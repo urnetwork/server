@@ -125,7 +125,7 @@ cluster_faults() {
 # stores, and an lb drain through nginx from warp's directives (local/sidecar-lb-fixture). They use real time, so they
 # run here and never at merge.
 disruptions() {
-  go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_disruption" -run '^(TestT3ResidentKilledMidStreamResetsTransferFailed|TestT3ResidentMigrationKeepsAStreamWholeOrResetsIt|TestT3RedisMasterRestartLosesOnlyRebuildableState|TestT3PostgresRestartMidRequest)$'
+  go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_disruption" -run '^(TestT3ResidentKilledMidStreamResetsTransferFailed|TestT3ResidentMigrationKeepsAStreamWholeOrResetsIt|TestT3ResidentKilledMidCallRetriesWithOneEffect|TestT3ResidentKilledUnderACallItsRetryJoinsTheRun|TestT3RedisMasterRestartLosesOnlyRebuildableState|TestT3PostgresRestartMidRequest)$'
   if command -v "${SIDECAR_LB_NGINX:-nginx}" >/dev/null 2>&1; then
     go_t3 ./sidecart3 -tags "$tags,sidecar_disruption" -run '^(TestT3LbDrainCutsAStreamedPutWith502|TestT3LbDrainRetriesABufferedPutOnTheSibling)$'
   else

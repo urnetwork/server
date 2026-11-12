@@ -14,8 +14,9 @@
 //     once, is not here: the client does not retry a 502 (question test-m2-15-streamed-put-502-not-retried).
 //   - resident: a stream whose peer's resident is killed, with the peer gone past the sender's ack timeout, resets
 //     TRANSFER_FAILED on the sender, and what the reader got is a prefix of what was sent; a resident killed under a peer
-//     that reconnects at once (a migration) keeps the stream's bytes whole or resets it, never a gap. The ack timeout is
-//     the setting it is, shortened from connect's 60 s so a nightly run takes seconds.
+//     that reconnects at once (a migration) keeps the stream's bytes whole or resets it, never a gap; and a mutating call
+//     whose callee's resident dies mid-run is answered once, its retry under its request_id running nothing twice. The
+//     ack timeout is the setting it is, shortened from connect's 60 s so a nightly run takes seconds.
 //   - Redis: an evs world's soft state, leases and push sequences among it, goes with the restart; every committed
 //     version still reads and verifies, the next push's sequence is above every earlier one, and a subscriber that lost
 //     its lease catches up at its hourly resync and leases again, as FS-62 has it on fakes.
@@ -353,6 +354,150 @@ func TestT3ResidentMigrationKeepsAStreamWholeOrResetsIt(t *testing.T) {
 			}
 		case <-ctx.Done():
 			t.Error("the write never ended")
+		}
+	})
+}
+
+// A mutating call the callee's resident dies under, mid-run: the call ends in its answer or in an error naming its
+// request_id, and sent again under that request_id it is answered from the callee's idempotency cache or joins the run
+// still live (§6.6), so the handler runs once whichever way the first attempt ended: §22.8's "RPC retries" across a
+// resident's death.
+func TestT3ResidentKilledMidCallRetriesWithOneEffect(t *testing.T) {
+	disruptionTestEnv().Run(t, func(tb testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 3*testDisruptionTimeout)
+		defer cancel()
+		platform := newDisruptionExchange(ctx, t)
+		defer platform.Close()
+		sides, err := newT3SubprotocolSides(ctx, t, platform, nil, "caller", "callee")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, side := range sides {
+			t.Cleanup(side.Close)
+		}
+		caller, callee := sides[0], sides[1]
+		const messageType = sidecarprotocol.MessageType(0x8f10)
+		runs := make(chan struct{}, 8)
+		release := make(chan struct{})
+		if _, err := callee.Subprotocol.Handle(messageType, func(ctx context.Context, request *sidecar.SubprotocolRequest) ([]byte, error) {
+			runs <- struct{}{}
+			<-release
+			return []byte("done"), nil
+		}, &sidecar.HandleOptions{Mutating: true}); err != nil {
+			t.Fatal(err)
+		}
+		type answer struct {
+			body []byte
+			err  error
+		}
+		answers := make(chan answer, 1)
+		go func() {
+			body, err := caller.Subprotocol.Call(ctx, sidecar.Id(callee.Client.ClientId), messageType, []byte("once"), &sidecar.CallOptions{Timeout: testDisruptionTimeout / 2})
+			answers <- answer{body: body, err: err}
+		}()
+		select {
+		case <-runs:
+		case <-ctx.Done():
+			t.Fatal("the call never reached its handler")
+		}
+		if err := NewResidentKill(platform.exchange, callee.Client.ClientId).Disrupt(ctx); err != nil {
+			t.Fatal(err)
+		}
+		close(release)
+		var first answer
+		select {
+		case first = <-answers:
+		case <-ctx.Done():
+			t.Fatal("the call never ended")
+		}
+		body := first.body
+		t.Logf("the attempt the resident died under ended %v", first.err)
+		if first.err != nil {
+			subprotocolError := &sidecar.SubprotocolError{}
+			if !errors.As(first.err, &subprotocolError) || subprotocolError.RequestId == 0 {
+				t.Fatalf("the call ended %v, naming no request_id to retry", first.err)
+			}
+			body, err = caller.Subprotocol.Call(ctx, sidecar.Id(callee.Client.ClientId), messageType, []byte("once"), &sidecar.CallOptions{Timeout: testDisruptionTimeout / 2, RequestId: subprotocolError.RequestId})
+			if err != nil {
+				t.Fatalf("the retry under request_id %d: %v", subprotocolError.RequestId, err)
+			}
+		}
+		if string(body) != "done" {
+			t.Errorf("the call answered %q", body)
+		}
+		select {
+		case <-runs:
+			t.Error("the handler ran twice")
+		default:
+		}
+	})
+}
+
+// The twin, with the retry certain: the first attempt gives up at its own 2 s deadline while the handler runs, the
+// callee's resident dies, and the call sent again under its request_id joins the run still live, which answers once.
+func TestT3ResidentKilledUnderACallItsRetryJoinsTheRun(t *testing.T) {
+	disruptionTestEnv().Run(t, func(tb testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 3*testDisruptionTimeout)
+		defer cancel()
+		platform := newDisruptionExchange(ctx, t)
+		defer platform.Close()
+		sides, err := newT3SubprotocolSides(ctx, t, platform, nil, "caller", "callee")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, side := range sides {
+			t.Cleanup(side.Close)
+		}
+		caller, callee := sides[0], sides[1]
+		const messageType = sidecarprotocol.MessageType(0x8f11)
+		runs := make(chan struct{}, 8)
+		release := make(chan struct{})
+		if _, err := callee.Subprotocol.Handle(messageType, func(ctx context.Context, request *sidecar.SubprotocolRequest) ([]byte, error) {
+			runs <- struct{}{}
+			<-release
+			return []byte("done"), nil
+		}, &sidecar.HandleOptions{Mutating: true}); err != nil {
+			t.Fatal(err)
+		}
+		calleeId := sidecar.Id(callee.Client.ClientId)
+		_, err = caller.Subprotocol.Call(ctx, calleeId, messageType, []byte("once"), &sidecar.CallOptions{Timeout: 2 * time.Second})
+		subprotocolError := &sidecar.SubprotocolError{}
+		if !errors.As(err, &subprotocolError) || subprotocolError.Code != sidecarprotocol.ErrorCode_ERR_DEADLINE_EXCEEDED || subprotocolError.RequestId == 0 {
+			close(release)
+			t.Fatalf("the first attempt ended %v, not its own deadline naming its request_id", err)
+		}
+		select {
+		case <-runs:
+		default:
+			close(release)
+			t.Fatal("the first attempt never reached its handler")
+		}
+		if err := NewResidentKill(platform.exchange, callee.Client.ClientId).Disrupt(ctx); err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+		type answer struct {
+			body []byte
+			err  error
+		}
+		answers := make(chan answer, 1)
+		go func() {
+			body, err := caller.Subprotocol.Call(ctx, calleeId, messageType, []byte("once"), &sidecar.CallOptions{Timeout: testDisruptionTimeout / 2, RequestId: subprotocolError.RequestId})
+			answers <- answer{body: body, err: err}
+		}()
+		close(release)
+		select {
+		case retried := <-answers:
+			if retried.err != nil || string(retried.body) != "done" {
+				t.Errorf("the retry under request_id %d answered %q %v", subprotocolError.RequestId, retried.body, retried.err)
+			}
+		case <-ctx.Done():
+			t.Fatal("the retry never ended")
+		}
+		select {
+		case <-runs:
+			t.Error("the handler ran twice")
+		default:
 		}
 	})
 }
