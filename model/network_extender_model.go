@@ -130,6 +130,13 @@ func (self *NetworkExtender) RecordCountryCode() string {
 // One family an extender was activated and is probed on. DnsPorts are the dns
 // carrier ports this address answered on (L2), ascending; empty when the dns
 // carrier was not offered.
+//
+// TcpPort and UdpPort are the carrier ports this address's own activation was
+// probed on (connect/EXTENDER.md S10): a router's mapping forwards one
+// family's carriers on ports it picks while the other family answers on the
+// bound ones, so they may differ from the extender's, which are its latest
+// activation's. 0 for an address activated before they were kept, which is on
+// the extender's.
 type NetworkExtenderAddress struct {
 	ExtenderId               server.Id
 	IpVersion                int
@@ -142,6 +149,25 @@ type NetworkExtenderAddress struct {
 	ConsecutiveProbeFailures int
 	Active                   bool
 	LastPublishTime          *time.Time
+	TcpPort                  int
+	UdpPort                  int
+}
+
+// The tcp port this address is dialed on (connect/EXTENDER.md S10): its own,
+// or the extender's for an address activated before its own was kept.
+func (self *NetworkExtenderAddress) DialTcpPort(extender *NetworkExtender) int {
+	if 0 < self.TcpPort {
+		return self.TcpPort
+	}
+	return extender.TcpPort
+}
+
+// The udp port this address is dialed on, as DialTcpPort.
+func (self *NetworkExtenderAddress) DialUdpPort(extender *NetworkExtender) int {
+	if 0 < self.UdpPort {
+		return self.UdpPort
+	}
+	return extender.UdpPort
 }
 
 // One queued gossip message.
@@ -162,7 +188,8 @@ type NetworkExtenderWithAddresses struct {
 }
 
 // The extender fields one uptime probe needs, flattened per address so the
-// task can spread addresses over its workers without regrouping (C3).
+// task can spread addresses over its workers without regrouping (C3). TcpPort
+// is the address's own (NetworkExtenderAddress.DialTcpPort).
 type NetworkExtenderProbeTarget struct {
 	ExtenderId server.Id
 	// the network that activated the extender, which a pass judges its
@@ -415,7 +442,9 @@ func getActiveNetworkExtenderAddressesInTx(
 			last_probe_time,
 			last_probe_success_time,
 			consecutive_probe_failures,
-			last_publish_time
+			last_publish_time,
+			COALESCE(tcp_port, 0),
+			COALESCE(udp_port, 0)
 		FROM network_extender_address
 		WHERE extender_id = $1 AND active
 		ORDER BY ip_version
@@ -441,6 +470,8 @@ func getActiveNetworkExtenderAddressesInTx(
 				&address.LastProbeSuccessTime,
 				&address.ConsecutiveProbeFailures,
 				&address.LastPublishTime,
+				&address.TcpPort,
+				&address.UdpPort,
 			))
 			address.Carriers = splitExtenderCarriers(carriers)
 			address.DnsPorts = splitExtenderDnsPorts(dnsPorts)
@@ -687,6 +718,8 @@ func ActivateNetworkExtender(
 			return
 		}
 
+		// the address keeps the ports it was probed on, which a router's
+		// mapping may make its family's alone (connect/EXTENDER.md S10)
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -698,9 +731,11 @@ func ActivateNetworkExtender(
 				dns_ports,
 				activate_time,
 				consecutive_probe_failures,
-				active
+				active,
+				tcp_port,
+				udp_port
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, 0, true)
+			VALUES ($1, $2, $3, $4, $5, $6, 0, true, NULLIF($7::int, 0), NULLIF($8::int, 0))
 			ON CONFLICT (extender_id, ip_version) DO UPDATE
 			SET
 				ip = $3,
@@ -714,7 +749,9 @@ func ActivateNetworkExtender(
 					THEN network_extender_address.consecutive_probe_failures
 					ELSE 0
 				END,
-				active = true
+				active = true,
+				tcp_port = EXCLUDED.tcp_port,
+				udp_port = EXCLUDED.udp_port
 			`,
 			extenderId,
 			activation.IpVersion,
@@ -722,6 +759,8 @@ func ActivateNetworkExtender(
 			joinExtenderCarriers(activation.Carriers),
 			joinExtenderDnsPorts(activation.DnsPorts),
 			issueTime,
+			activation.TcpPort,
+			activation.UdpPort,
 		))
 
 		// the history row: where this activation came from, as of now (M1)
@@ -1050,7 +1089,8 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 				network_extender_address.ip_version,
 				network_extender_address.ip,
 				network_extender_address.carriers,
-				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END
+				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END,
+				COALESCE(network_extender_address.tcp_port, 0)
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -1063,6 +1103,7 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 			for result.Next() {
 				target := &NetworkExtenderProbeTarget{}
 				var carriers string
+				var addressTcpPort int
 				server.Raise(result.Scan(
 					&target.ExtenderId,
 					&target.NetworkId,
@@ -1073,8 +1114,15 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 					&target.Ip,
 					&carriers,
 					&target.RealityPublicKey,
+					&addressTcpPort,
 				))
 				target.Carriers = splitExtenderCarriers(carriers)
+				// the address's own port, which a router's mapping may make its
+				// family's alone (connect/EXTENDER.md S10); an address activated
+				// before it was kept is on the extender's
+				if 0 < addressTcpPort {
+					target.TcpPort = addressTcpPort
+				}
 				targets = append(targets, target)
 			}
 		})
@@ -1290,7 +1338,9 @@ func GetRandomActiveNetworkExtenders(
 				network_extender_address.carriers,
 				network_extender_address.dns_ports,
 				network_extender_address.activate_time,
-				network_extender_address.last_publish_time
+				network_extender_address.last_publish_time,
+				COALESCE(network_extender_address.tcp_port, 0),
+				COALESCE(network_extender_address.udp_port, 0)
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -1348,6 +1398,8 @@ func GetRandomActiveNetworkExtenders(
 					&dnsPorts,
 					&address.ActivateTime,
 					&address.LastPublishTime,
+					&address.TcpPort,
+					&address.UdpPort,
 				))
 				address.ExtenderId = extender.ExtenderId
 				address.Carriers = splitExtenderCarriers(carriers)
@@ -1515,9 +1567,11 @@ func Testing_CreateNetworkExtender(
 					last_probe_success_time,
 					consecutive_probe_failures,
 					active,
-					last_publish_time
+					last_publish_time,
+					tcp_port,
+					udp_port
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12::int, 0), NULLIF($13::int, 0))
 				`,
 				extender.ExtenderId,
 				address.IpVersion,
@@ -1530,6 +1584,8 @@ func Testing_CreateNetworkExtender(
 				address.ConsecutiveProbeFailures,
 				address.Active,
 				address.LastPublishTime,
+				address.TcpPort,
+				address.UdpPort,
 			))
 		}
 	})
@@ -1679,7 +1735,9 @@ func Testing_GetNetworkExtender(
 				last_probe_success_time,
 				consecutive_probe_failures,
 				active,
-				last_publish_time
+				last_publish_time,
+				COALESCE(tcp_port, 0),
+				COALESCE(udp_port, 0)
 			FROM network_extender_address
 			WHERE extender_id = $1
 			ORDER BY ip_version
@@ -1702,6 +1760,8 @@ func Testing_GetNetworkExtender(
 					&address.ConsecutiveProbeFailures,
 					&address.Active,
 					&address.LastPublishTime,
+					&address.TcpPort,
+					&address.UdpPort,
 				))
 				address.Carriers = splitExtenderCarriers(carriers)
 				address.DnsPorts = splitExtenderDnsPorts(dnsPorts)

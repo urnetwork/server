@@ -800,9 +800,12 @@ func extenderCarrierConnectMode(carrier string) (connect.ExtenderConnectMode, bo
 // the same record.
 //
 // The dns ports are the union of what the addresses answered on (L2),
-// ascending, because the record names one extender's ports and not one
-// address's, and a client dials the lowest first. DnsPort stays the extender's
-// configured port, which is what a reader that predates the list dials.
+// ascending, because the record's own ports are one extender's, and a client
+// dials the lowest first. DnsPort stays the extender's configured port, which
+// is what a reader that predates the list dials. The tcp and udp ports are the
+// extender's latest activation's. An address whose ports are not the record's
+// -- one family a router forwards on other ports (connect/EXTENDER.md S10) --
+// names its own beside them, which a reader that predates the fields skips.
 //
 // The country, and the continent with it, is the extender's derived location's
 // while it has one, else the one it activated from (connect/GEOMAP.md §6,
@@ -862,6 +865,29 @@ func SignExtenderRecord(
 		// while the posting network holds the key (connect/EXTENDER.md P6,
 		// phase 14b); nil when it posted none
 		RealityPublicKey: extenderRecordRealityPublicKey(extender),
+	}
+	// an address's own ports where they are not the record's: a router's
+	// mapping forwards one family's carriers on ports it picks while the other
+	// family answers on the bound ones (connect/EXTENDER.md S10). An address on
+	// the record's ports names none, so the record of an extender whose
+	// addresses share their ports is the record it always was, and a reader
+	// that predates the fields dials every address on the record's
+	for i, address := range addresses {
+		recordAddress := recordAddresses[i]
+		if tcpPort := address.DialTcpPort(extender); tcpPort != extender.TcpPort {
+			recordAddress.TcpPort = uint32(tcpPort)
+		}
+		if udpPort := address.DialUdpPort(extender); udpPort != extender.UdpPort {
+			recordAddress.UdpPort = uint32(udpPort)
+		}
+		addressDnsPorts := []uint32{}
+		for _, dnsPort := range address.DnsPorts {
+			addressDnsPorts = append(addressDnsPorts, uint32(dnsPort))
+		}
+		slices.Sort(addressDnsPorts)
+		if 0 < len(addressDnsPorts) && !slices.Equal(addressDnsPorts, body.DnsPorts) {
+			recordAddress.DnsPorts = addressDnsPorts
+		}
 	}
 	// what a client must declare before a release hands the record out
 	// (connect/EXTENDER-UPDATE2.md §3.2), decided from the body as signed, so

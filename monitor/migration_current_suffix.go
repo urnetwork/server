@@ -985,6 +985,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// capture the flag's presence, census and lifecycle tables, versioned by
 	// their position
 	[]snMainnetMigrationContract{ctfMigrationContract},
+	// the carrier ports of each extender address, versioned by its position
+	[]snMainnetMigrationContract{extenderAddressPortsMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
