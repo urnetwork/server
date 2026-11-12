@@ -44,6 +44,7 @@ func newSnCtfDbFixture(t testing.TB) *snCtfDbFixture {
 		return f.view.Pool.CarryContract, nil
 	}
 	snCtfPoolRegistrations.Clear()
+	snCtfFinalizedEpochs.Clear()
 	t.Cleanup(func() {
 		SetStConfig(nil)
 		SetStLedgerV2Client(nil)

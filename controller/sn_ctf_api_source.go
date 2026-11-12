@@ -181,6 +181,10 @@ func snCtfRootsOf(ctx context.Context, cfg *StConfig, poolId uint64) ([]*snCtfRo
 	return roots, nil
 }
 
+// The covered epochs of finalized roots, by deployment, epoch and root seq:
+// their results, pots, awards and census are written once.
+var snCtfFinalizedEpochs sync.Map
+
 // The root that covers an epoch: the first committed root, by epoch, whose
 // epochs include it.
 func snCtfCoveringRoot(roots []*snCtfRoot, epoch uint64) *snCtfRoot {
@@ -246,13 +250,26 @@ func (self *snCtfCoreSource) view(ctx context.Context) (*snCtfView, error) {
 			byEpoch[result.Epoch] = result
 		}
 		for epoch := firstEpoch; epoch <= lastRootEpoch; epoch += 1 {
+			root := snCtfCoveringRoot(roots, epoch)
+			if root == nil {
+				return nil, fmt.Errorf("no committed root covers epoch %d", epoch)
+			}
+			// an epoch a finalized root covers never changes
+			cacheKey := fmt.Sprintf("%s|%d|%d", key, epoch, root.Seq)
+			if cached, ok := snCtfFinalizedEpochs.Load(cacheKey); ok && root.Finalized {
+				view.Epochs = append(view.Epochs, cached.(*snCtfEpoch))
+				continue
+			}
 			result := byEpoch[epoch]
 			if result == nil {
 				return nil, fmt.Errorf("epoch %d, which a committed root covers, has no recorded result", epoch)
 			}
-			covered, err := self.epochOf(ctx, clock, snCtfCoveringRoot(roots, epoch), result)
+			covered, err := self.epochOf(ctx, clock, root, result)
 			if err != nil {
 				return nil, err
+			}
+			if root.Finalized {
+				snCtfFinalizedEpochs.Store(cacheKey, covered)
 			}
 			view.Epochs = append(view.Epochs, covered)
 		}
