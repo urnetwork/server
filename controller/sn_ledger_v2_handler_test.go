@@ -523,6 +523,55 @@ func TestSnLedgerAccountRefusesInconsistentAnswers(t *testing.T) {
 	})
 }
 
+// The operator's capture the flag pool, 2^32 + n (sn CAPTURETHEFLAG.md §10):
+// its account is answered beside the pool's, named kind ctf, with no account
+// record needed; a CTF pool whose ledger cannot be read fails the whole answer
+// without partial=true, as before, and with it is named in unavailable_pools
+// while the pool's account is answered.
+func TestSnLedgerAccountServesTheCtfPool(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newLedgerV2EndpointFixture(t)
+		corsOrigins := snOperatorCorsOrigins
+		snOperatorCorsOrigins = func() ([]string, bool) { return nil, true }
+		t.Cleanup(func() { snOperatorCorsOrigins = corsOrigins })
+		ctfPool := uint64(1<<32 + 1)
+		ctfLedger := f.build(ctfPool, 9, 9, nil, 555, []protocol.LedgerUsageRow{
+			{ClientID: ledgerV2ClientId(1), Coldkey: ledgerV2A, UsageBytes: 5},
+		})
+		zero := uint64(0)
+		f.mirror(ctfPool, 1, ctfLedger, &zero)
+		vault := testLedgerV2Vault
+		sibling := merkle.LedgerLeafHash(ledgerV2B, uint256.NewInt(400))
+		poolEntry := fmt.Sprintf(`{"vault":"%s","no_id":1,"kind":"pool","label":"Pool 1","index":0,"root_index":0,"cumulative":"600","proof":[{"hash":"0x%x","sum":"400"}],"claimed":"250","pending_cumulative":"1600"}`, vault, sibling)
+		otherEntry := fmt.Sprintf(`{"vault":"%s","no_id":2,"kind":"pool","label":"Pool 2","index":0,"root_index":0,"cumulative":"777","proof":[],"claimed":"0","pending_cumulative":null}`, vault)
+		ctfEntry := fmt.Sprintf(`{"vault":"%s","no_id":%d,"kind":"ctf","label":"Capture the flag","index":0,"root_index":0,"cumulative":"555","proof":[],"claimed":"0","pending_cumulative":null}`, vault, ctfPool)
+		whole := fmt.Sprintf(`{"coldkey":"%s","accounts":[%s,%s,%s],"unavailable_pools":[]}`, ledgerV2Hex(ledgerV2A), poolEntry, otherEntry, ctfEntry)
+		for _, target := range []string{"", "&partial=true"} {
+			response := serveLedgerV2(SnLedgerAccount, "/sn/ledger/account?coldkey="+ledgerV2Hex(ledgerV2A)+target)
+			requireLedgerV2Answer(t, response, http.StatusOK, whole)
+			if response.Header().Get("Link") != SnOperatorLink || response.Header().Get("Access-Control-Allow-Origin") != "*" {
+				t.Fatalf("headers %v", response.Header())
+			}
+			if verified := requireLedgerV2ProofsVerify(t, f, response.Body.Bytes()); verified != 3 {
+				t.Fatalf("%d proofs verified", verified)
+			}
+		}
+
+		// the CTF pool's next root names objects that are not published
+		lost := *ctfLedger
+		lost.Commit.LedgerHash = [32]byte{0xcf}
+		one := uint64(1)
+		f.mirror(ctfPool, 2, &lost, &one)
+		resetLedgerV2Caches()
+		requireLedgerV2Answer(t, getLedgerV2Account(ledgerV2Hex(ledgerV2A)), http.StatusBadGateway, ledgerV2Problem(http.StatusBadGateway, SnProblemLedgerUnavailable, "Ledger account unavailable."))
+		partial := fmt.Sprintf(`{"coldkey":"%s","accounts":[%s,%s],"unavailable_pools":[{"vault":"%s","no_id":%d,"kind":"ctf","label":"Capture the flag"}]}`, ledgerV2Hex(ledgerV2A), poolEntry, otherEntry, vault, ctfPool)
+		requireLedgerV2Answer(t, serveLedgerV2(SnLedgerAccount, "/sn/ledger/account?coldkey="+ledgerV2Hex(ledgerV2A)+"&partial=true"), http.StatusOK, partial)
+		// a coldkey the CTF pool does not hold reads the same way: the pool is unknown
+		requireLedgerV2Answer(t, serveLedgerV2(SnLedgerAccount, "/sn/ledger/account?coldkey="+ledgerV2Hex(ledgerV2C)+"&partial=true"), http.StatusOK,
+			fmt.Sprintf(`{"coldkey":"%s","accounts":[{"vault":"%s","no_id":1,"kind":"pool","label":"Pool 1","index":2,"root_index":null,"cumulative":"0","proof":null,"claimed":"0","pending_cumulative":"1000"}],"unavailable_pools":[{"vault":"%s","no_id":%d,"kind":"ctf","label":"Capture the flag"}]}`, ledgerV2Hex(ledgerV2C), vault, vault, ctfPool))
+	})
+}
+
 // SV-3: requests that arrive together after new roots read each root's
 // accounts once, and later requests answer from the cached trees.
 func TestSnLedgerAccountBuildsEachTreeOnce(t *testing.T) {
