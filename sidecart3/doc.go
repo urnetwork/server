@@ -35,6 +35,10 @@
 //   - capture_stores.go, §22.7's CC3 (TEST-M2-09): every object, every Redis key on every master and
 //     every sidecar Postgres table's rows added to a Net's capture, with PrivacyClassPostgres and, under
 //     sidecar_leaktest, its leak (capture_stores_leak.go).
+//   - scenario.go, §22.7's scenarios on T3 (TEST-M2-11): sidecartest's runner on a T3 Net, its stores
+//     captured, the keys its host wrote given to the guard, and §7.4's allowlist from server's own route
+//     tables; S1's code-create clause runs through server's router, and S3a and S4a through the builders
+//     T2 runs.
 //
 // server/sidecar-t3.sh runs this with -tags sidecar_testhooks,sidecar_pending and
 // WARP_TEST_ENV_FAIL_FAST=1, inside the private test stores test-env.sh attests: its suites cadence on
