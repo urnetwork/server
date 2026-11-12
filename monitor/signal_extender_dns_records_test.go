@@ -84,6 +84,14 @@ func extenderDnsTestAnswer(values []string) DNSResponseObservation {
 	return DNSResponseObservation{ResponseCode: DNSResponseSuccess, Texts: values}
 }
 
+// The default settings with the whole-zone half alone: no region's path is
+// asked (extender_dns_countries_test.go judges those).
+func extenderDnsZoneSettings() *ExtenderDnsRecordsSettings {
+	settings := DefaultExtenderDnsRecordsSettings()
+	settings.Countries = nil
+	return settings
+}
+
 // Runs the probe once, and returns its findings' states and what it asked.
 func extenderDnsTestStates(t *testing.T, settings *ExtenderDnsRecordsSettings, environment string, txtFn func(string, string) (DNSResponseObservation, error)) (map[string]string, []string) {
 	t.Helper()
@@ -176,7 +184,7 @@ func TestExtenderDnsRecordsJudgesWhatClientsAreServed(t *testing.T) {
 			return extenderDnsTestAnswer(fresh), nil
 		}, want: map[string]string{stale: "healthy"}},
 	} {
-		states, asked := extenderDnsTestStates(t, DefaultExtenderDnsRecordsSettings(), "main", test.txtFn)
+		states, asked := extenderDnsTestStates(t, extenderDnsZoneSettings(), "main", test.txtFn)
 		requireStormStates(t, test.name, states, test.want)
 		if strings.Join(asked, ",") != "1.1.1.1:53 extender.bringyour.com,8.8.8.8:53 extender.bringyour.com,9.9.9.9:53 extender.bringyour.com" {
 			t.Fatalf("%s: asked %v, want every resolver for the extender record name", test.name, asked)
@@ -198,7 +206,7 @@ func TestExtenderDnsRecordsAlertNamesTheServedTimes(t *testing.T) {
 	if got := (extenderDnsRecordsProbe{}).cadence(); got != 10*time.Minute {
 		t.Fatalf("cadence = %s", got)
 	}
-	alerts, err := NewExtenderDnsRecordsSignal().Run(context.Background(), stormMainSettings(extenderDnsTestNow, source))
+	alerts, err := NewExtenderDnsRecordsSignalWithSettings(extenderDnsZoneSettings()).Run(context.Background(), stormMainSettings(extenderDnsTestNow, source))
 	if err != nil {
 		t.Fatal(err)
 	}

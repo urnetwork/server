@@ -23,6 +23,9 @@ package controller
 //  3. finalize, answer and record, as for the provider pool.
 //  4. recycle: once a root is final, the carry contract's recycle returns the
 //     carry account's α to the pool hotkey, where the next close captures it.
+//     The carry keeps a residual of its own on vault2's escrow hotkey; if
+//     root's sweep clears it, a claim cannot be recycled until someone
+//     seeds it again, which the driver alerts and waits for.
 //
 // Shadow mode builds and publishes an unsigned report instead, and sends
 // nothing (st_ctf_shadow.go).
@@ -80,6 +83,7 @@ const (
 	StCtfAlertDrand              = "ctf_drand"
 	StCtfAlertBuild              = "ctf_build"
 	StCtfAlertCarry              = "ctf_carry"
+	StCtfAlertCarryResidual      = "ctf_carry_residual"
 	StCtfAlertMirror             = "ctf_mirror"
 )
 
@@ -89,6 +93,9 @@ const (
 	// stCtfCarryLateBlocks is how long a final root may go without its
 	// carry returned before StCtfAlertCarryLate: about two hours.
 	stCtfCarryLateBlocks = 600
+	// stCtfResidualWait spaces the recycle's attempts while the carry has no
+	// residual: only a seed() someone sends lets its claim through.
+	stCtfResidualWait = 1 * time.Hour
 )
 
 // StCtfDriverStep is one planned driver step. An answer names its demand: the
@@ -381,14 +388,17 @@ func stCtfWaitUntil(reason string, at time.Time) *StPublishOutcome {
 
 // The selectors of the reverts that show a CTF write already done by another
 // sender or another attempt: a census already committed, or nothing left on
-// the carry to recycle.
+// the carry to recycle above its residual. ResidualMissing is the carry's
+// refusal to claim without its residual, which only a seed() clears.
 var (
 	stCtfCensusAlreadyCommitted = [4]byte(crypto.Keccak256([]byte("CensusAlreadyCommitted()"))[:4])
 	stCtfNothingToRecycle       = [4]byte(crypto.Keccak256([]byte("NothingToRecycle()"))[:4])
+	stCtfResidualMissing        = [4]byte(crypto.Keccak256([]byte("ResidualMissing()"))[:4])
 )
 
 // Records one chain write as a publish row, as stLedgerV2Send does. A revert
-// that shows the write already done ends it as skipped.
+// that shows the write already done ends it as skipped. The carry's
+// ResidualMissing fails the attempt, retried only at stCtfResidualWait's pace.
 func stCtfSend(ctx context.Context, records stCtfRecords, epoch uint64, kind string, send func() (string, error)) *StPublishOutcome {
 	publishId := records.Publish(ctx, epoch, kind)
 	txHash, err := send()
@@ -401,6 +411,9 @@ func stCtfSend(ctx context.Context, records stCtfRecords, epoch uint64, kind str
 		outcome = &StPublishOutcome{Status: model.StPublishStatusSkipped, TxHash: txHash, Reason: "already done: CensusAlreadyCommitted"}
 	case reverted && selector == stCtfNothingToRecycle:
 		outcome = &StPublishOutcome{Status: model.StPublishStatusSkipped, TxHash: txHash, Reason: "already done: NothingToRecycle"}
+	case reverted && selector == stCtfResidualMissing:
+		outcome = &StPublishOutcome{Status: model.StPublishStatusFailed, TxHash: txHash, Reason: "ResidualMissing: " + err.Error(), Retry: true,
+			RetryAt: stCtfServerNow().Add(stCtfResidualWait)}
 	default:
 		if name, done := stLedgerV2AlreadyDone(err); done {
 			outcome = &StPublishOutcome{Status: model.StPublishStatusSkipped, TxHash: txHash, Reason: "already done: " + name}
@@ -926,9 +939,17 @@ func stCtfRunRecord(ctx context.Context, cfg *StConfig, records stCtfRecords, se
 
 // stCtfRunRecycle returns the carry of the CTF pool's latest final root
 // (§4.6): the carry contract claims the carry account from that root, unless
-// someone has, and moves everything it holds back onto the pool hotkey. Only
-// a final root is ever named, and only the latest, whose cumulative carry
-// account covers every earlier one.
+// someone has, and moves everything it holds above its residual back onto the
+// pool hotkey. Only a final root is ever named, and only the latest, whose
+// cumulative carry account covers every earlier one.
+//
+// The carry keeps a residual on vault2's escrow hotkey so that vault2's
+// claims to it always land. If root's sweep of small nominations clears it,
+// the runtime would refuse the claim and the carry reverts ResidualMissing:
+// only a seed() with at least seedMinimum() of TAO restores it, which the
+// driver does not spend on its own. It alerts, with the TAO a seed needs, and
+// tries again each stCtfResidualWait, sending nothing meanwhile. The account
+// stays claimable, and the epochs stay unmatured until the carry is back.
 func stCtfRunRecycle(ctx context.Context, cfg *StConfig, client StLedgerV2Client, ctfClient StCtfClient, records stCtfRecords, rootIndex uint64) (*StPublishOutcome, error) {
 	kind, poolId := model.StPublishKindCtfRecycle, ctf.PoolID(cfg.NoId)
 	state, err := client.LedgerV2State(ctx, poolId)
@@ -972,22 +993,76 @@ func stCtfRunRecycle(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 	// The carry account is always named, with its proof, so the call under
 	// the root's transaction key never changes: the carry claims it only while
 	// vault2's claimed is below its cumulative, and otherwise moves only what
-	// it holds.
+	// it holds above its residual.
 	account := tree.accounts[index]
 	proof, err := tree.tree.Proof(uint64(index))
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
-	if outcome := stCtfFreeStakingHotkey(ctx, cfg, ctfClient, records, root, carryInfo); outcome != nil {
-		return outcome, nil
+
+	// What the carry holds of its own, and whether the claim is still due.
+	held, err := ctfClient.CtfCarryHeld(ctx, carry, carryInfo)
+	if err != nil {
+		return stLedgerV2Retry(err), nil
 	}
+	claimed, err := client.LedgerV2Claimed(ctx, poolId, uint64(index))
+	if err != nil {
+		return stLedgerV2Retry(err), nil
+	}
+	claimDue, kept := claimed.Lt(&account.Cumulative), held.Kept()
+	if kept.IsZero() {
+		// Alerted as soon as it is seen, so that the seed can come before
+		// the next root's claim; with this root's claim due, the recycle
+		// waits for it.
+		shortfall := stCtfResidualMissingAlert(cfg, root, carry, held)
+		if claimDue {
+			return stCtfWaitUntil(fmt.Sprintf("the carry has no residual: seed() with at least %s rao", shortfall.Dec()), stCtfServerNow().Add(stCtfResidualWait)), nil
+		}
+	} else if kept.Lt(&held.Residual) {
+		stCtfAlert(cfg, StCtfAlertCarryResidual, fmt.Sprintf("lowered %s", kept.Dec()), "the carry %s holds %s rao on vault2's escrow hotkey, below its residual of %s: the runtime lowered it, and the next recycle or seed() follows it down; a residual root's sweep can clear is restored only by seed()", carry.Hex(), held.Position.Dec(), held.Residual.Dec())
+	}
+	// With the carry account claimed, what sits above the residual moves only
+	// if the runtime's transfer floor lets it, at the alpha price: dust, as a
+	// rounding tick or a donation leaves, waits for the next root's claim,
+	// which moves it along, rather than a recycle the runtime refuses.
+	if !claimDue && kept.Lt(&held.Position) {
+		var surplus uint256.Int
+		surplus.Sub(&held.Position, &kept)
+		if !snClaimRelayClearsFloor(snClaimRelayValueTaoRao(&surplus, held.AlphaPriceWei)) {
+			return stCtfConclude(ctx, records, root.Epoch, kind, model.StPublishStatusSkipped, "already done: the carry account is claimed, and the %s rao above the residual are worth less than the runtime's transfer floor; the next root's recycle moves them", surplus.Dec()), nil
+		}
+	}
+	// Only a recycle that claims or moves stake reaches vault2's list: a
+	// carry with nothing above its residual ends at NothingToRecycle.
+	if claimDue || kept.Lt(&held.Position) {
+		if outcome := stCtfFreeStakingHotkey(ctx, cfg, ctfClient, records, root, carryInfo); outcome != nil {
+			return outcome, nil
+		}
+	}
+	var sent error
 	outcome := stCtfSend(ctx, records, root.Epoch, kind, func() (string, error) {
-		return ctfClient.CtfRecycle(ctx, carry, poolId, rootIndex, uint64(index), &account, proof)
+		txHash, err := ctfClient.CtfRecycle(ctx, carry, poolId, rootIndex, uint64(index), &account, proof)
+		sent = err
+		return txHash, err
 	})
+	if selector, reverted := stLedgerV2RevertSelector(sent); reverted && selector == stCtfResidualMissing {
+		// Root's sweep cleared the residual after the read above.
+		stCtfAlert(cfg, StCtfAlertCarryResidual, fmt.Sprintf("root %d missing", root.Index), "the recycle of root %d reverted ResidualMissing: root's sweep cleared the carry %s's residual, so vault2's claim of the carry account would be refused; anyone restores it with seed() and at least seedMinimum() of TAO, then the recycle goes on", root.Index, carry.Hex())
+	}
 	if outcome.Status == model.StPublishStatusConfirmed {
 		stCtfLastEpoch.WithLabelValues("recycle").Set(float64(root.Epoch))
 	}
 	return outcome, nil
+}
+
+// stCtfResidualMissingAlert alerts that the carry has no residual left, with
+// the TAO a seed() has to send, which it returns: until someone seeds it,
+// vault2's claims of the carry account are refused, and a recycle that has to
+// claim reverts ResidualMissing.
+func stCtfResidualMissingAlert(cfg *StConfig, root *StLedgerV2FinalizedRoot, carry common.Address, held *StCtfCarryHeld) uint256.Int {
+	shortfall := held.SeedShortfall()
+	stCtfAlert(cfg, StCtfAlertCarryResidual, fmt.Sprintf("root %d missing", root.Index), "the carry %s has no residual on vault2's escrow hotkey (residual %s, position %s rao): root's sweep cleared it, so vault2's claims of the carry account, root %d's or a later one's, are refused and a recycle that claims reverts ResidualMissing. Anyone restores it with seed(), sending at least %s rao: seedMinimum() is %s and the carry already holds %s rao of TAO. A recycle with a claim to make waits until then", carry.Hex(), held.Residual.Dec(), held.Position.Dec(), root.Index, shortfall.Dec(), held.SeedMinimum.Dec(), held.SpendableRao.Dec())
+	return shortfall
 }
 
 const (

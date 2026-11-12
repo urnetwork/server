@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T06:18:26.971033Z",
+  "observed_at": "2026-11-12T09:04:00.951643Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,36 +17,59 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": true,
-    "publication_held": false
+    "grading_ready": false,
+    "publication_held": true,
+    "diagnosis": "Goofe's original attempt is now recorded succeeded after 9/9 measurements, verified native cleanup, repeated same-clock reconciliations through fence 30, and central retention. No measurement rerun or deadline extension occurred. API readiness continues fluctuating with host liveness; Sille remains in native measurement on its original clock."
   },
   "queue": {
-    "succeeded": 9,
+    "succeeded": 12,
     "failed": 2,
-    "queued": 5,
+    "queued": 4,
     "running": 2
   },
+  "recent_completed": [
+    {
+      "job_id": "01a1cac1-bfb6-874c-78fb-05740ec204e4",
+      "host_id": "goofe",
+      "started_at": "2026-11-12T07:10:20.253976",
+      "deadline": "2026-11-12T10:10:20.253976",
+      "observed_phase": "succeeded_central_retention_and_score_recorded",
+      "database_success_observed_at": "2026-11-12T09:01:17.659846Z",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "database_custody": "same_attempt_reconciliations_fences_27_through_30_original_clock_preserved",
+      "retention_heartbeat_incident": {
+        "error_at": "2026-11-12T08:46:46.970880Z",
+        "error": "PostgresStore.Heartbeat: context deadline exceeded",
+        "private_log": "/var/lib/urnetwork/competition-epoch2-heartbeat-retention-20261112.ZzVVKPi7/worker.private.log",
+        "log_sha256": "8379de5a21d226185a4307d576f46b1217b58ec020b45e068040a2ab0971b86c",
+        "evaluation_restarted": false,
+        "deadline_extended": false,
+        "new_terminal_failure_recorded": false
+      }
+    }
+  ],
   "active_attempts": [
     {
-      "job_id": "01a1ca08-d3c6-0e22-3ccf-fd6da35bc356",
+      "job_id": "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43",
       "host_id": "goofe",
-      "started_at": "2026-11-12T05:31:38.724108",
-      "deadline": "2026-11-12T08:31:38.724108",
-      "observed_phase": "candidate_measurements",
-      "candidate_completed": 4,
-      "database_custody": "released_after_heartbeat_timeout_2026-11-12T05:52:29.860826Z",
-      "native_process_verified_live": true,
-      "reattachment_verified": false
+      "run_id": "39c8e006ac2cec752ed53625bfbfa06587905af65ba405d773aa28bfab255b69",
+      "started_at": "2026-11-12T09:03:31.278113",
+      "deadline": "2026-11-12T12:03:31.278113",
+      "observed_phase": "native_accepted_preparing",
+      "native_service_verified_active": true,
+      "database_fence": 31
     },
     {
-      "job_id": "01a1ca5d-8d1f-3a64-6356-0dfeacf43557",
+      "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
       "host_id": "sille",
-      "started_at": "2026-11-12T05:52:24.10429",
-      "deadline": "2026-11-12T08:52:24.10429",
+      "started_at": "2026-11-12T07:37:00.304027",
+      "deadline": "2026-11-12T10:37:00.304027",
       "observed_phase": "candidate_measurements",
-      "candidate_completed": 1,
-      "database_custody": "released_after_heartbeat_timeout_2026-11-12T06:15:17.173607Z",
-      "native_process_verified_live": true,
+      "candidate_completed": 8,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T07:43:32.322963Z",
       "reattachment_verified": false
     }
   ],
@@ -91,15 +114,52 @@
     "implementation_and_deployment_pending": true,
     "queued": false,
     "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
-    "frozen_server_commit": "fdd92e7b6acb5587b22531c591ecceff8fd3ae6e",
-    "frozen_sn_commit": "ac7309bdc4beb959105ae60f2f43bfe0b5e06a6b",
+    "frozen_server_commit": "071c5856466418ffc39a41cfee79cd5bb2e25053",
+    "unqualified_remote_backup_branch": "competition-distributed-infrastructure-reevaluation-20261112",
+    "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
+    "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "corrected_dependency_attempt_authorized_not_yet_verified_running",
-      "previous_attempt": "setup_failure_zero_tests_missing_tracked_sn_packages",
-      "previous_evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.2IZI2TQU",
-      "previous_controller_log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071",
+      "status": "bounded_snapshot_census_fix_and_deterministic_controls_under_implementation_not_yet_compiled",
+      "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+      "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
+      "controller_ordinary_passed": 393,
+      "cli_ordinary_passed": 33,
+      "root_ordinary_passed": 33,
+      "monitor_ordinary_passed": 0,
+      "monitor_failure": "TestMigrationsCompetitionDistributedPublishedPrefixesAndGuardFaults: isolated PostgreSQL backend was OOM-killed at the exact conn-closed timestamp. Query memory versus fixture sizing audit remains pending; fail-fast stopped the package.",
+      "monitor_incident_evidence": "EPOCH2-RECOVERY-QA-POSTGRES-OOM-2026-11-12.json",
+      "monitor_log_sha256": "1af94365a7a169d7a2a6c5ddd4d4c554f10c943d13ce106b5eca739e98be210b",
+      "race_started": false,
+      "owned_qa_fixtures_cleaned_up": true,
+      "completed_qualification_source_commit": "3e72d8572839264459898950f0fc040feda50f11",
+      "diagnostic": {
+        "source_commit": "071c5856466418ffc39a41cfee79cd5bb2e25053",
+        "verified_running_at": "2026-11-12T08:34:18Z",
+        "terminal_at": "2026-11-12T08:36:00.600993907Z",
+        "result": "failed: PostgreSQL OOM-killed during EXPLAIN with jit=off; query execution never reached",
+        "test_log_sha256": "3e79b3c2ce9e13501fc75d7a14af5ada1ec871259254381ab789b03e3ce5b649",
+        "owned_fixtures_cleaned_up": true,
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "686b5c07bb194cfeb6e381c150123436",
+        "main_pid": 1840830,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.CeOHaNnO",
+        "selector": "^TestMigrationCatalogResourceDiagnostic$",
+        "count": 1,
+        "postgres_memory_bytes": 2147483648,
+        "production_predicates_changed": false,
+        "full_qualification_or_race_authorized_by_this_diagnostic": false
+      },
+      "workspace_sha256": "fa98030fed949631072273ad80a100475256da96089e3100137f9c31e3ab6c28",
+      "previous_zero_test_dependency_failures": [
+        {"evidence": "2IZI2TQU", "log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071"},
+        {"evidence": "2SNMhX3G", "log_sha256": "ef300e9f282c8ba92378d2f1577b21b491b2c3f2d76b5c5218d8d686bc2f6629"},
+        {"evidence": "QPQ1TM6V", "log_sha256": "7cb213bf815a1a1d786a0f27e2291dccce68963361a1e46b0cb8bdd1d3ba5d83"}
+      ],
       "server_source_unchanged_by_dependency_correction": true,
-      "live_and_product_checkouts_unchanged": true
+      "live_and_product_checkouts_unchanged": true,
+      "previous_fixture_failure": "Q6aozbcV: partial 40 pass/21 fail before controlled stop; actual common assertion round_not_open, not the expected handoff-negative-control log.",
+      "previous_smoke_failure": "7k3K6O43: two passed, current-ASAP source derivation failed from an intentionally incomplete synthetic producer profile; fail-fast skipped the remaining case.",
+      "coverage_limit": "Historical expired lifecycle and current ASAP startup/admission/claim branches are tested separately; no single real-time three-hour expired-ASAP run has been completed."
     }
   },
   "pending_authorizations": [
@@ -107,7 +167,7 @@
     "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted."
   ],
   "next_actions": [
-    "Implement and qualify the newly user-approved distributed recovery authority for the two failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence.",
+    "Qualify the implemented distributed recovery authority and corrected test fixtures for the two approved failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence.",
     "Monitor both exact active jobs and live readiness; investigate new failures from retained evidence.",
     "After authorized drain and positively verified global idle, activate only the receipt-pinned staged worker, verify its actual runtime identity and unchanged execution inputs, then resume claims.",
     "Do not change frozen product source, shared baseline, scoring rules, evaluator image or any original attempt deadline."
