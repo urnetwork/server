@@ -220,6 +220,17 @@ func StLedgerV2AccountsPartial(ctx context.Context, coldkey [32]byte) (*StLedger
 	return stLedgerV2Accounts(ctx, coldkey, true)
 }
 
+// stLedgerV2ColdkeyAccounts reads the account record of a coldkey. A test
+// replaces it to record a root while the record is read.
+var stLedgerV2ColdkeyAccounts = model.GetStLedgerV2AccountsForColdkey
+
+// stLedgerV2Count is the number of a pool's recorded accounts, read before
+// the account record, or why it could not be read.
+type stLedgerV2Count struct {
+	value uint64
+	err   error
+}
+
 func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*StLedgerV2AccountsResult, error) {
 	result := &StLedgerV2AccountsResult{Coldkey: fmt.Sprintf("0x%x", coldkey), Accounts: []*StLedgerV2AccountEntry{}, UnavailablePools: []*StLedgerV2UnavailablePool{}}
 	cfg := stConfig()
@@ -229,9 +240,25 @@ func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*S
 	recorded := map[uint64]uint64{}
 	ctfOn := stCtfPoolOn(cfg)
 	noIds := stLedgerV2OwnPools(cfg, ctfOn)
+	// Each own pool's recorded accounts are counted before the record of the
+	// coldkey's accounts is read. An account the record had not reached when
+	// it was read is at or after that count, where stLedgerV2AccountEntry
+	// looks for it, so a root recorded between the reads never hides it. A
+	// count that cannot be read fails only a pool that needs it, as it did
+	// when it was read there. The pools only the record names hold the
+	// coldkey's recorded account and need no count.
+	counts := map[uint64]stLedgerV2Count{}
+	for _, noId := range noIds {
+		var count stLedgerV2Count
+		count.err = stLedgerV2Guard(func() error {
+			count.value = model.GetStLedgerV2AccountCount(ctx, cfg.DeploymentKey(), noId)
+			return nil
+		})
+		counts[noId] = count
+	}
 	var accounts []*model.StLedgerV2Account
 	if err := stLedgerV2Guard(func() error {
-		accounts = model.GetStLedgerV2AccountsForColdkey(ctx, cfg.DeploymentKey(), coldkey)
+		accounts = stLedgerV2ColdkeyAccounts(ctx, cfg.DeploymentKey(), coldkey)
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("st ledger v2: the account record of 0x%x: %w", coldkey, err)
@@ -251,7 +278,7 @@ func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*S
 		index, isRecorded := recorded[noId]
 		var entry *StLedgerV2AccountEntry
 		err := stLedgerV2Guard(func() (err error) {
-			entry, err = stLedgerV2AccountEntry(ctx, cfg, noId, coldkey, index, isRecorded)
+			entry, err = stLedgerV2AccountEntry(ctx, cfg, noId, coldkey, index, isRecorded, counts[noId])
 			return
 		})
 		if err != nil {
@@ -290,8 +317,9 @@ func stLedgerV2Guard(read func() error) (err error) {
 // One pool's entry, or nil when neither root holds the coldkey. A recorded
 // account has its index from the account index; any other account was
 // appended after the recorded ones, by a finalized root not recorded yet or
-// by the pending root.
-func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, coldkey [32]byte, index uint64, recorded bool) (*StLedgerV2AccountEntry, error) {
+// by the pending root, so it is at or after count, the pool's recorded
+// accounts counted before the account index was read.
+func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, coldkey [32]byte, index uint64, recorded bool, count stLedgerV2Count) (*StLedgerV2AccountEntry, error) {
 	deploymentKey := cfg.DeploymentKey()
 	finalized := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, noId)
 	pending := model.GetStLedgerV2PendingRoot(ctx, deploymentKey, noId)
@@ -315,7 +343,10 @@ func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, col
 	}
 	found := recorded
 	if !found {
-		index, found = stLedgerV2FindAccount(coldkey, model.GetStLedgerV2AccountCount(ctx, deploymentKey, noId), finalizedAccounts, pendingAccounts)
+		if count.err != nil {
+			return nil, count.err
+		}
+		index, found = stLedgerV2FindAccount(coldkey, count.value, finalizedAccounts, pendingAccounts)
 	}
 	if !found {
 		return nil, nil
