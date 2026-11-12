@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "kind": "authenticated-executor-request-io-qualification",
+  "source_commit": "0aa7513825f7f1cfa1cc62bb88ca1d87244d1c48",
+  "source_worktree": "/home/by/urnetwork/temp/competition-transport-698-backport-20261112",
+  "qualified_worker_base": "698d94c44a0c148af0dfff119020c76dcd0a7444",
+  "workspace_sha256": "cf60a7c87fced3da461f23853efec081954e879b9ff95f42b995b13770039452",
+  "original_nine_dependency_heads_and_clean_statuses_unchanged": true,
+  "root_cause": "Historical transport read and writer-join operations preceded Cmd.Wait without independent context closure of manually owned pipes; descendants retaining stdin/stdout or the exec-owned stderr copier could prevent bounded request completion.",
+  "fix": "Own all three local standard streams explicitly, close only request-local pipe ends on cancellation, promptly reap the exact child, and join the request writer, diagnostic drainer, context watcher and waiter. Native evaluation identity and deadlines are unchanged.",
+  "oracle_correction": {
+    "root_cause": "Linux 6.8 does not report pidfd POLLHUP after successful reaping. Native diagnostic passed three identical runs proving Cmd.Wait success, generation-pinned ECHILD and preserved unread bytes with only POLLIN reported.",
+    "replacement": "Positive actual-Wait-completed barrier followed by generation-pinned ECHILD before releasing the first response read; live and invalid witnesses are rejected.",
+    "kernel_version_skip_or_polling_oracle_added": false,
+    "diagnostic_receipt_directory": "/var/lib/urnetwork/transport-pidfd-diagnostic-20261112.zlDvni8D",
+    "diagnostic_manifest_sha256": "ce9211c75dff246be1f058321da8b71827a6c75e078cf2af7f6ce6c125bd691d"
+  },
+  "positive": {
+    "selected_top_level_cases": 22,
+    "native_regression_cases": 13,
+    "compatibility_cases": 9,
+    "source_allowlist_matches_go_discovery": true,
+    "ordinary_repetitions": 3,
+    "ordinary_passed": 66,
+    "ordinary_failed": 0,
+    "ordinary_skipped": 0,
+    "ordinary_log_sha256": "35f00ba558aa50b56e25dbae8d69ab996d4ca876cd818ad418da331c76216373",
+    "race_repetitions": 3,
+    "race_passed": 66,
+    "race_failed": 0,
+    "race_skipped": 0,
+    "race_log_sha256": "377d1c5ad48581fcb8b592f04931331ca89d9707df1da166152d0387b5487663",
+    "actual_exit_status": 0
+  },
+  "causal_negative_controls": {
+    "method": "Separate private source clone and sealed Go overlay restoring historical manual/copying pipes and read-to-writer-join-to-Wait ordering; framing, callbacks, pins and context rejection retained.",
+    "replacement_source_sha256": "adbdb1d2902a6bc4eb679025cde8ab295a815eef4b79831b64beadfc08afe028",
+    "sealed_overlay_sha256": "8308eb14df7bafe1e976555fd53a49288535ed54838590cbb2db0fc4b941fa10",
+    "cases": [
+      {"name": "TestCompetitionAgentPipeCancellationInterruptsAcknowledgedRead", "expected_go_exit": 1, "actual_go_exit": 1, "log_sha256": "deb02c9f88da489423a1884e5720a758085d92dc688c40947611e6dbed0415a2"},
+      {"name": "TestCompetitionAgentPipeCancellationInterruptsAcknowledgedWrite", "expected_go_exit": 1, "actual_go_exit": 1, "log_sha256": "511c826928bd516a51a90fb9b55115b7318fc3eda94fde2f31e8c54d68f6e357"},
+      {"name": "TestCompetitionAgentPipeCancellationJoinsInheritedStderr", "expected_go_exit": 1, "actual_go_exit": 1, "log_sha256": "20c0f7aff0ba4af9e47ddcf776bc1e722f9c197eb01f7080602a713eafd3a24a"}
+    ],
+    "all_three_failed_at_expected_blocked_join_assertion": true,
+    "compile_setup_or_global_timeout_accepted_as_proof": false,
+    "qualified_source_edited": false,
+    "fixture_holders_explicitly_released_and_joined": true
+  },
+  "evidence_directory": "/var/lib/urnetwork/transport-final-qualification-0aa751-20261112.X0P3r1dy",
+  "evidence_manifest_sha256": "5ba95886a48196289e9b998ddaac663b692dd0bf2e84d3846a170eb45d352611",
+  "prior_dependency_build_failure_resource_guard_stop_and_git_trust_setup_failure_preserved_separately": true,
+  "source_and_dependencies_unchanged_by_execution": true,
+  "fixture_processes_closed": true,
+  "production_api_database_docker_or_native_agent_probes_performed_by_tests": false,
+  "qualified": true,
+  "worker_build_pending": true,
+  "deployed": false,
+  "live_worker_restarted": false,
+  "scoring_rules_baseline_source_and_attempt_deadlines_unchanged": true,
+  "broader_distributed_recovery_qualification": {
+    "separate_feature_not_covered_by_this_receipt": true,
+    "top_level_tests_completed": 97,
+    "top_level_tests_still_unexecuted": 163,
+    "main_integration_migration_and_service_rollout_still_required_before_schema_2_grants": true
+  }
+}
