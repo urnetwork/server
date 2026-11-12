@@ -49,6 +49,19 @@
     "queued": 0,
     "running": 0
   },
+  "recovery_tool_qualification_workspace": {
+    "status": "all_ten_pinned_sources_prepared_not_runtime_qualified",
+    "path": "/mnt/data/competition-recovery-main-qualification-20261112.1WMPyzn0/private",
+    "workspace_sha256": "e6689f801f6fc885031e2a62eea86a192ee3b36b4cc9e7ffd5c461800f83f6f0",
+    "invocation_id": "019853f486814d15b0bdb8b1e4cd678a",
+    "actual_and_monitor_exit_zero": true,
+    "view_bytes": 933433344,
+    "root_git_metadata_bytes": 7143424,
+    "repository_manifest_sha256": "1e16d03973171fcaa8d9ee2307fbd283de0f9ea9bdd4a6daa74cb2f07f557bf3",
+    "qualification_index_tests": {"ordinary_passed": 21, "race_passed": 21, "failed": 0, "skipped": 0},
+    "competition_source_or_runtime_changed": false,
+    "receipt": "private-source-view-authentication-2026-11-12.md"
+  },
   "recent_completed": [
     {
       "job_id": "01a1ced8-d838-de59-123b-e65f25c273f6",
