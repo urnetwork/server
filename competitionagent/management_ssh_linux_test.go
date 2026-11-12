@@ -26,7 +26,7 @@ func managementSshTestProjection(config Config, policy ManagementResourcePolicy,
 		// Transient=yes, FragmentPath=/run/systemd/transient/<exact unit>.
 		"FragmentPath": "/run/systemd/transient/" + plan.UnitName,
 		"ControlGroup": managementPrivateCgroupPath + "/" + plan.UnitName, "User": "root", "Group": "root", "Type": "exec", "Restart": "no", "RemainAfterExit": "yes",
-		"KillMode": "control-group", "MainPID": "17", "InvocationID": strings.Repeat("e", 32), "ExecMainStartTimestampMonotonic": "100",
+		"KillMode": "control-group", "MainPID": "17", "ControlPID": "0", "Job": "", "NeedDaemonReload": "no", "InvocationID": strings.Repeat("e", 32), "ExecMainStartTimestampMonotonic": "100",
 		"MemoryMax": strconv.FormatInt(plan.MemoryBytes, 10), "MemoryHigh": "infinity", "MemorySwapMax": "0", "TasksMax": strconv.FormatInt(plan.TasksMaximum, 10),
 		"CPUQuotaPerSecUSec": fmt.Sprintf("%dus", settings.Agent.ManagementCpuQuotaPercent*10000), "CPUQuotaPeriodUSec": fmt.Sprintf("%dus", settings.Agent.ContainmentCpuPeriodMicros),
 		"AllowedCPUs": strings.ReplaceAll(policy.ManagementCpuSet, ",", " "), "CPUAffinity": strings.ReplaceAll(policy.ManagementCpuSet, ",", " "),
@@ -159,6 +159,66 @@ func TestManagementSshMissingUnitAcceptsOmittedUnsetCommand(t *testing.T) {
 		mutate(changed)
 		if _, err := validateManagementSshUnit(managementSshTestProjectionBytes(changed), config, &policy, plan, settings); err == nil {
 			t.Fatal("missing command waived uncertain or loaded custody")
+		}
+	}
+}
+
+// Pending PID1 work is not an empty unit, including when the object otherwise
+// looks absent. Control processes and stale unit-file projections also refuse.
+func TestManagementSshRetirementProjectionRequiresKnownJobAndControlOwnership(t *testing.T) {
+	config, policy, settings := managementSshTestConfig(t)
+	plan := managementSshTestPlan(config, policy, settings)
+	for _, job := range []string{"", "0", "17"} {
+		values := managementSshTestProjection(config, policy, plan, settings)
+		values["Job"] = job
+		unit, err := validateManagementSshUnit(managementSshTestProjectionBytes(values), config, &policy, plan, settings)
+		if err != nil || unit.pendingJob != (job == "17") || unit.controlPid != 0 {
+			t.Fatal("typed pending manager work was misclassified", err)
+		}
+	}
+	for _, mutation := range []struct{ key, value string }{
+		{key: "Job", value: "-1"}, {key: "Job", value: "01"}, {key: "Job", value: "4294967296"}, {key: "Job", value: "1/start"},
+		{key: "ControlPID", value: "-1"}, {key: "ControlPID", value: "00"}, {key: "NeedDaemonReload", value: "yes"},
+	} {
+		values := managementSshTestProjection(config, policy, plan, settings)
+		values[mutation.key] = mutation.value
+		if _, err := validateManagementSshUnit(managementSshTestProjectionBytes(values), config, &policy, plan, settings); err == nil {
+			t.Fatalf("uncertain manager authority accepted: %s", mutation.key)
+		}
+	}
+	for _, key := range []string{"Job", "ControlPID", "NeedDaemonReload"} {
+		values := managementSshTestProjection(config, policy, plan, settings)
+		delete(values, key)
+		if _, err := validateManagementSshUnit(managementSshTestProjectionBytes(values), config, &policy, plan, settings); err == nil {
+			t.Fatalf("omitted retirement authority accepted: %s", key)
+		}
+	}
+	for _, mutation := range []struct{ key, value string }{{key: "Job", value: "17"}, {key: "ControlPID", value: "19"}} {
+		values := managementSshTestProjection(config, policy, plan, settings)
+		managementSshRetirementMissing(values)
+		values[mutation.key] = mutation.value
+		if _, err := validateManagementSshUnit(managementSshTestProjectionBytes(values), config, &policy, plan, settings); err == nil {
+			t.Fatalf("not-found hid independent pending manager work: %s", mutation.key)
+		}
+	}
+}
+
+// The new operation has exactly one local nonce argument. It cannot reset
+// every failed unit, select another role, start work or escape through options.
+func TestManagementSshRetirementManagerArgumentsLimitExactFailureReset(t *testing.T) {
+	unit := managementSshUnitName(strings.Repeat("a", 64))
+	arguments, err := managementSshManagerArguments("reset-failed", unit)
+	if err != nil || strings.Join(arguments, " ") != "reset-failed -- "+unit {
+		t.Fatal("exact managed control reset was not rendered closed", err)
+	}
+	for _, other := range []string{"", "*", "--all", "urnetwork-subeval-control-*.service", unit + " other.service", unitName(strings.Repeat("b", 64)), managementRecoveryServiceName} {
+		if _, err := managementSshManagerArguments("reset-failed", other); err == nil {
+			t.Fatalf("failure reset acquired another scope: %q", other)
+		}
+	}
+	for _, operation := range []string{"start", "restart", "reset-failed --all", "stop --all", "daemon-reload", "kill"} {
+		if _, err := managementSshManagerArguments(operation, unit); err == nil {
+			t.Fatalf("retirement acquired another manager operation: %s", operation)
 		}
 	}
 }
