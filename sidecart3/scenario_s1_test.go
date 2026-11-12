@@ -47,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/protobuf/proto"
@@ -319,7 +320,7 @@ func (self *s1McpStream) Write(p []byte) (int, error) {
 // An MCP session against device, as `ur mcp` relays one to the daemon: the daemon's catalog on device's settings, the
 // server's every answer captured, and each read-only tool called with no arguments, a refusal being an answer too.
 // Answers how many tools were called.
-func runS1McpSession(ctx context.Context, run *sidecartest.ScenarioRun, device *T3Sidecar) (int, error) {
+func runS1McpSession(ctx context.Context, run *sidecartest.ScenarioRun, device *T3Sidecar) (called int, returnErr error) {
 	identity := device.Sidecar().Identity()
 	if identity == nil {
 		return 0, fmt.Errorf("%s holds no identity", device.Name)
@@ -337,7 +338,11 @@ func runS1McpSession(ctx context.Context, run *sidecartest.ScenarioRun, device *
 	defer func() {
 		cancel()
 		clientConn.Close()
-		<-served
+		select {
+		case <-served:
+		case <-time.After(device.t3Settings.CloseTimeout):
+			returnErr = errors.Join(returnErr, fmt.Errorf("the MCP session of %s did not end within %s", device.Name, device.t3Settings.CloseTimeout))
+		}
 	}()
 	client := gomcp.NewClient(&gomcp.Implementation{Name: "sidecart3-s1", Version: "0.0.0"}, nil)
 	clientSession, err := client.Connect(sessionCtx, &gomcp.IOTransport{Reader: clientConn, Writer: clientConn}, nil)
@@ -349,7 +354,6 @@ func runS1McpSession(ctx context.Context, run *sidecartest.ScenarioRun, device *
 	if err != nil {
 		return 0, err
 	}
-	called := 0
 	for _, tool := range tools.Tools {
 		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
 			continue
