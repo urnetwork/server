@@ -49,9 +49,9 @@ No Qwen/Gemma inference had started for this pre-review request at that check.
 Existing scoring and the independent recovery-tool qualification are not being
 interrupted.
 
-The subsequent fixed-round read-only census selected **15 of 20 jobs**: 15
-successful eligible candidates, one successful below-margin candidate and four
-failed jobs. All 15 selected patches have distinct digests. The private census
+The subsequent fixed-round read-only census succeeded. Candidate identities,
+eligibility details and subsequent model findings are retained privately rather
+than published as a live ranking or per-submission reveal. The private census
 snapshot digest is
 `476e8a9a38d447322332197c2f8565243c0984639d190afa6cdade7ac0cedd8c`.
 This is a database snapshot only: immutable archive authentication and complete
@@ -76,6 +76,14 @@ findings, incomplete responses, wrong model identities and provider failures;
 all terminal evidence must survive rejection. Verify private output permissions,
 bounded inputs and source coverage, cache invalidation and duplicate execution
 control. Run no candidate code in the review process.
+
+The fixed census reader passed nine synthetic cases three times ordinarily and
+three times with the race detector (54 passes, zero failures/skips), using
+network-disabled execution. Source and dependency identities were unchanged.
+The first 512 MiB compiler attempt ran no tests and remains an unqualified OOM
+failure. The fresh 2 GiB test-only attempt passed with a 630.1 MiB peak; no
+submission limit, gate or scoring parameter changed. This qualifies the census
+reader's tested boundaries, not the unfinished archive/provider pipeline.
 
 ## Initial provider transport evidence
 
