@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T10:09:30.655947Z",
+  "observed_at": "2026-11-12T10:25:23.319310Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -72,7 +72,7 @@
       "started_at": "2026-11-12T09:08:11.310398",
       "deadline": "2026-11-12T12:08:11.310398",
       "observed_phase": "candidate_measurements",
-      "candidate_completed": 5,
+      "candidate_completed": 7,
       "native_service_verified_active": true,
       "database_fence": 32,
       "database_custody": "released_after_heartbeat_timeout_2026-11-12T09:56:43.273087Z"
@@ -84,7 +84,7 @@
       "started_at": "2026-11-12T09:20:10.16599",
       "deadline": "2026-11-12T12:20:10.16599",
       "observed_phase": "candidate_measurements",
-      "candidate_completed": 3,
+      "candidate_completed": 5,
       "database_fence": 18,
       "database_custody": "last_observed_lease_expired_2026-11-12T10:04:07.140698Z_not_a_verified_new_owner"
     }
@@ -151,7 +151,7 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "explicit_successor_oracles_refrozen_12_fast_boundary_checks_passed_original_native_fault_test_running",
+    "status": "broad_qualification_failed_intake_catalog_coherence_author_diagnosing_no_live_deployment",
       "successor_oracle_rerun": {
         "source_commit": "bf055da1ac6d9e90c904c7f15d023b16dc96705b",
         "production_code_unchanged_from_a4eaa": true,
@@ -159,9 +159,18 @@
         "invocation_id": "8bce69974b9c49119c70f65fe1666152",
         "main_pid": 2603949,
         "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.scTPflNp",
-        "verified_active": true,
+      "verified_active": false,
         "boundary_checks_passed": 12,
-        "original_schema_fault_test_result_pending": true,
+      "original_schema_fault_test_result_pending": false,
+      "original_schema_fault_test_passed": true,
+      "broad_passed": 44,
+      "broad_failed_tests": 1,
+      "failure": "TestMigrationsCompetitionIntakeFirstActualCatalogFaults: complete intake candidate catalog is not coherent: <nil>; schema head 961",
+      "broad_log_sha256": "edf97930d1a08684520e3e705212b6b8677c220fb238b91b510e7cef7b97fb14",
+      "durable_evidence_directory": "/var/lib/urnetwork/bounded-census-bf055-failure-20261112.J5rO3906",
+      "durable_evidence_manifest_sha256": "313aa619adc7ecdb1d607408759e3df6272a5c5ded2c0d568297cff5dd0955aa",
+      "source_and_dependency_after_manifests_match_before": true,
+      "owned_fixtures_cleaned_up_and_source_released": true,
         "harness_template_sha256": "2af012850033ab9dc5a084fb8c85b8818b170f3a985af77f743ff911cde41995",
         "harness_exit_helper_sha256": "3d62e8e5110e022db0c1b6d842dd04068806dd7bc8a98fcd00372b50a6af7215",
         "harness_forced_failure_and_dirty_first_repository_controls_passed": true,
