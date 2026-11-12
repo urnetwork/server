@@ -13,11 +13,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/holiman/uint256"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -465,4 +469,181 @@ func (self *snCtfCoreSource) ClientEpochs(ctx context.Context, view *snCtfView, 
 		return nil
 	})
 	return
+}
+
+func snCtfAwardOf(award *model.CtfAward) *snCtfAward {
+	return &snCtfAward{Role: award.Role, Country: award.CountryCode, Rank: award.Rank, Unit: award.Unit, UnitFamily: award.UnitFamily, ClientId: award.ClientId, Coldkey: award.Coldkey, Slot: award.Slot, Pot: award.Pot, Deferred: award.Deferred}
+}
+
+func (self *snCtfCoreSource) Wins(ctx context.Context, view *snCtfView, scope snCtfClientScope) (wins []*snCtfWin, err error) {
+	wins = []*snCtfWin{}
+	last := view.lastEpoch()
+	if last == nil {
+		return
+	}
+	first := view.Epochs[0].Epoch
+	err = stLedgerV2Guard(func() error {
+		cfg := self.cfg
+		key := cfg.DeploymentKey()
+		var awards []*model.CtfAward
+		if scope.ClientId != nil {
+			awards = model.GetCtfClientAwards(ctx, key, cfg.NoId, *scope.ClientId, first)
+		} else {
+			awards = model.GetCtfNetworkAwards(ctx, key, cfg.NoId, scope.NetworkId, first, last.Epoch)
+		}
+		for _, award := range awards {
+			// the covered epochs only: a committed root holds the award
+			if first <= award.Epoch && award.Epoch <= last.Epoch {
+				wins = append(wins, &snCtfWin{Epoch: award.Epoch, Award: snCtfAwardOf(award)})
+			}
+		}
+		return nil
+	})
+	return
+}
+
+// How many coldkeys' claim states are read at once.
+const snCtfClaimReadsAtOnce = 8
+
+func (self *snCtfCoreSource) AccountClaims(ctx context.Context, view *snCtfView, needs []*snCtfClaimNeed) map[[32]byte]*snCtfAccountClaims {
+	claims := map[[32]byte]*snCtfAccountClaims{}
+	cfg := self.cfg
+	poolId, ok := stCtfPoolId(cfg)
+	if len(needs) == 0 || !ok || !stCtfPoolOn(cfg) {
+		// capture the flag is off: no capture the flag pool is read
+		return claims
+	}
+	// below the lowest finalized root not recorded yet, the record of each
+	// root's deltas gives the account's cumulative in it
+	recordedBelow := uint64(math.MaxUint64)
+	if err := stLedgerV2Guard(func() error {
+		if next := model.GetNextUnrecordedStLedgerV2Root(ctx, cfg.DeploymentKey(), poolId); next != nil {
+			if next.RootIndex == nil {
+				return fmt.Errorf("finalized root %d of pool %d has no root index", next.Seq, poolId)
+			}
+			recordedBelow = *next.RootIndex
+		}
+		return nil
+	}); err != nil {
+		glog.Infof("[sn]ctf claims: %s\n", err)
+		return claims
+	}
+	var lock sync.Mutex
+	var reads sync.WaitGroup
+	slots := make(chan struct{}, snCtfClaimReadsAtOnce)
+	for _, need := range needs {
+		reads.Add(1)
+		slots <- struct{}{}
+		go server.HandleError(func() {
+			defer func() {
+				<-slots
+				reads.Done()
+			}()
+			var accountClaims *snCtfAccountClaims
+			err := stLedgerV2Guard(func() (err error) {
+				accountClaims, err = self.accountClaims(ctx, poolId, recordedBelow, need)
+				return
+			})
+			if err != nil {
+				glog.Infof("[sn]ctf claims of 0x%x: %s\n", need.Coldkey, err)
+				return
+			}
+			lock.Lock()
+			defer lock.Unlock()
+			claims[need.Coldkey] = accountClaims
+		})
+	}
+	reads.Wait()
+	return claims
+}
+
+// accountClaims reads one coldkey's account in the CTF pool as a claim sees it.
+// vault2's claimed and the latest finalized root's cumulative are the ledger
+// route's own read (stLedgerV2AccountEntry). An earlier root's cumulative is
+// the sum of the account's recorded deltas through it, or, for a finalized
+// root not recorded yet, the root's own published accounts.
+func (self *snCtfCoreSource) accountClaims(ctx context.Context, poolId uint64, recordedBelow uint64, need *snCtfClaimNeed) (*snCtfAccountClaims, error) {
+	cfg := self.cfg
+	key := cfg.DeploymentKey()
+	index, recorded := uint64(0), false
+	for _, account := range model.GetStLedgerV2AccountsForColdkey(ctx, key, need.Coldkey) {
+		if account.NoId == poolId {
+			index, recorded = account.Index, true
+		}
+	}
+	deltas := []*model.StLedgerV2Amount{}
+	for _, amount := range model.GetStLedgerV2AmountsForColdkey(ctx, key, need.Coldkey) {
+		if amount.NoId == poolId {
+			deltas = append(deltas, amount)
+		}
+	}
+	recordedThrough := func(rootIndex uint64) uint256.Int {
+		var sum uint256.Int
+		for _, delta := range deltas {
+			if delta.RootIndex <= rootIndex {
+				sum.Add(&sum, &delta.Amount)
+			}
+		}
+		return sum
+	}
+	entry, err := stLedgerV2AccountEntry(ctx, cfg, poolId, need.Coldkey, index, recorded)
+	if err != nil {
+		return nil, err
+	}
+	claims := &snCtfAccountClaims{Cumulative: map[uint64]uint256.Int{}}
+	if entry == nil || entry.RootIndex == nil {
+		// no finalized root holds an account of the coldkey: none of its
+		// wins was paid anything to claim
+		if 0 < len(deltas) {
+			return nil, fmt.Errorf("no finalized root of pool %d holds the account the record has deltas of", poolId)
+		}
+		for _, root := range need.Roots {
+			claims.Cumulative[root.Seq] = uint256.Int{}
+		}
+		return claims, nil
+	}
+	latestIndex := *entry.RootIndex
+	var latest uint256.Int
+	if err := latest.SetFromDecimal(entry.Cumulative); err != nil {
+		return nil, err
+	}
+	if err := claims.Claimed.SetFromDecimal(entry.Claimed); err != nil {
+		return nil, err
+	}
+	if sum := recordedThrough(latestIndex); latestIndex < recordedBelow && !sum.Eq(&latest) {
+		return nil, fmt.Errorf("the recorded deltas of pool %d add up to %s, not the finalized cumulative %s", poolId, sum.Dec(), latest.Dec())
+	}
+	for _, root := range need.Roots {
+		if root.RootIndex == nil {
+			return nil, fmt.Errorf("finalized root %d of pool %d has no root index", root.Seq, poolId)
+		}
+		rootIndex := *root.RootIndex
+		switch {
+		case rootIndex == latestIndex:
+			claims.Cumulative[root.Seq] = latest
+		case latestIndex < rootIndex:
+			return nil, fmt.Errorf("root %d of pool %d is after the latest finalized root %d", rootIndex, poolId, latestIndex)
+		case rootIndex < recordedBelow:
+			claims.Cumulative[root.Seq] = recordedThrough(rootIndex)
+		default:
+			// a finalized root the record has not reached: its own accounts
+			mirrored := model.GetStLedgerV2FinalizedRoot(ctx, key, poolId, rootIndex)
+			if mirrored == nil {
+				return nil, fmt.Errorf("finalized root %d of pool %d is not mirrored", rootIndex, poolId)
+			}
+			_, accounts, err := stLedgerV2AccountTree(ctx, mirrored)
+			if err != nil {
+				return nil, err
+			}
+			var cumulative uint256.Int
+			if entry.Index < uint64(len(accounts)) {
+				if accounts[entry.Index].Coldkey != need.Coldkey {
+					return nil, fmt.Errorf("finalized root %d of pool %d does not hold the coldkey at index %d", rootIndex, poolId, entry.Index)
+				}
+				cumulative = accounts[entry.Index].Cumulative
+			}
+			claims.Cumulative[root.Seq] = cumulative
+		}
+	}
+	return claims, nil
 }

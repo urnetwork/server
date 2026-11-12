@@ -116,6 +116,13 @@ type snCtfSource interface {
 	EpochDetail(ctx context.Context, view *snCtfView, epoch *snCtfEpoch) (*snCtfEpochDetail, error)
 	// ClientEpochs are a client's census members and awards in the epochs.
 	ClientEpochs(ctx context.Context, view *snCtfView, clientId server.Id, epochs []*snCtfEpoch) (map[uint64]*snCtfClientEpochFacts, error)
+	// Wins are the scope's awards in the view's covered epochs: its client's,
+	// or every client's its network has had.
+	Wins(ctx context.Context, view *snCtfView, scope snCtfClientScope) ([]*snCtfWin, error)
+	// AccountClaims reads the claim state of each coldkey's account in the
+	// CTF pool at the roots it needs. A coldkey whose state cannot be read is
+	// left out, so its wins answer claimed null.
+	AccountClaims(ctx context.Context, view *snCtfView, needs []*snCtfClaimNeed) map[[32]byte]*snCtfAccountClaims
 }
 
 // snCtfSourceOf is the source of the routes, errSnCtfNotConfigured where
@@ -394,13 +401,27 @@ func SnCtfEpoch(w http.ResponseWriter, r *http.Request, value string) {
 	writeSnCacheableJson(w, r, nil, cacheControl, epoch.Root.changeTime(), snCtfEpochResultOf(view, epoch, detail))
 }
 
-// SnCtfClient serves GET /sn/ctf/client?limit=, for the client a bearer client
-// JWT names. A network JWT or an API key names no client, and is answered 401.
+// snCtfClientScopeOf is whom a credential's answer covers: the client a
+// client token names, or, for the network credential (the network's token or
+// an API key), every client of its network.
+func snCtfClientScopeOf(byJwt *session.ByJwt) snCtfClientScope {
+	scope := snCtfClientScope{NetworkId: byJwt.NetworkId}
+	if byJwt.ClientId != nil {
+		clientId := *byJwt.ClientId
+		scope.ClientId = &clientId
+	}
+	return scope
+}
+
+// SnCtfClient serves GET /sn/ctf/client?limit=: for a client token, its
+// client's status and wins; for the network credential (a network token or an
+// API key), the wins of every client of its network. Only a request without a
+// credential that authenticates is answered 401, never a network's.
 func SnCtfClient(w http.ResponseWriter, r *http.Request) {
 	SnOperatorCors(w, r)
 	unauthorized := func() {
 		w.Header().Set("WWW-Authenticate", "Bearer")
-		WriteSnProblem(w, http.StatusUnauthorized, SnProblemUnauthorized, "This route answers for one client. Send the client's JWT.")
+		WriteSnProblem(w, http.StatusUnauthorized, SnProblemUnauthorized, "Send a client's or a network's bearer token.")
 	}
 	clientSession, err := session.NewClientSessionFromRequest(r)
 	if err != nil {
@@ -416,10 +437,11 @@ func SnCtfClient(w http.ResponseWriter, r *http.Request) {
 		unauthorized()
 		return
 	}
-	if clientSession.ByJwt == nil || clientSession.ByJwt.ClientId == nil || clientSession.ApiKeyAuthenticated {
+	if clientSession.ByJwt == nil {
 		unauthorized()
 		return
 	}
+	scope := snCtfClientScopeOf(clientSession.ByJwt)
 	limit, ok := snCtfLimit(r.URL.Query().Get("limit"), snCtfClientDefaultLimit, snCtfClientMaximumLimit)
 	if !ok {
 		WriteSnProblem(w, http.StatusBadRequest, SnProblemBadRequest, fmt.Sprintf("limit must be an integer from 1 to %d.", snCtfClientMaximumLimit))
@@ -429,16 +451,35 @@ func SnCtfClient(w http.ResponseWriter, r *http.Request) {
 	if view == nil {
 		return
 	}
-	epochs := []*snCtfEpoch{}
-	for i := len(view.Epochs) - 1; 0 <= i && len(epochs) < limit; i -= 1 {
-		epochs = append(epochs, view.Epochs[i])
-	}
-	clientId := *clientSession.ByJwt.ClientId
-	facts, err := source.ClientEpochs(clientSession.Ctx, view, clientId, epochs)
+	result, err := snCtfClientAnswer(clientSession.Ctx, source, view, scope, limit)
 	if err != nil {
-		glog.Infof("[sn]ctf client epochs: %s\n", err)
+		glog.Infof("[sn]ctf client: %s\n", err)
 		WriteSnProblem(w, http.StatusServiceUnavailable, SnProblemUnavailable, "The capture the flag state is unavailable. Try again shortly.")
 		return
 	}
-	writeSnCacheableJson(w, r, clientSession, snCtfClientCacheControl, view.AsOf, snCtfClientResultOf(view, clientId, facts, limit))
+	writeSnCacheableJson(w, r, clientSession, snCtfClientCacheControl, view.AsOf, result)
+}
+
+// snCtfClientAnswer reads what GET /sn/ctf/client answers for a scope: a
+// client's census members and awards in the most recent limit covered epochs,
+// the scope's wins, and the claim states of their coldkeys' accounts. A claim
+// state that cannot be read never fails the answer; its wins say null.
+func snCtfClientAnswer(ctx context.Context, source snCtfSource, view *snCtfView, scope snCtfClientScope, limit int) (*SnCtfClientResult, error) {
+	facts := map[uint64]*snCtfClientEpochFacts{}
+	if scope.ClientId != nil {
+		epochs := []*snCtfEpoch{}
+		for i := len(view.Epochs) - 1; 0 <= i && len(epochs) < limit; i -= 1 {
+			epochs = append(epochs, view.Epochs[i])
+		}
+		var err error
+		if facts, err = source.ClientEpochs(ctx, view, *scope.ClientId, epochs); err != nil {
+			return nil, fmt.Errorf("epochs: %w", err)
+		}
+	}
+	wins, err := source.Wins(ctx, view, scope)
+	if err != nil {
+		return nil, fmt.Errorf("wins: %w", err)
+	}
+	claims := source.AccountClaims(ctx, view, snCtfClaimNeeds(view, wins))
+	return snCtfClientResultOf(view, scope, facts, wins, claims, limit), nil
 }

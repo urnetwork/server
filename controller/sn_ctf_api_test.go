@@ -507,10 +507,20 @@ func TestSnCtfClientAnswersTheExample(t *testing.T) {
 			Awards: map[int]*snCtfAward{snCtfRoleProvider: awardOf(view.Epochs[0])},
 		},
 	}
-	got := snCtfTestJson(t, snCtfClientResultOf(view, clientId, facts, 8))
+	// its coldkey's account is claimed through epoch 8's root, root 1
+	coldkey := awardOf(view.Epochs[0]).Coldkey
+	wins := []*snCtfWin{{Epoch: 9, Award: awardOf(view.Epochs[1])}, {Epoch: 8, Award: awardOf(view.Epochs[0])}}
+	claims := map[[32]byte]*snCtfAccountClaims{coldkey: {Claimed: snCtfTestRao(48_025_660), Cumulative: map[uint64]uint256.Int{1: snCtfTestRao(48_025_660)}}}
+	needs := snCtfClaimNeeds(view, wins)
+	if len(needs) != 1 || needs[0].Coldkey != coldkey || len(needs[0].Roots) != 1 || needs[0].Roots[0] != view.Roots[0] {
+		t.Fatalf("needs %+v: only epoch 8's root, finalized, is read", needs)
+	}
+	scope := snCtfClientScope{ClientId: &clientId, NetworkId: server.NewId()}
+	got := snCtfTestJson(t, snCtfClientResultOf(view, scope, facts, wins, claims, 8))
 	requireSnCtfEqual(t, "client", got, example)
-	if result := snCtfClientResultOf(view, clientId, facts, 1); len(result.Epochs) != 1 || result.Epochs[0].Epoch != 9 {
-		t.Fatalf("limit 1: %d epochs", len(result.Epochs))
+	// limit 1: epoch 9 alone, and the claimed win of epoch 8 is left out
+	if result := snCtfClientResultOf(view, scope, facts, wins, claims, 1); len(result.Epochs) != 1 || result.Epochs[0].Epoch != 9 || len(result.Wins) != 1 || result.Wins[0].Epoch != 9 {
+		t.Fatalf("limit 1: %d epochs, %d wins", len(result.Epochs), len(result.Wins))
 	}
 	// a member left out by every rule but a candidate's own reads its first
 	// rule in the document's order; a client never seen is not in the role
@@ -519,7 +529,7 @@ func TestSnCtfClientAnswersTheExample(t *testing.T) {
 	if *role.Reason != "country_changed" || role.Country != nil || *role.UnitFamily != 6 || role.UnitsInDraw != nil || role.Won {
 		t.Fatalf("role %+v", role)
 	}
-	if empty := snCtfClientResultOf(&snCtfView{}, clientId, nil, 8); len(empty.Epochs) != 0 || empty.Epochs == nil {
+	if empty := snCtfClientResultOf(&snCtfView{}, scope, nil, nil, nil, 8); len(empty.Epochs) != 0 || empty.Epochs == nil || len(empty.Wins) != 0 || empty.Wins == nil || *empty.ClientId != clientId.String() {
 		t.Fatal("a client before the first root")
 	}
 	// a candidate of an epoch without a draw has no units in a draw
@@ -575,6 +585,9 @@ type snCtfTestSource struct {
 	view   *snCtfView
 	err    error
 	detail *snCtfEpochDetail
+	// every scope's wins, and the coldkeys' claim states
+	wins   []*snCtfWin
+	claims map[[32]byte]*snCtfAccountClaims
 }
 
 func (self *snCtfTestSource) View(context.Context) (*snCtfView, error) {
@@ -593,6 +606,20 @@ func (self *snCtfTestSource) EpochDetail(context.Context, *snCtfView, *snCtfEpoc
 
 func (self *snCtfTestSource) ClientEpochs(context.Context, *snCtfView, server.Id, []*snCtfEpoch) (map[uint64]*snCtfClientEpochFacts, error) {
 	return map[uint64]*snCtfClientEpochFacts{}, nil
+}
+
+func (self *snCtfTestSource) Wins(context.Context, *snCtfView, snCtfClientScope) ([]*snCtfWin, error) {
+	return self.wins, nil
+}
+
+func (self *snCtfTestSource) AccountClaims(_ context.Context, _ *snCtfView, needs []*snCtfClaimNeed) map[[32]byte]*snCtfAccountClaims {
+	claims := map[[32]byte]*snCtfAccountClaims{}
+	for _, need := range needs {
+		if claim, ok := self.claims[need.Coldkey]; ok {
+			claims[need.Coldkey] = claim
+		}
+	}
+	return claims
 }
 
 // withSnCtfTestSource serves the routes from source, behind a load balancer
@@ -624,7 +651,7 @@ func serveSnCtf(handler func(http.ResponseWriter, *http.Request), target string,
 	return response
 }
 
-func requireSnProblem(t *testing.T, response *httptest.ResponseRecorder, status int, code string) {
+func requireSnProblem(t testing.TB, response *httptest.ResponseRecorder, status int, code string) {
 	t.Helper()
 	var problem SnProblem
 	if response.Code != status || response.Header().Get("Content-Type") != "application/problem+json" || json.Unmarshal(response.Body.Bytes(), &problem) != nil ||
@@ -710,7 +737,8 @@ func TestSnCtfRouteErrors(t *testing.T) {
 	}
 	requireSnProblem(t, epoch("7"), http.StatusNotFound, SnProblemUnknownEpoch)
 	requireSnProblem(t, epoch("10"), http.StatusNotFound, SnProblemUnknownEpoch)
-	// a network JWT, an API key or no token names no client
+	// no token, or one that does not authenticate (the database tests answer
+	// the tokens that do: TestDbSnCtfClientAnswersEveryCredential)
 	response := serveSnCtf(SnCtfClient, "/sn/ctf/client")
 	requireSnProblem(t, response, http.StatusUnauthorized, SnProblemUnauthorized)
 	if response.Header().Get("WWW-Authenticate") != "Bearer" {
