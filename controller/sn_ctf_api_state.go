@@ -1003,10 +1003,17 @@ func (self *snCtfView) clientRole(epoch *snCtfEpoch, facts *snCtfClientEpochFact
 	return answer
 }
 
-// snCtfClientResultOf is GET /sn/ctf/client: the client's status in the most
-// recent limit covered epochs, newest first.
-func snCtfClientResultOf(view *snCtfView, clientId server.Id, facts map[uint64]*snCtfClientEpochFacts, limit int) *SnCtfClientResult {
-	result := &SnCtfClientResult{AsOf: snOperatorTime(view.AsOf), Unit: snCtfUnit(), ClientId: clientId.String(), Epochs: []*SnCtfClientEpoch{}}
+// snCtfClientResultOf is GET /sn/ctf/client: for a client, its status in the
+// most recent limit covered epochs, newest first; and the scope's wins
+// (winsAnswer), the client's or every client's of the network.
+func snCtfClientResultOf(view *snCtfView, scope snCtfClientScope, facts map[uint64]*snCtfClientEpochFacts, wins []*snCtfWin, claims map[[32]byte]*snCtfAccountClaims, limit int) *SnCtfClientResult {
+	result := &SnCtfClientResult{AsOf: snOperatorTime(view.AsOf), Unit: snCtfUnit(), Epochs: []*SnCtfClientEpoch{}, Wins: view.winsAnswer(wins, claims, limit)}
+	if scope.ClientId == nil {
+		// a network credential names no one client
+		return result
+	}
+	clientId := scope.ClientId.String()
+	result.ClientId = &clientId
 	for i := len(view.Epochs) - 1; 0 <= i && len(result.Epochs) < limit; i -= 1 {
 		epoch := view.Epochs[i]
 		epochFacts := facts[epoch.Epoch]

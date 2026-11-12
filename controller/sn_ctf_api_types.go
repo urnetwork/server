@@ -373,10 +373,32 @@ type SnCtfClientEpoch struct {
 	Extenders  SnCtfClientRole `json:"extenders"`
 }
 
-// SnCtfClientResult is the answer of GET /sn/ctf/client.
+// SnCtfClientWin is one award of the answer's client, or of one of its
+// network's clients, and whether it is claimed (snCtfWinClaimed).
+type SnCtfClientWin struct {
+	Epoch       uint64      `json:"epoch"`
+	Role        string      `json:"role"`
+	Country     string      `json:"country"`
+	Rank        int         `json:"rank"`
+	ClientId    string      `json:"client_id"`
+	Amount      SnCtfAmount `json:"amount"`
+	Slot        SnCtfAmount `json:"slot"`
+	PotShare    SnCtfAmount `json:"pot_share"`
+	Pending     bool        `json:"pending"`
+	RootStatus  string      `json:"root_status"`
+	Coldkey     string      `json:"coldkey"`
+	ColdkeySs58 string      `json:"coldkey_ss58"`
+	// nil when the claim state of its coldkey's account could not be read
+	Claimed *bool `json:"claimed"`
+}
+
+// SnCtfClientResult is the answer of GET /sn/ctf/client. For a network
+// credential, which names no one client, ClientId is nil, Epochs is empty and
+// Wins are its clients'.
 type SnCtfClientResult struct {
 	AsOf     string              `json:"as_of"`
 	Unit     SnCtfUnit           `json:"unit"`
-	ClientId string              `json:"client_id"`
+	ClientId *string             `json:"client_id"`
 	Epochs   []*SnCtfClientEpoch `json:"epochs"`
+	Wins     []*SnCtfClientWin   `json:"wins"`
 }
