@@ -1,7 +1,7 @@
-// CODESTYLE's comment rules over every Go file of this module, tests included: a comment at the top
+// CODESTYLE's comment rules over every Go file of this package, tests included: a comment at the top
 // of each file, and a doc comment on each function, method and type that does not open by
-// repeating its name. The root's style_test.go holds the root to the same; this module is outside
-// it.
+// repeating its name. sidecar's style_test.go holds that repository to the same; this package came
+// from there (QD-750) and keeps the rule here, where nothing else checks it.
 
 package main
 

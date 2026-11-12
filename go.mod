@@ -53,6 +53,7 @@ require (
 	github.com/urnetwork/sidecar v0.0.0
 	github.com/urnetwork/sidecar/smtpproof v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0
+	github.com/urnetwork/warp v0.0.0
 	github.com/vedhavyas/go-subkey/v2 v2.0.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/mod v0.41.0
@@ -255,6 +256,9 @@ replace github.com/urnetwork/glog => ../glog
 replace github.com/urnetwork/goidenticons => ../goidenticons
 
 replace github.com/urnetwork/userwireguard => ../userwireguard
+
+// sidecarctl reads services.yml through warp's own loader (CONTRACTS.md C-23, QD-750).
+replace github.com/urnetwork/warp => ../warp
 
 replace github.com/urfoundation/sn => ../sn
 

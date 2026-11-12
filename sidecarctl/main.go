@@ -10,12 +10,12 @@
 // the usage text. Callers such as a builder job read nothing but that exit status, so a command
 // never reports a failure with exit 0.
 //
-// This is a nested module so that a command can import server's packages, and warp's, without the
-// root module depending on either. It requires nothing yet. It stays one package, and no file names
-// it by its module path, because the release's rewrite would turn that path into one under
-// .../sidecar/v2026 that nothing provides (check/hygiene_modules_test.go). The change that first
-// requires one of this repository's modules, connect or glog also adds sidecarctl to
-// build/all/run.sh's sidecar_cli_release_edit, which edits cli's requires the same way.
+// It is a package of server's module (owner, 2026-11-12, QD-750; it began as a nested module of the
+// sidecar repository), so a command links server's packages, the engine packages server hosts and
+// warp's under server's own dependency, license and layering rules: sidecar's §4.7 license list and
+// §4.4 layering rule let no command there link server's model or an engine. It stays one package.
+// A command that reaches an env's Postgres or Redis does so as server's own processes do, under the
+// WARP_ENV that names the env, and so under server's dial guards (test_env_dial_guard.go).
 
 package main
 
