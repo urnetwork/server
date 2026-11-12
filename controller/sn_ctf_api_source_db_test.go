@@ -34,6 +34,9 @@ type snCtfDbFixture struct {
 
 func newSnCtfDbFixture(t testing.TB) *snCtfDbFixture {
 	f := &snCtfDbFixture{t: t, ctx: context.Background(), cfg: ledgerV2TestConfig(), view: snCtfTestView(t)}
+	// the operator's vault2 is the example's, which the source names from the
+	// configuration
+	f.cfg.VaultV2 = f.view.Pool.Vault
 	f.chain = newFakeLedgerV2Chain(&[]string{})
 	f.chain.firstEpoch = 8
 	SetStConfig(f.cfg)
@@ -114,6 +117,12 @@ func TestDbSnCtfSourceView(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// the routes add the page from ctf.yml's api block (snCtfApiConfigOf);
+		// the source never reads it
+		if view.PageUrl != "" {
+			t.Fatalf("the source set the page %q", view.PageUrl)
+		}
+		view.PageUrl = f.view.PageUrl
 		want := snCtfResultOf(f.view)
 		got := snCtfResultOf(view)
 		// the stub's block times are estimates; the rest is the records'
