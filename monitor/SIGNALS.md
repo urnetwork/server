@@ -23140,6 +23140,70 @@ cover the registration, the migration gate, every class with its severity,
 sustain and guidance, privacy, and malformed aggregates; a SQL test runs the
 SELECT on tables shaped as the Gamma migration makes them.
 
+### 2.22c Store notifications stopped while purchases continue
+Probe: `store-notifications`
+
+From 2026-10-19 to 10-27 Main refused every Google Play real-time developer
+notification (POST /pay/play answered 503: vault google.yml had no
+`webhook.audience`), about 74,000 refusals, and nothing noticed for eight
+days. Purchases went on being credited by the app's purchase report and the
+hourly reconcile, but a Play purchase cancelled before its first notification
+was processed was never acknowledged, and Google refunded it after three days
+(support inbox 8010, 8046, 8086, 8098). The App Store's notifications
+(POST /apple/notification) had the same blind spot.
+
+Every notification of either store now ends in one outcome
+(controller/store_notification_flow.go), counted on the api and alt as
+`urnetwork_store_notifications_total{store,outcome}` (`google`, `apple`):
+`accepted`; `refused_unavailable` (our verification config is missing: 503,
+with the `payment-webhook-refused` line); `refused_auth` (a Play push with no
+valid Google token of the configured publisher); `refused_audience` (the
+configured publisher's token for another audience: our google.yml and the
+Pub/Sub subscription disagree); `refused_signature` (an App Store JWS that does
+not verify against the pinned roots, or is too old); `refused_claims` (a
+verified App Store notification of another app, environment or version);
+`refused_malformed` (a body that is not a notification); `error` (verified,
+then processing failed; the store redelivers it). An accepted notification
+sets `urnetwork_store_notification_last_accepted_timestamp_seconds{store}` and,
+at most once a minute per process, the store's row of `store_notification_flow`,
+which the migration creates with its clock at the migration. The api
+dashboard's "store notifications" panels show both.
+
+- `store-notification-silent` (PAGE, this probe): a store accepted no
+  notification for 24 hours (`store_notification_flow.last_accepted_at`)
+  while `subscription_renewal` holds supporter purchases of it started inside
+  those 24 hours and at least an hour ago, which other paths credited. Every
+  purchase sends its store's notification within minutes, so the notifications
+  are refused, failing or no longer sent (a removed push subscription or
+  notification URL). Restore the verifier input or the store's endpoint
+  setting through their owners, let the stores redeliver, and reconcile the
+  purchases of the window, checking Play Console for any cancelled before
+  their first notification; never grant from this aggregate. An api older than
+  the flow writes nothing, so it reads as silent a day after the migration:
+  deploy the api and alt with the migration.
+- `store-notification-refused` (PAGE, from the §1.5 log tail at one line a
+  minute): the fixed line `[store-notification]<store> <outcome>` for
+  `refused_audience`, `refused_claims` or `error`, framed by store and
+  outcome: a notification that verified as the store's was refused or failed.
+  Our configuration and the store's disagree, or processing fails behind it.
+  Correct the configuration through the vault owner or fix the processing
+  error; never disable verification.
+- `store-notification-unverified` (WARN, from the log tail at five lines a
+  minute): the same line for `refused_auth`, `refused_signature` or
+  `refused_malformed`. Anyone can post to the routes, so these alone are not
+  an outage; a sustained rate while accepted notifications stop (the silent
+  page) is the store's own notifications failing to verify, a changed
+  publisher service account or Apple chain.
+
+Only stores, outcomes, counts and ages leave the api and PostgreSQL: no token,
+purchase token, transaction id, network or body.
+
+Implementation convention: SIGNALS.md §2.22c (`store-notifications`) maps to
+`signal_store_notifications.go` and `signal_store_notifications_test.go`. The
+log classes are in `tailer.go`. Synthetic tests cover the migration gate, the
+silent decision, privacy and malformed aggregates; a database test runs the
+query against the migrated schema.
+
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`
 
@@ -29649,7 +29713,9 @@ The refusal itself was invisible to `log-errors`: the warning
 `[<webhook>]webhook refused, verification <secret|publisher|audience>
 unavailable: <detail>` can contain no error-shaped word. The
 `payment-webhook-refused` class pages on one matching line, framed only by
-play, stripe, coinbase or helius. Its fixed verification-input sample omits all
+play, stripe, coinbase, helius or apple (an App Store notification whose
+apple.yml cannot build the verifier is answered 503 the same way, no longer a
+panic). Its fixed verification-input sample omits all
 resource, field and loader-error details, without relabeling publisher/audience
 failures as missing secrets. The refusal header takes precedence over generic
 resource/transport signatures in its suffix; a plain unrelated resource or

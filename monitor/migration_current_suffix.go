@@ -1001,6 +1001,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// capability-aware FindProviders2's URL evidence columns, versioned by
 	// their position
 	[]snMainnetMigrationContract{providerEgressFp2EvidenceMigrationContract},
+	// the store notification flow, versioned by its position
+	[]snMainnetMigrationContract{storeNotificationFlowMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
