@@ -295,7 +295,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/ledger/account":                        routeAccessPublic,
 	"GET /sn/ctf":                                   routeAccessPublic,
 	"GET /sn/ctf/here":                              routeAccessPublic,
-	"GET /sn/ctf/client":                            routeAccessClient, // the bearer's own client's status
+	"GET /sn/ctf/client":                            routeAccessClient, // the bearer's own client's wins, or its network's clients
 	"GET /sn/ctf/top":                               routeAccessPublic,
 	"GET /sn/ctf/country/([^/]+)":                   routeAccessPublic,
 	"GET /sn/ctf/epoch/([^/]+)":                     routeAccessPublic,

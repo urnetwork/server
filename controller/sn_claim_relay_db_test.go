@@ -949,10 +949,10 @@ func claimRelayDbNear(millis int64, until time.Time) bool {
 // the flag pool, each a row of its own kind and label, whether or not
 // partial=true is asked. Once the CTF pool's latest root cannot be read,
 // partial=true names that pool in unavailable_pools beside the pool's row,
-// while an old client, which never sends partial, gets the error answer with
-// no balances. The pass claims the pool it can read and says the ledger is
-// unavailable, naming the other, and a Claim now takes the readable pool's
-// account and keeps its request for the other.
+// while an old client, which never sends partial, gets the pool's row alone,
+// as before the CTF pool, and no error. The pass claims the pool it can read
+// and says the ledger is unavailable, naming the other, and a Claim now takes
+// the readable pool's account and keeps its request for the other.
 func TestDbClaimRelayRouteReadsBothPools(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao), claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
@@ -1009,10 +1009,14 @@ func TestDbClaimRelayRouteReadsBothPools(t *testing.T) {
 		if pool := answer.UnavailablePools[0]; pool.NoId != claimRelayTestCtfPool || pool.Kind != StLedgerV2PoolKindCtf || pool.Label != "Capture the flag" || pool.Vault != stLedgerV2Address(world.cfg.VaultV2) {
 			t.Fatalf("the unavailable pool %+v", pool)
 		}
-		// an old client, which never sends partial: no balance at all, never zero
+		// an old client, which never sends partial: the pool's account as
+		// before the CTF pool, and no error
 		old, err := SnClaimRelay(clientSession)
-		if err != nil || old.Error == nil || old.Error.Message == "" || len(old.Accounts) != 0 || len(old.UnavailablePools) != 0 || old.State != SnClaimRelayStateRunning {
+		if err != nil || old.Error != nil || len(old.Accounts) != 1 || old.Accounts[0].NoId != 1 || len(old.UnavailablePools) != 0 || old.State != SnClaimRelayStateRunning {
 			t.Fatalf("an old client's answer %+v (%v)", old, err)
+		}
+		if *old.Accounts[0] != *answer.Accounts[0] {
+			t.Fatalf("an old client's account %+v, a partial answer's %+v", old.Accounts[0], answer.Accounts[0])
 		}
 
 		// the pass claims what it can read and names the pool it cannot
@@ -1267,7 +1271,10 @@ func TestDbClaimRelayWithCtfOffAnswersAsBefore(t *testing.T) {
 // the operator's pool still claims the CTF pool's accounts on the real tables
 // and names the operator's pool unavailable; the request of a coldkey that
 // pool's account index records waits for it, and one of a coldkey it does not
-// record, with nothing readable to claim, is given back.
+// record, with nothing readable to claim, is given back. A Claim now of a
+// coldkey whose only account is in the unreadable operator's pool says the
+// balances could not be read, never that nothing is pending, and so does one
+// of a coldkey in both pools once neither can be read.
 func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
@@ -1301,6 +1308,25 @@ func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
 		if len(requests) != 1 || requests[0].Coldkey != claimRelayTestColdkey(1) {
 			t.Fatalf("requests %+v", requests)
 		}
+
+		tapUnreadable := func(name string, coldkeyIndex int) {
+			t.Helper()
+			address, err := ss58.Encode(claimRelayTestColdkey(coldkeyIndex), ss58.BittensorPrefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tap, err := SnClaimRelayClaimNow(&SnClaimRelayClaimNowArgs{ColdkeySs58: address}, world.session(coldkeyIndex))
+			if err != nil || tap.Error == nil || tap.Requested || tap.Reason != "" {
+				t.Fatalf("%s: tap %+v (%v)", name, tap, err)
+			}
+		}
+		// coldkey 1's only account is in the operator's pool
+		tapUnreadable("the operator's pool unreadable", 1)
+		// coldkey 0 has an account in each pool, and the CTF pool's next root
+		// names objects nobody published too
+		model.SetStLedgerV2RootFinalized(ctx, key, &model.StLedgerV2Root{NoId: claimRelayTestCtfPool, Seq: 2, Epoch: 10, Root: [32]byte{0xcf}, Total: *uint256.NewInt(1), LeafCount: 2, LedgerHash: [32]byte{0xcf, 0x01}, RootIndex: &one}, 96)
+		resetLedgerV2Caches()
+		tapUnreadable("both pools unreadable", 0)
 	})
 }
 
@@ -1311,8 +1337,9 @@ func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
 // its api block off, or no st.yml ctf block), the pass still claims pool 1 and
 // runs with no pool unavailable, an old client and a partial=true one both read
 // coldkey 1's account in pool 1 whole, and a Claim now is taken and paid.
-// Turned on, the same pool is named unavailable by the pass and fails the old
-// client's answer, so a read of it would show.
+// Turned on, the same pool is named unavailable by the pass and by a
+// partial=true answer, so a read of it would show, while an old client still
+// reads pool 1's account alone, as before.
 func TestDbClaimRelayReadsNoCtfPoolWithCtfOff(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao), claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
@@ -1374,11 +1401,174 @@ func TestDbClaimRelayReadsNoCtfPoolWithCtfOff(t *testing.T) {
 		if gauge := testutil.ToFloat64(snClaimRelayPoolsUnavailable); status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{claimRelayTestCtfPool}) || status.PoolsUnavailable != 1 || gauge != 1 {
 			t.Fatalf("on: status %+v, metric %v", status, gauge)
 		}
-		if old, err := SnClaimRelay(clientSession); err != nil || old.Error == nil || len(old.Accounts) != 0 {
-			t.Fatalf("on: an old client's answer %+v (%v)", old, err)
-		}
+		readsPool1("on, an old client", false)
 		if partial, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, clientSession); err != nil || partial.Error != nil || len(partial.Accounts) != 1 || len(partial.UnavailablePools) != 1 || partial.UnavailablePools[0].NoId != claimRelayTestCtfPool {
 			t.Fatalf("on: a partial answer %+v (%v)", partial, err)
+		}
+	})
+}
+
+// Old apps on the claim relay through a fault of the capture the flag pool
+// (owner, 2026-11-11). With capture the flag on and that pool unreadable, GET
+// /sn/claim-relay without partial=true answers each network exactly as it does
+// with capture the flag off, the operator's pool's rows and no error, and a
+// Claim now of a coldkey whose only account is in that pool reads
+// nothing_pending, as before the pool, never an error; a partial=true client
+// sees the pool named unavailable. The operator's pool's rows are byte for byte
+// the ones each network read before the fault. Two faults are tried in turn: a
+// row of the pool's roots that does not read back from the database, then a
+// latest root whose objects nobody published. In each the pass claims the
+// operator's pool and names the other, and an old app still reads its rows as
+// before; only the relay's own state, which every client reads and no app
+// draws, says ledger_unavailable. Once the pool reads again, its accounts are
+// answered again. This test fails if an old client sees an error during a CTF
+// pool fault.
+func TestDbClaimRelayAnswersOldClientsThroughACtfPoolFault(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao), claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
+		setCtfPoolTestSwitches(t, world.cfg, true, true)
+		ctx := world.ctx
+		key := world.cfg.DeploymentKey()
+		carry, holder, flagOnly := claimRelayTestColdkey(9), claimRelayTestColdkey(1), claimRelayTestColdkey(7)
+		world.publishCtfRoot(carry, 0, 9, []merkle.LedgerAccount{
+			{Coldkey: carry, Cumulative: *claimRelayTestAlpha(4 * snClaimRelayAutomaticTaoRao)},
+			{Coldkey: holder, Cumulative: *claimRelayTestAlpha(20 * snClaimRelayFloorTaoRao)},
+			{Coldkey: flagOnly, Cumulative: *claimRelayTestAlpha(30 * snClaimRelayFloorTaoRao)},
+		})
+		paid := world.payBothPools()
+		// the pass claims pool 1's account over the threshold, and nothing else
+		if result := SnClaimRelayPass(ctx); result.State != SnClaimRelayStateRunning || !slices.Equal(paid(), []string{"1/0"}) {
+			t.Fatalf("pass %s, paid %v", result, paid())
+		}
+		flagOnlySs58, err := ss58.Encode(flagOnly, ss58.BittensorPrefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		networks := []struct {
+			name    string
+			session *session.ClientSession
+			// its accounts' pools while the CTF pool reads
+			pools []int64
+		}{
+			{"pool 1 alone", world.session(0), []int64{1}},
+			{"both pools", world.session(1), []int64{1, int64(claimRelayTestCtfPool)}},
+			{"the CTF pool alone", world.session(7), []int64{int64(claimRelayTestCtfPool)}},
+		}
+		wire := func(answer *SnClaimRelayResult) string {
+			raw, err := json.Marshal(answer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(raw)
+		}
+		readable := func(name string) {
+			t.Helper()
+			for _, network := range networks {
+				for _, partial := range []bool{false, true} {
+					answer, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: partial}, network.session)
+					if err != nil || answer.Error != nil || len(answer.UnavailablePools) != 0 || len(answer.Accounts) != len(network.pools) {
+						t.Fatalf("%s, the network with %s, partial %t: %+v (%v)", name, network.name, partial, answer, err)
+					}
+					for i, account := range answer.Accounts {
+						if account.NoId != network.pools[i] {
+							t.Fatalf("%s, the network with %s, partial %t: account %+v", name, network.name, partial, account)
+						}
+					}
+				}
+			}
+		}
+		readable("before any fault")
+		// each network's rows of the operator's pool before any fault, which an
+		// old app reads unchanged through every fault below
+		poolRows := map[string]string{}
+		for _, network := range networks {
+			answer, err := SnClaimRelay(network.session)
+			if err != nil || answer.Error != nil {
+				t.Fatalf("before any fault, the network with %s: %+v (%v)", network.name, answer, err)
+			}
+			rows := []*SnClaimRelayAccount{}
+			for _, account := range answer.Accounts {
+				if account.NoId == 1 {
+					rows = append(rows, account)
+				}
+			}
+			raw, err := json.Marshal(rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			poolRows[network.name] = string(raw)
+		}
+
+		// what an old app reads while the CTF pool cannot be read: what it reads
+		// with capture the flag off, which is its answer before the CTF pool
+		oldApps := func(name string) {
+			t.Helper()
+			setCtfPoolTestSwitches(t, world.cfg, false, false)
+			want := map[string]string{}
+			for _, network := range networks {
+				answer, err := SnClaimRelay(network.session)
+				if err != nil || answer.Error != nil {
+					t.Fatalf("%s, capture the flag off, the network with %s: %+v (%v)", name, network.name, answer, err)
+				}
+				want[network.name] = wire(answer)
+			}
+			setCtfPoolTestSwitches(t, world.cfg, true, true)
+			for _, network := range networks {
+				old, err := SnClaimRelay(network.session)
+				if err != nil || old.Error != nil {
+					t.Fatalf("%s: an old app of the network with %s sees an error: %+v (%v)", name, network.name, old, err)
+				}
+				if got := wire(old); got != want[network.name] {
+					t.Fatalf("%s: an old app of the network with %s reads %s\nwant, as before the CTF pool, %s", name, network.name, got, want[network.name])
+				}
+				// its rows are the operator's pool's, as they read before the fault
+				if rows, err := json.Marshal(old.Accounts); err != nil || string(rows) != poolRows[network.name] {
+					t.Fatalf("%s: an old app of the network with %s reads the rows %s (%v)\nwant, as before the fault, %s", name, network.name, rows, err, poolRows[network.name])
+				}
+				partial, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, network.session)
+				if err != nil || partial.Error != nil || len(partial.UnavailablePools) != 1 || partial.UnavailablePools[0].NoId != claimRelayTestCtfPool {
+					t.Fatalf("%s: a partial answer to the network with %s %+v (%v)", name, network.name, partial, err)
+				}
+			}
+			// a tap of the coldkey whose only account the CTF pool holds reads
+			// nothing to claim, as before that pool, not an error
+			tap, err := SnClaimRelayClaimNow(&SnClaimRelayClaimNowArgs{ColdkeySs58: flagOnlySs58}, networks[2].session)
+			if err != nil || tap.Error != nil || tap.Requested || tap.Reason != SnClaimRelayReasonNothingPending {
+				t.Fatalf("%s: a tap of the coldkey in the CTF pool alone %+v (%v)", name, tap, err)
+			}
+		}
+		duringAFault := func(name string) {
+			t.Helper()
+			oldApps(name)
+			// the pass claims the pool it can read and names the CTF pool
+			SnClaimRelayPass(ctx)
+			status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
+			if status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{claimRelayTestCtfPool}) {
+				t.Fatalf("%s: status %+v", name, status)
+			}
+			oldApps(name + ", after a pass")
+		}
+		exec := func(sql string, args ...any) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.RaisePgResult(conn.Exec(ctx, sql, args...))
+			}, server.OptReadWrite())
+		}
+
+		// a row of the pool's roots does not read back from the database
+		total := model.GetLatestStLedgerV2FinalizedRoot(ctx, key, claimRelayTestCtfPool).Total.Dec()
+		exec(`UPDATE st_ledger_v2_root SET total = -1 WHERE deployment_key = $1 AND no_id = $2 AND seq = 1`, string(key), int64(claimRelayTestCtfPool))
+		duringAFault("a row of the pool's roots does not read back")
+		exec(`UPDATE st_ledger_v2_root SET total = $3 WHERE deployment_key = $1 AND no_id = $2 AND seq = 1`, string(key), int64(claimRelayTestCtfPool), total)
+		readable("the row reads back again")
+
+		// the pool's latest root names objects nobody published
+		lost := uint64(1)
+		model.SetStLedgerV2RootFinalized(ctx, key, &model.StLedgerV2Root{NoId: claimRelayTestCtfPool, Seq: 2, Epoch: 10, Root: [32]byte{0xcf}, Total: *uint256.NewInt(1), LeafCount: 3, LedgerHash: [32]byte{0xcf, 0x01}, RootIndex: &lost}, 95)
+		resetLedgerV2Caches()
+		duringAFault("the pool's latest root names objects nobody published")
+		// nothing but pool 1's due account was ever claimed
+		if got := paid(); !slices.Equal(got, []string{"1/0"}) {
+			t.Fatalf("paid %v", got)
 		}
 	})
 }

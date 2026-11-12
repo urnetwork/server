@@ -1,6 +1,7 @@
 package grafana
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -47,7 +48,8 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"refusals by reason":    "sum by (pinger_kind, reason) (max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h",
 		"who is measuring":      "urnetwork_stats_extender_ping_sources_24h",
 		"extenders pinged":      "urnetwork_stats_extender_pinged_extenders_24h",
-		"refusing targets":      "urnetwork_stats_extender_ping_rejections_total",
+		"refusing targets":      "urnetwork_stats_extender_ping_evidence_rejections_total",
+		"refusals per hour":     "urnetwork_stats_extender_ping_rejections_total",
 		"derived locations":     "urnetwork_stats_derived_locations",
 		"derived crossings":     "urnetwork_stats_derived_location_crossings",
 		"excluded sources":      "urnetwork_stats_derive_excluded_sources",
@@ -111,12 +113,12 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 	}
 }
 
-// The contracts, pings and ping rejections counters are the only metrics
-// that name extenders. Every panel reading one must cap with topk, so a
-// dashboard never renders one line per extender in an open population, and
-// must read it through increase(): all are counters fed from closed hour
-// buckets, and a raw value is the process-lifetime total, which a restart
-// resets.
+// The contracts, pings, ping rejections and ping evidence counters are the
+// only metrics that name extenders. Every panel reading one must cap with
+// topk, so a dashboard never renders one line per extender in an open
+// population, and must read it through increase(): all are counters fed from
+// closed hour buckets, and a raw value is the process-lifetime total, which a
+// restart resets.
 func TestExtendersDashboardLeaderboardIsBounded(t *testing.T) {
 	dashboard := readTestDashboard(t, "extenders.json")
 
@@ -124,6 +126,8 @@ func TestExtendersDashboardLeaderboardIsBounded(t *testing.T) {
 		"urnetwork_stats_extender_contracts_total",
 		"urnetwork_stats_extender_pings_total",
 		"urnetwork_stats_extender_ping_rejections_total",
+		"urnetwork_stats_extender_ping_evidence_rejections_total",
+		"urnetwork_stats_extender_ping_evidence_pings_total",
 	}
 	for _, panel := range dashboard.Panels {
 		for _, target := range panel.Targets {
@@ -226,11 +230,12 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 		})
 	}
 
-	// the refusing targets: rejections over pings per target, capped, as a
-	// rate, and explained as the evidence the co-signature exists for
+	// the refusing targets: the refusals that are evidence against each
+	// target over the pings they are a share of, capped, as a rate, and
+	// explained as the evidence the co-signature exists for
 	refusing := panelWith(t, func(expr string) bool {
-		return strings.Contains(expr, "urnetwork_stats_extender_ping_rejections_total") &&
-			strings.Contains(expr, "urnetwork_stats_extender_pings_total") &&
+		return strings.Contains(expr, "urnetwork_stats_extender_ping_evidence_rejections_total") &&
+			strings.Contains(expr, "urnetwork_stats_extender_ping_evidence_pings_total") &&
 			strings.Contains(expr, "/")
 	})
 	if refusing.Type != "table" {
@@ -250,10 +255,10 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 		}
 	}
 
-	// the targets refusing the most count every reason, which the per-target
-	// counter cannot split: the panel says so, and what a stale directory
-	// does to the ranking
-	for _, want := range []string{"unknown_pinger", "stale directories"} {
+	// the targets refusing the most say what is left out and why: a ranking of
+	// every refusal listed stale directories, and an hour without the
+	// evidence count is unknown, not zero
+	for _, want := range []string{"unknown_pinger", "rate_limited", "stale directories", "no reason", "never an unknown hour read as no refusals"} {
 		if !strings.Contains(refusing.Description, want) {
 			t.Errorf("targets refusing the most description lacks %q", want)
 		}
@@ -347,6 +352,95 @@ func TestExtendersDashboardReadsTheRefusalReason(t *testing.T) {
 	for _, want := range []string{"POST /network/ping-report", "pinger_not_reporter", "replay", "rate_limited"} {
 		if !strings.Contains(route.Description, want) {
 			t.Errorf("claims the operator refused description lacks %q", want)
+		}
+	}
+}
+
+// The targets refusing the most and the refusals per hour read the refusals
+// that are evidence against the target (the extender ping review of
+// 2026-11-11). They read the per-target rejections counter, which counts every
+// reason: from 2026-11-07 stale directories refused most extender pingers as
+// unknown, and the ranking listed extenders whose only fault was that. The
+// ranking divides the evidence refusals by the pings of the same hours, so an
+// hour whose tally row predates the evidence count drops out of both rather
+// than reading as an hour with no refusals; the hourly evidence line leaves
+// such an hour a gap, and draws no line across it. Every reason stays beside
+// it for contrast.
+func TestExtendersDashboardRanksRefusingTargetsByEvidence(t *testing.T) {
+	dashboard := readTestDashboard(t, "extenders.json")
+	panelTitled := func(title string) testPanel {
+		t.Helper()
+		for _, panel := range dashboard.Panels {
+			if panel.Title == title {
+				return panel
+			}
+		}
+		t.Fatalf("no panel %q", title)
+		return testPanel{}
+	}
+	const evidenceRejections = `urnetwork_stats_extender_ping_evidence_rejections_total{env="$env"}`
+	const evidencePings = `urnetwork_stats_extender_ping_evidence_pings_total{env="$env"}`
+	const rejections = `urnetwork_stats_extender_ping_rejections_total{env="$env"}`
+
+	ranking := panelTitled("targets refusing the most")
+	wantRanking := "topk(20, sum by (extender_id) (increase(" + evidenceRejections + "[$__range])) / " +
+		"(sum by (extender_id) (increase(" + evidencePings + "[$__range])) >= 10))"
+	if len(ranking.Targets) != 1 || ranking.Targets[0].Expr != wantRanking {
+		t.Errorf("targets refusing the most does not rank the evidence refusals over the pings of their hours: %+v", ranking.Targets)
+	}
+
+	perHour := panelTitled("refusals per hour")
+	wantPerHour := []testTarget{
+		{
+			RefId:        "A",
+			Expr:         "sum(increase(" + evidenceRejections + "[1h])) and (sum(increase(" + evidencePings + "[1h])) > 0)",
+			LegendFormat: "evidence against the target",
+		},
+		{
+			RefId:        "B",
+			Expr:         "sum(increase(" + rejections + "[1h]))",
+			LegendFormat: "every reason",
+		},
+	}
+	if len(perHour.Targets) != len(wantPerHour) {
+		t.Fatalf("refusals per hour has %d queries, want the evidence refusals and every reason: %+v", len(perHour.Targets), perHour.Targets)
+	}
+	for i, want := range wantPerHour {
+		got := perHour.Targets[i]
+		if got.RefId != want.RefId || got.Expr != want.Expr || got.LegendFormat != want.LegendFormat {
+			t.Errorf("refusals per hour query %d is %+v, want %+v", i, got, want)
+		}
+	}
+	for _, want := range []string{"unknown_pinger", "rate_limited", "no reason", "a gap there, never a zero"} {
+		if !strings.Contains(perHour.Description, want) {
+			t.Errorf("refusals per hour description lacks %q", want)
+		}
+	}
+
+	// a line drawn across an hour without the evidence count would invent its
+	// refusals
+	body, err := dashboardsFs.ReadFile("dashboards/extenders.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Panels []struct {
+			Title       string `json:"title"`
+			FieldConfig struct {
+				Defaults struct {
+					Custom struct {
+						SpanNulls json.RawMessage `json:"spanNulls"`
+					} `json:"custom"`
+				} `json:"defaults"`
+			} `json:"fieldConfig"`
+		} `json:"panels"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, panel := range document.Panels {
+		if panel.Title == "refusals per hour" && string(panel.FieldConfig.Defaults.Custom.SpanNulls) != "false" {
+			t.Errorf("refusals per hour spans nulls (%s): an hour without the evidence count is drawn as counted", panel.FieldConfig.Defaults.Custom.SpanNulls)
 		}
 	}
 }

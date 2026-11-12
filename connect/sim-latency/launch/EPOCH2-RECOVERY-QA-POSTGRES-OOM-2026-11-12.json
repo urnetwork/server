@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "incident": "isolated_recovery_qualification_postgres_oom",
+  "observed_at": "2026-11-12T08:18:28Z",
+  "scope": "Disposable QA PostgreSQL only; not main PostgreSQL or an evaluation container.",
+  "server_commit": "3e72d8572839264459898950f0fc040feda50f11",
+  "test": "TestMigrationsCompetitionDistributedPublishedPrefixesAndGuardFaults",
+  "test_error": "conn closed",
+  "test_log_sha256": "1af94365a7a169d7a2a6c5ddd4d4c554f10c943d13ce106b5eca739e98be210b",
+  "private_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
+  "kernel_evidence": {
+    "journal_window": "2026-11-12T08:18:20Z/2026-11-12T08:18:35Z",
+    "container_id": "2ee6c908c16f52c15410f0bfe53879c0fec7a5ec620f8c108ce968ff34acb637",
+    "host_postgres_pid": 1697623,
+    "constraint": "CONSTRAINT_MEMCG",
+    "killed_process": "postgres",
+    "anonymous_rss_kib": 853108,
+    "configured_container_memory_bytes": 1073741824,
+    "configured_container_memory_and_swap_bytes": 1073741824,
+    "postgres_tmpfs_maximum_bytes": 805306368,
+    "root_independently_verified": true
+  },
+  "interpretation": {
+    "connection_loss_cause_established": true,
+    "query_memory_root_cause_audit_complete": false,
+    "fixture_memory_sufficiency_established": false,
+    "production_database_failure_demonstrated": false,
+    "automatic_retry_performed": false,
+    "error_suppressed": false,
+    "race_qualification_started": false
+  },
+  "completed_ordinary_checks": {
+    "controller": 393,
+    "cli": 33,
+    "root": 33
+  },
+  "controlled_reproduction": {
+    "source_commit": "071c5856466418ffc39a41cfee79cd5bb2e25053",
+    "private_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.CeOHaNnO",
+    "test_log_sha256": "3e79b3c2ce9e13501fc75d7a14af5ada1ec871259254381ab789b03e3ce5b649",
+    "query_bytes": 4362508,
+    "query_sha256": "a2bf64150161521e568b31b7d3966395ae6ca24522038e94b7baf7b562e83eec",
+    "artifact_columns": 373,
+    "compiled_migration_head": 961,
+    "database_prefix": 927,
+    "operation": "EXPLAIN (FORMAT JSON, SETTINGS, SUMMARY), jit=off",
+    "postgres_memory_limit_and_peak_bytes": 2147483648,
+    "docker_reported_oom_killed": true,
+    "native_postgres_log": "2026-11-12T08:35:59.856Z: backend 126 terminated by signal 9 during EXPLAIN",
+    "full_query_execution_reached": false,
+    "jit_on_comparison_reached": false,
+    "plan_or_artifact_rows_returned": false,
+    "memory_log_sha256": "88f331ffa08fdb05611d071d391e1b16127f7d329c9c46a5a5282bc698f21044",
+    "initial_inspect_sha256": "7b26df72f1bbc0df35d9cd44f3871b59181d75e548170f9d44d7189b51f0a31a",
+    "final_inspect_sha256": "30cb4861929520cd1a82636c4dd232b86bf03066f90326435812fe0d52af0c1c",
+    "postgres_log_sha256": "f05daa2b437422516ea0026b6017199c55015672dba6370f3b67e9d6d0e53e90",
+    "source_manifest_unchanged_sha256": "9670671eadde912b147725b59ba18c7a48a838cf0c70a95f30811682d60a4219",
+    "owned_fixtures_cleaned_up": true
+  },
+  "next_action": "Fix the unbounded single-query planning footprint while preserving the full artifact census and fault checks. Do not increase the fixture cap again merely to obtain a passing result. Rerun affected ordinary checks and race qualification before deploying recovery authority.",
+  "live_attempts_restarted": false,
+  "main_database_modified": false
+}

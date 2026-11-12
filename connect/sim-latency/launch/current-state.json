@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T07:11:18.792549Z",
+  "observed_at": "2026-11-12T09:21:34.824591Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -19,34 +19,78 @@
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "diagnosis": "Goofe completed its previous native run, reconciled the same attempt with its original deadline, retained artifacts and recorded success. Its fresh host heartbeat restored grading readiness; no explicit hold was changed. Sille's current custody remains released while native execution continues."
+    "diagnosis": "Both previously measured attempts are now recorded succeeded after same-clock reconciliation and retention. Goofe's intervening build failure has offline frozen-base nonapplication evidence. Both hosts have claimed their following FIFO jobs; no original deadline or measurement history was reset."
   },
   "queue": {
-    "succeeded": 10,
-    "failed": 2,
-    "queued": 4,
+    "succeeded": 13,
+    "failed": 3,
+    "queued": 2,
     "running": 2
   },
-  "active_attempts": [
+  "recent_completed": [
     {
       "job_id": "01a1cac1-bfb6-874c-78fb-05740ec204e4",
       "host_id": "goofe",
       "started_at": "2026-11-12T07:10:20.253976",
       "deadline": "2026-11-12T10:10:20.253976",
-      "observed_phase": "new_fifo_claim"
+      "observed_phase": "succeeded_central_retention_and_score_recorded",
+      "database_success_observed_at": "2026-11-12T09:01:17.659846Z",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "database_custody": "same_attempt_reconciliations_fences_27_through_30_original_clock_preserved",
+      "retention_heartbeat_incident": {
+        "error_at": "2026-11-12T08:46:46.970880Z",
+        "error": "PostgresStore.Heartbeat: context deadline exceeded",
+        "private_log": "/var/lib/urnetwork/competition-epoch2-heartbeat-retention-20261112.ZzVVKPi7/worker.private.log",
+        "log_sha256": "8379de5a21d226185a4307d576f46b1217b58ec020b45e068040a2ab0971b86c",
+        "evaluation_restarted": false,
+        "deadline_extended": false,
+        "new_terminal_failure_recorded": false
+      }
     },
     {
-      "job_id": "01a1ca5d-8d1f-3a64-6356-0dfeacf43557",
+      "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
       "host_id": "sille",
-      "started_at": "2026-11-12T05:52:24.10429",
-      "deadline": "2026-11-12T08:52:24.10429",
-      "observed_phase": "candidate_measurements",
-      "candidate_completed": 7,
-      "database_custody": "released_after_heartbeat_timeout_2026-11-12T06:15:17.173607Z",
-      "native_process_verified_live": true,
-      "reattachment_verified": false
+      "started_at": "2026-11-12T07:37:00.304027",
+      "deadline": "2026-11-12T10:37:00.304027",
+      "observed_phase": "succeeded_central_retention_and_score_recorded",
+      "database_success_observed_at": "2026-11-12T09:21:34.824591Z",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "database_custody": "same_attempt_reconciliation_fence_17_original_clock_preserved"
     }
   ],
+  "active_attempts": [
+    {
+      "job_id": "01a1cd84-9163-5ec0-4f8a-d56902ef4a38",
+      "host_id": "goofe",
+      "run_id": "172485374a7f77775e327f1b38818f243412a523375f3c411952ef004563da6f",
+      "started_at": "2026-11-12T09:08:11.310398",
+      "deadline": "2026-11-12T12:08:11.310398",
+      "observed_phase": "native_running",
+      "native_service_verified_active": true,
+      "database_fence": 32
+    },
+    {
+      "job_id": "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c",
+      "host_id": "sille",
+      "run_id": "b4f33b481989ea9e43637e5a2aa6e99abc710d5ec690f51f8852200a4c87c4dd",
+      "started_at": "2026-11-12T09:20:10.16599",
+      "deadline": "2026-11-12T12:20:10.16599",
+      "observed_phase": "new_fifo_claim"
+    }
+  ],
+  "latest_failure": {
+    "job_id": "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43",
+    "evidence": "EPOCH2-SOURCE-APPLICATION-FAILURE-2026-11-12.json",
+    "offline_result": "19 files have hunks that do not apply to the exact frozen Connect tree",
+    "generic_builder_classification_not_rewritten": true,
+    "blind_infrastructure_retry_granted": false
+  },
   "live_worker": {
     "source_commit": "68817f6d3ea96b7a8179c7af63808d504560af32",
     "service": "urnetwork-competition-production-r2.service",
@@ -88,13 +132,54 @@
     "implementation_and_deployment_pending": true,
     "queued": false,
     "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
-    "frozen_server_commit": "4394a2ddb33246459747a01a1f5a7c1713921c86",
+    "frozen_server_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+    "unqualified_remote_backup_branch": "competition-distributed-infrastructure-reevaluation-20261112",
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "corrected_startup_role_smoke_verified_active_compilation_no_result_yet",
+      "status": "bounded_census_pure_and_native_smoke_verified_running_no_result_yet",
+      "smoke": {
+        "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+        "started_at": "2026-11-12T09:21:28Z",
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "6e77ad0ea0a34c5dba6a9aad5d3630dd",
+        "main_pid": 2209408,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.pCDvPyv7",
+        "selector": "^TestMigrationCensus",
+        "count": 1,
+        "native_psql_explicitly_enabled": true,
+        "postgres_memory_bytes": 1073741824,
+        "full_qualification_or_race_started": false
+      },
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
-      "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.NBkRc8Ov",
+      "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
+      "controller_ordinary_passed": 393,
+      "cli_ordinary_passed": 33,
+      "root_ordinary_passed": 33,
+      "monitor_ordinary_passed": 0,
+      "monitor_failure": "TestMigrationsCompetitionDistributedPublishedPrefixesAndGuardFaults: isolated PostgreSQL backend was OOM-killed at the exact conn-closed timestamp. Query memory versus fixture sizing audit remains pending; fail-fast stopped the package.",
+      "monitor_incident_evidence": "EPOCH2-RECOVERY-QA-POSTGRES-OOM-2026-11-12.json",
+      "monitor_log_sha256": "1af94365a7a169d7a2a6c5ddd4d4c554f10c943d13ce106b5eca739e98be210b",
+      "race_started": false,
+      "owned_qa_fixtures_cleaned_up": true,
+      "completed_qualification_source_commit": "3e72d8572839264459898950f0fc040feda50f11",
+      "diagnostic": {
+        "source_commit": "071c5856466418ffc39a41cfee79cd5bb2e25053",
+        "verified_running_at": "2026-11-12T08:34:18Z",
+        "terminal_at": "2026-11-12T08:36:00.600993907Z",
+        "result": "failed: PostgreSQL OOM-killed during EXPLAIN with jit=off; query execution never reached",
+        "test_log_sha256": "3e79b3c2ce9e13501fc75d7a14af5ada1ec871259254381ab789b03e3ce5b649",
+        "owned_fixtures_cleaned_up": true,
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "686b5c07bb194cfeb6e381c150123436",
+        "main_pid": 1840830,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.CeOHaNnO",
+        "selector": "^TestMigrationCatalogResourceDiagnostic$",
+        "count": 1,
+        "postgres_memory_bytes": 2147483648,
+        "production_predicates_changed": false,
+        "full_qualification_or_race_authorized_by_this_diagnostic": false
+      },
       "workspace_sha256": "fa98030fed949631072273ad80a100475256da96089e3100137f9c31e3ab6c28",
       "previous_zero_test_dependency_failures": [
         {"evidence": "2IZI2TQU", "log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071"},

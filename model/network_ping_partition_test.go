@@ -523,19 +523,25 @@ func TestNetworkPingReadsUnchangedAcrossPartitions(t *testing.T) {
 			}
 		}
 
+		// the refusal is for a round trip below the observed one, evidence
+		// against the target
 		beforeHourCounts := CountExtenderPingsByHour(ctx, boundary.Add(-time.Hour))
 		connect.AssertEqual(t, beforeHourCounts, []ExtenderHourPingCount{{
-			ExtenderId: targetExtenderId,
-			PingerKind: NetworkPingPingerKindExtender,
-			Pings:      2,
-			Rejections: 1,
+			ExtenderId:         targetExtenderId,
+			PingerKind:         NetworkPingPingerKindExtender,
+			Pings:              2,
+			Rejections:         1,
+			EvidenceRejections: 1,
+			EvidenceKnown:      true,
 		}})
 		afterHourCounts := CountExtenderPingsByHour(ctx, boundary)
 		connect.AssertEqual(t, afterHourCounts, []ExtenderHourPingCount{{
-			ExtenderId: targetExtenderId,
-			PingerKind: NetworkPingPingerKindExtender,
-			Pings:      2,
-			Rejections: 0,
+			ExtenderId:         targetExtenderId,
+			PingerKind:         NetworkPingPingerKindExtender,
+			Pings:              2,
+			Rejections:         0,
+			EvidenceRejections: 0,
+			EvidenceKnown:      true,
 		}})
 	})
 }
