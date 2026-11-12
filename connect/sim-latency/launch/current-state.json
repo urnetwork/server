@@ -3,6 +3,18 @@
   "observed_at": "2026-11-12T15:17:12.853061Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
+  "private_in_epoch_reviews": {
+    "requested_at": "2026-11-12",
+    "status": "implementing_nonauthorizing_authenticated_prereview_path",
+    "members": ["qwen3.8-27b", "gemma-4-26b-a4b"],
+    "eligibility": "frozen_round_reward_eligibility_not_evaluation_success_alone",
+    "eligible_census_pending": true,
+    "inference_started": false,
+    "private_retained_results_required": true,
+    "automatic_official_approval_authorized": false,
+    "seal_or_reward_revision_fabrication_allowed": false,
+    "reference": "private-prereview-2026-11-12.md"
+  },
   "scope": {
     "environment": "main",
     "competition_id": "sim-latency-season-1",
@@ -456,6 +468,54 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
+    "ordinary_fixture_lifecycle_candidate": {
+      "status": "initial_controls_and_historical_oracle_validated_full_221_authorized_not_yet_terminal",
+      "source_directory": "/home/by/urnetwork/temp/competition-census-fresh-owned-backend-candidate-20261112",
+      "source_manifest_sha256": "49b8c592e1fc48d38afd00af71a8cea582729c9ad130ff58dcbfd448d5476143",
+      "stage1": {
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0,
+        "native_postgres_controls_passed": 4,
+        "postgres_peak_bytes": 363692032,
+        "log_sha256": "72aa751954b20126ccf9710a0f176d9ad4e7b4d3f83c31271db886f3b3b2bda2",
+        "evidence_directory": "/dev/shm/competition-census-owned-stage1-qa-20261112.bBi7ydOT",
+        "actor_guard_capture_cleanup_exit_zero": true
+      },
+      "stage2": {
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "abfb4c75e9204eb181792f523453dfbd",
+        "main_pid": 0,
+        "original_main_pid": 3996441,
+        "control_session": 46072,
+        "evidence_directory": "/dev/shm/competition-census-owned-stage2-qa-20261112.x3bbHD4Q",
+        "expected_assertion": "ordinary census returned a reusable physical connection to the pool",
+        "result": "exact_expected_assertion_after_real_census",
+        "actual_go_exit": 1,
+        "actual_actor_exit": 1,
+        "expected_negative_wrapper_exit": 0,
+        "guard_exit": 0,
+        "source_and_dependencies_unchanged": true,
+        "owned_cleanup_succeeded": true,
+        "log_sha256": "30b1f6c5b804b1b316208d19c0f3b7393fd3a1a80640b47106f1360ad1fd309b"
+      },
+      "stage3": {
+        "status": "live_full_221_candidate_no_outcome_yet",
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "c329db84bc144155a121ed89806f5e0c",
+        "main_pid": 4022080,
+        "control_session": 83909,
+        "evidence_directory": "/dev/shm/competition-census-owned-stage3-qa-20261112.cSPBcrQB",
+        "test": "TestMigrationsSignalMergedCatalogUsesExactColumns",
+        "go_timeout_minutes": 40,
+        "postgres_memory_bytes": 1073741824,
+        "diagnostic_sql_or_grant": false,
+        "automatic_retry_authorized": false
+      },
+      "full_221_and_broader_271_qualification_pending": true,
+      "old_203_passes_not_transferred_to_candidate": true,
+      "production_change": false
+    },
     "status": "203_top_level_completed_57_remaining_chain_stopped_on_isolated_postgres_oom_transport_worker_stable",
     "sequential_remainder_chain": {
       "ledger_directory": "/dev/shm/competition-recovery-chain-20261112.pAWVCjqC",
