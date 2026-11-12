@@ -12,31 +12,24 @@ import (
 
 	"github.com/urfoundation/sn/ledger"
 	"github.com/urnetwork/connect"
-
-	"github.com/urnetwork/server"
 )
 
-func extenderEligibilityOf(t *testing.T, judged ExtenderEligibilities, extender byte) *ExtenderEligibility {
+// The judgement of the test record with extender id byte extender.
+func extenderEligibilityOf(t *testing.T, eligibilities ExtenderEligibilities, extender byte) *ExtenderEligibility {
 	t.Helper()
-	for _, eligibility := range judged {
+	for _, eligibility := range eligibilities {
 		if eligibility.Record.ExtenderId == contractPayoutTestId(extender) {
 			return eligibility
 		}
 	}
-	t.Fatalf("extender %d is not judged", extender)
+	t.Fatalf("extender %d is not eligibilities", extender)
 	return nil
 }
 
-func extenderEligibilityTestRules() *ExtenderEligibilityRules {
-	rules := stCensusTestRules()
-	rules.CanaryNetworks = map[server.Id]bool{}
-	return rules
-}
-
-// Every client of the records has a wallet.
+// Gives every client of the records a wallet.
 func extenderEligibilityPayAll(rules *ExtenderEligibilityRules, records []*StExtenderCensusRecord) {
 	for _, record := range records {
-		rules.Coldkeys[record.ClientId] = [32]byte{0xc0, byte(record.ClientId[15])}
+		rules.ClientIdColdkeys[record.ClientId] = [32]byte{0xc0, record.ClientId[15]}
 	}
 }
 
@@ -55,9 +48,9 @@ func TestExtenderEligibilityE1(t *testing.T) {
 		stCensusTestRecord(5, 5, "-198.51.100.50", "-2001:db8:5::5"),
 		stCensusTestRecord(6, 6),
 	}
-	rules := extenderEligibilityTestRules()
+	rules := stCensusTestRules()
 	extenderEligibilityPayAll(rules, records)
-	judged, err := DecideExtenderEligibility(records, rules)
+	eligibilities, err := DecideExtenderEligibility(records, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +67,7 @@ func TestExtenderEligibilityE1(t *testing.T) {
 		{5, false, ledger.UnitNone, ""},
 		{6, false, ledger.UnitNone, ""},
 	} {
-		e := extenderEligibilityOf(t, judged, c.extender)
+		e := extenderEligibilityOf(t, eligibilities, c.extender)
 		var unit [32]byte
 		if c.unitOf != "" {
 			unit = stCensusTestUnit(netip.MustParseAddr(c.unitOf))
@@ -83,7 +76,7 @@ func TestExtenderEligibilityE1(t *testing.T) {
 			t.Fatalf("extender %d: active %v family %d eligible %v, want %v, %d and the unit of %q", c.extender, e.Active(), e.Family, e.Eligible(), c.active, c.family, c.unitOf)
 		}
 	}
-	if e := extenderEligibilityOf(t, judged, 3); e.Flags != ledger.CensusRevoked {
+	if e := extenderEligibilityOf(t, eligibilities, 3); e.Flags != ledger.CensusRevoked {
 		t.Fatalf("a revoked record's flags are %b", e.Flags)
 	}
 }
@@ -99,14 +92,14 @@ func TestExtenderEligibilityE3Chain(t *testing.T) {
 		stCensusTestRecord(3, 3, "2001:db8:aa:1::3"),
 		stCensusTestRecord(4, 4, "203.0.113.4"),
 	}
-	rules := extenderEligibilityTestRules()
+	rules := stCensusTestRules()
 	extenderEligibilityPayAll(rules, records)
-	judged, err := DecideExtenderEligibility(records, rules)
+	eligibilities, err := DecideExtenderEligibility(records, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for extender, duplicate := range map[byte]bool{1: false, 2: true, 3: true, 4: false} {
-		e := extenderEligibilityOf(t, judged, extender)
+		e := extenderEligibilityOf(t, eligibilities, extender)
 		if e.Duplicate() != duplicate || e.Eligible() == duplicate {
 			t.Fatalf("extender %d: duplicate %v eligible %v, want duplicate %v", extender, e.Duplicate(), e.Eligible(), duplicate)
 		}
@@ -123,16 +116,16 @@ func TestExtenderEligibilityE3LowerIneligibleRecordHolds(t *testing.T) {
 		lower func(rules *ExtenderEligibilityRules, lower *StExtenderCensusRecord)
 	}{
 		{"no wallet", func(rules *ExtenderEligibilityRules, lower *StExtenderCensusRecord) {
-			delete(rules.Coldkeys, lower.ClientId)
+			delete(rules.ClientIdColdkeys, lower.ClientId)
 		}},
 		{"head-bound", func(rules *ExtenderEligibilityRules, lower *StExtenderCensusRecord) {
-			rules.HeadBound[lower.ClientId] = true
+			rules.HeadBoundClientIds[lower.ClientId] = true
 		}},
 		{"durable network", func(rules *ExtenderEligibilityRules, lower *StExtenderCensusRecord) {
-			rules.Durable[lower.NetworkId] = true
+			rules.DurableNetworkIds[lower.NetworkId] = true
 		}},
 		{"declared network", func(rules *ExtenderEligibilityRules, lower *StExtenderCensusRecord) {
-			rules.Declared[lower.NetworkId] = true
+			rules.DeclaredNetworkIds[lower.NetworkId] = true
 		}},
 		{"canary", func(rules *ExtenderEligibilityRules, lower *StExtenderCensusRecord) {
 			lower.Canary = true
@@ -140,14 +133,14 @@ func TestExtenderEligibilityE3LowerIneligibleRecordHolds(t *testing.T) {
 	} {
 		lower, higher := stCensusTestRecord(1, 1, "198.51.100.10"), stCensusTestRecord(2, 2, "198.51.100.10")
 		records := []*StExtenderCensusRecord{lower, higher}
-		rules := extenderEligibilityTestRules()
+		rules := stCensusTestRules()
 		extenderEligibilityPayAll(rules, records)
 		c.lower(rules, lower)
-		judged, err := DecideExtenderEligibility(records, rules)
+		eligibilities, err := DecideExtenderEligibility(records, rules)
 		if err != nil {
 			t.Fatal(err)
 		}
-		l, h := extenderEligibilityOf(t, judged, 1), extenderEligibilityOf(t, judged, 2)
+		l, h := extenderEligibilityOf(t, eligibilities, 1), extenderEligibilityOf(t, eligibilities, 2)
 		if l.Duplicate() || l.Eligible() || !h.Duplicate() || h.Eligible() {
 			t.Fatalf("%s: lower duplicate %v eligible %v, higher duplicate %v eligible %v", c.name, l.Duplicate(), l.Eligible(), h.Duplicate(), h.Eligible())
 		}
@@ -174,21 +167,21 @@ func TestExtenderEligibilityE3ClientsAndAddresses(t *testing.T) {
 		stCensusTestRecord(41, 6, "2001:db8:bb:1::ffff"),
 		stCensusTestRecord(42, 7, "2001:db8:bb:2::1"), // another /64 of the same /48
 	}
-	rules := extenderEligibilityTestRules()
+	rules := stCensusTestRules()
 	extenderEligibilityPayAll(rules, records)
-	judged, err := DecideExtenderEligibility(records, rules)
+	eligibilities, err := DecideExtenderEligibility(records, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for extender, duplicate := range map[byte]bool{11: false, 12: true, 20: false, 31: false, 40: false, 41: true, 42: false} {
-		if e := extenderEligibilityOf(t, judged, extender); e.Duplicate() != duplicate {
+		if e := extenderEligibilityOf(t, eligibilities, extender); e.Duplicate() != duplicate {
 			t.Fatalf("extender %d: duplicate %v, want %v", extender, e.Duplicate(), duplicate)
 		}
 	}
-	if extenderEligibilityOf(t, judged, 10).Duplicate() || extenderEligibilityOf(t, judged, 30).Duplicate() {
+	if extenderEligibilityOf(t, eligibilities, 10).Duplicate() || extenderEligibilityOf(t, eligibilities, 30).Duplicate() {
 		t.Fatal("an inactive record is a duplicate")
 	}
-	if a, b := extenderEligibilityOf(t, judged, 40), extenderEligibilityOf(t, judged, 42); a.Unit != b.Unit || !a.Eligible() || !b.Eligible() {
+	if a, b := extenderEligibilityOf(t, eligibilities, 40), extenderEligibilityOf(t, eligibilities, 42); a.Unit != b.Unit || !a.Eligible() || !b.Eligible() {
 		t.Fatal("two /64s of one /48 do not both count, in one unit")
 	}
 }
@@ -212,14 +205,14 @@ func TestExtenderEligibilityE4AndE5(t *testing.T) {
 		stCensusTestRecord(7, 7, "198.51.100.7"),
 		stCensusTestRecord(8, 8, "198.51.100.8"),
 	}
-	rules := extenderEligibilityTestRules()
+	rules := stCensusTestRules()
 	extenderEligibilityPayAll(rules, records)
-	rules.Durable[records[2].NetworkId] = true
-	rules.Declared[records[4].NetworkId] = true
-	rules.CanaryNetworks[records[5].NetworkId] = true
-	rules.HeadBound[records[6].ClientId] = true
-	delete(rules.Coldkeys, records[7].ClientId)
-	judged, err := DecideExtenderEligibility(records, rules)
+	rules.DurableNetworkIds[records[2].NetworkId] = true
+	rules.DeclaredNetworkIds[records[4].NetworkId] = true
+	rules.CanaryNetworkIds[records[5].NetworkId] = true
+	rules.HeadBoundClientIds[records[6].ClientId] = true
+	delete(rules.ClientIdColdkeys, records[7].ClientId)
+	eligibilities, err := DecideExtenderEligibility(records, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,20 +231,20 @@ func TestExtenderEligibilityE4AndE5(t *testing.T) {
 		{7, ledger.CensusHeadBound, false, true, true},
 		{8, 0, false, false, false},
 	} {
-		e := extenderEligibilityOf(t, judged, c.extender)
-		if e.Flags != ledger.CensusActive|c.flag || e.OwnNetwork() != c.own || e.HeadBound() != c.head || e.Payable() != c.payable {
-			t.Fatalf("extender %d: flags %b own %v head %v payable %v", c.extender, e.Flags, e.OwnNetwork(), e.HeadBound(), e.Payable())
+		e := extenderEligibilityOf(t, eligibilities, c.extender)
+		if e.Flags != ledger.CensusActive|c.flag || e.OwnNetwork() != c.own || e.HeadBound() != c.head || e.payable() != c.payable {
+			t.Fatalf("extender %d: flags %b own %v head %v payable %v", c.extender, e.Flags, e.OwnNetwork(), e.HeadBound(), e.payable())
 		}
 		if e.Eligible() != (c.extender == 1) {
 			t.Fatalf("extender %d: eligible %v", c.extender, e.Eligible())
 		}
-		if row := e.CensusRow(); row.Eligible() != e.Eligible() || row.Flags != e.Flags || row.Coldkey != e.Coldkey {
+		if row := e.censusRow(); row.Eligible() != e.Eligible() || row.Flags != e.Flags || row.Coldkey != e.Coldkey {
 			t.Fatalf("extender %d: its census row reads otherwise", c.extender)
 		}
 	}
 }
 
-// A client is judged by its active record with the lowest extender id, else
+// A client is eligibilities by its active record with the lowest extender id, else
 // by its lowest record; a client with no record has none.
 func TestExtenderEligibilityJudged(t *testing.T) {
 	inactive := stCensusTestRecord(1, 1, "198.51.100.1")
@@ -265,20 +258,20 @@ func TestExtenderEligibilityJudged(t *testing.T) {
 		onlyInactive,
 		stCensusTestRecord(4, 2, "-198.51.100.4"),
 	}
-	rules := extenderEligibilityTestRules()
+	rules := stCensusTestRules()
 	extenderEligibilityPayAll(rules, records)
-	judged, err := DecideExtenderEligibility(records, rules)
+	eligibilities, err := DecideExtenderEligibility(records, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e := judged.Judged(contractPayoutTestId(1)); e == nil || e.Record.ExtenderId != contractPayoutTestId(2) || e.Duplicate() {
-		t.Fatalf("client 1 is judged by %+v, want its lowest active record, 2", e)
+	if e := eligibilities.Judged(contractPayoutTestId(1)); e == nil || e.Record.ExtenderId != contractPayoutTestId(2) || e.Duplicate() {
+		t.Fatalf("client 1 is eligibilities by %+v, want its lowest active record, 2", e)
 	}
-	if e := judged.Judged(contractPayoutTestId(2)); e == nil || e.Record.ExtenderId != contractPayoutTestId(4) {
-		t.Fatalf("client 2 is judged by %+v, want its lowest record, 4", e)
+	if e := eligibilities.Judged(contractPayoutTestId(2)); e == nil || e.Record.ExtenderId != contractPayoutTestId(4) {
+		t.Fatalf("client 2 is eligibilities by %+v, want its lowest record, 4", e)
 	}
-	if judged.Judged(contractPayoutTestId(9)) != nil {
-		t.Fatal("a client without records is judged")
+	if eligibilities.Judged(contractPayoutTestId(9)) != nil {
+		t.Fatal("a client without records is eligibilities")
 	}
 }
 
@@ -293,7 +286,7 @@ func TestExtenderEligibilityOrderAndRefusals(t *testing.T) {
 		stCensusTestRecord(5, 5, "203.0.113.4"),
 		stCensusTestRecord(6, 6, "192.0.2.6"),
 	}
-	rules := extenderEligibilityTestRules()
+	rules := stCensusTestRules()
 	extenderEligibilityPayAll(rules, records)
 	want, err := DecideExtenderEligibility(records, rules)
 	if err != nil {
@@ -307,19 +300,19 @@ func TestExtenderEligibilityOrderAndRefusals(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Equal(got.CensusRows(), want.CensusRows()) {
+		if !slices.Equal(got.censusRows(), want.censusRows()) {
 			t.Fatal("the judgement depends on the records' order")
 		}
 	}
 	if _, err := DecideExtenderEligibility(append(slices.Clone(records), records[0]), rules); err == nil {
-		t.Fatal("a record listed twice was judged")
+		t.Fatal("a record listed twice was eligibilities")
 	}
 	if _, err := DecideExtenderEligibility(records, &ExtenderEligibilityRules{}); err == nil {
-		t.Fatal("rules without a unit key judged records")
+		t.Fatal("rules without a unit key eligibilities records")
 	}
-	zero := extenderEligibilityTestRules()
+	zero := stCensusTestRules()
 	zero.Unit = func(netip.Addr) [32]byte { return [32]byte{} }
 	if _, err := DecideExtenderEligibility(records, zero); err == nil {
-		t.Fatal("an active record with a zero unit was judged")
+		t.Fatal("an active record with a zero unit was eligibilities")
 	}
 }

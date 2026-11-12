@@ -584,6 +584,9 @@ type PaymentReconcileRunOptions struct {
 	// empty runs all of them. Filtered-out stores are untouched entirely: no
 	// events, no watermark.
 	Stores []string
+	// The Solana store's receiver leg (solana_receiver_sweep.go); nil runs
+	// it with DefaultSolanaReceiverSweepSettings.
+	SolanaReceiverSweepSettings *SolanaReceiverSweepSettings
 }
 
 // PaymentReconcileStoreResult is one store's tally for the run. In a dry run,
@@ -625,6 +628,8 @@ type paymentReconcileRun struct {
 	runId         server.Id
 	now           time.Time
 	dryRun        bool
+	// the Solana receiver leg's tunables; nil reads the defaults
+	solanaReceiverSweepSettings *SolanaReceiverSweepSettings
 
 	// remaining store API budget for the store currently reconciling
 	budget int
@@ -1090,13 +1095,17 @@ func runPaymentReconciliation(
 	options *PaymentReconcileRunOptions,
 ) *PaymentReconcileRunResult {
 	run := &paymentReconcileRun{
-		clientSession: clientSession,
-		connOwner:     connOwner,
-		runId:         server.NewId(),
-		now:           server.NowUtc(),
-		dryRun:        options.DryRun,
-		storeDetails:  map[string]map[string]any{},
-		storeResults:  map[string]*PaymentReconcileStoreResult{},
+		clientSession:               clientSession,
+		connOwner:                   connOwner,
+		runId:                       server.NewId(),
+		now:                         server.NowUtc(),
+		dryRun:                      options.DryRun,
+		solanaReceiverSweepSettings: options.SolanaReceiverSweepSettings,
+		storeDetails:                map[string]map[string]any{},
+		storeResults:                map[string]*PaymentReconcileStoreResult{},
+	}
+	if run.solanaReceiverSweepSettings == nil {
+		run.solanaReceiverSweepSettings = DefaultSolanaReceiverSweepSettings()
 	}
 
 	stores := paymentReconcileStoreLegs()
@@ -2305,6 +2314,9 @@ func playRenewalMatchesSubscriptionInConn(connOwner server.PgConn,
 //	active renewal whose credited tx signature is NOT on-chain (per Helius,
 //	    full-history lookup, credited > 1h and < unlink_after ago) -> end
 //	underpaid records -> left for the operator (still underpaid)
+//	USDC transfer into a receiver, older than MinAge, at least DustUsd,
+//	    that no record names -> the webhook's decision: credit through an
+//	    intent's one-shot when one matches, else recorded once (no_intent)
 func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketSolana
@@ -2487,6 +2499,13 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 			)
 		}
 	}
+
+	// the receiver leg: every USDC transfer into our receivers, once, from
+	// the chain (solana_receiver_sweep.go). A payment no intent names any
+	// more (its delivery lost after the intent was swept) is recorded for an
+	// operator, never credited off the record. It keeps its own cursors and
+	// call cap, so it runs before leg 3 can spend the budget.
+	reconcileSolanaReceivers(run)
 
 	// leg 3: the chain itself, for every open USDC intent's reference: a
 	// payment whose Helius delivery was lost is found and credited through the

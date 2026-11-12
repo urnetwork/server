@@ -40,34 +40,29 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// ExtenderEligibilityRules are the operator's facts eligibility needs beside
-// the records: the unit key, the operator's own networks, and each provider
-// client's payout coldkey and head binding.
+// The operator's facts eligibility needs beside the records: the unit key, the
+// operator's own networks, and each provider client's payout coldkey and head
+// binding.
 type ExtenderEligibilityRules struct {
-	// Unit is the keyed /29 or /48 prefix hash of an address, §8.4's head
-	// unit under the same key and granularity
-	// (VerifyEgressIpHashWithSettings).
+	// the keyed /29 or /48 prefix hash of an address, §8.4's head unit under
+	// the same key and granularity (VerifyEgressIpHashWithSettings)
 	Unit func(netip.Addr) [32]byte
-	// Durable are the operator's gated, durable networks
-	// (extender.yml directory.durable_network_ids), Declared the other
-	// networks it declares it controls, and CanaryNetworks the networks that
-	// host one of its canary extenders (E5).
-	Durable        map[server.Id]bool
-	Declared       map[server.Id]bool
-	CanaryNetworks map[server.Id]bool
-	// Coldkeys are the provider clients' payout coldkeys under the wallet
-	// selection provider rows use, absent or zero without one (E4).
-	Coldkeys map[server.Id][32]byte
-	// HeadBound are the provider clients with an active fleet binding at
-	// either of the epoch's boundaries (E4).
-	HeadBound map[server.Id]bool
+	// the gated, durable fleet (extender.yml directory.durable_network_ids)
+	DurableNetworkIds map[server.Id]bool
+	// the other networks the operator declares it controls
+	DeclaredNetworkIds map[server.Id]bool
+	// the networks that host one of the operator's canary extenders
+	CanaryNetworkIds map[server.Id]bool
+	// payout coldkeys under the wallet selection provider rows use, absent or
+	// zero without one (E4)
+	ClientIdColdkeys map[server.Id][32]byte
+	// provider clients with an active fleet binding at either of the epoch's
+	// boundaries (E4)
+	HeadBoundClientIds map[server.Id]bool
 }
 
-// StExtenderCensusRules are the extender pool census's rules: the shared ones.
-type StExtenderCensusRules = ExtenderEligibilityRules
-
-// ExtenderEligibility is one record judged under E1 and E3–E5, with the flags
-// of its census row (ledger.CensusFlags).
+// One record judged under E1 and E3–E5, with the flags of its census row
+// (ledger.CensusFlags).
 type ExtenderEligibility struct {
 	Record  *StExtenderCensusRecord
 	Flags   ledger.CensusFlags
@@ -76,41 +71,40 @@ type ExtenderEligibility struct {
 	Coldkey [32]byte
 }
 
-// Active is E1.
+// E1.
 func (self *ExtenderEligibility) Active() bool {
 	return self.Flags&ledger.CensusActive != 0
 }
 
-// Duplicate is E3: the record is active and another record of its component
-// counts.
+// E3: the record is active and another record of its component counts.
 func (self *ExtenderEligibility) Duplicate() bool {
 	return self.Flags&ledger.CensusDuplicate != 0
 }
 
-// OwnNetwork is E5's failure: the record is gated, a canary, or on another
-// network the operator controls.
+// E5's failure: the record is gated, a canary, or on another network the
+// operator controls.
 func (self *ExtenderEligibility) OwnNetwork() bool {
 	return self.Flags&(ledger.CensusGated|ledger.CensusCanary|ledger.CensusDeclared) != 0
 }
 
-// HeadBound is E4's second half: the provider client has an active fleet
-// binding at either boundary.
+// E4's second half: the provider client has an active fleet binding at either
+// boundary.
 func (self *ExtenderEligibility) HeadBound() bool {
 	return self.Flags&ledger.CensusHeadBound != 0
 }
 
-// Payable is E4's first half: the provider client has a payout coldkey.
-func (self *ExtenderEligibility) Payable() bool {
+// E4's first half: the provider client has a payout coldkey.
+func (self *ExtenderEligibility) payable() bool {
 	return self.Coldkey != ([32]byte{})
 }
 
-// Eligible is every rule at once, as ledger.CensusRow.Eligible reads a row.
+// Every rule at once, as ledger.CensusRow.Eligible reads a row.
 func (self *ExtenderEligibility) Eligible() bool {
-	return self.Flags == ledger.CensusActive && self.Payable()
+	return self.Flags == ledger.CensusActive && self.payable()
 }
 
-// CensusRow is the record's census row.
-func (self *ExtenderEligibility) CensusRow() ledger.CensusRow {
+// The record's census row.
+func (self *ExtenderEligibility) censusRow() ledger.CensusRow {
 	return ledger.CensusRow{
 		ExtenderID: [16]byte(self.Record.ExtenderId),
 		ClientID:   [16]byte(self.Record.ClientId),
@@ -121,16 +115,15 @@ func (self *ExtenderEligibility) CensusRow() ledger.CensusRow {
 	}
 }
 
-// ExtenderEligibilities are an epoch's judged records, sorted by client id and
-// extender id.
+// An epoch's judged records, sorted by client id and extender id.
 type ExtenderEligibilities []*ExtenderEligibility
 
-// Judged is the record a provider client is judged by when it is judged as
-// one extender (sn CAPTURETHEFLAG.md X1): its active record with the lowest
-// extender id, else its lowest record; nil for a client with no record.
+// The record a provider client is judged by when it is judged as one extender
+// (sn CAPTURETHEFLAG.md X1): its active record with the lowest extender id,
+// else its lowest record; nil for a client with no record.
 func (self ExtenderEligibilities) Judged(clientId server.Id) *ExtenderEligibility {
-	i, _ := slices.BinarySearchFunc(self, clientId, func(e *ExtenderEligibility, clientId server.Id) int {
-		return e.Record.ClientId.Cmp(clientId)
+	i, _ := slices.BinarySearchFunc(self, clientId, func(eligibility *ExtenderEligibility, clientId server.Id) int {
+		return eligibility.Record.ClientId.Cmp(clientId)
 	})
 	var lowest *ExtenderEligibility
 	for ; i < len(self) && self[i].Record.ClientId == clientId; i++ {
@@ -144,48 +137,18 @@ func (self ExtenderEligibilities) Judged(clientId server.Id) *ExtenderEligibilit
 	return lowest
 }
 
-// CensusRows are the judged records' census rows, in their order.
-func (self ExtenderEligibilities) CensusRows() []ledger.CensusRow {
+// The judged records' census rows, in their order.
+func (self ExtenderEligibilities) censusRows() []ledger.CensusRow {
 	rows := make([]ledger.CensusRow, len(self))
 	for i, eligibility := range self {
-		rows[i] = eligibility.CensusRow()
+		rows[i] = eligibility.censusRow()
 	}
 	return rows
 }
 
-// The address a record's unit is keyed from: its active IPv4 address, else
-// its active IPv6 address, as a provider's head score pins its IPv4 hash
-// first.
-func extenderUnitAddress(record *StExtenderCensusRecord) (netip.Addr, uint8, bool) {
-	for _, family := range []uint8{ledger.UnitIPv4, ledger.UnitIPv6} {
-		for _, address := range record.Addresses {
-			if address.Active && address.Ip.IsValid() && (address.Ip.Is4() == (family == ledger.UnitIPv4)) {
-				return address.Ip, family, true
-			}
-		}
-	}
-	return netip.Addr{}, ledger.UnitNone, false
-}
-
-// The keys E3 joins records by: the provider client, each active IPv4 address
-// and each active IPv6 address's /64.
-func extenderDedupKeys(record *StExtenderCensusRecord) []string {
-	keys := []string{"client:" + record.ClientId.String()}
-	for _, address := range record.Addresses {
-		switch {
-		case !address.Active || !address.Ip.IsValid():
-		case address.Ip.Is4():
-			keys = append(keys, "ipv4:"+address.Ip.String())
-		default:
-			keys = append(keys, "ipv6:"+netip.PrefixFrom(address.Ip, 64).Masked().String())
-		}
-	}
-	return keys
-}
-
-// DecideExtenderEligibility judges an epoch's records under E1 and E3–E5,
-// sorted by client id and extender id. A record listed twice, or an active
-// one whose unit key is zero, is an error.
+// Judges an epoch's records under E1 and E3–E5, sorted by client id and
+// extender id. A record listed twice, or an active one whose unit key is
+// zero, is an error.
 func DecideExtenderEligibility(records []*StExtenderCensusRecord, rules *ExtenderEligibilityRules) (ExtenderEligibilities, error) {
 	if rules == nil || rules.Unit == nil {
 		return nil, errors.New("extender eligibility: no unit key")
@@ -197,16 +160,28 @@ func DecideExtenderEligibility(records []*StExtenderCensusRecord, rules *Extende
 		}
 		return a.ExtenderId.Cmp(b.ExtenderId)
 	})
-	judged := make(ExtenderEligibilities, len(records))
-	listed := make(map[server.Id]bool, len(records))
+	// the address a unit is keyed from: the active IPv4 address, else the
+	// active IPv6 address, as a provider's head score pins its IPv4 hash first
+	unitAddress := func(record *StExtenderCensusRecord) (netip.Addr, uint8, bool) {
+		for _, family := range []uint8{ledger.UnitIPv4, ledger.UnitIPv6} {
+			for _, address := range record.Addresses {
+				if address.Active && address.Ip.IsValid() && (address.Ip.Is4() == (family == ledger.UnitIPv4)) {
+					return address.Ip, family, true
+				}
+			}
+		}
+		return netip.Addr{}, ledger.UnitNone, false
+	}
+	eligibilities := make(ExtenderEligibilities, len(records))
+	listedExtenderIds := make(map[server.Id]bool, len(records))
 	for i, record := range records {
-		if listed[record.ExtenderId] {
+		if listedExtenderIds[record.ExtenderId] {
 			return nil, fmt.Errorf("extender eligibility: extender %s is listed twice", record.ExtenderId)
 		}
-		listed[record.ExtenderId] = true
+		listedExtenderIds[record.ExtenderId] = true
 		eligibility := &ExtenderEligibility{Record: record}
 		// E1
-		if address, family, ok := extenderUnitAddress(record); ok && record.Active && !record.Revoked {
+		if address, family, ok := unitAddress(record); ok && record.Active && !record.Revoked {
 			eligibility.Flags |= ledger.CensusActive
 			eligibility.Unit, eligibility.Family = rules.Unit(address), family
 			if eligibility.Unit == ([32]byte{}) {
@@ -217,62 +192,73 @@ func DecideExtenderEligibility(records []*StExtenderCensusRecord, rules *Extende
 			eligibility.Flags |= ledger.CensusRevoked
 		}
 		// E5
-		if record.DirectoryTier != connect.ExtenderDirectoryTierOpen || rules.Durable[record.NetworkId] {
+		if record.DirectoryTier != connect.ExtenderDirectoryTierOpen || rules.DurableNetworkIds[record.NetworkId] {
 			eligibility.Flags |= ledger.CensusGated
 		}
 		if record.Canary {
 			eligibility.Flags |= ledger.CensusCanary
 		}
-		if rules.Declared[record.NetworkId] || rules.CanaryNetworks[record.NetworkId] {
+		if rules.DeclaredNetworkIds[record.NetworkId] || rules.CanaryNetworkIds[record.NetworkId] {
 			eligibility.Flags |= ledger.CensusDeclared
 		}
 		// E4
-		if rules.HeadBound[record.ClientId] {
+		if rules.HeadBoundClientIds[record.ClientId] {
 			eligibility.Flags |= ledger.CensusHeadBound
 		}
-		eligibility.Coldkey = rules.Coldkeys[record.ClientId]
-		judged[i] = eligibility
+		eligibility.Coldkey = rules.ClientIdColdkeys[record.ClientId]
+		eligibilities[i] = eligibility
 	}
 	// E3 over the active records: a union of every key's records, each
 	// component counted once, for its lowest (client id, extender id), which
-	// in this order is its lowest index.
-	parent := make([]int, len(judged))
-	for i := range parent {
-		parent[i] = i
+	// in this order is its lowest index. The keys are the provider client,
+	// each active IPv4 address and each active IPv6 address's /64.
+	parentIndexes := make([]int, len(eligibilities))
+	for i := range parentIndexes {
+		parentIndexes[i] = i
 	}
 	find := func(i int) int {
-		for parent[i] != i {
-			parent[i] = parent[parent[i]]
-			i = parent[i]
+		for parentIndexes[i] != i {
+			parentIndexes[i] = parentIndexes[parentIndexes[i]]
+			i = parentIndexes[i]
 		}
 		return i
 	}
-	first := map[string]int{}
-	for i, eligibility := range judged {
+	firstKeyIndexes := map[string]int{}
+	for i, eligibility := range eligibilities {
 		if !eligibility.Active() {
 			continue
 		}
-		for _, key := range extenderDedupKeys(eligibility.Record) {
-			j, ok := first[key]
+		keys := []string{"client:" + eligibility.Record.ClientId.String()}
+		for _, address := range eligibility.Record.Addresses {
+			switch {
+			case !address.Active || !address.Ip.IsValid():
+			case address.Ip.Is4():
+				keys = append(keys, "ipv4:"+address.Ip.String())
+			default:
+				keys = append(keys, "ipv6:"+netip.PrefixFrom(address.Ip, 64).Masked().String())
+			}
+		}
+		for _, key := range keys {
+			j, ok := firstKeyIndexes[key]
 			if !ok {
-				first[key] = i
+				firstKeyIndexes[key] = i
 				continue
 			}
 			if a, b := find(i), find(j); a != b {
-				parent[max(a, b)] = min(a, b)
+				parentIndexes[max(a, b)] = min(a, b)
 			}
 		}
 	}
-	for i, eligibility := range judged {
+	for i, eligibility := range eligibilities {
 		if eligibility.Active() && find(i) != i {
 			eligibility.Flags |= ledger.CensusDuplicate
 		}
 	}
-	return judged, nil
+	return eligibilities, nil
 }
 
-// GetExtenderCanaryNetworkIds reads the networks of every extender published
-// on its own canary channel, which are the operator's own (E5).
+// Reads the networks of every extender published on its own canary channel,
+// which are the operator's own (E5).
 func GetExtenderCanaryNetworkIds(ctx context.Context) []server.Id {
 	networkIds := []server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {

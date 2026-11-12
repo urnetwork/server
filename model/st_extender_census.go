@@ -78,16 +78,16 @@ func GetStExtenderCensusRecords(ctx context.Context, start time.Time, end time.T
 	return records
 }
 
-// BuildStExtenderCensus builds an epoch's census rows from its records, one
-// per record, under the shared eligibility rules (extender_eligibility.go:
-// E1, E3–E5). The rows are sorted by client id and extender id, and pass the
-// census rules validators check (ledger.CheckCensusRows).
-func BuildStExtenderCensus(records []*StExtenderCensusRecord, rules *StExtenderCensusRules) ([]ledger.CensusRow, error) {
-	judged, err := DecideExtenderEligibility(records, rules)
+// Builds an epoch's census rows from its records, one per record, under the
+// shared eligibility rules (extender_eligibility.go: E1, E3–E5). The rows are
+// sorted by client id and extender id, and pass the census rules validators
+// check (ledger.CheckCensusRows).
+func BuildStExtenderCensus(records []*StExtenderCensusRecord, rules *ExtenderEligibilityRules) ([]ledger.CensusRow, error) {
+	eligibilities, err := DecideExtenderEligibility(records, rules)
 	if err != nil {
 		return nil, fmt.Errorf("extender census: %w", err)
 	}
-	rows := judged.CensusRows()
+	rows := eligibilities.censusRows()
 	if err := ledger.CheckCensusRows(rows); err != nil {
 		return nil, fmt.Errorf("extender census: %w", err)
 	}

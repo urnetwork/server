@@ -33,6 +33,7 @@ type solanaLostDeliveryRpc struct {
 	calls        map[string]int
 }
 
+// Answers the reader's RPC calls from what the test put on the chain.
 func (self *solanaLostDeliveryRpc) call(ctx context.Context, method string, params any, result any) error {
 	self.calls[method] += 1
 	args, _ := params.([]any)
@@ -56,9 +57,8 @@ func (self *solanaLostDeliveryRpc) call(ctx context.Context, method string, para
 	return fmt.Errorf("unexpected method %s", method)
 }
 
-// payUsdc puts a finalized USDC transfer of amountMicro to our receiver on the
-// chain, naming the reference as Solana Pay does (an account key of the
-// transfer).
+// Puts a finalized USDC transfer of amountMicro to our receiver on the chain,
+// naming the reference as Solana Pay does (an account key of the transfer).
 func (self *solanaLostDeliveryRpc) payUsdc(reference string, signature string, amountMicro int64) {
 	payer := "CustomerWa11etAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	balance := func(index int, owner string, amount int64) map[string]any {
@@ -106,6 +106,7 @@ func (self *solanaLostDeliveryRpc) payUsdc(reference string, signature string, a
 	}
 }
 
+// The chain, installed as the reads' RPC until the test ends.
 func newSolanaLostDeliveryRpc(t testing.TB) *solanaLostDeliveryRpc {
 	rpc := &solanaLostDeliveryRpc{
 		signatures:   map[string][]map[string]any{},

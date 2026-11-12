@@ -37,8 +37,8 @@ func stCensusTestRecord(extender byte, client byte, addresses ...string) *StExte
 	return record
 }
 
-func stCensusTestRules() *StExtenderCensusRules {
-	return &StExtenderCensusRules{Unit: stCensusTestUnit, Durable: map[server.Id]bool{}, Declared: map[server.Id]bool{}, Coldkeys: map[server.Id][32]byte{}, HeadBound: map[server.Id]bool{}}
+func stCensusTestRules() *ExtenderEligibilityRules {
+	return &ExtenderEligibilityRules{Unit: stCensusTestUnit, DurableNetworkIds: map[server.Id]bool{}, DeclaredNetworkIds: map[server.Id]bool{}, CanaryNetworkIds: map[server.Id]bool{}, ClientIdColdkeys: map[server.Id][32]byte{}, HeadBoundClientIds: map[server.Id]bool{}}
 }
 
 func stCensusRowOf(t *testing.T, rows []ledger.CensusRow, extender byte) ledger.CensusRow {
@@ -160,11 +160,11 @@ func TestBuildStExtenderCensusFlagsAndWallets(t *testing.T) {
 		stCensusTestRecord(7, 7, "198.51.100.70"),
 	}
 	rules := stCensusTestRules()
-	rules.Durable[records[2].NetworkId] = true
-	rules.Declared[records[4].NetworkId] = true
-	rules.HeadBound[records[5].ClientId] = true
+	rules.DurableNetworkIds[records[2].NetworkId] = true
+	rules.DeclaredNetworkIds[records[4].NetworkId] = true
+	rules.HeadBoundClientIds[records[5].ClientId] = true
 	for _, record := range records[:6] {
-		rules.Coldkeys[record.ClientId] = [32]byte{byte(record.ClientId[15]), 0xc0}
+		rules.ClientIdColdkeys[record.ClientId] = [32]byte{byte(record.ClientId[15]), 0xc0}
 	}
 	rows, err := BuildStExtenderCensus(records, rules)
 	if err != nil {
@@ -179,7 +179,7 @@ func TestBuildStExtenderCensusFlagsAndWallets(t *testing.T) {
 			t.Fatalf("extender %d: eligible %v", extender, eligible)
 		}
 	}
-	if row := stCensusRowOf(t, rows, 1); row.Coldkey != rules.Coldkeys[records[0].ClientId] {
+	if row := stCensusRowOf(t, rows, 1); row.Coldkey != rules.ClientIdColdkeys[records[0].ClientId] {
 		t.Fatal("the coldkey is not the provider client's")
 	}
 	if row := stCensusRowOf(t, rows, 7); row.Coldkey != ([32]byte{}) {

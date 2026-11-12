@@ -13,7 +13,8 @@ import (
 func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *testing.T) {
 	versions := []int{CtfSchemaMigrationVersion(), NetworkPingTargetEvidenceSchemaMigrationVersion(),
 		NetworkExtenderAddressPortsSchemaMigrationVersion(), CtfAwardNetworkMigrationVersion(),
-		StLedgerV2ExtenderMigrationVersion(), CompetitionDistributedReevaluationMigrationVersion()}
+		StLedgerV2ExtenderMigrationVersion(), SolanaReceiverSweepCursorVersion(),
+		CompetitionDistributedReevaluationMigrationVersion()}
 	for index, version := range versions {
 		if version < 1 || index > 0 && version != versions[index-1]+1 {
 			t.Fatal("captured published migration tail was moved, omitted or overwritten", versions)
@@ -22,7 +23,7 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 	if versions[len(versions)-1] != MigrationCount() {
 		t.Fatal("local recovery must follow the entire captured origin tail", versions, MigrationCount())
 	}
-	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], MigrationCount())
+	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], MigrationCount())
 }
 
 // Deleting only each explicit addition recovers the complete reviewed old

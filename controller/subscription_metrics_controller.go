@@ -85,6 +85,20 @@ var subscriptionMetricsDataPackBytesDesc = prometheus.NewDesc(
 	nil,
 )
 
+var subscriptionMetricsUncreditedPaymentsDesc = prometheus.NewDesc(
+	"urnetwork_subscription_payments_uncredited",
+	"Payments received at least the snapshot's minimum age ago (30 minutes by default) that no credit consumed, per rail: a USDC payment into a Solana receiver that bought nothing (usdc_solana), a crypto rail receipt not credited (seen, confirmed or held for review), a Pay with Gamma charge spent but not credited (gamma).",
+	[]string{"rail"},
+	nil,
+)
+
+var subscriptionMetricsUncreditedOldestAgeDesc = prometheus.NewDesc(
+	"urnetwork_subscription_payments_uncredited_oldest_age_seconds",
+	"Age of the oldest payment counted in urnetwork_subscription_payments_uncredited, per rail that has one.",
+	[]string{"rail"},
+	nil,
+)
+
 var subscriptionMetricsSnapshotTimestampDesc = prometheus.NewDesc(
 	"urnetwork_subscription_snapshot_timestamp_seconds",
 	"Unix time when this Taskworker completed the complete privacy-safe subscription metrics snapshot.",
@@ -102,6 +116,8 @@ var subscriptionMetricsDescs = []*prometheus.Desc{
 	subscriptionMetricsReconciliationSourceTimestampDesc,
 	subscriptionMetricsDataPackFulfillmentsDesc,
 	subscriptionMetricsDataPackBytesDesc,
+	subscriptionMetricsUncreditedPaymentsDesc,
+	subscriptionMetricsUncreditedOldestAgeDesc,
 	subscriptionMetricsSnapshotTimestampDesc,
 }
 
@@ -295,6 +311,24 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 					window,
 				),
 			)
+		}
+	}
+
+	// every rail, zero included; an age only where a payment waits
+	for _, rail := range model.SubscriptionMetricsUncreditedRails() {
+		metrics = append(metrics, prometheus.MustNewConstMetric(
+			subscriptionMetricsUncreditedPaymentsDesc,
+			prometheus.GaugeValue,
+			float64(snapshot.UncreditedPayments[rail]),
+			rail,
+		))
+		if 0 < snapshot.UncreditedPayments[rail] {
+			metrics = append(metrics, prometheus.MustNewConstMetric(
+				subscriptionMetricsUncreditedOldestAgeDesc,
+				prometheus.GaugeValue,
+				float64(snapshot.UncreditedOldestAgeSeconds[rail]),
+				rail,
+			))
 		}
 	}
 

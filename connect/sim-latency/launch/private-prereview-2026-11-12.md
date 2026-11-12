@@ -164,7 +164,71 @@ original preserved response without another inference call or modification of
 the original failure receipt. Gemma's local rejection also remains under
 diagnosis. Other scopes remain held pending these checks.
 
+The narrow offline validator subsequently passed 75 ordinary and 75 race-test
+executions. Its first build's compiler succeeded, but a post-build check wrongly
+expected linker flags in `go version -m` despite `-trimpath`; that actor failure
+remains preserved. A separately reviewed passive ELF inspector passed 21 ordinary
+and 21 race tests and verified the original binary's exact source-hash binding
+without executing it. The original binary was not rebuilt.
+
+The network-disabled offline Qwen validation then succeeded, with original
+request/response/receipt hashes unchanged. Its separate receipt is
+`706f503960bf354ad2032442bc4323e91d5c30aa7e6b76c54a679e6ae1c74125`.
+It validates only the supplied partial scope and records the remaining source,
+instrument, transitive-context and paired-review obligations. The original local
+failure receipt still says invalid; neither that receipt nor Gemma's rejected
+response was rewritten. A separate Qwen scoring-instrument response subsequently
+completed but named `canonical.patch` as a production code path. That is evidence,
+not product code: this response remains rejected without filtering, rewriting or
+rerunning it. Other prepared scopes remain unstarted pending a prospectively
+stricter renderer with explicit production-path choices.
+
 These are private, nonfinal observations, not submission approvals, complete
 honesty reviews, or authority to elect, reward or promote a candidate. No
-candidate patch was executed by this review tooling. Protected result
-publication and full-source paired review remain unfinished.
+candidate patch was executed by this review tooling. Full-source paired review
+and protected archival of the separate offline validation remain unfinished.
+
+At 22:06 UTC, the original Qwen execution-run call's eight original evidence
+leaves and manifest were successfully archived privately in MinIO, with exact
+version readback, digest verification and COMPLIANCE retention through
+2028-01-01. Manifest version: `8bfc2240-7c74-460a-a1e1-56f52c873b76`;
+local publication receipt SHA-256:
+`931b60a762f97f7414f977853d5e36d67107df74f7be3fa49b3eefeb65e168ff`.
+Actor, resource guard and original-file capture all completed successfully.
+The original failed-validation flag remains unchanged. This archives provenance,
+not an approval, and grants no election, reward or source-promotion authority.
+Durable private operational evidence is retained at
+`/var/lib/urnetwork/competition-prereview-protected-original-20261112.peSJpxpS`.
+
+## Full-source expansion requirements
+
+First-file observations are a provider/protocol pilot, not the requested review
+of every eligible submission. The next planner must derive a private coverage
+ledger from the authenticated export inventory, not from whichever passes
+happen to succeed. Each obligation binds the job, patch and source-lock digests,
+model member/revision, source path/blob digest, supplied content range and
+relevant changed hunks. Complete-file and patch-hunk-only evidence are different
+provenance classes; neither can silently stand in for the other.
+
+Batch complete changed files within tokenizer-verified budgets, including the
+candidate changes and needed callers/helpers. If a file cannot fit, prospectively
+define bounded ranges with complete changed-hunk coverage and enclosing
+declaration context; retain unresolved cross-range dependencies explicitly.
+Do not silently truncate source or treat source-census hashes as observed code.
+Instrument-only passes may be shared only as immutable factual context with
+exact source identity, never as another candidate's honesty judgment.
+
+Collect each model's missing-context requests into a union and retrieve those
+files only from the frozen repository commits. Continue until every required
+changed-source obligation and material transitive dependency is covered, or
+report the review incomplete. A final per-candidate synthesis must see the
+paired evidence, all disagreements and unresolved findings, and the six
+criteria plus traffic-preservation and production-benefit checks. Findings from
+either member remain present; a pass from the other does not erase them.
+
+Before scheduling more inference, the planner and completion checker need
+deterministic controls for omitted files/hunks, duplicate credit, wrong model
+or source digest, partial-versus-complete provenance, unresolved dependencies,
+failed/incomplete provider output and changes to the eligible-job inventory.
+Persist immutable progress so reconnecting does not repeat completed calls.
+Protected archival failure retries archival only, never model execution.

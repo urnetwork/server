@@ -32,6 +32,7 @@ const (
 
 var stripeVerifyTestNow = time.Unix(stripeVerifyTestPeriodStart, 0).UTC().Add(10 * time.Minute)
 
+// The fake Stripe api's objects and what the seams observed.
 type stripeVerifyTestEnv struct {
 	stateLock     sync.Mutex
 	sessions      map[string]map[string]any
@@ -58,6 +59,7 @@ type stripeVerifyTestEnv struct {
 	rateLimitCalls int
 }
 
+// A fake Stripe api and the endpoint's seams, restored when the test ends.
 func newStripeVerifyTestEnv(t *testing.T) *stripeVerifyTestEnv {
 	env := &stripeVerifyTestEnv{
 		sessions:          map[string]map[string]any{},
@@ -186,6 +188,7 @@ func newStripeVerifyTestEnv(t *testing.T) *stripeVerifyTestEnv {
 	return env
 }
 
+// A signed-in session of the network.
 func stripeVerifyTestSession(networkId server.Id) *session.ClientSession {
 	return session.NewLocalClientSession(context.Background(), "127.0.0.1:1", &session.ByJwt{
 		NetworkId: networkId,
@@ -239,6 +242,7 @@ func (self *stripeVerifyTestEnv) setInvoice(invoiceId string, networkId server.I
 	}
 }
 
+// The charge that paid an invoice, with what it gave back.
 func (self *stripeVerifyTestEnv) setCharge(chargeId string, amount int64, refunded int64, disputed bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -252,6 +256,7 @@ func (self *stripeVerifyTestEnv) setCharge(chargeId string, amount int64, refund
 	}
 }
 
+// A subscription the payment sheet created for the network.
 func (self *stripeVerifyTestEnv) setPaymentSheetSubscription(subscriptionId string, networkId server.Id, status string, paymentSheet string, defaultPaymentMethod string, latestInvoiceId string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -274,6 +279,7 @@ func (self *stripeVerifyTestEnv) setPaymentSheetSubscription(subscriptionId stri
 	}
 }
 
+// Fails unless the endpoint answered status without an error.
 func requireVerifyStatus(t *testing.T, name string, result *VerifyStorePurchaseResult, err error, status string) {
 	t.Helper()
 	if err != nil {

@@ -996,6 +996,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the SN25 extender pool's tables and epoch row columns, versioned by
 	// their position
 	[]snMainnetMigrationContract{stLedgerV2ExtenderMigrationContract},
+	// the Solana receiver sweep's cursor, versioned by its position
+	[]snMainnetMigrationContract{solanaReceiverSweepCursorMigrationContract},
 	// Exact closure, cycle transition and inherited legacy/source custody.
 	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract},
 )
