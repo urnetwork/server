@@ -36,6 +36,23 @@
   "external_dependency_evidence": "/dev/shm/competition-prefix-dependency-proof-20261112.XBHxfr3c",
   "race_qualification_complete": true,
   "qualification_complete": true,
+  "staged_release": {
+    "created_at": "2026-11-12T02:21:51.551878646Z",
+    "root": "/usr/local/libexec/urnetwork/competition-worker-heartbeat-prefix-50d34a8b8-go1274-20261112-v1",
+    "binary_sha256": "5ae30360eb164ca3c4928ae6ec83dddcca27a21764991019c7cbc1e1ec0c5d78",
+    "image_digest": "sha256:8f4b4edcf4184e3ef214e98dde127cbe3f37a4be6fe7de00848120e50730dbea",
+    "distribution_archive_sha256": "0a13e32948e1ba1149164251890619d568eddb20f347a895dfe840a9e278d552",
+    "image_worker_bytes_match_native": true,
+    "external_dependencies_rechecked_before_and_after_build": true,
+    "wrapper_sha256": "93e54523fd86775be424aa26bc9253d7d69b26ad18b32d2e65c108e040e487c6",
+    "candidate_override_sha256": "fd93b58c0674226036ef30a5e977b6d4c35281b35ca1e9a93626a07337fca192",
+    "root_receipt_sha256": "a9ce6a05b511cd03fa65412d8031fc266a702cc87c2effd0c30d71429ac4b34f",
+    "runtime_override_installed": false,
+    "service_reloaded": false,
+    "service_restarted": false,
+    "original_worker_still_running_verified": true,
+    "systemd_need_daemon_reload": false
+  },
   "deployed": false,
-  "remaining": "Build/stage this exact qualified source. Worker activation still requires the authorized idle maintenance boundary. No scoring/source/baseline policy or original submission deadline changes. A separately reviewed final-slot retry-cap follow-up is not part of this qualified source."
+  "remaining": "Activate only at the authorized idle maintenance boundary. No scoring/source/baseline policy or original submission deadline changes. A separately reviewed final-slot retry-cap follow-up is not part of this qualified source."
 }
