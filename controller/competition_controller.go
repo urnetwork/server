@@ -7126,6 +7126,8 @@ type Worker struct {
 	// Nil preserves final persistence; tests withdraw parent authority here.
 	evaluationCompletionForTest func()
 	heartbeatSettings           competitionHeartbeatSettings
+	// Nil retains the idle owner's defaults; tests own cleanup cancellation.
+	idleHeartbeatSettings *competitionIdleHostHeartbeatSettings
 	// Only a successful actual host registration can move this conservative
 	// freshness bound. Job lease acknowledgements never refresh it.
 	confirmedHostLeaseExpiresAt time.Time
@@ -7165,7 +7167,10 @@ func newWorkerWithImageDigest(
 	}, nil
 }
 
-func (self *Worker) Run(ctx context.Context) error {
+// Idle round/runtime/admission reads never own host-refresh progress. Each idle
+// child is joined before baseline preparation or the existing job heartbeat
+// takes over; no request manufactures containment or changes execution clocks.
+func (self *Worker) Run(ctx context.Context) (resultErr error) {
 	if err := requireConfiguredCompetitionRuntime(ctx, self.settings, self.store); err != nil {
 		return err
 	}
@@ -7173,23 +7178,42 @@ func (self *Worker) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	hostTicker := time.NewTicker(time.Duration(self.settings.WorkerHeartbeatSeconds) * time.Second)
-	defer hostTicker.Stop()
 	pollTicker := time.NewTicker(self.pollEvery)
 	defer pollTicker.Stop()
-	pollTick, hostTick := pollTicker.C, hostTicker.C
+	pollTick := pollTicker.C
 	if self.pollTickForTest != nil {
 		pollTick = self.pollTickForTest
 	}
-	if self.hostTickForTest != nil {
-		hostTick = self.hostTickForTest
+	workCtx, cancelWork := context.WithCancelCause(ctx)
+	defer cancelWork(nil)
+	var idle *competitionIdleHostHeartbeat
+	startIdle := func() error {
+		if idle != nil {
+			return nil
+		}
+		var err error
+		idle, err = newCompetitionIdleHostHeartbeat(workCtx, cancelWork, self, hostCheck, self.confirmedHostLeaseExpiresAt)
+		return err
 	}
+	stopIdle := func() error {
+		if idle == nil {
+			return nil
+		}
+		latest, confirmed, err := idle.stop()
+		idle = nil
+		hostCheck, self.confirmedHostLeaseExpiresAt = latest, confirmed
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, stopIdle()) }()
 
 	for {
-		if err := requireConfiguredCompetitionRuntime(ctx, self.settings, self.store); err != nil {
+		if err := startIdle(); err != nil {
 			return err
 		}
-		finished, err := self.finishEpoch(ctx)
+		if err := requireConfiguredCompetitionRuntime(workCtx, self.settings, self.store); err != nil {
+			return err
+		}
+		finished, err := self.finishEpoch(workCtx)
 		if err != nil && !errors.Is(err, ErrAutomationHeld) {
 			return fmt.Errorf("finish competition epoch: %w", err)
 		}
@@ -7198,7 +7222,13 @@ func (self *Worker) Run(ctx context.Context) error {
 		}
 		var job *queuedJob
 		if err == nil {
-			job, err = self.claimWithPreparedRoundBaseline(ctx, hostCheck)
+			hostCheck = idle.latest()
+			job, err = self.claimWithPreparedRoundBaselineOwned(workCtx, hostCheck, func() (HostSelfCheck, error) {
+				// Only a genuinely reserved producer transfers ownership. Ordinary
+				// polls retain one ticker even with a configured baseline profile.
+				err := stopIdle()
+				return hostCheck, err
+			})
 		}
 		// An authorized grading pause is idle, not worker death. Keep genuine
 		// self-check/host heartbeats alive without claiming or evaluating work.
@@ -7206,38 +7236,36 @@ func (self *Worker) Run(ctx context.Context) error {
 			return fmt.Errorf("claim competition job: %w", err)
 		}
 		if job != nil {
-			if err := self.evaluateOne(ctx, job, hostCheck); err != nil {
+			if err := stopIdle(); err != nil {
 				return err
 			}
-			fresh, checkErr := self.selfCheck(ctx)
+			if err := workCtx.Err(); err != nil {
+				return context.Cause(workCtx)
+			}
+			if err := self.evaluateOne(workCtx, job, hostCheck); err != nil {
+				return err
+			}
+			fresh, checkErr := self.selfCheck(workCtx)
 			if checkErr != nil {
-				if fresh.HostId != "" {
+				if competitionFailedHostCheckCanInvalidate(self.settings, fresh) {
 					_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, fresh)
 				}
 				return fmt.Errorf("competition evaluator lost self-check after job: %w", checkErr)
 			}
-			if err := self.registerHost(ctx, fresh); err != nil {
+			if err := self.registerHost(workCtx, fresh); err != nil {
 				return fmt.Errorf("refresh evaluator host after job: %w", err)
 			}
 			hostCheck = fresh
 			continue
 		}
+		if err := startIdle(); err != nil {
+			return err
+		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-workCtx.Done():
+			return context.Cause(workCtx)
 		case <-pollTick:
-		case <-hostTick:
-			fresh, checkErr := self.selfCheck(ctx)
-			if checkErr != nil {
-				if fresh.HostId != "" {
-					_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, fresh)
-				}
-				return fmt.Errorf("competition evaluator lost self-check: %w", checkErr)
-			}
-			if err := self.registerHost(ctx, fresh); err != nil {
-				return fmt.Errorf("refresh evaluator host: %w", err)
-			}
-			hostCheck = fresh
+		case <-idle.updated:
 		}
 	}
 }
@@ -7253,7 +7281,7 @@ func (self *Worker) Preflight(ctx context.Context) error {
 func (self *Worker) preflight(ctx context.Context) (HostSelfCheck, error) {
 	hostCheck, err := self.selfCheck(ctx)
 	if err != nil {
-		if hostCheck.HostId != "" {
+		if competitionFailedHostCheckCanInvalidate(self.settings, hostCheck) {
 			_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, hostCheck)
 		}
 		return hostCheck, fmt.Errorf("competition evaluator self-check: %w", err)
