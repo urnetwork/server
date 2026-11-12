@@ -347,11 +347,30 @@ type snClaimRelayChain interface {
 // snClaimRelayLedger reads the accounts of the latest finalized root of each of
 // the operator's pools, each pool on its own.
 type snClaimRelayLedger interface {
-	// Accounts are a pool's accounts once it has a finalized, recorded root,
-	// by pool and index. A pool whose ledger cannot be read is left out and
-	// named in unavailable; err says that no pool could be read.
-	Accounts(ctx context.Context) (accounts []*snClaimRelayAccount, unavailable []uint64, err error)
+	// Accounts are each pool's accounts once it has a finalized, recorded
+	// root, by pool and index. A pool whose ledger cannot be read is left out
+	// and named in the read; err says that no pool could be read.
+	Accounts(ctx context.Context) (*snClaimRelayLedgerRead, error)
 	Proof(ctx context.Context, account *snClaimRelayAccount) ([]merkle.LedgerNode, error)
+}
+
+// snClaimRelayLedgerRead is one pass's read of the operator's pools.
+type snClaimRelayLedgerRead struct {
+	Accounts []*snClaimRelayAccount
+	// the pools whose ledger could not be read, by no_id
+	Unavailable []uint64
+	// the coldkeys the account index records in those pools; nil when the
+	// index could not be read either, so that any coldkey may hold one there
+	UnavailableColdkeys map[[32]byte]bool
+}
+
+// mayHold reports whether a coldkey may have an account the pass could not
+// read.
+func (self *snClaimRelayLedgerRead) mayHold(coldkey [32]byte) bool {
+	if len(self.Unavailable) == 0 {
+		return false
+	}
+	return self.UnavailableColdkeys == nil || self.UnavailableColdkeys[coldkey]
 }
 
 // snClaimRelayRequest is one unfinished Claim now.
@@ -479,6 +498,13 @@ func (self *snClaimRelay) pass(ctx context.Context) *SnClaimRelayStatus {
 		status.Refusals = snClaimRelayLiveRefusals(previous.Refusals, now)
 	}
 	self.run(ctx, now, status)
+	// A pool that cannot be read is a fault even while the others are claimed,
+	// so a pass that would end running says the ledger is unavailable, as one
+	// that could read no pool does, and names the pools.
+	if status.State == SnClaimRelayStateRunning && 0 < len(status.UnavailablePools) {
+		status.State = SnClaimRelayStateLedgerUnavailable
+		status.Detail = fmt.Sprintf("the ledger of pools %v cannot be read; the other pools are claimed", status.UnavailablePools)
+	}
 	snClaimRelayLimitRefusals(status)
 	self.publish(ctx, status)
 	return status
@@ -524,22 +550,22 @@ func (self *snClaimRelay) run(ctx context.Context, now time.Time, status *SnClai
 	// what a transaction reconciled above paid, whatever this pass does next
 	self.recordPaid(ctx, spend)
 
-	accounts, unavailable, err := self.ledger.Accounts(ctx)
+	read, err := self.ledger.Accounts(ctx)
 	if err != nil {
 		status.State, status.Detail = SnClaimRelayStateLedgerUnavailable, err.Error()
 		return
 	}
-	if 0 < len(unavailable) {
-		status.UnavailablePools = unavailable
-		glog.Infof("[sn]claim relay pools %v are unavailable this pass; the others are claimed\n", unavailable)
+	if 0 < len(read.Unavailable) {
+		status.UnavailablePools = read.Unavailable
+		glog.Infof("[sn]claim relay pools %v are unavailable this pass; the others are claimed\n", read.Unavailable)
 	}
 	batching := chain.Batching(ctx)
 	status.Batching = batching
 	// A request ends once every account of its coldkey is settled, whatever
 	// the pass does next.
-	taps := newSnClaimRelayTaps(0 < len(unavailable))
+	taps := newSnClaimRelayTaps()
 	defer self.finishTaps(ctx, taps)
-	groups := self.candidates(ctx, accounts, facts, batching, taps, status)
+	groups := self.candidates(ctx, read, facts, batching, taps, status)
 
 	budget := new(big.Int).Sub(snClaimRelayDailyCapWei, spend.SpentWei)
 	planned := snClaimRelayWorstCase(snClaimRelayPlanningGasLimit, facts.FeeCapWei)
@@ -602,21 +628,25 @@ type snClaimRelayTaps struct {
 	// the relay paid a tapped claim of the coldkey it would not have sent by
 	// itself
 	limit map[[32]byte]bool
-	// a pool could not be read, so a coldkey may have accounts the pass cannot
-	// see: no request ends
-	partial bool
+	// the coldkey may have an account in a pool the pass could not read, so
+	// its request does not end
+	blocked map[[32]byte]bool
 }
 
-func newSnClaimRelayTaps(partial bool) *snClaimRelayTaps {
-	return &snClaimRelayTaps{open: map[[32]byte]map[string]bool{}, limit: map[[32]byte]bool{}, partial: partial}
+func newSnClaimRelayTaps() *snClaimRelayTaps {
+	return &snClaimRelayTaps{open: map[[32]byte]map[string]bool{}, limit: map[[32]byte]bool{}, blocked: map[[32]byte]bool{}}
 }
 
-func (self *snClaimRelayTaps) add(claim *snClaimRelayClaim) {
-	coldkey := claim.Account.Coldkey
+// request follows a requested coldkey through the pass.
+func (self *snClaimRelayTaps) request(coldkey [32]byte, blocked bool) {
 	if self.open[coldkey] == nil {
 		self.open[coldkey] = map[string]bool{}
 	}
-	self.open[coldkey][claim.Account.key()] = true
+	self.blocked[coldkey] = blocked
+}
+
+func (self *snClaimRelayTaps) add(claim *snClaimRelayClaim) {
+	self.open[claim.Account.Coldkey][claim.Account.key()] = true
 }
 
 func (self *snClaimRelayTaps) settle(claim *snClaimRelayClaim) {
@@ -641,7 +671,7 @@ func (self *snClaimRelayTaps) paid(claim *snClaimRelayClaim) {
 func (self *snClaimRelay) finishTaps(ctx context.Context, taps *snClaimRelayTaps) {
 	for coldkey, open := range taps.open {
 		switch {
-		case len(open) == 0 && !taps.partial:
+		case len(open) == 0 && !taps.blocked[coldkey]:
 			self.requests.Finish(ctx, coldkey, taps.limit[coldkey])
 		case taps.limit[coldkey]:
 			self.requests.Limit(ctx, coldkey)
@@ -668,11 +698,14 @@ func (self *snClaimRelay) applySpend(status *SnClaimRelayStatus, spend *snClaimR
 // other accounts of its coldkey above the floor when the relay batches, since
 // one of them is due. A request with nothing above the floor is given back, so
 // a claim under it is never sent.
-func (self *snClaimRelay) candidates(ctx context.Context, accounts []*snClaimRelayAccount, facts *snClaimRelayFacts, batching bool, taps *snClaimRelayTaps, status *SnClaimRelayStatus) [][]*snClaimRelayClaim {
+func (self *snClaimRelay) candidates(ctx context.Context, read *snClaimRelayLedgerRead, facts *snClaimRelayFacts, batching bool, taps *snClaimRelayTaps, status *SnClaimRelayStatus) [][]*snClaimRelayClaim {
 	// a coldkey's accounts, by pool and index as the ledger reads them
 	coldkeyAccounts := map[[32]byte][]*snClaimRelayAccount{}
-	for _, account := range accounts {
+	for _, account := range read.Accounts {
 		coldkeyAccounts[account.Coldkey] = append(coldkeyAccounts[account.Coldkey], account)
+	}
+	over := func(account *snClaimRelayAccount) bool {
+		return snClaimRelayOverThreshold(snClaimRelayValueTaoRao(account.claimable(), facts.AlphaPriceWei))
 	}
 	clearsFloor := func(account *snClaimRelayAccount) bool {
 		claimable := account.claimable()
@@ -685,6 +718,8 @@ func (self *snClaimRelay) candidates(ctx context.Context, accounts []*snClaimRel
 			self.requests.Finish(ctx, request.Coldkey, false)
 			continue
 		}
+		blocked := read.mayHold(request.Coldkey)
+		taps.request(request.Coldkey, blocked)
 		group := []*snClaimRelayClaim{}
 		for _, account := range coldkeyAccounts[request.Coldkey] {
 			// paid, by this relay or anyone else, or under the floor
@@ -697,19 +732,30 @@ func (self *snClaimRelay) candidates(ctx context.Context, accounts []*snClaimRel
 			group = append(group, claim)
 		}
 		if len(group) == 0 {
-			if !taps.partial {
+			if !blocked {
 				self.requests.Finish(ctx, request.Coldkey, false)
 			}
 			continue
 		}
+		// a due account first, so that a claim that has to go alone is one
+		// the relay would have sent by itself
+		slices.SortStableFunc(group, func(a, b *snClaimRelayClaim) int {
+			switch {
+			case over(a.Account) && !over(b.Account):
+				return -1
+			case !over(a.Account) && over(b.Account):
+				return 1
+			}
+			return 0
+		})
 		groups = append(groups, group)
 	}
 	due := []*snClaimRelayAccount{}
-	for _, account := range accounts {
+	for _, account := range read.Accounts {
 		if placed[account.key()] || self.banned(account.Coldkey) {
 			continue
 		}
-		if snClaimRelayOverThreshold(snClaimRelayValueTaoRao(account.claimable(), facts.AlphaPriceWei)) {
+		if over(account) {
 			due = append(due, account)
 		}
 	}
@@ -736,7 +782,7 @@ func (self *snClaimRelay) candidates(ctx context.Context, accounts []*snClaimRel
 					continue
 				}
 				placed[other.key()] = true
-				group = append(group, &snClaimRelayClaim{Account: other, Companion: !snClaimRelayOverThreshold(snClaimRelayValueTaoRao(other.claimable(), facts.AlphaPriceWei))})
+				group = append(group, &snClaimRelayClaim{Account: other, Companion: !over(other)})
 			}
 		}
 		groups = append(groups, group)
@@ -759,6 +805,8 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 		claimsPerTransaction = snClaimRelayBatchMaximum
 	}
 	kept := []*snClaimRelayClaim{}
+	// where each kept group ends in kept
+	groupEnds := []int{}
 	estimates := uint64(0)
 	preflights := 0
 	for index, group := range groups {
@@ -772,7 +820,7 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 		if !batching {
 			most = 1
 		}
-		verified, rest, stop := self.verify(ctx, chain, group, most, facts, batching, now, &preflights, taps, status)
+		verified, rest, stop := self.verify(ctx, chain, group, most, facts, now, &preflights, taps, status)
 		if stop {
 			return nil, false
 		}
@@ -799,6 +847,7 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 			}
 		}
 		kept = append(kept, verified...)
+		groupEnds = append(groupEnds, len(kept))
 		for _, claim := range verified {
 			estimates += claim.Estimate
 		}
@@ -810,7 +859,8 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 	if len(kept) == 0 {
 		return nil, more
 	}
-	return self.transaction(ctx, chain, kept, facts, funds), more || 1 < len(kept)
+	send = self.transaction(ctx, chain, kept, groupEnds, facts, funds)
+	return send, more || len(send.Claims) < len(kept)
 }
 
 // verify reads up to most of a group's claims against the chain and returns
@@ -818,10 +868,7 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 // past most were left for a later pass. A companion goes only with a due
 // account of its coldkey, so without one the group sends nothing. stop says the
 // pass ends, and the status says why.
-func (self *snClaimRelay) verify(ctx context.Context, chain snClaimRelayChain, group []*snClaimRelayClaim, most int, facts *snClaimRelayFacts, batching bool, now time.Time, preflights *int, taps *snClaimRelayTaps, status *SnClaimRelayStatus) (verified []*snClaimRelayClaim, rest bool, stop bool) {
-	over := func(claim *snClaimRelayClaim) bool {
-		return snClaimRelayOverThreshold(snClaimRelayValueTaoRao(claim.Account.claimable(), facts.AlphaPriceWei))
-	}
+func (self *snClaimRelay) verify(ctx context.Context, chain snClaimRelayChain, group []*snClaimRelayClaim, most int, facts *snClaimRelayFacts, now time.Time, preflights *int, taps *snClaimRelayTaps, status *SnClaimRelayStatus) (verified []*snClaimRelayClaim, rest bool, stop bool) {
 	for _, candidate := range group {
 		if most <= len(verified) {
 			rest = true
@@ -883,26 +930,44 @@ func (self *snClaimRelay) verify(ctx context.Context, chain snClaimRelayChain, g
 	if !slices.ContainsFunc(verified, func(claim *snClaimRelayClaim) bool { return !claim.Companion }) {
 		return nil, rest, false
 	}
-	// A tapped claim the relay would have sent by itself uses nothing up: one
-	// over the threshold, or one under it that goes with a due account of its
-	// coldkey in the same batch.
-	due := slices.ContainsFunc(verified, over)
-	for _, claim := range verified {
-		claim.UnderThreshold = !over(claim) && !(batching && due)
-	}
+	// The group's first claim is the one that goes alone when a batch cannot,
+	// so it is never a companion.
+	slices.SortStableFunc(verified, func(a, b *snClaimRelayClaim) int {
+		switch {
+		case !a.Companion && b.Companion:
+			return -1
+		case a.Companion && !b.Companion:
+			return 1
+		}
+		return 0
+	})
 	return verified, rest, false
 }
 
 // transaction is a batch of the kept claims when a batcher is usable and at
-// least two fit the funds, or the first alone. A batch names its gas limit: the
-// most it can cost is checked against the funds before it is sent.
-func (self *snClaimRelay) transaction(ctx context.Context, chain snClaimRelayChain, kept []*snClaimRelayClaim, facts *snClaimRelayFacts, funds *big.Int) *snClaimRelaySend {
+// least two fit the funds, or the first alone. A batch ends where a group ends,
+// so that a coldkey's claims go together or wait together, and a claim that has
+// to go alone is the first of its group: a due or tapped account, never a
+// companion. A batch names its gas limit: the most it can cost is checked
+// against the funds before it is sent.
+func (self *snClaimRelay) transaction(ctx context.Context, chain snClaimRelayChain, kept []*snClaimRelayClaim, groupEnds []int, facts *snClaimRelayFacts, funds *big.Int) *snClaimRelaySend {
+	// the longest run of whole groups of at most count claims
+	whole := func(count int) int {
+		end := 0
+		for _, groupEnd := range groupEnds {
+			if groupEnd <= count {
+				end = groupEnd
+			}
+		}
+		return end
+	}
 	claims := kept
 	gasPerClaim := uint64(0)
 	for _, claim := range kept {
 		gasPerClaim = max(gasPerClaim, snClaimRelayGasLimit(claim.Estimate))
 	}
-	for 2 <= len(claims) {
+	var send *snClaimRelaySend
+	for send == nil && 2 <= len(claims) {
 		batch, err := chain.SizeBatch(ctx, claims, gasPerClaim)
 		if err != nil {
 			glog.Infof("[sn]claim relay batch of %d is not ready, claiming alone: %s\n", len(claims), err)
@@ -911,17 +976,38 @@ func (self *snClaimRelay) transaction(ctx context.Context, chain snClaimRelayCha
 		if batch == nil || batch.Count < 2 {
 			break
 		}
+		if end := whole(batch.Count); end < batch.Count {
+			// the batcher fits part of a group: size the whole groups again
+			claims = claims[:end]
+			continue
+		}
 		liability := snClaimRelayWorstCase(batch.GasLimit, facts.FeeCapWei)
 		if liability.Cmp(funds) <= 0 {
-			return &snClaimRelaySend{To: batch.To, Calldata: batch.Calldata, GasLimit: batch.GasLimit, Claims: claims[:batch.Count], Batch: true}
+			send = &snClaimRelaySend{To: batch.To, Calldata: batch.Calldata, GasLimit: batch.GasLimit, Claims: claims[:batch.Count], Batch: true}
+			break
 		}
 		// As many as fit by this size's cost a claim, and one fewer at least.
 		fit := new(big.Int).Quo(new(big.Int).Mul(funds, big.NewInt(int64(batch.Count))), liability).Int64()
-		claims = claims[:min(int(fit), batch.Count-1)]
+		claims = claims[:whole(min(int(fit), batch.Count-1))]
 	}
-	first := kept[0]
-	to, calldata := chain.Claim(first)
-	return &snClaimRelaySend{To: to, Calldata: calldata, GasLimit: snClaimRelayGasLimit(first.Estimate), Claims: []*snClaimRelayClaim{first}}
+	if send == nil {
+		first := kept[0]
+		to, calldata := chain.Claim(first)
+		send = &snClaimRelaySend{To: to, Calldata: calldata, GasLimit: snClaimRelayGasLimit(first.Estimate), Claims: []*snClaimRelayClaim{first}}
+	}
+	// A tapped claim the relay would have sent by itself uses nothing up: one
+	// over the threshold, or one under it that goes in this batch with a due
+	// account of its coldkey.
+	over := func(claim *snClaimRelayClaim) bool {
+		return snClaimRelayOverThreshold(snClaimRelayValueTaoRao(claim.Account.claimable(), facts.AlphaPriceWei))
+	}
+	for _, claim := range send.Claims {
+		withDue := send.Batch && slices.ContainsFunc(send.Claims, func(other *snClaimRelayClaim) bool {
+			return other != claim && other.Account.Coldkey == claim.Account.Coldkey && over(other)
+		})
+		claim.UnderThreshold = !over(claim) && !withDue
+	}
+	return send
 }
 
 func (self *snClaimRelay) refuse(account *snClaimRelayAccount, reason string, now time.Time, wait time.Duration, status *SnClaimRelayStatus) {

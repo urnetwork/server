@@ -219,9 +219,19 @@ func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, ent
 	refusal := status.Refusals[snClaimRelayAccountKey(entry.NoId, entry.Index)]
 	refused := refusal != nil && now.Before(refusal.Until)
 	class := snClaimRelayClassOf(status.State)
-	// a pool the relay could not read this pass waits, as a paused relay does
-	if class == snClaimRelayClassMoving && slices.Contains(status.UnavailablePools, entry.NoId) {
-		class = snClaimRelayClassPaused
+	if 0 < len(status.UnavailablePools) {
+		switch {
+		case slices.Contains(status.UnavailablePools, entry.NoId):
+			// a pool the relay could not read this pass waits, as a paused
+			// relay does
+			if class == snClaimRelayClassMoving || status.State == SnClaimRelayStateLedgerUnavailable {
+				class = snClaimRelayClassPaused
+			}
+		case status.State == SnClaimRelayStateLedgerUnavailable:
+			// the pass said the ledger is unavailable for another pool's
+			// sake: this pool's accounts are claimed
+			class = snClaimRelayClassMoving
+		}
 	}
 	// claimed with a due account of its coldkey in the same batch
 	companion := withDue && status.Batching && snClaimRelayClearsFloor(value)
@@ -612,9 +622,16 @@ func SnClaimRelayPass(ctx context.Context) *SnClaimRelayPassResult {
 	if status.Detail != "" {
 		glog.Infof("[sn]claim relay state %s: %s\n", status.State, status.Detail)
 	}
-	result := &SnClaimRelayPassResult{State: status.State, Delay: snClaimRelayIdleDelay}
-	if status.Again && status.State == SnClaimRelayStateRunning {
-		result.Delay = snClaimRelayBusyDelay
+	return &SnClaimRelayPassResult{State: status.State, Delay: snClaimRelayNextDelay(status)}
+}
+
+// snClaimRelayNextDelay is when the next pass runs: soon while claims move and
+// more are due, the readable pools' too while another pool cannot be read; else
+// after the idle delay.
+func snClaimRelayNextDelay(status *SnClaimRelayStatus) time.Duration {
+	moving := status.State == SnClaimRelayStateRunning || (status.State == SnClaimRelayStateLedgerUnavailable && 0 < len(status.UnavailablePools))
+	if status.Again && moving {
+		return snClaimRelayBusyDelay
 	}
-	return result
+	return snClaimRelayIdleDelay
 }

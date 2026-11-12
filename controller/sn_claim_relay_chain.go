@@ -43,6 +43,9 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urfoundation/sn/amendment"
+	"github.com/urfoundation/sn/ctf"
+	"github.com/urfoundation/sn/ledger"
 	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/miner/onchain"
 	"github.com/urfoundation/sn/stabi"
@@ -786,30 +789,67 @@ type snClaimRelayCoreLedger struct {
 	cfg *StConfig
 }
 
-func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) ([]*snClaimRelayAccount, []uint64, error) {
-	accounts := []*snClaimRelayAccount{}
-	unavailable := []uint64{}
+func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) (*snClaimRelayLedgerRead, error) {
+	read := &snClaimRelayLedgerRead{Accounts: []*snClaimRelayAccount{}}
+	pools := stLedgerV2OwnPools(self.cfg)
 	var errs []error
-	for _, noId := range stLedgerV2OwnPools(self.cfg) {
+	for _, noId := range pools {
 		var poolAccounts []*snClaimRelayAccount
 		err := stLedgerV2Guard(func() (err error) {
 			poolAccounts, err = self.poolAccounts(ctx, noId)
 			return
 		})
 		if err != nil {
-			unavailable = append(unavailable, noId)
+			read.Unavailable = append(read.Unavailable, noId)
 			errs = append(errs, fmt.Errorf("pool %d: %w", noId, err))
 			continue
 		}
-		accounts = append(accounts, poolAccounts...)
+		read.Accounts = append(read.Accounts, poolAccounts...)
 	}
-	if len(unavailable) == len(stLedgerV2OwnPools(self.cfg)) {
-		return nil, nil, errors.Join(errs...)
+	if len(read.Unavailable) == len(pools) {
+		return nil, errors.Join(errs...)
 	}
 	for _, err := range errs {
 		glog.Infof("[sn]claim relay ledger: %s\n", err)
 	}
-	return accounts, unavailable, nil
+	if 0 < len(read.Unavailable) {
+		// who may hold an account the pass cannot read: the coldkeys the account
+		// index records there; unknown when the index cannot be read either
+		coldkeys := map[[32]byte]bool{}
+		if stLedgerV2Guard(func() error {
+			for _, noId := range read.Unavailable {
+				for _, account := range model.GetStLedgerV2Accounts(ctx, self.cfg.DeploymentKey(), noId) {
+					coldkeys[account.Coldkey] = true
+				}
+			}
+			return nil
+		}) == nil {
+			read.UnavailableColdkeys = coldkeys
+		}
+	}
+	return read, nil
+}
+
+// The carry contract's coldkey a capture the flag ledger names, by ledger hash:
+// a published header never changes.
+var snClaimRelayCarryColdkeys sync.Map
+
+// snClaimRelayCarryColdkey is the carry contract's coldkey that a capture the
+// flag ledger's header names, nil for a ledger of another kind.
+func snClaimRelayCarryColdkey(ctx context.Context, ledgerHash [32]byte) (*[32]byte, error) {
+	if carry, ok := snClaimRelayCarryColdkeys.Load(ledgerHash); ok {
+		return carry.(*[32]byte), nil
+	}
+	data, err := GetStLedgerV2Object(ctx, ledger.Ref(ledgerHash).String())
+	if err != nil {
+		return nil, err
+	}
+	var carry *[32]byte
+	if header, err := ctf.DecodeHeader(data); err == nil {
+		carry = &header.CarryColdkey
+	}
+	snClaimRelayCarryColdkeys.Store(ledgerHash, carry)
+	return carry, nil
 }
 
 // One pool's accounts, empty until it has a finalized root.
@@ -823,6 +863,16 @@ func (self *snClaimRelayCoreLedger) poolAccounts(ctx context.Context, noId uint6
 	if err != nil {
 		return nil, err
 	}
+	// The carry contract's account in a capture the flag pool holds the pots:
+	// its recycle claims it and moves the stake back onto the pool (sn
+	// CAPTURETHEFLAG.md §4.6), and a claim of the relay's would only spend the
+	// day's cap.
+	var carry *[32]byte
+	if _, ctfPool := amendment.CtfNoID(noId); ctfPool {
+		if carry, err = snClaimRelayCarryColdkey(ctx, root.LedgerHash); err != nil {
+			return nil, err
+		}
+	}
 	claimed := model.GetStLedgerV2ClaimedCumulatives(ctx, deploymentKey, noId)
 	indexAccounts := model.GetStLedgerV2Accounts(ctx, deploymentKey, noId)
 	accounts := make([]*snClaimRelayAccount, 0, len(indexAccounts))
@@ -833,6 +883,9 @@ func (self *snClaimRelayCoreLedger) poolAccounts(ctx context.Context, noId uint6
 		leaf := &leaves[indexAccount.Index]
 		if leaf.Coldkey != indexAccount.Coldkey {
 			glog.Errorf("[sn]claim relay account %d of pool %d is another coldkey in root %d\n", indexAccount.Index, noId, *root.RootIndex)
+			continue
+		}
+		if carry != nil && leaf.Coldkey == *carry {
 			continue
 		}
 		account := &snClaimRelayAccount{NoId: noId, Index: indexAccount.Index, RootIndex: *root.RootIndex, Coldkey: leaf.Coldkey, Cumulative: leaf.Cumulative}

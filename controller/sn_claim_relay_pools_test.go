@@ -11,6 +11,7 @@ import (
 	"errors"
 	"math/big"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,41 +227,132 @@ func TestClaimRelayClaimNowOfNothingAboveTheFloorInAnyPool(t *testing.T) {
 	}
 }
 
-// A pool whose ledger cannot be read leaves the other's claims alone, says so
-// in the status, and keeps every request: its accounts there are unknown.
+// A pool whose ledger cannot be read leaves the other's claims alone, and the
+// pass says the ledger is unavailable, naming the pool, so that the stall alert
+// fires. A request stays while its coldkey may hold an account there: the
+// account index records one, or the index cannot be read either.
 func TestClaimRelayOnePoolUnavailable(t *testing.T) {
 	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
 	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
-	world := newClaimRelayWorld(t, over, small)
+	world := newClaimRelayWorld(t, over, small, small)
 	world.batching = true
 	world.addCtf(0, small)
 	world.addCtf(1, small)
 	world.ctfLedgerErr = errors.New("the capture the flag ledger cannot be read")
 	world.tap(1)
+	// coldkey 2 has no account in the capture the flag pool
+	world.tap(2)
 	status := world.passes()
-	requireClaimRelayState(t, status, SnClaimRelayStateRunning)
-	requireClaimRelaySent(t, world, "1/1", "1/0")
+	requireClaimRelayState(t, status, SnClaimRelayStateLedgerUnavailable)
+	if !strings.Contains(status.Detail, "4294967297") {
+		t.Fatalf("detail %q", status.Detail)
+	}
+	sent := world.sentKeys()
+	slices.Sort(sent)
+	if want := []string{"1/0", "1/1", "1/2"}; !slices.Equal(sent, want) {
+		t.Fatalf("sent %v, want %v", sent, want)
+	}
 	if !slices.Equal(status.UnavailablePools, []uint64{claimRelayTestCtfPool}) {
 		t.Fatalf("unavailable %v", status.UnavailablePools)
 	}
 	if _, queued := world.requests[claimRelayTestColdkey(1)]; !queued {
-		t.Fatal("a request ended while a pool could not be read")
+		t.Fatal("a request ended while its coldkey's account in a pool could not be read")
 	}
-	if !world.limited(1) {
-		t.Fatal("the paid tap did not start the limit")
+	if _, queued := world.requests[claimRelayTestColdkey(2)]; queued {
+		t.Fatal("a request with nothing in the unreadable pool stayed")
+	}
+	if !world.limited(1) || !world.limited(2) {
+		t.Fatal("a paid tap did not start its limit")
+	}
+	// claims move at the busy cadence while the other pool cannot be read
+	if delay := snClaimRelayNextDelay(&SnClaimRelayStatus{State: SnClaimRelayStateLedgerUnavailable, UnavailablePools: status.UnavailablePools, Again: true}); delay != snClaimRelayBusyDelay {
+		t.Fatalf("a partial pass waits %s", delay)
+	}
+	if delay := snClaimRelayNextDelay(&SnClaimRelayStatus{State: SnClaimRelayStateLedgerUnavailable, Again: true}); delay != snClaimRelayIdleDelay {
+		t.Fatalf("a pass that read no pool waits %s", delay)
 	}
 
 	// once it can be read again, the rest of the request is claimed
 	world.ctfLedgerErr = nil
-	world.passes()
-	requireClaimRelaySent(t, world, "1/1", "1/0", claimRelayCtfKey(1))
+	requireClaimRelayState(t, world.passes(), SnClaimRelayStateRunning)
+	if sent := world.sentKeys(); sent[len(sent)-1] != claimRelayCtfKey(1) {
+		t.Fatalf("sent %v", sent)
+	}
 	if _, queued := world.requests[claimRelayTestColdkey(1)]; queued {
 		t.Fatal("the request stayed queued")
 	}
 
-	// both pools unavailable is the ledger unavailable
+	// with the index unreadable too, every request waits
+	world.nowTime = world.nowTime.Add(snClaimRelayClaimNowPeriod + time.Hour)
+	world.setLeaves(over, small, small, claimRelayTestAlpha(10*snClaimRelayFloorTaoRao+1))
+	world.ctfLedgerErr, world.indexUnreadable = errors.New("the capture the flag ledger cannot be read"), true
+	world.tap(3)
+	world.passes()
+	if _, queued := world.requests[claimRelayTestColdkey(3)]; !queued {
+		t.Fatal("a request ended though the unreadable pool's holders are unknown")
+	}
+
+	// both pools unavailable is the ledger unavailable, and nothing is read
 	world.ledgerErr = errors.New("the ledger cannot be read")
 	requireClaimRelayState(t, world.pass(), SnClaimRelayStateLedgerUnavailable)
+}
+
+// A batch ends where a group ends: when the batcher fits part of a coldkey's
+// group, the group waits for the next transaction, whole.
+func TestClaimRelayABatchEndsAtAGroupsEnd(t *testing.T) {
+	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	world := newClaimRelayWorld(t, new(uint256.Int).Mul(over, uint256.NewInt(2)), over)
+	world.batching, world.batchMost = true, 2
+	companion := world.addCtf(1, claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
+	world.pass()
+	if len(world.txs) != 1 || world.txs[0].send.Batch || world.txs[0].send.Claims[0].Account.key() != "1/0" {
+		t.Fatalf("first %v", world.sentKeys())
+	}
+	world.pass()
+	second := world.txs[1].send
+	if !second.Batch || len(second.Claims) != 2 || second.Claims[0].Account.key() != "1/1" || second.Claims[1].Account.key() != claimRelayCtfKey(companion) {
+		t.Fatalf("second %v", world.sentKeys())
+	}
+}
+
+// A group that cannot be batched sends its first claim alone, its due account,
+// and its companion is not sent: it is not due.
+func TestClaimRelayACompanionWithoutABatch(t *testing.T) {
+	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	world := newClaimRelayWorld(t, over)
+	world.batching = true
+	world.batchErr = errors.New("the batcher is unavailable")
+	world.addCtf(0, claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
+	world.passes()
+	requireClaimRelaySent(t, world, "1/0")
+}
+
+// A tap whose batch cannot go sends the due account alone first, which uses
+// nothing up; the account under the threshold then goes alone, which the relay
+// would not have sent by itself, so the limit starts when it is paid.
+func TestClaimRelayClaimNowWithoutABatchStartsTheLimitAtTheUnderThresholdClaim(t *testing.T) {
+	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
+	world := newClaimRelayWorld(t, small)
+	world.batching = true
+	world.batchErr = errors.New("the batcher is unavailable")
+	world.addCtf(0, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))
+	world.tap(0)
+	world.pass()
+	requireClaimRelaySent(t, world, claimRelayCtfKey(0))
+	if world.limited(0) {
+		t.Fatal("a due claim sent alone started the limit")
+	}
+	if _, queued := world.requests[claimRelayTestColdkey(0)]; !queued {
+		t.Fatal("the request ended with an account still to claim")
+	}
+	world.passes()
+	requireClaimRelaySent(t, world, claimRelayCtfKey(0), "1/0")
+	if !world.limited(0) {
+		t.Fatal("the tapped claim under the threshold did not start the limit")
+	}
+	if _, queued := world.requests[claimRelayTestColdkey(0)]; queued {
+		t.Fatal("the request stayed queued")
+	}
 }
 
 // The api says why each pool's balance is pending: a companion of a due
@@ -291,13 +383,20 @@ func TestClaimRelayAccountViewOfThePools(t *testing.T) {
 	if account := view(true); account.Reason != SnClaimRelayReasonUnderThreshold {
 		t.Fatalf("with a due account and no batcher: %+v", account)
 	}
-	status.UnavailablePools = []uint64{claimRelayTestCtfPool}
+	// a pass that could not read the capture the flag pool says the ledger is
+	// unavailable: that pool waits, the other is claimed
+	status.State, status.UnavailablePools = SnClaimRelayStateLedgerUnavailable, []uint64{claimRelayTestCtfPool}
 	if account := view(true); account.Reason != SnClaimRelayReasonRelayPaused || account.ClaimNowReason != SnClaimRelayReasonRelayPaused {
 		t.Fatalf("an unavailable pool: %+v", account)
 	}
 	entry.NoId = 1
-	if account := view(false); account.Reason != SnClaimRelayReasonUnderThreshold || account.Kind != StLedgerV2PoolKindPool || account.Label != "Pool 1" {
+	if account := view(false); account.Reason != SnClaimRelayReasonUnderThreshold || !account.ClaimNowAvailable || account.Kind != StLedgerV2PoolKindPool || account.Label != "Pool 1" {
 		t.Fatalf("the operator's pool: %+v", account)
+	}
+	// a ledger unavailable with no pool named pauses every pool
+	status.UnavailablePools = nil
+	if account := view(false); account.Reason != SnClaimRelayReasonRelayPaused {
+		t.Fatalf("the ledger unavailable: %+v", account)
 	}
 }
 

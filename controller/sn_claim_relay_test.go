@@ -97,6 +97,8 @@ type claimRelayWorld struct {
 	// one pool's ledger cannot be read; ledgerErr fails both
 	poolLedgerErr error
 	ctfLedgerErr  error
+	// the account index of a pool that cannot be read cannot be read either
+	indexUnreadable bool
 
 	chainClaimed  map[uint64]*uint256.Int
 	mirrorClaimed map[uint64]*uint256.Int
@@ -124,6 +126,8 @@ type claimRelayWorld struct {
 	// a batch's refused items, by account index
 	batchRefusals map[uint64][4]byte
 	batching      bool
+	// the most claims the batcher fits in a batch, 0 for all
+	batchMost int
 
 	txs        []*claimRelayWorldTx
 	requests   map[[32]byte]time.Time
@@ -337,6 +341,9 @@ func (self *claimRelayWorld) SizeBatch(_ context.Context, claims []*snClaimRelay
 	if !self.batching {
 		return nil, nil
 	}
+	if 0 < self.batchMost && self.batchMost < len(claims) {
+		claims = claims[:self.batchMost]
+	}
 	// the last item needs its whole cap; the 20% is the tools' headroom
 	need := uint64(len(claims)-1)*claimRelayTestBatchGas + gasPerClaim + gasPerClaim/63 + 20_000
 	return &snClaimRelayBatch{
@@ -414,10 +421,10 @@ func (self *claimRelayWorld) Send(_ context.Context, send *snClaimRelaySend) (*s
 // snClaimRelayLedger
 
 // Pool 1's accounts, then the capture the flag pool's, as the core ledger reads
-// them. A pool that cannot be read is named, unless neither can be.
-func (self *claimRelayWorld) Accounts(context.Context) ([]*snClaimRelayAccount, []uint64, error) {
-	accounts := []*snClaimRelayAccount{}
-	unavailable := []uint64{}
+// them. A pool that cannot be read is named with the coldkeys its account index
+// records, unless the index cannot be read either; neither pool read is an error.
+func (self *claimRelayWorld) Accounts(context.Context) (*snClaimRelayLedgerRead, error) {
+	read := &snClaimRelayLedgerRead{Accounts: []*snClaimRelayAccount{}}
 	pools := []struct {
 		noId      uint64
 		rootIndex uint64
@@ -426,7 +433,15 @@ func (self *claimRelayWorld) Accounts(context.Context) ([]*snClaimRelayAccount, 
 	}{{1, 3, self.leaves, errors.Join(self.ledgerErr, self.poolLedgerErr)}, {claimRelayTestCtfPool, 0, self.ctfLeaves, errors.Join(self.ledgerErr, self.ctfLedgerErr)}}
 	for _, pool := range pools {
 		if pool.err != nil {
-			unavailable = append(unavailable, pool.noId)
+			read.Unavailable = append(read.Unavailable, pool.noId)
+			if !self.indexUnreadable {
+				if read.UnavailableColdkeys == nil {
+					read.UnavailableColdkeys = map[[32]byte]bool{}
+				}
+				for _, leaf := range pool.leaves {
+					read.UnavailableColdkeys[leaf.Coldkey] = true
+				}
+			}
 			continue
 		}
 		for index := range pool.leaves {
@@ -434,13 +449,16 @@ func (self *claimRelayWorld) Accounts(context.Context) ([]*snClaimRelayAccount, 
 			if claimed := self.mirrorClaimed[claimRelaySlot(account)]; claimed != nil {
 				account.Claimed = *claimed
 			}
-			accounts = append(accounts, account)
+			read.Accounts = append(read.Accounts, account)
 		}
 	}
-	if len(unavailable) == len(pools) {
-		return nil, nil, errors.Join(self.ledgerErr, self.poolLedgerErr, self.ctfLedgerErr)
+	if len(read.Unavailable) == len(pools) {
+		return nil, errors.Join(self.ledgerErr, self.poolLedgerErr, self.ctfLedgerErr)
 	}
-	return accounts, unavailable, nil
+	if self.indexUnreadable {
+		read.UnavailableColdkeys = nil
+	}
+	return read, nil
 }
 
 func (self *claimRelayWorld) Proof(_ context.Context, account *snClaimRelayAccount) ([]merkle.LedgerNode, error) {
