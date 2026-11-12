@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T21:16:38.782157Z",
+  "observed_at": "2026-11-12T22:06:08.422828Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -27,7 +27,7 @@
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "api_observed_at": "2026-11-12T20:49:47Z",
+    "api_observed_at": "2026-11-12T22:06:08Z",
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
       "supervisor_pid": 211140,
@@ -58,10 +58,18 @@
     "database_grants_issued": false,
     "ordinary_qualification": {
       "original_scope": 271,
-      "qualified": 131,
-      "pending": 140,
+      "qualified": 148,
+      "pending": 123,
       "failed_batch_partial_credit": false,
       "race_or_release_qualification_complete": false
+    },
+    "active_qualification": {
+      "cases": 24,
+      "pid": 724024,
+      "invocation_id": "157d6f30727d464897fdbe9228d88f66",
+      "evidence": "/dev/shm/competition-wallet-pinned-batch04-20261112.pATuh4xU",
+      "manifest_sha256": "e8a13627cd24b45d20cf691315a48ed1b9bb941f897f4f6dfa279f0e99ff1098",
+      "completed_or_credited": false
     },
     "wallet_fixture": {
       "source_manifest_sha256": "6039cf2fc0176a6f5742ecbb300a19b73a7258d5d787dc21bb3f81914ec3ee03",
@@ -69,7 +77,7 @@
       "expanded_source_scope": 274,
       "last_resource_stopped_qa_evidence": "/dev/shm/competition-wallet-projection-pure-4g-qa-20261112.8HC01I3O",
       "diagnosis": "Test wrapper dropped census context, bypassing bounded query batches; native PostgreSQL OOM preserved.",
-      "status": "Nine pure executions and native backing-index three-state test passed. Original 17-test batch (including all four wallet cases) is running from the pinned binary; no partial-batch credit or release claim.",
+      "status": "Nine pure executions, native three-state test and full original 17-test batch passed, including all four wallet cases. No partial-batch credit or release claim.",
       "pure_runtime_evidence": "/dev/shm/competition-wallet-projection-runtime-20261112.dtbbznPd",
       "pure_runtime_log_sha256": "c738eb138e43311f33bbe795c1544e6cf1c3540d0d79d790eaeb428b079a297c",
       "pure_passed": 9,
@@ -86,8 +94,15 @@
         "durable_evidence": "/var/lib/urnetwork/competition-wallet-pure-native-qualification-20261112.1zFYVGFG",
         "durable_manifest_sha256": "1825021548a87e13100460d763158cc70c2ee681f431377b76e9b24eabef8eb0"
       },
-      "live_original_batch": {
+      "completed_original_batch": {
         "cases": 17,
+        "passed": 17,
+        "failed": 0,
+        "skipped": 0,
+        "log_sha256": "5e8fb3e0788144ca379818c53171ed986ebfec0a9f3475222cfbfb1ba32d3009",
+        "postgres_peak_bytes": 389402624,
+        "postgres_oom_kills": 0,
+        "actor_guard_capture_cleanup_exit_zero": true,
         "pid": 663139,
         "invocation_id": "945979b7cd9d4ba283d119838924be26",
         "evidence": "/dev/shm/competition-wallet-pinned-batch23-20261112.9XmvSuNB"
@@ -97,7 +112,7 @@
       "prepared_binary_sha256": "e2a3b939bb211063a1b62108ebcfacb5353dc815dd3f57899850ce1817e9c508",
       "preparation_source_and_dependencies_unchanged": true,
       "compiler_preparation": "Trusted operator preparation only: 4 GiB memory, 512 MiB cache-growth bound, preflight root reserve plus that cache budget; no tests, candidate execution, database or model calls. Test-phase cache limit stays 128 MiB; native PostgreSQL stays 1 GiB.",
-      "tests_required": "Three pure controls x3, actual backing-index three-state test, all four wallet-family tests, remaining census and final exact-main/race compatibility."
+      "tests_remaining": "Remaining 123 original census cases, race qualification and final exact-main/dependency compatibility."
     },
     "isolated_server_commit": "3ae7d84523a10cc98bb1e3ee0309b0ed44b55b3c",
     "isolated_sn_commit": "e908edda50378af63576109df88c603168716ce6",
@@ -114,8 +129,17 @@
     "gemma_first_partial": "Rejected: non-JSON prefix and unseen-file findings; no reroll.",
     "qwen_scoring_partial": "Provider completed; rejected because canonical.patch is not a production source path. No rewriting or reroll.",
     "further_old_calls_held": true,
-    "coverage_planner": "Unqualified draft; lossless source/hunk ledger and typed renderer still needed, including both members and transitive/cross-file closure.",
-    "publisher": "24 ordinary +24 race tests passed. Two builds resource-stopped; no binary, no remote upload. Same-source/flags build pending restored capacity.",
+    "coverage_planner": "Refrozen unqualified source 7332b2c2727d5301f9f898d9aa29cf132bd1b277261d1c15d5b9c861f115f244; eleven synthetic cases await independent tests. Typed renderer, both-member coverage and transitive/cross-file closure remain pending.",
+    "publisher": "24 ordinary +24 race tests passed; compile-only preparation passed. Original Qwen call's eight evidence leaves and manifest retained with exact-version readback; original failed validation flag remains unchanged. Linked offline validation retention remains separate and pending.",
+    "protected_original_call": {
+      "key": "32ddf0f6d09a7592155e8de5942ec09671603bbc3a3c32054b94e661d61e3e7f",
+      "receipt_sha256": "931b60a762f97f7414f977853d5e36d67107df74f7be3fa49b3eefeb65e168ff",
+      "manifest_version": "8bfc2240-7c74-460a-a1e1-56f52c873b76",
+      "retention": "COMPLIANCE through 2028-01-01T00:00:00Z",
+      "actor_guard_and_capture_exit_zero": true,
+      "evidence": "/dev/shm/competition-prereview-qwen32-publication-20261112.RvX2cwX9",
+      "authoritative": false
+    },
     "authoritative_decision_or_publication_issued": false
   },
   "disk_recovery": {
@@ -135,8 +159,8 @@
     "qualification_reserve_unchanged_bytes": 35433480192
   },
   "next_actions": [
-    "Run frozen wallet controls at standard 4 GiB compiler bound; obtain native 1 GiB PostgreSQL proof without changing scoring or production code.",
-    "Finish exact-source publisher build and protected private MinIO version/readback proof; retain linked validation separately without changing original calls.",
+    "Finish the remaining original census cases and race qualification using the pinned wallet-fixture binary; preserve native PostgreSQL and runtime limits.",
+    "Qualify the coverage planner and linked-validation retention helper; retain linked validation separately without changing original calls.",
     "Complete recovery qualification and deploy compatible readers/worker before granting any of the three infrastructure recoveries; preserve original failure records and submission-order ties.",
     "Finish complete paired, bounded reviews for every eligible submission; partial observations never count as approvals.",
     "Monitor live API, supervisor leases and both hosts. Never restart a live attempt because an observation is quiet."

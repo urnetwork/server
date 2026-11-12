@@ -185,8 +185,20 @@ stricter renderer with explicit production-path choices.
 
 These are private, nonfinal observations, not submission approvals, complete
 honesty reviews, or authority to elect, reward or promote a candidate. No
-candidate patch was executed by this review tooling. Protected result
-publication and full-source paired review remain unfinished.
+candidate patch was executed by this review tooling. Full-source paired review
+and protected archival of the separate offline validation remain unfinished.
+
+At 22:06 UTC, the original Qwen execution-run call's eight original evidence
+leaves and manifest were successfully archived privately in MinIO, with exact
+version readback, digest verification and COMPLIANCE retention through
+2028-01-01. Manifest version: `8bfc2240-7c74-460a-a1e1-56f52c873b76`;
+local publication receipt SHA-256:
+`931b60a762f97f7414f977853d5e36d67107df74f7be3fa49b3eefeb65e168ff`.
+Actor, resource guard and original-file capture all completed successfully.
+The original failed-validation flag remains unchanged. This archives provenance,
+not an approval, and grants no election, reward or source-promotion authority.
+Durable private operational evidence is retained at
+`/var/lib/urnetwork/competition-prereview-protected-original-20261112.peSJpxpS`.
 
 ## Full-source expansion requirements
 
