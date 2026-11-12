@@ -67,11 +67,14 @@ import (
 // TXT set: on 11-12 Alidns served 3 of the Asia set's 13 records, trimmed
 // without being marked truncated, and DNSPod answered it truncated and empty,
 // so a client there learned three extenders from dns, or none. China's TXT set
-// holds only as many records as both deliver whole (cn_record_count, 1 by
-// default), and it rotates: each tick answers the next window of the extenders
-// China's own vantage is dealt, canaries first, so a day of lookups covers that
-// vantage's partition and never more (R2). Its A and AAAA sets answer exactly
-// the addresses of the extenders its records vouch for. The sets of every other
+// holds as many whole records as Alidns delivers, about three, each of which
+// DNSPod also delivers alone: DNSPod trims a larger answer at record
+// boundaries, so its clients get one whole record of the set (owner,
+// 2026-11-12: "let's do the best thing for users"). The set rotates: each tick
+// answers the window one place further along the extenders China's own vantage
+// is dealt, canaries first, so a day of lookups covers that vantage's
+// partition and never more (R2). Its A and AAAA sets answer exactly the
+// addresses of the extenders its records vouch for. The sets of every other
 // location are drawn as if China's did not exist.
 //
 // Deletion is narrowed to sets this publisher owns -- the record name, an A,
@@ -99,10 +102,12 @@ const (
 	// hold a client on addresses the next tick has already replaced.
 	ExtenderDnsDefaultTtl = 60
 
-	// Signed records in China's set when the configuration does not say: the
-	// most that both of China's resolvers delivered whole on 2026-11-12
-	// (extenderDnsCnDnspodMaxMessageBytes).
-	ExtenderDnsDefaultCnRecordCount = 1
+	// The most signed records in China's set when the configuration does not
+	// say: as many as Alidns delivers whole, which its ceiling
+	// (extenderDnsCnAlidnsMaxMessageBytes) decides before this does. It holds
+	// four of the shortest records Main signed on 2026-11-12 (264
+	// characters), three of the usual ones and two of the longest (368).
+	ExtenderDnsDefaultCnRecordCount = 4
 
 	// Route 53 is a global service reached through one endpoint; the region
 	// only has to be a real one when the configuration leaves it out.
@@ -147,11 +152,16 @@ const (
 //
 // DNSPod (DoH at 1.12.12.12 and 120.53.53.53, plain at 119.29.29.29) delivered
 // a 481-byte answer whole, one record of 410 characters. It trimmed every
-// answer of 948 to 2,297 bytes to under 512 without marking it truncated, and
-// answered one of 4.5 KB truncated and empty, as it answers the continents'
-// extender sets. The EDNS size asked made no difference (none, 1,232 or 4,096).
-// Its TCP answered whole once and empty once, and a client's resolver never
-// retries over TCP an answer it got unmarked.
+// answer of 948 to 2,297 bytes at record boundaries without marking it
+// truncated: each of its ten trimmed answers parsed, every value in it was a
+// whole record of the name's set, and it kept a run of them in 433 to 462
+// bytes, never a partial record and never none. It answered one of 4.5 KB
+// truncated and empty, as it answers the continents' extender sets. The EDNS
+// size asked made no difference (none, 1,232 or 4,096). Its TCP answered whole
+// once and empty once, and a client's resolver never retries over TCP an
+// answer it got unmarked. A record whose answer alone fits the largest
+// trimmed answer, 462 bytes, therefore survives DNSPod's trim of China's set
+// as its first record.
 //
 // Alidns (DoH at 223.5.5.5 and 223.6.6.6, plain at 223.5.5.5) delivered every
 // answer of up to 1,144 bytes whole and trimmed every larger one, unmarked, to
@@ -159,7 +169,7 @@ const (
 // is cut to what fits its ceiling, so an answer within the largest it gave is
 // not cut.
 const (
-	extenderDnsCnDnspodMaxMessageBytes = 481
+	extenderDnsCnDnspodMaxMessageBytes = 462
 	extenderDnsCnAlidnsMaxMessageBytes = 1_204
 )
 
@@ -499,8 +509,9 @@ type extenderDnsCountrySet struct {
 
 // China (owner, 2026-11-12). A client there resolves through the resolvers
 // the sdk gives cn (connect net_http_doh_regional.go): Alidns and DNSPod, by
-// DoH and then by plain DNS. DNSPod delivers one record whole, Alidns about
-// three.
+// DoH and then by plain DNS. Alidns delivers about three records whole; DNSPod
+// trims the set at record boundaries to one whole record, whichever it caches
+// first, so each record must fit its trimmed answer alone.
 var extenderDnsCnSet = extenderDnsCountrySet{
 	countryCode:           "CN",
 	maxRecordMessageBytes: extenderDnsCnDnspodMaxMessageBytes,
@@ -840,14 +851,17 @@ func sampleExtenderDnsRecordSets(
 // ranked is the extenders the country's vantage was dealt this epoch, best
 // first (extenderDnsLocationExtenderIds): its continent's dns canaries, then
 // the epoch's order of its partition, then the fill. The TXT set takes the
-// tick's window of them, so successive ticks answer successive windows and a
-// day's lookups cover the whole of the ranking, while a poller in the country
-// still sees only what its vantage is dealt (R2). The canaries keep their
-// place at the head (R4) while a slot is left to rotate; with one record, the
-// default, a canary takes its turn at the head of the rotation instead, or the
-// set would answer the canary alone forever. A record the signer has nothing
-// for, or that the country's resolvers would not deliver whole
-// (extenderDnsCountryTxtBudget), gives its slot to the next in the window.
+// tick's window of them, which starts one place further along each tick, so
+// every extender of the ranking heads a window once a cycle -- the record a
+// resolver that keeps only the first may hand on -- however many records of
+// a window fit, and a day's lookups cover the whole of the ranking, while a
+// poller in the country still sees only what its vantage is dealt (R2) at the
+// pace of one new extender a tick. The canaries keep their place at the head
+// (R4) while a slot is left to rotate; with one record a canary takes its
+// turn at the head of the rotation instead, or the set would answer the canary
+// alone forever. A record the signer has nothing for, or that the country's
+// resolvers would not deliver whole (extenderDnsCountryTxtBudget), gives its
+// slot to the next in the window.
 //
 // The address sets answer each family's address of exactly the extenders the
 // TXT set vouches for -- every address a record names, and no other -- since a
@@ -875,8 +889,7 @@ func extenderDnsCountryRecordSets(
 	}
 	candidates := slices.Clone(pinned)
 	if 0 < len(rotating) {
-		window := uint64(recordCount - len(pinned))
-		start := int((countrySample.rotation * window) % uint64(len(rotating)))
+		start := int(countrySample.rotation % uint64(len(rotating)))
 		for i := range rotating {
 			candidates = append(candidates, rotating[(start+i)%len(rotating)])
 		}
