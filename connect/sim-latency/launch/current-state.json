@@ -1,6 +1,25 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T00:55:13Z",
+  "observed_at": "2026-11-12T01:17:57Z",
+  "latest_epoch2_heartbeat_qualified": {
+    "evidence": "EPOCH2-HEARTBEAT-QUALIFICATION-2026-11-12.json",
+    "qualified_branch_commit": "d4bb6c900595d5d8e76921baff4dbeb49fbfcc97",
+    "ordinary_executions_passed": 261,
+    "race_executions_passed": 261,
+    "test_failures": 0,
+    "merged_main_release_source": "89be8b3b8b768cf0434cf1a337e67b6cb3751ae0",
+    "merged_main_ordinary_package_passed": true,
+    "merged_main_race_qualification_complete": false,
+    "worker_binary_built": false,
+    "runtime_deployed": false,
+    "succeeded": 3,
+    "failed": 2,
+    "running": 2,
+    "queued": 9,
+    "goofe_candidate_replicates_last_observed": 7,
+    "sille_candidate_replicates_last_observed": 3,
+    "next_action": "Finish exact merged-main race check, then build and stage its immutable worker and actual distribution identity. Do not activate a systemd override or interrupt either active evaluation; claim-only maintenance approval remains requested. Adjacent managed-control registry retirement is being fixed separately without changing current host authority. Older entries below are historical snapshots."
+  },
   "latest_epoch2_heartbeat_reconciliation": {
     "succeeded": 3,
     "failed": 2,
