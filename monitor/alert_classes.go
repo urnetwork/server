@@ -31,6 +31,9 @@ var alertClassKinds = map[string]alertClassKind{
 	// SIGNALS.md §28 extender health
 	"extender-activations-stopped":          incidentAlertClass,
 	"extender-churn-high":                   incidentAlertClass,
+	"extender-dns-country-partial":          incidentAlertClass,
+	"extender-dns-country-stale":            incidentAlertClass,
+	"extender-dns-country-unobservable":     visibilityAlertClass,
 	"extender-dns-records-stale":            incidentAlertClass,
 	"extender-dns-records-unobservable":     visibilityAlertClass,
 	"extender-gated-release-failing":        incidentAlertClass,

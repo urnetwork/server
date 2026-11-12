@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,14 @@ import (
 // verified: the monitor holds no root key, and the operator's hosted zone has
 // no other writer. The name is public; no address or key a record carries
 // reaches an alert.
+//
+// That judges the zone. Its per-country half (extender_dns_countries.go,
+// owner, 2026-11-12: "use the dns resolver settings for the target country.
+// The sdk gives a dns per country") asks the resolvers each connection region
+// takes, from the sdk's per-country DNS settings, the way a client asks them,
+// and judges each (country, resolver) on its own: no fresh records
+// (extender-dns-country-stale), a partial set (extender-dns-country-partial),
+// or unreachable from here, which only holds the resolver's state.
 func NewExtenderDnsRecordsSignal() Signal {
 	return NewExtenderDnsRecordsSignalWithSettings(DefaultExtenderDnsRecordsSettings())
 }
@@ -68,22 +77,57 @@ type ExtenderDnsRecordsSettings struct {
 	Cadence time.Duration
 	// the most values one answer may carry; more are left undecoded
 	MaxRecords int
+
+	// The connection regions whose paths the per-country half asks, each
+	// resolver judged on its own; none turns the half off. The default is
+	// the sdk's per-country DNS settings (ExtenderDnsCountriesFromSdk).
+	Countries []ExtenderDnsCountry
+	// the authoritative nameservers (host:port) of the record name's zone,
+	// which give the operator's set for a location; none discovers them
+	// through the platform resolver
+	AuthoritativeServers []string
+	// the most time the per-country half of one run may take; a question it
+	// leaves unasked or unanswered holds its resolver's state
+	CountryBudget time.Duration
+	// the most questions of the per-country half in flight at once
+	CountryConcurrency int
+	// the least time between launching two questions
+	CountryPacing time.Duration
+	// what a client reads of one DoH answer (connect maxDohResponseBytes)
+	ClientDohResponseBytes int
+	// what the monitor reads of one DoH answer, to count what a client's read
+	// cut off
+	FullDohResponseBytes int
 }
 
 // The defaults of SIGNALS.md §28.2.
 func DefaultExtenderDnsRecordsSettings() *ExtenderDnsRecordsSettings {
 	return &ExtenderDnsRecordsSettings{
-		RecordNames:  map[string]string{"main": "extender.bringyour.com"},
-		Resolvers:    []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"},
-		MaxNewestAge: time.Hour,
-		Sustain:      2,
-		Cadence:      10 * time.Minute,
-		MaxRecords:   256,
+		RecordNames:            map[string]string{"main": "extender.bringyour.com"},
+		Resolvers:              []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"},
+		MaxNewestAge:           time.Hour,
+		Sustain:                2,
+		Cadence:                10 * time.Minute,
+		MaxRecords:             256,
+		Countries:              ExtenderDnsCountriesFromSdk(),
+		CountryBudget:          60 * time.Second,
+		CountryConcurrency:     4,
+		CountryPacing:          100 * time.Millisecond,
+		ClientDohResponseBytes: ExtenderDnsClientDohResponseBytes,
+		FullDohResponseBytes:   64 * 1024,
 	}
 }
 
 func (self *ExtenderDnsRecordsSettings) valid() bool {
-	return self != nil && 0 < len(self.Resolvers) && 0 < self.MaxNewestAge && 0 < self.Sustain && 0 < self.Cadence && 0 < self.MaxRecords
+	if self == nil || len(self.Resolvers) == 0 || self.MaxNewestAge <= 0 || self.Sustain <= 0 || self.Cadence <= 0 || self.MaxRecords <= 0 {
+		return false
+	}
+	if len(self.Countries) == 0 {
+		return true
+	}
+	return 0 < self.CountryBudget && 0 < self.CountryConcurrency && 0 <= self.CountryPacing &&
+		0 < self.ClientDohResponseBytes && self.ClientDohResponseBytes <= self.FullDohResponseBytes &&
+		extenderDnsCountriesValid(self.Countries)
 }
 
 type extenderDnsRecordsProbe struct {
@@ -124,6 +168,9 @@ type extenderDnsRecordsObservation struct {
 	// the newest issue and the latest expiry among the records
 	newestIssue  time.Time
 	latestExpire time.Time
+	// each record's extender, once: its signed public key, or the value
+	// when the record names none. Compared in memory only, never reported.
+	keys []string
 }
 
 // Decodes every served value as a client does and reduces the answer to its
@@ -151,6 +198,13 @@ func observeExtenderDnsRecords(txts []string, now time.Time, maxRecords int) ext
 			continue
 		}
 		observation.records++
+		key := string(body.PublicKey)
+		if key == "" {
+			key = txt
+		}
+		if !slices.Contains(observation.keys, key) {
+			observation.keys = append(observation.keys, key)
+		}
 		issue := time.UnixMilli(int64(body.IssueTimeMs)).UTC()
 		expire := time.UnixMilli(int64(body.ExpireTimeMs)).UTC()
 		if observation.newestIssue.Before(issue) {
@@ -226,6 +280,22 @@ func (self extenderDnsRecordsProbe) check(ctx context.Context, env *probeEnv) ([
 		return nil, nil
 	}
 
+	findings, zoneReasons, err := self.checkZone(ctx, env, settings, name, target)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, self.checkCountries(ctx, env, settings, name, target, zoneReasons)...)
+	if err := ctx.Err(); err != nil {
+		return nil, probeLifecycleError(ctx, err)
+	}
+	return findings, nil
+}
+
+// The whole-zone half: the freshest answer of the configured public
+// resolvers. It also returns why that answer is stale, none when it is fresh
+// or when no resolver answered: a resolver of the per-country half stale for
+// those reasons alone is the zone's staleness, not the resolver's.
+func (self extenderDnsRecordsProbe) checkZone(ctx context.Context, env *probeEnv, settings *ExtenderDnsRecordsSettings, name string, target string) ([]finding, []string, error) {
 	answers := make([]extenderDnsRecordsAnswer, len(settings.Resolvers))
 	var wait sync.WaitGroup
 	for index, resolver := range settings.Resolvers {
@@ -238,7 +308,7 @@ func (self extenderDnsRecordsProbe) check(ctx context.Context, env *probeEnv) ([
 	}
 	wait.Wait()
 	if err := ctx.Err(); err != nil {
-		return nil, probeLifecycleError(ctx, err)
+		return nil, nil, probeLifecycleError(ctx, err)
 	}
 
 	now := env.now()
@@ -267,13 +337,13 @@ func (self extenderDnsRecordsProbe) check(ctx context.Context, env *probeEnv) ([
 		return []finding{
 			stormClearHold(extenderDnsRecordsProbeId, "extender-dns-records-stale", target),
 			extenderDnsRecordsUnobservable(target, "lookup_failed", failure),
-		}, nil
+		}, nil, nil
 	}
 
 	reasons := freshest.staleReasons(now, settings.MaxNewestAge)
 	findings := []finding{healthyFinding(extenderDnsRecordsProbeId, tierWarn, "extender-dns-records-unobservable", target)}
 	if len(reasons) == 0 {
-		return append(findings, healthyFinding(extenderDnsRecordsProbeId, tierWarn, "extender-dns-records-stale", target)), nil
+		return append(findings, healthyFinding(extenderDnsRecordsProbeId, tierWarn, "extender-dns-records-stale", target)), nil, nil
 	}
 	newestAge := "none"
 	if !freshest.newestIssue.IsZero() {
@@ -296,7 +366,7 @@ func (self extenderDnsRecordsProbe) check(ctx context.Context, env *probeEnv) ([
 		action:   "Read §27.2's extender-dns-publish-failing and the taskworker log for `[extenderpublish]dns publish failed`, which names each refused set and Route 53's answer (InvalidChangeBatch: a set's size; AccessDenied: the dns block's credentials). If the publisher reports every change accepted, compare its TXT sets with the hosted zone's record sets for the name.",
 		verify:   fmt.Sprintf("A run reads valid records from the resolvers, the newest issued within %s.", settings.MaxNewestAge),
 		playbook: "SIGNALS.md §28.2",
-	}), nil
+	}), reasons, nil
 }
 
 // The visibility finding of §28.2: the policy is invalid, or no resolver

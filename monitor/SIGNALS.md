@@ -50084,6 +50084,7 @@ unless a row says otherwise.
 | The gossip publish drain died in the 11-06 07:44Z Main brownout; nothing was published until the restart at 11-11 22:09–22:15Z | 5.6 days | `extender-gossip-stalled` (§27.2); the end state `extender-release-coverage-low` (§28.1) | §27.2 within about half an hour (from the queue's age); §28.1 at about 11-07 07:40Z |
 | Route 53 refused every DNS tick from 10-28 18:12Z (one batch over the 32,000-character RDATA limit), while the DNS gauges reported the sets the tick wanted, not what landed | 14 days | `extender-dns-publish-failing` (§27.2); the gauges now count only what Route 53 accepted | within about 45 minutes (the counter is new; not replayable) |
 | The public TXT records of `extender.bringyour.com` expired 10-29 18:12Z and were still served on 11-11 | 13 days | `extender-dns-records-stale` (§28.2) | about 10-28 19:30Z, an hour after the last accepted tick |
+| The resolvers the sdk gives China serve part of the TXT set or none: Alidns's DoH 3 of the 14 to 15 records, the answer not marked truncated and served long past the TTL; DNSPod's DoH an answer marked truncated with none (2026-11-12) | unknown; seen 11-12 | `extender-dns-country-partial`, `extender-dns-country-stale` (§28.2, per connection region) | on the second run after the monitor build is deployed |
 | The seed bundle is off by design | — | `extender-seed-off` (§27.1), a configured state | — |
 | Gated release has never been used: no requests, no gated fleet | — | `extender-gated-release-failing` (§28.1), dormant until clients ask | — |
 | The activation bootstrap was the only fresh source of extender records after 11-07 | — | `extender-activations-stopped` (§28.1) | never: at least 7 stored activations every hour from 11-03 |
@@ -50101,7 +50102,7 @@ and which its outcome:
 | Channel | What reaches clients | Publisher | Outcome |
 |---|---|---|---|
 | Gossip: each replica drains `network_extender_publish` every 5 s (gossip/publish.go) and floods it to its links | every member's and extender's directory, through its link to a replica | `extender-gossip-stalled` (§27.2) | `extender-release-coverage-low` (§28.1); `extender-directories-stale` (§2.19c); the links themselves, `gossip-mesh-links-dropped` and `gossip-mesh-saturated` (§28.4) |
-| DNS `extender.<network host>`: the taskworker's publish tick writes the geo A, AAAA and TXT sets to Route 53 every 10 minutes | a resolver's continent's addresses and signed records | `extender-dns-publish-failing` (§27.2) | `extender-dns-records-stale` (§28.2) |
+| DNS `extender.<network host>`: the taskworker's publish tick writes the geo A, AAAA and TXT sets to Route 53 every 10 minutes | a resolver's continent's addresses and signed records | `extender-dns-publish-failing` (§27.2) | `extender-dns-records-stale` (§28.2); through each connection region's resolvers, `extender-dns-country-stale` and `extender-dns-country-partial` (§28.2) |
 | Seed bundle: `/v1/seed.bin` and its mirrors | a signed cold-start bundle (no released client fetches it yet) | `extender-seed-mirror-stale`, `-expired`, `-rollback` (§27.1) | `extender-seed-off` while off (§27.1) |
 | Activation bootstrap: each stored `POST /network/extender-activate` | the activating extender's own fresh record and 8 random peers | — | `extender-activations-stopped` (§28.1) |
 | Gated release: `POST /network/extender-release` | gated records for a client that asks | — | `extender-gated-release-failing` (§28.1) |
@@ -50119,7 +50120,12 @@ Read together:
   that queues nothing). The outcome signals still fire.
 - **DNS publishing stopped.** `extender-dns-publish-failing` comes first.
   `extender-dns-records-stale` follows within the hour, and it also fires
-  when the publisher believes it succeeded.
+  when the publisher believes it succeeded. Each region's resolvers serving
+  the same staleness hold rather than warn.
+- **A region's resolver fails.** `extender-dns-country-stale` or
+  `extender-dns-country-partial` with a fresh whole zone is that resolver: a
+  client of the region whose lookup lands there gets no record or part of
+  the set. A resolver unreachable from here raises nothing.
 - **Supply fell.** `extender-supply-falling` with activations still stored
   is revocation, by the prober or on the extenders' side. With
   `extender-activations-stopped` too, it is the activation path.
@@ -50234,9 +50240,15 @@ For gated release, read the outcomes:
 
 Probe: `extender-dns-records`
 
-Status: added 2026-11-11. On 11-11 it reads every record served as issued
-10-28 18:12Z and expired 10-29 18:12Z, and fires on the monitor's second run
-until §27.2's DNS fix is deployed and its first tick lands.
+Status: added 2026-11-11. On 11-11 it read every record served as issued
+10-28 18:12Z and expired 10-29 18:12Z, and fired on the monitor's second run
+until §27.2's DNS fix was deployed and its first tick landed. Extended
+2026-11-12, when the owner asked for each target country's resolvers: "use
+the dns resolver settings for the target country. The sdk gives a dns per
+country." The probe has two halves: the whole zone, below, and each
+connection region's resolvers, judged resolver by resolver.
+
+#### The whole zone
 
 Source: the TXT records of the extender record name, `extender.bringyour.com`
 on Main (a client derives `extender.<network host>`). Every 10 minutes (15
@@ -50283,10 +50295,11 @@ False-negative qualifiers: the name is geo-routed, so the probe sees only
 the TXT sets of the resolvers' locations (or the default set). A set that
 fails only for another continent is §27.2's `extender-dns-publish-failing`.
 A client behind a resolver that drops large answers, like the router above,
-gets no records at all, and this probe does not see it. The signature is
-not verified: the monitor holds no root key, and the hosted zone has no
-other writer. The A and AAAA sets are not judged here; their changes are
-§27.2's.
+gets no records at all, and this half does not see it; the per-country half
+below asks the resolvers the sdk gives each connection region. The
+signature is not verified: the monitor holds no root key, and the hosted
+zone has no other writer. The A and AAAA sets are not judged here; their
+changes are §27.2's.
 
 ACTION: read §27.2's `extender-dns-publish-failing` and the taskworker log
 for `[extenderpublish]dns publish failed`, which names each refused set and
@@ -50298,6 +50311,183 @@ Route 53's answer:
 
 If the publisher reports every change accepted, compare its TXT sets with
 the hosted zone's record sets for the name.
+
+#### Each connection region's resolvers
+
+Source: the sdk's per-country DNS settings, read from the sdk build the
+monitor compiles (`monitor/extender_dns_countries.go`,
+`ExtenderDnsCountriesFromSdk`; connect `net_http_doh_regional.go` is the
+table behind them). Nothing is copied into the monitor:
+
+- the connection regions, `sdk.IngressCountryCodes()`: cn, ir, kz and ru on
+  11-12;
+- each region's DoH presets, `sdk.IngressDohUrls(cc)`: cn's Alidns
+  (223.5.5.5, 223.6.6.6) and DNSPod (1.12.12.12, 120.53.53.53), labelled
+  `DoH <ip>` because the sdk names them by url;
+- each region's plain resolvers, named and in the sdk's order,
+  `sdk.GetRegionalDnsServers()`: ru Yandex.DNS (77.88.8.8) and National DNS
+  (NSDI) at 195.208.4.1 and 195.208.5.1 (each label carries its address); ir
+  Shecan (178.22.122.100), then Electro (78.157.42.100); cn Alidns
+  (223.5.5.5) and DNSPod/Tencent (119.29.29.29); kz Cloudflare (1.1.1.1) and
+  Quad9 (9.9.9.10);
+- the undisclosed path, `default`: the default DoH servers of
+  `sdk.GetDefaultDnsResolverSettings()`, which are the ones a client's control
+  names ask (Cloudflare 1.1.1.1 and 1.0.0.1, Quad9 9.9.9.10, DNS.SB
+  185.222.222.222 and 45.11.45.11).
+
+IPv4 endpoints only: the monitor host has no IPv6 route. The sdk names no
+DoT endpoint for the platform's names (DoT appears only in the egress
+presets' personal ids), so none is asked.
+
+Each resolver is asked the way a client asks it (connect
+`net_extender_network.go` `resolveDnsTxt`, `net_http_doh.go`):
+
+- DoH first: an RFC 8484 GET of a question with id 0, recursion desired and
+  an EDNS(0) OPT record of 1232 bytes. A client reads 16 KiB of the body
+  (`maxDohResponseBytes`, a `LimitReader`), keeps the TXT records it parsed
+  before a record the cut broke (`parseDohWire`), and keeps nothing of an
+  answer that carries a policy extended DNS error (every DoH server the sdk
+  names is a built-in endpoint, so that guard applies). The probe reads the
+  body on to 64 KiB to count what the cut cost. A test runs connect's own
+  `DohQueryTxt` against the same server and requires the same records, under
+  16 KiB and over it.
+- Plain DNS only when the client would fall back: when no DoH server of the
+  region yields a TXT value. UDP, then TCP when truncated.
+- A region's path here is its DoH presets, then its plain resolvers. A client
+  puts the default DoH servers behind a region's presets too, but a region is
+  in the sdk's table because those are known not to work there, and from here
+  they always answer, so they are judged once, as the `default` path. A
+  client's TXT fallback asks the device's own resolver, which no monitor can
+  ask; the region's plain resolvers, the recursive resolvers the sdk names
+  for it, stand in for it.
+- Each value is decoded as a client decodes it
+  (`connect.DecodeExtenderDnsRecord`).
+
+The operator's set to compare with comes from the name's authoritative
+nameservers (`extender.bringyour.com` is a hosted zone of its own; its NS
+set is read through the platform resolver), asked over TCP from here and
+with a resolver's /24 as the EDNS client subnet (RFC 7871). Route 53 answers
+a client subnet by its location, as it answers a resolver that forwards its
+client's subnet. On 11-12 it answered 15 records (5.2 KB) from here and for
+Russian /24s, and 13 for Iranian and Chinese ones; the sets shared no
+record. An answer is matched to a set by extender key (each record's signed
+public key), so a resolver one tick behind still matches.
+
+Each (country, resolver) is judged on its own:
+
+- fresh: the location's whole set, the newest record issued within the hour;
+- no fresh records: none served (`none_served`), a name error
+  (`name_error`), a policy-filtered answer (`filtered`), an answer marked
+  truncated with no record or a truncated UDP answer whose TCP retry failed
+  (`truncated_empty`), a plain resolver that answers the name's A question
+  but not its TXT question, as the monitor host's router did on 11-11
+  (`txt_dropped`), nothing that decodes (`none_decoded`), or only stale or
+  expired records (`newest_too_old`, `all_expired`);
+- a partial set: the client's 16 KiB read cut records off (`client_cap`), or
+  the answer is a strict subset of its location's set
+  (`fewer_than_authoritative`). The second is judged only when the set for
+  the resolver's own /24 was read, since that set can be the smaller one;
+- unreachable from here: no answer (to the TXT question nor, from a plain
+  resolver, to the A question asked after it), a refusal, a server failure,
+  an HTTP or TLS failure. Some regional resolvers refuse foreign questions
+  (Electro on 11-12), so this is visibility only, never a fault. The resolver's
+  identities hold their state (a clear hold), it is listed as
+  `path_unreachable` in its region's alerts, and a region none of whose
+  resolvers answers is listed as `blind` in every alert of the half. Neither
+  raises an alert of its own: a visibility alert would keep every other
+  incident of the signal from clearing for as long as a region refuses
+  foreign questions.
+
+Thresholds (target `<env>/extender-dns-records/<country>/<resolver>`, the
+country code and the resolver's label from the sdk's table, nothing else):
+
+- WARN `extender-dns-country-stale`, on 2 consecutive runs: the resolver, on
+  the path a client of the region takes, gives a client no fresh record.
+  While the whole zone is stale (`extender-dns-records-stale`), a resolver
+  stale for the same reasons holds instead; the zone's alert speaks for it.
+- WARN `extender-dns-country-partial`, on 2 consecutive runs: the resolver
+  gives a client fewer records than its location's set.
+- `extender-dns-country-unobservable` (`<env>/extender-dns-records/countries`):
+  no resolver of any path answered (`none_answered`), an answer could not be
+  judged because the authoritative set could not be read
+  (`authority_unavailable`), or the budget ended before every question was
+  answered (`budget_exhausted`).
+
+Bounds: one run of the half has a 60-second budget, at most 4 questions in
+flight and 100 ms between launches. Each question is bounded at 8 seconds (4
+per exchange), a DoH body is read to 64 KiB, and each resolver is asked once
+a run, a plain resolver that leaves the TXT question unanswered once more
+for the A record: about 20 questions, plus one authoritative question from
+here and one for each /24 whose answer is not the set from here. A question
+the budget cuts holds its identities. The monitor exports no metric of its
+own, so no dashboard panel is added; the alerts carry the country and the
+resolver.
+
+Live, 2026-11-12, from the monitor host: two paced passes of the probe's own
+code (07:04Z and 07:30Z, about 30 questions each, 5 s). Route 53 answered 14
+records from here, 13 for the Chinese and Iranian /24s and 14 to 15 for the
+Russian and DNS.SB ones.
+
+| Path | Resolver | Answer | Judgment |
+|---|---|---|---|
+| default | DoH 1.1.1.1, 1.0.0.1 (Cloudflare), 9.9.9.10 (Quad9) | 14 records, 4.7 KB: the set from here | fresh |
+| default | DoH 185.222.222.222, 45.11.45.11 (DNS.SB) | 14 to 15 records, 5.1 to 5.4 KB: its /24's set | fresh |
+| cn | DoH 223.5.5.5 (Alidns) | 3 records, not marked truncated; at 07:30Z the same 3 as at 07:04Z, the newest issued 99 minutes before | `extender-dns-country-partial` (3 of 14, `fewer_than_authoritative`) while they match a set, and `extender-dns-country-stale` (`newest_too_old`) |
+| cn | DoH 223.6.6.6 (Alidns) | 3 records, not marked truncated | `extender-dns-country-partial` (3 of 14) |
+| cn | DoH 1.12.12.12, 120.53.53.53 (DNSPod) | marked truncated, no record (468 bytes) | `extender-dns-country-stale` (`truncated_empty`) |
+| cn | Alidns, DNSPod/Tencent (plain) | not asked: Alidns's DoH yields records | — |
+| ir | Shecan | 14 to 15 records | fresh |
+| ir | Electro | REFUSED | unreachable from here: held, no alert |
+| kz | Cloudflare, Quad9 (plain) | 14 records | fresh |
+| ru | Yandex.DNS, NSDI at both addresses | 14 to 15 records: their /24's set | fresh |
+
+So the watcher's second run after deploy raises four or five WARNs, all
+China's: a client in cn whose lookup lands on Alidns gets 3 of its
+location's records (and Alidns serves them long past the 60-second TTL), and
+on DNSPod none. By hand the same day, Alidns's plain resolver trims the set
+to 3 records (about 1 KB) without marking it truncated, over UDP and TCP
+alike, and DNSPod's answers UDP marked truncated with none and closes TCP
+unanswered.
+
+False-positive qualifiers: a resolver can be one tick behind; extender keys
+stay the same across ticks within an epoch, so it still matches. At an epoch
+turn an answer can match no set for one run and is then not judged partial.
+A resolver whose location Route 53 places differently from its /24 (an
+anycast resolver without a client subnet) is compared with both the set
+from here and its /24's set, and a set that equals either is whole.
+
+False-negative qualifiers: from here, an anycast resolver (Cloudflare,
+Quad9, DNS.SB, Alidns, DNSPod) answers from its nearest site, not from the
+region; a region's blocking of DoH or of the name, and anything only an
+in-country network does to the answer, is not seen. The device's own
+resolver, which a client's TXT fallback asks, is not asked. IPv6 endpoints
+are not asked. A region's plain resolvers are asked only in a run whose DoH
+presets yield nothing, as a client asks them.
+
+ACTION: if `extender-dns-records-stale` fires too, the publisher is the
+cause; follow the whole zone's ACTION above. Otherwise the resolver is; its
+alert names the country, the resolver and its endpoint:
+
+- `none_served`, `name_error` or `filtered` from a region's resolver: the
+  region's resolver refuses the name; compare
+  `dig +tcp TXT extender.bringyour.com @<resolver ip>` with `@1.1.1.1`;
+- `truncated_empty` or `txt_dropped`: the resolver cannot carry the answer
+  (a DoH answer marked truncated with none, a truncated UDP answer whose TCP
+  retry failed, or a TXT question left unanswered while the A question is
+  answered);
+- `newest_too_old` or `all_expired` alone, with a fresh whole zone: the
+  resolver's cache;
+- `client_cap`: the location's set is larger than a client reads in one DoH
+  answer; read the publisher's TXT budget (`extenderDnsTxtMaxAnswerBytes`,
+  taskworker/work/extender_dns_publish.go) against the answer's
+  `response_bytes`;
+- `fewer_than_authoritative`: the resolver trims the set; compare its answer
+  with `dig +tcp +norec +subnet=<resolver ip>/24 TXT extender.bringyour.com
+  @<a nameserver from dig NS extender.bringyour.com>`.
+
+A resolver that keeps failing its region belongs out of the sdk's
+per-country table (connect `net_http_doh_regional.go`), or the location's
+TXT set must shrink to what it carries.
 
 ### 28.3 Provider fleet departure
 
