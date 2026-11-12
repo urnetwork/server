@@ -267,8 +267,9 @@ type testChinaResolver struct {
 }
 
 var testChinaResolvers = []testChinaResolver{
-	// 481 bytes whole; 948 to 2,297 trimmed under 512; 4,511 truncated, empty
-	{name: "DNSPod", wholeBytes: 481, trimBytes: 512, truncatedBytes: 4_511},
+	// 481 bytes whole; 948 to 2,297 trimmed at record boundaries to whole
+	// records in at most 462; 4,511 truncated, empty
+	{name: "DNSPod", wholeBytes: 481, trimBytes: 462, truncatedBytes: 4_511},
 	// 1,144 bytes whole; every larger answer trimmed to 1,151 to 1,204
 	{name: "Alidns", wholeBytes: 1_204, trimBytes: 1_204},
 }
@@ -294,24 +295,30 @@ func (self testChinaResolver) deliver(t testing.TB, records []string) ([]byte, [
 	return testExtenderDnsChinaAnswer(t, testExtenderDnsRecordName, kept, false), kept
 }
 
-// The records of China's TXT answer that every China resolver delivers whole:
-// all of them when each does, else none. A client takes the answer of
-// whichever resolver answers first.
-func testExtenderDnsChinaDeliveredWhole(t testing.TB, desiredSets []*extenderDnsRecordSet) ([]string, string) {
+// What China's resolvers hand a client of China's TXT answer: Alidns every
+// record of it, and DNSPod, which trims at record boundaries, a run of its
+// whole records, at least one. A failure says why when either does not. A
+// client takes the answer of whichever resolver answers first.
+func testExtenderDnsChinaDelivered(t testing.TB, desiredSets []*extenderDnsRecordSet) (*extenderDnsRecordSet, []string, string) {
 	t.Helper()
 	txtSet := testExtenderDnsChinaAnswerSet(desiredSets, route53.RRTypeTxt)
 	if txtSet == nil {
-		return nil, "no TXT set answers China"
+		return nil, nil, "no TXT set answers China"
 	}
 	whole := testExtenderDnsChinaAnswer(t, testExtenderDnsRecordName, txtSet.records, false)
+	delivered := map[string][]string{}
 	for _, resolver := range testChinaResolvers {
-		_, kept := resolver.deliver(t, txtSet.records)
-		if !slices.Equal(kept, txtSet.records) {
-			return nil, fmt.Sprintf("China is answered by %s, %d records in a %d-byte answer, and %s delivers %d of them",
-				txtSet.setIdentifier(), len(txtSet.records), len(whole), resolver.name, len(kept))
-		}
+		_, delivered[resolver.name] = resolver.deliver(t, txtSet.records)
 	}
-	return txtSet.records, ""
+	dnspod := delivered["DNSPod"]
+	wholeRecords := 0 < len(dnspod) && !slices.ContainsFunc(dnspod, func(record string) bool {
+		return !slices.Contains(txtSet.records, record)
+	})
+	if !slices.Equal(delivered["Alidns"], txtSet.records) || !wholeRecords {
+		return txtSet, nil, fmt.Sprintf("China is answered by %s, %d records in a %d-byte answer; Alidns delivers %d of them whole, DNSPod %d",
+			txtSet.setIdentifier(), len(txtSet.records), len(whole), len(delivered["Alidns"]), len(dnspod))
+	}
+	return txtSet, dnspod, ""
 }
 
 // The extender key a TXT value carries, hex.
@@ -337,15 +344,17 @@ func testExtenderDnsNonChinaSetIdentifiers(desiredSets []*extenderDnsRecordSet) 
 	return setIdentifiers
 }
 
-// China's own sets of a tick: a TXT set of recordCount records, each verifying
-// under rootPublicKey and the same bytes as the extender's record in every
-// other set of the tick, and an A and an AAAA set answering exactly the
+// China's own sets of a tick: a TXT set of minRecords to maxRecords records,
+// whole in Alidns's answer and each whole in DNSPod's trimmed one, each
+// verifying under rootPublicKey and the same bytes as the extender's record in
+// every other set of the tick, and an A and an AAAA set answering exactly the
 // addresses of the family those records name. A family none of them names has
 // no set of China's.
 func assertTestExtenderDnsChinaSets(
 	t testing.TB,
 	desiredSets []*extenderDnsRecordSet,
-	recordCount int,
+	minRecords int,
+	maxRecords int,
 	rootPublicKey ed25519.PublicKey,
 ) {
 	t.Helper()
@@ -362,10 +371,13 @@ func assertTestExtenderDnsChinaSets(
 		}
 	}
 	txtSet := chinaSets[route53.RRTypeTxt]
-	if txtSet == nil || len(txtSet.records) != recordCount {
-		t.Fatalf("China's own TXT set is %s, want %d records; China is answered by %s",
-			testExtenderDnsSetSummary(txtSet), recordCount,
+	if txtSet == nil || len(txtSet.records) < minRecords || maxRecords < len(txtSet.records) {
+		t.Fatalf("China's own TXT set is %s, want %d to %d records; China is answered by %s",
+			testExtenderDnsSetSummary(txtSet), minRecords, maxRecords,
 			testExtenderDnsSetSummary(testExtenderDnsChinaAnswerSet(desiredSets, route53.RRTypeTxt)))
+	}
+	if _, _, failure := testExtenderDnsChinaDelivered(t, desiredSets); failure != "" {
+		t.Fatal(failure)
 	}
 	keySet := connect.NewExtenderRootKeySet(rootPublicKey)
 	named := map[string][]string{}
@@ -411,11 +423,13 @@ func assertTestExtenderDnsChinaSets(
 	}
 }
 
-// Whatever the window of the tick, China's resolvers both deliver China's TXT
-// answer whole: one record by default, in an answer within DNSPod's 481
-// bytes. That holds for the longest records Main signs too. With three
-// records, Alidns still delivers them whole and DNSPod one of them.
-func TestExtenderDnsChinaIsAnsweredWholeByItsResolvers(t *testing.T) {
+// By default China is answered as many whole records as Alidns delivers --
+// four of the shortest records Main signs, three of the usual ones, two of the
+// longest -- and DNSPod, trimming that answer at record boundaries, still hands
+// its clients one whole record of it: the best for users (owner, 2026-11-12).
+// One record a lookup, which both would deliver whole, gave a client on Alidns
+// a third of what it can carry.
+func TestExtenderDnsChinaIsAnsweredAsManyWholeRecordsAsItsResolversDeliver(t *testing.T) {
 	mainSized := testExtenderDnsMainSizedAddresses()
 	addresses := testExtenderDnsChinaShapedAddresses()
 	signer := testExtenderDnsRealSigner(t, addresses, testExtenderDnsRootPrivateKey)
@@ -423,38 +437,26 @@ func TestExtenderDnsChinaIsAnsweredWholeByItsResolvers(t *testing.T) {
 		name      string
 		addresses []*model.NetworkExtenderDnsAddress
 		signer    extenderDnsRecordSigner
+		records   int
 	}{
-		// records of Main's average length on 11-12 in a directory of its shape
-		{"Main-sized", mainSized, testExtenderDnsSizedSigner(327)},
-		// the longest record in Main's sets on 11-12
-		{"368-character records", mainSized, testExtenderDnsSizedSigner(368)},
-		{"signed records", addresses, signer},
+		// the shortest, average and longest records in Main's sets on 11-12, in
+		// a directory of Main's shape
+		{"264-character records", mainSized, testExtenderDnsSizedSigner(264), 4},
+		{"Main-sized", mainSized, testExtenderDnsSizedSigner(327), 3},
+		{"368-character records", mainSized, testExtenderDnsSizedSigner(368), 2},
+		{"signed records", addresses, signer, 3},
 	} {
 		for rotation := range uint64(24) {
-			desiredSets := sampleTestExtenderDnsChinaSets(test.addresses, 8, testExtenderDnsEpoch, test.signer, 1, rotation)
-			records, failure := testExtenderDnsChinaDeliveredWhole(t, desiredSets)
+			desiredSets := sampleTestExtenderDnsChinaSets(test.addresses, 8, testExtenderDnsEpoch, test.signer, ExtenderDnsDefaultCnRecordCount, rotation)
+			txtSet, dnspod, failure := testExtenderDnsChinaDelivered(t, desiredSets)
 			if failure != "" {
 				t.Fatalf("%s, tick %d: %s", test.name, rotation, failure)
 			}
-			if len(records) != 1 {
-				t.Fatalf("%s, tick %d: China is answered %d records, want 1", test.name, rotation, len(records))
+			if len(txtSet.records) != test.records {
+				t.Fatalf("%s, tick %d: China is answered %d records, want the %d Alidns delivers whole", test.name, rotation, len(txtSet.records), test.records)
 			}
-		}
-	}
-
-	for rotation := range uint64(24) {
-		desiredSets := sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, signer, 3, rotation)
-		txtSet := testExtenderDnsChinaAnswerSet(desiredSets, route53.RRTypeTxt)
-		if txtSet == nil || len(txtSet.records) != 3 {
-			t.Fatalf("tick %d: with three records China's TXT answer is %s", rotation, testExtenderDnsSetSummary(txtSet))
-		}
-		for _, resolver := range testChinaResolvers {
-			want := 3
-			if resolver.name == "DNSPod" {
-				want = 1
-			}
-			if _, kept := resolver.deliver(t, txtSet.records); len(kept) != want {
-				t.Fatalf("tick %d: %s delivers %d of China's three records, want %d", rotation, resolver.name, len(kept), want)
+			if len(dnspod) != 1 {
+				t.Fatalf("%s, tick %d: DNSPod hands on %d of China's records, want one whole record", test.name, rotation, len(dnspod))
 			}
 		}
 	}
@@ -471,14 +473,14 @@ func TestExtenderDnsChinaSetRotatesThroughItsRanking(t *testing.T) {
 	signer := testExtenderDnsRealSigner(t, addresses, testExtenderDnsRootPrivateKey)
 	answered := func(epoch uint64, rotation uint64) string {
 		t.Helper()
-		records, failure := testExtenderDnsChinaDeliveredWhole(t, sampleTestExtenderDnsChinaSets(addresses, 8, epoch, signer, 1, rotation))
+		txtSet, _, failure := testExtenderDnsChinaDelivered(t, sampleTestExtenderDnsChinaSets(addresses, 8, epoch, signer, 1, rotation))
 		if failure != "" {
 			t.Fatalf("epoch %d, tick %d: %s", epoch, rotation, failure)
 		}
-		if len(records) != 1 {
-			t.Fatalf("epoch %d, tick %d: China is answered %d records, want 1", epoch, rotation, len(records))
+		if len(txtSet.records) != 1 {
+			t.Fatalf("epoch %d, tick %d: China is answered %d records, want 1", epoch, rotation, len(txtSet.records))
 		}
-		return testExtenderDnsRecordKeyHex(t, records[0])
+		return testExtenderDnsRecordKeyHex(t, txtSet.records[0])
 	}
 
 	sequence := []string{}
@@ -519,6 +521,32 @@ func TestExtenderDnsChinaSetRotatesThroughItsRanking(t *testing.T) {
 		t.Fatalf("a day of ticks answered China with %d extenders, fewer than one epoch's %d", len(day), len(ranking))
 	}
 	t.Logf("one epoch cycles through %d extenders; a day answers %d", len(ranking), len(day))
+
+	// With the default count and records so long that two fit, each tick's set
+	// still leads with the extender the one-record set of that tick holds:
+	// every extender heads a set once a cycle, which is the record a resolver
+	// that keeps one hands on, and every extender is in a set within the
+	// cycle, however many of a window fit.
+	longSigner := testExtenderDnsSizedSigner(368)
+	shown := map[string]bool{}
+	for rotation := range uint64(2 * len(ranking)) {
+		one := testExtenderDnsChinaAnswerSet(sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, longSigner, 1, rotation), route53.RRTypeTxt)
+		txtSet, _, failure := testExtenderDnsChinaDelivered(t, sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, longSigner, ExtenderDnsDefaultCnRecordCount, rotation))
+		if failure != "" {
+			t.Fatalf("368-character records, tick %d: %s", rotation, failure)
+		}
+		if one == nil || len(txtSet.records) != 2 || txtSet.records[0] != one.records[0] {
+			t.Fatalf("368-character records, tick %d: China's set of %d records does not lead with the extender of the tick's one-record set", rotation, len(txtSet.records))
+		}
+		if rotation < uint64(len(ranking)) {
+			for _, record := range txtSet.records {
+				shown[record] = true
+			}
+		}
+	}
+	if len(shown) != len(ranking) {
+		t.Fatalf("one cycle of two-record sets answered China with %d of its %d extenders", len(shown), len(ranking))
+	}
 }
 
 // A dns canary of Asia stays at the head of China's set while a slot is left
@@ -560,11 +588,11 @@ func TestExtenderDnsChinaSetKeepsItsCanariesFirst(t *testing.T) {
 	canaryTicks := 0
 	for rotation := range uint64(32) {
 		desiredSets := sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, signer, 1, rotation)
-		records, failure := testExtenderDnsChinaDeliveredWhole(t, desiredSets)
+		txtSet, _, failure := testExtenderDnsChinaDelivered(t, desiredSets)
 		if failure != "" {
 			t.Fatalf("tick %d: %s", rotation, failure)
 		}
-		if len(records) == 1 && testExtenderDnsRecordKeyHex(t, records[0]) == canaryKeyHex {
+		if len(txtSet.records) == 1 && testExtenderDnsRecordKeyHex(t, txtSet.records[0]) == canaryKeyHex {
 			canaryTicks += 1
 		}
 	}
@@ -580,11 +608,11 @@ func TestExtenderDnsChinaSetKeepsItsCanariesFirst(t *testing.T) {
 func TestExtenderDnsChinaIsAnsweredOnlyAddressesItsRecordsVouchFor(t *testing.T) {
 	addresses := testExtenderDnsChinaShapedAddresses()
 	signer := testExtenderDnsRealSigner(t, addresses, testExtenderDnsRootPrivateKey)
-	for _, recordCount := range []int{1, 2} {
+	for _, recordCount := range []int{1, 2, ExtenderDnsDefaultCnRecordCount} {
 		for rotation := range uint64(24) {
 			desiredSets := sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, signer, recordCount, rotation)
 			// a record Alidns delivers whole vouches for its addresses to the
-			// clients it answers; with one record DNSPod's clients get it too
+			// clients it answers; DNSPod's clients get one of them
 			records := []string{}
 			if txtSet := testExtenderDnsChinaAnswerSet(desiredSets, route53.RRTypeTxt); txtSet != nil {
 				_, records = testChinaResolvers[1].deliver(t, txtSet.records)
@@ -623,11 +651,12 @@ func TestExtenderDnsChinaIsAnsweredOnlyAddressesItsRecordsVouchFor(t *testing.T)
 	}
 }
 
-// A released client reads China's answer whole and accepts every record of
-// it, through each of China's resolvers: the reader of connect v2026.10.27
-// (mirrored, testReleasedReaderTxts) and connect's own DoH TXT query against a
-// server that answers as the resolver does, each value decoded as a client
-// decodes it and verified under the root key.
+// A released client reads every record a resolver of China hands it and
+// accepts each: through Alidns the whole of China's answer, through DNSPod
+// the whole records it trimmed the answer to, at least one. Read by the reader
+// of connect v2026.10.27 (mirrored, testReleasedReaderTxts) and by connect's
+// own DoH TXT query against a server that answers as the resolver does, each
+// value decoded as a client decodes it and verified under the root key.
 func TestExtenderDnsChinaAnswerReadsAsAReleasedClientReadsIt(t *testing.T) {
 	addresses := testExtenderDnsChinaShapedAddresses()
 	signer := testExtenderDnsRealSigner(t, addresses, testExtenderDnsRootPrivateKey)
@@ -656,13 +685,13 @@ func TestExtenderDnsChinaAnswerReadsAsAReleasedClientReadsIt(t *testing.T) {
 	}
 
 	for rotation := range uint64(4) {
-		desiredSets := sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, signer, 1, rotation)
-		txtSet := testExtenderDnsChinaAnswerSet(desiredSets, route53.RRTypeTxt)
-		if txtSet == nil {
-			t.Fatalf("tick %d: no TXT set answers China", rotation)
+		desiredSets := sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, signer, ExtenderDnsDefaultCnRecordCount, rotation)
+		txtSet, _, failure := testExtenderDnsChinaDelivered(t, desiredSets)
+		if failure != "" {
+			t.Fatalf("tick %d: %s", rotation, failure)
 		}
 		for _, resolver := range testChinaResolvers {
-			answer, _ := resolver.deliver(t, txtSet.records)
+			answer, delivered := resolver.deliver(t, txtSet.records)
 			servedLock.Lock()
 			served = answer
 			servedLock.Unlock()
@@ -670,9 +699,9 @@ func TestExtenderDnsChinaAnswerReadsAsAReleasedClientReadsIt(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			current := connect.DohQueryTxt(ctx, settings, testExtenderDnsRecordName)
 			cancel()
-			if !slices.Equal(released, txtSet.records) || !slices.Equal(current, txtSet.records) {
-				t.Fatalf("tick %d: through %s a released client reads %d and connect %d of %s's %d records (a %d-byte answer)",
-					rotation, resolver.name, len(released), len(current), txtSet.setIdentifier(), len(txtSet.records), len(answer))
+			if len(delivered) == 0 || !slices.Equal(released, delivered) || !slices.Equal(current, delivered) {
+				t.Fatalf("tick %d: through %s, which hands on %d of %s's %d records (a %d-byte answer), a released client reads %d and connect %d",
+					rotation, resolver.name, len(delivered), txtSet.setIdentifier(), len(txtSet.records), len(answer), len(released), len(current))
 			}
 			for _, txt := range current {
 				message, err := connect.DecodeExtenderDnsRecord(txt)
@@ -709,7 +738,7 @@ func TestExtenderDnsChinaSetLeavesEveryOtherLocationAlone(t *testing.T) {
 		for _, epoch := range []uint64{testExtenderDnsEpoch, testExtenderDnsEpoch + 1} {
 			without := sampleExtenderDnsRecordSets(addresses, 8, testExtenderDnsSecret, epoch, signer)
 			with := []*extenderDnsRecordSet{}
-			for _, desiredSet := range sampleTestExtenderDnsChinaSets(addresses, 8, epoch, signer, 1, epoch*7) {
+			for _, desiredSet := range sampleTestExtenderDnsChinaSets(addresses, 8, epoch, signer, ExtenderDnsDefaultCnRecordCount, epoch*7) {
 				geoLocation := extenderDnsResourceRecordSet(testExtenderDnsRecordName, testExtenderDnsTtl, desiredSet).GeoLocation
 				if aws.StringValue(geoLocation.CountryCode) == "CN" {
 					continue
@@ -730,15 +759,14 @@ func TestExtenderDnsChinaSetLeavesEveryOtherLocationAlone(t *testing.T) {
 	}
 }
 
-// The country gauge says what Route 53 accepted of China's sets: its one
-// record and the addresses that record vouches for, and a zero TXT value on a
-// tick Route 53 refused TXT sets, while the address sets that landed still
-// count.
+// The country gauge says what Route 53 accepted of China's sets: its records
+// and the addresses they vouch for, and a zero TXT value on a tick Route 53
+// refused TXT sets, while the address sets that landed still count.
 func TestExtenderDnsChinaGaugeReportsWhatRoute53Accepted(t *testing.T) {
 	addresses := testExtenderDnsChinaShapedAddresses()
 	signer := testExtenderDnsRealSigner(t, addresses, testExtenderDnsRootPrivateKey)
 	for _, refusedRecordType := range []string{"", route53.RRTypeTxt} {
-		desiredSets := sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, signer, 1, 3)
+		desiredSets := sampleTestExtenderDnsChinaSets(addresses, 8, testExtenderDnsEpoch, signer, ExtenderDnsDefaultCnRecordCount, 3)
 		api := newTestQuotaRoute53Api()
 		api.refusedRecordType = refusedRecordType
 		publisher := &route53ExtenderDnsPublisher{api: api, hostedZoneId: testExtenderDnsHostedZoneId}
@@ -757,8 +785,8 @@ func TestExtenderDnsChinaGaugeReportsWhatRoute53Accepted(t *testing.T) {
 				landed[aws.StringValue(recordSet.Type)] += float64(len(recordSet.ResourceRecords))
 			}
 		}
-		if refusedRecordType == "" && (landed[route53.RRTypeTxt] != 1 || landed[route53.RRTypeA] == 0) {
-			t.Fatalf("Route 53 holds %v of China's records by type, want one TXT record and its addresses", landed)
+		if refusedRecordType == "" && (landed[route53.RRTypeTxt] < 2 || landed[route53.RRTypeA] != landed[route53.RRTypeTxt]) {
+			t.Fatalf("Route 53 holds %v of China's records by type, want the records Alidns delivers whole and an address of each", landed)
 		}
 		for _, recordType := range extenderDnsRecordTypes {
 			want := landed[recordType]
@@ -792,6 +820,6 @@ func TestExtenderDnsPublishAnswersChinaWithItsConfiguredRecordCount(t *testing.T
 		}
 
 		runTestExtenderPublish(t, ctx)
-		assertTestExtenderDnsChinaSets(t, publisher.onlyApply(t).upsertSets, 2, rootPublicKey)
+		assertTestExtenderDnsChinaSets(t, publisher.onlyApply(t).upsertSets, 2, 2, rootPublicKey)
 	})
 }

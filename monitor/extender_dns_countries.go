@@ -55,7 +55,10 @@ package monitor
 //     cut records off, or the answer holds fewer records than the operator's
 //     set for the resolver's location, which the name's authoritative
 //     nameservers give from here and with the resolver's /24 as the EDNS
-//     client subnet, matched by extender key;
+//     client subnet, matched by extender key -- except a run of whole,
+//     decodable records from a resolver known to cut what it cannot carry
+//     that way (TrimmingResolvers, DNSPod), of a set larger than it delivers
+//     whole, which is its trim (acceptTrim);
 //   - unreachable from here: no answer (from a plain resolver, to neither the
 //     TXT question nor the A question asked after it), a refusal or a server
 //     failure. Some regional resolvers refuse foreign questions, so this is
@@ -503,13 +506,15 @@ func extenderDnsFailureReason(err error) string {
 	}
 }
 
-// The operator's TXT set for one location, by extender key.
+// The operator's TXT set for one location, by extender key, and the size of
+// a resolver's answer that carries it whole.
 type extenderDnsAuthoritySet struct {
-	ok   bool
-	keys map[string]bool
+	ok          bool
+	keys        map[string]bool
+	answerBytes int
 }
 
-func newExtenderDnsAuthoritySet(observation DNSResponseObservation, err error, now time.Time, maxRecords int) extenderDnsAuthoritySet {
+func newExtenderDnsAuthoritySet(observation DNSResponseObservation, err error, now time.Time, maxRecords int, name string) extenderDnsAuthoritySet {
 	if err != nil {
 		return extenderDnsAuthoritySet{}
 	}
@@ -518,11 +523,46 @@ func newExtenderDnsAuthoritySet(observation DNSResponseObservation, err error, n
 	default:
 		return extenderDnsAuthoritySet{}
 	}
-	set := extenderDnsAuthoritySet{ok: true, keys: map[string]bool{}}
+	set := extenderDnsAuthoritySet{ok: true, keys: map[string]bool{}, answerBytes: extenderDnsTxtAnswerSize(name, observation.Texts)}
 	for _, key := range observeExtenderDnsRecords(observation.Texts, now, maxRecords).keys {
 		set.keys[key] = true
 	}
 	return set
+}
+
+// The bytes of a resolver's TXT answer of these values for name: the header,
+// the question, each value as a record of strings of at most 255 bytes under
+// a compressed owner name, and an OPT record with an IPv4 /24 client subnet,
+// the shape China's resolvers answered the probe in on 2026-11-12.
+func extenderDnsTxtAnswerSize(name string, values []string) int {
+	size := 12 + len(absoluteDNSName(name)) + 1 + 4 + 11 + 11
+	for _, value := range values {
+		size += 2 + 10 + max(1, (len(value)+254)/255) + len(value)
+	}
+	return size
+}
+
+// A resolver known to cut an answer it cannot carry to a run of its whole
+// records rather than mark it truncated (settings.TrimmingResolvers): a run of
+// whole records of the location's set, each decoding as a record, when the set
+// is larger than the resolver delivers whole, is its trim and not a partial
+// set. China's own set is sized so Alidns delivers it whole and DNSPod one
+// whole record of it (owner, 2026-11-12). An empty answer, or one with a value
+// that does not decode, is judged as before.
+func (self *extenderDnsCountryJudgment) acceptTrim(wholeBytes int, vantage extenderDnsAuthoritySet, subnet extenderDnsAuthoritySet) {
+	if !slices.Equal(self.partialReasons, []string{"fewer_than_authoritative"}) ||
+		self.observation.undecodable != 0 || self.observation.other != 0 || self.observation.records == 0 {
+		return
+	}
+	matched := vantage
+	if self.authority == "client_subnet" {
+		matched = subnet
+	}
+	if matched.answerBytes <= wholeBytes {
+		return
+	}
+	self.partialReasons = nil
+	self.trimmed = true
 }
 
 // Whether keys are exactly the set's.
@@ -585,6 +625,9 @@ type extenderDnsCountryJudgment struct {
 	// nothing shows whether the set is partial: the authoritative set could
 	// not be read, and the client's read cut nothing off
 	partialUnknown bool
+	// a resolver known to trim cut the set to a run of its whole records
+	// (acceptTrim)
+	trimmed bool
 }
 
 // Judges one answer against the authoritative sets from here and for the
@@ -725,7 +768,7 @@ func (self extenderDnsRecordsProbe) checkCountries(ctx context.Context, env *pro
 			servers = discovered
 		}
 		observation, err := env.runner.dnsTxtAuthoritative(ctx, name, servers, netip.Prefix{})
-		vantage = newExtenderDnsAuthoritySet(observation, err, now, settings.MaxRecords)
+		vantage = newExtenderDnsAuthoritySet(observation, err, now, settings.MaxRecords, name)
 	})
 	for _, questions := range countryQuestions {
 		for _, question := range questions {
@@ -780,7 +823,7 @@ func (self extenderDnsRecordsProbe) checkCountries(ctx context.Context, env *pro
 	for _, prefix := range prefixes {
 		launcher.launch(func(ctx context.Context) {
 			observation, err := env.runner.dnsTxtAuthoritative(ctx, name, servers, prefix)
-			set := newExtenderDnsAuthoritySet(observation, err, now, settings.MaxRecords)
+			set := newExtenderDnsAuthoritySet(observation, err, now, settings.MaxRecords, name)
 			subnetLock.Lock()
 			subnetSets[prefix] = set
 			subnetLock.Unlock()
@@ -798,6 +841,9 @@ func (self extenderDnsRecordsProbe) checkCountries(ctx context.Context, env *pro
 				subnet = subnetSets[prefix]
 			}
 			question.judgment = judgeExtenderDnsCountryAnswer(question.answer, now, settings, vantage, subnet)
+			if wholeBytes, ok := settings.TrimmingResolvers[question.resolver.Endpoint]; ok {
+				question.judgment.acceptTrim(wholeBytes, vantage, subnet)
+			}
 		}
 	}
 	return self.countryFindings(settings, countryQuestions, name, zoneTarget, zoneReasons, now)
@@ -901,7 +947,7 @@ func (self extenderDnsRecordsProbe) countryFindings(settings *ExtenderDnsRecords
 					probeId: extenderDnsRecordsProbeId, tier: tierWarn, class: "extender-dns-country-stale", target: target, sustain: settings.Sustain,
 					symptom:   fmt.Sprintf("Clients %s that resolve the extender records through %s get no fresh records: %s", extenderDnsCountryClients(country), question.resolver.Name, strings.Join(judgment.staleReasons, ", ")),
 					mechanism: fmt.Sprintf("A client resolves the extender record name through its connection region's resolvers, which the sdk names per country: the region's DoH servers first, read 16 KiB deep, then its plain resolvers only when DoH yields no TXT value. It verifies each signed record of the answer and adds it to its directory. This resolver, on that path, gave no fresh record: none served, none a client keeps (an answer marked truncated with none, one carrying a policy extended dns error, or a TXT question left unanswered by a resolver that answers the A question), none that decodes, or only records issued over %s ago or expired. A client whose lookup lands here learns no extender from DNS.", settings.MaxNewestAge),
-					baseline:  fmt.Sprintf("Every resolver on a region's path serves the whole TXT set of its location (13 to 15 records, about 5 KB, from Route 53 on 2026-11-12; China's own set, one record of about 0.4 KB by default, from the same day), the newest issued within about 11 minutes. WARN when this resolver, on the path a client of the region takes, serves no fresh record for %d consecutive runs %s apart.", settings.Sustain, self.cadence()),
+					baseline:  fmt.Sprintf("Every resolver on a region's path serves the whole TXT set of its location (13 to 15 records, about 5 KB, from Route 53 on 2026-11-12; China's own set, about three records in about 1.1 KB, from the same day, of which DNSPod hands on one whole record), the newest issued within about 11 minutes. WARN when this resolver, on the path a client of the region takes, serves no fresh record for %d consecutive runs %s apart.", settings.Sustain, self.cadence()),
 					observed:  extenderDnsCountryObserved(question, now, pathUnreachable, blind, judgment.staleReasons),
 					evidence:  extenderDnsCountryEvidence(settings),
 					context:   extenderDnsCountryContext(name),
@@ -916,11 +962,11 @@ func (self extenderDnsRecordsProbe) countryFindings(settings *ExtenderDnsRecords
 					probeId: extenderDnsRecordsProbeId, tier: tierWarn, class: "extender-dns-country-partial", target: target, sustain: settings.Sustain,
 					symptom:   fmt.Sprintf("Clients %s that resolve the extender records through %s get a partial set: %s", extenderDnsCountryClients(country), question.resolver.Name, extenderDnsPartialSummary(question)),
 					mechanism: "A client resolves the extender record name through its connection region's resolvers, which the sdk names per country, keeps the signed records of the TXT answer it reads, and dials only the addresses those records vouch for. This resolver's answer gave a client fewer records than the operator's set for the resolver's location: the client's 16 KiB read of the DoH answer cut records off (client_cap), or the resolver trimmed the set without marking it truncated (fewer_than_authoritative, against Route 53's answer for the location, asked directly). A client whose lookup lands here learns only part of the location's extenders.",
-					baseline:  fmt.Sprintf("Every resolver on a region's path serves the whole TXT set of its location (13 to 15 records, about 5 KB, from Route 53 on 2026-11-12; China's own set, one record of about 0.4 KB by default, from the same day). WARN when this resolver, on the path a client of the region takes, gives a client fewer records than the location's set for %d consecutive runs %s apart.", settings.Sustain, self.cadence()),
+					baseline:  fmt.Sprintf("Every resolver on a region's path serves the whole TXT set of its location (13 to 15 records, about 5 KB, from Route 53 on 2026-11-12; China's own set, about three records in about 1.1 KB, from the same day, of which DNSPod hands on one whole record). WARN when this resolver, on the path a client of the region takes, gives a client fewer records than the location's set for %d consecutive runs %s apart.", settings.Sustain, self.cadence()),
 					observed:  extenderDnsCountryObserved(question, now, pathUnreachable, blind, judgment.partialReasons),
 					evidence:  extenderDnsCountryEvidence(settings),
 					context:   extenderDnsCountryContext(name),
-					action:    "Compare the resolver's answer with Route 53's for its location: `dig +tcp +subnet=<resolver ip>/24 TXT " + name + " @<resolver ip>` against `dig +tcp +norec +subnet=<resolver ip>/24 TXT " + name + " @<a nameserver of the name>` (`dig NS " + name + "`). client_cap: the location's set is larger than a client reads in one DoH answer; read the publisher's TXT budget (extenderDnsTxtMaxAnswerBytes, taskworker/work/extender_dns_publish.go) against the answer's response_bytes. fewer_than_authoritative alone: the resolver trims the set; the location's TXT set must fit what the resolver carries, or the resolver belongs out of the sdk's per-country table (connect net_http_doh_regional.go). China's own set is held to what Alidns and DNSPod delivered whole on 2026-11-12 (extenderDnsCnDnspodMaxMessageBytes, extenderDnsCnAlidnsMaxMessageBytes, and the dns block's cn_record_count, 1 by default); a partial cn answer of that set means a resolver's ceiling moved, or cn_record_count was raised past DNSPod's one record.",
+					action:    "Compare the resolver's answer with Route 53's for its location: `dig +tcp +subnet=<resolver ip>/24 TXT " + name + " @<resolver ip>` against `dig +tcp +norec +subnet=<resolver ip>/24 TXT " + name + " @<a nameserver of the name>` (`dig NS " + name + "`). client_cap: the location's set is larger than a client reads in one DoH answer; read the publisher's TXT budget (extenderDnsTxtMaxAnswerBytes, taskworker/work/extender_dns_publish.go) against the answer's response_bytes. fewer_than_authoritative alone: the resolver trims the set; the location's TXT set must fit what the resolver carries, or the resolver belongs out of the sdk's per-country table (connect net_http_doh_regional.go). China's own set is held to what Alidns delivered whole on 2026-11-12 (extenderDnsCnAlidnsMaxMessageBytes, capped by the dns block's cn_record_count), each record within what DNSPod's trimmed answers ran to (extenderDnsCnDnspodMaxMessageBytes); DNSPod's run of whole records of it is its trim and is not reported, so a partial cn answer means Alidns's ceiling moved or DNSPod's answer held a value that does not decode.",
 					verify:    "A run reads the location's whole set through the resolver.",
 					playbook:  "SIGNALS.md §28.2",
 				})
