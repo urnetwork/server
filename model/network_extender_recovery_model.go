@@ -72,6 +72,7 @@ func GetNetworkExtenderRecoveryProbeTargets(
 			SELECT
 				network_extender.extender_id,
 				network_extender.network_id,
+				network_extender.client_id,
 				network_extender.public_key,
 				network_extender.tcp_port,
 				network_extender.dns_tld,
@@ -102,6 +103,9 @@ func GetNetworkExtenderRecoveryProbeTargets(
 				server.Raise(result.Scan(
 					&target.ExtenderId,
 					&target.NetworkId,
+					// the client a webrtc address's return is probed through
+					// (connect/EXTENDER.md S8)
+					&target.ClientId,
 					&target.PublicKey,
 					&target.TcpPort,
 					&target.DnsTld,

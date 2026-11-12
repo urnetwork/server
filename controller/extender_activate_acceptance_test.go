@@ -32,6 +32,10 @@ const (
 // as an activation passes them on.
 var testAcceptanceDnsPorts = []int{53, 4053}
 
+// The tcp challenge's share of an activation that offers webrtc beside tcp,
+// the operator's default (ExtenderActivateSettings.TcpChallengeTimeout).
+var testActivationTcpChallengeTimeout = DefaultExtenderActivateSettings().TcpChallengeTimeout
+
 // Fake probes that answer from a table, and log each probe in the order it
 // was made as "<carrier>:<port>" or "forward".
 type testActivationProbes struct {
@@ -45,6 +49,11 @@ type testActivationProbes struct {
 	forwardErr           error
 	// answers the forward in place of forwardErr when set
 	forwardAnswer func(ctx context.Context) error
+	// the caller address the webrtc test's forward reports, or its error;
+	// webRtcAnswer answers in place of both when set (connect/EXTENDER.md S8)
+	webRtcClientAddress string
+	webRtcErr           error
+	webRtcAnswer        func(ctx context.Context) (string, error)
 
 	// the clock the activation is judged on, which only the fakes move
 	clock *testActivationClock
@@ -65,6 +74,7 @@ func newTestActivationProbes() *testActivationProbes {
 	return &testActivationProbes{
 		carrierErrs:          map[string]error{},
 		forwardClientAddress: "192.0.2.10:443",
+		webRtcClientAddress:  "192.0.2.10:443",
 		clock:                newTestActivationClock(),
 	}
 }
@@ -103,6 +113,16 @@ func (self *testActivationProbes) activationProbes() *extenderActivationProbes {
 			}
 			return self.forwardClientAddress, nil
 		},
+		webRtc: func(ctx context.Context) (string, error) {
+			self.logProbe(connect.ExtenderCarrierWebRtc)
+			if self.webRtcAnswer != nil {
+				return self.webRtcAnswer(ctx)
+			}
+			if self.webRtcErr != nil {
+				return "", self.webRtcErr
+			}
+			return self.webRtcClientAddress, nil
+		},
 	}
 }
 
@@ -113,6 +133,7 @@ func (self *testActivationProbes) judge(ctx context.Context, carriers ...string)
 		ctx,
 		self.clock.activationClock(),
 		self.activationProbes(),
+		testActivationTcpChallengeTimeout,
 		carriers,
 		testAcceptanceTcpPort,
 		testAcceptanceUdpPort,

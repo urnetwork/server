@@ -577,6 +577,13 @@ func ConnectControlFrames(
 				// One in any other pack is a no-op, so its error cannot make
 				// the client drop the replies of the frames beside it.
 
+			case *protocol.ExchangeSignals:
+				// an extender's answer to a webrtc carrier offer the resident
+				// relayed from the control id (connect/EXTENDER.md S8). The
+				// resident's internal client takes it on its own signal
+				// receive path, which waits for it; here it is a no-op, so the
+				// answer is no control failure
+
 			case *protocol.ResidentMoveResult:
 				// validated against the client's move intent in Redis, since
 				// any control path can carry it (resident_move_result.go)
