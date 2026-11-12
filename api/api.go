@@ -409,6 +409,15 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
 		router.NewRoute("GET", "/sn/ledger/object", handlers.SnLedgerObject),
 		router.NewRoute("GET", "/sn/ledger/account", handlers.SnLedgerAccount),
+		// capture the flag (sn CAPTURETHEFLAG.md §9.1) and the document of
+		// these routes, sn/api/operator.yml
+		router.NewRoute("GET", "/sn/ctf", handlers.SnCtf),
+		router.NewRoute("GET", "/sn/ctf/here", handlers.SnCtfHere),
+		router.NewRoute("GET", "/sn/ctf/client", handlers.SnCtfClient),
+		router.NewRoute("GET", "/sn/ctf/top", handlers.SnCtfTop),
+		router.NewRoute("GET", "/sn/ctf/country/([^/]+)", handlers.SnCtfCountry),
+		router.NewRoute("GET", "/sn/ctf/epoch/([^/]+)", handlers.SnCtfEpoch),
+		router.NewRoute("GET", "/sn/openapi\\.yml", handlers.SnOpenApi),
 		// the claim relay (apple BTEASY.md): what is pending and why, and Claim now
 		router.NewRoute("GET", "/sn/claim-relay", handlers.SnClaimRelay),
 		router.NewRoute("POST", "/sn/claim-relay/claim-now", handlers.SnClaimRelayClaimNow),
