@@ -224,6 +224,10 @@ func StLedgerV2AccountsPartial(ctx context.Context, coldkey [32]byte) (*StLedger
 // replaces it to record a root while the record is read.
 var stLedgerV2ColdkeyAccounts = model.GetStLedgerV2AccountsForColdkey
 
+// stLedgerV2PendingRoot reads a pool's pending root. A test replaces it to
+// finalize the root while it is read.
+var stLedgerV2PendingRoot = model.GetStLedgerV2PendingRoot
+
 // stLedgerV2Count is the number of a pool's recorded accounts, read before
 // the account record, or why it could not be read.
 type stLedgerV2Count struct {
@@ -321,8 +325,14 @@ func stLedgerV2Guard(read func() error) (err error) {
 // accounts counted before the account index was read.
 func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, coldkey [32]byte, index uint64, recorded bool, count stLedgerV2Count) (*StLedgerV2AccountEntry, error) {
 	deploymentKey := cfg.DeploymentKey()
+	// The pending root is read before the latest finalized root: a root that
+	// finalizes between the reads is then the finalized root, never in
+	// neither read, and read in both it is no longer pending.
+	pending := stLedgerV2PendingRoot(ctx, deploymentKey, noId)
 	finalized := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, noId)
-	pending := model.GetStLedgerV2PendingRoot(ctx, deploymentKey, noId)
+	if pending != nil && finalized != nil && pending.Seq == finalized.Seq {
+		pending = nil
+	}
 	if finalized == nil && pending == nil && !recorded {
 		// no root holds any account of the pool, like the capture the flag
 		// pool's before its first

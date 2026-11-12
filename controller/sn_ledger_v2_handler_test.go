@@ -493,6 +493,69 @@ func TestSnLedgerAccountFindsAnAccountRecordedDuringTheRead(t *testing.T) {
 	})
 }
 
+// The race a root finalizing during a read could lose: the pending root that
+// appends C's account finalizes while the route reads the pool's roots. Read
+// in the old order, the latest finalized root before it finalized and the
+// pending root after, C was in neither. The route reads the pending root
+// first, so C is found in one of them: finalized just before the pending read,
+// C is in the finalized root alone; just after, the same root is read in both,
+// and it is the finalized root, no longer pending. Either way the poll
+// answers C's finalized account, with no pending cumulative.
+func TestSnLedgerAccountFindsAnAccountWhoseRootFinalizesBeforeThePendingRead(t *testing.T) {
+	testSnLedgerAccountRootFinalizingDuringTheRead(t, false)
+}
+
+func TestSnLedgerAccountFindsAnAccountWhoseRootFinalizesAfterThePendingRead(t *testing.T) {
+	testSnLedgerAccountRootFinalizingDuringTheRead(t, true)
+}
+
+// testSnLedgerAccountRootFinalizingDuringTheRead finalizes root 1 just before
+// the route's read of the pending root, or just after it.
+func testSnLedgerAccountRootFinalizingDuringTheRead(t *testing.T, finalizedAfter bool) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newLedgerV2EndpointFixture(t)
+		f.chain.claimed[[2]uint64{1, 2}] = *uint256.NewInt(100)
+		read := stLedgerV2PendingRoot
+		t.Cleanup(func() { stLedgerV2PendingRoot = read })
+		finalizations := 0
+		finalize := func(noId uint64) {
+			if noId == 1 && finalizations == 0 {
+				finalizations++
+				one := uint64(1)
+				f.mirror(1, 2, f.root1, &one)
+			}
+		}
+		stLedgerV2PendingRoot = func(ctx context.Context, deploymentKey model.StDeploymentKey, noId uint64) *model.StLedgerV2Root {
+			if !finalizedAfter {
+				finalize(noId)
+			}
+			root := read(ctx, deploymentKey, noId)
+			if finalizedAfter {
+				finalize(noId)
+			}
+			return root
+		}
+		nodes, err := f.root1.Tree.Proof(2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof := []string{}
+		for _, node := range nodes {
+			proof = append(proof, fmt.Sprintf(`{"hash":"0x%x","sum":"%s"}`, node.Hash, node.Sum.Dec()))
+		}
+		want := fmt.Sprintf(`{"coldkey":"%s","accounts":[{"vault":"%s","no_id":1,"kind":"pool","label":"Pool 1","index":2,"root_index":1,"cumulative":"1000","proof":[%s],"claimed":"100","pending_cumulative":null}],"unavailable_pools":[]}`,
+			ledgerV2Hex(ledgerV2C), testLedgerV2Vault, strings.Join(proof, ","))
+		response := getLedgerV2Account(ledgerV2Hex(ledgerV2C))
+		if finalizations != 1 {
+			t.Fatalf("root 1 finalized %d times during the read", finalizations)
+		}
+		requireLedgerV2Answer(t, response, http.StatusOK, want)
+		if verified := requireLedgerV2ProofsVerify(t, f, response.Body.Bytes()); verified != 1 {
+			t.Fatalf("%d proofs verified", verified)
+		}
+	})
+}
+
 // SV-3 (malformed input): a coldkey that is neither an ss58 address with the
 // Bittensor prefix nor 0x and 64 hex digits is a 400.
 func TestSnLedgerAccountRefusesMalformedColdkeys(t *testing.T) {
@@ -883,6 +946,17 @@ func TestSnLedgerAccountAnswersOldClientsThroughACtfPoolFault(t *testing.T) {
 		// named to a partial=true client.
 		unavailable := ledgerV2Problem(http.StatusBadGateway, SnProblemLedgerUnavailable, "Ledger account unavailable.")
 		poolUnavailable := fmt.Sprintf(`{"vault":"%s","no_id":1,"kind":"pool","label":"Pool 1"}`, vault)
+		// A count of its accounts that cannot be read fails it only for a
+		// coldkey it does not record: C, only in its pending root, is a 502
+		// and named, while A, which it records, is answered whole.
+		exec(`INSERT INTO st_ledger_v2_account (deployment_key, no_id, account_index, coldkey, root_index, create_time) VALUES ($1, 1, $2, $3, 0, now())`, key, int64(math.MaxInt64), ledgerV2Z[:])
+		requireLedgerV2Answer(t, get(ledgerV2C, false), http.StatusBadGateway, unavailable)
+		requireLedgerV2Answer(t, get(ledgerV2C, true), http.StatusOK, answer(ledgerV2C, "", "["+poolUnavailable+"]"))
+		for _, partial := range []bool{false, true} {
+			requireLedgerV2Answer(t, get(ledgerV2A, partial), http.StatusOK, answer(ledgerV2A, before[ledgerV2A]+","+ctfEntry(), "[]"))
+		}
+		exec(`DELETE FROM st_ledger_v2_account WHERE deployment_key = $1 AND no_id = 1 AND account_index = $2`, key, int64(math.MaxInt64))
+		readable()
 		f.chain.failNext("claimed", errors.New("vault2 claimed(1, 0): rpc down"))
 		requireLedgerV2Answer(t, get(ledgerV2A, false), http.StatusBadGateway, unavailable)
 		f.chain.failNext("claimed", errors.New("vault2 claimed(1, 0): rpc down"))
