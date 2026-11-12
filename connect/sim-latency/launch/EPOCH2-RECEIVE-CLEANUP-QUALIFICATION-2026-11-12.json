@@ -102,7 +102,27 @@
     "source_and_dependencies_unchanged": true,
     "existing_live_worker_and_staged_fallback_unchanged": true,
     "frozen_product_source_baseline_and_evaluator_image_unchanged": true,
-    "staging_pending": true
+    "staging_pending": false
+  },
+  "staging_only": {
+    "release_root": "/usr/local/libexec/urnetwork/competition-worker-receive-cleanup-698d94c44-go1274-20261112-v1",
+    "helper_source_sha256": "b1781b7634d7ebf03baaf1129227a9d035b6b084ec66aa7ab11c69440a1643c0",
+    "helper_binary_sha256": "5c92a7993d237e68490d563389be9e4d1f795507e4b70066968ed9c4055d858c",
+    "receipt_sha256": "d03561d0a5f40a68a62848e56e7cf125fd679c96c805e940854176eee3516b40",
+    "wrapper_path": "/etc/urnetwork/competition-coordinator-worker-receive-cleanup-698d94c44-20261112-v1/worker",
+    "wrapper_sha256": "f00c4f81e4642f3071a152db7656b3db90dc4ce1bd781b4bc581e0d428206d41",
+    "candidate_basename": "99-zzzzzzzzzzzzz-epoch2-receive-cleanup-20261112.conf",
+    "candidate_sha256": "aa0a20c10f73f2dbc152f75fb1a5748fb38a3b34ec33d6d3108ee5887d03da0a",
+    "candidate_inside_release_only": true,
+    "actual_live_override_absent": true,
+    "root_owner_modes_and_nonsymlink_files_independently_verified": true,
+    "wrapper_exactly_four_expected_literal_replacements": true,
+    "coordinator_baseline_and_worker_identity_pins_preserved": true,
+    "independent_verification_passed": true,
+    "existing_worker_and_prior_staged_release_unchanged": true,
+    "systemd_need_daemon_reload": false,
+    "service_reloaded": false,
+    "service_restarted": false
   },
   "deployed": false,
   "runtime_restarted": false,
