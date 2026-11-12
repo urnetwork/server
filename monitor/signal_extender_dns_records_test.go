@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -30,7 +31,7 @@ type extenderDnsSyntheticSource struct {
 	txtFn     func(resolver string, hostname string) (DNSResponseObservation, error)
 }
 
-func (self *extenderDnsSyntheticSource) DNSTxt(_ context.Context, resolver, hostname string) (DNSResponseObservation, error) {
+func (self *extenderDnsSyntheticSource) DNSTxt(_ context.Context, resolver, hostname string, _ netip.Prefix) (DNSResponseObservation, error) {
 	self.stateLock.Lock()
 	self.asked = append(self.asked, resolver+" "+hostname)
 	self.stateLock.Unlock()

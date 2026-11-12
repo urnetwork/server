@@ -349,10 +349,11 @@ type DNSAliasSignalSource interface {
 }
 
 // DNSTxtSignalSource optionally supplies one resolver's answer to a name's TXT
-// question, for SIGNALS.md §28.2. Production asks the resolver over the DNS
-// wire protocol (UDP, then TCP when truncated).
+// question, with an EDNS client subnet when clientSubnet is valid, for
+// SIGNALS.md §28.2. Production asks the resolver over the DNS wire protocol
+// (UDP, then TCP when truncated).
 type DNSTxtSignalSource interface {
-	DNSTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error)
+	DNSTxt(ctx context.Context, resolver, hostname string, clientSubnet netip.Prefix) (DNSResponseObservation, error)
 }
 
 // DNSAddressSignalSource optionally supplies one resolver's answer to a name's
@@ -364,11 +365,12 @@ type DNSAddressSignalSource interface {
 }
 
 // DNSDohSignalSource optionally supplies one DoH server's answer to a name's
-// TXT question, for SIGNALS.md §28.2: the HTTP status and the body, read to at
-// most maxBytes+1 bytes. Production asks the server over https as a client
-// asks it (an RFC 8484 GET).
+// TXT question, with an EDNS client subnet when clientSubnet is valid, for
+// SIGNALS.md §28.2: the HTTP status and the body, read to at most maxBytes+1
+// bytes. Production asks the server over https as a client asks it (an RFC
+// 8484 GET).
 type DNSDohSignalSource interface {
-	DNSDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int) (int, []byte, error)
+	DNSDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int, clientSubnet netip.Prefix) (int, []byte, error)
 }
 
 // DNSAuthoritativeTxtSignalSource optionally supplies the authoritative
@@ -1044,12 +1046,12 @@ func (r *sourceRunner) dnsRecursive(ctx context.Context, hostname string, record
 	return source.DNSRecursive(ctx, hostname, recordType)
 }
 
-func (r *sourceRunner) dnsTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error) {
+func (r *sourceRunner) dnsTxt(ctx context.Context, resolver, hostname string, clientSubnet netip.Prefix) (DNSResponseObservation, error) {
 	source, ok := r.source.(DNSTxtSignalSource)
 	if !ok {
 		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSTxtSignalSource")
 	}
-	return source.DNSTxt(ctx, resolver, hostname)
+	return source.DNSTxt(ctx, resolver, hostname, clientSubnet)
 }
 
 func (r *sourceRunner) dnsAddress(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error) {
@@ -1060,12 +1062,12 @@ func (r *sourceRunner) dnsAddress(ctx context.Context, resolver, hostname string
 	return source.DNSAddress(ctx, resolver, hostname)
 }
 
-func (r *sourceRunner) dnsDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int) (int, []byte, error) {
+func (r *sourceRunner) dnsDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int, clientSubnet netip.Prefix) (int, []byte, error) {
 	source, ok := r.source.(DNSDohSignalSource)
 	if !ok {
 		return 0, nil, fmt.Errorf("monitor: SignalSource does not implement DNSDohSignalSource")
 	}
-	return source.DNSDohTxt(ctx, dohUrl, hostname, maxBytes)
+	return source.DNSDohTxt(ctx, dohUrl, hostname, maxBytes, clientSubnet)
 }
 
 func (r *sourceRunner) dnsNameservers(ctx context.Context, name string) ([]string, error) {

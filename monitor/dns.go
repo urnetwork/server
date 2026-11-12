@@ -172,14 +172,21 @@ func (r *runner) dnsRecursive(ctx context.Context, hostname string, recordType D
 // signed TXT set always is. The platform resolver is not used: a home router
 // that answered the name's A query dropped its 4 KB TXT answer over both UDP
 // and TCP (2026-11-11). The response code says whether the name serves no
-// TXT records (success, no values) or does not exist (name-error).
-func (r *runner) dnsTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error) {
+// TXT records (success, no values) or does not exist (name-error). With a
+// valid clientSubnet the question carries it as an EDNS client subnet (RFC
+// 7871), which a resolver that forwards its client's subnet passes on to the
+// name's nameservers in place of the monitor's own.
+func (r *runner) dnsTxt(ctx context.Context, resolver, hostname string, clientSubnet netip.Prefix) (DNSResponseObservation, error) {
 	commandCtx, cancel := boundedDNSContext(ctx, r.cfg.commandTimeout)
 	defer cancel()
 
+	additional, err := dnsClientSubnetAdditional(clientSubnet)
+	if err != nil {
+		return DNSResponseObservation{}, err
+	}
 	// a recursive resolver asked without recursion desired answers from its
 	// cache only, or refuses
-	observation, err := dnsWireQueryRecursion(commandCtx, "udp", resolver, hostname, DNSRecordTXT, true)
+	observation, err := dnsWireQueryOptions(commandCtx, "udp", resolver, hostname, DNSRecordTXT, true, additional)
 	if err != nil {
 		if ctx.Err() != nil {
 			return DNSResponseObservation{}, ctx.Err()
@@ -214,12 +221,13 @@ func (r *runner) dnsAddress(ctx context.Context, resolver, hostname string) (DNS
 // whose certificate must name that ip. It returns the HTTP status and the
 // body, read to at most maxBytes+1 bytes, so an answer longer than maxBytes
 // reads as one byte over. No proxy from the environment applies, no redirect
-// is followed, and no connection outlives the call.
-func (r *runner) dnsDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int) (int, []byte, error) {
+// is followed, and no connection outlives the call. A valid clientSubnet goes
+// in the OPT record as an EDNS client subnet, as dnsTxt sends it.
+func (r *runner) dnsDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int, clientSubnet netip.Prefix) (int, []byte, error) {
 	commandCtx, cancel := boundedDNSContext(ctx, r.cfg.commandTimeout)
 	defer cancel()
 
-	query, err := buildDohTxtQuery(hostname)
+	query, err := buildDohTxtQuery(hostname, clientSubnet)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -286,22 +294,30 @@ func dohRequestError(err error) error {
 }
 
 // The wire query of a client's DoH TXT question (connect net_http_doh.go):
-// id 0 (RFC 8484 §4.1), recursion desired, and an EDNS(0) OPT record without
-// options, which asks for extended dns errors.
-func buildDohTxtQuery(hostname string) ([]byte, error) {
+// id 0 (RFC 8484 §4.1), recursion desired, and an EDNS(0) OPT record, which
+// asks for extended dns errors. A client's carries no option; with a valid
+// clientSubnet it carries that subnet (dnsClientSubnetAdditional).
+func buildDohTxtQuery(hostname string, clientSubnet netip.Prefix) ([]byte, error) {
 	name, err := dnsmessage.NewName(absoluteDNSName(hostname))
 	if err != nil {
 		return nil, err
 	}
-	var optHeader dnsmessage.ResourceHeader
-	if err := optHeader.SetEDNS0(dnsDohEdnsPayloadSize, dnsmessage.RCodeSuccess, false); err != nil {
+	additional, err := dnsClientSubnetAdditional(clientSubnet)
+	if err != nil {
 		return nil, err
+	}
+	if additional == nil {
+		var optHeader dnsmessage.ResourceHeader
+		if err := optHeader.SetEDNS0(dnsDohEdnsPayloadSize, dnsmessage.RCodeSuccess, false); err != nil {
+			return nil, err
+		}
+		additional = &dnsmessage.Resource{Header: optHeader, Body: &dnsmessage.OPTResource{}}
 	}
 	question := dnsmessage.Question{Name: name, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET}
 	message := dnsmessage.Message{
 		Header:      dnsmessage.Header{RecursionDesired: true},
 		Questions:   []dnsmessage.Question{question},
-		Additionals: []dnsmessage.Resource{{Header: optHeader, Body: &dnsmessage.OPTResource{}}},
+		Additionals: []dnsmessage.Resource{*additional},
 	}
 	return message.Pack()
 }

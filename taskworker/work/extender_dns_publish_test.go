@@ -1074,7 +1074,7 @@ func createTestDnsExtender(
 func TestExtenderDnsPublishSamplesEveryContinentAndFamily(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		installTestExtenderWorkConfig(t, testExtenderDnsConfigYaml()...)
+		rootPublicKey := installTestExtenderWorkConfig(t, testExtenderDnsConfigYaml()...)
 		publisher := stubExtenderDnsPublisher(t)
 
 		bothFamilies := []testExtenderDnsAddressSpec{
@@ -1113,7 +1113,7 @@ func TestExtenderDnsPublishSamplesEveryContinentAndFamily(t *testing.T) {
 		// nothing for AF, AN, OC or SA and no A set for asia
 		// and one txt set per location the address sets answer for, in the
 		// order the locations were first answered
-		connect.AssertEqual(t, batch.setIdentifiers(), []string{
+		connect.AssertEqual(t, testExtenderDnsNonChinaSetIdentifiers(batch.upsertSets), []string{
 			"extender-EU-A",
 			"extender-NA-A",
 			"extender-default-A",
@@ -1125,6 +1125,9 @@ func TestExtenderDnsPublishSamplesEveryContinentAndFamily(t *testing.T) {
 			"extender-default-TXT",
 			"extender-AS-TXT",
 		})
+		// and China's own after them: one record, whichever extender the
+		// tick's window holds, and the addresses it names
+		assertTestExtenderDnsChinaSets(t, batch.upsertSets, ExtenderDnsDefaultCnRecordCount, rootPublicKey)
 
 		globalIpv4Ips := testExtenderDnsIps(4, 1, 2, 3, 4, 5, 8)
 		globalIpv6Ips := testExtenderDnsIps(6, 1, 2, 3, 6)
@@ -1214,6 +1217,8 @@ func TestExtenderDnsPublishDeletesAContinentThatWentEmpty(t *testing.T) {
 
 		runTestExtenderPublish(t, ctx)
 		first := publisher.onlyApply(t)
+		// China's own sets last: every extender is v4 only, so whichever the
+		// tick's window holds, China has an A set and a TXT set
 		connect.AssertEqual(t, first.setIdentifiers(), []string{
 			"extender-EU-A",
 			"extender-NA-A",
@@ -1221,6 +1226,8 @@ func TestExtenderDnsPublishDeletesAContinentThatWentEmpty(t *testing.T) {
 			"extender-EU-TXT",
 			"extender-NA-TXT",
 			"extender-default-TXT",
+			"extender-country-CN-A",
+			"extender-country-CN-TXT",
 		})
 		connect.AssertEqual(t, first.deletedSetIdentifiers, []string{})
 
@@ -1234,6 +1241,8 @@ func TestExtenderDnsPublishDeletesAContinentThatWentEmpty(t *testing.T) {
 			"extender-default-A",
 			"extender-NA-TXT",
 			"extender-default-TXT",
+			"extender-country-CN-A",
+			"extender-country-CN-TXT",
 		})
 		// the continent's txt set goes with its address set
 		connect.AssertEqual(t, second.deletedSetIdentifiers, []string{"extender-EU-A", "extender-EU-TXT"})
@@ -1243,6 +1252,8 @@ func TestExtenderDnsPublishDeletesAContinentThatWentEmpty(t *testing.T) {
 			"extender-default-A",
 			"extender-NA-TXT",
 			"extender-default-TXT",
+			"extender-country-CN-A",
+			"extender-country-CN-TXT",
 		})
 	})
 }
@@ -1263,8 +1274,9 @@ func TestExtenderDnsPublishFailureDoesNotStopTheDrip(t *testing.T) {
 		result := runTestExtenderPublish(t, ctx)
 		connect.AssertEqual(t, result.Published, 1)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 1)
-		// the apply was attempted, every change failed, and the zone is as it was
-		connect.AssertEqual(t, len(publisher.onlyApply(t).upsertSets), 4)
+		// the apply was attempted, every change failed, and the zone is as it was:
+		// North America's and the default's A and TXT sets, and China's
+		connect.AssertEqual(t, len(publisher.onlyApply(t).upsertSets), 6)
 		connect.AssertEqual(t, publisher.zoneSetIdentifiers, []string{})
 
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
