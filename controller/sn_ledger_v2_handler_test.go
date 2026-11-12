@@ -605,9 +605,11 @@ func TestSnLedgerAccountBuildsEachTreeOnce(t *testing.T) {
 
 // SV-3, CL-2: the SDK's strict parser (sdk/sn_ledger.go) accepts the
 // endpoint's real answers over HTTP and shows every state from them:
-// finalized, paid, claimable and pending across several pools, an account
-// only in the pending root, and an unknown coldkey as an empty list rather
-// than an error. The 502 of a ledger that cannot be read reaches the SDK as
+// finalized, paid, claimable and pending across several pools, each with its
+// pool's kind and label, an account only in the pending root, and an unknown
+// coldkey as an empty list rather than an error. The SDK asks with
+// partial=true, so a pool the server cannot read reaches it as unavailable
+// beside the others, and the 502 of a ledger that cannot be read at all as
 // ledger_unavailable with no balances, never as zero.
 func TestSnLedgerAccountAnswersParseInTheSdk(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -654,11 +656,11 @@ func TestSnLedgerAccountAnswersParseInTheSdk(t *testing.T) {
 			want    []sdk.SnLedgerAccount
 		}{
 			{ledgerV2A, []sdk.SnLedgerAccount{
-				{Vault: vault, NoId: 1, Index: 0, FinalizedRao: 600, ClaimableRao: 350, PaidRao: 250, Pending: true, PendingRao: 1600},
-				{Vault: vault, NoId: 2, Index: 0, FinalizedRao: 777, ClaimableRao: 777},
+				{Vault: vault, NoId: 1, Kind: StLedgerV2PoolKindPool, Label: "Pool 1", Index: 0, FinalizedRao: 600, ClaimableRao: 350, PaidRao: 250, Pending: true, PendingRao: 1600},
+				{Vault: vault, NoId: 2, Kind: StLedgerV2PoolKindPool, Label: "Pool 2", Index: 0, FinalizedRao: 777, ClaimableRao: 777},
 			}},
-			{ledgerV2B, []sdk.SnLedgerAccount{{Vault: vault, NoId: 1, Index: 1, FinalizedRao: 400, PaidRao: 400, Pending: true, PendingRao: 400}}},
-			{ledgerV2C, []sdk.SnLedgerAccount{{Vault: vault, NoId: 1, Index: 2, Pending: true, PendingRao: 1000}}},
+			{ledgerV2B, []sdk.SnLedgerAccount{{Vault: vault, NoId: 1, Kind: StLedgerV2PoolKindPool, Label: "Pool 1", Index: 1, FinalizedRao: 400, PaidRao: 400, Pending: true, PendingRao: 400}}},
+			{ledgerV2C, []sdk.SnLedgerAccount{{Vault: vault, NoId: 1, Kind: StLedgerV2PoolKindPool, Label: "Pool 1", Index: 2, Pending: true, PendingRao: 1000}}},
 			{ledgerV2H, []sdk.SnLedgerAccount{}},
 		} {
 			if got := accounts(read(test.coldkey)); !reflect.DeepEqual(got, test.want) {
@@ -666,8 +668,27 @@ func TestSnLedgerAccountAnswersParseInTheSdk(t *testing.T) {
 			}
 		}
 
+		// The SDK asks with partial=true: a pool the server cannot read reaches
+		// it as unavailable, never as zero, beside the pools it could read.
 		f.chain.failNext("claimed", errors.New("vault2 claimed(1, 0): rpc down"))
 		result := fetch(ledgerV2A)
+		if result.Error != nil || !result.Partial || result.Accounts.Len() != 1 || result.UnavailablePools.Len() != 1 {
+			t.Fatalf("a pool the server cannot read, in the sdk: %+v, %d accounts, %d unavailable", result.Error, result.Accounts.Len(), result.UnavailablePools.Len())
+		}
+		if pool := result.UnavailablePools.Get(0); pool.NoId != 1 || pool.Kind != StLedgerV2PoolKindPool || pool.Label != "Pool 1" || pool.Vault != vault {
+			t.Fatalf("the unavailable pool %+v", pool)
+		}
+		if account := result.Accounts.Get(0); account.NoId != 2 || account.FinalizedRao != 777 || account.ClaimableRao != 777 {
+			t.Fatalf("the readable pool's account %+v", account)
+		}
+
+		// Without the account record the pools to answer are unknown, so even a
+		// partial answer is a 502, which reaches the SDK as ledger_unavailable
+		// with no balances, never as zero.
+		server.Db(f.ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(f.ctx, `ALTER TABLE st_ledger_v2_account RENAME TO st_ledger_v2_account_unreadable`))
+		}, server.OptReadWrite())
+		result = fetch(ledgerV2A)
 		if result.Error == nil || result.Error.Code != sdk.SnErrorCodeLedgerUnavailable || result.Error.Message != "http 502 fetching the ledger account" || result.Accounts.Len() != 0 {
 			t.Fatalf("an unavailable ledger in the sdk: %+v, %d accounts", result.Error, result.Accounts.Len())
 		}
