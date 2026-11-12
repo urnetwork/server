@@ -27,10 +27,10 @@ type competitionHeartbeatSettings struct {
 	// existing twenty-second owner reserve. This is a total call cap, not
 	// extra attempts or a fresh timeout after historical retries are spent.
 	ScopeLockMaximumAttempts int
-	// Exact returned-idle, acknowledged-rollback distributed prefix/final-slot
-	// deadlines share one total call ceiling inside the same twenty-second
-	// owner and both leases. Nonpositive preserves historical final-slot
-	// retries and disables the new pre-business prefix continuation.
+	// All exact failed-last distributed SQL prefixes with returned-idle,
+	// acknowledged rollback share one total call ceiling inside the same
+	// twenty-second owner and both leases. Nonpositive preserves historical
+	// final-slot retries and disables the new prefix continuation.
 	DistributedReturnedRollbackMaximumAttempts int
 	// Independent metadata budget; never extends the evaluation or its lease.
 	CompletionRetry competitionLeaseRetrySettings

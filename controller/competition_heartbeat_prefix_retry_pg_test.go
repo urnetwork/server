@@ -32,13 +32,16 @@ func (self *competitionHeartbeatPrefixPgBarrier) unlock() {
 
 // A live original claim is renewed, never rerun or given a replacement clock.
 func TestCompetitionHeartbeatPrefixRetryPgThreeRollbacksThenFourthSuccess(t *testing.T) {
-	testCompetitionHeartbeatReturnedRollbackPg(t, false)
+	testCompetitionHeartbeatReturnedRollbackPg(t, competitionHeartbeatDatabaseSupervisorAuthority)
 }
 
-// Both exact source graphs share actual server-wait/cancellation/rollback and
-// cleanup ownership. Only isolated instrumentation and proof position differ.
-func testCompetitionHeartbeatReturnedRollbackPg(t *testing.T, finalSlot bool) {
+// The known source positions share actual server-wait/cancellation/rollback
+// and cleanup ownership. Only isolated instrumentation/proof position differ.
+func testCompetitionHeartbeatReturnedRollbackPg(t *testing.T, failedStep competitionHeartbeatDatabaseStep) {
 	t.Helper()
+	if failedStep != competitionHeartbeatDatabaseSupervisorAuthority && failedStep != competitionHeartbeatDatabaseJobUpdate && failedStep != competitionHeartbeatDatabaseSlotUpdate {
+		t.Fatal("returned-rollback fixture selected unreviewed instrumentation")
+	}
 	for _, historicalCap := range []bool{true, false} {
 		env := server.DefaultTestEnv()
 		env.RerunCount = 0
@@ -67,13 +70,13 @@ func testCompetitionHeartbeatReturnedRollbackPg(t *testing.T, finalSlot bool) {
 				if !strings.HasPrefix(database, "test_") {
 					panic("prefix instrumentation requires its isolated generated test database")
 				}
-				if finalSlot {
-					server.RaisePgResult(tx.Exec(watchdog, `CREATE SEQUENCE synthetic_returned_slot_calls;
-					 CREATE FUNCTION synthetic_returned_slot_latency() RETURNS trigger AS $body$
+				if failedStep != competitionHeartbeatDatabaseSupervisorAuthority {
+					server.RaisePgResult(tx.Exec(watchdog, `CREATE SEQUENCE synthetic_returned_statement_calls;
+					 CREATE FUNCTION synthetic_returned_statement_latency() RETURNS trigger AS $body$
 					 DECLARE call_number bigint;
 					 BEGIN
 					  IF NEW.job_id::text=TG_ARGV[0] AND NEW.lease_expires_at>OLD.lease_expires_at THEN
-					   call_number:=nextval('synthetic_returned_slot_calls'::regclass);
+					   call_number:=nextval('synthetic_returned_statement_calls'::regclass);
 					   IF call_number<=3 THEN
 					    PERFORM set_config('lock_timeout','0',true);
 					    PERFORM set_config('application_name',TG_ARGV[3],true);
@@ -82,9 +85,13 @@ func testCompetitionHeartbeatReturnedRollbackPg(t *testing.T, finalSlot bool) {
 					  END IF;
 					  RETURN NEW;
 					 END $body$ LANGUAGE plpgsql;`))
-					server.RaisePgResult(tx.Exec(watchdog, fmt.Sprintf(`CREATE TRIGGER synthetic_returned_slot_latency
-					 BEFORE UPDATE OF lease_expires_at ON competition_execution_slot FOR EACH ROW
-					 EXECUTE FUNCTION synthetic_returned_slot_latency('%s','%d','%d','%s')`, job.JobId.String(), class, firstObject, applicationName)))
+					table := "competition_execution_slot"
+					if failedStep == competitionHeartbeatDatabaseJobUpdate {
+						table = "competition_job"
+					}
+					server.RaisePgResult(tx.Exec(watchdog, fmt.Sprintf(`CREATE TRIGGER synthetic_returned_statement_latency
+					 BEFORE UPDATE OF lease_expires_at ON %s FOR EACH ROW
+					 EXECUTE FUNCTION synthetic_returned_statement_latency('%s','%d','%d','%s')`, table, job.JobId.String(), class, firstObject, applicationName)))
 					return
 				}
 				server.RaisePgResult(tx.Exec(watchdog, fmt.Sprintf(`CREATE SCHEMA synthetic_prefix;
@@ -267,16 +274,22 @@ func testCompetitionHeartbeatReturnedRollbackPg(t *testing.T, finalSlot bool) {
 					tb.Fatal("actual prefix statement/rollback/release did not return")
 				}
 				proof, ok := returned.err.(competitionHeartbeatDatabaseError)
-				if returned.ordinal != ordinal || !ok || proof.snapshot.Transaction.CommitAttempts != 0 ||
+				if returned.ordinal != ordinal || !ok || !competitionHeartbeatDistributedReturnedRollbackDeadline(returned.err) || proof.snapshot.Transaction.CommitAttempts != 0 ||
 					proof.snapshot.Transaction.RollbackAcknowledged != 1 || proof.snapshot.Transaction.ReleaseReturned != 1 || proof.snapshot.Transaction.LastRelease.Disposition != server.DbTxReleaseIdle {
 					tb.Fatal("actual heartbeat failed to produce its exact returned rollback proof", ordinal, competitionHeartbeatFailureDetails(returned.err))
 				}
-				if finalSlot {
+				if failedStep == competitionHeartbeatDatabaseSlotUpdate {
 					if !competitionHeartbeatDistributedSlotUpdateDeadline(returned.err) || competitionHeartbeatDistributedPreBusinessDeadline(returned.err) ||
 						proof.snapshot.Step != competitionHeartbeatDatabaseSlotUpdate || proof.snapshot.SqlStatements != 12 || len(proof.snapshot.Statements) != 12 ||
 						proof.snapshot.Statements[10].Step != competitionHeartbeatDatabaseSlotUpdate || proof.snapshot.Statements[10].Succeeded ||
 						proof.snapshot.Statements[11].Step != competitionHeartbeatDatabaseJobUpdate || !proof.snapshot.Statements[11].Succeeded {
 						tb.Fatal("actual final-slot rollback lost its exact failed slot and completed job UPDATE proof", competitionHeartbeatFailureDetails(returned.err))
+					}
+				} else if failedStep == competitionHeartbeatDatabaseJobUpdate {
+					if competitionHeartbeatDistributedSlotUpdateDeadline(returned.err) || competitionHeartbeatDistributedPreBusinessDeadline(returned.err) ||
+						proof.snapshot.Step != competitionHeartbeatDatabaseJobUpdate || proof.snapshot.SqlStatements != 11 || len(proof.snapshot.Statements) != 11 ||
+						proof.snapshot.Statements[10].Step != competitionHeartbeatDatabaseJobUpdate || proof.snapshot.Statements[10].Ordinal != 1 || proof.snapshot.Statements[10].Succeeded {
+						tb.Fatal("actual job UPDATE rollback lost its exact failed-last source proof", competitionHeartbeatFailureDetails(returned.err))
 					}
 				} else if !competitionHeartbeatDistributedPreBusinessDeadline(returned.err) || proof.snapshot.Step != competitionHeartbeatDatabaseSupervisorAuthority || proof.snapshot.SqlStatements != 8 ||
 					len(proof.snapshot.Statements) != 8 || proof.snapshot.Statements[7].Ordinal != 2 || proof.snapshot.Statements[7].Kind != "exec" {
