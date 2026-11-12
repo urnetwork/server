@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T22:31:27.047863Z",
+  "observed_at": "2026-11-12T23:30:55.662837Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -27,7 +27,7 @@
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "api_observed_at": "2026-11-12T22:25:53Z",
+    "api_observed_at": "2026-11-12T23:30:53Z",
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
       "supervisor_pid": 211140,
@@ -69,17 +69,19 @@
     "database_grants_issued": false,
     "ordinary_qualification": {
       "original_scope": 271,
-      "qualified": 172,
-      "pending": 99,
+      "qualified": 220,
+      "pending": 51,
       "failed_batch_partial_credit": false,
       "race_or_release_qualification_complete": false
     },
     "active_qualification": {
       "cases": 24,
-      "pid": 800014,
-      "invocation_id": "e2d553c7b6af4106809ccaf8d24a6734",
-      "evidence": "/dev/shm/competition-wallet-pinned-batch05-20261112.sD7o6hsp",
-      "manifest_sha256": "47356fe301842447bad4de5461de69a2a5af1dabe39620aec300b6bf4b11d32d",
+      "pid": 958167,
+      "invocation_id": "24a827c998194378ad5080ffa48c8de5",
+      "evidence": "/dev/shm/competition-wallet-pinned-batch07-20261112.YyF9tlyt",
+      "manifest_sha256": "e714600c5166af7df65aa4852342834348f3b86525a192845905ae6efbbe05e4",
+      "go_timeout_seconds": 2400,
+      "actor_runtime_seconds": 2700,
       "completed_or_credited": false
     },
     "wallet_fixture": {
@@ -128,20 +130,34 @@
         "passed": 24,
         "failed": 0,
         "skipped": 0,
-        "log_sha256": "6b105b94ba86fe5152a2f10f3f5f4a0bab291bf979526da163430cd8ea6db28d",
-        "postgres_peak_bytes": 440471552,
+        "log_sha256": "13b9fd18907ad3a26018082857b013230174271a43149b4acd5f77fba766e601",
+        "postgres_peak_bytes": 482119680,
         "postgres_oom_kills": 0,
         "actor_guard_capture_cleanup_exit_zero": true,
-        "durable_evidence": "/var/lib/urnetwork/competition-native24-coverage11-qualification-20261112.VfutpY70",
-        "durable_manifest_sha256": "34ff83047cc325f5169aa4bef8db1d67a1e4f81368cc1f0432310a632f9924b4"
+        "durable_evidence": "/var/lib/urnetwork/competition-native-batch06-green-20261112.dH4z0o0k",
+        "durable_manifest_sha256": "0b590481421b0702afd146ab4e4d79ca2217584af3615207e0da0e8023626354"
       },
-      "tests_remaining": "Remaining 99 original census cases, race qualification and final exact-main/dependency compatibility."
+      "tests_remaining": "Remaining 51 original census cases, race qualification and final exact-main/dependency compatibility."
     },
-    "isolated_server_commit": "37fc05dc1",
+    "isolated_server_commit": "e91627e74601f2bceab0365c8a5e49e1158bf53c",
     "isolated_sn_commit": "e908edda50378af63576109df88c603168716ce6",
     "isolated_main_qualified_or_deployed": false,
-    "integration_status": "Wallet fixture checkpoint and captured main 4b54fda91 merged in isolation; published Solana cursor migration precedes local recovery append, with captured-tail regression updated. Current original-census qualification inputs remain unchanged.",
+    "integration_status": "Wallet fixture checkpoint, captured main 189d1e558 and heartbeat fix 59b3ce0ca merged in isolation. Published Solana cursor and provider-egress evidence migrations precede local recovery append, with captured-tail regression updated. Integration receipt 47624a0c8b142c2c7b47e1413feb2712fccf4ca31f9d5baa400f7634ff8cbce1. Current original-census qualification inputs remain unchanged; no release claim.",
     "deployment_pending": "Only after qualification: append recovery migration after origin, deploy compatible API/monitor, install worker/reevaluate CLI, verify global idle and both host closures, individually authorize recovery preserving FIFO."
+  },
+  "idle_heartbeat_fix": {
+    "source_commit": "59b3ce0ca2bfcc96d29de8c98d14cc1c5e9ae9fa",
+    "source_manifest_sha256": "b4f079ab837696fabfb44370e6fda79db7a1b3a4f3a396e138fcb0481962647c",
+    "new_causal_cases": 15,
+    "adjacent_cases": 61,
+    "qualified_or_deployed": false,
+    "normal_compile": "Resource-stopped: cache growth 613072896 bytes exceeded the predeclared 536870912-byte bound. No binary or native Go exit status was produced; zero tests ran. Wrapper EXIT 0 is not success; manager TERM and guard 2 are preserved.",
+    "durable_resource_failure": "/var/lib/urnetwork/competition-idle-heartbeat-normal-cache-stop-20261112.mqAX8YSx",
+    "durable_failure_manifest_sha256": "eb25526e7b36ff69349c00e698ab303219137de7258d1385235f5a4954306233",
+    "source_and_dependencies_unchanged": true,
+    "historical_old_run_control_source_sha256": "f0b03983dbfe1fa7a0fa5b0a51552d03cd809655a9af39662f18a8c76271f9d8",
+    "historical_control_executed": false,
+    "warm_compile_authorization": "One unchanged-profile warm normal compile after the active native batch joins, conditional on fresh 33 GiB plus 512 MiB headroom. Read-only audit proved the complete 174474538-byte controller-with-tests archive was cached; testmain compilation/link remain unproved. Stop on another failure; no blind retry or scoring-limit change."
   },
   "private_reviews": {
     "members": [
@@ -153,9 +169,25 @@
     "gemma_first_partial": "Rejected: non-JSON prefix and unseen-file findings; no reroll.",
     "qwen_scoring_partial": "Provider completed; rejected because canonical.patch is not a production source path. No rewriting or reroll.",
     "further_old_calls_held": true,
-    "coverage_planner": "Source 7332b2c2727d5301f9f898d9aa29cf132bd1b277261d1c15d5b9c861f115f244 passed eleven synthetic cases three times ordinary and race. Actual inventory plan execution remains pending.",
+    "coverage_planner": "Source 7332b2c2727d5301f9f898d9aa29cf132bd1b277261d1c15d5b9c861f115f244 passed eleven synthetic cases three times ordinary and race. Complete authenticated inventory plan execution passed; every obligation remains pending, with no model calls, observed/accepted findings, token admission, closure or authority.",
+    "complete_plan": {
+      "sha256": "de3ac1723be6001d80a584f85ae6ad3a73647c2028a7b6d40a8b13a7f47e1f2e",
+      "durable_evidence": "/var/lib/urnetwork/competition-complete-offline-coverage-plan-20261112.1CXy4E8r",
+      "durable_manifest_sha256": "2477560a6da91a75452a8ac8c67360df454f11012f807a3ec294e08a03b34a4d",
+      "all_context_input_bytes_and_modes_unchanged": true,
+      "actor_guard_capture_exit_zero": true
+    },
     "bounded_renderer": "Source 03ef12212a4e548e3721c7e92cd424c42d458594a985509c43aba65ca8ae55a5 passed six synthetic cases three times ordinary and race; typed provider boundary, conservative adjacent citation guards and complete paired/transitive review remain in progress. No new inference.",
-    "linked_validation_retention": "Source 954cc73b2496ed62987e6ee3c4c9fd05b5613cb8cc2b2b5c9e3a9d766ecf8e55 passed sixteen synthetic cases three times ordinary and race. Operator plan d4cbbc0399505ca1eabb262fc47cae0c90293ce78d9e2e530826be93bb358aa5 pins existing proof only; actual build/upload pending. No original receipt changed.",
+    "linked_validation_retention": "Source 954cc73b2496ed62987e6ee3c4c9fd05b5613cb8cc2b2b5c9e3a9d766ecf8e55 passed sixteen synthetic cases three times ordinary and race. Actual protected archival of operator plan d4cbbc0399505ca1eabb262fc47cae0c90293ce78d9e2e530826be93bb358aa5 passed: 23 leaves plus manifest, exact retained versions/readbacks, COMPLIANCE through 2028-01-01. All original eight call leaves and two validation leaves unchanged; no model/validator/DB execution or authority.",
+    "protected_linked_validation": {
+      "receipt_sha256": "f14b95a4c5c459c8418d9dedea6de9283e1660c751e920c213d0e0ddabd7af80",
+      "manifest_sha256": "9121b686574d720d6ef3daa17afb231a2a8b15dff1cb4fe7933417161cd2e549",
+      "manifest_version": "c1888ab7-0e27-4bc9-b198-df498bb27aa5",
+      "durable_evidence": "/var/lib/urnetwork/competition-linked-retention-build-runtime-20261112.XE4A5FMu",
+      "durable_manifest_sha256": "eac2ae6856bbf302c6650e1267f95d5747f23c28783c010285aa438c9f92ca00",
+      "actor_guard_capture_exit_zero": true,
+      "complete_review_or_approval": false
+    },
     "render_linked_qa_evidence": "/var/lib/urnetwork/competition-render-linked-synthetic-qualification-20261112.WtE2fpwl",
     "render_linked_qa_manifest_sha256": "553e2db57205e84950211b4c35da77b57810d8ed9da4d463e81d9e2e844cb78d",
     "publisher": "24 ordinary +24 race tests passed; compile-only preparation passed. Original Qwen call's eight evidence leaves and manifest retained with exact-version readback; original failed validation flag remains unchanged. Linked offline validation retention remains separate and pending.",
@@ -187,15 +219,35 @@
     "repository_baseline_or_evidence_deleted": false,
     "qualification_reserve_unchanged_bytes": 35433480192
   },
+  "buildkit_cache_cleanup": {
+    "removed_records": 14,
+    "scope": "Exact validated unused, unshared, reclaimable regular BuildKit cache records, last used at least 24 hours ago; no images, containers, volumes, repositories, baselines or evidence removed.",
+    "reported_reclaimed": "234 MB",
+    "root_available_before_bytes": 35802656768,
+    "root_available_after_bytes": 36036624384,
+    "docker_image_inventory_sha256_before_and_after": "04c2bc9e776a904676ebb44b63b5f009bc3c2bdc2af94dd5bed37b535f704890",
+    "recovery": "Disposable build caches can be recreated by rebuilding; authoritative source and retained artifacts are unchanged."
+  },
+  "epoch1_public_result_check": {
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "http_success": true,
+    "integrity_review": "approved",
+    "source_approval": "approved",
+    "has_winner": true,
+    "invalidated": false,
+    "settlement_status": "pending",
+    "interpretation": "The public result stayed accessible during an epoch-2 readiness dip. Pending is the API's settlement-receipt status, not independent proof of an external payment's state."
+  },
   "next_actions": [
     "Finish the remaining original census cases and race qualification using the pinned wallet-fixture binary; preserve native PostgreSQL and runtime limits.",
-    "Qualify the coverage planner and linked-validation retention helper; retain linked validation separately without changing original calls.",
+    "Qualify the new bounded multi-unit provider adapter and execute complete paired reviews from the authenticated coverage ledger; protected original and linked validation evidence are retained separately.",
+    "Independently qualify isolated idle-heartbeat fix 59b3ce0ca2bfcc96d29de8c98d14cc1c5e9ae9fa and its fifteen causal controls before any main merge or live deployment.",
     "Complete recovery qualification and deploy compatible readers/worker before granting any of the three infrastructure recoveries; preserve original failure records and submission-order ties.",
     "Finish complete paired, bounded reviews for every eligible submission; partial observations never count as approvals.",
     "Monitor live API, supervisor leases and both hosts. Never restart a live attempt because an observation is quiet."
   ],
   "pending_authorizations": [
-    "Cleanup of the other two previously identified compiler directories remains unapproved. The specifically approved /tmp/go-build2752663447 cleanup is complete and recoverable from its verified private archive."
+    "Recoverable cleanup of inactive /tmp/go-build3486652901 and /tmp/go-build3223552786 has been requested asynchronously and remains unapproved. Neither was removed. The specifically approved /tmp/go-build2752663447 cleanup is complete and recoverable from its verified private archive."
   ],
   "historical_evidence": {
     "path": "../old/CURRENT-STATE-HISTORY-2026-11-12T211638.json",
