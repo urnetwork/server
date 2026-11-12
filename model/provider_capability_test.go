@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/urnetwork/connect"
+
+	"github.com/urnetwork/server"
 )
 
 // Window counts with the newest run a minute before now, so the evidence is
@@ -272,4 +274,75 @@ func TestProviderCapabilityReason(t *testing.T) {
 			t.Errorf("downgrades %d: got %+v", c.downgrades, reason)
 		}
 	}
+}
+
+// The classified decision reads the class's forgiven runs as passes, for
+// the Online 0.8 rule's general half too, under the country guard the strict
+// decision published: the guard is computed from the strict counts and both
+// decisions apply it (FP2-PROTOCOL.md §3.4).
+func TestClassifiedDecisionAppliesTheStrictGuard(t *testing.T) {
+	settings := DefaultEgressIndexSettings()
+	settings.OnlineUrlSuccessRatio = 0.8
+	udpLess := func() ProviderEgressHealthCounts {
+		counts := onlineSuccessTestCounts(5, 10)
+		counts.ForgivenTcp, counts.ForgivenBoth, counts.NegativeUdp = 5, 5, 5
+		return counts
+	}
+	measuredClientId, exemptClientId := server.NewId(), server.NewId()
+	clientIdCounts := map[server.Id]ProviderEgressHealthCounts{
+		measuredClientId: udpLess(),
+		exemptClientId:   udpLess(),
+	}
+	clientIdCountryCodes := map[server.Id]string{
+		measuredClientId: "us",
+		exemptClientId:   "zz",
+	}
+	// zz: the probe fails for most of its providers, so the guard exempts it
+	for range 3 {
+		clientId := server.NewId()
+		clientIdCounts[clientId] = onlineSuccessTestCounts(0, 4)
+		clientIdCountryCodes[clientId] = "zz"
+	}
+	filter := onlineSuccessTestFilter(clientIdCounts, clientIdCountryCodes, settings)
+	connect.AssertEqual(t, filter.onlineSuccessBaseline.exempt("us"), false)
+	connect.AssertEqual(t, filter.onlineSuccessBaseline.exempt("zz"), true)
+
+	decide := func(clientId server.Id, countryCode string) (strict providerEgressDecision, classified providerEgressDecision) {
+		counts := filter.healthCounts[clientId]
+		classification := classifyProviderCapability(counts, false, filter.now, settings)
+		connect.AssertEqual(t, classification.class, providerCapabilityClassD)
+		strict = decideProviderEgress(filter.egressFacts(clientId, &countryCode, nil, nil, settings), false)
+		classified = decideProviderEgress(filter.classifiedEgressFacts(clientId, &countryCode, nil, nil, settings, classification), false)
+		return
+	}
+	// under the ratio where it applies: the strict decision takes the
+	// provider out of every bucket, the classified one keeps it in all three
+	strict, classified := decide(measuredClientId, "us")
+	connect.AssertEqual(t, strict.reason, ProviderExcludedLowSuccess)
+	connect.AssertEqual(t, strict.online, false)
+	connect.AssertEqual(t, classified.online, true)
+	connect.AssertEqual(t, classified.quality, true)
+	connect.AssertEqual(t, classified.speed, true)
+	// an exempt country keeps the strict provider online as before
+	strict, classified = decide(exemptClientId, "zz")
+	connect.AssertEqual(t, strict.reason, ProviderExcludedHealth)
+	connect.AssertEqual(t, strict.online, true)
+	connect.AssertEqual(t, classified.online, true)
+	connect.AssertEqual(t, classified.speed, true)
+
+	// the general half forgives from its own counts: a provider whose
+	// country outcomes fail keeps its general half's verdict
+	general := onlineSuccessTestCounts(2, 6)
+	general.ForgivenTcp, general.ForgivenBoth = 4, 4
+	counts := onlineSuccessTestCounts(6, 10)
+	counts.ForgivenTcp, counts.ForgivenBoth = 4, 4
+	counts.General = &general
+	clientId := server.NewId()
+	filter.healthCounts[clientId] = counts
+	classification := classifyProviderCapability(counts, false, filter.now, settings)
+	facts := filter.classifiedEgressFacts(clientId, selectTestString("us"), nil, nil, settings, classification)
+	connect.AssertEqual(t, facts.lowUrlSuccess, false)
+	connect.AssertEqual(t, facts.noUrlSuccess, false)
+	strictFacts := filter.egressFacts(clientId, selectTestString("us"), nil, nil, settings)
+	connect.AssertEqual(t, strictFacts.lowUrlSuccess, true)
 }

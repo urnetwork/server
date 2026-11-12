@@ -77,8 +77,9 @@ func TestCountProviderEgressCountsTheClassifiedCapabilityAndPostQuantumSignal(t 
 				}
 			}
 		}
-		// the strict counts are unchanged: the UDP-less provider is no native
-		// of the strict decision, the other two are
+		// the strict counts are unchanged: the UDP-less provider (10 of 20)
+		// and the IPv6-less one (15 of 20, under 4 in 5) are no natives of
+		// the strict decision, the healthy one is
 		if counts.BucketIndexCounts[RankModeSpeed] == nil {
 			t.Fatal("no strict speed counts")
 		}
@@ -86,8 +87,8 @@ func TestCountProviderEgressCountsTheClassifiedCapabilityAndPostQuantumSignal(t 
 		for _, count := range counts.BucketIndexCounts[RankModeSpeed] {
 			strictSpeed += count
 		}
-		if strictSpeed != 2 {
-			t.Errorf("strict speed holds %d providers, want 2", strictSpeed)
+		if strictSpeed != 1 {
+			t.Errorf("strict speed holds %d providers, want 1", strictSpeed)
 		}
 	})
 }
