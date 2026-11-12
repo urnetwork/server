@@ -51,11 +51,9 @@ func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 }
 
 func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
-	// The admission exception carries the qualification recovery's custody on,
-	// which carries the executor control amendment's, which carries the official
-	// review's, which carries the review handoff's: at the head it owns their
-	// faults.
-	custodian := server.CompetitionExecutorAdmissionClaimMigrationVersion()
+	// The explicit distributed successor carries the admitted-claim chain's
+	// complete historical custody; no unrelated future retirement is accepted.
+	custodian := migrationDistributedRecoveryTestOwner(t, server.CompetitionExecutorAdmissionClaimMigrationVersion(), server.MigrationCount()).requiredVersion
 	handoffBodies := server.CompetitionReviewHandoffBodiesSql()
 	_, _, _, _, twoMemberIdentityGuard, _, _, _ := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
 	_, _, _, unamendedEquivalenceGuard, _ := server.CompetitionDistributedEvaluationBodiesSql()

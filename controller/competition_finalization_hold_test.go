@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -98,7 +97,7 @@ func TestCompetitionFinalizationHoldAuthenticatedHandlerScope(t *testing.T) {
 // The separately versioned public schema keeps the original status fields
 // required and adds the new status bit only as an optional prospective signal.
 func TestCompetitionFinalizationHoldOpenApiContract(t *testing.T) {
-	content, err := os.ReadFile("../../sn/api/competition.yml")
+	content, err := readCompetitionTestSnContract()
 	if err != nil {
 		t.Fatal(err)
 	}

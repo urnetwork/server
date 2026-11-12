@@ -260,6 +260,8 @@ func runRecovery(args []string, output io.Writer) error {
 	runtimeSha := flags.String("runtime-file-sha256", "", "exact runtime qualification file digest")
 	tokenPath := flags.String("token-file", "", "root-owned scoped control token")
 	idempotencyKey := flags.String("idempotency-key", "", "single-use operator request identity")
+	coordinatorPath := flags.String("distributed-coordinator", "", "root-pinned distributed coordinator profile for native closure observations only")
+	coordinatorSha256 := flags.String("distributed-coordinator-sha256", "", "exact distributed coordinator profile digest")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || len(*authSha) != 64 || len(*runtimeSha) != 64 || *idempotencyKey == "" {
 		return errors.New("reevaluation arguments rejected")
 	}
@@ -303,6 +305,13 @@ func runRecovery(args []string, output io.Writer) error {
 	if err := bindRecoveryRuntime(settings, runtime); err != nil {
 		return err
 	}
+	if auth.Schema == 2 {
+		if *coordinatorPath == "" || len(*coordinatorSha256) != 64 || controller.ConfigureCompetitionDistributedCoordinator(settings, *coordinatorPath, *coordinatorSha256) != nil {
+			return errors.New("distributed closure observation role rejected")
+		}
+	} else if *coordinatorPath != "" || *coordinatorSha256 != "" {
+		return errors.New("historical singleton recovery cannot select a distributed observation role")
+	}
 	authorizationDigest, err := model.CompetitionAutomationDigest(auth)
 	if err != nil || limits.Timeout <= 0 {
 		return errors.New("authorization binding rejected")
@@ -317,7 +326,18 @@ func runRecovery(args []string, output io.Writer) error {
 	if err != nil {
 		return errors.New("audited reevaluation refused; inspect restricted operator evidence")
 	}
-	return json.NewEncoder(output).Encode(receipt)
+	return writeRecoveryReceipt(output, receipt)
+}
+
+// Native signed inventories remain in the private immutable database audit.
+// Standard output retains only the previously public receipt and proof digest.
+func writeRecoveryReceipt(output io.Writer, receipt *model.CompetitionJobReevaluationReceipt) error {
+	if receipt == nil {
+		return errors.New("recovery receipt unavailable")
+	}
+	publicReceipt := *receipt
+	publicReceipt.DistributedProof = nil
+	return json.NewEncoder(output).Encode(publicReceipt)
 }
 
 // Standard output contains only the authenticated, message-free receipt.

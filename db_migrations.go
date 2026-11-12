@@ -11486,4 +11486,8 @@ var migrations = []any{
 	// five-second lock bound. ctf_award is empty until capture the flag is
 	// live. Apply before deploying the taskworker and api that use it.
 	ctfAwardNetworkMigration,
+
+	// Explicit distributed terminal-infrastructure recovery preserves original
+	// admission/failure and requires all-host closure before a new cycle queues.
+	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),
 }

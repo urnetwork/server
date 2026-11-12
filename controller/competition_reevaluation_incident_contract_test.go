@@ -5,7 +5,6 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -16,7 +15,7 @@ import (
 // Compile the published OpenAPI component, not a hand-written replacement of
 // its rules. All identities come from the existing synthetic receipt fixture.
 func TestCompetitionReevaluationIncidentPublicContractPreservesTypedFailure(t *testing.T) {
-	content, err := os.ReadFile("../../sn/api/competition.yml")
+	content, err := readCompetitionTestSnContract()
 	if err != nil {
 		t.Fatal(err)
 	}

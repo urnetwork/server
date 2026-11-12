@@ -496,7 +496,9 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 	// Every artifact is queried before its version is checked. Nullable catalog
 	// lookups keep future or missing functions from aborting schema inspection;
 	// an existence conjunct cannot protect a strict regprocedure cast.
-	rows, err := env.runner.pg(ctx, `
+	observation := &migrationCensusObservation{settings: env.cfg.migrationCensus}
+	queryCtx := context.WithValue(ctx, migrationCensusContextKey{}, observation)
+	rows, err := env.runner.pg(queryCtx, `
 		WITH version AS (
 			SELECT coalesce(max(end_version_number), 0)::int AS value
 			FROM migration_audit
@@ -2288,11 +2290,17 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		if !migrationBool(rows[0].str(11)) {
 			missing = append(missing, "migration_catalog identities@v600")
 		} else {
-			catalogRows, catalogErr := env.runner.pg(ctx, `
+			catalogRows := observation.catalogRows
+			var catalogErr error
+			if !observation.catalogComplete {
+				// Custom sources keep their logical query contract. The native
+				// transport and real-database adapters return this same snapshot.
+				catalogRows, catalogErr = env.runner.pg(ctx, `
 				SELECT migration_index, trim(identity_sha256)
 				FROM migration_catalog
 				ORDER BY migration_catalog.migration_index;
 			`)
+			}
 			if catalogErr != nil {
 				return nil, catalogErr
 			}

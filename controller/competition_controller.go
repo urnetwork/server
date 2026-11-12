@@ -588,6 +588,7 @@ type Settings struct {
 	OfficialReviewImportSha256          string `yaml:"official_review_import_sha256,omitempty"`
 	reevaluationRuntime                 *model.CompetitionJobReevaluationRuntime
 	reevaluationRuntimeSha256           string
+	distributedReevaluationSettings     *competitionDistributedReevaluationSettings
 	AutomationPolicy                    model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
 	Enabled                             bool                                    `yaml:"enabled"`
 	CompetitionId                       string                                  `yaml:"competition_id"`

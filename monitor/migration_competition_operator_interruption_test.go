@@ -14,7 +14,11 @@ import (
 // The new artifact does not retire a predecessor or replace an old function.
 func TestMigrationsCompetitionOperatorInterruptionRetainsIndependentCustody(t *testing.T) {
 	version := server.CompetitionOperatorInterruptionMigrationVersion()
-	if version <= server.CompetitionReevaluationPostCloseMigrationVersion() || competitionReevaluationPostCloseMigrationContract.artifact.removedVersion != 0 {
+	legacy := server.CompetitionReevaluationPostCloseMigrationVersion()
+	distributed := server.CompetitionDistributedReevaluationMigrationVersion()
+	_ = migrationDistributedRecoveryTestOwner(t, legacy, server.MigrationCount())
+	if version <= legacy || distributed <= version || migrationCurrentSuffixTestContract(t, legacy).artifact.removedVersion != distributed ||
+		migrationCurrentSuffixTestContract(t, version).artifact.removedVersion != 0 {
 		t.Fatal("additive operator proof retired historical recovery custody")
 	}
 	contract := migrationCurrentSuffixTestContract(t, version)

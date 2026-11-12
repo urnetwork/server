@@ -166,3 +166,9 @@ distributed round. Its two reviewed singleton incident classes do not grant a
 new remote execution cycle or reset its original absolute deadline. A new
 incident-specific recovery needs separate review; do not repair it with direct
 job/slot SQL. Existing committed singleton recovery receipts remain replayable.
+
+The separate schema-2 distributed terminal-infrastructure capability is described
+in cli/competitionreevaluate/DISTRIBUTED_RECOVERY.txt. It requires migration and
+consumer qualification, explicit per-job authority, the evaluation hold, every
+database/native host idle and positive original-host closure. It does not widen
+the historical authorization above, interrupt a live run or change an old clock.
