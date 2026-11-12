@@ -324,3 +324,41 @@ func TestCompetitionDistributedRecoveryPgProducerPolicyMismatchStopsBeforeNative
 		fixture.settings = originalSettings
 	})
 }
+
+// The authoritative availability cut is not a cycle start. A frozen earlier
+// application fixture clock can exclude that job from normal FIFO selection;
+// a fresh SQL sample admits it without changing its history or granting time.
+func TestCompetitionDistributedRecoveryPgFrozenClockMustReachGrantedAvailability(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		fixture := newCompetitionDistributedRecoveryPgFixture(t, tb)
+		ctx := tb.Context()
+		receipt, err := fixture.authorize(tb, ctx)
+		if err != nil || receipt == nil {
+			tb.Fatal(err)
+		}
+		staleNow := receipt.AuthorizedAt.Add(-time.Second)
+		fixture.clock.Advance(staleNow.Sub(fixture.clock.Now()))
+		var availableAt time.Time
+		var eligible bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT available_at,available_at<=$2 FROM competition_job WHERE job_id=$1`, fixture.original.JobId, fixture.clock.Now()).Scan(&availableAt, &eligible))
+		})
+		if !availableAt.Equal(receipt.AuthorizedAt) || eligible || !fixture.clock.Now().Before(availableAt) {
+			tb.Fatal("stale-cut control did not exercise future availability relative to its frozen fixture clock")
+		}
+		before := fixture.snapshot(ctx)
+		fixture.releaseHold(tb)
+		if fixture.clock.Now().Before(availableAt) || !reflect.DeepEqual(before, fixture.snapshot(ctx)) {
+			tb.Fatal("fresh fixture clock failed to reach availability or changed job/slot authority")
+		}
+		job, err := fixture.store.Claim(ctx, fixture.selected(0), "synthetic-current-clock-worker", fixture.runtime.WorkerImageDigest)
+		if err != nil || job == nil {
+			tb.Fatal("fresh eligible FIFO cut did not claim the preserved recovery", err)
+		}
+		if job.JobId != fixture.original.JobId || job.EvaluationCycle != 1 || job.WorkerImageDigest != fixture.runtime.WorkerImageDigest ||
+			job.StartedAt == nil || !job.StartedAt.Equal(*fixture.original.StartedAt) || job.CycleStartedAt == nil || job.CycleStartedAt.Before(availableAt) ||
+			job.ExecutionDeadline == nil || !job.ExecutionDeadline.Equal(job.CycleStartedAt.Add(3*time.Hour)) {
+			tb.Fatal("availability observation changed FIFO, original history, qualified image or cycle budget")
+		}
+	})
+}

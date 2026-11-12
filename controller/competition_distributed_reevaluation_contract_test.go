@@ -5,7 +5,6 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,11 +19,7 @@ import (
 // isolated QA. Normal sibling checkouts use their real checked-in specification.
 func competitionDistributedRecoveryContract(t testing.TB) func(any) error {
 	t.Helper()
-	path := os.Getenv("COMPETITION_TEST_SN_CONTRACT")
-	if path == "" {
-		path = "../../sn/api/competition.yml"
-	}
-	content, err := os.ReadFile(path)
+	content, err := readCompetitionTestSnContract()
 	if err != nil {
 		t.Fatal(err)
 	}

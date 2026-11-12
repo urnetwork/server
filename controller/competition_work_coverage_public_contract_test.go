@@ -5,7 +5,6 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 
@@ -17,7 +16,7 @@ import (
 // Resolves the actual companion repository's schema, not a duplicate fixture.
 func coveragePublicSchemaValidator(t testing.TB, name string) func(any) error {
 	t.Helper()
-	content, err := os.ReadFile("../../sn/api/competition.yml")
+	content, err := readCompetitionTestSnContract()
 	if err != nil {
 		t.Fatal(err)
 	}

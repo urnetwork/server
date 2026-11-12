@@ -159,6 +159,21 @@ func (self *competitionDistributedRecoveryPgFixture) releaseHold(t testing.TB) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	self.observeCurrentDatabaseClock(t)
+}
+
+// Live test operations follow a fresh SQL cut. Historical fixture setup uses
+// its explicit earlier clock separately; no lease, start or deadline is edited.
+func (self *competitionDistributedRecoveryPgFixture) observeCurrentDatabaseClock(t testing.TB) time.Time {
+	t.Helper()
+	var now time.Time
+	server.Db(t.Context(), func(conn server.PgConn) {
+		var err error
+		now, err = competitionIntakeFirstDatabaseTime(t.Context(), conn)
+		server.Raise(err)
+	})
+	self.clock.Advance(now.Sub(self.clock.Now()))
+	return now
 }
 
 // Both the immutable terminal and all empty fenced slots are compared, so a
@@ -377,11 +392,19 @@ func TestCompetitionDistributedRecoveryPgRetainsFifoAndQualifiedWorker(t *testin
 		}
 		fixture.releaseHold(tb)
 		before := fixture.snapshot(tb.Context())
-		if job, err := fixture.store.Claim(tb.Context(), fixture.selected(0), "synthetic-obsolete-worker", testWorkerImageDigest()); job != nil || err == nil || !reflect.DeepEqual(before, fixture.snapshot(tb.Context())) {
-			tb.Fatal("obsolete worker consumed recovery authority", err)
+		if job, err := fixture.store.Claim(tb.Context(), fixture.selected(0), "synthetic-obsolete-worker", testWorkerImageDigest()); job != nil {
+			tb.Fatalf("obsolete image returned a job: original=%t cycle=%d qualified-image=%t", job.JobId == fixture.original.JobId, job.EvaluationCycle, job.WorkerImageDigest == fixture.runtime.WorkerImageDigest)
+		} else if !errors.Is(err, ErrLeaseLost) {
+			tb.Fatal("obsolete image did not reach the exact recovery-image refusal", err)
+		}
+		if !reflect.DeepEqual(before, fixture.snapshot(tb.Context())) {
+			tb.Fatal("obsolete image changed recovered or unrelated job custody")
 		}
 		job, err := fixture.store.Claim(tb.Context(), fixture.selected(0), "synthetic-fixed-worker", fixture.runtime.WorkerImageDigest)
-		if err != nil || job == nil || job.JobId != fixture.original.JobId || !job.SubmittedAt.Equal(fixture.original.SubmittedAt) {
+		if err != nil || job == nil {
+			tb.Fatal("eligible recovered FIFO admission was not claimed", err)
+		}
+		if job.JobId != fixture.original.JobId || job.EvaluationCycle != 1 || job.WorkerImageDigest != fixture.runtime.WorkerImageDigest || !job.SubmittedAt.Equal(fixture.original.SubmittedAt) {
 			tb.Fatal("recovery changed preserved admission FIFO", err)
 		}
 	})
@@ -457,7 +480,7 @@ func TestCompetitionDistributedRecoveryPgMigrationKeepsRunningCycleZeroWorker(t 
 		if err := fixture.store.Heartbeat(ctx, settings, "synthetic-running-legacy-control", job.JobId); err != nil {
 			tb.Fatal("additive recovery DDL fenced running cycle-zero heartbeat", err)
 		}
-		outcome := testSharedBaselineOutcome(tb, settings, job, EvaluationOutcome{Score: competitionRankingScore(90, 110), distributedArchiveVerified: true})
+		outcome := competitionPreparedIntakeCompletionOutcome(tb, settings, job)
 		if retry, err := fixture.store.Complete(ctx, settings, "synthetic-running-legacy-control", job.JobId, outcome); err != nil || retry {
 			tb.Fatal("additive recovery DDL changed running cycle-zero completion", retry, err)
 		}
@@ -575,12 +598,18 @@ func TestCompetitionDistributedRecoveryPgTwoGrantsRequireFreshCensusAndKeepOrder
 		}
 		fixture.releaseHold(tb)
 		first, err := fixture.store.Claim(ctx, fixture.selected(0), "synthetic-first-recovered", fixture.runtime.WorkerImageDigest)
-		if err != nil || first == nil || first.JobId != firstOriginal.JobId {
-			tb.Fatal("recovered FIFO lost original first admission", err)
+		if err != nil || first == nil {
+			tb.Fatal("eligible first recovered admission was not claimed", err)
+		}
+		if first.JobId != firstOriginal.JobId || first.EvaluationCycle != 1 || first.AttemptCount != 2 || first.WorkerImageDigest != fixture.runtime.WorkerImageDigest {
+			tb.Fatal("recovered FIFO lost original first admission/cycle/image")
 		}
 		second, err := fixture.store.Claim(ctx, fixture.selected(1), "synthetic-second-recovered", fixture.runtime.WorkerImageDigest)
-		if err != nil || second == nil || second.JobId != other.JobId || first.EvaluationCycle != 1 || second.EvaluationCycle != 1 || first.AttemptCount != 2 || second.AttemptCount != 2 {
-			tb.Fatal("second recovered claim changed original ordering or attempt namespaces", err)
+		if err != nil || second == nil {
+			tb.Fatal("eligible second recovered admission was not claimed", err)
+		}
+		if second.JobId != other.JobId || second.EvaluationCycle != 1 || second.AttemptCount != 2 || second.WorkerImageDigest != fixture.runtime.WorkerImageDigest {
+			tb.Fatal("second recovered claim changed original ordering, image or attempt namespace")
 		}
 	})
 }
@@ -597,16 +626,24 @@ func TestCompetitionDistributedRecoveryPgReclaimKeepsCycleClockAndRunId(t *testi
 		settings := fixture.selected(0)
 		first, err := fixture.store.Claim(tb.Context(), settings, "synthetic-recovery-first-owner", fixture.runtime.WorkerImageDigest)
 		if err != nil || first == nil {
-			tb.Fatal(err)
+			tb.Fatal("eligible recovery was not claimed before handback", err)
 		}
+		if first.JobId != fixture.original.JobId || first.EvaluationCycle != 1 || first.CycleStartedAt == nil || first.ExecutionDeadline == nil {
+			tb.Fatal("handback fixture claimed a different job or cycle")
+		}
+		fixture.observeCurrentDatabaseClock(tb)
 		if err := fixture.store.HandBack(withCompetitionJobAuthority(tb.Context(), first), "synthetic-recovery-first-owner", first.JobId, "synthetic-owned-shutdown"); err != nil {
 			tb.Fatal(err)
 		}
+		fixture.observeCurrentDatabaseClock(tb)
 		next, err := fixture.store.Claim(tb.Context(), settings, "synthetic-recovery-successor", testWorkerImageDigest())
-		if err != nil || next == nil || next.JobId != first.JobId || next.EvaluationCycle != 1 || next.AttemptCount != first.AttemptCount || next.CycleAttemptOffset != first.CycleAttemptOffset ||
+		if err != nil || next == nil {
+			tb.Fatal("released live custody was not reclaimed", err)
+		}
+		if next.JobId != first.JobId || next.EvaluationCycle != 1 || next.AttemptCount != first.AttemptCount || next.CycleAttemptOffset != first.CycleAttemptOffset ||
 			!next.CycleStartedAt.Equal(*first.CycleStartedAt) || !next.ExecutionDeadline.Equal(*first.ExecutionDeadline) || next.SlotFencingToken <= first.SlotFencingToken || next.WorkerImageDigest != first.WorkerImageDigest ||
 			competitionagent.RunId(next.JobId.String(), next.EvaluationCycle, next.AttemptCount) != competitionagent.RunId(first.JobId.String(), first.EvaluationCycle, first.AttemptCount) {
-			tb.Fatal("recovery handback/reclaim changed native attempt or original new-cycle budget", err)
+			tb.Fatal("recovery handback/reclaim changed native attempt or original new-cycle budget")
 		}
 	})
 }
