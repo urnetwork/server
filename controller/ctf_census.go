@@ -314,7 +314,7 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 		stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d own networks", epoch), "epoch %d's census waits: %s", epoch, err)
 		return stCtfCensusRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
 	}
-	facts.OwnNetworks = ownNetworks.AllNetworkIds()
+	facts.OwnNetworks = ownNetworks.allNetworkIds()
 
 	// P5, X5: a fleet binding at either boundary, and the provider pool's
 	// wallet selection
