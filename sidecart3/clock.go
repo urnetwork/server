@@ -62,12 +62,16 @@ type StoreClockSettings struct {
 	RedisScanCount int64
 	// How many fields one HPTTL or HPEXPIRE names: 1,000. Positive.
 	RedisFieldCount int
+	// How far past the store's now a DELETE names a time when the schedule's clock lets it delete: 24 h, past any
+	// store's LastModified however its clock runs, so the store's own comparison passes. Positive.
+	UnmodifiedPassAhead time.Duration
 }
 
 func DefaultStoreClockSettings() *StoreClockSettings {
 	return &StoreClockSettings{
-		RedisScanCount:  1000,
-		RedisFieldCount: 1000,
+		RedisScanCount:      1000,
+		RedisFieldCount:     1000,
+		UnmodifiedPassAhead: 24 * time.Hour,
 	}
 }
 
@@ -279,7 +283,7 @@ func (self *StoreClock) unmodified(ctx context.Context, clusterId string, key st
 		return sidecar.WithBlobUnmodified(ctx, time.UnixMilli(0))
 	}
 	// every stored object passes a time this far ahead
-	return sidecar.WithBlobUnmodified(ctx, self.store.Now().Add(24*time.Hour))
+	return sidecar.WithBlobUnmodified(ctx, self.store.Now().Add(self.settings.UnmodifiedPassAhead))
 }
 
 // Shortens the Redis families' ttls by how far the schedule's clock has moved since they were last aged, deleting a
