@@ -73,6 +73,10 @@ var alertClassKinds = map[string]alertClassKind{
 	"extender-seed-mirror-stale":         incidentAlertClass,
 	"extender-seed-mirrors-unobservable": visibilityAlertClass,
 	"extender-seed-off":                  visibilityAlertClass,
+	// SIGNALS.md §27.2 extender publishing
+	"extender-dns-publish-failing":     incidentAlertClass,
+	"extender-gossip-stalled":          incidentAlertClass,
+	"extender-publishing-unobservable": visibilityAlertClass,
 	// unknown states
 	"drain-moves-not-deployed":                         visibilityAlertClass,
 	"drain-moves-telemetry-incomplete":                 visibilityAlertClass,

@@ -566,7 +566,7 @@
      "legendFormat": "addresses in dns (v4)"
     }
    ],
-   "description": "IPv4 addresses the last publish tick wrote across every A set. Series are per process and keyed by instance, so this aggregates across the fleet rather than selecting a bare series: during a redeploy the draining and starting processes both push."
+   "description": "IPv4 addresses in the A sets Route 53 accepted in the last publish tick. Exported only by a taskworker that ran a tick in the last 30 minutes. Series are per process and keyed by instance, so this aggregates across the fleet rather than selecting a bare series: during a redeploy the draining and starting processes both push."
   },
   {
    "id": 12,
@@ -620,7 +620,7 @@
      "legendFormat": "addresses in dns (v6)"
     }
    ],
-   "description": "IPv6 addresses the last publish tick wrote across every AAAA set."
+   "description": "IPv6 addresses in the AAAA sets Route 53 accepted in the last publish tick."
   },
   {
    "id": 13,
@@ -674,7 +674,7 @@
      "legendFormat": "extenders in dns"
     }
    ],
-   "description": "Distinct extenders reachable through the addresses the last tick published. Lower than the population: each set is a rotating sample, not the whole pool."
+   "description": "Distinct extenders reachable through the addresses Route 53 accepted in the last tick. Lower than the population: each set is a rotating sample, not the whole pool."
   },
   {
    "id": 14,
@@ -728,7 +728,7 @@
      "legendFormat": "signed TXT records"
     }
    ],
-   "description": "Signed extender records published across all TXT sets. Zero means the operator has no root key and only address sets were written \u2014 a client can then bootstrap addresses but cannot verify them."
+   "description": "Signed extender records in the TXT sets Route 53 accepted in the last tick. Zero with A and AAAA sets present means the TXT sets did not land, or the operator has no root key and only address sets were written: a released client then dials none of the dns addresses, since it dials only what a record verified."
   },
   {
    "id": 15,
@@ -782,7 +782,7 @@
      "legendFormat": "A sets"
     }
    ],
-   "description": "A record sets published \u2014 one per continent with ipv4 addresses, plus the global default."
+   "description": "A record sets Route 53 accepted in the last tick: one per continent with ipv4 addresses, plus the global default."
   },
   {
    "id": 16,
@@ -836,7 +836,7 @@
      "legendFormat": "AAAA sets"
     }
    ],
-   "description": "AAAA record sets published. A family with no address anywhere produces no set at all rather than an empty one, since a record that resolves to nothing is worse than no record."
+   "description": "AAAA record sets Route 53 accepted in the last tick. A family with no address anywhere produces no set at all rather than an empty one, since a record that resolves to nothing is worse than no record."
   },
   {
    "id": 17,
@@ -848,7 +848,7 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
+    "w": 8,
     "x": 0,
     "y": 20
    },
@@ -902,7 +902,7 @@
      "legendFormat": "ipv6"
     }
    ],
-   "description": "What each tick actually wrote. The sets are recomputed every tick and never stored, so these gauges are the only record of what is in dns \u2014 the database can only say what was eligible."
+   "description": "What Route 53 accepted in each tick. The sets are recomputed every tick and never stored, so these gauges are the only record of what is in dns: the database can only say what was eligible. A set that failed is not counted, even where the zone still holds an older copy of it."
   },
   {
    "id": 18,
@@ -914,8 +914,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
-    "x": 12,
+    "w": 8,
+    "x": 8,
     "y": 20
    },
    "fieldConfig": {
@@ -977,7 +977,73 @@
      "legendFormat": "TXT"
     }
    ],
-   "description": "Sets published per tick by record type. TXT tracks the locations the address sets answer for, so it should move with A and AAAA; TXT falling to zero alone means signing stopped."
+   "description": "Sets Route 53 accepted per tick by record type. TXT tracks the locations the address sets answer for, so it should move with A and AAAA; TXT falling to zero alone means its sets were refused or signing stopped (see set changes by outcome)."
+  },
+  {
+   "id": 75,
+   "type": "timeseries",
+   "title": "set changes by outcome (30m)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 20
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env=\"$env\",outcome=\"accepted\"}[30m]))",
+     "refId": "A",
+     "legendFormat": "{{record_type}} accepted"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env=\"$env\",outcome=\"failed\"}[30m]))",
+     "refId": "B",
+     "legendFormat": "{{record_type}} failed"
+    }
+   ],
+   "description": "Every set change the publish tick wanted over the last 30 minutes (three ticks), accepted by Route 53 or failed: refused, errored, or never sent because the zone could not be read or an upsert of its type failed. Each set is a request of its own, so a refused TXT set costs only TXT. Failed changes for half an hour raise extender-dns-publish-failing (monitor/SIGNALS.md \u00a727.2); the taskworker log line `dns publish failed` names each set and Route 53's answer."
   },
   {
    "id": 19,
@@ -3338,7 +3404,7 @@
      "legendFormat": "{{stage}} {{outcome}}"
     }
    ],
-   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api too busy to take it, refused before any budget was spent: probes when it was already probing as many activations as it takes at once, budget_lock when other spends held one of its budgets past the lock bound; budget is an activation budget that refused it, by which -- client, address, proven_address, account (connect#230); config error is the operator's extender configuration; tcp and forward are the required test (C2a), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
+   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api too busy to take it, refused before any budget was spent: probes when it was already probing as many activations as it takes at once, budget_lock when other spends held one of its budgets past the lock bound; budget is an activation budget that refused it, by which -- client, address, proven_address, account, unproven_account (the account's, for an account none of whose hosts has passed on the family in 7 days) -- or error when the budget check failed rather than refused (connect#230); config error is the operator's extender configuration; tcp and forward are the required test (C2a), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
   },
   {
    "id": 64,
@@ -3566,7 +3632,7 @@
      "legendFormat": "{{stage}} {{outcome}} {{family}}"
     }
    ],
-   "description": "The activations refused for room rather than for anything the extender did, per hour, each answered with the wait until there is room (retry_after_seconds), which the activator waits out (connect#230). busy probes: the api was already probing as many activations as it takes at once; busy budget_lock: other spends held one of the budgets past the lock bound. budget: client is one client's 6 an hour, address one caller address's 6 an hour (its /32 or /64) over every account, proven_address the 6 an hour a key has of its own at the address its network proved it at, account the account's 60 an hour plus 6 per proven host, at most 1200. A run of account refusals is a fleet ramping or restarting; address refusals on one family are posts from a shared address."
+   "description": "The activations refused for room rather than for anything the extender did, per hour, each answered with the wait until there is room (retry_after_seconds), which the activator waits out (connect#230). busy probes: the api was already probing as many activations as it takes at once; busy budget_lock: other spends held one of the budgets past the lock bound. budget: client is one client's 6 an hour, address one caller address's 6 an hour (its /32 or /64) over every account, proven_address the 6 an hour a key has of its own at the address its network proved it at, account the account's 60 an hour plus 6 per proven host, at most 1200, unproven_account the same budget refusing an account none of whose hosts has passed on the family in 7 days, which asks for an hour, two, four, then six as the account keeps spending its floor on probes that fail; error is a budget check that failed rather than refused. A run of account refusals is a fleet ramping or restarting, and a steady unproven_account count is a fleet that cannot be reached on its tcp port; address refusals on one family are posts from a shared address. An activator from before connect 3a826e16 (2026-11-01), every release up to v2026.10.30, ignores the wait and backs off ten minutes doubling to six hours on its own."
   },
   {
    "id": 67,
@@ -3878,6 +3944,547 @@
     }
    ],
    "description": "Extenders with 5 or more distinct process runs started in the last 24 hours, beside the extenders that report a run id at all. Each activation names the run of the process that sent it, so a run that started in the window is a restart; a process that restarts every half hour starts about 48 a day, and long-lived copies of one key start none. Run ids arrive with a connect release, so a zero means no restarts only beside a population that reports them. A gap is a read that failed. Which extenders, and how their runs ended, is the query in connect/EXTENDER-ACTIVATION.md section 7."
+  },
+  {
+   "id": 175,
+   "type": "row",
+   "title": "uptime probe",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 163
+   },
+   "panels": []
+  },
+  {
+   "id": 176,
+   "type": "stat",
+   "title": "revocations (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 0,
+    "y": 164
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#ff9830"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_taskworker_extender_probe_revocations_total{env=\"$env\"}[24h]))",
+     "refId": "A",
+     "legendFormat": "revocations"
+    }
+   ],
+   "description": "Extenders the uptime probe revoked in the last 24 hours, when their last active address failed six probes in a row (connect/EXTENDER.md C3). Every revocation on the directory is one of these. On Main from 11-02 to 11-11 there were about 20 a day."
+  },
+  {
+   "id": 177,
+   "type": "stat",
+   "title": "revoked extenders restored (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 6,
+    "y": 164
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#73bf69"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_taskworker_extender_probe_restores_total{env=\"$env\",kind=\"extender\"}[24h]))",
+     "refId": "A",
+     "legendFormat": "restored"
+    }
+   ],
+   "description": "Revoked extenders the uptime probe brought back in the last 24 hours because they answered a probe for their return: the same tcp challenge under the extender's key at the address it lost, tried for 72 hours after it last worked (taskworker/work/extender_probe_recovery.go). A restore queues a record issued after the revocation, so every directory takes the extender back. Each one is a revocation the extender recovered from without a new activation."
+  },
+  {
+   "id": 178,
+   "type": "stat",
+   "title": "false revocation rate (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 12,
+    "y": 164
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 1,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#5794f2"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_taskworker_extender_probe_restores_total{env=\"$env\",kind=\"extender\"}[24h])) / sum(increase(urnetwork_taskworker_extender_probe_revocations_total{env=\"$env\"}[24h]))",
+     "refId": "A",
+     "legendFormat": "restored per revocation"
+    }
+   ],
+   "description": "Revoked extenders restored over revocations, both in the last 24 hours: the share of revocations whose extender was answering again within the window, a false revocation or an outage it came back from quickly. A restore can follow a revocation of the day before, so a day with few revocations can read above 100%. No data is a day with no revocation. Extenders that came back through their own activation instead are not counted here."
+  },
+  {
+   "id": 179,
+   "type": "stat",
+   "title": "probe failures held (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 18,
+    "y": 164
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#b877d9"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_taskworker_extender_probe_results_total{env=\"$env\",result=\"held\"}[24h]))",
+     "refId": "A",
+     "legendFormat": "held"
+    }
+   ],
+   "description": "Probe failures in the last 24 hours that counted against no extender because the pass was the prober's: three quarters of a family's addresses failed, across three quarters of its networks or with the prober's own control target failing too (taskworker/work/extender_probe_common_mode.go). Normally zero; anything else is a prober fault the guard kept from revoking the directory."
+  },
+  {
+   "id": 180,
+   "type": "timeseries",
+   "title": "uptime probe passes by verdict (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 169
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (ip_version, verdict) (increase(urnetwork_taskworker_extender_probe_passes_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "ipv{{ip_version}} {{verdict}}"
+    }
+   ],
+   "description": "The verdict of each family's uptime probe pass, per hour; a pass runs every five minutes, so a healthy hour is 12 counted per family. common_mode is a pass whose failures spanned the family's networks and control_failed one whose control target, the operator's api host, failed with most of the family: neither counts its failures against anyone. Each held pass also logs an error line naming its counts."
+  },
+  {
+   "id": 181,
+   "type": "timeseries",
+   "title": "uptime probe results (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 169
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (ip_version, set, result) (increase(urnetwork_taskworker_extender_probe_results_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "ipv{{ip_version}} {{set}} {{result}}"
+    }
+   ],
+   "description": "Every uptime probe of the last hour by family, by set and by result. active is the addresses in the directory, whose failures count toward the six that deactivate an address; recovery is the deactivated addresses probed for their return, every pass for two hours after they last worked and then every half hour. held is a failure of a pass the verdict held. A healthy hour fails a few percent of active probes; a failure share that jumps for one family alone points at the prober's path for that family."
+  },
+  {
+   "id": 182,
+   "type": "timeseries",
+   "title": "deactivations, revocations and restores (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 177
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (ip_version) (increase(urnetwork_taskworker_extender_probe_deactivations_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "ipv{{ip_version}} deactivated"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_taskworker_extender_probe_revocations_total{env=\"$env\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "revoked"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (ip_version, kind) (increase(urnetwork_taskworker_extender_probe_restores_total{env=\"$env\"}[1h]))",
+     "refId": "C",
+     "legendFormat": "ipv{{ip_version}} {{kind}} restored"
+    }
+   ],
+   "description": "Addresses the uptime probe deactivated, extenders it revoked, and what it restored, per hour. An address restored on an extender that another family kept active is kind address; a revoked extender brought back is kind extender. Restores that track revocations closely are revocations the extenders did not deserve, or recovered from within minutes."
+  },
+  {
+   "id": 183,
+   "type": "timeseries",
+   "title": "time revoked before a restore",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 177
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (increase(urnetwork_taskworker_extender_probe_restore_revoked_seconds_bucket{env=\"$env\"}[6h])))",
+     "refId": "A",
+     "legendFormat": "p50"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le) (increase(urnetwork_taskworker_extender_probe_restore_revoked_seconds_bucket{env=\"$env\"}[6h])))",
+     "refId": "B",
+     "legendFormat": "p95"
+    }
+   ],
+   "description": "How long the extenders the probe restored had been out of the directories, over the last six hours of restores. The first probe for a return comes five minutes after the revocation, so a false revocation reads as about five minutes; before the way back existed, it lasted until the extender's own next activation, up to a day. The buckets end at 72 hours, the end of the recovery window."
+  },
+  {
+   "id": 184,
+   "type": "timeseries",
+   "title": "prober control target (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 185
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (ip_version, result) (increase(urnetwork_taskworker_extender_probe_control_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "ipv{{ip_version}} {{result}}"
+    }
+   ],
+   "description": "The uptime prober's own control: a tls handshake with the operator's api host over each family it is about to judge, before and after every pass, through the probes' own dial settings (taskworker/work/extender_probe_control.go). ok is normal, two a pass. absent is a family the api host has no address of, unknown a lookup that failed or a pass that ended, and neither judges anything. failed holds a pass only once the control has answered in that process and most of the family failed with it, so a control that never answers from the taskworker shows here as failed and holds nothing."
   }
  ]
 }

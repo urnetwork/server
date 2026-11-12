@@ -211,25 +211,22 @@ func runWithDependencies(
 	}
 	defer node.Close()
 
-	flushStats := func() {}
-	joinPublish := func() {}
-	if err := readiness(ctx); err != nil {
-		// the mesh itself needs no database, so an unready replica still
-		// carries what it hears; only the drip waits
-		glog.Infof("[gossip]not ready (%s)\n", err)
-	} else if runCtx.Err() == nil {
-		flushStats = startStatsPusher(runCtx)
-		publishDone := make(chan struct{})
-		// A raise, such as a claim or stamp that fails while the database is
-		// away, ends the drain only. The mesh keeps carrying what it hears,
-		// as on an unready replica. Canceling runCtx would end Run, and with
-		// it the gossip process, or every service of an all-in-one operator.
-		go server.HandleError(func() {
-			defer close(publishDone)
-			runPublish(runCtx, node, publishTimeout, publishBatchSize)
-		})
-		joinPublish = func() { <-publishDone }
-	}
+	publishDone := make(chan struct{})
+	// Canceling runCtx would end Run, and with it the gossip process, or
+	// every service of an all-in-one operator, so nothing the drain does
+	// cancels it.
+	go server.HandleError(func() {
+		defer close(publishDone)
+		runPublishWhenReady(
+			runCtx,
+			readiness,
+			startStatsPusher,
+			func(ctx context.Context) {
+				runPublish(ctx, modelPublishQueue{}, node, publishTimeout, publishBatchSize, waitPublish)
+			},
+			waitPublish,
+		)
+	})
 
 	// a raise ends the status log only; the mesh does not depend on it
 	go server.HandleError(func() {
@@ -266,8 +263,68 @@ func runWithDependencies(
 	// the drain publishes through the node, so it ends before the deferred
 	// close takes the node out from under it
 	cancel()
-	joinPublish()
-	flushStats()
+	<-publishDone
 	glog.Infof("[gossip]close\n")
 	return nil
+}
+
+// runPublishWhenReady runs the drain, and the stats pusher beside it, on a
+// replica whose database is ready, until ctx ends. The pusher is flushed once
+// the drain has ended.
+//
+// The mesh itself needs no database, so an unready replica still carries what
+// it hears; only the drip waits, and only until readiness passes. A replica
+// that started during a database outage, or ahead of the migration its binary
+// needs, checks again a backoff after every failure (publishBackoff), where it
+// used to log once and never drain.
+//
+// The drain retries its own failed passes (runPublish), so it ends only with
+// ctx. Were it to end early all the same, the pusher would still run until ctx
+// ends, as it does on a replica whose drain never started.
+func runPublishWhenReady(
+	ctx context.Context,
+	readiness func(context.Context) error,
+	startStatsPusher func(context.Context) func(),
+	drain func(context.Context),
+	wait publishWait,
+) {
+	if !awaitPublishReadiness(ctx, readiness, wait) {
+		return
+	}
+	flushStats := startStatsPusher(ctx)
+	defer flushStats()
+	server.HandleError(func() {
+		drain(ctx)
+	})
+	<-ctx.Done()
+}
+
+// Checks readiness until it passes, waiting publishBackoff between failures.
+// False when ctx ended first.
+func awaitPublishReadiness(
+	ctx context.Context,
+	readiness func(context.Context) error,
+	wait publishWait,
+) bool {
+	for failures := 1; ; failures += 1 {
+		var err error
+		if r := server.HandleError(func() {
+			err = readiness(ctx)
+		}); r != nil {
+			err = fmt.Errorf("readiness raised: %s", server.ErrorJsonNoStack(r))
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if err == nil {
+			return true
+		}
+		// the mesh itself needs no database, so an unready replica still
+		// carries what it hears; only the drip waits
+		backoff := publishBackoff(publishTimeout, failures)
+		glog.Infof("[gossip]not ready, the drain waits (check %d, the next in %s): %s\n", failures, backoff, err)
+		if !wait(ctx, backoff) {
+			return false
+		}
+	}
 }

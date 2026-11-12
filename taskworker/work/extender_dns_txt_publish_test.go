@@ -201,7 +201,7 @@ func TestRoute53ExtenderDnsPublishesTxtSets(t *testing.T) {
 		{continentCode: "EU", records: []string{"short", long}},
 		{records: []string{"short"}},
 	}
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
@@ -210,8 +210,7 @@ func TestRoute53ExtenderDnsPublishesTxtSets(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 
-	connect.AssertEqual(t, len(api.changeInputs), 1)
-	changes := api.changeInputs[0].ChangeBatch.Changes
+	changes := api.oneChangePerRequest(t, testExtenderDnsHostedZoneId)
 	connect.AssertEqual(t, len(changes), 4)
 
 	connect.AssertEqual(t, aws.StringValue(changes[0].ResourceRecordSet.SetIdentifier), "extender-EU-A")
@@ -265,7 +264,7 @@ func TestExtenderDnsPublishSignsATxtRecordPerExtender(t *testing.T) {
 		createTestDnsExtender(ctx, 2, "de", true, testExtenderDnsAddressSpec{ipVersion: 4, active: true})
 
 		runTestExtenderPublish(t, ctx)
-		batch := publisher.onlyBatch(t)
+		batch := publisher.onlyApply(t)
 		connect.AssertEqual(t, batch.setIdentifiers(), []string{
 			"extender-EU-A",
 			"extender-NA-A",

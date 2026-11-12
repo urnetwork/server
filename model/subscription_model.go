@@ -1637,6 +1637,31 @@ func SetContractStream(
 // carried its data over the extender -- every active extender of an endpoint
 // counts, which is fuzzy per contract but averages to the right allocation.
 //
+// Only a tag that can be a relay is a party (owner, 2026-11-11: "Any contract
+// that comes from an extender should treat the extender as a 1/n party on the
+// contract", and only contracts actually relayed through an extender earn that
+// share). A connection is tagged by its caller address alone (J1), so a client
+// on the extender's own address is tagged as if the extender carried it. Two
+// kinds of tag carry nothing, and are no party, so they take no hop share in
+// settlement and count in no extender statistic, every one of which reads
+// these rows:
+//   - the extender's own network's: the extender's own provider client, whose
+//     platform connection leaves from the extender's address, and the clients
+//     of its network packed behind that address. On 2026-11-11 these were 72%
+//     and 22% of the rows (research extender-health-2026-11-11 §1.3). A share
+//     of its own client collapsed into the endpoint's and moved nothing, while
+//     one of another of its clients moved a consumer's provider's half to the
+//     consumer's own network, or split a provider's share inside its network.
+//   - a public provider's: a provider that provides publicly dials the
+//     platform directly on every transport (J4), so a public provider tagged
+//     with an extender is one on the extender's address, which the extender
+//     does not relay. The public mode is its ProvideModePublic key
+//     (setProvideMode in the sdk), which no consumer's client holds.
+//
+// A cross-network tag of any other client stays a party: a client relayed by
+// another network's extender reaches the platform from the extender's
+// address, which is what the tag sees.
+//
 // The two branches carry different party values so they cannot collide, and
 // each is distinct in itself, so several connections of one client through one
 // extender are one row.
@@ -1651,6 +1676,11 @@ func SetContractStream(
 // same transaction inserted just above, so it is a primary key lookup that
 // always hits; a contract that somehow is not there gets no party rows rather
 // than a null create_time.
+//
+// The endpoint's network is the contract's own source or destination network,
+// and its public provide key is read by the provide_key primary key, so the
+// two exclusions add one key lookup per tagged endpoint and nothing for the
+// untagged ones, which are nearly all.
 //
 // $1 contract, $2 source client, $3 destination client, $4 source party,
 // $5 destination party.
@@ -1671,7 +1701,7 @@ const contractExtenderInsertSql = `
 		network_extender.network_id,
 		transfer_contract.create_time
 	FROM (
-		SELECT DISTINCT extender_id, $4::varchar AS party
+		SELECT DISTINCT extender_id, $4::varchar AS party, client_id
 		FROM network_client_connection
 		WHERE
 			client_id = $2 AND
@@ -1680,7 +1710,7 @@ const contractExtenderInsertSql = `
 
 		UNION ALL
 
-		SELECT DISTINCT extender_id, $5::varchar AS party
+		SELECT DISTINCT extender_id, $5::varchar AS party, client_id
 		FROM network_client_connection
 		WHERE
 			client_id = $3 AND
@@ -1692,7 +1722,28 @@ const contractExtenderInsertSql = `
 		network_extender.active
 	INNER JOIN transfer_contract ON
 		transfer_contract.contract_id = $1
+	WHERE
+		-- the extender's own network relays nothing to itself: its own
+		-- provider client, and the clients of its network behind its address
+		network_extender.network_id <> CASE
+			WHEN endpoint.party = $4::varchar THEN transfer_contract.source_network_id
+			ELSE transfer_contract.destination_network_id
+		END AND
+		-- a public provider dials the platform directly (J4)
+		NOT EXISTS (
+			SELECT 1
+			FROM provide_key
+			WHERE
+				provide_key.client_id = endpoint.client_id AND
+				provide_key.provide_mode = ` + contractExtenderPublicProvideModeSql + `
+		)
 `
+
+// The ProvideModePublic key that marks a public provider in
+// contractExtenderInsertSql, as the literal the statement compares
+// provide_key.provide_mode with. A constant statement cannot format the mode
+// in, so TestContractExtenderPublicProvideModeIsTheModel pins this to it.
+const contractExtenderPublicProvideModeSql = "3"
 
 // MinShrinkContractTransferByteCount is the floor for shrink-to-fit escrow.
 // When the payer's available balance is below the requested contract size but

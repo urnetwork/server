@@ -65,11 +65,19 @@ const (
 	extenderActivationOutcomeBudgetLock = "budget_lock"
 	// the budget stage: the budget that refused it, the calling client's, the
 	// caller address's, a key's at the address its network proved it at, or
-	// the account's (ExtenderActivateSettings)
-	extenderActivationOutcomeClient        = "client"
-	extenderActivationOutcomeAddress       = "address"
-	extenderActivationOutcomeProvenAddress = "proven_address"
-	extenderActivationOutcomeAccount       = "account"
+	// the account's (ExtenderActivateSettings). The account's budget is counted
+	// as unproven_account when none of the account's hosts has passed
+	// activation on the family within ProvenHostMaxAge, which is the refusal
+	// that asks for the longer wait (unprovenAccountRetryAfter). A budget
+	// check that failed rather than refused, or a refusal by a budget that is
+	// none of these, is counted as error (extenderActivationOutcomeError):
+	// never as the account's, which is what every such failure was counted as
+	// before
+	extenderActivationOutcomeClient          = "client"
+	extenderActivationOutcomeAddress         = "address"
+	extenderActivationOutcomeProvenAddress   = "proven_address"
+	extenderActivationOutcomeAccount         = "account"
+	extenderActivationOutcomeUnprovenAccount = "unproven_account"
 )
 
 // The family of the caller's address. Unknown is a request refused because
@@ -94,6 +102,8 @@ var extenderActivationStageOutcomes = map[string][]string{
 		extenderActivationOutcomeAddress,
 		extenderActivationOutcomeProvenAddress,
 		extenderActivationOutcomeAccount,
+		extenderActivationOutcomeUnprovenAccount,
+		extenderActivationOutcomeError,
 	},
 	extenderActivationStageTcp: {
 		extenderActivationOutcomeError,
@@ -136,7 +146,7 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 			Help: "Extender activations (POST /network/extender-activate) by the stage that ended them, how, and the caller's address family. " +
 				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; owner, the key is registered to another network; " +
 				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once; budget_lock, other spends held a budget past the lock bound); " +
-				"budget, an activation budget refused it, the outcome naming which (client, address, proven_address -- a key's own at the address it was proved at -- or account); " +
+				"budget, an activation budget refused it, the outcome naming which (client, address, proven_address -- a key's own at the address it was proved at -- account, or unproven_account -- the account's, for an account none of whose hosts has passed on the family in 7 days, answered with a wait that grows to 6 hours), or error when the budget check failed rather than refused; " +
 				"tcp and forward, the required test, which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); " +
 				"store, activated, or storing the passed activation failed.",
 		}, []string{"stage", "outcome", "family"}),
@@ -208,7 +218,10 @@ func extenderActivationRefusalOutcome(stage string, stageOutcome string) string 
 }
 
 // The budget outcome of a budget refusal (extenderActivationStageBudget): the
-// kind of the budget that refused, by its action.
+// kind of the budget that refused, by its action. Every action an activation
+// spends is named; any other is no budget the activation asked for, and is
+// counted as error rather than as the account's, which is what it was counted
+// as before.
 func extenderActivationBudgetOutcome(action string) string {
 	switch action {
 	case model.AccountActionExtenderActivateV4, model.AccountActionExtenderActivateV6:
@@ -217,8 +230,10 @@ func extenderActivationBudgetOutcome(action string) string {
 		return extenderActivationOutcomeAddress
 	case model.AccountActionExtenderActivateProvenAddressV4, model.AccountActionExtenderActivateProvenAddressV6:
 		return extenderActivationOutcomeProvenAddress
-	default:
+	case model.AccountActionExtenderActivateAccountV4, model.AccountActionExtenderActivateAccountV6:
 		return extenderActivationOutcomeAccount
+	default:
+		return extenderActivationOutcomeError
 	}
 }
 
