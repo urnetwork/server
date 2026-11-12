@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T13:23:52.9732Z",
+  "observed_at": "2026-11-12T13:57:25.857228Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -20,15 +20,31 @@
     "grading_ready": true,
     "publication_held": false,
     "api_observed_at": "2026-11-12T12:17:56Z",
-    "diagnosis": "Goofe's last FIFO job is actively measuring, with six of nine candidate replicates completed at fence 35. The queue is empty. Sille's native run completed and cleanup passed, but its original 12:20:10 deadline has passed and the database still records it running; no terminal result or clock extension is inferred. No maintenance hold or runtime restart has been applied."
+    "diagnosis": "Goofe completed nine replicates and is centrally succeeded. Sille's native run also completed exit zero with cleanup verified, but remains the only centrally running record after its original 12:20:10 deadline. No terminal central result or clock extension is inferred for Sille. The corrected worker is staged only; no maintenance hold or runtime restart has been applied."
   },
   "queue": {
-    "succeeded": 15,
+    "succeeded": 16,
     "failed": 3,
     "queued": 0,
-    "running": 2
+    "running": 1
   },
   "recent_completed": [
+    {
+      "job_id": "01a1ced8-d838-de59-123b-e65f25c273f6",
+      "host_id": "goofe",
+      "run_id": "d368fd8d3fb04c0959792bbcdeceef537fdd1b35203dce443044eb7108e45459",
+      "started_at": "2026-11-12T12:21:27.242562",
+      "deadline": "2026-11-12T15:21:27.242562",
+      "observed_phase": "succeeded_central_retention_and_score_recorded",
+      "database_success_observed_at": "2026-11-12T13:57:25.857228Z",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "native_service_verified_active": false,
+      "database_fence": 35,
+      "original_clock_preserved": true
+    },
     {
       "job_id": "01a1cac1-bfb6-874c-78fb-05740ec204e4",
       "host_id": "goofe",
@@ -100,19 +116,6 @@
     }
   ],
   "active_attempts": [
-    {
-      "job_id": "01a1ced8-d838-de59-123b-e65f25c273f6",
-      "host_id": "goofe",
-      "run_id": "d368fd8d3fb04c0959792bbcdeceef537fdd1b35203dce443044eb7108e45459",
-      "started_at": "2026-11-12T12:21:27.242562",
-      "deadline": "2026-11-12T15:21:27.242562",
-      "observed_phase": "candidate",
-      "candidate_completed": 6,
-      "native_service_verified_active": true,
-      "native_service_pid": 4179256,
-      "database_fence": 35,
-      "database_custody": "last_verified_healthy_heartbeat_2026-11-12T13:05:50.011505Z_lease_2026-11-12T13:07:20.011505Z"
-    },
     {
       "job_id": "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c",
       "host_id": "sille",
@@ -257,7 +260,24 @@
         "expected_red_must_be_blocked_join_not_setup_or_compile": true
       },
       "worker_build": {
-    "status": "native_build_v2_packaging_and_independent_archive_qualification_passed_not_installed",
+    "status": "native_build_image_and_guard_qualified_append_only_release_staged_not_activated",
+    "staged_release": {
+      "evidence_directory": "/var/lib/urnetwork/competition-worker-transport-stage-20261112.DATAV7gT",
+      "release_directory": "/usr/local/libexec/urnetwork/competition-worker-transport-0aa751382-go1274-20261112-v2",
+      "actual_exit_status": 0,
+      "runtime_seconds": 5.100,
+      "release_receipt_sha256": "f47b5e02098e8acb4bc8fffadc7df7717ee005158e75aca8c1bff73d959aa9e0",
+      "wrapper_sha256": "b2f5688932154ca1657cf5e481d8749102c5e9782d551a410cb41383c94adcf4",
+      "candidate_override_sha256": "3790e269e9cc57d2aecb6a2fedb6a35a02ca91e0fdcee540c9041d02235a9e22",
+      "old_runtime_and_frozen_pins_unchanged": true,
+      "live_override_absent": true,
+      "continuous_stage_guard_started": false,
+      "capacity_basis": "Prospectively documented short-actor fallback: actor finished before guard identity capture; actual exit zero, pre/post root capacity and bounded single-payload copy verified.",
+      "root_free_before_bytes": 36469608448,
+      "root_free_after_bytes": 36349526016,
+      "admission_reserve_above_33_gib_bytes": 536870912,
+      "runtime_activated": false
+    },
     "v2_packaging": {
       "unit": "competition-worker-transport-package-0aa751382-20261112-v2.service",
       "invocation_id": "cb23cdecb1dc4551a2d8fdb5f056e2a5",
@@ -402,8 +422,57 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-    "status": "98_top_level_completed_162_remaining_catalog_fault_batch_running_corrected_worker_image_qualified",
-    "active_remainder_batch": {
+    "status": "105_top_level_completed_155_remaining_corrected_guard_qualified_recovery_chain_running_worker_release_staged_not_activated",
+    "sequential_remainder_chain": {
+      "ledger_directory": "/dev/shm/competition-recovery-chain-20261112.pAWVCjqC",
+      "control_session": 43890,
+      "historical_stopped_chain_directory": "/dev/shm/competition-recovery-chain-20261112.CtdDMoLx",
+      "completed_manifest": "completed.txt",
+      "remaining_manifest": "remaining.txt",
+      "actor_history": "actors.txt",
+      "verified_at": "2026-11-12T13:55:33Z",
+      "verified_completed": 105,
+      "verified_remaining": 155,
+      "whole_suite": 260,
+      "status": "replacement_chain_running_legacy_four_qualified_after_guard_fix",
+      "active_test_batch": "heavy-mainnet",
+      "active_invocation_id": "7b172c9363724eee91ee4f509d2cf870",
+      "active_main_pid": 3388025,
+      "active_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.Kdph2mJz",
+      "legacy_rerun_log_sha256": "7427119f096061e0bda4212bfc098179ce0310a94b8ffd7e6a12eaa34cda3bd2",
+      "last_qualified_test": "TestMigrationsCurrentSuffixRecoveryMetadataFaultsReachSignal",
+      "last_qualified_log_sha256": "29f84530d708c17e406454087a01f6882ac417a1f1c72d62d611db2c34b8d6dc",
+      "guard_failure": {
+        "batch": "heavy-legacy-payer",
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.9c02HcR3",
+        "test_passes_not_credited": 4,
+        "guard_exit_status": 1,
+        "guard_elapsed_seconds": 13.096,
+        "root_cause": "du raced Go temporary-directory removal; set-e exited the measurement guard without completing guard coverage.",
+        "guard_actor_log_sha256": "8303ca5df9b69db9fb2f6f4253b6408c6b457a317f793f930022aba52cc1e047",
+        "test_log_sha256": "0216c65668506f8a9093448051ef8b3176e53621d2a90489ed03efa740309de8",
+        "owned_cleanup_passed": true,
+        "resolution": "Corrected guard passed qualification; all four tests subsequently passed with actor, guard and cleanup exit zero. Historical unguarded result remains uncredited."
+      },
+      "guard_fix_qualification": {
+        "evidence_directory": "/dev/shm/competition-capacity-guard-qa-20261112.CvvvfzWP",
+        "invocation_id": "05336c8dcb854941ac1814ecab95a21e",
+        "ordinary_passed": 33,
+        "race_passed": 33,
+        "failed": 0,
+        "skipped": 0,
+        "actor_exit_status": 0,
+        "bootstrap_guard_exit_status": 0,
+        "source_unchanged": true,
+        "normal_guard_sha256": "0941dda0d7f5fd2eac210955279717889b24cda94ef47cdf82de323a01cbfc06",
+        "race_guard_sha256": "8edaeadaa678078278b8c2fbe36de796e13555dd6c4cbffeb8036bd4c0002fc6",
+        "ordinary_log_sha256": "3e239238ccd2b99ff62a7de08ae6d2eb8aee4f3060382527a7f53fa5410ccf09",
+        "race_log_sha256": "ed9b023b336a7b0abb22700ed069e6b1c795c66f5b45be618a5a36f061b33dfe",
+        "historical_guard_causal_failure_retained": true
+      },
+      "policy": "Original manifest batches only, sequential, stop entire chain on any test/setup/source/cleanup/resource-guard failure; no retries, skips, race runs or runtime changes."
+    },
+    "completed_catalog_fault_batch": {
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
       "invocation_id": "aef62c879dd24b08a91bc266e8d740b6",
       "main_pid": 3328502,
@@ -412,7 +481,8 @@
       "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.YbMYHFGm",
       "test": "TestMigrationsCurrentSuffixCatalogFaultsReachSignal",
       "manifest_sha256": "84d343200c6fa49da9079c97761e73d9b62c65c71e472243aeff2dcd20b83ca6",
-      "result": "running_not_counted_as_passed",
+      "result": "passed_actual_exit_zero_source_and_dependencies_unchanged_cleanup_zero",
+      "log_sha256": "3af0dc598e3db7964e1350c744ef1a08f693db55a5a4ef781e6e5b767e4d225a",
       "go_timeout_minutes": 40,
       "actor_timeout_minutes": 45,
       "no_automatic_next_batch": true
@@ -434,8 +504,8 @@
       "actor_timeout_minutes": 45,
       "no_automatic_next_batch": true
     },
-    "completed_top_level_test_union": 98,
-    "unexecuted_top_level_tests": 162,
+    "completed_top_level_test_union": 105,
+    "unexecuted_top_level_tests": 155,
     "prefix_continuation": {
       "source_commit": "7880fd886bb976adabb5e0b97a2cc6d5d61ea439",
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
