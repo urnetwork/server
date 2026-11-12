@@ -39,6 +39,8 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"record sets in dns":    "urnetwork_taskworker_extender_dns_sets",
 		"signed records in dns": "urnetwork_taskworker_extender_dns_txt_records",
 		"dns set outcomes":      "urnetwork_taskworker_extender_dns_changes_total",
+		// China's own sets, which its resolvers deliver whole (owner, 2026-11-12)
+		"china's set in dns":    `urnetwork_taskworker_extender_dns_country_records{env="$env",country="CN"}`,
 		"gossip backlog":        "urnetwork_stats_extender_gossip_pending",
 		"gossip staleness":      "urnetwork_stats_extender_gossip_oldest_pending_seconds",
 		"released to gossip":    "urnetwork_stats_extender_gossip_released_24h",
