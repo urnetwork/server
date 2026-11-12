@@ -422,15 +422,19 @@ func (self *claimRelayWorld) Send(_ context.Context, send *snClaimRelaySend) (*s
 
 // Pool 1's accounts, then the capture the flag pool's, as the core ledger reads
 // them. A pool that cannot be read is named with the coldkeys its account index
-// records, unless the index cannot be read either; neither pool read is an error.
+// records, unless the index cannot be read either; no pool with a finalized
+// root read is an error. The capture the flag pool has a root once a test adds
+// an account.
 func (self *claimRelayWorld) Accounts(context.Context) (*snClaimRelayLedgerRead, error) {
 	read := &snClaimRelayLedgerRead{Accounts: []*snClaimRelayAccount{}}
 	pools := []struct {
 		noId      uint64
 		rootIndex uint64
 		leaves    []merkle.LedgerAccount
+		rooted    bool
 		err       error
-	}{{1, 3, self.leaves, errors.Join(self.ledgerErr, self.poolLedgerErr)}, {claimRelayTestCtfPool, 0, self.ctfLeaves, errors.Join(self.ledgerErr, self.ctfLedgerErr)}}
+	}{{1, 3, self.leaves, true, errors.Join(self.ledgerErr, self.poolLedgerErr)}, {claimRelayTestCtfPool, 0, self.ctfLeaves, 0 < len(self.ctfLeaves), errors.Join(self.ledgerErr, self.ctfLedgerErr)}}
+	rooted := 0
 	for _, pool := range pools {
 		if pool.err != nil {
 			read.Unavailable = append(read.Unavailable, pool.noId)
@@ -444,6 +448,9 @@ func (self *claimRelayWorld) Accounts(context.Context) (*snClaimRelayLedgerRead,
 			}
 			continue
 		}
+		if pool.rooted {
+			rooted += 1
+		}
 		for index := range pool.leaves {
 			account := &snClaimRelayAccount{NoId: pool.noId, Index: uint64(index), RootIndex: pool.rootIndex, Coldkey: pool.leaves[index].Coldkey, Cumulative: pool.leaves[index].Cumulative}
 			if claimed := self.mirrorClaimed[claimRelaySlot(account)]; claimed != nil {
@@ -452,7 +459,7 @@ func (self *claimRelayWorld) Accounts(context.Context) (*snClaimRelayLedgerRead,
 			read.Accounts = append(read.Accounts, account)
 		}
 	}
-	if len(read.Unavailable) == len(pools) {
+	if 0 < len(read.Unavailable) && rooted == 0 {
 		return nil, errors.Join(self.ledgerErr, self.poolLedgerErr, self.ctfLedgerErr)
 	}
 	if self.indexUnreadable {
