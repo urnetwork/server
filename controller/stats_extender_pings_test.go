@@ -1,10 +1,15 @@
 package controller
 
 import (
+	"slices"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/urnetwork/connect"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -111,4 +116,82 @@ func TestStatsExtenderPingOutcomeValuesCarryTheReason(t *testing.T) {
 	}
 	// the window's pings, less the kind no label names
 	connect.AssertEqual(t, total, float64(3507+25798+349+348+2+3))
+}
+
+// One closed hour of the per-target counters (statsAddExtenderHourPings). A
+// stale directory that refused most extender pingers as unknown counts every
+// refusal in the rejections counter, as before, but only its one refusal of a
+// claim in the evidence counter, which is what the ranking of refusing targets
+// reads. A target with no refusal has its evidence series at zero, so its
+// later refusals reach increase(). A row a release from before the evidence
+// count stored adds its pings and refusals as before and nothing to either
+// evidence counter: the hour drops out of the evidence share rather than read
+// as an hour with no refusals. A pinger kind no label names adds nothing.
+// Pure.
+func TestStatsAddExtenderHourPingsCountsEvidenceOnlyWhereKnown(t *testing.T) {
+	staleDirectory := server.NewId()
+	honest := server.NewId()
+	storedBefore := server.NewId()
+	unnamedKind := server.NewId()
+	statsAddExtenderHourPings([]model.ExtenderHourPingCount{
+		// 38 unknown pingers and one round trip below the observed one
+		{ExtenderId: staleDirectory, PingerKind: model.NetworkPingPingerKindExtender, Pings: 40, Rejections: 39, EvidenceRejections: 1, EvidenceKnown: true},
+		{ExtenderId: staleDirectory, PingerKind: model.NetworkPingPingerKindProvider, Pings: 10, EvidenceKnown: true},
+		{ExtenderId: honest, PingerKind: model.NetworkPingPingerKindProvider, Pings: 12, EvidenceKnown: true},
+		{ExtenderId: storedBefore, PingerKind: model.NetworkPingPingerKindProvider, Pings: 20, Rejections: 5},
+		{ExtenderId: unnamedKind, PingerKind: 9, Pings: 7, Rejections: 7, EvidenceRejections: 7, EvidenceKnown: true},
+	})
+
+	// a series' value and whether it exists, read from what the counter
+	// collects: asking the counter for a series would make it
+	type series struct {
+		value  float64
+		exists bool
+	}
+	read := func(counter *statsCounterVec, labelValues ...string) series {
+		t.Helper()
+		metrics := make(chan prometheus.Metric)
+		go func() {
+			counter.counter.Collect(metrics)
+			close(metrics)
+		}()
+		found := series{}
+		var writeErr error
+		for metric := range metrics {
+			written := &dto.Metric{}
+			if err := metric.Write(written); err != nil {
+				writeErr = err
+				continue
+			}
+			writtenValues := []string{}
+			for _, label := range written.GetLabel() {
+				writtenValues = append(writtenValues, label.GetValue())
+			}
+			if slices.Equal(writtenValues, labelValues) {
+				found = series{value: written.GetCounter().GetValue(), exists: true}
+			}
+		}
+		if writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		return found
+	}
+
+	connect.AssertEqual(t, read(statsExtenderPingsCounter, staleDirectory.String(), "extender"), series{40, true})
+	connect.AssertEqual(t, read(statsExtenderPingsCounter, staleDirectory.String(), "provider"), series{10, true})
+	connect.AssertEqual(t, read(statsExtenderPingRejectionsCounter, staleDirectory.String()), series{39, true})
+	connect.AssertEqual(t, read(statsExtenderPingEvidenceRejectionsCounter, staleDirectory.String()), series{1, true})
+	connect.AssertEqual(t, read(statsExtenderPingEvidencePingsCounter, staleDirectory.String()), series{50, true})
+
+	connect.AssertEqual(t, read(statsExtenderPingEvidenceRejectionsCounter, honest.String()), series{0, true})
+	connect.AssertEqual(t, read(statsExtenderPingEvidencePingsCounter, honest.String()), series{12, true})
+
+	connect.AssertEqual(t, read(statsExtenderPingsCounter, storedBefore.String(), "provider"), series{20, true})
+	connect.AssertEqual(t, read(statsExtenderPingRejectionsCounter, storedBefore.String()), series{5, true})
+	connect.AssertEqual(t, read(statsExtenderPingEvidenceRejectionsCounter, storedBefore.String()), series{})
+	connect.AssertEqual(t, read(statsExtenderPingEvidencePingsCounter, storedBefore.String()), series{})
+
+	connect.AssertEqual(t, read(statsExtenderPingRejectionsCounter, unnamedKind.String()), series{})
+	connect.AssertEqual(t, read(statsExtenderPingEvidenceRejectionsCounter, unnamedKind.String()), series{})
+	connect.AssertEqual(t, read(statsExtenderPingEvidencePingsCounter, unnamedKind.String()), series{})
 }

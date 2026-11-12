@@ -19810,13 +19810,15 @@ conditions holds (every threshold a setting with the default given):
   last hour — targets refusing honest claims (gate tolerance, clock skew),
   pingers under-claiming, the probe path, or a key mismatch. Both counts
   leave out the two refusals that are evidence against no one, as the derive
-  leaves them out of every refusal rate (`derivePingRefusalIsEvidence`): an
-  unknown pinger (reason 4), usually a directory that has not caught up,
-  which the stale-directories condition below judges, and a rate limit
-  (reason 6). A refusal with no reason, which a pinger records for an
-  acceptance whose co-signature did not verify, is a key mismatch and stays
-  counted. The other part is rate-limited (reason 6) above 5 % of every
-  verdict, which is the extenders' admission limits (connect/EXTENDER.md A12)
+  leaves them out of every refusal rate
+  (`model.NetworkPingRefusalCountsAgainstTarget`): an unknown pinger
+  (reason 4), usually a directory that has not caught up, which the
+  stale-directories condition below judges, and a rate limit (reason 6). A
+  refusal with no reason, which a pinger records for an acceptance whose
+  co-signature did not verify, is a key mismatch and stays counted; the
+  derive counts it against the target's refusal rate only, since the target
+  accepted the claim. The other part is rate-limited (reason 6) above 5 % of
+  every verdict, which is the extenders' admission limits (connect/EXTENDER.md A12)
   set too tight for the ping cadence. Until 2026-11-11 the share counted
   unknown pingers: with the
   directories stale after the 2026-11-06 gossip stall, it read 17–24 % of an

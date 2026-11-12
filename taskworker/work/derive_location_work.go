@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -143,8 +142,9 @@ type DeriveLocationsResult struct {
 	// sample (an unknown pinger kind, a node's ping to itself)
 	CosignedPings int `json:"cosigned_pings"`
 	DroppedPings  int `json:"dropped_pings"`
-	// the refusals counted against a pinger's and a target's refusal rates,
-	// and those that are not evidence (§5.5)
+	// the refusals counted against a target's refusal rate, and against the
+	// pinger's too unless the target accepted the claim (a refusal with no
+	// reason); and those that are evidence against no one (§5.5)
 	Refusals        int `json:"refusals"`
 	IgnoredRefusals int `json:"ignored_refusals"`
 
@@ -586,24 +586,6 @@ func derivePingerNodeKind(pingerKind int) (int, bool) {
 	}
 }
 
-// Whether a refusal's reason speaks to either party's honesty (§5.5): a round
-// trip below the one the target observed, a bad nonce, a claim bound to the
-// wrong extender, or a bad signature. A pinger the target does not know is
-// usually a directory that has not caught up, and a probe refused for rate is
-// usually the shared address of an NLayer front (§2.9); neither is evidence
-// against anyone, so neither counts as a refusal or as an attestation.
-func derivePingRefusalIsEvidence(reason int) bool {
-	switch reason {
-	case int(connect.ExtenderProbeVerdictReasonRttBelowObserved),
-		int(connect.ExtenderProbeVerdictReasonNonce),
-		int(connect.ExtenderProbeVerdictReasonWrongExtender),
-		int(connect.ExtenderProbeVerdictReasonBadSignature):
-		return true
-	default:
-		return false
-	}
-}
-
 // The window's pings as the solver takes them: one term per ordered pair, the
 // nodes the terms name, and every party's attestation and refusal counts. The
 // co-signed direct pings arrive from the cursors (mergeDeriveInputs); the
@@ -650,23 +632,32 @@ func (self *deriveInputs) addRelayedCosigns(count *model.NetworkPingAttestationC
 	self.counts(target).PingsAsTarget += count.Count
 }
 
-// Takes one refused ping: when its reason is evidence, a refusal of its
-// pinger's attestation and one its target made.
+// Takes one refused ping (§5.5) as far as its reason is evidence: a refusal its
+// target made (model.NetworkPingRefusalCountsAgainstTarget) and, when the
+// target refused the claim itself, a refusal of its pinger's attestation
+// (model.NetworkPingRefusalCountsAgainstPinger). A refusal with no reason, an
+// acceptance whose co-signature did not verify, counts against the target
+// alone, as connect means it to: the pinger's attestation was neither refused
+// nor co-signed, so it is in neither of the pinger's counts. A pinger the
+// target does not know and a probe refused for rate are evidence against no
+// one, and count as a refusal or an attestation of neither party.
 func (self *deriveInputs) addRefusal(refusal *model.NetworkPingRefusal) {
 	nodeKind, ok := derivePingerNodeKind(refusal.PingerKind)
-	if !ok || !derivePingRefusalIsEvidence(refusal.Reason) {
+	if !ok || !model.NetworkPingRefusalCountsAgainstTarget(refusal.Reason) {
 		self.ignoredRefusals += 1
 		return
 	}
-	source := deriveNodeId(nodeKind, refusal.PingerId)
-	target := deriveNodeId(model.DerivedLocationNodeKindExtender, refusal.TargetExtenderId)
 	self.refusalCount += 1
-	pinger := self.counts(source)
-	pinger.AsPinger += 1
-	pinger.PingsAsPinger += 1
+	target := deriveNodeId(model.DerivedLocationNodeKindExtender, refusal.TargetExtenderId)
 	refuser := self.counts(target)
 	refuser.AsTarget += 1
 	refuser.PingsAsTarget += 1
+	if model.NetworkPingRefusalCountsAgainstPinger(refusal.Reason) {
+		source := deriveNodeId(nodeKind, refusal.PingerId)
+		pinger := self.counts(source)
+		pinger.AsPinger += 1
+		pinger.PingsAsPinger += 1
+	}
 }
 
 // The extenders the terms name: the extenders a pinger could have sampled

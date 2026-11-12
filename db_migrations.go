@@ -11460,4 +11460,14 @@ var migrations = []any{
 	// before deploying the taskworker and api that use them; they stay empty
 	// while ctf.yml leaves capture the flag off.
 	ctfSchemaMigration,
+
+	// The refusals of each target's ping hour that are evidence against the
+	// target (network_ping_target_evidence_schema.go): one nullable bigint on
+	// network_ping_target_hour_tally and its day partitions, added only when
+	// absent, under a five-second lock bound. A catalog change only: nothing
+	// is rewritten or scanned, and every row stored before it reads null, its
+	// evidence unknown. The running release names its columns and writes on.
+	// Apply before deploying the api and alt that write it and the taskworker
+	// that reads it.
+	newSqlMigration(networkPingTargetEvidenceSchemaSql),
 }

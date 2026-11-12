@@ -220,6 +220,9 @@ func addNetworkPings(
 		type targetHourTallyCounts struct {
 			pingCount      int64
 			rejectionCount int64
+			// the refusals that are evidence against the target
+			// (NetworkPingRefusalCountsAgainstTarget)
+			evidenceRejectionCount int64
 		}
 		// a pinger of a day
 		type pingerDayKey struct {
@@ -273,6 +276,9 @@ func addNetworkPings(
 			targetHourCounts.pingCount += 1
 			if storedPing.Cosign == NetworkPingCosignRejected {
 				targetHourCounts.rejectionCount += 1
+				if NetworkPingRefusalCountsAgainstTarget(storedPing.CosignReason) {
+					targetHourCounts.evidenceRejectionCount += 1
+				}
 			}
 
 			pingerDayKeys[pingerDayKey{
@@ -378,6 +384,7 @@ func addNetworkPings(
 		targetPingerKinds := make([]int16, 0, len(targetHourKeys))
 		targetPingCounts := make([]int64, 0, len(targetHourKeys))
 		targetRejectionCounts := make([]int64, 0, len(targetHourKeys))
+		targetEvidenceRejectionCounts := make([]int64, 0, len(targetHourKeys))
 		for _, targetHourKey := range targetHourKeys {
 			targetHourCounts := targetHourTallyKeyCounts[targetHourKey]
 			targetHours = append(targetHours, targetHourKey.hour)
@@ -385,7 +392,11 @@ func addNetworkPings(
 			targetPingerKinds = append(targetPingerKinds, int16(targetHourKey.pingerKind))
 			targetPingCounts = append(targetPingCounts, targetHourCounts.pingCount)
 			targetRejectionCounts = append(targetRejectionCounts, targetHourCounts.rejectionCount)
+			targetEvidenceRejectionCounts = append(targetEvidenceRejectionCounts, targetHourCounts.evidenceRejectionCount)
 		}
+		// A row an older release created holds no evidence count, and adding
+		// to its null leaves it null: the hour's evidence stays unknown rather
+		// than reading as the part of it counted since.
 		_, err = tx.Exec(
 			ctx,
 			`
@@ -394,24 +405,28 @@ func addNetworkPings(
 				target_extender_id,
 				pinger_kind,
 				ping_count,
-				rejection_count
+				rejection_count,
+				evidence_rejection_count
 			)
 			SELECT * FROM unnest(
 				$1::timestamp[],
 				$2::uuid[],
 				$3::smallint[],
 				$4::bigint[],
-				$5::bigint[]
+				$5::bigint[],
+				$6::bigint[]
 			)
 			ON CONFLICT (hour, target_extender_id, pinger_kind) DO UPDATE SET
 				ping_count = network_ping_target_hour_tally.ping_count + excluded.ping_count,
-				rejection_count = network_ping_target_hour_tally.rejection_count + excluded.rejection_count
+				rejection_count = network_ping_target_hour_tally.rejection_count + excluded.rejection_count,
+				evidence_rejection_count = network_ping_target_hour_tally.evidence_rejection_count + excluded.evidence_rejection_count
 			`,
 			targetHours,
 			targetExtenderIds,
 			targetPingerKinds,
 			targetPingCounts,
 			targetRejectionCounts,
+			targetEvidenceRejectionCounts,
 		)
 		raiseStoreErr(err)
 
@@ -1398,9 +1413,12 @@ func MaintainNetworkPingPartitions(
 // beyond-half-planet round trips, sharded by the pinger's id so the fleet's
 // reports do not queue on a few rows. network_ping_target_hour_tally counts
 // pings and refusals per hour, target and pinger kind, for the per-extender
-// counters. network_ping_pinger_day and network_ping_target_day hold the
-// distinct pingers and targets of each utc day, so a day's distinct count is
-// an index-only count. The sweep keeps them all on the pings' days: the day
+// counters, and of the refusals those that are evidence against the target
+// (NetworkPingRefusalCountsAgainstTarget) in evidence_rejection_count: null in
+// a row a release from before the column created, whose evidence is unknown.
+// network_ping_pinger_day and network_ping_target_day hold the distinct
+// pingers and targets of each utc day, so a day's distinct count is an
+// index-only count. The sweep keeps them all on the pings' days: the day
 // tables are partitioned and dropped with the ping days, and the small hour
 // tally is deleted behind the oldest ping day.
 //
@@ -1445,6 +1463,46 @@ var NetworkPingRefusalReasons = []int{
 	int(connect.ExtenderProbeVerdictReasonUnknownPinger),
 	int(connect.ExtenderProbeVerdictReasonBadSignature),
 	int(connect.ExtenderProbeVerdictReasonRateLimited),
+}
+
+// Whether a refusal with `reason` is evidence against its target
+// (connect/GEOMAP.md §5.5). A round trip below the one the target observed, a
+// bad nonce, a claim bound to the wrong extender and a bad signature speak to
+// either party's honesty. A refusal that names no reason is the pinger's record
+// of an acceptance whose co-signature did not verify: connect files it as a
+// refusal so that no target escapes its refusal rate by accepting with a
+// signature nobody can check (connect ExtenderPingRejected), and the operator
+// stores it only when no co-signature it was given verifies. A pinger the
+// target does not know is usually a directory that has not caught up, and a
+// probe refused for rate usually an NLayer front's shared address (§2.9):
+// neither is evidence against anyone, and nor is a reason no target sends. The
+// per-target tally's evidence count and the derive's refusal rate as target
+// read this one rule, so the targets the dashboard ranks as refusing are the
+// ones the derive counts against. It judges a refusal's reason only: a
+// co-signed verdict, or one that never arrived, is no refusal at all.
+func NetworkPingRefusalCountsAgainstTarget(reason int) bool {
+	switch reason {
+	case int(connect.ExtenderProbeVerdictReasonOk),
+		int(connect.ExtenderProbeVerdictReasonRttBelowObserved),
+		int(connect.ExtenderProbeVerdictReasonNonce),
+		int(connect.ExtenderProbeVerdictReasonWrongExtender),
+		int(connect.ExtenderProbeVerdictReasonBadSignature):
+		return true
+	default:
+		return false
+	}
+}
+
+// Whether a refusal with `reason` is also evidence against its pinger: one that
+// counts against its target (NetworkPingRefusalCountsAgainstTarget) and refused
+// the pinger's claim. A refusal that names no reason does not: the target
+// accepted the claim, and only its co-signature failed. Counted against the
+// pinger, it would let a target that signs badly mark down every pinger that
+// measured it, since the refusal rate as pinger is the one that weighs and
+// excludes sources. The derive's refusal rate as pinger reads this rule.
+func NetworkPingRefusalCountsAgainstPinger(reason int) bool {
+	return reason != int(connect.ExtenderProbeVerdictReasonOk) &&
+		NetworkPingRefusalCountsAgainstTarget(reason)
 }
 
 // Pings of one pinger kind with one verdict and reason, direct or relayed.
@@ -1627,13 +1685,20 @@ type ExtenderHourPingCount struct {
 	PingerKind int
 	Pings      int64
 	Rejections int64
+	// the refusals that are evidence against the target
+	// (NetworkPingRefusalCountsAgainstTarget), when the hour's row counts them:
+	// a row a release from before the count created does not, and its evidence
+	// is unknown rather than zero
+	EvidenceRejections int64
+	EvidenceKnown      bool
 }
 
 // Returns the pings each target received in the hour beginning at hourStart,
-// per pinger kind, and how many were refused: that hour's rows of the
-// per-target tally, read once per closed hour, exactly as the contract counter
-// is fed. The kind is kept so the extender to extender traffic is visible per
-// hour; it has two values, so it at most doubles the per extender series.
+// per pinger kind, and how many were refused, all and as evidence: that hour's
+// rows of the per-target tally, read once per closed hour, exactly as the
+// contract counter is fed. The kind is kept so the extender to extender
+// traffic is visible per hour; it has two values, so it at most doubles the
+// per extender series.
 func CountExtenderPingsByHour(ctx context.Context, hourStart time.Time) []ExtenderHourPingCount {
 	counts := []ExtenderHourPingCount{}
 	hourStart = hourStart.UTC().Truncate(time.Hour)
@@ -1641,7 +1706,7 @@ func CountExtenderPingsByHour(ctx context.Context, hourStart time.Time) []Extend
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT target_extender_id, pinger_kind, ping_count, rejection_count
+			SELECT target_extender_id, pinger_kind, ping_count, rejection_count, evidence_rejection_count
 			FROM network_ping_target_hour_tally
 			WHERE hour = $1
 			`,
@@ -1650,12 +1715,18 @@ func CountExtenderPingsByHour(ctx context.Context, hourStart time.Time) []Extend
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var count ExtenderHourPingCount
+				var evidenceRejections *int64
 				server.Raise(result.Scan(
 					&count.ExtenderId,
 					&count.PingerKind,
 					&count.Pings,
 					&count.Rejections,
+					&evidenceRejections,
 				))
+				if evidenceRejections != nil {
+					count.EvidenceRejections = *evidenceRejections
+					count.EvidenceKnown = true
+				}
 				counts = append(counts, count)
 			}
 		})
