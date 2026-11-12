@@ -566,7 +566,7 @@
      "legendFormat": "addresses in dns (v4)"
     }
    ],
-   "description": "IPv4 addresses the last publish tick wrote across every A set. Series are per process and keyed by instance, so this aggregates across the fleet rather than selecting a bare series: during a redeploy the draining and starting processes both push."
+   "description": "IPv4 addresses in the A sets Route 53 accepted in the last publish tick. Exported only by a taskworker that ran a tick in the last 30 minutes. Series are per process and keyed by instance, so this aggregates across the fleet rather than selecting a bare series: during a redeploy the draining and starting processes both push."
   },
   {
    "id": 12,
@@ -620,7 +620,7 @@
      "legendFormat": "addresses in dns (v6)"
     }
    ],
-   "description": "IPv6 addresses the last publish tick wrote across every AAAA set."
+   "description": "IPv6 addresses in the AAAA sets Route 53 accepted in the last publish tick."
   },
   {
    "id": 13,
@@ -674,7 +674,7 @@
      "legendFormat": "extenders in dns"
     }
    ],
-   "description": "Distinct extenders reachable through the addresses the last tick published. Lower than the population: each set is a rotating sample, not the whole pool."
+   "description": "Distinct extenders reachable through the addresses Route 53 accepted in the last tick. Lower than the population: each set is a rotating sample, not the whole pool."
   },
   {
    "id": 14,
@@ -728,7 +728,7 @@
      "legendFormat": "signed TXT records"
     }
    ],
-   "description": "Signed extender records published across all TXT sets. Zero means the operator has no root key and only address sets were written \u2014 a client can then bootstrap addresses but cannot verify them."
+   "description": "Signed extender records in the TXT sets Route 53 accepted in the last tick. Zero with A and AAAA sets present means the TXT sets did not land, or the operator has no root key and only address sets were written: a released client then dials none of the dns addresses, since it dials only what a record verified."
   },
   {
    "id": 15,
@@ -782,7 +782,7 @@
      "legendFormat": "A sets"
     }
    ],
-   "description": "A record sets published \u2014 one per continent with ipv4 addresses, plus the global default."
+   "description": "A record sets Route 53 accepted in the last tick: one per continent with ipv4 addresses, plus the global default."
   },
   {
    "id": 16,
@@ -836,7 +836,7 @@
      "legendFormat": "AAAA sets"
     }
    ],
-   "description": "AAAA record sets published. A family with no address anywhere produces no set at all rather than an empty one, since a record that resolves to nothing is worse than no record."
+   "description": "AAAA record sets Route 53 accepted in the last tick. A family with no address anywhere produces no set at all rather than an empty one, since a record that resolves to nothing is worse than no record."
   },
   {
    "id": 17,
@@ -848,7 +848,7 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
+    "w": 8,
     "x": 0,
     "y": 20
    },
@@ -902,7 +902,7 @@
      "legendFormat": "ipv6"
     }
    ],
-   "description": "What each tick actually wrote. The sets are recomputed every tick and never stored, so these gauges are the only record of what is in dns \u2014 the database can only say what was eligible."
+   "description": "What Route 53 accepted in each tick. The sets are recomputed every tick and never stored, so these gauges are the only record of what is in dns: the database can only say what was eligible. A set that failed is not counted, even where the zone still holds an older copy of it."
   },
   {
    "id": 18,
@@ -914,8 +914,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
-    "x": 12,
+    "w": 8,
+    "x": 8,
     "y": 20
    },
    "fieldConfig": {
@@ -977,7 +977,73 @@
      "legendFormat": "TXT"
     }
    ],
-   "description": "Sets published per tick by record type. TXT tracks the locations the address sets answer for, so it should move with A and AAAA; TXT falling to zero alone means signing stopped."
+   "description": "Sets Route 53 accepted per tick by record type. TXT tracks the locations the address sets answer for, so it should move with A and AAAA; TXT falling to zero alone means its sets were refused or signing stopped (see set changes by outcome)."
+  },
+  {
+   "id": 75,
+   "type": "timeseries",
+   "title": "set changes by outcome (30m)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 20
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env=\"$env\",outcome=\"accepted\"}[30m]))",
+     "refId": "A",
+     "legendFormat": "{{record_type}} accepted"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env=\"$env\",outcome=\"failed\"}[30m]))",
+     "refId": "B",
+     "legendFormat": "{{record_type}} failed"
+    }
+   ],
+   "description": "Every set change the publish tick wanted over the last 30 minutes (three ticks), accepted by Route 53 or failed: refused, errored, or never sent because the zone could not be read or an upsert of its type failed. Each set is a request of its own, so a refused TXT set costs only TXT. Failed changes for half an hour raise extender-dns-publish-failing (monitor/SIGNALS.md \u00a727.2); the taskworker log line `dns publish failed` names each set and Route 53's answer."
   },
   {
    "id": 19,
@@ -1701,7 +1767,7 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "sum(max by (pinger_kind, outcome, relayed) (urnetwork_stats_extender_pings_24h{env=\"$env\"}))",
+     "expr": "sum(max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h{env=\"$env\"}))",
      "refId": "A",
      "legendFormat": "pings (24h)"
     }
@@ -1755,12 +1821,12 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "sum(max by (pinger_kind, relayed) (urnetwork_stats_extender_pings_24h{env=\"$env\",outcome=\"cosigned\"}))",
+     "expr": "sum(max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h{env=\"$env\",outcome=\"cosigned\"}))",
      "refId": "A",
      "legendFormat": "co-signed (24h)"
     }
    ],
-   "description": "Pings whose target co-signed them, as the operator recomputed it: the target's co-signature verified under the target's stored key over exactly the claim the pinger signed. Only these are measurements (D8). Well below the total means targets are refusing or not answering; the refusals table below says which."
+   "description": "Pings whose target co-signed them, as the operator recomputed it: the target's co-signature verified under the target's stored key over exactly the claim the pinger signed. Only these are measurements (D8). Well below the total means targets are refusing or not answering; the refused stat beside this one and the refusals by reason panel below say which."
   },
   {
    "id": 40,
@@ -1800,7 +1866,7 @@
     "colorMode": "value",
     "graphMode": "area",
     "justifyMode": "center",
-    "textMode": "value",
+    "textMode": "value_and_name",
     "wideLayout": true
    },
    "targets": [
@@ -1809,12 +1875,21 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "sum(max by (pinger_kind, relayed) (urnetwork_stats_extender_pings_24h{env=\"$env\",outcome=\"rejected\"}))",
+     "expr": "sum(max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h{env=\"$env\",outcome=\"rejected\",reason!~\"unknown_pinger|rate_limited\"}))",
      "refId": "A",
-     "legendFormat": "refused (24h)"
+     "legendFormat": "on the claim"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h{env=\"$env\",outcome=\"rejected\",reason=\"unknown_pinger\"}))",
+     "refId": "B",
+     "legendFormat": "unknown pinger"
     }
    ],
-   "description": "Pings the pinger says its target refused, plus acceptances whose co-signature did not verify. A refusal is the pinger's word only and is evidence against a target only in aggregate (GEOMAP \u00a75.5); a ping that got no verdict at all is counted apart as unknown, so a flaky path is not read as a refusing extender."
+   "description": "Pings the pinger says its target refused, plus acceptances whose co-signature did not verify, in two counts by the reason the target gave. On the claim is every refusal that speaks to a party (GEOMAP \u00a75.5): a round trip below the one the target observed, a bad nonce, the wrong extender, a bad signature, or a refusal with no reason, which is an acceptance whose co-signature did not verify at the pinger. Unknown pinger is a target whose directory does not hold the extender pinger's record: evidence against no one, which the derive leaves out of every refusal rate. A high count of it is stale directories, not refusing targets: after gossip publishing stopped on 2026-11-06 it was 87% of the extender pingers' verdicts, and the monitor's extender-directories-stale finding says to check gossip and DNS publishing. rate_limited, also evidence against no one, is in neither count and is shown in the refusals by reason panel. A refusal is the pinger's word only and is evidence against a target only in aggregate; a ping that got no verdict at all is counted apart as unknown, so a flaky path is not read as a refusing extender."
   },
   {
    "id": 34,
@@ -2028,12 +2103,12 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "max by (pinger_kind, outcome, relayed) (urnetwork_stats_extender_pings_24h{env=\"$env\"})",
+     "expr": "sum by (pinger_kind, outcome, relayed) (max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h{env=\"$env\"}))",
      "refId": "A",
      "legendFormat": "{{pinger_kind}} {{outcome}} relayed={{relayed}}"
     }
    ],
-   "description": "The trailing 24 hour ping count over time, split by who pinged (provider or extender), what the operator made of the target's verdict (cosigned, rejected, unknown) and whether the ping was relayed. A relayed ping (GEOMAP \u00a72.9) went through an NLayer extender, which relays a probe to the end of its chain: the round trip is the whole chain's, the claim is judged and co-signed by the chain end, and the row counts here and as co-signature evidence but is never a solver term, since the detour through the front overstates the distance to the end. Every series is published, zero included, so a verdict that goes quiet is a line at zero rather than a gap."
+   "description": "The trailing 24 hour ping count over time, split by who pinged (provider or extender), what the operator made of the target's verdict (cosigned, rejected, unknown) and whether the ping was relayed. A relayed ping (GEOMAP \u00a72.9) went through an NLayer extender, which relays a probe to the end of its chain: the round trip is the whole chain's, the claim is judged and co-signed by the chain end, and the row counts here and as co-signature evidence but is never a solver term, since the detour through the front overstates the distance to the end. A rejected line adds up every refusal reason; the refusals by reason panel splits them. Every series is published, zero included, so a verdict that goes quiet is a line at zero rather than a gap."
   },
   {
    "id": 42,
@@ -2252,7 +2327,7 @@
      }
     }
    ],
-   "description": "The share of each target's pings that were refused over the dashboard's time range, highest first, top 20, among targets with at least ten pings in the range so one refused ping is not a 100% row. This is the evidence the co-signature exists for (GEOMAP \u00a72.3, \u00a72.7): an extender that never co-signs, or refuses far more than its peers, is one rejecting valid readings -- or one many pingers lie about, which is why a refusal is only the pinger's word and is weighed in aggregate by the reputation of \u00a75.5. A ping with no verdict is not a refusal and is not counted here. Both counters are per-extender, fed from closed hour buckets, capped with topk and read through increase()."
+   "description": "The share of each target's pings that were refused over the dashboard's time range, highest first, top 20, among targets with at least ten pings in the range so one refused ping is not a 100% row. This is the evidence the co-signature exists for (GEOMAP \u00a72.3, \u00a72.7): an extender that never co-signs, or refuses far more than its peers, is one rejecting valid readings -- or one many pingers lie about, which is why a refusal is only the pinger's word and is weighed in aggregate by the reputation of \u00a75.5. A ping with no verdict is not a refusal and is not counted here. The per-target counter has no reason, so this counts every refusal reason, unknown_pinger among them: when that reason leads the refusals by reason panel, the targets' directories are stale -- they refuse extender pingers whose records they do not hold, as after gossip publishing stopped on 2026-11-06 -- and this table ranks stale directories, not targets rejecting valid readings. Read it against the refused stat's on the claim count. Both counters are per-extender, fed from closed hour buckets, capped with topk and read through increase()."
   },
   {
    "id": 44,
@@ -2309,7 +2384,121 @@
      "legendFormat": "refused pings per hour"
     }
    ],
-   "description": "Refused pings stored per hour across the fleet, from the per-extender rejections counter. A step up that the ping rate does not share is a target, or a group of them, starting to refuse; the table beside this one names them. Fed from closed hour buckets, so the last hour is a step behind."
+   "description": "Refused pings stored per hour across the fleet, every reason together, from the per-extender rejections counter, which has no reason; the refusals by reason panel below says which. A step up that the ping rate does not share is a target, or a group of them, starting to refuse; the table beside this one names them. Fed from closed hour buckets, so the last hour is a step behind."
+  },
+  {
+   "id": 77,
+   "type": "timeseries",
+   "title": "refusals by reason (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 84
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (pinger_kind, reason) (max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h{env=\"$env\",outcome=\"rejected\"}))",
+     "refId": "A",
+     "legendFormat": "{{pinger_kind}} {{reason}}"
+    }
+   ],
+   "description": "The trailing 24 hour refusals by who pinged and the reason the target gave (connect/GEOMAP.md \u00a72.3, connect's ExtenderProbeVerdictReason*). rtt_below_observed: the claim's round trip was under the one the target observed -- the gate tolerance, a clock, or a pinger under-claiming. nonce and wrong_extender: the probe path. bad_signature: a signature that did not verify, a key mismatch. none: a refusal with no reason, an acceptance whose co-signature did not verify at the pinger. unknown_pinger: the target's directory does not hold the extender pinger's record. It is evidence against no one: a line that climbs is the directories going stale, as they did a day after gossip publishing stopped on 2026-11-06 -- check gossip and DNS publishing, not the targets (SIGNALS.md \u00a72.19c, extender-directories-stale). rate_limited: an admission limit, usually an NLayer front's shared address. other: a reason no target sends. The derive counts rtt_below_observed, nonce, wrong_extender and bad_signature as evidence and leaves every other reason out of its refusal rates (GEOMAP \u00a75.5). Every reason a target sends is published, zero included, so a reason that goes quiet is a line at zero."
+  },
+  {
+   "id": 76,
+   "type": "timeseries",
+   "title": "claims the operator refused (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 84
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (reason) (increase(urnetwork_extender_ping_report_refused_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{reason}}"
+    }
+   ],
+   "description": "Ping claims POST /network/ping-report refused before storing them, per hour, by why: these never reach the counts above, and the pinger's reporter logs only a refused report, never a refused claim. oversized and rate_limited refuse a whole report, and the reporter does not post its claims again. malformed: a claim that does not decode; time_window: its timestamp is outside the window the report accepts (a day back, five minutes ahead); pinger_not_reporter: its pinger is not the reporting client -- another client id, or an extender key another client activated last, as when an extender's slots share one key; pinger_unknown: the operator holds no key for the pinger; target_unknown: no extender activated under the target's key; target_own: the pinger measuring itself or another extender of its client; bad_signature: the pinger's signature does not verify; uncosigned_cap: a claim without a verifying co-signature past the report's cap; replay: already stored, or repeated in the report. The counter is per api and alt process, read through increase(); every reason exists at zero."
   },
   {
    "id": 45,
@@ -2320,7 +2509,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 84
+    "y": 92
    },
    "panels": []
   },
@@ -2336,7 +2525,7 @@
     "h": 5,
     "w": 4,
     "x": 0,
-    "y": 85
+    "y": 93
    },
    "fieldConfig": {
     "defaults": {
@@ -2390,7 +2579,7 @@
     "h": 5,
     "w": 4,
     "x": 4,
-    "y": 85
+    "y": 93
    },
    "fieldConfig": {
     "defaults": {
@@ -2444,7 +2633,7 @@
     "h": 5,
     "w": 4,
     "x": 8,
-    "y": 85
+    "y": 93
    },
    "fieldConfig": {
     "defaults": {
@@ -2498,7 +2687,7 @@
     "h": 5,
     "w": 4,
     "x": 12,
-    "y": 85
+    "y": 93
    },
    "fieldConfig": {
     "defaults": {
@@ -2552,7 +2741,7 @@
     "h": 5,
     "w": 4,
     "x": 16,
-    "y": 85
+    "y": 93
    },
    "fieldConfig": {
     "defaults": {
@@ -2606,7 +2795,7 @@
     "h": 5,
     "w": 4,
     "x": 20,
-    "y": 85
+    "y": 93
    },
    "fieldConfig": {
     "defaults": {
@@ -2676,7 +2865,7 @@
     "h": 8,
     "w": 6,
     "x": 0,
-    "y": 90
+    "y": 98
    },
    "fieldConfig": {
     "defaults": {
@@ -2733,7 +2922,7 @@
     "h": 8,
     "w": 6,
     "x": 6,
-    "y": 90
+    "y": 98
    },
    "fieldConfig": {
     "defaults": {
@@ -2790,7 +2979,7 @@
     "h": 8,
     "w": 6,
     "x": 12,
-    "y": 90
+    "y": 98
    },
    "fieldConfig": {
     "defaults": {
@@ -2847,7 +3036,7 @@
     "h": 8,
     "w": 6,
     "x": 18,
-    "y": 90
+    "y": 98
    },
    "fieldConfig": {
     "defaults": {
@@ -2904,7 +3093,7 @@
     "h": 5,
     "w": 6,
     "x": 0,
-    "y": 98
+    "y": 106
    },
    "fieldConfig": {
     "defaults": {
@@ -2974,7 +3163,7 @@
     "h": 5,
     "w": 6,
     "x": 6,
-    "y": 98
+    "y": 106
    },
    "fieldConfig": {
     "defaults": {
@@ -3044,7 +3233,7 @@
     "h": 5,
     "w": 6,
     "x": 12,
-    "y": 98
+    "y": 106
    },
    "fieldConfig": {
     "defaults": {
@@ -3106,7 +3295,7 @@
     "h": 5,
     "w": 6,
     "x": 18,
-    "y": 98
+    "y": 106
    },
    "fieldConfig": {
     "defaults": {
@@ -3168,7 +3357,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 103
+    "y": 111
    },
    "fieldConfig": {
     "defaults": {
@@ -3225,7 +3414,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 103
+    "y": 111
    },
    "fieldConfig": {
     "defaults": {
@@ -3279,7 +3468,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 111
+    "y": 119
    },
    "panels": []
   },
@@ -3295,7 +3484,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 112
+    "y": 120
    },
    "fieldConfig": {
     "defaults": {
@@ -3352,7 +3541,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 112
+    "y": 120
    },
    "fieldConfig": {
     "defaults": {
@@ -3409,7 +3598,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 120
+    "y": 128
    },
    "fieldConfig": {
     "defaults": {
@@ -3466,7 +3655,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 120
+    "y": 128
    },
    "fieldConfig": {
     "defaults": {
@@ -3523,7 +3712,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 128
+    "y": 136
    },
    "fieldConfig": {
     "defaults": {
@@ -3577,7 +3766,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 136
+    "y": 144
    },
    "panels": []
   },
@@ -3593,7 +3782,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 137
+    "y": 145
    },
    "fieldConfig": {
     "defaults": {
@@ -3650,7 +3839,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 137
+    "y": 145
    },
    "fieldConfig": {
     "defaults": {
@@ -3707,7 +3896,7 @@
     "h": 9,
     "w": 12,
     "x": 0,
-    "y": 145
+    "y": 153
    },
    "fieldConfig": {
     "defaults": {
@@ -3755,7 +3944,7 @@
     "h": 9,
     "w": 12,
     "x": 12,
-    "y": 145
+    "y": 153
    },
    "fieldConfig": {
     "defaults": {
@@ -3809,7 +3998,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 154
+    "y": 162
    },
    "panels": []
   },
@@ -3825,7 +4014,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 155
+    "y": 163
    },
    "fieldConfig": {
     "defaults": {
@@ -3888,7 +4077,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 163
+    "y": 171
    },
    "panels": []
   },
@@ -3904,7 +4093,7 @@
     "h": 5,
     "w": 6,
     "x": 0,
-    "y": 164
+    "y": 172
    },
    "fieldConfig": {
     "defaults": {
@@ -3958,7 +4147,7 @@
     "h": 5,
     "w": 6,
     "x": 6,
-    "y": 164
+    "y": 172
    },
    "fieldConfig": {
     "defaults": {
@@ -4012,7 +4201,7 @@
     "h": 5,
     "w": 6,
     "x": 12,
-    "y": 164
+    "y": 172
    },
    "fieldConfig": {
     "defaults": {
@@ -4066,7 +4255,7 @@
     "h": 5,
     "w": 6,
     "x": 18,
-    "y": 164
+    "y": 172
    },
    "fieldConfig": {
     "defaults": {
@@ -4120,7 +4309,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 169
+    "y": 177
    },
    "fieldConfig": {
     "defaults": {
@@ -4177,7 +4366,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 169
+    "y": 177
    },
    "fieldConfig": {
     "defaults": {
@@ -4234,7 +4423,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 177
+    "y": 185
    },
    "fieldConfig": {
     "defaults": {
@@ -4309,7 +4498,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 177
+    "y": 185
    },
    "fieldConfig": {
     "defaults": {
@@ -4375,7 +4564,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 185
+    "y": 193
    },
    "fieldConfig": {
     "defaults": {

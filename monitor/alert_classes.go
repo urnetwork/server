@@ -57,6 +57,10 @@ var alertClassKinds = map[string]alertClassKind{
 	"extender-seed-mirror-stale":         incidentAlertClass,
 	"extender-seed-mirrors-unobservable": visibilityAlertClass,
 	"extender-seed-off":                  visibilityAlertClass,
+	// SIGNALS.md §27.2 extender publishing
+	"extender-dns-publish-failing":     incidentAlertClass,
+	"extender-gossip-stalled":          incidentAlertClass,
+	"extender-publishing-unobservable": visibilityAlertClass,
 	// unknown states
 	"drain-moves-not-deployed":                         visibilityAlertClass,
 	"drain-moves-telemetry-incomplete":                 visibilityAlertClass,
@@ -408,6 +412,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"egress-tls-judge-stale":                              incidentAlertClass,
 	"zero-carry-verdict-spike":                            incidentAlertClass,
 	"escrow-zero-byte-writes":                             incidentAlertClass,
+	"extender-directories-stale":                          incidentAlertClass,
 	"failed_window_events":                                incidentAlertClass,
 	"family-growth":                                       incidentAlertClass,
 	"framer-message-too-large":                            incidentAlertClass,
