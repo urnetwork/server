@@ -196,9 +196,8 @@ func VerifyPlayPurchase(
 	case "SUBSCRIPTION_STATE_ACTIVE":
 		// fall through to credit
 	case "SUBSCRIPTION_STATE_CANCELED":
-		// cancelled is not expired: auto-renew is off and the period it paid
-		// for is credited like an active one's (support inbox 8086). With no
-		// paid time left it never credits -- terminal
+		// cancelled is not expired: the paid period credits like an active one's;
+		// with no paid time left it never credits -- terminal
 		if !playPurchasePaid(sub, server.NowUtc()) {
 			return NewVerifyStorePurchaseInvalid(), nil
 		}
