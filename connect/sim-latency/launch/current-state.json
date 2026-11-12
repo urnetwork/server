@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T04:44:51.797909+00:00",
+  "observed_at": "2026-11-12T06:39:08.057022Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,27 +17,38 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": true,
-    "publication_held": false
+    "grading_ready": false,
+    "publication_held": true,
+    "diagnosis": "Host-registration heartbeats are stale after both job custody handbacks. Read-only checks found no explicit admission, evaluation or finalization hold. The artifact_storage host-census flag is not an independent fresh MinIO probe."
   },
   "queue": {
-    "succeeded": 7,
+    "succeeded": 9,
     "failed": 2,
-    "queued": 7,
+    "queued": 5,
     "running": 2
   },
   "active_attempts": [
     {
-      "job_id": "01a1c7bf-ae3b-76f3-dee7-e60d2f77c90c",
+      "job_id": "01a1ca08-d3c6-0e22-3ccf-fd6da35bc356",
       "host_id": "goofe",
-      "started_at": "2026-11-12T03:40:44.712434",
-      "deadline": "2026-11-12T06:40:44.712434"
+      "started_at": "2026-11-12T05:31:38.724108",
+      "deadline": "2026-11-12T08:31:38.724108",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 6,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T05:52:29.860826Z",
+      "native_process_verified_live": true,
+      "reattachment_verified": false
     },
     {
-      "job_id": "01a1c88c-5f36-c222-3ec0-668fe393050f",
+      "job_id": "01a1ca5d-8d1f-3a64-6356-0dfeacf43557",
       "host_id": "sille",
-      "started_at": "2026-11-12T04:08:45.761115",
-      "deadline": "2026-11-12T07:08:45.761115"
+      "started_at": "2026-11-12T05:52:24.10429",
+      "deadline": "2026-11-12T08:52:24.10429",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 3,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T06:15:17.173607Z",
+      "native_process_verified_live": true,
+      "reattachment_verified": false
     }
   ],
   "live_worker": {
@@ -73,12 +84,37 @@
     "source_baseline_scoring_and_evaluator_image_unchanged": true,
     "native_agent_retirement_fix_not_activated": true
   },
+  "approved_failed_job_retries": {
+    "approval": "EPOCH2-DISTRIBUTED-RETRY-APPROVAL-2026-11-12.json",
+    "jobs": ["01a1c402-9ca1-79d8-e114-5af7c2ef343d", "01a1c4af-c928-3e6a-d183-6c9f319cc119"],
+    "user_authorized": true,
+    "request_is_not_a_database_grant": true,
+    "implementation_and_deployment_pending": true,
+    "queued": false,
+    "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
+    "frozen_server_commit": "fdd92e7b6acb5587b22531c591ecceff8fd3ae6e",
+    "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
+    "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
+    "qualification": {
+      "status": "corrected_dependency_attempt_verified_active_compilation_no_tests_completed",
+      "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+      "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.Q6aozbcV",
+      "workspace_sha256": "fa98030fed949631072273ad80a100475256da96089e3100137f9c31e3ab6c28",
+      "previous_zero_test_dependency_failures": [
+        {"evidence": "2IZI2TQU", "log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071"},
+        {"evidence": "2SNMhX3G", "log_sha256": "ef300e9f282c8ba92378d2f1577b21b491b2c3f2d76b5c5218d8d686bc2f6629"},
+        {"evidence": "QPQ1TM6V", "log_sha256": "7cb213bf815a1a1d786a0f27e2291dccce68963361a1e46b0cb8bdd1d3ba5d83"}
+      ],
+      "server_source_unchanged_by_dependency_correction": true,
+      "live_and_product_checkouts_unchanged": true
+    }
+  },
   "pending_authorizations": [
     "Claim-only maintenance window for the independently verified combined worker; otherwise retain the previously approved empty-queue boundary.",
-    "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted.",
-    "Two old infrastructure failures require separately authorized controlled recovery; do not create fresh attempt clocks implicitly."
+    "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted."
   ],
   "next_actions": [
+    "Implement and qualify the newly user-approved distributed recovery authority for the two failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence.",
     "Monitor both exact active jobs and live readiness; investigate new failures from retained evidence.",
     "After authorized drain and positively verified global idle, activate only the receipt-pinned staged worker, verify its actual runtime identity and unchanged execution inputs, then resume claims.",
     "Do not change frozen product source, shared baseline, scoring rules, evaluator image or any original attempt deadline."
