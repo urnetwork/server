@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T09:01:17.659846Z",
+  "observed_at": "2026-11-12T09:04:00.951643Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -24,8 +24,8 @@
   "queue": {
     "succeeded": 12,
     "failed": 2,
-    "queued": 5,
-    "running": 1
+    "queued": 4,
+    "running": 2
   },
   "recent_completed": [
     {
@@ -52,6 +52,16 @@
     }
   ],
   "active_attempts": [
+    {
+      "job_id": "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43",
+      "host_id": "goofe",
+      "run_id": "39c8e006ac2cec752ed53625bfbfa06587905af65ba405d773aa28bfab255b69",
+      "started_at": "2026-11-12T09:03:31.278113",
+      "deadline": "2026-11-12T12:03:31.278113",
+      "observed_phase": "native_accepted_preparing",
+      "native_service_verified_active": true,
+      "database_fence": 31
+    },
     {
       "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
       "host_id": "sille",
@@ -109,7 +119,7 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "isolated_monitor_query_planning_oom_reproduced_at_2gib_bounded_query_fix_pending",
+      "status": "bounded_snapshot_census_fix_and_deterministic_controls_under_implementation_not_yet_compiled",
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
       "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
       "controller_ordinary_passed": 393,
