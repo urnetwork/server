@@ -10,13 +10,22 @@ package controller
 // durable intents of the existing engine, signed by the root key.
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
+	"golang.org/x/crypto/blake2b"
 
 	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/ss58"
@@ -33,11 +42,23 @@ func stCtfRecycleOperation(rootIndex uint64, poolId uint64) string {
 	return fmt.Sprintf("ctfrecycle:%d:%d", rootIndex, poolId)
 }
 
-// StCtfCarry is the carry contract's immutable identity as it reads it.
+// An absorb names the root whose recycle it clears the way for and the
+// hotkey it frees, so a later fill of the same entry is absorbed again only
+// for a later root.
+func stCtfAbsorbOperation(rootIndex uint64, poolId uint64, hotkey [32]byte) string {
+	return fmt.Sprintf("ctfabsorb:%d:%d:%x", rootIndex, poolId, hotkey[:8])
+}
+
+// StCtfCarry is the carry contract's immutable identity as it reads it: its
+// vault2, pool and coldkey, and the coldkey, escrow hotkey and pool hotkey of
+// that vault2 it moves stake between.
 type StCtfCarry struct {
-	Vault   common.Address
-	PoolId  uint64
-	Coldkey [32]byte
+	Vault        common.Address
+	PoolId       uint64
+	Coldkey      [32]byte
+	VaultColdkey [32]byte
+	EscrowHotkey [32]byte
+	PoolHotkey   [32]byte
 }
 
 // StCtfClient is the swappable capture the flag chain client; CoreStClient
@@ -60,6 +81,13 @@ type StCtfClient interface {
 	// proof) under ctfrecycle:rootIndex:P, the carry account at index of the
 	// final root rootIndex with its claim proof.
 	CtfRecycle(ctx context.Context, carry common.Address, poolId uint64, rootIndex uint64, index uint64, account *merkle.LedgerAccount, proof []merkle.LedgerNode) (string, error)
+	// CtfStakingHotkeys reads the runtime's StakingHotkeys list of a
+	// coldkey: the hotkeys it holds stake on.
+	CtfStakingHotkeys(ctx context.Context, coldkey [32]byte) ([][32]byte, error)
+	// CtfAbsorbStake sends vault2's absorbStake(hotkey), which moves
+	// vault2's stake on a hotkey no pool uses into its escrow, under
+	// ctfabsorb:rootIndex:P:hotkey.
+	CtfAbsorbStake(ctx context.Context, poolId uint64, rootIndex uint64, hotkey [32]byte) (string, error)
 }
 
 var stCtfClientLock sync.Mutex
@@ -123,8 +151,20 @@ func (self *CoreStClient) CtfCarry(ctx context.Context, carry common.Address) (*
 	if err != nil {
 		return nil, fmt.Errorf("carry %s poolId(): %w", carry.Hex(), err)
 	}
-	if out.Coldkey, err = stViewAt(self, ctx, carry, stCtfCarryAbi.PackColdkey(), stCtfCarryAbi.UnpackColdkey); err != nil {
-		return nil, fmt.Errorf("carry %s coldkey(): %w", carry.Hex(), err)
+	for _, read := range []struct {
+		name     string
+		calldata []byte
+		unpack   func([]byte) ([32]byte, error)
+		out      *[32]byte
+	}{
+		{"coldkey()", stCtfCarryAbi.PackColdkey(), stCtfCarryAbi.UnpackColdkey, &out.Coldkey},
+		{"vaultColdkey()", stCtfCarryAbi.PackVaultColdkey(), stCtfCarryAbi.UnpackVaultColdkey, &out.VaultColdkey},
+		{"escrowHotkey()", stCtfCarryAbi.PackEscrowHotkey(), stCtfCarryAbi.UnpackEscrowHotkey, &out.EscrowHotkey},
+		{"poolHotkey()", stCtfCarryAbi.PackPoolHotkey(), stCtfCarryAbi.UnpackPoolHotkey, &out.PoolHotkey},
+	} {
+		if *read.out, err = stViewAt(self, ctx, carry, read.calldata, read.unpack); err != nil {
+			return nil, fmt.Errorf("carry %s %s: %w", carry.Hex(), read.name, err)
+		}
 	}
 	return out, nil
 }
@@ -148,6 +188,122 @@ func (self *CoreStClient) CtfRecycle(ctx context.Context, carry common.Address, 
 		nodes[i] = stabi.LedgerTreeProofNode{Hash: node.Hash, Sum: node.Sum.ToBig()}
 	}
 	return self.sendLedgerV2(ctx, stCtfRecycleOperation(rootIndex, poolId), carry, stCtfCarryAbi.PackRecycle(stBig(rootIndex), argument, nodes))
+}
+
+func (self *CoreStClient) CtfAbsorbStake(ctx context.Context, poolId uint64, rootIndex uint64, hotkey [32]byte) (string, error) {
+	return self.sendLedgerV2(ctx, stCtfAbsorbOperation(rootIndex, poolId, hotkey), self.cfg.VaultV2, stLedgerV2VaultAbi.PackAbsorbStake(hotkey))
+}
+
+// stCtfStakingHotkeysKey is the storage key of SubtensorModule's
+// StakingHotkeys map at a coldkey: twox128("SubtensorModule") ‖
+// twox128("StakingHotkeys") ‖ blake2_128(coldkey) ‖ coldkey.
+func stCtfStakingHotkeysKey(coldkey [32]byte) []byte {
+	key := make([]byte, 0, 16+16+16+32)
+	key = append(key, twox128([]byte("SubtensorModule"))...)
+	key = append(key, twox128([]byte("StakingHotkeys"))...)
+	h, err := blake2b.New(16, nil)
+	if err != nil {
+		panic(err)
+	}
+	h.Write(coldkey[:])
+	key = append(key, h.Sum(nil)...)
+	return append(key, coldkey[:]...)
+}
+
+// stCtfDecodeAccounts decodes a SCALE Vec<AccountId32>: a compact length,
+// then 32 bytes an account.
+func stCtfDecodeAccounts(value []byte) ([][32]byte, error) {
+	if len(value) == 0 {
+		return nil, nil
+	}
+	var n uint64
+	var header int
+	switch value[0] & 3 {
+	case 0:
+		n, header = uint64(value[0]>>2), 1
+	case 1:
+		if len(value) < 2 {
+			return nil, errors.New("st ctf: short compact length")
+		}
+		n, header = uint64(binary.LittleEndian.Uint16(value[:2])>>2), 2
+	case 2:
+		if len(value) < 4 {
+			return nil, errors.New("st ctf: short compact length")
+		}
+		n, header = uint64(binary.LittleEndian.Uint32(value[:4])>>2), 4
+	default:
+		return nil, errors.New("st ctf: an account list longer than 2^30")
+	}
+	if uint64(len(value)-header) != 32*n {
+		return nil, fmt.Errorf("st ctf: %d bytes for %d accounts", len(value)-header, n)
+	}
+	accounts := make([][32]byte, n)
+	for i := range accounts {
+		copy(accounts[i][:], value[header+32*i:])
+	}
+	return accounts, nil
+}
+
+// CtfStakingHotkeys reads StakingHotkeys(coldkey) with state_getStorage from
+// the subtensor endpoints, which serve the substrate JSON-RPC beside the EVM
+// one (sn_substrate.go).
+func (self *CoreStClient) CtfStakingHotkeys(ctx context.Context, coldkey [32]byte) ([][32]byte, error) {
+	urls := snSubstrateRpcUrls()
+	if len(urls) == 0 {
+		return nil, errors.New("subtensor rpc is not configured")
+	}
+	key := "0x" + hex.EncodeToString(stCtfStakingHotkeysKey(coldkey))
+	var lastErr error
+	for _, url := range urls {
+		value, err := stCtfSubstrateStorage(ctx, url, key)
+		if err == nil {
+			return stCtfDecodeAccounts(value)
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// stCtfSubstrateStorage reads one storage value, nil when the key has none.
+func stCtfSubstrateStorage(ctx context.Context, url string, key string) ([]byte, error) {
+	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "state_getStorage", "params": []string{key}})
+	if err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, snSubstrateRequestTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(callCtx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := snSubstrateHttpClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("substrate rpc: http %d", response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var out snJsonRpcResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	if out.Error != nil {
+		return nil, fmt.Errorf("substrate rpc: %s", out.Error.Message)
+	}
+	if !snStorageValuePresent(out.Result) {
+		return nil, nil
+	}
+	var value string
+	if err := json.Unmarshal(out.Result, &value); err != nil {
+		return nil, err
+	}
+	return hex.DecodeString(strings.TrimPrefix(value, "0x"))
 }
 
 // stCtfCarryColdkey is the carry contract's coldkey, the carry account's leaf

@@ -1,8 +1,13 @@
 package controller
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 
@@ -96,5 +101,61 @@ func TestStCtfLedgerIsReadByTheV2TreeReader(t *testing.T) {
 	proof, err := tree.Proof(0)
 	if err != nil || !merkle.VerifyLedgerProof(root, &total, tree.LeafCount(), 0, accounts[0].Coldkey, &accounts[0].Cumulative, proof) {
 		t.Fatalf("proof: %v", err)
+	}
+}
+
+// vault2's StakingHotkeys list is read with state_getStorage at
+// SubtensorModule.StakingHotkeys(coldkey), a Blake2_128Concat map of a SCALE
+// Vec<AccountId32>.
+func TestStCtfReadsAStakingHotkeyList(t *testing.T) {
+	coldkey := [32]byte{0x7a, 0x01}
+	key := stCtfStakingHotkeysKey(coldkey)
+	if len(key) != 80 || !bytes.Equal(key[:16], twox128([]byte("SubtensorModule"))) || !bytes.Equal(key[16:32], twox128([]byte("StakingHotkeys"))) || !bytes.Equal(key[48:], coldkey[:]) {
+		t.Fatalf("key %x", key)
+	}
+	accounts := [][32]byte{{1}, {2}, {3}}
+	value := []byte{byte(len(accounts) << 2)}
+	for _, account := range accounts {
+		value = append(value, account[:]...)
+	}
+	if decoded, err := stCtfDecodeAccounts(value); err != nil || !reflect.DeepEqual(decoded, accounts) {
+		t.Fatalf("decoded %v %v", decoded, err)
+	}
+	long := binary.LittleEndian.AppendUint16(nil, 128<<2|1)
+	for i := 0; i < 128; i++ {
+		long = append(long, make([]byte, 32)...)
+	}
+	if decoded, err := stCtfDecodeAccounts(long); err != nil || len(decoded) != 128 {
+		t.Fatalf("128 accounts: %d %v", len(decoded), err)
+	}
+	for _, bad := range [][]byte{{byte(2 << 2)}, {byte(1 << 2), 1}, {3}} {
+		if _, err := stCtfDecodeAccounts(bad); err == nil {
+			t.Fatalf("decoded %x", bad)
+		}
+	}
+	if decoded, err := stCtfDecodeAccounts(nil); err != nil || len(decoded) != 0 {
+		t.Fatalf("absent: %v %v", decoded, err)
+	}
+
+	answer := `{"jsonrpc":"2.0","id":1,"result":"0x` + hex.EncodeToString(value) + `"}`
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Method string   `json:"method"`
+			Params []string `json:"params"`
+		}
+		if json.NewDecoder(r.Body).Decode(&request) != nil || request.Method != "state_getStorage" || request.Params[0] != "0x"+hex.EncodeToString(key) {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(answer))
+	}))
+	t.Cleanup(rpc.Close)
+	raw, err := stCtfSubstrateStorage(t.Context(), rpc.URL, "0x"+hex.EncodeToString(key))
+	if err != nil || !bytes.Equal(raw, value) {
+		t.Fatalf("storage %x %v", raw, err)
+	}
+	answer = `{"jsonrpc":"2.0","id":1,"result":null}`
+	if raw, err := stCtfSubstrateStorage(t.Context(), rpc.URL, "0x"+hex.EncodeToString(key)); err != nil || raw != nil {
+		t.Fatalf("absent storage %x %v", raw, err)
 	}
 }

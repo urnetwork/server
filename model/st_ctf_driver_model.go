@@ -16,8 +16,11 @@ const (
 	StPublishKindCtfCommit   = "ctfcommit"
 	StPublishKindCtfFinalize = "ctffinalize"
 	StPublishKindCtfAnswer   = "ctfanswer"
-	// the carry contract's recycle of a final root's carry account
+	// the carry contract's recycle of a final root's carry account, and
+	// vault2's absorbStake of a foreign position that frees an entry of its
+	// staking hotkey list for it
 	StPublishKindCtfRecycle = "ctfrecycle"
+	StPublishKindCtfAbsorb  = "ctfabsorb"
 	// a finalized root's accounts and amounts recorded for readers
 	StPublishKindCtfRecord = "ctfrecord"
 	// a shadow run's unsigned report, its reference in the reason

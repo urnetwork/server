@@ -592,3 +592,67 @@ func TestStCtfDriverRecordsTheChainsCommitment(t *testing.T) {
 		t.Fatalf("commitment %+v", commitment)
 	}
 }
+
+// §4.6 (sn-contracts' open issue 3): while third parties hold vault2's
+// staking hotkey list at 128 without the pool hotkey, the recycle would be
+// refused, so the driver absorbs a foreign position first, passing over the
+// escrow and pool hotkeys, then recycles.
+func TestStCtfDriverFreesAStakingHotkeyForTheRecycle(t *testing.T) {
+	f := newCtfFixture(t, StCtfModeLive)
+	f.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
+	f.commitRound(8, 1000)
+	f.emission(8, 1_000_000_000_000)
+	f.chain.head = f.chain.end(8)
+	f.run(StCtfDriverStepCensus, 8)
+	f.run(StCtfDriverStepEpoch, 8)
+	f.chain.approvals = 1
+	f.chain.head += f.chain.challenge
+	f.run(StCtfDriverStepFinalize, 8)
+	f.takeLog()
+
+	otherPool := [32]byte{0x91}
+	f.chain.poolHotkeys[otherPool] = true
+	list := [][32]byte{ctfTestEscrowHotkey, otherPool}
+	for i := 0; len(list) < stCtfStakingHotkeysMax; i++ {
+		list = append(list, [32]byte{0xd0, byte(i)})
+	}
+	f.chain.staking[ctfTestVaultColdkey] = list
+	outcome := f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0})
+	requireLedgerV2Outcome(t, outcome, model.StPublishStatusSkipped, true, "was freed on hotkey 0xd0")
+	requireCtfLog(t, f.takeLog(), "absorb 91", "absorb d0")
+	if got := len(f.chain.staking[ctfTestVaultColdkey]); got != stCtfStakingHotkeysMax-1 {
+		t.Fatalf("%d staking hotkeys", got)
+	}
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, f.takeLog(), "recycle root 0")
+	returned := f.chain.recycled[9]
+	if !slices.Contains(f.chain.staking[ctfTestVaultColdkey], ctfTestPoolHotkey) || returned.IsZero() {
+		t.Fatal("the carry did not return")
+	}
+	requireCtfAlerts(t, f.alerts)
+
+	// nothing foreign left to free: alerted, and the recycle waits
+	g := newCtfFixture(t, StCtfModeLive)
+	g.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
+	g.commitRound(8, 1000)
+	g.emission(8, 1_000_000_000_000)
+	g.chain.head = g.chain.end(8)
+	g.run(StCtfDriverStepCensus, 8)
+	g.run(StCtfDriverStepEpoch, 8)
+	g.chain.approvals = 1
+	g.chain.head += g.chain.challenge
+	g.run(StCtfDriverStepFinalize, 8)
+	g.takeLog()
+	full := [][32]byte{ctfTestEscrowHotkey}
+	for i := 0; len(full) < stCtfStakingHotkeysMax; i++ {
+		hotkey := [32]byte{0x92, byte(i)}
+		g.chain.poolHotkeys[hotkey] = true
+		full = append(full, hotkey)
+	}
+	g.chain.staking[ctfTestVaultColdkey] = full
+	requireLedgerV2Outcome(t, g.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, true, "list is full")
+	if got := len(g.takeLog()); got != stCtfAbsorbTries {
+		t.Fatalf("%d absorbs tried", got)
+	}
+	requireCtfAlerts(t, g.alerts, StCtfAlertCarryLate+" root 0 staking hotkeys")
+}

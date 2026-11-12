@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -163,23 +164,24 @@ var stCtfCarries sync.Map
 
 // stCtfCheckCarry requires the carry contract to be the CTF pool's, on this
 // deployment's vault2, with the coldkey every EVM contract has, before the
-// driver trusts its records or sends to it. A carry that checks is cached.
-func stCtfCheckCarry(ctx context.Context, cfg *StConfig, ctfClient StCtfClient, carry common.Address) error {
+// driver trusts its records or sends to it, and returns what it read. A
+// carry that checks is cached: it is immutable.
+func stCtfCheckCarry(ctx context.Context, cfg *StConfig, ctfClient StCtfClient, carry common.Address) (*StCtfCarry, error) {
 	key := fmt.Sprintf("%s|%s", cfg.DeploymentKey(), carry.Hex())
-	if _, ok := stCtfCarries.Load(key); ok {
-		return nil
+	if value, ok := stCtfCarries.Load(key); ok {
+		return value.(*StCtfCarry), nil
 	}
 	read, err := ctfClient.CtfCarry(ctx, carry)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if read.Vault != cfg.VaultV2 || read.PoolId != ctf.PoolID(cfg.NoId) || read.Coldkey != stCtfCarryColdkey(carry) {
 		err := fmt.Errorf("st ctf: carry %s is for vault %s pool %d with coldkey 0x%x, not this deployment's pool %d", carry.Hex(), read.Vault.Hex(), read.PoolId, read.Coldkey, ctf.PoolID(cfg.NoId))
 		stCtfAlert(cfg, StCtfAlertCarry, carry.Hex(), "%s", err)
-		return err
+		return nil, err
 	}
-	stCtfCarries.Store(key, true)
-	return nil
+	stCtfCarries.Store(key, read)
+	return read, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -653,7 +655,7 @@ func stCtfCommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2Clien
 		return stCtfConclude(ctx, records, epoch, kind, model.StPublishStatusSkipped, "the total %s does not exceed the finalized total %s", funded.Dec(), finalizedTotal.Dec()), nil
 	}
 	carry := entry.Ctf.Carry
-	if err := stCtfCheckCarry(ctx, cfg, ctfClient, carry); err != nil {
+	if _, err := stCtfCheckCarry(ctx, cfg, ctfClient, carry); err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 
@@ -948,7 +950,8 @@ func stCtfRunRecycle(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 		return stCtfConclude(ctx, records, root.Epoch, kind, model.StPublishStatusSkipped, "capture the flag is not in force for epoch %d", root.Epoch), nil
 	}
 	carry := entry.Ctf.Carry
-	if err := stCtfCheckCarry(ctx, cfg, ctfClient, carry); err != nil {
+	carryInfo, err := stCtfCheckCarry(ctx, cfg, ctfClient, carry)
+	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 	tree, err := stCtfCachedTree(ctx, root.LedgerHash, root.Root, &root.Total, root.LeafCount)
@@ -975,6 +978,9 @@ func stCtfRunRecycle(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
+	if outcome := stCtfFreeStakingHotkey(ctx, cfg, ctfClient, records, root, carryInfo); outcome != nil {
+		return outcome, nil
+	}
 	outcome := stCtfSend(ctx, records, root.Epoch, kind, func() (string, error) {
 		return ctfClient.CtfRecycle(ctx, carry, poolId, rootIndex, uint64(index), &account, proof)
 	})
@@ -982,4 +988,58 @@ func stCtfRunRecycle(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 		stCtfLastEpoch.WithLabelValues("recycle").Set(float64(root.Epoch))
 	}
 	return outcome, nil
+}
+
+const (
+	// stCtfStakingHotkeysMax is the runtime's limit on a coldkey's
+	// StakingHotkeys list.
+	stCtfStakingHotkeysMax = 128
+	// stCtfAbsorbTries bounds the foreign entries one attempt tries to free.
+	stCtfAbsorbTries = 8
+)
+
+// The (root, hotkey) pairs absorbed in this process: an absorb's transaction
+// key names both, so a position refilled on the same hotkey is passed over
+// for another rather than sent again.
+var stCtfAbsorbed sync.Map
+
+// stCtfFreeStakingHotkey clears the way for a recycle (sn-contracts' open
+// issue 3). The carry's transfer to vault2 on the pool hotkey adds that hotkey
+// to vault2's StakingHotkeys list whenever vault2 holds nothing on it, and the
+// runtime refuses a list that would pass 128 entries (TooManyStakingHotkeys).
+// Anyone can fill vault2's list with dust on hotkeys of their own; vault2's
+// absorbStake moves such a foreign position into its escrow, as surplus, and
+// so frees its entry. It returns nil when the recycle may be sent now, and
+// otherwise this attempt's outcome. A list that cannot be read does not hold
+// the recycle back: if it fails, the step retries.
+func stCtfFreeStakingHotkey(ctx context.Context, cfg *StConfig, ctfClient StCtfClient, records stCtfRecords, root *StLedgerV2FinalizedRoot, carry *StCtfCarry) *StPublishOutcome {
+	list, err := ctfClient.CtfStakingHotkeys(ctx, carry.VaultColdkey)
+	if err != nil {
+		glog.Infof("[st]ctf vault2's staking hotkeys could not be read before the recycle of root %d: %s\n", root.Index, err)
+		return nil
+	}
+	if len(list) < stCtfStakingHotkeysMax || slices.Contains(list, carry.PoolHotkey) {
+		return nil
+	}
+	tries := 0
+	for _, hotkey := range list {
+		key := fmt.Sprintf("%s|%d|%x", cfg.DeploymentKey(), root.Index, hotkey)
+		if _, done := stCtfAbsorbed.Load(key); done || hotkey == carry.EscrowHotkey || hotkey == carry.PoolHotkey {
+			continue
+		}
+		if tries == stCtfAbsorbTries {
+			break
+		}
+		tries++
+		outcome := stCtfSend(ctx, records, root.Epoch, model.StPublishKindCtfAbsorb, func() (string, error) {
+			return ctfClient.CtfAbsorbStake(ctx, ctf.PoolID(cfg.NoId), root.Index, hotkey)
+		})
+		stCtfAbsorbed.Store(key, true)
+		if outcome.Status == model.StPublishStatusConfirmed {
+			glog.Infof("[st]ctf absorbed vault2's stake on hotkey 0x%x to free an entry of its staking hotkeys for the recycle of root %d\n", hotkey, root.Index)
+			return stCtfWaitUntil(fmt.Sprintf("an entry of vault2's staking hotkeys was freed on hotkey 0x%x", hotkey), stCtfServerNow())
+		}
+	}
+	stCtfAlert(cfg, StCtfAlertCarryLate, fmt.Sprintf("root %d staking hotkeys", root.Index), "vault2's staking hotkey list is full without the pool hotkey and no foreign entry could be absorbed, so the recycle of root %d waits", root.Index)
+	return stCtfWaitUntil("vault2's staking hotkey list is full", stCtfServerNow().Add(5*stCtfPollDelay))
 }

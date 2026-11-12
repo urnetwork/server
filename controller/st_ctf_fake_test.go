@@ -31,8 +31,11 @@ import (
 const ctfTestNoId = 1
 
 var (
-	ctfTestPoolId = ctf.PoolID(ctfTestNoId)
-	ctfTestCarry  = common.HexToAddress("0x00000000000000000000000000000000000000c7")
+	ctfTestPoolId       = ctf.PoolID(ctfTestNoId)
+	ctfTestCarry        = common.HexToAddress("0x00000000000000000000000000000000000000c7")
+	ctfTestVaultColdkey = [32]byte{0x7a}
+	ctfTestEscrowHotkey = [32]byte{0xe5}
+	ctfTestPoolHotkey   = [32]byte{0x90}
 )
 
 // Real quicknet pulses, read from drand's public API on 2026-11-11.
@@ -81,6 +84,10 @@ type fakeCtfChain struct {
 	held uint256.Int
 	// afterClose runs after a close of the CTF pool succeeds.
 	afterClose func()
+	// staking holds the runtime's StakingHotkeys lists by coldkey, and
+	// poolHotkeys the hotkeys vault2 refuses to absorb (any pool's).
+	staking     map[[32]byte][][32]byte
+	poolHotkeys map[[32]byte]bool
 }
 
 func newFakeCtfChain(log *[]string) *fakeCtfChain {
@@ -91,7 +98,9 @@ func newFakeCtfChain(log *[]string) *fakeCtfChain {
 	return &fakeCtfChain{
 		fakeLedgerV2Chain: pool, providers: providers,
 		census: map[uint64]fakeCtfCensus{}, times: map[uint64]uint64{}, roundOf: map[uint64]uint64{}, recycled: map[uint64]uint256.Int{},
-		carry: StCtfCarry{Vault: common.HexToAddress(testLedgerV2Vault), PoolId: ctfTestPoolId, Coldkey: stCtfCarryColdkey(ctfTestCarry)},
+		carry: StCtfCarry{Vault: common.HexToAddress(testLedgerV2Vault), PoolId: ctfTestPoolId, Coldkey: stCtfCarryColdkey(ctfTestCarry),
+			VaultColdkey: ctfTestVaultColdkey, EscrowHotkey: ctfTestEscrowHotkey, PoolHotkey: ctfTestPoolHotkey},
+		staking: map[[32]byte][][32]byte{}, poolHotkeys: map[[32]byte]bool{ctfTestPoolHotkey: true},
 	}
 }
 
@@ -214,6 +223,26 @@ func (self *fakeCtfChain) CtfCommitCensus(ctx context.Context, epoch uint64, noI
 	return fmt.Sprintf("0xcensus%d", epoch), nil
 }
 
+func (self *fakeCtfChain) CtfStakingHotkeys(ctx context.Context, coldkey [32]byte) ([][32]byte, error) {
+	if err := self.failed("staking"); err != nil {
+		return nil, err
+	}
+	return slices.Clone(self.staking[coldkey]), nil
+}
+
+func (self *fakeCtfChain) CtfAbsorbStake(ctx context.Context, poolId uint64, rootIndex uint64, hotkey [32]byte) (string, error) {
+	*self.log = append(*self.log, fmt.Sprintf("absorb %x", hotkey[:1]))
+	list := self.staking[ctfTestVaultColdkey]
+	switch {
+	case hotkey == ctfTestEscrowHotkey || self.poolHotkeys[hotkey]:
+		return "", fakeLedgerV2Revert("InvalidHotkey")
+	case !slices.Contains(list, hotkey):
+		return "", fakeLedgerV2Revert("NothingToAbsorb")
+	}
+	self.staking[ctfTestVaultColdkey] = slices.DeleteFunc(slices.Clone(list), func(entry [32]byte) bool { return entry == hotkey })
+	return fmt.Sprintf("0xabsorb%x", hotkey[:1]), nil
+}
+
 func (self *fakeCtfChain) CtfRecycle(ctx context.Context, carry common.Address, poolId uint64, rootIndex uint64, index uint64, account *merkle.LedgerAccount, proof []merkle.LedgerNode) (string, error) {
 	*self.log = append(*self.log, fmt.Sprintf("recycle root %d", rootIndex))
 	if err := self.failed("recycle"); err != nil {
@@ -246,6 +275,13 @@ func (self *fakeCtfChain) CtfRecycle(ctx context.Context, carry common.Address, 
 	}
 	if self.held.IsZero() {
 		return "", fakeLedgerV2Revert("NothingToRecycle")
+	}
+	// the transfer to vault2 on the pool hotkey adds it to vault2's list
+	if list := self.staking[ctfTestVaultColdkey]; !slices.Contains(list, ctfTestPoolHotkey) {
+		if stCtfStakingHotkeysMax <= len(list) {
+			return "", errors.New("execution reverted: TooManyStakingHotkeys")
+		}
+		self.staking[ctfTestVaultColdkey] = append(slices.Clone(list), ctfTestPoolHotkey)
 	}
 	// The next close captures it with the epoch's emission.
 	epoch := self.lastFunded + 1
@@ -632,6 +668,7 @@ func resetCtfCaches() {
 	stCtfPools.Clear()
 	stCtfCarries.Clear()
 	stCtfPulses.Clear()
+	stCtfAbsorbed.Clear()
 	stCtfAmendmentHolders.Clear()
 	stCtfTreeLock.Lock()
 	stCtfTrees, stCtfTreeOrder = map[[32]byte]*stLedgerV2Tree{}, nil
