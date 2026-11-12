@@ -929,7 +929,12 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionWorkCoverageMigrationContract().removedAt(server.CompetitionIntakeFirstMigrationVersion())},
 	// The successor retains all four retired composites, replacing only
 	// their exact operative guard bodies with scoped legacy-preserving ones.
-	[]snMainnetMigrationContract{migrationCurrentSuffix(server.CompetitionIntakeFirstMigrationVersion(), "separate published-source intake and qualified grading custody", competitionIntakeFirstArtifactQuery())},
+	// MG0's permissive competition step retires it once this binary links MG0;
+	// until then that version is zero and it is never retired.
+	[]snMainnetMigrationContract{migrationCurrentSuffix(server.CompetitionIntakeFirstMigrationVersion(), "separate published-source intake and qualified grading custody", competitionIntakeFirstArtifactQuery()).
+		removedAt(server.CompetitionSidecarSourceMigrationVersion())},
+	// the widened source guards with the same custody, at the step's position
+	competitionSidecarSourceMigrationContracts(),
 	// unique-exit hosted proxies: eleven additive migrations, each versioned by
 	// its position
 	proxyUniqueExitMigrationContracts,
