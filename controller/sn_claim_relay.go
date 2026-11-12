@@ -193,6 +193,11 @@ type SnClaimRelayStatus struct {
 	// with none named here, as before the capture the flag pool, and the api
 	// pauses every pool.
 	UnavailablePools []uint64 `json:"unavailable_pools,omitempty"`
+	// OthersClaimed says the pass ran as it would have ended running, claiming
+	// the pools it could read, and is ledger_unavailable only for
+	// UnavailablePools. A pass that stopped on another pool's fault after
+	// naming them leaves it false.
+	OthersClaimed bool `json:"others_claimed,omitempty"`
 	// PoolsUnavailable counts the pools whose ledger the relay's latest read
 	// could not read, for the metrics: this pass's, whether it claimed the
 	// others or ended there, or, for a pass that ended before reading the
@@ -514,16 +519,22 @@ func (self *snClaimRelay) pass(ctx context.Context) *SnClaimRelayStatus {
 		status.PoolsUnavailable = max(previous.PoolsUnavailable, len(previous.UnavailablePools))
 	}
 	self.run(ctx, now, status)
-	// A pool that cannot be read is a fault even while the others are claimed,
-	// so a pass that would end running says the ledger is unavailable, as one
-	// that could read no pool does, and names the pools.
-	if status.State == SnClaimRelayStateRunning && 0 < len(status.UnavailablePools) {
-		status.State = SnClaimRelayStateLedgerUnavailable
-		status.Detail = fmt.Sprintf("the ledger of pools %v cannot be read; the other pools are claimed", status.UnavailablePools)
-	}
+	snClaimRelayConclude(status)
 	snClaimRelayLimitRefusals(status)
 	self.publish(ctx, status)
 	return status
+}
+
+// snClaimRelayConclude says what a pass that is running says once it could not
+// read some pools. A pool that cannot be read is a fault even while the others
+// are claimed, so such a pass says the ledger is unavailable, as one that could
+// read no pool does, names the pools, and says it claimed the others.
+func snClaimRelayConclude(status *SnClaimRelayStatus) {
+	if status.State == SnClaimRelayStateRunning && 0 < len(status.UnavailablePools) {
+		status.State = SnClaimRelayStateLedgerUnavailable
+		status.Detail = fmt.Sprintf("the ledger of pools %v cannot be read; the other pools are claimed", status.UnavailablePools)
+		status.OthersClaimed = true
+	}
 }
 
 // Fills the status; every return has set its state.
@@ -612,8 +623,12 @@ func (self *snClaimRelay) run(ctx context.Context, now time.Time, status *SnClai
 		return
 	}
 
-	// A pass may wait minutes for finality; the status stays fresh meanwhile.
-	self.publish(ctx, status)
+	// A pass may wait minutes for finality; the status stays fresh meanwhile,
+	// and already says of the pools the pass could not read what it will say
+	// once it ends.
+	sending := *status
+	snClaimRelayConclude(&sending)
+	self.publish(ctx, &sending)
 	outcome, err := chain.Send(ctx, send)
 	if errors.Is(err, errSnClaimRelayInFlight) {
 		status.State, status.Detail = SnClaimRelayStateInFlight, err.Error()

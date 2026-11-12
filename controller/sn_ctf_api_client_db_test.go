@@ -436,8 +436,21 @@ func TestDbSnCtfAccountClaims(t *testing.T) {
 		want["0b"] = "unread"
 		requireSnCtfEqual(t, "a record that does not add up", read(), want)
 
-		// vault2 cannot be read: every account with a finalized root is left
-		// out; D, which has none, needs no read
+		// vault2 cannot be read once this instance has read it: past the time a
+		// value is fresh, each account answers its last value read
+		clock := snCtfClaimedNow
+		t.Cleanup(func() { snCtfClaimedNow = clock })
+		snCtfClaimedNow = func() time.Time { return time.Now().Add(2 * snCtfClaimedTtl) }
+		f.chain.fail["claimed"] = []error{errors.New("rpc down"), errors.New("rpc down"), errors.New("rpc down"), errors.New("rpc down")}
+		requireSnCtfEqual(t, "vault2 unreadable after a read", snCtfClaimsTestStates(source.AccountClaims(f.ctx, nil, needs), ledgerV2A, ledgerV2B, ledgerV2C, ledgerV2D), want)
+		delete(f.chain.fail, "claimed")
+		f.chain.fail["finalized"] = []error{errors.New("rpc down")}
+		requireSnCtfEqual(t, "no finalized head after a read", snCtfClaimsTestStates(source.AccountClaims(f.ctx, nil, needs), ledgerV2A, ledgerV2B, ledgerV2C, ledgerV2D), want)
+		delete(f.chain.fail, "finalized")
+		snCtfClaimedNow = clock
+
+		// vault2 cannot be read and this instance never read it: every account
+		// with a finalized root is left out; D, which has none, needs no read
 		f.chain.fail["claimed"] = []error{errors.New("rpc down"), errors.New("rpc down"), errors.New("rpc down"), errors.New("rpc down")}
 		requireSnCtfEqual(t, "vault2 unreadable", read(), map[string]string{"0a": "unread", "0b": "unread", "0c": "unread", "0d": "0: 1=0"})
 		delete(f.chain.fail, "claimed")
