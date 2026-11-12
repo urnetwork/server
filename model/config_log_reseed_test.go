@@ -49,10 +49,14 @@ type reseedWorld struct {
 
 func newReseedWorld(t testing.TB, twoMembers bool) *reseedWorld {
 	t.Helper()
+	return newReseedWorldFor(t, server.NewId(), server.NewId(), twoMembers)
+}
+
+// A reseedWorld whose network and owner are networkId's and ownerUserId's, as a network Postgres holds.
+func newReseedWorldFor(t testing.TB, networkId server.Id, ownerUserId server.Id, twoMembers bool) *reseedWorld {
+	t.Helper()
 	ctx := t.Context()
 	cluster := testReseedFakeCluster(t)
-	networkId := server.NewId()
-	ownerUserId := server.NewId()
 	self := &reseedWorld{t: t, ctx: ctx, networkId: networkId, ownerSidecarId: server.NewId()}
 	self.world = sidecartest.NewConfigLogSuiteWorldFor(ctx, cluster, sidecar.Id(networkId), sidecar.Id(ownerUserId), sidecar.Id(self.ownerSidecarId))
 	settings := DefaultConfigLogSettings()

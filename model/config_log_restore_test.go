@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/urnetwork/sidecar/protocol/bridge"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // A restored head below the store's tip advances to the verified tip; a head that names another A_n at a retained
@@ -175,5 +177,84 @@ func TestReapplyRemovalEffectsAfterARestore(t *testing.T) {
 		count, err = ReapplyRemovalEffects(self.ctx, self.sequencer, self.networkId, settings)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, count, 0)
+	})
+}
+
+// POST /network/config/reseed past its gate, on Postgres's bindings: a client that binds no sidecar is refused; the
+// owner's device alone adopts nothing in a two-member network; the member's device's upload adopts the run through the
+// tip; a re-seeded head from the member's device, which is no config writer, is refused; and the owner's device's walk
+// from C_0 writes the run back to the lost cluster and drops the network's uploads.
+func TestPostConfigReseedAdoptsWhatTwoMembersDevicesUpload(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		owner := newClientOwnerFixture(t)
+		t.Cleanup(server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n  reseed: true\n", owner.networkId)))
+		self := newReseedWorldFor(t, owner.networkId, owner.userId, true)
+		clientSession := func(clientId *server.Id) *session.ClientSession {
+			return session.Testing_CreateClientSession(owner.ctx, &session.ByJwt{NetworkId: owner.networkId, UserId: owner.userId, ClientId: clientId})
+		}
+		bound := func(sidecarId server.Id) *session.ClientSession {
+			t.Helper()
+			client := owner.mint(t, owner.root, &AuthNetworkClientArgs{Description: "device", DeviceSpec: "test", StrictExp: true})
+			identityKey, _, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := testSidecarBindingRecord(t, owner.networkId, sidecarId, identityKey, 1)
+			record.ClientId = *client.ClientId
+			if outcome, _ := BindSidecarIdentity(owner.ctx, record, server.NowUtc()); outcome != SidecarBindAppended {
+				t.Fatalf("the binding: %s", outcome)
+			}
+			return clientSession(client.ClientId)
+		}
+		args := func(upload *ConfigReseedUpload, configPushes [][]byte) *ConfigReseedArgs {
+			return &ConfigReseedArgs{Genesis: upload.SignedGenesis, Entries: upload.Entries, Rows: upload.Rows, ConfigPushes: configPushes}
+		}
+		refusal := func(err error) string {
+			t.Helper()
+			configLogError := &ConfigLogError{}
+			if !errors.As(err, &configLogError) {
+				t.Fatalf("not a refusal: %v", err)
+			}
+			return configLogError.Code
+		}
+		uploads := NewConfigReseedUploads(nil)
+		settings := DefaultConfigReseedSettings()
+
+		unbound := owner.mint(t, owner.root, &AuthNetworkClientArgs{Description: "unbound", DeviceSpec: "test"})
+		_, err := postConfigReseed(args(self.kept(self.ownerSidecarId), nil), clientSession(unbound.ClientId), uploads, settings)
+		connect.AssertEqual(t, refusal(err), "config_unadmitted")
+
+		ownerDevice, memberDevice := bound(self.ownerSidecarId), bound(self.memberSidecarId)
+		result, err := postConfigReseed(args(self.kept(self.ownerSidecarId), nil), ownerDevice, uploads, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Tip == nil, true)
+		result, err = postConfigReseed(args(self.kept(self.memberSidecarId), nil), memberDevice, uploads, settings)
+		connect.AssertEqual(t, err, nil)
+		if result.Tip == nil || result.Tip.N != self.tip.GetVersion() || !bytes.Equal(result.Tip.Chain, self.tip.GetChain()) {
+			t.Fatalf("the adopted tip: %+v", result.Tip)
+		}
+		connect.AssertEqual(t, result.StoppedAt, uint64(0))
+		connect.AssertEqual(t, result.Written, false)
+
+		adoption, err := AdoptConfigRun(self.tip, uploads.List(owner.networkId))
+		connect.AssertEqual(t, err, nil)
+		configPushes := self.world.ConfigPushes(0, adoption.NewestBase().GetConfigVersion())
+		_, err = postConfigReseed(args(self.kept(self.memberSidecarId), configPushes), memberDevice, uploads, settings)
+		connect.AssertEqual(t, refusal(err), "config_refused")
+
+		lost := testReseedFakeCluster(t)
+		sequencerSettings := DefaultConfigLogSettings()
+		sequencerSettings.Clock = self.world.Clock()
+		restored := NewConfigLogSequencer(lost, sequencerSettings, nil)
+		SetConfigLogSequencer(restored)
+		t.Cleanup(func() { SetConfigLogSequencer(nil) })
+		result, err = postConfigReseed(args(self.kept(self.ownerSidecarId), configPushes), ownerDevice, uploads, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Written, true)
+		tip, err := restored.Tip(owner.ctx, owner.networkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, tip.GetVersion(), self.tip.GetVersion())
+		connect.AssertEqual(t, bytes.Equal(tip.GetChain(), self.tip.GetChain()), true)
+		connect.AssertEqual(t, len(uploads.List(owner.networkId)), 0)
 	})
 }
