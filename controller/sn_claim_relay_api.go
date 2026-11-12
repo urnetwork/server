@@ -68,8 +68,10 @@ func snClaimRelayClassOf(state string) int {
 }
 
 // SnClaimRelayArgs are GET /sn/claim-relay's query: Partial (partial=true) asks
-// for the pools that can be read, naming the others in UnavailablePools,
-// rather than an Error for all of them.
+// for the pools that can be read, naming the others in UnavailablePools.
+// Without it, as old apps ask, a capture the flag pool that cannot be read is
+// left out, unnamed, and any other pool that cannot be read is an Error for
+// all of them.
 type SnClaimRelayArgs struct {
 	Partial bool
 }
@@ -331,8 +333,9 @@ func snClaimRelayNetworkColdkeys(clientSession *session.ClientSession) ([][32]by
 // snClaimRelayColdkeyAccounts reads the relay's view of one coldkey's accounts in
 // the operator's pools, its pool and, while capture the flag is on
 // (stCtfPoolOn), its capture the flag pool, by no_id: none, one or two. partial
-// reads each pool on its own and names those that cannot be read; otherwise any
-// pool that cannot be read is an error.
+// reads each pool on its own and names those that cannot be read; otherwise a
+// capture the flag pool that cannot be read is left out, unnamed, and any other
+// pool that cannot be read is an error (StLedgerV2Accounts).
 func snClaimRelayColdkeyAccounts(ctx context.Context, cfg *StConfig, status *SnClaimRelayStatus, coldkey [32]byte, partial bool, now time.Time) ([]*SnClaimRelayAccount, []*StLedgerV2UnavailablePool, error) {
 	var ledger *StLedgerV2AccountsResult
 	var err error
@@ -418,8 +421,9 @@ func snClaimRelayNetworkAccounts(clientSession *session.ClientSession, cfg *StCo
 	return accounts, unavailable, nil
 }
 
-// SnClaimRelay answers GET /sn/claim-relay for the caller's network, whole or an
-// Error.
+// SnClaimRelay answers GET /sn/claim-relay for the caller's network as an app
+// that predates partial=true asks: a capture the flag pool that cannot be read
+// is left out, and any other pool that cannot be read is an Error.
 func SnClaimRelay(clientSession *session.ClientSession) (*SnClaimRelayResult, error) {
 	return SnClaimRelayWithArgs(&SnClaimRelayArgs{}, clientSession)
 }
@@ -511,7 +515,11 @@ func SnClaimRelayClaimNow(args *SnClaimRelayClaimNowArgs, clientSession *session
 		return unreadable(err)
 	}
 	if len(accounts) == 0 {
-		if 0 < len(unavailable) {
+		// A tap names no partial answer, so it is answered as an app that
+		// predates the capture the flag pool asks: that pool, unreadable, is
+		// left out, and only another pool that cannot be read leaves the
+		// balances unread.
+		if slices.ContainsFunc(unavailable, func(pool *StLedgerV2UnavailablePool) bool { return pool.Kind != StLedgerV2PoolKindCtf }) {
 			return unreadable(fmt.Errorf("pools %d of %d unavailable", len(unavailable), len(stLedgerV2OwnPools(cfg, stCtfPoolOn(cfg)))))
 		}
 		return refuse(SnClaimRelayReasonNothingPending, 0)
