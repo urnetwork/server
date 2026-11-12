@@ -266,24 +266,70 @@ func (self *sdkBrowsingSetupFixture) waitInitial() (sdkBrowsingSetupSnapshot, er
 	locationSub := self.device.AddConnectedProviderLocationChangeListener(listener)
 	defer windowSub.Close()
 	defer locationSub.Close()
+	return waitSdkBrowsingSetupInitialSnapshot(
+		self.setupCtx,
+		defaultSdkBrowsingSetupWaitSettings(),
+		listener.changed,
+		self.discovery.changed,
+		func() sdkBrowsingSetupSnapshot {
+			return sdkBrowsingSetupSnapshotFrom(self.device.GetExits(), self.device.GetWindowStatus(), self.device.GetConnectedProviderLocations(), self.readyProviderIds())
+		},
+		func() *sdkBrowsingSetupEmptyReceipt {
+			return self.discovery.snapshot().InitialExcludedEmpty
+		},
+	)
+}
+
+// GetExits is a pull-only public view. These settings belong only to the
+// fixture waiter and never change SDK discovery, transport, or window policy.
+type sdkBrowsingSetupWaitSettings struct {
+	ExitHealthReadInterval time.Duration
+}
+
+func defaultSdkBrowsingSetupWaitSettings() *sdkBrowsingSetupWaitSettings {
+	return &sdkBrowsingSetupWaitSettings{ExitHealthReadInterval: 100 * time.Millisecond}
+}
+
+// Keep the actual readiness loop behind explicit public-view inputs so its
+// wake contract can be qualified without constructing providers or TestEnv.
+func waitSdkBrowsingSetupInitialSnapshot(
+	ctx context.Context,
+	settings *sdkBrowsingSetupWaitSettings,
+	structuralChanged <-chan struct{},
+	discoveryChanged <-chan struct{},
+	readSnapshot func() sdkBrowsingSetupSnapshot,
+	readEmptyReceipt func() *sdkBrowsingSetupEmptyReceipt,
+) (sdkBrowsingSetupSnapshot, error) {
+	if settings == nil || settings.ExitHealthReadInterval <= 0 {
+		return sdkBrowsingSetupSnapshot{}, errors.New("SDK_BROWSING_SETUP_WAIT_SETTINGS: positive exit-health read interval required")
+	}
+	// Window and location callbacks cover structural changes. Exit warning and
+	// quarantine health is pull-only, so bound its otherwise silent recovery.
+	healthReads := time.NewTicker(settings.ExitHealthReadInterval)
+	defer healthReads.Stop()
 	var snapshot sdkBrowsingSetupSnapshot
 	for {
-		snapshot = sdkBrowsingSetupSnapshotFrom(self.device.GetExits(), self.device.GetWindowStatus(), self.device.GetConnectedProviderLocations(), self.readyProviderIds())
-		ready, err := sdkBrowsingSetupReady(snapshot, self.discovery.snapshot().InitialExcludedEmpty)
+		snapshot = readSnapshot()
+		var empty *sdkBrowsingSetupEmptyReceipt
+		if readEmptyReceipt != nil {
+			empty = readEmptyReceipt()
+		}
+		ready, err := sdkBrowsingSetupReady(snapshot, empty)
 		if err != nil {
 			return snapshot, err
 		}
 		if ready {
-			if err := self.setupCtx.Err(); err != nil {
+			if err := ctx.Err(); err != nil {
 				return snapshot, err
 			}
 			return snapshot, nil
 		}
 		select {
-		case <-self.setupCtx.Done():
-			return snapshot, fmt.Errorf("SDK_BROWSING_SETUP_PREMISE: %s: %w", snapshot, self.setupCtx.Err())
-		case <-listener.changed:
-		case <-self.discovery.changed:
+		case <-ctx.Done():
+			return snapshot, fmt.Errorf("SDK_BROWSING_SETUP_PREMISE: %s: %w", snapshot, ctx.Err())
+		case <-structuralChanged:
+		case <-discoveryChanged:
+		case <-healthReads.C:
 		}
 	}
 }
