@@ -50,7 +50,7 @@ func newPurchaseGuestDbNetwork(t testing.TB, ctx context.Context) *purchaseGuest
 	}
 }
 
-// addSignIn converts the guest in place, as the apps do.
+// Converts the guest in place, as the apps do.
 func (self *purchaseGuestDbNetwork) addSignIn(t testing.TB) {
 	userAuth := fmt.Sprintf("guest-gaps-%s@example.com", self.networkId)
 	password := "SomeValidPassword123!"

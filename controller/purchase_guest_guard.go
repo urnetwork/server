@@ -39,8 +39,8 @@ var purchaseNetworkHasAnyAuthMethod = model.NetworkHasAnyAuthMethod
 // The refusal of a purchase for a named network that has no sign-in.
 const purchaseGuestNetworkMessage = "That network has no sign-in. Sign in to it in the app and add a sign-in before buying for it."
 
-// refuseGuestDestination reports whether a purchase for a network the buyer
-// named must be refused: it is a legacy guest network.
+// Whether a purchase for a network the buyer named must be refused: it is a
+// legacy guest network.
 func refuseGuestDestination(ctx context.Context, networkId server.Id) bool {
 	if purchaseNetworkHasAnyAuthMethod(ctx, networkId) {
 		return false
@@ -51,11 +51,10 @@ func refuseGuestDestination(ctx context.Context, networkId server.Id) bool {
 	return true
 }
 
-// X402RefuseGuest is the guest refusal of an x402 payment, for every entry
-// that settles one, before anything is verified or settled: nil when the
-// caller's network has a sign-in, else a 403 with the guest refusal's message
-// and code. The agent is told to have the account add a sign-in; no money
-// moves.
+// The guest refusal of an x402 payment, for every entry that settles one,
+// before anything is verified or settled: nil when the caller's network has a
+// sign-in, else a 403 with the guest refusal's message and code. The agent is
+// told to have the account add a sign-in; no money moves.
 func X402RefuseGuest(clientSession *session.ClientSession) error {
 	if !refuseGuestPurchase(clientSession) {
 		return nil
