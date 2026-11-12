@@ -128,4 +128,8 @@ type ProviderEgressHealthStored struct {
 	// scoring: in the history and the rolling quota, out of the eight-hour
 	// window and every scored total.
 	Probation bool
+	// the stored failed_later_legs mask (egresshealth.UrlProbeFailedLaterLeg*)
+	FailedLaterLegs int16
+	// the stored pq_outcome (egresshealth.UrlProbePqOutcome*)
+	PqOutcome int16
 }
