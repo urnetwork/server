@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T10:44:19.361657Z",
+  "observed_at": "2026-11-12T10:56:22.767271Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,15 +17,16 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": false,
-    "publication_held": true,
-    "diagnosis": "Goofe completed native measurements, cleanup and central retention, then recorded success after same-attempt fence-33 reconciliation. Sille continues measurements with its last observed fence-18 lease expired after the 10:02:59 heartbeat error. Do not infer coordinator custody from a live native process. No new terminal failure, clock reset, grant or maintenance hold has been recorded."
+    "grading_ready": true,
+    "publication_held": false,
+    "api_observed_at": "2026-11-12T10:50:16Z",
+    "diagnosis": "Goofe recorded success after same-attempt fence-33 reconciliation, then claimed the next FIFO job at fence 34; its new native service is active. Sille completed 9/9 with native exit zero and both cleanup checks verified, but central retention is pending and its last observed fence-18 lease remains expired after the 10:02:59 heartbeat error. No new terminal failure, clock reset, grant or maintenance hold has been recorded."
   },
   "queue": {
     "succeeded": 14,
     "failed": 3,
-    "queued": 2,
-    "running": 1
+    "queued": 1,
+    "running": 2
   },
   "recent_completed": [
     {
@@ -83,13 +84,29 @@
   ],
   "active_attempts": [
     {
+      "job_id": "01a1ced7-151a-9f37-2271-b4486a0f1ac1",
+      "host_id": "goofe",
+      "run_id": "8033ed26204ff3a2c732e6d396a96e46737b88ea3cc971273b2b0631731a25db",
+      "started_at": "2026-11-12T10:44:50.752744",
+      "deadline": "2026-11-12T13:44:50.752744",
+      "observed_phase": "native_service_active",
+      "native_service_verified_active": true,
+      "native_service_pid": 3259690,
+      "database_fence": 34,
+      "database_custody": "heartbeat_2026-11-12T10:45:13.544250Z_lease_2026-11-12T10:46:43.544250Z"
+    },
+    {
       "job_id": "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c",
       "host_id": "sille",
       "run_id": "b4f33b481989ea9e43637e5a2aa6e99abc710d5ec690f51f8852200a4c87c4dd",
       "started_at": "2026-11-12T09:20:10.16599",
       "deadline": "2026-11-12T12:20:10.16599",
-      "observed_phase": "candidate_measurements",
-      "candidate_completed": 7,
+      "observed_phase": "native_exit_zero_and_cleanup_verified_not_yet_centrally_retained",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "native_terminal_observed_at": "2026-11-12T10:56:22.767271Z",
       "database_fence": 18,
       "database_custody": "last_observed_lease_expired_2026-11-12T10:04:07.140698Z_not_a_verified_new_owner"
     }
@@ -109,6 +126,15 @@
     "error": "PostgresStore.Heartbeat context deadline exceeded",
     "native_processes_verified_active_at": "2026-11-12T10:09:30Z",
     "original_deadlines_unchanged": true
+  },
+  "transport_cancellation_audit": {
+    "source_gap_confirmed": true,
+    "scope": "Manually owned request pipes can block protocol reads or writer join before process.Wait after direct-child cancellation; inherited stderr also needs a bounded join.",
+    "live_snapshot": "Coordinator 143823 retained direct child 2571215 in zombie state at 2026-11-12T11:02:41Z; this does not prove its exact blocked phase or zombie duration.",
+    "covered_by_staged_698_worker": false,
+    "separate_fix_and_deterministic_tests_requested": true,
+    "frozen_recovery_qualification_unchanged": true,
+    "live_process_signaled_or_restarted": false
   },
   "live_worker": {
     "source_commit": "68817f6d3ea96b7a8179c7af63808d504560af32",
@@ -149,6 +175,15 @@
     "user_authorized": true,
     "request_is_not_a_database_grant": true,
     "implementation_and_deployment_pending": true,
+  "deployment_requirements_after_final_merged_qualification": {
+    "migration": "Append the additive recovery migration after all published origin migrations; normal direct-administration deployment pipeline only.",
+    "main_services": ["api", "monitor"],
+    "api_reason": "Old strict shared readers reject schema-2 recovery markers; deploy compatible readers before granting recovery.",
+    "local_programs": ["competitionworker", "competitionreevaluate"],
+    "handoff": "Verified global idle and fresh runtime proof before central worker replacement and sequential grants.",
+    "config_or_vault_change_required": false,
+    "native_agent_or_candidate_image_change_required": false
+  },
     "queued": false,
     "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
   "frozen_server_commit": "7880fd886bb976adabb5e0b97a2cc6d5d61ea439",
@@ -171,6 +206,7 @@
       "targeted_failed": 0,
       "targeted_log_sha256": "43f71bf69944ddbaa28555c3cc86867611d174e1684b9dd9c5e854c1af2fd8e1",
       "broader_suite_running": true,
+      "repaired_native_fault_test_passed_in_broad_run_at": "2026-11-12T10:48:04.981393801Z",
       "broader_allowlist_matches_go_discovery": true,
       "broader_allowlist_sha256": "b4f2acc7896240749b5bf6d11c75b1a8ae7520afc16efff4ba0adeabd499334f",
       "preserved_physical_fault_controls": 12,
