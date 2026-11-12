@@ -16,8 +16,10 @@ package sidecart3
 //     request.
 //
 // A real store parks no request on a schedule's word, so a Delay is refused when a schedule arms it
-// (checkPlan), and QuorumLoss and DriveMiss, which need T3's 4-host MinIO layouts (TEST-M2-07), stay
-// refused by the base. Wrappers are safe for concurrent use.
+// (checkPlan). QuorumLoss and DriveMiss run on T3's 4-host file-cluster layouts alone (cluster_faults.go),
+// and a Net on the local stack's one MinIO process refuses both. Every blob request carries its deadline in
+// the store's time, and the store clock, when on, sits beneath these wrappers, so what a plan lets through
+// is recorded on the schedule's clock (clock.go). Wrappers are safe for concurrent use.
 
 import (
 	"context"
@@ -45,10 +47,11 @@ var (
 )
 
 // Refuses at Add what a real store cannot do on a schedule's word: park a request (Delay). T2's fakes do
-// it, and T3's clock and cluster faults (TEST-M2-07) are where a real store's would come from.
+// it, and on a real store a request waits only on the store's own state: a host down, a quorum lost, a key
+// held (cluster_faults.go).
 func checkPlan(plan *sidecartest.FaultPlan) error {
 	if plan.Result == sidecartest.Delay {
-		return fmt.Errorf("%w: a real store parks no request on a schedule's word (TEST-M2-07)", errPlanNeedsAFake)
+		return fmt.Errorf("%w: a real store parks no request on a schedule's word", errPlanNeedsAFake)
 	}
 	return nil
 }
@@ -70,12 +73,16 @@ func blobTransportError(write bool) error {
 	return fmt.Errorf("blob request failed: %w", errTransport)
 }
 
-// server.FileClusters with the Net's plans. Each cluster it hands out is wrapped, and before a request it
-// reads the clusters' admin info again whenever the Net's clock has moved since it last did, so a
-// schedule's Advance never leaves a write refused on admin info the fake clock made stale.
+// server.FileClusters with the Net's plans, over blobs, the clusters themselves or the store clock on them.
+// Each cluster it hands out is wrapped, and before a request it reads the clusters' admin info again
+// whenever the Net's clock has moved since it last did, so a schedule's Advance never leaves a write
+// refused on admin info the fake clock made stale.
 type faultBlobs struct {
+	blobs    sidecar.BlobStore
 	clusters *server.FileClusters
 	net      *sidecartest.Net
+	// QuorumLoss and DriveMiss on a layout, nil on the local stack
+	clusterFaults *clusterFaults
 
 	stateLock sync.Mutex
 	// the Net's time at the last check
@@ -84,8 +91,8 @@ type faultBlobs struct {
 
 var _ sidecar.BlobStore = (*faultBlobs)(nil)
 
-func newFaultBlobs(clusters *server.FileClusters, net *sidecartest.Net) *faultBlobs {
-	return &faultBlobs{clusters: clusters, net: net}
+func newFaultBlobs(blobs sidecar.BlobStore, clusters *server.FileClusters, net *sidecartest.Net, clusterFaults *clusterFaults) *faultBlobs {
+	return &faultBlobs{blobs: blobs, clusters: clusters, net: net, clusterFaults: clusterFaults}
 }
 
 // Rereads admin info once the Net's clock has moved since the last read.
@@ -113,23 +120,23 @@ func (self *faultBlobs) wrap(cluster sidecar.BlobCluster, err error) (sidecar.Bl
 }
 
 func (self *faultBlobs) Cluster(clusterId string) (sidecar.BlobCluster, error) {
-	return self.wrap(self.clusters.Cluster(clusterId))
+	return self.wrap(self.blobs.Cluster(clusterId))
 }
 
 func (self *faultBlobs) FirstCluster() (sidecar.BlobCluster, error) {
-	return self.wrap(self.clusters.FirstCluster())
+	return self.wrap(self.blobs.FirstCluster())
 }
 
 func (self *faultBlobs) SegmentCluster() (sidecar.BlobCluster, error) {
-	return self.wrap(self.clusters.SegmentCluster())
+	return self.wrap(self.blobs.SegmentCluster())
 }
 
 func (self *faultBlobs) MetadataClusterIds() []string {
-	return self.clusters.MetadataClusterIds()
+	return self.blobs.MetadataClusterIds()
 }
 
 func (self *faultBlobs) NewRepoClusterId() string {
-	return self.clusters.NewRepoClusterId()
+	return self.blobs.NewRepoClusterId()
 }
 
 type faultBlobCluster struct {
@@ -140,8 +147,9 @@ type faultBlobCluster struct {
 var _ sidecar.BlobCluster = (*faultBlobCluster)(nil)
 
 // One request: its plan, then the real store, then what the plan does with the answer. FakeBlobs'
-// request, on a store that keeps its own lock and deadlines.
-func (self *faultBlobCluster) request(ctx context.Context, op string, key string, write bool, serve func() error) error {
+// request, on a store that keeps its own lock and deadlines. serve takes the ctx the store gets: the
+// caller's, with its deadline header in the store's time.
+func (self *faultBlobCluster) request(ctx context.Context, op string, key string, write bool, serve func(ctx context.Context) error) error {
 	sidecartest.StopIfDead(ctx)
 	self.blobs.fresh(ctx)
 	plan := self.blobs.net.Faults().Take(ctx, op, self.cluster.ClusterId(), key, write)
@@ -156,7 +164,20 @@ func (self *faultBlobCluster) request(ctx context.Context, op string, key string
 	case sidecartest.CrashBeforeApply:
 		sidecartest.CrashCaller(ctx)
 	}
-	err := serve()
+	net := self.blobs.net
+	storeCtx := server.WithFileClusterStoreTime(ctx, func(deadline time.Time) time.Time {
+		return StoreTime(net, deadline)
+	})
+	var err error
+	switch result {
+	case sidecartest.QuorumLoss, sidecartest.DriveMiss:
+		// admitted only on a layout (admitClusterFault), so clusterFaults is there
+		err = self.blobs.clusterFaults.carryOut(ctx, plan, self.cluster, key, write, func() error {
+			return serve(storeCtx)
+		})
+	default:
+		err = serve(storeCtx)
+	}
 	switch result {
 	case sidecartest.ApplyThenDrop:
 		return blobTransportError(write)
@@ -180,7 +201,7 @@ func (self *faultBlobCluster) SettlePassed() bool {
 
 func (self *faultBlobCluster) PutIfNoneMatch(ctx context.Context, key string, body []byte, options *sidecar.BlobPutOptions) (string, error) {
 	var newEtag string
-	err := self.request(ctx, sidecartest.FaultOpPut, key, true, func() error {
+	err := self.request(ctx, sidecartest.FaultOpPut, key, true, func(ctx context.Context) error {
 		var err error
 		newEtag, err = self.cluster.PutIfNoneMatch(ctx, key, body, options)
 		return err
@@ -193,7 +214,7 @@ func (self *faultBlobCluster) PutIfNoneMatch(ctx context.Context, key string, bo
 
 func (self *faultBlobCluster) PutIfMatch(ctx context.Context, key string, etag string, body []byte, options *sidecar.BlobPutOptions) (string, error) {
 	var newEtag string
-	err := self.request(ctx, sidecartest.FaultOpPut, key, true, func() error {
+	err := self.request(ctx, sidecartest.FaultOpPut, key, true, func(ctx context.Context) error {
 		var err error
 		newEtag, err = self.cluster.PutIfMatch(ctx, key, etag, body, options)
 		return err
@@ -206,7 +227,7 @@ func (self *faultBlobCluster) PutIfMatch(ctx context.Context, key string, etag s
 
 func (self *faultBlobCluster) PutStream(ctx context.Context, key string, body io.Reader, byteCount int64, checksumSha256 []byte) (string, error) {
 	var newEtag string
-	err := self.request(ctx, sidecartest.FaultOpPut, key, true, func() error {
+	err := self.request(ctx, sidecartest.FaultOpPut, key, true, func(ctx context.Context) error {
 		var err error
 		newEtag, err = self.cluster.PutStream(ctx, key, body, byteCount, checksumSha256)
 		return err
@@ -218,11 +239,11 @@ func (self *faultBlobCluster) PutStream(ctx context.Context, key string, body io
 }
 
 // An object whose answer a plan dropped is closed here, since its caller never sees it.
-func (self *faultBlobCluster) open(ctx context.Context, key string, get func() (*sidecar.BlobObject, error)) (*sidecar.BlobObject, error) {
+func (self *faultBlobCluster) open(ctx context.Context, key string, get func(ctx context.Context) (*sidecar.BlobObject, error)) (*sidecar.BlobObject, error) {
 	var object *sidecar.BlobObject
-	err := self.request(ctx, sidecartest.FaultOpGet, key, false, func() error {
+	err := self.request(ctx, sidecartest.FaultOpGet, key, false, func(ctx context.Context) error {
 		var err error
-		object, err = get()
+		object, err = get(ctx)
 		return err
 	})
 	if err != nil {
@@ -235,20 +256,20 @@ func (self *faultBlobCluster) open(ctx context.Context, key string, get func() (
 }
 
 func (self *faultBlobCluster) Get(ctx context.Context, key string) (*sidecar.BlobObject, error) {
-	return self.open(ctx, key, func() (*sidecar.BlobObject, error) {
+	return self.open(ctx, key, func(ctx context.Context) (*sidecar.BlobObject, error) {
 		return self.cluster.Get(ctx, key)
 	})
 }
 
 func (self *faultBlobCluster) GetRange(ctx context.Context, key string, offset int64, byteCount int64) (*sidecar.BlobObject, error) {
-	return self.open(ctx, key, func() (*sidecar.BlobObject, error) {
+	return self.open(ctx, key, func(ctx context.Context) (*sidecar.BlobObject, error) {
 		return self.cluster.GetRange(ctx, key, offset, byteCount)
 	})
 }
 
 func (self *faultBlobCluster) Head(ctx context.Context, key string) (*sidecar.BlobInfo, error) {
 	var info *sidecar.BlobInfo
-	err := self.request(ctx, sidecartest.FaultOpGet, key, false, func() error {
+	err := self.request(ctx, sidecartest.FaultOpGet, key, false, func(ctx context.Context) error {
 		var err error
 		info, err = self.cluster.Head(ctx, key)
 		return err
@@ -262,7 +283,7 @@ func (self *faultBlobCluster) Head(ctx context.Context, key string) (*sidecar.Bl
 func (self *faultBlobCluster) List(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]*sidecar.BlobInfo, bool, error) {
 	var objects []*sidecar.BlobInfo
 	var more bool
-	err := self.request(ctx, sidecartest.FaultOpList, keyPrefix, false, func() error {
+	err := self.request(ctx, sidecartest.FaultOpList, keyPrefix, false, func(ctx context.Context) error {
 		var err error
 		objects, more, err = self.cluster.List(ctx, keyPrefix, startAfter, limit)
 		return err
@@ -274,7 +295,7 @@ func (self *faultBlobCluster) List(ctx context.Context, keyPrefix string, startA
 }
 
 func (self *faultBlobCluster) Delete(ctx context.Context, key string) error {
-	return self.request(ctx, sidecartest.FaultOpDelete, key, true, func() error {
+	return self.request(ctx, sidecartest.FaultOpDelete, key, true, func(ctx context.Context) error {
 		return self.cluster.Delete(ctx, key)
 	})
 }
@@ -284,17 +305,20 @@ func (self *faultBlobCluster) Delete(ctx context.Context, key string) error {
 var redisReadOps = []string{"get", "mget", "hget", "hgetall", "xrange"}
 
 // server's sidecar.Redis with the Net's plans: FakeRedis's call, on the real store. Each script and each
-// call naming two or more keys goes to calls too, for RunCrossslot.
+// call naming two or more keys goes to calls too, for RunCrossslot. With the store clock on, a call first
+// ages its families by however far the Net's clock has moved (clock.go).
 type faultRedis struct {
 	redis sidecar.Redis
 	net   *sidecartest.Net
 	calls *CrossslotCalls
+	// nil when off
+	storeClock *StoreClock
 }
 
 var _ sidecar.Redis = (*faultRedis)(nil)
 
-func newFaultRedis(redis sidecar.Redis, net *sidecartest.Net, calls *CrossslotCalls) *faultRedis {
-	return &faultRedis{redis: redis, net: net, calls: calls}
+func newFaultRedis(redis sidecar.Redis, net *sidecartest.Net, calls *CrossslotCalls, storeClock *StoreClock) *faultRedis {
+	return &faultRedis{redis: redis, net: net, calls: calls, storeClock: storeClock}
 }
 
 // One call: its plan, then Redis, then what the plan does with the answer.
@@ -302,6 +326,10 @@ func (self *faultRedis) call(ctx context.Context, op string, keys []string, serv
 	sidecartest.StopIfDead(ctx)
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if self.storeClock != nil {
+		// a failure is the store clock's to report: the call itself goes on
+		self.storeClock.age(ctx)
 	}
 	faultKey := ""
 	if 0 < len(keys) {

@@ -25,6 +25,13 @@
 //   - linearize.go, CheckLinearizable, §22.8's history rule: Porcupine over a fault.History, per ref,
 //     with §11.8's commit rule and each unknown outcome's end open, which only server's tests import
 //     (TEST-M2-02).
+//   - clock.go, the store clock (TEST-M2-07; QD-264): every request's deadline in the store's time
+//     (StoreTime), and, with Settings.StoreClock, LastModified and the named Redis families' ttls on the
+//     schedule's clock, Advance aging them at once; RunRow runs a case with it exactly when catalog.yml
+//     flags the case store_clock, and FS-114 never.
+//   - cluster_faults.go, T3's 4-host file-cluster layouts (Settings.Layout, EVSB-M2-17's
+//     local/file-cluster-t3) and their faults: HostDown, HostUp, QuorumLoss and DriveMiss carried out on
+//     the minio fork's containers, and HostCluster for a read through one host.
 //
 // server/sidecar-t3.sh runs this with -tags sidecar_testhooks,sidecar_pending and
 // WARP_TEST_ENV_FAIL_FAST=1, inside the private test stores test-env.sh attests: its suites cadence on
@@ -39,7 +46,8 @@
 //   - the capture of the exchange's frames (CC2) and of the stores (CC3, TEST-M2-09).
 //   - the 3-master Redis Cluster: test-env.sh attests one Redis node until QD-028's change lands, so
 //     RunCrossslot fails rather than linting on a node that accepts what 3 masters refuse.
-//   - the store clock (TEST-M2-07's clock.go) and T3's MinIO layouts, QuorumLoss and DriveMiss.
+//   - api on the store clock: T3 hosts no api but the config log's sequencer, which takes the Net's clock
+//     itself, and server's exchange and controller keep real time (exchange.go).
 //
 // A Net that opens a connect client needs server's schema, so a test of a row with clients runs in a
 // TestEnv that applies the migrations; a Net with none needs no schema. T3 runs never use t.Parallel:

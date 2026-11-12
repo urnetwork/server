@@ -48,15 +48,25 @@ func RuleSettings(t testing.TB, settings *Settings) *fault.RuleSettings {
 
 // A registered case's T3 run under every rule its row takes (fault.CheckRow on T3's Nets), failing t
 // with each failure and logging what ran. A case with no T3 builder fails as missing. ruleSettings nil
-// takes RuleSettings with the defaults.
+// takes RuleSettings with the defaults, the store clock on for a case catalog.yml flags store_clock; a
+// case runs with the store clock exactly when it is flagged, and FS-114 never does (clock.go).
 func RunRow(t testing.TB, rowId string, caseName string, ruleSettings *fault.RuleSettings) *fault.RowReport {
 	t.Helper()
 	registration := fault.Lookup(rowId, caseName, fault.TierT3)
 	if registration == nil {
 		t.Fatalf("%s %q has no T3 builder registered: missing", rowId, caseName)
 	}
+	testCase := fault.DefaultCatalog().Case(rowId, caseName)
 	if ruleSettings == nil {
-		ruleSettings = RuleSettings(t, nil)
+		settings := DefaultSettings()
+		if testCase.StoreClock {
+			settings.StoreClock = DefaultStoreClockSettings()
+		}
+		ruleSettings = RuleSettings(t, settings)
+	}
+	storeClockOn, _ := netSettingsStoreClocks.Load(ruleSettings.Net)
+	if err := storeClockCaseErr(testCase, storeClockOn == true); err != nil {
+		t.Fatalf("%v", err)
 	}
 	report := fault.CheckRow(t.Context(), registration, ruleSettings)
 	t.Log(report.String())

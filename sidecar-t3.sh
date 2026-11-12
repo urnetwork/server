@@ -7,7 +7,9 @@
 #                           the T3 rows at once (Q-TEST-1: a connect pin change reruns both tiers; T2's
 #                           run every merge in sidecar/test.sh)
 #   sidecar-t3.sh nightly   the suites, then every FS row registered on T3, under §22.8's rules with the
-#                           100 nightly explorer seeds
+#                           100 nightly explorer seeds, then T3's cluster faults on the 4-host file-cluster
+#                           layouts (server/local/file-cluster-t3/t3.sh up; TEST-M2-07), which kill and start
+#                           hosts and so run only here, and say "not run" when the layouts do not answer
 #
 # Everything builds with -tags sidecar_testhooks,sidecar_pending, so the hooks and the pending migration
 # groups are in, and runs with -count=1 and WARP_TEST_ENV_FAIL_FAST=1: server's TestEnv reruns a failed
@@ -34,6 +36,8 @@ state_dir=${SIDECAR_T3_STATE_DIR:-${TMPDIR:-/tmp}/sidecar-t3-state}
 export WARP_TEST_ENV_FAIL_FAST=1
 tags=sidecar_testhooks,sidecar_pending
 minio_health=http://127.0.0.1:59000/minio/health/cluster
+# the first host of T3's meta-1 layout (local/file-cluster-t3/clusters.yml)
+layout_health=http://127.0.0.1:52101/minio/health/cluster
 
 cadence=${1:-}
 case $cadence in
@@ -95,6 +99,19 @@ rows() {
   go_t3 ./sidecart3 -tags "$tags,sidecar_localstack" -run '^TestT3Rows$'
 }
 
+layout_up() {
+  curl -sf -o /dev/null --max-time 5 "$layout_health"
+}
+
+# QuorumLoss, DriveMiss, HostDown and HostUp on T3's 4-host layouts, which take hosts down for real.
+cluster_faults() {
+  if layout_up; then
+    go_t3 ./sidecart3 -tags "$tags,sidecar_filecluster_t3" -run '^(TestT3LayoutTakesRequestsOnAFakeClock|TestT3QuorumLossGives503AndAnUnknownOutcome|TestT3DriveMissLeavesTheObjectReadableUntilASecondHostGoesDown|TestT3AHostReturningHeals)$'
+  else
+    skip "T3's cluster faults: the 4-host file-cluster layouts do not answer (local/file-cluster-t3/t3.sh up)"
+  fi
+}
+
 connect_pin() {
   awk '/path: connect$/ { found = 1; next } found && /ref:/ { print $2; exit }' "$here/local/source-graph/lock.yml"
 }
@@ -102,6 +119,7 @@ connect_pin() {
 suites
 if [ "$cadence" = nightly ]; then
   rows
+  cluster_faults
 else
   pin=$(connect_pin)
   last_pin=$(cat "$state_dir/connect-pin" 2>/dev/null || true)
