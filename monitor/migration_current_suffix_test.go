@@ -506,6 +506,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE network_extender_address ALTER COLUMN tcp_port SET DEFAULT 0`},
 		{name: "extender address udp port required", version: server.NetworkExtenderAddressPortsSchemaMigrationVersion(),
 			sql: `UPDATE network_extender_address SET udp_port = 443; ALTER TABLE network_extender_address ALTER COLUMN udp_port SET NOT NULL`},
+		// A capture the flag award's network is read by its own index, so a
+		// network's wins outlive its clients' rows.
+		{name: "ctf award network index absent", version: server.CtfAwardNetworkMigrationVersion(),
+			sql: `DROP INDEX ctf_award_network`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

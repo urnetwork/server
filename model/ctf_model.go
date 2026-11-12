@@ -986,6 +986,10 @@ type CtfAward struct {
 	Pot        uint256.Int
 	// the pot share is a pending award
 	Deferred bool
+	// The network the award was won for, fixed when it is written
+	// (CreateCtfEpochResult) and read back; nil when it was not known. A
+	// network's wins are selected by it, so they outlive the client's rows.
+	NetworkId *server.Id
 }
 
 // One pot row (§5; sn ctf.Pot).
@@ -1022,6 +1026,13 @@ func ctfDecimals(values []uint256.Int) []string {
 // pots and pending awards, all or nothing, once: an epoch's census, draw and
 // awards are fixed inputs (§5). False when the epoch has a result, in which
 // case nothing is written.
+//
+// Each award is written with the network it was won for (ctf_award.network_id):
+// the network the epoch's census recorded for the winning member, else the
+// network of the client's network_client row, null when neither is there. A
+// network's wins are read by it (GetCtfNetworkAwards), so they stay its own
+// after the client is removed and its rows are reaped. The awards' own
+// NetworkId is not read.
 func CreateCtfEpochResult(ctx context.Context, result *CtfEpochResult, awards []*CtfAward, pots []*CtfPot, pending []*CtfPendingAward) (created bool) {
 	key := requireStDeploymentKey(result.DeploymentKey)
 	var censusHash []byte
@@ -1099,12 +1110,24 @@ func CreateCtfEpochResult(ctx context.Context, result *CtfEpochResult, awards []
 				`
 				INSERT INTO ctf_award (
 					deployment_key, no_id, epoch, role, country_code, rank, unit, unit_family,
-					client_id, coldkey, slot_rao, pot_rao, deferred
+					client_id, coldkey, slot_rao, pot_rao, deferred, network_id
 				)
 				SELECT
 					$1::varchar, $2::bigint, $3::bigint, award.role, award.country_code, award.rank, award.unit,
 					NULLIF(award.unit_family, 0), award.client_id, award.coldkey,
-					award.slot_rao::numeric, award.pot_rao::numeric, award.deferred
+					award.slot_rao::numeric, award.pot_rao::numeric, award.deferred,
+					COALESCE(
+						(
+							SELECT member.network_id FROM ctf_census_member AS member
+							WHERE member.deployment_key = $1::varchar AND member.no_id = $2::bigint
+								AND member.epoch = $3::bigint AND member.role = award.role
+								AND member.client_id = award.client_id
+						),
+						(
+							SELECT network_client.network_id FROM network_client
+							WHERE network_client.client_id = award.client_id
+						)
+					)
 				FROM unnest(
 					$4::smallint[], $5::varchar[], $6::smallint[], $7::bytea[], $8::smallint[],
 					$9::uuid[], $10::bytea[], $11::text[], $12::text[], $13::boolean[]
@@ -1279,7 +1302,7 @@ func GetCtfEpochResults(ctx context.Context, deploymentKey StDeploymentKey, noId
 	return results
 }
 
-const ctfAwardColumns = `epoch, role, country_code, rank, unit, unit_family, client_id, coldkey, slot_rao::text, pot_rao::text, deferred`
+const ctfAwardColumns = `epoch, role, country_code, rank, unit, unit_family, client_id, coldkey, slot_rao::text, pot_rao::text, deferred, network_id`
 
 func scanCtfAward(result server.PgResult) *CtfAward {
 	award := &CtfAward{}
@@ -1288,7 +1311,7 @@ func scanCtfAward(result server.PgResult) *CtfAward {
 	var unit, coldkey []byte
 	var unitFamily *int16
 	var slot, pot string
-	server.Raise(result.Scan(&epoch, &role, &award.CountryCode, &rank, &unit, &unitFamily, &award.ClientId, &coldkey, &slot, &pot, &award.Deferred))
+	server.Raise(result.Scan(&epoch, &role, &award.CountryCode, &rank, &unit, &unitFamily, &award.ClientId, &coldkey, &slot, &pot, &award.Deferred, &award.NetworkId))
 	award.Epoch = uint64(epoch)
 	award.Role = int(role)
 	award.Rank = int(rank)
@@ -1345,9 +1368,10 @@ func GetCtfClientAwards(ctx context.Context, deploymentKey StDeploymentKey, noId
 	return awards
 }
 
-// GetCtfNetworkAwards returns the awards of the epochs fromEpoch … toEpoch of
-// every client a network has had, removed ones included, newest first, then by
-// role, country and rank.
+// GetCtfNetworkAwards returns the awards of the epochs fromEpoch … toEpoch won
+// for a network (ctf_award.network_id, fixed when each award was written), by
+// any client it has had, removed and reaped ones included, newest first, then
+// by role, country and rank.
 func GetCtfNetworkAwards(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, networkId server.Id, fromEpoch uint64, toEpoch uint64) []*CtfAward {
 	key := requireStDeploymentKey(deploymentKey)
 	awards := []*CtfAward{}
@@ -1355,8 +1379,7 @@ func GetCtfNetworkAwards(ctx context.Context, deploymentKey StDeploymentKey, noI
 		result, err := conn.Query(
 			ctx,
 			`SELECT `+ctfAwardColumns+` FROM ctf_award
-			WHERE deployment_key = $1 AND no_id = $2 AND $4 <= epoch AND epoch <= $5
-				AND client_id IN (SELECT client_id FROM network_client WHERE network_id = $3)
+			WHERE deployment_key = $1 AND no_id = $2 AND network_id = $3 AND $4 <= epoch AND epoch <= $5
 			ORDER BY epoch DESC, role, country_code, rank`,
 			key, int64(noId), networkId, int64(fromEpoch), int64(toEpoch),
 		)

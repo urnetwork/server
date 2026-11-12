@@ -15,8 +15,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
 
 	"github.com/urnetwork/glog"
@@ -32,8 +35,10 @@ import (
 
 // stLedgerV2AccountTreeLock serializes the endpoint's tree reads, so that the
 // requests that arrive together after a new root build its tree once and then
-// share the cached one.
-var stLedgerV2AccountTreeLock sync.Mutex
+// share the cached one. A read waits for it only while its context lasts, so
+// a reader with a deadline, as GET /sn/ctf/client's claim states have, is
+// never held past it by another reader's build.
+var stLedgerV2AccountTreeLock = make(chan struct{}, 1)
 
 // ErrStLedgerV2Coldkey refuses a coldkey that is neither an ss58 address with
 // the Bittensor prefix nor 0x and 64 hex digits.
@@ -347,8 +352,14 @@ func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, col
 }
 
 func stLedgerV2AccountTree(ctx context.Context, root *model.StLedgerV2Root) (*merkle.LedgerSumTree, []merkle.LedgerAccount, error) {
-	stLedgerV2AccountTreeLock.Lock()
-	defer stLedgerV2AccountTreeLock.Unlock()
+	select {
+	case stLedgerV2AccountTreeLock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, fmt.Errorf("st ledger v2: the tree of ledger 0x%x: %w", root.LedgerHash, ctx.Err())
+	}
+	defer func() {
+		<-stLedgerV2AccountTreeLock
+	}()
 	return StLedgerV2Tree(ctx, root.LedgerHash, root.Root, &root.Total, root.LeafCount)
 }
 
@@ -371,4 +382,73 @@ func (self *CoreStClient) LedgerV2Claimed(ctx context.Context, noId uint64, inde
 		return uint256.Int{}, fmt.Errorf("vault2 claimed(%d, %d): %w", noId, index, err)
 	}
 	return stUint256(claimed)
+}
+
+// LedgerV2ClaimedAt reads vault2.claimed(noId, index) of every index at one
+// block, all of them from one endpoint: a failed request is read again whole,
+// at the next endpoint or after a pause, while ctx lasts.
+func (self *CoreStClient) LedgerV2ClaimedAt(ctx context.Context, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error) {
+	if len(indexes) == 0 {
+		return []uint256.Int{}, nil
+	}
+	var claimed []uint256.Int
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
+		values, err := stReadLedgerV2ClaimedAt(ctx, client, self.cfg.VaultV2, noId, block, indexes)
+		if err != nil {
+			return err
+		}
+		claimed = values
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("vault2 claimed of %d accounts of pool %d at block %d: %w", len(indexes), noId, block, err)
+	}
+	return claimed, nil
+}
+
+// stReadLedgerV2ClaimedAt reads vault2's claimed of each index at one block
+// from one endpoint, in eth_call batches of at most
+// stMaximumEVMRPCBatchCalls. rpc.BatchElem matches the answers by JSON-RPC
+// id, so the order an endpoint answers in cannot move a value to another
+// index.
+func stReadLedgerV2ClaimedAt(ctx context.Context, client *ethclient.Client, vault common.Address, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error) {
+	if client == nil {
+		return nil, errors.New("st ledger v2: the claimed batch has no endpoint")
+	}
+	claimed := make([]uint256.Int, len(indexes))
+	for start := 0; start < len(indexes); start += stMaximumEVMRPCBatchCalls {
+		end := min(start+stMaximumEVMRPCBatchCalls, len(indexes))
+		raw := make([]hexutil.Bytes, end-start)
+		batch := make([]rpc.BatchElem, end-start)
+		for i := start; i < end; i++ {
+			batch[i-start] = rpc.BatchElem{
+				Method: "eth_call",
+				Args: []any{
+					map[string]any{"to": vault, "data": hexutil.Bytes(stLedgerV2VaultAbi.PackClaimed(stBig(noId), stBig(indexes[i])))},
+					hexutil.EncodeUint64(block),
+				},
+				Result: &raw[i-start],
+			}
+		}
+		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
+		err := client.Client().BatchCallContext(callCtx, batch)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		for i := range batch {
+			index := indexes[start+i]
+			if batch[i].Error != nil {
+				return nil, fmt.Errorf("vault2 claimed(%d, %d): %w", noId, index, batch[i].Error)
+			}
+			value, err := stLedgerV2VaultAbi.UnpackClaimed(raw[i])
+			if err != nil {
+				return nil, fmt.Errorf("vault2 claimed(%d, %d): %w", noId, index, err)
+			}
+			if claimed[start+i], err = stUint256(value); err != nil {
+				return nil, fmt.Errorf("vault2 claimed(%d, %d): %w", noId, index, err)
+			}
+		}
+	}
+	return claimed, nil
 }

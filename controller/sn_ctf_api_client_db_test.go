@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/holiman/uint256"
 
@@ -71,13 +72,13 @@ func snCtfClientTestWins(t testing.TB, response *httptest.ResponseRecorder) (*Sn
 // Every credential that authenticates is answered, never 401: a client token
 // for its own client, its status and its wins; the network's token and its API
 // key for every client the network has had, a removed one included, and not a
-// client of another network. Only no token, or one that does not
-// authenticate, is 401. With capture the flag off, a network's token is 503,
-// as a client's is.
+// client of another network, and still once the reaper has hard-deleted every
+// client's rows, since each award keeps the network it was won for. Only no
+// token, or one that does not authenticate, is 401. With capture the flag
+// off, a network's token is 503, as a client's is.
 func TestDbSnCtfClientAnswersEveryCredential(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		f := newSnCtfDbFixture(t)
-		ctx := f.ctx
+		ctx := context.Background()
 		parse := func(text string) server.Id {
 			id, err := server.ParseId(text)
 			if err != nil {
@@ -98,6 +99,9 @@ func TestDbSnCtfClientAnswersEveryCredential(t *testing.T) {
 			devices[clientId] = server.NewId()
 			model.Testing_CreateDevice(ctx, networkId, devices[clientId], clientId, "ctf client", "test")
 		}
+		// the awards are written once the clients exist, as the driver writes
+		// an epoch's awards after its census: each with its client's network
+		f := newSnCtfDbFixture(t)
 		networkSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkN, UserId: userN})
 		if result, err := model.RemoveNetworkClient(&model.RemoveNetworkClientArgs{ClientId: removed}, networkSession); err != nil || result.Error != nil {
 			t.Fatalf("remove: %+v %v", result, err)
@@ -200,6 +204,30 @@ func TestDbSnCtfClientAnswersEveryCredential(t *testing.T) {
 		for _, token := range []string{clientToken, networkToken, apiKey.ApiKey} {
 			requireSnProblem(t, ask(token), http.StatusServiceUnavailable, SnProblemUnavailable)
 		}
+
+		// On again, after the reaper has marked every idle client inactive and
+		// hard-deleted the inactive ones, as it does 30 days after a
+		// deactivation: the network's wins are still all of its clients'.
+		withSnCtfTestSource(t, source)
+		later := time.Now().Add(time.Hour)
+		model.RemoveDisconnectedNetworkClients(ctx, later, later, later)
+		var left int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM network_client WHERE client_id = ANY($1::uuid[])`, []server.Id{iceland, extender, removed, other}).Scan(&left))
+		})
+		if left != 0 {
+			t.Fatalf("%d of the clients' network_client rows left after the reaper", left)
+		}
+		for name, token := range map[string]string{"network token": networkToken, "API key": apiKey.ApiKey} {
+			response := ask(token)
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s after the reaper: %d %s", name, response.Code, response.Body.String())
+			}
+			_, wins := snCtfClientTestWins(t, response)
+			requireSnCtfEqual(t, name+" wins after the reaper", wins, networkWins)
+		}
+		_, wins = snCtfClientTestWins(t, ask(otherToken))
+		requireSnCtfEqual(t, "the other network's wins after the reaper", wins, []string{fmt.Sprintf("9 provider is 2 %s false", other)})
 	})
 }
 
@@ -215,24 +243,11 @@ type snCtfClaimsFixture struct {
 	viewRoots []*snCtfRoot
 }
 
-// snCtfLockedChain is the fake chain with its vault2 claimed reads one at a
-// time: the claim states read several coldkeys at once, and the fake's
-// failure queue is not safe for that.
-type snCtfLockedChain struct {
-	*fakeLedgerV2Chain
-	lock sync.Mutex
-}
-
-func (self *snCtfLockedChain) LedgerV2Claimed(ctx context.Context, noId uint64, index uint64) (uint256.Int, error) {
-	self.lock.Lock()
-	defer self.lock.Unlock()
-	return self.fakeLedgerV2Chain.LedgerV2Claimed(ctx, noId, index)
-}
-
 func newSnCtfClaimsFixture(t testing.TB) *snCtfClaimsFixture {
 	f := &snCtfClaimsFixture{ledgerV2EndpointFixture: newLedgerV2EndpointFixture(t), pool: 1<<32 + 1}
-	SetStLedgerV2Client(&snCtfLockedChain{fakeLedgerV2Chain: f.chain})
 	setCtfPoolTestSwitches(t, f.cfg, true, true)
+	snCtfResetClaimedCache()
+	t.Cleanup(snCtfResetClaimedCache)
 	usage := func(rows ...any) []protocol.LedgerUsageRow {
 		out := []protocol.LedgerUsageRow{}
 		for i := 0; i < len(rows); i += 2 {
@@ -355,10 +370,11 @@ func snCtfClaimsTestStates(claims map[[32]byte]*snCtfAccountClaims, coldkeys ...
 // The claim state of each coldkey's CTF account: vault2's claimed at the
 // finalized head, and its cumulative in each root it is asked for, from the
 // record of each root's deltas below the first root not recorded yet, the
-// ledger route's read for the latest finalized root, and a finalized root's
-// own published accounts while the record has not reached it. A coldkey whose
-// state disagrees with itself, or cannot be read, is left out; none is read
-// while capture the flag is off.
+// latest finalized root's accounts, and a finalized root's own published
+// accounts while the record has not reached it. A coldkey whose state
+// disagrees with itself, or cannot be read, is left out; one whose account the
+// records do not find has nothing paid, so its wins are null, never claimed;
+// none is read while capture the flag is off.
 func TestDbSnCtfAccountClaims(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newSnCtfClaimsFixture(t)
@@ -369,7 +385,9 @@ func TestDbSnCtfAccountClaims(t *testing.T) {
 		// A has claimed through root 1, B through root 0, C nothing
 		f.chain.claimed[[2]uint64{f.pool, 0}] = *uint256.NewInt(1_600)
 		f.chain.claimed[[2]uint64{f.pool, 1}] = *uint256.NewInt(400)
+		// each read is the chain's now, not a value kept from a read before
 		read := func() map[string]string {
+			snCtfResetClaimedCache()
 			return snCtfClaimsTestStates(source.AccountClaims(f.ctx, nil, needs), ledgerV2A, ledgerV2B, ledgerV2C, ledgerV2D)
 		}
 		want := map[string]string{
@@ -388,14 +406,18 @@ func TestDbSnCtfAccountClaims(t *testing.T) {
 		f.recordThrough(1)
 		requireSnCtfEqual(t, "roots 0 and 1 recorded", read(), want)
 		// every root recorded: the record and the latest root agree, and no
-		// tree but the latest finalized and the pending root is read
+		// tree but the latest finalized root's is read
 		f.recordThrough(2)
 		resetLedgerV2Caches()
 		f.builder.reads.Store(0)
 		requireSnCtfEqual(t, "every root recorded", read(), want)
-		if reads := f.builder.reads.Load(); reads != 2 {
-			t.Fatalf("%d tree reads with every root recorded, want the latest finalized and the pending root's", reads)
+		if reads := f.builder.reads.Load(); reads != 1 {
+			t.Fatalf("%d tree reads with every root recorded, want the latest finalized root's", reads)
 		}
+		// every account at one finalized block, read once, in one batch
+		f.chain.fail["finalized"] = []error{nil, errors.New("a second finalized read")}
+		requireSnCtfEqual(t, "one finalized read", read(), want)
+		delete(f.chain.fail, "finalized")
 
 		// vault2's claimed above the finalized cumulative: A is left out
 		f.chain.claimed[[2]uint64{f.pool, 0}] = *uint256.NewInt(2_601)
@@ -419,6 +441,37 @@ func TestDbSnCtfAccountClaims(t *testing.T) {
 		f.chain.fail["claimed"] = []error{errors.New("rpc down"), errors.New("rpc down"), errors.New("rpc down"), errors.New("rpc down")}
 		requireSnCtfEqual(t, "vault2 unreadable", read(), map[string]string{"0a": "unread", "0b": "unread", "0c": "unread", "0d": "0: 1=0"})
 		delete(f.chain.fail, "claimed")
+		// nor its finalized head
+		f.chain.fail["finalized"] = []error{errors.New("rpc down")}
+		requireSnCtfEqual(t, "no finalized head", read(), map[string]string{"0a": "unread", "0b": "unread", "0c": "unread", "0d": "0: 1=0"})
+		delete(f.chain.fail, "finalized")
+
+		// The state a root recorded between the account record's read and the
+		// count of recorded accounts once left: the record without A while
+		// the count covers A's index. The records find no account of A, so
+		// nothing was paid to it, and every win of it is null, never claimed.
+		server.Tx(f.ctx, func(tx server.PgTx) {
+			for _, table := range []string{"st_ledger_v2_account", "st_ledger_v2_amount"} {
+				server.RaisePgResult(tx.Exec(f.ctx, `DELETE FROM `+table+` WHERE deployment_key = $1 AND no_id = $2 AND coldkey = $3`,
+					string(f.cfg.DeploymentKey()), int64(f.pool), ledgerV2A[:]))
+			}
+		})
+		if count := model.GetStLedgerV2AccountCount(f.ctx, f.cfg.DeploymentKey(), f.pool); count != 3 {
+			t.Fatalf("the count of recorded accounts is %d, want B's and C's to cover A's index", count)
+		}
+		claims := func() map[[32]byte]*snCtfAccountClaims {
+			snCtfResetClaimedCache()
+			return source.AccountClaims(f.ctx, nil, needs)
+		}()
+		requireSnCtfEqual(t, "an account the records do not find", snCtfClaimsTestStates(claims, ledgerV2A)["0a"], "0: 1=0 2=0 3=0")
+		for i, root := range f.viewRoots[:3] {
+			// A's win of the epoch of each finalized root, as much as A has in it
+			cumulative := f.roots[i].Accounts[0].Cumulative
+			win := &snCtfWin{Epoch: f.roots[i].Commit.Epoch, Award: &snCtfAward{Coldkey: ledgerV2A, Slot: cumulative}}
+			if claimed := snCtfWinClaimed(win, root, claims[ledgerV2A]); claimed != nil {
+				t.Fatalf("A's win paid by root %d reads claimed %t with its account not found, want null", root.Seq, *claimed)
+			}
+		}
 
 		// capture the flag off: none is read
 		setCtfPoolTestSwitches(t, f.cfg, true, false)

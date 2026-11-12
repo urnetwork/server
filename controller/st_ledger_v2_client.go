@@ -142,6 +142,13 @@ type StLedgerV2Client interface {
 	LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, rootIndex uint64, index uint64) (uint8, error)
 	// LedgerV2Claimed reads vault2.claimed(noId, index) at the finalized head.
 	LedgerV2Claimed(ctx context.Context, noId uint64, index uint64) (uint256.Int, error)
+	// LedgerV2FinalizedBlock reads the finalized head's number, for a reader
+	// that reads several views at one block.
+	LedgerV2FinalizedBlock(ctx context.Context) (uint64, error)
+	// LedgerV2ClaimedAt reads vault2.claimed(noId, index) of each index at one
+	// block, in batched eth_calls of at most stMaximumEVMRPCBatchCalls to a
+	// request, the values in the indexes' order.
+	LedgerV2ClaimedAt(ctx context.Context, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error)
 	// LedgerV2Close sends closeOperatorEpoch under v2close:e:no.
 	LedgerV2Close(ctx context.Context, epoch uint64, noId uint64) (string, error)
 	// LedgerV2Commit sends commitDistribution under v2commit:e:no.
@@ -337,6 +344,14 @@ func (self *CoreStClient) LedgerV2LatestBlock(ctx context.Context) (uint64, erro
 		return 0, fmt.Errorf("latest head: %w", err)
 	}
 	return latest, nil
+}
+
+func (self *CoreStClient) LedgerV2FinalizedBlock(ctx context.Context) (uint64, error) {
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("finalized head: %w", err)
+	}
+	return head.Number, nil
 }
 
 // The finalized root at an index, as vault2.roots returns it.

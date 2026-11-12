@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -338,6 +339,103 @@ func TestCtfDriverRecords(t *testing.T) {
 		recycled := GetCtfRecycledFor(ctx, key, 1, 8, 10)
 		if total, ok := recycled[9]; !ok || total.Uint64() != 180_000_000_000 || len(recycled) != 1 {
 			t.Fatalf("recycled %v", recycled)
+		}
+	})
+}
+
+// Each award is written with the network it was won for: the network the
+// census member of its epoch, role and client names, else its client's
+// network_client row's, null with neither. A network's awards are read by it,
+// so they are still its own once its clients' rows are reaped.
+func TestCtfAwardsKeepTheirNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		key := testStDeploymentKey
+		// epoch 8's census: provider {1} a candidate of network A
+		census, objects, members, pots, exclusions := testCtfCensus(key, 8)
+		if !CreateCtfCensus(ctx, census, objects, members, pots, exclusions) {
+			t.Fatal("census not created")
+		}
+		networkA, networkB := *members[0].NetworkId, server.NewId()
+		candidate, other, unknown := server.Id{1}, server.Id{4}, server.Id{5}
+		// network_client says B for the candidate and for {4}
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, clientId := range []server.Id{candidate, other} {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (client_id, network_id) VALUES ($1, $2)`, clientId, networkB))
+			}
+		})
+		write := func(epoch uint64, awards ...*CtfAward) {
+			result := &CtfEpochResult{DeploymentKey: key, NoId: 1, Epoch: epoch, LedgerEpoch: epoch, LedgerHash: testCtfHash("ledger"), Awards: len(awards),
+				AwardsRef: testCtfHash("awards"), PotsRef: testCtfHash("pots"), PendingRef: testCtfHash("pending")}
+			for _, award := range awards {
+				award.Epoch, award.Unit, award.UnitFamily, award.Coldkey = epoch, testCtfHash("unit"), 4, testCtfHash("coldkey")
+				award.Slot.SetUint64(100)
+			}
+			if !CreateCtfEpochResult(ctx, result, awards, nil, nil) {
+				t.Fatalf("epoch %d not written", epoch)
+			}
+		}
+		// the candidate's provider win (its member's network, A), its extender
+		// win (no member of that role: B), {4}'s (no member: B) and {5}'s
+		// (neither: null); in epoch 9, which has no census, the candidate's (B)
+		ignored := server.NewId()
+		write(8,
+			&CtfAward{Role: CtfRoleProvider, CountryCode: "is", Rank: 1, ClientId: candidate, NetworkId: &ignored},
+			&CtfAward{Role: CtfRoleExtender, CountryCode: "is", Rank: 1, ClientId: candidate},
+			&CtfAward{Role: CtfRoleProvider, CountryCode: "de", Rank: 1, ClientId: other},
+			&CtfAward{Role: CtfRoleProvider, CountryCode: "tm", Rank: 1, ClientId: unknown},
+		)
+		write(9, &CtfAward{Role: CtfRoleProvider, CountryCode: "is", Rank: 2, ClientId: candidate})
+
+		networkOf := func(award *CtfAward) string {
+			if award.NetworkId == nil {
+				return "null"
+			}
+			switch *award.NetworkId {
+			case networkA:
+				return "A"
+			case networkB:
+				return "B"
+			}
+			return award.NetworkId.String()
+		}
+		got := []string{}
+		for _, epoch := range []uint64{8, 9} {
+			for _, award := range GetCtfAwards(ctx, key, 1, epoch) {
+				got = append(got, fmt.Sprintf("%d %d %s %s", award.Epoch, award.Role, award.CountryCode, networkOf(award)))
+			}
+		}
+		if want := []string{"8 1 de B", "8 1 is A", "8 1 tm null", "8 2 is B", "9 1 is B"}; !slices.Equal(got, want) {
+			t.Fatalf("awards' networks %v, want %v", got, want)
+		}
+
+		networkAwards := func(networkId server.Id) []string {
+			listed := []string{}
+			for _, award := range GetCtfNetworkAwards(ctx, key, 1, networkId, 1, 9) {
+				listed = append(listed, fmt.Sprintf("%d %d %s %s", award.Epoch, award.Role, award.CountryCode, award.ClientId))
+			}
+			return listed
+		}
+		wantA := []string{fmt.Sprintf("8 1 is %s", candidate)}
+		wantB := []string{fmt.Sprintf("9 1 is %s", candidate), fmt.Sprintf("8 1 de %s", other), fmt.Sprintf("8 2 is %s", candidate)}
+		if got := networkAwards(networkA); !slices.Equal(got, wantA) {
+			t.Fatalf("network A's awards %v, want %v", got, wantA)
+		}
+		if got := networkAwards(networkB); !slices.Equal(got, wantB) {
+			t.Fatalf("network B's awards %v, want %v", got, wantB)
+		}
+		// the clients' rows reaped: the networks' awards are unchanged
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client WHERE client_id = ANY($1::uuid[])`, []server.Id{candidate, other}))
+		})
+		if got := networkAwards(networkA); !slices.Equal(got, wantA) {
+			t.Fatalf("network A's awards after its client's rows are gone %v, want %v", got, wantA)
+		}
+		if got := networkAwards(networkB); !slices.Equal(got, wantB) {
+			t.Fatalf("network B's awards after its clients' rows are gone %v, want %v", got, wantB)
+		}
+		if got := GetCtfClientAwards(ctx, key, 1, candidate, 1); len(got) != 3 {
+			t.Fatalf("the candidate's own awards: %d, want 3", len(got))
 		}
 	})
 }

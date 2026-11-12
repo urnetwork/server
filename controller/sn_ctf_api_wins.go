@@ -2,8 +2,8 @@ package controller
 
 // sn_ctf_api_wins.go — the wins GET /sn/ctf/client answers (sn/api/operator.yml
 // CtfClientWin), and whether each is claimed. Pure: the awards and the claim
-// states come from the source (sn_ctf_api_source.go), so the rule is tested
-// without a database or a chain.
+// states come from the source (sn_ctf_api_source.go, sn_ctf_api_claims.go), so
+// the rule is tested without a database or a chain.
 //
 // The rule. vault2's claims are cumulative: a claim pays an account up to its
 // cumulative in a finalized root and sets the account's claimed to it, so an
@@ -19,6 +19,16 @@ package controller
 //   - Otherwise it is unclaimed: while its paying root is pending, while its
 //     pending pot share waits for a matured epoch, and while the account's
 //     claimed is below that cumulative.
+//   - The paying root pays the whole win: its slot by then, and its pot share
+//     in it. So the account's cumulative in the paying root is at least the
+//     win's amount. A state that says less is not trusted, and the win is
+//     null, never claimed: an account the records do not find, as a root
+//     recorded between the read of the account record and the count of
+//     recorded accounts once made it, reads nothing paid and nothing claimed,
+//     which would otherwise say claimed. The one other way to say less is a
+//     shortfall that took part of a pending pot share before the first matured
+//     epoch paid it, which needs every pot empty; that win is null too,
+//     unknown rather than wrong.
 
 import (
 	"cmp"
@@ -28,10 +38,6 @@ import (
 
 	"github.com/urnetwork/server"
 )
-
-// How many coldkeys' claim states one answer reads, those of the newest wins
-// first: each is a chain read. Wins of any other coldkey answer claimed null.
-const snCtfClaimColdkeysPerAnswer = 32
 
 // snCtfClientScope is whom GET /sn/ctf/client answers for: the client a client
 // credential names, or, for a network credential, every client its network
@@ -87,10 +93,10 @@ func (self *snCtfView) payingRoot(win *snCtfWin) *snCtfRoot {
 	return nil
 }
 
-// snCtfClaimNeeds lists the coldkeys whose claim states the wins need, by
-// their newest win, at most snCtfClaimColdkeysPerAnswer, each with its wins'
-// finalized paying roots. A win whose paying root is pending, or that has none
-// yet, is unclaimed without a read.
+// snCtfClaimNeeds lists every coldkey whose claim state the wins need, by its
+// newest win, so that the newest are read first, each with its wins' finalized
+// paying roots. A win whose paying root is pending, or that has none yet, is
+// unclaimed without a read.
 func snCtfClaimNeeds(view *snCtfView, wins []*snCtfWin) []*snCtfClaimNeed {
 	ordered := slices.Clone(wins)
 	snCtfSortWins(ordered)
@@ -103,9 +109,6 @@ func snCtfClaimNeeds(view *snCtfView, wins []*snCtfWin) []*snCtfClaimNeed {
 		}
 		need := byColdkey[win.Award.Coldkey]
 		if need == nil {
-			if len(needs) == snCtfClaimColdkeysPerAnswer {
-				continue
-			}
 			need = &snCtfClaimNeed{Coldkey: win.Award.Coldkey}
 			byColdkey[win.Award.Coldkey] = need
 			needs = append(needs, need)
@@ -121,8 +124,9 @@ func snCtfClaimNeeds(view *snCtfView, wins []*snCtfWin) []*snCtfClaimNeed {
 
 // snCtfWinClaimed is whether a win is claimed, by its paying root and its
 // coldkey's claim state: false while the paying root is pending or there is
-// none yet, nil when the claim state could not be read.
-func snCtfWinClaimed(root *snCtfRoot, claims *snCtfAccountClaims) *bool {
+// none yet; nil when the claim state could not be read, or gives the account
+// less in the paying root than the win's amount, which that root pays whole.
+func snCtfWinClaimed(win *snCtfWin, root *snCtfRoot, claims *snCtfAccountClaims) *bool {
 	claimed := false
 	if root == nil || !root.Finalized {
 		return &claimed
@@ -131,7 +135,7 @@ func snCtfWinClaimed(root *snCtfRoot, claims *snCtfAccountClaims) *bool {
 		return nil
 	}
 	cumulative, ok := claims.Cumulative[root.Seq]
-	if !ok {
+	if !ok || cumulative.Lt(win.Award.total()) {
 		return nil
 	}
 	claimed = !claims.Claimed.Lt(&cumulative)
@@ -155,7 +159,7 @@ func (self *snCtfView) winsAnswer(wins []*snCtfWin, claims map[[32]byte]*snCtfAc
 			// only covered epochs: a committed root holds the win
 			continue
 		}
-		claimed := snCtfWinClaimed(self.payingRoot(win), claims[win.Award.Coldkey])
+		claimed := snCtfWinClaimed(win, self.payingRoot(win), claims[win.Award.Coldkey])
 		if claimed != nil && *claimed && !recent[win.Epoch] {
 			continue
 		}
