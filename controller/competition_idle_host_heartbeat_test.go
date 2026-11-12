@@ -183,7 +183,8 @@ type competitionIdleTestFixture struct {
 	watch     context.Context
 	ticks     chan time.Time
 	polls     chan time.Time
-	done      chan error
+	done      chan struct{}
+	resultErr error
 	joined    atomic.Bool
 	started   bool
 }
@@ -200,8 +201,10 @@ func newCompetitionIdleTestFixture(t *testing.T, settings *Settings, store Store
 	}
 	settings.WorkerHeartbeatSeconds, settings.HostHeartbeatMaxAgeSeconds = 20, 60
 	ctx, cancel := context.WithCancel(t.Context())
-	watch, stopWatch := context.WithTimeout(t.Context(), 5*time.Minute)
-	fixture := &competitionIdleTestFixture{ctx: ctx, cancel: cancel, watch: watch, ticks: make(chan time.Time), polls: make(chan time.Time), done: make(chan error, 1)}
+	// testing cancels t.Context before cleanup; that cancellation stops the worker,
+	// but must not expire the separate watchdog that joins its physical return.
+	watch, stopWatch := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Minute)
+	fixture := &competitionIdleTestFixture{ctx: ctx, cancel: cancel, watch: watch, ticks: make(chan time.Time), polls: make(chan time.Time), done: make(chan struct{})}
 	fixture.clock.Store(time.Now().UnixNano())
 	fixture.store = &competitionIdleTestStore{Store: store, clock: &fixture.clock, registrations: make(chan competitionIdleTestRegistration, 32)}
 	fixture.evaluator = &competitionIdleTestEvaluator{check: passingHostCheck(settings)}
@@ -214,13 +217,8 @@ func newCompetitionIdleTestFixture(t *testing.T, settings *Settings, store Store
 	fixture.worker.hostTickForTest, fixture.worker.pollTickForTest = fixture.ticks, fixture.polls
 	fixture.worker.heartbeatSettings.LeaseRetry.Now = func() time.Time { return time.Unix(0, fixture.clock.Load()).UTC() }
 	t.Cleanup(func() {
-		cancel()
-		if fixture.started {
-			select {
-			case <-fixture.done:
-			case <-watch.Done():
-				t.Error("synthetic idle worker did not physically join")
-			}
+		if err := fixture.stopAndJoin(); err != nil {
+			t.Error(err)
 		}
 		stopWatch()
 	})
@@ -230,20 +228,52 @@ func newCompetitionIdleTestFixture(t *testing.T, settings *Settings, store Store
 // The worker result is retained for assertions and cleanup independently.
 func (self *competitionIdleTestFixture) start() {
 	self.started = true
-	go func() { err := self.worker.Run(self.ctx); self.joined.Store(true); self.done <- err }()
+	go func() {
+		defer close(self.done)
+		self.resultErr = self.worker.Run(self.ctx)
+		self.joined.Store(true)
+	}()
 }
 
-// Retaining the result leaves the cleanup owner able to join exactly once.
+// Closed completion is reusable by result readers and cleanup. The retained
+// error is read only after close publishes the worker's physical return.
+func (self *competitionIdleTestFixture) awaitJoined(watch context.Context) error {
+	if !self.started {
+		return nil
+	}
+	select {
+	case <-self.done:
+		return nil
+	default:
+	}
+	select {
+	case <-self.done:
+		return nil
+	case <-watch.Done():
+		// Completion is positive evidence even at the watchdog boundary; a
+		// still-running child never gains join credit from cancellation alone.
+		select {
+		case <-self.done:
+			return nil
+		default:
+			return fmt.Errorf("synthetic idle worker did not physically join: %w", watch.Err())
+		}
+	}
+}
+
+// Every cleanup cancels only its own worker, then joins the same completion.
+func (self *competitionIdleTestFixture) stopAndJoin() error {
+	self.cancel()
+	return self.awaitJoined(self.watch)
+}
+
+// Reading the original result never consumes cleanup's completion witness.
 func (self *competitionIdleTestFixture) result(t *testing.T) error {
 	t.Helper()
-	select {
-	case err := <-self.done:
-		self.done <- err
-		return err
-	case <-self.watch.Done():
-		t.Fatal("synthetic idle worker result missing")
-		return self.watch.Err()
+	if err := self.awaitJoined(self.watch); err != nil {
+		t.Fatal(err)
 	}
+	return self.resultErr
 }
 
 // No wall-clock sleeps or short negative polls establish a lifecycle event.
