@@ -12,7 +12,7 @@ package controller
 // answered (also the {CHECKOUT_SESSION_ID} of the return url), or the
 // subscription id POST /subscription/stripe/payment-sheet answered. The server
 // reads it back from Stripe, checks that it belongs to the caller's network,
-// and credits it through the SAME code the webhooks run:
+// and credits it through the same code the webhooks run:
 //
 //   - a Pro subscription's invoice: stripeHandleInvoicePaidWithOnboarding, the
 //     invoice.paid handler, gated by the stripe_invoice ledger, so a report
@@ -62,17 +62,35 @@ var (
 	stripeVerifyInvoiceNetworkIdFunc = model.GetStripeInvoiceNetworkId
 	stripeVerifyCreditInvoiceFunc    = stripeHandleInvoicePaidWithOnboarding
 	stripeVerifyFinalizeCustomerFunc = stripeFinalizeTierForCustomer
-	stripeVerifyCheckoutCreditedFunc = stripeCheckoutFulfilled
-	stripeVerifyFulfillCheckoutFunc  = stripeHandleCheckoutSessionCompleted
-	stripeVerifyPaymentMethodCountry = stripeVerifyReadPaymentMethodCountry
+	// whether a data pack checkout already has its balance code (the
+	// purchase event id of its first line)
+	stripeVerifyCheckoutCreditedFunc = func(clientSession *session.ClientSession, sessionId string) (bool, error) {
+		_, err := model.GetBalanceCodeIdForPurchaseEventId(clientSession.Ctx, stripeCheckoutPurchaseEventId(sessionId, 0))
+		return err == nil, nil
+	}
+	stripeVerifyFulfillCheckoutFunc = stripeHandleCheckoutSessionCompleted
+	// the billing country of the card the sheet attached, "" when Stripe
+	// cannot say: what setup_intent.succeeded finalizes the tier from
+	stripeVerifyPaymentMethodCountry = stripePaymentMethodCountry
 	stripeVerifyFetchChargeFunc      = stripeReconcileFetchCharge
 	stripeVerifyNowFunc              = server.NowUtc
 )
 
-// A data pack checkout older than this is left to the webhook and support:
-// Stripe retries checkout.session.completed for 72 h, so a report inside
-// that window only brings forward what the webhook would do.
-const stripeVerifyCheckoutMaxAge = 72 * time.Hour
+// How a client's report of a card payment is judged.
+type stripeVerifySettings struct {
+	// A data pack checkout older than this is left to the webhook and
+	// support: Stripe retries checkout.session.completed for 72 h, so a report
+	// inside that window only brings forward what the webhook would do.
+	// Non-positive refuses every data pack report.
+	CheckoutMaxAge time.Duration
+}
+
+// The settings the endpoint runs with.
+func defaultStripeVerifySettings() *stripeVerifySettings {
+	return &stripeVerifySettings{
+		CheckoutMaxAge: 72 * time.Hour,
+	}
+}
 
 type VerifyStripeCheckoutArgs struct {
 	// the checkout session id POST /stripe/create-checkout-session answered
@@ -106,8 +124,8 @@ type stripeVerifyCheckoutSession struct {
 	Created int64 `json:"created"`
 }
 
-// completedObject is the session as checkout.session.completed delivers it,
-// for that event's handler.
+// The session as checkout.session.completed delivers it, for that event's
+// handler.
 func (self *stripeVerifyCheckoutSession) completedObject() *StripeEventCheckoutCompleteObject {
 	return &StripeEventCheckoutCompleteObject{
 		Id:                self.Id,
@@ -156,8 +174,7 @@ type stripeVerifyInvoice struct {
 	} `json:"lines"`
 }
 
-// eventObject is the invoice as invoice.paid delivers it, for that event's
-// handler.
+// The invoice as invoice.paid delivers it, for that event's handler.
 func (self *stripeVerifyInvoice) eventObject() *StripeEventInvoiceObject {
 	return &StripeEventInvoiceObject{
 		Id:            self.Id,
@@ -168,8 +185,8 @@ func (self *stripeVerifyInvoice) eventObject() *StripeEventInvoiceObject {
 	}
 }
 
-// paidThrough is the end of the period the invoice pays for, nil when the
-// invoice names none.
+// The end of the period the invoice pays for, nil when the invoice names
+// none.
 func (self *stripeVerifyInvoice) paidThrough() *time.Time {
 	if self.Lines == nil {
 		return nil
@@ -183,9 +200,9 @@ func (self *stripeVerifyInvoice) paidThrough() *time.Time {
 	return nil
 }
 
-// VerifyStripeCheckout answers POST /subscription/verify-stripe-checkout: a
-// client's report of a card payment, read back from Stripe and credited
-// through the webhooks' own code.
+// Answers POST /subscription/verify-stripe-checkout: a client's report of a
+// card payment, read back from Stripe and credited through the webhooks' own
+// code.
 //
 // decision table (Stripe's state -> status):
 //
@@ -228,14 +245,17 @@ func VerifyStripeCheckout(
 	}
 
 	if sessionId != "" {
-		return verifyStripeCheckoutSession(sessionId, clientSession)
+		return verifyStripeCheckoutSession(sessionId, clientSession, defaultStripeVerifySettings())
 	}
 	return verifyStripePaymentSheetSubscription(subscriptionId, clientSession)
 }
 
+// A report of a checkout session: Pro (subscription mode) or a data pack
+// (payment mode).
 func verifyStripeCheckoutSession(
 	sessionId string,
 	clientSession *session.ClientSession,
+	settings *stripeVerifySettings,
 ) (*VerifyStorePurchaseResult, error) {
 	checkoutSession, found, err := stripeVerifyGet[*stripeVerifyCheckoutSession](
 		clientSession,
@@ -313,7 +333,7 @@ func verifyStripeCheckoutSession(
 		if fulfilled {
 			return verifyStatusResult(VerifyPurchaseStatusAlreadyCredited), nil
 		}
-		if created := time.Unix(checkoutSession.Created, 0); checkoutSession.Created <= 0 || stripeVerifyCheckoutMaxAge < stripeVerifyNowFunc().Sub(created) {
+		if created := time.Unix(checkoutSession.Created, 0); checkoutSession.Created <= 0 || settings.CheckoutMaxAge < stripeVerifyNowFunc().Sub(created) {
 			return NewVerifyStorePurchaseInvalid(), nil
 		}
 		if _, err := stripeVerifyFulfillCheckoutFunc(checkoutSession.completedObject(), clientSession); err != nil {
@@ -327,6 +347,8 @@ func verifyStripeCheckoutSession(
 	}
 }
 
+// A report of the payment sheet's subscription, which has no checkout
+// session.
 func verifyStripePaymentSheetSubscription(
 	subscriptionId string,
 	clientSession *session.ClientSession,
@@ -406,8 +428,8 @@ func verifyStripePaymentSheetSubscription(
 	return verifyStripeInvoice(invoiceId, clientSession)
 }
 
-// verifyStripeInvoice credits a paid invoice of the caller's subscription
-// through the invoice.paid handler, once.
+// Credits a paid invoice of the caller's subscription through the
+// invoice.paid handler, once.
 func verifyStripeInvoice(
 	invoiceId string,
 	clientSession *session.ClientSession,
@@ -470,9 +492,9 @@ func verifyStripeInvoice(
 	return stripeVerifyInvoiceCreditStatus(clientSession, invoiceId, paidThrough)
 }
 
-// stripeVerifyLedgerStatus is the answer for an invoice the ledger already
-// holds: already_credited for the caller's network, wrong_network for another.
-// done = false when the ledger does not hold it.
+// The answer for an invoice the ledger already holds: already_credited for
+// the caller's network, wrong_network for another. done = false when the
+// ledger does not hold it.
 func stripeVerifyLedgerStatus(
 	clientSession *session.ClientSession,
 	invoiceId string,
@@ -491,11 +513,10 @@ func stripeVerifyLedgerStatus(
 	}, true
 }
 
-// stripeVerifyInvoiceCreditStatus reads the ledger after a credit attempt on
-// an invoice it did not hold before: credited when the caller's network holds
-// the invoice now (this report, or a webhook in the same moment, landed it),
-// pending when nothing credited it (a payment sheet trial whose finalization
-// did not get to it).
+// Reads the ledger after a credit attempt on an invoice it did not hold
+// before: credited when the caller's network holds the invoice now (this
+// report, or a webhook in the same moment, landed it), pending when nothing
+// credited it (a payment sheet trial whose finalization did not get to it).
 func stripeVerifyInvoiceCreditStatus(
 	clientSession *session.ClientSession,
 	invoiceId string,
@@ -511,13 +532,7 @@ func stripeVerifyInvoiceCreditStatus(
 	return &VerifyStorePurchaseResult{Status: VerifyPurchaseStatusCredited, ExpiryTime: paidThrough}, nil
 }
 
-// stripeCheckoutFulfilled reports whether a data pack checkout already has
-// its balance code (the purchase event id of its first line).
-func stripeCheckoutFulfilled(clientSession *session.ClientSession, sessionId string) (bool, error) {
-	_, err := model.GetBalanceCodeIdForPurchaseEventId(clientSession.Ctx, stripeCheckoutPurchaseEventId(sessionId, 0))
-	return err == nil, nil
-}
-
+// A subscription with its latest invoice, as the payment sheet created it.
 func stripeVerifyReadSubscription(
 	clientSession *session.ClientSession,
 	subscriptionId string,
@@ -532,15 +547,8 @@ func stripeVerifyReadSubscription(
 	return subscription, true, nil
 }
 
-// stripeVerifyReadPaymentMethodCountry is the billing country of the card the
-// sheet attached, "" when Stripe cannot say: what setup_intent.succeeded
-// finalizes the tier from.
-func stripeVerifyReadPaymentMethodCountry(paymentMethodId string) string {
-	return stripePaymentMethodCountry(paymentMethodId)
-}
-
-// stripeVerifyGet reads one object from Stripe's api. found = false when
-// Stripe does not know it (400, 404), which no retry changes.
+// Reads one object from Stripe's api. found = false when Stripe does not know
+// it (400, 404), which no retry changes.
 func stripeVerifyGet[R any](clientSession *session.ClientSession, objectUrl string) (result R, found bool, returnErr error) {
 	result, err := server.HttpGetRequireStatusOk[R](
 		clientSession.Ctx,
