@@ -50073,6 +50073,11 @@ covers four sources:
   fix/extender-churn-1111 and fix/extender-attribution-1111;
 - the five probes below (§28.1–§28.5).
 
+§28.6 adds a sixth probe, for S8's webrtc signaling relay
+(connect/EXTENDER.md S8), which carries the operator's acceptance and
+uptime probes to extenders on the webrtc carrier. It came after the review,
+so no finding below maps to it.
+
 Replayed times come from Main's Mimir history from 2026-10-28 to 11-11,
 unless a row says otherwise.
 
@@ -50126,18 +50131,27 @@ Read together:
 - **Supply fell.** `extender-supply-falling` with activations still stored
   is revocation, by the prober or on the extenders' side. With
   `extender-activations-stopped` too, it is the activation path.
+- **Webrtc tests failing.** `extender-webrtc-relay-no-answer-high` means
+  the operator's webrtc tests of extenders fail. Activations only webrtc
+  could pass are refused, and addresses accepted on webrtc alone are
+  deactivated after six failed uptime probes in a row, so
+  `extender-supply-falling` can follow.
 
 Deployment: the probes run in the monitor build that carries this section.
-Most read series Main already exports. Two parts need new exporters:
+Most read series Main already exports. Three parts need new exporters:
 `gossip-mesh` reads `urnetwork_gossip_peers` and
 `urnetwork_gossip_conn_manager_watermark` from a gossip build with
 gossip/mesh_metrics.go (until then, open file descriptors and the default
 watermark); `extender-churn-high` reads `urnetwork_stats_extenders_created_24h`
 and `urnetwork_stats_extenders_revoked_24h` from a taskworker build with
 controller/stats_extender_supply.go (until then,
-`extender-supply-unobservable` reports `churn_state_missing`). The extender
-health dashboard (`urnetwork-extender-health`) shows every series these
-probes read.
+`extender-supply-unobservable` reports `churn_state_missing`); and
+`extender-webrtc-relay` reads `urnetwork_extender_webrtc_relay_offers_total`
+from a connect build with S8's connect/extender_webrtc_relay.go (until then,
+`extender-webrtc-relay-unobservable` reports `relay_state_missing`). The
+extender health dashboard (`urnetwork-extender-health`) shows every series
+these probes read but the relay's, which the extenders dashboard
+(`urnetwork-extenders`) shows in its "webrtc relay" row.
 
 ### 28.1 Extender release to clients
 
@@ -50693,3 +50707,132 @@ once are the prober's; failures in a few networks are theirs.
 `urnetwork_taskworker_extender_probe_restores_total` counts revoked
 extenders that answered again, which were false revocations. Then read
 §28.1's activations for extenders coming back.
+
+### 28.6 Extender webrtc relay
+
+Probe: `extender-webrtc-relay`
+
+Status: added 2026-11-12 with S8, the webrtc acceptance of extenders
+(connect/EXTENDER.md S8, feat/extender-webrtc-s8-1111); the owner accepted
+the signal that day. It reads a counter only a connect build with S8's
+relay exports. Until that build runs, `extender-webrtc-relay-unobservable`
+reports `relay_state_missing`. The relay has never run in production, so
+there is no history: the thresholds below are first values, to revisit
+after the first week of data.
+
+The relay: the operator's prober (the api's activation probe and the
+taskworker's uptime probe) posts a webrtc offer to the extender client's
+Redis offer set. The connect process holding the client's resident takes
+it and relays it to the client as exchange signals. The client's extender
+answerer (connect net_extender_webrtc_signal.go) answers on the same
+exchange, and the resident posts the answer for the prober (server
+connect/extender_webrtc_relay.go). The prober offers only to extenders
+whose builds serve the carrier: an activation tests webrtc only for an
+extender that offers the carrier (under S8's rules, only when tcp failed or
+was not offered), and the uptime task probes webrtc only on addresses
+accepted on it.
+
+Source: `urnetwork_extender_webrtc_relay_offers_total`, the offers each
+connect process's residents took for their clients, by outcome. Every
+connect process exports each outcome at zero from its start. The probe
+reads its increase over the trailing hour, summed over the processes by
+outcome, at one-minute evaluations of one bounded Mimir range read (the §26
+history read), every 5 minutes. The total counts every outcome:
+
+- `answered`: the client answered, and the answer was posted for the
+  prober;
+- `no_answer`: the client sent no answer before the offer's deadline, or
+  its answer failed;
+- `expired`: the prober's deadline had passed when the offer was taken;
+- `rate_limited`: the client's offers came faster than its rate;
+- `busy`: the exchange was already relaying as many offers as it takes at
+  once (`MaxConcurrentRelays`, 64 per process);
+- `oversized` and `malformed`: the offer or the answer was past the size
+  bound, or the offer did not decode.
+
+```promql
+sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main",outcome="no_answer"}[1h]))
+  / sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main"}[1h]))
+sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main",outcome="busy"}[1h]))
+  / sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main"}[1h]))
+```
+
+Healthy: no history yet. As designed, nearly every offer is answered,
+since the prober offers only to builds that serve the carrier, and `busy`
+is about zero: the prober holds far fewer offers open than the bound (the
+uptime pass probes 16 addresses at a time per taskworker, and a client may
+have at most two offers pending).
+
+Thresholds (each judged at every one-minute evaluation of its hold, with at
+least 20 offers in the trailing hour):
+
+- WARN `extender-webrtc-relay-no-answer-high`: more than half of the offers
+  `no_answer`, for 30 minutes. A broken answerer or relay path leaves
+  nearly every offer unanswered; half leaves room for extenders that answer
+  late or whose networks lose the exchange's signals.
+- WARN `extender-webrtc-relay-busy-high`: more than 5% of the offers
+  `busy`, for 30 minutes. `busy` should be about zero, so a lasting 5% is
+  the bound being hit, not a burst.
+- Fewer than 20 offers in the trailing hour are too few to judge, and read
+  as healthy, as §28.1's idle gated channel does: under 20, a handful of
+  slow extenders moves either share past its line. Until extenders on
+  builds that serve the carrier are tested, this is the relay's state.
+- `extender-webrtc-relay-unobservable`: the read failed, an outcome had no
+  value at an evaluation (`evaluation_missing`, naming the outcome), or no
+  connect process exported the counter (`relay_state_missing`).
+
+The 30-minute hold spans six uptime probes of each webrtc address (one
+every 5 minutes), long enough to ride out one connect process restarting
+while its clients reconnect.
+
+False-positive qualifiers: an extender whose build serves the carrier but
+whose network loses the exchange's signals reads as `no_answer`. So would
+an offer to a build without the answerer, which the prober's carrier rule
+keeps out.
+
+False-negative qualifiers:
+
+- **A relay that takes nothing.** The counter counts offers a resident
+  took. Offers that never reach a resident's relay (the offer set's Redis
+  key events, or the listener every resident registers) are counted
+  nowhere, so the relay reads as idle, under the minimum. The webrtc step
+  of the extenders dashboard's activation panels shows those probes
+  failing.
+- **A prober the failures quieted.** If deactivating the addresses accepted
+  on webrtc alone leaves the prober fewer than 20 offers an hour, the relay
+  reads as healthy again. `extender-supply-falling` (§28.5) and the
+  activation outcomes show it.
+- **One process.** The shares are fleet-wide, so one connect process
+  refusing every offer busy, among many, can stay under 5%.
+- **Refusals in the total.** `expired`, `rate_limited`, `busy`,
+  `oversized` and `malformed` count in the total, so a relay that refuses
+  most offers lowers the `no_answer` share. Read
+  `extender-webrtc-relay-busy-high` first.
+
+ACTION:
+
+- **No answer.** Read the extenders dashboard's "webrtc relay" row beside
+  the webrtc step of its activation panels, and when the share rose: with a
+  connect deploy, the relay; with an sdk release, the answerer. Then check,
+  in order:
+  - the sdk's extender answerer (connect net_extender_webrtc_signal.go) in
+    the builds the prober offers to;
+  - the resident relay (server connect/extender_webrtc_relay.go). At log
+    verbosity 1, its `[wr]<client> no answer` lines name each failed
+    exchange's error;
+  - the exchange-to-client control path the offer travels as exchange
+    signals: from the resident's internal client to the client's manager,
+    which hands flagged offers to the answerer.
+- **Busy.** Find what fills the relay before raising `MaxConcurrentRelays`,
+  which bounds how many exchanges one connect process holds open with its
+  clients. Find the process with the query below. Many offers there: a
+  prober sending more than it should (a burst of activations, or an uptime
+  pass grown with the fleet), which the relay is right to refuse; slow the
+  prober. Few offers with busy still high: slots held by exchanges that
+  outlive their offer's deadline, a relay fault. Raise the bound only for
+  load an exchange should carry.
+
+```promql
+sum by (host, block) (increase(urnetwork_extender_webrtc_relay_offers_total{env="main",outcome="busy"}[1h]))
+  / sum by (host, block) (increase(urnetwork_extender_webrtc_relay_offers_total{env="main"}[1h]))
+```

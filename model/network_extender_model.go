@@ -169,6 +169,10 @@ type NetworkExtenderProbeTarget struct {
 	// failures by: one network's extenders share an operator, and often one
 	// outage
 	NetworkId server.Id
+	// the client the extender's device is reachable under on the exchange,
+	// the one that activated it last, which is where an address accepted on
+	// the webrtc carrier is probed (C2a, C3; connect/EXTENDER.md S8)
+	ClientId  server.Id
 	PublicKey []byte
 	TcpPort   int
 	DnsTld    string
@@ -335,6 +339,87 @@ func joinExtenderCarriers(carriers []string) string {
 		kept = append(kept, carrier)
 	}
 	return strings.Join(kept, ",")
+}
+
+// Whether an address with these carriers can be a client's first contact
+// (connect/EXTENDER.md S8): it serves a socket carrier, tcp, quic or dns. An
+// address accepted on the webrtc carrier alone cannot be, since the carrier
+// signals through the dialer's own exchange connection, so it is published
+// in the records a connected client reads (the drip, the feed) and never in
+// what a client reaches the operator by: the geo dns sets, the seed cohort,
+// an activation's bootstrap.
+func ExtenderAddressFirstContact(carriers []string) bool {
+	for _, carrier := range carriers {
+		switch carrier {
+		case connect.ExtenderCarrierTcp, connect.ExtenderCarrierQuic, connect.ExtenderCarrierDns:
+			return true
+		}
+	}
+	return false
+}
+
+// The carriers column of an address that can be a first contact, as a
+// postgres regular expression: one of its comma-separated carriers is tcp,
+// quic or dns (ExtenderAddressFirstContact).
+var extenderFirstContactCarriersPattern = fmt.Sprintf(
+	"(^|,)(%s|%s|%s)(,|$)",
+	connect.ExtenderCarrierTcp,
+	connect.ExtenderCarrierQuic,
+	connect.ExtenderCarrierDns,
+)
+
+// Whether an address with these carriers was accepted on the webrtc carrier
+// without tcp (connect/EXTENDER.md S8): it lists webrtc, which the activation
+// tests only where the tcp path failed or was not offered, and not tcp. Such
+// an address is probed for uptime over webrtc, and the operator caps how many
+// extenders hold one (controller ExtenderActivateSettings.
+// MaxWebRtcOnlyExtenders).
+func ExtenderAddressWebRtcOnly(carriers []string) bool {
+	return slices.Contains(carriers, connect.ExtenderCarrierWebRtc) &&
+		!slices.Contains(carriers, connect.ExtenderCarrierTcp)
+}
+
+// The carriers column of an address that lists webrtc, and of one that lists
+// tcp, as postgres regular expressions over its comma-separated carriers
+// (ExtenderAddressWebRtcOnly).
+var (
+	extenderWebRtcCarriersPattern = fmt.Sprintf("(^|,)%s(,|$)", connect.ExtenderCarrierWebRtc)
+	extenderTcpCarriersPattern    = fmt.Sprintf("(^|,)%s(,|$)", connect.ExtenderCarrierTcp)
+)
+
+// How many active extenders hold an active address accepted on the webrtc
+// carrier without tcp (ExtenderAddressWebRtcOnly), which the activation's cap
+// compares with its bound before it runs a webrtc test. The extender of
+// excludePublicKey is left out, so an extender already counted activates
+// again, on either family; nil leaves none out.
+func CountActiveWebRtcOnlyNetworkExtenders(ctx context.Context, excludePublicKey []byte) int {
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT COUNT(DISTINCT network_extender.extender_id)
+			FROM network_extender
+			INNER JOIN network_extender_address ON
+				network_extender_address.extender_id = network_extender.extender_id AND
+				network_extender_address.active
+			WHERE
+				network_extender.active AND
+				network_extender_address.carriers ~ $1 AND
+				network_extender_address.carriers !~ $2 AND
+				($3::bytea IS NULL OR network_extender.public_key != $3::bytea)
+			`,
+			extenderWebRtcCarriersPattern,
+			extenderTcpCarriersPattern,
+			excludePublicKey,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return count
 }
 
 // The inverse, tolerant of the empty column an address with no carrier would
@@ -1044,6 +1129,7 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 			SELECT
 				network_extender.extender_id,
 				network_extender.network_id,
+				network_extender.client_id,
 				network_extender.public_key,
 				network_extender.tcp_port,
 				network_extender.dns_tld,
@@ -1066,6 +1152,7 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 				server.Raise(result.Scan(
 					&target.ExtenderId,
 					&target.NetworkId,
+					&target.ClientId,
 					&target.PublicKey,
 					&target.TcpPort,
 					&target.DnsTld,
@@ -1092,6 +1179,12 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 // The order is stable rather than random. The sampler does its own shuffling
 // from a seeded source, so a random order here would only make one tick's
 // sets impossible to reproduce for the same reason the sampler is seeded.
+//
+// An address accepted on the webrtc carrier alone is left out
+// (ExtenderAddressFirstContact): the dns sets and the seed cohort drawn from
+// this pool are a client's first contact, and the webrtc carrier signals
+// through an exchange connection a client in first contact does not have
+// (connect/EXTENDER.md S8).
 func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtenderDnsAddress {
 	addresses := []*NetworkExtenderDnsAddress{}
 
@@ -1106,7 +1199,8 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 				network_extender_address.ip_version,
 				network_extender_address.ip,
 				network_extender.directory_tier,
-				COALESCE(network_extender.canary_channel, '')
+				COALESCE(network_extender.canary_channel, ''),
+				network_extender_address.carriers
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -1124,6 +1218,7 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				address := &NetworkExtenderDnsAddress{}
+				var carriers string
 				server.Raise(result.Scan(
 					&address.ExtenderId,
 					&address.PublicKey,
@@ -1132,7 +1227,11 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 					&address.Ip,
 					&address.DirectoryTier,
 					&address.CanaryChannel,
+					&carriers,
 				))
+				if !ExtenderAddressFirstContact(splitExtenderCarriers(carriers)) {
+					continue
+				}
 				addresses = append(addresses, address)
 			}
 		})
@@ -1257,6 +1356,12 @@ func GetNetworkExtenderIdsForPublish(ctx context.Context, limit int, staleBefore
 // excludeExtenderId leaves one extender out, normally the one being activated,
 // which has no use for its own record in the sample. The zero id excludes
 // nothing.
+//
+// Only an extender with an active address that can be a first contact is
+// sampled (ExtenderAddressFirstContact): a bootstrap is what a client starts
+// from, and an extender accepted on the webrtc carrier alone is reached only
+// through an exchange connection (connect/EXTENDER.md S8). Its record keeps
+// every active address of the extender.
 func GetRandomActiveNetworkExtenders(
 	ctx context.Context,
 	limit int,
@@ -1310,7 +1415,8 @@ func GetRandomActiveNetworkExtenders(
 					sampled.active AND
 					sampled.extender_id != $2 AND
 					sampled.directory_tier = $4 AND
-					sampled.canary_channel IS NULL
+					sampled.canary_channel IS NULL AND
+					sampled_address.carriers ~ $5
 				GROUP BY sampled.extender_id
 				ORDER BY random()
 				LIMIT $1
@@ -1321,6 +1427,7 @@ func GetRandomActiveNetworkExtenders(
 			excludeExtenderId,
 			DerivedLocationNodeKindExtender,
 			connect.ExtenderDirectoryTierOpen,
+			extenderFirstContactCarriersPattern,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

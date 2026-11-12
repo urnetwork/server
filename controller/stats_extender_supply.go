@@ -27,8 +27,21 @@ var statsExtendersRevoked24hGauge = newStatsGauge(
 	"Extenders that lost their last active address in the last 24 hours and have not activated again since",
 )
 
+// The extenders accepted on the webrtc carrier without tcp (connect/EXTENDER.md
+// S8), the population the activation's cap bounds
+// (ExtenderActivateSettings.MaxWebRtcOnlyExtenders), read by the extenders
+// dashboard beside the activations the cap refused
+// (urnetwork_extender_activations_total{stage="webrtc",outcome="cap"}), so a
+// cap that binds is seen, and how close the population is to it. One plain
+// count with no label.
+var statsWebRtcOnlyExtendersGauge = newStatsGauge(
+	"webrtc_only_extenders",
+	"Active extenders with an active address accepted on the webrtc carrier without tcp, the population the activation's cap bounds",
+)
+
 func statsRefreshExtenderSupply(ctx context.Context, now time.Time) {
 	supply := model.CountExtenderSupply(ctx, now)
 	statsExtendersCreated24hGauge.set(float64(supply.Created))
 	statsExtendersRevoked24hGauge.set(float64(supply.Revoked))
+	statsWebRtcOnlyExtendersGauge.set(float64(model.CountActiveWebRtcOnlyNetworkExtenders(ctx, nil)))
 }
