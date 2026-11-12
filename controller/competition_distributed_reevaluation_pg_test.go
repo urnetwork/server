@@ -201,9 +201,16 @@ func TestCompetitionDistributedRecoveryPgSingleUsePreservesOriginalHistory(t *te
 			tb.Fatal("authorization allocated a clock or changed original start", err)
 		}
 		replayed, err := fixture.authorize(tb, tb.Context())
-		if err != nil || !reflect.DeepEqual(replayed, receipt) || fixture.calls != 3 || !reflect.DeepEqual(fixture.snapshot(tb.Context()), after) {
-			tb.Fatal("exact replay changed custody/history or issued new native observation", err)
+		if err != nil || replayed == nil {
+			tb.Fatal("exact replay failed to return its committed receipt", err)
 		}
+		if fixture.calls != 3 {
+			tb.Fatal("exact replay issued another native observation", fixture.calls)
+		}
+		if !reflect.DeepEqual(fixture.snapshot(tb.Context()), after) {
+			tb.Fatal("exact replay changed persisted custody, clocks, history, events or audit")
+		}
+		requireCompetitionDistributedRecoveryReceiptEqual(tb, fixture.settings, receipt, replayed)
 		fixture.request.IdempotencyKey = "synthetic-different-grant"
 		if again, err := fixture.authorize(tb, tb.Context()); err == nil || again != nil {
 			tb.Fatal("second identity granted another cycle")

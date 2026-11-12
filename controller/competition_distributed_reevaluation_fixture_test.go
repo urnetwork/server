@@ -3,6 +3,8 @@
 package controller
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/competitionagent"
+	"github.com/urnetwork/server/model"
 )
 
 // No source, intake, job, baseline or executor trigger is disabled. An older
@@ -20,6 +24,75 @@ func newCompetitionPreparedAnnouncedCompletionFixtureAt(t *testing.T, tb testing
 	tb.Helper()
 	intake, round := newCompetitionAnnouncedAdmissionFixtureAt(t, tb, historicalNow)
 	return finishCompetitionPreparedCompletionFixture(tb, intake, round, true, true)
+}
+
+// PostgreSQL owns JSONB textual order, not the immutable proof's typed digest.
+// Every public field and every private signed value must still match exactly.
+func requireCompetitionDistributedRecoveryReceiptEqual(t testing.TB, settings *Settings, expected, actual *model.CompetitionJobReevaluationReceipt) {
+	t.Helper()
+	first, replay := *expected, *actual
+	first.DistributedProof, replay.DistributedProof = nil, nil
+	if !reflect.DeepEqual(first, replay) {
+		t.Fatal("replay changed a public cycle, receipt, digest or original-failure field")
+	}
+	var firstProof, replayProof competitionDistributedRecoveryProof
+	if err := decodeFailureEvidenceJson(expected.DistributedProof, &firstProof); err != nil {
+		t.Fatal("original private native proof failed strict typed decoding", err)
+	}
+	if err := decodeFailureEvidenceJson(actual.DistributedProof, &replayProof); err != nil {
+		t.Fatal("replayed private native proof failed strict typed decoding", err)
+	}
+	firstJson, firstDigest, firstErr := competitionDistributedRecoveryProofJson(&firstProof)
+	replayJson, replayDigest, replayErr := competitionDistributedRecoveryProofJson(&replayProof)
+	if firstErr != nil || replayErr != nil || !bytes.Equal(firstJson, replayJson) || firstDigest != replayDigest ||
+		firstDigest != expected.Distributed.NativeProofSha256 || replayDigest != actual.Distributed.NativeProofSha256 {
+		t.Fatal("replay changed a typed native observation, signature, identity or proof digest", firstErr, replayErr)
+	}
+	for _, response := range append([]competitionagent.Response{replayProof.OriginalStatus}, replayProof.Availability...) {
+		matched := false
+		for _, host := range settings.DistributedEvaluationPolicy.Hosts {
+			if host.HostId == response.HostId {
+				matched = true
+				if err := validateCompetitionDistributedRecoveryEnvelope(response, host); err != nil {
+					t.Fatal("replayed native signature no longer authenticates its frozen host", err)
+				}
+			}
+		}
+		if !matched {
+			t.Fatal("replayed native proof named an unknown host")
+		}
+	}
+	if !bytes.Equal(expected.DistributedProof, actual.DistributedProof) {
+		t.Log("JSONB changed private proof formatting only; exact public receipt and typed signed proof are unchanged")
+	}
+}
+
+// A real JSONB roundtrip changes RawMessage representation, while preserving
+// every typed field and authenticated digest. Raw byte equality is not replay.
+func TestCompetitionDistributedRecoveryPgReceiptJsonbRoundtripKeepsSignedAuthority(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		fixture := newCompetitionDistributedRecoveryPgFixture(t, tb)
+		receipt, err := fixture.authorize(tb, tb.Context())
+		if err != nil || receipt == nil {
+			tb.Fatal(err)
+		}
+		canonical, err := json.Marshal(receipt)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		var stored []byte
+		server.Db(tb.Context(), func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(tb.Context(), `SELECT $1::jsonb`, string(canonical)).Scan(&stored))
+		})
+		var projected model.CompetitionJobReevaluationReceipt
+		if err := decodeFailureEvidenceJson(stored, &projected); err != nil || validateCompetitionDistributedRecoveryReceipt(&projected) != nil {
+			tb.Fatal("JSONB roundtrip lost authenticated private proof", err)
+		}
+		if bytes.Equal(receipt.DistributedProof, projected.DistributedProof) || reflect.DeepEqual(receipt, &projected) {
+			tb.Fatal("root-cause control did not exercise PostgreSQL's different private JSON representation")
+		}
+		requireCompetitionDistributedRecoveryReceiptEqual(tb, fixture.settings, receipt, &projected)
+	})
 }
 
 // The returned candidates are genuinely admitted, but no control is published
