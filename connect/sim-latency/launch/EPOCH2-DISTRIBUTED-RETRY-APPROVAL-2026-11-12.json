@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "kind": "operator-approved-distributed-infrastructure-retry-preparation/v1",
+  "approval_recorded_at": "2026-11-12T05:21:53Z",
+  "approval_text": "Please retry the failed evaluations",
+  "scope": {
+    "environment": "main",
+    "competition_id": "sim-latency-season-1",
+    "season_id": "sim-latency-production-20261028-r2",
+    "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+    "epoch": 2
+  },
+  "private_terminal_capture": {
+    "path": "/var/lib/urnetwork/competition-epoch2-distributed-retry-preparation-20261112-923362695/terminal-snapshots.private.json",
+    "sha256": "ee9326d594a3a9b12604a72b31e21a0accb14ba72eaaab9a6e06c78c1b6280e9",
+    "observed_at": "2026-11-12T05:17:28.648625Z",
+    "read_only_database_transaction": true,
+    "owner_root_mode_0400": true,
+    "raw_terminal_patch_event_and_policy_data_not_published": true,
+    "main_migration_head_observed": 959
+  },
+  "jobs": [
+    {
+      "job_id": "01a1c402-9ca1-79d8-e114-5af7c2ef343d",
+      "original_host": "sille",
+      "original_submitted_at": "2026-11-10T05:51:07.827471Z",
+      "original_started_at": "2026-11-11T17:52:08.278953Z",
+      "original_deadline": "2026-11-11T20:52:08.278953Z",
+      "original_attempt_count": 1,
+      "original_cycle": 0,
+      "original_failure_kind": "infrastructure",
+      "original_failure_code": "evaluation_time_budget_exhausted",
+      "original_native_run_id": "97c094e7476c70b8a40cf16c5c3c3c929a11b0ff64195296a819d56f3e278497",
+      "static_native_execution_started": true,
+      "static_native_exit_code": 0,
+      "static_native_cleanup_verified": true,
+      "diagnosis": "Native measurements completed; coordinator retention/completion did not finish inside the original deadline."
+    },
+    {
+      "job_id": "01a1c4af-c928-3e6a-d183-6c9f319cc119",
+      "original_host": "goofe",
+      "original_submitted_at": "2026-11-10T09:00:17.014991Z",
+      "original_started_at": "2026-11-11T20:52:17.050115Z",
+      "original_deadline": "2026-11-11T23:52:17.050115Z",
+      "original_attempt_count": 1,
+      "original_cycle": 0,
+      "original_failure_kind": "infrastructure",
+      "original_failure_code": "evaluation_time_budget_exhausted",
+      "original_native_run_id": "ce04036ce8d21253cdb1345b305baa8e3550469c3e0890f12355744740dcfd04",
+      "static_native_execution_started": false,
+      "static_native_exit_code": -1,
+      "static_native_cleanup_verified": true,
+      "diagnosis": "Legacy prelaunch infrastructure failure; candidate execution never started and approved closure completed.",
+      "closure_evidence": "EPOCH2-GOOFE-RESTORED-2026-11-12.md"
+    }
+  ],
+  "constraints": {
+    "single_recovery_cycle_per_job": true,
+    "recovery_budget_seconds": 10800,
+    "fresh_cycle_clock_only_from_authorized_database_claim": true,
+    "original_failure_and_original_clock_history_preserved": true,
+    "same_job_submission_patch_principals_and_fifo_tie_order": true,
+    "no_additional_submission_fee": true,
+    "frozen_source_shared_baseline_scoring_and_evaluator_image_unchanged": true,
+    "new_cycle_and_fences_must_reject_stale_results": true,
+    "requires_qualified_versioned_distributed_authority": true,
+    "requires_positive_closure_and_all_host_idle_fencing": true,
+    "static_observations_not_substitutes_for_fresh_signed_grant_evidence": true,
+    "no_active_attempt_interruption": true
+  },
+  "request_only_not_a_database_grant": true,
+  "implementation_and_deployment_requirements_pending": true,
+  "retries_queued": false
+}

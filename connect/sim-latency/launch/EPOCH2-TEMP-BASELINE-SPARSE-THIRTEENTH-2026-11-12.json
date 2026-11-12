@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "kind": "approved-reversible-temporary-baseline-cleanup/v1",
+  "approval": "Existing approval for clean versioned baseline copies in completed temporary test checkouts.",
+  "checkouts": [
+    {
+      "temporary_checkout": "/home/by/urnetwork/temp/server-evaluator-audit.7Z5IfB",
+      "retained_commit": "6775a29473f35e86c609a91884bb800007c83bb4",
+      "source_changes_manifest_sha256_before_and_after": "20c077fc9a7a63469d70f88230cf162450ed1189c9f24a0aa973af72c10c97e2",
+      "restore_command": "git -C /home/by/urnetwork/temp/server-evaluator-audit.7Z5IfB sparse-checkout disable"
+    },
+    {
+      "temporary_checkout": "/home/by/urnetwork/temp/server-g5-classifier-harness.nrLyAJ",
+      "retained_commit": "90b64ae86c0640620d89dcf9ecc8f7525a295ce6",
+      "source_changes_manifest_sha256_before_and_after": "47b1bb6faec77bbe7bbaa5edd945b9b2c189828ce8db0d428de061f9b74b1382",
+      "restore_command": "git -C /home/by/urnetwork/temp/server-g5-classifier-harness.nrLyAJ sparse-checkout disable"
+    },
+    {
+      "temporary_checkout": "/home/by/urnetwork/temp/h1-byte-pacing-reference-20261028.sv804F/server",
+      "retained_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
+      "source_changes_manifest_sha256_before_and_after": "5d6453bae64e46823efc637176e64a5dabe45352e84d574f654d8735fbf2c20f",
+      "restore_command": "git -C /home/by/urnetwork/temp/h1-byte-pacing-reference-20261028.sv804F/server sparse-checkout disable"
+    }
+  ],
+  "excluded_subtree": "connect/sim-latency/baseline",
+  "baseline_tracked_files_clean": true,
+  "no_untracked_or_ignored_files_in_excluded_subtree": true,
+  "no_active_process_cwd_reference": true,
+  "process_command_scan_only_matched_its_observer": true,
+  "previous_worktree_sparse_pattern_files_absent": true,
+  "unstaged_staged_and_untracked_source_changes_preserved": true,
+  "canonical_baseline_git_objects_logs_and_patches_preserved": true,
+  "compiler_caches_failed_job_evidence_and_active_runtimes_untouched": true,
+  "root_available_bytes_after": 38367883264
+}
