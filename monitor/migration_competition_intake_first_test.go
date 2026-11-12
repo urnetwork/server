@@ -17,6 +17,71 @@ func competitionIntakeFirstCatalogTestQuery(t testing.TB) string {
 	return snMainnetMigrationProbePrefix(t) + "SELECT " + competitionIntakeFirstArtifactQuery()
 }
 
+// Every replacement is a reviewed intake-lineage successor. Post-close
+// recovery is a separate lineage which joins only in the final composite.
+// Do not follow an arbitrary registered retirement or waive an old predicate.
+func competitionIntakeFirstCatalogTestPredicateAt(t testing.TB, head int) string {
+	t.Helper()
+	query := competitionIntakeFirstArtifactQuery()
+	previous := server.CompetitionIntakeFirstMigrationVersion()
+	if previous == 0 {
+		return query
+	}
+	for _, successor := range []snMainnetMigrationContract{
+		competitionReviewHandoffMigrationContract,
+		competitionOfficialReviewMigrationContract,
+		competitionExecutorControlAmendmentMigrationContract,
+		competitionExecutorQualificationRecoveryMigrationContract,
+		competitionExecutorAdmissionExceptionMigrationContract,
+		competitionExecutorAdmissionClaimMigrationContract,
+		competitionDistributedReevaluationMigrationContract,
+	} {
+		version := successor.artifact.requiredVersion
+		prior := migrationCurrentSuffixTestContract(t, previous)
+		registered := migrationCurrentSuffixTestContract(t, version)
+		if version <= previous || prior.artifact.removedVersion != version || registered.query != successor.query {
+			t.Fatal("intake catalog has an unreviewed successor or changed registered predicate", previous, version)
+		}
+		if version <= head {
+			query = successor.query
+		}
+		previous = version
+	}
+	if migrationCurrentSuffixTestContract(t, previous).artifact.removedVersion != 0 {
+		t.Fatal("intake catalog final owner has an unreviewed successor")
+	}
+	return query
+}
+
+// The old fixture stopped at AdmissionException and therefore rejected a
+// coherent Claim/current schema. Exact-byte boundary controls fail before a
+// database opens if either known successor is accidentally omitted again.
+func TestMigrationsCompetitionIntakeFirstCatalogSelectsExactPublishedOwner(t *testing.T) {
+	owners := []snMainnetMigrationContract{
+		migrationCurrentSuffixTestContract(t, server.CompetitionIntakeFirstMigrationVersion()),
+		competitionReviewHandoffMigrationContract,
+		competitionOfficialReviewMigrationContract,
+		competitionExecutorControlAmendmentMigrationContract,
+		competitionExecutorQualificationRecoveryMigrationContract,
+		competitionExecutorAdmissionExceptionMigrationContract,
+		competitionExecutorAdmissionClaimMigrationContract,
+		competitionDistributedReevaluationMigrationContract,
+	}
+	for index, owner := range owners {
+		heads := []int{owner.artifact.requiredVersion}
+		if index+1 < len(owners) {
+			heads = append(heads, owners[index+1].artifact.requiredVersion-1)
+		} else {
+			heads = append(heads, owner.artifact.requiredVersion+1, server.MigrationCount())
+		}
+		for _, head := range heads {
+			if query := competitionIntakeFirstCatalogTestPredicateAt(t, head); query != owner.query {
+				t.Fatal("intake catalog selected an obsolete/future body at the wrong boundary", head, owner.artifact.requiredVersion)
+			}
+		}
+	}
+}
+
 // Removing the prefix deterministically loses index_artifact before a fault
 // can be tested, even when the complete deployed schema is healthy.
 func TestMigrationsCompetitionIntakeFirstCatalogQueryRetainsNativePrefix(t *testing.T) {
@@ -73,24 +138,11 @@ func TestMigrationsCompetitionIntakeFirstActualCatalogFaults(t *testing.T) {
 		if server.CompetitionIntakeFirstMigrationVersion() == 0 {
 			server.Tx(ctx, func(tx server.PgTx) { server.RaisePgResult(tx.Exec(ctx, server.CompetitionIntakeFirstMigrationSql())) }, server.OptReadWrite())
 		}
-		query := competitionIntakeFirstCatalogTestQuery(tb)
-		// The review handoff re-created three winner-review bodies this custody
-		// pins, the official review two of those and the review identity body,
-		// the executor control amendment the equivalence guard and the grading
-		// readiness, the qualification recovery the equivalence guard again,
-		// and the admission exception the whole-host readiness. Each carries the
-		// rest of its predecessor on, so at the head the intake custody is the
-		// latest of them that applied.
-		for _, successor := range []snMainnetMigrationContract{
-			competitionReviewHandoffMigrationContract,
-			competitionOfficialReviewMigrationContract,
-			competitionExecutorControlAmendmentMigrationContract,
-			competitionExecutorQualificationRecoveryMigrationContract,
-			competitionExecutorAdmissionExceptionMigrationContract,
-		} {
-			if version := successor.artifact.requiredVersion; version != 0 && version <= actualHead {
-				query = snMainnetMigrationProbePrefix(tb) + "SELECT " + successor.query
-			}
+		query := snMainnetMigrationProbePrefix(tb) + "SELECT " + competitionIntakeFirstCatalogTestPredicateAt(tb, actualHead)
+		// This is one complete source-owned predicate, not the whole census.
+		// Refuse an oversized successor instead of recreating unbounded planning.
+		if len(query) > DefaultMigrationCensusSettings().MaximumStatementBytes {
+			tb.Fatal("direct intake catalog predicate exceeds bounded statement admission")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var healthy bool
