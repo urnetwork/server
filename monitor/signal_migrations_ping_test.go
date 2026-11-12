@@ -198,10 +198,16 @@ func TestMigrationPingQueryPinsExactShapes(t *testing.T) {
 type migrationPingDatabaseSource struct {
 	syntheticSource
 	artifactRow Row
+	// Direct full-query parity readers must not fall back to one giant SQL
+	// statement if a future fixture change accidentally drops the marker.
+	requireCensusOwnership bool
 }
 
 // Implements SignalSource on the test database, rendering values as psql does.
 func (self *migrationPingDatabaseSource) PostgreSQL(ctx context.Context, query string) ([]Row, error) {
+	if self.requireCensusOwnership && migrationCensusFromContext(ctx) == nil {
+		return nil, fmt.Errorf("native migration parity fixture requires an owned census observation")
+	}
 	rows := []Row{}
 	var queryErr error
 	server.Db(ctx, func(conn server.PgConn) {
