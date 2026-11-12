@@ -72,6 +72,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urfoundation/sn/amendment"
 	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/miner/onchain"
 )
@@ -186,7 +187,8 @@ type SnClaimRelayStatus struct {
 	// the floor go with any of its accounts that is due.
 	Batching bool `json:"batching,omitempty"`
 	// UnavailablePools are the operator's pools whose ledger the pass could not
-	// read while it claimed the others, by no_id: their accounts wait. A pass
+	// read while it claimed the others, by no_id: at its ledger read, or for a
+	// capture the flag pool at a claim's proof. Their accounts wait. A pass
 	// that could read no pool with a finalized root ends ledger_unavailable
 	// with none named here, as before the capture the flag pool, and the api
 	// pauses every pool.
@@ -896,6 +898,10 @@ func (self *snClaimRelay) verify(ctx context.Context, chain snClaimRelayChain, g
 		if refusal := status.Refusals[account.key()]; refusal != nil && now.Before(refusal.Until) {
 			continue
 		}
+		if slices.Contains(status.UnavailablePools, account.NoId) {
+			// its pool's tree could not be read earlier in this pass
+			continue
+		}
 		*preflights += 1
 		claimed, err := chain.Claimed(ctx, account)
 		if err != nil {
@@ -919,6 +925,14 @@ func (self *snClaimRelay) verify(ctx context.Context, chain snClaimRelayChain, g
 		}
 		claim.Proof, err = self.ledger.Proof(ctx, &read)
 		if err != nil {
+			if _, ctfPool := amendment.CtfNoID(account.NoId); ctfPool {
+				// A capture the flag pool whose tree cannot be read now waits
+				// as one the ledger read could not read: the operator's pool
+				// is still claimed, and its accounts read on the api as they
+				// would without that pool (owner, 2026-11-11).
+				snClaimRelayPoolUnavailable(status, account.NoId, err)
+				continue
+			}
 			status.State, status.Detail = SnClaimRelayStateLedgerUnavailable, err.Error()
 			return nil, false, true
 		}
@@ -1026,6 +1040,20 @@ func (self *snClaimRelay) transaction(ctx context.Context, chain snClaimRelayCha
 		claim.UnderThreshold = !over(claim) && !withDue
 	}
 	return send
+}
+
+// snClaimRelayPoolUnavailable names a pool whose tree the pass could not read
+// after its ledger read, as that read names the pools it could not read: the
+// pool's accounts wait, a request with one of them stays, and the pass claims
+// the other pools.
+func snClaimRelayPoolUnavailable(status *SnClaimRelayStatus, noId uint64, err error) {
+	if slices.Contains(status.UnavailablePools, noId) {
+		return
+	}
+	glog.Infof("[sn]claim relay pool %d is unavailable this pass: %s; the others are claimed\n", noId, err)
+	status.UnavailablePools = append(slices.Clone(status.UnavailablePools), noId)
+	slices.Sort(status.UnavailablePools)
+	status.PoolsUnavailable += 1
 }
 
 func (self *snClaimRelay) refuse(account *snClaimRelayAccount, reason string, now time.Time, wait time.Duration, status *SnClaimRelayStatus) {
