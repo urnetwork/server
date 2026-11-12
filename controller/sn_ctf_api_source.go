@@ -40,11 +40,15 @@ func newSnCtfCoreSource() (snCtfSource, error) {
 	return &snCtfCoreSource{cfg: cfg}, nil
 }
 
-// snCtfCarryOf is the carry contract the answers name: the driver's, from the
-// signed amendment entry in force or its configuration. Without one the routes
-// are unavailable.
+// snCtfCarryOf is the carry contract the answers name: the capture the flag
+// driver's (st.yml ctf.carry_address, which live mode requires to equal the
+// signed amendment entry's carry). While the driver is off or names none, the
+// routes are unavailable. Tests replace it.
 var snCtfCarryOf = func(ctx context.Context, cfg *StConfig, epoch uint64) (common.Address, error) {
-	return common.Address{}, errSnCtfNotConfigured
+	if !cfg.Ctf.On() || cfg.Ctf.CarryAddress == (common.Address{}) {
+		return common.Address{}, errSnCtfNotConfigured
+	}
+	return cfg.Ctf.CarryAddress, nil
 }
 
 type snCtfPoolRegistration struct {
