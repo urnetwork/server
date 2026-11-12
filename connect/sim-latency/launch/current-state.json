@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T04:44:51.797909+00:00",
+  "observed_at": "2026-11-12T06:18:26.971033Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -21,23 +21,33 @@
     "publication_held": false
   },
   "queue": {
-    "succeeded": 7,
+    "succeeded": 9,
     "failed": 2,
-    "queued": 7,
+    "queued": 5,
     "running": 2
   },
   "active_attempts": [
     {
-      "job_id": "01a1c7bf-ae3b-76f3-dee7-e60d2f77c90c",
+      "job_id": "01a1ca08-d3c6-0e22-3ccf-fd6da35bc356",
       "host_id": "goofe",
-      "started_at": "2026-11-12T03:40:44.712434",
-      "deadline": "2026-11-12T06:40:44.712434"
+      "started_at": "2026-11-12T05:31:38.724108",
+      "deadline": "2026-11-12T08:31:38.724108",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 4,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T05:52:29.860826Z",
+      "native_process_verified_live": true,
+      "reattachment_verified": false
     },
     {
-      "job_id": "01a1c88c-5f36-c222-3ec0-668fe393050f",
+      "job_id": "01a1ca5d-8d1f-3a64-6356-0dfeacf43557",
       "host_id": "sille",
-      "started_at": "2026-11-12T04:08:45.761115",
-      "deadline": "2026-11-12T07:08:45.761115"
+      "started_at": "2026-11-12T05:52:24.10429",
+      "deadline": "2026-11-12T08:52:24.10429",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 1,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T06:15:17.173607Z",
+      "native_process_verified_live": true,
+      "reattachment_verified": false
     }
   ],
   "live_worker": {
@@ -73,12 +83,31 @@
     "source_baseline_scoring_and_evaluator_image_unchanged": true,
     "native_agent_retirement_fix_not_activated": true
   },
+  "approved_failed_job_retries": {
+    "approval": "EPOCH2-DISTRIBUTED-RETRY-APPROVAL-2026-11-12.json",
+    "jobs": ["01a1c402-9ca1-79d8-e114-5af7c2ef343d", "01a1c4af-c928-3e6a-d183-6c9f319cc119"],
+    "user_authorized": true,
+    "request_is_not_a_database_grant": true,
+    "implementation_and_deployment_pending": true,
+    "queued": false,
+    "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
+    "frozen_server_commit": "fdd92e7b6acb5587b22531c591ecceff8fd3ae6e",
+    "frozen_sn_commit": "ac7309bdc4beb959105ae60f2f43bfe0b5e06a6b",
+    "qualification": {
+      "status": "corrected_dependency_attempt_authorized_not_yet_verified_running",
+      "previous_attempt": "setup_failure_zero_tests_missing_tracked_sn_packages",
+      "previous_evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.2IZI2TQU",
+      "previous_controller_log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071",
+      "server_source_unchanged_by_dependency_correction": true,
+      "live_and_product_checkouts_unchanged": true
+    }
+  },
   "pending_authorizations": [
     "Claim-only maintenance window for the independently verified combined worker; otherwise retain the previously approved empty-queue boundary.",
-    "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted.",
-    "Two old infrastructure failures require separately authorized controlled recovery; do not create fresh attempt clocks implicitly."
+    "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted."
   ],
   "next_actions": [
+    "Implement and qualify the newly user-approved distributed recovery authority for the two failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence.",
     "Monitor both exact active jobs and live readiness; investigate new failures from retained evidence.",
     "After authorized drain and positively verified global idle, activate only the receipt-pinned staged worker, verify its actual runtime identity and unchanged execution inputs, then resume claims.",
     "Do not change frozen product source, shared baseline, scoring rules, evaluator image or any original attempt deadline."
