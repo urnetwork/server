@@ -405,20 +405,7 @@ func adoptConfigRunUnder(signedGenesis []byte, restoredHead *bridge.AuthPin, upl
 		return nil, fmt.Errorf("%w: %w", ErrConfigReseedRunRefused, err)
 	}
 	adoption.state = state
-	for _, entryBytes := range adoption.Entries {
-		entry := &bridge.AuthEntry{}
-		if proto.Unmarshal(entryBytes, entry) != nil || entry.GetKind() != bridge.AuthEntryKindBase {
-			continue
-		}
-		signed := &bridge.Signed{}
-		header := &bridge.ProjectionHeader{}
-		if proto.Unmarshal(entry.GetBody(), signed) != nil || proto.Unmarshal(signed.GetBody(), header) != nil {
-			continue
-		}
-		if rowsBytes, found := rows[[sha256.Size]byte(header.GetRowsSha256())]; found && len(header.GetRowsSha256()) == sha256.Size {
-			adoption.Rows[[sha256.Size]byte(header.GetRowsSha256())] = rowsBytes
-		}
-	}
+	adoption.Rows = configReseedBaseRows(adoption.Entries, rows)
 
 	if restoredHead != nil && 0 < restoredHead.GetVersion() {
 		switch {
@@ -429,6 +416,33 @@ func adoptConfigRunUnder(signedGenesis []byte, restoredHead *bridge.AuthPin, upl
 		}
 	}
 	return adoption, nil
+}
+
+// The rows the bases among entries name, from rows by rows_sha256. A base
+// whose rows_sha256 is not a digest names none.
+func configReseedBaseRows(entries [][]byte, rows map[[sha256.Size]byte][]byte) map[[sha256.Size]byte][]byte {
+	baseRows := map[[sha256.Size]byte][]byte{}
+	for _, entryBytes := range entries {
+		entry := &bridge.AuthEntry{}
+		if proto.Unmarshal(entryBytes, entry) != nil || entry.GetKind() != bridge.AuthEntryKindBase {
+			continue
+		}
+		signed := &bridge.Signed{}
+		header := &bridge.ProjectionHeader{}
+		if proto.Unmarshal(entry.GetBody(), signed) != nil || proto.Unmarshal(signed.GetBody(), header) != nil {
+			continue
+		}
+		// the length first, since converting a shorter slice to the array
+		// panics
+		if len(header.GetRowsSha256()) != sha256.Size {
+			continue
+		}
+		rowsSha256 := [sha256.Size]byte(header.GetRowsSha256())
+		if rowsBytes, found := rows[rowsSha256]; found {
+			baseRows[rowsSha256] = rowsBytes
+		}
+	}
+	return baseRows
 }
 
 // Whether the newest adopted base names a config head on the walk from C_0
