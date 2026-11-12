@@ -5240,8 +5240,28 @@ type ClientScore struct {
 	ScaledWeights  map[string]float32
 	PassesMinimums map[string]bool
 
+	// The capabilities the URL evidence took away (FP2-PROTOCOL.md §4.3):
+	// ClientScoreCapabilityDowngradeIpv6 and ClientScoreCapabilityDowngradeUdp.
+	// Zero, as every entry an older exporter wrote decodes, is no downgrade,
+	// for the same gob reason as NetworkOnly. The score in today's facets
+	// carries it with the strict decision's buckets, which legacy readers
+	// read; the classified copy in a capability facet carries it with the
+	// classified decision's (capabilityCopy). Selector-mode FindProviders2
+	// skips a downgraded record in today's facets and labels every record by
+	// it (CapabilityLabels).
+	CapabilityDowngrades uint8
+	// The newest post-quantum outcome of the URL probe in the eight-hour
+	// window is positive (FP2-PROTOCOL.md §12.4). Strict post-quantum
+	// requests read it once client_score_post_quantum_v1_ready is set; the
+	// zero value, as every older entry decodes, is not post-quantum.
+	PostQuantumPositive bool
+
 	// Performance-only score for sampling weights. It never changes admission.
 	minimumScores map[string]int
+	// The export's classified copy of a downgraded provider's score, written
+	// only to the capability facets (FP2-PROTOCOL.md §4.4); nil for a
+	// provider that is not downgraded. Unexported, so never encoded.
+	capabilityCopy *ClientScore
 }
 
 type ClientFilter struct {

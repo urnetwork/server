@@ -831,12 +831,53 @@ func (self providerCountFilter) egressFacts(
 	egressQuality *bool,
 	settings *EgressIndexSettings,
 ) *providerEgressFacts {
+	// Read accepted health directly so an old rollup cannot extend freshness.
+	counts, ok := self.healthCounts[clientId]
+	return self.egressFactsWithCounts(clientId, rollupCountryCode, egressIndex, egressQuality, settings, counts, ok)
+}
+
+// The facts the classified decision reads (FP2-PROTOCOL.md §3.4): the
+// provider's facts with the window counts its classification gives, in
+// which the runs its class forgives are passes. Every other fact, the
+// country guard the strict decision published among them, is unchanged, so
+// a provider that is not downgraded gets exactly its strict facts.
+func (self providerCountFilter) classifiedEgressFacts(
+	clientId server.Id,
+	rollupCountryCode *string,
+	egressIndex *int,
+	egressQuality *bool,
+	settings *EgressIndexSettings,
+	classification providerCapabilityClassification,
+) *providerEgressFacts {
+	counts, ok := self.healthCounts[clientId]
+	if ok {
+		counts = classification.classifiedCounts(counts)
+	}
+	return self.egressFactsWithCounts(clientId, rollupCountryCode, egressIndex, egressQuality, settings, counts, ok)
+}
+
+// The provider's facts with the window counts given: hasCounts false for a
+// provider without accepted outcomes in the window.
+func (self providerCountFilter) egressFactsWithCounts(
+	clientId server.Id,
+	rollupCountryCode *string,
+	egressIndex *int,
+	egressQuality *bool,
+	settings *EgressIndexSettings,
+	counts ProviderEgressHealthCounts,
+	hasCounts bool,
+) *providerEgressFacts {
 	publishedCountryCode := normalizeCountryCode(rollupCountryCode)
 	observedCountryCode := self.countryCodes[clientId]
-	// Read accepted health directly so an old rollup cannot extend freshness.
-	counts, urlIndex := self.urlIndex(clientId, settings)
+	urlIndex := EgressIndex{}
 	// the Online rule decides by the general catalog's outcomes alone
-	onlineCounts, onlineUrlIndex := self.onlineUrlIndex(clientId, settings)
+	onlineCounts := counts
+	onlineUrlIndex := EgressIndex{}
+	if hasCounts {
+		urlIndex = ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, self.now, settings)
+		onlineCounts = counts.onlineCounts()
+		onlineUrlIndex = ComputeEgressIndex(&EgressHealthRun{MeasuredAt: onlineCounts.MeasuredAt, OkCount: onlineCounts.OKCount, Total: onlineCounts.Total}, self.now, settings)
+	}
 	return &providerEgressFacts{
 		arinRisk:                self.arinRisk[clientId],
 		arinNonQuality:          self.arinNonQuality[clientId],
