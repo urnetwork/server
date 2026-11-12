@@ -93,6 +93,65 @@ func TestGateRowRunsItsCommands(t *testing.T) {
 	}
 }
 
+// A store_clock row says beside its outcome that its T3 run's ages were translated, and its outcome is its tests'
+// as any row's; one that is not says nothing of it. gates.yml carries the flag from catalog.yml for every case the
+// catalog flags.
+func TestAStoreClockRowSaysItsTimeWasTranslated(t *testing.T) {
+	gates := `gates:
+  M2:
+    - row: FS-59
+      tests:
+        - {repo: fixture, package: ./widget, names: [TestPasses]}
+      store_clock: true
+    - row: FS-2
+      tests:
+        - {repo: fixture, package: ./widget, names: [TestPasses]}
+`
+	options := writeGateFixture(t, gates, "ids: {}\n")
+	options.gate = "M2"
+	report, err := runGate(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range report.rows {
+		said := slices.Contains(result.details, gateStoreClockDetail)
+		switch result.label {
+		case "FS-59":
+			if !said || result.outcome != gatePass {
+				t.Errorf("FS-59: %s, %q", result.outcome, result.details)
+			}
+		case "FS-2":
+			if said || result.outcome != gatePass {
+				t.Errorf("FS-2: %s, %q", result.outcome, result.details)
+			}
+		}
+	}
+	committed := &gatesFile{}
+	data, err := os.ReadFile("gates.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, committed); err != nil {
+		t.Fatal(err)
+	}
+	flagged := 0
+	for _, row := range committed.Gates["M2"] {
+		testCase := fault.DefaultCatalog().Case(row.Row, row.Case)
+		if row.Row == "" || testCase == nil {
+			continue
+		}
+		if row.StoreClock != testCase.StoreClock {
+			t.Errorf("gates.yml's %s says store_clock %t", testCase, row.StoreClock)
+		}
+		if row.StoreClock {
+			flagged += 1
+		}
+	}
+	if flagged == 0 {
+		t.Error("no M2 row of gates.yml is store_clock")
+	}
+}
+
 // An entry review is no Gn-out: it runs its own rows and neither FS-55's every rows nor FS-54.
 func TestAnEntryGateRunsNoGnOutRows(t *testing.T) {
 	gates := strings.Replace(fixtureGates, "  every:", "  M2-in:\n    - row: FS-46\n      tests:\n        - {repo: fixture, package: ./widget, names: [TestPasses]}\n  every:", 1)

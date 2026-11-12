@@ -12,8 +12,9 @@
 # and pass on exit 0, or read the outcome a last "sidecar-gate outcome: <outcome>" line names, a nonzero exit still
 # failing. A row with nothing to run is missing. external says what outside the build (hardware,
 # production, people) the row also waits on, or the later gate a later-of case passes at, and reads open.
-# A case's T2 test is TestFs<n><Case> in sidecar's sidecartest/fault and its T3 test TestFs<n><Case>OnT3 in
-# server's sidecart3, by convention, so this file does not change as rows land.
+# store_clock: true says the case's T3 run reads stored ages through T3's store clock (QD-264), which the report
+# names beside its outcome. A case's T2 test is TestFs<n><Case> in sidecar's sidecartest/fault and its T3 test
+# TestFs<n><Case>OnT3 in server's sidecart3, by convention, so this file does not change as rows land.
 gates:
   G0:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
@@ -102,6 +103,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs6]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs6OnT3]}
+      store_clock: true
     - row: FS-7
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs7]}
@@ -110,6 +112,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs8]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs8OnT3]}
+      store_clock: true
     - row: FS-9
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs9]}
@@ -182,6 +185,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs53]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs53OnT3]}
+      store_clock: true
     - row: FS-57
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs57]}
@@ -194,14 +198,17 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs59]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs59OnT3]}
+      store_clock: true
     - row: FS-60
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs60]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs60OnT3]}
+      store_clock: true
     - row: FS-61
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs61]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs61OnT3]}
+      store_clock: true
     - row: FS-62
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs62]}
@@ -225,6 +232,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs95Format1]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs95Format1OnT3]}
+      store_clock: true
     - row: FS-102
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs102]}
@@ -238,6 +246,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs103]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs103OnT3]}
+      store_clock: true
     - row: FS-104
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs104]}
@@ -249,6 +258,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs106]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs106OnT3]}
+      store_clock: true
     - row: FS-113
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs113]}
@@ -389,6 +399,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs106PageWorker]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs106PageWorkerOnT3]}
+      store_clock: true
   M5-in:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
@@ -541,12 +552,14 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs86AnnounceEntries]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs86AnnounceEntriesOnT3]}
+      store_clock: true
     - row: FS-86
       case: cards
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs86Cards]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs86CardsOnT3]}
       external: the later of M6-out and M10-out, where it passes (§23.6)
+      store_clock: true
     - row: FS-87
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs87]}
@@ -612,6 +625,7 @@ gates:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs111TeamRecord]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs111TeamRecordOnT3]}
       external: the later of M6-out and M10-out, where it passes (§23.6)
+      store_clock: true
     - row: FS-122
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs122OnT3]}
@@ -676,6 +690,7 @@ gates:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs111Mailbox]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs111MailboxOnT3]}
       external: the later of M7-out and M10-out, where it passes (§23.6)
+      store_clock: true
     - row: FS-112
       case: mailbox
       tests:
@@ -824,6 +839,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs71]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs71OnT3]}
+      store_clock: true
     - row: FS-72
       case: migration
       tests:
@@ -837,6 +853,7 @@ gates:
     - row: FS-73
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs73OnT3]}
+      store_clock: true
     - row: FS-74
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs74]}
@@ -904,6 +921,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs81]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs81OnT3]}
+      store_clock: true
     - row: FS-83
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs83]}
@@ -928,6 +946,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs86Cards]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs86CardsOnT3]}
+      store_clock: true
     - row: FS-87
       case: index
       tests:
@@ -941,6 +960,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs89]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs89OnT3]}
+      store_clock: true
     - row: FS-90
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs90]}
@@ -949,6 +969,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs91]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs91OnT3]}
+      store_clock: true
     - row: FS-92
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92]}
@@ -1013,16 +1034,19 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs111]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs111OnT3]}
+      store_clock: true
     - row: FS-111
       case: mailbox
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs111Mailbox]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs111MailboxOnT3]}
+      store_clock: true
     - row: FS-111
       case: team-record
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs111TeamRecord]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs111TeamRecordOnT3]}
+      store_clock: true
     - row: FS-112
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs112]}
