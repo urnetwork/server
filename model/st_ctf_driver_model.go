@@ -1,12 +1,13 @@
 package model
 
 // st_ctf_driver_model.go — the capture the flag driver's st_publish kinds (sn
-// CAPTURETHEFLAG.md §3.3, §4.3, §4.6, §11.2). The driver keeps no table of its
+// CAPTURETHEFLAG.md §3.3, §4.3, §4.6, §11.2). The driver has no table of its
 // own: its CTF pool P = 2^32 + n is a vault2 pool, so the event mirror records
-// its funding, roots and demands in the v2 tables under no_id P, its roots'
-// accounts and amounts are recorded there as the provider pool's are, and an
-// epoch's fixed awards object is its st_ledger_v2_epoch_rows record under no_id
-// P, the one reference in provider_chunks (§5, fixed inputs).
+// its funding, roots and demands in the v2 tables under no_id P, and its
+// finalized roots' accounts and amounts are recorded there as the provider
+// pool's are; what it writes for readers (commitments, draws, each epoch's
+// fixed result, ledgers, returned carry) is in the capture the flag tables
+// (ctf_model.go).
 const (
 	// the census commitment, commitCtfCensus
 	StPublishKindCtfCensus = "ctfcensus"
