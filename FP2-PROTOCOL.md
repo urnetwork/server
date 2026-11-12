@@ -7,13 +7,14 @@ Design for peer review. Nothing here is built yet.
 | Status | Ready for peer review: all owner decisions recorded. |
 | Date | 2026-11-12 |
 | Server | origin/main 017d11630; every server file cited is identical at cbb7d7306 |
-| Connect | origin/main fc949b78 |
-| SDK | origin/main b5395b2d; every sdk file cited is identical at 447ed899 |
-| Apps | apple origin/main 6c8daad4, android origin/main eebb05181 (§5.5 only); the files cited are identical at 4254667d and 1820ea290 |
+| Connect | origin/main 885ab442; every connect file cited is identical at fc949b78 |
+| SDK | `feat/fp2-limited-window-1112` 2f945bea, which contains sdk main through dce4ab69; every sdk reference is at 2f945bea |
+| SDK, limited window | branch `feat/fp2-limited-window-1112` 2f945bea, not landed: it lands right after connect's change (§13) |
+| Apps and localizations | android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813, localizations 19b89a4, all on their main (§5.5) |
 
 References are `path:line` at those commits. Paths without a repo prefix are
-in the server repo; `connect/`, `sdk/`, `apple/` and `android/` name the
-other repos.
+in the server repo; `connect/`, `sdk/`, `android/`, `apple/`, `windows/`,
+`linux/` and `localizations/` name the other repos.
 
 ## Terms
 
@@ -64,8 +65,9 @@ other repos.
   `dualstack`.
 - A new limited window holds `tcp` providers. Its clients join the race of
   every flow they can carry.
-  - Size: half the largest normal window's target, at least 1 (D8). On mobile
-    it is 1 if the memory gate fails (D11.5).
+  - Size: half the largest normal window's target, at least 1 (D8). On a
+    low-memory device (iOS, Android, a hosted proxy) it is bounded at 1 if the
+    memory gate fails (D11.5).
   - Rank mode: the performance profile's, `quality` in auto (D10).
 - The provider status tells a downgraded provider why (D11.6).
 - Connect's shipped local IPv6 downgrade (B5) is retired. Placement uses
@@ -655,28 +657,59 @@ The provider status already reports URL checks as the ranking item
 `url_checks` (model/provider_status_model.go:966-981), decided by the strict
 rule (:777). The item keeps its value, count, total and `passes` as today.
 
-For a downgraded provider, the item gains a `reason` field (string,
-omitempty), and its `explanation` appends the same text. There is one
-sentence per dropped capability:
+**The fields.** A downgraded provider's item gains three fields. All are
+omitempty, and all are also carried in the compact form.
 
-| Label | Reason |
+| Field | Type | Value |
+|---|---|---|
+| `reason` | string | The server's English sentences, one per dropped capability, the `tcp` one first. `explanation` ends with the same text. |
+| `reason_tcp_count` | int | The runs in the window with `failed_later_legs & 5`: an HTTP/3 leg judged the provider's. Set exactly when the `tcp` sentence is in `reason`. |
+| `reason_ipv4_count` | int | The runs with `failed_later_legs & 6`: an IPv6 leg judged the provider's. Set exactly when the `ipv4` sentence is in `reason`. |
+
+**The sentences:**
+
+| Label | Sentence |
 |---|---|
 | `tcp` | "%d of these checks failed only over HTTP/3 (UDP), so this device is offered for TCP traffic only. Some app builds and some networks do not route UDP." |
 | `ipv4` | "%d of these checks failed only over IPv6, so this device is offered for IPv4 traffic only." |
 
-- **Counts:** the provider's `negative_udp` and `negative_ip` over the window
-  (§4.2).
+- **Counts.** The IPv4 count reads mask & 6, not §4.2's `negative_ip` (mask
+  & 2). A dual-stack provider classed B by mask-4 runs alone would otherwise
+  read "0 of these checks".
 - **Labels:** the same classification as the export (§3.3), computed for the
   one provider.
-- **Apps:**
-  - Android already shows the explanation
-    (android/app/app/src/main/java/com/bringyour/network/ui/stats/ProviderStatusPresentation.kt:121),
-    so old Android builds show the reason too.
-  - The Apple app shows its own help text for this item
-    (apple/app/network/Shared/ViewModels/ProviderStatusPresentation.swift:251-262).
-    It gains one line for `reason`.
-  - The sdk's `ProviderRankingNumber` (sdk/api.go:3360-3371) carries the new
-    field.
+- **sdk** (on main at dce4ab69):
+  - `ProviderRankingNumber` gains `Reason`, `ReasonTcpCount`,
+    `ReasonIpv4Count` and `ReasonLines` (sdk/api.go:3379-3390).
+  - `ProviderStatusReasonLine{Label, Count, Text}`
+    (sdk/provider_status_reason.go:28) has the labels `tcp`, `ipv4` and
+    `text`.
+  - Its `UnmarshalJSON` (:56) derives the lines: `tcp`, then `ipv4`, each
+    when its count is at least 1. Otherwise it gives one `text` line with the
+    English reason.
+  - The C ABI exposes `urnet::ProviderRankingNumber::reason_lines`.
+- **Localizations** (19b89a4): plural keys `provider_status_reason_line_tcp`
+  and `provider_status_reason_line_ipv4` in all 28 locales
+  (localizations/keys/provider_status_reason_line_tcp.yaml and
+  `_ipv4.yaml`).
+- **Apps.** Every app shows its own localized help line for this item, so all
+  four needed code, and no old build shows the reason. `explanation` is only
+  a debug or accessibility fallback.
+  - **android** (130ed4526):
+    android/app/app/src/main/java/com/bringyour/network/ui/stats/ProviderStatusPresentation.kt:43, 401, 414, 536
+    and
+    android/app/app/src/main/java/com/bringyour/network/ui/stats/ProviderDemandChart.kt:357.
+  - **apple** (e1c3cfac):
+    apple/app/network/Shared/ViewModels/ProviderStatusPresentation.swift:203, 232, 238,
+    apple/app/network/Shared/ViewModels/ProviderStatusStore.swift:270, and
+    apple/app/network/Main/Account/Earnings/ProviderDemandSection.swift:175.
+  - **windows** (93af2d51):
+    windows/app/src/App/ProviderStatusPresentation.h:260, 315, 409 and
+    windows/app/src/App/WalletPage.cpp:510, 6105.
+  - **linux** (ff3a813): linux/app/src/ProviderStatusPresentation.hpp:261,
+    411, 527 and linux/app/src/EarningsPage.cpp:513, 570, 8229.
+- **Servers.** Older servers omit the fields, so the reason shows only after
+  the server deploy that adds them (§10 step 3).
 
 ## 6. Server selection algorithm
 
@@ -907,8 +940,10 @@ state changes a label between FP2 answers.
 | Target | `max(1, floor(f × S))` for f > 0. S is the largest current target among the active normal windows, the `targetWindowSize` each window's resize pass computes (:14399-14425). In a fixed profile the inactive window's target is 0. f ≤ 0: no limited window. |
 | Hard max | `max(1, floor(f × the largest normal hard max))` |
 | Desktop auto | normal targets 6 (quality) and 1 (speed; max 2): S = 6, limited 3 |
-| Mobile auto | normal 4 and 1 (sdk/mobile_memory_policy.go:237-238): S = 4, limited 2. If the memory gate fails, 1 (D11.5). |
-| Mobile memory gate | The steady-memory test of §9 decides. If the device stays within its 24 MiB target with the limited window at 2, mobile uses 2; otherwise the mobile policy sizes it at 1 (D11.5). Desktop is unaffected. |
+| iOS and hosted proxies (32 MiB memory target) | normal windows scale with the target (sdk/mobile_memory_policy.go:237-238, 292-299): quality 5, speed 1, so S = 5 and the limited window is 2 |
+| Android (64 MiB) | quality 10, speed 2, so S = 10 and the limited window is 5 |
+| Low-memory bound (D11.5) | `MultiClientSettings.LimitedWindowSizeMax` caps the limited window; 0 means no bound. The sdk feeds it from its unexported `DeviceLocalSettings.lowMemoryLimitedWindowSizeMax` (sdk/device_local.go:735, default 0 at :411), through `applyMobileLimitedWindowSettingsForPlatform` (sdk/mobile_memory_policy.go:590, called at sdk/device_local.go:5536). It applies on low-memory devices only: iOS, Android and hosted proxies. A fraction alone cannot give D11.5's 1 on Android. |
+| Memory gate | Steady memory is measured on the iOS and Android nightlies with every window full, before the stable release. If either is over its target, the bound is set to 1 at sdk/device_local.go:411. Until then the gate counts as not failed: no bound. Desktop is unaffected. |
 | Fixed profile of size N | `max(1, floor(N/2))` |
 | Fixed destination | none: the fixed exit carries every flow |
 | Fill and refill | its own `resize` loop (:13895) and `expand` (:14845), like a normal window. Each request carries `target_count` (its target), `held_count` (its `tcp` clients) and `dualstack_target_count` 0. There is no IPv6 need. |
@@ -991,7 +1026,7 @@ state changes a label between FP2 answers.
   | Flow with no compatible client | Answer |
   |---|---|
   | UDP (IPv4 or IPv6) | ICMP port unreachable (`ipOosUnreachable`, connect/ip_packet.go:157). QUIC stacks fall back to TCP at once. Counted (`udpNoRouteCount`). |
-  | IPv6 TCP or ICMP | today's B6 no-route (:8721-8733) and the interceptor's empty AAAA (`SetIpv6Unroutable`, sdk/device_local.go:5611), now decided from IP labels |
+  | IPv6 TCP or ICMP | today's B6 no-route (:8721-8733) and the interceptor's empty AAAA (`SetIpv6Unroutable`, sdk/device_local.go:5651), now decided from IP labels |
   | IPv4 TCP or ICMP | every client is compatible, so this happens only with no client at all: today's wait and retry |
 
 - `UdpUnroutable()` mirrors `Ipv6Unroutable()`
@@ -1000,22 +1035,29 @@ state changes a label between FP2 answers.
 
 ### 7.8 sdk and apps
 
-- **Window status** (sdk/device.go:425-429; sdk/device_local.go:5776) gains:
-  - `UdpAvailable`, beside `Ipv6Available`;
-  - `LimitedWindowSize`.
-- **Mobile memory policy** (sdk/mobile_memory_policy.go:544-558) keeps the
-  normal sizes. The limited window follows the fraction, giving 2 on mobile.
-  If the steady-memory test fails, the policy sizes it at 1 (D11.5).
-- **Developer menu:** `LimitedWindowSizeFraction` is exposed beside the
-  reliability controls (sdk/reliability_controls.go) for testing.
-- **Provider status (D11.6):**
-  - the sdk's `ProviderRankingNumber` (sdk/api.go:3360-3371) gains `Reason`;
-  - the Apple app shows it on its network-checks row (§5.5);
-  - Android already shows the server's explanation.
+The sdk's limited-window work is on `feat/fp2-limited-window-1112` (2f945bea).
+It lands right after connect's change (§13).
 
-  This is the only app change.
+- **Window status** (sdk/device.go:435-441):
+  - `UdpAvailable` comes from the merged window event;
+  - `LimitedWindowSize` is set at sdk/device_local.go:5670 and 5812;
+  - `GetWindowStatus` no longer calls the client while holding `stateLock`.
+- **Sizes:**
+  - The fraction stays connect's 0.5; the sdk never copies it.
+  - On low-memory devices the sdk sets `LimitedWindowSizeMax` (§7.4, D11.5).
+- **Developer controls:**
+  - `GetLimitedWindowSizeFraction`, `SetLimitedWindowSizeFraction` and
+    `ResetLimitedWindowSizeFraction` (sdk/reliability_controls.go:610-645);
+  - the override is built into each new window (sdk/device_local.go:5545);
+  - DeviceLocal only: DeviceRemote (rpc) does not have them yet (§13).
+- **Exits:** `CapabilityIp`, `CapabilityProtocol` and `OverflowStep`, also in
+  `ExitRpc`. A limited exit's `WindowType` is `limited`
+  (`ExitWindowTypeLimited`).
+- **Diagnostics:** memory usage reports `limited_clients`, and transfer
+  diagnostics report `limited_client_count`.
+- **Provider status (D11.6):** all four apps changed (§5.5).
 - **No other app API or UI change.** Auto stays the default
-  (sdk/device_local.go:9077-9078). Connected stays count-based on the normal
+  (sdk/device_local.go:9129-9130). Connected stays count-based on the normal
   windows (sdk/connect_view_controller.go:1215).
 
 ### 7.9 Retiring the local IPv6 downgrade (B5) (D11.8)
@@ -1049,17 +1091,18 @@ warnings read.
 
 ### 7.10 Costs per device
 
-| | Desktop | Mobile |
-|---|---|---|
-| Window clients today | quality 6, speed 1 (max 2): 7-8 | quality 4, speed 1: 5 |
-| Limited window | 3 | 2, or 1 if the memory gate fails (D11.5) |
-| Window clients after | 10-11 (+38-43%) | 7 (+40%), or 6 (+20%) |
-| Contracts | +3 per direction while the limited clients carry data. The wide race sends each cold-start TCP flow's first packet to them, so they open contracts early. | +2 (or +1) |
-| Control plane | +3 client setups (auth and control registration) and continuous pings (`CPingRestTimeout` 10 s, `CPingMaxByteCountPerSecond` 32 KiB/s; connect/ip_remote_multi_client.go:255, 264) | +2 (or +1) |
-| Memory | each client holds its own transport graph and buffers | the steady target of 24 MiB (sdk/mobile_memory_policy.go:14) was calibrated for 4 + 1 clients. Per-client buffers include a resend queue of 64-512 KiB and an unreliable flight of 128 KiB (:224-236). The limited window adds two, or one if the gate fails (D11.5). |
+| | Desktop | iOS and hosted proxies (32 MiB) | Android (64 MiB) |
+|---|---|---|---|
+| Window clients today | quality 6, speed 1 (max 2): 7-8 | quality 5, speed 1: 6 | quality 10, speed 2: 12 |
+| Limited window | 3 | 2, or 1 with the bound (D11.5) | 5, or 1 with the bound |
+| Window clients after | 10-11 (+38-43%) | 8 (+33%), or 7 | 17 (+42%), or 13 |
+| Contracts | +3 per direction while the limited clients carry data. The wide race sends each cold-start TCP flow's first packet to them, so they open contracts early. | +2 (or +1) | +5 (or +1) |
+| Control plane | +3 client setups (auth and control registration) and continuous pings (`CPingRestTimeout` 10 s, `CPingMaxByteCountPerSecond` 32 KiB/s; connect/ip_remote_multi_client.go:255, 264) | +2 (or +1) | +5 (or +1) |
+| Memory | each client holds its own transport graph and buffers | the window sizes scale from the 24 MiB calibration (sdk/mobile_memory_policy.go:14, 292-299). Per-client buffers include a resend queue of 64-512 KiB and an unreliable flight of 128 KiB (:224-236). | the same, at 64 MiB |
 
 Race duplication: each cold-start TCP flow's first packet goes to up to 3 more
-exits on desktop and 2 (or 1) on mobile.
+exits on desktop, 2 on iOS and hosted proxies and 5 on Android, or 1 with the
+bound.
 
 ## 8. Metrics, dashboards, alerts, measures
 
@@ -1159,8 +1202,9 @@ all):
   - Online rises from 30.3k to 50.5k at the ratio level, about 44.5k after
     the gates (88%).
   - They reach users through:
-    - the limited windows: 3 per desktop device, 2 per mobile device (1 if
-      the memory gate fails);
+    - the limited windows: 3 per desktop device, 2 per iOS device or hosted
+      proxy, and 5 per Android device (1 on a low-memory device if the memory
+      gate fails);
     - the normal windows, when a location has fewer `dualproto` providers
       than a window's target.
 - **IP axis.** 2 providers return. Its value is correct IPv6 placement, not
@@ -1313,14 +1357,16 @@ all):
 
 **sdk:**
 - the window status fields;
-- the mobile policy's limited window: 2, or 1 when the memory gate fails
-  (D11.5);
-- a steady-memory measurement on iOS and Android with all windows filled,
-  against the 24 MiB target:
-  - it runs with the limited window at 2;
-  - if that exceeds the target, it runs again at 1, which then ships
-    (D11.5);
-  - this gates the client release.
+- the limited window's size: 2 on iOS and hosted proxies, 5 on Android, and 1
+  with the low-memory bound set (D11.5);
+- the window status fields, the exit fields and the diagnostics' limited
+  counts (§7.8);
+- the developer controls set, read and reset the fraction for new windows;
+- a steady-memory measurement on the iOS and Android nightlies with every
+  window full, against each device's memory target (32 MiB on iOS, 64 MiB on
+  Android), before the stable release:
+  - if either is over its target, the bound is set to 1 (D11.5);
+  - this gates the stable release.
 
 **Integration:**
 - A local provider with UDP blocked is labelled `tcp`. It lands in the
@@ -1390,6 +1436,17 @@ inert for them.
     `enabled: false`) one day after step 3, and its code is deleted in the
     next release.
   - **Connect and sdk** need no change for PQ (§12.5).
+- **Apps, sdk and localizations (§13):**
+  1. The provider status reason shows only after the server deploy that adds
+     its fields (step 3); older servers omit them.
+  2. The sdk's limited window lands right after connect's change. Hosted
+     proxies take it first (step 4), then the apps (step 5).
+  3. Before the stable release, steady memory is measured on the iOS and
+     Android nightlies with every window full. If either is over its target,
+     the low-memory bound is set to 1.
+  4. The /mainnet note (sn `docs/mainnet-fp2-capabilities-1112` 1c94ca1c, web
+     42b091f6) stays unmerged by design. Its date is a placeholder, and it
+     publishes with the stable app release.
 - **Measure between steps 2 and 3.** Watch Redis memory for `cs_` keys,
   export duration, and the new gauges filling over 8 hours.
 - **The client settings** `LimitedWindowSizeFraction` (0.5; 0 turns the
@@ -1409,7 +1466,7 @@ inert for them.
 | Risk | Mitigation |
 |---|---|
 | **Dual-stack concentration.** Measuring "enough" on the IP axis against the window's target would draw every window from class A wherever A fills it: us has 108 dual-stack providers of 20,991 on the hard gate. | Resolved by D11.1. The IPv6 need takes one dual-stack client per quality window, as today's soft minimum does, and A and B then draw together (§6.3). |
-| **Mobile memory.** Two more window clients against a 24 MiB target calibrated for 5. | The §9 memory gate. If it fails, mobile uses 1 (D11.5). |
+| **Mobile memory.** Two more window clients on iOS and hosted proxies (32 MiB target), and five more on Android (64 MiB). | The memory gate on the nightlies before the stable release. If it fails, the low-memory bound is 1 (D11.5). |
 | **Platform load.** 3-4 more clients per device: setups, pings, contracts and race duplicates. | measure on the proxy fleet first (step 4) |
 | **Label lag without local downgrade (D7.5).** A provider that loses UDP keeps `dualproto` for a few hours, and its UDP flows stall until then. | The wide race hedges cold starts, and apps fall back from QUIC to TCP. |
 | **IPv6 without B5 (D11.8).** A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns, typically a few hours (§3.5). | Only dual-stack providers are concerned, about 1% of supply. Applications fall back to IPv4, and B6's no-route still answers when no `dualstack` client exists. |
@@ -1632,3 +1689,34 @@ last 7 days.
 - The residual case is a provider that lost PQ after its last positive run.
   Its client fails closed within the existing ping budget, as today, and its
   next run reads negative.
+
+## 13. Implementation status
+
+### 13.1 Workstream D: sdk, apps, localizations
+
+**Landed on main:**
+- localizations 19b89a4;
+- sdk 1d00b3a3, f00867d6 and dce4ab69;
+- android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813.
+
+**Not landed yet:**
+- sdk `feat/fp2-limited-window-1112` (2f945bea) lands right after connect's
+  change. Once connect's ExitInfo fields reach connect main, the sdk's
+  `TestExitFromConnectCarriesEveryExitInfoField` fails until this branch
+  lands.
+
+**Unmerged by design:** the /mainnet note, sn
+`docs/mainnet-fp2-capabilities-1112` (1c94ca1c) and web 42b091f6. It
+publishes with the stable app release (§10).
+
+**Deviations from the design, now folded in above:**
+- **§5.5:** every app shows its own localized help line, so all four needed
+  code. The server adds `reason_tcp_count` (mask & 5) and
+  `reason_ipv4_count` (mask & 6) beside `reason`.
+- **§7.4 and §7.10:** mobile window sizes scale with each device's memory
+  target. D11.5's 1 is the low-memory bound `LimitedWindowSizeMax`, not a
+  fraction.
+
+**Follow-ups:**
+- the DeviceRemote (rpc) developer control for the fraction;
+- the memory gate on the iOS and Android nightlies (§10).
