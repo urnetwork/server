@@ -51,13 +51,14 @@ func competitionDistributedSlotTestPolicy(t testing.TB) *CompetitionDistributedE
 
 // The owned clock is safe across exact query barriers and concurrent completion.
 type competitionDistributedPgFixture struct {
-	settings    *Settings
-	store       PostgresStore
-	round       *roundRecord
-	clock       *competitionLeaseRetryClock
-	sourceJob   *queuedJob
-	preparation *roundBaselinePreparation
-	prepared    *preparedRoundBaseline
+	settings        *Settings
+	startupSettings *Settings
+	store           PostgresStore
+	round           *roundRecord
+	clock           *competitionLeaseRetryClock
+	sourceJob       *queuedJob
+	preparation     *roundBaselinePreparation
+	prepared        *preparedRoundBaseline
 }
 
 // Source-installation triggers alone are temporarily disabled while inserting

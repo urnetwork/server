@@ -81,7 +81,7 @@ func finishCompetitionPreparedCompletionFixture(tb testing.TB, intake *competiti
 		tb.Fatal("genuine reserved queued source could not publish its control", err)
 	}
 	clock := &competitionLeaseRetryClock{now: intake.now}
-	fixture := &competitionDistributedPgFixture{settings: frozen, store: intake.store, clock: clock, round: round,
+	fixture := &competitionDistributedPgFixture{settings: frozen, startupSettings: intake.settings, store: intake.store, clock: clock, round: round,
 		sourceJob: preparation.SourceJob, preparation: preparation, prepared: prepared}
 	fixture.store.now = clock.Now
 	if distributed {

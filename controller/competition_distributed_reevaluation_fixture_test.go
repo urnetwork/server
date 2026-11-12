@@ -162,21 +162,34 @@ func TestCompetitionDistributedRecoveryPgCurrentIntakeBranchesKeepRealOpening(t 
 			fixture.round.ClosesAt.Sub(fixture.round.OpensAt) != 7*24*time.Hour {
 			tb.Fatal("ASAP fixture backdated or omitted its actual SQL opening/grant")
 		}
-		for _, loader := range []func() (*Settings, error){
-			func() (*Settings, error) {
-				return settingsForCompetitionApiRound(ctx, fixture.settings, fixture.store, fixture.round)
-			},
-			func() (*Settings, error) {
-				return settingsForAutomationRound(ctx, fixture.settings, fixture.store, fixture.round)
-			},
+		// Match RunDistributedCoordinator's real worker child, not its separate
+		// synthetic baseline producer profile with intentionally empty Config.
+		childSettings := *fixture.selected(0)
+		childSettings.roundBaselinePreparation, childSettings.distributedPreparationOnly = nil, false
+		for _, loader := range []struct {
+			name string
+			load func() (*Settings, error)
+		}{
+			{name: "api-startup-base", load: func() (*Settings, error) {
+				return settingsForCompetitionApiRound(ctx, fixture.startupSettings, fixture.store, fixture.round)
+			}},
+			{name: "worker-startup-base", load: func() (*Settings, error) {
+				return settingsForAutomationRound(ctx, fixture.startupSettings, fixture.store, fixture.round)
+			}},
+			{name: "worker-derived-coordinator-child", load: func() (*Settings, error) {
+				return settingsForAutomationRound(ctx, &childSettings, fixture.store, fixture.round)
+			}},
 		} {
-			loaded, err := loader()
+			loaded, err := loader.load()
 			if err != nil || loaded == nil || loaded.intakeFirstActivation == nil || *loaded.intakeFirstActivation != *fixture.settings.intakeFirstActivation ||
 				!storedPolicyMatches(loaded, fixture.round.PolicyJson) {
-				tb.Fatal("ASAP API/worker source derivation lost its exact purpose authority", err)
+				tb.Fatal("ASAP source derivation lost its exact purpose authority", loader.name, err)
 			}
 		}
-		selected := fixture.selected(0)
+		if err := requireConfiguredCompetitionRuntime(ctx, &childSettings, fixture.store); err != nil {
+			tb.Fatal("ASAP derived child failed the actual worker startup runtime boundary", err)
+		}
+		selected := &childSettings
 		job, err := fixture.store.Claim(ctx, selected, "synthetic-current-intake-worker", testWorkerImageDigest())
 		if err != nil || job == nil || job.StartedAt == nil || job.StartedAt.Before(fixture.round.OpensAt) || job.ExecutionDeadline == nil ||
 			!job.ExecutionDeadline.Equal(job.StartedAt.Add(3*time.Hour)) {
