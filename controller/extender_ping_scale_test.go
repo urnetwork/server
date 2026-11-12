@@ -117,9 +117,9 @@ func BenchmarkExtenderPingReportVerify(b *testing.B) {
 	report := newTestPingVerifyReport(b, connect.DefaultExtenderPingReporterSettings().MaxBatchCount)
 	b.ResetTimer()
 	for i := 0; i < b.N; i += 1 {
-		pings, rejected, err := verifyPingReport(report.args, report.reporterClientId, report.now, report.keys, report.settings)
-		if err != nil || rejected != 0 || len(pings) != len(report.args.Pings) {
-			b.Fatalf("verified %d of %d with %d rejected: %v", len(pings), len(report.args.Pings), rejected, err)
+		pings, refusals, err := verifyPingReport(report.args, report.reporterClientId, report.now, report.keys, report.settings)
+		if err != nil || refusals.total() != 0 || len(pings) != len(report.args.Pings) {
+			b.Fatalf("verified %d of %d with %v refused: %v", len(pings), len(report.args.Pings), refusals, err)
 		}
 		for _, ping := range pings {
 			if ping.Cosign != model.NetworkPingCosignCosigned {
@@ -176,9 +176,9 @@ func TestExtenderPingReportVerifiesAtTheIngestBudget(t *testing.T) {
 		cpuStart := processCpuTime()
 		wallStart := time.Now()
 		for i := 0; i < reportCount; i += 1 {
-			pings, rejected, err := verifyPingReport(report.args, report.reporterClientId, report.now, report.keys, report.settings)
-			if err != nil || rejected != 0 || len(pings) != len(report.args.Pings) {
-				t.Fatalf("verified %d of %d with %d rejected: %v", len(pings), len(report.args.Pings), rejected, err)
+			pings, refusals, err := verifyPingReport(report.args, report.reporterClientId, report.now, report.keys, report.settings)
+			if err != nil || refusals.total() != 0 || len(pings) != len(report.args.Pings) {
+				t.Fatalf("verified %d of %d with %v refused: %v", len(pings), len(report.args.Pings), refusals, err)
 			}
 		}
 		pingCpuTime := (processCpuTime() - cpuStart) / time.Duration(pingCount)
@@ -280,13 +280,13 @@ func TestExtenderPingReportRejectsAReplayOnTheNextDay(t *testing.T) {
 		args := &ExtenderPingReportArgs{
 			Pings: []*ExtenderPingArgs{testPingArgs(attestation, connect.ExtenderPingCosigned, target.cosign(t, attestation))},
 		}
-		result, err := extenderPingReport(args, clientSession, now, settings)
+		result, err := extenderPingReport(args, clientSession, now, settings, nil)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, "")
 		connect.AssertEqual(t, result.Accepted, 1)
 		connect.AssertEqual(t, result.Rejected, 0)
 
-		result, err = extenderPingReport(args, clientSession, nextDay, settings)
+		result, err = extenderPingReport(args, clientSession, nextDay, settings, nil)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Error, "")
 		connect.AssertEqual(t, result.Accepted, 0)
@@ -328,7 +328,7 @@ func TestExtenderPingReportRateLimitIsPerClient(t *testing.T) {
 		post := func(clientSession *session.ClientSession) *ExtenderPingReportResult {
 			result, err := extenderPingReport(&ExtenderPingReportArgs{
 				Pings: []*ExtenderPingArgs{{}},
-			}, clientSession, server.NowUtc(), settings)
+			}, clientSession, server.NowUtc(), settings, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -403,7 +403,7 @@ func TestExtenderPingReportRefusesAReplayUntilTheClaimExpires(t *testing.T) {
 			return false
 		}
 		post := func(now time.Time, args *ExtenderPingReportArgs) *ExtenderPingReportResult {
-			result, err := extenderPingReport(args, clientSession, now, settings)
+			result, err := extenderPingReport(args, clientSession, now, settings, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
