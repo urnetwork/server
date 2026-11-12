@@ -11494,4 +11494,11 @@ var migrations = []any{
 	// when absent, under a five-second lock bound. Nothing existing is
 	// rewritten. Apply before deploying the taskworker and api that read them.
 	stLedgerV2ExtenderMigration,
+
+	// The store notification flow (store_notification_flow_schema.go,
+	// controller/store_notification_flow.go): one new table with a row per
+	// store, under a five-second lock bound, created only when absent.
+	// Nothing existing is locked or rewritten. Apply with the api and alt
+	// that write it.
+	storeNotificationFlowMigration,
 }

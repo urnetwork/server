@@ -1099,7 +1099,25 @@ var endPlaySubscriptionEntitlement = func(
 
 // https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
 // https://developer.android.com/google/play/billing/rtdn-reference
+//
+// A verified push is accepted when it is processed, else it is an error the
+// route answers 500 and Pub/Sub redelivers (store_notification_flow.go).
 func PlayWebhook(
+	webhookArgs *PlayWebhookArgs,
+	clientSession *session.ClientSession,
+) (*PlayWebhookResult, error) {
+	result, err := playWebhook(webhookArgs, clientSession)
+	if err != nil {
+		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationError)
+	} else {
+		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationAccepted)
+	}
+	return result, err
+}
+
+// Processes one verified push, as the route always has; PlayWebhook records
+// its outcome.
+func playWebhook(
 	webhookArgs *PlayWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*PlayWebhookResult, error) {
@@ -2115,8 +2133,21 @@ var playIdTokenClaims = func(ctx context.Context, idToken string) (map[string]an
 }
 
 // Fails closed: without the configured publisher and audience every push is
-// refused as unavailable, before Google is asked about its token.
-func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+// refused as unavailable, before Google is asked about its token. Every
+// refusal is recorded with its outcome (store_notification_flow.go).
+func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (body io.Reader, returnErr error) {
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		outcome := StoreNotificationRefusedMalformed
+		if returnErr == errWebhookVerificationUnavailable {
+			outcome = StoreNotificationRefusedUnavailable
+		} else if refused, ok := returnErr.(*playAuthError); ok {
+			outcome = refused.outcome
+		}
+		RecordStoreNotificationOutcome(req.Context(), model.SubscriptionMarketGoogle, outcome)
+	}()
 	publisherEmail, err := playPublisherEmail()
 	if err != nil {
 		glog.Warningf("[play]webhook refused, verification publisher unavailable: %s\n", err)
@@ -2136,7 +2167,7 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	authHeader := req.Header.Get("Authorization")
 
 	if authHeader == "" {
-		return nil, errors.New("missing authorization header")
+		return nil, &playAuthError{outcome: StoreNotificationRefusedAuth, message: "missing authorization header"}
 	}
 
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
@@ -2149,24 +2180,39 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	return bytes.NewReader(bodyBytes), nil
 }
 
+// Binds a push's Google id token to the configured publisher and audience. A
+// refusal says why (playAuthError): no token Google accepts, or one of
+// another publisher or issuer (refused_auth); the configured publisher's
+// token for another audience (refused_audience: our google.yml and the
+// Pub/Sub subscription disagree); or no answer from Google (error).
 func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string, audience string) error {
 	bearerPrefix := "Bearer "
 
 	if strings.HasPrefix(auth, bearerPrefix) {
 		claims, err := playIdTokenClaims(ctx, auth[len(bearerPrefix):])
 		if err != nil {
-			return err
+			var statusErr *server.HttpStatusError
+			if errors.As(err, &statusErr) {
+				// Google answered: the token is not one it issued, or expired
+				return &playAuthError{outcome: StoreNotificationRefusedAuth, message: err.Error()}
+			}
+			// Google could not be asked: the push is unverified, not refused
+			return &playAuthError{outcome: StoreNotificationError, message: err.Error()}
 		}
 		// Google's tokeninfo endpoint verifies the signature. Bind that token
 		// to this subscription and its verified service account as well.
 		issuer, _ := claims["iss"].(string)
 		verified := claims["email_verified"] == true || claims["email_verified"] == "true"
-		if claims["email"] == publisherEmail && claims["aud"] == audience && verified &&
-			(issuer == "https://accounts.google.com" || issuer == "accounts.google.com") {
+		publisher := claims["email"] == publisherEmail && verified &&
+			(issuer == "https://accounts.google.com" || issuer == "accounts.google.com")
+		if publisher && claims["aud"] == audience {
 			return nil
 		}
+		if publisher {
+			return playAuthRefused(StoreNotificationRefusedAudience)
+		}
 	}
-	return errors.New("Missing authorization.")
+	return playAuthRefused(StoreNotificationRefusedAuth)
 }
 
 // The grant windows (model.FreeGrantWindow, model.ReferralGrantWindow) and the Pro
