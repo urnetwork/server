@@ -28,6 +28,7 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// What the fake Stripe api answers.
 type stripeVerifyDbFake struct {
 	stateLock     sync.Mutex
 	sessions      map[string]map[string]any
@@ -35,6 +36,8 @@ type stripeVerifyDbFake struct {
 	invoices      map[string]map[string]any
 }
 
+// A fake Stripe api, through the raw-HTTP seam and the stripe-go backend,
+// restored when the test ends.
 func newStripeVerifyDbFake(t testing.TB) *stripeVerifyDbFake {
 	fake := &stripeVerifyDbFake{
 		sessions:      map[string]map[string]any{},
@@ -122,6 +125,7 @@ func (self *stripeVerifyDbFake) setPaidSubscription(subscriptionId string, invoi
 	}
 }
 
+// A completed, paid Pro checkout of the network.
 func (self *stripeVerifyDbFake) setCompletedCheckout(sessionId string, networkId server.Id, subscriptionId string, invoiceId string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -139,6 +143,7 @@ func (self *stripeVerifyDbFake) setCompletedCheckout(sessionId string, networkId
 	}
 }
 
+// The invoice's rows in the stripe_invoice ledger and subscription_renewal.
 func stripeVerifyDbCounts(t testing.TB, ctx context.Context, networkId server.Id, invoiceId string) (ledgerRows int, renewalRows int) {
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
