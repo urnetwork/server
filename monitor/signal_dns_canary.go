@@ -37,11 +37,11 @@ import (
 //     /dns/ready reads it, so a bad minute pauses certs' orders within the minute.
 //
 // dns-canary-signature and dns-ns-down page §19.8's rota at any hour from M5 (owner decision 143);
-// dns-ns-failing, dns-ns-serial-divergence, dns-key-window and dns-canary-propagation warn; and
-// dns-canary-unobservable reports a check that could not run (no settings, no anchor, no validator, a
-// write or a report the block refused), which holds every other incident open, so a blind monitor never
-// clears one. plan-DNS-running-ns's business-hours page for one NS failing an hour waits for a
-// business-hours path in the pager; until then that is dns-ns-failing on Slack.
+// dns-ns-failing, one NS failing an hour, is plan-DNS-running-ns's business-hours page, which the pager
+// holds until the business calendar opens (QD-754); dns-ns-serial-divergence, dns-key-window and
+// dns-canary-propagation warn; and dns-canary-unobservable reports a check that could not run (no
+// settings, no anchor, no validator, a write or a report the block refused), which holds every other
+// incident open, so a blind monitor never clears one.
 func NewDnsCanarySignal() Signal {
 	return &signalAdapter{
 		number: "28.1", key: "dns-canary", name: "DNS canary, nameservers and DNSKEY window",
@@ -234,6 +234,8 @@ func (self *dnsCanaryCheck) finding(class string, target string, symptom string,
 		finding.tier = tierPage
 		finding.sustain = self.settings.PageSustain
 	case dnsCanaryClassNsFailing:
+		// a page for business hours: the pager holds it until the calendar opens
+		finding.tier = tierPage
 		finding.sustain = self.settings.NsFailingSustain
 	case dnsCanaryClassDivergence:
 		finding.sustain = self.settings.DivergenceSustain

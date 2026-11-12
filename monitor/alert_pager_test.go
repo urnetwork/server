@@ -64,11 +64,17 @@ func newPagerHarness() *pagerHarness {
 	return &pagerHarness{clock: clock, sink: pager.NewFakeSink(pager.FakeSinkSettings{Now: clock.Now})}
 }
 
+// The business calendar is the default review hours, Monday to Friday 09:00 to
+// 18:00 UTC, read from no file.
 func (self *pagerHarness) settings() PagerAlertNotifierSettings {
 	return PagerAlertNotifierSettings{
 		Sink:        self.sink,
 		Environment: "synthetic",
 		Now:         self.clock.Now,
+		BusinessCalendar: newAbuseReviewPagerCalendar(
+			func() *server.AbuseConfig { return nil },
+			func(string, ...any) {},
+		),
 		Logf: func(format string, args ...any) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
@@ -131,11 +137,15 @@ func requirePagedPeople(t *testing.T, sink *pager.FakeSink, want ...string) {
 	}
 }
 
-// FS-50's core for every page class in the table: at 02:00 the first person is
-// paged at once, the second at 30 minutes unacknowledged and not before; a row
-// that pages both at once pages both at 02:00 and nobody after.
+// FS-50's core for every any-hours page class in the table: at 02:00 the first
+// person is paged at once, the second at 30 minutes unacknowledged and not
+// before; a row that pages both at once pages both at 02:00 and nobody after.
+// The business rows' 02:00 is alert_pager_business_test.go's.
 func TestPageClassAt0200PagesTheSecondPersonAt30MinutesNotBefore(t *testing.T) {
 	for _, row := range pageClasses {
+		if row.hours != pageHoursAny {
+			continue
+		}
 		harness := newPagerHarness()
 		notifier := NewPagerAlertNotifier(harness.settings())
 		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{pagerTestAlert(row.class, SeverityPage)}})

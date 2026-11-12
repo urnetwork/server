@@ -23,12 +23,37 @@ import (
 // interface map-stale or a custom host pending at M6, a refused drop job at
 // M10.
 //
+// A row's hours say when its page may reach the rota (QD-754): any, the
+// default, pages at once at any hour, and business is §19.8's business row,
+// which the notifier holds until the business calendar opens. The business
+// rows' signals report them at page severity, so on Slack they read PAGE at
+// any hour, and only the pager waits: filecluster-wear's two (EVSB-M3-01),
+// filecluster-cohort's three (EVSB-M3-02, g0-recheck-0-hdd-trigger #1) and
+// dns-canary's one NS failing an hour (DNS-M5-17, plan-DNS-running-ns).
+//
 // A row's text leaves the site in the page's summary, so it names a condition
 // and an action and never a target (I-13). The rota's acknowledgment time is
 // the same 30 minutes on every row, so it belongs to the pager service. A row
 // marked bothAtOnce pages both rota members at once, as §19.8's rota line asks
 // of the notices, rather than the second only when the first does not
 // acknowledge.
+
+// When a row's page may reach the rota.
+type pageHours int
+
+const (
+	// at once, at any hour
+	pageHoursAny pageHours = iota
+	// held until the business calendar opens
+	pageHoursBusiness
+)
+
+func (self pageHours) String() string {
+	if self == pageHoursBusiness {
+		return "business"
+	}
+	return "any"
+}
 
 // One alert class and the §19.8 row it pages under.
 type pageClass struct {
@@ -41,12 +66,18 @@ type pageClass struct {
 	action string
 	// page both rota members at once
 	bothAtOnce bool
+	// when the page may go; the zero value is any hour
+	hours pageHours
 }
 
-// §19.8 gives a set at risk and a cluster refusing writes one row.
+// §19.8 gives a set at risk and a cluster refusing writes one row, and its
+// business row gives a cluster's projected exhaustion and its cohort limit one
+// clause.
 const (
 	pageRowClusterAtRisk    = "a set at_risk, or a cluster refusing writes"
 	pageActionClusterAtRisk = "the cold spare within 1 h of the page (19.10); restored within 4 h"
+	pageRowCohort           = "a metadata cluster's projected exhaustion within its move tool's lead time, or the cluster at its cohort limit"
+	pageActionCohort        = "19.9's cohorts row: date the move tool by the earliest projection, and confirm deletions and erasures pass"
 )
 
 var pageClasses = []pageClass{
@@ -101,6 +132,37 @@ var pageClasses = []pageClass{
 		firstMilestone: "M5",
 		action:         pager.NoticePageAction,
 		bothAtOnce:     true,
+	},
+	// §19.8's business row
+	{
+		class:          "filecluster-drive-dwpd-business",
+		row:            "a metadata drive's 7-day mean over 0.75 DWPD",
+		firstMilestone: "M3",
+		action:         "19.10's file cluster row: confirm the counters, then order the next metadata cluster (19.9)",
+		hours:          pageHoursBusiness,
+	},
+	{
+		class:          "filecluster-drive-rating-short",
+		row:            "a metadata drive projected, at its 30-day rate, to spend its rated endurance before five years of service",
+		firstMilestone: "M3",
+		action:         "19.6's wear row: record the wear against the rating, then order the next metadata cluster (19.9)",
+		hours:          pageHoursBusiness,
+	},
+	{class: "filecluster-cohort-exhaustion", row: pageRowCohort, firstMilestone: "M3", action: pageActionCohort, hours: pageHoursBusiness},
+	{class: "filecluster-cohort-limit", row: pageRowCohort, firstMilestone: "M3", action: pageActionCohort, hours: pageHoursBusiness},
+	{
+		class:          "filecluster-hdd-trigger",
+		row:            "a segment cluster's projected drive operations crossing half its measured capacity within the segment placement's lead time",
+		firstMilestone: "M3",
+		action:         "19.9's hdd row: order the segment placement and its HDD capacity before the crossing",
+		hours:          pageHoursBusiness,
+	},
+	{
+		class:          "dns-ns-failing",
+		row:            "one dns edge failing probes for an hour",
+		firstMilestone: "M5",
+		action:         "§12.6's runbook",
+		hours:          pageHoursBusiness,
 	},
 }
 

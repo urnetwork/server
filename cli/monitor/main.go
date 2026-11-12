@@ -337,7 +337,8 @@ func slackNotifierSettings(settings servermonitor.SignalSettings, opts monitorOp
 
 // The pager notifier's settings for this watcher. A sink that cannot be built
 // leaves the notifier unable to page, which it says on stderr and through
-// slackNotifier, the optional carrier of its warn.
+// slackNotifier, the optional carrier of its warn. The business calendar is
+// left to the notifier's default, abuse.yml's business hours (QD-754).
 func pagerNotifierSettings(settings servermonitor.SignalSettings, slackNotifier *servermonitor.SlackAlertNotifier) servermonitor.PagerAlertNotifierSettings {
 	notifierSettings := servermonitor.DefaultPagerAlertNotifierSettings()
 	notifierSettings.Environment = settings.Environment

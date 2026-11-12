@@ -202,10 +202,10 @@ func TestDnsCanaryEachFailureRaisesItsClass(t *testing.T) {
 		}, classes: []string{dnsCanaryClassNsDown}, pageTier: true},
 		{name: "one NS down", change: func(world *dnsCanaryTestWorld) {
 			delete(world.nsReads, dnsCanaryTestNs1.String())
-		}, classes: []string{dnsCanaryClassNsFailing}},
+		}, classes: []string{dnsCanaryClassNsFailing}, pageTier: true},
 		{name: "one NS serving an old canary", change: func(world *dnsCanaryTestWorld) {
 			world.validations[dnsCanaryTestNs1.String()].values = []string{strconv.FormatInt(dnsCanaryTestNow.Add(-10*time.Minute).UnixMilli(), 10) + " site"}
-		}, classes: []string{dnsCanaryClassNsFailing}},
+		}, classes: []string{dnsCanaryClassNsFailing}, pageTier: true},
 		{name: "serials apart", change: func(world *dnsCanaryTestWorld) {
 			world.nsReads[dnsCanaryTestNs2.String()].soaSerial = 39
 		}, classes: []string{dnsCanaryClassDivergence}, verdict: true},
