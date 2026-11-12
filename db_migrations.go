@@ -11479,4 +11479,11 @@ var migrations = []any{
 	// null, the extender's ports. Apply before deploying the api, alt and
 	// taskworker that use them.
 	newSqlMigration(networkExtenderAddressPortsSchemaSql),
+
+	// The network each capture the flag award was won for (ctf_schema.go,
+	// ctfAwardNetworkSql): one nullable uuid on ctf_award, backfilled where
+	// the census or network_client knows the network, and its index, under a
+	// five-second lock bound. ctf_award is empty until capture the flag is
+	// live. Apply before deploying the taskworker and api that use it.
+	ctfAwardNetworkMigration,
 }
