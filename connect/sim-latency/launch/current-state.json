@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T13:57:25.857228Z",
+  "observed_at": "2026-11-12T15:17:12.853061Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -20,13 +20,22 @@
     "grading_ready": true,
     "publication_held": false,
     "api_observed_at": "2026-11-12T12:17:56Z",
-    "diagnosis": "Goofe completed nine replicates and is centrally succeeded. Sille's native run also completed exit zero with cleanup verified, but remains the only centrally running record after its original 12:20:10 deadline. No terminal central result or clock extension is inferred for Sille. The corrected worker is staged only; no maintenance hold or runtime restart has been applied."
+    "diagnosis": "Authorized idle-boundary handoff completed. The qualified 0aa751382 worker is active with zero supervisor restarts. Evaluation hold revision 28 was released at revision 29. Sille's expired attempt reconciled to failed without extending its original 12:20:10 deadline; both host slots are empty. This is not a successful score or an authorized new recovery cycle.",
+    "transport_activation": {
+      "worker_sha256": "009dce62e7ddd90b377252122bb0b262e7e697e0c0488bb829af214a3ac26719",
+      "supervisor_invocation": "ecfd3b4b026a46b5ad4065012baddf54",
+      "private_evidence_directory": "/var/lib/urnetwork/competition-transport-handoff-20261112.iqaSCVwA",
+      "hold_revision_after_release": 29,
+      "sille_reconciled_fence": 19,
+      "original_submission_time_preserved": true,
+      "original_deadline_preserved": true
+    }
   },
   "queue": {
     "succeeded": 16,
-    "failed": 3,
+    "failed": 4,
     "queued": 0,
-    "running": 1
+    "running": 0
   },
   "recent_completed": [
     {
@@ -422,7 +431,7 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-    "status": "112_top_level_completed_148_remaining_corrected_guard_qualified_recovery_chain_running_worker_release_staged_not_activated",
+    "status": "183_top_level_completed_77_remaining_recovery_chain_resumed_transport_worker_activated",
     "sequential_remainder_chain": {
       "ledger_directory": "/dev/shm/competition-recovery-chain-20261112.pAWVCjqC",
       "control_session": 43890,
@@ -430,15 +439,15 @@
       "completed_manifest": "completed.txt",
       "remaining_manifest": "remaining.txt",
       "actor_history": "actors.txt",
-      "verified_at": "2026-11-12T14:17:15Z",
-      "verified_completed": 112,
-      "verified_remaining": 148,
+      "verified_at": "2026-11-12T15:17:08Z",
+      "verified_completed": 183,
+      "verified_remaining": 77,
       "whole_suite": 260,
-      "status": "replacement_chain_running_legacy_four_qualified_after_guard_fix",
-      "active_test_batch": "heavy-native-fee",
-      "active_invocation_id": "89f9f671b5e74fafa90a34f2697aed0e",
-      "active_main_pid": 3442721,
-      "active_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.k4AckBxY",
+      "status": "resumed_after_authorized_transport_handoff",
+      "active_test_batch": "remainder4",
+      "active_invocation_id": "456b70ec7c034bea982c4417688ff3b7",
+      "active_main_pid": 3571512,
+      "active_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.ormpTeOd",
       "completed_mainnet_batch": {
         "passed": 7,
         "failed": 0,
@@ -515,8 +524,8 @@
       "actor_timeout_minutes": 45,
       "no_automatic_next_batch": true
     },
-    "completed_top_level_test_union": 112,
-    "unexecuted_top_level_tests": 148,
+    "completed_top_level_test_union": 183,
+    "unexecuted_top_level_tests": 77,
     "prefix_continuation": {
       "source_commit": "7880fd886bb976adabb5e0b97a2cc6d5d61ea439",
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
