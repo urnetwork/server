@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T05:56:00Z",
+  "observed_at": "2026-11-12T06:18:26.971033Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -32,8 +32,8 @@
       "host_id": "goofe",
       "started_at": "2026-11-12T05:31:38.724108",
       "deadline": "2026-11-12T08:31:38.724108",
-      "observed_phase": "candidate_replicate_2_live",
-      "candidate_completed": 1,
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 4,
       "database_custody": "released_after_heartbeat_timeout_2026-11-12T05:52:29.860826Z",
       "native_process_verified_live": true,
       "reattachment_verified": false
@@ -42,7 +42,12 @@
       "job_id": "01a1ca5d-8d1f-3a64-6356-0dfeacf43557",
       "host_id": "sille",
       "started_at": "2026-11-12T05:52:24.10429",
-      "deadline": "2026-11-12T08:52:24.10429"
+      "deadline": "2026-11-12T08:52:24.10429",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 1,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T06:15:17.173607Z",
+      "native_process_verified_live": true,
+      "reattachment_verified": false
     }
   ],
   "live_worker": {
@@ -85,7 +90,17 @@
     "request_is_not_a_database_grant": true,
     "implementation_and_deployment_pending": true,
     "queued": false,
-    "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112"
+    "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
+    "frozen_server_commit": "fdd92e7b6acb5587b22531c591ecceff8fd3ae6e",
+    "frozen_sn_commit": "ac7309bdc4beb959105ae60f2f43bfe0b5e06a6b",
+    "qualification": {
+      "status": "corrected_dependency_attempt_authorized_not_yet_verified_running",
+      "previous_attempt": "setup_failure_zero_tests_missing_tracked_sn_packages",
+      "previous_evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.2IZI2TQU",
+      "previous_controller_log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071",
+      "server_source_unchanged_by_dependency_correction": true,
+      "live_and_product_checkouts_unchanged": true
+    }
   },
   "pending_authorizations": [
     "Claim-only maintenance window for the independently verified combined worker; otherwise retain the previously approved empty-queue boundary.",
