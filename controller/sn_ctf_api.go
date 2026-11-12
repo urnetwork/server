@@ -123,14 +123,84 @@ var snCtfSourceOf = func() (snCtfSource, error) {
 	return newSnCtfCoreSource()
 }
 
+// How long one read of the view may take, and how old a view may be served
+// while a newer one is read.
+const (
+	snCtfViewReadTimeout = 30 * time.Second
+	snCtfViewMaxStale    = 5 * time.Minute
+)
+
 var snCtfViewCache struct {
 	lock     sync.Mutex
 	view     *snCtfView
 	readTime time.Time
+	// closed when the read in progress ends; nil when none is
+	reading chan struct{}
+	// the last read's error
+	err error
 }
 
-// snCtfReadView reads the view, from the cache while it is fresh. On a failure it
-// has answered 503 and returns nil.
+// snCtfLoadView is the view, read at most once at a time on a context of its
+// own, so that no request waits on another's read or fails with another's
+// cancellation. While a view is fresh it is answered; while a newer one is
+// read, the previous one is answered if it is not too old; otherwise the
+// request waits for the read.
+func snCtfLoadView(ctx context.Context, source snCtfSource) (*snCtfView, error) {
+	cache := &snCtfViewCache
+	cache.lock.Lock()
+	now := time.Now()
+	if cache.view != nil && now.Sub(cache.readTime) < snCtfViewTtl {
+		view := cache.view
+		cache.lock.Unlock()
+		return view, nil
+	}
+	if cache.reading == nil {
+		reading := make(chan struct{})
+		cache.reading = reading
+		go server.HandleError(func() {
+			defer close(reading)
+			readCtx, cancel := context.WithTimeout(context.Background(), snCtfViewReadTimeout)
+			defer cancel()
+			view, err := source.View(readCtx)
+			cache.lock.Lock()
+			defer cache.lock.Unlock()
+			if err == nil {
+				cache.view, cache.readTime = view, time.Now()
+			}
+			cache.err, cache.reading = err, nil
+		}, func() {
+			cache.lock.Lock()
+			defer cache.lock.Unlock()
+			cache.err, cache.reading = errors.New("the capture the flag view read panicked"), nil
+		})
+	}
+	reading := cache.reading
+	if cache.view != nil && now.Sub(cache.readTime) < snCtfViewMaxStale {
+		view := cache.view
+		cache.lock.Unlock()
+		return view, nil
+	}
+	cache.lock.Unlock()
+	if reading != nil {
+		select {
+		case <-reading:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	cache.lock.Lock()
+	defer cache.lock.Unlock()
+	if cache.view != nil && time.Since(cache.readTime) < snCtfViewMaxStale {
+		return cache.view, nil
+	}
+	if cache.err != nil {
+		return nil, cache.err
+	}
+	return nil, errors.New("the capture the flag view is not read yet")
+}
+
+// snCtfReadView reads the view. On a failure it has answered 503 and returns
+// nil.
 func snCtfReadView(w http.ResponseWriter, r *http.Request) (snCtfSource, *snCtfView) {
 	source, err := snCtfSourceOf()
 	if err != nil {
@@ -140,31 +210,28 @@ func snCtfReadView(w http.ResponseWriter, r *http.Request) (snCtfSource, *snCtfV
 		WriteSnProblem(w, http.StatusServiceUnavailable, SnProblemUnavailable, "The capture the flag state is unavailable. Try again shortly.")
 		return nil, nil
 	}
-	cache := &snCtfViewCache
-	cache.lock.Lock()
-	defer cache.lock.Unlock()
-	now := time.Now()
-	if cache.view == nil || snCtfViewTtl <= now.Sub(cache.readTime) {
-		view, err := source.View(r.Context())
-		if err != nil {
-			glog.Infof("[sn]ctf view: %s\n", err)
-			WriteSnProblem(w, http.StatusServiceUnavailable, SnProblemUnavailable, "The capture the flag state is unavailable. Try again shortly.")
-			return nil, nil
-		}
-		cache.view, cache.readTime = view, now
+	cached, err := snCtfLoadView(r.Context(), source)
+	if err != nil {
+		glog.Infof("[sn]ctf view: %s\n", err)
+		WriteSnProblem(w, http.StatusServiceUnavailable, SnProblemUnavailable, "The capture the flag state is unavailable. Try again shortly.")
+		return nil, nil
 	}
-	if config := snCtfApiConfigOf(); config.PageUrl != "" {
-		view := *cache.view
-		view.PageUrl = config.PageUrl
-		return source, &view
-	}
-	return source, cache.view
+	view := *cached
+	view.PageUrl = snCtfApiConfigOf().PageUrl
+	return source, &view
 }
 
 func snCtfResetViewCache() {
-	snCtfViewCache.lock.Lock()
-	defer snCtfViewCache.lock.Unlock()
-	snCtfViewCache.view = nil
+	cache := &snCtfViewCache
+	cache.lock.Lock()
+	reading := cache.reading
+	cache.lock.Unlock()
+	if reading != nil {
+		<-reading
+	}
+	cache.lock.Lock()
+	defer cache.lock.Unlock()
+	cache.view, cache.err = nil, nil
 }
 
 // SnCtf serves GET /sn/ctf.

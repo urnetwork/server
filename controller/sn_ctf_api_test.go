@@ -421,15 +421,13 @@ func TestSnCtfEpochAnswersTheExample(t *testing.T) {
 		Candidates:     4_217,
 		ExcusedSamples: 0,
 		Draw:           &snCtfDraw{Round: 34_737_596, Signature: signature, Randomness: snCtfTestHex32(t, exampleDraw["randomness"].(string)), Seed: snCtfTestHex32(t, exampleDraw["seed"].(string))},
-		Members: []*snCtfCensusMember{
-			// failed presence and no wallet: the document counts presence, the
-			// census no wallet
-			{Role: snCtfRoleProvider, Failed: 1<<snCtfReasonPresence | 1<<snCtfReasonNoWallet, Country: "is"},
-			{Role: snCtfRoleProvider, Failed: 1 << snCtfReasonOfflineAtEnd, Country: "de"},
-			{Role: snCtfRoleExtender, Failed: 1<<snCtfReasonOwnNetwork | 1<<snCtfReasonInactive, Country: "de"},
-			{Role: snCtfRoleProvider, Candidate: true, Country: "is", DrawCountry: "is"},
+		Exclusions: []*snCtfExclusion{
+			{Role: snCtfRoleProvider, Reason: snCtfReasonNoWallet, Count: 99},
+			{Role: snCtfRoleProvider, Reason: snCtfReasonOfflineAtEnd, Count: 3},
+			{Role: snCtfRoleProvider, Reason: snCtfReasonNoWallet, Count: 1},
+			{Role: snCtfRoleExtender, Reason: snCtfReasonInactive, Count: 2},
+			{Role: snCtfRoleExtender, Reason: snCtfReasonPresence, Count: 5},
 		},
-		Exclusions: []*snCtfExclusion{{Role: snCtfRoleProvider, Reason: snCtfReasonNoWallet, Count: 99}},
 	}
 	result := snCtfEpochResultOf(view, view.lastEpoch(), detail)
 	got := snCtfTestJson(t, result)
@@ -459,14 +457,10 @@ func TestSnCtfEpochAnswersTheExample(t *testing.T) {
 	if result.Census.Units != (SnCtfRoleCounts{Providers: 1_862 + 2, Extenders: 3}) || result.Census.Candidates != 4_217 || result.Census.Block != 9_701_016 {
 		t.Fatalf("census %+v", result.Census)
 	}
-	want := SnCtfExcluded{Providers: SnCtfExclusionCounts{Presence: 1, OfflineAtEnd: 1}, Extenders: SnCtfExclusionCounts{Inactive: 1}}
+	// the census's published counts, summed over the countries, by name
+	want := SnCtfExcluded{Providers: SnCtfExclusionCounts{NoWallet: 100, OfflineAtEnd: 3}, Extenders: SnCtfExclusionCounts{Inactive: 2, Presence: 5}}
 	if result.Census.Excluded != want {
 		t.Fatalf("excluded %+v", result.Census.Excluded)
-	}
-	// without the members, the census's own counts
-	detail.Members = nil
-	if excluded := snCtfEpochResultOf(view, view.lastEpoch(), detail).Census.Excluded; excluded != (SnCtfExcluded{Providers: SnCtfExclusionCounts{NoWallet: 99}}) {
-		t.Fatalf("excluded %+v", excluded)
 	}
 	if result.AsOf != "2026-12-11T22:24:12Z" || *result.Objects.Census != snCtfRef([32]byte{0xc9}) || result.Objects.Header != snCtfRef(view.lastEpoch().Root.LedgerHash) {
 		t.Fatalf("as of %s objects %+v", result.AsOf, result.Objects)
@@ -527,6 +521,12 @@ func TestSnCtfClientAnswersTheExample(t *testing.T) {
 	}
 	if empty := snCtfClientResultOf(&snCtfView{}, clientId, nil, 8); len(empty.Epochs) != 0 || empty.Epochs == nil {
 		t.Fatal("a client before the first root")
+	}
+	// a candidate of an epoch without a draw has no units in a draw
+	view.Epochs[1].Drawn = false
+	candidate := &snCtfCensusMember{Role: snCtfRoleProvider, Candidate: true, Country: "is", DrawCountry: "is", UnitFamily: 4}
+	if role := view.clientRole(view.Epochs[1], &snCtfClientEpochFacts{Members: map[int]*snCtfCensusMember{snCtfRoleProvider: candidate}}, snCtfRoleProvider); role.UnitsInDraw != nil || !role.Candidate {
+		t.Fatalf("role %+v", role)
 	}
 }
 
@@ -597,7 +597,7 @@ func (self *snCtfTestSource) ClientEpochs(context.Context, *snCtfView, server.Id
 
 // withSnCtfTestSource serves the routes from source, behind a load balancer
 // that answers for origins.
-func withSnCtfTestSource(t *testing.T, source snCtfSource, origins ...string) {
+func withSnCtfTestSource(t testing.TB, source snCtfSource, origins ...string) {
 	t.Helper()
 	sourceOf, corsOrigins := snCtfSourceOf, snOperatorCorsOrigins
 	snCtfSourceOf = func() (snCtfSource, error) {
@@ -606,7 +606,7 @@ func withSnCtfTestSource(t *testing.T, source snCtfSource, origins ...string) {
 		}
 		return source, nil
 	}
-	snOperatorCorsOrigins = func() []string { return origins }
+	snOperatorCorsOrigins = func() ([]string, bool) { return origins, true }
 	snCtfResetViewCache()
 	t.Cleanup(func() {
 		snCtfSourceOf, snOperatorCorsOrigins = sourceOf, corsOrigins
@@ -729,9 +729,17 @@ func TestSnOperatorCors(t *testing.T) {
 			t.Fatalf("origin %q: %v, want %v", origin, values, want)
 		}
 	}
-	snOperatorCorsOrigins = func() []string { return []string{"*"} }
+	snOperatorCorsOrigins = func() ([]string, bool) { return []string{"*"}, true }
 	if values := serveSnCtf(SnOpenApi, "/sn/openapi.yml").Header().Values("Access-Control-Allow-Origin"); values != nil {
 		t.Fatalf("with * on the list: %v", values)
+	}
+	// while the list is unknown, none: never a second value for the
+	// operator's own sites
+	snOperatorCorsOrigins = func() ([]string, bool) { return nil, false }
+	for _, origin := range []string{"", "https://example.com", "https://ur.xyz"} {
+		if values := serveSnCtf(SnOpenApi, "/sn/openapi.yml", "Origin", origin).Header().Values("Access-Control-Allow-Origin"); values != nil {
+			t.Fatalf("origin %q with the list unknown: %v", origin, values)
+		}
 	}
 	services := &snOperatorServicesYaml{}
 	if err := yaml.Unmarshal([]byte("versions:\n  - services:\n      api:\n        cors_origins: [https://ur.xyz, https://ur.io]\n      mcp:\n        cors_origins_from: api\n  - services:\n      api:\n        cors_origins: [https://old.example]\n"), services); err != nil {

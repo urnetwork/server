@@ -817,34 +817,28 @@ type snCtfEpochDetail struct {
 	// the census's counts; zero without one
 	Candidates     int64
 	ExcusedSamples int
-	// every miner of the census, when they are still kept: the exclusion
-	// counts follow the API's order of rules
-	Members []*snCtfCensusMember
-	// the census's exclusion rows, which count under the lowest-numbered
-	// reason, for when the members are no longer kept
+	// the census's exclusion rows: each miner counted once, under the
+	// lowest-numbered reason that excluded it (sn ctf.Reason)
 	Exclusions []*snCtfExclusion
 	Draw       *snCtfDraw
 	Pending    []*snCtfPendingAward
 }
 
+// excluded are the exclusion counts of the census's published exclusion
+// object, by role and reason name: what anyone can check against the
+// committed census, and the same for good, as an immutable answer must be.
+// The object counts a miner that failed several rules under the census's
+// lowest-numbered reason (sn ctf.Reason order), which is not always the first
+// of operator.yml's CtfExclusionReason order (presence before no_wallet); the
+// census members that tell the two apart are pruned after 60 epochs.
 func (self *snCtfEpochDetail) excluded() SnCtfExcluded {
 	var excluded SnCtfExcluded
-	count := func(role int) *SnCtfExclusionCounts {
-		if role == snCtfRoleExtender {
-			return &excluded.Extenders
-		}
-		return &excluded.Providers
-	}
-	if 0 < len(self.Members) {
-		for _, member := range self.Members {
-			if !member.Candidate {
-				count(member.Role).add(snCtfFirstFailed(member.Failed), 1)
-			}
-		}
-		return excluded
-	}
 	for _, exclusion := range self.Exclusions {
-		count(exclusion.Role).add(exclusion.Reason, exclusion.Count)
+		count := &excluded.Providers
+		if exclusion.Role == snCtfRoleExtender {
+			count = &excluded.Extenders
+		}
+		count.add(exclusion.Reason, exclusion.Count)
 	}
 	return excluded
 }
@@ -982,7 +976,8 @@ func (self *snCtfView) clientRole(epoch *snCtfEpoch, facts *snCtfClientEpochFact
 	country := member.Country
 	if member.Candidate {
 		country = member.DrawCountry
-		if index, ok := snCtfCountryIndex()[country]; ok {
+		// a draw that ran holds its unit
+		if index, ok := snCtfCountryIndex()[country]; ok && epoch.Drawn && 0 < epoch.pot(index, role).Units {
 			units := int64(epoch.pot(index, role).Units)
 			answer.UnitsInDraw = &units
 		}

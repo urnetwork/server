@@ -268,6 +268,11 @@ func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, col
 	deploymentKey := cfg.DeploymentKey()
 	finalized := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, noId)
 	pending := model.GetStLedgerV2PendingRoot(ctx, deploymentKey, noId)
+	if finalized == nil && pending == nil && !recorded {
+		// no root holds any account of the pool, like the capture the flag
+		// pool's before its first
+		return nil, nil
+	}
 	var tree *merkle.LedgerSumTree
 	var finalizedAccounts, pendingAccounts []merkle.LedgerAccount
 	var err error

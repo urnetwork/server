@@ -109,6 +109,7 @@ func snOperatorCorsOriginsOf(services *snOperatorServicesYaml, service string) [
 var snOperatorCorsOriginsCache struct {
 	lock     sync.Mutex
 	origins  []string
+	known    bool
 	readTime time.Time
 }
 
@@ -116,44 +117,46 @@ var snOperatorCorsOriginsCache struct {
 // process's service: the origins whose requests it answers with their own
 // origin in Access-Control-Allow-Origin. It is read from the same services
 // configuration the load balancer is rendered from, so the two never
-// disagree. Without one it is empty, as on a host with no load balancer in
-// front. Tests replace it.
-var snOperatorCorsOrigins = func() []string {
+// disagree, and a read that fails keeps the last good list. known is false
+// until a read succeeds. Tests replace it.
+var snOperatorCorsOrigins = func() (origins []string, known bool) {
 	cache := &snOperatorCorsOriginsCache
 	cache.lock.Lock()
 	defer cache.lock.Unlock()
 	now := time.Now()
 	if !cache.readTime.IsZero() && now.Sub(cache.readTime) < snOperatorCorsOriginsTtl {
-		return cache.origins
+		return cache.origins, cache.known
 	}
 	cache.readTime = now
 	service, err := server.Service()
 	if err != nil {
 		service = snOperatorDefaultService
 	}
-	var origins []string
 	server.HandleError(func() {
 		resource, err := server.Vault.SimpleResource("services.yml")
 		if err != nil {
+			glog.Infof("[sn]no services configuration, so the load balancer's origins are unknown: %s\n", err)
 			return
 		}
 		var services snOperatorServicesYaml
 		if err := resource.UnmarshalYamlE(&services); err != nil {
-			glog.Infof("[sn]services configuration does not parse; every origin is answered with *: %s\n", err)
+			glog.Errorf("[sn]services configuration does not parse, so the load balancer's origins are unknown: %s\n", err)
 			return
 		}
-		origins = snOperatorCorsOriginsOf(&services, service)
+		cache.origins, cache.known = snOperatorCorsOriginsOf(&services, service), true
 	})
-	cache.origins = origins
-	return origins
+	return cache.origins, cache.known
 }
 
 // SnOperatorCors sets the answer's one Access-Control-Allow-Origin: "*",
 // unless the load balancer answers for the request's origin itself, which it
 // does for the origins on its allowlist (and for every origin when the list
-// holds "*"). Two values would make a browser refuse the answer.
+// holds "*"). Two values would make a browser refuse the answer, so while the
+// allowlist is unknown the api sends none: the operator's own sites still read
+// the answer through the load balancer's.
 func SnOperatorCors(w http.ResponseWriter, r *http.Request) {
-	if snOperatorOriginAnsweredByLb(r.Header.Get("Origin"), snOperatorCorsOrigins()) {
+	origins, known := snOperatorCorsOrigins()
+	if !known || snOperatorOriginAnsweredByLb(r.Header.Get("Origin"), origins) {
 		return
 	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
