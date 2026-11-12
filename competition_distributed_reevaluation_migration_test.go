@@ -7,6 +7,23 @@ import (
 	"testing"
 )
 
+// Captured main's published tail must keep its exact order before the local
+// recovery append. Resolve positions from actual registered migration objects,
+// not an assumed head or a hard-coded replacement for a published identity.
+func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *testing.T) {
+	versions := []int{CtfSchemaMigrationVersion(), NetworkPingTargetEvidenceSchemaMigrationVersion(),
+		NetworkExtenderAddressPortsSchemaMigrationVersion(), CtfAwardNetworkMigrationVersion(), CompetitionDistributedReevaluationMigrationVersion()}
+	for index, version := range versions {
+		if version < 1 || index > 0 && version != versions[index-1]+1 {
+			t.Fatal("captured published migration tail was moved, omitted or overwritten", versions)
+		}
+	}
+	if versions[len(versions)-1] != MigrationCount() {
+		t.Fatal("local recovery must follow the entire captured origin tail", versions, MigrationCount())
+	}
+	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], MigrationCount())
+}
+
 // Deleting only each explicit addition recovers the complete reviewed old
 // function. A broad replacement or silent gate removal changes these bytes.
 func TestCompetitionDistributedRecoveryMigrationPreservesPredecessorGuards(t *testing.T) {
