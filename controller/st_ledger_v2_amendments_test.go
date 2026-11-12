@@ -36,8 +36,8 @@ func (self *stAmendmentTestStore) Save(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-// stAmendmentTestSite serves a published file and pins key as the signer of
-// chain 964 sn 25, through the seams, for the test's life.
+// Serves a published file and pins key as the signer of chain 964 sn 25,
+// through the seams, for the test's life.
 type stAmendmentTestSite struct {
 	key    *ecdsa.PrivateKey
 	served atomic.Value
@@ -86,12 +86,12 @@ func newStAmendmentTestSite(t *testing.T) *stAmendmentTestSite {
 }
 
 func resetStAmendmentSources() {
-	stAmendmentSourcesLock.Lock()
-	defer stAmendmentSourcesLock.Unlock()
-	stAmendmentSources = map[model.StDeploymentKey]*amendment.Source{}
+	stDeploymentKeyAmendmentSourcesLock.Lock()
+	defer stDeploymentKeyAmendmentSourcesLock.Unlock()
+	stDeploymentKeyAmendmentSources = map[model.StDeploymentKey]*amendment.Source{}
 }
 
-// publish serves a file of the signed extender entries for no 1 from each of
+// Serves a file of the signed extender entries for no 1 from each of
 // epochs.
 func (self *stAmendmentTestSite) publish(t *testing.T, epochs ...uint64) {
 	t.Helper()
@@ -114,7 +114,7 @@ func (self *stAmendmentTestSite) publish(t *testing.T, epochs ...uint64) {
 	self.served.Store([]byte(file.String()))
 }
 
-// stAmendmentTestConfig is a mainnet operator's st.yml with the given blocks.
+// A mainnet operator's st.yml with the given blocks.
 func stAmendmentTestConfig(t *testing.T, document string) *StConfig {
 	t.Helper()
 	var file stVaultFile
@@ -165,7 +165,7 @@ func TestStLedgerV2AmendmentsFromSignedEntry(t *testing.T) {
 	} else if got, _ := again.extenders(context.Background(), 8); got.FirstEpoch != 8 {
 		t.Fatalf("an outage dropped the entry: %+v", got)
 	}
-	if len(site.alerts) != 1 || !strings.Contains(site.alerts[0], StLedgerV2AlertAmendments) {
+	if len(site.alerts) != 1 || !strings.Contains(site.alerts[0], stLedgerV2AlertAmendments) {
 		t.Fatalf("alerts %v", site.alerts)
 	}
 }
@@ -291,10 +291,10 @@ func TestStExtenderPoolSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pool.measurement) != 1 || !pool.measurement[measurement] || len(pool.declared) != 1 || !pool.declared[declared] {
+	if len(pool.measurementNetworkIds) != 1 || !pool.measurementNetworkIds[measurement] || len(pool.declaredNetworkIds) != 1 || !pool.declaredNetworkIds[declared] {
 		t.Fatalf("pool %+v", pool)
 	}
-	if pool, err := stExtenderPoolSettings(stAmendmentTestConfig(t, "enabled: false\n")); err != nil || len(pool.measurement) != 0 || len(pool.declared) != 0 {
+	if pool, err := stExtenderPoolSettings(stAmendmentTestConfig(t, "enabled: false\n")); err != nil || len(pool.measurementNetworkIds) != 0 || len(pool.declaredNetworkIds) != 0 {
 		t.Fatalf("no block: %+v, %v", pool, err)
 	}
 	for _, document := range []string{
@@ -314,7 +314,7 @@ func TestStExtenderPoolSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pool, err := stExtenderPoolSettings(testnet); err != nil || !pool.declared[declared] || pool.declared[measurement] {
+	if pool, err := stExtenderPoolSettings(testnet); err != nil || !pool.declaredNetworkIds[declared] || pool.declaredNetworkIds[measurement] {
 		t.Fatalf("testnet reads %+v, %v", pool, err)
 	}
 }

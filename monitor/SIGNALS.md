@@ -22738,6 +22738,42 @@ The count is distinct invoices; the ages are first-seen ages:
   check the chain on a second source, then clear `crypto_scan_cursor.recent_blocks`
   for `btc`: the scan reads its reorg window again from the cursor.
 
+Received but never credited (support inbox 6584, 6692, 6729: seven 40 USDC
+payments of 2025-09 to 2026-08 reached our Solana receivers, were never
+credited, and nothing told anyone). Every payment the rails receive and do
+not credit is counted per rail by the subscriptions snapshot as
+`urnetwork_subscription_payments_uncredited{rail}`, with
+`urnetwork_subscription_payments_uncredited_oldest_age_seconds{rail}`, once it is
+30 minutes old by default (`model.SubscriptionMetricsSettings.UncreditedMinAge`): `usdc_solana`
+(a `solana_unfulfilled_payment` row, written by the Helius webhook, the
+reconcile or its receiver leg), each crypto coin (a `crypto_payment_receipt`
+in `seen`, `confirmed` or `review`), and `gamma` (a spent `gamma_charge` whose
+intent is neither credited nor voided). The panel is "received payments not
+credited" on the subscriptions dashboard. The alerts read the same rows
+directly: a Solana row pages as `payment-solana-unfulfilled` above, a gamma
+charge as §2.22a, and the crypto receipts no class above names page or warn
+here, per coin, with first-seen ages:
+
+- `payment-received-uncredited` (PAGE): a receipt the scanner should have
+  credited by itself is still in the mempool or in a block two hours after it
+  was first seen (`PaymentFailuresSettings.ReceivedPendingAge`) (past the slowest coin's credit depth and past
+  `crypto-scanner-stalled`, so an outage pages as a stall first; a double spend
+  counts only once mined), or its credit failed five times in a row
+  (`credit_failed`). The customer paid and has nothing. Read the taskworker log
+  (`[cryptopay]`) and `bringyourctl crypto show`, fix the credit's cause, and
+  let the scanner credit it; a `credit_failed` receipt is credited with
+  `bringyourctl crypto credit` after review. Never credit twice.
+- `payment-received-held` (WARN): a receipt held for an operator or the
+  customer that no class above names, 30 minutes after it was first seen
+  (`PaymentFailuresSettings.ReceivedHeldAge`):
+  `underpaid`, `late_underpaid`, `extra`, `unknown_address`, `voided`,
+  `orphaned`, or a sanctions or shape hold that names no invoice. Match it to
+  its support thread; credit one that covers what was bought with
+  `bringyourctl crypto credit` after review, or keep it for the customer's
+  request with a documented disposition. Crypto returns wait for the
+  customer's request (owner, 2026-11-11): never return or offer one
+  unprompted, and never credit on an address or amount match alone.
+
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal
 start ages, not inferred deletion times. No account, email, network, payment

@@ -659,16 +659,20 @@ type solanaReconcileLookups struct {
 	clientSession *session.ClientSession
 }
 
+// The open intent one of references names, on the run's session.
 func (self *solanaReconcileLookups) searchIntentsByReference(references []string) (*model.PaymentIntentSearchResult, error) {
 	return model.SearchPaymentIntentsInConn(self.connOwner, references, self.clientSession)
 }
 
+// Whether the signature consumed an intent, on the run's session.
 func (self *solanaReconcileLookups) isPaymentCompleted(signature string) bool {
 	return model.IsSolanaPaymentCompletedInConn(self.connOwner, self.clientSession.Ctx, signature)
 }
 
+// Every intent quoted the amount, on the run's session: the run holds its
+// connection for its whole pass, so a second one is never taken.
 func (self *solanaReconcileLookups) intentsByAmountMicro(amountMicro int64, minExpiresAt time.Time) ([]*model.SolanaPaymentIntent, error) {
-	return model.ListSolanaPaymentIntentsByAmountMicro(self.clientSession.Ctx, amountMicro, minExpiresAt)
+	return model.ListSolanaPaymentIntentsByAmountMicroInConn(self.connOwner, self.clientSession.Ctx, amountMicro, minExpiresAt)
 }
 
 // reconcileSolanaChainReferences is leg 3 of the Solana reconcile: for every
@@ -722,7 +726,7 @@ func reconcileSolanaChainReferences(run *paymentReconcileRun) (bool, error) {
 			}
 			read += 1
 			run.examine(store)
-			solanaChainAct(run, store, signature.Signature, solanaDecidePayment(solanaTransactionFromParsed(signature.Signature, parsed), lookups))
+			solanaChainAct(run, store, signature.Signature, solanaDecidePayment(solanaTransactionFromParsed(signature.Signature, parsed), lookups), solanaChainLegName)
 		}
 	}
 	run.storeDetail(store)["chain_references"] = len(references)
@@ -730,8 +734,20 @@ func reconcileSolanaChainReferences(run *paymentReconcileRun) (bool, error) {
 	return true, nil
 }
 
-// solanaChainAct carries out one decision as the webhook does.
-func solanaChainAct(run *paymentReconcileRun, store string, signature string, decision *solanaPaymentDecision) {
+// The legs that act on a webhook decision, as their events name them.
+const (
+	// leg 3: the transactions that name an open intent's reference
+	solanaChainLegName = "chain"
+	// the receiver leg: every transaction of our receivers' USDC token
+	// accounts (solana_receiver_sweep.go)
+	solanaReceiverLegName = "receiver"
+)
+
+// Carries out one decision as the webhook does: a credit only through the
+// intent's one-shot (solanaChainCredit), an unfulfilled record for an
+// operator, or nothing. ok = false when it failed and recorded an error event,
+// so the receiver leg reads the transaction again next run.
+func solanaChainAct(run *paymentReconcileRun, store string, signature string, decision *solanaPaymentDecision, leg string) (ok bool) {
 	ctx := run.clientSession.Ctx
 	switch decision.action {
 	case solanaPaymentActionError:
@@ -741,38 +757,40 @@ func solanaChainAct(run *paymentReconcileRun, store string, signature string, de
 		}
 		run.record(store, model.PaymentReconcileActionError, nil, signature, map[string]any{
 			"error": message,
-			"leg":   "chain",
+			"leg":   leg,
 		})
+		return false
 	case solanaPaymentActionRecord:
 		if run.dryRun {
-			return
+			return true
 		}
 		if err := solanaChainRecord(run.connOwner, ctx, decision.unfulfilled); err != nil {
 			run.record(store, model.PaymentReconcileActionError, nil, signature, map[string]any{
 				"error": err.Error(),
-				"leg":   "chain",
+				"leg":   leg,
 			})
-			return
+			return false
 		}
-		glog.Infof("[reconcile]solana: a payment no webhook delivered bought nothing; recorded unfulfilled (%s)\n", decision.skipMessage)
+		glog.Infof("[reconcile]solana: a payment no webhook delivered bought nothing; recorded unfulfilled by the %s leg (%s)\n", leg, decision.skipMessage)
 	case solanaPaymentActionCredit:
-		details := map[string]any{"reference": decision.intent.PaymentReference, "leg": "chain"}
+		details := map[string]any{"reference": decision.intent.PaymentReference, "leg": leg}
 		if run.dryRun {
 			run.record(store, model.PaymentReconcileActionWouldCredit, decision.intent.NetworkId, signature, details)
-			return
+			return true
 		}
 		credited, err := solanaChainCredit(run.connOwner, run.clientSession, decision.intent, signature, decision.tokenAmountUsd)
 		if err != nil {
 			run.record(store, model.PaymentReconcileActionError, decision.intent.NetworkId, signature, map[string]any{
 				"error": err.Error(),
-				"leg":   "chain",
+				"leg":   leg,
 			})
-			return
+			return false
 		}
 		if credited {
 			solanaChainOnboarding(run.clientSession, decision.intent)
 			run.record(store, model.PaymentReconcileActionCredited, decision.intent.NetworkId, signature, details)
-			glog.Infof("[reconcile]solana: credited reference %s from the chain; its webhook delivery was lost\n", decision.intent.PaymentReference)
+			glog.Infof("[reconcile]solana: credited reference %s from the chain (%s leg); its webhook delivery was lost\n", decision.intent.PaymentReference, leg)
 		}
 	}
+	return true
 }

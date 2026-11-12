@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/netip"
 
 	"github.com/urfoundation/sn/ledger"
 	"github.com/urnetwork/glog"
@@ -29,17 +28,16 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// StLedgerV2UsageStepExtenderCensus is the usage step that captures an epoch's
-// extender census.
+// The usage step that captures an epoch's extender census.
 const StLedgerV2UsageStepExtenderCensus = "extender_census"
 
-// errStLedgerV2ExtenderCensusMissing is a build of an epoch the amendment
-// covers before its census is captured; the build retries.
+// A build of an epoch the amendment covers before its census is captured; the
+// build retries.
 var errStLedgerV2ExtenderCensusMissing = errors.New("st ledger v2: the epoch's extender census is not captured yet")
 
-// stLedgerV2ExtenderCensusDue reports whether an epoch's census is still to
-// be captured. A failed read, such as a table not migrated yet, is logged and
-// plans nothing, so it can never stop the users or the statement.
+// Reports whether an epoch's census is still to be captured. A failed read,
+// such as a table not migrated yet, is logged and plans nothing, so it can
+// never stop the users or the statement.
 func stLedgerV2ExtenderCensusDue(ctx context.Context, cfg *StConfig, epoch uint64) (due bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -50,9 +48,9 @@ func stLedgerV2ExtenderCensusDue(ctx context.Context, cfg *StConfig, epoch uint6
 	return model.GetStLedgerV2ExtenderCensus(ctx, cfg.DeploymentKey(), cfg.NoId, epoch) == nil
 }
 
-// stLedgerV2CaptureExtenderCensus captures an epoch's census once, as its
-// records stand when the step runs, as soon as the epoch's end boundary is
-// finalized. An epoch already captured is never captured again.
+// Captures an epoch's census once, as its records stand when the step runs, as
+// soon as the epoch's end boundary is finalized. An epoch already captured is
+// never captured again.
 func stLedgerV2CaptureExtenderCensus(ctx context.Context, cfg *StConfig, client StClient, epoch uint64) *StPublishOutcome {
 	key := cfg.DeploymentKey()
 	if captured := model.GetStLedgerV2ExtenderCensus(ctx, key, cfg.NoId, epoch); captured != nil {
@@ -65,7 +63,15 @@ func stLedgerV2CaptureExtenderCensus(ctx context.Context, cfg *StConfig, client 
 	if authority == nil || authority.Epoch != epoch || authority.PolicyHash != cfg.PolicyHash {
 		return stLedgerV2UsageRetry(fmt.Sprintf("the payout authority of epoch %d is absent or differs", epoch))
 	}
-	rows, err := stLedgerV2ExtenderCensusRows(ctx, cfg, client, authority)
+	// the census from the extender directory under the shared eligibility
+	// rules (extender_eligibility.go), the rules capture the flag's census
+	// judges extenders by
+	records := model.GetStExtenderCensusRecords(ctx, authority.StartTime, authority.EndTime)
+	rules, err := stExtenderEligibilityRules(ctx, cfg, client, authority, records)
+	if err != nil {
+		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d extender census: %s", epoch, err))
+	}
+	rows, err := model.BuildStExtenderCensus(records, rules)
 	if err != nil {
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d extender census: %s", epoch, err))
 	}
@@ -77,81 +83,19 @@ func stLedgerV2CaptureExtenderCensus(ctx context.Context, cfg *StConfig, client 
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d extender census captured at %s: %d rows, %d eligible extenders in %d units", epoch, captured.CaptureTime.UTC().Format("2006-01-02T15:04:05Z"), captured.Rows, eligible, units)}
 }
 
+// A census's eligible extenders and the units that hold them.
 func stExtenderCensusCounts(rows []ledger.CensusRow) (eligible int, units int) {
-	seen := map[[32]byte]bool{}
+	seenUnits := map[[32]byte]bool{}
 	for i := range rows {
 		if rows[i].Eligible() {
 			eligible++
-			seen[rows[i].Unit] = true
+			seenUnits[rows[i].Unit] = true
 		}
 	}
-	return eligible, len(seen)
+	return eligible, len(seenUnits)
 }
 
-// stLedgerV2ExtenderCensusRows builds an epoch's census from the extender
-// directory, under the rules provider rows follow: units keyed as the head's
-// egress prefix (§8.4), coldkeys by the provider rows' wallet selection, and
-// head bindings at either of the epoch's boundary blocks. The census row
-// publishes the coldkey it selected; the resolutions are not retained here,
-// so the census can never disagree with the retention the provider rows make
-// of the same clients' wallets.
-func stLedgerV2ExtenderCensusRows(ctx context.Context, cfg *StConfig, client StClient, authority *StPayoutEpochAuthority) ([]ledger.CensusRow, error) {
-	pool, err := stExtenderPoolSettings(cfg)
-	if err != nil {
-		return nil, err
-	}
-	records := model.GetStExtenderCensusRecords(ctx, authority.StartTime, authority.EndTime)
-	settings := VerifySettings()
-	rules := &model.StExtenderCensusRules{
-		Unit:      func(ip netip.Addr) [32]byte { return model.VerifyEgressIpHashWithSettings(ip, settings) },
-		Durable:   map[server.Id]bool{},
-		Declared:  pool.declared,
-		Coldkeys:  map[server.Id][32]byte{},
-		HeadBound: map[server.Id]bool{},
-	}
-	if extenders, err := EnvExtenderConfig(); err == nil {
-		for _, networkId := range extenders.DurableNetworkIds() {
-			rules.Durable[networkId] = true
-		}
-	}
-	if len(records) == 0 {
-		return model.BuildStExtenderCensus(records, rules)
-	}
-	// the provider clients, once each
-	seen := map[server.Id]bool{}
-	usages := []*model.StProviderUsage{}
-	clientIds := [][16]byte{}
-	for _, record := range records {
-		if !seen[record.ClientId] {
-			seen[record.ClientId] = true
-			usages = append(usages, &model.StProviderUsage{ClientId: record.ClientId, NetworkId: record.NetworkId})
-			clientIds = append(clientIds, stId16(record.ClientId))
-		}
-	}
-	work, workConfigured, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
-	if err != nil {
-		return nil, err
-	}
-	resolutions, err := stLedgerV2Wallets(ctx, cfg, work, workConfigured, authority, usages)
-	if err != nil {
-		return nil, err
-	}
-	for clientId, resolution := range resolutions {
-		if resolution != nil {
-			rules.Coldkeys[clientId] = resolution.Coldkey
-		}
-	}
-	excluded, err := stHeadExcludedClients(ctx, cfg, client, authority.Epoch, authority.Start.Block, authority.End.Block, clientIds)
-	if err != nil {
-		return nil, err
-	}
-	for clientId := range excluded {
-		rules.HeadBound[server.Id(clientId)] = true
-	}
-	return model.BuildStExtenderCensus(records, rules)
-}
-
-// stLedgerV2CapturedCensus reads an epoch's captured census.
+// Reads an epoch's captured census.
 func stLedgerV2CapturedCensus(ctx context.Context, cfg *StConfig, epoch uint64) ([]ledger.CensusRow, error) {
 	captured := model.GetStLedgerV2ExtenderCensus(ctx, cfg.DeploymentKey(), cfg.NoId, epoch)
 	if captured == nil {
@@ -167,13 +111,12 @@ func stLedgerV2CapturedCensus(ctx context.Context, cfg *StConfig, epoch uint64) 
 	return rows, nil
 }
 
-// stLedgerV2RecordedExtenders is a recorded epoch's extender component as
-// ledger.Build takes it again: the Z it was built with, and its census read
-// back from the census chunks it was built with, which the build must
-// reproduce (fixed inputs). A component's presence must match the amendment:
-// rows recorded without one for an epoch the amendment covers, or with one for
-// an epoch it does not, are refused, and only an operator rebuild of the
-// epoch builds both again.
+// A recorded epoch's extender component as ledger.Build takes it again: the Z
+// it was built with, and its census read back from the census chunks it was
+// built with, which the build must reproduce (fixed inputs). A component's
+// presence must match the amendment: rows recorded without one for an epoch the
+// amendment covers, or with one for an epoch it does not, are refused, and only
+// an operator rebuild of the epoch builds both again.
 func stLedgerV2RecordedExtenders(ctx context.Context, covered *StLedgerV2CoveredEpoch, amendment model.StExtenderAmendment) (*ledger.ExtenderInput, error) {
 	recorded := covered.Rows.Extenders
 	switch inForce := amendment.InForce(covered.Epoch); {
@@ -205,10 +148,10 @@ func stLedgerV2RecordedExtenders(ctx context.Context, covered *StLedgerV2Covered
 	return &ledger.ExtenderInput{Bytes: recorded.Bytes, Census: census, Chunks: refs}, nil
 }
 
-// stLedgerV2ExtenderParts is what the epoch-rows record keeps of an epoch's
-// extender pool beside the component the ledger builds: Z and its parts, and
-// the contracts and payer networks behind it. The census chunks are the
-// build's (stLedgerV2EpochExtenders).
+// What the epoch-rows record keeps of an epoch's extender pool beside the
+// component the ledger builds: Z and its parts, and the contracts and payer
+// networks behind it. The census chunks are the build's
+// (stLedgerV2EpochExtenders).
 func stLedgerV2ExtenderParts(pool *model.StEpochExtenderPool) *model.StLedgerV2EpochExtenders {
 	return &model.StLedgerV2EpochExtenders{
 		Bytes: pool.Bytes(), IntraPlatform: uint64(pool.IntraPlatform), IntraNetwork: uint64(pool.IntraNetwork),
@@ -216,10 +159,9 @@ func stLedgerV2ExtenderParts(pool *model.StEpochExtenderPool) *model.StLedgerV2E
 	}
 }
 
-// stLedgerV2EpochExtenders is a built epoch's extender component as the
-// epoch-rows record keeps it, nil without one: the build's Z and census
-// chunks, with the parts its input held. A component built without parts, or
-// with parts of another Z, is refused.
+// A built epoch's extender component as the epoch-rows record keeps it, nil
+// without one: the build's Z and census chunks, with the parts its input held.
+// A component built without parts, or with parts of another Z, is refused.
 func stLedgerV2EpochExtenders(epoch *ledger.EpochAllocation, parts *model.StLedgerV2EpochExtenders) (*model.StLedgerV2EpochExtenders, error) {
 	switch {
 	case epoch.Extenders == nil && parts == nil:

@@ -184,16 +184,22 @@ func collectSubscriptionMetrics(collector *subscriptionMetricsCollector) []prome
 // test; timestamp families use their own time-valued marker.
 func uniformSubscriptionMetricsSnapshot(value int64, sourceTime time.Time) *model.SubscriptionMetricsSnapshot {
 	snapshot := &model.SubscriptionMetricsSnapshot{
-		ActiveAccounts:           map[string]int64{},
-		TrialsActive:             map[model.SubscriptionMetricsStorePlan]int64{},
-		NewPaidAccounts:          map[model.SubscriptionMetricsStoreWindow]int64{},
-		EngagedAccounts:          map[model.SubscriptionMetricsStoreWindow]int64{},
-		ChurnedAccounts:          map[model.SubscriptionMetricsStoreWindow]int64{},
-		ReconciliationEvents:     map[model.SubscriptionMetricsStoreActionWindow]int64{},
-		ReconciliationHeartbeat:  &sourceTime,
-		ReconciliationWatermarks: map[string]time.Time{},
-		DataPackFulfillments:     map[model.SubscriptionMetricsDataPackWindow]int64{},
-		DataPackBytes:            map[model.SubscriptionMetricsDataPackWindow]int64{},
+		ActiveAccounts:             map[string]int64{},
+		TrialsActive:               map[model.SubscriptionMetricsStorePlan]int64{},
+		NewPaidAccounts:            map[model.SubscriptionMetricsStoreWindow]int64{},
+		EngagedAccounts:            map[model.SubscriptionMetricsStoreWindow]int64{},
+		ChurnedAccounts:            map[model.SubscriptionMetricsStoreWindow]int64{},
+		ReconciliationEvents:       map[model.SubscriptionMetricsStoreActionWindow]int64{},
+		ReconciliationHeartbeat:    &sourceTime,
+		ReconciliationWatermarks:   map[string]time.Time{},
+		DataPackFulfillments:       map[model.SubscriptionMetricsDataPackWindow]int64{},
+		DataPackBytes:              map[model.SubscriptionMetricsDataPackWindow]int64{},
+		UncreditedPayments:         map[string]int64{},
+		UncreditedOldestAgeSeconds: map[string]int64{},
+	}
+	for _, rail := range model.SubscriptionMetricsUncreditedRails() {
+		snapshot.UncreditedPayments[rail] = value
+		snapshot.UncreditedOldestAgeSeconds[rail] = value
 	}
 	stores := append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreDeduplicated)
 	for _, store := range stores {
@@ -246,9 +252,10 @@ func requireSubscriptionMetricsGeneration(
 	// bittensor, bitcoin, ethereum, gamma): monero and zcash added 58 samples
 	// to the 152 of four stores, and the active trials 21 (seven stores by
 	// three plans); bittensor, bitcoin and ethereum add 29 samples and 3 trial
-	// series each (96), and gamma 32 more
-	if len(metrics) != 359 {
-		t.Fatalf("collected metrics = %d, want 359 bounded samples", len(metrics))
+	// series each (96), and gamma 32 more; the received payments not credited
+	// add a count and an oldest age for each of eight rails (16)
+	if len(metrics) != 375 {
+		t.Fatalf("collected metrics = %d, want 375 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric

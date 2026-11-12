@@ -11,8 +11,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// StLedgerV2ExtenderShadow is an epoch's recorded shadow report: the report's
-// bytes and their ledger object reference.
+// An epoch's recorded shadow report: the report's bytes and their ledger object
+// reference.
 type StLedgerV2ExtenderShadow struct {
 	Epoch      uint64
 	ReportRef  string
@@ -20,9 +20,9 @@ type StLedgerV2ExtenderShadow struct {
 	CreateTime time.Time
 }
 
-// RecordStLedgerV2ExtenderShadow records an epoch's shadow report once: a report
-// already recorded is kept, and returned, whatever this one holds, so the first
-// report built for an epoch is the one reviewed.
+// Records an epoch's shadow report once: a report already recorded is kept, and
+// returned, whatever this one holds, so the first report built for an epoch is
+// the one reviewed.
 func RecordStLedgerV2ExtenderShadow(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, reportRef string, report []byte) *StLedgerV2ExtenderShadow {
 	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -35,8 +35,7 @@ func RecordStLedgerV2ExtenderShadow(ctx context.Context, deploymentKey StDeploym
 	return GetStLedgerV2ExtenderShadow(ctx, deploymentKey, noId, epoch)
 }
 
-// GetStLedgerV2ExtenderShadow is an epoch's recorded shadow report, nil before
-// one is recorded.
+// An epoch's recorded shadow report, nil before one is recorded.
 func GetStLedgerV2ExtenderShadow(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64) *StLedgerV2ExtenderShadow {
 	key := requireStDeploymentKey(deploymentKey)
 	var shadow *StLedgerV2ExtenderShadow

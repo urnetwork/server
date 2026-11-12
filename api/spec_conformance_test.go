@@ -150,6 +150,7 @@ func registry() []specEndpoint {
 		{"POST", "/subscription/check-balance-code", rt(model.CheckBalanceCodeArgs{}), rt(model.CheckBalanceCodeResult{})},
 		{"POST", "/subscription/redeem-balance-code", rt(controller.RedeemBalanceCodeArgs{}), rt(model.RedeemBalanceCodeResult{})},
 		{"POST", "/subscription/create-payment-id", rt(model.SubscriptionCreatePaymentIdArgs{}), rt(model.SubscriptionCreatePaymentIdResult{})},
+		{"POST", "/subscription/verify-stripe-checkout", rt(controller.VerifyStripeCheckoutArgs{}), rt(controller.VerifyStorePurchaseResult{})},
 
 		{"POST", "/device/add", rt(model.DeviceAddArgs{}), rt(model.DeviceAddResult{})},
 		{"POST", "/device/create-share-code", rt(model.DeviceCreateShareCodeArgs{}), rt(model.DeviceCreateShareCodeResult{})},

@@ -283,6 +283,7 @@ func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth
 		store()
 	}()
 	if partitionMissingErr == nil {
+		recordProviderEgressHealthE2e(ctx, health, stored)
 		return
 	}
 	// a day older than the ingest takes is a day retention may have dropped
@@ -293,6 +294,7 @@ func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth
 	_, err = providerEgressHealthHistoryPartitionFamily.EnsureRangeFor(ctx, health.MeasuredAt)
 	server.Raise(err)
 	store()
+	recordProviderEgressHealthE2e(ctx, health, stored)
 	return
 }
 
@@ -399,21 +401,36 @@ func storeProviderEgressHealth(
 			t := health.MeasuredAt.UTC()
 			securityMeasuredAt = &t
 		}
+		// the later legs judged the provider's and the post-quantum outcome
+		// (FP2-PROTOCOL.md §4.1, §12.3), from the judged evidence, for a
+		// scored measured outcome only: a recheck or an outcome on probation
+		// never enters the window, so it stores 0 for both
+		failedLaterLegs, pqOutcome := int16(0), egresshealth.UrlProbePqOutcomeUnmeasured
+		if !unscoredOutcome {
+			failedLaterLegs = health.UrlProbeEvidence.FailedLaterLegs(measuredOk, measuredTotal)
+			pqOutcome = health.UrlProbeEvidence.PqOutcome(measuredTotal)
+		}
 		inserted, err := tx.Exec(ctx, `
 			INSERT INTO provider_egress_health_history
-				(run_id, client_id, measured_at, ok_count, total_count, class_results, tls_authentication_failure, cycle_started_at, url_probe, url_probe_evidence, url_probe_policy_version, url_source, url_probation)
-			VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11,$12,$13)
+				(run_id, client_id, measured_at, ok_count, total_count, class_results, tls_authentication_failure, cycle_started_at, url_probe, url_probe_evidence, url_probe_policy_version, url_source, url_probation, failed_later_legs, pq_outcome)
+			VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15)
 			ON CONFLICT DO NOTHING`,
 			runId, health.ClientId, health.MeasuredAt.UTC(), measuredOk, measuredTotal,
 			measuredClassResultsJson, health.TLSAuthenticationFailure, cycleStartedAt, urlProbe, evidenceJson, policyVersion,
-			int16(health.UrlSource), probation)
+			int16(health.UrlSource), probation, failedLaterLegs, pqOutcome)
 		if err != nil {
 			raiseProviderEgressHealthInsertErr(err, health.MeasuredAt)
 		}
 		if inserted.RowsAffected() == 0 {
 			return
 		}
-		result = ProviderEgressHealthStored{Stored: true, Recheck: recheck, Probation: probation && !recheck}
+		result = ProviderEgressHealthStored{
+			Stored:          true,
+			Recheck:         recheck,
+			Probation:       probation && !recheck,
+			FailedLaterLegs: failedLaterLegs,
+			PqOutcome:       pqOutcome,
+		}
 		// a measured country outcome, scored or not, is paired with the same
 		// provider's general outcomes for the refresh's graduation and
 		// demotion judgements; a recheck is no sample of the site. The pair
@@ -752,12 +769,11 @@ func providerOnlineUrlEvidenceSql(alias string) string {
 	return providerEgressHealthWindowRowsSql(alias) + " AND " + providerOnlineUrlSourceSql(alias)
 }
 
-// The pq_outcome values of a run (FP2-PROTOCOL.md §12.3): 0 unmeasured.
-// todo(fp2): egresshealth.UrlProbePqOutcomePositive and Negative once the
-// evidence migration lands
+// The pq_outcome values of a run the aggregate reads (FP2-PROTOCOL.md
+// §12.3), the ingest's own; 0 is unmeasured.
 const (
-	providerEgressPqOutcomeSqlPositive = 1
-	providerEgressPqOutcomeSqlNegative = 2
+	providerEgressPqOutcomeSqlPositive = egresshealth.UrlProbePqOutcomePositive
+	providerEgressPqOutcomeSqlNegative = egresshealth.UrlProbePqOutcomeNegative
 )
 
 // The window's aggregate per provider: the newest and oldest outcome, the
