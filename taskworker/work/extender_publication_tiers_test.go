@@ -68,7 +68,7 @@ func TestExtenderPublishTickKeepsRestrictedRecordsOutOfOpenChannels(t *testing.T
 
 		runTestExtenderPublish(t, ctx)
 
-		batch := publisher.onlyBatch(t)
+		batch := publisher.onlyApply(t)
 		canaryAnswered := false
 		for _, upsertSet := range batch.upsertSets {
 			for _, ip := range upsertSet.ips {
