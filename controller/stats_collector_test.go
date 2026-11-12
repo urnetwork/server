@@ -305,6 +305,14 @@ func TestStatsRefreshDbExportsExtenderAndContractGauges(t *testing.T) {
 		if value := testStatsGaugeValue(t, statsOnlineExtendersGauge); value != 3 {
 			t.Fatalf("online_extenders = %f, want 3", value)
 		}
+		// the supply gauges of the same refresh (stats_extender_supply.go):
+		// three keys first activated today, none revoked
+		if value := testStatsGaugeValue(t, statsExtendersCreated24hGauge); value != 3 {
+			t.Fatalf("extenders_created_24h = %f, want 3", value)
+		}
+		if value := testStatsGaugeValue(t, statsExtendersRevoked24hGauge); value != 0 {
+			t.Fatalf("extenders_revoked_24h = %f, want an exported zero", value)
+		}
 
 		// the per-country gauge replaces its whole label set, like providers
 		if count := testutil.CollectAndCount(

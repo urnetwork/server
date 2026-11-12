@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "kind": "approved-reversible-temporary-baseline-cleanup/v1",
+  "approval": "Existing approval for clean versioned baseline copies in completed temporary test checkouts.",
+  "temporary_checkout": "/home/by/urnetwork/temp/competition-intake-first-20261028.Ak3hAQdw/server",
+  "retained_commit": "851581785fad2bc15b0bd94c5cf2a91d106e6155",
+  "excluded_subtree": "connect/sim-latency/baseline",
+  "baseline_tracked_files_clean": true,
+  "no_untracked_or_ignored_files_in_excluded_subtree": true,
+  "no_active_process_cwd_reference": true,
+  "process_command_scan_only_matched_its_observer": true,
+  "excluded_subtree_clean_after_operation": true,
+  "unrelated_staged_changes_preserved": true,
+  "staged_patch_sha256_before_and_after": "6f43c7085fdbd3a63c2dd49d42c712434acc518b3f50eae8cdd77e477ac53b33",
+  "canonical_baseline_and_protected_runtime_receipts_preserved": true,
+  "git_objects_logs_patches_preserved": true,
+  "active_checkouts_and_compiler_caches_untouched": true,
+  "qualification_guard_thresholds_unchanged": true,
+  "root_available_bytes_after": 37364355072,
+  "restore_command": "git -C /home/by/urnetwork/temp/competition-intake-first-20261028.Ak3hAQdw/server sparse-checkout disable"
+}

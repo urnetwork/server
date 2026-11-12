@@ -74,6 +74,10 @@ var (
 		Namespace: "urnetwork", Subsystem: "sn_claim_relay", Name: "accounts_refused",
 		Help: "Accounts whose claim is waiting after a refusal: an hour after a refused preflight, the rest of the UTC day after a revert.",
 	})
+	snClaimRelayPoolsUnavailable = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "urnetwork", Subsystem: "sn_claim_relay", Name: "pools_unavailable",
+		Help: "The operator's pools (its pool and, with capture the flag on, its capture the flag pool) whose ledger the relay's latest read could not read: this worker's last pass's, whether it claimed the other pools or, with no pool that has a finalized root readable, ended ledger_unavailable; a pass that ended before reading the ledger carries the previous pass's count. Their accounts wait.",
+	})
 	snClaimRelayLastEstimateGas = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "sn_claim_relay", Name: "last_estimate_gas",
 		Help: "The gas of the last claim preflight. A claim is about 150,000 to 207,000, and the relay stops at 400,000.",
@@ -114,6 +118,7 @@ func init() {
 		snClaimRelayClaimsPaidToday,
 		snClaimRelayRefusalsGauge,
 		snClaimRelayLastEstimateGas,
+		snClaimRelayPoolsUnavailable,
 		snClaimRelayClaims,
 		snClaimRelayClaimNowRequests,
 	)
@@ -168,6 +173,7 @@ func observeSnClaimRelayPass(status *SnClaimRelayStatus) {
 	snClaimRelayOverThresholdGauge.Set(float64(status.OverThreshold))
 	snClaimRelayClaimsPaidToday.Set(float64(status.ClaimsPaidToday))
 	snClaimRelayRefusalsGauge.Set(float64(len(status.Refusals)))
+	snClaimRelayPoolsUnavailable.Set(float64(status.PoolsUnavailable))
 	if 0 < status.LastEstimateGas {
 		snClaimRelayLastEstimateGas.Set(float64(status.LastEstimateGas))
 	}

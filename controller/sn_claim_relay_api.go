@@ -7,6 +7,7 @@ package controller
 // between the relay and the device's own claim.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,6 +67,13 @@ func snClaimRelayClassOf(state string) int {
 	}
 }
 
+// SnClaimRelayArgs are GET /sn/claim-relay's query: Partial (partial=true) asks
+// for the pools that can be read, naming the others in UnavailablePools,
+// rather than an Error for all of them.
+type SnClaimRelayArgs struct {
+	Partial bool
+}
+
 // SnClaimRelayResult is GET /sn/claim-relay. An Error means the balances could not
 // be read: they are unavailable, never zero.
 type SnClaimRelayResult struct {
@@ -80,18 +88,25 @@ type SnClaimRelayResult struct {
 	// days between two Claim now of one coldkey
 	ClaimNowPeriodDays int                    `json:"claim_now_period_days"`
 	Accounts           []*SnClaimRelayAccount `json:"accounts"`
-	Error              *SnClaimRelayError     `json:"error,omitempty"`
+	// With partial=true, the pools whose ledger could not be read, by no_id:
+	// their balances are unavailable, never zero. [] otherwise.
+	UnavailablePools []*StLedgerV2UnavailablePool `json:"unavailable_pools"`
+	Error            *SnClaimRelayError           `json:"error,omitempty"`
 }
 
 type SnClaimRelayError struct {
 	Message string `json:"message"`
 }
 
-// SnClaimRelayAccount is one coldkey's account in the operator's pool.
+// SnClaimRelayAccount is one coldkey's account in one of the operator's pools:
+// its pool or its capture the flag pool.
 type SnClaimRelayAccount struct {
 	ColdkeySs58 string `json:"coldkey_ss58"`
 	NoId        int64  `json:"no_id"`
-	Index       int64  `json:"index"`
+	// the pool's kind, StLedgerV2PoolKind*, and English display label
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
+	Index int64  `json:"index"`
 	// what a claim would pay now, in rao of α
 	ClaimableRao int64 `json:"claimable_rao"`
 	// its TAO value at the last price, in rao of TAO
@@ -150,10 +165,12 @@ func snClaimRelayRao(amount *uint256.Int) int64 {
 }
 
 // One entry's balance as the relay's status judges it, and claim the relay's
-// record of the account's latest paid claim, nil without one. Pure, for the tests.
-// The mirror behind the account is the chain's own read here, so a Reason never
-// says more than what is true at this read.
-func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, entry *StLedgerV2AccountEntry, requested bool, limitUntil time.Time, claim *model.SnClaimRelayClaim, now time.Time) (*SnClaimRelayAccount, error) {
+// record of the account's latest paid claim, nil without one. withDue says
+// another account of the coldkey is due, so the relay claims this one with it
+// when it batches. Pure, for the tests. The mirror behind the account is the
+// chain's own read here, so a Reason never says more than what is true at this
+// read.
+func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, entry *StLedgerV2AccountEntry, requested bool, withDue bool, limitUntil time.Time, claim *model.SnClaimRelayClaim, now time.Time) (*SnClaimRelayAccount, error) {
 	var cumulative, claimed uint256.Int
 	if err := cumulative.SetFromDecimal(entry.Cumulative); err != nil {
 		return nil, err
@@ -170,9 +187,12 @@ func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, ent
 		price = parsed
 	}
 	value := snClaimRelayValueTaoRao(claimable, price)
+	kind, label := StLedgerV2PoolKind(entry.NoId)
 	account := &SnClaimRelayAccount{
 		ColdkeySs58:  coldkeySs58,
 		NoId:         int64(entry.NoId),
+		Kind:         kind,
+		Label:        label,
 		Index:        int64(entry.Index),
 		ClaimableRao: int64(claimable.Uint64()),
 		ValueTaoRao:  value.Int64(),
@@ -199,6 +219,22 @@ func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, ent
 	refusal := status.Refusals[snClaimRelayAccountKey(entry.NoId, entry.Index)]
 	refused := refusal != nil && now.Before(refusal.Until)
 	class := snClaimRelayClassOf(status.State)
+	if 0 < len(status.UnavailablePools) {
+		switch {
+		case slices.Contains(status.UnavailablePools, entry.NoId):
+			// a pool the relay could not read this pass waits, as a paused
+			// relay does
+			if class == snClaimRelayClassMoving || status.State == SnClaimRelayStateLedgerUnavailable {
+				class = snClaimRelayClassPaused
+			}
+		case status.State == SnClaimRelayStateLedgerUnavailable:
+			// the pass said the ledger is unavailable for another pool's
+			// sake: this pool's accounts are claimed
+			class = snClaimRelayClassMoving
+		}
+	}
+	// claimed with a due account of its coldkey in the same batch
+	companion := withDue && status.Batching && snClaimRelayClearsFloor(value)
 	switch {
 	case claimable.IsZero():
 		account.Reason = SnClaimRelayReasonNothingPending
@@ -208,7 +244,7 @@ func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, ent
 		account.Reason = SnClaimRelayReasonRelayPaused
 	case refused:
 		account.Reason = SnClaimRelayReasonRefused
-	case !requested && !snClaimRelayOverThreshold(value):
+	case !requested && !companion && !snClaimRelayOverThreshold(value):
 		account.Reason = SnClaimRelayReasonUnderThreshold
 	case status.State == SnClaimRelayStateCapReached:
 		account.Reason = SnClaimRelayReasonCapReached
@@ -292,57 +328,105 @@ func snClaimRelayNetworkColdkeys(clientSession *session.ClientSession) ([][32]by
 	return coldkeys, nil
 }
 
-// snClaimRelayColdkeyAccounts reads the relay's view of one coldkey's account in
-// the operator's pool: none, or one.
-func snClaimRelayColdkeyAccounts(ctx context.Context, cfg *StConfig, status *SnClaimRelayStatus, coldkey [32]byte, now time.Time) ([]*SnClaimRelayAccount, error) {
-	ledger, err := StLedgerV2Accounts(ctx, coldkey)
+// snClaimRelayColdkeyAccounts reads the relay's view of one coldkey's accounts in
+// the operator's pools, its pool and, while capture the flag is on
+// (stCtfPoolOn), its capture the flag pool, by no_id: none, one or two. partial
+// reads each pool on its own and names those that cannot be read; otherwise any
+// pool that cannot be read is an error.
+func snClaimRelayColdkeyAccounts(ctx context.Context, cfg *StConfig, status *SnClaimRelayStatus, coldkey [32]byte, partial bool, now time.Time) ([]*SnClaimRelayAccount, []*StLedgerV2UnavailablePool, error) {
+	var ledger *StLedgerV2AccountsResult
+	var err error
+	if partial {
+		ledger, err = StLedgerV2AccountsPartial(ctx, coldkey)
+	} else {
+		ledger, err = StLedgerV2Accounts(ctx, coldkey)
+	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	address, err := ss58.Encode(coldkey, ss58.BittensorPrefix)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	ownPools := stLedgerV2OwnPools(cfg, stCtfPoolOn(cfg))
+	unavailable := []*StLedgerV2UnavailablePool{}
+	for _, pool := range ledger.UnavailablePools {
+		if slices.Contains(ownPools, pool.NoId) {
+			unavailable = append(unavailable, pool)
+		}
+	}
+	var price *big.Int
+	if parsed, ok := new(big.Int).SetString(status.AlphaPriceWei, 10); ok {
+		price = parsed
+	}
+	// the relay claims in the operator's own pools
+	entries := []*StLedgerV2AccountEntry{}
+	due := map[uint64]bool{}
+	for _, entry := range ledger.Accounts {
+		if !slices.Contains(ownPools, entry.NoId) {
+			continue
+		}
+		entries = append(entries, entry)
+		var cumulative, claimed uint256.Int
+		if cumulative.SetFromDecimal(entry.Cumulative) == nil && claimed.SetFromDecimal(entry.Claimed) == nil && claimed.Lt(&cumulative) {
+			due[entry.NoId] = snClaimRelayOverThreshold(snClaimRelayValueTaoRao(new(uint256.Int).Sub(&cumulative, &claimed), price))
+		}
 	}
 	requested, limitUntil := model.GetSnClaimRelayRequest(ctx, cfg.DeploymentKey(), coldkey, now)
 	accounts := []*SnClaimRelayAccount{}
-	for _, entry := range ledger.Accounts {
-		// the relay claims in the operator's own pool
-		if entry.NoId != cfg.NoId {
-			continue
+	for _, entry := range entries {
+		withDue := false
+		for noId, isDue := range due {
+			withDue = withDue || (isDue && noId != entry.NoId)
 		}
 		claim := model.GetSnClaimRelayClaim(ctx, cfg.DeploymentKey(), entry.NoId, entry.Index)
-		account, err := snClaimRelayAccountView(status, address, entry, requested, limitUntil, claim, now)
+		account, err := snClaimRelayAccountView(status, address, entry, requested, withDue, limitUntil, claim, now)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		accounts = append(accounts, account)
 	}
-	return accounts, nil
+	return accounts, unavailable, nil
 }
 
 // snClaimRelayNetworkAccounts reads the relay's view of each of the network's
-// accounts in the operator's pool.
-func snClaimRelayNetworkAccounts(clientSession *session.ClientSession, cfg *StConfig, status *SnClaimRelayStatus, now time.Time) ([]*SnClaimRelayAccount, error) {
+// accounts in the operator's pools, and with partial the pools that could not
+// be read, once each.
+func snClaimRelayNetworkAccounts(clientSession *session.ClientSession, cfg *StConfig, status *SnClaimRelayStatus, partial bool, now time.Time) ([]*SnClaimRelayAccount, []*StLedgerV2UnavailablePool, error) {
 	coldkeys, err := snClaimRelayNetworkColdkeys(clientSession)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	accounts := []*SnClaimRelayAccount{}
+	unavailable := []*StLedgerV2UnavailablePool{}
 	if cfg == nil || !cfg.Enabled || !cfg.LedgerV2Enabled() {
-		return accounts, nil
+		return accounts, unavailable, nil
 	}
 	for _, coldkey := range coldkeys {
-		coldkeyAccounts, err := snClaimRelayColdkeyAccounts(clientSession.Ctx, cfg, status, coldkey, now)
+		coldkeyAccounts, coldkeyUnavailable, err := snClaimRelayColdkeyAccounts(clientSession.Ctx, cfg, status, coldkey, partial, now)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		accounts = append(accounts, coldkeyAccounts...)
+		for _, pool := range coldkeyUnavailable {
+			if !slices.ContainsFunc(unavailable, func(listed *StLedgerV2UnavailablePool) bool { return listed.NoId == pool.NoId }) {
+				unavailable = append(unavailable, pool)
+			}
+		}
 	}
-	return accounts, nil
+	slices.SortFunc(unavailable, func(a, b *StLedgerV2UnavailablePool) int { return cmp.Compare(a.NoId, b.NoId) })
+	return accounts, unavailable, nil
 }
 
-// SnClaimRelay answers GET /sn/claim-relay for the caller's network.
+// SnClaimRelay answers GET /sn/claim-relay for the caller's network, whole or an
+// Error.
 func SnClaimRelay(clientSession *session.ClientSession) (*SnClaimRelayResult, error) {
+	return SnClaimRelayWithArgs(&SnClaimRelayArgs{}, clientSession)
+}
+
+// SnClaimRelayWithArgs answers GET /sn/claim-relay[?partial=true] for the caller's
+// network.
+func SnClaimRelayWithArgs(args *SnClaimRelayArgs, clientSession *session.ClientSession) (*SnClaimRelayResult, error) {
 	now := server.NowUtc()
 	cfg := stConfig()
 	status := snClaimRelayCurrentStatus(clientSession.Ctx, cfg, now)
@@ -358,8 +442,9 @@ func SnClaimRelay(clientSession *session.ClientSession) (*SnClaimRelayResult, er
 		TransferFloorRao:         snClaimRelayAlphaOf(snClaimRelayFloorTaoRao, price).Int64(),
 		ClaimNowPeriodDays:       int(snClaimRelayClaimNowPeriod / (24 * time.Hour)),
 		Accounts:                 []*SnClaimRelayAccount{},
+		UnavailablePools:         []*StLedgerV2UnavailablePool{},
 	}
-	accounts, err := snClaimRelayNetworkAccounts(clientSession, cfg, status, now)
+	accounts, unavailable, err := snClaimRelayNetworkAccounts(clientSession, cfg, status, args.Partial, now)
 	if err != nil {
 		// Whatever the balances are, they are not zero: the relay's state still
 		// reaches the app, and the app says they could not be read.
@@ -368,6 +453,7 @@ func SnClaimRelay(clientSession *session.ClientSession) (*SnClaimRelayResult, er
 		return result, nil
 	}
 	result.Accounts = accounts
+	result.UnavailablePools = unavailable
 	return result, nil
 }
 
@@ -418,16 +504,29 @@ func SnClaimRelayClaimNow(args *SnClaimRelayClaimNowArgs, clientSession *session
 		// not this network's, or banned: both read as nothing to claim
 		return refuse(SnClaimRelayReasonNothingPending, 0)
 	}
-	accounts, err := snClaimRelayColdkeyAccounts(ctx, cfg, status, coldkey, now)
+	// A tap claims every account of the coldkey the relay can, so it reads
+	// each pool on its own: one that cannot be read waits for a later pass.
+	accounts, unavailable, err := snClaimRelayColdkeyAccounts(ctx, cfg, status, coldkey, true, now)
 	if err != nil {
 		return unreadable(err)
 	}
 	if len(accounts) == 0 {
+		if 0 < len(unavailable) {
+			return unreadable(fmt.Errorf("pools %d of %d unavailable", len(unavailable), len(stLedgerV2OwnPools(cfg, stCtfPoolOn(cfg)))))
+		}
 		return refuse(SnClaimRelayReasonNothingPending, 0)
 	}
-	account := accounts[0]
-	if !account.ClaimNowAvailable {
-		return refuse(account.ClaimNowReason, account.ClaimNowNextAtMillis)
+	if !slices.ContainsFunc(accounts, func(account *SnClaimRelayAccount) bool { return account.ClaimNowAvailable }) {
+		// why not: the first account with a balance says it best, the limit
+		// and a queued request apply to every account alike
+		reason := accounts[0]
+		for _, account := range accounts {
+			if 0 < account.ClaimableRao {
+				reason = account
+				break
+			}
+		}
+		return refuse(reason.ClaimNowReason, reason.ClaimNowNextAtMillis)
 	}
 	model.AddSnClaimRelayRequest(ctx, cfg.DeploymentKey(), coldkey, now)
 	snClaimRelayClaimNowRequests.WithLabelValues(snClaimRelayRequestAccepted).Inc()
@@ -449,6 +548,10 @@ func (self *snClaimRelayCoreRequests) List(ctx context.Context, limit int) []*sn
 
 func (self *snClaimRelayCoreRequests) Finish(ctx context.Context, coldkey [32]byte, startLimit bool) {
 	model.FinishSnClaimRelayRequest(ctx, self.deploymentKey, coldkey, startLimit, server.NowUtc(), snClaimRelayClaimNowPeriod)
+}
+
+func (self *snClaimRelayCoreRequests) Limit(ctx context.Context, coldkey [32]byte) {
+	model.StartSnClaimRelayLimit(ctx, self.deploymentKey, coldkey, server.NowUtc(), snClaimRelayClaimNowPeriod)
 }
 
 // snClaimRelayCoreClaimRecords keeps the paid claims in Redis.
@@ -520,9 +623,16 @@ func SnClaimRelayPass(ctx context.Context) *SnClaimRelayPassResult {
 	if status.Detail != "" {
 		glog.Infof("[sn]claim relay state %s: %s\n", status.State, status.Detail)
 	}
-	result := &SnClaimRelayPassResult{State: status.State, Delay: snClaimRelayIdleDelay}
-	if status.Again && status.State == SnClaimRelayStateRunning {
-		result.Delay = snClaimRelayBusyDelay
+	return &SnClaimRelayPassResult{State: status.State, Delay: snClaimRelayNextDelay(status)}
+}
+
+// snClaimRelayNextDelay is when the next pass runs: soon while claims move and
+// more are due, the readable pools' too while another pool cannot be read; else
+// after the idle delay.
+func snClaimRelayNextDelay(status *SnClaimRelayStatus) time.Duration {
+	moving := status.State == SnClaimRelayStateRunning || (status.State == SnClaimRelayStateLedgerUnavailable && 0 < len(status.UnavailablePools))
+	if status.Again && moving {
+		return snClaimRelayBusyDelay
 	}
-	return result
+	return snClaimRelayIdleDelay
 }

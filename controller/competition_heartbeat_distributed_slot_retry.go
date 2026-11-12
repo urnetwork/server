@@ -8,13 +8,42 @@ import "github.com/urnetwork/server"
 // Unlike the existing legacy proof, this new class requires acknowledged
 // rollback plus a returned idle pool release, never pending destruction.
 func competitionHeartbeatDistributedSlotUpdateDeadline(err error) bool {
+	return competitionHeartbeatDistributedStatementDeadline(err, competitionHeartbeatDistributedSlotStatements())
+}
+
+// Every known failed-last position shares the same returned rollback proof.
+// A statement which succeeded before a later callback/commit failure is not
+// this class; unknown SQL and incomplete source prefixes remain refusal.
+func competitionHeartbeatDistributedReturnedRollbackDeadline(err error) bool {
 	proof, ok := err.(competitionHeartbeatDatabaseError)
-	if !ok {
+	expected := competitionHeartbeatDistributedSlotStatements()
+	if !ok || proof.snapshot.SqlStatements == 0 || proof.snapshot.SqlStatements > uint64(len(expected)) {
+		return false
+	}
+	return competitionHeartbeatDistributedStatementDeadline(err, expected[:proof.snapshot.SqlStatements])
+}
+
+// Compatibility retains the original read/config-only meaning. Job/slot
+// updates and a non-final failure are not members of this narrower class,
+// even though the generic returned-rollback recognizer covers known updates.
+func competitionHeartbeatDistributedPreBusinessDeadline(err error) bool {
+	proof, ok := err.(competitionHeartbeatDatabaseError)
+	expected := competitionHeartbeatDistributedPreBusinessStatements()
+	if !ok || proof.snapshot.SqlStatements == 0 || proof.snapshot.SqlStatements > uint64(len(expected)) {
+		return false
+	}
+	return competitionHeartbeatDistributedStatementDeadline(err, expected[:proof.snapshot.SqlStatements])
+}
+
+// Both closed source graphs require the same physically returned transaction,
+// live entry budgets, one last deadline and exact unique diagnostic positions.
+func competitionHeartbeatDistributedStatementDeadline(err error, expected []competitionHeartbeatSqlStatement) bool {
+	proof, ok := err.(competitionHeartbeatDatabaseError)
+	if !ok || len(expected) == 0 {
 		return false
 	}
 	snapshot, transaction := proof.snapshot, proof.snapshot.Transaction
-	expected := competitionHeartbeatDistributedSlotStatements()
-	if snapshot.SqlShape != competitionHeartbeatDistributedSlotShape || !snapshot.SqlShapeValid || snapshot.SqlStatements != uint64(len(expected)) || snapshot.CallbackEntries != 1 || snapshot.Step != competitionHeartbeatDatabaseSlotUpdate || snapshot.UnknownStatements != 0 ||
+	if snapshot.SqlShape != competitionHeartbeatDistributedSlotShape || !snapshot.SqlShapeValid || snapshot.SqlStatements != uint64(len(expected)) || snapshot.CallbackEntries != 1 || snapshot.Step != expected[len(expected)-1].step || snapshot.UnknownStatements != 0 ||
 		transaction.AcquireAttempts == 0 || transaction.AcquireAttempts != snapshot.Acquire.Attempt || transaction.AcquireSucceeded != 1 || transaction.BeginAttempts != 1 || transaction.BeginSucceeded != 1 || transaction.CallbackEntered != 1 ||
 		transaction.CommitAttempts != 0 || transaction.CommitAcknowledged != 0 || transaction.LastCommit != (server.DbTxBoundaryObservation{}) ||
 		transaction.RollbackAttempts != 1 || transaction.RollbackAcknowledged != 1 || !transaction.LastRollback.Returned || !transaction.LastBegin.Returned ||

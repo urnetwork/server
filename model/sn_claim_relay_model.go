@@ -176,6 +176,15 @@ func FinishSnClaimRelayRequest(ctx context.Context, deploymentKey StDeploymentKe
 	})
 }
 
+// StartSnClaimRelayLimit starts a coldkey's limit for period while its request
+// stays queued for its other accounts. A limit already running is kept as it
+// is.
+func StartSnClaimRelayLimit(ctx context.Context, deploymentKey StDeploymentKey, coldkey [32]byte, now time.Time, period time.Duration) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		server.Raise(r.SetNX(ctx, snClaimRelayLimitKey(deploymentKey, coldkey), strconv.FormatInt(now.UnixMilli(), 10), period).Err())
+	})
+}
+
 // GetStLedgerV2Accounts returns a pool's account index in position order.
 func GetStLedgerV2Accounts(ctx context.Context, deploymentKey StDeploymentKey, noId uint64) []*StLedgerV2Account {
 	key := requireStDeploymentKey(deploymentKey)

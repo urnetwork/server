@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "kind": "competition-heartbeat-prefix-qualification/v1",
+  "source_commit": "50d34a8b80a6c30b329257425be87d588fd365ee",
+  "workspace_sha256": "c6ac37678e47cf4278cbd88f2f14377607a855e51d7bf54f9339a131a9d17ea0",
+  "root_cause": "Distributed supervisor-authority transaction-local configuration timed out after three attempts despite acknowledged rollback, returned idle pool release, no COMMIT and substantial remaining time in the original ownership reserve. The earlier slot-update-only continuation did not cover this exact prefix.",
+  "fix": "Only exact source-owned distributed pre-business prefixes with physically returned acknowledged rollback may use a cumulative eight-call ceiling inside the same 20-second budget and both confirmed leases. Unknown statements, ambiguous commits, unacknowledged cleanup and business updates cannot borrow this prefix continuation.",
+  "focused_smoke": {
+    "passed": 7,
+    "failed": 0,
+    "exit_status": 0,
+    "log_sha256": "da98f40b02a4dfbb2133169b06c9ca464353de677ff1efbb509e164ac7425fa5",
+    "source_manifest_sha256": "af15d11d96d9c2f3e07ef029f831acf858c0c6484b6b86349949ea41b9f43ae5",
+    "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.8Gu8guX3"
+  },
+  "broad_ordinary": {
+    "passed": 282,
+    "failed": 0,
+    "repetitions": 3,
+    "exit_status": 0,
+    "log_sha256": "3affada891eb725f725b346339b2702eab7f1fa70b9bb0186d8b04febbcc5954",
+    "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.CCY394lV"
+  },
+  "broad_race": {
+    "passed": 282,
+    "failed": 0,
+    "repetitions": 3,
+    "exit_status": 0,
+    "log_sha256": "e1c13b409e08fde761419bc239cc66bcbab406cac905e0a46c8e448cbd04c1ab",
+    "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.CCY394lV"
+  },
+  "source_manifest_unchanged": true,
+  "source_manifest_sha256": "af15d11d96d9c2f3e07ef029f831acf858c0c6484b6b86349949ea41b9f43ae5",
+  "external_dependencies_clean_and_unchanged": true,
+  "external_dependency_manifest_sha256": "b8d6daacae1b26cd10ca18ca698d53440105c25f21769eb4fde57cf3f5f4f8ae",
+  "external_dependency_evidence": "/dev/shm/competition-prefix-dependency-proof-20261112.XBHxfr3c",
+  "race_qualification_complete": true,
+  "qualification_complete": true,
+  "staged_release": {
+    "created_at": "2026-11-12T02:21:51.551878646Z",
+    "root": "/usr/local/libexec/urnetwork/competition-worker-heartbeat-prefix-50d34a8b8-go1274-20261112-v1",
+    "binary_sha256": "5ae30360eb164ca3c4928ae6ec83dddcca27a21764991019c7cbc1e1ec0c5d78",
+    "image_digest": "sha256:8f4b4edcf4184e3ef214e98dde127cbe3f37a4be6fe7de00848120e50730dbea",
+    "distribution_archive_sha256": "0a13e32948e1ba1149164251890619d568eddb20f347a895dfe840a9e278d552",
+    "image_worker_bytes_match_native": true,
+    "external_dependencies_rechecked_before_and_after_build": true,
+    "wrapper_sha256": "93e54523fd86775be424aa26bc9253d7d69b26ad18b32d2e65c108e040e487c6",
+    "candidate_override_sha256": "fd93b58c0674226036ef30a5e977b6d4c35281b35ca1e9a93626a07337fca192",
+    "root_receipt_sha256": "a9ce6a05b511cd03fa65412d8031fc266a702cc87c2effd0c30d71429ac4b34f",
+    "runtime_override_installed": false,
+    "service_reloaded": false,
+    "service_restarted": false,
+    "original_worker_still_running_verified": true,
+    "systemd_need_daemon_reload": false
+  },
+  "deployed": false,
+  "remaining": "Activate only at the authorized idle maintenance boundary. No scoring/source/baseline policy or original submission deadline changes. A separately reviewed final-slot retry-cap follow-up is not part of this qualified source."
+}

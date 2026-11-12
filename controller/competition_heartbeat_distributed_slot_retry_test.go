@@ -92,7 +92,7 @@ func TestCompetitionHeartbeatDistributedSlotRetryResumesInsideOriginalReserve(t 
 	}
 }
 
-func TestCompetitionHeartbeatDistributedSlotRetryRequiresBothLeasesAndKeepsThreeCallCap(t *testing.T) {
+func TestCompetitionHeartbeatDistributedSlotRetryRequiresBothLeasesAndKeepsReturnedRollbackCallCap(t *testing.T) {
 	for _, mode := range []string{"known", "unknown-job", "unknown-host", "expired-job", "expired-host", "cancel"} {
 		synctest.Test(t, func(t *testing.T) {
 			settings := defaultCompetitionHeartbeatSettings()
@@ -126,7 +126,7 @@ func TestCompetitionHeartbeatDistributedSlotRetryRequiresBothLeasesAndKeepsThree
 			})
 			maximum := 1
 			if mode == "known" {
-				maximum = settings.LeaseRetry.MaximumAttempts
+				maximum = settings.DistributedReturnedRollbackMaximumAttempts
 			}
 			if mode == "expired-job" || mode == "expired-host" {
 				maximum = 0

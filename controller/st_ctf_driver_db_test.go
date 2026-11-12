@@ -81,7 +81,9 @@ func TestStCtfDriverRecordsInTheDatabase(t *testing.T) {
 		if count := model.GetStLedgerV2AccountCount(f.ctx, key, ctfTestPoolId); count != pending.LeafCount {
 			t.Fatalf("%d accounts recorded of %d", count, pending.LeafCount)
 		}
-		// served by the ledger account route, as any pool's account
+		// served by the ledger account route, as any pool's account, once
+		// ctf.yml's api block is on beside st.yml's ctf block (stCtfPoolOn)
+		setCtfYmlTestApi(t, true)
 		awards := model.GetCtfAwards(f.ctx, key, ctfTestNoId, 8)
 		SetStLedgerBuilder(stLedgerV2Builder{})
 		t.Cleanup(func() { SetStLedgerBuilder(nil) })
