@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -185,6 +186,16 @@ func TestSidecarPendingBuildTags(t *testing.T) {
 // turns NOT NULL only through a validated NOT VALID check (precedent
 // db_migrations.go's network_user_auth_wallet_user_fk), never SET NOT NULL,
 // whose scan holds every writer of the table.
+//
+// A group may also replace a function that a registered migration created, which
+// the running release calls, but only to widen it, as the permissive step of an
+// additive-then-cleanup pair does (competitionSidecarSourceMigration). The
+// replacement is the registered function's text with fragments put under
+// conditional arms, each `(CASE WHEN condition THEN alternative ELSE fragment
+// END)` with the registered fragment kept as the ELSE arm, so the function
+// answers as before wherever every condition is false. Each condition is one
+// the registered function is shown to refuse (sidecarGroupRefusedConditions),
+// so what the function admitted it still admits.
 var (
 	sidecarGroupCreateTablePattern = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?`)
 	sidecarGroupDestroyPattern     = regexp.MustCompile(`(?i)\b(DROP|RENAME|TRUNCATE)\b`)
@@ -192,7 +203,96 @@ var (
 	sidecarGroupIndexPattern       = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:"?[a-z_][a-z0-9_]*"?\s+)?ON\s+(?:ONLY\s+)?"?([a-z_][a-z0-9_]*)"?`)
 	sidecarGroupIndexNamePattern   = regexp.MustCompile(`(?i)\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s+ON\b`)
 	sidecarGroupRecoveryPattern    = regexp.MustCompile(`(?i)^\s*DROP\s+INDEX\s+CONCURRENTLY\s+IF\s+EXISTS\s+([a-z_][a-z0-9_]*)\s*$`)
+	sidecarGroupFunctionPattern    = regexp.MustCompile(`(?i)\bCREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION\s+"?([a-z_][a-z0-9_]*)"?\s*\()`)
+	sidecarGroupFunctionTagPattern = regexp.MustCompile(`\$[A-Za-z_]*\$`)
+	sidecarGroupConditionalPattern = regexp.MustCompile(`\(CASE WHEN ([^()]+) THEN ([^()]+) ELSE ([^()]+) END\)`)
 )
+
+// The conditions under which a registered function refuses every input, by
+// function. A replacement that changes the function only under one of them
+// admits everything the registered function admits. Each is proved on a
+// database, against the registered function: the source guards' two by
+// TestCompetitionSidecarSourceGraphOnlyWidens and
+// TestCompetitionSidecarSourceAuthorizationOnlyWidens, under the pending tag.
+var sidecarGroupRefusedConditions = map[string][]string{
+	"competition_v2_source_graph_valid": {"commits ? 'sidecar'"},
+	"competition_v2_source_authorized":  {"intent->'commits' ? 'sidecar'"},
+}
+
+// The migrations below every pending group: main's and each registered
+// group's, which the release running when a pending group applies has applied.
+func sidecarGroupRegisteredMigrations() []any {
+	return migrations[:len(migrations)-len(sidecarPendingMigrations())]
+}
+
+// Each function a statement list creates, by lower-case name, as its text from
+// the FUNCTION keyword to the end of its dollar-quoted body, so CREATE and
+// CREATE OR REPLACE of one text compare equal. A function whose body is not
+// dollar quoted maps to "", which equals no replacement.
+func sidecarGroupFunctions(sql string) map[string]string {
+	functions := map[string]string{}
+	for _, match := range sidecarGroupFunctionPattern.FindAllStringSubmatchIndex(sql, -1) {
+		name := strings.ToLower(sql[match[4]:match[5]])
+		text := ""
+		rest := sql[match[2]:]
+		if open := sidecarGroupFunctionTagPattern.FindStringIndex(rest); open != nil {
+			tag := rest[open[0]:open[1]]
+			if end := strings.Index(rest[open[1]:], tag); 0 <= end {
+				text = rest[:open[1]+end+len(tag)]
+			}
+		}
+		functions[name] = text
+	}
+	return functions
+}
+
+// The registered function of a name: its latest text below the pending groups,
+// and whether a registered migration creates it at all.
+func sidecarGroupRegisteredFunction(name string) (string, bool) {
+	text := ""
+	found := false
+	for _, migration := range sidecarGroupRegisteredMigrations() {
+		if value, ok := migration.(*SqlMigration); ok {
+			if function, ok := sidecarGroupFunctions(value.sql)[name]; ok {
+				text = function
+				found = true
+			}
+		}
+	}
+	return text, found
+}
+
+// The conditions a replacement puts fragments of the registered function under,
+// and whether the two texts differ in nothing else. A conditional arm the
+// registered text already holds is unchanged text, not an edit.
+func sidecarGroupWidenedConditions(registered string, replacement string) ([]string, bool) {
+	conditions := []string{}
+	registeredAt := 0
+	replacementAt := 0
+	for _, arm := range sidecarGroupConditionalPattern.FindAllStringSubmatchIndex(replacement, -1) {
+		between := replacement[replacementAt:arm[0]]
+		if !strings.HasPrefix(registered[registeredAt:], between) {
+			return nil, false
+		}
+		registeredAt += len(between)
+		whole := replacement[arm[0]:arm[1]]
+		kept := replacement[arm[6]:arm[7]]
+		switch {
+		case strings.HasPrefix(registered[registeredAt:], whole):
+			registeredAt += len(whole)
+		case strings.HasPrefix(registered[registeredAt:], kept):
+			registeredAt += len(kept)
+			conditions = append(conditions, replacement[arm[2]:arm[3]])
+		default:
+			return nil, false
+		}
+		replacementAt = arm[1]
+	}
+	if registered[registeredAt:] != replacement[replacementAt:] {
+		return nil, false
+	}
+	return conditions, true
+}
 
 // What the static check refuses in one group, each finding naming the group and
 // the entry. Only the tables this group creates are new: an earlier group's
@@ -227,9 +327,32 @@ func sidecarGroupFindings(groupName string, group []any) []string {
 					finding(index, "indexes the existing table %s in a transaction, where §19.7 builds it online", table)
 				}
 			}
+			replaced := sidecarGroupFunctions(value.sql)
+			for _, name := range slices.Sorted(maps.Keys(replaced)) {
+				registered, ok := sidecarGroupRegisteredFunction(name)
+				if !ok {
+					// a function the group adds, which the running release never calls
+					continue
+				}
+				conditions, ok := sidecarGroupWidenedConditions(registered, replaced[name])
+				if !ok || registered == "" {
+					finding(index, "replaces the function %s the running release calls outside a conditional arm that keeps its registered text", name)
+					continue
+				}
+				for _, condition := range conditions {
+					if !slices.Contains(sidecarGroupRefusedConditions[name], condition) {
+						finding(index, "changes the function %s under the condition %q, which the registered function is not shown to refuse", name, condition)
+					}
+				}
+			}
 		case *OnlineSqlMigration:
 			refuseStatement(index, value.sql)
 			refuseStatement(index, value.auditSql)
+			for _, name := range slices.Sorted(maps.Keys(sidecarGroupFunctions(value.sql + "\n" + value.auditSql))) {
+				if _, ok := sidecarGroupRegisteredFunction(name); ok {
+					finding(index, "replaces the function %s the running release calls outside a transaction", name)
+				}
+			}
 			built := sidecarGroupIndexNamePattern.FindStringSubmatch(value.sql)
 			if built == nil {
 				finding(index, "runs online without CREATE INDEX CONCURRENTLY, so it locks the table it changes")
@@ -342,4 +465,104 @@ func TestSidecarGroupCheckRefusesARecoveryThatDropsAnotherIndex(t *testing.T) {
 		)},
 		"drops more than its own interrupted index",
 	)
+}
+
+// The registered source graph guard with its repository count rewritten, as a
+// group entry.
+func sidecarGroupSourceGraphTwin(t *testing.T, count string) any {
+	t.Helper()
+	anchor := "(SELECT count(*) FROM jsonb_object_keys(commits))=10"
+	if strings.Count(competitionSourceRetirementGraph, anchor) != 1 {
+		t.Fatal("the registered source graph guard lost its count")
+	}
+	return newSqlMigration(strings.Replace(competitionSourceRetirementGraph, anchor,
+		"(SELECT count(*) FROM jsonb_object_keys(commits))="+count, 1))
+}
+
+// A group may replace a registered function only to widen it. The cleanup step
+// that requires sidecar narrows what the running release writes, so no group
+// holds it.
+func TestSidecarGroupCheckRefusesANarrowedFunction(t *testing.T) {
+	permissive := []any{newSqlMigration(competitionSidecarSourceMigration())}
+	outside := "replaces the function competition_v2_source_graph_valid the running release calls outside a conditional arm"
+
+	// eleven required: the ten the running release sends stop passing
+	requireSidecarGroupFindings(t, []any{sidecarGroupSourceGraphTwin(t, "11")}, permissive, outside)
+	narrowed := strings.Replace(competitionSourceRetirementGraph, "'warp','gvisor']", "'warp','gvisor','sidecar']", 1)
+	if narrowed == competitionSourceRetirementGraph {
+		t.Fatal("the registered source graph guard lost its names")
+	}
+	requireSidecarGroupFindings(t, []any{newSqlMigration(narrowed)}, permissive, outside)
+
+	// the arms the other way round: ten is required of a graph with sidecar and
+	// eleven of one without
+	requireSidecarGroupFindings(t,
+		[]any{sidecarGroupSourceGraphTwin(t, "(CASE WHEN commits ? 'sidecar' THEN 10 ELSE 11 END)")},
+		[]any{sidecarGroupSourceGraphTwin(t, competitionSidecarSourceGraphCount)},
+		outside,
+	)
+
+	// a conditional arm under a condition nothing shows the registered guard to
+	// refuse, here one that always holds
+	requireSidecarGroupFindings(t,
+		[]any{sidecarGroupSourceGraphTwin(t, "(CASE WHEN commits ? 'server' THEN 11 ELSE 10 END)")},
+		[]any{sidecarGroupSourceGraphTwin(t, competitionSidecarSourceGraphCount)},
+		`under the condition "commits ? 'server'", which the registered function is not shown to refuse`,
+	)
+
+	// the permissive counts with one more change beside them
+	loosened := strings.Replace(competitionSidecarSourceMigration(), " OR COALESCE(intent->>'manifest','')=''", "", 1)
+	if loosened == competitionSidecarSourceMigration() {
+		t.Fatal("the source authorization lost its manifest check")
+	}
+	requireSidecarGroupFindings(t, []any{newSqlMigration(loosened)}, permissive,
+		"replaces the function competition_v2_source_authorized the running release calls outside a conditional arm")
+
+	// a replacement outside a transaction, whatever its text
+	requireSidecarGroupFindings(t,
+		[]any{newOnlineSqlMigration(competitionSidecarSourceMigration(), competitionSidecarSourceMigration())},
+		permissive,
+		"replaces the function competition_v2_source_graph_valid the running release calls outside a transaction",
+	)
+}
+
+// A function the group itself adds is no replacement: no registered migration
+// creates it, so the running release never calls it.
+func TestSidecarGroupCheckAdmitsANewFunction(t *testing.T) {
+	added := []any{newSqlMigration(`
+		CREATE FUNCTION sidecar_group_check_twin() RETURNS trigger LANGUAGE plpgsql AS $guard$
+		BEGIN
+		 RETURN OLD;
+		END
+		$guard$;
+	`)}
+	if findings := sidecarGroupFindings("MGx", added); len(findings) != 0 {
+		t.Fatalf("a new function is refused: %q", findings)
+	}
+}
+
+// The two texts differ only in conditional arms that keep the registered
+// fragment, and the conditions come back in order.
+func TestSidecarGroupWidenedConditions(t *testing.T) {
+	for _, c := range []struct {
+		registered  string
+		replacement string
+		conditions  []string
+		refused     bool
+	}{
+		{registered: "a=10 AND b<>11", replacement: "a=10 AND b<>11", conditions: []string{}},
+		{registered: "a=10 AND b<>11", replacement: "a=(CASE WHEN c THEN 11 ELSE 10 END) AND b<>(CASE WHEN d THEN 12 ELSE 11 END)", conditions: []string{"c", "d"}},
+		// an arm the registered text already holds is unchanged text
+		{registered: "a=(CASE WHEN c THEN 11 ELSE 10 END)", replacement: "a=(CASE WHEN c THEN 11 ELSE 10 END)", conditions: []string{}},
+		{registered: "a=10", replacement: "a=11", refused: true},
+		{registered: "a=10", replacement: "a=(CASE WHEN c THEN 10 ELSE 11 END)", refused: true},
+		{registered: "a=10 AND b", replacement: "a=(CASE WHEN c THEN 11 ELSE 10 END)", refused: true},
+		{registered: "a=10", replacement: "a=(CASE WHEN c THEN 11 ELSE 10 END) OR true", refused: true},
+		{registered: "a=10", replacement: "true OR a=(CASE WHEN c THEN 11 ELSE 10 END)", refused: true},
+	} {
+		conditions, ok := sidecarGroupWidenedConditions(c.registered, c.replacement)
+		if ok == c.refused || (ok && !slices.Equal(conditions, c.conditions)) {
+			t.Errorf("%q to %q: conditions %q, ok %t", c.registered, c.replacement, conditions, ok)
+		}
+	}
 }

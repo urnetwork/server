@@ -132,7 +132,9 @@ func TestPromoteMovesOnlyItsOwnGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.lastVersion != len(literal.Elts) || result.firstVersion != result.lastVersion-4 {
+	// MG0's six entries: the owner table, the two column changes, the index, the
+	// competition's permissive step and the marker
+	if result.lastVersion != len(literal.Elts) || result.firstVersion != result.lastVersion-5 {
 		t.Fatalf("versions %d-%d over a literal of %d", result.firstVersion, result.lastVersion, len(literal.Elts))
 	}
 	moved := literal.Elts[result.firstVersion-1:]
