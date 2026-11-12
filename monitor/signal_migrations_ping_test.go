@@ -5,10 +5,10 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -201,6 +201,11 @@ type migrationPingDatabaseSource struct {
 	// Direct full-query parity readers must not fall back to one giant SQL
 	// statement if a future fixture change accidentally drops the marker.
 	requireCensusOwnership bool
+	// Nil uses this adapter's default independent physical-cleanup budget.
+	censusFixtureSettings *migrationCensusFixtureSettings
+	// Tests may inspect the actual already-owned physical connection. The
+	// observer never acquires another connection or changes its ownership.
+	ownedCensusObserved func(*pgx.Conn)
 }
 
 // Implements SignalSource on the test database, rendering values as psql does.
@@ -208,23 +213,47 @@ func (self *migrationPingDatabaseSource) PostgreSQL(ctx context.Context, query s
 	if self.requireCensusOwnership && migrationCensusFromContext(ctx) == nil {
 		return nil, fmt.Errorf("native migration parity fixture requires an owned census observation")
 	}
+	settings := defaultMigrationCensusFixtureSettings()
+	if self.censusFixtureSettings != nil {
+		settings = *self.censusFixtureSettings
+	}
+	if err := settings.validate(); err != nil {
+		return nil, err
+	}
 	rows := []Row{}
 	var queryErr error
 	server.Db(ctx, func(conn server.PgConn) {
 		if observation := migrationCensusFromContext(ctx); observation != nil {
-			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+			// Production owns a fresh psql session per observation. Keep that
+			// physical lifetime here, not the pool's cross-prefix lifetime.
+			physical := conn.Conn()
+			var tx pgx.Tx
+			cleanup := migrationCensusFixtureCleanup{
+				rollback: func(cleanupCtx context.Context) error {
+					if tx == nil {
+						return nil
+					}
+					return tx.Rollback(cleanupCtx)
+				},
+				close:       physical.Close,
+				cleanupDone: physical.PgConn().CleanupDone(),
+			}
+			defer func() {
+				queryErr = errors.Join(queryErr, cleanup.finish(ctx, settings))
+				if queryErr != nil {
+					rows, self.artifactRow = nil, nil
+					observation.catalogRows, observation.catalogComplete = nil, false
+				}
+			}()
+			if self.ownedCensusObserved != nil {
+				self.ownedCensusObserved(physical)
+			}
+			var err error
+			tx, err = conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 			if err != nil {
 				queryErr = err
 				return
 			}
-			defer func() {
-				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				defer cancel()
-				if err := tx.Rollback(cleanupCtx); err != nil && err != pgx.ErrTxClosed {
-					queryErr = err
-					observation.catalogRows, observation.catalogComplete = nil, false
-				}
-			}()
 			rows, queryErr = migrationCensusFixtureInTx(ctx, tx, query, observation, func() error { return tx.Commit(ctx) })
 			return
 		}
