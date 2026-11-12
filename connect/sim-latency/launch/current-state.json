@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T06:18:26.971033Z",
+  "observed_at": "2026-11-12T06:39:08.057022Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,8 +17,9 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": true,
-    "publication_held": false
+    "grading_ready": false,
+    "publication_held": true,
+    "diagnosis": "Host-registration heartbeats are stale after both job custody handbacks. Read-only checks found no explicit admission, evaluation or finalization hold. The artifact_storage host-census flag is not an independent fresh MinIO probe."
   },
   "queue": {
     "succeeded": 9,
@@ -33,7 +34,7 @@
       "started_at": "2026-11-12T05:31:38.724108",
       "deadline": "2026-11-12T08:31:38.724108",
       "observed_phase": "candidate_measurements",
-      "candidate_completed": 4,
+      "candidate_completed": 6,
       "database_custody": "released_after_heartbeat_timeout_2026-11-12T05:52:29.860826Z",
       "native_process_verified_live": true,
       "reattachment_verified": false
@@ -44,7 +45,7 @@
       "started_at": "2026-11-12T05:52:24.10429",
       "deadline": "2026-11-12T08:52:24.10429",
       "observed_phase": "candidate_measurements",
-      "candidate_completed": 1,
+      "candidate_completed": 3,
       "database_custody": "released_after_heartbeat_timeout_2026-11-12T06:15:17.173607Z",
       "native_process_verified_live": true,
       "reattachment_verified": false
@@ -92,12 +93,18 @@
     "queued": false,
     "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
     "frozen_server_commit": "fdd92e7b6acb5587b22531c591ecceff8fd3ae6e",
-    "frozen_sn_commit": "ac7309bdc4beb959105ae60f2f43bfe0b5e06a6b",
+    "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
+    "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "corrected_dependency_attempt_authorized_not_yet_verified_running",
-      "previous_attempt": "setup_failure_zero_tests_missing_tracked_sn_packages",
-      "previous_evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.2IZI2TQU",
-      "previous_controller_log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071",
+      "status": "corrected_dependency_attempt_verified_active_compilation_no_tests_completed",
+      "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+      "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.Q6aozbcV",
+      "workspace_sha256": "fa98030fed949631072273ad80a100475256da96089e3100137f9c31e3ab6c28",
+      "previous_zero_test_dependency_failures": [
+        {"evidence": "2IZI2TQU", "log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071"},
+        {"evidence": "2SNMhX3G", "log_sha256": "ef300e9f282c8ba92378d2f1577b21b491b2c3f2d76b5c5218d8d686bc2f6629"},
+        {"evidence": "QPQ1TM6V", "log_sha256": "7cb213bf815a1a1d786a0f27e2291dccce68963361a1e46b0cb8bdd1d3ba5d83"}
+      ],
       "server_source_unchanged_by_dependency_correction": true,
       "live_and_product_checkouts_unchanged": true
     }
