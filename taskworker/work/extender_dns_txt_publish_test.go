@@ -265,7 +265,7 @@ func TestExtenderDnsPublishSignsATxtRecordPerExtender(t *testing.T) {
 
 		runTestExtenderPublish(t, ctx)
 		batch := publisher.onlyApply(t)
-		connect.AssertEqual(t, batch.setIdentifiers(), []string{
+		connect.AssertEqual(t, testExtenderDnsNonChinaSetIdentifiers(batch.upsertSets), []string{
 			"extender-EU-A",
 			"extender-NA-A",
 			"extender-default-A",
@@ -275,6 +275,9 @@ func TestExtenderDnsPublishSignsATxtRecordPerExtender(t *testing.T) {
 			"extender-NA-TXT",
 			"extender-default-TXT",
 		})
+		// China's one record is the same bytes as the extender's record in
+		// every other set, under the same root key
+		assertTestExtenderDnsChinaSets(t, batch.upsertSets, ExtenderDnsDefaultCnRecordCount, rootPublicKey)
 
 		keySet := connect.NewExtenderRootKeySet(rootPublicKey)
 		// every location answers with both extenders, so every txt set holds

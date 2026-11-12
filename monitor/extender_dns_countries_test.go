@@ -728,7 +728,7 @@ func TestExtenderDnsDohReadsAsTheClientDoes(t *testing.T) {
 		values = test.values
 		valuesLock.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		status, body, err := monitorRunner.dnsDohTxt(ctx, dohUrl, "extender.bringyour.com", 64*1024)
+		status, body, err := monitorRunner.dnsDohTxt(ctx, dohUrl, "extender.bringyour.com", 64*1024, netip.Prefix{})
 		if err != nil || status != http.StatusOK {
 			cancel()
 			t.Fatalf("%s: %d %v", test.name, status, err)
@@ -835,7 +835,7 @@ func TestDnsWireQueryReportsATruncatedRetry(t *testing.T) {
 		return extenderDnsFakeTxtResponse(query, values, nil)
 	})
 	monitorRunner := &runner{cfg: &monitorConfig{env: "main", commandTimeout: 5 * time.Second}}
-	observation, err := monitorRunner.dnsTxt(context.Background(), endpoint, "extender.bringyour.com")
+	observation, err := monitorRunner.dnsTxt(context.Background(), endpoint, "extender.bringyour.com", netip.Prefix{})
 	var retry *dnsTruncatedRetryError
 	if !errors.As(err, &retry) {
 		t.Fatalf("observation %+v, err %v, want a truncated retry", observation, err)

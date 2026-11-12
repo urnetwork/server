@@ -58,12 +58,12 @@ func (self *extenderDnsCountrySource) askedSorted() []string {
 	return asked
 }
 
-func (self *extenderDnsCountrySource) DNSTxt(_ context.Context, resolver, _ string) (DNSResponseObservation, error) {
+func (self *extenderDnsCountrySource) DNSTxt(_ context.Context, resolver, _ string, _ netip.Prefix) (DNSResponseObservation, error) {
 	self.record("dns " + resolver)
 	return self.txt(resolver)
 }
 
-func (self *extenderDnsCountrySource) DNSDohTxt(_ context.Context, dohUrl, _ string, maxBytes int) (int, []byte, error) {
+func (self *extenderDnsCountrySource) DNSDohTxt(_ context.Context, dohUrl, _ string, maxBytes int, _ netip.Prefix) (int, []byte, error) {
 	self.record("doh " + dohUrl)
 	return self.doh(dohUrl, maxBytes)
 }

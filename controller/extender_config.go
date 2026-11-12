@@ -219,6 +219,15 @@ func (self *ExtenderConfig) DirectoryTierForNetwork(networkId server.Id) int {
 // record name is configured rather than derived from the host, since which
 // name an operator serves is an operations decision.
 //
+// cn_record_count is the number of signed records in China's own set, which
+// answers China in place of the Asia set and rotates each tick (the publisher's
+// extenderDnsCnSet). Unset, it is 1: the most that both of the resolvers the
+// sdk gives China, Alidns and DNSPod, delivered whole on 2026-11-12. Alidns
+// alone delivers about 3 whole; raising it to 3 gives a client whose lookup
+// lands on Alidns three records (two when all are near the longest Main
+// signs) and one on DNSPod still one, trimmed out of the three without being
+// marked truncated.
+//
 // The zone is named either way: hosted_zone_id is the zone verbatim, and
 // hosted_zone_name is the zone's domain, which the publisher resolves to an id
 // through the aws api once per process. The name is what operations knows, and
@@ -232,6 +241,7 @@ type ExtenderDnsConfig struct {
 	RecordName         string `yaml:"record_name"`
 	Ttl                int    `yaml:"ttl"`
 	SampleCount        int    `yaml:"sample_count"`
+	CnRecordCount      int    `yaml:"cn_record_count"`
 	AwsRegion          string `yaml:"aws_region"`
 	AwsAccessKeyId     string `yaml:"aws_access_key_id"`
 	AwsSecretAccessKey string `yaml:"aws_secret_access_key"`
