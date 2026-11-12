@@ -219,14 +219,14 @@ func (self *ExtenderConfig) DirectoryTierForNetwork(networkId server.Id) int {
 // record name is configured rather than derived from the host, since which
 // name an operator serves is an operations decision.
 //
-// cn_record_count is the number of signed records in China's own set, which
-// answers China in place of the Asia set and rotates each tick (the publisher's
-// extenderDnsCnSet). Unset, it is 1: the most that both of the resolvers the
-// sdk gives China, Alidns and DNSPod, delivered whole on 2026-11-12. Alidns
-// alone delivers about 3 whole; raising it to 3 gives a client whose lookup
-// lands on Alidns three records (two when all are near the longest Main
-// signs) and one on DNSPod still one, trimmed out of the three without being
-// marked truncated.
+// cn_record_count caps the signed records in China's own set, which answers
+// China in place of the Asia set and rotates each tick (the publisher's
+// extenderDnsCnSet). Unset, the cap is 4 and the set holds as many records as
+// Alidns delivers whole, about 3 (2 when they are near the longest Main
+// signs): the best for users (owner, 2026-11-12). DNSPod, the sdk's other
+// resolver for China, trims that answer at record boundaries to one whole
+// record, as it was measured to on 2026-11-12. Setting it to 1 gives every
+// client in China the one record both deliver whole.
 //
 // The zone is named either way: hosted_zone_id is the zone verbatim, and
 // hosted_zone_name is the zone's domain, which the publisher resolves to an id

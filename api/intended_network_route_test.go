@@ -39,6 +39,7 @@ var intendedNetworkReportedRoutes = []string{
 	"POST /subscription/create-payment-id",
 	"POST /subscription/verify-play-purchase",
 	"POST /subscription/verify-apple-transaction",
+	"POST /subscription/verify-stripe-checkout",
 	"POST /x402/purchase",
 	"POST /wallet/circle-init",
 	"POST /wallet/circle-transfer-out",

@@ -1125,9 +1125,11 @@ func TestExtenderDnsPublishSamplesEveryContinentAndFamily(t *testing.T) {
 			"extender-default-TXT",
 			"extender-AS-TXT",
 		})
-		// and China's own after them: one record, whichever extender the
-		// tick's window holds, and the addresses it names
-		assertTestExtenderDnsChinaSets(t, batch.upsertSets, ExtenderDnsDefaultCnRecordCount, rootPublicKey)
+		// and China's own after them: as many records as Alidns delivers whole
+		// of the six extenders China's samples of three draw, three of these
+		// or four if the tick's window holds the shortest, and the addresses
+		// they name
+		assertTestExtenderDnsChinaSets(t, batch.upsertSets, 3, ExtenderDnsDefaultCnRecordCount, rootPublicKey)
 
 		globalIpv4Ips := testExtenderDnsIps(4, 1, 2, 3, 4, 5, 8)
 		globalIpv6Ips := testExtenderDnsIps(6, 1, 2, 3, 6)

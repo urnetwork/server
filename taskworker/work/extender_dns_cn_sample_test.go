@@ -49,14 +49,19 @@ func sampleTestExtenderDnsChinaSets(
 	)
 }
 
-// China's set holds one record unless the configuration says otherwise: the
-// most that both of its resolvers delivered whole on 2026-11-12.
-func TestExtenderDnsCnRecordCountDefaultsToWhatBothResolversDeliverWhole(t *testing.T) {
-	connect.AssertEqual(t, ExtenderDnsDefaultCnRecordCount, 1)
-	connect.AssertEqual(t, extenderDnsCnRecordCount(&controller.ExtenderConfig{}), 1)
+// Unless the configuration says otherwise, China's set is capped at four
+// records, as many of the shortest records Main signs as Alidns delivers
+// whole, so Alidns's ceiling decides how many it holds.
+func TestExtenderDnsCnRecordCountDefaultsToWhatAlidnsDeliversWhole(t *testing.T) {
+	connect.AssertEqual(t, ExtenderDnsDefaultCnRecordCount, 4)
+	connect.AssertEqual(t, extenderDnsCnRecordCount(&controller.ExtenderConfig{}), 4)
 	connect.AssertEqual(t, extenderDnsCnRecordCount(&controller.ExtenderConfig{
 		Dns: controller.ExtenderDnsConfig{CnRecordCount: -2},
-	}), 1)
+	}), 4)
+	shortest := extenderDnsTxtMessageOverheadBytes("extender.bringyour.com") + ExtenderDnsDefaultCnRecordCount*(14+264)
+	if extenderDnsCnAlidnsMaxMessageBytes < shortest || extenderDnsCnAlidnsMaxMessageBytes >= shortest+14+264 {
+		t.Fatalf("four of the shortest records are a %d-byte answer; the cap should be the most that fit Alidns's %d", shortest, extenderDnsCnAlidnsMaxMessageBytes)
+	}
 
 	installTestExtenderWorkConfig(
 		t,
@@ -151,7 +156,7 @@ func TestExtenderDnsCountryTxtBudgetCountsTheWholeAnswer(t *testing.T) {
 		t.Fatalf("a record of %d characters, past what DNSPod delivers alone, was taken", longest+1)
 	}
 	// three of the longest records Main signs are past what Alidns delivers
-	// whole, so the third is refused; three of the shortest fit
+	// whole, so the third is refused; four of the shortest fit
 	budget := newExtenderDnsCountryTxtBudget(sample)
 	for i := range 2 {
 		if !budget.take(testExtenderDnsBase64Record(i, 368)) {
@@ -162,10 +167,13 @@ func TestExtenderDnsCountryTxtBudgetCountsTheWholeAnswer(t *testing.T) {
 		t.Fatalf("a third record of 368 characters, a %d-byte answer, was taken", overhead+3*(14+368))
 	}
 	budget = newExtenderDnsCountryTxtBudget(sample)
-	for i := range 3 {
+	for i := range 4 {
 		if !budget.take(testExtenderDnsBase64Record(i, 264)) {
 			t.Fatalf("record %d of 264 characters was refused", i)
 		}
+	}
+	if budget.take(testExtenderDnsBase64Record(4, 264)) {
+		t.Fatalf("a fifth record of 264 characters, a %d-byte answer, was taken", overhead+5*(14+264))
 	}
 }
 

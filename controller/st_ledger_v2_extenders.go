@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/netip"
 
 	"github.com/urfoundation/sn/ledger"
 	"github.com/urnetwork/glog"
@@ -89,64 +88,13 @@ func stExtenderCensusCounts(rows []ledger.CensusRow) (eligible int, units int) {
 }
 
 // stLedgerV2ExtenderCensusRows builds an epoch's census from the extender
-// directory, under the rules provider rows follow: units keyed as the head's
-// egress prefix (§8.4), coldkeys by the provider rows' wallet selection, and
-// head bindings at either of the epoch's boundary blocks. The census row
-// publishes the coldkey it selected; the resolutions are not retained here,
-// so the census can never disagree with the retention the provider rows make
-// of the same clients' wallets.
+// directory under the shared eligibility rules (extender_eligibility.go), the
+// rules capture the flag's census judges extenders by.
 func stLedgerV2ExtenderCensusRows(ctx context.Context, cfg *StConfig, client StClient, authority *StPayoutEpochAuthority) ([]ledger.CensusRow, error) {
-	pool, err := stExtenderPoolSettings(cfg)
-	if err != nil {
-		return nil, err
-	}
 	records := model.GetStExtenderCensusRecords(ctx, authority.StartTime, authority.EndTime)
-	settings := VerifySettings()
-	rules := &model.StExtenderCensusRules{
-		Unit:      func(ip netip.Addr) [32]byte { return model.VerifyEgressIpHashWithSettings(ip, settings) },
-		Durable:   map[server.Id]bool{},
-		Declared:  pool.declared,
-		Coldkeys:  map[server.Id][32]byte{},
-		HeadBound: map[server.Id]bool{},
-	}
-	if extenders, err := EnvExtenderConfig(); err == nil {
-		for _, networkId := range extenders.DurableNetworkIds() {
-			rules.Durable[networkId] = true
-		}
-	}
-	if len(records) == 0 {
-		return model.BuildStExtenderCensus(records, rules)
-	}
-	// the provider clients, once each
-	seen := map[server.Id]bool{}
-	usages := []*model.StProviderUsage{}
-	clientIds := [][16]byte{}
-	for _, record := range records {
-		if !seen[record.ClientId] {
-			seen[record.ClientId] = true
-			usages = append(usages, &model.StProviderUsage{ClientId: record.ClientId, NetworkId: record.NetworkId})
-			clientIds = append(clientIds, stId16(record.ClientId))
-		}
-	}
-	work, workConfigured, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
+	rules, err := stExtenderEligibilityRules(ctx, cfg, client, authority, records)
 	if err != nil {
 		return nil, err
-	}
-	resolutions, err := stLedgerV2Wallets(ctx, cfg, work, workConfigured, authority, usages)
-	if err != nil {
-		return nil, err
-	}
-	for clientId, resolution := range resolutions {
-		if resolution != nil {
-			rules.Coldkeys[clientId] = resolution.Coldkey
-		}
-	}
-	excluded, err := stHeadExcludedClients(ctx, cfg, client, authority.Epoch, authority.Start.Block, authority.End.Block, clientIds)
-	if err != nil {
-		return nil, err
-	}
-	for clientId := range excluded {
-		rules.HeadBound[server.Id(clientId)] = true
 	}
 	return model.BuildStExtenderCensus(records, rules)
 }
