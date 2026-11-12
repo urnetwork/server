@@ -11461,10 +11461,21 @@ var migrations = []any{
 	// while ctf.yml leaves capture the flag off.
 	ctfSchemaMigration,
 
+	// The refusals of each target's ping hour that are evidence against the
+	// target (network_ping_target_evidence_schema.go): one nullable bigint on
+	// network_ping_target_hour_tally and its day partitions, added only when
+	// absent, under a five-second lock bound. A catalog change only: nothing
+	// is rewritten or scanned, and every row stored before it reads null, its
+	// evidence unknown. The running release names its columns and writes on.
+	// Apply before deploying the api and alt that write it and the taskworker
+	// that reads it.
+	newSqlMigration(networkPingTargetEvidenceSchemaSql),
+
 	// The SN25 extender pool (db_st_ledger_v2_extenders.go, sn WHITEPAPER.md
-	// §8.6): the verified amendments file, each epoch's extender census and
-	// two nullable columns on st_ledger_v2_epoch_rows, each created only when
-	// absent, under a five-second lock bound. Nothing existing is rewritten.
-	// Apply before deploying the taskworker and api that read them.
+	// §8.6): the verified amendments file, each epoch's extender census, the
+	// shadow reports of the epochs before E_x, the platform endpoint registry
+	// and six nullable columns on st_ledger_v2_epoch_rows, each created only
+	// when absent, under a five-second lock bound. Nothing existing is
+	// rewritten. Apply before deploying the taskworker and api that read them.
 	stLedgerV2ExtenderMigration,
 }

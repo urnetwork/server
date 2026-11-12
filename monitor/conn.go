@@ -331,6 +331,9 @@ type runner struct {
 	runSSH              sshCommandRunner
 	runLocal            localCommandRunner
 	operatorDiagnostics io.Writer
+	// the TLS configuration of DoH questions (dnsDohTxt); nil verifies against
+	// the system roots. Only tests set it, to trust an in-process DoH server.
+	dohTLSConfig *tls.Config
 }
 
 func newRunner(cfg *monitorConfig) *runner {

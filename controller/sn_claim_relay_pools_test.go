@@ -346,6 +346,73 @@ func TestClaimRelayOperatorPoolUnavailableBeforeTheCtfPoolsFirstRoot(t *testing.
 	}
 }
 
+// A capture the flag pool whose tree the pass cannot read for a claim's proof,
+// after its ledger read found it (its tree left the cache and cannot be built
+// again), waits as a pool the ledger read could not read: the operator's pool
+// is still claimed, a tapped coldkey's request stays for its CTF account, and
+// the pass names the CTF pool, so the api reads the operator's pool's accounts
+// as it would without the fault rather than relay_paused (owner, 2026-11-11).
+// Once the tree reads again the CTF accounts are claimed. A tree of the
+// operator's pool that cannot be read still stops the pass, the ledger
+// unavailable with no pool named, as before.
+func TestClaimRelayCtfPoolProofUnavailable(t *testing.T) {
+	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
+	world := newClaimRelayWorld(t, over, small)
+	world.batching = true
+	world.addCtf(0, over)
+	world.addCtf(1, small)
+	world.proofErrs = map[uint64]error{claimRelayTestCtfPool: errors.New("the capture the flag tree cannot be built")}
+	world.tap(1)
+	status := world.passes()
+	requireClaimRelayState(t, status, SnClaimRelayStateLedgerUnavailable)
+	sent := world.sentKeys()
+	slices.Sort(sent)
+	if want := []string{"1/0", "1/1"}; !slices.Equal(sent, want) {
+		t.Fatalf("sent %v, want %v", sent, want)
+	}
+	if !slices.Equal(status.UnavailablePools, []uint64{claimRelayTestCtfPool}) || status.PoolsUnavailable != 1 || !strings.Contains(status.Detail, "4294967297") {
+		t.Fatalf("status %+v", status)
+	}
+	if _, queued := world.requests[claimRelayTestColdkey(1)]; !queued {
+		t.Fatal("a request ended while its coldkey's CTF account could not be claimed")
+	}
+	// the operator's pool's accounts read as claimed, the CTF pool's as waiting
+	entry := claimRelayLedgerEntry(small, new(uint256.Int), nil)
+	for _, c := range []struct {
+		noId   uint64
+		reason string
+	}{{1, SnClaimRelayReasonUnderThreshold}, {claimRelayTestCtfPool, SnClaimRelayReasonRelayPaused}} {
+		entry.NoId = c.noId
+		account, err := snClaimRelayAccountView(status, "ss58", entry, false, false, time.Time{}, nil, world.nowTime)
+		if err != nil || account.Reason != c.reason {
+			t.Fatalf("pool %d's account %+v (%v), want %s", c.noId, account, err, c.reason)
+		}
+	}
+
+	// once the tree reads again, the CTF accounts are claimed and the request ends
+	world.proofErrs = nil
+	requireClaimRelayState(t, world.passes(), SnClaimRelayStateRunning)
+	sent = world.sentKeys()
+	slices.Sort(sent)
+	if want := []string{"1/0", "1/1", claimRelayCtfKey(0), claimRelayCtfKey(1)}; !slices.Equal(sent, want) {
+		t.Fatalf("sent %v, want %v", sent, want)
+	}
+	if _, queued := world.requests[claimRelayTestColdkey(1)]; queued {
+		t.Fatal("the request stayed queued")
+	}
+
+	// the operator's pool's tree that cannot be read stops the pass
+	world = newClaimRelayWorld(t, over)
+	world.addCtf(0, over)
+	world.proofErrs = map[uint64]error{1: errors.New("the pool's tree cannot be built")}
+	status = world.pass()
+	requireClaimRelayState(t, status, SnClaimRelayStateLedgerUnavailable)
+	if len(world.txs) != 0 || len(status.UnavailablePools) != 0 || status.Detail != "the pool's tree cannot be built" {
+		t.Fatalf("sent %d, status %+v", len(world.txs), status)
+	}
+}
+
 // A batch ends where a group ends: when the batcher fits part of a coldkey's
 // group, the group waits for the next transaction, whole.
 func TestClaimRelayABatchEndsAtAGroupsEnd(t *testing.T) {

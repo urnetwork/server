@@ -1345,6 +1345,30 @@ func GetCtfClientAwards(ctx context.Context, deploymentKey StDeploymentKey, noId
 	return awards
 }
 
+// GetCtfNetworkAwards returns the awards of the epochs fromEpoch … toEpoch of
+// every client a network has had, removed ones included, newest first, then by
+// role, country and rank.
+func GetCtfNetworkAwards(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, networkId server.Id, fromEpoch uint64, toEpoch uint64) []*CtfAward {
+	key := requireStDeploymentKey(deploymentKey)
+	awards := []*CtfAward{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT `+ctfAwardColumns+` FROM ctf_award
+			WHERE deployment_key = $1 AND no_id = $2 AND $4 <= epoch AND epoch <= $5
+				AND client_id IN (SELECT client_id FROM network_client WHERE network_id = $3)
+			ORDER BY epoch DESC, role, country_code, rank`,
+			key, int64(noId), networkId, int64(fromEpoch), int64(toEpoch),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				awards = append(awards, scanCtfAward(result))
+			}
+		})
+	})
+	return awards
+}
+
 const ctfPotColumns = `epoch, country_code, role, units, winners, pot_in::text, pot_out::text`
 
 func scanCtfPot(result server.PgResult) *CtfPot {

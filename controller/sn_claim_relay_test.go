@@ -97,6 +97,8 @@ type claimRelayWorld struct {
 	// one pool's ledger cannot be read; ledgerErr fails both
 	poolLedgerErr error
 	ctfLedgerErr  error
+	// a pool whose tree cannot be read for a claim's proof, by no_id
+	proofErrs map[uint64]error
 	// the account index of a pool that cannot be read cannot be read either
 	indexUnreadable bool
 
@@ -469,6 +471,9 @@ func (self *claimRelayWorld) Accounts(context.Context) (*snClaimRelayLedgerRead,
 }
 
 func (self *claimRelayWorld) Proof(_ context.Context, account *snClaimRelayAccount) ([]merkle.LedgerNode, error) {
+	if err := self.proofErrs[account.NoId]; err != nil {
+		return nil, err
+	}
 	return self.treeOf(account).Proof(account.Index)
 }
 

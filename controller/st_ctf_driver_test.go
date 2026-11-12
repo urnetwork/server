@@ -9,6 +9,7 @@ package controller
 import (
 	"encoding/hex"
 	"errors"
+	"math/big"
 	"reflect"
 	"slices"
 	"strings"
@@ -239,7 +240,9 @@ func TestStCtfDriverWaitsForTheCensusAndItsRound(t *testing.T) {
 }
 
 // §4.6: the carry is recycled only once its root is final, and then the next
-// epoch is matured; a second recycle finds nothing.
+// epoch is matured. It returns the carry account and keeps its residual; a
+// second recycle finds nothing above the residual, and with nothing to move
+// it absorbs nothing from vault2's list, even full.
 func TestStCtfDriverRecyclesOnlyFinalRoots(t *testing.T) {
 	f := newCtfFixture(t, StCtfModeLive)
 	f.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
@@ -261,11 +264,17 @@ func TestStCtfDriverRecyclesOnlyFinalRoots(t *testing.T) {
 	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "finalize 8", "recycle root 0")
 	returned := f.chain.recycled[9]
-	if returned.IsZero() {
-		t.Fatal("nothing returned")
+	if claimed := ctfTestCarryClaimed(f.chain); returned.IsZero() || !returned.Eq(&claimed) || f.chain.held.Uint64() != ctfTestSeedRao || f.chain.residual.Uint64() != ctfTestSeedRao {
+		t.Fatalf("returned %s of the carry account's %s, keeping %s of the residual %s", returned.Dec(), claimed.Dec(), f.chain.held.Dec(), f.chain.residual.Dec())
 	}
+	full := [][32]byte{ctfTestEscrowHotkey}
+	for i := 0; len(full) < stCtfStakingHotkeysMax; i++ {
+		full = append(full, [32]byte{0xd1, byte(i)})
+	}
+	f.chain.staking[ctfTestVaultColdkey] = full
 	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, false, "NothingToRecycle")
 	requireCtfLog(t, f.takeLog(), "recycle root 0")
+	f.chain.staking[ctfTestVaultColdkey] = nil
 
 	// epoch 9 captures it with its emission and is matured
 	f.census[9] = ctfTestCensusOf(t, 9, ctfTestCandidates()...)
@@ -282,6 +291,170 @@ func TestStCtfDriverRecyclesOnlyFinalRoots(t *testing.T) {
 		t.Fatalf("epoch 9: matured %t returned %s of %s owed", e.Matured, e.Returned.Dec(), e.Owed.Dec())
 	}
 	requireCtfAlerts(t, f.alerts)
+}
+
+// ctfTestCarryClaimed is what vault2 has paid the carry account of the CTF
+// pool: the only account claimed in these tests.
+func ctfTestCarryClaimed(chain *fakeCtfChain) uint256.Int {
+	var claimed uint256.Int
+	for key, amount := range chain.claimed {
+		if key[0] == ctfTestPoolId {
+			claimed.Add(&claimed, &amount)
+		}
+	}
+	return claimed
+}
+
+// ctfTestFinalRoot runs epoch 8 to a final root whose carry account is not
+// yet claimed.
+func ctfTestFinalRoot(t *testing.T) *ctfFixture {
+	t.Helper()
+	f := newCtfFixture(t, StCtfModeLive)
+	f.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
+	f.commitRound(8, 1000)
+	f.emission(8, 1_000_000_000_000)
+	f.chain.head = f.chain.end(8)
+	f.run(StCtfDriverStepCensus, 8)
+	f.run(StCtfDriverStepEpoch, 8)
+	f.chain.approvals = 1
+	f.chain.head += f.chain.challenge
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepFinalize, 8), model.StPublishStatusConfirmed, false, "")
+	f.takeLog()
+	return f
+}
+
+// §4.6: root's sweep cleared the carry's residual, so vault2 would refuse to
+// pay it the carry account and the recycle would revert ResidualMissing. The
+// driver sends nothing, absorbs nothing, records nothing that ends the step,
+// alerts with the TAO a seed() needs and tries again an hour later; the
+// recycle stays planned. Once anyone seeds, it returns the carry and keeps
+// the new residual.
+func TestStCtfDriverWaitsForASeedWithoutTheResidual(t *testing.T) {
+	f := ctfTestFinalRoot(t)
+	f.chain.sweep(2_000_000_000)
+	full := [][32]byte{ctfTestEscrowHotkey}
+	for i := 0; len(full) < stCtfStakingHotkeysMax; i++ {
+		full = append(full, [32]byte{0xd2, byte(i)})
+	}
+	f.chain.staking[ctfTestVaultColdkey] = full
+	before := stCtfServerNow()
+	outcome := f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0})
+	requireLedgerV2Outcome(t, outcome, model.StPublishStatusSkipped, true, "seed() with at least 19000000000 rao")
+	if outcome.RetryAt.Before(before.Add(stCtfResidualWait - time.Minute)) {
+		t.Fatalf("retried at %s, from %s", outcome.RetryAt, before)
+	}
+	requireCtfLog(t, f.takeLog())
+	if status, _ := f.records.Outcome(f.ctx, 8, model.StPublishKindCtfRecycle); status != "" {
+		t.Fatalf("the waiting recycle is recorded %s", status)
+	}
+	f.records.mirror(f.chain)
+	if got := f.sync(9); !slices.Contains(got, "ctf_recycle 8") {
+		t.Fatalf("planned %q", got)
+	}
+	requireCtfAlerts(t, f.alerts, StCtfAlertCarryResidual+" root 0 missing")
+
+	// a seed of the swept TAO alone is refused; with the rest it restores the
+	// residual, and the recycle goes on
+	if err := f.chain.seed(0); err == nil {
+		t.Fatal("a seed below the least")
+	}
+	if err := f.chain.seed(19_000_000_000); err != nil {
+		t.Fatal(err)
+	}
+	f.chain.staking[ctfTestVaultColdkey] = nil
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, f.takeLog(), "recycle root 0")
+	returned, claimed := f.chain.recycled[9], ctfTestCarryClaimed(f.chain)
+	if returned.IsZero() || !returned.Eq(&claimed) || f.chain.residual.Uint64() != 20_000_000_000 || f.chain.held.Uint64() != 20_000_000_000 {
+		t.Fatalf("returned %s of %s, keeping %s of the residual %s", returned.Dec(), claimed.Dec(), f.chain.held.Dec(), f.chain.residual.Dec())
+	}
+
+	// A sweep with no claim due is alerted at once, so the seed can come
+	// before the next root's claim; the recycle ends at NothingToRecycle.
+	g := ctfTestFinalRoot(t)
+	requireLedgerV2Outcome(t, g.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	g.chain.sweep(2_000_000_000)
+	g.takeLog()
+	requireLedgerV2Outcome(t, g.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, false, "NothingToRecycle")
+	requireCtfLog(t, g.takeLog(), "recycle root 0")
+	requireCtfAlerts(t, g.alerts, StCtfAlertCarryResidual+" root 0 missing")
+}
+
+// §4.6: a sweep after the driver read the residual makes the recycle revert
+// ResidualMissing. The attempt fails without ending the step, alerted, and is
+// retried an hour later; a failed read of the carry is retried as usual.
+func TestStCtfDriverRecycleRevertsResidualMissing(t *testing.T) {
+	f := ctfTestFinalRoot(t)
+	f.chain.failNext("held", errors.New("rpc down"))
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusFailed, true, "rpc down")
+	requireCtfLog(t, f.takeLog())
+
+	f.chain.failNext("recycle", fakeLedgerV2Revert("ResidualMissing"))
+	before := stCtfServerNow()
+	outcome := f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0})
+	requireLedgerV2Outcome(t, outcome, model.StPublishStatusFailed, true, "ResidualMissing")
+	if outcome.RetryAt.Before(before.Add(stCtfResidualWait - time.Minute)) {
+		t.Fatalf("retried at %s, from %s", outcome.RetryAt, before)
+	}
+	requireCtfLog(t, f.takeLog(), "recycle root 0")
+	if status, _ := f.records.Outcome(f.ctx, 8, model.StPublishKindCtfRecycle); status != "" {
+		t.Fatalf("a ResidualMissing revert ended the recycle as %s", status)
+	}
+	requireCtfAlerts(t, f.alerts, StCtfAlertCarryResidual+" root 0 missing")
+
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, f.takeLog(), "recycle root 0")
+}
+
+// §4.6: with the carry account claimed, a surplus above the residual worth
+// less than the runtime's transfer floor cannot move, so the recycle ends
+// without sending and the next root's claim moves it along; a claim of the
+// carry account that someone else made before the driver is moved at once.
+func TestStCtfDriverLeavesDustForTheNextRoot(t *testing.T) {
+	f := ctfTestFinalRoot(t)
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	f.takeLog()
+	var key [2]uint64
+	var cumulative uint256.Int
+	for k, amount := range f.chain.claimed {
+		if k[0] == ctfTestPoolId {
+			key, cumulative = k, amount
+		}
+	}
+	// 99,999 rao at 1 TAO per α: below the 100,000 rao floor
+	f.chain.held.AddUint64(&f.chain.held, 99_999)
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, false, "transfer floor")
+	requireCtfLog(t, f.takeLog())
+	if status, _ := f.records.Outcome(f.ctx, 8, model.StPublishKindCtfRecycle); status != model.StPublishStatusSkipped {
+		t.Fatalf("dust left the recycle %q", status)
+	}
+	// the same α is worth the floor at a higher price, and moves
+	f.chain.alphaPrice = big.NewInt(2e18)
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, f.takeLog(), "recycle root 0")
+	requireCtfAlerts(t, f.alerts)
+
+	g := ctfTestFinalRoot(t)
+	g.chain.claimed[key] = cumulative
+	g.chain.held.Add(&g.chain.held, &cumulative)
+	requireLedgerV2Outcome(t, g.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, g.takeLog(), "recycle root 0")
+	if returned := g.chain.recycled[9]; cumulative.IsZero() || !returned.Eq(&cumulative) || g.chain.held.Uint64() != ctfTestSeedRao {
+		t.Fatalf("returned %s of the %s someone else claimed, keeping %s", returned.Dec(), cumulative.Dec(), g.chain.held.Dec())
+	}
+}
+
+// §4.6: a position the runtime lowered below the residual is followed down
+// and alerted; the recycle still returns the carry account above it.
+func TestStCtfDriverAlertsALoweredResidual(t *testing.T) {
+	f := ctfTestFinalRoot(t)
+	f.chain.held.SetUint64(ctfTestSeedRao - 1)
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	returned, claimed := f.chain.recycled[9], ctfTestCarryClaimed(f.chain)
+	if !returned.Eq(&claimed) || f.chain.residual.Uint64() != ctfTestSeedRao-1 {
+		t.Fatalf("returned %s of %s, residual %s", returned.Dec(), claimed.Dec(), f.chain.residual.Dec())
+	}
+	requireCtfAlerts(t, f.alerts, StCtfAlertCarryResidual+" lowered 999999999")
 }
 
 // §4.7: when the carry is late, the epoch's winners get their slots now and
