@@ -293,38 +293,28 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 		facts.Providers[clientId] = end
 	}
 
-	// X1, X3–X6
-	for clientId, records := range model.GetCtfExtenderBoundaries(ctx, extenderIds, authority.StartTime, authority.EndTime) {
-		if record := ctfExtenderRecord(records); record != nil {
-			networkId := record.NetworkId
-			facts.Extenders[clientId] = &ctfExtenderEnd{
-				ExtenderId:         record.ExtenderId,
-				NetworkId:          &networkId,
-				Active:             record.Active,
-				Canary:             record.Canary,
-				CountryCode:        record.CountryCode,
-				ActivatedElsewhere: ctfExtenderMoved(record),
-				Egress:             model.CtfExtenderEgress(record.Ipv4, record.Ipv6, VerifySettings()),
-			}
-		}
+	// X1, X4–X6: the shared eligibility rules, the extender pool's E1 and
+	// E3–E5, over every record of the epoch, so both pools judge an extender
+	// alike; X3 from the judged record's activations
+	records := model.GetStExtenderCensusRecords(ctx, authority.StartTime, authority.EndTime)
+	rules, err := stExtenderEligibilityRules(ctx, cfg, client, authority, records)
+	if err != nil {
+		stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d extender eligibility", epoch), "epoch %d's census waits: %s", epoch, err)
+		return stCtfCensusRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
 	}
+	judged, err := model.DecideExtenderEligibility(records, rules)
+	if err != nil {
+		return stCtfCensusRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
+	}
+	facts.Extenders = ctfExtenderEnds(judged, model.GetCtfExtenderBoundaries(ctx, extenderIds, authority.StartTime, authority.EndTime), extenderIds)
 
-	// P6, X6: the networks the operator declares, its gated durable fleet and
-	// every canary's network
-	for _, networkId := range settings.OwnNetworkIds() {
-		facts.OwnNetworks[networkId] = true
-	}
-	durableNetworkIds, err := ctfDurableNetworkIds()
+	// P6: the operator's own networks, the one list E5 reads
+	own, err := readStExtenderOwnNetworks(ctx, cfg)
 	if err != nil {
 		stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d own networks", epoch), "epoch %d's census waits: %s", epoch, err)
 		return stCtfCensusRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
 	}
-	for _, networkId := range durableNetworkIds {
-		facts.OwnNetworks[networkId] = true
-	}
-	for _, networkId := range model.GetCtfCanaryNetworkIds(ctx) {
-		facts.OwnNetworks[networkId] = true
-	}
+	facts.OwnNetworks = own.All()
 
 	// P5, X5: a fleet binding at either boundary, and the provider pool's
 	// wallet selection
@@ -433,34 +423,6 @@ func ctfMissingSamples(samples []*model.CtfPresenceSample, excused *model.CtfSam
 		}
 	}
 	return
-}
-
-// The message of an extender configuration that is absent: a deployment
-// without an extender network, which has no gated fleet.
-const ctfExtenderConfigAbsentMessage = "the extender network is not configured"
-
-// ctfDurableNetworkIds reads the gated, durable fleet of extender.yml (P6,
-// X6). An absent extender.yml has none. An unreadable one, or an id in it that
-// does not parse, is an error: the operator's own fleet must not compete
-// because its list could not be read.
-func ctfDurableNetworkIds() ([]server.Id, error) {
-	extenderConfig, err := EnvExtenderConfig()
-	if err != nil {
-		var configErr *extenderConfigError
-		if errors.As(err, &configErr) && configErr.message == ctfExtenderConfigAbsentMessage {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("extender.yml cannot be read for its durable_network_ids: %s", err)
-	}
-	networkIds := []server.Id{}
-	for _, networkIdStr := range extenderConfig.Directory.DurableNetworkIds {
-		networkId, err := server.ParseId(strings.TrimSpace(networkIdStr))
-		if err != nil {
-			return nil, fmt.Errorf("extender.yml directory.durable_network_ids holds %q, which is not a network id", networkIdStr)
-		}
-		networkIds = append(networkIds, networkId)
-	}
-	return networkIds, nil
 }
 
 // ctfExtenderMoved is X3's test that an extender stayed in one country through
@@ -658,19 +620,41 @@ func ctfResolveProviderUnit(egress *model.CtfEgress, sampled []*ctfSampledUnit, 
 	return resolved
 }
 
-// The record an extender member is judged by: its provider client's record
-// that is active at the end, the lowest extender id, else its lowest record.
-func ctfExtenderRecord(records []*model.CtfExtenderBoundary) *model.CtfExtenderBoundary {
-	var chosen *model.CtfExtenderBoundary
-	for _, record := range records {
-		switch {
-		case chosen == nil,
-			record.Active && !chosen.Active,
-			record.Active == chosen.Active && record.ExtenderId.Less(chosen.ExtenderId):
-			chosen = record
+// ctfExtenderEnds are the extender members' facts: each member's provider
+// client judged by its judged record under the shared eligibility rules (X1,
+// X4–X6), with the country of that record and its activations from the
+// boundary read (X3). A member whose client has no record of the epoch has no
+// facts, so it is inactive.
+func ctfExtenderEnds(judged model.ExtenderEligibilities, boundaries map[server.Id][]*model.CtfExtenderBoundary, extenderIds []server.Id) map[server.Id]*ctfExtenderEnd {
+	ends := map[server.Id]*ctfExtenderEnd{}
+	for _, clientId := range extenderIds {
+		eligibility := judged.Judged(clientId)
+		if eligibility == nil {
+			continue
 		}
+		networkId := eligibility.Record.NetworkId
+		end := &ctfExtenderEnd{
+			ExtenderId: eligibility.Record.ExtenderId,
+			NetworkId:  &networkId,
+			Active:     eligibility.Active(),
+			Duplicate:  eligibility.Duplicate(),
+			HeadBound:  eligibility.HeadBound(),
+			Coldkey:    eligibility.Coldkey,
+			OwnNetwork: eligibility.OwnNetwork(),
+		}
+		if eligibility.Active() {
+			unit := eligibility.Unit
+			end.Egress = &model.CtfEgress{Unit: &unit, UnitFamily: int(eligibility.Family)}
+		}
+		for _, record := range boundaries[clientId] {
+			if record.ExtenderId == eligibility.Record.ExtenderId {
+				end.CountryCode = record.CountryCode
+				end.ActivatedElsewhere = ctfExtenderMoved(record)
+			}
+		}
+		ends[clientId] = end
 	}
-	return chosen
+	return ends
 }
 
 // stCtfColdkeys selects the payout coldkey of each member client as the

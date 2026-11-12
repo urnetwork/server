@@ -16,9 +16,16 @@ package controller
 //	P2  10 presence                             X2  10 presence
 //	P3  9 country changed                       X3  9 country changed, an activation
 //	                                                elsewhere in the epoch
-//	P4  8 duplicate address                     X4  8 duplicate address
-//	P5  7 no wallet, 6 head-bound               X5  7 no wallet, 6 head-bound
-//	P6  5 own network                           X6  5 own network or a canary
+//	P4  8 duplicate address                     X4  8 duplicate (E3)
+//	P5  7 no wallet, 6 head-bound               X5  7 no wallet, 6 head-bound (E4)
+//	P6  5 own network                           X6  5 own network (E5)
+//
+// An extender's X1 and X4–X6 are the extender pool's E1 and E3–E5 (§4.2),
+// judged once for both pools by the shared eligibility rules
+// (model/extender_eligibility.go, extender_eligibility.go): its member is
+// judged by its provider client's judged record, and E3 decides its
+// duplicates from every active record of the epoch, not from this census's
+// candidates.
 //
 // A member without a unit has no prefix to enter a draw with, which the
 // census counts as no valid location (4): a valid location needs an address
@@ -53,15 +60,21 @@ type ctfProviderEnd struct {
 	Egress      *model.CtfEgress
 }
 
-// An extender's facts at the end boundary (X1, X3–X6): the record evaluated
-// for its provider client.
+// An extender's facts at the end boundary (X1, X3–X6): its provider client's
+// judged record under the shared eligibility rules.
 type ctfExtenderEnd struct {
 	ExtenderId server.Id
 	NetworkId  *server.Id
-	// active and unrevoked with at least one active address (E1)
+	// E1: active and unrevoked with at least one active address
 	Active bool
-	// published only on its own canary channel (R4)
-	Canary bool
+	// E3: another active record of its component counts
+	Duplicate bool
+	// E4: an active fleet binding at either boundary, and the payout
+	// coldkey, zero without one
+	HeadBound bool
+	Coldkey   [32]byte
+	// E5: gated, a canary, or on another network the operator controls
+	OwnNetwork bool
 	// the record's country: its derived location's, else its activation's
 	CountryCode string
 	// a country of an activation of the record in the epoch other than
@@ -82,11 +95,13 @@ type ctfCensusFacts struct {
 	// by provider client id, for the extender members; a member without facts
 	// is inactive
 	Extenders map[server.Id]*ctfExtenderEnd
-	// the operator's own networks (P6, X6)
+	// the operator's own networks (P6); an extender's are in its facts (X6)
 	OwnNetworks map[server.Id]bool
-	// clients with an active fleet binding at either boundary (P5, X5)
+	// clients with an active fleet binding at either boundary (P5); an
+	// extender's is in its facts (X5)
 	HeadBound map[server.Id]bool
-	// payout coldkeys under the provider pool's wallet selection (E4)
+	// payout coldkeys under the provider pool's wallet selection (P5); an
+	// extender's is in its facts (X5)
 	Coldkeys map[server.Id][32]byte
 }
 
@@ -216,6 +231,7 @@ func decideCtfCensus(facts *ctfCensusFacts) *ctfCensusDecision {
 		member := &model.CtfCensusMember{Role: key.role, ClientId: key.clientId}
 		var failed uint32
 		var egress *model.CtfEgress
+		headBound, coldkey := facts.HeadBound[key.clientId], facts.Coldkeys[key.clientId]
 		switch key.role {
 		case model.CtfRoleProvider:
 			end := facts.Providers[key.clientId]
@@ -254,12 +270,17 @@ func decideCtfCensus(facts *ctfCensusFacts) *ctfCensusDecision {
 			if !ctfCountryInL(member.CountryCode) {
 				failed = ctfFailed(failed, model.CtfReasonNoLocation)
 			}
-			if end.Canary || (end.NetworkId != nil && facts.OwnNetworks[*end.NetworkId]) {
+			if end.OwnNetwork {
 				failed = ctfFailed(failed, model.CtfReasonOwnNetwork)
 			}
 			if end.ActivatedElsewhere {
 				failed = ctfFailed(failed, model.CtfReasonCountryChanged)
 			}
+			// X4 is E3, decided from every active record of the epoch
+			if end.Active && end.Duplicate {
+				failed = ctfFailed(failed, model.CtfReasonDuplicate)
+			}
+			headBound, coldkey = end.HeadBound, end.Coldkey
 		}
 		if egress == nil || egress.Unit == nil || (egress.UnitFamily != 4 && egress.UnitFamily != 6) {
 			failed = ctfFailed(failed, model.CtfReasonNoLocation)
@@ -269,10 +290,10 @@ func decideCtfCensus(facts *ctfCensusFacts) *ctfCensusDecision {
 			member.UnitFamily = egress.UnitFamily
 			addresses[member] = egress.Addresses
 		}
-		if facts.HeadBound[key.clientId] {
+		if headBound {
 			failed = ctfFailed(failed, model.CtfReasonHeadBound)
 		}
-		if coldkey, ok := facts.Coldkeys[key.clientId]; ok && coldkey != ([32]byte{}) {
+		if coldkey != ([32]byte{}) {
 			member.Coldkey = &coldkey
 		} else {
 			failed = ctfFailed(failed, model.CtfReasonNoWallet)
@@ -304,12 +325,16 @@ func decideCtfCensus(facts *ctfCensusFacts) *ctfCensusDecision {
 		families[*member.Unit] = member.UnitFamily
 	}
 
-	// P4, X4: one candidate per keyed IPv4 address or IPv6 /64 per role, the
+	// P4: one provider candidate per keyed IPv4 address or IPv6 /64, the
 	// lowest client id. A member sharing an address with a lower candidate is
 	// a duplicate whatever else it fails; one that fails nothing else and
-	// shares none is a candidate and holds its addresses.
-	held := map[int]map[[32]byte]bool{model.CtfRoleProvider: {}, model.CtfRoleExtender: {}}
+	// shares none is a candidate and holds its addresses. (An extender's X4 is
+	// E3, above.)
+	held := map[int]map[[32]byte]bool{model.CtfRoleProvider: {}}
 	for _, member := range decision.Members {
+		if member.Role != model.CtfRoleProvider {
+			continue
+		}
 		for _, address := range addresses[member] {
 			if held[member.Role][address] {
 				member.Failed = ctfFailed(member.Failed, model.CtfReasonDuplicate)
