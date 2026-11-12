@@ -1107,6 +1107,12 @@ func statsRefreshDb(ctx context.Context, window statsEpochWindow) {
 	// the extender gossip and popularity gauges (grafana/dashboards/extenders.json)
 	statsRefreshExtenders(ctx, now)
 
+	// the extender supply gauges (stats_extender_supply.go); isolated, so a
+	// read that fails costs only its own gauges
+	server.HandleError(func() {
+		statsRefreshExtenderSupply(ctx, now)
+	})
+
 	// the lag.dev gauges (grafana/dashboards/lag-dev.json, stats_collector_lag.go);
 	// isolated, so a lag read that fails costs only its own gauges
 	server.HandleError(func() {
