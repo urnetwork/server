@@ -187,8 +187,10 @@ func retryCompetitionAuthorityRenewalObserved(ctx context.Context, leaseExpiresA
 // Only the job heartbeat supplies this narrower returned transaction proof.
 // The call ceiling is cumulative and the original total/authority never reset.
 type competitionAuthorityLockContinuation struct {
-	MaximumAttempts int
-	Completed       func(error) bool
+	MaximumAttempts         int
+	Completed               func(error) bool
+	DeadlineMaximumAttempts int
+	CompletedDeadline       func(error) bool
 }
 
 // Historical callers supply no extension. An exact early read-only failure
@@ -343,6 +345,9 @@ func retryCompetitionAuthorityRenewalWithLockContinuation(ctx context.Context, l
 		maximumAttempts := settings.LockRetry.MaximumAttempts
 		if scopeLockRetry && maximumAttempts < continuation.MaximumAttempts {
 			maximumAttempts = continuation.MaximumAttempts
+		}
+		if deadlineRetry && continuation != nil && continuation.CompletedDeadline != nil && continuation.CompletedDeadline(err) && maximumAttempts < continuation.DeadlineMaximumAttempts {
+			maximumAttempts = continuation.DeadlineMaximumAttempts
 		}
 		if !lockRetry && !deadlineRetry || leaseExpiresAt.IsZero() || settings.Timeout <= 0 || settings.AttemptTimeout <= 0 ||
 			settings.LockRetry.Timeout <= 0 || settings.LockRetry.Interval <= 0 || attempt+1 >= maximumAttempts {
