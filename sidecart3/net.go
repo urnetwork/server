@@ -116,6 +116,9 @@ func LayoutSettings(t testing.TB) *Settings {
 // Whether each NetSettings this package made turns the store clock on, so RunRow can hold a case to its flag.
 var netSettingsStoreClocks sync.Map
 
+// Each open T3 Net's Redis wrapper, so a scenario finds the keys the sidecar wrote.
+var netFaultRedis sync.Map
+
 // The NetSettings T3's Nets build from, which fault's rules take to run a T3 row: settings.Net with
 // Engines hosting on server's stores, Platform running the clients on server's exchange, the platform
 // fakes refused, and a row's authorization log on server's sequencer. Each Net arms server.Tx's pg-commit hook on t while it is open, so Nets are built one at
@@ -208,7 +211,9 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 		Clock:         net.Clock(),
 		Redis:         settings.Redis,
 	})
-	host.Redis = newFaultRedis(host.Redis, net, settings.CrossslotCalls, clocks.storeClock)
+	redisWrapper := newFaultRedis(host.Redis, net, settings.CrossslotCalls, clocks.storeClock)
+	host.Redis = redisWrapper
+	netFaultRedis.Store(net, redisWrapper)
 	host.Gates = fakes.Gates
 	net.Faults().SetCheck(checkPlan)
 	net.Faults().SetRealStore(admitClusterFault(layoutFaults))
@@ -234,6 +239,7 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 			clusterFaultNets.Delete(net)
 		}
 		netClockNets.Delete(net)
+		netFaultRedis.Delete(net)
 		clusters.Close()
 		buckets.remove()
 	}

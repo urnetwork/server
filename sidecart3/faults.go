@@ -313,6 +313,23 @@ type faultRedis struct {
 	calls *CrossslotCalls
 	// nil when off
 	storeClock *StoreClock
+
+	writtenLock sync.Mutex
+	// every key a call that writes named, which is the sidecar's Redis on a database server's platform shares
+	writtenKeys map[string]bool
+}
+
+// Every key a write through the Net's host named, sorted: the keys of the sidecar's families on T3, apart from
+// those server's exchange and controller keep beside them in the test's database.
+func (self *faultRedis) WrittenKeys() []string {
+	self.writtenLock.Lock()
+	defer self.writtenLock.Unlock()
+	keys := []string{}
+	for key := range self.writtenKeys {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 var _ sidecar.Redis = (*faultRedis)(nil)
@@ -330,6 +347,18 @@ func (self *faultRedis) call(ctx context.Context, op string, keys []string, serv
 	if self.storeClock != nil {
 		// a failure is the store clock's to report: the call itself goes on
 		self.storeClock.age(ctx)
+	}
+	if !slices.Contains(redisReadOps, op) {
+		func() {
+			self.writtenLock.Lock()
+			defer self.writtenLock.Unlock()
+			if self.writtenKeys == nil {
+				self.writtenKeys = map[string]bool{}
+			}
+			for _, key := range keys {
+				self.writtenKeys[key] = true
+			}
+		}()
 	}
 	faultKey := ""
 	if 0 < len(keys) {
