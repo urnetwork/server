@@ -232,6 +232,9 @@ func TestCtfCensusProviderEndRules(t *testing.T) {
 			t.Errorf("provider %d is a near miss", i)
 		}
 	}
+	if member := ctfMember(t, decision, model.CtfRoleProvider, ids[5]); member.CountryCode != model.CtfCountryUnknown {
+		t.Errorf("a member in %q, outside the list, is stored in it", member.CountryCode)
+	}
 	// the exclusion counts: in its country at the end, "zz" outside the list
 	want := []*model.CtfCensusExclusion{
 		{CountryCode: "is", Role: 1, Reason: model.CtfReasonOffline, Count: 4},
@@ -530,33 +533,102 @@ func TestEncodeCtfCensusEmpty(t *testing.T) {
 }
 
 // The census unit of a provider: its pin, the pin's family from the samples
-// when the live addresses no longer show it, else the latest sampled unit,
-// in its end country first.
+// when the live addresses no longer show it; else the latest sampled unit, in
+// its end country first; else the prefix of its live address.
 func TestCtfResolveProviderUnit(t *testing.T) {
-	pinned, home, away := ctfTestHash("pinned"), ctfTestHash("home"), ctfTestHash("away")
+	pinned, home, away, live := ctfTestHash("pinned"), ctfTestHash("home"), ctfTestHash("away"), ctfTestHash("live")
 	address := ctfTestHash("address")
 	sampled := []*ctfSampledUnit{
 		{countryCode: "is", unit: home, family: 6, lastSampleIndex: 300},
 		{countryCode: "de", unit: away, family: 4, lastSampleIndex: 600},
 		{countryCode: "de", unit: pinned, family: 4, lastSampleIndex: 10},
 	}
-	if egress := ctfResolveProviderUnit(&model.CtfEgress{Unit: &pinned, UnitFamily: 6, Addresses: [][32]byte{address}}, sampled, "is"); *egress.Unit != pinned || egress.UnitFamily != 6 || len(egress.Addresses) != 1 {
+	if egress := ctfResolveProviderUnit(&model.CtfEgress{Unit: &pinned, UnitFamily: 6, Pinned: true, Addresses: [][32]byte{address}}, sampled, "is"); *egress.Unit != pinned || egress.UnitFamily != 6 || !egress.Pinned || len(egress.Addresses) != 1 {
 		t.Errorf("a pin with its family %+v", egress)
 	}
-	if egress := ctfResolveProviderUnit(&model.CtfEgress{Unit: &pinned}, sampled, "is"); *egress.Unit != pinned || egress.UnitFamily != 4 {
+	if egress := ctfResolveProviderUnit(&model.CtfEgress{Unit: &pinned, Pinned: true}, sampled, "is"); *egress.Unit != pinned || egress.UnitFamily != 4 {
 		t.Errorf("a pin without its family %+v", egress)
 	}
-	if egress := ctfResolveProviderUnit(&model.CtfEgress{Unit: &address}, sampled, "is"); *egress.Unit != address || egress.UnitFamily != 0 {
+	if egress := ctfResolveProviderUnit(&model.CtfEgress{Unit: &address, Pinned: true}, sampled, "is"); *egress.Unit != address || egress.UnitFamily != 0 {
 		t.Errorf("a pin no sample saw %+v", egress)
 	}
-	if egress := ctfResolveProviderUnit(&model.CtfEgress{Addresses: [][32]byte{address}}, sampled, "is"); *egress.Unit != home || egress.UnitFamily != 6 || len(egress.Addresses) != 1 {
+	// unpinned: the samples' unit wins over the live prefix at the capture
+	if egress := ctfResolveProviderUnit(&model.CtfEgress{Unit: &live, UnitFamily: 4, Addresses: [][32]byte{address}}, sampled, "is"); *egress.Unit != home || egress.UnitFamily != 6 || egress.Pinned || len(egress.Addresses) != 1 {
 		t.Errorf("no pin, a unit sampled in the end country %+v", egress)
 	}
 	if egress := ctfResolveProviderUnit(nil, sampled, "fr"); *egress.Unit != away || egress.UnitFamily != 4 {
 		t.Errorf("no pin, the latest unit sampled anywhere %+v", egress)
 	}
+	if egress := ctfResolveProviderUnit(&model.CtfEgress{Unit: &live, UnitFamily: 4}, nil, "is"); *egress.Unit != live || egress.UnitFamily != 4 {
+		t.Errorf("no pin and no sample, the live prefix %+v", egress)
+	}
 	if egress := ctfResolveProviderUnit(nil, nil, "is"); egress.Unit != nil {
 		t.Errorf("no pin and no sample %+v", egress)
+	}
+}
+
+// X3: an extender moved when its activations in the epoch were in more than
+// one country, or, without a derived location, in a country other than the
+// record's. A derived location is not compared with GeoLite2's activations.
+func TestCtfExtenderMoved(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		country     string
+		derived     bool
+		activations []string
+		moved       bool
+	}{
+		{"no activation", "ir", false, nil, false},
+		{"activated in its country", "ir", false, []string{"ir", "ir"}, false},
+		{"activated elsewhere", "ir", false, []string{"tr"}, true},
+		{"activated in two countries", "ir", false, []string{"ir", "tr"}, true},
+		{"derived, activated in one other country", "ir", true, []string{"de", "de"}, false},
+		{"derived, activated in two countries", "ir", true, []string{"de", "ir"}, true},
+	} {
+		record := &model.CtfExtenderBoundary{CountryCode: c.country, Derived: c.derived, ActivationCountryCodes: c.activations}
+		if ctfExtenderMoved(record) != c.moved {
+			t.Errorf("%s: moved %t, want %t", c.name, !c.moved, c.moved)
+		}
+	}
+}
+
+// The samples that count against every miner: not taken, or taken without
+// the providers' half, and not excused.
+func TestCtfMissingSamples(t *testing.T) {
+	sourceTime := time.Now()
+	samples := []*model.CtfPresenceSample{}
+	for i := range 10 {
+		sample := &model.CtfPresenceSample{SampleIndex: i, ProviderSourceTime: &sourceTime}
+		if i == 5 || i == 6 {
+			sample.ProviderSourceTime = nil
+		}
+		samples = append(samples, sample)
+	}
+	var excused model.CtfSampleSet
+	excused.Set(6)
+	excused.Set(20)
+	missing, providersMissing := ctfMissingSamples(samples, &excused)
+	if missing != model.CtfSamplesPerEpoch-10-1 || providersMissing != 1 {
+		t.Fatalf("missing %d providers missing %d", missing, providersMissing)
+	}
+}
+
+// P6, X6 fail closed: an extender.yml that cannot be read, or that names a
+// durable network that does not parse, stops the census rather than let the
+// operator's own fleet compete.
+func TestCtfDurableNetworkIds(t *testing.T) {
+	networkId := server.NewId()
+	installTestExtenderConfigYaml(t, "directory:\n  durable_network_ids:\n    - "+networkId.String()+"\n")
+	if ids, err := ctfDurableNetworkIds(); err != nil || !slices.Equal(ids, []server.Id{networkId}) {
+		t.Fatalf("durable networks %v %v", ids, err)
+	}
+	installTestExtenderConfigYaml(t, "directory:\n  durable_network_ids:\n    - "+networkId.String()+"\n    - fleet\n")
+	if _, err := ctfDurableNetworkIds(); err == nil {
+		t.Fatal("a durable network that does not parse was dropped")
+	}
+	installTestExtenderConfigYaml(t, "directory: [\n")
+	if _, err := ctfDurableNetworkIds(); err == nil {
+		t.Fatal("an unreadable extender.yml gave no durable networks")
 	}
 }
 
@@ -589,10 +661,11 @@ func TestCtfMemberClientIds(t *testing.T) {
 	}
 }
 
-// The sync plans the quarter hour's sample once, from the block it is at, and
-// nothing while capture the flag is off.
+// The sync plans the quarter hour's sample once its task is scheduled, in the
+// second half of its quarter hour, from the block the chain is estimated at,
+// and nothing while capture the flag is off.
 func TestStCtfDataSyncPlansEachSampleOnce(t *testing.T) {
-	cfg := &StConfig{Enabled: true, ChainId: 964, ContractAddress: [20]byte{1}, NoId: 1}
+	cfg := &StConfig{Enabled: true, ChainId: 964, ContractAddress: [20]byte{1}, NoId: 1, BlockSeconds: 12}
 	SetStConfig(cfg)
 	SetStClient(newStubStClient(&StEpochState{}))
 	defer SetStConfig(nil)
@@ -600,28 +673,42 @@ func TestStCtfDataSyncPlansEachSampleOnce(t *testing.T) {
 	defer model.Testing_SetCtfDataSettings(nil)
 	defer ctfDataPlannedSample.Delete(string(cfg.DeploymentKey()) + "|1")
 
-	state := &StEpochState{Epoch: 8, EpochStartBlock: 9_600_028, TEpochBlocks: 50_400, HeadBlock: 9_600_028 + 75*10 + 3}
+	now := server.NowUtc()
+	start := uint64(9_600_028)
+	state := &StEpochState{Epoch: 8, EpochStartBlock: start, TEpochBlocks: 50_400, HeadBlock: start + 75*10 + 3, HeadBlockTime: now}
 	model.Testing_SetCtfDataSettings(&model.CtfDataConfig{})
 	if steps, err := StCtfDataSync(t.Context(), state); err != nil || len(steps) != 0 {
 		t.Fatalf("off: %v %v", steps, err)
 	}
 	model.Testing_SetCtfDataSettings(&model.CtfDataConfig{Presence: model.CtfPresenceConfig{Enabled: true}})
-	steps, err := StCtfDataSync(t.Context(), state)
-	if err != nil || len(steps) != 1 || steps[0].Kind != StCtfDataStepSample || steps[0].Epoch != 8 || steps[0].Index != 10 || steps[0].HeadBlock != state.HeadBlock {
-		t.Fatalf("first turn planned %+v %v", steps, err)
-	}
-	if time.Since(steps[0].PlannedTime) > time.Minute {
-		t.Fatal("the sample is not planned now")
-	}
 	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 0 {
-		t.Fatalf("a second turn in the same quarter hour planned %+v", steps)
+		t.Fatalf("the first half of a quarter hour planned %+v", steps)
 	}
-	state.HeadBlock += 75
-	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 1 || steps[0].Index != 11 {
-		t.Fatalf("the next quarter hour planned %+v", steps)
+	state.HeadBlock = start + 75*10 + 40
+	steps, err := StCtfDataSync(t.Context(), state)
+	if err != nil || len(steps) != 1 || steps[0].Kind != StCtfDataStepSample || steps[0].Epoch != 8 || steps[0].Index != 10 || steps[0].EpochBlocks != 50_400 {
+		t.Fatalf("the second half planned %+v %v", steps, err)
+	}
+	step := steps[0]
+	if !step.QuarterStart.Equal(now.Add(-40*12*time.Second)) || !step.QuarterEnd.Equal(now.Add(35*12*time.Second)) || step.HeadBlock != state.HeadBlock {
+		t.Fatalf("quarter hour %s to %s at block %d", step.QuarterStart, step.QuarterEnd, step.HeadBlock)
+	}
+	// not scheduled yet: planned again
+	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 1 {
+		t.Fatalf("an unscheduled sample was not planned again: %+v", steps)
+	}
+	StCtfDataStepScheduled(step)
+	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 0 {
+		t.Fatalf("a scheduled sample was planned again: %+v", steps)
+	}
+	// finality stalled ten minutes ago, at the start of sample 12: the chain is
+	// about 50 blocks on, in its second half
+	state.HeadBlock, state.HeadBlockTime = start+75*12, now.Add(-10*time.Minute)
+	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 1 || steps[0].Index != 12 || steps[0].HeadBlock != start+75*12+50 {
+		t.Fatalf("a stalled finalized head planned %+v", steps)
 	}
 	// past the epoch's blocks the mirror has not rolled yet: nothing
-	state.HeadBlock = state.EpochStartBlock + state.TEpochBlocks
+	state.HeadBlock, state.HeadBlockTime = start+state.TEpochBlocks, now
 	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 0 {
 		t.Fatalf("a block past the epoch planned %+v", steps)
 	}

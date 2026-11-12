@@ -38,12 +38,17 @@ const (
 	StCtfDataStepCensus = "ctf_census"
 )
 
-// StCtfDataAlertCensus is raised once per epoch when its census cannot be built for
-// a reason that retrying will not change, and StCtfDataAlertSamples when its census
-// is built from fewer samples than the epoch had.
+// The alerts, each raised once per epoch and process: StCtfDataAlertCensus when
+// an epoch's census cannot be built or published for a reason retrying will not
+// change; StCtfDataAlertSamples when a census counts samples that were not
+// taken, or taken without the providers' half, that no declared outage
+// excuses; StCtfDataAlertPresence during the epoch, as soon as a sample is
+// missed or finds no provider for a stale score export, while an outage can
+// still be declared for it.
 const (
-	StCtfDataAlertCensus  = "ctf_census_build"
-	StCtfDataAlertSamples = "ctf_census_samples"
+	StCtfDataAlertCensus   = "ctf_census_build"
+	StCtfDataAlertSamples  = "ctf_census_samples"
+	StCtfDataAlertPresence = "ctf_presence_gap"
 )
 
 // How long after an epoch's end its census may still be read: within it a
@@ -63,16 +68,49 @@ const ctfCensusPlanGrace = 10 * time.Minute
 type StCtfDataStep struct {
 	Kind  string
 	Epoch uint64
-	// the sample's index and the block and time it was planned at (samples)
-	Index       int
-	HeadBlock   uint64
-	PlannedTime time.Time
-	RunAt       time.Time
+	// samples: the sample's index, the epoch's length in blocks, the block
+	// and time it was planned at, and the estimated times of the first blocks
+	// of the sample and of the next one: its quarter hour
+	Index        int
+	EpochBlocks  uint64
+	HeadBlock    uint64
+	PlannedTime  time.Time
+	QuarterStart time.Time
+	QuarterEnd   time.Time
+	RunAt        time.Time
 }
 
-// The samples planned by this process, the last per deployment, so a sync turn
-// plans each sample once; the task's run-once key keeps workers to one.
+// The samples scheduled by this process, the last per deployment, so a sync
+// turn plans each sample once; the task's run-once key keeps workers to one.
 var ctfDataPlannedSample sync.Map
+
+// StCtfDataStepScheduled records that a step's task is scheduled, so the next
+// sync turn does not plan its sample again. A sample whose scheduling failed
+// is planned again.
+func StCtfDataStepScheduled(step *StCtfDataStep) {
+	if step.Kind != StCtfDataStepSample {
+		return
+	}
+	cfg := stConfig()
+	if cfg == nil {
+		return
+	}
+	ctfDataPlannedSample.Store(fmt.Sprintf("%s|%d", cfg.DeploymentKey(), cfg.NoId), fmt.Sprintf("%d|%d", step.Epoch, step.Index))
+}
+
+// The block the chain is at now, estimated from the finalized head the sync
+// read and the time since it, so samples keep their quarter hours while
+// finality lags or stalls.
+func ctfEstimatedHead(state *StEpochState, now time.Time) uint64 {
+	if state.HeadBlockTime.IsZero() || !now.After(state.HeadBlockTime) {
+		return state.HeadBlock
+	}
+	blockSeconds := int64(stDefaultBlockSeconds)
+	if cfg := stConfig(); cfg != nil && 0 < cfg.BlockSeconds {
+		blockSeconds = cfg.BlockSeconds
+	}
+	return state.HeadBlock + uint64(now.Sub(state.HeadBlockTime)/(time.Duration(blockSeconds)*time.Second))
+}
 
 // The epochs whose census this process saw built or given up.
 var ctfDataCensusConcluded sync.Map
@@ -97,10 +135,25 @@ func StCtfDataSync(ctx context.Context, state *StEpochState) ([]*StCtfDataStep, 
 	now := server.NowUtc()
 	steps := []*StCtfDataStep{}
 	if settings.Presence.Enabled {
-		if index, ok := model.CtfSampleIndex(state.EpochStartBlock, state.TEpochBlocks, state.HeadBlock); ok {
+		// A sample is taken in the second half of its quarter hour, so the
+		// extender challenges of the quarter hour have run (X2).
+		head := ctfEstimatedHead(state, now)
+		if index, ok := model.CtfSampleIndex(state.EpochStartBlock, state.TEpochBlocks, head); ok {
+			first := model.CtfSampleFirstBlock(state.EpochStartBlock, state.TEpochBlocks, index)
+			next := model.CtfSampleFirstBlock(state.EpochStartBlock, state.TEpochBlocks, index+1)
 			planned := fmt.Sprintf("%d|%d", state.Epoch, index)
-			if previous, loaded := ctfDataPlannedSample.Swap(fmt.Sprintf("%s|%d", deploymentKey, cfg.NoId), planned); !loaded || previous != planned {
-				steps = append(steps, &StCtfDataStep{Kind: StCtfDataStepSample, Epoch: state.Epoch, Index: index, HeadBlock: state.HeadBlock, PlannedTime: now, RunAt: now})
+			if previous, _ := ctfDataPlannedSample.Load(fmt.Sprintf("%s|%d", deploymentKey, cfg.NoId)); previous != planned && first+(next-first)/2 <= head {
+				steps = append(steps, &StCtfDataStep{
+					Kind:         StCtfDataStepSample,
+					Epoch:        state.Epoch,
+					Index:        index,
+					EpochBlocks:  state.TEpochBlocks,
+					HeadBlock:    head,
+					PlannedTime:  now,
+					QuarterStart: StEstimateBlockTime(state.HeadBlock, state.HeadBlockTime, first),
+					QuarterEnd:   StEstimateBlockTime(state.HeadBlock, state.HeadBlockTime, next),
+					RunAt:        now,
+				})
 			}
 		}
 	}
@@ -118,6 +171,7 @@ func StCtfDataSync(ctx context.Context, state *StEpochState) ([]*StCtfDataStep, 
 				ctfDataCensusConcluded.Store(concludedKey, true)
 			case census == nil && pastWindow:
 				ctfDataCensusConcluded.Store(concludedKey, true)
+				stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d", epoch), "epoch %d has no census: its capture window passed at about %s without one, so every slot of it carries", epoch, ended.Add(ctfCensusCaptureWindow).UTC().Format(time.RFC3339))
 			default:
 				steps = append(steps, &StCtfDataStep{Kind: StCtfDataStepCensus, Epoch: epoch, RunAt: now})
 			}
@@ -198,6 +252,13 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 	}
 	outages := model.GetCtfPresenceOutages(ctx, deploymentKey, cfg.NoId, authority.StartTime, authority.EndTime)
 	excused := model.CtfExcusedSamples(authority.StartTime, authority.EndTime, outages)
+	// a sample that covers no block of a short epoch is never taken
+	if authority.Start.Block < authority.End.Block {
+		uncovered := model.CtfUncoveredSamples(authority.End.Block - authority.Start.Block)
+		for i := range excused {
+			excused[i] |= uncovered[i]
+		}
+	}
 	facts := &ctfCensusFacts{
 		Excused:     excused,
 		Required:    model.CtfRequiredSamples(excused.Count()),
@@ -242,7 +303,7 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 				Active:             record.Active,
 				Canary:             record.Canary,
 				CountryCode:        record.CountryCode,
-				ActivatedElsewhere: slices.ContainsFunc(record.ActivationCountryCodes, func(code string) bool { return code != record.CountryCode }),
+				ActivatedElsewhere: ctfExtenderMoved(record),
 				Egress:             model.CtfExtenderEgress(record.Ipv4, record.Ipv6, VerifySettings()),
 			}
 		}
@@ -253,10 +314,13 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 	for _, networkId := range settings.OwnNetworkIds() {
 		facts.OwnNetworks[networkId] = true
 	}
-	if extenderConfig, err := EnvExtenderConfig(); err == nil {
-		for _, networkId := range extenderConfig.DurableNetworkIds() {
-			facts.OwnNetworks[networkId] = true
-		}
+	durableNetworkIds, err := ctfDurableNetworkIds()
+	if err != nil {
+		stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d own networks", epoch), "epoch %d's census waits: %s", epoch, err)
+		return stCtfCensusRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
+	}
+	for _, networkId := range durableNetworkIds {
+		facts.OwnNetworks[networkId] = true
 	}
 	for _, networkId := range model.GetCtfCanaryNetworkIds(ctx) {
 		facts.OwnNetworks[networkId] = true
@@ -339,12 +403,90 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 	}
 	ctfDataMetrics.censuses.WithLabelValues(ctfCensusResultBuilt).Inc()
 	stCtfCensusMetrics(census, decision, excused.Count(), captureTime.Sub(authority.EndTime))
-	if len(samples) < model.CtfSamplesPerEpoch {
-		stLedgerV2Alert(cfg, StCtfDataAlertSamples, fmt.Sprintf("epoch %d", epoch), "epoch %d's census counts %d of its %d samples taken (%d with the providers' half) and excuses %d: a missing sample found nobody; declare the outage before the census if the platform was down", epoch, len(samples), model.CtfSamplesPerEpoch, providerSamples, excused.Count())
+	if missing, providersMissing := ctfMissingSamples(samples, &excused); 0 < missing || 0 < providersMissing {
+		stLedgerV2Alert(cfg, StCtfDataAlertSamples, fmt.Sprintf("epoch %d", epoch), "epoch %d's census found nobody in %d samples that were not taken and found no provider in %d more taken while the score export was stale; no declared outage excuses them (%d excused), so they count against every miner", epoch, missing, providersMissing, excused.Count())
 	}
 	glog.Infof("[ctf]epoch %d census %s: %d candidates (%d providers in %d units, %d extenders in %d units) of %d members, %d samples taken, %d excused, required %d\n", epoch, ledger.Ref(census.CensusHash), census.Candidates, census.ProviderCandidates, census.ProviderUnits, census.ExtenderCandidates, census.ExtenderUnits, census.ProviderMembers+census.ExtenderMembers, len(samples), excused.Count(), facts.Required)
+	outcome := stCtfPublishCensus(ctx, cfg, census)
+	// after the publication, which the driver's commitment waits on
 	stCtfCensusRetention(ctx, cfg, settings, epoch)
-	return stCtfPublishCensus(ctx, cfg, census)
+	return outcome
+}
+
+// The samples of an epoch that count against every miner: those not taken,
+// and those taken with no providers' half, that are not excused.
+func ctfMissingSamples(samples []*model.CtfPresenceSample, excused *model.CtfSampleSet) (missing int, providersMissing int) {
+	var taken, providers model.CtfSampleSet
+	for _, sample := range samples {
+		taken.Set(sample.SampleIndex)
+		if sample.ProviderSourceTime != nil {
+			providers.Set(sample.SampleIndex)
+		}
+	}
+	for i := range model.CtfSamplesPerEpoch {
+		switch {
+		case excused.Has(i):
+		case !taken.Has(i):
+			missing += 1
+		case !providers.Has(i):
+			providersMissing += 1
+		}
+	}
+	return
+}
+
+// The message of an extender configuration that is absent: a deployment
+// without an extender network, which has no gated fleet.
+const ctfExtenderConfigAbsentMessage = "the extender network is not configured"
+
+// ctfDurableNetworkIds reads the gated, durable fleet of extender.yml (P6,
+// X6). An absent extender.yml has none. An unreadable one, or an id in it that
+// does not parse, is an error: the operator's own fleet must not compete
+// because its list could not be read.
+func ctfDurableNetworkIds() ([]server.Id, error) {
+	extenderConfig, err := EnvExtenderConfig()
+	if err != nil {
+		var configErr *extenderConfigError
+		if errors.As(err, &configErr) && configErr.message == ctfExtenderConfigAbsentMessage {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("extender.yml cannot be read for its durable_network_ids: %s", err)
+	}
+	networkIds := []server.Id{}
+	for _, networkIdStr := range extenderConfig.Directory.DurableNetworkIds {
+		networkId, err := server.ParseId(strings.TrimSpace(networkIdStr))
+		if err != nil {
+			return nil, fmt.Errorf("extender.yml directory.durable_network_ids holds %q, which is not a network id", networkIdStr)
+		}
+		networkIds = append(networkIds, networkId)
+	}
+	return networkIds, nil
+}
+
+// ctfExtenderMoved is X3's test that an extender stayed in one country through
+// the epoch: its activations in the epoch were all in one country, and, when
+// the record's country is its activations' own (it has no derived location),
+// in the record's country. A derived location comes from the extender's
+// co-signed pings, not GeoLite2, so it is not compared with the activations,
+// which every extender sends at least daily; a change between them is the
+// move the rule catches.
+func ctfExtenderMoved(record *model.CtfExtenderBoundary) bool {
+	countries := map[string]bool{}
+	for _, countryCode := range record.ActivationCountryCodes {
+		countries[countryCode] = true
+	}
+	if 1 < len(countries) {
+		return true
+	}
+	if record.Derived {
+		return false
+	}
+	for countryCode := range countries {
+		if countryCode != record.CountryCode {
+			return true
+		}
+	}
+	return false
 }
 
 // encodeCtfCensus encodes a decided census in the sn ctf census format (§4.3):
@@ -398,16 +540,22 @@ func stCtfPublishCensus(ctx context.Context, cfg *StConfig, census *model.CtfCen
 	if _, ok := objects[census.CensusHash]; !ok {
 		return stCtfCensusRetry(fmt.Sprintf("epoch %d census header is not stored", census.Epoch))
 	}
+	failed := func(reason string) *StPublishOutcome {
+		if late := server.NowUtc().Sub(census.EndTime); ctfCensusCaptureWindow < late {
+			stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d publication", census.Epoch), "epoch %d's census %s is built but not in the ledger object store %s after its end, so it cannot be committed: %s", census.Epoch, ledger.Ref(census.CensusHash), late.Round(time.Second), reason)
+		}
+		return stCtfCensusRetry(reason)
+	}
 	for _, ref := range slices.SortedFunc(maps.Keys(objects), func(a, b [32]byte) int { return slices.Compare(a[:], b[:]) }) {
 		if ref == census.CensusHash {
 			continue
 		}
 		if _, err := PutStLedgerV2Object(ctx, objects[ref]); err != nil {
-			return stCtfCensusRetry(fmt.Sprintf("epoch %d census object %s: %s", census.Epoch, ledger.Ref(ref), err))
+			return failed(fmt.Sprintf("epoch %d census object %s: %s", census.Epoch, ledger.Ref(ref), err))
 		}
 	}
 	if _, err := PutStLedgerV2Object(ctx, objects[census.CensusHash]); err != nil {
-		return stCtfCensusRetry(fmt.Sprintf("epoch %d census header: %s", census.Epoch, err))
+		return failed(fmt.Sprintf("epoch %d census header: %s", census.Epoch, err))
 	}
 	model.SetCtfCensusPublished(ctx, cfg.DeploymentKey(), cfg.NoId, census.Epoch, server.NowUtc())
 	ctfDataCensusConcluded.Store(concludedKey, true)
@@ -460,50 +608,53 @@ func ctfSampledUnits(presences []*model.CtfPresence) map[server.Id][]*ctfSampled
 	return units
 }
 
-// ctfResolveProviderUnit settles a provider's unit for the census. The unit is
-// the prefix pinned in the epoch's window. When its family cannot be read from
-// the provider's live addresses, as after the address changed, it is the
-// family the samples recorded for that prefix. Without a pin, the unit is the
-// latest one the samples recorded in the provider's end country, else in any
-// country, as the sampler read it from the same pins.
+// ctfResolveProviderUnit settles a provider's unit for the census: the prefix
+// the verify head model pinned in the epoch's window, its family read from the
+// provider's live addresses or, after the address changed, from the samples
+// that saw the pin. Without a pin, the latest unit the samples recorded, in
+// the provider's end country first, as the sampler read it from the same pins
+// or, for a provider the model cannot pin, from its live address; else the
+// prefix of its live address at the capture.
 func ctfResolveProviderUnit(egress *model.CtfEgress, sampled []*ctfSampledUnit, countryCode string) *model.CtfEgress {
 	resolved := &model.CtfEgress{}
 	if egress != nil {
 		resolved.Addresses = egress.Addresses
-		if egress.Unit != nil {
-			unit := *egress.Unit
-			resolved.Unit = &unit
-			resolved.UnitFamily = egress.UnitFamily
-		}
 	}
-	if resolved.Unit != nil && resolved.UnitFamily == 0 {
-		for _, unit := range sampled {
-			if unit.unit == *resolved.Unit {
-				resolved.UnitFamily = unit.family
-				break
+	if egress != nil && egress.Pinned && egress.Unit != nil {
+		unit := *egress.Unit
+		resolved.Unit, resolved.UnitFamily, resolved.Pinned = &unit, egress.UnitFamily, true
+		if resolved.UnitFamily == 0 {
+			for _, sampledUnit := range sampled {
+				if sampledUnit.unit == unit {
+					resolved.UnitFamily = sampledUnit.family
+					break
+				}
 			}
 		}
 		return resolved
 	}
-	if resolved.Unit != nil || len(sampled) == 0 {
+	if 0 < len(sampled) {
+		latest := slices.MaxFunc(sampled, func(a, b *ctfSampledUnit) int {
+			aHome, bHome := a.countryCode == countryCode, b.countryCode == countryCode
+			switch {
+			case aHome != bHome:
+				if aHome {
+					return 1
+				}
+				return -1
+			case a.lastSampleIndex != b.lastSampleIndex:
+				return a.lastSampleIndex - b.lastSampleIndex
+			}
+			return slices.Compare(b.unit[:], a.unit[:])
+		})
+		unit := latest.unit
+		resolved.Unit, resolved.UnitFamily = &unit, latest.family
 		return resolved
 	}
-	latest := slices.MaxFunc(sampled, func(a, b *ctfSampledUnit) int {
-		aHome, bHome := a.countryCode == countryCode, b.countryCode == countryCode
-		switch {
-		case aHome != bHome:
-			if aHome {
-				return 1
-			}
-			return -1
-		case a.lastSampleIndex != b.lastSampleIndex:
-			return a.lastSampleIndex - b.lastSampleIndex
-		}
-		return slices.Compare(b.unit[:], a.unit[:])
-	})
-	unit := latest.unit
-	resolved.Unit = &unit
-	resolved.UnitFamily = latest.family
+	if egress != nil && egress.Unit != nil {
+		unit := *egress.Unit
+		resolved.Unit, resolved.UnitFamily = &unit, egress.UnitFamily
+	}
 	return resolved
 }
 

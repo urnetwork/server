@@ -69,8 +69,11 @@ func TestCtfSchemaMigrationCreatesOnlyItsTablesAndIsBounded(t *testing.T) {
 // keeps the shape the model writes.
 func TestCtfSchemaKeysAndShapes(t *testing.T) {
 	tables := map[string]string{}
-	for _, match := range regexp.MustCompile(`(?s)CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\n\t\);`).FindAllStringSubmatch(ctfSchemaSql, -1) {
+	for _, match := range regexp.MustCompile(`(?s)CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\n\t\)( WITH \(fillfactor = \d+\))?;`).FindAllStringSubmatch(ctfSchemaSql, -1) {
 		tables[match[1]] = match[2]
+	}
+	if !strings.Contains(ctfSchemaSql, "\t) WITH (fillfactor = 50);\n\n\tCREATE TABLE IF NOT EXISTS ctf_presence_outage") {
+		t.Error("ctf_presence leaves no room for its rows' new versions")
 	}
 	if len(tables) != 16 {
 		t.Fatalf("parsed %d ctf tables, want 16", len(tables))

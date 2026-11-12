@@ -20,9 +20,9 @@ func ctfMigrationColumns(table string, epoch bool, columns ...snMainnetMigration
 	return snMainnetMigrationColumns(table, append(ctfMigrationKeyColumns(epoch), columns...)...)
 }
 
-// Durable ordinary tables with their columns, keys and indexes as the migration
-// publishes them. Follow the migration's position after merges instead of
-// pinning a number.
+// Durable ordinary tables with their columns, keys, indexes and the presence
+// table's fillfactor as the migration publishes them. Follow the migration's
+// position after merges instead of pinning a number.
 var ctfMigrationContract = migrationCurrentSuffix(server.CtfSchemaMigrationVersion(), "capture the flag presence, census and lifecycle",
 	migrationFp2Table("ctf_presence_sample"),
 	ctfMigrationColumns("ctf_presence_sample", true,
@@ -46,6 +46,7 @@ var ctfMigrationContract = migrationCurrentSuffix(server.CtfSchemaMigrationVersi
 		snMainnetMigrationColumn{name: "last_sample_index", kind: "smallint", notNull: true},
 		snMainnetMigrationColumn{name: "update_time", kind: "timestamp without time zone", notNull: true}),
 	snMainnetMigrationConstraints("ctf_presence", "PRIMARY KEY (deployment_key, no_id, epoch, role, client_id, country_code)"),
+	migrationFillfactor("ctf_presence", 50),
 
 	migrationFp2Table("ctf_presence_outage"),
 	snMainnetMigrationColumns("ctf_presence_outage",

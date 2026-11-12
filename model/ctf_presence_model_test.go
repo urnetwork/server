@@ -92,6 +92,31 @@ func TestCtfSampleIndexIsBlockPlaced(t *testing.T) {
 	}
 }
 
+// A testnet epoch shorter than 672 blocks leaves samples that cover no block;
+// a mainnet epoch leaves none.
+func TestCtfUncoveredSamples(t *testing.T) {
+	for blocks, want := range map[uint64]int{50_400: 0, 672: 0, 673: 0, 671: 1, 360: 312, 300: 372} {
+		uncovered := CtfUncoveredSamples(blocks)
+		if uncovered.Count() != want {
+			t.Errorf("an epoch of %d blocks leaves %d uncovered samples, want %d", blocks, uncovered.Count(), want)
+		}
+		covered := map[int]bool{}
+		for block := uint64(0); block < blocks; block++ {
+			index, _ := CtfSampleIndex(0, blocks, block)
+			if uncovered.Has(index) {
+				t.Fatalf("block %d of %d is in uncovered sample %d", block, blocks, index)
+			}
+			if CtfSampleFirstBlock(0, blocks, index) > block || block >= CtfSampleFirstBlock(0, blocks, index+1) {
+				t.Fatalf("block %d of %d is outside its sample %d's blocks", block, blocks, index)
+			}
+			covered[index] = true
+		}
+		if len(covered)+uncovered.Count() != CtfSamplesPerEpoch {
+			t.Fatalf("an epoch of %d blocks covers %d samples and leaves %d", blocks, len(covered), uncovered.Count())
+		}
+	}
+}
+
 // Half of the samples not excused, rounded up (§4.2, CtfPresence.required).
 func TestCtfRequiredSamples(t *testing.T) {
 	for excused, want := range map[int]int{0: 336, 1: 336, 2: 335, 3: 335, 671: 1, 672: 0} {
@@ -143,12 +168,12 @@ func TestCtfPresenceProvidersRoundTrip(t *testing.T) {
 	providers := &CtfPresenceProviders{
 		MeasuredAt: time.UnixMilli(1_795_000_000_123).UTC(),
 		Providers: []*CtfPresenceProvider{
-			{ClientId: server.NewId(), NetworkId: server.NewId(), CountryCode: "is"},
+			{ClientId: server.NewId(), NetworkId: server.NewId(), CountryCode: "is", Public: true},
 			{ClientId: server.NewId(), NetworkId: server.NewId(), CountryCode: "zz"},
 		},
 	}
 	encoded := encodeCtfPresenceProviders(providers)
-	if len(encoded) != 12+2*34 {
+	if len(encoded) != 12+2*35 {
 		t.Fatalf("encoded %d bytes", len(encoded))
 	}
 	decoded, err := decodeCtfPresenceProviders(encoded)
@@ -169,15 +194,20 @@ func TestCtfPresenceProvidersRoundTrip(t *testing.T) {
 		}
 	}
 	corrupt := bytes.Clone(encoded)
-	corrupt[len(corrupt)-1] = 'Z'
+	corrupt[len(corrupt)-2] = 'Z'
 	if _, err := decodeCtfPresenceProviders(corrupt); err == nil {
 		t.Error("decoded an uppercase country")
 	}
+	flagged := bytes.Clone(encoded)
+	flagged[len(flagged)-1] = 0x02
+	if _, err := decodeCtfPresenceProviders(flagged); err == nil {
+		t.Error("decoded an unknown flag")
+	}
 }
 
-// The Online set holds each Online provider with a Public key once, with the
-// country it is published under; network-only and not Online providers are
-// left out.
+// The Online set holds each Online provider once, with the country it is
+// published under and whether it holds a Public key; providers that are not
+// Online are left out.
 func TestNewCtfPresenceProvidersTakesTheExportDecision(t *testing.T) {
 	online, networkOnly, offline, noEgress := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	networkId := server.NewId()
@@ -199,14 +229,19 @@ func TestNewCtfPresenceProvidersTakesTheExportDecision(t *testing.T) {
 		},
 	)
 	got := map[server.Id]string{}
+	public := map[server.Id]bool{}
 	for _, provider := range providers.Providers {
 		if provider.NetworkId != networkId {
 			t.Fatalf("provider %s has network %s", provider.ClientId, provider.NetworkId)
 		}
 		got[provider.ClientId] = provider.CountryCode
+		public[provider.ClientId] = provider.Public
 	}
-	if len(got) != 2 || got[online] != "is" || got[noEgress] != "zz" {
+	if len(got) != 3 || got[online] != "is" || got[noEgress] != "zz" || got[networkOnly] != "de" {
 		t.Fatalf("online set %v", got)
+	}
+	if !public[online] || !public[noEgress] || public[networkOnly] {
+		t.Fatalf("public flags %v", public)
 	}
 	if !slices.IsSortedFunc(providers.Providers, func(a, b *CtfPresenceProvider) int { return a.ClientId.Cmp(b.ClientId) }) {
 		t.Fatal("online set is not by client id")

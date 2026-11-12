@@ -49,12 +49,17 @@ func scheduleStCtfDataSteps(clientSession *session.ClientSession, deploymentKey 
 			Kind:          step.Kind,
 			Epoch:         step.Epoch,
 			Index:         step.Index,
+			EpochBlocks:   step.EpochBlocks,
 			HeadBlock:     step.HeadBlock,
 			PlannedTime:   step.PlannedTime,
+			QuarterStart:  step.QuarterStart,
+			QuarterEnd:    step.QuarterEnd,
 		}
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 			task.ScheduleTaskInTxIfAbsent(tx, StCtfDataStep, args, clientSession, stCtfDataStepRunOnce(args), task.RunAt(step.RunAt), task.MaxTime(stCtfDataStepMaxTime))
 		})
+		// only once its task is scheduled, so a failed schedule plans it again
+		controller.StCtfDataStepScheduled(step)
 	}
 }
 
@@ -69,8 +74,11 @@ type StCtfDataStepArgs struct {
 	Kind          string    `json:"kind"`
 	Epoch         uint64    `json:"epoch"`
 	Index         int       `json:"index"`
+	EpochBlocks   uint64    `json:"epoch_blocks"`
 	HeadBlock     uint64    `json:"head_block"`
 	PlannedTime   time.Time `json:"planned_time"`
+	QuarterStart  time.Time `json:"quarter_start"`
+	QuarterEnd    time.Time `json:"quarter_end"`
 	Attempt       int       `json:"attempt"`
 }
 
@@ -87,11 +95,14 @@ func StCtfDataStep(
 		return &StCtfDataStepResult{}, nil
 	}
 	outcome, err := controller.StCtfDataRunStep(clientSession.Ctx, &controller.StCtfDataStep{
-		Kind:        stCtfDataStep.Kind,
-		Epoch:       stCtfDataStep.Epoch,
-		Index:       stCtfDataStep.Index,
-		HeadBlock:   stCtfDataStep.HeadBlock,
-		PlannedTime: stCtfDataStep.PlannedTime,
+		Kind:         stCtfDataStep.Kind,
+		Epoch:        stCtfDataStep.Epoch,
+		Index:        stCtfDataStep.Index,
+		EpochBlocks:  stCtfDataStep.EpochBlocks,
+		HeadBlock:    stCtfDataStep.HeadBlock,
+		PlannedTime:  stCtfDataStep.PlannedTime,
+		QuarterStart: stCtfDataStep.QuarterStart,
+		QuarterEnd:   stCtfDataStep.QuarterEnd,
 	})
 	if err != nil {
 		glog.Infof("[st]%s step epoch %d/%d failed (attempt %d): %s\n", stCtfDataStep.Kind, stCtfDataStep.Epoch, stCtfDataStep.Index, stCtfDataStep.Attempt, err)

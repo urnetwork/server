@@ -214,11 +214,15 @@ type CtfExtenderBoundary struct {
 	Canary bool
 	// the record's country: its derived location's, else its activation's
 	CountryCode string
+	// the record's country is its derived location's
+	Derived bool
 	// its active addresses, nil for a family without one
 	Ipv4 *netip.Addr
 	Ipv6 *netip.Addr
 	// the countries of its activations in the epoch, normalized; an
-	// activation that resolved to no country is left out
+	// activation that resolved to no country is left out. They are GeoLite2's
+	// for the activating address, as the record's country is without a
+	// derived location.
 	ActivationCountryCodes []string
 }
 
@@ -270,6 +274,7 @@ func GetCtfExtenderBoundaries(ctx context.Context, clientIds []server.Id, startT
 						&derivedCountryCode,
 					))
 					boundary.CountryCode = ctfRecordCountryCode(derivedCountryCode, countryCode)
+					boundary.Derived = strings.TrimSpace(derivedCountryCode) != ""
 					boundaries[boundary.ClientId] = append(boundaries[boundary.ClientId], boundary)
 					byExtender[boundary.ExtenderId] = boundary
 					extenderIds = append(extenderIds, boundary.ExtenderId)

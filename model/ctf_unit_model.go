@@ -37,6 +37,9 @@ type CtfEgress struct {
 	Unit *[32]byte
 	// 4 or 6, 0 when unknown
 	UnitFamily int
+	// the unit is the verify head model's pin of the epoch; otherwise it is
+	// the prefix of the miner's live address
+	Pinned bool
 	// the keyed IPv4 addresses and IPv6 /64s it holds, ascending
 	Addresses [][32]byte
 }
@@ -46,7 +49,14 @@ type CtfEgress struct {
 // (a trail's pin, else the SN Top board's); with pin, a provider that has
 // neither gets the board's pin of its live candidate, as the board pins it.
 // The family is that of the live address whose prefix the pin is, else unknown.
-// The reads are pipelined 512 providers at a time.
+//
+// A provider the verify model cannot pin, because no family of its attributes
+// to it alone (providers behind one IPv4 address, as a household NAT or a
+// mobile CGNAT puts them), has no pin. Its unit is then the stored prefix
+// hash of its live IPv4 address, else of its IPv6 address, unpinned: the same
+// keyed /29 or /48, so the duplicate rule, not the bijection, picks one of the
+// providers sharing an address. The reads are pipelined 512 providers at a
+// time.
 func GetCtfProviderEgress(ctx context.Context, clientIds []server.Id, settings *VerifySettings, epoch uint64, pin bool) map[server.Id]*CtfEgress {
 	egresses := map[server.Id]*CtfEgress{}
 	if len(clientIds) == 0 {
@@ -76,11 +86,16 @@ func GetCtfProviderEgress(ctx context.Context, clientIds []server.Id, settings *
 					live, _ := splitVerifyEgressFields(fields, nowMs)
 					versions = append(versions, live)
 				}
-				egress := ctfEgressOfLive(newVerifyLiveEgress(versions[0], versions[1]))
+				live := newVerifyLiveEgress(versions[0], versions[1])
+				egress := ctfEgressOfLive(live)
 				if pinned, ok := pins[clientId]; ok {
 					unit := pinned
 					egress.Unit = &unit
-					egress.UnitFamily = ctfPinFamily(newVerifyLiveEgress(versions[0], versions[1]), pinned)
+					egress.UnitFamily = ctfPinFamily(live, pinned)
+					egress.Pinned = true
+				} else if unit, family, ok := ctfLiveUnit(live); ok {
+					egress.Unit = &unit
+					egress.UnitFamily = family
 				}
 				egresses[clientId] = egress
 			}
@@ -107,6 +122,25 @@ func ctfEgressOfLive(live verifyLiveEgress) *CtfEgress {
 	}
 	slices.SortFunc(egress.Addresses, func(a, b [32]byte) int { return slices.Compare(a[:], b[:]) })
 	return egress
+}
+
+// The least stored prefix hash of the first family, IPv4 then IPv6, with a
+// live address, whether or not the family attributes to the client.
+func ctfLiveUnit(live verifyLiveEgress) ([32]byte, int, bool) {
+	for _, family := range []int{4, 6} {
+		scores := []string{}
+		for _, address := range live.byFamily[family] {
+			if address.score != "" {
+				scores = append(scores, address.score)
+			}
+		}
+		if 0 < len(scores) {
+			if decoded, err := hex.DecodeString(slices.Min(scores)); err == nil && len(decoded) == 32 {
+				return [32]byte(decoded), family, true
+			}
+		}
+	}
+	return [32]byte{}, 0, false
 }
 
 // The family of the live address whose stored prefix hash is the pin, IPv4

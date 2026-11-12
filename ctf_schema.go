@@ -9,7 +9,9 @@ package server
 //   - ctf_presence_sample: one row per quarter-hour sample taken (§4.2), the
 //     sample's time and block and how many miners it found.
 //   - ctf_presence: one row per miner, role and country of an epoch, with the
-//     samples that found it present there as a bitmap.
+//     samples that found it present there as a bitmap. Every sample rewrites
+//     the rows of the miners it finds, none of them an indexed column, so half
+//     of each page is left free for the new versions to stay on it (HOT).
 //   - ctf_presence_outage: the platform-wide outages the operator declares.
 //     Every sample whose quarter hour overlaps one is excused.
 //   - ctf_census: an epoch's census (§4.3), written once: its hash, header and
@@ -71,7 +73,7 @@ const ctfSchemaSql = `
 
 		PRIMARY KEY (deployment_key, no_id, epoch, role, client_id, country_code),
 		CHECK ((unit IS NULL) = (unit_family IS NULL))
-	);
+	) WITH (fillfactor = 50);
 
 	CREATE TABLE IF NOT EXISTS ctf_presence_outage (
 		outage_id uuid NOT NULL,

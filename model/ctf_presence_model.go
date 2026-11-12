@@ -10,9 +10,9 @@ package model
 // does not excuse.
 //
 // Samples are placed by block, not by clock, so every epoch has exactly 672 of
-// them whatever its block times: sample i of an epoch of T blocks starting at
-// block s covers the blocks [s + floor(i·T/672), s + floor((i+1)·T/672)), which
-// is 75 blocks on mainnet. A sample that was never taken counts as a sample
+// them whatever its block times: block b of an epoch of T blocks starting at
+// block s is in sample floor((b − s)·672/T), so sample i covers the blocks
+// [s + ceil(i·T/672), s + ceil((i+1)·T/672)), which is 75 blocks on mainnet. A sample that was never taken counts as a sample
 // that found nobody, unless a declared outage excuses it.
 //
 // The provider half reads the score export's Online decisions, which the
@@ -111,12 +111,30 @@ func CtfSampleIndex(startBlock uint64, epochBlocks uint64, block uint64) (int, b
 	return int(index), true
 }
 
-// CtfSampleFirstBlock is the first block sample i covers. A sample of an epoch
-// shorter than 672 blocks may cover none, and is then never taken.
+// CtfSampleFirstBlock is the first block sample i covers, the first whose
+// CtfSampleIndex is i: start + ceil(i·T/672). A sample of an epoch shorter
+// than 672 blocks may cover none, and is then never taken.
 func CtfSampleFirstBlock(startBlock uint64, epochBlocks uint64, i int) uint64 {
 	hi, lo := bits.Mul64(uint64(i), epochBlocks)
-	offset, _ := bits.Div64(hi, lo, CtfSamplesPerEpoch)
+	offset, remainder := bits.Div64(hi, lo, CtfSamplesPerEpoch)
+	if remainder != 0 {
+		offset += 1
+	}
 	return startBlock + offset
+}
+
+// CtfUncoveredSamples are the samples of an epoch of epochBlocks blocks that
+// cover no block, and so are never taken: none on mainnet, where every sample
+// covers 75 blocks, and 672 − T of a testnet epoch of T < 672 blocks. The
+// census excuses them, as no miner could be found in them.
+func CtfUncoveredSamples(epochBlocks uint64) CtfSampleSet {
+	var uncovered CtfSampleSet
+	for i := range CtfSamplesPerEpoch {
+		if CtfSampleFirstBlock(0, epochBlocks, i) == CtfSampleFirstBlock(0, epochBlocks, i+1) {
+			uncovered.Set(i)
+		}
+	}
+	return uncovered
 }
 
 // CtfRequiredSamples is the presence a candidate needs (§4.2): half of the
@@ -161,20 +179,26 @@ type CtfPresenceProvider struct {
 	// the country the provider is published under, normalized
 	// (CtfNormalizeCountryCode)
 	CountryCode string
+	// holds a Public provide key; a network-only provider is online for its
+	// own network only, and is never present (P1)
+	Public bool
 }
 
 // The score export's Online set: every provider whose top-level score is
-// Online and not network-only, by client id.
+// Online, by client id. The census reads it for ClientScore.Online alone, so
+// a provider that lost its Public key fails only that rule.
 type CtfPresenceProviders struct {
 	MeasuredAt time.Time
 	Providers  []*CtfPresenceProvider
 }
 
 // The encoded set: the export's unix milliseconds (8), the count (4), then per
-// provider its client id (16), network id (16) and country (2).
+// provider its client id (16), network id (16), country (2) and flags (1: bit
+// 0 Public).
 const (
 	ctfPresenceProvidersHeaderBytes = 12
-	ctfPresenceProviderBytes        = 34
+	ctfPresenceProviderBytes        = 35
+	ctfPresenceProviderPublic       = 1
 )
 
 func encodeCtfPresenceProviders(providers *CtfPresenceProviders) []byte {
@@ -186,6 +210,11 @@ func encodeCtfPresenceProviders(providers *CtfPresenceProviders) []byte {
 		b = append(b, provider.NetworkId.Bytes()...)
 		country := CtfNormalizeCountryCode(provider.CountryCode)
 		b = append(b, country[0], country[1])
+		var flags byte
+		if provider.Public {
+			flags |= ctfPresenceProviderPublic
+		}
+		b = append(b, flags)
 	}
 	return b
 }
@@ -206,9 +235,13 @@ func decodeCtfPresenceProviders(b []byte) (*CtfPresenceProviders, error) {
 			ClientId:    server.Id(row[0:16]),
 			NetworkId:   server.Id(row[16:32]),
 			CountryCode: string(row[32:34]),
+			Public:      row[34]&ctfPresenceProviderPublic != 0,
 		}
 		if CtfNormalizeCountryCode(provider.CountryCode) != provider.CountryCode {
 			return nil, fmt.Errorf("ctf presence providers: provider %d has country %q", i, provider.CountryCode)
+		}
+		if row[34]&^ctfPresenceProviderPublic != 0 {
+			return nil, fmt.Errorf("ctf presence providers: provider %d has flags %x", i, row[34])
 		}
 		providers.Providers[i] = provider
 	}
@@ -217,8 +250,8 @@ func decodeCtfPresenceProviders(b []byte) (*CtfPresenceProviders, error) {
 
 // The export's Online set from its decided scores: each provider once, from any
 // of the location maps it sits in, since every map decides it the same way
-// (rankClientScore). A network-only provider is left out: it has no Public
-// provide key. The country is the one the provider is published under.
+// (rankClientScore), flagged Public unless it is network-only. The country is
+// the one the provider is published under.
 func newCtfPresenceProviders(
 	measuredAt time.Time,
 	locationClientScores map[server.Id]map[server.Id]*ClientScore,
@@ -227,14 +260,14 @@ func newCtfPresenceProviders(
 	online := map[server.Id]*CtfPresenceProvider{}
 	for _, clientScores := range locationClientScores {
 		for clientId, clientScore := range clientScores {
-			if _, ok := online[clientId]; ok || !clientScore.Online || clientScore.NetworkOnly {
+			if _, ok := online[clientId]; ok || !clientScore.Online {
 				continue
 			}
 			countryCode := CtfCountryUnknown
 			if egress := clientIdEgresses[clientId]; egress != nil {
 				countryCode = CtfNormalizeCountryCode(normalizeCountryCode(egress.publishedCountryCode))
 			}
-			online[clientId] = &CtfPresenceProvider{ClientId: clientId, NetworkId: clientScore.NetworkId, CountryCode: countryCode}
+			online[clientId] = &CtfPresenceProvider{ClientId: clientId, NetworkId: clientScore.NetworkId, CountryCode: countryCode, Public: !clientScore.NetworkOnly}
 		}
 	}
 	providers := &CtfPresenceProviders{MeasuredAt: measuredAt.UTC(), Providers: make([]*CtfPresenceProvider, 0, len(online))}

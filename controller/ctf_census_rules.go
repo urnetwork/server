@@ -280,6 +280,10 @@ func decideCtfCensus(facts *ctfCensusFacts) *ctfCensusDecision {
 		presenceFailed, present := ctfPresenceFailures(presences[key], member.CountryCode, facts)
 		member.Failed = failed | presenceFailed
 		member.PresentSamples = present
+		// a country outside the 249 is none, as the census counts it
+		if !ctfCountryInL(member.CountryCode) {
+			member.CountryCode = model.CtfCountryUnknown
+		}
 		decision.Members = append(decision.Members, member)
 	}
 

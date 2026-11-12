@@ -5,11 +5,12 @@ package controller
 // every provider and extender of the operator's pool.
 //
 //   - Providers (P1): the score export's Online set, which the export publishes
-//     when presence is on. A provider in it is an active, top-level, connected
-//     provider with a Public provide key and a valid location that passes
-//     ClientScore.Online, in the country it is published under. A set older
-//     than model.CtfPresenceProvidersMaxAge is a stalled export: the sample
-//     then finds no provider, and the census alert says so.
+//     when presence is on. A provider in it flagged Public is an active,
+//     top-level, connected provider with a Public provide key and a valid
+//     location that passes ClientScore.Online, in the country it is published
+//     under. A set older than model.CtfPresenceProvidersMaxAge is a stalled
+//     export: the sample then finds no provider, and the presence alert says
+//     so while an outage can still be declared.
 //   - Extenders (X2): every record that is active and unrevoked with an active
 //     address whose challenge passed in the sample's quarter hour, in the
 //     record's country, counted for its provider client.
@@ -31,23 +32,32 @@ import (
 )
 
 // The window a challenge must have passed in for an extender to be present in a
-// sample: the quarter hour before it.
+// sample whose quarter hour is not known: the quarter hour before it.
 const ctfExtenderChallengeWindow = 15 * time.Minute
 
-// A sample runs at most this late after it was planned. Later, its quarter
-// hour has passed and the next sample covers the miners instead.
+// A sample whose quarter hour is not known runs at most this late after it was
+// planned. Later, its quarter hour has passed and the next sample covers the
+// miners instead.
 const ctfSampleMaxDelay = 15 * time.Minute
 
-// stCtfTakeSample takes one sample of the epoch, unless it is taken.
+// stCtfTakeSample takes one sample of the epoch, unless it is taken. Its
+// quarter hour runs from the estimated time of its first block to the next
+// sample's; the sync plans it in the second half, so the quarter hour's
+// extender challenges have run.
 func stCtfTakeSample(ctx context.Context, cfg *StConfig, step *StCtfDataStep) *StPublishOutcome {
 	deploymentKey := cfg.DeploymentKey()
 	if model.HasCtfPresenceSample(ctx, deploymentKey, cfg.NoId, step.Epoch, step.Index) {
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d sample %d already taken", step.Epoch, step.Index)}
 	}
 	now := server.NowUtc()
-	if ctfSampleMaxDelay < now.Sub(step.PlannedTime) {
+	quarterStart, quarterEnd := step.QuarterStart, step.QuarterEnd
+	if quarterStart.IsZero() || quarterEnd.IsZero() || !quarterStart.Before(quarterEnd) {
+		quarterStart, quarterEnd = now.Add(-ctfExtenderChallengeWindow), step.PlannedTime.Add(ctfSampleMaxDelay)
+	}
+	if quarterEnd.Before(now) {
 		ctfDataMetrics.samples.WithLabelValues(ctfSampleResultLate).Inc()
-		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d sample %d is %s late; its quarter hour has passed", step.Epoch, step.Index, now.Sub(step.PlannedTime).Round(time.Second))}
+		stLedgerV2Alert(cfg, StCtfDataAlertPresence, fmt.Sprintf("epoch %d", step.Epoch), "epoch %d sample %d was not taken: its quarter hour ended before it ran, so it counts against every miner unless an outage is declared for it (bringyourctl st ctf-outage) before the epoch's census", step.Epoch, step.Index)
+		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d sample %d is late; its quarter hour ended at %s", step.Epoch, step.Index, quarterEnd.Format(time.RFC3339))}
 	}
 
 	sample := &model.CtfPresenceSample{
@@ -67,12 +77,17 @@ func stCtfTakeSample(ctx context.Context, cfg *StConfig, step *StCtfDataStep) *S
 	if providers != nil && now.Sub(providers.MeasuredAt) <= model.CtfPresenceProvidersMaxAge {
 		measuredAt := providers.MeasuredAt
 		sample.ProviderSourceTime = &measuredAt
-		clientIds := make([]server.Id, len(providers.Providers))
-		for i, provider := range providers.Providers {
-			clientIds[i] = provider.ClientId
+		// P1: online, with a Public provide key
+		public := []*model.CtfPresenceProvider{}
+		clientIds := []server.Id{}
+		for _, provider := range providers.Providers {
+			if provider.Public {
+				public = append(public, provider)
+				clientIds = append(clientIds, provider.ClientId)
+			}
 		}
 		egresses := model.GetCtfProviderEgress(ctx, clientIds, VerifySettings(), step.Epoch, true)
-		for _, provider := range providers.Providers {
+		for _, provider := range public {
 			observation := &model.CtfPresenceObservation{Role: model.CtfRoleProvider, ClientId: provider.ClientId, CountryCode: provider.CountryCode}
 			if egress := egresses[provider.ClientId]; egress != nil && egress.Unit != nil {
 				observation.Unit = egress.Unit
@@ -80,17 +95,20 @@ func stCtfTakeSample(ctx context.Context, cfg *StConfig, step *StCtfDataStep) *S
 			}
 			observations = append(observations, observation)
 		}
-		sample.Providers = len(providers.Providers)
+		sample.Providers = len(public)
 	} else {
-		age := "none"
+		age := "absent"
 		if providers != nil {
-			age = now.Sub(providers.MeasuredAt).Round(time.Second).String()
+			age = now.Sub(providers.MeasuredAt).Round(time.Second).String() + " old"
 		}
-		glog.Infof("[ctf]epoch %d sample %d finds no provider: the export's online set is %s old\n", step.Epoch, step.Index, age)
+		glog.Infof("[ctf]epoch %d sample %d finds no provider: the export's online set is %s\n", step.Epoch, step.Index, age)
+		stLedgerV2Alert(cfg, StCtfDataAlertPresence, fmt.Sprintf("epoch %d", step.Epoch), "epoch %d sample %d found no provider: the score export's online set is %s. If providers were online, declare the outage (bringyourctl st ctf-outage) before the epoch's census, or the sample counts against every provider", step.Epoch, step.Index, age)
 	}
 
+	// X2: active and unrevoked, with an address whose challenge passed in the
+	// sample's quarter hour
 	extenders := 0
-	for _, presence := range model.GetCtfExtenderPresence(ctx, now.Add(-ctfExtenderChallengeWindow)) {
+	for _, presence := range model.GetCtfExtenderPresence(ctx, quarterStart) {
 		egress := model.CtfExtenderEgress(presence.Ipv4, presence.Ipv6, VerifySettings())
 		observations = append(observations, &model.CtfPresenceObservation{
 			Role:        model.CtfRoleExtender,
@@ -105,6 +123,15 @@ func stCtfTakeSample(ctx context.Context, cfg *StConfig, step *StCtfDataStep) *S
 
 	if !model.RecordCtfPresenceSample(ctx, sample, observations) {
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d sample %d already taken", step.Epoch, step.Index)}
+	}
+	// the sample before, unless it covers no block of a short epoch
+	var uncovered model.CtfSampleSet
+	if 0 < step.EpochBlocks {
+		uncovered = model.CtfUncoveredSamples(step.EpochBlocks)
+	}
+	if previous := step.Index - 1; 0 <= previous && !uncovered.Has(previous) &&
+		!model.HasCtfPresenceSample(ctx, deploymentKey, cfg.NoId, step.Epoch, previous) {
+		stLedgerV2Alert(cfg, StCtfDataAlertPresence, fmt.Sprintf("epoch %d", step.Epoch), "epoch %d sample %d was never taken: it counts against every miner unless an outage is declared for it (bringyourctl st ctf-outage) before the epoch's census", step.Epoch, previous)
 	}
 	result := ctfSampleResultTaken
 	if sample.ProviderSourceTime == nil {
