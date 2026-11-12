@@ -4,12 +4,16 @@ package oauth
 // (§13.7's members audience) signs its visitors in through this issuer, which
 // makes the issuer an authority for those origins (§2.8 EX8).
 //
-//	client     the origin itself, client_id=https://<host>.<net>.<root>, a
-//	           client of no registration and no metadata document: accepted
-//	           only while the network <net> names holds, in its newest verified
-//	           projection, an active publish grant of <host> whose audience is
-//	           members (§8), and refused once the grant ends, at authorization
-//	           and again at the code's redemption
+//	client     the origin itself, client_id=https://<host>.<net>.<root>, with
+//	           :<port> for tlsedge's 8443, 8883 and 5671 and 443 written bare,
+//	           never :443 (QD-723), a client of no registration and no metadata
+//	           document: accepted only while the network <net> names holds, in
+//	           its newest verified projection, an active publish grant of
+//	           tls/<port>/<host> whose audience is members (§8), and refused
+//	           once the grant ends, at authorization and again at the code's
+//	           redemption. Each port's endpoint is an origin and a client of its
+//	           own (D-TEAM-15), so a grant, a code and a token of one port
+//	           count for nothing on another
 //	redirect   exactly that origin's /.well-known/ur/callback, so no open
 //	           redirect: no other uri, port, path or query
 //	visitor    signed in on ur.io (a team IdP where a team requires one, with
@@ -18,7 +22,8 @@ package oauth
 //	           on TEAM-M6's member rows, so a team network's origin refuses
 //	           every visitor until then
 //	token      the code redeems, with its PKCE verifier, for an ID token alone:
-//	           {iss, aud = origin, network_id, nonce, exp = 60 s, sub =
+//	           {iss, aud = origin, its port as written, network_id, nonce, exp
+//	           = 60 s (EdgeLoginSettings.IdTokenDuration), sub =
 //	           member_id, the owner's user_id in a personal network}, signed by
 //	           the id- key set, whose public keys EdgeJwksUri serves apart from
 //	           the mcp set's
@@ -26,7 +31,7 @@ package oauth
 //	           member, network, origin, time and nonce
 //
 // The issuer reads no projection itself: EdgeLoginSource answers which network
-// an origin names and whether its grant is live, and api installs one
+// an origin's host names and whether its port's grant is live, and api installs one
 // (SetEdgeLoginSource) once it hosts §8.9's gate cache (ACL's AclGateCache).
 // With none installed every edge origin is refused, never fetched as a client
 // metadata document.
@@ -38,6 +43,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -55,13 +61,40 @@ import (
 const (
 	// the path an edge origin's front receives its code at (§7.8)
 	EdgeCallbackPath = "/.well-known/ur/callback"
-	// an edge login's ID token lives this long: a format value of §7.8's flow
-	EdgeIdTokenDuration = 60 * time.Second
 	// the client type of an edge origin
 	ClientTypeEdge = "edge"
 	// the one scope an edge login asks
 	EdgeScopeOpenid = "openid"
+	// https's own port, which an origin never writes (QD-723)
+	edgeOriginBarePort = "443"
 )
+
+// Tunables of edge login.
+type EdgeLoginSettings struct {
+	// How long an edge login's ID token lives: §7.8's 60 s, which a front
+	// takes no further than its own IdTokenMaxLifetime.
+	IdTokenDuration time.Duration
+}
+
+func DefaultEdgeLoginSettings() *EdgeLoginSettings {
+	return &EdgeLoginSettings{
+		IdTokenDuration: 60 * time.Second,
+	}
+}
+
+var edgeLoginSettings atomic.Pointer[EdgeLoginSettings]
+
+// Installs the issuer's edge login settings; nil restores the defaults.
+func SetEdgeLoginSettings(settings *EdgeLoginSettings) {
+	edgeLoginSettings.Store(settings)
+}
+
+func currentEdgeLoginSettings() *EdgeLoginSettings {
+	if settings := edgeLoginSettings.Load(); settings != nil {
+		return settings
+	}
+	return DefaultEdgeLoginSettings()
+}
 
 var (
 	// the origin is no edge origin this issuer serves, or its grant is not live
@@ -77,8 +110,10 @@ type EdgeLoginSource interface {
 	// a host under no such root, which is then no edge origin.
 	ResolveOrigin(ctx context.Context, originHost string) (networkId server.Id, host string, ok bool, err error)
 	// Whether the network's newest verified projection holds, now, an active
-	// publish grant of host whose audience is members (§8.4).
-	MembersPublishGranted(ctx context.Context, networkId server.Id, host string, now time.Time) (bool, error)
+	// publish grant of host on port, tls/<port>/<host>, whose audience is
+	// members (§8.4): AclMembersPublishGranted over the network's AclState. A
+	// grant of the host's other ports answers nothing for this one.
+	MembersPublishGranted(ctx context.Context, networkId server.Id, host string, port int, now time.Time) (bool, error)
 }
 
 var edgeLoginSource atomic.Pointer[EdgeLoginSource]
@@ -101,11 +136,14 @@ func currentEdgeLoginSource() EdgeLoginSource {
 
 // An edge origin as a client_id names it.
 type EdgeOrigin struct {
-	// https://<host>.<net>.<root>, the client_id and the ID token's aud
+	// https://<host>.<net>.<root>, with :<port> unless the port is 443: the
+	// client_id and the ID token's aud
 	Origin    string
 	NetworkId server.Id
 	// the published host the grant names
 	Host string
+	// the tlsedge port its endpoint listens on: 443, 8443, 8883 or 5671
+	Port int
 }
 
 // The origin's callback, the one redirect_uri it may use.
@@ -113,26 +151,67 @@ func (self *EdgeOrigin) RedirectUri() string {
 	return self.Origin + EdgeCallbackPath
 }
 
-// The host of an https origin with nothing but a host, lowercase; false for any
-// other url, which is then no edge origin.
+// The host of an https origin with nothing but a lowercase host and, at most,
+// a port; false for any other url, which is then no edge origin. Which ports an
+// edge origin may write is resolveEdgeOrigin's to say.
 func edgeOriginHost(clientId string) (string, bool) {
+	host, _, ok := edgeOriginHostPort(clientId)
+	return host, ok
+}
+
+// edgeOriginHost with the port as the client id writes it, "" for an origin
+// that writes none.
+func edgeOriginHostPort(clientId string) (host string, portText string, ok bool) {
 	originUrl, err := url.Parse(clientId)
-	if err != nil || originUrl.Scheme != "https" || originUrl.Host == "" || originUrl.Port() != "" ||
-		originUrl.User != nil || (originUrl.Path != "" && originUrl.Path != "/") || originUrl.RawQuery != "" || originUrl.Fragment != "" {
-		return "", false
+	if err != nil || originUrl.Scheme != "https" || originUrl.Host == "" ||
+		originUrl.User != nil || originUrl.Path != "" || originUrl.RawQuery != "" || originUrl.Fragment != "" {
+		return "", "", false
 	}
-	host := originUrl.Hostname()
-	if host != strings.ToLower(host) || "https://"+host != clientId {
-		return "", false
+	host = originUrl.Hostname()
+	if host == "" || host != strings.ToLower(host) {
+		return "", "", false
 	}
-	return host, true
+	if "https://"+host == clientId {
+		return host, "", true
+	}
+	portText, written := strings.CutPrefix(clientId, "https://"+host+":")
+	if !written {
+		return "", "", false
+	}
+	return host, portText, true
+}
+
+// The tlsedge port an origin under a served root names, by what it writes
+// after its host: none is 443, and a written port is 8443, 8883 or 5671 in its
+// one spelling. 443 written out, any other port and any other spelling are
+// refused, so each endpoint has one origin and one client_id (QD-723). The four
+// ports are the tls/ namespace's own (sidecar.ParseSocketName), which keeps
+// the issuer's list the one a listener registers under.
+func edgeOriginPort(host string, portText string, written bool) (int, bool) {
+	switch {
+	case !written:
+		portText = edgeOriginBarePort
+	case portText == edgeOriginBarePort:
+		return 0, false
+	}
+	socketName := "tls/" + portText + "/" + host
+	name, namespace, err := sidecar.ParseSocketName(socketName)
+	if err != nil || namespace != sidecar.SocketNamespaceTls || name != socketName {
+		return 0, false
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return 0, false
+	}
+	return port, true
 }
 
 // The edge origin clientId names, ok false for a client id that is no edge
 // origin of a root this server serves. An origin under such a root that no
-// installed source can judge is refused, not passed on.
+// installed source can judge, or whose port is not one an edge origin writes,
+// is refused, not passed on.
 func resolveEdgeOrigin(ctx context.Context, clientId string) (origin *EdgeOrigin, ok bool, err error) {
-	originHost, isOrigin := edgeOriginHost(clientId)
+	originHost, portText, isOrigin := edgeOriginHostPort(clientId)
 	if !isOrigin {
 		return nil, false, nil
 	}
@@ -150,7 +229,11 @@ func resolveEdgeOrigin(ctx context.Context, clientId string) (origin *EdgeOrigin
 	if !under {
 		return nil, false, nil
 	}
-	return &EdgeOrigin{Origin: "https://" + originHost, NetworkId: networkId, Host: host}, true, nil
+	port, served := edgeOriginPort(host, portText, clientId != "https://"+originHost)
+	if !served {
+		return nil, true, ErrEdgeOriginRefused
+	}
+	return &EdgeOrigin{Origin: clientId, NetworkId: networkId, Host: host, Port: port}, true, nil
 }
 
 // Whether a dns root this server serves holds host, read from §12's dns_root
@@ -178,14 +261,14 @@ func edgeLoginRootHolds(ctx context.Context, host string) bool {
 	return holds
 }
 
-// Whether the origin's grant is live now, refusing when it is not or cannot be
-// told.
+// Whether the grant of the origin's host on its port is live now, refusing when
+// it is not or cannot be told.
 func checkEdgeOriginGrant(ctx context.Context, origin *EdgeOrigin, now time.Time) error {
 	source := currentEdgeLoginSource()
 	if source == nil {
 		return ErrEdgeOriginRefused
 	}
-	granted, err := source.MembersPublishGranted(ctx, origin.NetworkId, origin.Host, now)
+	granted, err := source.MembersPublishGranted(ctx, origin.NetworkId, origin.Host, origin.Port, now)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrEdgeOriginRefused, err)
 	}
@@ -315,7 +398,8 @@ func ExchangeEdgeCode(ctx context.Context, args *ExchangeCodeArgs) (*EdgeTokenRe
 	if code.NetworkId != origin.NetworkId {
 		return nil, ErrInvalidCode
 	}
-	idToken, err := MintEdgeIdToken(origin.Origin, code.NetworkId, code.UserId, code.Nonce, server.NowUtc())
+	settings := currentEdgeLoginSettings()
+	idToken, err := mintEdgeIdToken(origin.Origin, code.NetworkId, code.UserId, code.Nonce, server.NowUtc(), settings)
 	if err != nil {
 		return nil, err
 	}
@@ -324,12 +408,16 @@ func ExchangeEdgeCode(ctx context.Context, args *ExchangeCodeArgs) (*EdgeTokenRe
 	return &EdgeTokenResponse{
 		IdToken:   idToken,
 		TokenType: "Bearer",
-		ExpiresIn: int(EdgeIdTokenDuration / time.Second),
+		ExpiresIn: int(settings.IdTokenDuration / time.Second),
 	}, nil
 }
 
 // An edge login's ID token for origin, signed by the id- key set at now.
 func MintEdgeIdToken(origin string, networkId server.Id, memberId server.Id, nonce string, now time.Time) (string, error) {
+	return mintEdgeIdToken(origin, networkId, memberId, nonce, now, currentEdgeLoginSettings())
+}
+
+func mintEdgeIdToken(origin string, networkId server.Id, memberId server.Id, nonce string, now time.Time, settings *EdgeLoginSettings) (string, error) {
 	signingKey, err := SigningKeyOf(SignerKeySetId)
 	if err != nil {
 		return "", err
@@ -342,7 +430,7 @@ func MintEdgeIdToken(origin string, networkId server.Id, memberId server.Id, non
 			Subject:   memberId.String(),
 			Audience:  gojwt.ClaimStrings{origin},
 			IssuedAt:  gojwt.NewNumericDate(now),
-			ExpiresAt: gojwt.NewNumericDate(now.Add(EdgeIdTokenDuration)),
+			ExpiresAt: gojwt.NewNumericDate(now.Add(settings.IdTokenDuration)),
 			ID:        server.NewId().String(),
 		},
 	}
@@ -413,83 +501,32 @@ func AuthorizeRedirectHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
-// Whether the rules of an AclState's rows grant an active publish of host whose
-// audience is members: what an EdgeLoginSource over §8.9's gate cache answers
-// for a network. A rule's public names take a host as sidecar's MayPublish
-// does: a bare * every host, else label by label, * within a label any run of
-// characters; an expired rule, one with another audience and a name with a path
-// take nothing. Whose rule it is does not matter here: the issuer asks whether
-// the network publishes the host to its members at all.
-func AclMembersPublishGranted(acl *sidecar.AclState, host string, now time.Time) bool {
-	if acl == nil || host == "" || strings.Contains(host, "*") {
+// Whether a projection's AclState holds, now, a members publish grant of host on
+// port: what an EdgeLoginSource over §8.9's gate cache answers for a network
+// (QD-723). It is ACL-M5-01's AclState.PublishGrant for tls/<port>/<host> in
+// http mode, asked of each sidecar the state admits, so it carries every rule
+// of §8.10's: a rule binding another port's socket gives nothing here, publish
+// needs listen on the bound socket, rules that disagree give none, and a parked
+// or suspended sidecar holds no grant. The issuer names no listener, so one
+// sidecar's grant whose audience is members or members-device is enough: the
+// network then publishes that endpoint to its members.
+func AclMembersPublishGranted(acl *sidecar.AclState, host string, port int, now time.Time) bool {
+	if acl == nil || host == "" || port <= 0 {
 		return false
 	}
-	for _, rule := range acl.Rows().GetRules() {
-		if expires := rule.GetExpires(); expires != 0 && expires <= now.UnixMilli() {
+	socketName := "tls/" + strconv.Itoa(port) + "/" + host
+	if name, namespace, err := sidecar.ParseSocketName(socketName); err != nil || namespace != sidecar.SocketNamespaceTls || name != socketName {
+		return false
+	}
+	for _, sidecarId := range acl.View().SidecarIds() {
+		grant, decision := acl.PublishGrant(sidecar.AclSidecarSubject(sidecarId), socketName, protocol.AclAppMode_ACL_APP_MODE_HTTP, now)
+		if !decision.Allowed || grant == nil {
 			continue
 		}
-		if !slices.Contains(rule.GetActions(), uint32(protocol.AclAction_ACL_ACTION_PUBLISH)) {
-			continue
-		}
-		switch rule.GetAudience() {
-		case protocol.AclAudience_ACL_AUDIENCE_UNSPECIFIED, protocol.AclAudience_ACL_AUDIENCE_MEMBERS, protocol.AclAudience_ACL_AUDIENCE_MEMBERS_DEVICE:
-		default:
-			continue
-		}
-		for _, target := range rule.GetTargets() {
-			if name := target.GetPublicName(); name != "" && !strings.Contains(name, "/") && edgeHostCovers(name, host) {
-				return true
-			}
+		switch grant.Audience {
+		case protocol.AclAudience_ACL_AUDIENCE_MEMBERS, protocol.AclAudience_ACL_AUDIENCE_MEMBERS_DEVICE:
+			return true
 		}
 	}
 	return false
-}
-
-// Whether a dns pattern takes a host: a bare * every host, else label by label,
-// as sidecar's aclDnsHostCovers.
-func edgeHostCovers(pattern string, host string) bool {
-	if pattern == "*" {
-		return true
-	}
-	patternLabels := strings.Split(pattern, ".")
-	hostLabels := strings.Split(host, ".")
-	if len(patternLabels) != len(hostLabels) {
-		return false
-	}
-	for i, label := range patternLabels {
-		if !edgeGlobMatches(label, hostLabels[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// Whether a label glob takes text: * any run of characters, every other
-// character itself (sidecar's aclGlobMatches).
-func edgeGlobMatches(pattern string, text string) bool {
-	patternIndex := 0
-	textIndex := 0
-	starIndex := -1
-	starTextIndex := 0
-	for textIndex < len(text) {
-		switch {
-		case patternIndex < len(pattern) && pattern[patternIndex] == '*':
-			starIndex = patternIndex
-			starTextIndex = textIndex
-			patternIndex += 1
-		case patternIndex < len(pattern) && pattern[patternIndex] == text[textIndex]:
-			patternIndex += 1
-			textIndex += 1
-		case 0 <= starIndex:
-			starTextIndex += 1
-			textIndex = starTextIndex
-			patternIndex = starIndex + 1
-		default:
-			return false
-		}
-	}
-	for patternIndex < len(pattern) && pattern[patternIndex] == '*' {
-		patternIndex += 1
-	}
-	return patternIndex == len(pattern)
 }
