@@ -11470,4 +11470,11 @@ var migrations = []any{
 	// Apply before deploying the api and alt that write it and the taskworker
 	// that reads it.
 	newSqlMigration(networkPingTargetEvidenceSchemaSql),
+
+	// The network each capture the flag award was won for (ctf_schema.go,
+	// ctfAwardNetworkSql): one nullable uuid on ctf_award, backfilled where
+	// the census or network_client knows the network, and its index, under a
+	// five-second lock bound. ctf_award is empty until capture the flag is
+	// live. Apply before deploying the taskworker and api that use it.
+	ctfAwardNetworkMigration,
 }

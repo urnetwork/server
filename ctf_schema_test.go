@@ -24,6 +24,65 @@ func TestCtfSchemaMigrationIsAppended(t *testing.T) {
 	}
 }
 
+// ctf_award.network_id is its own plain SQL migration, after the one that
+// creates ctf_award and after the ping evidence migration that was the last on
+// main before it, at its position in the list.
+func TestCtfAwardNetworkMigrationIsAppended(t *testing.T) {
+	version := CtfAwardNetworkMigrationVersion()
+	if version < 1 || len(migrations) < version || migrations[version-1] != ctfAwardNetworkMigration {
+		t.Fatalf("ctf award network migration version %d is not its position", version)
+	}
+	if schema := CtfSchemaMigrationVersion(); version <= schema {
+		t.Fatalf("ctf award network migration %d is not after the ctf schema migration %d", version, schema)
+	}
+	if evidence := NetworkPingTargetEvidenceSchemaMigrationVersion(); version <= evidence {
+		t.Fatalf("ctf award network migration %d is not after the ping evidence migration %d", version, evidence)
+	}
+	if sqlMigrationVersion(ctfAwardNetworkSql) != version {
+		t.Fatal("the ctf award network SQL is in the list more than once, or not as its migration")
+	}
+}
+
+// The migration bounds its lock waits before anything else, touches ctf_award
+// alone, adds only the nullable column and its index when absent, and sets
+// only the rows whose network is still null: from the census member of the
+// award's epoch, role and client, else the client's network_client row.
+func TestCtfAwardNetworkMigrationIsBoundedAndAdditive(t *testing.T) {
+	sql := ctfAwardNetworkSql
+	bound := strings.Index(sql, "SET LOCAL lock_timeout = '5s';")
+	if bound < 0 || strings.Index(sql, "ALTER") < bound {
+		t.Error("the migration does not bound its lock wait before it alters ctf_award")
+	}
+	for _, statement := range []string{
+		"ALTER TABLE ctf_award ADD COLUMN IF NOT EXISTS network_id uuid NULL;",
+		"CREATE INDEX IF NOT EXISTS ctf_award_network ON ctf_award (deployment_key, no_id, network_id, epoch);",
+		"UPDATE ctf_award SET network_id = COALESCE(",
+		"WHERE network_id IS NULL;",
+		"member.epoch = ctf_award.epoch AND member.role = ctf_award.role",
+		"member.client_id = ctf_award.client_id",
+		"WHERE network_client.client_id = ctf_award.client_id",
+	} {
+		if !strings.Contains(sql, statement) {
+			t.Errorf("the migration lacks %q", statement)
+		}
+	}
+	if strings.Index(sql, "FROM ctf_census_member") > strings.Index(sql, "FROM network_client") {
+		t.Error("the migration prefers network_client's network to the census member's")
+	}
+	changed := regexp.MustCompile(`(?i)\b(?:ALTER TABLE|UPDATE|CREATE INDEX IF NOT EXISTS \w+ ON|INSERT INTO|DELETE FROM)\s+(\w+)`).FindAllStringSubmatch(sql, -1)
+	if len(changed) != 3 {
+		t.Fatalf("the migration changes %d relations, want ctf_award's column, its rows and its index", len(changed))
+	}
+	for _, match := range changed {
+		if match[1] != "ctf_award" {
+			t.Errorf("the migration changes %s", match[1])
+		}
+	}
+	if regexp.MustCompile(`(?i)\b(DROP|TRUNCATE|VACUUM|ANALYZE|CLUSTER|REFERENCES|CONCURRENTLY|NOT NULL|DEFAULT)\b`).MatchString(sql) {
+		t.Error("the migration does more than add a nullable column, its values and its index")
+	}
+}
+
 // The tables the census, the driver and the api read and write, each created
 // only when absent after a five-second lock bound, and nothing else: no table
 // that exists is altered, rewritten, sampled or deleted from.

@@ -209,6 +209,45 @@ func GetStLedgerV2AccountsForColdkey(ctx context.Context, deploymentKey StDeploy
 	return accounts
 }
 
+// stLedgerV2ColdkeyBytes is coldkeys as a bytea[] argument.
+func stLedgerV2ColdkeyBytes(coldkeys [][32]byte) [][]byte {
+	values := make([][]byte, len(coldkeys))
+	for i := range coldkeys {
+		values[i] = coldkeys[i][:]
+	}
+	return values
+}
+
+// GetStLedgerV2AccountIndexes returns the recorded position of each of the
+// coldkeys that has an account in one pool, in one read.
+func GetStLedgerV2AccountIndexes(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, coldkeys [][32]byte) map[[32]byte]uint64 {
+	key := requireStDeploymentKey(deploymentKey)
+	indexes := map[[32]byte]uint64{}
+	if len(coldkeys) == 0 {
+		return indexes
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT coldkey, account_index
+				FROM st_ledger_v2_account
+				WHERE deployment_key = $1 AND coldkey = ANY($2::bytea[]) AND no_id = $3
+			`,
+			key, stLedgerV2ColdkeyBytes(coldkeys), int64(noId),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var coldkey []byte
+				var index int64
+				server.Raise(result.Scan(&coldkey, &index))
+				indexes[[32]byte(coldkey)] = uint64(index)
+			}
+		})
+	})
+	return indexes
+}
+
 // StLedgerV2Amount is one coldkey's amount, in rao, of one covered epoch.
 type StLedgerV2Amount struct {
 	NoId      uint64
@@ -329,6 +368,19 @@ func GetStLedgerV2Amounts(ctx context.Context, deploymentKey StDeploymentKey, no
 // pool, by pool then epoch.
 func GetStLedgerV2AmountsForColdkey(ctx context.Context, deploymentKey StDeploymentKey, coldkey [32]byte) []*StLedgerV2Amount {
 	return getStLedgerV2Amounts(ctx, deploymentKey, `coldkey = $2`, coldkey[:])
+}
+
+// GetStLedgerV2PoolAmountsForColdkeys returns the recorded amounts of each of
+// the coldkeys in one pool, by epoch, in one read.
+func GetStLedgerV2PoolAmountsForColdkeys(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, coldkeys [][32]byte) map[[32]byte][]*StLedgerV2Amount {
+	byColdkey := map[[32]byte][]*StLedgerV2Amount{}
+	if len(coldkeys) == 0 {
+		return byColdkey
+	}
+	for _, amount := range getStLedgerV2Amounts(ctx, deploymentKey, `coldkey = ANY($2::bytea[]) AND no_id = $3`, stLedgerV2ColdkeyBytes(coldkeys), int64(noId)) {
+		byColdkey[amount.Coldkey] = append(byColdkey[amount.Coldkey], amount)
+	}
+	return byColdkey
 }
 
 func getStLedgerV2Amounts(ctx context.Context, deploymentKey StDeploymentKey, where string, args ...any) []*StLedgerV2Amount {

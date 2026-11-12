@@ -178,6 +178,26 @@ func (self *fakeLedgerV2Chain) LedgerV2Claimed(ctx context.Context, noId uint64,
 	return self.claimed[[2]uint64{noId, index}], nil
 }
 
+func (self *fakeLedgerV2Chain) LedgerV2FinalizedBlock(ctx context.Context) (uint64, error) {
+	if err := self.failed("finalized"); err != nil {
+		return 0, err
+	}
+	return self.head, nil
+}
+
+// LedgerV2ClaimedAt answers a batch as one read: a failure queued for
+// "claimed" refuses the whole batch, as a refused request would.
+func (self *fakeLedgerV2Chain) LedgerV2ClaimedAt(ctx context.Context, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error) {
+	if err := self.failed("claimed"); err != nil {
+		return nil, err
+	}
+	values := make([]uint256.Int, len(indexes))
+	for i, index := range indexes {
+		values[i] = self.claimed[[2]uint64{noId, index}]
+	}
+	return values, nil
+}
+
 func (self *fakeLedgerV2Chain) LedgerV2Close(ctx context.Context, epoch uint64, noId uint64) (string, error) {
 	*self.log = append(*self.log, fmt.Sprintf("close %d", epoch))
 	if err := self.failed("close"); err != nil {
