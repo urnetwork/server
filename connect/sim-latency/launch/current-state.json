@@ -139,7 +139,7 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "smoke_14_of_14_and_critical_repeat_54_of_54_passed_test_only_parity_correction_refrozen_phase_b_verified_running",
+      "status": "broader_run_29_passes_then_stale_closed_successor_oracle_failure_test_only_explicit_chain_fixes_underway",
       "phase_b": {
         "source_commit": "27844c56653c67158067f71ac7ab95e319f93c2d",
         "production_code_unchanged_from_a4eaa": true,
@@ -148,7 +148,12 @@
         "invocation_id": "642622d53b1e40d8bead38b90487691c",
         "main_pid": 2368044,
         "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.OzHgCUcg",
-        "verified_active": true,
+        "verified_active": false,
+        "prerequisite_results": "ownership controls 6/6 and native parity comparison 1/1 passed",
+        "broad_result": "29 passed then fail-fast: TestMigrationsAutomationSchemaFaultsReachSignal reports admitted claim custody has an unreviewed successor",
+        "log_sha256": "339da81bc87b83feb4d792126064ccfaf2f6e0ac221ae1aee1fade48503b16cf",
+        "fixtures_cleaned_up_and_compiler_released": true,
+        "after_manifest_missing_on_failure": true,
         "stages": "two acquisition-tripwire tests repeated three times, then exact native parity comparison, then broader source-derived migration/PostgreSQL tests only if both gates pass",
         "excluded_test": "TestMigrationCatalogResourceDiagnostic: retained explicit old-monolithic OOM reproduction, not ordinary qualification",
         "race_authorized": false
