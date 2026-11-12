@@ -1046,6 +1046,63 @@
    "description": "Every set change the publish tick wanted over the last 30 minutes (three ticks), accepted by Route 53 or failed: refused, errored, or never sent because the zone could not be read or an upsert of its type failed. Each set is a request of its own, so a refused TXT set costs only TXT. Failed changes for half an hour raise extender-dns-publish-failing (monitor/SIGNALS.md \u00a727.2); the taskworker log line `dns publish failed` names each set and Route 53's answer."
   },
   {
+   "id": 188,
+   "type": "timeseries",
+   "title": "China's own set",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 28
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (record_type) (urnetwork_taskworker_extender_dns_country_records{env=\"$env\",country=\"CN\"})",
+     "refId": "A",
+     "legendFormat": "{{record_type}}"
+    }
+   ],
+   "description": "What Route 53 accepted of China's own sets in each tick (taskworker/work/extender_dns_publish.go, extenderDnsCnSet): signed records in its TXT set, addresses in its A and AAAA sets. China's resolvers do not deliver a continent's set whole (2026-11-12: Alidns served 3 of the Asia set's 13 records, DNSPod none), so China is answered by a set of its own of cn_record_count records, 1 by default, which rotates every tick. TXT at the count is healthy. A and AAAA hold the addresses of the extenders those records vouch for, and a family none of them has reads zero, which is normal. TXT at zero is China answered by the Asia set again: Route 53 refused the set (set changes by outcome), no ranked record fit what China's resolvers deliver whole, or nothing could be signed (the taskworker log)."
+  },
+  {
    "id": 19,
    "type": "row",
    "title": "gossip network",
@@ -1054,7 +1111,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 28
+    "y": 36
    },
    "panels": []
   },
@@ -1070,7 +1127,7 @@
     "h": 5,
     "w": 4,
     "x": 0,
-    "y": 29
+    "y": 37
    },
    "fieldConfig": {
     "defaults": {
@@ -1124,7 +1181,7 @@
     "h": 5,
     "w": 4,
     "x": 4,
-    "y": 29
+    "y": 37
    },
    "fieldConfig": {
     "defaults": {
@@ -1178,7 +1235,7 @@
     "h": 5,
     "w": 4,
     "x": 8,
-    "y": 29
+    "y": 37
    },
    "fieldConfig": {
     "defaults": {
@@ -1232,7 +1289,7 @@
     "h": 5,
     "w": 4,
     "x": 12,
-    "y": 29
+    "y": 37
    },
    "fieldConfig": {
     "defaults": {
@@ -1286,7 +1343,7 @@
     "h": 5,
     "w": 4,
     "x": 16,
-    "y": 29
+    "y": 37
    },
    "fieldConfig": {
     "defaults": {
@@ -1340,7 +1397,7 @@
     "h": 5,
     "w": 4,
     "x": 20,
-    "y": 29
+    "y": 37
    },
    "fieldConfig": {
     "defaults": {
@@ -1394,7 +1451,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 34
+    "y": 42
    },
    "fieldConfig": {
     "defaults": {
@@ -1460,7 +1517,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 34
+    "y": 42
    },
    "fieldConfig": {
     "defaults": {
@@ -1526,7 +1583,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 34
+    "y": 42
    },
    "fieldConfig": {
     "defaults": {
@@ -1598,7 +1655,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 42
+    "y": 50
    },
    "panels": []
   },
@@ -1614,7 +1671,7 @@
     "h": 9,
     "w": 12,
     "x": 0,
-    "y": 43
+    "y": 51
    },
    "fieldConfig": {
     "defaults": {
@@ -1662,7 +1719,7 @@
     "h": 9,
     "w": 12,
     "x": 12,
-    "y": 43
+    "y": 51
    },
    "fieldConfig": {
     "defaults": {
@@ -1716,7 +1773,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 52
+    "y": 60
    },
    "panels": []
   },
@@ -1732,7 +1789,7 @@
     "h": 5,
     "w": 4,
     "x": 0,
-    "y": 53
+    "y": 61
    },
    "fieldConfig": {
     "defaults": {
@@ -1786,7 +1843,7 @@
     "h": 5,
     "w": 4,
     "x": 4,
-    "y": 53
+    "y": 61
    },
    "fieldConfig": {
     "defaults": {
@@ -1840,7 +1897,7 @@
     "h": 5,
     "w": 4,
     "x": 8,
-    "y": 53
+    "y": 61
    },
    "fieldConfig": {
     "defaults": {
@@ -1903,7 +1960,7 @@
     "h": 5,
     "w": 4,
     "x": 12,
-    "y": 53
+    "y": 61
    },
    "fieldConfig": {
     "defaults": {
@@ -1957,7 +2014,7 @@
     "h": 5,
     "w": 4,
     "x": 16,
-    "y": 53
+    "y": 61
    },
    "fieldConfig": {
     "defaults": {
@@ -2011,7 +2068,7 @@
     "h": 5,
     "w": 4,
     "x": 20,
-    "y": 53
+    "y": 61
    },
    "fieldConfig": {
     "defaults": {
@@ -2065,7 +2122,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 58
+    "y": 66
    },
    "fieldConfig": {
     "defaults": {
@@ -2122,7 +2179,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 58
+    "y": 66
    },
    "fieldConfig": {
     "defaults": {
@@ -2188,7 +2245,7 @@
     "h": 9,
     "w": 12,
     "x": 0,
-    "y": 66
+    "y": 74
    },
    "fieldConfig": {
     "defaults": {
@@ -2236,7 +2293,7 @@
     "h": 9,
     "w": 12,
     "x": 12,
-    "y": 66
+    "y": 74
    },
    "fieldConfig": {
     "defaults": {
@@ -2293,7 +2350,7 @@
     "h": 9,
     "w": 12,
     "x": 0,
-    "y": 75
+    "y": 83
    },
    "fieldConfig": {
     "defaults": {
@@ -2341,7 +2398,7 @@
     "h": 9,
     "w": 12,
     "x": 12,
-    "y": 75
+    "y": 83
    },
    "fieldConfig": {
     "defaults": {
@@ -2407,7 +2464,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 84
+    "y": 92
    },
    "fieldConfig": {
     "defaults": {
@@ -2464,7 +2521,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 84
+    "y": 92
    },
    "fieldConfig": {
     "defaults": {
@@ -2518,7 +2575,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 92
+    "y": 100
    },
    "panels": []
   },
@@ -2534,7 +2591,7 @@
     "h": 5,
     "w": 4,
     "x": 0,
-    "y": 93
+    "y": 101
    },
    "fieldConfig": {
     "defaults": {
@@ -2588,7 +2645,7 @@
     "h": 5,
     "w": 4,
     "x": 4,
-    "y": 93
+    "y": 101
    },
    "fieldConfig": {
     "defaults": {
@@ -2642,7 +2699,7 @@
     "h": 5,
     "w": 4,
     "x": 8,
-    "y": 93
+    "y": 101
    },
    "fieldConfig": {
     "defaults": {
@@ -2696,7 +2753,7 @@
     "h": 5,
     "w": 4,
     "x": 12,
-    "y": 93
+    "y": 101
    },
    "fieldConfig": {
     "defaults": {
@@ -2750,7 +2807,7 @@
     "h": 5,
     "w": 4,
     "x": 16,
-    "y": 93
+    "y": 101
    },
    "fieldConfig": {
     "defaults": {
@@ -2804,7 +2861,7 @@
     "h": 5,
     "w": 4,
     "x": 20,
-    "y": 93
+    "y": 101
    },
    "fieldConfig": {
     "defaults": {
@@ -2874,7 +2931,7 @@
     "h": 8,
     "w": 6,
     "x": 0,
-    "y": 98
+    "y": 106
    },
    "fieldConfig": {
     "defaults": {
@@ -2931,7 +2988,7 @@
     "h": 8,
     "w": 6,
     "x": 6,
-    "y": 98
+    "y": 106
    },
    "fieldConfig": {
     "defaults": {
@@ -2988,7 +3045,7 @@
     "h": 8,
     "w": 6,
     "x": 12,
-    "y": 98
+    "y": 106
    },
    "fieldConfig": {
     "defaults": {
@@ -3045,7 +3102,7 @@
     "h": 8,
     "w": 6,
     "x": 18,
-    "y": 98
+    "y": 106
    },
    "fieldConfig": {
     "defaults": {
@@ -3102,7 +3159,7 @@
     "h": 5,
     "w": 6,
     "x": 0,
-    "y": 106
+    "y": 114
    },
    "fieldConfig": {
     "defaults": {
@@ -3172,7 +3229,7 @@
     "h": 5,
     "w": 6,
     "x": 6,
-    "y": 106
+    "y": 114
    },
    "fieldConfig": {
     "defaults": {
@@ -3242,7 +3299,7 @@
     "h": 5,
     "w": 6,
     "x": 12,
-    "y": 106
+    "y": 114
    },
    "fieldConfig": {
     "defaults": {
@@ -3304,7 +3361,7 @@
     "h": 5,
     "w": 6,
     "x": 18,
-    "y": 106
+    "y": 114
    },
    "fieldConfig": {
     "defaults": {
@@ -3366,7 +3423,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 111
+    "y": 119
    },
    "fieldConfig": {
     "defaults": {
@@ -3423,7 +3480,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 111
+    "y": 119
    },
    "fieldConfig": {
     "defaults": {
@@ -3477,7 +3534,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 119
+    "y": 127
    },
    "panels": []
   },
@@ -3493,7 +3550,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 120
+    "y": 128
    },
    "fieldConfig": {
     "defaults": {
@@ -3550,7 +3607,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 120
+    "y": 128
    },
    "fieldConfig": {
     "defaults": {
@@ -3607,7 +3664,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 128
+    "y": 136
    },
    "fieldConfig": {
     "defaults": {
@@ -3664,7 +3721,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 128
+    "y": 136
    },
    "fieldConfig": {
     "defaults": {
@@ -3721,7 +3778,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 136
+    "y": 144
    },
    "fieldConfig": {
     "defaults": {
@@ -3775,7 +3832,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 144
+    "y": 152
    },
    "panels": []
   },
@@ -3791,7 +3848,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 145
+    "y": 153
    },
    "fieldConfig": {
     "defaults": {
@@ -3848,7 +3905,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 145
+    "y": 153
    },
    "fieldConfig": {
     "defaults": {
@@ -3905,7 +3962,7 @@
     "h": 9,
     "w": 12,
     "x": 0,
-    "y": 153
+    "y": 161
    },
    "fieldConfig": {
     "defaults": {
@@ -3953,7 +4010,7 @@
     "h": 9,
     "w": 12,
     "x": 12,
-    "y": 153
+    "y": 161
    },
    "fieldConfig": {
     "defaults": {
@@ -4007,7 +4064,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 162
+    "y": 170
    },
    "panels": []
   },
@@ -4023,7 +4080,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 163
+    "y": 171
    },
    "fieldConfig": {
     "defaults": {
@@ -4086,7 +4143,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 171
+    "y": 179
    },
    "panels": []
   },
@@ -4102,7 +4159,7 @@
     "h": 5,
     "w": 6,
     "x": 0,
-    "y": 172
+    "y": 180
    },
    "fieldConfig": {
     "defaults": {
@@ -4156,7 +4213,7 @@
     "h": 5,
     "w": 6,
     "x": 6,
-    "y": 172
+    "y": 180
    },
    "fieldConfig": {
     "defaults": {
@@ -4210,7 +4267,7 @@
     "h": 5,
     "w": 6,
     "x": 12,
-    "y": 172
+    "y": 180
    },
    "fieldConfig": {
     "defaults": {
@@ -4264,7 +4321,7 @@
     "h": 5,
     "w": 6,
     "x": 18,
-    "y": 172
+    "y": 180
    },
    "fieldConfig": {
     "defaults": {
@@ -4318,7 +4375,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 177
+    "y": 185
    },
    "fieldConfig": {
     "defaults": {
@@ -4375,7 +4432,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 177
+    "y": 185
    },
    "fieldConfig": {
     "defaults": {
@@ -4432,7 +4489,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 185
+    "y": 193
    },
    "fieldConfig": {
     "defaults": {
@@ -4507,7 +4564,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 185
+    "y": 193
    },
    "fieldConfig": {
     "defaults": {
@@ -4573,7 +4630,7 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 193
+    "y": 201
    },
    "fieldConfig": {
     "defaults": {
@@ -4627,7 +4684,7 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 201
+    "y": 209
    },
    "panels": []
   },
@@ -4643,7 +4700,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 202
+    "y": 210
    },
    "fieldConfig": {
     "defaults": {
@@ -4700,7 +4757,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 202
+    "y": 210
    },
    "fieldConfig": {
     "defaults": {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
@@ -302,7 +303,7 @@ func (self extenderDnsRecordsProbe) checkZone(ctx context.Context, env *probeEnv
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			observation, err := env.runner.dnsTxt(ctx, resolver, name)
+			observation, err := env.runner.dnsTxt(ctx, resolver, name, netip.Prefix{})
 			answers[index] = extenderDnsRecordsAnswer{observation: observation, err: err}
 		}()
 	}
