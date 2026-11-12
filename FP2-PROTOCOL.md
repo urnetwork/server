@@ -8,9 +8,11 @@ Design for peer review. Nothing here is built yet.
 | Server | origin/main b8e99de07; every server file cited is identical at cbb7d7306 |
 | Connect | origin/main fc949b78 |
 | SDK | origin/main 447ed899 |
+| Apps | apple origin/main 4254667d; android origin/main 1820ea290 (§5.5 only) |
 
 References are `path:line` at those commits. Paths without a repo prefix are
-in the server repo, and `connect/` and `sdk/` name the other two repos.
+in the server repo; `connect/`, `sdk/`, `apple/` and `android/` name the
+other repos.
 
 ## Terms
 
@@ -28,7 +30,9 @@ in the server repo, and `connect/` and `sdk/` name the other two repos.
 | legacy mode | a FindProviders2 request without `select`: exactly today's behaviour |
 | selector mode | a request with `select` |
 | normal windows | connect's quality and speed windows |
-| limited window | connect's new window of `ipv4+tcp` providers (§7.4) |
+| limited window | connect's new window of `tcp` providers, requested with `ipv4+tcp` selectors (§7.4) |
+| IPv6 need | how many `dualstack` clients a window still wants: its IPv6 minimum less those it holds (D11.1, §6.3) |
+| overflow | `tcp` providers given to a `dualproto` request that the requested protocol cannot fill (§6.3) |
 | compatible | a window client whose labels can carry a flow (§7.2) |
 
 ## 1. Summary, goals, non-goals
@@ -42,18 +46,25 @@ in the server repo, and `connect/` and `sdk/` name the other two repos.
 - A provider that fails the URL ratio only because of its HTTP/3 (UDP) legs
   becomes `tcp`. A dual-stack provider that fails only because of its IPv6
   legs becomes `ipv4`. Its buckets are then judged on the legs it keeps.
-- A request that names capabilities (`select`) gets the requested class first.
-  It overflows to lower classes, in the decided order A → B → C → D, only when
-  the location cannot fill the window's target from the requested class. Every
-  answered provider carries both labels.
+- A request that names capabilities (`select`) is filled in the decided order
+  (D7.2), as refined by D11.1 and D11.2:
+  1. the window's IPv6 need, from `dualstack` providers;
+  2. then the requested protocol's providers;
+  3. then, only when those cannot reach the window's target, `tcp` providers
+     as overflow.
+
+  Every answered provider carries both labels.
 - A request without `select` gets exactly today's answer: the hard gate, no
   overflow, no new fields.
 - In connect, each window client keeps the labels FP2 gave it. A flow is only
   ever placed on a compatible client: UDP needs `dualproto`, IPv6 needs
   `dualstack`.
-- A new limited window holds `ipv4+tcp` providers. Its size is half the
-  largest normal window's target, at least 1. Its clients join the race of
+- A new limited window holds `tcp` providers. Its clients join the race of
   every flow they can carry.
+  - Size: half the largest normal window's target, at least 1 (D8). On mobile
+    it is 1 if the memory gate fails (D11.5).
+  - Rank mode: the performance profile's, `quality` in auto (D10).
+- The provider status tells a downgraded provider why (D11.6).
 
 **Goals.**
 1. Bring the providers that pass everything but UDP (about 20,700 on Main on
@@ -63,9 +74,10 @@ in the server repo, and `connect/` and `sdk/` name the other two repos.
 3. Keep every answer to an existing client byte-identical.
 
 **Non-goals.**
-- **No local downgrade on either axis** (owner, decision D7.5). Connect
-  derives no capability from what it sees on its own flows. The shipped local
-  IPv6 downgrade (IPV6.md B5) is removed with this change (§7.9).
+- **No local downgrade on either axis** (owner, decision D7.5). This design
+  adds no capability state derived from a client's own flows. Whether the
+  shipped local IPv6 downgrade (IPV6.md B5) goes too is the one open question
+  (Q8; both options in §7.9).
 - **The hard gate stays the default.** Old clients, and new clients talking
   to old servers, get the hard gate.
 - **No change to SN25.** Scoring, weights and payouts read no URL outcome and
@@ -90,21 +102,30 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D1 (2026-11-11) | HTTP/3 legs count | "tests https and h3 for each provider where the url support both https and h3. A provider should pass the quality probe only if both tcp and udp pass." | qualityprobe/H3.md |
 | D2 (2026-11-11) | IP families count | "Pass means passing all probes. This applies to TCP probes and UDP probes." | qualityprobe/IPFAMILY.md |
 | D3 (2026-11-11) | per-country UDP switch | "an optional field per country that lets udp probes be disabled for the country" | `udp_probes: false` for cn, ir, ru, tm |
-| D4 | the hard UDP gate stays; the Speed/Online split is rejected | "In auto, any udp flow should be kept on quality not speed. I think the hard udp gate is correct right now. A lot of speed/streaming use cases use udp, and a provider not routing udp is an issue." | §1, §6, §7.6 |
+| D4 | the hard UDP gate stays; the Speed/Online split is rejected | "In auto, any udp flow should be kept on quality not speed. I think the hard udp gate is correct right now. A lot of speed/streaming use cases use udp, and a provider not routing udp is an issue." | §1, §6, §7.6. Its "kept on quality not speed" wording is superseded by D11.4. |
 | D5 | a protocol-aware FP2 | "have a protocol selector "all" or "tcp-only" in the find providers 2 index, and the ip multi client makes sure that the provider window selected can actually route the traffic" | superseded in detail by D6 |
 | D6.1 | two axes; default selectors; bias, then overflow; labels on every result | "I want to also fold in ipv4/ipv4 with udp/tcp. dualstack means dual ipv4/6. dualproto means tcp/ucp. 1. by default windows use dualstack and dualproto selectors. The FP2 biases towards the requested, but if there is not enough, overflows to ipv4-only and tcp-only. The returned results mark each provider with the ip and protocol capabilities." | §3, §5, §6 |
 | D6.2 | compatible placement | "2. when selecting a client, the capabilities of the currently active cleints are used. Only compatible capabilities with the flow are considered." | §7.2-7.3 |
 | D6.3 | the limited window and merged races | "3. there will be a fallback window that is set up with ipv4 only and tcp only that has a minimum count. The default should be 1. This allows us to maintain the degraded/limited clients to be used when the flows are eligible. Call it the limited window. The flow races merge the normal windows with the limited window clients so that they can race across all clients." | §7.4-7.5; size superseded by D8 |
 | D7.1 | no selectors means today's hard gate exactly: strict, no overflow, byte-identical | accepted | §5.4, §6 |
 | D7.2 | overflow order: full → `ipv4+dualproto` → `dualstack+tcp` → `ipv4+tcp` | accepted | §6 |
-| D7.3 | "not enough" means fewer matching providers in the location than the window's target count | "correct" | §6; operational definition in §6.3, see open question Q2 |
+| D7.3 | "not enough" means fewer matching providers in the location than the window's target count | "correct" | §6.3, refined by D11.1 and D11.2 |
 | D7.4 | labels come only from negative probe evidence | "if no negative measurement assume dual" (for both axes; unmeasured `udp_probes: false` countries count as `dualproto`) | §3.2-3.3 |
-| D7.5 | no local downgrade state on either axis | "it's impossible to tell per-flow failures from provider failures. also it's very hard to tell a failed udp flow" | §1 non-goals, §7.9 |
+| D7.5 | no local downgrade state on either axis | "it's impossible to tell per-flow failures from provider failures. also it's very hard to tell a failed udp flow" | §1 non-goals. Whether it also covers the shipped B5 is open question Q8 (§7.9). |
 | D8 | limited window size | "I want to change the limited window to half the normal window size, min 1." Supersedes "min count 1, default 1" (D6.3). | §7.4 |
 | D9 | process | "Ok fully finish FP2-PROTOCOL.md and then i will have a peer review before we start implementation." | this document |
+| D10 | the limited window's rank mode follows the performance profile | "the limited window should match the same rank mode as the performance profile. if auto, the limited window should be quality" (answers open question Q3) | §6.2, §7.4, §7.6 |
+| D11 | open questions Q1, Q2 and Q4-Q7 settled as recommended | "Q1,Q2,Q4,Q5,Q6,Q7 accept recommendations" | rows D11.1-D11.7 |
+| D11.1 (Q1) | the IP axis is enough once the window holds one IPv6-capable client (its IPv6 minimum); only the protocol axis uses the window's target | accepted | §5.1, §6.2-6.3, §7.4 |
+| D11.2 (Q2) | "matching providers in the location" means the window's held clients of the requested class plus the candidates the request can still use | accepted | §6.3 |
+| D11.4 (Q4) | in auto, UDP goes to quality first, then to compatible speed clients. Supersedes D4's "kept on quality not speed". | accepted | §7.6 |
+| D11.5 (Q5) | if the mobile memory gate fails, mobile sizes the limited window at 1 | accepted | §7.4, §7.8, §7.10, §9, §10 |
+| D11.6 (Q6) | the provider status tells a downgraded provider why | accepted | §5.5, §7.8 |
+| D11.7 (Q7) | a /mainnet note when the apps ship | accepted | §10 |
 
-D7.5 covers the shipped IPv6 local downgrade (B5) too. Placement reads only
-the server's labels, so B5 is removed (§7.9).
+Whether D7.5 also retires the shipped IPv6 local downgrade (B5) is not
+confirmed. It is the one open question (Q8, §11), and §7.9 sets out both
+options.
 
 ## 3. Capability model
 
@@ -481,8 +502,10 @@ JSON Schema (draft 2020-12). Every existing field is unchanged.
       "properties": {
         "ip": { "enum": ["dualstack", "ipv4"], "default": "dualstack" },
         "protocol": { "enum": ["dualproto", "tcp"], "default": "dualproto" },
-        "target_count": { "type": "integer", "minimum": 1, "description": "the window's target count; default: count, or 1 when count < 1" },
-        "held_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds whose labels equal the requested class" }
+        "target_count": { "type": "integer", "minimum": 1, "description": "the window's target count, for the protocol axis; default: count, or 1 when count < 1" },
+        "held_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds whose protocol label is the requested one (D11.2)" },
+        "dualstack_target_count": { "type": "integer", "minimum": 0, "description": "the window's IPv6 minimum (D11.1); default 1 when ip is dualstack; treated as 0 when ip is ipv4" },
+        "held_dualstack_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds that are labelled dualstack" }
       }
     }
   }
@@ -512,7 +535,7 @@ Unknown members are ignored, as today: the body is decoded with
         "client_id": { "type": "string", "format": "uuid" },
         "estimated_bytes_per_second": { "type": "integer" },
         "has_estimated_bytes_per_second": { "type": "boolean" },
-        "tier": { "type": "integer", "description": "selector mode adds 3 x backfill_tier_offset per overflow step" },
+        "tier": { "type": "integer", "description": "selector mode adds 3 x backfill_tier_offset to an overflow provider" },
         "intermediary_ids": { "type": "array", "description": "unchanged; omitted" },
         "network_only": { "type": "boolean", "description": "unchanged; omitted when false" },
         "reputation_failed_names": { "type": "string", "description": "unchanged; omitted when empty" },
@@ -528,17 +551,19 @@ Unknown members are ignored, as today: the body is decoded with
             "protocol": { "enum": ["dualproto", "tcp"] }
           }
         },
-        "overflow_step": { "type": "integer", "minimum": 1, "maximum": 3, "description": "selector mode only: how many classes below the requested one the provider was drawn from; omitted for the requested class" }
+        "overflow_step": { "type": "integer", "minimum": 1, "maximum": 1, "description": "selector mode only: 1 for an overflow provider (a tcp provider given to a dualproto request, §6.3); omitted otherwise" }
       }
     },
     "Select": {
       "type": "object",
-      "required": ["ip", "protocol", "target_count", "held_count"],
+      "required": ["ip", "protocol", "target_count", "held_count", "dualstack_target_count", "held_dualstack_count"],
       "properties": {
         "ip": { "enum": ["dualstack", "ipv4"] },
         "protocol": { "enum": ["dualproto", "tcp"] },
         "target_count": { "type": "integer", "minimum": 1 },
-        "held_count": { "type": "integer", "minimum": 0 }
+        "held_count": { "type": "integer", "minimum": 0 },
+        "dualstack_target_count": { "type": "integer", "minimum": 0 },
+        "held_dualstack_count": { "type": "integer", "minimum": 0 }
       }
     }
   }
@@ -556,9 +581,12 @@ Errors use the existing "<code> message" convention
 | `select.protocol` not `dualproto` or `tcp` | 400 `unknown select.protocol "<value>"` |
 | `select.target_count` present and < 1 | 400 `select.target_count must be at least 1` |
 | `select.held_count` < 0 | 400 `select.held_count must not be negative` |
+| `select.dualstack_target_count` < 0 | 400 `select.dualstack_target_count must not be negative` |
+| `select.held_dualstack_count` < 0 | 400 `select.held_dualstack_count must not be negative` |
+| `select.dualstack_target_count` > 0 with `ip: ipv4` | 200; treated as 0 |
 | A member of the wrong JSON type | 400 InvalidRequestBodyMessage (router/handler_utils.go:287-294) |
 | `select` with `ip_family: v6-only` | 200; discovery returns none (§3.6); named providers are still answered |
-| `select` with `force_minimum` | 200; classes order the forced pool (§6) |
+| `select` with `force_minimum` | 200; the phases of §6.2 order the forced pool |
 
 The checks run before any spec is read, like `ip_family`'s
 (model/network_client_location_model.go:6351).
@@ -568,7 +596,7 @@ The checks run before any spec is read, like `ip_family`'s
 | | Old server | New server |
 |---|---|---|
 | **Old client** (no `select`) | today | Legacy mode: byte-identical answers for the same cache state. No new fields. The hard gate, no overflow (D7.1). |
-| **New client** (sends `select`) | See below | Selector mode, as designed. |
+| **New client** (sends `select`) | See below | Selector mode, as designed. The limited window's requests carry the profile's rank mode: `quality` in auto (D10). |
 
 **New client, old server.**
 - The server ignores `select` and answers the hard gate, with no
@@ -579,6 +607,8 @@ The checks run before any spec is read, like `ip_family`'s
   - the protocol is always `dualproto`, since every entry passed the hard
     UDP gate;
   - the limited window does not fill;
+  - the normal windows keep sending today's `v6-capable` shortfall request
+    (IPV6.md B1-B2);
   - placement still checks compatibility with these labels.
 
 **New client, new server, before the first new export.** This is the window
@@ -590,6 +620,35 @@ of a rolling deploy.
 
 **Hosted devices.** The proxy service runs one build of the server and the
 sdk, so its devices are always in a same-version cell.
+
+### 5.5 Provider status (D11.6)
+
+The provider status already reports URL checks as the ranking item
+`url_checks` (model/provider_status_model.go:966-981), decided by the strict
+rule (:777). The item keeps its value, count, total and `passes` as today.
+
+For a downgraded provider, the item gains a `reason` field (string,
+omitempty), and its `explanation` appends the same text. There is one
+sentence per dropped capability:
+
+| Label | Reason |
+|---|---|
+| `tcp` | "%d of these checks failed only over HTTP/3 (UDP), so this device is offered for TCP traffic only. Some app builds and some networks do not route UDP." |
+| `ipv4` | "%d of these checks failed only over IPv6, so this device is offered for IPv4 traffic only." |
+
+- **Counts:** the provider's `negative_udp` and `negative_ip` over the window
+  (§4.2).
+- **Labels:** the same classification as the export (§3.3), computed for the
+  one provider.
+- **Apps:**
+  - Android already shows the explanation
+    (android/app/app/src/main/java/com/bringyour/network/ui/stats/ProviderStatusPresentation.kt:121),
+    so old Android builds show the reason too.
+  - The Apple app shows its own help text for this item
+    (apple/app/network/Shared/ViewModels/ProviderStatusPresentation.swift:251-262).
+    It gains one line for `reason`.
+  - The sdk's `ProviderRankingNumber` (sdk/api.go:3360-3371) carries the new
+    field.
 
 ## 6. Server selection algorithm
 
@@ -607,70 +666,97 @@ FindProviders2(args, session):
         return legacyFindProviders2(args, session)              // §6.1
     sel := validate(args.select)                                // §5.3; defaults filled
     familyFacets := ipFamilyFacetsForFilter(args.ip_family)     // unchanged, 400 on unknown
-    classes := ceilingOrder(sel)                                // §6.3
-    classes := keepFamilies(classes, args.ip_family)            // §6.3
+    // args.rank_mode is the requesting window's: quality or speed for a normal
+    // window; for the limited window, the performance profile's (auto: quality), D10
     count := args.force_count ? args.count : max(args.count, 20)        // unchanged (:6427)
     loadCount := findProviders2LoadCount(count, len(exclusions))         // unchanged (:6325)
     answer := namedProviders(args.specs)                        // unchanged gates; labels §6.4
+    ipNeed := 0
+    if sel.ip == dualstack:
+        ipNeed = max(0, sel.dualstack_target_count - sel.held_dualstack_count)   // D11.1
     for level in [request targets, region, country]:            // location fallback, unless strict (unchanged)
         discovered := []
-        available := sel.held_count
-        for step, class in enumerate(classes):
-            pool := classPool(class, args.rank_mode, args.force_minimum)    // §6.4
-            drawn := fill(pool, args.rank_mode, args.force_minimum,
-                          count - len(discovered))              // today's fill, §6.5
-            for p in drawn:
-                p.tier += step * 3 * BackfillTierOffset         // 33 with the default offset
-                p.capabilities = labels(p); p.overflow_step = step
-            discovered += drawn
-            available += eligible(pool)                         // §6.3
-            if available >= sel.target_count or len(discovered) >= count:
-                break                                           // enough: no further overflow
+        // 1. the IPv6 need: dualstack classes within the protocol ceiling (§6.3)
+        if ipNeed > 0:
+            need := fill(pool(needClasses(sel) ∩ keepFamilies(args.ip_family)),   // §6.3 table
+                         args.rank_mode, args.force_minimum, ipNeed)              // A, then C
+            for p in need where sel.protocol == dualproto and labels(p).protocol == tcp:
+                p.tier += 3 * BackfillTierOffset                // a C taken for the need is overflow
+                p.overflow_step = 1
+            discovered += need
+        // 2. the requested protocol's classes, as one pool (D11.1)
+        main := pool(protocolClasses(sel.protocol) ∩ keepFamilies(args.ip_family))
+        discovered += fill(main, args.rank_mode, args.force_minimum,
+                           count - len(discovered))             // never redraws a provider
+        // 3. overflow: a dualproto request that is not enough (D7.3, D11.2)
+        if sel.protocol == dualproto and sel.held_count + eligible(main) < sel.target_count:
+            over := fill(pool({C, D} ∩ keepFamilies(args.ip_family)),
+                         args.rank_mode, args.force_minimum, count - len(discovered))
+            for p in over:
+                p.tier += 3 * BackfillTierOffset                // 33 with the default offset
+                p.overflow_step = 1
+            discovered += over
+        for p in discovered:
+            p.capabilities = labels(p)                          // §4.3
         if discovered is not empty or args.strict or no level left:
             break
     return answer + discovered, echo sel
 ```
 
-### 6.3 Class order, family filter, "enough"
+### 6.3 Classes per phase, family filter, "enough"
 
-- **`ceilingOrder(sel)`** starts at the requested class and walks the decided
-  order downward (D7.2). It never returns a class above the requested one:
+| Request (`ip`, `protocol`) | IPv6 need from | Main pool | Overflow pool |
+|---|---|---|---|
+| `dualstack`, `dualproto` (normal windows) | A, then C if no A is eligible | A ∪ B | C ∪ D, tier +33 |
+| `ipv4`, `dualproto` | none | A ∪ B | C ∪ D, tier +33 |
+| `dualstack`, `tcp` | C | C ∪ D | none |
+| `ipv4`, `tcp` (the limited window) | none | C ∪ D | none |
 
-  | Requested class | Classes drawn, in order |
-  |---|---|
-  | A (`dualstack+dualproto`, the normal windows) | A, B, C, D |
-  | B | B, C, D |
-  | C | C, D |
-  | D (`ipv4+tcp`, the limited window) | D only |
+**How D7.2 and D11.1 combine.** The decided order A → B → C → D still holds:
+- `dualstack` comes before `ipv4` for the IPv6 need;
+- `dualproto` comes before `tcp` for the window's target.
 
-- **`keepFamilies`** applies `ip_family` as a filter on IP labels:
+Once the IPv6 need is met, the IP axis no longer orders the draw (D11.1). So A
+and B form one pool, and C and D another. A pool of several classes reads
+their facets in one shuffled order, as online requests read theirs
+(model/network_client_location_model.go:6124).
 
-  | `ip_family` | Classes kept |
-  |---|---|
-  | `""` or `v4-capable` | every class |
-  | `v6-capable` or `dualstack` | the `dualstack` classes (A, C) |
-  | `v4-only` | the `ipv4` classes (B, D) |
-  | `v6-only` | none (§3.6) |
+**The ceiling.** A `tcp` request never receives a `dualproto` provider. A C
+provider given to a `dualproto` request for its IPv6 need is overflow: tier
++33, `overflow_step` 1.
 
-- **"Enough" (D7.3).** The location has enough of the classes drawn so far
-  when `held_count` plus the eligible candidates found in them reaches
-  `target_count`. Eligible candidates are those left after the request's
-  exclusions, hard exclusions, offline and incapable filters, counted up to
-  the load budget.
-  - Counting the window's own clients, and leaving out those the request
-    excludes, makes "matching providers in the location" mean what the window
-    can actually use. A window with all its target clients in the requested
-    class never overflows to fill a slot it does not have. A class depleted
-    by exclusions overflows rather than leaving the window short (open
-    question Q2).
-  - Overflow is decided per class, across all of today's fill stages. A
-    requested-class provider from the Online fallback (tier 22) ranks ahead
-    of a lower-class Quality native (tier 33 or more). This is the bias of
-    D6.1, and the reason for open question Q1.
+**`keepFamilies`** applies `ip_family` as a filter on IP labels:
+
+| `ip_family` | Classes kept |
+|---|---|
+| `""` or `v4-capable` | every class |
+| `v6-capable` or `dualstack` | the `dualstack` classes (A, C) |
+| `v4-only` | the `ipv4` classes (B, D) |
+| `v6-only` | none (§3.6) |
+
+**"Enough" (D7.3, D11.2).**
+- A `dualproto` request has enough when `held_count` plus the eligible
+  candidates of the main pool reaches `target_count`. Only then does it skip
+  overflow.
+- Eligible candidates are those left after the request's exclusions, hard
+  exclusions, offline and incapable filters, counted up to the load budget.
+- Held clients count toward the target, and excluded providers do not. So a
+  full window never overflows to fill a slot it does not have, and a pool
+  depleted by exclusions overflows rather than leaving the window short.
+
+**The IPv6 need (D11.1).** It is `dualstack_target_count` (the window's IPv6
+minimum) less `held_dualstack_count`. A quality window wants 1 and a speed
+window 0 (connect/ip_remote_multi_client.go:232), as today's soft minimum
+does.
+- So the IP axis reserves at most one slot per quality window, and none in a
+  speed window.
+- Beyond that slot, dual-stack providers are drawn only in proportion to their
+  share of the main pool. On Main, us has 108 dual-stack hard-gate providers
+  among 20,991 (§8.4).
 
 ### 6.4 Pools and labels
 
-- **`classPool(class, mode, forced)`**, non-forced:
+- **`pool(classes)`** reads, for each class, non-forced:
 
   | Class | Today's facet, records with no downgrade | Capability facet |
   |---|---|---|
@@ -687,7 +773,7 @@ FindProviders2(args, session):
   Their labels come from the two sets of §4.4: membership gives `dualstack`
   or `tcp`; absence gives `ipv4` or `dualproto`.
 
-### 6.5 The fill per rank mode, unchanged inside each class
+### 6.5 The fill per rank mode, unchanged inside each pool
 
 - **Quality and speed:**
   1. the requested mode's natives (`PassesMinimums[mode]`; Quality also needs
@@ -700,7 +786,7 @@ FindProviders2(args, session):
 - **force_minimum:** the forced pool, common gates only; no borrowing, as
   today.
 
-The rest is today's, within each class:
+The rest is today's, within each pool:
 - the draw: `selectClientScoresByWeight` with modern-first partitioning
   (:6583-6587; model/network_client_selection_evidence.go:214);
 - the weights: `ScaledWeights[mode]` (model/network_client_score_rank.go:233),
@@ -711,13 +797,13 @@ The rest is today's, within each class:
 
 ### 6.6 Overflow tier offset
 
-The offset is 3 × `BackfillTierOffset` (33 with today's default,
-model/egress_index.go:208) per step.
-- The highest tier a class can carry before client demerits is the Online
-  band, 22.
+Overflow providers get 3 × `BackfillTierOffset` added to their tier: 33 with
+today's default (model/egress_index.go:208).
+- The highest tier a main-pool provider can carry before client demerits is
+  the Online band, 22.
 - Connect adds at most `MaxClientTierDemerit` (7, :189), so 29.
-- 33 therefore keeps every requested-class entry ahead of every overflow entry
-  after demerits, as `BackfillTierOffset` does for borrowing.
+- 33 therefore keeps every main-pool entry ahead of every overflow entry after
+  demerits, as `BackfillTierOffset` does for borrowing.
 - Connect does not bound tiers.
 
 ## 7. Connect
@@ -782,27 +868,34 @@ that gather by IP version alone take the protocol as well.
 | Property | Value |
 |---|---|
 | Window type | `WindowTypeLimited` (3), beside quality (1) and speed (2) (connect/ip_remote_multi_client.go:99-120) |
-| Selectors | `{"ip": "ipv4", "protocol": "tcp"}`: class D only (§6.3) |
-| Rank mode | `speed` (open question Q3) |
+| Selectors | `{"ip": "ipv4", "protocol": "tcp"}`: the `tcp` classes C and D, never a `dualproto` provider (§6.3) |
+| Rank mode | the performance profile's (D10): auto uses `quality`, a fixed Quality profile `quality`, a fixed Speed profile `speed`. Read from the window's profile when each request is built; normal windows read their own type (connect/ip_remote_multi_client_family.go:448). |
 | `ip_family` | `v4-capable` |
 | Size setting | `MultiClientSettings.LimitedWindowSizeFraction`, default 0.5 |
 | Target | `max(1, floor(f × S))` for f > 0. S is the largest current target among the active normal windows, the `targetWindowSize` each window's resize pass computes (:14399-14425). In a fixed profile the inactive window's target is 0. f ≤ 0: no limited window. |
 | Hard max | `max(1, floor(f × the largest normal hard max))` |
 | Desktop auto | normal targets 6 (quality) and 1 (speed; max 2): S = 6, limited 3 |
-| Mobile auto | normal 4 and 1 (sdk/mobile_memory_policy.go:237-238): S = 4, limited 2 |
+| Mobile auto | normal 4 and 1 (sdk/mobile_memory_policy.go:237-238): S = 4, limited 2. If the memory gate fails, 1 (D11.5). |
+| Mobile memory gate | The steady-memory test of §9 decides. If the device stays within its 24 MiB target with the limited window at 2, mobile uses 2; otherwise the mobile policy sizes it at 1 (D11.5). Desktop is unaffected. |
 | Fixed profile of size N | `max(1, floor(N/2))` |
 | Fixed destination | none: the fixed exit carries every flow |
-| Fill and refill | its own `resize` loop (:13895) and `expand` (:14845), like a normal window. Each request carries `target_count` (its target) and `held_count` (its class-D clients). No IPv6 shortfall fill. |
-| No class-D supply | the window stays empty and costs nothing |
+| Fill and refill | its own `resize` loop (:13895) and `expand` (:14845), like a normal window. Each request carries `target_count` (its target), `held_count` (its `tcp` clients) and `dualstack_target_count` 0. There is no IPv6 need. |
+| No `tcp` supply | the window stays empty and costs nothing |
 | Old server (no echo) | the window does not fill |
-| Profile change | reset with the normal windows (`SetPerformanceProfile`, :3394) |
+| Profile change | Handled exactly like the normal windows. An equal profile is a no-op (:3403-3408). Otherwise `SetPerformanceProfile` (:3394-3430) installs the new profile on every window in `self.windows`, the limited window included (:13381-13400: it also forgets sticky and recent exits). `shuffle` then cancels every client (:16231-16238). Those clients' flows go through `removeClient` (:5718): QUIC flows are rebound to compatible candidates, and TCP flows are torn down. The resize loop refills under the new rank mode, with the target recomputed from the new active normal windows. |
 | Count | one per multi client |
 
 **Normal windows.**
 - Each request carries `select: {"ip": "dualstack", "protocol": "dualproto"}`
-  with `target_count` (the window's target) and `held_count` (its clients
-  labelled A) (D6.1). The `ip_family` filters and the v6 shortfall request are
-  unchanged (IPV6.md B1-B2).
+  (D6.1) with:
+  - `target_count`: the window's target;
+  - `held_count`: its clients labelled `dualproto`;
+  - `dualstack_target_count`: its IPv6 minimum (`WindowSizeMinIpv6Capable`:
+    quality 1, speed 0; connect/ip_remote_multi_client.go:232);
+  - `held_dualstack_count`: its clients labelled `dualstack` (D11.1).
+- In selector mode the main request carries the IPv6 need. The separate
+  `v6-capable` shortfall request (IPV6.md B1-B2) is therefore sent only to a
+  server that did not echo `select`.
 - The generator interface gains
   `NextDestinationsWithCapabilities(count, exclude, rankMode, ipFamily, select)`.
   `ApiMultiClientGenerator` implements it; a generator without it is called
@@ -819,14 +912,14 @@ that gather by IP version alone take the protocol as well.
   performance, same-network and scored placement.
 - The race dials every candidate in parallel and binds the lowest measured RTT
   (`MultiRaceClientCount` 0, :377-402). Limited clients therefore compete on
-  equal terms for the TCP/IPv4 flows they can carry.
+  equal terms for the TCP flows they can carry.
 - Under a degraded backend the race is bounded
   (`MultiRaceDegradedClientCount`), and the normal windows' candidates come
   first.
-- Class D can carry only TCP/IPv4 and ICMP/IPv4 (§7.2), so limited clients
-  never join a UDP or IPv6 race.
-- When the selected windows offer nothing compatible, a TCP/IPv4 flow races
-  the limited window alone.
+- Limited clients are `tcp` (classes C and D), so they never join a UDP race.
+  A class-C client also joins TCP/IPv6 races (§7.2).
+- When the selected windows offer nothing compatible, a TCP flow races the
+  limited window's compatible clients alone.
 
 ### 7.6 Auto, fixed profiles, rebind and donors
 
@@ -840,13 +933,15 @@ that gather by IP version alone take the protocol as well.
 
   - Today, non-443 UDP goes speed-first.
   - The limited window is merged into every list (§7.5).
-  - "Kept on quality" (D4) is read as quality first. The speed fallback is
-    limited to compatible (`dualproto`) clients, which removes the risk D4
-    names (open question Q4).
+  - D11.4 settles UDP: quality first, then speed's compatible (`dualproto`)
+    clients. It supersedes D4's "kept on quality not speed". Compatibility
+    filtering removes the risk D4 named.
 - **Fixed profiles:**
   - the active window carries every flow, compatible clients only;
-  - the limited window is merged;
+  - the limited window is merged, and requests the profile's rank mode
+    (D10);
   - the inactive window holds none.
+- **Auto:** the limited window requests `quality` (D10).
 - **Rebind** (`QuicRebindOnExitLoss`, :1531-1545): candidates come from every
   window. `carriesUpdates` (:6474-6481) admits only clients compatible with
   every rebound flow. A QUIC flow never moves to a `tcp` client, and TCP is
@@ -877,40 +972,63 @@ that gather by IP version alone take the protocol as well.
   - `UdpAvailable`, beside `Ipv6Available`;
   - `LimitedWindowSize`.
 - **Mobile memory policy** (sdk/mobile_memory_policy.go:544-558) keeps the
-  normal sizes. The limited window follows the fraction, giving 2 on mobile;
-  §9 gates the release on the steady-memory test.
+  normal sizes. The limited window follows the fraction, giving 2 on mobile.
+  If the steady-memory test fails, the policy sizes it at 1 (D11.5).
 - **Developer menu:** `LimitedWindowSizeFraction` is exposed beside the
   reliability controls (sdk/reliability_controls.go) for testing.
-- **No app API or UI change.** Auto stays the default
+- **Provider status (D11.6):**
+  - the sdk's `ProviderRankingNumber` (sdk/api.go:3360-3371) gains `Reason`;
+  - the Apple app shows it on its network-checks row (§5.5);
+  - Android already shows the server's explanation.
+
+  This is the only app change.
+- **No other app API or UI change.** Auto stays the default
   (sdk/device_local.go:9077-9078). Connected stays count-based on the normal
   windows (sdk/connect_view_controller.go:1215).
 
-### 7.9 Removing the local IPv6 downgrade (B5)
+### 7.9 The shipped local IPv6 downgrade (B5): open question Q8
 
-D7.5 forbids local capability state. These are removed, and IPV6.md B5 is
-marked superseded:
-- `maybeDowngradeIpv6` (connect/ip_remote_multi_client_family.go:68-85);
-- its trigger on the dial-failure path (connect/ip_remote_multi_client.go:10406-10407);
-- `noteIpFamilyDowngrade` (family.go:661-676);
-- the `ipFamilyDowngraded` latch (connect/ip_remote_multi_client.go:17253-17259);
-- `ipv6DialStarvedWithLock` (family.go:97-138).
+This design adds no local capability state (D7.5). Connect already ships one
+piece, the IPv6 local downgrade of IPV6.md B5: an exit whose IPv6 dials starve
+while IPv4 stays healthy is latched to v4-only for the life of the window. The
+owner has not said whether D7.5 retires it. Both options:
 
-`IpFamily()` (family.go:40-51) then returns the server's IP label. The
-version-split dial-strike record stays: ordinary starvation warnings read it.
+**Option A: retire B5.** Placement reads only the server's labels.
+- Removed:
+  - `maybeDowngradeIpv6` (connect/ip_remote_multi_client_family.go:68-85);
+  - its trigger on the dial-failure path (connect/ip_remote_multi_client.go:10406-10407);
+  - `noteIpFamilyDowngrade` (family.go:661-676);
+  - the `ipFamilyDowngraded` latch (connect/ip_remote_multi_client.go:17253-17259);
+  - `ipv6DialStarvedWithLock` (family.go:97-138).
+- `IpFamily()` (family.go:40-51) returns the server's IP label. The
+  version-split dial-strike record stays, because ordinary starvation
+  warnings read it.
+- IPV6.md B5 is marked superseded.
+- **Effect:** a dual-stack exit whose IPv6 breaks keeps getting IPv6 flows
+  until its label turns (§3.5). Applications fall back to IPv4 meanwhile.
+
+**Option B: keep B5 as shipped.** Nothing in B5 changes.
+- The IP label a placement reads is the server's label, lowered by B5's latch
+  where it fired. The latch only ever lowers `dualstack` to `ipv4`.
+- D7.5 then applies to new local state only. This design adds none, and in
+  particular no UDP downgrade.
+- **Effect:** IPv6 flows leave a starved exit within a session, as today.
+
+Every other part of this design works unchanged under either option.
 
 ### 7.10 Costs per device
 
 | | Desktop | Mobile |
 |---|---|---|
 | Window clients today | quality 6, speed 1 (max 2): 7-8 | quality 4, speed 1: 5 |
-| Limited window | 3 | 2 |
-| Window clients after | 10-11 (+38-43%) | 7 (+40%) |
-| Contracts | +3 per direction while the limited clients carry data. The wide race sends each cold-start TCP/IPv4 flow's first packet to them, so they open contracts early. | +2 |
-| Control plane | +3 client setups (auth and control registration) and continuous pings (`CPingRestTimeout` 10 s, `CPingMaxByteCountPerSecond` 32 KiB/s; connect/ip_remote_multi_client.go:255, 264) | +2 |
-| Memory | each client holds its own transport graph and buffers | the steady target of 24 MiB (sdk/mobile_memory_policy.go:14) was calibrated for 4 + 1 clients. Per-client buffers include a resend queue of 64-512 KiB and an unreliable flight of 128 KiB (:224-236). The limited window adds two. |
+| Limited window | 3 | 2, or 1 if the memory gate fails (D11.5) |
+| Window clients after | 10-11 (+38-43%) | 7 (+40%), or 6 (+20%) |
+| Contracts | +3 per direction while the limited clients carry data. The wide race sends each cold-start TCP flow's first packet to them, so they open contracts early. | +2 (or +1) |
+| Control plane | +3 client setups (auth and control registration) and continuous pings (`CPingRestTimeout` 10 s, `CPingMaxByteCountPerSecond` 32 KiB/s; connect/ip_remote_multi_client.go:255, 264) | +2 (or +1) |
+| Memory | each client holds its own transport graph and buffers | the steady target of 24 MiB (sdk/mobile_memory_policy.go:14) was calibrated for 4 + 1 clients. Per-client buffers include a resend queue of 64-512 KiB and an unreliable flight of 128 KiB (:224-236). The limited window adds two, or one if the gate fails (D11.5). |
 
-Race duplication: each cold-start TCP/IPv4 flow's first packet goes to up to 3
-more exits on desktop and 2 on mobile.
+Race duplication: each cold-start TCP flow's first packet goes to up to 3 more
+exits on desktop and 2 (or 1) on mobile.
 
 ## 8. Metrics, dashboards, alerts, measures
 
@@ -921,8 +1039,9 @@ more exits on desktop and 2 on mobile.
 | `urnetwork_egress_url_failed_later_legs_total` | `legs` = `v4udp`, `v6tcp`, `v6udp`, `v4udp_v6tcp`, `v4udp_v6udp` | ingest | urnetwork / provider quality probes |
 | `urnetwork_stats_provider_egress_capability` | `bucket` (quality, speed, online), `ip`, `protocol` | stats collector, classified decision | urnetwork / providers |
 | `urnetwork_findproviders2_select_requests_total` | `rank_mode`, `ip`, `protocol` | FP2 | urnetwork / providers |
-| `urnetwork_findproviders2_select_answered_total` | `rank_mode`, `overflow_step` (0-3), `ip`, `protocol` | FP2 | urnetwork / providers |
-| `urnetwork_findproviders2_select_overflow_total` | `rank_mode`, `overflow_step` (1-3): requests that reached the step | FP2 | urnetwork / providers |
+| `urnetwork_findproviders2_select_answered_total` | `rank_mode`, `overflow_step` (0 or 1), `ip`, `protocol` | FP2 | urnetwork / providers |
+| `urnetwork_findproviders2_select_overflow_total` | `rank_mode`: requests given `tcp` overflow | FP2 | urnetwork / providers |
+| `urnetwork_findproviders2_select_ipv6_need_total` | `rank_mode`, `outcome` (`met`, `short`): requests with an IPv6 need, and whether the answer met it (D11.1) | FP2 | urnetwork / providers |
 
 `urnetwork_stats_provider_egress_index` and `urnetwork_stats_provider_excluded`
 keep the strict decision, unchanged (controller/stats_collector.go:80-86).
@@ -996,7 +1115,8 @@ all):
   - Online rises from 30.3k to 50.5k at the ratio level, about 44.5k after
     the gates (88%).
   - They reach users through:
-    - the limited windows: 3 per desktop device, 2 per mobile device;
+    - the limited windows: 3 per desktop device, 2 per mobile device (1 if
+      the memory gate fails);
     - the normal windows, when a location has fewer `dualproto` providers
       than a window's target.
 - **IP axis.** 2 providers return. Its value is correct IPv6 placement, not
@@ -1059,12 +1179,20 @@ all):
 - **Legacy mode:** byte-identical answers (golden, every rank mode,
   `force_minimum`, `ip_family`, `strict` with fallback).
 - **Selector mode:**
-  - order A → B → C → D;
-  - "enough" at `target_count − 1`, `target_count` and `target_count + 1`,
-    with `held_count`;
-  - the ceiling (D returns only D);
-  - labels and `overflow_step` on every entry, and the tier offsets;
-  - each 400;
+  - **the IPv6 need (D11.1):**
+    - `dualstack_target_count` 1 with `held_dualstack_count` 0 and 1;
+    - A eligible; A absent with C eligible, which is given as overflow;
+      neither;
+  - **the main pool:** A and B draw together, with no A preference beyond the
+    need;
+  - **overflow only when `held_count` plus the eligible main candidates is
+    below `target_count` (D11.2):** at `target_count − 1`, `target_count` and
+    `target_count + 1`, and with exclusions depleting the pool;
+  - **the ceiling:** a `tcp` request never gets a `dualproto` provider; the
+    limited window's request gets C and D;
+  - labels on every entry; `overflow_step` 1 and tier +33 on overflow entries
+    only;
+  - each 400, including the two IPv6-need fields;
   - `force_minimum`;
   - named providers labelled from the sets;
   - `ip_family` v6-capable gives A and C;
@@ -1072,6 +1200,12 @@ all):
   - skipped downgraded records in today's facets;
   - the location fallback climbs only when every class is empty;
   - a cache from before the export yields A and B only.
+
+**Provider status (D11.6):**
+- `reason` and the explanation sentence for `tcp`, for `ipv4`, for both and
+  for neither, with the counts;
+- `url_checks` value, count, total and `passes` are unchanged;
+- Android shows the explanation; the Apple row shows `reason`.
 
 **Compatibility matrix, one test per cell (§5.4):**
 - old request on the new server is byte-identical;
@@ -1092,21 +1226,43 @@ all):
   - a fixed destination gives none;
   - f ≤ 0 gives none;
   - the hard max;
-- the limited window's request (selectors, rank mode, target and held
-  counts);
-- the merged race: compatible limited clients join TCP/IPv4 races only, and
-  the degraded-backend order;
+- the limited window's request: selectors, target and held counts, and
+  `dualstack_target_count` 0;
+- normal windows' requests: `dualstack_target_count` 1 (quality) and 0
+  (speed), with the held counts; the `v6-capable` shortfall request goes only
+  to a server without the echo;
+- the limited window's rank mode, one case per profile (D10):
+  - auto requests `quality`;
+  - fixed Quality requests `quality`;
+  - fixed Speed requests `speed`;
+- a profile switch while connected, for auto → fixed Speed, fixed Speed →
+  auto, and fixed Quality → fixed Speed:
+  - the limited window's clients are cancelled with the normal windows';
+  - QUIC flows are rebound and TCP flows torn down, as in `removeClient`;
+  - the next requests carry the new rank mode;
+  - the target is recomputed;
+  - an equal profile changes nothing;
+- the merged race: compatible limited clients join TCP races only, IPv6 ones
+  only when labelled `dualstack`; and the degraded-backend order;
 - auto: UDP tries quality, then speed's compatible clients;
 - no compatible client: UDP gets port unreachable after formation and waits
   during formation; B6 reads labels;
 - old-server detection;
-- B5 code removed: no capability changes after dial strikes.
+- B5, per the answer to Q8:
+  - under option A, no capability change after dial strikes;
+  - under option B, B5's latch lowers a `dualstack` label, and the exit then
+    gets no IPv6 flow.
 
 **sdk:**
 - the window status fields;
-- the mobile policy's limited window of 2;
+- the mobile policy's limited window: 2, or 1 when the memory gate fails
+  (D11.5);
 - a steady-memory measurement on iOS and Android with all windows filled,
-  against the 24 MiB target. This gates the client release.
+  against the 24 MiB target:
+  - it runs with the limited window at 2;
+  - if that exceeds the target, it runs again at 1, which then ships
+    (D11.5);
+  - this gates the client release.
 
 **Integration:**
 - A local provider with UDP blocked is labelled `tcp`. It lands in the
@@ -1128,16 +1284,21 @@ inert for them.
 |---|---|---|---|
 | 1 | `db migrate` (§4.1) | any server build with this change (readiness) | none needed: the column is unused by older builds and stays |
 | 2 | taskworker: ingest writes the mask; the export classifies and writes the capability facets, the native capability snapshot and the sets; stats gauges | step 3 for full value (not required for safety) | previous build. Capability keys expire with the export TTL (300 min); legacy keys are unchanged throughout. |
-| 3 | api, alt and the proxy service's server side: selector mode | the client release | previous build: new clients see an old server (§5.4) |
+| 3 | api, alt and the proxy service's server side: selector mode and the provider status reason (D11.6) | the client release | previous build: new clients see an old server (§5.4) |
 | 4 | proxy service with the new connect and sdk (hosted devices) | the app release, as the first fleet measurement of §8.2 | previous proxy build |
-| 5 | apps through the nightly | none | the previous release |
+| 5 | apps through the nightly: the memory gate decides the mobile limited size (D11.5); the Apple status row shows the reason (D11.6); a /mainnet note goes out with it (D11.7) | none | the previous release |
 
 - **Measure between steps 2 and 3.** Watch Redis memory for `cs_` keys,
   export duration, and the new gauges filling over 8 hours.
 - **The client settings** `LimitedWindowSizeFraction` (0.5; 0 turns the
   window off) and the selectors are compiled defaults. They are exposed in the
   developer menu for testing; a production change is a release.
-- **IPV6.md** gets a note that B5 is superseded by this document.
+- **IPV6.md B5:** marked superseded under option A of Q8; unchanged under
+  option B.
+- **The /mainnet note (D11.7)** goes on the /mainnet timeline when step 5
+  ships. It says that providers whose builds do not route UDP, or whose IPv6
+  fails, are offered for the traffic they can carry, and that SN25 scoring is
+  unchanged.
 
 ## 11. Risks and open questions
 
@@ -1145,49 +1306,28 @@ inert for them.
 
 | Risk | Mitigation |
 |---|---|
-| **Dual-stack concentration.** With "enough" measured against the window's target (D7.3), every normal window draws only class A wherever A fills it: us (108 of 20,991 hard-gate providers), hk, se, sg, gb, de, jp and tw. | open question Q1 |
-| **Mobile memory.** Two more window clients against a 24 MiB target calibrated for 5. | the §9 memory gate; open question Q5 |
+| **Dual-stack concentration.** Measuring "enough" on the IP axis against the window's target would draw every window from class A wherever A fills it: us has 108 dual-stack providers of 20,991 on the hard gate. | Resolved by D11.1. The IPv6 need takes one dual-stack client per quality window, as today's soft minimum does, and A and B then draw together (§6.3). |
+| **Mobile memory.** Two more window clients against a 24 MiB target calibrated for 5. | The §9 memory gate. If it fails, mobile uses 1 (D11.5). |
 | **Platform load.** 3-4 more clients per device: setups, pings, contracts and race duplicates. | measure on the proxy fleet first (step 4) |
 | **Label lag without local downgrade (D7.5).** A provider that loses UDP keeps `dualproto` for a few hours, and its UDP flows stall until then. | The wide race hedges cold starts, and apps fall back from QUIC to TCP. |
-| **IPv6 without B5.** A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns. | dual-stack is about 1% of supply; same hedges as above |
+| **IPv6 without B5** (option A of Q8 only). A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns. | Dual-stack is about 1% of supply; applications fall back to IPv4. |
 | **Export cost.** About 75% more union pages. | measured at step 2; capability keys can be dropped by rollback |
 
 ### Open questions
 
-Each question comes with a recommendation.
+Q1-Q7 are decided (D10 and D11). One question remains.
 
-1. **Q1. IP axis "enough".**
-   - *Question:* should the IP axis count as enough once the answer holds the
-     window's IPv6 minimum (1, `WindowSizeMinIpv6Capable`), and only the
-     protocol axis use the window's target?
-   - *Recommendation:* yes.
-   - *Why:* today a window keeps one IPv6-capable exit, and IPv6 flows need no
-     more. Under D7.3 as written, US windows would draw from 108 providers
-     instead of about 21,000.
-   - *Effect:* order and labels unchanged; A and B are drawn together once
-     one A is in hand.
-2. **Q2. "Matching providers in the location" (D7.3).**
-   - *Question:* should it be counted as the window's held clients of the
-     class plus the candidates the request can still use (§6.3)?
-   - *Recommendation:* yes.
-   - *Why:* a raw location count would refuse to overflow while exclusions
-     leave the window short.
-3. **Q3. The limited window's rank mode.**
-   - *Recommendation:* `speed`, which holds most class-D natives. It still
-     borrows class-D Quality natives and Online members.
-4. **Q4. UDP in auto.**
-   - *Question:* quality first, then speed's compatible clients (this
-     design), or quality only (D4's words)?
-   - *Recommendation:* quality first, then speed's compatible clients.
-   - *Why:* compatibility filtering removes the risk D4 names. Quality-only
-     would turn a quality-window outage into UDP no-route.
-5. **Q5. Mobile size if the memory gate fails.**
-   - *Recommendation:* let the mobile policy size the limited window at 1,
-     keeping D8 everywhere else.
-6. **Q6. Provider status.**
-   - *Question:* should a downgraded provider be told why ("UDP is not routed
-     by this build")?
-   - *Recommendation:* yes. Fork and July-build operators can then fix it.
-7. **Q7. /mainnet note.**
-   - *Recommendation:* yes, when step 5 ships. SN25 is unchanged, but
-     downgraded providers regain traffic and earnings.
+- **Q8. Does D7.5 retire the shipped IPv6 local downgrade (B5)?**
+  - *Options:* §7.9 sets out both.
+    - **A, retire it:** placement reads only the server's labels. IPv6 flows
+      to a dual-stack exit whose IPv6 broke continue until its label turns,
+      typically within a few hours (§3.5).
+    - **B, keep it as shipped:** B5's latch may lower a `dualstack` label for
+      the life of a window. D7.5 covers new local state only.
+  - *What changes:* option A removes the five B5 pieces listed in §7.9, its
+    tests and the IPV6.md B5 text. Option B changes nothing in B5, and adds
+    one test that the latch composes with the labels.
+  - *Recommendation:* A. The owner's reason for D7.5 ("impossible to tell
+    per-flow failures from provider failures") applies to B5's dial-strike
+    inference too. A gives placement one source of truth, and the supply it
+    touches is about 1%.
