@@ -11494,4 +11494,14 @@ var migrations = []any{
 	// when absent, under a five-second lock bound. Nothing existing is
 	// rewritten. Apply before deploying the taskworker and api that read them.
 	stLedgerV2ExtenderMigration,
+
+	// Capability-aware FindProviders2's URL evidence
+	// (db_provider_egress_fp2_evidence.go, FP2-PROTOCOL.md §4.1, §12.3): two
+	// constant-default smallint columns on the partitioned URL history, the
+	// failed later legs judged the provider's and the post-quantum outcome,
+	// added only when absent under a five-second lock bound. A catalog change
+	// only: nothing is rewritten or scanned, and every outcome stored before
+	// it reads 0. Apply before deploying the taskworker, api and alt that use
+	// them.
+	providerEgressFp2EvidenceMigration,
 }

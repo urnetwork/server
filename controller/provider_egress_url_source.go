@@ -209,6 +209,64 @@ func recordProviderEgressUrlOutcome(health *model.ProviderEgressHealth, stored m
 			providerEgressUrlIpv6VerdictsTotal.WithLabelValues(model.ProviderEgressIpv6PlaceUdp, leg.H3.Verdict).Inc()
 		}
 	}
+	if mask := stored.FailedLaterLegs; mask != 0 {
+		// the stored mask's legs, in bit order: v4udp, v6tcp, v6udp
+		legs := []string{}
+		for _, bit := range providerEgressUrlFailedLaterLegBits {
+			if mask&bit.mask != 0 {
+				legs = append(legs, bit.label)
+			}
+		}
+		providerEgressUrlFailedLaterLegsTotal.WithLabelValues(strings.Join(legs, "_")).Inc()
+	}
+	if health.UrlProbeEvidence.E2e != nil {
+		pq := egresshealth.UrlProbePqUnmeasured
+		switch stored.PqOutcome {
+		case egresshealth.UrlProbePqOutcomePositive:
+			pq = egresshealth.UrlProbePqPositive
+		case egresshealth.UrlProbePqOutcomeNegative:
+			pq = egresshealth.UrlProbePqNegative
+		}
+		providerEgressUrlPqOutcomesTotal.WithLabelValues(pq).Inc()
+	}
+}
+
+// Each failed later leg's bit and its label in the failed later legs counter.
+var providerEgressUrlFailedLaterLegBits = []struct {
+	mask  int16
+	label string
+}{
+	{mask: egresshealth.UrlProbeFailedLaterLegIpv4Udp, label: "v4udp"},
+	{mask: egresshealth.UrlProbeFailedLaterLegIpv6Tcp, label: "v6tcp"},
+	{mask: egresshealth.UrlProbeFailedLaterLegIpv6Udp, label: "v6udp"},
+}
+
+// The stored failed outcomes whose later legs the ingest judged the
+// provider's (FP2-PROTOCOL.md §3.2, §4.1).
+var providerEgressUrlFailedLaterLegsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_url",
+	Name:      "failed_later_legs_total",
+	Help:      "Stored URL outcomes that failed only on later legs the ingest's place verdict held against the provider, by the legs (failed_later_legs mask): v4udp, the IPv4 HTTP/3 leg was silent; v6tcp, the IPv6 HTTPS leg failed; v6udp, the IPv6 HTTP/3 leg was silent; v4udp_v6tcp and v4udp_v6udp, both. Each is negative evidence on the protocol axis (udp) or the IP axis (v6tcp), which capability-aware FindProviders2 classifies on instead of excluding",
+}, []string{"legs"})
+
+// The post-quantum outcomes of stored URL turns that opened an end-to-end
+// session (FP2-PROTOCOL.md §12.3).
+var providerEgressUrlPqOutcomesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_url",
+	Name:      "pq_outcomes_total",
+	Help:      "Stored URL outcomes of post-quantum turns, by the pq_outcome the store kept: positive, the session negotiated a post-quantum group, sealed before the IPv4 HTTPS leg's request and carried that passed leg; negative, a classical group, a post-quantum session unsealed by the run's end, or no responder for a whole establishment window; unmeasured, anything else, a security recheck or an outcome on probation included. Strict post-quantum selection needs a positive outcome in the eight-hour window",
+}, []string{"pq"})
+
+func init() {
+	for _, legs := range []string{"v4udp", "v6tcp", "v6udp", "v4udp_v6tcp", "v4udp_v6udp"} {
+		providerEgressUrlFailedLaterLegsTotal.WithLabelValues(legs)
+	}
+	for _, pq := range []string{egresshealth.UrlProbePqPositive, egresshealth.UrlProbePqNegative, egresshealth.UrlProbePqUnmeasured} {
+		providerEgressUrlPqOutcomesTotal.WithLabelValues(pq)
+	}
+	prometheus.MustRegister(providerEgressUrlFailedLaterLegsTotal, providerEgressUrlPqOutcomesTotal)
 }
 
 // The place verdicts of stored failed IPv6 legs (model.JudgeProviderEgressLegs).
