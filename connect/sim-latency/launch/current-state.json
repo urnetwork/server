@@ -1,6 +1,19 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T03:55:44Z",
+  "observed_at": "2026-11-12T04:18:00Z",
+  "latest_epoch2_receive_cleanup_qualified": {
+    "evidence": "EPOCH2-RECEIVE-CLEANUP-QUALIFICATION-2026-11-12.json",
+    "source_commit": "698d94c44a0c148af0dfff119020c76dcd0a7444",
+    "ordinary_passed": 147,
+    "race_passed": 147,
+    "failures": 0,
+    "behavioral_negative_control_caught_original_leak": true,
+    "source_workspace_and_external_dependencies_unchanged": true,
+    "all_resource_guards_passed": true,
+    "deployed": false,
+    "running_worker_source_unchanged": "68817f6d3ea96b7a8179c7af63808d504560af32",
+    "next_action": "Merge and push the qualified source and evidence. Do not activate it or the staged heartbeat worker during active attempts. Requested claim-only maintenance approval remains pending; otherwise use the existing empty-queue maintenance boundary. Two old infrastructure failures still need separately authorized controlled recovery. Earlier entries are historical snapshots."
+  },
   "receive_cleanup_qualification": {
     "source_commit": "02e4ed3a8c24ee23c78601663d351b908eecd683",
     "source_worktree": "/home/by/urnetwork/temp/competition-receive-owned-cleanup-20261112",
