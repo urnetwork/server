@@ -175,7 +175,7 @@ func cloneCompetitionHeartbeatOwnerDatabase(original *competitionHeartbeatDataba
 		return nil, false
 	}
 	if len(original.Statements) > int(competitionHeartbeatDatabaseStepCount)*3 ||
-		original.SqlShape != "" && original.SqlShape != competitionHeartbeatLegacySlotShape {
+		original.SqlShape != "" && original.SqlShape != competitionHeartbeatLegacySlotShape && original.SqlShape != competitionHeartbeatScopeLockShape && original.SqlShape != competitionHeartbeatDistributedSlotShape {
 		return nil, true
 	}
 	validBudget := func(value server.DbContextBudget) bool {

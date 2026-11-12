@@ -99,15 +99,19 @@ func retryCompetitionJobHeartbeatOperation(ctx context.Context, jobExpiresAt, ho
 func retryCompetitionJobHeartbeatOperationObserved(ctx context.Context, jobExpiresAt, hostExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error, observation *competitionHeartbeatOwnerObservation) (time.Time, error) {
 	proof := competitionHeartbeatUnadmittedDeadline
 	expiresAt := jobExpiresAt
+	var continuation *competitionAuthorityLockContinuation
 	if !jobExpiresAt.IsZero() && !hostExpiresAt.IsZero() {
 		if hostExpiresAt.Before(expiresAt) {
 			expiresAt = hostExpiresAt
 		}
 		proof = func(err error) bool {
-			return competitionHeartbeatUnadmittedDeadline(err) || competitionHeartbeatSlotUpdateDeadline(err) || competitionHeartbeatJobLockDeadline(err)
+			return competitionHeartbeatUnadmittedDeadline(err) || competitionHeartbeatSlotUpdateDeadline(err) || competitionHeartbeatJobLockDeadline(err) || competitionHeartbeatDistributedSlotUpdateDeadline(err)
+		}
+		if settings.ScopeLockMaximumAttempts > settings.LeaseRetry.MaximumAttempts {
+			continuation = &competitionAuthorityLockContinuation{MaximumAttempts: settings.ScopeLockMaximumAttempts, Completed: competitionHeartbeatScopeLockTimeout}
 		}
 	}
-	return retryCompetitionHeartbeatWithProofObserved(ctx, expiresAt, settings, operation, proof, observation)
+	return retryCompetitionHeartbeatWithLockContinuation(ctx, expiresAt, settings, operation, proof, observation, continuation)
 }
 
 // Only the job adapter above broadens its own predicate. Supervisor/host
@@ -118,9 +122,14 @@ func retryCompetitionHeartbeatWithProof(ctx context.Context, leaseExpiresAt time
 
 // Neither observation nor completed-store capture can wrap a predicate input.
 func retryCompetitionHeartbeatWithProofObserved(ctx context.Context, leaseExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error, proof func(error) bool, observation *competitionHeartbeatOwnerObservation) (time.Time, error) {
+	return retryCompetitionHeartbeatWithLockContinuation(ctx, leaseExpiresAt, settings, operation, proof, observation, nil)
+}
+
+// Only the exact job adapter opts into the scoped first-lock continuation.
+func retryCompetitionHeartbeatWithLockContinuation(ctx context.Context, leaseExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error, proof func(error) bool, observation *competitionHeartbeatOwnerObservation, continuation *competitionAuthorityLockContinuation) (time.Time, error) {
 	policy := competitionSupervisorRenewalSettings{Timeout: settings.AcquireRetry.Timeout, AttemptTimeout: settings.AcquireRetry.AttemptTimeout, LockRetry: settings.LeaseRetry}
 	var acknowledgedStart time.Time
-	err := retryCompetitionAuthorityRenewalObserved(ctx, leaseExpiresAt, policy, func(attemptCtx context.Context) error {
+	err := retryCompetitionAuthorityRenewalWithLockContinuation(ctx, leaseExpiresAt, policy, func(attemptCtx context.Context) error {
 		now := settings.LeaseRetry.Now
 		if now == nil {
 			now = server.NowUtc
@@ -139,7 +148,7 @@ func retryCompetitionHeartbeatWithProofObserved(ctx context.Context, leaseExpire
 			acknowledgedStart = startedAt
 		}
 		return err
-	}, proof, observation)
+	}, proof, observation, continuation)
 	if err != nil {
 		return time.Time{}, err
 	}

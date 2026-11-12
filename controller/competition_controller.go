@@ -6389,8 +6389,11 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, workerId string, jobId server.Id) error {
 	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
 	return captureCompetitionHeartbeatDatabase(ctx, func(observation *competitionHeartbeatDatabaseObservation) {
-		if settings.AutomationPolicy.Enabled && settings.automationLease != nil && !competitionDistributedEnabled(settings) && self.beforeLeaseRowLockForTest == nil {
+		if settings.AutomationPolicy.Enabled && settings.automationLease != nil && self.beforeLeaseRowLockForTest == nil {
 			observation.sqlShape, observation.sqlValid = competitionHeartbeatLegacySlotShape, true
+			if competitionDistributedEnabled(settings) {
+				observation.sqlShape = competitionHeartbeatDistributedSlotShape
+			}
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			tx = observation.beginCallback(tx)
