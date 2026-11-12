@@ -48,7 +48,22 @@
     "program_bytes": 4521075,
     "logical_predicates_removed": 0
   },
-  "remaining_work": "Repeat critical ordinary qualification; correct the adjacent public-column parity fixture's direct unmarked full-query route before broader migration tests; complete broader ordinary and race checks, then qualify final integration and deployment.",
+  "critical_ordinary_repeat": {
+    "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+    "private_evidence_directory": "/var/lib/urnetwork/competition-bounded-census-repeat-20261112.YjgQTSn4",
+    "count": 3,
+    "distinct_tests": 18,
+    "passed": 54,
+    "failed": 0,
+    "skipped": 0,
+    "exit_status": 0,
+    "log_sha256": "20cb9b3c46dee602899abca1cf64d6b68859eda0043d9a89d5ed725723b80e99",
+    "postgres_peak_memory_bytes": 388231168,
+    "postgres_oom_killed": false,
+    "source_and_dependencies_unchanged": true,
+    "owned_fixtures_cleaned_up": true
+  },
+  "remaining_work": "Correct the adjacent public-column parity fixture's direct unmarked full-query route before broader migration tests; complete broader ordinary and race checks, then qualify final origin-first/local-recovery-last integration and deployment.",
   "full_qualification_complete": false,
   "race_started": false,
   "main_feature_merge_or_deployment_performed": false,
