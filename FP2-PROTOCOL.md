@@ -6,10 +6,10 @@ Design for peer review. Nothing here is built yet.
 |---|---|
 | Status | Ready for peer review: all owner decisions recorded. |
 | Date | 2026-11-12 |
-| Server | origin/main b8e99de07; every server file cited is identical at cbb7d7306 |
+| Server | origin/main 017d11630; every server file cited is identical at cbb7d7306 |
 | Connect | origin/main fc949b78 |
-| SDK | origin/main 447ed899 |
-| Apps | apple origin/main 4254667d; android origin/main 1820ea290 (§5.5 only) |
+| SDK | origin/main b5395b2d; every sdk file cited is identical at 447ed899 |
+| Apps | apple origin/main 6c8daad4, android origin/main eebb05181 (§5.5 only); the files cited are identical at 4254667d and 1820ea290 |
 
 References are `path:line` at those commits. Paths without a repo prefix are
 in the server repo; `connect/`, `sdk/`, `apple/` and `android/` name the
@@ -35,6 +35,8 @@ other repos.
 | IPv6 need | how many `dualstack` clients a window still wants: its IPv6 minimum less those it holds (D11.1, §6.3) |
 | overflow | `tcp` providers given to a `dualproto` request that the requested protocol cannot fill (§6.3) |
 | compatible | a window client whose labels can carry a flow (§7.2) |
+| strict PQ | a request with `post_quantum_encryption` or `require_modern_provider` set (§12.4) |
+| PQ-positive | a provider whose newest post-quantum outcome in the 8-hour window is positive (§12.4) |
 
 ## 1. Summary, goals, non-goals
 
@@ -68,6 +70,9 @@ other repos.
 - The provider status tells a downgraded provider why (D11.6).
 - Connect's shipped local IPv6 downgrade (B5) is retired. Placement uses
   only the server's labels on both axes (D11.8).
+- Strict post-quantum (PQ) requests match only providers the quality probe has
+  seen seal a PQ session within the last 8 hours. Neither a provider's
+  declaration nor the capability probe qualifies any more (D12, §12).
 
 **Goals.**
 1. Bring the providers that pass everything but UDP (about 20,700 on Main on
@@ -89,6 +94,8 @@ other repos.
   not change; the record line the monitor parses (monitor/tailer.go:1222-1250)
   is unchanged.
 - **No new provider.yml knobs, and no off-by-default settings.**
+- **No new window for post-quantum** (D12.3). Every window uses the current PQ
+  setting.
 - **No change to the location list counts, the location stables or the apps'
   Connected status.** They keep reading the strict decision.
 - **Out of scope for v1:**
@@ -125,6 +132,10 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D11.6 (Q6) | the provider status tells a downgraded provider why | accepted | §5.5, §7.8 |
 | D11.7 (Q7) | a /mainnet note when the apps ship | accepted | §10 |
 | D11.8 (Q8) | D7.5 also retires connect's shipped IPv6 local downgrade (B5): placement uses only the server's labels on both axes | "a retire it accepted" | §1, §7.1-7.3, §7.9, §9, §10, §11 |
+| D12.1 | the quality probe, not the capability probe, confirms post-quantum: every URL probe tunnel runs the PQ end-to-end session, and each run records a positive or negative PQ outcome | "I think the main change is using the quality probe to confirm that post quantum works, instead of the capability probe." | §12.2-12.3 |
+| D12.2 | strict PQ requires a positive signal. "No negative measurement means capable" (D7.4) does not apply to PQ, and a declaration alone no longer qualifies. | "We should require positive signal for any provider that gets matched to a strict post quantum criteria." | §12.4 |
+| D12.3 | no new window: every window, the limited one included, uses the current PQ setting, and a toggle regenerates them all. Overflow never relaxes PQ. | "we already added postquantum as a selection criteria to fp2. when postquantum is enabled/disabled, the entire multi windows are regenerated. We should make sure to the use current post quantum setting on all window selection. We do not need a new window." | §12.5 |
+| D12.4 | 7918 (connect#220) is solved by strict selection with the positive signal; its fail-fast, cache and field-measurement options are not needed | "With the strong fp2 post quantum filter and quality probe positive signal, i think 7918 is solved by the multi client requiring a strong multi client selection when post quantum is enabled." | §12.7 |
 
 D11.8 applies D7.5 to the shipped IPv6 local downgrade (B5) too: it is
 retired (§7.9). No owner question is open.
@@ -316,10 +327,14 @@ only by class D, and both booleans would read false for it.
 ```sql
 SET LOCAL lock_timeout = '5s';
 ALTER TABLE provider_egress_health_history
-    ADD COLUMN IF NOT EXISTS failed_later_legs smallint NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS failed_later_legs smallint NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS pq_outcome smallint NOT NULL DEFAULT 0;
 ```
 
-- **The bits:**
+- **`pq_outcome`** is the run's post-quantum outcome: 0 unmeasured, 1
+  positive, 2 negative (§12.3). It is added by the same statement and costs the
+  same.
+- **The bits** of `failed_later_legs`:
   - 1: IPv4 HTTP/3 silent, judged `provider`;
   - 2: IPv6 HTTPS failed, judged `provider`;
   - 4: IPv6 HTTP/3 silent, judged `provider`.
@@ -622,6 +637,17 @@ of a rolling deploy.
 
 **Hosted devices.** The proxy service runs one build of the server and the
 sdk, so its devices are always in a same-version cell.
+
+**Post-quantum (D12).** `post_quantum_encryption` and `require_modern_provider`
+already exist on every server, so no field is new. Only their meaning changes,
+from declared or capability-probed to measured by the quality probe (§12.4):
+
+| | Old server | New server, before `client_score_post_quantum_v1_ready` | New server, after it |
+|---|---|---|---|
+| Any client sending either field | today's meaning | today's meaning | PQ-positive providers only |
+| Any client sending neither | unchanged | unchanged | unchanged |
+
+No client change is needed.
 
 ### 5.5 Provider status (D11.6)
 
@@ -1048,6 +1074,19 @@ exits on desktop and 2 (or 1) on mobile.
 | `urnetwork_findproviders2_select_overflow_total` | `rank_mode`: requests given `tcp` overflow | FP2 | urnetwork / providers |
 | `urnetwork_findproviders2_select_ipv6_need_total` | `rank_mode`, `outcome` (`met`, `short`): requests with an IPv6 need, and whether the answer met it (D11.1) | FP2 | urnetwork / providers |
 
+**Post-quantum (D12):**
+
+| Metric | Labels | Source | Dashboard |
+|---|---|---|---|
+| `urnetwork_url_probe_e2e_outcomes_total` | `pq` (`positive`, `negative`, `unmeasured`) | taskworker prober | urnetwork / provider quality probes |
+| `urnetwork_egress_url_pq_outcomes_total` | `pq` | ingest | urnetwork / provider quality probes |
+| `urnetwork_stats_provider_post_quantum` | `bucket`, `signal` (`positive`, `negative`, `none`) | stats collector | urnetwork / providers |
+| `urnetwork_findproviders2_post_quantum_requests_total` | `field` (`post_quantum_encryption`, `require_modern_provider`) | FP2 | urnetwork / providers |
+
+The capability probe's metrics (capprobe/metrics.go) retire with it. Its
+dashboard, "capability-probes", is replaced by the URL-probe PQ panels, and
+its ./grafana tests move to them.
+
 `urnetwork_stats_provider_egress_index` and `urnetwork_stats_provider_excluded`
 keep the strict decision, unchanged (controller/stats_collector.go:80-86).
 
@@ -1290,6 +1329,37 @@ all):
   no IPv6 flow. Use the local provider harness of `TestH3LegThroughALocalProvider`
   and `TestIpv6LegsThroughALocalDualStackProvider`.
 
+**Post-quantum (D12):**
+- **Prober:**
+  - a local PQ provider gives `positive`;
+  - a provider that negotiates a classical group gives `negative`;
+  - a provider without the responder gives `unmeasured` within a short turn,
+    and `negative` after a whole establishment window;
+  - each one's URL outcome is identical with PQ on and off, so PQ never fails
+    a URL run;
+  - the seal wait is bounded and counted in the run budget.
+- **Ingest:**
+  - a prober cannot claim `positive` without a post-quantum key exchange and a
+    passed IPv4 HTTPS leg;
+  - `pq_outcome` is stored, and rechecks and probation runs store 0;
+  - modern evidence is recorded.
+- **Aggregate:** latest wins between positive and negative; no outcome means
+  not PQ-positive.
+- **FP2:**
+  - both fields keep only PQ-positive providers in every draw, named
+    providers included;
+  - a declared but unmeasured provider is left out;
+  - a network-only provider is left out;
+  - selector mode's phases and overflow never add a non-positive provider;
+  - before the ready marker the old sources answer, and after it the measured
+    signal.
+- **connect:**
+  - a PQ toggle regenerates every window, the limited one included;
+  - every request, the limited window's included, carries
+    `require_modern_provider`;
+  - every window client, limited ones included, runs
+    `EncryptionModeRequired`.
+
 **Merge set:** the server's model and controller DB tests, the ./grafana
 tests and `TestEveryAlertClassIsClassified`.
 
@@ -1307,6 +1377,19 @@ inert for them.
 | 4 | proxy service with the new connect and sdk (hosted devices), B5's retirement included (D11.8) | the app release, as the first fleet measurement of §8.2 | previous proxy build |
 | 5 | apps through the nightly, B5's retirement included (D11.8): the memory gate decides the mobile limited size (D11.5); the Apple status row shows the reason (D11.6); a /mainnet note goes out with it (D11.7) | none | the previous release |
 
+- **Post-quantum (D12).** It rides the same steps:
+  - **Step 1:** the migration adds `pq_outcome`.
+  - **Step 2:** the taskworker's URL prober opens the PQ session in every
+    tunnel, and the ingest stores `pq_outcome` and the modern evidence. The
+    export stamps `PostQuantumPositive` and publishes the sets. 8 hours after
+    the PQ-measuring prober started, a full evidence window, the export marks
+    `client_score_post_quantum_v1_ready`.
+  - **Step 3:** api, alt and the proxy use the measured signal once the marker
+    is set, and today's sources until then.
+  - **The capability probe** is switched off (`capability_probe.yml`
+    `enabled: false`) one day after step 3, and its code is deleted in the
+    next release.
+  - **Connect and sdk** need no change for PQ (§12.5).
 - **Measure between steps 2 and 3.** Watch Redis memory for `cs_` keys,
   export duration, and the new gauges filling over 8 hours.
 - **The client settings** `LimitedWindowSizeFraction` (0.5; 0 turns the
@@ -1331,7 +1414,221 @@ inert for them.
 | **Label lag without local downgrade (D7.5).** A provider that loses UDP keeps `dualproto` for a few hours, and its UDP flows stall until then. | The wide race hedges cold starts, and apps fall back from QUIC to TCP. |
 | **IPv6 without B5 (D11.8).** A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns, typically a few hours (§3.5). | Only dual-stack providers are concerned, about 1% of supply. Applications fall back to IPv4, and B6's no-route still answers when no `dualstack` client exists. |
 | **Export cost.** About 75% more union pages. | measured at step 2; capability keys can be dropped by rollback |
+| **Network-only providers under strict PQ** (D12.2). The URL probe cannot reach a provider that holds only a Network key, so it never has a positive signal, and a strict-PQ request no longer matches it. | This follows D12.2 ("any provider"). Such providers stay available to their network's requests without PQ. |
+| **A provider that loses PQ** stays PQ-positive until its next run reads negative, typically within a turn (about 24 minutes). | Window clients stay fail-closed and verify every session (§12.5), so nothing is sent in the clear. |
+| **Prober cost** (§12.2). One key registration, one PQ handshake and up to a 3 s seal wait per URL turn. | The capability probe's own tunnels go away. Watch the URL lane's turn time at step 2. |
 
 ### Open questions
 
-None. Q1-Q8 are decided (D10, D11.1-D11.8).
+None. Q1-Q8 are decided (D10, D11.1-D11.8), and post-quantum selection is
+decided by D12.1-D12.4 (§12).
+
+## 12. Post-quantum selection (D12)
+
+### 12.1 Today
+
+**Two request fields ask for post-quantum (PQ) providers:**
+
+| Field | What it means today | Who sends it |
+|---|---|---|
+| `post_quantum_encryption` | The provider's latest provide declared PQ sessions. It is read per request (`readProvidePostQuantumEncryption`, model/provide_capability_model.go:38) and applied in every draw (model/network_client_location_model.go:5100-5105; candidates at :6653, named providers at :7364). | connect builds from before FP2-MODERN |
+| `require_modern_provider` | `ClientScore.Modern`: the capability probe measured end-to-end PQ (X25519MLKEM768) and resizable windows within 7 days (model/egress_modern_provider.go:1-31, :348). A Network-key-only provider counts by its declaration (model/network_client_location_model.go:5790). Applied by the request filter (model/network_client_selection_prefilter.go:20, 36) and for named providers (:6732-6734, :7351-7352). | connect today, whenever the profile asks for PQ (connect/ip_remote_multi_client_api.go:885, 926) |
+
+- **The declaration** comes from the provider's provide frame
+  (connect/transfer_contract_manager.go:1512-1567). It sets
+  `PostQuantumEncryption` when the provider's session manager serves PQ
+  sessions.
+- **The capability probe** (capprobe/README.md) measures each Online provider
+  in a short tunnel of its own. That tunnel uses
+  `EncryptionModeOpportunistic`, a `PeerCapabilityRecorder` and
+  `ClientKeyRegistrationRequired`
+  (qualityprobe/providertunnel/capability_observation.go:23, 73). The URL
+  probe's tunnels keep end-to-end encryption off
+  (model/egress_modern_provider.go:11-13).
+- **Not strict filters:** the provider.yml modern gate is off, and
+  modern-first priority only orders bands (FP2-MODERN.md).
+
+**Connect.**
+- A PQ profile runs every window client fail-closed, with
+  `EncryptionModeRequired` (connect/ip_remote_multi_client.go:17306-17318).
+- `syncGeneratorPostQuantumEncryption` (:3440-3447) pushes the PQ setting
+  into the shared API generator before any window discovers: at construction
+  (:3008) and on each profile change (:3425). It lands in
+  `ApiMultiClientGenerator.SetPostQuantumEncryption`
+  (connect/ip_remote_multi_client_api.go:748-749).
+- Every FP2 request the generator makes reads that flag:
+  - discovery through `nextDestinationsContext` (:807, arguments at
+    :878-886);
+  - named redials through `NextDestinationsForClientId` (:908, :926).
+- A profile whose PQ setting differs is not equal (`performanceProfilesEqual`,
+  connect/ip_remote_multi_client.go:3365-3369). So `SetPerformanceProfile`
+  retires and regenerates every window (:3394-3430).
+- The limited window (§7.4) is built through the same generator and the same
+  client-settings path, so it inherits both.
+
+**7918 (connect#220).** PQ mobile connects stalled for 60 s and more.
+Discovery offered providers that could not seal a PQ session, and fail-closed
+evaluation waited out each dead candidate before trying the next.
+
+### 12.2 The probe: PQ in every URL tunnel (D12.1)
+
+**The tunnel.**
+- Every URL probe tunnel applies the capability observation the capability
+  probe uses today: `providertunnel.Config.CapabilityObservation`
+  (qualityprobe/providertunnel/tunnel.go:132, applied at :652).
+- That means `EncryptionModeOpportunistic`, the run's own
+  `PeerCapabilityRecorder`, and `ClientKeyRegistrationRequired`. It does not
+  include the capability probe's redial pacing, which URL tunnels never had.
+- Opportunistic means the URL legs never depend on it. A provider without the
+  end-to-end responder keeps carrying the turn in plaintext. So the URL
+  outcome, every bucket and the classification of §3 do not change with PQ.
+- A turn waits for its session to seal before its first URL request, up to
+  `pq_seal_wait`: the HTTPS connect bound, 3 s. A provider that seals in time
+  carries the turn's requests sealed.
+
+**Each run records one PQ outcome:**
+
+| Outcome | When |
+|---|---|
+| positive | the session negotiated a post-quantum group (X25519MLKEM768) and sealed, and the run's IPv4 HTTPS leg passed through it |
+| negative | the session negotiated a classical group; or a post-quantum session had not sealed by the run's end; or a ClientHello went unanswered for a whole establishment window while the provider acknowledged pings (the capability probe's `no_responder`) |
+| unmeasured | anything else: a handshake still pending at the run's end, a lost or replaced tunnel client, a run that failed or was not measured |
+
+The same session also shows whether the provider's acks advertise a receive
+window, as the capability probe reads it (capprobe/reading.go:51-60).
+
+**Cost per URL turn:**
+- one key-registration round trip before admission;
+- one TLS 1.3 handshake with X25519MLKEM768 through the provider, carrying
+  ML-KEM-768 flights of about 5 to 9 KB;
+- up to 3 s of waiting for a seal that a non-PQ provider never gives. The run
+  budget (`Options.RunBudget`, qualityprobe/egresshealth/egresshealth.go:917)
+  counts it.
+
+The capability probe's own tunnels, prober shard and passes go away (§12.4).
+
+### 12.3 Evidence and storage
+
+- **Evidence:** `url_probe_evidence` gains `e2e`, omitted when the run
+  observed nothing:
+
+  ```json
+  {"pq": "positive|negative|unmeasured", "key_exchange": "...", "sealed_before_request": true, "window": "resizable|fixed|not_tested"}
+  ```
+
+  The ingest validates it as it does the other legs. A prober cannot claim
+  `positive` without a post-quantum key exchange and a passed IPv4 HTTPS leg.
+- **Column:** the §4.1 migration adds `pq_outcome` beside `failed_later_legs`,
+  so there is no second migration. The store sets it from the validated
+  evidence: 1 positive, 2 negative, 0 otherwise. Rechecks and probation runs
+  store 0.
+- **Aggregate** over the 8-hour window (§4.2):
+
+  ```sql
+  MAX(measured_at) FILTER (WHERE pq_outcome = 1) AS pq_positive_at,
+  MAX(measured_at) FILTER (WHERE pq_outcome = 2) AS pq_negative_at
+  ```
+
+- **Modern evidence:** the URL-probe ingest records each conclusive
+  observation in `provider_modern_evidence` (`RecordProviderModernEvidence`,
+  model/egress_modern_provider.go:222), as the capability probe does today.
+  The window reading keeps its table and its census gauges.
+
+### 12.4 Strict match (D12.2)
+
+- **PQ-positive:** a provider whose newest PQ outcome in the 8-hour window is
+  positive. `pq_positive_at` is set and is later than any `pq_negative_at`.
+- **Positive proof is required.** D7.4's "no negative measurement means dual"
+  does not apply to PQ. A provider without a positive outcome in the window is
+  not PQ-positive, and its declaration no longer qualifies.
+- **`post_quantum_encryption: true`** keeps only PQ-positive providers in
+  every draw, named providers included.
+- **`require_modern_provider: true`** keeps only modern providers: PQ-positive,
+  with the latest URL-probe observation advertising resizable windows. This is
+  FP2-MODERN.md's "modern", now sourced from the URL probe. Connect keeps
+  sending this field (§12.1).
+- **How FP2 reads it:**
+  - the export stamps `ClientScore.PostQuantumPositive` and computes
+    `ClientScore.Modern` from it (model/network_client_score_rank.go:218);
+  - the request filter (model/network_client_selection_prefilter.go:20, 36)
+    reads those fields;
+  - for named providers, the export publishes the sets
+    `{provider_post_quantum_positive}` and `{provider_modern}`, replaced each
+    export like `{provider_hard_exclusions}`. They replace
+    `readProvidePostQuantumEncryption` (:6653, :7364) and
+    `readProviderModernClientIds` (:6732-6734, :7351-7352).
+- **Network-only providers:** a provider that holds only a Network key cannot
+  be reached by the URL probe, so it never has a positive signal. Under D12.2
+  ("any provider") a strict-PQ request does not match it. Its
+  declaration-based modern status (model/network_client_location_model.go:5790)
+  ends.
+- **The capability probe is retired.** Both of its checks, PQ and resizable
+  windows, move to the URL probe.
+  - `capability_probe.yml` is set to `enabled: false` once the URL probe has
+    fed `provider_modern_evidence` for a day.
+  - The `capprobe` package and `work.CapabilityProbe`
+    (taskworker/work/capability_probe_work.go:178) are deleted in the next
+    release.
+  - The modern gate and modern-first priority keep their mechanisms, fed by
+    URL-probe evidence. The provider.yml gate stays off.
+
+### 12.5 Windows (D12.3)
+
+- **No new window.** Every window, the limited one included, asks with the
+  current PQ setting through the shared generator (§12.1). A PQ toggle
+  regenerates every window.
+- The new capability request (`NextDestinationsWithCapabilities`, §7.4)
+  carries `require_modern_provider` from the same flag.
+- **Under strict PQ, overflow never relaxes PQ.** The IPv6 need, the main pool
+  and the `tcp` overflow (§6.3) all draw from PQ-positive providers only. So
+  the limited window draws PQ-positive `tcp` providers.
+- **Placement is unchanged:** window clients still run
+  `EncryptionModeRequired` and verify every session before sealing traffic.
+
+### 12.6 Impact
+
+**Today's proxy** is the modern-gate shadow count,
+`urnetwork_stats_provider_modern_gate_shadow`:
+
+| Bucket | Modern | Not post-quantum |
+|---|---|---|
+| Quality | 84 | 778 |
+| Speed | 26,319 | 1,651 |
+| Online | 26,504 | 1,733 |
+
+**Measured on Main** (read-only, 2026-11-12): the classes of §3 over the
+8-hour window ending about 16:40Z, against capability-probe evidence from the
+last 7 days.
+
+| Class | Providers | Post-quantum | Not post-quantum | No evidence |
+|---|---|---|---|---|
+| A | 261 | 258 | 2 | 1 |
+| B | 27,865 | 25,907 | 1,785 | 173 |
+| C | 15 | 15 | 0 | 0 |
+| D | 20,487 | 10,928 | 3,845 | 5,714 |
+
+**What a strict-PQ user can draw under positive-signal matching:**
+- **Legacy mode:** about 26,200 providers at the ratio level (A and B
+  post-quantum). That is today's 26,319 modern Speed providers.
+- **Selector mode:** about 37,100 (adding C and D post-quantum), or roughly
+  35,600 after the gates.
+  - It rises further as the URL probe measures the 5,714 class-D providers the
+    capability probe never reached: that probe measures Online providers only,
+    and the hard gate keeps most of class D out of Online.
+- **The July build** (2026.7.2+N, about 12,200 providers) predates PQ:
+  providers answer X25519MLKEM768 since v2026.7.21
+  (model/egress_modern_provider.go:4-6). As the 11-11 updater fix and the next
+  nightly move them, they turn PQ-positive. They also carry UDP, so they move
+  from class D to class B.
+
+### 12.7 7918 (D12.4)
+
+- 7918 is solved by strict selection with the positive signal. A PQ client is
+  offered only providers that sealed a PQ session through the quality probe
+  within 8 hours. Fail-closed evaluation therefore no longer waits out
+  providers that never could seal one.
+- The fail-fast evaluation, discovery cache and field-measurement options
+  recorded on 7918 are not needed.
+- The residual case is a provider that lost PQ after its last positive run.
+  Its client fails closed within the existing ping budget, as today, and its
+  next run reads negative.
