@@ -43,7 +43,9 @@ func newCompetitionDistributedRecoveryPgFixture(t *testing.T, tb testing.TB) *co
 		databaseNow, err = competitionIntakeFirstDatabaseTime(ctx, conn)
 		server.Raise(err)
 	})
-	base := newCompetitionPreparedIntakeCompletionFixtureAt(t, tb, true, databaseNow.Add(-4*time.Hour))
+	// The complete original budget has expired, while the independent default
+	// baseline-preparation cleanup lease remains live during synthetic setup.
+	base := newCompetitionPreparedAnnouncedCompletionFixtureAt(t, tb, databaseNow.Add(-3*time.Hour-time.Second))
 	fixture := &competitionDistributedRecoveryPgFixture{competitionDistributedPgFixture: base}
 	selected := base.selected(0)
 	job, err := base.store.Claim(ctx, selected, "synthetic-original-worker", testWorkerImageDigest())

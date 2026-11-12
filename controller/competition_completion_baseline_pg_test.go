@@ -20,15 +20,9 @@ import (
 // Real source handoff, protected admissions, runtime quorum and separate
 // reserved publication precede synthetic no-op receipts. No trigger is disabled.
 func newCompetitionPreparedIntakeCompletionFixture(t *testing.T, tb testing.TB, distributed bool) *competitionDistributedPgFixture {
-	return newCompetitionPreparedIntakeCompletionFixtureAt(t, tb, distributed, time.Time{})
-}
-
-// The full guarded lifecycle also supports genuinely historical synthetic
-// runs. Only current SQL authority/qualification clocks remain on real time.
-func newCompetitionPreparedIntakeCompletionFixtureAt(t *testing.T, tb testing.TB, distributed bool, historicalNow time.Time) *competitionDistributedPgFixture {
 	tb.Helper()
 	ctx := tb.Context()
-	intake := newCompetitionIntakeFirstDatabaseFixtureAt(t, ctx, historicalNow, func(settings *Settings) {
+	intake := newCompetitionIntakeFirstDatabaseFixture(t, ctx, func(settings *Settings) {
 		if distributed {
 			settings.FutureEpochPolicy.DistributedEvaluationPolicy = competitionDistributedSlotTestPolicy(tb)
 		}
@@ -42,12 +36,10 @@ func newCompetitionPreparedIntakeCompletionFixtureAt(t *testing.T, tb testing.TB
 	if err != nil {
 		tb.Fatal(err)
 	}
-	if historicalNow.IsZero() {
-		server.Db(ctx, func(conn server.PgConn) {
-			intake.now, err = competitionIntakeFirstDatabaseTime(ctx, conn)
-			server.Raise(err)
-		})
-	}
+	server.Db(ctx, func(conn server.PgConn) {
+		intake.now, err = competitionIntakeFirstDatabaseTime(ctx, conn)
+		server.Raise(err)
+	})
 	service := newServiceWithImageDigest(intake.settings, intake.store, testApiImageDigest(), nil)
 	for _, name := range []string{"synthetic-prepared-source", "synthetic-prepared-next"} {
 		accepted, code, evalError := service.SubmitV2(ctx, ScoreArgs{RoundId: opened.RoundId, Patch: testPatch(name)}, &Principal{Id: "synthetic-submitter", Role: "submitter"})
@@ -66,6 +58,14 @@ func newCompetitionPreparedIntakeCompletionFixtureAt(t *testing.T, tb testing.TB
 	if err != nil {
 		tb.Fatal(err)
 	}
+	return finishCompetitionPreparedCompletionFixture(tb, intake, round, distributed, false)
+}
+
+// Announced and ASAP fixtures share only the guarded baseline/host bootstrap.
+// Their distinct source activation, opening and admission paths stay explicit.
+func finishCompetitionPreparedCompletionFixture(tb testing.TB, intake *competitionIntakeFirstDatabaseFixture, round *roundRecord, distributed, historical bool) *competitionDistributedPgFixture {
+	tb.Helper()
+	ctx := tb.Context()
 	frozen, err := settingsForCompetitionApiRound(ctx, intake.settings, intake.store, round)
 	if err != nil {
 		tb.Fatal(err)
@@ -88,7 +88,7 @@ func newCompetitionPreparedIntakeCompletionFixtureAt(t *testing.T, tb testing.TB
 		// SQL independently bounds actual qualification publication. Synthetic
 		// original candidate history must not backdate that live SQL authority.
 		originalNow := clock.Now()
-		if !historicalNow.IsZero() {
+		if historical {
 			var currentNow time.Time
 			server.Db(ctx, func(conn server.PgConn) {
 				currentNow, err = competitionIntakeFirstDatabaseTime(ctx, conn)
