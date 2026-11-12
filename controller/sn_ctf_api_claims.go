@@ -44,7 +44,9 @@ import (
 // apps read the wins at its Done and again 30, 60 and 120 s after it, so a
 // value kept under 30 s is never the one an app's read before took, whatever
 // that read's latency: once the claim is final, the app's next read shows it,
-// unless another reader read the account in the meantime.
+// unless another reader read the account in the meantime. That holds while
+// vault2 can be read: when it cannot, the app's reads get the last value read,
+// from before the claim, until a read gets through.
 const snCtfClaimedTtl = 25 * time.Second
 
 // The most accounts whose claimed is kept, the least recently used dropped
@@ -98,8 +100,10 @@ func snCtfClaimedLast(key snCtfClaimedKey) *snCtfClaimedRead {
 }
 
 // snCtfClaimedKeep keeps a value read of key as the most recently used,
-// dropping the least recently used past snCtfClaimedCacheLimit. The caller
-// holds the cache's lock.
+// dropping the least recently used past snCtfClaimedCacheLimit. A key's claimed
+// only grows, so of two reads it keeps the larger value and the later time: a
+// read that began earlier and finished later, or one at an older finalized
+// block, never lowers it. The caller holds the cache's lock.
 func snCtfClaimedKeep(key snCtfClaimedKey, claimed uint256.Int, readTime time.Time) {
 	cache := &snCtfClaimedCache
 	if cache.reads == nil {
@@ -107,7 +111,12 @@ func snCtfClaimedKeep(key snCtfClaimedKey, claimed uint256.Int, readTime time.Ti
 	}
 	if element, ok := cache.reads[key]; ok {
 		read := element.Value.(*snCtfClaimedRead)
-		read.claimed, read.readTime = claimed, readTime
+		if read.claimed.Lt(&claimed) {
+			read.claimed = claimed
+		}
+		if read.readTime.Before(readTime) {
+			read.readTime = readTime
+		}
 		cache.recency.MoveToFront(element)
 		return
 	}
@@ -131,8 +140,9 @@ func snCtfClaimedKeep(key snCtfClaimedKey, claimed uint256.Int, readTime time.Ti
 // out.
 func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes []uint64) map[uint64]uint256.Int {
 	claimed := map[uint64]uint256.Int{}
+	deploymentKey := cfg.DeploymentKey()
 	keyOf := func(index uint64) snCtfClaimedKey {
-		return snCtfClaimedKey{deploymentKey: cfg.DeploymentKey(), vault: cfg.VaultV2, poolId: poolId, index: index}
+		return snCtfClaimedKey{deploymentKey: deploymentKey, vault: cfg.VaultV2, poolId: poolId, index: index}
 	}
 	cache := &snCtfClaimedCache
 	unread := []uint64{}
@@ -157,6 +167,7 @@ func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes [
 	snCtfReadClaimed(ctx, poolId, unread, now, keyOf, claimed)
 	// what was not read now: the last value read, whatever its age
 	stale := 0
+	var oldest time.Duration
 	cache.lock.Lock()
 	for _, index := range unread {
 		if _, ok := claimed[index]; ok {
@@ -165,11 +176,12 @@ func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes [
 		if read := snCtfClaimedLast(keyOf(index)); read != nil {
 			claimed[index] = read.claimed
 			stale += 1
+			oldest = max(oldest, now.Sub(read.readTime))
 		}
 	}
 	cache.lock.Unlock()
 	if 0 < stale {
-		glog.Infof("[sn]ctf claimed of %d accounts of pool %d answered as last read\n", stale, poolId)
+		glog.Infof("[sn]ctf claimed of %d accounts of pool %d answered as last read, the oldest read %s ago\n", stale, poolId, oldest.Round(time.Second))
 	}
 	return claimed
 }

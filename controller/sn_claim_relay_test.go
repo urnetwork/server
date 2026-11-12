@@ -142,7 +142,8 @@ type claimRelayWorld struct {
 	chainBuilt int
 	estimated  []uint64
 	published  int
-	// what each publish said, as it said it
+	// a copy of each status published, its state and pools as they were then
+	// (its maps are shared with the pass's)
 	publishedStatuses []SnClaimRelayStatus
 }
 
