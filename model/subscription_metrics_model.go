@@ -128,7 +128,81 @@ type SubscriptionMetricsSnapshot struct {
 	ReconciliationWatermarks map[string]time.Time
 	DataPackFulfillments     map[SubscriptionMetricsDataPackWindow]int64
 	DataPackBytes            map[SubscriptionMetricsDataPackWindow]int64
+	// payments received at least the minimum age ago that no credit
+	// consumed, by rail (SubscriptionMetricsUncreditedRails), and the age of
+	// the oldest, in seconds, for each rail that has one
+	UncreditedPayments         map[string]int64
+	UncreditedOldestAgeSeconds map[string]int64
 }
+
+// The subscriptions snapshot's tunables.
+type SubscriptionMetricsSettings struct {
+	// How long a received payment may wait for its credit before it counts
+	// as uncredited. Zero counts every uncredited payment at once.
+	UncreditedMinAge time.Duration
+}
+
+// A new instance on every call.
+func DefaultSubscriptionMetricsSettings() *SubscriptionMetricsSettings {
+	return &SubscriptionMetricsSettings{
+		// the webhook, the scanner and the reconcile's legs have had their
+		// turn
+		UncreditedMinAge: 30 * time.Minute,
+	}
+}
+
+// The gamma rail of the uncredited payments: Pay with Gamma's charges.
+const SubscriptionMetricsRailGamma = "gamma"
+
+// The closed rail label set of the uncredited payments: every crypto asset
+// (USDC on Solana is usdc_solana), and gamma.
+var subscriptionMetricsUncreditedRails = append(append([]string{}, CryptoAssets...), SubscriptionMetricsRailGamma)
+
+// The rails of the uncredited payments, a new slice on every call.
+func SubscriptionMetricsUncreditedRails() []string {
+	return append([]string(nil), subscriptionMetricsUncreditedRails...)
+}
+
+// Per rail, the payments that reached us at least the minimum age ago ($2)
+// and that no credit consumed, with the age of the oldest at $1:
+//   - usdc_solana: a USDC payment into a Solana receiver that bought nothing
+//     (solana_unfulfilled_payment: no intent matched it, or it was short of
+//     its quote), recorded by the webhook, the reconcile or its receiver leg,
+//     aged from its on-chain time;
+//   - each crypto rail coin: a receipt not credited (in the mempool, in a
+//     block, or held for review), aged from when the scanner first saw it;
+//   - gamma: a charge our spend took whose intent is neither credited nor
+//     voided, aged from the spend.
+//
+// Only rails and counts leave PostgreSQL.
+var subscriptionMetricsUncreditedQuery = `
+/* subscription-metrics-uncredited */
+WITH received AS (
+    SELECT 'usdc_solana'::text AS rail,
+           COALESCE(unfulfilled.transaction_time, unfulfilled.record_time) AS received_at
+    FROM solana_unfulfilled_payment unfulfilled
+    UNION ALL
+    SELECT receipt.asset::text, receipt.first_seen_at
+    FROM crypto_payment_receipt receipt
+    WHERE receipt.state IN ('seen', 'confirmed', 'review')
+    UNION ALL
+    SELECT 'gamma'::text, charge.resolved_at
+    FROM gamma_charge charge
+    INNER JOIN gamma_payment_intent intent ON intent.intent_id = charge.intent_id
+    WHERE charge.state = 'spent'
+      AND charge.resolved_at IS NOT NULL
+      AND intent.credited_at IS NULL
+      AND intent.voided_at IS NULL
+)
+SELECT rail,
+       count(*)::bigint,
+       greatest(0, extract(epoch FROM $1::timestamp - min(received_at)))::bigint
+FROM received
+WHERE received_at <= $2
+  AND rail IN (` + subscriptionMetricsSqlList(subscriptionMetricsUncreditedRails) + `)
+GROUP BY rail
+ORDER BY rail
+`
 
 // subscriptionMetricsAccountQuery defines the account semantics in one
 // snapshot:
@@ -432,15 +506,17 @@ ORDER BY source, metric_window.window_name
 
 func newSubscriptionMetricsSnapshot() *SubscriptionMetricsSnapshot {
 	return &SubscriptionMetricsSnapshot{
-		ActiveAccounts:           map[string]int64{},
-		TrialsActive:             map[SubscriptionMetricsStorePlan]int64{},
-		NewPaidAccounts:          map[SubscriptionMetricsStoreWindow]int64{},
-		EngagedAccounts:          map[SubscriptionMetricsStoreWindow]int64{},
-		ChurnedAccounts:          map[SubscriptionMetricsStoreWindow]int64{},
-		ReconciliationEvents:     map[SubscriptionMetricsStoreActionWindow]int64{},
-		ReconciliationWatermarks: map[string]time.Time{},
-		DataPackFulfillments:     map[SubscriptionMetricsDataPackWindow]int64{},
-		DataPackBytes:            map[SubscriptionMetricsDataPackWindow]int64{},
+		ActiveAccounts:             map[string]int64{},
+		TrialsActive:               map[SubscriptionMetricsStorePlan]int64{},
+		NewPaidAccounts:            map[SubscriptionMetricsStoreWindow]int64{},
+		EngagedAccounts:            map[SubscriptionMetricsStoreWindow]int64{},
+		ChurnedAccounts:            map[SubscriptionMetricsStoreWindow]int64{},
+		ReconciliationEvents:       map[SubscriptionMetricsStoreActionWindow]int64{},
+		ReconciliationWatermarks:   map[string]time.Time{},
+		DataPackFulfillments:       map[SubscriptionMetricsDataPackWindow]int64{},
+		DataPackBytes:              map[SubscriptionMetricsDataPackWindow]int64{},
+		UncreditedPayments:         map[string]int64{},
+		UncreditedOldestAgeSeconds: map[string]int64{},
 	}
 }
 
@@ -449,6 +525,11 @@ func newSubscriptionMetricsSnapshot() *SubscriptionMetricsSnapshot {
 // snapshot timestamp, so old exporter state becomes no-data rather than a
 // current-looking zero.
 func LoadSubscriptionMetricsSnapshot(ctx context.Context, now time.Time) *SubscriptionMetricsSnapshot {
+	return LoadSubscriptionMetricsSnapshotWithSettings(ctx, now, DefaultSubscriptionMetricsSettings())
+}
+
+// One aggregate dashboard snapshot at the given settings.
+func LoadSubscriptionMetricsSnapshotWithSettings(ctx context.Context, now time.Time, settings *SubscriptionMetricsSettings) *SubscriptionMetricsSnapshot {
 	now = now.UTC()
 	cutoff24Hours := now.Add(-24 * time.Hour)
 	cutoff7Days := now.Add(-7 * 24 * time.Hour)
@@ -561,6 +642,23 @@ func LoadSubscriptionMetricsSnapshot(ctx context.Context, now time.Time) *Subscr
 				key := SubscriptionMetricsDataPackWindow{Source: source, Window: window}
 				snapshot.DataPackFulfillments[key] = fulfillmentCount
 				snapshot.DataPackBytes[key] = byteCount
+			}
+		})
+
+		result, err = conn.Query(
+			ctx,
+			subscriptionMetricsUncreditedQuery,
+			now,
+			now.Add(-settings.UncreditedMinAge),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var rail string
+				var count int64
+				var oldestAgeSeconds int64
+				server.Raise(result.Scan(&rail, &count, &oldestAgeSeconds))
+				snapshot.UncreditedPayments[rail] = count
+				snapshot.UncreditedOldestAgeSeconds[rail] = oldestAgeSeconds
 			}
 		})
 	})
