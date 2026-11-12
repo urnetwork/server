@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "kind": "competition-heartbeat-prefix-qualification/v1",
+  "source_commit": "50d34a8b80a6c30b329257425be87d588fd365ee",
+  "workspace_sha256": "c6ac37678e47cf4278cbd88f2f14377607a855e51d7bf54f9339a131a9d17ea0",
+  "root_cause": "Distributed supervisor-authority transaction-local configuration timed out after three attempts despite acknowledged rollback, returned idle pool release, no COMMIT and substantial remaining time in the original ownership reserve. The earlier slot-update-only continuation did not cover this exact prefix.",
+  "fix": "Only exact source-owned distributed pre-business prefixes with physically returned acknowledged rollback may use a cumulative eight-call ceiling inside the same 20-second budget and both confirmed leases. Unknown statements, ambiguous commits, unacknowledged cleanup and business updates cannot borrow this prefix continuation.",
+  "focused_smoke": {
+    "passed": 7,
+    "failed": 0,
+    "exit_status": 0,
+    "log_sha256": "da98f40b02a4dfbb2133169b06c9ca464353de677ff1efbb509e164ac7425fa5",
+    "source_manifest_sha256": "af15d11d96d9c2f3e07ef029f831acf858c0c6484b6b86349949ea41b9f43ae5",
+    "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.8Gu8guX3"
+  },
+  "broad_ordinary": {
+    "passed": 282,
+    "failed": 0,
+    "repetitions": 3,
+    "exit_status": 0,
+    "log_sha256": "3affada891eb725f725b346339b2702eab7f1fa70b9bb0186d8b04febbcc5954",
+    "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.CCY394lV"
+  },
+  "broad_race": {
+    "passed": 282,
+    "failed": 0,
+    "repetitions": 3,
+    "exit_status": 0,
+    "log_sha256": "e1c13b409e08fde761419bc239cc66bcbab406cac905e0a46c8e448cbd04c1ab",
+    "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.CCY394lV"
+  },
+  "source_manifest_unchanged": true,
+  "source_manifest_sha256": "af15d11d96d9c2f3e07ef029f831acf858c0c6484b6b86349949ea41b9f43ae5",
+  "external_dependencies_clean_and_unchanged": true,
+  "external_dependency_manifest_sha256": "b8d6daacae1b26cd10ca18ca698d53440105c25f21769eb4fde57cf3f5f4f8ae",
+  "external_dependency_evidence": "/dev/shm/competition-prefix-dependency-proof-20261112.XBHxfr3c",
+  "race_qualification_complete": true,
+  "qualification_complete": true,
+  "deployed": false,
+  "remaining": "Build/stage this exact qualified source. Worker activation still requires the authorized idle maintenance boundary. No scoring/source/baseline policy or original submission deadline changes. A separately reviewed final-slot retry-cap follow-up is not part of this qualified source."
+}
