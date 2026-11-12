@@ -13,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"sync"
 	"time"
@@ -514,14 +513,25 @@ func (self *snCtfCoreSource) AccountClaims(ctx context.Context, view *snCtfView,
 		return claims
 	}
 	// below the lowest finalized root not recorded yet, the record of each
-	// root's deltas gives the account's cumulative in it
-	recordedBelow := uint64(math.MaxUint64)
+	// root's deltas gives the account's cumulative in it. The latest finalized
+	// root is read first, so that a root finalized after it is never taken for
+	// a recorded one; a root's deltas are recorded with it in one transaction,
+	// and they are read after this.
+	recordedBelow := uint64(0)
 	if err := stLedgerV2Guard(func() error {
-		if next := model.GetNextUnrecordedStLedgerV2Root(ctx, cfg.DeploymentKey(), poolId); next != nil {
-			if next.RootIndex == nil {
-				return fmt.Errorf("finalized root %d of pool %d has no root index", next.Seq, poolId)
+		latest := model.GetLatestStLedgerV2FinalizedRoot(ctx, cfg.DeploymentKey(), poolId)
+		if latest == nil {
+			return nil
+		}
+		next := model.GetNextUnrecordedStLedgerV2Root(ctx, cfg.DeploymentKey(), poolId)
+		for _, root := range []*model.StLedgerV2Root{latest, next} {
+			if root != nil && root.RootIndex == nil {
+				return fmt.Errorf("finalized root %d of pool %d has no root index", root.Seq, poolId)
 			}
-			recordedBelow = *next.RootIndex
+		}
+		recordedBelow = *latest.RootIndex + 1
+		if next != nil {
+			recordedBelow = min(recordedBelow, *next.RootIndex)
 		}
 		return nil
 	}); err != nil {
