@@ -413,6 +413,62 @@ func TestClaimRelayCtfPoolProofUnavailable(t *testing.T) {
 	}
 }
 
+// The relay's state as GET /sn/claim-relay answers it. A pass that claimed
+// the operator's pool while only the capture the flag pool could not be read,
+// at the ledger read or at a claim's proof, is running to a client that asks
+// without partial=true, as every app that predates that pool does, and
+// ledger_unavailable to one that asks with it. A pass that could not read the
+// operator's pool, or stopped on its tree after naming the capture the flag
+// pool, is ledger_unavailable to both, and every other state reads the same.
+func TestClaimRelayStateForOldClients(t *testing.T) {
+	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	states := func(status *SnClaimRelayStatus) [2]string {
+		return [2]string{snClaimRelayStateFor(status, false), snClaimRelayStateFor(status, true)}
+	}
+	for _, c := range []struct {
+		name          string
+		ctfLedger     error
+		poolLedger    error
+		proofs        map[uint64]error
+		othersClaimed bool
+		unavailable   []uint64
+		states        [2]string
+		sent          []string
+	}{
+		{"the CTF pool's ledger", errors.New("the capture the flag ledger cannot be read"), nil, nil,
+			true, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateRunning, SnClaimRelayStateLedgerUnavailable}, []string{"1/0"}},
+		{"the CTF pool's tree at a proof", nil, nil, map[uint64]error{claimRelayTestCtfPool: errors.New("the capture the flag tree cannot be built")},
+			true, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateRunning, SnClaimRelayStateLedgerUnavailable}, []string{"1/0"}},
+		{"the operator's pool's ledger", nil, errors.New("the pool's ledger cannot be read"), nil,
+			true, []uint64{1}, [2]string{SnClaimRelayStateLedgerUnavailable, SnClaimRelayStateLedgerUnavailable}, []string{claimRelayCtfKey(0)}},
+		{"the operator's pool's tree after the CTF pool's ledger", errors.New("the capture the flag ledger cannot be read"), nil, map[uint64]error{1: errors.New("the pool's tree cannot be built")},
+			false, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateLedgerUnavailable, SnClaimRelayStateLedgerUnavailable}, []string{}},
+	} {
+		world := newClaimRelayWorld(t, over)
+		// a batch, so that one pass reaches both pools' proofs
+		world.batching = true
+		world.addCtf(0, over)
+		world.ctfLedgerErr, world.poolLedgerErr, world.proofErrs = c.ctfLedger, c.poolLedger, c.proofs
+		status := world.pass()
+		requireClaimRelayState(t, status, SnClaimRelayStateLedgerUnavailable)
+		sent := world.sentKeys()
+		slices.Sort(sent)
+		if status.OthersClaimed != c.othersClaimed || !slices.Equal(status.UnavailablePools, c.unavailable) || states(status) != c.states || !slices.Equal(sent, c.sent) {
+			t.Fatalf("%s: others claimed %t, unavailable %v, states %v, sent %v", c.name, status.OthersClaimed, status.UnavailablePools, states(status), sent)
+		}
+	}
+	// every other state, and a status written before the pass said whether it
+	// claimed the others, reads the same to both
+	for _, state := range snClaimRelayStates {
+		for _, othersClaimed := range []bool{false, true} {
+			status := &SnClaimRelayStatus{State: state, UnavailablePools: []uint64{claimRelayTestCtfPool}, OthersClaimed: othersClaimed && state != SnClaimRelayStateLedgerUnavailable}
+			if got := states(status); got != [2]string{state, state} {
+				t.Fatalf("%s, others claimed %t: %v", state, status.OthersClaimed, got)
+			}
+		}
+	}
+}
+
 // A batch ends where a group ends: when the batcher fits part of a coldkey's
 // group, the group waits for the next transaction, whole.
 func TestClaimRelayABatchEndsAtAGroupsEnd(t *testing.T) {

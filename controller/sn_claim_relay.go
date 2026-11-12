@@ -193,6 +193,11 @@ type SnClaimRelayStatus struct {
 	// with none named here, as before the capture the flag pool, and the api
 	// pauses every pool.
 	UnavailablePools []uint64 `json:"unavailable_pools,omitempty"`
+	// OthersClaimed says the pass ran as it would have ended running, claiming
+	// the pools it could read, and is ledger_unavailable only for
+	// UnavailablePools. A pass that stopped on another pool's fault after
+	// naming them leaves it false.
+	OthersClaimed bool `json:"others_claimed,omitempty"`
 	// PoolsUnavailable counts the pools whose ledger the relay's latest read
 	// could not read, for the metrics: this pass's, whether it claimed the
 	// others or ended there, or, for a pass that ended before reading the
@@ -520,6 +525,7 @@ func (self *snClaimRelay) pass(ctx context.Context) *SnClaimRelayStatus {
 	if status.State == SnClaimRelayStateRunning && 0 < len(status.UnavailablePools) {
 		status.State = SnClaimRelayStateLedgerUnavailable
 		status.Detail = fmt.Sprintf("the ledger of pools %v cannot be read; the other pools are claimed", status.UnavailablePools)
+		status.OthersClaimed = true
 	}
 	snClaimRelayLimitRefusals(status)
 	self.publish(ctx, status)
