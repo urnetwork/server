@@ -98,8 +98,8 @@ func SnLedgerObject(w http.ResponseWriter, r *http.Request) {
 
 // SnLedgerAccount backs `GET /sn/ledger/account?coldkey=<ss58|0x hex>`: the
 // coldkey's settlement v2 account in every pool, with its claim proof
-// (VERSION2-FINAL.md §8.3), whole or with partial=true per pool
-// (sn/api/operator.yml). Public.
+// (VERSION2-FINAL.md §8.3), per pool with partial=true, and otherwise without
+// a capture the flag pool that cannot be read (sn/api/operator.yml). Public.
 func SnLedgerAccount(w http.ResponseWriter, r *http.Request) {
 	controller.SnLedgerAccount(w, r)
 }

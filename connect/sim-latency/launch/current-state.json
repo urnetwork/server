@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T09:04:00.951643Z",
+  "observed_at": "2026-11-12T09:41:55.075558Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,14 +17,14 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": false,
-    "publication_held": true,
-    "diagnosis": "Goofe's original attempt is now recorded succeeded after 9/9 measurements, verified native cleanup, repeated same-clock reconciliations through fence 30, and central retention. No measurement rerun or deadline extension occurred. API readiness continues fluctuating with host liveness; Sille remains in native measurement on its original clock."
+    "grading_ready": true,
+    "publication_held": false,
+    "diagnosis": "Both previously measured attempts are now recorded succeeded after same-clock reconciliation and retention. Goofe's intervening build failure has offline frozen-base nonapplication evidence. Both hosts have claimed their following FIFO jobs; no original deadline or measurement history was reset."
   },
   "queue": {
-    "succeeded": 12,
-    "failed": 2,
-    "queued": 4,
+    "succeeded": 13,
+    "failed": 3,
+    "queued": 2,
     "running": 2
   },
   "recent_completed": [
@@ -49,30 +49,50 @@
         "deadline_extended": false,
         "new_terminal_failure_recorded": false
       }
-    }
-  ],
-  "active_attempts": [
-    {
-      "job_id": "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43",
-      "host_id": "goofe",
-      "run_id": "39c8e006ac2cec752ed53625bfbfa06587905af65ba405d773aa28bfab255b69",
-      "started_at": "2026-11-12T09:03:31.278113",
-      "deadline": "2026-11-12T12:03:31.278113",
-      "observed_phase": "native_accepted_preparing",
-      "native_service_verified_active": true,
-      "database_fence": 31
     },
     {
       "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
       "host_id": "sille",
       "started_at": "2026-11-12T07:37:00.304027",
       "deadline": "2026-11-12T10:37:00.304027",
-      "observed_phase": "candidate_measurements",
-      "candidate_completed": 8,
-      "database_custody": "released_after_heartbeat_timeout_2026-11-12T07:43:32.322963Z",
-      "reattachment_verified": false
+      "observed_phase": "succeeded_central_retention_and_score_recorded",
+      "database_success_observed_at": "2026-11-12T09:21:34.824591Z",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "database_custody": "same_attempt_reconciliation_fence_17_original_clock_preserved"
     }
   ],
+  "active_attempts": [
+    {
+      "job_id": "01a1cd84-9163-5ec0-4f8a-d56902ef4a38",
+      "host_id": "goofe",
+      "run_id": "172485374a7f77775e327f1b38818f243412a523375f3c411952ef004563da6f",
+      "started_at": "2026-11-12T09:08:11.310398",
+      "deadline": "2026-11-12T12:08:11.310398",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 3,
+      "native_service_verified_active": true,
+      "database_fence": 32
+    },
+    {
+      "job_id": "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c",
+      "host_id": "sille",
+      "run_id": "b4f33b481989ea9e43637e5a2aa6e99abc710d5ec690f51f8852200a4c87c4dd",
+      "started_at": "2026-11-12T09:20:10.16599",
+      "deadline": "2026-11-12T12:20:10.16599",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 1
+    }
+  ],
+  "latest_failure": {
+    "job_id": "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43",
+    "evidence": "EPOCH2-SOURCE-APPLICATION-FAILURE-2026-11-12.json",
+    "offline_result": "19 files have hunks that do not apply to the exact frozen Connect tree",
+    "generic_builder_classification_not_rewritten": true,
+    "blind_infrastructure_retry_granted": false
+  },
   "live_worker": {
     "source_commit": "68817f6d3ea96b7a8179c7af63808d504560af32",
     "service": "urnetwork-competition-production-r2.service",
@@ -114,12 +134,56 @@
     "implementation_and_deployment_pending": true,
     "queued": false,
     "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
-    "frozen_server_commit": "071c5856466418ffc39a41cfee79cd5bb2e25053",
+    "frozen_server_commit": "27844c56653c67158067f71ac7ab95e319f93c2d",
     "unqualified_remote_backup_branch": "competition-distributed-infrastructure-reevaluation-20261112",
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "bounded_snapshot_census_fix_and_deterministic_controls_under_implementation_not_yet_compiled",
+      "status": "smoke_14_of_14_and_critical_repeat_54_of_54_passed_test_only_parity_correction_refrozen_phase_b_verified_running",
+      "phase_b": {
+        "source_commit": "27844c56653c67158067f71ac7ab95e319f93c2d",
+        "production_code_unchanged_from_a4eaa": true,
+        "started_at": "2026-11-12T09:41:15Z",
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "642622d53b1e40d8bead38b90487691c",
+        "main_pid": 2368044,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.OzHgCUcg",
+        "verified_active": true,
+        "stages": "two acquisition-tripwire tests repeated three times, then exact native parity comparison, then broader source-derived migration/PostgreSQL tests only if both gates pass",
+        "excluded_test": "TestMigrationCatalogResourceDiagnostic: retained explicit old-monolithic OOM reproduction, not ordinary qualification",
+        "race_authorized": false
+      },
+      "smoke_receipt": "EPOCH2-BOUNDED-CENSUS-SMOKE-2026-11-12.json",
+      "phase_a": {
+        "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "0bc9969459084842a1fa2bd718317fed",
+        "main_pid": 2267938,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.PBOc3NUi",
+        "count": 3,
+        "verified_active": false,
+        "result": "54 passed; zero failures or skips; actual exit zero",
+        "log_sha256": "20cb9b3c46dee602899abca1cf64d6b68859eda0043d9a89d5ed725723b80e99",
+        "fixtures_cleaned_up_and_compiler_released": true,
+        "broader_phase_auto_start_revoked": true,
+        "reason": "Older public-column parity helper calls the database source without the census context marker; preserve the frozen active run, then fix that bypass before broad execution."
+      },
+      "smoke": {
+        "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+        "started_at": "2026-11-12T09:21:28Z",
+        "terminal_at": "2026-11-12T09:26:14.106489615Z",
+        "result": "13 new tests plus the original failing test passed; zero skips",
+        "fixtures_cleaned_up": true,
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "6e77ad0ea0a34c5dba6a9aad5d3630dd",
+        "main_pid": 2209408,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.pCDvPyv7",
+        "selector": "^TestMigrationCensus",
+        "count": 1,
+        "native_psql_explicitly_enabled": true,
+        "postgres_memory_bytes": 1073741824,
+        "full_qualification_or_race_started": false
+      },
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
       "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
       "controller_ordinary_passed": 393,

@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "kind": "bounded-migration-census-smoke/v1",
+  "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+  "sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
+  "sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
+  "workspace_sha256": "fa98030fed949631072273ad80a100475256da96089e3100137f9c31e3ab6c28",
+  "private_evidence_directory": "/var/lib/urnetwork/competition-bounded-census-smoke-20261112.MZBYQAKp",
+  "new_tests": {
+    "selector": "^TestMigrationCensus",
+    "count": 1,
+    "passed": 13,
+    "failed": 0,
+    "skipped": 0,
+    "exit_status": 0,
+    "log_sha256": "2da6419586fb7da53b3bd01f3ca712a539cc33e9d14f7c76bed42d5f8ed0cce6",
+    "real_psql_prefix_and_head_passed": true,
+    "independent_writer_snapshot_and_identity_barrier_passed": true
+  },
+  "original_failure_regression": {
+    "selector": "^TestMigrationsCompetitionDistributedPublishedPrefixesAndGuardFaults$",
+    "count": 1,
+    "passed": 1,
+    "failed": 0,
+    "exit_status": 0,
+    "log_sha256": "adc094b56003ff9215a53b5015a9638522b8bc001425f36f243a56c781cf8f1a"
+  },
+  "native_resource_proof": {
+    "postgres_memory_and_swap_cap_bytes": 1073741824,
+    "postgres_peak_memory_bytes": 364445696,
+    "oom_events": 0,
+    "oom_kills": 0,
+    "docker_oom_killed": false,
+    "complete_schema_prefixes": [927, 961],
+    "physical_sessions_per_census": 1,
+    "same_readonly_repeatable_read_snapshot_for_artifacts_and_identities": true,
+    "source_and_dependency_manifests_unchanged": true,
+    "owned_fixtures_cleaned_up": true
+  },
+  "query_bounds": {
+    "logical_query_bytes": 4362508,
+    "logical_query_sha256": "a2bf64150161521e568b31b7d3966395ae6ca24522038e94b7baf7b562e83eec",
+    "logical_columns": 373,
+    "pre_feature_query_bytes": 3995743,
+    "pre_feature_query_sha256": "57fbbb00ba2f1ce321fcf855bc4aefbf367f3777fc8b9ecb2c72f5b02f448663",
+    "physical_batches": 29,
+    "largest_statement_bytes": 455767,
+    "program_bytes": 4521075,
+    "logical_predicates_removed": 0
+  },
+  "critical_ordinary_repeat": {
+    "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+    "private_evidence_directory": "/var/lib/urnetwork/competition-bounded-census-repeat-20261112.YjgQTSn4",
+    "count": 3,
+    "distinct_tests": 18,
+    "passed": 54,
+    "failed": 0,
+    "skipped": 0,
+    "exit_status": 0,
+    "log_sha256": "20cb9b3c46dee602899abca1cf64d6b68859eda0043d9a89d5ed725723b80e99",
+    "postgres_peak_memory_bytes": 388231168,
+    "postgres_oom_killed": false,
+    "source_and_dependencies_unchanged": true,
+    "owned_fixtures_cleaned_up": true
+  },
+  "remaining_work": "Correct the adjacent public-column parity fixture's direct unmarked full-query route before broader migration tests; complete broader ordinary and race checks, then qualify final origin-first/local-recovery-last integration and deployment.",
+  "full_qualification_complete": false,
+  "race_started": false,
+  "main_feature_merge_or_deployment_performed": false,
+  "live_evaluations_interrupted": false
+}

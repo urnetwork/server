@@ -595,6 +595,28 @@ var statsExtenderPingRejectionsCounter = newStatsCounterVec(
 	"extender_id",
 )
 
+// The refusals that are evidence against each target, and the pings they are a
+// share of, for the ranking of refusing targets. The rejections counter above
+// counts every reason: from 2026-11-07 stale directories refused most extender
+// pingers as unknown, and a ranking by it listed extenders whose only fault was
+// that. These read the per-target tally's evidence count
+// (model.NetworkPingRefusalCountsAgainstTarget), which leaves out unknown
+// pingers and rate limits. A closed hour whose tally row a release from before
+// the count stored has no evidence count, and adds to neither: the share over a
+// range is then over the hours that count it, never an unknown hour read as no
+// refusals.
+var statsExtenderPingEvidenceRejectionsCounter = newStatsCounterVec(
+	"extender_ping_evidence_rejections_total",
+	"Refused pings stored for each target extender that are evidence against it: every refusal reason but unknown_pinger and rate_limited, a refusal with no reason (an acceptance whose co-signature did not verify) included. "+
+		"Accumulated from the closed hour buckets that count them; a bucket stored before the count adds nothing",
+	"extender_id",
+)
+var statsExtenderPingEvidencePingsCounter = newStatsCounterVec(
+	"extender_ping_evidence_pings_total",
+	"Pings stored for each target extender in the closed hour buckets that count its evidence refusals, the denominator of extender_ping_evidence_rejections_total: a bucket stored before the count adds to neither",
+	"extender_id",
+)
+
 // The derived locations (connect/GEOMAP.md §5.4, §5.7), read only by the
 // extenders dashboard. The published rows are counted from the table, so the
 // counts fall as the sweep removes rows a derivation did not renew; what the
@@ -1477,43 +1499,50 @@ func statsRefreshExtenderContracts(ctx context.Context, now time.Time) {
 
 // statsExtenderPingsHour is the counter cursor of the pings, kept separately
 // from the contracts cursor so the two counters seed and resume independently.
-// The pings and rejections counters share it: both are fed from the one
-// grouped query per hour.
+// The pings, rejections and evidence counters share it: all are fed from the
+// one grouped query per hour.
 var statsExtenderPingsHour time.Time
 
 // statsRefreshExtenderPings adds every hour that closed since the last refresh
-// to the per-extender pings and rejections counters, on the same rules as the
-// contracts.
-//
-// A target's rejections series is written in every hour the target was
-// pinged, zero included. A counter series that first appears at a nonzero
-// value hides that value from increase(), so a rejections series that only
-// appeared with a target's first refusal would lose it. Written from the
-// target's first pinged hour, it has exactly the first-hour blind spot its
-// pings series has, and the refusal rate on the dashboard compares like with
-// like.
+// to the per-extender ping counters (statsAddExtenderHourPings), on the same
+// rules as the contracts.
 func statsRefreshExtenderPings(ctx context.Context, now time.Time) {
 	if statsExtenderPingsHour.IsZero() {
 		statsExtenderPingsHour = statsClosedHour(now)
 		return
 	}
 	for _, hour := range statsClosedHoursSince(statsExtenderPingsHour, now) {
-		for _, count := range model.CountExtenderPingsByHour(ctx, hour) {
-			pingerKind, ok := statsPingerKindNames[count.PingerKind]
-			if !ok {
-				continue
-			}
-			statsExtenderPingsCounter.add(
-				float64(count.Pings),
-				count.ExtenderId.String(),
-				pingerKind,
-			)
-			statsExtenderPingRejectionsCounter.add(
-				float64(count.Rejections),
-				count.ExtenderId.String(),
-			)
-		}
+		statsAddExtenderHourPings(model.CountExtenderPingsByHour(ctx, hour))
 		statsExtenderPingsHour = hour
+	}
+}
+
+// Adds one closed hour's per-target counts to the per-extender ping counters:
+// the pings per pinger kind, the refusals of every reason, and, when the hour's
+// tally row counts them, the refusals that are evidence against the target
+// with the pings they are a share of. A row a release from before the evidence
+// count stored adds to neither evidence counter, so the hour drops out of the
+// evidence share instead of reading as one with no refusals.
+//
+// A target's rejections and evidence series are written in every hour they
+// count, zero included. A counter series that first appears at a nonzero value
+// hides that value from increase(), so a series that only appeared with a
+// target's first refusal would lose it. Written from the target's first
+// counted hour, each has exactly the first-hour blind spot of the pings it is
+// a share of, and the refusal rates on the dashboard compare like with like.
+func statsAddExtenderHourPings(counts []model.ExtenderHourPingCount) {
+	for _, count := range counts {
+		pingerKind, ok := statsPingerKindNames[count.PingerKind]
+		if !ok {
+			continue
+		}
+		extenderId := count.ExtenderId.String()
+		statsExtenderPingsCounter.add(float64(count.Pings), extenderId, pingerKind)
+		statsExtenderPingRejectionsCounter.add(float64(count.Rejections), extenderId)
+		if count.EvidenceKnown {
+			statsExtenderPingEvidenceRejectionsCounter.add(float64(count.EvidenceRejections), extenderId)
+			statsExtenderPingEvidencePingsCounter.add(float64(count.Pings), extenderId)
+		}
 	}
 }
 

@@ -985,6 +985,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// capture the flag's presence, census and lifecycle tables, versioned by
 	// their position
 	[]snMainnetMigrationContract{ctfMigrationContract},
+	// the per-target ping hour's evidence refusals, versioned by their
+	// position
+	[]snMainnetMigrationContract{networkPingTargetEvidenceMigrationContract},
 	// the carrier ports of each extender address, versioned by its position
 	[]snMainnetMigrationContract{extenderAddressPortsMigrationContract},
 )

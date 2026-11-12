@@ -495,6 +495,17 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE network_onboarding ALTER COLUMN distribution DROP NOT NULL`},
 		{name: "onboarding distribution without its default", version: server.NetworkOnboardingDistributionMigrationVersion(),
 			sql: `ALTER TABLE network_onboarding ALTER COLUMN distribution DROP DEFAULT`},
+		// The ping target evidence count is nullable with no default, so the
+		// rows a release from before it stores read unknown rather than none.
+		{name: "ping target evidence count defaults to none", version: server.NetworkPingTargetEvidenceSchemaMigrationVersion(),
+			sql: `ALTER TABLE network_ping_target_hour_tally ALTER COLUMN evidence_rejection_count SET DEFAULT 0`},
+		// An extender address's ports are nullable with no default, so an
+		// address the running release stores reads null, the extender's ports
+		// (connect/EXTENDER.md S10), never a port of 0.
+		{name: "extender address tcp port defaults to zero", version: server.NetworkExtenderAddressPortsSchemaMigrationVersion(),
+			sql: `ALTER TABLE network_extender_address ALTER COLUMN tcp_port SET DEFAULT 0`},
+		{name: "extender address udp port required", version: server.NetworkExtenderAddressPortsSchemaMigrationVersion(),
+			sql: `UPDATE network_extender_address SET udp_port = 443; ALTER TABLE network_extender_address ALTER COLUMN udp_port SET NOT NULL`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.
