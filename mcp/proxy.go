@@ -86,6 +86,10 @@ func settleFetchPayment(clientSession *session.ClientSession, payment string) (*
 	if !controller.X402Enabled() {
 		return nil, fmt.Errorf("payments are not enabled")
 	}
+	// nothing is verified or settled for a guest network
+	if err := controller.X402RefuseGuest(clientSession); err != nil {
+		return nil, err
+	}
 
 	return controller.X402Purchase(
 		clientSession.Ctx,

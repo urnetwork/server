@@ -179,6 +179,9 @@ func PayDataSolanaIntent(
 	if networkId == nil {
 		return payDataSolanaIntentError(PurchaseErrorCodeNetworkNotFound, fmt.Sprintf("No network named %s", networkName)), nil
 	}
+	if refuseGuestDestination(clientSession.Ctx, *networkId) {
+		return payDataSolanaIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestNetworkMessage), nil
+	}
 
 	// the quote carries a reserved sub-cent suffix, so a payment sent without
 	// the memo is still identified by its exact amount
@@ -244,6 +247,8 @@ func PayDataSolanaStatus(
 	if model.GetCryptoPaymentIntentBySolanaReference(clientSession.Ctx, reference) != nil {
 		return &PayDataSolanaStatusResult{Status: PayDataSolanaStatusUnknown}, nil
 	}
+	// a payment its webhook has not delivered is found on the chain
+	intent = payDataSolanaStatusCheck(clientSession, intent)
 
 	result := &PayDataSolanaStatusResult{
 		Status:    payDataSolanaStatusOf(intent, server.NowUtc()),

@@ -8,14 +8,11 @@ package model
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/netip"
-	"slices"
 	"time"
 
 	"github.com/urfoundation/sn/ledger"
-	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -81,152 +78,16 @@ func GetStExtenderCensusRecords(ctx context.Context, start time.Time, end time.T
 	return records
 }
 
-// StExtenderCensusRules are the operator's facts the census rows need beside
-// the records: the unit key, the operator's own networks, and each provider
-// client's payout coldkey and head binding.
-type StExtenderCensusRules struct {
-	// Unit is the keyed /29 or /48 prefix hash of an address, §8.4's head
-	// unit under the same key and granularity
-	// (VerifyEgressIpHashWithSettings).
-	Unit func(netip.Addr) [32]byte
-	// Durable are the operator's gated, durable networks
-	// (durable_network_ids), and Declared the other networks it declares it
-	// controls (E5).
-	Durable  map[server.Id]bool
-	Declared map[server.Id]bool
-	// Coldkeys are the provider clients' payout coldkeys under the wallet
-	// selection provider rows use, absent without one (E4).
-	Coldkeys map[server.Id][32]byte
-	// HeadBound are the provider clients with an active fleet binding at
-	// either of the epoch's boundaries (E4).
-	HeadBound map[server.Id]bool
-}
-
-// The address a record's unit is keyed from: its active IPv4 address, else
-// its active IPv6 address, as a provider's head score pins its IPv4 hash
-// first.
-func stExtenderCensusUnitAddress(record *StExtenderCensusRecord) (netip.Addr, uint8, bool) {
-	for _, family := range []uint8{ledger.UnitIPv4, ledger.UnitIPv6} {
-		for _, address := range record.Addresses {
-			if address.Active && address.Ip.IsValid() && (address.Ip.Is4() == (family == ledger.UnitIPv4)) {
-				return address.Ip, family, true
-			}
-		}
+// Builds an epoch's census rows from its records, one per record, under the
+// shared eligibility rules (extender_eligibility.go: E1, E3–E5). The rows are
+// sorted by client id and extender id, and pass the census rules validators
+// check (ledger.CheckCensusRows).
+func BuildStExtenderCensus(records []*StExtenderCensusRecord, rules *ExtenderEligibilityRules) ([]ledger.CensusRow, error) {
+	eligibilities, err := DecideExtenderEligibility(records, rules)
+	if err != nil {
+		return nil, fmt.Errorf("extender census: %w", err)
 	}
-	return netip.Addr{}, ledger.UnitNone, false
-}
-
-// The keys E3 deduplicates by: the provider client, each active IPv4 address
-// and each active IPv6 address's /64.
-func stExtenderCensusDedupKeys(record *StExtenderCensusRecord) []string {
-	keys := []string{"client:" + record.ClientId.String()}
-	for _, address := range record.Addresses {
-		switch {
-		case !address.Active || !address.Ip.IsValid():
-		case address.Ip.Is4():
-			keys = append(keys, "ipv4:"+address.Ip.String())
-		default:
-			keys = append(keys, "ipv6:"+netip.PrefixFrom(address.Ip, 64).Masked().String())
-		}
-	}
-	return keys
-}
-
-// BuildStExtenderCensus builds an epoch's census rows from its records:
-//   - E1, active: the record is active and unrevoked and one of its addresses
-//     is active; only then has it a unit, the keyed hash of its active IPv4
-//     address's /29, else of its active IPv6 address's /48;
-//   - E3, duplicate: of the active records that share a provider client, an
-//     IPv4 address or an IPv6 /64, directly or through others, only the
-//     lowest by (client id, extender id) counts;
-//   - E4: the provider client's coldkey, and its head binding;
-//   - E5: gated (the gated tier or a durable network), canary, declared.
-//
-// The rows are sorted by client id and extender id, and pass the census rules
-// validators check (ledger.CheckCensusRows).
-func BuildStExtenderCensus(records []*StExtenderCensusRecord, rules *StExtenderCensusRules) ([]ledger.CensusRow, error) {
-	if rules == nil || rules.Unit == nil {
-		return nil, errors.New("extender census: no unit key")
-	}
-	records = slices.Clone(records)
-	slices.SortFunc(records, func(a, b *StExtenderCensusRecord) int {
-		if c := a.ClientId.Cmp(b.ClientId); c != 0 {
-			return c
-		}
-		return a.ExtenderId.Cmp(b.ExtenderId)
-	})
-	rows := make([]ledger.CensusRow, len(records))
-	active := make([]bool, len(records))
-	listed := make(map[server.Id]bool, len(records))
-	for i, record := range records {
-		if listed[record.ExtenderId] {
-			return nil, fmt.Errorf("extender census: extender %s is listed twice", record.ExtenderId)
-		}
-		listed[record.ExtenderId] = true
-		row := ledger.CensusRow{ExtenderID: [16]byte(record.ExtenderId), ClientID: [16]byte(record.ClientId)}
-		if address, family, ok := stExtenderCensusUnitAddress(record); ok && record.Active && !record.Revoked {
-			active[i] = true
-			row.Flags |= ledger.CensusActive
-			row.Unit, row.Family = rules.Unit(address), family
-			if row.Unit == ([32]byte{}) {
-				return nil, fmt.Errorf("extender census: extender %s has a zero unit", record.ExtenderId)
-			}
-		}
-		if record.Revoked {
-			row.Flags |= ledger.CensusRevoked
-		}
-		if record.DirectoryTier != connect.ExtenderDirectoryTierOpen || rules.Durable[record.NetworkId] {
-			row.Flags |= ledger.CensusGated
-		}
-		if record.Canary {
-			row.Flags |= ledger.CensusCanary
-		}
-		if rules.Declared[record.NetworkId] {
-			row.Flags |= ledger.CensusDeclared
-		}
-		if rules.HeadBound[record.ClientId] {
-			row.Flags |= ledger.CensusHeadBound
-		}
-		row.Coldkey = rules.Coldkeys[record.ClientId]
-		rows[i] = row
-	}
-	// E3 over the active records: a union of every key's records, each
-	// component counted once, for its lowest (client id, extender id), which
-	// in this order is its lowest index.
-	parent := make([]int, len(records))
-	for i := range parent {
-		parent[i] = i
-	}
-	var find func(int) int
-	find = func(i int) int {
-		for parent[i] != i {
-			parent[i] = parent[parent[i]]
-			i = parent[i]
-		}
-		return i
-	}
-	first := map[string]int{}
-	for i, record := range records {
-		if !active[i] {
-			continue
-		}
-		for _, key := range stExtenderCensusDedupKeys(record) {
-			j, ok := first[key]
-			if !ok {
-				first[key] = i
-				continue
-			}
-			a, b := find(i), find(j)
-			if a != b {
-				parent[max(a, b)] = min(a, b)
-			}
-		}
-	}
-	for i := range records {
-		if active[i] && find(i) != i {
-			rows[i].Flags |= ledger.CensusDuplicate
-		}
-	}
+	rows := eligibilities.censusRows()
 	if err := ledger.CheckCensusRows(rows); err != nil {
 		return nil, fmt.Errorf("extender census: %w", err)
 	}
