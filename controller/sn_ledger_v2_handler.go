@@ -327,10 +327,11 @@ func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, col
 	deploymentKey := cfg.DeploymentKey()
 	// The pending root is read before the latest finalized root: a root that
 	// finalizes between the reads is then the finalized root, never in
-	// neither read, and read in both it is no longer pending.
+	// neither read, and a pending root read that is not after the finalized
+	// root has finalized since, or been passed by one that did.
 	pending := stLedgerV2PendingRoot(ctx, deploymentKey, noId)
 	finalized := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, noId)
-	if pending != nil && finalized != nil && pending.Seq == finalized.Seq {
+	if pending != nil && finalized != nil && pending.Seq <= finalized.Seq {
 		pending = nil
 	}
 	if finalized == nil && pending == nil && !recorded {
