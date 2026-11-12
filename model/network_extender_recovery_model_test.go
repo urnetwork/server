@@ -90,6 +90,9 @@ func TestGetNetworkExtenderRecoveryProbeTargetsReadsWhatTheProbesDeactivated(t *
 		connect.AssertEqual(t, revokedTarget.IpVersion, 4)
 		connect.AssertEqual(t, revokedTarget.Ip, netip.MustParseAddr("192.0.2.41"))
 		connect.AssertEqual(t, revokedTarget.NetworkId, revoked.Extender.NetworkId)
+		// the client a webrtc address's return is probed through
+		// (connect/EXTENDER.md S8)
+		connect.AssertEqual(t, revokedTarget.ClientId, revoked.Extender.ClientId)
 		connect.AssertEqual(t, string(revokedTarget.PublicKey), string(revokedKey))
 		connect.AssertEqual(t, revokedTarget.RevokeTime != nil, true)
 		connect.AssertEqual(t, revokedTarget.LastProbeTime != nil, true)

@@ -48,6 +48,7 @@ func (self *testActivationProbes) judgeOnTheRealClock(ctx context.Context, carri
 		ctx,
 		newExtenderActivationClock(),
 		self.activationProbes(),
+		testActivationTcpChallengeTimeout,
 		carriers,
 		testAcceptanceTcpPort,
 		testAcceptanceUdpPort,

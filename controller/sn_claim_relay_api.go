@@ -67,11 +67,31 @@ func snClaimRelayClassOf(state string) int {
 	}
 }
 
+// snClaimRelayStateFor is the relay's state as GET /sn/claim-relay answers it,
+// with partial=true or without. A pass that claimed the pools it could read
+// says ledger_unavailable for those it could not. Without partial=true, as
+// every app that predates the capture the flag pool asks, a pass whose only
+// such pools are capture the flag pools reads running, as it would have before
+// that pool existed (sn CAPTURETHEFLAG.md §12.1, item 22): those pools are left
+// out of the answer, and the operator's pool's rows read as before.
+func snClaimRelayStateFor(status *SnClaimRelayStatus, partial bool) string {
+	if partial || status.State != SnClaimRelayStateLedgerUnavailable || !status.OthersClaimed || len(status.UnavailablePools) == 0 {
+		return status.State
+	}
+	for _, noId := range status.UnavailablePools {
+		if kind, _ := StLedgerV2PoolKind(noId); kind != StLedgerV2PoolKindCtf {
+			return status.State
+		}
+	}
+	return SnClaimRelayStateRunning
+}
+
 // SnClaimRelayArgs are GET /sn/claim-relay's query: Partial (partial=true) asks
 // for the pools that can be read, naming the others in UnavailablePools.
 // Without it, as old apps ask, a capture the flag pool that cannot be read is
-// left out, unnamed, and any other pool that cannot be read is an Error for
-// all of them.
+// left out, unnamed, with the relay's state as before that pool
+// (snClaimRelayStateFor), and any other pool that cannot be read is an Error
+// for all of them.
 type SnClaimRelayArgs struct {
 	Partial bool
 }
@@ -229,9 +249,10 @@ func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, ent
 			if class == snClaimRelayClassMoving || status.State == SnClaimRelayStateLedgerUnavailable {
 				class = snClaimRelayClassPaused
 			}
-		case status.State == SnClaimRelayStateLedgerUnavailable:
+		case status.State == SnClaimRelayStateLedgerUnavailable && status.OthersClaimed:
 			// the pass said the ledger is unavailable for another pool's
-			// sake: this pool's accounts are claimed
+			// sake and claimed this pool's accounts; one that stopped on
+			// this pool after naming another pauses it, as before that pool
 			class = snClaimRelayClassMoving
 		}
 	}
@@ -439,7 +460,7 @@ func SnClaimRelayWithArgs(args *SnClaimRelayArgs, clientSession *session.ClientS
 		price = parsed
 	}
 	result := &SnClaimRelayResult{
-		State:                    status.State,
+		State:                    snClaimRelayStateFor(status, args.Partial),
 		AutomaticThresholdTaoRao: int64(snClaimRelayAutomaticTaoRao),
 		TransferFloorTaoRao:      int64(snClaimRelayFloorTaoRao),
 		AutomaticThresholdRao:    snClaimRelayAlphaOf(snClaimRelayAutomaticTaoRao, price).Int64(),

@@ -178,6 +178,7 @@ func TestExtenderActivationStepsNameTheProbedFamily(t *testing.T) {
 		context.Background(),
 		probes.clock.activationClock(),
 		probes.activationProbes(),
+		testActivationTcpChallengeTimeout,
 		[]string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierQuic},
 		testAcceptanceTcpPort,
 		testAcceptanceUdpPort,

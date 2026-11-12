@@ -72,6 +72,7 @@ func GetNetworkExtenderRecoveryProbeTargets(
 			SELECT
 				network_extender.extender_id,
 				network_extender.network_id,
+				network_extender.client_id,
 				network_extender.public_key,
 				network_extender.tcp_port,
 				network_extender.dns_tld,
@@ -81,7 +82,8 @@ func GetNetworkExtenderRecoveryProbeTargets(
 				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END,
 				GREATEST(network_extender_address.activate_time, network_extender_address.last_probe_success_time),
 				network_extender_address.last_probe_time,
-				network_extender.revoke_time
+				network_extender.revoke_time,
+				COALESCE(network_extender_address.tcp_port, 0)
 			FROM network_extender_address
 			INNER JOIN network_extender ON
 				network_extender.extender_id = network_extender_address.extender_id
@@ -99,9 +101,13 @@ func GetNetworkExtenderRecoveryProbeTargets(
 			for result.Next() {
 				target := &NetworkExtenderRecoveryProbeTarget{}
 				var carriers string
+				var addressTcpPort int
 				server.Raise(result.Scan(
 					&target.ExtenderId,
 					&target.NetworkId,
+					// the client a webrtc address's return is probed through
+					// (connect/EXTENDER.md S8)
+					&target.ClientId,
 					&target.PublicKey,
 					&target.TcpPort,
 					&target.DnsTld,
@@ -112,8 +118,15 @@ func GetNetworkExtenderRecoveryProbeTargets(
 					&target.LastWorkTime,
 					&target.LastProbeTime,
 					&target.RevokeTime,
+					&addressTcpPort,
 				))
 				target.Carriers = splitExtenderCarriers(carriers)
+				// probed for its return where it was probed before: on its own
+				// port (connect/EXTENDER.md S10), or the extender's for an
+				// address activated before its own was kept
+				if 0 < addressTcpPort {
+					target.TcpPort = addressTcpPort
+				}
 				targets = append(targets, target)
 			}
 		})

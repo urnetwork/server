@@ -27,6 +27,7 @@ import (
 
 	"maps"
 
+	"github.com/pion/webrtc/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
 
@@ -558,6 +559,9 @@ type ExchangeSettings struct {
 	// has a few transports, each seen from one address per family.
 	// Non-positive uses the default.
 	ObservedAddressesMaxCount int
+	// the residents' half of the webrtc extender carrier's signaling relay
+	// (extender_webrtc_relay.go): its bounds per exchange process
+	ExtenderWebRtcRelay ExtenderWebRtcRelaySettings
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -709,6 +713,7 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		},
 		ClientCloseBatchSize:      512,
 		ObservedAddressesMaxCount: 16,
+		ExtenderWebRtcRelay:       *DefaultExtenderWebRtcRelaySettings(),
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -858,6 +863,12 @@ type Exchange struct {
 	// KeyEventDelivery.Enabled
 	keyEventSubscriber          *keyEventSubscriber
 	contractOriginNotifications *model.ContractOriginNotifications
+	// the webrtc extender carrier offers this exchange's residents relay at
+	// once, over all of them (ExtenderWebRtcRelaySettings.MaxConcurrentRelays)
+	extenderWebRtcRelaySlots chan struct{}
+	// the wakes of the residents' relays: this process's own offer channel,
+	// set exactly when keyEventSubscriber is (extender_webrtc_offer_wakes.go)
+	extenderWebRtcOfferWakes *extenderWebRtcOfferWakes
 
 	// set once `Drain` starts. While draining, new connections are refused
 	// (`ConnectHandler.Connect` 503s and `NominateLocalResident` declines) so
@@ -980,6 +991,10 @@ func newExchange(
 		residentChanges:       map[server.Id]chan struct{}{},
 		connections:           map[server.Id]map[server.Id]context.CancelFunc{},
 		drainedClients:        map[server.Id]struct{}{},
+		extenderWebRtcRelaySlots: make(
+			chan struct{},
+			max(0, settings.ExtenderWebRtcRelay.MaxConcurrentRelays),
+		),
 	}
 
 	if settings.KeyEventDelivery.Enabled {
@@ -987,6 +1002,15 @@ func newExchange(
 		// residents register their listeners with it in `Resident.Run`
 		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery, settings.EnableStuckProviderRecycle)
 		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
+		// the residents' webrtc offers wake this process on its own channel,
+		// the one its resident registrations name (connect/EXTENDER.md S8)
+		exchange.extenderWebRtcOfferWakes = newExtenderWebRtcOfferWakes(
+			cancelCtx,
+			model.ExtenderWebRtcOfferChannel(host, service, block),
+			server.DefaultRedisShardSubscriptionSettings(),
+			nil,
+			settings.KeyEventDelivery.ResyncSpreadTimeout,
+		)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block, ExchangeOpTransport)
@@ -4888,6 +4912,25 @@ func (self *Resident) Run() {
 		removeCloseListener := self.exchange.keyEventSubscriber.AddCloseListener(self.clientId, closeListener)
 		defer removeCloseListener()
 		closeListener.Kick()
+
+		// the webrtc extender carrier's offers the prober relays to the
+		// client (connect/EXTENDER.md S8, extender_webrtc_relay.go), woken on
+		// this process's offer channel. An offer added before this
+		// registration had no listener, so it takes once now; the listener
+		// holds no goroutine while it has nothing to relay
+		relayListener := newExtenderWebRtcRelayListener(
+			self.ctx,
+			self.clientId,
+			&self.exchange.settings.ExtenderWebRtcRelay,
+			self.exchange.extenderWebRtcRelaySlots,
+			extenderWebRtcRelayRedisStore{},
+			self.exchangeExtenderWebRtcOffer,
+			time.Now,
+		)
+		defer relayListener.CloseAndWait()
+		removeRelayListener := self.exchange.extenderWebRtcOfferWakes.AddListener(self.clientId, relayListener)
+		defer removeRelayListener()
+		relayListener.Kick()
 	}
 
 	// only top-level client-category peers get network peer updates.
@@ -4954,6 +4997,19 @@ func (self *Resident) handleNetworkPeerEvent(event *model.NetworkPeerEvent) {
 	for _, frame := range frames {
 		self.sendListenerFrame(frame)
 	}
+}
+
+// Exchanges one relayed webrtc extender carrier offer with the resident
+// client (connect/EXTENDER.md S8): the internal client, whose id is the
+// control id, sends it as a flagged `ExchangeSignals`, the way a peers update
+// reaches the client, and waits under the offer's stream id for the answer of
+// this client alone. The control id is a no-contract peer of every client,
+// so neither direction needs a contract.
+func (self *Resident) exchangeExtenderWebRtcOffer(
+	ctx context.Context,
+	offer webrtc.SessionDescription,
+) (webrtc.SessionDescription, error) {
+	return self.client.WebRtcManager().ExtenderCarrierExchanger(connect.Id(self.clientId)).ExchangeOffer(ctx, offer)
 }
 
 // Sends one listener-produced control frame to the resident client. A failed

@@ -23,6 +23,12 @@ func TestStCtfDriverRecordsInTheDatabase(t *testing.T) {
 		f.commitRound(8, 1000)
 		f.emission(8, 1_000_000_000_000)
 		f.chain.head = f.chain.end(8)
+		// the first provider in Iceland is a client of a network; the census
+		// fake records no members, so the award takes network_client's network
+		winner := server.Id(ctfTestCandidates()[0].ClientID)
+		networkId, userId := server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(f.ctx, networkId, "ctfdriver", userId)
+		model.Testing_CreateDevice(f.ctx, networkId, server.NewId(), winner, "ctf driver", "test")
 
 		requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusConfirmed, false, "")
 		requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusSkipped, false, "is committed at block")
@@ -47,8 +53,20 @@ func TestStCtfDriverRecordsInTheDatabase(t *testing.T) {
 		if result == nil || result.LedgerHash != pending.LedgerHash || !result.Drawn || result.Awards != 6 {
 			t.Fatalf("result %+v", result)
 		}
-		if awards := model.GetCtfAwards(f.ctx, key, ctfTestNoId, 8); len(awards) != 6 {
-			t.Fatalf("%d awards", len(awards))
+		written := model.GetCtfAwards(f.ctx, key, ctfTestNoId, 8)
+		if len(written) != 6 {
+			t.Fatalf("%d awards", len(written))
+		}
+		// each award is written with the network it was won for, known here
+		// for the winner alone
+		for _, award := range written {
+			if award.ClientId == winner && (award.NetworkId == nil || *award.NetworkId != networkId) ||
+				award.ClientId != winner && award.NetworkId != nil {
+				t.Fatalf("award of client %s written with network %v", award.ClientId, award.NetworkId)
+			}
+		}
+		if won := model.GetCtfNetworkAwards(f.ctx, key, ctfTestNoId, networkId, 8, 8); len(won) != 1 || won[0].ClientId != winner {
+			t.Fatalf("the network's awards %+v", won)
 		}
 		if pots := model.GetCtfPots(f.ctx, key, ctfTestNoId, 8); len(pots) != 498 {
 			t.Fatalf("%d pots", len(pots))

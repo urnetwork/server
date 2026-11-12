@@ -120,8 +120,10 @@ type snCtfSource interface {
 	// or every client's its network has had.
 	Wins(ctx context.Context, view *snCtfView, scope snCtfClientScope) ([]*snCtfWin, error)
 	// AccountClaims reads the claim state of each coldkey's account in the
-	// CTF pool at the roots it needs. A coldkey whose state cannot be read is
-	// left out, so its wins answer claimed null.
+	// CTF pool at the roots it needs, while ctx lasts, and returns when it
+	// ends, with nothing it started still running. A coldkey whose state
+	// cannot be read in that time is left out, so its wins answer claimed
+	// null.
 	AccountClaims(ctx context.Context, view *snCtfView, needs []*snCtfClaimNeed) map[[32]byte]*snCtfAccountClaims
 }
 
@@ -460,10 +462,18 @@ func SnCtfClient(w http.ResponseWriter, r *http.Request) {
 	writeSnCacheableJson(w, r, clientSession, snCtfClientCacheControl, view.AsOf, result)
 }
 
+// How long an answer of GET /sn/ctf/client may spend reading the claim states
+// of its wins: each coldkey's account in the CTF pool, and vault2's claimed at
+// the finalized head. A state not read by then answers claimed null, so a
+// claim state that a chain down or slow cannot give never fails the answer,
+// nor holds it past this. Tests shorten it.
+var snCtfClaimsTimeout = 5 * time.Second
+
 // snCtfClientAnswer reads what GET /sn/ctf/client answers for a scope: a
 // client's census members and awards in the most recent limit covered epochs,
 // the scope's wins, and the claim states of their coldkeys' accounts. A claim
-// state that cannot be read never fails the answer; its wins say null.
+// state that cannot be read within snCtfClaimsTimeout never fails the answer;
+// its wins say null.
 func snCtfClientAnswer(ctx context.Context, source snCtfSource, view *snCtfView, scope snCtfClientScope, limit int) (*SnCtfClientResult, error) {
 	facts := map[uint64]*snCtfClientEpochFacts{}
 	if scope.ClientId != nil {
@@ -480,6 +490,8 @@ func snCtfClientAnswer(ctx context.Context, source snCtfSource, view *snCtfView,
 	if err != nil {
 		return nil, fmt.Errorf("wins: %w", err)
 	}
-	claims := source.AccountClaims(ctx, view, snCtfClaimNeeds(view, wins))
+	claimsCtx, cancel := context.WithTimeout(ctx, snCtfClaimsTimeout)
+	defer cancel()
+	claims := source.AccountClaims(claimsCtx, view, snCtfClaimNeeds(view, wins))
 	return snCtfClientResultOf(view, scope, facts, wins, claims, limit), nil
 }

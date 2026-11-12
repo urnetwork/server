@@ -45,9 +45,8 @@ import (
 //
 // Whether an extender may be measured is one rule everywhere,
 // ExtenderMeasurementEligibleAddresses: an active extender in the open tier
-// that is no canary (§2, decision 1), whose tcp carrier is on 443 where
-// browsers connect (decision 4), at each active address that serves tcp
-// (decision 14).
+// that is no canary (§2, decision 1), at each active address that serves tcp
+// (decision 14) on 443, where browsers connect (decision 4).
 
 const (
 	// The port a browser reaches the measurement api on: the extender's
@@ -196,10 +195,11 @@ func ParseExtenderMeasurementCsrDer(csr []byte, extenderId server.Id, zone strin
 
 // ExtenderMeasurementEligibleAddresses is the addresses an extender is
 // measured at, IPv4 first, or why it may not be measured (C5, C8): the
-// extender is active, in the open tier and no canary, serves tcp on the
-// measurement port, and has at least one active address that serves tcp. A
-// webrtc-only extender has no public inbound address and is not measured
-// (decision 14).
+// extender is active, in the open tier and no canary, and has at least one
+// active address that serves tcp on the measurement port. Each address is
+// judged by its own port, which a router's mapping may move on one family
+// alone (connect/EXTENDER.md S10). A webrtc-only extender has no public inbound
+// address and is not measured (decision 14).
 func ExtenderMeasurementEligibleAddresses(
 	extender *model.NetworkExtender,
 	addresses []*model.NetworkExtenderAddress,
@@ -213,12 +213,16 @@ func ExtenderMeasurementEligibleAddresses(
 		return nil, "an extender in the gated tier is never measured"
 	case extender.CanaryChannel != "":
 		return nil, "a canary is never measured"
-	case extender.TcpPort != ExtenderMeasurementPort:
-		return nil, fmt.Sprintf("the extender serves tcp on %d, not %d", extender.TcpPort, ExtenderMeasurementPort)
 	}
 	ips = []netip.Addr{}
+	// the port of an address left out for serving tcp on another, for the reason
+	otherTcpPort := 0
 	for _, address := range addresses {
 		if !address.Active || !slices.Contains(address.Carriers, connect.ExtenderCarrierTcp) {
+			continue
+		}
+		if tcpPort := address.DialTcpPort(extender); tcpPort != ExtenderMeasurementPort {
+			otherTcpPort = tcpPort
 			continue
 		}
 		ip := address.Ip.Unmap().WithZone("")
@@ -227,6 +231,9 @@ func ExtenderMeasurementEligibleAddresses(
 		}
 	}
 	if len(ips) == 0 {
+		if otherTcpPort != 0 {
+			return nil, fmt.Sprintf("the extender serves tcp on %d, not %d", otherTcpPort, ExtenderMeasurementPort)
+		}
 		return nil, "the extender has no public inbound address"
 	}
 	slices.SortFunc(ips, func(a netip.Addr, b netip.Addr) int {

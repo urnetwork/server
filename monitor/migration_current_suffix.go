@@ -988,6 +988,11 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the per-target ping hour's evidence refusals, versioned by their
 	// position
 	[]snMainnetMigrationContract{networkPingTargetEvidenceMigrationContract},
+	// the carrier ports of each extender address, versioned by its position
+	[]snMainnetMigrationContract{extenderAddressPortsMigrationContract},
+	// the network each capture the flag award was won for, versioned by its
+	// position
+	[]snMainnetMigrationContract{ctfAwardNetworkMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

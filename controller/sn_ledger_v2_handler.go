@@ -15,8 +15,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
 
 	"github.com/urnetwork/glog"
@@ -32,8 +35,10 @@ import (
 
 // stLedgerV2AccountTreeLock serializes the endpoint's tree reads, so that the
 // requests that arrive together after a new root build its tree once and then
-// share the cached one.
-var stLedgerV2AccountTreeLock sync.Mutex
+// share the cached one. A read waits for it only while its context lasts, so
+// a reader with a deadline, as GET /sn/ctf/client's claim states have, is
+// never held past it by another reader's build.
+var stLedgerV2AccountTreeLock = make(chan struct{}, 1)
 
 // ErrStLedgerV2Coldkey refuses a coldkey that is neither an ss58 address with
 // the Bittensor prefix nor 0x and 64 hex digits.
@@ -215,6 +220,21 @@ func StLedgerV2AccountsPartial(ctx context.Context, coldkey [32]byte) (*StLedger
 	return stLedgerV2Accounts(ctx, coldkey, true)
 }
 
+// stLedgerV2ColdkeyAccounts reads the account record of a coldkey. A test
+// replaces it to record a root while the record is read.
+var stLedgerV2ColdkeyAccounts = model.GetStLedgerV2AccountsForColdkey
+
+// stLedgerV2PendingRoot reads a pool's pending root. A test replaces it to
+// finalize the root while it is read.
+var stLedgerV2PendingRoot = model.GetStLedgerV2PendingRoot
+
+// stLedgerV2Count is the number of a pool's recorded accounts, read before
+// the account record, or why it could not be read.
+type stLedgerV2Count struct {
+	value uint64
+	err   error
+}
+
 func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*StLedgerV2AccountsResult, error) {
 	result := &StLedgerV2AccountsResult{Coldkey: fmt.Sprintf("0x%x", coldkey), Accounts: []*StLedgerV2AccountEntry{}, UnavailablePools: []*StLedgerV2UnavailablePool{}}
 	cfg := stConfig()
@@ -224,9 +244,25 @@ func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*S
 	recorded := map[uint64]uint64{}
 	ctfOn := stCtfPoolOn(cfg)
 	noIds := stLedgerV2OwnPools(cfg, ctfOn)
+	// Each own pool's recorded accounts are counted before the record of the
+	// coldkey's accounts is read. An account the record had not reached when
+	// it was read is at or after that count, where stLedgerV2AccountEntry
+	// looks for it, so a root recorded between the reads never hides it. A
+	// count that cannot be read fails only a pool that needs it, as it did
+	// when it was read there. The pools only the record names hold the
+	// coldkey's recorded account and need no count.
+	counts := map[uint64]stLedgerV2Count{}
+	for _, noId := range noIds {
+		var count stLedgerV2Count
+		count.err = stLedgerV2Guard(func() error {
+			count.value = model.GetStLedgerV2AccountCount(ctx, cfg.DeploymentKey(), noId)
+			return nil
+		})
+		counts[noId] = count
+	}
 	var accounts []*model.StLedgerV2Account
 	if err := stLedgerV2Guard(func() error {
-		accounts = model.GetStLedgerV2AccountsForColdkey(ctx, cfg.DeploymentKey(), coldkey)
+		accounts = stLedgerV2ColdkeyAccounts(ctx, cfg.DeploymentKey(), coldkey)
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("st ledger v2: the account record of 0x%x: %w", coldkey, err)
@@ -246,7 +282,7 @@ func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*S
 		index, isRecorded := recorded[noId]
 		var entry *StLedgerV2AccountEntry
 		err := stLedgerV2Guard(func() (err error) {
-			entry, err = stLedgerV2AccountEntry(ctx, cfg, noId, coldkey, index, isRecorded)
+			entry, err = stLedgerV2AccountEntry(ctx, cfg, noId, coldkey, index, isRecorded, counts[noId])
 			return
 		})
 		if err != nil {
@@ -285,11 +321,19 @@ func stLedgerV2Guard(read func() error) (err error) {
 // One pool's entry, or nil when neither root holds the coldkey. A recorded
 // account has its index from the account index; any other account was
 // appended after the recorded ones, by a finalized root not recorded yet or
-// by the pending root.
-func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, coldkey [32]byte, index uint64, recorded bool) (*StLedgerV2AccountEntry, error) {
+// by the pending root, so it is at or after count, the pool's recorded
+// accounts counted before the account index was read.
+func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, coldkey [32]byte, index uint64, recorded bool, count stLedgerV2Count) (*StLedgerV2AccountEntry, error) {
 	deploymentKey := cfg.DeploymentKey()
+	// The pending root is read before the latest finalized root: a root that
+	// finalizes between the reads is then the finalized root, never in
+	// neither read, and a pending root read that is not after the finalized
+	// root has finalized since, or been passed by one that did.
+	pending := stLedgerV2PendingRoot(ctx, deploymentKey, noId)
 	finalized := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, noId)
-	pending := model.GetStLedgerV2PendingRoot(ctx, deploymentKey, noId)
+	if pending != nil && finalized != nil && pending.Seq <= finalized.Seq {
+		pending = nil
+	}
 	if finalized == nil && pending == nil && !recorded {
 		// no root holds any account of the pool, like the capture the flag
 		// pool's before its first
@@ -310,7 +354,10 @@ func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, col
 	}
 	found := recorded
 	if !found {
-		index, found = stLedgerV2FindAccount(coldkey, model.GetStLedgerV2AccountCount(ctx, deploymentKey, noId), finalizedAccounts, pendingAccounts)
+		if count.err != nil {
+			return nil, count.err
+		}
+		index, found = stLedgerV2FindAccount(coldkey, count.value, finalizedAccounts, pendingAccounts)
 	}
 	if !found {
 		return nil, nil
@@ -347,8 +394,14 @@ func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, col
 }
 
 func stLedgerV2AccountTree(ctx context.Context, root *model.StLedgerV2Root) (*merkle.LedgerSumTree, []merkle.LedgerAccount, error) {
-	stLedgerV2AccountTreeLock.Lock()
-	defer stLedgerV2AccountTreeLock.Unlock()
+	select {
+	case stLedgerV2AccountTreeLock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, fmt.Errorf("st ledger v2: the tree of ledger 0x%x: %w", root.LedgerHash, ctx.Err())
+	}
+	defer func() {
+		<-stLedgerV2AccountTreeLock
+	}()
 	return StLedgerV2Tree(ctx, root.LedgerHash, root.Root, &root.Total, root.LeafCount)
 }
 
@@ -371,4 +424,73 @@ func (self *CoreStClient) LedgerV2Claimed(ctx context.Context, noId uint64, inde
 		return uint256.Int{}, fmt.Errorf("vault2 claimed(%d, %d): %w", noId, index, err)
 	}
 	return stUint256(claimed)
+}
+
+// LedgerV2ClaimedAt reads vault2.claimed(noId, index) of every index at one
+// block, all of them from one endpoint: a failed request is read again whole,
+// at the next endpoint or after a pause, while ctx lasts.
+func (self *CoreStClient) LedgerV2ClaimedAt(ctx context.Context, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error) {
+	if len(indexes) == 0 {
+		return []uint256.Int{}, nil
+	}
+	var claimed []uint256.Int
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
+		values, err := stReadLedgerV2ClaimedAt(ctx, client, self.cfg.VaultV2, noId, block, indexes)
+		if err != nil {
+			return err
+		}
+		claimed = values
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("vault2 claimed of %d accounts of pool %d at block %d: %w", len(indexes), noId, block, err)
+	}
+	return claimed, nil
+}
+
+// stReadLedgerV2ClaimedAt reads vault2's claimed of each index at one block
+// from one endpoint, in eth_call batches of at most
+// stMaximumEVMRPCBatchCalls. rpc.BatchElem matches the answers by JSON-RPC
+// id, so the order an endpoint answers in cannot move a value to another
+// index.
+func stReadLedgerV2ClaimedAt(ctx context.Context, client *ethclient.Client, vault common.Address, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error) {
+	if client == nil {
+		return nil, errors.New("st ledger v2: the claimed batch has no endpoint")
+	}
+	claimed := make([]uint256.Int, len(indexes))
+	for start := 0; start < len(indexes); start += stMaximumEVMRPCBatchCalls {
+		end := min(start+stMaximumEVMRPCBatchCalls, len(indexes))
+		raw := make([]hexutil.Bytes, end-start)
+		batch := make([]rpc.BatchElem, end-start)
+		for i := start; i < end; i++ {
+			batch[i-start] = rpc.BatchElem{
+				Method: "eth_call",
+				Args: []any{
+					map[string]any{"to": vault, "data": hexutil.Bytes(stLedgerV2VaultAbi.PackClaimed(stBig(noId), stBig(indexes[i])))},
+					hexutil.EncodeUint64(block),
+				},
+				Result: &raw[i-start],
+			}
+		}
+		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
+		err := client.Client().BatchCallContext(callCtx, batch)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		for i := range batch {
+			index := indexes[start+i]
+			if batch[i].Error != nil {
+				return nil, fmt.Errorf("vault2 claimed(%d, %d): %w", noId, index, batch[i].Error)
+			}
+			value, err := stLedgerV2VaultAbi.UnpackClaimed(raw[i])
+			if err != nil {
+				return nil, fmt.Errorf("vault2 claimed(%d, %d): %w", noId, index, err)
+			}
+			if claimed[start+i], err = stUint256(value); err != nil {
+				return nil, fmt.Errorf("vault2 claimed(%d, %d): %w", noId, index, err)
+			}
+		}
+	}
+	return claimed, nil
 }

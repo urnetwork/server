@@ -72,6 +72,10 @@ const (
 	// under all of what is left (connect#230). A udp carrier gives no answer
 	// to fail fast on, so one that never answers waits out the budget, but it
 	// waits beside the others rather than before them, and loses only itself.
+	// The webrtc test that runs in place of a tcp path that failed has a
+	// budget of this length of its own, ending no later than
+	// ExtenderActivateSettings.TcpChallengeTimeout past this one
+	// (connect/EXTENDER.md S8), so an activation probes for at most the two.
 	ExtenderActivateProbeTimeout = 10 * time.Second
 
 	// The service label of the family api hosts an activation is posted to
@@ -206,7 +210,9 @@ type ExtenderActivateSettings struct {
 	UnprovenAccountAttemptLookback time.Duration
 
 	// activations the api process probes at once (connect#230). Each holds a
-	// handler for up to the 10 s probe budget, so a fleet restarting at once
+	// handler for up to the 10 s probe budget, or 15 s when the webrtc test
+	// runs in place of a tcp path that failed (TcpChallengeTimeout), so a
+	// fleet restarting at once
 	// could otherwise hold thousands. One over it is refused as busy before
 	// it spends any budget, with a `retry_after_seconds`. Non-positive refuses
 	// every activation as busy.
@@ -215,6 +221,34 @@ type ExtenderActivateSettings struct {
 	// the activations refused together do not all come back together
 	BusyRetryAfterMin time.Duration
 	BusyRetryAfterMax time.Duration
+
+	// how long the tcp carrier's challenge has, in an activation that offers
+	// the webrtc carrier beside tcp, before the tcp path is judged failed and
+	// the webrtc test runs in its place (C2a, connect/EXTENDER.md S8). The
+	// webrtc test runs only where the tcp path failed or was not offered, and
+	// never beside a tcp test that may still pass (owner, 2026-11-12). A tcp
+	// port that answers passes its challenge in a second or two; one a home
+	// router black-holes never answers, and the webrtc test after it, which a
+	// host behind nat is accepted on, then has a budget of
+	// ExtenderActivateProbeTimeout of its own. So such an activation probes
+	// for at most this plus ExtenderActivateProbeTimeout, the uptime probe's
+	// address budget (taskworker ExtenderProbeAddressTimeout). An activation
+	// that offers tcp without webrtc gives tcp the whole budget, as it always
+	// did. Non-positive gives the tcp challenge no time, so every such
+	// activation is tried on webrtc.
+	TcpChallengeTimeout time.Duration
+	// the most extenders the operator accepts on the webrtc carrier without
+	// tcp (connect/EXTENDER.md S8): active extenders with an active address
+	// that lists webrtc and not tcp, the activating key's own left out, so an
+	// extender already counted activates again. Past it an activation whose
+	// tcp path failed or was not offered is refused before the webrtc test
+	// runs, and its refusal names the cap. A first bound while the carrier is
+	// new (owner, 2026-11-12): every such address costs the uptime pass a
+	// relayed offer and an ICE join at the same probe concurrency
+	// (taskworker ExtenderProbeConcurrency), and a webrtc test that fails
+	// holds a worker for the whole address budget. Read only when the webrtc
+	// test is to run. Non-positive accepts none on webrtc without tcp.
+	MaxWebRtcOnlyExtenders int
 
 	// where every activation's outcome and probe step times are counted
 	// (extender_activation_metrics.go). Nil counts nothing, which is what a
@@ -491,7 +525,13 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		// fleet's refused posts over three rounds of the guard
 		BusyRetryAfterMin: 1 * time.Minute,
 		BusyRetryAfterMax: 3 * time.Minute,
-		metrics:           defaultExtenderActivationMetrics,
+		// the uptime probe's address budget less the activation's
+		TcpChallengeTimeout: 5 * time.Second,
+		// a hundred, up to two hundred addresses: a pass's webrtc probes that
+		// all wait out their 15 s budget hold the 16 workers about three
+		// minutes, inside the five-minute cadence beside the tcp addresses
+		MaxWebRtcOnlyExtenders: 100,
+		metrics:                defaultExtenderActivationMetrics,
 	}
 }
 
@@ -688,15 +728,19 @@ type ExtenderActivateResult struct {
 	DnsPorts []int `json:"dns_ports,omitempty"`
 	// the optional carriers that were offered and did not answer, each dns
 	// port that did not, in the order offered, with the port, the probe's
-	// error and its timing (C2a). They are left out of the stored address and
+	// error and its timing (C2a); and tcp, when its path failed and the
+	// activation passed on the webrtc test that ran in its place
+	// (connect/EXTENDER.md S8). They are left out of the stored address and
 	// the signed record, so the extender is published on the carriers that
-	// answered and no others. Empty on a refusal, which probes no optional
-	// carrier.
+	// answered and no others. A carrier that was never probed is in neither
+	// list: webrtc, offered beside a tcp path that passed, is not tested. Empty
+	// on a refusal, which probes no optional carrier.
 	RefusedCarriers []*ExtenderCarrierRefusal `json:"refused_carriers,omitempty"`
 	// every probe step the activation ran -- the tcp challenge and the forward
-	// through it, in the order run, then each dns port and quic, which run
+	// through it, in the order run, then the webrtc test when it ran in place
+	// of a failed tcp path or alone, then each dns port and quic, which run
 	// together and are listed in that order -- with how long it ran, how much
-	// of the probe budget was left when it started, and how it ended (C2). A
+	// of its budget was left when it started, and how it ended (C2). A
 	// refusal's last step is the one that refused it.
 	// Empty when the activation was refused before anything was probed.
 	ProbeSteps []*ExtenderProbeStep `json:"probe_steps,omitempty"`
@@ -727,6 +771,12 @@ type ExtenderActivateResult struct {
 	// extender makes a key of its network's own. Left out on every other
 	// answer; an extender that predates it reads `error` alone.
 	Refusal string `json:"refusal,omitempty"`
+	// true on every answer: this operator keeps each address's ports
+	// (connect/EXTENDER.md S10), storing the ports a post offers with that
+	// family's address alone and signing them per address, so an extender may
+	// offer each family its own ports. An extender that reads it does so only
+	// while the operator's last answer said it; one that predates it skips it.
+	AddressPorts bool `json:"address_ports,omitempty"`
 }
 
 // The wire form of a wait (`retry_after_seconds`): whole seconds, rounded up
@@ -786,6 +836,10 @@ func extenderCarrierConnectMode(carrier string) (connect.ExtenderConnectMode, bo
 		return connect.ExtenderConnectModeQuic, true
 	case connect.ExtenderCarrierDns:
 		return connect.ExtenderConnectModeDns, true
+	case connect.ExtenderCarrierWebRtc:
+		// no ip:port probe: reached through the exchange signaling
+		// (extender_webrtc_controller.go)
+		return connect.ExtenderConnectModeWebRtc, true
 	default:
 		return "", false
 	}
@@ -800,9 +854,12 @@ func extenderCarrierConnectMode(carrier string) (connect.ExtenderConnectMode, bo
 // the same record.
 //
 // The dns ports are the union of what the addresses answered on (L2),
-// ascending, because the record names one extender's ports and not one
-// address's, and a client dials the lowest first. DnsPort stays the extender's
-// configured port, which is what a reader that predates the list dials.
+// ascending, because the record's own ports are one extender's, and a client
+// dials the lowest first. DnsPort stays the extender's configured port, which
+// is what a reader that predates the list dials. The tcp and udp ports are the
+// extender's latest activation's. An address whose ports are not the record's
+// -- one family a router forwards on other ports (connect/EXTENDER.md S10) --
+// names its own beside them, which a reader that predates the fields skips.
 //
 // The country, and the continent with it, is the extender's derived location's
 // while it has one, else the one it activated from (connect/GEOMAP.md §6,
@@ -830,6 +887,17 @@ func SignExtenderRecord(
 		}
 	}
 	slices.Sort(dnsPorts)
+	// the rendezvous of the webrtc carrier (connect/EXTENDER.md S3, S8): the
+	// client id the extender's device is reachable under on the exchange,
+	// which a dialer signals its offer to, the client that activated last.
+	// Only a record whose address lists the carrier carries it.
+	var webRtcClientId []byte
+	for _, address := range addresses {
+		if slices.Contains(address.Carriers, connect.ExtenderCarrierWebRtc) {
+			webRtcClientId = extender.ClientId.Bytes()
+			break
+		}
+	}
 	countryCode := extender.RecordCountryCode()
 	directoryTier := extender.DirectoryTier
 	if extender.CanaryChannel != "" {
@@ -837,14 +905,15 @@ func SignExtenderRecord(
 		directoryTier = connect.ExtenderDirectoryTierGated
 	}
 	body := &protocol.ExtenderRecordBody{
-		PublicKey:   extender.PublicKey,
-		Addresses:   recordAddresses,
-		TcpPort:     uint32(extender.TcpPort),
-		UdpPort:     uint32(extender.UdpPort),
-		DnsPort:     uint32(extender.DnsPort),
-		DnsPorts:    dnsPorts,
-		DnsTld:      extender.DnsTld,
-		CountryCode: countryCode,
+		PublicKey:      extender.PublicKey,
+		WebRtcClientId: webRtcClientId,
+		Addresses:      recordAddresses,
+		TcpPort:        uint32(extender.TcpPort),
+		UdpPort:        uint32(extender.UdpPort),
+		DnsPort:        uint32(extender.DnsPort),
+		DnsPorts:       dnsPorts,
+		DnsTld:         extender.DnsTld,
+		CountryCode:    countryCode,
 		// the same mapping and the same country the geo dns sets use, so
 		// "close" means one thing on both paths (connect/DESIGNNOTES4.md §2)
 		ContinentCode: model.ContinentCodeForCountry(countryCode),
@@ -862,6 +931,29 @@ func SignExtenderRecord(
 		// while the posting network holds the key (connect/EXTENDER.md P6,
 		// phase 14b); nil when it posted none
 		RealityPublicKey: extenderRecordRealityPublicKey(extender),
+	}
+	// an address's own ports where they are not the record's: a router's
+	// mapping forwards one family's carriers on ports it picks while the other
+	// family answers on the bound ones (connect/EXTENDER.md S10). An address on
+	// the record's ports names none, so the record of an extender whose
+	// addresses share their ports is the record it always was, and a reader
+	// that predates the fields dials every address on the record's
+	for i, address := range addresses {
+		recordAddress := recordAddresses[i]
+		if tcpPort := address.DialTcpPort(extender); tcpPort != extender.TcpPort {
+			recordAddress.TcpPort = uint32(tcpPort)
+		}
+		if udpPort := address.DialUdpPort(extender); udpPort != extender.UdpPort {
+			recordAddress.UdpPort = uint32(udpPort)
+		}
+		addressDnsPorts := []uint32{}
+		for _, dnsPort := range address.DnsPorts {
+			addressDnsPorts = append(addressDnsPorts, uint32(dnsPort))
+		}
+		slices.Sort(addressDnsPorts)
+		if 0 < len(addressDnsPorts) && !slices.Equal(addressDnsPorts, body.DnsPorts) {
+			recordAddress.DnsPorts = addressDnsPorts
+		}
 	}
 	// what a client must declare before a release hands the record out
 	// (connect/EXTENDER-UPDATE2.md §3.2), decided from the body as signed, so
@@ -1197,9 +1289,10 @@ func (self *extenderActivateService) activate(
 			probeSteps,
 		)
 		return &ExtenderActivateResult{
-			Activated:  false,
-			Error:      message,
-			ProbeSteps: probeSteps,
+			Activated:    false,
+			Error:        message,
+			ProbeSteps:   probeSteps,
+			AddressPorts: true,
 		}, nil
 	}
 	// a refusal that judged nothing about the caller -- a busy api, a spent
@@ -1242,10 +1335,12 @@ func (self *extenderActivateService) activate(
 	if len(carriers) == 0 {
 		return refuse("an activation must offer at least one carrier")
 	}
-	// the forward probe runs over tcp, so an extender that does not serve tcp
-	// cannot be proved to forward at all
-	if !slices.Contains(carriers, connect.ExtenderCarrierTcp) {
-		return refuse("an activation must offer the tcp carrier")
+	// the forward is proved over a required path (C2a): public tcp, or the
+	// peer-to-peer webrtc carrier of a host behind nat (connect/EXTENDER.md
+	// S8), so an extender that serves neither cannot be proved to forward at
+	// all
+	if !slices.Contains(carriers, connect.ExtenderCarrierTcp) && !slices.Contains(carriers, connect.ExtenderCarrierWebRtc) {
+		return refuse("an activation must offer the tcp carrier or the webrtc carrier")
 	}
 
 	tcpPort := args.TcpPort
@@ -1550,14 +1645,40 @@ func (self *extenderActivateService) activate(
 				extenderForwardProbeTlsConfig(),
 			)
 		},
+		// signaled to the client the posting jwt names, which is the client
+		// the record will name as the rendezvous, and to no other
+		webRtc: func(ctx context.Context) (string, error) {
+			return probeExtenderWebRtcActivation(
+				ctx,
+				*clientSession.ByJwt.ClientId,
+				publicKey,
+				ipVersion,
+				clientIp,
+				config.ApiUrl,
+				extenderForwardProbeTlsConfig(),
+			)
+		},
 	}
 	if self.testProbes != nil {
 		probes = self.testProbes(clientIp, ipVersion)
+	}
+	if probes.webRtcOnlyRoom == nil {
+		// the operator's cap on extenders accepted on webrtc without tcp,
+		// whatever probes run: read only when the webrtc test is to run, and
+		// never counting the activating key's own extender
+		maxWebRtcOnlyExtenders := settings.MaxWebRtcOnlyExtenders
+		probes.webRtcOnlyRoom = func(ctx context.Context) error {
+			return extenderWebRtcOnlyRoom(
+				maxWebRtcOnlyExtenders,
+				model.CountActiveWebRtcOnlyNetworkExtenders(ctx, publicKey),
+			)
+		}
 	}
 	outcome := probeExtenderActivation(
 		clientSession.Ctx,
 		newExtenderActivationClock(),
 		probes,
+		settings.TcpChallengeTimeout,
 		carriers,
 		tcpPort,
 		udpPort,
@@ -1757,6 +1878,7 @@ func (self *extenderActivateService) activate(
 		AllowedHosts:    config.AllowedHosts(),
 		Record:          recordBase64,
 		Bootstrap:       bootstrap,
+		AddressPorts:    true,
 	}, nil
 }
 
@@ -1768,6 +1890,41 @@ func (self *extenderActivateService) activate(
 type extenderActivationProbes struct {
 	carrier func(ctx context.Context, connectMode connect.ExtenderConnectMode, port int) error
 	forward func(ctx context.Context) (string, error)
+	// the webrtc test (C2a, connect/EXTENDER.md S8): one dial over the
+	// carrier through the signaling relay to the activating client, which
+	// verifies the key and then the `GET /hello` through it, answering the
+	// caller address the api saw. Nil is an operator with no signaling path.
+	webRtc func(ctx context.Context) (string, error)
+	// whether the operator takes another extender on the webrtc carrier
+	// without tcp (ExtenderActivateSettings.MaxWebRtcOnlyExtenders), asked
+	// just before the webrtc test runs, which is only where the tcp path
+	// failed or was not offered: nil when it does, an error wrapping
+	// ErrExtenderWebRtcOnlyCap past the cap, any other error when the count
+	// could not be read, either of which refuses the webrtc path untried.
+	// Nil asks nothing, which is a test's.
+	webRtcOnlyRoom func(ctx context.Context) error
+}
+
+// ErrExtenderWebRtcOnlyCap is the refusal of the webrtc test of an activation
+// whose tcp path failed or was not offered, once the operator has as many
+// extenders on the webrtc carrier without tcp as it takes for now
+// (ExtenderActivateSettings.MaxWebRtcOnlyExtenders, connect/EXTENDER.md S8).
+var ErrExtenderWebRtcOnlyCap = errors.New("the operator accepts no more extenders on the webrtc carrier without tcp for now")
+
+// Whether one more extender may be accepted on the webrtc carrier without
+// tcp, given the cap and how many the operator has, its own left out: nil
+// while there is room, else the cap's refusal, which says how many there are
+// and that an extender the internet reaches on tcp is still accepted.
+func extenderWebRtcOnlyRoom(maxCount int, count int) error {
+	if count < maxCount {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w (%d accepted, the cap is %d); an extender whose tcp port the internet reaches is accepted on tcp",
+		ErrExtenderWebRtcOnlyCap,
+		count,
+		max(0, maxCount),
+	)
 }
 
 // The clock the probes of one activation run on (C2): the time each step is
@@ -1901,54 +2058,91 @@ func extenderProbeSecondsText(d time.Duration) string {
 
 // Judges one activation by the acceptance rule of C2a.
 //
-// The required test runs first: the challenge on the tcp carrier, the
-// verified forward through it, and the family the forward arrived on (A7). If
-// any of those fails, the activation is refused with that failure named, and
-// nothing else is probed. Only then are the optional carriers probed, when
-// they were offered. One that does not answer is left out and listed; it
-// never refuses an activation the required test passed (connect#230). The
-// order is part of the rule: a udp carrier gives no answer to fail fast on, so
-// an optional carrier probed before the forward could spend the budget the
-// forward needs and gate the activation after all.
+// Two paths are required tests, and an activation must pass one it offered:
+// public tcp -- the challenge on the tcp carrier, the verified forward through
+// it, and the family the forward arrived on (A7) -- and peer-to-peer webrtc --
+// one dial over the carrier through the exchange signaling, which challenges
+// the extender and verifies its key, then the verified forward through it and
+// the same family check (connect/EXTENDER.md S8). The webrtc test runs only
+// where the tcp path failed or was not offered, and never beside a tcp test
+// that may still pass (owner, 2026-11-12): an extender the operator reaches on
+// tcp is accepted on tcp, its device is sent no offer, and webrtc is neither
+// stored for it nor listed as refused. An activation that passes no required
+// path it ran is refused with the failure of each named, and nothing else is
+// probed. Only once a required path has passed are the optional carriers
+// probed, when they were offered. One that does not answer is left out and
+// listed; it never refuses an activation a required path passed
+// (connect#230). The order is part of the rule: a udp carrier gives no answer
+// to fail fast on, so an optional carrier probed before the forward could
+// spend the budget the forward needs and gate the activation after all.
+//
+// An activation that offers tcp without webrtc is judged exactly as it always
+// was: the tcp path under the whole shared budget, then the optional
+// carriers. One that offers webrtc without tcp runs the webrtc test under the
+// whole shared budget. One that offers both runs the tcp path first with its
+// challenge cut at tcpChallengeTimeout (ExtenderActivateSettings), since a
+// host behind nat that binds tcp 443 gets no answer on it, and a challenge
+// that waited out the shared budget would leave the webrtc test none; when the
+// tcp path fails, at the challenge or after it, the webrtc test runs in its
+// place under a budget of its own, ExtenderActivateProbeTimeout long and
+// ending no later than tcpChallengeTimeout past the shared one, and the failed
+// tcp path is listed with the refused carriers. Before the webrtc test runs the
+// operator's cap is asked (ExtenderActivateSettings.MaxWebRtcOnlyExtenders),
+// which refuses it untried once the operator has as many extenders on webrtc
+// without tcp as it takes for now.
 //
 // The optional carriers -- each offered dns port and quic -- are probed all at
-// once, each until it answers or the shared budget ends (connect#230). A udp
-// port with nothing bound waits out the budget, and probed one after the
-// other, each port under a window of its own (L2), a dead port spent the
-// time of every carrier after it, while a live one that answered after its
-// window was left out as if nothing listened on it: an extender whose first
-// reply came 2.4-4.3 s after the hello passed the tcp test and lost its dns
-// and quic carriers. Probed together, no carrier waits on another, every one
-// has all of what is left of the budget after the required test, and the
-// activation still ends with the budget, never later.
+// once, each until it answers or the budget of the required path that passed
+// ends (connect#230). A udp port with nothing bound waits out the budget, and
+// probed one after the other, each port under a window of its own (L2), a dead
+// port spent the time of every carrier after it, while a live one that
+// answered after its window was left out as if nothing listened on it: an
+// extender whose first reply came 2.4-4.3 s after the hello passed the tcp
+// test and lost its dns and quic carriers. Probed together, no carrier waits
+// on another, every one has all of what is left of the budget after the
+// required test, and the activation still ends with the budget, never later.
 //
 // Every step runs on the clock: the shared budget ends
 // ExtenderActivateProbeTimeout after the judging starts. Each step is timed,
 // and the outcome lists every step with how long it ran and what was left of
-// the shared budget when it started. A step whose budget ran out before it
-// answered timed out, and its refusal says how much time it had; a late
-// answer and no answer were the same "context deadline exceeded" before
-// (connect#230).
+// its budget when it started: the tcp path's, then the webrtc test's, then the
+// optional carriers'. A step whose budget ran out before it answered timed
+// out, and its refusal says how much time it had; a late answer and no answer
+// were the same "context deadline exceeded" before (connect#230).
 func probeExtenderActivation(
 	ctx context.Context,
 	clock *extenderActivationClock,
 	probes *extenderActivationProbes,
+	tcpChallengeTimeout time.Duration,
 	carriers []string,
 	tcpPort int,
 	udpPort int,
 	dnsPorts []int,
 	ipVersion int,
 ) *extenderActivationOutcome {
-	probeDeadline := clock.now().Add(ExtenderActivateProbeTimeout)
+	startTime := clock.now()
+	probeDeadline := startTime.Add(ExtenderActivateProbeTimeout)
 	probeCtx, probeCancel := clock.withDeadline(ctx, probeDeadline)
 	defer probeCancel()
 
-	steps := []*ExtenderProbeStep{}
-	// times one step under stepCtx, which ends at the shared budget or sooner.
-	// A step that failed once its context had reached its deadline timed out;
-	// any other failure is the step's own. It records nothing, so the optional
-	// carriers can be timed together and listed in a fixed order.
+	// A budget steps run under: its context, which ends at its deadline, and
+	// the deadline. The shared budget, and the webrtc test's own when it runs
+	// in place of a tcp path that failed.
+	type probeBudget struct {
+		ctx      context.Context
+		deadline time.Time
+	}
+	sharedBudget := &probeBudget{
+		ctx:      probeCtx,
+		deadline: probeDeadline,
+	}
+
+	// times one step under stepCtx, which ends at the budget's deadline or
+	// sooner. A step that failed once its context had reached its deadline
+	// timed out; any other failure is the step's own. It records nothing, so
+	// the optional carriers can be timed together and listed in a fixed order.
 	timeStep := func(
+		budget *probeBudget,
 		stepCtx context.Context,
 		name string,
 		port int,
@@ -1964,12 +2158,12 @@ func probeExtenderActivation(
 				IpVersion:    ipVersion,
 				Port:         port,
 				ElapsedMs:    elapsed.Milliseconds(),
-				BudgetLeftMs: max(0, probeDeadline.Sub(stepStart)).Milliseconds(),
+				BudgetLeftMs: max(0, budget.deadline.Sub(stepStart)).Milliseconds(),
 				Outcome:      extenderProbeStepOutcomeOk,
 			},
 			elapsed:      elapsed,
 			allowance:    max(0, stepDeadline.Sub(stepStart)),
-			sharedBudget: !stepDeadline.Before(probeDeadline),
+			sharedBudget: !stepDeadline.Before(budget.deadline),
 			err:          err,
 		}
 		if err != nil {
@@ -1980,65 +2174,223 @@ func probeExtenderActivation(
 		}
 		return run
 	}
-	// times one step and records it, for the required test, which runs in
-	// order
+
+	// One required path as it ran: its steps in order, and, when it failed,
+	// why, at which step and how, and the refusal listed for it when the
+	// other path passed in its place.
+	type requiredPathRun struct {
+		steps          []*ExtenderProbeStep
+		refusal        string
+		refusalStep    string
+		refusalOutcome string
+		refusedCarrier *ExtenderCarrierRefusal
+	}
+	// times one step of a required path and records it, in order
 	runStep := func(
+		path *requiredPathRun,
+		budget *probeBudget,
 		stepCtx context.Context,
 		name string,
 		port int,
 		probe func(ctx context.Context) error,
 	) *extenderProbeStepRun {
-		run := timeStep(stepCtx, name, port, probe)
-		steps = append(steps, run.step)
+		run := timeStep(budget, stepCtx, name, port, probe)
+		path.steps = append(path.steps, run.step)
 		return run
 	}
-	refuse := func(run *extenderProbeStepRun, refusal string, refusalOutcome string) *extenderActivationOutcome {
+	fail := func(
+		path *requiredPathRun,
+		run *extenderProbeStepRun,
+		carrier string,
+		port int,
+		refusal string,
+		refusalOutcome string,
+	) {
+		path.refusal = refusal
+		path.refusalStep = run.step.Name
+		path.refusalOutcome = refusalOutcome
+		path.refusedCarrier = &ExtenderCarrierRefusal{
+			Carrier:      carrier,
+			Port:         port,
+			Error:        refusal,
+			ElapsedMs:    run.step.ElapsedMs,
+			BudgetLeftMs: run.step.BudgetLeftMs,
+		}
+	}
+
+	offersWebRtc := slices.Contains(carriers, connect.ExtenderCarrierWebRtc)
+	// without webrtc the tcp path is the required test, whatever the list
+	// says, as it always was; the list only says what may be stored
+	runsTcp := slices.Contains(carriers, connect.ExtenderCarrierTcp) || !offersWebRtc
+
+	// the tcp path (C2a): the challenge on the tcp carrier, the forward through
+	// it, and the family the forward arrived on, under the shared budget
+	probeTcpPath := func(path *requiredPathRun) {
+		// the webrtc test waits on this path, so a challenge nothing answers
+		// must not take its budget: it has its share alone (above)
+		challengeCtx := probeCtx
+		if offersWebRtc {
+			var challengeCancel context.CancelFunc
+			challengeCtx, challengeCancel = clock.withDeadline(probeCtx, startTime.Add(tcpChallengeTimeout))
+			defer challengeCancel()
+		}
+		tcpRun := runStep(path, sharedBudget, challengeCtx, connect.ExtenderCarrierTcp, tcpPort, func(ctx context.Context) error {
+			return probes.carrier(ctx, connect.ExtenderConnectModeTcpTls, tcpPort)
+		})
+		if tcpRun.err != nil {
+			fail(path, tcpRun, connect.ExtenderCarrierTcp, tcpPort, tcpRun.refusal(connect.ExtenderCarrierTcp+" carrier"), tcpRun.step.Outcome)
+			return
+		}
+		var forwardClientAddress string
+		// the forward runs over the tcp carrier, so it is the tcp port it dials
+		forwardRun := runStep(path, sharedBudget, probeCtx, extenderProbeStepForward, tcpPort, func(ctx context.Context) error {
+			var err error
+			forwardClientAddress, err = probes.forward(ctx)
+			return err
+		})
+		if forwardRun.err != nil {
+			fail(path, forwardRun, connect.ExtenderCarrierTcp, tcpPort, forwardRun.refusal(extenderProbeStepForward), forwardRun.step.Outcome)
+			return
+		}
+		// an extender must egress on the family it was reached on (A7); a
+		// forward that arrives on the other family would publish an address
+		// that does not carry the traffic the record promises
+		if forwardIpVersion := server.ClientAddressIpVersion(forwardClientAddress); forwardIpVersion != ipVersion {
+			// the forward answered, but not as the required test needs
+			forwardRun.step.Outcome = extenderProbeStepOutcomeError
+			fail(
+				path,
+				forwardRun,
+				connect.ExtenderCarrierTcp,
+				tcpPort,
+				fmt.Sprintf(
+					"the forward arrived on ipv%d, not ipv%d, after %s",
+					forwardIpVersion,
+					ipVersion,
+					extenderProbeSecondsText(forwardRun.elapsed),
+				),
+				extenderProbeRefusalOtherFamily,
+			)
+		}
+	}
+
+	// the webrtc path (C2a, connect/EXTENDER.md S8): the operator's cap, then
+	// one dial over the carrier, which proves the key and then the forward
+	// through it, and the family the forward arrived on, under budget. The
+	// carrier dials no port, so the step names none. A cap that refuses it, or
+	// cannot be read, sends the extender nothing and lists no step.
+	probeWebRtcPath := func(path *requiredPathRun, budget *probeBudget) {
+		if err := askExtenderWebRtcOnlyRoom(budget.ctx, probes); err != nil {
+			path.refusal = fmt.Sprintf("the %s carrier was not tried: %s", connect.ExtenderCarrierWebRtc, err)
+			path.refusalStep = connect.ExtenderCarrierWebRtc
+			path.refusalOutcome = extenderActivationOutcomeError
+			if errors.Is(err, ErrExtenderWebRtcOnlyCap) {
+				path.refusalOutcome = extenderActivationOutcomeCap
+			}
+			return
+		}
+		var forwardClientAddress string
+		webRtcRun := runStep(path, budget, budget.ctx, connect.ExtenderCarrierWebRtc, 0, func(ctx context.Context) error {
+			var err error
+			forwardClientAddress, err = probeRequiredWebRtc(ctx, probes)
+			return err
+		})
+		if webRtcRun.err != nil {
+			fail(path, webRtcRun, connect.ExtenderCarrierWebRtc, 0, webRtcRun.refusal(connect.ExtenderCarrierWebRtc+" carrier"), webRtcRun.step.Outcome)
+			return
+		}
+		// the extender's forward follows the family of the ice pair it was
+		// reached on (A7), which the probe pins to the activation's family
+		if forwardIpVersion := server.ClientAddressIpVersion(forwardClientAddress); forwardIpVersion != ipVersion {
+			webRtcRun.step.Outcome = extenderProbeStepOutcomeError
+			fail(
+				path,
+				webRtcRun,
+				connect.ExtenderCarrierWebRtc,
+				0,
+				fmt.Sprintf(
+					"the webrtc forward arrived on ipv%d, not ipv%d, after %s",
+					forwardIpVersion,
+					ipVersion,
+					extenderProbeSecondsText(webRtcRun.elapsed),
+				),
+				extenderProbeRefusalOtherFamily,
+			)
+		}
+	}
+
+	tcpPath := &requiredPathRun{}
+	webRtcPath := &requiredPathRun{}
+	// the required paths that ran, in the order they ran
+	requiredPaths := []*requiredPathRun{}
+	// the budget of the required path that passed, which the optional
+	// carriers run under; nil while none has
+	var passedBudget *probeBudget
+	if runsTcp {
+		requiredPaths = append(requiredPaths, tcpPath)
+		probeTcpPath(tcpPath)
+		if tcpPath.refusal == "" {
+			passedBudget = sharedBudget
+		}
+	}
+	// webrtc only where the tcp path failed or was not offered
+	webRtcRan := false
+	if offersWebRtc && passedBudget == nil {
+		webRtcRan = true
+		requiredPaths = append(requiredPaths, webRtcPath)
+		webRtcBudget := sharedBudget
+		if runsTcp {
+			// in place of the tcp path that failed: a budget of its own, as
+			// long as the shared one and ending no later than the challenge's
+			// share past it, so the activation's probes end within both
+			webRtcDeadline := clock.now().Add(ExtenderActivateProbeTimeout)
+			if latestDeadline := probeDeadline.Add(max(0, tcpChallengeTimeout)); latestDeadline.Before(webRtcDeadline) {
+				webRtcDeadline = latestDeadline
+			}
+			webRtcCtx, webRtcCancel := clock.withDeadline(ctx, webRtcDeadline)
+			defer webRtcCancel()
+			webRtcBudget = &probeBudget{
+				ctx:      webRtcCtx,
+				deadline: webRtcDeadline,
+			}
+		}
+		probeWebRtcPath(webRtcPath, webRtcBudget)
+		if webRtcPath.refusal == "" {
+			passedBudget = webRtcBudget
+		}
+	}
+	steps := []*ExtenderProbeStep{}
+	for _, path := range requiredPaths {
+		steps = append(steps, path.steps...)
+	}
+	if passedBudget == nil {
+		// every required path that ran failed: refused with each failure
+		// named, at the last one's step
+		refusals := []string{}
+		for _, path := range requiredPaths {
+			refusals = append(refusals, path.refusal)
+		}
+		last := requiredPaths[len(requiredPaths)-1]
 		return &extenderActivationOutcome{
-			refusal:        refusal,
-			refusalStep:    run.step.Name,
-			refusalOutcome: refusalOutcome,
+			refusal:        strings.Join(refusals, "; "),
+			refusalStep:    last.refusalStep,
+			refusalOutcome: last.refusalOutcome,
 			steps:          steps,
 		}
 	}
 
-	tcpRun := runStep(probeCtx, connect.ExtenderCarrierTcp, tcpPort, func(ctx context.Context) error {
-		return probes.carrier(ctx, connect.ExtenderConnectModeTcpTls, tcpPort)
-	})
-	if tcpRun.err != nil {
-		return refuse(tcpRun, tcpRun.refusal(connect.ExtenderCarrierTcp+" carrier"), tcpRun.step.Outcome)
-	}
-	var forwardClientAddress string
-	// the forward runs over the tcp carrier, so it is the tcp port it dials
-	forwardRun := runStep(probeCtx, extenderProbeStepForward, tcpPort, func(ctx context.Context) error {
-		var err error
-		forwardClientAddress, err = probes.forward(ctx)
-		return err
-	})
-	if forwardRun.err != nil {
-		return refuse(forwardRun, forwardRun.refusal(extenderProbeStepForward), forwardRun.step.Outcome)
-	}
-	// an extender must egress on the family it was reached on (A7); a forward
-	// that arrives on the other family would publish an address that does not
-	// carry the traffic the record promises
-	if forwardIpVersion := server.ClientAddressIpVersion(forwardClientAddress); forwardIpVersion != ipVersion {
-		// the forward answered, but not as the required test needs
-		forwardRun.step.Outcome = extenderProbeStepOutcomeError
-		return refuse(
-			forwardRun,
-			fmt.Sprintf(
-				"the forward arrived on ipv%d, not ipv%d, after %s",
-				forwardIpVersion,
-				ipVersion,
-				extenderProbeSecondsText(forwardRun.elapsed),
-			),
-			extenderProbeRefusalOtherFamily,
-		)
-	}
-
-	answered := map[string]bool{
-		connect.ExtenderCarrierTcp: true,
-	}
+	answered := map[string]bool{}
 	refusals := map[string][]*ExtenderCarrierRefusal{}
+	if runsTcp && tcpPath.refusal == "" {
+		answered[connect.ExtenderCarrierTcp] = true
+	}
+	if webRtcRan && webRtcPath.refusal == "" {
+		answered[connect.ExtenderCarrierWebRtc] = true
+		// the tcp path it ran in place of, left out and listed
+		if tcpPath.refusedCarrier != nil {
+			refusals[connect.ExtenderCarrierTcp] = append(refusals[connect.ExtenderCarrierTcp], tcpPath.refusedCarrier)
+		}
+	}
 
 	// the optional carriers to probe, in the order their steps are listed:
 	// each offered dns port, then quic
@@ -2068,16 +2420,16 @@ func probeExtenderActivation(
 			port:        udpPort,
 		})
 	}
-	// all at once, each under the shared budget (connect#230): none waits on
-	// another, so a carrier with nothing bound costs only itself, and a live
-	// one that is slow has all of what is left. Each probe ends with the
-	// shared budget at the latest, so this waits no longer than the budget.
+	// all at once, each under the passed path's budget (connect#230): none
+	// waits on another, so a carrier with nothing bound costs only itself, and
+	// a live one that is slow has all of what is left. Each probe ends with
+	// that budget at the latest, so this waits no longer than the budget.
 	var optionalProbesDone sync.WaitGroup
 	for _, optional := range optionalProbes {
 		optionalProbesDone.Add(1)
 		go func() {
 			defer optionalProbesDone.Done()
-			optional.run = timeStep(probeCtx, optional.carrier, optional.port, func(ctx context.Context) error {
+			optional.run = timeStep(passedBudget, passedBudget.ctx, optional.carrier, optional.port, func(ctx context.Context) error {
 				return probeOptionalExtenderCarrier(ctx, probes, optional.connectMode, optional.port)
 			})
 		}()
@@ -2118,6 +2470,40 @@ func probeExtenderActivation(
 		outcome.refusedCarriers = append(outcome.refusedCarriers, refusals[carrier]...)
 	}
 	return outcome
+}
+
+// Asks the operator's cap on extenders accepted on webrtc without tcp
+// (extenderActivationProbes.webRtcOnlyRoom) under the webrtc test's budget,
+// just before the test would run. A count that panics, a database read that
+// failed, is an error, which refuses the webrtc test untried rather than
+// probing past a cap it could not read. No question asks nothing.
+func askExtenderWebRtcOnlyRoom(ctx context.Context, probes *extenderActivationProbes) (err error) {
+	if probes.webRtcOnlyRoom == nil {
+		return nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[extender]activation webrtc cap could not be read: %s\n", server.ErrorJson(r, debug.Stack()))
+			err = fmt.Errorf("the operator could not count its extenders on webrtc without tcp: %v", r)
+		}
+	}()
+	return probes.webRtcOnlyRoom(ctx)
+}
+
+// The webrtc test of one activation (probeExtenderActivation). A probe that
+// panics fails that path alone, as an optional carrier's does
+// (probeOptionalExtenderCarrier). No probe is a path with no signaling.
+func probeRequiredWebRtc(ctx context.Context, probes *extenderActivationProbes) (forwardClientAddress string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[extender]activation probe webrtc panicked: %s\n", server.ErrorJson(r, debug.Stack()))
+			err = fmt.Errorf("the probe failed: %v", r)
+		}
+	}()
+	if probes.webRtc == nil {
+		return "", ErrExtenderWebRtcSignalingUnavailable
+	}
+	return probes.webRtc(ctx)
 }
 
 // One optional carrier's probe, which runs in a goroutine of its own

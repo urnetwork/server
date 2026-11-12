@@ -11471,6 +11471,22 @@ var migrations = []any{
 	// that reads it.
 	newSqlMigration(networkPingTargetEvidenceSchemaSql),
 
+	// The carrier ports of each extender address
+	// (network_extender_address_ports_schema.go, connect/EXTENDER.md S10): two
+	// nullable columns on network_extender_address with no default, a catalog
+	// change only, under a two-second lock bound. The running release names
+	// its columns and reads on, and an address written before or by it reads
+	// null, the extender's ports. Apply before deploying the api, alt and
+	// taskworker that use them.
+	newSqlMigration(networkExtenderAddressPortsSchemaSql),
+
+	// The network each capture the flag award was won for (ctf_schema.go,
+	// ctfAwardNetworkSql): one nullable uuid on ctf_award, backfilled where
+	// the census or network_client knows the network, and its index, under a
+	// five-second lock bound. ctf_award is empty until capture the flag is
+	// live. Apply before deploying the taskworker and api that use it.
+	ctfAwardNetworkMigration,
+
 	// The SN25 extender pool (db_st_ledger_v2_extenders.go, sn WHITEPAPER.md
 	// §8.6): the verified amendments file, each epoch's extender census, the
 	// shadow reports of the epochs before E_x, the platform endpoint registry

@@ -106,6 +106,25 @@ func TestSnCtfWinClaimedRule(t *testing.T) {
 	requireSnCtfEqual(t, "a root's cumulative not read", snCtfWinsTestClaimed(view.winsAnswer(wins, partial, 5)),
 		map[string]string{"8 provider is 1": "true", "9 extender is 1": "null", "10 provider de 2": "null", "11 provider is 1": "false", "12 provider is 1": "false"})
 
+	// The state the records give a coldkey whose account they do not find,
+	// as a root recorded between the read of the account record and the count
+	// of recorded accounts once made them: nothing claimed and nothing paid in
+	// any root. Every finalized win of it is null, never claimed, since its
+	// paying root pays it whole.
+	notFound := map[[32]byte]*snCtfAccountClaims{coldkey: {Cumulative: map[uint64]uint256.Int{1: {}, 2: {}}}}
+	requireSnCtfEqual(t, "an account not found", snCtfWinsTestClaimed(view.winsAnswer(wins, notFound, 5)), unknown)
+	// the rule is per win: a paying root's cumulative below one win's amount
+	// leaves that win null and decides the others it covers
+	short := map[[32]byte]*snCtfAccountClaims{coldkey: {Claimed: snCtfTestRao(100), Cumulative: map[uint64]uint256.Int{1: snCtfTestRao(100), 2: snCtfTestRao(149)}}}
+	requireSnCtfEqual(t, "a paying root below a win's amount", snCtfWinsTestClaimed(view.winsAnswer(wins, short, 5)),
+		map[string]string{"8 provider is 1": "true", "9 extender is 1": "null", "10 provider de 2": "false", "11 provider is 1": "false", "12 provider is 1": "false"})
+	// a win of no amount pays nothing, so no account is needed to hold it,
+	// and it is claimed
+	nothing := snCtfWinsTestWin(8, snCtfRoleExtender, "de", 5, client, [32]byte{0xa2}, 0, 0, false)
+	if claimed := snCtfWinClaimed(nothing, view.payingRoot(nothing), &snCtfAccountClaims{Cumulative: map[uint64]uint256.Int{1: {}}}); claimed == nil || !*claimed {
+		t.Fatalf("a win of no amount, of a coldkey no root holds: claimed %v", claimed)
+	}
+
 	// limit 2 (epochs 11 and 12): the claimed wins of older epochs are left
 	// out, the others listed whatever their epoch, newest first
 	claims := map[[32]byte]*snCtfAccountClaims{coldkey: {Claimed: snCtfTestRao(100), Cumulative: cumulative}}
@@ -131,7 +150,8 @@ func TestSnCtfWinClaimedRule(t *testing.T) {
 
 // A network's answer: no client, no epochs, the wins of its clients newest
 // first, providers before extenders, then country and rank; each coldkey's
-// claim state read once, the newest wins' coldkeys first, at most 32.
+// claim state read once, the newest wins' coldkeys first, however many there
+// are.
 func TestSnCtfClientResultOfANetwork(t *testing.T) {
 	view := snCtfWinsTestView()
 	first, second := server.NewId(), server.NewId()
@@ -171,24 +191,24 @@ func TestSnCtfClientResultOfANetwork(t *testing.T) {
 		t.Fatalf("answer %s", raw)
 	}
 
-	// 33 coldkeys, one win each in epoch 8 and one more in 10: the coldkey
-	// whose newest win is the oldest is not read, and its win says null
+	// 300 coldkeys, one win each in epoch 10 but the last's, in epoch 8: every
+	// coldkey's state is asked for, the newest wins' first, and every win is
+	// decided, the oldest included
+	const coldkeys = 300
 	many := []*snCtfWin{}
-	for i := range snCtfClaimColdkeysPerAnswer + 1 {
+	for i := range coldkeys {
 		epoch := uint64(10)
-		if i == snCtfClaimColdkeysPerAnswer {
+		if i == coldkeys-1 {
 			epoch = 8
 		}
-		many = append(many, snCtfWinsTestWin(epoch, snCtfRoleProvider, fmt.Sprintf("%c%c", 'a'+i/26, 'a'+i%26), 1, first, [32]byte{0xc0, byte(i)}, 100, 0, false))
+		many = append(many, snCtfWinsTestWin(epoch, snCtfRoleProvider, fmt.Sprintf("%c%c", 'a'+i/26, 'a'+i%26), 1, first, [32]byte{0xc0, byte(i >> 8), byte(i)}, 100, 0, false))
 	}
 	needs := snCtfClaimNeeds(view, many)
-	if len(needs) != snCtfClaimColdkeysPerAnswer {
-		t.Fatalf("%d coldkeys read", len(needs))
+	if len(needs) != coldkeys {
+		t.Fatalf("%d of %d coldkeys read", len(needs), coldkeys)
 	}
-	for _, need := range needs {
-		if need.Coldkey == [32]byte{0xc0, byte(snCtfClaimColdkeysPerAnswer)} {
-			t.Fatal("the coldkey of the oldest win is read")
-		}
+	if oldest := needs[len(needs)-1]; oldest.Coldkey != many[coldkeys-1].Award.Coldkey || len(oldest.Roots) != 1 || oldest.Roots[0] != view.Roots[0] {
+		t.Fatalf("the coldkey of the oldest win is not read last, at root 1: %+v", oldest)
 	}
 	readAll := map[[32]byte]*snCtfAccountClaims{}
 	for _, win := range many {
@@ -196,10 +216,10 @@ func TestSnCtfClientResultOfANetwork(t *testing.T) {
 	}
 	source := &snCtfTestSource{claims: readAll}
 	answered := view.winsAnswer(many, source.AccountClaims(context.Background(), view, needs), 8)
-	if last := answered[len(answered)-1]; last.Epoch != 8 || last.Claimed != nil {
-		t.Fatalf("the win of the 33rd coldkey: %+v", last)
+	if len(answered) != coldkeys || answered[coldkeys-1].Epoch != 8 {
+		t.Fatalf("%d wins answered", len(answered))
 	}
-	for _, win := range answered[:len(answered)-1] {
+	for _, win := range answered {
 		if win.Claimed == nil || *win.Claimed {
 			t.Fatalf("win %+v", win)
 		}

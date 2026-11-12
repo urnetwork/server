@@ -344,3 +344,56 @@ var ctfSchemaMigration = newSqlMigration(ctfSchemaSql)
 func CtfSchemaMigrationVersion() int {
 	return migrationVersion(ctfSchemaMigration)
 }
+
+// The network each award was won for (ctf_award.network_id). GET
+// /sn/ctf/client answers a network's credential with the awards won for it,
+// read by this column. It no longer goes through the network's network_client
+// rows, which the reaper hard-deletes 30 days after a client is deactivated
+// (model.NetworkClientReapAfterDeactivate), and with them the network's wins.
+// model.CreateCtfEpochResult writes it with each award.
+//
+//   - One nullable uuid column, added only when absent. The rows already
+//     written are backfilled where their network is known: the network the
+//     epoch's census recorded for the winning member, else the network of the
+//     client's network_client row. A row with neither stays null and no
+//     network lists it. Capture the flag is not live, so production holds no
+//     award to backfill.
+//   - Its index serves a network's read: deployment, operator, network, epoch.
+//     ctf_award is empty until capture the flag is live, so the index is built
+//     at once inside the migration's transaction.
+//   - Every lock wait is bounded at five seconds, as the ctf migration's are;
+//     the ALTER holds ACCESS EXCLUSIVE on ctf_award for that instant. Run
+//     again, it adds nothing and sets only rows still null.
+//
+// A release before it names the columns it writes and reads, so it writes on
+// after the migration and leaves the column null; capture the flag's driver
+// stays off until a release with the column runs it. Apply before deploying
+// the taskworker and the api that use it.
+const ctfAwardNetworkSql = `
+	SET LOCAL lock_timeout = '5s';
+
+	ALTER TABLE ctf_award ADD COLUMN IF NOT EXISTS network_id uuid NULL;
+
+	UPDATE ctf_award SET network_id = COALESCE(
+		(
+			SELECT member.network_id FROM ctf_census_member AS member
+			WHERE member.deployment_key = ctf_award.deployment_key AND member.no_id = ctf_award.no_id
+				AND member.epoch = ctf_award.epoch AND member.role = ctf_award.role
+				AND member.client_id = ctf_award.client_id
+		),
+		(
+			SELECT network_client.network_id FROM network_client
+			WHERE network_client.client_id = ctf_award.client_id
+		)
+	)
+	WHERE network_id IS NULL;
+
+	CREATE INDEX IF NOT EXISTS ctf_award_network ON ctf_award (deployment_key, no_id, network_id, epoch);
+`
+
+var ctfAwardNetworkMigration = newSqlMigration(ctfAwardNetworkSql)
+
+// The version that adds ctf_award.network_id, wherever merges place it.
+func CtfAwardNetworkMigrationVersion() int {
+	return migrationVersion(ctfAwardNetworkMigration)
+}
