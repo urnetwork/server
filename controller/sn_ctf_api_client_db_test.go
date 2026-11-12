@@ -215,8 +215,23 @@ type snCtfClaimsFixture struct {
 	viewRoots []*snCtfRoot
 }
 
+// snCtfLockedChain is the fake chain with its vault2 claimed reads one at a
+// time: the claim states read several coldkeys at once, and the fake's
+// failure queue is not safe for that.
+type snCtfLockedChain struct {
+	*fakeLedgerV2Chain
+	lock sync.Mutex
+}
+
+func (self *snCtfLockedChain) LedgerV2Claimed(ctx context.Context, noId uint64, index uint64) (uint256.Int, error) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	return self.fakeLedgerV2Chain.LedgerV2Claimed(ctx, noId, index)
+}
+
 func newSnCtfClaimsFixture(t testing.TB) *snCtfClaimsFixture {
 	f := &snCtfClaimsFixture{ledgerV2EndpointFixture: newLedgerV2EndpointFixture(t), pool: 1<<32 + 1}
+	SetStLedgerV2Client(&snCtfLockedChain{fakeLedgerV2Chain: f.chain})
 	setCtfPoolTestSwitches(t, f.cfg, true, true)
 	usage := func(rows ...any) []protocol.LedgerUsageRow {
 		out := []protocol.LedgerUsageRow{}
