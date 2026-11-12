@@ -19835,7 +19835,10 @@ conditions holds (every threshold a setting with the default given):
   became 87 % of the extender pingers' verdicts with nothing alerting; this
   condition would have fired at about 07Z on 11-07. The refusals are evidence
   against no one, and the targets refuse as designed, so the action is
-  publishing, never the probe gate;
+  publishing, never the probe gate. §27.2 watches the publishers themselves
+  (`extender-gossip-stalled`, `extender-dns-publish-failing`); this condition
+  is the end-to-end check that their records reach the directories, and with
+  both publishers healthy it is the delivery between them;
 - **no verdicts** (`derive-no-verdicts`): pings with no verdict above
   `DeriveMaxUnknownShare` (30 %) — extenders on the old binary, or the
   verdict frame lost on a carrier;
