@@ -310,53 +310,57 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sn/evidence":                             routeAccessPublic,
 	"GET /sn/evidence/history":                      routeAccessPublic,
 	"GET /hello":                                    routeAccessPublic,
-	"POST /account/api-key":                         routeAccessNetwork,  // creates an API key = a full network credential (escalation)
-	"POST /account/api-key/remove":                  routeAccessNetwork,  // revokes an API key
-	"GET /account/api-keys":                         routeAccessNetwork,  // lists API keys
-	"GET /network/auth-keys":                        routeAccessNetwork,  // lists auth keys (Network until TEAM-M6-03's roles)
-	"POST /network/auth-keys":                       routeAccessNetwork,  // creates an auth key, which enrolls devices (escalation)
-	"POST /network/auth-key-revoke":                 routeAccessNetwork,  // revokes an auth key
-	"POST /network/enroll":                          routeAccessPublic,   // an auth key in the body is its credential (§7.8)
-	"POST /network/team-create":                     routeAccessNetwork,  // makes a team network, its caller the first Owner (§7.5)
-	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5), Owners and Admins by the role gate
-	"POST /network/member-invite":                   routeAccessNetwork,  // invites a person to a team (§7.5), Owners and Admins by the role gate
-	"POST /network/member-invite-accept":            routeAccessNetwork,  // a person joins a team from an invite with its own sign-in (§7.5)
-	"POST /auth/network-switch":                     routeAccessNetwork,  // a person's credential for another network it signs in to (§7.5)
-	"POST /network/team-checkout":                   routeAccessNetwork,  // buys a team network its tier (§20.5), the Owner's or a Billing admin's by the role gate
-	"POST /network/idp":                             routeAccessNetwork,  // adds a team's OIDC IdP (§7.6), the Owner's by its role gate
-	"GET /auth/sso/callback":                        routeAccessPublic,   // the state names its flow, taken once (§7.6)
-	"POST /network/domain-add":                      routeAccessNetwork,  // adds a team's domain to verify (§7.6), the Owner's by its role gate
-	"POST /network/domain-verify":                   routeAccessNetwork,  // looks a domain's TXT record up, which routes its sign-ins once found
-	"POST /network/domain-remove":                   routeAccessNetwork,  // removes a team's domain
-	"POST /auth/sso-discover":                       routeAccessPublic,   // an address's domain to its team's IdP; says nothing of other addresses (§7.6)
-	"GET /network/admin-events":                     routeAccessNetwork,  // a team's admin events (§7.11), Auditors and above by the role gate
-	"GET /network/usage":                            routeAccessNetwork,  // the network's usage and limits (§20.14), the read roles by the role gate
-	"POST /network/audit-webhook":                   routeAccessNetwork,  // sends a team's admin events to a SIEM (§7.11), the Owner's by its role gate
-	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
-	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,   // a sidecar of the caller's network (§5.15)
-	"GET /sidecar/identity":                         routeAccessClient,   // ?client_id=: the sidecar a client of the caller's network binds
-	"GET /sidecar/sync/poll":                        routeAccessClient,   // the bearer's own client's hints (§6.8)
-	"GET /sidecar/sync/versions":                    routeAccessClient,   // the bearer's own client's versions (§6.8)
-	"GET /sidecar/sync/([^/]+)":                     routeAccessClient,   // core: the bearer's own client's state (§6.8)
-	"GET /sidecar/limits":                           routeAccessClient,   // the caller's network's limits (§20.7)
-	"GET /internal/gate/limits/([^/]+)":             routeAccessPublic,   // a host's internal bearer, verified by hash, is its credential (QD-055)
-	"GET /internal/gate/over-limit":                 routeAccessPublic,   // a host's internal bearer (QD-055)
-	"GET /internal/gate/draw-order/([^/]+)":         routeAccessPublic,   // a host's internal bearer (QD-055)
-	"POST /internal/gate/spent/([^/]+)":             routeAccessPublic,   // a host's internal bearer (QD-055)
-	"POST /internal/gate/usage-batch":               routeAccessPublic,   // a host's internal bearer; the batch's producer is its own (QD-055)
-	"POST /sidecar/push-token":                      routeAccessClient,   // the bearer's own client's wake token (§18.7)
-	"POST /sidecar/wake":                            routeAccessClient,   // another admitted device of the bearer's member, by the controller (§6.16)
-	"POST /sidecar/close":                           routeAccessPublic,   // an ephemeral client's close capability, its own credential (§18.8)
-	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
-	"POST /approval/cancel":                         routeAccessClient,   // an approver's signed cancel of its own decision's uses (§16.6)
-	"GET /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar of either network of the share (§17.16)
-	"PUT /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar's own network's sealed table (§17.16)
-	"POST /network/config/delta":                    routeAccessClient,   // a signed statement, verified at the tip (§7.9)
-	"POST /network/config/projection":               routeAccessClient,   // a config writer's signed base (§7.9)
-	"GET /network/config/projection":                routeAccessClient,   // the network's log, which the caller verifies (§7.9)
-	"POST /network/config/reseed":                   routeAccessClient,   // a member device's upload of the log it keeps after a site loss (§7.9)
-	"POST /account/payout-wallet":                   routeAccessAppAdmin, // redirects payouts
-	"GET /account/payout-wallet":                    routeAccessAppAdmin, // payout wallet read
+	"POST /account/api-key":                         routeAccessNetwork,   // creates an API key = a full network credential (escalation)
+	"POST /account/api-key/remove":                  routeAccessNetwork,   // revokes an API key
+	"GET /account/api-keys":                         routeAccessNetwork,   // lists API keys
+	"GET /network/auth-keys":                        routeAccessNetwork,   // lists auth keys (Network until TEAM-M6-03's roles)
+	"POST /network/auth-keys":                       routeAccessNetwork,   // creates an auth key, which enrolls devices (escalation)
+	"POST /network/auth-key-revoke":                 routeAccessNetwork,   // revokes an auth key
+	"POST /network/enroll":                          routeAccessPublic,    // an auth key in the body is its credential (§7.8)
+	"POST /network/team-create":                     routeAccessNetwork,   // makes a team network, its caller the first Owner (§7.5)
+	"GET /network/members":                          routeAccessNetwork,   // a team's members (§7.5), Owners and Admins by the role gate
+	"POST /network/member-invite":                   routeAccessNetwork,   // invites a person to a team (§7.5), Owners and Admins by the role gate
+	"POST /network/member-invite-accept":            routeAccessNetwork,   // a person joins a team from an invite with its own sign-in (§7.5)
+	"POST /auth/network-switch":                     routeAccessNetwork,   // a person's credential for another network it signs in to (§7.5)
+	"POST /network/team-checkout":                   routeAccessNetwork,   // buys a team network its tier (§20.5), the Owner's or a Billing admin's by the role gate
+	"POST /network/idp":                             routeAccessNetwork,   // adds a team's OIDC IdP (§7.6), the Owner's by its role gate
+	"GET /auth/sso/callback":                        routeAccessPublic,    // the state names its flow, taken once (§7.6)
+	"POST /network/domain-add":                      routeAccessNetwork,   // adds a team's domain to verify (§7.6), the Owner's by its role gate
+	"POST /network/domain-verify":                   routeAccessNetwork,   // looks a domain's TXT record up, which routes its sign-ins once found
+	"POST /network/domain-remove":                   routeAccessNetwork,   // removes a team's domain
+	"POST /auth/sso-discover":                       routeAccessPublic,    // an address's domain to its team's IdP; says nothing of other addresses (§7.6)
+	"GET /network/admin-events":                     routeAccessNetwork,   // a team's admin events (§7.11), Auditors and above by the role gate
+	"GET /network/usage":                            routeAccessNetwork,   // the network's usage and limits (§20.14), the read roles by the role gate
+	"POST /network/audit-webhook":                   routeAccessNetwork,   // sends a team's admin events to a SIEM (§7.11), the Owner's by its role gate
+	"POST /sidecar/bind":                            routeAccessClient,    // appends the bearer's own client generation (§5.15)
+	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,    // a sidecar of the caller's network (§5.15)
+	"GET /sidecar/identity":                         routeAccessClient,    // ?client_id=: the sidecar a client of the caller's network binds
+	"GET /sidecar/sync/poll":                        routeAccessClient,    // the bearer's own client's hints (§6.8)
+	"GET /sidecar/sync/versions":                    routeAccessClient,    // the bearer's own client's versions (§6.8)
+	"GET /sidecar/sync/([^/]+)":                     routeAccessClient,    // core: the bearer's own client's state (§6.8)
+	"GET /sidecar/limits":                           routeAccessClient,    // the caller's network's limits (§20.7)
+	"GET /internal/gate/limits/([^/]+)":             routeAccessPublic,    // a host's internal bearer, verified by hash, is its credential (QD-055)
+	"GET /internal/gate/over-limit":                 routeAccessPublic,    // a host's internal bearer (QD-055)
+	"GET /internal/gate/draw-order/([^/]+)":         routeAccessPublic,    // a host's internal bearer (QD-055)
+	"POST /internal/gate/spent/([^/]+)":             routeAccessPublic,    // a host's internal bearer (QD-055)
+	"POST /internal/gate/usage-batch":               routeAccessPublic,    // a host's internal bearer; the batch's producer is its own (QD-055)
+	"POST /sidecar/push-token":                      routeAccessClient,    // the bearer's own client's wake token (§18.7)
+	"POST /sidecar/wake":                            routeAccessClient,    // another admitted device of the bearer's member, by the controller (§6.16)
+	"POST /sidecar/close":                           routeAccessPublic,    // an ephemeral client's close capability, its own credential (§18.8)
+	"POST /acl/ack":                                 routeAccessClient,    // the bearer's own client's applied projection version (§8.9)
+	"POST /tls/cert-order":                          routeAccessPublic,    // a service token, aud certs, is its credential; the subject is the token's (§13.15)
+	"GET /tls/cert-order/([^/]+)":                   routeAccessPublic,    // the same service token: the caller's own order (§13.15)
+	"GET /tls/certs":                                routeAccessClient,    // the bearer's network's certificates and attestations, for the CT watch (D-TLS-8)
+	"POST /tls/cert-revoke":                         routeAccessOwnClient, // a client token marks its own certificate, a network credential any of its network's (§13.15)
+	"POST /approval/cancel":                         routeAccessClient,    // an approver's signed cancel of its own decision's uses (§16.6)
+	"GET /network/bridge/share/([^/]+)":             routeAccessClient,    // a sidecar of either network of the share (§17.16)
+	"PUT /network/bridge/share/([^/]+)":             routeAccessClient,    // a sidecar's own network's sealed table (§17.16)
+	"POST /network/config/delta":                    routeAccessClient,    // a signed statement, verified at the tip (§7.9)
+	"POST /network/config/projection":               routeAccessClient,    // a config writer's signed base (§7.9)
+	"GET /network/config/projection":                routeAccessClient,    // the network's log, which the caller verifies (§7.9)
+	"POST /network/config/reseed":                   routeAccessClient,    // a member device's upload of the log it keeps after a site loss (§7.9)
+	"POST /account/payout-wallet":                   routeAccessAppAdmin,  // redirects payouts
+	"GET /account/payout-wallet":                    routeAccessAppAdmin,  // payout wallet read
 	"POST /account/circle-wallet":                   routeAccessPublic,
 	"POST /account/wallet":                          routeAccessAppAdmin, // adds a payout wallet
 	"GET /account/wallets":                          routeAccessAppAdmin, // account wallets
@@ -455,6 +459,12 @@ var strictExpRoutes = map[string]bool{
 	"POST /acl/ack": true,
 	// §16.6's cancel (MCP-M3-23)
 	"POST /approval/cancel": true,
+	// §13.15's certificate routes (TLS-M5-16); the two order routes take a service token, so a
+	// strict_exp bearer is refused there by the controller, not by this gate
+	"POST /tls/cert-order":        true,
+	"GET /tls/cert-order/([^/]+)": true,
+	"GET /tls/certs":              true,
+	"POST /tls/cert-revoke":       true,
 	// §17.16's share tables (BRIDGE-M6-02)
 	"GET /network/bridge/share/([^/]+)": true,
 	"PUT /network/bridge/share/([^/]+)": true,
