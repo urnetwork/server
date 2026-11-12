@@ -30,6 +30,10 @@ type clientScorePage struct {
 	// A partitioned union page omitted by modern-only traversal until one
 	// of the partition's expected modern pages proves the metadata stale.
 	modernRecovery bool
+	// The records of the page a selector-mode read keeps
+	// (FP2-PROTOCOL.md §6.4); nil keeps every record. A page's count and
+	// checksum proofs hold for the whole page before it filters.
+	filter func(*ClientScore) bool
 }
 
 // A partitioned traversal (network_client_score_modern.go) reads its pages in
@@ -245,6 +249,12 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 		if command.native != nil && len(sample) != command.page.expectedCount {
 			sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page count mismatch", errClientScoreNativeUnavailable))
 			continue
+		}
+		if command.page.filter != nil {
+			// the decoded copies are this reader's own
+			sample = slices.DeleteFunc(sample, func(score *ClientScore) bool {
+				return !command.page.filter(score)
+			})
 		}
 		mergeClientScoreSample(scores, sample)
 	}

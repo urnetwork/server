@@ -5809,6 +5809,550 @@
         }
       ],
       "description": "Connected providers with a zero-carry verdict in force, as the dashboard counts the pool: in the last day their contracts from at least three client networks (the prober's, their own network's and the sessions their clients reported idle left out) carried at most 1 KiB in all, and none earlier that day carried any, and every URL probe in the last eight hours failed. A hard exclusion: out of every bucket, answer and provider-locations count, force_minimum and an explicit client id included, in every country, whatever the URL-success rule's exemption. The URL probe keeps measuring them; a success, a new app version on the device or the verdict's expiry after 72 hours brings them back (model/provider_zero_carry.go). The judge's runs, its verdicts by country and its reads are on the egress probes dashboard (zero-carry judge row)."
+    },
+    {
+      "id": 935,
+      "type": "row",
+      "title": "capability-aware selection (FP2-PROTOCOL.md)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 248
+      },
+      "panels": []
+    },
+    {
+      "id": 936,
+      "type": "timeseries",
+      "title": "quality supply by capability",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 249
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip, protocol) (urnetwork_stats_provider_egress_capability{env=\"$env\",bucket=\"quality\"})",
+          "refId": "A",
+          "legendFormat": "{{ip}}+{{protocol}}"
+        }
+      ],
+      "description": "Connected valid public providers in the quality bucket of the classified decision, by the capability labels FindProviders2 serves them with (FP2-PROTOCOL.md §3, §8.1). dualproto rows are today's hard-gate supply (a provider whose URL checks took nothing away counts by its strict decision); ipv4+tcp and dualstack+tcp are the providers whose URL checks failed only over HTTP/3 (UDP), which only selector-mode requests draw: the limited window, and the normal windows as overflow. ipv4+dualproto also holds the dual-stack providers whose IPv6 legs failed. After the taskworker deploy the tcp rows fill over the 8-hour evidence window (§8.5: Speed near 20k)."
+    },
+    {
+      "id": 937,
+      "type": "timeseries",
+      "title": "speed supply by capability",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 249
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip, protocol) (urnetwork_stats_provider_egress_capability{env=\"$env\",bucket=\"speed\"})",
+          "refId": "A",
+          "legendFormat": "{{ip}}+{{protocol}}"
+        }
+      ],
+      "description": "Connected valid public providers in the speed bucket of the classified decision, by the capability labels FindProviders2 serves them with (FP2-PROTOCOL.md §3, §8.1). dualproto rows are today's hard-gate supply (a provider whose URL checks took nothing away counts by its strict decision); ipv4+tcp and dualstack+tcp are the providers whose URL checks failed only over HTTP/3 (UDP), which only selector-mode requests draw: the limited window, and the normal windows as overflow. ipv4+dualproto also holds the dual-stack providers whose IPv6 legs failed. After the taskworker deploy the tcp rows fill over the 8-hour evidence window (§8.5: Speed near 20k)."
+    },
+    {
+      "id": 938,
+      "type": "timeseries",
+      "title": "online supply by capability",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 249
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (ip, protocol) (urnetwork_stats_provider_egress_capability{env=\"$env\",bucket=\"online\"})",
+          "refId": "A",
+          "legendFormat": "{{ip}}+{{protocol}}"
+        }
+      ],
+      "description": "Connected valid public providers in the online bucket of the classified decision, by the capability labels FindProviders2 serves them with (FP2-PROTOCOL.md §3, §8.1). dualproto rows are today's hard-gate supply (a provider whose URL checks took nothing away counts by its strict decision); ipv4+tcp and dualstack+tcp are the providers whose URL checks failed only over HTTP/3 (UDP), which only selector-mode requests draw: the limited window, and the normal windows as overflow. ipv4+dualproto also holds the dual-stack providers whose IPv6 legs failed. After the taskworker deploy the tcp rows fill over the 8-hour evidence window (§8.5: Speed near 20k)."
+    },
+    {
+      "id": 939,
+      "type": "timeseries",
+      "title": "post-quantum signal by bucket",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 257
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (bucket, signal) (urnetwork_stats_provider_post_quantum{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{bucket}} {{signal}}"
+        }
+      ],
+      "description": "Connected valid public providers of each bucket of the classified decision by their post-quantum signal in the 8-hour window (FP2-PROTOCOL.md §8.1, §12.4): positive when the URL probe's newest post-quantum outcome is positive, negative when it is negative, none without an outcome. Once client_score_post_quantum_v1_ready is set, a request with post_quantum_encryption or require_modern_provider matches positive providers only (D12.2), so the positive series is the supply a post-quantum client can draw."
+    },
+    {
+      "id": 940,
+      "type": "timeseries",
+      "title": "strict post-quantum requests",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 257
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (field) (rate(urnetwork_findproviders2_post_quantum_requests_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{field}}"
+        }
+      ],
+      "description": "FindProviders2 requests per second that set post_quantum_encryption or require_modern_provider, by the field, summed over the api, alt and proxy processes (FP2-PROTOCOL.md §8.1, §12.4). Connect sends require_modern_provider whenever the performance profile asks for post-quantum encryption; post_quantum_encryption comes from older connect builds."
+    },
+    {
+      "id": 941,
+      "type": "timeseries",
+      "title": "selector-mode requests",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 265
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode, ip, protocol) (rate(urnetwork_findproviders2_select_requests_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}} {{ip}}+{{protocol}}"
+        }
+      ],
+      "description": "FindProviders2 requests per second that carried select, by rank mode and the selectors they asked for, summed over the api, alt and proxy processes (FP2-PROTOCOL.md §5.1, §8.1). Normal windows ask dualstack+dualproto; the limited window asks ipv4+tcp under the performance profile's rank mode (D10). Requests without select are legacy mode and are not counted here."
+    },
+    {
+      "id": 942,
+      "type": "timeseries",
+      "title": "selector-mode providers answered",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 265
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode, overflow_step, ip, protocol) (rate(urnetwork_findproviders2_select_answered_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}} overflow {{overflow_step}} {{ip}}+{{protocol}}"
+        }
+      ],
+      "description": "Providers per second that selector-mode answers held, by rank mode, overflow step (1 for a tcp provider given to a dualproto request, tier +33, §6.3, §6.6) and the labels they were answered with, summed over the api, alt and proxy processes (FP2-PROTOCOL.md §8.1). overflow 0 tcp rows are the limited window's answers; overflow 1 rows are normal windows topped up with tcp providers because their location had too few dualproto ones."
+    },
+    {
+      "id": 943,
+      "type": "timeseries",
+      "title": "requests given tcp overflow",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 273
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode) (rate(urnetwork_findproviders2_select_overflow_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}}"
+        }
+      ],
+      "description": "Selector-mode requests per second whose answer held at least one overflow provider (overflow_step 1: a tcp provider given to a dualproto request at tier +33), summed over the api, alt and proxy processes (FP2-PROTOCOL.md §6.3, §6.6, §8.1). Overflow happens when a dualproto request's held clients plus the eligible dualproto candidates of its location stay below its target_count (D7.3, D11.2). Read it against selector-mode requests: a high share means locations where most supply is tcp."
+    },
+    {
+      "id": 944,
+      "type": "timeseries",
+      "title": "IPv6 need met or short",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 273
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode, outcome) (rate(urnetwork_findproviders2_select_ipv6_need_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}} {{outcome}}"
+        }
+      ],
+      "description": "Selector-mode requests per second with an IPv6 need (dualstack_target_count above held_dualstack_count, D11.1), by whether the answer held enough dualstack providers to meet it, summed over the api, alt and proxy processes (FP2-PROTOCOL.md §8.1). A quality window needs one dualstack client; short means its location had no eligible dualstack provider of either protocol."
     }
   ]
 }

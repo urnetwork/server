@@ -83,6 +83,8 @@ package controller
 //	urnetwork_stats_provider_excluded                of those, the ones the egress rules leave out of a bucket {reason} (db)
 //	urnetwork_stats_provider_online_success_exempt   per country the URL-success rule exempts, the providers the exemption keeps online {country_code} (redis, written by the score export)
 //	urnetwork_stats_provider_modern_gate_shadow      of the providers the other rules admit to quality and speed, those the modern provider gate keeps and each reason it would take one out {bucket, outcome} (db)
+//	urnetwork_stats_provider_egress_capability       of those, each bucket's providers by the capability labels of the classified decision (FP2-PROTOCOL.md §8.1) {bucket, ip, protocol} (db)
+//	urnetwork_stats_provider_post_quantum            of those, each bucket's providers by the classified decision and their post-quantum signal in the window (FP2-PROTOCOL.md §8.1, §12.4) {bucket, signal} (db)
 //
 // the ARIN database canary gauges are internal (arindbctl/ARINDB.md,
 // "Dual-database canary"), listed in stats_arindb_canary.go and read by
@@ -440,6 +442,34 @@ var statsProviderModernGateShadowGauge = newStatsGaugeVec(
 	"Connected valid public providers the other egress rules admit to quality or speed, by what the modern provider gate decides for them",
 	"bucket",
 	"outcome",
+)
+
+// The classified decision's supply (FP2-PROTOCOL.md §3.4, §8.1): the
+// providers of each bucket by their IP label (dualstack, ipv4) and protocol
+// label (dualproto, tcp). A provider whose URL checks took no capability
+// away counts by its strict decision, so the dualproto rows of quality and
+// speed are today's hard-gate supply and the tcp rows what selector-mode
+// requests add. Three buckets and four label pairs, every series published
+// every refresh, zero included.
+var statsProviderEgressCapabilityGauge = newStatsGaugeVec(
+	"provider_egress_capability",
+	"Connected valid public providers of each bucket of the classified egress decision, by capability labels",
+	"bucket",
+	"ip",
+	"protocol",
+)
+
+// The classified decision's supply by post-quantum signal (FP2-PROTOCOL.md
+// §8.1, §12.4): positive when the newest post-quantum outcome of the URL
+// probe in the window is positive, the only providers a strict post-quantum
+// request matches once the marker is set; negative when the newest is
+// negative; none without an outcome. Three buckets and three signals, every
+// series published every refresh, zero included.
+var statsProviderPostQuantumGauge = newStatsGaugeVec(
+	"provider_post_quantum",
+	"Connected valid public providers of each bucket of the classified egress decision, by post-quantum signal",
+	"bucket",
+	"signal",
 )
 
 // The modern provider gate under this process's provider.yml at the last
@@ -1244,6 +1274,27 @@ func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {
 		})
 	}
 	statsProviderModernGateShadowGauge.replace(shadowValues)
+
+	capabilityValues := []statsLabeledValue{}
+	postQuantumValues := []statsLabeledValue{}
+	for _, bucket := range model.ProviderEgressBuckets {
+		for _, ip := range model.ProviderEgressCapabilityIps {
+			for _, protocol := range model.ProviderEgressCapabilityProtocols {
+				capabilityValues = append(capabilityValues, statsLabeledValue{
+					labelValues: []string{bucket, ip, protocol},
+					value:       float64(counts.CapabilityCounts[bucket][ip][protocol]),
+				})
+			}
+		}
+		for _, signal := range model.ProviderPostQuantumSignals {
+			postQuantumValues = append(postQuantumValues, statsLabeledValue{
+				labelValues: []string{bucket, signal},
+				value:       float64(counts.PostQuantumCounts[bucket][signal]),
+			})
+		}
+	}
+	statsProviderEgressCapabilityGauge.replace(capabilityValues)
+	statsProviderPostQuantumGauge.replace(postQuantumValues)
 }
 
 // Publishes the countries the URL-success rule exempts under the guard the
