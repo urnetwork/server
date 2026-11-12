@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -20,9 +21,11 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urfoundation/sn/amendment"
 	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/ss58"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/startifact"
 )
@@ -36,11 +39,15 @@ var stLedgerV2AccountTreeLock sync.Mutex
 // the Bittensor prefix nor 0x and 64 hex digits.
 var ErrStLedgerV2Coldkey = errors.New("coldkey is not an ss58 address or 0x and 64 hex digits")
 
-// StLedgerV2AccountsResult is the answer of GET /sn/ledger/account (SPEC.md):
-// the coldkey as 0x and 64 lowercase hex digits, and its accounts by no_id.
+// StLedgerV2AccountsResult is the answer of GET /sn/ledger/account (SPEC.md,
+// sn/api/operator.yml): the coldkey as 0x and 64 lowercase hex digits, its
+// accounts by no_id, and, for a partial answer, the pools whose ledger could
+// not be read.
 type StLedgerV2AccountsResult struct {
 	Coldkey  string                    `json:"coldkey"`
 	Accounts []*StLedgerV2AccountEntry `json:"accounts"`
+	// UnavailablePools is [] but for an answer asked with partial=true.
+	UnavailablePools []*StLedgerV2UnavailablePool `json:"unavailable_pools"`
 }
 
 // StLedgerV2AccountEntry is the coldkey's account in one pool. Amounts are
@@ -48,6 +55,9 @@ type StLedgerV2AccountsResult struct {
 type StLedgerV2AccountEntry struct {
 	Vault string `json:"vault"`
 	NoId  uint64 `json:"no_id"`
+	// Kind is StLedgerV2PoolKind*, and Label the pool's English display name.
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
 	Index uint64 `json:"index"`
 	// RootIndex is the latest finalized root's index. It is nil for an account
 	// only in the pending root, which has a zero Cumulative and Claimed and no
@@ -65,6 +75,45 @@ type StLedgerV2AccountEntry struct {
 type StLedgerV2ProofNode struct {
 	Hash string `json:"hash"`
 	Sum  string `json:"sum"`
+}
+
+// StLedgerV2UnavailablePool is a pool a partial answer would cover whose
+// ledger could not be read: whether the coldkey has an account there is
+// unknown, never zero.
+type StLedgerV2UnavailablePool struct {
+	Vault string `json:"vault"`
+	NoId  uint64 `json:"no_id"`
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
+}
+
+// The kinds of pool (sn/api/operator.yml SnLedgerPoolKind): an operator's
+// pool, no_id n below 2^32, which pays providers and, from E_x, extenders;
+// and an operator's capture the flag pool, 2^32 + n (CAPTURETHEFLAG.md §3.1).
+const (
+	StLedgerV2PoolKindPool = "pool"
+	StLedgerV2PoolKindCtf  = "ctf"
+)
+
+// StLedgerV2PoolKind is a pool's kind and its English display label: "Pool
+// n", as the apps name an operator's pool, or "Capture the flag".
+func StLedgerV2PoolKind(noId uint64) (kind string, label string) {
+	if _, ok := amendment.CtfNoID(noId); ok {
+		return StLedgerV2PoolKindCtf, "Capture the flag"
+	}
+	return StLedgerV2PoolKindPool, fmt.Sprintf("Pool %d", noId)
+}
+
+// stLedgerV2OwnPools are the pools this operator answers for whether or not
+// its account record holds the coldkey: its pool, no_id n, and its capture
+// the flag pool, 2^32 + n, in ascending no_id. A pool none of whose roots is
+// mirrored holds no account.
+func stLedgerV2OwnPools(cfg *StConfig) []uint64 {
+	noIds := []uint64{cfg.NoId}
+	if ctfPoolId, ok := stCtfPoolId(cfg); ok {
+		noIds = append(noIds, ctfPoolId)
+	}
+	return noIds
 }
 
 // SnLedgerObject serves GET /sn/ledger/object?hash=sha256:<hex>: the immutable
@@ -91,21 +140,28 @@ func SnLedgerObject(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(object)
 }
 
-// SnLedgerAccount serves GET /sn/ledger/account?coldkey=<ss58|0x hex>.
+// SnLedgerAccount serves GET /sn/ledger/account?coldkey=<ss58|0x
+// hex>[&partial=true]. Without partial=true the answer is whole or a 502;
+// with it a pool whose ledger cannot be read is named in unavailable_pools.
+// Errors are problem details (sn/api/operator.yml).
 func SnLedgerAccount(w http.ResponseWriter, r *http.Request) {
-	coldkey, err := ParseStLedgerV2Coldkey(r.URL.Query().Get("coldkey"))
+	SnOperatorCors(w, r)
+	query := r.URL.Query()
+	coldkey, err := ParseStLedgerV2Coldkey(query.Get("coldkey"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		WriteSnProblem(w, http.StatusBadRequest, SnProblemBadRequest, err.Error())
 		return
 	}
-	accounts, err := StLedgerV2Accounts(r.Context(), coldkey)
+	partial, _ := strconv.ParseBool(query.Get("partial"))
+	accounts, err := stLedgerV2Accounts(r.Context(), coldkey, partial)
 	if err != nil {
 		glog.Warningf("[sn]ledger account 0x%x: %s\n", coldkey, err)
-		http.Error(w, "Ledger account unavailable.", http.StatusBadGateway)
+		WriteSnProblem(w, http.StatusBadGateway, SnProblemLedgerUnavailable, "Ledger account unavailable.")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Link", SnOperatorLink)
 	_ = json.NewEncoder(w).Encode(accounts)
 }
 
@@ -132,34 +188,76 @@ func ParseStLedgerV2Coldkey(value string) ([32]byte, error) {
 // StLedgerV2Accounts returns the coldkey's account in every pool whose latest
 // finalized root or pending root holds one, by no_id: the finalized cumulative
 // with its claim proof and vault2's claimed, read at the finalized head, and
-// the pending cumulative. The pools are the server's own and those where the
-// account index records the coldkey. Without settlement v2 the list is empty.
+// the pending cumulative. The pools are the server's own two, its pool and its
+// capture the flag pool, and those where the account index records the
+// coldkey. Without settlement v2 the list is empty. The answer is whole: any
+// pool that cannot be read is an error.
 func StLedgerV2Accounts(ctx context.Context, coldkey [32]byte) (*StLedgerV2AccountsResult, error) {
-	result := &StLedgerV2AccountsResult{Coldkey: fmt.Sprintf("0x%x", coldkey), Accounts: []*StLedgerV2AccountEntry{}}
+	return stLedgerV2Accounts(ctx, coldkey, false)
+}
+
+// StLedgerV2AccountsPartial is StLedgerV2Accounts with each pool read on its
+// own: a pool whose ledger cannot be read is left out of the accounts and
+// named in UnavailablePools. It is still an error when the account record
+// cannot be read, since then the pools to answer are unknown.
+func StLedgerV2AccountsPartial(ctx context.Context, coldkey [32]byte) (*StLedgerV2AccountsResult, error) {
+	return stLedgerV2Accounts(ctx, coldkey, true)
+}
+
+func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*StLedgerV2AccountsResult, error) {
+	result := &StLedgerV2AccountsResult{Coldkey: fmt.Sprintf("0x%x", coldkey), Accounts: []*StLedgerV2AccountEntry{}, UnavailablePools: []*StLedgerV2UnavailablePool{}}
 	cfg := stConfig()
 	if !cfg.LedgerV2Enabled() {
 		return result, nil
 	}
 	recorded := map[uint64]uint64{}
-	noIds := []uint64{cfg.NoId}
-	for _, account := range model.GetStLedgerV2AccountsForColdkey(ctx, cfg.DeploymentKey(), coldkey) {
+	noIds := stLedgerV2OwnPools(cfg)
+	var accounts []*model.StLedgerV2Account
+	if err := stLedgerV2Guard(func() error {
+		accounts = model.GetStLedgerV2AccountsForColdkey(ctx, cfg.DeploymentKey(), coldkey)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("st ledger v2: the account record of 0x%x: %w", coldkey, err)
+	}
+	for _, account := range accounts {
 		recorded[account.NoId] = account.Index
-		if account.NoId != cfg.NoId {
+		if !slices.Contains(noIds, account.NoId) {
 			noIds = append(noIds, account.NoId)
 		}
 	}
 	slices.Sort(noIds)
 	for _, noId := range noIds {
 		index, isRecorded := recorded[noId]
-		entry, err := stLedgerV2AccountEntry(ctx, cfg, noId, coldkey, index, isRecorded)
+		var entry *StLedgerV2AccountEntry
+		err := stLedgerV2Guard(func() (err error) {
+			entry, err = stLedgerV2AccountEntry(ctx, cfg, noId, coldkey, index, isRecorded)
+			return
+		})
 		if err != nil {
-			return nil, err
+			if !partial {
+				return nil, err
+			}
+			glog.Warningf("[sn]ledger account 0x%x: pool %d is unavailable: %s\n", coldkey, noId, err)
+			kind, label := StLedgerV2PoolKind(noId)
+			result.UnavailablePools = append(result.UnavailablePools, &StLedgerV2UnavailablePool{Vault: stLedgerV2Address(cfg.VaultV2), NoId: noId, Kind: kind, Label: label})
+			continue
 		}
 		if entry != nil {
 			result.Accounts = append(result.Accounts, entry)
 		}
 	}
 	return result, nil
+}
+
+// stLedgerV2Guard runs a read whose store raises on a failure, as the model
+// does, and returns the raise as its error.
+func stLedgerV2Guard(read func() error) (err error) {
+	server.HandleError(func() {
+		err = read()
+	}, func(raised error) {
+		err = raised
+	})
+	return
 }
 
 // One pool's entry, or nil when neither root holds the coldkey. A recorded
@@ -170,6 +268,11 @@ func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, col
 	deploymentKey := cfg.DeploymentKey()
 	finalized := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, noId)
 	pending := model.GetStLedgerV2PendingRoot(ctx, deploymentKey, noId)
+	if finalized == nil && pending == nil && !recorded {
+		// no root holds any account of the pool, like the capture the flag
+		// pool's before its first
+		return nil, nil
+	}
 	var tree *merkle.LedgerSumTree
 	var finalizedAccounts, pendingAccounts []merkle.LedgerAccount
 	var err error
@@ -190,7 +293,8 @@ func stLedgerV2AccountEntry(ctx context.Context, cfg *StConfig, noId uint64, col
 	if !found {
 		return nil, nil
 	}
-	entry := &StLedgerV2AccountEntry{Vault: stLedgerV2Address(cfg.VaultV2), NoId: noId, Index: index, Cumulative: "0", Claimed: "0"}
+	kind, label := StLedgerV2PoolKind(noId)
+	entry := &StLedgerV2AccountEntry{Vault: stLedgerV2Address(cfg.VaultV2), NoId: noId, Kind: kind, Label: label, Index: index, Cumulative: "0", Claimed: "0"}
 	if index < uint64(len(finalizedAccounts)) && finalizedAccounts[index].Coldkey == coldkey {
 		cumulative := finalizedAccounts[index].Cumulative
 		client := stLedgerV2Client()

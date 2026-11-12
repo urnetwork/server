@@ -795,6 +795,16 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.StLedgerV2UsageStep,
 			work.StLedgerV2UsageStepPost,
 		),
+		// sn CAPTURETHEFLAG.md §4.2, §4.3
+		task.NewTaskTargetWithPost(
+			work.StCtfDataStep,
+			work.StCtfDataStepPost,
+		),
+		// sn CAPTURETHEFLAG.md §11.2
+		task.NewTaskTargetWithPost(
+			work.StCtfDriverStep,
+			work.StCtfDriverStepPost,
+		),
 		task.NewTaskTargetWithPost(
 			work.StV1Sweep,
 			work.StV1SweepPost,

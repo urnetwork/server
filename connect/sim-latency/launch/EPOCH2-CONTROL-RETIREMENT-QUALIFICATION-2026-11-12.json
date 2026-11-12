@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "kind": "competition-managed-control-retirement-qualification/v1",
+  "source_commit": "74d85b9246603a4764cafb994c0030ca545074bc",
+  "source_manifest_sha256": "98c152322aa5aa701d20f075edc343b5c1cb20f119eb45c989eb62a977a9798c",
+  "root_cause": "The joined SSH lifecycle removed its original plan after process join and native emptiness even when its failed PID1 unit remained loaded. Later cleanup could no longer authenticate that unit's original authority.",
+  "fix": "Withdraw admission, join the exact owner, positively retire only the known stopped nonce unit, then bracket native emptiness with fresh PID1 absence. Uncertainty retains the original plan and closed unknown receipt within the existing registry cap.",
+  "ordinary_passed": 174,
+  "race_passed": 174,
+  "failures": 0,
+  "repetitions_each": 3,
+  "terminal_exit_status": 0,
+  "source_unchanged": true,
+  "logs": "/dev/shm/competition-managed-retirement-independent-qa-20261112.AQYPA9rw",
+  "ordinary_log_sha256": "318e6ce9e9a0900270593f8844eb134b7922c5e56d156ecebfbb9cde4a8cfdde",
+  "race_log_sha256": "7ee91871027b1185941ecec1cc940be9b8ae09fdc9049275778b02964c5b53be",
+  "negative_control": {
+    "change": "Bypass only the positive manager-retirement call in a separate sparse mutation checkout, restoring the old inactive/empty/joined behavior.",
+    "test": "TestManagementSshRetirementLoadedFailedRequiresPositiveManagerCollection",
+    "go_exit_status": 1,
+    "compiled_and_executed": true,
+    "expected_assertion": "old inactive/empty/joined predicate forgot a loaded failed PID1 unit",
+    "log_sha256": "b346a115642d8aebc14d4cb5082b56905f956cf09d7c9fbc052e0b83ec83b815",
+    "mutation_diff_sha256": "475f4c0d81fa4d3a50a432fa36ffa341d80ee21db6a4f5f14eb763068f7c6ca7",
+    "logs": "/dev/shm/competition-retirement-negative-qa-20261112.PKa9DEr8",
+    "qualified_source_untouched": true
+  },
+  "live_host_mutations": false,
+  "native_host_qualification_claimed": false,
+  "deployed": false,
+  "remaining": "Native agent rollout requires a separately reviewed host-control amendment and real host qualification. These results prove the selected deterministic lifecycle regressions, not native production admission or the repository-wide suite."
+}

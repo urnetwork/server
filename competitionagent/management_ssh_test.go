@@ -93,6 +93,9 @@ func managementSshTestHost(config Config, policy ManagementResourcePolicy, setti
 		return &copy, Pin{Path: "/usr/bin/systemctl", Sha256: strings.Repeat("e", 64)}, nil
 	}
 	host.newId = func() (string, error) { return strings.Repeat("d", 64), nil }
+	host.resetFailed = func(context.Context, Pin, string) error {
+		return errors.New("synthetic manager reset is not installed for this owner")
+	}
 	return host
 }
 
@@ -242,7 +245,7 @@ func TestManagementSshNeverReadsFramesBeforePlacement(t *testing.T) {
 func TestManagementSshStopsExitedServiceBeforeWaitingForMonitor(t *testing.T) {
 	config, policy, settings := managementSshTestConfig(t)
 	host := managementSshTestHost(config, policy, settings)
-	started, stopped, waitReturned := &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}
+	started, stopped, waitReturned, retired := &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}
 	waitEntered, stopRelease := make(chan struct{}), make(chan struct{})
 	var stopOnce sync.Once
 	host.start = func(_ context.Context, _ *Config, plan managementSshPlan, marker string, files []*os.File) (managementSshProcess, error) {
@@ -254,7 +257,7 @@ func TestManagementSshStopsExitedServiceBeforeWaitingForMonitor(t *testing.T) {
 			kill: func() error { stopOnce.Do(func() { close(stopRelease) }); return nil }}, nil
 	}
 	host.observe = func(_ context.Context, _ *Config, _ *ManagementResourcePolicy, _ Pin, plan managementSshPlan) (managementSshUnit, error) {
-		return managementSshUnit{exists: started.Load(), completed: started.Load(), inactive: stopped.Load(), invocationId: strings.Repeat("e", 32)}, nil
+		return managementSshUnit{exists: started.Load() && !retired.Load(), completed: started.Load(), inactive: stopped.Load(), invocationId: strings.Repeat("e", 32)}, nil
 	}
 	host.stop = func(_ context.Context, _ Pin, unit string) error {
 		if !validManagementSshUnit(unit) || validUnitName(unit) {
@@ -266,6 +269,7 @@ func TestManagementSshStopsExitedServiceBeforeWaitingForMonitor(t *testing.T) {
 		return nil
 	}
 	host.empty = func(context.Context, string) (bool, error) { return stopped.Load(), nil }
+	host.resetFailed = func(context.Context, Pin, string) error { retired.Store(true); return nil }
 	host.beforeJoinedReturn = func() {
 		if !waitReturned.Load() {
 			t.Error("wrapper returned before its physical monitor wait joined")
@@ -301,7 +305,7 @@ func TestManagementSshCancellationJoinsOnlyItsControlUnit(t *testing.T) {
 	if err := os.WriteFile(durablePath, durableBytes, 0400); err != nil {
 		t.Fatal(err)
 	}
-	started, stopped := false, false
+	started, stopped, retired := false, false, false
 	waitRelease := make(chan struct{})
 	var stopOnce sync.Once
 	var marker string
@@ -313,7 +317,7 @@ func TestManagementSshCancellationJoinsOnlyItsControlUnit(t *testing.T) {
 		if started && !stopped {
 			cancel()
 		}
-		return managementSshUnit{exists: started, inactive: stopped, invocationId: strings.Repeat("e", 32)}, nil
+		return managementSshUnit{exists: started && !retired, inactive: stopped, invocationId: strings.Repeat("e", 32)}, nil
 	}
 	host.stop = func(_ context.Context, _ Pin, unit string) error {
 		if unit == unitName(durableRun) || !validManagementSshUnit(unit) {
@@ -327,6 +331,7 @@ func TestManagementSshCancellationJoinsOnlyItsControlUnit(t *testing.T) {
 		return nil
 	}
 	host.empty = func(context.Context, string) (bool, error) { return stopped, nil }
+	host.resetFailed = func(context.Context, Pin, string) error { retired = true; return nil }
 	inRead, _, _, outWrite, _, diagWrite := managementSshTestPipes(t)
 	if err := host.serve(parent, config.configPath, inRead, outWrite, diagWrite); !errors.Is(err, context.Canceled) || errors.Is(err, ErrManagedSshUnknown) || !stopped {
 		t.Fatal("canceled transport did not positively join only its own control", err)
@@ -505,7 +510,7 @@ func TestManagementSshJoinsActualInheritedPipeProcessAfterExactStop(t *testing.T
 	defer statusWrite.Close()
 	defer stopRead.Close()
 	defer stopWrite.Close()
-	started, completed, stopped, waited := &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}
+	started, completed, stopped, waited, retired := &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}, &atomic.Bool{}
 	childReady, exited := make(chan struct{}), make(chan struct{})
 	var command *exec.Cmd
 	host.start = func(_ context.Context, _ *Config, _ managementSshPlan, _ string, files []*os.File) (managementSshProcess, error) {
@@ -526,7 +531,7 @@ func TestManagementSshJoinsActualInheritedPipeProcessAfterExactStop(t *testing.T
 		return &managementSshTestProcess{wait: func() error { err := command.Wait(); waited.Store(true); return err }, kill: func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }}, nil
 	}
 	host.observe = func(context.Context, *Config, *ManagementResourcePolicy, Pin, managementSshPlan) (managementSshUnit, error) {
-		return managementSshUnit{exists: started.Load(), completed: completed.Load(), inactive: stopped.Load(), invocationId: strings.Repeat("e", 32)}, nil
+		return managementSshUnit{exists: started.Load() && !retired.Load(), completed: completed.Load(), inactive: stopped.Load(), invocationId: strings.Repeat("e", 32)}, nil
 	}
 	host.stop = func(_ context.Context, _ Pin, unit string) error {
 		if !validManagementSshUnit(unit) || !completed.Load() {
@@ -539,6 +544,7 @@ func TestManagementSshJoinsActualInheritedPipeProcessAfterExactStop(t *testing.T
 		return nil
 	}
 	host.empty = func(context.Context, string) (bool, error) { return stopped.Load(), nil }
+	host.resetFailed = func(context.Context, Pin, string) error { retired.Store(true); return nil }
 	host.beforeJoinedReturn = func() {
 		if !waited.Load() || command.ProcessState == nil || !command.ProcessState.Exited() {
 			t.Error("managed SSH returned while its real monitor process retained work")

@@ -98,15 +98,22 @@ func SnLedgerObject(w http.ResponseWriter, r *http.Request) {
 
 // SnLedgerAccount backs `GET /sn/ledger/account?coldkey=<ss58|0x hex>`: the
 // coldkey's settlement v2 account in every pool, with its claim proof
-// (VERSION2-FINAL.md §8.3). Public.
+// (VERSION2-FINAL.md §8.3), whole or with partial=true per pool
+// (sn/api/operator.yml). Public.
 func SnLedgerAccount(w http.ResponseWriter, r *http.Request) {
 	controller.SnLedgerAccount(w, r)
 }
 
-// SnClaimRelay backs `GET /sn/claim-relay`: per coldkey of the caller's network,
-// what is pending, why, and whether Claim now can be tapped.
+// SnClaimRelay backs `GET /sn/claim-relay[?partial=true]`: per account of the
+// caller's network's coldkeys, in each of the operator's pools, what is
+// pending, why, and whether Claim now can be tapped.
 func SnClaimRelay(w http.ResponseWriter, r *http.Request) {
-	router.WrapRequireAuth(controller.SnClaimRelay, w, r)
+	partial, _ := strconv.ParseBool(r.URL.Query().Get("partial"))
+	args := &controller.SnClaimRelayArgs{Partial: partial}
+	impl := func(clientSession *session.ClientSession) (*controller.SnClaimRelayResult, error) {
+		return controller.SnClaimRelayWithArgs(args, clientSession)
+	}
+	router.WrapRequireAuth(impl, w, r)
 }
 
 // SnClaimRelayClaimNow backs `POST /sn/claim-relay/claim-now`: queues one of the
