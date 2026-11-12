@@ -998,6 +998,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{stLedgerV2ExtenderMigrationContract},
 	// the Solana receiver sweep's cursor, versioned by its position
 	[]snMainnetMigrationContract{solanaReceiverSweepCursorMigrationContract},
+	// capability-aware FindProviders2's URL evidence columns, versioned by
+	// their position
+	[]snMainnetMigrationContract{providerEgressFp2EvidenceMigrationContract},
 	// Exact closure, cycle transition and inherited legacy/source custody.
 	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract},
 )

@@ -8369,6 +8369,101 @@
           "legendFormat": "{{family}} {{outcome}}"
         }
       ]
+    },
+    {
+      "id": 170,
+      "type": "row",
+      "title": "capability evidence: failed later legs and post-quantum outcomes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 559
+      },
+      "panels": []
+    },
+    {
+      "id": 171,
+      "type": "timeseries",
+      "title": "URL outcomes failed only on later legs, by leg / min",
+      "description": "Stored URL outcomes that failed only on legs made after their IPv4 HTTPS leg passed, where the ingest's place verdict held each failed leg against the provider (FP2-PROTOCOL.md §3.2): v4udp, the IPv4 HTTP/3 leg was silent; v6tcp, the IPv6 HTTPS leg failed; v6udp, the IPv6 HTTP/3 leg was silent; v4udp_v6tcp and v4udp_v6udp, both. This is the failed_later_legs mask each outcome stores. Capability-aware FindProviders2 reads it as negative evidence on one axis, UDP (protocol, label tcp) or IPv6 (IP, label ipv4), and classifies the provider on the legs it keeps instead of excluding it. A leg judged the place's makes its outcome a pass and is not counted here.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 560
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (legs) (rate(urnetwork_egress_url_failed_later_legs_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{legs}}"
+        }
+      ]
+    },
+    {
+      "id": 172,
+      "type": "timeseries",
+      "title": "post-quantum outcomes of URL turns / min",
+      "description": "Stored URL outcomes of post-quantum turns, the turns whose claim asked for an end-to-end session (about one turn per provider every four hours), by the pq_outcome the store kept (FP2-PROTOCOL.md §12.3): positive, the session negotiated a post-quantum group (X25519MLKEM768), sealed before the IPv4 HTTPS leg's request and carried that passed leg; negative, a classical group, a post-quantum session that had not sealed by the run's end, or no responder for a whole establishment window while the provider acknowledged the turn's traffic; unmeasured, anything else, a security recheck or an outcome on probation included. Strict post-quantum selection matches only providers whose newest outcome in the eight-hour window is positive.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 560
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pq) (rate(urnetwork_egress_url_pq_outcomes_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "stored {{pq}}"
+        }
+      ]
     }
   ]
 }

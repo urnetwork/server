@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T22:06:08.422828Z",
+  "observed_at": "2026-11-12T22:31:27.047863Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -27,7 +27,7 @@
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "api_observed_at": "2026-11-12T22:06:08Z",
+    "api_observed_at": "2026-11-12T22:25:53Z",
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
       "supervisor_pid": 211140,
@@ -39,7 +39,18 @@
       "operator_hold_or_restart_performed": false,
       "ops_maintenance_confirmation": "user_asking_ops_to_check_1918_to_1927_utc"
     },
-    "transient_readiness_cause_confirmed": false
+    "transient_readiness_cause_confirmed": false,
+    "latest_readiness_dip": {
+      "observed_at": "2026-11-12T22:11:20.824762Z",
+      "failed_checks": ["authoritative_evaluator_host", "artifact_storage", "host_rebaseline"],
+      "artifact_archive_and_database_checks_passed": true,
+      "heartbeat_snapshot_at": "2026-11-12T22:11:40.402750Z",
+      "sille_heartbeat_at": "2026-11-12T22:10:13.214900Z",
+      "goofe_heartbeat_at": "2026-11-12T22:09:05.062813Z",
+      "configured_maximum_age_seconds": 60,
+      "recovered_without_restart": true,
+      "interpretation": "Both eligible rows were stale, so all three host-backed counts fail together; archive check remained healthy. Idle heartbeat scheduling/operation latency cause is still under investigation, not a proven MinIO incident."
+    }
   },
   "recovery": {
     "authorized_failed_jobs": [
@@ -58,17 +69,17 @@
     "database_grants_issued": false,
     "ordinary_qualification": {
       "original_scope": 271,
-      "qualified": 148,
-      "pending": 123,
+      "qualified": 172,
+      "pending": 99,
       "failed_batch_partial_credit": false,
       "race_or_release_qualification_complete": false
     },
     "active_qualification": {
       "cases": 24,
-      "pid": 724024,
-      "invocation_id": "157d6f30727d464897fdbe9228d88f66",
-      "evidence": "/dev/shm/competition-wallet-pinned-batch04-20261112.pATuh4xU",
-      "manifest_sha256": "e8a13627cd24b45d20cf691315a48ed1b9bb941f897f4f6dfa279f0e99ff1098",
+      "pid": 800014,
+      "invocation_id": "e2d553c7b6af4106809ccaf8d24a6734",
+      "evidence": "/dev/shm/competition-wallet-pinned-batch05-20261112.sD7o6hsp",
+      "manifest_sha256": "47356fe301842447bad4de5461de69a2a5af1dabe39620aec300b6bf4b11d32d",
       "completed_or_credited": false
     },
     "wallet_fixture": {
@@ -112,11 +123,24 @@
       "prepared_binary_sha256": "e2a3b939bb211063a1b62108ebcfacb5353dc815dd3f57899850ce1817e9c508",
       "preparation_source_and_dependencies_unchanged": true,
       "compiler_preparation": "Trusted operator preparation only: 4 GiB memory, 512 MiB cache-growth bound, preflight root reserve plus that cache budget; no tests, candidate execution, database or model calls. Test-phase cache limit stays 128 MiB; native PostgreSQL stays 1 GiB.",
-      "tests_remaining": "Remaining 123 original census cases, race qualification and final exact-main/dependency compatibility."
+      "latest_completed_native_batch": {
+        "cases": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "log_sha256": "6b105b94ba86fe5152a2f10f3f5f4a0bab291bf979526da163430cd8ea6db28d",
+        "postgres_peak_bytes": 440471552,
+        "postgres_oom_kills": 0,
+        "actor_guard_capture_cleanup_exit_zero": true,
+        "durable_evidence": "/var/lib/urnetwork/competition-native24-coverage11-qualification-20261112.VfutpY70",
+        "durable_manifest_sha256": "34ff83047cc325f5169aa4bef8db1d67a1e4f81368cc1f0432310a632f9924b4"
+      },
+      "tests_remaining": "Remaining 99 original census cases, race qualification and final exact-main/dependency compatibility."
     },
-    "isolated_server_commit": "3ae7d84523a10cc98bb1e3ee0309b0ed44b55b3c",
+    "isolated_server_commit": "37fc05dc1",
     "isolated_sn_commit": "e908edda50378af63576109df88c603168716ce6",
     "isolated_main_qualified_or_deployed": false,
+    "integration_status": "Wallet fixture checkpoint and captured main 4b54fda91 merged in isolation; published Solana cursor migration precedes local recovery append, with captured-tail regression updated. Current original-census qualification inputs remain unchanged.",
     "deployment_pending": "Only after qualification: append recovery migration after origin, deploy compatible API/monitor, install worker/reevaluate CLI, verify global idle and both host closures, individually authorize recovery preserving FIFO."
   },
   "private_reviews": {
@@ -129,7 +153,11 @@
     "gemma_first_partial": "Rejected: non-JSON prefix and unseen-file findings; no reroll.",
     "qwen_scoring_partial": "Provider completed; rejected because canonical.patch is not a production source path. No rewriting or reroll.",
     "further_old_calls_held": true,
-    "coverage_planner": "Refrozen unqualified source 7332b2c2727d5301f9f898d9aa29cf132bd1b277261d1c15d5b9c861f115f244; eleven synthetic cases await independent tests. Typed renderer, both-member coverage and transitive/cross-file closure remain pending.",
+    "coverage_planner": "Source 7332b2c2727d5301f9f898d9aa29cf132bd1b277261d1c15d5b9c861f115f244 passed eleven synthetic cases three times ordinary and race. Actual inventory plan execution remains pending.",
+    "bounded_renderer": "Source 03ef12212a4e548e3721c7e92cd424c42d458594a985509c43aba65ca8ae55a5 passed six synthetic cases three times ordinary and race; typed provider boundary, conservative adjacent citation guards and complete paired/transitive review remain in progress. No new inference.",
+    "linked_validation_retention": "Source 954cc73b2496ed62987e6ee3c4c9fd05b5613cb8cc2b2b5c9e3a9d766ecf8e55 passed sixteen synthetic cases three times ordinary and race. Operator plan d4cbbc0399505ca1eabb262fc47cae0c90293ce78d9e2e530826be93bb358aa5 pins existing proof only; actual build/upload pending. No original receipt changed.",
+    "render_linked_qa_evidence": "/var/lib/urnetwork/competition-render-linked-synthetic-qualification-20261112.WtE2fpwl",
+    "render_linked_qa_manifest_sha256": "553e2db57205e84950211b4c35da77b57810d8ed9da4d463e81d9e2e844cb78d",
     "publisher": "24 ordinary +24 race tests passed; compile-only preparation passed. Original Qwen call's eight evidence leaves and manifest retained with exact-version readback; original failed validation flag remains unchanged. Linked offline validation retention remains separate and pending.",
     "protected_original_call": {
       "key": "32ddf0f6d09a7592155e8de5942ec09671603bbc3a3c32054b94e661d61e3e7f",
@@ -138,6 +166,7 @@
       "retention": "COMPLIANCE through 2028-01-01T00:00:00Z",
       "actor_guard_and_capture_exit_zero": true,
       "evidence": "/dev/shm/competition-prereview-qwen32-publication-20261112.RvX2cwX9",
+      "durable_evidence": "/var/lib/urnetwork/competition-prereview-protected-original-20261112.peSJpxpS",
       "authoritative": false
     },
     "authoritative_decision_or_publication_issued": false
