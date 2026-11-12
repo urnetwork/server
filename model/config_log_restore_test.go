@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 
 	"github.com/urnetwork/server"
@@ -133,5 +134,46 @@ func TestRecreateRecentRevocations(t *testing.T) {
 		count, err := RecreateRecentRevocations(owner.ctx, now, settings)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, count, 1)
+	})
+}
+
+// The effects step after a Postgres restore whose backup predates a SidecarRevoke's effects: this process's watermark
+// says it applied the entry, so an ordinary run applies nothing, but the walk from the start applies it again, and a
+// second walk finds nothing left.
+func TestReapplyRemovalEffectsAfterARestore(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		installTestRevStore(t)
+		self := newTestEffectsLog(t)
+		sidecarId := self.removal.sidecarId
+		pin, err := self.post(self.ownerRevoke(sidecar.Id(sidecarId)))
+		if err != nil {
+			t.Fatalf("the removal: %v", err)
+		}
+		settings := DefaultConfigLogEffectsSettings()
+		first, err := ApplyConfigLogEffects(self.ctx, self.sequencer, self.networkId, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, first.AppliedCount, 1)
+
+		// the restored backup: the client and the identity active, and no event naming the entry
+		var chain [32]byte
+		copy(chain[:], pin.GetChain())
+		server.Tx(self.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(self.ctx, `UPDATE network_client SET active = true, deactivate_time = NULL WHERE client_id = $1`, self.removal.clientId))
+			server.RaisePgResult(tx.Exec(self.ctx, `UPDATE sidecar_identity SET status = $2, revoke_time = NULL WHERE sidecar_id = $1`, sidecarId, SidecarIdentityStatusActive))
+			server.RaisePgResult(tx.Exec(self.ctx, `DELETE FROM network_admin_event WHERE network_id = $1 AND request_id = $2`, self.networkId, configLogEffectRequestId(self.networkId, pin.GetVersion(), chain)))
+		})
+		ordinary, err := ApplyConfigLogEffects(self.ctx, self.sequencer, self.networkId, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, ordinary.AppliedCount, 0)
+		connect.AssertEqual(t, testEffectsClientActive(t, self.ctx, self.removal.clientId), true)
+
+		count, err := ReapplyRemovalEffects(self.ctx, self.sequencer, self.networkId, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, count, 1)
+		connect.AssertEqual(t, testEffectsClientActive(t, self.ctx, self.removal.clientId), false)
+		connect.AssertEqual(t, testEffectsIdentityStatus(t, self.ctx, sidecarId), SidecarIdentityStatusRevoked)
+		count, err = ReapplyRemovalEffects(self.ctx, self.sequencer, self.networkId, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, count, 0)
 	})
 }
