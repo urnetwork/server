@@ -26,7 +26,18 @@ const (
 	stLedgerV2UsageStepRetryDelay = 15 * time.Second
 	// A step reads the epoch's provider chunks and publishes one small object.
 	stLedgerV2UsageStepMaxTime = 30 * time.Minute
+	// An extender shadow step reads the epoch's contracts as a root's build
+	// does, so it has the v2 driver's time.
+	stLedgerV2UsageShadowStepMaxTime = 2 * time.Hour
 )
+
+// stLedgerV2UsageStepMaxTimeOf is a usage step's time limit by kind.
+func stLedgerV2UsageStepMaxTimeOf(kind string) time.Duration {
+	if kind == controller.StLedgerV2UsageStepExtenderShadow {
+		return stLedgerV2UsageShadowStepMaxTime
+	}
+	return stLedgerV2UsageStepMaxTime
+}
 
 // scheduleStLedgerV2UsageSteps starts a task chain for each due usage step that has
 // none. Nothing it does can reach the sync turn's other work: a database or chain
@@ -45,7 +56,7 @@ func scheduleStLedgerV2UsageSteps(clientSession *session.ClientSession, deployme
 	for _, step := range steps {
 		args := &StLedgerV2UsageStepArgs{DeploymentKey: string(deploymentKey), Kind: step.Kind, Epoch: step.Epoch}
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-			task.ScheduleTaskInTxIfAbsent(tx, StLedgerV2UsageStep, args, clientSession, stLedgerV2UsageStepRunOnce(args), task.RunAt(step.RunAt), task.MaxTime(stLedgerV2UsageStepMaxTime))
+			task.ScheduleTaskInTxIfAbsent(tx, StLedgerV2UsageStep, args, clientSession, stLedgerV2UsageStepRunOnce(args), task.RunAt(step.RunAt), task.MaxTime(stLedgerV2UsageStepMaxTimeOf(step.Kind)))
 		})
 	}
 }
@@ -107,7 +118,7 @@ func StLedgerV2UsageStepPost(
 		}
 		next := *stLedgerV2UsageStep
 		next.Attempt += 1
-		task.ScheduleTaskInTx(tx, StLedgerV2UsageStep, &next, clientSession, stLedgerV2UsageStepRunOnce(&next), task.RunAt(runAt), task.MaxTime(stLedgerV2UsageStepMaxTime))
+		task.ScheduleTaskInTx(tx, StLedgerV2UsageStep, &next, clientSession, stLedgerV2UsageStepRunOnce(&next), task.RunAt(runAt), task.MaxTime(stLedgerV2UsageStepMaxTimeOf(next.Kind)))
 	}
 	return nil
 }

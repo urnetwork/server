@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -248,8 +249,8 @@ func (self *stDemandWorkV1Chain) BlockHash(context.Context, uint64) ([32]byte, e
 	return [32]byte{}, nil
 }
 
-// A sync turn starts the ended epoch's users capture alongside its v2 step, and a pending
-// chain keeps its own retry.
+// A sync turn starts the ended epoch's users capture and its extender census capture
+// alongside its v2 step, each its own chain, and a pending chain keeps its own retry.
 func TestStSyncChainSchedulesTheUsageStep(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -271,13 +272,14 @@ func TestStSyncChainSchedulesTheUsageStep(t *testing.T) {
 		stDemandSeedSyncTurn(ctx, key)
 		runProjectionAuditTask(tb, owner, newAsyncMaintenanceCase(StSyncChain, StSyncChainPost, &StSyncChainArgs{DeploymentKey: string(key)}), true)
 		function := task.NewTaskTarget(StLedgerV2UsageStep).TargetFunctionName()
-		if got := pendingStArgs(tb, ctx, function); len(got) != 1 || got[0] != controller.StLedgerV2UsageStepUsers+" 6 attempt 0" {
-			tb.Fatalf("usage steps %v", got)
+		want := []string{controller.StLedgerV2UsageStepExtenderCensus + " 6 attempt 0", controller.StLedgerV2UsageStepUsers + " 6 attempt 0"}
+		if got := pendingStArgs(tb, ctx, function); !slices.Equal(got, want) {
+			tb.Fatalf("usage steps %v, want %v", got, want)
 		}
-		// The next turn sees it pending and leaves it as it is.
+		// The next turn sees them pending and leaves them as they are.
 		runProjectionAuditTask(tb, owner, newAsyncMaintenanceCase(StSyncChain, StSyncChainPost, &StSyncChainArgs{DeploymentKey: string(key)}), true)
-		if got := pendingStArgs(tb, ctx, function); len(got) != 1 {
-			tb.Fatalf("usage steps %v", got)
+		if got := pendingStArgs(tb, ctx, function); !slices.Equal(got, want) {
+			tb.Fatalf("usage steps %v, want %v", got, want)
 		}
 		// A step of a replaced deployment does nothing and schedules nothing.
 		stale := &StLedgerV2UsageStepArgs{DeploymentKey: "945:0x1000000000000000000000000000000000000001", Kind: controller.StLedgerV2UsageStepUsers, Epoch: 6}

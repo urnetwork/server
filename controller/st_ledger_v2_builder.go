@@ -74,11 +74,13 @@ type StLedgerV2Build struct {
 }
 
 // StLedgerV2EpochProviders is a covered epoch's provider chunk references;
-// Null marks providers: null.
+// Null marks providers: null. Extenders is its extender component, for an
+// epoch the SN25 extender amendment covers, recorded with its rows.
 type StLedgerV2EpochProviders struct {
 	Epoch          uint64
 	ProviderChunks []string
 	Null           bool
+	Extenders      *model.StLedgerV2EpochExtenders
 }
 
 var stLedgerBuilderLock sync.Mutex
