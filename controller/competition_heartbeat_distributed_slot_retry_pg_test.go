@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -132,12 +133,12 @@ func TestCompetitionHeartbeatDistributedSlotRetryPgAcknowledgedRollbackPreserves
 			defer close(joined)
 			ack, err := retryCompetitionJobHeartbeatOperation(operationCtx, *job.LeaseExpiresAt, fixture.clock.Now().Add(time.Minute), settings, func(ctx context.Context) error {
 				calls++
-				actual := ctx
+				actual := withCompetitionJobAuthority(ctx, job)
 				if calls == 1 {
-					actual = &competitionHeartbeatPgDeadlineContext{Context: ctx, stopped: deadlineObserved}
+					actual = &competitionHeartbeatPgDeadlineContext{Context: actual, stopped: deadlineObserved}
 					attempts <- actual
 				}
-				err := fixture.store.Heartbeat(withCompetitionJobAuthority(actual, job), selected, "synthetic-distributed-slot-worker", job.JobId)
+				err := fixture.store.Heartbeat(actual, selected, "synthetic-distributed-slot-worker", job.JobId)
 				if calls == 1 {
 					firstError = err
 				}
@@ -218,4 +219,53 @@ func TestCompetitionHeartbeatDistributedSlotRetryPgAcknowledgedRollbackPreserves
 			t.Fatal("renewal reset original distributed clock/fence/attempt or lost atomic lease extension", before, after)
 		}
 	})
+}
+
+// Registration is synchronous and observable without timing a negative ACK.
+// The actual fixture wrapper supplies cancellation and its stopped witness.
+type competitionHeartbeatDeadlineRegistration struct {
+	*competitionHeartbeatPgDeadlineContext
+	registrations atomic.Int64
+}
+
+func (self *competitionHeartbeatDeadlineRegistration) AfterFunc(callback func()) func() bool {
+	self.registrations.Add(1)
+	return self.competitionHeartbeatPgDeadlineContext.AfterFunc(callback)
+}
+
+func TestCompetitionHeartbeatDistributedDeadlineWitnessPreservesAuthorityAndDelegation(t *testing.T) {
+	for _, authorityOutside := range []bool{true, false} {
+		parent, cancel := context.WithCancel(t.Context())
+		job := &queuedJob{JobId: server.Id{15: 7}, AttemptCount: 1}
+		witness := &competitionHeartbeatDeadlineRegistration{competitionHeartbeatPgDeadlineContext: &competitionHeartbeatPgDeadlineContext{Context: parent, stopped: make(chan struct{})}}
+		var observed context.Context
+		if authorityOutside {
+			observed = withCompetitionJobAuthority(witness, job)
+		} else {
+			witness.Context = withCompetitionJobAuthority(parent, job)
+			observed = witness
+		}
+		authority, ok := observed.Value(competitionJobAuthorityKey{}).(competitionJobAuthority)
+		if !ok || authority.JobId != job.JobId {
+			cancel()
+			t.Fatal("deadline witness lost original job authority")
+		}
+		finished := make(chan struct{})
+		stop := context.AfterFunc(observed, func() { close(finished) })
+		expected := int64(1)
+		if authorityOutside {
+			expected = 0
+		}
+		if witness.registrations.Load() != expected {
+			cancel()
+			stop()
+			t.Fatal("fixture did not reproduce and fix optional AfterFunc hiding", authorityOutside)
+		}
+		cancel()
+		<-finished
+		stop()
+		if !authorityOutside {
+			<-witness.stopped
+		}
+	}
 }
