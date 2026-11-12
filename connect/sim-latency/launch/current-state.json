@@ -137,10 +137,25 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "bounded_census_pure_and_native_smoke_verified_running_no_result_yet",
+      "status": "smoke_14_of_14_passed_repeated_critical_ordinary_running_broad_phase_held_for_adjacent_fixture_fix",
+      "smoke_receipt": "EPOCH2-BOUNDED-CENSUS-SMOKE-2026-11-12.json",
+      "phase_a": {
+        "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "0bc9969459084842a1fa2bd718317fed",
+        "main_pid": 2267938,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.PBOc3NUi",
+        "count": 3,
+        "verified_active": true,
+        "broader_phase_auto_start_revoked": true,
+        "reason": "Older public-column parity helper calls the database source without the census context marker; preserve the frozen active run, then fix that bypass before broad execution."
+      },
       "smoke": {
         "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
         "started_at": "2026-11-12T09:21:28Z",
+        "terminal_at": "2026-11-12T09:26:14.106489615Z",
+        "result": "13 new tests plus the original failing test passed; zero skips",
+        "fixtures_cleaned_up": true,
         "unit": "competition-distributed-recovery-independent-qa-20261112.service",
         "invocation_id": "6e77ad0ea0a34c5dba6a9aad5d3630dd",
         "main_pid": 2209408,
