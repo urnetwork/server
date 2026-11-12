@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T04:44:51.797909+00:00",
+  "observed_at": "2026-11-12T07:11:18.792549Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -18,26 +18,33 @@
   "runtime_status": {
     "intake_ready": true,
     "grading_ready": true,
-    "publication_held": false
+    "publication_held": false,
+    "diagnosis": "Goofe completed its previous native run, reconciled the same attempt with its original deadline, retained artifacts and recorded success. Its fresh host heartbeat restored grading readiness; no explicit hold was changed. Sille's current custody remains released while native execution continues."
   },
   "queue": {
-    "succeeded": 7,
+    "succeeded": 10,
     "failed": 2,
-    "queued": 7,
+    "queued": 4,
     "running": 2
   },
   "active_attempts": [
     {
-      "job_id": "01a1c7bf-ae3b-76f3-dee7-e60d2f77c90c",
+      "job_id": "01a1cac1-bfb6-874c-78fb-05740ec204e4",
       "host_id": "goofe",
-      "started_at": "2026-11-12T03:40:44.712434",
-      "deadline": "2026-11-12T06:40:44.712434"
+      "started_at": "2026-11-12T07:10:20.253976",
+      "deadline": "2026-11-12T10:10:20.253976",
+      "observed_phase": "new_fifo_claim"
     },
     {
-      "job_id": "01a1c88c-5f36-c222-3ec0-668fe393050f",
+      "job_id": "01a1ca5d-8d1f-3a64-6356-0dfeacf43557",
       "host_id": "sille",
-      "started_at": "2026-11-12T04:08:45.761115",
-      "deadline": "2026-11-12T07:08:45.761115"
+      "started_at": "2026-11-12T05:52:24.10429",
+      "deadline": "2026-11-12T08:52:24.10429",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 7,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T06:15:17.173607Z",
+      "native_process_verified_live": true,
+      "reattachment_verified": false
     }
   ],
   "live_worker": {
@@ -80,14 +87,33 @@
     "request_is_not_a_database_grant": true,
     "implementation_and_deployment_pending": true,
     "queued": false,
-    "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112"
+    "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
+    "frozen_server_commit": "4394a2ddb33246459747a01a1f5a7c1713921c86",
+    "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
+    "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
+    "qualification": {
+      "status": "corrected_startup_role_smoke_verified_active_compilation_no_result_yet",
+      "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+      "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.NBkRc8Ov",
+      "workspace_sha256": "fa98030fed949631072273ad80a100475256da96089e3100137f9c31e3ab6c28",
+      "previous_zero_test_dependency_failures": [
+        {"evidence": "2IZI2TQU", "log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071"},
+        {"evidence": "2SNMhX3G", "log_sha256": "ef300e9f282c8ba92378d2f1577b21b491b2c3f2d76b5c5218d8d686bc2f6629"},
+        {"evidence": "QPQ1TM6V", "log_sha256": "7cb213bf815a1a1d786a0f27e2291dccce68963361a1e46b0cb8bdd1d3ba5d83"}
+      ],
+      "server_source_unchanged_by_dependency_correction": true,
+      "live_and_product_checkouts_unchanged": true,
+      "previous_fixture_failure": "Q6aozbcV: partial 40 pass/21 fail before controlled stop; actual common assertion round_not_open, not the expected handoff-negative-control log.",
+      "previous_smoke_failure": "7k3K6O43: two passed, current-ASAP source derivation failed from an intentionally incomplete synthetic producer profile; fail-fast skipped the remaining case.",
+      "coverage_limit": "Historical expired lifecycle and current ASAP startup/admission/claim branches are tested separately; no single real-time three-hour expired-ASAP run has been completed."
+    }
   },
   "pending_authorizations": [
     "Claim-only maintenance window for the independently verified combined worker; otherwise retain the previously approved empty-queue boundary.",
     "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted."
   ],
   "next_actions": [
-    "Implement and qualify the newly user-approved distributed recovery authority for the two failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence.",
+    "Qualify the implemented distributed recovery authority and corrected test fixtures for the two approved failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence.",
     "Monitor both exact active jobs and live readiness; investigate new failures from retained evidence.",
     "After authorized drain and positively verified global idle, activate only the receipt-pinned staged worker, verify its actual runtime identity and unchanged execution inputs, then resume claims.",
     "Do not change frozen product source, shared baseline, scoring rules, evaluator image or any original attempt deadline."
