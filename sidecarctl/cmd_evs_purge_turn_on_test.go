@@ -1,9 +1,9 @@
-// Tests for `sidecarctl evs purge-turn-on`. The request's shape and once key are evsservice's
-// (sweep_task_test.go) and the fold is server/task's (sidecarhost's TestTasksTwoSchedulesOfOneKeyRunOnce), neither of
-// which this module may link, so these hold the command to its contract against a fake env: it schedules exactly once
-// a run when the gate is enabled with purge on, refuses and schedules nothing otherwise, asks a second run for the
-// same request, never reports a failure with exit 0, and, with the env as server would reach it, refuses before
-// reading anything.
+// Tests for `sidecarctl evs purge-turn-on` against a fake env. The request's shape and once key are evsservice's
+// (sweep_task_test.go) and the fold is server/task's (sidecarhost's TestTasksTwoSchedulesOfOneKeyRunOnce), so these
+// hold the command to its contract: it schedules exactly once a run when the gate is enabled with purge on, refuses
+// and schedules nothing otherwise, asks a second run for the same request, never reports a failure with exit 0, and
+// refuses an env its process does not run as before reading anything. cmd_evs_purge_turn_on_server_test.go runs it
+// against server's loader and queue on the private test stack.
 
 package main
 
@@ -309,21 +309,31 @@ func TestEvsPurgeTurnOnRefusesCommandLinesItCannotTake(t *testing.T) {
 	}
 }
 
-// The binary as built reaches no env: until sidecarctl may link server's loader, server/task's queue and evsservice,
-// every run exits 1, naming the questions, with nothing read or scheduled.
-func TestEvsPurgeTurnOnRefusesEveryEnvUntilItMayLinkServer(t *testing.T) {
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	if code := sidecarctlCommands.run([]string{"evs", "purge-turn-on", "test"}, stdout, stderr); code != 1 {
-		t.Fatalf("exited %d, want 1: %s", code, stderr.String())
+// The binary as built reaches one env, the one its WARP_ENV names: asked for another, or with no WARP_ENV, it exits 1
+// before it reads a gate or reaches a queue, naming both envs.
+func TestEvsPurgeTurnOnRefusesAnEnvThisProcessDoesNotRunAs(t *testing.T) {
+	cases := []struct {
+		processEnv string
+		want       string
+	}{
+		{processEnv: "canary", want: "WARP_ENV=canary and was asked for test"},
+		{processEnv: "", want: "WARP_ENV is not set"},
 	}
-	for _, want := range []string{"nothing was scheduled", "dns-m0-01-sidecarctl-server-link", "ops-m10-01-purge-turn-on-links"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("printed %q to stderr, want %q in it", stderr.String(), want)
+	for _, c := range cases {
+		t.Setenv("WARP_ENV", c.processEnv)
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		if code := sidecarctlCommands.run([]string{"evs", "purge-turn-on", "test"}, stdout, stderr); code != 1 {
+			t.Fatalf("WARP_ENV=%q: exited %d, want 1: %s", c.processEnv, code, stderr.String())
 		}
-	}
-	if stdout.Len() != 0 {
-		t.Errorf("printed %q", stdout.String())
+		for _, want := range []string{"nothing was scheduled", c.want, "WARP_ENV=test"} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("WARP_ENV=%q: printed %q to stderr, want %q in it", c.processEnv, stderr.String(), want)
+			}
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("WARP_ENV=%q: printed %q", c.processEnv, stdout.String())
+		}
 	}
 }
 

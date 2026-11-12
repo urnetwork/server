@@ -20,12 +20,10 @@
 //
 // What it reads and where it schedules are server's: the config loader that reads config/<env>/sidecar.yml under
 // WARP_ENV as every service does (server/sidecar_config.go), server/task's queue in the env's Postgres
-// (sidecarhost.Tasks, whose Schedule once-keys a request), and the request evsservice builds. This module may link
-// none of them: §4.7's license and module rules keep every server package out
-// (questions/dns-m0-01-sidecarctl-server-link.md), and §4.4 lets only server link an engine package such as
-// evsservice (questions/ops-m10-01-purge-turn-on-links.md). Until those are answered, the env opener refuses every env
-// before it reads or schedules anything, so the command exits 1 with nothing queued, and the turn-on waits as it does
-// today. The rest is built against evsPurgeTurnOnEnv, which is all such an opener has to supply.
+// (sidecarhost.Tasks, whose Schedule once-keys a request), and the request evsservice builds. The process reaches one
+// env, the one its WARP_ENV names, so the command refuses an <env> that is not it before reading or scheduling
+// anything: the operator names the env twice, and a slip in either schedules nothing. Since QD-750 sidecarctl is
+// server's, so these link; before it the opener refused every env.
 
 package main
 
@@ -37,6 +35,11 @@ import (
 	"io"
 	"regexp"
 	"time"
+
+	"github.com/urnetwork/sidecar/evsservice"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 // format2's purge mode that deletes, as sidecar.yml spells it. server's loader reads anything but exactly this as
@@ -110,15 +113,48 @@ func defaultEvsPurgeTurnOnSettings() *evsPurgeTurnOnSettings {
 	}
 }
 
-// The env as server would reach it: its format2 gate through server.CurrentSidecarConfig().Format2(), read under a
-// WARP_ENV that names env, and evsservice.EvsSweepTurnOnTaskRequest() scheduled through sidecarhost.Tasks on its
-// Postgres. None of that links into this module (see the file header), so this refuses every env, and the command
-// reads and schedules nothing.
+// The env this process runs in, as server reaches it: its sidecar.yml through server's loader and its task queue
+// through sidecarhost.Tasks on its Postgres.
+type serverEvsPurgeTurnOnEnv struct {
+	tasks *sidecarhost.Tasks
+}
+
+// server.CurrentSidecarConfig().Format2(): a file that is absent, unreadable or does not parse reads a closed gate
+// (server/sidecar_config.go), which the command refuses as not enabled.
+func (self *serverEvsPurgeTurnOnEnv) ReadFormat2Gate(ctx context.Context) (gate *evsFormat2GateRead, returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			gate, returnErr = nil, fmt.Errorf("server's config loader failed: %v", recovered)
+		}
+	}()
+	format2 := server.CurrentSidecarConfig().Format2()
+	return &evsFormat2GateRead{
+		enabled: format2.Gate().Enabled(),
+		purge:   string(format2.Purge()),
+	}, nil
+}
+
+// evsservice.EvsSweepTurnOnTaskRequest() through sidecarhost.Tasks, which once-keys it on server/task's queue.
+func (self *serverEvsPurgeTurnOnEnv) ScheduleTurnOn(ctx context.Context, dueTime time.Time) (*evsScheduledTask, error) {
+	request := evsservice.EvsSweepTurnOnTaskRequest()
+	request.RunAt = dueTime
+	if err := self.tasks.Schedule(ctx, request); err != nil {
+		return nil, err
+	}
+	return &evsScheduledTask{name: request.Name, onceKey: request.OnceKey, dueTime: dueTime}, nil
+}
+
+// The env as server reaches it, which is the one WARP_ENV names: any other env, or no WARP_ENV, is refused before
+// anything is read, since this process's loader and pools would reach WARP_ENV's and not the env the operator named.
 func openServerEvsPurgeTurnOnEnv(ctx context.Context, env string) (evsPurgeTurnOnEnv, error) {
-	return nil, fmt.Errorf(
-		"nothing was scheduled: reading %s's format2 gate through server's config loader and scheduling on its task queue need server's packages and evsservice, which sidecarctl may not link until the open questions dns-m0-01-sidecarctl-server-link and ops-m10-01-purge-turn-on-links are answered (C-23, §4.4, §4.7)",
-		env,
-	)
+	processEnv, err := server.Env()
+	if err != nil {
+		return nil, fmt.Errorf("nothing was scheduled: WARP_ENV is not set, and this reaches the env it names; run it as that env's services run, with WARP_ENV=%s", env)
+	}
+	if processEnv != env {
+		return nil, fmt.Errorf("nothing was scheduled: this process runs as WARP_ENV=%s and was asked for %s; run it with WARP_ENV=%s", processEnv, env, env)
+	}
+	return &serverEvsPurgeTurnOnEnv{tasks: sidecarhost.NewTasks(nil)}, nil
 }
 
 // `sidecarctl evs purge-turn-on <env>`, against the env as server reaches it.
