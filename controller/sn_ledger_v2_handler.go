@@ -46,7 +46,9 @@ var ErrStLedgerV2Coldkey = errors.New("coldkey is not an ss58 address or 0x and 
 type StLedgerV2AccountsResult struct {
 	Coldkey  string                    `json:"coldkey"`
 	Accounts []*StLedgerV2AccountEntry `json:"accounts"`
-	// UnavailablePools is [] but for an answer asked with partial=true.
+	// UnavailablePools is [] but for an answer asked with partial=true: an
+	// answer without it leaves a capture the flag pool that cannot be read out
+	// of Accounts instead.
 	UnavailablePools []*StLedgerV2UnavailablePool `json:"unavailable_pools"`
 }
 
@@ -141,9 +143,11 @@ func SnLedgerObject(w http.ResponseWriter, r *http.Request) {
 }
 
 // SnLedgerAccount serves GET /sn/ledger/account?coldkey=<ss58|0x
-// hex>[&partial=true]. Without partial=true the answer is whole or a 502;
-// with it a pool whose ledger cannot be read is named in unavailable_pools.
-// Errors are problem details (sn/api/operator.yml).
+// hex>[&partial=true]. With partial=true a pool whose ledger cannot be read is
+// named in unavailable_pools. Without it, as old apps ask, a capture the flag
+// pool that cannot be read is left out and the other pools are answered as
+// before it existed, and any other pool that cannot be read is a 502. Errors
+// are problem details (sn/api/operator.yml).
 func SnLedgerAccount(w http.ResponseWriter, r *http.Request) {
 	SnOperatorCors(w, r)
 	query := r.URL.Query()
@@ -191,8 +195,14 @@ func ParseStLedgerV2Coldkey(value string) ([32]byte, error) {
 // the pending cumulative. The pools are the server's own, its pool and, while
 // capture the flag is on (stCtfPoolOn), its capture the flag pool, and those
 // where the account index records the coldkey, but no capture the flag pool
-// while it is off. Without settlement v2 the list is empty. The answer is
-// whole: any pool that cannot be read is an error.
+// while it is off. Without settlement v2 the list is empty.
+//
+// It answers a client that does not ask for a partial answer, as every app
+// that predates the capture the flag pool asks: the answer names no pool
+// unavailable. A capture the flag pool that cannot be read is left out, so
+// the other pools are answered exactly as before that pool existed and only
+// its balance is missing until it can be read again (owner, 2026-11-11). Any
+// other pool that cannot be read is an error, as before.
 func StLedgerV2Accounts(ctx context.Context, coldkey [32]byte) (*StLedgerV2AccountsResult, error) {
 	return stLedgerV2Accounts(ctx, coldkey, false)
 }
@@ -240,12 +250,18 @@ func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*S
 			return
 		})
 		if err != nil {
-			if !partial {
+			kind, label := StLedgerV2PoolKind(noId)
+			switch {
+			case partial:
+				glog.Warningf("[sn]ledger account 0x%x: pool %d is unavailable: %s\n", coldkey, noId, err)
+				result.UnavailablePools = append(result.UnavailablePools, &StLedgerV2UnavailablePool{Vault: stLedgerV2Address(cfg.VaultV2), NoId: noId, Kind: kind, Label: label})
+			case kind == StLedgerV2PoolKindCtf:
+				// A client that knows no unavailable pool gets the others as
+				// before the capture the flag pool, never an error for it.
+				glog.Warningf("[sn]ledger account 0x%x: capture the flag pool %d is unavailable and left out: %s\n", coldkey, noId, err)
+			default:
 				return nil, err
 			}
-			glog.Warningf("[sn]ledger account 0x%x: pool %d is unavailable: %s\n", coldkey, noId, err)
-			kind, label := StLedgerV2PoolKind(noId)
-			result.UnavailablePools = append(result.UnavailablePools, &StLedgerV2UnavailablePool{Vault: stLedgerV2Address(cfg.VaultV2), NoId: noId, Kind: kind, Label: label})
 			continue
 		}
 		if entry != nil {
