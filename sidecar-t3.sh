@@ -81,7 +81,7 @@ skip() {
 
 # The store suites on their real stores (sidecart3.Suites names each test), and T3's own checks.
 suites() {
-  go_t3 ./sidecart3 -tags "$tags" -run '^(TestEveryStoreSuiteRunsOnT3|TestSuiteProblemsFailAFakeWithNoSuite|TestSidecarT3RunsEverySuiteTest|TestFailFastLeavesNoRerun|TestCrossslotKeysSpreadOverTheMasters|TestCrossslotCallsKeepEachShapeOnce|TestRunCrossslotRefusesOneNode|TestADialOutsideTheAttestedListIsRefused|TestInlinePathFailsAPlantedPostgresRead|TestInlinePathFailsOneRedisCallOverItsRow|TestInlinePathReadsAnUnsetLimitAsMissing|TestEveryPathRowResolvesOrReadsMissing)$'
+  go_t3 ./sidecart3 -tags "$tags" -run '^(TestEveryStoreSuiteRunsOnT3|TestSuiteProblemsFailAFakeWithNoSuite|TestSidecarT3RunsEverySuiteTest|TestFailFastLeavesNoRerun|TestCrossslotKeysSpreadOverTheMasters|TestCrossslotCallsKeepEachShapeOnce|TestRunCrossslotRefusesOneNode|TestADialOutsideTheAttestedListIsRefused|TestInlinePathFailsAPlantedPostgresRead|TestInlinePathFailsOneRedisCallOverItsRow|TestInlinePathReadsAnUnsetLimitAsMissing|TestEveryPathRowResolvesOrReadsMissing|TestCapturePartReaderMakesAPartOnlyWhenTheScanReachesIt|TestCapturePartReaderEndsWithAPartsError|TestCapturePartReaderClosedPartWayEndsItsProducer)$'
   go_t3 ./sidecarhost -tags "$tags" -run '^(TestRedisConformsOnTheTestStore|TestCountingRedisConformsOnTheTestStore)$'
   go_t3 ./model -tags "$tags" -run '^(TestSidecarPushStorePassesItsSuite|TestSocketStorePassesItsSuite|TestMxEdgeStorePassesTheSuite|TestSmtpEdgeStorePassesTheSuite|TestConfigLogSequencerPassesTheStoreSuite)$'
   go_t3 ./dnshost -tags "$tags" -run '^(TestStoreRunsTheDnsStoreSuite|TestRestoreStoreRunsItsSuite)$'
