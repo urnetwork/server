@@ -139,3 +139,32 @@ caller is already covered. Bounded partial code-observation passes may run
 after their own authentication and input checks, but must remain nonfinal and
 cannot approve or disqualify a submission. Complete paired review, union of
 findings and independently verified official reuse are still required.
+
+## Bounded observation milestone
+
+The first full-instrument inputs exceeded both members' tokenizer-verified
+context budgets and were refused before generation. A subsequent Qwen pass
+with an 8,192-token output allowance exhausted that allowance in reasoning;
+its incomplete response remains preserved and is not a review result.
+
+The next observer cut reserves 32,768 output tokens and divides the instrument
+into four explicit, complete-file groups. Sixteen deterministic controls passed
+three ordinary and three race repetitions (96 passes, no failures or skips).
+The model pair, reasoning efforts, context limits and generation deadline did
+not change. All groups and remaining changed-source context are still required.
+
+Both first-group provider calls returned completed responses. Their original
+local validators rejected the observations, so neither currently counts as a
+validated partial review. Qwen's rejection identified a citation-boundary issue:
+an authenticated changed-file patch path was rejected because its complete
+pristine file was deferred. A separate offline validator is being prepared to
+distinguish patch-hunk-only evidence from full-pristine evidence, retaining
+unknown-path rejection and every response-integrity check. It must validate the
+original preserved response without another inference call or modification of
+the original failure receipt. Gemma's local rejection also remains under
+diagnosis. Other scopes remain held pending these checks.
+
+These are private, nonfinal observations, not submission approvals, complete
+honesty reviews, or authority to elect, reward or promote a candidate. No
+candidate patch was executed by this review tooling. Protected result
+publication and full-source paired review remain unfinished.
