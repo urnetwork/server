@@ -365,14 +365,16 @@ func runS1McpSession(ctx context.Context, run *sidecartest.ScenarioRun, device *
 func captureServerLogs(t testing.TB, capture *sidecartest.PrivacyCapture, dir string, verbosity string) (func() int64, func()) {
 	t.Helper()
 	restores := []func(){}
-	for _, name := range []string{"logtostderr", "v"} {
+	for _, name := range []string{"logtostderr", "alsologtostderr", "v"} {
 		value := flag.Lookup(name).Value.String()
 		restores = append(restores, func() { flag.Set(name, value) })
 	}
 	if err := glog.SetLogDir(dir); err != nil {
 		t.Fatal(err)
 	}
+	// the files alone, so a planted value never reaches the test's own output
 	flag.Set("logtostderr", "false")
+	flag.Set("alsologtostderr", "false")
 	flag.Set("v", verbosity)
 	files := func() []string {
 		glog.Flush()
