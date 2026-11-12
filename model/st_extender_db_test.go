@@ -149,8 +149,16 @@ func TestStExtenderDbAmendedUsageReadsTheLiveContractRow(t *testing.T) {
 			UnfundedBytes: ByteCount(stAmendedDbShare(c3, r.ClientId)), UnfundedContracts: 1,
 			MeasurementBytes: 50, MeasurementContracts: 1,
 		}
-		if *pool != wantPool {
+		if stExtenderPoolTotals(pool) != stExtenderPoolTotals(&wantPool) {
 			t.Fatalf("pool %+v, want %+v", *pool, wantPool)
+		}
+		// every pooled share, funded or not, is some client's
+		var pooledTotal ByteCount
+		for _, bytes := range pool.PooledByClient {
+			pooledTotal += bytes
+		}
+		if uint64(pooledTotal) != pool.PooledBytes() {
+			t.Fatalf("clients' pooled shares sum to %d, not the pool's %d", pooledTotal, pool.PooledBytes())
 		}
 		var credited int64
 		for _, bytes := range want {
@@ -474,7 +482,8 @@ func TestStExtenderDbEpochRowsExtenderComponent(t *testing.T) {
 		ctx := t.Context()
 		key := testStDeploymentKey
 		chunks := []string{ledger.RefOf([]byte("p8")).String()}
-		component := &StLedgerV2EpochExtenders{Bytes: math.MaxUint64, CensusChunks: []string{ledger.RefOf([]byte("c1")).String(), ledger.RefOf([]byte("c2")).String()}}
+		component := &StLedgerV2EpochExtenders{Bytes: math.MaxUint64, CensusChunks: []string{ledger.RefOf([]byte("c1")).String(), ledger.RefOf([]byte("c2")).String()},
+			IntraPlatform: math.MaxUint64 - 1, IntraNetwork: 1, Contracts: math.MaxInt64, Payers: 3}
 		if err := RecordStLedgerV2EpochComponents(ctx, key, 1, 8, chunks, component); err != nil {
 			t.Fatal(err)
 		}
@@ -499,13 +508,28 @@ func TestStExtenderDbEpochRowsExtenderComponent(t *testing.T) {
 			t.Fatalf("recording the same again: %v", err)
 		}
 		for name, other := range map[string]*StLedgerV2EpochExtenders{
-			"other bytes":  {Bytes: math.MaxUint64 - 1, CensusChunks: component.CensusChunks},
-			"other census": {Bytes: math.MaxUint64, CensusChunks: component.CensusChunks[:1]},
+			"other bytes":  {Bytes: math.MaxUint64 - 1, CensusChunks: component.CensusChunks, IntraPlatform: math.MaxUint64 - 2, IntraNetwork: 1, Contracts: math.MaxInt64, Payers: 3},
+			"other census": {Bytes: math.MaxUint64, CensusChunks: component.CensusChunks[:1], IntraPlatform: math.MaxUint64 - 1, IntraNetwork: 1, Contracts: math.MaxInt64, Payers: 3},
+			"other parts":  {Bytes: math.MaxUint64, CensusChunks: component.CensusChunks, IntraPlatform: math.MaxUint64 - 2, IntraNetwork: 2, Contracts: math.MaxInt64, Payers: 3},
+			"other counts": {Bytes: math.MaxUint64, CensusChunks: component.CensusChunks, IntraPlatform: math.MaxUint64 - 1, IntraNetwork: 1, Contracts: math.MaxInt64, Payers: 4},
 			"none":         nil,
 		} {
 			if err := RecordStLedgerV2EpochComponents(ctx, key, 1, 8, chunks, other); !errors.Is(err, ErrStLedgerV2EpochRowsFixed) {
 				t.Fatalf("%s: %v", name, err)
 			}
+		}
+		// a component whose parts are not its Z is refused before anything is
+		// written
+		for name, invalid := range map[string]*StLedgerV2EpochExtenders{
+			"parts not Z":       {Bytes: 5, IntraNetwork: 4, Contracts: 1, Payers: 1},
+			"Z without a payer": {Bytes: 5, IntraNetwork: 5, Contracts: 1},
+		} {
+			if err := RecordStLedgerV2EpochComponents(ctx, key, 1, 11, []string{}, invalid); err == nil || errors.Is(err, ErrStLedgerV2EpochRowsFixed) {
+				t.Fatalf("%s: %v", name, err)
+			}
+		}
+		if record := GetStLedgerV2EpochRows(ctx, key, 1, 11, 11)[11]; record != nil {
+			t.Fatalf("an invalid component was recorded: %+v", record)
 		}
 		if err := RecordStLedgerV2EpochComponents(ctx, key, 1, 7, []string{}, component); !errors.Is(err, ErrStLedgerV2EpochRowsFixed) {
 			t.Fatalf("an epoch recorded without a component gained one: %v", err)
@@ -513,7 +537,7 @@ func TestStExtenderDbEpochRowsExtenderComponent(t *testing.T) {
 		if requested, err := RequestStLedgerV2EpochRebuild(ctx, key, 1, 8, "operator"); err != nil || !requested {
 			t.Fatalf("rebuild request: %v %v", requested, err)
 		}
-		rebuilt := &StLedgerV2EpochExtenders{Bytes: 12, CensusChunks: []string{ledger.RefOf([]byte("c3")).String()}}
+		rebuilt := &StLedgerV2EpochExtenders{Bytes: 12, CensusChunks: []string{ledger.RefOf([]byte("c3")).String()}, IntraPlatform: 2, IntraNetwork: 10, Contracts: 2, Payers: 1}
 		if err := RecordStLedgerV2EpochComponents(ctx, key, 1, 8, []string{}, rebuilt); err != nil {
 			t.Fatal(err)
 		}

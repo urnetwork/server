@@ -26,8 +26,21 @@ func stAmendedTestAdd(t *testing.T, reader *stEpochAmendedUsage, c stAmendedTest
 	t.Helper()
 	snapshot, _ := stExtenderTestSnapshot(t, c.bytes, c.origin, c.egress, c.hops...)
 	origin := c.origin.NetworkId
-	row := &stEpochUsageRow{contractId: contractPayoutTestId(250), live: !c.archived, originNetworkId: &origin, payerNetworkId: c.payer}
+	createTime := stExtenderTestCreateTime
+	row := &stEpochUsageRow{contractId: contractPayoutTestId(250), live: !c.archived, originNetworkId: &origin, payerNetworkId: c.payer, createTime: &createTime}
 	return reader.add(row, snapshot)
+}
+
+// stExtenderPoolTotals are a pool's totals without its per-client map, which
+// leaves the struct comparable.
+func stExtenderPoolTotals(pool *StEpochExtenderPool) [8]uint64 {
+	return [8]uint64{uint64(pool.IntraPlatform), uint64(pool.IntraNetwork), pool.Contracts, pool.Payers,
+		uint64(pool.UnfundedBytes), pool.UnfundedContracts, uint64(pool.MeasurementBytes), pool.MeasurementContracts}
+}
+
+// stExtenderPoolEmpty reports a pool with nothing in it.
+func stExtenderPoolEmpty(pool *StEpochExtenderPool) bool {
+	return stExtenderPoolTotals(pool) == [8]uint64{} && len(pool.PooledByClient) == 0
 }
 
 func stTestNetwork(n byte) *server.Id {
@@ -78,6 +91,11 @@ func TestStEpochAmendedUsageWorkedExample(t *testing.T) {
 	if providerTotal+int64(pool.Bytes()) != 7_000_000_004 || pool.UnfundedBytes != 0 || pool.MeasurementBytes != 0 {
 		t.Fatalf("provider usage %d and Z %d do not sum to the epoch's 7,000,000,004 bytes", providerTotal, pool.Bytes())
 	}
+	// each pooled share is its client's: tlsedge's half of c2 and the receiving
+	// client's half of c3
+	if len(pool.PooledByClient) != 2 || pool.PooledByClient[tlsedge.ClientId] != 1_500_000_001 || pool.PooledByClient[contractPayoutTestId(7)] != 500_000_001 || pool.PooledBytes() != 2_000_000_002 {
+		t.Fatalf("pooled by client %v", pool.PooledByClient)
+	}
 }
 
 // Before E_x the reader is the reader before the amendment: every share is
@@ -103,7 +121,7 @@ func TestStEpochAmendedUsageBeforeItsFirstEpoch(t *testing.T) {
 		for _, usage := range usages {
 			got[usage.ClientId] = usage.PayoutByteCount
 		}
-		if got[tlsedge.ClientId] != 1_500_000_001 || got[x.ClientId] != 1_500_000_000+500_000_000 || got[receiver.ClientId] != 500_000_001 || *pool != (StEpochExtenderPool{}) {
+		if got[tlsedge.ClientId] != 1_500_000_001 || got[x.ClientId] != 1_500_000_000+500_000_000 || got[receiver.ClientId] != 500_000_001 || !stExtenderPoolEmpty(pool) {
 			t.Fatalf("epoch %d: usages %v and pool %+v, want every share as provider usage", epoch, got, pool)
 		}
 	}
@@ -141,6 +159,11 @@ func TestStEpochAmendedUsageExcludesUnfundedAndMeasurement(t *testing.T) {
 		pool.UnfundedBytes != 501 || pool.UnfundedContracts != 1 || pool.MeasurementBytes != 501 || pool.MeasurementContracts != 1 {
 		t.Fatalf("pool %+v", pool)
 	}
+	// every pooled share leaves the rows, funded or not: the receiving client's
+	// three halves
+	if pool.PooledByClient[contractPayoutTestId(7)] != 3*501 || pool.PooledBytes() != 3*501 {
+		t.Fatalf("pooled by client %v", pool.PooledByClient)
+	}
 }
 
 // The reader refuses what it cannot classify rather than guess: an archived
@@ -166,7 +189,7 @@ func TestStEpochAmendedUsageRefusesWhatItCannotClassify(t *testing.T) {
 			t.Fatalf("a contract without shares: %v", err)
 		}
 	}
-	if usages, pool := reader.result(); len(usages) != 0 || *pool != (StEpochExtenderPool{}) {
+	if usages, pool := reader.result(); len(usages) != 0 || !stExtenderPoolEmpty(pool) {
 		t.Fatalf("refused contracts added %+v and %+v", usages, pool)
 	}
 	// A zero-byte contract with hops moves no bytes: archived or without an
@@ -179,7 +202,7 @@ func TestStEpochAmendedUsageRefusesWhatItCannotClassify(t *testing.T) {
 		}
 	}
 	usages, pool := reader.result()
-	if len(usages) != 2 || usages[0].PayoutByteCount != 0 || usages[1].PayoutByteCount != 0 || *pool != (StEpochExtenderPool{}) {
+	if len(usages) != 2 || usages[0].PayoutByteCount != 0 || usages[1].PayoutByteCount != 0 || !stExtenderPoolEmpty(pool) {
 		t.Fatalf("zero-byte contracts added %+v and %+v", usages, pool)
 	}
 }

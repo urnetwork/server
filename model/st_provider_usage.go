@@ -126,6 +126,7 @@ type stEpochUsageRow struct {
 	live            bool
 	originNetworkId *server.Id
 	payerNetworkId  *server.Id
+	createTime      *time.Time
 }
 
 // The refusals one row raises alone, in the read's order. Safe to run

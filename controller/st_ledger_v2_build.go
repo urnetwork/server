@@ -24,6 +24,7 @@ import (
 	"github.com/urfoundation/sn/ledger"
 	"github.com/urfoundation/sn/merkle"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -81,12 +82,15 @@ func (self stLedgerV2Builder) Build(ctx context.Context, input *StLedgerV2BuildI
 		// the pool's first root covers firstEpoch … e
 		in.FirstEpoch = input.Epochs[0].Epoch
 	}
+	// each covered epoch's extender pool, nil without a component
+	pools := make([]*stLedgerV2EpochPool, 0, len(input.Epochs))
 	for _, covered := range input.Epochs {
-		epoch, err := stLedgerV2EpochInput(ctx, cfg, covered, amendments)
+		epoch, pool, err := stLedgerV2EpochInput(ctx, cfg, covered, amendments)
 		if err != nil {
 			return nil, err
 		}
 		in.Epochs = append(in.Epochs, epoch)
+		pools = append(pools, pool)
 		funded.Add(&funded, &covered.Funding)
 		in.FundedThrough[covered.Epoch] = funded
 	}
@@ -102,7 +106,19 @@ func (self stLedgerV2Builder) Build(ctx context.Context, input *StLedgerV2BuildI
 	// every object but the header and the recorded epochs' published chunks
 	published := map[ledger.Ref]bool{sha256.Sum256(built.Header): true}
 	for i, epoch := range built.Epochs {
-		providers := &StLedgerV2EpochProviders{Epoch: epoch.Epoch, Null: epoch.Null, Extenders: stLedgerV2EpochExtenders(&built.Epochs[i])}
+		var parts *model.StLedgerV2EpochExtenders
+		if pools[i] != nil {
+			parts = pools[i].parts
+		}
+		extenders, err := stLedgerV2EpochExtenders(&built.Epochs[i], parts)
+		if err != nil {
+			return nil, err
+		}
+		// an epoch first built here: its pool as the reader counted it
+		if pool := pools[i]; pool != nil && pool.read != nil {
+			stExtenderPoolMetrics("build", epoch.Epoch, pool.read, &epoch.Extenders.ExtenderSplit, ledger.EligibleUsage(in.Epochs[i].Rows), amendments.platformEndpoints.InForce(server.NowUtc()))
+		}
+		providers := &StLedgerV2EpochProviders{Epoch: epoch.Epoch, Null: epoch.Null, Extenders: extenders}
 		if !epoch.Null {
 			providers.ProviderChunks = make([]string, len(epoch.Providers))
 			for j, ref := range epoch.Providers {
@@ -137,56 +153,71 @@ func (self stLedgerV2Builder) Build(ctx context.Context, input *StLedgerV2BuildI
 	return build, nil
 }
 
+// stLedgerV2EpochPool is a covered epoch's extender pool beside its ledger
+// input: the parts the record keeps with the component
+// (stLedgerV2EpochExtenders), recorded or new, and, for an epoch first built
+// now, the epoch reader's pool.
+type stLedgerV2EpochPool struct {
+	parts *model.StLedgerV2EpochExtenders
+	read  *model.StEpochExtenderPool
+}
+
 // stLedgerV2EpochInput is one covered epoch's ledger input: its recorded null
 // declaration, or its recorded rows read back from their published chunks,
 // or, when nothing is recorded, rows built from v1's inputs. For an epoch the
 // extender pool amendment covers it also holds the epoch's extender pool: the
 // recorded one, or Z from the new rows and the census captured at the
-// epoch's end.
-func stLedgerV2EpochInput(ctx context.Context, cfg *StConfig, covered *StLedgerV2CoveredEpoch, amendments *stLedgerV2Amendments) (ledger.EpochInput, error) {
+// epoch's end, and returns the pool beside it; nil without a component.
+func stLedgerV2EpochInput(ctx context.Context, cfg *StConfig, covered *StLedgerV2CoveredEpoch, amendments *stLedgerV2Amendments) (ledger.EpochInput, *stLedgerV2EpochPool, error) {
 	input := ledger.EpochInput{Epoch: covered.Epoch}
-	amendment, err := amendments.extenders(covered.Epoch)
+	amendment, err := amendments.extenders(ctx, covered.Epoch)
 	if err != nil {
-		return input, err
+		return input, nil, err
 	}
 	if covered.Rows == nil {
 		rows, pool, err := stLedgerV2NewAmendedEpochRows(ctx, covered.Epoch, amendment, amendments.pool)
 		if err != nil {
-			return input, err
+			return input, nil, err
 		}
 		input.Rows = rows
-		if pool != nil {
-			census, err := stLedgerV2CapturedCensus(ctx, cfg, covered.Epoch)
-			if err != nil {
-				return input, err
-			}
-			input.Extenders = &ledger.ExtenderInput{Bytes: pool.Bytes(), Census: census}
+		if pool == nil {
+			return input, nil, nil
 		}
-		return input, nil
+		census, err := stLedgerV2CapturedCensus(ctx, cfg, covered.Epoch)
+		if err != nil {
+			return input, nil, err
+		}
+		input.Extenders = &ledger.ExtenderInput{Bytes: pool.Bytes(), Census: census}
+		return input, &stLedgerV2EpochPool{parts: stLedgerV2ExtenderParts(pool), read: pool}, nil
 	}
 	if input.Extenders, err = stLedgerV2RecordedExtenders(ctx, covered, amendment); err != nil {
-		return input, err
+		return input, nil, err
+	}
+	var parts *stLedgerV2EpochPool
+	if recorded := covered.Rows.Extenders; recorded != nil && input.Extenders != nil {
+		copied := *recorded
+		parts = &stLedgerV2EpochPool{parts: &copied}
 	}
 	if covered.Rows.Null() {
 		input.Null = true
-		return input, nil
+		return input, nil, nil
 	}
 	chunks := make([][]byte, len(covered.Rows.ProviderChunks))
 	input.Chunks = make([]ledger.Ref, len(chunks))
 	for i, ref := range covered.Rows.ProviderChunks {
 		chunk, err := GetStLedgerV2Object(ctx, ref)
 		if err != nil {
-			return input, fmt.Errorf("st ledger v2: epoch %d: %w", covered.Epoch, err)
+			return input, nil, fmt.Errorf("st ledger v2: epoch %d: %w", covered.Epoch, err)
 		}
 		// the object store returns only bytes that hash to the reference
 		chunks[i], input.Chunks[i] = chunk, ledger.RefOf(chunk)
 	}
 	rows, err := ledger.DecodeProviderChunks(chunks)
 	if err != nil {
-		return input, fmt.Errorf("st ledger v2: epoch %d: %w", covered.Epoch, err)
+		return input, nil, fmt.Errorf("st ledger v2: epoch %d: %w", covered.Epoch, err)
 	}
 	input.Rows = rows
-	return input, nil
+	return input, parts, nil
 }
 
 // Accounts reads a published ledger's account rows in position order: its

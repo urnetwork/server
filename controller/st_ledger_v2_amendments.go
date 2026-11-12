@@ -128,8 +128,11 @@ type stLedgerV2Amendments struct {
 	noId     uint64
 	file     *amendment.File
 	fallback *amendment.Fallback
-	// platform endpoints and the extender pool's networks
+	// the extender pool's networks
 	pool *stExtenderPoolConfig
+	// the platform endpoint registry, read once, when an epoch the amendment
+	// covers first needs it
+	platformEndpoints model.StPlatformEndpointSet
 }
 
 // stLedgerV2ReadAmendments reads the amendments for one build: it fetches the
@@ -230,10 +233,10 @@ func stExtenderPoolSettings(cfg *StConfig) (*stExtenderPoolConfig, error) {
 }
 
 // extenders is the extender pool amendment as the epoch reader applies it to
-// epoch: in force from the first epoch of the entry that covers it, and the
-// zero amendment when none does. Platform endpoints are sidecar's edges, which
-// no registry names yet, so there are none.
-func (self *stLedgerV2Amendments) extenders(epoch uint64) (model.StExtenderAmendment, error) {
+// epoch: in force from the first epoch of the entry that covers it, with the
+// operator's registered platform endpoints (model/st_platform_endpoint.go), and
+// the zero amendment when none covers it.
+func (self *stLedgerV2Amendments) extenders(ctx context.Context, epoch uint64) (model.StExtenderAmendment, error) {
 	in, err := self.file.At(self.noId, epoch, self.fallback)
 	if err != nil {
 		return model.StExtenderAmendment{}, err
@@ -241,7 +244,75 @@ func (self *stLedgerV2Amendments) extenders(epoch uint64) (model.StExtenderAmend
 	if in.Extenders == nil {
 		return model.StExtenderAmendment{}, nil
 	}
-	return model.StExtenderAmendment{FirstEpoch: in.Extenders.FromEpoch, PlatformEndpoints: map[server.Id]bool{}}, nil
+	if self.platformEndpoints == nil {
+		if self.platformEndpoints, err = stPlatformEndpoints(ctx); err != nil {
+			return model.StExtenderAmendment{}, err
+		}
+	}
+	return model.StExtenderAmendment{FirstEpoch: in.Extenders.FromEpoch, PlatformEndpoints: self.platformEndpoints}, nil
+}
+
+// stPlatformEndpointsRead reads the platform endpoint registry: a seam the pure
+// tests replace.
+var stPlatformEndpointsRead = model.GetStPlatformEndpoints
+
+// stPlatformEndpoints reads the platform endpoint registry. A failed read, such
+// as a table not migrated yet, is an error, never an empty registry.
+func stPlatformEndpoints(ctx context.Context) (set model.StPlatformEndpointSet, err error) {
+	defer stDemandStoreRecover("platform endpoint registry read", &err)
+	return stPlatformEndpointsRead(ctx), nil
+}
+
+// stPlatformEndpointNetworks are the networks a platform endpoint registration
+// is checked against: the operator's own, its gated durable networks
+// (extender.yml directory.durable_network_ids) and the networks st.yml's
+// extender_pool declares it controls, and its measurement networks.
+func stPlatformEndpointNetworks(ctx context.Context, cfg *StConfig) (model.StPlatformEndpointNetworks, error) {
+	networks := model.StPlatformEndpointNetworks{Operator: map[server.Id]bool{}}
+	pool, err := stExtenderPoolSettings(cfg)
+	if err != nil {
+		return networks, err
+	}
+	extenders, err := EnvExtenderConfig()
+	if err != nil {
+		return networks, fmt.Errorf("extender.yml cannot be read for its durable_network_ids: %w", err)
+	}
+	for _, networkId := range extenders.DurableNetworkIds() {
+		networks.Operator[networkId] = true
+	}
+	for networkId := range pool.declared {
+		networks.Operator[networkId] = true
+	}
+	networks.Measurement = stExtenderPoolMeasurementNetworks(ctx, pool)
+	return networks, nil
+}
+
+// StRegisterPlatformEndpoint is the operator's command registering a client as a
+// platform endpoint of kind from now on (model.RegisterStPlatformEndpoint).
+func StRegisterPlatformEndpoint(ctx context.Context, clientId server.Id, kind string, by string) (*model.StPlatformEndpoint, error) {
+	cfg, _, err := stRequire()
+	if err != nil {
+		return nil, err
+	}
+	networks, err := stPlatformEndpointNetworks(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	registered, err := model.RegisterStPlatformEndpoint(ctx, clientId, kind, by, networks)
+	if err == nil {
+		glog.Infof("[st]platform endpoint %s (%s, network %s) registered by %s from %s\n", clientId, kind, registered.NetworkId, by, registered.RegisterTime.Format("2006-01-02T15:04:05Z"))
+	}
+	return registered, err
+}
+
+// StRevokePlatformEndpoint is the operator's command ending a client's platform
+// endpoint registration now.
+func StRevokePlatformEndpoint(ctx context.Context, clientId server.Id, by string) error {
+	err := model.RevokeStPlatformEndpoint(ctx, clientId, by)
+	if err == nil {
+		glog.Infof("[st]platform endpoint %s revoked by %s\n", clientId, by)
+	}
+	return err
 }
 
 // stExtenderPoolMeasurementNetworks are the payer networks whose contracts

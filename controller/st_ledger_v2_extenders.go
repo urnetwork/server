@@ -70,6 +70,9 @@ func stLedgerV2CaptureExtenderCensus(ctx context.Context, cfg *StConfig, client 
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d extender census: %s", epoch, err))
 	}
 	captured := model.CaptureStLedgerV2ExtenderCensus(ctx, key, cfg.NoId, epoch, model.EncodeStExtenderCensus(rows), uint64(len(rows)), server.NowUtc())
+	if kept, err := model.DecodeStExtenderCensus(captured.Census); err == nil {
+		stExtenderCensusMetrics(epoch, kept)
+	}
 	eligible, units := stExtenderCensusCounts(rows)
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d extender census captured at %s: %d rows, %d eligible extenders in %d units", epoch, captured.CaptureTime.UTC().Format("2006-01-02T15:04:05Z"), captured.Rows, eligible, units)}
 }
@@ -202,15 +205,36 @@ func stLedgerV2RecordedExtenders(ctx context.Context, covered *StLedgerV2Covered
 	return &ledger.ExtenderInput{Bytes: recorded.Bytes, Census: census, Chunks: refs}, nil
 }
 
+// stLedgerV2ExtenderParts is what the epoch-rows record keeps of an epoch's
+// extender pool beside the component the ledger builds: Z and its parts, and
+// the contracts and payer networks behind it. The census chunks are the
+// build's (stLedgerV2EpochExtenders).
+func stLedgerV2ExtenderParts(pool *model.StEpochExtenderPool) *model.StLedgerV2EpochExtenders {
+	return &model.StLedgerV2EpochExtenders{
+		Bytes: pool.Bytes(), IntraPlatform: uint64(pool.IntraPlatform), IntraNetwork: uint64(pool.IntraNetwork),
+		Contracts: pool.Contracts, Payers: pool.Payers,
+	}
+}
+
 // stLedgerV2EpochExtenders is a built epoch's extender component as the
-// epoch-rows record keeps it, nil without one.
-func stLedgerV2EpochExtenders(epoch *ledger.EpochAllocation) *model.StLedgerV2EpochExtenders {
-	if epoch.Extenders == nil {
-		return nil
+// epoch-rows record keeps it, nil without one: the build's Z and census
+// chunks, with the parts its input held. A component built without parts, or
+// with parts of another Z, is refused.
+func stLedgerV2EpochExtenders(epoch *ledger.EpochAllocation, parts *model.StLedgerV2EpochExtenders) (*model.StLedgerV2EpochExtenders, error) {
+	switch {
+	case epoch.Extenders == nil && parts == nil:
+		return nil, nil
+	case epoch.Extenders == nil || parts == nil || parts.Bytes != epoch.Extenders.Bytes:
+		return nil, fmt.Errorf("st ledger v2: epoch %d's extender component is built without the pool parts of its bytes", epoch.Epoch)
 	}
 	census := make([]string, len(epoch.Extenders.Census))
 	for i, ref := range epoch.Extenders.Census {
 		census[i] = ref.String()
 	}
-	return &model.StLedgerV2EpochExtenders{Bytes: epoch.Extenders.Bytes, CensusChunks: census}
+	component := *parts
+	component.CensusChunks = census
+	if err := component.Check(); err != nil {
+		return nil, fmt.Errorf("st ledger v2: epoch %d: %w", epoch.Epoch, err)
+	}
+	return &component, nil
 }

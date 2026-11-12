@@ -1677,7 +1677,8 @@ func stDemandCommitRoot(tb testing.TB, cfg *StConfig, epoch uint64, seq uint64, 
 // A sync turn plans the ended epoch's next usage step, on a registered pool, and only
 // from the pool's first epoch on: users and the extender census at once, each until it
 // is captured, the statement once the root committed for the epoch in its root window
-// is mirrored. An epoch that can have no statement,
+// is mirrored, and, once the epoch's rows are recorded without an extender component,
+// its extender shadow report until one is recorded. An epoch that can have no statement,
 // declared unrecoverable, with no root in its window or with more than one, alerts once
 // and plans nothing.
 func TestStLedgerV2UsageSync(t *testing.T) {
@@ -1730,16 +1731,22 @@ func TestStLedgerV2UsageSync(t *testing.T) {
 		if err := model.RecordStLedgerV2EpochRows(ctx, key, 1, 5, nil); err != nil {
 			tb.Fatal(err)
 		}
-		if got := plan(6); got != "" {
+		// rows recorded without an extender component, with the census
+		// captured: the epoch's shadow report is due, and not the statement
+		if got := plan(6); got != StLedgerV2UsageStepExtenderShadow+" 5" {
 			tb.Fatalf("recorded rows planned the statement: %q", got)
 		}
 		stDemandCommitRoot(tb, cfg, 5, 1, 5*50_400+10, stDemandHeaderEpoch(tb, 5, []string{}, false))
-		if got := plan(6); got != StLedgerV2UsageStepStatement+" 5" {
+		if got := plan(6); got != StLedgerV2UsageStepStatement+" 5, "+StLedgerV2UsageStepExtenderShadow+" 5" {
 			tb.Fatalf("%q", got)
 		}
 		if err := model.RecordStLedgerV2EpochStatement(ctx, key, 1, 5, 0, 0, "sha256:x", []byte("{}")); err != nil {
 			tb.Fatal(err)
 		}
+		if got := plan(6); got != StLedgerV2UsageStepExtenderShadow+" 5" {
+			tb.Fatalf("the statement recorded: %q", got)
+		}
+		model.RecordStLedgerV2ExtenderShadow(ctx, key, 1, 5, "sha256:"+strings.Repeat("ab", 32), []byte("{}"))
 		if got := plan(6); got != "" {
 			tb.Fatalf("done: %q", got)
 		}

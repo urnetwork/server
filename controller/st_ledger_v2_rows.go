@@ -47,6 +47,13 @@ func stLedgerV2NewEpochRows(ctx context.Context, epoch uint64) ([]protocol.Ledge
 // pool is the extender pool's configuration, needed only when the amendment
 // covers the epoch.
 func stLedgerV2NewAmendedEpochRows(ctx context.Context, epoch uint64, amendment model.StExtenderAmendment, pool *stExtenderPoolConfig) ([]protocol.LedgerUsageRow, *model.StEpochExtenderPool, error) {
+	return stLedgerV2AmendedEpochRows(ctx, epoch, amendment, pool, true)
+}
+
+// stLedgerV2AmendedEpochRows is stLedgerV2NewAmendedEpochRows, retaining the
+// selected wallets' resolutions only when retain is set: a shadow report reads
+// an epoch without recording anything (st_ledger_v2_extender_shadow.go).
+func stLedgerV2AmendedEpochRows(ctx context.Context, epoch uint64, amendment model.StExtenderAmendment, pool *stExtenderPoolConfig, retain bool) ([]protocol.LedgerUsageRow, *model.StEpochExtenderPool, error) {
 	cfg, client, err := stRequire()
 	if err != nil {
 		return nil, nil, err
@@ -77,7 +84,7 @@ func stLedgerV2NewAmendedEpochRows(ctx context.Context, epoch uint64, amendment 
 	if err != nil {
 		return nil, nil, err
 	}
-	rows, err := stLedgerV2RowsFromUsages(ctx, cfg, client, epoch, authority, usages)
+	rows, err := stLedgerV2RowsFromUsages(ctx, cfg, client, epoch, authority, usages, retain)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -86,8 +93,9 @@ func stLedgerV2NewAmendedEpochRows(ctx context.Context, epoch uint64, amendment 
 
 // stLedgerV2RowsFromUsages turns an epoch's provider usages into its rows:
 // the roster's provider universe when one is signed, the wallets, and the
-// head flags.
-func stLedgerV2RowsFromUsages(ctx context.Context, cfg *StConfig, client StClient, epoch uint64, authority *StPayoutEpochAuthority, usages []*model.StProviderUsage) ([]protocol.LedgerUsageRow, error) {
+// head flags. With retain, the selected wallets' resolutions are retained, as
+// v1 retains them, before the rows are recorded.
+func stLedgerV2RowsFromUsages(ctx context.Context, cfg *StConfig, client StClient, epoch uint64, authority *StPayoutEpochAuthority, usages []*model.StProviderUsage, retain bool) ([]protocol.LedgerUsageRow, error) {
 	// a signed roster, when one is configured, fixes the provider universe
 	work, workConfigured, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
 	if err == nil {
@@ -120,6 +128,9 @@ func stLedgerV2RowsFromUsages(ctx context.Context, cfg *StConfig, client StClien
 	}
 	for i := range rows {
 		rows[i].HeadExcluded = excluded[rows[i].ClientID] != nil
+	}
+	if !retain {
+		return rows, nil
 	}
 	retained := make([]*model.StPayoutWalletResolution, 0, len(resolutions))
 	for _, resolution := range resolutions {

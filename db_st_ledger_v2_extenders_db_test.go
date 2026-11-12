@@ -78,6 +78,8 @@ func stExtenderMigrationState(t testing.TB, ctx context.Context) []string {
 			`SELECT row(r.*)::text FROM st_ledger_v2_epoch_rows AS r ORDER BY deployment_key, no_id, epoch`,
 			`SELECT row(c.*)::text FROM st_ledger_v2_extender_census AS c ORDER BY deployment_key, no_id, epoch`,
 			`SELECT row(a.*)::text FROM st_amendments AS a ORDER BY deployment_key`,
+			`SELECT row(s.*)::text FROM st_ledger_v2_extender_shadow AS s ORDER BY deployment_key, no_id, epoch`,
+			`SELECT row(p.*)::text FROM st_platform_endpoint AS p ORDER BY client_id, register_time`,
 		} {
 			result, err := conn.Query(ctx, sql)
 			WithPgResult(result, err, func() {
@@ -100,8 +102,8 @@ func stExtenderMigrationCode(err error) string {
 	return fmt.Sprintf("%v", err)
 }
 
-// Applied after the migrations before it, the migration creates its two
-// tables with the columns, keys and checks the model reads, and adds the two
+// Applied after the migrations before it, the migration creates its four
+// tables with the columns, keys and checks the model reads, and adds the six
 // nullable columns without defaults to the epoch rows, which the running
 // release's rows read as NULL. The release's insert, which names its columns,
 // still stores. Run again it changes nothing, and the head still applies.
@@ -130,8 +132,10 @@ func TestStLedgerV2ExtenderMigrationOnTheDatabase(t *testing.T) {
 			return exists
 		}
 
+		componentColumns := []string{"extender_bytes", "extender_census_chunks", "extender_intra_platform_bytes", "extender_intra_network_bytes", "extender_contracts", "extender_payers"}
 		ApplyDbMigrationsUpTo(ctx, version-1)
-		if regclass("st_amendments") || regclass("st_ledger_v2_extender_census") || len(stExtenderMigrationColumns(t, ctx, "st_ledger_v2_epoch_rows", "extender_bytes", "extender_census_chunks")) != 0 {
+		if regclass("st_amendments") || regclass("st_ledger_v2_extender_census") || regclass("st_ledger_v2_extender_shadow") || regclass("st_platform_endpoint") ||
+			len(stExtenderMigrationColumns(t, ctx, "st_ledger_v2_epoch_rows", componentColumns...)) != 0 {
 			t.Fatal("the extender pool's state exists before its migration")
 		}
 		declared := "operator@example"
@@ -139,11 +143,42 @@ func TestStLedgerV2ExtenderMigrationOnTheDatabase(t *testing.T) {
 		insertRunningRelease(6, nil, &declared)
 
 		ApplyDbMigrationsUpTo(ctx, version)
-		if got, want := stExtenderMigrationColumns(t, ctx, "st_ledger_v2_epoch_rows", "extender_bytes", "extender_census_chunks"), []stExtenderMigrationColumn{
+		if got, want := stExtenderMigrationColumns(t, ctx, "st_ledger_v2_epoch_rows", componentColumns...), []stExtenderMigrationColumn{
 			{name: "extender_bytes", dataType: "numeric", udtName: "numeric", precision: 20, scale: 0, nullable: true},
 			{name: "extender_census_chunks", dataType: "ARRAY", udtName: "_text", nullable: true},
+			{name: "extender_intra_platform_bytes", dataType: "numeric", udtName: "numeric", precision: 20, scale: 0, nullable: true},
+			{name: "extender_intra_network_bytes", dataType: "numeric", udtName: "numeric", precision: 20, scale: 0, nullable: true},
+			{name: "extender_contracts", dataType: "bigint", udtName: "int8", precision: 64, nullable: true},
+			{name: "extender_payers", dataType: "bigint", udtName: "int8", precision: 64, nullable: true},
 		}; !slices.Equal(got, want) {
 			t.Fatalf("epoch rows columns %+v, want %+v", got, want)
+		}
+		if got, want := stExtenderMigrationColumns(t, ctx, "st_ledger_v2_extender_shadow"), []stExtenderMigrationColumn{
+			{name: "deployment_key", dataType: "character varying", udtName: "varchar", length: 96},
+			{name: "no_id", dataType: "bigint", udtName: "int8", precision: 64},
+			{name: "epoch", dataType: "bigint", udtName: "int8", precision: 64},
+			{name: "report_ref", dataType: "character varying", udtName: "varchar", length: 71},
+			{name: "report", dataType: "bytea", udtName: "bytea"},
+			{name: "create_time", dataType: "timestamp without time zone", udtName: "timestamp"},
+		}; !slices.Equal(got, want) {
+			t.Fatalf("st_ledger_v2_extender_shadow columns %+v, want %+v", got, want)
+		}
+		if got, want := stExtenderMigrationColumns(t, ctx, "st_platform_endpoint"), []stExtenderMigrationColumn{
+			{name: "client_id", dataType: "uuid", udtName: "uuid"},
+			{name: "network_id", dataType: "uuid", udtName: "uuid"},
+			{name: "kind", dataType: "character varying", udtName: "varchar", length: 16},
+			{name: "register_time", dataType: "timestamp without time zone", udtName: "timestamp"},
+			{name: "registered_by", dataType: "character varying", udtName: "varchar", length: 256},
+			{name: "revoke_time", dataType: "timestamp without time zone", udtName: "timestamp", nullable: true},
+			{name: "revoked_by", dataType: "character varying", udtName: "varchar", length: 256, nullable: true},
+		}; !slices.Equal(got, want) {
+			t.Fatalf("st_platform_endpoint columns %+v, want %+v", got, want)
+		}
+		if key := stExtenderMigrationPrimaryKey(t, ctx, "st_ledger_v2_extender_shadow"); !slices.Equal(key, []string{"deployment_key", "no_id", "epoch"}) {
+			t.Fatalf("st_ledger_v2_extender_shadow key %v", key)
+		}
+		if key := stExtenderMigrationPrimaryKey(t, ctx, "st_platform_endpoint"); !slices.Equal(key, []string{"client_id", "register_time"}) {
+			t.Fatalf("st_platform_endpoint key %v", key)
 		}
 		if got, want := stExtenderMigrationColumns(t, ctx, "st_amendments"), []stExtenderMigrationColumn{
 			{name: "deployment_key", dataType: "character varying", udtName: "varchar", length: 96},
@@ -175,7 +210,8 @@ func TestStLedgerV2ExtenderMigrationOnTheDatabase(t *testing.T) {
 		var rows, components int
 		MaintenanceDb(ctx, func(conn PgConn) {
 			Raise(conn.QueryRow(ctx, `
-				SELECT count(*), count(*) FILTER (WHERE extender_bytes IS NOT NULL OR extender_census_chunks IS NOT NULL)
+				SELECT count(*), count(*) FILTER (WHERE extender_bytes IS NOT NULL OR extender_census_chunks IS NOT NULL
+					OR extender_intra_platform_bytes IS NOT NULL OR extender_intra_network_bytes IS NOT NULL OR extender_contracts IS NOT NULL OR extender_payers IS NOT NULL)
 				FROM st_ledger_v2_epoch_rows
 			`).Scan(&rows, &components))
 		}, OptReadOnly(), OptNoRetry())
@@ -186,9 +222,18 @@ func TestStLedgerV2ExtenderMigrationOnTheDatabase(t *testing.T) {
 		// the new release's writes: Z up to 2^64 - 1, exactly
 		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(ctx, `
-				INSERT INTO st_ledger_v2_epoch_rows (deployment_key, no_id, epoch, provider_chunks, declared_by, create_time, extender_bytes, extender_census_chunks)
-				VALUES ($1, 1, 8, ARRAY['p8'], NULL, $2, $3::text::numeric, ARRAY['c8'])
-			`, key, NowUtc(), "18446744073709551615"))
+				INSERT INTO st_ledger_v2_epoch_rows (deployment_key, no_id, epoch, provider_chunks, declared_by, create_time, extender_bytes, extender_census_chunks,
+					extender_intra_platform_bytes, extender_intra_network_bytes, extender_contracts, extender_payers)
+				VALUES ($1, 1, 8, ARRAY['p8'], NULL, $2, $3::text::numeric, ARRAY['c8'], $4::text::numeric, $5::text::numeric, 9223372036854775807, 1)
+			`, key, NowUtc(), "18446744073709551615", "18446744073709551614", "1"))
+			RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO st_ledger_v2_extender_shadow (deployment_key, no_id, epoch, report_ref, report, create_time)
+				VALUES ($1, 1, 6, $2, $3, $4)
+			`, key, "sha256:"+strings.Repeat("ab", 32), []byte("{}"), NowUtc()))
+			RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO st_platform_endpoint (client_id, network_id, kind, register_time, registered_by)
+				VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', 'tlsedge', $1, 'operator@example')
+			`, NowUtc()))
 			RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO st_ledger_v2_extender_census (deployment_key, no_id, epoch, census, census_rows, capture_time)
 				VALUES ($1, 1, 8, $2, 1, $3)
@@ -207,13 +252,19 @@ func TestStLedgerV2ExtenderMigrationOnTheDatabase(t *testing.T) {
 			sql  string
 			code string
 		}{
-			"no_id 0":            {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 0, 9, ''::bytea, 0, now())`, "23514"},
-			"epoch 0":            {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 1, 0, ''::bytea, 0, now())`, "23514"},
-			"negative rows":      {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 1, 9, ''::bytea, -1, now())`, "23514"},
-			"no census":          {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 1, 9, NULL, 0, now())`, "23502"},
-			"a second census":    {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 1, 8, ''::bytea, 0, now())`, "23505"},
-			"no amendments file": {`INSERT INTO st_amendments VALUES ($1 || 'x', NULL, now())`, "23502"},
-			"a Z past 20 digits": {`UPDATE st_ledger_v2_epoch_rows SET extender_bytes = 184467440737095516150 WHERE deployment_key = $1 AND epoch = 8`, "22003"},
+			"no_id 0":                 {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 0, 9, ''::bytea, 0, now())`, "23514"},
+			"epoch 0":                 {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 1, 0, ''::bytea, 0, now())`, "23514"},
+			"negative rows":           {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 1, 9, ''::bytea, -1, now())`, "23514"},
+			"no census":               {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 1, 9, NULL, 0, now())`, "23502"},
+			"a second census":         {`INSERT INTO st_ledger_v2_extender_census VALUES ($1, 1, 8, ''::bytea, 0, now())`, "23505"},
+			"no amendments file":      {`INSERT INTO st_amendments VALUES ($1 || 'x', NULL, now())`, "23502"},
+			"a Z past 20 digits":      {`UPDATE st_ledger_v2_epoch_rows SET extender_bytes = 184467440737095516150 WHERE deployment_key = $1 AND epoch = 8`, "22003"},
+			"a second shadow":         {`INSERT INTO st_ledger_v2_extender_shadow VALUES ($1, 1, 6, 'x', ''::bytea, now())`, "23505"},
+			"a shadow of no_id 0":     {`INSERT INTO st_ledger_v2_extender_shadow VALUES ($1, 0, 6, 'x', ''::bytea, now())`, "23514"},
+			"another kind":            {`INSERT INTO st_platform_endpoint VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', 'egress', now(), $1)`, "23514"},
+			"no registrant":           {`INSERT INTO st_platform_endpoint VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', 'smtpedge', now(), '' || left($1, 0))`, "23514"},
+			"revoked before it began": {`INSERT INTO st_platform_endpoint VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', 'mxedge', now(), $1, now() - interval '1 second', $1)`, "23514"},
+			"revoked by no one":       {`INSERT INTO st_platform_endpoint VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', 'mxedge', now() - interval '1 hour', $1, now(), NULL)`, "23514"},
 		} {
 			MaintenanceDb(ctx, func(conn PgConn) {
 				_, err := conn.Exec(ctx, c.sql, key)
@@ -224,7 +275,7 @@ func TestStLedgerV2ExtenderMigrationOnTheDatabase(t *testing.T) {
 		}
 
 		before := stExtenderMigrationState(t, ctx)
-		if len(before) != 6 || !strings.Contains(before[3], "18446744073709551615") {
+		if len(before) != 8 || !strings.Contains(before[3], "18446744073709551615") {
 			t.Fatalf("state %v", before)
 		}
 		MaintenanceDb(ctx, func(conn PgConn) {

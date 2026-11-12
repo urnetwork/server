@@ -9,6 +9,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,6 +62,9 @@ func newStAmendmentTestSite(t *testing.T) *stAmendmentTestSite {
 		w.Write(raw)
 	}))
 	previousSigner, previousUrl, previousStorer, previousSink := stAmendmentSigner, stAmendmentUrl, stAmendmentStorer, stLedgerV2AlertSink
+	previousPlatformEndpoints := stPlatformEndpointsRead
+	// the pure tests read an empty platform endpoint registry
+	stPlatformEndpointsRead = func(context.Context) model.StPlatformEndpointSet { return model.StPlatformEndpointSet{} }
 	stAmendmentSigner = func(chainId uint64, netuid uint16) (common.Address, bool) {
 		return crypto.PubkeyToAddress(key.PublicKey), chainId == 964 && netuid == 25
 	}
@@ -71,6 +75,7 @@ func newStAmendmentTestSite(t *testing.T) *stAmendmentTestSite {
 	t.Cleanup(func() {
 		server.Close()
 		stAmendmentSigner, stAmendmentUrl, stAmendmentStorer, stLedgerV2AlertSink = previousSigner, previousUrl, previousStorer, previousSink
+		stPlatformEndpointsRead = previousPlatformEndpoints
 		resetStAmendmentSources()
 		stLedgerV2Alerted.Range(func(key, value any) bool {
 			stLedgerV2Alerted.Delete(key)
@@ -145,7 +150,7 @@ func TestStLedgerV2AmendmentsFromSignedEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	for epoch, want := range map[uint64]uint64{1: 0, 5: 0, 7: 0, 8: 8, 9: 8, 100: 8} {
-		got, err := amendments.extenders(epoch)
+		got, err := amendments.extenders(context.Background(), epoch)
 		if err != nil || got.FirstEpoch != want || got.InForce(epoch) != (want != 0) {
 			t.Fatalf("epoch %d: %+v, %v; want first epoch %d", epoch, got, err, want)
 		}
@@ -157,7 +162,7 @@ func TestStLedgerV2AmendmentsFromSignedEntry(t *testing.T) {
 	site.served.Store([]byte(nil))
 	if again, err := stLedgerV2ReadAmendments(context.Background(), cfg); err != nil {
 		t.Fatalf("an outage stopped the reader: %v", err)
-	} else if got, _ := again.extenders(8); got.FirstEpoch != 8 {
+	} else if got, _ := again.extenders(context.Background(), 8); got.FirstEpoch != 8 {
 		t.Fatalf("an outage dropped the entry: %+v", got)
 	}
 	if len(site.alerts) != 1 || !strings.Contains(site.alerts[0], StLedgerV2AlertAmendments) {
@@ -200,7 +205,7 @@ func TestStLedgerV2AmendmentsConfiguredFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	for epoch, want := range map[uint64]uint64{7: 0, 8: 8, 9: 9, 10: 9} {
-		if got, err := amendments.extenders(epoch); err != nil || got.FirstEpoch != want {
+		if got, err := amendments.extenders(context.Background(), epoch); err != nil || got.FirstEpoch != want {
 			t.Fatalf("epoch %d: %+v, %v; want first epoch %d", epoch, got, err, want)
 		}
 	}
@@ -230,7 +235,7 @@ func TestStLedgerV2AmendmentsUnpinnedDeployment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := amendments.extenders(8); got.FirstEpoch != 8 {
+	if got, _ := amendments.extenders(context.Background(), 8); got.FirstEpoch != 8 {
 		t.Fatalf("epoch 8: %+v", got)
 	}
 	cfg = stAmendmentTestConfig(t, "enabled: false\n")
@@ -238,7 +243,7 @@ func TestStLedgerV2AmendmentsUnpinnedDeployment(t *testing.T) {
 	if amendments, err = stLedgerV2ReadAmendments(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := amendments.extenders(1000); got.InForce(1000) {
+	if got, _ := amendments.extenders(context.Background(), 1000); got.InForce(1000) {
 		t.Fatalf("an unconfigured deployment has an amendment: %+v", got)
 	}
 }
@@ -256,7 +261,7 @@ func TestStLedgerV2AmendmentsTestingHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := amendments.extenders(8); got.InForce(8) {
+	if got, _ := amendments.extenders(context.Background(), 8); got.InForce(8) {
 		t.Fatalf("an unpinned deployment read the published entry: %+v", got)
 	}
 	restore()
@@ -270,7 +275,7 @@ func TestStLedgerV2AmendmentsTestingHook(t *testing.T) {
 	if amendments, err = stLedgerV2ReadAmendments(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := amendments.extenders(8); got.FirstEpoch != 8 {
+	if got, _ := amendments.extenders(context.Background(), 8); got.FirstEpoch != 8 {
 		t.Fatalf("after the restore: %+v", got)
 	}
 }
@@ -320,7 +325,7 @@ func TestStExtenderPoolSettings(t *testing.T) {
 // read; the rest carry nothing.
 func TestStLedgerV2RecordedExtendersMatchTheAmendment(t *testing.T) {
 	amendment := model.StExtenderAmendment{FirstEpoch: 8}
-	component := &model.StLedgerV2EpochExtenders{Bytes: 5, CensusChunks: []string{}}
+	component := &model.StLedgerV2EpochExtenders{Bytes: 5, CensusChunks: []string{}, IntraNetwork: 5, Contracts: 1, Payers: 1}
 	for _, c := range []struct {
 		name    string
 		epoch   uint64
@@ -341,18 +346,71 @@ func TestStLedgerV2RecordedExtendersMatchTheAmendment(t *testing.T) {
 	}
 }
 
-// A built epoch's component is recorded as its Z and its census chunks.
+// A built epoch's component is recorded as its Z and its census chunks, with
+// the parts of the pool it was built from: Z's two parts and the contracts and
+// payers behind them. A component without parts, or with parts of another Z,
+// is refused, and so is a component's parts without a component.
 func TestStLedgerV2EpochExtendersRecord(t *testing.T) {
-	if stLedgerV2EpochExtenders(&ledger.EpochAllocation{}) != nil {
-		t.Fatal("an epoch without a component records one")
+	if got, err := stLedgerV2EpochExtenders(&ledger.EpochAllocation{}, nil); got != nil || err != nil {
+		t.Fatalf("an epoch without a component records %+v, %v", got, err)
 	}
 	census := []ledger.Ref{ledger.RefOf([]byte("a")), ledger.RefOf([]byte("b"))}
-	got := stLedgerV2EpochExtenders(&ledger.EpochAllocation{Extenders: &ledger.ExtenderAllocation{ExtenderSplit: ledger.ExtenderSplit{Bytes: 42}, Census: census}})
-	want := &model.StLedgerV2EpochExtenders{Bytes: 42, CensusChunks: []string{census[0].String(), census[1].String()}}
+	allocation := &ledger.EpochAllocation{Epoch: 8, Extenders: &ledger.ExtenderAllocation{ExtenderSplit: ledger.ExtenderSplit{Bytes: 42}, Census: census}}
+	pool := &model.StEpochExtenderPool{IntraPlatform: 2, IntraNetwork: 40, Contracts: 3, Payers: 2}
+	got, err := stLedgerV2EpochExtenders(allocation, stLedgerV2ExtenderParts(pool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &model.StLedgerV2EpochExtenders{Bytes: 42, CensusChunks: []string{census[0].String(), census[1].String()}, IntraPlatform: 2, IntraNetwork: 40, Contracts: 3, Payers: 2}
 	if !got.Equal(want) {
 		t.Fatalf("recorded %+v, want %+v", got, want)
 	}
 	if got.Equal(nil) || (*model.StLedgerV2EpochExtenders)(nil).Equal(want) || !(*model.StLedgerV2EpochExtenders)(nil).Equal(nil) {
 		t.Fatal("Equal does not tell a component from none")
+	}
+	for name, other := range map[string]*model.StLedgerV2EpochExtenders{
+		"another census":         {Bytes: 42, CensusChunks: []string{census[0].String()}, IntraPlatform: 2, IntraNetwork: 40, Contracts: 3, Payers: 2},
+		"another split of Z":     {Bytes: 42, CensusChunks: want.CensusChunks, IntraPlatform: 1, IntraNetwork: 41, Contracts: 3, Payers: 2},
+		"another contract count": {Bytes: 42, CensusChunks: want.CensusChunks, IntraPlatform: 2, IntraNetwork: 40, Contracts: 4, Payers: 2},
+		"another payer count":    {Bytes: 42, CensusChunks: want.CensusChunks, IntraPlatform: 2, IntraNetwork: 40, Contracts: 3, Payers: 3},
+	} {
+		if got.Equal(other) {
+			t.Fatalf("%s: Equal holds", name)
+		}
+	}
+	for name, parts := range map[string]*model.StLedgerV2EpochExtenders{
+		"no parts":          nil,
+		"another Z's parts": stLedgerV2ExtenderParts(&model.StEpochExtenderPool{IntraNetwork: 41, Contracts: 1, Payers: 1}),
+	} {
+		if got, err := stLedgerV2EpochExtenders(allocation, parts); err == nil {
+			t.Fatalf("%s: recorded %+v", name, got)
+		}
+	}
+	if got, err := stLedgerV2EpochExtenders(&ledger.EpochAllocation{}, stLedgerV2ExtenderParts(pool)); err == nil {
+		t.Fatalf("parts without a component recorded %+v", got)
+	}
+}
+
+// What the epoch reader's pool holds by construction, a record holds too: Z is
+// its parts' sum, and the contracts and payers behind Z exist exactly when Z is
+// positive, with no more payers than contracts.
+func TestStLedgerV2EpochExtendersCheck(t *testing.T) {
+	for name, c := range map[string]struct {
+		component model.StLedgerV2EpochExtenders
+		valid     bool
+	}{
+		"Z of both parts":     {model.StLedgerV2EpochExtenders{Bytes: 3, IntraPlatform: 1, IntraNetwork: 2, Contracts: 2, Payers: 1}, true},
+		"no Z":                {model.StLedgerV2EpochExtenders{}, true},
+		"Z not its parts":     {model.StLedgerV2EpochExtenders{Bytes: 4, IntraPlatform: 1, IntraNetwork: 2, Contracts: 2, Payers: 1}, false},
+		"parts that overflow": {model.StLedgerV2EpochExtenders{Bytes: 0, IntraPlatform: math.MaxUint64, IntraNetwork: 1, Contracts: 1, Payers: 1}, false},
+		"Z without contracts": {model.StLedgerV2EpochExtenders{Bytes: 3, IntraNetwork: 3}, false},
+		"contracts without Z": {model.StLedgerV2EpochExtenders{Contracts: 1, Payers: 1}, false},
+		"more payers":         {model.StLedgerV2EpochExtenders{Bytes: 3, IntraNetwork: 3, Contracts: 1, Payers: 2}, false},
+		"contracts, no payer": {model.StLedgerV2EpochExtenders{Bytes: 3, IntraNetwork: 3, Contracts: 1}, false},
+		"more than a record":  {model.StLedgerV2EpochExtenders{Bytes: 3, IntraNetwork: 3, Contracts: math.MaxInt64 + 1, Payers: 1}, false},
+	} {
+		if err := c.component.Check(); (err == nil) != c.valid {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }

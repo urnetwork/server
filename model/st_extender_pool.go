@@ -9,6 +9,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"time"
@@ -48,6 +49,15 @@ type StEpochExtenderPool struct {
 	UnfundedContracts    uint64
 	MeasurementBytes     ByteCount
 	MeasurementContracts uint64
+	// PooledByClient sums each client's pooled shares, funded or not, the bytes
+	// the amendment takes out of its provider usage: what an offline replay of
+	// a recorded epoch checks its rows' change against.
+	PooledByClient map[server.Id]ByteCount
+}
+
+// PooledBytes is every pooled share: Z and the bytes it leaves out.
+func (self *StEpochExtenderPool) PooledBytes() uint64 {
+	return uint64(self.IntraPlatform) + uint64(self.IntraNetwork) + uint64(self.UnfundedBytes) + uint64(self.MeasurementBytes)
 }
 
 // Bytes is Z.
@@ -68,7 +78,8 @@ type stEpochAmendedUsage struct {
 }
 
 func newStEpochAmendedUsage(epoch uint64, amendment stExtenderAmendment, measurement map[server.Id]bool) *stEpochAmendedUsage {
-	return &stEpochAmendedUsage{epoch: epoch, amendment: amendment, measurement: measurement, usages: map[server.Id]*StProviderUsage{}, payers: map[server.Id]bool{}}
+	return &stEpochAmendedUsage{epoch: epoch, amendment: amendment, measurement: measurement, usages: map[server.Id]*StProviderUsage{}, payers: map[server.Id]bool{},
+		pool: StEpochExtenderPool{PooledByClient: map[server.Id]ByteCount{}}}
 }
 
 func addStEpochPoolBytes(total *ByteCount, bytes ByteCount) error {
@@ -95,7 +106,10 @@ func (self *stEpochAmendedUsage) add(row *stEpochUsageRow, snapshot *contractUsa
 	if row.originNetworkId == nil {
 		return fmt.Errorf("subnet contract %s has usage shares but no usage origin", row.contractId)
 	}
-	shares, err := stContractSharesForEpoch(snapshot, self.epoch, *row.originNetworkId, self.amendment)
+	if row.createTime == nil {
+		return fmt.Errorf("subnet contract %s has usage shares but no create time", row.contractId)
+	}
+	shares, err := stContractSharesForEpoch(snapshot, self.epoch, *row.originNetworkId, *row.createTime, self.amendment)
 	if err != nil {
 		return fmt.Errorf("subnet contract %s: %w", row.contractId, err)
 	}
@@ -105,6 +119,13 @@ func (self *stEpochAmendedUsage) add(row *stEpochUsageRow, snapshot *contractUsa
 	pooled := shares.ExtenderPoolBytes()
 	if pooled == 0 {
 		return nil
+	}
+	for _, share := range shares.Pooled {
+		total := self.pool.PooledByClient[share.ClientId]
+		if err := addStEpochPoolBytes(&total, share.ByteCount); err != nil {
+			return err
+		}
+		self.pool.PooledByClient[share.ClientId] = total
 	}
 	switch {
 	case row.payerNetworkId == nil:
@@ -155,16 +176,18 @@ func (self *stEpochAmendedUsage) result() ([]*StProviderUsage, *StEpochExtenderP
 	slices.SortFunc(usages, func(a, b *StProviderUsage) int { return a.ClientId.Cmp(b.ClientId) })
 	pool := self.pool
 	pool.Payers = uint64(len(self.payers))
+	pool.PooledByClient = maps.Clone(self.pool.PooledByClient)
 	return usages, &pool
 }
 
 // The usage statement (stEpochProviderUsageSql) with each live contract's
-// usage origin network and payer. The origin is the endpoint the usage
-// snapshot left out of the contract's hops, so its network is the one the
+// usage origin network, payer and create time. The origin is the endpoint the
+// usage snapshot left out of the contract's hops, so its network is the one the
 // amendment calls the origin's; it is NULL for a legacy direction, which
-// writes no snapshot with shares. The rows, their order and their snapshot
-// are exactly the usage statement's: the archived and undated arms carry no
-// origin, and only a live row is marked live.
+// writes no snapshot with shares. The create time fixes which platform
+// endpoints were registered for the contract. The rows, their order and their
+// snapshot are exactly the usage statement's: the archived and undated arms
+// carry no origin, and only a live row is marked live.
 const stEpochAmendedUsageSql = `
 	WITH missing_time AS MATERIALIZED (
 		(SELECT contract_id, NULL::jsonb AS provider_usage, close_time, false AS duplicate
@@ -177,7 +200,7 @@ const stEpochAmendedUsageSql = `
 		 ORDER BY close_time, contract_id LIMIT 1)
 	)
 	SELECT contract_id, provider_usage, close_time, duplicate,
-		false AS live, NULL::uuid AS origin_network_id, NULL::uuid AS payer_network_id
+		false AS live, NULL::uuid AS origin_network_id, NULL::uuid AS payer_network_id, NULL::timestamp AS create_time
 	FROM missing_time
 	UNION ALL
 	SELECT source.contract_id, source.provider_usage, source.close_time,
@@ -185,7 +208,8 @@ const stEpochAmendedUsageSql = `
 		true AS live,
 		CASE WHEN source.usage_origin_is_source THEN source.source_network_id
 			WHEN NOT source.usage_origin_is_source THEN source.destination_network_id END,
-		source.payer_network_id
+		source.payer_network_id,
+		source.create_time
 	FROM transfer_contract AS source
 	LEFT JOIN st_provider_usage_archive AS archive ON archive.contract_id=source.contract_id
 		AND $1 <= archive.close_time AND archive.close_time < $2
@@ -194,7 +218,7 @@ const stEpochAmendedUsageSql = `
 		AND source.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
 	UNION ALL
 	SELECT contract_id, provider_usage, close_time, false,
-		false, NULL::uuid, NULL::uuid
+		false, NULL::uuid, NULL::uuid, NULL::timestamp
 	FROM st_provider_usage_archive
 	WHERE NOT EXISTS (SELECT 1 FROM missing_time)
 		AND $1 <= close_time AND close_time < $2
@@ -202,7 +226,7 @@ const stEpochAmendedUsageSql = `
 `
 
 func scanStEpochAmendedUsageRow(rows pgx.Rows, row *stEpochUsageRow) error {
-	return rows.Scan(&row.contractId, &row.data, &row.closedAt, &row.duplicate, &row.live, &row.originNetworkId, &row.payerNetworkId)
+	return rows.Scan(&row.contractId, &row.data, &row.closedAt, &row.duplicate, &row.live, &row.originNetworkId, &row.payerNetworkId, &row.createTime)
 }
 
 // GetStEpochAmendedUsageAtEpoch reads an epoch's provider usage under the

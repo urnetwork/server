@@ -9,7 +9,7 @@ import (
 )
 
 // The migration is one plain SQL migration, after the settlement v2 schema
-// whose epoch rows it adds two columns to, and its version is its position.
+// whose epoch rows it adds six columns to, and its version is its position.
 func TestStLedgerV2ExtenderMigrationIsAppended(t *testing.T) {
 	version := sqlMigrationVersion(StLedgerV2ExtenderSchemaSql)
 	if version < 1 || migrations[version-1] != stLedgerV2ExtenderMigration {
@@ -39,8 +39,21 @@ func TestStLedgerV2ExtenderMigrationCreatesOnlyItsStateAndIsBounded(t *testing.T
 		`census_rows bigint NOT NULL CHECK (census_rows >= 0),`,
 		`capture_time timestamp NOT NULL,`,
 		`PRIMARY KEY (deployment_key, no_id, epoch)`,
+		`IF to_regclass('public.st_ledger_v2_extender_shadow') IS NULL THEN`,
+		`CREATE TABLE st_ledger_v2_extender_shadow (`,
+		`report_ref varchar(71) NOT NULL,`,
+		`report bytea NOT NULL,`,
+		`IF to_regclass('public.st_platform_endpoint') IS NULL THEN`,
+		`CREATE TABLE st_platform_endpoint (`,
+		`kind varchar(16) NOT NULL CHECK (kind IN ('tlsedge', 'smtpedge', 'mxedge')),`,
+		`PRIMARY KEY (client_id, register_time),`,
+		`CHECK (revoke_time IS NULL OR register_time < revoke_time),`,
 		`ADD COLUMN IF NOT EXISTS extender_bytes numeric(20,0) NULL,`,
-		`ADD COLUMN IF NOT EXISTS extender_census_chunks text[] NULL;`,
+		`ADD COLUMN IF NOT EXISTS extender_census_chunks text[] NULL,`,
+		`ADD COLUMN IF NOT EXISTS extender_intra_platform_bytes numeric(20,0) NULL,`,
+		`ADD COLUMN IF NOT EXISTS extender_intra_network_bytes numeric(20,0) NULL,`,
+		`ADD COLUMN IF NOT EXISTS extender_contracts bigint NULL,`,
+		`ADD COLUMN IF NOT EXISTS extender_payers bigint NULL;`,
 	} {
 		if !strings.Contains(sql, marker) {
 			t.Errorf("extender pool migration lacks %q", marker)
