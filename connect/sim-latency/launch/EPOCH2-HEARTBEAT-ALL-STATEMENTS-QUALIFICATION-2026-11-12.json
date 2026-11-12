@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "kind": "competition-all-heartbeat-statements-qualification/v1",
+  "source_commit": "95fe2b792253549f41ab5e275ea1a78bfef2ba3a",
+  "workspace_sha256": "62a44f5370b914385180e559064ad0618b7b2bdbda2b6bfe22246a9d1f202db4",
+  "scope": "All twelve exact source-owned failed-last heartbeat statement positions share the existing physically returned rollback validator. Optional job-only cumulative eight-call retries remain inside the original 20-second budget and both confirmed leases. Unknown SQL, all-success/later failures, COMMIT uncertainty, unacknowledged rollback and unreturned pool cleanup remain excluded.",
+  "focused_smoke": {
+    "passed": 7,
+    "failed": 0,
+    "exit_status": 0,
+    "includes_actual_postgresql_authority_job_update_and_slot_update_failures": true,
+    "log_sha256": "950c7b4aa2736ebad5626dc98b9fd8dbe81fe1fc4f8a5c942456c9e7da741131",
+    "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.KAIDbEnl",
+    "source_manifest_sha256": "d9733c419819fbca23e58c6360bdff2baef869e0119118523bb803a586e2aeb9",
+    "source_unchanged": true,
+    "external_dependencies_clean_unchanged": true,
+    "external_dependency_manifest_sha256": "b8d6daacae1b26cd10ca18ca698d53440105c25f21769eb4fde57cf3f5f4f8ae"
+  },
+  "broad_expected_executions_each": 318,
+  "broad_qualification_complete": false,
+  "qualification_complete": false,
+  "deployed": false,
+  "remaining": "Finish broad ordinary/race qualification and source/dependency identity verification, build and stage the exact committed source, then activate only at the authorized idle maintenance boundary. No scoring/source/baseline policy or original deadline changes."
+}
