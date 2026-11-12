@@ -48,10 +48,16 @@ func testNetworkPingTallyDifferences(t testing.TB, ctx context.Context) map[stri
 			FROM network_ping
 			GROUP BY 1, 2, 3, 4, 5, 6`,
 		"target hour tally": `
-			SELECT hour, target_extender_id, pinger_kind, ping_count, rejection_count
+			SELECT hour, target_extender_id, pinger_kind, ping_count, rejection_count, evidence_rejection_count
 			FROM network_ping_target_hour_tally`,
 		"target hour tally from rows": `
-			SELECT date_trunc('hour', create_time), target_extender_id, pinger_kind, count(*), count(*) FILTER (WHERE cosign = 2)
+			SELECT
+				date_trunc('hour', create_time),
+				target_extender_id,
+				pinger_kind,
+				count(*),
+				count(*) FILTER (WHERE cosign = 2),
+				count(*) FILTER (WHERE cosign = 2 AND cosign_reason = ANY($1))
 			FROM network_ping
 			GROUP BY 1, 2, 3`,
 		"pinger day": `
@@ -69,8 +75,11 @@ func testNetworkPingTallyDifferences(t testing.TB, ctx context.Context) map[stri
 			tallyQuery := tallyQueries[tally]
 			rowsQuery := tallyQueries[tally+" from rows"]
 			arguments := []any{}
-			if tally == "hour tally" {
+			switch tally {
+			case "hour tally":
 				arguments = append(arguments, settings.HourShardCount, settings.HalfPlanetRttMs)
+			case "target hour tally":
+				arguments = append(arguments, testNetworkPingTargetEvidenceReasons())
 			}
 			var differenceCount int
 			server.Raise(conn.QueryRow(
@@ -90,11 +99,26 @@ func testNetworkPingTallyDifferences(t testing.TB, ctx context.Context) map[stri
 	return differences
 }
 
+// The refusal reasons that are evidence against the target, written out
+// rather than read from the rule they check: a refusal with no reason, a round
+// trip below the one observed, a bad nonce, the wrong extender and a bad
+// signature.
+func testNetworkPingTargetEvidenceReasons() []int32 {
+	return []int32{
+		int32(connect.ExtenderProbeVerdictReasonOk),
+		int32(connect.ExtenderProbeVerdictReasonRttBelowObserved),
+		int32(connect.ExtenderProbeVerdictReasonNonce),
+		int32(connect.ExtenderProbeVerdictReasonWrongExtender),
+		int32(connect.ExtenderProbeVerdictReasonBadSignature),
+	}
+}
+
 // Pings across three days and their hours -- both pinger kinds, every
-// verdict, refusal reasons including the rate limit, direct and relayed, round
-// trips of zero and beyond half the planet, several pingers and targets --
-// stored through both paths, with a same-instant copy and a replay among them
-// that store nothing.
+// verdict, refusal reasons that are evidence against the target and that are
+// not (no reason, a round trip below the observed one, an unknown pinger, the
+// rate limit), direct and relayed, round trips of zero and beyond half the
+// planet, several pingers and targets -- stored through both paths, with a
+// same-instant copy and a replay among them that store nothing.
 func testNetworkPingTallySeed(t testing.TB, ctx context.Context, day time.Time) (pings []*NetworkPing) {
 	t.Helper()
 	pingerIds := []server.Id{server.NewId(), server.NewId(), server.NewId()}
@@ -111,6 +135,8 @@ func testNetworkPingTallySeed(t testing.TB, ctx context.Context, day time.Time) 
 	reasons := []int{
 		int(connect.ExtenderProbeVerdictReasonRttBelowObserved),
 		int(connect.ExtenderProbeVerdictReasonRateLimited),
+		int(connect.ExtenderProbeVerdictReasonOk),
+		int(connect.ExtenderProbeVerdictReasonUnknownPinger),
 	}
 	for i := 0; i < 60; i += 1 {
 		cosign := NetworkPingCosigns[i%len(NetworkPingCosigns)]
@@ -144,10 +170,10 @@ func testNetworkPingTallySeed(t testing.TB, ctx context.Context, day time.Time) 
 
 // Every tally equals the count over the rows: the fleet's hour tally by hour,
 // shard, kind, relay, verdict and reason with its round trips, the per-target
-// hour tally with its refusals, and the distinct pingers and targets of each
-// day. The dashboard's reads of them equal the counts over the rows of their
-// window: the day's outcomes, the distincts over the days covering it, and
-// each hour's per-target counts.
+// hour tally with its refusals and those that are evidence against the target,
+// and the distinct pingers and targets of each day. The dashboard's reads of
+// them equal the counts over the rows of their window: the day's outcomes, the
+// distincts over the days covering it, and each hour's per-target counts.
 func TestNetworkPingTalliesMatchTheRows(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -254,15 +280,27 @@ func TestNetworkPingTalliesMatchTheRows(t *testing.T) {
 			wantCounts := []string{}
 			server.Db(ctx, func(conn server.PgConn) {
 				result, err := conn.Query(ctx, `
-					SELECT target_extender_id, pinger_kind, count(*), count(*) FILTER (WHERE cosign = 2)
+					SELECT
+						target_extender_id,
+						pinger_kind,
+						count(*),
+						count(*) FILTER (WHERE cosign = 2),
+						count(*) FILTER (WHERE cosign = 2 AND cosign_reason = ANY($3))
 					FROM network_ping
 					WHERE $1 <= create_time AND create_time < $2
 					GROUP BY 1, 2
-				`, hour, hour.Add(time.Hour))
+				`, hour, hour.Add(time.Hour), testNetworkPingTargetEvidenceReasons())
 				server.WithPgResult(result, err, func() {
 					for result.Next() {
-						var hourCount ExtenderHourPingCount
-						server.Raise(result.Scan(&hourCount.ExtenderId, &hourCount.PingerKind, &hourCount.Pings, &hourCount.Rejections))
+						// every row was stored with its evidence count
+						hourCount := ExtenderHourPingCount{EvidenceKnown: true}
+						server.Raise(result.Scan(
+							&hourCount.ExtenderId,
+							&hourCount.PingerKind,
+							&hourCount.Pings,
+							&hourCount.Rejections,
+							&hourCount.EvidenceRejections,
+						))
 						wantCounts = append(wantCounts, fmt.Sprintf("%+v", hourCount))
 					}
 				})

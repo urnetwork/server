@@ -273,11 +273,11 @@ func (self derivedLocationsPingHour) verdicts() int64 {
 // evidence against no one, a pinger the target does not know (reason 4) --
 // usually a directory that has not caught up -- and a probe refused for rate
 // (reason 6), usually an NLayer front's shared address. The derive leaves
-// both out of every refusal rate (derivePingRefusalIsEvidence), and a stale
-// directory refuses most extender pingers for the first: counted, it reads as
-// targets refusing honest claims. A refusal that names no reason, which a
-// pinger records for an acceptance whose co-signature did not verify, is kept,
-// since that is a key fault.
+// both out of every refusal rate (model.NetworkPingRefusalCountsAgainstTarget),
+// and a stale directory refuses most extender pingers for the first: counted,
+// it reads as targets refusing honest claims. A refusal that names no reason,
+// which a pinger records for an acceptance whose co-signature did not verify,
+// is kept, since that is a key fault; the derive counts it against the target.
 func (self derivedLocationsPingHour) countedRefusals() int64 {
 	return max(0, self.rejected-self.unknownPinger-self.rateLimited)
 }

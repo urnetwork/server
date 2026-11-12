@@ -23,7 +23,7 @@ func testPingTallySnapshot(t testing.TB, ctx context.Context) []string {
 	server.Db(ctx, func(conn server.PgConn) {
 		for _, query := range []string{
 			`SELECT 'hour', hour::text, shard, pinger_kind, relayed, cosign, cosign_reason, ping_count, zero_rtt_count, beyond_half_planet_count FROM network_ping_hour_tally`,
-			`SELECT 'target hour', hour::text, target_extender_id::text, pinger_kind, ping_count, rejection_count FROM network_ping_target_hour_tally`,
+			`SELECT 'target hour', hour::text, target_extender_id::text, pinger_kind, ping_count, rejection_count, evidence_rejection_count FROM network_ping_target_hour_tally`,
 			`SELECT 'pinger day', day::text, pinger_kind, pinger_id::text FROM network_ping_pinger_day`,
 			`SELECT 'target day', day::text, target_extender_id::text FROM network_ping_target_day`,
 		} {
