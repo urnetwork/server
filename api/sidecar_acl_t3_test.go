@@ -8,8 +8,9 @@ package api_test
 // (model.AdvanceNetworkAclHead) on the private Postgres, over the Net's metadata cluster on the local stack's MinIO.
 // sidecart3.CaptureStores adds every object, Redis key and sidecar table row to the Net's capture, network_acl_head and
 // network_acl_ack among them (local/sidecar-columns.yml), and the scan finds no canary, tag, group or K_sock in any
-// form. It needs MG2's tables (sidecar_pending) and the local stack (local/stack.sh up), and fails rather than skips
-// without them.
+// form, and under sidecar_leaktest the same note leaked into a sidecar table through Postgres's own leak is found. It
+// needs MG2's tables (sidecar_pending) and the local stack (local/stack.sh up), and fails rather than skips without
+// them.
 
 import (
 	"testing"
@@ -21,26 +22,34 @@ import (
 	"github.com/urnetwork/server/sidecart3"
 )
 
+// A T3 Net whose stores CaptureStores reads, and on its metadata cluster the canary document saved through server's
+// sequencer with api's read-cache script and network_acl_head advance. The caller closes both.
+func aclT3CanaryWorld(tb testing.TB) (*sidecartest.Net, *sidecart3.CaptureStoresReport, *sidecartest.AdmissionNet, *sidecartest.AclCanaryPolicy) {
+	net := sidecartest.NewNet(tb.Context(), sidecart3.NetSettings(tb, nil))
+	report, err := sidecart3.CaptureStores(net, nil)
+	if err != nil {
+		net.Close()
+		tb.Fatal(err)
+	}
+	tier, err := net.AdmissionTier()
+	if err != nil {
+		net.Close()
+		tb.Fatal(err)
+	}
+	tier.AclCompile = sidecartest.AclAdmissionCompile
+	tier.NewApi = sidecart3.ConfigLogApiWith(func(settings *model.ConfigLogSettings) {
+		settings.EntryCache = model.NewConfigLogRedisEntryCache(nil)
+	}, model.AdvanceNetworkAclHead)
+	admission := sidecartest.NewAdmissionNet(tb, tier)
+	return net, report, admission, admission.SaveAclCanaryPolicy(net.Capture())
+}
+
 func TestAclPolicyCanariesReachNoStoreOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := tb.Context()
-		net := sidecartest.NewNet(ctx, sidecart3.NetSettings(tb, nil))
+		net, report, admission, _ := aclT3CanaryWorld(tb)
 		defer net.Close()
-		report, err := sidecart3.CaptureStores(net, nil)
-		if err != nil {
-			tb.Fatal(err)
-		}
-		tier, err := net.AdmissionTier()
-		if err != nil {
-			tb.Fatal(err)
-		}
-		tier.AclCompile = sidecartest.AclAdmissionCompile
-		tier.NewApi = sidecart3.ConfigLogApiWith(func(settings *model.ConfigLogSettings) {
-			settings.EntryCache = model.NewConfigLogRedisEntryCache(nil)
-		}, model.AdvanceNetworkAclHead)
-		admission := sidecartest.NewAdmissionNet(tb, tier)
 		defer admission.Close()
-		admission.SaveAclCanaryPolicy(net.Capture())
 
 		// api advanced the network's head to the tip, with the document, as its append path does
 		head, err := model.GetNetworkAclHead(ctx, server.Id(admission.NetworkId()))
@@ -63,5 +72,29 @@ func TestAclPolicyCanariesReachNoStoreOnT3(t *testing.T) {
 			tb.Errorf("not read: %v", err)
 		}
 		tb.Logf("scanned %d objects, %d Redis keys and %d rows; tables not read: %v", objects, redisKeys, rows, report.TablesNotRead())
+	})
+}
+
+// Under sidecar_leaktest: Postgres's own leak (sidecart3's capture_stores_leak.go) carries the saved policy's note into a
+// sidecar table, and CaptureStores' scan finds it there, so the clean scan above reads what a server bug would write.
+func TestAclPolicyCanaryLeakedIntoPostgresIsCaughtOnT3(t *testing.T) {
+	leak := sidecartest.LeakClasses()[sidecartest.PrivacyClassPostgres]
+	if !sidecartest.LeaksLinked || leak == nil {
+		t.Skip("the leaks link only under sidecar_leaktest, which test.sh's leak leg builds")
+	}
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		net, _, admission, policy := aclT3CanaryWorld(tb)
+		defer net.Close()
+		defer admission.Close()
+		if findings := net.Capture().Scan(); len(findings) != 0 {
+			tb.Fatalf("findings before the leak: %v", findings)
+		}
+		leak.Put(tb, net, []byte(policy.Note))
+		for _, finding := range net.Capture().Scan() {
+			if finding.Needle == "acl policy note" && finding.Class == sidecartest.PrivacyClassPostgres {
+				return
+			}
+		}
+		tb.Error("a policy note leaked into Postgres went unseen")
 	})
 }
