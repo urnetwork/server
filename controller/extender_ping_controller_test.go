@@ -703,7 +703,17 @@ func TestExtenderPingReportFeedsTheDashboardCounts(t *testing.T) {
 		counts := model.CountExtenderPings(ctx, server.NowUtc())
 		connect.AssertEqual(t, counts.Pings24h, int64(3))
 		connect.AssertEqual(t, counts.Targets24h, int64(1))
-		connect.AssertEqual(t, len(counts.Outcomes24h), len(model.NetworkPingPingerKinds)*len(model.NetworkPingCosigns)*2)
+		// every kind, relayed or not, by verdict: co-signed and unknown once
+		// each, a refusal once per reason
+		connect.AssertEqual(t, len(counts.Outcomes24h), len(model.NetworkPingPingerKinds)*2*(len(model.NetworkPingCosigns)-1+len(model.NetworkPingRefusalReasons)))
+		for _, outcome := range counts.Outcomes24h {
+			if outcome.Cosign == model.NetworkPingCosignRejected && 0 < outcome.Pings {
+				// the refusal is counted under the reason the target gave
+				connect.AssertEqual(t, outcome.PingerKind, model.NetworkPingPingerKindProvider)
+				connect.AssertEqual(t, outcome.Reason, int(connect.ExtenderProbeVerdictReasonRttBelowObserved))
+				connect.AssertEqual(t, outcome.Pings, int64(1))
+			}
+		}
 		kindSources := map[int]int64{}
 		for _, source := range counts.Sources24h {
 			kindSources[source.PingerKind] = source.Sources

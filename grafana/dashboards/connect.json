@@ -4322,6 +4322,60 @@
                     "legendFormat": "ObservedAddresses frame {{service}}"
                 }
             ]
+        },
+        {
+            "id": 109,
+            "type": "row",
+            "title": "no-record close answers (controller/connect_control_no_record.go)",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 392
+            },
+            "panels": []
+        },
+        {
+            "id": 110,
+            "type": "timeseries",
+            "title": "contracts answered with no record / s, by party and report",
+            "description": "Contract ids a client answered a close request (CloseSequences) for with ContractsNoRecord, by the client's party and what the platform holds of its reports. report=none is contract state the client lost before its first checkpoint (a hard kill, an OOM, a crash, a power loss): the platform writes nothing, so the expiry sweep settles on the other party's count with no SN25 credit for the unconfirmed bytes. checkpoint, final, closed and unknown change nothing either; dropped is ids past the per-answer bound. Clients from connect 2026-11-11 send it; earlier ones answered with a zero final, which settled at half the sender's count. No data, not zero, until a client answers.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 393
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (party, report) (rate(urnetwork_contract_close_no_record_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{party}} {{report}}"
+                }
+            ]
         }
     ]
 }

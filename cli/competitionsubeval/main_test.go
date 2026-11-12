@@ -141,8 +141,26 @@ func TestSubevaluationArgumentsAcceptOnlyClosedRecoveryRole(t *testing.T) {
 	}
 }
 
-// Only the installed forced wrapper selects the managed transport. It cannot
-// append a remote command, pick another lifecycle role or recurse into itself.
+// Legacy closure is a separate local role, never an extra execution argument.
+func TestSubevaluationArgumentsKeepLegacyClosureSeparateFromOtherRoles(t *testing.T) {
+	parsed, err := parseArguments([]string{"--config", "/synthetic/authorization.json", "--close-legacy-prelaunch"}, &bytes.Buffer{})
+	if err != nil || !parsed.closeLegacyPrelaunch || parsed.recoverActive || parsed.serve || parsed.cleanupRunId != "" || parsed.configPath != "/synthetic/authorization.json" {
+		t.Fatal("explicit local operator role was not retained", err)
+	}
+	for _, args := range [][]string{
+		{"--close-legacy-prelaunch"},
+		{"--config", "/synthetic/authorization.json", "--close-legacy-prelaunch", "arbitrary-command"},
+		{"--config", "/synthetic/authorization.json", "--close-legacy-prelaunch", "--recover-active"},
+		{"--config", "/synthetic/authorization.json", "--close-legacy-prelaunch", "--serve"},
+		{"--config", "/synthetic/authorization.json", "--close-legacy-prelaunch", "--execute=" + strings.Repeat("a", 64)},
+	} {
+		if _, err := parseArguments(args, &bytes.Buffer{}); err == nil {
+			t.Fatal("operator closure accepted remote execution or extra authority", args)
+		}
+	}
+}
+
+// Managed transport retains its original fixed role and descriptor boundary.
 func TestSubevaluationArgumentsAcceptOnlyClosedManagedServeRole(t *testing.T) {
 	parsed, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--serve-managed"}, &bytes.Buffer{})
 	if err != nil || !parsed.serveManaged || parsed.serve || parsed.configPath != "/synthetic/agent.json" || parsed.recoverActive {

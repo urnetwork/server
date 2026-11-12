@@ -5800,6 +5800,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			migrateClientScore(clientScore)
 		}
 	}
+	// capture the flag's presence reads these decisions (ctf_presence_model.go);
+	// off unless ctf.yml turns it on, and never a reason for the export to fail
+	publishCtfPresenceProviders(ctx, nativeSourceStartedAt, locationClientScores, clientIdEgresses)
 	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
 	nativeCensus.Arindb = arindbDecision.nativeSummary()
 

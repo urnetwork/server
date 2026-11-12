@@ -220,6 +220,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.StFinalizePoke)},
 		{target: task.NewTaskTarget(work.StLedgerV2Step)},
 		{target: task.NewTaskTarget(work.StLedgerV2UsageStep)},
+		{target: task.NewTaskTarget(work.StCtfDataStep)},
 		{target: task.NewTaskTarget(work.StCtfDriverStep)},
 		{target: task.NewTaskTarget(work.StV1Sweep)},
 		{target: task.NewTaskTarget(work.SnSyncFleetBindings), schedule: work.ScheduleSnSyncFleetBindings},

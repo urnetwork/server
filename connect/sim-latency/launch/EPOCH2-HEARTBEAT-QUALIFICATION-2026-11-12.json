@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "kind": "competition-heartbeat-retry-qualification/v1",
+  "core_commit": "409648aa6602431745ad19b0b415726dd1799e12",
+  "qualified_source_manifest_sha256": "3e6656b7020d009ae0c8d641a1b1053c466beba77c7909dce2b8374cd630cfc2",
+  "scope": "Job heartbeat retry, exact distributed transaction rollback proof, unchanged supervisor and host controls; isolated PostgreSQL/Redis, three repetitions each ordinary and race.",
+  "ordinary": {
+    "passed": 261,
+    "failed": 0,
+    "exit_status": 0,
+    "package_seconds": 119.330,
+    "log_sha256": "b656b050db9646c062cb2bfeb312014d04f815f475802d8dcfd41d92d1bd9191"
+  },
+  "race": {
+    "passed": 261,
+    "failed": 0,
+    "exit_status": 0,
+    "package_seconds": 133.468,
+    "log_sha256": "680a6d65275a7077c2b0594c819dcc205bb8f022474c1e5c115c858198f13ea6"
+  },
+  "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.iDqJ0kMB",
+  "source_manifest_unchanged_after_tests": true,
+  "earlier_attempt": {
+    "outcome": "incomplete: declared 15-minute test actor timed out after cold race compilation",
+    "race_passed_before_timeout": 92,
+    "race_package_pass": false,
+    "race_log_sha256": "7cfb99a0528ca7a2763b2652ac8bb7c78f0ba468a1f1dbe2a0f5fb8baffcef23",
+    "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.Sj27hSBs"
+  },
+  "preserved_invariants": ["original submission deadlines", "original source and baseline", "20-second heartbeat ownership reserve", "both confirmed lease bounds", "no retry after ambiguous commit or unacknowledged rollback", "unchanged supervisor and host retry policy"],
+  "deployed": false,
+  "remaining": "Commit fixture correction, merge and verify clean main, build immutable worker release, then activate only at the authorized idle maintenance boundary. This is targeted qualification, not a claim that the repository-wide suite passed."
+}

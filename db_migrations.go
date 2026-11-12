@@ -11451,4 +11451,13 @@ var migrations = []any{
 	// locked or rewritten. Apply before deploying the taskworker, api and alt
 	// that use it.
 	providerEgressIpv6PlaceMigration,
+
+	// Capture the flag (ctf_schema.go, model/ctf_model.go, sn
+	// CAPTURETHEFLAG.md): the presence samples, the census and every later
+	// step's records, for the census, the driver and the api alike. Sixteen
+	// new empty tables and their indexes, each created only when absent under a
+	// five-second lock bound. Nothing existing is locked or rewritten. Apply
+	// before deploying the taskworker and api that use them; they stay empty
+	// while ctf.yml leaves capture the flag off.
+	ctfSchemaMigration,
 }

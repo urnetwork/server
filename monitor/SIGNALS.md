@@ -19774,7 +19774,11 @@ SELECT hour,
        COALESCE(sum(ping_count) FILTER (WHERE cosign = 0), 0)::bigint AS unknown,
        COALESCE(sum(ping_count) FILTER (WHERE relayed), 0)::bigint AS relayed,
        sum(zero_rtt_count)::bigint AS zero_rtt,
-       sum(beyond_half_planet_count)::bigint AS beyond_half_planet
+       sum(beyond_half_planet_count)::bigint AS beyond_half_planet,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = 2 AND cosign_reason = 4), 0)::bigint AS unknown_pinger,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 1), 0)::bigint AS extender_cosigned,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 2), 0)::bigint AS extender_rejected,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 2 AND cosign_reason = 4), 0)::bigint AS extender_unknown_pinger
 FROM network_ping_hour_tally
 WHERE date_trunc('hour', now() at time zone 'utc') - interval '23 hours' <= hour
 GROUP BY hour ORDER BY hour;
@@ -19783,9 +19787,12 @@ GROUP BY hour ORDER BY hour;
 The ingest adds every stored report to that tally in the report's own
 transaction, so the counts are exact; the day is the 24 clock hours up to the
 current one, and beyond half the planet is the ingest's threshold (200 ms at
-the solver's 100 km per ms), which `DeriveHalfPlanetRttMs` follows.
+the solver's 100 km per ms), which `DeriveHalfPlanetRttMs` follows. The tally
+keeps the refusal reason (connect `ExtenderProbeVerdictReason*`) and the
+pinger kind (2 is an extender), so the refusals that are evidence against no
+one, and the extender pingers' verdicts, are counted apart.
 
-Alert, WARN tier, fifteen-minute cadence, when any of these thirteen
+Alert, WARN tier, fifteen-minute cadence, when any of these fourteen
 conditions holds (every threshold a setting with the default given):
 
 - **not running** (`derive-not-running`, parts `stale-run`, `task-missing`,
@@ -19800,10 +19807,38 @@ conditions holds (every threshold a setting with the default given):
   ingest have stopped;
 - **refusals** (`derive-refusals`, parts `rejected`, `rate-limited`):
   rejected pings above `DeriveMaxRefusalShare` (10 %) of verdicts over the
-  last hour — targets refusing honest claims (gate tolerance, clock skew) or
-  pingers under-claiming; or rate-limited (reason 6) above 5 %, which is the
-  extenders' admission limits (connect/EXTENDER.md A12) set too tight for the
-  ping cadence;
+  last hour — targets refusing honest claims (gate tolerance, clock skew),
+  pingers under-claiming, the probe path, or a key mismatch. Both counts
+  leave out the two refusals that are evidence against no one, as the derive
+  leaves them out of every refusal rate (`derivePingRefusalIsEvidence`): an
+  unknown pinger (reason 4), usually a directory that has not caught up,
+  which the stale-directories condition below judges, and a rate limit
+  (reason 6). A refusal with no reason, which a pinger records for an
+  acceptance whose co-signature did not verify, is a key mismatch and stays
+  counted. The other part is rate-limited (reason 6) above 5 % of every
+  verdict, which is the extenders' admission limits (connect/EXTENDER.md A12)
+  set too tight for the ping cadence. Until 2026-11-11 the share counted
+  unknown pingers: with the
+  directories stale after the 2026-11-06 gossip stall, it read 17–24 % of an
+  hour's verdicts refused, against 5.6–9.1 % without them (11-11, 15–20Z);
+- **stale directories** (`extender-directories-stale`): extender pingers
+  refused as unknown (reason 4) above `DeriveMaxUnknownPingerShare` (30 %) of
+  the last hour's extender-pinger verdicts. A target refuses an extender
+  pinger whose operator-signed record is not active in its directory;
+  directories are filled by gossip publishing, the DNS TXT records, extender
+  feeds and each activation's own record and bootstrap sample, and a record
+  lives 24 hours, so about a day after publishing stops a target knows only
+  the few peers its own activations returned. The finding reads "directories
+  are stale: check gossip and DNS publishing". It is the end-to-end sign that
+  record distribution failed: gossip publishing stopped on 2026-11-06 at
+  07:49Z, the records lapsed about 07:55Z the next day, and unknown pingers
+  became 87 % of the extender pingers' verdicts with nothing alerting; this
+  condition would have fired at about 07Z on 11-07. The refusals are evidence
+  against no one, and the targets refuse as designed, so the action is
+  publishing, never the probe gate. §27.2 watches the publishers themselves
+  (`extender-gossip-stalled`, `extender-dns-publish-failing`); this condition
+  is the end-to-end check that their records reach the directories, and with
+  both publishers healthy it is the delivery between them;
 - **no verdicts** (`derive-no-verdicts`): pings with no verdict above
   `DeriveMaxUnknownShare` (30 %) — extenders on the old binary, or the
   verdict frame lost on a carrier;
@@ -19885,8 +19920,9 @@ extender id or a coordinate. The job's own log line carries the per-run
 detail (nodes, terms, excluded, crossings, sweeps per round).
 
 Action: a supply or verdict finding is the ping path (connect, the
-extenders' binaries, the ingest); a residual, crossing or exclusion finding
-is calibration — change one setting at a time in `DeriveSettings`, wait
+extenders' binaries, the ingest); a stale-directories finding is record
+distribution (gossip and DNS publishing); a residual, crossing or exclusion
+finding is calibration — change one setting at a time in `DeriveSettings`, wait
 one run, and read the residual and crossing panels; a thin-evidence finding
 is ping coverage first and the peer gate second; a non-convergence finding
 is the sweep cap or the damping. Verify: the finding clears on the next run
@@ -49673,6 +49709,82 @@ clients pin Let's Encrypt); `signature` or `foreign_network` at a mirror
 serving someone else's bundle; an older sequence at the mirror's sync. For the
 origin, read the publisher's outcomes (`store_error`, `sign_error`,
 `self_check_failed`: the signing key is not in `root_public_keys_hex`).
+
+### 27.2 Extender publishing
+
+Probe: `extender-publishing`
+
+Status: added 2026-11-11 with the fixes for two silent stops
+(factury/research/extender-health-2026-11-11.md §1.4, §5 items 1 and 2). The
+gossip drain had published nothing since 2026-11-06 07:49:44Z: a claim raised
+during that morning's Main brownout, the raise ended every replica's drain,
+and 10,919 records and revocations queued for five days. Route 53 had refused
+every dns tick since 2026-10-28 18:12Z ("RDATA character limit of 32000
+exceeded": all the sets went in one request, which Route 53 caps at 32,000
+value characters with each character of an UPSERT counted twice), while the
+dns gauges, drawn from the desired sets, read healthy.
+
+Source: two series the publishers export, labeled by fixed enums only:
+
+- `urnetwork_stats_extender_gossip_oldest_pending_seconds{kind}`: the age of
+  the oldest message written to `network_extender_publish` and not yet
+  released (`record`, `revocation`), from every taskworker's stats collector;
+  0 on an empty queue;
+- `urnetwork_taskworker_extender_dns_changes_total{record_type,outcome}`: every
+  set change the extender publish tick wanted (`A`, `AAAA`, `TXT`), `accepted`
+  by Route 53 or `failed`. Every combination exists from process start.
+
+```promql
+max by (kind) (urnetwork_stats_extender_gossip_oldest_pending_seconds{env="main"})
+sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env="main",outcome="failed"}[15m]))
+sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env="main",outcome="accepted"}[15m]))
+```
+
+Healthy: the gossip service drains the queue every 5 seconds, 64 rows a pass
+per replica, so the oldest unreleased message is seconds old. The publish tick
+runs every 10 minutes and writes every set in a request of its own, and no
+change fails.
+
+Thresholds (each judged at every one-minute evaluation of its hold; a gossip
+kind is the target `extender-gossip/<kind>`, a record type
+`extender-dns/<record_type>`):
+
+- WARN `extender-gossip-stalled`: the kind's oldest unreleased message older
+  than 10 minutes for 5 minutes. A failed drain pass retries after a backoff
+  of at most a minute, and an unready replica starts its drain once readiness
+  passes, so a stall this long is no replica draining at all.
+- WARN `extender-dns-publish-failing`: a failed change of the record type in
+  the trailing 15 minutes for 30 minutes, about three failed ticks in a row. A
+  change fails when Route 53 refused it, its request errored, or it was never
+  sent: the zone could not be resolved or listed, the publisher could not be
+  built, or a delete was held because an upsert of its type failed.
+- `extender-publishing-unobservable`: the read failed, a series is ambiguous
+  or missing at an evaluation, no stats collector exported the gossip queue
+  (`gossip_state_missing`), or no taskworker exported the changes counter
+  (`dns_state_missing`: a build that predates it).
+
+False-positive qualifiers: the gossip gauge is refreshed every 5 minutes with
+the stats collector's other database series, and the 10-minute threshold
+covers that cadence. The gossip queue also grows while every gossip replica is
+deliberately stopped. False-negative qualifiers: a dns block with no
+record name fails before any set is drawn and counts no change; the tick logs
+it and the dns gauges read zero. A set that keeps landing with stale content
+is not a failure here. Neither series says whether clients still reach the
+gossip mesh; that is the gossip service's own connection count.
+
+ACTION: for `extender-gossip-stalled`, read the gossip service's log for
+`[gossip]drain pass failed` (the database path of the replica) and
+`[gossip]not ready` (its readiness: Postgres, Redis and the migration head),
+and `process_start_time_seconds{service="gossip"}`. A replica that logs
+neither and still does not drain needs its unit restarted (stop the warp
+container itself and check `docker ps`). For `extender-dns-publish-failing`,
+read the taskworker log for `[extenderpublish]dns publish failed`, which names
+every failed set and Route 53's answer: `InvalidChangeBatch` points at a set's
+size or shape (the dns block's `sample_count`, record size), `AccessDenied` or
+a signature error at the dns block's credentials, `Throttling` or
+`PriorRequestNotComplete` at another writer of the hosted zone. The extenders
+dashboard (`urnetwork-extenders`) shows what Route 53 accepted and each
+outcome's rate.
 
 ## Shared provider-egress dashboard refresh
 
