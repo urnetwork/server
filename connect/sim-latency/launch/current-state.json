@@ -431,7 +431,7 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-    "status": "183_top_level_completed_77_remaining_recovery_chain_resumed_transport_worker_activated",
+    "status": "203_top_level_completed_57_remaining_recovery_chain_running_transport_worker_activated",
     "sequential_remainder_chain": {
       "ledger_directory": "/dev/shm/competition-recovery-chain-20261112.pAWVCjqC",
       "control_session": 43890,
@@ -439,15 +439,25 @@
       "completed_manifest": "completed.txt",
       "remaining_manifest": "remaining.txt",
       "actor_history": "actors.txt",
-      "verified_at": "2026-11-12T15:17:08Z",
-      "verified_completed": 183,
-      "verified_remaining": 77,
+      "verified_at": "2026-11-12T15:21:34Z",
+      "verified_completed": 203,
+      "verified_remaining": 57,
       "whole_suite": 260,
       "status": "resumed_after_authorized_transport_handoff",
-      "active_test_batch": "remainder4",
-      "active_invocation_id": "456b70ec7c034bea982c4417688ff3b7",
-      "active_main_pid": 3571512,
-      "active_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.ormpTeOd",
+      "active_test_batch": "remainder5",
+      "active_invocation_id": "bbe10e9c77fe4017b4815be9bacb54d4",
+      "active_main_pid": 3589986,
+      "active_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.jsS0FzqA",
+      "completed_remainder4": {
+        "passed": 20,
+        "failed": 0,
+        "skipped": 0,
+        "package_elapsed_seconds": 233.016,
+        "log_sha256": "886112b469b86fa11071b81d2b59fb0a300aa0a6bf041381bcfb04678c8ae1b3",
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.ormpTeOd",
+        "actor_guard_capture_cleanup_exit_zero": true,
+        "source_and_dependencies_unchanged": true
+      },
       "completed_mainnet_batch": {
         "passed": 7,
         "failed": 0,
@@ -524,8 +534,8 @@
       "actor_timeout_minutes": 45,
       "no_automatic_next_batch": true
     },
-    "completed_top_level_test_union": 183,
-    "unexecuted_top_level_tests": 77,
+    "completed_top_level_test_union": 203,
+    "unexecuted_top_level_tests": 57,
     "prefix_continuation": {
       "source_commit": "7880fd886bb976adabb5e0b97a2cc6d5d61ea439",
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
