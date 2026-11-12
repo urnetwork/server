@@ -49,6 +49,22 @@ No Qwen/Gemma inference had started for this pre-review request at that check.
 Existing scoring and the independent recovery-tool qualification are not being
 interrupted.
 
+The subsequent fixed-round read-only census selected **15 of 20 jobs**: 15
+successful eligible candidates, one successful below-margin candidate and four
+failed jobs. All 15 selected patches have distinct digests. The private census
+snapshot digest is
+`476e8a9a38d447322332197c2f8565243c0984639d190afa6cdade7ac0cedd8c`.
+This is a database snapshot only: immutable archive authentication and complete
+source preparation are still required before sending a candidate to a model.
+The first census queried the wrong column (`epoch` instead of `epoch_number`);
+the corrected read succeeded without weakening baseline identity checks.
+
+The existing official winner cache does **not** accept an in-epoch advisory
+result. Official reuse needs an explicit adapter that validates the actual
+election and unchanged factual inputs, while preserving the original advisory
+purpose and model-input provenance. Until that is implemented and verified,
+retained pre-reviews are useful evidence, not automatically reusable approvals.
+
 ## Required checks before the first private model request
 
 Use synthetic fixtures to prove that a successful but gate-failed, below-margin,
