@@ -17,7 +17,9 @@ import (
 
 // A separately approved dependency-only improvement is still a source change.
 func TestReviewedSourceChoiceAcceptsEveryLockedRepositoryChange(t *testing.T) {
-	for _, repository := range model.CompetitionSourceRepositoryNames() {
+	// the fixture's graph is the ten the evaluator still copies; sidecar is not
+	// one of its locked repositories
+	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 		current, proposal, deadline := reviewedProposalFixture(t)
 		proposal.Commits = map[string]string{}
 		for name, commit := range current.Commits {

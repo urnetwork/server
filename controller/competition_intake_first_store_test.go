@@ -60,7 +60,7 @@ func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context)
 	settings.ArtifactRoot = t.TempDir()
 	settings.SeasonEndsAt, settings.RetainUntil = currentTime.Add(60*24*time.Hour), currentTime.Add(400*24*time.Hour)
 	commits := map[string]string{}
-	for _, name := range model.CompetitionSourceRepositoryNames() {
+	for _, name := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 		commits[name] = settings.BaseSha
 	}
 	var err error

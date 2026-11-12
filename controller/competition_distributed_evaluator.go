@@ -322,7 +322,7 @@ func authenticateDistributedCompetitionAttempt(ctx context.Context, settings *Se
 		return failure("artifact_authentication_failed", "executor raw evidence failed authentication")
 	}
 	if err := authenticateDistributedCompetitionSources(settings, job, directory, artifacts, result.Score != nil); err != nil {
-		return failure("executor_source_mismatch", "executor source evidence did not match the exact frozen ten-repository graph")
+		return failure("executor_source_mismatch", "executor source evidence did not match the exact frozen repository graph")
 	}
 	receipt, executor, err := materializeCompetitionExecutorReceipt(directory, job, start, response)
 	if err != nil {

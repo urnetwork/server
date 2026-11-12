@@ -16,14 +16,30 @@ import (
 )
 
 func TestCompetitionDistributedMeasuredGraphUsesCanonicalTenRepositoryContract(t *testing.T) {
-	commits := map[string]string{}
+	// the ten with sidecar are measured as the ten alone are, and sidecar stands
+	// in for none of them
+	withSidecar := map[string]string{}
 	for _, repository := range model.CompetitionSourceRepositoryNames() {
+		withSidecar[repository] = strings.Repeat("a", 40)
+	}
+	if len(withSidecar) != 11 || validateDistributedMeasuredCommits(withSidecar) != nil {
+		t.Fatal("the ten measured repositories with sidecar were refused")
+	}
+	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
+		delete(withSidecar, repository)
+		if validateDistributedMeasuredCommits(withSidecar) == nil {
+			t.Fatal("sidecar replaced an absent measured product repository", repository)
+		}
+		withSidecar[repository] = strings.Repeat("a", 40)
+	}
+	commits := map[string]string{}
+	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 		commits[repository] = strings.Repeat("a", 40)
 	}
 	if len(commits) != 10 || validateDistributedMeasuredCommits(commits) != nil {
 		t.Fatal("the canonical ten-repository graph was reduced by a second obsolete-repository subtraction")
 	}
-	for _, repository := range model.CompetitionSourceRepositoryNames() {
+	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 		delete(commits, repository)
 		if validateDistributedMeasuredCommits(commits) == nil {
 			t.Fatal("an absent measured product repository was accepted", repository)
@@ -65,7 +81,7 @@ func TestCompetitionDistributedSourcesVerifyAllTenFrozenHeadsAndLifecycle(t *tes
 		settings := validSettings()
 		settings.distributedCoordinator = &competitionDistributedCoordinatorProfile{Config: competitionDistributedCoordinatorConfig{Settings: defaultCompetitionDistributedCoordinatorSettings()}}
 		settings.distributedSourceCommits = map[string]string{}
-		for _, repository := range model.CompetitionSourceRepositoryNames() {
+		for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 			settings.distributedSourceCommits[repository] = settings.BaseSha
 		}
 		copyCommits := func(commits map[string]string) map[string]string {

@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -189,7 +191,9 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 		}
 		return runGitRaw(repository, args...)
 	}
-	repositories := model.CompetitionSourceRepositoryNames()
+	// the identity's own graph, which the lock digest above held to the ten live
+	// repositories or those ten with sidecar
+	repositories := slices.Collect(maps.Keys(identity.Repositories))
 	sort.Strings(repositories)
 	for _, repository := range repositories {
 		path := filepath.Join(root, repository)

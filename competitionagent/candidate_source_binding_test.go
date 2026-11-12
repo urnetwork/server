@@ -244,6 +244,41 @@ func TestCandidateSourceBindingRejectsInvalidPostPatchIdentity(t *testing.T) {
 	}
 }
 
+// An image built from a server commit that requires the sidecar module names
+// sidecar beside the ten, and the binding admits it as it admits the ten alone.
+// Sidecar stands in for no product repository, brings no other name and needs a
+// canonical commit.
+func TestCandidateSourceBindingAdmitsSidecarOnlyBesideTheTen(t *testing.T) {
+	fixture := newCandidateSourceTest(t)
+	fixture.identity.Repositories["sidecar"] = fmt.Sprintf("%040x", 11)
+	fixture.writeIdentity(t)
+	_, creates := fixture.daemon(t, nil)
+	if response := fixture.create(t, false, nil); response.Code != http.StatusCreated || creates.Load() != 1 {
+		t.Fatalf("the ten with sidecar were rejected: status=%d", response.Code)
+	}
+	for _, mutate := range []func(*candidateSourceIdentity){
+		func(identity *candidateSourceIdentity) { delete(identity.Repositories, "gvisor") },
+		func(identity *candidateSourceIdentity) { identity.Repositories["sidecar"] = strings.Repeat("0", 64) },
+		func(identity *candidateSourceIdentity) { identity.Repositories["sidecar"] = "" },
+		func(identity *candidateSourceIdentity) {
+			identity.Repositories["synthetic-extra"] = strings.Repeat("0", 40)
+		},
+		func(identity *candidateSourceIdentity) {
+			delete(identity.Repositories, "sn")
+			identity.Repositories["synthetic-extra"] = strings.Repeat("0", 40)
+		},
+	} {
+		fixture := newCandidateSourceTest(t)
+		fixture.identity.Repositories["sidecar"] = fmt.Sprintf("%040x", 11)
+		mutate(&fixture.identity)
+		fixture.writeIdentity(t)
+		_, creates := fixture.daemon(t, nil)
+		if response := fixture.create(t, false, nil); response.Code != http.StatusForbidden || creates.Load() != 0 {
+			t.Fatal("an invalid graph with sidecar reached daemon create")
+		}
+	}
+}
+
 // The source-materialization class cannot claim that the image's inherited
 // pristine workspace was patched; its exact image/build/source labels bind it.
 func TestCandidateSourceBindingRejectsChangedImageLabelsAndMutableAliases(t *testing.T) {

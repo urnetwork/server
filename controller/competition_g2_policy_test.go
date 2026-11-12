@@ -20,7 +20,7 @@ func g2FuturePolicyForTest(t *testing.T) *CompetitionFutureEpochPolicy {
 	t.Helper()
 	coverage := model.DefaultCompetitionWorkCoveragePolicy()
 	commits := map[string]string{}
-	for _, repository := range model.CompetitionSourceRepositoryNames() {
+	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 		commits[repository] = strings.Repeat("a", 40)
 	}
 	lock, err := model.CompetitionSourceLockDigest(commits)

@@ -10,8 +10,19 @@ import (
 
 var competitionSourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// Returns an independently owned list of the complete active competition graph.
+// Returns an independently owned list of the complete active competition graph:
+// the ten repositories it has held and sidecar, which every server commit that
+// requires the sidecar module needs beside it to build.
 func CompetitionSourceRepositoryNames() []string {
+	return append(CompetitionSourceRepositoryNamesBeforeSidecar(), "sidecar")
+}
+
+// Returns an independently owned list of the graph of a source whose server
+// commit predates the sidecar module. Such a source stays valid: the database
+// guards admit the ten, or the ten with sidecar
+// (server.competitionSidecarSourceMigration), until a cleanup migration requires
+// sidecar once every competition job runs a release that sends it.
+func CompetitionSourceRepositoryNamesBeforeSidecar() []string {
 	return []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
 }
 
@@ -21,12 +32,16 @@ func CompetitionSourceLockDigest(commits map[string]string) (string, error) {
 	return CompetitionSourceLockDigestForMode(commits, false)
 }
 
-// Requires the ten live dependencies in either mode. Historical evidence is
-// retained unchanged; an obsolete extra repository cannot authorize new work.
+// Requires the ten live dependencies in either mode, alone or with sidecar, as
+// the database guards do. Historical evidence is retained unchanged; an
+// obsolete or unknown extra repository cannot authorize new work.
 func CompetitionSourceLockDigestForMode(commits map[string]string, _ bool) (string, error) {
-	repositoryNames := CompetitionSourceRepositoryNames()
+	repositoryNames := CompetitionSourceRepositoryNamesBeforeSidecar()
+	if _, sidecar := commits["sidecar"]; sidecar {
+		repositoryNames = CompetitionSourceRepositoryNames()
+	}
 	if len(commits) != len(repositoryNames) {
-		return "", fmt.Errorf("source lock requires exactly %d frozen repositories", len(repositoryNames))
+		return "", fmt.Errorf("source lock requires exactly the %d frozen repositories, or those with sidecar", len(CompetitionSourceRepositoryNamesBeforeSidecar()))
 	}
 	for _, repository := range repositoryNames {
 		if !competitionSourceCommitPattern.MatchString(commits[repository]) {
