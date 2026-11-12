@@ -30,7 +30,7 @@ func TestDnsRestoreCommandsRefuseWithoutTheDnsTables(t *testing.T) {
 			if code := sidecarctlCommands.run(args, stdout, stderr); code != 1 || !strings.Contains(stderr.String(), "dns tables are not linked in this binary") {
 				tb.Errorf("%q: exited %d with %q, want 1 and the unlinked tables", args, code, stderr.String())
 			}
-			if strings.Contains(stdout.String(), "restoring is") || strings.Contains(stdout.String(), "done:") {
+			if strings.Contains(stderr.String(), "rerun") || strings.Contains(stdout.String(), "restoring is") || strings.Contains(stdout.String(), "done:") {
 				tb.Errorf("%q: printed %q", args, stdout.String())
 			}
 		}

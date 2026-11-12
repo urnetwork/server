@@ -41,6 +41,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/dnshost"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
@@ -291,6 +292,8 @@ func runDnsRestoreWithSettings(ctx context.Context, args []string, settings *dns
 	switch {
 	case errors.Is(err, dnsservice.ErrDnsNotRestoring):
 		return fmt.Errorf("%s is not restoring in %s, and no restore ran under incident %s: run `sidecarctl dns restoring on` as the dumps load, then this: %w", root, env.env, incidentId, err)
+	case errors.Is(err, model.ErrDnsUnlinked):
+		return fmt.Errorf("the restore step for %s in %s did not run and changed nothing: %w", root, env.env, err)
 	case errors.Is(err, dnsservice.ErrDnsRootUnknown):
 		return fmt.Errorf("%s has no dns_root row in %s, so there is nothing to restore: the dumps hold the row of a root that was ever served: %w", root, env.env, err)
 	case errors.Is(err, dnsservice.ErrDnsRestoreIncident):

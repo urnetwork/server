@@ -19,6 +19,7 @@ import (
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // The root the fake env serves when a test names no other.
@@ -288,6 +289,7 @@ func TestDnsRestoreExitsOneUntilTheStepEnds(t *testing.T) {
 		{name: "not restoring", runErr: dnsservice.ErrDnsNotRestoring, want: "is not restoring in test"},
 		{name: "another incident", runErr: dnsservice.ErrDnsRestoreIncident, want: "committed under another incident"},
 		{name: "no root row", runErr: dnsservice.ErrDnsRootUnknown, want: "has no dns_root row in test"},
+		{name: "unlinked tables", runErr: model.ErrDnsUnlinked, want: "did not run and changed nothing: dns tables are not linked"},
 		{name: "no end", progress: waiting, want: "answered no end", wantPrint: "restore serial: 16777216"},
 		{name: "no answer", want: "answered no end"},
 	}
