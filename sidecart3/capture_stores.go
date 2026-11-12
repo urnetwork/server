@@ -2,22 +2,27 @@ package sidecart3
 
 // §22.7's CC3 on T3 (TEST-M2-09; R-TEST-3, I-1, I-2, I-18): what T3's real stores hold, added to a Net's capture as
 // sources its scan reads at each Scan, so a canary or a key in any stored byte is found in every form the scan
-// knows, never sampled (an object streams to the scan; a Redis key's reads and a Postgres table's pages are held
-// whole until the scan reads them, which this draft leaves to the review phase):
+// knows, never sampled. Each item streams: the scan pulls it a part at a time (capturePartReader), and a part is read
+// from its store only when the scan reaches it, so no object, Redis key or table is held whole:
 //
 //   - every object in every metadata cluster and the segment cluster: its key, which is data too, its metadata and
 //     its body, read through the Net's host under InspectContext, so the capture takes no plan and leaves no
 //     history (FI-30's recorder);
 //   - every Redis key on every master of the test's database (the ForEach over masters a 3-master cluster needs, one
-//     node until QD-028's change): its name, DUMP's payload, and a read by the key's type (GET, HGETALL, LRANGE,
-//     SMEMBERS, ZRANGE with scores, XRANGE), since DUMP's encoding of a listpack or a compressed list can hide a
-//     canary the plain values show;
+//     node until QD-028's change): its name, DUMP's payload, and a read by the key's type a range at a time (GETRANGE,
+//     HSCAN, LRANGE, SSCAN, ZRANGE with scores, XRANGE), since DUMP's encoding of a listpack or a compressed list can
+//     hide a canary the plain values show. DUMP's payload is one reply, the one part a key holds whole;
 //   - every row of every sidecar Postgres table local/sidecar-columns.yml names, each row as Postgres's JSON text of
-//     it, bytea as its hex: a table a group this binary does not link has none, and is listed as not read.
+//     it, bytea as its hex, a page at a time in ctid order, each page in a read-only transaction of its own: a table a
+//     group this binary does not link has none, and is listed as not read.
+//
+// What stays whole until the scan reads it is the list of names: each cluster's keys a page at a time as it lists,
+// and every Redis key's name, since SCAN may answer a name twice.
 //
 // PrivacyClassPostgres registers here, beside its capture, and capture_stores_leak.go holds its leak under
-// sidecar_leaktest. A source that cannot read its store yields an item saying so, which the scan cannot pass for a
-// canary, and CaptureStores' report lists it: what was not read was not scanned.
+// sidecar_leaktest. A store that cannot be read, listed or scanned yields an item that will not open, and a part that
+// fails ends its item's stream with the failure, so the scan reports each as a finding no run passes on; the report
+// lists them too: what was not read was not scanned.
 
 import (
 	"bytes"
@@ -25,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"iter"
 	"os"
 	"regexp"
 	"slices"
@@ -57,17 +63,20 @@ type CaptureStoresSettings struct {
 	RedisScanCount int64
 	// Rows one Postgres page reads: 1,000. Positive.
 	PostgresPageRowCount int
-	// Elements one range read of a list, a set, a sorted set or a stream asks for: 1,000. Positive.
+	// Elements one range read of a hash, a list, a set, a sorted set or a stream asks for: 1,000. Positive.
 	RedisRangeCount int64
+	// Bytes one GETRANGE of a string reads: 1 MiB, the scan's own chunk. Positive.
+	RedisStringChunkByteCount int64
 }
 
 func DefaultCaptureStoresSettings() *CaptureStoresSettings {
 	return &CaptureStoresSettings{
-		SidecarColumnsPath:   "../local/sidecar-columns.yml",
-		ListPageCount:        1000,
-		RedisScanCount:       1000,
-		PostgresPageRowCount: 1000,
-		RedisRangeCount:      1000,
+		SidecarColumnsPath:        "../local/sidecar-columns.yml",
+		ListPageCount:             1000,
+		RedisScanCount:            1000,
+		PostgresPageRowCount:      1000,
+		RedisRangeCount:           1000,
+		RedisStringChunkByteCount: 1024 * 1024,
 	}
 }
 
@@ -172,11 +181,12 @@ func CaptureStores(net *sidecartest.Net, settings *CaptureStoresSettings) (*Capt
 
 // Every object of every cluster, each an item that streams its key, metadata and body.
 func captureObjects(ctx context.Context, blobs sidecar.BlobStore, settings *CaptureStoresSettings, report *CaptureStoresReport) []*sidecartest.PrivacyItem {
+	items := []*sidecartest.PrivacyItem{}
 	clusters := []sidecar.BlobCluster{}
 	for _, clusterId := range blobs.MetadataClusterIds() {
 		cluster, err := blobs.Cluster(clusterId)
 		if err != nil {
-			report.failed(err)
+			items = append(items, captureUnread(sidecartest.PrivacyClassObject, "cluster "+clusterId, err, report))
 			continue
 		}
 		clusters = append(clusters, cluster)
@@ -184,15 +194,14 @@ func captureObjects(ctx context.Context, blobs sidecar.BlobStore, settings *Capt
 	if segmentCluster, err := blobs.SegmentCluster(); err == nil {
 		clusters = append(clusters, segmentCluster)
 	} else {
-		report.failed(err)
+		items = append(items, captureUnread(sidecartest.PrivacyClassObject, "the segment cluster", err, report))
 	}
-	items := []*sidecartest.PrivacyItem{}
 	for _, cluster := range clusters {
 		startAfter := ""
 		for {
 			objects, more, err := cluster.List(ctx, "", startAfter, settings.ListPageCount)
 			if err != nil {
-				report.failed(fmt.Errorf("listing cluster %s: %w", cluster.ClusterId(), err))
+				items = append(items, captureUnread(sidecartest.PrivacyClassObject, "listing cluster "+cluster.ClusterId(), err, report))
 				break
 			}
 			for _, object := range objects {
@@ -246,12 +255,64 @@ func (self *captureObjectBody) Close() error {
 	return self.body.Close()
 }
 
-// Every Redis key of the test's database on every master, each an item of its name, DUMP's payload and its values.
+// An item whose store could not be read, which will not open, so the scan reports it as a finding: what was not read
+// was not scanned. The report lists it too.
+func captureUnread(class sidecartest.PrivacyClass, name string, err error, report *CaptureStoresReport) *sidecartest.PrivacyItem {
+	err = fmt.Errorf("%s: %w", name, err)
+	report.failed(err)
+	return &sidecartest.PrivacyItem{Class: class, Name: name, Open: func() (io.ReadCloser, error) {
+		return nil, err
+	}}
+}
+
+// A stream of the parts a producer yields, each made only when the scan has read the one before, so a store's read is
+// held a part at a time, never whole. A part's error ends the stream with it, which the scan reports. Not safe for
+// concurrent use: the scan reads it from one goroutine.
+type capturePartReader struct {
+	next func() ([]byte, error, bool)
+	stop func()
+	part []byte
+	err  error
+}
+
+func newCapturePartReader(parts iter.Seq2[[]byte, error]) *capturePartReader {
+	next, stop := iter.Pull2(parts)
+	return &capturePartReader{next: next, stop: stop}
+}
+
+func (self *capturePartReader) Read(p []byte) (int, error) {
+	for len(self.part) == 0 {
+		if self.err != nil {
+			return 0, self.err
+		}
+		part, err, ok := self.next()
+		switch {
+		case !ok:
+			self.err = io.EOF
+		case err != nil:
+			self.err = err
+		default:
+			self.part = part
+		}
+	}
+	n := copy(p, self.part)
+	self.part = self.part[n:]
+	return n, nil
+}
+
+// Ends the producer where it stands.
+func (self *capturePartReader) Close() error {
+	self.stop()
+	return nil
+}
+
+// Every Redis key of the test's database on every master, each an item that streams its name, DUMP's payload and its
+// values a range at a time.
 func captureRedis(ctx context.Context, settings *CaptureStoresSettings, report *CaptureStoresReport) (items []*sidecartest.PrivacyItem) {
 	defer func() {
 		// server.Redis raises a pool's failure as a panic
 		if recovered := recover(); recovered != nil {
-			report.failed(fmt.Errorf("the capture's Redis: %v", recovered))
+			items = append(items, captureUnread(sidecartest.PrivacyClassRedis, "the capture's Redis", fmt.Errorf("%v", recovered), report))
 		}
 	}()
 	var client server.RedisClient
@@ -285,16 +346,18 @@ func captureRedis(ctx context.Context, settings *CaptureStoresSettings, report *
 		err = scanNode(ctx, client)
 	}
 	if err != nil {
-		report.failed(fmt.Errorf("SCAN: %w", err))
+		items = append(items, captureUnread(sidecartest.PrivacyClassRedis, "SCAN", err, report))
 	}
 	sort.Strings(keys)
 	keys = slices.Compact(keys)
 	for _, key := range keys {
-		body, err := captureRedisKey(ctx, client, key, settings)
-		if err != nil {
-			report.failed(fmt.Errorf("reading Redis key %q: %w", key, err))
-		}
-		items = append(items, &sidecartest.PrivacyItem{Class: sidecartest.PrivacyClassRedis, Name: "redis " + key, Body: body})
+		items = append(items, &sidecartest.PrivacyItem{
+			Class: sidecartest.PrivacyClassRedis,
+			Name:  "redis " + key,
+			Open: func() (io.ReadCloser, error) {
+				return newCapturePartReader(captureRedisKeyParts(ctx, client, key, settings, report)), nil
+			},
+		})
 	}
 	report.stateLock.Lock()
 	report.redisCount += len(keys)
@@ -302,121 +365,148 @@ func captureRedis(ctx context.Context, settings *CaptureStoresSettings, report *
 	return items
 }
 
-// key's name, DUMP's payload, and its values read by its type, each part apart from the next.
-func captureRedisKey(ctx context.Context, client server.RedisClient, key string, settings *CaptureStoresSettings) ([]byte, error) {
-	var body bytes.Buffer
-	body.WriteString(key + "\x00")
-	dump, err := client.Dump(ctx, key).Result()
-	if err == redis.Nil {
-		// gone since the SCAN
-		return body.Bytes(), nil
-	}
-	if err != nil {
-		return body.Bytes(), err
-	}
-	body.WriteString(dump + "\x00")
-	keyType, err := client.Type(ctx, key).Result()
-	if err != nil {
-		return body.Bytes(), err
-	}
-	write := func(values ...string) {
-		for _, value := range values {
-			body.WriteString(value + "\x00")
+// key's name, DUMP's payload, and its values read by its type a range at a time, each value apart from the next. A key
+// gone since the SCAN is its name alone.
+func captureRedisKeyParts(ctx context.Context, client server.RedisClient, key string, settings *CaptureStoresSettings, report *CaptureStoresReport) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		values := func(values ...string) []byte {
+			var part bytes.Buffer
+			for _, value := range values {
+				part.WriteString(value + "\x00")
+			}
+			return part.Bytes()
 		}
-	}
-	switch keyType {
-	case "string":
-		value, err := client.Get(ctx, key).Result()
-		if err != nil && err != redis.Nil {
-			return body.Bytes(), err
+		failed := func(err error) {
+			err = fmt.Errorf("reading Redis key %q: %w", key, err)
+			report.failed(err)
+			yield(nil, err)
 		}
-		write(value)
-	case "hash":
-		fieldValues, err := client.HGetAll(ctx, key).Result()
+		if !yield(values(key), nil) {
+			return
+		}
+		dump, err := client.Dump(ctx, key).Result()
+		if err == redis.Nil {
+			return
+		}
 		if err != nil {
-			return body.Bytes(), err
+			failed(err)
+			return
 		}
-		fields := []string{}
-		for field := range fieldValues {
-			fields = append(fields, field)
+		if !yield(values(dump), nil) {
+			return
 		}
-		sort.Strings(fields)
-		for _, field := range fields {
-			write(field, fieldValues[field])
+		keyType, err := client.Type(ctx, key).Result()
+		if err != nil {
+			failed(err)
+			return
 		}
-	case "list":
-		for start := int64(0); ; start += settings.RedisRangeCount {
-			values, err := client.LRange(ctx, key, start, start+settings.RedisRangeCount-1).Result()
-			if err != nil {
-				return body.Bytes(), err
-			}
-			write(values...)
-			if int64(len(values)) < settings.RedisRangeCount {
-				break
-			}
-		}
-	case "set":
-		cursor := uint64(0)
-		for {
-			members, next, err := client.SScan(ctx, key, cursor, "*", settings.RedisRangeCount).Result()
-			if err != nil {
-				return body.Bytes(), err
-			}
-			write(members...)
-			if next == 0 {
-				break
-			}
-			cursor = next
-		}
-	case "zset":
-		for start := int64(0); ; start += settings.RedisRangeCount {
-			members, err := client.ZRangeWithScores(ctx, key, start, start+settings.RedisRangeCount-1).Result()
-			if err != nil {
-				return body.Bytes(), err
-			}
-			for _, member := range members {
-				write(fmt.Sprint(member.Member), fmt.Sprint(member.Score))
-			}
-			if int64(len(members)) < settings.RedisRangeCount {
-				break
-			}
-		}
-	case "stream":
-		after := "-"
-		for {
-			messages, err := client.XRangeN(ctx, key, after, "+", settings.RedisRangeCount).Result()
-			if err != nil {
-				return body.Bytes(), err
-			}
-			for _, message := range messages {
-				fields := []string{}
-				for field := range message.Values {
-					fields = append(fields, field)
+		switch keyType {
+		case "string":
+			for start := int64(0); ; start += settings.RedisStringChunkByteCount {
+				chunk, err := client.GetRange(ctx, key, start, start+settings.RedisStringChunkByteCount-1).Result()
+				if err != nil {
+					failed(err)
+					return
 				}
-				sort.Strings(fields)
-				write(message.ID)
-				for _, field := range fields {
-					write(field, fmt.Sprint(message.Values[field]))
+				if !yield([]byte(chunk), nil) {
+					return
 				}
-				after = "(" + message.ID
+				if int64(len(chunk)) < settings.RedisStringChunkByteCount {
+					yield(values(""), nil)
+					return
+				}
 			}
-			if int64(len(messages)) < settings.RedisRangeCount {
-				break
+		case "hash":
+			cursor := uint64(0)
+			for {
+				fieldValues, next, err := client.HScan(ctx, key, cursor, "*", settings.RedisRangeCount).Result()
+				if err != nil {
+					failed(err)
+					return
+				}
+				if !yield(values(fieldValues...), nil) || next == 0 {
+					return
+				}
+				cursor = next
+			}
+		case "list":
+			for start := int64(0); ; start += settings.RedisRangeCount {
+				elements, err := client.LRange(ctx, key, start, start+settings.RedisRangeCount-1).Result()
+				if err != nil {
+					failed(err)
+					return
+				}
+				if !yield(values(elements...), nil) || int64(len(elements)) < settings.RedisRangeCount {
+					return
+				}
+			}
+		case "set":
+			cursor := uint64(0)
+			for {
+				members, next, err := client.SScan(ctx, key, cursor, "*", settings.RedisRangeCount).Result()
+				if err != nil {
+					failed(err)
+					return
+				}
+				if !yield(values(members...), nil) || next == 0 {
+					return
+				}
+				cursor = next
+			}
+		case "zset":
+			for start := int64(0); ; start += settings.RedisRangeCount {
+				members, err := client.ZRangeWithScores(ctx, key, start, start+settings.RedisRangeCount-1).Result()
+				if err != nil {
+					failed(err)
+					return
+				}
+				memberScores := []string{}
+				for _, member := range members {
+					memberScores = append(memberScores, fmt.Sprint(member.Member), fmt.Sprint(member.Score))
+				}
+				if !yield(values(memberScores...), nil) || int64(len(members)) < settings.RedisRangeCount {
+					return
+				}
+			}
+		case "stream":
+			after := "-"
+			for {
+				messages, err := client.XRangeN(ctx, key, after, "+", settings.RedisRangeCount).Result()
+				if err != nil {
+					failed(err)
+					return
+				}
+				entries := []string{}
+				for _, message := range messages {
+					fields := []string{}
+					for field := range message.Values {
+						fields = append(fields, field)
+					}
+					sort.Strings(fields)
+					entries = append(entries, message.ID)
+					for _, field := range fields {
+						entries = append(entries, field, fmt.Sprint(message.Values[field]))
+					}
+					after = "(" + message.ID
+				}
+				if !yield(values(entries...), nil) || int64(len(messages)) < settings.RedisRangeCount {
+					return
+				}
 			}
 		}
 	}
-	return body.Bytes(), nil
 }
 
-// Every row of each table, each table an item of Postgres's JSON text of its rows, read a page at a time, each page
-// in a read-only transaction, and held whole until the scan reads it.
+// Every row of each table, each table an item of Postgres's JSON text of its rows, read a page at a time as the scan
+// reaches it.
 func capturePostgres(ctx context.Context, tables []string, settings *CaptureStoresSettings, report *CaptureStoresReport) []*sidecartest.PrivacyItem {
 	reader := &postgresReader{}
+	items := []*sidecartest.PrivacyItem{}
 	present := []string{}
 	for _, table := range tables {
 		rows, err := reader.Rows(ctx, "SELECT to_regclass($1) IS NOT NULL", table)
 		if err != nil {
-			report.failed(fmt.Errorf("finding table %s: %w", table, err))
+			items = append(items, captureUnread(sidecartest.PrivacyClassPostgres, "finding table "+table, err, report))
 			continue
 		}
 		if len(rows) == 1 && rows[0][0] == true {
@@ -427,39 +517,52 @@ func capturePostgres(ctx context.Context, tables []string, settings *CaptureStor
 			report.stateLock.Unlock()
 		}
 	}
-	items := []*sidecartest.PrivacyItem{}
 	for _, table := range present {
 		items = append(items, &sidecartest.PrivacyItem{
 			Class: sidecartest.PrivacyClassPostgres,
 			Name:  "postgres " + table,
 			Open: func() (io.ReadCloser, error) {
-				var body bytes.Buffer
-				identifier := pgx.Identifier{table}.Sanitize()
-				// ctid orders a page's rows, which no other column of every table can
-				for offset := 0; ; offset += settings.PostgresPageRowCount {
-					rows, err := reader.Rows(ctx, fmt.Sprintf("SELECT row_to_json(t)::text FROM %s t ORDER BY ctid LIMIT %d OFFSET %d", identifier, settings.PostgresPageRowCount, offset))
-					if err != nil {
-						report.failed(fmt.Errorf("reading table %s: %w", table, err))
-						break
-					}
-					for _, row := range rows {
-						if text, ok := row[0].(string); ok {
-							body.WriteString(text + "\n")
-						} else {
-							encoded, _ := json.Marshal(row[0])
-							body.Write(append(encoded, '\n'))
-						}
-					}
-					report.stateLock.Lock()
-					report.rowCount += len(rows)
-					report.stateLock.Unlock()
-					if len(rows) < settings.PostgresPageRowCount {
-						break
-					}
-				}
-				return io.NopCloser(&body), nil
+				return newCapturePartReader(capturePostgresTableParts(ctx, reader, table, settings, report)), nil
 			},
 		})
 	}
 	return items
+}
+
+// table's rows a page at a time, after the last page's final ctid, each row its JSON text on a line. Each page is a
+// read-only transaction of its own, so a row moved by a write between two pages can be read twice or not at all: the
+// capture reads at a flow's end, when nothing writes.
+func capturePostgresTableParts(ctx context.Context, reader *postgresReader, table string, settings *CaptureStoresSettings, report *CaptureStoresReport) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		identifier := pgx.Identifier{table}.Sanitize()
+		query := fmt.Sprintf("SELECT ctid::text, row_to_json(t)::text FROM %s t WHERE ctid > $1::tid ORDER BY ctid LIMIT %d", identifier, settings.PostgresPageRowCount)
+		after := "(0,0)"
+		for {
+			rows, err := reader.Rows(ctx, query, after)
+			if err != nil {
+				err = fmt.Errorf("reading table %s: %w", table, err)
+				report.failed(err)
+				yield(nil, err)
+				return
+			}
+			var page bytes.Buffer
+			for _, row := range rows {
+				if ctid, ok := row[0].(string); ok {
+					after = ctid
+				}
+				if text, ok := row[1].(string); ok {
+					page.WriteString(text + "\n")
+				} else {
+					encoded, _ := json.Marshal(row[1])
+					page.Write(append(encoded, '\n'))
+				}
+			}
+			report.stateLock.Lock()
+			report.rowCount += len(rows)
+			report.stateLock.Unlock()
+			if !yield(page.Bytes(), nil) || len(rows) < settings.PostgresPageRowCount {
+				return
+			}
+		}
+	}
 }

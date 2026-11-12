@@ -172,6 +172,120 @@ func TestT3CaptureStoresReadsWhatDumpHides(t *testing.T) {
 	})
 }
 
+// Every part of a Redis key and every page of a table is read as it streams, never only the first: with ranges of 2
+// elements, string chunks of 64 bytes and Postgres pages of 1 row, a canary in a hash's fifth field, a list's seventh
+// element, a set and a sorted set of 9, a stream's fifth entry, across a string's chunk boundary and in a table's
+// third planted row is each caught.
+func TestT3CaptureStoresStreamsEveryRangeAndPage(t *testing.T) {
+	captureTestEnv().Run(t, func(tb testing.TB) {
+		settings := DefaultCaptureStoresSettings()
+		settings.RedisRangeCount = 2
+		settings.RedisStringChunkByteCount = 64
+		settings.PostgresPageRowCount = 1
+		net, report, ctx := newCapturedNet(t, settings)
+		capture := net.Capture()
+		var client server.RedisClient
+		server.Redis(ctx, func(redisClient server.RedisClient) {
+			client = redisClient
+		})
+		tag := runKey("t3pages_")
+		hashed := capture.CanaryText("fifth hash field")
+		for index := range 5 {
+			value := fmt.Sprintf("an ordinary value %d", index)
+			if index == 4 {
+				value = hashed
+			}
+			if err := client.HSet(ctx, "{"+tag+"}hash", fmt.Sprintf("field %d", index), value).Err(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		listed := capture.CanaryText("seventh list element")
+		elements := []any{"one", "two", "three", "four", "five", "six", listed}
+		if err := client.RPush(ctx, "{"+tag+"}list", elements...).Err(); err != nil {
+			t.Fatal(err)
+		}
+		member := capture.CanaryText("a set member among 9")
+		scored := capture.CanaryText("a sorted member among 9")
+		for index := range 8 {
+			if err := client.SAdd(ctx, "{"+tag+"}set", fmt.Sprintf("member %d", index)).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.ZAdd(ctx, "{"+tag+"}zset", redis.Z{Score: float64(index), Member: fmt.Sprintf("member %d", index)}).Err(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := client.SAdd(ctx, "{"+tag+"}set", member).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.ZAdd(ctx, "{"+tag+"}zset", redis.Z{Score: 9, Member: scored}).Err(); err != nil {
+			t.Fatal(err)
+		}
+		streamed := capture.CanaryText("fifth stream entry")
+		for index := range 5 {
+			value := fmt.Sprintf("an ordinary entry %d", index)
+			if index == 4 {
+				value = streamed
+			}
+			if err := client.XAdd(ctx, &redis.XAddArgs{Stream: "{" + tag + "}stream", Values: map[string]any{"field": value}}).Err(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// a 52-byte text canary starting at byte 40, so chunk 1 holds its first 24 bytes and chunk 2 the rest
+		straddled := capture.CanaryText("a string across a chunk boundary")
+		if err := client.Set(ctx, "{"+tag+"}string", strings.Repeat("p", 40)+straddled+strings.Repeat("q", 100), time.Hour).Err(); err != nil {
+			t.Fatal(err)
+		}
+		plantPostgres(t, []byte("an ordinary key 1"))
+		plantPostgres(t, []byte("an ordinary key 2"))
+		plantPostgres(t, capture.Canary("the third planted row"))
+
+		findings := capture.Scan()
+		for _, want := range []struct {
+			label string
+			class sidecartest.PrivacyClass
+		}{
+			{label: "fifth hash field", class: sidecartest.PrivacyClassRedis},
+			{label: "seventh list element", class: sidecartest.PrivacyClassRedis},
+			{label: "a set member among 9", class: sidecartest.PrivacyClassRedis},
+			{label: "a sorted member among 9", class: sidecartest.PrivacyClassRedis},
+			{label: "fifth stream entry", class: sidecartest.PrivacyClassRedis},
+			{label: "a string across a chunk boundary", class: sidecartest.PrivacyClassRedis},
+			{label: "the third planted row", class: sidecartest.PrivacyClassPostgres},
+		} {
+			if !caughtIn(findings, want.label, want.class) {
+				t.Errorf("the %s was not caught in %s: %v", want.label, want.class, findings)
+			}
+		}
+		if errs := report.Errors(); len(errs) != 0 {
+			t.Errorf("stores not read: %v", errs)
+		}
+		if _, _, rows := report.Counts(); rows < 3 {
+			t.Errorf("read %d rows a page at a time", rows)
+		}
+	})
+}
+
+// A table that cannot be read fails the scan, never passes it on nothing: the table's item ends its stream with the
+// store's refusal, which the scan reports, and the report lists it.
+func TestT3CaptureStoresUnreadTableFailsTheScan(t *testing.T) {
+	captureTestEnv().Run(t, func(tb testing.TB) {
+		settings := DefaultCaptureStoresSettings()
+		// a name the column map's pattern allows, of a relation that is a view the reader cannot page by ctid
+		settings.ExtraPostgresTables = []string{"pg_stat_activity"}
+		net, report, _ := newCapturedNet(t, settings)
+		findings := net.Capture().Scan()
+		failed := slices.ContainsFunc(findings, func(finding *sidecartest.PrivacyFinding) bool {
+			return finding.Class == sidecartest.PrivacyClassPostgres && finding.Source == "postgres pg_stat_activity"
+		})
+		if !failed {
+			t.Errorf("an unreadable table passed the scan: %v", findings)
+		}
+		if len(report.Errors()) == 0 {
+			t.Errorf("the report lists no unread table")
+		}
+	})
+}
+
 // Every object is read, never a sample: with a LIST of 50 keys a page, a canary in the 160th object of a cluster is
 // caught.
 func TestT3CaptureStoresReadsEveryObject(t *testing.T) {
