@@ -18,6 +18,16 @@ package oauth
 //	                   its sidecar holds no row in the state, its client is no
 //	                   tagged or ephemeral one, M is the member its credential
 //	                   names and a member of the state
+//	forward_only       a sidecar S's forwarding client F (§7.4, owner decision
+//	                   197; TEAM-M8-02) acts as S at every gate (D-ACL-3), so it
+//	                   gets repo:<config_repo_id>:r alone, at evs and gkm, and
+//	                   only while S's forwarding Delegation is live (§7.9's
+//	                   forwarding row), whatever S reads: no other repo scope, no
+//	                   bootstrap admin, no recovery scope, nothing at another
+//	                   audience. Only the newest active forwarding child of S's
+//	                   current client speaks for S (model.ForwardingClientSidecar),
+//	                   so a setup that supersedes S's Delegation with other keys
+//	                   ends the old F's exchange; the token names S as its sidecar
 //
 // Refused whole: a client whose sidecar the state revoked, reaped, parked or
 // suspended, whose not_after passed or whose member left (invalid_grant); an
@@ -75,6 +85,11 @@ var (
 	exchangeScopeClientTaggedOrEphemeral = func(ctx context.Context, clientId server.Id) (bool, error) {
 		return model.ClientTaggedOrEphemeral(ctx, clientId)
 	}
+	// whether the client is a forwarding client or a child of one
+	exchangeScopeClientForwardOnly = model.ClientForwardOnly
+	// the sidecar a forwarding client speaks for, nil for one that speaks for
+	// none
+	exchangeScopeForwardingSidecar = model.ForwardingClientSidecar
 )
 
 // The real ExchangeScopeSource over a gate.
@@ -205,6 +220,14 @@ func (self *ProjectionExchangeScopeSource) Grant(ctx context.Context, request *E
 	state := snapshot.Config
 	now := self.now()
 
+	forwardOnly, err := exchangeScopeClientForwardOnly(ctx, request.NetworkId, request.ClientId)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the client's marks: %w", ErrExchangeUnavailable, err)
+	}
+	if forwardOnly {
+		return self.grantForwardOnly(ctx, snapshot, request, aclAudience, now)
+	}
+
 	if request.SidecarId == nil || state.SidecarRow(sidecar.Id(*request.SidecarId)) == nil {
 		return self.grantUnadmitted(ctx, snapshot, request)
 	}
@@ -308,4 +331,46 @@ func (self *ProjectionExchangeScopeSource) grantUnadmitted(ctx context.Context, 
 		}
 	}
 	return grant, nil
+}
+
+// A forwarding client's grant: the config's r at evs or gkm while its sidecar's
+// forwarding Delegation is live, or a refusal.
+func (self *ProjectionExchangeScopeSource) grantForwardOnly(ctx context.Context, snapshot *sidecar.AclGateSnapshot, request *ExchangeScopeRequest, aclAudience sidecar.AclTokenAudience, now time.Time) (*ExchangeScopeGrant, error) {
+	if aclAudience == 0 {
+		return nil, fmt.Errorf("%w: a forwarding client exchanges for the config's r at evs and gkm alone", ErrInvalidScope)
+	}
+	forwardSidecarId, err := exchangeScopeForwardingSidecar(ctx, request.NetworkId, request.ClientId)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the forwarding client's sidecar: %w", ErrExchangeUnavailable, err)
+	}
+	if forwardSidecarId == nil {
+		return nil, fmt.Errorf("%w: the client speaks for no sidecar", ErrInvalidGrant)
+	}
+	state := snapshot.Config
+	sidecarId := sidecar.Id(*forwardSidecarId)
+	if !exchangeSidecarStanding(state, snapshot.Acl, sidecarId, now) {
+		return nil, fmt.Errorf("%w: the forwarding client's sidecar is not admitted", ErrInvalidGrant)
+	}
+	tableGrant, err := sidecar.AclExchangeScopes(state, &sidecar.AclExchangeRequest{
+		SidecarId:   sidecarId,
+		Audience:    aclAudience,
+		Scopes:      request.Scopes,
+		ForwardOnly: true,
+		Now:         now,
+	})
+	if err != nil {
+		if errors.Is(err, sidecar.ErrAclExchangeScope) {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidScope, err)
+		}
+		return nil, err
+	}
+	if len(tableGrant.Scopes) == 0 {
+		return nil, fmt.Errorf("%w: a forwarding client gets the config's r alone, while its sidecar's forwarding Delegation is live", ErrInvalidScope)
+	}
+	return &ExchangeScopeGrant{
+		Scopes:      tableGrant.Scopes,
+		ProjVersion: snapshot.Pin.GetVersion(),
+		MemberId:    exchangeSidecarMember(state, sidecarId),
+		SidecarId:   forwardSidecarId,
+	}, nil
 }

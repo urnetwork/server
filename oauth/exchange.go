@@ -87,6 +87,10 @@ type ExchangeScopeGrant struct {
 	MemberId *server.Id
 	// who acts for the subject, nil for none
 	Act *ServiceTokenActor
+	// the sidecar the token names when it is not the client's own binding's: a
+	// forwarding client's sidecar, which it acts as (§7.4, D-ACL-3); nil keeps
+	// the client's own
+	SidecarId *server.Id
 }
 
 // Where the exchange's scopes come from: §8's rows in the newest projection
@@ -342,6 +346,9 @@ func Exchange(ctx context.Context, args *ExchangeArgs) (*ExchangeResult, error) 
 		if !slices.Contains(scopes, granted) {
 			return nil, fmt.Errorf("the scope source granted a scope the request did not ask for")
 		}
+	}
+	if grant.SidecarId != nil {
+		sidecarId = grant.SidecarId
 	}
 
 	var subjectClaim *server.Id

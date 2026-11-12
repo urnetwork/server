@@ -323,12 +323,12 @@ func TestNonAdminRoutesServeAClientToken(t *testing.T) {
 // those keep the app admin class until §7.4's stage 2 is live.
 func TestCredentialMintingRoutesAreAdminRoutes(t *testing.T) {
 	for key, want := range map[string]routeAccess{
-		"POST /account/api-key":            routeAccessNetwork,
-		"POST /network/auth-keys":          routeAccessNetwork,
-		"POST /auth/network-refresh":       routeAccessNetwork,
-		"POST /oauth/authorize":            routeAccessNetwork,
-		"POST /device/add":                 routeAccessNetwork,
-		"POST /network/remove-clients":     routeAccessNetwork,
+		"POST /account/api-key":        routeAccessNetwork,
+		"POST /network/auth-keys":      routeAccessNetwork,
+		"POST /auth/network-refresh":   routeAccessNetwork,
+		"POST /oauth/authorize":        routeAccessNetwork,
+		"POST /device/add":             routeAccessNetwork,
+		"POST /network/remove-clients": routeAccessNetwork,
 		// §7.4's stage 2 six: Network in the table, app admin until stage 2 is
 		// live (TestStage2RoutesRefuseDeviceTokensOnceLive)
 		"POST /auth/code-create":           routeAccessNetwork,
@@ -577,4 +577,117 @@ func TestStage2RoutesRefuseDeviceTokensOnceLive(t *testing.T) {
 			t.Fatalf("Routes() serves %d of the six", found)
 		}
 	}
+}
+
+// Replaces the forwarding mark's lookup for one test.
+func setClientForwardOnly(t *testing.T, forwardOnly func(ctx context.Context, networkId server.Id, clientId server.Id) (bool, error)) {
+	t.Helper()
+	previous := clientForwardOnly
+	clientForwardOnly = forwardOnly
+	t.Cleanup(func() {
+		clientForwardOnly = previous
+	})
+}
+
+// §7.4's mark row names a forwarding client's routes (owner decision 197).
+var forwardOnlyAllowlist = []string{
+	"GET /auth/refresh",
+	"POST /network/auth-client",
+	"POST /network/remove-client",
+	"GET /network/config/projection",
+	"GET /sidecar/identity/([^/]+)",
+	"GET /sidecar/identity",
+	"GET /sidecar/sync/poll",
+	"GET /key/([^/]+)",
+	"POST /connect/control",
+}
+
+// A forwarding client's bearer reaches exactly §7.4's shorter list, with its proof where the list wants one: every
+// other route of the sidecar allowlist answers it the sidecar refusal before its handler, counted as forward_only_route,
+// and every route off that list answers it as any strict_exp bearer. A lookup of the mark that fails refuses on those
+// routes too; a strict_exp bearer that is no forwarding client keeps the whole sidecar allowlist. Reads Redis for the
+// proofs' jtis.
+func TestForwardOnlyTokenRoutes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		self := newStrictExpProofFixture(t)
+		setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
+			return false
+		})
+		setClientForwardOnly(t, func(ctx context.Context, networkId server.Id, clientId server.Id) (bool, error) {
+			return clientId == self.tokens.clientId, nil
+		})
+
+		listed := []string{}
+		for key := range forwardOnlyRoutes {
+			listed = append(listed, key)
+			if !strictExpRoutes[key] {
+				t.Errorf("%s is on the forwarding list and off the sidecar allowlist", key)
+			}
+		}
+		slices.Sort(listed)
+		want := slices.Clone(forwardOnlyAllowlist)
+		slices.Sort(want)
+		if !slices.Equal(listed, want) {
+			t.Fatalf("forwardOnlyRoutes = %v, want §7.4's %v", listed, want)
+		}
+
+		authorization := "Bearer " + self.tokens.strictToken
+		served := 0
+		for _, route := range Routes() {
+			key := routeAccessKey(route)
+			if route.RefusesForwardOnlyCredentials() != (strictExpRoutes[key] && !forwardOnlyRoutes[key]) {
+				t.Errorf("%s: forwarding gate = %t", key, route.RefusesForwardOnlyCredentials())
+			}
+			var proof func(r *http.Request)
+			if strictExpProofRoutes[key] {
+				proof = self.proof(route, self.privateKey)
+			}
+			before := childAdminCallCount(key, p0RefusalForwardOnly, p0ResultRefused)
+			w, reached := serveStubbed(route, authorization, proof)
+			switch {
+			case forwardOnlyRoutes[key]:
+				served += 1
+				if !reached || w.Code != http.StatusOK {
+					t.Errorf("%s: status = %d body = %q, handler ran = %t; want the handler", key, w.Code, w.Body.String(), reached)
+				}
+			case strictExpRoutes[key]:
+				if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
+					t.Errorf("%s: status = %d body = %q, handler ran = %t; want the forwarding refusal", key, w.Code, w.Body.String(), reached)
+				}
+				if after := childAdminCallCount(key, p0RefusalForwardOnly, p0ResultRefused); after != before+1 {
+					t.Errorf("%s: counted %v forwarding refusals", key, after-before)
+				}
+			default:
+				if reached || w.Code != http.StatusForbidden {
+					t.Errorf("%s: status = %d, handler ran = %t; want the sidecar refusal", key, w.Code, reached)
+				}
+			}
+		}
+		if served != len(forwardOnlyAllowlist) {
+			t.Fatalf("served %d of the %d forwarding routes", served, len(forwardOnlyAllowlist))
+		}
+
+		routes := Routes()
+		byKey := func(key string) *router.Route {
+			return routes[slices.IndexFunc(routes, func(route *router.Route) bool { return routeAccessKey(route) == key })]
+		}
+		// a failed lookup refuses as the mark would
+		setClientForwardOnly(t, func(ctx context.Context, networkId server.Id, clientId server.Id) (bool, error) {
+			return false, fmt.Errorf("the owner row cannot be read")
+		})
+		for _, key := range []string{"POST /sidecar/bind", "POST /network/config/delta"} {
+			if w, reached := serveStubbed(byKey(key), authorization, nil); reached || w.Code != http.StatusForbidden {
+				t.Errorf("%s with the mark unreadable: status = %d, handler ran = %t", key, w.Code, reached)
+			}
+		}
+		// a strict_exp bearer that is no forwarding client keeps the sidecar allowlist
+		setClientForwardOnly(t, func(ctx context.Context, networkId server.Id, clientId server.Id) (bool, error) {
+			return false, nil
+		})
+		for _, key := range []string{"POST /sidecar/bind", "POST /network/config/delta", "GET /sidecar/limits"} {
+			if w, reached := serveStubbed(byKey(key), authorization, nil); !reached || w.Code != http.StatusOK {
+				t.Errorf("%s for a sidecar's own client: status = %d, handler ran = %t", key, w.Code, reached)
+			}
+		}
+	})
 }
