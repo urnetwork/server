@@ -13,6 +13,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+// Makes the canary networks read networkIds until the test ends.
 func setTestStExtenderCanaryNetworks(t *testing.T, networkIds ...server.Id) {
 	t.Helper()
 	previous := stExtenderCanaryNetworkIdsRead
@@ -20,6 +21,7 @@ func setTestStExtenderCanaryNetworks(t *testing.T, networkIds ...server.Id) {
 	t.Cleanup(func() { stExtenderCanaryNetworkIdsRead = previous })
 }
 
+// Makes ctf.yml declare networkIds, with its census off, until the test ends.
 func setTestCtfOwnNetworkIds(t *testing.T, networkIds ...string) {
 	t.Helper()
 	// census off: its own networks still belong to the one list
@@ -28,21 +30,23 @@ func setTestCtfOwnNetworkIds(t *testing.T, networkIds ...string) {
 }
 
 func TestStExtenderOwnNetworksAreOneList(t *testing.T) {
-	durable, declared, ctfOwn, canary := server.NewId(), server.NewId(), server.NewId(), server.NewId()
-	installTestExtenderConfigYaml(t, "directory:\n  durable_network_ids:\n    - "+durable.String()+"\n")
-	setTestCtfOwnNetworkIds(t, " "+ctfOwn.String()+" ")
-	setTestStExtenderCanaryNetworks(t, canary)
-	cfg := stAmendmentTestConfig(t, "enabled: false\nextender_pool:\n  declared_network_ids:\n    - "+declared.String()+"\n")
-	own, err := readStExtenderOwnNetworks(t.Context(), cfg)
+	durableNetworkId, declaredNetworkId, ctfOwnNetworkId, canaryNetworkId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+	installTestExtenderConfigYaml(t, "directory:\n  durable_network_ids:\n    - "+durableNetworkId.String()+"\n")
+	setTestCtfOwnNetworkIds(t, " "+ctfOwnNetworkId.String()+" ")
+	setTestStExtenderCanaryNetworks(t, canaryNetworkId)
+	cfg := stAmendmentTestConfig(t, "enabled: false\nextender_pool:\n  declared_network_ids:\n    - "+declaredNetworkId.String()+"\n")
+	ownNetworks, err := readStExtenderOwnNetworks(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(own.Durable) != 1 || !own.Durable[durable] || len(own.Declared) != 2 || !own.Declared[declared] || !own.Declared[ctfOwn] || len(own.Canary) != 1 || !own.Canary[canary] {
-		t.Fatalf("own networks %+v", own)
+	if len(ownNetworks.DurableNetworkIds) != 1 || !ownNetworks.DurableNetworkIds[durableNetworkId] ||
+		len(ownNetworks.DeclaredNetworkIds) != 2 || !ownNetworks.DeclaredNetworkIds[declaredNetworkId] || !ownNetworks.DeclaredNetworkIds[ctfOwnNetworkId] ||
+		len(ownNetworks.CanaryNetworkIds) != 1 || !ownNetworks.CanaryNetworkIds[canaryNetworkId] {
+		t.Fatalf("own networks %+v", ownNetworks)
 	}
-	all := own.All()
-	if len(all) != 4 || !all[durable] || !all[declared] || !all[ctfOwn] || !all[canary] {
-		t.Fatalf("all own networks %v", all)
+	allNetworkIds := ownNetworks.AllNetworkIds()
+	if len(allNetworkIds) != 4 || !allNetworkIds[durableNetworkId] || !allNetworkIds[declaredNetworkId] || !allNetworkIds[ctfOwnNetworkId] || !allNetworkIds[canaryNetworkId] {
+		t.Fatalf("all own networks %v", allNetworkIds)
 	}
 }
 
@@ -52,10 +56,10 @@ func TestStExtenderOwnNetworksFailClosed(t *testing.T) {
 	setTestStExtenderCanaryNetworks(t)
 	cfg := stAmendmentTestConfig(t, "enabled: false\n")
 	for _, c := range []struct {
-		name      string
-		extender  string
-		ctfOwnIds []string
-		cfg       *StConfig
+		name             string
+		extender         string
+		ctfOwnNetworkIds []string
+		cfg              *StConfig
 	}{
 		{"a durable network that does not parse", "directory:\n  durable_network_ids:\n    - fleet\n", nil, cfg},
 		{"an unreadable extender.yml", "directory: [\n", nil, cfg},
@@ -63,14 +67,14 @@ func TestStExtenderOwnNetworksFailClosed(t *testing.T) {
 		{"a declared network that does not parse", "directory: {}\n", nil, stAmendmentTestConfig(t, "enabled: false\nextender_pool:\n  declared_network_ids:\n    - ours\n")},
 	} {
 		installTestExtenderConfigYaml(t, c.extender)
-		setTestCtfOwnNetworkIds(t, c.ctfOwnIds...)
-		if own, err := readStExtenderOwnNetworks(t.Context(), c.cfg); err == nil {
-			t.Fatalf("%s: read %+v", c.name, own)
+		setTestCtfOwnNetworkIds(t, c.ctfOwnNetworkIds...)
+		if ownNetworks, err := readStExtenderOwnNetworks(t.Context(), c.cfg); err == nil {
+			t.Fatalf("%s: read %+v", c.name, ownNetworks)
 		}
 	}
 	installTestExtenderConfigYaml(t, "directory: {}\n")
 	setTestCtfOwnNetworkIds(t)
-	if own, err := readStExtenderOwnNetworks(t.Context(), cfg); err != nil || len(own.All()) != 0 {
-		t.Fatalf("no own networks: %+v, %v", own, err)
+	if ownNetworks, err := readStExtenderOwnNetworks(t.Context(), cfg); err != nil || len(ownNetworks.AllNetworkIds()) != 0 {
+		t.Fatalf("no own networks: %+v, %v", ownNetworks, err)
 	}
 }

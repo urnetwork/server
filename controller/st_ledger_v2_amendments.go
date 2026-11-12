@@ -274,11 +274,11 @@ func stPlatformEndpointNetworks(ctx context.Context, cfg *StConfig) (model.StPla
 	if err != nil {
 		return networks, err
 	}
-	own, err := readStExtenderOwnNetworks(ctx, cfg)
+	ownNetworks, err := readStExtenderOwnNetworks(ctx, cfg)
 	if err != nil {
 		return networks, err
 	}
-	networks.Operator = own.All()
+	networks.Operator = ownNetworks.AllNetworkIds()
 	networks.Measurement = stExtenderPoolMeasurementNetworks(ctx, pool)
 	return networks, nil
 }
