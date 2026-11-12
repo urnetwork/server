@@ -540,6 +540,42 @@ func TestSnCtfClientAnswersTheExample(t *testing.T) {
 	}
 }
 
+// GET /sn/ctf/client for a network's credential answers the document's
+// network example: no client and no epochs, and the wins of its provider in
+// Iceland and its extender in Germany, newest first, the Iceland provider's
+// coldkey claimed through epoch 8's root and the extender's not at all.
+func TestSnCtfClientAnswersTheNetworkExample(t *testing.T) {
+	view := snCtfTestView(t)
+	example := snCtfTestJson(t, snCtfTestExamples(t)["CtfClientResultNetwork"])
+	iceland, err := server.ParseId("3f6c2a1e-8d4b-4c7a-9e21-5b0d7f3a9c64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extender, err := server.ParseId("6a0f3c9d-71e2-4b58-8c3a-e94d2b6f1057")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extenderColdkey := snCtfTestHex32(t, "0xb515f4c4f7bc1e73557df4d34f7fb3ae7885d1fa1e522eea3439d1c198697afb")
+	// the extender's epoch 8 win, beside the view's two winners in Iceland
+	view.Epochs[0].Awards = append(view.Epochs[0].Awards, &snCtfAward{Role: snCtfRoleExtender, Country: "de", Rank: 1, Unit: [32]byte{0x84}, UnitFamily: 4,
+		ClientId: extender, Coldkey: extenderColdkey, Slot: snCtfTestRao(48_025_660)})
+	wins := []*snCtfWin{}
+	for _, epoch := range view.Epochs {
+		for _, award := range epoch.Awards {
+			if award.ClientId == iceland || award.ClientId == extender {
+				wins = append(wins, &snCtfWin{Epoch: epoch.Epoch, Award: award})
+			}
+		}
+	}
+	icelandColdkey := snCtfTestHex32(t, "0xff05d4de50cdc2b6d6aca7b376cfdb00f65c4243f6799c4eaca182e877faf619")
+	claims := map[[32]byte]*snCtfAccountClaims{
+		icelandColdkey:  {Claimed: snCtfTestRao(48_025_660), Cumulative: map[uint64]uint256.Int{1: snCtfTestRao(48_025_660)}},
+		extenderColdkey: {Cumulative: map[uint64]uint256.Int{1: snCtfTestRao(48_025_660)}},
+	}
+	got := snCtfTestJson(t, snCtfClientResultOf(view, snCtfClientScope{NetworkId: server.NewId()}, nil, wins, claims, 8))
+	requireSnCtfEqual(t, "network", got, example)
+}
+
 func TestSnCtfAmountsAndCountries(t *testing.T) {
 	for rao, alpha := range map[uint64]string{0: "0.000000000", 1: "0.000000001", 48_025_660: "0.048025660", 1_000_000_000: "1.000000000", 212_273_417_481: "212.273417481"} {
 		if amount := snCtfAmountOf(uint256.NewInt(rao)); amount.Alpha != alpha || amount.Rao != rao {
