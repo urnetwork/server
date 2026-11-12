@@ -67,3 +67,25 @@ with no sessions and linger disabled. A continuation must suppress new control
 connections and positively join that manager, preserve the old attempt and
 audits, and pass the existing native proof before performing full cleanup.
 No cleanup success is claimed by this snapshot.
+
+## Follow-up at 23:31 UTC
+
+The exact temporary root-owned coordinator SSH connection hold was installed,
+and the control-user manager was stopped with its native cgroup independently
+absent. Operator access remained working. State and original clock hashes were
+unchanged.
+
+One separately reviewed continuation then authenticated the 37 retained
+retirements and started the canonical recovery. That service failed before
+cleanup verification. Its original starting receipt and the failed continuation
+receipt remain retained; neither may be overwritten or removed to permit replay.
+
+A read-only probe using the frozen native SDK reproduced the exact error:
+`legacy effective SSH ingress is ambiguous`. The ingress parser incorrectly
+rejects legitimate repeated non-authority `sshd -T` keys such as `hostkey` and
+`listenaddress`. The correction must preserve strict duplicate/missing-value
+checks for `forcecommand`, `authorizedkeysfile` and `authorizedkeyscommand`.
+Because the original recovery executable is pinned, a corrected executable also
+needs a narrowly authenticated one-hop amendment preserving all original attempt,
+clock, source, launch-denial and starting-receipt evidence. Implementation and
+deterministic regression tests are in progress. No cleanup success is claimed.
