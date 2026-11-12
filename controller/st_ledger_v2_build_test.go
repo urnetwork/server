@@ -635,7 +635,12 @@ func TestStLedgerV2BuilderRefusesUnbuildableRows(t *testing.T) {
 		delete(f.chain.authorities, 1)
 
 		f.cfg.Netuid = 0
-		refused("unusable subnet", protocol.ErrWalletMappingIntegrity, "")
+		// no amendments are read for an unusable subnet, so it builds nothing;
+		// its new rows refuse its wallets, as before the amendments
+		refused("unusable subnet", nil, "the amendments need the deployment's netuid and operator")
+		if _, err := stLedgerV2NewEpochRows(f.ctx, 1); !errors.Is(err, protocol.ErrWalletMappingIntegrity) {
+			t.Fatalf("unusable subnet rows: %v", err)
+		}
 		f.cfg.Netuid = 7
 
 		f.chain.fleetBoundErr = errors.New("FleetBound logs unavailable")
