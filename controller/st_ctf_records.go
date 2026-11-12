@@ -1,12 +1,14 @@
 package controller
 
 // st_ctf_records.go — what the capture the flag driver keeps (sn
-// CAPTURETHEFLAG.md §5, §11.2): its publish rows, each epoch's fixed awards,
-// and the event mirror's rows of the CTF pool P = 2^32 + n. Nothing here is
-// new storage: the v2 tables are scoped by no_id, so the CTF pool's rows sit
-// beside the provider pool's (model/st_ctf_driver_model.go). The driver reaches
-// them through stCtfRecords, which the database implements and the driver's
-// tests replace with memory.
+// CAPTURETHEFLAG.md §4.3 to §5, §11.2): its publish rows; the event mirror's
+// rows of the CTF pool P = 2^32 + n, which the v2 tables scope by no_id; and
+// what it writes for readers into the capture the flag tables
+// (model/ctf_model.go), scoped by the operator's no_id n: each epoch's census
+// commitment and draw, each covered epoch's result fixed at the first live
+// root that covers it (§5, fixed inputs), and every ledger it builds. The
+// driver reaches them through stCtfRecords, which the database implements and
+// the driver's tests replace with memory.
 
 import (
 	"context"
@@ -24,10 +26,6 @@ type stCtfRecords interface {
 	// Publish records a pending publish row, and Resolve its outcome.
 	Publish(ctx context.Context, epoch uint64, kind string) server.Id
 	Resolve(ctx context.Context, publishId server.Id, outcome *StPublishOutcome)
-	// FixedAwards returns the recorded fixed awards of epochs first … last,
-	// and RecordFixedAwards records an epoch's (st_ledger_v2_epoch_rows).
-	FixedAwards(ctx context.Context, poolId uint64, first uint64, last uint64) map[uint64]*model.StLedgerV2EpochRows
-	RecordFixedAwards(ctx context.Context, poolId uint64, epoch uint64, awardsRef string) error
 	// The event mirror's rows of a pool.
 	PendingRoot(ctx context.Context, poolId uint64) *model.StLedgerV2Root
 	Root(ctx context.Context, poolId uint64, seq uint64) *model.StLedgerV2Root
@@ -42,11 +40,25 @@ type stCtfRecords interface {
 	MirroredBlock(ctx context.Context) uint64
 	// RecordRoot writes a finalized root's new accounts and amounts.
 	RecordRoot(ctx context.Context, poolId uint64, seq uint64, firstIndex uint64, newColdkeys [][32]byte, amounts []*model.StLedgerV2Amount) error
+	// SetCommitment writes an epoch's census commitment, false for another
+	// census hash.
+	SetCommitment(ctx context.Context, commitment *model.CtfCensusCommitment) bool
+	// CreateDraw writes an epoch's draw once.
+	CreateDraw(ctx context.Context, draw *model.CtfDraw) bool
+	// EpochResults returns the fixed results of epochs first … last, and
+	// CreateEpochResult fixes one, once.
+	EpochResults(ctx context.Context, first uint64, last uint64) map[uint64]*model.CtfEpochResult
+	CreateEpochResult(ctx context.Context, result *model.CtfEpochResult, awards []*model.CtfAward, pots []*model.CtfPot, pending []*model.CtfPendingAward) bool
+	// CreateLedger writes a built ledger once, and SetLedgerStatus records
+	// its change of state.
+	CreateLedger(ctx context.Context, ledger *model.CtfLedger) bool
+	SetLedgerStatus(ctx context.Context, epoch uint64, ledgerHash [32]byte, update *model.CtfLedgerStatusUpdate) bool
 }
 
 // stCtfDbRecords keeps the records in the database.
 type stCtfDbRecords struct {
 	deploymentKey model.StDeploymentKey
+	noId          uint64
 }
 
 func (self *stCtfDbRecords) Outcome(ctx context.Context, epoch uint64, kind string) (string, string) {
@@ -68,14 +80,6 @@ func (self *stCtfDbRecords) Publish(ctx context.Context, epoch uint64, kind stri
 
 func (self *stCtfDbRecords) Resolve(ctx context.Context, publishId server.Id, outcome *StPublishOutcome) {
 	stResolvePublish(ctx, publishId, outcome)
-}
-
-func (self *stCtfDbRecords) FixedAwards(ctx context.Context, poolId uint64, first uint64, last uint64) map[uint64]*model.StLedgerV2EpochRows {
-	return model.GetStLedgerV2EpochRows(ctx, self.deploymentKey, poolId, first, last)
-}
-
-func (self *stCtfDbRecords) RecordFixedAwards(ctx context.Context, poolId uint64, epoch uint64, awardsRef string) error {
-	return model.RecordStLedgerV2EpochRows(ctx, self.deploymentKey, poolId, epoch, []string{awardsRef})
 }
 
 func (self *stCtfDbRecords) PendingRoot(ctx context.Context, poolId uint64) *model.StLedgerV2Root {
@@ -118,6 +122,38 @@ func (self *stCtfDbRecords) RecordRoot(ctx context.Context, poolId uint64, seq u
 	return model.RecordStLedgerV2Root(ctx, self.deploymentKey, poolId, seq, firstIndex, newColdkeys, amounts)
 }
 
+func (self *stCtfDbRecords) SetCommitment(ctx context.Context, commitment *model.CtfCensusCommitment) bool {
+	commitment.DeploymentKey, commitment.NoId = self.deploymentKey, self.noId
+	return model.SetCtfCensusCommitment(ctx, commitment)
+}
+
+func (self *stCtfDbRecords) CreateDraw(ctx context.Context, draw *model.CtfDraw) bool {
+	draw.DeploymentKey, draw.NoId = self.deploymentKey, self.noId
+	return model.CreateCtfDraw(ctx, draw)
+}
+
+func (self *stCtfDbRecords) EpochResults(ctx context.Context, first uint64, last uint64) map[uint64]*model.CtfEpochResult {
+	results := map[uint64]*model.CtfEpochResult{}
+	for _, result := range model.GetCtfEpochResults(ctx, self.deploymentKey, self.noId, first, last) {
+		results[result.Epoch] = result
+	}
+	return results
+}
+
+func (self *stCtfDbRecords) CreateEpochResult(ctx context.Context, result *model.CtfEpochResult, awards []*model.CtfAward, pots []*model.CtfPot, pending []*model.CtfPendingAward) bool {
+	result.DeploymentKey, result.NoId = self.deploymentKey, self.noId
+	return model.CreateCtfEpochResult(ctx, result, awards, pots, pending)
+}
+
+func (self *stCtfDbRecords) CreateLedger(ctx context.Context, ledger *model.CtfLedger) bool {
+	ledger.DeploymentKey, ledger.NoId = self.deploymentKey, self.noId
+	return model.CreateCtfLedger(ctx, ledger)
+}
+
+func (self *stCtfDbRecords) SetLedgerStatus(ctx context.Context, epoch uint64, ledgerHash [32]byte, update *model.CtfLedgerStatusUpdate) bool {
+	return model.SetCtfLedgerStatus(ctx, self.deploymentKey, self.noId, epoch, ledgerHash, update)
+}
+
 var stCtfRecordsLock sync.Mutex
 var stCtfRecordsInstance stCtfRecords
 
@@ -136,5 +172,5 @@ func stCtfRecordsFor(cfg *StConfig) stCtfRecords {
 	if instance != nil {
 		return instance
 	}
-	return &stCtfDbRecords{deploymentKey: cfg.DeploymentKey()}
+	return &stCtfDbRecords{deploymentKey: cfg.DeploymentKey(), noId: cfg.NoId}
 }

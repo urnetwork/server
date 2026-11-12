@@ -2983,6 +2983,9 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		if self.cfg.LedgerV2Enabled() {
 			addresses = append(addresses, self.cfg.SettlementV2, self.cfg.VaultV2)
 		}
+		if carry := stCtfCarryMirrored(self.cfg); carry != (common.Address{}) {
+			addresses = append(addresses, carry)
+		}
 		out, err := client.FilterLogs(callCtx, ethereum.FilterQuery{
 			FromBlock: new(big.Int).SetUint64(fromBlock),
 			ToBlock:   new(big.Int).SetUint64(toBlock),
@@ -3010,6 +3013,8 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		logDecoders := decoders
 		if v2Decoders, ok := self.stLedgerV2EventDecoders(log.Address); ok {
 			logDecoders = v2Decoders
+		} else if ctfDecoders, ok := self.stCtfEventDecoders(log.Address); ok {
+			logDecoders = ctfDecoders
 		}
 		for _, decode := range logDecoders {
 			if k, a, ok := decode(log); ok {
@@ -4921,6 +4926,7 @@ func StSyncChainEvents(ctx context.Context, _ uint64) (int, error) {
 		stApplyEventStatuses(ctx, cfg, events)
 		stApplyHeadBindings(ctx, cfg, events)
 		stApplyLedgerV2Events(ctx, cfg, events)
+		stApplyCtfEvents(ctx, cfg, events)
 		model.SetStChainCheckpoint(ctx, cfg.DeploymentKey(), model.StChainCheckpoint{NextBlock: nextBlock, BlockHash: canonicalHashes[toBlock]})
 		synced += len(events)
 		fromBlock = nextBlock

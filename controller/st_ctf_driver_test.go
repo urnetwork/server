@@ -7,6 +7,7 @@ package controller
 // audits it.
 
 import (
+	"encoding/hex"
 	"errors"
 	"reflect"
 	"slices"
@@ -96,8 +97,29 @@ func TestStCtfDriverRunsAnEpochInOrder(t *testing.T) {
 	if got := f.records.rows(8); !reflect.DeepEqual(got, []string{"ctfcensus confirmed", "ctfclose confirmed", "ctfcommit confirmed"}) {
 		t.Fatalf("rows %q", got)
 	}
-	if record := f.records.fixed[8]; record == nil || !slices.Equal(record.ProviderChunks, []string{e.AwardsRef.String()}) {
-		t.Fatalf("fixed awards %+v, want %v", record, e.AwardsRef)
+	// what the API reads: the commitment, the draw, the fixed result and the
+	// ledger, committed
+	commitment := f.records.commitments[8]
+	if commitment == nil || commitment.Status != model.CtfCommitmentStatusCommitted || commitment.CensusHash != f.census[8].Hash ||
+		*commitment.CommitBlock != f.chain.end(8)+1 || *commitment.Round != 1000 || *commitment.CommitBlockTime != ctfTestCommitTime(1000) {
+		t.Fatalf("commitment %+v", commitment)
+	}
+	draw := f.records.draws[8]
+	if draw == nil || draw.Round != 1000 || draw.Seed != e.Seed || draw.Randomness != e.Randomness || hex.EncodeToString(draw.Signature) != ctfTestPulses[1000] {
+		t.Fatalf("draw %+v", draw)
+	}
+	fixed := f.records.results[8]
+	if fixed == nil || ledger.Ref(fixed.AwardsRef) != e.AwardsRef || fixed.LedgerEpoch != 8 || fixed.LedgerHash != f.chain.pending.LedgerHash ||
+		!fixed.Drawn || fixed.Awards != 6 || len(f.records.awards[8]) != 6 || fixed.CensusHash == nil || *fixed.CensusHash != f.census[8].Hash {
+		t.Fatalf("epoch result %+v", fixed)
+	}
+	for _, award := range f.records.awards[8] {
+		if award.UnitFamily != ctf.FamilyIPv4 || award.Coldkey != ctfTestColdkey([16]byte(award.ClientId)) {
+			t.Fatalf("award %+v", award)
+		}
+	}
+	if built := f.records.ledgers[f.chain.pending.LedgerHash]; built == nil || built.Status != model.CtfLedgerStatusCommitted || built.Shadow || built.FirstEpoch != 8 {
+		t.Fatalf("ledger %+v", built)
 	}
 	requireCtfAlerts(t, f.alerts)
 }
@@ -119,11 +141,14 @@ func TestStCtfDriverIsIdempotent(t *testing.T) {
 	f.chain.failNext("commit", errors.New("connection reset"))
 	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusFailed, true, "connection reset")
 	requireCtfLog(t, f.takeLog(), "close 8", "commit 8 prev 0")
-	fixed := f.records.fixed[8].ProviderChunks
+	fixed := f.records.results[8]
+	if fixed == nil || f.records.ledgers[fixed.LedgerHash].Status != model.CtfLedgerStatusBuilt {
+		t.Fatalf("not fixed before the commit: %+v", fixed)
+	}
 	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "commit 8 prev 0")
-	if !slices.Equal(f.records.fixed[8].ProviderChunks, fixed) {
-		t.Fatal("the retry changed the fixed awards")
+	if f.records.results[8] != fixed || f.chain.pending.LedgerHash != fixed.LedgerHash {
+		t.Fatal("the retry changed the fixed result")
 	}
 	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusSkipped, false, "already committed")
 	requireCtfLog(t, f.takeLog())
@@ -390,7 +415,7 @@ func TestStCtfSyncPlansTheSteps(t *testing.T) {
 	f.commitRound(8, 1000)
 	f.emission(8, 1_000_000_000_000)
 	f.chain.head = f.chain.end(8)
-	if got := f.sync(9); !reflect.DeepEqual(got, []string{"ctf_census 8", "ctf_epoch 8"}) {
+	if got := f.sync(9); !reflect.DeepEqual(got, []string{"ctf_commit_census 8", "ctf_epoch 8"}) {
 		t.Fatalf("at end(8): %q", got)
 	}
 	f.run(StCtfDriverStepCensus, 8)
@@ -401,6 +426,10 @@ func TestStCtfSyncPlansTheSteps(t *testing.T) {
 	f.records.mirror(f.chain)
 	if got := f.sync(9); !reflect.DeepEqual(got, []string{"ctf_finalize 8"}) {
 		t.Fatalf("committed: %q", got)
+	}
+	ledgerRow := f.records.ledgers[f.chain.pending.LedgerHash]
+	if ledgerRow.Status != model.CtfLedgerStatusCommitted || ledgerRow.Seq == nil || *ledgerRow.Seq != f.chain.pending.Seq {
+		t.Fatalf("committed ledger %+v", ledgerRow)
 	}
 	f.chain.approvals = 1
 	f.chain.head += f.chain.challenge
@@ -421,6 +450,9 @@ func TestStCtfSyncPlansTheSteps(t *testing.T) {
 	if got := f.sync(9); len(got) != 0 {
 		t.Fatalf("done: %q", got)
 	}
+	if ledgerRow.Status != model.CtfLedgerStatusFinalized || ledgerRow.RootIndex == nil || *ledgerRow.RootIndex != 0 {
+		t.Fatalf("finalized ledger %+v", ledgerRow)
+	}
 	recorded := f.records.recorded[root.Seq]
 	var sum uint256.Int
 	for _, amount := range recorded.amounts {
@@ -431,5 +463,66 @@ func TestStCtfSyncPlansTheSteps(t *testing.T) {
 	}
 	if recorded.firstIndex != 0 || uint64(len(recorded.newColdkeys)) != root.LeafCount || !sum.Eq(&root.Total) {
 		t.Fatalf("recorded %d new accounts from %d, %s of %s", len(recorded.newColdkeys), recorded.firstIndex, sum.Dec(), root.Total.Dec())
+	}
+}
+
+// §4.7: a missed close defers the epoch, whose emission funds the next
+// captured one, and a missed commit leaves the epoch to the next root; that
+// root covers both epochs with their committed censuses and draws, and the
+// audit reproduces it.
+func TestStCtfDriverDeferredAndMissedEpochs(t *testing.T) {
+	f := newCtfFixture(t, StCtfModeLive)
+	f.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
+	f.commitRound(8, 1000)
+	f.emission(8, 1_000_000_000_000)
+	f.chain.head = f.chain.end(8)
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusConfirmed, false, "")
+	// the epoch step does not run until its close window has passed
+	f.chain.head = f.chain.end(8) + f.chain.window + 1
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusMissed, false, "close window closed")
+	requireCtfLog(t, f.takeLog(), "census 8")
+	requireCtfAlerts(t, f.alerts, StCtfAlertMissedClose+" epoch 8")
+
+	// epoch 9: its close defers 8; its root covers 8 and 9
+	f.census[9] = ctfTestCensusOf(t, 9, ctfTestCandidates()[3:]...)
+	f.commitRound(9, 1001)
+	f.emission(9, 2_000_000_000_000)
+	f.chain.head = f.chain.end(9)
+	f.run(StCtfDriverStepCensus, 9)
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 9), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, f.takeLog(), "census 9", "close 9", "defer 8", "commit 9 prev 0")
+	result := f.verify(nil)
+	requireCtfAudit(t, result)
+	if len(result.Epochs) != 2 || !result.Epochs[0].Funding.IsZero() || !result.Epochs[0].Drawn || !result.Epochs[1].Drawn {
+		t.Fatalf("epochs %d: %+v", len(result.Epochs), result.Epochs)
+	}
+	if f.records.results[8] == nil || f.records.results[9] == nil || f.records.results[8].LedgerEpoch != 9 {
+		t.Fatalf("results %+v %+v", f.records.results[8], f.records.results[9])
+	}
+
+	// epoch 10: its commit is missed; epoch 11's root covers 10 and 11 on root 0
+	f.chain.approvals = 1
+	f.chain.head += f.chain.challenge
+	f.run(StCtfDriverStepFinalize, 9)
+	f.census[10] = ctfTestCensusOf(t, 10, ctfTestCandidates()...)
+	f.commitRound(10, 1002)
+	f.emission(10, 1_000_000_000_000)
+	f.chain.head = f.chain.end(10)
+	f.run(StCtfDriverStepCensus, 10)
+	f.chain.failNext("commit", fakeLedgerV2Revert("InvalidWindow"))
+	f.run(StCtfDriverStepEpoch, 10)
+	f.chain.head = f.chain.end(10) + f.chain.window + 1
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 10), model.StPublishStatusMissed, false, "commit window closed")
+	f.census[11] = ctfTestCensusOf(t, 11, ctfTestCandidates()...)
+	f.commitRound(11, 1003)
+	f.emission(11, 1_000_000_000_000)
+	f.chain.head = f.chain.end(11)
+	f.run(StCtfDriverStepCensus, 11)
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 11), model.StPublishStatusConfirmed, false, "")
+	previous := f.chain.roots[0]
+	result = f.verify(&ledger.Root{Epoch: previous.Epoch, Root: previous.Root, Total: previous.Total, LeafCount: previous.LeafCount, LedgerHash: previous.LedgerHash})
+	requireCtfAudit(t, result)
+	if len(result.Epochs) != 2 || result.Epochs[0].Epoch != 10 || result.Epochs[0].AwardsRef != ledger.Ref(f.records.results[10].AwardsRef) {
+		t.Fatalf("epochs %+v", result.Epochs)
 	}
 }

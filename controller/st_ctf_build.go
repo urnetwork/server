@@ -1,14 +1,16 @@
 package controller
 
-// st_ctf_build.go — a CTF root's inputs and objects (sn CAPTURETHEFLAG.md
-// §4.3 to §5). The driver reads chain facts at the finalized head (the census
-// commitments, their blocks' timestamps, vault2's funding, the carry
-// contract's returns), the census objects from the ledger object store, the
-// pulses from drand, and the operator's attested inputs (each candidate's
-// payout coldkey, recorded with the census at end(k)); package ctf does every
-// draw and amount. Published objects are put-if-absent, the header last, and an
-// epoch's awards reference is recorded at the first root that covers it, so a
-// later root reproduces it exactly (§5, fixed inputs).
+// st_ctf_build.go — a CTF root's inputs, objects and records (sn
+// CAPTURETHEFLAG.md §4.3 to §5). The driver reads chain facts at the finalized
+// head (the census commitments, their blocks' timestamps, vault2's funding,
+// the carry contract's returns), the census the server built at end(k) (its
+// objects, and each candidate's payout coldkey, operator-attested and never
+// published; controller/ctf_census.go), the census objects from the ledger
+// object store when the census part no longer holds them, and the pulses from
+// drand; package ctf does every draw and amount. Published objects are
+// put-if-absent, the header last. A covered epoch's result, its awards
+// included, is fixed at the first live root that covers it, so a later root
+// reproduces it exactly (§5, fixed inputs).
 
 import (
 	"bytes"
@@ -30,40 +32,18 @@ import (
 	"github.com/urnetwork/server/startifact"
 )
 
-// StCtfCensus is an epoch's census as the server built it right after end(k)
-// (§4.2, §4.3): its hash, what commitCtfCensus commits, its objects (header,
-// row chunks, exclusion object) and every candidate's payout coldkey under the
-// provider pool's wallet selection (P5, X5), which is never published.
-type StCtfCensus struct {
-	Epoch    uint64
-	Hash     ledger.Ref
-	Objects  ledger.Objects
-	Coldkeys map[[16]byte][32]byte
-}
+// stCtfCensusSource reads the census the server built for an epoch, nil
+// while it is not built (GetStCtfCensus); tests replace it.
+var stCtfCensusSource = GetStCtfCensus
 
-// StCtfCensusSource reads the census the server built for an epoch, nil while
-// it is not built.
-type StCtfCensusSource func(ctx context.Context, epoch uint64) (*StCtfCensus, error)
-
-var stCtfCensusSourceLock sync.Mutex
-var stCtfCensusSourceInstance StCtfCensusSource
-
-// SetStCtfCensusSource installs the census builder's reader; nil removes it,
-// and no census is then ever built.
-func SetStCtfCensusSource(source StCtfCensusSource) {
-	stCtfCensusSourceLock.Lock()
-	defer stCtfCensusSourceLock.Unlock()
-	stCtfCensusSourceInstance = source
-}
-
+// stCtfCensusOf is the census built for an epoch, checked: nil while it is
+// not built, and nil once the census part no longer holds its objects, which
+// happens only after a finalized root covers the epoch.
 func stCtfCensusOf(ctx context.Context, epoch uint64) (*StCtfCensus, error) {
-	stCtfCensusSourceLock.Lock()
-	source := stCtfCensusSourceInstance
-	stCtfCensusSourceLock.Unlock()
-	if source == nil {
+	census, err := stCtfCensusSource(ctx, epoch)
+	if errors.Is(err, ErrStCtfCensusObjectsGone) {
 		return nil, nil
 	}
-	census, err := source(ctx, epoch)
 	if err != nil || census == nil {
 		return nil, err
 	}
@@ -248,9 +228,9 @@ func stCtfBuildInput(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 	if epoch <= covered || ledger.MaxCoveredEpochs < epoch-covered {
 		return nil, fmt.Errorf("st ctf: a root for epoch %d cannot cover epochs %d to %d", epoch, covered+1, epoch)
 	}
-	fixed := records.FixedAwards(ctx, poolId, covered+1, epoch)
-	pending := state.Pending
-	mayFinalize := pending != nil && 0 < state.Quorum && state.Quorum <= state.Approvals
+	// The result of an epoch an earlier live root covered is fixed: its
+	// awards must encode to exactly the awards object it fixed.
+	fixed := records.EpochResults(ctx, covered+1, epoch)
 	for k := covered + 1; k <= epoch; k++ {
 		funded, err := client.LedgerV2FundedThrough(ctx, poolId, k)
 		if err != nil {
@@ -275,27 +255,20 @@ func stCtfBuildInput(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 				return nil, err
 			}
 		}
-		// The awards an earlier root covered k with are fixed, unless the
-		// operator asked for them to be built again and no pending root that
-		// can still finalize lists them (stLedgerV2Rebuilds).
-		if record := fixed[k]; record != nil && len(record.ProviderChunks) == 1 && !(record.RebuildRequestedBy != "" && !(mayFinalize && k <= pending.Epoch)) {
-			awards, err := ledger.ParseRef(record.ProviderChunks[0])
-			if err != nil {
-				return nil, fmt.Errorf("st ctf: epoch %d fixed awards %q: %w", k, record.ProviderChunks[0], err)
-			}
+		if result := fixed[k]; result != nil {
+			awards := ledger.Ref(result.AwardsRef)
 			input.Awards = &awards
-		} else if record != nil && record.RebuildRequestedBy == "" {
-			return nil, fmt.Errorf("st ctf: epoch %d's fixed awards record is not one awards reference", k)
 		}
 		in.Epochs = append(in.Epochs, input)
 	}
 	return in, nil
 }
 
-// stCtfPublish writes a built root's objects: every object but the header, in
-// reference order; then the awards references of the epochs built for the
-// first time; then the header, so nothing published names a missing object.
-func stCtfPublish(ctx context.Context, records stCtfRecords, poolId uint64, in *ctf.BuildInput, built *ctf.Ledger) error {
+// stCtfPublish writes a built root's objects: every object but the header,
+// in reference order; then, for a live root, its records (stCtfRecordBuild),
+// which fix the results of the epochs it covers first; then the header, so
+// nothing published names a missing object.
+func stCtfPublish(ctx context.Context, cfg *StConfig, records stCtfRecords, in *ctf.BuildInput, built *ctf.Ledger) error {
 	refs := make([]ledger.Ref, 0, len(built.Objects))
 	for ref := range built.Objects {
 		if ref != built.Commit.LedgerHash {
@@ -309,12 +282,8 @@ func stCtfPublish(ctx context.Context, records stCtfRecords, poolId uint64, in *
 		}
 	}
 	if records != nil {
-		for i, e := range built.Epochs {
-			if in.Epochs[i].Awards == nil {
-				if err := records.RecordFixedAwards(ctx, poolId, e.Epoch, e.AwardsRef.String()); err != nil {
-					return err
-				}
-			}
+		if err := stCtfRecordBuild(ctx, cfg, records, in, built); err != nil {
+			return err
 		}
 	}
 	_, err := PutStLedgerV2Object(ctx, built.Header)

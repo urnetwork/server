@@ -251,15 +251,19 @@ func (self *fakeCtfChain) CtfRecycle(ctx context.Context, carry common.Address, 
 // fakeCtfRecords keeps the driver's records in memory. The mirror's rows are
 // copied from the fake chain by mirror.
 type fakeCtfRecords struct {
-	publishes map[uint64][]*fakeCtfPublish
-	fixed     map[uint64]*model.StLedgerV2EpochRows
-	pending   *model.StLedgerV2Root
-	roots     []*model.StLedgerV2Root
-	demands   []*model.StLedgerV2Demand
-	funding   map[uint64]*model.StLedgerV2Funding
-	mirrored  uint64
-	recorded  map[uint64]fakeCtfRecorded
-	next      int
+	publishes   map[uint64][]*fakeCtfPublish
+	commitments map[uint64]*model.CtfCensusCommitment
+	draws       map[uint64]*model.CtfDraw
+	results     map[uint64]*model.CtfEpochResult
+	awards      map[uint64][]*model.CtfAward
+	ledgers     map[[32]byte]*model.CtfLedger
+	pending     *model.StLedgerV2Root
+	roots       []*model.StLedgerV2Root
+	demands     []*model.StLedgerV2Demand
+	funding     map[uint64]*model.StLedgerV2Funding
+	mirrored    uint64
+	recorded    map[uint64]fakeCtfRecorded
+	next        int
 }
 
 type fakeCtfPublish struct {
@@ -275,7 +279,9 @@ type fakeCtfRecorded struct {
 }
 
 func newFakeCtfRecords() *fakeCtfRecords {
-	return &fakeCtfRecords{publishes: map[uint64][]*fakeCtfPublish{}, fixed: map[uint64]*model.StLedgerV2EpochRows{}, funding: map[uint64]*model.StLedgerV2Funding{}, recorded: map[uint64]fakeCtfRecorded{}}
+	return &fakeCtfRecords{publishes: map[uint64][]*fakeCtfPublish{}, commitments: map[uint64]*model.CtfCensusCommitment{}, draws: map[uint64]*model.CtfDraw{},
+		results: map[uint64]*model.CtfEpochResult{}, awards: map[uint64][]*model.CtfAward{}, ledgers: map[[32]byte]*model.CtfLedger{},
+		funding: map[uint64]*model.StLedgerV2Funding{}, recorded: map[uint64]fakeCtfRecorded{}}
 }
 
 func (self *fakeCtfRecords) Outcome(ctx context.Context, epoch uint64, kind string) (string, string) {
@@ -320,29 +326,74 @@ func (self *fakeCtfRecords) rows(epoch uint64) []string {
 	return out
 }
 
-func (self *fakeCtfRecords) FixedAwards(ctx context.Context, poolId uint64, first uint64, last uint64) map[uint64]*model.StLedgerV2EpochRows {
-	out := map[uint64]*model.StLedgerV2EpochRows{}
+func (self *fakeCtfRecords) SetCommitment(ctx context.Context, commitment *model.CtfCensusCommitment) bool {
+	existing := self.commitments[commitment.Epoch]
+	if existing != nil && existing.CensusHash != commitment.CensusHash {
+		return false
+	}
+	updated := *commitment
+	if existing != nil {
+		if updated.TxHash == "" {
+			updated.TxHash = existing.TxHash
+		}
+		if updated.CommitBlock == nil {
+			updated.CommitBlock, updated.CommitBlockTime, updated.Round = existing.CommitBlock, existing.CommitBlockTime, existing.Round
+		}
+	}
+	self.commitments[commitment.Epoch] = &updated
+	return true
+}
+
+func (self *fakeCtfRecords) CreateDraw(ctx context.Context, draw *model.CtfDraw) bool {
+	if self.draws[draw.Epoch] != nil {
+		return false
+	}
+	self.draws[draw.Epoch] = draw
+	return true
+}
+
+func (self *fakeCtfRecords) EpochResults(ctx context.Context, first uint64, last uint64) map[uint64]*model.CtfEpochResult {
+	out := map[uint64]*model.CtfEpochResult{}
 	for k := first; k <= last; k++ {
-		if record := self.fixed[k]; record != nil && poolId == ctfTestPoolId {
-			copied := *record
-			out[k] = &copied
+		if result := self.results[k]; result != nil {
+			out[k] = result
 		}
 	}
 	return out
 }
 
-func (self *fakeCtfRecords) RecordFixedAwards(ctx context.Context, poolId uint64, epoch uint64, awardsRef string) error {
-	if poolId != ctfTestPoolId {
-		return fmt.Errorf("fixed awards of pool %d", poolId)
+func (self *fakeCtfRecords) CreateEpochResult(ctx context.Context, result *model.CtfEpochResult, awards []*model.CtfAward, pots []*model.CtfPot, pending []*model.CtfPendingAward) bool {
+	if self.results[result.Epoch] != nil {
+		return false
 	}
-	if existing := self.fixed[epoch]; existing != nil && existing.RebuildRequestedBy == "" {
-		if !slices.Equal(existing.ProviderChunks, []string{awardsRef}) {
-			return fmt.Errorf("%w: epoch %d", model.ErrStLedgerV2EpochRowsFixed, epoch)
-		}
-		return nil
+	if len(pots) != ctf.NumPots {
+		panic(fmt.Sprintf("epoch %d result with %d pots", result.Epoch, len(pots)))
 	}
-	self.fixed[epoch] = &model.StLedgerV2EpochRows{Epoch: epoch, ProviderChunks: []string{awardsRef}, CreateTime: time.Now()}
-	return nil
+	self.results[result.Epoch], self.awards[result.Epoch] = result, awards
+	return true
+}
+
+func (self *fakeCtfRecords) CreateLedger(ctx context.Context, ledger *model.CtfLedger) bool {
+	if self.ledgers[ledger.LedgerHash] != nil {
+		return false
+	}
+	self.ledgers[ledger.LedgerHash] = ledger
+	return true
+}
+
+func (self *fakeCtfRecords) SetLedgerStatus(ctx context.Context, epoch uint64, ledgerHash [32]byte, update *model.CtfLedgerStatusUpdate) bool {
+	ledger := self.ledgers[ledgerHash]
+	if ledger == nil || ledger.Epoch != epoch || update == nil {
+		return false
+	}
+	ledger.Status = update.Status
+	if update.Seq != nil {
+		ledger.Seq = update.Seq
+	}
+	if update.RootIndex != nil {
+		ledger.RootIndex = update.RootIndex
+	}
+	return true
 }
 
 func (self *fakeCtfRecords) PendingRoot(ctx context.Context, poolId uint64) *model.StLedgerV2Root {
@@ -478,7 +529,7 @@ func ctfTestCensusOf(t testing.TB, epoch uint64, candidates ...ctf.Candidate) *S
 	for _, candidate := range candidates {
 		coldkeys[candidate.ClientID] = ctfTestColdkey(candidate.ClientID)
 	}
-	return &StCtfCensus{Epoch: epoch, Hash: encoded.Hash, Objects: encoded.Objects, Coldkeys: coldkeys}
+	return &StCtfCensus{Epoch: epoch, Hash: encoded.Hash, Objects: encoded.Objects, Coldkeys: coldkeys, Published: true}
 }
 
 // The test census: three provider units in Iceland, one in Turkmenistan
@@ -529,10 +580,10 @@ func newCtfFixture(t testing.TB, mode StCtfMode) *ctfFixture {
 	SetStCtfClient(f.chain)
 	setStCtfRecords(f.records)
 	SetStLedgerV2ObjectStore(server.NewLocalBlobStore(t.TempDir(), "test"))
-	SetStCtfCensusSource(func(ctx context.Context, epoch uint64) (*StCtfCensus, error) {
+	signer, admission, bound, source := stCtfAmendmentSigner, stCtfAdmission, stCtfBoundFor, stCtfCensusSource
+	stCtfCensusSource = func(ctx context.Context, epoch uint64) (*StCtfCensus, error) {
 		return f.census[epoch], nil
-	})
-	signer, admission, bound := stCtfAmendmentSigner, stCtfAdmission, stCtfBoundFor
+	}
 	stCtfAmendmentSigner = func(uint64, uint16) (common.Address, bool) { return common.Address{}, false }
 	stCtfAdmission = func(context.Context, *StConfig) error { return nil }
 	stCtfBoundFor = func(ctx context.Context, cfg *StConfig, epoch uint64, clientIds [][16]byte) (map[[16]byte]bool, error) {
@@ -549,8 +600,7 @@ func newCtfFixture(t testing.TB, mode StCtfMode) *ctfFixture {
 		SetStCtfClient(nil)
 		setStCtfRecords(nil)
 		SetStLedgerV2ObjectStore(nil)
-		SetStCtfCensusSource(nil)
-		stCtfAmendmentSigner, stCtfAdmission, stCtfBoundFor = signer, admission, bound
+		stCtfAmendmentSigner, stCtfAdmission, stCtfBoundFor, stCtfCensusSource = signer, admission, bound, source
 		resetCtfCaches()
 	})
 	return f

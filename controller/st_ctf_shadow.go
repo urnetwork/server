@@ -156,7 +156,7 @@ func stCtfShadowCarry(ctx context.Context, cfg *StConfig, epoch uint64) (common.
 
 // stCtfRunShadow builds and publishes epoch k's shadow report.
 func stCtfRunShadow(ctx context.Context, cfg *StConfig, chain stCtfShadowChain, records stCtfRecords, epoch uint64) (*StPublishOutcome, error) {
-	kind, poolId := model.StPublishKindCtfShadow, ctf.PoolID(cfg.NoId)
+	kind := model.StPublishKindCtfShadow
 	if status, reason := records.Outcome(ctx, epoch, kind); status != "" {
 		return &StPublishOutcome{Status: status, Reason: reason}, nil
 	}
@@ -234,7 +234,7 @@ func stCtfRunShadow(ctx context.Context, cfg *StConfig, chain stCtfShadowChain, 
 		stCtfAlert(cfg, StCtfAlertBuild, fmt.Sprintf("shadow epoch %d", epoch), "the shadow root of epoch %d cannot be built: %s", epoch, err)
 		return stLedgerV2Retry(err), nil
 	}
-	if err := stCtfPublish(ctx, nil, poolId, &in, built); err != nil {
+	if err := stCtfPublish(ctx, cfg, nil, &in, built); err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 	report, err := stCtfShadowReportOf(cfg, &in, built, carry, basis, &provider)
@@ -245,6 +245,11 @@ func stCtfRunShadow(ctx context.Context, cfg *StConfig, chain stCtfShadowChain, 
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
+	row, err := stCtfLedgerRow(&in, built, true, report)
+	if err != nil {
+		return stLedgerV2Retry(err), nil
+	}
+	records.CreateLedger(ctx, row)
 	stCtfReport(cfg, built, "shadow ")
 	stCtfLastEpoch.WithLabelValues("shadow").Set(float64(epoch))
 	glog.Infof("[st]ctf shadow epoch %d report %s\n", epoch, ref)

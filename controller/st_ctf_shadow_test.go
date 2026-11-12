@@ -47,8 +47,16 @@ func TestStCtfShadowPublishesAnAuditableReport(t *testing.T) {
 	requireLedgerV2Outcome(t, outcome, model.StPublishStatusConfirmed, false, "report sha256:")
 	// nothing is sent, and nothing a live root would read is recorded
 	requireCtfLog(t, f.takeLog())
-	if len(f.chain.census) != 0 || len(f.records.fixed) != 0 || f.chain.pending != nil {
-		t.Fatalf("the shadow run wrote: census %v fixed %v pending %v", f.chain.census, f.records.fixed, f.chain.pending)
+	if len(f.chain.census) != 0 || len(f.records.results) != 0 || len(f.records.draws) != 0 || len(f.records.commitments) != 0 || f.chain.pending != nil {
+		t.Fatalf("the shadow run wrote: census %v results %v draws %v commitments %v pending %v", f.chain.census, f.records.results, f.records.draws, f.records.commitments, f.chain.pending)
+	}
+	if len(f.records.ledgers) != 1 {
+		t.Fatalf("ledgers %v", f.records.ledgers)
+	}
+	for _, row := range f.records.ledgers {
+		if !row.Shadow || row.Status != model.CtfLedgerStatusShadow || row.Epoch != 7 || row.FirstEpoch != 7 || len(row.Report) == 0 {
+			t.Fatalf("shadow ledger %+v", row)
+		}
 	}
 
 	ref, err := ledger.ParseRef(strings.TrimPrefix(outcome.Reason, "report "))

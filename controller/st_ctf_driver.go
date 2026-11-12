@@ -273,6 +273,10 @@ func StCtfDriverSync(ctx context.Context, state *StEpochState) ([]*StCtfDriverSt
 
 	if 2 <= state.Epoch {
 		for _, root := range records.RootsFromEpoch(ctx, poolId, state.Epoch-2) {
+			// The ledgers the API reads follow their roots on chain.
+			if update := stCtfLedgerStatus(root); update != nil {
+				records.SetLedgerStatus(ctx, root.Epoch, root.LedgerHash, update)
+			}
 			if root.Status == model.StLedgerV2RootFinalized {
 				continue
 			}
@@ -451,6 +455,7 @@ func stCtfRunCensus(ctx context.Context, cfg *StConfig, client StLedgerV2Client,
 	if hash != ([32]byte{}) {
 		if census != nil && census.Hash != hash {
 			stCtfAlert(cfg, StCtfAlertCensusMismatch, fmt.Sprintf("epoch %d", epoch), "the chain holds census %v committed at block %d, not the census built, %v", ledger.Ref(hash), block, census.Hash)
+			records.SetCommitment(ctx, &model.CtfCensusCommitment{Epoch: epoch, CensusHash: census.Hash, Status: model.CtfCommitmentStatusRefused})
 		}
 		// Every committed census object stays published: a lost one stalls
 		// the epoch's roots.
@@ -459,11 +464,17 @@ func stCtfRunCensus(ctx context.Context, cfg *StConfig, client StLedgerV2Client,
 				return stLedgerV2Retry(err), nil
 			}
 		}
+		if err := stCtfRecordCommitment(ctx, ctfClient, records, epoch, hash, block, ""); err != nil {
+			return stLedgerV2Retry(err), nil
+		}
 		stCtfLastEpoch.WithLabelValues("census").Set(float64(epoch))
 		return stCtfConclude(ctx, records, epoch, kind, model.StPublishStatusSkipped, "census %v is committed at block %d", ledger.Ref(hash), block), nil
 	}
 	if deadline < state.HeadBlock {
 		stCtfAlert(cfg, StCtfAlertCensusMissed, fmt.Sprintf("epoch %d", epoch), "no census committed by block %d: epoch %d has no draw and everything carries", deadline, epoch)
+		if census != nil {
+			records.SetCommitment(ctx, &model.CtfCensusCommitment{Epoch: epoch, CensusHash: census.Hash, Status: model.CtfCommitmentStatusMissed})
+		}
 		return stCtfConclude(ctx, records, epoch, kind, model.StPublishStatusMissed, "the census window closed at block %d", deadline), nil
 	}
 	if late := end + window/4; late < state.HeadBlock {
@@ -472,31 +483,53 @@ func stCtfRunCensus(ctx context.Context, cfg *StConfig, client StLedgerV2Client,
 	if census == nil {
 		return stLedgerV2Wait(cfg, state, fmt.Sprintf("the census of epoch %d is not built yet", epoch), 0), nil
 	}
+	// Only a census whose every object the census part has published is
+	// committed; publishing again first costs nothing and makes sure.
+	if !census.Published {
+		return stLedgerV2Wait(cfg, state, fmt.Sprintf("the census of epoch %d is not published yet", epoch), 0), nil
+	}
 	if state.Paused {
 		return stLedgerV2Wait(cfg, state, "settlement is paused", 0), nil
 	}
-	// Publish before committing: whoever reads the commitment can fetch the
-	// census it names.
 	if err := stCtfRepublishCensus(ctx, census); err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 	if outcome := stLedgerV2LateSend(ctx, cfg, client, state, "census", deadline); outcome != nil {
 		return outcome, nil
 	}
+	records.SetCommitment(ctx, &model.CtfCensusCommitment{Epoch: epoch, CensusHash: census.Hash, Status: model.CtfCommitmentStatusPending})
 	outcome := stCtfSend(ctx, records, epoch, kind, func() (string, error) {
 		return ctfClient.CtfCommitCensus(ctx, epoch, cfg.NoId, census.Hash)
 	})
 	if outcome.Retry {
+		records.SetCommitment(ctx, &model.CtfCensusCommitment{Epoch: epoch, CensusHash: census.Hash, Status: model.CtfCommitmentStatusSent, TxHash: outcome.TxHash})
 		return outcome, nil
 	}
-	if hash, _, err = ctfClient.CtfCensus(ctx, cfg.NoId, epoch); err != nil {
+	if hash, block, err = ctfClient.CtfCensus(ctx, cfg.NoId, epoch); err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 	if hash != census.Hash {
+		records.SetCommitment(ctx, &model.CtfCensusCommitment{Epoch: epoch, CensusHash: census.Hash, Status: model.CtfCommitmentStatusSent, TxHash: outcome.TxHash})
 		return stLedgerV2Retry(fmt.Errorf("the census commitment of epoch %d is not visible at the finalized head", epoch)), nil
+	}
+	if err := stCtfRecordCommitment(ctx, ctfClient, records, epoch, hash, block, outcome.TxHash); err != nil {
+		return stLedgerV2Retry(err), nil
 	}
 	stCtfLastEpoch.WithLabelValues("census").Set(float64(epoch))
 	return outcome, nil
+}
+
+// stCtfRecordCommitment records a census commitment seen at the finalized
+// head, with its block's EVM timestamp and the draw round ρ_k it fixes.
+func stCtfRecordCommitment(ctx context.Context, ctfClient StCtfClient, records stCtfRecords, epoch uint64, hash [32]byte, block uint64, txHash string) error {
+	blockTime, err := ctfClient.CtfBlockTime(ctx, block)
+	if err != nil {
+		return err
+	}
+	round := ctf.DrawRound(blockTime)
+	records.SetCommitment(ctx, &model.CtfCensusCommitment{Epoch: epoch, CensusHash: hash, Status: model.CtfCommitmentStatusCommitted, TxHash: txHash,
+		CommitBlock: &block, CommitBlockTime: &blockTime, Round: &round})
+	return nil
 }
 
 // stCtfRunEpoch drives epoch k of the CTF pool through the provider pool's
@@ -597,6 +630,9 @@ func stCtfCommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2Clien
 		if err != nil {
 			return stLedgerV2Retry(err), nil
 		}
+		if err := stCtfRecordCommitment(ctx, ctfClient, records, epoch, hash, block, ""); err != nil {
+			return stLedgerV2Retry(err), nil
+		}
 		round := ctf.DrawRound(blockTime)
 		if at := stCtfRoundTime(round); stCtfServerNow().Before(at) {
 			return stCtfWaitUntil(fmt.Sprintf("drand round %d of epoch %d's draw is published at %s", round, epoch, at.Format(time.RFC3339)), at.Add(time.Second)), nil
@@ -643,7 +679,7 @@ func stCtfCommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2Clien
 	}
 
 	// 6. Publish the objects, then the header.
-	if err := stCtfPublish(ctx, records, poolId, in, built); err != nil {
+	if err := stCtfPublish(ctx, cfg, records, in, built); err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 	stCtfCacheTree(built.Commit.LedgerHash, &stLedgerV2Tree{tree: built.Tree, accounts: built.Accounts})
@@ -673,6 +709,7 @@ func stCtfCommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2Clien
 		return client.LedgerV2Commit(ctx, epoch, poolId, rootCount, commitment)
 	})
 	if outcome.Status == model.StPublishStatusConfirmed {
+		records.SetLedgerStatus(ctx, epoch, built.Commit.LedgerHash, &model.CtfLedgerStatusUpdate{Status: model.CtfLedgerStatusCommitted})
 		stCtfLastEpoch.WithLabelValues("commit").Set(float64(epoch))
 	}
 	return outcome, nil
@@ -873,6 +910,7 @@ func stCtfRunRecord(ctx context.Context, cfg *StConfig, records stCtfRecords, se
 	if err := records.RecordRoot(ctx, poolId, seq, uint64(len(previousAccounts)), newColdkeys, amounts); err != nil {
 		return stLedgerV2Retry(err), nil
 	}
+	records.SetLedgerStatus(ctx, root.Epoch, root.LedgerHash, stCtfLedgerStatus(root))
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("capture the flag root %d recorded", *root.RootIndex)}, nil
 }
 
