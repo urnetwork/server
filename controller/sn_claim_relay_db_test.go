@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/holiman/uint256"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urfoundation/sn/ctf"
 	"github.com/urfoundation/sn/ledger"
@@ -1178,7 +1179,8 @@ func claimRelayDbKeys(t testing.TB, raw []byte) []string {
 // and label and an empty unavailable_pools. A pass that cannot read the
 // operator's pool ends there as it did, ledger_unavailable whatever else would
 // stop it (here a low balance), and leaves every Claim now request queued; the
-// old client reads the error and no balances, and the ledger route a 502.
+// old client reads the error and no balances, and the ledger route a 502. The
+// pools_unavailable metric counts the pool.
 func TestDbClaimRelayWithCtfOffAnswersAsBefore(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
@@ -1243,6 +1245,9 @@ func TestDbClaimRelayWithCtfOffAnswersAsBefore(t *testing.T) {
 		if result.State != SnClaimRelayStateLedgerUnavailable || status.State != SnClaimRelayStateLedgerUnavailable || len(status.UnavailablePools) != 0 || !strings.Contains(status.Detail, "pool 1:") {
 			t.Fatalf("pass %s, status %+v", result, status)
 		}
+		if gauge := testutil.ToFloat64(snClaimRelayPoolsUnavailable); status.PoolsUnavailable != 1 || gauge != 1 {
+			t.Fatalf("pools unavailable %d, metric %v", status.PoolsUnavailable, gauge)
+		}
 		if requests := model.GetSnClaimRelayRequests(ctx, key, 10); len(requests) != 2 {
 			t.Fatalf("requests %+v", requests)
 		}
@@ -1283,7 +1288,7 @@ func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
 
 		SnClaimRelayPass(ctx)
 		status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
-		if status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{1}) {
+		if status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{1}) || status.PoolsUnavailable != 1 {
 			t.Fatalf("status %+v", status)
 		}
 		if got := paid(); !slices.Equal(got, []string{claimRelayCtfKey(1)}) {

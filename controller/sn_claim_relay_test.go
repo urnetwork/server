@@ -423,7 +423,8 @@ func (self *claimRelayWorld) Send(_ context.Context, send *snClaimRelaySend) (*s
 // Pool 1's accounts, then the capture the flag pool's, as the core ledger reads
 // them. A pool that cannot be read is named with the coldkeys its account index
 // records, unless the index cannot be read either; no pool with a finalized
-// root read is an error. A pool has a root once a test gives it an account.
+// root read is an error, with the read naming the pools that failed. A pool
+// has a root once a test gives it an account.
 func (self *claimRelayWorld) Accounts(context.Context) (*snClaimRelayLedgerRead, error) {
 	read := &snClaimRelayLedgerRead{Accounts: []*snClaimRelayAccount{}}
 	pools := []struct {
@@ -459,7 +460,7 @@ func (self *claimRelayWorld) Accounts(context.Context) (*snClaimRelayLedgerRead,
 		}
 	}
 	if 0 < len(read.Unavailable) && rooted == 0 {
-		return nil, errors.Join(self.ledgerErr, self.poolLedgerErr, self.ctfLedgerErr)
+		return read, errors.Join(self.ledgerErr, self.poolLedgerErr, self.ctfLedgerErr)
 	}
 	if self.indexUnreadable {
 		read.UnavailableColdkeys = nil

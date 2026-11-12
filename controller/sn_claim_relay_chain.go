@@ -816,9 +816,10 @@ func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) (*snClaimRelay
 	// A pool without a finalized root, like the capture the flag pool before
 	// its first or with capture the flag off, holds nothing to claim. When it
 	// is the only one read, the ledger is unavailable and the pass ends there,
-	// as it did with the operator's pool alone.
+	// as it did with the operator's pool alone; the read still names the
+	// pools that failed.
 	if 0 < len(read.Unavailable) && rooted == 0 {
-		return nil, errors.Join(errs...)
+		return read, errors.Join(errs...)
 	}
 	for _, err := range errs {
 		glog.Infof("[sn]claim relay ledger: %s\n", err)

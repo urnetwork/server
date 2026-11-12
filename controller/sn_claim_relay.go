@@ -184,8 +184,16 @@ type SnClaimRelayStatus struct {
 	// the floor go with any of its accounts that is due.
 	Batching bool `json:"batching,omitempty"`
 	// UnavailablePools are the operator's pools whose ledger the pass could not
-	// read, by no_id: their accounts wait while the others are claimed.
+	// read while it claimed the others, by no_id: their accounts wait. A pass
+	// that could read no pool with a finalized root ends ledger_unavailable
+	// with none named here, as before the capture the flag pool, and the api
+	// pauses every pool.
 	UnavailablePools []uint64 `json:"unavailable_pools,omitempty"`
+	// PoolsUnavailable counts the pools whose ledger the relay's latest read
+	// could not read, for the metrics: this pass's, whether it claimed the
+	// others or ended there, or, for a pass that ended before reading the
+	// ledger, the previous pass's.
+	PoolsUnavailable int `json:"pools_unavailable,omitempty"`
 }
 
 // SnClaimRelayRefusal is why one account's claim is waiting: until the next UTC
@@ -350,7 +358,7 @@ type snClaimRelayLedger interface {
 	// Accounts are each pool's accounts once it has a finalized, recorded
 	// root, by pool and index. A pool whose ledger cannot be read is left out
 	// and named in the read; err says that no pool with a finalized root
-	// could be read.
+	// could be read, and the read still names the pools that could not be.
 	Accounts(ctx context.Context) (*snClaimRelayLedgerRead, error)
 	Proof(ctx context.Context, account *snClaimRelayAccount) ([]merkle.LedgerNode, error)
 }
@@ -497,6 +505,8 @@ func (self *snClaimRelay) pass(ctx context.Context) *SnClaimRelayStatus {
 	status := &SnClaimRelayStatus{State: SnClaimRelayStateRunning, PassTime: now}
 	if previous := self.lastStatus(ctx); previous != nil {
 		status.Refusals = snClaimRelayLiveRefusals(previous.Refusals, now)
+		// what the latest read found, until this pass reads the ledger
+		status.PoolsUnavailable = previous.PoolsUnavailable
 	}
 	self.run(ctx, now, status)
 	// A pool that cannot be read is a fault even while the others are claimed,
@@ -552,6 +562,10 @@ func (self *snClaimRelay) run(ctx context.Context, now time.Time, status *SnClai
 	self.recordPaid(ctx, spend)
 
 	read, err := self.ledger.Accounts(ctx)
+	if read != nil {
+		// whether or not the pass goes on with the other pools
+		status.PoolsUnavailable = len(read.Unavailable)
+	}
 	if err != nil {
 		status.State, status.Detail = SnClaimRelayStateLedgerUnavailable, err.Error()
 		return

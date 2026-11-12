@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // The accounts the world's transactions sent, by pool and index, once each.
@@ -321,7 +322,8 @@ func TestClaimRelayOperatorPoolUnavailable(t *testing.T) {
 // cannot read the operator's pool ends there as it did before the CTF pool:
 // the ledger is unavailable whatever else would stop it, here a low balance,
 // nothing is sent, and every request waits, a coldkey's the pool does not
-// record too.
+// record too. The api reads no pool named, as before; the metrics count the
+// pool.
 func TestClaimRelayOperatorPoolUnavailableBeforeTheCtfPoolsFirstRoot(t *testing.T) {
 	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
 	world := newClaimRelayWorld(t, small, small)
@@ -331,8 +333,8 @@ func TestClaimRelayOperatorPoolUnavailableBeforeTheCtfPoolsFirstRoot(t *testing.
 	world.tap(5)
 	status := world.pass()
 	requireClaimRelayState(t, status, SnClaimRelayStateLedgerUnavailable)
-	if len(world.txs) != 0 || len(status.UnavailablePools) != 0 {
-		t.Fatalf("sent %d, unavailable %v", len(world.txs), status.UnavailablePools)
+	if len(world.txs) != 0 || len(status.UnavailablePools) != 0 || status.PoolsUnavailable != 1 {
+		t.Fatalf("sent %d, unavailable %v, counted %d", len(world.txs), status.UnavailablePools, status.PoolsUnavailable)
 	}
 	for _, index := range []int{1, 5} {
 		if _, queued := world.requests[claimRelayTestColdkey(index)]; !queued {
@@ -465,4 +467,49 @@ func TestStLedgerV2PoolKind(t *testing.T) {
 	if pools := stLedgerV2OwnPools(&StConfig{NoId: 1}); !slices.Equal(pools, []uint64{1, 1<<32 + 1}) {
 		t.Fatalf("own pools %v", pools)
 	}
+}
+
+// The pools_unavailable metric counts the pools the relay's latest read could
+// not read, in every pass: the operator's pool when it ends a pass before the
+// capture the flag pool's first root (the api, as before, reads no pool named
+// then), both pools when neither can be read, and the capture the flag pool
+// while the pass claims the other. A pass that ends before reading the ledger
+// carries the count, and a read of every pool clears it.
+func TestClaimRelayPoolsUnavailableMetric(t *testing.T) {
+	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	world := newClaimRelayWorld(t, over)
+	pass := func(name string, state string, unavailable []uint64, count int) {
+		t.Helper()
+		status := world.pass()
+		observeSnClaimRelayPass(status)
+		requireClaimRelayState(t, status, state)
+		if !slices.Equal(status.UnavailablePools, unavailable) || status.PoolsUnavailable != count {
+			t.Fatalf("%s: unavailable %v, counted %d", name, status.UnavailablePools, status.PoolsUnavailable)
+		}
+		if gauge := testutil.ToFloat64(snClaimRelayPoolsUnavailable); gauge != float64(count) {
+			t.Fatalf("%s: pools_unavailable %v, want %d", name, gauge, count)
+		}
+	}
+
+	world.poolLedgerErr = errors.New("the pool's ledger cannot be read")
+	pass("the operator's pool before the first CTF root", SnClaimRelayStateLedgerUnavailable, nil, 1)
+	world.factsErr = errors.New("the chain cannot be read")
+	pass("a pass that ends before the ledger", SnClaimRelayStateChainUnavailable, nil, 1)
+	world.factsErr, world.reconcileErr = nil, errSnClaimRelayInFlight
+	pass("a claim in flight", SnClaimRelayStateInFlight, nil, 1)
+	world.reconcileErr = nil
+
+	world.addCtf(0, claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
+	world.ctfLedgerErr = errors.New("the capture the flag ledger cannot be read")
+	pass("both pools", SnClaimRelayStateLedgerUnavailable, nil, 2)
+	world.signerErr = errSnClaimRelayNoKey
+	pass("no key", SnClaimRelayStateNoKey, nil, 2)
+	world.signerErr = nil
+
+	world.poolLedgerErr = nil
+	pass("the capture the flag pool", SnClaimRelayStateLedgerUnavailable, []uint64{claimRelayTestCtfPool}, 1)
+	world.ctfLedgerErr = nil
+	pass("every pool read", SnClaimRelayStateRunning, nil, 0)
+	world.factsErr = errors.New("the chain cannot be read")
+	pass("a pass that ends before the ledger after a whole read", SnClaimRelayStateChainUnavailable, nil, 0)
 }
