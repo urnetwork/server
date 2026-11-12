@@ -11,6 +11,7 @@ package monitor
 import (
 	"context"
 	"io"
+	"net/netip"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -45,6 +46,10 @@ type probeRunner interface {
 	dnsAuthoritative(ctx context.Context, zone, hostname string, recordType DNSRecordType) (DNSAuthoritativeObservation, error)
 	dnsRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error)
 	dnsTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error)
+	dnsAddress(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error)
+	dnsDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int) (int, []byte, error)
+	dnsNameservers(ctx context.Context, name string) ([]string, error)
+	dnsTxtAuthoritative(ctx context.Context, hostname string, servers []string, clientSubnet netip.Prefix) (DNSResponseObservation, error)
 	warpctl(ctx context.Context, args ...string) (string, error)
 	warpctlStream(ctx context.Context, diagnostics io.Writer, args ...string) (*exec.Cmd, io.ReadCloser, error)
 }
