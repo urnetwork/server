@@ -11470,4 +11470,13 @@ var migrations = []any{
 	// Apply before deploying the api and alt that write it and the taskworker
 	// that reads it.
 	newSqlMigration(networkPingTargetEvidenceSchemaSql),
+
+	// The carrier ports of each extender address
+	// (network_extender_address_ports_schema.go, connect/EXTENDER.md S10): two
+	// nullable columns on network_extender_address with no default, a catalog
+	// change only, under a two-second lock bound. The running release names
+	// its columns and reads on, and an address written before or by it reads
+	// null, the extender's ports. Apply before deploying the api, alt and
+	// taskworker that use them.
+	newSqlMigration(networkExtenderAddressPortsSchemaSql),
 }
