@@ -27,6 +27,18 @@
       "private_evidence_directory": "/var/lib/urnetwork/competition-transport-handoff-20261112.iqaSCVwA",
       "hold_revision_after_release": 29,
       "sille_reconciled_fence": 19,
+      "sille_terminal_failure": {
+        "job_id": "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c",
+        "kind": "infrastructure",
+        "code": "evaluation_time_budget_exhausted",
+        "retriable": false,
+        "has_score": false,
+        "attempt": 1,
+        "cycle": 0,
+        "observed_at": "2026-11-12T15:52:23.964060Z",
+        "private_receipt": "terminal-job-readback.private.json",
+        "new_cycle_authorized_by_activation": false
+      },
       "original_submission_time_preserved": true,
       "original_deadline_preserved": true
     }
@@ -431,7 +443,7 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-    "status": "203_top_level_completed_57_remaining_recovery_chain_running_transport_worker_activated",
+    "status": "203_top_level_completed_57_remaining_chain_stopped_on_isolated_postgres_oom_transport_worker_stable",
     "sequential_remainder_chain": {
       "ledger_directory": "/dev/shm/competition-recovery-chain-20261112.pAWVCjqC",
       "control_session": 43890,
@@ -439,15 +451,29 @@
       "completed_manifest": "completed.txt",
       "remaining_manifest": "remaining.txt",
       "actor_history": "actors.txt",
-      "verified_at": "2026-11-12T15:21:34Z",
+      "verified_at": "2026-11-12T15:48:15Z",
       "verified_completed": 203,
       "verified_remaining": 57,
       "whole_suite": 260,
-      "status": "resumed_after_authorized_transport_handoff",
-      "active_test_batch": "remainder5",
-      "active_invocation_id": "bbe10e9c77fe4017b4815be9bacb54d4",
-      "active_main_pid": 3589986,
-      "active_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.jsS0FzqA",
+      "status": "terminal_exit_1_no_automatic_retry",
+      "active_test_batch": null,
+      "active_invocation_id": null,
+      "active_main_pid": 0,
+      "active_evidence_directory": null,
+      "failed_remainder5": {
+        "test": "TestMigrationsSignalMergedCatalogUsesExactColumns",
+        "invocation_id": "bbe10e9c77fe4017b4815be9bacb54d4",
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.jsS0FzqA",
+        "durable_evidence_directory": "/var/lib/urnetwork/bounded-census-signal-merged-red-7880-20261112.A59CpMQW",
+        "durable_manifest_sha256": "817f7b56a9f8ad24d54fa0548efd4678fa028314780c52e62cad7bddabd54a49",
+        "log_sha256": "bf29d2b8fd71c3fdf53bd27b9790282a399e2d70cde4ccb62e92f8a2c26c9a54",
+        "package_elapsed_seconds": 1571.949,
+        "actor_and_chain_exit": 1,
+        "guard_and_cleanup_exit": 0,
+        "partial_passes_not_credited": 5,
+        "source_and_dependencies_unchanged": true,
+        "failure": "Isolated PostgreSQL reached its unchanged 1 GiB cap; memory.events recorded oom_kill=1, and backend 186 was killed during commit. Exact preceding operation and memory ownership remain under diagnosis. No live evaluator failure or production database outage is inferred."
+      },
       "completed_remainder4": {
         "passed": 20,
         "failed": 0,
