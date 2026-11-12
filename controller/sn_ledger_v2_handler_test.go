@@ -605,10 +605,11 @@ func TestSnLedgerAccountBuildsEachTreeOnce(t *testing.T) {
 
 // SV-3, CL-2: the SDK's strict parser (sdk/sn_ledger.go) accepts the
 // endpoint's real answers over HTTP and shows every state from them:
-// finalized, paid, claimable and pending across several pools, an account
-// only in the pending root, and an unknown coldkey as an empty list rather
-// than an error. The 502 of a ledger that cannot be read reaches the SDK as
-// ledger_unavailable with no balances, never as zero.
+// finalized, paid, claimable and pending across several pools, each with its
+// pool's kind and label, an account only in the pending root, and an unknown
+// coldkey as an empty list rather than an error. The 502 of a ledger that
+// cannot be read reaches the SDK as ledger_unavailable with no balances, never
+// as zero.
 func TestSnLedgerAccountAnswersParseInTheSdk(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2EndpointFixture(t)
@@ -654,11 +655,11 @@ func TestSnLedgerAccountAnswersParseInTheSdk(t *testing.T) {
 			want    []sdk.SnLedgerAccount
 		}{
 			{ledgerV2A, []sdk.SnLedgerAccount{
-				{Vault: vault, NoId: 1, Index: 0, FinalizedRao: 600, ClaimableRao: 350, PaidRao: 250, Pending: true, PendingRao: 1600},
-				{Vault: vault, NoId: 2, Index: 0, FinalizedRao: 777, ClaimableRao: 777},
+				{Vault: vault, NoId: 1, Kind: StLedgerV2PoolKindPool, Label: "Pool 1", Index: 0, FinalizedRao: 600, ClaimableRao: 350, PaidRao: 250, Pending: true, PendingRao: 1600},
+				{Vault: vault, NoId: 2, Kind: StLedgerV2PoolKindPool, Label: "Pool 2", Index: 0, FinalizedRao: 777, ClaimableRao: 777},
 			}},
-			{ledgerV2B, []sdk.SnLedgerAccount{{Vault: vault, NoId: 1, Index: 1, FinalizedRao: 400, PaidRao: 400, Pending: true, PendingRao: 400}}},
-			{ledgerV2C, []sdk.SnLedgerAccount{{Vault: vault, NoId: 1, Index: 2, Pending: true, PendingRao: 1000}}},
+			{ledgerV2B, []sdk.SnLedgerAccount{{Vault: vault, NoId: 1, Kind: StLedgerV2PoolKindPool, Label: "Pool 1", Index: 1, FinalizedRao: 400, PaidRao: 400, Pending: true, PendingRao: 400}}},
+			{ledgerV2C, []sdk.SnLedgerAccount{{Vault: vault, NoId: 1, Kind: StLedgerV2PoolKindPool, Label: "Pool 1", Index: 2, Pending: true, PendingRao: 1000}}},
 			{ledgerV2H, []sdk.SnLedgerAccount{}},
 		} {
 			if got := accounts(read(test.coldkey)); !reflect.DeepEqual(got, test.want) {
