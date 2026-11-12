@@ -168,3 +168,36 @@ These are private, nonfinal observations, not submission approvals, complete
 honesty reviews, or authority to elect, reward or promote a candidate. No
 candidate patch was executed by this review tooling. Protected result
 publication and full-source paired review remain unfinished.
+
+## Full-source expansion requirements
+
+First-file observations are a provider/protocol pilot, not the requested review
+of every eligible submission. The next planner must derive a private coverage
+ledger from the authenticated export inventory, not from whichever passes
+happen to succeed. Each obligation binds the job, patch and source-lock digests,
+model member/revision, source path/blob digest, supplied content range and
+relevant changed hunks. Complete-file and patch-hunk-only evidence are different
+provenance classes; neither can silently stand in for the other.
+
+Batch complete changed files within tokenizer-verified budgets, including the
+candidate changes and needed callers/helpers. If a file cannot fit, prospectively
+define bounded ranges with complete changed-hunk coverage and enclosing
+declaration context; retain unresolved cross-range dependencies explicitly.
+Do not silently truncate source or treat source-census hashes as observed code.
+Instrument-only passes may be shared only as immutable factual context with
+exact source identity, never as another candidate's honesty judgment.
+
+Collect each model's missing-context requests into a union and retrieve those
+files only from the frozen repository commits. Continue until every required
+changed-source obligation and material transitive dependency is covered, or
+report the review incomplete. A final per-candidate synthesis must see the
+paired evidence, all disagreements and unresolved findings, and the six
+criteria plus traffic-preservation and production-benefit checks. Findings from
+either member remain present; a pass from the other does not erase them.
+
+Before scheduling more inference, the planner and completion checker need
+deterministic controls for omitted files/hunks, duplicate credit, wrong model
+or source digest, partial-versus-complete provenance, unresolved dependencies,
+failed/incomplete provider output and changes to the eligible-job inventory.
+Persist immutable progress so reconnecting does not repeat completed calls.
+Protected archival failure retries archival only, never model execution.

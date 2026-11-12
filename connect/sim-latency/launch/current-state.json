@@ -396,6 +396,17 @@
     "job_id": "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43",
     "evidence": "EPOCH2-SOURCE-APPLICATION-FAILURE-2026-11-12.json",
     "offline_result": "19 files have hunks that do not apply to the exact frozen Connect tree",
+    "fresh_recheck": {
+      "observed_on": "2026-11-12",
+      "temporary_index_directory": "/mnt/data/competition-patch-recheck-20261112.OR5cAXUJ",
+      "exact_frozen_tree_index_check_exit": 0,
+      "apply_check_exit": 1,
+      "files_with_rejected_hunks": 19,
+      "canonical_and_routed_patch_digests_match_original_diagnostic": true,
+      "current_checkout_or_index_modified": false,
+      "candidate_executed": false,
+      "retry_authorization_does_not_bypass_patch_application": true
+    },
     "generic_builder_classification_not_rewritten": true,
     "blind_infrastructure_retry_granted": false
   },
@@ -660,10 +671,33 @@
   },
   "approved_failed_job_retries": {
     "approval": "EPOCH2-DISTRIBUTED-RETRY-APPROVAL-2026-11-12.json",
-    "jobs": ["01a1c402-9ca1-79d8-e114-5af7c2ef343d", "01a1c4af-c928-3e6a-d183-6c9f319cc119"],
+    "jobs": ["01a1c402-9ca1-79d8-e114-5af7c2ef343d", "01a1c4af-c928-3e6a-d183-6c9f319cc119", "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43", "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c"],
+    "expanded_user_authorization": "2026-11-12: We need to re-run all evaluation failures",
+    "expanded_authorization_scope": "All four currently failed jobs; original failure records and submission-order tie-breaking remain unchanged. Patch-application failure requires exact frozen-source preflight, not altered patch bytes or bypassed screening.",
     "user_authorized": true,
     "request_is_not_a_database_grant": true,
     "implementation_and_deployment_pending": true,
+    "isolated_main_contract_preparation": {
+      "worktree": "/home/by/urnetwork/temp/competition-recovery-main-sn-20261112",
+      "merged_commit": "e908edda50378af63576109df88c603168716ce6",
+      "captured_origin_commit": "bdfcec46f146bf1bf1f4643017d9fb5b38afefd5",
+      "recovery_contract_parent": "c0534edf360d4c9eb3036e3daa44abfb3a65450f",
+      "competition_contract_blob_unchanged": "ddb147acfa98bda85b2a494e4a491e150fac2d2b",
+      "module_and_sum_blobs_unchanged": true,
+      "shared_sn_main_checkout_modified": false,
+      "qualified_or_deployed": false
+    },
+    "isolated_server_integration": {
+      "worktree": "/home/by/urnetwork/temp/competition-recovery-main-integrated-20261112",
+      "commit": "3ae7d84523a10cc98bb1e3ee0309b0ed44b55b3c",
+      "captured_main": "6c1da5c0f",
+      "origin_migration_prefix_preserved": true,
+      "local_migration_difference": "One distributed-reevaluation migration appended after the origin extender migration; earlier recovery prerequisites are already present in captured main.",
+      "qualified_or_deployed": false,
+      "tail_test_updated_for_published_extender_predecessor": true,
+      "previous_generated_main_qualification_view_must_be_refreshed": true,
+      "frozen_candidate_test_inputs_changed": false
+    },
   "deployment_requirements_after_final_merged_qualification": {
     "migration": "Append the additive recovery migration after all published origin migrations; normal direct-administration deployment pipeline only.",
     "main_services": ["api", "monitor"],
@@ -742,18 +776,18 @@
       "broader_271_qualification_pending": true,
       "new_candidate_cut_ordinary_scope": {
         "total": 271,
-        "qualified": 92,
-        "pending": 179,
+        "qualified": 111,
+        "pending": 160,
         "scope_sha256": "c8c8deb9f7813e15b4b0dd1eca110271047c99bb41a81aadd7816a3d5ef8628c",
-        "qualified_sha256": "f84a08017b887ad3b110983ad310ab91b051e474997da35b24d0c40adc18eb22",
-        "pending_sha256": "77951eb64cfc4184cfaac7df2433c34d64a7b6649469c06956217ffa47f5e6e4",
-        "latest_batch_passed": 20,
+        "qualified_sha256": "330a3ff74a17e7f79329a802d0b967c73f7ab6c0b01c0d974f09c58f9958c564",
+        "pending_sha256": "d1cd1d0de7e6d10d85263fc74c330723b8faab52866b6dbb4d10962e738a06d3",
+        "latest_batch_passed": 19,
         "latest_batch_failed": 0,
         "latest_batch_skipped": 0,
-        "latest_log_sha256": "b0627108a8bf4c0424096488fecab93cf2943cd3202d84134bd57cf80257b371",
-        "latest_evidence_directory": "/dev/shm/competition-census-owned-batch20-qa-20261112.kKwjwFqL",
-        "latest_durable_evidence_directory": "/var/lib/urnetwork/bounded-census-owned-batch20-7880-20261112.1GnARgul",
-        "latest_durable_manifest_sha256": "ac39b5d650cae5083245c802c721a10a162d6b3576026711b2662667280299f8",
+        "latest_log_sha256": "a065f1a97948fd058beb2b83117d5647373785d27073895cce872fb81fa4fe64",
+        "latest_evidence_directory": "/dev/shm/competition-census-owned-batch21-qa-20261112.USJCYU3e",
+        "previous_batch_durable_evidence_directory": "/var/lib/urnetwork/bounded-census-owned-batch20-7880-20261112.1GnARgul",
+        "previous_batch_durable_manifest_sha256": "ac39b5d650cae5083245c802c721a10a162d6b3576026711b2662667280299f8",
         "actual_actor_guard_capture_cleanup_exit_zero": true,
         "source_and_dependencies_unchanged": true,
         "race_qualification_claimed": false
@@ -1106,7 +1140,7 @@
     "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted."
   ],
   "next_actions": [
-    "Qualify the implemented distributed recovery authority and corrected test fixtures for the two approved failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence.",
+    "Qualify the implemented distributed recovery authority and corrected test fixtures for all four user-authorized failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence. Recheck the patch-application failure against exact frozen source without changing submitted bytes or bypassing screening.",
     "Monitor the activated transport worker and both executor slots; investigate new failures from retained evidence.",
     "Finish all recovery qualification and exact final-main compatibility checks before deploying the distinct recovery-capable worker or granting a new evaluation cycle. Transport activation is complete and the maintenance hold is released.",
     "Do not change frozen product source, shared baseline, scoring rules, evaluator image or any original attempt deadline."
