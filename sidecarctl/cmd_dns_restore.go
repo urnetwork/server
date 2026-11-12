@@ -179,7 +179,7 @@ func (self *dnsRestoreLogger) V(level int32) sidecar.Verbose {
 
 // The root a command works on: --root when given, in any case and with or without its final dot, which must be
 // one dns.yml serves, and otherwise dns.yml's root when it lists exactly one.
-func dnsRestoreRoot(roots []string, rootFlag string) (string, error) {
+func dnsYmlRoot(roots []string, rootFlag string) (string, error) {
 	if rootFlag == "" {
 		if len(roots) != 1 {
 			return "", sidecarctlUsageErrorf("dns.yml serves %d roots %q, so --root must name one", len(roots), roots)
@@ -221,7 +221,7 @@ func runDnsRestoringWithSettings(args []string, settings *dnsRestoreSettings, ou
 		return fmt.Errorf("restoring was not changed: %w", err)
 	}
 	defer env.close()
-	root, err := dnsRestoreRoot(env.roots, *rootFlag)
+	root, err := dnsYmlRoot(env.roots, *rootFlag)
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func runDnsRestoreWithSettings(ctx context.Context, args []string, settings *dns
 		return fmt.Errorf("the restore step did not run: %w", err)
 	}
 	defer env.close()
-	root, err := dnsRestoreRoot(env.roots, *rootFlag)
+	root, err := dnsYmlRoot(env.roots, *rootFlag)
 	if err != nil {
 		return err
 	}
