@@ -784,7 +784,8 @@ func (self *snClaimRelayCoreChain) Send(ctx context.Context, send *snClaimRelayS
 // root's tree. A coldkey in the index that the root does not hold at its
 // index, which vault2 would refuse anyway, is left out and logged. A pool whose
 // ledger cannot be read is left out of the pass and named, so that the other
-// pools' accounts are still claimed.
+// pools' accounts are still claimed, once another pool with a finalized root
+// was read.
 type snClaimRelayCoreLedger struct {
 	cfg *StConfig
 }
@@ -793,10 +794,13 @@ func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) (*snClaimRelay
 	read := &snClaimRelayLedgerRead{Accounts: []*snClaimRelayAccount{}}
 	pools := stLedgerV2OwnPools(self.cfg)
 	var errs []error
+	// the pools read that have a finalized root
+	rooted := 0
 	for _, noId := range pools {
 		var poolAccounts []*snClaimRelayAccount
+		hasRoot := false
 		err := stLedgerV2Guard(func() (err error) {
-			poolAccounts, err = self.poolAccounts(ctx, noId)
+			poolAccounts, hasRoot, err = self.poolAccounts(ctx, noId)
 			return
 		})
 		if err != nil {
@@ -804,9 +808,16 @@ func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) (*snClaimRelay
 			errs = append(errs, fmt.Errorf("pool %d: %w", noId, err))
 			continue
 		}
+		if hasRoot {
+			rooted += 1
+		}
 		read.Accounts = append(read.Accounts, poolAccounts...)
 	}
-	if len(read.Unavailable) == len(pools) {
+	// A pool without a finalized root, like the capture the flag pool before
+	// its first or with capture the flag off, holds nothing to claim. When it
+	// is the only one read, the ledger is unavailable and the pass ends there,
+	// as it did with the operator's pool alone.
+	if 0 < len(read.Unavailable) && rooted == 0 {
 		return nil, errors.Join(errs...)
 	}
 	for _, err := range errs {
@@ -852,16 +863,17 @@ func snClaimRelayCarryColdkey(ctx context.Context, ledgerHash [32]byte) (*[32]by
 	return carry, nil
 }
 
-// One pool's accounts, empty until it has a finalized root.
-func (self *snClaimRelayCoreLedger) poolAccounts(ctx context.Context, noId uint64) ([]*snClaimRelayAccount, error) {
+// One pool's accounts, empty until it has a finalized root, and whether it
+// has one.
+func (self *snClaimRelayCoreLedger) poolAccounts(ctx context.Context, noId uint64) ([]*snClaimRelayAccount, bool, error) {
 	deploymentKey := self.cfg.DeploymentKey()
 	root := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, noId)
 	if root == nil || root.RootIndex == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 	_, leaves, err := stLedgerV2AccountTree(ctx, root)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	// The carry contract's account in a capture the flag pool holds the pots:
 	// its recycle claims it and moves the stake back onto the pool (sn
@@ -870,7 +882,7 @@ func (self *snClaimRelayCoreLedger) poolAccounts(ctx context.Context, noId uint6
 	var carry *[32]byte
 	if _, ctfPool := amendment.CtfNoID(noId); ctfPool {
 		if carry, err = snClaimRelayCarryColdkey(ctx, root.LedgerHash); err != nil {
-			return nil, err
+			return nil, true, err
 		}
 	}
 	claimed := model.GetStLedgerV2ClaimedCumulatives(ctx, deploymentKey, noId)
@@ -896,7 +908,7 @@ func (self *snClaimRelayCoreLedger) poolAccounts(ctx context.Context, noId uint6
 		}
 		accounts = append(accounts, account)
 	}
-	return accounts, nil
+	return accounts, true, nil
 }
 
 func (self *snClaimRelayCoreLedger) Proof(ctx context.Context, account *snClaimRelayAccount) ([]merkle.LedgerNode, error) {

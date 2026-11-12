@@ -349,7 +349,8 @@ type snClaimRelayChain interface {
 type snClaimRelayLedger interface {
 	// Accounts are each pool's accounts once it has a finalized, recorded
 	// root, by pool and index. A pool whose ledger cannot be read is left out
-	// and named in the read; err says that no pool could be read.
+	// and named in the read; err says that no pool with a finalized root
+	// could be read.
 	Accounts(ctx context.Context) (*snClaimRelayLedgerRead, error)
 	Proof(ctx context.Context, account *snClaimRelayAccount) ([]merkle.LedgerNode, error)
 }

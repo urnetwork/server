@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,8 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/holiman/uint256"
 
+	"github.com/urfoundation/sn/ctf"
+	"github.com/urfoundation/sn/ledger"
 	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urfoundation/sn/stabi"
@@ -422,11 +426,18 @@ func TestDbClaimRelayRequests(t *testing.T) {
 		if requested || until.Before(now.Add(snClaimRelayClaimNowPeriod-time.Hour)) || until.After(now.Add(snClaimRelayClaimNowPeriod+time.Hour)) {
 			t.Fatalf("after it was paid: %t %s", requested, until)
 		}
-		// a running limit is not pushed back by another
+		// a running limit is not pushed back by another: it keeps its start
 		model.FinishSnClaimRelayRequest(ctx, key, first, true, now.Add(10*24*time.Hour), snClaimRelayClaimNowPeriod)
 		if _, again := model.GetSnClaimRelayRequest(ctx, key, first, now); !again.Equal(until) && again.Sub(until) > time.Minute {
 			t.Fatalf("the limit moved from %s to %s", until, again)
 		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			start, err := r.Get(ctx, fmt.Sprintf("sn_claim_relay_limit:%s:%s", key, hex.EncodeToString(first[:]))).Result()
+			server.Raise(err)
+			if start != fmt.Sprint(now.UnixMilli()) {
+				t.Fatalf("the limit's start %s, want %d", start, now.UnixMilli())
+			}
+		})
 		// nothing sent, nothing used up
 		model.FinishSnClaimRelayRequest(ctx, key, second, false, now, snClaimRelayClaimNowPeriod)
 		if requested, until := model.GetSnClaimRelayRequest(ctx, key, second, now); requested || !until.IsZero() {
@@ -506,6 +517,8 @@ type claimRelayDbWorld struct {
 	chain   *snClaimRelayCoreChain
 	leaves  []merkle.LedgerAccount
 	paid    map[uint64]bool
+	// the ledger object store, once a capture the flag root is published
+	store server.BlobStore
 }
 
 func newClaimRelayDbWorld(t testing.TB, amounts ...*uint256.Int) *claimRelayDbWorld {
@@ -811,6 +824,474 @@ func TestDbClaimRelayNetworkConsentsNameTheColdkeys(t *testing.T) {
 		}
 		if seen[firstKey.Public().Encode()] != 1 || seen[secondKey.Public().Encode()] != 1 {
 			t.Fatalf("listed %x", listed)
+		}
+	})
+}
+
+// publishCtfRoot gives the operator's capture the flag pool, 2^32 + 1, its
+// finalized root rootIndex (seq rootIndex + 1) of epoch, published as the
+// driver publishes one: the account chunks and a CTF header naming carry as the
+// carry contract's coldkey. Its tree is read through that header, since the
+// world's builder knows only pool 1's ledger. The account index records the
+// accounts it adds, and vault2 answers the root and, for each account it adds,
+// nothing claimed. It returns the ledger hash.
+func (self *claimRelayDbWorld) publishCtfRoot(carry [32]byte, rootIndex uint64, epoch uint64, leaves []merkle.LedgerAccount) [32]byte {
+	t := self.t
+	t.Helper()
+	if self.store == nil {
+		self.store = server.NewLocalBlobStore(t.TempDir(), "test")
+		SetStLedgerV2ObjectStore(self.store)
+		t.Cleanup(func() { SetStLedgerV2ObjectStore(nil) })
+	}
+	chunks, err := ledger.EncodeAccountChunks(leaves)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := make([]ledger.Ref, len(chunks))
+	for index, chunk := range chunks {
+		if _, err := PutStLedgerV2Object(self.ctx, chunk); err != nil {
+			t.Fatal(err)
+		}
+		refs[index] = ledger.RefOf(chunk)
+	}
+	empty := ledger.RefOf(nil)
+	header, err := ctf.EncodeHeader(&ctf.Header{
+		NoID: self.cfg.NoId, Epoch: epoch, CarryColdkey: carry,
+		Epochs:   []ctf.HeaderEpoch{{Epoch: epoch, Awards: empty, Pots: empty, Pending: empty}},
+		Accounts: refs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PutStLedgerV2Object(self.ctx, header); err != nil {
+		t.Fatal(err)
+	}
+	ledgerHash := [32]byte(ledger.RefOf(header))
+	tree, err := merkle.BuildLedgerSumTree(self.ctx, leaves)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, total := tree.Root()
+	key := self.cfg.DeploymentKey()
+	model.SetStLedgerV2RootFinalized(self.ctx, key, &model.StLedgerV2Root{NoId: claimRelayTestCtfPool, Seq: rootIndex + 1, Epoch: epoch, Root: root, Total: total, LeafCount: uint64(len(leaves)), LedgerHash: ledgerHash, RootIndex: &rootIndex}, 90+rootIndex)
+	firstIndex := model.GetStLedgerV2AccountCount(self.ctx, key, claimRelayTestCtfPool)
+	newColdkeys := [][32]byte{}
+	for _, leaf := range leaves[firstIndex:] {
+		newColdkeys = append(newColdkeys, leaf.Coldkey)
+	}
+	if err := model.RecordStLedgerV2Root(self.ctx, key, claimRelayTestCtfPool, rootIndex+1, firstIndex, newColdkeys, nil); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := stabi.STSettlementVault2MetaData.ParseABI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootOutput, err := parsed.Methods["roots"].Outputs.Pack(stabi.ISTSettlementVault2Root{Root: root, Total: total.ToBig(), LeafCount: uint64(len(leaves)), Epoch: epoch, LedgerHash: ledgerHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	self.fixture.lock.Lock()
+	defer self.fixture.lock.Unlock()
+	self.fixture.results[string(stLedgerV2VaultAbi.PackRoots(stBig(claimRelayTestCtfPool), stBig(rootIndex)))] = rootOutput
+	for index := firstIndex; index < uint64(len(leaves)); index++ {
+		self.fixture.results[string(stLedgerV2VaultAbi.PackClaimed(stBig(claimRelayTestCtfPool), stBig(index)))] = make([]byte, 32)
+	}
+	return ledgerHash
+}
+
+// payBothPools answers each claim the relay sends, in either pool, as vault2
+// pays it: a Claimed log in the receipt, and claimed reads the cumulative from
+// then on. The function it returns lists the accounts paid, by pool and index,
+// in order.
+func (self *claimRelayDbWorld) payBothPools() func() []string {
+	var paid []string
+	self.fixture.lock.Lock()
+	defer self.fixture.lock.Unlock()
+	self.fixture.receiptHook = func(tx *types.Transaction, receipt *types.Receipt) {
+		claims, _, err := snClaimRelayDecodeCalldata(tx.Data())
+		if err != nil {
+			self.t.Errorf("a transaction that is not a claim: %v", err)
+			return
+		}
+		receipt.GasUsed = 155_000
+		receipt.EffectiveGasPrice = claimRelayGwei(5)
+		for _, item := range claims {
+			noId, index := item.NoId.Uint64(), item.Account.Index.Uint64()
+			cumulative, overflow := uint256.FromBig(item.Account.Cumulative)
+			if overflow {
+				self.t.Errorf("claim %d/%d of %s", noId, index, item.Account.Cumulative)
+				return
+			}
+			claim := &snClaimRelayClaim{Account: &snClaimRelayAccount{NoId: noId, Index: index, RootIndex: item.RootIndex.Uint64(), Coldkey: item.Account.Coldkey, Cumulative: *cumulative}}
+			receipt.Logs = append(receipt.Logs, claimRelayDbClaimedLog(self.t, self.cfg, claim, self.chain.relayer.address))
+			word := make([]byte, 32)
+			item.Account.Cumulative.FillBytes(word)
+			self.fixture.results[string(stLedgerV2VaultAbi.PackClaimed(stBig(noId), stBig(index)))] = word
+			paid = append(paid, snClaimRelayAccountKey(noId, index))
+		}
+	}
+	return func() []string {
+		self.fixture.lock.Lock()
+		defer self.fixture.lock.Unlock()
+		return slices.Clone(paid)
+	}
+}
+
+// claimRelayDbNear reports whether a unix-milliseconds time is the limit's end,
+// which the reads place by its remaining time to within a few milliseconds.
+func claimRelayDbNear(millis int64, until time.Time) bool {
+	return time.Duration(millis-until.UnixMilli()).Abs()*time.Millisecond <= time.Second
+}
+
+// GET /sn/claim-relay reads both of the operator's pools from the database: a
+// coldkey's account in its pool and in its capture the flag pool, each a row of
+// its own kind and label, whether or not partial=true is asked. Once the CTF
+// pool's latest root cannot be read, partial=true names that pool in
+// unavailable_pools beside the pool's row, while an old client, which never
+// sends partial, gets the error answer with no balances. The pass claims the
+// pool it can read and says the ledger is unavailable, naming the other, and a
+// Claim now takes the readable pool's account and keeps its request for the
+// other.
+func TestDbClaimRelayRouteReadsBothPools(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao), claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
+		ctx := world.ctx
+		key := world.cfg.DeploymentKey()
+		carry, holder := claimRelayTestColdkey(9), claimRelayTestColdkey(1)
+		ctfLeaves := []merkle.LedgerAccount{
+			// the pots, over the threshold: the carry's recycle claims them
+			{Coldkey: carry, Cumulative: *claimRelayTestAlpha(4 * snClaimRelayAutomaticTaoRao)},
+			{Coldkey: holder, Cumulative: *claimRelayTestAlpha(20 * snClaimRelayFloorTaoRao)},
+		}
+		world.publishCtfRoot(carry, 0, 9, ctfLeaves)
+		paid := world.payBothPools()
+
+		// the pass claims pool 1's account over the threshold, never the carry's
+		if result := SnClaimRelayPass(ctx); result.State != SnClaimRelayStateRunning {
+			t.Fatalf("pass: %s", result)
+		}
+		if got := paid(); !slices.Equal(got, []string{"1/0"}) {
+			t.Fatalf("paid %v", got)
+		}
+
+		clientSession := world.session(1)
+		for _, partial := range []bool{true, false} {
+			answer, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: partial}, clientSession)
+			if err != nil || answer.Error != nil || answer.State != SnClaimRelayStateRunning || len(answer.Accounts) != 2 || len(answer.UnavailablePools) != 0 {
+				t.Fatalf("partial %t: %+v (%v)", partial, answer, err)
+			}
+			pool, flag := answer.Accounts[0], answer.Accounts[1]
+			if pool.NoId != 1 || pool.Kind != StLedgerV2PoolKindPool || pool.Label != "Pool 1" || pool.Index != 1 ||
+				pool.ClaimableRao != int64(world.leaves[1].Cumulative.Uint64()) || pool.Reason != SnClaimRelayReasonUnderThreshold || !pool.ClaimNowAvailable {
+				t.Fatalf("partial %t: the pool's account %+v", partial, pool)
+			}
+			if flag.NoId != int64(claimRelayTestCtfPool) || flag.Kind != StLedgerV2PoolKindCtf || flag.Label != "Capture the flag" || flag.Index != 1 || flag.ColdkeySs58 != pool.ColdkeySs58 ||
+				flag.ClaimableRao != int64(ctfLeaves[1].Cumulative.Uint64()) || flag.Reason != SnClaimRelayReasonUnderThreshold || !flag.ClaimNowAvailable {
+				t.Fatalf("partial %t: the capture the flag account %+v", partial, flag)
+			}
+			wire, err := json.Marshal(answer)
+			if err != nil || !strings.Contains(string(wire), `"unavailable_pools":[]`) ||
+				!strings.Contains(string(wire), fmt.Sprintf(`"no_id":%d,"kind":"ctf","label":"Capture the flag","index":1,`, claimRelayTestCtfPool)) {
+				t.Fatalf("partial %t on the wire %s (%v)", partial, wire, err)
+			}
+		}
+
+		// the CTF pool's next root names objects nobody published
+		lost := uint64(1)
+		model.SetStLedgerV2RootFinalized(ctx, key, &model.StLedgerV2Root{NoId: claimRelayTestCtfPool, Seq: 2, Epoch: 10, Root: [32]byte{0xcf}, Total: *uint256.NewInt(1), LeafCount: 2, LedgerHash: [32]byte{0xcf, 0x01}, RootIndex: &lost}, 95)
+		resetLedgerV2Caches()
+		answer, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, clientSession)
+		if err != nil || answer.Error != nil || len(answer.Accounts) != 1 || answer.Accounts[0].NoId != 1 || len(answer.UnavailablePools) != 1 {
+			t.Fatalf("partial, the CTF pool unreadable: %+v (%v)", answer, err)
+		}
+		if pool := answer.UnavailablePools[0]; pool.NoId != claimRelayTestCtfPool || pool.Kind != StLedgerV2PoolKindCtf || pool.Label != "Capture the flag" || pool.Vault != stLedgerV2Address(world.cfg.VaultV2) {
+			t.Fatalf("the unavailable pool %+v", pool)
+		}
+		// an old client, which never sends partial: no balance at all, never zero
+		old, err := SnClaimRelay(clientSession)
+		if err != nil || old.Error == nil || old.Error.Message == "" || len(old.Accounts) != 0 || len(old.UnavailablePools) != 0 || old.State != SnClaimRelayStateRunning {
+			t.Fatalf("an old client's answer %+v (%v)", old, err)
+		}
+
+		// the pass claims what it can read and names the pool it cannot
+		SnClaimRelayPass(ctx)
+		status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
+		if status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{claimRelayTestCtfPool}) {
+			t.Fatalf("status %+v", status)
+		}
+		answer, err = SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, clientSession)
+		if err != nil || answer.State != SnClaimRelayStateLedgerUnavailable || len(answer.Accounts) != 1 || answer.Accounts[0].Reason != SnClaimRelayReasonUnderThreshold || !answer.Accounts[0].ClaimNowAvailable {
+			t.Fatalf("the readable pool while the other is unavailable: %+v (%v)", answer, err)
+		}
+		tap, err := SnClaimRelayClaimNow(&SnClaimRelayClaimNowArgs{ColdkeySs58: answer.Accounts[0].ColdkeySs58}, clientSession)
+		if err != nil || !tap.Requested {
+			t.Fatalf("tap %+v (%v)", tap, err)
+		}
+		SnClaimRelayPass(ctx)
+		if got := paid(); !slices.Equal(got, []string{"1/0", "1/1"}) {
+			t.Fatalf("paid %v", got)
+		}
+		// paid, the coldkey's limit runs, and its request stays for the account
+		// the pass cannot read
+		now := server.NowUtc()
+		if requested, until := model.GetSnClaimRelayRequest(ctx, key, holder, now); !requested || until.Before(now.Add(snClaimRelayClaimNowPeriod-time.Hour)) {
+			t.Fatalf("after the readable pool's claim: requested %t until %s", requested, until)
+		}
+	})
+}
+
+// Claim now on the real tables and Redis, for a coldkey with an account in each
+// of the operator's pools and no batcher: the first pass pays the pool's
+// account, which starts the coldkey's 30-day limit, a Redis key of its own
+// (model.StartSnClaimRelayLimit), while the request stays for the capture the
+// flag account; the next pass pays that one and ends the request, and the limit
+// keeps its first end. While it runs, the coldkey's new balance waits with the
+// limit's reason and end, and a tap is refused with them; another coldkey taps
+// freely.
+func TestDbClaimRelayClaimNowLimitIsPerColdkey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
+		world := newClaimRelayDbWorld(t, small, small)
+		ctx := world.ctx
+		key := world.cfg.DeploymentKey()
+		carry, tapped, other := claimRelayTestColdkey(9), claimRelayTestColdkey(1), claimRelayTestColdkey(0)
+		ctfLeaves := []merkle.LedgerAccount{
+			{Coldkey: carry, Cumulative: *claimRelayTestAlpha(4 * snClaimRelayAutomaticTaoRao)},
+			{Coldkey: tapped, Cumulative: *claimRelayTestAlpha(20 * snClaimRelayFloorTaoRao)},
+		}
+		world.publishCtfRoot(carry, 0, 9, ctfLeaves)
+		paid := world.payBothPools()
+
+		// nothing is due, and the carry's account is never the relay's to claim
+		SnClaimRelayPass(ctx)
+		if got := paid(); len(got) != 0 {
+			t.Fatalf("paid %v", got)
+		}
+		clientSession := world.session(1)
+		address, err := ss58.Encode(tapped, ss58.BittensorPrefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tap, err := SnClaimRelayClaimNow(&SnClaimRelayClaimNowArgs{ColdkeySs58: address}, clientSession); err != nil || !tap.Requested {
+			t.Fatalf("tap %+v (%v)", tap, err)
+		}
+
+		// without a batcher each claim goes alone: the pool's account first
+		SnClaimRelayPass(ctx)
+		if got := paid(); !slices.Equal(got, []string{"1/1"}) {
+			t.Fatalf("paid %v", got)
+		}
+		now := server.NowUtc()
+		requested, until := model.GetSnClaimRelayRequest(ctx, key, tapped, now)
+		if !requested || until.Before(now.Add(snClaimRelayClaimNowPeriod-time.Hour)) || now.Add(snClaimRelayClaimNowPeriod).Before(until) {
+			t.Fatalf("after the first claim: requested %t until %s", requested, until)
+		}
+		// the limit is the coldkey's own key in Redis, holding its start and kept
+		// for the period
+		limitKey := fmt.Sprintf("sn_claim_relay_limit:%s:%s", key, hex.EncodeToString(tapped[:]))
+		limit := func() (start string, ttl time.Duration) {
+			server.Redis(ctx, func(r server.RedisClient) {
+				var err error
+				start, err = r.Get(ctx, limitKey).Result()
+				server.Raise(err)
+				ttl, err = r.PTTL(ctx, limitKey).Result()
+				server.Raise(err)
+			})
+			return
+		}
+		limitStart, limitTtl := limit()
+		if limitTtl < snClaimRelayClaimNowPeriod-time.Hour || snClaimRelayClaimNowPeriod < limitTtl {
+			t.Fatalf("limit %s ttl %s", limitKey, limitTtl)
+		}
+		answer, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, clientSession)
+		if err != nil || answer.Error != nil || len(answer.Accounts) != 2 {
+			t.Fatalf("answer %+v (%v)", answer, err)
+		}
+		if pool := answer.Accounts[0]; pool.ClaimableRao != 0 || pool.Reason != SnClaimRelayReasonNothingPending || !claimRelayDbNear(pool.ClaimNowNextAtMillis, until) {
+			t.Fatalf("the paid account %+v, limit until %s", pool, until)
+		}
+		if flag := answer.Accounts[1]; flag.Reason != SnClaimRelayReasonQueued || flag.ClaimNowReason != SnClaimRelayClaimNowRequested || flag.ClaimNowAvailable {
+			t.Fatalf("the queued account %+v", flag)
+		}
+
+		SnClaimRelayPass(ctx)
+		if got := paid(); !slices.Equal(got, []string{"1/1", claimRelayCtfKey(1)}) {
+			t.Fatalf("paid %v", got)
+		}
+		if requests := model.GetSnClaimRelayRequests(ctx, key, 10); len(requests) != 0 {
+			t.Fatalf("requests %+v", requests)
+		}
+		if requested, again := model.GetSnClaimRelayRequest(ctx, key, tapped, server.NowUtc()); requested || again.Sub(until).Abs() > time.Second {
+			t.Fatalf("the limit moved from %s to %s (requested %t)", until, again, requested)
+		}
+		// the paid claim that ended the request kept the running limit: its
+		// start, and the time left of it
+		if start, ttl := limit(); start != limitStart || limitTtl < ttl {
+			t.Fatalf("the limit started again: start %s ttl %s, was %s ttl %s", start, ttl, limitStart, limitTtl)
+		}
+
+		// the coldkey earns again in the capture the flag pool: the balance waits
+		// for the limit, and a tap says until when
+		more := claimRelayTestAlpha(15 * snClaimRelayFloorTaoRao)
+		ctfLeaves[1].Cumulative.Add(&ctfLeaves[1].Cumulative, more)
+		world.publishCtfRoot(carry, 1, 10, ctfLeaves)
+		answer, err = SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, clientSession)
+		if err != nil || answer.Error != nil || len(answer.Accounts) != 2 {
+			t.Fatalf("answer %+v (%v)", answer, err)
+		}
+		if flag := answer.Accounts[1]; flag.ClaimableRao != int64(more.Uint64()) || flag.ClaimNowAvailable || flag.ClaimNowReason != SnClaimRelayClaimNowLimit || !claimRelayDbNear(flag.ClaimNowNextAtMillis, until) {
+			t.Fatalf("a new balance under the limit %+v, limit until %s", flag, until)
+		}
+		tap, err := SnClaimRelayClaimNow(&SnClaimRelayClaimNowArgs{ColdkeySs58: address}, clientSession)
+		if err != nil || tap.Requested || tap.Reason != SnClaimRelayClaimNowLimit || !claimRelayDbNear(tap.NextAtMillis, until) {
+			t.Fatalf("a tap under the limit %+v (%v)", tap, err)
+		}
+		// the limit is that coldkey's alone
+		otherAddress, err := ss58.Encode(other, ss58.BittensorPrefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tap, err := SnClaimRelayClaimNow(&SnClaimRelayClaimNowArgs{ColdkeySs58: otherAddress}, world.session(0)); err != nil || !tap.Requested {
+			t.Fatalf("another coldkey's tap %+v (%v)", tap, err)
+		}
+	})
+}
+
+// claimRelayDbKeys lists a JSON object's keys, sorted.
+func claimRelayDbKeys(t testing.TB, raw []byte) []string {
+	t.Helper()
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{}
+	for key := range object {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// With capture the flag off (no st.yml ctf block, so no CTF root), the relay
+// answers an old client, which never sends partial=true, as it did before the
+// CTF pool: the fields it read then, and besides them only each account's kind
+// and label and an empty unavailable_pools. A pass that cannot read the
+// operator's pool ends there as it did, ledger_unavailable whatever else would
+// stop it (here a low balance), and leaves every Claim now request queued; the
+// old client reads the error and no balances, and the ledger route a 502.
+func TestDbClaimRelayWithCtfOffAnswersAsBefore(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
+		world := newClaimRelayDbWorld(t, small, small)
+		ctx := world.ctx
+		key := world.cfg.DeploymentKey()
+		if world.cfg.Ctf.On() {
+			t.Fatalf("capture the flag is on: %+v", world.cfg.Ctf)
+		}
+		// an object store with nothing in it: no read leaves the test
+		SetStLedgerV2ObjectStore(server.NewLocalBlobStore(t.TempDir(), "test"))
+		t.Cleanup(func() { SetStLedgerV2ObjectStore(nil) })
+
+		if result := SnClaimRelayPass(ctx); result.State != SnClaimRelayStateRunning {
+			t.Fatalf("pass: %s", result)
+		}
+		clientSession := world.session(1)
+		answer, err := SnClaimRelay(clientSession)
+		if err != nil || answer.Error != nil || len(answer.Accounts) != 1 {
+			t.Fatalf("answer %+v (%v)", answer, err)
+		}
+		account := answer.Accounts[0]
+		if account.NoId != 1 || account.Kind != StLedgerV2PoolKindPool || account.Label != "Pool 1" || account.Index != 1 || account.Reason != SnClaimRelayReasonUnderThreshold || !account.ClaimNowAvailable {
+			t.Fatalf("account %+v", account)
+		}
+		wire, err := json.Marshal(answer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(wire, &top); err != nil {
+			t.Fatal(err)
+		}
+		accounts := []json.RawMessage{}
+		if err := json.Unmarshal(top["accounts"], &accounts); err != nil || len(accounts) != 1 || string(top["unavailable_pools"]) != "[]" {
+			t.Fatalf("on the wire %s (%v)", wire, err)
+		}
+		// the answer's fields before capture the flag, and unavailable_pools
+		if keys := claimRelayDbKeys(t, wire); !slices.Equal(keys, []string{"accounts", "automatic_threshold_rao", "automatic_threshold_tao_rao", "claim_now_period_days", "state", "transfer_floor_rao", "transfer_floor_tao_rao", "unavailable_pools"}) {
+			t.Fatalf("answer fields %v", keys)
+		}
+		// an account's fields before capture the flag, and kind and label
+		if keys := claimRelayDbKeys(t, accounts[0]); !slices.Equal(keys, []string{"claim_now_available", "claimable_rao", "coldkey_ss58", "index", "kind", "label", "no_id", "pending_rao", "reason", "value_tao_rao"}) {
+			t.Fatalf("account fields %v", keys)
+		}
+
+		// the operator's pool's next root names objects nobody published, and the
+		// relay's balance is low
+		one := uint64(1)
+		model.SetStLedgerV2RootFinalized(ctx, key, &model.StLedgerV2Root{NoId: 1, Seq: 2, Epoch: 5, Root: [32]byte{0xaf}, Total: *uint256.NewInt(1), LeafCount: 2, LedgerHash: [32]byte{0xaf, 0x01}, RootIndex: &one}, 95)
+		resetLedgerV2Caches()
+		world.fixture.lock.Lock()
+		world.fixture.balance = big.NewInt(1)
+		world.fixture.lock.Unlock()
+		// requests of a coldkey the account index records and of one it does not
+		now := server.NowUtc()
+		model.AddSnClaimRelayRequest(ctx, key, claimRelayTestColdkey(1), now)
+		model.AddSnClaimRelayRequest(ctx, key, claimRelayTestColdkey(5), now)
+
+		result := SnClaimRelayPass(ctx)
+		status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
+		if result.State != SnClaimRelayStateLedgerUnavailable || status.State != SnClaimRelayStateLedgerUnavailable || len(status.UnavailablePools) != 0 || !strings.Contains(status.Detail, "pool 1:") {
+			t.Fatalf("pass %s, status %+v", result, status)
+		}
+		if requests := model.GetSnClaimRelayRequests(ctx, key, 10); len(requests) != 2 {
+			t.Fatalf("requests %+v", requests)
+		}
+		old, err := SnClaimRelay(clientSession)
+		if err != nil || old.Error == nil || len(old.Accounts) != 0 || len(old.UnavailablePools) != 0 || old.State != SnClaimRelayStateLedgerUnavailable {
+			t.Fatalf("an old client's answer %+v (%v)", old, err)
+		}
+		if response := serveLedgerV2(SnLedgerAccount, "/sn/ledger/account?coldkey="+ledgerV2Hex(claimRelayTestColdkey(1))); response.Code != http.StatusBadGateway {
+			t.Fatalf("the ledger route %d %s", response.Code, response.Body.String())
+		}
+	})
+}
+
+// Once the capture the flag pool has a root, a pass that cannot read the
+// operator's pool still claims the CTF pool's accounts on the real tables and
+// names the operator's pool unavailable; the request of a coldkey that pool's
+// account index records waits for it, and one of a coldkey it does not record,
+// with nothing readable to claim, is given back.
+func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
+		world := newClaimRelayDbWorld(t, small, small)
+		ctx := world.ctx
+		key := world.cfg.DeploymentKey()
+		carry := claimRelayTestColdkey(9)
+		world.publishCtfRoot(carry, 0, 9, []merkle.LedgerAccount{
+			{Coldkey: carry, Cumulative: *claimRelayTestAlpha(4 * snClaimRelayAutomaticTaoRao)},
+			{Coldkey: claimRelayTestColdkey(0), Cumulative: *claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)},
+		})
+		paid := world.payBothPools()
+		// the operator's pool's next root names objects nobody published
+		one := uint64(1)
+		model.SetStLedgerV2RootFinalized(ctx, key, &model.StLedgerV2Root{NoId: 1, Seq: 2, Epoch: 5, Root: [32]byte{0xaf}, Total: *uint256.NewInt(1), LeafCount: 2, LedgerHash: [32]byte{0xaf, 0x01}, RootIndex: &one}, 95)
+		resetLedgerV2Caches()
+		now := server.NowUtc()
+		model.AddSnClaimRelayRequest(ctx, key, claimRelayTestColdkey(1), now)
+		model.AddSnClaimRelayRequest(ctx, key, claimRelayTestColdkey(5), now)
+
+		SnClaimRelayPass(ctx)
+		status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
+		if status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{1}) {
+			t.Fatalf("status %+v", status)
+		}
+		if got := paid(); !slices.Equal(got, []string{claimRelayCtfKey(1)}) {
+			t.Fatalf("paid %v", got)
+		}
+		requests := model.GetSnClaimRelayRequests(ctx, key, 10)
+		if len(requests) != 1 || requests[0].Coldkey != claimRelayTestColdkey(1) {
+			t.Fatalf("requests %+v", requests)
 		}
 	})
 }
