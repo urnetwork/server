@@ -523,14 +523,15 @@ func TestSnLedgerAccountRefusesInconsistentAnswers(t *testing.T) {
 	})
 }
 
-// The operator's capture the flag pool, 2^32 + n (sn CAPTURETHEFLAG.md §10):
-// its account is answered beside the pool's, named kind ctf, with no account
-// record needed; a CTF pool whose ledger cannot be read fails the whole answer
-// without partial=true, as before, and with it is named in unavailable_pools
-// while the pool's account is answered.
+// With capture the flag on, the operator's capture the flag pool, 2^32 + n (sn
+// CAPTURETHEFLAG.md §10): its account is answered beside the pool's, named
+// kind ctf, with no account record needed; a CTF pool whose ledger cannot be
+// read fails the whole answer without partial=true, as before, and with it is
+// named in unavailable_pools while the pool's account is answered.
 func TestSnLedgerAccountServesTheCtfPool(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2EndpointFixture(t)
+		setCtfPoolTestSwitches(t, f.cfg, true, true)
 		corsOrigins := snOperatorCorsOrigins
 		snOperatorCorsOrigins = func() ([]string, bool) { return nil, true }
 		t.Cleanup(func() { snOperatorCorsOrigins = corsOrigins })
@@ -569,6 +570,82 @@ func TestSnLedgerAccountServesTheCtfPool(t *testing.T) {
 		// a coldkey the CTF pool does not hold reads the same way: the pool is unknown
 		requireLedgerV2Answer(t, serveLedgerV2(SnLedgerAccount, "/sn/ledger/account?coldkey="+ledgerV2Hex(ledgerV2C)+"&partial=true"), http.StatusOK,
 			fmt.Sprintf(`{"coldkey":"%s","accounts":[{"vault":"%s","no_id":1,"kind":"pool","label":"Pool 1","index":2,"root_index":null,"cumulative":"0","proof":null,"claimed":"0","pending_cumulative":"1000"}],"unavailable_pools":[{"vault":"%s","no_id":%d,"kind":"ctf","label":"Capture the flag"}]}`, ledgerV2Hex(ledgerV2C), vault, vault, ctfPool))
+	})
+}
+
+// With capture the flag off the ledger route reads no capture the flag pool,
+// not even one the account record holds a coldkey in, so no fault of one can
+// reach a client. Here every read of the operator's CTF pool fails: its
+// finalized and pending roots name objects nobody published, and the account
+// record holds A there. Whichever switch is off (no ctf.yml or its api block
+// off, or no st.yml ctf block), each coldkey's answer is still its pools'
+// accounts as before capture the flag, whole, with partial=true or without,
+// and no tree but those pools' is read. Turned on, the same pool fails an old
+// client's answer, so a read of it would show.
+func TestSnLedgerAccountReadsNoCtfPoolWithCtfOff(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newLedgerV2EndpointFixture(t)
+		ctfPool := uint64(1<<32 + 1)
+		zero := uint64(0)
+		lost := *f.pool2
+		lost.Commit.LedgerHash = [32]byte{0xcf}
+		f.mirror(ctfPool, 1, &lost, &zero)
+		f.record(ctfPool, 1, 0, ledgerV2A)
+		lostPending := *f.root1
+		lostPending.Commit.LedgerHash = [32]byte{0xce}
+		f.mirror(ctfPool, 2, &lostPending, nil)
+
+		vault := testLedgerV2Vault
+		sibling := merkle.LedgerLeafHash(ledgerV2B, uint256.NewInt(400))
+		answers := []struct {
+			coldkey [32]byte
+			want    string
+		}{
+			{ledgerV2A, fmt.Sprintf(`{"coldkey":"%s","accounts":[`+
+				`{"vault":"%s","no_id":1,"kind":"pool","label":"Pool 1","index":0,"root_index":0,"cumulative":"600","proof":[{"hash":"0x%x","sum":"400"}],"claimed":"250","pending_cumulative":"1600"},`+
+				`{"vault":"%s","no_id":2,"kind":"pool","label":"Pool 2","index":0,"root_index":0,"cumulative":"777","proof":[],"claimed":"0","pending_cumulative":null}],"unavailable_pools":[]}`,
+				ledgerV2Hex(ledgerV2A), vault, sibling, vault)},
+			{ledgerV2C, fmt.Sprintf(`{"coldkey":"%s","accounts":[`+
+				`{"vault":"%s","no_id":1,"kind":"pool","label":"Pool 1","index":2,"root_index":null,"cumulative":"0","proof":null,"claimed":"0","pending_cumulative":"1000"}],"unavailable_pools":[]}`,
+				ledgerV2Hex(ledgerV2C), vault)},
+		}
+		resetLedgerV2Caches()
+		f.builder.reads.Store(0)
+		for _, off := range []struct {
+			name   string
+			stYml  bool
+			ctfYml bool
+		}{
+			{"neither switch", false, false},
+			{"no ctf.yml, or its api block off", true, false},
+			{"no st.yml ctf block", false, true},
+		} {
+			setCtfPoolTestSwitches(t, f.cfg, off.stYml, off.ctfYml)
+			for _, answer := range answers {
+				for _, target := range []string{"", "&partial=true"} {
+					response := serveLedgerV2(SnLedgerAccount, "/sn/ledger/account?coldkey="+ledgerV2Hex(answer.coldkey)+target)
+					if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != answer.want {
+						t.Fatalf("%s%s: %d %q\nwant %q", off.name, target, response.Code, response.Body.String(), answer.want)
+					}
+				}
+			}
+		}
+		// pool 1's finalized and pending roots and pool 2's finalized root, each
+		// read once; never a root of the CTF pool
+		if reads := f.builder.reads.Load(); reads != 3 {
+			t.Fatalf("%d tree reads", reads)
+		}
+
+		// on, the same pool cannot be read
+		setCtfPoolTestSwitches(t, f.cfg, true, true)
+		unavailable := ledgerV2Problem(http.StatusBadGateway, SnProblemLedgerUnavailable, "Ledger account unavailable.")
+		requireLedgerV2Answer(t, getLedgerV2Account(ledgerV2Hex(ledgerV2A)), http.StatusBadGateway, unavailable)
+		requireLedgerV2Answer(t, getLedgerV2Account(ledgerV2Hex(ledgerV2C)), http.StatusBadGateway, unavailable)
+		if reads := f.builder.reads.Load(); reads <= 3 {
+			t.Fatalf("%d tree reads with capture the flag on", reads)
+		}
+		requireLedgerV2Answer(t, serveLedgerV2(SnLedgerAccount, "/sn/ledger/account?coldkey="+ledgerV2Hex(ledgerV2A)+"&partial=true"), http.StatusOK,
+			strings.Replace(answers[0].want, `"unavailable_pools":[]`, fmt.Sprintf(`"unavailable_pools":[{"vault":"%s","no_id":%d,"kind":"ctf","label":"Capture the flag"}]`, vault, ctfPool), 1))
 	})
 }
 

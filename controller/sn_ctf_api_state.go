@@ -707,8 +707,9 @@ func snCtfCountryResultOf(view *snCtfView, country *snCtfCountry) *SnCtfCountryR
 }
 
 // The exclusion reasons, as the census numbers them (sn ctf.Reason) and as the
-// API names them; and the order in which the API counts a miner under the
-// first rule it failed (operator.yml CtfExclusionReason).
+// API names them; and the order in which /sn/ctf/client names the first rule a
+// miner failed (operator.yml CtfExclusionReason). The census's counts keep the
+// census's own order (CtfExclusionCounts).
 const (
 	snCtfReasonInactive         = 1
 	snCtfReasonOfflineAtEnd     = 2
@@ -828,9 +829,10 @@ type snCtfEpochDetail struct {
 // object, by role and reason name: what anyone can check against the
 // committed census, and the same for good, as an immutable answer must be.
 // The object counts a miner that failed several rules under the census's
-// lowest-numbered reason (sn ctf.Reason order), which is not always the first
-// of operator.yml's CtfExclusionReason order (presence before no_wallet); the
-// census members that tell the two apart are pruned after 60 epochs.
+// lowest-numbered reason (sn ctf.Reason order), as operator.yml's
+// CtfExclusionCounts says, which is not always the first of the
+// CtfExclusionReason order /sn/ctf/client uses (presence before no_wallet);
+// the census members that tell the two apart are pruned after 60 epochs.
 func (self *snCtfEpochDetail) excluded() SnCtfExcluded {
 	var excluded SnCtfExcluded
 	for _, exclusion := range self.Exclusions {
