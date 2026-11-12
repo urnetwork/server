@@ -50087,7 +50087,7 @@ unless a row says otherwise.
 | Only 12.9% of activation probes pass TCP 443. Two accounts that never pass pin the activation limit (about 96k refusals a day). A budget check that failed was counted as `account` | weeks | the `unproven_account` and `error` outcomes of `urnetwork_extender_activations_total`, and the longer wait for accounts that never pass (fix/extender-attribution-1111). No alert: reachability is the operators' | — |
 | 72% of `contract_extender` rows were an extender's own host, inflating the relay statistics about 10–15 times | weeks | self-tags no longer written (fix/extender-attribution-1111). No alert | — |
 | A 12.5k-device provider fleet (Vietnam, one custom build) went offline at 10:35Z, taking most of the gossip mesh with it. It was first read as a gossip outage | ongoing | `provider-fleet-departure` (§28.3); `gossip-mesh-links-dropped` (§28.4) | §28.4 at about 10:52Z, §28.3 at about 11:54Z (the stats lag 30–40 minutes); the same fleet's 11-02 departure at about 14:12Z and 14:54Z |
-| While that fleet was present, the gossip replicas' 512/1024 watermarks ran a 67-second trim-and-redial loop, about 10k link closures a minute | all 14 days of history | `gossip-mesh-saturated` (§28.4) | all four replicas held more than 1,024 open fds 95% of the time from 10-30 to 11-11 10:35Z; edge-3 again from about 22:50Z after the restart, at 93–101% of 1,024 |
+| While that fleet was present, the gossip replicas' 512/1024 watermarks ran a 67-second trim-and-redial loop, about 10k link closures a minute | all 14 days of history | `gossip-mesh-saturated` (§28.4) | all four replicas held more than 1,024 open fds 95% of the time from 10-30 to 11-11 10:35Z; edge-3 again from about 22:20Z to 23:30Z after the restart, at 98–101% of 1,024 |
 | About 14 GB of gossip heap built up across the four replicas | 10 days | `gossip-heap-high` (§28.4) | edge-4 by about 11-01 22Z, edge-3 by about 11-02 02Z |
 
 How each channel reaches clients, and which signal judges its publisher
@@ -50400,9 +50400,8 @@ Thresholds (each judged at every one-minute evaluation of its hold):
   `<env>/gossip-mesh/<host>`): links above 90% of the high watermark for 30
   minutes, or above the watermark for 10 minutes (`trimming=yes`, the
   loop). All four replicas held more than 1,024 open fds 95% of the time
-  from 10-30 until 11-11 10:35Z (1,000–8,000). Edge-3 held 950–1,040 (93–101%)
-  from about 22:50Z on 11-11, after the restart, so this fires on the
-  probe's first runs.
+  from 10-30 until 11-11 10:35Z (1,000–8,000). After the restart, edge-3 held
+  1,000–1,030 (98–101%) from about 22:20Z to 23:30Z on 11-11, then about 780.
 - WARN `gossip-mesh-links-dropped` (target `<env>/gossip-mesh`): the
   replicas' links together under half of their 3-hour peak for 15 minutes.
   Replayed, it fires only on the two fleet departures: on 11-02 at 13:57Z the
