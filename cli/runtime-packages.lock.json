@@ -578,6 +578,7 @@
     "mcp": "certificates",
     "mxedge-platform": "certificates",
     "proxy": "proxy",
+    "sockets": "certificates",
     "taskworker": "certificates"
   }
 }
