@@ -35,6 +35,16 @@ func validateCompetitionRepositoryPromotion(previous map[string]string, next map
 			changed = true
 		}
 	}
+	for repository := range next {
+		if _, held := previous[repository]; !held {
+			// a repository the evaluated graph lacks, which the lock digest admits
+			// only for sidecar: a dependency change like any other
+			if policy.PathBase == "" {
+				return errors.New("legacy promotion cannot change dependency commits")
+			}
+			changed = true
+		}
+	}
 	if !changed {
 		return errors.New("reviewed promotion must change an evaluated repository")
 	}

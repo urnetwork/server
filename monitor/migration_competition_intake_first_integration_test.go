@@ -36,7 +36,8 @@ func TestMigrationsCompetitionIntakeFirstIntegrationRetiresExactlyFourOwners(t *
 		}
 	}
 	contract := migrationCurrentSuffixTestContract(t, version)
-	if contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 || contract.query != competitionIntakeFirstArtifactQuery() {
+	// MG0's permissive source step retires it, at version zero while MG0 is pending
+	if contract.artifact.removedVersion != server.CompetitionSidecarSourceMigrationVersion() || contract.artifact.rowColumn != version-589 || contract.query != competitionIntakeFirstArtifactQuery() {
 		t.Fatal("integrated intake does not pin the exact current complete custody query")
 	}
 	oldCoverage := migrationCurrentSuffixTestContract(t, server.CompetitionWorkCoverageMigrationVersion())

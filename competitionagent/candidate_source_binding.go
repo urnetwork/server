@@ -376,8 +376,14 @@ func (self *DockerProxy) readCandidateSourceIdentity(source string) (*candidateS
 		return nil, "", errors.New("candidate source identity is not the exact temporary post-patch class")
 	}
 	repositories := strings.Fields("server connect sdk proxy glog goidenticons userwireguard sn warp gvisor")
+	// An image built from a server commit that requires the sidecar module names
+	// sidecar too; one built before it names the ten. Both run while rounds of
+	// either kind are open, as the database guards admit both.
+	if _, sidecar := identity.Repositories["sidecar"]; sidecar {
+		repositories = append(repositories, "sidecar")
+	}
 	if len(identity.Repositories) != len(repositories) {
-		return nil, "", errors.New("candidate source identity does not contain exactly ten product repositories")
+		return nil, "", errors.New("candidate source identity does not contain exactly the ten product repositories, or those with sidecar")
 	}
 	for _, repository := range repositories {
 		if !candidateSourceCommitPattern.MatchString(identity.Repositories[repository]) {

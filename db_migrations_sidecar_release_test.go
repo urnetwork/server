@@ -23,6 +23,11 @@ func TestReleaseBuildRegistersNoPendingGroup(t *testing.T) {
 	if 0 < len(sidecarPendingMigrations()) {
 		t.Fatal("a release build has pending migrations")
 	}
+	// MG0's permissive competition step replaces functions main already names,
+	// so the name check below cannot see it
+	if version := CompetitionSidecarSourceMigrationVersion(); version != 0 {
+		t.Fatalf("a release build registers the competition's permissive step at version %d", version)
+	}
 	names := append([]string{
 		"network_client_owner", "auth_code_api_key_id", "network_auth_key", "network_admin_event", "sidecar_identity",
 		// §20's parts of MG1 and MG2 (QUOTA-M1-02, QUOTA-M2-02)

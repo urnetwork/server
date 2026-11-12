@@ -86,7 +86,7 @@ func TestCompetitionHostQualificationRoutesMonoRootSource(t *testing.T) {
 	policy.PathBase = competitionMonoRootPathBase
 	policy.AllowedPaths = nil
 	policy.ForbiddenPaths = []string{"server/connect/sim-latency/**"}
-	for _, repository := range model.CompetitionSourceRepositoryNames() {
+	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 		policy.AllowedPaths = append(policy.AllowedPaths, repository+"/**")
 	}
 	tree := []byte("100644 blob " + strings.Repeat("a", 40) + "\tconnect/resident_contract_manager.go\x00")

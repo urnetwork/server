@@ -20,8 +20,9 @@
 //   - Redis: an evs world's soft state, leases and push sequences among it, goes with the restart; every committed
 //     version still reads and verifies, the next push's sequence is above every earlier one, and a subscriber that lost
 //     its lease catches up at its hourly resync and leases again, as FS-62 has it on fakes.
-//   - Postgres: a request whose transaction's connection is terminated at its commit is refused and takes no effect,
-//     so a retry applies it once; whether its status must be 503 is question test-m2-15-postgres-restart-answer.
+//   - Postgres: a request whose transaction's connection is terminated at its commit is answered 503 with
+//     Retry-After: 1 (QD-759) and takes no effect, so the retry the answer asks for applies it once. The cut is a
+//     backend's termination, which raises 57P01; a restart's other classes are held in server/router's own tests.
 
 package sidecart3
 
@@ -589,10 +590,10 @@ func TestT3RedisMasterRestartLosesOnlyRebuildableState(t *testing.T) {
 type disruptionRequestKey struct{}
 
 // POST /network/auth-keys's transaction has its connection terminated at its commit, as a Postgres or PgBouncer restart
-// mid-request does: the api's answer is a refusal, nothing of the request took effect, and the same request sent again
-// makes one key, so a retry has no double effect. The status is logged and not held: server's router answers the
-// raised 57P01 with its fixed 500, where §22.8's "answers retryable" may mean the 503 and Retry-After a lock timeout
-// already gets (question test-m2-15-postgres-restart-answer), so this row proves the no-double-effect half alone.
+// mid-request does. The api answers retryable, §22.8's first half: the router maps the raised 57P01 to 503 with
+// Retry-After: 1 and a fixed body that carries none of the cause (QD-759), as it answers a lock timeout. Nothing of
+// the request took effect, and the same request sent again makes one key, so the retry has no double effect, its
+// second half.
 func TestT3PostgresRestartMidRequest(t *testing.T) {
 	disruptionTestEnv().Run(t, func(tb testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), testDisruptionTimeout)
@@ -627,10 +628,27 @@ func TestT3PostgresRestartMidRequest(t *testing.T) {
 		}
 		before := keyCount()
 		args := &model.CreateAuthKeyArgs{DurationSeconds: 600, MaxUses: 1}
-		status, answer, err := api.Call(context.WithValue(ctx, disruptionRequestKey{}, true), http.MethodPost, "/network/auth-keys", root, args)
+		encodedArgs, err := json.Marshal(args)
 		if err != nil {
 			t.Fatal(err)
 		}
+		// sent as api.Call sends it, and through the transport itself so the answer's headers are read
+		request, err := http.NewRequestWithContext(context.WithValue(ctx, disruptionRequestKey{}, true), http.MethodPost, api.settings.ApiOrigin+"/network/auth-keys", bytes.NewReader(encodedArgs))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", root)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := api.Transport().RoundTrip(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		answer, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		status := response.StatusCode
 		select {
 		case err := <-restarted:
 			if err != nil {
@@ -643,8 +661,11 @@ func TestT3PostgresRestartMidRequest(t *testing.T) {
 			t.Fatalf("a commit on a terminated connection answered 200 %s", answer)
 		}
 		t.Logf("a commit cut by a Postgres restart answers %d %s", status, strings.TrimSpace(string(answer)))
-		if status < 500 {
-			t.Errorf("the api answered %d, a refusal of the request's own rather than a server's failure", status)
+		if retryAfter := response.Header.Get("Retry-After"); status != http.StatusServiceUnavailable || retryAfter != "1" {
+			t.Errorf("the api answered %d with Retry-After %q, want the retryable 503 with 1", status, retryAfter)
+		}
+		if body := strings.TrimSpace(string(answer)); body != `{"error":"Temporarily unavailable. Retry shortly."}` {
+			t.Errorf("the retryable answer's body is %q, which is not the fixed one", body)
 		}
 		if after := keyCount(); after != before {
 			t.Errorf("the cut request left %d keys, from %d", after, before)

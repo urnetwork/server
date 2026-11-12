@@ -89,7 +89,8 @@ func TestSidecarGroupsEndTheMigrations(t *testing.T) {
 }
 
 // Every group passes the static check (sidecarGroupFindings): no drop, rename or
-// truncation, no SET NOT NULL, and an existing table indexed only online.
+// truncation, no SET NOT NULL, an existing table indexed only online, and a
+// registered function replaced only to widen it.
 func TestSidecarGroupsAreAdditive(t *testing.T) {
 	for _, group := range sidecarPendingGroups() {
 		for _, finding := range sidecarGroupFindings(group.name, group.group) {
@@ -138,15 +139,23 @@ func TestSidecarMg0IsInTheBinarysRequiredHead(t *testing.T) {
 }
 
 // CODESTYLE's migration rules: the group may add tables, columns and indexes. It
-// may not touch what the running release reads or writes.
+// may not touch what the running release reads or writes, but for the
+// competition's source guards, which it widens (sidecarGroupFindings holds that
+// entry to a widening, and the tests of competitionSidecarSourceMigration to its
+// text and behavior).
 func TestSidecarMg0IsAdditive(t *testing.T) {
 	statement := regexp.MustCompile(`(?is)^\s*(CREATE TABLE network_client_owner\b|SET LOCAL lock_timeout = '2s';\s+ALTER TABLE \w+\s+ADD COLUMN\b|CREATE INDEX (CONCURRENTLY )?auth_code_api_key_id\b)`)
 	refused := regexp.MustCompile(`(?i)\b(DROP COLUMN|DROP TABLE|ALTER COLUMN|RENAME|SET NOT NULL|NOT VALID|TRUNCATE|UPDATE|DELETE|transaction_timeout)\b`)
 	required := regexp.MustCompile(`(?i)ADD COLUMN \w+ [\w ]*NOT NULL`)
+	widened := 0
 	for index, migration := range sidecarMg0Migrations() {
 		sqls := []string{}
 		switch value := migration.(type) {
 		case *SqlMigration:
+			if value.sql == competitionSidecarSourceMigration() {
+				widened++
+				continue
+			}
 			sqls = append(sqls, value.sql)
 		case *OnlineSqlMigration:
 			// the restart step drops only what an interrupted build of this index left
@@ -172,6 +181,12 @@ func TestSidecarMg0IsAdditive(t *testing.T) {
 				t.Errorf("entry %d changes what the running release uses: %s", index, sql)
 			}
 		}
+	}
+	if widened != 1 {
+		t.Fatalf("MG0 holds the competition's permissive step %d times", widened)
+	}
+	if findings := sidecarGroupFindings("MG0", sidecarMg0Migrations()); len(findings) != 0 {
+		t.Fatalf("MG0 is refused: %q", findings)
 	}
 }
 

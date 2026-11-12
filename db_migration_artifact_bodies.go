@@ -77,6 +77,14 @@ func CompetitionSourceRetirementBodiesSql() (sourceGraphValid, sourceAuthorized 
 	return strings.Split(migration, "$graph$")[1], strings.Split(migration, "$source$")[1]
 }
 
+// MG0's permissive competition step (competitionSidecarSourceMigration) widens
+// the source graph and source authorization bodies to admit sidecar beside the
+// ten. It reads published source only, whether or not this binary links MG0.
+func CompetitionSidecarSourceBodiesSql() (sourceGraphValid, sourceAuthorized string) {
+	migration := competitionSidecarSourceMigration()
+	return strings.Split(migration, "$graph$")[1], strings.Split(migration, "$source$")[1]
+}
+
 // Version 859 binds a scheduled round's opening to its intent: it replaces the
 // round guard body and republishes the winner guards unchanged.
 func CompetitionScheduledOpeningRoundGuardBodySql() string {

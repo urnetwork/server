@@ -43,11 +43,12 @@ type competitionDistributedSourceEvidence struct {
 	CleanupComplete      bool                                 `json:"cleanup_complete"`
 }
 
-// Exactly ten measured repositories are permitted; operator control code is
+// Exactly the frozen graph is permitted, the ten measured repositories or those
+// with sidecar (model.CompetitionSourceLockDigest); operator control code is
 // never copied into an evaluation checkout or accepted as a candidate product.
 func validateDistributedMeasuredCommits(commits map[string]string) error {
 	if _, err := model.CompetitionSourceLockDigest(commits); err != nil {
-		return errors.New("measured source must contain the exact canonical ten-repository graph")
+		return errors.New("measured source must contain the exact canonical repository graph")
 	}
 	return nil
 }

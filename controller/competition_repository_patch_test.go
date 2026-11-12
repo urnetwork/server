@@ -124,3 +124,43 @@ func TestCompetitionRepositoryPromotionUsesFrozenScopeAndCompleteGraph(t *testin
 		t.Fatal("unchanged source accepted as a promotion")
 	}
 }
+
+// Sidecar joining a graph of the ten, or leaving one, is a dependency change:
+// the frozen broad policy admits it and legacy approval never does, even beside
+// a server change, so no legacy review brings in a repository it did not see.
+func TestCompetitionRepositoryPromotionTreatsSidecarAsADependencyChange(t *testing.T) {
+	ten := map[string]string{}
+	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
+		ten[repository] = strings.Repeat("a", 40)
+	}
+	eleven := map[string]string{}
+	for name, commit := range ten {
+		eleven[name] = commit
+	}
+	eleven["sidecar"] = strings.Repeat("b", 40)
+	for _, direction := range [][2]map[string]string{{ten, eleven}, {eleven, ten}} {
+		previous, next := direction[0], direction[1]
+		if err := validateCompetitionRepositoryPromotion(previous, next, competitionRepositoryTestPolicy()); err != nil {
+			t.Fatalf("broad reviewed sidecar change refused: %v", err)
+		}
+		if err := validateCompetitionRepositoryPromotion(previous, next, PatchPolicy{}); err == nil || !strings.Contains(err.Error(), "legacy promotion cannot change dependency commits") {
+			t.Fatalf("legacy scope admitted a sidecar change: %v", err)
+		}
+		withServer := map[string]string{}
+		for name, commit := range next {
+			withServer[name] = commit
+		}
+		withServer["server"] = strings.Repeat("c", 40)
+		if err := validateCompetitionRepositoryPromotion(previous, withServer, PatchPolicy{}); err == nil || !strings.Contains(err.Error(), "legacy promotion cannot change dependency commits") {
+			t.Fatalf("legacy scope admitted a sidecar change beside a server change: %v", err)
+		}
+	}
+	unknown := map[string]string{}
+	for name, commit := range ten {
+		unknown[name] = commit
+	}
+	unknown["synthetic-unknown"] = strings.Repeat("b", 40)
+	if err := validateCompetitionRepositoryPromotion(ten, unknown, competitionRepositoryTestPolicy()); err == nil {
+		t.Fatal("an unknown eleventh repository was promoted")
+	}
+}

@@ -74,6 +74,11 @@ func TestMigrationsCompetitionIntakeFirstActualCatalogFaults(t *testing.T) {
 			server.Tx(ctx, func(tx server.PgTx) { server.RaisePgResult(tx.Exec(ctx, server.CompetitionIntakeFirstMigrationSql())) }, server.OptReadWrite())
 		}
 		query := competitionIntakeFirstCatalogTestQuery(tb)
+		if 0 < server.CompetitionSidecarSourceMigrationVersion() {
+			// a head with MG0's permissive source step holds this custody with the
+			// two widened source guard bodies, which that step's successor pins
+			query = strings.TrimSuffix(query, competitionIntakeFirstArtifactQuery()) + competitionSidecarSourceArtifactQuery()
+		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var healthy bool
 			if err := conn.QueryRow(ctx, query).Scan(&healthy); err != nil || !healthy {
