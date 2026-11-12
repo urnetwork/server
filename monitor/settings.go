@@ -341,6 +341,13 @@ type DNSAliasSignalSource interface {
 	DNSRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error)
 }
 
+// DNSTxtSignalSource optionally supplies a name's TXT records, each record's
+// character strings joined, for SIGNALS.md §28.2. Production resolves them
+// through the platform resolver.
+type DNSTxtSignalSource interface {
+	DNSTxt(ctx context.Context, hostname string) ([]string, error)
+}
+
 // SettingsGenerationCheck compares the immutable settings already owned by a
 // monitor with the effective settings available now. The implementation keeps
 // the fresh values only for the duration of the comparison. Freshness Alerts
@@ -1002,6 +1009,14 @@ func (r *sourceRunner) dnsRecursive(ctx context.Context, hostname string, record
 		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAliasSignalSource")
 	}
 	return source.DNSRecursive(ctx, hostname, recordType)
+}
+
+func (r *sourceRunner) dnsTxt(ctx context.Context, hostname string) ([]string, error) {
+	source, ok := r.source.(DNSTxtSignalSource)
+	if !ok {
+		return nil, fmt.Errorf("monitor: SignalSource does not implement DNSTxtSignalSource")
+	}
+	return source.DNSTxt(ctx, hostname)
 }
 
 func (r *sourceRunner) warpctl(ctx context.Context, args ...string) (string, error) {

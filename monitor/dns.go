@@ -140,6 +140,28 @@ func (r *runner) dnsRecursive(ctx context.Context, hostname string, recordType D
 	return DNSResponseObservation{ResponseCode: DNSResponseNameError}, nil
 }
 
+// dnsTxt resolves a name's TXT records through the platform resolver, the
+// view a client's system resolver has. Each record's character strings are
+// joined into one value, as a client joins them. A name with no TXT records,
+// or no such name, is returned as the resolver's not-found error, which
+// dnsNameNotFound recognises.
+func (r *runner) dnsTxt(ctx context.Context, hostname string) ([]string, error) {
+	commandCtx, cancel := boundedDNSContext(ctx, r.cfg.commandTimeout)
+	defer cancel()
+
+	txts, err := net.DefaultResolver.LookupTXT(commandCtx, absoluteDNSName(hostname))
+	if err == nil {
+		return txts, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if dnsNameNotFound(err) {
+		return nil, err
+	}
+	return nil, fmt.Errorf("recursive txt lookup: %w", err)
+}
+
 func boundedDNSContext(ctx context.Context, configured time.Duration) (context.Context, context.CancelFunc) {
 	timeout := configured
 	if timeout <= 0 || timeout > dnsObservationTimeout {
