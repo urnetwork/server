@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"time"
 
@@ -75,63 +74,39 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 	if err != nil {
 		return competitionagent.Response{}, err
 	}
-	process := exec.CommandContext(ctx, command, arguments...)
-	process.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
-	stderr := &boundedBuffer{limit: int(settings.MaximumDiagnosticBytes)}
-	process.Stderr = stderr
-	stdin, err := process.StdinPipe()
-	if err != nil {
-		return competitionagent.Response{}, err
-	}
-	stdout, err := process.StdoutPipe()
-	if err != nil {
-		stdin.Close()
-		return competitionagent.Response{}, err
-	}
-	if err := process.Start(); err != nil {
-		stdin.Close()
-		stdout.Close()
-		return competitionagent.Response{}, err
-	}
-	written := make(chan error, 1)
-	go func() {
+	writeRequest := func(stdin io.Writer) error {
 		err := competitionagent.WriteDocument(stdin, request, settings.Limits.DocumentBytes)
 		if err == nil && request.Operation == "start" && request.Start != nil {
 			err = competitionagent.WriteFiles(stdin, inputDirectory, request.Start.Inputs, settings.Limits.InputBytes, settings.Limits)
 		}
-		written <- errors.Join(err, stdin.Close())
-	}()
+		return err
+	}
 	response := competitionagent.Response{}
-	readErr := competitionagent.ReadDocument(stdout, &response, settings.Limits.DocumentBytes)
-	if readErr == nil {
+	readResponse := func(stdout io.Reader) error {
+		if err := competitionagent.ReadDocument(stdout, &response, settings.Limits.DocumentBytes); err != nil {
+			return err
+		}
 		key, err := base64.StdEncoding.DecodeString(self.host.AgentPublicKeyBase64)
 		if err != nil || len(key) != ed25519.PublicKeySize {
-			readErr = errors.New("invalid frozen executor verification key")
-		} else {
-			readErr = competitionagent.VerifyResponse(response, key)
+			return errors.New("invalid frozen executor verification key")
 		}
-	}
-	if readErr == nil && (response.Schema != competitionagent.Schema || response.HostId != self.host.HostId || response.RunId != request.RunId || response.FencingToken != request.FencingToken) {
-		readErr = errors.Join(competitionagent.ErrIntegrity, errors.New("executor response belongs to another host, run or owner fence"))
-	}
-	if readErr == nil && request.Operation == "artifacts" {
-		if outputDirectory == "" {
-			readErr = errors.New("artifact request has no private destination")
-		} else {
-			readErr = competitionagent.ReadFiles(stdout, outputDirectory, response.Files, settings.Limits.ArtifactBytes, settings.Limits)
+		if err := competitionagent.VerifyResponse(response, key); err != nil {
+			return err
 		}
+		if response.Schema != competitionagent.Schema || response.HostId != self.host.HostId || response.RunId != request.RunId || response.FencingToken != request.FencingToken {
+			return errors.Join(competitionagent.ErrIntegrity, errors.New("executor response belongs to another host, run or owner fence"))
+		}
+		if request.Operation == "artifacts" {
+			if outputDirectory == "" {
+				return errors.New("artifact request has no private destination")
+			}
+			if err := competitionagent.ReadFiles(stdout, outputDirectory, response.Files, settings.Limits.ArtifactBytes, settings.Limits); err != nil {
+				return err
+			}
+		}
+		return readCompetitionAgentTrailer(stdout)
 	}
-	if readErr == nil {
-		readErr = readCompetitionAgentTrailer(stdout)
-	}
-	if readErr != nil {
-		cancel()
-		stdin.Close()
-		stdout.Close()
-	}
-	writeErr := <-written
-	waitErr := process.Wait()
-	if err := errors.Join(readErr, writeErr, waitErr); err != nil {
+	if err := exchangeCompetitionAgentCommand(ctx, cancel, command, arguments, int(settings.MaximumDiagnosticBytes), writeRequest, readResponse); err != nil {
 		// Agent stderr may contain hidden request paths or runtime details; it
 		// is never included in a public error or echoed into service logs.
 		return competitionagent.Response{}, fmt.Errorf("authenticated executor transport failed: %w", err)
