@@ -19774,7 +19774,11 @@ SELECT hour,
        COALESCE(sum(ping_count) FILTER (WHERE cosign = 0), 0)::bigint AS unknown,
        COALESCE(sum(ping_count) FILTER (WHERE relayed), 0)::bigint AS relayed,
        sum(zero_rtt_count)::bigint AS zero_rtt,
-       sum(beyond_half_planet_count)::bigint AS beyond_half_planet
+       sum(beyond_half_planet_count)::bigint AS beyond_half_planet,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = 2 AND cosign_reason = 4), 0)::bigint AS unknown_pinger,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 1), 0)::bigint AS extender_cosigned,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 2), 0)::bigint AS extender_rejected,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 2 AND cosign_reason = 4), 0)::bigint AS extender_unknown_pinger
 FROM network_ping_hour_tally
 WHERE date_trunc('hour', now() at time zone 'utc') - interval '23 hours' <= hour
 GROUP BY hour ORDER BY hour;
@@ -19783,9 +19787,12 @@ GROUP BY hour ORDER BY hour;
 The ingest adds every stored report to that tally in the report's own
 transaction, so the counts are exact; the day is the 24 clock hours up to the
 current one, and beyond half the planet is the ingest's threshold (200 ms at
-the solver's 100 km per ms), which `DeriveHalfPlanetRttMs` follows.
+the solver's 100 km per ms), which `DeriveHalfPlanetRttMs` follows. The tally
+keeps the refusal reason (connect `ExtenderProbeVerdictReason*`) and the
+pinger kind (2 is an extender), so the refusals that are evidence against no
+one, and the extender pingers' verdicts, are counted apart.
 
-Alert, WARN tier, fifteen-minute cadence, when any of these thirteen
+Alert, WARN tier, fifteen-minute cadence, when any of these fourteen
 conditions holds (every threshold a setting with the default given):
 
 - **not running** (`derive-not-running`, parts `stale-run`, `task-missing`,
@@ -19800,10 +19807,38 @@ conditions holds (every threshold a setting with the default given):
   ingest have stopped;
 - **refusals** (`derive-refusals`, parts `rejected`, `rate-limited`):
   rejected pings above `DeriveMaxRefusalShare` (10 %) of verdicts over the
-  last hour — targets refusing honest claims (gate tolerance, clock skew) or
-  pingers under-claiming; or rate-limited (reason 6) above 5 %, which is the
-  extenders' admission limits (connect/EXTENDER.md A12) set too tight for the
-  ping cadence;
+  last hour — targets refusing honest claims (gate tolerance, clock skew),
+  pingers under-claiming, the probe path, or a key mismatch. Both counts
+  leave out the two refusals that are evidence against no one, as the derive
+  leaves them out of every refusal rate (`derivePingRefusalIsEvidence`): an
+  unknown pinger (reason 4), usually a directory that has not caught up,
+  which the stale-directories condition below judges, and a rate limit
+  (reason 6). A refusal with no reason, which a pinger records for an
+  acceptance whose co-signature did not verify, is a key mismatch and stays
+  counted. The other part is rate-limited (reason 6) above 5 % of every
+  verdict, which is the extenders' admission limits (connect/EXTENDER.md A12)
+  set too tight for the ping cadence. Until 2026-11-11 the share counted
+  unknown pingers: with the
+  directories stale after the 2026-11-06 gossip stall, it read 17–24 % of an
+  hour's verdicts refused, against 5.6–9.1 % without them (11-11, 15–20Z);
+- **stale directories** (`extender-directories-stale`): extender pingers
+  refused as unknown (reason 4) above `DeriveMaxUnknownPingerShare` (30 %) of
+  the last hour's extender-pinger verdicts. A target refuses an extender
+  pinger whose operator-signed record is not active in its directory;
+  directories are filled by gossip publishing, the DNS TXT records, extender
+  feeds and each activation's own record and bootstrap sample, and a record
+  lives 24 hours, so about a day after publishing stops a target knows only
+  the few peers its own activations returned. The finding reads "directories
+  are stale: check gossip and DNS publishing". It is the end-to-end sign that
+  record distribution failed: gossip publishing stopped on 2026-11-06 at
+  07:49Z, the records lapsed about 07:55Z the next day, and unknown pingers
+  became 87 % of the extender pingers' verdicts with nothing alerting; this
+  condition would have fired at about 07Z on 11-07. The refusals are evidence
+  against no one, and the targets refuse as designed, so the action is
+  publishing, never the probe gate. §27.2 watches the publishers themselves
+  (`extender-gossip-stalled`, `extender-dns-publish-failing`); this condition
+  is the end-to-end check that their records reach the directories, and with
+  both publishers healthy it is the delivery between them;
 - **no verdicts** (`derive-no-verdicts`): pings with no verdict above
   `DeriveMaxUnknownShare` (30 %) — extenders on the old binary, or the
   verdict frame lost on a carrier;
@@ -19885,8 +19920,9 @@ extender id or a coordinate. The job's own log line carries the per-run
 detail (nodes, terms, excluded, crossings, sweeps per round).
 
 Action: a supply or verdict finding is the ping path (connect, the
-extenders' binaries, the ingest); a residual, crossing or exclusion finding
-is calibration — change one setting at a time in `DeriveSettings`, wait
+extenders' binaries, the ingest); a stale-directories finding is record
+distribution (gossip and DNS publishing); a residual, crossing or exclusion
+finding is calibration — change one setting at a time in `DeriveSettings`, wait
 one run, and read the residual and crossing panels; a thin-evidence finding
 is ping coverage first and the peer gate second; a non-convergence finding
 is the sweep cap or the damping. Verify: the finding clears on the next run
