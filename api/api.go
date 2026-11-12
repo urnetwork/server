@@ -344,6 +344,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// gates as the webhooks and the payment reconciler
 		router.NewRoute("POST", "/subscription/verify-play-purchase", handlers.SubscriptionVerifyPlayPurchase),
 		router.NewRoute("POST", "/subscription/verify-apple-transaction", handlers.SubscriptionVerifyAppleTransaction),
+		// a card payment, reported when the checkout or the payment sheet
+		// finishes: read back from Stripe and credited through the webhooks'
+		// own code, so a late webhook no longer delays Pro
+		router.NewRoute("POST", "/subscription/verify-stripe-checkout", handlers.SubscriptionVerifyStripeCheckout),
 		// x402: agents pay inline (HTTP 402 + PAYMENT-SIGNATURE in v2, X-PAYMENT in
 		// v1). Both 404 while x402 is not configured/enabled -- see
 		// vault/<env>/x402.yml.

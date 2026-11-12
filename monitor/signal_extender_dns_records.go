@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
@@ -98,6 +99,25 @@ type ExtenderDnsRecordsSettings struct {
 	// what the monitor reads of one DoH answer, to count what a client's read
 	// cut off
 	FullDohResponseBytes int
+	// the resolvers known to cut a TXT answer they cannot carry to a run of
+	// its whole records rather than mark it truncated, by endpoint as the
+	// countries name them, each with the largest answer it delivers whole: a
+	// run of whole records of a larger set from one of these is its trim, not
+	// a partial set
+	TrimmingResolvers map[string]int
+}
+
+// DNSPod, by the endpoints the sdk names it with for cn: DoH at 1.12.12.12
+// and 120.53.53.53, plain at 119.29.29.29. On 2026-11-12 it delivered TXT
+// answers of up to 481 bytes whole and cut every larger one it carried at
+// record boundaries, to whole records in at most 462 bytes, unmarked. China's
+// own set is sized so it hands on one whole record of it.
+func ExtenderDnsDnspodTrimmingResolvers() map[string]int {
+	return map[string]int{
+		"https://1.12.12.12/dns-query":   481,
+		"https://120.53.53.53/dns-query": 481,
+		"119.29.29.29:53":                481,
+	}
 }
 
 // The defaults of SIGNALS.md §28.2.
@@ -115,6 +135,7 @@ func DefaultExtenderDnsRecordsSettings() *ExtenderDnsRecordsSettings {
 		CountryPacing:          100 * time.Millisecond,
 		ClientDohResponseBytes: ExtenderDnsClientDohResponseBytes,
 		FullDohResponseBytes:   64 * 1024,
+		TrimmingResolvers:      ExtenderDnsDnspodTrimmingResolvers(),
 	}
 }
 
@@ -302,7 +323,7 @@ func (self extenderDnsRecordsProbe) checkZone(ctx context.Context, env *probeEnv
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			observation, err := env.runner.dnsTxt(ctx, resolver, name)
+			observation, err := env.runner.dnsTxt(ctx, resolver, name, netip.Prefix{})
 			answers[index] = extenderDnsRecordsAnswer{observation: observation, err: err}
 		}()
 	}

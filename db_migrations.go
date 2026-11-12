@@ -11487,6 +11487,14 @@ var migrations = []any{
 	// live. Apply before deploying the taskworker and api that use it.
 	ctfAwardNetworkMigration,
 
+	// The SN25 extender pool (db_st_ledger_v2_extenders.go, sn WHITEPAPER.md
+	// §8.6): the verified amendments file, each epoch's extender census, the
+	// shadow reports of the epochs before E_x, the platform endpoint registry
+	// and six nullable columns on st_ledger_v2_epoch_rows, each created only
+	// when absent, under a five-second lock bound. Nothing existing is
+	// rewritten. Apply before deploying the taskworker and api that read them.
+	stLedgerV2ExtenderMigration,
+
 	// Explicit distributed terminal-infrastructure recovery preserves original
 	// admission/failure and requires all-host closure before a new cycle queues.
 	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),

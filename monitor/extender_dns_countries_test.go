@@ -130,6 +130,34 @@ func TestExtenderDnsCountriesComeFromTheSdk(t *testing.T) {
 	}
 }
 
+// DNSPod's trim is recognized by the endpoints the sdk gives cn: one of them
+// renamed in the sdk's table would turn DNSPod's expected trim into partial
+// alerts, so the default list must name endpoints of cn's path.
+func TestExtenderDnsTrimmingResolversAreOnChinasPath(t *testing.T) {
+	endpoints := []string{}
+	for _, country := range ExtenderDnsCountriesFromSdk() {
+		if country.Code != "cn" {
+			continue
+		}
+		for _, resolver := range slices.Concat(country.Doh, country.Dns) {
+			endpoints = append(endpoints, resolver.Endpoint)
+		}
+	}
+	trimming := ExtenderDnsDnspodTrimmingResolvers()
+	if len(trimming) != 3 {
+		t.Fatalf("DNSPod's trimming resolvers are %v, want its two DoH servers and its plain resolver", trimming)
+	}
+	for endpoint, wholeBytes := range trimming {
+		if !slices.Contains(endpoints, endpoint) {
+			t.Errorf("%s is not on cn's path %v", endpoint, endpoints)
+		}
+		if wholeBytes != 481 {
+			t.Errorf("%s delivers %d bytes whole, want the 481 measured on 2026-11-12", endpoint, wholeBytes)
+		}
+	}
+	connect.AssertEqual(t, DefaultExtenderDnsRecordsSettings().TrimmingResolvers, trimming)
+}
+
 // The client's DoH parse (connect parseDohWire): values joined from their
 // strings, empty and repeated values left out, the answers read until the
 // first that does not parse, none for a name error, and a policy extended
@@ -728,7 +756,7 @@ func TestExtenderDnsDohReadsAsTheClientDoes(t *testing.T) {
 		values = test.values
 		valuesLock.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		status, body, err := monitorRunner.dnsDohTxt(ctx, dohUrl, "extender.bringyour.com", 64*1024)
+		status, body, err := monitorRunner.dnsDohTxt(ctx, dohUrl, "extender.bringyour.com", 64*1024, netip.Prefix{})
 		if err != nil || status != http.StatusOK {
 			cancel()
 			t.Fatalf("%s: %d %v", test.name, status, err)
@@ -835,7 +863,7 @@ func TestDnsWireQueryReportsATruncatedRetry(t *testing.T) {
 		return extenderDnsFakeTxtResponse(query, values, nil)
 	})
 	monitorRunner := &runner{cfg: &monitorConfig{env: "main", commandTimeout: 5 * time.Second}}
-	observation, err := monitorRunner.dnsTxt(context.Background(), endpoint, "extender.bringyour.com")
+	observation, err := monitorRunner.dnsTxt(context.Background(), endpoint, "extender.bringyour.com", netip.Prefix{})
 	var retry *dnsTruncatedRetryError
 	if !errors.As(err, &retry) {
 		t.Fatalf("observation %+v, err %v, want a truncated retry", observation, err)

@@ -70,34 +70,41 @@ func TestPlaySalesNoticeNamesTheBasePlan(t *testing.T) {
 }
 
 // The Play webhook records a trial that stops renewing as trial.cancelled
-// with the purchase's plan: penguin1234's trial is the yearly plan's.
+// with the purchase's plan: penguin1234's trial is the yearly plan's. The
+// trial's remaining days are still the customer's: cancelled is not expired,
+// so a first notice that finds the trial already cancelled credits it.
 func TestPlayTrialOutcomeRecordsTheBasePlan(t *testing.T) {
-	env := newPlayWebhookTestEnv(t, map[string]*Sku{
-		"supporter": {Supporter: true, PriceAmountUsd: 5, FeeFraction: 0.3},
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newPlayWebhookTestEnv(t, map[string]*Sku{
+			"supporter": {Supporter: true, PriceAmountUsd: 5, FeeFraction: 0.3},
+		})
+		type outcome struct {
+			store string
+			plan  string
+		}
+		cancelled := []outcome{}
+		previousCancelled := playStoreTrialCancelled
+		playStoreTrialCancelled = func(ctx context.Context, networkId server.Id, store string, plan string, now time.Time) bool {
+			cancelled = append(cancelled, outcome{store: store, plan: plan})
+			return true
+		}
+		t.Cleanup(func() { playStoreTrialCancelled = previousCancelled })
+
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "penguin1234", server.NewId())
+		start := server.NowUtc().Add(-time.Hour).Truncate(time.Second)
+		sub := playPenguinSubscription(start, start.Add(14*24*time.Hour))
+		// auto-renew turned off during the trial
+		sub.SubscriptionState = "SUBSCRIPTION_STATE_CANCELED"
+		sub.LineItems[0].AutoRenewingPlan.AutoRenewEnabled = false
+		sub.ExternalAccountIdentifiers = &PlayExternalAccountIdentifiers{ExternalAccountId: networkId.String()}
+		env.subscriptions["token-penguin"] = sub
+
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		_, err := PlayWebhook(env.webhookArgs(t, "supporter", "token-penguin"), clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, cancelled, []outcome{{store: model.OnboardingStorePlay, plan: model.PlanYearly}})
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 	})
-	type outcome struct {
-		store string
-		plan  string
-	}
-	cancelled := []outcome{}
-	previousCancelled := playStoreTrialCancelled
-	playStoreTrialCancelled = func(ctx context.Context, networkId server.Id, store string, plan string, now time.Time) bool {
-		cancelled = append(cancelled, outcome{store: store, plan: plan})
-		return true
-	}
-	t.Cleanup(func() { playStoreTrialCancelled = previousCancelled })
-
-	networkId := server.NewId()
-	start := server.NowUtc().Add(-time.Hour).Truncate(time.Second)
-	sub := playPenguinSubscription(start, start.Add(14*24*time.Hour))
-	// auto-renew turned off during the trial
-	sub.SubscriptionState = "SUBSCRIPTION_STATE_CANCELED"
-	sub.LineItems[0].AutoRenewingPlan.AutoRenewEnabled = false
-	sub.ExternalAccountIdentifiers = &PlayExternalAccountIdentifiers{ExternalAccountId: networkId.String()}
-	env.subscriptions["token-penguin"] = sub
-
-	clientSession := session.Testing_CreateClientSession(context.Background(), nil)
-	_, err := PlayWebhook(env.webhookArgs(t, "supporter", "token-penguin"), clientSession)
-	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, cancelled, []outcome{{store: model.OnboardingStorePlay, plan: model.PlanYearly}})
 }

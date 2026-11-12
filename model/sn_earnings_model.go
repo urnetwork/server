@@ -6,6 +6,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -121,18 +122,81 @@ func GetStPayoutNetworkShares(ctx context.Context, deploymentKey StDeploymentKey
 	return shares
 }
 
-// GetAccountNanoPointsInWindow sums one network's account points created in
-// [start, end). Points are written by the payout planner
-// (PaymentPlanner.applyPayoutPoints), so an epoch's points are the point rows
-// whose create time falls inside the epoch's wall-clock window.
+// A window's points (an epoch's, for GET /account/epochs and the epoch
+// earnings email). An operator block's points (operator_block_points.go) are
+// written when its award runs, after the block ends, by the daily task or the
+// backfill, so their create time says when the award ran, not when the
+// traffic was provided: the backfill wrote blocks 15 to 17 (2026-10-04 to
+// 10-25) on 2026-10-30, and by create time all three fell in one epoch and the
+// epochs before it showed none. Owner, 2026-11-12: each block's points count in
+// the epoch that contains the block's end. Every other point row, such as a
+// payout plan's before the earning boundary, counts by its create time.
+//
+// The operator blocks whose end falls in [start, end): block b ends at
+// SubnetBlockGenesis + b * SubnetBlockDuration.
+func operatorBlocksEndingIn(start time.Time, end time.Time) []int64 {
+	blocks := []int64{}
+	if !start.Before(end) {
+		return blocks
+	}
+	// the first block ending at or after start
+	block := int64(1)
+	if elapsed := start.Sub(SubnetBlockGenesis); 0 < elapsed {
+		block = int64((elapsed + SubnetBlockDuration - 1) / SubnetBlockDuration)
+		if block < 1 {
+			block = 1
+		}
+	}
+	for ; ; block += 1 {
+		blockEnd := operatorBlockStart(block).Add(SubnetBlockDuration)
+		if !blockEnd.Before(end) {
+			return blocks
+		}
+		if !blockEnd.Before(start) {
+			blocks = append(blocks, block)
+		}
+	}
+}
+
+// The plan ids of the operator blocks ending in [start, end), and of every
+// operator block whose award a read at the later of now and end can meet:
+// blocks 1 through the one after the block containing that time. Point rows
+// under the second set never count by their create time.
+func pointsWindowOperatorPlanIds(start time.Time, end time.Time) (inWindow []server.Id, all []server.Id) {
+	inWindow = []server.Id{}
+	for _, block := range operatorBlocksEndingIn(start, end) {
+		inWindow = append(inWindow, OperatorBlockPointsPlanId(block))
+	}
+	last := int64(SubnetBlockNumber(server.MaxTime(server.NowUtc(), end))) + 1
+	all = make([]server.Id, 0, last)
+	for block := int64(1); block <= last; block += 1 {
+		all = append(all, OperatorBlockPointsPlanId(block))
+	}
+	return
+}
+
+// The point rows of a window: the operator block awards of the blocks ending
+// in it ($inWindow), and any other row created in it, an operator award's
+// excepted ($all). Positions name the statement's parameters.
+func pointsWindowSql(startParam int, endParam int, inWindowParam int, allParam int) string {
+	return fmt.Sprintf(`(
+		(create_time >= $%d AND create_time < $%d AND (payment_plan_id IS NULL OR NOT payment_plan_id = ANY($%d::uuid[]))) OR
+		payment_plan_id = ANY($%d::uuid[])
+	)`, startParam, endParam, allParam, inWindowParam)
+}
+
+// GetAccountNanoPointsInWindow sums one network's account points of
+// [start, end): its operator block awards by the epoch of each block's end,
+// and its other point rows by their create time.
 func GetAccountNanoPointsInWindow(ctx context.Context, networkId server.Id, start time.Time, end time.Time) NanoPoints {
+	inWindow, all := pointsWindowOperatorPlanIds(start, end)
 	var nanoPoints NanoPoints
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
             SELECT COALESCE(SUM(point_value), 0)::bigint
             FROM account_point
-            WHERE network_id = $1 AND create_time >= $2 AND create_time < $3
-        `, networkId, start, end)
+            WHERE network_id = $1 AND `+pointsWindowSql(2, 3, 4, 5)+`
+        `, networkId, start, end, inWindow, all)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&nanoPoints))
@@ -142,17 +206,19 @@ func GetAccountNanoPointsInWindow(ctx context.Context, networkId server.Id, star
 	return nanoPoints
 }
 
-// GetNetworkNanoPointsInWindow sums account points per network created in
-// [start, end); networks without points are absent.
+// GetNetworkNanoPointsInWindow sums account points per network of
+// [start, end), as GetAccountNanoPointsInWindow does; networks without points
+// are absent.
 func GetNetworkNanoPointsInWindow(ctx context.Context, start time.Time, end time.Time) map[server.Id]NanoPoints {
+	inWindow, all := pointsWindowOperatorPlanIds(start, end)
 	points := map[server.Id]NanoPoints{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
             SELECT network_id, SUM(point_value)::bigint
             FROM account_point
-            WHERE create_time >= $1 AND create_time < $2
+            WHERE `+pointsWindowSql(1, 2, 3, 4)+`
             GROUP BY network_id
-        `, start, end)
+        `, start, end, inWindow, all)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var networkId server.Id

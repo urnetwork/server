@@ -161,13 +161,20 @@ func subnetDemandInstallEvidence(world *subnetWorld) *subnetDemandEvidence {
 // Publishes one statement of an operator's epoch, signed by key.
 func (self *subnetDemandEvidence) publish(t *testing.T, noId, epoch uint64, totalBytes, users uint64, chunks []string, key *ecdsa.PrivateKey) {
 	t.Helper()
+	self.publishWith(t, noId, epoch, totalBytes, users, chunks, key, nil, "")
+}
+
+// Publishes one statement with an extender pool, a version 2 statement, under
+// kind, or its own version's kind when kind is empty.
+func (self *subnetDemandEvidence) publishWith(t *testing.T, noId, epoch uint64, totalBytes, users uint64, chunks []string, key *ecdsa.PrivateKey, pool *usage.ExtenderPool, kind string) {
+	t.Helper()
 	world := self.world
 	start, end := world.epochStartBlock(epoch), world.epochStartBlock(epoch+1)
 	statement := &usage.Statement{
 		DeploymentID: world.deployment.DeploymentId, ChainID: world.deployment.ChainId, GenesisHash: world.deployment.GenesisHash, Netuid: world.deployment.Netuid,
 		Coordinator: world.coordinator, VaultV2: common.HexToAddress(world.deployment.VaultV2), PolicyHash: world.deployment.PolicyHash, NoID: noId, Epoch: epoch,
 		Start: usage.Boundary{Number: start, Hash: strings.ToLower(world.evmHash(start).Hex())}, End: usage.Boundary{Number: end, Hash: strings.ToLower(world.evmHash(end).Hex())},
-		ProviderChunks: chunks, ProviderRows: uint64(len(chunks)), TotalUsageBytes: totalBytes, TotalUsers: users,
+		ProviderChunks: chunks, ProviderRows: uint64(len(chunks)), TotalUsageBytes: totalBytes, TotalUsers: users, ExtenderPool: pool,
 	}
 	if err := statement.Seal(key); err != nil {
 		t.Fatal(err)
@@ -176,7 +183,10 @@ func (self *subnetDemandEvidence) publish(t *testing.T, noId, epoch uint64, tota
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope := &startifact.EvidenceEnvelope{DeploymentID: world.deployment.DeploymentId, ChainID: world.deployment.ChainId, GenesisHash: world.deployment.GenesisHash, Netuid: world.deployment.Netuid, Kind: usage.EvidenceKind, RunID: usage.RunID(noId, epoch), CreatedAt: "2026-11-07T00:00:00Z", Payload: payload}
+	if kind == "" {
+		kind = statement.Kind()
+	}
+	envelope := &startifact.EvidenceEnvelope{DeploymentID: world.deployment.DeploymentId, ChainID: world.deployment.ChainId, GenesisHash: world.deployment.GenesisHash, Netuid: world.deployment.Netuid, Kind: kind, RunID: usage.RunID(noId, epoch), CreatedAt: "2026-11-07T00:00:00Z", Payload: payload}
 	if err := startifact.SignEvidence(envelope, key); err != nil {
 		t.Fatal(err)
 	}
@@ -585,6 +595,66 @@ func TestSubnetDepositsAuditAV2Source(t *testing.T) {
 		t.Fatal(alert.Observed)
 	}
 	world.requirePrivate(t, alerts)
+}
+
+// subnetDemandExtenderPool is a version 2 statement's extender pool of z bytes,
+// all intra-network, from one contract of one payer, with one eligible extender
+// in one unit taking all of it.
+func subnetDemandExtenderPool(z uint64) *usage.ExtenderPool {
+	return &usage.ExtenderPool{IntraNetworkBytes: z, ExtenderPoolBytes: z, ExtenderPoolWeightBytes: z, ExtenderPoolContracts: 1, ExtenderPoolPayers: 1,
+		ExtenderCensus: subnetDemandChunks("census"), ExtenderUnits: 1, EligibleExtenders: 1, ExtenderChunks: subnetDemandChunks("shares")}
+}
+
+// From E_x an epoch's statement is version 2, published under epoch-usage-v2,
+// and judged by its total, which holds all of Z (sn WHITEPAPER.md §8.6.4): a
+// deposit sized from the providers' usage alone is short. A version 1 and a
+// version 2 statement for the same chunks equivocate, and a statement published
+// under the other version's kind is invalid.
+func TestSubnetDepositsAuditAVersion2Statement(t *testing.T) {
+	t.Run("judged by its total with Z", func(t *testing.T) {
+		world, evidence := subnetDemandV2World(t)
+		evidence.publishWith(t, 1, world.currentEpoch-1, 1000+2000, 10, subnetDemandChunks("chunk-1"), subnetWorldArtifactKey(t, 1), subnetDemandExtenderPool(2000), "")
+		world.setDeposit(1, big.NewInt(3000+20))
+		evidence.publish(t, 2, world.currentEpoch-1, 6000, 10, subnetDemandChunks("chunk-2"), subnetWorldArtifactKey(t, 2))
+		world.setDeposit(2, big.NewInt(6000+20))
+		requireNoSubnetAlerts(t, runSubnetWorld(t, NewSubnetDepositsSignal(), world.signalSettings()))
+		world.setDeposit(1, big.NewInt(1000+20))
+		alert := requireSubnetAlert(t, runSubnetWorld(t, NewSubnetDepositsSignal(), world.signalSettings()), subnetOperatorDepositMismatchClass, "subnet-deposits/no-1", "", SeverityWarn)
+		if !strings.Contains(alert.Observed, "state=deposit_mismatch") {
+			t.Fatal(alert.Observed)
+		}
+	})
+	t.Run("both versions for the same chunks equivocate", func(t *testing.T) {
+		world, evidence := subnetDemandV2World(t)
+		chunks := subnetDemandChunks("chunk")
+		evidence.publish(t, 1, world.currentEpoch-1, 1000, 1, chunks, subnetWorldArtifactKey(t, 1))
+		evidence.publishWith(t, 1, world.currentEpoch-1, 1000+5, 1, chunks, subnetWorldArtifactKey(t, 1), subnetDemandExtenderPool(5), "")
+		alert := requireSubnetAlert(t, runSubnetWorld(t, NewSubnetDepositsSignal(), world.signalSettings()), subnetOperatorDepositMismatchClass, "subnet-deposits/no-1", "", SeverityWarn)
+		if !strings.Contains(alert.Observed, "state=artifact_equivocation") {
+			t.Fatal(alert.Observed)
+		}
+	})
+	t.Run("two extender pools for the same chunks equivocate", func(t *testing.T) {
+		world, evidence := subnetDemandV2World(t)
+		chunks := subnetDemandChunks("chunk")
+		pool := subnetDemandExtenderPool(5)
+		evidence.publishWith(t, 1, world.currentEpoch-1, 1005, 1, chunks, subnetWorldArtifactKey(t, 1), pool, "")
+		other := *pool
+		other.EligibleExtenders, other.ExtenderUnits = 2, 2
+		evidence.publishWith(t, 1, world.currentEpoch-1, 1005, 1, chunks, subnetWorldArtifactKey(t, 1), &other, "")
+		alert := requireSubnetAlert(t, runSubnetWorld(t, NewSubnetDepositsSignal(), world.signalSettings()), subnetOperatorDepositMismatchClass, "subnet-deposits/no-1", "", SeverityWarn)
+		if !strings.Contains(alert.Observed, "state=artifact_equivocation") {
+			t.Fatal(alert.Observed)
+		}
+	})
+	t.Run("the other version's kind is invalid", func(t *testing.T) {
+		world, evidence := subnetDemandV2World(t)
+		evidence.publishWith(t, 1, world.currentEpoch-1, 1005, 1, subnetDemandChunks("chunk"), subnetWorldArtifactKey(t, 1), subnetDemandExtenderPool(5), usage.EvidenceKind)
+		alert := requireSubnetAlert(t, runSubnetWorld(t, NewSubnetDepositsSignal(), world.signalSettings()), subnetOperatorDepositMismatchClass, "subnet-deposits/no-1", "", SeverityWarn)
+		if !strings.Contains(alert.Observed, "state=artifact_invalid") {
+			t.Fatal(alert.Observed)
+		}
+	})
 }
 
 // A source epoch before the pool's first v2 epoch keeps the artifact.
