@@ -9,14 +9,19 @@ package oauth
 // wait on by its OnLoad hook, never a sleep.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
@@ -485,5 +490,272 @@ func TestExchangeWithTheProjectionsScopes(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, claims.Scopes(), []string{configAdmin})
 		connect.AssertEqual(t, *claims.SidecarId, self.ownerSidecarId)
+	})
+}
+
+// A base folding through the tip whose rows add the config repo's AclRepo row, which no production state holds yet
+// (question team-m2-15-config-repo-acl-row): what lets a test reach the config's r through the table at all.
+func (self *exchangeScopesWorld) foldWithConfigRepoRow() {
+	self.t.Helper()
+	snapshot := self.load()
+	state := snapshot.Config
+	previous := state.Base()
+	rows := state.Rows()
+	acl := &protocol.AclRows{}
+	if err := proto.Unmarshal(rows.GetAcl(), acl); err != nil {
+		self.t.Fatal(err)
+	}
+	acl.Repos = append(acl.Repos, &protocol.AclRepo{
+		RepoId: state.Genesis().GetConfigRepoId(),
+		Kind:   protocol.RepoKind_REPO_KIND_CONFIG,
+	})
+	slices.SortFunc(acl.Repos, func(a *protocol.AclRepo, b *protocol.AclRepo) int {
+		return bytes.Compare(a.GetRepoId(), b.GetRepoId())
+	})
+	aclBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(acl)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	rows.Acl = aclBytes
+	rowsBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(rows)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	rowsSha256 := sha256.Sum256(rowsBytes)
+	signedHeader := self.world.SignAsOwner(bridge.SignedType_SIGNED_PROJECTION_HEADER, &bridge.ProjectionHeader{
+		NetworkId:        sidecar.Id(self.networkId).Bytes(),
+		Version:          self.tip.GetVersion() + 1,
+		PrevChain:        self.tip.GetChain(),
+		FoldedThrough:    self.tip.GetVersion(),
+		ConfigVersion:    previous.GetConfigVersion(),
+		ConfigHeadSha256: previous.GetConfigHeadSha256(),
+		RowsSha256:       rowsSha256[:],
+		RowsByteCount:    uint32(len(rowsBytes)),
+		Threshold:        previous.GetThreshold(),
+	})
+	pin, err := self.sequencer.AppendBase(self.ctx, self.networkId, &model.ConfigLogBase{SignedHeader: signedHeader, Rows: rowsBytes})
+	if err != nil {
+		self.t.Fatalf("the base with the config row: %v", err)
+	}
+	self.world.SetTip(pin)
+	self.tip = pin
+}
+
+// The owner's first device files its forwarding Delegation (§7.9's forwarding row), answering its delegation_id.
+func (self *exchangeScopesWorld) fileForwardingDelegation(label string) []byte {
+	self.t.Helper()
+	readerKey := bytes.Repeat([]byte(label), 1216/len(label)+1)[:1216]
+	signedBytes := self.world.SignAsOwner(bridge.SignedType_SIGNED_DELEGATION, &protocol.Delegation{
+		Header:               self.world.Header(),
+		Pubkey:               exchangeScopesIdentityKey(self.t),
+		ReaderXwingPublicKey: readerKey,
+		Forward:              &bridge.ForwardScope{ForwardSidecarId: sidecar.Id(self.ownerSidecarId).Bytes()},
+	})
+	signed := &bridge.Signed{}
+	if err := proto.Unmarshal(signedBytes, signed); err != nil {
+		self.t.Fatal(err)
+	}
+	self.post(signedBytes)
+	purpose, _ := sidecar.ConfigStatementPurpose(bridge.SignedType_SIGNED_DELEGATION)
+	delegationId := bridge.SignedBytesSha256(purpose, bridge.SignedType_SIGNED_DELEGATION, signed.GetBody())
+	return delegationId[:]
+}
+
+// Replaces the forwarding reads for one test: forwardingClients maps each forwarding client to the sidecar it speaks
+// for, nil for one that speaks for none.
+func setExchangeScopeForwarding(t testing.TB, forwardingClients map[server.Id]*server.Id) {
+	previousForwardOnly := exchangeScopeClientForwardOnly
+	previousSidecar := exchangeScopeForwardingSidecar
+	exchangeScopeClientForwardOnly = func(ctx context.Context, networkId server.Id, clientId server.Id) (bool, error) {
+		_, forwardOnly := forwardingClients[clientId]
+		return forwardOnly, nil
+	}
+	exchangeScopeForwardingSidecar = func(ctx context.Context, networkId server.Id, clientId server.Id) (*server.Id, error) {
+		return forwardingClients[clientId], nil
+	}
+	t.Cleanup(func() {
+		exchangeScopeClientForwardOnly = previousForwardOnly
+		exchangeScopeForwardingSidecar = previousSidecar
+	})
+}
+
+// §7.8's forwarding rule (TEAM-M8-02): a forwarding client of S gets the config's r alone, at evs and gkm, naming S as
+// its sidecar, while S's forwarding Delegation is live, whatever S reads: not the general repo S administers, not the
+// config's admin S's bootstrap holds, no recovery scope, nothing at another audience. An older forwarding client, which
+// speaks for no sidecar, is refused, and once S revokes its forwarding Delegation the config's r is refused too.
+func TestExchangeScopesForwardingClientGetsTheConfigsReadAlone(t *testing.T) {
+	self := newExchangeScopesWorld(t)
+	setExchangeScopeClientTaggedOrEphemeral(t, untaggedExchangeClient)
+	repoId := self.createGeneralRepo()
+	delegationId := self.fileForwardingDelegation("forwarding keys one")
+	self.foldWithConfigRepoRow()
+	snapshot := self.load()
+	source := self.source()
+	if snapshot.Config.ForwardingDelegation(sidecar.Id(self.ownerSidecarId)) == nil {
+		t.Fatal("no live forwarding Delegation")
+	}
+	configRead := repoScope(self.configRepoId(snapshot), "r")
+	configAdmin := repoScope(self.configRepoId(snapshot), "admin")
+
+	forwardingClientId, olderClientId := server.NewId(), server.NewId()
+	setExchangeScopeForwarding(t, map[server.Id]*server.Id{forwardingClientId: &self.ownerSidecarId, olderClientId: nil})
+	forwarding := func(audience string, scopes ...string) *ExchangeScopeRequest {
+		request := self.request(nil, self.ownerMemberId, audience, scopes...)
+		request.ClientId = forwardingClientId
+		return request
+	}
+
+	// S itself reads the config and administers its repo
+	grant, err := source.Grant(self.ctx, self.request(&self.ownerSidecarId, self.ownerMemberId, "evs", configRead, repoScope(repoId, "admin")))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, grant.Scopes, []string{configRead, repoScope(repoId, "admin")})
+
+	for _, audience := range []string{"evs", "gkm"} {
+		grant, err := source.Grant(self.ctx, forwarding(audience, configRead, repoScope(repoId, "admin"), repoScope(repoId, "r"), configAdmin))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, []string{configRead})
+		connect.AssertEqual(t, *grant.SidecarId, self.ownerSidecarId)
+		connect.AssertEqual(t, *grant.MemberId, self.ownerMemberId)
+		connect.AssertEqual(t, grant.ProjVersion, snapshot.Pin.GetVersion())
+	}
+	for name, request := range map[string]*ExchangeScopeRequest{
+		"S's general repo":      forwarding("evs", repoScope(repoId, "r")),
+		"the config's admin":    forwarding("evs", configAdmin),
+		"the config's rw":       forwarding("gkm", repoScope(self.configRepoId(snapshot), "rw")),
+		"a recovery scope":      forwarding("gkm", recoveryScope(self.ownerMemberId)),
+		"no scope":              forwarding("evs"),
+		"the config's r at dns": forwarding("dns", configRead),
+	} {
+		_, err := source.Grant(self.ctx, request)
+		requireExchangeRefused(t, name, err, ErrInvalidScope)
+	}
+	older := forwarding("evs", configRead)
+	older.ClientId = olderClientId
+	_, err = source.Grant(self.ctx, older)
+	requireExchangeRefused(t, "an older forwarding client", err, ErrInvalidGrant)
+
+	// ended: S's DelegationRevoke of it
+	self.post(self.world.SignAsOwner(bridge.SignedType_SIGNED_DELEGATION_REVOKE, &protocol.DelegationRevoke{
+		Header: self.world.Header(), DelegationId: delegationId,
+	}))
+	ended := self.load()
+	connect.AssertEqual(t, ended.Config.ForwardingDelegation(sidecar.Id(self.ownerSidecarId)) == nil, true)
+	_, err = source.Grant(self.ctx, forwarding("evs", configRead))
+	requireExchangeRefused(t, "after its Delegation ended", err, ErrInvalidScope)
+}
+
+// The exchange with a forwarding client's token: its token names S as its sidecar, S's client as its subject and the
+// config's r as its one scope.
+func TestExchangeWithAForwardingClientsToken(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		fixture := newExchangeFixture(t)
+		self := newExchangeScopesWorldFor(t, fixture.networkId, fixture.userId, server.NewId())
+		self.fileForwardingDelegation("forwarding keys")
+		self.foldWithConfigRepoRow()
+		snapshot := self.load()
+		defer SetExchangeScopeSource(self.source())()
+		sidecarClientId := server.NewId()
+		previousSubject := exchangeClientSubject
+		previousSidecarId := exchangeClientSidecarId
+		exchangeClientSubject = func(ctx context.Context, networkId server.Id, clientId server.Id) (server.Id, error) {
+			return sidecarClientId, nil
+		}
+		// the forwarding client is bound to no sidecar
+		exchangeClientSidecarId = func(ctx context.Context, networkId server.Id, clientId server.Id) *server.Id {
+			return nil
+		}
+		t.Cleanup(func() {
+			exchangeClientSubject = previousSubject
+			exchangeClientSidecarId = previousSidecarId
+		})
+		setExchangeScopeForwarding(t, map[server.Id]*server.Id{fixture.clientId: &self.ownerSidecarId})
+
+		configRead := repoScope(self.configRepoId(snapshot), "r")
+		result, err := Exchange(t.Context(), fixture.args("evs", configRead))
+		connect.AssertEqual(t, err, nil)
+		claims, err := newTestServiceTokenVerifier(t).Verify(result.AccessToken, "evs")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, claims.Scopes(), []string{configRead})
+		connect.AssertEqual(t, claims.ClientId, fixture.clientId)
+		connect.AssertEqual(t, *claims.SubjectClientId, sidecarClientId)
+		connect.AssertEqual(t, *claims.SidecarId, self.ownerSidecarId)
+		connect.AssertEqual(t, claims.ProjVersion, snapshot.Pin.GetVersion())
+	})
+}
+
+// Replaces the restored rows' Owners and Admins for one test: admins maps each admin's sidecar to its member.
+func setExchangeScopeReseedAdmins(t testing.TB, admins map[server.Id]server.Id) {
+	previous := exchangeScopeReseedAdminSidecar
+	exchangeScopeReseedAdminSidecar = func(ctx context.Context, networkId server.Id, sidecarId server.Id) (*server.Id, bool, error) {
+		memberId, admin := admins[sidecarId]
+		if !admin {
+			return nil, false, nil
+		}
+		return &memberId, true, nil
+	}
+	t.Cleanup(func() {
+		exchangeScopeReseedAdminSidecar = previous
+	})
+}
+
+// §7.8's re-seed mode (TEAM-M3-02, §19.10): repo:<id>:admin alone, at evs and gkm, for any repo, to the sidecars the
+// restored rows list under Owners and Admins, with no projection read; everything else restore_required: another
+// scope, another audience, no scope, another sidecar, a client bound to none, a forwarding client.
+func TestExchangeScopesReseedModeMintsOnlyAdminsAdminScopes(t *testing.T) {
+	networkId := server.NewId()
+	adminSidecarId, otherSidecarId, memberId := server.NewId(), server.NewId(), server.NewId()
+	setExchangeScopeReseedAdmins(t, map[server.Id]server.Id{adminSidecarId: memberId})
+	forwardingClientId := server.NewId()
+	setExchangeScopeForwarding(t, map[server.Id]*server.Id{forwardingClientId: &adminSidecarId})
+	// no gate at all: re-seed mode reads none
+	source := NewProjectionExchangeScopeSource(nil, nil)
+	request := func(sidecarId *server.Id, audience string, scopes ...string) *ExchangeScopeRequest {
+		clientId := server.NewId()
+		return &ExchangeScopeRequest{NetworkId: networkId, ClientId: clientId, SubjectClientId: clientId, SidecarId: sidecarId, Audience: audience, Scopes: scopes}
+	}
+	repoAdmin, otherAdmin := repoScope(server.NewId(), "admin"), repoScope(server.NewId(), "admin")
+	for _, audience := range []string{"evs", "gkm"} {
+		grant, err := source.GrantReseed(context.Background(), request(&adminSidecarId, audience, repoAdmin, otherAdmin))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, []string{repoAdmin, otherAdmin})
+		connect.AssertEqual(t, *grant.MemberId, memberId)
+		connect.AssertEqual(t, grant.ProjVersion, uint64(0))
+	}
+	forwarding := request(&adminSidecarId, "evs", repoAdmin)
+	forwarding.ClientId = forwardingClientId
+	for name, refused := range map[string]*ExchangeScopeRequest{
+		"a read scope":        request(&adminSidecarId, "evs", repoScope(server.NewId(), "r")),
+		"beside a read":       request(&adminSidecarId, "evs", repoAdmin, repoScope(server.NewId(), "r")),
+		"at dns":              request(&adminSidecarId, "dns", repoAdmin),
+		"no scope":            request(&adminSidecarId, "evs"),
+		"another sidecar":     request(&otherSidecarId, "evs", repoAdmin),
+		"no sidecar":          request(nil, "evs", repoAdmin),
+		"a forwarding client": forwarding,
+		"a recovery scope":    request(&adminSidecarId, "gkm", recoveryScope(memberId)),
+	} {
+		_, err := source.GrantReseed(context.Background(), refused)
+		requireExchangeRefused(t, name, err, ErrRestoreRequired)
+	}
+}
+
+// Through the exchange while sidecar.yml's reseed is on: the installed source's re-seed grant answers, an admin's
+// sidecar getting its admin scope and a token naming it, and every other request restore_required.
+func TestExchangeInReseedMode(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		fixture := newExchangeFixture(t)
+		defer server.Testing_PushSidecarConfig("sidecar:\n  reseed: true\n")()
+		setExchangeScopeReseedAdmins(t, map[server.Id]server.Id{fixture.sidecarId: fixture.userId})
+		defer SetExchangeScopeSource(NewProjectionExchangeScopeSource(nil, nil))()
+
+		repoAdmin := repoScope(server.NewId(), "admin")
+		result, err := Exchange(t.Context(), fixture.args("evs", repoAdmin))
+		connect.AssertEqual(t, err, nil)
+		claims, err := newTestServiceTokenVerifier(t).Verify(result.AccessToken, "evs")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, claims.Scopes(), []string{repoAdmin})
+		connect.AssertEqual(t, *claims.SidecarId, fixture.sidecarId)
+
+		_, err = Exchange(t.Context(), fixture.args("evs", repoScope(server.NewId(), "r")))
+		requireExchangeRefused(t, "a read scope", err, ErrRestoreRequired)
 	})
 }

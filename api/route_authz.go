@@ -25,7 +25,9 @@ import (
 // The P0 auth fix (§7.4's stage 1, D-TEAM-14) adds two refusals. A child or
 // admin_refused client's token is refused on the app admin and own client
 // payout routes, and a strict_exp token, a sidecar's, reaches only the routes
-// strictExpRoutes lists, with a proof of its ClientKey where it renews or mints.
+// strictExpRoutes lists, with a proof of its ClientKey where it renews or mints;
+// a forward_only one, a sidecar's forwarding client's, only the shorter list
+// forwardOnlyRoutes keeps of them (owner decision 197).
 // Each refusal is counted in urnetwork_auth_child_admin_calls_total. M0 ran them
 // log-only behind sidecar.yml's p0_enforce for stage 1's 14 days; from M1 they
 // refuse in code, whatever that file says or whether it is there at all, so a
@@ -317,6 +319,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/enroll":                          routeAccessPublic,   // an auth key in the body is its credential (§7.8)
 	"POST /network/team-create":                     routeAccessNetwork,  // makes a team network, its caller the first Owner (§7.5)
 	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5), Owners and Admins by the role gate
+	"POST /network/member-invite":                   routeAccessNetwork,  // invites a person to a team (§7.5), Owners and Admins by the role gate
+	"POST /network/member-invite-accept":            routeAccessNetwork,  // a person joins a team from an invite with its own sign-in (§7.5)
+	"POST /auth/network-switch":                     routeAccessNetwork,  // a person's credential for another network it signs in to (§7.5)
 	"POST /network/team-checkout":                   routeAccessNetwork,  // buys a team network its tier (§20.5), the Owner's or a Billing admin's by the role gate
 	"POST /network/idp":                             routeAccessNetwork,  // adds a team's OIDC IdP (§7.6), the Owner's by its role gate
 	"GET /auth/sso/callback":                        routeAccessPublic,   // the state names its flow, taken once (§7.6)
@@ -349,6 +354,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/config/delta":                    routeAccessClient,   // a signed statement, verified at the tip (§7.9)
 	"POST /network/config/projection":               routeAccessClient,   // a config writer's signed base (§7.9)
 	"GET /network/config/projection":                routeAccessClient,   // the network's log, which the caller verifies (§7.9)
+	"POST /network/config/reseed":                   routeAccessClient,   // a member device's upload of the log it keeps after a site loss (§7.9)
 	"POST /account/payout-wallet":                   routeAccessAppAdmin, // redirects payouts
 	"GET /account/payout-wallet":                    routeAccessAppAdmin, // payout wallet read
 	"POST /account/circle-wallet":                   routeAccessPublic,
@@ -452,6 +458,30 @@ var strictExpRoutes = map[string]bool{
 	"POST /network/config/delta":      true,
 	"POST /network/config/projection": true,
 	"GET /network/config/projection":  true,
+	// §7.9's site loss, only while sidecar.yml's reseed is true (TEAM-M3-02)
+	"POST /network/config/reseed": true,
+}
+
+// The only routes a forward_only bearer reaches (§7.4's mark row, owner
+// decision 197): a sidecar's forwarding client F, which its app's VPN component
+// holds, and F's window clients, which inherit the mark. Each is on
+// strictExpRoutes too, since F is strict_exp; every other route of that list
+// refuses F with the strict_exp gate's 403, and a lookup of the mark that fails
+// refuses as a mark would. F refreshes and mints and removes its own children
+// with its proof (the model limits a client token to its own children), reads
+// the log, an identity and its key, and long-polls for hints; its exchange is
+// the Public token route's, which takes F's token in its form (oauth's
+// exchange_scopes.go gives it the config's r alone).
+var forwardOnlyRoutes = map[string]bool{
+	"GET /auth/refresh":              true,
+	"POST /network/auth-client":      true,
+	"POST /network/remove-client":    true,
+	"GET /network/config/projection": true,
+	"GET /sidecar/identity/([^/]+)":  true,
+	"GET /sidecar/identity":          true,
+	"GET /sidecar/sync/poll":         true,
+	"GET /key/([^/]+)":               true,
+	"POST /connect/control":          true,
 }
 
 // The routes where a strict_exp bearer proves its ClientKey (§7.4). The third
@@ -509,11 +539,15 @@ var clientRefusesAdmin = model.ClientRefusesAdmin
 // The key a strict_exp bearer's proof must be signed by. Tests replace it.
 var clientProofPublicKey = model.ClientProofPublicKey
 
+// Whether a client is a forwarding client or a child of one. Tests replace it.
+var clientForwardOnly = model.ClientForwardOnly
+
 // What a refusal of the P0 auth fix was, as counted.
 const (
 	p0RefusalClientAdmin = "client_admin"
 	p0RefusalStrictExp   = "strict_exp_route"
 	p0RefusalProof       = "strict_exp_proof"
+	p0RefusalForwardOnly = "forward_only_route"
 	// the one result since M1
 	p0ResultRefused = "refused"
 )
@@ -523,7 +557,7 @@ var childAdminCallCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "auth",
 		Name:      "child_admin_calls_total",
-		Help:      "Calls the P0 auth fix refuses, by route template, by what refuses them (client_admin: a child or admin_refused client on an app admin or own client payout route; strict_exp_route: a strict_exp token off its allowlist; strict_exp_proof: a strict_exp token without a good proof) and by result, refused since M1 enforces stage 1 (logged in M0's log-only days)",
+		Help:      "Calls the P0 auth fix refuses, by route template, by what refuses them (client_admin: a child or admin_refused client on an app admin or own client payout route; strict_exp_route: a strict_exp token off its allowlist; strict_exp_proof: a strict_exp token without a good proof; forward_only_route: a forwarding client's token off its shorter allowlist) and by result, refused since M1 enforces stage 1 (logged in M0's log-only days)",
 	},
 	[]string{"route", "refusal", "result"},
 )
@@ -553,6 +587,20 @@ func refuseClientAdmin(ctx context.Context, routeKey string, byJwt *session.ByJw
 	}
 	if clientRefusesAdmin(ctx, byJwt.NetworkId, *byJwt.ClientId) {
 		return refuseP0Call(routeKey, p0RefusalClientAdmin, byJwt)
+	}
+	return false
+}
+
+// Whether a strict_exp bearer on a route forwardOnlyRoutes does not hold is a
+// forwarding client's, which it then refuses: true too when the mark cannot be
+// read, so a failed lookup never widens a forwarding client's routes.
+func refuseForwardOnly(ctx context.Context, routeKey string, byJwt *session.ByJwt) bool {
+	if byJwt.ClientId == nil {
+		return refuseP0Call(routeKey, p0RefusalForwardOnly, byJwt)
+	}
+	forwardOnly, err := clientForwardOnly(ctx, byJwt.NetworkId, *byJwt.ClientId)
+	if err != nil || forwardOnly {
+		return refuseP0Call(routeKey, p0RefusalForwardOnly, byJwt)
 	}
 	return false
 }
@@ -618,6 +666,10 @@ func applyRouteAccess(routes []*router.Route) []*router.Route {
 		if !strictExpRoutes[routeKey] {
 			route = router.RefuseStrictExpCredentials(route, func(ctx context.Context, byJwt *session.ByJwt) bool {
 				return refuseP0Call(routeKey, p0RefusalStrictExp, byJwt)
+			})
+		} else if !forwardOnlyRoutes[routeKey] {
+			route = router.RefuseForwardOnlyCredentials(route, func(ctx context.Context, byJwt *session.ByJwt) bool {
+				return refuseForwardOnly(ctx, routeKey, byJwt)
 			})
 		}
 		if !lagGuestRoutes[routeKey] {

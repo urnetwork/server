@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -133,11 +134,16 @@ type clientMarks struct {
 	// the device client of an sdk whose forwarding role left legacy, which its
 	// resident tells team hints (§18.6, owner decision 106)
 	aclEnforcing bool
+	// a sidecar's forwarding client F, which its app's VPN component holds (§7.4,
+	// owner decision 197): strict_exp and admin_refused too, its tokens reach
+	// only forwardOnlyRoutes and exchange only for the config's r (§7.8). MG8's
+	// column, so only a binary that links MG8 reads or writes it
+	forwardOnly bool
 }
 
 // Whether there is anything to write in an owner row.
 func (self clientMarks) marked() bool {
-	return self.adminRefused || self.strictExp || self.declaresNoEgress || self.aclEnforcing
+	return self.adminRefused || self.strictExp || self.declaresNoEgress || self.aclEnforcing || self.forwardOnly
 }
 
 // Both sets of marks: what a request asks for and what a parent passes down.
@@ -147,17 +153,19 @@ func (self clientMarks) union(other clientMarks) clientMarks {
 		strictExp:        self.strictExp || other.strictExp,
 		declaresNoEgress: self.declaresNoEgress || other.declaresNoEgress,
 		aclEnforcing:     self.aclEnforcing || other.aclEnforcing,
+		forwardOnly:      self.forwardOnly || other.forwardOnly,
 	}
 }
 
 // What a request asks for. A strict_exp client is always admin_refused, so a
-// request for the one alone gets both.
+// request for the one alone gets both, and a forward_only client is both.
 func requestedClientMarks(authClient *AuthNetworkClientArgs) clientMarks {
 	return clientMarks{
-		adminRefused:     authClient.AdminRefused || authClient.StrictExp,
-		strictExp:        authClient.StrictExp,
+		adminRefused:     authClient.AdminRefused || authClient.StrictExp || authClient.ForwardOnly,
+		strictExp:        authClient.StrictExp || authClient.ForwardOnly,
 		declaresNoEgress: authClient.DeclaresNoEgress,
 		aclEnforcing:     authClient.AclEnforcing,
+		forwardOnly:      authClient.ForwardOnly,
 	}
 }
 
@@ -166,6 +174,11 @@ func readClientMarksInTx(ctx context.Context, tx server.PgTx, networkId server.I
 	if !server.SidecarMg0Linked() {
 		return
 	}
+	// forward_only is MG8's: a binary without it reads none
+	forwardOnlyColumn := "false"
+	if server.SidecarMg8Linked() {
+		forwardOnlyColumn = "COALESCE(network_client_owner.forward_only, false)"
+	}
 	result, err := tx.Query(
 		ctx,
 		`
@@ -173,7 +186,8 @@ func readClientMarksInTx(ctx context.Context, tx server.PgTx, networkId server.I
 				network_client_owner.admin_refused,
 				network_client_owner.strict_exp,
 				network_client_owner.declares_no_egress,
-				network_client_owner.acl_enforcing
+				network_client_owner.acl_enforcing,
+				`+forwardOnlyColumn+`
 			FROM network_client_owner
 			INNER JOIN network_client ON network_client.client_id = network_client_owner.client_id
 			WHERE
@@ -185,7 +199,7 @@ func readClientMarksInTx(ctx context.Context, tx server.PgTx, networkId server.I
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&marks.adminRefused, &marks.strictExp, &marks.declaresNoEgress, &marks.aclEnforcing))
+			server.Raise(result.Scan(&marks.adminRefused, &marks.strictExp, &marks.declaresNoEgress, &marks.aclEnforcing, &marks.forwardOnly))
 		}
 	})
 	return
@@ -209,64 +223,24 @@ type clientOwnerInsert struct {
 	clientPublicKey []byte
 }
 
-// Writes a new client's owner row. The caller checked the marks. client_public_key
-// is MG1's column, so a row that has one needs MG1.
+// Writes a new client's owner row. The caller checked the marks.
+// client_public_key is MG1's column and forward_only MG8's, so a row that has
+// either needs its group.
 func insertClientOwnerInTx(ctx context.Context, tx server.PgTx, clientId server.Id, row *clientOwnerInsert) {
-	if row.clientPublicKey == nil {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_client_owner (
-					client_id,
-					owner_user_id,
-					member_id,
-					sponsor_user_id,
-					auth_key_id,
-					tagged,
-					ephemeral,
-					admin_refused,
-					strict_exp,
-					declares_no_egress,
-					acl_enforcing
-				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-			`,
-			clientId,
-			row.ownerUserId,
-			row.memberId,
-			row.sponsorUserId,
-			row.authKeyId,
-			row.tagged,
-			row.ephemeral,
-			row.marks.adminRefused,
-			row.marks.strictExp,
-			row.marks.declaresNoEgress,
-			row.marks.aclEnforcing,
-		))
-		return
+	columns := []string{
+		"client_id",
+		"owner_user_id",
+		"member_id",
+		"sponsor_user_id",
+		"auth_key_id",
+		"tagged",
+		"ephemeral",
+		"admin_refused",
+		"strict_exp",
+		"declares_no_egress",
+		"acl_enforcing",
 	}
-	if !server.SidecarMg1Linked() {
-		panic(errors.New("an owner row's client_public_key needs MG1"))
-	}
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-			INSERT INTO network_client_owner (
-				client_id,
-				owner_user_id,
-				member_id,
-				sponsor_user_id,
-				auth_key_id,
-				tagged,
-				ephemeral,
-				admin_refused,
-				strict_exp,
-				declares_no_egress,
-				acl_enforcing,
-				client_public_key
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		`,
+	values := []any{
 		clientId,
 		row.ownerUserId,
 		row.memberId,
@@ -278,7 +252,29 @@ func insertClientOwnerInTx(ctx context.Context, tx server.PgTx, clientId server.
 		row.marks.strictExp,
 		row.marks.declaresNoEgress,
 		row.marks.aclEnforcing,
-		row.clientPublicKey,
+	}
+	if row.clientPublicKey != nil {
+		if !server.SidecarMg1Linked() {
+			panic(errors.New("an owner row's client_public_key needs MG1"))
+		}
+		columns = append(columns, "client_public_key")
+		values = append(values, row.clientPublicKey)
+	}
+	if row.marks.forwardOnly {
+		if !server.SidecarMg8Linked() {
+			panic(errors.New("an owner row's forward_only needs MG8"))
+		}
+		columns = append(columns, "forward_only")
+		values = append(values, true)
+	}
+	placeholders := make([]string, len(columns))
+	for i := range columns {
+		placeholders[i] = "$" + strconv.Itoa(i+1)
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`INSERT INTO network_client_owner (`+strings.Join(columns, ", ")+`) VALUES (`+strings.Join(placeholders, ", ")+`)`,
+		values...,
 	))
 }
 
@@ -735,4 +731,263 @@ func Testing_SetNetworkEnrollHasGenesis(hasGenesis func(ctx context.Context, net
 	return func() {
 		networkEnrollHasGenesis = previous
 	}
+}
+
+// §7.4's forwarding client (TEAM-M8-02; owner decision 197; DESIGN-DETAILS
+// 4.2.6's S5): a sidecar S mints F for its app's VPN component with S's own
+// client token and S's DPoP proof, naming the component's ClientKey.
+//
+//	mark     forward_only, which sets admin_refused and strict_exp too and
+//	         which F's children, its window clients, inherit; MG8's column
+//	source   S's own client, a bound sidecar client of the newest generation:
+//	         the bearer is that client and a strict_exp one, so the proof gate
+//	         checked its proof (api/route_authz.go's strictExpProofRoutes)
+//	key      client_public_key, 32 B, stored in F's owner row (MG1's column):
+//	         with no binding it is the key F's own proofs are checked against
+//	         (ClientProofPublicKey). Taken only for a new forwarding client
+//	repeat   a mint naming a key an active forwarding child of S's client
+//	         already holds reissues that client, so a lost answer mints no
+//	         second F
+//	exchange only the newest active forwarding child of S's current client
+//	         speaks for S (ForwardingClientSidecar), so a setup that supersedes
+//	         S's forwarding Delegation with other keys, and so mints a new F,
+//	         ends the old F's exchange; its window clients never exchange
+
+// The client admin settings' bound, for a forwarding answer too.
+var clientForwardOnlyAnswers = newBoundedClientMap[bool](DefaultClientAdminSettings().CachedClientMaxCount)
+
+// Whether the client is a forwarding client or a child of one: its owner row's
+// forward_only. False in a binary that does not link MG8, which can mint
+// none. An error for a read that failed or a client its network does not hold,
+// which every caller refuses on. Each answer is immutable, so it is kept for as
+// long as this process can hold it.
+func ClientForwardOnly(ctx context.Context, networkId server.Id, clientId server.Id) (bool, error) {
+	if !server.SidecarMg8Linked() {
+		return false, nil
+	}
+	if forwardOnly, ok := clientForwardOnlyAnswers.Load(clientId); ok {
+		return forwardOnly, nil
+	}
+	found := false
+	forwardOnly := false
+	if r := server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT COALESCE(network_client_owner.forward_only, false)
+					FROM network_client
+					LEFT JOIN network_client_owner ON network_client_owner.client_id = network_client.client_id
+					WHERE
+						network_client.client_id = $1 AND
+						network_client.network_id = $2
+				`,
+				clientId,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&forwardOnly))
+					found = true
+				}
+			})
+		})
+	}); r != nil {
+		return false, fmt.Errorf("client forward_only: %v", r)
+	}
+	if !found {
+		return false, errors.New("client forward_only: no such client in the network")
+	}
+	clientForwardOnlyAnswers.Store(clientId, forwardOnly)
+	return forwardOnly, nil
+}
+
+// Drops this process's forwarding answers, for a test that writes a client's
+// rows directly after the client was asked about.
+func Testing_ForgetClientForwardOnly() {
+	clientForwardOnlyAnswers.Clear()
+}
+
+// What a forwarding mint is refused with.
+const (
+	clientForwardOnlyMinterMessage  = "A forwarding client is minted by its sidecar's own client, with its proof."
+	clientForwardOnlyKeyMessage     = "A forwarding client needs its 32-byte client_public_key."
+	clientForwardOnlyUnboundMessage = "A forwarding client's source must be a bound sidecar client."
+	clientPublicKeyMarkMessage      = "A client_public_key is taken only for a new forwarding client."
+	clientPublicKeyMismatchMessage  = "The client_public_key is not the client's."
+)
+
+// What a mint's request asks of forward_only before its transaction (§7.4's
+// mark row), with no lock held: a message to refuse with, or, for a repeat
+// whose key an active forwarding child of the source already holds, that
+// client, which the mint then reissues. A child of a forwarding client inherits
+// the mark and names no key. A read that fails is the caller's error.
+func checkForwardOnlyMint(ctx context.Context, authClient *AuthNetworkClientArgs, clientSession *session.ClientSession) (reuseClientId *server.Id, message string, returnErr error) {
+	if !authClient.ForwardOnly {
+		if authClient.ClientPublicKey != nil {
+			return nil, clientPublicKeyMarkMessage, nil
+		}
+		return nil, "", nil
+	}
+	if authClient.ClientId != nil {
+		// a reissue: its marks and key are checked against the client's own in
+		// its transaction
+		return nil, "", nil
+	}
+	sourceClientId := authClient.SourceClientId
+	callerClientId := clientSession.ByJwt.ClientId
+	if sourceClientId == nil || callerClientId == nil || *sourceClientId != *callerClientId || !clientSession.ByJwt.StrictExp {
+		return nil, clientForwardOnlyMinterMessage, nil
+	}
+	networkId := clientSession.ByJwt.NetworkId
+	sourceForwardOnly, err := ClientForwardOnly(ctx, networkId, *sourceClientId)
+	if err != nil {
+		return nil, "", err
+	}
+	if sourceForwardOnly {
+		// F's own child, a window client: the mark is inherited
+		if authClient.ClientPublicKey != nil {
+			return nil, clientPublicKeyMarkMessage, nil
+		}
+		return nil, "", nil
+	}
+	if len(authClient.ClientPublicKey) != ed25519.PublicKeySize {
+		return nil, clientForwardOnlyKeyMessage, nil
+	}
+	if _, err := GetClientBindingKey(ctx, *sourceClientId); err != nil {
+		return nil, clientForwardOnlyUnboundMessage, nil
+	}
+	existing, err := getForwardOnlyChildByKey(ctx, networkId, *sourceClientId, authClient.ClientPublicKey)
+	if err != nil {
+		return nil, "", err
+	}
+	return existing, "", nil
+}
+
+// The key a new client's owner row stores: a new forwarding client's, nil for
+// every other client, a forwarding client's child included.
+func forwardOnlyMintKey(authClient *AuthNetworkClientArgs, parentMarks clientMarks) []byte {
+	if !authClient.ForwardOnly || parentMarks.forwardOnly {
+		return nil
+	}
+	return bytes.Clone(authClient.ClientPublicKey)
+}
+
+// A reissue naming a key must name the client's own: nil when it names none or
+// the client's, else the message to refuse with.
+func refuseReissuedClientPublicKeyInTx(ctx context.Context, tx server.PgTx, authClient *AuthNetworkClientArgs) string {
+	if authClient.ClientPublicKey == nil {
+		return ""
+	}
+	if !bytes.Equal(getEnrolledClientPublicKeyInTx(ctx, tx, *authClient.ClientId), authClient.ClientPublicKey) {
+		return clientPublicKeyMismatchMessage
+	}
+	return ""
+}
+
+// The newest active forwarding child of sourceClientId that holds key, nil for
+// none. The source's children share its device, so the read is the device's.
+func getForwardOnlyChildByKey(ctx context.Context, networkId server.Id, sourceClientId server.Id, key []byte) (clientId *server.Id, returnErr error) {
+	if r := server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT network_client.client_id
+					FROM network_client
+					INNER JOIN network_client_owner ON network_client_owner.client_id = network_client.client_id
+					WHERE
+						network_client.device_id = (
+							SELECT device_id FROM network_client WHERE client_id = $2 AND network_id = $1
+						) AND
+						network_client.network_id = $1 AND
+						network_client.source_client_id = $2 AND
+						network_client.active = true AND
+						network_client_owner.forward_only = true AND
+						network_client_owner.client_public_key = $3
+					ORDER BY network_client.create_time DESC, network_client.client_id DESC
+					LIMIT 1
+				`,
+				networkId,
+				sourceClientId,
+				key,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					var found server.Id
+					server.Raise(result.Scan(&found))
+					clientId = &found
+				}
+			})
+		})
+	}); r != nil {
+		return nil, fmt.Errorf("forwarding client by key: %v", r)
+	}
+	return
+}
+
+// The sidecar a forwarding client speaks for at the exchange (§7.8's
+// forwarding rule): S, when the client is the newest active forwarding child
+// of S's client of the newest generation, bound to S. Nil for any other
+// client: an older forwarding client of S's client, which a later setup's
+// supersedes, a forwarding client's own child, or one whose source no longer
+// is S's current client. An error for a read that failed.
+func ForwardingClientSidecar(ctx context.Context, networkId server.Id, clientId server.Id) (sidecarId *server.Id, returnErr error) {
+	var sourceClientId *server.Id
+	newest := false
+	if r := server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						client.source_client_id,
+						client.client_id = (
+							SELECT sibling.client_id
+							FROM network_client sibling
+							INNER JOIN network_client_owner sibling_owner ON sibling_owner.client_id = sibling.client_id
+							WHERE
+								sibling.device_id = client.device_id AND
+								sibling.network_id = client.network_id AND
+								sibling.source_client_id = client.source_client_id AND
+								sibling.active = true AND
+								sibling_owner.forward_only = true
+							ORDER BY sibling.create_time DESC, sibling.client_id DESC
+							LIMIT 1
+						)
+					FROM network_client client
+					INNER JOIN network_client_owner owner ON owner.client_id = client.client_id
+					WHERE
+						client.client_id = $1 AND
+						client.network_id = $2 AND
+						client.active = true AND
+						owner.forward_only = true
+				`,
+				clientId,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					var isNewest *bool
+					server.Raise(result.Scan(&sourceClientId, &isNewest))
+					newest = isNewest != nil && *isNewest
+				}
+			})
+		})
+	}); r != nil {
+		return nil, fmt.Errorf("forwarding client: %v", r)
+	}
+	if sourceClientId == nil || !newest {
+		return nil, nil
+	}
+	// a failed read answers as no binding, which refuses
+	if _, err := GetClientBindingKey(ctx, *sourceClientId); err != nil {
+		return nil, nil
+	}
+	view := GetSidecarIdentityByClient(ctx, networkId, *sourceClientId)
+	if view == nil {
+		return nil, nil
+	}
+	sidecar := view.SidecarId
+	return &sidecar, nil
 }

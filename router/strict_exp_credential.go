@@ -52,6 +52,24 @@ func strictExpGate(refusal ClientCredentialRefusal, handler http.HandlerFunc) ht
 	}
 }
 
+// The route with a gate in front of its handler that answers 403, as the
+// strict_exp gate does, to a strict_exp token the refusal applies to: on a route
+// the strict_exp allowlist holds, what narrows a sidecar's forwarding client to
+// its own shorter list (§7.4, owner decision 197). Every other request reaches
+// the handler unchanged.
+func RefuseForwardOnlyCredentials(route *Route, refusal ClientCredentialRefusal) *Route {
+	refused := *route
+	refused.forwardOnlyRefusal = refusal
+	refused.handler = strictExpGate(refusal, route.handler)
+	return &refused
+}
+
+// Whether the route has the forwarding client gate: whether it is off the
+// forwarding allowlist while on the strict_exp one.
+func (self *Route) RefusesForwardOnlyCredentials() bool {
+	return self.forwardOnlyRefusal != nil
+}
+
 // The route with a gate in front of its handler that answers 403 to a strict_exp
 // token's request the refusal applies to.
 func RequireStrictExpProof(route *Route, refusal StrictExpProofRefusal) *Route {

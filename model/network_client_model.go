@@ -237,6 +237,14 @@ type AuthNetworkClientArgs struct {
 	// the reply returns its close capability once. Refused for a child and a
 	// re-auth.
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// §7.4's forwarding client F of a sidecar (owner decision 197): minted by
+	// the sidecar's own client token with its proof, as that client's child,
+	// strict_exp and admin_refused too, kept for life and inherited by F's
+	// children (network_client_owner_model.go's checkForwardOnlyMint).
+	ForwardOnly bool `json:"forward_only,omitempty"`
+	// A new forwarding client's ClientKey, Ed25519, 32 bytes: with no binding,
+	// what its proofs are checked against. Taken only with forward_only.
+	ClientPublicKey []byte `json:"client_public_key,omitempty"`
 
 	// what POST /network/enroll adds to the mint (EnrollNetworkClient), which no
 	// request body can set
@@ -278,6 +286,8 @@ type AuthNetworkClientResult struct {
 	StrictExp        bool `json:"strict_exp,omitempty"`
 	DeclaresNoEgress bool `json:"declares_no_egress,omitempty"`
 	AclEnforcing     bool `json:"acl_enforcing,omitempty"`
+	// a forwarding client's, which the VPN component's hand-off confirms
+	ForwardOnly bool `json:"forward_only,omitempty"`
 	// an ephemeral mint's close capability, 128 random bits returned only here
 	// (§7.7); api keeps only its SHA-256
 	Close string `json:"close,omitempty"`
@@ -415,7 +425,8 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 	// a mark that cannot be kept is a refusal, never a client without it
 	requestedMarks := requestedClientMarks(authClient)
 	if (requestedMarks.marked() || enrollment != nil) && !server.SidecarMg0Linked() ||
-		(authClient.Ephemeral || enrollment != nil) && !server.SidecarMg1Linked() {
+		(authClient.Ephemeral || enrollment != nil || authClient.ForwardOnly) && !server.SidecarMg1Linked() ||
+		authClient.ForwardOnly && !server.SidecarMg8Linked() {
 		authClientResult = &AuthNetworkClientResult{
 			Error: &AuthNetworkClientError{
 				Message: clientMarksUnavailableMessage,
@@ -432,6 +443,27 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			},
 		}
 		return
+	}
+
+	// a forwarding client's mint asks its source and key first, and a repeat of
+	// one reissues the client it made (§7.4)
+	reuseClientId, forwardOnlyMessage, err := checkForwardOnlyMint(clientSession.Ctx, authClient, clientSession)
+	if err != nil {
+		authClientError = err
+		return
+	}
+	if forwardOnlyMessage != "" {
+		authClientResult = &AuthNetworkClientResult{
+			Error: &AuthNetworkClientError{
+				Message: forwardOnlyMessage,
+			},
+		}
+		return
+	}
+	if reuseClientId != nil {
+		reissue := *authClient
+		reissue.ClientId = reuseClientId
+		authClient = &reissue
 	}
 
 	if authClient.ClientId == nil {
@@ -1063,9 +1095,10 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			} else if marks.marked() || authClient.Ephemeral {
 				ownerUserId := clientSession.ByJwt.UserId
 				ownerRow = &clientOwnerInsert{
-					ownerUserId: &ownerUserId,
-					ephemeral:   authClient.Ephemeral,
-					marks:       marks,
+					ownerUserId:     &ownerUserId,
+					ephemeral:       authClient.Ephemeral,
+					marks:           marks,
+					clientPublicKey: forwardOnlyMintKey(authClient, parentMarks),
 				}
 			}
 			closeCapability := ""
@@ -1164,6 +1197,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				StrictExp:        marks.strictExp,
 				DeclaresNoEgress: marks.declaresNoEgress,
 				AclEnforcing:     marks.aclEnforcing,
+				ForwardOnly:      marks.forwardOnly,
 				Close:            closeCapability,
 			}
 			if proxyClient != nil {
@@ -1301,6 +1335,14 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				}
 				return
 			}
+			if message := refuseReissuedClientPublicKeyInTx(clientSession.Ctx, tx, authClient); message != "" {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: message,
+					},
+				}
+				return
+			}
 			if clientSession.ByJwt.StrictExp {
 				marks = marks.union(clientMarks{adminRefused: true, strictExp: true})
 			}
@@ -1431,6 +1473,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				StrictExp:        marks.strictExp,
 				DeclaresNoEgress: marks.declaresNoEgress,
 				AclEnforcing:     marks.aclEnforcing,
+				ForwardOnly:      marks.forwardOnly,
 			}
 		}, server.TxReadCommitted)
 	}

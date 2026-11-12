@@ -218,6 +218,8 @@ var sidecarAllowlist = []string{
 	"POST /network/config/delta",
 	"POST /network/config/projection",
 	"GET /network/config/projection",
+	// §7.9's site loss (TEAM-M3-02)
+	"POST /network/config/reseed",
 }
 
 // The route families §7.4 classifies sidecar. A route under one of these paths
