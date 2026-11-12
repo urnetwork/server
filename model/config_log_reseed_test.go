@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"errors"
 	"testing"
 
@@ -344,4 +345,43 @@ func TestAdoptConfigRunCountsOnlyMembersThatMayUpload(t *testing.T) {
 	if !errors.Is(err, ErrConfigReseedNoRun) {
 		t.Fatalf("a read_only device's upload alone: %v", err)
 	}
+}
+
+// The adopted rows are those the run's bases name: a base whose rows_sha256 is short of a digest names none, and
+// neither does a statement or bytes that are no entry.
+func TestConfigReseedBaseRowsSkipsWhatNamesNoDigest(t *testing.T) {
+	base := func(rowsSha256 []byte) []byte {
+		headerBytes, err := proto.Marshal(&bridge.ProjectionHeader{RowsSha256: rowsSha256})
+		if err != nil {
+			t.Fatal(err)
+		}
+		signedBytes, err := proto.Marshal(&bridge.Signed{Body: headerBytes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entryBytes, err := proto.Marshal(&bridge.AuthEntry{Kind: bridge.AuthEntryKindBase, Body: signedBytes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return entryBytes
+	}
+	heldRows := []byte("rows a base names")
+	heldSha256 := sha256.Sum256(heldRows)
+	unheldSha256 := sha256.Sum256([]byte("rows no upload holds"))
+	statement, err := proto.Marshal(&bridge.AuthEntry{Kind: bridge.AuthEntryKindStatement, Body: heldSha256[:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[[sha256.Size]byte][]byte{heldSha256: heldRows}
+
+	baseRows := configReseedBaseRows([][]byte{
+		base(heldSha256[:sha256.Size-1]),
+		base(nil),
+		base(unheldSha256[:]),
+		statement,
+		[]byte("no entry"),
+		base(heldSha256[:]),
+	}, rows)
+	connect.AssertEqual(t, len(baseRows), 1)
+	connect.AssertEqual(t, bytes.Equal(baseRows[heldSha256], heldRows), true)
 }
