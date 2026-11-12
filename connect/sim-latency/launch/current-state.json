@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T08:43:16.216675Z",
+  "observed_at": "2026-11-12T08:48:01.917626Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,9 +17,9 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": true,
+    "grading_ready": false,
     "publication_held": false,
-    "diagnosis": "Goofe completed 9/9, exited zero and verified both cleanup boundaries. Automatic reconciliation advanced fence 27 to 28 with the same attempt/start/deadline, received 256 files (202552782 bytes), and refreshed host liveness. Central archival/score recording remains pending. Sille continues native measurements on its original clock."
+    "diagnosis": "Goofe completed 9/9, exited zero and verified both cleanup boundaries. Reconciliation advanced fence 27 to 28 with the original clock and received 256 files (202552782 bytes), but another PostgreSQL heartbeat deadline released fence 28 during retention at 08:46:50.684736Z. No new failure is recorded; central archival/score recording remains pending. Sille continues native measurements on its original clock."
   },
   "queue": {
     "succeeded": 11,
@@ -38,7 +38,16 @@
       "native_exit_code": 0,
       "native_cleanup_verified": true,
       "native_stop_cleanup_verified": true,
-      "database_custody": "automatically_reconciled_fence_28_original_clock_preserved"
+      "database_custody": "reconciled_fence_28_then_released_after_heartbeat_timeout_2026-11-12T08:46:50.684736Z",
+      "retention_heartbeat_incident": {
+        "error_at": "2026-11-12T08:46:46.970880Z",
+        "error": "PostgresStore.Heartbeat: context deadline exceeded",
+        "private_log": "/var/lib/urnetwork/competition-epoch2-heartbeat-retention-20261112.ZzVVKPi7/worker.private.log",
+        "log_sha256": "8379de5a21d226185a4307d576f46b1217b58ec020b45e068040a2ab0971b86c",
+        "evaluation_restarted": false,
+        "deadline_extended": false,
+        "new_terminal_failure_recorded": false
+      }
     },
     {
       "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
