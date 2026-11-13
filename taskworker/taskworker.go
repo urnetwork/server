@@ -211,6 +211,13 @@ func initTaskSchedule(ctx context.Context) {
 		// cert-1's rows deleted 30 days past their certificate's end; not
 		// scheduled without MG5
 		work.ScheduleTlsCertPurge(clientSession, tx)
+		// certs' orders taken to their CAs, due certificates renewed from
+		// their stored CSRs, and the revocation sweep (§13.8); each runs empty
+		// passes until the process installs the engine, and none is scheduled
+		// without MG5
+		work.ScheduleTlsCertOrders(clientSession, tx)
+		work.ScheduleTlsCertRenewals(clientSession, tx)
+		work.ScheduleTlsCertRevocations(clientSession, tx)
 		// §12's journal past 7 days, challenges and canaries past their hour,
 		// and zone suspensions past their until; not scheduled without MG5
 		work.ScheduleDnsMaintenance(clientSession, tx)
@@ -704,6 +711,18 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.TlsCertPurge,
 			work.TlsCertPurgePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.TlsCertOrders,
+			work.TlsCertOrdersPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.TlsCertRenewals,
+			work.TlsCertRenewalsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.TlsCertRevocations,
+			work.TlsCertRevocationsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.DnsMaintenance,
