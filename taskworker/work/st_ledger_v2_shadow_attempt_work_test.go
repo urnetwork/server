@@ -101,6 +101,8 @@ func TestStLedgerV2UsageStepCountsAndCapsTimedOutShadowAttempts(t *testing.T) {
 		defer func() {
 			controller.SetStConfig(nil)
 			controller.SetStClient(nil)
+			// the given-up epoch is this process's, which other tests share
+			controller.Testing_ClearStExtenderShadowConcluded()
 		}()
 		settings := DefaultStLedgerV2UsageStepSettings()
 		// the attempt's own bound, reached at once: the read below waits on it
@@ -249,10 +251,13 @@ func TestStLedgerV2UsageSyncRaisesAQueuedShadowRowsBound(t *testing.T) {
 		controller.SetStConfig(cfg)
 		controller.SetStClient(&ledgerV2WorkV1Chain{})
 		controller.SetStLedgerV2Client(&ledgerV2WorkChain{})
+		// no epoch concluded or given up by another test in this process
+		controller.Testing_ClearStExtenderShadowConcluded()
 		defer func() {
 			controller.SetStConfig(nil)
 			controller.SetStClient(nil)
 			controller.SetStLedgerV2Client(nil)
+			controller.Testing_ClearStExtenderShadowConcluded()
 		}()
 		key := cfg.DeploymentKey()
 		// epoch 6, one of the two before E_x = 8, with its census captured and

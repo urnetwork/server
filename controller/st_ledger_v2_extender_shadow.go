@@ -169,6 +169,12 @@ func stExtenderShadowKey(cfg *StConfig, epoch uint64) string {
 	return fmt.Sprintf("%s|%d|%d", cfg.DeploymentKey(), cfg.NoId, epoch)
 }
 
+// Forgets the epochs this process's shadow steps concluded or gave up, for the
+// tests of other packages that share the process.
+func Testing_ClearStExtenderShadowConcluded() {
+	stExtenderShadowConcluded.Clear()
+}
+
 // Reports whether an epoch's shadow report is still to be built: it is one of
 // the two epochs before E_x, by the amendments this server holds
 // (stLedgerV2HeldAmendments, which fetches nothing), its census is captured,
