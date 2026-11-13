@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Captured main 615b3f2c3's published tail must keep its exact order before the
+// Captured main fb38f3002's published tail must keep its exact order before the
 // local recovery append. Resolve positions from actual registered objects;
 // published migration identities cannot move when the local append is merged.
 func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *testing.T) {
@@ -16,20 +16,20 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 		StLedgerV2ExtenderMigrationVersion(), SolanaReceiverSweepCursorVersion(),
 		ProviderEgressFp2EvidenceMigrationVersion(),
 		StoreNotificationFlowVersion(), CryptoAddressSweepVersion(),
-		SolanaShopifyOrderPaymentVersion(),
+		SolanaShopifyOrderPaymentVersion(), NetworkMailContextVersion(),
 		CompetitionDistributedReevaluationMigrationVersion()}
 	for index, version := range versions {
 		if version < 1 || index > 0 && version != versions[index-1]+1 {
 			t.Fatal("captured published migration tail was moved, omitted or overwritten", versions)
 		}
 	}
-	if versions[8] != 968 || versions[9] != 969 {
-		t.Fatal("captured main's published address-sweep and Shopify migrations moved", versions)
+	if versions[8] != 968 || versions[9] != 969 || versions[10] != 970 {
+		t.Fatal("captured main's published address-sweep, Shopify or mail migrations moved", versions)
 	}
 	if versions[len(versions)-1] != MigrationCount() {
 		t.Fatal("local recovery must follow the entire captured origin tail", versions, MigrationCount())
 	}
-	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], MigrationCount())
+	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d mail_context=%d recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], versions[11], MigrationCount())
 }
 
 // Deleting only each explicit addition recovers the complete reviewed old

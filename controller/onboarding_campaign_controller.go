@@ -205,8 +205,18 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 		row.ExitReason = onboarding.ExitHoldout
 		row.ExitedAt = &now
 	default:
+		// E1 in the reader's zone as the mail chain resolves it now: a device
+		// may have reported one already (the device path, a sign-in before
+		// verification), else the sign-up IP's, the country's, or the
+		// sign-up's own time of day
+		frameHour, frameMinute := onboardingFrameTime()
+		zone := resolveMailReader(mailReaderSources{
+			MailContext: model.GetNetworkMailContext(clientSession.Ctx, networkId),
+			Onboarding:  row,
+			ActivityAt:  &now,
+		}, frameHour, frameMinute).SendZone
 		day := onboardingSchedule().Day(onboarding.StepE1, onboarding.PathB)
-		at := onboarding.SendAt(now, day, onboarding.LoadLocation(row.TimeZone), onboardingSendWindow())
+		at := onboarding.SendAt(now, day, zone.Loc(), zone.Window(onboardingSendWindow()))
 		row.NextStep = onboarding.StepE1
 		row.NextSendAt = &at
 	}
@@ -228,6 +238,24 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 		}
 	}
 	scheduleOnboardingCampaignStep(clientSession, networkId, onboarding.StepE1, *row.NextSendAt)
+}
+
+// onboardingFrameTime is the local time an activity frame reads a sign-up
+// as: the middle of the send window, so the sends keep the sign-up's own
+// time of day, unclamped, and a late step goes within half a window of it.
+func onboardingFrameTime() (hour int, minute int) {
+	return onboardingSendWindow().Middle()
+}
+
+// onboardingMailReader resolves a row's send zone and languages as of now
+// (controller/mail_context.go): the network's mail context, the row's own
+// zone, locale and country, the purchase countries and the newest client
+// event's locale where they can change it, and the sign-up as the activity an
+// unknown zone falls back to.
+func onboardingMailReader(ctx context.Context, row *model.NetworkOnboarding) mailReader {
+	createdAt := row.CreatedAt
+	hour, minute := onboardingFrameTime()
+	return resolveMailReader(loadMailReaderSources(ctx, row.NetworkId, row, "", &createdAt), hour, minute)
 }
 
 // RecordOnboardingClientContext stores what a device reports on auth-client:
@@ -563,7 +591,10 @@ func OnboardingCampaignStep(
 			NextStep: row.NextStep, NextSendAt: row.NextSendAt}, nil
 	}
 
-	facts, offer := loadOnboardingFacts(ctx, row, now)
+	// the zone and the languages as of now: a device may have reported them
+	// since the row was created
+	reader := onboardingMailReader(ctx, row)
+	facts, offer := loadOnboardingFactsIn(ctx, row, reader.SendZone, now)
 	decision := onboarding.Decide(args.Step, facts)
 	result := &OnboardingCampaignStepResult{
 		Action:   decision.Action,
@@ -580,8 +611,8 @@ func OnboardingCampaignStep(
 		return result, nil
 	}
 
-	loc := onboarding.LoadLocation(row.TimeZone)
-	window := onboardingSendWindow()
+	loc := reader.SendZone.Loc()
+	window := reader.SendZone.Window(onboardingSendWindow())
 	if decision.Action == onboarding.ActionDefer {
 		// the step waits (E3a for a late offer's last day): the row keeps it as
 		// the next step, and the post schedules it again at its moment
@@ -608,7 +639,7 @@ func OnboardingCampaignStep(
 			}
 			offer = issued
 		}
-		outcome, err := sendOnboardingCampaignEmail(ctx, row, args.Step, decision, offer, now)
+		outcome, err := sendOnboardingCampaignEmail(ctx, row, reader, args.Step, decision, offer, now)
 		if err != nil {
 			onboardingEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, "failed").Inc()
 			model.RecordNetworkOnboardingSendFailure(ctx, row.NetworkId, err.Error())
@@ -653,8 +684,15 @@ func OnboardingCampaignStepPost(
 	return nil
 }
 
-// loadOnboardingFacts reads everything a decision looks at, as of now.
+// loadOnboardingFacts reads everything a decision looks at, as of now, in
+// the row's send zone as the mail chain resolves it.
 func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now time.Time) (onboarding.Facts, *model.OnboardingOffer) {
+	return loadOnboardingFactsIn(ctx, row, onboardingMailReader(ctx, row).SendZone, now)
+}
+
+// loadOnboardingFactsIn is loadOnboardingFacts in a send zone the caller
+// resolved.
+func loadOnboardingFactsIn(ctx context.Context, row *model.NetworkOnboarding, zone onboarding.SendZone, now time.Time) (onboarding.Facts, *model.OnboardingOffer) {
 	offer := model.GetOnboardingOffer(ctx, row.NetworkId)
 	path := row.Path
 	if p := model.OnboardingPathForNetwork(offer); p != "" {
@@ -726,7 +764,7 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
 		OfferEndsSoon:     offer != nil && onboarding.OfferEndsSoon(offer.ExpiresAt, now),
-		LastChanceAt:      onboardingLastChanceAt(offer, offerState, row.TimeZone, now),
+		LastChanceAt:      onboardingLastChanceAt(offer, offerState, zone, now),
 		DesktopTemplate:   cfg.Brevo.HasTemplateVariant(onboarding.TemplateE2Widget, onboarding.VariantDesktop),
 		FeedbackSubmitted: feedbackSubmitted,
 		FeedbackEmailSent: onboardingFeedbackEmailSent(model.ListNetworkOnboardingEmails(ctx, row.NetworkId)),
@@ -736,13 +774,13 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 }
 
 // onboardingLastChanceAt is the Facts.LastChanceAt of an offer: the moment its
-// last-chance email goes in the network's zone and send window, while that
+// last-chance email goes in the network's send zone and window, while that
 // lies ahead; nil without an active offer or once the moment has passed.
-func onboardingLastChanceAt(offer *model.OnboardingOffer, offerState string, timeZone string, now time.Time) *time.Time {
+func onboardingLastChanceAt(offer *model.OnboardingOffer, offerState string, zone onboarding.SendZone, now time.Time) *time.Time {
 	if offer == nil || offerState != onboarding.OfferStateActive {
 		return nil
 	}
-	at := onboarding.LastChanceAt(offer.ExpiresAt, onboarding.LoadLocation(timeZone), onboardingSendWindow())
+	at := onboarding.LastChanceAt(offer.ExpiresAt, zone.Loc(), zone.Window(onboardingSendWindow()))
 	if !at.After(now) {
 		return nil
 	}
@@ -808,9 +846,12 @@ type OnboardingSendPlan struct {
 	Tags       []string          `json:"tags"`
 }
 
-func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, step string, decision onboarding.Decision, offer *model.OnboardingOffer, now time.Time) (*OnboardingSendPlan, error) {
+// buildOnboardingSendPlan resolves a send, in the reader's language (the
+// first of their languages a template serves, else their country's, else
+// English) with dates in their zone.
+func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, reader mailReader, step string, decision onboarding.Decision, offer *model.OnboardingOffer, now time.Time) (*OnboardingSendPlan, error) {
 	cfg := model.Onboarding()
-	templateId, templateLocale, ok := cfg.Brevo.TemplateIdLocale(decision.Template, decision.Variant, row.Locale)
+	templateId, templateLocale, _, ok := cfg.Brevo.TemplateIdForReader(decision.Template, decision.Variant, reader.Languages, cfg.EffectiveMailLanguageSettings())
 	if !ok || templateId <= 0 {
 		return nil, fmt.Errorf("no Brevo template for %s/%s/%s", decision.Template, decision.Variant, row.Locale)
 	}
@@ -823,7 +864,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 	if err != nil {
 		return nil, fmt.Errorf("mint landing token: %w", err)
 	}
-	loc := onboarding.LoadLocation(row.TimeZone)
+	loc := reader.SendZone.DisplayLocation()
 	tier := model.Pro().PriceTierForCountry(row.Country)
 	regular := tier.YearlyUsd
 	offerPrice := cfg.OfferPriceUsd(regular)
@@ -981,12 +1022,12 @@ func brevoPostSmtpEmail(ctx context.Context, args *brevoSmtpEmailArgs) (messageI
 
 // sendOnboardingCampaignEmail renders and sends one step to the network's
 // account email. Returns "sent" or "dry_run"; an error means retry.
-func sendOnboardingCampaignEmail(ctx context.Context, row *model.NetworkOnboarding, step string, decision onboarding.Decision, offer *model.OnboardingOffer, now time.Time) (string, error) {
+func sendOnboardingCampaignEmail(ctx context.Context, row *model.NetworkOnboarding, reader mailReader, step string, decision onboarding.Decision, offer *model.OnboardingOffer, now time.Time) (string, error) {
 	_, userAuth, ok := model.GetNetworkAdminUserAuth(ctx, row.NetworkId)
 	if !ok || userAuth == "" {
 		return "", fmt.Errorf("network %s has no admin email", row.NetworkId)
 	}
-	plan, err := buildOnboardingSendPlan(ctx, row, step, decision, offer, now)
+	plan, err := buildOnboardingSendPlan(ctx, row, reader, step, decision, offer, now)
 	if err != nil {
 		return "", err
 	}
@@ -1288,14 +1329,17 @@ type OnboardingStatus struct {
 	Emails []*model.NetworkOnboardingEmail `json:"emails"`
 	Events []*model.OnboardingEvent        `json:"events"`
 	Facts  *onboarding.Facts               `json:"facts,omitempty"`
+	// what the network's apps and browsers last reported
+	MailContext *model.NetworkMailContext `json:"mail_context,omitempty"`
 }
 
 func OnboardingCampaignStatus(ctx context.Context, networkId server.Id) *OnboardingStatus {
 	status := &OnboardingStatus{
-		Row:    model.GetNetworkOnboarding(ctx, networkId),
-		Offer:  model.GetOnboardingOffer(ctx, networkId),
-		Emails: model.ListNetworkOnboardingEmails(ctx, networkId),
-		Events: model.ListOnboardingEvents(ctx, networkId, 500),
+		Row:         model.GetNetworkOnboarding(ctx, networkId),
+		Offer:       model.GetOnboardingOffer(ctx, networkId),
+		Emails:      model.ListNetworkOnboardingEmails(ctx, networkId),
+		Events:      model.ListOnboardingEvents(ctx, networkId, 500),
+		MailContext: model.GetNetworkMailContext(ctx, networkId),
 	}
 	if status.Row != nil {
 		facts, _ := loadOnboardingFacts(ctx, status.Row, server.NowUtc())
@@ -1318,11 +1362,12 @@ func OnboardingCampaignPreview(ctx context.Context, networkId server.Id, step st
 		return nil, fmt.Errorf("network %s is not in the campaign", networkId)
 	}
 	now := server.NowUtc()
-	facts, offer := loadOnboardingFacts(ctx, row, now)
+	reader := onboardingMailReader(ctx, row)
+	facts, offer := loadOnboardingFactsIn(ctx, row, reader.SendZone, now)
 	decision := onboarding.Decide(step, facts)
 	preview := &OnboardingPreview{Decision: decision}
 	if decision.Action == onboarding.ActionSend {
-		plan, err := buildOnboardingSendPlan(ctx, row, step, decision, offer, now)
+		plan, err := buildOnboardingSendPlan(ctx, row, reader, step, decision, offer, now)
 		if err != nil {
 			preview.Error = err.Error()
 		} else {

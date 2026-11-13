@@ -72,7 +72,7 @@ var reengagementContextSourcesTotal = prometheus.NewCounterVec(prometheus.Counte
 	Namespace: "urnetwork",
 	Subsystem: "reengagement",
 	Name:      "context_sources_total",
-	Help:      "Scan candidates by stream and where each part of their mail context came from: part is country, locale, platform or time_zone; source is onboarding, app_store, play, stripe, client_event, device or unknown.",
+	Help:      "Scan candidates by stream and where each part of their mail context came from: part is country, locale, platform or time_zone; source is onboarding, app_store, play, stripe, client_event, device, client (what the network's apps and browsers last reported), country (the country's zone or language), activity (the time of day of the last connection or sign-up) or unknown.",
 }, []string{"stream", "part", "source"})
 
 func init() {
@@ -155,7 +155,7 @@ func ReengagementScan(args *ReengagementScanArgs, clientSession *session.ClientS
 
 	open := func(stream string, candidate *model.ReengagementCandidate, firstStep string, lastConnect *time.Time) {
 		result.Candidates[stream]++
-		mailContext := reengagementContext(ctx, candidate.NetworkId)
+		mailContext, reader := reengagementContextReader(ctx, candidate.NetworkId, lastConnect)
 		countReengagementContextSources(stream, mailContext)
 		if refusal := reengagementPolicyExit(ctx, candidate.NetworkId, stream, mailContext.Country, now); refusal != "" {
 			result.Refused[stream]++
@@ -166,7 +166,7 @@ func ReengagementScan(args *ReengagementScanArgs, clientSession *session.ClientS
 			reengagementEpisodesTotal.WithLabelValues(stream, "dry_run").Inc()
 			return
 		}
-		if openReengagementEpisode(clientSession, candidate.NetworkId, stream, firstStep, lastConnect, mailContext, now) {
+		if openReengagementEpisode(clientSession, candidate.NetworkId, stream, firstStep, lastConnect, mailContext, reader.SendZone, now) {
 			result.Opened[stream]++
 			reengagementEpisodesTotal.WithLabelValues(stream, "opened").Inc()
 		} else {
@@ -269,8 +269,8 @@ func reengagementPolicyExit(ctx context.Context, networkId server.Id, stream str
 }
 
 // openReengagementEpisode starts the episode in the network's resolved mail
-// context and schedules its first step.
-func openReengagementEpisode(clientSession *session.ClientSession, networkId server.Id, stream string, firstStep string, lastConnect *time.Time, mailContext ReengagementContext, now time.Time) bool {
+// context and schedules its first step in the context's send zone.
+func openReengagementEpisode(clientSession *session.ClientSession, networkId server.Id, stream string, firstStep string, lastConnect *time.Time, mailContext ReengagementContext, sendZone onboarding.SendZone, now time.Time) bool {
 	ctx := clientSession.Ctx
 	cfg := model.Reengagement()
 	s := cfg.ScheduleValue()
@@ -289,7 +289,7 @@ func openReengagementEpisode(clientSession *session.ClientSession, networkId ser
 		row.ExperimentId = a.ExperimentId
 		row.Variant = a.Variant
 	}
-	at := reengagement.SendAt(now, 0, onboarding.LoadLocation(mailContext.TimeZone), s, now)
+	at := reengagement.SendAtZone(now, 0, sendZone, s, now)
 	row.NextSendAt = &at
 	cooldownBefore := now.Add(-time.Duration(s.CooldownDays) * day)
 	if !model.StartNetworkReengagement(ctx, row, cooldownBefore, now) {
@@ -376,12 +376,14 @@ func ReengagementStep(args *ReengagementStepArgs, clientSession *session.ClientS
 		return result, nil
 	}
 
-	loc := onboarding.LoadLocation(row.TimeZone)
+	// the zone and the languages as of now: a device may have reported them
+	// since the episode opened
+	reader := reengagementMailReader(ctx, row)
 	if decision.Action == reengagement.ActionSend || decision.Action == reengagement.ActionVirtual {
 		// one campaign email a week across both programs, for both arms
 		if last := model.LastCampaignSendAt(ctx, row.NetworkId); last != nil {
 			if earliest := last.Add(time.Duration(s.MinGapDays) * day); now.Before(earliest) {
-				at := reengagement.SendAt(earliest, 0, loc, s, now)
+				at := reengagement.SendAtZone(earliest, 0, reader.SendZone, s, now)
 				reengagementEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, "deferred").Inc()
 				server.Tx(ctx, func(tx server.PgTx) {
 					model.AdvanceNetworkReengagementInTx(tx, ctx, row.NetworkId, args.Step, nil, args.Step, &at, now)
@@ -394,7 +396,7 @@ func ReengagementStep(args *ReengagementStepArgs, clientSession *session.ClientS
 	var sentAt *time.Time
 	switch decision.Action {
 	case reengagement.ActionSend:
-		outcome, sent, err := sendReengagementEmail(ctx, row, args.Step, decision, facts, now)
+		outcome, sent, err := sendReengagementEmail(ctx, row, reader, args.Step, decision, facts, now)
 		if err != nil {
 			reengagementEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, "failed").Inc()
 			model.RecordNetworkReengagementSendFailure(ctx, row.NetworkId, err.Error())
@@ -418,7 +420,7 @@ func ReengagementStep(args *ReengagementStepArgs, clientSession *session.ClientS
 	}
 
 	if decision.NextStep != "" {
-		at := reengagement.SendAt(row.StartedAt, decision.NextDay, loc, s, now)
+		at := reengagement.SendAtZone(row.StartedAt, decision.NextDay, reader.SendZone, s, now)
 		result.NextSendAt = &at
 	} else {
 		reengagementExitsTotal.WithLabelValues(row.Stream, reengagement.ExitDone).Inc()
@@ -532,12 +534,14 @@ func reengagementProEndedAt(ctx context.Context, networkId server.Id) *time.Time
 	return &end
 }
 
-// buildReengagementSendPlan resolves a send. offer is the win-back offer W1
+// buildReengagementSendPlan resolves a send, in the reader's language
+// (the first of their languages a template serves, else their country's,
+// else English) with dates in their zone. offer is the win-back offer W1
 // issued for this send; without one, an offer variant (a dry run, a preview)
 // shows the expiry an offer issued now would have.
-func buildReengagementSendPlan(ctx context.Context, row *model.NetworkReengagement, step string, decision reengagement.Decision, facts reengagement.Facts, offer *model.WinbackOffer, now time.Time) (*ReengagementSendPlan, error) {
+func buildReengagementSendPlan(ctx context.Context, row *model.NetworkReengagement, reader mailReader, step string, decision reengagement.Decision, facts reengagement.Facts, offer *model.WinbackOffer, now time.Time) (*ReengagementSendPlan, error) {
 	cfg := model.Reengagement()
-	templateId, locale, ok := cfg.Brevo.TemplateIdLocale(decision.Template, decision.Variant, row.Locale)
+	templateId, locale, _, ok := cfg.Brevo.TemplateIdForReader(decision.Template, decision.Variant, reader.Languages, model.Onboarding().EffectiveMailLanguageSettings())
 	if !ok || templateId <= 0 {
 		return nil, fmt.Errorf("no Brevo template for %s/%s/%s", decision.Template, decision.Variant, row.Locale)
 	}
@@ -554,7 +558,7 @@ func buildReengagementSendPlan(ctx context.Context, row *model.NetworkReengageme
 		Template:      decision.Template,
 		Variant:       decision.Variant,
 		Locale:        locale,
-		Location:      onboarding.LoadLocation(row.TimeZone),
+		Location:      reader.SendZone.DisplayLocation(),
 		Now:           now,
 		SiteUrl:       cfg.EffectiveSiteUrl(),
 		Token:         token,
@@ -613,13 +617,13 @@ func brevoSendReengagementTemplate(ctx context.Context, to string, plan *Reengag
 // win-back offer here, after the one-a-week deferral and right before the
 // send, so the offer's deadline starts with the email; a dry run issues
 // nothing.
-func sendReengagementEmail(ctx context.Context, row *model.NetworkReengagement, step string, decision reengagement.Decision, facts reengagement.Facts, now time.Time) (string, reengagement.Decision, error) {
+func sendReengagementEmail(ctx context.Context, row *model.NetworkReengagement, reader mailReader, step string, decision reengagement.Decision, facts reengagement.Facts, now time.Time) (string, reengagement.Decision, error) {
 	_, userAuth, ok := model.GetNetworkAdminUserAuth(ctx, row.NetworkId)
 	if !ok || !strings.Contains(userAuth, "@") {
 		return "", decision, fmt.Errorf("network %s has no admin email", row.NetworkId)
 	}
 	if !ReengagementEnabled() {
-		plan, err := buildReengagementSendPlan(ctx, row, step, decision, facts, nil, now)
+		plan, err := buildReengagementSendPlan(ctx, row, reader, step, decision, facts, nil, now)
 		if err != nil {
 			return "", decision, err
 		}
@@ -635,7 +639,7 @@ func sendReengagementEmail(ctx context.Context, row *model.NetworkReengagement, 
 			return "", decision, err
 		}
 	}
-	plan, err := buildReengagementSendPlan(ctx, row, step, decision, facts, offer, now)
+	plan, err := buildReengagementSendPlan(ctx, row, reader, step, decision, facts, offer, now)
 	if err != nil {
 		return "", decision, err
 	}
@@ -811,15 +815,22 @@ type ReengagementStatus struct {
 	Facts     *reengagement.Facts               `json:"facts,omitempty"`
 	// the context a scan would open an episode in now, with its sources
 	Context ReengagementContext `json:"context"`
+	// what the network's apps and browsers last reported
+	MailContext *model.NetworkMailContext `json:"mail_context,omitempty"`
 }
 
 func ReengagementNetworkStatus(ctx context.Context, networkId server.Id) *ReengagementStatus {
 	status := &ReengagementStatus{
-		Row:       model.GetNetworkReengagement(ctx, networkId),
-		MailState: model.GetNetworkMailState(ctx, networkId),
-		Emails:    model.ListNetworkReengagementEmails(ctx, networkId),
-		Context:   reengagementContext(ctx, networkId),
+		Row:         model.GetNetworkReengagement(ctx, networkId),
+		MailState:   model.GetNetworkMailState(ctx, networkId),
+		Emails:      model.ListNetworkReengagementEmails(ctx, networkId),
+		MailContext: model.GetNetworkMailContext(ctx, networkId),
 	}
+	var lastConnect *time.Time
+	if status.Row != nil {
+		lastConnect = status.Row.LastConnectAt
+	}
+	status.Context = reengagementContext(ctx, networkId, lastConnect)
 	if status.Row != nil {
 		facts := loadReengagementFacts(ctx, status.Row, server.NowUtc())
 		status.Facts = &facts
@@ -845,7 +856,7 @@ func ReengagementNetworkPreview(ctx context.Context, networkId server.Id, step s
 	decision := reengagement.Decide(step, facts, model.Reengagement().ScheduleValue())
 	preview := &ReengagementPreview{Decision: decision}
 	if decision.Action == reengagement.ActionSend || decision.Action == reengagement.ActionVirtual {
-		plan, err := buildReengagementSendPlan(ctx, row, step, decision, facts, nil, now)
+		plan, err := buildReengagementSendPlan(ctx, row, reengagementMailReader(ctx, row), step, decision, facts, nil, now)
 		if err != nil {
 			preview.Error = err.Error()
 		} else {

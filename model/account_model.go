@@ -417,6 +417,16 @@ func RemoveNetworkWithRemovals(
 		// every revocation record of the network refuses it before the
 		// deletion commits
 		server.Raise(session.RetireNetworkRecords(ctx, networkId))
+		// what the network's apps reported for its campaign emails (zone,
+		// languages, app builds) goes with it
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_mail_context
+				WHERE network_id = $1
+			`,
+			networkId,
+		))
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

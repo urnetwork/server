@@ -11533,6 +11533,13 @@ var migrations = []any{
 	// webhook) and the taskworker (the Solana reconcile) that use it.
 	solanaShopifyOrderPaymentMigration,
 
+	// The durable per-network mail context (network_mail_context_schema.go,
+	// controller/mail_context.go): one new empty table, created only when
+	// absent, under a five-second lock bound. Nothing existing is locked or
+	// rewritten. Apply before deploying the api and alt that write it and the
+	// taskworker that reads it.
+	networkMailContextMigration,
+
 	// Explicit distributed terminal-infrastructure recovery preserves original
 	// admission/failure and requires all-host closure before a new cycle queues.
 	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),
