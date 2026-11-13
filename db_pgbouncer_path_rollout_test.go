@@ -24,7 +24,7 @@ func TestPgBouncerPathOfBlock(t *testing.T) {
 	directBlocks := map[string][]string{
 		"api":     {"beta"},
 		"connect": {"beta", "g1"},
-		"proxy":   {PgBouncerEveryBlock},
+		"proxy":   {pgBouncerEveryBlock},
 	}
 	for _, check := range []struct {
 		service string
@@ -110,21 +110,21 @@ func TestSetServicePgBouncerPathChoosesTheProcessBlock(t *testing.T) {
 func TestPgBouncerDirectBlocksNameServicesThatChoose(t *testing.T) {
 	blockName := regexp.MustCompile(`^(beta|g[1-9][0-9]*)$`)
 	for service, blocks := range pgBouncerDirectBlocks {
-		if !slices.Contains(PgBouncerPathServices, service) {
+		if !slices.Contains(pgBouncerPathServices, service) {
 			t.Errorf("%s is in the table, but its main does not choose from it", service)
 		}
 		if len(blocks) == 0 {
 			t.Errorf("%s lists no block", service)
 		}
 		for i, block := range blocks {
-			if block != PgBouncerEveryBlock && !blockName.MatchString(block) {
+			if block != pgBouncerEveryBlock && !blockName.MatchString(block) {
 				t.Errorf("%s lists %q, which is not a block name", service, block)
 			}
 			if slices.Contains(blocks[:i], block) {
 				t.Errorf("%s lists %q twice", service, block)
 			}
 		}
-		if slices.Contains(blocks, PgBouncerEveryBlock) && len(blocks) != 1 {
+		if slices.Contains(blocks, pgBouncerEveryBlock) && len(blocks) != 1 {
 			t.Errorf("%s lists every block and more: %v", service, blocks)
 		}
 	}
@@ -258,7 +258,7 @@ func TestServiceMainsChooseTheirPgBouncerPath(t *testing.T) {
 		chooser:  "SetPgBouncerPath",
 		argument: "path",
 	}}
-	for _, service := range PgBouncerPathServices {
+	for _, service := range pgBouncerPathServices {
 		want = append(want, pgBouncerPathChoiceCall{
 			path:     "cli/" + service + "/main.go",
 			function: "main",

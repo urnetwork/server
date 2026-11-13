@@ -4,30 +4,31 @@ package server
 // (db_pgbouncer_path.go), while that path rolls out. Owner, 2026-11-13: "Code
 // can choose to use a single port, or choose to go direct."
 //
-// The services warp runs beside the database host (`PgBouncerPathServices`)
+// The services warp runs beside the database host (`pgBouncerPathServices`)
 // call `SetServicePgBouncerPath` with their own name in main, before any
 // database use. A process goes direct when warp runs it in a block
 // (WARP_BLOCK) that `pgBouncerDirectBlocks` lists for its service, or the
-// service lists `PgBouncerEveryBlock`. Every other block, a process warp does
+// service lists `pgBouncerEveryBlock`. Every other block, a process warp does
 // not run, and every other main keep the single port: bringyourctl and the
 // other tools among them, which operators run through a tunnel that forwards
 // only that port.
 //
-// A stage of the rollout is a change to this table, merged in the stage's
-// window and deployed with its service. One build serves every block of a
-// service and only the listed blocks go direct, so a stage can go out to its
-// block alone (`warpctl deploy main <service> <version> <block>`), and that
-// block reverts the same way, to the build before.
+// A stage of the rollout is a change to `pgBouncerDirectBlocks`, and to the
+// stage its test pins, merged in the stage's window and deployed with its
+// service. One build serves every block of a service and only the listed
+// blocks go direct, so a stage can go out to its block alone (`warpctl deploy
+// main <service> <version> <block>`), and that block reverts the same way, to
+// the build before.
 
 import (
 	"github.com/urnetwork/glog"
 )
 
 // In a service's list, every block of the service.
-const PgBouncerEveryBlock = "*"
+const pgBouncerEveryBlock = "*"
 
 // The services whose mains choose their path with `SetServicePgBouncerPath`.
-var PgBouncerPathServices = []string{"api", "connect", "proxy", "taskworker", "alt", "gossip", "mcp"}
+var pgBouncerPathServices = []string{"api", "connect", "proxy", "taskworker", "alt", "gossip", "mcp"}
 
 // The blocks whose main pools dial the PgBouncer instances directly, by
 // service. Empty: every block of every service is on the single port.
@@ -40,7 +41,7 @@ func pgBouncerPathOfBlock(directBlocks map[string][]string, service string, bloc
 		return PgBouncerPathSinglePort
 	}
 	for _, directBlock := range directBlocks[service] {
-		if directBlock == PgBouncerEveryBlock || directBlock == block {
+		if directBlock == pgBouncerEveryBlock || directBlock == block {
 			return PgBouncerPathDirect
 		}
 	}
