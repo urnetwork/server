@@ -352,6 +352,18 @@ func StripeWebhook(
 
 		return stripeHandleInvoicePaymentFailed(stripeWebhook.Data.Object, clientSession)
 
+	} else if stripeWebhook.Type == "invoice.payment_action_required" && stripeWebhook.Data != nil {
+
+		/**
+		 * a renewal (a trial's first charge among them) waits on the customer
+		 * to confirm the payment with their bank (3D Secure): ask the account to
+		 * confirm it, through the same notices (subscription_stripe_dunning.go)
+		 */
+
+		glog.Infof("type: invoice.payment_action_required")
+
+		return stripeHandleInvoicePaymentFailed(stripeWebhook.Data.Object, clientSession)
+
 	} else if stripeWebhook.Type == "invoice.voided" && stripeWebhook.Data != nil {
 
 		glog.Infof("type: invoice.voided")

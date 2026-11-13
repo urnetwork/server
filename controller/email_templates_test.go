@@ -83,6 +83,23 @@ func TestEmailTemplatesRender(t *testing.T) {
 			Currency:         "usd",
 		}, true},
 		{&SubscriptionPaymentFailedTemplate{AmountDue: 1999, Currency: "eur"}, true},
+		// a payment waiting on the customer's bank (3D Secure): the reminders
+		// to confirm it
+		{&SubscriptionPaymentFailedTemplate{
+			ActionRequired:   true,
+			HostedInvoiceUrl: "https://invoice.stripe.com/i/acct_synthetic/live_synthetic?s=ap",
+			AmountDue:        4000,
+			Currency:         "usd",
+			NextAttemptTime:  &paymentFailedNextAttempt,
+		}, true},
+		{&SubscriptionPaymentFailedTemplate{
+			Final:            true,
+			ActionRequired:   true,
+			HostedInvoiceUrl: "https://invoice.stripe.com/i/acct_synthetic/live_synthetic?s=ap",
+			AmountDue:        500,
+			Currency:         "usd",
+		}, true},
+		{&SubscriptionPaymentFailedTemplate{ActionRequired: true, AmountDue: 1999, Currency: "eur"}, true},
 		// the security notices are email only: no sms body
 		{securityWalletNoticeSample(), false},
 		{securitySignInNoticeSample(model.SecuritySignInAdded, model.SecuritySignInRemoved), false},

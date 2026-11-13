@@ -28,6 +28,15 @@
 //     email. The open row is the in-app past-due notice
 //     (SubscriptionBalanceResult.PaymentPastDue) every app shows, with the same
 //     link.
+//   - a renewal whose payment waits on the customer to confirm it with their
+//     bank (3D Secure: the invoice's PaymentIntent requires action) is
+//     followed the same way, on invoice.payment_action_required as well as
+//     invoice.payment_failed, and before Stripe counts a failed attempt
+//     (attempt_count 0, which the dunning used to skip: two trial conversions
+//     that waited on 3D Secure in the 30 days to 2026-11-13 lapsed without an
+//     email). Its notices ask the customer to confirm the payment on the
+//     invoice's Stripe-hosted page, where the bank's check runs, instead of
+//     saying it was declined (owner, 2026-11-13).
 //
 // The billing portal opens for the caller's own network only
 // (stripeCustomerIdForNetwork): the customer is found from what the server
@@ -39,9 +48,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/stripe/stripe-go/v82"
 
 	"github.com/urnetwork/glog"
 
@@ -138,6 +150,10 @@ type stripeDunningInvoice struct {
 	Created            int64           `json:"created"`
 	Customer           json.RawMessage `json:"customer"`
 	stripeInvoiceSubscriptionRef
+	// its payment waits on the customer to confirm it with their bank (3D
+	// Secure). Not a field of Stripe's invoice: read from the invoice's
+	// payments (stripeDunningInvoiceActionRequired).
+	PaymentActionRequired bool `json:"-"`
 }
 
 // The next automatic attempt, or nil when there is none.
@@ -206,6 +222,124 @@ func stripeDunningFetchSubscription(ctx context.Context, subscriptionId string, 
 	return sub, nil
 }
 
+// The status of a PaymentIntent that waits on the customer, here to confirm
+// the payment with their bank (3D Secure).
+const stripePaymentIntentStatusRequiresAction = "requires_action"
+
+// A payment intent as GET /v1/payment_intents/{id} gives it, or expanded.
+type stripeDunningPaymentIntent struct {
+	Id     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// The invoice's payments as GET /v1/invoice_payments lists them: each attempt
+// to pay the invoice, with its payment intent (an id, or an object when
+// expanded).
+type stripeDunningInvoicePaymentList struct {
+	Data []*struct {
+		// open, paid or canceled
+		Status  string `json:"status"`
+		Payment *struct {
+			// payment_intent, charge or payment_record
+			Type          string          `json:"type"`
+			PaymentIntent json.RawMessage `json:"payment_intent"`
+		} `json:"payment"`
+	} `json:"data"`
+}
+
+// The read's authorization, with the API version pinned to the one the
+// server's stripe-go speaks (stripe.APIVersion), so the read's shape does not
+// depend on the account's default version, which the dunning's other reads
+// use.
+func stripePinnedVersionHeader(header http.Header) {
+	stripeAuthHeader(header)
+	header.Set("Stripe-Version", stripe.APIVersion)
+}
+
+// Whether Stripe refused a read for good (a 4xx other than a rate limit): no
+// retry of the same read changes the answer.
+func stripeReadRefused(err error) bool {
+	var statusErr *server.HttpStatusError
+	return errors.As(err, &statusErr) &&
+		http.StatusBadRequest <= statusErr.StatusCode &&
+		statusErr.StatusCode < http.StatusInternalServerError &&
+		statusErr.StatusCode != http.StatusTooManyRequests
+}
+
+// Whether the invoice's payment waits on the customer to confirm it with
+// their bank (3D Secure): an open payment of the invoice whose PaymentIntent
+// requires action. An invoice lists its payments from API version 2025-03-31
+// on, and these reads are pinned to such a version (stripePinnedVersionHeader).
+// A read Stripe refuses for good leaves the answer unknown, which reads as no:
+// the notice then says the payment did not go through, as it always did.
+// Another failure is an error, and the webhook is delivered again.
+func stripeDunningInvoiceActionRequired(ctx context.Context, invoiceId string, settings *stripeDunningSettings) (bool, error) {
+	query := url.Values{
+		"invoice":  []string{invoiceId},
+		"status":   []string{"open"},
+		"limit":    []string{"100"},
+		"expand[]": []string{"data.payment.payment_intent"},
+	}
+	list, err := func() (*stripeDunningInvoicePaymentList, error) {
+		readCtx, cancel := context.WithTimeout(ctx, settings.StripeReadTimeout)
+		defer cancel()
+		return server.HttpGetRequireStatusOk[*stripeDunningInvoicePaymentList](
+			readCtx,
+			fmt.Sprintf("%s/v1/invoice_payments?%s", stripeApiBaseUrl, query.Encode()),
+			stripePinnedVersionHeader,
+			server.ResponseJsonObject[*stripeDunningInvoicePaymentList],
+		)
+	}()
+	if err != nil {
+		if stripeReadRefused(err) {
+			glog.Warningf("[stripe]dunning: invoice %s: its payments could not be read, so it reads as not waiting on a confirmation: %s\n", invoiceId, err)
+			return false, nil
+		}
+		return false, fmt.Errorf("invoice %s payments: %w", invoiceId, err)
+	}
+	if list == nil {
+		return false, fmt.Errorf("invoice %s payments: no list", invoiceId)
+	}
+	for _, payment := range list.Data {
+		if payment == nil || payment.Status != "open" || payment.Payment == nil || payment.Payment.Type != "payment_intent" {
+			continue
+		}
+		var paymentIntent stripeDunningPaymentIntent
+		if err := json.Unmarshal(payment.Payment.PaymentIntent, &paymentIntent); err != nil || paymentIntent.Status == "" {
+			// not expanded: read the payment intent itself
+			paymentIntentId := stripeIdFromRaw(payment.Payment.PaymentIntent)
+			if paymentIntentId == "" {
+				continue
+			}
+			read, err := func() (*stripeDunningPaymentIntent, error) {
+				readCtx, cancel := context.WithTimeout(ctx, settings.StripeReadTimeout)
+				defer cancel()
+				return server.HttpGetRequireStatusOk[*stripeDunningPaymentIntent](
+					readCtx,
+					fmt.Sprintf("%s/v1/payment_intents/%s", stripeApiBaseUrl, url.PathEscape(paymentIntentId)),
+					stripePinnedVersionHeader,
+					server.ResponseJsonObject[*stripeDunningPaymentIntent],
+				)
+			}()
+			if err != nil {
+				if stripeReadRefused(err) {
+					glog.Warningf("[stripe]dunning: invoice %s: payment intent %s could not be read: %s\n", invoiceId, paymentIntentId, err)
+					continue
+				}
+				return false, fmt.Errorf("invoice %s payment intent %s: %w", invoiceId, paymentIntentId, err)
+			}
+			if read == nil || read.Id != paymentIntentId {
+				return false, fmt.Errorf("invoice %s payment intent %s: Stripe returned another payment intent", invoiceId, paymentIntentId)
+			}
+			paymentIntent = *read
+		}
+		if paymentIntent.Status == stripePaymentIntentStatusRequiresAction {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // The network the subscription bills, by the rules that credit its renewals
 // (stripeResolveInvoiceCredit): its network_id metadata, then the
 // client_reference_id of the checkout session that started it. A customer the
@@ -270,15 +404,17 @@ func stripePaymentFailedNoticeDue(
 }
 
 // Why the invoice is not a failing renewal the dunning follows, or "" when it
-// is: an off-session renewal, still open after a failed attempt, whose
-// subscription Stripe is still retrying.
+// is: an off-session renewal, still open after a failed attempt or waiting on
+// the customer to confirm its payment, whose subscription Stripe is still
+// retrying. A payment that waits on the bank's check can have no attempt Stripe
+// counts as failed yet.
 func stripeDunningFailingReason(invoice *stripeDunningInvoice, sub *stripeDunningSubscription) string {
 	switch {
 	case invoice.BillingReason != stripeBillingReasonSubscriptionCycle:
 		return "not a renewal: billing reason " + invoice.BillingReason
 	case invoice.Status != "open":
 		return "invoice is " + invoice.Status
-	case invoice.AttemptCount < 1:
+	case invoice.AttemptCount < 1 && !invoice.PaymentActionRequired:
 		return "no failed attempt"
 	case sub == nil:
 		return "no subscription"
@@ -352,6 +488,9 @@ type stripeDunningOutcome struct {
 	Currency       string
 	AttemptCount   int
 	NextAttemptAt  *time.Time
+	// the payment waits on the customer to confirm it with their bank (3D
+	// Secure), so the notice asks them to confirm it
+	PaymentActionRequired bool
 	// the notice owed now (or, in a dry run, that would be)
 	Notice stripePaymentFailedNotice
 	// the account has an email, so the notice goes to the outbox
@@ -406,6 +545,15 @@ func stripeDunningProcessInvoice(
 	}
 	if outcome.CustomerId == "" {
 		outcome.CustomerId = stripeIdFromRaw(sub.Customer)
+	}
+	if invoice.Status == "open" && stripeSubscriptionRetrying(sub.Status) {
+		// a payment waiting on the bank's check owes a notice before Stripe
+		// counts a failed attempt, and the notice asks for the confirmation
+		invoice.PaymentActionRequired, err = stripeDunningInvoiceActionRequired(ctx, invoiceId, settings)
+		if err != nil {
+			return nil, err
+		}
+		outcome.PaymentActionRequired = invoice.PaymentActionRequired
 	}
 	if skip := stripeDunningFailingReason(invoice, sub); skip != "" {
 		outcome.Skip = skip
@@ -485,6 +633,7 @@ func stripeDunningProcessInvoice(
 			userAuth:  email,
 			template: &SubscriptionPaymentFailedTemplate{
 				Final:            notice == stripePaymentFailedNoticeFinal,
+				ActionRequired:   invoice.PaymentActionRequired,
 				HostedInvoiceUrl: failure.HostedInvoiceUrl,
 				AmountDue:        invoice.AmountDue,
 				Currency:         invoice.Currency,
@@ -567,10 +716,12 @@ func stripeWithdrawPaymentFailedNoticesInTx(ctx context.Context, tx server.PgTx,
 
 // ----- webhooks -----
 
-// invoice.payment_failed: an attempt to charge the invoice failed. Only the
-// invoice id is taken from the event; the handler reads the current state.
-// Always 200 except when Stripe or the database cannot be read, so Stripe
-// delivers the event again.
+// invoice.payment_failed (an attempt to charge the invoice failed) and
+// invoice.payment_action_required (the charge waits on the customer to confirm
+// it with their bank, 3D Secure). Only the invoice id is taken from the event;
+// the handler reads the current state, so either event of one invoice decides
+// on the same ledger row. Always 200 except when Stripe or the database cannot
+// be read, so Stripe delivers the event again.
 func stripeHandleInvoicePaymentFailed(object json.RawMessage, clientSession *session.ClientSession) (*StripeWebhookResult, error) {
 	var invoice struct {
 		Id            string `json:"id"`
@@ -632,12 +783,12 @@ func stripeDunningLogOutcome(outcome *stripeDunningOutcome) {
 		networkId = outcome.NetworkId.String()
 	}
 	if outcome.Notice == stripePaymentFailedNoticeNone {
-		glog.Infof("[stripe]dunning: invoice %s (network %s, attempt %d): no notice: %s\n", outcome.InvoiceId, networkId, outcome.AttemptCount, outcome.Skip)
+		glog.Infof("[stripe]dunning: invoice %s (network %s, attempt %d, action required %t): no notice: %s\n", outcome.InvoiceId, networkId, outcome.AttemptCount, outcome.PaymentActionRequired, outcome.Skip)
 		return
 	}
 	glog.Infof(
-		"[stripe]dunning: invoice %s (network %s, attempt %d): %s notice owed, email=%t\n",
-		outcome.InvoiceId, networkId, outcome.AttemptCount, outcome.Notice, outcome.HasEmail,
+		"[stripe]dunning: invoice %s (network %s, attempt %d, action required %t): %s notice owed, email=%t\n",
+		outcome.InvoiceId, networkId, outcome.AttemptCount, outcome.PaymentActionRequired, outcome.Notice, outcome.HasEmail,
 	)
 }
 
@@ -734,6 +885,9 @@ type StripeDunningReportRow struct {
 	AttemptCount int
 	// nil when Stripe will not retry again
 	NextAttemptTime *time.Time
+	// the payment waits on the customer to confirm it with their bank (3D
+	// Secure), and the notice asks them to confirm it
+	PaymentActionRequired bool
 	// first, final, or "" when nothing is owed now
 	Notice string
 	// why nothing is owed, when nothing is
@@ -781,6 +935,7 @@ func StripeDunningReport(ctx context.Context, send bool) ([]*StripeDunningReport
 			row.Currency = outcome.Currency
 			row.AttemptCount = outcome.AttemptCount
 			row.NextAttemptTime = outcome.NextAttemptAt
+			row.PaymentActionRequired = outcome.PaymentActionRequired
 			row.Notice = string(outcome.Notice)
 			row.Skip = outcome.Skip
 			if send {

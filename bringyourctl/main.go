@@ -2172,8 +2172,13 @@ func paymentsStripeDunning(opts docopt.Opts, out io.Writer) int {
 		if strings.HasPrefix(row.Skip, "error: ") {
 			failed += 1
 		}
+		note := row.Skip
+		if row.PaymentActionRequired {
+			// the notice asks the customer to confirm the payment
+			note = strings.TrimSuffix("awaits 3D Secure confirmation; "+note, "; ")
+		}
 		fmt.Fprintf(out, "%-30s %-9s %-38s %-5s %-29s %10s %8d %-17s %-6s %s\n",
-			row.SubscriptionId, row.SubscriptionStatus, networkId, email, row.InvoiceId, row.Amount(), row.AttemptCount, nextAttempt, notice, row.Skip)
+			row.SubscriptionId, row.SubscriptionStatus, networkId, email, row.InvoiceId, row.Amount(), row.AttemptCount, nextAttempt, notice, note)
 	}
 	fmt.Fprintf(out, "%d subscriptions, %d could not be read\n", len(rows), failed)
 	if 0 < failed {
