@@ -70,8 +70,10 @@ func TestMigrationsPublicColumnsPreserveDynamicRowAndFaultVisibility(t *testing.
 		read := func(query string) Row {
 			ctx, cancel := context.WithTimeout(tb.Context(), 45*time.Second)
 			defer cancel()
-			rows, err := (&migrationPingDatabaseSource{}).PostgreSQL(ctx, query)
-			if err != nil || len(rows) != 1 || len(rows[0]) != columns {
+			observation := &migrationCensusObservation{settings: DefaultMigrationCensusSettings()}
+			ctx = context.WithValue(ctx, migrationCensusContextKey{}, observation)
+			rows, err := (&migrationPingDatabaseSource{requireCensusOwnership: true}).PostgreSQL(ctx, query)
+			if err != nil || len(rows) != 1 || len(rows[0]) != columns || !observation.catalogComplete {
 				tb.Fatal("complete migration row comparison unavailable")
 			}
 			return rows[0]

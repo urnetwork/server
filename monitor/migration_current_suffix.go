@@ -924,7 +924,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// The future executor slots and no-op evidence follow that origin prefix.
 	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
 	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
-	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract},
+	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract.removedAt(server.CompetitionDistributedReevaluationMigrationVersion())},
 	// Version is resolved from the appended coverage migration, never fixed.
 	[]snMainnetMigrationContract{competitionWorkCoverageMigrationContract().removedAt(server.CompetitionIntakeFirstMigrationVersion())},
 	// The successor retains all four retired composites, replacing only
@@ -977,7 +977,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the per-cycle Pro grants, versioned by their position
 	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
 	// The corrected claim trigger carries every earlier admission guard.
-	[]snMainnetMigrationContract{competitionExecutorAdmissionClaimMigrationContract},
+	[]snMainnetMigrationContract{competitionExecutorAdmissionClaimMigrationContract.removedAt(server.CompetitionDistributedReevaluationMigrationVersion())},
 	// the HTTP/3 place evidence, versioned by its position
 	[]snMainnetMigrationContract{providerEgressH3PlaceMigrationContract},
 	// the IPv6 place evidence, versioned by its position
@@ -1008,6 +1008,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{cryptoAddressSweepMigrationContract},
 	// the Shopify orders paid with Solana Pay, versioned by its position
 	[]snMainnetMigrationContract{solanaShopifyOrderPaymentMigrationContract},
+	// Exact closure, cycle transition and inherited legacy/source custody.
+	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

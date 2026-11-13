@@ -155,7 +155,9 @@ func runCompetitionExecutorWorker(ctx context.Context, worker *Worker, evaluator
 		if finished {
 			return nil
 		}
-		if err == nil && !integrityRejected {
+		// A grading pause is an idle worker state, not a reason to skip the
+		// preflight and heartbeat owner on a held coordinator restart.
+		if (err == nil || errors.Is(err, ErrAutomationHeld)) && !integrityRejected {
 			err = worker.Run(ctx)
 			if err == nil {
 				return nil

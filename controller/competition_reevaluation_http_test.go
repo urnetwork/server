@@ -21,7 +21,7 @@ import (
 )
 
 // Both existing transport contracts serialize the same owned recovery, keep
-// evaluation holds/private errors sealed, and refuse unauthorized cache reuse.
+// unpublished outcomes/private errors sealed, and refuse unauthorized cache reuse.
 func TestCompetitionReevaluationHttpPreservesOwnedReceiptAndPublicationEmbargo(t *testing.T) {
 	for _, v2 := range []bool{false, true} {
 		func() {
@@ -82,8 +82,11 @@ func TestCompetitionReevaluationHttpPreservesOwnedReceiptAndPublicationEmbargo(t
 					RevealAt: time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)}, CompetitionId: settings.CompetitionId, PolicyJson: policy},
 			}
 			if v2 {
-				publicationAt := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+				publicationAt := job.Round.RevealAt
 				job.Round.AutomationPublicationAt = &publicationAt
+			}
+			if roundPublished(&job.Round, time.Now().UTC()) {
+				t.Fatalf("v2=%t recovery HTTP fixture must be unpublished independently of evaluation holds", v2)
 			}
 			store := &privateScoreOwnerStore{fakeStore: &fakeStore{getJob: job, round: &job.Round,
 				holdStatus: competitionAutomationHoldStatus{Evaluation: v2}}, owner: "apex"}

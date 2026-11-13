@@ -195,6 +195,14 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			// claim's clock starts only after those waits and a fresh parent fence.
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
 			now = self.nowUtc().Truncate(time.Microsecond)
+			if job.EvaluationCycle > 0 && job.Reevaluation != nil && job.Reevaluation.Schema == 2 {
+				var clockErr error
+				now, clockErr = competitionDistributedRecoveryDatabaseTime(ctx, tx)
+				server.Raise(clockErr)
+				if now.Before(job.Reevaluation.AuthorizedAt) {
+					panic(ErrLeaseLost)
+				}
+			}
 			if reconcile && job.ExecutionDeadline != nil && now.Before(*job.ExecutionDeadline) {
 				var rejected bool
 				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_job_event WHERE job_id=$1 AND event_type='execution_custody_released'
@@ -220,8 +228,10 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			deadline := job.ExecutionDeadline
 			if deadline == nil {
 				started := now
-				if job.EvaluationCycle > 0 && job.CycleStartedAt != nil {
-					started = *job.CycleStartedAt
+				if job.EvaluationCycle > 0 {
+					if job.CycleStartedAt != nil {
+						started = *job.CycleStartedAt
+					}
 				} else if job.StartedAt != nil {
 					started = *job.StartedAt
 				}

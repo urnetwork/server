@@ -152,6 +152,26 @@ type PostgreSQLSettings struct {
 	User          string
 	Password      string
 	Database      string
+	// Zero inherits the existing 30-second statement budget. Negative,
+	// fractional-millisecond or PostgreSQL-unrepresentable values refuse use.
+	StatementTimeout time.Duration
+}
+
+// Connection and statement defaults have one source for both SQL paths.
+func DefaultPostgreSQLSettings() PostgreSQLSettings {
+	return PostgreSQLSettings{Port: 5432, PgBouncerPort: 6432, StatementTimeout: 30 * time.Second}
+}
+
+// PostgreSQL's integer millisecond GUC must represent the exact owner budget.
+func pgStatementTimeoutMillis(timeout time.Duration) (int64, error) {
+	if timeout == 0 {
+		timeout = DefaultPostgreSQLSettings().StatementTimeout
+	}
+	milliseconds := int64(timeout / time.Millisecond)
+	if timeout <= 0 || timeout%time.Millisecond != 0 || milliseconds != int64(int32(milliseconds)) {
+		return 0, fmt.Errorf("monitor: PostgreSQL statement timeout must be positive whole representable milliseconds")
+	}
+	return milliseconds, nil
 }
 
 // Separate admin and query-role credentials stay in memory. QueryDomain is the
@@ -482,8 +502,11 @@ type SignalSettings struct {
 	routerDesiredGeneration [32]byte
 	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
 	// authoritative topology; exclusions never remove placements or capacity.
-	ExcludedHosts     []string
-	PostgreSQL        PostgreSQLSettings
+	ExcludedHosts []string
+	PostgreSQL    PostgreSQLSettings
+	// Nil selects fresh default census bounds; explicit nonpositive bounds
+	// refuse the observation rather than removing planner admission.
+	MigrationCensus   *MigrationCensusSettings
 	Grafana           GrafanaSettings
 	GooglePlay        GooglePlayReportingSettings
 	AppleReporting    AppleReportingSettings
@@ -558,6 +581,13 @@ func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSetti
 }
 
 func (s SignalSettings) withDefaults() SignalSettings {
+	if s.MigrationCensus == nil {
+		bounds := DefaultMigrationCensusSettings()
+		s.MigrationCensus = &bounds
+	} else {
+		bounds := *s.MigrationCensus
+		s.MigrationCensus = &bounds
+	}
 	s.APIReleaseProof = cloneAPIReleaseProofSettings(s.APIReleaseProof)
 	s.SubnetCorrectness = cloneSubnetCorrectnessSettings(s.SubnetCorrectness)
 	s.SubnetArtifacts = cloneSubnetArtifactSettings(s.SubnetArtifacts)
@@ -571,10 +601,13 @@ func (s SignalSettings) withDefaults() SignalSettings {
 		s.AddressMode = AddressModeOverlay
 	}
 	if s.PostgreSQL.Port == 0 {
-		s.PostgreSQL.Port = 5432
+		s.PostgreSQL.Port = DefaultPostgreSQLSettings().Port
 	}
 	if s.PostgreSQL.PgBouncerPort == 0 {
-		s.PostgreSQL.PgBouncerPort = 6432
+		s.PostgreSQL.PgBouncerPort = DefaultPostgreSQLSettings().PgBouncerPort
+	}
+	if s.PostgreSQL.StatementTimeout == 0 {
+		s.PostgreSQL.StatementTimeout = DefaultPostgreSQLSettings().StatementTimeout
 	}
 	if s.SourceAttribution.IPv4URL == "" {
 		s.SourceAttribution.IPv4URL = "https://api-v4.bringyour.com/my-ip-info"
@@ -611,6 +644,15 @@ func (s SignalSettings) withRuntime() SignalSettings {
 func (s SignalSettings) Validate() error { return s.withDefaults().validate() }
 
 func (s SignalSettings) validate() error {
+	if _, err := pgStatementTimeoutMillis(s.PostgreSQL.StatementTimeout); err != nil {
+		return err
+	}
+	if s.MigrationCensus == nil {
+		return fmt.Errorf("monitor: migration census bounds are absent")
+	}
+	if err := s.MigrationCensus.validate(); err != nil {
+		return err
+	}
 	if !s.PGQuerySampleUntil.IsZero() && s.PGQuerySampleUntil.After(s.Now().Add(24*time.Hour)) {
 		return fmt.Errorf("monitor: bounded PG query sample expiry exceeds 24 hours")
 	}
@@ -776,6 +818,10 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 }
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
+	census := DefaultMigrationCensusSettings()
+	if settings.MigrationCensus != nil {
+		census = *settings.MigrationCensus
+	}
 	cfg := &monitorConfig{
 		env:                       settings.Environment,
 		publicDomain:              settings.PublicDomain,
@@ -802,6 +848,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		pgUser:                    settings.PostgreSQL.User,
 		pgPassword:                settings.PostgreSQL.Password,
 		pgDb:                      settings.PostgreSQL.Database,
+		pgStatementTimeout:        settings.PostgreSQL.StatementTimeout,
 		grafanaAdminPassword:      settings.Grafana.AdminPassword,
 		mimirQueryDomain:          settings.Grafana.QueryDomain,
 		mimirQueryUsername:        settings.Grafana.QueryUsername,
@@ -821,6 +868,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		sharedSshAdmission:        settings.sharedSshAdmission,
 		sshConnectTimeout:         settings.SSHConnectTimeout,
 		commandTimeout:            settings.CommandTimeout,
+		migrationCensus:           census,
 	}
 	if settings.runtime != nil {
 		cfg.remoteCommands = settings.runtime.remoteCommands

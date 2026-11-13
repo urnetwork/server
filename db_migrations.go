@@ -11532,4 +11532,8 @@ var migrations = []any{
 	// or rewritten. Apply before deploying the api and alt (the Helius
 	// webhook) and the taskworker (the Solana reconcile) that use it.
 	solanaShopifyOrderPaymentMigration,
+
+	// Explicit distributed terminal-infrastructure recovery preserves original
+	// admission/failure and requires all-host closure before a new cycle queues.
+	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),
 }
