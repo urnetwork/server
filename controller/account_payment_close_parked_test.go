@@ -155,15 +155,15 @@ func TestPayoutCloseParkedDigest(t *testing.T) {
 		{PaymentId: a, PayoutNanoCents: 1_234_567_891, Reason: model.UsdcParkedOther, Week: "2026-10-26"},
 	}
 	sum := sha256.Sum256([]byte("urnetwork payouts close-parked v1\npayment 01a17fd1-0000-7000-8000-00000000000a 1234567891\npayment 01a17fd1-0000-7000-8000-00000000000b 10000000"))
-	digest := payoutCloseParkedDigest(rows)
+	digest := payoutCloseParkedDigest(rows, nil)
 	if digest != hex.EncodeToString(sum[:]) {
 		t.Fatal("digest", digest)
 	}
-	if payoutCloseParkedDigest([]*PayoutCloseParkedRow{rows[1], rows[0]}) != digest {
+	if payoutCloseParkedDigest([]*PayoutCloseParkedRow{rows[1], rows[0]}, nil) != digest {
 		t.Fatal("the digest depends on the row order")
 	}
 	// reasons and weeks are reported, not bound
-	if payoutCloseParkedDigest([]*PayoutCloseParkedRow{{PaymentId: b, PayoutNanoCents: 10_000_000}, {PaymentId: a, PayoutNanoCents: 1_234_567_891}}) != digest {
+	if payoutCloseParkedDigest([]*PayoutCloseParkedRow{{PaymentId: b, PayoutNanoCents: 10_000_000}, {PaymentId: a, PayoutNanoCents: 1_234_567_891}}, nil) != digest {
 		t.Fatal("the digest binds more than the ids and payouts")
 	}
 	for _, changed := range [][]*PayoutCloseParkedRow{
@@ -172,12 +172,12 @@ func TestPayoutCloseParkedDigest(t *testing.T) {
 		{rows[0], rows[1], {PaymentId: server.NewId(), PayoutNanoCents: 1}},
 		{},
 	} {
-		if payoutCloseParkedDigest(changed) == digest {
+		if payoutCloseParkedDigest(changed, nil) == digest {
 			t.Fatal("a different census kept the digest", changed)
 		}
 	}
 	empty := sha256.Sum256([]byte("urnetwork payouts close-parked v1"))
-	if payoutCloseParkedDigest(nil) != hex.EncodeToString(empty[:]) {
+	if payoutCloseParkedDigest(nil, nil) != hex.EncodeToString(empty[:]) {
 		t.Fatal("the digest of no payments")
 	}
 }

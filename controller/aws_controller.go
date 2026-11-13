@@ -292,8 +292,9 @@ func (self *SubscriptionPaymentFailedTemplate) NextAttemptDate() string {
 }
 
 // The notice that a network's USDC payout is withheld for want of a Solana
-// wallet. Payout is the withheld total, which the account message outbox sums
-// over the slices of one payout run.
+// wallet, with the withheld total. Since USDC payouts ended (owner decision
+// 2026-11-12) no payout run writes one; delivery still renders, or withholds,
+// one already in the outbox.
 type MissingWalletTemplate struct {
 	PaymentId server.Id
 	Payout    model.NanoCents

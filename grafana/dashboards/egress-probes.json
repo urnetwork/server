@@ -8428,7 +8428,7 @@
       "id": 172,
       "type": "timeseries",
       "title": "post-quantum outcomes of URL turns / min",
-      "description": "Stored URL outcomes of post-quantum turns, the turns whose claim asked for an end-to-end session (about one turn per provider every four hours), by the pq_outcome the store kept (FP2-PROTOCOL.md §12.3): positive, the session negotiated a post-quantum group (X25519MLKEM768), sealed before the IPv4 HTTPS leg's request and carried that passed leg; negative, a classical group, a post-quantum session that had not sealed by the run's end, or no responder for a whole establishment window while the provider acknowledged the turn's traffic; unmeasured, anything else, a security recheck or an outcome on probation included. Strict post-quantum selection matches only providers whose newest outcome in the eight-hour window is positive.",
+      "description": "Stored URL outcomes of post-quantum turns, the turns whose claim asked for an end-to-end session (about one turn per provider every four hours), by the pq_outcome the store kept (FP2-PROTOCOL.md §12.3): positive, the session negotiated a post-quantum group (X25519MLKEM768), sealed before the IPv4 HTTPS leg's request and carried that passed leg; negative, a classical group, a post-quantum session that had not sealed by the run's end, or no responder for a whole establishment window while the provider acknowledged the turn's traffic; unmeasured, anything else, a security recheck or an outcome on probation included. Strict post-quantum selection matches only providers whose newest outcome in the eight-hour window is positive. prober is the same turns as the taskworker read them before submitting, so a gap between the two is outcomes the store kept as unmeasured.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -8462,6 +8462,11 @@
           "refId": "A",
           "expr": "sum by (pq) (rate(urnetwork_egress_url_pq_outcomes_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "legendFormat": "stored {{pq}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (pq) (rate(urnetwork_url_probe_e2e_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "prober {{pq}}"
         }
       ]
     }

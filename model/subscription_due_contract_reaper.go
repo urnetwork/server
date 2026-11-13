@@ -122,9 +122,11 @@ const dueContractDeleteDependentsSql = `
 
 // removeDueContractBatches consumes the first bounded slice of the reap_time
 // index before doing any payment lookup. Due contracts held by an active or
-// ambiguous payment are repaired to reap_time = NULL. So are unpaid contracts
-// stamped by the former 90-day rule that have not yet reached the new 300-day
-// horizon. All other due contracts and their dependent rows are deleted.
+// ambiguous payment are repaired to reap_time = NULL. So are contracts stamped
+// by the former 90-day rule that have not yet reached the new 300-day horizon
+// and that no settled payment paid: none completed, and none the USDC
+// close-out closed (server.AccountPaymentRetentionSettledSql). All other due
+// contracts and their dependent rows are deleted.
 // Classifying only the already-bounded slice avoids turning the safety checks
 // into an anti-join over contract history. The payment guard also covers
 // completed payments whose queued retention cursor has not finished yet.
@@ -307,7 +309,7 @@ func (self *dueContractReaper) removeBatch(ctx context.Context) (processedCount 
 									account_payment.payment_id = transfer_escrow_sweep.payment_id
 								WHERE
 									transfer_escrow_sweep.contract_id = due.contract_id AND
-									account_payment.completed
+									`+server.AccountPaymentRetentionSettledSql+`
 							)
 						)
 				), cleared AS (

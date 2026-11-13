@@ -33,6 +33,9 @@ type Provider struct {
 	// its URL loads make (egresshealth.Options.ProviderIpFamily) and whether
 	// its tunnel carries IPv6. The zero value is legacy, IPv4 alone.
 	IpFamily egresshealth.IpFamily
+	// The claim asked this turn to measure post-quantum: its tunnel opens an
+	// opportunistic end-to-end session (egresshealth url_e2e.go).
+	PostQuantum bool
 }
 
 // Opens a tunnel to one provider and returns an http.Client that

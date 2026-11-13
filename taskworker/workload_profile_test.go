@@ -194,7 +194,7 @@ func TestSubnetOperatorWorkloadPreservesProductionDefault(t *testing.T) {
 		}
 		// the geolocation-source pin refresh is retired and no longer seeded
 		// (connect/GEOMAP.md D24); the pool refresh is the egress default now
-		for _, target := range []task.Target{task.NewTaskTarget(work.Payout), task.NewTaskTarget(work.RefreshEgressDestinations), task.NewTaskTarget(work.StSyncChain), task.NewTaskTarget(controller.DeliverAccountMessages)} {
+		for _, target := range []task.Target{task.NewTaskTarget(work.RefreshEgressDestinations), task.NewTaskTarget(work.StSyncChain), task.NewTaskTarget(controller.DeliverAccountMessages)} {
 			name := target.TargetFunctionName()
 			if !worker.HasTarget(name) || !seeded[name] {
 				t.Errorf("ordinary production default lost scheduled/registered task %s", name)
@@ -202,6 +202,12 @@ func TestSubnetOperatorWorkloadPreservesProductionDefault(t *testing.T) {
 		}
 		if !worker.HasTarget(task.NewTaskTarget(controller.AdvancePayment).TargetFunctionName()) {
 			t.Fatal("ordinary production default lost controller-enqueued retail payments")
+		}
+		// the weekly payout ended with USDC payouts (owner decision 2026-11-12):
+		// its target stays registered to drain queued rows and is not seeded
+		payoutName := task.NewTaskTarget(work.Payout).TargetFunctionName()
+		if !worker.HasTarget(payoutName) || seeded[payoutName] {
+			t.Fatalf("payout target registered %v, seeded %v; want registered and not seeded", worker.HasTarget(payoutName), seeded[payoutName])
 		}
 	})
 }
