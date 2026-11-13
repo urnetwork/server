@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/onboarding"
 )
 
 // An anonymous event in the shape Brevo documents for one (the unique proxy
@@ -221,5 +222,23 @@ func TestBrevoCampaignEventOfNoRecordedSendIsCounted(t *testing.T) {
 	}
 	if attempts := server.PacketPostgresAttempts(ctx); attempts != 0 {
 		t.Errorf("another sender's events were looked up (%d PostgreSQL attempts)", attempts)
+	}
+}
+
+// A send an experiment covers carries the experiment and arm tags after the
+// program, template and variant (onboarding.CampaignTags, 2026-11-13); the
+// webhook still reads the program and template from the first two.
+func TestBrevoWebhookReadsTheTemplateBeforeTheExperimentTags(t *testing.T) {
+	tags := onboarding.CampaignTags("reengagement", "r2_reason", "lapsed", "reengage_lapsed_1", "control")
+	encoded, err := json.Marshal(tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := brevoAnonymousWebhookArgs(t, "spam", string(encoded))
+	if template, ok := brevoWebhookCampaignTemplate(args, "reengagement"); !ok || template != "r2_reason" {
+		t.Fatalf("template %q (%t) from %v", template, ok, tags)
+	}
+	if _, ok := brevoWebhookCampaignTemplate(args, "onboarding"); ok {
+		t.Fatal("a re-engagement send read as onboarding's")
 	}
 }
