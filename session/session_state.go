@@ -31,7 +31,7 @@ func (self *ByJwt) AcceptUntil() time.Time {
 	if self.ExpiresAt == nil {
 		return time.Time{}
 	}
-	return self.ExpiresAt.Time.Add(SessionGrace + clockLeeway)
+	return self.ExpiresAt.Time.Add(SessionGrace + DefaultByJwtSettings().ClockLeeway)
 }
 
 // The checks of a credential's lifetime no gate relaxes, made wherever a

@@ -16,8 +16,8 @@ func TestSessionMaintenanceExpiryRepairAndPublicationRace(t *testing.T) {
 		early := sessionFixtureCredential(network, now)
 		late := sessionFixtureCredential(network, now)
 		foreign := sessionFixtureCredential(other, now)
-		early.ExpiresAt = gojwt.NewNumericDate(now.Add(time.Hour - SessionGrace - clockLeeway))
-		late.ExpiresAt = gojwt.NewNumericDate(now.Add(3*time.Hour - SessionGrace - clockLeeway))
+		early.ExpiresAt = gojwt.NewNumericDate(now.Add(time.Hour - SessionGrace - DefaultByJwtSettings().ClockLeeway))
+		late.ExpiresAt = gojwt.NewNumericDate(now.Add(3*time.Hour - SessionGrace - DefaultByJwtSettings().ClockLeeway))
 		foreign.ExpiresAt = early.ExpiresAt
 		for _, credential := range []*ByJwt{early, late, foreign} {
 			if _, err := RegisterNetworkSession(ctx, credential, "password", nil, false, now); err != nil {

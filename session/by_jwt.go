@@ -66,19 +66,26 @@ type ByJwtSettings struct {
 	// The exp of a strict_exp token, a sidecar's, from its mint: a copied token
 	// outlives its theft by at most this (D-TEAM-14; owner decisions 103, 131).
 	StrictExpiry time.Duration
+	// The skew between clocks a token's exp, nbf and iat are read with, and that
+	// a tagged credential's terminal horizon adds (AcceptUntil): 30 s. A
+	// strict_exp token's exp takes none (validateStrictExp).
+	ClockLeeway time.Duration
+	// How long a network id repaired from a credential's user or client is kept
+	// in Redis for the next repair (fixByJwt): 15 min.
+	NetworkIdCacheTtl time.Duration
 }
 
 // The lifetimes every token is minted with.
 func DefaultByJwtSettings() *ByJwtSettings {
 	return &ByJwtSettings{
-		Expiry:       30 * 24 * time.Hour,
-		StrictExpiry: 7 * 24 * time.Hour,
+		Expiry:            30 * 24 * time.Hour,
+		StrictExpiry:      7 * 24 * time.Hour,
+		ClockLeeway:       30 * time.Second,
+		NetworkIdCacheTtl: 15 * time.Minute,
 	}
 }
 
 const (
-	clockLeeway = 30 * time.Second
-
 	ByJwtIssuer          = "urnetwork:byjwt"
 	ByJwtAudienceApi     = "urnetwork:api"
 	ByJwtAudienceConnect = "urnetwork:connect"
@@ -197,6 +204,13 @@ type ByJwt struct {
 	// credential is minted for the membership; renewal and every credential
 	// derived from it keep it.
 	MemberId *server.Id `json:"member_id,omitempty"`
+	// the sidecar whose identity binding names this client (§5.5): sockets
+	// reads the caller's §8 subject here, with no Postgres (plan-SOCK-client-auth,
+	// QD-040). Set only by POST /sidecar/bind's re-mint (RemintSidecarCredential),
+	// from the binding api has just recorded, and kept by a refresh of the same
+	// client. It names this client's sidecar alone, so Renew, which a child's
+	// credential is derived from, drops it, and no derived credential carries it.
+	SidecarId *server.Id `json:"sidecar_id,omitempty"`
 	gojwt.RegisteredClaims
 }
 
@@ -474,16 +488,35 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 // ByJwt struct (a gojwt.Claims via its embedded RegisteredClaims) to avoid a
 // MapClaims map plus a json marshal/unmarshal round-trip on every request.
 func parseByJwtSigned(keyring *byJwtKeyring, jwtSigned string) (*ByJwt, error) {
+	reread := func(seenKeys *byJwtKeys) *byJwtKeys {
+		if keyring.reread(seenKeys) {
+			return keyring.heldKeys()
+		}
+		return nil
+	}
+	byJwt, _, err := parseByJwtSignedByKeys(keyring.heldKeys(), reread, jwtSigned)
+	return byJwt, err
+}
+
+// parseByJwtSigned's rule over any held keys, the issuer's keyring's or the
+// verify-only keyring's (by_jwt_verify_keyring.go), so both accept exactly the
+// same tokens. reread is asked once, after a token whose kid selected no key
+// fails every held key, and answers the keys a reread gained, or nil when it
+// gained none. unknownKid reports a token that named a kid the final keys do
+// not hold: a key this process was never given, which a verifier may tell from
+// a forgery under a key it holds.
+func parseByJwtSignedByKeys(keys *byJwtKeys, reread func(seenKeys *byJwtKeys) *byJwtKeys, jwtSigned string) (byJwt *ByJwt, unknownKid bool, err error) {
 	parserOptions := []gojwt.ParserOption{
 		gojwt.WithValidMethods([]string{"ES256", "ES384", "ES512", "RS512"}),
 		gojwt.WithoutClaimsValidation(),
 	}
-	parse := func(keys *byJwtKeys) (byJwt *ByJwt, kidMissed bool, err error) {
+	parse := func(keys *byJwtKeys) (byJwt *ByJwt, kidMissed bool, kidUnknown bool, err error) {
 		keyFunc := func(token *gojwt.Token) (any, error) {
 			if kid, ok := token.Header["kid"].(string); ok {
 				if matchedPublicKey, ok := keys.kidPublicKeys[kid]; ok {
 					return matchedPublicKey, nil
 				}
+				kidUnknown = true
 			}
 			kidMissed = true
 			return gojwt.VerificationKeySet{Keys: keys.verificationKeys}, nil
@@ -493,15 +526,16 @@ func parseByJwtSigned(keyring *byJwtKeyring, jwtSigned string) (*ByJwt, error) {
 		return
 	}
 
-	keys := keyring.heldKeys()
-	byJwt, kidMissed, err := parse(keys)
-	if err != nil && kidMissed && errors.Is(err, gojwt.ErrTokenSignatureInvalid) && keyring.reread(keys) {
-		byJwt, _, err = parse(keyring.heldKeys())
+	byJwt, kidMissed, kidUnknown, err := parse(keys)
+	if err != nil && kidMissed && errors.Is(err, gojwt.ErrTokenSignatureInvalid) {
+		if rereadKeys := reread(keys); rereadKeys != nil {
+			byJwt, _, kidUnknown, err = parse(rereadKeys)
+		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, kidUnknown, err
 	}
-	return byJwt, nil
+	return byJwt, false, nil
 }
 
 // ParseByJwtForAudience verifies the signature and the registered lifetime
@@ -538,6 +572,7 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 	// (reject_missing_expiration) or a passed exp (reject_expired) is fatal;
 	// not-before and issued-at violations are fatal in every mode.
 	now := server.NowUtc()
+	clockLeeway := DefaultByJwtSettings().ClockLeeway
 	if err := validateSessionHorizon(byJwt, now); err != nil {
 		return nil, err
 	}
@@ -985,11 +1020,16 @@ func (self *ByJwt) clientRoot(clientId server.Id) *server.Id {
 	return &clientId
 }
 
-// Copies lineage and identity while refreshing only registered claims.
+// Copies lineage and identity while refreshing only registered claims. The
+// sidecar_id claim is left out: it names this one client's sidecar, and the
+// copy is also what a child client's credential is built from
+// (AuthNetworkClient), which must not act as its parent's sidecar. A refresh of
+// the same client puts it back (RenewSessionCredential).
 func (self *ByJwt) Renew() *ByJwt {
 	copy := *self
 	copy.RegisteredClaims = newRegisteredClaims(self.UserId, self.StrictExp)
 	copy.Roles = slices.Clone(self.Roles)
+	copy.SidecarId = nil
 	return &copy
 }
 
@@ -1034,7 +1074,7 @@ func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
 					byJwt.NetworkId = networkId
 					glog.V(1).Infof("[jwt]fixed network_id with user_id\n")
 					storeCtx := context.Background()
-					ttl := 15 * time.Minute
+					ttl := DefaultByJwtSettings().NetworkIdCacheTtl
 					go server.HandleError(func() {
 						server.Redis(storeCtx, func(r server.RedisClient) {
 							// ignore the error
@@ -1061,7 +1101,7 @@ func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
 					byJwt.NetworkId = networkId
 					glog.V(1).Infof("[jwt]fixed network_id with client_id\n")
 					storeCtx := context.Background()
-					ttl := 15 * time.Minute
+					ttl := DefaultByJwtSettings().NetworkIdCacheTtl
 					go server.HandleError(func() {
 						server.Redis(storeCtx, func(r server.RedisClient) {
 							// ignore the error

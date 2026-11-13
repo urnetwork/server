@@ -168,7 +168,7 @@ func TestAuthorizationLeaseCredentialHorizonRetiresDuringOutage(t *testing.T) {
 		sessionId := credential.NetworkId
 		credential.SessionId = &sessionId
 		// accept until start + 3 minutes
-		credential.ExpiresAt = gojwt.NewNumericDate(start.Add(3*time.Minute - SessionGrace - clockLeeway))
+		credential.ExpiresAt = gojwt.NewNumericDate(start.Add(3*time.Minute - SessionGrace - DefaultByJwtSettings().ClockLeeway))
 		check := &scriptedLeaseCheck{
 			results:   []error{nil},
 			otherwise: ErrAuthUnavailable,

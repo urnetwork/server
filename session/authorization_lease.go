@@ -188,7 +188,7 @@ func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, cl
 	if credential.SessionId == nil && credential.RootClientId == nil && !rejectExpired() {
 		terminal = time.Time{}
 	} else if rejectExpired() && credential.ExpiresAt != nil {
-		strict := credential.ExpiresAt.Time.Add(clockLeeway)
+		strict := credential.ExpiresAt.Time.Add(DefaultByJwtSettings().ClockLeeway)
 		if terminal.IsZero() || strict.Before(terminal) {
 			terminal = strict
 		}

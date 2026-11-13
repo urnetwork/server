@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -121,6 +122,12 @@ func RenewSessionCredential(clientSession *ClientSession, networkName string, pr
 	credential := clientSession.ByJwt.Renew()
 	credential.NetworkName = networkName
 	credential.Pro = pro
+	// the same client: its sidecar stays its sidecar (QD-040), which Renew,
+	// shared with child mints, leaves out
+	if sidecarId := clientSession.ByJwt.SidecarId; sidecarId != nil && credential.ClientId != nil {
+		keptSidecarId := *sidecarId
+		credential.SidecarId = &keptSidecarId
+	}
 	PrepareSessionMint(credential, false)
 	err = sessionTx(clientSession.Ctx, func(tx server.PgTx) error {
 		if err := LockSessionLifecycle(clientSession.Ctx, tx, credential.NetworkId, false); err != nil {
@@ -134,6 +141,55 @@ func RenewSessionCredential(clientSession *ClientSession, networkName string, pr
 		}
 		var err error
 		signed, err = RegisterAndSignInTx(clientSession.Ctx, tx, credential, "legacy", nil, false)
+		return err
+	})
+	if err != nil {
+		return "", answerRenewalRefusal(err)
+	}
+	return
+}
+
+// POST /sidecar/bind's re-mint (plan-SOCK-client-auth, QD-040): the presented
+// client credential, signed again with sidecarId, the sidecar of the binding api
+// has just recorded for this client, as its sidecar_id claim, so sockets reads
+// the caller's sidecar with no Postgres.
+//
+// Every other claim stays as presented, its lifetime included: exp, nbf, iat
+// and the create time. Only the jti is new, as the token is a new one. Bind
+// takes no proof of the ClientKey, and a byte-identical bind is answered again,
+// so a re-mint that renewed would let a copied token and the binding, which GET
+// /sidecar/identity hands out, outlive the copy's exp, which only a refresh with
+// the proof may extend (§7.4, D-TEAM-14). The presented credential is checked
+// again in the re-mint's transaction, under the session lifecycle lock every
+// rotation takes, and the re-mint registers as every mint does; a refusal
+// answers as a renewal's does (answerRenewalRefusal).
+func RemintSidecarCredential(clientSession *ClientSession, sidecarId server.Id) (signed string, err error) {
+	if clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity {
+		return "", sessionError("current_session_required")
+	}
+	presented := clientSession.ByJwt
+	if presented.ClientId == nil || presented.DeviceId == nil {
+		return "", errors.New("a sidecar credential is a client's")
+	}
+	if sidecarId == (server.Id{}) {
+		return "", errors.New("a sidecar credential names its sidecar")
+	}
+	credential := *presented
+	credential.Roles = slices.Clone(presented.Roles)
+	credential.SidecarId = &sidecarId
+	credential.ID = server.NewId().String()
+	err = sessionTx(clientSession.Ctx, func(tx server.PgTx) error {
+		if err := LockSessionLifecycle(clientSession.Ctx, tx, credential.NetworkId, false); err != nil {
+			return err
+		}
+		if err := ValidateByJwtStateInTx(clientSession.Ctx, tx, presented, true); err != nil {
+			return err
+		}
+		if err := AssociateSessionClientInTx(clientSession.Ctx, tx, &credential, false); err != nil {
+			return err
+		}
+		var err error
+		signed, err = RegisterAndSignInTx(clientSession.Ctx, tx, &credential, "legacy", nil, false)
 		return err
 	})
 	if err != nil {
