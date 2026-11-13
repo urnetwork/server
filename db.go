@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	// "strconv"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -487,7 +487,7 @@ func (self *retryBackoff) NextRetryTimeout() time.Duration {
 		return self.retryMinTimeout
 	}
 	return self.retryMinTimeout + time.Duration(
-		mathrand.Int63n(int64(backoff-self.retryMinTimeout)),
+		mathrand.Int64N(int64(backoff-self.retryMinTimeout)),
 	)
 }
 

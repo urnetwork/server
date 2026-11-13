@@ -7,7 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptrace"
 	"testing"
@@ -34,7 +34,7 @@ func (self *unavailableContractTransport) ProviderContractAcquisitionUnavailable
 func TestBlackholeUnavailableContractIsNotMeasured(t *testing.T) {
 	transport := &unavailableContractTransport{}
 	result := blackhole(t.Context(), &http.Client{Transport: transport}, stubDests("https://contract.probe.example", BlackholeSampleSize),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 	if result.Ok || result.Failure != FailureNotMeasured || result.NotMeasured != BlackholeSampleSize {
 		t.Fatalf("local contract wait became provider evidence: %+v", result)
 	}
@@ -50,7 +50,7 @@ func TestBlackholeUnavailableContractIsNotMeasured(t *testing.T) {
 func TestFullUnavailableContractHasNoMeasuredScore(t *testing.T) {
 	result, err := check(t.Context(), &http.Client{Transport: &unavailableContractTransport{}},
 		stubDests("https://contract.probe.example", BlackholeSampleSize),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 	if err != nil || result.Total != 0 || result.OkCount != 0 || result.NotMeasured == 0 {
 		t.Fatalf("local contract wait produced quality score: result=%+v err=%v", result, err)
 	}
@@ -60,7 +60,7 @@ func TestFullUnavailableContractHasNoMeasuredScore(t *testing.T) {
 func TestLoadContractContactReplacesEarlierUnknown(t *testing.T) {
 	transport := &unavailableContractTransport{}
 	transport.contractUnavailable = func() bool { return transport.requests.Load() == 1 }
-	r := newRun(staticPath{client: &http.Client{Transport: transport}}, Options{Sleep: noSleep}, 1, time.Hour, rand.New(rand.NewSource(1)))
+	r := newRun(staticPath{client: &http.Client{Transport: transport}}, Options{Sleep: noSleep}, 1, time.Hour, rand.New(rand.NewPCG(1, 0)))
 	result := r.load(t.Context(), stubDests("https://contract.probe.example", 1)[1])
 	if result.NotMeasured || result.Ok || result.Attempts != DefaultLoadAttempts {
 		t.Fatalf("earlier local unknown suppressed provider evidence: %+v", result)

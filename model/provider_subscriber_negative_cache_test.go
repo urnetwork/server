@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -381,7 +381,8 @@ func TestSubscriberNegativeCacheRandomOverlapEvictionAndExpiry(t *testing.T) {
 	c := newSubscriberNegativeCache(4096, now)
 	events := map[string]int{}
 	c.observe = func(event string, count int) { events[event] += count }
-	rng := rand.New(rand.NewSource(1))
+	// a fixed seed, so a run replays
+	rng := rand.New(rand.NewPCG(1, 0))
 	reads, readCandidates, requestedCandidates := 0, 0, 0
 	read := func(_ context.Context, ids []server.Id, _ func()) (map[server.Id]bool, error) {
 		reads++
@@ -406,7 +407,7 @@ func TestSubscriberNegativeCacheRandomOverlapEvictionAndExpiry(t *testing.T) {
 			if i%2 == 0 {
 				population = 1024 // An overlapping hot subset plus broad cold work.
 			}
-			ids[i] = subscriberCachePopulationId(rng.Intn(population))
+			ids[i] = subscriberCachePopulationId(rng.IntN(population))
 			unique[ids[i]] = true
 		}
 		requestedCandidates += len(unique)
@@ -445,7 +446,8 @@ func BenchmarkSubscriberNegativeCacheRandomPopulation256(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			clock, now := subscriberCacheTestClock()
 			c := newSubscriberNegativeCache(subscriberNegativeCapacity, now)
-			rng := rand.New(rand.NewSource(2))
+			// a fixed seed, so a run replays
+			rng := rand.New(rand.NewPCG(2, 0))
 			reads, candidates := 0, 0
 			read := func(_ context.Context, ids []server.Id, _ func()) (map[server.Id]bool, error) {
 				reads++
@@ -469,7 +471,7 @@ func BenchmarkSubscriberNegativeCacheRandomPopulation256(b *testing.B) {
 					if hotHalf && i%2 == 0 {
 						population = 1024
 					}
-					ids[i] = subscriberCachePopulationId(rng.Intn(population))
+					ids[i] = subscriberCachePopulationId(rng.IntN(population))
 				}
 				if _, err := c.lookup(b.Context(), ids, read); err != nil {
 					b.Fatal(err)

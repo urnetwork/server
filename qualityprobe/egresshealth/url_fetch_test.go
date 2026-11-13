@@ -10,7 +10,7 @@ import (
 	"errors"
 	"io"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
@@ -223,17 +223,17 @@ func TestUrlProbeSecurityPoolGetsEqualProbability(t *testing.T) {
 	counts := map[string]int{}
 	for seed := int64(0); seed < 200; seed++ {
 		expected := "security_recheck"
-		rng := rand.New(rand.NewSource(seed))
-		if rng.Intn(2) != 0 {
+		rng := rand.New(rand.NewPCG(uint64(seed), 0))
+		if rng.IntN(2) != 0 {
 			expected = "general"
-			if rng.Intn(2) == 1 {
+			if rng.IntN(2) == 1 {
 				expected = "country"
 			}
 		}
 		client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 503, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("synthetic failure"))}, nil
 		})}
-		result, err := Check(context.Background(), client, Options{UrlProbe: true, Rand: rand.New(rand.NewSource(seed)), Destinations: []Destination{{Name: "general", Class: ClassSite, Url: "https://general.example/"}}, CountryDestinations: []Destination{{Name: "country", Class: ClassSite, Url: "https://country.example/"}}, SecurityDestinations: []Destination{{Name: "security", Class: ClassSite, Url: "https://affected.example/"}}})
+		result, err := Check(context.Background(), client, Options{UrlProbe: true, Rand: rand.New(rand.NewPCG(uint64(seed), 0)), Destinations: []Destination{{Name: "general", Class: ClassSite, Url: "https://general.example/"}}, CountryDestinations: []Destination{{Name: "country", Class: ClassSite, Url: "https://country.example/"}}, SecurityDestinations: []Destination{{Name: "security", Class: ClassSite, Url: "https://affected.example/"}}})
 		if err != nil || result.UrlSource != expected {
 			t.Fatalf("seed=%d source=%s want=%s err=%v", seed, result.UrlSource, expected, err)
 		}
@@ -249,10 +249,10 @@ func TestUrlProbeSecurityPoolGetsEqualProbability(t *testing.T) {
 // Compressed bytes, not their inflated decoded representation, supply the
 // throughput gate. A server ignoring identity cannot manufacture fast egress.
 func TestUrlProbeThroughputUsesWireBytesEvenWhenServerSendsGzip(t *testing.T) {
-	rng := rand.New(rand.NewSource(31))
+	rng := rand.New(rand.NewPCG(31, 0))
 	content := []byte(strings.Repeat("readable synthetic content ", 10000))
 	for range 32768 {
-		content = append(content, byte('!'+rng.Intn(90)))
+		content = append(content, byte('!'+rng.IntN(90)))
 	}
 	var encoded bytes.Buffer
 	compressor := gzip.NewWriter(&encoded)

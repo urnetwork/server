@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"reflect"
 	"regexp"
 	"runtime"
