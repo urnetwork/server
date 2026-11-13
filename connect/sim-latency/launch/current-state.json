@@ -23,8 +23,8 @@
     "hold_active": true
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.aVLivUUi/state.private.json",
-    "sha256": "42998d167993296ded61f3ba3e9028b4fd1e4cfdb6994d7189429628c3b88f5d",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.Eo5FpwUZ/state.private.json",
+    "sha256": "49170515275fefcb130843fc19ffe2c38ba727756c7d20cbdedbf9a4e6e67f6d",
     "mode": "root:root 0400 in root:root 0700 directory",
     "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
@@ -38,7 +38,10 @@
     "migration_verified_at": "2026-11-13T15:17:17Z",
     "deployment_verified": false,
     "worker_activated": true,
-    "worker_identity_verified_at": "2026-11-13T15:22:25Z",
+    "worker_identity_verified_at": "2026-11-13T16:37:45Z",
+    "supervisor_restarts_since_held_handoff": 2,
+    "last_observed_supervisor_fence": 71,
+    "supervisor_renewal_diagnosis_pending": true,
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
     "fresh_native_observation_passed": true,
@@ -68,7 +71,7 @@
     "model_call_live_at_observation": false,
     "complete_candidate_approval_issued": false,
     "broader_registry_and_protected_hydration": "Parallel source work, not activated. No uncontrolled eviction, quota increase or namespace reset.",
-    "status": "CLARIFICATION_METADATA_PREPARATION_PENDING"
+    "status": "PROSPECTIVE_REVIEW_PREPARATION_PENDING"
   },
   "qualified_clarification_metadata": {
     "source_manifest_sha256": "6d3863a8e575e59b697ffd8807efc0dc099ecd8340ad7b63bea89dfc79aea760",
@@ -77,10 +80,22 @@
     "adjacent_tests_passed": 92,
     "evidence_directory": "/var/lib/urnetwork/competition-native-pending-qa-20261113.3nLzh15e",
     "normal_binary_sha256": "ab151f7708796b6fcc58a65d56ebe9bec04a678081556c1db4cd56acd8cbdacc",
-    "actual_prepare_started": false,
-    "actual_generation_started": false,
+    "actual_prepare_started": true,
+    "actual_prepare_succeeded": true,
+    "actual_prepare_generated_code_review": false,
+    "actual_generation_started": true,
+    "actual_generation_finished": true,
+    "actual_model_call_live": false,
     "metadata_grants_code_or_approval_credit": false,
-    "remaining": "Pin and check the approved path-only PREPARE before any metadata generation. Composite code-bearing review remains separate and incomplete."
+    "remaining": "Metadata execution finished; consult protected results. Preserve every original finding and never repeat a consumed operation. Prepare prospective review only for an unblocked candidate. Composite code-bearing integration remains incomplete."
+  },
+  "qualified_prospective_and_composite_stages": {
+    "prospective_format_tests_passed": 105,
+    "prospective_source_manifest_sha256": "d6e21ac25afcf760f460e6239dea3f89ffa34b4e8a23eeb2175be0f35df42790",
+    "prospective_normal_binary_sha256": "c3926c554840295d793874b99859d06ed9f4e8ec6ba8eaa25345d7194ad66867",
+    "kernel_and_native_controls_passed": 23,
+    "kernel_qualification_manifest_sha256": "5f2e1223effc9cea56c47f6a64ff7414477eed29923660c9ae2afb6e21f6060c",
+    "full_composite_integration_complete": false
   },
   "qualified_storage_renewal": {
     "source_manifest_sha256": "86a9e7e5f4acadbc9ddb442ff93e87814d8bc0b156a3e080f702c9bbd39a2f99",
@@ -118,6 +133,13 @@
     "bytes": 173541860,
     "sha256": "f3fad907aadf6f657527a74aed771bd1024dea868c951b408ce18e8d94973efc",
     "verified_recovery_directory": "/dev/shm/competition-retired-inactive-cache-20261113.57KE0S8j",
+    "recovery_is_volatile_ram": true,
+    "source_baseline_submission_evidence_deleted": false
+  },
+  "subsequent_recoverable_cache_cleanup": {
+    "removed_only_inactive_rebuildable_objects": 3,
+    "bytes": 520190924,
+    "verified_recovery_directory": "/dev/shm/competition-retired-inactive-cache-20261113.nVLG4soy",
     "recovery_is_volatile_ram": true,
     "source_baseline_submission_evidence_deleted": false
   },
