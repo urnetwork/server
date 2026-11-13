@@ -402,8 +402,8 @@ func TestParamsMatchManifests(t *testing.T) {
 	base := ParamsInput{
 		// an iPhone: the App Store bills it (the direct branch is TestOfferParamsStoreBilled's)
 		Platform: "iPhone", StoreBilled: true, DailyDataGb: 30, DaysActive: 3, ConnectDays: 2, ProvidersOnline: 4812, CountriesOnline: 91,
-		OfferExpiresAt: &expires, OfferPriceUsd: 29.99, RegularYearUsd: 39.99, TrialDays: 14,
-		Location: time.UTC, Now: expires.Add(-4 * 24 * time.Hour), Token: "tok", SiteUrl: "https://ur.io", CompanyLine: "co",
+		OfferExpiresAt: &expires, OfferPriceUsd: 29.99, RegularYearUsd: 39.99,
+		Location: time.UTC, Token: "tok", SiteUrl: "https://ur.io", CompanyLine: "co",
 		// the desktop email's browser branch (TestE2DesktopParams has the app's)
 		Browser: true,
 	}
@@ -519,8 +519,8 @@ func TestOfferParamsStoreBilled(t *testing.T) {
 		}
 	}
 	for _, template := range []string{TemplateE3LastChance, TemplateE4bOffer} {
-		in := ParamsInput{Template: template, Variant: VariantDefault, OfferExpiresAt: &expires, OfferPriceUsd: 30, RegularYearUsd: 40, TrialDays: 14,
-			Location: time.UTC, Now: expires.Add(-24 * time.Hour), Token: "tok", SiteUrl: "https://ur.io"}
+		in := ParamsInput{Template: template, Variant: VariantDefault, OfferExpiresAt: &expires, OfferPriceUsd: 30, RegularYearUsd: 40,
+			Location: time.UTC, Token: "tok", SiteUrl: "https://ur.io"}
 		if got := BuildParams(in)["store_billed"]; got != "" {
 			t.Fatalf("%s: direct billing has store_billed %q", template, got)
 		}

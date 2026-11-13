@@ -49,7 +49,6 @@ type ParamsInput struct {
 	NoOfferEmail   bool
 	OfferPriceUsd  float64
 	RegularYearUsd float64
-	TrialDays      int
 	// the App Store or Google Play bills the network: the offer emails carry
 	// no price (the store charges its own local price; REVIEW.md finding 7)
 	StoreBilled bool
@@ -60,8 +59,6 @@ type ParamsInput struct {
 
 	// the network's zone for the local date/time strings
 	Location *time.Location
-	// now, for the trial end
-	Now time.Time
 
 	// landing token (cta_url) and feedback token (rating/reason urls)
 	Token string
@@ -250,7 +247,6 @@ func BuildParams(in ParamsInput) map[string]string {
 	if in.OfferExpiresAt != nil {
 		offerExpires = FormatDateTimeLocale(*in.OfferExpiresAt, in.Location, in.Locale)
 	}
-	trialEnd := FormatDateLocale(in.Now.Add(time.Duration(in.TrialDays)*24*time.Hour), in.Location, in.Locale)
 	daysActive := in.DaysActive
 	if daysActive < 1 {
 		daysActive = 1
@@ -302,7 +298,6 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["offer_price"] = FormatUsd(in.OfferPriceUsd)
 		p["regular_price"] = FormatUsd(in.RegularYearUsd)
 		p["offer_expires_at"] = offerExpires
-		p["trial_end_at"] = trialEnd
 	case TemplateE4bOffer:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
 		// the Pro value line (email_pro_value: "Pro gives you 10 TiB of data
@@ -312,7 +307,6 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["offer_price"] = FormatUsd(in.OfferPriceUsd)
 		p["regular_price"] = FormatUsd(in.RegularYearUsd)
 		p["offer_expires_at"] = offerExpires
-		p["trial_end_at"] = trialEnd
 	case TemplateE4Feedback:
 		if in.Variant == VariantEngaged {
 			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)

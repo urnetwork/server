@@ -32,7 +32,7 @@ func TestE1OfferLineFollowsTheOfferRule(t *testing.T) {
 	}
 	in := ParamsInput{
 		Template: TemplateE1Connect, Variant: VariantDefault, NoOfferEmail: true,
-		OfferExpiresAt: &expires, DailyDataGb: 30, Location: time.UTC, Now: expires.Add(-4 * 24 * time.Hour),
+		OfferExpiresAt: &expires, DailyDataGb: 30, Location: time.UTC,
 		Token: "T", SiteUrl: "https://ur.io",
 	}
 	if got := BuildParams(in)["offer_expires_at"]; got != "" {
@@ -183,7 +183,7 @@ func TestDailyDataIsInGiB(t *testing.T) {
 	for _, template := range []string{TemplateE1Connect, TemplateE3LastChance, TemplateE4bOffer} {
 		p := BuildParams(ParamsInput{
 			Template: template, Variant: VariantDefault, DailyDataGb: 30, OfferExpiresAt: &expires,
-			Location: time.UTC, Now: expires.Add(-24 * time.Hour), Token: "T", SiteUrl: "https://ur.io",
+			Location: time.UTC, Token: "T", SiteUrl: "https://ur.io",
 		})
 		if got := p["daily_data_gb"]; got != "30 GiB" {
 			t.Errorf("%s: daily_data_gb %q", template, got)
