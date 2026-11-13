@@ -2,7 +2,10 @@ package model
 
 import (
 	"context"
+	"net/netip"
 	"time"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -34,12 +37,35 @@ func maxNetworkCreateAttemptsError(retryAfterSeconds int) error {
 	}
 }
 
-// CheckNetworkCreateRateLimit checks if the IP has exceeded the daily account
-// creation limit. It records the attempt and returns an error if over the limit.
-// Must be called BEFORE the network is actually created (attempt recorded atomically).
+// CheckNetworkCreateRateLimit checks a seed-phrase sign-up against the budgets
+// of its source, records it in each, and returns a 429 error over any. Must be
+// called BEFORE the network is actually created.
+//
+// The budgets, in order (network_create_source_limit.go):
+//   - the address budget, NetworkCreateDailyLimit per address bucket per
+//     rolling NetworkCreateDailyWindow, in PostgreSQL;
+//   - the source network budget, DefaultNetworkCreateSourceLimitSettings, in
+//     Redis, for a sign-up the address budget admitted.
+//
+// A sign-up refused by either is recorded in neither: the source network budget
+// counts only admitted sign-ups, and its refusal removes the attempt the
+// address budget recorded. So a person retrying a refusal does not extend it,
+// and repeated attempts from one address bucket the address budget refuses never
+// spend its source network's budget.
 func CheckNetworkCreateRateLimit(
 	ctx context.Context,
 	session *session.ClientSession,
+) error {
+	return checkNetworkCreateRateLimit(ctx, session, server.NowUtc(), DefaultNetworkCreateSourceLimitSettings())
+}
+
+// CheckNetworkCreateRateLimit with the source network budget's clock and
+// settings.
+func checkNetworkCreateRateLimit(
+	ctx context.Context,
+	session *session.ClientSession,
+	now time.Time,
+	sourceSettings *NetworkCreateSourceLimitSettings,
 ) error {
 	rateLimitClient, err := server.NewRateLimitClient(session.ClientAddress)
 	if err != nil {
@@ -49,10 +75,18 @@ func CheckNetworkCreateRateLimit(
 		clientAddressHash, _, err := session.ClientAddressHashPort()
 		if err != nil {
 			// Can't determine client address — allow.
+			noteSeedphraseSignupAdmission(seedphraseSignupUnscoped, seedphraseSignupFamily(netip.Addr{}))
 			return nil
 		}
 		rateLimitClient = server.NewStoredRateLimitClient(clientAddressHash)
 	} else if testSeedphraseRateLimitBypassForAddr(rateLimitClient.Addr()) {
+		noteSeedphraseSignupAdmission(seedphraseSignupUnscoped, seedphraseSignupFamily(rateLimitClient.Addr()))
+		return nil
+	}
+	addr := rateLimitClient.Addr()
+	family := seedphraseSignupFamily(addr)
+	if rateLimitClient.Excluded() {
+		noteSeedphraseSignupAdmission(seedphraseSignupUnscoped, family)
 		return nil
 	}
 	result := server.CheckNetworkCreateIpRateLimit(
@@ -71,9 +105,55 @@ func CheckNetworkCreateRateLimit(
 		if maxSeconds := int(NetworkCreateDailyWindow / time.Second); maxSeconds < result.RetryAfterSeconds {
 			result.RetryAfterSeconds = maxSeconds
 		}
+		noteSeedphraseSignupAdmission(seedphraseSignupLimitedAddress, family)
 		return maxNetworkCreateAttemptsError(result.RetryAfterSeconds)
 	}
 
+	if !addr.IsValid() {
+		// a stored address hash names no network to count in
+		observeSeedphraseSignupSource(seedphraseSignupScopeAddress, family, int64(result.Count)+1)
+		noteSeedphraseSignupAdmission(seedphraseSignupAddressOnly, family)
+		return nil
+	}
+
+	decision, err := checkNetworkCreateSourceLimit(ctx, addr, now, sourceSettings)
+	if err != nil {
+		glog.Warningf("[signup]seed-phrase source network budget not counted; the sign-up goes ahead: %s\n", err)
+		observeSeedphraseSignupSource(seedphraseSignupScopeAddress, family, int64(result.Count)+1)
+		noteSeedphraseSignupAdmission(seedphraseSignupUnavailable, family)
+		return nil
+	}
+	if decision.limited != "" {
+		// the address budget recorded this attempt; a refused attempt must not
+		// spend it. When the removal fails, the attempt stays counted in the
+		// address budget and the refusal still stands.
+		server.HandleError(func() {
+			server.RemoveNetworkCreateIpRateLimitAttempt(ctx, result.AttemptId)
+		}, func(err error) {
+			glog.Warningf("[signup]a seed-phrase sign-up refused by its source network stays counted in its address budget: %s\n", err)
+		})
+		if decision.limited == networkCreateSourceBudgetShort {
+			noteSeedphraseSignupAdmission(seedphraseSignupLimitedNetworkShort, family)
+		} else {
+			noteSeedphraseSignupAdmission(seedphraseSignupLimitedNetworkLong, family)
+		}
+		return maxNetworkCreateSourceAttemptsError(decision.retryAfterSeconds)
+	}
+
+	observeSeedphraseSignupSource(seedphraseSignupScopeAddress, family, int64(result.Count)+1)
+	observeSeedphraseSignupSource(seedphraseSignupScopeNetworkShort, family, decision.shortCount)
+	observeSeedphraseSignupSource(seedphraseSignupScopeNetworkLong, family, decision.longCount)
+	if 0 < sourceSettings.AsnWindow {
+		if asn := server.GetIpAsn(addr); asn != nil {
+			asnCount, err := countNetworkCreateSourceAsn(ctx, asn.Number, now, sourceSettings)
+			if err == nil {
+				observeSeedphraseSignupSource(seedphraseSignupScopeAsn, family, asnCount)
+			} else if glog.V(1) {
+				glog.Infof("[signup]seed-phrase sign-up not counted for its autonomous system: %s\n", err)
+			}
+		}
+	}
+	noteSeedphraseSignupAdmission(seedphraseSignupAllowed, family)
 	return nil
 }
 

@@ -277,7 +277,8 @@ func NetworkCreate(
 			return result, nil
 		}
 
-		// rate limit: max 5 seedphrase accounts per IP per day
+		// the source's budgets: 5 seedphrase accounts per address bucket per
+		// day, and its /24 or /48 network's (network_create_source_limit.go)
 		if err := CheckNetworkCreateRateLimit(clientSession.Ctx, clientSession); err != nil {
 			return nil, err
 		}
