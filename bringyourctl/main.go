@@ -107,7 +107,7 @@ Usage:
     bringyourctl crypto show --intent=<intent_id>
     bringyourctl crypto credit --intent=<intent_id> [--sanctions-cleared]
     bringyourctl crypto credit-usdc --intent=<intent_id> --tx=<signature> [(--commit --expect=<digest>)]
-    bringyourctl payouts close-attempted [(--commit --expect=<digest>)]
+    bringyourctl payouts close-attempted [--forfeit=<payment_ids>] [(--commit --expect=<digest>)]
     bringyourctl crypto void --intent=<intent_id>
     bringyourctl crypto refund --intent=<intent_id> --address=<payout_address>
     bringyourctl crypto alchemy-webhook [--signing-key-file=<path>]
@@ -274,8 +274,9 @@ Options:
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
-    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect; with crypto credit-usdc, credit the invoice from the payment as its dry run with that digest printed. Without it the run is a read-only dry run.
+    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect; with crypto credit-usdc, credit the invoice from the payment as its dry run with that digest printed; with payouts close-attempted, write the decisions of the dry run whose digest is --expect. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
+    --forfeit=<payment_ids>  With payouts close-attempted, close these payments, comma separated, as the owner forfeited them, without reading Circle: each must be a canceled payment an attempt of which reached Circle, not completed and not closed, or the run refuses them all and writes nothing.
     --network_ids=<network_ids>  With network trim-proxies, the networks to trim, comma separated; omitted, every network that holds a hosted proxy (a paged scan of proxy_client).
     --keep=<keep>  With network trim-proxies, the active hosted proxies each trimmed free network keeps, its newest by client id; omitted, the free cap (5).
     --rate=<rate>  With network trim-proxies --commit, hosted proxies removed a second, in batches of 500; omitted, 200.
