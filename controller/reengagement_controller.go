@@ -586,7 +586,7 @@ func buildReengagementSendPlan(ctx context.Context, row *model.NetworkReengageme
 		Locale:     locale,
 		TemplateId: templateId,
 		Params:     reengagement.BuildParams(in),
-		Tags:       []string{"reengagement", decision.Template, decision.Variant},
+		Tags:       onboarding.CampaignTags("reengagement", decision.Template, decision.Variant, row.ExperimentId, row.Variant),
 	}, nil
 }
 

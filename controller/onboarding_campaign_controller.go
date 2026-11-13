@@ -867,7 +867,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		Locale:     templateLocale,
 		TemplateId: templateId,
 		Params:     onboarding.BuildParams(in),
-		Tags:       []string{"onboarding", decision.Template, decision.Variant},
+		Tags:       onboarding.CampaignTags("onboarding", decision.Template, decision.Variant, row.ExperimentId, row.EmailVariant),
 	}, nil
 }
 
