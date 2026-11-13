@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
@@ -46,6 +47,29 @@ var appleSsoClientIds = sync.OnceValue(func() []string {
 var googleSsoClientIds = sync.OnceValue(func() []string {
 	return ssoAllowedClientIds("google.yml")
 })
+
+var ssoClientIdsOverride atomic.Pointer[[]string]
+
+// The audiences an sso jwt may name: the vault's client ids, read once per
+// process, or the client ids a test set with Testing_SetSsoClientIds.
+func ssoClientIds(vaultClientIds func() []string) []string {
+	if clientIds := ssoClientIdsOverride.Load(); clientIds != nil {
+		return *clientIds
+	}
+	return vaultClientIds()
+}
+
+// Testing_SetSsoClientIds accepts clientIds as the audience of Google and Apple
+// jwts instead of the client ids of google.yml and apple.yml. The vault lists
+// are read once per process, so a test in another package cannot set them
+// through the vault. With Testing_SetSsoJwkKeys, a test signs in through the
+// real parsers. The returned pop restores the previous override.
+func Testing_SetSsoClientIds(clientIds []string) func() {
+	previous := ssoClientIdsOverride.Swap(&clientIds)
+	return func() {
+		ssoClientIdsOverride.Store(previous)
+	}
+}
 
 // validateSsoClaims checks the non-signature claims of a provider id token:
 // the issuer must be the provider and the audience must be one of our client
