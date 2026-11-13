@@ -268,6 +268,34 @@ type OnboardingConfig struct {
 	Results     OnboardingResultsConfig  `yaml:"results"`
 	// who the campaign emails (onboarding and re-engagement) may go to
 	Policy OnboardingPolicyConfig `yaml:"policy"`
+	// which app builds have the home screen widget of E2's widget email
+	Widgets OnboardingWidgetsConfig `yaml:"widgets"`
+}
+
+// OnboardingWidgetsConfig lays release records over
+// onboarding.DefaultWidgetSettings, so a release that brings the home screen
+// widget to another build (the App Store's, first) is a config change, not a
+// server release.
+type OnboardingWidgetsConfig struct {
+	// MinVersions maps "<platform>/<distribution>" to the first app version
+	// whose build has the widget (onboarding.WidgetSettings.MinVersions),
+	// entry by entry over the defaults; an empty version removes a default.
+	MinVersions map[string]string `yaml:"min_versions"`
+}
+
+// EffectiveWidgetSettings are onboarding.DefaultWidgetSettings with
+// widgets.min_versions laid over them.
+func (c *OnboardingConfig) EffectiveWidgetSettings() *onboarding.WidgetSettings {
+	s := onboarding.DefaultWidgetSettings()
+	for key, version := range c.Widgets.MinVersions {
+		key = strings.TrimSpace(key)
+		if version = strings.TrimSpace(version); version == "" {
+			delete(s.MinVersions, key)
+		} else {
+			s.MinVersions[key] = version
+		}
+	}
+	return s
 }
 
 // OnboardingPolicyConfig is the mail policy (onboarding/policy.go): the
@@ -305,9 +333,12 @@ func (c *OnboardingConfig) MailPolicy() onboarding.MailPolicy {
 // OnboardingResultsConfig tunes the nightly results rollup and the admin
 // results endpoint (PLAN.md "OPTIMIZATION LOOP" §3-§5).
 type OnboardingResultsConfig struct {
-	// MinExposures is the volume floor of /admin/onboarding/results: a row with
-	// fewer exposures is not returned (it would identify a handful of networks
-	// by dimension alone). Default 10.
+	// MinExposures is the volume floor of /admin/onboarding/results and
+	// /admin/reengagement/results: an experiment's variant with fewer
+	// exposures in total over the request's cohort days and filters has none
+	// of its rows returned (a handful of networks would be identifiable by
+	// dimension alone). Held on the variant totals the readout sums, not per
+	// row, which would drop most of each arm. Default 10.
 	MinExposures int `yaml:"min_exposures"`
 	// RollupDays is how many cohort days back the nightly rollup recomputes so
 	// the fixed-window outcomes (up to 60 days) mature in place. Default 60.

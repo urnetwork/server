@@ -840,6 +840,42 @@ func GetNetworkClientContext(ctx context.Context, networkId server.Id) *NetworkC
 	return c
 }
 
+// NetworkClientBuild is the app build of a network's newest active client:
+// its device's spec and the app version the device last connected with
+// (device.client_version, written at the connect auth; "" before its first
+// connection).
+type NetworkClientBuild struct {
+	DeviceSpec    string
+	ClientVersion string
+}
+
+// GetNetworkNewestClientBuild reads the network's newest active client that
+// has a device, by creation, or nil when it has none. One backward read of the
+// (network_id, create_time) index.
+func GetNetworkNewestClientBuild(ctx context.Context, networkId server.Id) (build *NetworkClientBuild) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT device.device_spec, COALESCE(device.client_version, '')
+				FROM network_client
+				INNER JOIN device ON device.device_id = network_client.device_id
+				WHERE network_client.network_id = $1 AND network_client.active
+				ORDER BY network_client.create_time DESC
+				LIMIT 1
+			`,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				build = &NetworkClientBuild{}
+				server.Raise(result.Scan(&build.DeviceSpec, &build.ClientVersion))
+			}
+		})
+	})
+	return
+}
+
 // ----- consent evidence and suppression (account_preferences) -----
 
 // NetworkMailState is the network's product-updates preference, how it was
