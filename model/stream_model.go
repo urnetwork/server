@@ -10,7 +10,7 @@ import (
 	// "encoding/json"
 	"fmt"
 	"iter"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"sync"
 	"time"
 

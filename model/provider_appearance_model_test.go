@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"strconv"
 	"strings"
 	"sync"
@@ -327,18 +327,18 @@ func TestProviderAppearanceHashStaysBounded(t *testing.T) {
 	store := newTestingProviderAppearanceStore(func() time.Time { return now })
 	clientId := server.NewId()
 	key := providerAppearanceKey(clientId)
-	random := mathrand.New(mathrand.NewSource(8))
+	random := mathrand.New(mathrand.NewPCG(8, 0))
 
 	maxFields := 0
 	writeCount := 0
 	for session := 0; session < 80; session += 1 {
 		// offered every few seconds for up to three hours, a flush at a time
-		activeEnd := now.Add(time.Duration(random.Intn(3*60*60)) * time.Second)
+		activeEnd := now.Add(time.Duration(random.IntN(3*60*60)) * time.Second)
 		for now.Before(activeEnd) {
-			now = now.Add(time.Duration(1+random.Intn(10)) * time.Second)
+			now = now.Add(time.Duration(1+random.IntN(10)) * time.Second)
 			nowMinute := providerAppearanceMinute(now)
 			minuteCounts := map[int64]int64{nowMinute: 1}
-			if random.Intn(4) == 0 {
+			if random.IntN(4) == 0 {
 				// a count from the previous minute, flushed late
 				minuteCounts[nowMinute-1] = 1
 			}
@@ -359,7 +359,7 @@ func TestProviderAppearanceHashStaysBounded(t *testing.T) {
 			}
 		}
 		// then idle, from a moment to past the expiry
-		now = now.Add(time.Duration(random.Intn(75*60)) * time.Second)
+		now = now.Add(time.Duration(random.IntN(75*60)) * time.Second)
 	}
 	if maxFields < ProviderAppearanceWindowBuckets {
 		t.Fatalf("the simulation never filled the window (%d fields)", maxFields)

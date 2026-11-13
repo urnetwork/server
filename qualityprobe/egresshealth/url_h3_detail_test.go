@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -86,7 +86,7 @@ func TestUrlProbeH3SkippedAfterAFailedHttpsLegIsVisible(t *testing.T) {
 func TestUrlProbeH3UnavailableIsNotMeasured(t *testing.T) {
 	transport := &h3TestTransport{https: h3TestContent(nil)}
 	result, err := Check(context.Background(), &http.Client{Transport: transport}, Options{
-		UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewPCG(3, 0)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -275,7 +275,7 @@ func TestUrlProbeH3LegCutShortIsNotMeasured(t *testing.T) {
 	})
 	path := &h3TestLosingPath{client: &http.Client{Transport: &h3TestTransport{https: h3TestContent(nil), h3: h3}}, signal: signal}
 	result, err := Check(context.Background(), nil, Options{
-		UrlProbe: true, Path: path, Sleep: noSleep, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Path: path, Sleep: noSleep, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewPCG(3, 0)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +307,7 @@ func TestUrlProbeSecurityRecheckMakesNoH3Leg(t *testing.T) {
 		transport := &h3TestTransport{https: h3TestContent(nil), h3: h3TestContent(nil)}
 		result, err := Check(context.Background(), &http.Client{Transport: transport}, Options{
 			UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalogWithoutH3), SecurityDestinations: recheck,
-			Rand: rand.New(rand.NewSource(seed)),
+			Rand: rand.New(rand.NewPCG(uint64(seed), 0)),
 		})
 		if err != nil {
 			t.Fatal(err)

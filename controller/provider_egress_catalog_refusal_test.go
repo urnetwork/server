@@ -6,7 +6,7 @@
 package controller
 
 import (
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -161,7 +161,7 @@ func TestServePoolDropsOnlyACountrySiteCollidingWithAServedEntry(t *testing.T) {
 	stored := []*model.ProviderEgressDestination{{Name: "candidate-shop", Active: true, Probation: true}}
 	dropped := testutil.ToFloat64(providerEgressCatalogRefusalsTotal.WithLabelValues(ProviderEgressRefusalStageServe, ProviderEgressRefusalCountryConflict))
 
-	pool, err := sites.servePool(stored, time.Date(2026, time.November, 7, 9, 0, 0, 0, time.UTC), rand.New(rand.NewSource(1)))
+	pool, err := sites.servePool(stored, time.Date(2026, time.November, 7, 9, 0, 0, 0, time.UTC), rand.New(rand.NewPCG(1, 0)))
 	if err != nil {
 		t.Fatalf("one colliding country site refused the whole pool: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestServePoolDropsOnlyACountrySiteCollidingWithAServedEntry(t *testing.T) {
 	}
 
 	// with the candidate not promoted there is nothing to collide with
-	pool, err = sites.servePool(nil, time.Date(2026, time.November, 7, 9, 0, 0, 0, time.UTC), rand.New(rand.NewSource(1)))
+	pool, err = sites.servePool(nil, time.Date(2026, time.November, 7, 9, 0, 0, 0, time.UTC), rand.New(rand.NewPCG(1, 0)))
 	if err != nil || names("de") != "de-shop,de-one,de-two" {
 		t.Fatalf("with no candidate promoted: de=%s err=%v, want de-shop served", names("de"), err)
 	}

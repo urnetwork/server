@@ -2,7 +2,7 @@ package controller
 
 import (
 	"encoding/json"
-	"math/rand"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +37,7 @@ func udpCountryTestServe(t *testing.T, text string) (*ProviderEgressSites, *egre
 		copy.Active = true
 		stored = append(stored, &copy)
 	}
-	pool, err := sites.servePool(stored, time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC), rand.New(rand.NewSource(1)))
+	pool, err := sites.servePool(stored, time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC), rand.New(rand.NewPCG(1, 0)))
 	if err != nil {
 		t.Fatalf("the parsed catalog cannot be served: %v", err)
 	}

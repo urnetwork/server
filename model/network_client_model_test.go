@@ -2,10 +2,10 @@ package model
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
-	mathrand "math/rand"
 	"testing"
 	"time"
 
@@ -524,7 +524,7 @@ func TestProvideMirrorTtl(t *testing.T) {
 
 		clientId := server.NewId()
 		secretKey := make([]byte, 32)
-		mathrand.Read(secretKey)
+		cryptorand.Read(secretKey)
 
 		SetProvide(ctx, clientId, map[ProvideMode][]byte{
 			ProvideModePublic: secretKey,
@@ -555,7 +555,7 @@ func TestSetProvide(t *testing.T) {
 
 		newSecretKeys := func() map[ProvideMode][]byte {
 			k := make([]byte, 32)
-			mathrand.Read(k)
+			cryptorand.Read(k)
 			return map[ProvideMode][]byte{
 				ProvideModePublic: k,
 			}
@@ -1652,7 +1652,7 @@ func TestGetProvideFallsBackToDb(t *testing.T) {
 
 		clientId := server.NewId()
 		secretKey := make([]byte, 32)
-		mathrand.Read(secretKey)
+		cryptorand.Read(secretKey)
 		secretKeys := map[ProvideMode][]byte{
 			ProvideModePublic: secretKey,
 		}
@@ -1705,7 +1705,7 @@ func TestSetProvideRemovesStaleModes(t *testing.T) {
 		clientId := server.NewId()
 		key := func() []byte {
 			k := make([]byte, 32)
-			mathrand.Read(k)
+			cryptorand.Read(k)
 			return k
 		}
 
@@ -1893,7 +1893,7 @@ func TestSweepOrphanNetworkClientDataMultiSlice(t *testing.T) {
 
 		newSecretKey := func() []byte {
 			k := make([]byte, 32)
-			mathrand.Read(k)
+			cryptorand.Read(k)
 			return k
 		}
 
@@ -1992,7 +1992,7 @@ func TestSweepOrphanClearsProvideRedis(t *testing.T) {
 		// a client_id with no backing network_client row
 		clientId := server.NewId()
 		secretKey := make([]byte, 32)
-		mathrand.Read(secretKey)
+		cryptorand.Read(secretKey)
 		SetProvide(ctx, clientId, map[ProvideMode][]byte{
 			ProvideModePublic: secretKey,
 		})
@@ -2056,7 +2056,7 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 		})
 
 		secretKey := make([]byte, 32)
-		mathrand.Read(secretKey)
+		cryptorand.Read(secretKey)
 		SetProvide(ctx, clientId, map[ProvideMode][]byte{
 			ProvideModePublic: secretKey,
 		})
@@ -2219,7 +2219,7 @@ func TestMigrateProvideMode(t *testing.T) {
 
 		key := func() []byte {
 			k := make([]byte, 32)
-			mathrand.Read(k)
+			cryptorand.Read(k)
 			return k
 		}
 

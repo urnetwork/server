@@ -6,7 +6,7 @@ package solve
 
 import (
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"reflect"
 	"slices"
 	"testing"
@@ -370,7 +370,7 @@ func TestSolveWarmStartAndOrder(t *testing.T) {
 		t.Fatalf("a warm start took %v sweeps, a cold one %v", warm.Sweeps, cold.Sweeps)
 	}
 
-	random := mathrand.New(mathrand.NewSource(1))
+	random := mathrand.New(mathrand.NewPCG(1, 0))
 	shuffledNodes := slices.Clone(network.nodes)
 	random.Shuffle(len(shuffledNodes), func(i int, j int) { shuffledNodes[i], shuffledNodes[j] = shuffledNodes[j], shuffledNodes[i] })
 	shuffledTerms := slices.Clone(terms)
@@ -605,7 +605,7 @@ func TestSolveIgnoresTermOrder(t *testing.T) {
 	network.pings(aggregator, 16, 0.2, nil, nil)
 	terms := aggregator.Terms()
 	want := Solve(network.nodes, terms, nil, nil, settings)
-	random := mathrand.New(mathrand.NewSource(9))
+	random := mathrand.New(mathrand.NewPCG(9, 0))
 	reversed := slices.Clone(terms)
 	slices.Reverse(reversed)
 	shuffled := slices.Clone(terms)

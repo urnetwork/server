@@ -5,7 +5,7 @@ package solve
 
 import (
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"testing"
 )
@@ -382,7 +382,7 @@ func TestAcceptanceNoPings(t *testing.T) {
 // the earth, stale corrections from a micrometre to 10 000 km, one reputation
 // round or the default.
 func TestNoPingsReturnToGenesis(t *testing.T) {
-	random := mathrand.New(mathrand.NewSource(7))
+	random := mathrand.New(mathrand.NewPCG(7, 0))
 	largestKm := 0.0
 	for trial := 0; trial < 200; trial += 1 {
 		settings := DefaultSettings()
@@ -390,7 +390,7 @@ func TestNoPingsReturnToGenesis(t *testing.T) {
 			settings.ReputationRounds = 1
 		}
 		nodes := []Node{}
-		for i := 0; i < 1+random.Intn(30); i += 1 {
+		for i := 0; i < 1+random.IntN(30); i += 1 {
 			staleKm := math.Pow(10, -9+13*random.Float64())
 			bearing := random.Float64() * 2 * math.Pi
 			nodes = append(nodes, Node{

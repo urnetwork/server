@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -121,7 +121,7 @@ const familyTestIpv4Catalog = `[{"name":"synthetic-v4","class":"site","url":"htt
 func familyTestCheck(t *testing.T, transport http.RoundTripper, catalog string, family IpFamily, udpProbesDisabled bool) *Result {
 	t.Helper()
 	result, err := Check(context.Background(), &http.Client{Transport: transport}, Options{
-		UrlProbe: true, Destinations: h3TestDestinations(t, catalog), Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Destinations: h3TestDestinations(t, catalog), Rand: rand.New(rand.NewPCG(3, 0)),
 		ProviderIpFamily: family, UdpProbesDisabled: udpProbesDisabled,
 	})
 	if err != nil {
@@ -179,7 +179,7 @@ func TestUrlProbeIpv4ProviderUsesARecordsOnly(t *testing.T) {
 func TestUrlProbeIpv6OnlyProviderNeverUsesAnARecord(t *testing.T) {
 	transport := familyTestPath(familyTestContent(), familyTestContent(), familyTestContent(), familyTestContent())
 	result, err := Check(context.Background(), &http.Client{Transport: transport}, Options{
-		UrlProbe: true, Destinations: h3TestDestinations(t, familyTestDualCatalog), Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Destinations: h3TestDestinations(t, familyTestDualCatalog), Rand: rand.New(rand.NewPCG(3, 0)),
 		ProviderIpFamily: IpFamilyV6Only,
 	})
 	if !errors.Is(err, ErrNoUrlForProviderFamily) || result != nil {
@@ -334,7 +334,7 @@ func TestUrlProbeUrlWithoutARecordIsNeverDrawn(t *testing.T) {
 		for _, family := range []IpFamily{IpFamilyV4Only, IpFamilyDualstack} {
 			path := familyTestPath(familyTestContent(), familyTestContent(), nil, nil)
 			result, err := Check(context.Background(), &http.Client{Transport: path}, Options{
-				UrlProbe: true, Destinations: h3TestDestinations(t, catalog), Rand: rand.New(rand.NewSource(seed)), ProviderIpFamily: family,
+				UrlProbe: true, Destinations: h3TestDestinations(t, catalog), Rand: rand.New(rand.NewPCG(uint64(seed), 0)), ProviderIpFamily: family,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -346,7 +346,7 @@ func TestUrlProbeUrlWithoutARecordIsNeverDrawn(t *testing.T) {
 	}
 	only := `[{"name":"synthetic-v6-only","class":"site","url":"https://v6only.example/","expect":"body","ipv4":false,"ipv6":true}]`
 	if _, err := Check(context.Background(), &http.Client{Transport: familyTestPath(familyTestContent(), familyTestContent(), nil, nil)}, Options{
-		UrlProbe: true, Destinations: h3TestDestinations(t, only), Rand: rand.New(rand.NewSource(1)), ProviderIpFamily: IpFamilyDualstack,
+		UrlProbe: true, Destinations: h3TestDestinations(t, only), Rand: rand.New(rand.NewPCG(1, 0)), ProviderIpFamily: IpFamilyDualstack,
 	}); !errors.Is(err, ErrNoUrlForProviderFamily) {
 		t.Fatalf("a catalog with no IPv4 URL: err=%v; want not measured", err)
 	}
@@ -496,7 +496,7 @@ func TestUrlProbeDualStackTurnMakesItsIpv6LegsOnAStandIn(t *testing.T) {
 	for seed := int64(0); seed < 40; seed++ {
 		path := familyTestPath(familyTestContent(), familyTestContent(), familyTestContent(), familyTestContent())
 		result, err := Check(context.Background(), &http.Client{Transport: path}, Options{
-			UrlProbe: true, Destinations: h3TestDestinations(t, familyTestStandInCatalog), Rand: rand.New(rand.NewSource(seed)),
+			UrlProbe: true, Destinations: h3TestDestinations(t, familyTestStandInCatalog), Rand: rand.New(rand.NewPCG(uint64(seed), 0)),
 			ProviderIpFamily: IpFamilyDualstack,
 		})
 		if err != nil {
@@ -537,7 +537,7 @@ func TestUrlProbeDualStackTurnMakesItsIpv6LegsOnAStandIn(t *testing.T) {
 	// the stand-in's IPv6 failure fails the load like the load's own would
 	path := familyTestPath(familyTestContent(), familyTestFails("dial_tcp"), familyTestContent(), familyTestContent())
 	result, err := Check(context.Background(), &http.Client{Transport: path}, Options{
-		UrlProbe: true, Destinations: h3TestDestinations(t, familyTestStandInCatalog), Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Destinations: h3TestDestinations(t, familyTestStandInCatalog), Rand: rand.New(rand.NewPCG(3, 0)),
 		ProviderIpFamily: IpFamilyDualstack,
 	})
 	if err != nil {
@@ -559,7 +559,7 @@ func TestUrlProbeStandInIsDrawnOnlyForIpv6AndFromTheTurnsLane(t *testing.T) {
 	draw := func(options Options, seed int64) (*Result, *familyTestTransport) {
 		t.Helper()
 		path := familyTestPath(familyTestContent(), familyTestContent(), familyTestContent(), familyTestContent())
-		options.UrlProbe, options.Rand = true, rand.New(rand.NewSource(seed))
+		options.UrlProbe, options.Rand = true, rand.New(rand.NewPCG(uint64(seed), 0))
 		result, err := Check(context.Background(), &http.Client{Transport: path}, options)
 		if err != nil {
 			t.Fatal(err)
@@ -630,7 +630,7 @@ func TestUrlProbeIpv6StandInEvidenceValidation(t *testing.T) {
 	var evidence *UrlProbeEvidence
 	for seed := int64(0); evidence == nil && seed < 200; seed++ {
 		result, err := Check(context.Background(), &http.Client{Transport: path}, Options{
-			UrlProbe: true, Destinations: h3TestDestinations(t, familyTestStandInCatalog), Rand: rand.New(rand.NewSource(seed)),
+			UrlProbe: true, Destinations: h3TestDestinations(t, familyTestStandInCatalog), Rand: rand.New(rand.NewPCG(uint64(seed), 0)),
 			ProviderIpFamily: IpFamilyDualstack,
 		})
 		if err != nil {
@@ -746,7 +746,7 @@ func TestUrlProbeIpv6EchoNeverBecomesTheProvidersExit(t *testing.T) {
 	}
 	catalog := `[{"name":"synthetic-echo","class":"connectivity","url":"https://echo.example/ip","expect":"body","verify":{"kind":"ip_text"},"ipv6":true}]`
 	path := familyTestPath(echo("198.51.100.7"), echo("2001:db8::7"), nil, nil)
-	options := Options{UrlProbe: true, Destinations: h3TestDestinations(t, catalog), Rand: rand.New(rand.NewSource(3)), ProviderIpFamily: IpFamilyDualstack}
+	options := Options{UrlProbe: true, Destinations: h3TestDestinations(t, catalog), Rand: rand.New(rand.NewPCG(3, 0)), ProviderIpFamily: IpFamilyDualstack}
 	options.exitAddressAllowed = func(ip netip.Addr) bool {
 		return netip.MustParsePrefix("198.51.100.0/24").Contains(ip) || netip.MustParsePrefix("2001:db8::/32").Contains(ip)
 	}

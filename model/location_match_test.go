@@ -2,7 +2,7 @@ package model
 
 import (
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -102,11 +102,11 @@ func TestPlaceNameDistance(t *testing.T) {
 // beyond it, on random pairs of short strings over a small alphabet (so that
 // swaps and near misses are common).
 func TestPlaceRuneDistanceWithinLimitMatchesFullDistance(t *testing.T) {
-	random := mathrand.New(mathrand.NewSource(1))
+	random := mathrand.New(mathrand.NewPCG(1, 0))
 	randomName := func() []rune {
-		name := make([]rune, random.Intn(10))
+		name := make([]rune, random.IntN(10))
 		for i := range name {
-			name[i] = rune('a' + random.Intn(4))
+			name[i] = rune('a' + random.IntN(4))
 		}
 		return name
 	}

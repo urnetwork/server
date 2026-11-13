@@ -7,7 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -880,7 +880,7 @@ func (self *directionalLink) close() {
 // All random and timing decisions are serialized in this lifecycle loop.
 func (self *directionalLink) run(seed int64) {
 	defer close(self.done)
-	random := rand.New(rand.NewSource(seed))
+	random := rand.New(rand.NewPCG(uint64(seed), 0))
 	packets := &scheduledPacketHeap{}
 	heap.Init(packets)
 	// Keep one explicitly disarmed timer. Resetting an expired or active timer
@@ -1032,7 +1032,7 @@ func (self *directionalLink) run(seed int64) {
 		if terminalDropCause == linkTerminalDropNone {
 			if 0 < profile.Jitter {
 				jitterRange := int64(2*profile.Jitter) + 1
-				jitter = time.Duration(random.Int63n(jitterRange) - int64(profile.Jitter))
+				jitter = time.Duration(random.Int64N(jitterRange) - int64(profile.Jitter))
 			}
 			reorderCandidate = pendingReorderPacket == nil &&
 				random.Float64() < profile.ReorderProbability

@@ -40,7 +40,7 @@ package connect
 
 import (
 	"context"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"sync"
 	"time"
@@ -165,7 +165,7 @@ func newProviderLivenessLeaseWriter(refreshInterval time.Duration) *providerLive
 	return &providerLivenessLeaseWriter{
 		refreshInterval: refreshInterval,
 		jitter: func() time.Duration {
-			return time.Duration(mathrand.Int63n(int64(model.ProviderLivenessLeaseRefreshJitter) + 1))
+			return time.Duration(mathrand.Int64N(int64(model.ProviderLivenessLeaseRefreshJitter) + 1))
 		},
 		now:                     time.Now,
 		writeShard:              model.WriteProviderLivenessLeaseShard,
