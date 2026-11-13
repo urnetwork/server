@@ -199,11 +199,13 @@ func TestRetentionLivenessNeverReadsReapStamping(t *testing.T) {
 	}
 }
 
-// A watcher still holding the contract-reap-stalled incident that the reap
-// check raised clears it after two complete runs of the signal, on the
-// unstamped 2026-11-13 shape: the signal reports neither the class nor an
-// unknown state for its target, so its runs are complete. Before the check
-// retired, every run reported it again and the incident never cleared.
+// A notifier holding the contract-reap-stalled incident that the reap check
+// raised clears it after two complete runs of the signal, on the unstamped
+// 2026-11-13 shape: the signal reports neither the class nor an unknown state
+// for its target, so its runs are complete. Before the check retired, every run
+// reported it again and the incident never cleared. Slack incident state is
+// process-local, so a watcher restarted on the retiring build holds no such
+// incident to clear.
 func TestRetentionLivenessClearsTheRetiredReapIncident(t *testing.T) {
 	webhook, webhookUrl := newFakeSlackWebhook(t)
 	harness := newSlackTestHarness()

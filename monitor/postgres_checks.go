@@ -118,10 +118,10 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			baseline:  "10–50k healthy (29,981 steady state after 2026-07-17); growth = closes not keeping up, and the 2.3 landmine plan degrades linearly with this number",
 			observed:  observed,
 			evidence:  evidence,
-			context:   "Match the executing Taskworker artifact before applying the reviewed source's expiry policy to this observation. Compare CloseExpiredContracts live/completed duration, complete stored error and next run time with the retention-fanout signal and transfer_contract autovacuum phase. A short accounting-rejected attempt can leave the singleton in long backoff despite independently committed siblings; a fast retry does not resolve the financial rejection. Filtered task-name logs can omit joined-error continuation lines. A full cohort with sub-second worker transactions can also be delayed by persisted write/vacuum debt after the retention query itself clears. The force_closed_total resolution counter can increment before close succeeds and is not terminal-verified throughput. Prefer same-call terminal_verified, unresolved_accounting and quarantined_accounting evidence with complete stored error/retry timing and the exact executor artifact; those summaries do not join to a sampled panic merely by timestamp.",
-			action:    "Correlate consecutive age buckets with CloseExpiredContracts duration/outcomes, complete stored error and next run time, retention-fanout evidence, and the transfer_contract autovacuum phase before changing code or deploying. A high or rising count alone does not establish a retention defect; apply the bounded retention correction only after that cause is confirmed in the running path. If exact private evidence verifies an underfunded disputed row, preserve its settlement guard and reservation; distinguish terminal-verified sibling progress with a prompt accounted-for retry from a long global backoff, without inferring that cause from the backlog count. Do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
+			context:   "Match the executing Taskworker artifact before applying the reviewed source's expiry policy to this observation. Compare CloseExpiredContracts live/completed duration, complete stored error and next run time with the transfer_contract autovacuum phase. A short accounting-rejected attempt can leave the singleton in long backoff despite independently committed siblings; a fast retry does not resolve the financial rejection. Filtered task-name logs can omit joined-error continuation lines. A full cohort with sub-second worker transactions can also be delayed by persisted write/vacuum debt. The force_closed_total resolution counter can increment before close succeeds and is not terminal-verified throughput. Prefer same-call terminal_verified, unresolved_accounting and quarantined_accounting evidence with complete stored error/retry timing and the exact executor artifact; those summaries do not join to a sampled panic merely by timestamp.",
+			action:    "Correlate consecutive age buckets with CloseExpiredContracts duration/outcomes, complete stored error and next run time, and the transfer_contract autovacuum phase before changing code or deploying. A high or rising count alone does not establish a retention defect; act only after that cause is confirmed in the running path. If exact private evidence verifies an underfunded disputed row, preserve its settlement guard and reservation; distinguish terminal-verified sibling progress with a prompt accounted-for retry from a long global backoff, without inferring that cause from the backlog count. Do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
 			verify:    "The older-than-five-minute cohort falls on consecutive samples and the total open set drains toward 10–50k. Confirm terminal-verified sibling progress and bounded next attempts; any unresolved financial rejection remains a task failure warning even when retries are prompt. A failed whole batch is not a successful task completion.",
-			playbook:  "SIGNALS.md 1.2, 2.6, 2.10 and 5.7",
+			playbook:  "SIGNALS.md 1.2, 2.6 and 5.7",
 		}
 		if !exact {
 			f.mechanism += " The scan reached its fixed row cap. All reported counts are lower bounds; equal repeated bounds do not prove a flat or falling population."
@@ -868,21 +868,6 @@ func vacuumDeadTupleThresholdLabel(threshold int64) string {
 	return fmt.Sprintf("%d", threshold)
 }
 
-func isPaymentPlannerVacuumHorizon(query string) bool {
-	lowerQuery := strings.ToLower(query)
-	if strings.Contains(lowerQuery, "temp_account_payment") {
-		return true
-	}
-	if strings.Contains(lowerQuery, "from transfer_escrow_sweep") &&
-		strings.Contains(lowerQuery, "subsidy_start_time") &&
-		strings.Contains(lowerQuery, "subsidy_end_time") {
-		return true
-	}
-	return strings.Contains(lowerQuery, "from subsidy_payment") &&
-		strings.Contains(lowerQuery, "start_time <") &&
-		strings.Contains(lowerQuery, "< end_time")
-}
-
 func isPureCascadeVacuumRelation(relation string) bool {
 	switch relation {
 	case "contract_close", "transfer_escrow", "transfer_escrow_sweep":
@@ -1003,22 +988,11 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			action = "Let independently verified, bounded progressing work finish. Establish reliability task ownership, SQL phase, current drained-target/window markers and deployed source before changing maintenance policy. Do not cancel the transaction, raise its deadline, or retune autovacuum from a truncated query sample alone."
 			verify = "The attributed reliability attempt reaches its bounded outcome and durable window markers advance; the active vacuum completes and " + recoveryTarget + " on consecutive five-minute samples. One released horizon or partial reclamation is not full recovery."
 		} else if lowerQuery := strings.ToLower(r.str(20)); strings.Contains(lowerQuery, "update transfer_contract") &&
-			strings.Contains(lowerQuery, "reap_time") {
-			mechanism += " The selected horizon is the legacy CompletePayment retention fan-out: one indexed payment lookup is updating millions of transfer_contract reap_time values inside one transaction, generating the dead rows and holding their old snapshot while autovacuum works."
-			context += " The retention-fanout signal is the authoritative statement diagnosis; this vacuum signal describes the same writer's MVCC and cleanup consequence."
-			action = "Roll out the contract_retention_pending queue and bounded, committed contract_retention_cursor batches. Do not cancel the progressing vacuum, kill an in-flight payment without proving retry safety, or tune autovacuum around the unbounded writer."
-			verify = "The legacy retention query disappears, cursor batches commit with bounded row counts, the active vacuum completes, and " + recoveryTarget + " on consecutive five-minute samples."
-		} else if lowerQuery := strings.ToLower(r.str(20)); strings.Contains(lowerQuery, "update transfer_contract") &&
 			strings.Contains(lowerQuery, "set outcome") && strings.Contains(lowerQuery, "close_time") {
-			mechanism += " The selected horizon is one bounded per-contract CloseExpiredContracts transaction. During backlog recovery, many short committed closes legitimately create a new dead-row cohort; a seconds-old closer is workload evidence, not an old MVCC pin or the legacy multi-million-row retention fan-out."
+			mechanism += " The selected horizon is one bounded per-contract CloseExpiredContracts transaction. During backlog recovery, many short committed closes legitimately create a new dead-row cohort; a seconds-old closer is workload evidence, not an old MVCC pin."
 			context += " The open-contract signal is authoritative for whether the closer is draining. Compare its five- and 30-minute age buckets and the active close-task duration before attributing this dead-row wave to a stuck writer."
 			action = "Let the bounded close cohort and progressing autovacuum run. Retain the independent 25,000-row open and disputed scan caps; roll out that existing checkpoint only where executor provenance proves the older limit. A merged count above 25,000 alone does not prove an old artifact. Do not cancel the closer, raise its concurrency, or revive a draining backlog merely to reduce the current dead-tuple estimate."
 			verify = "Older open-contract buckets fall, each close cohort checkpoints before its deadline, autovacuum completes, and " + recoveryTarget + " on consecutive five-minute samples after the backlog drains."
-		} else if isPaymentPlannerVacuumHorizon(r.str(20)) {
-			mechanism += " The selected horizon is the Payout payment planner building its bounded temp_account_payment working set. This statement reads transfer_contract and can retain an MVCC snapshot while the plan runs, but it is not the unbounded transfer_contract retention writer that produced the dead-row wave."
-			context += " The task-canary signal is authoritative for the Payout row. In the affected deployment, the outer plan transaction can later sit idle while a deliberately separate reliability-maintenance transaction runs; PostgreSQL's global five-minute idle-in-transaction timeout then closes that outer connection."
-			action = "Let the bounded payout attempt reach its task outcome, and roll out the payment-plan SET LOCAL idle_in_transaction_session_timeout override together with bounded plan slices. Do not cancel this bounded reader solely from its sampled age, disable the database-wide timeout, or blame it for the retention write fan-out."
-			verify = "A Payout slice commits and clears its task error, an unrelated PostgreSQL session retains the global five-minute idle-in-transaction timeout, autovacuum completes, and " + recoveryTarget + " on consecutive five-minute samples."
 		} else if lowerQuery := strings.TrimSpace(strings.ToLower(r.str(20))); atoiRow(r, 16) < vacuumOldHorizonAgeSeconds && strings.HasPrefix(lowerQuery, "select ") {
 			mechanism += " The selected candidate is a fresh read-only snapshot, not a persistent horizon holder. Its large backend_xmin age is inherited from cluster transaction state; a seconds-old SELECT does not become the owner merely because it was sampled after the real old transaction released."
 			context += " Treat this row as negative attribution evidence. Continuing dead-row growth with per-index progress points to writer churn and cleanup debt; use the retention, close-backlog, and active-query signals to name those writers."

@@ -298,8 +298,8 @@ func harvestAlertClasses(t *testing.T, sourceTexts ...string) sourceAlertClasses
 					sites = append(sites, classSite{site: site, node: typed, expr: expr, value: resolve(expr, frames, nameValues, 0), marked: marked})
 				}
 				_, logClass := values["re"]
-				_, logBurst := values["eventRe"]
-				if expr, ok := values["name"]; ok && (logClass || logBurst) {
+				_, logCanonical := values["eventRe"]
+				if expr, ok := values["name"]; ok && (logClass || logCanonical) {
 					sites = append(sites, classSite{site: site, node: typed, expr: expr, value: resolve(expr, frames, nameValues, 0)})
 				}
 			case *ast.AssignStmt:

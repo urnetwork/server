@@ -239,7 +239,7 @@ func TestReconcileReceiptProducerDeclaredTimestampLossResetsEveryPage(t *testing
 					}
 					return ordinary + warning, nil
 				}
-				live := "[private-block][" + now.Format(time.RFC3339Nano) + "]eval error = Bad status: 429 Too Many Requests {\"code\":5,\"message\":\"API rate limit error\"}"
+				live := "[private-block][" + now.Format(time.RFC3339Nano) + "][rel] event=window_failed window=quality reason=providers-unresponsive after=45000"
 				tailer.ingestStanding(live, true, true)
 				tailer.reconcileOnce(context.Background())
 				wantCalls := map[string]int{"aggregate": 1, "block": 3, "aggregate-continuation": 2, "block-continuation": 3}[phase]
@@ -259,7 +259,7 @@ func TestReconcileReceiptProducerDeclaredTimestampLossResetsEveryPage(t *testing
 				if findingByClass(t, findings, "tailer-reconcile").healthy {
 					t.Fatal("producer-declared loss did not preserve per-service visibility")
 				}
-				if findingByClass(t, findings, "payment-processor-rate-limit").healthy {
+				if findingByClass(t, findings, "window-stall-terminal").healthy {
 					t.Fatal("incomplete query discarded a separately observed live finding")
 				}
 				receipt := parseSyntheticReconcileReceipt(t, diagnostics.String())
