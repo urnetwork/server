@@ -64,6 +64,9 @@ Options:
 	if err != nil {
 		panic(err)
 	}
+	// past nginx's single port, straight to the PgBouncer instances
+	// (server db_pgbouncer_path.go)
+	server.SetPgBouncerPath(server.PgBouncerPathDirect)
 	if err := taskworker.Run(ctx, taskworker.RunOptions{Port: port, Count: count, BatchSize: batchSize}); err != nil {
 		panic(err)
 	}

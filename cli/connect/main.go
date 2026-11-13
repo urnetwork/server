@@ -56,6 +56,9 @@ Options:
 	if privateHeapTarget == "config" {
 		privateHeapTarget = ""
 	}
+	// past nginx's single port, straight to the PgBouncer instances
+	// (server db_pgbouncer_path.go)
+	server.SetPgBouncerPath(server.PgBouncerPathDirect)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger, PrivateHeapProfileTarget: privateHeapTarget}); err != nil {

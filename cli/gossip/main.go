@@ -43,6 +43,9 @@ Options:
 	if err != nil {
 		panic(err)
 	}
+	// past nginx's single port, straight to the PgBouncer instances
+	// (server db_pgbouncer_path.go)
+	server.SetPgBouncerPath(server.PgBouncerPathDirect)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 	if err := gossipserver.Run(ctx, gossipserver.RunOptions{Port: port}); err != nil {

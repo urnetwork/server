@@ -94,6 +94,10 @@ Options:
 		panic(err)
 	}
 
+	// past nginx's single port, straight to the PgBouncer instances
+	// (server db_pgbouncer_path.go)
+	server.SetPgBouncerPath(server.PgBouncerPathDirect)
+
 	settings := proxy.DefaultProxySettings()
 	configureProxyControlFamily()
 

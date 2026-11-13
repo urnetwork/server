@@ -38,6 +38,9 @@ func main() {
 		}
 		logs.Exit(2)
 	}
+	// past nginx's single port, straight to the PgBouncer instances
+	// (server db_pgbouncer_path.go)
+	server.SetPgBouncerPath(server.PgBouncerPathDirect)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 	if err := mcp.Run(ctx, mcp.RunOptions{Port: *port}); err != nil {
