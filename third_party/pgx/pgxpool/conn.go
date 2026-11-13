@@ -17,8 +17,22 @@ type Conn struct {
 // Release returns c to the pool it was acquired from. Once Release has been called, other methods must not be called.
 // However, it is safe to call Release multiple times. Subsequent calls after the first will be ignored.
 func (c *Conn) Release() {
+	c.releaseWithIdleReturn(false)
+}
+
+// ReleaseWithIdleReturn follows Release's existing ownership path and reports
+// only a synchronous return to the open pool. False includes disposal, reset,
+// closing, asynchronous hooks, and an already released connection. True is not
+// a promise that another borrower cannot immediately acquire the resource.
+func (c *Conn) ReleaseWithIdleReturn() bool {
+	return c.releaseWithIdleReturn(true)
+}
+
+// A reset pool is conservatively unprovable for its remaining lifetime: puddle
+// may destroy a reset resource even when its pgx connection is protocol-idle.
+func (c *Conn) releaseWithIdleReturn(observe bool) bool {
 	if c.res == nil {
-		return
+		return false
 	}
 
 	conn := c.Conn()
@@ -34,7 +48,7 @@ func (c *Conn) Release() {
 		// Signal to the health check to run since we just destroyed a connections
 		// and we might be below minConns now
 		c.p.triggerHealthCheck()
-		return
+		return false
 	}
 
 	// If the pool is consistently being used, we might never get to check the
@@ -46,12 +60,23 @@ func (c *Conn) Release() {
 		// Signal to the health check to run since we just destroyed a connections
 		// and we might be below minConns now
 		c.p.triggerHealthCheck()
-		return
+		return false
 	}
 
 	if c.p.afterRelease == nil {
 		res.Release()
-		return
+		if !observe {
+			return false
+		}
+		if c.p.idleReturnReset.Load() {
+			return false
+		}
+		select {
+		case <-c.p.closeChan:
+			return false
+		default:
+			return true
+		}
 	}
 
 	go func() {
@@ -64,6 +89,7 @@ func (c *Conn) Release() {
 			c.p.triggerHealthCheck()
 		}
 	}()
+	return false
 }
 
 // Hijack assumes ownership of the connection from the pool. Caller is responsible for closing the connection. Hijack

@@ -43,6 +43,9 @@ Options:
 	if err != nil {
 		panic(err)
 	}
+	// the PgBouncer instances directly on the blocks the rollout lists, nginx's
+	// single port on the rest (server db_pgbouncer_path_rollout.go)
+	server.SetServicePgBouncerPath("api")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 	if err := api.Run(ctx, api.RunOptions{Port: port}); err != nil {

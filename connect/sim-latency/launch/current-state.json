@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T14:01:16Z",
+  "observed_at": "2026-11-13T18:47:55Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -23,8 +23,8 @@
     "hold_active": true
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.Eo5FpwUZ/state.private.json",
-    "sha256": "49170515275fefcb130843fc19ffe2c38ba727756c7d20cbdedbf9a4e6e67f6d",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.CQZ5wsYf/state.private.json",
+    "sha256": "3dd6c39dd32a6893927c4c3c40afbb852e3e46fa30bc1b29287972364f83f43b",
     "mode": "root:root 0400 in root:root 0700 directory",
     "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
@@ -33,20 +33,26 @@
   "control_release": {
     "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
     "sn_commit": "e9aa3ac282ed7e4bc48eaab60d03043a5f6a6dac",
+    "sn_commit_scope": "Release source label, not a replacement for the actual compiled dependency manifest.",
+    "actual_worker_qualification_sn_dependency_commit": "d00ec71262b513a2bd5ca5f436da39aee05d6cba",
     "required_migration": 971,
     "observed_migration_head": 971,
     "migration_verified_at": "2026-11-13T15:17:17Z",
     "deployment_verified": false,
     "worker_activated": true,
-    "worker_identity_verified_at": "2026-11-13T16:37:45Z",
+    "worker_identity_verified_at": "2026-11-13T18:44:13Z",
+    "supervisor_manager_activated_at": "2026-11-13T18:43:48Z",
+    "supervisor_manager_sha256": "a571706953456c944d66a75c7ce0c6c47b2fbfef6db8b392a98c5def69c3c5c5",
+    "supervisor_restarts_since_latest_manager_handoff": 0,
     "supervisor_restarts_since_held_handoff": 2,
     "last_observed_supervisor_fence": 71,
     "supervisor_renewal_diagnosis_pending": true,
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
     "fresh_native_observation_passed": true,
-    "fresh_native_observation_receipt_sha256": "a8017da75e060552f492b976320fc25b221c1fd228a8cab2db2d4f0397f7970c",
+    "fresh_native_observation_receipt_sha256": "094a976ea646b99f72d6301a3c68e65f432100021cb452389705a023345f3abc",
     "ordinary_tests_passed": 169,
+    "ordinary_qualification_scope": "Composed retained qualification: 152 controller, 3 root, 3 monitor and 11 CLI tests across documented source cuts, including the corrected HTTP fixture. Not a fresh 169-test run at every subsequent main commit.",
     "focused_race_tests_passed": 69,
     "postgres_init_permission_tests_passed": 4,
     "final_migration_prefix_tests_passed": 6,
@@ -57,21 +63,33 @@
     "staged_activation_config_sha256": "8a37f2660c286f52f8c390662f1953048cee57d74dfe9ec2c3c4b7d0df2419e1",
     "worker_sha256": "c91fe976448b957fc121c951b2cfd1dbd2fd42e9451be80d9f246708c029de93",
     "recovery_cli_sha256": "58ccd4a081eff8a47dd735776b1e609f953e5b35d94c035ad4003985424c838e",
-    "next_action": "Migration 971 and the held worker handoff are verified. Confirm advancing evaluator-host heartbeats and compatible serving API identity before any recovery grant. Keep owned hold 36 until recovery authority and host readiness pass.",
+    "api_runtime_self_report": "sha256:0a0b00a2d375a07a7531b8ab37814ccd01a1be49964efb1cb7e0adb02d6fdfa0",
+    "api_runtime_self_report_matches_registry": true,
+    "api_all_replica_convergence_proved": false,
+    "next_action": "The tested supervisor is active and the unchanged worker remains held. Review the exact runtime qualification and fresh per-job ownership/native proofs before controlled recovery grants. API runtime self-report is bound to an actual admission, not an all-replica or physical-container inspection claim.",
     "historical_sections_below": "Earlier source/test/process observations remain historical; this checkpoint supersedes their pending-build descriptions."
   },
   "review_runtime": {
-    "source_manifest_sha256": "90783495efde8893b6c6e1b7649b4a94c4699e140020cf9d8d157ee58739c2a0",
-    "overlay_sha256": "b4bfb4016171f2e6dd95a2cb9e2efeca5829812b951fdcc842b697887c99b5c7",
-    "focused_tests_passed": 79,
-    "normal_binary_sha256": "cb45e815100d768be04a2692133a8f5915927cf9951420e59f5c736f788f9686",
+    "source_manifest_sha256": "384641ec3eb32e2958c5f907ba43655bb992395547712291af53c478477057ff",
+    "overlay_sha256": "f727b5db36f9c88290ebd12caa125f6dd80d2a710d0b3b11c837f3b9110a8c9f",
+    "focused_tests_passed": 110,
+    "normal_binary_sha256": "eedb7f331eafa704bff5ac04c1749fed13a4b95b298d1036f6ab298fbc90b8bc",
     "real_offline_reconciliation_passed": true,
     "old_failure_preserved": true,
     "same_candidate_replacement_without_trusted_proof": false,
     "model_call_live_at_observation": false,
+    "execution_actor_live_at_observation": false,
     "complete_candidate_approval_issued": false,
     "broader_registry_and_protected_hydration": "Parallel source work, not activated. No uncontrolled eviction, quota increase or namespace reset.",
-    "status": "PROSPECTIVE_REVIEW_PREPARATION_PENDING"
+    "status": "PRIVATE_REVIEW_EXECUTION_TERMINAL",
+    "current_preparation_unit": "competition-private-complete-review-prepare-20261113-v7.service",
+    "current_preparation_generates_model_judgment": false,
+    "current_preparation_terminal": true,
+    "current_preparation_exit_status": 0,
+    "current_execution_unit": "competition-private-complete-review-execute-20261113-v4.service",
+    "current_execution_invocation_id": "934db47b3cee4af19272b6b05e925fb8",
+    "current_execution_exit_status": 0,
+    "operation_outcomes": "Consult protected immutable operation receipts; do not infer candidate approval from operational status."
   },
   "qualified_clarification_metadata": {
     "source_manifest_sha256": "6d3863a8e575e59b697ffd8807efc0dc099ecd8340ad7b63bea89dfc79aea760",
@@ -87,7 +105,7 @@
     "actual_generation_finished": true,
     "actual_model_call_live": false,
     "metadata_grants_code_or_approval_credit": false,
-    "remaining": "Metadata execution finished; consult protected results. Preserve every original finding and never repeat a consumed operation. Prepare prospective review only for an unblocked candidate. Composite code-bearing integration remains incomplete."
+    "remaining": "Metadata execution finished; consult protected results. Preserve every original finding and never repeat a consumed operation. Full composite integration has passed synthetic qualification but is not the active runtime."
   },
   "qualified_prospective_and_composite_stages": {
     "prospective_format_tests_passed": 105,
@@ -95,7 +113,10 @@
     "prospective_normal_binary_sha256": "c3926c554840295d793874b99859d06ed9f4e8ec6ba8eaa25345d7194ad66867",
     "kernel_and_native_controls_passed": 23,
     "kernel_qualification_manifest_sha256": "5f2e1223effc9cea56c47f6a64ff7414477eed29923660c9ae2afb6e21f6060c",
-    "full_composite_integration_complete": false
+    "full_composite_integration_complete": true,
+    "full_composite_qualification_tests_passed": 132,
+    "full_composite_source_manifest_sha256": "c221b215de618928466f719e9158dc0489745ae3e024ed8ba1b798ab3e0c9ae6",
+    "full_composite_runtime_activated": false
   },
   "qualified_storage_renewal": {
     "source_manifest_sha256": "86a9e7e5f4acadbc9ddb442ff93e87814d8bc0b156a3e080f702c9bbd39a2f99",
@@ -108,6 +129,44 @@
     "runtime_activated": false,
     "cache_limits_increased": false,
     "remaining": "Compose selected-job routing and clarification lineage before full-cohort runtime qualification. Synthetic window coverage is not completed candidate review."
+  },
+  "qualified_supervisor_update_recovery": {
+    "base_server_commit": "84615490189d7d58dc9acbea4086324cbe15d0ce",
+    "source_manifest_sha256": "bfbbde9be2fe31df70a668f44c297a6dd76c9da8f26e9858a50d265217059f70",
+    "new_tests_passed": 24,
+    "adjacent_controller_tests_passed": 60,
+    "pure_root_tests_passed": 35,
+    "focused_race_tests_passed": 40,
+    "isolated_postgres_tests_passed": 3,
+    "causal_mutants_failed_as_expected": 2,
+    "ported_files_match_qualified_source": true,
+    "manager_deployed": true,
+    "manager_build_passed": true,
+    "manager_cli_compatibility_passed": true,
+    "staged_manager_sha256": "a571706953456c944d66a75c7ce0c6c47b2fbfef6db8b392a98c5def69c3c5c5",
+    "fresh_readonly_transition_checks_passed": true,
+    "fresh_native_handoff_observation_passed": true,
+    "operator_observer_correction": "Remove the extra RestrictAddressFamilies wrapper property; the paired read-only diagnostic passed without it. Evaluation-container and managed-agent controls are unchanged.",
+    "remaining": "The qualified supervisor is active. Preserve the existing hold and worker while completing controlled recovery authority; this checkpoint grants neither a retry nor hold release."
+  },
+  "qualified_offline_context_adapter": {
+    "source_manifest_sha256": "06d3d625d6bb065154d7b5f412a5571eb2d2f8f66eedef744bdec0412d8cea85",
+    "inputs_sha256": "7fe6d5033a1934d901a08b8a82ab32416faacdd82acf4effca1753179f1f8e0a",
+    "synthetic_tests_passed": 15,
+    "normal_binary_sha256": "8c6076b16508230788ba3a2a90f78210936808f3867a5cbcf90cde520b62c2f9",
+    "actual_context_assembly_performed": false,
+    "actual_delta_selection_performed": true,
+    "registry_activated": false,
+    "remaining": "Selection succeeded for the pinned as-of snapshot; it is explicitly not a full-population census. Authenticate newly exported originals and preserve every previous packet byte before assembly. No registry or completed-review credit."
+  },
+  "qualified_review_orchestrator": {
+    "source_manifest_sha256": "e578003dbf876b3be6a01cc35b0c3f7cf8b95a713bbbc460606f62cfda4ab321",
+    "normal_tests_passed": 30,
+    "normal_binary_sha256": "cc8c295e58177c13f87e67ea336e77cb2a1b87064ee0ac88146177e667ff2d2b",
+    "independent_targeted_security_review_passed": true,
+    "runtime_activated": false,
+    "older_coordinator_activated": false,
+    "remaining": "Install and review a prospective custody/v2 operator profile using current immutable progress. Never activate the older coordinator with known ancestry and uncertainty-reporting defects."
   },
   "package_restart_deferral": {
     "hosts": [
@@ -143,8 +202,15 @@
     "recovery_is_volatile_ram": true,
     "source_baseline_submission_evidence_deleted": false
   },
+  "latest_recoverable_cache_cleanup": {
+    "removed_only_inactive_rebuildable_objects": 3,
+    "bytes": 518410018,
+    "verified_recovery_directory": "/dev/shm/competition-retired-inactive-cache-20261113.0UD9wteW",
+    "recovery_is_volatile_ram": true,
+    "source_baseline_submission_evidence_deleted": false
+  },
   "next_actions": [
-    "Confirm and repair the provider-envelope parser against unchanged retained originals, with deterministic tests and no fresh inference. Consult the protected operator state; never silently rewrite old failures.",
+    "The current execution is terminal. Review and provision the newly qualified secure orchestrator against immutable progress; never replay a consumed operation or infer candidate approval from scoped evidence.",
     "Verify advancing host heartbeats after the completed held worker handoff; retain compatible serving API identity before controlled recovery.",
     "Finish complete both-model reviews and bounded cohort/archive routing. Derive eligibility from authenticated scoring rules, never success state alone.",
     "Keep all candidate outcomes and operator proof payloads in protected storage. Publish results only through the authorized finalization path."
