@@ -253,9 +253,16 @@ func (self *SubscriptionEndedTemplate) Name() string {
 // Subscription, whose "Update payment method" opens Stripe's billing portal. The
 // hosted link is sent only when it is on Stripe's invoice domain
 // (stripeHostedInvoiceUrlAllowed); otherwise the email offers the update alone.
+// A payment that waits on the customer's bank (3D Secure) asks the customer to
+// confirm it instead: the hosted page runs the bank's check, and Manage
+// Subscription links the same page when the email cannot.
 type SubscriptionPaymentFailedTemplate struct {
 	// the final notice rather than the first
 	Final bool
+	// the payment waits on the customer to confirm it with their bank (3D
+	// Secure) rather than having been declined. Added after the other fields:
+	// a notice written before it reads as declined.
+	ActionRequired bool
 	// the invoice's Stripe-hosted payment page, or ""
 	HostedInvoiceUrl string
 	// the amount due in the currency's minor unit, and its ISO code

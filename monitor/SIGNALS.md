@@ -22964,6 +22964,43 @@ owns the three unresolved dispositions. Release owns attributable API and
 Taskworker artifacts, followed by two clean reconciliation/deletion windows;
 do not treat the stable count or its imminent expiry as deployment proof.
 
+Card testing (owner, 2026-11-13). In 2026-11 card testers ran 20 cards in 92
+seconds through two Checkout sessions made 2.5 minutes after their account,
+and 22 attempts over three sessions. The yearly plan's free trial checks a
+card for nothing (a $0 SetupIntent), the kind of check card testers prefer.
+Stripe's `setup_intent.setup_failed` and `charge.failed` reached the webhook
+and were ignored, so nothing showed it. The api now counts each failed card check, with no personal data, as
+`urnetwork_subscription_stripe_failures_total{kind,reason_class}` (kind
+`setup` or `charge`; the decline class `declined`, `insufficient_funds`,
+`invalid_card`, `lost_stolen`, `fraud`, `blocked`, `authentication`,
+`processing` or `other`), and in a sliding Redis window per owner: the network
+the check names, else its Stripe customer, else the intent every attempt of
+one Checkout session shares, keyed by the Stripe event id so a redelivery
+counts once. More than `BurstCount` (5) failures of one owner within
+`BurstWindow` (10 minutes, both in the api's card-failure settings,
+controller/subscription_stripe_card_failures.go) log one fixed line,
+`[stripe]card failure burst: <count> failed card checks within <minutes>
+minutes for <network|customer|intent> <id> (...)`, again at each further
+`BurstCount` failures while the window stays full, and count in
+`urnetwork_subscription_stripe_failure_bursts_total{owner}`. The api
+dashboard's "failed card checks" panel shows both.
+
+- `payment-card-failure-burst` (WARN at one line a minute, PAGE at three, from
+  the §1.5 log tail, framed by owner kind): one owner passed the burst count.
+  The alert omits the owner id and the count; the api log line has them. Look
+  the owner up in the Stripe dashboard (its sessions, attempts and Radar
+  outcomes) and, for a network, its account and age. For card testing, remove
+  the network or its sign-in and refund any payment that went through before
+  it becomes a dispute; make sure Radar runs on cards saved for later (Radar
+  settings, "Use Radar on payment methods saved for future use"). A customer
+  whose own card is declined a few times stays under the count; never refund
+  or block on the count alone.
+
+Each network may also start at most 10 card purchases (Checkout sessions and
+payment sheets together) an hour, on top of the address budget the payment
+sheet always spent (controller/subscription_stripe_purchase_limit.go); a start
+past it is refused with `rate_limited` and the wait.
+
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
 tests cover every durable class, healthy zero rows, strict allowlists and

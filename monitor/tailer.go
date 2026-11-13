@@ -926,6 +926,21 @@ var logClasses = []logClass{
 		action:    "Use privileged payment tooling to correlate the provider event with the retained balance code, then retry fulfillment only to its verified existing destination or make an authorized refund/support disposition. Preserve the code and purchase ledger; never expose its secret, invent a destination, or delete evidence to clear the page.",
 		verify:    "The original provider event completes idempotently or receives a documented authorized disposition, the retained code is consumed at most once, and no payment-balance-code-undelivered line recurs through two payment-failures cadences after log-ingestion delay.",
 	},
+	// controller/subscription_stripe_card_failures.go: one network, Stripe
+	// customer or checkout ran more failed card checks than its burst count
+	// within the burst window, the shape of card testing (owner, 2026-11-13)
+	{name: "payment-card-failure-burst", re: paymentCardFailureBurstRe,
+		sample: func(line string) string {
+			return "[stripe]card failure burst: failed card checks over the burst count for one " + paymentCardFailureBurstLogGroup(line) + " (count, owner and card details omitted)"
+		},
+		groupBy:       paymentCardFailureBurstLogGroup,
+		rateThreshold: 1, pageRateThreshold: 3, tier: tierWarn, playbook: "SIGNALS.md §2.22", redactIDs: true,
+		meaning:   "one network, Stripe customer or checkout session ran more failed card checks (setup_intent.setup_failed or charge.failed) than the api's burst count within its burst window: the shape of card testing, where a script runs stolen cards through a checkout to find the live ones",
+		mechanism: "The api counts every failed card check Stripe reports for its owner in a sliding Redis window keyed by the Stripe event id: the network the check names, else its Stripe customer, else the intent all attempts of one Checkout session share. A failure past the burst count logs this line once, and each further burst count of failures logs it again while the window stays full. The 2026-11 attacks ran 20 cards in 92 seconds through two Checkout sessions, and 22 attempts over three; the yearly plan's free trial checks a card for nothing (a $0 SetupIntent), the kind of check card testers prefer.",
+		context:   "A line is a burst of one owner, not a count of cards or customers; urnetwork_subscription_stripe_failures_total{kind,reason_class} on the api dashboard has the fleet's failures by kind and decline class, and urnetwork_subscription_stripe_failure_bursts_total{owner} the bursts. A customer whose own cards are declined a few times stays under the count. Stripe's own card testing defenses act inside each session and are not visible here. The network or customer id is in the api log line only; the alert omits it.",
+		action:    "Read the owner from the api log line and look it up in the Stripe dashboard: the Checkout sessions, payment attempts and Radar outcomes of that customer or intent, and for a network its account and how new it is. When it is card testing, remove the network or its sign-in and refund any payment that went through before it becomes a dispute. Check that Radar runs on cards saved for later (Radar settings: Use Radar on payment methods saved for future use) and consider a Radar rule for the pattern. Never refund or block on the count alone.",
+		verify:    "No further line for the owner through two log-errors cadences after log-ingestion delay, the api dashboard's failed card checks back to their usual rate, and the owner's sessions show no new attempts in Stripe. Quiet logs alone do not prove the attempts stopped if the api's Redis count was unavailable (its warning lines say so).",
+	},
 	{name: "tx-rollback-mask", re: txRollbackMaskRe,
 		sample: func(string) string {
 			return "txWithPool rollback cleanup replaced an existing transaction error (details omitted)"
@@ -1606,6 +1621,20 @@ func storeNotificationLogGroup(re *regexp.Regexp) func(string) string {
 // The refused webhook's bounded name; the resource and field stay in the service log.
 func paymentWebhookRefusedLogGroup(line string) string {
 	if match := paymentWebhookRefusedRe.FindStringSubmatch(line); len(match) > 1 {
+		return match[1]
+	}
+	return "unknown"
+}
+
+// controller/subscription_stripe_card_failures.go stripeCardFailureBurstLine:
+// `[stripe]card failure burst: <count> failed card checks within <minutes>
+// minutes for <network|customer|intent> <id> (latest <kind> <class>)`.
+var paymentCardFailureBurstRe = regexp.MustCompile(`\[stripe\]card failure burst: [0-9]+ failed card checks within [0-9]+ minutes for (network|customer|intent) `)
+
+// What the burst's failures counted for: network, customer or intent. The id
+// after it stays in the service log.
+func paymentCardFailureBurstLogGroup(line string) string {
+	if match := paymentCardFailureBurstRe.FindStringSubmatch(line); len(match) > 1 {
 		return match[1]
 	}
 	return "unknown"
