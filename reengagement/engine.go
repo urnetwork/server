@@ -579,18 +579,23 @@ func FixHighlights(highlights []*Highlight, platform string, country string, rea
 
 // ----- send time -----
 
-// SendAt places a step: `day` days after the episode start, at the schedule's
-// hour in the network's zone, clamped into the send window, and never in the
-// past.
+// SendAt places a step in a reader's own zone (SendAtZone).
 func SendAt(startedAt time.Time, day int, loc *time.Location, s Schedule, now time.Time) time.Time {
+	return SendAtZone(startedAt, day, onboarding.ZoneSendZone(loc), s, now)
+}
+
+// SendAtZone places a step: `day` days after the episode start, at the
+// schedule's hour in the zone's location, clamped into the send window as the
+// zone narrows it (a country's zone keeps the window inside every populated
+// zone of the country), and never in the past.
+func SendAtZone(startedAt time.Time, day int, zone onboarding.SendZone, s Schedule, now time.Time) time.Time {
 	s = s.WithDefaults()
-	if loc == nil {
-		loc = time.UTC
-	}
+	loc := zone.Loc()
 	w, err := onboarding.ParseSendWindow(s.SendWindow)
 	if err != nil {
 		w = onboarding.DefaultSendWindow
 	}
+	w = zone.Window(w)
 	local := startedAt.In(loc)
 	anchor := time.Date(local.Year(), local.Month(), local.Day(), s.SendHour, 0, 0, 0, loc)
 	at := onboarding.SendAt(anchor, day, loc, w)

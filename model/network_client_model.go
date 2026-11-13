@@ -208,12 +208,15 @@ type AuthNetworkClientArgs struct {
 	// Ignored for a re-auth and for an ancillary client.
 	ProvideIntent bool `json:"provide_intent,omitempty"`
 
-	// TimeZone is the device's IANA zone (e.g. "America/Los_Angeles"), used
-	// only to place the onboarding campaign's sends in the user's local day.
-	// Optional; never stored on the client.
-	TimeZone string `json:"time_zone,omitempty"`
-	// Locale is the device's BCP 47 locale ("de-DE"); same use, same rules.
-	Locale string `json:"locale,omitempty"`
+	// TimeZone is the device's IANA zone (e.g. "America/Los_Angeles"),
+	// Locale its BCP 47 locale ("de-DE") and Locales its languages, most
+	// preferred first, of which Locale is the first: the campaign emails are
+	// placed in the reader's day and written in their language from them
+	// (controller/mail_context.go). Optional; kept only as the network's
+	// latest values (network_mail_context), never on the client.
+	TimeZone string   `json:"time_zone,omitempty"`
+	Locale   string   `json:"locale,omitempty"`
+	Locales  []string `json:"locales,omitempty"`
 }
 
 type ProxyConfig struct {

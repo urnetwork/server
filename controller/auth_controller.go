@@ -70,7 +70,11 @@ func AuthLogin(
 	   }
 	*/
 
-	return authLogin(login, clientSession, model.AuthLogin)
+	result, err := authLogin(login, clientSession, model.AuthLogin)
+	if err == nil && result != nil && result.Network != nil {
+		recordSignInMailContext(clientSession, result.Network.ByJwt, login.TimeZone, login.Locales)
+	}
+	return result, err
 }
 
 // The model's login, injected so the result handling runs without a database.
@@ -95,7 +99,11 @@ func AuthLoginWithPassword(
 	loginWithPassword model.AuthLoginWithPasswordArgs,
 	clientSession *session.ClientSession,
 ) (*model.AuthLoginWithPasswordResult, error) {
-	return authLoginWithPassword(loginWithPassword, clientSession, model.AuthLoginWithPassword, authVerifySendResult)
+	result, err := authLoginWithPassword(loginWithPassword, clientSession, model.AuthLoginWithPassword, authVerifySendResult)
+	if err == nil && result != nil && result.Network != nil && result.Network.ByJwt != nil {
+		recordSignInMailContext(clientSession, *result.Network.ByJwt, loginWithPassword.TimeZone, loginWithPassword.Locales)
+	}
+	return result, err
 }
 
 type authLoginWithPasswordFunction func(model.AuthLoginWithPasswordArgs, *session.ClientSession) (*model.AuthLoginWithPasswordResult, error)
@@ -436,6 +444,11 @@ func AuthVerify(
 ) (*model.AuthVerifyResult, error) {
 	result, err := model.AuthVerify(verify, clientSession)
 	if err == nil {
+		// what the sign-in reported, before the enrollment that places E1
+		// from it
+		if result != nil && result.Network != nil {
+			recordSignInMailContext(clientSession, result.Network.ByJwt, verify.TimeZone, verify.Locales)
+		}
 		completeAuthVerify(result, verify.UserAuth, clientSession, defaultAuthVerifyEffects())
 	}
 	return result, err

@@ -6,28 +6,36 @@ package controller
 // (mmm/reengagement/PLAN.md "Server" 7 and 10): the locale its emails are
 // rendered in, the time zone its sends are placed in, the platform its "what
 // changed" items are chosen for, and the country the mail policy reads. The
-// onboarding row decides every part it has. A network older than the
-// onboarding program (signed up before 2026-09-15) has no row; its country
-// comes from its purchases and its locale and platform from its own clients'
-// reports (reengagement/context.go). Never an IP lookup: without a source a
-// part stays unknown, and an unknown country is the mail policy's strictest
-// case.
+// onboarding row decides the country and the platform when it has them; a
+// network older than the onboarding program (signed up before 2026-09-15)
+// has no row, and its country comes from its purchases and its platform from
+// its own clients' reports (reengagement/context.go). The time zone and the
+// locale follow the chain of controller/mail_context.go, which reads first
+// what the network's apps and browsers last reported. Never an IP lookup:
+// without a source a part stays unknown, and an unknown country is the mail
+// policy's strictest case.
 
 import (
 	"context"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/onboarding"
 	"github.com/urnetwork/server/reengagement"
 )
 
 // ReengagementContext is a network's resolved mail context, with where each
 // part came from (reengagement.ContextSource*, "" when no source had it).
 type ReengagementContext struct {
-	Locale         string `json:"locale"`
-	LocaleSource   string `json:"locale_source"`
+	// the email locale a send would be written in (onboarding.EmailLocales);
+	// "" when no source names one, which is English
+	Locale       string `json:"locale"`
+	LocaleSource string `json:"locale_source"`
+	// the IANA zone sends are placed in; "" when none, or an activity frame
+	// (TimeZoneSource activity)
 	TimeZone       string `json:"time_zone"`
 	TimeZoneSource string `json:"time_zone_source"`
 	Platform       string `json:"platform"`
@@ -49,25 +57,66 @@ type reengagementContextSources struct {
 	StripeCountry   string
 	// what the network's clients last reported; nil when not read
 	Client *model.NetworkClientContext
+	// what the network's apps and browsers last reported on auth-client,
+	// sign-up and sign-in; nil when nothing
+	MailContext *model.NetworkMailContext
+	// when the reader was last active: the last connection, else the
+	// sign-up; nil when unknown
+	ActivityAt *time.Time
+	// the hour an activity frame places sends at; 0 is the default schedule's
+	SendHour int
+	// nil is onboarding.DefaultMailLanguageSettings
+	LanguageSettings *onboarding.MailLanguageSettings
+}
+
+// mailReaderSources are the mail chain's view of the sources.
+func (self *reengagementContextSources) mailReaderSources() mailReaderSources {
+	s := mailReaderSources{
+		MailContext:     self.MailContext,
+		Onboarding:      self.Onboarding,
+		AppStoreCountry: self.AppStoreCountry,
+		PlayCountry:     self.PlayCountry,
+		StripeCountry:   self.StripeCountry,
+		ActivityAt:      self.ActivityAt,
+	}
+	if self.Client != nil {
+		s.EventLocale = self.Client.EventLocale
+	}
+	return s
+}
+
+func (self *reengagementContextSources) languageSettings() *onboarding.MailLanguageSettings {
+	if self.LanguageSettings != nil {
+		return self.LanguageSettings
+	}
+	return onboarding.DefaultMailLanguageSettings()
+}
+
+func (self *reengagementContextSources) sendHour() int {
+	if 0 < self.SendHour {
+		return self.SendHour
+	}
+	return reengagement.DefaultSchedule.SendHour
 }
 
 // resolveReengagementContext takes each part from its first source with a
-// usable value. The onboarding row comes first for every part. The country
-// then falls back to the App Store storefront, the Google Play region and the
-// Stripe card's billing country, in that order; the locale to the newest
-// client event's; the platform to the newer of the newest client event's and
-// the one the newest client's device spec names. The time zone has no
-// fallback. Countries are normalized to alpha-2 and locales to the onboarding
-// rows' form; a value that does not normalize is no value.
+// usable value. The country: the onboarding row's, then the App Store
+// storefront, the Google Play region and the Stripe card's billing country,
+// in that order. The platform: the onboarding row's, then the newer of the
+// newest client event's and the one the newest client's device spec names.
+// The time zone and the locale: the mail chain (resolveMailReader), the
+// locale as the email locale it picks among the shipped ones. Countries are
+// normalized to alpha-2; a value that does not normalize is no value.
 func resolveReengagementContext(s reengagementContextSources) ReengagementContext {
+	c, _ := resolveReengagementContextReader(s)
+	return c
+}
+
+// resolveReengagementContextReader is resolveReengagementContext with the
+// mail chain's resolution, whose send zone places the episode's steps.
+func resolveReengagementContextReader(s reengagementContextSources) (ReengagementContext, mailReader) {
 	c := ReengagementContext{}
 	if onb := s.Onboarding; onb != nil {
-		if locale := normalizeLocale(onb.Locale); locale != "" {
-			c.Locale, c.LocaleSource = locale, reengagement.ContextSourceOnboarding
-		}
-		if timeZone := strings.TrimSpace(onb.TimeZone); timeZone != "" {
-			c.TimeZone, c.TimeZoneSource = timeZone, reengagement.ContextSourceOnboarding
-		}
 		if platform := reengagementEventPlatform(onb.Platform); platform != "" {
 			c.Platform, c.PlatformSource = platform, reengagement.ContextSourceOnboarding
 		}
@@ -90,17 +139,16 @@ func resolveReengagementContext(s reengagementContextSources) ReengagementContex
 			}
 		}
 	}
-	if client := s.Client; client != nil {
-		if c.Locale == "" {
-			if locale := normalizeLocale(client.EventLocale); locale != "" {
-				c.Locale, c.LocaleSource = locale, reengagement.ContextSourceClientEvent
-			}
-		}
-		if c.Platform == "" {
-			c.Platform, c.PlatformSource = newestClientPlatform(client)
-		}
+	if client := s.Client; client != nil && c.Platform == "" {
+		c.Platform, c.PlatformSource = newestClientPlatform(client)
 	}
-	return c
+
+	reader := resolveMailReader(s.mailReaderSources(), s.sendHour(), 0)
+	c.TimeZone, c.TimeZoneSource = reader.TimeZone, reader.TimeZoneSource
+	if locale, source := onboarding.ChooseTemplateLocale(reader.Languages, onboarding.EmailLocales, s.languageSettings()); source != "" {
+		c.Locale, c.LocaleSource = locale, source
+	}
+	return c, reader
 }
 
 // reengagementEventPlatform is the platform as the events and the highlights
@@ -132,25 +180,59 @@ func newestClientPlatform(client *model.NetworkClientContext) (platform string, 
 	return "", ""
 }
 
-// reengagementContext resolves the network's context, reading only what the
-// onboarding row leaves open: a network with a complete row costs one read;
-// one without a row reads its store countries (and its card's, when no store
-// has one) and its client reports.
-func reengagementContext(ctx context.Context, networkId server.Id) ReengagementContext {
+// reengagementContext resolves the network's context, reading only what can
+// change it: the onboarding row and the mail context always; the purchase
+// countries when the row names no country or the mail chain could fall back
+// to them; the clients' reports when the platform is unknown or no reported
+// language has a template. lastConnect is the network's last connection, the
+// activity an unknown zone falls back to (else the sign-up the row records).
+func reengagementContext(ctx context.Context, networkId server.Id, lastConnect *time.Time) ReengagementContext {
+	c, _ := reengagementContextReader(ctx, networkId, lastConnect)
+	return c
+}
+
+// reengagementContextReader is reengagementContext with the mail chain's
+// resolution, whose send zone places the episode's first step.
+func reengagementContextReader(ctx context.Context, networkId server.Id, lastConnect *time.Time) (ReengagementContext, mailReader) {
+	cfg := model.Reengagement()
+	languageSettings := model.Onboarding().EffectiveMailLanguageSettings()
 	sources := reengagementContextSources{
-		Onboarding: model.GetNetworkOnboarding(ctx, networkId),
+		Onboarding:       model.GetNetworkOnboarding(ctx, networkId),
+		MailContext:      model.GetNetworkMailContext(ctx, networkId),
+		ActivityAt:       lastConnect,
+		SendHour:         cfg.ScheduleValue().SendHour,
+		LanguageSettings: languageSettings,
+	}
+	if sources.ActivityAt == nil && sources.Onboarding != nil {
+		createdAt := sources.Onboarding.CreatedAt
+		sources.ActivityAt = &createdAt
 	}
 	c := resolveReengagementContext(sources)
-	if c.Country == "" {
+	if c.Country == "" || mailReaderNeedsPurchaseCountries(sources.mailReaderSources(), languageSettings) {
 		sources.AppStoreCountry, sources.PlayCountry = model.NetworkStoreCountries(ctx, networkId)
 		if sources.AppStoreCountry == "" && sources.PlayCountry == "" {
 			sources.StripeCountry = model.NetworkStripeBillingCountry(ctx, networkId)
 		}
 	}
-	if c.Locale == "" || c.Platform == "" {
+	if c.Platform == "" || !mailReaderServesALanguage(sources.mailReaderSources(), languageSettings) {
 		sources.Client = model.GetNetworkClientContext(ctx, networkId)
 	}
-	return resolveReengagementContext(sources)
+	return resolveReengagementContextReader(sources)
+}
+
+// reengagementMailReader resolves an episode's send zone and languages at
+// send time, so a zone or language a device reported after the episode
+// opened places and writes its later steps. The episode's country stands in
+// for the onboarding row's when the network has none; its last connection,
+// else its start, is the activity an unknown zone falls back to.
+func reengagementMailReader(ctx context.Context, row *model.NetworkReengagement) mailReader {
+	activityAt := row.StartedAt
+	if row.LastConnectAt != nil {
+		activityAt = *row.LastConnectAt
+	}
+	onb := model.GetNetworkOnboarding(ctx, row.NetworkId)
+	sources := loadMailReaderSources(ctx, row.NetworkId, onb, row.Country, &activityAt)
+	return resolveMailReader(sources, model.Reengagement().ScheduleValue().SendHour, 0)
 }
 
 // countReengagementContextSources records where a scan candidate's context

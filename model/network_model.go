@@ -123,6 +123,13 @@ type NetworkCreateArgs struct {
 	// as the body of its HTTP status (401), instead of the plain text message
 	// older clients expect; the status stays a refusal either way
 	ResultErrors bool `json:"result_errors,omitempty"`
+	// TimeZone is the device's or browser's IANA zone and Locales its
+	// languages, most preferred first (BCP 47): the campaign emails are
+	// placed in the reader's day and written in their language from them
+	// (controller/mail_context.go). Optional; kept only as the network's
+	// latest values, never with the request.
+	TimeZone string   `json:"time_zone,omitempty"`
+	Locales  []string `json:"locales,omitempty"`
 }
 
 type NetworkCreateResult struct {

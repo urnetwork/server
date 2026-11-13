@@ -47,6 +47,8 @@ func NetworkCreate(
 		// duplicate-account refusals as unhandled HTTP 500 failures.
 		return nil, result.Error
 	}
+	// what the sign-up reported, before the enrollment that places E1 from it
+	recordNetworkCreateMailContextPostPrimary(result, &networkCreate, clientSession)
 	enrollNetworkCreateOnboardingPostPrimary(result, clientSession)
 
 	// Every new network gets the day's free data (pro.yml free.data), and a
@@ -130,6 +132,24 @@ func NetworkCreate(
 	}
 
 	return result, nil
+}
+
+// recordNetworkCreateMailContextPostPrimary keeps what a committed sign-up
+// reported for its network (controller/mail_context.go): the zone and
+// languages the app or the web app sent, a browser's Accept-Language, and the
+// app build. A sign-up still waiting for its verification has its network
+// too, and keeps them.
+func recordNetworkCreateMailContextPostPrimary(
+	result *model.NetworkCreateResult,
+	networkCreate *model.NetworkCreateArgs,
+	clientSession *session.ClientSession,
+) {
+	if result == nil || result.Network == nil || result.Network.NetworkId == (server.Id{}) {
+		return
+	}
+	runPostPrimaryOnboarding(clientSession, func(postSession *session.ClientSession) {
+		RecordNetworkMailContext(postSession, result.Network.NetworkId, networkCreate.TimeZone, networkCreate.Locales, "", "")
+	})
 }
 
 func enrollNetworkCreateOnboardingPostPrimary(
