@@ -23257,6 +23257,58 @@ log classes are in `tailer.go`. Synthetic tests cover the migration gate, the
 silent decision, privacy and malformed aggregates; a database test runs the
 query against the migrated schema.
 
+### 2.22d App Store offer code supply
+Probe: `apple-offer-codes`
+
+An App Store reader redeems the welcome offer only with a one-time App Store
+offer code from the pool `network_onboarding_apple_offer_code` (or the custom
+code `onboarding.yml` `offer.apple_custom_offer_code`, when one is set). A
+reader whose offer finds no code sees no discount in the App Store app. Every
+offer used to draw a code whatever its reader, and step E4b drew one at the
+send: on 2026-11-12, 451 of the 509 codes drawn went to Android and web
+networks, which redeem through Google Play or Stripe, and about 1,511 were
+left, about three days at that rate, with nothing watching the pool. A code is
+now drawn only for a reader on an App Store build (the iOS app or the Mac App
+Store build): when the App Store app issues the offer, or when an App Store
+build first reads an offer issued without one (the email offer, an offer
+issued on another platform).
+`urnetwork_onboarding_apple_offer_code_draws_total{trigger,result}` counts the
+outcomes.
+
+A code is handed only to an offer it outlives, so a batch serves new offers
+for `offer.apple.expiry_days` minus `offer.validity_days` days (7 - 5 = 2 on
+Main). The daily top-up (`controller.AppleOfferCodeTopUp`, while
+`onboarding.yml` `enabled` and `offer.apple.offer_code_id` are set) asks App
+Store Connect for one batch of `offer.apple.batch_size` (at least 500) whenever
+fewer than `offer.apple.min_available` codes would outlive an offer issued
+before its next run. It keeps up with at most a batch a day; when it stalls,
+the pool runs out within days whatever its count.
+
+- `apple-offer-code-supply-low` (WARN, this probe, hourly, two observations):
+  the supply covers fewer than seven days of draws. The draw rate is the codes
+  assigned in the last three days. The top-up is live when it is configured
+  and a batch arrived within two intervals (a code expires later than any
+  older batch's), or the pool is above the floor it refills at; a live top-up
+  that adds more codes a day than are drawn keeps the supply up. Otherwise the
+  supply is the codes a new offer can take over the draw rate, and, while no
+  top-up delivers, no longer than the last of them stays assignable. A pool
+  with no code a new offer can take warns when codes were drawn in the last 30
+  days. Healthy while the welcome offer is off. Restore a skipped or failed
+  top-up (the App Store Connect key in `vault/main/apple_app_store_connect.yml`,
+  `offer.apple.offer_code_id`) through their owners, raise
+  `offer.apple.batch_size` when App Store readers draw more than a batch a day,
+  and check the draws by trigger when they rise without more App Store readers;
+  never hand codes out by hand.
+
+Only counts, one age and one flag leave PostgreSQL: no code, network or offer.
+
+Implementation convention: SIGNALS.md §2.22d (`apple-offer-codes`) maps to
+`signal_apple_offer_codes.go` and `signal_apple_offer_codes_test.go`.
+Synthetic tests cover the supply decision (the 2026-11-12 pool, a live and a
+stalled top-up, demand above the daily batch, an empty pool in use and not in
+use, the offer switched off), the query contract and malformed aggregates; a
+database test runs the query against the migrated schema.
+
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`
 
