@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T23:30:55.662837Z",
+  "observed_at": "2026-11-13T00:16:21Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -27,7 +27,7 @@
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "api_observed_at": "2026-11-12T23:30:53Z",
+    "api_observed_at": "2026-11-13T00:16:21Z",
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
       "supervisor_pid": 211140,
@@ -69,20 +69,18 @@
     "database_grants_issued": false,
     "ordinary_qualification": {
       "original_scope": 271,
-      "qualified": 220,
-      "pending": 51,
+      "qualified": 244,
+      "pending": 27,
       "failed_batch_partial_credit": false,
       "race_or_release_qualification_complete": false
     },
-    "active_qualification": {
-      "cases": 24,
-      "pid": 958167,
-      "invocation_id": "24a827c998194378ad5080ffa48c8de5",
-      "evidence": "/dev/shm/competition-wallet-pinned-batch07-20261112.YyF9tlyt",
-      "manifest_sha256": "e714600c5166af7df65aa4852342834348f3b86525a192845905ae6efbbe05e4",
-      "go_timeout_seconds": 2400,
-      "actor_runtime_seconds": 2700,
-      "completed_or_credited": false
+    "active_qualification": null,
+    "last_original_batch": {
+      "passed": 24,
+      "failed": 0,
+      "skipped": 0,
+      "durable_evidence": "/var/lib/urnetwork/competition-native-batch07-green-20261112.pPqsi4x5",
+      "manifest_sha256": "6b6769aff44ac8fabef3afe7707957a0ba80a658064552a58bfd5af7be08c478"
     },
     "wallet_fixture": {
       "source_manifest_sha256": "6039cf2fc0176a6f5742ecbb300a19b73a7258d5d787dc21bb3f81914ec3ee03",
@@ -137,9 +135,9 @@
         "durable_evidence": "/var/lib/urnetwork/competition-native-batch06-green-20261112.dH4z0o0k",
         "durable_manifest_sha256": "0b590481421b0702afd146ab4e4d79ca2217584af3615207e0da0e8023626354"
       },
-      "tests_remaining": "Remaining 51 original census cases, race qualification and final exact-main/dependency compatibility."
+      "tests_remaining": "Remaining 27 original census cases, race qualification and final exact-main/dependency compatibility."
     },
-    "isolated_server_commit": "e91627e74601f2bceab0365c8a5e49e1158bf53c",
+    "isolated_server_commit": "ae8920bd7a5ec9e97a51e179cf9b74600b1c8a7a",
     "isolated_sn_commit": "e908edda50378af63576109df88c603168716ce6",
     "isolated_main_qualified_or_deployed": false,
     "integration_status": "Wallet fixture checkpoint, captured main 189d1e558 and heartbeat fix 59b3ce0ca merged in isolation. Published Solana cursor and provider-egress evidence migrations precede local recovery append, with captured-tail regression updated. Integration receipt 47624a0c8b142c2c7b47e1413feb2712fccf4ca31f9d5baa400f7634ff8cbce1. Current original-census qualification inputs remain unchanged; no release claim.",
@@ -157,7 +155,15 @@
     "source_and_dependencies_unchanged": true,
     "historical_old_run_control_source_sha256": "f0b03983dbfe1fa7a0fa5b0a51552d03cd809655a9af39662f18a8c76271f9d8",
     "historical_control_executed": false,
-    "warm_compile_authorization": "One unchanged-profile warm normal compile after the active native batch joins, conditional on fresh 33 GiB plus 512 MiB headroom. Read-only audit proved the complete 174474538-byte controller-with-tests archive was cached; testmain compilation/link remain unproved. Stop on another failure; no blind retry or scoring-limit change."
+    "warm_compile_result": "Compiled successfully; original smoke exposed a test-cleanup cancellation fixture defect. Failure preserved; production code unchanged by the correction.",
+    "corrected_fixture_source_sha256": "252a3f26dde8affe48a7116a9e28153a09c8f48a3913479e5bc68aa4a6cc0f9a",
+    "corrected_normal_binary_sha256": "63650e18d67da95301548688c9016a6c94cde4f782f7963ca8eadd1b829dca35",
+    "corrected_smoke_passed": 20,
+    "normal_executions_passed": 243,
+    "normal_failures_or_skips": 0,
+    "normal_durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-normal243-green-20261113.KlVhxljU",
+    "normal_manifest_sha256": "d8def8e2d36289cff01f3ecd4c7734c4849a0c049e4a861489c7668d06e67d39",
+    "race_and_historical_controls_complete": false
   },
   "private_reviews": {
     "members": [
@@ -219,6 +225,21 @@
     "repository_baseline_or_evidence_deleted": false,
     "qualification_reserve_unchanged_bytes": 35433480192
   },
+  "additional_approved_disk_recovery": {
+    "archive_directory": "/var/lib/urnetwork/competition-compiler-recovery-20261113.HEPLmQp8",
+    "removed_paths": ["/tmp/go-build3486652901", "/tmp/go-build3223552786"],
+    "archives": [
+      {"name": "go-build3486652901.tar.gz", "bytes": 244437476, "sha256": "16c736da33d8dc76a27fd9aba2e5da283f81e0756a03f257b4d6cd6b8d84e424"},
+      {"name": "go-build3223552786.tar.gz", "bytes": 239435523, "sha256": "8f2bc95edf887cfdc443e1ee1a2bef1be257046bcc74f299c3c397b11855e77a"}
+    ],
+    "archive_owner_mode": "root:0400",
+    "gzip_integrity_and_tar_comparison_exit_zero": true,
+    "fresh_canonical_inode_and_open_file_checks_passed": true,
+    "user_approved": true,
+    "recoverable": true,
+    "root_available_bytes_after": 37700001792,
+    "repository_baseline_or_evidence_deleted": false
+  },
   "buildkit_cache_cleanup": {
     "removed_records": 14,
     "scope": "Exact validated unused, unshared, reclaimable regular BuildKit cache records, last used at least 24 hours ago; no images, containers, volumes, repositories, baselines or evidence removed.",
@@ -236,7 +257,7 @@
     "has_winner": true,
     "invalidated": false,
     "settlement_status": "pending",
-    "interpretation": "The public result stayed accessible during an epoch-2 readiness dip. Pending is the API's settlement-receipt status, not independent proof of an external payment's state."
+    "interpretation": "The historical public result returned HTTP 200 near an observed epoch-2 readiness dip; those sequential reads do not prove a bracketed hold condition. Pending is the API's settlement-receipt status, not independent proof of an external payment's state."
   },
   "next_actions": [
     "Finish the remaining original census cases and race qualification using the pinned wallet-fixture binary; preserve native PostgreSQL and runtime limits.",
@@ -246,9 +267,7 @@
     "Finish complete paired, bounded reviews for every eligible submission; partial observations never count as approvals.",
     "Monitor live API, supervisor leases and both hosts. Never restart a live attempt because an observation is quiet."
   ],
-  "pending_authorizations": [
-    "Recoverable cleanup of inactive /tmp/go-build3486652901 and /tmp/go-build3223552786 has been requested asynchronously and remains unapproved. Neither was removed. The specifically approved /tmp/go-build2752663447 cleanup is complete and recoverable from its verified private archive."
-  ],
+  "pending_authorizations": [],
   "historical_evidence": {
     "path": "../old/CURRENT-STATE-HISTORY-2026-11-12T211638.json",
     "sha256": "907fc91621e1baf820ce6cbf51a7a0b7fba0a8d34fb758f26fffb7dee204cd03",
