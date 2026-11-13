@@ -108,6 +108,9 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleDeliverAccountMessages(clientSession, tx)
+		// the hourly Stripe dunning sweep: owes the payment-failed notices a
+		// webhook missed (controller/subscription_stripe_dunning_sweep.go)
+		controller.ScheduleSweepStripeDunning(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		work.ScheduleCloseContractDeadlines(clientSession, tx)
@@ -372,6 +375,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.DeliverAccountMessages,
 			controller.DeliverAccountMessagesPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.SweepStripeDunning,
+			controller.SweepStripeDunningPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.PlaySubscriptionRenewal,

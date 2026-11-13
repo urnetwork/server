@@ -94,6 +94,10 @@ Options:
 		panic(err)
 	}
 
+	// the PgBouncer instances directly on the blocks the rollout lists, nginx's
+	// single port on the rest (server db_pgbouncer_path_rollout.go)
+	server.SetServicePgBouncerPath("proxy")
+
 	settings := proxy.DefaultProxySettings()
 	configureProxyControlFamily()
 
