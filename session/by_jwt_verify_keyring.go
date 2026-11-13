@@ -289,10 +289,16 @@ func parseByJwtPublicJwks(document []byte, rsaMinBitCount int) (map[string]crypt
 // vault's order, for ByJwtPublicJwksResourceName: what an operations command
 // writes for a block's secret_files each time jwt.yml gains a key version, which
 // must reach the blocks before the version signs (byJwtKeySigningDelay). It
-// reads the vault as the issuer's keyring does, so it runs where jwt.yml is
-// mounted.
+// reads the vault as the issuer's keyring rereads it, so it runs where jwt.yml
+// is mounted, and a key path that does not resolve fails the export rather than
+// leaving that path's keys out of it.
 func ExportByJwtPublicJwks() ([]byte, error) {
-	keys, err := readByJwtKeys(defaultByJwtKeyringSettings(), nil)
+	noKeys := &byJwtKeys{
+		kidPublicKeys:         map[string]crypto.PublicKey{},
+		pathKeys:              map[string]*byJwtKey{},
+		pathFailedModifyTimes: map[string]time.Time{},
+	}
+	keys, err := readByJwtKeys(defaultByJwtKeyringSettings(), noKeys)
 	if err != nil {
 		return nil, err
 	}

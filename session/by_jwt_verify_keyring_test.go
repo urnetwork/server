@@ -11,6 +11,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +178,36 @@ func TestByJwtVerifyKeyringWithNoDocumentIsUnavailable(t *testing.T) {
 	if _, _, err := verifier.parse(signed); err != nil {
 		t.Fatalf("after the document arrived: %v", err)
 	}
+}
+
+// The export an operations command writes from a vault's jwt.yml holds every
+// listed version's public key, and a verify-only keyring on it alone verifies
+// what the process signs, whichever version signed.
+func TestExportByJwtPublicJwksVerifiesTheVaultsTokens(t *testing.T) {
+	if os.Getenv(byJwtRotationChildEnv) == t.Name() {
+		vaultRoot := os.Getenv("WARP_VAULT_HOME")
+		document, err := ExportByJwtPublicJwks()
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock := newByJwtTestClock()
+		verifier := newByJwtVerifyTestKeyring(&byJwtVerifyTestDocument{document: document}, clock)
+		for _, version := range []string{"1.0.0", "2.0.0"} {
+			key := readByJwtKeyFile(t, byJwtRotationKeyFile(vaultRoot, version))
+			if _, unknownKid, err := verifier.parse(signByJwtWithKey(t, newByJwtTestClaims(), key, true)); err != nil || unknownKid {
+				t.Fatalf("version %s: %v, unknown kid %v", version, err, unknownKid)
+			}
+		}
+		if _, _, err := verifier.parse(newByJwtTestClaims().Testing_Sign()); err != nil {
+			t.Fatalf("what the process signs: %v", err)
+		}
+		return
+	}
+
+	vaultRoot := newByJwtRotationVault(t)
+	writeByJwtRotationKey(t, vaultRoot, "1.0.0")
+	writeByJwtRotationKey(t, vaultRoot, "2.0.0")
+	runByJwtRotationChild(t, t.Name(), vaultRoot)
 }
 
 // Any key the document cannot vouch for refuses the whole document: a private
