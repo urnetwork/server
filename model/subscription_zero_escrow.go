@@ -242,12 +242,14 @@ func CreateZeroEscrowContract(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	defer recoverContractPublicationDeadline(&transferEscrow, &returnErr)
 	// Pin before acquisition, as the other creation paths do.
 	ctx = providerWorkSessionContext(ctx)
 	// the stream state the insert binds is read before the transaction
 	// (contract_stream_binding.go)
 	resolveContractStreamBinding(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
+	defer leaveTransaction()
 	server.Tx(ctx, func(tx server.PgTx) {
 		transferEscrow, returnErr = createZeroEscrowContractInTx(
 			ctx,
@@ -299,6 +301,7 @@ func CreateZeroEscrowCompanionContract(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	defer recoverContractPublicationDeadline(&transferEscrow, &returnErr)
 	// Pin before acquisition, as the other creation paths do.
 	ctx = providerWorkSessionContext(ctx)
 	stampClientId := destinationId
@@ -306,6 +309,7 @@ func CreateZeroEscrowCompanionContract(
 	// (contract_stream_binding.go)
 	resolveContractStreamBinding(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
+	defer leaveTransaction()
 	server.Tx(ctx, func(tx server.PgTx) {
 		transferEscrow, returnErr, stampClientId = nil, nil, destinationId
 		originOutcome := server.ContractCompanionOriginError
@@ -410,13 +414,14 @@ func createZeroEscrowContractInTx(
 	if err := validateProberShardAdmissionDeadlineInTx(ctx, tx, shardDeadline); err != nil {
 		return nil, err
 	}
-	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId); err != nil {
+	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId, shardDeadline); err != nil {
 		return nil, err
 	}
 
 	contractId := server.NewId()
 	streamId := bindContractStreamAtInsert(ctx, contractId)
 	var expirationTime time.Time
+	var completedAt *time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		batch.Queue(
 			zeroEscrowContractInsertSql,
@@ -432,15 +437,9 @@ func createZeroEscrowContractInTx(
 			streamId,
 			contractUsageOriginInsertArg(ctx, sourceNetworkId, destinationNetworkId, companionContractId),
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
-		batch.Queue(
-			contractExtenderInsertSql,
-			contractId,
-			sourceId,
-			destinationId,
-			ContractPartySource,
-			ContractPartyDestination,
-		)
+		completedAt = queueContractExtenderPublication(batch, contractId, sourceId, destinationId, shardDeadline)
 	})
+	requireContractPublicationDeadline(shardDeadline, completedAt)
 	server.AddTxCommitCount(tx, &contractOpenedCounter, 1)
 	providerWorkRetainReservationInTx(ctx, tx, contractId)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "create", expirationTime)

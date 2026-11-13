@@ -537,10 +537,15 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	if amount, ok := grantTransferEscrowByteCount(requested, granted); !ok || amount != granted {
 		return nil, nil, errors.New("selected Redis reservation does not cover the shrink floor")
 	}
-	if err := redisGrantSelectedCurrent(ctx, tx, selectedIds); err != nil {
+	grantDeadline := deadline
+	if companionId != nil {
+		// The origin's own refusal precedes the final shard deadline check.
+		grantDeadline = nil
+	}
+	if err := redisGrantSelectedCurrent(ctx, tx, selectedIds, grantDeadline); err != nil {
 		return nil, nil, err
 	}
-	if err := validateCompanionContractExpirationInTx(ctx, tx, companionId); err != nil {
+	if err := validateCompanionContractExpirationInTx(ctx, tx, companionId, deadline); err != nil {
 		return nil, nil, err
 	}
 	// Per-contract rows only. The compatibility triggers omit marked rows from
@@ -553,6 +558,7 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	// possibly committed contract. Existing reconciliation/lease recovery owns it.
 	admission.notePublication()
 	var expirationTime time.Time
+	var completedAt *time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, b := range selected {
 			batch.Queue(`INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count,redis_reserved) VALUES($1,$2,$3,true)`, admission.contractId, b.BalanceId, b.BalanceByteCount)
@@ -569,8 +575,9 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 			// usage origin (subscription_network_escrow.go)
 			contractUsageOriginInsertArg(ctx, sourceNetworkId, destinationNetworkId, companionId),
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
-		batch.Queue(contractExtenderInsertSql, admission.contractId, sourceId, destinationId, ContractPartySource, ContractPartyDestination)
+		completedAt = queueContractExtenderPublication(batch, admission.contractId, sourceId, destinationId, deadline)
 	})
+	requireContractPublicationDeadline(deadline, completedAt)
 	server.AddTxCommitCount(tx, &contractOpenedCounter, 1)
 	providerWorkRetainReservationInTx(ctx, tx, admission.contractId)
 	contractHoleEventInTx(ctx, tx, admission.contractId, sourceId, destinationId, "create", expirationTime)

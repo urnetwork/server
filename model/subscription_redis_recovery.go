@@ -361,14 +361,18 @@ func (self *redisContractAdmission) recoverRetainedPageWithPublication(page cont
 	// Discovery changes no token amount. Remaining candidates keep their SQL
 	// fence around every custody check and exact release/publication below.
 	type retainedCandidate struct {
-		balanceId server.Id
-		candidate redisReservationRecoveryCandidate
+		balanceId    server.Id
+		candidate    redisReservationRecoveryCandidate
+		ackAttempted bool
+		acknowledged bool
 	}
 	retained := make([]retainedCandidate, 0, redisReservationRecoveryBatch)
 	// This request's attempts have joined their transactions, so its own
-	// pending tokens pass to recovery with this page, as tokens reserved
-	// inside the transaction always did. An attempt of the same request still
-	// in flight keeps them pending.
+	// exact confirmed tokens can be acknowledged while still pending. Enrolling
+	// them first would expose them to every concurrent creator's SQL recovery
+	// page during the acknowledgement round trip. Failed acknowledgements and
+	// all other tokens retain ordinary recovery. Each early attempt consumes
+	// one of the same bounded page slots, including an uncertain reply.
 	self.retirePending(func(inFlight bool) error {
 		own := self.contractId.String()
 		if inFlight {
@@ -378,12 +382,44 @@ func (self *redisContractAdmission) recoverRetainedPageWithPublication(page cont
 			if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
 				break
 			}
+			ownCollected := false
+			if !inFlight && publication != nil && publication.ContractId == self.contractId {
+				for _, balance := range publication.Balances {
+					if balance == nil || balance.BalanceId != balanceId || balance.BalanceByteCount <= 0 {
+						continue
+					}
+					// A changed or absent token keeps the previous discovery and
+					// custody path. The script rechecks this amount atomically, so
+					// a debit between this read and acknowledgement cannot be lost.
+					var amount string
+					err := server.RedisWithDeadline(page, func(client server.RedisClient) error {
+						var err error
+						amount, err = client.HGet(page, redisContractReservationKeys(balanceId)[1], own).Result()
+						return err
+					}, server.OptRedisNoPreflight(), server.OptRedisKeepLateReplies())
+					if err == nil && amount == strconv.FormatInt(balance.BalanceByteCount, 10) {
+						_, ackErr := redisContractReservation(page, "published", balanceId, self.contractId, 0, balance.BalanceByteCount, redisContractReservationLease,
+							server.OptRedisKeepLateReplies())
+						retained = append(retained, retainedCandidate{balanceId: balanceId,
+							candidate:    redisReservationRecoveryCandidate{contractId: self.contractId, amount: balance.BalanceByteCount},
+							ackAttempted: true, acknowledged: ackErr == nil})
+						ownCollected = true
+					}
+					break
+				}
+			}
+			if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
+				break
+			}
 			candidates, err := redisReservationRecoveryPage(page, balanceId, own)
 			if err != nil {
 				redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
 				continue
 			}
 			for _, candidate := range candidates {
+				if ownCollected && candidate.contractId == self.contractId {
+					continue
+				}
 				if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
 					break
 				}
@@ -405,8 +441,8 @@ func (self *redisContractAdmission) recoverRetainedPageWithPublication(page cont
 			pending = append(pending, retained[index:]...)
 			break
 		}
-		acknowledged := false
-		if publication != nil && publication.ContractId == self.contractId && item.candidate.contractId == self.contractId {
+		acknowledged := item.acknowledged
+		if !item.ackAttempted && publication != nil && publication.ContractId == self.contractId && item.candidate.contractId == self.contractId {
 			for _, balance := range publication.Balances {
 				if balance != nil && balance.BalanceId == item.balanceId && balance.BalanceByteCount == item.candidate.amount {
 					_, err := redisContractReservation(page, "published", item.balanceId, item.candidate.contractId, 0, item.candidate.amount, redisContractReservationLease,

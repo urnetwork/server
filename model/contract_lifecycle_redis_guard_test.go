@@ -121,13 +121,11 @@ func TestRedisContractClockGuardRejectsBypassedLocksAndErrors(t *testing.T) {
 		"application_clock":    strings.Replace(source, "clock_timestamp() AT TIME ZONE 'UTC'", "now()", 1),
 		"early_write":          strings.Replace(source, lock, "tx.Exec(ctx,`INSERT INTO transfer_contract VALUES(clock_timestamp() AT TIME ZONE 'UTC')`)\n"+lock, 1),
 	} {
-		t.Run(name, func(t *testing.T) {
-			if mutant == source {
-				t.Fatal("mutation missed boundary")
-			}
-			if contractLifecycleRedisWriterOrder(mutant) == nil {
-				t.Fatal("unsafe writer accepted")
-			}
-		})
+		if mutant == source {
+			t.Fatalf("%s: mutation missed boundary", name)
+		}
+		if contractLifecycleRedisWriterOrder(mutant) == nil {
+			t.Errorf("%s: unsafe writer accepted", name)
+		}
 	}
 }
