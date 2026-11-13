@@ -78,6 +78,28 @@ var defaultAppleNotificationVerifier = sync.OnceValue(func() *appleNotificationV
 	}
 })
 
+// The verifier apple.yml builds. Replaceable only by tests: the default
+// panics, once and for good, when apple.yml lacks the notification config.
+var appleNotificationVerifierSource = func() *appleNotificationVerifier {
+	return defaultAppleNotificationVerifier()
+}
+
+// A JWS of a notification that does not verify against the pinned Apple roots
+// (its signature, its chain, or its age).
+type appleSignatureError struct {
+	err error
+}
+
+// The verifier's text, unchanged.
+func (self *appleSignatureError) Error() string {
+	return self.err.Error()
+}
+
+// The verifier's error.
+func (self *appleSignatureError) Unwrap() error {
+	return self.err
+}
+
 func newAppleNotificationVerifier(
 	config *appleNotificationConfig,
 	rootCertificates []*x509.Certificate,
@@ -97,7 +119,7 @@ func (self *appleNotificationVerifier) verifyNotification(
 ) (*controller.AppleNotificationDecodedPayload, error) {
 	outerClaims, err := self.verifyJws(signedPayload, true)
 	if err != nil {
-		return nil, fmt.Errorf("verify notification JWS: %w", err)
+		return nil, fmt.Errorf("verify notification JWS: %w", &appleSignatureError{err: err})
 	}
 
 	notificationBytes, err := json.Marshal(outerClaims)
@@ -136,7 +158,7 @@ func (self *appleNotificationVerifier) verifyNotification(
 	if signedTransactionInfo != "" {
 		notification.TransactionInfo, err = self.verifyJws(signedTransactionInfo, false)
 		if err != nil {
-			return nil, fmt.Errorf("verify signed transaction info: %w", err)
+			return nil, fmt.Errorf("verify signed transaction info: %w", &appleSignatureError{err: err})
 		}
 		if err := self.verifyNestedIdentity(notification.TransactionInfo, bundleId, environment); err != nil {
 			return nil, fmt.Errorf("transaction identity: %w", err)
@@ -145,7 +167,7 @@ func (self *appleNotificationVerifier) verifyNotification(
 	if signedRenewalInfo != "" {
 		notification.RenewalInfo, err = self.verifyJws(signedRenewalInfo, false)
 		if err != nil {
-			return nil, fmt.Errorf("verify signed renewal info: %w", err)
+			return nil, fmt.Errorf("verify signed renewal info: %w", &appleSignatureError{err: err})
 		}
 		if err := self.verifyNestedIdentity(notification.RenewalInfo, bundleId, environment); err != nil {
 			return nil, fmt.Errorf("renewal identity: %w", err)

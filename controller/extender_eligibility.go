@@ -26,19 +26,19 @@ import (
 // list that does not parse is an error, never a dropped id.
 type stExtenderOwnNetworks struct {
 	// the gated, durable fleet (extender.yml directory.durable_network_ids)
-	DurableNetworkIds map[server.Id]bool
+	durableNetworkIds map[server.Id]bool
 	// the networks the operator declares it controls, in st.yml
 	// extender_pool.declared_network_ids and in ctf.yml census.own_network_ids
 	// alike
-	DeclaredNetworkIds map[server.Id]bool
+	declaredNetworkIds map[server.Id]bool
 	// the networks that host one of its canary extenders
-	CanaryNetworkIds map[server.Id]bool
+	canaryNetworkIds map[server.Id]bool
 }
 
 // Every network of the three lists.
-func (self *stExtenderOwnNetworks) AllNetworkIds() map[server.Id]bool {
+func (self *stExtenderOwnNetworks) allNetworkIds() map[server.Id]bool {
 	allNetworkIds := map[server.Id]bool{}
-	for _, networkIds := range []map[server.Id]bool{self.DurableNetworkIds, self.DeclaredNetworkIds, self.CanaryNetworkIds} {
+	for _, networkIds := range []map[server.Id]bool{self.durableNetworkIds, self.declaredNetworkIds, self.canaryNetworkIds} {
 		maps.Copy(allNetworkIds, networkIds)
 	}
 	return allNetworkIds
@@ -54,9 +54,9 @@ var stExtenderCanaryNetworkIdsRead = model.GetExtenderCanaryNetworkIds
 // be read.
 func readStExtenderOwnNetworks(ctx context.Context, cfg *StConfig) (*stExtenderOwnNetworks, error) {
 	ownNetworks := &stExtenderOwnNetworks{
-		DurableNetworkIds:  map[server.Id]bool{},
-		DeclaredNetworkIds: map[server.Id]bool{},
-		CanaryNetworkIds:   map[server.Id]bool{},
+		durableNetworkIds:  map[server.Id]bool{},
+		declaredNetworkIds: map[server.Id]bool{},
+		canaryNetworkIds:   map[server.Id]bool{},
 	}
 	parse := func(list string, networkIdStrs []string, networkIds map[server.Id]bool) error {
 		for _, networkIdStr := range networkIdStrs {
@@ -75,21 +75,21 @@ func readStExtenderOwnNetworks(ctx context.Context, cfg *StConfig) (*stExtenderO
 		if !errors.As(err, &configErr) || configErr.message != "the extender network is not configured" {
 			return nil, fmt.Errorf("extender.yml cannot be read for its durable_network_ids: %s", err)
 		}
-	} else if err := parse("extender.yml directory.durable_network_ids", extenderConfig.Directory.DurableNetworkIds, ownNetworks.DurableNetworkIds); err != nil {
+	} else if err := parse("extender.yml directory.durable_network_ids", extenderConfig.Directory.DurableNetworkIds, ownNetworks.durableNetworkIds); err != nil {
 		return nil, err
 	}
 	pool, err := stExtenderPoolSettings(cfg)
 	if err != nil {
 		return nil, err
 	}
-	maps.Copy(ownNetworks.DeclaredNetworkIds, pool.declared)
+	maps.Copy(ownNetworks.declaredNetworkIds, pool.declaredNetworkIds)
 	// read whether or not capture the flag's census is on, so the operator's
 	// own networks are one list in both pools
-	if err := parse("ctf.yml census.own_network_ids", model.CtfDataSettings().Census.OwnNetworkIds, ownNetworks.DeclaredNetworkIds); err != nil {
+	if err := parse("ctf.yml census.own_network_ids", model.CtfDataSettings().Census.OwnNetworkIds, ownNetworks.declaredNetworkIds); err != nil {
 		return nil, err
 	}
 	for _, networkId := range stExtenderCanaryNetworkIdsRead(ctx) {
-		ownNetworks.CanaryNetworkIds[networkId] = true
+		ownNetworks.canaryNetworkIds[networkId] = true
 	}
 	return ownNetworks, nil
 }
@@ -112,9 +112,9 @@ func stExtenderEligibilityRules(ctx context.Context, cfg *StConfig, client StCli
 	settings := VerifySettings()
 	rules := &model.ExtenderEligibilityRules{
 		Unit:               func(ip netip.Addr) [32]byte { return model.VerifyEgressIpHashWithSettings(ip, settings) },
-		DurableNetworkIds:  ownNetworks.DurableNetworkIds,
-		DeclaredNetworkIds: ownNetworks.DeclaredNetworkIds,
-		CanaryNetworkIds:   ownNetworks.CanaryNetworkIds,
+		DurableNetworkIds:  ownNetworks.durableNetworkIds,
+		DeclaredNetworkIds: ownNetworks.declaredNetworkIds,
+		CanaryNetworkIds:   ownNetworks.canaryNetworkIds,
 		ClientIdColdkeys:   map[server.Id][32]byte{},
 		HeadBoundClientIds: map[server.Id]bool{},
 	}

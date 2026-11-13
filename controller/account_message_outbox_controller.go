@@ -173,8 +173,6 @@ type accountMessage struct {
 	networkId *server.Id
 	userAuth  string
 	template  Template
-	// a held message waits for its writer to release it
-	held bool
 }
 
 // The model's arguments for the message. The template must go through the
@@ -194,7 +192,6 @@ func (self *accountMessage) args() *model.AccountMessageArgs {
 		UserAuth:     self.userAuth,
 		TemplateName: templateName,
 		TemplateJson: string(templateJson),
-		Held:         self.held,
 	}
 }
 
@@ -470,18 +467,12 @@ func scheduleDeliverAccountMessagesAt(clientSession *session.ClientSession, tx s
 	)
 }
 
-// Releases the missing-wallet notices a stopped payout run left held, delivers
-// the due account messages, then removes finished ones past their retention.
+// Delivers the due account messages, then removes finished ones past their
+// retention.
 func DeliverAccountMessages(
 	_ *DeliverAccountMessagesArgs,
 	clientSession *session.ClientSession,
 ) (*DeliverAccountMessagesResult, error) {
-	// a payout run that stopped before its release leaves its notices held
-	releaseMissingWalletNotices(
-		clientSession.Ctx,
-		server.NowUtc().Add(-missingWalletNoticeHoldTimeout),
-		configuredMissingWalletNoticeMinPayout,
-	)
 	delivery := newAccountMessageDelivery(
 		clientSession.Ctx,
 		GetAWSMessageSender(),

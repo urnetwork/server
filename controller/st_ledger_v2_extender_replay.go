@@ -22,7 +22,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// StLedgerV2ExtenderReplayReport is an offline replay's result.
+// An offline replay's result.
 type StLedgerV2ExtenderReplayReport struct {
 	Epoch uint64 `json:"epoch"`
 	// the recorded rows, and the rows under the amendment
@@ -41,20 +41,20 @@ type StLedgerV2ExtenderReplayReport struct {
 	MeasurementBytes     uint64 `json:"measurement_bytes"`
 	MeasurementContracts uint64 `json:"measurement_contracts"`
 	PooledBytes          uint64 `json:"pooled_bytes"`
-	// PooledOutsideRows are pooled shares of clients that have no row either
-	// way, outside a signed roster's provider universe.
+	// pooled shares of clients that have no row either way, outside a signed
+	// roster's provider universe.
 	PooledOutsideRows uint64 `json:"pooled_outside_rows"`
 	PooledClients     int    `json:"pooled_clients"`
 	PlatformEndpoints int    `json:"platform_endpoints"`
-	// Mismatches lists every client whose rows do not differ by exactly its
-	// pooled shares, or whose coldkey or head flag moved.
+	// every client whose rows do not differ by exactly its pooled shares, or whose
+	// coldkey or head flag moved.
 	Mismatches []StLedgerV2ExtenderReplayMismatch `json:"mismatches"`
-	// Exact holds when there are no mismatches and the recorded rows exceed the
+	// true when there are no mismatches and the recorded rows exceed the
 	// amended ones by exactly the pooled shares inside them.
 	Exact bool `json:"exact"`
 }
 
-// StLedgerV2ExtenderReplayMismatch is one client the replay cannot reconcile.
+// One client the replay cannot reconcile.
 type StLedgerV2ExtenderReplayMismatch struct {
 	ClientId      string `json:"client_id"`
 	RecordedBytes uint64 `json:"recorded_bytes"`
@@ -63,10 +63,10 @@ type StLedgerV2ExtenderReplayMismatch struct {
 	Reason        string `json:"reason"`
 }
 
-// StLedgerV2ExtenderReplay replays a recorded epoch under the amendment, from
-// the epoch itself, with the platform endpoints registered now and the extender
-// pool's configured networks. It is refused for an epoch with no recorded rows,
-// one declared unrecoverable and one already built with an extender component.
+// Replays a recorded epoch under the amendment, from the epoch itself, with the
+// platform endpoints registered now and the extender pool's configured
+// networks. It is refused for an epoch with no recorded rows, one declared
+// unrecoverable and one already built with an extender component.
 func StLedgerV2ExtenderReplay(ctx context.Context, epoch uint64) (*StLedgerV2ExtenderReplayReport, error) {
 	cfg, _, err := stRequire()
 	if err != nil {
@@ -103,11 +103,11 @@ func StLedgerV2ExtenderReplay(ctx context.Context, epoch uint64) (*StLedgerV2Ext
 	return report, nil
 }
 
-// stExtenderReplayCompare reconciles an epoch's recorded rows with its rows
-// under the amendment and the epoch reader's pool: each client's recorded usage
-// must be its amended usage plus its pooled shares, with the same coldkey and
-// head flag, and a client with no row either way contributes its pooled shares
-// only to PooledOutsideRows.
+// Reconciles an epoch's recorded rows with its rows under the amendment and the
+// epoch reader's pool: each client's recorded usage must be its amended usage
+// plus its pooled shares, with the same coldkey and head flag, and a client
+// with no row either way contributes its pooled shares only to
+// PooledOutsideRows.
 func stExtenderReplayCompare(epoch uint64, recorded []protocol.LedgerUsageRow, amended []protocol.LedgerUsageRow, pool *model.StEpochExtenderPool) *StLedgerV2ExtenderReplayReport {
 	report := &StLedgerV2ExtenderReplayReport{
 		Epoch: epoch, RecordedRows: len(recorded), AmendedRows: len(amended),
@@ -115,40 +115,40 @@ func stExtenderReplayCompare(epoch uint64, recorded []protocol.LedgerUsageRow, a
 		ExtenderContracts: pool.Contracts, ExtenderPayers: pool.Payers,
 		UnfundedBytes: uint64(pool.UnfundedBytes), UnfundedContracts: pool.UnfundedContracts,
 		MeasurementBytes: uint64(pool.MeasurementBytes), MeasurementContracts: pool.MeasurementContracts,
-		PooledBytes: pool.PooledBytes(), PooledClients: len(pool.PooledByClient),
+		PooledBytes: pool.PooledBytes(), PooledClients: len(pool.ClientIdPooledBytes),
 		Mismatches: []StLedgerV2ExtenderReplayMismatch{},
 	}
 	byClient := func(rows []protocol.LedgerUsageRow, total *uint64) map[[16]byte]protocol.LedgerUsageRow {
-		out := make(map[[16]byte]protocol.LedgerUsageRow, len(rows))
+		clientIdRows := make(map[[16]byte]protocol.LedgerUsageRow, len(rows))
 		for _, row := range rows {
-			out[row.ClientID] = row
+			clientIdRows[row.ClientID] = row
 			*total += row.UsageBytes
 		}
-		return out
+		return clientIdRows
 	}
-	recordedBy := byClient(recorded, &report.RecordedBytes)
-	amendedBy := byClient(amended, &report.AmendedBytes)
-	clients := make([][16]byte, 0, len(recordedBy))
-	for clientId := range recordedBy {
-		clients = append(clients, clientId)
+	recordedClientIdRows := byClient(recorded, &report.RecordedBytes)
+	amendedClientIdRows := byClient(amended, &report.AmendedBytes)
+	clientIds := make([][16]byte, 0, len(recordedClientIdRows))
+	for clientId := range recordedClientIdRows {
+		clientIds = append(clientIds, clientId)
 	}
-	for clientId := range amendedBy {
-		if _, ok := recordedBy[clientId]; !ok {
-			clients = append(clients, clientId)
+	for clientId := range amendedClientIdRows {
+		if _, ok := recordedClientIdRows[clientId]; !ok {
+			clientIds = append(clientIds, clientId)
 		}
 	}
-	slices.SortFunc(clients, func(a, b [16]byte) int { return bytes.Compare(a[:], b[:]) })
+	slices.SortFunc(clientIds, func(a, b [16]byte) int { return bytes.Compare(a[:], b[:]) })
 	var pooledInRows uint64
-	for _, clientId := range clients {
-		before, after := recordedBy[clientId], amendedBy[clientId]
-		pooled := uint64(pool.PooledByClient[server.Id(clientId)])
+	for _, clientId := range clientIds {
+		before, after := recordedClientIdRows[clientId], amendedClientIdRows[clientId]
+		pooled := uint64(pool.ClientIdPooledBytes[server.Id(clientId)])
 		pooledInRows += pooled
 		mismatch := func(reason string) {
 			report.Mismatches = append(report.Mismatches, StLedgerV2ExtenderReplayMismatch{ClientId: server.Id(clientId).String(),
 				RecordedBytes: before.UsageBytes, AmendedBytes: after.UsageBytes, PooledBytes: pooled, Reason: reason})
 		}
-		_, hadRow := recordedBy[clientId]
-		_, hasRow := amendedBy[clientId]
+		_, hadRow := recordedClientIdRows[clientId]
+		_, hasRow := amendedClientIdRows[clientId]
 		switch {
 		case after.UsageBytes > before.UsageBytes || before.UsageBytes-after.UsageBytes != pooled:
 			mismatch(fmt.Sprintf("the recorded usage is not the amended usage plus the pooled shares (a change of %d bytes)", int64(before.UsageBytes)-int64(after.UsageBytes)))

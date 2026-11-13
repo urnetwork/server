@@ -63,7 +63,7 @@ func stExtenderExample() (recorded []protocol.LedgerUsageRow, amended []protocol
 		{ClientID: nowallet, UsageBytes: 1_000_000_000_000},
 	}
 	pool = &model.StEpochExtenderPool{IntraPlatform: 600_000_000_001, IntraNetwork: 400_000_000_000, Contracts: 7, Payers: 3,
-		PooledByClient: map[server.Id]model.ByteCount{server.Id(c): 400_000_000_000, server.Id(endpoint): 600_000_000_001}}
+		ClientIdPooledBytes: map[server.Id]model.ByteCount{server.Id(c): 400_000_000_000, server.Id(endpoint): 600_000_000_001}}
 	unit := func(n byte) [32]byte { return [32]byte{0xee, n} }
 	census = []ledger.CensusRow{
 		{ExtenderID: [16]byte{1}, ClientID: stExtenderClient(0x21), Coldkey: stExtenderColdkey('d'), Unit: unit(1), Family: ledger.UnitIPv4, Flags: ledger.CensusActive},
@@ -298,7 +298,7 @@ func TestStExtenderReplayOfTheWorkedExample(t *testing.T) {
 	// and a pooled client with no row either way, outside a roster's universe,
 	// is counted apart
 	outside := *pool
-	outside.PooledByClient = map[server.Id]model.ByteCount{server.Id(stExtenderClient(3)): 400_000_000_000, server.Id(stExtenderClient(5)): 600_000_000_001, server.Id(stExtenderClient(9)): 7}
+	outside.ClientIdPooledBytes = map[server.Id]model.ByteCount{server.Id(stExtenderClient(3)): 400_000_000_000, server.Id(stExtenderClient(5)): 600_000_000_001, server.Id(stExtenderClient(9)): 7}
 	outside.IntraNetwork += 7
 	if report := stExtenderReplayCompare(4, recorded, amended, &outside); !report.Exact || report.PooledOutsideRows != 7 {
 		t.Fatalf("replay %+v", report)

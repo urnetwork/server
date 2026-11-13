@@ -297,6 +297,12 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 // The ordinary Claim starts the submission clock. A cold round instead owns
 // one separate producer first; publication and the real first Claim are atomic.
 func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host HostSelfCheck) (*queuedJob, error) {
+	return self.claimWithPreparedRoundBaselineOwned(ctx, host, nil)
+}
+
+// A configured profile alone never resets idle liveness. Only a real reserved
+// producer transfers and joins the idle owner before its own heartbeat begins.
+func (self *Worker) claimWithPreparedRoundBaselineOwned(ctx context.Context, host HostSelfCheck, beforeProducer func() (HostSelfCheck, error)) (*queuedJob, error) {
 	if competitionDistributedEnabled(self.settings) {
 		// Qualification proves this runtime class, not that an earlier remote
 		// run has joined. Read physical custody before every fresh FIFO claim;
@@ -344,6 +350,13 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 		_ = store.ReleaseRoundBaselinePreparation(cleanupCtx, preparation)
 	}
 	defer cleanup()
+	if beforeProducer != nil {
+		var err error
+		host, err = beforeProducer()
+		if err != nil {
+			return nil, err
+		}
+	}
 	hold := func(stage string, cause error) (*queuedJob, error) {
 		holdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), policy.CleanupTimeout)
 		defer cancel()

@@ -182,7 +182,7 @@ type SnReconcileEvidence struct {
 // main, where two dry runs had not finished after 45 minutes and two hours.
 var snReconcileStuckSql = `WITH stuck AS MATERIALIZED (
 	SELECT p.* FROM account_payment p
-	WHERE NOT p.completed AND NOT ` + legacyProviderPaymentReplacedSql("p.payment_id") + ` AND (
+	WHERE NOT p.completed AND NOT ` + legacyProviderPaymentReplacedSql("p.payment_id") + ` AND NOT ` + usdcPayoutClosed("p") + ` AND (
 		(p.canceled AND (p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL)) OR
 		(NOT p.canceled AND p.circle_idempotency_key IS NOT NULL AND p.payment_record IS NULL AND p.tx_hash IS NULL
 		AND NOT EXISTS (SELECT 1 FROM audit_account_payment a WHERE a.event_id=p.circle_idempotency_key)))
@@ -225,8 +225,9 @@ var snReconcileStuckSql = `WITH stuck AS MATERIALIZED (
 // not, may have been POSTed, so that row is out of scope. So is an original
 // that the legacy correction (account_payment_legacy_correction.go) replaced
 // (RC-22): it stays canceled with its key, and its replacement carries the
-// obligation. A stuck row without a network cannot be attributed to later
-// rows; the census refuses it.
+// obligation. So is a row the USDC close-out closed (account_payment_usdc_close.go):
+// another transfer paid its obligation, or it was forfeited. A stuck row
+// without a network cannot be attributed to later rows; the census refuses it.
 func GetSnReconcileStuckRows(ctx context.Context) (rows []*SnReconcileRow, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, returnErr = []*SnReconcileRow{}, nil

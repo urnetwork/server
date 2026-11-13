@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -673,6 +674,33 @@ type ProviderEgressHealthCounts struct {
 	// kept every provider under the ratio, and a failing country site would
 	// take providers whose general outcomes pass out of Online (D4).
 	General *ProviderEgressHealthCounts
+	// The failed runs (ok_count 0) whose later legs judged the provider's
+	// (failed_later_legs non-zero) are all IPv6 legs (mask & 1 = 0), all
+	// HTTP/3 legs (mask & 2 = 0), or any: the runs dropping IPv6, UDP or
+	// both forgives (FP2-PROTOCOL.md §3.2, §4.2). The general half holds its
+	// own.
+	ForgivenIpv4 int
+	ForgivenTcp  int
+	ForgivenBoth int
+	// Runs with negative evidence (§3.3): an IPv6 HTTPS leg judged the
+	// provider's (mask & 2), an HTTP/3 leg (mask & 5), any IPv6 leg
+	// (mask & 6). NegativeIpv6 is the count the provider status tells for
+	// a dropped IPv6 (§5.5); the whole window only.
+	NegativeIp   int
+	NegativeUdp  int
+	NegativeIpv6 int
+	// The newest positive and negative post-quantum outcomes in the window
+	// (§12.3), nil for none; the whole window only.
+	PostQuantumPositiveAt *time.Time
+	PostQuantumNegativeAt *time.Time
+}
+
+// Whether the newest post-quantum outcome in the window is positive
+// (FP2-PROTOCOL.md §12.4): a positive outcome later than any negative one. No
+// outcome is not positive (D12.2).
+func (self ProviderEgressHealthCounts) postQuantumPositive() bool {
+	return self.PostQuantumPositiveAt != nil &&
+		(self.PostQuantumNegativeAt == nil || self.PostQuantumNegativeAt.Before(*self.PostQuantumPositiveAt))
 }
 
 // The tally the Online rule, its URL ratio and its country guard decide by:
@@ -696,7 +724,7 @@ func (self ProviderEgressHealthCounts) onlineCounts() ProviderEgressHealthCounts
 // catalog's outcomes from the rest (ProviderEgressHealthCounts.General).
 func providerEgressHealthWindowSql() string {
 	return `
-	SELECT client_id, measured_at, ok_count, total_count, class_results, url_source
+	SELECT client_id, measured_at, ok_count, total_count, class_results, url_source, failed_later_legs, pq_outcome
 	FROM provider_egress_health_history
 	WHERE measured_at > $1 AND measured_at <= $2 AND ` + providerEgressHealthWindowRowsSql("") + `
 `
@@ -741,14 +769,44 @@ func providerOnlineUrlEvidenceSql(alias string) string {
 	return providerEgressHealthWindowRowsSql(alias) + " AND " + providerOnlineUrlSourceSql(alias)
 }
 
+// The pq_outcome values of a run the aggregate reads (FP2-PROTOCOL.md
+// §12.3), the ingest's own; 0 is unmeasured.
+const (
+	providerEgressPqOutcomeSqlPositive = egresshealth.UrlProbePqOutcomePositive
+	providerEgressPqOutcomeSqlNegative = egresshealth.UrlProbePqOutcomeNegative
+)
+
 // The window's aggregate per provider: the newest and oldest outcome, the
 // successes and outcomes, and the same over the general catalog's outcomes
-// alone, which getProviderEgressHealthCountsSnapshot reads.
+// alone, which getProviderEgressHealthCountsSnapshot reads; then the runs
+// each capability drop forgives and the negative evidence, overall and for
+// the general half, and the newest post-quantum outcomes (FP2-PROTOCOL.md
+// §4.2, §12.3). Every filter is an integer test, so the query stays
+// jsonb-free. A general filter puts the source last, so the general half's
+// four tallies stay the only filters on the source alone.
 func providerEgressHealthCountsSql() string {
 	general := providerOnlineUrlSourceSql("")
+	failed := "ok_count = 0 AND failed_later_legs <> 0"
+	forgivenIpv4 := fmt.Sprintf("%s AND failed_later_legs & %d = 0", failed, ProviderEgressFailedLaterLegIpv4Udp)
+	forgivenTcp := fmt.Sprintf("%s AND failed_later_legs & %d = 0", failed, ProviderEgressFailedLaterLegIpv6Tcp)
+	forgivenBoth := failed
+	negativeIp := fmt.Sprintf("failed_later_legs & %d <> 0", ProviderEgressFailedLaterLegIpv6Tcp)
+	negativeUdp := fmt.Sprintf("failed_later_legs & %d <> 0", ProviderEgressFailedLaterLegIpv4Udp|ProviderEgressFailedLaterLegIpv6Udp)
+	negativeIpv6 := fmt.Sprintf("failed_later_legs & %d <> 0", ProviderEgressFailedLaterLegIpv6Tcp|ProviderEgressFailedLaterLegIpv6Udp)
+	capabilityCounts := []string{forgivenIpv4, forgivenTcp, forgivenBoth, negativeIp, negativeUdp}
+	countSql := ""
+	for _, condition := range append(slices.Clone(capabilityCounts), negativeIpv6) {
+		countSql += `
+			COUNT(*) FILTER (WHERE ` + condition + `),`
+	}
+	for _, condition := range capabilityCounts {
+		countSql += `
+			COUNT(*) FILTER (WHERE ` + condition + ` AND ` + general + `),`
+	}
 	return `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count),
 			MAX(measured_at) FILTER (WHERE ` + general + `), MIN(measured_at) FILTER (WHERE ` + general + `),
-			COALESCE(SUM(ok_count) FILTER (WHERE ` + general + `), 0), COALESCE(SUM(total_count) FILTER (WHERE ` + general + `), 0)
+			COALESCE(SUM(ok_count) FILTER (WHERE ` + general + `), 0), COALESCE(SUM(total_count) FILTER (WHERE ` + general + `), 0),` + countSql + fmt.Sprintf(`
+			MAX(measured_at) FILTER (WHERE pq_outcome = %d), MAX(measured_at) FILTER (WHERE pq_outcome = %d)`, providerEgressPqOutcomeSqlPositive, providerEgressPqOutcomeSqlNegative) + `
 			FROM (` + providerEgressHealthWindowSql() + `) AS evidence`
 }
 
@@ -792,6 +850,7 @@ func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []serv
 				var counts ProviderEgressHealthCounts
 				var generalMeasuredAt, generalFirstMeasuredAt *time.Time
 				var generalOkCount, generalTotal int
+				general := &ProviderEgressHealthCounts{}
 				server.Raise(result.Scan(
 					&clientId,
 					&counts.MeasuredAt,
@@ -802,9 +861,22 @@ func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []serv
 					&generalFirstMeasuredAt,
 					&generalOkCount,
 					&generalTotal,
+					&counts.ForgivenIpv4,
+					&counts.ForgivenTcp,
+					&counts.ForgivenBoth,
+					&counts.NegativeIp,
+					&counts.NegativeUdp,
+					&counts.NegativeIpv6,
+					&general.ForgivenIpv4,
+					&general.ForgivenTcp,
+					&general.ForgivenBoth,
+					&general.NegativeIp,
+					&general.NegativeUdp,
+					&counts.PostQuantumPositiveAt,
+					&counts.PostQuantumNegativeAt,
 				))
 				if generalTotal != counts.Total {
-					general := &ProviderEgressHealthCounts{OKCount: generalOkCount, Total: generalTotal}
+					general.OKCount, general.Total = generalOkCount, generalTotal
 					if generalMeasuredAt != nil && generalFirstMeasuredAt != nil {
 						general.MeasuredAt, general.FirstMeasuredAt = *generalMeasuredAt, *generalFirstMeasuredAt
 					}
