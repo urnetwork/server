@@ -225,9 +225,9 @@ func TestServiceContractDecisionReadsOnce(t *testing.T) {
 
 		reads := 0
 		read := getSocketServicePair
-		getSocketServicePair = func(ctx context.Context, listenerClientId connect.Id, dialerClientId connect.Id) (uint64, bool, error) {
+		getSocketServicePair = func(ctx context.Context, pairClientId connect.Id, edgeClientId connect.Id) (uint64, bool, error) {
 			reads += 1
-			return read(ctx, listenerClientId, dialerClientId)
+			return read(ctx, pairClientId, edgeClientId)
 		}
 		defer func() {
 			getSocketServicePair = read

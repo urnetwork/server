@@ -1366,16 +1366,20 @@ var serviceContractSettings = model.DefaultServiceContractSettings()
 
 // §6.10.1 items 1-3 for a contract from clientId to destinationId (C9, D-PROTO-9, D-PROTO-15, I-12): when exactly one
 // end is a platform client of config's urnetwork-edge network, the contract is Service only while field
-// <edge client> of {svc_<other client>} lives, the pair an edge's Find records with its grant expiry, read once,
-// whichever end sends, so both directions read the same field. A missing, expired, malformed or unavailable pair
-// refuses (connect/CODESTYLE.md, packet flow), and so do two edge ends, which no Find pairs. An edge end means
-// Service or nothing: never Network, which grants LAN and loopback egress, and never Public, since edges run
-// relay-only toward sidecars (D-PROTO-6). The ends' networks come from the relationship's one query, so the decision
-// adds no PostgreSQL query and one Redis read; the control id's contracts are left as they are.
+// <edge client> of {svc_<other client>} lives, the pair a Find records with its grant expiry, read once, whichever
+// end sends, so both directions read the same field. A missing, expired, malformed or unavailable pair refuses
+// (connect/CODESTYLE.md, packet flow), and so do two edge ends, which no Find pairs. An edge end means Service or
+// nothing: never Network, which grants LAN and loopback egress, and never Public, since edges run relay-only toward
+// sidecars (D-PROTO-6). The ends' networks come from the relationship's one query, so the decision adds no PostgreSQL
+// query and one Redis read; the control id's contracts are left as they are.
 //
-// The pair is keyed by the end that is not the edge, as tls/ and smtp/ Finds write it, an edge dialing a sidecar's
-// listener. A ur/ Find (SOCK-M9-01) has an edge listen and a sidecar dial, which keys {svc_<edge>}: no contract this
-// reads it for issues, so a ur/ stream is refused until question proto-m5-04-ur-pair-key is answered.
+// Every pair is keyed by its end that is not the edge, whichever end listens (QD-728). A tls/ or smtp/ Find, an edge
+// dialing a sidecar's listener, writes field <edge dialer> of {svc_<sidecar listener>}; a ur/ Find (SOCK-M9-01,
+// D-SOCK-11), a sidecar dialing an edge's ur/<service>, writes field <edge listener> of {svc_<sidecar dialer>}. So the
+// decision needs no namespace, which a contract does not carry, and a ur/ stream gets Service both ways while its pair
+// lives: the service's grant, refreshed per Find, never past the sidecar's removal. The contract is still signed under
+// the destination's own Service key, which the secret read after this requires, so a sidecar that advertises no
+// Service gets no edge's reply (§6.10.1 item 2).
 func decideServiceContract(
 	ctx context.Context,
 	clientId server.Id,
@@ -1393,20 +1397,21 @@ func decideServiceContract(
 	}
 	sourceEdge := details.SourceNetworkId != nil && *details.SourceNetworkId == edgeNetworkId
 	destinationEdge := details.DestinationNetworkId != nil && *details.DestinationNetworkId == edgeNetworkId
-	var listenerId, dialerId server.Id
+	// the pair's key is the end that is not the edge, and its field the edge, in either direction
+	var pairClientId, edgeClientId server.Id
 	switch {
 	case sourceEdge && destinationEdge:
 		return contractServiceDecision{outcome: contractServiceRefuse, cause: "service_no_pair"}
 	case sourceEdge:
-		listenerId, dialerId = destinationId, clientId
+		pairClientId, edgeClientId = destinationId, clientId
 	case destinationEdge:
-		listenerId, dialerId = clientId, destinationId
+		pairClientId, edgeClientId = clientId, destinationId
 	default:
 		return contractServiceDecision{outcome: contractServiceNone}
 	}
 	pairCtx, cancel := context.WithTimeout(ctx, serviceContractSettings.PairReadTimeout)
 	defer cancel()
-	grantExpireMillis, found, err := getSocketServicePair(pairCtx, connect.Id(listenerId), connect.Id(dialerId))
+	grantExpireMillis, found, err := getSocketServicePair(pairCtx, connect.Id(pairClientId), connect.Id(edgeClientId))
 	switch {
 	case err != nil:
 		return contractServiceDecision{outcome: contractServiceRefuse, cause: "service_unavailable"}
