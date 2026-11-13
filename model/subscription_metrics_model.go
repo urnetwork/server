@@ -306,7 +306,7 @@ var subscriptionMetricsAccountQuery = `
 /* subscription-metrics-accounts */
 WITH tracked_renewal AS MATERIALIZED (
     SELECT renewal.network_id, renewal.market, renewal.start_time, renewal.end_time,
-           ` + subscriptionMetricsPaidEndSql("renewal") + ` AS paid_end_time
+           renewal.paid_end_time, renewal.net_revenue_nano_cents
     FROM subscription_renewal renewal
     WHERE renewal.subscription_type = 'supporter'
       AND renewal.market IN (` + subscriptionMetricsStoresSql + `)
@@ -333,10 +333,11 @@ WITH tracked_renewal AS MATERIALIZED (
     SELECT DISTINCT network_id
     FROM active_by_store
 ), paid_now_by_store AS (
-    SELECT network_id, market, bool_or($1 < paid_end_time) AS paid_now
-    FROM tracked_renewal
-    WHERE start_time <= $1 AND $1 < end_time
-    GROUP BY network_id, market
+    SELECT tracked.network_id, tracked.market,
+           bool_or($1 < ` + subscriptionMetricsPaidEndSql("tracked") + `) AS paid_now
+    FROM tracked_renewal tracked
+    WHERE tracked.start_time <= $1 AND $1 < tracked.end_time
+    GROUP BY tracked.network_id, tracked.market
 ), in_grace_by_store AS (
     SELECT network_id, market
     FROM paid_now_by_store
