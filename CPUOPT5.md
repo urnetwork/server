@@ -1205,7 +1205,7 @@ writes cost 0.011 backends; the Solana sweep, the uncredited-payment metric and
 the store notification flow under 0.001 together.
 
 **Ranked opportunities** (cores at the evening peak, which is now close to the
-daily mean; they overlap little):
+daily mean):
 
 | # | Change | Est. saving | Risk |
 |---|---|---|---|
@@ -1220,9 +1220,10 @@ daily mean; they overlap little):
 | 9 | JIT off for OLTP (CPUOPT4 #9) | 0.15–0.2 | low |
 | 10 | GetTransferStats and the health-window aggregate (CPUOPT4 #10) | 0.2–0.4 | low–medium |
 
-Together roughly 6–10 cores, 20–35% of edge-2's 29.5-core mean; #2, #3 and #5
-overlap in kernel time. #1's retirement option is an SN25 decision; #2, #3 and
-#4 need owner windows on the database path (#4's is planned as O2).
+Together roughly 8–13 cores while the shadow loop runs and 6–9 without it,
+against edge-2's 29.5-core mean; #2, #3 and #5 overlap in kernel time. #1's
+retirement option is an SN25 decision; #2, #3 and #4 need owner windows on the
+database path (#4's is planned as O2).
 
 ### 1. Method
 
@@ -1267,6 +1268,7 @@ Every query went through `support db query`: one statement at a time, READ
 ONLY, 30 s timeout, 0.8–5.9 s each including the tool's start. Two reads of
 pending_task by function name (`shadowcheck-1.json`, `shadowtask-1.json`) took
 4.2 and 5.9 s, probably scanning its 27.8 GiB heap; they were not repeated.
+The last activity sample took 9.5 s end to end and was the last query.
 Nothing else touched a large table. Nothing was refused.
 
 **Not captured:** EXPLAIN (the tool accepts only SELECT and WITH), so plans are
@@ -1467,52 +1469,47 @@ from autovacuum.
   routine. D42's 7475aa85f makes `work.Payout` a no-op, so the queued 11-15
   10:00Z row plans nothing. That avoids about 100–180 core-hours a week, or
   0.6–1.1 cores on the weekly mean.
-- **The SN25 shadow loop.** The application's longest transaction rose 300 s
-  every 5 minutes from 20:30Z, peaked at 1,729–1,795 s, dropped, and climbed
-  again: 12 cycles until 03:40Z. The gaps grew from 1–5 minutes to 20–30
-  minutes. `work.StLedgerV2UsageStep` was in flight at every sample from 21:20Z,
-  and `urnetwork_st_extender_pool_epoch` has no `shadow` phase. During the
-  loop, buffer hits ran 7.8M/s against 3.7M/s, and tuples returned 9.2M/s
-  against 4.3M/s.
-- **The 13th cycle, in this session.** One direct backend ran query_id
-  4027406781210946646, which is `stEpochAmendedUsageSql`
-  (model/st_extender_pool.go:190, called at :325-327 through
+- **The SN25 shadow loop.** The application's longest transaction climbed to
+  1,729–1,795 s and dropped 12 times between 20:30Z and 03:40Z, with gaps
+  growing from 1–5 minutes to 20–30. `work.StLedgerV2UsageStep` was in flight
+  at every sample from 21:20Z; `urnetwork_st_extender_pool_epoch` has no
+  `shadow` phase.
+- **The read.** query_id 4027406781210946646, `stEpochAmendedUsageSql`
+  (model/st_extender_pool.go:190), runs on one direct backend through
   `server.MaintenanceDb`, `WithoutTransactionTimeout` and a REPEATABLE READ,
-  read-only transaction). It started at 04:18:43Z and was on CPU with no wait
-  event at 470, 1,310, 1,421 and 1,502 s, its xmin 2.2M → 6.8M transactions
-  old. By 04:48:57Z it was gone: no pgss row (it never completed),
-  st_ledger_v2_extender_shadow empty.
+  read-only transaction (:325-327). The 13th ran 04:18:43–04:48:42Z, on CPU,
+  its xmin 2.2M → 6.8M transactions old; it left no pgss row (a cancelled
+  statement is never recorded) and no shadow report. The 14th started on
+  schedule at 05:20:52Z; at 253 s its xmin was 1.17M old and growing 4,750 a
+  second, and dead rows in transfer_debit_journal grew 1,350/s
+  (`shadowrun-{1,2}.json`). PG 18's `pg_stat_get_backend_io` does not move
+  while a statement runs, so its own block counts are not visible before it
+  ends.
 - **What one read costs edge-2** (`shadow-cycles.txt`, `cycle13-5m.txt`). Busy
-  climbs from about 26 cores to 35–44 by the end of each read and falls back
-  within 5 minutes of the cancel. Over a 30-minute read that is +5 to +10 cores
-  overnight and +14 this morning, when iowait rose from 2.7 to 9 cores. The
-  read's own backend is about 1 core; most of the rest is the pin tax below.
-  Its own counters land at the cancel: tuples fetched jump by 3.6M/s for that
-  5-minute step, about 1.1B tuples per read *(inferred)*. pgss cannot show the
-  statement's rows or blocks per call, because a cancelled statement is never
-  recorded.
-- **Why it does not stop** (the pending row at 04:49Z, `shadowtask-1.json`):
+  climbs from about 26 cores to 35–44 by the cancel and falls back within 5
+  minutes: +5 to +10 cores on average over a read overnight, +14 this morning
+  (iowait 2.7 → 9 cores). The read's own backend is about 1 core; the rest is
+  the pin tax below and IO. Its counters land at the cancel: tuples fetched
+  jump by 3.6M/s for that 5-minute step, about 1.1B tuples per read
+  *(inferred)*.
+- **Why it does not stop** (the pending row at 04:49Z, `shadowtask-1.json`:
   `kind` extender_shadow, `epoch` 4, `attempt` 1, `run_max_time_seconds` 1800,
-  `reschedule_error` Timeout, `reschedule_error_count` 13, next `run_at`
-  05:20:50Z. The 14th read started at 05:20:52Z and was waiting on
-  `DataFileRead` 53 s later, holding the cluster's oldest snapshot.
-  - The row was scheduled by d1ea65129 with the 30-minute `MaxTime`. D42's
-    `ShadowMaxTime` of 2 h (3939500bb; taskworker/work/st_ledger_v2_usage_work.go:42-45
+  `reschedule_error` Timeout ×13, `run_at` 05:20:50Z):
+  - d1ea65129 scheduled the row with the 30-minute `MaxTime`. D42's 2-h
+    `ShadowMaxTime` (3939500bb; taskworker/work/st_ledger_v2_usage_work.go:42-45
     at 978dcba02) applies only to rows the sync or the Post schedules, and the
     sync's `ScheduleTaskInTxIfAbsent` (:75) leaves an existing row alone.
-  - A timed-out attempt goes through the task framework's error reschedule
-    (task/task_completion.go:77-118). It keeps the same row with its bound and
-    arguments, backs off `RescheduleTimeout × 2^n` capped at about an hour
-    (task/task.go:200-213), and has no error limit. It never reaches the step's
-    Post, so `Attempt` stays 1 and `MaxAttempts` (100) never applies.
-  - `task.RaiseRunOnceMaxTimeInTx` (task/task.go:609) exists for exactly this
-    and is used only by the deposit step (taskworker/work/st_work.go:432).
+  - A timeout goes through the framework's error reschedule
+    (task/task_completion.go:77-118): the same row, bound and arguments, a
+    `RescheduleTimeout × 2^n` backoff capped near an hour (task/task.go:200-213),
+    no error limit, and no Post, so `Attempt` stays 1 and `MaxAttempts` (100)
+    never applies. `task.RaiseRunOnceMaxTimeInTx` (task/task.go:609) exists for
+    this case and only the deposit step uses it (taskworker/work/st_work.go:432).
   - A 7-day epoch's whole-window read takes 40–55 minutes at the code's own
-    measured 125–165k rows/s on about 400M contracts (model/st_provider_usage.go:88)
-    *(inferred)*, so no 30-minute attempt can finish.
-  - The backoff is now at its cap, 0.5–1.5 h after each failure, so the loop
-    reads for 30 minutes every 1–2 h *(inferred)*: about 2–5 cores on
-    average, without end.
+    125–165k rows/s on about 400M contracts (model/st_provider_usage.go:88)
+    *(inferred)*, so no 30-minute attempt can finish. With the backoff at its
+    cap the loop reads 30 minutes every 1–2 h *(inferred)*: about 2–5 cores
+    on average, without end.
 - **The pin tax.** Per-call costs of four statements, with the snapshot's age
   (`pintax.txt`):
 
@@ -1575,71 +1572,60 @@ listeners still have a backlog of 128, because the change needs restarts.
 #### #1 End the SN25 shadow loop, and keep epoch reads from pinning the primary
 
 - **Change**, in order:
-  - **(a) End the loop now (owner's choice of two).** Either the owner retires
-    epoch 4's shadow report, if §8.6.7 no longer needs it, and the chain's
-    pending row is cleared. Or the sync raises an existing row to the bound the
-    code declares: `task.RaiseRunOnceMaxTimeInTx` beside
-    `ScheduleTaskInTxIfAbsent` at taskworker/work/st_ledger_v2_usage_work.go:75,
-    as the deposit step does at taskworker/work/st_work.go:432 ("a chain an
-    earlier binary left pending lacks" this binary's run time). The second
-    applies the 2-h bound D42 already merged. CODESTYLE.md asks for exactly
-    that: a stale, earlier deadline must not reject a healthy operation before
-    its full budget. It does let one read hold its snapshot up to 2 h, so (c)
-    matters more after it. Check the other `...IfAbsent` chains whose
-    `MaxTime` changed for the same stale-row defect.
-  - **(b) Count a timed-out attempt.** Today the framework's error reschedule
-    bypasses the Post, which is the only place attempts are counted. A step
-    that times out should count toward the chain's `MaxAttempts`, so the chain
-    stops with a metric and a log line rather than re-reading the whole epoch
-    at every backoff (CODESTYLE.md: stop retrying definitive failures for
-    unchanged inputs). Any new limit is a field of
-    `StLedgerV2UsageStepSettings`. Retries after other errors stay as they are.
+  - **(a) End the loop now, one of two ways.** The owner retires epoch 4's
+    shadow report if §8.6.7 no longer needs it, and the pending row is cleared.
+    Or the sync raises an existing row to the declared bound with
+    `task.RaiseRunOnceMaxTimeInTx` beside `ScheduleTaskInTxIfAbsent`
+    (taskworker/work/st_ledger_v2_usage_work.go:75), as the deposit step does
+    for "a chain an earlier binary left pending" (taskworker/work/st_work.go:432).
+    That applies the 2-h bound D42 already merged, as CODESTYLE.md asks: a
+    stale, earlier deadline must not cut a healthy operation short. It lets
+    one read hold its snapshot up to 2 h, so (c) matters more after it. Check
+    the other `...IfAbsent` chains whose `MaxTime` changed for the same defect.
+  - **(b) Count a timed-out attempt.** The framework's error reschedule bypasses
+    the Post, the only place attempts are counted. A timeout should count
+    toward `MaxAttempts`, so the chain stops with a metric and a log line
+    instead of re-reading the epoch at every backoff (CODESTYLE.md: stop
+    retrying definitive failures for unchanged inputs). A new limit is a field
+    of `StLedgerV2UsageStepSettings`.
   - **(c) Shorten the snapshot.** Read the 7-day window in close-time slices,
-    each in its own short REPEATABLE READ transaction, with the progress
-    checkpointed so a failed slice does not restart the read (CODESTYLE.md:
-    checkpoint resumable progress). A terminal close time never changes and
-    each row has one, so the slices together see each row once *(inferred)*.
-    This changes the statement's one-snapshot reasoning, so its author must
-    review it. Alternatively, read edge-6's restored copy once it has replayed
-    past the epoch's close.
-- **Code** (978dcba02): taskworker/work/st_ledger_v2_usage_work.go:42-45 (100
-  attempts, 15 s, 30 minutes, 2 h), :75 (the sync) and :138 (the Post);
-  task/task_completion.go:77-118 (the error reschedule), task/task.go:200-213
-  (its backoff) and :609 (`RaiseRunOnceMaxTimeInTx`);
-  controller/st_ledger_v2_extender_shadow.go:172-174;
-  model/st_extender_pool.go:239 and :325-327 (one REPEATABLE READ snapshot on
-  the maintenance pool without a transaction timeout); controller/st_ledger_v2_rows.go:50
+    each in its own short REPEATABLE READ transaction, with progress
+    checkpointed so a failed slice does not restart the read (CODESTYLE.md). A
+    terminal close time never changes and each row has one, so the slices see
+    each row once *(inferred)*; the statement's author must review that. Or
+    read edge-6's restored copy once it has replayed past the epoch's close.
+- **Code** (978dcba02): taskworker/work/st_ledger_v2_usage_work.go:42-45, :75
+  and :138 (the Post); task/task_completion.go:77-118, task/task.go:200-213 and
+  :609; controller/st_ledger_v2_extender_shadow.go:172-174;
+  model/st_extender_pool.go:239 and :325-327; controller/st_ledger_v2_rows.go:50
   (the live root build, from epoch 8).
-- **Evidence (§2.5):** 13 timed-out reads of 30 minutes, nothing recorded; the
-  pending row's bound is still 1800 s with the attempt at 1. Each read lifts
-  edge-2 from about 26 cores to 35–44 by its end: +5 to +10 cores on average
-  per read overnight (2.7–5.1 core-h each, 27–49 core-h for 12), +14 in this
-  morning's read (about 7 core-h). Four hot statements cost 0.22 backends
-  without a pin and 1.74 twenty minutes into one; all statements, 6.71 against
-  8.68 backends.
+- **Evidence (§2.5):** 14 reads of 30 minutes since 11-12 20:30Z, 13 timed out
+  with nothing recorded and the 14th running; the row's bound is still 1800 s
+  with the attempt at 1. Each read lifts edge-2 by 5–10 cores on average
+  overnight (27–49 core-h for 12) and by 14 this morning (about 7 core-h). The
+  four pin-sensitive statements cost 0.22 backends without a pin and 1.74
+  twenty minutes into one.
 - **Saving:** (a) saves about 2–5 cores on average from now, for as long as the
-  loop would otherwise run *(inferred: 3–7 core-h per read, one read every 1–2
-  h)*. A read allowed to finish in 40–55 minutes costs perhaps 10–15 core-h,
-  once *(inferred: the pin tax keeps growing with the snapshot's age)*. (c)
-  removes most of that and of any later epoch read's pin tax, including the
-  weekly root builds from epoch 8.
-- **Effort and risk:** (a) and (b) are small and low risk. Each needs a
-  deterministic regression test: a pending row scheduled with the old bound is
-  raised at the next sync; a timed-out attempt advances `Attempt` and the chain
-  ends at the limit. (c) is medium: it touches the settlement statement's
+  loop would run *(inferred: 3–7 core-h per read, one read every 1–2 h)*. A
+  read allowed to finish in 40–55 minutes costs perhaps 10–15 core-h, once
+  *(inferred: the pin tax grows with the snapshot's age)*. (c) removes most of
+  that, and of the pin tax of later epoch reads such as the weekly root builds.
+- **Effort and risk:** (a) and (b) are small and low risk, each with a
+  deterministic regression test (a row scheduled with the old bound is raised
+  at the next sync; a timed-out attempt advances `Attempt` and the chain ends
+  at the limit). (c) is medium: it touches the settlement statement's
   determinism and needs its author and a replay check
   (controller/st_ledger_v2_extender_replay.go:97).
 - **Timing bounds:** retiring the shadow or counting timeouts moves no bound.
-  Raising the row to 2 h applies a bound the owner already merged (3939500bb)
-  and touches no user-facing timing. (c) moves no deadline.
-- **Verify:** `pg_stat_activity_max_tx_duration` for the application user stays
-  under about 5 minutes outside the weekly reads; the debit oldest-age query
-  stays near 3.5 ms; the pending usage-step row's `reschedule_error_count`
-  stops rising; a `shadow` phase in `urnetwork_st_extender_pool_epoch` if the
-  report is kept.
-- **Owner:** whether epoch 4's shadow report is still wanted (an SN25 decision).
-  For (c), the SN25 statement's author, and the owner if the edge-6 copy is
-  used.
+  Raising the row to 2 h applies a bound already merged (3939500bb) and
+  touches no user-facing timing. (c) moves no deadline.
+- **Verify:** the application's `pg_stat_activity_max_tx_duration` stays under
+  about 5 minutes outside the weekly reads; the debit oldest-age query stays
+  near 1 ms; the row's `reschedule_error_count` stops rising; a `shadow` phase
+  in `urnetwork_st_extender_pool_epoch` if the report is kept.
+- **Owner:** whether epoch 4's shadow report is still wanted (an SN25
+  decision); for (c), the statement's author, and the owner if the edge-6 copy
+  is used.
 
 #### #2 Remove the nginx stream hop (CPUOPT4 #2)
 
