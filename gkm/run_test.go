@@ -234,8 +234,8 @@ func TestHostReadyWithEverySeam(t *testing.T) {
 	}
 }
 
-// gkm's authorization state, which server has no implementation of yet, keeps the block not ready and says so, and
-// the engine still answers through its guard: a request with no token is refused, one with a token 503.
+// A host given no authorization state, which NewHost never builds itself, is not ready and says so, and the engine
+// still answers through its guard: a request with no token is refused, one with a token 503.
 func TestHostNotReadyWithoutTheAuthState(t *testing.T) {
 	gkmHost, fakeHost := newHostTestHost(t, nil, nil)
 	missing := gkmHost.Missing()

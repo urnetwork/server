@@ -2,7 +2,8 @@ package monitor
 
 // Pager notifier for the continuous watcher (§19.8, D-OPS-9, R-PHASE-12, owner
 // decision 143). Slack carries every alert; this notifier beside it wakes the
-// rota for §19.8's page classes only, at any hour.
+// rota for §19.8's page classes only: at any hour, or for the business row
+// once business hours open.
 //
 // Handle takes the executions Slack's Handle takes and applies the same
 // incident rule, observeIncidents, on its own state, since the pager must work
@@ -14,6 +15,16 @@ package monitor
 // page severity, whether raised there or promoted by PageSustain, and resolves
 // the page when it clears. A warn alert pages nothing, whatever its class, and
 // a SeverityPage alert of a class with no row stays on Slack.
+//
+// A row of business hours (QD-754) pages only while BusinessCalendar is open.
+// Raised outside them, its page is held here, never queued, and goes to the
+// sender at the first execution Handle takes once the calendar is open, from
+// any signal: the watcher hands one over at least as often as its fastest
+// signal runs. An incident that clears first drops its held page, so nobody
+// is paged for it. The resolve is still sent then, as for any page: the sink
+// ignores a key that is not open, and a page an earlier watcher opened under
+// the key in business hours closes. From the sender on, a business page is a
+// page like any other, with the same key, retry and resolve.
 //
 // A page carries only its class, the time, the environment, a key and the
 // row's fixed text, because it leaves the site (I-13). The key is a hash of the
@@ -30,7 +41,9 @@ package monitor
 //
 // State is process-local, so a restarted watcher re-raises each open incident
 // under the same key and the sink's dedup absorbs it, leaving the page and its
-// acknowledgment clock as they were. A page whose incident ended while no
+// acknowledgment clock as they were. A held page is state too: a watcher
+// restarted outside business hours holds its incident again until they open,
+// and Close logs how many it leaves held. A page whose incident ended while no
 // watcher ran stays open for a person to close. Two overlapping watchers both
 // page under one key, and either one's clear resolves the page.
 //
@@ -69,13 +82,16 @@ type PagerAlertNotifierSettings struct {
 	// Slack's ClearAfterCompleteRuns in the CLI. Non-positive takes
 	// ClearAfterCompleteRuns, which has Slack's default.
 	WarnClearRuns int
+	// when a business-hours row's page may go; nil reads abuse.yml's review
+	// hours (NewAbuseReviewPagerCalendar)
+	BusinessCalendar PagerBusinessCalendar
 	// one line per call, without a trailing newline
 	Logf func(format string, args ...any)
 	Now  func() time.Time
 }
 
 // The production limits. Logf writes to stderr, the monitor's diagnostic
-// stream.
+// stream. BusinessCalendar stays nil here and is filled with Logf in hand.
 func DefaultPagerAlertNotifierSettings() PagerAlertNotifierSettings {
 	return PagerAlertNotifierSettings{
 		ClearAfterCompleteRuns: 2,
@@ -104,6 +120,9 @@ func (self PagerAlertNotifierSettings) withDefaults() PagerAlertNotifierSettings
 	if self.Delivery.Logf == nil {
 		self.Delivery.Logf = self.Logf
 	}
+	if self.BusinessCalendar == nil {
+		self.BusinessCalendar = NewAbuseReviewPagerCalendar(self.Logf)
+	}
 	return self
 }
 
@@ -129,6 +148,10 @@ type PagerAlertNotifier struct {
 	stateLock    sync.Mutex
 	closed       bool
 	keyIncidents map[string]*slackIncident
+	// business-hours pages waiting for the calendar to open, by dedup key
+	keyHeldPages map[string]pager.Page
+	// their keys, oldest hold first
+	heldKeys []string
 }
 
 // Logs one line saying whether pages can reach the rota. Without a sink it
@@ -140,6 +163,7 @@ func NewPagerAlertNotifier(settings PagerAlertNotifierSettings) *PagerAlertNotif
 	notifier := &PagerAlertNotifier{
 		settings:     settings,
 		keyIncidents: map[string]*slackIncident{},
+		keyHeldPages: map[string]pager.Page{},
 	}
 	if settings.Sink == nil {
 		reason := firstNonempty(settings.DisabledReason, "no pager sink")
@@ -147,7 +171,7 @@ func NewPagerAlertNotifier(settings PagerAlertNotifierSettings) *PagerAlertNotif
 		notifier.reportFailing("The watcher cannot page: " + reason)
 		return notifier
 	}
-	settings.Logf("monitor: pager notifications enabled: one page per incident of §19.8's page classes")
+	settings.Logf("monitor: pager notifications enabled: one page per incident of §19.8's page classes, the business row's in business hours")
 	delivery := settings.Delivery
 	delivery.DeliveryFailing = notifier.deliveryFailing
 	notifier.sender = pager.NewRetrySink(settings.Sink, delivery)
@@ -170,20 +194,31 @@ func (self *PagerAlertNotifier) Handle(signal Signal, execution SignalExecution)
 	for _, transition := range observeIncidents(self.keyIncidents, self.settings.ClearAfterCompleteRuns, signal.Key(), execution, notAtStart) {
 		self.applyWithLock(now, transition)
 	}
+	// after the transitions, so an incident this execution cleared is dropped
+	// and not paged
+	self.releaseHeldWithLock(now)
 }
 
 // Stops taking executions and gives the sender until ctx ends to hand the sink
-// what it holds, retries included. Its log counts what it abandons: a later
-// watcher re-raises whatever is still active.
+// what it holds, retries included. Its log counts what it abandons, the pages
+// still held for business hours among them: a later watcher re-raises whatever
+// is still active.
 func (self *PagerAlertNotifier) Close(ctx context.Context) {
 	if self.sender == nil {
 		return
 	}
+	heldCount := 0
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		if !self.closed {
+			heldCount = len(self.heldKeys)
+		}
 		self.closed = true
 	}()
+	if 0 < heldCount {
+		self.settings.Logf("monitor: %d page(s) were still held for business hours at close", heldCount)
+	}
 	self.sender.Close(ctx)
 }
 
@@ -191,21 +226,73 @@ func (self *PagerAlertNotifier) Close(ctx context.Context) {
 // on the network, so the lock keeps an incident's events in order across
 // concurrent Handles. An error here is a closing sender or a page this file
 // built wrongly, and either way it must not pass unseen.
+//
+// A business-hours row's page is queued only while the calendar is open, and
+// held otherwise; a clear drops what is held before it queues the resolve.
 func (self *PagerAlertNotifier) applyWithLock(now time.Time, transition slackTransition) {
 	alert := transition.alert
 	row, paged := pageClassOf(alert.Class)
 	if !paged || alert.Severity != SeverityPage {
 		return
 	}
+	dedupKey := pagerDedupKey(self.settings.Environment, alert)
 	var err error
-	if transition.kind == slackCleared {
-		err = self.sender.Resolve(context.Background(), pagerDedupKey(self.settings.Environment, alert))
-	} else {
+	switch {
+	case transition.kind == slackCleared:
+		if self.dropHeldWithLock(dedupKey) {
+			self.settings.Logf("monitor: a page of class %s held for business hours was dropped: its incident cleared before they opened", row.class)
+		}
+		err = self.sender.Resolve(context.Background(), dedupKey)
+	case row.hours == pageHoursBusiness && !self.settings.BusinessCalendar.IsOpen(now):
+		if _, held := self.keyHeldPages[dedupKey]; !held {
+			self.keyHeldPages[dedupKey] = self.page(now, alert, row)
+			self.heldKeys = append(self.heldKeys, dedupKey)
+			self.settings.Logf("monitor: a page of class %s is held until business hours open", row.class)
+		}
+	default:
+		// the page goes now, so a hold of the key has nothing left to wait for
+		self.dropHeldWithLock(dedupKey)
 		err = self.sender.Trigger(context.Background(), self.page(now, alert, row))
 	}
 	if err != nil {
 		self.settings.Logf("monitor: a page of class %s was not queued: %v", row.class, err)
 	}
+}
+
+// Forgets the key's held page; false when none was held.
+func (self *PagerAlertNotifier) dropHeldWithLock(dedupKey string) bool {
+	if _, held := self.keyHeldPages[dedupKey]; !held {
+		return false
+	}
+	delete(self.keyHeldPages, dedupKey)
+	for i, heldKey := range self.heldKeys {
+		if heldKey == dedupKey {
+			self.heldKeys = append(self.heldKeys[:i], self.heldKeys[i+1:]...)
+			break
+		}
+	}
+	return true
+}
+
+// Queues every held page once the calendar is open, oldest hold first. A held
+// page's incident is still active: a clear would have dropped it. A page the
+// sender does not take stays held for the next execution.
+func (self *PagerAlertNotifier) releaseHeldWithLock(now time.Time) {
+	if len(self.heldKeys) == 0 || !self.settings.BusinessCalendar.IsOpen(now) {
+		return
+	}
+	stillHeldKeys := []string{}
+	for _, dedupKey := range self.heldKeys {
+		page := self.keyHeldPages[dedupKey]
+		if err := self.sender.Trigger(context.Background(), page); err != nil {
+			self.settings.Logf("monitor: a held page of class %s was not queued: %v", page.Class, err)
+			stillHeldKeys = append(stillHeldKeys, dedupKey)
+			continue
+		}
+		delete(self.keyHeldPages, dedupKey)
+		self.settings.Logf("monitor: business hours are open: a held page of class %s goes to the rota", page.Class)
+	}
+	self.heldKeys = stillHeldKeys
 }
 
 // The page for one incident, built from the row and never from the alert's

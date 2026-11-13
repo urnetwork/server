@@ -4,14 +4,14 @@
 #
 # usage: wipe.sh drives <cluster> <host>...   loses those hosts' drives for good: each host's container and its drive
 #                                              volumes removed, then started again empty, as new disks in a replaced
-#                                              host are; past a set's parity (meta-1: 3 of its 4 hosts, seg-1: 3 of
-#                                              4) what the lost drives held is gone, and readers alarm on heads naming
-#                                              missing segments
+#                                              host are; past a set's parity (3 of a cluster's 4 hosts) what the
+#                                              lost drives held is gone, and readers alarm on heads naming missing
+#                                              segments
 #        wipe.sh site                          the site lost: every cluster's containers and drives removed, then
 #                                              started again with new empty drives and their buckets made again (§19.10's
 #                                              hardware step), on which t3.sh suite passes before any re-seed
 #
-# A host is named by its number, 1 to 4 (meta-2's one host is 1). The authority and Postgres steps of FS-41 are their
+# A host is named by its number, 1 to 4. The authority and Postgres steps of FS-41 are their
 # owners'; sidecar.yml's reseed: true, which opens /reseed, is the run's to set. GO names the go that runs t3tool.
 set -euo pipefail
 
@@ -24,17 +24,15 @@ compose=(docker compose -f "$here/docker-compose.yml")
 service_of() {
   local cluster=$1 host=$2
   case "$cluster" in
-    meta-1|seg-1) echo "fc-$cluster-host$host" ;;
-    meta-2) echo "fc-meta-2" ;;
+    meta-1|meta-2|seg-1) echo "fc-$cluster-host$host" ;;
     *) echo "no cluster $cluster" >&2; return 64 ;;
   esac
 }
 
 drive_count_of() {
   case "$1" in
-    meta-1) echo 2 ;;
+    meta-1|meta-2) echo 2 ;;
     seg-1) echo 4 ;;
-    meta-2) echo 8 ;;
   esac
 }
 

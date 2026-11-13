@@ -11,12 +11,20 @@ package taskworker
 // budget a process), with Push, pushservice's hint writer, added for gkm. A process with no such file holds no host
 // and runs no reconciler, today's production among them.
 //
-// Not yet here, and failing closed:
+// Its authorization state is gkmservice.AclGkmReconcilerState over §8.9's gate cache (QD-718), which
+// gkmReconcilerStateFromHost builds for the runtime on the host's Redis and first metadata cluster
+// (sidecar.AclGateDirectSource): api's INCR of {acl_<networkId>}v reaches the cache through the host's shared
+// key-event subscriber and loads that network, and the reconciler is told once the new state is installed, so the
+// pass a hint wakes reads that state. The cache is this process's one gate cache (C-09): another job here that needs
+// §8.9's state reads this one, never a second. A host whose Redis takes no such watch gives no state, and the runtime
+// starts no reconciler; the sweep's name stays bound, so a run queued anyway fails and waits on server/task's backoff
+// rather than find no function.
 //
-//   - gkm's authorization state, GkmReconcilerState over §8.9's gate cache and {acl_<networkId>}v: server has no
-//     implementation of it (AclGateCache keeps no list of networks, no per-sidecar index and no install callback for
-//     it to read), so gkmReconcilerStateSource is nil and a production runtime starts no reconciler; the sweep's name
-//     stays bound, so a run queued anyway fails and waits on server/task's backoff rather than find no function;
+// Not yet here:
+//
+//   - the networks whose log has not moved since this process started: the cache holds a network from its first
+//     {acl_}v event on, so until then the reconciler sends it no hint, sets it no expiry wake and keeps every object
+//     of its sidecars (question gkm-auth-state-reconciler-networks);
 //   - the hint writer's sidecar_id resolver, which plan-KEYS-hint-addressing gives taskworker over
 //     sidecar_identity_binding: without it every pending hint is counted unresolved and lost, which the clients'
 //     hourly resync covers (§6.8).
@@ -34,9 +42,28 @@ import (
 	"github.com/urnetwork/sidecar/pushservice"
 )
 
-// gkm's authorization state for a host: nil until server builds GkmReconcilerState over §8.9's gate cache (the file
-// header), and a test's.
-var gkmReconcilerStateSource func(ctx context.Context, host *sidecar.ServiceHost) (gkmservice.GkmReconcilerState, error)
+// gkm's authorization state for a host, until ctx ends: gkmReconcilerStateFromHost, or a test's. nil gives none.
+var gkmReconcilerStateSource = gkmReconcilerStateFromHost
+
+// gkm's authorization state over a gate cache of its own on host, which needs Redis and Blobs: the cache follows
+// {acl_<networkId>}v on host's subscriber and lives until ctx ends, the runtime's.
+func gkmReconcilerStateFromHost(ctx context.Context, host *sidecar.ServiceHost) (gkmservice.GkmReconcilerState, error) {
+	if host == nil || host.Redis == nil || host.Blobs == nil {
+		return nil, errors.New("gkm's authorization state needs a host with Redis and Blobs")
+	}
+	settings := sidecar.DefaultAclGateSettings()
+	// glog, as the budget loops' own adapter writes it
+	settings.Log = evsBudgetLogger{}
+	cache := sidecar.NewAclGateCache(ctx, sidecar.NewAclGateDirectSource(host.Redis, host.Blobs, settings), host.Clock, settings)
+	removeWatch, err := cache.Watch(host.Redis)
+	if err != nil {
+		// with no events the cache would learn of no network
+		cache.Close()
+		return nil, err
+	}
+	context.AfterFunc(ctx, removeWatch)
+	return gkmservice.NewAclGkmReconcilerState(cache), nil
+}
 
 // The reconciler the newest runtime started, nil while none runs.
 var gkmReconcilerCurrent atomic.Pointer[gkmservice.GkmReconciler]

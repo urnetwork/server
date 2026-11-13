@@ -3,11 +3,16 @@ package taskworker
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/gkmservice"
+	"github.com/urnetwork/sidecar/protocol/bridge"
 	"github.com/urnetwork/sidecar/sidecartest"
 )
 
@@ -99,7 +104,8 @@ func TestGkmReconcilerSweepRunsOnTheReconcilerTheRuntimeHolds(t *testing.T) {
 }
 
 // A process with no evs host, or with one and no authorization state to give the reconciler, starts none and keeps
-// the sweep's name bound, so a run queued anyway waits on its retry.
+// the sweep's name bound, so a run queued anyway waits on its retry: no state source, one that fails, and a host
+// whose Redis or clusters the real one cannot build on.
 func TestGkmReconcilerWaitsWithoutItsHostOrState(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -115,13 +121,158 @@ func TestGkmReconcilerWaitsWithoutItsHostOrState(t *testing.T) {
 	host := sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil).ServiceHost()
 	evsJobHost.Store(host)
 	defer evsJobHost.CompareAndSwap(host, nil)
-	if gkmReconcilerStateSource != nil {
-		t.Fatal("server has an authorization state for gkm's reconciler: this test's premise has moved")
+	source := gkmReconcilerStateSource
+	defer func() {
+		gkmReconcilerStateSource = source
+	}()
+
+	gkmReconcilerStateSource = nil
+	startGkmReconcilerFromHost(ctx, &lifetime)
+	if gkmReconcilerCurrent.Load() != nil {
+		t.Fatal("a reconciler with no state source")
+	}
+	gkmReconcilerStateSource = func(ctx context.Context, host *sidecar.ServiceHost) (gkmservice.GkmReconcilerState, error) {
+		return nil, errors.New("no authorization state")
 	}
 	startGkmReconcilerFromHost(ctx, &lifetime)
 	if gkmReconcilerCurrent.Load() != nil {
 		t.Fatal("a reconciler with no authorization state")
 	}
+
+	// the real source builds nothing on a host with no Redis or no clusters
+	gkmReconcilerStateSource = source
+	for _, strip := range []func(host *sidecar.ServiceHost){
+		func(host *sidecar.ServiceHost) { host.Redis = nil },
+		func(host *sidecar.ServiceHost) { host.Blobs = nil },
+	} {
+		stripped := *host
+		strip(&stripped)
+		if state, err := gkmReconcilerStateFromHost(ctx, &stripped); err == nil || state != nil {
+			t.Errorf("a state on a host missing a store: %v", err)
+		}
+		evsJobHost.Store(&stripped)
+		startGkmReconcilerFromHost(ctx, &lifetime)
+		evsJobHost.Store(host)
+		if gkmReconcilerCurrent.Load() != nil {
+			t.Fatal("a reconciler on a host missing a store")
+		}
+	}
 	cancel()
 	lifetime.Wait()
+}
+
+// A runtime with an evs host starts its reconciler on the state server builds for it (QD-718): §8.9's gate cache
+// over the host's Redis and first metadata cluster. That state hears {acl_<networkId>}v's INCR on the host's own
+// subscriber, tells a change once the network's state is installed, and then lists the network, gives its state at
+// the log's tip and knows its sidecars' standing; a revocation reaches it the same way.
+func TestGkmReconcilerStartsOnTheHostsGateCache(t *testing.T) {
+	if gkmReconcilerCurrent.Load() != nil || evsJobHost.Load() != nil {
+		t.Fatal("a reconciler or an evs host held before the test")
+	}
+	net := sidecartest.NewNet(t.Context(), nil)
+	defer net.Close()
+	tier, err := net.AdmissionTier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tier.AclCompile = sidecartest.AclAdmissionCompile
+	admission := sidecartest.NewAdmissionNet(t, tier)
+	defer admission.Close()
+	host := net.Host()
+	networkId := admission.NetworkId()
+	owner := admission.Owner()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var lifetime sync.WaitGroup
+	evsJobHost.Store(host)
+	defer evsJobHost.CompareAndSwap(host, nil)
+	startGkmReconcilerFromHost(ctx, &lifetime)
+	reconciler := gkmReconcilerCurrent.Load()
+	if reconciler == nil {
+		t.Fatal("a runtime with a host and its gate cache started no reconciler")
+	}
+
+	state, err := gkmReconcilerStateFromHost(ctx, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan *gkmservice.GkmStateChange, 64)
+	stopWatch, err := state.Watch(func(change *gkmservice.GkmStateChange) {
+		changes <- change
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopWatch()
+	// a guard, never the proof: only a broken cache reaches it
+	await := func(what string) *gkmservice.GkmStateChange {
+		t.Helper()
+		select {
+		case change := <-changes:
+			return change
+		case <-time.After(30 * time.Second):
+			t.Fatalf("no %s", what)
+		}
+		return nil
+	}
+	hint := func() {
+		t.Helper()
+		if _, err := host.Redis.Increment(ctx, sidecar.AclVersionKey(networkId), 48*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// until the tip is installed: a hint's load may land one entry behind a log that moved twice
+	awaitTip := func() *gkmservice.GkmNetworkState {
+		t.Helper()
+		for {
+			change := await("change")
+			if change == nil || change.NetworkId != networkId {
+				t.Fatalf("a change of another network: %+v", change)
+			}
+			networkState, err := state.State(ctx, networkId)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if proto.Equal(networkState.View.Pin(), admission.Tip()) {
+				return networkState
+			}
+		}
+	}
+	if change := await("first change"); change != nil {
+		t.Fatalf("the watch's first change: %+v", change)
+	}
+	if networkIds := state.Networks(); len(networkIds) != 0 {
+		t.Fatalf("networks before any event: %v", networkIds)
+	}
+
+	hint()
+	networkState := awaitTip()
+	if networkIds := state.Networks(); !slices.Equal(networkIds, []sidecar.Id{networkId}) {
+		t.Fatalf("the networks: %v", networkIds)
+	}
+	if !slices.Contains(networkState.RepoIds, admission.ConfigRepoId()) {
+		t.Errorf("the network's repos: %v", networkState.RepoIds)
+	}
+	if standingNetworkId, revoked, known, err := state.SidecarStanding(ctx, owner.SidecarId); err != nil || !known || revoked || standingNetworkId != networkId {
+		t.Fatalf("the owner's standing: %s, %t, %t, %v", standingNetworkId, revoked, known, err)
+	}
+
+	_, phone := admission.ConsentedMember("taskworker reconciler")
+	admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_SIDECAR_REVOKE, admission.Revocation(phone, bridge.SidecarRevokeReason_SIDECAR_REVOKE_REASON_LOST, 0)))
+	if _, _, known, _ := state.SidecarStanding(ctx, phone.SidecarId); known {
+		t.Fatal("a sidecar known before any event told of its admission")
+	}
+	hint()
+	awaitTip()
+	if _, revoked, known, err := state.SidecarStanding(ctx, phone.SidecarId); err != nil || !known || !revoked {
+		t.Fatalf("the revoked device's standing: %t, %t, %v", revoked, known, err)
+	}
+
+	// the runtime's end: the reconciler is no longer current
+	cancel()
+	lifetime.Wait()
+	if gkmReconcilerCurrent.Load() != nil {
+		t.Fatal("a reconciler current after the runtime's end")
+	}
 }

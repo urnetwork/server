@@ -4,7 +4,8 @@
 #
 #   meta-1   4 hosts x 2 drives at EC:4, the first metadata cluster
 #   seg-1    4 hosts x 4 drives at EC:8, the segment cluster
-#   meta-2   one 8-drive process at EC:4, a second metadata cluster (FS-63's next cluster)
+#   meta-2   4 hosts x 2 drives at EC:4, a second metadata cluster (FS-63's next cluster), like meta-1: the fork
+#            refuses to start one process on a cluster's drives under the settle rules (QD-756)
 #
 # Containers are named sidecar-test-fc-*, and t3.sh down stops and removes them and their drives. The root user is
 # synthetic and reaches nothing but these containers. Drives are named volumes, so a host the suite kills comes back
@@ -186,28 +187,70 @@ services:
       - sidecar-test-fc-seg-1-host4-d2:/drives/d2
       - sidecar-test-fc-seg-1-host4-d3:/drives/d3
       - sidecar-test-fc-seg-1-host4-d4:/drives/d4
-  fc-meta-2:
+  fc-meta-2-host1:
     <<: *host
-    container_name: sidecar-test-fc-meta-2
+    container_name: sidecar-test-fc-meta-2-host1
     networks:
       filecluster:
         ipv4_address: 172.30.52.31
-    hostname: fc-meta-2
-    command: [server, "--address", ":9000", "/drives/d{1...8}"]
+    hostname: fc-meta-2-host1
+    command: [server, "--address", ":9000", "http://fc-meta-2-host{1...4}:9000/drives/d{1...2}"]
     environment:
       <<: *settle-env
       MINIO_STORAGE_CLASS_STANDARD: "EC:4"
       MINIO_ERASURE_SET_DRIVE_COUNT: "8"
     ports: ["127.0.0.1:52301:9000", "127.0.0.1:52311:9100"]
     volumes:
-      - sidecar-test-fc-meta-2-d1:/drives/d1
-      - sidecar-test-fc-meta-2-d2:/drives/d2
-      - sidecar-test-fc-meta-2-d3:/drives/d3
-      - sidecar-test-fc-meta-2-d4:/drives/d4
-      - sidecar-test-fc-meta-2-d5:/drives/d5
-      - sidecar-test-fc-meta-2-d6:/drives/d6
-      - sidecar-test-fc-meta-2-d7:/drives/d7
-      - sidecar-test-fc-meta-2-d8:/drives/d8
+      - sidecar-test-fc-meta-2-host1-d1:/drives/d1
+      - sidecar-test-fc-meta-2-host1-d2:/drives/d2
+  fc-meta-2-host2:
+    <<: *host
+    container_name: sidecar-test-fc-meta-2-host2
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.32
+    hostname: fc-meta-2-host2
+    command: [server, "--address", ":9000", "http://fc-meta-2-host{1...4}:9000/drives/d{1...2}"]
+    environment:
+      <<: *settle-env
+      MINIO_STORAGE_CLASS_STANDARD: "EC:4"
+      MINIO_ERASURE_SET_DRIVE_COUNT: "8"
+    ports: ["127.0.0.1:52302:9000", "127.0.0.1:52312:9100"]
+    volumes:
+      - sidecar-test-fc-meta-2-host2-d1:/drives/d1
+      - sidecar-test-fc-meta-2-host2-d2:/drives/d2
+  fc-meta-2-host3:
+    <<: *host
+    container_name: sidecar-test-fc-meta-2-host3
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.33
+    hostname: fc-meta-2-host3
+    command: [server, "--address", ":9000", "http://fc-meta-2-host{1...4}:9000/drives/d{1...2}"]
+    environment:
+      <<: *settle-env
+      MINIO_STORAGE_CLASS_STANDARD: "EC:4"
+      MINIO_ERASURE_SET_DRIVE_COUNT: "8"
+    ports: ["127.0.0.1:52303:9000", "127.0.0.1:52313:9100"]
+    volumes:
+      - sidecar-test-fc-meta-2-host3-d1:/drives/d1
+      - sidecar-test-fc-meta-2-host3-d2:/drives/d2
+  fc-meta-2-host4:
+    <<: *host
+    container_name: sidecar-test-fc-meta-2-host4
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.34
+    hostname: fc-meta-2-host4
+    command: [server, "--address", ":9000", "http://fc-meta-2-host{1...4}:9000/drives/d{1...2}"]
+    environment:
+      <<: *settle-env
+      MINIO_STORAGE_CLASS_STANDARD: "EC:4"
+      MINIO_ERASURE_SET_DRIVE_COUNT: "8"
+    ports: ["127.0.0.1:52304:9000", "127.0.0.1:52314:9100"]
+    volumes:
+      - sidecar-test-fc-meta-2-host4-d1:/drives/d1
+      - sidecar-test-fc-meta-2-host4-d2:/drives/d2
 
 networks:
   filecluster:
@@ -268,19 +311,19 @@ volumes:
     name: sidecar-test-fc-seg-1-host4-d3
   sidecar-test-fc-seg-1-host4-d4:
     name: sidecar-test-fc-seg-1-host4-d4
-  sidecar-test-fc-meta-2-d1:
-    name: sidecar-test-fc-meta-2-d1
-  sidecar-test-fc-meta-2-d2:
-    name: sidecar-test-fc-meta-2-d2
-  sidecar-test-fc-meta-2-d3:
-    name: sidecar-test-fc-meta-2-d3
-  sidecar-test-fc-meta-2-d4:
-    name: sidecar-test-fc-meta-2-d4
-  sidecar-test-fc-meta-2-d5:
-    name: sidecar-test-fc-meta-2-d5
-  sidecar-test-fc-meta-2-d6:
-    name: sidecar-test-fc-meta-2-d6
-  sidecar-test-fc-meta-2-d7:
-    name: sidecar-test-fc-meta-2-d7
-  sidecar-test-fc-meta-2-d8:
-    name: sidecar-test-fc-meta-2-d8
+  sidecar-test-fc-meta-2-host1-d1:
+    name: sidecar-test-fc-meta-2-host1-d1
+  sidecar-test-fc-meta-2-host1-d2:
+    name: sidecar-test-fc-meta-2-host1-d2
+  sidecar-test-fc-meta-2-host2-d1:
+    name: sidecar-test-fc-meta-2-host2-d1
+  sidecar-test-fc-meta-2-host2-d2:
+    name: sidecar-test-fc-meta-2-host2-d2
+  sidecar-test-fc-meta-2-host3-d1:
+    name: sidecar-test-fc-meta-2-host3-d1
+  sidecar-test-fc-meta-2-host3-d2:
+    name: sidecar-test-fc-meta-2-host3-d2
+  sidecar-test-fc-meta-2-host4-d1:
+    name: sidecar-test-fc-meta-2-host4-d1
+  sidecar-test-fc-meta-2-host4-d2:
+    name: sidecar-test-fc-meta-2-host4-d2

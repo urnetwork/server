@@ -79,12 +79,17 @@ func fileClusterSuiteT3Targets(t *testing.T) map[string]*FileClusterSuiteTarget 
 }
 
 // FS-114's head and marker cases and its twin, the conditional DELETE's three store cases, a LIST whole or 503, and
-// stale conditions with a host lost, on the first metadata cluster (4 x 2 at EC:4) and the segment cluster (4 x 4 at
-// EC:8): every case passes and the report names the build every host runs.
+// stale conditions with a host lost, on the two metadata clusters (4 x 2 at EC:4 each: the first, and FS-63's second,
+// which was one 8-drive process until QD-756) and the segment cluster (4 x 4 at EC:8): every case passes and the
+// report names the build every host runs.
 func TestFileClusterSuitePassesOnT3(t *testing.T) {
 	targets := fileClusterSuiteT3Targets(t)
-	for _, clusterId := range []string{"meta-1", "seg-1"} {
-		report, err := RunFileClusterSuite(t.Context(), targets[clusterId])
+	for _, clusterId := range []string{"meta-1", "meta-2", "seg-1"} {
+		target := targets[clusterId]
+		if target == nil || len(target.Hosts) != 4 {
+			t.Fatalf("%s: T3's clusters are 4 hosts each: %+v", clusterId, target)
+		}
+		report, err := RunFileClusterSuite(t.Context(), target)
 		if err != nil {
 			t.Fatalf("%s: %v (is T3 up? local/file-cluster-t3/t3.sh up)", clusterId, err)
 		}
@@ -98,18 +103,5 @@ func TestFileClusterSuitePassesOnT3(t *testing.T) {
 		} else if len(build) != 40 {
 			t.Errorf("%s: the build %q", clusterId, build)
 		}
-	}
-}
-
-// The one-process cluster, a second metadata cluster: the suite runs every case one host allows and never names a
-// build while any case failed or did not run, which with one host its FS-114 cases cannot.
-func TestFileClusterSuiteOnAOneProcessClusterNamesNoBuild(t *testing.T) {
-	report, err := RunFileClusterSuite(t.Context(), fileClusterSuiteT3Targets(t)["meta-2"])
-	if err != nil {
-		t.Fatalf("meta-2: %v (is T3 up? local/file-cluster-t3/t3.sh up)", err)
-	}
-	t.Logf("%s", report)
-	if _, ok := report.SettlePassedBuild(); ok {
-		t.Error("a one-process cluster named a build with its FS-114 cases not run")
 	}
 }

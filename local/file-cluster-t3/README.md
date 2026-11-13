@@ -7,7 +7,7 @@
 |---|---|---|---|
 | meta-1 | 4 hosts x 2 drives, EC:4, the first metadata cluster | `127.0.0.1:52101`-`52104` | `52111`-`52114` |
 | seg-1 | 4 hosts x 4 drives, EC:8, the segment cluster | `127.0.0.1:52201`-`52204` | `52211`-`52214` |
-| meta-2 | one 8-drive process, EC:4, a second metadata cluster | `127.0.0.1:52301` | `52311` |
+| meta-2 | 4 hosts x 2 drives, EC:4, a second metadata cluster | `127.0.0.1:52301`-`52304` | `52311`-`52314` |
 
 ```sh
 local/file-cluster-t3/t3.sh build    # the fork's hooked build and t3tool, into sidecar-test-fc-minio:local
@@ -26,7 +26,8 @@ The hooked build never ships: a production cluster runs the same commit's releas
 FS-114 cases and so does not pass alone. `settle_passed_build` is recorded once this T3 run and the cluster's own run
 agree on the build (plan-EVSB-settle-gate).
 
-meta-2, the one-process cluster, fails on the fork's build of 2026-11-11: some minutes after any DELETE its stash
-sweep dereferences a lock server a one-process set never registers and the process exits, and in one run of three it
-took a DELETE past its deadline. It names no
-build, which is the gate failing closed, and its FS-114 cases need two hosts, so it never passes alone.
+meta-2 was one 8-drive process until 2026-11-12. On the fork's build of 2026-11-11 its stash sweep reached through a
+lock server one process never registers and the process exited, and in one run of three it took a DELETE past its
+deadline. The owner put a cluster of one process out of scope (QD-756): §19.6 builds every cluster from 4 hosts, the
+fork refuses to start one process on a cluster's drives under the settle rules, and meta-2 is 4 x 2 like meta-1, so
+FS-63's second-cluster cases and the suite run on a second cluster of hosts. The suite refuses a target of one host.

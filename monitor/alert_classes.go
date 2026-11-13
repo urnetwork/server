@@ -41,6 +41,13 @@ var alertClassKinds = map[string]alertClassKind{
 	"lb-split-probe-unobservable": visibilityAlertClass,
 	// §19.8's notice row, paged by taskworker's abuse worker through pager.PageNotice, never a signal
 	"abuse-notice": pageAlertClass,
+	// §19.8's business row, paged once the business calendar opens (QD-754; SIGNALS.md §28.1, §29.4, §29.7)
+	"dns-ns-failing":                  pageAlertClass,
+	"filecluster-cohort-exhaustion":   pageAlertClass,
+	"filecluster-cohort-limit":        pageAlertClass,
+	"filecluster-drive-dwpd-business": pageAlertClass,
+	"filecluster-drive-rating-short":  pageAlertClass,
+	"filecluster-hdd-trigger":         pageAlertClass,
 	// the pager's own warn, which reaches Slack only
 	"pager-sink-failing": incidentAlertClass,
 	// SIGNALS.md §30's other sidecar service findings; a blind signal holds the rest open
@@ -48,8 +55,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"slo-unobservable":                     visibilityAlertClass,
 	"sidecar-service-failure":              incidentAlertClass,
 	"sidecar-service-failure-unobservable": visibilityAlertClass,
-	// SIGNALS.md §29's other storage findings; a blind signal holds the rest open. The business-hours
-	// classes (dwpd-business, rating-short) warn until the pager has a business-hours path.
+	// SIGNALS.md §29's other storage findings; a blind signal holds the rest open
 	"filecluster-set-degraded":        incidentAlertClass,
 	"filecluster-heal-debt-lost":      incidentAlertClass,
 	"filecluster-state-unobservable":  visibilityAlertClass,
@@ -59,15 +65,10 @@ var alertClassKinds = map[string]alertClassKind{
 	"filecluster-settle-unobservable": visibilityAlertClass,
 	"filecluster-drive-dwpd-day":      incidentAlertClass,
 	"filecluster-drive-dwpd-week":     incidentAlertClass,
-	"filecluster-drive-dwpd-business": incidentAlertClass,
 	"filecluster-drive-media-errors":  incidentAlertClass,
 	"filecluster-drive-spare-low":     incidentAlertClass,
-	"filecluster-drive-rating-short":  incidentAlertClass,
 	"filecluster-wear-unobservable":   visibilityAlertClass,
-	"filecluster-cohort-limit":        incidentAlertClass,
-	"filecluster-cohort-exhaustion":   incidentAlertClass,
 	"filecluster-cohort-trigger":      incidentAlertClass,
-	"filecluster-hdd-trigger":         incidentAlertClass,
 	"filecluster-cohort-unobservable": visibilityAlertClass,
 	"write-budget-p0-warn-line":       incidentAlertClass,
 	"write-budget-bucket-empty":       incidentAlertClass,
@@ -79,7 +80,6 @@ var alertClassKinds = map[string]alertClassKind{
 	"sidecar-dump-offsite-stale":      incidentAlertClass,
 	"sidecar-dump-unobservable":       visibilityAlertClass,
 	// SIGNALS.md §28.1's other dns findings; a blind check holds the rest open
-	"dns-ns-failing":           incidentAlertClass,
 	"dns-ns-serial-divergence": incidentAlertClass,
 	"dns-key-window":           incidentAlertClass,
 	"dns-canary-propagation":   incidentAlertClass,

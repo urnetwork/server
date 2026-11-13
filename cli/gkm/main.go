@@ -52,8 +52,7 @@ func main() {
 		deps.Quota = quota
 		defer quota.Drain(context.Background())
 	}
-	// the block's own stores for the rest; what server has no implementation of yet keeps it not ready (gkm's
-	// package header)
+	// the block's own stores and authorization state for the rest (gkm's package header)
 	if err := gkm.Run(ctx, gkm.RunOptions{Port: *port, Deps: deps}); err != nil {
 		panic(err)
 	}
