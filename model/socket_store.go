@@ -8,7 +8,8 @@ package model
 //	                             (socket_store_scripts.go)
 //	{sg_<network_id>_<h16>}ix    the group's leases, a ZSET of listener ids scored by lease end in ms
 //	{svc_<listener_client_id>}   §6.10.1's pairs: field the dialer, value the grant's expiry, and the floor
-//	                             ~f a removal left (sock-3)
+//	                             ~f a removal left (sock-3); keyed by the end that is not the edge, so a ur/
+//	                             Find's pair is under its sidecar dialer, field the edge listener (QD-728)
 //	{sn_<network_id>}names       the listing: field the name key, value kind;lease_ms;sealed, and the
 //	                             sweep's claim in field 0x00 (sock-4)
 //	{sc_<client_id>}set          the client's set, a ZSET of 0x01 || name key and one meta member (sock-5)
