@@ -29,8 +29,11 @@ type UrlProbeE2eObserver interface {
 	// How long the tunnel holds the turn's first sends for the session to
 	// seal (pq_seal_wait): counted in the run's budget.
 	SealWait() time.Duration
-	// The turn's IPv4 HTTPS leg wrote its first request: whether the session
-	// had sealed by then is the evidence's sealed_before_request.
+	// The turn's IPv4 HTTPS leg acquired its connection, before writing its
+	// first request. The session must already be usable at this boundary.
+	RequestStarted()
+	// The first request finished writing. Its session must still match the
+	// before-write observation for sealed_before_request to hold.
 	RequestWritten()
 	// The turn's evidence once its loads ended, given whether its IPv4 HTTPS
 	// leg passed; nil when the session observed nothing.
