@@ -180,7 +180,11 @@
       "production_blobs_equal_qualified_source": true,
       "test_blobs_equal_corrected_fixture": true,
       "schema_api_module_changes": false,
-      "merged_to_main_or_deployed": false
+      "merged_to_main_or_deployed": true,
+      "merged_to_main": true,
+      "main_merge_commit": "4ae5dc9bcd123d8ad328ace97382c190b3c588b2",
+      "deployed": false,
+      "full_main_abi_or_build_qualified": false
     },
     "warm_compile_result": "Compiled successfully; original smoke exposed a test-cleanup cancellation fixture defect. Failure preserved; production code unchanged by the correction.",
     "corrected_fixture_source_sha256": "252a3f26dde8affe48a7116a9e28153a09c8f48a3913479e5bc68aa4a6cc0f9a",
@@ -203,7 +207,13 @@
       "evidence": "/dev/shm/competition-idle-heartbeat-worker-buildonly-20261113.e70Wpr0v",
       "last_reported_pid": 1257450,
       "last_reported_invocation_id": "63455d40820e441ba4ad713203e49c8d",
-      "terminal_result_verified": false,
+      "terminal_result_verified": true,
+      "actual_go_exit": 0,
+      "duration_seconds": 59,
+      "actor_guard_and_capture_exit_zero": true,
+      "binary_sha256": "9a3bacc690049b21a2565700f13df5856a1faad98533035a49c5388294c2607a",
+      "build_profile": "Clean 59b3 source; Go1.27.4 linux/amd64-v1, CGO0, greenteagc, trimpath, original nine dependencies. No full-main build claim.",
+      "image_created": false,
       "target_executed_installed_or_activated": false
     },
     "race_compiler": {
