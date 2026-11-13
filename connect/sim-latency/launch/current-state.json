@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T12:53:57.178661Z",
+  "observed_at": "2026-11-13T14:01:16Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -15,28 +15,22 @@
     "opens_at": "2026-11-10T04:28:28.670738Z",
     "closes_at": "2026-11-17T04:28:28.670738Z"
   },
-  "queue": {
-    "succeeded": 18,
-    "failed": 4,
-    "queued": 1,
-    "running": 0
-  },
   "runtime_status": {
     "intake_ready": true,
     "grading_ready": false,
     "publication_held": true,
     "evaluation_hold_revision": 36,
-    "hold_active": true,
-    "hold_evidence": "/var/lib/urnetwork/competition-combined-qualification-maintenance-20261113.Zd7cpCEc",
-    "hold_plan_sha256": "af3d72578deda020f0ad1231acfd4ef69b162076a33bc819d07533d5ee6a7cc2",
-    "supervisor_unit": "urnetwork-competition-production-r2.service",
-    "supervisor_pid": 3129600,
-    "automatic_restarts": 74,
-    "staged_worker_activated": false,
-    "host_readiness": "Host-backed checks require fresh eligible heartbeats. Their current failure does not independently establish MinIO failure.",
-    "active_attempts": 0
+    "hold_active": true
   },
-  "latest_recovery_checkpoint": {
+  "protected_operator_state": {
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.ExkdzGSN/state.private.json",
+    "sha256": "fe4d0df1d4d3eef0ee0bab49eff153f3c31723339240055186c24cdb1291b023",
+    "mode": "root:root 0400 in root:root 0700 directory",
+    "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
+    "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
+    "embargo": "Do not publish candidate eligibility, scores, findings, rankings or per-job review status before authorized finalization. Repository updates carry control-plane status only."
+  },
+  "control_release": {
     "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
     "sn_commit": "e9aa3ac282ed7e4bc48eaab60d03043a5f6a6dac",
     "required_migration": 971,
@@ -54,133 +48,21 @@
     "staged_activation_config_sha256": "8a37f2660c286f52f8c390662f1953048cee57d74dfe9ec2c3c4b7d0df2419e1",
     "worker_sha256": "c91fe976448b957fc121c951b2cfd1dbd2fd42e9451be80d9f246708c029de93",
     "recovery_cli_sha256": "58ccd4a081eff8a47dd735776b1e609f953e5b35d94c035ad4003985424c838e",
-    "next_action": "Verify main migration 971 and compatible API deployment, retain serving image identity, then activate the fixed worker at verified idle and authorize the three reviewed infrastructure recoveries. Keep hold 36 until recovery authority and host readiness are verified.",
+    "next_action": "Verify main migration 971 and compatible API deployment, retain serving image identity, then consult protected per-job recovery state before any grant. Keep owned hold 36 until recovery authority and host readiness pass.",
     "historical_sections_below": "Earlier source/test/process observations remain historical; this checkpoint supersedes their pending-build descriptions."
   },
-  "recovery": {
-    "latest_user_directive": "Rerun all failed evaluations. Controlled recovery qualification is in progress; no rerun has started and submitted patch bytes and screening remain unchanged.",
-    "infrastructure_jobs_pending_recovery": [
-      "01a1c402-9ca1-79d8-e114-5af7c2ef343d",
-      "01a1c4af-c928-3e6a-d183-6c9f319cc119",
-      "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c"
-    ],
-    "patch_job_requires_resubmission": "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43",
-    "patch_preflight": "Unchanged patch fails 19 files against the exact frozen Connect tree; no screening bypass.",
-    "database_grants_issued": false,
-    "terminal_export": "/var/lib/urnetwork/competition-current-terminal-db-retry-20261113.Qdlmd040/current-terminal-packets.private.json",
-    "terminal_export_sha256": "02ac2379f394fd1f8b52527eec85d6dd52be957b76f8ad6f24b5f9d3a7f30b50",
-    "native_facts_directory": "/var/lib/urnetwork/competition-original-native-filefacts-20261113.wXOmaLj5",
-    "offline_drafts": {
-      "path": "/var/lib/urnetwork/competition-schema2-offline-drafts-20261113.3g2OxuOL/schema2-drafts.private.json",
-      "sha256": "ae6bfd7b79f121acd9b39725ce24676d86afe92b252fbbc85f00a8698df006d4",
-      "count": 3,
-      "authority": false,
-      "ready_for_authorization": false,
-      "helper_tests_passed": 6,
-      "helper_binary_sha256": "798fc27a753581aa3e5f399d52dc5112cf9e7058f6d1fa881904ffa236610a93",
-      "helper_build_evidence": "/var/lib/urnetwork/offline-draft-retry-20261113.WJwXOAx4",
-      "dependency_manifest": "/tmp/competition-recovery-offline-draft-20261113.3Hxju2os/dependency-drift-manifest.json",
-      "dependency_manifest_sha256": "3565489e3b152e38b5a606b33d1541dab98d56ad51d343432e4b36bde29dc894",
-      "build_source": "/dev/shm/competition-fast-control-source-20261113.qGCneXJ4/server",
-      "build_scope": "Canonicalizer/model/run-ID files match main. This source route qualifies only the offline helper, not deployment.",
-      "known_failed_build": "Current user server/connect replacements lack required extender fields. Do not retry unchanged or mutate user repos to build this helper."
-    },
-    "grant_requirements": "Migration 971, compatible API and actual serving image identity, fixed-worker handoff, accepted runtime and closure evidence, held global idle, then fresh signed native status/availability and matching censuses. Each grant needs a new census; original native/DB fences need not be equal.",
-    "instructions": "../../../cli/competitionreevaluate/DISTRIBUTED_RECOVERY.txt"
-  },
-  "private_reviews": {
-    "namespace": "/mnt/data/competition-private-complete-review",
-    "members": [
-      "qwen3.8-27b",
-      "gemma-4-26b-a4b"
-    ],
-    "bound_initial_cohort": 15,
-    "current_success_population": 18,
-    "current_population_coverage": false,
-    "all_eligible_submissions_reviewed": false,
-    "accepted_candidate_reviews": 0,
-    "official_import_or_approval": false,
-    "census_sha256": "5b8a9633370f43f01d91617ba42267b6feec450daf347d7ae3c891c15f5fdca3",
-    "unit_set_sha256": "91f5dd7aa3c0617e275d0270347aa7379033dbb76fd1d6692706e9e4f59c7107",
-    "both_model_obligations": 784,
-    "inventory_root": "/mnt/data/competition-private-prereview-contexts-20261112.WABbFBO6/contexts",
-    "inventory_sha256": "38022aaaccdb05585eadabd352489ebdf08fdc36a2944179b96f386ed3a0fac1",
-    "coverage_plan": "/var/lib/urnetwork/competition-complete-offline-coverage-plan-20261112.1CXy4E8r/coverage.pending.json",
-    "coverage_plan_sha256": "de3ac1723be6001d80a584f85ae6ad3a73647c2028a7b6d40a8b13a7f47e1f2e",
-    "protected_inputs": "/var/lib/urnetwork/competition-complete-review-inputs-20261113-v1",
-    "current_normal_binary": "/var/lib/urnetwork/competition-combined-bounded-qa-20261113.uOR0sKCp/review-runtime",
-    "current_normal_binary_sha256": "f5bb8892c13f12c8f61b4af4b738bb2b414a212de36eaf770c7d0a8ba113723b",
-    "current_progress": {
-      "kind": "driver-progress/v2",
-      "sha256": "638f924144651ac4d7d265f6e03197c1bb77429eb432b5ce216a2f6753136a2e",
-      "bytes": 3016
-    },
-    "provider_failure": {
-      "state": "FIRST_GENERATION_REJECTED_NO_ACCEPTED_REVIEW",
-      "input_tokens": 56783,
-      "prompt_fit_verified": true,
-      "source_units_clipped": false,
-      "http_status": 400,
-      "error": "Grammar error: Unimplemented keys: [\"uniqueItems\"]",
-      "response_sha256": "939bd0eb124619d6812e66dadc3084c3b778b5a8f175ae1f9d92fa8353fa0afe",
-      "semantic_key": "752907c6238f75e0c1165e39c897c8934dc8805248fc8f420e406fb0c655728c",
-      "grammar_fix_source_sha256": "deb936f17436a2d05e96e38d2b818b3d939a3d3d46a921ebb1e7e85f069b48c1",
-      "grammar_fix_tests_passed": 20,
-      "original_terminal_preserved": true,
-      "replacement_generation_authorized": false,
-      "historical_admission_replay_test_passed": true,
-      "historical_admission_replay_evidence": "/var/lib/urnetwork/competition-formatter-replay-qa-20261113.4HzFQKcs",
-      "next_action": "Bind trusted installed-backend evidence for pre-sampling schema rejection and explicitly wire its reviewed verifier before replacement inference. The composed recovery passed 74 targeted tests; removing unsupported schema hints does not relax exact local ID validation. No candidate review has completed.",
-      "supersedes": "The actual_prepare block below records historical oversized-prompt refusals. Bounded authenticated metadata now fits without clipping source; the subsequent first generation failed schema compilation."
-    },
-    "qualified_recovery_tests": {
-      "source_sha256": "098cf166a2c04c165a4e99ad70761a6717855f2977b829a0eaf6c446590ec834",
-      "passed": 67,
-      "evidence": "/var/lib/urnetwork/competition-recovery-fixture-qa-20261113.Z37RWSwI",
-      "actual_installed_proof_verifier_enabled": false
-    },
-    "qualified_packing_tests": {
-      "source_sha256": "d5d5fdcd5e3f237f81cbbab97d29aea83cf18420e399b547878ecf6fa4054f1e",
-      "focused_passed": 7,
-      "unchanged_oversized_case_passed": true,
-      "oversized_seconds": 286.297,
-      "original_timeout_seconds": 300,
-      "evidence": "/var/lib/urnetwork/competition-packing-fixture-qa-20261113.n3byHP4W",
-      "historical_failed_results_preserved": true
-    },
-    "composed_qualification": {
-      "source": "/home/by/urnetwork/temp/competition-epoch2-private-prereview-20261112/complete-review-composed-grammar-packing-20261113.RP1myR6P",
-      "source_sha256": "a6295aa542e67adbec6a796632a6af9cbb142894d75d1284e25bd1a12959100c",
-      "overlay_sha256": "4ca82c69ecf33a6e083dc2ec3339589318fb6f5490d140287273aba48cf64b69",
-      "expected_tests": 74,
-      "status": "SOURCE_AND_TARGETED_TESTS_QUALIFIED_NOT_ACTIVATED",
-      "passed_tests": 74,
-      "test_binary_sha256": "7e5ac7a619cbc878152c241cabb6924d7992effef29e7739c89b324d1722f594",
-      "evidence": "/var/lib/urnetwork/competition-composed74-qa-20261113.kCsp0rqO",
-      "actual_installed_proof_verifier_enabled": false
-    },
-    "extension_requirement": "Preserve original 15 census/claims. Authenticate a fresh 18-packet inventory, then append a registry assigning only the three new jobs to a new census. Current same-census runtime must not be bypassed or reset.",
-    "storage_boundaries": "No eviction/hydration workaround; preserve originals and control reservation. Root reserve 33 GiB; data reserve 4 GiB. No model call before corrected-scope recovery is qualified and trusted installed pre-sampling evidence is bound."
-  },
-  "latest_private_review_archive": {
-    "operation_sha256": "3acd4a2869ed563262d4e171fb29d7c00687a57512090a24d93554d9bf16ea6e",
-    "inventory_sha256": "646104c7ab97a1de93da636069e27ee91a3168f2df9429872b6a194dc8e0a570",
-    "objects": 126,
-    "bytes": 72489348,
-    "missing_objects": 0,
-    "published_union_equals_inventory": true,
-    "all_objects_and_both_manifests_exact_version_readback_verified": true,
-    "retention_mode": "COMPLIANCE",
-    "retain_until": "2028-01-01T00:00:00Z",
-    "batch0_receipt_sha256": "2274ac79813b3898b99f650ae32d66e65cb994eb16be832bfeb01c72cbed9ba4",
-    "batch1_receipt_sha256": "451c6ef1ff1d30c46e8b9f2e572bc0ced8b1cd852b23bc1201c48cd5e9c9567c",
-    "receipt_directory": "/mnt/data/competition-private-complete-review/archive-receipts",
-    "receipt_names": [
-      "new-originals-batch0-20261113-v3",
-      "new-originals-batch1-20261113-v3"
-    ],
-    "originals_deleted": false,
-    "review_or_approval": false
+  "review_runtime": {
+    "source_manifest_sha256": "90783495efde8893b6c6e1b7649b4a94c4699e140020cf9d8d157ee58739c2a0",
+    "overlay_sha256": "b4bfb4016171f2e6dd95a2cb9e2efeca5829812b951fdcc842b697887c99b5c7",
+    "focused_tests_passed": 79,
+    "normal_binary_sha256": "cb45e815100d768be04a2692133a8f5915927cf9951420e59f5c736f788f9686",
+    "real_offline_reconciliation_passed": true,
+    "old_failure_preserved": true,
+    "same_candidate_replacement_without_trusted_proof": false,
+    "model_call_live_at_observation": false,
+    "complete_candidate_approval_issued": false,
+    "broader_registry_and_protected_hydration": "Parallel source work, not activated. No uncontrolled eviction, quota increase or namespace reset.",
+    "status": "OFFLINE_PROVIDER_ENVELOPE_COMPATIBILITY_DIAGNOSIS"
   },
   "package_restart_deferral": {
     "hosts": [
@@ -193,12 +75,19 @@
     "competition_package_restarts_deferred_to_idle": true,
     "services_restarted_by_verification": false
   },
+  "recoverable_cache_cleanup": {
+    "removed_only_inactive_rebuildable_objects": 4,
+    "bytes": 696087774,
+    "verified_recovery_directory": "/dev/shm/competition-retired-inactive-cache-20261113.YBxSAoiN",
+    "recovery_is_volatile_ram": true,
+    "source_baseline_submission_evidence_deleted": false,
+    "reason": "Root fell below 33 GiB floor. Same-binary offline status passed after verified no-open cache relocation; no reserve relaxation."
+  },
   "next_actions": [
-    "Verify main migration 971 and compatible API deployment; retain actual serving API image identity. Do not substitute evaluator/worker image or migrate through pooled port 6432.",
-    "Keep own evaluation hold 36 while preparing exact per-job recovery bindings. At positively verified global idle, hand off to the staged fixed worker, refresh both hosts, seal runtime/closure authority, then grant each approved infrastructure retry with a fresh signed/census cut. Release only the current owned hold after gates pass.",
-    "Finish composed review tests. Obtain Snow's installed Qwen image/source/no-override evidence for the exact uniqueItems rejection before enabling its narrowly scoped recovery. Default proof callback remains nil; no unchanged inference retry.",
-    "Complete both-model review for each eligible candidate, then extend immutable cohort coverage for the three newer successful jobs without rewriting the old 15 census/claims. Partial scopes never count as approvals.",
-    "Monitor API, supervisor and both hosts. No interruption of live attempts, deadline reset, source/scoring change, or screening bypass."
+    "Confirm and repair the provider-envelope parser against unchanged retained originals, with deterministic tests and no fresh inference. Consult the protected operator state; never silently rewrite old failures.",
+    "Verify main migration 971 and compatible API deployment, then perform the qualified worker handoff and controlled recovery under the owned hold and fresh authority.",
+    "Finish complete both-model reviews and bounded cohort/archive routing. Derive eligibility from authenticated scoring rules, never success state alone.",
+    "Keep all candidate outcomes and operator proof payloads in protected storage. Publish results only through the authorized finalization path."
   ],
   "source_index": "../EPOCH-SOURCE.md",
   "historical_evidence": {
