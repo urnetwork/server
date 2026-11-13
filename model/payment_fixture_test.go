@@ -86,15 +86,15 @@ func testingAssignSweepPayment(ctx context.Context, networkId server.Id, contrac
 				$1, $2, $3,
 				COALESCE(SUM(payout_byte_count), 0), COALESCE(SUM(payout_net_revenue_nano_cents), 0),
 				COALESCE(MIN(sweep_time), now() AT TIME ZONE 'UTC'),
-				$5 IS NOT NULL, $5, $6, $7
+				$5::timestamp IS NOT NULL, $5::timestamp, $6::text, $7::text
 			FROM transfer_escrow_sweep
-			WHERE network_id = $3 AND contract_id = ANY($4) AND payment_id IS NULL
+			WHERE network_id = $3 AND contract_id = ANY($4::uuid[]) AND payment_id IS NULL
 			`,
 			paymentId, server.NewId(), networkId, contractIds, completedTime, record, txHash,
 		))
 		server.RaisePgResult(tx.Exec(
 			ctx,
-			`UPDATE transfer_escrow_sweep SET payment_id = $1 WHERE network_id = $2 AND contract_id = ANY($3) AND payment_id IS NULL`,
+			`UPDATE transfer_escrow_sweep SET payment_id = $1 WHERE network_id = $2 AND contract_id = ANY($3::uuid[]) AND payment_id IS NULL`,
 			paymentId, networkId, contractIds,
 		))
 	})
