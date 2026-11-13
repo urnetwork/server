@@ -860,8 +860,11 @@ func (self *stripeEventSubscriptionObject) plan() string {
 
 // stripeHandleSubscriptionDeleted writes trial.cancelled when a subscription
 // with a trial ends before (or at) the trial's end: the trial never became a
-// paid period. Any other deletion is the end of a paid subscription, which the
-// entitlement code already handles by the paid-through date. Always 200.
+// paid period. Always 200. It does not end Pro: each window ends on its own
+// (its period plus the grace of its invoice's payment), and the hourly
+// reconciler ends what the deletion takes away sooner (reconcileStripe): a
+// window no payment paid for once Stripe cancels it for non-payment, and a
+// requested cancel's window once its paid period is over.
 func stripeHandleSubscriptionDeleted(object json.RawMessage, clientSession *session.ClientSession) (*StripeWebhookResult, error) {
 	var sub stripeEventSubscriptionObject
 	if err := json.Unmarshal(object, &sub); err != nil {

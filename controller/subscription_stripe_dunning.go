@@ -758,6 +758,14 @@ func stripeHandleInvoicePaymentFailed(object json.RawMessage, clientSession *ses
 
 // invoice.voided and invoice.marked_uncollectible: the invoice will not be
 // collected, so its failure is over. Always 200 unless the database fails.
+//
+// With the dashboard's "mark the invoice uncollectible" final action, Stripe
+// marks the last failed renewal uncollectible as it cancels the subscription,
+// so this can arrive before or after customer.subscription.deleted, and again.
+// Whichever comes first resolves the failure, and the rest find nothing open.
+// Neither touches Pro: an uncollectible invoice credited nothing, and the
+// window the subscription paid for is the reconciler's (reconcileStripe). If
+// the customer pays the invoice later, invoice.paid credits its period.
 func stripeHandleInvoiceResolved(object json.RawMessage, reason string, clientSession *session.ClientSession) (*StripeWebhookResult, error) {
 	var invoice struct {
 		Id string `json:"id"`

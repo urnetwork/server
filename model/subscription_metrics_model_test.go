@@ -27,6 +27,11 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 		// holds) is no subscription
 		"renewal.market = 'apple'\n          AND renewal.net_revenue_nano_cents = 0",
 		"paid.transaction_id = renewal.transaction_id",
+		// past due: a current window, and none whose paid period covers now,
+		// in the store or, deduplicated, in any store
+		"bool_or($1 < CASE",
+		"WHERE NOT paid_now",
+		"HAVING NOT bool_or(paid_now)",
 	} {
 		if !strings.Contains(subscriptionMetricsAccountQuery, required) {
 			t.Errorf("account query is missing %q", required)
@@ -38,7 +43,12 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 		// purchase (no revenue) are no trial
 		"AND 0 < renewal.net_revenue_nano_cents\n      AND renewal.start_time <= $1\n      AND $1 < renewal.end_time - interval '24 hours'",
 		"renewal.end_time - interval '24 hours' < renewal.start_time + interval '27 days'",
-		"AND renewal.net_revenue_nano_cents = 0\n      AND renewal.start_time <= $1\n      AND $1 < renewal.end_time - interval '30 days'",
+		// a Stripe trial is its $0 invoice inside its paid period: its recorded
+		// paid end, or a pre-paid_end_time row's end less the grace its credit
+		// wrote, not a fixed 30 days off its end
+		"AND renewal.net_revenue_nano_cents = 0\n          AND renewal.start_time <= $1\n          AND $1 < renewal.end_time\n    ) stripe_trial",
+		"WHEN renewal.paid_end_time IS NOT NULL THEN LEAST(renewal.paid_end_time, renewal.end_time)",
+		"WHERE $1 < stripe_trial.paid_end_time\n      AND stripe_trial.paid_end_time < stripe_trial.start_time + interval '27 days'",
 		"AND ledger.price_milliunits = 0",
 		"SELECT 'deduplicated', plan, count(DISTINCT network_id)::bigint",
 		// a Play purchase with a charged window is no longer in its trial,
@@ -57,6 +67,16 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 	} {
 		if !strings.Contains(subscriptionMetricsReconciliationQuery, required) {
 			t.Errorf("reconciliation query is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		// open now, whatever the age; resolved by the closed reason set
+		"WHERE failure.resolve_time IS NULL",
+		"failure.resolve_reason IN ('paid', 'voided', 'uncollectible', 'subscription_ended')",
+		"metric_window.since_time <= failure.resolve_time",
+	} {
+		if !strings.Contains(subscriptionMetricsPaymentFailureQuery, required) {
+			t.Errorf("payment failure query is missing %q", required)
 		}
 	}
 	if !strings.Contains(subscriptionMetricsWatermarkQuery, "WHERE store IN ("+trackedMarkets+")") {
@@ -93,6 +113,7 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 		subscriptionMetricsTrialQuery,
 		subscriptionMetricsReconciliationQuery,
 		subscriptionMetricsDataPackQuery,
+		subscriptionMetricsPaymentFailureQuery,
 	} {
 		selectTail := query[strings.LastIndex(query, "SELECT "):]
 		for _, identifier := range []string{

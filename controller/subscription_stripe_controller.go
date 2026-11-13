@@ -530,7 +530,9 @@ func StripeWebhook(
 
 		/**
 		 * the onboarding trial outcome: a subscription deleted within its
-		 * trial is trial.cancelled (onboarding_stripe_controller.go)
+		 * trial is trial.cancelled (onboarding_stripe_controller.go). Pro
+		 * follows within the hour: the reconciler ends a window no payment
+		 * paid for when Stripe cancels for non-payment (reconcileStripe)
 		 */
 
 		glog.Infof("type: customer.subscription.deleted")
@@ -789,6 +791,10 @@ type StripeCustomerExpanded struct {
 }
 
 type StripeInvoiceExpanded struct {
+	Status string `json:"status"`
+	// in the currency's minor unit; 0 for a trial or a fully discounted invoice
+	// (stripeInvoiceTookPayment)
+	AmountPaid   int64                   `json:"amount_paid"`
 	Customer     *StripeCustomerExpanded `json:"customer"`
 	Lines        *StripeLineItems        `json:"lines"`
 	Subscription *struct {
@@ -840,7 +846,11 @@ type stripeInvoiceCredit struct {
 	networkId      server.Id
 	subscriptionId string
 	startTime      time.Time
-	endTime        time.Time
+	// the end of the period the invoice billed
+	paidEndTime time.Time
+	// the window's end: paidEndTime plus the grace of the invoice's payment
+	// (stripeGraceSettings)
+	endTime time.Time
 }
 
 // Resolves the network from the subscription's network_id metadata, then the
@@ -971,12 +981,17 @@ func stripeResolveInvoiceCredit(
 			periodEnd:      periodEnd,
 		}
 	}
+	// in UTC, as the timestamp columns these reach hold it
+	paidEndTime := time.Unix(periodEnd, 0).UTC()
+	// a period that took payment keeps the manual-payment grace; a free trial
+	// gets a day (subscription_stripe_grace.go)
+	grace := stripeGraceSettingsFunc().periodGrace(stripeInvoiceTookPayment(fullInvoice.Status, fullInvoice.AmountPaid))
 	credit := &stripeInvoiceCredit{
 		networkId:      *networkId,
 		subscriptionId: subscriptionId,
-		// in UTC, as the timestamp columns these reach hold it
-		startTime: time.Unix(periodStart, 0).UTC(),
-		endTime:   time.Unix(periodEnd, 0).UTC().Add(manualPaymentGracePeriod),
+		startTime:      time.Unix(periodStart, 0).UTC(),
+		paidEndTime:    paidEndTime,
+		endTime:        paidEndTime.Add(grace),
 	}
 	return credit, nil
 }
@@ -1054,11 +1069,9 @@ func stripeHandleInvoicePaidInConn(connOwner server.PgConn,
 
 	_, err = stripeCreditInvoicePaidInConn(connOwner,
 		clientSession.Ctx,
-		credit.networkId,
+		credit,
 		invoice,
 		netRevenue,
-		credit.startTime,
-		credit.endTime,
 	)
 	if err != nil {
 		glog.Infof("Error processing invoice paid: %v", err)
@@ -1129,6 +1142,9 @@ func stripeAcknowledgeUnresolvedInvoice(
 // credit are in the SAME tx: either both commit or neither does, and a
 // concurrent duplicate delivery blocks on the ledger row and then sees zero
 // rows affected. credited = false means this invoice was already credited.
+//
+// This form credits an invoice that took payment, whose window [startTime,
+// endTime) runs the manual-payment grace past its period.
 func stripeCreditInvoicePaid(
 	ctx context.Context,
 	networkId server.Id,
@@ -1137,22 +1153,26 @@ func stripeCreditInvoicePaid(
 	startTime time.Time,
 	endTime time.Time,
 ) (credited bool, returnErr error) {
-	return stripeCreditInvoicePaidInConn(nil, ctx, networkId, &StripeEventInvoiceObject{Id: invoiceId}, netRevenue, startTime, endTime)
+	credit := &stripeInvoiceCredit{
+		networkId:   networkId,
+		startTime:   startTime,
+		paidEndTime: endTime.Add(-stripeGraceSettingsFunc().periodGrace(true)),
+		endTime:     endTime,
+	}
+	return stripeCreditInvoicePaidInConn(nil, ctx, credit, &StripeEventInvoiceObject{Id: invoiceId}, netRevenue)
 }
 
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
 // invoice is the invoice as delivered; only its id is required.
 func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
 	ctx context.Context,
-	networkId server.Id,
+	credit *stripeInvoiceCredit,
 	invoice *StripeEventInvoiceObject,
 	netRevenue model.NanoCents,
-	startTime time.Time,
-	endTime time.Time,
 ) (credited bool, returnErr error) {
 
 	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-		credited, returnErr = stripeCreditInvoicePaidInTx(tx, ctx, networkId, invoice, netRevenue, startTime, endTime)
+		credited, returnErr = stripeCreditInvoicePaidInTx(tx, ctx, credit, invoice, netRevenue)
 	}, server.TxReadCommitted)
 
 	if returnErr != nil {
@@ -1162,7 +1182,7 @@ func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
 	if credited {
 		// the pro balance is committed -- refresh the entitlement cache so the
 		// upgrade is visible immediately rather than after ProCacheTtl
-		model.UpdateProNetworkInConn(connOwner, ctx, networkId)
+		model.UpdateProNetworkInConn(connOwner, ctx, credit.networkId)
 	}
 
 	return credited, nil
@@ -1170,16 +1190,18 @@ func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
 
 // stripeCreditInvoicePaidInTx is one attempt of the credit, in the caller's
 // ReadCommitted transaction: the stripe_invoice ledger gate, then the renewal
-// and the pro balance, then the sales notice of the new payment.
+// and the pro balance, then the sales notice of the new payment. The credit's
+// window and paid period come from stripeResolveInvoiceCredit.
 func stripeCreditInvoicePaidInTx(
 	tx server.PgTx,
 	ctx context.Context,
-	networkId server.Id,
+	credit *stripeInvoiceCredit,
 	invoice *StripeEventInvoiceObject,
 	netRevenue model.NanoCents,
-	startTime time.Time,
-	endTime time.Time,
 ) (credited bool, returnErr error) {
+	networkId := credit.networkId
+	startTime := credit.startTime
+	endTime := credit.endTime
 	if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
 		return false, err
 	}
@@ -1201,9 +1223,9 @@ func stripeCreditInvoicePaidInTx(
 		return false, nil
 	}
 
-	// the invoice's billing period: endTime is its end plus the manual-payment
-	// grace (stripeResolveInvoiceCredit)
-	paidEndTime := endTime.Add(-manualPaymentGracePeriod)
+	// the invoice's billing period; endTime runs the grace of its payment past
+	// it (stripeResolveInvoiceCredit)
+	paidEndTime := credit.paidEndTime
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -1244,7 +1266,7 @@ func stripeCreditInvoicePaidInTx(
 	// the ledger row is new: this invoice is a new payment, posted once the
 	// transaction commits
 	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
-		return stripeInvoiceSalesNotice(networkId, invoice, startTime, endTime)
+		return stripeInvoiceSalesNotice(networkId, invoice, startTime, paidEndTime)
 	})
 
 	return true, nil

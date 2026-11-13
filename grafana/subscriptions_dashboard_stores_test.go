@@ -56,11 +56,11 @@ func TestSubscriptionsDashboardShowsEveryTrackedStore(t *testing.T) {
 			}
 		}
 	}
-	// current, new, engaged and churned subscribers by store, and the three
-	// reconciliation panels (terminal events and repairs gate on each
-	// store's source timestamp too)
-	if lists != 9 {
-		t.Errorf("subscriptions dashboard has %d tracked-store lists, want 9", lists)
+	// current, new, engaged, churned and past-due subscribers by store, and
+	// the three reconciliation panels (terminal events and repairs gate on
+	// each store's source timestamp too)
+	if lists != 10 {
+		t.Errorf("subscriptions dashboard has %d tracked-store lists, want 10", lists)
 	}
 
 	documentBytes, err := dashboardsFs.ReadFile("dashboards/subscriptions.json")
@@ -76,5 +76,39 @@ func TestSubscriptionsDashboardShowsEveryTrackedStore(t *testing.T) {
 		if !strings.Contains(string(documentBytes), required) {
 			t.Errorf("subscriptions dashboard does not say %q", required)
 		}
+	}
+}
+
+// The resolved payment failures panel names exactly the reasons the exporter
+// labels (model.SubscriptionMetricsPaymentFailureResolveReasons), and only the
+// stores whose failed renewals the server records, so a reason the ledger
+// gains fails here until the dashboard shows it.
+func TestSubscriptionsDashboardShowsEveryPaymentFailureReason(t *testing.T) {
+	dashboard := readTestDashboard(t, "subscriptions.json")
+	reasonList := regexp.MustCompile(`reason=~"([^"]*)"`)
+	storeName := regexp.MustCompile(`urnetwork_subscription_payment_failures_\w+\{[^}]*store="([^"]*)"`)
+	reasonLists := 0
+	failureStores := 0
+	for _, panel := range dashboard.Panels {
+		for _, target := range panel.Targets {
+			for _, match := range reasonList.FindAllStringSubmatch(target.Expr, -1) {
+				reasonLists += 1
+				if named := strings.Split(match[1], "|"); !slices.Equal(named, model.SubscriptionMetricsPaymentFailureResolveReasons()) {
+					t.Errorf("panel %d %q selects reasons %v, want %v", panel.Id, panel.Title, named, model.SubscriptionMetricsPaymentFailureResolveReasons())
+				}
+			}
+			for _, match := range storeName.FindAllStringSubmatch(target.Expr, -1) {
+				failureStores += 1
+				if !slices.Contains(model.SubscriptionMetricsPaymentFailureStores(), match[1]) {
+					t.Errorf("panel %d %q selects payment failures of %s, which records none", panel.Id, panel.Title, match[1])
+				}
+			}
+		}
+	}
+	if reasonLists != 1 {
+		t.Errorf("subscriptions dashboard has %d payment failure reason lists, want 1", reasonLists)
+	}
+	if failureStores != 2 {
+		t.Errorf("subscriptions dashboard selects payment failures %d times, want 2 (open, resolved)", failureStores)
 	}
 }
