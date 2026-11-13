@@ -1003,6 +1003,11 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{providerEgressFp2EvidenceMigrationContract},
 	// the store notification flow, versioned by its position
 	[]snMainnetMigrationContract{storeNotificationFlowMigrationContract},
+	// the sweep of every issued address of a per-address coin, versioned by
+	// its position
+	[]snMainnetMigrationContract{cryptoAddressSweepMigrationContract},
+	// the Shopify orders paid with Solana Pay, versioned by its position
+	[]snMainnetMigrationContract{solanaShopifyOrderPaymentMigrationContract},
 	// Exact closure, cycle transition and inherited legacy/source custody.
 	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract},
 )
