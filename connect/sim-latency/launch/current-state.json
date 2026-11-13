@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T04:10:10Z",
+  "observed_at": "2026-11-13T05:16:13Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,54 +17,73 @@
   },
   "source_index": "../EPOCH-SOURCE.md",
   "queue": {
-    "succeeded": 17,
+    "succeeded": 18,
     "failed": 4,
     "queued": 0,
-    "running": 1
+    "running": 0
   },
   "last_completed_attempt": {
-    "job_id": "01a1d270-672a-80c0-4983-afa0464c8eae",
-    "host_id": "sille",
-    "run_id": "cb61142db0a92772f6d58ea327d613d521151d3eaf461d0c27dd5bff97a10725",
-    "started_at": "2026-11-13T01:06:37.281162Z",
-    "original_deadline_at": "2026-11-13T04:06:37.281162Z",
+    "job_id": "01a1d2c5-1653-b033-1203-34a0e6e9bf32",
+    "host_id": "goofe",
+    "run_id": "bd851b8f0e56dc110814e31c84300e42d2850545efcb2e553f36d0d834a25d67",
+    "started_at": "2026-11-13T02:38:32.584085Z",
+    "original_deadline_at": "2026-11-13T05:38:32.584085Z",
     "attempt": 1,
     "cycle": 0,
-    "native_fencing_token": 20,
-    "last_progress": "Native evaluation and verified cleanup succeeded; authoritative database now counts17 succeeded and no running Sille job."
+    "native_fencing_token": 37,
+    "last_progress": "Native evaluation and both cleanup checks succeeded; same attempt reconciled at fence37 with unchanged deadline, then authoritative database recorded success and cleared the slot at04:17:59 UTC."
   },
-  "active_attempts": [{
+  "active_attempts": [],
+  "last_reconciled_attempt": {
     "job_id": "01a1d2c5-1653-b033-1203-34a0e6e9bf32",
     "host_id": "goofe",
     "started_at": "2026-11-13T02:38:32.584085Z",
     "original_deadline_at": "2026-11-13T05:38:32.584085Z",
     "no_operator_interruption": true,
-    "coordinator_custody": "reconciled_same_attempt",
+    "coordinator_custody": "reconciled_same_attempt_then_completed",
     "reconciled_database_fence": 37,
     "reconciled_heartbeat_at": "2026-11-13T04:10:45.438015Z",
     "database_lease_released_at": "2026-11-13T03:45:04.395237Z",
     "cause": "Heartbeat database operations timed out at03:44:47/55; coordinator withdrew custody without stopping the remote execution. Hold32 temporarily blocked same-run reconciliation and is now released at revision33.",
-    "native_progress": "Candidate replicate09 observed running with healthy PostgreSQL/Redis after custody release; no native completion claimed.",
-    "next_action": "Monitor same-run result/archive completion within the unchanged deadline; do not restart the active worker."
-  }],
+    "native_progress": "Native state succeeded at fence37, exit0, execution started, both cleanup checks true and recovery inactive; database success confirmed.",
+    "next_action": "Heartbeat worker maintenance completed; no rerun of this successful job. Finish controlled recovery qualification for the infrastructure-failed jobs."
+  },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": true,
-    "publication_held": false,
-    "api_observed_at": "2026-11-13T04:10:09.786875Z",
+    "grading_ready": false,
+    "publication_held": true,
+    "api_observed_at": "2026-11-13T05:15:19.935814Z",
+    "current_maintenance": {
+      "evaluation_hold_revision": 36,
+      "active": true,
+      "evidence": "/var/lib/urnetwork/competition-combined-qualification-maintenance-20261113.Zd7cpCEc",
+      "operator_plan_sha256": "af3d72578deda020f0ad1231acfd4ef69b162076a33bc819d07533d5ee6a7cc2",
+      "post_hold_all_database_slots_idle": true,
+      "both_latest_native_runs_succeeded_and_cleaned": true,
+      "fresh_signed_observer_build_in_progress": false,
+      "worker_stopped_or_replaced": true,
+      "ownership_readback": "/var/lib/urnetwork/competition-recovery-hold-readback-20261113.LXMp4dQk/readback.json",
+      "no_failed_job_recovery_grants": true
+    },
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
-      "supervisor_pid": 211140,
-      "worker_pid": 211494,
-      "invocation_id": "09dbbbec396b44f89b3440e0a2e39e25",
-      "automatic_restarts": 3,
-      "last_start": "2026-11-12T19:27:21Z",
-      "worker_source_or_binary_changed": false,
+      "supervisor_pid": 2512624,
+      "worker_pid": 2512998,
+      "invocation_id": "bbba43c014224403b2cf85f4d2282dbd",
+      "automatic_restarts": 1,
+      "last_start": "2026-11-13T04:39:58Z",
+      "worker_source_or_binary_changed": true,
       "operator_hold_or_restart_performed": true,
-      "service_stopped_or_restarted": false,
+      "service_stopped_or_restarted": true,
       "ops_maintenance_confirmation": "user_asking_ops_to_check_1918_to_1927_utc"
     },
     "transient_readiness_cause_confirmed": false,
+    "known_held_reconciliation_gap": {
+      "status": "confirmed_source_path_not_fixed",
+      "evidence": "The same Goofe attempt remained native-successful while hold32 blocked coordinator reconciliation; release33 let fence37 reconcile without a rerun or deadline change.",
+      "boundaries": "Worker.Run skips all claims after held finishEpoch, and claimDistributedCompetitionJob rejects the hold before inspecting its existing slot. Moving only one check would not fix the composed path.",
+      "operational_mitigation": "Enter maintenance only after authoritative database slots and signed native terminal cleanup are verified idle. Do not interrupt active attempts or use a hold release to bypass qualification."
+    },
     "latest_readiness_dip": {
       "observed_at": "2026-11-12T22:11:20.824762Z",
       "failed_checks": ["authoritative_evaluator_host", "artifact_storage", "host_rebaseline"],
@@ -116,7 +135,23 @@
       "failed_batch_partial_credit": false,
       "race_or_release_qualification_complete": false
     },
-    "active_qualification": null,
+    "active_qualification": {
+      "kind": "remaining3_original_census_cpu02",
+      "evidence": "/dev/shm/competition-wallet-deferred3-cpu02-20261113.wb6QTMLW",
+      "actor_unit": "competition-guard-independent-qa-20261112.service",
+      "actor_pid": 2616238,
+      "actor_invocation_id": "017ad3bf8bf846c3a8d52d302938f6e0",
+      "guard_unit": "competition-guard-bootstrap-20261112.service",
+      "guard_pid": 2616320,
+      "guard_invocation_id": "ff4228ba57c3496695ac6728ac5c76ad",
+      "started_at": "2026-11-13T05:09:14Z",
+      "recipe_sha256": "fa1ad3c71ac8393ace22280ff1143ee7f46a2f693aac9ef4a855988b6311f137",
+      "actor_minutes": 65,
+      "guard_minutes": 66,
+      "runtime_only": true,
+      "passed_credit_granted": false,
+      "qualification_scope": "Original pinned source7880fd886 and wallet binarye2a3b939; no claim of integrated-main, race or release qualification."
+    },
     "last_completed_qualification": {
       "kind": "remaining24_original_census_cpu02",
       "evidence": "/dev/shm/competition-wallet-remaining24-cpu02-20261113.QgW15S0C",
@@ -203,10 +238,10 @@
       },
       "tests_remaining": "Remaining 3 original census cases, race qualification and final exact-main/dependency compatibility."
     },
-    "isolated_server_commit": "3abab6d3375aa7e2448808d42e85a83c305fdfae",
-    "isolated_sn_commit": "e908edda50378af63576109df88c603168716ce6",
+    "isolated_server_commit": "d7b23aeabd4b8e16a61acf8a1051f7c918d7a070",
+    "isolated_sn_commit": "d00ec71262b513a2bd5ca5f436da39aee05d6cba",
     "isolated_main_qualified_or_deployed": false,
-    "integration_status": "Isolated recovery branch merged current main a6735f73e. Published store-notification migration and monitor contract now precede the local recovery append; captured-tail regression includes StoreNotificationFlowVersion. Feature-only checkpoint 3abab6d33 is pushed, not qualified or merged into main. Existing original-census source/binary inputs remain unchanged; final exact-main/dependency and migration compatibility checks are pending.",
+    "integration_status": "Isolated feature checkpoint f8f9ff0d1 merged captured main615b3f2c3 without importing its dirty worktree. Published address-sweep968 and Shopify969 remain unchanged before local recovery970; the captured-tail regression includes both identities. Diff/format checks passed, but this checkpoint has not passed runtime qualification or been merged into main. Original-census source/binary inputs remain unchanged; final exact-source/dependency and migration compatibility checks are pending.",
     "deployment_pending": "Only after qualification: append recovery migration after origin, deploy compatible API/monitor, install worker/reevaluate CLI, verify global idle and both host closures, individually authorize recovery preserving FIFO."
   },
   "idle_heartbeat_fix": {
@@ -215,7 +250,9 @@
     "new_causal_cases": 15,
     "adjacent_cases": 61,
     "qualified_or_deployed": true,
-    "deployed": false,
+    "deployed": true,
+    "deployed_worker_sha256": "9a3bacc690049b21a2565700f13df5856a1faad98533035a49c5388294c2607a",
+    "activation_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-final-handoff-20261113.vXo0opmo",
     "initial_normal_compile": "Resource-stopped: cache growth 613072896 bytes exceeded the predeclared 536870912-byte bound. No binary or native Go exit status was produced; zero tests ran. Wrapper EXIT 0 is not success; manager TERM and guard 2 are preserved.",
     "durable_resource_failure": "/var/lib/urnetwork/competition-idle-heartbeat-normal-cache-stop-20261112.mqAX8YSx",
     "durable_failure_manifest_sha256": "eb25526e7b36ff69349c00e698ab303219137de7258d1385235f5a4954306233",
@@ -249,7 +286,7 @@
       "merged_to_main_or_deployed": true,
       "merged_to_main": true,
       "main_merge_commit": "4ae5dc9bcd123d8ad328ace97382c190b3c588b2",
-      "deployed": false,
+      "deployed": true,
       "full_main_abi_or_build_qualified": false
     },
     "warm_compile_result": "Compiled successfully; original smoke exposed a test-cleanup cancellation fixture defect. Failure preserved; production code unchanged by the correction.",
@@ -481,7 +518,7 @@
     "interpretation": "The historical public result returned HTTP 200 near an observed epoch-2 readiness dip; those sequential reads do not prove a bracketed hold condition. Pending is the API's settlement-receipt status, not independent proof of an external payment's state."
   },
   "next_actions": [
-    "Maintenance hold32 is released at revision33 after all24 native cases, joins and cleanup passed. Goofe reconciled at fence37 with attempt1 and original05:38:32 UTC deadline unchanged. Monitor same-run result/archive completion; never restart the active worker.",
+    "Queue drained at18 succeeded/4 failed. Under new own maintenance hold34, finish the fresh signed native observer for actual latest20/37 fences, then positively stop/fence the old idle service and activate the qualified staged heartbeat worker. Preserve all source/scoring pins and prove fresh host checks before release.",
     "Qualify the frozen published-history API fix at /var/lib/urnetwork/competition-published-history-read-fix-20261113.64r4qLqN, with normal/race runs and old-predicate causal controls. Published results/scores must stay readable during claim holds; embargo and election writes remain guarded. Commit/push before requesting the normal API deployment; no main migration is needed for this read fix.",
     "After live reconciliation, finish the remaining original census cases and race qualification using the pinned wallet-fixture binary; preserve native PostgreSQL and runtime limits. Deferred3 CPU02 recipe fa1ad3c71ac8393ace22280ff1143ee7f46a2f693aac9ef4a855988b6311f137 is prepared, not executed.",
     "Qualify the new bounded multi-unit provider adapter and execute complete paired reviews from the authenticated coverage ledger; protected original and linked validation evidence are retained separately.",
