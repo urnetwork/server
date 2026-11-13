@@ -1,0 +1,486 @@
+// Command monitor runs the reusable probes in server/monitor.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"github.com/urnetwork/server/v2026"
+	"io"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	servermonitor "github.com/urnetwork/server/v2026/monitor"
+)
+
+type stringFlags []string
+
+func (f *stringFlags) String() string { return fmt.Sprint([]string(*f)) }
+func (f *stringFlags) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+const (
+	alertFormatMarkdown = "markdown"
+	alertFormatJSONL    = "jsonl"
+)
+
+type monitorOptions struct {
+	once            bool
+	listSignals     bool
+	mode            string
+	format          string
+	output          string
+	keys            stringFlags
+	includedSignals stringFlags
+	excludedSignals stringFlags
+	// diagnostic: a focused run without the tier-0 vitals, which cannot
+	// verify production (RUN-MAIN.md, "Tier-0 vitals in every verification")
+	skipTierZeroVitals           bool
+	excludedHosts                stringFlags
+	excludedEdgeIPv6Hosts        stringFlags
+	minimumProbeCadence          time.Duration
+	apiReleaseProofFile          string
+	pgQuerySampleUntil           string
+	pgQuerySampleContinuous      bool
+	urlProbeCoverageOutput       string
+	providerSelectionOutput      string
+	settingsWitnessOutput        string
+	invocationWitnessOutput      string
+	admissionDiagnosticDirectory string
+	sshAdmissionDirectory        string
+	slackAlerts                  bool
+}
+
+// Exit only after the command-owned process lifecycle has returned.
+func main() {
+	os.Exit(runMonitorProcess(func() error {
+		return run(os.Args[1:], os.Stdout)
+	}, os.Stderr, server.ScrubProcessLogs))
+}
+
+// Drain both scrubbed descriptors before returning the final process status.
+func runMonitorProcess(runCommand func() error, stderr io.Writer, scrubLogs func() (func(), error)) int {
+	// Address scrubbing for everything this process writes to stdout and
+	// stderr, installed before anything can log. A failure here is not fatal:
+	// it degrades to the previous unscrubbed behavior rather than losing
+	// logging entirely. See server.ScrubProcessLogs.
+	restore, _ := scrubLogs()
+	defer restore()
+
+	if err := runCommand(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func run(args []string, stdout io.Writer) error {
+	if len(args) > 0 && args[0] == "ssh-lease" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		defer stop()
+		return runSshLeaseCommand(ctx, args, os.Stdin, stdout, servermonitor.RunSshAdmissionLease)
+	}
+	return runWithSettingsLoader(args, stdout, servermonitor.LoadSignalSettings)
+}
+
+func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error)) error {
+	return runWithSettingsAndSshAdmission(args, stdout, loadSettings, configureSharedSshAdmission)
+}
+
+func configureSharedSshAdmission(ctx context.Context, settings servermonitor.SignalSettings, directory string, once bool) (servermonitor.SignalSettings, error) {
+	if once {
+		return settings.WithSharedSshDiagnosticAdmission(ctx, directory)
+	}
+	return settings.WithSharedSshAdmission(ctx, directory)
+}
+
+// Bind the optional witness to actual local identity in ordinary CLI runs.
+func runWithSettingsAndSshAdmission(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error), configureAdmission func(context.Context, servermonitor.SignalSettings, string, bool) (servermonitor.SignalSettings, error)) (resultErr error) {
+	return runWithSettingsAdmissionAndWitness(args, stdout, loadSettings, configureAdmission,
+		func(ctx context.Context, settings servermonitor.SignalSettings, path string) (servermonitor.SignalSettings, io.Closer, error) {
+			return settings.WithSettingsGenerationWitness(ctx, path, servermonitor.DefaultSettingsGenerationWitnessSettings())
+		})
+}
+
+// Keep configuration and owner seams explicit for synthetic CLI controls;
+// the optional witness sees the same validated post-override startup value.
+func runWithSettingsAdmissionAndWitness(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error), configureAdmission func(context.Context, servermonitor.SignalSettings, string, bool) (servermonitor.SignalSettings, error), configureWitness func(context.Context, servermonitor.SignalSettings, string) (servermonitor.SignalSettings, io.Closer, error)) (resultErr error) {
+	return runWithInvocationWitness(args, stdout, loadSettings, configureAdmission, configureWitness, servermonitor.NewRunInvocationWitness)
+}
+
+func runWithInvocationWitness(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error), configureAdmission func(context.Context, servermonitor.SignalSettings, string, bool) (servermonitor.SignalSettings, error), configureWitness func(context.Context, servermonitor.SignalSettings, string) (servermonitor.SignalSettings, io.Closer, error), configureInvocation func(context.Context, string, servermonitor.SignalSettings, []servermonitor.Signal, io.Writer) (*servermonitor.RunInvocationWitness, error)) (resultErr error) {
+	opts, err := parseMonitorOptions(args)
+	if err != nil {
+		return err
+	}
+	var releaseProof *servermonitor.APIReleaseProofSettings
+	if opts.apiReleaseProofFile != "" {
+		releaseProof, err = servermonitor.LoadAPIReleaseProofSettings(opts.apiReleaseProofFile)
+		if err != nil {
+			return err
+		}
+	}
+
+	var pgSampleUntil time.Time
+	if opts.pgQuerySampleUntil != "" {
+		pgSampleUntil, err = time.Parse(time.RFC3339, opts.pgQuerySampleUntil)
+		if err != nil {
+			return errors.New("monitor: invalid -pg-query-sample-until clock")
+		}
+	}
+	if opts.listSignals {
+		return writeSignalList(stdout, servermonitor.NewSignals())
+	}
+	signals, err := selectSignals(opts)
+	if err != nil {
+		return err
+	}
+	if opts.urlProbeCoverageOutput != "" {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "url-probe-coverage"
+		}
+		if !selected {
+			return errors.New("monitor: URL coverage output requires the URL coverage signal")
+		}
+	}
+	if opts.providerSelectionOutput != "" {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "provider-selection"
+		}
+		if !selected {
+			return errors.New("monitor: selection output requires the provider-selection signal")
+		}
+	}
+	if opts.settingsWitnessOutput != "" {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "settings-freshness"
+		}
+		if !selected {
+			return errors.New("monitor: settings witness output requires the settings-freshness signal")
+		}
+	}
+
+	if opts.pgQuerySampleContinuous || !pgSampleUntil.IsZero() {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "pg-query-sample"
+		}
+		if !selected {
+			return errors.New("monitor: configured bounded PG query sample signal is excluded")
+		}
+	}
+	if releaseProof != nil {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "api-release-proof"
+		}
+		if !selected {
+			return errors.New("monitor: configured API release proof signal is excluded")
+		}
+	}
+	loadEffectiveSettings := func() (servermonitor.SignalSettings, error) {
+		settings, err := loadSettings()
+		if err != nil {
+			return servermonitor.SignalSettings{}, err
+		}
+		settings.APIReleaseProof = releaseProof
+		settings.PGQuerySampleUntil = pgSampleUntil
+		settings.PGQuerySampleContinuous = opts.pgQuerySampleContinuous
+		return applyMonitorSettingsOptions(settings, opts)
+	}
+	settings, err := loadEffectiveSettings()
+	if err != nil {
+		return err
+	}
+	// LoadSignalSettings arms the library default. Replace it here so every
+	// current-generation comparison reapplies this process's immutable CLI
+	// mode, repeated key override, and exact host exclusions before comparing.
+	settings.SettingsGenerationCheck = servermonitor.NewSettingsGenerationCheck(loadEffectiveSettings)
+	if err := settings.Validate(); err != nil {
+		return err
+	}
+	if opts.sshAdmissionDirectory != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		settings, err = configureAdmission(ctx, settings, opts.sshAdmissionDirectory, opts.once)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	if opts.urlProbeCoverageOutput != "" {
+		output, err := os.OpenFile(opts.urlProbeCoverageOutput, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+		if err != nil {
+			return errors.New("monitor: URL coverage output cannot be opened")
+		}
+		defer func() { resultErr = errors.Join(resultErr, output.Close()) }()
+		settings.UrlProbeCoverageObserver = func(observation servermonitor.UrlProbeCoverageObservation) error {
+			return observation.WriteJsonl(output)
+		}
+	}
+	if opts.providerSelectionOutput != "" {
+		output, err := os.OpenFile(opts.providerSelectionOutput, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+		if err != nil {
+			return errors.New("monitor: selection output cannot be opened")
+		}
+		defer func() { resultErr = errors.Join(resultErr, output.Close()) }()
+		settings.ProviderSelectionObserver = func(observation servermonitor.ProviderSelectionObservation) error {
+			return observation.WriteJsonl(output)
+		}
+	}
+	if opts.settingsWitnessOutput != "" {
+		var owner io.Closer
+		settings, owner, err = configureWitness(context.Background(), settings, opts.settingsWitnessOutput)
+		if err != nil {
+			return err
+		}
+		if owner == nil {
+			return errors.New("monitor: settings witness owner unavailable")
+		}
+		defer func() { resultErr = errors.Join(resultErr, owner.Close()) }()
+	}
+	var invocationWitness *servermonitor.RunInvocationWitness
+	if opts.invocationWitnessOutput != "" {
+		invocationWitness, err = configureInvocation(context.Background(), opts.invocationWitnessOutput, settings, signals, os.Stderr)
+		if err != nil {
+			return err
+		}
+		if invocationWitness == nil {
+			return errors.New("monitor: invocation witness owner unavailable")
+		}
+		defer invocationWitness.Close()
+	}
+	var admissionDiagnostic *servermonitor.RunAdmissionDiagnostic
+	if opts.admissionDiagnosticDirectory != "" {
+		admissionDiagnostic, err = servermonitor.NewRunAdmissionDiagnostic(opts.admissionDiagnosticDirectory, invocationWitness)
+		if err != nil {
+			return err
+		}
+		defer admissionDiagnostic.Close()
+	}
+	monitor := servermonitor.NewWithSignals(settings, signals...)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer stop()
+	if opts.once {
+		alerts, runErr := monitor.Run(ctx)
+		output, closeOutput, err := openAlertOutput(stdout, opts.output)
+		if err != nil {
+			return err
+		}
+		writeErr := writeAlerts(output, opts.format, alerts)
+		closeErr := closeOutput()
+		if writeErr != nil || closeErr != nil {
+			return errors.Join(writeErr, closeErr)
+		}
+		return runErr
+	}
+	// One-shot runs are diagnostics and never notify. The notifier logs its
+	// own startup line and drains its queue for up to 15s at exit.
+	var notifier *servermonitor.SlackAlertNotifier
+	if opts.slackAlerts {
+		notifier = servermonitor.NewSlackAlertNotifier(slackNotifierSettings(settings, opts))
+		defer drainSlackNotifier(stop, notifier.Close, 15*time.Second)
+	} else {
+		fmt.Fprintln(os.Stderr, "monitor: Slack alert notifications disabled by -slack-alerts=false")
+	}
+	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence, InvocationWitness: invocationWitness, AdmissionDiagnostic: admissionDiagnostic}, continuousAlertHandler(stdout, opts.format, notifier))
+}
+
+// Restores default signal handling first, so a second interrupt or SIGTERM
+// ends the process at once, then gives the notifier until timeout to post
+// what it holds.
+func drainSlackNotifier(stopSignals func(), closeNotifier func(context.Context), timeout time.Duration) {
+	stopSignals()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	closeNotifier(ctx)
+}
+
+// The notifier's production settings for this watcher. Its start window
+// covers the active probes' first two rounds under the cadence floor, where an
+// alert active at start first passes a Sustain of 2.
+func slackNotifierSettings(settings servermonitor.SignalSettings, opts monitorOptions) servermonitor.SlackAlertNotifierSettings {
+	notifierSettings := servermonitor.DefaultSlackAlertNotifierSettings()
+	notifierSettings.WebhookUrl = settings.AlertNotifications.SlackWebhookUrl
+	notifierSettings.Environment = settings.Environment
+	notifierSettings.StartWindow = max(notifierSettings.StartWindow, 3*opts.minimumProbeCadence)
+	return notifierSettings
+}
+
+// Hands every gated execution, empty ones included (absence from complete
+// executions is what clears an incident), to the optional notifier, then
+// writes nonempty gated alerts to stdout.
+func continuousAlertHandler(stdout io.Writer, format string, notifier *servermonitor.SlackAlertNotifier) servermonitor.SignalExecutionHandler {
+	return func(ctx context.Context, signal servermonitor.Signal, execution servermonitor.SignalExecution) error {
+		if notifier != nil {
+			notifier.Handle(signal, execution)
+		}
+		if len(execution.Alerts) == 0 {
+			return nil
+		}
+		return writeAlerts(stdout, format, execution.Alerts)
+	}
+}
+
+// Applies the CLI's settings options. A watcher that never posts to Slack
+// (-slack-alerts=false or -once) drops the webhook from its effective
+// settings, so a webhook rotation does not make it stale.
+func applyMonitorSettingsOptions(settings servermonitor.SignalSettings, opts monitorOptions) (servermonitor.SignalSettings, error) {
+	if opts.mode != "" {
+		settings.AddressMode = servermonitor.AddressMode(opts.mode)
+	}
+	if len(opts.keys) > 0 {
+		settings.SSHKeyPaths = append([]string(nil), opts.keys...)
+	}
+	if !opts.slackAlerts || opts.once {
+		settings.AlertNotifications = servermonitor.AlertNotificationSettings{}
+	}
+	settings, err := servermonitor.ExcludeEdgeIPv6Hosts(settings, opts.excludedEdgeIPv6Hosts...)
+	if err != nil {
+		return servermonitor.SignalSettings{}, err
+	}
+	return servermonitor.ExcludeHosts(settings, opts.excludedHosts...)
+}
+
+func parseMonitorOptions(args []string) (monitorOptions, error) {
+	flags := flag.NewFlagSet("monitor", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var opts monitorOptions
+	flags.BoolVar(&opts.once, "once", false, "run every selected signal once and exit")
+	flags.BoolVar(&opts.listSignals, "list-signals", false, "list registered signal identifiers and exit without loading settings")
+	flags.StringVar(&opts.mode, "mode", "", "SSH address mode: lan or overlay")
+	flags.StringVar(&opts.format, "format", alertFormatMarkdown, "alert output format: markdown or jsonl")
+	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
+	flags.StringVar(&opts.sshAdmissionDirectory, "ssh-admission-dir", "", "private shared Linux SSH queue for the watcher and one bounded diagnostic")
+	flags.BoolVar(&opts.pgQuerySampleContinuous, "pg-query-sample-continuous", false, "continuously collect bounded PostgreSQL query/load samples at the 15m cadence floor")
+	flags.StringVar(&opts.urlProbeCoverageOutput, "url-probe-coverage-output", "", "append one URL quota observation per existing signal execution, including healthy and unavailable results, as JSONL")
+	flags.StringVar(&opts.providerSelectionOutput, "provider-selection-output", "", "append every bounded selection reason observation per existing signal execution, including nonempty and unavailable results, as JSONL")
+	flags.StringVar(&opts.settingsWitnessOutput, "settings-witness-output", "", "create a private same-process settings witness stream for existing freshness invocations; requires an owned Linux user unit")
+	flags.StringVar(&opts.admissionDiagnosticDirectory, "admission-diagnostic-dir", "", "create a NEW private finite local admission diagnostic directory; requires invocation witness, no health claim")
+	flags.StringVar(&opts.invocationWitnessOutput, "invocation-witness-output", "", "create a new private bounded dispatch/Signal.Run-return stream in continuous mode; no health or target-completeness claim")
+	flags.StringVar(&opts.pgQuerySampleUntil, "pg-query-sample-until", "", "UTC expiry for one optional bounded PostgreSQL query/load sample")
+	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
+	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
+	flags.BoolVar(&opts.slackAlerts, "slack-alerts", true, "in continuous mode, post one Slack message per alert transition to vault monitor.yml alerts.slack_webhook_url (empty disables)")
+	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
+	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated; the tier-0 vitals always run too")
+	flags.Var(&opts.excludedSignals, "exclude-signal", "signal key, number, or ID to omit; may be repeated")
+	flags.BoolVar(&opts.skipTierZeroVitals, "skip-tier-zero-vitals", false, "diagnostic: run only the included signals, without the tier-0 vitals; such a run cannot verify production")
+	flags.Var(&opts.excludedHosts, "exclude-host", "exact inventory host whose observation should be paused; may be repeated")
+	flags.Var(&opts.excludedEdgeIPv6Hosts, "exclude-edge-ipv6-host", "host whose exact public IPv6 paths should be paused; may be repeated")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return monitorOptions{}, errors.New("usage: monitor [-once] [-list-signals] [-min-probe-cadence DURATION] [-format markdown|jsonl] [-include-signal IDENTIFIER [-skip-tier-zero-vitals] | -exclude-signal IDENTIFIER]")
+	}
+	if opts.minimumProbeCadence < 0 {
+		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
+	}
+	if opts.sshAdmissionDirectory != "" && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: shared SSH admission is unavailable in signal-list mode")
+	}
+	if opts.urlProbeCoverageOutput != "" && (opts.listSignals || opts.urlProbeCoverageOutput == opts.output) {
+		return monitorOptions{}, errors.New("monitor: URL coverage output requires a distinct observation file and cannot be used with -list-signals")
+	}
+	if opts.providerSelectionOutput != "" && (opts.listSignals || opts.providerSelectionOutput == opts.output || opts.providerSelectionOutput == opts.urlProbeCoverageOutput) {
+		return monitorOptions{}, errors.New("monitor: selection output requires a distinct observation file and cannot be used with -list-signals")
+	}
+	if opts.settingsWitnessOutput != "" && (opts.listSignals || opts.settingsWitnessOutput == opts.output || opts.settingsWitnessOutput == opts.urlProbeCoverageOutput || opts.settingsWitnessOutput == opts.providerSelectionOutput) {
+		return monitorOptions{}, errors.New("monitor: settings witness output requires a distinct new private file and cannot be used with -list-signals")
+	}
+	if opts.invocationWitnessOutput != "" && (opts.once || opts.listSignals || opts.invocationWitnessOutput == opts.output || opts.invocationWitnessOutput == opts.urlProbeCoverageOutput || opts.invocationWitnessOutput == opts.providerSelectionOutput || opts.invocationWitnessOutput == opts.settingsWitnessOutput) {
+		return monitorOptions{}, errors.New("monitor: invocation witness requires continuous mode and a distinct new private file")
+	}
+	if opts.admissionDiagnosticDirectory != "" && (opts.invocationWitnessOutput == "" || opts.once || opts.listSignals) {
+		return monitorOptions{}, errors.New("monitor: admission diagnostic requires continuous mode and an invocation witness")
+	}
+	if opts.pgQuerySampleContinuous && opts.pgQuerySampleUntil != "" {
+		return monitorOptions{}, errors.New("monitor: continuous and expiring PG sample modes are mutually exclusive")
+	}
+	if (opts.pgQuerySampleContinuous || opts.pgQuerySampleUntil != "") && (opts.once || opts.minimumProbeCadence < 15*time.Minute) {
+		return monitorOptions{}, errors.New("monitor: PG query sampling requires continuous mode with at least 15m cadence floor")
+	}
+	if (opts.pgQuerySampleContinuous || opts.pgQuerySampleUntil != "") && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: PG query sampling cannot be used with -list-signals")
+	}
+	if opts.apiReleaseProofFile != "" && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: -api-release-proof cannot be used with -list-signals")
+	}
+	if opts.minimumProbeCadence != 0 && (opts.once || opts.listSignals) {
+		return monitorOptions{}, errors.New("monitor: nonzero -min-probe-cadence requires continuous mode")
+	}
+	if len(opts.includedSignals) > 0 && len(opts.excludedSignals) > 0 {
+		return monitorOptions{}, errors.New("monitor: -include-signal and -exclude-signal are mutually exclusive")
+	}
+	if opts.skipTierZeroVitals && len(opts.includedSignals) == 0 {
+		return monitorOptions{}, errors.New("monitor: -skip-tier-zero-vitals applies only to -include-signal runs")
+	}
+	if opts.format != alertFormatMarkdown && opts.format != alertFormatJSONL {
+		return monitorOptions{}, fmt.Errorf("monitor: format %q is not supported; use markdown or jsonl", opts.format)
+	}
+	if opts.output != "" && !opts.once {
+		return monitorOptions{}, errors.New("monitor: -output requires -once")
+	}
+	if opts.output != "" && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: -output cannot be used with -list-signals")
+	}
+	return opts, nil
+}
+
+// openAlertOutput lets one-shot monitor output bypass an ambient stdout
+// capture boundary. The caller supplies a private temporary path and promotes
+// it only after validating the terminal Markdown completion marker.
+func openAlertOutput(stdout io.Writer, path string) (io.Writer, func() error, error) {
+	if path == "" {
+		return stdout, func() error { return nil }, nil
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("monitor: open output %q: %w", path, err)
+	}
+	return file, file.Close, nil
+}
+
+// The signals a run executes: a focused run's named signals plus the tier-0
+// vitals (servermonitor.IncludeSignalsWithTierZeroVitals), unless the
+// diagnostic -skip-tier-zero-vitals leaves them out; otherwise every
+// registered signal but the excluded ones.
+func selectSignals(opts monitorOptions) ([]servermonitor.Signal, error) {
+	signals := servermonitor.NewSignals()
+	if 0 < len(opts.includedSignals) {
+		if opts.skipTierZeroVitals {
+			return servermonitor.IncludeSignals(signals, opts.includedSignals...)
+		}
+		return servermonitor.IncludeSignalsWithTierZeroVitals(signals, opts.includedSignals...)
+	}
+	return servermonitor.ExcludeSignals(signals, opts.excludedSignals...)
+}
+
+func writeSignalList(w io.Writer, signals []servermonitor.Signal) error {
+	if _, err := fmt.Fprintln(w, "NUMBER\tKEY\tID\tNAME"); err != nil {
+		return err
+	}
+	for _, signal := range signals {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", signal.Number(), signal.Key(), signal.ID(), signal.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeAlerts(w io.Writer, format string, alerts servermonitor.Alerts) error {
+	switch format {
+	case alertFormatMarkdown:
+		return servermonitor.WriteAlertsMarkdown(w, alerts)
+	case alertFormatJSONL:
+		return servermonitor.WriteAlertsJSONL(w, alerts)
+	default:
+		return fmt.Errorf("monitor: format %q is not supported", format)
+	}
+}
