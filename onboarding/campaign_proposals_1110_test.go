@@ -232,8 +232,8 @@ func TestE2DesktopParams(t *testing.T) {
 	in := ParamsInput{
 		Template: TemplateE2Widget, Variant: VariantDesktop, Locale: "en",
 		DaysActive: 3, ConnectDays: 2, ProvidersOnline: 4812, CountriesOnline: 91,
-		Location: time.UTC, Now: time.Date(2026, 11, 13, 15, 0, 0, 0, time.UTC),
-		Token: "T", SiteUrl: "https://ur.io/", CompanyLine: "co",
+		Location: time.UTC,
+		Token:    "T", SiteUrl: "https://ur.io/", CompanyLine: "co",
 	}
 	for _, browser := range []bool{true, false} {
 		in.Browser = browser
