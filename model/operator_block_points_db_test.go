@@ -153,10 +153,11 @@ func operatorBlockPointsUsage(t testing.TB, ctx context.Context, start time.Time
 
 // The root cause: past the earning boundary a payout plan applied no points,
 // so a completed operator block's traffic earned none. The block's award
-// gives them by the plan's rules, stores the payments' operator block so the
-// leaderboard's Blocks count it, and changes neither the SN pool's usage, the
-// sweeps nor the provider's stats; a legacy obligation before the boundary is
-// no traffic of the block. A second run awards nothing more.
+// gives them, the payout points by bytes served, stores the payments'
+// operator block so the leaderboard's Blocks count it, and changes neither the
+// SN pool's usage, the sweeps nor the provider's stats; a legacy obligation
+// before the boundary is no traffic of the block. A second run awards nothing
+// more.
 func TestOperatorBlockPointsAwardPostCutoffBlock(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -171,9 +172,6 @@ func TestOperatorBlockPointsAwardPostCutoffBlock(t *testing.T) {
 
 		config := operatorBlockPointsTestConfig()
 		config.ReliabilityPointsPerPayout = 0
-		config.ReliabilitySubsidyPerPayoutUsd = 0
-		config.UsdPerActiveUser = 0
-		config.SubscriptionNetRevenueFraction = 0
 		gib := ByteCount(1024 * 1024 * 1024)
 
 		payer := newOperatorBlockPointsPayer(t, ctx)
@@ -221,19 +219,15 @@ func TestOperatorBlockPointsAwardPostCutoffBlock(t *testing.T) {
 			t.Fatalf("block %d has no award: %v", block, awards)
 		}
 
-		// the plan's rule over the block: one paying network, so its subsidy
-		// splits over A and B by bytes
-		// over the block's window past the boundary (ComputeOperatorBlockPoints'
-		// SubsidyScale), the whole block unless the boundary is inside it
+		// the block's payout points, over its window past the boundary (the
+		// whole block unless the boundary is inside it), shared 3:1 by bytes
 		scale := min(float64(windowEnd.Sub(windowStart))/float64(config.Duration()), 1.0)
-		subsidyUsd := scale * config.MinPayoutUsd
-		payoutA := UsdToNanoCents(float64(3*gib) / float64(4*gib) * subsidyUsd / 1)
-		payoutB := UsdToNanoCents(float64(gib) / float64(4*gib) * subsidyUsd / 1)
-		totalPoints := float64(config.AccountPointsPerPayout) * scale
-		pointsA := PointsToNanoPoints(totalPoints * (float64(payoutA) / float64(payoutA+payoutB)))
-		pointsB := PointsToNanoPoints(totalPoints * (float64(payoutB) / float64(payoutA+payoutB)))
+		payoutNanoPoints := PointsToNanoPoints(float64(config.AccountPointsPerPayout) * scale)
+		shares := operatorBlockPayoutPointShares(payoutNanoPoints, map[server.Id]ByteCount{providerA: 3 * gib, providerB: gib})
+		pointsA, pointsB := shares[providerA], shares[providerB]
+		operatorBlockPointsRequireByteShares(t, map[server.Id]NanoPoints{providerA: pointsA, providerB: pointsB}, map[server.Id]ByteCount{providerA: 3 * gib, providerB: gib}, payoutNanoPoints)
 		multipliedA := NanoPoints(float64(pointsA) * config.SeekerHolderMultiplier)
-		if award.TotalComputedPayout != payoutA+payoutB || award.TrafficUserCount != 1 || len(award.Payments) != 2 || award.SweepCount != 3 {
+		if award.PayoutNanoPoints != payoutNanoPoints || award.ByteCount != 4*gib || len(award.Payments) != 2 || award.SweepCount != 3 {
 			t.Fatalf("award %+v", award)
 		}
 
@@ -325,8 +319,7 @@ func TestOperatorBlockPointsAwardPostCutoffBlock(t *testing.T) {
 // The award's reliability is the payout plan's: the award's read-only fold of
 // the window equals the fold the plan ran into network_connection_reliability_score,
 // computed here by the plan's statement, multiplied by the country multipliers
-// as the plan read them, so reliability points and the computed reliability
-// subsidy are the plan's for the window.
+// as the plan read them, so reliability points are the plan's for the window.
 func TestOperatorBlockPointsReliabilityMatchesThePlanFold(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -341,7 +334,6 @@ func TestOperatorBlockPointsReliabilityMatchesThePlanFold(t *testing.T) {
 		previous := *config
 		defer func() { *config = previous }()
 		config.ReliabilityPointsPerPayout = 500_000
-		config.ReliabilitySubsidyPerPayoutUsd = 250
 		scale := 0.25
 
 		// the plan's window [start, end] in reliability blocks is the award's
@@ -357,7 +349,7 @@ func TestOperatorBlockPointsReliabilityMatchesThePlanFold(t *testing.T) {
 			}
 			planWeights[weight.key.networkId] += float64(weight.weight * multiplier)
 		}
-		planSubsidies := operatorBlockReliabilitySubsidies(planWeights, scale, config)
+		planPoints := operatorBlockReliabilityPoints(planWeights, scale, config)
 
 		reliability, err := readOperatorBlockReliability(ctx, start, end.Add(time.Microsecond), now)
 		if err != nil {
@@ -366,9 +358,9 @@ func TestOperatorBlockPointsReliabilityMatchesThePlanFold(t *testing.T) {
 		if len(reliability.networkWeights) != 2 || reliability.effectiveBlockCount <= 0 {
 			t.Fatalf("reliability %+v", reliability)
 		}
-		awardSubsidies := operatorBlockReliabilitySubsidies(reliability.networkWeights, scale, config)
-		if !maps.Equal(planSubsidies, awardSubsidies) || len(awardSubsidies) != 2 || awardSubsidies[networkA].Points <= 0 || awardSubsidies[networkB].Usdc <= 0 {
-			t.Fatalf("plan %v, award %v", planSubsidies, awardSubsidies)
+		awardPoints := operatorBlockReliabilityPoints(reliability.networkWeights, scale, config)
+		if !maps.Equal(planPoints, awardPoints) || len(awardPoints) != 2 || awardPoints[networkA] <= 0 || awardPoints[networkB] <= 0 {
+			t.Fatalf("plan %v, award %v", planPoints, awardPoints)
 		}
 	})
 }

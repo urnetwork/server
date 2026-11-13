@@ -3,7 +3,9 @@ package controller
 // The daily operator block points task (model/operator_block_points.go):
 // every completed operator block past the provider earning boundary gets the
 // points of its traffic, in parallel with the SN pool that pays for it. Owner
-// decision 2026-10-28.
+// decision 2026-10-28. Since 2026-11-13 the payout points follow the bytes
+// served, paid or unpaid, with no revenue term (owner decision 2026-11-13);
+// the first block the task awards after that change gets the new rule.
 
 import (
 	"time"

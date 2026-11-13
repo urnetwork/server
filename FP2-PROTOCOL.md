@@ -700,7 +700,8 @@ The provider status already reports URL checks as the ranking item
 rule (:777). The item keeps its value, count, total and `passes` as today.
 
 **The fields.** A downgraded provider's item gains three fields. All are
-omitempty, and all are also carried in the compact form.
+omitempty. The full form carries the English `reason`; the compact form
+carries the two counts without the English text.
 
 | Field | Type | Value |
 |---|---|---|
