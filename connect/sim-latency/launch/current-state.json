@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T20:35:42Z",
+  "observed_at": "2026-11-13T21:13:18Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -23,8 +23,8 @@
     "hold_active": false
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.7ev2yGJF/state.private.json",
-    "sha256": "5fb1f36af657b84c7f14e7d709831213864cff7f3801f6d280fb09926d2f609c",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.cnCdrdJI/state.private.json",
+    "sha256": "075f889d74b8f76e9052ab9f5cd6e67a0b7513c46277f58785f8291b541b7560",
     "mode": "root:root 0400 in root:root 0700 directory",
     "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
@@ -174,7 +174,8 @@
     "older_coordinator_activated": false,
     "earlier_control_preflights_failed_before_any_actor": true,
     "management_cpu_placement_qualified": false,
-    "remaining": "Do not activate existing custody/v2 or canonical/v3 configurations during grading: their actor CPUs overlap the evaluation set. The management-core-only v4 profile passed all 32 synthetic controls on reserved CPUs 20,22; stage a fresh immutable configuration, verify actual effective actor placement, then start an ordinary batch without changing prior claims, inner models, inputs, limits or gates. No model actor is currently active."
+    "launch_suspended_for_memory_accounting": true,
+    "remaining": "DO NOT ACTIVATE any review configuration yet. Management-core v4 passed 32 synthetic controls and its immutable config is staged, but auxiliary RAM-backed allocations are outside the declared management/evaluation budgets. Restore globally backed headroom through approved verified offload, and account the reviewer inside the reserved management budget before launch. This review-only suspension does not pause grading. Keep all prior claims, inner models, inputs, limits and gates unchanged."
   },
   "package_restart_deferral": {
     "hosts": [
@@ -218,7 +219,7 @@
     "source_baseline_submission_evidence_deleted": false
   },
   "next_actions": [
-    "Review orchestration has no active model call. Qualify management-core placement before starting another review batch; never replay a consumed operation or infer candidate approval from scoped evidence.",
+    "Review orchestration has no active model call. Keep it stopped until auxiliary RAM-cache offload is approved and verified and reserved-memory accounting is restored. Never replay a consumed operation or infer candidate approval from scoped evidence.",
     "Monitor active grading attempts and advancing host heartbeats under their existing deadlines. Recovery grants and hold release are committed; do not repeat them or restart a live owner on observation timeout.",
     "Finish complete both-model reviews and bounded cohort/archive routing. Derive eligibility from authenticated scoring rules, never success state alone.",
     "Keep all candidate outcomes and operator proof payloads in protected storage. Publish results only through the authorized finalization path."
