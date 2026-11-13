@@ -1006,6 +1006,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the sweep of every issued address of a per-address coin, versioned by
 	// its position
 	[]snMainnetMigrationContract{cryptoAddressSweepMigrationContract},
+	// the Shopify orders paid with Solana Pay, versioned by its position
+	[]snMainnetMigrationContract{solanaShopifyOrderPaymentMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

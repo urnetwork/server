@@ -22679,6 +22679,14 @@ establish:
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
+  Since 2026-11-13 a URnode order of our Shopify store paid with Solana Pay
+  into the same receiver is not one of these: when its Shopify order record
+  verifies it (one order paid through Solana Pay, a sale of exactly the
+  payment's total near its block), the webhook or the reconcile's receiver
+  leg records it in `solana_shopify_order_payment` instead, never credited.
+  A Solana Pay app payment no order verifies stays `no_intent`, its match
+  note saying why (no order, two, or an order another payment holds: a
+  second payment of one order); check it against the order in Shopify.
 - `payment-refund-unmatched` (PAGE): Stripe withdrew/disputed funds but the
   event could not be mapped to the immutable purchase ledger. Do not guess by
   email or manually edit a balance.

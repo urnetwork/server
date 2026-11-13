@@ -547,9 +547,8 @@ func (self *solanaNativeWallet) CheckNetwork(ctx context.Context) error {
 
 // ----- a jsonParsed transaction as the Helius webhook's decision reads it -----
 
-// solanaTransactionFromParsed is a finalized jsonParsed transaction in the
-// shape of a Helius enhanced transaction, as far as solanaDecidePayment reads
-// one:
+// A finalized jsonParsed transaction in the shape of a Helius enhanced
+// transaction, as far as solanaDecidePayment reads one:
 //
 //   - Type TRANSFER when a USDC token account owned by one of our receivers
 //     gained USDC, else UNKNOWN (the decision skips it);
@@ -557,6 +556,9 @@ func (self *solanaNativeWallet) CheckNetwork(ctx context.Context) error {
 //     the receiver and the UI amount as the gain, from the transaction's own
 //     pre and post token balances (a transfer, a transferChecked, a CPI from a
 //     smart wallet alike), the sender as the owner whose USDC fell;
+//   - the token account that paid each of those, when one instruction names
+//     it, and that account's other USDC transfers in the transaction
+//     (solanaParsedNameUsdcSources), as Helius names them;
 //   - the account keys as the account data (a Solana Pay reference is one),
 //     and the memo instructions with their text as the data (solanaMemoTexts
 //     keeps a text verbatim), top-level and inner;
@@ -693,7 +695,132 @@ func solanaTransactionFromParsed(signature string, parsed *solanaParsedTransacti
 		})
 		transaction.Type = "TRANSFER"
 	}
+	solanaParsedNameUsdcSources(transaction, parsed, keys)
 	return transaction
+}
+
+// The token programs whose transfers move USDC.
+var solanaTokenProgramIds = []string{
+	"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+	"TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+}
+
+// One transfer of USDC between token accounts an instruction of a parsed
+// transaction made, top-level or inner.
+type solanaParsedUsdcTransfer struct {
+	source      string
+	destination string
+	// micro-USDC
+	amount int64
+}
+
+// A parsed transaction's token program transfers of USDC (transfer,
+// transferChecked), top-level and inner, in order, with the owners of the USDC
+// token accounts the transaction's token balances name.
+func solanaParsedUsdcTransfers(parsed *solanaParsedTransaction, keys []string) (transfers []*solanaParsedUsdcTransfer, owners map[string]string) {
+	transfers = []*solanaParsedUsdcTransfer{}
+	owners = map[string]string{}
+	if parsed.Meta == nil {
+		return
+	}
+	for _, balances := range [][]solanaTokenBalance{parsed.Meta.PreTokenBalances, parsed.Meta.PostTokenBalances} {
+		for _, balance := range balances {
+			if balance.Mint == solanaUsdcMint && 0 <= balance.AccountIndex && balance.AccountIndex < len(keys) && owners[keys[balance.AccountIndex]] == "" {
+				owners[keys[balance.AccountIndex]] = balance.Owner
+			}
+		}
+	}
+	for _, instruction := range parsed.allInstructions() {
+		if !slices.Contains(solanaTokenProgramIds, instruction.ProgramId) || len(instruction.Parsed) == 0 {
+			continue
+		}
+		var parsedInstruction struct {
+			Type string `json:"type"`
+			Info struct {
+				Source      string `json:"source"`
+				Destination string `json:"destination"`
+				Mint        string `json:"mint"`
+				Amount      string `json:"amount"`
+				TokenAmount struct {
+					Amount string `json:"amount"`
+				} `json:"tokenAmount"`
+			} `json:"info"`
+		}
+		if err := json.Unmarshal(instruction.Parsed, &parsedInstruction); err != nil {
+			continue
+		}
+		info := parsedInstruction.Info
+		amountText := info.Amount
+		switch parsedInstruction.Type {
+		case "transferChecked":
+			if info.Mint != solanaUsdcMint {
+				continue
+			}
+			amountText = info.TokenAmount.Amount
+		case "transfer":
+			// a plain transfer names no mint: both accounts must hold USDC
+			_, sourceUsdc := owners[info.Source]
+			_, destinationUsdc := owners[info.Destination]
+			if !sourceUsdc || !destinationUsdc {
+				continue
+			}
+		default:
+			continue
+		}
+		amount, err := strconv.ParseInt(amountText, 10, 64)
+		if err != nil || amount <= 0 || info.Source == "" || info.Destination == "" {
+			continue
+		}
+		transfers = append(transfers, &solanaParsedUsdcTransfer{source: info.Source, destination: info.Destination, amount: amount})
+	}
+	return
+}
+
+// Names, as Helius's enhanced transactions do, the token account that paid
+// each transfer into one of our receivers (FromTokenAccount, when one
+// instruction transfer names it), and adds that account's other USDC transfers
+// in the transaction (a Solana Pay app's fee) as transfers to their own
+// owners: a Shopify order's payment is recognized by all its source sent out
+// (solana_shopify_order.go). The transfers into our receivers, which every
+// decision reads, are unchanged.
+func solanaParsedNameUsdcSources(transaction *SolanaTransaction, parsed *solanaParsedTransaction, keys []string) {
+	instructionTransfers, owners := solanaParsedUsdcTransfers(parsed, keys)
+	receiverTokenAccounts := []string{}
+	sources := []string{}
+	for i := range transaction.TokenTransfers {
+		receiverTransfer := &transaction.TokenTransfers[i]
+		receiverTokenAccounts = append(receiverTokenAccounts, receiverTransfer.ToTokenAccount)
+		named := []string{}
+		for _, instructionTransfer := range instructionTransfers {
+			if instructionTransfer.destination == receiverTransfer.ToTokenAccount && !slices.Contains(named, instructionTransfer.source) {
+				named = append(named, instructionTransfer.source)
+			}
+		}
+		if len(named) == 1 {
+			receiverTransfer.FromTokenAccount = named[0]
+			if !slices.Contains(sources, named[0]) {
+				sources = append(sources, named[0])
+			}
+		}
+	}
+	for _, instructionTransfer := range instructionTransfers {
+		owner := owners[instructionTransfer.destination]
+		if !slices.Contains(sources, instructionTransfer.source) ||
+			slices.Contains(receiverTokenAccounts, instructionTransfer.destination) ||
+			slices.Contains(solanaReceiverAddresses, owner) {
+			continue
+		}
+		uiAmount, _ := strconv.ParseFloat(cryptoFormatAtomic(instructionTransfer.amount, 6), 64)
+		transaction.TokenTransfers = append(transaction.TokenTransfers, TokenTransfer{
+			FromTokenAccount: instructionTransfer.source,
+			FromUserAccount:  owners[instructionTransfer.source],
+			Mint:             solanaUsdcMint,
+			ToTokenAccount:   instructionTransfer.destination,
+			ToUserAccount:    owner,
+			TokenAmount:      uiAmount,
+			TokenStandard:    "Fungible",
+		})
+	}
 }
 
 // ----- the chain leg of the Solana reconcile -----

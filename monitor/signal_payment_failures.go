@@ -374,7 +374,7 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		}
 		common.class = "payment-solana-unfulfilled"
 		common.symptom = fmt.Sprintf("%d received Solana payment(s) remain unfulfilled with reason %s", count, target)
-		common.mechanism = "Helius delivered a confirmed transfer but the server could not match a live intent or the received amount was below the quoted amount. The webhook was acknowledged, so the durable row is the only bounded recovery source."
+		common.mechanism = "Helius delivered a confirmed transfer but the server could not match a live intent or the received amount was below the quoted amount. The webhook was acknowledged, so the durable row is the only bounded recovery source. A Shopify order paid with Solana Pay that its order record verifies is recorded as the order's payment instead (solana_shopify_order_payment) and never lands here; one no order verifies does, with why in its match note."
 		common.action = "Validate the on-chain transfer and intent lookup through the supported reconciliation path. Credit only an exactly matched, sufficiently funded payment; otherwise route the durable row for an authorized refund/support decision. Never delete it to clear the alert."
 		common.verify = "Every valid transfer is credited idempotently or receives a documented authorized resolution, the durable row clears through the supported path, and no duplicate grant is created."
 	case "refund_unmatched":
