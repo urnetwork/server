@@ -50,6 +50,8 @@ const (
 type DbTxReleaseObservation struct {
 	Disposition     DbTxReleaseDisposition `json:"disposition"`
 	CleanupComplete bool                   `json:"cleanup_complete"`
+	// Only the driver's actual synchronous return, never protocol-idle entry.
+	PoolReturned bool `json:"pool_returned,omitempty"`
 }
 
 // Only the last entered boundary retains finite context budgets. BEGIN samples
@@ -158,10 +160,11 @@ func (self *DbTxObservation) releaseEntered() {
 
 // Only a returned release can transfer custody. Sampling a channel does not
 // wait for it, retain it, or start another cleanup worker.
-func (self *DbTxObservation) releaseReturned(disposition DbTxReleaseDisposition, cleanup <-chan struct{}) {
+func (self *DbTxObservation) releaseReturned(disposition DbTxReleaseDisposition, cleanup <-chan struct{}, poolReturned ...bool) {
 	if self != nil {
 		self.snapshot.ReleaseReturned++
 		self.snapshot.LastRelease.Disposition = disposition
+		self.snapshot.LastRelease.PoolReturned = disposition == DbTxReleaseIdle && len(poolReturned) == 1 && poolReturned[0]
 		select {
 		case <-cleanup:
 			self.snapshot.LastRelease.CleanupComplete = true

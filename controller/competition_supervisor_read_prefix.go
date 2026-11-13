@@ -16,6 +16,7 @@ import (
 type competitionSupervisorReadPrefixSnapshot struct {
 	workerFence                          bool
 	scopeIndependent                     bool
+	renewalWriter                        bool
 	valid                                bool
 	count, returned, succeeded, bypasses uint64
 }
@@ -28,7 +29,13 @@ func competitionSupervisorObservedReadPrefix(prefix competitionSupervisorReadPre
 } {
 	statements := competitionSupervisorReadPrefixStatements(prefix.workerFence)
 	if prefix.scopeIndependent && !prefix.workerFence {
-		return statements[1:]
+		statements = statements[1:]
+	}
+	if prefix.renewalWriter && !prefix.workerFence {
+		statements = append(statements, struct {
+			step      competitionSupervisorRenewalStep
+			kind, sql string
+		}{step: competitionSupervisorRenewalLeaseUpdate, kind: "exec", sql: strings.Join(strings.Fields(competitionSupervisorLeaseRenewalUpdateSql), " ")})
 	}
 	return statements
 }

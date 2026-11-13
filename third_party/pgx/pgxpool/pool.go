@@ -79,6 +79,7 @@ type Pool struct {
 	newConnsCount        atomic.Int64
 	lifetimeDestroyCount atomic.Int64
 	idleDestroyCount     atomic.Int64
+	idleReturnReset      atomic.Bool
 
 	p                     *puddle.Pool[*connResource]
 	config                *Config
@@ -704,6 +705,8 @@ func (p *Pool) AcquireAllIdle(ctx context.Context) []*Conn {
 // It is safe to reset a pool while connections are checked out. Those connections will be closed when they are returned
 // to the pool.
 func (p *Pool) Reset() {
+	// Publish before puddle can send an otherwise idle resource to destruction.
+	p.idleReturnReset.Store(true)
 	p.p.Reset()
 }
 

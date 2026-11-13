@@ -23,8 +23,8 @@
     "hold_active": true
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.Eo5FpwUZ/state.private.json",
-    "sha256": "49170515275fefcb130843fc19ffe2c38ba727756c7d20cbdedbf9a4e6e67f6d",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.Tax9LvLK/state.private.json",
+    "sha256": "28b0a361beda12b9891546337f7b1fa3d3f5275d30af31565724cb5c4f2ae10b",
     "mode": "root:root 0400 in root:root 0700 directory",
     "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
@@ -71,10 +71,12 @@
     "model_call_live_at_observation": false,
     "complete_candidate_approval_issued": false,
     "broader_registry_and_protected_hydration": "Parallel source work, not activated. No uncontrolled eviction, quota increase or namespace reset.",
-    "status": "PRIVATE_REVIEW_IN_PROGRESS_NEXT_SCOPE_PREPARATION_RUNNING",
+    "status": "PRIVATE_REVIEW_PREPARATION_STOPPED_PENDING_REQUIRED_INTEGRATION",
     "current_preparation_unit": "competition-private-complete-review-prepare-20261113-v6.service",
     "current_preparation_invocation_id": "a7bcbd9248434eea978349c9df25d874",
     "current_preparation_generates_model_judgment": false,
+    "current_preparation_terminal": true,
+    "current_preparation_exit_status": 1,
     "operation_outcomes": "Consult protected immutable operation receipts; do not infer candidate approval from operational status."
   },
   "qualified_clarification_metadata": {
@@ -116,6 +118,19 @@
     "cache_limits_increased": false,
     "remaining": "Compose selected-job routing and clarification lineage before full-cohort runtime qualification. Synthetic window coverage is not completed candidate review."
   },
+  "qualified_supervisor_update_recovery": {
+    "base_server_commit": "84615490189d7d58dc9acbea4086324cbe15d0ce",
+    "source_manifest_sha256": "bfbbde9be2fe31df70a668f44c297a6dd76c9da8f26e9858a50d265217059f70",
+    "new_tests_passed": 24,
+    "adjacent_controller_tests_passed": 60,
+    "pure_root_tests_passed": 35,
+    "focused_race_tests_passed": 40,
+    "isolated_postgres_tests_passed": 3,
+    "causal_mutants_failed_as_expected": 2,
+    "ported_files_match_qualified_source": true,
+    "manager_deployed": false,
+    "remaining": "Build the exact qualified composition with its pinned dependencies, verify idle custody and preserve the existing held worker during manager-only deployment. This does not authorize a recovery grant or hold release."
+  },
   "package_restart_deferral": {
     "hosts": [
       "sille",
@@ -151,7 +166,7 @@
     "source_baseline_submission_evidence_deleted": false
   },
   "next_actions": [
-    "Join the existing preparation unit and inspect its immutable receipt before any next operation. Preserve consumed operations and old failures; never repeat inference because observation timed out.",
+    "Inspect the terminal preparation receipt and complete its required integration. The preparation operation is consumed; do not restart it or repeat old inference.",
     "Verify advancing host heartbeats after the completed held worker handoff; retain compatible serving API identity before controlled recovery.",
     "Finish complete both-model reviews and bounded cohort/archive routing. Derive eligibility from authenticated scoring rules, never success state alone.",
     "Keep all candidate outcomes and operator proof payloads in protected storage. Publish results only through the authorized finalization path."

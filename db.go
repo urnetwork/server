@@ -859,9 +859,12 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				needsCleanup := discard || physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
 				lifecycle.beginRelease()
 				txObservation.releaseEntered()
+				poolReturned := false
 				if discard {
 					discardPgConnection(ctx, conn)
 					conn = nil
+				} else if releasePolicyKnown {
+					poolReturned = conn.ReleaseWithIdleReturn()
 				} else {
 					conn.Release()
 				}
@@ -873,7 +876,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 						disposition = DbTxReleaseDestroyTransferred
 					}
 				}
-				txObservation.releaseReturned(disposition, cleanup)
+				txObservation.releaseReturned(disposition, cleanup, poolReturned)
 			}()
 			defer func() {
 				if err := recover(); err != nil {
