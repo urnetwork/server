@@ -29,7 +29,8 @@
 // yet fails closed, each said once at start: Client-class token verification for sockets (plan-SOCK-client-auth,
 // QD-040's verify-only keyring and revocation-record check), so sidecarhost's Authenticator answers every
 // authenticated route unavailable; tls/'s ValidateListen (TLS-M5-22) and smtp/'s (MAIL-M7-22), so neither
-// namespace is registered and the engine refuses every entry of both.
+// namespace is registered and the engine refuses every entry of both. ur/ is the platform's (SOCK-M9-01) and opens
+// with the block: urnetwork-edge's clients list its services, and any sidecar Finds them.
 //
 // The key file is the owner's to create in vault (SOCK.md's external list). The command that writes one is an
 // operations command, which sidecarctl holds (owner, 2026-11-07; server/sidecarctl since QD-750), so it is not
@@ -215,6 +216,12 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 		return fail(err)
 	}
 	self.engine = engine
+	// ur/ is the platform's own (SOCK-M9-01): its rules are the engine's, so it opens with the block
+	if err := engine.RegisterPlatformNamespace(); err != nil {
+		engine.Close()
+		gate.Close()
+		return fail(err)
+	}
 	self.events = deps.Events
 	if self.events == nil {
 		self.events = engine
