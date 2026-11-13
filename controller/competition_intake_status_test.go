@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -72,8 +73,9 @@ func TestCompetitionIntakeStatusDoesNotChangeCanonicalPolicy(t *testing.T) {
 	}
 }
 
-// Even a retained previously completed score remains hidden while grading is held.
-func TestCompetitionIntakeHeldGradingDoesNotPublishScores(t *testing.T) {
+// A new grading pause cannot withdraw a score whose immutable publication
+// boundary already passed.
+func TestCompetitionIntakeHeldGradingPreservesPublishedScores(t *testing.T) {
 	_, store, service := newAutomationStagingApiFixture(t)
 	store.fakeStore.holdStatus.Evaluation = true
 	job := *store.enqueueJob
@@ -83,8 +85,25 @@ func TestCompetitionIntakeHeldGradingDoesNotPublishScores(t *testing.T) {
 	job.Round.AutomationPublicationAt = &publicationAt
 	store.fakeStore.getJob = &job
 	result, status, evalError := service.GetScoreV2(context.Background(), job.JobId, &Principal{Id: "synthetic-submitter", Role: "submitter"})
-	if evalError != nil || status != http.StatusOK || result.Score != nil || result.State != "completed" {
-		t.Fatalf("held grading exposed a score: %+v %d %v", result, status, evalError)
+	if evalError != nil || status != http.StatusOK || result == nil || result.Score == nil || result.State != "succeeded" {
+		t.Fatalf("held grading withdrew a published score: %+v %d %v", result, status, evalError)
+	}
+}
+
+// A future seal remains embargoed even when a completed job already has a
+// stored score; removing the historical read gate must not publish it early.
+func TestCompetitionIntakeHeldGradingDoesNotPublishFutureScores(t *testing.T) {
+	_, store, service := newAutomationStagingApiFixture(t)
+	store.fakeStore.holdStatus.Evaluation = true
+	job := *store.enqueueJob
+	rawScore := float64(123)
+	job.State, job.Score = "succeeded", &ScoreResult{RawScore: &rawScore}
+	publicationAt := server.NowUtc().Add(time.Hour)
+	job.Round.AutomationPublicationAt = &publicationAt
+	store.fakeStore.getJob = &job
+	result, status, evalError := service.GetScoreV2(context.Background(), job.JobId, &Principal{Id: "synthetic-submitter", Role: "submitter"})
+	if evalError != nil || status != http.StatusOK || result == nil || result.Score != nil || result.State != "completed" {
+		t.Fatalf("grading pause exposed an embargoed score: %+v %d %v", result, status, evalError)
 	}
 }
 
@@ -100,9 +119,9 @@ func (self *competitionIntakeScopedHoldStore) AutomationHoldStatus(_ context.Con
 	return competitionAutomationHoldStatus{Evaluation: self.observedSeason == self.currentSeason}, nil
 }
 
-// Historical contracts authenticate their original frozen scope rather than
-// inheriting the live season's hold. Existing source/auth guards run unchanged.
-func TestCompetitionIntakeHistoricalScoreUsesFrozenHoldScope(t *testing.T) {
+// Published history does not depend on a mutable hold lookup in either season.
+// Existing frozen source and authenticated score ownership guards still run.
+func TestCompetitionIntakeHistoricalScoreDoesNotReadMutableHolds(t *testing.T) {
 	settings, source, _ := newAutomationStagingApiFixture(t)
 	store := &competitionIntakeScopedHoldStore{automationStagingApiStore: source, currentSeason: settings.AutomationPolicy.SeasonId}
 	job := *source.enqueueJob
@@ -123,8 +142,32 @@ func TestCompetitionIntakeHistoricalScoreUsesFrozenHoldScope(t *testing.T) {
 	store.fakeStore.getJob = &job
 	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
 	result, status, evalError := service.GetScoreV2(context.Background(), job.JobId, &Principal{Id: "synthetic-submitter", Role: "submitter"})
-	if evalError != nil || status != http.StatusOK || result.Score == nil || store.observedSeason != policy.AutomationPolicy.SeasonId {
+	if evalError != nil || status != http.StatusOK || result == nil || result.Score == nil || store.observedSeason != "" {
 		t.Fatalf("historical score inherited the current season hold: %+v %d %v scope=%s", result, status, evalError, store.observedSeason)
+	}
+}
+
+// Unpublished historical contracts still query their frozen season, rather
+// than inheriting a different live season's operational hold.
+func TestCompetitionIntakeUnpublishedRoundUsesFrozenHoldScope(t *testing.T) {
+	settings, source, _ := newAutomationStagingApiFixture(t)
+	store := &competitionIntakeScopedHoldStore{automationStagingApiStore: source, currentSeason: settings.AutomationPolicy.SeasonId}
+	round := source.enqueueJob.Round
+	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.AutomationPolicy.SeasonId = "synthetic-prior-season"
+	round.PolicyJson, err = json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicationAt := server.NowUtc().Add(time.Hour)
+	round.AutomationPublicationAt = &publicationAt
+	service := newServiceWithImageDigest(settings, store, testApiImageDigest(), nil)
+	held, err := service.competitionPublicationHeld(context.Background(), settings, &round)
+	if err != nil || held || store.observedSeason != policy.AutomationPolicy.SeasonId {
+		t.Fatalf("unpublished round lost its frozen hold scope: held=%t scope=%s err=%v", held, store.observedSeason, err)
 	}
 }
 
@@ -169,9 +212,9 @@ func TestCompetitionIntakeDurableHoldPreservesFifoAndPreventsClaimAndSeal(t *tes
 	})
 }
 
-// A newly applied grading hold also blocks an existing seal's public result
-// and replay path; it cannot be bypassed through idempotent finalization.
-func TestCompetitionIntakeHoldBlocksExistingWinnerPublication(t *testing.T) {
+// A claim-only pause cannot retract published history, but it still blocks
+// election replay and cannot reveal a seal before its publication boundary.
+func TestCompetitionIntakeHoldPreservesPublishedResultAndBlocksSealReplay(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newCompetitionAutomationFixture(t)
@@ -180,15 +223,23 @@ func TestCompetitionIntakeHoldBlocksExistingWinnerPublication(t *testing.T) {
 		if _, err := fixture.store.SealAndElect(ctx, fixture.settings, fixture.round.RoundId); err != nil {
 			t.Fatal(err)
 		}
+		published, err := fixture.store.AutomationResult(ctx, fixture.settings, fixture.round.RoundId)
+		if err != nil || published == nil {
+			t.Fatalf("initial published result unavailable: %+v %v", published, err)
+		}
 		args := model.CompetitionAutomationHoldArgs{Kind: "evaluation", Active: true, IdempotencyKey: "synthetic-publication-hold", ReasonCode: "OPERATOR_HOLD", PublicExplanation: "Synthetic publication gate.", EvidenceSha256: strings.Repeat("b", 64)}
 		if _, err := fixture.store.SetAutomationHold(ctx, fixture.settings, "synthetic-scheduler", args); err != nil {
 			t.Fatal(err)
 		}
-		if result, err := fixture.store.AutomationResult(ctx, fixture.settings, fixture.round.RoundId); !errors.Is(err, ErrAutomationHeld) || result != nil {
-			t.Fatalf("hold exposed a previous winner: %+v %v", result, err)
+		if result, err := fixture.store.AutomationResult(ctx, fixture.settings, fixture.round.RoundId); err != nil || !reflect.DeepEqual(result, published) {
+			t.Fatalf("claim hold retracted or changed published history: %+v %v", result, err)
 		}
 		if result, err := fixture.store.SealAndElect(ctx, fixture.settings, fixture.round.RoundId); !errors.Is(err, ErrAutomationHeld) || result != nil {
 			t.Fatalf("seal replay bypassed grading hold: %+v %v", result, err)
+		}
+		fixture.now = published.Seal.PublicationAt.Add(-time.Nanosecond)
+		if result, err := fixture.store.AutomationResult(ctx, fixture.settings, fixture.round.RoundId); !errors.Is(err, ErrAutomationNotPublished) || result != nil {
+			t.Fatalf("claim hold bypassed the publication embargo: %+v %v", result, err)
 		}
 	})
 }
