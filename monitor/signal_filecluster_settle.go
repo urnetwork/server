@@ -13,10 +13,10 @@ package monitor
 //   - filecluster-settle-unobservable reports what it could not read: Mimir itself, a cluster with no MinIO
 //     series, or no process clock at all.
 //
-// The MinIO series reach Mimir only through a scrape of each cluster's node metrics that labels them
-// job="file_cluster_minio" and cluster="<cluster id>", which xops does not run yet, and no evs, gkm or
-// taskworker host constructs its clock check yet (EVSB-M2-03). Until both do this signal reads blind, which
-// holds its incidents open: it cannot tell a held key from none.
+// The MinIO series reach Mimir through xops's scrape of each cluster's node metrics on every storage host
+// (playbook-file-clusters.yml), which labels them job="file_cluster_minio" and cluster="<cluster id>". No evs,
+// gkm or taskworker host constructs its clock check yet (EVSB-M2-03): until one does this signal reports the
+// process clocks blind, which holds its clock incidents open.
 
 import (
 	"context"

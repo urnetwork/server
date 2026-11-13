@@ -10,23 +10,27 @@ package monitor
 //     degraded, never at_risk;
 //   - at_risk: degraded and a further drive or host failing, or a host offline past 4 h (the RTO).
 //
-// A set leaves degraded once a full heal ends with every drive online, or, when no drive or host was offline,
-// once the queue drains with nothing dropped and no unclean start since the last full heal; it leaves at_risk
-// once the failure is repaired and a full heal ends. Lost queue entries with every drive online warn, and the
-// warn says to start one full heal.
+// A set leaves degraded once a full heal that began after its last failure ends, or, when no drive or host was
+// offline, once the queue drains with nothing dropped and no unclean start since the last full heal began; it
+// leaves at_risk once the failure is repaired and such a full heal ends. Lost queue entries with every drive
+// online warn, and the warn says to start one full heal.
 //
-// The heal inputs are the minio fork's, which does not export them yet: per pool and set the partial-write
-// queue's depth, its dropped entries and unclean starts, and when a full heal ended. Until it does a set's heal
-// debt reads unknown, never zero (the owner's interim): no set reads protected, a set with every drive online
-// reads unknown, a visibility finding, so no incident of this signal clears by itself, and a set that was
-// degraded or at_risk stays so until the watcher restarts after its full heal.
+// The heal inputs are the minio fork's, read from Mimir (filecluster_heal_debt.go): per pool and set each
+// host's partial-write queue depth, the entries it lost, its unclean starts and its last loss, and when the
+// cluster's last full heal began and ended. A set's heal debt is known only while every host of its cluster shows
+// its queue and the full heal reads; otherwise it reads unknown, never zero (the owner's interim): the set does
+// not read protected, with every drive online it reads unknown, a visibility finding, and a set that was degraded
+// or at_risk stays so.
 //
-// It publishes urnetwork_filecluster_set_state{cluster,set,state}. filecluster-set-at-risk pages §19.8's rota at
-// any hour from M3; filecluster-set-degraded and filecluster-heal-debt-lost warn; filecluster-state-unobservable
-// reports a cluster whose admin info did not read, or a set whose state hangs on an input it lacks.
+// It publishes urnetwork_filecluster_set_state{cluster,set,state} and the queues' sums,
+// urnetwork_filecluster_mrf_depth{cluster,set}, urnetwork_filecluster_mrf_dropped_total{cluster,set} and
+// urnetwork_filecluster_unclean_starts_total{cluster,set}. filecluster-set-at-risk pages §19.8's rota at any hour
+// from M3; filecluster-set-degraded and filecluster-heal-debt-lost warn; filecluster-state-unobservable reports a
+// cluster whose admin info did not read, or a set whose state hangs on an input it lacks.
 //
 // Its memory is the process's: each host's outage start and each set's episode. A restarted watcher dates an
-// outage from its first sight, so a host already down at the restart pages as past the RTO up to 4 h late.
+// outage from its first sight, so a host already down at the restart pages as past the RTO up to 4 h late, and
+// it forgets an episode that only a full heal ends: a set whose outage it did not see reads by its queue alone.
 
 import (
 	"context"
@@ -67,13 +71,15 @@ type fileClusterHealDebt struct {
 	known bool
 	// partial writes queued for heal
 	depth float64
-	// entries dropped, or an unclean start, since the last full heal
+	// entries dropped, or an unclean start, that no full heal began after
 	lost bool
-	// when the last full heal of the cluster's bucket ended; zero for none known
-	fullHealEndTime time.Time
+	// when the cluster's last full heal began and ended; zero for none. The fork records one only when a heal
+	// of the whole cluster ran to its end and left every item on every drive of its set.
+	fullHealStartTime time.Time
+	fullHealEndTime   time.Time
 }
 
-// Every set's heal debt in a cluster, by set. A set it does not name reads unknown.
+// Every set's heal debt in a cluster, by set, in place of the Mimir read. A set it does not name reads unknown.
 type fileClusterHealDebtSource func(ctx context.Context, env *probeEnv, clusterId string) (map[string]*fileClusterHealDebt, error)
 
 // What one set has been through since it last read clear.
@@ -123,7 +129,9 @@ type fileClusterSetVerdict struct {
 
 // Holds each set's memory across runs. Safe for concurrent use.
 type fileClusterStateProbe struct {
-	// nil reads every set's debt unknown, as it is until the fork exports it
+	// nil queries Mimir
+	query sidecarStorageQuery
+	// nil reads the fork's series through query; set, it stands in for them
 	healDebt fileClusterHealDebtSource
 
 	stateLock sync.Mutex
@@ -145,6 +153,17 @@ func (self *fileClusterStateProbe) check(ctx context.Context, env *probeEnv) ([]
 		return []finding{gate}, nil
 	}
 	now := env.now()
+	// one query reads every cluster's heal debt. A query that fails leaves every debt unknown, never zero.
+	var debtSamples []*sidecarStorageSample
+	var debtErr error
+	if self.healDebt == nil {
+		query := self.query
+		if query == nil {
+			query = sidecarStorageMimirQuery
+		}
+		debtSamples, debtErr = query(ctx, env, fileClusterHealDebtQuery(env.cfg.env, settings.MetricFreshness))
+	}
+	debtGauges, _ := settings.Gauges.(FileClusterHealDebtGauges)
 	findings := []finding{}
 	for _, clusterId := range settings.AdminSource.ClusterIds() {
 		info, err := settings.AdminSource.ReadAdminInfo(ctx, clusterId)
@@ -154,17 +173,27 @@ func (self *fileClusterStateProbe) check(ctx context.Context, env *probeEnv) ([]
 			if settings.Gauges != nil {
 				settings.Gauges.PublishSetStates(clusterId, self.unknownSetStates(clusterId))
 			}
+			if debtGauges != nil {
+				debtGauges.PublishQueueDebts(clusterId, nil)
+			}
 			continue
 		}
 		var debts map[string]*fileClusterHealDebt
-		if self.healDebt != nil {
+		var queues map[string]FileClusterQueueDebt
+		switch {
+		case self.healDebt != nil:
 			// an error leaves every debt unknown, never zero
 			debts, _ = self.healDebt(ctx, env, clusterId)
+		case debtErr == nil:
+			debts, queues = fileClusterHealDebts(clusterId, info, debtSamples)
 		}
 		clusterFindings, setStates := self.evaluate(settings, now, clusterId, info, debts)
 		findings = append(findings, clusterFindings...)
 		if settings.Gauges != nil {
 			settings.Gauges.PublishSetStates(clusterId, setStates)
+		}
+		if debtGauges != nil && self.healDebt == nil {
+			debtGauges.PublishQueueDebts(clusterId, queues)
 		}
 	}
 	return findings, nil
@@ -317,10 +346,12 @@ func evaluateFileClusterSet(
 		memory.atRisk = true
 	}
 
-	// the episode ends on a full heal after its last failure, or, with nothing offline in it, on a drained
-	// queue that lost nothing
+	// the episode ends on a full heal that began after its last failure, or, with nothing offline in it, on a
+	// drained queue that lost nothing. A heal that began before a drive returned or was replaced healed part
+	// of the set without it, so its end ends nothing.
 	if len(failingUnits) == 0 && len(rebuildingUnits) == 0 && 0 < len(memory.episodeUnits) && debt.known {
-		healed := !debt.fullHealEndTime.IsZero() && debt.fullHealEndTime.After(memory.lastFailureTime) && debt.fullHealEndTime.After(memory.episodeStartTime)
+		healed := !debt.fullHealStartTime.IsZero() && !debt.fullHealEndTime.IsZero() &&
+			debt.fullHealStartTime.After(memory.lastFailureTime) && debt.fullHealStartTime.After(memory.episodeStartTime)
 		drained := !memory.episodeOffline && debt.depth == 0 && !debt.lost
 		if healed || drained {
 			memory.clear()
@@ -374,13 +405,13 @@ func (self *fileClusterStateProbe) stateFinding(settings *SidecarStorageSettings
 	case fileClusterStateClassAtRisk:
 		finding.tier = tierPage
 		finding.sustain = settings.PageSustain
-		finding.action = "Bring the failed host or drives back, or within 1 h of the page move a host's drives into the cold spare chassis or fit spare drives (§19.10); then run a full heal (mc admin heal --recursive)."
+		finding.action = "Bring the failed host or drives back, or within 1 h of the page move a host's drives into the cold spare chassis or fit spare drives (§19.10); then run a full heal of the whole cluster (mc admin heal --recursive <alias>)."
 	case fileClusterStateClassDegraded:
 		finding.sustain = settings.WarnSustain
-		finding.action = "Heal: on any return run a full heal (mc admin heal --recursive); the set stays degraded until it ends."
+		finding.action = "Heal: once every drive is back run a full heal of the whole cluster (mc admin heal --recursive <alias>); the set stays degraded until one that began after the return ends with nothing left unhealed."
 	case fileClusterStateClassDebtLost:
 		finding.sustain = 1
-		finding.action = "Start one full heal (mc admin heal --recursive): MinIO's partial-write queue lost entries, so only a full heal restores the shards they named."
+		finding.action = "Start one full heal of the whole cluster (mc admin heal --recursive <alias>): MinIO's partial-write queue lost entries, so only a full heal restores the shards they named."
 	case fileClusterStateClassUnobservable:
 		finding.sustain = 1
 		finding.unobservable = true
@@ -398,6 +429,13 @@ func (self *fileClusterStateProbe) setFindings(settings *SidecarStorageSettings,
 	}
 	observed := fmt.Sprintf("state=%s failing=[%s] rebuilding=[%s] long_offline=[%s] episode=[%s] heal_debt_known=%t",
 		verdict.state, list(verdict.failingUnits), list(verdict.rebuildingUnits), list(verdict.longOfflineHosts), list(verdict.episodeUnits), verdict.debt.known)
+	if verdict.debt.known {
+		fullHeal := "none"
+		if !verdict.debt.fullHealEndTime.IsZero() {
+			fullHeal = verdict.debt.fullHealStartTime.UTC().Format(time.RFC3339) + ".." + verdict.debt.fullHealEndTime.UTC().Format(time.RFC3339)
+		}
+		observed += fmt.Sprintf(" mrf_depth=%g mrf_lost=%t full_heal=%s", verdict.debt.depth, verdict.debt.lost, fullHeal)
+	}
 	findings := []finding{}
 	switch verdict.state {
 	case fileClusterStateAtRisk:
@@ -410,7 +448,7 @@ func (self *fileClusterStateProbe) setFindings(settings *SidecarStorageSettings,
 				"an erasure set is degraded: a drive or host offline, a drive rebuilding, or a heal pending", observed))
 	case fileClusterStateUnknown:
 		findings = append(findings, self.stateFinding(settings, fileClusterStateClassUnobservable, target, "heal-debt",
-			"every drive is online, and whether a heal is pending is unknown: the minio fork exports no partial-write queue or full heal yet", observed))
+			"every drive is online, and whether a heal is pending is unknown: a host's partial-write queue or the cluster's last full heal did not read from Mimir", observed))
 	default:
 		findings = append(findings,
 			healthyFinding(fileClusterStateProbeId, tierPage, fileClusterStateClassAtRisk, target),
