@@ -11,28 +11,22 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// subsidy.yml: the points of an operator block (operator_block_points.go) and
+// the country reliability multipliers. Its revenue and USDC keys
+// (usd_per_active_user, subscription_net_revenue_fraction, min_payout_usd,
+// active_user_byte_count_threshold, reliability_subsidy_per_payout_usd) sized
+// the payout plan's subsidy, which weighed points by revenue until 2026-11-13;
+// nothing reads them since, and parsing ignores them.
 type SubsidyConfig struct {
-	Days                                      float64 `yaml:"days"`
-	UsdPerActiveUser                          float64 `yaml:"usd_per_active_user"`
-	SubscriptionNetRevenueFraction            float64 `yaml:"subscription_net_revenue_fraction"`
-	MinPayoutUsd                              float64 `yaml:"min_payout_usd"`
-	ActiveUserByteCountThresholdHumanReadable string  `yaml:"active_user_byte_count_threshold"`
-	ReferralParentPayoutFraction              float64 `yaml:"referral_parent_payout_fraction"`
-	ReferralChildPayoutFraction               float64 `yaml:"referral_child_payout_fraction"`
-	AccountPointsPerPayout                    int     `yaml:"account_points_per_payout"`
-	ReliabilityPointsPerPayout                int     `yaml:"reliability_points_per_payout"`
-	ReliabilitySubsidyPerPayoutUsd            int     `yaml:"reliability_subsidy_per_payout_usd"`
-	CountryReliabilityWeightTarget            float64 `yaml:"country_reliability_weight_target"`
-	MaxCountryReliabilityMultiplier           float64 `yaml:"max_country_reliability_multiplier"`
-	SeekerHolderMultiplier                    float64 `yaml:"seeker_holder_multiplier"`
-}
-
-func (self *SubsidyConfig) ActiveUserByteCountThreshold() ByteCount {
-	byteCount, err := ParseByteCount(self.ActiveUserByteCountThresholdHumanReadable)
-	if err != nil {
-		panic(err)
-	}
-	return byteCount
+	// the subsidy period, to which the points per payout apply
+	Days                            float64 `yaml:"days"`
+	ReferralParentPayoutFraction    float64 `yaml:"referral_parent_payout_fraction"`
+	ReferralChildPayoutFraction     float64 `yaml:"referral_child_payout_fraction"`
+	AccountPointsPerPayout          int     `yaml:"account_points_per_payout"`
+	ReliabilityPointsPerPayout      int     `yaml:"reliability_points_per_payout"`
+	CountryReliabilityWeightTarget  float64 `yaml:"country_reliability_weight_target"`
+	MaxCountryReliabilityMultiplier float64 `yaml:"max_country_reliability_multiplier"`
+	SeekerHolderMultiplier          float64 `yaml:"seeker_holder_multiplier"`
 }
 
 func (self *SubsidyConfig) Duration() time.Duration {
