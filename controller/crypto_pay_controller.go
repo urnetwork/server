@@ -163,7 +163,8 @@ type CryptoPaymentStatusResult struct {
 	NetworkName string `json:"network_name"`
 	// unknown | pending | seen | confirming | paid | expired | review
 	Status string `json:"status"`
-	// with review: underpaid | late_underpaid | extra | orphaned | voided
+	// with review: underpaid | late_underpaid | extra | orphaned | voided |
+	// unlinked
 	ReviewReason string `json:"review_reason"`
 	// exact decimal strings in coin units, and the same in atomic units
 	Amount          string `json:"amount"`
@@ -1558,6 +1559,17 @@ var cryptoHeldReviewReasons = []string{
 	model.CryptoReviewReasonAmountUnmatched,
 	model.CryptoReviewReasonVoided,
 	model.CryptoReviewReasonExtra,
+	// a payment to an invoice the retention unlink passed, which no longer
+	// knows its network
+	model.CryptoReviewReasonUnlinked,
+}
+
+// cryptoIntentUndeliverable reports an invoice whose credit has nowhere to
+// go: one delivered to a network, past the retention unlink, which forgot the
+// network (RunCryptoPaymentUnlink). A code invoice still delivers: its buyer
+// reads the code with the status token.
+func cryptoIntentUndeliverable(intent *model.CryptoPaymentIntent) bool {
+	return intent.UnlinkedAt != nil && intent.Delivery != model.CryptoDeliveryCode
 }
 
 // cryptoBuyerReviewReason is the review reason a buyer is shown: either
@@ -1595,7 +1607,33 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 //	                          when anything arrived on time, late_underpaid otherwise)
 //	before the quote ends,    seen, with what remains to be sent
 //	short
+//	past the retention        what the rows above would credit is review/unlinked
+//	unlink, to a network      instead: the unlink forgot the network, so the credit
+//	                          has nowhere to go (a code invoice still credits)
 func cryptoEvaluateIntent(
+	intent *model.CryptoPaymentIntent,
+	receipts []*model.CryptoPaymentReceipt,
+	policy *cryptoIntentPolicy,
+	now time.Time,
+) *cryptoIntentView {
+	view := cryptoJudgeIntent(intent, receipts, policy, now)
+	if view.Action == cryptoIntentActionCredit && cryptoIntentUndeliverable(intent) {
+		view.Status = CryptoPaymentStatusReview
+		view.ReviewReason = model.CryptoReviewReasonUnlinked
+		view.RemainingAtomic = 0
+		view.Action = cryptoIntentActionReview
+		view.ActionReason = model.CryptoReviewReasonUnlinked
+		view.ReviewReceipts = view.CreditReceipts
+		view.CreditReceipts = nil
+		view.CreditUsd = 0
+		view.ReceiptUsdValue = map[model.CryptoPaymentReceiptKey]model.NanoCents{}
+	}
+	return view
+}
+
+// cryptoJudgeIntent is cryptoEvaluateIntent's table but its last row: what
+// the rules make of the invoice wherever its credit would go.
+func cryptoJudgeIntent(
 	intent *model.CryptoPaymentIntent,
 	receipts []*model.CryptoPaymentReceipt,
 	policy *cryptoIntentPolicy,

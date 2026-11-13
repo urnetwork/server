@@ -11518,4 +11518,11 @@ var migrations = []any{
 	// Nothing existing is locked or rewritten. Apply with the api and alt
 	// that write it.
 	storeNotificationFlowMigration,
+
+	// The sweep of every address a per-address coin's invoices were ever
+	// given (crypto_address_sweep_schema.go, controller/crypto_pay_sweep.go):
+	// two new empty tables, each created only when absent, under a
+	// five-second lock bound. Nothing existing is locked or rewritten. Apply
+	// before deploying the taskworker that runs the scans.
+	cryptoAddressSweepMigration,
 }

@@ -12,7 +12,11 @@ package controller
 //     about 15 minutes;
 //   - the fast path: Alchemy's Address Activity webhook (crypto_pay_alchemy.go),
 //     when alchemy.yml names it, only brings an address's read forward. New
-//     pool addresses are added to it through the Notify API.
+//     pool addresses are added to it through the Notify API;
+//   - the sweep (crypto_pay_sweep.go): every address an invoice was ever
+//     given, read once a day from its own cursor through the finalized block
+//     (SweepAddress), so a payment to an old or expired invoice is recorded
+//     even when its webhook delivery is lost.
 //
 // A transfer in a block that is reorged away before finality stops being
 // reported, and the scanner's vanished-receipt check re-reads its transaction
@@ -66,6 +70,52 @@ func newEthereumWallet(settings *cryptoWalletSettings, assetConfig *CryptoPayAss
 // when alchemy.yml names it and the Notify token.
 func (self *ethereumWallet) RegisterAddresses(ctx context.Context, addresses []string) error {
 	return cryptoAlchemyRegisterAddresses(ctx, self.webhookId, self.notifyToken, addresses)
+}
+
+// WebhookWatched: new pool addresses are registered with the Address
+// Activity webhook, whose delivery brings an address's read forward whatever
+// its age, when alchemy.yml names the webhook and the Notify token.
+func (self *ethereumWallet) WebhookWatched() bool {
+	return self.webhookId != "" && self.notifyToken != ""
+}
+
+// SweepAddress reads an issued address's ETH transfers after its cursor
+// (from the chain's start before its first read) through the finalized
+// block, in one alchemy_getAssetTransfers read, and moves the cursor to that
+// block: a finalized transfer never changes, so none is read twice and none
+// is passed over (crypto_pay_sweep.go).
+func (self *ethereumWallet) SweepAddress(
+	ctx context.Context,
+	address *model.CryptoAddressSweepAddress,
+	settings *CryptoAddressSweepSettings,
+	spend func() bool,
+) ([]*cryptoWalletReceipt, *model.CryptoAddressSweepCursor, bool, error) {
+	canonical, err := cryptoEthereumAddressCanonical(address.Address)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("an issued ETH address does not read: %w", err)
+	}
+	finalized, _, _, err := self.heads(ctx)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	from := cryptoSweepFromHeight(address.Cursor)
+	if finalized < from {
+		// nothing was finalized since the last read
+		return []*cryptoWalletReceipt{}, &model.CryptoAddressSweepCursor{Height: address.Cursor.Height}, true, nil
+	}
+	if !spend() {
+		return nil, nil, false, nil
+	}
+	transfers, err := self.transfersTo(ctx, canonical, cryptoHexBlock(from), cryptoHexBlock(finalized))
+	if err != nil {
+		return nil, nil, false, err
+	}
+	receipts, err := self.receipts(ctx, transfers, map[string]int64{canonical: address.AddressIndex}, finalized, time.Now().UTC())
+	if err != nil {
+		return nil, nil, false, err
+	}
+	finalizedHeight := int64(min(finalized, 1<<62))
+	return receipts, &model.CryptoAddressSweepCursor{Height: &finalizedHeight}, true, nil
 }
 
 // The receipt statuses of finalized transactions, per process: a finalized

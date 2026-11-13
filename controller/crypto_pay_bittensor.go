@@ -7,16 +7,34 @@ package controller
 // delay in Coinbase's own TAO deposits (trackers listed seven send and
 // receive delays in 2026, one of 4.5 days on Prime) never holds a customer.
 //
+// Every finalized block is read, and every Balances.Transfer in it is
+// matched against every address a TAO invoice was ever given (open or closed,
+// credited, voided or past the retention unlink), in one indexed lookup a
+// scan: a payment to an old or expired invoice is recorded too, and judged by
+// the late-payment rules (cryptoEvaluateIntent): credited where they credit,
+// else held for an operator. An invoice made after its block was mined is
+// not matched in it.
+//
 // snow's node is shared with the SN25 validator, so the reader is careful
 // with it (xops snow/subtensor/README.md: a runtime call outside the node's
 // cache of compiled runtimes stalls every client; on 2026-10-14 a reader that
-// spanned runtimes stalled the validator):
+// spanned runtimes stalled the validator). Its bounds are
+// CryptoTaoReaderSettings:
 //
-//   - it reads recent finalized blocks only: at most cryptoTaoBlocksPerScan a
-//     scan, never further back than cryptoTaoLookbackBlocks behind the
-//     finalized head. Older blocks are passed over, counted in
+//   - it reads recent finalized blocks only: at most BlocksPerScan a scan,
+//     never further back than LookbackBlocks behind the finalized head. Older
+//     blocks are passed over, counted in
 //     urnetwork_crypto_pay_scan_blocks_skipped_total and logged;
-//   - it reads no block at all while no TAO invoice address is in play;
+//   - its requests to the node are paced (one per RequestSpacing at most) and
+//     budgeted (RequestsPerScan a scan, the heads included: a scan stops
+//     reading blocks before it would pass it, and the next scan goes on), and
+//     counted by method in urnetwork_crypto_pay_tao_node_requests_total. In
+//     the steady state a scan reads the few blocks finalized since the last
+//     one: four storage and header reads a block (no runtime call), plus the
+//     heads and the network check, about 13 requests a 20 s scan at Finney's
+//     12 s blocks (0.65 a second; a scan that reads no block makes 6);
+//   - it reads no block at all until a TAO invoice address has been issued,
+//     so a coin that is configured but not yet sold costs only the heads;
 //   - it never replays history across runtime upgrades: each block's runtime
 //     is read from storage (System.LastRuntimeUpgrade, not a runtime call),
 //     and its events and extrinsics are decoded with that runtime's own
@@ -77,12 +95,50 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The most finalized blocks one scan reads.
-const cryptoTaoBlocksPerScan = 100
+// The TAO reader's tunables: the bounds of its load on snow's node, which the
+// SN25 validator shares.
+type CryptoTaoReaderSettings struct {
+	// The most finalized blocks one scan reads. Non-positive reads none.
+	BlocksPerScan int
+	// The furthest behind the finalized head a block is read: about an hour
+	// of 12 s blocks, all of the node's recent runtime. A scanner down longer
+	// passes the older blocks over and counts them.
+	LookbackBlocks uint64
+	// The most node requests one scan makes reading blocks, the heads and the
+	// network check included: a full scan of BlocksPerScan blocks is four
+	// requests a block, and a block that pays an invoice two more. A scan
+	// stops reading blocks before it would pass it. Non-positive reads none.
+	RequestsPerScan int
+	// The least time between two requests to the node, so a scan that catches
+	// up after an outage spreads its reads instead of bursting them.
+	// Non-positive does not pace.
+	RequestSpacing time.Duration
+	// How far after its block's time an invoice may have been made and still
+	// be matched in the block: the skew between our clock and the chain's.
+	ClockTolerance time.Duration
+}
 
-// The furthest behind the finalized head a block is read (about an hour of
-// 12 s blocks).
-const cryptoTaoLookbackBlocks = 300
+// A new instance on every call.
+func DefaultCryptoTaoReaderSettings() *CryptoTaoReaderSettings {
+	return &CryptoTaoReaderSettings{
+		BlocksPerScan:  100,
+		LookbackBlocks: 300,
+		// a full scan's 400 block reads, its heads, and the calls and times of
+		// the few blocks that pay an invoice
+		RequestsPerScan: 500,
+		// at most 20 requests a second: a catch-up of a full scan takes 20 s
+		RequestSpacing: 50 * time.Millisecond,
+		ClockTolerance: 5 * time.Minute,
+	}
+}
+
+// Requests the reader makes to the node per block it reads: its hash, its
+// runtime, its header and its events.
+const cryptoTaoBlockRequests = 4
+
+// The most more requests one read block makes: its body and its time, when a
+// transfer in it pays an invoice.
+const cryptoTaoBlockPaymentRequests = 2
 
 // A finalized head older than this is a node, or a finality, that stalled:
 // the network's height is unknown and TAO is not sold.
@@ -146,9 +202,42 @@ var cryptoPayTaoExtrinsicsUndecodable = prometheus.NewCounter(prometheus.Counter
 	Help:      "TAO extrinsics the reader could not decode and skipped (a transfer to an invoice address in one is held for review)",
 })
 
+// The reader's requests to snow's node, by method: the load it adds to the
+// node the SN25 validator shares.
+var cryptoPayTaoNodeRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "crypto_pay",
+	Name:      "tao_node_requests_total",
+	Help:      "Requests the TAO reader made to snow's Finney node, which the SN25 validator shares, by method",
+}, []string{"method"})
+
 func init() {
-	prometheus.MustRegister(cryptoPayTaoReaderPaused, cryptoPayTaoExtrinsicsUndecodable)
+	prometheus.MustRegister(cryptoPayTaoReaderPaused, cryptoPayTaoExtrinsicsUndecodable, cryptoPayTaoNodeRequests)
 }
+
+// The clock and the wait of the reader's pacing. Replaceable only by tests.
+var (
+	cryptoTaoPaceNow  = time.Now
+	cryptoTaoPaceWait = func(ctx context.Context, wait time.Duration) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+			return nil
+		}
+	}
+)
+
+// Whether a TAO invoice address was ever issued, and the issued addresses
+// among the given ones. Replaceable only by tests.
+var (
+	cryptoTaoAddressesIssued = func(ctx context.Context) bool {
+		return model.CryptoPaymentAddressesIssuedInConn(nil, ctx, model.CryptoAssetTao)
+	}
+	cryptoTaoIssuedAddresses = func(ctx context.Context, addresses []string) map[string]*model.CryptoPaymentIssuedAddress {
+		return model.GetCryptoPaymentIssuedAddressesInConn(nil, ctx, model.CryptoAssetTao, addresses)
+	}
+)
 
 // A runtime the reader will not read: it pauses.
 var errCryptoTaoRuntimeUnreadable = errors.New("the TAO reader cannot read this runtime")
@@ -604,11 +693,13 @@ func cryptoTaoCacheBlock(block *cryptoTaoBlock) {
 
 // ----- the reader -----
 
+// bittensorWallet is one scan's reader (or one reconcile's): its request
+// budget and pacing are its own.
 type bittensorWallet struct {
 	*cryptoCoinbaseAddresses
-	cryptoAddressWatch
-	network string
-	rpc     cryptoTaoRpc
+	network  string
+	rpc      cryptoTaoRpc
+	settings *CryptoTaoReaderSettings
 
 	stateLock sync.Mutex
 	// the scan's view of the chain, read once per scan
@@ -617,6 +708,9 @@ type bittensorWallet struct {
 	lastRead uint64
 	// a runtime other than the head's this scan read (at most one)
 	olderSpec uint32
+	// the requests made to the node, and when the last was let through
+	requests      int
+	lastRequestAt time.Time
 }
 
 // cryptoTaoHeads is the finalized and best heads.
@@ -633,6 +727,7 @@ func newBittensorWallet(settings *cryptoWalletSettings, assetConfig *CryptoPayAs
 		cryptoCoinbaseAddresses: newCryptoCoinbaseAddresses(model.CryptoAssetTao, settings, cryptoTaoAddressCanonical),
 		network:                 assetConfig.Network,
 		rpc:                     cryptoTaoRpcFor(settings.ChainRpcUrl),
+		settings:                DefaultCryptoTaoReaderSettings(),
 	}
 }
 
@@ -640,6 +735,42 @@ func newBittensorWallet(settings *cryptoWalletSettings, assetConfig *CryptoPayAs
 // chain.
 func (self *bittensorWallet) Irreversible() bool {
 	return true
+}
+
+// call makes one request to the node, at most one each RequestSpacing (the
+// wait holds no lock and ends with ctx), and counts it.
+func (self *bittensorWallet) call(ctx context.Context, result any, method string, params ...any) error {
+	var wait time.Duration
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		now := cryptoTaoPaceNow()
+		allowedAt := now
+		if 0 < self.settings.RequestSpacing && !self.lastRequestAt.IsZero() {
+			allowedAt = self.lastRequestAt.Add(self.settings.RequestSpacing)
+		}
+		if now.Before(allowedAt) {
+			wait = allowedAt.Sub(now)
+		} else {
+			allowedAt = now
+		}
+		self.lastRequestAt = allowedAt
+		self.requests += 1
+	}()
+	if 0 < wait {
+		if err := cryptoTaoPaceWait(ctx, wait); err != nil {
+			return err
+		}
+	}
+	cryptoPayTaoNodeRequests.WithLabelValues(method).Inc()
+	return self.rpc.call(ctx, result, method, params...)
+}
+
+// requestsLeft is what remains of the scan's request budget.
+func (self *bittensorWallet) requestsLeft() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.settings.RequestsPerScan - self.requests
 }
 
 type cryptoTaoHeader struct {
@@ -656,7 +787,7 @@ func cryptoTaoHeaderNumber(header *cryptoTaoHeader) (uint64, error) {
 
 func (self *bittensorWallet) storage(ctx context.Context, key string, blockHash string) (string, error) {
 	var value *string
-	if err := self.rpc.call(ctx, &value, "state_getStorage", key, blockHash); err != nil {
+	if err := self.call(ctx, &value, "state_getStorage", key, blockHash); err != nil {
 		return "", err
 	}
 	if value == nil {
@@ -675,11 +806,11 @@ func (self *bittensorWallet) readHeads(ctx context.Context) (*cryptoTaoHeads, er
 		return heads, nil
 	}
 	heads = &cryptoTaoHeads{}
-	if err := self.rpc.call(ctx, &heads.finalizedHash, "chain_getFinalizedHead"); err != nil {
+	if err := self.call(ctx, &heads.finalizedHash, "chain_getFinalizedHead"); err != nil {
 		return nil, err
 	}
 	var finalized cryptoTaoHeader
-	if err := self.rpc.call(ctx, &finalized, "chain_getHeader", heads.finalizedHash); err != nil {
+	if err := self.call(ctx, &finalized, "chain_getHeader", heads.finalizedHash); err != nil {
 		return nil, err
 	}
 	number, err := cryptoTaoHeaderNumber(&finalized)
@@ -688,7 +819,7 @@ func (self *bittensorWallet) readHeads(ctx context.Context) (*cryptoTaoHeads, er
 	}
 	heads.finalized = number
 	var best cryptoTaoHeader
-	if err := self.rpc.call(ctx, &best, "chain_getHeader"); err != nil {
+	if err := self.call(ctx, &best, "chain_getHeader"); err != nil {
 		return nil, err
 	}
 	if heads.best, err = cryptoTaoHeaderNumber(&best); err != nil {
@@ -736,14 +867,14 @@ func (self *bittensorWallet) runtimeFor(ctx context.Context, heads *cryptoTaoHea
 	var version struct {
 		SpecVersion uint32 `json:"specVersion"`
 	}
-	if err := self.rpc.call(ctx, &version, "state_getRuntimeVersion", parentHash); err != nil {
+	if err := self.call(ctx, &version, "state_getRuntimeVersion", parentHash); err != nil {
 		return nil, err
 	}
 	if version.SpecVersion != spec {
 		return nil, fmt.Errorf("%w: the parent of a block of spec %d runs spec %d", errCryptoTaoRuntimeUnreadable, spec, version.SpecVersion)
 	}
 	var encoded string
-	if err := self.rpc.call(ctx, &encoded, "state_getMetadata", parentHash); err != nil {
+	if err := self.call(ctx, &encoded, "state_getMetadata", parentHash); err != nil {
 		return nil, err
 	}
 	meta, _, err := crv4.DecodeRuntimeMetadata(encoded)
@@ -767,7 +898,7 @@ func (self *bittensorWallet) runtimeFor(ctx context.Context, heads *cryptoTaoHea
 // node. fetchAllowed = false reads only a block whose runtime is cached.
 func (self *bittensorWallet) readBlock(ctx context.Context, heads *cryptoTaoHeads, number uint64, fetchAllowed bool) (*cryptoTaoBlock, error) {
 	var hash string
-	if err := self.rpc.call(ctx, &hash, "chain_getBlockHash", number); err != nil {
+	if err := self.call(ctx, &hash, "chain_getBlockHash", number); err != nil {
 		return nil, err
 	}
 	if hash == "" {
@@ -785,7 +916,7 @@ func (self *bittensorWallet) readBlock(ctx context.Context, heads *cryptoTaoHead
 		return nil, fmt.Errorf("%w: block %d: %s", errCryptoTaoRuntimeUnreadable, number, err)
 	}
 	var header cryptoTaoHeader
-	if err := self.rpc.call(ctx, &header, "chain_getHeader", hash); err != nil {
+	if err := self.call(ctx, &header, "chain_getHeader", hash); err != nil {
 		return nil, err
 	}
 	runtime, err := self.runtimeFor(ctx, heads, spec, header.ParentHash, fetchAllowed)
@@ -826,7 +957,7 @@ func (self *bittensorWallet) blockCall(ctx context.Context, block *cryptoTaoBloc
 				Extrinsics []string `json:"extrinsics"`
 			} `json:"block"`
 		}
-		if err := self.rpc.call(ctx, &body, "chain_getBlock", block.hash); err != nil {
+		if err := self.call(ctx, &body, "chain_getBlock", block.hash); err != nil {
 			return nil, err
 		}
 		block.extrinsics = body.Block.Extrinsics
@@ -914,11 +1045,44 @@ func cryptoTaoParseTxId(txId string) (number uint64, extrinsic int, err error) {
 type cryptoTaoOurs struct {
 	address string
 	index   int64
+	// when its invoice was made, for the match of a block mined before it;
+	// zero matches every block (a re-read of a recorded receipt)
+	createdAt time.Time
+}
+
+// cryptoTaoIssuedOurs are the invoice accounts among the destinations of the
+// blocks' transfers: every address a TAO invoice was ever given, in one
+// lookup.
+func cryptoTaoIssuedOurs(ctx context.Context, blocks []*cryptoTaoBlock) map[[32]byte]*cryptoTaoOurs {
+	ours := map[[32]byte]*cryptoTaoOurs{}
+	destinations := []string{}
+	seen := map[[32]byte]bool{}
+	for _, block := range blocks {
+		for _, transfer := range block.transfers {
+			if !seen[transfer.to] {
+				seen[transfer.to] = true
+				destinations = append(destinations, cryptoTaoAddressOf(transfer.to))
+			}
+		}
+	}
+	if len(destinations) == 0 {
+		return ours
+	}
+	for address, issuedAddress := range cryptoTaoIssuedAddresses(ctx, destinations) {
+		account, err := cryptoTaoAccountOf(address)
+		if err != nil {
+			continue
+		}
+		ours[account] = &cryptoTaoOurs{address: address, index: issuedAddress.AddressIndex, createdAt: issuedAddress.CreateTime}
+	}
+	return ours
 }
 
 // blockReceipts reads a block's transfers to our accounts as receipts: summed
 // per account and extrinsic, held for review (transfer_shape) unless the
-// extrinsic's shape is one the rail credits.
+// extrinsic's shape is one the rail credits. An account whose invoice was
+// made after the block was mined (less the clock tolerance) is not matched
+// in it.
 func (self *bittensorWallet) blockReceipts(ctx context.Context, block *cryptoTaoBlock, ours map[[32]byte]*cryptoTaoOurs, onlyExtrinsic *int) ([]*cryptoWalletReceipt, error) {
 	type key struct {
 		extrinsic int
@@ -966,6 +1130,10 @@ func (self *bittensorWallet) blockReceipts(ctx context.Context, block *cryptoTao
 	receipts := []*cryptoWalletReceipt{}
 	for _, k := range order {
 		account := ours[k.to]
+		if !account.createdAt.IsZero() && timestamp.Add(self.settings.ClockTolerance).Before(account.createdAt) {
+			// an invoice made after the block was mined was not paid in it
+			continue
+		}
 		receipt := &cryptoWalletReceipt{
 			TxId:          cryptoTaoTxId(block.number, k.extrinsic),
 			OutputKey:     strconv.FormatInt(account.index, 10),
@@ -987,13 +1155,16 @@ func (self *bittensorWallet) blockReceipts(ctx context.Context, block *cryptoTao
 
 // cryptoTaoScanRange is which finalized blocks one scan reads: from
 // minHeight (the cursor less its window), never further back than the
-// lookback (the blocks passed over are counted), at most
-// cryptoTaoBlocksPerScan, up to the finalized head. A first scan (minHeight
-// 0) starts at the lookback without counting.
-func cryptoTaoScanRange(minHeight uint64, finalized uint64) (start uint64, end uint64, skipped uint64) {
+// lookback (the blocks passed over are counted), at most BlocksPerScan, up to
+// the finalized head. A first scan (minHeight 0) starts at the lookback
+// without counting. ok = false: the settings read no block.
+func cryptoTaoScanRange(settings *CryptoTaoReaderSettings, minHeight uint64, finalized uint64) (start uint64, end uint64, skipped uint64, ok bool) {
+	if settings.BlocksPerScan <= 0 {
+		return 0, 0, 0, false
+	}
 	floor := uint64(0)
-	if cryptoTaoLookbackBlocks < finalized {
-		floor = finalized - cryptoTaoLookbackBlocks
+	if settings.LookbackBlocks < finalized {
+		floor = finalized - settings.LookbackBlocks
 	}
 	start = minHeight
 	if start < floor {
@@ -1005,8 +1176,8 @@ func cryptoTaoScanRange(minHeight uint64, finalized uint64) (start uint64, end u
 	if finalized < start {
 		start = finalized
 	}
-	end = min(finalized, start+cryptoTaoBlocksPerScan-1)
-	return start, end, skipped
+	end = min(finalized, start+uint64(settings.BlocksPerScan)-1)
+	return start, end, skipped, true
 }
 
 // cryptoTaoPause marks the reader paused on a runtime it cannot read; a scan
@@ -1021,50 +1192,70 @@ func cryptoTaoPause(err error) error {
 	return err
 }
 
+// IncomingSince reads the finalized blocks of the scan's range (see the file
+// header) and reports their transfers to every address a TAO invoice was ever
+// given. It reads no block until an address has been issued. It stops before
+// a block whose reads could pass the scan's request budget, and reports the
+// last block it read: the next scan goes on from there.
 func (self *bittensorWallet) IncomingSince(ctx context.Context, minHeight uint64) ([]*cryptoWalletReceipt, uint64, error) {
 	heads, err := self.readHeads(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	watched := self.watchedAddresses()
-	ours := map[[32]byte]*cryptoTaoOurs{}
-	for _, address := range watched {
-		account, err := cryptoTaoAccountOf(address.Address)
-		if err != nil {
-			continue
-		}
-		ours[account] = &cryptoTaoOurs{address: address.Address, index: address.AddressIndex}
-	}
-	if len(ours) == 0 {
-		// no TAO invoice in play: no block is read
+	idle := func() ([]*cryptoWalletReceipt, uint64, error) {
 		self.stateLock.Lock()
 		self.lastRead = heads.finalized
 		self.stateLock.Unlock()
 		cryptoPayTaoReaderPaused.Set(0)
 		return []*cryptoWalletReceipt{}, heads.finalized, nil
 	}
-	start, end, skipped := cryptoTaoScanRange(minHeight, heads.finalized)
+	if !cryptoTaoAddressesIssued(ctx) {
+		// no TAO invoice address was ever issued: no block is read
+		return idle()
+	}
+	start, end, skipped, ok := cryptoTaoScanRange(self.settings, minHeight, heads.finalized)
+	if !ok {
+		return idle()
+	}
 	if 0 < skipped {
 		cryptoPayScanBlocksSkipped.WithLabelValues(model.CryptoAssetTao).Add(float64(skipped))
 		glog.Errorf("[cryptopay]tao: %d finalized blocks are past the reader's lookback and were not read (from %d to %d)\n", skipped, minHeight, start-1)
 	}
-	receipts := []*cryptoWalletReceipt{}
+	blocks := []*cryptoTaoBlock{}
 	for number := start; number <= end; number += 1 {
+		if self.requestsLeft() < cryptoTaoBlockRequests+cryptoTaoBlockPaymentRequests {
+			// the scan's budget: the next scan goes on from here
+			break
+		}
 		block, err := self.readBlock(ctx, heads, number, true)
 		if err != nil {
 			return nil, 0, cryptoTaoPause(err)
 		}
+		blocks = append(blocks, block)
+	}
+	if len(blocks) == 0 {
+		// nothing read: the next scan starts where this one would have
+		lastRead := max(start, 2) - 1
+		self.stateLock.Lock()
+		self.lastRead = lastRead
+		self.stateLock.Unlock()
+		return []*cryptoWalletReceipt{}, lastRead, nil
+	}
+	ours := cryptoTaoIssuedOurs(ctx, blocks)
+	receipts := []*cryptoWalletReceipt{}
+	for _, block := range blocks {
 		blockReceipts, err := self.blockReceipts(ctx, block, ours, nil)
 		if err != nil {
 			return nil, 0, cryptoTaoPause(err)
 		}
 		receipts = append(receipts, blockReceipts...)
-		self.stateLock.Lock()
-		self.lastRead = number
-		self.stateLock.Unlock()
 	}
+	lastRead := blocks[len(blocks)-1].number
+	self.stateLock.Lock()
+	self.lastRead = lastRead
+	self.stateLock.Unlock()
 	cryptoPayTaoReaderPaused.Set(0)
-	return receipts, end, nil
+	return receipts, lastRead, nil
 }
 
 // Transaction re-reads one receipt's block for its transfers to the pool's
@@ -1084,7 +1275,7 @@ func (self *bittensorWallet) Transaction(ctx context.Context, txId string) ([]*c
 	if heads.finalized < number {
 		return nil, false, nil
 	}
-	withinLookback := heads.finalized < number+cryptoTaoLookbackBlocks
+	withinLookback := heads.finalized < number+self.settings.LookbackBlocks
 	block, err := self.readBlock(ctx, heads, number, withinLookback)
 	if err != nil {
 		return nil, false, err
@@ -1136,7 +1327,7 @@ func (self *bittensorWallet) CheckNetwork(ctx context.Context) error {
 		return fmt.Errorf("TAO is received on mainnet only, not %s", self.network)
 	}
 	var genesis string
-	if err := self.rpc.call(ctx, &genesis, "chain_getBlockHash", 0); err != nil {
+	if err := self.call(ctx, &genesis, "chain_getBlockHash", 0); err != nil {
 		return err
 	}
 	if !strings.EqualFold(genesis, cryptoTaoFinneyGenesis) {

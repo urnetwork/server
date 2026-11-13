@@ -1003,6 +1003,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{providerEgressFp2EvidenceMigrationContract},
 	// the store notification flow, versioned by its position
 	[]snMainnetMigrationContract{storeNotificationFlowMigrationContract},
+	// the sweep of every issued address of a per-address coin, versioned by
+	// its position
+	[]snMainnetMigrationContract{cryptoAddressSweepMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

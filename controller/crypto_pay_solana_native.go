@@ -17,7 +17,11 @@ package controller
 //   - the fast path: the Helius webhook's native branch (subscription_controller.go,
 //     heliusHintNativeInvoices). Helius sees a per-invoice address only if the
 //     address is on its webhook; a delivery that names one only brings the
-//     address's next read forward, and the read credits.
+//     address's next read forward, and the read credits;
+//   - the scan's sweep (crypto_pay_sweep.go): every address an invoice was
+//     ever given, read hourly once its invoice is out of play, from the newest
+//     signature examined (SweepAddress), so a payment to an old or expired
+//     invoice is recorded too.
 //
 // Credited at finalized (with Alpenglow, confirmed and finalized describe the
 // same state), and final at once: a finalized transaction never leaves the
@@ -387,6 +391,93 @@ func (self *solanaNativeWallet) IncomingSince(ctx context.Context, minHeight uin
 		}
 	}
 	return receipts, 0, nil
+}
+
+// SweepAddress reads an issued address's finalized transactions newer than
+// its cursor's signature (its whole history before the first read), oldest
+// first, and reports their native SOL payments to it. The listing must reach
+// the cursor within settings.MaxPages pages, or nothing of it is acted on (an
+// older transaction it did not reach would be passed over for good). Each
+// signature page and each transaction is a request taken from spend; when
+// spend refuses one, the cursor is the last transaction examined, and the
+// next read goes on from it. A transaction listed as finalized that the RPC
+// does not serve yet stops the read there too (crypto_pay_sweep.go).
+func (self *solanaNativeWallet) SweepAddress(
+	ctx context.Context,
+	address *model.CryptoAddressSweepAddress,
+	settings *CryptoAddressSweepSettings,
+	spend func() bool,
+) ([]*cryptoWalletReceipt, *model.CryptoAddressSweepCursor, bool, error) {
+	cursor := address.Cursor
+	signatures := []*solanaSignatureInfo{}
+	listed := false
+	beforeSignature := ""
+	for page := 0; page < settings.MaxPages; page += 1 {
+		if !spend() {
+			return nil, nil, false, nil
+		}
+		options := map[string]any{
+			"commitment": "finalized",
+			"limit":      settings.PageSize,
+		}
+		if cursor != nil && cursor.Signature != "" {
+			options["until"] = cursor.Signature
+		}
+		if beforeSignature != "" {
+			options["before"] = beforeSignature
+		}
+		var pageSignatures []*solanaSignatureInfo
+		if err := self.rpc.call(ctx, "getSignaturesForAddress", []any{address.Address, options}, &pageSignatures); err != nil {
+			return nil, nil, false, fmt.Errorf("getSignaturesForAddress: %w", err)
+		}
+		for _, signature := range pageSignatures {
+			if signature != nil && signature.Signature != "" {
+				signatures = append(signatures, signature)
+			}
+		}
+		if len(pageSignatures) < settings.PageSize {
+			listed = true
+			break
+		}
+		beforeSignature = pageSignatures[len(pageSignatures)-1].Signature
+	}
+	if !listed {
+		return nil, nil, false, fmt.Errorf("more than %d pages of history since the cursor; raise the sweep's page limit", settings.MaxPages)
+	}
+	slices.Reverse(signatures)
+
+	ours := map[string]int64{address.Address: address.AddressIndex}
+	receipts := []*cryptoWalletReceipt{}
+	var next *model.CryptoAddressSweepCursor
+	if cursor != nil {
+		copied := *cursor
+		next = &copied
+	}
+	for _, signature := range signatures {
+		if signature.Err == nil {
+			if !spend() {
+				return receipts, next, false, nil
+			}
+			transaction, err := solanaFinalizedTransaction(ctx, self.rpc, signature.Signature)
+			if err != nil {
+				// what was read before it is kept
+				return receipts, next, false, fmt.Errorf("getTransaction: %w", err)
+			}
+			if transaction == nil {
+				// listed as finalized but not served yet: read again next scan
+				return receipts, next, false, nil
+			}
+			receipts = append(receipts, solanaNativeReceipts(signature.Signature, transaction, ours)...)
+		}
+		// a failed transaction moved nothing
+		slot := int64(min(signature.Slot, 1<<62))
+		next = &model.CryptoAddressSweepCursor{Signature: signature.Signature, Height: &slot}
+	}
+	if next == nil {
+		// an address with no history yet: read again from its start
+		next = &model.CryptoAddressSweepCursor{}
+	}
+	return receipts, next, true, nil
 }
 
 // Transaction reads one transaction again and reports its payments to any
