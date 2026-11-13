@@ -1,12 +1,13 @@
 # Capability-aware FindProviders2 and connect placement
 
-Design for peer review. Nothing here is built yet.
+Design and implementation record. §1-§12 are the design, with what building it
+changed folded in; §13 records how each workstream built it.
 
 | | |
 |---|---|
-| Status | Ready for peer review: all owner decisions recorded. |
+| Status | Implemented and landed (§13), except the capability-probe retirement and the /mainnet note, which wait for their release steps (§10). All owner decisions recorded. |
 | Date | 2026-11-12 |
-| Server | design base cbb7d7306 for §1-§12; §13 cites the implementation at its merges (S1: 86553321d) |
+| Server | design base cbb7d7306 for §1-§12; §13 cites the implementation at its merges (S1: 86553321d; S2: 4fdf026c0, which contains 3dcc7b138) |
 | Connect | design base fc949b78 for §1-§12; §13 cites connect main 13a6c4f2 |
 | SDK | 2f945bea, the limited-window branch, landed on sdk main as 1777be51; every sdk reference is at 2f945bea |
 | Apps and localizations | android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813, localizations 19b89a4, all on their main (§5.5) |
@@ -38,6 +39,7 @@ in the server repo; `connect/`, `sdk/`, `android/`, `apple/`, `windows/`,
 | compatible | a window client whose labels can carry a flow (§7.2) |
 | strict PQ | a request with `post_quantum_encryption` or `require_modern_provider` set (§12.4) |
 | PQ-positive | a provider whose newest post-quantum outcome in the 8-hour window is positive (§12.4) |
+| S1, S2, C, D | the implementation workstreams: server evidence and probe, server selection, connect, and sdk, apps and localizations (§13) |
 
 ## 1. Summary, goals, non-goals
 
@@ -81,7 +83,8 @@ in the server repo; `connect/`, `sdk/`, `android/`, `apple/`, `windows/`,
    2026-11-12) back into use for the traffic they can carry, without ever
    routing UDP to them.
 2. Make IPv6 placement read the same probe-backed labels.
-3. Keep every answer to an existing client byte-identical.
+3. Keep every answer to an existing client as it is today: the same strict
+   membership and the same JSON (§6.1).
 
 **Non-goals.**
 - **No local downgrade on either axis** (D7.5, D11.8). No capability state is
@@ -118,7 +121,7 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D6.1 | two axes; default selectors; bias, then overflow; labels on every result | "I want to also fold in ipv4/ipv4 with udp/tcp. dualstack means dual ipv4/6. dualproto means tcp/ucp. 1. by default windows use dualstack and dualproto selectors. The FP2 biases towards the requested, but if there is not enough, overflows to ipv4-only and tcp-only. The returned results mark each provider with the ip and protocol capabilities." | §3, §5, §6 |
 | D6.2 | compatible placement | "2. when selecting a client, the capabilities of the currently active cleints are used. Only compatible capabilities with the flow are considered." | §7.2-7.3 |
 | D6.3 | the limited window and merged races | "3. there will be a fallback window that is set up with ipv4 only and tcp only that has a minimum count. The default should be 1. This allows us to maintain the degraded/limited clients to be used when the flows are eligible. Call it the limited window. The flow races merge the normal windows with the limited window clients so that they can race across all clients." | §7.4-7.5; size superseded by D8 |
-| D7.1 | no selectors means today's hard gate exactly: strict, no overflow, byte-identical | accepted | §5.4, §6 |
+| D7.1 | no selectors means today's hard gate exactly: strict, no overflow, byte-identical | accepted | §5.4, §6. Built as identical content and the exact legacy JSON: gob rules out identical bytes (§6.1). |
 | D7.2 | overflow order: full → `ipv4+dualproto` → `dualstack+tcp` → `ipv4+tcp` | accepted | §6 |
 | D7.3 | "not enough" means fewer matching providers in the location than the window's target count | "correct" | §6.3, refined by D11.1 and D11.2 |
 | D7.4 | labels come only from negative probe evidence | "if no negative measurement assume dual" (for both axes; unmeasured `udp_probes: false` countries count as `dualproto`) | §3.2-3.3 |
@@ -219,7 +222,7 @@ The export runs this per provider per pass, from the 8-hour counts (§4.2):
 ```
 classify(p):
     adv := advertised(p)                         // A for dual-stack, B for v4-only
-    if p.total < ProviderOnlineMinMeasuredUrlRuns (2):
+    if p.total < ProviderOnlineMinMeasuredUrlRuns (2) or no current evidence:
         return adv                               // no verdict, so no negative measurement
     for class in decidedOrderFrom(adv):          // A,B,C,D, or B,D for a v4-only provider
         if passes4of5(p.ok + forgiven(p, class), p.total):
@@ -234,6 +237,8 @@ classify(p):
 - `passes4of5(ok, total)` is today's comparison:
   QualityOkNumerator·total ≤ QualityOkDenominator·ok
   (model/egress_index.go:681-695).
+- **No current evidence** is `ComputeEgressIndex`'s: the window's newest run
+  is older than the evidence age. Such a provider has no verdict either.
 - A provider that passes today's ratio is never downgraded. So the class-A
   and advertised-B providers are exactly today's hard-gate admissions (D7.1).
 - The classification reads all accepted outcomes, as the Quality/Speed ratio
@@ -311,7 +316,9 @@ What follows from it:
 - **Unadvertised IPv6:** `ipv4` (§3.1).
 - **v6-only providers** (1 connected on Main on 2026-11-11):
   - the URL probe does not claim them, so they have no evidence;
-  - the two-axis model assumes IPv4, so selector mode never returns them;
+  - the two-axis model assumes IPv4, so they are never downgraded and have no
+    classified copy. Their records stay in today's facet `6`, which selector
+    mode does not read, so it never draws one;
   - legacy requests keep today's `ip_family` facets, which do reach them.
 - **IPv6 stand-ins** (IPFAMILY.md): a stand-in's IPv6 verdicts set bits 2 and
   4 exactly as the URL's own would.
@@ -389,12 +396,18 @@ COUNT(*) FILTER (WHERE ok_count = 0 AND failed_later_legs <> 0 AND failed_later_
 COUNT(*) FILTER (WHERE ok_count = 0 AND failed_later_legs <> 0 AND failed_later_legs & 2 = 0) AS forgiven_tcp,
 COUNT(*) FILTER (WHERE ok_count = 0 AND failed_later_legs <> 0)                            AS forgiven_both,
 COUNT(*) FILTER (WHERE failed_later_legs & 2 <> 0)                                         AS negative_ip,
-COUNT(*) FILTER (WHERE failed_later_legs & 5 <> 0)                                         AS negative_udp
--- and the same five with "AND url_source = 0" for the general half
+COUNT(*) FILTER (WHERE failed_later_legs & 5 <> 0)                                         AS negative_udp,
+COUNT(*) FILTER (WHERE failed_later_legs & 6 <> 0)                                         AS negative_ipv6
+-- the first five again with "AND url_source = 0" for the general half;
+-- negative_ipv6 and the post-quantum times (§12.3) cover the whole window only
 ```
 
 - `ProviderEgressHealthCounts` (:643-659) gains these counts. Its `General`
-  gains the same five.
+  gains the first five.
+- `negative_ipv6` (mask & 6) is the count the provider status tells for a
+  dropped IPv6 (§5.5).
+- The struct also gains the newest positive and negative post-quantum
+  outcomes (§12.3).
 - The query stays jsonb-free.
 - The rollup's own window query (model/network_client_reliability_model.go:3157)
   is unchanged. It feeds the `egress_quality` diagnostic, which stays strict.
@@ -409,22 +422,29 @@ COUNT(*) FILTER (WHERE failed_later_legs & 5 <> 0)                              
     5213).
 - **Labels served:**
   - `ip` is `dualstack` when `IpFamily()` is `dualstack` and bit 1 is clear,
-    else `ipv4`;
+    else `ipv4`, a v6-only provider included (§3.6);
   - `protocol` is `tcp` when bit 2 is set, else `dualproto`.
 - **Two records per downgraded provider.** The export sets
-  `CapabilityDowngrades` on the provider's shared score, which keeps the
-  strict fields for today's facets. Each downgraded provider also gets a
-  classified copy, carrying:
+  `CapabilityDowngrades`, and `PostQuantumPositive` (§12.4), on the
+  provider's shared score, which keeps the strict fields for today's facets.
+  Each downgraded provider also gets a classified copy. It is held in an
+  unexported field of the shared score, so it is never encoded with today's
+  records. It carries:
   - `PassesMinimums`, `Online`, `UrlProbeSuccessWeight` and `ScaledWeights`
     from the classified decision;
-  - `Tiers`, which are performance-only, unchanged.
+  - `Scores` and `Tiers` ranked again from its class's index. The Quality
+    tier's base is the egress index, so the copy's Quality tier comes from
+    its class's index. The Speed base is zero, so its Speed tier is
+    unchanged. A copy whose counts give no current evidence keeps the strict
+    tiers.
 
   The copy is written only to the capability facets (§4.4).
 
 ### 4.4 Export facets and keys
 
 Today's facets `d`, `4` and `6` keep exactly today's strict membership and
-bytes. Three new facets hold the classified copies of downgraded providers:
+content; their bytes cannot be pinned under gob (§6.1). Three new facets hold
+the classified copies of downgraded providers:
 
 | Facet | Class | Who |
 |---|---|---|
@@ -468,6 +488,11 @@ export's TTL and a ready member, like `{provider_hard_exclusions}`
 - `{provider_capability_tcp}`: providers labelled `tcp`, about 20,700.
 
 FP2 labels a client-id spec from them (§6.4).
+- The export publishes them with the two post-quantum sets of §12.4. Each of
+  the four sets is its own cluster slot, so each is replaced in its own
+  transaction.
+- A reader that finds a set without its ready member reads every provider as
+  absent.
 
 **Cost.**
 - About 20,700 downgraded providers are written into the union pools of both
@@ -476,6 +501,8 @@ FP2 labels a client-id spec from them (§6.4).
 - The native capability snapshot holds the class-D Speed natives and the few
   class-D Quality natives.
 - The decision work doubles: one more in-memory pass over the facts.
+- A second native snapshot is written per non-forced target and rank mode,
+  which lengthens the export.
 - Measure Redis memory for `cs_` keys before and after the first export (§10
   step 2).
 
@@ -614,7 +641,7 @@ The checks run before any spec is read, like `ip_family`'s
 
 | | Old server | New server |
 |---|---|---|
-| **Old client** (no `select`) | today | Legacy mode: byte-identical answers for the same cache state. No new fields. The hard gate, no overflow (D7.1). |
+| **Old client** (no `select`) | today | Legacy mode: today's answer, drawn from today's strict membership, with no new fields (§6.1). The hard gate, no overflow (D7.1). |
 | **New client** (sends `select`) | See below | Selector mode, as designed. The limited window's requests carry the profile's rank mode: `quality` in auto (D10). |
 
 **New client, old server.**
@@ -638,6 +665,8 @@ of a rolling deploy.
   labelled from records whose downgrade bits are zero.
 - Classes C and D are empty, so the limited window finds none and stays
   empty.
+- A target whose capability facets exist but whose `:native_cap_v1` is
+  missing gives C and D without natives (§13.4).
 
 **Hosted devices.** The proxy service runs one build of the server and the
 sdk, so its devices are always in a same-version cell.
@@ -722,9 +751,28 @@ omitempty, and all are also carried in the compact form.
 
 ### 6.1 Legacy mode
 
-`select` absent or null: `FindProviders2` runs exactly today's code
-(model/network_client_location_model.go:6335-7411). That path is not
-modified. A golden test pins its answers (§9).
+`select` absent or null: `FindProviders2` runs today's code
+(model/network_client_location_model.go:6335-7411).
+
+**As built (§13.4),** that path changes in three places only:
+- the branch to selector mode at entry;
+- the post-quantum request metric;
+- strict PQ once the ready marker is set, which D12 requires in legacy mode
+  too (§5.4, §12.4).
+
+Selector mode is a separate function that repeats the level body for each
+pool. A fix to either must be checked against both (§11).
+
+**What the tests pin.** Byte-identical output cannot be pinned:
+- the score cache is gob-encoded, so any new exported `ClientScore` field
+  changes the encoded type descriptor;
+- the export writes its pages in Go's random map order.
+
+The tests pin instead:
+- the content of today's facets
+  (`TestExportClientScoresTodaysFacetsIgnoreCapabilityCopies`);
+- the exact JSON of a legacy answer
+  (`TestFindProviders2LegacyAnswerEncodesWithoutNewFields`).
 
 ### 6.2 Selector mode
 
@@ -747,7 +795,7 @@ FindProviders2(args, session):
         // 1. the IPv6 need: dualstack classes within the protocol ceiling (§6.3)
         if ipNeed > 0:
             need := fill(pool(needClasses(sel) ∩ keepFamilies(args.ip_family)),   // §6.3 table
-                         args.rank_mode, args.force_minimum, ipNeed)              // A, then C
+                         args.rank_mode, args.force_minimum, ipNeed)              // A, then C for the rest
             for p in need where sel.protocol == dualproto and labels(p).protocol == tcp:
                 p.tier += 3 * BackfillTierOffset                // a C taken for the need is overflow
                 p.overflow_step = 1
@@ -757,7 +805,7 @@ FindProviders2(args, session):
         discovered += fill(main, args.rank_mode, args.force_minimum,
                            count - len(discovered))             // never redraws a provider
         // 3. overflow: a dualproto request that is not enough (D7.3, D11.2)
-        if sel.protocol == dualproto and sel.held_count + eligible(main) < sel.target_count:
+        if sel.protocol == dualproto and sel.held_count + len(non-overflow answers) < sel.target_count:
             over := fill(pool({C, D} ∩ keepFamilies(args.ip_family)),
                          args.rank_mode, args.force_minimum, count - len(discovered))
             for p in over:
@@ -766,8 +814,8 @@ FindProviders2(args, session):
             discovered += over
         for p in discovered:
             p.capabilities = labels(p)                          // §4.3
-        if discovered is not empty or args.strict or no level left:
-            break
+        if args.strict or no level left or a pool read had an admitted provider:
+            break                                               // today's rule, over every pool read
     return answer + discovered, echo sel
 ```
 
@@ -775,7 +823,7 @@ FindProviders2(args, session):
 
 | Request (`ip`, `protocol`) | IPv6 need from | Main pool | Overflow pool |
 |---|---|---|---|
-| `dualstack`, `dualproto` (normal windows) | A, then C if no A is eligible | A ∪ B | C ∪ D, tier +33 |
+| `dualstack`, `dualproto` (normal windows) | A, then C for what A leaves | A ∪ B | C ∪ D, tier +33 |
 | `ipv4`, `dualproto` | none | A ∪ B | C ∪ D, tier +33 |
 | `dualstack`, `tcp` | C | C ∪ D | none |
 | `ipv4`, `tcp` (the limited window) | none | C ∪ D | none |
@@ -811,6 +859,11 @@ provider given to a `dualproto` request for its IPv6 need is overflow: tier
 - Held clients count toward the target, and excluded providers do not. So a
   full window never overflows to fill a slot it does not have, and a pool
   depleted by exclusions overflows rather than leaving the window short.
+- **As built,** the eligible candidates are counted as the answers the need
+  and main phases gave that are not overflow. Up to the target, that is the
+  same number whenever the request's count is at least its target. Connect
+  never sets `force_count`, so its requests' count is at least the server's
+  minimum of 20.
 
 **The IPv6 need (D11.1).** It is `dualstack_target_count` (the window's IPv6
 minimum) less `held_dualstack_count`. A quality window wants 1 and a speed
@@ -839,7 +892,8 @@ does.
     `CapabilityDowngrades` and `IpFamily()` give.
 - **Named providers** (client-id specs) pass today's gates and come first.
   Their labels come from the two sets of §4.4: membership gives `dualstack`
-  or `tcp`; absence gives `ipv4` or `dualproto`.
+  or `tcp`; absence gives `ipv4` or `dualproto`, as does a set no export has
+  published.
 
 ### 6.5 The fill per rank mode, unchanged inside each pool
 
@@ -1157,22 +1211,40 @@ its ./grafana tests move to them.
 `urnetwork_stats_provider_egress_index` and `urnetwork_stats_provider_excluded`
 keep the strict decision, unchanged (controller/stats_collector.go:80-86).
 
+**As built (§13.4):**
+- Both gauges are read from the egress counts snapshot, which moves to schema
+  8 with the wire keys `k` (capability) and `q` (post-quantum).
+- Both bucket by the classified decision. A provider that is not downgraded
+  counts by its strict decision, which equals it.
+- Every label set of the FP2 counters is registered at startup, so every
+  series exists at zero.
+- The providers dashboard's row "capability-aware selection (FP2-PROTOCOL.md)"
+  (panel 935) holds panels 936-944:
+  - supply by capability for each bucket;
+  - the post-quantum signal;
+  - strict PQ requests;
+  - selector-mode requests and answers;
+  - `tcp` overflow;
+  - the IPv6 need.
+
+  A ./grafana test covers the row.
+
 ### 8.2 Hosted devices
 
 These are connect process counters that the proxy exports, like
-proxy/window_client_metrics.go:21-56. Connect counts them (§13.3), and S2's
-exporter publishes them.
+proxy/window_client_metrics.go:21-56. Connect counts them (§13.3), and the
+proxy's exporter publishes them (server merge 4fdf026c0, §13.4).
 
 | Metric | Labels |
 |---|---|
-| `urnetwork_proxy_window_clients` | `window` (quality, speed, limited), `ip`, `protocol` |
+| `urnetwork_proxy_window_clients` | `window` (quality, speed, limited; auto for any other window type), `ip`, `protocol` |
 | `urnetwork_proxy_window_flows_total` | `window` of the winning client, `ip_version`, `protocol` |
 | `urnetwork_proxy_window_no_compatible_total` | `ip_version`, `protocol` |
 
 The existing `window` label of the proxy window metrics gains `limited`
 (connect/ip_remote_multi_client_window_client_stats.go:22-45). Dashboard:
-urnetwork / proxy. Apps report the same counts in their window status and
-diagnostics; they have no Prometheus.
+urnetwork / proxy, panels 80-82, with a ./grafana test. Apps report the same
+counts in their window status and diagnostics; they have no Prometheus.
 
 ### 8.3 Alerts
 
@@ -1265,7 +1337,8 @@ all):
 - An older-build insert stores 0.
 
 **Aggregate (DB):**
-- The five counts, overall and general.
+- The five counts, overall and general; `negative_ipv6` and the
+  post-quantum times over the whole window.
 - Rows from before the migration are never forgiven.
 - The general half excludes country outcomes.
 
@@ -1281,16 +1354,18 @@ all):
 
 **Export (DB and Redis):**
 - The `i`, `t` and `x` keys are written, empty ones included.
-- Today's `d`, `4` and `6` keys and the `:native_v1` snapshots are
-  byte-identical with and without the change (golden).
+- Today's `d`, `4` and `6` keys and the `:native_v1` snapshots hold the same
+  content with and without the change. Bytes cannot be compared under gob
+  (§6.1).
 - `:native_cap_v1` has its own manifest; today's reader accepts the old
   snapshot unchanged.
 - The modern document's new entries are ignored by today's reader.
 - The named-provider sets are replaced each export.
 
 **FP2 (DB and Redis):**
-- **Legacy mode:** byte-identical answers (golden, every rank mode,
-  `force_minimum`, `ip_family`, `strict` with fallback).
+- **Legacy mode:** today's answers (every rank mode, `force_minimum`,
+  `ip_family`, `strict` with fallback), and the exact legacy JSON, with no new
+  field.
 - **Selector mode:**
   - **the IPv6 need (D11.1):**
     - `dualstack_target_count` 1 with `held_dualstack_count` 0 and 1;
@@ -1311,17 +1386,18 @@ all):
   - `ip_family` v6-capable gives A and C;
   - `rank_mode: online`;
   - skipped downgraded records in today's facets;
-  - the location fallback climbs only when every class is empty;
+  - the location fallback climbs only when every pool read was published
+    without an admitted provider;
   - a cache from before the export yields A and B only.
 
 **Provider status (D11.6):**
 - `reason` and the explanation sentence for `tcp`, for `ipv4`, for both and
   for neither, with the counts;
 - `url_checks` value, count, total and `passes` are unchanged;
-- Android shows the explanation; the Apple row shows `reason`.
+- the sdk derives the reason lines from the counts (§5.5).
 
 **Compatibility matrix, one test per cell (§5.4):**
-- old request on the new server is byte-identical;
+- an old request on the new server gets today's answer, with no new field;
 - a new request on an old server's stub gives no echo, so labels come from
   `ip_family` and the limited window stays empty;
 - the new-new cell;
@@ -1448,24 +1524,39 @@ inert for them.
 | 4 | proxy service with the new connect and sdk (hosted devices), B5's retirement included (D11.8) | the app release, as the first fleet measurement of §8.2 | previous proxy build |
 | 5 | apps through the nightly, B5's retirement included (D11.8): the memory gate decides the mobile limited size (D11.5); the Apple status row shows the reason (D11.6); a /mainnet note goes out with it (D11.7) | none | the previous release |
 
-- **Post-quantum, as built (S1, §13.2):**
-  1. `db migrate` to 966 or later: done on 2026-11-13.
-  2. **taskworker.** Watch the `st_client_key_history` insert rate (about 27
-     a second for the first hour, then about 7), PQ turn time (up to 3 s
-     more) and the three new metrics.
-  3. **api and alt.** Remote probers can update in any order.
-  4. **Owner config release**, one day after step 3:
+- **As built (§13.2, §13.4), in deploy order.** D42, rolling now, is server
+  a151cee8d. It carries S1 step 1 only. S1 step 2 (86553321d) and S2
+  (3dcc7b138, 4fdf026c0) ship together in the next server release. Apart
+  from step 6, no config or vault change is needed.
+  1. `db migrate` to 966 or later: done on Main on 2026-11-13.
+  2. **taskworker.**
+     - S1: PQ turns, and the ingest of the mask and the PQ outcome.
+     - S2: the classification, the `i`, `t` and `x` facets,
+       `:native_cap_v1`, the four sets, PQ stamping and the marker call.
+     - Watch the `st_client_key_history` insert rate (about 27 a second for
+       the first hour, then about 7) and PQ turn time (up to 3 s more).
+     - Watch Redis memory for `cs_` keys and export duration (a second native
+       snapshot per non-forced target and mode).
+     - Watch the new metrics, and the gauges filling over 8 hours.
+  3. **api, alt and the proxy service's server side:** selector mode, strict
+     PQ once the marker is set, and the status reason. Remote probers can
+     update in any order.
+  4. **The proxy build with connect 13a6c4f2:** the hosted limited window and
+     placement, and the proxy metrics.
+  5. **Grafana:** the providers and proxy dashboards.
+  6. **Owner config release**, one day after step 3:
      `capability_probe.yml` `enabled: false`.
-  5. **Next release:** merge the retirement branch
-     (`feat/fp2-s1-capprobe-retire-1112`). It must follow step 4, or monitor
+  7. **Next release:** merge the retirement branch
+     (`feat/fp2-s1-capprobe-retire-1112`). It must follow step 6, or monitor
      §2.19g pages.
 
   **Rollback:** the previous taskworker. PQ turns stop, the marker expires,
-  and strict PQ returns to today's sources.
+  and strict PQ returns to today's sources. The capability keys and sets
+  expire with the export TTL.
 - **Post-quantum (D12).** It rides the same steps:
   - **Step 1:** the migration adds `pq_outcome`.
-  - **Step 2:** the taskworker's URL prober opens the PQ session in every
-    tunnel, and the ingest stores `pq_outcome` and the modern evidence. The
+  - **Step 2:** the taskworker's URL prober opens the PQ session on PQ turns
+    (D12.5), and the ingest stores `pq_outcome` and the modern evidence. The
     export stamps `PostQuantumPositive` and publishes the sets. 8 hours after
     the PQ-measuring prober started, a full evidence window, the export marks
     `client_score_post_quantum_v1_ready`.
@@ -1515,7 +1606,8 @@ inert for them.
 | **Platform load.** 3-4 more clients per device: setups, pings, contracts and race duplicates. | measure on the proxy fleet first (step 4) |
 | **Label lag without local downgrade (D7.5).** A provider that loses UDP keeps `dualproto` for a few hours, and its UDP flows stall until then. | The wide race hedges cold starts, and apps fall back from QUIC to TCP. |
 | **IPv6 without B5 (D11.8).** A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns, typically a few hours (§3.5). | Only dual-stack providers are concerned, about 1% of supply. Applications fall back to IPv4, and B6's no-route still answers when no `dualstack` client exists. |
-| **Export cost.** About 75% more union pages. | measured at step 2; capability keys can be dropped by rollback |
+| **Export cost.** About 75% more union pages, and a second native snapshot per non-forced target and mode. | Measured at step 2: Redis memory for `cs_` keys and export duration. Capability keys can be dropped by rollback. |
+| **Two selection bodies.** Selector mode repeats the legacy level body for each pool in a separate function (§6.1). A fix to one can miss the other. | Check every selection fix against both. The legacy JSON and today's-facet tests pin the legacy side. |
 | **Network-only providers under strict PQ** (D12.2). The URL probe cannot reach a provider that holds only a Network key, so it never has a positive signal, and a strict-PQ request no longer matches it. | This follows D12.2 ("any provider"). Such providers stay available to their network's requests without PQ. |
 | **A provider that loses PQ** stays PQ-positive until its next run reads negative, typically within a turn (about 24 minutes). | Window clients stay fail-closed and verify every session (§12.5), so nothing is sent in the clear. |
 | **Prober cost** (§12.2). One key registration, one PQ handshake and up to a 3 s seal wait per PQ turn; about 3 GB a day of `st_client_key_history` at about 7 turns a second. | The schedule (D12.5) keeps it to a third of the turns of a provider without a recent outcome. The capability probe's own tunnels go away. Watch the insert rate and turn time at taskworker deploy. |
@@ -1524,7 +1616,7 @@ inert for them.
 ### Open questions
 
 None. Q1-Q8 are decided (D10, D11.1-D11.8), and post-quantum selection is
-decided by D12.1-D12.4 (§12).
+decided by D12.1-D12.5 (§12).
 
 ## 12. Post-quantum selection (D12)
 
@@ -1661,25 +1753,38 @@ The capability probe's own tunnels, prober shard and passes go away (§12.4).
 - **`post_quantum_encryption: true`** keeps only PQ-positive providers in
   every draw, named providers included.
 - **`require_modern_provider: true`** keeps only modern providers: PQ-positive,
-  with the latest URL-probe observation advertising resizable windows. This is
-  FP2-MODERN.md's "modern", now sourced from the URL probe. Connect keeps
-  sending this field (§12.1).
+  with the newest modern evidence of the last 7 days advertising resizable
+  windows. This is FP2-MODERN.md's "modern", now sourced from the URL probe.
+  Connect keeps sending this field (§12.1).
+  - The newest modern evidence is the newest `provider_modern_evidence` row,
+    whichever probe wrote it. Until the capability probe is switched off, its
+    rows count too.
+  - The request filter also requires `PostQuantumPositive` for this field.
+    That guards the one export cycle whose `Modern` was computed before the
+    marker was set.
 - **How FP2 reads it:**
-  - the export stamps `ClientScore.PostQuantumPositive` and computes
-    `ClientScore.Modern` from it (model/network_client_score_rank.go:218);
+  - the export stamps `ClientScore.PostQuantumPositive`. It computes
+    `ClientScore.Modern` from it once the marker is set when the export
+    starts, and today's way before that
+    (model/network_client_score_rank.go:218);
   - the request filter (model/network_client_selection_prefilter.go:20, 36)
     reads those fields;
   - for named providers, the export publishes the sets
     `{provider_post_quantum_positive}` and `{provider_modern}`, replaced each
     export like `{provider_hard_exclusions}`. They replace
     `readProvidePostQuantumEncryption` (:6653, :7364) and
-    `readProviderModernClientIds` (:6732-6734, :7351-7352).
+    `readProviderModernClientIds` (:6732-6734, :7351-7352);
+  - every export writes the flag and the sets, and readers use them only
+    after the marker.
 - **The ready marker:** `client_score_post_quantum_v1_ready` holds the PQ
   stream's start.
   - After each complete export, the export sets it while the stream has run
     for 8 hours or more and its last outcome is under 30 minutes old, and
     deletes it otherwise.
-  - Until it is set, strict PQ answers from today's sources (§10).
+  - The export reads it before it writes any score. FindProviders2 reads it
+    through a per-process cache no older than the request settings' max age.
+  - Until it is set, strict PQ answers from today's sources (§10), in legacy
+    and selector mode alike.
 - **Network-only providers:** a provider that holds only a Network key cannot
   be reached by the URL probe, so it never has a positive signal. Under D12.2
   ("any provider") a strict-PQ request does not match it. Its
@@ -1940,7 +2045,7 @@ All connect references in this section are at connect main 13a6c4f2.
 - In all: 52 files, +4522/-649. No migrations or config.
 - D's sdk limited window landed right after it (sdk 1777be51).
 - S2's proxy exporter, server `feat/fp2-s2-proxy-window-metrics-1112`
-  (dd73d29a1), is S2's to land.
+  (dd73d29a1), landed as server merge 4fdf026c0 (§13.4).
 
 **Wire and labels:**
 - `FindProviders2Args.Select` (connect/api.go:406), the echo (:419), and each
@@ -2115,3 +2220,276 @@ All connect references in this section are at connect main 13a6c4f2.
 
 **Memory:** about floor(0.5 × S) more clients: 3 on desktop in auto, 2 on
 iOS and 5 on Android (§7.10).
+
+### 13.4 Workstream S2: server selection
+
+All server references in this section are at server 4fdf026c0, S2's later
+merge, which contains 3dcc7b138.
+
+**Landed:**
+- 3dcc7b138, `Merge feat/fp2-s2-selection-1112`, onto dfacbfd0b:
+  - 4aac4a980: the classification, the aggregate counts and the
+    `ClientScore` fields;
+  - 43dd4ec30: selector mode, the export facets, `:native_cap_v1`, the named
+    and PQ sets, strict PQ and the metrics;
+  - 58efed495: copies rank by their class's index, and DB tests;
+  - 4adbb2ab0: comments and a partition test;
+  - 7d6e84602, merging 86b26ee6e: the status reason, the stats gauges and the
+    providers dashboard;
+  - 9ad7a3097: one shared v6-only classifier;
+  - e927d6760 and 574bd9633: test fixes;
+  - e31aeb30d: a main merge with S1 step 1, where S1's ready marker replaced
+    S2's stand-in;
+  - b80a4291c: the mask and PQ constants alias S1's egresshealth constants.
+- 4fdf026c0, `Merge feat/fp2-s2-proxy-window-metrics-1112` (dd73d29a1), onto
+  f5a19c1db: the proxy exporter of §8.2, built against connect 13a6c4f2.
+- No migrations: S2 reads S1's 966.
+
+**Labels and classes** (model/provider_capability.go):
+- The labels are `ProviderCapabilityIpDualstack` and `...Ipv4`, and
+  `ProviderCapabilityProtocolDualproto` and `...Tcp`.
+- `ClientScoreCapabilityDowngradeIpv6` is 1 and `...Udp` 2 (:45).
+- `ProviderEgressFailedLaterLeg{Ipv4Udp,Ipv6Tcp,Ipv6Udp}` (:55) alias
+  `egresshealth.UrlProbeFailedLaterLeg*`.
+- Classes A-D are `providerCapabilityClass`.
+- `providerCapabilityForgiven` (:214) is §3.2's table:
+  - a dual-stack provider's B forgives `ForgivenIpv4`, its C `ForgivenTcp`
+    and its D `ForgivenBoth`;
+  - a v4-only provider's D forgives `ForgivenTcp`;
+  - an advertised class forgives nothing.
+- `classifyProviderCapability` (:272) is §3.3, with `ComputeEgressIndex`'s
+  exact 4/5 comparison. With fewer than 2 runs, or no current evidence, the
+  provider keeps its advertised labels.
+- `classifiedCounts` (:317) adds the forgiven runs overall, and to `General`
+  from `General`'s own counts.
+- `ClientScore.CapabilityLabels()` (:200) gives the labels of §4.3.
+- `classifyProviderCapabilityOfFamilies`
+  (model/provider_capability_families.go:19) never classifies a v6-only
+  provider. The export, the status and the counts all use it.
+
+**Aggregate** (model/provider_egress_health_model.go):
+- The window SELECT reads `failed_later_legs` and `pq_outcome`. The store
+  side (:415) is S1's.
+- `ProviderEgressHealthCounts` (:661) gains the counts of §4.2 (:682-695).
+- `postQuantumPositive()` (:701): the newest positive is strictly later than
+  any negative.
+- `providerEgressHealthCountsSql` (:787) uses integer FILTERs only, no jsonb.
+  Its general filters keep `url_source = 0` last.
+
+**Classified decision** (model/egress_index.go):
+- `classifiedEgressFacts` (:844) runs over `egressFactsWithCounts` (:861):
+  today's facts, with the class's forgiven runs as passes. That covers the
+  Quality and Speed ratio, the index, and the Online rule's 0.8 general half.
+- The strict country guard applies to both decisions. A provider that is not
+  downgraded gets exactly its strict facts.
+- `rankClientScoreWithCounts` (model/network_client_score_rank.go:190) takes
+  the URL weight from OK'.
+
+**Export** (`UpdateClientScores`, model/network_client_location_model.go):
+- The loop at :5903 classifies every decided provider through
+  `newClientScoreCapability` (model/network_client_score_capability.go:91).
+  That computes:
+  - the classification;
+  - for a downgraded provider, the classified decision and counts;
+  - `postQuantumPositive`;
+  - `postQuantumModern` (`providerPostQuantumModern`, :153).
+- The PQ marker is read at model/network_client_location_model.go:5922,
+  before any score is written.
+- `migrateClientScore` (:5939) sets `CapabilityDowngrades` and
+  `PostQuantumPositive` on the shared score, whose buckets stay strict.
+  - A downgraded provider also gets the unexported `capabilityCopy`, ranked
+    with the classified decision and counts.
+  - The copy's Quality tier comes from its class's index
+    (`rankClientScoreCapabilityTiers`,
+    model/network_client_score_capability.go:120, called at
+    model/network_client_location_model.go:5982).
+- `Modern`: once the marker is set when the export starts, `Modern` is
+  `postQuantumModern`, and declaration-only modern status ends. Before that,
+  it is today's.
+- `exportClientScores` (model/network_client_score_targets.go:300) puts the
+  copies (:311-320) into the union facets `i`, `t` and `x` (Online or native)
+  and into the native capability facets, in non-forced modes only.
+  - Every capability facet is written, empty ones included.
+  - The `ClientFilter` does not count copies.
+- The emit (model/network_client_location_model.go:322-331, 355-391) writes
+  `c_l_<i|t|x>` and `s_l_<facet>_<n>`, and puts `i`, `t` and `x` in the
+  `m_l` partition.
+- `:native_cap_v1`:
+  - its key is `clientScoreNativeCapabilityKey`
+    (model/network_client_score_capability.go:68);
+  - `writeClientScoreNativeSnapshotOf`
+    (model/network_client_score_native.go:356) writes it, with the manifest
+    facets exactly `i`, `t` and `x`;
+  - `readClientScoreNativeManifestOf` (:435) reads it;
+  - the fanout is `publishCapability` and `aliasCapability` (:40).
+- After a complete export:
+  1. `publishProviderCapabilitySets`
+     (model/network_client_score_capability.go:176, called at
+     model/network_client_location_model.go:6224) replaces the four sets,
+     each with the export's TTL and a `ready:v1` member, one transaction per
+     slot;
+  2. then S1's `MarkClientScorePostQuantumReady` runs (:6231).
+
+**Readers:**
+- `clientScoreNativeTargetPages` (model/network_client_score_native.go:575)
+  collects the pages per snapshot. The legacy read is unchanged.
+- `clientScoreReadOptions` (model/network_client_score_read.go:187) adds
+  per-facet record filters, and switches the un-faceted fallback off.
+- `clientScorePage.filter` (model/network_client_score_cursor.go:36) runs
+  after the count and checksum proofs.
+- The pool facet `"*"` (model/network_client_selection_evidence.go:155) draws
+  a pool as one group.
+- `clientScoreRequestFilter` (model/network_client_selection_prefilter.go):
+  - `capabilityClasses` (:26) replaces the family facets in selector mode;
+  - `requirePostQuantumPositive` (:53) is the strict PQ check.
+
+**API** (model/network_client_location_model.go):
+- `FindProviders2Args.Select` (:5166) is a `*FindProviders2Select` (:5172).
+  Its pointer members tell absent from null. The same type is the echo, with
+  all six members filled.
+- `FindProvidersCapabilities{Ip, Protocol}` (:5207).
+- `FindProvidersProvider.Capabilities` (:5238) and `OverflowStep` (:5243),
+  both omitempty.
+- The JSON tags match connect's. None of these fields appears in legacy mode.
+- `newFindProviders2Selection` (model/network_client_location_select.go:67)
+  validates before any read, with §5.3's 400s and §5.1's defaults.
+
+**Selection** (`findProviders2WithSelect`,
+model/network_client_location_select.go:529):
+- It is entered at model/network_client_location_model.go:6573, only when
+  `select` is set.
+- `ipv6Need` is at model/network_client_location_select.go:137.
+- Each level runs three phases:
+  1. the IPv6 need (:1361): A, then C topping up. A C provider here is
+     overflow for a `dualproto` request;
+  2. the main pool: A ∪ B for `dualproto`, C ∪ D for `tcp`;
+  3. overflow (:1382): C ∪ D, only when `held_count` plus the non-overflow
+     answers is below `target_count`.
+- Each phase is a full legacy fill in its pool: natives, then the other mode
+  at +offset, then the Online union at +2×offset. An Online request is a
+  uniform draw.
+- `force_minimum` reads the forced pool, classed by each record's downgrade
+  bits.
+- Overflow gets tier + `findProviders2OverflowBand` (3, :53) ×
+  `BackfillTierOffset`, and `overflow_step` 1. No phase redraws a provider
+  that an earlier phase or a name answered.
+- `providerCapabilityClassesForIpFamily` (:179) is §6.3's `keepFamilies`.
+- `newFindProviders2PoolFacets` (:207):
+  - non-forced: `d` and `4`, skipping downgraded records, plus the `i`, `t`
+    and `x` copies of the pool's classes;
+  - forced: `d` and `4`, filtered by class.
+- `loadFindProviders2PoolNative` (:292) reads both native snapshots. A
+  missing `:native_cap_v1`, as in a rolling deploy, leaves C and D without
+  natives. `loadFindProviders2PoolPreferred` is at :373.
+- Named providers come first, labelled from the sets
+  (`readNamedProviderCapabilities`,
+  model/network_client_score_capability.go:255).
+- The location fallback keeps today's rule, `targetsWithoutSupply`, over
+  every pool the level read.
+
+**Strict PQ:**
+- `findProviders2PostQuantumReady`
+  (model/network_client_location_select.go:475) reads S1's ready key through
+  `clientScorePostQuantumReadyCache`
+  (model/network_client_score_capability.go:285), whose max age is
+  `RequestSettingsMaxAge`. It is called at
+  model/network_client_location_model.go:6593.
+- After the marker:
+  - candidates need `PostQuantumPositive`, and `Modern` too for
+    `require_modern_provider` (model/network_client_selection_prefilter.go:53);
+  - named providers are answered from the sets
+    (`readFindProviders2PostQuantumEncryption`,
+    model/network_client_location_select.go:486, and
+    `readFindProviders2NamedModern`, :512).
+- Before the marker, today's calls run unchanged. This holds in legacy and
+  selector mode alike, and overflow never relaxes it.
+
+**Status** (model/provider_status_model.go):
+- The `url_checks` item gains `reason`, `reason_tcp_count` (mask & 5) and
+  `reason_ipv4_count` (mask & 6) (:339-341).
+- The explanation appends a space and the reason (:1015-1020).
+- The value, count, total and `passes` stay strict. The compact form carries
+  both counts.
+
+**Metrics and dashboards:**
+- FP2 request metrics (model/network_client_location_select.go:414-438), with
+  every label set registered at startup:
+  - `urnetwork_findproviders2_select_requests_total{rank_mode,ip,protocol}`;
+  - `urnetwork_findproviders2_select_answered_total{rank_mode,overflow_step,ip,protocol}`;
+  - `urnetwork_findproviders2_select_overflow_total{rank_mode}`;
+  - `urnetwork_findproviders2_select_ipv6_need_total{rank_mode,outcome}`;
+  - `urnetwork_findproviders2_post_quantum_requests_total{field}`, in both
+    modes.
+- Stats gauges:
+  - `urnetwork_stats_provider_egress_capability{bucket,ip,protocol}` and
+    `urnetwork_stats_provider_post_quantum{bucket,signal}`
+    (controller/stats_collector.go:455, 469);
+  - they read `CountProviderEgress` (model/egress_index.go:1451;
+    `CapabilityCounts` :1351);
+  - the counts snapshot goes to schema 8, with the wire keys `k` and `q`
+    (controller/stats_provider_egress_cache.go:137-138).
+- The proxy exporter (proxy/window_client_metrics.go:61-77) publishes §8.2's
+  three metrics. Its `window` values are `quality`, `speed`, `limited` and
+  `auto`.
+- Dashboards: providers panels 935-944 and proxy panels 80-82. Their tests
+  are grafana/providers_capability_dashboard_test.go and
+  grafana/proxy_window_capability_dashboard_test.go.
+
+**Deviations from §3-§12, folded in above:**
+1. Today's export cannot stay byte-identical under gob. Content identity and
+   the exact legacy answer JSON are pinned instead (§6.1).
+2. The legacy path changes only at the select branch, the PQ request metric
+   and the marker-gated strict PQ. Selector mode repeats the level body per
+   pool (§6.1, §11).
+3. Copies take their Quality tier from their class's index (§4.3).
+4. The status IPv4 count is mask & 6 (§5.5).
+5. The IPv6 need reads "A, then C" as C topping up what A leaves (§6.3). That
+   is the same for the windows' minimum of 1.
+6. Modern after the marker reads the newest `provider_modern_evidence` row,
+   whichever probe wrote it, and `require_modern_provider` also requires
+   `PostQuantumPositive` (§12.4).
+7. The PQ flag and sets are written by every export, and read only after the
+   marker (§12.4).
+8. A v6-only provider is never downgraded, so selector mode never draws one
+   (§3.6).
+9. `urnetwork_stats_provider_post_quantum` buckets by the classified decision
+   (§8.1).
+10. Overflow eligibility is counted from the non-overflow answers (§6.3).
+11. S1's migration is 966, not 965.
+
+**Tests:**
+- **Unit:**
+  - class boundaries (off by one), mask 4 to B before C, too few runs, no
+    class passing, no UDP legs, counts and labels, reasons, and the strict
+    guard under the Online 0.8 rule;
+  - selection defaults, the echo, every 400, `ip_family` classes, the phases
+    and the pool facets;
+  - export facets, emit keys, the legacy JSON, today's-facet content and
+    partition compatibility.
+- **Redis reads:** the skip filter, the rolling deploy, and `:native_cap_v1`
+  against today's reader.
+- **DB:**
+  - the export's facets, snapshot and sets;
+  - selector mode: legacy unchanged, the need, the main pool, overflow at
+    held 6, 7 and 10, exclusions, the limited window's request, `dualstack`
+    with `tcp`, v6-capable, v6-only with names, named labels, online,
+    `force_minimum` and the 400s;
+  - strict PQ before and after the marker;
+  - the status reason, and the capability and PQ counts.
+- **Proxy:** collector tests.
+- Every new test failed to compile before the change.
+- **The merged-tree gate:**
+  - model DB 100 of 100, 261 related model unit tests, and controller stats
+    21 of 21;
+  - `TestEveryAlertClassIsClassified`, the proxy window tests,
+    `TestSpecConformance` and `TestSpecRoutesImplemented` pass;
+  - build and vet are clean, and ./grafana fails only on its 21 known
+    failures;
+  - `TestFindProviders2PrefilterBoundsSubscriberReadsUnderContention` flaked
+    once under load 150-400, and passed in the gate.
+
+**Release status:**
+- D42, rolling now, is server a151cee8d. It carries S1 step 1 only.
+- S2 (3dcc7b138 and 4fdf026c0) and S1 step 2 ship in the next server release,
+  in §10's deploy order.
+- No config or vault change.
