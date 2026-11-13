@@ -1,6 +1,30 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T11:24:54Z",
+  "observed_at": "2026-11-13T12:21:08Z",
+  "latest_review_provider_failure": {
+    "state": "FIRST_GENERATION_REJECTED_NO_ACCEPTED_REVIEW",
+    "input_tokens": 56783,
+    "prompt_fit_verified": true,
+    "source_units_clipped": false,
+    "http_status": 400,
+    "error": "Grammar error: Unimplemented keys: [\"uniqueItems\"]",
+    "response_sha256": "939bd0eb124619d6812e66dadc3084c3b778b5a8f175ae1f9d92fa8353fa0afe",
+    "semantic_key": "752907c6238f75e0c1165e39c897c8934dc8805248fc8f420e406fb0c655728c",
+    "grammar_fix_source_sha256": "deb936f17436a2d05e96e38d2b818b3d939a3d3d46a921ebb1e7e85f069b48c1",
+    "grammar_fix_tests_passed": 20,
+    "original_terminal_preserved": true,
+    "replacement_generation_authorized": false,
+    "next_action": "Bind trusted backend evidence for pre-sampling schema rejection, then qualify narrowly scoped historical-schema replay and recovery. Removing unsupported schema hints does not relax exact local ID validation. No candidate review has completed.",
+    "supersedes": "The actual_prepare block below records historical oversized-prompt refusals. Bounded authenticated metadata now fits without clipping source; the subsequent first generation failed schema compilation."
+  },
+  "package_restart_deferral": {
+    "hosts": ["sille", "goofe"],
+    "verified_at": "2026-11-13T12:20:47Z",
+    "policy_sha256": "e3d2d03859741fae37313f9d3427ce25ce49a62971d092f94fb396b8d651881e",
+    "security_updates_install": true,
+    "competition_package_restarts_deferred_to_idle": true,
+    "services_restarted_by_verification": false
+  },
   "latest_recovery_checkpoint": {
     "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
     "sn_commit": "e9aa3ac282ed7e4bc48eaab60d03043a5f6a6dac",
@@ -53,7 +77,7 @@
     },
     "oversized_helper_regression_passed": true,
     "oversized_helper_seconds": 292.295,
-    "new_generation_calls_started": false,
+    "new_generation_calls_started": true,
     "actual_input_binding": {
       "initial_cohort_packets": 15,
       "both_model_obligations": 784,
