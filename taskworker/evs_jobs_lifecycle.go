@@ -8,12 +8,18 @@ package taskworker
 //   - evs.reconcile: daily, a walk of every repo/ that applies the projected RepoDeletes and RepoRestores a repo
 //     lacks and queues each deleted repo's start and each shredding repo's shred again (evsservice.RunReconcile).
 //
-// No projection source reaches taskworker yet (ACL's projection reader for §8.8's AclRepo rows), so evsDeletionSource
-// is nil: the walk applies nothing and only queues, and a deleted repo's 7-day start waits, asked again daily. A
-// --now shred, which needs no projection, runs to its tombstone.
+// The projection both read is §8.9's state in the process's one gate cache (C-09), which gkm's reconciler start
+// builds on the runtime's host (gkm_reconciler.go): evsservice.AclEvsAuthState over it answers each repo's newest
+// RepoDelete from the network's AclRepo rows alone, dated by the row's deleted_time_ms and restored by its
+// restored_at, so a start 7 d 10 min after the RepoDelete's entry decides from rows the log may no longer hold
+// (QD-743). A network the cache has not loaded answers an error, which starts its load and leaves the repo to the
+// job's retry or the next walk. Until a runtime holds that cache, the source is nil: the walk applies nothing and
+// only queues, and a deleted repo's 7-day start waits, asked again a ShredHoldRecheckInterval on. A --now shred, which
+// needs no projection, runs to its tombstone.
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -23,11 +29,41 @@ import (
 	"github.com/urnetwork/sidecar/gkmservice"
 )
 
-// The reconciler's interval: daily (§11.12's log first row).
-const evsReconcileInterval = 24 * time.Hour
+// The shred's and the reconciler's tunables in taskworker (QD-702).
+type evsLifecycleJobSettings struct {
+	// The reconciler's interval: daily (§11.12's log first row). Positive.
+	ReconcileInterval time.Duration
+}
 
-// The projection the shred's start and the reconciler read; nil until one reaches taskworker (see the file header).
-var evsDeletionSource evsservice.EvsRepoDeletionSource
+// §11.12's values. A fresh value each call.
+func defaultEvsLifecycleJobSettings() *evsLifecycleJobSettings {
+	return &evsLifecycleJobSettings{
+		ReconcileInterval: 24 * time.Hour,
+	}
+}
+
+// The projection the shred's start and the reconciler read, over the gate cache the newest runtime built; nil until
+// one is installed (see the file header).
+var evsDeletionSourceCurrent atomic.Pointer[evsservice.AclEvsAuthState]
+
+// The projection current now, a nil interface while none is installed, so a run reads no typed nil.
+func evsDeletionSource() evsservice.EvsRepoDeletionSource {
+	if source := evsDeletionSourceCurrent.Load(); source != nil {
+		return source
+	}
+	return nil
+}
+
+// Makes §8.9's state in gate the projection evs's lifecycle jobs read, and returns what removes it at its runtime's end,
+// which leaves a newer runtime's in place.
+func installEvsDeletionSource(gate evsservice.EvsAclGate) func() {
+	// the deletion facts read no rev/ object, so the state takes no revocation reader
+	source := evsservice.NewAclEvsAuthState(gate, nil)
+	evsDeletionSourceCurrent.Store(source)
+	return func() {
+		evsDeletionSourceCurrent.CompareAndSwap(source, nil)
+	}
+}
 
 func init() {
 	evsJobs = append(evsJobs,
@@ -46,7 +82,7 @@ func runEvsShred(ctx context.Context, host *sidecar.ServiceHost, args []byte) er
 		ShredGroup: func(ctx context.Context, cluster sidecar.BlobCluster, repoId sidecar.Id, final bool) error {
 			return gkmservice.ShredGroup(ctx, host, cluster, repoId, final, nil)
 		},
-		Deletions: evsDeletionSource,
+		Deletions: evsDeletionSource(),
 	}, args)
 	if err != nil {
 		return err
@@ -64,11 +100,11 @@ func firstEvsReconcile(host *sidecar.ServiceHost) *sidecar.TaskRequest {
 func runEvsReconcile(ctx context.Context, host *sidecar.ServiceHost, args []byte) error {
 	now := host.ClockOrReal().Now()
 	if err := host.Tasks.Schedule(ctx, &sidecar.TaskRequest{
-		Name: evsservice.EvsReconcileTaskName, OnceKey: evsservice.EvsReconcileTaskName, RunAt: now.Add(evsReconcileInterval),
+		Name: evsservice.EvsReconcileTaskName, OnceKey: evsservice.EvsReconcileTaskName, RunAt: now.Add(defaultEvsLifecycleJobSettings().ReconcileInterval),
 	}); err != nil {
 		return err
 	}
-	counts, err := evsservice.RunReconcile(ctx, host, &evsservice.EvsReconcileDeps{Deletions: evsDeletionSource})
+	counts, err := evsservice.RunReconcile(ctx, host, &evsservice.EvsReconcileDeps{Deletions: evsDeletionSource()})
 	if err != nil {
 		return err
 	}
