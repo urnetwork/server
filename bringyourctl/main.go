@@ -47,6 +47,7 @@ Usage:
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
     bringyourctl db sweep-orphans [--slice=<n>]
     bringyourctl db scrub-client-addresses
+    bringyourctl db scrub-network-create-secrets [--after=<event_id>] [--through=<event_id>] [--batch=<n>] [--batch-pause=<duration>] [(--apply --expect=<digest>)]
     bringyourctl db key-history-floor [--rollback | --restore]
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
@@ -263,7 +264,7 @@ Options:
                    major or full, mildest first.
 
     --private-stdin  Read the bounded private expiry request from stdin.
-    --apply          Apply the scoped expiry request; omission is a read-only preview.
+    --apply          Apply the scoped expiry request; omission is a read-only preview. With db scrub-network-create-secrets, rewrite the audit rows of the dry run whose digest is --expect.
     --contract_id=<contract_id> The contract to close
     --target_id=<target_id>     The contract_close.party (either "destination" or "source")
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
@@ -285,7 +286,11 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc or contracts close-due dry run printed; --send and --commit refuse any other census.
+    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, contracts close-due or db scrub-network-create-secrets dry run printed; --send, --commit and --apply refuse any other census.
+    --after=<event_id>  With db scrub-network-create-secrets, scrub only the audit rows after this event id: a stopped --apply prints the last one it committed.
+    --through=<event_id>  With db scrub-network-create-secrets, the newest audit event id in scope; the dry run defaults to the newest row and prints it, and --apply needs the one the dry run printed.
+    --batch=<n>  With db scrub-network-create-secrets, the audit rows each statement reads and each transaction rewrites, at most 5000 (the default).
+    --batch-pause=<duration>  With db scrub-network-create-secrets, the wait after each batch (Go duration; default 2s).
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
@@ -338,6 +343,8 @@ func main() {
 			dbSweepOrphans(opts)
 		} else if scrubClientAddresses, _ := opts.Bool("scrub-client-addresses"); scrubClientAddresses {
 			dbScrubClientAddresses(opts)
+		} else if scrubNetworkCreateSecrets, _ := opts.Bool("scrub-network-create-secrets"); scrubNetworkCreateSecrets {
+			os.Exit(dbScrubNetworkCreateSecretsCommand(opts))
 		} else if keyHistoryFloor, _ := opts.Bool("key-history-floor"); keyHistoryFloor {
 			dbKeyHistoryFloor(opts)
 		} else if closeEvidenceRetention, _ := opts.Bool("close-evidence-retention"); closeEvidenceRetention {
