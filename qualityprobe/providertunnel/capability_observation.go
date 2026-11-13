@@ -44,9 +44,11 @@ type CapabilityObservation struct {
 	// while the session first establishes (connect's
 	// OpportunisticEstablishHold), so a provider that seals in time carries
 	// them sealed and one that does not gets them in plaintext once it ends.
-	// Zero, the capability probe's, keeps the client's own hold, none by
-	// default: its first sends go at once, in plaintext until the session
-	// seals.
+	// The URL phase that makes those sends gets it on top of its own budget
+	// (providerFirstSendsHold), so the hold is never timed as the provider's
+	// DNS or connect. Zero, the capability probe's, keeps the client's own
+	// hold, none by default: its first sends go at once, in plaintext until
+	// the session seals.
 	EstablishHold time.Duration
 	// A replaced window client is recorded (Tunnel.ClientReplaced) and the
 	// tunnel keeps running, for a measurement that rides traffic the session

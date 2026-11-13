@@ -201,7 +201,7 @@ func TestH3QuicConfigFitsTheProbeTunnel(t *testing.T) {
 	if config.InitialPacketSize != 1252 || config.InitialPacketSize+20+8 > connect.DefaultMtu || !config.DisablePathMTUDiscovery {
 		t.Fatalf("QUIC datagrams do not fit the tunnel link: initial=%d pmtud_off=%t", config.InitialPacketSize, config.DisablePathMTUDiscovery)
 	}
-	if config.HandshakeIdleTimeout != urlProbeTcpTimeout || config.MaxIdleTimeout != urlProbeReadIdleTimeout {
+	if config.HandshakeIdleTimeout != defaultProviderUrlPhaseSettings().TcpTimeout || config.MaxIdleTimeout != urlProbeReadIdleTimeout {
 		t.Fatalf("QUIC bounds are not the HTTPS leg's: handshake=%s idle=%s", config.HandshakeIdleTimeout, config.MaxIdleTimeout)
 	}
 	if len(config.Versions) != 1 || config.Versions[0] != quic.Version1 || config.Allow0RTT || config.TokenStore != nil || config.KeepAlivePeriod != 0 || config.EnableDatagrams {

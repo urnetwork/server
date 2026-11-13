@@ -74,7 +74,7 @@ func observeProviderQuicHandshakeRetry(ctx context.Context, err error, received 
 // Initial, so the leg fails at the bound of its second handshake (dialQuic
 // makes a silent one once more), two bounds well inside its request timeout
 // and the turn's slot. It is a var so a test can shorten it.
-var urlProbeQuicHandshakeIdleTimeout = urlProbeTcpTimeout
+var urlProbeQuicHandshakeIdleTimeout = defaultProviderUrlPhaseSettings().TcpTimeout
 
 // After the handshake a connection that hears nothing for the HTTPS leg's
 // read-idle bound is over, as a stalled HTTPS read is.
