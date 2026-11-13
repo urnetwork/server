@@ -978,7 +978,8 @@ Daily (`<scratch>/c/tw_daily.txt`):
   reads 1 at 30 of 34 quarter-hours from 11-12 20:30Z to 11-13 04:45Z (the gaps are
   the D42 and D43 rolls). Every attempt has ended at 1,800 s with `Timeout`: the
   pending row counted 13 by 04:49Z (Part D §2.5), the latest ending 04:48:42Z with
-  "failed epoch 4 shadow rows: context canceled". None has finished.
+  "failed epoch 4 shadow rows: context canceled". None has finished; a 14th began
+  at 05:20:52Z.
 - **Why it never ends** (Part D §2.5 read the pending row): the row was scheduled
   by d1ea65129 with the usage steps' 30-minute `MaxTime`. D42 gave shadow steps a
   2-hour bound (3939500bb; taskworker/work/st_ledger_v2_usage_work.go:42–45, applied
