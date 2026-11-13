@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T22:33:18Z",
+  "observed_at": "2026-11-13T23:08:28Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -23,8 +23,8 @@
     "hold_active": false
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.jHnj9PK5/state.private.json",
-    "sha256": "fe7412bf1f461d55c2dc8cdfdcf2a1d230c45666e9e3a222fe337d35d0c5ae1d",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.j1VfdWQU/state.private.json",
+    "sha256": "7114aa751d6d475276eceaa62b5aa8c1a49bbd370e1ab8602e60526b619e90d9",
     "mode": "root:root 0400 in root:root 0700 directory",
     "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
@@ -36,8 +36,8 @@
     "cache_helper_dependency_only_source_sha256": "af476fddca1d30829997875a7da302ffad6a1d1a4ec028849e43572ea128dc2c",
     "cache_helper_tests_executed": 0,
     "cache_helper_qa_status": "Initial build stopped on advancing local server/connect dependency mismatch. A dependency-only successor uses the qualified source tree; its QA awaits private-management memory headroom. No product code or test expectation changed.",
-    "review_orchestrator_v5_source_sha256": "c1c2ada34dee0eda00677fdf2affa27a0a06ffc4141124ae80b7d80a24b65776",
-    "review_orchestrator_v5_status": "Source-only placement and parent-budget guards; not built, tested or activated. Historical v4 qualification below does not qualify v5.",
+    "review_orchestrator_v6_source_sha256": "adae37f44cb4d3a99d691f804c01a01c53075b7317cc91ed00bde63158cef79a",
+    "review_orchestrator_v6_status": "Independent source review found no remaining delta blocker. Fresh coordinator placement and parent-budget checks now run immediately before each dispatch; four composed regressions added. Unbuilt, untested and not activated. Supersedes v5's startup-only coordinator check; historical qualification below does not qualify v6.",
     "live_cache_archive_or_eviction_performed": false,
     "live_cache_archive_and_eviction_approval": "Pending; earlier unrelated cleanup approvals do not authorize this operation.",
     "next_action": "Keep existing evaluations and deadlines intact. Test auxiliary tools only after management-memory admission passes. Keep model calls stopped until global RAM backing and review placement are reconciled. Per-job recovery outcomes remain in the protected operator record."
