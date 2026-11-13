@@ -12,7 +12,9 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
+	"sync"
 	"time"
 )
 
@@ -270,7 +272,20 @@ type providerUrlProbeFamilyTransport interface {
 func fetchUrlProbeLoad(ctx context.Context, client *http.Client, destination Destination, firstTimeout time.Duration, legTimeout time.Duration, profile RequestProfile, opts Options) CheckResult {
 	plan := opts.urlProbeLegPlan(destination)
 	ipv4Ctx := withUrlProbeIpVersion(ctx, 4)
-	result := fetchUrlProbe(ipv4Ctx, client, destination, firstTimeout, profile, opts)
+	httpsCtx := ipv4Ctx
+	if opts.E2e != nil {
+		// a post-quantum turn reads its session when the IPv4 HTTPS leg writes
+		// its first request: whether that request rode the sealed session
+		var written sync.Once
+		httpsCtx = httptrace.WithClientTrace(ipv4Ctx, &httptrace.ClientTrace{
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				if info.Err == nil {
+					written.Do(opts.E2e.RequestWritten)
+				}
+			},
+		})
+	}
+	result := fetchUrlProbe(httpsCtx, client, destination, firstTimeout, profile, opts)
 	result.UdpProbesDisabled = plan.udpProbesDisabled
 	if plan.h3 {
 		result.H3Required = true

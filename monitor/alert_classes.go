@@ -274,7 +274,6 @@ var alertClassKinds = map[string]alertClassKind{
 	"mover-store-errors":                                  incidentAlertClass,
 	"pg-disk-space-low":                                   incidentAlertClass,
 	"storage-runway":                                      incidentAlertClass,
-	"contract-reap-stalled":                               incidentAlertClass,
 	"contract-horizon-reaper-stalled":                     incidentAlertClass,
 	"contract-horizon-reaper-failing":                     incidentAlertClass,
 	"contract-horizon-control-unavailable":                incidentAlertClass,

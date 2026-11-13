@@ -6392,7 +6392,7 @@ var stragglerContractIdMargin = ContractIdCreateTimeMargin
 // the whole contract heap. reap_time is a timestamp without zone on the UTC
 // storage clock. Preserve the transaction-start clock while making its
 // storage zone explicit.
-const assignStragglerReapTimeSQL = `
+var assignStragglerReapTimeSQL = `
 WITH batch AS (
 	SELECT transfer_contract.contract_id
 	FROM transfer_contract

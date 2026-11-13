@@ -41,6 +41,11 @@ type ProviderUrlProbeDue struct {
 	// (qualityprobe/egresshealth url_family.go); a prober that predates it
 	// ignores it and probes IPv4.
 	IpFamily connect.IpFamily `json:"ip_family,omitempty"`
+	// The turn measures post-quantum: its tunnel opens an opportunistic
+	// end-to-end session with the provider and reports its outcome as e2e
+	// evidence (provider_url_probe_post_quantum.go). A prober that predates
+	// it ignores it and opens none.
+	PostQuantum bool `json:"post_quantum,omitempty"`
 }
 
 // A stable provider slot belongs to one logical shard, independently of the
@@ -301,6 +306,9 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 	if ordinaryExpiryComplete {
 		_ = writeProviderUrlProbeOrdinaryExpiry(ctx, providerUrlProbeOrdinaryExpiryKey(shardIndex, shardCount), now)
 	}
+	// which issued turns measure post-quantum, decided after the claim's
+	// transaction so its row locks are not held for the reads
+	markProviderUrlProbePostQuantumTurns(ctx, now, result.Providers, DefaultProviderUrlProbePostQuantumSettings())
 	// Two-day receipt storage cleanup has a durable Taskworker owner. Current
 	// completion expiry above and measured-history clock predicates retain all
 	// admission authority even when that independent cleanup is delayed;
