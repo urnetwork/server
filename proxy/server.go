@@ -1290,6 +1290,49 @@ func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncSt
 	return errors.Join(addErr, removeErr)
 }
 
+// WatchProxyClients registers this instance with the proxy client
+// notification of its (host, block): each delivery of new and changed clients
+// adds their WireGuard clients, and each periodic full set reconciles them. A
+// client created within WarmupTimeout also has its device opened. A delivery
+// fails only when no client was applied, and the notification then delivers
+// the same clients again on its next poll. Returns the unsubscribe.
+func (self *wgServer) WatchProxyClients(notification *proxyClientNotification) func() {
+	unsubscribe := notification.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) error {
+		if 0 < self.settings.WarmupTimeout {
+			warmupStartTime := server.NowUtc().Add(-self.settings.WarmupTimeout)
+			for _, proxyClient := range proxyClients {
+				if warmupStartTime.Before(proxyClient.CreateTime) {
+					// warmup the device
+					_, err := self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
+					if err != nil {
+						glog.Infof("[proxy][%s]warmup err=%s\n", proxyClient.ProxyId, err)
+					} else {
+						glog.Infof("[proxy][%s]warmup\n", proxyClient.ProxyId)
+					}
+				}
+			}
+		}
+
+		// a returned error means the notification re-delivers these clients on
+		// the next poll instead of advancing past them
+		err := self.AddProxyClients(proxyClients...)
+		if err != nil {
+			glog.Infof("[proxy]wg add proxy clients err=%s\n", err)
+		}
+		return err
+	})
+	unsubscribeFullSync := notification.AddProxyClientsFullSyncCallback(func(proxyClients []*model.ProxyClient, syncStartTime time.Time) {
+		err := self.SyncProxyClients(proxyClients, syncStartTime)
+		if err != nil {
+			glog.Infof("[proxy]wg sync proxy clients err=%s\n", err)
+		}
+	})
+	return func() {
+		unsubscribe()
+		unsubscribeFullSync()
+	}
+}
+
 // errProxyDeviceNoRoute: the device's window formed no provider in time.
 var errProxyDeviceNoRoute = errors.New("Proxy device has no route.")
 
