@@ -49117,34 +49117,62 @@ and the pager holds one until the business calendar opens, abuse.yml's
 `business_hours` (Monday to Friday 09:00 to 18:00 UTC by default), then pages
 the rota; one whose incident clears first is dropped and pages nobody.
 
-This monitor publishes three gauges, pushed with the process's registry under
+This monitor publishes these series, pushed with the process's registry under
 warp: `urnetwork_filecluster_set_state{cluster,set,state}` (§29.1), state one
 of `protected`, `degraded`, `at_risk` or `unknown`, 1 under the set's state and
-0 under the others; `urnetwork_filecluster_drive_rating_days{cluster}`
-(§29.4); and `urnetwork_filecluster_exhaustion_days{cluster,resource}` (§29.7).
+0 under the others; `urnetwork_filecluster_mrf_depth{cluster,set}`,
+`urnetwork_filecluster_mrf_dropped_total{cluster,set}` and
+`urnetwork_filecluster_unclean_starts_total{cluster,set}` (§29.1), each set's
+partial-write queue summed over its cluster's hosts;
+`urnetwork_filecluster_drive_rating_days{cluster}` (§29.4); and
+`urnetwork_filecluster_exhaustion_days{cluster,resource}` (§29.7).
+
+The minio fork's own series reach Mimir through a scrape of each cluster's
+node metrics on every storage host (xops's playbook-file-clusters.yml), which
+labels them `job="file_cluster_minio"` and `cluster="<cluster id>"`; MinIO
+labels each with its host, `server="<host:port>"`, the name the cluster's admin
+info lists the host under. §29.1 and §29.3 read them there.
 
 ### 29.1 File-cluster protection states
 
 Probe: `filecluster-state`
 
-Every 30 s, each cluster's admin info, by §19.6's table: protected (every drive
-online, no heal pending); degraded (a drive or host offline, a drive
-rebuilding, MinIO's partial-write queue above zero or entries it lost, or an
-outage no full heal has followed); at_risk (degraded and a further drive or
-host failing, or a host offline past the 4 h RTO). A rebuild alone stays
-degraded. A set leaves degraded on a full heal ending with every drive online,
-or, when nothing was offline, on the queue draining with nothing lost
-(g0-recheck-1-s11-degraded-write-debt); it leaves at_risk once repaired and a
-full heal ends.
+Every 30 s, each cluster's admin info and one Mimir query, by §19.6's table:
+protected (every drive online, no heal pending); degraded (a drive or host
+offline, a drive rebuilding, MinIO's partial-write queue above zero or entries
+it lost, or an outage no full heal has followed); at_risk (degraded and a
+further drive or host failing, or a host offline past the 4 h RTO). A rebuild
+alone stays degraded. A set leaves degraded on a full heal that began after its
+last failure, or, when nothing was offline, on the queue draining with nothing
+lost (g0-recheck-1-s11-degraded-write-debt); it leaves at_risk once repaired
+and such a full heal ends.
 
-The heal inputs (the queue's depth, its drops and unclean starts, a full
-heal's end) are the minio fork's, which does not export them yet. Until it
-does, a set's heal debt reads unknown, never zero: no set reads protected, a
-set with every drive online reads `unknown` and reports
-`filecluster-state-unobservable`, so no incident here clears by itself, and a
-set that was degraded or at_risk stays so until the watcher restarts after its
-full heal. Memory is the process's: a host already offline when the watcher
-starts is dated from its first sight.
+The heal inputs are the minio fork's
+(evsb-m3-01-file-cluster-signal-sources), per host, pool and set:
+`urnetwork_filecluster_host_mrf_depth` (partial writes queued or healing),
+`urnetwork_filecluster_host_mrf_dropped_total` (entries the queue lost: never
+queued, or taken off without a heal that left every drive of the set holding
+the object), `urnetwork_filecluster_host_unclean_starts_total` (starts after a
+process that did not save its queue) and
+`urnetwork_filecluster_host_mrf_last_loss_seconds` (the set's last loss on
+that host); and per cluster `urnetwork_filecluster_full_heal_start_seconds`
+and `urnetwork_filecluster_full_heal_end_seconds`, the last full heal: `mc
+admin heal --recursive` of the whole cluster, or of its one bucket, that ran to
+its end and left every item on every drive of its set. A heal that ran with a
+drive offline is not recorded, so its end ends nothing.
+
+A set's heal debt is known only while every host its cluster's admin info
+lists shows all four queue series fresh and some host shows the full heal.
+Its depth is the hosts' sum, and it has lost entries while any host's last
+loss is at or after the last full heal's start. Otherwise the debt reads
+unknown, never zero: the set does not read protected, with every drive online
+it reads `unknown` and reports `filecluster-state-unobservable`, a set that
+was degraded or at_risk stays so, and its queue series are not published. A
+new cluster's first writes can miss a host still starting, so it can begin
+with lost entries, which one full heal clears. Memory is the process's: a
+host already offline when the watcher starts is dated from its first sight,
+and a watcher restarted after an outage it saw reads the set by its queue
+alone.
 
 Classes:
 
@@ -49152,9 +49180,10 @@ Classes:
   within 1 h of the page, restored within 4 h.
 - `filecluster-set-degraded` **WARN**, sustained 2 runs.
 - `filecluster-heal-debt-lost` **WARN**: the queue lost entries with every
-  drive online; start one full heal (`mc admin heal --recursive`).
+  drive online; start one full heal (`mc admin heal --recursive <alias>`).
 - `filecluster-state-unobservable` (visibility): admin info did not read, or
-  a set's heal debt is unknown.
+  a set's heal debt is unknown: Mimir did not read, a host shows no queue, or
+  no host shows the cluster's full heal.
 
 ### 29.2 File-cluster write quorum and pools
 
@@ -49183,11 +49212,10 @@ EVSB-M2-18), and every clock §19.6 bounds: each evs, gkm and taskworker
 process's `urnetwork_clock_offset_seconds` (+Inf while unknown), each Redis
 host's (`role="redis"`, -1 while unknown) and each MinIO host's
 `urnetwork_filecluster_clock_offset_seconds` beside
-`urnetwork_filecluster_clock_known`. The MinIO series are read as a scrape of
-each cluster's node metrics labels them, `job="file_cluster_minio"` and
-`cluster="<cluster id>"`: xops runs no such scrape yet, and no evs, gkm or
-taskworker host constructs its clock check yet, so until both land this signal
-reads blind and holds its incidents open.
+`urnetwork_filecluster_clock_known`. The MinIO series are read as xops's scrape
+of each cluster's node metrics labels them, `job="file_cluster_minio"` and
+`cluster="<cluster id>"`. No evs, gkm or taskworker host constructs its clock
+check yet, so until one does this signal reports the process clocks blind.
 
 Classes:
 

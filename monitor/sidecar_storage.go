@@ -12,9 +12,10 @@ package monitor
 //     the processes, the storage hosts and the dumps push. Mimir's lag suits these signals; the budget loop
 //     itself never reads Mimir.
 //   - the gauges this monitor owns, §19.6's urnetwork_filecluster_set_state and §19.8's
-//     urnetwork_filecluster_drive_rating_days on SidecarStorageGauges and urnetwork_filecluster_exhaustion_days on
-//     FileClusterExhaustionGauges, which by default register in the process's prometheus registry; the continuous
-//     CLI pushes that registry under warp (server/grafana.go).
+//     urnetwork_filecluster_drive_rating_days on SidecarStorageGauges, urnetwork_filecluster_exhaustion_days on
+//     FileClusterExhaustionGauges, and §19.6's urnetwork_filecluster_mrf_depth, urnetwork_filecluster_mrf_dropped_total
+//     and urnetwork_filecluster_unclean_starts_total on FileClusterHealDebtGauges, which by default register in the
+//     process's prometheus registry; the continuous CLI pushes that registry under warp (server/grafana.go).
 //
 // No series, finding or page names a network or repo (D-OPS-8, I-13): clusters, sets, hosts, devices and
 // processes only.
@@ -381,6 +382,7 @@ type prometheusSidecarStorageGauges struct {
 	setStateGauge       *prometheus.GaugeVec
 	ratingDaysGauge     *prometheus.GaugeVec
 	exhaustionDaysGauge *prometheus.GaugeVec
+	queueDebts          *fileClusterQueueDebtCollector
 
 	stateLock sync.Mutex
 	// the sets each cluster's last publish named
@@ -400,7 +402,17 @@ func NewPrometheusSidecarStorageGauges(registerer prometheus.Registerer) Sidecar
 		}
 		return gauge
 	}
+	queueDebts := newFileClusterQueueDebtCollector()
+	if err := registerer.Register(queueDebts); err != nil {
+		var already prometheus.AlreadyRegisteredError
+		if errors.As(err, &already) {
+			if existing, ok := already.ExistingCollector.(*fileClusterQueueDebtCollector); ok {
+				queueDebts = existing
+			}
+		}
+	}
 	return &prometheusSidecarStorageGauges{
+		queueDebts: queueDebts,
 		setStateGauge: register(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: fileClusterSetStateMetricName,
 			Help: "§19.6's protection state of each erasure set: 1 under its state, 0 under the others; unknown while an input is missing.",
@@ -440,6 +452,67 @@ func (self *prometheusSidecarStorageGauges) PublishSetStates(clusterId string, s
 	}
 	slices.Sort(sets)
 	self.clusterSets[clusterId] = sets
+}
+
+func (self *prometheusSidecarStorageGauges) PublishQueueDebts(clusterId string, setQueues map[string]FileClusterQueueDebt) {
+	self.queueDebts.publish(clusterId, setQueues)
+}
+
+// The queues' sums as a collector: a gauge and two counters whose values are the hosts' own, summed (see
+// signal_filecluster_heal_debt.go). Safe for concurrent use.
+type fileClusterQueueDebtCollector struct {
+	depthDescription   *prometheus.Desc
+	droppedDescription *prometheus.Desc
+	uncleanDescription *prometheus.Desc
+
+	stateLock sync.Mutex
+	// by cluster, then set
+	clusterSetQueues map[string]map[string]FileClusterQueueDebt
+}
+
+func newFileClusterQueueDebtCollector() *fileClusterQueueDebtCollector {
+	labels := []string{"cluster", "set"}
+	return &fileClusterQueueDebtCollector{
+		depthDescription: prometheus.NewDesc(fileClusterMrfDepthMetricName,
+			"Partial writes of the erasure set its cluster's hosts have queued or are healing (§19.6).", labels, nil),
+		droppedDescription: prometheus.NewDesc(fileClusterMrfDroppedMetricName,
+			"Queued partial writes of the erasure set its cluster's hosts lost: never queued, or taken off unhealed.", labels, nil),
+		uncleanDescription: prometheus.NewDesc(fileClusterUncleanStartsMetricName,
+			"Starts of the cluster's hosts that followed a process which did not save its partial-write queue.", labels, nil),
+		clusterSetQueues: map[string]map[string]FileClusterQueueDebt{},
+	}
+}
+
+func (self *fileClusterQueueDebtCollector) publish(clusterId string, setQueues map[string]FileClusterQueueDebt) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if len(setQueues) == 0 {
+		delete(self.clusterSetQueues, clusterId)
+		return
+	}
+	queues := map[string]FileClusterQueueDebt{}
+	for set, queue := range setQueues {
+		queues[set] = queue
+	}
+	self.clusterSetQueues[clusterId] = queues
+}
+
+func (self *fileClusterQueueDebtCollector) Describe(descriptions chan<- *prometheus.Desc) {
+	descriptions <- self.depthDescription
+	descriptions <- self.droppedDescription
+	descriptions <- self.uncleanDescription
+}
+
+func (self *fileClusterQueueDebtCollector) Collect(metrics chan<- prometheus.Metric) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for clusterId, setQueues := range self.clusterSetQueues {
+		for set, queue := range setQueues {
+			metrics <- prometheus.MustNewConstMetric(self.depthDescription, prometheus.GaugeValue, queue.Depth, clusterId, set)
+			metrics <- prometheus.MustNewConstMetric(self.droppedDescription, prometheus.CounterValue, queue.DroppedCount, clusterId, set)
+			metrics <- prometheus.MustNewConstMetric(self.uncleanDescription, prometheus.CounterValue, queue.UncleanStartCount, clusterId, set)
+		}
+	}
 }
 
 func (self *prometheusSidecarStorageGauges) PublishExhaustionDays(clusterId string, resource string, days float64, known bool) {

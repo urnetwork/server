@@ -219,8 +219,8 @@ func checkFileClusterState(t *testing.T, probe *fileClusterStateProbe, source *f
 	return findings
 }
 
-// Until the fork exports its heal debt, a set with every drive online reads unknown, never protected, and
-// reports a visibility finding; its gauge reads unknown.
+// While the fork's heal debt does not read, here with no services host to ask Mimir through, a set with every
+// drive online reads unknown, never protected, and reports a visibility finding; its gauge reads unknown.
 func TestFileClusterStateUnknownHealDebtNeverReadsProtected(t *testing.T) {
 	source := newFakeFileClusterAdminSource()
 	gauges := newFakeSidecarStorageGauges()
@@ -294,8 +294,8 @@ func TestFileClusterStateFurtherFailureIsAtRisk(t *testing.T) {
 }
 
 // With the fork's heal debt known (a fake): the queue alone degrades and drains to protected; an outage ends
-// only on a full heal after its last failure; lost entries warn and hold the set until a full heal; a debt
-// before a failure makes the failure a further one.
+// only on a full heal that began after its last failure; lost entries warn and hold the set until a full heal; a
+// debt before a failure makes the failure a further one.
 func TestFileClusterStateKnownHealDebtFollowsTheOwnersRule(t *testing.T) {
 	source := newFakeFileClusterAdminSource()
 	gauges := newFakeSidecarStorageGauges()
@@ -327,9 +327,12 @@ func TestFileClusterStateKnownHealDebtFollowsTheOwnersRule(t *testing.T) {
 	setFileClusterTestHost(info, 2, "online")
 	// the queue drained, but a host was offline: only a full heal after it ends the episode
 	check("filecluster-set-degraded meta-1/0-0")
-	debt.fullHealEndTime = now.Add(-30 * time.Minute)
-	check("filecluster-set-degraded meta-1/0-0")
+	// a full heal that began before the host's return healed part of the set without it
+	debt.fullHealStartTime = now.Add(-30 * time.Minute)
 	debt.fullHealEndTime = now
+	check("filecluster-set-degraded meta-1/0-0")
+	debt.fullHealStartTime = now
+	debt.fullHealEndTime = now.Add(30 * time.Second)
 	check()
 
 	debt.lost = true
@@ -339,6 +342,7 @@ func TestFileClusterStateKnownHealDebtFollowsTheOwnersRule(t *testing.T) {
 	check("filecluster-set-at-risk meta-1/0-0")
 	setFileClusterTestDrive(info, 1, "ok", false)
 	debt.lost = false
+	debt.fullHealStartTime = now.Add(30 * time.Second)
 	debt.fullHealEndTime = now.Add(time.Minute)
 	check()
 }
