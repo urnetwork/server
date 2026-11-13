@@ -194,8 +194,8 @@ change, slot statistics, the small code items) are all not done.
 1. **The §8.6 extender shadow step loops, and pins the primary each time** (C §2.4,
    D §2.5). `StLedgerV2UsageStep` (extender_shadow, epoch 4) reads the epoch's 7 days
    of contracts in one REPEATABLE READ snapshot on the maintenance pool. It is cut at
-   1,800 s and claimed again; 13 reads since 11-12 20:30Z, none finished, nothing
-   recorded.
+   1,800 s and claimed again: 13 reads since 11-12 20:30Z, none finished, nothing
+   recorded, and a 14th began on schedule at 05:20:52Z.
    - **Why it never ends:** the pending row was scheduled by d1ea65129 with the
      30-minute bound. D42's 2-hour `ShadowMaxTime` never reached it: the sync
      schedules `IfAbsent` and the framework's error reschedule keeps the row's bound,
@@ -1126,7 +1126,7 @@ Needs the owner's probe-design review: it changes which dials resume.
 ## Part D — PostgreSQL on edge-2
 
 This is research, not a change. Every number comes from read-only measurement
-of Main's primary, by-us-fmt-5-edge-2, on 2026-11-13 between 04:18Z and 05:10Z,
+of Main's primary, by-us-fmt-5-edge-2, on 2026-11-13 between 04:18Z and 05:25Z,
 plus Mimir history from 10-30. Nothing in production was changed. No
 identifiers, addresses or literals are printed here. Code references are at the
 deployed revisions: server a151cee8d (D42: api, alt), 978dcba02 (D43:
@@ -1185,7 +1185,8 @@ core while they stream. Instead:
   03:40Z lifted edge-2 by 5–10 cores each (27–49 core-hours); a 13th, at
   04:18–04:48Z under D43, by 14. Nothing was recorded. The pending row still
   has a 1800 s bound after 13 timeouts with its attempt at 1, so D42's 2-hour
-  bound never reached it and the loop has no end (§2.5).
+  bound never reached it and the loop has no end: a 14th read started on
+  schedule at 05:20:52Z (§2.5).
 - **The pin tax**, measured in this session: 20 minutes into that snapshot, four
   hot statements cost 1.74 backends, against 0.22 in a pin-free window after
   it, and transfer_debit_journal held 2.14M dead rows for 1,353 live.
@@ -1224,7 +1225,7 @@ overlap in kernel time. #1's retirement option is an SN25 decision; #2, #3 and
 
 ### 1. Method
 
-**When and load.** Friday 11-13, 04:18–05:10Z. Since the proxy loop ended,
+**When and load.** Friday 11-13, 04:18–05:25Z. Since the proxy loop ended,
 edge-2's load is nearly flat over the day: 23.4k commits/s in the pgss window
 against 24.5–25.8k/s at 18–22Z on 11-09..11-12, so this window stands for the
 evening load better than CPUOPT4's morning did. In the main pgss window
@@ -1492,7 +1493,8 @@ from autovacuum.
 - **Why it does not stop** (the pending row at 04:49Z, `shadowtask-1.json`):
   `kind` extender_shadow, `epoch` 4, `attempt` 1, `run_max_time_seconds` 1800,
   `reschedule_error` Timeout, `reschedule_error_count` 13, next `run_at`
-  05:20:50Z.
+  05:20:50Z. The 14th read started at 05:20:52Z and was waiting on
+  `DataFileRead` 53 s later, holding the cluster's oldest snapshot.
   - The row was scheduled by d1ea65129 with the 30-minute `MaxTime`. D42's
     `ShadowMaxTime` of 2 h (3939500bb; taskworker/work/st_ledger_v2_usage_work.go:42-45
     at 978dcba02) applies only to rows the sync or the Post schedules, and the
@@ -1551,7 +1553,7 @@ listeners still have a backlog of 128, because the change needs restarts.
 
 | Source | Revision, live since | Cost measured | Notes |
 |---|---|---|---|
-| SN25 extender shadow step (§8.6.7), epoch 4 | d1ea65129, taskworker 11-12 20:30Z; D42's 2-h bound (3939500bb) never reached the pending row | +5 to +10 cores on average per 30-minute read overnight (12 reads, 27–49 core-h), +14 in the 04:18–04:48Z read; 13 timeouts, nothing recorded; next read 05:20:50Z | §2.5. Ongoing: about 2–5 cores on average *(inferred)*. From epoch 8 the live root build reads the same statement through `stLedgerV2EpochRows` (controller/st_ledger_v2_rows.go:50) |
+| SN25 extender shadow step (§8.6.7), epoch 4 | d1ea65129, taskworker 11-12 20:30Z; D42's 2-h bound (3939500bb) never reached the pending row | +5 to +10 cores on average per 30-minute read overnight (12 reads, 27–49 core-h), +14 in the 04:18–04:48Z read; 13 timeouts, nothing recorded; a 14th read from 05:20:52Z | §2.5. Ongoing: about 2–5 cores on average *(inferred)*. From epoch 8 the live root build reads the same statement through `stLedgerV2EpochRows` (controller/st_ledger_v2_rows.go:50) |
 | §8.6 extender census and extender tables | ed692a6ec, d1ea65129 (11-12) | all 80 statements naming extender tables: 2,155 calls/s, 0.12 backends | mostly `contract_extender` lookups (1,283/s) and inserts (676/s) at contract creation, which predate §8.6 (2.7B lookups since 10-23); the census table holds 1 row and the network_extender tables under 60k rows each. The census's real cost is the shadow read above |
 | FP2 S2 capability counts in the health-window aggregate | 3dcc7b138, in D42 | 0.1 calls/s at 2,370 ms, 892k hits and 504 ms of JIT per call: 0.21 backends | `providerEgressHealthCountsSql` (model/provider_egress_health_model.go:806) adds eleven capability counts and two post-quantum maxima, each a `FILTER` aggregate, over an 8-hour window of about 2M rows. On 11-04: 1,050 ms and 350k hits at 0.3/s |
 | SN25 amounts for a network | the v2 reader, before D42 | 0.17 calls/s at 1,167 ms: 0.19 backends; 0.013 ms on 11-04 | `DISTINCT ON (epoch, coldkey)` over st_payout_wallet_resolution (449k rows; 0.22 sequential scans/s, 99k tuples/s) for an amount table of 90 rows (model/st_ledger_v2_reader_model.go:28, :86) |
