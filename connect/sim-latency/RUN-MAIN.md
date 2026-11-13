@@ -465,6 +465,13 @@ path does not change the frozen evaluated source, scorer, shared epoch baseline,
 R9 measurements, significance rules, artifact authentication or sandbox limits.
 Changes to those competition inputs still need an explicit epoch policy decision.
 
+On evaluation hosts, install `evaluator/needrestart-competition.conf` as
+`/etc/needrestart/conf.d/urnetwork-competition.conf`. Security updates still
+install, but competition-owned services are excluded from automatic
+package-triggered restarts. Apply their pending restarts under a claim hold at
+a verified idle boundary; do not leave patched runtime libraries indefinitely
+pending. Installing this configuration does not itself restart any service.
+
 #### Preparation-only qualification boundary — installed inactive
 
 The new native CLI adds `supervise --once --prepare-only` for one explicit
