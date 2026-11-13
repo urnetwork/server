@@ -270,17 +270,21 @@ func stripeReadRefused(err error) bool {
 // their bank (3D Secure): an open payment of the invoice whose PaymentIntent
 // requires action. An invoice lists its payments from API version 2025-03-31
 // on, and these reads are pinned to such a version (stripePinnedVersionHeader).
-// A read Stripe refuses for good leaves the answer unknown, which reads as no:
-// the notice then says the payment did not go through, as it always did.
-// Another failure is an error, and the webhook is delivered again.
+// The payment intents are expanded in the list; a list Stripe refuses with the
+// expansion is read once more without it, and each payment intent it names is
+// read on its own. A read Stripe refuses for good leaves the answer unknown,
+// which reads as no: the notice then says the payment did not go through, as it
+// always did. Another failure is an error, and the webhook is delivered again.
 func stripeDunningInvoiceActionRequired(ctx context.Context, invoiceId string, settings *stripeDunningSettings) (bool, error) {
-	query := url.Values{
-		"invoice":  []string{invoiceId},
-		"status":   []string{"open"},
-		"limit":    []string{"100"},
-		"expand[]": []string{"data.payment.payment_intent"},
-	}
-	list, err := func() (*stripeDunningInvoicePaymentList, error) {
+	readList := func(expand bool) (*stripeDunningInvoicePaymentList, error) {
+		query := url.Values{
+			"invoice": []string{invoiceId},
+			"status":  []string{"open"},
+			"limit":   []string{"100"},
+		}
+		if expand {
+			query.Set("expand[]", "data.payment.payment_intent")
+		}
 		readCtx, cancel := context.WithTimeout(ctx, settings.StripeReadTimeout)
 		defer cancel()
 		return server.HttpGetRequireStatusOk[*stripeDunningInvoicePaymentList](
@@ -289,7 +293,11 @@ func stripeDunningInvoiceActionRequired(ctx context.Context, invoiceId string, s
 			stripePinnedVersionHeader,
 			server.ResponseJsonObject[*stripeDunningInvoicePaymentList],
 		)
-	}()
+	}
+	list, err := readList(true)
+	if err != nil && stripeReadRefused(err) {
+		list, err = readList(false)
+	}
 	if err != nil {
 		if stripeReadRefused(err) {
 			glog.Warningf("[stripe]dunning: invoice %s: its payments could not be read, so it reads as not waiting on a confirmation: %s\n", invoiceId, err)

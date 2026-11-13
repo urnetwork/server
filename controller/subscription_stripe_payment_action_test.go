@@ -67,7 +67,11 @@ type stripePaymentActionTestApi struct {
 	stateLock sync.Mutex
 	// the list's answer status; 0 answers the payments
 	paymentsStatus int
-	payments       []map[string]any
+	// refuse a list that asks to expand the payment intents, and answer one
+	// that does not with the intents named only
+	refuseExpansion bool
+	listReads       int
+	payments        []map[string]any
 	// payment intent id -> status
 	paymentIntentStatuses map[string]string
 	paymentIntentReads    int
@@ -85,7 +89,9 @@ func newStripePaymentActionTestApi(t testing.TB) *stripePaymentActionTestApi {
 	mux.HandleFunc("GET /v1/invoice_payments", func(w http.ResponseWriter, r *http.Request) {
 		api.stateLock.Lock()
 		api.versions = append(api.versions, r.Header.Get("Stripe-Version"))
+		api.listReads += 1
 		status := api.paymentsStatus
+		refuseExpansion := api.refuseExpansion
 		payments := append([]map[string]any{}, api.payments...)
 		api.stateLock.Unlock()
 		if r.URL.Query().Get("invoice") != "in_synthetic_action" {
@@ -95,6 +101,29 @@ func newStripePaymentActionTestApi(t testing.TB) *stripePaymentActionTestApi {
 		if status != 0 {
 			writeJson(w, status, map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": "synthetic refusal"}})
 			return
+		}
+		if refuseExpansion {
+			if r.URL.Query().Get("expand[]") != "" {
+				writeJson(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": "this property cannot be expanded"}})
+				return
+			}
+			// the payment intents named only
+			named := []map[string]any{}
+			for _, payment := range payments {
+				paymentDetails := payment["payment"].(map[string]any)
+				paymentIntentId := paymentDetails["payment_intent"]
+				if paymentIntent, ok := paymentIntentId.(map[string]any); ok {
+					paymentIntentId = paymentIntent["id"]
+				}
+				named = append(named, map[string]any{
+					"id":      payment["id"],
+					"object":  payment["object"],
+					"invoice": payment["invoice"],
+					"status":  payment["status"],
+					"payment": map[string]any{"type": paymentDetails["type"], "payment_intent": paymentIntentId},
+				})
+			}
+			payments = named
 		}
 		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": payments, "has_more": false})
 	})
@@ -185,6 +214,22 @@ func TestStripeDunningInvoiceActionRequiredReadsTheInvoicePayments(t *testing.T)
 				t.Errorf("%s: a read asked for Stripe-Version %q, want the pinned %q", c.name, version, stripe.APIVersion)
 			}
 		}
+	}
+}
+
+// A list Stripe refuses with the payment intents expanded is read once more
+// without the expansion, and each payment intent it names is read on its own.
+func TestStripeDunningInvoiceActionRequiredReadsAgainWithoutExpansion(t *testing.T) {
+	api := newStripePaymentActionTestApi(t)
+	api.refuseExpansion = true
+	api.payments = []map[string]any{stripePaymentActionTestPayment("open", "payment_intent", "pi_synthetic_unexpanded", "")}
+	api.paymentIntentStatuses["pi_synthetic_unexpanded"] = "requires_action"
+	got, err := stripeDunningInvoiceActionRequired(context.Background(), "in_synthetic_action", defaultStripeDunningSettings())
+	if err != nil || !got {
+		t.Fatalf("a refused expansion must be read without it: action required %t, %v", got, err)
+	}
+	if api.listReads != 2 || api.paymentIntentReads != 1 {
+		t.Fatalf("%d list reads and %d payment intent reads, want 2 and 1", api.listReads, api.paymentIntentReads)
 	}
 }
 
