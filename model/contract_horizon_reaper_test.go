@@ -167,16 +167,3 @@ func TestWithoutContractIds(t *testing.T) {
 		t.Fatal("removing nothing changed the ids")
 	}
 }
-
-// Pure: unpaid sweeps below the contract id of an hour past the earning cutoff
-// are legacy obligations, and without a cutoff every unpaid sweep is one.
-func TestUnpaidLegacyContractIdBound(t *testing.T) {
-	cutoff := time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)
-	bound := unpaidLegacyContractIdBound(&server.ProviderPayoutTransition{Cutoff: cutoff})
-	if bound == nil || *bound != server.ContractIdFloor(cutoff.Add(time.Hour)) {
-		t.Fatal("the bound is not the contract id of an hour past the cutoff", bound)
-	}
-	if unpaidLegacyContractIdBound(nil) != nil {
-		t.Fatal("a bound without a cutoff")
-	}
-}
