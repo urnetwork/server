@@ -68,7 +68,19 @@
     "model_call_live_at_observation": false,
     "complete_candidate_approval_issued": false,
     "broader_registry_and_protected_hydration": "Parallel source work, not activated. No uncontrolled eviction, quota increase or namespace reset.",
-    "status": "OFFLINE_PROVIDER_ENVELOPE_COMPATIBILITY_DIAGNOSIS"
+    "status": "CLARIFICATION_METADATA_PREPARATION_PENDING"
+  },
+  "qualified_clarification_metadata": {
+    "source_manifest_sha256": "6d3863a8e575e59b697ffd8807efc0dc099ecd8340ad7b63bea89dfc79aea760",
+    "overlay_sha256": "d4da6633cd951f59a83b4842ecdde4770d26cafc15651046f21619f10b2fbcff",
+    "focused_cli_tests_passed": 7,
+    "adjacent_tests_passed": 92,
+    "evidence_directory": "/var/lib/urnetwork/competition-native-pending-qa-20261113.3nLzh15e",
+    "normal_binary_sha256": "ab151f7708796b6fcc58a65d56ebe9bec04a678081556c1db4cd56acd8cbdacc",
+    "actual_prepare_started": false,
+    "actual_generation_started": false,
+    "metadata_grants_code_or_approval_credit": false,
+    "remaining": "Pin and check the approved path-only PREPARE before any metadata generation. Composite code-bearing review remains separate and incomplete."
   },
   "qualified_storage_renewal": {
     "source_manifest_sha256": "86a9e7e5f4acadbc9ddb442ff93e87814d8bc0b156a3e080f702c9bbd39a2f99",
