@@ -227,7 +227,7 @@ func ReengagementScan(args *ReengagementScanArgs, clientSession *session.ClientS
 
 	if !result.DryRun {
 		// a connection renews the relationship a sunset or a "switched" ended
-		liftable := []string{reengagement.SuppressSunset, reengagement.SuppressSwitched}
+		liftable := reengagement.LiftableSuppressions()
 		for _, networkId := range model.ListLiftableSuppressedNetworksConnectedOn(ctx, today.Add(-day), today.Add(day), liftable, limit) {
 			if LiftNetworkMarketingSuppression(ctx, networkId, liftable) {
 				result.Lifted++

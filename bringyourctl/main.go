@@ -100,6 +100,7 @@ Usage:
     bringyourctl reengagement rollup [--from=<from>] [--to=<to>]
     bringyourctl reengagement send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
     bringyourctl reengagement mirror-suppressions
+    bringyourctl reengagement suppress (--network_id=<network_id> | --network_ids_file=<path>) --reason=<reason> [(--apply --expect=<digest>)]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
@@ -264,7 +265,7 @@ Options:
                    major or full, mildest first.
 
     --private-stdin  Read the bounded private expiry request from stdin.
-    --apply          Apply the scoped expiry request; omission is a read-only preview. With db scrub-network-create-secrets, rewrite the audit rows of the dry run whose digest is --expect.
+    --apply          Apply the scoped expiry request; omission is a read-only preview. With reengagement suppress, write the suppression of the dry run whose digest is --expect. With db scrub-network-create-secrets, rewrite the audit rows of the dry run whose digest is --expect.
     --contract_id=<contract_id> The contract to close
     --target_id=<target_id>     The contract_close.party (either "destination" or "source")
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
@@ -286,7 +287,8 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, contracts close-due or db scrub-network-create-secrets dry run printed; --send, --commit and --apply refuse any other census.
+    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, contracts close-due, reengagement suppress or db scrub-network-create-secrets dry run printed; --send, --commit and --apply refuse any other census.
+    --network_ids_file=<path>  With reengagement suppress, the networks to suppress: one network id a line; blank lines and lines starting with # are skipped.
     --after=<event_id>  With db scrub-network-create-secrets, scrub only the audit rows after this event id: a stopped --apply prints the last one it committed.
     --through=<event_id>  With db scrub-network-create-secrets, the newest audit event id in scope; the dry run defaults to the newest row and prints it, and --apply needs the one the dry run printed.
     --batch=<n>  With db scrub-network-create-secrets, the audit rows each statement reads and each transaction rewrites, at most 5000 (the default).
@@ -466,6 +468,8 @@ func main() {
 			reengagementSendTest(opts)
 		} else if mirrorSuppressions, _ := opts.Bool("mirror-suppressions"); mirrorSuppressions {
 			reengagementMirrorSuppressions(opts)
+		} else if suppress, _ := opts.Bool("suppress"); suppress {
+			os.Exit(reengagementSuppressCommand(opts))
 		}
 	} else if onboarding_, _ := opts.Bool("onboarding"); onboarding_ {
 		if status, _ := opts.Bool("status"); status {
@@ -2179,8 +2183,13 @@ func paymentsStripeDunning(opts docopt.Opts, out io.Writer) int {
 		if strings.HasPrefix(row.Skip, "error: ") {
 			failed += 1
 		}
+		note := row.Skip
+		if row.PaymentActionRequired {
+			// the notice asks the customer to confirm the payment
+			note = strings.TrimSuffix("awaits 3D Secure confirmation; "+note, "; ")
+		}
 		fmt.Fprintf(out, "%-30s %-9s %-38s %-5s %-29s %10s %8d %-17s %-6s %s\n",
-			row.SubscriptionId, row.SubscriptionStatus, networkId, email, row.InvoiceId, row.Amount(), row.AttemptCount, nextAttempt, notice, row.Skip)
+			row.SubscriptionId, row.SubscriptionStatus, networkId, email, row.InvoiceId, row.Amount(), row.AttemptCount, nextAttempt, notice, note)
 	}
 	fmt.Fprintf(out, "%d subscriptions, %d could not be read\n", len(rows), failed)
 	if 0 < failed {
@@ -3528,12 +3537,13 @@ func reengagementSendTest(opts docopt.Opts) {
 }
 
 // reengagementMirrorSuppressions queues the Brevo mirror of every marketing
-// suppression (the product-updates sync of each suppressed network's admin):
-// run once after the mirror deploys, for the suppressions recorded before it.
-// Safe to repeat.
+// suppression and of every network whose sign-up country gets no marketing
+// (the product-updates sync of each one's admin): run after a release that
+// changes the mirror, and after a country joins the mail policy's
+// no_marketing_countries. Safe to repeat.
 func reengagementMirrorSuppressions(opts docopt.Opts) {
-	queued := controller.MirrorNetworkMarketingSuppressions(context.Background())
-	fmt.Printf("queued the product-updates sync for %d suppressed networks\n", queued)
+	suppressed, noMarketingCountry := controller.MirrorNetworkMarketingSuppressions(context.Background())
+	fmt.Printf("queued the product-updates sync for %d suppressed networks and %d networks of no-marketing countries\n", suppressed, noMarketingCountry)
 }
 
 // ----- onboarding campaign (mmm/onboarding/PLAN.md) -----

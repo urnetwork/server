@@ -159,6 +159,44 @@ func (self *redisRefusalTestTx) QueryRow(ctx context.Context, sql string, args .
 	return self.PgTx.QueryRow(ctx, sql, args...)
 }
 
+// Preserve the same refusal seams when the real reads share one transport.
+// Every queued query and response still runs against PostgreSQL.
+func (self *redisRefusalTestTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
+	for _, query := range batch.QueuedQueries {
+		if strings.Contains(query.SQL, "contract_lifecycle_write_boundary") && self.beforeFence != nil {
+			self.beforeFence()
+		}
+		if query.SQL == `SELECT clock_timestamp() AT TIME ZONE 'UTC'` {
+			self.deadlineReads++
+		}
+		if strings.HasPrefix(query.SQL, `SELECT count(*)=$2,clock_timestamp() AT TIME ZONE 'UTC'`) {
+			self.deadlineReads++
+			read := query.Fn
+			query.Fn = func(results pgx.BatchResults) error {
+				return read(redisRefusalClockResults{BatchResults: results})
+			}
+		}
+	}
+	return self.PgTx.SendBatch(ctx, batch)
+}
+
+type redisRefusalClockResults struct{ pgx.BatchResults }
+
+func (self redisRefusalClockResults) QueryRow() pgx.Row {
+	return redisRefusalClockRow{Row: self.BatchResults.QueryRow()}
+}
+
+type redisRefusalClockRow struct{ pgx.Row }
+
+func (self redisRefusalClockRow) Scan(dest ...any) error {
+	if err := self.Row.Scan(dest...); err != nil {
+		return err
+	}
+	clock := dest[1].(*time.Time)
+	*clock = clock.AddDate(1, 0, 0)
+	return nil
+}
+
 func TestRedisAdmissionExpiredPostReserveClockCompensates(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0

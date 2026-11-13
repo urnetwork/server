@@ -534,6 +534,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"origin-wait-db-amplification":                        incidentAlertClass,
 	"panic":                                               incidentAlertClass,
 	"payment-balance-code-undelivered":                    incidentAlertClass,
+	"payment-card-failure-burst":                          incidentAlertClass,
 	"crypto-sanctions-hold":                               incidentAlertClass,
 	"crypto-screening-unavailable":                        incidentAlertClass,
 	"crypto-payment-held":                                 incidentAlertClass,

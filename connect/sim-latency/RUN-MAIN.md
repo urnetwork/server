@@ -435,6 +435,43 @@ Do not leave a reviewer agent acting as the scheduler. The supervisor's default
 choice is safe carry-forward; separately prepared promotion intents require the
 real source-review, exact-base, patch and deadline interlocks before selection.
 
+### Fast control-plane fixes
+
+The main API, supervisor, runner and recovery CLI are trusted control programs,
+not the submitted product or scoring instrument. Ship their correctness fixes
+with a normal cached Go build, one run of the affected regression tests, focused
+race checks for changed concurrent ownership, and a deployment smoke test. Use
+isolated PostgreSQL/Redis when the change touches durable state. Additive
+migrations must still work with the currently serving release.
+Normal trusted builds may download their required modules through the approved
+Go proxy/checksum service. Repair missing dependency declarations or checksums
+when required by the imports, without unrelated version upgrades. The offline
+build restriction remains for untrusted submission builds, not this control-plane
+development step.
+
+Do not require two builds to produce identical bytes, repeatedly rebuild
+unchanged dependencies, replay the entire historical qualification suite, or
+restart validation for documentation-only changes. Record the artifact actually
+deployed and retain its test results; a digest identifies that artifact, not a
+requirement to recreate it byte-for-byte. Reuse valid earlier evidence for
+unchanged code. Extra repetitions are for a demonstrated intermittent failure,
+not a universal release prerequisite.
+
+Deploy worker changes at a verified idle boundary, smoke-test readiness and
+heartbeats, authorize recoveries, then release the claim hold and verify the
+first recovery. Keep
+original submission order, failure history and evaluation deadlines. This fast
+path does not change the frozen evaluated source, scorer, shared epoch baseline,
+R9 measurements, significance rules, artifact authentication or sandbox limits.
+Changes to those competition inputs still need an explicit epoch policy decision.
+
+On evaluation hosts, install `evaluator/needrestart-competition.conf` as
+`/etc/needrestart/conf.d/urnetwork-competition.conf`. Security updates still
+install, but competition-owned services are excluded from automatic
+package-triggered restarts. Apply their pending restarts under a claim hold at
+a verified idle boundary; do not leave patched runtime libraries indefinitely
+pending. Installing this configuration does not itself restart any service.
+
 #### Preparation-only qualification boundary — installed inactive
 
 The new native CLI adds `supervise --once --prepare-only` for one explicit

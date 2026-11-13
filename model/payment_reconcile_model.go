@@ -80,6 +80,12 @@ const (
 	// An operator disposition: the reconciler does not grant from it, since
 	// a broadcast transaction can still fail on chain.
 	PaymentReconcileActionSettlementPending = "settlement_pending"
+	// A Stripe checkout paid with a delayed method (a bank debit or transfer)
+	// completed, and its payment failed afterwards
+	// (checkout.session.async_payment_failed). Nothing was fulfilled: a
+	// checkout fulfils only once its payment clears. Evidence is the checkout
+	// session; written once per session, for support.
+	PaymentReconcileActionPaymentFailed = "payment_failed"
 )
 
 // PaymentReconcileStoreAll is the store label for run-level rows (heartbeat).

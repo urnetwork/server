@@ -293,8 +293,9 @@ func StLedgerV2UsageSync(ctx context.Context, state *StEpochState) ([]*StLedgerV
 		steps = append(steps, &StLedgerV2UsageStep{Kind: kind, Epoch: epoch, RunAt: server.NowUtc()})
 	}
 	// The extender census is captured beside the users, as close to the
-	// boundary as a failed read allows (st_ledger_v2_extenders.go), and an epoch
-	// before E_x then gets its shadow report (st_ledger_v2_extender_shadow.go).
+	// boundary as a failed read allows (st_ledger_v2_extenders.go), for every
+	// epoch, and each of the two epochs before E_x then gets its shadow report
+	// (st_ledger_v2_extender_shadow.go).
 	if stLedgerV2ExtenderCensusDue(ctx, cfg, epoch) {
 		steps = append(steps, &StLedgerV2UsageStep{Kind: StLedgerV2UsageStepExtenderCensus, Epoch: epoch, RunAt: server.NowUtc()})
 	} else if stLedgerV2ExtenderShadowDue(ctx, cfg, epoch) {

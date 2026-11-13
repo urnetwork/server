@@ -1,15 +1,22 @@
 package controller
 
-// st_ledger_v2_extender_shadow.go — the SN25 extender pool's shadow runs (sn
-// WHITEPAPER.md §8.6.7: epochs 6 and 7). After an epoch the amendment does not
-// cover yet ends, and once its census is captured, its rows are recorded and its
-// close is final, the server builds what §8.6 would have paid for it: the epoch
-// read as if E_x were the epoch itself, its provider rows without the pooled
-// shares, and its extender component from the real census, as a pool's first root
-// over the one epoch funded with the epoch's real f_k. It commits nothing,
-// records no fixed input and retains no wallet resolution, so a shadow never binds
-// a live root and is never paid. It reaches the chain only through views
-// (stExtenderShadowChain).
+// st_ledger_v2_extender_shadow.go — the SN25 extender pool's live shadow runs
+// (sn WHITEPAPER.md §8.6.7: epochs 6 and 7). Only the two epochs before E_x run
+// live in shadow (stExtenderShadowNotLive): an earlier epoch, such as epoch 4,
+// gets the offline replay instead (st_ledger_v2_extender_replay.go), and an
+// epoch from E_x is built live. After each of the two ends, and once its census
+// is captured, its rows are recorded and its close is final, the server builds
+// what §8.6 would have paid for it: the epoch read as if E_x were the epoch
+// itself, its provider rows without the pooled shares, and its extender
+// component from the real census, as a pool's first root over the one epoch
+// funded with the epoch's real f_k. It commits nothing, records no fixed input
+// and retains no wallet resolution, so a shadow never binds a live root and is
+// never paid. It reaches the chain only through views (stExtenderShadowChain).
+//
+// E_x is the first epoch an extender pool entry puts the amendment in force,
+// signed or configured. The entry is signed during epoch 7, after epoch 6's
+// shadow is due, so until one is held the deployment's plan stands in
+// (stExtenderPoolPlannedFirstEpoch): 8 on mainnet.
 //
 // The report (schema urnetwork-extender-shadow-v1) maps one to one onto
 // ledger.VerifyInput (stExtenderShadowVerifyInput), so the validator's
@@ -34,6 +41,7 @@ import (
 	"sync"
 
 	"github.com/holiman/uint256"
+	"github.com/urfoundation/sn/amendment"
 	"github.com/urfoundation/sn/demand/usage"
 	"github.com/urfoundation/sn/ledger"
 	"github.com/urfoundation/sn/protocol"
@@ -54,9 +62,71 @@ type stExtenderShadowChain interface {
 	LedgerV2FundedThrough(ctx context.Context, noId uint64, epoch uint64) (uint256.Int, error)
 }
 
+// The epochs before E_x that run live in shadow (sn WHITEPAPER.md §8.6.7, "The
+// shadow runs": epochs 6 and 7 for E_x = 8).
+const stExtenderShadowLiveEpochs = 2
+
+// The extender pool's planned first epoch, by deployment, for the epochs before
+// an amendment entry names E_x: sn WHITEPAPER.md §8.6.7's rollout, E_x = 8 on
+// mainnet (chain 964, sn 25, no 1), as the owner decided on 2026-11-10. The
+// entry that fixes E_x is signed during epoch 7, after epoch 6's live shadow is
+// due, so until it is held the plan says which epochs run in shadow; an entry
+// held, signed or configured, says it from then on. The plan never puts the
+// amendment in force: only an entry does (st_ledger_v2_amendments.go). A
+// deployment with no plan has no live shadow until an entry names E_x. A seam
+// the tests replace.
+var stExtenderPoolPlannedFirstEpoch = func(chainId uint64, netuid uint64, noId uint64) (firstEpoch uint64, planned bool) {
+	if chainId == 964 && netuid == 25 && noId == 1 {
+		return 8, true
+	}
+	return 0, false
+}
+
+// E_x as the shadow rule reads it: the first epoch any extender pool entry for
+// the operator puts the amendment in force, signed or configured, as
+// amendment.File.At answers, and before any entry names one, the deployment's
+// plan. named reports that an entry fixed it; known is false with neither.
+func stExtenderPoolFirstEpoch(cfg *StConfig, file *amendment.File, fallback *amendment.Fallback) (firstEpoch uint64, named bool, known bool) {
+	for _, entry := range append(file.Entries(), fallback.Entries()...) {
+		if entry.Kind() == amendment.KindExtenders && entry.NoID == cfg.NoId && (!named || entry.FromEpoch < firstEpoch) {
+			firstEpoch, named = entry.FromEpoch, true
+		}
+	}
+	if named {
+		return firstEpoch, true, true
+	}
+	firstEpoch, known = stExtenderPoolPlannedFirstEpoch(cfg.ChainId, cfg.Netuid, cfg.NoId)
+	return firstEpoch, false, known
+}
+
+// Says why epoch has no live shadow, and "" for one of the
+// stExtenderShadowLiveEpochs epochs before E_x, which runs live in shadow. An
+// epoch from a planned E_x that no entry names yet has none either: the start
+// has moved, and the two epochs before the one an entry names later are the
+// shadow runs. It reads nothing: file and fallback are the amendments the
+// caller holds.
+func stExtenderShadowNotLive(cfg *StConfig, file *amendment.File, fallback *amendment.Fallback, epoch uint64) string {
+	firstEpoch, named, known := stExtenderPoolFirstEpoch(cfg, file, fallback)
+	source := "as planned; no amendment names it yet"
+	if named {
+		source = "as the amendments name it"
+	}
+	switch {
+	case !known:
+		return fmt.Sprintf("no amendment names the extender pool's first epoch and none is planned for this deployment, so epoch %d has no live shadow", epoch)
+	case named && firstEpoch <= epoch:
+		return fmt.Sprintf("epoch %d is covered by the extender pool amendment from epoch %d, so its component is built live and it has no shadow", epoch, firstEpoch)
+	case firstEpoch <= epoch:
+		return fmt.Sprintf("epoch %d is not before the extender pool's planned first epoch %d, which no amendment names yet, so it has no live shadow", epoch, firstEpoch)
+	case epoch+stExtenderShadowLiveEpochs < firstEpoch:
+		return fmt.Sprintf("only the %d epochs before the extender pool's first epoch %d (%s) run live in shadow, so epoch %d has none; an earlier epoch has the offline replay", stExtenderShadowLiveEpochs, firstEpoch, source, epoch)
+	}
+	return ""
+}
+
 // The epochs whose shadow run concluded without a report in this process: one
-// the amendment covers, or one with nothing to report. The sync plans them no
-// more; a restart reads each once more.
+// that does not run live in shadow, or one with nothing to report. The sync
+// plans them no more; a restart reads each once more.
 var stExtenderShadowConcluded sync.Map
 
 // The key a shadow step concludes under, by deployment, operator and epoch.
@@ -64,12 +134,14 @@ func stExtenderShadowKey(cfg *StConfig, epoch uint64) string {
 	return fmt.Sprintf("%s|%d|%d", cfg.DeploymentKey(), cfg.NoId, epoch)
 }
 
-// Reports whether an epoch's shadow report is still to be built: its census is
-// captured, its live root has recorded its rows without an extender component,
-// and no report is recorded. An epoch whose rows carry a component is one the
-// amendment covers, built live; one declared unrecoverable has nothing to
-// shadow. A failed read, such as a table not migrated yet, is logged and plans
-// nothing.
+// Reports whether an epoch's shadow report is still to be built: it is one of
+// the two epochs before E_x, by the amendments this server holds
+// (stLedgerV2HeldAmendments, which fetches nothing), its census is captured,
+// its live root has recorded its rows without an extender component, and no
+// report is recorded. Every other epoch plans nothing, before any of its records
+// is read. An epoch whose rows carry a component is one the amendment covers,
+// built live; one declared unrecoverable has nothing to shadow. A failed read,
+// such as a table not migrated yet, is logged and plans nothing.
 func stLedgerV2ExtenderShadowDue(ctx context.Context, cfg *StConfig, epoch uint64) (due bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -78,6 +150,14 @@ func stLedgerV2ExtenderShadowDue(ctx context.Context, cfg *StConfig, epoch uint6
 		}
 	}()
 	if _, concluded := stExtenderShadowConcluded.Load(stExtenderShadowKey(cfg, epoch)); concluded {
+		return false
+	}
+	file, fallback, err := stLedgerV2HeldAmendments(ctx, cfg)
+	if err != nil {
+		glog.Errorf("[st]v2 epoch %d extender shadow: the amendments held: %s\n", epoch, stScrubEndpoints(err.Error()))
+		return false
+	}
+	if stExtenderShadowNotLive(cfg, file, fallback, epoch) != "" {
 		return false
 	}
 	key := cfg.DeploymentKey()
@@ -94,11 +174,22 @@ func stExtenderShadowConclude(cfg *StConfig, epoch uint64, format string, args .
 	return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf(format, args...)}
 }
 
-// Builds, publishes and records epoch's shadow report. It waits for the epoch's
-// rows to be recorded by its live root and for its close, and concludes without
-// a report for an epoch the amendment covers, one declared unrecoverable, or
-// one with no eligible usage.
+// Builds, publishes and records epoch's shadow report. An epoch that does not
+// run live in shadow concludes first, by the amendments this server holds,
+// before any of its records, the chain or the published amendments are read;
+// that is how a step an earlier binary planned for such an epoch ends. It
+// waits for the epoch's rows to be recorded by its live root and for its
+// close, and concludes without a report for an epoch the published amendments
+// put outside the shadow runs, one declared unrecoverable, or one with no
+// eligible usage.
 func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExtenderShadowChain, epoch uint64) *StPublishOutcome {
+	file, fallback, err := stLedgerV2HeldAmendments(ctx, cfg)
+	if err != nil {
+		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d shadow: the amendments held: %s", epoch, err))
+	}
+	if notLive := stExtenderShadowNotLive(cfg, file, fallback, epoch); notLive != "" {
+		return stExtenderShadowConclude(cfg, epoch, "%s", notLive)
+	}
 	key := cfg.DeploymentKey()
 	if recorded := model.GetStLedgerV2ExtenderShadow(ctx, key, cfg.NoId, epoch); recorded != nil {
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d shadow report already recorded: %s", epoch, recorded.ReportRef)}
@@ -113,6 +204,10 @@ func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExt
 	}
 	if in.Extenders != nil {
 		return stExtenderShadowConclude(cfg, epoch, "epoch %d is covered by the extender pool amendment from epoch %d, so its component is built live and it has no shadow", epoch, in.Extenders.FromEpoch)
+	}
+	// the published file may name E_x before the stored copy does
+	if notLive := stExtenderShadowNotLive(cfg, amendments.file, amendments.fallback, epoch); notLive != "" {
+		return stExtenderShadowConclude(cfg, epoch, "%s", notLive)
 	}
 	census, err := stLedgerV2CapturedCensus(ctx, cfg, epoch)
 	if err != nil {

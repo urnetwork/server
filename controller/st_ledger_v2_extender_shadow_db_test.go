@@ -103,19 +103,20 @@ func newStExtenderPoolScenario(t testing.TB, amendmentFrom uint64) *stExtenderPo
 	return s
 }
 
-// Before E_x: epoch 2, built and recorded under the rule in force, gets the
-// shadow of what §8.6 would have paid: Z = the receiver's funded 500, the
-// unfunded 300 and the measurement network's 200 left out, the extender eligible
-// alone in its unit, Z' = 500 below W_k = 1,800, and from the epoch's 2,300 rao
-// own 1,000 and the extender's coldkey 1,300, where the rows as recorded pay
-// own 1,278 and the extender 1,022. The validator's recompute approves it; the
-// run records no fixed input and retains no wallet resolution; and it is built
-// once. The offline replay of the same epoch reconciles exactly.
+// Before E_x = 4: epoch 2, one of the two epochs before it and built and
+// recorded under the rule in force, gets the shadow of what §8.6 would have
+// paid: Z = the receiver's funded 500, the unfunded 300 and the measurement
+// network's 200 left out, the extender eligible alone in its unit, Z' = 500
+// below W_k = 1,800, and from the epoch's 2,300 rao own 1,000 and the
+// extender's coldkey 1,300, where the rows as recorded pay own 1,278 and the
+// extender 1,022. The validator's recompute approves it; the run records no
+// fixed input and retains no wallet resolution; and it is built once. The
+// offline replay of the same epoch reconciles exactly.
 func TestStLedgerV2ExtenderShadowAndReplayBeforeTheAmendment(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		s := newStExtenderPoolScenario(t, 0)
+		s := newStExtenderPoolScenario(t, 4)
 		f := s.f
 		build, err := (stLedgerV2Builder{}).Build(f.ctx, s.input)
 		if err != nil {

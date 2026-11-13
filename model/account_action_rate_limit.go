@@ -44,6 +44,10 @@ const (
 	AccountActionExtenderPingReport              = "ping_report"
 	AccountActionExtenderLatencyReport           = "extender_latency_report"
 	AccountActionExtenderBlockReport             = "extender_block_report"
+	// a network's card purchase starts, a Stripe Checkout session or the
+	// payment sheet's subscription, budgeted by the network's id
+	// (controller/subscription_stripe_purchase_limit.go)
+	AccountActionStripePurchaseStart = "stripe_purchase_start"
 )
 
 const (
@@ -89,6 +93,7 @@ var actionDisplayNames = map[string]string{
 	AccountActionExtenderPingReport:              "reporting extender pings",
 	AccountActionExtenderLatencyReport:           "reporting extender latency",
 	AccountActionExtenderBlockReport:             "reporting a blocked extender",
+	AccountActionStripePurchaseStart:             "starting a card purchase",
 }
 
 // The display name of an action, "this action" for one that has none.

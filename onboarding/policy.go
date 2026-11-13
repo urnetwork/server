@@ -4,12 +4,13 @@ package onboarding
 
 // Who the campaign emails may go to, by country and by the evidence behind the
 // product-updates preference (mmm/onboarding/REVIEW.md finding 12,
-// mmm/reengagement/PLAN.md "Audiences" and RESEARCH.md §5). Pure: the
-// controllers pass the facts and the configured lists, so every rule has a
-// unit test. The lists are data in onboarding.yml `policy`, and these are only
-// the defaults.
+// mmm/reengagement/PLAN.md "Audiences" and RESEARCH.md §5), and which
+// countries the product-updates lists leave out. Pure: the controllers pass
+// the facts and the configured lists, so every rule has a unit test. The lists
+// are data in onboarding.yml `policy`, and these are only the defaults.
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
@@ -49,8 +50,10 @@ const (
 
 // MailPolicy is the configured rule set.
 type MailPolicy struct {
-	// countries that get no campaign mail at all (explicit-consent regimes,
-	// advertising bans), ISO 3166-1 alpha-2
+	// countries that get no marketing mail at all, ISO 3166-1 alpha-2: no
+	// campaign mail (explicit-consent regimes, advertising bans, sanctions),
+	// and no place on the product-updates lists (NoMarketing). Service and
+	// account mail is not marketing and never reads this.
 	NoMarketingCountries []string
 	// countries that never get an offer (prices, discounts) by email
 	NoOfferCountries []string
@@ -61,9 +64,16 @@ type MailPolicy struct {
 	EvidenceWhenCountryUnknown bool
 }
 
-// Defaults, used when onboarding.yml has no `policy` block.
+// Defaults, used when onboarding.yml has no `policy` block. Read through
+// DefaultMailPolicy, which copies them.
 var (
-	DefaultNoMarketingCountries = []string{"CN", "RU"}
+	// China (consent and an "AD" subject prefix), Russia (prior consent;
+	// advertising VPNs is banned since 2025-09-01), and the sanctioned
+	// countries Iran, Cuba, North Korea and Syria (owner, 2026-11-13; config
+	// main lists the same). Crimea and the occupied Donetsk and Luhansk
+	// regions are sanctioned too, but a country code cannot tell them apart
+	// from the rest of Ukraine (or Russia), so no entry here covers them.
+	DefaultNoMarketingCountries = []string{"CN", "RU", "IR", "CU", "KP", "SY"}
 	DefaultNoOfferCountries     = []string{"IR", "CU", "KP", "SY"}
 	// the EU, the EEA, the United Kingdom and Switzerland
 	DefaultEvidenceCountries = []string{
@@ -73,12 +83,13 @@ var (
 	}
 )
 
-// DefaultMailPolicy is the rule set without configuration.
+// DefaultMailPolicy is the rule set without configuration. Each call returns
+// its own copy of the lists.
 func DefaultMailPolicy() MailPolicy {
 	return MailPolicy{
-		NoMarketingCountries:       DefaultNoMarketingCountries,
-		NoOfferCountries:           DefaultNoOfferCountries,
-		EvidenceCountries:          DefaultEvidenceCountries,
+		NoMarketingCountries:       slices.Clone(DefaultNoMarketingCountries),
+		NoOfferCountries:           slices.Clone(DefaultNoOfferCountries),
+		EvidenceCountries:          slices.Clone(DefaultEvidenceCountries),
 		EvidenceWhenCountryUnknown: true,
 	}
 }
@@ -129,12 +140,31 @@ func HasConsentEvidence(source string) bool {
 	}
 }
 
+// NoMarketing reports whether the country gets no marketing mail at all: no
+// campaign mail (Exit) and no place on the product-updates lists. An unknown
+// country is not one of them.
+func (p MailPolicy) NoMarketing(country string) bool {
+	return containsCountry(p.NoMarketingCountries, normalizeCountry(country))
+}
+
+// NoMarketingCountryCodes are the NoMarketingCountries the way a stored code
+// compares with them: trimmed, upper case, once each, blanks dropped.
+func (p MailPolicy) NoMarketingCountryCodes() []string {
+	codes := []string{}
+	for _, country := range p.NoMarketingCountries {
+		if code := normalizeCountry(country); code != "" && !slices.Contains(codes, code) {
+			codes = append(codes, code)
+		}
+	}
+	return codes
+}
+
 // Exit is the policy's exit reason for a campaign mail, or "" when it may go.
 // It does not look at the product-updates value itself (the campaigns check
 // that first).
 func (p MailPolicy) Exit(purpose string, f MailFacts) string {
 	country := normalizeCountry(f.Country)
-	if containsCountry(p.NoMarketingCountries, country) {
+	if p.NoMarketing(country) {
 		return ExitCountryNoMarketing
 	}
 	if country == "CA" && purpose != PurposeOnboarding {
