@@ -108,6 +108,8 @@ type StripeWebhookArgs struct {
 	Id   string           `json:"id"`
 	Type string           `json:"type"`
 	Data *StripeEventData `json:"data"`
+	// when the event happened, unix seconds; 0 when the body does not say
+	Created int64 `json:"created,omitempty"`
 }
 
 type StripeEventData struct {
@@ -399,6 +401,19 @@ func StripeWebhook(
 		glog.Infof("type: invoice.payment_action_required")
 
 		return stripeHandleInvoicePaymentFailed(stripeWebhook.Data.Object, clientSession)
+
+	} else if (stripeWebhook.Type == "charge.failed" || stripeWebhook.Type == "setup_intent.setup_failed") && stripeWebhook.Data != nil {
+
+		/**
+		 * a card check failed: counted, and a burst of them for one owner is
+		 * the card testing the monitor pages on
+		 * (subscription_stripe_card_failures.go). Always 200.
+		 */
+
+		glog.Infof("type: %s", stripeWebhook.Type)
+
+		stripeCardFailures.record(clientSession.Ctx, stripeWebhook)
+		return &StripeWebhookResult{}, nil
 
 	} else if stripeWebhook.Type == "invoice.voided" && stripeWebhook.Data != nil {
 
@@ -2392,6 +2407,22 @@ func StripeCreateCheckoutSession(
 		// refuse rather than hand a customer to Stripe with no way back
 		glog.Errorf("[stripe]checkout urls are not configured for ui mode %s\n", uiMode)
 		return stripeCheckoutError(PurchaseErrorCodeCheckoutUnavailable, "Checkout is not configured."), nil
+	}
+
+	if args.ItemId != StripeItemProMonthly && args.ItemId != StripeItemProYearly && !isDataPackItem(args.ItemId) {
+		// refused before it spends a purchase start
+		return stripeCheckoutError(PurchaseErrorCodeInvalidRequest, "Unknown item."), nil
+	}
+
+	// card testers run stolen cards through checkouts: the address's budget
+	// the payment sheet spends, then the network's own purchase starts
+	// (subscription_stripe_purchase_limit.go), before anything of Stripe's
+	if err := model.CheckOnboardingRateLimit(clientSession, model.OnboardingOfferRateLimit); err != nil {
+		return nil, err
+	}
+	if refusal := stripeNetworkPurchaseStartRefusal(clientSession.Ctx, networkId, stripePurchaseStartSettingsFunc()); refusal != "" {
+		glog.Infof("[stripe]checkout: network %s has no purchase start left: %s\n", networkId, refusal)
+		return stripeCheckoutError(PurchaseErrorCodeRateLimited, refusal), nil
 	}
 
 	stripe.Key = stripeApiToken()
