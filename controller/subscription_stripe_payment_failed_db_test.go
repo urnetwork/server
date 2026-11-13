@@ -36,16 +36,19 @@ import (
 const stripePaymentFailedTestTemplateName = "subscription_payment_failed"
 
 // A fake Stripe API: invoices, subscriptions and checkout sessions by id, read
-// through the raw-HTTP seam and the stripe-go backend alike, and billing portal
-// sessions, whose forms it records. Invoices are always served expanded (their
-// subscription and customer as objects), which every reader of an invoice
-// accepts. Safe for concurrent use.
+// through the raw-HTTP seam and the stripe-go backend alike, each invoice's
+// payments with their payment intents, and billing portal sessions, whose forms
+// it records. Invoices are always served expanded (their subscription and
+// customer as objects), which every reader of an invoice accepts. An invoice
+// has no payments until a test sets them. Safe for concurrent use.
 type stripePaymentFailedTestEnv struct {
 	stateLock              sync.Mutex
 	invoices               map[string]map[string]any
 	subscriptions          map[string]map[string]any
 	sessionsBySubscription map[string][]map[string]any
-	portalForms            []url.Values
+	// invoice id -> its payments, each with its payment intent expanded
+	invoicePayments map[string][]map[string]any
+	portalForms     []url.Values
 	// refuse a portal session that asks for a flow
 	refusePortalFlow bool
 
@@ -57,6 +60,7 @@ func newStripePaymentFailedTestEnv(t testing.TB) *stripePaymentFailedTestEnv {
 		invoices:               map[string]map[string]any{},
 		subscriptions:          map[string]map[string]any{},
 		sessionsBySubscription: map[string][]map[string]any{},
+		invoicePayments:        map[string][]map[string]any{},
 	}
 	writeJson := func(w http.ResponseWriter, status int, object any) {
 		w.Header().Set("Content-Type", "application/json")
@@ -98,6 +102,20 @@ func newStripePaymentFailedTestEnv(t testing.TB) *stripePaymentFailedTestEnv {
 		}
 		env.stateLock.Unlock()
 		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": subs, "has_more": false})
+	})
+	mux.HandleFunc("GET /v1/invoice_payments", func(w http.ResponseWriter, r *http.Request) {
+		// the invoice's payments, filtered by status as Stripe does; the
+		// payment intents are always expanded
+		query := r.URL.Query()
+		env.stateLock.Lock()
+		payments := []map[string]any{}
+		for _, payment := range env.invoicePayments[query.Get("invoice")] {
+			if status := query.Get("status"); status == "" || payment["status"] == status {
+				payments = append(payments, payment)
+			}
+		}
+		env.stateLock.Unlock()
+		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": payments, "has_more": false})
 	})
 	mux.HandleFunc("GET /v1/checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
 		env.stateLock.Lock()
@@ -218,6 +236,28 @@ func (self *stripePaymentFailedTestEnv) setInvoice(
 			"period":       map[string]any{"start": created.Unix(), "end": created.Add(365 * 24 * time.Hour).Unix()},
 		}}},
 	}
+}
+
+// Sets the invoice's one open payment, whose payment intent has the status
+// (requires_action while it waits on the customer's bank, 3D Secure).
+func (self *stripePaymentFailedTestEnv) setInvoicePaymentIntentStatus(invoiceId string, paymentIntentStatus string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.invoicePayments[invoiceId] = []map[string]any{{
+		"id":         "inpay_" + invoiceId,
+		"object":     "invoice_payment",
+		"invoice":    invoiceId,
+		"is_default": true,
+		"status":     "open",
+		"payment": map[string]any{
+			"type": "payment_intent",
+			"payment_intent": map[string]any{
+				"id":     "pi_" + invoiceId,
+				"object": "payment_intent",
+				"status": paymentIntentStatus,
+			},
+		},
+	}}
 }
 
 // Sets the subscription's latest invoice, as a status listing reports it.

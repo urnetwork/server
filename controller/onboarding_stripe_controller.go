@@ -351,6 +351,12 @@ func StripePaymentSheet(
 		return nil, err
 	}
 	networkId := clientSession.ByJwt.NetworkId
+	// each sheet is a new card check: it spends the network's purchase starts
+	// with the Checkout sessions (subscription_stripe_purchase_limit.go)
+	if refusal := stripeNetworkPurchaseStartRefusal(clientSession.Ctx, networkId, stripePurchaseStartSettingsFunc()); refusal != "" {
+		glog.Infof("[stripe]payment sheet: network %s has no purchase start left: %s\n", networkId, refusal)
+		return stripePaymentSheetError(PurchaseErrorCodeRateLimited, refusal), nil
+	}
 	tier := ResolvePriceTier(clientSession, args.StorefrontCountry)
 
 	stripe.Key = stripeApiToken()
