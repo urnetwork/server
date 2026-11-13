@@ -107,12 +107,17 @@ The mandatory release gate is part of `test.sh`, before filtered or expensive
 package tests. It always runs the actual PostgreSQL/Redis held-row and held-payer
 permit regressions, mixed legacy/new settlement/replay/expiry controls, and a
 512-client, two-process same-network workload with varied and shared
-destinations. Missing fixtures fail the gate. Run it directly after sourcing
-`test-env.sh` with:
+destinations. Missing fixtures fail the gate. Each discovered mandatory root
+runs serially in an independent race-enabled process with one attempt and a
+five-minute bound. Go's alarm covers the whole package, so batching these roots
+would charge every fresh database's migrations against one shared alarm.
+Caller filters never narrow the mandatory stage of `./test.sh`.
+
+For a focused control after sourcing `test-env.sh`, select one exact root:
 
 ```sh
-WARP_TEST_ENV_FAIL_FAST=1 go test -p=1 -race -count=1 -timeout=5m ./model ./taskworker/work \
-  -run '^(TestRedisAdmission.*|TestContractCreationSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$'
+WARP_TEST_ENV_FAIL_FAST=1 go test -p=1 -race -count=1 -timeout=5m ./model \
+  -run '^TestRedisAdmissionExpiryCleanupIsBounded$'
 ```
 
 The standalone larger workload uses the same owning test, with
@@ -143,15 +148,43 @@ transaction, and a Redis stall stalled every creator's server at once.
 
 A creator now reserves before BEGIN. Grant discovery runs as autocommit
 statements on pooled connections, and each reservation marks its token
-pending in `{escrow_<balance>}approx_pending_v3`, which recovery never reads.
-The transaction takes the request fence first, checks the attempt is still
-publishable, and then runs SQL only: custody, shard, endpoint and grant checks
-and the escrow/contract inserts. After the transaction joins, the request hands
-its pending tokens to recovery's own marker with its post-admission recovery
-page (acknowledging the published ones without SQL), or, when it published
-nothing, releases them in Redis alone with `release-pending`, with no
-PostgreSQL transaction. The companion origin is likewise selected before the
-transaction, which only rechecks its deadline after the client fence.
+pending in `{escrow_<balance>}approx_pending_v3`; live pending markers remain
+excluded from recovery.
+The transaction retains main's SQL ownership sequence: request fence, attempt
+publication window, fresh custody, shard, current endpoints, grant, and companion
+origin. A refused creation check does not dispatch later creation checks. Redis
+admission retains its approximate accounting; this change adds no shared
+financial lock, stronger isolation, or synchronous exact-ledger requirement.
+The controller retains main's separate active-endpoint lookup before grant
+discovery.
+
+Private shards obtain the post-grant or companion clock in that already-required
+query. Their existing last financial publication statement also returns its
+completion clock, including when extender insertion produces zero rows. A wait
+past the shard deadline aborts the provisional transaction instead of committing
+late rows. This adds a timestamp projection and returned-row aggregation only
+for private shards, without another SQL statement, round trip, or lock. Ordinary
+accounts send their original statements. The boundary covers escrow, contract,
+extender, and legacy cache publication, not COMMIT completion or later optional
+provider-session metadata.
+
+After the transaction joins, the request acknowledges its exact confirmed
+allocations while their tokens are still pending. A current-token read and the
+acknowledgement script both check the amount; acknowledgement changes neither
+the reservation nor its lease. Enrolling these tokens in shared recovery first
+would make concurrent creators run redundant SQL custody checks while that
+acknowledgement was in flight. Each early attempt consumes one of the recovery
+page's existing 32 slots. Changed tokens and uncertain replies retain main's
+fenced SQL recovery, as does every unrelated candidate. A page that ends keeps
+its remaining markers for later recovery.
+
+A definite refusal before a publication attempt releases its pending tokens in
+Redis alone with `release-pending`, without opening another PostgreSQL
+transaction. A late
+publication abort conservatively retains the existing bounded SQL custody
+recovery: catching the local abort does not establish an acknowledged rollback.
+The companion origin is selected before its transaction and rechecked after the
+client fence.
 
 Two bounds keep recovery away from a live request's tokens:
 
@@ -365,11 +398,12 @@ Retire old writers to close their early-Redis-release overlap. Never roll back
 by dropping the journal: drain it with a compatible worker first. Old legacy
 settlement still has shared-row contention and needs separate measured closure.
 
-`./test.sh` includes the mandatory real-PG/Redis contention gates. Focused gate:
+`./test.sh` includes every mandatory real-PG/Redis contention root, each in its
+own bounded process. A focused settlement control after sourcing `test-env.sh`:
 
 ```sh
-go test -p=1 -race -count=1 -timeout=5m ./model ./taskworker/work \
-  -run '^(TestAsyncDebit.*|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractSettlementSameNetworkLargeNContentionFree|TestTransferDebitTaskPartitionsAndBoundedContinuation)$'
+WARP_TEST_ENV_FAIL_FAST=1 go test -p=1 -race -count=1 -timeout=5m ./taskworker/work \
+  -run '^TestContractSettlementSameNetworkLargeNContentionFree$'
 ```
 
 The large settlement test uses 512 clients and two independent processes with a

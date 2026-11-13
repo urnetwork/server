@@ -35,7 +35,7 @@ func TestProviderBandwidthProbeShardRunsApartFromTheQualityShards(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		capabilityKey := model.ProberShardKey{TaskId: server.NewId(), Epoch: server.NewId(), ShardIndex: capabilityProbeShardIndex, ShardCount: capabilityProbeShardCount}
+		capabilityKey := model.ProberShardKey{TaskId: server.NewId(), Epoch: server.NewId(), ShardIndex: retiredCapabilityProbeShardIndex, ShardCount: retiredCapabilityProbeShardCount}
 		capabilityOwner, err := model.BeginProberShard(ctx, capabilityKey, 64*1024, time.Hour)
 		if err != nil {
 			t.Fatal(err)
@@ -50,7 +50,7 @@ func TestProviderBandwidthProbeShardRunsApartFromTheQualityShards(t *testing.T) 
 				tunnelConfig.PlatformPlacement == nil || tunnelConfig.Retirements == nil || tunnelConfig.ApiUrl != "https://api.probe.example" {
 				t.Errorf("the pass's tunnels lack the shard's identity, credentials, control, placement or retirements: %+v", tunnelConfig)
 			}
-			networkId = capabilityProbeShardTestNetworkId(t, ctx, key)
+			networkId = proberShardTestNetworkId(t, ctx, key)
 			if networkId == urlOwner.NetworkId || networkId == capabilityOwner.NetworkId {
 				t.Error("the bandwidth pass shares a network with a quality shard")
 			}
@@ -73,7 +73,7 @@ func TestProviderBandwidthProbeShardRunsApartFromTheQualityShards(t *testing.T) 
 				{name: "URL", key: urlKey},
 				{name: "capability", key: capabilityKey},
 			} {
-				if state := capabilityProbeShardTestState(t, ctx, c.key); state != "active" {
+				if state := proberShardTestState(t, ctx, c.key); state != "active" {
 					t.Errorf("the %s shard is %q while the bandwidth pass runs", c.name, state)
 				}
 			}
@@ -82,7 +82,7 @@ func TestProviderBandwidthProbeShardRunsApartFromTheQualityShards(t *testing.T) 
 		if err != nil || !finished || result != pass {
 			t.Fatalf("the pass returned %+v, %v (finished %t)", result, err, finished)
 		}
-		if state := capabilityProbeShardTestState(t, ctx, key); state != "draining" {
+		if state := proberShardTestState(t, ctx, key); state != "draining" {
 			t.Fatalf("the pass's shard is %q after it, want draining until its generation drops", state)
 		}
 		for _, owner := range []*model.ProberShardOwner{urlOwner, capabilityOwner} {
@@ -90,8 +90,8 @@ func TestProviderBandwidthProbeShardRunsApartFromTheQualityShards(t *testing.T) 
 				t.Fatalf("a quality shard lost its identity beside the bandwidth pass: %v", err)
 			}
 		}
-		capabilityProbeShardTestCleanup(t, ctx, key)
-		capabilityProbeShardTestCleanup(t, ctx, urlKey)
-		capabilityProbeShardTestCleanup(t, ctx, capabilityKey)
+		proberShardTestCleanup(t, ctx, key)
+		proberShardTestCleanup(t, ctx, urlKey)
+		proberShardTestCleanup(t, ctx, capabilityKey)
 	})
 }

@@ -565,7 +565,7 @@ func TestConnectTestScriptPropagatesDiscoveryFailure(t *testing.T) {
 	}
 }
 
-// Models the mandatory admission command separately from the four output-filter
+// Models the mandatory admission commands separately from the four output-filter
 // tiers; every synthetic go invocation records its exact directory and arguments.
 // No repository test or service preflight runs.
 func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, string, string) {
@@ -605,14 +605,23 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 printf '%s\0' "${PWD#"$URNETWORK_ROOT"/}" "${WARP_TEST_ENV_FAIL_FAST:-}" "$@" >> "$URNETWORK_ROOT/go-invocations"
 printf '\n' >> "$URNETWORK_ROOT/go-invocations"
 if [ "$PWD" = "$URNETWORK_ROOT/server" ]; then
-  if [ "$#" -ne 9 ] || [ "$1" != test ] || [ "$2" != -p=1 ] ||
+  if [ "$#" -ne 8 ] || [ "$1" != test ] || [ "$2" != -p=1 ] ||
      [ "$3" != -race ] || [ "$4" != -count=1 ] || [ "$5" != -timeout=5m ] ||
-     [ "$6" != ./model ] || [ "$7" != ./taskworker/work ] || [ "$8" != -run ] ||
-     [ "$9" != '^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' ] ||
      [ "${WARP_TEST_ENV_FAIL_FAST:-}" != 1 ]; then
     printf 'unexpected admission invocation\n' >&2
     exit 86
   fi
+  case "$6" in
+    ./model) name=TestRedisAdmissionFixture ;;
+    ./taskworker/work) name=TestTransferDebitTaskPartitionsAndBoundedContinuation ;;
+    *) exit 86 ;;
+  esac
+  if [ "$7" = -list ]; then
+    [ "$8" = '^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' ] || exit 86
+    printf '%s\nok synthetic-package 0.001s\n' "$name"
+    exit 0
+  fi
+  [ "$7" = -run ] && [ "$8" = "^${name}$" ] || exit 86
   printf 'test-runner-admission\n'
   exit "${TEST_SERVER_RUNNER_ADMISSION_STATUS:-0}"
 fi
@@ -633,12 +642,23 @@ exit "$test_status"
 	return runnerPath, binDir, workspaceRoot
 }
 
-// Captures the exact first command independently of caller-supplied test flags.
-func testServerRunnerAdmissionInvocation() []string {
-	return []string{
-		"server", "1", "test", "-p=1", "-race", "-count=1", "-timeout=5m",
-		"./model", "./taskworker/work", "-run", testServerRunnerAdmissionPattern,
+// Pins discovery and exact-case execution independently of caller test flags.
+func testServerRunnerAdmissionInvocations() [][]string {
+	var invocations [][]string
+	for _, test := range []struct {
+		packagePath string
+		name        string
+	}{
+		{packagePath: "./model", name: "TestRedisAdmissionFixture"},
+		{packagePath: "./taskworker/work", name: "TestTransferDebitTaskPartitionsAndBoundedContinuation"},
+	} {
+		prefix := []string{"server", "1", "test", "-p=1", "-race", "-count=1", "-timeout=5m", test.packagePath}
+		invocations = append(invocations,
+			append(append([]string{}, prefix...), "-list", testServerRunnerAdmissionPattern),
+			append(append([]string{}, prefix...), "-run", "^"+test.name+"$"),
+		)
 	}
+	return invocations
 }
 
 // Checks every command in order, including argument boundaries and fail-fast scope.
@@ -714,15 +734,14 @@ exec "$TEST_SERVER_RUNNER_CAT"`
 			t.Fatalf("binary runner signature %q count = %d; want 4", signature, count)
 		}
 	}
-	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
-		testServerRunnerAdmissionInvocation(),
+	requireTestServerRunnerInvocations(t, workspaceRoot, append(testServerRunnerAdmissionInvocations(), [][]string{
 		append([]string{"server/proxy", "0", "test", "-timeout", "30m", "-v"}, callerArgs...),
 		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "0", "-p=1", "-parallel=1", "-v"}, callerArgs...),
 		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
 		append([]string{"server/fixture", "0", "test", "-timeout", "0", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
-	})
-	if count := bytes.Count(output, []byte("test-runner-admission\n")); count != 1 {
-		t.Fatalf("admission completion count = %d; want 1", count)
+	}...))
+	if count := bytes.Count(output, []byte("test-runner-admission\n")); count != 2 {
+		t.Fatalf("admission completion count = %d; want 2", count)
 	}
 	if bytes.Contains(output, []byte("--- FAIL")) || bytes.Contains(output, []byte("[flaky]")) {
 		t.Fatal("captured binary fixture leaked a synthetic failure signature")
@@ -766,10 +785,9 @@ func TestServerTestScriptReportsSignaledOutputFilter(t *testing.T) {
 	if !ok || exitErr.ExitCode() != 143 {
 		t.Fatalf("runner filter failure = %v, %q; want exit 143", err, output)
 	}
-	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
-		testServerRunnerAdmissionInvocation(),
+	requireTestServerRunnerInvocations(t, workspaceRoot, append(testServerRunnerAdmissionInvocations(), [][]string{
 		{"server/proxy", "0", "test", "-timeout", "30m", "-v"},
-	})
+	}...))
 	upstreamStatusBytes, readErr := os.ReadFile(upstreamStatusPath)
 	if readErr != nil {
 		t.Fatal(readErr)
@@ -812,7 +830,7 @@ func TestServerTestScriptPropagatesAdmissionFailure(t *testing.T) {
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != status {
 			t.Fatalf("admission status %d: runner = %v, %q", status, err, output)
 		}
-		requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{testServerRunnerAdmissionInvocation()})
+		requireTestServerRunnerInvocations(t, workspaceRoot, testServerRunnerAdmissionInvocations()[:2])
 		for _, path := range []string{upstreamStatusPath, filepath.Join(workspaceRoot, "filter-invocations")} {
 			if record, err := os.ReadFile(path); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("admission status %d ran a later child: record=%q err=%v", status, record, err)
@@ -865,10 +883,9 @@ func TestServerTestScriptPreservesUpstreamFailure(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 70 {
 		t.Fatalf("runner upstream failure = %v, %q; want exit 70", err, output)
 	}
-	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
-		testServerRunnerAdmissionInvocation(),
+	requireTestServerRunnerInvocations(t, workspaceRoot, append(testServerRunnerAdmissionInvocations(), [][]string{
 		{"server/proxy", "0", "test", "-timeout", "30m", "-v"},
-	})
+	}...))
 	upstreamStatusBytes, err := os.ReadFile(upstreamStatusPath)
 	if err != nil {
 		t.Fatal(err)
@@ -876,7 +893,7 @@ func TestServerTestScriptPreservesUpstreamFailure(t *testing.T) {
 	if string(upstreamStatusBytes) != "70\n" {
 		t.Fatalf("upstream status = %q; want 70", upstreamStatusBytes)
 	}
-	if bytes.Count(output, []byte("test-runner-admission\n")) != 1 ||
+	if bytes.Count(output, []byte("test-runner-admission\n")) != 2 ||
 		bytes.Count(output, []byte("test-runner-upstream-failure\n")) != 1 ||
 		bytes.Contains(output, []byte("test output filter failed")) {
 		t.Fatalf("successful filter masked the upstream boundary: %q", output)
@@ -979,15 +996,14 @@ func TestServerTestScriptLeavesNativeFeePublicRootsOutOnlyOffLinuxWithoutGateExp
 			if err != nil {
 				t.Fatalf("runner failed: %v\n%s", err, output)
 			}
-			requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
-				testServerRunnerAdmissionInvocation(),
+			requireTestServerRunnerInvocations(t, workspaceRoot, append(testServerRunnerAdmissionInvocations(), [][]string{
 				append([]string{"server/proxy", "0", "test", "-timeout", "30m", "-v"}, callerArgs...),
 				append([]string{"server/connect/perfvar", "0", "test", "-timeout", "0", "-p=1", "-parallel=1", "-v"}, callerArgs...),
 				append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
 				packageInvocation("server/fixture", false),
 				packageInvocation("server/model", test.leave),
 				packageInvocation("server/controller", test.leave),
-			})
+			}...))
 			notice := "test.sh: the six public native-fee roots are left out of ./model and ./controller: their sn verifier runs only on Linux, and this host is " + test.host + "\n"
 			if count, want := strings.Count(string(output), notice), map[bool]int{false: 0, true: 1}[test.leave]; count != want {
 				t.Fatalf("notice count = %d; want %d\n%s", count, want, output)

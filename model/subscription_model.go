@@ -1954,7 +1954,7 @@ func createTransferEscrowInTx(
 	if err := validateProberShardAdmissionDeadlineInTx(ctx, tx, shardDeadline); err != nil {
 		return nil, nil, err
 	}
-	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId); err != nil {
+	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId, shardDeadline); err != nil {
 		return nil, nil, err
 	}
 	pending := make(map[server.Id]netEscrowSnapshot, len(balanceIds))
@@ -1969,6 +1969,7 @@ func createTransferEscrowInTx(
 	}
 	streamId := bindContractStreamAtInsert(ctx, contractId)
 	var expirationTime time.Time
+	var completedAt *time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, balanceId := range balanceIds {
 			escrow := balanceEscrows[balanceId]
@@ -2031,20 +2032,17 @@ func createTransferEscrowInTx(
 			contractUsageOriginInsertArg(ctx, sourceNetworkId, destinationNetworkId, companionContractId),
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 
-		batch.Queue(
-			contractExtenderInsertSql,
-			contractId,
-			sourceId,
-			destinationId,
-			ContractPartySource,
-			ContractPartyDestination,
-		)
 		if 0 < contractTransferByteCount {
+			batch.Queue(contractExtenderInsertSql, contractId, sourceId, destinationId, ContractPartySource, ContractPartyDestination)
 			// The same commit publishes only the exact expected revision. A
 			// legacy or concurrent writer leaves a miss rather than stale credit.
-			batch.Queue(netEscrowPublishAdmissionCacheSQL, netEscrowAdmissionCacheArgs(pending, balanceIds)...)
+			completedAt = queueContractPublicationClock(batch, netEscrowPublishAdmissionCacheSQL, netEscrowPublishAdmissionCacheCompletionClockSql,
+				shardDeadline, netEscrowAdmissionCacheArgs(pending, balanceIds)...)
+		} else {
+			completedAt = queueContractExtenderPublication(batch, contractId, sourceId, destinationId, shardDeadline)
 		}
 	})
+	requireContractPublicationDeadline(shardDeadline, completedAt)
 	server.AddTxCommitCount(tx, &contractOpenedCounter, 1)
 	providerWorkRetainReservationInTx(ctx, tx, contractId)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "create", expirationTime)
@@ -2200,6 +2198,7 @@ func createTransferEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	defer recoverContractPublicationDeadline(&transferEscrow, &returnErr)
 	// Direct owners also resolve optional file and key work before acquiring pg.
 	ctx = providerWorkSessionContext(ctx)
 	var posts []func() any
@@ -2391,6 +2390,7 @@ func createCompanionTransferEscrow(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	defer recoverContractPublicationDeadline(&transferEscrow, &returnErr)
 	// Direct callers must not load or verify an optional file while holding pg.
 	ctx = providerWorkSessionContext(ctx)
 	// An absent origin is decided by one read-only statement, before the
