@@ -23,8 +23,8 @@
     "hold_active": true
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.ExkdzGSN/state.private.json",
-    "sha256": "fe4d0df1d4d3eef0ee0bab49eff153f3c31723339240055186c24cdb1291b023",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.aVLivUUi/state.private.json",
+    "sha256": "42998d167993296ded61f3ba3e9028b4fd1e4cfdb6994d7189429628c3b88f5d",
     "mode": "root:root 0400 in root:root 0700 directory",
     "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
@@ -88,6 +88,14 @@
     "recovery_is_volatile_ram": true,
     "source_baseline_submission_evidence_deleted": false,
     "reason": "Root fell below 33 GiB floor. Same-binary offline status passed after verified no-open cache relocation; no reserve relaxation."
+  },
+  "additional_recoverable_cache_cleanup": {
+    "removed_only_inactive_rebuildable_objects": 1,
+    "bytes": 173541860,
+    "sha256": "f3fad907aadf6f657527a74aed771bd1024dea868c951b408ce18e8d94973efc",
+    "verified_recovery_directory": "/dev/shm/competition-retired-inactive-cache-20261113.57KE0S8j",
+    "recovery_is_volatile_ram": true,
+    "source_baseline_submission_evidence_deleted": false
   },
   "next_actions": [
     "Confirm and repair the provider-envelope parser against unchanged retained originals, with deterministic tests and no fresh inference. Consult the protected operator state; never silently rewrite old failures.",
