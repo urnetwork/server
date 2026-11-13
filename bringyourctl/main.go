@@ -1797,8 +1797,9 @@ func sendPayoutEmail(opts docopt.Opts) {
 // only reads Stripe and the database. --send owes those notices, through the
 // same processing as the invoice.payment_failed webhook, so an invoice the
 // webhook already noticed gets nothing more; the account message delivery task
-// sends them within a minute. Exits non-zero when a subscription could not be
-// read.
+// sends them within a minute. The taskworker runs the same send every hour
+// (controller.SweepStripeDunning), so --send owes at once what the next sweep
+// would. Exits non-zero when a subscription could not be read.
 func paymentsStripeDunning(opts docopt.Opts, out io.Writer) int {
 	ctx := context.Background()
 	send, _ := opts.Bool("--send")
