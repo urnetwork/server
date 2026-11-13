@@ -59,16 +59,21 @@ printed as not established, never copied from an old or planned control. These
 new capability/command paths remain prepared release work until qualified and
 deployed; they do not assert that current production already supports them.
 
-Before production activation, start with
+When assuming operational control, start with
 [`launch/current-state.json`](launch/current-state.json), the compact preparation
-checkpoint, then verify its live process/session and linked evidence. It is a
-dated operator snapshot, not score/runtime authority or permission to restart an
+checkpoint. On the coordinator, read its referenced root-private operator record,
+then verify the live process/session and linked evidence. The repository checkpoint
+must not disclose per-job eligibility, scores, review findings or candidate progress
+before authorized finalization; those belong in protected operational storage.
+These are dated operator snapshots, not score/runtime authority or permission to restart an
 active qualification. Live season state remains authoritative in the API,
 database and the supervisor's state directory described below.
 
-Keep that file limited to the current jobs, verified release, pending approvals
-and next actions. Superseded preparation/incident snapshots belong in the linked
+Keep that file limited to public-safe control status, verified release, pending
+deployments, next actions and the protected record's path/digest. Public-safe
+superseded preparation/incident snapshots belong in the linked
 `old/CURRENT-STATE-HISTORY-*` files, with their original bytes and digest retained.
+Do not copy private per-job snapshots into repository history.
 Open history only for a specific investigation; its readiness, hold and next-action
 fields are not current instructions.
 

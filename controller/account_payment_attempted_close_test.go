@@ -224,3 +224,52 @@ func TestUsdcAttemptedDigestBindsEveryDecision(t *testing.T) {
 		}
 	}
 }
+
+// A forfeit's report lists every named payment and prints the command that
+// commits exactly them, with its digest; a refused one prints neither digest
+// nor command. The Circle pass's report is as before: closed payments counted,
+// not listed, and a command without --forfeit.
+func TestUsdcAttemptedReportTextNamesTheForfeit(t *testing.T) {
+	first, second := server.NewId(), server.NewId()
+	row := func(paymentId server.Id, class string, reason string) *UsdcAttemptedRow {
+		return &UsdcAttemptedRow{PaymentId: paymentId, NetworkId: server.NewId(), Class: class, Reason: reason, PayoutNanoCents: model.UsdToNanoCents(0.25)}
+	}
+	forfeit := &UsdcAttemptedReport{
+		RunId:   server.NewId(),
+		Mode:    "dry_run",
+		Forfeit: []server.Id{first, second},
+		Digest:  "synthetic-digest",
+		Rows:    []*UsdcAttemptedRow{row(first, UsdcAttemptedClosed, UsdcAttemptedOwnerForfeit), row(second, UsdcAttemptedClosed, UsdcAttemptedOwnerForfeit)},
+	}
+	text := forfeit.Text()
+	for _, want := range []string{
+		"payouts close-attempted --forfeit=" + first.String() + "," + second.String() + " dry_run run",
+		"closed owner_forfeit: 2 payments, 0.500000 USD",
+		"closed owner_forfeit payment " + first.String(),
+		"closed owner_forfeit payment " + second.String(),
+		"digest synthetic-digest\n",
+		"commit with: bringyourctl payouts close-attempted --forfeit=" + first.String() + "," + second.String() + " --commit --expect=synthetic-digest\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the forfeit report misses %q:\n%s", want, text)
+		}
+	}
+
+	forfeit.Digest = ""
+	forfeit.Rows[1] = row(second, UsdcAttemptedRefused, "completed")
+	if text := forfeit.Text(); !strings.Contains(text, "refused completed payment "+second.String()) || strings.Contains(text, "digest") || strings.Contains(text, "commit with") {
+		t.Fatalf("a refused forfeit's report:\n%s", text)
+	}
+
+	pass := &UsdcAttemptedReport{
+		RunId:  server.NewId(),
+		Mode:   "dry_run",
+		Digest: "synthetic-digest",
+		Rows:   []*UsdcAttemptedRow{row(first, UsdcAttemptedClosed, "circle_absent"), row(second, UsdcAttemptedHeld, "lookup_failed")},
+	}
+	text = pass.Text()
+	if strings.Contains(text, "--forfeit") || strings.Contains(text, "payment "+first.String()) || !strings.Contains(text, "held lookup_failed payment "+second.String()) ||
+		!strings.Contains(text, "commit with: bringyourctl payouts close-attempted --commit --expect=synthetic-digest\n") {
+		t.Fatalf("the pass's report:\n%s", text)
+	}
+}
