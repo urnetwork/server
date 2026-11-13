@@ -650,6 +650,8 @@ func (self *egressProbeMetricsReporter) submitEgressHealthScored(
 		// every leg the acknowledged turn measured, probationary loads
 		// included: the transports are the provider's, whatever the site
 		observeUrlProbeTransportOutcomes(measured)
+		// and a post-quantum turn's end-to-end session
+		observeUrlProbeE2eOutcome(measured)
 		// and every HTTP/3 leg its provider's country turned off
 		observeUrlProbeUdpCountryDisabled(measured, func() string { return self.country(ctx, providerClientId) })
 	}

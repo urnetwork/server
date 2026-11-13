@@ -303,6 +303,7 @@ func DueProvidersOf(providers []model.ProviderUrlProbeDue) []ingest.DueProvider 
 			entry.NetworkId = provider.NetworkId.String()
 		}
 		entry.IpFamily = egresshealth.IpFamily(provider.IpFamily)
+		entry.PostQuantum = provider.PostQuantum
 		due = append(due, entry)
 	}
 	return due

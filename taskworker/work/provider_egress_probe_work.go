@@ -2135,7 +2135,9 @@ func runProviderEgressProbe(
 //
 // Its tunnels opt in to KeepClientKeysLocal: each URL probe mints a derived
 // client whose identity key nothing reads, and only this pass may skip
-// publishing it.
+// publishing it. A turn the claim marks for post-quantum reads its key, so
+// its clients publish (fleetprobe url_e2e.go): its session resolves the
+// provider's key from the platform's own store when no contract carried one.
 func newProviderUrlProbePass(
 	args *ProviderEgressProbeArgs,
 	operator ingest.Operator,
@@ -2156,8 +2158,9 @@ func newProviderUrlProbePass(
 		},
 		loadPool: operator.DestinationPool,
 		fullOptions: fleetprobe.FullOptions{
-			UrlProbe:     true,
-			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
+			UrlProbe:                      true,
+			TunnelConfig:                  providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
+			NewPeerClientPublicKeyFetcher: newProviderUrlProbePeerClientPublicKeyFetcher,
 		},
 		fullSink:     newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry),
 		recordTally:  newProviderEgressTallyRecorder(),
