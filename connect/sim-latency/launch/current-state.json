@@ -1,10 +1,11 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T10:26:59Z",
+  "observed_at": "2026-11-13T11:24:54Z",
   "latest_recovery_checkpoint": {
     "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
     "sn_commit": "e9aa3ac282ed7e4bc48eaab60d03043a5f6a6dac",
     "required_migration": 971,
+    "observed_migration_head": 969,
     "deployment_verified": false,
     "worker_activated": false,
     "ordinary_tests_passed": 169,
@@ -24,6 +25,11 @@
   "latest_private_review_checks": {
     "compaction_source_manifest_sha256": "0aa2fd746b68fc520d4935ce5138d25f92e145e26ee0e7eb3b8213f926deca2f",
     "compaction_new_controls_passed": 4,
+    "latest_fixture_source_manifest_sha256": "96bfa3ba2d356d9498b4878cdea01a1facfc17d36e4694de58eea960753f8cbf",
+    "engine_tests_inventory": 92,
+    "engine_unique_tests_passed": 91,
+    "remaining_engine_test": "TestCompleteReviewOversizedFileCompletesActualHierarchicalIntegration exceeded its original five-minute bound; its 367.26-second diagnostic pass is not qualification credit.",
+    "standalone_archive_tests_passed": 18,
     "named_caller_regression_passed": true,
     "named_caller_seconds": 170.43,
     "full_compaction_suite_passed": false,
@@ -47,7 +53,29 @@
     },
     "oversized_helper_regression_passed": true,
     "oversized_helper_seconds": 292.295,
-    "new_model_calls_started": false,
+    "new_generation_calls_started": false,
+    "actual_input_binding": {
+      "initial_cohort_packets": 15,
+      "both_model_obligations": 784,
+      "census_sha256": "5b8a9633370f43f01d91617ba42267b6feec450daf347d7ae3c891c15f5fdca3",
+      "unit_set_sha256": "91f5dd7aa3c0617e275d0270347aa7379033dbb76fd1d6692706e9e4f59c7107",
+      "receipt_sha256": "6a0a53a83a95b8456445e836dde9f6efbf26222c993275502c599204e2c8e91a",
+      "current_population_coverage": false,
+      "review_or_approval": false
+    },
+    "actual_prepare": {
+      "state": "TOKEN_REJECTED_NO_GENERATION",
+      "completed_tokenizer_rejections": 10,
+      "minimum_input_tokens": 704742,
+      "maximum_input_tokens": 887036,
+      "root_cause": "Every scope repeats the complete trusted packet (including about 838 KB instrument evidence) and raw nonproduction evidence. A bounded authenticated view is being implemented without reducing the complete code/patch obligations.",
+      "maximum_rss_kib": 645052,
+      "swaps": 0,
+      "process_memory_limit_bytes": 2147483648,
+      "receipt_sha256": "f44b2a60c8e3e289bb8b5d934fb6ad65b77fa9811b2b0c249c459c7106c82fd8",
+      "evidence": "/var/lib/urnetwork/competition-private-review-prepare-20261113-v2",
+      "originals_preserved_no_inference_reroll": true
+    },
     "compaction_evidence": "/var/lib/urnetwork/competition-compaction-qa-20261113.RYmlouqc",
     "runtime_evidence": "/var/lib/urnetwork/competition-runtime41-qa-20261113.LDSI1KqK",
     "sdk_archive_evidence": "/var/lib/urnetwork/competition-sdk-archive-build-20261113.Z4LLcV4f"
