@@ -37,10 +37,16 @@ func TestStripeTrialStartPostsATrialWithNoCharge(t *testing.T) {
 		),
 	})
 
-	// stripeResolveInvoiceCredit's window: the trial, then the manual-payment
+	// stripeResolveInvoiceCredit's window: the trial, then the free period's
 	// grace
 	invoice := &StripeEventInvoiceObject{Id: "in_trial", Total: 0, Currency: "usd", BillingReason: "subscription_create"}
-	credited, err := stripeCreditInvoicePaidInTx(tx, context.Background(), networkId, invoice, 0, start, trialEnd.Add(manualPaymentGracePeriod))
+	credit := &stripeInvoiceCredit{
+		networkId:   networkId,
+		startTime:   start,
+		paidEndTime: trialEnd,
+		endTime:     trialEnd.Add(SubscriptionGracePeriod),
+	}
+	credited, err := stripeCreditInvoicePaidInTx(tx, context.Background(), credit, invoice, 0)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, credited, true)
 
@@ -78,7 +84,13 @@ func TestStripeTrialConversionIsTheFirstSale(t *testing.T) {
 		PeriodStart:   int(start.Unix()),
 		PeriodEnd:     int(trialEnd.Unix()),
 	}
-	credited, err := stripeCreditInvoicePaidInTx(tx, context.Background(), networkId, invoice, model.UsdToNanoCents(27.99), trialEnd, yearEnd.Add(manualPaymentGracePeriod))
+	credit := &stripeInvoiceCredit{
+		networkId:   networkId,
+		startTime:   trialEnd,
+		paidEndTime: yearEnd,
+		endTime:     yearEnd.Add(manualPaymentGracePeriod),
+	}
+	credited, err := stripeCreditInvoicePaidInTx(tx, context.Background(), credit, invoice, model.UsdToNanoCents(27.99))
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, credited, true)
 
@@ -97,7 +109,7 @@ func TestStripeTrialConversionIsTheFirstSale(t *testing.T) {
 		PeriodStart:   int(trialEnd.Unix()),
 		PeriodEnd:     int(yearEnd.Unix()),
 	}
-	notice := stripeInvoiceSalesNotice(networkId, renewal, yearEnd, yearEnd.Add(365*24*time.Hour+manualPaymentGracePeriod))
+	notice := stripeInvoiceSalesNotice(networkId, renewal, yearEnd, yearEnd.Add(365*24*time.Hour))
 	connect.AssertEqual(t, notice.Kind, "renewal")
 }
 
@@ -120,12 +132,12 @@ func TestStripeReconcilerCreditLeavesTheTrialToTheReadBack(t *testing.T) {
 		),
 	})
 
-	notice := stripeInvoiceSalesNotice(networkId, &StripeEventInvoiceObject{Id: "in_short"}, start, shortEnd.Add(manualPaymentGracePeriod))
+	notice := stripeInvoiceSalesNotice(networkId, &StripeEventInvoiceObject{Id: "in_short"}, start, shortEnd)
 	connect.AssertEqual(t, notice.Trial, false)
 	notice.Enrich(context.Background(), notice)
 	connect.AssertEqual(t, salesNoticeLines(notice, "acme"), salesNoticeText("Pro yearly (plan change)", "acme", "12.50 USD", "Stripe (card)"))
 
-	notice = stripeInvoiceSalesNotice(networkId, &StripeEventInvoiceObject{Id: "in_missed_trial"}, start, start.Add(14*24*time.Hour+manualPaymentGracePeriod))
+	notice = stripeInvoiceSalesNotice(networkId, &StripeEventInvoiceObject{Id: "in_missed_trial"}, start, start.Add(14*24*time.Hour))
 	connect.AssertEqual(t, notice.Trial, false)
 	notice.Enrich(context.Background(), notice)
 	connect.AssertEqual(t, salesNoticeLines(notice, "acme"), stripeSalesTrialText("Trial", "Pro yearly (new)", "no charge (free trial until 2026-11-22)", "Stripe"))

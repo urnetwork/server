@@ -541,11 +541,13 @@ func ListPendingReengagementFixes(ctx context.Context, answeredAfter time.Time, 
 	return
 }
 
-// The markets whose supporter windows record their end with the 30-day
-// manual-payment grace already in it (controller manualPaymentGracePeriod:
-// crypto_pay_credit.go, gamma_credit.go and payment_reconcile_controller.go
-// add it to end_time), so Pro stops at end_time; the App Store and Play end
-// theirs at the store's expiry and may retry a failed renewal after it.
+// The markets whose supporter windows record their end with the grace already
+// in it, so Pro stops at end_time: the 30-day manual-payment grace on a paid
+// period (controller manualPaymentGracePeriod: crypto_pay_credit.go,
+// gamma_credit.go and subscription_stripe_controller.go add it to end_time),
+// and a day on a Stripe period no payment paid for, a trial
+// (subscription_stripe_grace.go). The App Store and Play end theirs at the
+// store's expiry and may retry a failed renewal after it.
 var reengagementGraceMarkets = []string{"stripe", "solana", "monero", "zcash", "bittensor", "bitcoin", "ethereum", "gamma", "x402", "manual"}
 
 // ReengagementGraceMarkets are the markets whose end_time includes the grace.

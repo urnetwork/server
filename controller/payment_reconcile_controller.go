@@ -508,21 +508,39 @@ func (self *stripeReconcileCharge) keptWholePayment() bool {
 
 // Whether the window a canceled subscription's invoice paid for may still be
 // running on paid time: someone asked for the cancel (not Stripe, for a failed
-// or disputed payment), the invoice is paid and took money, and its paid
-// period, which ends at paidPeriodEnd, has not ended. A cancel stops the renewals; it gives
-// no money back. The invoice's charge decides the rest (keptWholePayment).
+// or disputed payment), the invoice took payment (stripeInvoiceTookPayment), and
+// its paid period, which ends at paidPeriodEnd, has not ended. A cancel stops
+// the renewals; it gives no money back. The invoice's charge decides the rest
+// (keptWholePayment).
 func stripeCancelLeavesPaidPeriod(
 	invoice *stripeReconcileInvoiceExpanded,
 	paidPeriodEnd time.Time,
 	now time.Time,
 ) bool {
 	return invoice != nil &&
-		invoice.Status == "paid" &&
+		stripeInvoiceTookPayment(invoice.Status, invoice.AmountPaid) &&
 		invoice.Subscription != nil &&
 		invoice.Subscription.Status == "canceled" &&
 		invoice.Subscription.CancellationDetails.Reason == stripeCancellationReasonRequested &&
-		0 < invoice.AmountPaid &&
 		now.Before(paidPeriodEnd)
+}
+
+// Whether the window an invoice paid for keeps the manual-payment grace that
+// its end already carries: Stripe gave up on the subscription's renewal (the
+// final action kept it unpaid, or canceled it for payment_failed), and the
+// invoice took payment, as for a requested cancel's paid period
+// (stripeCancelLeavesPaidPeriod). A window no payment paid for (a trial) has no
+// manual-payment grace to keep: it ends when Stripe gives up (owner,
+// 2026-11-13). A refund or a dispute of the payment ends the window through its
+// own webhook.
+func stripeNonPaymentLeavesManualPaymentGrace(invoice *stripeReconcileInvoiceExpanded) bool {
+	if invoice == nil || invoice.Subscription == nil {
+		return false
+	}
+	gaveUp := invoice.Subscription.Status == "unpaid" ||
+		(invoice.Subscription.Status == "canceled" &&
+			invoice.Subscription.CancellationDetails.Reason == stripeCancellationReasonPaymentFailed)
+	return gaveUp && stripeInvoiceTookPayment(invoice.Status, invoice.AmountPaid)
 }
 
 // Reads the charge that paid a renewal's invoice.
@@ -1227,8 +1245,15 @@ func runPaymentReconciliation(
 //	    refunded nor disputed                                                  -> nothing
 //	    until the paid period ends, then end (a cancel gives no money back,
 //	    and the manual-payment grace is for renewals that may yet be paid)
-//	unpaid, or canceled for payment_failed, exact paid window                 -> nothing
+//	unpaid, or canceled for payment_failed, exact paid window whose invoice
+//	    took payment                                                           -> nothing
 //	    through the manual-payment grace
+//	unpaid, or canceled for payment_failed, a window no payment paid for (a
+//	    trial)                                                                 -> end
+//	    (owner, 2026-11-13: no grace for a network that never paid)
+//	past_due (or another state short of active) on a window no payment paid
+//	    for, a day past its period                                             -> end
+//	    (the free period's grace, subscription_stripe_grace.go)
 //	status active + cancel_at_period_end (time remaining)                      -> nothing
 //	anything else                                                              -> nothing
 func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
@@ -1394,26 +1419,26 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 		if fullInvoice.Subscription == nil {
 			continue
 		}
+		paidPeriodEnd, paidWindow := stripeRenewalPaidPeriodEndInConn(run.connOwner, ctx, renewal, fullInvoice)
 		// Preserve a verified paid window through manual-payment grace even
 		// if Stripe marks the renewal unpaid or auto-cancels it early. A
-		// customer-requested cancellation is not a payment failure.
-		manualPaymentGrace := (fullInvoice.Subscription.Status == "unpaid" ||
-			(fullInvoice.Subscription.Status == "canceled" &&
-				fullInvoice.Subscription.CancellationDetails.Reason == "payment_failed")) &&
-			renewal.EndTime.After(run.now) &&
-			stripeRenewalMatchesInvoiceInConn(run.connOwner, ctx, renewal, fullInvoice)
-		if manualPaymentGrace {
+		// customer-requested cancellation is not a payment failure, and a
+		// window no payment paid for has no manual-payment grace.
+		if paidWindow && stripeNonPaymentLeavesManualPaymentGrace(fullInvoice) {
 			continue
 		}
+		tookPayment := stripeInvoiceTookPayment(fullInvoice.Status, fullInvoice.AmountPaid)
 		if stripeSubscriptionOver(fullInvoice.Subscription.Status) {
-			details := map[string]any{"subscription_status": fullInvoice.Subscription.Status}
+			details := map[string]any{
+				"subscription_status": fullInvoice.Subscription.Status,
+				"took_payment":        tookPayment,
+			}
 			if reason := fullInvoice.Subscription.CancellationDetails.Reason; reason != "" {
 				details["cancellation_reason"] = reason
 			}
 			// A cancel inside the paid period keeps the window this invoice
 			// paid for until the period ends, unless its charge gave money back.
 			// A refund or dispute also ends it through its own webhook.
-			paidPeriodEnd, paidWindow := stripeRenewalPaidPeriodEndInConn(run.connOwner, ctx, renewal, fullInvoice)
 			if paidWindow && stripeCancelLeavesPaidPeriod(fullInvoice, paidPeriodEnd, run.now) {
 				details["paid_period_end"] = paidPeriodEnd.UTC().Format(time.RFC3339)
 				// with no charge named, what came back can't be read: end, as before
@@ -1454,13 +1479,31 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 				fullInvoice.Subscription.Id,
 				details,
 			)
-		} else if stripeSubscriptionEntitled(fullInvoice.Subscription.Status) &&
-			stripeRenewalMatchesInvoiceInConn(run.connOwner, ctx, renewal, fullInvoice) {
-			run.repairEntitlement(
+		} else if stripeSubscriptionEntitled(fullInvoice.Subscription.Status) {
+			if paidWindow {
+				run.repairEntitlement(
+					store,
+					renewal,
+					fullInvoice.Subscription.Id,
+					map[string]any{"subscription_status": fullInvoice.Subscription.Status},
+				)
+			}
+		} else if paidWindow && !tookPayment &&
+			!run.now.Before(paidPeriodEnd.Add(stripeGraceSettingsFunc().periodGrace(false))) {
+			// Stripe still retries the first charge after a period no payment
+			// paid for (past_due): the window gets the free period's grace, as
+			// one credited now does. A window credited before that carried the
+			// 30-day manual-payment grace (subscription_stripe_grace.go).
+			run.end(
 				store,
-				renewal,
+				renewal.NetworkId,
+				paymentReconcileEndScope{transactionIds: []string{renewal.TransactionId}},
 				fullInvoice.Subscription.Id,
-				map[string]any{"subscription_status": fullInvoice.Subscription.Status},
+				map[string]any{
+					"subscription_status": fullInvoice.Subscription.Status,
+					"took_payment":        tookPayment,
+					"paid_period_end":     paidPeriodEnd.UTC().Format(time.RFC3339),
+				},
 			)
 		}
 	}
@@ -1468,30 +1511,13 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 	return true, nil
 }
 
-func stripeRenewalMatchesInvoice(
-	ctx context.Context,
-	renewal *model.ReconcileSubscriptionRenewal,
-	invoice *stripeReconcileInvoiceExpanded,
-) bool {
-	return stripeRenewalMatchesInvoiceInConn(nil, ctx, renewal, invoice)
-}
-
-// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
-func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
-	ctx context.Context,
-	renewal *model.ReconcileSubscriptionRenewal,
-	invoice *stripeReconcileInvoiceExpanded,
-) bool {
-	_, paidWindow := stripeRenewalPaidPeriodEndInConn(connOwner, ctx, renewal, invoice)
-	return paidWindow
-}
-
 // The end of the paid period the invoice bills, when the renewal is exactly the
 // window the invoice's credit wrote on this network: the invoice's own ledger
 // network, the subscription's network metadata, and a subscription line whose
-// period starts the window and, with a grace period, ends it. paidWindow false
-// otherwise. Reuse the caller's PostgreSQL session; nil selects the outer
-// acquisition boundary.
+// period starts the window and ends the period the credit recorded
+// (paid_end_time), or, for a row written before that column, ends the window
+// with the grace it was credited with. paidWindow false otherwise. Reuse the
+// caller's PostgreSQL session; nil selects the outer acquisition boundary.
 func stripeRenewalPaidPeriodEndInConn(connOwner server.PgConn,
 	ctx context.Context,
 	renewal *model.ReconcileSubscriptionRenewal,
@@ -1525,11 +1551,20 @@ func stripeRenewalPaidPeriodEndInConn(connOwner server.PgConn,
 			continue
 		}
 		periodEnd := time.Unix(line.Period.End, 0)
-		if renewal.StartTime.Equal(time.Unix(line.Period.Start, 0)) &&
-			(renewal.EndTime.Equal(periodEnd.Add(manualPaymentGracePeriod)) ||
-				// Existing paid invoices retain the old 24-hour window until a
-				// separately verified migration extends them.
-				renewal.EndTime.Equal(periodEnd.Add(SubscriptionGracePeriod))) {
+		if !renewal.StartTime.Equal(time.Unix(line.Period.Start, 0)) {
+			continue
+		}
+		if renewal.PaidEndTime != nil {
+			// whatever grace the window runs (stripeGraceSettings)
+			if renewal.PaidEndTime.Equal(periodEnd) {
+				return periodEnd, true
+			}
+			continue
+		}
+		// a row written before paid_end_time ran the 30-day manual-payment
+		// grace, or, on the oldest paid invoices, the old 24-hour window
+		if renewal.EndTime.Equal(periodEnd.Add(manualPaymentGracePeriod)) ||
+			renewal.EndTime.Equal(periodEnd.Add(SubscriptionGracePeriod)) {
 			return periodEnd, true
 		}
 	}
