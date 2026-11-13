@@ -40,6 +40,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -75,6 +76,87 @@ type SocketStore struct {
 	settings *SocketStoreSettings
 	// Sees each script's name and keys as it runs, for the slot check and op counts. Nil in production.
 	scriptCallback func(name string, keys []string)
+	// When set, every script runs through it, one call each, rather than on the deadline pool: a test's counted
+	// Redis (§22.5's hot-path gate). Nil in production.
+	scriptRedis atomic.Pointer[socketScriptRunner]
+}
+
+// Scripts run through a sidecar.Redis, each one call.
+type socketScriptRunner struct {
+	redis sidecar.Redis
+}
+
+// Every script as a sidecar.RedisScript, named sockets.<name>, for a runner.
+var socketStoreSidecarScripts = func() map[string]*sidecar.RedisScript {
+	scripts := map[string]*sidecar.RedisScript{}
+	for name, source := range socketStoreScriptSources {
+		scripts[name] = &sidecar.RedisScript{Name: "sockets." + name, Source: source}
+	}
+	return scripts
+}()
+
+// One script through the runner's Redis, its arguments as go-redis would write them and its reply as go-redis would
+// read it, a nil reply being redis.Nil.
+func (self *socketScriptRunner) run(ctx context.Context, name string, keys []string, args []any) (any, error) {
+	argv := make([]string, len(args))
+	for index, arg := range args {
+		switch arg := arg.(type) {
+		case string:
+			argv[index] = arg
+		case []byte:
+			argv[index] = string(arg)
+		case int:
+			argv[index] = strconv.Itoa(arg)
+		case int64:
+			argv[index] = strconv.FormatInt(arg, 10)
+		case uint32:
+			argv[index] = strconv.FormatUint(uint64(arg), 10)
+		case uint64:
+			argv[index] = strconv.FormatUint(arg, 10)
+		default:
+			return nil, fmt.Errorf("socket store: a script argument of type %T", arg)
+		}
+	}
+	reply, err := self.redis.RunScript(ctx, socketStoreSidecarScripts[name], keys, argv)
+	if err != nil {
+		return nil, err
+	}
+	var value func(reply *sidecar.RedisReply) any
+	value = func(reply *sidecar.RedisReply) any {
+		switch reply.Kind {
+		case sidecar.RedisReplyInteger:
+			return reply.Integer
+		case sidecar.RedisReplyBulk:
+			return string(reply.Bulk)
+		case sidecar.RedisReplyArray:
+			values := make([]any, len(reply.Replies))
+			for index, element := range reply.Replies {
+				values[index] = value(element)
+			}
+			return values
+		}
+		return nil
+	}
+	if reply == nil || reply.Kind == sidecar.RedisReplyNil {
+		return nil, redis.Nil
+	}
+	return value(reply), nil
+}
+
+// Runs every later script through redis, one call each, and nil goes back to the deadline pool: what §22.5's hot-path
+// gate counts a composed path's calls with (sidecart3.InlinePath). A test's alone.
+func (self *SocketStore) Testing_RunScriptsThrough(redis sidecar.Redis) {
+	if redis == nil {
+		self.scriptRedis.Store(nil)
+		return
+	}
+	self.scriptRedis.Store(&socketScriptRunner{redis: redis})
+}
+
+// Calls observe with each script's name and keys as it runs: §22.4's slot check over a whole composed path. A test's
+// alone, set before the store is shared.
+func (self *SocketStore) Testing_ObserveScripts(observe func(name string, keys []string)) {
+	self.scriptCallback = observe
 }
 
 // A store on clock, nil being real time, with settings, nil being the defaults.
@@ -161,6 +243,9 @@ func (self *SocketStore) noteScript(name string, keys []string) {
 // One script, by SHA-1 with a fallback to its source.
 func (self *SocketStore) runScript(ctx context.Context, client server.RedisClient, name string, keys []string, args ...any) (any, error) {
 	self.noteScript(name, keys)
+	if runner := self.scriptRedis.Load(); runner != nil {
+		return runner.run(ctx, name, keys, args)
+	}
 	return socketStoreScripts[name].Run(ctx, client, keys, args...).Result()
 }
 
@@ -176,6 +261,18 @@ type socketScriptCall struct {
 func (self *SocketStore) runScripts(ctx context.Context, client server.RedisClient, calls []*socketScriptCall) ([]any, error) {
 	if len(calls) == 0 {
 		return nil, nil
+	}
+	if runner := self.scriptRedis.Load(); runner != nil {
+		replies := make([]any, len(calls))
+		for index, call := range calls {
+			self.noteScript(call.name, call.keys)
+			reply, err := runner.run(ctx, call.name, call.keys, call.args)
+			if err != nil {
+				return nil, err
+			}
+			replies[index] = reply
+		}
+		return replies, nil
 	}
 	pipe := client.Pipeline()
 	cmds := make([]*redis.Cmd, len(calls))
@@ -385,6 +482,7 @@ func socketParseListener(values []string) (*socketsservice.SocketStoreListener, 
 		MaxStreams:           registration.MaxStreams,
 		Serving:              registration.Serving,
 		Draining:             registration.Draining,
+		Affinity:             registration.Affinity,
 		LeaseExpireMillis:    leaseExpireMillis,
 		ReportedInflight:     registration.Inflight,
 		ReportMillis:         reportMillis,
@@ -819,6 +917,9 @@ func (self *SocketStore) pickArgs(request *socketsservice.SocketStorePickRequest
 		scheduler.ReporterNetworkCount,
 		max(scheduler.EjectionMax, scheduler.TicketLifetime).Milliseconds(),
 		strings.Join(reports, ","),
+		// the key rides ARGV alone and is never written (sock-2)
+		string(request.AffinityKey),
+		scheduler.AffinityLoadPercent,
 	}
 }
 

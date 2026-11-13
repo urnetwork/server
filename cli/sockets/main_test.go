@@ -86,7 +86,7 @@ type hostTestVerbose struct {
 }
 
 // A key file of one fresh key.
-func hostTestKeyFile(t *testing.T, now time.Time) func() ([]byte, error) {
+func hostTestKeyFile(t testing.TB, now time.Time) func() ([]byte, error) {
 	t.Helper()
 	data, err := socketsservice.SocketTicketKeyFileAdd(nil, now, nil)
 	if err != nil {

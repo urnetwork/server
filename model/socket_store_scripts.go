@@ -85,6 +85,7 @@ local function parse_m(s)
     weight = tonumber(f[4]),
     max = tonumber(f[5]),
     exclusive = bit.band(flags, 1) ~= 0,
+    affinity = bit.band(flags, 2) ~= 0,
     serving = bit.band(flags, 4) ~= 0,
     draining = bit.band(flags, 8) ~= 0,
     alpns = alpns,
@@ -342,7 +343,13 @@ return {"ok", int(first), int(redis.call("ZCARD", ix)), int(now + lease), prior,
 // KEYS: group, ix. ARGV: now_ms, dialer, dialer_network, protocol, min_version, alpns, first_draw,
 // second_draw, sample_count, ticket_lifetime_ms, clamp_floor, clamp_percent, ejection_step_ms,
 // ejection_max_ms, ejection_group_percent, reporter_window_ms, reporter_network_count, share_ttl_ms,
-// reports (listener:listen pairs, comma separated).
+// reports (listener:listen pairs, comma separated), affinity_key ("" for none), affinity_load_percent.
+//
+// A Find with an affinity key reads the whole group, never a sample, and after the filter picks by
+// rendezvous order among the listeners that opted in (socketsservice's affinity.go): redis.sha1hex of the
+// key and each listener's id, highest first, compared bytewise, each listener whose est × 100 × n reaches
+// affinity_load_percent × (the sum of est + 1) skipped as full. With none that opted in, P2C picks. The
+// key stays in ARGV: nothing here writes it, or a score, anywhere (sock-2).
 //
 // Returns {outcome, exclusions, ejections} and then, for the primary and the backup that were picked,
 // listener, lease_ms, m, r, i and e each, as they stood before the primary's share was added to.
@@ -375,6 +382,8 @@ local reports = {}
 if ARGV[19] ~= "" then
   reports = split(ARGV[19], ",")
 end
+local affinity_key = ARGV[20]
+local affinity_percent = tonumber(ARGV[21])
 
 local function active(count, start)
   return now < start + math.min(count * ejection_step, ejection_max)
@@ -501,7 +510,7 @@ for _, report in ipairs(reports) do
 end
 
 local members
-if sample_count < group_count then
+if sample_count < group_count and affinity_key == "" then
   members = redis.call("ZRANDMEMBER", ix, sample_count, "WITHSCORES")
 else
   members = redis.call("ZRANGE", ix, 0, -1, "WITHSCORES")
@@ -600,7 +609,46 @@ end
 if #pickable == 0 then
   return {3, exclusions, ejections}
 end
-table.sort(pickable, function(a, b) return less(a.id, b.id) end)
+
+-- the primary and backup by rendezvous order among the listeners that opted in, or nil with none
+local function pick_affinity()
+  local ranked = {}
+  local est_sum = 0
+  for _, candidate in ipairs(pickable) do
+    if candidate.affinity then
+      local est = estimate(candidate)
+      ranked[#ranked + 1] = {candidate = candidate, est = est, score = redis.sha1hex(affinity_key .. candidate.id)}
+      est_sum = est_sum + est
+    end
+  end
+  if #ranked == 0 then
+    return nil, nil
+  end
+  table.sort(ranked, function(a, b)
+    if a.score ~= b.score then
+      return less(b.score, a.score)
+    end
+    return less(a.candidate.id, b.candidate.id)
+  end)
+  local capacity = affinity_percent * (est_sum + 1)
+  local first = nil
+  for _, entry in ipairs(ranked) do
+    if entry.est * 100 * #ranked < capacity then
+      if not first then
+        first = entry.candidate
+      else
+        return first, entry.candidate
+      end
+    end
+  end
+  return first, nil
+end
+
+local primary = nil
+local backup = nil
+if affinity_key ~= "" then
+  primary, backup = pick_affinity()
+end
 
 local function draw_index(draw, skip)
   local total = 0
@@ -623,15 +671,17 @@ local function draw_index(draw, skip)
   return chosen
 end
 
-local first_index = draw_index(first_draw, 0)
-local primary = pickable[first_index]
-local backup = nil
-if 1 < #pickable then
-  backup = pickable[draw_index(second_draw, first_index)]
-  local first_load = estimate(primary) + 1
-  local second_load = estimate(backup) + 1
-  if second_load * primary.weight < first_load * backup.weight then
-    primary, backup = backup, primary
+if not primary then
+  table.sort(pickable, function(a, b) return less(a.id, b.id) end)
+  local first_index = draw_index(first_draw, 0)
+  primary = pickable[first_index]
+  if 1 < #pickable then
+    backup = pickable[draw_index(second_draw, first_index)]
+    local first_load = estimate(primary) + 1
+    local second_load = estimate(backup) + 1
+    if second_load * primary.weight < first_load * backup.weight then
+      primary, backup = backup, primary
+    end
   end
 end
 
@@ -839,8 +889,10 @@ redis.call("HPEXPIRE", key, until_ms - now, "FIELDS", 1, "~f")
 return 1
 `
 
-// A listener's renewal of its pairs (QD-656): each dialer field lives the lesser of ttl_max_ms and its
-// grant's remaining life, and one whose grant has ended goes. KEYS: {svc_<listener_client_id>}. ARGV:
+// A listener's renewal of its pairs (QD-656): each dialer field lives at least the lesser of ttl_max_ms
+// and its grant's remaining life, and one whose grant has ended goes. A touch never shortens a field: a
+// tls/ or smtp/ pair a Find wrote never has longer left, and a ur/ pair this key holds as its sidecar
+// dialer's (QD-728) keeps the longer life its Find gave it. KEYS: {svc_<listener_client_id>}. ARGV:
 // ttl_max_ms, now_ms.
 const socketStorePairTouchLua = socketStoreLuaPrelude + `
 local key = KEYS[1]
@@ -858,7 +910,10 @@ for index = 1, #values, 2 do
     if ttl <= 0 then
       redis.call("HDEL", key, field)
     else
-      redis.call("HPEXPIRE", key, ttl, "FIELDS", 1, field)
+      local current = redis.call("HPTTL", key, "FIELDS", 1, field)[1]
+      if current < ttl then
+        redis.call("HPEXPIRE", key, ttl, "FIELDS", 1, field)
+      end
     end
   end
 end

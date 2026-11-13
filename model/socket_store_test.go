@@ -9,6 +9,8 @@ package model
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"fmt"
 	"testing"
 	"time"
 
@@ -132,6 +134,134 @@ func TestSocketStorePickIsOneScript(t *testing.T) {
 		}
 		if len(scripts) != 1 || scripts[0] != "pick" {
 			t.Fatalf("a Find ran %v", scripts)
+		}
+	})
+}
+
+// Everything a key holds, by its type, as bytes a scan can search: a value read back, never a DUMP, whose
+// encoding may compress what it holds.
+func testSocketStoreContents(t testing.TB, ctx context.Context, key string) [][]byte {
+	t.Helper()
+	contents := [][]byte{}
+	server.Redis(ctx, func(client server.RedisClient) {
+		keyType, err := client.Type(ctx, key).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		values := []string{}
+		switch keyType {
+		case "string":
+			value, err := client.Get(ctx, key).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			values = append(values, value)
+		case "hash":
+			fieldValues, err := client.HGetAll(ctx, key).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for field, value := range fieldValues {
+				values = append(values, field, value)
+			}
+		case "zset":
+			members, err := client.ZRangeWithScores(ctx, key, 0, -1).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, member := range members {
+				values = append(values, fmt.Sprint(member.Member), fmt.Sprint(member.Score))
+			}
+		case "set":
+			members, err := client.SMembers(ctx, key).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			values = append(values, members...)
+		case "list":
+			members, err := client.LRange(ctx, key, 0, -1).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			values = append(values, members...)
+		case "none":
+		default:
+			t.Fatalf("a key of type %s", keyType)
+		}
+		for _, value := range values {
+			contents = append(contents, []byte(value))
+		}
+	})
+	return contents
+}
+
+// §9.7's affinity key lives for the request alone (sock-2, SOCK-M6-01): after keyed Picks, which reach the
+// group's listeners that opted in, no key the test's Redis holds, and nothing any key holds, carries the key's
+// bytes or a listener's score under it.
+func TestSocketStoreKeepsNoAffinityKey(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+		store := testSocketStore(clock, socketsservice.DefaultSocketStoreSettings())
+		networkId := testSocketStoreId()
+		nameToken := testSocketStoreId()
+		listenerIds := []connect.Id{}
+		for range 3 {
+			registration := testSocketStoreRegistration()
+			registration.NameToken = nameToken[:]
+			registration.Affinity = true
+			// loads that five picks leave below the bound, so the key stays on its listener
+			registration.Inflight = 50
+			listenerId := testSocketStoreId()
+			listenerIds = append(listenerIds, listenerId)
+			if _, err := store.ApplyPage(ctx, &socketsservice.SocketStorePage{
+				NetworkId:        networkId,
+				ListenerClientId: listenerId,
+				SetVersion:       1,
+				Registrations:    []*sidecar.SocketRegistration{registration},
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		affinityKey := []byte("affinity-key-canary-6f3a91c2")
+		primaries := map[connect.Id]bool{}
+		for range 5 {
+			pick, err := store.Pick(ctx, &socketsservice.SocketStorePickRequest{
+				NetworkId:       networkId,
+				NameKey:         nameToken[:],
+				DialerClientId:  testSocketStoreId(),
+				DialerNetworkId: networkId,
+				AffinityKey:     affinityKey,
+			})
+			if err != nil || pick.Outcome != socketsservice.SocketPickFound {
+				t.Fatalf("a keyed pick: %+v, %v", pick, err)
+			}
+			primaries[pick.Primary.Candidate.ListenerClientId] = true
+		}
+		if len(primaries) != 1 {
+			t.Fatalf("one key reached %d listeners", len(primaries))
+		}
+		needles := [][]byte{affinityKey}
+		for _, listenerId := range listenerIds {
+			score := socketsservice.SocketAffinityScore(affinityKey, listenerId)
+			needles = append(needles, score[:], []byte(hex.EncodeToString(score[:])))
+		}
+		keys := testSocketStoreKeys(t, ctx)
+		if len(keys) == 0 {
+			t.Fatal("the store holds no key, so the scan read nothing")
+		}
+		for _, key := range keys {
+			for _, needle := range needles {
+				if bytes.Contains([]byte(key), needle) {
+					t.Errorf("the key %s holds the affinity key or a score", key)
+				}
+				for _, content := range testSocketStoreContents(t, ctx, key) {
+					if bytes.Contains(content, needle) {
+						t.Errorf("%s holds the affinity key or a score", key)
+					}
+				}
+			}
 		}
 	})
 }
@@ -329,6 +459,50 @@ func TestSocketStorePairTouchSetsFieldTtls(t *testing.T) {
 				t.Errorf("an ended grant's pair lives %d ms", ttls[2])
 			}
 		})
+	})
+}
+
+// QD-728 on real Redis (SOCK-M9-01): a ur/ pair is field <edge listener> of {svc_<sidecar dialer>} for the service's
+// grant, 125 min for smtpedge, and the sidecar's own edge pairs' touch, which the same key takes, never shortens it,
+// while it still renews a short edge pair; CreateContract's one read finds it under the sidecar.
+func TestSocketStorePlatformPairOutlivesATouch(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+		settings := socketsservice.DefaultSocketStoreSettings()
+		store := testSocketStore(clock, settings)
+		sidecarClientId := testSocketStoreId()
+		edgeListenerId := testSocketStoreId()
+		edgeDialerId := testSocketStoreId()
+		nowMillis := uint64(clock.Now().UnixMilli())
+		platformLife := 125 * time.Minute
+		if wrote, _, err := store.SetServicePair(ctx, sidecarClientId, edgeListenerId, nowMillis+uint64(platformLife.Milliseconds()), platformLife, 0); err != nil || !wrote {
+			t.Fatalf("the ur/ pair: %v %v", wrote, err)
+		}
+		if wrote, _, err := store.SetServicePair(ctx, sidecarClientId, edgeDialerId, nowMillis+uint64((24*time.Hour).Milliseconds()), time.Minute, 0); err != nil || !wrote {
+			t.Fatalf("the edge pair: %v %v", wrote, err)
+		}
+		if err := store.TouchServicePairs(ctx, sidecarClientId); err != nil {
+			t.Fatal(err)
+		}
+		server.Redis(ctx, func(client server.RedisClient) {
+			ttls, err := client.HPTTL(ctx, socketPairKey(sidecarClientId), socketHexId(edgeListenerId), socketHexId(edgeDialerId)).Result()
+			if err != nil || len(ttls) != 2 {
+				t.Fatalf("ttls %v: %v", ttls, err)
+			}
+			if ttls[0] <= (120 * time.Minute).Milliseconds() {
+				t.Errorf("a touch cut the ur/ pair to %d ms", ttls[0])
+			}
+			if ttls[1] <= time.Minute.Milliseconds() || settings.EdgePairTtl.Milliseconds() < ttls[1] {
+				t.Errorf("the edge pair lives %d ms", ttls[1])
+			}
+		})
+		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if _, found, err := GetSocketServicePair(readCtx, sidecarClientId, edgeListenerId); err != nil || !found {
+			t.Fatalf("CreateContract's read of the ur/ pair: %v %v", found, err)
+		}
 	})
 }
 
