@@ -72,15 +72,15 @@ func (self *ethereumWallet) RegisterAddresses(ctx context.Context, addresses []s
 	return cryptoAlchemyRegisterAddresses(ctx, self.webhookId, self.notifyToken, addresses)
 }
 
-// WebhookWatched: new pool addresses are registered with the Address
-// Activity webhook, whose delivery brings an address's read forward whatever
-// its age, when alchemy.yml names the webhook and the Notify token.
+// New pool addresses are registered with the Address Activity webhook, whose
+// delivery brings an address's read forward whatever its age, when alchemy.yml
+// names the webhook and the Notify token.
 func (self *ethereumWallet) WebhookWatched() bool {
 	return self.webhookId != "" && self.notifyToken != ""
 }
 
-// SweepAddress reads an issued address's ETH transfers after its cursor
-// (from the chain's start before its first read) through the finalized
+// Reads an issued address's ETH transfers after its cursor (from the
+// chain's start before its first read) through the finalized
 // block, in one alchemy_getAssetTransfers read, and moves the cursor to that
 // block: a finalized transfer never changes, so none is read twice and none
 // is passed over (crypto_pay_sweep.go).

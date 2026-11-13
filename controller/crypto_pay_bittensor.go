@@ -693,8 +693,8 @@ func cryptoTaoCacheBlock(block *cryptoTaoBlock) {
 
 // ----- the reader -----
 
-// bittensorWallet is one scan's reader (or one reconcile's): its request
-// budget and pacing are its own.
+// One scan's reader (or one reconcile's): its request budget and pacing are
+// its own.
 type bittensorWallet struct {
 	*cryptoCoinbaseAddresses
 	network  string
@@ -737,8 +737,8 @@ func (self *bittensorWallet) Irreversible() bool {
 	return true
 }
 
-// call makes one request to the node, at most one each RequestSpacing (the
-// wait holds no lock and ends with ctx), and counts it.
+// One request to the node, at most one each RequestSpacing (the wait holds
+// no lock and ends with ctx), counted.
 func (self *bittensorWallet) call(ctx context.Context, result any, method string, params ...any) error {
 	var wait time.Duration
 	func() {
@@ -766,7 +766,7 @@ func (self *bittensorWallet) call(ctx context.Context, result any, method string
 	return self.rpc.call(ctx, result, method, params...)
 }
 
-// requestsLeft is what remains of the scan's request budget.
+// What remains of the scan's request budget.
 func (self *bittensorWallet) requestsLeft() int {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -1050,9 +1050,8 @@ type cryptoTaoOurs struct {
 	createdAt time.Time
 }
 
-// cryptoTaoIssuedOurs are the invoice accounts among the destinations of the
-// blocks' transfers: every address a TAO invoice was ever given, in one
-// lookup.
+// The invoice accounts among the destinations of the blocks' transfers: every
+// address a TAO invoice was ever given, in one lookup.
 func cryptoTaoIssuedOurs(ctx context.Context, blocks []*cryptoTaoBlock) map[[32]byte]*cryptoTaoOurs {
 	ours := map[[32]byte]*cryptoTaoOurs{}
 	destinations := []string{}
@@ -1192,8 +1191,8 @@ func cryptoTaoPause(err error) error {
 	return err
 }
 
-// IncomingSince reads the finalized blocks of the scan's range (see the file
-// header) and reports their transfers to every address a TAO invoice was ever
+// Reads the finalized blocks of the scan's range (see the file header) and
+// reports their transfers to every address a TAO invoice was ever
 // given. It reads no block until an address has been issued. It stops before
 // a block whose reads could pass the scan's request budget, and reports the
 // last block it read: the next scan goes on from there.
