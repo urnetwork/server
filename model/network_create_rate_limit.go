@@ -143,7 +143,7 @@ func checkNetworkCreateRateLimit(
 	observeSeedphraseSignupSource(seedphraseSignupScopeAddress, family, int64(result.Count)+1)
 	observeSeedphraseSignupSource(seedphraseSignupScopeNetworkShort, family, decision.shortCount)
 	observeSeedphraseSignupSource(seedphraseSignupScopeNetworkLong, family, decision.longCount)
-	if 0 < sourceSettings.AsnWindow {
+	if time.Millisecond <= sourceSettings.AsnWindow {
 		if asn := server.GetIpAsn(addr); asn != nil {
 			asnCount, err := countNetworkCreateSourceAsn(ctx, asn.Number, now, sourceSettings)
 			if err == nil {

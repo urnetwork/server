@@ -79,7 +79,7 @@ type NetworkCreateSourceLimitSettings struct {
 	// most 4.
 	LongLimit int
 	// The fixed window an autonomous system's admitted sign-ups are counted
-	// in, for the histogram. Non-positive: not counted.
+	// in, for the histogram. Under a millisecond: not counted.
 	AsnWindow time.Duration
 }
 
