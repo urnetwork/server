@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T18:47:55Z",
+  "observed_at": "2026-11-13T19:43:13Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -43,9 +43,9 @@
     "worker_identity_verified_at": "2026-11-13T18:44:13Z",
     "supervisor_manager_activated_at": "2026-11-13T18:43:48Z",
     "supervisor_manager_sha256": "a571706953456c944d66a75c7ce0c6c47b2fbfef6db8b392a98c5def69c3c5c5",
-    "supervisor_restarts_since_latest_manager_handoff": 0,
-    "supervisor_restarts_since_held_handoff": 2,
-    "last_observed_supervisor_fence": 71,
+    "supervisor_restarts_since_latest_manager_handoff": 1,
+    "supervisor_restarts_since_held_handoff": 3,
+    "last_observed_supervisor_fence": 72,
     "supervisor_renewal_diagnosis_pending": true,
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
@@ -66,7 +66,7 @@
     "api_runtime_self_report": "sha256:0a0b00a2d375a07a7531b8ab37814ccd01a1be49964efb1cb7e0adb02d6fdfa0",
     "api_runtime_self_report_matches_registry": true,
     "api_all_replica_convergence_proved": false,
-    "next_action": "The tested supervisor is active and the unchanged worker remains held. Review the exact runtime qualification and fresh per-job ownership/native proofs before controlled recovery grants. API runtime self-report is bound to an actual admission, not an all-replica or physical-container inspection claim.",
+    "next_action": "The tested supervisor is active and the unchanged worker remains held. The first controlled recovery invocation was refused without a confirmed grant; retain its sealed authorization and idempotency identity, inspect durable audit state, and diagnose the failure before any replay. A coincident renewal timeout restarted the supervisor and advanced its fence. Do not reuse the old sealed fencing census. API runtime self-report is bound to an actual admission, not an all-replica or physical-container inspection claim.",
     "historical_sections_below": "Earlier source/test/process observations remain historical; this checkpoint supersedes their pending-build descriptions."
   },
   "review_runtime": {
