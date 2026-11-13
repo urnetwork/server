@@ -67,14 +67,21 @@ type SidecarBindArgs struct {
 	Binding []byte `json:"binding"`
 }
 
-// POST /sidecar/bind's answer: the generation api recorded for the client.
+// POST /sidecar/bind's answer: the generation api recorded for the client, and
+// the bearer's credential re-minted with the binding's sidecar as its
+// sidecar_id claim (plan-SOCK-client-auth, QD-040), which the sidecar uses from
+// then on, so sockets reads its subject with no Postgres.
 type SidecarBindResult struct {
-	Generation int64 `json:"generation"`
+	Generation  int64  `json:"generation"`
+	ByClientJwt string `json:"by_client_jwt"`
 }
 
 // POST /sidecar/bind (§5.5, §5.6): verifies the binding and appends it under
 // plan-CORE-binding-wire's rules. A byte-identical retry answers the stored
-// generation and writes nothing.
+// generation and writes nothing. Both answer the re-minted credential
+// (session.RemintSidecarCredential), whose lifetime is the bearer's own, as
+// bind takes no proof of the ClientKey. A re-mint that fails after the append
+// answers its error, and the sidecar's retry, byte-identical, re-mints.
 func SidecarBind(bind *SidecarBindArgs, clientSession *session.ClientSession) (*SidecarBindResult, error) {
 	if !server.SidecarMg1Linked() {
 		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, sidecarIdentityUnavailableMessage)
@@ -112,7 +119,11 @@ func SidecarBind(bind *SidecarBindArgs, clientSession *session.ClientSession) (*
 	)
 	switch outcome {
 	case model.SidecarBindAppended, model.SidecarBindRetried:
-		return &SidecarBindResult{Generation: generation}, nil
+		byClientJwt, err := session.RemintSidecarCredential(clientSession, server.Id(binding.SidecarId))
+		if err != nil {
+			return nil, err
+		}
+		return &SidecarBindResult{Generation: generation, ByClientJwt: byClientJwt}, nil
 	case model.SidecarBindSidecarRevoked:
 		return nil, &sidecarIdentityRefusal{status: http.StatusForbidden, message: "The sidecar is revoked.", code: sidecarBindCodeRevoked}
 	case model.SidecarBindClientBound:
