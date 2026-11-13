@@ -11511,4 +11511,11 @@ var migrations = []any{
 	// it reads 0. Apply before deploying the taskworker, api and alt that use
 	// them.
 	providerEgressFp2EvidenceMigration,
+
+	// The store notification flow (store_notification_flow_schema.go,
+	// controller/store_notification_flow.go): one new table with a row per
+	// store, under a five-second lock bound, created only when absent.
+	// Nothing existing is locked or rewritten. Apply with the api and alt
+	// that write it.
+	storeNotificationFlowMigration,
 }

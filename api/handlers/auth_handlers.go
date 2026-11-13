@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/urnetwork/glog"
@@ -80,9 +82,20 @@ func AuthConnect(w http.ResponseWriter, r *http.Request) {
  * Apple webhook handling
  */
 
+// Every notification ends in one outcome (controller/store_notification_flow.go):
+// refused_malformed for an envelope that is not one, refused_unavailable when
+// apple.yml cannot build the verifier (503, logged as a fail-closed
+// refusal), refused_signature for a JWS that does not verify against the
+// pinned roots, refused_claims for a verified notification of another app,
+// environment or version, error when a verified notification could not be
+// processed, and accepted.
 func AppleNotification(w http.ResponseWriter, r *http.Request) {
 	const maxAppleNotificationBytes int64 = 1024 * 1024
+	outcome := func(outcome string) {
+		controller.RecordStoreNotificationOutcome(r.Context(), model.SubscriptionMarketApple, outcome)
+	}
 	if r.ContentLength > maxAppleNotificationBytes {
+		outcome(controller.StoreNotificationRefusedMalformed)
 		http.Error(w, "Notification is too large", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -94,23 +107,54 @@ func AppleNotification(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&payload); err != nil || payload.SignedPayload == "" {
 		glog.Infof("[apple] Rejected malformed notification envelope")
+		outcome(controller.StoreNotificationRefusedMalformed)
 		http.Error(w, "Could not parse notification payload", http.StatusBadRequest)
 		return
 	}
 
-	verifier := defaultAppleNotificationVerifier()
+	// the verifier apple.yml builds, or why it cannot be built: answered as
+	// unavailable instead of a panic
+	verifier, err := func() (verifier *appleNotificationVerifier, returnErr error) {
+		defer func() {
+			if r := recover(); r != nil {
+				verifier = nil
+				if err, ok := r.(error); ok {
+					returnErr = err
+				} else {
+					returnErr = fmt.Errorf("%v", r)
+				}
+			}
+		}()
+		return appleNotificationVerifierSource(), nil
+	}()
+	if err != nil {
+		glog.Warningf("[apple]webhook refused, verification config unavailable: %s\n", err)
+		outcome(controller.StoreNotificationRefusedUnavailable)
+		http.Error(w, "Service temporarily unavailable.", http.StatusServiceUnavailable)
+		return
+	}
 	notification, err := verifier.verifyNotification(payload.SignedPayload)
 	if err != nil {
 		glog.Infof("[apple] Rejected notification: %v", err)
+		// a JWS that does not verify, or a verified notification whose claims
+		// are not this app's
+		var signatureErr *appleSignatureError
+		if errors.As(err, &signatureErr) {
+			outcome(controller.StoreNotificationRefusedSignature)
+		} else {
+			outcome(controller.StoreNotificationRefusedClaims)
+		}
 		http.Error(w, "Invalid signed notification", http.StatusBadRequest)
 		return
 	}
 	processed, err := controller.ProcessAppleNotification(r.Context(), *notification, verifier.config.ProductIds)
 	if err != nil {
 		glog.Infof("[apple] Rejected verified notification %s: %v", notification.NotificationUUID, err)
+		outcome(controller.StoreNotificationError)
 		http.Error(w, "Invalid notification claims", http.StatusBadRequest)
 		return
 	}
+	outcome(controller.StoreNotificationAccepted)
 	glog.Infof(
 		"[apple] Notification type=%s uuid=%s processed=%t",
 		notification.NotificationType,

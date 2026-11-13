@@ -14,10 +14,8 @@
 // a crash between a send and its record, after which the lease ends and the
 // message is sent again (at least once).
 //
-// A held message (no deliver time) waits for its writer to release it, so a run
-// that commits in several transactions can owe one message (the missing-wallet
-// notice of a payout run). The rows keep the recipient, so delivered and
-// abandoned messages are removed after a retention period.
+// The rows keep the recipient, so delivered and abandoned messages are removed
+// after a retention period.
 package model
 
 import (
@@ -51,7 +49,6 @@ type AccountMessage struct {
 	// the template's fields as json
 	TemplateJson string
 	CreateTime   time.Time
-	// nil while the message is held
 	DeliverTime  *time.Time
 	AttemptCount int
 	// the claim of the attempt in flight
@@ -71,18 +68,13 @@ type AccountMessageArgs struct {
 	UserAuth     string
 	TemplateName string
 	TemplateJson string
-	// a held message waits for `ReleaseAccountMessageInTx`
-	Held bool
-	// a message that is not held is due this long after it is added (a
-	// security notice waits for more changes to join it); zero is due at once
+	// the message is due this long after it is added (a security notice waits
+	// for more changes to join it); zero is due at once
 	DeliverAfter time.Duration
 }
 
-// When a message added at `createTime` is due: nil while it is held.
+// When a message added at `createTime` is due.
 func (self *AccountMessageArgs) deliverTime(createTime time.Time) *time.Time {
-	if self.Held {
-		return nil
-	}
 	deliverTime := createTime.Add(max(self.DeliverAfter, 0))
 	return &deliverTime
 }
@@ -112,8 +104,8 @@ const addAccountMessageSql = `
 	ON CONFLICT (message_key) DO NOTHING
 `
 
-// Adds the message in the caller's transaction, due now (or after its delay)
-// unless held. Returns false when a message with the key exists.
+// Adds the message in the caller's transaction, due now or after its delay.
+// Returns false when a message with the key exists.
 func AddAccountMessageInTx(ctx context.Context, tx server.PgTx, args *AccountMessageArgs) (added bool) {
 	createTime := server.NowUtc()
 	deliverTime := args.deliverTime(createTime)
@@ -360,96 +352,6 @@ func boundedAccountMessageError(lastError string) string {
 		end -= 1
 	}
 	return lastError[:end]
-}
-
-// The held messages of the template added at or before `createdBefore`, oldest
-// first, locked for the caller's transaction to release or remove.
-func GetHeldAccountMessagesForUpdateInTx(
-	ctx context.Context,
-	tx server.PgTx,
-	templateName string,
-	createdBefore time.Time,
-) []*AccountMessage {
-	messages := []*AccountMessage{}
-	result, err := tx.Query(
-		ctx,
-		`
-			SELECT
-				message_id,
-				network_id,
-				user_auth,
-				template_json::text,
-				create_time
-			FROM account_message_outbox
-			WHERE
-				template_name = $1 AND
-				deliver_time IS NULL AND
-				create_time <= $2
-			ORDER BY create_time, message_id
-			FOR UPDATE
-		`,
-		templateName,
-		createdBefore,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			message := &AccountMessage{
-				TemplateName: templateName,
-			}
-			server.Raise(result.Scan(
-				&message.MessageId,
-				&message.NetworkId,
-				&message.UserAuth,
-				&message.TemplateJson,
-				&message.CreateTime,
-			))
-			messages = append(messages, message)
-		}
-	})
-	return messages
-}
-
-// Releases a held message with its final fields, due at `deliverTime`.
-func ReleaseAccountMessageInTx(
-	ctx context.Context,
-	tx server.PgTx,
-	messageId server.Id,
-	templateJson string,
-	deliverTime time.Time,
-) {
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-			UPDATE account_message_outbox
-			SET
-				template_json = $2,
-				deliver_time = $3
-			WHERE
-				message_id = $1 AND
-				deliver_time IS NULL
-		`,
-		messageId,
-		templateJson,
-		deliverTime,
-	))
-}
-
-// Removes held messages that will not be delivered (merged into another, or
-// below a threshold).
-func RemoveHeldAccountMessagesInTx(ctx context.Context, tx server.PgTx, messageIds []server.Id) {
-	if len(messageIds) == 0 {
-		return
-	}
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-			DELETE FROM account_message_outbox
-			WHERE
-				message_id = ANY($1) AND
-				deliver_time IS NULL
-		`,
-		messageIds,
-	))
 }
 
 // Removes up to `limit` delivered or abandoned messages added before
