@@ -22770,7 +22770,12 @@ here, per coin, with first-seen ages:
   customer that no class above names, 30 minutes after it was first seen
   (`PaymentFailuresSettings.ReceivedHeldAge`):
   `underpaid`, `late_underpaid`, `extra`, `unknown_address`, `voided`,
-  `orphaned`, or a sanctions or shape hold that names no invoice. Match it to
+  `orphaned`, `unlinked`, or a sanctions or shape hold that names no invoice.
+  Since 2026-11-13 the BTC, ETH, SOL and TAO scanners record a payment to any
+  address an invoice was ever given, however old, so a payment to a long
+  closed invoice lands here when the late-payment rules do not credit it;
+  `unlinked` is one the rules would credit, to an invoice past the 30-day
+  retention unlink, whose network the unlink forgot. Match it to
   its support thread; credit one that covers what was bought with
   `bringyourctl crypto credit` after review, or keep it for the customer's
   request with a documented disposition. Crypto returns wait for the

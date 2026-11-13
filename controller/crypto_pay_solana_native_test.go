@@ -104,10 +104,32 @@ func (self *fakeSolanaRpc) call(ctx context.Context, method string, params any, 
 		address, _ := args[0].(string)
 		options, _ := args[1].(map[string]any)
 		connect.AssertEqual(self.t, options["commitment"], "finalized")
-		if fixture, ok := self.signatures[address]; ok {
-			return json.Unmarshal(solanaTestFixture(self.t, fixture), result)
+		fixture, ok := self.signatures[address]
+		if !ok {
+			return self.answer([]any{}, result)
 		}
-		return self.answer([]any{}, result)
+		// the fixture's signatures, newest first, paged as the RPC pages
+		// them: after before, down to (not including) until, at most limit
+		var listed []map[string]any
+		if err := json.Unmarshal(solanaTestFixture(self.t, fixture), &listed); err != nil {
+			return err
+		}
+		page := []map[string]any{}
+		started := options["before"] == nil
+		for _, signature := range listed {
+			if options["until"] != nil && signature["signature"] == options["until"] {
+				break
+			}
+			if !started {
+				started = signature["signature"] == options["before"]
+				continue
+			}
+			page = append(page, signature)
+		}
+		if limit, ok := options["limit"].(int); ok && limit < len(page) {
+			page = page[:limit]
+		}
+		return self.answer(page, result)
 	case "getTransaction":
 		signature, _ := args[0].(string)
 		options, _ := args[1].(map[string]any)

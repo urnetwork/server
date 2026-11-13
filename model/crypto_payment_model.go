@@ -124,6 +124,12 @@ const (
 	// a payment to a coin's one shared deposit address (Coinbase gave no
 	// address per invoice) whose amount is no open invoice's unique amount
 	CryptoReviewReasonAmountUnmatched = "amount_unmatched"
+	// a payment the late-payment rules would credit to an invoice the
+	// retention unlink has passed: the unlink forgot the network the invoice
+	// was for, so the rail cannot deliver it, and an operator matches it to
+	// its buyer (a code invoice still credits: its buyer reads the code with
+	// the status token)
+	CryptoReviewReasonUnlinked = "unlinked"
 )
 
 // The most status tokens one invoice keeps: the first plus the ones handed to
@@ -1591,11 +1597,12 @@ type CryptoPaymentWatchedAddress struct {
 	Hot bool
 }
 
-// ListCryptoPaymentWatchedAddressesInConn lists the invoice addresses of a
-// per-address coin (Bitcoin, ETH, SOL, TAO) its scanner reads: open invoices,
-// invoices with a receipt still in the mempool or not yet confirmed, and
-// invoices that expired, were credited or were voided after watchSince. Hot
-// first, newest first, at most limit. Reuse the caller's PostgreSQL session;
+// The invoice addresses of a per-address coin (ETH, SOL) its scanner reads
+// every scan or often: open invoices, invoices with a receipt still in the
+// mempool or not yet confirmed, and invoices that expired, were credited or
+// were voided after watchSince. Hot first, newest first, at most limit. Every
+// other address an invoice was given is read by the scan's sweep
+// (ListCryptoAddressesToSweepInConn). Reuse the caller's PostgreSQL session;
 // nil selects the outer acquisition boundary.
 func ListCryptoPaymentWatchedAddressesInConn(
 	connOwner server.PgConn,
@@ -1659,25 +1666,49 @@ func ListCryptoPaymentWatchedAddressesInConn(
 	return
 }
 
-// GetCryptoPaymentInvoiceAddressesInPlayInConn maps each given address of a
-// coin that is an invoice address in play to the pool index the invoice drew
-// it at, in one lookup by the invoice address index: open, closed (expired,
-// credited or voided) after watchSince, or with a receipt still in the mempool
-// or unconfirmed, as ListCryptoPaymentWatchedAddressesInConn lists them, and
-// made before createdBefore. The Bitcoin block scanner asks it once a block,
-// with every address the block's outputs pay, and watchSince and
-// createdBefore from the block's time, so a block read late (a scanner that
-// was down) is matched as it would have been on time. Reuse the caller's
-// PostgreSQL session; nil selects the outer acquisition boundary.
-func GetCryptoPaymentInvoiceAddressesInPlayInConn(
+// An address an invoice of a coin was given: the pool index the invoice drew
+// it at, and when the invoice was made (the day only, once the retention
+// unlink has passed it).
+type CryptoPaymentIssuedAddress struct {
+	AddressIndex int64
+	CreateTime   time.Time
+}
+
+// Whether an invoice of the coin was ever given an address of the pool: one
+// probe of the invoice address index. Reuse the caller's PostgreSQL session;
+// nil selects the outer acquisition boundary.
+func CryptoPaymentAddressesIssuedInConn(connOwner server.PgConn, ctx context.Context, asset string) (issued bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+				SELECT EXISTS (
+					SELECT 1 FROM crypto_payment_intent
+					WHERE asset = $1 AND address_index IS NOT NULL AND solana_reference IS NULL
+				)
+			`,
+			asset,
+		).Scan(&issued))
+	})
+	return
+}
+
+// Maps each given address of a coin that an invoice was ever given to its
+// pool index and the invoice's time, in one lookup by the invoice address
+// index: every invoice, open or closed, credited, voided or past the
+// retention unlink, since a payment can reach any of them at any time. The
+// block readers ask it with every address their blocks pay (Bitcoin once a
+// block, TAO once a scan) and judge the invoice's time against the block's:
+// an invoice made after its block was mined was not paid in it. Addresses no
+// invoice was given are absent. Reuse the caller's PostgreSQL session; nil
+// selects the outer acquisition boundary.
+func GetCryptoPaymentIssuedAddressesInConn(
 	connOwner server.PgConn,
 	ctx context.Context,
 	asset string,
 	addresses []string,
-	watchSince time.Time,
-	createdBefore time.Time,
-) (indexes map[string]int64) {
-	indexes = map[string]int64{}
+) (issuedAddresses map[string]*CryptoPaymentIssuedAddress) {
+	issuedAddresses = map[string]*CryptoPaymentIssuedAddress{}
 	if len(addresses) == 0 {
 		return
 	}
@@ -1685,36 +1716,22 @@ func GetCryptoPaymentInvoiceAddressesInPlayInConn(
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT intent.address, intent.address_index
-				FROM crypto_payment_intent intent
-				WHERE intent.asset = $1
-				  AND intent.address = ANY($2)
-				  AND intent.solana_reference IS NULL
-				  AND intent.address_index IS NOT NULL
-				  AND intent.unlinked_at IS NULL
-				  AND intent.create_time < $4
-				  AND (
-					(intent.credited_at IS NULL AND intent.voided_at IS NULL AND $3 < intent.expires_at)
-					OR $3 < intent.credited_at
-					OR $3 < intent.voided_at
-					OR EXISTS (
-						SELECT 1 FROM crypto_payment_receipt receipt
-						WHERE receipt.intent_id = intent.intent_id
-						  AND receipt.state IN ('seen', 'confirmed')
-					)
-				  )
+				SELECT address, address_index, create_time
+				FROM crypto_payment_intent
+				WHERE asset = $1
+				  AND address = ANY($2)
+				  AND solana_reference IS NULL
+				  AND address_index IS NOT NULL
 			`,
 			asset,
 			addresses,
-			watchSince,
-			createdBefore,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var address string
-				var index int64
-				server.Raise(result.Scan(&address, &index))
-				indexes[address] = index
+				issuedAddress := &CryptoPaymentIssuedAddress{}
+				server.Raise(result.Scan(&address, &issuedAddress.AddressIndex, &issuedAddress.CreateTime))
+				issuedAddresses[address] = issuedAddress
 			}
 		})
 	})
