@@ -106,7 +106,7 @@ type hostTestWorld struct {
 }
 
 // A world whose gates open sockets to every network.
-func newHostTestWorld(t *testing.T) *hostTestWorld {
+func newHostTestWorld(t testing.TB) *hostTestWorld {
 	t.Helper()
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 	faults := sidecartest.NewFaultQueue()
@@ -126,7 +126,7 @@ func newHostTestWorld(t *testing.T) *hostTestWorld {
 
 // A host on the world with every seam a block holds, changed by mutate, once its engine has probed the store and
 // its gate has read the over-limit list.
-func (self *hostTestWorld) newHost(t *testing.T, mutate func(deps *hostDeps)) *socketsHost {
+func (self *hostTestWorld) newHost(t testing.TB, mutate func(deps *hostDeps)) *socketsHost {
 	t.Helper()
 	deps := &hostDeps{
 		Quota:         self.quota,

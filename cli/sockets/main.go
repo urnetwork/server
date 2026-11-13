@@ -3,13 +3,18 @@
 // sidecarhost.Run with GET /status and §9.15's /socket/* routes on port 80, {vault: no, config: yes, site: no}, user
 // 65532 and no Postgres: everything the engine keeps is soft state in Redis Cluster (§9.8), and api is reached only
 // off the request paths, for the projection and the over-limit list (I-12). The block's secret_files hold
-// redis.yml, its internal gate bearer (internal-gate-sockets.yml), the ticket key file (socket-ticket-keys.yml) and
-// grafana-push.yml.
+// redis.yml, its internal gate bearer (internal-gate-sockets.yml), the ticket key file (socket-ticket-keys.yml),
+// the by jwt keyring's public keys (jwt-jwks.json), auth.yml for revocation_record_enabled, and grafana-push.yml.
 //
 // What the block builds around socketsservice:
 //
 //   - ServiceHost: sidecarhost's, with Quota over api's internal gate at -api_url (quotahost.NewBlockQuota, whose
 //     OverLimit is Find's spent list) and Push, pushservice's hint writer, which carries SOCKET_HINT on topic sock.
+//   - The Authenticator: sidecarhost's, verifying the callers' Client-class tokens under SocketsAudience with
+//     session's ClientTokenVerifier (plan-SOCK-client-auth, QD-040): offline against jwt-jwks.json, then against
+//     each token's revocation record alone, never SQL, with the 120 s {sc_<client_id>}ok grace. A refused token
+//     answers 401; a check that cannot answer, a record miss, a Redis failure, a record not enabled or a keyring
+//     with no key, answers unavailable, never an unauthenticated allow.
 //   - The store: model.NewSocketStore on the block's Redis Cluster.
 //   - The gate: socketsservice.NewSocketProjectionGate over api's internal projection route (QD-055,
 //     AclGateApiSource) on the same bearer. With no bearer or no api the block has no source and stays not ready.
@@ -25,10 +30,10 @@
 //     which the block lays over the engine's bound each ControlQpsInterval.
 //
 // Readiness is §19.4's sockets column: Redis answering the engine's probe, a ticket key that signs, the gate ready
-// (a source and one over-limit answer) and the key-event families subscribed. What server has no implementation of
-// yet fails closed, each said once at start: Client-class token verification for sockets (plan-SOCK-client-auth,
-// QD-040's verify-only keyring and revocation-record check), so sidecarhost's Authenticator answers every
-// authenticated route unavailable; tls/'s ValidateListen (TLS-M5-22) and smtp/'s (MAIL-M7-22), so neither
+// (a source and one over-limit answer) and the key-event families subscribed. A Client-class verifier that cannot
+// answer yet, no jwt-jwks.json or the record not enabled, is said once at start and leaves readiness as §19.4 has
+// it: each authenticated route answers unavailable until it can. What server has no implementation of yet fails
+// closed, each said once at start: tls/'s ValidateListen (TLS-M5-22) and smtp/'s (MAIL-M7-22), so neither
 // namespace is registered and the engine refuses every entry of both. ur/ is the platform's (SOCK-M9-01) and opens
 // with the block: urnetwork-edge's clients list its services, and any sidecar Finds them.
 //
@@ -60,6 +65,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
+	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
@@ -75,6 +81,8 @@ type hostSettings struct {
 	Sockets *socketsservice.SocketsSettings
 	// The ticket key set's.
 	TicketKeys *socketsservice.SocketTicketKeySettings
+	// The Client-class verifier's: QD-040's grace and waits, on the mounted jwt-jwks.json.
+	ClientTokens *session.ClientTokenVerifierSettings
 	// How often sockets_control_qps is laid over the engine's bound: 60 s, §19.11's reread.
 	ControlQpsInterval time.Duration
 	// How long the block waits before it subscribes a key-event family again after a subscription failed: 5 s.
@@ -86,6 +94,7 @@ func defaultHostSettings() *hostSettings {
 	return &hostSettings{
 		Sockets:                socketsservice.DefaultSocketsSettings(),
 		TicketKeys:             socketsservice.DefaultSocketTicketKeySettings(),
+		ClientTokens:           session.DefaultClientTokenVerifierSettings(),
 		ControlQpsInterval:     60 * time.Second,
 		KeyEventsRetryInterval: 5 * time.Second,
 	}
@@ -99,7 +108,8 @@ type hostDeps struct {
 	Source sidecar.AclGateSource
 	// Reads the ticket key file: vault's socket-ticket-keys.yml.
 	KeyFile func() ([]byte, error)
-	// Each replaces sidecarhost's: a test's token issuer, a test's gates file, a test's Redis.
+	// Each replaces the block's: a test's token issuer in place of the Client-class Authenticator, a test's gates
+	// file, a test's Redis.
 	Authenticator sidecar.Authenticator
 	Gates         sidecar.ServiceGates
 	Redis         sidecar.Redis
@@ -167,8 +177,13 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 		Push:  deps.Push,
 		Clock: deps.Clock,
 	})
+	// the callers' Client-class tokens (QD-040), unless a test issues its own
+	var clientTokens *session.ClientTokenVerifier
 	if deps.Authenticator != nil {
 		host.Authenticator = deps.Authenticator
+	} else {
+		clientTokens = session.NewClientTokenVerifier(settings.ClientTokens)
+		host.Authenticator = sidecarhost.NewClientTokenAuthenticator(socketsservice.SocketsAudience, clientTokens)
 	}
 	if deps.Gates != nil {
 		host.Gates = deps.Gates
@@ -240,7 +255,13 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 	if 0 < len(self.missing) {
 		log.Errorf("[%s]not ready without %s", hostService, strings.Join(self.missing, "; "))
 	}
-	log.Infof("[%s]tls/ and smtp/ refuse every entry until their ValidateListen lands (TLS-M5-22, MAIL-M7-22), and Client-class tokens answer unavailable until plan-SOCK-client-auth's verifier lands", hostService)
+	if clientTokens != nil {
+		if err := clientTokens.Check(); err != nil {
+			// what the check names is a file or a setting, never a token or a client
+			log.Errorf("[%s]Client-class tokens answer unavailable until their verifier can answer: %v", hostService, err)
+		}
+	}
+	log.Infof("[%s]tls/ and smtp/ refuse every entry until their ValidateListen lands (TLS-M5-22, MAIL-M7-22)", hostService)
 	// the first try at once, so a block whose Redis answers is ready as soon as the engine is
 	if failed := self.subscribe(self.keyEventFamilies()); 0 < len(failed) {
 		self.group.Add(1)
