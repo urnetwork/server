@@ -1,7 +1,7 @@
 # Capability-aware FindProviders2 and connect placement
 
-Design and implementation record. §1-§12 are the design, with what building it
-changed folded in; §13 records how each workstream built it.
+Design and implementation record. What building it changed is folded into
+§1-§12.
 
 | | |
 |---|---|
@@ -13,9 +13,9 @@ changed folded in; §13 records how each workstream built it.
 | Apps and localizations | android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813, localizations 19b89a4, all on their main (§5.5) |
 
 References are `path:line` at those commits. §1-§12 describe the design
-against the code as it stood; §13 records how it was built. Paths without a repo prefix are
-in the server repo; `connect/`, `sdk/`, `android/`, `apple/`, `windows/`,
-`linux/` and `localizations/` name the other repos.
+against the code as it stood; §13 records how each workstream built it. Paths
+without a repo prefix are in the server repo; `connect/`, `sdk/`, `android/`,
+`apple/`, `windows/`, `linux/` and `localizations/` name the other repos.
 
 ## Terms
 
@@ -420,6 +420,7 @@ COUNT(*) FILTER (WHERE failed_later_legs & 6 <> 0)                              
     with zero, which means no downgrade: today's behaviour (the same reason as
     `NetworkOnly` and `IpFamilies`, model/network_client_location_model.go:5200,
     5213).
+  - The export also adds `PostQuantumPositive` (§12.4).
 - **Labels served:**
   - `ip` is `dualstack` when `IpFamily()` is `dualstack` and bit 1 is clear,
     else `ipv4`, a v6-only provider included (§3.6);
@@ -487,7 +488,7 @@ export's TTL and a ready member, like `{provider_hard_exclusions}`
   300;
 - `{provider_capability_tcp}`: providers labelled `tcp`, about 20,700.
 
-FP2 labels a client-id spec from them (§6.4).
+FP2 labels a client-id spec from them (§6.4). As built:
 - The export publishes them with the two post-quantum sets of §12.4. Each of
   the four sets is its own cluster slot, so each is replaced in its own
   transaction.
@@ -499,10 +500,9 @@ FP2 labels a client-id spec from them (§6.4).
   rank modes. That is about 75% more union pages, by count of members (Online
   holds 26.7k).
 - The native capability snapshot holds the class-D Speed natives and the few
-  class-D Quality natives.
+  class-D Quality natives. It is a second native snapshot per non-forced
+  target and rank mode, which lengthens the export.
 - The decision work doubles: one more in-memory pass over the facts.
-- A second native snapshot is written per non-forced target and rank mode,
-  which lengthens the export.
 - Measure Redis memory for `cs_` keys before and after the first export (§10
   step 2).
 
@@ -1212,9 +1212,11 @@ its ./grafana tests move to them.
 keep the strict decision, unchanged (controller/stats_collector.go:80-86).
 
 **As built (§13.4):**
-- Both gauges are read from the egress counts snapshot, which moves to schema
-  8 with the wire keys `k` (capability) and `q` (post-quantum).
-- Both bucket by the classified decision. A provider that is not downgraded
+- `urnetwork_stats_provider_egress_capability` and
+  `urnetwork_stats_provider_post_quantum` are read from the egress counts
+  snapshot, which moves to schema 8 with the wire keys `k` (capability) and
+  `q` (post-quantum).
+- Both gauges bucket by the classified decision. A provider that is not downgraded
   counts by its strict decision, which equals it.
 - Every label set of the FP2 counters is registered at startup, so every
   series exists at zero.
