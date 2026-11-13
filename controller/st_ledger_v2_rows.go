@@ -47,13 +47,16 @@ func stLedgerV2NewEpochRows(ctx context.Context, epoch uint64) ([]protocol.Ledge
 // extender pool's configuration, needed only when the amendment covers the
 // epoch.
 func stLedgerV2NewAmendedEpochRows(ctx context.Context, epoch uint64, amendment model.StExtenderAmendment, pool *stExtenderPoolConfig) ([]protocol.LedgerUsageRow, *model.StEpochExtenderPool, error) {
-	return stLedgerV2AmendedEpochRows(ctx, epoch, amendment, pool, true)
+	return stLedgerV2AmendedEpochRows(ctx, epoch, amendment, pool, true, model.StEpochUsageSlices{})
 }
 
 // As stLedgerV2NewAmendedEpochRows, retaining the selected wallets'
 // resolutions only when retain is set: a shadow report reads an epoch without
-// recording anything (st_ledger_v2_extender_shadow.go).
-func stLedgerV2AmendedEpochRows(ctx context.Context, epoch uint64, amendment model.StExtenderAmendment, pool *stExtenderPoolConfig, retain bool) ([]protocol.LedgerUsageRow, *model.StEpochExtenderPool, error) {
+// recording anything (st_ledger_v2_extender_shadow.go). slicing cuts the read
+// of an epoch the amendment covers into short snapshots
+// (model.GetStEpochAmendedUsageInSlices), to the same totals; its zero value
+// reads the epoch in one snapshot, as a root's build does.
+func stLedgerV2AmendedEpochRows(ctx context.Context, epoch uint64, amendment model.StExtenderAmendment, pool *stExtenderPoolConfig, retain bool, slicing model.StEpochUsageSlices) ([]protocol.LedgerUsageRow, *model.StEpochExtenderPool, error) {
 	cfg, client, err := stRequire()
 	if err != nil {
 		return nil, nil, err
@@ -80,7 +83,7 @@ func stLedgerV2AmendedEpochRows(ctx context.Context, epoch uint64, amendment mod
 		measurementNetworkIds = stExtenderPoolMeasurementNetworks(ctx, pool)
 	}
 	// the census is canonical: one usage per client, in client id order
-	usages, extenders, err := model.GetStEpochAmendedUsageAtEpoch(ctx, epoch, authority.StartTime, authority.EndTime, amendment, measurementNetworkIds)
+	usages, extenders, err := model.GetStEpochAmendedUsageInSlices(ctx, epoch, authority.StartTime, authority.EndTime, amendment, measurementNetworkIds, slicing)
 	if err != nil {
 		return nil, nil, err
 	}

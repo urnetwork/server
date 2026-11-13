@@ -6,7 +6,8 @@ package controller
 // appears in a label. Each gauge describes the last epoch of its phase:
 //   - census: the census captured at an epoch's end (N, M, rows);
 //   - build: an epoch the amendment covers, as a root first builds it;
-//   - shadow: an epoch before E_x, as its shadow report builds it.
+//   - shadow: an epoch before E_x, as its shadow report builds it, and the
+//     timed-out attempts of the last shadow given up.
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,7 +27,7 @@ var (
 	}, []string{"phase", "part"})
 	stExtenderPoolCounts = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "st_extender_pool", Name: "count",
-		Help: "Counts in the epoch of the phase (census, build, shadow), by count: census_rows, eligible (N), units (M), contracts and payers (behind Z), unfunded_contracts and measurement_contracts (left out of Z), platform_endpoints (registered when the epoch was read).",
+		Help: "Counts in the epoch of the phase (census, build, shadow), by count: census_rows, eligible (N), units (M), contracts and payers (behind Z), unfunded_contracts and measurement_contracts (left out of Z), platform_endpoints (registered when the epoch was read), and timed_out_attempts (shadow: the attempts whose read ran past its bound when an epoch's shadow was last given up).",
 	}, []string{"phase", "count"})
 	stExtenderPoolWeightShare = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "st_extender_pool", Name: "weight_share",

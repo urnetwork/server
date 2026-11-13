@@ -329,7 +329,7 @@ func StLedgerV2RunUsageStep(ctx context.Context, step *StLedgerV2UsageStep) (*St
 		if err != nil {
 			return nil, err
 		}
-		return stLedgerV2RunExtenderShadow(ctx, cfg, stLedgerV2ExtenderShadowViews{client: v2}, step.Epoch), nil
+		return stLedgerV2RunExtenderShadow(ctx, cfg, stLedgerV2ExtenderShadowViews{client: v2}, step.Epoch, DefaultStLedgerV2ExtenderShadowSettings()), nil
 	case StLedgerV2UsageStepStatement:
 		_, v2, err := stLedgerV2Require()
 		if err != nil {

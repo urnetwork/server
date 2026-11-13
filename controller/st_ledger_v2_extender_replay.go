@@ -94,7 +94,8 @@ func StLedgerV2ExtenderReplay(ctx context.Context, epoch uint64) (*StLedgerV2Ext
 		return nil, err
 	}
 	amendment := model.StExtenderAmendment{FirstEpoch: epoch, PlatformEndpoints: platformEndpoints}
-	rows, read, err := stLedgerV2AmendedEpochRows(ctx, epoch, amendment, pool, false)
+	// in a shadow run's short snapshots, wherever it reads
+	rows, read, err := stLedgerV2AmendedEpochRows(ctx, epoch, amendment, pool, false, DefaultStLedgerV2ExtenderShadowSettings().slicing())
 	if err != nil {
 		return nil, err
 	}

@@ -18,9 +18,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -85,7 +87,7 @@ func TestStLedgerV2ExtenderShadowEpochsBeforeTheShadowRunsConcludeWithoutReading
 					t.Fatalf("epoch %d's shadow step read before it concluded: %v", epoch, r)
 				}
 			}()
-			return stLedgerV2RunExtenderShadow(ctx, cfg, chain, epoch)
+			return stLedgerV2RunExtenderShadow(ctx, cfg, chain, epoch, DefaultStLedgerV2ExtenderShadowSettings())
 		}()
 		if outcome.Status != model.StPublishStatusSkipped || outcome.Retry || !strings.Contains(outcome.Reason, "first epoch 8") {
 			t.Fatalf("epoch %d: %+v", epoch, outcome)
@@ -198,5 +200,40 @@ func TestStExtenderShadowNotLiveSaysWhy(t *testing.T) {
 	// the stored entry is operator 1's
 	if got := stExtenderShadowNotLive(unplanned, file, fallback, 7); !strings.Contains(got, "none is planned") {
 		t.Fatalf("another operator: %s", got)
+	}
+}
+
+// An epoch whose shadow read keeps running past its bound is given up once:
+// one alert, its timed-out attempts in the shadow phase's gauge, and the sync
+// plans the epoch no more, before reading anything of it.
+func TestStLedgerV2GiveUpExtenderShadowAlertsOnce(t *testing.T) {
+	site := newStAmendmentTestSite(t)
+	site.publish(t)
+	cfg := stAmendmentTestConfig(t, "enabled: false\n")
+	previousCfg, previousClient := stConfigInstance, stClientInstance
+	SetStConfig(cfg)
+	SetStClient(newStubStClient(&StEpochState{Epoch: 8}))
+	t.Cleanup(func() {
+		stConfigInstance, stClientInstance = previousCfg, previousClient
+	})
+	clearStExtenderShadowConcluded(t)
+	ctx := server.WithoutPostgres(context.Background())
+	for range 2 {
+		StLedgerV2GiveUpExtenderShadow(6, 2, 110*time.Minute)
+	}
+	alerts := 0
+	for _, alert := range site.alerts {
+		if strings.HasPrefix(alert, StLedgerV2AlertExtenderShadow+": ") && strings.Contains(alert, "epoch 6's extender shadow read ran past 1h50m0s in 2 attempts") {
+			alerts++
+		}
+	}
+	if alerts != 1 || len(site.alerts) != 1 {
+		t.Fatalf("alerts %v", site.alerts)
+	}
+	if got := testutil.ToFloat64(stExtenderPoolCounts.WithLabelValues("shadow", "timed_out_attempts")); got != 2 {
+		t.Fatalf("timed-out attempts gauge %v", got)
+	}
+	if stLedgerV2ExtenderShadowDue(ctx, cfg, 6) || server.PacketPostgresAttempts(ctx) != 0 {
+		t.Fatalf("a given-up epoch is planned, or read: %d PostgreSQL acquisitions", server.PacketPostgresAttempts(ctx))
 	}
 }
