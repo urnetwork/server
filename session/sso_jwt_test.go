@@ -338,3 +338,45 @@ func TestSsoAllowedClientIds(t *testing.T) {
 		pop()
 	})
 }
+
+// Tests in other packages sign in through the real parsers for an audience
+// they set, without the vault's client ids, which are read once per process.
+// The override never reads those lists, so a later test can still set them
+// through the vault (TestSetSsoJwkKeysVerifiesWithoutTheLiveKeySets).
+func TestSetSsoClientIdsSetsTheAudience(t *testing.T) {
+	googleClientId := "synthetic-google-client.example"
+	appleClientId := "synthetic-apple-client.example"
+	synthetic := func(claims gojwt.MapClaims, audience string) gojwt.MapClaims {
+		claims["aud"] = audience
+		claims["sub"] = "synthetic-subject"
+		claims["email"] = "sso-audience@example.com"
+		delete(claims, "name")
+		return claims
+	}
+
+	key := testingSsoKey(t)
+	defer Testing_SetSsoJwkKeys([]any{&key.PublicKey})()
+
+	pop := Testing_SetSsoClientIds([]string{googleClientId, appleClientId})
+	googleJwt, err := ParseGoogleJwt(testingSsoSignJwt(t, gojwt.SigningMethodRS256, key, synthetic(testingGoogleClaims(), googleClientId)))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, googleJwt.UserAuth, "sso-audience@example.com")
+	appleJwt, err := ParseAppleJwt(testingSsoSignJwt(t, gojwt.SigningMethodRS256, key, synthetic(testingAppleClaims(), appleClientId)))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, appleJwt.UserAuth, "sso-audience@example.com")
+
+	// an audience the override does not list is refused as with the vault's
+	_, err = ParseGoogleJwt(testingSsoSignJwt(t, gojwt.SigningMethodRS256, key, synthetic(testingGoogleClaims(), "other-client.example")))
+	connect.AssertEqual(t, err.Error(), "Invalid audience.")
+	_, err = ParseAppleJwt(testingSsoSignJwt(t, gojwt.SigningMethodRS256, key, synthetic(testingAppleClaims(), "other-client.example")))
+	connect.AssertEqual(t, err.Error(), "Invalid audience.")
+
+	// nested overrides restore in order
+	popEmpty := Testing_SetSsoClientIds([]string{})
+	_, err = ParseGoogleJwt(testingSsoSignJwt(t, gojwt.SigningMethodRS256, key, synthetic(testingGoogleClaims(), googleClientId)))
+	connect.AssertEqual(t, err.Error(), "Invalid audience.")
+	popEmpty()
+	connect.AssertEqual(t, *ssoClientIdsOverride.Load(), []string{googleClientId, appleClientId})
+	pop()
+	connect.AssertEqual(t, ssoClientIdsOverride.Load() == nil, true)
+}
