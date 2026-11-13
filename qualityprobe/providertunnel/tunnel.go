@@ -638,6 +638,12 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		return settings
 	}
 
+	// A provider that never joined the multi-client was never sent a contract
+	// and holds no return for the derived client; a client generated after one
+	// joined replaces it (CapabilityObservation.apply). Set by
+	// watchProviderAdded once the multi-client exists.
+	providerAdded := &atomic.Bool{}
+
 	generator := newApiMultiClientGenerator(
 		lifecycleCtx,
 		[]*connect.ProviderSpec{
@@ -656,7 +662,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		func() *connect.ClientSettings {
 			settings := newProviderTunnelClientSettings(cfg.ContractReservationByteCount)
 			// nil for every tunnel but a capability measurement's
-			cfg.CapabilityObservation.apply(settings)
+			cfg.CapabilityObservation.apply(settings, providerAdded.Load())
 			// last, after every other change to the settings
 			if cfg.KeepClientKeysLocal {
 				skipUnreadClientKeyPublication(settings)
@@ -710,9 +716,6 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		protocol.ProvideMode_Network,
 		multiClientSettings,
 	)
-	// A provider that never joined the multi-client was never sent a contract
-	// and holds no return for the derived client.
-	providerAdded := &atomic.Bool{}
 	unwatchAdded := watchProviderAdded(multiClient.Monitor(), providerAdded)
 
 	// Independent of every other context here on purpose: it must outlive a

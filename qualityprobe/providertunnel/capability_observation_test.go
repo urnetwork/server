@@ -64,7 +64,7 @@ func TestUrlTunnelClientSettingsAreUnchanged(t *testing.T) {
 		t.Fatal("the URL tunnel's clients observe, wait for registration or fetch keys")
 	}
 	var unchanged *CapabilityObservation
-	unchanged.apply(defaults)
+	unchanged.apply(defaults, false)
 	if defaults.EncryptionSettings.Mode != connect.EncryptionModeOff || defaults.PeerCapabilityRecorder != nil || defaults.ClientKeyRegistrationRequired {
 		t.Fatal("a nil capability observation changed the settings")
 	}
@@ -115,7 +115,7 @@ func TestCapabilityTunnelClientSettingsObserveOpportunisticSessions(t *testing.T
 func TestCapabilityObservationCopiesTheEncryptionSettings(t *testing.T) {
 	settings := providerTunnelClientSettings(0)
 	shared := settings.EncryptionSettings
-	(&CapabilityObservation{Recorder: connect.NewPeerCapabilityRecorder(1)}).apply(settings)
+	(&CapabilityObservation{Recorder: connect.NewPeerCapabilityRecorder(1)}).apply(settings, false)
 	if shared.Mode != connect.EncryptionModeOff || shared == settings.EncryptionSettings {
 		t.Fatal("the observation wrote through to the caller's encryption settings")
 	}
@@ -237,9 +237,37 @@ func TestCapabilityObservationAppliesTheEstablishHold(t *testing.T) {
 	recorder := connect.NewPeerCapabilityRecorder(1)
 	for _, hold := range []time.Duration{0, 3 * time.Second} {
 		settings := connect.DefaultClientSettings()
-		(&CapabilityObservation{Recorder: recorder, EstablishHold: hold}).apply(settings)
+		(&CapabilityObservation{Recorder: recorder, EstablishHold: hold}).apply(settings, false)
 		if settings.EncryptionSettings.Mode != connect.EncryptionModeOpportunistic || settings.EncryptionSettings.OpportunisticEstablishHold != hold || !settings.ClientKeyRegistrationRequired {
 			t.Fatalf("hold %s applied %+v", hold, settings.EncryptionSettings)
+		}
+	}
+}
+
+// A client generated once the window's first has joined replaces it
+// mid-turn. Its first sends would wait out the seal again, inside phases whose
+// budgets count only the turn's first hold (providerFirstSendsHold), and for a
+// session the turn already reads unmeasured (Tunnel.ClientReplaced). So it
+// holds nothing and sends at once, still opportunistic, observed and
+// registered; the window's first client keeps the hold.
+func TestCapabilityObservationReplacementHoldsNoSends(t *testing.T) {
+	recorder := connect.NewPeerCapabilityRecorder(1)
+	observation := &CapabilityObservation{Recorder: recorder, EstablishHold: 3 * time.Second, KeepTunnelOnReplacement: true}
+	for _, c := range []struct {
+		replacement bool
+		hold        time.Duration
+	}{
+		{replacement: false, hold: 3 * time.Second},
+		{replacement: true, hold: 0},
+	} {
+		settings := providerTunnelClientSettings(0)
+		observation.apply(settings, c.replacement)
+		encryption := settings.EncryptionSettings
+		if encryption.OpportunisticEstablishHold != c.hold {
+			t.Errorf("replacement %t holds its first sends %s, want %s", c.replacement, encryption.OpportunisticEstablishHold, c.hold)
+		}
+		if encryption.Mode != connect.EncryptionModeOpportunistic || settings.PeerCapabilityRecorder != recorder || !settings.ClientKeyRegistrationRequired {
+			t.Errorf("replacement %t lost its session or observation: %+v", c.replacement, encryption)
 		}
 	}
 }
