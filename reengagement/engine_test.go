@@ -186,6 +186,24 @@ func TestRouteAnswer(t *testing.T) {
 	}
 }
 
+// A connection lifts only the program's own suppressions; an operator's
+// (sanctions, an automated sign-up cohort) stays for good.
+func TestOperatorSuppressionsAreNeverLiftable(t *testing.T) {
+	if !slices.Equal(OperatorSuppressions(), []string{SuppressSanctions, SuppressAutomatedSignup}) {
+		t.Fatal("operator suppressions", OperatorSuppressions())
+	}
+	for _, reason := range OperatorSuppressions() {
+		if LiftableSuppression(reason) || slices.Contains(LiftableSuppressions(), reason) {
+			t.Errorf("%s is liftable", reason)
+		}
+	}
+	for _, reason := range []string{SuppressSunset, SuppressSwitched} {
+		if !LiftableSuppression(reason) {
+			t.Errorf("%s is not liftable", reason)
+		}
+	}
+}
+
 func day(s string) time.Time {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
