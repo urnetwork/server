@@ -1243,25 +1243,71 @@ func networkCreateRedeemBalanceCodeInTx(
 	return isPro
 }
 
-func auditNetworkCreate(
+// The sign-up request as the network-create audit stores it, under
+// `network_create` in audit_network_event.event_details: an allowlist of the
+// request fields that abuse correlation reads, copied one by one. A field added
+// to NetworkCreateArgs is not stored until it is added here, so a new credential
+// cannot reach the audit by default. The request's credentials are never
+// stored: the password, the sign-in token (`auth_jwt`), the balance code, and
+// the wallet's signature and signed message. The json names are the request's,
+// so these records read like the rows written before the allowlist, which held
+// the whole request until `bringyourctl db scrub-network-create-secrets`
+// removed the credentials from them.
+type auditNetworkCreateRequest struct {
+	UserName string `json:"user_name"`
+	// the email or phone number of a password sign-up, as the request sent it
+	UserAuth *string `json:"user_auth,omitempty"`
+	// the sign-in provider (apple or google) of a sign-in sign-up
+	AuthJwtType      *string `json:"auth_jwt_type,omitempty"`
+	NetworkName      string  `json:"network_name"`
+	Terms            bool    `json:"terms"`
+	VerifyUseNumeric bool    `json:"verify_use_numeric"`
+	ReferralCode     *string `json:"referral_code,omitempty"`
+	ProductUpdates   *bool   `json:"product_updates,omitempty"`
+	// the wallet of a wallet sign-up: its address and chain only
+	WalletAuth *auditNetworkCreateWallet `json:"wallet_auth,omitempty"`
+}
+
+// The wallet of a wallet sign-up as the audit stores it.
+type auditNetworkCreateWallet struct {
+	PublicKey  string `json:"wallet_address,omitempty"`
+	Blockchain string `json:"blockchain,omitempty"`
+}
+
+// The event details of a created network. The client address is the peppered
+// hash (server.ClientIpHash) and the port, never the raw ip:port: the hash
+// keeps the abuse-correlation value (same /29 or /56 bucket, same hash)
+// without holding the address. The rows are kept for
+// AuditNetworkEventExpiration (RemoveOldAuditNetworkEvents), longer than the
+// request, and backups keep them longer still. Rows written before the hash
+// were rewritten by migration_20260807_ScrubTaskAndAuditClientAddresses.
+func auditNetworkCreateDetails(
 	networkCreate NetworkCreateArgs,
-	networkId server.Id,
 	clientSession *session.ClientSession,
-) {
-	// The peppered address hash (server.ClientIpHash), never the raw ip:port.
-	// audit_network_event rows are permanent — there is no reaper — so a raw
-	// address stored here would outlive every retention promise we make. The
-	// hash keeps the abuse-correlation value (same /29 or /56 bucket ⇒ same
-	// hash) without holding the address itself. Rows written before this
-	// change are rewritten by migration_20260807_ScrubTaskAndAuditClientAddresses.
+) string {
 	type Details struct {
-		NetworkCreate     NetworkCreateArgs `json:"network_create"`
-		ClientAddressHash string            `json:"client_address_hash,omitempty"`
-		ClientPort        int               `json:"client_port,omitempty"`
+		NetworkCreate     auditNetworkCreateRequest `json:"network_create"`
+		ClientAddressHash string                    `json:"client_address_hash,omitempty"`
+		ClientPort        int                       `json:"client_port,omitempty"`
 	}
 
 	details := Details{
-		NetworkCreate: networkCreate,
+		NetworkCreate: auditNetworkCreateRequest{
+			UserName:         networkCreate.UserName,
+			UserAuth:         networkCreate.UserAuth,
+			AuthJwtType:      networkCreate.AuthJwtType,
+			NetworkName:      networkCreate.NetworkName,
+			Terms:            networkCreate.Terms,
+			VerifyUseNumeric: networkCreate.VerifyUseNumeric,
+			ReferralCode:     networkCreate.ReferralCode,
+			ProductUpdates:   networkCreate.ProductUpdates,
+		},
+	}
+	if networkCreate.WalletAuth != nil {
+		details.NetworkCreate.WalletAuth = &auditNetworkCreateWallet{
+			PublicKey:  networkCreate.WalletAuth.PublicKey,
+			Blockchain: networkCreate.WalletAuth.Blockchain,
+		}
 	}
 	if clientAddressHash, clientPort, err := clientSession.ClientAddressHashPort(); err == nil {
 		details.ClientAddressHash = hex.EncodeToString(clientAddressHash[:])
@@ -1272,7 +1318,16 @@ func auditNetworkCreate(
 	if err != nil {
 		panic(err)
 	}
-	detailsJsonString := string(detailsJson)
+	return string(detailsJson)
+}
+
+// Records the created network with its sign-up request's allowlisted fields.
+func auditNetworkCreate(
+	networkCreate NetworkCreateArgs,
+	networkId server.Id,
+	clientSession *session.ClientSession,
+) {
+	detailsJsonString := auditNetworkCreateDetails(networkCreate, clientSession)
 
 	auditNetworkEvent := NewAuditNetworkEvent(AuditEventTypeNetworkCreated)
 	auditNetworkEvent.NetworkId = networkId

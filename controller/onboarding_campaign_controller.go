@@ -700,6 +700,8 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 	feedbackSubmitted := onboardingFeedbackAnswered(model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt), func(name string) bool {
 		return model.HasOnboardingEvent(ctx, row.NetworkId, name)
 	})
+	// E2's widget email goes only where the newest app build has the widget
+	platform, widgetBuild := onboardingClientBuild(row, model.GetNetworkNewestClientBuild(ctx, row.NetworkId), cfg.EffectiveWidgetSettings())
 	facts := onboarding.Facts{
 		Path:           path,
 		HasEmail:       row.Email,
@@ -718,8 +720,8 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		// offer.apple_email_enabled says the codes flow. The direct-download
 		// Mac bills through Stripe and gets it (P6).
 		NoOfferEmail:      onboarding.OfferEmailWithheld(offerByCountry, row.Platform, row.Distribution, path, cfg.Offer.AppleEmailEnabled),
-		Platform:          row.Platform,
-		Distribution:      row.Distribution,
+		Platform:          platform,
+		WidgetBuild:       widgetBuild,
 		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
@@ -756,6 +758,31 @@ func onboardingFeedbackEmailSent(emails []*model.NetworkOnboardingEmail) bool {
 		}
 	}
 	return false
+}
+
+// onboardingClientBuild is the Platform and WidgetBuild facts from the
+// network's newest active client (nil when it has none). The platform is the
+// row's, else the client's (from its device spec): a row recorded without
+// one takes the app the reader uses. WidgetBuild judges that client's build
+// by its platform, the app version it last connected with and, when it is on
+// the row's platform, the row's distribution, the only one the server keeps
+// (onboarding.WidgetSettings.HasWidget). Without a client there is no widget
+// build, and a row without a platform stays unknown.
+func onboardingClientBuild(row *model.NetworkOnboarding, build *model.NetworkClientBuild, widgets *onboarding.WidgetSettings) (platform string, widgetBuild bool) {
+	platform = row.Platform
+	if build == nil {
+		return
+	}
+	buildPlatform := platformFromDeviceSpec(build.DeviceSpec)
+	if platform == "" {
+		platform = buildPlatform
+	}
+	distribution := ""
+	if buildPlatform == row.Platform {
+		distribution = row.Distribution
+	}
+	widgetBuild = widgets.HasWidget(buildPlatform, distribution, build.ClientVersion)
+	return
 }
 
 // onboardingFeedbackAnswered is the feedback step's FeedbackSubmitted fact:
@@ -817,7 +844,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		Opening:         decision.Opening,
 		Platform:        onboarding.DeviceName(row.Platform, templateLocale),
 		StoreBilled:     onboarding.StoreBilledPlatform(row.Platform, row.Distribution),
-		Browser:         row.Platform == onboarding.PlatformWeb,
+		Browser:         decision.Browser,
 		Locale:          templateLocale,
 		DailyDataGb:     float64(model.Pro().Free.Data) / float64(model.Gib),
 		DaysActive:      int(now.Sub(row.CreatedAt).Hours() / 24),
@@ -828,9 +855,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		NoOfferEmail:    decision.NoOfferEmail,
 		OfferPriceUsd:   offerPrice,
 		RegularYearUsd:  regular,
-		TrialDays:       14,
 		Location:        loc,
-		Now:             now,
 		Token:           token,
 		SiteUrl:         cfg.EffectiveSiteUrl(),
 		CompanyLine:     cfg.EffectiveCompanyLine(),
@@ -842,7 +867,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		Locale:     templateLocale,
 		TemplateId: templateId,
 		Params:     onboarding.BuildParams(in),
-		Tags:       []string{"onboarding", decision.Template, decision.Variant},
+		Tags:       onboarding.CampaignTags("onboarding", decision.Template, decision.Variant, row.ExperimentId, row.EmailVariant),
 	}, nil
 }
 
@@ -1337,8 +1362,8 @@ func OnboardingCampaignSendTest(ctx context.Context, to string, template string,
 			Template: template, Variant: variant, Opening: opening,
 			Platform: "iPhone", DailyDataGb: float64(model.Pro().Free.Data) / float64(model.Gib),
 			DaysActive: 3, ConnectDays: 2, ProvidersOnline: providers, CountriesOnline: countries,
-			OfferExpiresAt: &expires, OfferPriceUsd: cfg.OfferPriceUsd(tier.YearlyUsd), RegularYearUsd: tier.YearlyUsd, TrialDays: 14,
-			Location: time.UTC, Now: now, Token: "test", SiteUrl: cfg.EffectiveSiteUrl(), CompanyLine: cfg.EffectiveCompanyLine(),
+			OfferExpiresAt: &expires, OfferPriceUsd: cfg.OfferPriceUsd(tier.YearlyUsd), RegularYearUsd: tier.YearlyUsd,
+			Location: time.UTC, Token: "test", SiteUrl: cfg.EffectiveSiteUrl(), CompanyLine: cfg.EffectiveCompanyLine(),
 		}),
 		Tags: []string{"onboarding", "test", template, variant},
 	}

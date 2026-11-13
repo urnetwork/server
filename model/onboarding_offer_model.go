@@ -106,9 +106,13 @@ type IssueOnboardingOfferArgs struct {
 	StripeCouponId string
 	PlayOfferTag   string
 	// AppleOfferCode is the fallback custom code; a one-time code from the pool
-	// is preferred when one is available
+	// is preferred when one is available. Empty for a reader the App Store
+	// does not bill: the code is the App Store's redemption handle only.
 	AppleOfferCode string
-	// AppleOfferCodePool draws a one-time code from network_onboarding_apple_offer_code
+	// AppleOfferCodePool draws a one-time code from
+	// network_onboarding_apple_offer_code. Only for a reader on an App Store
+	// build, who can redeem it: a code is one-time, and one drawn for anyone
+	// else is spent unused (controller appStoreReader).
 	AppleOfferCodePool bool
 }
 
@@ -153,6 +157,12 @@ func lockOnboardingNetworkInTx(tx server.PgTx, ctx context.Context, networkId se
 // that does not exist, and raises a failed statement, which ends the
 // transaction at once with its own error; a returned insert error let the
 // caller's callback go on to a commit that postgres rolled back.
+//
+// The App Store code is drawn only for the row this call inserted. A pool
+// code drawn before the insert was spent when a concurrent issue for the
+// same network won the insert: the key-share lock does not serialize two
+// issues, and the loser's code stayed assigned to the network while the
+// offer row named the winner's.
 func IssueOnboardingOfferInTx(tx server.PgTx, ctx context.Context, args *IssueOnboardingOfferArgs) (*OnboardingOffer, bool, error) {
 	if !lockOnboardingNetworkInTx(tx, ctx, args.NetworkId) {
 		return nil, false, ErrOnboardingNetworkNotFound
@@ -162,13 +172,6 @@ func IssueOnboardingOfferInTx(tx server.PgTx, ctx context.Context, args *IssueOn
 	}
 	now := server.NowUtc()
 	expiresAt := now.Add(args.Validity)
-
-	appleOfferCode := strings.TrimSpace(args.AppleOfferCode)
-	if args.AppleOfferCodePool {
-		if code, ok := assignAppleOfferCodeInTx(tx, ctx, args.NetworkId, expiresAt); ok {
-			appleOfferCode = code
-		}
-	}
 
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
@@ -183,10 +186,9 @@ func IssueOnboardingOfferInTx(tx server.PgTx, ctx context.Context, args *IssueOn
 				percent_off,
 				months_free,
 				stripe_coupon_id,
-				apple_offer_code,
 				play_offer_tag
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (network_id) DO NOTHING
 		`,
 		args.NetworkId,
@@ -198,14 +200,84 @@ func IssueOnboardingOfferInTx(tx server.PgTx, ctx context.Context, args *IssueOn
 		args.PercentOff,
 		args.MonthsFree,
 		nullIfEmpty(args.StripeCouponId),
-		nullIfEmpty(appleOfferCode),
 		nullIfEmpty(args.PlayOfferTag),
 	))
 	offer := GetOnboardingOfferInTx(tx, ctx, args.NetworkId)
 	if offer == nil {
 		return nil, false, ErrOnboardingOfferNotFound
 	}
-	return offer, tag.RowsAffected() == 1, nil
+	created := tag.RowsAffected() == 1
+	if created {
+		offer = setOnboardingOfferAppleCodeInTx(tx, ctx, offer, args.AppleOfferCodePool, args.AppleOfferCode)
+	}
+	return offer, created, nil
+}
+
+// OnboardingOfferHasAppleCode reports whether the offer carries an App Store
+// code: a one-time code or the custom code.
+func OnboardingOfferHasAppleCode(offer *OnboardingOffer) bool {
+	return offer != nil && offer.AppleOfferCode != nil && strings.TrimSpace(*offer.AppleOfferCode) != ""
+}
+
+// AssignOnboardingOfferAppleCode gives the network's offer its App Store code
+// when a reader on an App Store build reads it (controller
+// ensureOnboardingOfferAppleCode): a one-time code from the pool that
+// outlives the offer, else fallbackCode, the custom code, when it is set. An
+// offer issued without a code (by email, or to a reader on another platform)
+// gets one this way the first time an App Store build reads it, so a code is
+// spent only on a reader who can redeem it. Only an active offer without a
+// code takes one, and a code once set is never replaced: the reader may
+// already hold it. The offer row is locked for the draw, so concurrent reads
+// of one network draw one code. Returns the offer as it stands after the
+// call, nil when none was issued or the network does not exist, and whether
+// this call gave it its code.
+func AssignOnboardingOfferAppleCode(ctx context.Context, networkId server.Id, fallbackCode string) (offer *OnboardingOffer, stamped bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		offer, stamped = nil, false
+		// the network first, in the order an issue and a redemption binding
+		// take their locks
+		if !lockOnboardingNetworkInTx(tx, ctx, networkId) {
+			return
+		}
+		offer = GetOnboardingOfferForUpdateInTx(tx, ctx, networkId)
+		if offer == nil || !offer.Eligible(server.NowUtc()) || OnboardingOfferHasAppleCode(offer) {
+			return
+		}
+		offer = setOnboardingOfferAppleCodeInTx(tx, ctx, offer, true, fallbackCode)
+		stamped = OnboardingOfferHasAppleCode(offer)
+	}, server.TxReadCommitted)
+	return
+}
+
+// setOnboardingOfferAppleCodeInTx stamps a code on the offer row the caller
+// holds: a one-time code from the pool that outlives the offer when usePool,
+// else fallbackCode when it is set. Returns the offer with its code, as it
+// was when there is none to give.
+func setOnboardingOfferAppleCodeInTx(tx server.PgTx, ctx context.Context, offer *OnboardingOffer, usePool bool, fallbackCode string) *OnboardingOffer {
+	code := ""
+	if usePool {
+		if poolCode, ok := assignAppleOfferCodeInTx(tx, ctx, offer.NetworkId, offer.ExpiresAt); ok {
+			code = poolCode
+		}
+	}
+	if code == "" {
+		code = strings.TrimSpace(fallbackCode)
+	}
+	if code == "" {
+		return offer
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE network_onboarding_offer
+			SET apple_offer_code = $2
+			WHERE network_id = $1
+		`,
+		offer.NetworkId,
+		code,
+	))
+	offer.AppleOfferCode = &code
+	return offer
 }
 
 func nullIfEmpty(value string) *string {
@@ -386,6 +458,33 @@ func assignAppleOfferCodeInTx(tx server.PgTx, ctx context.Context, networkId ser
 	}
 	server.Raise(err)
 	return code, true
+}
+
+// GetNetworkClientDeviceSpec is the device spec of the network's client, ""
+// when the client is not the network's or has no device. It tells the
+// platform of an app whose sdk sends no X-UR-ClientInfo (controller
+// appStoreReader), on the plan read of an offer without an App Store code:
+// one primary key read of the client and one of its device.
+func GetNetworkClientDeviceSpec(ctx context.Context, networkId server.Id, clientId server.Id) (deviceSpec string) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT device.device_spec
+				FROM network_client
+				INNER JOIN device ON device.device_id = network_client.device_id
+				WHERE network_client.client_id = $1 AND network_client.network_id = $2
+			`,
+			clientId,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&deviceSpec))
+			}
+		})
+	})
+	return
 }
 
 // CountAvailableAppleOfferCodes is the number of unassigned codes in the pool

@@ -542,11 +542,13 @@ func ListPendingReengagementFixes(ctx context.Context, answeredAfter time.Time, 
 	return
 }
 
-// The markets whose supporter windows record their end with the 30-day
-// manual-payment grace already in it (controller manualPaymentGracePeriod:
-// crypto_pay_credit.go, gamma_credit.go and payment_reconcile_controller.go
-// add it to end_time), so Pro stops at end_time; the App Store and Play end
-// theirs at the store's expiry and may retry a failed renewal after it.
+// The markets whose supporter windows record their end with the grace already
+// in it, so Pro stops at end_time: the 30-day manual-payment grace on a paid
+// period (controller manualPaymentGracePeriod: crypto_pay_credit.go,
+// gamma_credit.go and subscription_stripe_controller.go add it to end_time),
+// and a day on a Stripe period no payment paid for, a trial
+// (subscription_stripe_grace.go). The App Store and Play end theirs at the
+// store's expiry and may retry a failed renewal after it.
 var reengagementGraceMarkets = []string{"stripe", "solana", "monero", "zcash", "bittensor", "bitcoin", "ethereum", "gamma", "x402", "manual"}
 
 // ReengagementGraceMarkets are the markets whose end_time includes the grace.
@@ -838,6 +840,42 @@ func GetNetworkClientContext(ctx context.Context, networkId server.Id) *NetworkC
 		})
 	})
 	return c
+}
+
+// NetworkClientBuild is the app build of a network's newest active client:
+// its device's spec and the app version the device last connected with
+// (device.client_version, written at the connect auth; "" before its first
+// connection).
+type NetworkClientBuild struct {
+	DeviceSpec    string
+	ClientVersion string
+}
+
+// GetNetworkNewestClientBuild reads the network's newest active client that
+// has a device, by creation, or nil when it has none. One backward read of the
+// (network_id, create_time) index.
+func GetNetworkNewestClientBuild(ctx context.Context, networkId server.Id) (build *NetworkClientBuild) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT device.device_spec, COALESCE(device.client_version, '')
+				FROM network_client
+				INNER JOIN device ON device.device_id = network_client.device_id
+				WHERE network_client.network_id = $1 AND network_client.active
+				ORDER BY network_client.create_time DESC
+				LIMIT 1
+			`,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				build = &NetworkClientBuild{}
+				server.Raise(result.Scan(&build.DeviceSpec, &build.ClientVersion))
+			}
+		})
+	})
+	return
 }
 
 // ----- consent evidence and suppression (account_preferences) -----

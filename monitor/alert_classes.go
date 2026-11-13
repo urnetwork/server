@@ -564,6 +564,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"store-notification-refused":                          incidentAlertClass,
 	"store-notification-silent":                           incidentAlertClass,
 	"store-notification-unverified":                       incidentAlertClass,
+	"apple-offer-code-supply-low":                         incidentAlertClass,
 	"peerconn-teardown-stalled":                           incidentAlertClass,
 	"persistent-active-query":                             incidentAlertClass,
 	"pg-client-capacity":                                  incidentAlertClass,

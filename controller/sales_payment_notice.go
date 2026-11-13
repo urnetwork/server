@@ -115,10 +115,11 @@ func stripeSalesKind(billingReason string, zeroAmount bool) string {
 	return ""
 }
 
-// stripeSalesPlanForWindow is the plan of a paid window that ends
-// manualPaymentGracePeriod after the paid period (stripeResolveInvoiceCredit).
-func stripeSalesPlanForWindow(startTime time.Time, endTime time.Time) string {
-	paid := endTime.Sub(startTime) - manualPaymentGracePeriod
+// stripeSalesPlanForPeriod is the plan of a paid period, by its length. The
+// period ends at the invoice's period end, before the grace its window runs
+// (stripeResolveInvoiceCredit).
+func stripeSalesPlanForPeriod(startTime time.Time, paidEndTime time.Time) string {
+	paid := paidEndTime.Sub(startTime)
 	day := 24 * time.Hour
 	switch {
 	case 27*day <= paid && paid <= 32*day:
@@ -192,20 +193,21 @@ func stripeMarkTrialNotice(notice *model.SalesPaymentNotice, trialEnd time.Time)
 	}
 }
 
-// stripeInvoiceSalesNotice is the notice of a credited subscription invoice.
-// What the delivered invoice carries is the fallback; the worker reads the
-// invoice back from Stripe for the amount paid, the reason, the plan, the
+// stripeInvoiceSalesNotice is the notice of a credited subscription invoice,
+// whose period runs from startTime to paidEndTime (its window's grace left
+// out). What the delivered invoice carries is the fallback; the worker reads
+// the invoice back from Stripe for the amount paid, the reason, the plan, the
 // trial and the charge's payment method.
 func stripeInvoiceSalesNotice(
 	networkId server.Id,
 	invoice *StripeEventInvoiceObject,
 	startTime time.Time,
-	endTime time.Time,
+	paidEndTime time.Time,
 ) *model.SalesPaymentNotice {
 	notice := &model.SalesPaymentNotice{
 		RecordKey: "stripe_invoice/" + invoice.Id,
 		NetworkId: &networkId,
-		Item:      model.SalesProItem(stripeSalesPlanForWindow(startTime, endTime)),
+		Item:      model.SalesProItem(stripeSalesPlanForPeriod(startTime, paidEndTime)),
 		Kind:      stripeSalesKind(invoice.BillingReason, invoice.Total == 0),
 		Amount:    "not reported by Stripe",
 		Method:    "Stripe",
@@ -213,13 +215,11 @@ func stripeInvoiceSalesNotice(
 	if model.SalesCurrencyCode(invoice.Currency) != "" {
 		notice.Amount = stripeSalesAmount(int64(invoice.Total), invoice.Currency)
 	}
-	// the window runs manualPaymentGracePeriod past the period it paid for.
 	// Only a delivered invoice (it names its currency) is read for a trial
 	// here: the reconciler credits by id alone, and the read back decides.
-	periodEnd := endTime.Add(-manualPaymentGracePeriod)
 	if model.SalesCurrencyCode(invoice.Currency) != "" {
-		if stripeInvoiceStartsTrial(invoice.BillingReason, int64(invoice.Total), periodEnd.Sub(startTime)) {
-			stripeMarkTrialNotice(notice, periodEnd)
+		if stripeInvoiceStartsTrial(invoice.BillingReason, int64(invoice.Total), paidEndTime.Sub(startTime)) {
+			stripeMarkTrialNotice(notice, paidEndTime)
 		} else if stripeInvoiceEndsTrial(invoice.BillingReason, int64(invoice.Total), stripeUnixPeriodLength(int64(invoice.PeriodStart), int64(invoice.PeriodEnd))) {
 			notice.Kind = model.SalesPaymentKindAfterTrial
 		}

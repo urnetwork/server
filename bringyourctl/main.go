@@ -47,6 +47,7 @@ Usage:
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
     bringyourctl db sweep-orphans [--slice=<n>]
     bringyourctl db scrub-client-addresses
+    bringyourctl db scrub-network-create-secrets [--after=<event_id>] [--through=<event_id>] [--batch=<n>] [--batch-pause=<duration>] [(--apply --expect=<digest>)]
     bringyourctl db key-history-floor [--rollback | --restore]
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
@@ -252,7 +253,7 @@ Options:
                    major or full, mildest first.
 
     --private-stdin  Read the bounded private expiry request from stdin.
-    --apply          Apply the scoped expiry request; omission is a read-only preview. With reengagement suppress, write the suppression of the dry run whose digest is --expect.
+    --apply          Apply the scoped expiry request; omission is a read-only preview. With reengagement suppress, write the suppression of the dry run whose digest is --expect. With db scrub-network-create-secrets, rewrite the audit rows of the dry run whose digest is --expect.
     --contract_id=<contract_id> The contract to close
     --target_id=<target_id>     The contract_close.party (either "destination" or "source")
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
@@ -264,8 +265,12 @@ Options:
     --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
-    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, payouts close-attempted, contracts close-due or reengagement suppress dry run printed; --commit and --apply refuse any other census.
+    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, payouts close-attempted, contracts close-due, reengagement suppress or db scrub-network-create-secrets dry run printed; --commit and --apply refuse any other census.
     --network_ids_file=<path>  With reengagement suppress, the networks to suppress: one network id a line; blank lines and lines starting with # are skipped.
+    --after=<event_id>  With db scrub-network-create-secrets, scrub only the audit rows after this event id: a stopped --apply prints the last one it committed.
+    --through=<event_id>  With db scrub-network-create-secrets, the newest audit event id in scope; the dry run defaults to the newest row and prints it, and --apply needs the one the dry run printed.
+    --batch=<n>  With db scrub-network-create-secrets, the audit rows each statement reads and each transaction rewrites, at most 5000 (the default).
+    --batch-pause=<duration>  With db scrub-network-create-secrets, the wait after each batch (Go duration; default 2s).
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
@@ -317,6 +322,8 @@ func main() {
 			dbSweepOrphans(opts)
 		} else if scrubClientAddresses, _ := opts.Bool("scrub-client-addresses"); scrubClientAddresses {
 			dbScrubClientAddresses(opts)
+		} else if scrubNetworkCreateSecrets, _ := opts.Bool("scrub-network-create-secrets"); scrubNetworkCreateSecrets {
+			os.Exit(dbScrubNetworkCreateSecretsCommand(opts))
 		} else if keyHistoryFloor, _ := opts.Bool("key-history-floor"); keyHistoryFloor {
 			dbKeyHistoryFloor(opts)
 		} else if closeEvidenceRetention, _ := opts.Bool("close-evidence-retention"); closeEvidenceRetention {
@@ -1467,31 +1474,6 @@ func networkFind(opts docopt.Opts) {
 		}
 		list(results)
 	}
-}
-
-func networkRemove(opts docopt.Opts) {
-	ctx := context.Background()
-
-	networkIdStr, _ := opts.String("--network_id")
-	userIdStr, _ := opts.String("--user_id")
-
-	networkId, err := server.ParseId(networkIdStr)
-	if err != nil {
-		panic(err)
-	}
-	userId, err := server.ParseId(userIdStr)
-	if err != nil {
-		panic(err)
-	}
-	// No store steps run here, so this passes no store snapshot: any active
-	// Stripe, App Store or Google Play renewal refuses the removal. Cancel it
-	// at the store (or let it end) first.
-	outcome, _ := model.RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil)
-	if outcome != model.RemoveNetworkRemoved {
-		fmt.Printf("network %s was not removed: %s\n", networkId, outcome)
-		os.Exit(1)
-	}
-	fmt.Printf("network %s removed\n", networkId)
 }
 
 // networkClientLimit shows, sets or clears the Embed plan client allowance of a

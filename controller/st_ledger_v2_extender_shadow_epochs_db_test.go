@@ -90,7 +90,7 @@ func TestStLedgerV2ExtenderShadowPlansOnlyTheTwoEpochsBeforeTheFirstEpoch(t *tes
 		chain := &stExtenderShadowCountingChain{stExtenderShadowTestChain: stExtenderShadowTestChain{
 			state: StLedgerV2State{Registered: true, FirstEpoch: 1, LastFundedEpoch: 5}, funded: map[uint64]uint256.Int{}}}
 		for _, epoch := range []uint64{4, 5} {
-			outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, epoch)
+			outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, epoch, DefaultStLedgerV2ExtenderShadowSettings())
 			if outcome.Status != model.StPublishStatusSkipped || outcome.Retry || !strings.Contains(outcome.Reason, "first epoch 8") {
 				t.Fatalf("epoch %d: %+v", epoch, outcome)
 			}
@@ -101,7 +101,7 @@ func TestStLedgerV2ExtenderShadowPlansOnlyTheTwoEpochsBeforeTheFirstEpoch(t *tes
 		if reads := chain.reads.Load(); reads != 0 {
 			t.Fatalf("the steps of epochs 4 and 5 read the chain %d times", reads)
 		}
-		if outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 6); !outcome.Retry || !strings.Contains(outcome.Reason, "not closed yet") {
+		if outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 6, DefaultStLedgerV2ExtenderShadowSettings()); !outcome.Retry || !strings.Contains(outcome.Reason, "not closed yet") {
 			t.Fatalf("epoch 6: %+v", outcome)
 		}
 		if planned := stExtenderShadowPlanned(f, 4, 5, 6, 7); planned[4] || planned[5] || !planned[6] || !planned[7] {
@@ -160,7 +160,7 @@ func TestStLedgerV2ExtenderShadowFollowsTheEntryThatFixesTheFirstEpoch(t *testin
 		served.Store("sn: 7\nsigned_amendments:\n  - line: \"" + line + "\"\n    signature: \"0x" + hex.EncodeToString(entry.Signature) + "\"\n")
 		chain := &stExtenderShadowCountingChain{stExtenderShadowTestChain: stExtenderShadowTestChain{
 			state: StLedgerV2State{Registered: true, FirstEpoch: 1, LastFundedEpoch: 8}, funded: map[uint64]uint256.Int{}}}
-		outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 6)
+		outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 6, DefaultStLedgerV2ExtenderShadowSettings())
 		if outcome.Status != model.StPublishStatusSkipped || outcome.Retry || !strings.Contains(outcome.Reason, "first epoch 9 (as the amendments name it)") {
 			t.Fatalf("epoch 6 after the start moved: %+v", outcome)
 		}

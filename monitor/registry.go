@@ -122,6 +122,7 @@ func NewSignals() []Signal {
 		NewGammaPaymentFailuresSignal(),
 		NewGammaWatcherSignal(),
 		NewStoreNotificationsSignal(),
+		NewAppleOfferCodesSignal(),
 		NewEgressOutcomesSignal(),
 		NewHMACCutoverSignal(),
 		NewProbeCleanupSignal(),

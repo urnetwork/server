@@ -29,6 +29,27 @@ var subscriptionMetricsActiveAccountsDesc = prometheus.NewDesc(
 	nil,
 )
 
+var subscriptionMetricsInGraceAccountsDesc = prometheus.NewDesc(
+	"urnetwork_subscription_in_grace_accounts",
+	"Distinct networks past due: a current supporter window but none that still covers now with the period it paid for (a grace after a failed or cancelled renewal, a store's billing grace hold, or the day after a free trial), per tracked store and deduplicated across stores. They count in urnetwork_subscription_active_accounts too.",
+	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsPaymentFailuresOpenDesc = prometheus.NewDesc(
+	"urnetwork_subscription_payment_failures_open",
+	"Failed subscription renewals still failing now (no payment, void, uncollectible mark or subscription end since), per store that records them.",
+	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsPaymentFailuresResolvedDesc = prometheus.NewDesc(
+	"urnetwork_subscription_payment_failures_resolved",
+	"Failed subscription renewals that stopped failing inside the rolling window, per store and reason: paid, voided, uncollectible, or subscription_ended.",
+	[]string{"store", "reason", "window"},
+	nil,
+)
+
 var subscriptionMetricsTrialsActiveDesc = prometheus.NewDesc(
 	"urnetwork_subscription_trials_active",
 	"Distinct networks inside a free trial now (nothing charged yet), per tracked store and plan, plus deduplicated across stores. They count in urnetwork_subscription_active_accounts too.",
@@ -108,6 +129,9 @@ var subscriptionMetricsSnapshotTimestampDesc = prometheus.NewDesc(
 
 var subscriptionMetricsDescs = []*prometheus.Desc{
 	subscriptionMetricsActiveAccountsDesc,
+	subscriptionMetricsInGraceAccountsDesc,
+	subscriptionMetricsPaymentFailuresOpenDesc,
+	subscriptionMetricsPaymentFailuresResolvedDesc,
 	subscriptionMetricsTrialsActiveDesc,
 	subscriptionMetricsNewPaidAccountsDesc,
 	subscriptionMetricsEngagedAccountsDesc,
@@ -206,12 +230,20 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 	metrics := []prometheus.Metric{}
 	stores := append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreDeduplicated)
 	for _, store := range stores {
-		metrics = append(metrics, prometheus.MustNewConstMetric(
-			subscriptionMetricsActiveAccountsDesc,
-			prometheus.GaugeValue,
-			float64(snapshot.ActiveAccounts[store]),
-			store,
-		))
+		metrics = append(metrics,
+			prometheus.MustNewConstMetric(
+				subscriptionMetricsActiveAccountsDesc,
+				prometheus.GaugeValue,
+				float64(snapshot.ActiveAccounts[store]),
+				store,
+			),
+			prometheus.MustNewConstMetric(
+				subscriptionMetricsInGraceAccountsDesc,
+				prometheus.GaugeValue,
+				float64(snapshot.InGraceAccounts[store]),
+				store,
+			),
+		)
 		for _, plan := range model.SubscriptionMetricsPlans() {
 			metrics = append(metrics, prometheus.MustNewConstMetric(
 				subscriptionMetricsTrialsActiveDesc,
@@ -251,6 +283,30 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 				store,
 				window,
 			))
+		}
+	}
+
+	// every store that records failed renewals, reason and window, zero
+	// included
+	for _, store := range model.SubscriptionMetricsPaymentFailureStores() {
+		metrics = append(metrics, prometheus.MustNewConstMetric(
+			subscriptionMetricsPaymentFailuresOpenDesc,
+			prometheus.GaugeValue,
+			float64(snapshot.PaymentFailuresOpen[store]),
+			store,
+		))
+		for _, reason := range model.SubscriptionMetricsPaymentFailureResolveReasons() {
+			for _, window := range model.SubscriptionMetricsWindows() {
+				key := model.SubscriptionMetricsStoreReasonWindow{Store: store, Reason: reason, Window: window}
+				metrics = append(metrics, prometheus.MustNewConstMetric(
+					subscriptionMetricsPaymentFailuresResolvedDesc,
+					prometheus.GaugeValue,
+					float64(snapshot.PaymentFailuresResolved[key]),
+					store,
+					reason,
+					window,
+				))
+			}
 		}
 	}
 
