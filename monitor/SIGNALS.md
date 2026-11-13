@@ -8545,7 +8545,9 @@ only says how long is left, not why. Facts on 10-22:
   (completion + 7 days), and subsidy payouts stopped with the epoch that ended
   2026-10-05. Rows therefore wait for the 300-day straggler horizon
   (`StragglerContractExpiration`); the first reach it on 2027-03-28. See
-  `server/CONTRACT-PARTITION.md`.
+  `server/CONTRACT-PARTITION.md`. Since 2026-11-01 the contract horizon reaper
+  (§2.4r) deletes them past its horizon instead, and check 2 below retired on
+  2026-11-13.
 - **`client_reliability` retention was pinned to the last subsidy epoch.**
   `clientReliabilityRetentionCutoffBlock` kept blocks from that epoch's end
   minus one day (2026-10-05) for the next payout, so the nightly drops stopped
@@ -8571,30 +8573,31 @@ only says how long is left, not why. Facts on 10-22:
 Checks, all cheap and read-only:
 1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
    The frontier no longer holds any retention, so its age is not a finding.
-2. Contract reap stamping: `TABLESAMPLE SYSTEM (0.0002)` on `transfer_contract`.
-   WARN `contract-reap-stalled` when fewer than 5% of sampled rows older than
-   14 days have `reap_time`.
+2. Retired 2026-11-13: contract reap stamping (`contract-reap-stalled`). Only
+   a completed USDC payout stamped `reap_time`, and USDC provider payouts
+   ended (owner decision 2026-11-13: "settle closed rows, let's close out usdc
+   entirely"), so the stamped share only falls. The contract horizon reaper
+   (§2.4r) reclaims contracts without `reap_time`, the payments the USDC
+   close-out closed included (`server.AccountPaymentRetentionSettledSql`), and
+   §2.4r watches it.
 3. Partition drop: WARN `partition-retention-stuck` when the oldest non-empty
    partition's upper bound is more than 2 days past its retention.
 4. Per relation over 100 GB: report net growth over 7 days with no deletes
    (`n_tup_del` unchanged) to the owners. This is a list, not an alert.
 
-Implementation (2026-10-22). Hourly, two bounded read-only queries run on
-the single enabled `pg-primary`, each behind a `hostname -s`, primary-role and
-30-second statement-clock guard. A catalog read returns the
-`client_reliability` parent's kind and every
+Implementation (2026-10-22; the reap sample retired 2026-11-13). Hourly, one
+bounded read-only query runs on the single enabled `pg-primary`, behind a
+`hostname -s`, primary-role and 30-second statement-clock guard. The catalog
+read returns the `client_reliability` parent's kind and every
 attached partition's name and heap size (at most 4,096), the statistics reset
 and postmaster start, and the public relations of at least 100 GB with their
 insert and delete counters, in fixed ten-cell frames bound by an end row. A
-second read counts `transfer_contract TABLESAMPLE SYSTEM (0.0002)` rows, rows
-older than 14 days, and those with `reap_time`. A failure in one read leaves
-only its own checks unknown. Targets are the primary's name plus a fixed
-check name; only counts, ages and fixed names leave SQL.
+failed read leaves the check unknown. The target is the primary's name plus a
+fixed check name; only counts, ages and fixed names leave SQL. A watcher that
+still holds a `contract-reap-stalled` incident clears it after two complete
+runs: the signal reports neither the class nor an unknown state for its
+target.
 
-- `contract-reap-stalled` (target `<primary>/contract-reap`, sustain 2,
-  because the page sample is random per run): fewer than 5% of at least 20
-  sampled rows older than 14 days have `reap_time`. A sample under 100 rows is
-  unknown; fewer than 20 old rows is a young table and healthy.
 - `partition-retention-stuck` (target
   `<primary>/client-reliability-partitions`, sustain 1): the oldest
   `client_reliability_pYYYYMMDD` partition whose heap holds a page has an
@@ -8612,34 +8615,34 @@ check name; only counts, ages and fixed names leave SQL.
   plain lowercase identifiers. A shorter window is
   `unqualified-stats-window`; old deletes outside the window can hide a
   relation, so the list is a lower bound.
-- `retention-liveness-unobservable` (per check target, sustain 2): no or
-  several primaries, a failed read, a wrong host or role, a skewed clock, an
+- `retention-liveness-unobservable` (target
+  `<primary>/client-reliability-partitions`, sustain 2): no or several
+  primaries, a failed read, a wrong host or role, a skewed clock, an
   incomplete or malformed frame.
 
 Every tunable, including the mirrored reliability horizon, is a field of
-`RetentionLivenessSettings`. Synthetic controls replay the 2026-10-22 state
-(0.75% stamped, the `st_client_key_history` append-only list, an old subsidy
-frontier that raises nothing), the 2026-10-31 state (27 days kept behind the
-frontier, judged stuck by the 21-day rule), every partition cutoff branch,
-reap share edges and sample sufficiency, malformed frames and failed reads,
-the list's window and name rules, inventory authority and cancellation.
+`RetentionLivenessSettings`. Synthetic controls replay the 2026-11-13 state
+(0.75% stamped, the `st_client_key_history` append-only list, nothing raised
+and the reap sample never read), a held `contract-reap-stalled` incident
+clearing after two complete runs, the 2026-10-31 state (27 days kept behind
+the frontier, judged stuck by the 21-day rule), every partition cutoff
+branch, malformed frames and failed reads, the list's window and name rules,
+inventory authority and cancellation.
 
 ACTION: retention horizons are owner decisions. Never drop
 `client_reliability` days inside the 10-day retention by hand: operator block
 points read a completed block's window, and a missing reliability block cuts
-provider credit. VERIFY: a complete observation inside each line on the next
-runs (two for the sampled check).
+provider credit. VERIFY: a complete observation inside the line on the next
+run.
 
 Partitioned contract tables (2026-10-23, `server/CONTRACT-PARTITION.md`).
-`TABLESAMPLE SYSTEM` on the partitioned `transfer_contract` samples the same
-share of every partition's pages, so `contract-reap-stalled` keeps its meaning;
-its context then notes that weeks past the 13-week horizon leave by partition
-drops (§2.4i). Check 4 counts a contract partition toward its contract table
+Check 4 counts a contract partition toward its contract table
 (sizes, inserts and deletes summed, the 100 GB line on the sum) and marks it
 `partitioned=true reclaimed_by=partition-drops`: a dropped week's deletes leave
 with its partition's statistics, so a partitioned table reads as append-only
-by construction. The catalog frame's ninth cell carries `transfer_contract`'s
-kind. A native PostgreSQL 18 test runs both reads before and after a cutover.
+by construction. The catalog frame's ninth cell, once `transfer_contract`'s
+kind for the reap sample, stays empty. A native PostgreSQL 18 test runs the
+catalog read before and after a cutover.
 
 ### 2.4h Contract partition runway — inserts past the last partition fail
 Probe: `contract-partition-runway`
@@ -28790,7 +28793,7 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 |---|---|---|---|
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
-| contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
+| partition-retention-stuck (contract-reap-stalled retired 2026-11-13) | pg | §2.4g | WARN |
 | contract-horizon-reaper-stalled / contract-horizon-reaper-failing / contract-horizon-control-unavailable / contract-horizon-reaper-behind / contract-horizon-block-points-holding / contract-horizon-reaper-unobservable | Mimir taskworker metrics | §2.4r, added 2026-11-01 after the 35-day horizon review, implemented by `contract-horizon-reaper` | WARN: no run in 1 h; 3 error or control-unavailable runs without progress in 1 h; lag growth of 2 h in 6 h while on; any block points keep |
 | usage-archive-hash-budget / usage-archive-hash-budget-unobservable | pg catalog | §2.4s, implemented by `usage-archive-hash-budget` | WARN when twice the largest archive week passes half of work_mem * hash_mem_multiplier / 64 B |
 | contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover | runway PAGE under 2 covered future weeks; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its week |
