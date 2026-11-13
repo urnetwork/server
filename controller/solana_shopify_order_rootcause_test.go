@@ -40,10 +40,10 @@ const (
 	solanaShopifyTestMemo = "6a0b1c2d3e4f5a6b7c8d9e0f-c3ludGhldGljLXNob3BpZnktbWVtby1oYXNoLTE="
 )
 
-// solanaShopifyTestParsedPayment is a finalized payment as the app builds it,
-// in the jsonParsed shape the receiver leg reads: the app's program splits the
-// buyer's USDC between our receiver (share) and the app's two fee accounts
-// (feeA, feeB), the app pays the fee, and a memo names the app's session.
+// A finalized payment as the app builds it, in the jsonParsed shape the
+// receiver leg reads: the app's program splits the buyer's USDC between our
+// receiver (share) and the app's two fee accounts (feeA, feeB), the app pays
+// the fee, and a memo names the app's session.
 func solanaShopifyTestParsedPayment(signature string, slot uint64, blockTime time.Time, receiver string, receiverToken string, share int64, feeA int64, feeB int64) *solanaReceiverFakeTransaction {
 	const buyerBefore = 1_000_000_000
 	total := share + feeA + feeB
@@ -128,9 +128,9 @@ func solanaShopifyTestParsedPayment(signature string, slot uint64, blockTime tim
 	}
 }
 
-// solanaShopifyTestHeliusPayment is the same payment as Helius's enhanced
-// transaction delivers it to the webhook: its token transfers, each with its
-// source and destination token accounts, its instructions and its memo.
+// The same payment as Helius's enhanced transaction delivers it to the
+// webhook: its token transfers, each with its source and destination token
+// accounts, its instructions and its memo.
 func solanaShopifyTestHeliusPayment(signature string, blockTime time.Time, receiver string, receiverToken string, share int64, feeA int64, feeB int64) *SolanaTransaction {
 	transfer := func(destinationToken string, destinationOwner string, amount int64) TokenTransfer {
 		uiAmount, _ := strconv.ParseFloat(cryptoFormatAtomic(amount, 6), 64)

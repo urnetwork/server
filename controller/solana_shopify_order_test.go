@@ -28,8 +28,7 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// solanaShopifyTestStore is the store's order record and the recorded order
-// payments, in memory.
+// The store's order record and the recorded order payments, in memory.
 type solanaShopifyTestStore struct {
 	orders []*solanaShopifyOrder
 	// an error every lookup answers
@@ -39,8 +38,8 @@ type solanaShopifyTestStore struct {
 	recorded map[string]*model.SolanaShopifyOrderPayment
 }
 
-// newSolanaShopifyTestStore replaces the order lookup and the recorded
-// payments with an empty store for the rest of the test.
+// Replaces the order lookup and the recorded payments with an empty store
+// for the rest of the test.
 func newSolanaShopifyTestStore(t *testing.T) *solanaShopifyTestStore {
 	store := &solanaShopifyTestStore{recorded: map[string]*model.SolanaShopifyOrderPayment{}}
 	previousOrders := solanaShopifyOrdersAround
@@ -88,8 +87,8 @@ func newSolanaShopifyTestStore(t *testing.T) *solanaShopifyTestStore {
 	return store
 }
 
-// order adds an order paid with Solana Pay: a successful sale of totalCents
-// USD processed at processedAt.
+// Adds an order paid with Solana Pay: a successful sale of totalCents USD
+// processed at processedAt.
 func (self *solanaShopifyTestStore) order(name string, totalCents int64, processedAt time.Time) *solanaShopifyOrder {
 	order := &solanaShopifyOrder{
 		id:       "gid://shopify/Order/synthetic-" + strings.TrimPrefix(name, "#"),
@@ -109,7 +108,7 @@ func (self *solanaShopifyTestStore) order(name string, totalCents int64, process
 	return order
 }
 
-// orderNames are the recorded payments, signature to order name.
+// The recorded payments, signature to order name.
 func (self *solanaShopifyTestStore) orderNames() map[string]string {
 	names := map[string]string{}
 	for signature, payment := range self.recorded {
@@ -118,10 +117,10 @@ func (self *solanaShopifyTestStore) orderNames() map[string]string {
 	return names
 }
 
-// solanaShopifyTestShop makes the store's order record one order paid with
-// Solana Pay, a sale of totalCents USD processed at processedAt, for the rest
-// of the test, and lists what is recorded as Shopify orders' payments,
-// signature to order name.
+// Makes the store's order record one order paid with Solana Pay, a sale of
+// totalCents USD processed at processedAt, for the rest of the test, and
+// lists what is recorded as Shopify orders' payments, signature to order
+// name.
 func solanaShopifyTestShop(t *testing.T, orderName string, totalCents int64, processedAt time.Time) func() map[string]string {
 	store := newSolanaShopifyTestStore(t)
 	store.order(orderName, totalCents, processedAt)
@@ -134,8 +133,8 @@ const (
 	solanaShopifyTestReceiverToken = "SynthReceiverToken9999999999999999999999999"
 )
 
-// solanaShopifyTestWebhook makes the test receiver ours and installs the
-// webhook's unfulfilled store, for the rest of the test.
+// Makes the test receiver ours and installs the webhook's unfulfilled store,
+// for the rest of the test.
 func solanaShopifyTestWebhook(t *testing.T, receiverLegRuns bool) *solanaFakeUnfulfilledStore {
 	previousReceivers := solanaReceiverAddresses
 	previousLegRuns := heliusReceiverLegRuns
@@ -504,4 +503,76 @@ func TestSolanaShopifyAdminApiReadsTheOrdersAroundABlock(t *testing.T) {
 	_, configured, err := solanaShopifyOrdersAround(context.Background(), blockTime, settings)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, configured, false)
+}
+
+// Serves the Admin API locally for the rest of the test: a client credentials
+// token, and every order lookup answered with ordersAnswer().
+func solanaShopifyTestAdminServer(t *testing.T, ordersAnswer func() string) {
+	shopifyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/admin/oauth/access_token":
+			fmt.Fprint(w, `{"access_token":"synthetic-access-token","expires_in":86399}`)
+		case "/admin/api/2026-07/graphql.json":
+			fmt.Fprint(w, ordersAnswer())
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(shopifyServer.Close)
+	previousCredentials := solanaShopifyCredentialsFunc
+	previousBaseUrl := solanaShopifyBaseUrl
+	solanaShopifyCredentialsFunc = func() (*solanaShopifyCredentials, bool) {
+		return &solanaShopifyCredentials{shop: "synthetic-store.example", apiVersion: "2026-07", clientId: "synthetic-client", clientSecret: "synthetic-client-secret"}, true
+	}
+	solanaShopifyBaseUrl = func(shop string) string { return shopifyServer.URL }
+	solanaShopifyTokensLock.Lock()
+	solanaShopifyTokens = map[string]*solanaShopifyToken{}
+	solanaShopifyTokensLock.Unlock()
+	t.Cleanup(func() {
+		solanaShopifyCredentialsFunc = previousCredentials
+		solanaShopifyBaseUrl = previousBaseUrl
+		solanaShopifyTokensLock.Lock()
+		solanaShopifyTokens = map[string]*solanaShopifyToken{}
+		solanaShopifyTokensLock.Unlock()
+	})
+}
+
+// A lookup that finds more orders in the window than one lookup reads cannot
+// show that an order it read is the only one paid with the payment's total:
+// the payment is unverified and keeps today's behaviour, though the orders
+// read hold one match. The same order record within one lookup's reach is
+// the payment's order.
+func TestSolanaShopifyOrderIsUnverifiedPastOneLookupsOrders(t *testing.T) {
+	previousReceivers := solanaReceiverAddresses
+	previousRecord := solanaShopifyRecord
+	recorded := map[string]string{}
+	solanaReceiverAddresses = []string{solanaShopifyTestReceiver}
+	solanaShopifyRecord = func(connOwner server.PgConn, ctx context.Context, payment *model.SolanaShopifyOrderPayment) bool {
+		recorded[payment.TxSignature] = payment.OrderName
+		return true
+	}
+	t.Cleanup(func() {
+		solanaReceiverAddresses = previousReceivers
+		solanaShopifyRecord = previousRecord
+	})
+	morePages := true
+	solanaShopifyTestAdminServer(t, func() string {
+		return fmt.Sprintf(`{"data":{"orders":{"edges":[{"node":{"id":"gid://shopify/Order/synthetic-1007","name":"#1007","paymentGatewayNames":["Solana Pay"],"transactions":[{"kind":"SALE","status":"SUCCESS","gateway":"Solana Pay","processedAt":"2026-11-13T10:14:12Z","paymentId":"synthetic-payment-1007","amountSet":{"shopMoney":{"amount":"143.97","currencyCode":"USD"}}}]}}],"pageInfo":{"hasNextPage":%t}}}}`, morePages)
+	})
+	blockTime := time.Date(2026, 11, 13, 10, 15, 2, 0, time.UTC)
+	payment := solanaShopifyTestHeliusPayment("full", blockTime, solanaShopifyTestReceiver, solanaShopifyTestReceiverToken, 142_530_300, 1_295_730, 143_970)
+	settings := DefaultSolanaShopifyOrderSettings()
+
+	outcome, note, err := solanaRecognizeShopifyOrder(nil, context.Background(), payment, 142.5303, model.SolanaShopifyOrderLegReceiver, settings, false)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, outcome, solanaShopifyUnverified)
+	connect.AssertEqual(t, strings.Contains(note, fmt.Sprintf("more than %d Shopify orders", settings.OrdersPerLookup)), true)
+	connect.AssertEqual(t, len(recorded), 0)
+
+	morePages = false
+	outcome, note, err = solanaRecognizeShopifyOrder(nil, context.Background(), payment, 142.5303, model.SolanaShopifyOrderLegReceiver, settings, false)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, outcome, solanaShopifyRecorded)
+	connect.AssertEqual(t, note, "")
+	connect.AssertEqual(t, recorded, map[string]string{"full": "#1007"})
 }

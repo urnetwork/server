@@ -547,9 +547,8 @@ func (self *solanaNativeWallet) CheckNetwork(ctx context.Context) error {
 
 // ----- a jsonParsed transaction as the Helius webhook's decision reads it -----
 
-// solanaTransactionFromParsed is a finalized jsonParsed transaction in the
-// shape of a Helius enhanced transaction, as far as solanaDecidePayment reads
-// one:
+// A finalized jsonParsed transaction in the shape of a Helius enhanced
+// transaction, as far as solanaDecidePayment reads one:
 //
 //   - Type TRANSFER when a USDC token account owned by one of our receivers
 //     gained USDC, else UNKNOWN (the decision skips it);

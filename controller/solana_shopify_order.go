@@ -22,11 +22,13 @@ package controller
 //     store app's client credentials, as the support tool reads orders):
 //     exactly one order paid through the Solana Pay gateway has a successful
 //     sale of exactly the payment's total, processed within MatchWindow of
-//     the block, and no other recorded payment holds that order. The total is
-//     all the USDC the paying token account sent out in the transaction, our
-//     share and the app's fee together, which is the order's total to the
-//     cent (16 of 16 orders paid 2025-11 to 2026-02, swaps through Jupiter
-//     included, matched their order this way and no other).
+//     the block (one lookup reads every order processed in the window, or
+//     none is verified), and no other recorded payment holds that order. The
+//     total is all the USDC the paying token account sent out in the
+//     transaction, our share and the app's fee together, which is the
+//     order's total to the cent (16 of 16 orders paid 2025-11 to 2026-02,
+//     swaps through Jupiter included, matched their order this way and no
+//     other).
 //
 // Anything else keeps today's behaviour: a payment no order record verifies
 // is recorded as no_intent and pages. Shopify makes its order a few seconds
@@ -87,7 +89,8 @@ type SolanaShopifyOrderSettings struct {
 	// Non-positive matches nothing.
 	MatchWindow time.Duration
 	// The most orders one lookup reads: the store's orders processed in the
-	// window around the block.
+	// window around the block. A window with more verifies no payment in it,
+	// since an order past the lookup could hold the same total.
 	OrdersPerLookup int
 	// One Admin API request is abandoned after this long.
 	RequestTimeout time.Duration
@@ -143,7 +146,8 @@ type solanaShopifyOrderTransaction struct {
 
 // The store's orders processed within the match window of at. configured =
 // false when no Shopify integration is configured (vault shopify.yml).
-// Replaceable only by tests.
+// errSolanaShopifyOrdersPastLookup: the window holds more orders than one
+// lookup reads. Replaceable only by tests.
 var solanaShopifyOrdersAround = func(ctx context.Context, at time.Time, settings *SolanaShopifyOrderSettings) (orders []*solanaShopifyOrder, configured bool, returnErr error) {
 	credentials, ok := solanaShopifyCredentialsFunc()
 	if !ok {
@@ -152,6 +156,10 @@ var solanaShopifyOrdersAround = func(ctx context.Context, at time.Time, settings
 	orders, err := solanaShopifyReadOrders(ctx, credentials, at, settings)
 	return orders, true, err
 }
+
+// The window of an order lookup holds more orders than one lookup reads, so
+// no order it read is known to be the only one of its total.
+var errSolanaShopifyOrdersPastLookup = errors.New("shopify orders: more orders in the window than one lookup reads")
 
 // The write of a recognized payment. Replaceable only by tests.
 var solanaShopifyRecord = model.RecordSolanaShopifyOrderPaymentInConn
@@ -279,6 +287,10 @@ func solanaRecognizeShopifyOrder(
 	orders, configured, err := solanaShopifyOrdersAround(ctx, blockTime, settings)
 	if !configured {
 		return solanaShopifyNotApplicable, "", nil
+	}
+	if errors.Is(err, errSolanaShopifyOrdersPastLookup) {
+		// final for this payment: the orders of a window it read do not go away
+		return solanaShopifyUnverified, fmt.Sprintf("more than %d Shopify orders were processed within %s of the block, so no one order is verified as the payment's", settings.OrdersPerLookup, settings.MatchWindow), nil
 	}
 	if err != nil {
 		return solanaShopifyUnverified, "", err
@@ -446,13 +458,15 @@ func solanaShopifyAccessToken(ctx context.Context, credentials *solanaShopifyCre
 }
 
 // The order lookup: the store's orders processed in a window, with their
-// payment transactions.
+// payment transactions, and whether the window holds more.
 const solanaShopifyOrdersQuery = `query($q: String!, $first: Int!) { orders(first: $first, query: $q, sortKey: PROCESSED_AT) { edges { node {
   id name paymentGatewayNames
   transactions(first: 20) { kind status gateway processedAt paymentId amountSet { shopMoney { amount currencyCode } } }
-} } } }`
+} } pageInfo { hasNextPage } } }`
 
-// The store's orders processed within the match window of at.
+// The store's orders processed within the match window of at;
+// errSolanaShopifyOrdersPastLookup when the window holds more than
+// OrdersPerLookup.
 func solanaShopifyReadOrders(ctx context.Context, credentials *solanaShopifyCredentials, at time.Time, settings *SolanaShopifyOrderSettings) ([]*solanaShopifyOrder, error) {
 	token, err := solanaShopifyAccessToken(ctx, credentials, settings)
 	if err != nil {
@@ -493,6 +507,9 @@ func solanaShopifyReadOrders(ctx context.Context, credentials *solanaShopifyCred
 						} `json:"transactions"`
 					} `json:"node"`
 				} `json:"edges"`
+				PageInfo struct {
+					HasNextPage bool `json:"hasNextPage"`
+				} `json:"pageInfo"`
 			} `json:"orders"`
 		} `json:"data"`
 		Errors []any `json:"errors"`
@@ -503,6 +520,9 @@ func solanaShopifyReadOrders(ctx context.Context, credentials *solanaShopifyCred
 	}
 	if 0 < len(answer.Errors) {
 		return nil, fmt.Errorf("shopify orders: %d graphql errors", len(answer.Errors))
+	}
+	if answer.Data.Orders.PageInfo.HasNextPage {
+		return nil, errSolanaShopifyOrdersPastLookup
 	}
 	orders := []*solanaShopifyOrder{}
 	for _, edge := range answer.Data.Orders.Edges {
