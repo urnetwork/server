@@ -1524,31 +1524,6 @@ func networkFind(opts docopt.Opts) {
 	}
 }
 
-func networkRemove(opts docopt.Opts) {
-	ctx := context.Background()
-
-	networkIdStr, _ := opts.String("--network_id")
-	userIdStr, _ := opts.String("--user_id")
-
-	networkId, err := server.ParseId(networkIdStr)
-	if err != nil {
-		panic(err)
-	}
-	userId, err := server.ParseId(userIdStr)
-	if err != nil {
-		panic(err)
-	}
-	// No store steps run here, so this passes no store snapshot: any active
-	// Stripe, App Store or Google Play renewal refuses the removal. Cancel it
-	// at the store (or let it end) first.
-	outcome, _ := model.RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil)
-	if outcome != model.RemoveNetworkRemoved {
-		fmt.Printf("network %s was not removed: %s\n", networkId, outcome)
-		os.Exit(1)
-	}
-	fmt.Printf("network %s removed\n", networkId)
-}
-
 // networkClientLimit shows, sets or clears the Embed plan client allowance of a
 // network (model/network_client_limit_model.go): an Embed plan sets the
 // network's client allowance — the top-level client limit and the concurrent

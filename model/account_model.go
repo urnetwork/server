@@ -238,6 +238,24 @@ func RemoveNetworkWithStoreSnapshot(
 	adminUserId *server.Id,
 	storeSnapshot *RemoveNetworkStoreSnapshot,
 ) (outcome RemoveNetworkOutcome, userAuths map[string]bool) {
+	return RemoveNetworkWithRemovals(ctx, networkId, adminUserId, storeSnapshot, nil)
+}
+
+// RemoveNetworkWithRemovals is RemoveNetworkWithStoreSnapshot that hands the
+// network's sign-in user auths (password and SSO logins) to
+// scheduleRemovalsInTx inside the removal's own transaction, before they are
+// deleted. What it queues there with tx, the removal of each address from
+// Brevo (controller.RemoveNetworkAndContacts), commits with the removal or not
+// at all: a refused or failed removal queues nothing, and a removed network
+// cannot leave its addresses behind unqueued. A nil scheduleRemovalsInTx
+// queues nothing. It must use tx and acquire no other database connection.
+func RemoveNetworkWithRemovals(
+	ctx context.Context,
+	networkId server.Id,
+	adminUserId *server.Id,
+	storeSnapshot *RemoveNetworkStoreSnapshot,
+	scheduleRemovalsInTx func(tx server.PgTx, userAuths map[string]bool),
+) (outcome RemoveNetworkOutcome, userAuths map[string]bool) {
 	var posts []server.PostFunction
 	retirementId := server.NewId()
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -336,6 +354,11 @@ func RemoveNetworkWithStoreSnapshot(
 				userAuths[userAuth] = true
 			}
 		})
+
+		// queued while the addresses still exist, in the removal's transaction
+		if scheduleRemovalsInTx != nil {
+			scheduleRemovalsInTx(tx, userAuths)
+		}
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for userId, _ := range userIds {
