@@ -11525,4 +11525,11 @@ var migrations = []any{
 	// five-second lock bound. Nothing existing is locked or rewritten. Apply
 	// before deploying the taskworker that runs the scans.
 	cryptoAddressSweepMigration,
+
+	// The Shopify orders paid with Solana Pay (solana_shopify_order_schema.go,
+	// controller/solana_shopify_order.go): one new empty table, created only
+	// when absent, under a five-second lock bound. Nothing existing is locked
+	// or rewritten. Apply before deploying the api and alt (the Helius
+	// webhook) and the taskworker (the Solana reconcile) that use it.
+	solanaShopifyOrderPaymentMigration,
 }

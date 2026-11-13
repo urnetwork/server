@@ -16,14 +16,20 @@ package controller
 // durable cursor per token account (solana_receiver_sweep_cursor), oldest
 // first. A transaction younger than the minimum age is left to the webhook for
 // now. A transaction that a record already names (an intent it paid, a renewal
-// or a balance keyed by it, a crypto receipt, an unfulfilled record) is passed
-// over without a read. Every other one is read (getTransaction, jsonParsed)
-// and, when it moved at least the dust amount of USDC into a receiver, put
-// through the webhook's own decision and acted on as the chain leg acts:
+// or a balance keyed by it, a crypto receipt, an unfulfilled record, a
+// Shopify order it paid) is passed over without a read. Every other one is
+// read (getTransaction, jsonParsed) and, when it moved at least the dust
+// amount of USDC into a receiver, put through the webhook's own decision and
+// acted on as the chain leg acts:
 //
 //   - credited only when an intent matches it, through that intent's one-shot
 //     (an open intent by its reference, or an unambiguous unique amount): the
 //     credit the webhook would have made;
+//   - a payment of one of our Shopify store's orders, made with Solana Pay
+//     into the same receiver, that its order record verifies
+//     (solana_shopify_order.go): recorded as the order's payment, never
+//     credited and never paging. A failed order lookup is an error event and
+//     the transaction is read again next run;
 //   - otherwise recorded once in solana_unfulfilled_payment (no_intent with
 //     the sender, the amount, the on-chain time, the account keys and why
 //     nothing matched; underpaid for an open intent's shortfall), which the
@@ -73,6 +79,9 @@ type SolanaReceiverSweepSettings struct {
 	// The RPC calls the leg takes from the Solana store's budget in one run,
 	// so a backlog never starves the other legs; the next run goes on.
 	MaxCallsPerRun int
+	// The lookup of a Shopify order's Solana Pay payment
+	// (solana_shopify_order.go).
+	ShopifyOrders *SolanaShopifyOrderSettings
 }
 
 // A new instance on every call.
@@ -90,6 +99,7 @@ func DefaultSolanaReceiverSweepSettings() *SolanaReceiverSweepSettings {
 		MaxPages: 10,
 		// a fifth of the store's default budget (paymentReconcileApiBudget)
 		MaxCallsPerRun: 100,
+		ShopifyOrders:  DefaultSolanaShopifyOrderSettings(),
 	}
 }
 
@@ -310,7 +320,14 @@ func reconcileSolanaReceivers(run *paymentReconcileRun) {
 					if transaction.Type == "TRANSFER" && settings.DustUsd <= receivedUsd(transaction) {
 						readCount += 1
 						run.examine(store)
-						if !solanaChainAct(run, store, signature.Signature, solanaDecidePayment(transaction, lookups), solanaReceiverLegName) {
+						decision := solanaDecidePayment(transaction, lookups)
+						recognized, err := solanaReceiverShopifyOrder(run, transaction, decision, settings)
+						if err != nil {
+							fail(tokenAccount, err)
+							stopped = true
+							break
+						}
+						if !recognized && !solanaChainAct(run, store, signature.Signature, decision, solanaReceiverLegName) {
 							stopped = true
 							break
 						}
@@ -330,6 +347,45 @@ func reconcileSolanaReceivers(run *paymentReconcileRun) {
 	if 0 < readCount {
 		glog.Infof("[reconcile]solana: the receiver leg examined %d transfers\n", readCount)
 	}
+}
+
+// solanaReceiverShopifyOrder recognizes a payment the decision would record
+// as no_intent as a Shopify order's (solana_shopify_order.go): recognized =
+// true when it is recorded as the order's payment (a dry run writes nothing),
+// and nothing else is done with it. A Solana Pay app payment no order record
+// verifies keeps today's no_intent record, with why in its note. err: the
+// order lookup failed; the leg reads the transaction again next run.
+func solanaReceiverShopifyOrder(
+	run *paymentReconcileRun,
+	transaction *SolanaTransaction,
+	decision *solanaPaymentDecision,
+	settings *SolanaReceiverSweepSettings,
+) (recognized bool, returnErr error) {
+	if decision.action != solanaPaymentActionRecord || decision.unfulfilled.Reason != model.SolanaUnfulfilledReasonNoIntent {
+		return false, nil
+	}
+	shopifySettings := settings.ShopifyOrders
+	if shopifySettings == nil {
+		shopifySettings = DefaultSolanaShopifyOrderSettings()
+	}
+	leg := model.SolanaShopifyOrderLegReceiver
+	outcome, note, err := solanaRecognizeShopifyOrder(run.connOwner, run.clientSession.Ctx, transaction, decision.unfulfilled.TokenAmountUsd, leg, shopifySettings, run.dryRun)
+	switch {
+	case err != nil:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "error").Inc()
+		return false, fmt.Errorf("the Shopify order lookup: %w", err)
+	case outcome == solanaShopifyRecorded:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "recorded").Inc()
+		return true, nil
+	case outcome == solanaShopifyUnverified:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "unverified").Inc()
+		matchNote := "a Solana Pay app payment no Shopify order verifies: " + note
+		if decision.unfulfilled.MatchNote != nil {
+			matchNote = *decision.unfulfilled.MatchNote + "; " + matchNote
+		}
+		decision.unfulfilled.MatchNote = &matchNote
+	}
+	return false, nil
 }
 
 // A token account's cursor at a listed signature.

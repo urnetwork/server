@@ -2712,6 +2712,15 @@ func HeliusWebhook(
 			skipMessage = decision.skipMessage
 			continue
 		case solanaPaymentActionRecord:
+			// a payment of one of our Shopify store's orders, made with Solana
+			// Pay into the same receiver, bought an order, not an app purchase:
+			// recorded as the order's, or left to the receiver leg while Shopify
+			// cannot verify it yet (solana_shopify_order.go)
+			if decision.unfulfilled.Reason == model.SolanaUnfulfilledReasonNoIntent &&
+				heliusShopifyOrderPayment(clientSession, transaction, decision.unfulfilled.TokenAmountUsd) {
+				skipMessage = "A Shopify order's payment"
+				continue
+			}
 			// Money arrived at our address and bought nothing. Helius is still acked
 			// 200 (it never re-examines a delivered tx) once it is recorded where an
 			// operator can see and repair it.
@@ -2775,6 +2784,56 @@ func HeliusWebhook(
 		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
 	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
+}
+
+// Whether the receiver leg of the Solana reconcile runs (helius.yml names
+// the RPC key it reads the chain with), so the webhook can leave a payment to
+// it. Replaceable only by tests.
+var heliusReceiverLegRuns = func() bool {
+	_, ok := solanaChainRpcUrl()
+	return ok
+}
+
+// heliusShopifyOrderPayment is the webhook's Shopify branch for a payment it
+// would record as no_intent: true when the payment is a Shopify order's,
+// recorded as the order's payment, or a Solana Pay app payment Shopify cannot
+// verify yet (its order may be made seconds after the block; the lookup may
+// fail) that the receiver leg reads after its minimum age and decides. false
+// keeps today's behaviour: the payment is recorded as no_intent. A
+// redelivery of a payment already recorded as an order's is true at once.
+func heliusShopifyOrderPayment(clientSession *session.ClientSession, transaction *SolanaTransaction, receivedUsd float64) bool {
+	ctx := clientSession.Ctx
+	if !solanaShopifyAppPayment(transaction) {
+		return false
+	}
+	if heliusShopifyOrderRecorded(ctx, transaction.Signature) {
+		return true
+	}
+	leg := model.SolanaShopifyOrderLegWebhook
+	outcome, note, err := solanaRecognizeShopifyOrder(nil, ctx, transaction, receivedUsd, leg, DefaultSolanaShopifyOrderSettings(), false)
+	switch {
+	case err != nil:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "error").Inc()
+		glog.Warningf("HeliusWebhook: the Shopify order of Solana Pay payment %s could not be looked up: %s\n", transaction.Signature, err)
+	case outcome == solanaShopifyRecorded:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "recorded").Inc()
+		return true
+	case outcome == solanaShopifyNotApplicable:
+		return false
+	}
+	if !heliusReceiverLegRuns() {
+		solanaShopifyOrderPayments.WithLabelValues(leg, "unverified").Inc()
+		return false
+	}
+	solanaShopifyOrderPayments.WithLabelValues(leg, "deferred").Inc()
+	glog.Infof("HeliusWebhook: Solana Pay payment %s is not verified as a Shopify order yet (%s); the receiver leg decides\n", transaction.Signature, note)
+	return true
+}
+
+// Whether a signature is recorded as a Shopify order's payment. Replaceable
+// only by tests.
+var heliusShopifyOrderRecorded = func(ctx context.Context, signature string) bool {
+	return model.IsSolanaShopifyOrderPaymentRecordedInConn(nil, ctx, signature)
 }
 
 // heliusHintNativeInvoices is the webhook's native branch: the native SOL
