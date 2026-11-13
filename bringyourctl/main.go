@@ -2258,12 +2258,21 @@ func migrateUserAuth(opts docopt.Opts) {
 	fmt.Println("User auth migration completed successfully.")
 }
 
+// Refreshes the country reliability multipliers now, as their weekly task does
+// (model.RefreshCountryReliabilityMultipliers), and prints each change.
 func reliabilitySetMultipliers(opts docopt.Opts) {
 	ctx := context.Background()
 
 	countryReliabilityMultipliers1 := model.GetAllClientLocationReliabilityMultipliers(ctx)
 
-	model.UpdateClientLocationReliabilityMultipliersWithDefaults(ctx)
+	refreshed, err := model.RefreshCountryReliabilityMultipliers(ctx, server.NowUtc(), model.DefaultCountryReliabilityMultiplierSettings())
+	if err != nil {
+		panic(err)
+	}
+	if !refreshed {
+		fmt.Println("No usable reliability block in the window; the multipliers are unchanged.")
+		return
+	}
 
 	countryReliabilityMultipliers2 := model.GetAllClientLocationReliabilityMultipliers(ctx)
 

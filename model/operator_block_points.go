@@ -52,8 +52,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
-
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
@@ -490,10 +488,9 @@ func readOperatorBlockTraffic(ctx context.Context, start time.Time, end time.Tim
 }
 
 // The reliability of the window: each network's multiplied reliability
-// weight, as a plan reads it from network_connection_reliability_score
-// (GetAllMultipliedNetworkReliabilityScoresInTx) after folding the window
-// (paymentPlanReliabilityFoldSql). It is computed here from read-only reads,
-// so neither a dry run nor an award writes the scores a payout plan owns.
+// weight, as the payout plan read it after folding the window
+// (readReliabilityWindowWeights). It is computed from read-only reads, so
+// neither a dry run nor an award writes anything for it.
 type operatorBlockReliability struct {
 	minBlockNumber      int64
 	maxBlockNumber      int64
@@ -563,19 +560,9 @@ func OperatorBlockPointsPendingWindows(ctx context.Context, cutoff time.Time, no
 	return starts, ends, nil
 }
 
-// A network's clients in one country; hasCountry is false for a valid client
-// location without a country.
-type operatorBlockReliabilityKey struct {
-	networkId         server.Id
-	countryLocationId server.Id
-	hasCountry        bool
-}
-
-// Reads the window's reliability with the plan's fold, in bounded read-only
-// statements, none in a transaction: the plan's chunk reads
-// (readPaymentPlanReliabilityPartials), the valid client locations, the exact
-// numeric sums per network and country, the division in SQL as the fold does
-// it, and the country multipliers.
+// Reads the window's reliability with the plan's fold
+// (readReliabilityWindowWeights), and multiplies each network's weight in a
+// country by the country's multiplier.
 func readOperatorBlockReliability(ctx context.Context, start time.Time, end time.Time, now time.Time) (*operatorBlockReliability, error) {
 	minBlockNumber, maxBlockNumber := operatorBlockReliabilityBlockWindow(start, end)
 	reliability := &operatorBlockReliability{
@@ -615,117 +602,22 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 		return reliability, nil
 	}
 
-	sums := map[operatorBlockReliabilityKey]*reliabilityExactSum{}
-	// client -> its valid location's country; absent for an invalid location
-	clientCountries := map[server.Id]*server.Id{}
-	clientRead := map[server.Id]bool{}
-	for chunkMin := minBlockNumber; chunkMin < maxBlockNumber; chunkMin += paymentPlanReliabilityChunkBlockCount {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		chunkMax := min(chunkMin+paymentPlanReliabilityChunkBlockCount, maxBlockNumber)
-		partials := readPaymentPlanReliabilityPartials(ctx, chunkMin, chunkMax, degradedBlockNumbers)
-
-		unread := []server.Id{}
-		for key := range partials {
-			if !clientRead[key.clientId] {
-				clientRead[key.clientId] = true
-				unread = append(unread, key.clientId)
-			}
-		}
-		slices.SortFunc(unread, server.Id.Cmp)
-		for batch := range slices.Chunk(unread, operatorBlockPointsLocationBatchSize) {
-			server.Db(ctx, func(conn server.PgConn) {
-				result, err := conn.Query(
-					ctx,
-					`
-					SELECT client_id, country_location_id
-					FROM network_client_location_reliability
-					WHERE client_id = ANY($1::uuid[]) AND valid = true
-					`,
-					batch,
-				)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var clientId server.Id
-						var countryLocationId *server.Id
-						server.Raise(result.Scan(&clientId, &countryLocationId))
-						clientCountries[clientId] = countryLocationId
-					}
-				})
-				boundedReadDone("client_locations")
-			})
-		}
-
-		for partialKey, partial := range partials {
-			countryLocationId, valid := clientCountries[partialKey.clientId]
-			if !valid {
-				continue
-			}
-			key := operatorBlockReliabilityKey{networkId: partialKey.networkId}
-			if countryLocationId != nil {
-				key.countryLocationId = *countryLocationId
-				key.hasCountry = true
-			}
-			sum, ok := sums[key]
-			if !ok {
-				sum = &reliabilityExactSum{}
-				sums[key] = sum
-			}
-			sum.add(partial.reliabilitySum.numeric())
-		}
-		// progress: a block's reads take hours on Main
-		glog.Infof("[obp]reliability blocks [%d, %d) read to %d: %d clients\n", minBlockNumber, maxBlockNumber, chunkMax, len(clientRead))
+	weights, err := readReliabilityWindowWeights(ctx, minBlockNumber, maxBlockNumber, degradedBlockNumbers, reliability.effectiveBlockCount)
+	if err != nil {
+		return nil, err
 	}
 	// the reads take hours, so retention is checked again on the clock, as
 	// the contract horizon reaper judges the block (operatorBlockPointsAwardableBlocks)
 	if err := checkRetention(server.NowUtc()); err != nil {
 		return nil, err
 	}
-	if len(sums) == 0 {
+	if len(weights) == 0 {
 		return reliability, nil
 	}
 
-	keys := slices.SortedFunc(maps.Keys(sums), func(a operatorBlockReliabilityKey, b operatorBlockReliabilityKey) int {
-		if c := a.networkId.Cmp(b.networkId); c != 0 {
-			return c
-		}
-		if a.hasCountry != b.hasCountry {
-			if a.hasCountry {
-				return 1
-			}
-			return -1
-		}
-		return a.countryLocationId.Cmp(b.countryLocationId)
-	})
-	numerics := make([]pgtype.Numeric, len(keys))
-	for i, key := range keys {
-		numerics[i] = sums[key].numeric()
-	}
-	weights := make([]float64, len(keys))
 	multipliers := map[server.Id]float64{}
 	server.Db(ctx, func(conn server.PgConn) {
-		// the fold's division and its float8 store, exactly
 		result, err := conn.Query(
-			ctx,
-			`
-			SELECT t.i, (t.s / $1::bigint)::float8
-			FROM unnest($2::numeric[]) WITH ORDINALITY AS t(s, i)
-			ORDER BY t.i
-			`,
-			reliability.effectiveBlockCount,
-			numerics,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var i int64
-				var weight float64
-				server.Raise(result.Scan(&i, &weight))
-				weights[i-1] = weight
-			}
-		})
-		boundedReadDone("reliability_weights")
-		result, err = conn.Query(
 			ctx,
 			`SELECT country_location_id, reliability_multiplier FROM network_client_location_reliability_multiplier`,
 		)
@@ -739,15 +631,15 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 		})
 		boundedReadDone("reliability_multipliers")
 	})
-	for i, key := range keys {
+	for _, weight := range weights {
 		multiplier := 1.0
-		if key.hasCountry {
-			if m, ok := multipliers[key.countryLocationId]; ok {
+		if weight.key.hasCountry {
+			if m, ok := multipliers[weight.key.countryLocationId]; ok {
 				multiplier = m
 			}
 		}
 		// the explicit conversion rounds the product, as SQL does, before the sum
-		reliability.networkWeights[key.networkId] += float64(weights[i] * multiplier)
+		reliability.networkWeights[weight.key.networkId] += float64(weight.weight * multiplier)
 	}
 	return reliability, nil
 }
