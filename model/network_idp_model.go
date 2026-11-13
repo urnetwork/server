@@ -27,6 +27,10 @@ package model
 //
 // A new IdP owes Owners and Admins the network authority notice (§7.8).
 //
+// A sign-in's flow waits between its start and its callback in Redis, under
+// {sso_<state>} for FlowTtl, and is taken once (RedisNetworkSsoFlowStore;
+// QD-720, §2.8's api-3).
+//
 // Not here, and listed by TEAM-M6-05's draft: a person with no URnetwork account
 // signing in first through an IdP, which needs an account the flow can make;
 // and the vault key's provisioning.
@@ -36,6 +40,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -57,14 +62,32 @@ type NetworkIdpSettings struct {
 	// SCIM runs: 7 days (§7.6).
 	ReauthWindow time.Duration
 	// How long one sign-in flow lives between its start and its callback:
-	// 10 min, a sign-in at the IdP with a second factor.
+	// 10 min, a sign-in at the IdP with a second factor (QD-720).
 	FlowTtl time.Duration
+	// The random bytes in each of a flow's state, nonce and PKCE verifier: 16,
+	// which is 128 bits and 22 characters of base64url.
+	FlowSecretByteCount int
+	// The longest state the flow store looks up, in characters: 64. A
+	// callback's state is a caller's text until a flow answers for it.
+	FlowStateMaxLength int
+	// The widths of network_idp's issuer and client_id columns, in bytes:
+	// 1024 each.
+	IssuerMaxLength   int
+	ClientIdMaxLength int
+	// The longest sub an IdP may assert, in bytes: 255 ASCII characters (OIDC
+	// Core §2), network_idp_identity's width.
+	SubMaxLength int
 }
 
 func DefaultNetworkIdpSettings() *NetworkIdpSettings {
 	return &NetworkIdpSettings{
-		ReauthWindow: 7 * 24 * time.Hour,
-		FlowTtl:      10 * time.Minute,
+		ReauthWindow:        7 * 24 * time.Hour,
+		FlowTtl:             10 * time.Minute,
+		FlowSecretByteCount: 16,
+		FlowStateMaxLength:  64,
+		IssuerMaxLength:     1024,
+		ClientIdMaxLength:   1024,
+		SubMaxLength:        255,
 	}
 }
 
@@ -72,14 +95,6 @@ func DefaultNetworkIdpSettings() *NetworkIdpSettings {
 const (
 	NetworkIdpClientAuthPrivateKeyJwt = "private_key_jwt"
 	NetworkIdpClientAuthClientSecret  = "client_secret"
-)
-
-// The widths of network_idp's text columns.
-const (
-	networkIdpIssuerMaxLength   = 1024
-	networkIdpClientIdMaxLength = 1024
-	// an IdP's sub is at most 255 ASCII characters (OIDC Core §2)
-	networkIdpSubMaxLength = 255
 )
 
 // The vault resource holding the 32-byte key that seals IdP client secrets.
@@ -187,7 +202,7 @@ func (self *NetworkIdp) ClientSecret() (string, error) {
 // whose host is a name or a public address. A host that resolves to a private
 // address is refused where api dials it (the OIDC client's dialer).
 func ValidNetworkIdpIssuer(issuer string) error {
-	if issuer == "" || networkIdpIssuerMaxLength < len(issuer) {
+	if issuer == "" || DefaultNetworkIdpSettings().IssuerMaxLength < len(issuer) {
 		return errors.New("The issuer is missing or too long.")
 	}
 	issuerUrl, err := url.Parse(issuer)
@@ -297,7 +312,7 @@ func CreateNetworkIdp(createNetworkIdp *CreateNetworkIdpArgs, clientSession *ses
 	if err := ValidNetworkIdpIssuer(createNetworkIdp.Issuer); err != nil {
 		return refuse(err.Error())
 	}
-	if createNetworkIdp.ClientId == "" || networkIdpClientIdMaxLength < len(createNetworkIdp.ClientId) {
+	if createNetworkIdp.ClientId == "" || DefaultNetworkIdpSettings().ClientIdMaxLength < len(createNetworkIdp.ClientId) {
 		return refuse("The client id is missing or too long.")
 	}
 	idpId := server.NewId()
@@ -401,8 +416,8 @@ func IdpIdentityUserInTx(ctx context.Context, tx server.PgTx, idpId server.Id, s
 // caller has shown that userId signed in with its own credential in this flow;
 // nothing here reads an email.
 func LinkIdpIdentityInTx(ctx context.Context, tx server.PgTx, idpId server.Id, sub string, userId server.Id) error {
-	if sub == "" || networkIdpSubMaxLength < len(sub) {
-		return errors.New("an IdP sub is 1 to 255 characters")
+	if subMaxLength := DefaultNetworkIdpSettings().SubMaxLength; sub == "" || subMaxLength < len(sub) {
+		return fmt.Errorf("an IdP sub is 1 to %d characters", subMaxLength)
 	}
 	server.RaisePgResult(tx.Exec(
 		ctx,
@@ -552,10 +567,13 @@ type NetworkSsoFlowStore interface {
 	Take(ctx context.Context, state string) (*NetworkSsoFlow, error)
 }
 
-// This process's flow store. None is installed in production until the
-// store's §2.8 row lands (questions/team-m2-16-sso-flow-state-row.md), so every
-// sign-in flow is refused meanwhile: it fails closed.
+// This process's flow store: the Redis one from the start (QD-720), which a
+// test replaces. With none, every sign-in flow is refused: it fails closed.
 var networkSsoFlowStore atomic.Pointer[NetworkSsoFlowStore]
+
+func init() {
+	SetNetworkSsoFlowStore(NewRedisNetworkSsoFlowStore(DefaultNetworkIdpSettings()))
+}
 
 // Installs the flow store; nil removes it.
 func SetNetworkSsoFlowStore(store NetworkSsoFlowStore) {
@@ -573,4 +591,146 @@ func CurrentNetworkSsoFlowStore() NetworkSsoFlowStore {
 		return nil
 	}
 	return *store
+}
+
+// The Redis key a flow waits under, {sso_<state>} (QD-720; §2.8's api-3). The
+// key is the whole tag, so a flow is one key in one slot.
+func networkSsoFlowKey(state string) string {
+	return "{sso_" + state + "}"
+}
+
+// Whether state can be a flow's key: 1 to maxLength characters of base64url's
+// alphabet, which is what BeginNetworkSso makes. A callback's state is a
+// caller's text, and nothing else of it reaches a key.
+func validNetworkSsoFlowState(state string, maxLength int) bool {
+	if state == "" || maxLength < len(state) {
+		return false
+	}
+	for _, c := range []byte(state) {
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// A flow as Redis holds it: the flow's JSON with the time the store stops
+// answering it, which the key's own ttl enforces too.
+type redisNetworkSsoFlow struct {
+	NetworkSsoFlow
+	ExpireTime time.Time `json:"expire_time"`
+}
+
+// The flow store on Redis (QD-720; §2.8's api-3): a flow is the JSON value of
+// {sso_<state>}, written once with its ttl and taken with GETDEL, so of any
+// number of callbacks carrying one state, on any api instance, at most one is
+// answered the flow. The state is soft (§19.7): a lost Redis loses only the
+// sign-ins in flight, which start again.
+//
+// Safe for concurrent use.
+type RedisNetworkSsoFlowStore struct {
+	settings *NetworkIdpSettings
+	now      atomic.Pointer[func() time.Time]
+}
+
+func NewRedisNetworkSsoFlowStore(settings *NetworkIdpSettings) *RedisNetworkSsoFlowStore {
+	return &RedisNetworkSsoFlowStore{settings: settings}
+}
+
+// Replaces the store's clock for a test.
+func (self *RedisNetworkSsoFlowStore) Testing_SetNow(now func() time.Time) {
+	self.now.Store(&now)
+}
+
+func (self *RedisNetworkSsoFlowStore) nowUtc() time.Time {
+	if now := self.now.Load(); now != nil {
+		return (*now)()
+	}
+	return server.NowUtc()
+}
+
+// Runs one command of a flow, never replayed: a SET or GETDEL whose reply was
+// lost may have been applied, and the caller is told so rather than given a
+// second run's answer. A raise is returned as its error.
+func networkSsoFlowRedis(ctx context.Context, callback func(server.RedisClient) error) (returnErr error) {
+	server.HandleError(func() {
+		server.RedisDoOnce(ctx, func(r server.RedisClient) {
+			returnErr = callback(r)
+		})
+	}, func(err error) {
+		returnErr = err
+	})
+	return
+}
+
+// Keeps the flow under its state for ttl. A flow with no usable state, a ttl
+// that is not positive, which Redis would read as no expiry, and a state that
+// already holds a flow are refused.
+func (self *RedisNetworkSsoFlowStore) Put(ctx context.Context, flow *NetworkSsoFlow, ttl time.Duration) error {
+	if flow == nil || !validNetworkSsoFlowState(flow.State, self.settings.FlowStateMaxLength) {
+		return errors.New("a sign-in flow needs a state")
+	}
+	if ttl <= 0 {
+		return errors.New("a sign-in flow needs a positive ttl")
+	}
+	flowJson, err := json.Marshal(&redisNetworkSsoFlow{
+		NetworkSsoFlow: *flow,
+		ExpireTime:     self.nowUtc().Add(ttl),
+	})
+	if err != nil {
+		return err
+	}
+	stored := false
+	err = networkSsoFlowRedis(ctx, func(r server.RedisClient) error {
+		var err error
+		stored, err = r.SetNX(ctx, networkSsoFlowKey(flow.State), flowJson, ttl).Result()
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if !stored {
+		return errors.New("a sign-in flow's state is already in use")
+	}
+	return nil
+}
+
+// The flow of state, removed by the GETDEL that read it; nil for an unknown,
+// taken or expired one. A value that does not read as that state's flow is an
+// error, and is gone.
+func (self *RedisNetworkSsoFlowStore) Take(ctx context.Context, state string) (*NetworkSsoFlow, error) {
+	if !validNetworkSsoFlowState(state, self.settings.FlowStateMaxLength) {
+		return nil, nil
+	}
+	var flowJson []byte
+	err := networkSsoFlowRedis(ctx, func(r server.RedisClient) error {
+		var err error
+		flowJson, err = r.GetDel(ctx, networkSsoFlowKey(state)).Bytes()
+		if errors.Is(err, server.RedisNil) {
+			flowJson = nil
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if flowJson == nil {
+		return nil, nil
+	}
+	stored := &redisNetworkSsoFlow{}
+	if err := json.Unmarshal(flowJson, stored); err != nil {
+		// never the parse error, which can quote the value
+		return nil, errors.New("a sign-in flow that does not parse")
+	}
+	if stored.State != state {
+		return nil, errors.New("a sign-in flow under another state's key")
+	}
+	if !self.nowUtc().Before(stored.ExpireTime) {
+		// Redis's ttl ends the key; this ends a flow the key outlived
+		return nil, nil
+	}
+	return &stored.NetworkSsoFlow, nil
 }
