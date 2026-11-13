@@ -127,7 +127,6 @@ Usage:
     bringyourctl task release <task_id>
     bringyourctl task kick <run_once_key>
     bringyourctl auth login <auth_code>
-    bringyourctl account-points populate --plan_id=<plan_id>
     bringyourctl account-points backfill-blocks [--blocks=<blocks>] [--file=<file>] [(--commit --expect=<digest>)]
     bringyourctl client connection fix
     bringyourctl migrate-user-auth
@@ -520,9 +519,9 @@ func main() {
 			authLogin(opts)
 		}
 	} else if accountPoints, _ := opts.Bool("account-points"); accountPoints {
-		if populate, _ := opts.Bool("populate"); populate {
-			accountPointsPopulate(opts)
-		} else if backfillBlocks, _ := opts.Bool("backfill-blocks"); backfillBlocks {
+		// populate --plan_id is retired (owner, 2026-11-13: "yes retire it"): its
+		// points followed a USDC payout plan's payout, and a rerun double-awards.
+		if backfillBlocks, _ := opts.Bool("backfill-blocks"); backfillBlocks {
 			os.Exit(accountPointsBackfillBlocksCommand(opts))
 		}
 		// } else if accountPoints, _ := opts.Bool("client"); accountPoints {
@@ -2219,23 +2218,6 @@ func authLogin(opts docopt.Opts) {
 
 	fmt.Printf("RESULT: %+v\n", authCodeLoginResult)
 
-}
-
-func accountPointsPopulate(opts docopt.Opts) {
-	ctx := context.Background()
-
-	// Payment Plans since 5/1
-	// [x] 0197760f-b8c5-b2f3-b932-47689f9bb6eb
-	// [x] 019747af-e95b-73b8-61bd-217edd39ff34
-	// [x] 019728d3-d5a2-25eb-40f4-e50b326637cf
-	// [x] 0196f54a-2c73-3645-8b91-b25efe9c0792
-	// [x] 0196d13d-a58c-dd9f-611b-ea4384015ddf
-	// [x] 0196a80a-c8cf-74c7-1e20-d7c72958de80
-	// [x] 01968d61-7a3c-b3a9-41c3-810bce4be30f
-	//
-	planIdStr, _ := opts.String("--plan_id")
-	planId := server.RequireParseId(planIdStr)
-	model.PopulatePlanAccountPoints(ctx, planId)
 }
 
 // func fixClientConnections(opts docopt.Opts) {
