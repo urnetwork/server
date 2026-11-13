@@ -377,7 +377,8 @@ func readNamedProviderCapabilities(ctx context.Context, clientIds []server.Id) (
 // Whether client_score_post_quantum_v1_ready is set, read through a
 // per-process cache no older than the request settings' max age, so a
 // strict post-quantum request costs no read of its own. Before the marker,
-// strict post-quantum requests read today's sources (§5.4, §10 step 3).
+// strict post-quantum requests read the probe's modern evidence of the last
+// seven days, never a provider's declaration (§12.4).
 type clientScorePostQuantumReadyCache struct {
 	stateLock sync.Mutex
 	ready     bool
