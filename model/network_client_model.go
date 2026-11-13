@@ -3611,9 +3611,10 @@ func SetProvide(
 // provider for, touches the declaration: one that declares a capability writes
 // the client's row when it differs, and one that declares none deletes it. A
 // provide with neither key, as a window client's return-traffic provide,
-// writes nothing there, so most provides add no write. A row a deactivation
-// leaves behind is inert: discovery reads it only for active providers with
-// keys, and the provider's next provide with such a key replaces or deletes it.
+// writes nothing there, so most provides add no write. Discovery reads no
+// declaration (provide_capability_model.go): a provider counts as post-quantum
+// only with a probe's evidence. The provider's next provide with such a key
+// replaces or deletes its row.
 func SetProvideWithCapabilities(
 	ctx context.Context,
 	clientId server.Id,

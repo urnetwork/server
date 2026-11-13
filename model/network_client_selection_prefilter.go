@@ -35,7 +35,7 @@ type clientScoreRequestFilter struct {
 
 // The nonzero values match the existing request-filter observation cells;
 // hard exclusions keep cell zero and are evaluated separately. Cell 4 is a
-// capability refusal, which the declared post-quantum refusals also count in.
+// capability refusal, which the post-quantum evidence refusals also count in.
 func (self clientScoreRequestFilter) rejection(clientId server.Id, score *ClientScore) int {
 	if score.NetworkOnly && score.NetworkId != self.callerNetworkId {
 		return 1

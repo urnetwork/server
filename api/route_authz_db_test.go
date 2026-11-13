@@ -170,6 +170,7 @@ var routeAccessNetworkTables = []string{
 	"st_fleet_binding_signature",
 	"test_balance_drain",
 	"stripe_customer",
+	"gamma_account",
 	// sign-in session revocation (session/REVOKE.md): a served revoke
 	// prepares an operation row and queues the network's index review
 	"network_session_operation",
@@ -282,6 +283,8 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"GET /network/client-data-caps":           {path: "/network/client-data-caps?limit=100"},
 		"GET /network/embed":                      {path: "/network/embed"},
 		"POST /network/client-acl-group":          {path: "/network/client-acl-group", body: map[string]any{"client_id": victimClientId, "acl_group": "default"}},
+		"GET /pay/gamma/settings":                 {path: "/pay/gamma/settings"},
+		"POST /pay/gamma/settings":                {path: "/pay/gamma/settings", body: map[string]any{"auto_renew": false, "auto_topup": false}},
 		"GET /wallet/balance":                     {path: "/wallet/balance"},
 		"POST /wallet/circle-init":                {path: "/wallet/circle-init"},
 		"POST /wallet/circle-transfer-out":        {path: "/wallet/circle-transfer-out", body: map[string]any{"to_address": "attacker", "amount_usdc_nano_cents": 1, "terms": true}},

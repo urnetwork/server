@@ -1,25 +1,25 @@
 // What operator block points (operator_block_points.go) keep of the payout
 // plan, which ended with USDC provider payouts (owner decisions 2026-11-12 and
 // 2026-11-13: "settle closed rows, let's close out usdc entirely"). An award
-// computes a block's points by the plan's rules, writing nothing until it
-// commits:
+// computes a block's points, writing nothing until it commits:
 //   - the reliability of the block's window, read in bounded statements and
 //     added exactly (readPaymentPlanReliabilityPartials)
-//   - the subscription revenue that weighs the subsidy
-//     (subsidyNetRevenuePerPeriod)
-//   - the points rule (planPayoutPoints)
+//   - the points rule (planPayoutPoints). The plan shared the payout points by
+//     a computed payout of net revenue and a revenue-sized subsidy; since
+//     2026-11-13 they are shared by bytes served
+//     (operatorBlockPayoutPointShares), and no revenue is read.
 //   - each payment's operator blocks (paymentPlanBlocksSql)
 package model
 
 import (
+	"cmp"
 	"context"
 	"maps"
+	"math/bits"
 	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
-
-	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
@@ -147,51 +147,6 @@ func readPaymentPlanReliabilityPartials(
 	return partials
 }
 
-// No product nets more than this in one purchase; a year of Pro nets about $40.
-// A balance claiming more holds a misrecorded price, such as an App Store price
-// from a non-USD storefront read as USD, and adds nothing to the subsidy revenue.
-const maxPlausibleBalanceSubsidyNetRevenueUsd = 100.0
-
-// A balance that funded a selected sweep, with the subscription revenue it carries.
-type subsidyRevenueBalance struct {
-	startTime         time.Time
-	endTime           time.Time
-	subsidyNetRevenue NanoCents
-}
-
-// The subscription revenue rate per subsidy period (`days`) over the subsidy
-// window, so that `subscription_net_revenue_fraction` of it compares with
-// `min_payout_usd`, which is also per period, before both scale to the window.
-// Each balance adds its revenue pro-rated to the part of the window it covers:
-// a balance spans many plan windows (a month of Pro, a year's purchase), and
-// adding its full revenue to each plan that drew from it counted it many times
-// over. A balance above a plausible price adds nothing.
-func subsidyNetRevenuePerPeriod(
-	subsidyRevenueBalances []*subsidyRevenueBalance,
-	windowStartTime time.Time,
-	windowEndTime time.Time,
-	period time.Duration,
-) NanoCents {
-	window := windowEndTime.Sub(windowStartTime)
-	if window <= 0 {
-		return 0
-	}
-	maxBalanceSubsidyNetRevenue := UsdToNanoCents(maxPlausibleBalanceSubsidyNetRevenueUsd)
-	windowSubsidyNetRevenue := 0.0
-	for _, revenueBalance := range subsidyRevenueBalances {
-		if revenueBalance.subsidyNetRevenue <= 0 || maxBalanceSubsidyNetRevenue < revenueBalance.subsidyNetRevenue {
-			continue
-		}
-		balanceDuration := revenueBalance.endTime.Sub(revenueBalance.startTime)
-		overlap := server.MinTime(revenueBalance.endTime, windowEndTime).Sub(server.MaxTime(revenueBalance.startTime, windowStartTime))
-		if balanceDuration <= 0 || overlap <= 0 {
-			continue
-		}
-		windowSubsidyNetRevenue += float64(revenueBalance.subsidyNetRevenue) * float64(overlap) / float64(balanceDuration)
-	}
-	return NanoCents(windowSubsidyNetRevenue * float64(period) / float64(window))
-}
-
 // Each payment's operator blocks, from the paid sweeps it selected and by the
 // history rollup's definition (pointsPaidSweepSql). The selection carries each
 // sweep's bytes and time, so this reads neither the sweep nor the contract
@@ -208,154 +163,150 @@ var paymentPlanBlocksSql = `
 		` + pointsPaidSweepSql("selected_escrow") + ` AND
 		` + pointsSweepInBlocksSql("selected_escrow", "$1")
 
-// The inputs of the points rule of one plan: its points, its payments by
-// network, and the bonuses' inputs. Operator block points
-// (operator_block_points.go) apply the same rule to a block's computed
-// payments.
+// Shares totalNanoPoints among the networks in proportion to their bytes,
+// exactly: each takes the floor of its proportional share, and the nano points
+// the floors leave, fewer than the networks, go one each to the largest
+// remainders, a tie to the lower network id. So the shares always sum to
+// totalNanoPoints, and each is within one nano point of its exact share. The
+// bytes are positive and their sum fits a ByteCount (planOperatorBlockPoints
+// checks it). Pure.
+func operatorBlockPayoutPointShares(totalNanoPoints NanoPoints, networkByteCounts map[server.Id]ByteCount) map[server.Id]NanoPoints {
+	shares := map[server.Id]NanoPoints{}
+	networkIds := slices.SortedFunc(maps.Keys(networkByteCounts), server.Id.Cmp)
+	var totalByteCount uint64
+	for _, networkId := range networkIds {
+		totalByteCount += uint64(networkByteCounts[networkId])
+	}
+	if totalNanoPoints <= 0 || totalByteCount == 0 {
+		return shares
+	}
+	type remainder struct {
+		networkId server.Id
+		value     uint64
+	}
+	remainders := make([]remainder, 0, len(networkIds))
+	allocated := uint64(0)
+	for _, networkId := range networkIds {
+		// totalNanoPoints * bytes / totalByteCount in 128 bits; the quotient is
+		// at most totalNanoPoints, since bytes <= totalByteCount
+		high, low := bits.Mul64(uint64(totalNanoPoints), uint64(networkByteCounts[networkId]))
+		share, rest := bits.Div64(high, low, totalByteCount)
+		shares[networkId] = NanoPoints(share)
+		allocated += share
+		remainders = append(remainders, remainder{networkId: networkId, value: rest})
+	}
+	// stable, so equal remainders keep the id order
+	slices.SortStableFunc(remainders, func(a remainder, b remainder) int {
+		return cmp.Compare(b.value, a.value)
+	})
+	for i := range uint64(totalNanoPoints) - allocated {
+		shares[remainders[i].networkId] += 1
+	}
+	return shares
+}
+
+// The inputs of the points rule of one award: its payout points, its provider
+// networks' bytes, and the bonuses' inputs.
 type payoutPointsPlan struct {
 	ctx           context.Context
 	subsidyConfig *SubsidyConfig
 	paymentPlanId server.Id
-	// account_points_per_payout scaled to the plan's subsidy window
-	totalPoints float64
-	// the sum of the payments' payouts, net of carried bonuses
-	totalPayout          NanoCents
-	payments             map[server.Id]*AccountPayment
-	reliabilitySubsidies map[server.Id]NetworkReliabilitySubsidy
-	seekerHolders        map[server.Id]bool
+	// account_points_per_payout scaled to the window: the payout points the
+	// networks share by bytes
+	payoutNanoPoints NanoPoints
+	// each provider network's bytes served in the window, all positive. A
+	// network's id is also the placeholder id of its payment, until a commit
+	// assigns the row's id.
+	networkByteCounts map[server.Id]ByteCount
+	// each network's reliability points; only a network with bytes takes them
+	reliabilityPoints map[server.Id]NanoPoints
+	seekerHolders     map[server.Id]bool
 	// network -> the network that referred it
 	referralParents map[server.Id]server.Id
 	// network -> the networks it referred
 	networkReferrals map[server.Id][]server.Id
 }
 
-// The points rule of a plan, without writing anything:
-//   - reliability points of each network with a payment
-//   - payout points in proportion to each payment's payout, net of carried
-//     bonuses
-//   - the seeker multiplier, which also doubles the reliability points
+// The points rule, without writing anything:
+//   - payout points: the payout points shared exactly in proportion to bytes
+//     (operatorBlockPayoutPointShares)
+//   - reliability points of each network with bytes
+//   - the seeker multiplier, which multiplies a seeker holder's payout points
+//     and gives its reliability points again
 //   - the referral parent's fraction and the referral children's halving
-//     fractions of the payout points
+//     fractions of the payout points, after the multiplier
 //
-// Networks are visited in id order, so the rows are the same for the same
-// inputs. The order changes nothing else: every row depends only on its own
-// payment and the plan's totals.
+// Bytes, reliability evidence, seeker holdings and referrals are the only
+// inputs: no revenue, and nothing about whether the traffic was paid. Networks
+// are visited in id order, so the rows are the same for the same inputs, and a
+// row of no points is left out.
 func planPayoutPoints(plan *payoutPointsPlan) []ApplyAccountPointsArgs {
 	queuedPoints := []ApplyAccountPointsArgs{}
 	queuePoints := func(args ApplyAccountPointsArgs) {
-		queuedPoints = append(queuedPoints, args)
-	}
-
-	/**
-	 * Apply reliability points
-	 */
-	for _, networkId := range slices.SortedFunc(maps.Keys(plan.reliabilitySubsidies), server.Id.Cmp) {
-		reliabilitySubsidy := plan.reliabilitySubsidies[networkId]
-
-		payment, ok := plan.payments[networkId]
-		if !ok {
-			glog.Errorf("[plan]no payment found for network %s, but reliability subsidy is %d nano cents\n", networkId, reliabilitySubsidy)
-			continue
-		}
-
-		if reliabilitySubsidy.Points > 0 {
-			reliabilityPointsArgs := ApplyAccountPointsArgs{
-				NetworkId:        payment.NetworkId,
-				Event:            AccountPointEventReliability,
-				PointValue:       reliabilitySubsidy.Points,
-				AccountPaymentId: &payment.PaymentId,
-				PaymentPlanId:    &plan.paymentPlanId,
-			}
-			queuePoints(reliabilityPointsArgs)
+		if 0 < args.PointValue {
+			queuedPoints = append(queuedPoints, args)
 		}
 	}
 
-	for _, networkId := range slices.SortedFunc(maps.Keys(plan.payments), server.Id.Cmp) {
-		payment := plan.payments[networkId]
+	networkIds := slices.SortedFunc(maps.Keys(plan.networkByteCounts), server.Id.Cmp)
+	payoutPoints := operatorBlockPayoutPointShares(plan.payoutNanoPoints, plan.networkByteCounts)
 
-		/**
-		 * Payout account points
-		 */
-		scaledAccountPoints := PointsToNanoPoints(plan.totalPoints * (float64(payment.Payout-payment.BonusPayout) / float64(plan.totalPayout)))
-		glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
-			payment.NetworkId,
-			scaledAccountPoints,
-			payment.Payout,
-		)
+	for _, networkId := range networkIds {
+		paymentId := networkId
+		queuePoints(ApplyAccountPointsArgs{
+			NetworkId:        networkId,
+			Event:            AccountPointEventReliability,
+			PointValue:       plan.reliabilityPoints[networkId],
+			AccountPaymentId: &paymentId,
+			PaymentPlanId:    &plan.paymentPlanId,
+		})
+	}
 
-		if scaledAccountPoints > 0 {
+	for _, networkId := range networkIds {
+		paymentId := networkId
+		points := payoutPoints[networkId]
+		queuePoints(ApplyAccountPointsArgs{
+			NetworkId:        networkId,
+			Event:            AccountPointEventPayout,
+			PointValue:       points,
+			PaymentPlanId:    &plan.paymentPlanId,
+			AccountPaymentId: &paymentId,
+		})
 
-			accountPointsArgs := ApplyAccountPointsArgs{
-				NetworkId:        payment.NetworkId,
-				Event:            AccountPointEventPayout,
-				PointValue:       scaledAccountPoints,
-				PaymentPlanId:    &payment.PaymentPlanId,
-				AccountPaymentId: &payment.PaymentId,
-			}
-
-			queuePoints(accountPointsArgs)
-
-		}
-
-		/**
-		 * Seeker bonus
-		 */
-		if plan.seekerHolders[payment.NetworkId] {
-			seekerBonus := NanoPoints(float64(scaledAccountPoints)*plan.subsidyConfig.SeekerHolderMultiplier) - scaledAccountPoints
-			scaledAccountPoints = NanoPoints(float64(scaledAccountPoints) * plan.subsidyConfig.SeekerHolderMultiplier) // apply the multiplier to the account points
-
-			// double reliability points for seeker holders
-			seekerBonus += plan.reliabilitySubsidies[payment.NetworkId].Points
-			glog.Infof("[plan]payout seeker holder %s with %d bonus points\n", payment.NetworkId, seekerBonus)
-
-			accountPointsArgs := ApplyAccountPointsArgs{
-				NetworkId:        payment.NetworkId,
+		if plan.seekerHolders[networkId] {
+			multipliedPoints := NanoPoints(float64(points) * plan.subsidyConfig.SeekerHolderMultiplier)
+			queuePoints(ApplyAccountPointsArgs{
+				NetworkId:        networkId,
 				Event:            AccountPointEventPayoutMultiplier,
-				PointValue:       seekerBonus,
-				PaymentPlanId:    &payment.PaymentPlanId,
-				AccountPaymentId: &payment.PaymentId,
-			}
-
-			queuePoints(accountPointsArgs)
+				PointValue:       multipliedPoints - points + plan.reliabilityPoints[networkId],
+				PaymentPlanId:    &plan.paymentPlanId,
+				AccountPaymentId: &paymentId,
+			})
+			points = multipliedPoints
 		}
 
-		/**
-		 * Apply bonus points to parent referral network
-		 */
-		parentReferralNetworkId, ok := plan.referralParents[payment.NetworkId]
-
-		if ok {
-			if parentReferralNetworkId != payment.NetworkId {
-				parentReferralPoints := NanoPoints(float64(scaledAccountPoints) * plan.subsidyConfig.ReferralParentPayoutFraction)
-
-				glog.Infof("[plan]payout applying referral parent network %s with %d points\n", parentReferralNetworkId, scaledAccountPoints)
-
-				accountPointsArgs := ApplyAccountPointsArgs{
-					NetworkId:        parentReferralNetworkId,
-					Event:            AccountPointEventPayoutLinkedAccount,
-					PointValue:       parentReferralPoints,
-					PaymentPlanId:    &payment.PaymentPlanId,
-					LinkedNetworkId:  &payment.NetworkId,
-					AccountPaymentId: &payment.PaymentId,
-				}
-
-				queuePoints(accountPointsArgs)
-			}
+		if parentNetworkId, ok := plan.referralParents[networkId]; ok && parentNetworkId != networkId {
+			linkedNetworkId := networkId
+			queuePoints(ApplyAccountPointsArgs{
+				NetworkId:        parentNetworkId,
+				Event:            AccountPointEventPayoutLinkedAccount,
+				PointValue:       NanoPoints(float64(points) * plan.subsidyConfig.ReferralParentPayoutFraction),
+				PaymentPlanId:    &plan.paymentPlanId,
+				LinkedNetworkId:  &linkedNetworkId,
+				AccountPaymentId: &paymentId,
+			})
 		}
 
-		/**
-		 * Apply bonus points to child referral networks
-		 */
-		visited := make(map[server.Id]struct{})
+		visited := map[server.Id]struct{}{}
 		payoutChildrenReferralNetworksInTx(
 			plan.ctx,
 			queuePoints,
-			scaledAccountPoints,
+			points,
 			plan.subsidyConfig.ReferralChildPayoutFraction,
-			payment.NetworkId,
+			networkId,
 			plan.networkReferrals,
-			payment.PaymentPlanId,
-			&payment.PaymentId,
+			plan.paymentPlanId,
+			&paymentId,
 			nil,
 			0,
 			visited,
