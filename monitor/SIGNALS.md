@@ -22966,10 +22966,10 @@ do not treat the stable count or its imminent expiry as deployment proof.
 
 Card testing (owner, 2026-11-13). In 2026-11 card testers ran 20 cards in 92
 seconds through two Checkout sessions made 2.5 minutes after their account,
-and 22 attempts over three sessions, mostly through the yearly plan's
-free-trial card check (a $0 SetupIntent). Stripe's `setup_intent.setup_failed`
-and `charge.failed` reached the webhook and were ignored, so nothing showed
-it. The api now counts each failed card check, with no personal data, as
+and 22 attempts over three sessions. The yearly plan's free trial checks a
+card for nothing (a $0 SetupIntent), the kind of check card testers prefer.
+Stripe's `setup_intent.setup_failed` and `charge.failed` reached the webhook
+and were ignored, so nothing showed it. The api now counts each failed card check, with no personal data, as
 `urnetwork_subscription_stripe_failures_total{kind,reason_class}` (kind
 `setup` or `charge`; the decline class `declined`, `insufficient_funds`,
 `invalid_card`, `lost_stolen`, `fraud`, `blocked`, `authentication`,

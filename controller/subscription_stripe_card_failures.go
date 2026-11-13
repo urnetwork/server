@@ -5,11 +5,12 @@ package controller
 // Card testers run lists of stolen cards through a merchant's checkout to find
 // the ones that still work. On our account in 2026-11: 20 cards in 92 seconds
 // through two Checkout sessions made 2.5 minutes after their account was, and
-// three sessions that tried 6 cards over 22 attempts, mostly through the
-// yearly plan's free-trial card check (a $0 SetupIntent). A failed check
-// reaches the webhook as setup_intent.setup_failed (a card saved for later:
-// the trial's check, the payment sheet's) or charge.failed (a payment), which
-// used to be answered 200 and otherwise ignored, so nothing showed the attack.
+// three sessions that tried 6 cards over 22 attempts. The yearly plan's free
+// trial checks a card for nothing (a $0 SetupIntent), the kind of check card
+// testers prefer. A failed check reaches the webhook as
+// setup_intent.setup_failed (a card saved for later: the trial's check, the
+// payment sheet's) or charge.failed (a payment), which used to be answered 200
+// and otherwise ignored, so nothing showed the attack.
 // Now each failed card check:
 //
 //   - is counted as urnetwork_subscription_stripe_failures_total{kind,reason_class}:
@@ -186,10 +187,10 @@ func init() {
 // The card-failure watch's tunables.
 type stripeCardFailureSettings struct {
 	// A burst is more than this many failed card checks of one owner within
-	// BurstWindow. 5: a customer whose card is declined tries two or three
-	// before giving up, while the 2026-11 card testing ran about ten through
-	// each Checkout session. Non-positive logs no burst; the failures are
-	// still counted.
+	// BurstWindow. 5: a customer whose card is declined tries a few before
+	// giving up, while the 2026-11 card testing ran 20 cards through two
+	// Checkout sessions. Non-positive logs no burst; the failures are still
+	// counted.
 	BurstCount int
 	// The trailing window the burst is counted over. 10 minutes: the 2026-11
 	// attacks ran 20 cards in 92 seconds, and 22 attempts over three sessions.

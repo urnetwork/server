@@ -4,7 +4,8 @@ package controller
 //
 // Card testers run stolen cards through checkouts. In 2026-11 one account made
 // two Checkout sessions 2.5 minutes after it was created and ran 20 cards
-// through them in 92 seconds; another made three. StripeCreateCheckoutSession
+// through them in 92 seconds, and three sessions ran 6 cards over 22
+// attempts. StripeCreateCheckoutSession
 // had no limit at all, so an account could make sessions as fast as it liked,
 // and the payment sheet had only its address's budget. Both now spend:
 //
@@ -35,7 +36,7 @@ import (
 type stripePurchaseStartSettings struct {
 	// The most card purchases, Checkout sessions and payment sheets together,
 	// one network may start within NetworkWindow. 10: a purchase starts one or
-	// two, and the 2026-11 card testing started two or three per account, so
+	// two, and the 2026-11 card testing ran through two or three sessions, so
 	// this does not stop that shape alone, but it stops one account from
 	// making sessions without end. Non-positive disables the network's budget.
 	NetworkLimit int
