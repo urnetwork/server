@@ -12,15 +12,17 @@
 //   - every escrow of it is settled;
 //   - every sweep of it is discharged: paid by a payment that completed more
 //     than CompletedContractExpiration ago and whose retention stamping is
-//     done, or unpaid on a contract minted after the earning cutoff, whose
-//     provider earns through the subnet pool from the archived usage. A sweep
-//     with no payment on an older contract, or one whose payment is canceled,
-//     pending or held (server.ContractPaymentRetentionHoldSql), is a legacy
-//     obligation the payout planner can still select, or the evidence a
-//     recovery reads, and keeps its contract. So does a sweep staged in a
-//     payment plan whose assignment is pending, and one whose payment
-//     completed under attribution review: completePaymentInTx queues no
-//     retention stamping for it, so the payment completion path keeps its
+//     done; of a payment the USDC close-out closed, which is settled as a
+//     completed one is (server.AccountPaymentRetentionSettledSql); or unpaid
+//     on a contract minted after the earning cutoff, whose provider earns
+//     through the subnet pool from the archived usage. A sweep with no payment
+//     on an older contract, or one whose payment is pending, held
+//     (server.ContractPaymentRetentionHoldSql) or canceled without being
+//     closed, is a legacy obligation the payout planner can still select, or
+//     the evidence a recovery reads, and keeps its contract. So does a sweep
+//     staged in a payment plan whose assignment is pending, and one whose
+//     payment completed under attribution review: completePaymentInTx queues
+//     no retention stamping for it, so the payment completion path keeps its
 //     contracts until the straggler horizon, and so does this reaper;
 //   - no unpaid sweep of it is traffic of an operator block whose points can
 //     still be awarded (OperatorBlockPointsPendingWindows). An award reads a
@@ -186,9 +188,9 @@ type ContractHorizonSettings struct {
 	ControlTimeout time.Duration
 	// A pass that reached the horizon starts over from the oldest contract
 	// once it began this long ago. A rescan rereads every contract still kept
-	// below the horizon at the same rate, and most kept contracts leave by the
-	// payment completion path (reap_time) or the straggler horizon instead, so
-	// it is long.
+	// below the horizon at the same rate, so it is long. It deletes those whose
+	// checks pass since the pass kept them, such as the contracts of a payment
+	// the USDC close-out closed after the pass went by.
 	RescanInterval time.Duration
 	// Gap between runs while a pass has work left.
 	ResumeInterval time.Duration
@@ -404,9 +406,9 @@ const (
 	contractHorizonProtectedUnsettled = "unsettled"
 	// a sweep belongs to a payment that holds retention
 	contractHorizonProtectedPaymentHold = "payment_hold"
-	// a sweep belongs to a payment that is not completed and holds nothing,
-	// such as a safely canceled one the planner re-plans, or to none that
-	// exists
+	// a sweep belongs to a payment that is not settled (completed, or closed
+	// by the USDC close-out) and holds nothing, such as a safely canceled one
+	// the planner re-plans, or to none that exists
 	contractHorizonProtectedPaymentIncomplete = "payment_incomplete"
 	// a sweep's payment completed within CompletedContractExpiration
 	contractHorizonProtectedPaymentRecent = "payment_recent"
@@ -973,7 +975,7 @@ var contractHorizonHoldSql = `
 		SELECT
 			transfer_escrow_sweep.contract_id,
 			bool_or(account_payment.payment_id IS NOT NULL AND (` + server.ContractPaymentRetentionHoldSql + `) IS TRUE) AS payment_hold,
-			bool_or(transfer_escrow_sweep.payment_id IS NOT NULL AND account_payment.completed IS NOT TRUE) AS payment_incomplete,
+			bool_or(transfer_escrow_sweep.payment_id IS NOT NULL AND (` + server.AccountPaymentRetentionSettledSql + `) IS NOT TRUE) AS payment_incomplete,
 			bool_or(account_payment.completed IS TRUE AND (account_payment.complete_time IS NULL OR $3 <= account_payment.complete_time)) AS payment_recent,
 			bool_or(transfer_escrow_sweep.payment_id IS NULL AND ($2::uuid IS NULL OR transfer_escrow_sweep.contract_id < $2::uuid)) AS unpaid_legacy,
 			bool_or(account_payment.completed IS TRUE AND account_payment.attribution_review_required IS TRUE) AS payment_review

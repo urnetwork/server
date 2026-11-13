@@ -6,7 +6,7 @@
 // are paid through the subnet, and legacy debt never becomes subnet credit.
 //
 // The journal row is the marker. Its event id derives from the payment id
-// (usdcPayoutClosedEventIdSql), so every check finds it with a primary key
+// (server.UsdcPayoutClosedEventIdSql), so every check finds it with a primary key
 // probe, as checks find a manual reimbursement's marker. A closed payment looks
 // safely canceled, so every read that would re-plan or restore a safely
 // canceled payment excludes it:
@@ -38,8 +38,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const UsdcPayoutClosedEventType = "usdc_payout_closed"
-
 // The reasons a parked payment is held, in the order the sender would hold it
 // if payments were on (AdvancePayment): first a missing wallet, then a payout
 // that does not cover the transfer fee, then the earning admission's
@@ -52,27 +50,17 @@ const (
 	UsdcParkedOther      = "other"
 )
 
-// The event id of the closure of the payment `%[1]s`, a uuid expression: the
-// md5 of a fixed prefix and the payment id's text. SQL and Go
-// (UsdcPayoutClosedEventId) derive the same id, and it is never the payment id
-// itself, which a manual reimbursement or legacy replacement marker takes.
-const usdcPayoutClosedEventIdSql = `md5('` + UsdcPayoutClosedEventType + `/' || (%[1]s)::text)::uuid`
-
+// The closure event id of the payment, as SQL derives it
+// (server.UsdcPayoutClosedEventIdSql).
 func UsdcPayoutClosedEventId(paymentId server.Id) server.Id {
-	sum := md5.Sum([]byte(UsdcPayoutClosedEventType + "/" + paymentId.String()))
+	sum := md5.Sum([]byte(server.UsdcPayoutClosedEventType + "/" + paymentId.String()))
 	return server.RequireIdFromBytes(sum[:])
 }
 
-// The account_payment row `%[1]s` was closed by the close-out. The probe is
-// fenced by OFFSET 0, so it stays one primary key probe per row and the planner
-// never turns it into a scan of the payment journal.
-const usdcPayoutClosedSql = `EXISTS (SELECT 1 FROM audit_account_payment usdc_payout_closed
-	WHERE usdc_payout_closed.event_id = ` + usdcPayoutClosedEventIdSql + `
-	AND usdc_payout_closed.payment_id = %[1]s
-	AND usdc_payout_closed.event_type = '` + UsdcPayoutClosedEventType + `' OFFSET 0)`
-
+// The account_payment row `paymentAlias` was closed by the close-out
+// (server.UsdcPayoutClosedSql).
 func usdcPayoutClosed(paymentAlias string) string {
-	return fmt.Sprintf(usdcPayoutClosedSql, paymentAlias+".payment_id")
+	return server.UsdcPayoutClosedSql(paymentAlias + ".payment_id")
 }
 
 // A parked payment `p`: a pending payment that Circle cannot hold. It is not
@@ -223,7 +211,7 @@ func CloseUsdcParkedPayments(
 			panic(fmt.Errorf("usdc close-out canceled %d of %d locked payments", tag.RowsAffected(), len(closed)))
 		}
 		tag = server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment (event_id, event_time, payment_id, event_type, event_details)
-			SELECT `+fmt.Sprintf(usdcPayoutClosedEventIdSql, "closed.payment_id")+`, $3, closed.payment_id, '`+UsdcPayoutClosedEventType+`', closed.details
+			SELECT `+server.UsdcPayoutClosedEventIdSql("closed.payment_id")+`, $3, closed.payment_id, '`+server.UsdcPayoutClosedEventType+`', closed.details
 			FROM unnest($1::uuid[], $2::text[]) AS closed(payment_id, details)`,
 			closedIds, closedDetails, closeTime))
 		if tag.RowsAffected() != int64(len(closed)) {
@@ -355,7 +343,7 @@ func CloseUsdcPaidElsewherePayment(
 			panic(fmt.Errorf("usdc close-out canceled %d rows of the locked payment %s", tag.RowsAffected(), payment.PaymentId))
 		}
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment (event_id, event_time, payment_id, event_type, event_details)
-			VALUES ($1, $2, $3, '`+UsdcPayoutClosedEventType+`', $4)`,
+			VALUES ($1, $2, $3, '`+server.UsdcPayoutClosedEventType+`', $4)`,
 			UsdcPayoutClosedEventId(payment.PaymentId), closeTime, payment.PaymentId, details(payment)))
 		closed = true
 	}, server.TxReadCommitted)

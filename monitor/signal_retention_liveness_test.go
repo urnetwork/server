@@ -1,5 +1,5 @@
-// Synthetic catalog and sampled-page frames exercise the two retention checks
-// and the append-only list through the public signal. No database is read.
+// Synthetic catalog frames exercise the partition retention check and the
+// append-only list through the public signal. No database is read.
 package monitor
 
 import (
@@ -24,7 +24,8 @@ type retentionTestRelation struct {
 	deleted  int64
 }
 
-// One catalog frame and one sampled frame as the primary returns them.
+// One catalog frame as the primary returns it, and the contract reap sample the
+// retired check read.
 type retentionTestSource struct {
 	now        time.Time
 	started    time.Time
@@ -36,20 +37,19 @@ type retentionTestSource struct {
 	subsidyFrontier time.Time
 	partitions      []retentionTestPartition
 	growth          []retentionTestRelation
-	sampled         int64
-	old             int64
-	stamped         int64
-	catalogErr      error
-	reapErr         error
-	mutateCatalog   func([]Row) []Row
-	mutateReap      func([]Row) []Row
+	// The sampled transfer_contract rows, those older than 14 days, and those
+	// of them with reap_time, as the reap sample before 2026-11-13 read them.
+	sampled       int64
+	old           int64
+	stamped       int64
+	catalogErr    error
+	mutateCatalog func([]Row) []Row
 }
 
 func retentionTestMicros(at time.Time) string { return strconv.FormatInt(at.UnixMicro(), 10) }
 
 // A healthy main-shaped primary at the synthetic clock: daily partitions
-// inside retention (10 days since 2026-11-10), reaped contracts and no
-// append-only relation.
+// inside retention (10 days since 2026-11-10) and no append-only relation.
 func retentionTestHealthy() retentionTestSource {
 	now := syntheticSettings(nil).Now()
 	source := retentionTestSource{
@@ -92,26 +92,25 @@ func (self retentionTestSource) catalogRows(readsFrontier bool) []Row {
 	return rows
 }
 
+// The frame the reap sample read: sampled, old and stamped row counts.
 func (self retentionTestSource) reapRows() []Row {
-	rows := []Row{{"reap", "pg-1", retentionTestMicros(self.now), strconv.FormatInt(self.sampled, 10),
+	return []Row{{"reap", "pg-1", retentionTestMicros(self.now), strconv.FormatInt(self.sampled, 10),
 		strconv.FormatInt(self.old, 10), strconv.FormatInt(self.stamped, 10), "0"}}
-	if self.mutateReap != nil {
-		rows = self.mutateReap(rows)
-	}
-	return rows
 }
 
-func retentionTestSettings(t *testing.T, source retentionTestSource) SignalSettings {
+// Every read the signal makes, in order: "catalog" or "reap".
+type retentionTestReads struct {
+	reads []string
+}
+
+func retentionTestSettingsWithReads(t *testing.T, source retentionTestSource, reads *retentionTestReads) SignalSettings {
 	t.Helper()
 	settings := syntheticSettings(&syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		if strings.Contains(query, "TABLESAMPLE SYSTEM (0.0002)") {
-			for _, want := range []string{"hostname -s", "transfer_contract", "1209600 * interval '1 second'", "reap_time IS NOT NULL", "pg_is_in_recovery()"} {
-				if !strings.Contains(query, want) {
-					t.Fatalf("reap sample lost %q", want)
-				}
-			}
-			return source.reapRows(), source.reapErr
+		if strings.Contains(query, "TABLESAMPLE") {
+			reads.reads = append(reads.reads, "reap")
+			return source.reapRows(), nil
 		}
+		reads.reads = append(reads.reads, "catalog")
 		for _, want := range []string{"hostname -s", "pg_is_in_recovery()", "to_regclass('public.client_reliability')", "pg_total_relation_size(c.oid) >= 100000000000"} {
 			if !strings.Contains(query, want) {
 				t.Fatalf("retention catalog read lost %q", want)
@@ -124,6 +123,11 @@ func retentionTestSettings(t *testing.T, source retentionTestSource) SignalSetti
 	return settings
 }
 
+func retentionTestSettings(t *testing.T, source retentionTestSource) SignalSettings {
+	t.Helper()
+	return retentionTestSettingsWithReads(t, source, &retentionTestReads{})
+}
+
 func retentionTestRun(t *testing.T, signal Signal, source retentionTestSource) Alerts {
 	t.Helper()
 	alerts, err := signal.Run(context.Background(), retentionTestSettings(t, source))
@@ -131,6 +135,16 @@ func retentionTestRun(t *testing.T, signal Signal, source retentionTestSource) A
 		t.Fatal("retention liveness run failed")
 	}
 	return alerts
+}
+
+// A partition census whose oldest storage-holding day is past its retention
+// and grace, so the stuck partition finding carries the append-only list.
+func retentionTestStuck(source retentionTestSource) retentionTestSource {
+	source.partitions = append(source.partitions, retentionTestPartition{
+		name: "client_reliability_p" + source.now.Add(-30*24*time.Hour).Format("20060102"),
+		heap: 1,
+	})
+	return source
 }
 
 func TestRetentionLivenessRegistered(t *testing.T) {
@@ -155,38 +169,73 @@ func TestRetentionLivenessHealthy(t *testing.T) {
 	}
 }
 
-// The 2026-10-22 shape: the subsidy epoch ended 10-05, under 1% of old
-// contract rows are stamped, and st_client_key_history only grows. The old
-// subsidy frontier is not a finding: it no longer holds any retention. The
-// partitions start 10-11, inside the 10-day retention and its grace, so only
-// the reap is stuck.
-func TestRetentionLivenessSyntheticIncident(t *testing.T) {
+// The 2026-11-13 shape: USDC payouts ended, so no completed payment stamps
+// reap_time, under 1% of old contract rows have it, and st_client_key_history
+// only grows. Contract reap stamping is not read, so the stamped share is no
+// finding: the contract horizon reaper reclaims contracts without it. The
+// partitions are inside the 10-day retention and its grace, so nothing is
+// raised. Before the reap check retired, this raised contract-reap-stalled on
+// every run.
+func TestRetentionLivenessNeverReadsReapStamping(t *testing.T) {
 	source := retentionTestHealthy()
-	source.now = time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	source.started = source.now.Add(-60 * 24 * time.Hour)
-	source.statsReset = source.now.Add(-30 * 24 * time.Hour)
-	source.subsidyFrontier = time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
-	source.partitions = nil
-	for day := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC); day.Before(source.now.Add(72 * time.Hour)); day = day.Add(24 * time.Hour) {
-		source.partitions = append(source.partitions, retentionTestPartition{name: "client_reliability_p" + day.Format("20060102"), heap: 60 * 1000 * 1000 * 1000})
-	}
 	source.growth = append(source.growth, retentionTestRelation{name: "st_client_key_history", oid: 16500, total: 382 * storageRunwayTestGigabyte, inserted: 81600000})
 	source.sampled, source.old, source.stamped = 4664, 4000, 30
-	alerts := retentionTestRun(t, NewRetentionLivenessSignal(), source)
-	if len(alerts) != 1 {
-		t.Fatalf("got %d alerts, want only the stalled reap", len(alerts))
+	reads := &retentionTestReads{}
+	alerts, err := NewRetentionLivenessSignal().Run(context.Background(), retentionTestSettingsWithReads(t, source, reads))
+	if err != nil {
+		t.Fatal("retention liveness run failed")
 	}
-	requireNoAlertClass(t, alerts, "retention-frontier-pinned")
-	reap := requireAlertClass(t, alerts, "contract-reap-stalled")
-	if reap.Target != "pg-1/contract-reap" || reap.Severity != SeverityWarn || reap.Sustain != 2 ||
-		!strings.Contains(reap.Observed, "old_rows=4000 old_rows_with_reap_time=30 stamped_share_pct=0.75") {
-		t.Fatalf("wrong reap alert: %s", reap.Observed)
+	if len(alerts) != 0 {
+		t.Fatalf("got %d alerts, first %s %s", len(alerts), alerts[0].Class, alerts[0].Target)
 	}
-	if !strings.Contains(reap.Evidence, "append_only_relations=[st_client_key_history total_gb=382.0 inserted_rows=81600000]") ||
-		strings.Contains(reap.Evidence, "transfer_contract total_gb") {
-		t.Fatalf("append-only list is wrong: %s", reap.Evidence)
+	if strings.Join(reads.reads, ",") != "catalog" {
+		t.Fatalf("reads = %v, want only the catalog", reads.reads)
 	}
-	requireNoAlertClass(t, alerts, "partition-retention-stuck")
+	for _, class := range []string{"contract-reap-stalled", "retention-frontier-pinned"} {
+		if _, ok := alertClassKinds[class]; ok {
+			t.Errorf("the retired class %s is still classified", class)
+		}
+	}
+}
+
+// A watcher still holding the contract-reap-stalled incident that the reap
+// check raised clears it after two complete runs of the signal, on the
+// unstamped 2026-11-13 shape: the signal reports neither the class nor an
+// unknown state for its target, so its runs are complete. Before the check
+// retired, every run reported it again and the incident never cleared.
+func TestRetentionLivenessClearsTheRetiredReapIncident(t *testing.T) {
+	webhook, webhookUrl := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.settings(webhookUrl))
+	signal := NewRetentionLivenessSignal()
+	notifier.Handle(signal, SignalExecution{Alerts: Alerts{{
+		SignalNumber: signal.Number(),
+		SignalKey:    signal.Key(),
+		SignalID:     signal.ID(),
+		SignalName:   signal.Name(),
+		Severity:     SeverityWarn,
+		Class:        "contract-reap-stalled",
+		Target:       "pg-1/contract-reap",
+		Environment:  "synthetic",
+		Symptom:      "Only 0.8% of sampled transfer_contract rows older than 14 days have reap_time; contract retention is not reclaiming",
+		Playbook:     "SIGNALS.md §2.4g",
+	}}})
+	source := retentionTestHealthy()
+	source.sampled, source.old, source.stamped = 4664, 4000, 30
+	for range 2 {
+		alerts := retentionTestRun(t, signal, source)
+		if len(alerts) != 0 {
+			t.Fatalf("got %d alerts, first %s %s", len(alerts), alerts[0].Class, alerts[0].Target)
+		}
+		notifier.Handle(signal, SignalExecution{Alerts: alerts})
+		harness.advance(time.Hour)
+	}
+	closeSlackNotifier(t, notifier)
+	requireSlackTexts(t, webhook.posted(),
+		"[WARN] raised (synthetic): Only 0.8% of sampled transfer_contract rows",
+		"[CLEARED] WARN (synthetic): Retention liveness",
+	)
 }
 
 // The 2026-10-31 shape: the subsidy frontier is 26 days old and the drop pass
@@ -256,34 +305,7 @@ func TestRetentionLivenessPartitionCutoffs(t *testing.T) {
 	}
 }
 
-// Reap share edges and sample sufficiency.
-func TestRetentionLivenessReapThresholds(t *testing.T) {
-	for _, test := range []struct {
-		sampled, old, stamped int64
-		class                 string
-	}{
-		{sampled: 5000, old: 1000, stamped: 50, class: ""},
-		{sampled: 5000, old: 1000, stamped: 49, class: "contract-reap-stalled"},
-		{sampled: 5000, old: 19, stamped: 0, class: ""},
-		{sampled: 5000, old: 0, stamped: 0, class: ""},
-		{sampled: 99, old: 99, stamped: 0, class: "retention-liveness-unobservable"},
-	} {
-		source := retentionTestHealthy()
-		source.sampled, source.old, source.stamped = test.sampled, test.old, test.stamped
-		alerts := retentionTestRun(t, NewRetentionLivenessSignal(), source)
-		if test.class == "" {
-			if len(alerts) != 0 {
-				t.Fatalf("sample %d/%d/%d alerted", test.sampled, test.old, test.stamped)
-			}
-			continue
-		}
-		if alert := requireAlertClass(t, alerts, test.class); alert.Target != "pg-1/contract-reap" || len(alerts) != 1 {
-			t.Fatalf("sample %d/%d/%d gave the wrong finding", test.sampled, test.old, test.stamped)
-		}
-	}
-}
-
-// Each read's failure leaves only its own checks unknown, never healthy.
+// A failed or malformed read leaves the partition check unknown, never healthy.
 func TestRetentionLivenessFramesAndFailuresStayUnknown(t *testing.T) {
 	type mutation struct {
 		name    string
@@ -291,45 +313,37 @@ func TestRetentionLivenessFramesAndFailuresStayUnknown(t *testing.T) {
 		targets []string
 		reason  string
 	}
-	both := []string{"pg-1/client-reliability-partitions"}
+	partitions := []string{"pg-1/client-reliability-partitions"}
 	for _, test := range []mutation{
-		{name: "catalog error", mutate: func(s *retentionTestSource) { s.catalogErr = errors.New("exit status 3: private-source-canary") }, targets: both, reason: "catalog-source-unavailable"},
+		{name: "catalog error", mutate: func(s *retentionTestSource) { s.catalogErr = errors.New("exit status 3: private-source-canary") }, targets: partitions, reason: "catalog-source-unavailable"},
 		{name: "wrong host", mutate: func(s *retentionTestSource) {
 			s.mutateCatalog = func(rows []Row) []Row { rows[0][1] = "pg-2"; return rows }
-		}, targets: both, reason: "source-identity-or-role-unavailable"},
+		}, targets: partitions, reason: "source-identity-or-role-unavailable"},
 		{name: "replica", mutate: func(s *retentionTestSource) {
 			s.mutateCatalog = func(rows []Row) []Row { rows[0][4] = "1"; return rows }
-		}, targets: both, reason: "source-identity-or-role-unavailable"},
+		}, targets: partitions, reason: "source-identity-or-role-unavailable"},
 		{name: "clock", mutate: func(s *retentionTestSource) {
 			s.mutateCatalog = func(rows []Row) []Row { rows[0][2] = retentionTestMicros(s.now.Add(time.Minute)); return rows }
-		}, targets: both, reason: "source-clock-unavailable"},
+		}, targets: partitions, reason: "source-clock-unavailable"},
 		{name: "missing end", mutate: func(s *retentionTestSource) {
 			s.mutateCatalog = func(rows []Row) []Row { return rows[:len(rows)-1] }
-		}, targets: both, reason: "incomplete-frame"},
+		}, targets: partitions, reason: "incomplete-frame"},
 		{name: "count mismatch", mutate: func(s *retentionTestSource) {
 			s.mutateCatalog = func(rows []Row) []Row { return append(rows[:1], rows[2:]...) }
-		}, targets: both, reason: "incomplete-frame"},
+		}, targets: partitions, reason: "incomplete-frame"},
 		{name: "unknown kind", mutate: func(s *retentionTestSource) {
 			s.mutateCatalog = func(rows []Row) []Row {
 				return append(rows, Row{"private-source-canary", "", "", "", "", "", "", "", "", ""})
 			}
-		}, targets: both, reason: "unexpected-frame-kind"},
+		}, targets: partitions, reason: "unexpected-frame-kind"},
 		{name: "bad number", mutate: func(s *retentionTestSource) {
 			s.mutateCatalog = func(rows []Row) []Row { rows[1][2] = "-1"; return rows }
-		}, targets: both, reason: "invalid-partition-row"},
+		}, targets: partitions, reason: "invalid-partition-row"},
 		{name: "narrow frame", mutate: func(s *retentionTestSource) {
 			s.mutateCatalog = func(rows []Row) []Row { rows[0] = rows[0][:9]; return rows }
-		}, targets: both, reason: "invalid-frame-width"},
-		{name: "unpartitioned", mutate: func(s *retentionTestSource) { s.parentKind = "r" }, targets: []string{"pg-1/client-reliability-partitions"}, reason: "parent-not-partitioned"},
-		{name: "missing parent", mutate: func(s *retentionTestSource) { s.parentKind = "" }, targets: []string{"pg-1/client-reliability-partitions"}, reason: "parent-missing"},
-		{name: "reap error", mutate: func(s *retentionTestSource) { s.reapErr = errors.New("private-source-canary") }, targets: []string{"pg-1/contract-reap"}, reason: "reap-sample-unavailable"},
-		{name: "reap host", mutate: func(s *retentionTestSource) {
-			s.mutateReap = func(rows []Row) []Row { rows[0][1] = "pg-2"; return rows }
-		}, targets: []string{"pg-1/contract-reap"}, reason: "reap-sample-frame-invalid"},
-		{name: "reap counts", mutate: func(s *retentionTestSource) { s.stamped = s.old + 1 }, targets: []string{"pg-1/contract-reap"}, reason: "reap-sample-frame-invalid"},
-		{name: "reap clock", mutate: func(s *retentionTestSource) {
-			s.mutateReap = func(rows []Row) []Row { rows[0][2] = retentionTestMicros(s.now.Add(-time.Hour)); return rows }
-		}, targets: []string{"pg-1/contract-reap"}, reason: "source-clock-unavailable"},
+		}, targets: partitions, reason: "invalid-frame-width"},
+		{name: "unpartitioned", mutate: func(s *retentionTestSource) { s.parentKind = "r" }, targets: partitions, reason: "parent-not-partitioned"},
+		{name: "missing parent", mutate: func(s *retentionTestSource) { s.parentKind = "" }, targets: partitions, reason: "parent-missing"},
 	} {
 		source := retentionTestHealthy()
 		test.mutate(&source)
@@ -376,10 +390,9 @@ func TestRetentionLivenessAppendOnlyList(t *testing.T) {
 		{name: "deleting relation", started: now.Add(-30 * 24 * time.Hour), statsReset: now.Add(-10 * 24 * time.Hour),
 			growth: []retentionTestRelation{{name: "audit_log", oid: 1, total: 200 * storageRunwayTestGigabyte, inserted: 5, deleted: 1}}, want: "append_only_relations=none"},
 	} {
-		source := retentionTestHealthy()
+		source := retentionTestStuck(retentionTestHealthy())
 		source.started, source.statsReset, source.growth = test.started, test.statsReset, test.growth
-		source.sampled, source.old, source.stamped = 5000, 1000, 0
-		alert := requireAlertClass(t, retentionTestRun(t, NewRetentionLivenessSignal(), source), "contract-reap-stalled")
+		alert := requireAlertClass(t, retentionTestRun(t, NewRetentionLivenessSignal(), source), "partition-retention-stuck")
 		if !strings.Contains(alert.Evidence, test.want) {
 			t.Fatalf("%s: list %q not in %s", test.name, test.want, alert.Evidence)
 		}
@@ -400,20 +413,20 @@ func TestRetentionLivenessInventoryAuthority(t *testing.T) {
 			settings.Hosts = append(settings.Hosts, HostSettings{Name: "pg-2", Roles: []string{"pg-primary"}})
 		}
 		alerts, err := NewRetentionLivenessSignal().Run(context.Background(), settings)
-		if err != nil || len(alerts) != 2 {
-			t.Fatalf("%s primary did not leave every check unknown", mode)
+		if err != nil || len(alerts) != 1 {
+			t.Fatalf("%s primary did not leave the check unknown", mode)
 		}
-		for _, alert := range alerts {
-			if alert.Class != "retention-liveness-unobservable" || !strings.Contains(alert.Observed, "primary-inventory-unavailable-or-ambiguous") {
-				t.Fatalf("%s primary certified a check", mode)
-			}
+		if alerts[0].Class != "retention-liveness-unobservable" || alerts[0].Target != "primary/client-reliability-partitions" ||
+			!strings.Contains(alerts[0].Observed, "primary-inventory-unavailable-or-ambiguous") {
+			t.Fatalf("%s primary certified the check", mode)
 		}
 	}
 }
 
-// Cancellation during either read returns lifecycle with the original cause.
+// Cancellation before or during the read returns lifecycle with the original
+// cause.
 func TestRetentionLivenessCancellationKeepsOriginalCause(t *testing.T) {
-	for _, stage := range []string{"before", "catalog", "reap"} {
+	for _, stage := range []string{"before", "catalog"} {
 		ctx, cancel := context.WithCancel(context.Background())
 		cause := errors.New("private-source-canary")
 		source := retentionTestHealthy()
@@ -422,15 +435,8 @@ func TestRetentionLivenessCancellationKeepsOriginalCause(t *testing.T) {
 			if stage == "before" {
 				t.Fatal("canceled work read the database")
 			}
-			reap := strings.Contains(query, "TABLESAMPLE")
-			if (stage == "catalog" && !reap) || (stage == "reap" && reap) {
-				cancel()
-				return nil, cause
-			}
-			if reap {
-				return source.reapRows(), nil
-			}
-			return source.catalogRows(strings.Contains(query, "FROM subsidy_payment")), nil
+			cancel()
+			return nil, cause
 		}}
 		if stage == "before" {
 			cancel()
@@ -448,16 +454,14 @@ func TestRetentionLivenessCancellationKeepsOriginalCause(t *testing.T) {
 
 // Once the contract tables are partitioned, a contract table arrives summed
 // over its partitions and is listed as reclaimed by partition drops, whose
-// deletes leave with the dropped partition's statistics; the reap finding
-// says the sample covers every partition. Plain tables read as before.
+// deletes leave with the dropped partition's statistics. Plain tables read as
+// before.
 func TestRetentionLivenessContractPartitions(t *testing.T) {
 	for _, partitioned := range []bool{false, true} {
-		source := retentionTestHealthy()
+		source := retentionTestStuck(retentionTestHealthy())
 		source.growth = []retentionTestRelation{{name: "transfer_contract", oid: 16400, total: 1895 * storageRunwayTestGigabyte, inserted: 2000000000}}
-		source.sampled, source.old, source.stamped = 5000, 1000, 0
 		if partitioned {
 			source.mutateCatalog = func(rows []Row) []Row {
-				rows[0][8] = "p"
 				for _, row := range rows {
 					if row[0] == "growth" {
 						row[6] = "1"
@@ -466,11 +470,10 @@ func TestRetentionLivenessContractPartitions(t *testing.T) {
 				return rows
 			}
 		}
-		alert := requireAlertClass(t, retentionTestRun(t, NewRetentionLivenessSignal(), source), "contract-reap-stalled")
+		alert := requireAlertClass(t, retentionTestRun(t, NewRetentionLivenessSignal(), source), "partition-retention-stuck")
 		listed := strings.Contains(alert.Evidence, "append_only_relations=[transfer_contract total_gb=1895.0 inserted_rows=2000000000 partitioned=true reclaimed_by=partition-drops]")
-		noted := strings.Contains(alert.Context, "transfer_contract is partitioned: the sample reads pages of every partition")
-		if listed != partitioned || noted != partitioned {
-			t.Fatalf("partitioned=%t: listed=%t noted=%t: %s / %s", partitioned, listed, noted, alert.Evidence, alert.Context)
+		if listed != partitioned {
+			t.Fatalf("partitioned=%t: listed=%t: %s", partitioned, listed, alert.Evidence)
 		}
 		if !partitioned && !strings.Contains(alert.Evidence, "append_only_relations=[transfer_contract total_gb=1895.0 inserted_rows=2000000000]") {
 			t.Fatalf("the plain list changed: %s", alert.Evidence)
@@ -481,7 +484,6 @@ func TestRetentionLivenessContractPartitions(t *testing.T) {
 		"contract_root.oid = pg_partition_root(c.oid)",
 		"contract_root.relname IN ('transfer_contract','transfer_escrow','contract_close','transfer_escrow_sweep','contract_close_report','contract_extender')",
 		"HAVING sum(total_bytes) >= 100000000000",
-		"to_regclass('public.transfer_contract')",
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("retention catalog read lost %q", want)
