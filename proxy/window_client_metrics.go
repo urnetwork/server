@@ -2,7 +2,11 @@
 // (connect ip_remote_multi_client_window_client_stats.go): every candidate an
 // expansion builds by outcome and the pass state that built it, every pass
 // that wants to grow by the state it found, warnings and removals by cause,
-// and the live windows by the state their last resize pass ended in.
+// and the live windows by the state their last resize pass ended in. The
+// capability-aware placement (server FP2-PROTOCOL.md §8.2) adds the live
+// window clients by window and the labels FindProviders2 gave them, the
+// flows by the window of their first exit, ip version and protocol, and the
+// flows no window held a compatible exit for.
 //
 // Every device of the process counts into one instance, read at scrape time.
 // The labels are connect's fixed vocabularies; no identity can become a label.
@@ -54,6 +58,24 @@ var windowsDesc = prometheus.NewDesc(
 	[]string{"window", "state"}, nil,
 )
 
+var windowClientsDesc = prometheus.NewDesc(
+	"urnetwork_proxy_window_clients",
+	"Live hosted window clients by window and the ip and protocol labels FindProviders2 gave them",
+	[]string{"window", "ip", "protocol"}, nil,
+)
+
+var windowFlowsDesc = prometheus.NewDesc(
+	"urnetwork_proxy_window_flows_total",
+	"Hosted device flows by the window of the exit that first carried them, their ip version and protocol",
+	[]string{"window", "ip_version", "protocol"}, nil,
+)
+
+var windowNoCompatibleDesc = prometheus.NewDesc(
+	"urnetwork_proxy_window_no_compatible_total",
+	"Hosted device flows answered unreachable because no window held an exit labelled to carry them, by ip version and protocol",
+	[]string{"ip_version", "protocol"}, nil,
+)
+
 // The read side of connect.WindowClientStats.
 type windowClientStatsSource interface {
 	VisitCandidates(visit func(window string, state string, outcome string, count uint64))
@@ -62,6 +84,9 @@ type windowClientStatsSource interface {
 	VisitRemovals(visit func(window string, cause string, count uint64))
 	VisitBalanceProbes(visit func(window string, outcome string, count uint64))
 	VisitWindows(visit func(window string, state string, count int64))
+	VisitWindowClients(visit func(window string, ip string, protocol string, count int64))
+	VisitWindowFlows(visit func(window string, ipVersion string, protocol string, count uint64))
+	VisitNoCompatible(visit func(ipVersion string, protocol string, count uint64))
 }
 
 // Reads one counters instance at scrape time.
@@ -82,6 +107,9 @@ func (self *windowClientStatsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- windowRemovalsDesc
 	ch <- windowBalanceProbesDesc
 	ch <- windowsDesc
+	ch <- windowClientsDesc
+	ch <- windowFlowsDesc
+	ch <- windowNoCompatibleDesc
 }
 
 func (self *windowClientStatsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -102,6 +130,15 @@ func (self *windowClientStatsCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 	self.stats.VisitWindows(func(window string, state string, count int64) {
 		ch <- prometheus.MustNewConstMetric(windowsDesc, prometheus.GaugeValue, float64(count), window, state)
+	})
+	self.stats.VisitWindowClients(func(window string, ip string, protocol string, count int64) {
+		ch <- prometheus.MustNewConstMetric(windowClientsDesc, prometheus.GaugeValue, float64(count), window, ip, protocol)
+	})
+	self.stats.VisitWindowFlows(func(window string, ipVersion string, protocol string, count uint64) {
+		ch <- prometheus.MustNewConstMetric(windowFlowsDesc, prometheus.CounterValue, float64(count), window, ipVersion, protocol)
+	})
+	self.stats.VisitNoCompatible(func(ipVersion string, protocol string, count uint64) {
+		ch <- prometheus.MustNewConstMetric(windowNoCompatibleDesc, prometheus.CounterValue, float64(count), ipVersion, protocol)
 	})
 }
 
