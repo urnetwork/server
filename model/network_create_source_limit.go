@@ -28,9 +28,9 @@ import (
 // /24 could make 160 accounts a day and one holding a /48 1,280 within the
 // address budget alone. The source network budget closes that rotation.
 //
-// What it does not stop: the 2026-11-13 wave (about 11.9k seed-phrase accounts
-// in five hours, each with five hosted proxies) came from about 10,200 address
-// buckets in 130 countries, almost every bucket used once an hour, the shape of
+// What it does not stop: the 2026-11-13 wave (11,905 seed-phrase accounts from
+// 18:00 to 22:30Z, each with five hosted proxies) came from 10,213 address
+// buckets in 143 countries, almost every bucket used once an hour, the shape of
 // a residential proxy pool. Its /24, /48 and autonomous system spread could not
 // be measured afterwards, because only peppered address-bucket hashes are kept.
 // urnetwork_seedphrase_signup_source_signups records, for every admitted
