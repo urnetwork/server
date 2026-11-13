@@ -19,8 +19,11 @@ package controller
 // (crypto_address_sweep: ETH the last block read through, SOL the newest
 // signature examined) to the reader's final head, and only those due: never
 // read, last read ReadEvery ago or more (ReadEveryUnwatched for a coin whose
-// addresses no provider webhook watches), or whose last read failed. A read
-// takes at most RequestsPerScan chain requests a scan in all.
+// addresses no provider webhook watches), or whose last read failed. A
+// scan's reads take at most RequestsPerScan chain requests in all, as the
+// readers count them: SOL each signature page and transaction, ETH one a
+// read (its transfer read; the further pages of an address past a thousand
+// transfers and the receipt checks of the transfers it finds go uncounted).
 //
 // Progress is checkpointed per address: its receipts are recorded and its
 // cursor written before the position moves past it. A read that stops early
@@ -69,9 +72,9 @@ type CryptoAddressSweepSettings struct {
 	// The most addresses one scan reads from the chain. Non-positive sweeps
 	// nothing.
 	ReadsPerScan int
-	// The most chain requests one scan's sweep makes (signature pages,
-	// transactions, transfer reads). A read that would pass it stops and goes
-	// on next scan. Non-positive sweeps nothing.
+	// The most chain requests one scan's sweep makes, as the readers count
+	// them (see the file header). A read that would pass it stops and goes on
+	// next scan. Non-positive sweeps nothing.
 	RequestsPerScan int
 	// SOL: the signatures one getSignaturesForAddress page asks for, at most
 	// 1000 (the RPC's limit).
@@ -79,6 +82,8 @@ type CryptoAddressSweepSettings struct {
 	// SOL: the pages one address's read may list. More history since the
 	// cursor is an error for the address, for an operator: nothing of it is
 	// acted on, since an older transaction would be passed over for good.
+	// Keep it below RequestsPerScan, or a listing that needs every page never
+	// completes.
 	MaxPages int
 }
 
@@ -156,8 +161,8 @@ func init() {
 }
 
 // How long a completely read address of the wallet's coin waits before its
-// next read: ReadEvery when a provider webhook watches
-// the coin's addresses, else ReadEveryUnwatched.
+// next read: ReadEvery when a provider webhook watches the coin's addresses,
+// else ReadEveryUnwatched.
 func cryptoSweepReadEvery(wallet cryptoWallet, settings *CryptoAddressSweepSettings) time.Duration {
 	if watched, ok := wallet.(cryptoWalletWebhookWatched); ok && watched.WebhookWatched() {
 		return settings.ReadEvery
@@ -166,8 +171,8 @@ func cryptoSweepReadEvery(wallet cryptoWallet, settings *CryptoAddressSweepSetti
 }
 
 // One scan's sweep (see the file header), with readEvery from
-// cryptoSweepReadEvery. record records the receipts of one
-// address's read, as the scan records the ones its reader reported.
+// cryptoSweepReadEvery. record records the receipts of one address's read,
+// as the scan records the ones its reader reported.
 func cryptoSweepIssuedAddresses(
 	ctx context.Context,
 	asset string,

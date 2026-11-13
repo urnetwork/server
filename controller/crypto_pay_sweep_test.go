@@ -18,8 +18,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// fakeCryptoSweep is the sweep's tables in memory: the issued addresses in
-// pool index order, their cursors and the rotation position.
+// The sweep's tables in memory: the issued addresses in pool index order,
+// their cursors and the rotation position.
 type fakeCryptoSweep struct {
 	issued    []*model.CryptoAddressSweepAddress
 	cursors   map[string]*model.CryptoAddressSweepCursor
@@ -27,8 +27,8 @@ type fakeCryptoSweep struct {
 	listCalls int
 }
 
-// newFakeCryptoSweep issues count addresses at pool indexes 10, 11, ... and
-// replaces the sweep's reads and writes with it for the rest of the test.
+// Issues count addresses at pool indexes 10, 11, ... and replaces the
+// sweep's reads and writes with them for the rest of the test.
 func newFakeCryptoSweep(t *testing.T, count int) *fakeCryptoSweep {
 	sweep := &fakeCryptoSweep{cursors: map[string]*model.CryptoAddressSweepCursor{}, position: -1}
 	for i := range count {
@@ -76,8 +76,8 @@ func newFakeCryptoSweep(t *testing.T, count int) *fakeCryptoSweep {
 	return sweep
 }
 
-// fakeCryptoSweeper reads issued addresses: each read spends one request and
-// moves a counter cursor on by one, unless the test answers for the address.
+// Reads issued addresses: each read spends one request and moves a counter
+// cursor on by one, unless the test answers for the address.
 type fakeCryptoSweeper struct {
 	reads   []string
 	answers map[string]func(address *model.CryptoAddressSweepAddress, spend func() bool) ([]*cryptoWalletReceipt, *model.CryptoAddressSweepCursor, bool, error)
@@ -103,15 +103,15 @@ func (self *fakeCryptoSweeper) SweepAddress(
 	return []*cryptoWalletReceipt{}, &model.CryptoAddressSweepCursor{Height: &height}, true, nil
 }
 
-// cryptoTestSweepSettings reads two addresses a scan, each once a day.
+// Two addresses read a scan, each once a day.
 func cryptoTestSweepSettings() *CryptoAddressSweepSettings {
 	settings := DefaultCryptoAddressSweepSettings()
 	settings.ReadsPerScan = 2
 	return settings
 }
 
-// cryptoTestSweep runs one scan's sweep and returns its result and the
-// receipts it recorded.
+// Runs one scan's sweep and returns its result and the receipts it
+// recorded.
 func cryptoTestSweep(sweeper *fakeCryptoSweeper, settings *CryptoAddressSweepSettings, now time.Time) (*CryptoPaymentScanResult, []*cryptoWalletReceipt) {
 	result := &CryptoPaymentScanResult{}
 	recorded := []*cryptoWalletReceipt{}
@@ -354,8 +354,8 @@ func TestCryptoEthereumSweepReadsAnAddressFromItsCursor(t *testing.T) {
 	connect.AssertEqual(t, next == nil, true)
 }
 
-// cryptoTestFirstTransferBlock is the block of the first of the address's
-// recorded transfers, as a JSON-RPC quantity.
+// The block of the first of the address's recorded transfers, as a JSON-RPC
+// quantity.
 func cryptoTestFirstTransferBlock(t *testing.T, wallet *ethereumWallet, address *model.CryptoAddressSweepAddress) string {
 	t.Helper()
 	transfers, err := wallet.transfersTo(context.Background(), address.Address, "0x0", "latest")

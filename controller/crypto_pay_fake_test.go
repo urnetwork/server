@@ -380,10 +380,10 @@ func cryptoTestEnable(t testing.TB, config *CryptoPayConfig, wallets map[string]
 	})
 }
 
-// cryptoTestHermeticSeams answers the rail's database and Redis reads that a
-// hermetic test does not set up: a pool with free addresses, no watched
-// addresses, no scan hints, no pool addresses for a transaction, no issued
-// address to sweep or to match in a TAO block. Returns the restore.
+// Answers the rail's database and Redis reads that a hermetic test does not
+// set up: a pool with free addresses, no watched addresses, no scan hints, no
+// pool addresses for a transaction, no issued address to sweep or to match in
+// a TAO block. Returns the restore.
 func cryptoTestHermeticSeams() func() {
 	previousCount := cryptoCountFreeAddresses
 	previousWatched := cryptoListWatchedAddresses

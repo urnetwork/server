@@ -1588,8 +1588,8 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 	return receipt.State == model.CryptoReceiptStateReview && slices.Contains(cryptoHeldReviewReasons, receipt.ReviewReason)
 }
 
-// cryptoEvaluateIntent judges an invoice and its receipts at now. Pure: the
-// status endpoint and the scanner share it, and the tests drive it directly.
+// Judges an invoice and its receipts at now. Pure: the status endpoint and
+// the scanner share it, and the tests drive it directly.
 //
 // "The quote" below ends at expires_at plus the coin's confirmation grace
 // (policy.onTimeUntil): Bitcoin's 3 hours, since its payments are first seen

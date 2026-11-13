@@ -79,11 +79,11 @@ func (self *ethereumWallet) WebhookWatched() bool {
 	return self.webhookId != "" && self.notifyToken != ""
 }
 
-// Reads an issued address's ETH transfers after its cursor (from the
-// chain's start before its first read) through the finalized
-// block, in one alchemy_getAssetTransfers read, and moves the cursor to that
-// block: a finalized transfer never changes, so none is read twice and none
-// is passed over (crypto_pay_sweep.go).
+// Reads an issued address's ETH transfers after its cursor (from the chain's
+// start before its first read) through the finalized block, in one
+// alchemy_getAssetTransfers read, and moves the cursor to that block: a
+// finalized transfer never changes, so none is read twice and none is passed
+// over (crypto_pay_sweep.go).
 func (self *ethereumWallet) SweepAddress(
 	ctx context.Context,
 	address *model.CryptoAddressSweepAddress,
