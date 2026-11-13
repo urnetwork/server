@@ -1526,8 +1526,8 @@ inert for them.
 
 - **As built (§13.2, §13.4), in deploy order.** D42, rolling now, is server
   a151cee8d. It carries S1 step 1 only. S1 step 2 (86553321d) and S2
-  (3dcc7b138, 4fdf026c0) ship together in the next server release. Apart
-  from step 6, no config or vault change is needed.
+  (3dcc7b138, 4fdf026c0) ship together in the next server release. The step
+  numbers are the table's.
   1. `db migrate` to 966 or later: done on Main on 2026-11-13.
   2. **taskworker.**
      - S1: PQ turns, and the ingest of the mask and the PQ outcome.
@@ -1543,12 +1543,16 @@ inert for them.
      update in any order.
   4. **The proxy build with connect 13a6c4f2:** the hosted limited window and
      placement, and the proxy metrics.
-  5. **Grafana:** the providers and proxy dashboards.
-  6. **Owner config release**, one day after step 3:
-     `capability_probe.yml` `enabled: false`.
-  7. **Next release:** merge the retirement branch
-     (`feat/fp2-s1-capprobe-retire-1112`). It must follow step 6, or monitor
-     §2.19g pages.
+  5. **Apps** through the nightly, as in the table.
+
+  Beside the steps:
+  - **Grafana**, after the server steps: the providers and proxy dashboards.
+  - **Owner config release**, one day after step 3: `capability_probe.yml`
+    `enabled: false`. It is the only config change, and no vault change is
+    needed.
+  - **Next release:** merge the retirement branch
+    (`feat/fp2-s1-capprobe-retire-1112`). It must follow the config release,
+    or monitor §2.19g pages.
 
   **Rollback:** the previous taskworker. PQ turns stop, the marker expires,
   and strict PQ returns to today's sources. The capability keys and sets
