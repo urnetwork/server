@@ -10,16 +10,20 @@ package controller
 //   - the tip: getblockchaininfo, once a scan;
 //   - each new block: getblockhash, then getblock at verbosity 2 (every
 //     transaction with its outputs' addresses and values). The addresses a
-//     block's outputs pay are matched against the invoice addresses in play
-//     in one indexed lookup per block (cryptoBitcoinInvoiceAddresses), never
-//     one per output or per invoice, and as of the block's own time, so a
-//     block read late is matched as it would have been on time;
+//     block's outputs pay are matched against every address an invoice was
+//     ever given, open or closed, credited, voided or past the retention
+//     unlink, in one indexed lookup per block (cryptoBitcoinInvoiceAddresses),
+//     never one per output or per invoice. An invoice made after the block
+//     was mined is not matched in it. A payment to an old or expired invoice
+//     is so recorded too, and judged by the late-payment rules
+//     (cryptoEvaluateIntent): credited where they credit, else held for an
+//     operator;
 //   - one transaction again (the sanctions screen's senders, from its inputs'
 //     prevouts; the scanner's and the reconciler's re-checks):
 //     getrawtransaction at verbosity 2.
 //
 // The scan follows the tip from a persisted cursor: the recent blocks it read,
-// with their hashes and what each paid the invoices in play, are kept with the
+// with their hashes and what each paid the invoice addresses, are kept with the
 // coin's cursor (crypto_scan_cursor.recent_blocks), written with the cursor
 // only when a scan completes, so the next scan, on whichever taskworker it
 // runs, starts from what the last complete one saw. Confirmations count from
@@ -62,7 +66,6 @@ import (
 
 	"github.com/urnetwork/glog"
 
-	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -243,7 +246,7 @@ type bitcoinChainBlock struct {
 	Hash   string `json:"hash"`
 	// unix seconds
 	Time int64 `json:"time"`
-	// what the block paid the invoice addresses in play when it was read
+	// what the block paid the invoice addresses when it was read
 	Payments []*bitcoinChainPayment `json:"payments,omitempty"`
 }
 
@@ -419,17 +422,20 @@ func cryptoBitcoinSenders(tx *bitcoinTx) []string {
 
 // ----- the source -----
 
-// The invoice addresses in play among a block's output addresses, as of the
-// block's time: one indexed lookup a block. Replaceable only by tests.
+// The invoice addresses among a block's output addresses: every address an
+// invoice was ever given (open or closed, credited, voided or past the
+// retention unlink) by an invoice made before the block was mined, in one
+// indexed lookup a block. Replaceable only by tests.
 var cryptoBitcoinInvoiceAddresses = func(ctx context.Context, addresses []string, blockTime time.Time) map[string]int64 {
-	asOf := server.NowUtc()
-	if blockTime.Before(asOf) {
-		asOf = blockTime
-	}
-	watchSince := asOf.Add(-cryptoPayConfigFunc().WatchAfterFor(model.CryptoAssetBtc))
 	// an invoice made after the block was mined could not have been paid in it
 	createdBefore := blockTime.Add(cryptoBitcoinClockTolerance)
-	return model.GetCryptoPaymentInvoiceAddressesInPlayInConn(nil, ctx, model.CryptoAssetBtc, addresses, watchSince, createdBefore)
+	indexes := map[string]int64{}
+	for address, issuedAddress := range model.GetCryptoPaymentIssuedAddressesInConn(nil, ctx, model.CryptoAssetBtc, addresses) {
+		if issuedAddress.CreateTime.Before(createdBefore) {
+			indexes[address] = issuedAddress.AddressIndex
+		}
+	}
+	return indexes
 }
 
 func (self *bitcoinWallet) chainInfo(ctx context.Context) (*bitcoinChainInfo, error) {
@@ -496,8 +502,8 @@ func (self *bitcoinWallet) readBlock(ctx context.Context, height uint64) (*bitco
 	return read, nil
 }
 
-// blockPayments reads what a block paid the invoice addresses in play: every
-// address its outputs pay, matched in one lookup.
+// What a block paid the invoice addresses: every address its outputs pay,
+// matched in one lookup.
 func (self *bitcoinWallet) blockPayments(ctx context.Context, block *bitcoinBlock) ([]*bitcoinChainPayment, error) {
 	addresses := []string{}
 	seen := map[string]bool{}

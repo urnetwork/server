@@ -17,7 +17,11 @@ package controller
 //   - the fast path: the Helius webhook's native branch (subscription_controller.go,
 //     heliusHintNativeInvoices). Helius sees a per-invoice address only if the
 //     address is on its webhook; a delivery that names one only brings the
-//     address's next read forward, and the read credits.
+//     address's next read forward, and the read credits;
+//   - the scan's sweep (crypto_pay_sweep.go): every address an invoice was
+//     ever given, read hourly once its invoice is out of play, from the newest
+//     signature examined (SweepAddress), so a payment to an old or expired
+//     invoice is recorded too.
 //
 // Credited at finalized (with Alpenglow, confirmed and finalized describe the
 // same state), and final at once: a finalized transaction never leaves the
@@ -389,6 +393,93 @@ func (self *solanaNativeWallet) IncomingSince(ctx context.Context, minHeight uin
 	return receipts, 0, nil
 }
 
+// Reads an issued address's finalized transactions newer than its cursor's
+// signature (its whole history before the first read), oldest first, and
+// reports their native SOL payments to it. The listing must reach the cursor
+// within settings.MaxPages pages, or nothing of it is acted on (an older
+// transaction it did not reach would be passed over for good). Each signature
+// page and each transaction is a request taken from spend; when spend refuses
+// one, the cursor is the last transaction examined, and the next read goes on
+// from it. A transaction listed as finalized that the RPC does not serve yet
+// stops the read there too (crypto_pay_sweep.go).
+func (self *solanaNativeWallet) SweepAddress(
+	ctx context.Context,
+	address *model.CryptoAddressSweepAddress,
+	settings *CryptoAddressSweepSettings,
+	spend func() bool,
+) ([]*cryptoWalletReceipt, *model.CryptoAddressSweepCursor, bool, error) {
+	cursor := address.Cursor
+	signatures := []*solanaSignatureInfo{}
+	listed := false
+	beforeSignature := ""
+	for page := 0; page < settings.MaxPages; page += 1 {
+		if !spend() {
+			return nil, nil, false, nil
+		}
+		options := map[string]any{
+			"commitment": "finalized",
+			"limit":      settings.PageSize,
+		}
+		if cursor != nil && cursor.Signature != "" {
+			options["until"] = cursor.Signature
+		}
+		if beforeSignature != "" {
+			options["before"] = beforeSignature
+		}
+		var pageSignatures []*solanaSignatureInfo
+		if err := self.rpc.call(ctx, "getSignaturesForAddress", []any{address.Address, options}, &pageSignatures); err != nil {
+			return nil, nil, false, fmt.Errorf("getSignaturesForAddress: %w", err)
+		}
+		for _, signature := range pageSignatures {
+			if signature != nil && signature.Signature != "" {
+				signatures = append(signatures, signature)
+			}
+		}
+		if len(pageSignatures) < settings.PageSize {
+			listed = true
+			break
+		}
+		beforeSignature = pageSignatures[len(pageSignatures)-1].Signature
+	}
+	if !listed {
+		return nil, nil, false, fmt.Errorf("more than %d pages of history since the cursor; raise the sweep's page limit", settings.MaxPages)
+	}
+	slices.Reverse(signatures)
+
+	ours := map[string]int64{address.Address: address.AddressIndex}
+	receipts := []*cryptoWalletReceipt{}
+	var next *model.CryptoAddressSweepCursor
+	if cursor != nil {
+		copied := *cursor
+		next = &copied
+	}
+	for _, signature := range signatures {
+		if signature.Err == nil {
+			if !spend() {
+				return receipts, next, false, nil
+			}
+			transaction, err := solanaFinalizedTransaction(ctx, self.rpc, signature.Signature)
+			if err != nil {
+				// what was read before it is kept
+				return receipts, next, false, fmt.Errorf("getTransaction: %w", err)
+			}
+			if transaction == nil {
+				// listed as finalized but not served yet: read again next scan
+				return receipts, next, false, nil
+			}
+			receipts = append(receipts, solanaNativeReceipts(signature.Signature, transaction, ours)...)
+		}
+		// a failed transaction moved nothing
+		slot := int64(min(signature.Slot, 1<<62))
+		next = &model.CryptoAddressSweepCursor{Signature: signature.Signature, Height: &slot}
+	}
+	if next == nil {
+		// an address with no history yet: read again from its start
+		next = &model.CryptoAddressSweepCursor{}
+	}
+	return receipts, next, true, nil
+}
+
 // Transaction reads one transaction again and reports its payments to any
 // address the pool holds.
 func (self *solanaNativeWallet) Transaction(ctx context.Context, txId string) ([]*cryptoWalletReceipt, bool, error) {
@@ -456,9 +547,8 @@ func (self *solanaNativeWallet) CheckNetwork(ctx context.Context) error {
 
 // ----- a jsonParsed transaction as the Helius webhook's decision reads it -----
 
-// solanaTransactionFromParsed is a finalized jsonParsed transaction in the
-// shape of a Helius enhanced transaction, as far as solanaDecidePayment reads
-// one:
+// A finalized jsonParsed transaction in the shape of a Helius enhanced
+// transaction, as far as solanaDecidePayment reads one:
 //
 //   - Type TRANSFER when a USDC token account owned by one of our receivers
 //     gained USDC, else UNKNOWN (the decision skips it);
@@ -466,6 +556,9 @@ func (self *solanaNativeWallet) CheckNetwork(ctx context.Context) error {
 //     the receiver and the UI amount as the gain, from the transaction's own
 //     pre and post token balances (a transfer, a transferChecked, a CPI from a
 //     smart wallet alike), the sender as the owner whose USDC fell;
+//   - the token account that paid each of those, when one instruction names
+//     it, and that account's other USDC transfers in the transaction
+//     (solanaParsedNameUsdcSources), as Helius names them;
 //   - the account keys as the account data (a Solana Pay reference is one),
 //     and the memo instructions with their text as the data (solanaMemoTexts
 //     keeps a text verbatim), top-level and inner;
@@ -602,7 +695,132 @@ func solanaTransactionFromParsed(signature string, parsed *solanaParsedTransacti
 		})
 		transaction.Type = "TRANSFER"
 	}
+	solanaParsedNameUsdcSources(transaction, parsed, keys)
 	return transaction
+}
+
+// The token programs whose transfers move USDC.
+var solanaTokenProgramIds = []string{
+	"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+	"TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+}
+
+// One transfer of USDC between token accounts an instruction of a parsed
+// transaction made, top-level or inner.
+type solanaParsedUsdcTransfer struct {
+	source      string
+	destination string
+	// micro-USDC
+	amount int64
+}
+
+// A parsed transaction's token program transfers of USDC (transfer,
+// transferChecked), top-level and inner, in order, with the owners of the USDC
+// token accounts the transaction's token balances name.
+func solanaParsedUsdcTransfers(parsed *solanaParsedTransaction, keys []string) (transfers []*solanaParsedUsdcTransfer, owners map[string]string) {
+	transfers = []*solanaParsedUsdcTransfer{}
+	owners = map[string]string{}
+	if parsed.Meta == nil {
+		return
+	}
+	for _, balances := range [][]solanaTokenBalance{parsed.Meta.PreTokenBalances, parsed.Meta.PostTokenBalances} {
+		for _, balance := range balances {
+			if balance.Mint == solanaUsdcMint && 0 <= balance.AccountIndex && balance.AccountIndex < len(keys) && owners[keys[balance.AccountIndex]] == "" {
+				owners[keys[balance.AccountIndex]] = balance.Owner
+			}
+		}
+	}
+	for _, instruction := range parsed.allInstructions() {
+		if !slices.Contains(solanaTokenProgramIds, instruction.ProgramId) || len(instruction.Parsed) == 0 {
+			continue
+		}
+		var parsedInstruction struct {
+			Type string `json:"type"`
+			Info struct {
+				Source      string `json:"source"`
+				Destination string `json:"destination"`
+				Mint        string `json:"mint"`
+				Amount      string `json:"amount"`
+				TokenAmount struct {
+					Amount string `json:"amount"`
+				} `json:"tokenAmount"`
+			} `json:"info"`
+		}
+		if err := json.Unmarshal(instruction.Parsed, &parsedInstruction); err != nil {
+			continue
+		}
+		info := parsedInstruction.Info
+		amountText := info.Amount
+		switch parsedInstruction.Type {
+		case "transferChecked":
+			if info.Mint != solanaUsdcMint {
+				continue
+			}
+			amountText = info.TokenAmount.Amount
+		case "transfer":
+			// a plain transfer names no mint: both accounts must hold USDC
+			_, sourceUsdc := owners[info.Source]
+			_, destinationUsdc := owners[info.Destination]
+			if !sourceUsdc || !destinationUsdc {
+				continue
+			}
+		default:
+			continue
+		}
+		amount, err := strconv.ParseInt(amountText, 10, 64)
+		if err != nil || amount <= 0 || info.Source == "" || info.Destination == "" {
+			continue
+		}
+		transfers = append(transfers, &solanaParsedUsdcTransfer{source: info.Source, destination: info.Destination, amount: amount})
+	}
+	return
+}
+
+// Names, as Helius's enhanced transactions do, the token account that paid
+// each transfer into one of our receivers (FromTokenAccount, when one
+// instruction transfer names it), and adds that account's other USDC transfers
+// in the transaction (a Solana Pay app's fee) as transfers to their own
+// owners: a Shopify order's payment is recognized by all its source sent out
+// (solana_shopify_order.go). The transfers into our receivers, which every
+// decision reads, are unchanged.
+func solanaParsedNameUsdcSources(transaction *SolanaTransaction, parsed *solanaParsedTransaction, keys []string) {
+	instructionTransfers, owners := solanaParsedUsdcTransfers(parsed, keys)
+	receiverTokenAccounts := []string{}
+	sources := []string{}
+	for i := range transaction.TokenTransfers {
+		receiverTransfer := &transaction.TokenTransfers[i]
+		receiverTokenAccounts = append(receiverTokenAccounts, receiverTransfer.ToTokenAccount)
+		named := []string{}
+		for _, instructionTransfer := range instructionTransfers {
+			if instructionTransfer.destination == receiverTransfer.ToTokenAccount && !slices.Contains(named, instructionTransfer.source) {
+				named = append(named, instructionTransfer.source)
+			}
+		}
+		if len(named) == 1 {
+			receiverTransfer.FromTokenAccount = named[0]
+			if !slices.Contains(sources, named[0]) {
+				sources = append(sources, named[0])
+			}
+		}
+	}
+	for _, instructionTransfer := range instructionTransfers {
+		owner := owners[instructionTransfer.destination]
+		if !slices.Contains(sources, instructionTransfer.source) ||
+			slices.Contains(receiverTokenAccounts, instructionTransfer.destination) ||
+			slices.Contains(solanaReceiverAddresses, owner) {
+			continue
+		}
+		uiAmount, _ := strconv.ParseFloat(cryptoFormatAtomic(instructionTransfer.amount, 6), 64)
+		transaction.TokenTransfers = append(transaction.TokenTransfers, TokenTransfer{
+			FromTokenAccount: instructionTransfer.source,
+			FromUserAccount:  owners[instructionTransfer.source],
+			Mint:             solanaUsdcMint,
+			ToTokenAccount:   instructionTransfer.destination,
+			ToUserAccount:    owner,
+			TokenAmount:      uiAmount,
+			TokenStandard:    "Fungible",
+		})
+	}
 }
 
 // ----- the chain leg of the Solana reconcile -----

@@ -357,7 +357,7 @@ Response `CryptoPaymentStatusResult`:
 | Field | Type | |
 |---|---|---|
 | `status` | string | below |
-| `review_reason` | string | with `review`: `underpaid`, `late_underpaid`, `extra`, `orphaned`, `voided`, `credit_failed`, `screening`, `transfer_shape` or `amount_unmatched`; else `""`. Show the review copy for any value |
+| `review_reason` | string | with `review`: `underpaid`, `late_underpaid`, `extra`, `orphaned`, `voided`, `credit_failed`, `screening`, `transfer_shape`, `amount_unmatched` or `unlinked`; else `""`. Show the review copy for any value |
 | `amount(_atomic)`, `received(_atomic)`, `remaining(_atomic)` | string | `received` counts mempool and mined receipts (a top-up to the same address included), but not a mempool payment the wallet flags as a double spend (it counts once mined) |
 | `excess(_atomic)` | string | what arrived beyond the amount, `"0"` when nothing did. An overpayment is credited as paid; the surplus is returned on request to support, in the same coin, with the owner's go |
 | `network` | string | the chain the payment is sent on |
@@ -375,7 +375,7 @@ Response `CryptoPaymentStatusResult`:
 |---|---|
 | `unknown` | no such invoice, or the token does not match. Nothing else is filled in |
 | `paid` | credited. A credited invoice that later received a second payment stays `paid` (the second payment is held, `extra`, for an operator) |
-| `review` | needs an operator: `underpaid` (short at expiry; Bitcoin: at the end of its grace), `late_underpaid` (arrived after expiry, Bitcoin after its grace, worth less than the price at its first-seen rate), `orphaned` (a credited payment left the chain: its entitlement was ended and its credit taken back, `credited_at` is `null` again, until an operator grants it again), `voided` (a payment to an invoice an operator closed), `credit_failed` (the payment is there but its credit kept failing; an operator credits it by hand), `screening` (the payment is held by the sanctions screen; it is credited once it clears), `transfer_shape` (a TAO transfer sent as a batch, a proxy or multisig call, an EVM precompile send or a stake transfer: an operator confirms it reached Coinbase, then credits it), `amount_unmatched` (reserved for a coin whose deposit address is shared, matched by amount; not produced while every invoice has its own address) |
+| `review` | needs an operator: `underpaid` (short at expiry; Bitcoin: at the end of its grace), `late_underpaid` (arrived after expiry, Bitcoin after its grace, worth less than the price at its first-seen rate), `orphaned` (a credited payment left the chain: its entitlement was ended and its credit taken back, `credited_at` is `null` again, until an operator grants it again), `voided` (a payment to an invoice an operator closed), `credit_failed` (the payment is there but its credit kept failing; an operator credits it by hand), `screening` (the payment is held by the sanctions screen; it is credited once it clears), `transfer_shape` (a TAO transfer sent as a batch, a proxy or multisig call, an EVM precompile send or a stake transfer: an operator confirms it reached Coinbase, then credits it), `amount_unmatched` (reserved for a coin whose deposit address is shared, matched by amount; not produced while every invoice has its own address), `unlinked` (a late payment worth the price to an invoice older than the retention window, 30 days: the invoice no longer knows the account it was for, so an operator matches the payment to its buyer; a `code` invoice is still credited) |
 | `confirming` | received at least 99.5% of the amount (or, after expiry, a late payment worth the price at its first-seen rate), not yet at `confirmations_required` |
 | `seen` | something arrived, less than 99.5% of the amount; `remaining` says how much more to send to the same address |
 | `expired` | past `expires_at` with nothing received; for Bitcoin, past `expires_at` and its 3-hour confirmation grace |
@@ -465,9 +465,9 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
 
 - **Bitcoin** (Alchemy's JSON-RPC alone, on the free tier, `vault/<env>/alchemy.yml`; BTCPAY.md §16.7): a block
   scanner. Each scan (every minute) reads the tip (`getblockchaininfo`); each new block is read once
-  (`getblockhash`, then `getblock` at verbosity 2), and every address its outputs pay is matched against the invoice
-  addresses in play in one indexed lookup per block, as of the block's own time (open, or closed in the 24 hours
-  before it, or with a receipt still unconfirmed; never one made more than 3 hours after the block). Only outputs
+  (`getblockhash`, then `getblock` at verbosity 2), and every address its outputs pay is matched against every
+  address an invoice was ever given (open or closed, credited, voided or past the retention unlink) in one indexed
+  lookup per block, never one made more than 3 hours after the block. Only outputs
   count, summed per transaction and address, every script type (P2PKH, P2SH, P2WPKH, P2WSH, P2TR). Confirmations count
   from the block's height. The recent blocks read (24), with their hashes and what each paid, are kept with the cursor
   (`crypto_scan_cursor.recent_blocks`, written only when a scan completes): a block that is not a child of the kept tip
@@ -488,7 +488,9 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
   the tip, read by each scan and by each address refill's network check, once a minute each, and each block once.
 - **ETH** (Alchemy only): each invoice address's incoming transfers (`alchemy_getAssetTransfers`, `toAddress`, the
   external and internal categories), polled every 30 seconds, in exact wei; each paying transaction's receipt status
-  (a reverted one moved nothing); credited once its block is at the `finalized` tag. The Address Activity webhook is
+  (a reverted one moved nothing); credited once its block is at the `finalized` tag. Every other address an invoice
+  was ever given is read by the scan's sweep, once a day from its own cursor through the `finalized` block (hourly
+  when the webhook is off). The Address Activity webhook is
   a fast path, on when alchemy.yml names `eth_webhook_id`, `eth_webhook_signing_key` and `notify_auth_token`: the
   refill adds each new address to it through the Notify API. The webhook is made once by the owner at deploy time:
   `bringyourctl crypto alchemy-webhook [--signing-key-file=<path>]` finds the webhook for
@@ -496,19 +498,26 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
   the named file.
 - **SOL** (Helius RPC, `vault/<env>/helius.yml`): each invoice address's finalized signatures and their transactions
   (`getSignaturesForAddress`, `getTransaction` jsonParsed); system transfers to the address count, the sources are the
-  senders. The Helius webhook's native branch only brings a read forward. The hourly Solana reconcile also reads the
+  senders. Every other address an invoice was ever given is read by the scan's sweep, hourly, from the newest
+  signature it examined. The Helius webhook's native branch only brings a read forward. The hourly Solana reconcile also reads the
   chain for every open USDC Solana Pay reference and credits a payment whose webhook delivery was lost.
-- **TAO** (snow's Finney node, through `st.yml`): finalized blocks only, at most 100 a scan and never more than 300
-  behind the finalized head; each block decoded with its own runtime's metadata (`System.LastRuntimeUpgrade`), never
+- **TAO** (snow's Finney node, through `st.yml`): every finalized block once a TAO invoice address has been issued
+  (none before), at most 100 a scan and never more than 300 behind the finalized head, its transfers matched against
+  every address an invoice was ever given in one lookup a scan; the reader's requests to the node are paced (at most
+  20 a second), budgeted (500 a scan) and counted by method (`urnetwork_crypto_pay_tao_node_requests_total`); each
+  block decoded with its own runtime's metadata (`System.LastRuntimeUpgrade`), never
   replaying history across runtime upgrades. Only top-level `Balances.transfer_keep_alive`, `transfer_allow_death`
   and `transfer_all` calls to the invoice address are credited by themselves; every other shape (batches, proxy,
   multisig, the EVM precompile, stake transfers) is held as `transfer_shape`. An undecodable extrinsic is skipped and
   counted; a runtime the reader cannot read pauses it (`urnetwork_crypto_pay_tao_reader_paused`) without
   crash-looping. **The TAO scanner's first run on mainnet must pass the SN25 validator's deploy gate**: snow's node is
   shared with the validator.
-- **Watch windows** (TAO, ETH, SOL): an open invoice's address is read every scan; one that expired, was credited or
+- **Watch windows** (ETH, SOL): an open invoice's address is read every scan; one that expired, was credited or
   was voided in the last 24 hours once every ten scan intervals; an address a webhook names, at the next scan
-  whatever its age. Bitcoin matches the same invoices in every block, as of the block's time.
+  whatever its age; every other address an invoice was ever given by the sweep (above). Bitcoin and TAO match every
+  issued address in every block they read. A payment to an old invoice is judged by the late-payment rules: credited
+  where they credit (valued at its first-seen rate), else held for an operator (`late_underpaid`, `extra`, `voided`,
+  `unlinked`).
 
 ### Rates
 
