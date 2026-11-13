@@ -184,29 +184,40 @@ type urlPhaseFixture struct {
 	dns, tcp, handshake, headers, bodyGap time.Duration
 	body                                  string
 	chunkSize                             int
-	connections                           atomic.Int64
-	workers                               sync.WaitGroup
-	lifetime                              context.Context
-	stop                                  context.CancelFunc
+	// How the provider path holds the tunnel's first sends (nil: not at all),
+	// and the first-sends hold the tunnel's resolver is given (nil: none).
+	path        *firstSendsHoldPath
+	firstSends  *providerFirstSendsHold
+	connections atomic.Int64
+	workers     sync.WaitGroup
+	lifetime    context.Context
+	stop        context.CancelFunc
 }
 
 // Real WebPKI verification, TLS, HTTP/1, request ownership and URL result
 // classification run on net.Pipe. No host socket, provider or Main dependency.
+// The query and the connect each take their delay once the path lets their
+// sends go.
 func (self *urlPhaseFixture) client(t *testing.T) *http.Client {
 	t.Helper()
 	requireInjectedSystemTrust(t)
 	self.lifetime, self.stop = context.WithCancel(context.Background())
 	leaf, key := issueLeaf(t, "phase.example")
 	certificate := tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: key}
+	path := self.path
+	if path == nil {
+		path = &firstSendsHoldPath{}
+	}
 	resolver := &providerUrlResolver{
 		query: func(ctx context.Context, _, _ string) ([]netip.Addr, bool) {
-			if waitUrlPhase(ctx, self.dns) != nil {
+			if waitUrlPhase(ctx, time.Until(path.release().Add(self.dns))) != nil {
 				return nil, false
 			}
 			return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, true
 		},
+		firstSends: self.firstSends,
 		dial: func(ctx context.Context, _, _ string, _ []netip.Addr) (net.Conn, error) {
-			if err := waitUrlPhase(ctx, self.tcp); err != nil {
+			if err := waitUrlPhase(ctx, time.Until(path.release().Add(self.tcp))); err != nil {
 				return nil, err
 			}
 			left, right := net.Pipe()

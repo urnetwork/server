@@ -549,6 +549,9 @@ type Tunnel struct {
 	// Set when a second client took the window of a tunnel that keeps
 	// running on a replacement (CapabilityObservation.KeepTunnelOnReplacement).
 	clientReplaced *atomic.Bool
+	// The hold on the tunnel's first sends, given to the URL phase that makes
+	// them; nil for a tunnel whose clients hold nothing.
+	firstSends *providerFirstSendsHold
 	// Whether the provider ever joined the multi-client, and the
 	// unsubscribe of the callback that records it.
 	providerAdded *atomic.Bool
@@ -775,6 +778,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		lose:            lose,
 		unwatch:         unwatch,
 		clientReplaced:  clientReplaced,
+		firstSends:      newProviderFirstSendsHold(cfg.CapabilityObservation),
 		providerAdded:   providerAdded,
 		unwatchAdded:    unwatchAdded,
 		packetSent:      packetSent,
@@ -986,6 +990,8 @@ func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []strin
 			window, providers := self.multiClient.Monitor().Events()
 			return dnsRouteFromMonitor(self.lost, window, providers)
 		},
+		phases:     defaultProviderUrlPhaseSettings(),
+		firstSends: self.firstSends,
 	}
 	client := httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)
 	client.Transport.(*providerHttpTransport).registration = self.registration
