@@ -495,6 +495,29 @@ func (self *CertsStore) ListQueued(ctx context.Context, afterCertId sidecar.Id, 
 	)
 }
 
+func (self *CertsStore) ListInStates(ctx context.Context, states []sidecar.TlsCertState, afterCertId sidecar.Id, count int) ([]*sidecar.TlsCertRecord, error) {
+	if count <= 0 || len(states) == 0 {
+		return []*sidecar.TlsCertRecord{}, nil
+	}
+	stateNames := make([]string, 0, len(states))
+	for _, state := range states {
+		stateNames = append(stateNames, string(state))
+	}
+	return self.list(
+		ctx,
+		`
+			SELECT `+certsStoreColumns+`
+			FROM network_tls_cert
+			WHERE state = ANY($1) AND $2 < cert_id
+			ORDER BY cert_id
+			LIMIT $3
+		`,
+		stateNames,
+		server.Id(afterCertId),
+		count,
+	)
+}
+
 func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsservice.CertsTransition) (applied bool, returnErr error) {
 	if transition == nil || len(transition.From) == 0 || transition.To == "" {
 		return false, errors.New("certs store: a transition needs its states")
