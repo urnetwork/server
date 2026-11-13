@@ -19,10 +19,12 @@ package controller
 //	          model.MintNetworkSignIn with the IdP's mark, which an SSO-required
 //	          team asks of every sign-in
 //
-// The flow store's §2.8 row is open (questions/team-m2-16-sso-flow-state-row.md),
-// so production installs none and every flow is refused meanwhile, failing
-// closed. api fetches only https issuers, never through a redirect, and never
-// dials a non-public address (model.NetworkIdpDialControl).
+// A flow waits in Redis under {sso_<state>} for FlowTtl, 10 minutes, and is
+// taken with GETDEL (model.RedisNetworkSsoFlowStore; QD-720, §2.8's api-3), so
+// any api instance finishes a flow another began and none finishes it twice.
+// With no store installed every flow is refused, failing closed. api fetches
+// only https issuers, never through a redirect, and never dials a non-public
+// address (model.NetworkIdpDialControl).
 
 import (
 	"context"
@@ -91,9 +93,12 @@ var defaultNetworkOidcClient = sync.OnceValue(func() NetworkOidcClient {
 // it.
 var networkSsoRedirectOrigin = session.DpopApiOrigin
 
-// 128 random bits, base64url with no padding.
-func networkSsoRandom() (string, error) {
-	b := make([]byte, 16)
+// byteCount random bytes, base64url with no padding.
+func networkSsoRandom(byteCount int) (string, error) {
+	if byteCount <= 0 {
+		return "", errors.New("a sign-in flow needs random bytes")
+	}
+	b := make([]byte, byteCount)
 	if _, err := io.ReadFull(rand.Reader, b); err != nil {
 		return "", err
 	}
@@ -132,6 +137,7 @@ func BeginNetworkSso(ctx context.Context, idpId server.Id, linkingSession *sessi
 	if err != nil {
 		return nil, fmt.Errorf("%d The api has no public origin.", http.StatusServiceUnavailable)
 	}
+	settings := model.DefaultNetworkIdpSettings()
 	flow := &model.NetworkSsoFlow{
 		IdpId:       idp.IdpId,
 		NetworkId:   idp.NetworkId,
@@ -139,7 +145,7 @@ func BeginNetworkSso(ctx context.Context, idpId server.Id, linkingSession *sessi
 		CreateTime:  server.NowUtc(),
 	}
 	for _, value := range []*string{&flow.State, &flow.Nonce, &flow.CodeVerifier} {
-		if *value, err = networkSsoRandom(); err != nil {
+		if *value, err = networkSsoRandom(settings.FlowSecretByteCount); err != nil {
 			return nil, err
 		}
 	}
@@ -149,7 +155,7 @@ func BeginNetworkSso(ctx context.Context, idpId server.Id, linkingSession *sessi
 		userId := linkingSession.ByJwt.UserId
 		flow.LinkingUserId = &userId
 	}
-	if err := store.Put(ctx, flow, model.DefaultNetworkIdpSettings().FlowTtl); err != nil {
+	if err := store.Put(ctx, flow, settings.FlowTtl); err != nil {
 		return nil, err
 	}
 	authorizationUrl, err := currentNetworkOidcClient().AuthorizationUrl(ctx, idp, flow)
@@ -468,7 +474,7 @@ func VerifyNetworkOidcIdToken(idToken string, keySet *jose.JSONWebKeySet, idp *m
 	if claims.Nonce == "" || claims.Nonce != flow.Nonce {
 		return nil, errors.New("the ID token's nonce is not the flow's")
 	}
-	if claims.Subject == "" || 255 < len(claims.Subject) {
+	if claims.Subject == "" || model.DefaultNetworkIdpSettings().SubMaxLength < len(claims.Subject) {
 		return nil, errors.New("the ID token names no sub")
 	}
 	return &model.NetworkOidcIdentity{Sub: claims.Subject, Email: claims.Email, EmailVerified: claims.EmailVerified}, nil
