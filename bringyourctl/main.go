@@ -105,6 +105,7 @@ Usage:
     bringyourctl crypto show --intent=<intent_id>
     bringyourctl crypto credit --intent=<intent_id> [--sanctions-cleared]
     bringyourctl crypto credit-usdc --intent=<intent_id> --tx=<signature> [(--commit --expect=<digest>)]
+    bringyourctl payouts close-attempted [(--commit --expect=<digest>)]
     bringyourctl crypto void --intent=<intent_id>
     bringyourctl crypto refund --intent=<intent_id> --address=<payout_address>
     bringyourctl crypto alchemy-webhook [--signing-key-file=<path>]
@@ -262,7 +263,7 @@ Options:
     --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
-    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc or contracts close-due dry run printed; --commit refuses any other census.
+    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, payouts close-attempted or contracts close-due dry run printed; --commit refuses any other census.
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
@@ -443,6 +444,10 @@ func main() {
 			onboardingRollup(opts)
 		} else if experiments, _ := opts.Bool("experiments"); experiments {
 			onboardingExperiments(opts)
+		}
+	} else if payouts, _ := opts.Bool("payouts"); payouts {
+		if closeAttempted, _ := opts.Bool("close-attempted"); closeAttempted {
+			os.Exit(payoutsCloseAttemptedCommand(opts, os.Stdout, os.Stderr))
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
 		if scheduleOpen, _ := opts.Bool("schedule-open-closures"); scheduleOpen {
