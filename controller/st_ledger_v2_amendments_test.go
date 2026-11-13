@@ -43,6 +43,8 @@ type stAmendmentTestSite struct {
 	served atomic.Value
 	alerts []string
 	store  *stAmendmentTestStore
+	// requests for the published file
+	fetches atomic.Int64
 }
 
 func newStAmendmentTestSite(t *testing.T) *stAmendmentTestSite {
@@ -54,6 +56,7 @@ func newStAmendmentTestSite(t *testing.T) *stAmendmentTestSite {
 	site := &stAmendmentTestSite{key: key, store: &stAmendmentTestStore{}}
 	site.served.Store([]byte(nil))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		site.fetches.Add(1)
 		raw := site.served.Load().([]byte)
 		if raw == nil {
 			http.NotFound(w, r)

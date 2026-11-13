@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/urfoundation/sn/amendment"
 	"github.com/urfoundation/sn/demand"
 	"github.com/urfoundation/sn/demand/bridge"
 	"github.com/urfoundation/sn/demand/pricesheet"
@@ -1677,15 +1678,25 @@ func stDemandCommitRoot(tb testing.TB, cfg *StConfig, epoch uint64, seq uint64, 
 // A sync turn plans the ended epoch's next usage step, on a registered pool, and only
 // from the pool's first epoch on: users and the extender census at once, each until it
 // is captured, the statement once the root committed for the epoch in its root window
-// is mirrored, and, once the epoch's rows are recorded without an extender component,
-// its extender shadow report until one is recorded. An epoch that can have no statement,
-// declared unrecoverable, with no root in its window or with more than one, alerts once
-// and plans nothing.
+// is mirrored, and, for one of the two epochs before E_x (here 7, configured) once its
+// rows are recorded without an extender component, its extender shadow report until one
+// is recorded. An epoch that can have no statement, declared unrecoverable, with no root
+// in its window or with more than one, alerts once and plans nothing.
 func TestStLedgerV2UsageSync(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := context.Background()
 		stDemandDbSetup(ctx)
 		cfg := ledgerV2TestConfig()
+		cfg.Netuid = 7
+		line, err := amendment.NewExtenders(cfg.ChainId, uint16(cfg.Netuid), cfg.NoId, 7).Line()
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if err := cfg.Amendments.Encode([]string{line}); err != nil {
+			tb.Fatal(err)
+		}
+		stExtenderShadowConcluded.Clear()
+		tb.Cleanup(stExtenderShadowConcluded.Clear)
 		key := cfg.DeploymentKey()
 		previousCfg := stConfigInstance
 		SetStConfig(cfg)
