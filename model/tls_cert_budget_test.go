@@ -135,6 +135,7 @@ func TestCertsBudgetRebuildsALostKeyFromItsRows(t *testing.T) {
 				Attestation:         []byte("attestation"),
 				Ca:                  string(ca),
 				State:               sidecar.TlsCertStateQueued,
+				StateTime:           orderTime,
 			}
 		}
 		issued := row(now.Add(-30 * time.Minute))

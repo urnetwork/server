@@ -54,10 +54,13 @@ func TestCertsStoreKeepsAChainAndEmptyColumns(t *testing.T) {
 			SpkiSha256:          make([]byte, 32),
 			Attestation:         []byte("attestation"),
 			State:               sidecar.TlsCertStateIssued,
-			Serial:              "0a1b",
-			NotBefore:           orderTime,
-			NotAfter:            orderTime.Add(90 * 24 * time.Hour),
-			Chain:               [][]byte{[]byte("leaf"), []byte("intermediate")},
+			StateTime:           orderTime.Add(time.Minute),
+			// a reason named on a row that is not revoking is not kept
+			RevocationReason: sidecar.TlsCertRevocationReasonKeyCompromise,
+			Serial:           "0a1b",
+			NotBefore:        orderTime,
+			NotAfter:         orderTime.Add(90 * 24 * time.Hour),
+			Chain:            [][]byte{[]byte("leaf"), []byte("intermediate")},
 		}
 		copy(row.IdentifierSetSha256, row.CertId[:])
 		if err := store.InsertCert(ctx, row); err != nil {
@@ -77,6 +80,19 @@ func TestCertsStoreKeepsAChainAndEmptyColumns(t *testing.T) {
 		if !stored.NotBefore.Equal(row.NotBefore) || !stored.NotAfter.Equal(row.NotAfter) || stored.NotBefore.Location() != time.UTC {
 			t.Fatalf("the validity read back as %v to %v", stored.NotBefore, stored.NotAfter)
 		}
+		if !stored.StateTime.Equal(row.StateTime) || stored.StateTime.Location() != time.UTC || stored.RevocationReason != "" {
+			t.Fatalf("the state's time read back as %v with reason %q", stored.StateTime, stored.RevocationReason)
+		}
+		// a row with no chain keeps none, not an empty one
+		chainless := *row
+		chainless.CertId = sidecartest.CertsIdAt(orderTime.Add(time.Second))
+		chainless.Chain = [][]byte{}
+		if err := store.InsertCert(ctx, &chainless); err != nil {
+			t.Fatal(err)
+		}
+		if stored, err := store.GetCert(ctx, chainless.CertId); err != nil || stored.Chain != nil {
+			t.Fatalf("a row with no chain read back %v, %v", stored, err)
+		}
 
 		// a set's orders since a time between two milliseconds start at the next one
 		between := orderTime.Add(500 * time.Microsecond)
@@ -87,6 +103,7 @@ func TestCertsStoreKeepsAChainAndEmptyColumns(t *testing.T) {
 			CertId: row.CertId,
 			From:   []sidecar.TlsCertState{sidecar.TlsCertStateIssued},
 			To:     sidecar.TlsCertStateIssued,
+			At:     orderTime.Add(time.Hour),
 			Ca:     "le",
 		}); err != nil || !applied {
 			t.Fatalf("the transition: %v, %v", applied, err)
@@ -99,7 +116,7 @@ func TestCertsStoreKeepsAChainAndEmptyColumns(t *testing.T) {
 		}
 
 		// a transition with no states is refused, not applied to every row
-		if _, err := store.TransitionCert(ctx, &certsservice.CertsTransition{CertId: row.CertId, To: sidecar.TlsCertStateRevoked}); err == nil {
+		if _, err := store.TransitionCert(ctx, &certsservice.CertsTransition{CertId: row.CertId, To: sidecar.TlsCertStateRevoked, At: orderTime.Add(time.Hour)}); err == nil {
 			t.Fatal("a transition from no state was taken")
 		}
 		if stored, err := store.GetCert(ctx, row.CertId); err != nil || stored.State != sidecar.TlsCertStateIssued {
@@ -129,12 +146,25 @@ func TestRequestTlsCertRevocationMarksIssuedRowsOfItsNetwork(t *testing.T) {
 				SpkiSha256:          make([]byte, 32),
 				Attestation:         []byte("attestation"),
 				State:               state,
+				StateTime:           orderTime,
 			}
 			if err := store.InsertCert(ctx, row); err != nil {
 				t.Fatal(err)
 			}
 			return row.CertId
 		}
+		// a marked row holds its reason and the time of the mark
+		marked := func(certId sidecar.Id, reason sidecar.TlsCertRevocationReason, since time.Time) {
+			t.Helper()
+			row, err := store.GetCert(ctx, certId)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.State != sidecar.TlsCertStateRevoking || row.RevocationReason != reason || row.StateTime.Before(since.Truncate(time.Microsecond)) {
+				t.Fatalf("a marked row: state %s, reason %q, state time %v, marked since %v", row.State, row.RevocationReason, row.StateTime, since)
+			}
+		}
+		since := server.NowUtc()
 		stateOf := func(certId sidecar.Id) sidecar.TlsCertState {
 			t.Helper()
 			row, err := store.GetCert(ctx, certId)
@@ -159,6 +189,8 @@ func TestRequestTlsCertRevocationMarksIssuedRowsOfItsNetwork(t *testing.T) {
 		if stateOf(first) != sidecar.TlsCertStateRevoking || stateOf(second) != sidecar.TlsCertStateIssued {
 			t.Fatalf("after one: %s, %s", stateOf(first), stateOf(second))
 		}
+		// §21.6's takedown: the names stop being served
+		marked(first, sidecar.TlsCertRevocationReasonCessationOfOperation, since)
 		// the whole network: what is still issued, once
 		for _, want := range []int{1, 0} {
 			if count, err := RequestTlsCertRevocation(ctx, &TlsCertRevocationRequest{NetworkId: server.Id(networkId), Reason: "abuse:case"}); err != nil || count != want {
@@ -169,9 +201,19 @@ func TestRequestTlsCertRevocationMarksIssuedRowsOfItsNetwork(t *testing.T) {
 			stateOf(expired) != sidecar.TlsCertStateExpired || stateOf(other) != sidecar.TlsCertStateIssued {
 			t.Fatal("a row that was not the network's issued certificate moved")
 		}
+		marked(second, sidecar.TlsCertRevocationReasonCessationOfOperation, since)
+		if row, err := store.GetCert(ctx, queued); err != nil || row.RevocationReason != "" || !row.StateTime.Equal(orderTime) {
+			t.Fatalf("a row the request did not mark: %+v, %v", row, err)
+		}
 		if _, err := RequestTlsCertRevocation(ctx, &TlsCertRevocationRequest{CertId: server.Id(first)}); err == nil {
 			t.Fatal("a revocation with no network was taken")
 		}
+		// a compromise: the CA is to be told keyCompromise
+		compromised := insert(networkId, sidecar.TlsCertStateIssued)
+		if count, err := RequestTlsCertRevocation(ctx, &TlsCertRevocationRequest{NetworkId: server.Id(networkId), CertId: server.Id(compromised), Reason: "compromise", KeyCompromise: true}); err != nil || count != 1 {
+			t.Fatalf("a compromised certificate: %d, %v", count, err)
+		}
+		marked(compromised, sidecar.TlsCertRevocationReasonKeyCompromise, since)
 	})
 }
 
@@ -182,7 +224,7 @@ func TestCertsStoreUnlinkedTouchesNothing(t *testing.T) {
 		}
 		ctx := context.Background()
 		store := NewCertsStore(nil)
-		row := &sidecar.TlsCertRecord{CertId: sidecar.NewId(), NetworkId: sidecar.NewId(), State: sidecar.TlsCertStateQueued}
+		row := &sidecar.TlsCertRecord{CertId: sidecar.NewId(), NetworkId: sidecar.NewId(), State: sidecar.TlsCertStateQueued, StateTime: server.NowUtc()}
 		if err := store.InsertCert(ctx, row); !errors.Is(err, ErrCertsStoreUnavailable) {
 			t.Fatalf("an insert without MG5 answered %v", err)
 		}
@@ -194,6 +236,9 @@ func TestCertsStoreUnlinkedTouchesNothing(t *testing.T) {
 		}
 		if _, err := store.PurgeEnded(ctx, server.NowUtc()); !errors.Is(err, ErrCertsStoreUnavailable) {
 			t.Fatalf("a purge without MG5 answered %v", err)
+		}
+		if _, err := store.PurgeChains(ctx, server.NowUtc()); !errors.Is(err, ErrCertsStoreUnavailable) {
+			t.Fatalf("a chain purge without MG5 answered %v", err)
 		}
 	})
 }

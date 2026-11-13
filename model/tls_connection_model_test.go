@@ -89,8 +89,10 @@ var tlsSchemaColumnRows = map[string][2]string{
 	"network_tls_cert.ari_window_start":      {"cert-1", "ARI window"},
 	"network_tls_cert.ari_window_end":        {"cert-1", "ARI window"},
 	"network_tls_cert.state":                 {"cert-1", "state"},
+	"network_tls_cert.state_time":            {"cert-1", "the time of its latest state"},
 	"network_tls_cert.successor_cert_id":     {"cert-1", "successor"},
-	"network_tls_cert.chain":                 {"cert-1", "Team custom-domain chains"},
+	"network_tls_cert.chain":                 {"cert-1", "issued chains until 30 d after expiry or revocation"},
+	"network_tls_cert.revocation_reason":     {"cert-1", "a requested revocation's reason"},
 
 	"network_tls_suspension.network_id": {"tls-4", "kill-switch entries"},
 	"network_tls_suspension.host":       {"tls-4", "a host or all the network's hosts"},
@@ -103,7 +105,7 @@ var tlsSchemaColumnRows = map[string][2]string{
 	"tls_connection_record.start_time":    {"tls-3", "start"},
 	"tls_connection_record.end_time":      {"tls-3", "duration"},
 	"tls_connection_record.byte_count":    {"tls-3", "bytes"},
-	"tls_connection_record.visitor_hash":  {"tls-3", "a /24 or /48 hash under a daily-rotated key"},
+	"tls_connection_record.visitor_hash":  {"tls-3", "a /24 or /48 hash, HMAC-SHA256 under k_record from tls-2's fleet-shared daily key"},
 
 	"tls_connection_day.network_id":       {"tls-3", "daily counts per network and host"},
 	"tls_connection_day.host":             {"tls-3", "daily counts per network and host"},

@@ -9,11 +9,14 @@ package model
 // cert_id's, which certs mints on its own clock, so "orders since" is a range
 // of ids and reads network_tls_cert's (…, cert_id) indexes. The store keeps no
 // clock: every time is the caller's, whole to the microsecond as Postgres
-// keeps it.
+// keeps it, state_time among them, which a row is written with and each change
+// of state sets (QD-742).
 //
 // A state change applies only while the row is in one of the transition's
-// From states, in one UPDATE, so two passes cannot both move a row. Nothing
-// here is on a connection's path.
+// From states, in one UPDATE, so two passes cannot both move a row. The same
+// UPDATE writes an issuance's chain, and keeps revocation_reason only on a
+// revoking row: any other state clears it (QD-741). Nothing here is on a
+// connection's path.
 //
 // The table is MG5's: a binary that does not link the group answers
 // ErrCertsStoreUnavailable for every call (server.SidecarMg5Linked).
@@ -80,8 +83,10 @@ const certsStoreColumns = `
 	ari_window_start,
 	ari_window_end,
 	state,
+	state_time,
 	successor_cert_id,
-	chain
+	chain,
+	revocation_reason
 `
 
 // Runs callback under the call's deadline and returns what it raised, as an
@@ -132,6 +137,13 @@ func certsStoreNullId(value sidecar.Id) *server.Id {
 	return &id
 }
 
+func certsStoreNullChain(value [][]byte) [][]byte {
+	if len(value) == 0 {
+		return nil
+	}
+	return value
+}
+
 func certsStoreNullBytes(value []byte) []byte {
 	if len(value) == 0 {
 		return nil
@@ -159,9 +171,10 @@ func certsStoreIdFloor(at time.Time) server.Id {
 func certsStoreScan(row pgx.Row) (*sidecar.TlsCertRecord, error) {
 	var certId, networkId, clientId, sidecarId server.Id
 	var successorCertId *server.Id
-	var ca, accountUri, profile, serial *string
+	var ca, accountUri, profile, serial, revocationReason *string
 	var notBefore, notAfter, ariWindowStart, ariWindowEnd *time.Time
 	var state string
+	var stateTime time.Time
 	record := &sidecar.TlsCertRecord{}
 	if err := row.Scan(
 		&certId,
@@ -181,8 +194,10 @@ func certsStoreScan(row pgx.Row) (*sidecar.TlsCertRecord, error) {
 		&ariWindowStart,
 		&ariWindowEnd,
 		&state,
+		&stateTime,
 		&successorCertId,
 		&record.Chain,
+		&revocationReason,
 	); err != nil {
 		return nil, err
 	}
@@ -191,6 +206,10 @@ func certsStoreScan(row pgx.Row) (*sidecar.TlsCertRecord, error) {
 	record.ClientId = sidecar.Id(clientId)
 	record.SidecarId = sidecar.Id(sidecarId)
 	record.State = sidecar.TlsCertState(state)
+	record.StateTime = stateTime.UTC()
+	if revocationReason != nil {
+		record.RevocationReason = sidecar.TlsCertRevocationReason(*revocationReason)
+	}
 	if ca != nil {
 		record.Ca = *ca
 	}
@@ -262,6 +281,14 @@ func (self *CertsStore) InsertCert(ctx context.Context, row *sidecar.TlsCertReco
 	if row == nil || row.CertId == (sidecar.Id{}) {
 		return errors.New("certs store: a row needs an id")
 	}
+	if row.StateTime.IsZero() {
+		return certsservice.ErrCertsStateTime
+	}
+	// a reason waits only in a revoking row
+	revocationReason := ""
+	if row.State == sidecar.TlsCertStateRevoking {
+		revocationReason = string(row.RevocationReason)
+	}
 	inserted := false
 	err := self.run(ctx, func(ctx context.Context) {
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -269,7 +296,7 @@ func (self *CertsStore) InsertCert(ctx context.Context, row *sidecar.TlsCertReco
 				ctx,
 				`
 					INSERT INTO network_tls_cert (`+certsStoreColumns+`)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 					ON CONFLICT (cert_id) DO NOTHING
 				`,
 				server.Id(row.CertId),
@@ -289,8 +316,10 @@ func (self *CertsStore) InsertCert(ctx context.Context, row *sidecar.TlsCertReco
 				certsStoreNullTime(row.AriWindowStart),
 				certsStoreNullTime(row.AriWindowEnd),
 				string(row.State),
+				row.StateTime.UTC(),
 				certsStoreNullId(row.SuccessorCertId),
-				row.Chain,
+				certsStoreNullChain(row.Chain),
+				certsStoreNullString(revocationReason),
 			))
 			inserted = tag.RowsAffected() == 1
 		})
@@ -522,6 +551,9 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 	if transition == nil || len(transition.From) == 0 || transition.To == "" {
 		return false, errors.New("certs store: a transition needs its states")
 	}
+	if transition.At.IsZero() {
+		return false, certsservice.ErrCertsStateTime
+	}
 	from := make([]string, 0, len(transition.From))
 	for _, state := range transition.From {
 		from = append(from, string(state))
@@ -534,6 +566,7 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 					UPDATE network_tls_cert
 					SET
 						state = $3,
+						state_time = CASE WHEN state = $3::varchar THEN state_time ELSE $12::timestamp END,
 						ca = COALESCE($4, ca),
 						account_uri = COALESCE($5, account_uri),
 						profile = COALESCE($6, profile),
@@ -541,7 +574,12 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 						not_before = COALESCE($8, not_before),
 						not_after = COALESCE($9, not_after),
 						ari_window_start = COALESCE($10, ari_window_start),
-						ari_window_end = COALESCE($11, ari_window_end)
+						ari_window_end = COALESCE($11, ari_window_end),
+						chain = COALESCE($13::bytea[], chain),
+						revocation_reason = CASE
+							WHEN $3::varchar = 'revoking' THEN COALESCE($14, revocation_reason)
+							ELSE NULL
+						END
 					WHERE cert_id = $1 AND state = ANY($2)
 				`,
 				server.Id(transition.CertId),
@@ -555,6 +593,9 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 				certsStoreNullTime(transition.NotAfter),
 				certsStoreNullTime(transition.AriWindowStart),
 				certsStoreNullTime(transition.AriWindowEnd),
+				transition.At.UTC(),
+				certsStoreNullChain(transition.Chain),
+				certsStoreNullString(string(transition.RevocationReason)),
 			))
 			applied = tag.RowsAffected() == 1
 		})
@@ -594,15 +635,55 @@ func (self *CertsStore) SetSuccessor(ctx context.Context, certId sidecar.Id, suc
 	return
 }
 
+// A revoked or failed row ended at its state's time, and a row in any other
+// state when its certificate's validity did (cert-1's ttl; QD-742). Two
+// statements, each on its own partial index.
 func (self *CertsStore) PurgeEnded(ctx context.Context, before time.Time) (removedCount int, returnErr error) {
 	returnErr = self.run(ctx, func(ctx context.Context) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
-				`DELETE FROM network_tls_cert WHERE not_after IS NOT NULL AND not_after < $1`,
+				`DELETE FROM network_tls_cert WHERE state IN ('revoked', 'failed') AND state_time < $1`,
 				before.UTC(),
 			))
 			removedCount = int(tag.RowsAffected())
+			tag = server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					DELETE FROM network_tls_cert
+					WHERE
+						not_after IS NOT NULL AND
+						not_after < $1 AND
+						state NOT IN ('revoked', 'failed')
+				`,
+				before.UTC(),
+			))
+			removedCount += int(tag.RowsAffected())
+		})
+	})
+	return
+}
+
+// A revoked row's certificate ended at its revocation, and any other's at its
+// validity's end. A failed row never had a chain.
+func (self *CertsStore) PurgeChains(ctx context.Context, before time.Time) (droppedCount int, returnErr error) {
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Tx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE network_tls_cert
+					SET chain = NULL
+					WHERE
+						chain IS NOT NULL AND
+						(
+							(state = 'revoked' AND state_time < $1) OR
+							(state NOT IN ('revoked', 'failed') AND not_after IS NOT NULL AND not_after < $1)
+						)
+				`,
+				before.UTC(),
+			))
+			droppedCount = int(tag.RowsAffected())
 		})
 	})
 	return
@@ -614,17 +695,19 @@ type TlsCertRevocationRequest struct {
 	NetworkId server.Id
 	// One certificate of the network. Zero: every issued certificate of it.
 	CertId server.Id
-	// Why, for the log alone: abuse:<case_id>, alias:<name>. The row keeps no
-	// reason until cert-1 names one (tls-m5-05-cert-row-values), so certs'
-	// revocation chain tells the CA cessationOfOperation for each.
+	// Why, for the log alone: abuse:<case_id>, alias:<name>.
 	Reason string
+	// The key is compromised: the CA is told keyCompromise. Without it the CA
+	// is told cessationOfOperation, as §21.6's takedown and a retiring alias
+	// have it (§13.8). Either waits in the row until the CA has taken it.
+	KeyCompromise bool
 }
 
-// Marks the network's issued certificates, or the one named, revoking, which
-// certs' revocation chain (TLS-M5-17) then takes to its CA; no renewal follows
-// a row that is not issued. Nothing here reaches a CA. Returns how many rows
-// it marked: a certificate of another network, one already on its way out and
-// one that never issued are none.
+// Marks the network's issued certificates, or the one named, revoking with the
+// request's reason, which certs' revocation chain (TLS-M5-17) then takes to its
+// CA; no renewal follows a row that is not issued. Nothing here reaches a CA.
+// Returns how many rows it marked: a certificate of another network, one
+// already on its way out and one that never issued are none.
 func RequestTlsCertRevocation(ctx context.Context, request *TlsCertRevocationRequest) (markedCount int, returnErr error) {
 	if !server.SidecarMg5Linked() {
 		return 0, ErrCertsStoreUnavailable
@@ -636,12 +719,19 @@ func RequestTlsCertRevocation(ctx context.Context, request *TlsCertRevocationReq
 	if request.CertId != (server.Id{}) {
 		certId = &request.CertId
 	}
+	revocationReason := sidecar.TlsCertRevocationReasonCessationOfOperation
+	if request.KeyCompromise {
+		revocationReason = sidecar.TlsCertRevocationReasonKeyCompromise
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				UPDATE network_tls_cert
-				SET state = 'revoking'
+				SET
+					state = 'revoking',
+					state_time = $3,
+					revocation_reason = $4
 				WHERE
 					network_id = $1 AND
 					state = 'issued' AND
@@ -649,6 +739,8 @@ func RequestTlsCertRevocation(ctx context.Context, request *TlsCertRevocationReq
 			`,
 			request.NetworkId,
 			certId,
+			server.NowUtc(),
+			string(revocationReason),
 		))
 		markedCount = int(tag.RowsAffected())
 	})

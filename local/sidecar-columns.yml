@@ -266,10 +266,12 @@ tables:
       not_after: cert-1
       not_before: cert-1
       profile: cert-1
+      revocation_reason: cert-1
       serial: cert-1
       sidecar_id: cert-1
       spki_sha256: cert-1
       state: cert-1
+      state_time: cert-1
       successor_cert_id: cert-1
   network_tls_suspension:
     group: MG5

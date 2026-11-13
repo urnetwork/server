@@ -696,14 +696,19 @@ func sidecarMg5DnsMigrations() []any {
 func sidecarMg5TlsMigrations() []any {
 	return []any{
 		// §13.8's orders and certificates (cert-1), written before an order
-		// reaches a CA and kept 30 days past expiry or revocation. An order's
-		// time is its cert_id's, which certs mints. ca, account_uri and profile
-		// are set when an order reaches a CA; serial and the validity when it
-		// issues; the ARI window when the CA gives one. successor_cert_id names
-		// the row that took over. chain holds a Team custom domain's registered
-		// chain (v1), each certificate's DER, leaf first, and stays NULL on any
-		// other row. csr is NULL only on a registered chain no request
-		// preceded.
+		// reaches a CA and kept 30 days past expiry, revocation or failure. An
+		// order's time is its cert_id's, which certs mints. ca, account_uri and
+		// profile are set when an order reaches a CA; serial and the validity
+		// when it issues; the ARI window when the CA gives one.
+		// successor_cert_id names the row that took over. state_time is when
+		// the row came to its state, set at its writing and with every change
+		// of state: a revoked or failed row's 30 days count from it (QD-742).
+		// chain holds the chain a CA issued, or a Team custom domain's
+		// registered one (v1), each certificate's DER, leaf first, and is NULL
+		// before the row has one and again 30 days past the certificate's
+		// expiry or revocation. revocation_reason is what the CA is to be told,
+		// RFC 5280's name, held only while state is revoking (QD-741). csr is
+		// NULL only on a registered chain no request preceded.
 		newSqlMigration(`
 			CREATE TABLE network_tls_cert (
 				cert_id uuid NOT NULL,
@@ -723,8 +728,10 @@ func sidecarMg5TlsMigrations() []any {
 				ari_window_start timestamp NULL,
 				ari_window_end timestamp NULL,
 				state varchar(16) NOT NULL,
+				state_time timestamp NOT NULL,
 				successor_cert_id uuid NULL,
 				chain bytea[] NULL,
+				revocation_reason varchar(32) NULL,
 
 				PRIMARY KEY (cert_id)
 			)
@@ -748,6 +755,10 @@ func sidecarMg5TlsMigrations() []any {
 		// expiry and the 30-day purge
 		newSqlMigration(`
 			CREATE INDEX network_tls_cert_not_after ON network_tls_cert (not_after) WHERE not_after IS NOT NULL
+		`),
+		// the purge of revoked and failed rows, 30 days past their state's time
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_ended ON network_tls_cert (state_time) WHERE state IN ('revoked', 'failed')
 		`),
 		// a replaced certificate, by its serial within its network
 		newSqlMigration(`
