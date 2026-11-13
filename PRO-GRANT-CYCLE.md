@@ -126,9 +126,12 @@ cycle.
 - A cancellation adds no new paid period, so grants stop after the paid
   term. A yearly plan cancelled at period end keeps its monthly cycles to the
   end of the paid year.
-- A billing-grace hold, or the 30-day manual-payment grace of Stripe, the
-  crypto rails and gamma, keeps Pro through the period's marker but starts no
-  cycle. The last cycle's grant expires a day after the cycle. The
+- A billing-grace hold, or the 30-day manual-payment grace of a period paid
+  through Stripe, the crypto rails or gamma, keeps Pro through the period's
+  marker but starts no cycle. A Stripe period no payment paid for (the yearly
+  plan's trial) runs a day past its end instead, and ends when Stripe cancels
+  it for non-payment (owner, 2026-11-13; controller/subscription_stripe_grace.go).
+  The last cycle's grant expires a day after the cycle. The
   renewal that recovers the charge starts the next cycle. (Before, a network
   in grace on the 1st got a new 10 TiB.) From that expiry until the charge
   recovers, the network has the daily free grant, as every network does

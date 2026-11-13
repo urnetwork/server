@@ -515,6 +515,10 @@ type ReconcileSubscriptionRenewal struct {
 	EndTime       time.Time
 	PurchaseToken string
 	TransactionId string
+	// the end of the period the row's payment or trial covers, without its
+	// grace (SubscriptionRenewal.PaidEndTime); nil for a row written before the
+	// column and for a billing grace hold
+	PaidEndTime *time.Time
 }
 
 // RepairReconciledProEntitlement restores only the Pro metadata for an exact,
@@ -673,7 +677,8 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 			ctx,
 			`
 			SELECT renewal.network_id, renewal.start_time, renewal.end_time,
-			       COALESCE(renewal.purchase_token, ''), COALESCE(renewal.transaction_id, '')
+			       COALESCE(renewal.purchase_token, ''), COALESCE(renewal.transaction_id, ''),
+			       renewal.paid_end_time
 			FROM subscription_renewal renewal
 			INNER JOIN network ON network.network_id = renewal.network_id
 			WHERE renewal.market = $1
@@ -696,6 +701,7 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 					&renewal.EndTime,
 					&renewal.PurchaseToken,
 					&renewal.TransactionId,
+					&renewal.PaidEndTime,
 				))
 				renewals = append(renewals, renewal)
 			}

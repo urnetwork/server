@@ -95,7 +95,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Subscriptions** come from durable supporter renewal windows for Apple, Google Play / Android (`google`), Stripe, Solana, Monero, Zcash, TAO (`bittensor`), Bitcoin, ETH (`ethereum`) and Pay with Gamma (`gamma`). A free trial is a subscription (owner decision 2026-11-08): a network counts while it is paid, inside a free trial, or inside a grace period after a failed charge (a store's billing grace, or the 30-day manual-payment grace of Stripe, the crypto rails and gamma). App Store sandbox purchases (TestFlight, App Review) record no revenue and are left out. Per-store counts are distinct networks in that store; `deduplicated` counts a network once across all tracked stores. **Current trials** are the networks inside a free trial now, nothing charged yet, by store and plan; they are part of the current subscriptions, not added to them. Google Play and Stripe sell the trial only with the yearly plan; the App Store product names its plan. **New subscriptions** count a network's first supporter window per store, a trial's start included, while `deduplicated` is its first-ever window across all tracked stores; a trial's first charge, renewals and store switches never count again. **Engaged** means a current subscriber has at least one active top-level client whose latest authentication falls inside the selected rolling window; it is subscriber engagement, not an all-network traffic proxy. **Observed churn** means the latest known supporter window ended during the window and the account remains inactive; it combines natural expiry, cancellation and a trial that ended without a charge, because the durable renewal ledger cannot distinguish them. Reactivated accounts are excluded. No panel here shows revenue.\n\nReconciliation panels count non-dry-run audit events. They require a fresh hourly run heartbeat and a fresh successful watermark for the matching store, so an unavailable provider source renders no-data rather than false zero. Gamma has no reconciliation leg, so it never has rows there. Data-pack panels are gross fulfilled grants: code-backed rows plus direct paid non-Pro balances, with a redeemed code's balance excluded from the direct side. The existing ledgers do not retain a reliable processor/product/quantity dimension for every grant; refunds and terminal provider events remain visible separately. All panels use one complete 15-minute Taskworker snapshot and export only bounded aggregate labels."
+        "content": "**Subscriptions** come from durable supporter renewal windows for Apple, Google Play / Android (`google`), Stripe, Solana, Monero, Zcash, TAO (`bittensor`), Bitcoin, ETH (`ethereum`) and Pay with Gamma (`gamma`). A free trial is a subscription (owner decision 2026-11-08): a network counts while it is paid, inside a free trial, or inside a grace period after a failed charge (a store's billing grace; the 30-day manual-payment grace of a period paid through Stripe, the crypto rails or gamma; or, since 2026-11-13, the day after a Stripe free trial whose first charge failed). App Store sandbox purchases (TestFlight, App Review) record no revenue and are left out. Per-store counts are distinct networks in that store; `deduplicated` counts a network once across all tracked stores. **Current trials** are the networks inside a free trial now, nothing charged yet, by store and plan; they are part of the current subscriptions, not added to them. Google Play and Stripe sell the trial only with the yearly plan; the App Store product names its plan. **New subscriptions** count a network's first supporter window per store, a trial's start included, while `deduplicated` is its first-ever window across all tracked stores; a trial's first charge, renewals and store switches never count again. **Engaged** means a current subscriber has at least one active top-level client whose latest authentication falls inside the selected rolling window; it is subscriber engagement, not an all-network traffic proxy. **Observed churn** means the latest known supporter window ended during the window and the account remains inactive; it combines natural expiry, cancellation and a trial that ended without a charge, because the durable renewal ledger cannot distinguish them. Reactivated accounts are excluded. **Past due** counts the current subscribers whose window has outlived the period it paid for: the grace after a failed or cancelled renewal, a store's billing grace hold, or the day after a free trial; they are part of the current subscriptions, not added to them. **Payment failures** are Stripe's failed renewals, the ones the server sends payment notices for: those still failing now, and those that stopped failing inside the window, by reason (`paid`, `voided`, `uncollectible`, or `subscription_ended` when Stripe's final action canceled the subscription). No panel here shows revenue.\n\nReconciliation panels count non-dry-run audit events. They require a fresh hourly run heartbeat and a fresh successful watermark for the matching store, so an unavailable provider source renders no-data rather than false zero. Gamma has no reconciliation leg, so it never has rows there. Data-pack panels are gross fulfilled grants: code-backed rows plus direct paid non-Pro balances, with a redeemed code's balance excluded from the direct side. The existing ledgers do not retain a reliable processor/product/quantity dimension for every grant; refunds and terminal provider events remain visible separately. All panels use one complete 15-minute Taskworker snapshot and export only bounded aggregate labels."
       }
     },
     {
@@ -1083,6 +1083,207 @@
           "expr": "max by (rail) (urnetwork_subscription_payments_uncredited_oldest_age_seconds{env=\"$env\",service=\"taskworker\",rail=~\"usdc_solana|zec|xmr|tao|btc|eth|sol|gamma\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "{{rail}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "row",
+      "title": "past due and payment failures",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "past due (in grace)",
+      "description": "Distinct current subscribers, deduplicated across stores, whose window has outlived the period it paid for and none of whose stores has a paid period covering now: the grace after a failed or cancelled renewal, a store's billing grace hold, or the day after a free trial. A period paid through Stripe keeps a 30-day grace after a failed renewal; a Stripe trial whose first charge failed gets a day (owner, 2026-11-13).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 71
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_subscription_in_grace_accounts{env=\"$env\",service=\"taskworker\",store=\"deduplicated\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "bargauge",
+      "title": "past due by store",
+      "description": "Distinct current subscribers in each store whose windows there have all outlived the periods they paid for. A network paid in another store still counts in the store it is past due in.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 18,
+        "x": 6,
+        "y": 71
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (store) (urnetwork_subscription_in_grace_accounts{env=\"$env\",service=\"taskworker\",store=~\"apple|google|stripe|solana|monero|zcash|bittensor|bitcoin|ethereum|gamma\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{store}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "open payment failures",
+      "description": "Stripe renewals whose charge failed and that are still failing now: no payment, void, uncollectible mark or subscription end since. Each owes the account the payment notices and shows the in-app past-due notice while its latest failure is recent.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 78
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_subscription_payment_failures_open{env=\"$env\",service=\"taskworker\",store=\"stripe\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "bargauge",
+      "title": "payment failures resolved",
+      "description": "Failed Stripe renewals that stopped failing inside the window, by reason: paid (the customer paid or Stripe's retry succeeded), voided, uncollectible, or subscription_ended (Stripe's final action canceled the subscription, or it was canceled).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 18,
+        "x": 6,
+        "y": 78
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (reason) (urnetwork_subscription_payment_failures_resolved{env=\"$env\",service=\"taskworker\",store=\"stripe\",reason=~\"paid|voided|uncollectible|subscription_ended\",window=\"$window\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{reason}}",
           "instant": true,
           "range": false
         }
