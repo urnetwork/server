@@ -1514,10 +1514,10 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 // The end of the paid period the invoice bills, when the renewal is exactly the
 // window the invoice's credit wrote on this network: the invoice's own ledger
 // network, the subscription's network metadata, and a subscription line whose
-// period starts the window and ends the period the credit recorded
-// (paid_end_time), or, for a row written before that column, ends the window
-// with the grace it was credited with. paidWindow false otherwise. Reuse the
-// caller's PostgreSQL session; nil selects the outer acquisition boundary.
+// period starts the window and either ends the period the credit recorded
+// (paid_end_time), or ends the window with a grace a credit wrote. paidWindow
+// false otherwise. Reuse the caller's PostgreSQL session; nil selects the outer
+// acquisition boundary.
 func stripeRenewalPaidPeriodEndInConn(connOwner server.PgConn,
 	ctx context.Context,
 	renewal *model.ReconcileSubscriptionRenewal,
@@ -1554,16 +1554,12 @@ func stripeRenewalPaidPeriodEndInConn(connOwner server.PgConn,
 		if !renewal.StartTime.Equal(time.Unix(line.Period.Start, 0)) {
 			continue
 		}
-		if renewal.PaidEndTime != nil {
-			// whatever grace the window runs (stripeGraceSettings)
-			if renewal.PaidEndTime.Equal(periodEnd) {
-				return periodEnd, true
-			}
-			continue
-		}
-		// a row written before paid_end_time ran the 30-day manual-payment
-		// grace, or, on the oldest paid invoices, the old 24-hour window
-		if renewal.EndTime.Equal(periodEnd.Add(manualPaymentGracePeriod)) ||
+		// The recorded period matches whatever grace the window runs
+		// (stripeGraceSettings). The end alone matches a window with the 30-day
+		// manual-payment grace, or with the 24-hour window of the oldest paid
+		// invoices and of a free period, as before paid_end_time was recorded.
+		if (renewal.PaidEndTime != nil && renewal.PaidEndTime.Equal(periodEnd)) ||
+			renewal.EndTime.Equal(periodEnd.Add(manualPaymentGracePeriod)) ||
 			renewal.EndTime.Equal(periodEnd.Add(SubscriptionGracePeriod)) {
 			return periodEnd, true
 		}
