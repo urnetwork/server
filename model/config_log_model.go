@@ -33,10 +33,12 @@ import (
 //
 //	verify     the retry identity first: a statement whose id an applied entry
 //	           among the last 4,096 holds, or a base this log holds, answers
-//	           that entry's {n, A_n}; then the verdict at the tip, a refusal
-//	           answering 403 (a base whose tip moved, 409) with the tip
+//	           that entry's {n, A_n}; then the verdict at the tip, at the time
+//	           the entry will carry, a refusal answering 403 (a base whose tip
+//	           moved, or whose shrunk_repo_ids are not the repos it shrinks at
+//	           that time, 409, so its writer signs again; QD-746) with the tip
 //	append     PUT proj/<network_id>/<n>/_ If-None-Match at tip+1, the entry's
-//	           time api's clock
+//	           time api's clock, read once for the verdict and the entry
 //	412        another api instance won the position: read its entry, apply it
 //	           and verify again at the new tip
 //	unknown    a timeout or lost response: GET the position; the same bytes are
@@ -512,8 +514,10 @@ type configLogAppend struct {
 	body []byte
 	// the genesis base 1 carries
 	genesis []byte
-	// the entry a retry finds, or the verdict at the tip
-	verify func(network *configLogNetwork) (*bridge.AuthPin, error)
+	// the entry a retry finds, or the verdict at the tip at timeMs, the time
+	// the entry is stamped with, so a reader judges it at the time api did
+	// (a base's own shrinks, QD-746)
+	verify func(network *configLogNetwork, timeMs int64) (*bridge.AuthPin, error)
 	// charged once, after the first verify finds no retry and passes: §7.9's
 	// append limits, a 429, or an entry already in the log to answer with
 	charge func(ctx context.Context, network *configLogNetwork) (*bridge.AuthPin, error)
@@ -579,7 +583,9 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 	// whether this request scheduled its effects task's intent
 	intended := false
 	for range self.settings.AppendAttemptCount {
-		found, err := request.verify(network)
+		// one time an attempt: the verdict's and the entry's
+		timeMs := self.now().UnixMilli()
+		found, err := request.verify(network, timeMs)
 		if err != nil {
 			// a cap's refusal answers as the QuotaRefusal itself (§20.7)
 			quotaRefusal := &QuotaRefusalError{}
@@ -612,7 +618,7 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 			N:         n,
 			PrevChain: tip.GetChain(),
 			Kind:      request.kind,
-			TimeMs:    self.now().UnixMilli(),
+			TimeMs:    timeMs,
 			Body:      request.body,
 		})
 		if err != nil {
@@ -734,8 +740,7 @@ func (self *ConfigLogSequencer) AppendStatement(ctx context.Context, networkId s
 	return self.append(ctx, networkId, &configLogAppend{
 		kind: bridge.AuthEntryKindStatement,
 		body: signed,
-		verify: func(network *configLogNetwork) (*bridge.AuthPin, error) {
-			timeMs := self.now().UnixMilli()
+		verify: func(network *configLogNetwork, timeMs int64) (*bridge.AuthPin, error) {
 			verdict := network.log.Check(signed, timeMs)
 			if pin, found := network.log.FindStatement(verdict.StatementId); found {
 				return pin, nil
@@ -809,11 +814,11 @@ func (self *ConfigLogSequencer) AppendBase(ctx context.Context, networkId server
 		kind:    bridge.AuthEntryKindBase,
 		body:    base.SignedHeader,
 		genesis: base.Genesis,
-		verify: func(network *configLogNetwork) (*bridge.AuthPin, error) {
+		verify: func(network *configLogNetwork, timeMs int64) (*bridge.AuthPin, error) {
 			if pin := network.basePins[bodyId]; pin != nil {
 				return pin, nil
 			}
-			if err := network.log.CheckBase(base.SignedHeader, base.Rows); err != nil {
+			if err := network.log.CheckBase(base.SignedHeader, base.Rows, timeMs); err != nil {
 				return nil, err
 			}
 			return nil, network.log.CheckConfigPushes(base.SignedHeader, base.ConfigPushes)
@@ -851,7 +856,7 @@ func (self *ConfigLogSequencer) AppendTick(ctx context.Context, networkId server
 	return self.append(ctx, networkId, &configLogAppend{
 		kind: bridge.AuthEntryKindTick,
 		body: body,
-		verify: func(network *configLogNetwork) (*bridge.AuthPin, error) {
+		verify: func(network *configLogNetwork, timeMs int64) (*bridge.AuthPin, error) {
 			if network.log.State().Base() == nil {
 				return nil, errors.New("no tick before base 1")
 			}
