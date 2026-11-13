@@ -16,7 +16,7 @@ siblings:
     ref: 818f60489ac279ab01f2a625b6428ab1b4e24dd2
   - repository: urnetwork/sdk
     path: sdk
-    ref: 62d6921b9d070f5f2ba85c001f7df211e924ba67
+    ref: 43a623c6b338c81b29e9d4f957f147f59b4d28b0
   - repository: urnetwork/proxy
     path: proxy
     ref: 6d1ea2eee1c74d37443f4508501b0ac2bd3fd5d2
