@@ -617,14 +617,88 @@ func TestSolveIgnoresTermOrder(t *testing.T) {
 	}
 }
 
-// Seed 13 of the acceptance continent has a stiff pair, 93 km apart at the
-// truth and 167 km apart at genesis. Swept one node at a time, the pair and
-// everything else come to within a kilometre of the truth; swept all at once
-// (Jacobi), both ends closed the whole gap in the same sweep and the pair
-// settled in a wrong arrangement 72 km off, which no later sweep undid.
+// Seed 13 of the acceptance continent as the Go 1 source placed it, which the
+// Jacobi sweep was measured on (blocks.go). The tests now draw from a v2 PCG,
+// which places seed 13 elsewhere, so the geometry is kept as data. Every
+// anchor is a 5 km node at its truth; every other node is a 1000 km node
+// whose genesis is its truth moved 20-60 km. Its pings, noiseless, draw
+// nothing that matters from the generator.
+func stiffPairNetwork(settings *Settings) *syntheticNetwork {
+	truths := []LatLon{
+		{Latitude: 40.702485431059806, Longitude: -3.8268999451102608},
+		{Latitude: 40.57213448689834, Longitude: 24.38568936823445},
+		{Latitude: 54.38577545004372, Longitude: -3.974833831270619},
+		{Latitude: 53.60775852623252, Longitude: 23.769955653336954},
+		{Latitude: 46.271158853727016, Longitude: 20.470035365720094},
+		{Latitude: 46.084454234471416, Longitude: 6.484811016731503},
+		{Latitude: 42.75787013683195, Longitude: -1.9011384309501007},
+		{Latitude: 46.8608792481202, Longitude: 3.6192339990898366},
+		{Latitude: 48.89726221412809, Longitude: 2.317590017126832},
+		{Latitude: 47.33676834656322, Longitude: 1.8604887795903706},
+		{Latitude: 43.78892405462856, Longitude: 15.957935644935798},
+		{Latitude: 41.40807991467127, Longitude: 22.448218520273358},
+		{Latitude: 44.25813521075375, Longitude: 1.328109213303395},
+		{Latitude: 49.302816199528195, Longitude: 3.720366360876848},
+		{Latitude: 41.45124988272786, Longitude: 23.56244279282884},
+		{Latitude: 46.92031340689964, Longitude: 7.679419522241827},
+		{Latitude: 46.744303897828935, Longitude: 3.9127582597857398},
+		{Latitude: 41.35103228107513, Longitude: -1.2854756864202113},
+		{Latitude: 50.251793450176066, Longitude: 12.796986267978612},
+		{Latitude: 53.14930441686004, Longitude: 20.265013959724307},
+	}
+	geneses := []LatLon{
+		{Latitude: 40.702485431059806, Longitude: -3.8268999451102608},
+		{Latitude: 40.57213448689834, Longitude: 24.38568936823445},
+		{Latitude: 54.38577545004372, Longitude: -3.974833831270619},
+		{Latitude: 53.60775852623252, Longitude: 23.769955653336954},
+		{Latitude: 46.522873965198045, Longitude: 20.39922580953455},
+		{Latitude: 46.58692227366166, Longitude: 6.291227142545057},
+		{Latitude: 42.915924391168375, Longitude: -2.0417355315853194},
+		{Latitude: 47.13227567725308, Longitude: 3.7894445927073717},
+		{Latitude: 48.64508199611015, Longitude: 2.202012969789094},
+		{Latitude: 47.35378503702187, Longitude: 2.192271586397177},
+		{Latitude: 43.366646005895454, Longitude: 16.311339492212714},
+		{Latitude: 41.849691628129435, Longitude: 22.04345081325727},
+		{Latitude: 44.46165676045229, Longitude: 1.4711309595756097},
+		{Latitude: 49.54988773930462, Longitude: 4.4192996393999895},
+		{Latitude: 41.08170077046997, Longitude: 23.763121711690683},
+		{Latitude: 46.88496111646505, Longitude: 7.049146112976136},
+		{Latitude: 46.93183844624349, Longitude: 3.279452552057855},
+		{Latitude: 41.576891770277484, Longitude: -1.0416649532695816},
+		{Latitude: 50.667664870546645, Longitude: 12.978943344667897},
+		{Latitude: 53.047038867906736, Longitude: 19.472200091886855},
+	}
+	network := &syntheticNetwork{
+		settings: settings,
+		// the noiseless pings still draw one value a sample
+		random: mathrand.New(mathrand.NewPCG(13, 0)),
+	}
+	for i := range truths {
+		anchor := i < len(syntheticAnchorCorners)
+		radiusKm := syntheticWideRadiusKm
+		if anchor {
+			radiusKm = syntheticAnchorRadiusKm
+		}
+		network.truth = append(network.truth, truths[i])
+		network.anchor = append(network.anchor, anchor)
+		network.nodes = append(network.nodes, Node{
+			Id:       syntheticNodeId(i),
+			Genesis:  geneses[i],
+			RadiusKm: radiusKm,
+		})
+	}
+	return network
+}
+
+// Seed 13 of the acceptance continent (stiffPairNetwork) has a stiff pair, 93
+// km apart at the truth and 167 km apart at genesis. Swept one node at a time,
+// the pair and everything else come to within a kilometre of the truth; swept
+// all at once (Jacobi), both ends closed the whole gap in the same sweep and
+// the pair settled in a wrong arrangement 72 km off, which no later sweep
+// undid.
 func TestSolveKeepsStiffPairsApart(t *testing.T) {
 	settings := DefaultSettings()
-	network := newSyntheticNetwork(13, settings, true)
+	network := stiffPairNetwork(settings)
 	pair := [2]int{11, 14}
 	if gapKm := DistanceKm(network.truth[pair[0]], network.truth[pair[1]]); !(gapKm < 100) {
 		t.Fatalf("test geometry: the pair is %.1f km apart", gapKm)
