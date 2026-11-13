@@ -382,8 +382,8 @@ func cryptoTestEnable(t testing.TB, config *CryptoPayConfig, wallets map[string]
 
 // cryptoTestHermeticSeams answers the rail's database and Redis reads that a
 // hermetic test does not set up: a pool with free addresses, no watched
-// addresses, no scan hints, no pool addresses for a transaction. Returns the
-// restore.
+// addresses, no scan hints, no pool addresses for a transaction, no issued
+// address to sweep or to match in a TAO block. Returns the restore.
 func cryptoTestHermeticSeams() func() {
 	previousCount := cryptoCountFreeAddresses
 	previousWatched := cryptoListWatchedAddresses
@@ -392,6 +392,26 @@ func cryptoTestHermeticSeams() func() {
 	previousInvoiceAddresses := cryptoInvoiceAddresses
 	previousAddHints := cryptoAddScanHints
 	previousTakeHints := cryptoTakeScanHints
+	previousSweepPosition := cryptoSweepPosition
+	previousSweepSetPosition := cryptoSweepSetPosition
+	previousSweepAddresses := cryptoSweepAddresses
+	previousSweepSetCursor := cryptoSweepSetCursor
+	previousTaoIssued := cryptoTaoAddressesIssued
+	previousTaoIssuedAddresses := cryptoTaoIssuedAddresses
+	cryptoSweepPosition = func(ctx context.Context, asset string) int64 {
+		return -1
+	}
+	cryptoSweepSetPosition = func(ctx context.Context, asset string, afterAddressIndex int64, now time.Time) {}
+	cryptoSweepAddresses = func(ctx context.Context, asset string, afterAddressIndex int64, limit int) []*model.CryptoAddressSweepAddress {
+		return []*model.CryptoAddressSweepAddress{}
+	}
+	cryptoSweepSetCursor = func(ctx context.Context, cursor *model.CryptoAddressSweepCursor, now time.Time) {}
+	cryptoTaoAddressesIssued = func(ctx context.Context) bool {
+		return false
+	}
+	cryptoTaoIssuedAddresses = func(ctx context.Context, addresses []string) map[string]*model.CryptoPaymentIssuedAddress {
+		return map[string]*model.CryptoPaymentIssuedAddress{}
+	}
 	cryptoCountFreeAddresses = func(ctx context.Context, asset string) int {
 		return 1
 	}
@@ -419,6 +439,12 @@ func cryptoTestHermeticSeams() func() {
 		cryptoInvoiceAddresses = previousInvoiceAddresses
 		cryptoAddScanHints = previousAddHints
 		cryptoTakeScanHints = previousTakeHints
+		cryptoSweepPosition = previousSweepPosition
+		cryptoSweepSetPosition = previousSweepSetPosition
+		cryptoSweepAddresses = previousSweepAddresses
+		cryptoSweepSetCursor = previousSweepSetCursor
+		cryptoTaoAddressesIssued = previousTaoIssued
+		cryptoTaoIssuedAddresses = previousTaoIssuedAddresses
 	}
 }
 

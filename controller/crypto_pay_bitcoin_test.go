@@ -480,12 +480,12 @@ func (self *cryptoTestBitcoinNode) serve() string {
 // ----- the seams -----
 
 // cryptoTestBitcoinState stands in for the database: the cursor row's kept
-// chain, the invoice addresses in play, the pool, and every lookup made.
+// chain, the invoice addresses, the pool, and every lookup made.
 type cryptoTestBitcoinState struct {
 	stateLock sync.Mutex
 	// the kept chain the last complete scan wrote
 	chain *model.CryptoScanChain
-	// the invoice addresses in play, and the pool, by address
+	// the invoice addresses, and the pool, by address
 	ours map[string]int64
 	// the addresses each block lookup was asked, in order
 	lookups [][]string
