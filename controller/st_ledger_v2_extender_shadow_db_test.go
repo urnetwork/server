@@ -103,19 +103,20 @@ func newStExtenderPoolScenario(t testing.TB, amendmentFrom uint64) *stExtenderPo
 	return s
 }
 
-// Before E_x: epoch 2, built and recorded under the rule in force, gets the
-// shadow of what §8.6 would have paid: Z = the receiver's funded 500, the
-// unfunded 300 and the measurement network's 200 left out, the extender eligible
-// alone in its unit, Z' = 500 below W_k = 1,800, and from the epoch's 2,300 rao
-// own 1,000 and the extender's coldkey 1,300, where the rows as recorded pay
-// own 1,278 and the extender 1,022. The validator's recompute approves it; the
-// run records no fixed input and retains no wallet resolution; and it is built
-// once. The offline replay of the same epoch reconciles exactly.
+// Before E_x = 4: epoch 2, one of the two epochs before it and built and
+// recorded under the rule in force, gets the shadow of what §8.6 would have
+// paid: Z = the receiver's funded 500, the unfunded 300 and the measurement
+// network's 200 left out, the extender eligible alone in its unit, Z' = 500
+// below W_k = 1,800, and from the epoch's 2,300 rao own 1,000 and the
+// extender's coldkey 1,300, where the rows as recorded pay own 1,278 and the
+// extender 1,022. The validator's recompute approves it; the run records no
+// fixed input and retains no wallet resolution; and it is built once. The
+// offline replay of the same epoch reconciles exactly.
 func TestStLedgerV2ExtenderShadowAndReplayBeforeTheAmendment(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		s := newStExtenderPoolScenario(t, 0)
+		s := newStExtenderPoolScenario(t, 4)
 		f := s.f
 		build, err := (stLedgerV2Builder{}).Build(f.ctx, s.input)
 		if err != nil {
@@ -134,7 +135,7 @@ func TestStLedgerV2ExtenderShadowAndReplayBeforeTheAmendment(t *testing.T) {
 		chain := &stExtenderShadowTestChain{state: StLedgerV2State{Registered: true, FirstEpoch: 1, LastFundedEpoch: 1},
 			funded: map[uint64]uint256.Int{1: *uint256.NewInt(1_500), 2: *uint256.NewInt(3_800)}}
 		// the epoch's close is not final yet
-		if outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2); !outcome.Retry || !strings.Contains(outcome.Reason, "not closed yet") {
+		if outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2, DefaultStLedgerV2ExtenderShadowSettings()); !outcome.Retry || !strings.Contains(outcome.Reason, "not closed yet") {
 			t.Fatalf("a shadow before the close %+v", outcome)
 		}
 		chain.state.LastFundedEpoch = 2
@@ -148,7 +149,7 @@ func TestStLedgerV2ExtenderShadowAndReplayBeforeTheAmendment(t *testing.T) {
 			return count
 		}
 		resolutionsBefore := resolutions()
-		outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2)
+		outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2, DefaultStLedgerV2ExtenderShadowSettings())
 		if outcome.Status != model.StPublishStatusConfirmed {
 			t.Fatalf("shadow %+v", outcome)
 		}
@@ -196,7 +197,7 @@ func TestStLedgerV2ExtenderShadowAndReplayBeforeTheAmendment(t *testing.T) {
 			t.Fatalf("the shadow retained wallet resolutions: %d before, %d after", resolutionsBefore, after)
 		}
 		// built once
-		if again := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2); again.Status != model.StPublishStatusSkipped || !strings.Contains(again.Reason, recorded.ReportRef) {
+		if again := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2, DefaultStLedgerV2ExtenderShadowSettings()); again.Status != model.StPublishStatusSkipped || !strings.Contains(again.Reason, recorded.ReportRef) {
 			t.Fatalf("a second shadow %+v", again)
 		}
 
@@ -264,7 +265,7 @@ func TestStLedgerV2StatementExtenderPoolFromTheCommittedComponent(t *testing.T) 
 		}
 		// the covered epoch has no shadow
 		chain := &stExtenderShadowTestChain{state: StLedgerV2State{Registered: true, FirstEpoch: 1, LastFundedEpoch: 2}, funded: map[uint64]uint256.Int{1: *uint256.NewInt(1_500), 2: *uint256.NewInt(3_800)}}
-		if outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2); outcome.Status != model.StPublishStatusSkipped || !strings.Contains(outcome.Reason, "covered") || stLedgerV2ExtenderShadowDue(f.ctx, f.cfg, 2) {
+		if outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2, DefaultStLedgerV2ExtenderShadowSettings()); outcome.Status != model.StPublishStatusSkipped || !strings.Contains(outcome.Reason, "covered") || stLedgerV2ExtenderShadowDue(f.ctx, f.cfg, 2) {
 			t.Fatalf("a shadow of a covered epoch %+v", outcome)
 		}
 		if model.GetStLedgerV2ExtenderShadow(f.ctx, f.cfg.DeploymentKey(), 1, 2) != nil {

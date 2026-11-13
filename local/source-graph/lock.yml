@@ -10,13 +10,13 @@ siblings:
   # revision.
   - repository: urnetwork/connect
     path: connect
-    ref: 511734052f57b24d072a2f429640fdae68f0b98a
+    ref: 0b41b7c1b6e822f3eeb8ace2671a54d7e42da8cd
   - repository: urnetwork/glog
     path: glog
     ref: 818f60489ac279ab01f2a625b6428ab1b4e24dd2
   - repository: urnetwork/sdk
     path: sdk
-    ref: 62d6921b9d070f5f2ba85c001f7df211e924ba67
+    ref: 43a623c6b338c81b29e9d4f957f147f59b4d28b0
   - repository: urnetwork/proxy
     path: proxy
     ref: 6d1ea2eee1c74d37443f4508501b0ac2bd3fd5d2
@@ -31,7 +31,7 @@ siblings:
     ref: 2df4358e3b54acc6740873cdfb193f3795cafeab
   - repository: urfoundation/sn
     path: sn
-    ref: 86962bcf0fc860cc8c963420b327bb3f7d3722d1
+    ref: d00ec71262b513a2bd5ca5f436da39aee05d6cba
   # Server and SN's fixture generator use this same reviewed fork. Published
   # release modules receive an immutable replacement from the builder.
   - repository: urnetwork/gvisor

@@ -139,35 +139,6 @@ func TestVacuumHealthSignalExplainsReliabilityHorizon(t *testing.T) {
 	}
 }
 
-func TestVacuumHealthSignalExplainsRetentionHorizon(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{
-			"transfer_contract", "21662641", "08-30 08:23",
-			"5000000", "vacuuming indexes", "3134", "23793748", "23793748", "0", "0", "4", "13",
-			"1614586", "90463", "531679478", "531679323", "98", "active", "client backend", "",
-			"UPDATE transfer_contract SET reap_time = LEAST(COALESCE(transfer_contract.reap_time, 'infinity'), $2) WHERE transfer_contract.contract_id IN (SELECT contract_id FROM transfer_escrow_sweep)",
-		}}, nil
-	}}
-	alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	alert := requireAlertClass(t, alerts, "dead-tuples")
-	for _, detail := range []string{
-		"legacy CompletePayment retention fan-out",
-		"millions of transfer_contract",
-		"contract_retention_pending queue",
-		"bounded, committed contract_retention_cursor batches",
-		"Do not cancel the progressing vacuum",
-		"legacy retention query disappears",
-	} {
-		markdown := alert.Markdown()
-		if !strings.Contains(markdown, detail) {
-			t.Fatalf("retention horizon alert missing %q:\n%s", detail, markdown)
-		}
-	}
-}
-
 func TestVacuumHealthSignalExplainsBoundedCloseRecoveryWriter(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
 		return []Row{{
@@ -194,42 +165,6 @@ func TestVacuumHealthSignalExplainsBoundedCloseRecoveryWriter(t *testing.T) {
 	} {
 		if markdown := alert.Markdown(); !strings.Contains(markdown, detail) {
 			t.Fatalf("bounded-close vacuum alert missing %q:\n%s", detail, markdown)
-		}
-	}
-}
-
-func TestVacuumHealthSignalExplainsPaymentPlannerHorizon(t *testing.T) {
-	queries := []string{
-		"CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP AS SELECT u.contract_id, u.balance_id, u.network_id FROM transfer_contract u",
-		"SELECT MIN(transfer_contract.create_time) AS subsidy_start_time, MAX(transfer_contract.close_time) AS subsidy_end_time FROM transfer_escrow_sweep INNER JOIN transfer_contract",
-		"SELECT start_time, end_time FROM subsidy_payment WHERE start_time < $2 AND $1 < end_time",
-	}
-	for _, query := range queries {
-		source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-			return []Row{{
-				"transfer_contract", "14103687", "08-30 10:03",
-				"5000000", "vacuuming indexes", "1673", "23980545", "23980545", "0", "0", "0", "13",
-				"1742249", "81239", "536367736", "536367372", "83", "active", "client backend", "",
-				query,
-			}}, nil
-		}}
-		alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(source))
-		if err != nil {
-			t.Fatal(err)
-		}
-		alert := requireAlertClass(t, alerts, "dead-tuples")
-		for _, detail := range []string{
-			"Payout payment planner",
-			"bounded temp_account_payment working set",
-			"not the unbounded transfer_contract retention writer",
-			"task-canary signal is authoritative",
-			"SET LOCAL idle_in_transaction_session_timeout override",
-			"Do not cancel this bounded reader solely from its sampled age",
-			"unrelated PostgreSQL session retains the global five-minute",
-		} {
-			if markdown := alert.Markdown(); !strings.Contains(markdown, detail) {
-				t.Fatalf("payment-planner vacuum alert missing %q for query %q:\n%s", detail, query, markdown)
-			}
 		}
 	}
 }

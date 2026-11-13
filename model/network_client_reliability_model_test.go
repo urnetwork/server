@@ -202,58 +202,43 @@ func TestAddClientReliabilityStats(t *testing.T) {
 			}
 		}
 
-		UpdateNetworkReliabilityScores(ctx, startTime, endTime, true)
 		UpdateNetworkReliabilityWindow(ctx, startTime, endTime, true)
 
 		blockCountPerBucket := ReliabilityBlockCountPerBucket()
 
-		for _, networkScores := range []map[server.Id]ReliabilityScore{
-			GetAllNetworkReliabilityScores(ctx),
-			GetAllMultipliedNetworkReliabilityScores(ctx),
-		} {
-			for networkId, clientIds := range networkClientIds {
-				netReliabilityScore := float64(0)
-				netIndepententReliabilityScore := float64(0)
-				for _, clientId := range clientIds {
-					netReliabilityScore += netReliabilityScores[clientId]
-					netIndepententReliabilityScore += netIndependentReliabilityScores[clientId]
-				}
-				d := netReliabilityScore - networkScores[networkId].ReliabilityScore
-				if d < -eps || eps < d {
-					connect.AssertEqual(t, netReliabilityScore, networkScores[networkId].ReliabilityScore)
-				}
-				d = netIndepententReliabilityScore - networkScores[networkId].IndependentReliabilityScore
-				if d < -eps || eps < d {
-					connect.AssertEqual(t, netIndepententReliabilityScore, networkScores[networkId].IndependentReliabilityScore)
-				}
+		for networkId, clientIds := range networkClientIds {
+			netReliabilityScore := float64(0)
+			for _, clientId := range clientIds {
+				netReliabilityScore += netReliabilityScores[clientId]
+			}
 
-				isPro := false
+			isPro := false
 
-				byJwt := session.NewByJwt(
-					networkId,
-					server.NewId(),
-					"",
-					false,
-					isPro,
-				).Client(clientIds[0], server.NewId())
-				clientSession := session.Testing_CreateClientSession(
-					ctx,
-					byJwt,
-				)
-				clientSession.ClientAddress = "192.0.2.1:90000"
+			byJwt := session.NewByJwt(
+				networkId,
+				server.NewId(),
+				"",
+				false,
+				isPro,
+			).Client(clientIds[0], server.NewId())
+			clientSession := session.Testing_CreateClientSession(
+				ctx,
+				byJwt,
+			)
+			clientSession.ClientAddress = "192.0.2.1:90000"
 
-				reliabilityWindow, err := GetNetworkReliabilityWindow(clientSession)
-				connect.AssertEqual(t, err, nil)
-				connect.AssertEqual(t, reliabilityWindow.MaxTotalClientCount, len(clientIds))
-				for _, totalClientCount := range reliabilityWindow.TotalClientCounts {
-					connect.AssertEqual(t, totalClientCount, len(clientIds))
-				}
-				// reconstruct the total score from the weight
-				windowReliabilityScore := reliabilityWindow.MeanReliabilityWeight * float64(int(reliabilityWindow.MaxBucketNumber-reliabilityWindow.MinBucketNumber)*blockCountPerBucket)
-				d = windowReliabilityScore - networkScores[networkId].ReliabilityScore
-				if d < -eps || eps < d {
-					connect.AssertEqual(t, windowReliabilityScore, networkScores[networkId].ReliabilityScore)
-				}
+			reliabilityWindow, err := GetNetworkReliabilityWindow(clientSession)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, reliabilityWindow.MaxTotalClientCount, len(clientIds))
+			for _, totalClientCount := range reliabilityWindow.TotalClientCounts {
+				connect.AssertEqual(t, totalClientCount, len(clientIds))
+			}
+			// reconstruct the total score from the weight: the network's
+			// clients' scores
+			windowReliabilityScore := reliabilityWindow.MeanReliabilityWeight * float64(int(reliabilityWindow.MaxBucketNumber-reliabilityWindow.MinBucketNumber)*blockCountPerBucket)
+			d := windowReliabilityScore - netReliabilityScore
+			if d < -eps || eps < d {
+				connect.AssertEqual(t, windowReliabilityScore, netReliabilityScore)
 			}
 		}
 
@@ -573,16 +558,7 @@ func TestClientReliabilityScoreSharedIpNormalization(t *testing.T) {
 			connect.AssertEqual(t, score.ReliabilityScore, float64(n)/2)
 		}
 
-		// the network score and window score aggregate the same dilution
-		UpdateNetworkReliabilityScores(ctx, startTime, endTime, false)
-		networkScores := GetAllNetworkReliabilityScores(ctx)
-		networkScore, ok := networkScores[networkId]
-		connect.AssertEqual(t, ok, true)
-		connect.AssertEqual(t, networkScore.IndependentReliabilityScore, float64(n))
-		if d := networkScore.ReliabilityScore - float64(n)/2; d < -eps || eps < d {
-			connect.AssertEqual(t, networkScore.ReliabilityScore, float64(n)/2)
-		}
-
+		// the window score aggregates the same dilution
 		UpdateNetworkReliabilityWindowScores(ctx, endTime, false)
 		server.Db(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(
@@ -650,28 +626,21 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 		endTime := startTime.Add(ReliabilityBlockDuration)
 
 		UpdateClientReliabilityScores(ctx, endTime, true)
-		UpdateNetworkReliabilityScores(ctx, startTime, endTime, false)
 		UpdateNetworkReliabilityWindowScores(ctx, endTime, false)
 
 		clientScores := GetAllClientReliabilityScores(ctx)
 		connect.AssertNotEqual(t, len(clientScores), 0)
-		networkScores := GetAllNetworkReliabilityScores(ctx)
-		_, ok := networkScores[networkId]
-		connect.AssertEqual(t, ok, true)
 
 		// refresh far in the future: every window is past the data, so all
 		// rows must be removed as stale
 		farFuture := endTime.Add(NetworkWindowLookback + 24*time.Hour)
 		UpdateClientReliabilityScores(ctx, farFuture, false)
-		UpdateNetworkReliabilityScores(ctx, farFuture.Add(-time.Hour), farFuture, false)
 		UpdateNetworkReliabilityWindowScores(ctx, farFuture, false)
 
 		lookbackClientScores := GetAllClientReliabilityScores(ctx)
 		for _, clientScores := range lookbackClientScores {
 			connect.AssertEqual(t, len(clientScores), 0)
 		}
-		networkScores = GetAllNetworkReliabilityScores(ctx)
-		connect.AssertEqual(t, len(networkScores), 0)
 
 		server.Db(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(

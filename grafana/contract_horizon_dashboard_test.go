@@ -82,7 +82,7 @@ func TestContractHorizonReaperDashboardPanels(t *testing.T) {
 		kept.Targets[0].Expr != "sum by (reason) (rate(urnetwork_contract_horizon_protected_contracts_total{"+contractHorizonTaskworkerFilter+"}[$__rate_interval]))" {
 		t.Errorf("kept contracts panel lost its per-reason rate: %+v", kept.Targets)
 	}
-	for _, reason := range []string{"open", "unresolved", "recent_close", "busy", "unsettled", "payment_hold", "payment_incomplete", "payment_recent", "unpaid_legacy", "plan_staged", "block_points", "payment_review"} {
+	for _, reason := range []string{"open", "unresolved", "recent_close", "busy", "unsettled", "payment_hold", "payment_incomplete", "payment_recent", "block_points", "payment_review"} {
 		if !strings.Contains(kept.Description, reason) {
 			t.Errorf("kept contracts panel does not explain %s", reason)
 		}

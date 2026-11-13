@@ -1,20 +1,17 @@
 package model
 
 import (
-	"context"
 	"testing"
 	"time"
-
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/server"
 )
 
 // The subsidy pool is max(`min_payout_usd`, `subscription_net_revenue_fraction`
-// x revenue) per period, scaled to the plan window. The planner added the full
-// revenue of every balance its sweeps drew from: one misrecorded balance (an App
-// Store price from a non-USD storefront read as USD) set the pool of every plan
-// that drew from it, and a balance spanning many windows added its whole revenue
-// to each of them. The amounts and floors here are synthetic.
+// x revenue) per period, scaled to the window, as operator block points weigh
+// it. The payout planner added the full revenue of every balance its sweeps
+// drew from: one misrecorded balance (an App Store price from a non-USD
+// storefront read as USD) set the pool of every plan that drew from it, and a
+// balance spanning many windows added its whole revenue to each of them. The
+// amounts and floors here are synthetic.
 
 // a 30-day period, like `days: 30`
 const subsidyRevenueTestPeriod = 30 * 24 * time.Hour
@@ -167,165 +164,4 @@ func TestSubsidyNetRevenuePerPeriodSkipsImplausibleBalance(t *testing.T) {
 		)
 		assertSubsidyNetRevenueUsd(t, c.label, netRevenue, c.expectedUsd)
 	}
-}
-
-// a 30-day period with the floor `minPayoutUsd` and the 0.2 revenue fraction
-func subsidyRevenueTestConfig(minPayoutUsd float64) *SubsidyConfig {
-	subsidyConfig := *EnvSubsidyConfig()
-	subsidyConfig.Days = 30
-	subsidyConfig.MinDaysFraction = 0
-	subsidyConfig.MinPayoutUsd = minPayoutUsd
-	subsidyConfig.SubscriptionNetRevenueFraction = 0.2
-	subsidyConfig.UsdPerActiveUser = 0
-	subsidyConfig.MinWalletPayoutUsd = 0
-	subsidyConfig.ReliabilitySubsidyPerPayoutUsd = 0
-	return &subsidyConfig
-}
-
-// Plans a week in which each balance's payer sends traffic through one provider,
-// and returns the plan's subsidy.
-func planSubsidyRevenueTestWeek(t testing.TB, ctx context.Context, subsidyConfig *SubsidyConfig, transferBalances []*TransferBalance) *SubsidyPayment {
-	t.Helper()
-	usedTransferByteCount := ByteCount(1024 * 1024 * 1024)
-
-	providerNetworkId := server.NewId()
-	providerClientId := server.NewId()
-	testingCreatePaymentClient(ctx, providerNetworkId, providerClientId)
-
-	for _, transferBalance := range transferBalances {
-		payerClientId := server.NewId()
-		testingCreatePaymentClient(ctx, transferBalance.NetworkId, payerClientId)
-		AddTransferBalance(ctx, transferBalance)
-
-		escrow, err := CreateTransferEscrow(ctx, transferBalance.NetworkId, payerClientId, providerNetworkId, providerClientId, usedTransferByteCount)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, CloseContract(ctx, escrow.ContractId, payerClientId, usedTransferByteCount, false), nil)
-		connect.AssertEqual(t, CloseContract(ctx, escrow.ContractId, providerClientId, usedTransferByteCount, false), nil)
-	}
-
-	// the subsidy window runs from the earliest contract create to the latest close
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`UPDATE transfer_contract SET create_time = $1`,
-			server.NowUtc().Add(-7*24*time.Hour),
-		))
-	})
-
-	paymentPlan, err := PlanPaymentsWithConfig(ctx, subsidyConfig)
-	connect.AssertEqual(t, err, nil)
-	subsidyPayment := GetSubsidyPayment(ctx, paymentPlan.PaymentPlanId)
-	if subsidyPayment == nil {
-		t.Fatal("the plan paid no subsidy")
-	}
-	return subsidyPayment
-}
-
-// A plan whose revenue term is below the floor pays the floor for its window.
-func assertSubsidyPoolIsFloor(t testing.TB, subsidyConfig *SubsidyConfig, subsidyPayment *SubsidyPayment) {
-	t.Helper()
-	window := subsidyPayment.EndTime.Sub(subsidyPayment.StartTime)
-	subsidyScale := min(float64(window/time.Minute)/float64(subsidyConfig.Duration()/time.Minute), 1.0)
-	floorPayout := UsdToNanoCents(subsidyScale * subsidyConfig.MinPayoutUsd)
-	// each payee's share rounds by up to a nano cent
-	if difference := subsidyPayment.NetPayout - floorPayout; difference < -16 || 16 < difference {
-		t.Fatalf("subsidy paid $%.6f over %s, expected the floor $%.6f", NanoCentsToUsd(subsidyPayment.NetPayout), window, NanoCentsToUsd(floorPayout))
-	}
-}
-
-// A misrecorded month's grant without a purchase token and a misrecorded yearly
-// purchase, like the September and October 2026 balances, beside a monthly
-// subscription.
-func TestPaymentPlanSubsidyRevenueSkipsMisrecordedBalances(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		subsidyConfig := subsidyRevenueTestConfig(300)
-		now := server.NowUtc().Truncate(time.Second)
-		day := 24 * time.Hour
-
-		subsidyPayment := planSubsidyRevenueTestWeek(t, ctx, subsidyConfig, []*TransferBalance{
-			{
-				NetworkId:             server.NewId(),
-				StartTime:             now.Add(-20 * day),
-				EndTime:               now.Add(-20 * day).Add(subsidyRevenueTestPeriod),
-				StartBalanceByteCount: 1024 * 1024 * 1024 * 1024,
-				BalanceByteCount:      1024 * 1024 * 1024 * 1024,
-				SubsidyNetRevenue:     UsdToNanoCents(3.50),
-			},
-			{
-				NetworkId:             server.NewId(),
-				StartTime:             now.Add(-20 * day),
-				EndTime:               now.Add(12 * day),
-				StartBalanceByteCount: 1024 * 1024 * 1024 * 1024,
-				BalanceByteCount:      1024 * 1024 * 1024 * 1024,
-				SubsidyNetRevenue:     UsdToNanoCents(91000.00),
-			},
-			{
-				NetworkId:             server.NewId(),
-				StartTime:             now.Add(-180 * day),
-				EndTime:               now.Add(186 * day),
-				StartBalanceByteCount: 1024 * 1024 * 1024 * 1024,
-				BalanceByteCount:      1024 * 1024 * 1024 * 1024,
-				SubsidyNetRevenue:     UsdToNanoCents(970000.00),
-			},
-		})
-
-		assertSubsidyNetRevenueUsd(t, "plan", subsidyPayment.NetRevenue, 3.50)
-		assertSubsidyPoolIsFloor(t, subsidyConfig, subsidyPayment)
-	})
-}
-
-// A yearly subscription counts $36.50 / 365 days = $3.00 per period in a weekly
-// plan, not its whole year. With a $5 floor, the whole year (0.2 x $36.50 =
-// $7.30) set the pool instead of the floor.
-func TestPaymentPlanSubsidyRevenueProRatesBalanceSpanningWindows(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		subsidyConfig := subsidyRevenueTestConfig(5)
-		now := server.NowUtc().Truncate(time.Second)
-		day := 24 * time.Hour
-
-		subsidyPayment := planSubsidyRevenueTestWeek(t, ctx, subsidyConfig, []*TransferBalance{
-			{
-				NetworkId:             server.NewId(),
-				StartTime:             now.Add(-100 * day),
-				EndTime:               now.Add(265 * day),
-				StartBalanceByteCount: 1024 * 1024 * 1024 * 1024,
-				BalanceByteCount:      1024 * 1024 * 1024 * 1024,
-				SubsidyNetRevenue:     UsdToNanoCents(36.50),
-			},
-		})
-
-		assertSubsidyNetRevenueUsd(t, "plan", subsidyPayment.NetRevenue, 3.00)
-		assertSubsidyPoolIsFloor(t, subsidyConfig, subsidyPayment)
-	})
-}
-
-// A week of monthly subscriptions counts the same revenue as before.
-func TestPaymentPlanSubsidyRevenueNormalWeekUnchanged(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		subsidyConfig := subsidyRevenueTestConfig(300)
-		now := server.NowUtc().Truncate(time.Second)
-		day := 24 * time.Hour
-
-		transferBalances := []*TransferBalance{}
-		netUsd := 0.0
-		for i, usd := range []float64{3.50, 4.79, 3.50} {
-			startTime := now.Add(-time.Duration(10+i) * day)
-			transferBalances = append(transferBalances, &TransferBalance{
-				NetworkId:             server.NewId(),
-				StartTime:             startTime,
-				EndTime:               startTime.Add(subsidyRevenueTestPeriod),
-				StartBalanceByteCount: 1024 * 1024 * 1024 * 1024,
-				BalanceByteCount:      1024 * 1024 * 1024 * 1024,
-				SubsidyNetRevenue:     UsdToNanoCents(usd),
-			})
-			netUsd += usd
-		}
-		subsidyPayment := planSubsidyRevenueTestWeek(t, ctx, subsidyConfig, transferBalances)
-
-		assertSubsidyNetRevenueUsd(t, "plan", subsidyPayment.NetRevenue, netUsd)
-		assertSubsidyPoolIsFloor(t, subsidyConfig, subsidyPayment)
-	})
 }

@@ -133,7 +133,7 @@ func TestDataLeaderboardWindowsIncludeAwardedOperatorBlocks(t *testing.T) {
 
 // The same through the award itself: a network whose only traffic is past the
 // boundary appears on the board and in the ranking with the bytes its block
-// award recorded, beside a network paid by the last legacy plan.
+// award recorded, beside a network paid in a legacy payout window.
 func TestDataLeaderboardCountsAPostBoundaryBlockAward(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -145,7 +145,6 @@ func TestDataLeaderboardCountsAPostBoundaryBlockAward(t *testing.T) {
 		config.ReliabilitySubsidyPerPayoutUsd = 0
 		config.UsdPerActiveUser = 0
 		config.SubscriptionNetRevenueFraction = 0
-		config.MinWalletPayoutUsd = 0
 		gib := ByteCount(1024 * 1024 * 1024)
 		mib := ByteCount(1024 * 1024)
 
@@ -158,12 +157,8 @@ func TestDataLeaderboardCountsAPostBoundaryBlockAward(t *testing.T) {
 			providerSession.Cancel()
 		}
 
-		// B: paid by the legacy plan, for traffic before the boundary
-		legacyClose := cutoff.Add(-time.Hour)
-		payer.contract(t, ctx, providerB, clientB, legacyClose, legacyClose, 5*mib, UsdToNanoCents(1))
-		if _, err := CreatePaymentPlan(ctx, config, false, 0); err != nil {
-			t.Fatal(err)
-		}
+		// B: paid in a legacy payout window, for traffic before the boundary
+		leaderboardTestPayoutWindow(t, ctx, map[server.Id]ByteCount{providerB: 5 * mib})
 		// A: only past the boundary, in the block
 		inBlock := operatorBlockPointsTestTrafficTime(block, cutoff)
 		payer.contract(t, ctx, providerA, clientA, inBlock, inBlock, 2*gib, 0)

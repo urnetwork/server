@@ -15,7 +15,7 @@ func TestMigrationsExecutorAdmissionClaimRetainsExactCustody(t *testing.T) {
 	version := server.CompetitionExecutorAdmissionClaimMigrationVersion()
 	previous := migrationCurrentSuffixTestContract(t, server.CompetitionExecutorAdmissionExceptionMigrationVersion())
 	current := migrationCurrentSuffixTestContract(t, version)
-	if previous.artifact.removedVersion != version || current.artifact.removedVersion != 0 {
+	if previous.artifact.removedVersion != version || current.artifact.removedVersion != server.CompetitionDistributedReevaluationMigrationVersion() {
 		t.Fatal("admitted claim custody does not transfer at its actual migration")
 	}
 	_, old, _, _, _ := server.CompetitionDistributedEvaluationBodiesSql()

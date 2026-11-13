@@ -273,8 +273,10 @@ active missing capability and must not be read as green.
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.5b | Runbook | `migrations` pins the retired queue: its guards and contract key dropped, its empty table kept until a later release drops it. The legacy settlement probe retired with the queue on 2026-10-24 (PARTITION-MAINTENANCE-PLAN.md, Part B). |
 | 2.5c | Runbook | `contract-rate`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
+| 2.10 | Runbook | Retired 2026-11-13 with USDC provider payouts: no payment completion stamps contract retention. `retention-liveness` and `contract-horizon-reaper` watch contract retention. |
 | 2.11b | Coverage gap | `pgbouncer-backlog` (§26.1) implements replacement backlog and oldest-wait bands without a server-count gate; the original server-gated saturation proposal is superseded, and an exported average-wait read remains missing |
 | 2.11c | Coverage gap | `pgbouncer-stalls` checks that 6432 accepts a connection; the listener-count, per-worker balance, overflow and hop-latency reads are missing |
+| 2.14 | Runbook | Retired 2026-11-13 with USDC provider payouts: no Taskworker submits a Circle transfer. `credentials` checks the Circle API token that customer wallets still use. |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -283,7 +285,7 @@ active missing capability and must not be read as green.
 | 5.6 | Runbook | `pg-state`, `pg-capacity`, `pool-retention`, `wait-events` |
 | 5.7 | Runbook | `task-canaries`, `task-health`, `stuck-leases`, `task-convergence`, `log-errors` |
 | 5.8 | Runbook | `active-queries`, `planner-flips`, `wait-events` |
-| 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `circle-admission`, `key-publication` |
+| 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `key-publication` |
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
 | 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters use the conditional observed-log authority of §2.2b |
 | 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
@@ -1351,7 +1353,7 @@ WHERE function_name LIKE '%UpdateClient%'
   subscription, or payment rows to quiet the alert.
 - GOTCHA — one task family can still contain several causes. On 2026-08-30,
   `AdvancePayment` had 384 failing rows: 368 wallet-insufficient, ten
-  connection-cleanup deadlines from §2.10 retention, five
+  connection-cleanup deadlines from the payment-retention writer, five
   `processor-invalid-destination` 400s, and one processor 429. The
   highest-error representative belonged to the wallet class and made a
   single-cause explanation falsely describe the other 16 rows. The probe now
@@ -1360,53 +1362,7 @@ WHERE function_name LIKE '%UpdateClient%'
   family alert says it is mixed and builds its action and verification from
   only the classes present in that snapshot; stale guidance for an absent
   class is itself an alerting defect. A sample is evidence, not permission to
-  apply its diagnosis to every row. Keep invalid-destination separate from
-  generic processor 400s because only that typed, definitive pre-chain result
-  is safe to unpin (§5.7).
-- GOTCHA — a destination rejection and its failed reset are different phases.
-  `AdvancePayment` currently composes `Payment create transaction error: ...;
-  invalid destination reset error: ...`; retained older errors use ` = ` at
-  both separators. One shared pattern requires the complete paired form and
-  nonempty reset detail in the SQL, fixed task taxonomy, and log classifier.
-  Task and SQL classification additionally require `AdvancePayment` ownership.
-  The complete SQL error is classified as `invalid-destination-reset-failed`
-  before processor or persistence text. A lone suffix, mixed separators, or
-  ordinary destination rejection does not establish a failed reset.
-  Single-cause guidance uses that full-text class even when the representative
-  160-byte sample ends before the suffix. Mixed-family guidance includes this
-  reset/persistence action only when its class is present. Inspect concurrent,
-  terminal, or on-chain payment state and the guarded persistence outcome;
-  preserve the existing key and reconcile before another submission. Neither
-  a matching destination phrase nor a current source base proves successful
-  reset or unchanged account configuration. Never clear rows or keys manually.
-  An equals-only watcher misses the current colon form, so absence of this
-  class there is not reset-health evidence. The source mismatch alone cannot
-  assign an observed `other` cohort to reset failures; retain the original
-  complete-error observation and its source before attribution. Missing or
-  failed SQL/log observations remain unknown, and relabeling a failure does
-  not prove that payment recovery occurred.
-- The 2026-09-18 Main `AdvancePayment` investigation established the current
-  operations/configuration split with a bounded read-only primary query. Of
-  1,119 pending failures, 1,117 were `wallet-insufficient`: each remained
-  nonterminal with its existing idempotency key and without a processor record
-  or chain hash, so they are source-wallet liquidity work, not a stuck-worker
-  or retry-reset defect. Thirty-eight rows had fresh claims; changing parked
-  and claim counts therefore describe scheduler state, not recovery. The two
-  `processor-invalid-destination` rows were also nonterminal and unpinned, and
-  selected current active, owned MATIC wallets whose address shape was not a
-  valid EVM address. That independently establishes an account-wallet
-  configuration fault, not a generic processor outage. The current selected
-  wallet is not evidence of source liquidity, and a stored rejection alone is
-  not evidence that a reset succeeded; retain both checks. One logical
-  provider attempt can emit two diagnostic lines, so line rate is not a task
-  count. Finance must verify/fund the exact source network/token wallet (or
-  authorize a payout pause), and the account owner/operator must submit the
-  valid intended destination through the supported account API. Do not deploy,
-  restart, replay, clear idempotency, accelerate retries, or retarget a pinned
-  payout to address either class. After authorized corrections, require an
-  independent 90-minute natural-retry window plus ingestion delay, intended
-  successful transfers without duplicates, and no new admission failures or
-  rate limits before closing both cohorts.
+  apply its diagnosis to every row.
 - The 2026-09-12 `SyncProductUpdatesForUser` incident is the transient
   non-payment control for `processor-bad-request`. At `13:59:32Z`, one
   first-error row had a fresh claim, was due immediately, and was explicitly
@@ -1447,292 +1403,20 @@ WHERE function_name LIKE '%UpdateClient%'
   operation and retry lifecycle; do not copy the provider message, contact, or
   request into evidence. A self-healed first error closes after the same task
   finishes and stays absent for the five-minute parked boundary.
-- GOTCHA — wallet insufficiency is an operational liquidity boundary, but its
-  retry shape can still contain a software amplification. Consecutive task
-  errors have a one-hour nominal cap. The old scheduler added only 0–2 seconds
-  of jitter at that cap, so rows created by one outage retained their narrow
-  wave forever. On 2026-08-31, 824 failing `AdvancePayment` rows would have
-  averaged 13.7 retries/minute if dispersed; instead a live wave reached
-  79/minute (69 rows also had a fresh claim heartbeat), and the processor
-  returned one 429 amid 817 wallet-insufficient rows. Ordinary 400
-  wallet-insufficient responses continued immediately afterward, separating
-  the bounded burst from a fleet-wide processor outage. The pre-fix cohort
-  recurred later the same day: wallet-insufficient output reached 86/minute at
-  15:40Z, Circle returned a second 429 at 15:40:52Z, and the next durable
-  snapshot changed from 817 wallet-insufficient plus one rate-limit row to 816
-  plus two while the family total remained 824. The wave continued: five
-  distinct wallet-insufficient attempts landed at 15:46:23Z before another
-  request received 429 in that same second; four attempts at 15:46:33Z then
-  preceded a fourth 429. The durable snapshot shifted to 815 plus three before
-  the fourth result was ingested and stayed there afterward: the cause
-  breakdown is each row's current last error, not a cumulative event counter,
-  so one row changing class can hide another 429. The immediate
-  `payment-processor-rate-limit` log class is the event signal; use the durable
-  breakdown only for the current retry population. Both taskworker groups were
-  still entirely on `2026.8.31-outerwerld+1033655820`; its embedded source
-  revision `1d8f01e5` predates the proportional-jitter fix. This exact temporal
-  and row-class conversion is evidence of cohort amplification, not a claim
-  that every 429 has that cause. The scheduler now jitters saturated retries
-  across 30–90 minutes with the same one-hour mean; its deterministic 824-row
-  synthetic cohort covers all 60 minute buckets with at most 14 rows in one
-  bucket. Deploy taskworker commit `70b0d269` or later and verify the narrow
-  hourly wave disappears and no new rate-limit row is created during the next
-  recurrence. This containment cannot create liquidity:
-  finance/ops must still fund the exact network/token wallet or pause payouts.
-  Never accelerate retries, delete pending rows, or rotate idempotency keys to
-  silence this class.
-  One logical Circle rejection normally produces two diagnostic lines: the
-  provider-boundary client record and the task evaluator record. The standing
-  alert now reports both raw `diagnostic_lines` and
-  `processor_rate_limit_events`, counting only exact-replay-deduplicated task
-  evaluator records for the latter. A lone provider line still alerts
-  fail-safe, but it renders a zero canonical count instead of being silently
-  divided by two. This matters during the live stale-build drain, where a
-  4/min line rate represented two logical 429 events and the durable current
-  row class advanced independently.
-- The standing tail derives `payout-retry-microburst` only from the fixed
-  `[circlec][transfer-admission] admitted observable=v1 ...` marker emitted
-  synchronously after the shared Redis gate admits and before the processor
-  POST. A stable-member command replay returns the original Redis TIME
-  admission second only while that reservation remains in the active rolling
-  window. A replay after cutoff obtains one fresh current slot/bucket before
-  the caller can return and POST. The tailer groups that returned field rather
-  than the host/logger timestamp and de-duplicates exact records across the
-  current and immediately previous drain window. A peak of four markers is
-  a direct violation of the three-admission rolling-second ceiling: all four
-  events within one Redis second also fit inside the one-second window ending
-  at the latest event. The process-local sequence
-  makes distinct admissions distinguishable without carrying a payment,
-  wallet, account, network, destination, token, request, or provider response.
-  The retained alert sample strips the Warp host/generation/correlation prefix.
-
-  Response and task-evaluator timestamps are deliberately excluded from this
-  invariant. They occur after POST and independent submissions admitted in
-  different seconds can complete together. Wallet evaluator records remain a
-  bounded correlation input for an actual processor 429, and
-  `payout-wallet-insufficient` remains the separate **operations/finance**
-  alert. A quiet admission-marker window is interpretable only while §2.14
-  proves the marker capability on every newest Taskworker and standing-tail
-  visibility/reconciliation is healthy; mixed rollout or missing telemetry is
-  unobservable, never zero. Close the software branch only after complete
-  capability coverage and a 90-minute window below four markers/second with
-  zero gate errors and zero processor 429s.
-
-  On 2026-09-12, the legacy evaluator-derived rule warned on four independent
-  wallet-rejection completions in one source second. The same bounded window
-  had 66 admitted transfers across five minutes, all eight newest Taskworkers
-  exposed the existing gate metrics, and admission deferrals, admission
-  errors, and processor 429s were all zero. That proves the sample was a real
-  response-completion cohort but does not prove an admission burst. The
-  admission marker and capability gauge correct that counting boundary without
-  changing payment semantics, retry timing, idempotency, or the limiter.
-
-  The older incident chronology below remains useful as response-cohort and
-  429 correlation evidence. Its evaluator-derived “microburst” observations
-  predate the direct marker and must not be read as admission-time measurements.
-
-  The standing implementation then caught the next recurrence live at
-  16:30–16:38Z. A bounded independent pull found 164 canonical
-  wallet-insufficient task attempts across all eight active taskworker
-  host/generation allocations. The peak was five attempts in
-  `2026-08-31T16:31:47Z`; the one logical 429 occurred in that same second and
-  appeared as the expected Circle-client plus task-evaluator diagnostic pair.
-  The standing windows independently alerted at four, five, four, and four
-  attempts/second. Both taskworker generations were still uniformly on
-  `2026.8.31-outerwerld+1033655820`, so this is direct post-probe validation of
-  the old-jitter diagnosis, not inferred recurrence from durable row counts.
-  The live alert also found an evidence bug: its stored sample came from the
-  first canonical attempt in the minute (16:31:33), not the actual five-event
-  peak second (16:31:47). The tailer now updates both `peak_source_second` and
-  its redacted sample whenever a later second exceeds the prior peak; a
-  deterministic sparse-first/peak-later regression prevents the alert from
-  presenting unrelated evidence again.
-
-  The next old-build recurrence exposed a second timestamp-evidence defect.
-  As the parked subset fell from 801 to 691, the independent canonical audit
-  found 39 attempts in three minutes and a four-attempt peak at
-  `2026-08-31T18:31:16Z`; the standing monitor independently opened
-  `payout-retry-microburst` with 28 canonical attempts from 56 diagnostic
-  lines. Its peak field rendered `2026-08-31T13:31:16` with no offset because
-  the parser stripped `-05:00` before storing the grouping key. Interpreting
-  that wall clock as UTC would shift correlation with Circle, PostgreSQL, and
-  kernel evidence by five hours. Burst timestamps now parse the complete
-  RFC3339 offset, normalize the instant to a whole UTC second, and render the
-  trailing `Z`; the redacted sample retains the original envelope. A
-  deterministic non-UTC-offset regression requires
-  `13:31:16-05:00` to render and group as `18:31:16Z`.
-
-  Post-roll validation on the clean `5c91a3c4` monitor captured the same live
-  wave without an inference step. Three consecutive windows rendered peaks of
-  five attempts at `18:36:58Z`, four at `18:38:48Z`, and four at
-  `18:40:08Z`; each peak retained its original `-05:00` sample envelope. No
-  `payment-processor-rate-limit` event appeared through that last window. This
-  proves the UTC evidence fix is active while independently reaffirming that
-  the still-deployed pre-`70b0d269` taskworker preserves narrow retry cohorts.
-
-  The same recurrence then crossed the processor boundary. Four canonical
-  wallet failures landed at `18:45:38Z`; at `18:45:39Z`, two more wallet
-  failures and two canonical 429s landed together. Five wallet failures at
-  `18:46:41Z` were followed at `18:46:42Z` by two wallet failures and a third
-  canonical 429. The standing monitor independently reported the first pair as
-  two logical events from four diagnostic lines, then the third as one event
-  from two lines. At `18:46:57Z`, the durable family snapshot changed from
-  `wallet-insufficient=817,processor-invalid-destination=6,processor-rate-limit=1`
-  to `814,6,4` while the total stayed 824. Exactly three rows changing class
-  matches the three canonical events and rules out a growing payment backlog
-  or a duplicate-log illusion. A fourth canonical 429 followed at
-  `18:48:04.608126Z`, and a fifth followed five wallet-insufficient attempts
-  at `18:53:30Z` before landing at `18:53:30.571865Z`. The durable breakdown
-  remained `814,6,4`: it is the current last error of each row, not a
-  cumulative event counter, so a row returning to wallet-insufficient can
-  conceal a different row's new 429. The stale cohort caused real provider
-  throttling even though several earlier four/five-per-second peaks did not;
-  deploy `70b0d269` rather than treating the empirical burst threshold as a
-  deterministic provider quota.
-
-  The unchanged deployment produced another independently bounded recurrence
-  from `20:29:56Z` through `20:35:31Z`. Across the eight active
-  host/generation allocations, 143 exact-replay-deduplicated task-evaluator
-  records represented wallet-insufficient attempts. Seven source seconds held
-  at least four attempts; the peak was five at `20:31:57Z`, and one canonical
-  processor 429 landed in that same second. The standing monitor independently
-  rendered that exact five-attempt UTC peak, one logical rate-limit event from
-  its two diagnostic lines, and the surrounding wallet retry rate. The durable
-  family stayed at 824 rows while its latest-error breakdown became 810
-  wallet-insufficient, eight processor-rate-limit, and six invalid-destination
-  rows. This is further direct evidence that
-  `2026.8.31-outerwerld+1033655820` still preserves the pre-fix retry wave; it
-  does not justify a different retry algorithm or treating the 429 as a broad
-  processor outage. Deploy a Taskworker artifact containing `70b0d269`, then
-  use the complete 90-minute observation gate already specified above.
-
-  The UTC-rollover recurrence supplied the direct post-provenance control. At
-  `00:31:39Z`, the standing monitor reported 28 exact-replay-deduplicated task
-  attempts from 56 diagnostic lines. Six wallet-insufficient attempts landed
-  at `00:30:43Z`, and one canonical processor 429—two diagnostic lines—landed
-  in that exact second. The independently bounded query produced the same
-  source second and logical event count. Because the deployed image provenance
-  is `1d8f01e5`, this joins the runtime burst to the known pre-`70b0d269`
-  scheduler rather than inferring source age from its version string. It also
-  validates the monitor's peak-sample and canonical-event accounting through a
-  fresh live recurrence. Deploy the existing jitter fix; do not add a second
-  retry algorithm or confuse dispersion with the separate wallet-liquidity
-  operation.
-
-  The unchanged artifact then produced a broader causal control through
-  `00:50Z`. A bounded three-hour query found 15 canonical 429 evaluator events
-  across 12 exact source seconds and 12 task rows. Every one of those seconds
-  also held at least five canonical wallet-insufficient attempts; one held
-  six. In the latest event, five wallet results completed from
-  `00:49:53.240866Z` through `00:49:53.327394Z`, followed by the 429 evaluator
-  result at `00:49:53.339836Z`. The durable family remained exactly 824 rows
-  while its latest-error breakdown moved to 815 wallet-insufficient, six
-  invalid-destination, and three rate-limit rows. This proves another provider
-  throttle was amplification of the existing backlog rather than backlog
-  growth, while also proving the durable class count is not a cumulative 429
-  counter. The tailer now reports a privacy-safe source-second join directly:
-  canonical rate-limit seconds, how many crossed the four-attempt cohort
-  threshold, total/peak coincident wallet attempts, and the canonical logical
-  event count. It retains burst-second counts across the bounded drain overlap
-  so late reconciliation cannot sever the correlation; deterministic tests
-  require an exact-second cross-drain join, reject the adjacent second, expire
-  old state, and keep diagnostic replay at zero logical events. This stronger
-  evidence still does not establish Circle's account quota or justify a shared
-  limiter before `70b0d269` has completed its 90-minute deployment control.
-
-  At `03:22Z` on 2026-09-01, the standing invalid-destination alert exposed a
-  monitor provenance bug: every responding block sampled
-  `2026.8.31+1034210530`, and the investigation initially treated that mutable
-  WARP/config generation as proof that source `a52392db` was running. Exact
-  artifact validation later disproved that inference. Six directly observable
-  blocks on enabled edges 0, 1, and 3 executed image content identity
-  `sha256:042255119828a004024a4dc5e57d97373a8bf399aca6074ca98804dec2b3156a`;
-  edge-4's two blocks had no retained startup digest and unprivileged Docker
-  inspection was unavailable, so they remain provenance-unknown rather than
-  being counted as proven. The matching amd64 manifest's extracted executable
-  reported base revision `078d6c11` with `vcs.modified=true`, while its BuildKit
-  attestation described Docker context `a52392db`. The prebuilt binary was made
-  from a dirty earlier tree and the Docker context was published after HEAD
-  advanced. This is a release-provenance race, not evidence that config version
-  maps to source.
-
-  Direct binary discriminators nevertheless prove that the six-block artifact
-  contains the proportional-jitter fix: it exports the
-  `task.errorRescheduleDelay` symbol and the post-`70b0d269` direct `run_at=$3`
-  / `$5` error-count SQL rather than the old SQL `power()` backoff. The one
-  four-attempt source second at `06:14:26Z` produced no canonical processor 429
-  and the microburst finding cleared on the next complete cadences. That is not
-  a reason to redeploy the same Taskworker; retain the full observation gate
-  and investigate a repeated current-artifact wave or a coincident 429. The
-  taxonomy now makes no current-version claim and delegates software action to
-  the independently triggered `payout-retry-microburst` finding. Its
-  deterministic test rejects historical version/source assertions and a direct
-  jitter-deploy instruction. The operational wallet correction remains
-  unchanged.
-
-  The required post-jitter control then failed at `07:12:48Z` on 2026-09-01.
-  Five canonical wallet-insufficient transfer results completed in that source
-  second and a sixth transfer request received Circle 429; three results came
-  from edge-0/g1, one from edge-1/g1, and one from edge-4/g1, while the 429
-  came from edge-1/g2. Four of the five successful rejections therefore came
-  from blocks whose exact executable had already been proven to contain the
-  proportional-jitter implementation; edge-4's unknown artifact cannot explain
-  away the recurrence. At `07:12:49Z`, three more edge-1/g2 wallet rejections
-  and another canonical 429 followed. This rules out stale retry jitter as the
-  remaining root cause: independent 30–90-minute random choices lower average
-  synchronization but cannot enforce a fleet-wide instantaneous ceiling.
-  Circle's current [Wallets API rate-limit
-  documentation](https://developers.circle.com/api-reference/wallets/rate-limits)
-  specifies five default POST requests/second and a 429 when exceeded, matching
-  the observed five completed rejections plus sixth refusal.
-
-  Current-main server commit `14928f69` (the patch-identical replay of former
-  commit `eb7e79b6`) is the root fix. Immediately before the developer
-  transfer POST, every process contends on one Redis-time rolling sorted set;
-  an atomic Lua decision admits at most three submits in any rolling second,
-  leaving two requests/second of documented headroom. A unique member makes a
-  lost-response command replay idempotent while its reservation remains in the
-  active rolling window. After cutoff, that reservation no longer accounts for
-  the current ceiling, so the same member atomically obtains one fresh slot and
-  bucket before the caller returns. Redis or context failure is fail closed
-  before HTTP, and the durable payment idempotency key remains unchanged. A
-  deterministic synthetic launches eight concurrent fleet callers at one
-  timestamp, requires exactly three admissions/five deferrals, and proves a
-  within-window replay preserves the original bucket without consuming a slot.
-  A second lost-response synthetic proves a same-member post-cutoff retry gets
-  exactly one fresh current slot/bucket and one synchronous observation before
-  caller return. §2.14 owns deployment and runtime verification; the existing
-  source-second log join remains the provider-outcome control.
-  Follow-up current-main commit `66525afc` converts the server Redis wrapper's
-  connection panic path into that same measured fail-closed error, so it is the
-  fail-closed activity/error baseline. It predates the capability gauge and
-  exact pre-POST marker and therefore is not the complete §2.14 observation
-  baseline. Surviving current-main commit `928abfca` adds that capability and
-  marker contract; use it as the minimum source when §2.14 marker visibility is
-  part of the recovery gate.
-
-  The first remediation added a fail-closed Warp release gate, but operator
-  policy later established that intentional local checkout state must remain
-  deployable; current Warp commit `8797d48` removes that gate. Generic service
-  telemetry still exports the Go base revision, Boolean modified bit, and
-  Warp-injected immutable digest so future probes can join the running process
-  without extracting images. A modified bit is descriptive rather than a
-  failure; preserve the participating local diff when exact replay matters.
-  None of this requires redeploying the current Taskworker solely to re-prove
-  the already-present jitter behavior.
-
-  The first `03:50Z` run of the replacement watcher found the same defect in
-  the independent `task-canaries` mixed-family guidance: its current
-  `AdvancePayment` alert still asserted that the old version/source was the
-  production Taskworker. The durable task rows do not contain runtime artifact
-  ancestry, so this PostgreSQL probe cannot make that claim. It now requires an
-  explicit per-block ancestry check for typed-reset `b8af229f`, deploys only to
-  older blocks, and requires typed rejection, successful guarded reset, and
-  current wallet-selection evidence before attributing persistence to invalid
-  configured-wallet selection. Synthetic mixed-family tests reject the old
-  version, source, and generic `production taskworker` claim. Historical
-  incident paragraphs retain their dated artifacts as evidence, not runtime
-  instructions.
+- Retired 2026-11-13: the USDC payout task classes. USDC provider payouts
+  ended (owner decisions 2026-11-12 and 2026-11-13: "settle closed rows, let's
+  close out usdc entirely"). `AdvancePayment` is gone, and `Payout`,
+  `ProcessPendingPayouts` and `CancelHungAccountPayments` drain queued rows as
+  no-ops, so no task can fail with a payout-wallet, destination or
+  payment-planner error. The task error classes `wallet-insufficient`,
+  `processor-invalid-destination`, `invalid-destination-reset-failed`,
+  `postgres-local-buffer-exhaustion` and `idle-transaction-timeout`, their
+  `AdvancePayment` and `Payout` guidance, the live `Payout` overrun diagnosis
+  and the §4 payout log classes retired with them. The generic
+  `processor-rate-limit` and `processor-bad-request` classes stay for other
+  processor callers. Slack incident state is process-local: the watcher
+  restarted on this build holds none of the retired incidents, and one the
+  previous process raised gets no cleared message.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains
@@ -3607,8 +3291,6 @@ ledger crosswalks deterministic:
   and network namespace only after that binding; do not assume Redis.
 - `missing-origin-contract` is the metric-only raw log classifier feeding the
   independently bounded §2.17 missing-origin analysis.
-- `circle-transfer-admitted` is non-alerting admission evidence for §2.14;
-  `circle-transfer-admission-failed` is its fail-closed error class.
 - `signal-send-not-admitted`, `signal-send-encryption-not-ready`,
   `signal-send-canceled-or-closed`, and `signal-send-other` are the bounded
   reason-specific successors to the legacy sender class in §14.6. They keep
@@ -7807,10 +7489,11 @@ At 09:42Z the oldest useful horizon made that remaining writer explicit: a
 98s transaction was executing the legacy `UPDATE transfer_contract SET
 reap_time = ...` while dead tuples held at 21.66M. The autovacuum itself was
 active on `IO:WalSync`, had no blocker, and remained in index cleanup. The
-vacuum probe now recognizes this query shape and names the shared
+vacuum probe recognized this query shape and named the shared
 `retention-fanout` cause, the durable pending-queue/cursor-batch fix, and the
-payment retry-safety constraint. It must not suggest canceling the healthy
-vacuum or tuning around the unbounded writer.
+payment retry-safety constraint, until both retired with USDC provider payouts
+on 2026-11-13 (§2.10). It must not suggest canceling the healthy vacuum or
+tuning around the unbounded writer.
 
 The same live vacuum exposed a monitor compatibility blind spot at 09:47Z.
 PostgreSQL reported that it had processed 4 of 13 indexes while the legacy
@@ -8593,10 +8276,12 @@ attached partition's name and heap size (at most 4,096), the statistics reset
 and postmaster start, and the public relations of at least 100 GB with their
 insert and delete counters, in fixed ten-cell frames bound by an end row. A
 failed read leaves the check unknown. The target is the primary's name plus a
-fixed check name; only counts, ages and fixed names leave SQL. A watcher that
-still holds a `contract-reap-stalled` incident clears it after two complete
-runs: the signal reports neither the class nor an unknown state for its
-target.
+fixed check name; only counts, ages and fixed names leave SQL. The signal
+reports neither the retired `contract-reap-stalled` class nor an unknown state
+for its target, so a notifier holding that incident would clear it after two
+complete runs. Slack incident state is process-local, though: the watcher
+restarted on the retiring build holds none, and an incident the previous
+process raised gets no cleared message.
 
 - `partition-retention-stuck` (target
   `<primary>/client-reliability-partitions`, sustain 1): the oldest
@@ -9082,14 +8767,17 @@ Probe: `task-health`
 The post-migration 2026-08-31 sample adds a bounded-backlog discriminator.
 The first two successful `RemoveCompletedContracts` runs averaged 306.2s
 against a 6.3s trailing p95 after migration 595 made the durable retention
-cursor available. Current source gives each completed-payment assignment,
-straggler assignment, and due-delete phase a five-minute wall-clock budget, so
-a normally completed run near 300s is consistent with one phase draining its
-budget; it is not by itself a stuck transaction or recurrence of the former
-missing-column failure. Keep one recurring reaper, correlate
-`contract_retention_pending` and cursor progress with §2.10, and require the
-queue plus durations to fall on consecutive 30-minute runs. Do not add
-concurrent reapers or raise the task deadline to hide durable backlog.
+cursor available. Current source gives the straggler assignment and due-delete
+phases a five-minute wall-clock budget each, so a normally completed run near
+300s is consistent with one phase draining its budget; it is not by itself a
+stuck transaction or recurrence of the former missing-column failure. Keep one
+recurring reaper, correlate the due `reap_time` backlog, and require the
+backlog plus durations to fall on consecutive 30-minute runs. Do not add
+concurrent reapers or raise the task deadline to hide durable backlog. Since
+USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13), no
+payment completion queues contracts for the reaper; the completed-payment
+assignment phase and the retention queue retired, and the contract horizon
+reaper (§2.4r) deletes contracts past its horizon.
 
 At 06:16Z, one `ExportStats` run completed in 187s versus its 87.6s trailing
 p95. The exact finished interval overlapped an 870-second
@@ -10390,10 +10078,9 @@ An unavailable summary or a nearby panic timestamp cannot establish that join.
 
 An above-threshold warmup or a rise alone does not identify a retention defect.
 Before changing code or deploying, correlate consecutive age buckets with the
-running closer's duration/outcomes, current retention-fanout evidence, and the
-transfer_contract autovacuum phase. Apply the bounded retention correction only
-if that attribution is confirmed; the historical episodes below are not proof
-of the current running path.
+running closer's duration/outcomes and the transfer_contract autovacuum phase.
+Act only if that attribution is confirmed; the historical episodes below are
+not proof of the current running path.
 
 The five- and thirty-minute creation-age buckets measure age, not expiry status.
 Current source uses a 12-minute quiet cutoff for `CloseExpiredContracts`. A
@@ -11056,7 +10743,7 @@ lead time: its taskworker heartbeat exceeded 900s before the existing
 open-contract probe's sustained trend opened at 536,761 contracts (474,389
 older than five minutes and 141,039 older than 30). The live probe therefore
 alerts at 120s, while the open-set buckets remain authoritative for impact and
-drain. Correlate the duration with §2.10 and vacuum state. Executor identity is
+drain. Correlate the duration with vacuum state. Executor identity is
 chronology, not causal proof: the same task remained slow after the overlapping
 net-escrow writer ended, while a legacy retention writer and
 `transfer_contract` vacuum debt were active.
@@ -12062,7 +11749,7 @@ rank, location, sampled provider, or API release.
   provider IDs in the alert. The Go probe first checks `pg_attribute`; before
   the append-only column exists it omits both direct column references, so the
   current database remains observable without serializing every wide health row
-  through JSON. Until `tls_integrity_armed=true`, §2.10 owns the pending
+  through JSON. Until `tls_integrity_armed=true`, §8.9 owns the pending
   migration and this count is unarmed rather than proof of zero failures. Once
   armed, PostgreSQL can use the partial boolean index, a positive row remains
   excluded even after its 24-hour score sample ages out, and only a later clean
@@ -13633,123 +13320,17 @@ feeding its matrices through the public adapter and synthetic native census.
 An engine skip leaves that qualification unmet. No test definition or source
 review establishes deployed behavior or current production health.
 
-### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
-Probe: `retention-fanout`
+### 2.10 Payment-completion retention fan-out — retired
 
-Observation authority: require at least one complete 12-column result row and
-nonnegative 64-bit integers for every count, age, time and block metric before
-health or attribution. Missing, short, extra-width, fractional, negative or
-out-of-range cells remain unavailable; they cannot become numeric zero.
-The query-id filter can return several statistics partitions across database,
-user and top-level status. Validate every partition, require its repeated
-activity/task aggregates to agree, retain all partition metrics, and test the
-100,000 rows/call corroboration against any partition. Never let arbitrary
-first-row order hide a qualifying partition or dilute it with another partition.
-The left join's complete zero row when no statement matches is valid; an empty
-result is unavailable. Retained cleanup text alone remains insufficient, and
-lifetime statement metrics do not establish a current execution or CPU share.
-
-
-`CompletePayment` stamps `transfer_contract.reap_time` for every contract in a
-payment's `transfer_escrow_sweep`. The lookup is indexed by `payment_id`, so an
-indexed plan can still be catastrophically expensive when one payment owns
-millions of contracts. Track the exact statement separately from the generic
-top-total-time list:
-```sql
-SELECT queryid, calls,
-       round(mean_exec_time::numeric, 1) AS mean_ms,
-       round(max_exec_time::numeric, 1) AS max_ms,
-       round(rows::numeric / NULLIF(calls, 0), 0) AS rows_per_call,
-       shared_blks_hit, shared_blks_read, shared_blks_dirtied,
-       shared_blks_written
-FROM pg_stat_statements
-WHERE queryid = -3312164664690273449;
-
-SELECT count(*) AS active,
-       max(clock_timestamp() - query_start) AS oldest
-FROM pg_stat_activity
-WHERE state = 'active' AND query_id = -3312164664690273449;
-```
-2026-08-27 signature since the pgss reset: 18 calls, 338,497ms mean,
-544,554ms max, 2,209,550 updated rows/call, 1.48B shared hits, and 54.7M
-dirtied blocks. One to three copies remained active for tens of seconds to
-minutes while the storage device ran in high-utilization write bursts.
-
-2026-08-30 live monitor confirmation: query id `-3312164664690273449` had
-reached 36 calls, 326,707ms mean, 544,554ms max, and 2,156,191 rows/call; one
-sample saw three active copies with the oldest at 72s and the next saw one at
-105s. The current source no longer issues that synchronous statement:
-`CompletePayment` sets the durable `contract_retention_pending` queue bit, and
-`RemoveCompletedContracts` advances `contract_retention_cursor` in bounded,
-committed batches. Seeing the legacy query id after that source change therefore
-identifies an older deployed generation; deploy the fixed generation and then
-require the exact query id to disappear rather than tuning PostgreSQL around it.
-The same live window supplied a cross-signal check: a 1,548s
-`CloseExpiredContracts` run accumulated 244k open contracts while this query
-remained active, then two comparable 100k close cohorts finished in 22–23s
-immediately after the retention executions cleared (§2.6). This is the
-retention fan-out delaying unrelated writers, not evidence that the closer
-needs a larger pool.
-It also pushed `transfer_contract` above the 10M dead-tuple warning while
-autovacuum was active; vacuum brought the estimate back below threshold, but
-cannot make an unbounded multi-million-row update cheap. Treat §2.4 bloat as a
-downstream symptom until the legacy query id disappears.
-
-A later read-only sample separated the payment backlog into causes instead of
-letting its largest class hide the retention failures. Of 384 failing
-`AdvancePayment` rows, 368 carried the known unfunded-wallet error, while ten
-different rows retained `Interrupted: failed to deallocate cached
-statement(s): conn closed` after their exact 120-second task boundary. Those
-ten rows spanned two payment plans and nine networks; each payment referenced
-1,184,684–3,356,615 sweep rows, or 21,875,448 in total. All ten had a processor
-record and idempotency key but no receipt/hash or terminal state. One selected
-retry supplied direct causal proof: taskworker began it at 13:49:03Z while
-PostgreSQL began query id `-3312164664690273449` for its 3,356,615-row payment.
-The same backend remained in that exact `UPDATE` from 0.5s through 118.5s,
-alternating ordinary execution with WAL/data-file waits and no blocker; at
-13:51:03Z taskworker reported `eval error(120.00s)` with the connection-cleanup
-text. The cleanup message is cancellation aftermath, not the slow operation.
-The probe therefore retains this durable correlation between retries when both
-the legacy statement averages at least 100,000 rows/call and an
-`AdvancePayment` row carries that deadline signature. The error alone is not
-enough to attribute retention.
-
-- WARN: one execution active >30s, or >=2 concurrent executions for two
-  samples; also warn between retries when the exact legacy query has at least
-  100,000 rows/call and an `AdvancePayment` row retains the 120-second cleanup
-  signature. Include rows/call and storage/WAL signals; backend count alone
-  understates this load.
-- This is not the rare-value planner landmine (§2.3):
-  `transfer_escrow_sweep_payment_contract` (payment_id, contract_id) exists
-  and is used to find the fan-out (`transfer_escrow_sweep_payment_id` was
-  dropped by the index diet).
-  `ANALYZE` and larger PgBouncer pools do not reduce millions of updates.
-- Action: make retention stamping bounded/chunked or decouple it from the
-  synchronous payment transaction. During an incident, correlate it with
-  §2.6 growth and §2.11 pool-path timeouts; do not kill a payment transaction
-  without first proving retry/idempotency safety.
-
-The 16:19–16:53 recurrence preserved the same durable writer signature while
-close, reliability, and vacuum work overlapped. Query id
-`-3312164664690273449` advanced from 39 to 40 calls and from 2,156,465 to
-2,162,072 rows/call; lifetime mean/max execution reached 324,803/544,554ms,
-with 3.234B shared-buffer hits, 30.93M reads, 115.45M dirtied blocks, and only
-164,194 written blocks. One to three copies were transiently active and one
-exceeded 410s. Ten durable `AdvancePayment` rows still carried the exact
-120-second connection-cleanup deadline signature. This is continued evidence
-of an unbounded row writer and delayed cancellation cleanup, not a reason to
-expand connection pools; keep the bounded retention implementation and use
-the retained task errors only as attribution between active executions.
-
-The next execution brought the lifetime total to 41 calls and then cleared
-from `pg_stat_activity`. At 18:02Z the statement averaged 2,170,158 rows and
-325,648ms per call, with a 544,554ms maximum, 3,329,316,398 shared-buffer hits,
-31,981,964 reads, 118,226,752 dirtied blocks, and only 173,741 written blocks.
-All ten cleanup-deadline task rows remained durable. The concurrent
-`transfer_contract` vacuum completed and cut its dead-tuple estimate below one
-million, but that cleanup result does not make the 2.17M-row payment
-transaction bounded. Require the query id and deadline-error cohort to
-disappear after the queued cursor path is deployed.
+Retired 2026-11-13 with its `retention-fanout` class. USDC provider payouts
+ended (owner decisions 2026-11-12 and 2026-11-13: "settle closed rows, let's
+close out usdc entirely"): no payment completes, so neither the legacy
+`CompletePayment` reap stamping (query id `-3312164664690273449`) nor the
+`contract_retention_pending` queue that replaced it runs, and `AdvancePayment`,
+whose cleanup-deadline rows corroborated it, is gone. The contract horizon
+reaper (§2.4r) deletes contracts past its horizon. Slack incident state is
+process-local: the watcher restarted on this build holds no `retention-fanout`
+incident, and one the previous process raised gets no cleared message.
 
 ### 2.11 PgBouncer pool-path stalls — startup progress vs busy servers
 Probe: `pgbouncer-stalls`
@@ -15471,198 +15052,22 @@ synthetic scheduled-reboot case includes two long active heartbeats and makes
 one exact id complete before the previous-boot boundary; only the genuinely
 interrupted task may alert.
 
-### 2.14 Circle transfer admission — fleet ceiling vs random retry dispersion
-Probe: `circle-admission`
+### 2.14 Circle transfer admission — retired
 
-Circle's [Wallets API rate-limit
-documentation](https://developers.circle.com/api-reference/wallets/rate-limits)
-currently specifies 20 GET requests/second, five default POST requests/second,
-selected POST exceptions at ten/second, and HTTP 429 after a limit is exceeded.
-`POST /v1/w3s/developer/transactions/transfer` is not listed as an exception.
-The 2026-09-01 post-jitter control in §1.2 matched that default boundary: five
-wallet rejection responses and a sixth 429 landed in one source second even
-though four of the five responses came from executables already proven to
-contain proportional retry jitter. Random scheduling is useful load
-dispersion, but it is not admission control.
-
-Current-main server commit `14928f69` (the patch-identical replay of former
-commit `eb7e79b6`) puts one fail-closed, fleet-wide gate immediately
-before the transfer POST. Redis server time eliminates host-clock skew. One
-atomic sorted-set script admits no more than three unique transfer calls in a
-rolling second, leaving two requests/second of headroom for other callers. A
-stable per-call member makes Redis command replay idempotent only while its
-reservation remains in that active rolling window. A replay after cutoff
-atomically acquires one fresh current slot and bucket before the caller can
-return. A waiter retains the payment's durable Circle idempotency key, and a
-Redis/context error returns before HTTP rather than guessing that an ambiguous
-financial submit is safe.
-Current-main descendant `66525afc` converts the Redis wrapper's pre-command
-connection panic into the same error/counter/log path. `66525afc` is the
-fail-closed activity/error baseline, but it does **not** prove the capability gauge or exact
-pre-POST marker. Stable patch IDs prove it is patch-identical to the former
-`b8718420` hash after main was rewritten. Later commit `928abfca` is the
-surviving current-main marker-capable baseline: it registers the fixed gauge and
-emits one Redis-time marker synchronously before each admitted POST. Its
-patch-identical predecessors were rewritten and are not current ancestry, so
-deployment guidance uses `928abfca`.
-
-The Taskworker exports these process metrics:
-
-- `urnetwork_circle_transfer_admissions_total`
-- `urnetwork_circle_transfer_deferrals_total`
-- `urnetwork_circle_transfer_admission_errors_total`
-- `urnetwork_circle_transfer_admission_wait_seconds_count`
-- `urnetwork_circle_transfer_admission_wait_seconds_sum`
-- `urnetwork_circle_transfer_admission_observable_info` (fixed at one when the
-  process emits the bounded pre-POST marker)
-
-For every successful gate decision, the same executable emits exactly one
-fixed-shape marker before returning to the caller:
-
-`[circlec][transfer-admission] admitted observable=v1 redis_second=<unix-second> sequence=<count> deferrals=<count> wait_ms=<milliseconds>`
-
-`redis_second` is the authoritative bucket returned by the atomic gate. A
-stable-member replay returns the original sorted-set score rather than a later
-command time only while that score remains inside the active rolling window.
-After cutoff, the old score is removed and the replay obtains a fresh current
-slot and bucket before the single synchronous caller return. `sequence` is a
-process-local monotonic observation counter, not a payment or customer
-identifier. It lets the tailer distinguish simultaneous admissions while exact
-replay of one log record remains idempotent. The tailer retains only this
-suffix; malformed suffixes and arbitrary appended text cannot enter the count
-or alert evidence. The added return field is private to each binary's embedded
-Lua invocation and parser; old and new script SHAs can coexist during rollout
-because both retain the identical sorted-set key, members, scores, expiry,
-ceiling, and wait decisions.
-
-The probe selects the newest actual-scrape-fresh process for each host/block,
-so an old draining generation cannot supply a replacement's missing sample.
-It requires a fresh capability sample directly, establishes accepted activity
-sample presence independently with fresh five-minute sample counts, then
-evaluates five-minute counter increases per exact process.
-This distinction matters because PromQL `increase()` returns no vector when Mimir
-accepted only one sample; that is incomplete telemetry coverage, not evidence
-that the process lacks the registered gate collector.
-
-Observation authority is per exact `{env, job, host, block, instance}` and
-metric family. The producer registers scalar counters, histogram count/sum and
-a fixed-one capability gauge; extra labels cannot create an independent owner.
-Each returned start, capability, delta and range-count family must be unique.
-Equal duplicates, conflicting duplicates and a malformed/valid duplicate pair
-are all unknown, independently of vector order. Values must be finite and
-nonnegative, capability must equal one, and an activity increase requires an
-independently present positive integer range count of at least two. Missing,
-stale, future, null or malformed values cannot become zero. A positive wait
-sum with zero wait count, or a non-finite wait ratio/aggregate, is also unknown.
-
-`increase()` retains PromQL counter-reset semantics; the monitor consumes its
-five-minute result rather than subtracting raw counters. The publisher gives
-each process a new instance nonce, so a replacement's zero is independent of
-its draining predecessor's cumulative activity. Only a unique, valid newest
-start can select a host/block cohort. An observed runtime with a missing or
-ambiguous start prevents another instance in that cohort from standing in for
-it, and tied newest starts are unknown. A strictly older runtime with a unique
-start cannot supply or invalidate the selected replacement's activity families.
-
-False-positive qualifiers: duplicate or malformed observations establish a
-visibility defect, not a financial gate failure, a missing collector, or a
-Taskworker deployment requirement. Per-process completed waits need both the
-count and sum; zero/zero is healthy idle activity, not pressure. Unknown or
-partial fleet totals and means render as `unknown`; the probe never labels a
-partial subset as a complete fleet measurement.
-False-negative qualifiers: a complete error delta or complete wait pair on a
-selected current runtime can independently prove an error or pressure even
-when another family or another host/block cohort is unobservable. Preserve
-those findings alongside `circle-transfer-admission-unobservable`; ambiguity
-must neither erase confirmed failures nor establish fleet recovery. Missing
-whole runtimes outside the returned cohort remain outside this Mimir-only
-inventory, so source/digest and deployment convergence still require §8.12.
-These are source-confirmed parser controls, not evidence of a current Main
-duplicate or malformed-series incident.
-
-- HEALTHY: every newest Taskworker exposes the capability and all five activity
-  families; admission errors are zero; fleet and per-process mean completed
-  wait are at most five seconds. Deferrals may be non-zero—they prove the gate
-  prevented an unsafe burst.
-  `circle-transfer-admission` is the reducer's healthy-only fallback identity,
-  not an emitted problem class or an additional probe. Do not count it as an
-  admission failure in the implementation/catalog crosswalk.
-- WARN `circle-transfer-admission-unobservable`: a newest process either has no
-  fresh capability/activity sample or has fewer than two accepted activity
-  samples for a five-minute increase, or has malformed, duplicate or ambiguous
-  runtime/family authority as defined above. A missing capability can mean mixed
-  rollout, missing collection, or telemetry loss; admission-marker absence is
-  therefore unknown and must never be rendered as zero. An artifact containing
-  `66525afc` can expose every activity family while still lacking the gauge and
-  marker. Deploy a clean Taskworker containing `928abfca` only for a genuinely
-  pre-marker artifact proven by §8.12 source/digest provenance; otherwise
-  restore stats delivery/Mimir admission and do not prescribe an application
-  deployment.
-- WARN `circle-transfer-admission-error`: the gate failed closed. Correlate the
-  exact window with taskworker drain state, Redis liveness/latency, and the
-  privacy-safe admission failure line. Never bypass the gate or manually replay
-  a payment.
-- WARN `circle-transfer-admission-pressure`: fleet or one process averages more
-  than five seconds of completed admission wait across two probes. Keep the
-  safety ceiling. If `payout-wallet-insufficient` is active, this is partly an
-  **operations/finance** boundary: fund or pause that wallet because software
-  cannot create liquidity. For legitimate sustained payout growth, obtain the
-  account's authoritative Circle quota before changing code or thresholds.
-- VERIFY: §8.12 proves every newest Taskworker runs `928abfca` or a descendant;
-  the capability and all five activity families are present, counter families
-  have two scrapes, admission errors and Circle 429s stay zero, exact pre-POST
-  markers stay below four/second, and payment idempotency keys remain stable for
-  one full 90-minute retry window.
-
-The 2026-09-02 post-deployment control closed the software branch. All eight
-newest fresh Taskworker processes ran version
-`2026.9.1-outerwerld+1034926970` from one clean source revision
-`fe3fa8eea625a3935ec7fe6569ee83b8a2578143` and immutable image digest. Git
-ancestry proves that revision contains typed-reset `b8af229f`, proportional
-jitter `70b0d269`, and the complete `66525afc` fail-closed activity/error
-baseline. The dedicated probe then required only the five activity collectors;
-that historical control predates the capability/marker requirement. Across the full
-90-minute control, 1,244 exact task-evaluator wallet-insufficient responses
-occupied 1,037 source seconds, peaked at exactly three attempts in one second,
-and produced zero admission-failed lines and zero Circle 429s. That is positive
-provider-response and error-path evidence consistent with a working fleet
-ceiling, but those post-POST timestamps are not direct admission evidence.
-Continued wallet-insufficient or invalid-destination rows after this boundary
-are the separate finance and account-configuration actions in §1.2; do not
-prescribe another Taskworker deployment for them.
-
-The 2026-09-13 Main control exposed the ancestry distinction directly. All
-eight newest Taskworker identities had accepted samples for all five activity
-families but lacked only `urnetwork_circle_transfer_admission_observable_info`
-across sustained minute cadences. Their uniform runtime generation was
-established well before `928abfca`; the corresponding historical source tag
-`1b9cacba` contains `66525afc` but predates `928abfca` and has neither the gauge
-nor the `observable=v1` marker. The running executable reported a modified
-source identity, so the tag is a source-content negative control rather than a
-substitute for §8.12 runtime provenance. Six independent service-gateway reads
-agreed that every visible established process had the activity families and no
-capability sample. This selects an unpromoted marker-capable Taskworker artifact
-as the primary cause, not two-sample warmup or the known Mimir publisher-front
-skew. A separate transient whole-family gap remains owned by §11.20a and does
-not explain the fleet-wide, capability-only absence.
-
-Implementation convention: SIGNALS.md §2.14 (`circle-admission`) maps to
-`signal_circle_admission.go` and `signal_circle_admission_test.go`. Synthetic
-tests cover a healthy newest generation, mixed marker-capability rollout, an
-ambiguous replacement with no accepted samples for two activity families, a
-present collector with only one accepted range sample, fail-closed errors,
-excessive per-process wait hidden by a lower fleet mean, invalid counter
-data, all scalar-family duplicates in both vector orders, conflicting/equal
-and extra-label duplicates, malformed/partial runtime preservation of
-independent errors and pressure, integer range-count boundaries, ambiguous
-newest starts, idle zero and the strict five-second wait edge. Product-level synthetics cover the marker-before-POST boundary, bounded
-marker shape, the eight-caller Redis ceiling, original-bucket replay within the
-active window, and fresh-slot/bucket admission for a same-member lost-response
-retry after cutoff before one synchronous caller return. Tailer synthetics
-prove response completions cannot trigger the admission alert, four markers do
-trigger it, exact log replay is idempotent, skewed and out-of-order host
-timestamps cannot replace the Redis bucket, and retained Markdown contains no
-Warp or payment identity.
+Retired 2026-11-13 with the `circle-transfer-admission`,
+`circle-transfer-admission-error`, `circle-transfer-admission-pressure` and
+`circle-transfer-admission-unobservable` classes, and the §4 log classes
+`circle-transfer-admitted` (with its `payout-retry-microburst` burst) and
+`circle-transfer-admission-failed`. USDC provider payouts ended (owner
+decisions 2026-11-12 and 2026-11-13: "settle closed rows, let's close out usdc
+entirely"), so no Taskworker submits a Circle transfer: the fleet transfer
+gate, its `urnetwork_circle_transfer_*` metrics and its pre-POST marker are
+gone with `AdvancePayment`. Without the retirement, the first Taskworker
+without the gate would raise `circle-transfer-admission-unobservable`.
+Customer Circle wallet reads keep the shared payment-read retry bound. Slack
+incident state is process-local: the watcher restarted on this build holds
+none of these incidents, and one the previous process raised gets no cleared
+message.
 
 ### 2.15 Provider reliability running-sum integrity — immutable degraded blocks
 Probe: `reliability-drift`
@@ -22964,6 +22369,43 @@ owns the three unresolved dispositions. Release owns attributable API and
 Taskworker artifacts, followed by two clean reconciliation/deletion windows;
 do not treat the stable count or its imminent expiry as deployment proof.
 
+Card testing (owner, 2026-11-13). In 2026-11 card testers ran 20 cards in 92
+seconds through two Checkout sessions made 2.5 minutes after their account,
+and 22 attempts over three sessions. The yearly plan's free trial checks a
+card for nothing (a $0 SetupIntent), the kind of check card testers prefer.
+Stripe's `setup_intent.setup_failed` and `charge.failed` reached the webhook
+and were ignored, so nothing showed it. The api now counts each failed card check, with no personal data, as
+`urnetwork_subscription_stripe_failures_total{kind,reason_class}` (kind
+`setup` or `charge`; the decline class `declined`, `insufficient_funds`,
+`invalid_card`, `lost_stolen`, `fraud`, `blocked`, `authentication`,
+`processing` or `other`), and in a sliding Redis window per owner: the network
+the check names, else its Stripe customer, else the intent every attempt of
+one Checkout session shares, keyed by the Stripe event id so a redelivery
+counts once. More than `BurstCount` (5) failures of one owner within
+`BurstWindow` (10 minutes, both in the api's card-failure settings,
+controller/subscription_stripe_card_failures.go) log one fixed line,
+`[stripe]card failure burst: <count> failed card checks within <minutes>
+minutes for <network|customer|intent> <id> (...)`, again at each further
+`BurstCount` failures while the window stays full, and count in
+`urnetwork_subscription_stripe_failure_bursts_total{owner}`. The api
+dashboard's "failed card checks" panel shows both.
+
+- `payment-card-failure-burst` (WARN at one line a minute, PAGE at three, from
+  the §1.5 log tail, framed by owner kind): one owner passed the burst count.
+  The alert omits the owner id and the count; the api log line has them. Look
+  the owner up in the Stripe dashboard (its sessions, attempts and Radar
+  outcomes) and, for a network, its account and age. For card testing, remove
+  the network or its sign-in and refund any payment that went through before
+  it becomes a dispute; make sure Radar runs on cards saved for later (Radar
+  settings, "Use Radar on payment methods saved for future use"). A customer
+  whose own card is declined a few times stays under the count; never refund
+  or block on the count alone.
+
+Each network may also start at most 10 card purchases (Checkout sessions and
+payment sheets together) an hour, on top of the address budget the payment
+sheet always spent (controller/subscription_stripe_purchase_limit.go); a start
+past it is refused with `rate_limited` and the wait.
+
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
 tests cover every durable class, healthy zero rows, strict allowlists and
@@ -23219,6 +22661,58 @@ Implementation convention: SIGNALS.md §2.22c (`store-notifications`) maps to
 log classes are in `tailer.go`. Synthetic tests cover the migration gate, the
 silent decision, privacy and malformed aggregates; a database test runs the
 query against the migrated schema.
+
+### 2.22d App Store offer code supply
+Probe: `apple-offer-codes`
+
+An App Store reader redeems the welcome offer only with a one-time App Store
+offer code from the pool `network_onboarding_apple_offer_code` (or the custom
+code `onboarding.yml` `offer.apple_custom_offer_code`, when one is set). A
+reader whose offer finds no code sees no discount in the App Store app. Every
+offer used to draw a code whatever its reader, and step E4b drew one at the
+send: on 2026-11-12, 451 of the 509 codes drawn went to Android and web
+networks, which redeem through Google Play or Stripe, and about 1,511 were
+left, about three days at that rate, with nothing watching the pool. A code is
+now drawn only for a reader on an App Store build (the iOS app or the Mac App
+Store build): when the App Store app issues the offer, or when an App Store
+build first reads an offer issued without one (the email offer, an offer
+issued on another platform).
+`urnetwork_onboarding_apple_offer_code_draws_total{trigger,result}` counts the
+outcomes.
+
+A code is handed only to an offer it outlives, so a batch serves new offers
+for `offer.apple.expiry_days` minus `offer.validity_days` days (7 - 5 = 2 on
+Main). The daily top-up (`controller.AppleOfferCodeTopUp`, while
+`onboarding.yml` `enabled` and `offer.apple.offer_code_id` are set) asks App
+Store Connect for one batch of `offer.apple.batch_size` (at least 500) whenever
+fewer than `offer.apple.min_available` codes would outlive an offer issued
+before its next run. It keeps up with at most a batch a day; when it stalls,
+the pool runs out within days whatever its count.
+
+- `apple-offer-code-supply-low` (WARN, this probe, hourly, two observations):
+  the supply covers fewer than seven days of draws. The draw rate is the codes
+  assigned in the last three days. The top-up is live when it is configured
+  and a batch arrived within two intervals (a code expires later than any
+  older batch's), or the pool is above the floor it refills at; a live top-up
+  that adds more codes a day than are drawn keeps the supply up. Otherwise the
+  supply is the codes a new offer can take over the draw rate, and, while no
+  top-up delivers, no longer than the last of them stays assignable. A pool
+  with no code a new offer can take warns when codes were drawn in the last 30
+  days. Healthy while the welcome offer is off. Restore a skipped or failed
+  top-up (the App Store Connect key in `vault/main/apple_app_store_connect.yml`,
+  `offer.apple.offer_code_id`) through their owners, raise
+  `offer.apple.batch_size` when App Store readers draw more than a batch a day,
+  and check the draws by trigger when they rise without more App Store readers;
+  never hand codes out by hand.
+
+Only counts, one age and one flag leave PostgreSQL: no code, network or offer.
+
+Implementation convention: SIGNALS.md §2.22d (`apple-offer-codes`) maps to
+`signal_apple_offer_codes.go` and `signal_apple_offer_codes_test.go`.
+Synthetic tests cover the supply decision (the 2026-11-12 pool, a live and a
+stalled top-up, demand above the daily batch, an empty pool in use and not in
+use, the offer switched off), the query contract and malformed aggregates; a
+database test runs the query against the migrated schema.
 
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`
@@ -26217,35 +25711,24 @@ controls, then observe complete fresh coverage through the normal alert window.
 | `[onboarding]connect.day write failed ... inconsistent types deduced for parameter $3 (SQLSTATE 42P08)` (`onboarding-connect-day-write`) | The Connect session was already committed and remains usable, but the separate `RecordConnectDay` transaction was rejected before it wrote analytics. The same untyped parameter was used as INSERT output and a varchar comparison. Recovery deliberately forgets the process-local cache entry, so the next connection retries and amplifies the defect. The 2026-09-10 persistence manifest's outer identity said Taskworker, but every selected private record and the focused snapshot named Connect; a bounded current discriminator found the exact source/SQLSTATE intersection throughout sampled Connect generations and zero matching Taskworker lines. All sampled Connect endpoints ran `2026.9.10+1042581110`, containing first-bad server commit `821f8131`. | Deploy Connect from a server checkout whose real statement explicitly casts every reused UUID, varchar, and timestamp parameter. Do not restart Taskworker, replay raw connections, or fabricate missing historical events; backfill is a separate product/data-policy decision. The fixed alert sample omits the client identifier. Verify the PostgreSQL test records exactly one `connect.day` event per network per UTC day, every Connect block runs the corrected artifact, and neither this class nor its former `novel` shape recurs for ten minutes after ingestion delay while connections continue. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Counts are failed/retried attempts, not unique users. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes is an elevated-denial trigger, not proof of Redis drift. Distinguish genuine depletion or grant regression, Redis mirror drift, and stale authoritative PostgreSQL escrow retained by a close backlog. Compare complete closer failures/cadence and exact private payer accounting with mirror-versus-source evidence before authorizing reconciliation. Require a same-generation temporal baseline and actual admission/delivery impact before assigning a new outage's cause. Do not calculate the rate from sampled logs. |
-| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N canonical attempts/hour on average. One attempt normally emits both a Circle-client and task-evaluator diagnostic; the alert therefore reports `wallet_insufficient_events` separately from raw line rate. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; current-main `14928f69` (the patch-identical replay of former `eb7e79b6`) separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean marker-capable `928abfca` Taskworker only where §8.12/§2.14 proves it absent; `66525afc` alone has the fail-closed activity/error path but not the capability gauge or exact pre-POST marker. Another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
-| `payout-retry-microburst` (derived from the fixed `transfer-admission admitted observable=v1` line) | At least four exact-replay-deduplicated pre-POST admission markers carried one authoritative Redis TIME second, which cannot fit under the three-admission rolling-second gate. Host/logger timestamps, response completions, and evaluator lines do not count. Absence is unknown unless §2.14 proves the marker capability on every newest Taskworker. | **Software/telemetry action:** first restore or deploy complete §2.14 capability coverage according to §8.12 provenance. With coverage complete, preserve the ceiling, backoff, and idempotency keys while diagnosing the Redis gate. An uninstrumented caller belongs to the separate processor-429 source investigation because it cannot emit this marker. Verify zero gate errors, a full 90-minute window below four admission markers/second, and no processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
-| `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing marker-capable `928abfca` only where §8.12/§2.14 proves the shared Redis-time gate or complete observation contract absent. The earlier `66525afc` baseline does not emit the capability gauge or exact marker. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
-| `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
-| `payout-invalid-destination-reset-failed` — composed `Payment create transaction error: ...; invalid destination reset error: ...`, or the legacy form with ` = ` at both separators | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. The shared complete marker requires nonempty reset detail and precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. An older equals-only watcher or incomplete log window cannot establish a healthy reset window. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay, using a containing watcher and complete observations. See §1.2/§5.7. |
-| `payout-invalid-destination` — HTTP `400 Bad Request` plus `invalid destination address` text (taskworker, Circle payment path) | This text class does not prove the typed response, current chain compatibility, or guarded-reset outcome. In the inspected product source, only a typed HTTP 400 with parsed code `155219` or the exact normalized invalid-address message permits a guarded pre-chain reset. A code-only response need not match this text class. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; a current request/wallet join must establish whether that cause applies. A Circle-client diagnostic precedes the reset and can accompany its later failure. Without an evaluator line, logical event cardinality is unknown while the diagnostic WARN remains visible. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay using complete current observations. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`, or for a Stream fallback by its one origin lookup in `CreateContract`, before the provide secret, metadata and endpoint reads, and again with the recorded labels when a refusal kept by the route rejection ring (60 seconds, or until an origin edge) is replayed, including before the client state query. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
 | Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | No matching request was observed on those captured fronts. This excludes a server arrival only when the capture covers every route the shipped client can choose: Alt serves its own API over H3/WhoDis without the ordinary LB/API path (§16.9). In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path and embedded client transport revision. Bind the ordinary API and Alt API/Connect handler generations and public carrier paths before assigning an absent request to the client. If a complete capture excludes arrival, inspect `[net]http serial`/`[net]http parallel` route selection and require the bounded preferred-route and cold-route discovery controls. Missing Alt coverage is unknown; it does not authorize a server restart, longer UI wait or app-level retry. |
 | `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create or replayed release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting the nonpositive result while retaining its diagnostic value. A later legitimate reservation or reconciliation can recreate a positive key. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, immutable source, duration, reservation statement profile, aggregate drift, and Redis mutation errors. Retain the page-local additive reconciler and atomic release clamp; deploy single-attempt checked mirror mutations, migration 601, the unsettled-partial query, and the non-current-open pass. After rollout verify any residual line says `clamped_to=0`; a later key is either absent with no new reservations or exactly equals the current PostgreSQL open-reservation sum. Key presence alone does not disprove the clamp. Pages stay below one second and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
 
-For `payout-invalid-destination`, `invalid_destination_events` is the
-exact-replay-deduplicated task-evaluator event count, not an additional Alert
-class or a unique-payout count. If the window has destination diagnostics but
-no evaluator line, report `invalid_destination_events=unknown` and
-`canonical_source=absent`; retain the diagnostic line count, threshold, WARN,
-and alert identity. Missing canonical evidence cannot establish zero logical
-failures. The separate reset-failure class similarly
-reports `invalid_destination_reset_failed_events` for exact-replay-deduplicated
-evaluator lines; that is neither a unique-payment count nor a proof of a
-successful reset. The internal correlation-only state named
-`payout-wallet-completion-correlation` also emits no Alert: it retains bounded
-wallet-insufficient completion cohorts for the processor-429
-`coincident_wallet_attempts` observation. Neither completion timestamps nor
-these internal names satisfy the separate `payout-retry-microburst` admission
-invariant. Class-coverage audits must distinguish emitted class names from
-canonical metric and correlation-only names instead of declaring phantom
-missing probes.
+The payout log classes (`payout-wallet-insufficient`, `payout-retry-microburst`,
+`payment-processor-rate-limit`, `circle-transfer-admitted`,
+`circle-transfer-admission-failed`, `payout-invalid-destination` and
+`payout-invalid-destination-reset-failed`) retired on 2026-11-13: USDC provider
+payouts ended (owner decisions 2026-11-12 and 2026-11-13), and no Taskworker
+sends a Circle transfer or logs these lines (§1.2, §2.14). Slack incident state
+is process-local: the watcher restarted on this build holds none of their
+incidents, and one the previous process raised gets no cleared message. A
+canonical count such as `failed_window_events` is the
+exact-replay-deduplicated logical-event count of its class, not an additional
+Alert class; class-coverage audits must distinguish emitted class names from
+canonical metric names instead of declaring phantom missing probes.
 
 At `2026-09-03T09:56Z`–`09:59Z`, the authoritative watcher measured
 Fireside Proxy `device_rpc_transport` WebSocket close-1006 unexpected-EOF
@@ -26565,21 +26048,11 @@ row's `sample_max_time_s`; for a non-`Drained:` context cancellation, compare
 that value with the taskworker `eval error` duration before deciding whether
 the task-specific deadline is undersized.
 
-For Payout, first establish the current SQL phase; the historical nested
-reliability/idle-timeout failure is not an explanation for an active final
-sweep-assignment UPDATE. At 2026-09-27 14:59:52Z the RunOnce Payout row had a
-fresh 6.4-second claim and a six-hour task limit, but its `run_at` was only
-779 seconds old while the sampled payment-plan transaction had begun around
-11:46Z. A reschedule can change `run_at`; this mismatch alone proves neither
-an orphan nor ownership by the current attempt. Join the exact task heartbeat,
-executor artifact and connection ownership before classifying the transaction
-as progressing, abandoned or retry-safe. The task-overdue fallback is one
-hour when fewer than ten seven-day completions establish history; a recent
-reschedule can therefore be below that task guard while the independent
-active-query and wait-event warnings already fire. Points readiness observes
-committed payment/rollup rows, so it does not attest this uncommitted plan's
-progress. Do not cancel the financial transaction, replay the Payout row,
-change its atomicity or enlarge its deadline from this chronology alone.
+USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13: "settle
+closed rows, let's close out usdc entirely"). `AdvancePayment` is gone, and
+`Payout`, `ProcessPendingPayouts` and `CancelHungAccountPayments` drain queued
+rows as no-ops, so their phase, liquidity, destination and planner guidance
+retired (§1.2).
 
 `CloseExpiredContracts` can fail briefly on a correctly enforced escrow guard
 and retain the same singleton in ordinary long backoff; this is not an execution
@@ -26627,266 +26100,8 @@ backend. A redeploy solely for the already-present cadence/checkpoint changes,
 larger MaxTime, query cancel, or database restart is not the repair for this
 variant.
 
-The 2026-09-16 retained `AdvancePayment` family contained 1,119 failures:
-1,117 `wallet-insufficient` and two text-classified
-`processor-invalid-destination` rows. At 09:49Z, all eight scrape-fresh newest
-Taskworkers reported the same image and modified Build base `36a13c81`, whose
-Server gitlink `c2fa1d2b` contains typed reset `b8af229f`, retry dispersion
-`70b0d269`, and fail-closed admission `66525afc`. This establishes reported-base
-ancestry, not the exact modified executable or successful reset of those two
-rows. The earlier six-row incident below cannot be identified with today's
-two from counts alone. Finance must separately verify source-wallet liquidity;
-the destination cohort needs typed rejection, reset outcome, and current
-wallet-selection evidence before a configuration correction is attributed.
-No new payment-product defect or authority to replay/fund/change wallets
-follows from these aggregate counts.
+Task-family variants:
 
-The source review exposed a separate monitor attribution defect: the composed
-controller reset error was previously counted as an ordinary destination
-rejection. `task-canaries` now gives `invalid-destination-reset-failed` its own
-persistence/state action, and log-errors emits the distinct
-`payout-invalid-destination-reset-failed` class before ordinary destination or
-generic network matches. Neither class claims that the configured wallet is
-still invalid. These are source-correctness controls, not evidence that the
-current two-row cohort actually failed its reset. Deterministic controls cover
-the exact composed marker, SQL-class precedence, truncated representatives,
-mixed causes, ordinary rejection, healthy windows, replay deduplication, and
-private suffix/address/identifier redaction. Their Go execution remains a
-separate validation gate; alert absence alone does not close the payment
-boundary.
-
-The retained 2026-10-17 `payout-invalid-destination` WARN contained two
-Circle-client diagnostics and no canonical evaluator line. It displayed a
-logical count of zero and asserted a current declared-chain mismatch, although
-its source ran before the typed-error check and guarded reset. The monitor now
-uses its existing unknown-cardinality path for that missing evaluator evidence
-and preserves the two diagnostic lines and WARN. HTTP 400/code `155219` text
-does not establish a typed error object, a reset attempt or outcome, or the
-current wallet's compatibility. The smallest discriminator is an unambiguous
-private join to the exact failed-payment audit and retained attempt, with the
-emitting artifact, typed rejection eligibility, reset outcome, current wallet
-selection, and chain-compatibility result. Missing, stale, partial, or ambiguous
-evidence remains unknown; an older historical cohort or the separate payout
-planner's performance branch does not supply that join. Healthy controls keep
-a complete empty log window quiet, preserve one canonical event for an
-evaluator-plus-provider replay, and retain the distinct reset-failure class.
-No payout or account correction follows from this monitoring repair.
-
-Two 2026-08-29 task-family variants were formerly hidden behind the raw-row
-limit:
-
-- `AdvancePayment`, five `400 Bad Request` rows with Circle
-  `Invalid destination address.`: a complete read-only breakdown found two
-  active external wallets across two networks (three payment plans), all
-  declared `MATIC` but carrying 44-character Solana base58 public keys. Both
-  wallets were still selected for payout; the rows had retried 373–1,059
-  times. `WalletValidateAddress` ignored the declared chain and always called
-  the Solana base58 parser, so these addresses passed registration before
-  Circle rejected them as Polygon destinations. The payment path creates a
-  stable idempotency key before submission, and `UpdatePaymentWallet` correctly
-  refuses to change a wallet once that key exists; without distinguishing this
-  definitive rejection, a user correction cannot reach the parked payment.
-  Validate SOL with the Solana parser and MATIC with a nonzero, `0x`-prefixed
-  EVM address; reject Ethereum in this SOL/MATIC payout-wallet endpoint (TAO
-  remains a non-payout identity). After typed HTTP 400/code 155219, Circle has
-  created no transfer, so clear only that pre-chain attempt and let the next
-  retry select the corrected payout wallet. An arbitrary string match is not
-  enough: malformed responses, generic 400s, 429s, and transport errors retain
-  their stable key because submission may be ambiguous. Deterministic tests
-  cover both cross-chain address directions, zero/unknown destinations, typed
-  and wrapped error classification, corrected-wallet selection with a fresh
-  key, and key reuse after an ambiguous error.
-
-  Post-deployment validation on 2026-08-31 separated code convergence from
-  configuration convergence. All taskworker blocks reported
-  `2026.8.31-outerwerld+1033655820`. Its embedded source revision `1d8f01e5`
-  contains typed-reset commit `b8af229f0` but predates proportional-jitter
-  commit `70b0d269`; this ancestry distinction must come from the artifact,
-  not the current checkout. The same six invalid-destination payments retried
-  once in the 12:34–12:51Z hour and again in the 13:34–13:51Z hour. That exact
-  spacing matches the one-hour consecutive-error cap. Clearing the typed
-  attempt does not invent a replacement payout wallet: without an account-owner/operator
-  correction, `UpdatePaymentWallet` selects the same invalid configured wallet
-  and Circle rejects it again. Correct the wallet through the supported account
-  API and let the next retry converge. Do not manually clear payment rows,
-  processor keys, or sweeps; persistence after the reset release is an
-  operational configuration alert, not evidence that faster retries are
-  needed.
-
-  A later bounded canonical-log audit through 16:51:58Z made that conclusion
-  stronger. It found 58 task-evaluator invalid-destination attempts for the
-  same six logical payments across both taskworker blocks (22 on g1 and 36 on
-  g2), including exactly six attempts in every UTC hour from 11 through 16.
-  The deployed revision contains the typed pre-chain attempt release, so the
-  unchanged six-payment cardinality after each hourly retry proves the current
-  payout-wallet selection is still returning the invalid configuration. The
-  `payout-invalid-destination` log class now counts exact-replay-deduplicated
-  task-evaluator lines separately from the duplicate Circle-client diagnostic,
-  redacts entity ids, and warns as an operational wallet-correction alert on
-  the first current occurrence.
-
-  A subsequent bounded audit through 17:52:00Z extended the discriminator by
-  another complete recurrence. The two-hour source window contained 24
-  diagnostic lines but only 12 exact-replay-deduplicated task-evaluator
-  attempts: exactly six in 16:35–16:51Z and the same six payment IDs again in
-  17:35–17:52Z. Five attempts ran on g1 and seven on g2, ruling out one stale
-  taskworker generation as the owner. Combined with the embedded-revision
-  ancestry above, this is continued invalid wallet selection after the safe
-  typed reset, not evidence that the reset code is missing. At that point it
-  did not weaken the separate requirement to deploy `70b0d269` for retry
-  dispersion; the later current-main `66525afc` baseline contains that jitter,
-  the fleet admission gate, and complete fail-closed activity/error telemetry
-  required by that historical post-jitter control. It does not contain the
-  later capability gauge or exact pre-POST marker from `928abfca`.
-
-  An independent artifact/runtime control at the UTC day boundary removed the
-  remaining provenance assumption. The published OCI/SLSA build provenance for
-  taskworker `2026.8.31-outerwerld+1033655820` names source revision
-  `1d8f01e5` for both amd64 and arm64 and a build completion at 08:43Z. Git
-  ancestry proves that revision contains typed-reset `b8af229f0` and excludes
-  retry-dispersion `70b0d269`. A bounded three-hour taskworker query then found
-  36 diagnostic lines but only 18 exact-replay-deduplicated evaluator attempts:
-  the same six logical payments at the same minute in each of the 21Z, 22Z,
-  and 23Z hours. The deployed reset is therefore active and repeatedly exposes
-  the still-invalid selected wallet, while the hour-locked cadence separately
-  proves the old jitter. The incident therefore required both correcting the
-  wallet through the supported account API and deploying retry dispersion;
-  current software convergence for the gate and fail-closed activity/error path
-  used `66525afc`; complete marker observability now requires `928abfca` or a
-  descendant. Neither software fix can invent or authorize valid payout-wallet
-  data.
-
-  The 2026-09-02 control then proved that baseline live on all eight newest
-  Taskworker processes at source `fe3fa8ee`. The same 90-minute interval had
-  zero Circle 429s, zero admission failures, and a maximum of three canonical
-  wallet attempts per source second. Six invalid-destination rows still
-  remained and emitted a new exact task-evaluator event from that generation.
-  This is configuration persistence after both software fixes: the typed reset
-  safely releases each definitive attempt, but the unchanged account wallet is
-  selected again. Correct it through the supported account API; a new service
-  version cannot close this class.
-- `Payout`, `ERROR: no empty local buffer available (SQLSTATE 53000)`: the
-  2026-08-31 UTC production row reached 153 failures on PostgreSQL 18.4 while
-  `effective_io_concurrency=200` and `temp_buffers=8MB`. Its stack ended in
-  `PaymentPlanner.finalizePayments` while scanning the planner's temporary
-  tables. This exactly matches PostgreSQL 18's read-stream lookahead defect:
-  high effective I/O concurrency can pin every local buffer for a temporary
-  relation. The [upstream bug report](https://www.postgresql.org/message-id/CAFMO8-rYPSJbXsDdWDzDdpNi-fQ%2B6bKvgbXwE%2BR=sGko4epq0Q@mail.gmail.com)
-  identifies the temporary-buffer failure, and PostgreSQL's
-  [18.6 release announcement](https://www.postgresql.org/about/news/postgresql-186-1711-1615-1519-1424-and-19-beta-3-released-3365/)
-  includes the server fix.
-  Upgrade PostgreSQL to 18.6 or newer for the root fix. Until then, the
-  payment-plan transaction applies `SET LOCAL effective_io_concurrency = 32`;
-  this contains the affected read stream without reducing the production-wide
-  value for unrelated queries. Do not raise `temp_buffers`, delete the task
-  row, or blindly lower the global concurrency setting. Verify 32 inside the
-  Payout transaction, the original value on a fresh session after commit, and
-  completion of the same pending row. Remove the containment after the server
-  upgrade only with a production-shaped temporary-table regression. The
-  deterministic regression records both exact `SET LOCAL` statements and
-  verifies that both transaction settings return to their session baselines
-  after commit.
-  A later live retry supplied the deployment discriminator. Exact task
-  `<redacted-id>` began on edge-1/g2 at
-  05:51:51Z, kept authoritative ten-second heartbeats through planner work,
-  and failed at 06:10:31Z after 1,120.91s with the same SQLSTATE 53000 in
-  `PaymentPlanner.finalizePayments`, advancing the row from 157 to 158
-  failures. PostgreSQL still reported 18.4, while every sampled g1/g2 worker
-  reported `2026.8.30+1033129380`; that tag predates the transaction-local
-  containment. The row then returned to its normal backoff about 59 minutes
-  ahead. This is a pre-fix recurrence, not evidence against the containment:
-  do not pull the row forward, and require a post-rollout retry to observe 32
-  inside the transaction and reach a terminal success.
-  The next live attempt exposed an independent planner defect before it
-  reached `finalizePayments`: its active backend spent several minutes with no
-  wait event on the subsidy-range MIN/MAX over `transfer_escrow_sweep`. That
-  query rescanned paid historical rows even though `temp_account_payment`
-  already held the exact selected and close-time-bounded slice. The planner now
-  derives the range from that temporary relation, removing both the semantic
-  overreach and the lifetime-table scan. A deterministic query-shape
-  regression forbids `transfer_escrow_sweep`, a second close-time predicate,
-  or an extra bound argument in that stage. This fix ships in `taskworker`
-  alongside the transaction-local PostgreSQL containment; verify both
-  independently on the same retry.
-- `Payout`, `pgconn.connLockError=conn closed`, repeatedly after roughly
-  16 minutes: production's database-level
-  `idle_in_transaction_session_timeout=5min` closed the outer payment-plan
-  transaction while a deliberately separate, long reliability maintenance
-  transaction ran. The bounded payout task now applies `SET LOCAL
-  idle_in_transaction_session_timeout=0` to that transaction only. Its task
-  `MaxTime` and four-day plan slices remain the bounds; the global five-minute
-  guard still protects every unrelated session. Verify one payout slice
-  commits, the same pending row's error clears, and a fresh DB session still
-  reports the configured five-minute setting.
-  A live 2026-08-30 retry reproduced every boundary: Payout began at 07:58:25Z;
-  its outer transaction reached 726s total and 260s continuously idle on the
-  subsidy-overlap query, then disappeared after crossing the 300s database
-  cutoff while a separate `network_connection_reliability_score` INSERT kept
-  running. The task finally failed at 08:17:36Z after 1,150.90s with
-  `pgconn.connLockError=conn closed`, raising the same row to 143 failures.
-  This is affirmative validation for the transaction-local override, not a
-  reason to disable the global guard.
-  The next retry reproduced the separation even more precisely. It began at
-  09:17:37Z; outer PID 1554457 entered `idle in transaction` on the
-  subsidy-overlap query at approximately 09:24:33Z and disappeared as that
-  uninterrupted interval crossed 300s near 09:29:33Z. The task claim kept
-  heartbeating while its separate computation finished, then taskworker logged
-  `eval error(1011.80s)` at 09:34:28Z and advanced the same row from 143 to 144
-  failures. The roughly five-minute delay between connection death and error
-  observation explains why task duration alone cannot identify the timeout;
-  follow the outer backend state and the nested work together.
-  A third retry repeated the boundary under the later recovery load. Payout
-  began at 10:34:31Z; its outer transaction became continuously idle on the
-  same subsidy-window query near 10:42:41Z, was still present at 298s idle,
-  and disappeared before the next 12-second sample after crossing 300s. The
-  task claim continued for almost eight more minutes, then logged
-  `eval error(1264.30s)` with the same `pgconn.connLockError=conn closed` at
-  10:55:35Z and advanced the row to 145 failures. The next retry remained on
-  the normal hourly backoff at 11:55:35Z. Repeatedly observing the database
-  guard fire long before task error presentation is direct validation for
-  changing only the outer transaction's local setting.
-  That fourth retry began at 11:55:36Z. Outer PID 1846780 spent roughly seven
-  minutes actively building the subsidy window, then became idle in transaction
-  on the `subsidy_payment` overlap query near 12:03:03Z. It was still present at
-  291 seconds of uninterrupted idle and absent at the 12:08:10Z sample, while
-  taskworker continued heartbeating beyond 753 seconds. Total transaction age
-  had already exceeded 700 seconds, so the disappearance again follows the
-  continuous-idle guard, not a total-runtime limit. This fourth independent
-  boundary reproduction keeps the same scoped remediation and supplies a
-  post-vacuum-load control. Taskworker ultimately logged
-  `eval error(1068.46s)` with the same `pgconn.connLockError=conn closed` at
-  12:13:25Z and advanced the row to 146 failures, completing the expected
-  database-cutoff-to-late-task-error chain.
-  The fifth retry began at 13:13:26Z. During the attempt, a direct PostgreSQL
-  sample found its outer subsidy-window transaction 533s old and continuously
-  idle for 89s; a later sample found no matching outer backend while the task
-  heartbeat continued through 1,307s. Taskworker then logged
-  `eval error(1312.95s)` with the same `pgconn.connLockError=conn closed` at
-  13:35:19Z and advanced the row to 147 failures. This is the same
-  database-connection-loss chain under the longest observed tail so far, not a
-  reason to raise the task's 21,600s deadline.
-  Two more deployed attempts reproduced the identical terminal class. The
-  sixth ran on edge-3/g1 until `eval error(1346.46s)` at 14:57:48Z and raised
-  the row to 148 failures. The seventh ran on edge-3/g2 from approximately
-  15:57:49Z until `eval error(1278.54s)` at 16:19:09Z and raised it to 149;
-  both stacks ended in `createPaymentPlan` with
-  `pgconn.connLockError=conn closed`. The hourly recurrence across taskworker
-  generations rules out a one-process connection accident and continues to
-  validate the transaction-local timeout override. Do not pull the parked row
-  forward or disable the global five-minute policy; verify the same slice
-  commits only after the scoped source fix is rolled out.
-  The eighth retry ran independently on edge-4/g2 and ended at 17:35:44Z with
-  `eval error(994.66s)` and the same `*pgconn.connLockError=conn closed`,
-  advancing the row to 150 failures. Its fresh claim then expired and the row
-  returned to the normal hourly backoff. This independent executor recurrence
-  preserves the same classification and remediation; it is not score-worker
-  contention or a reason to disable the database-wide guard.
-  The deterministic regression first records the session baseline, installs a
-  25ms transaction-local timeout, applies the payment-plan override, idles for
-  100ms, and requires a successful commit; it then requires the same connection
-  to report its original baseline again. This proves survival and scope without
-  weakening the standing database policy. It passed three race-enabled runs
-  against real local PostgreSQL after the fourth production reproduction.
 - `RefreshVerifyProxyEgress`, `Interrupted: Done` / `Interrupted: context
   canceled`, 940 retries observed while
   `st.yml enabled:false`: this is disabled work, not a Redis incident. All four
@@ -28624,7 +27839,6 @@ Tier-1 (warn):
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
 | probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature active-disconnected egress-prober children with or without lifetime connection history | any residual in either independent branch for 2 probes |
-| retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
 | grafana-plugin-unregistered | logs + Grafana `/api/ds/query` | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | grafana-datasource-query | Grafana `/api/ds/query` | 11.15 authenticated `warp-mimir` or `warp-loki` control does not return a successful result after plugin loading | 2 consecutive probes |
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |

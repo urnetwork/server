@@ -253,9 +253,16 @@ func (self *SubscriptionEndedTemplate) Name() string {
 // Subscription, whose "Update payment method" opens Stripe's billing portal. The
 // hosted link is sent only when it is on Stripe's invoice domain
 // (stripeHostedInvoiceUrlAllowed); otherwise the email offers the update alone.
+// A payment that waits on the customer's bank (3D Secure) asks the customer to
+// confirm it instead: the hosted page runs the bank's check, and Manage
+// Subscription links the same page when the email cannot.
 type SubscriptionPaymentFailedTemplate struct {
 	// the final notice rather than the first
 	Final bool
+	// the payment waits on the customer to confirm it with their bank (3D
+	// Secure) rather than having been declined. Added after the other fields:
+	// a notice written before it reads as declined.
+	ActionRequired bool
 	// the invoice's Stripe-hosted payment page, or ""
 	HostedInvoiceUrl string
 	// the amount due in the currency's minor unit, and its ISO code
@@ -289,25 +296,6 @@ func (self *SubscriptionPaymentFailedTemplate) NextAttemptDate() string {
 		return ""
 	}
 	return self.NextAttemptTime.UTC().Format("January 2, 2006")
-}
-
-// The notice that a network's USDC payout is withheld for want of a Solana
-// wallet, with the withheld total. Since USDC payouts ended (owner decision
-// 2026-11-12) no payout run writes one; delivery still renders, or withholds,
-// one already in the outbox.
-type MissingWalletTemplate struct {
-	PaymentId server.Id
-	Payout    model.NanoCents
-	BaseTemplate
-}
-
-func (self *MissingWalletTemplate) Name() string {
-	return "subscription_missing_wallet"
-}
-
-// The withheld total in USD with two decimals, as the templates print it.
-func (self *MissingWalletTemplate) AmountUsd() string {
-	return fmt.Sprintf("%.2f", model.NanoCentsToUsd(self.Payout))
 }
 
 // fixme - we can clean this up so all public functions are in the interface

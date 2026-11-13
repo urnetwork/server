@@ -23,6 +23,16 @@ func TestSubscriptionMetricsCollectorPublishesCompleteBoundedSnapshot(t *testing
 			model.SubscriptionMarketApple:              4,
 			model.SubscriptionMetricsStoreDeduplicated: 9,
 		},
+		InGraceAccounts: map[string]int64{
+			model.SubscriptionMarketStripe:             3,
+			model.SubscriptionMetricsStoreDeduplicated: 2,
+		},
+		PaymentFailuresOpen: map[string]int64{
+			model.SubscriptionMarketStripe: 6,
+		},
+		PaymentFailuresResolved: map[model.SubscriptionMetricsStoreReasonWindow]int64{
+			{Store: model.SubscriptionMarketStripe, Reason: model.StripeInvoicePaymentFailureResolveSubscriptionEnded, Window: model.SubscriptionMetricsWindow7Days}: 4,
+		},
 		NewPaidAccounts: map[model.SubscriptionMetricsStoreWindow]int64{
 			{Store: model.SubscriptionMarketApple, Window: model.SubscriptionMetricsWindow7Days}:              2,
 			{Store: model.SubscriptionMetricsStoreDeduplicated, Window: model.SubscriptionMetricsWindow7Days}: 3,
@@ -85,6 +95,24 @@ func TestSubscriptionMetricsCollectorPublishesCompleteBoundedSnapshot(t *testing
 	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_snapshot_timestamp_seconds", nil); got != float64(refreshedAt.Unix()) {
 		t.Fatalf("snapshot timestamp = %v, want %d", got, refreshedAt.Unix())
 	}
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_in_grace_accounts", map[string]string{"store": model.SubscriptionMarketStripe}); got != 3 {
+		t.Fatalf("past due stripe = %v, want 3", got)
+	}
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_in_grace_accounts", map[string]string{"store": model.SubscriptionMetricsStoreDeduplicated}); got != 2 {
+		t.Fatalf("past due deduplicated = %v, want 2", got)
+	}
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_in_grace_accounts", map[string]string{"store": model.SubscriptionMarketApple}); got != 0 {
+		t.Fatalf("past due apple = %v, want a known zero", got)
+	}
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_payment_failures_open", map[string]string{"store": model.SubscriptionMarketStripe}); got != 6 {
+		t.Fatalf("open payment failures = %v, want 6", got)
+	}
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_payment_failures_resolved", map[string]string{"store": model.SubscriptionMarketStripe, "reason": model.StripeInvoicePaymentFailureResolveSubscriptionEnded, "window": model.SubscriptionMetricsWindow7Days}); got != 4 {
+		t.Fatalf("payment failures resolved by subscription end 7d = %v, want 4", got)
+	}
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_payment_failures_resolved", map[string]string{"store": model.SubscriptionMarketStripe, "reason": model.StripeInvoicePaymentFailureResolvePaid, "window": model.SubscriptionMetricsWindow24Hours}); got != 0 {
+		t.Fatalf("payment failures resolved paid 24h = %v, want a known zero", got)
+	}
 
 	// ten tracked stores (apple, google, stripe, solana, monero, zcash,
 	// bittensor, bitcoin, ethereum, gamma) plus the deduplicated series
@@ -117,6 +145,12 @@ func TestSubscriptionMetricsCollectorPublishesCompleteBoundedSnapshot(t *testing
 	}
 	if got := len(metricFamilies["urnetwork_subscription_data_pack_fulfillments"].Metric); got != 12 {
 		t.Errorf("data-pack series = %d, want 3 sources x 4 windows", got)
+	}
+	if got := len(metricFamilies["urnetwork_subscription_in_grace_accounts"].Metric); got != 11 {
+		t.Errorf("past-due series = %d, want 11 bounded stores", got)
+	}
+	if got := len(metricFamilies["urnetwork_subscription_payment_failures_resolved"].Metric); got != 12 {
+		t.Errorf("resolved payment failure series = %d, want 1 store x 4 reasons x 3 windows", got)
 	}
 
 	// Replacement deletes a missing source timestamp. A stale previous
@@ -185,7 +219,10 @@ func collectSubscriptionMetrics(collector *subscriptionMetricsCollector) []prome
 func uniformSubscriptionMetricsSnapshot(value int64, sourceTime time.Time) *model.SubscriptionMetricsSnapshot {
 	snapshot := &model.SubscriptionMetricsSnapshot{
 		ActiveAccounts:             map[string]int64{},
+		InGraceAccounts:            map[string]int64{},
 		TrialsActive:               map[model.SubscriptionMetricsStorePlan]int64{},
+		PaymentFailuresOpen:        map[string]int64{},
+		PaymentFailuresResolved:    map[model.SubscriptionMetricsStoreReasonWindow]int64{},
 		NewPaidAccounts:            map[model.SubscriptionMetricsStoreWindow]int64{},
 		EngagedAccounts:            map[model.SubscriptionMetricsStoreWindow]int64{},
 		ChurnedAccounts:            map[model.SubscriptionMetricsStoreWindow]int64{},
@@ -201,9 +238,18 @@ func uniformSubscriptionMetricsSnapshot(value int64, sourceTime time.Time) *mode
 		snapshot.UncreditedPayments[rail] = value
 		snapshot.UncreditedOldestAgeSeconds[rail] = value
 	}
+	for _, store := range model.SubscriptionMetricsPaymentFailureStores() {
+		snapshot.PaymentFailuresOpen[store] = value
+		for _, reason := range model.SubscriptionMetricsPaymentFailureResolveReasons() {
+			for _, window := range model.SubscriptionMetricsWindows() {
+				snapshot.PaymentFailuresResolved[model.SubscriptionMetricsStoreReasonWindow{Store: store, Reason: reason, Window: window}] = value
+			}
+		}
+	}
 	stores := append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreDeduplicated)
 	for _, store := range stores {
 		snapshot.ActiveAccounts[store] = value
+		snapshot.InGraceAccounts[store] = value
 		for _, plan := range model.SubscriptionMetricsPlans() {
 			snapshot.TrialsActive[model.SubscriptionMetricsStorePlan{Store: store, Plan: plan}] = value
 		}
@@ -253,9 +299,11 @@ func requireSubscriptionMetricsGeneration(
 	// to the 152 of four stores, and the active trials 21 (seven stores by
 	// three plans); bittensor, bitcoin and ethereum add 29 samples and 3 trial
 	// series each (96), and gamma 32 more; the received payments not credited
-	// add a count and an oldest age for each of eight rails (16)
-	if len(metrics) != 375 {
-		t.Fatalf("collected metrics = %d, want 375 bounded samples", len(metrics))
+	// add a count and an oldest age for each of eight rails (16); the past-due
+	// accounts one per store and deduplicated (11), and Stripe's failed
+	// renewals one open count and four reasons by three windows (13)
+	if len(metrics) != 399 {
+		t.Fatalf("collected metrics = %d, want 399 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric

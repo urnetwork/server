@@ -627,7 +627,9 @@ type AdminOnboardingResultsArgs struct {
 type AdminOnboardingResultsResult struct {
 	Rows       []*model.OnboardingResultsRow `json:"rows"`
 	NextCursor *string                       `json:"next_cursor"`
-	// MinExposures is the volume floor applied to this page.
+	// MinExposures is the volume floor applied to this page: the least
+	// exposures a variant has in total over the request's cohort days and
+	// filters for its rows to be returned.
 	MinExposures int `json:"min_exposures"`
 }
 

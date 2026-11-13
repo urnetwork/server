@@ -195,10 +195,12 @@ type SubscriptionBalanceResult struct {
 	 * and that is exactly when the cancel path must be reachable, entitlement
 	 * bookkeeping notwithstanding.
 	 */
-	Subscriptions             []*Subscription          `json:"subscriptions,omitempty"`
-	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
-	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
-	UpdateTime                time.Time                `json:"update_time"`
+	Subscriptions          []*Subscription          `json:"subscriptions,omitempty"`
+	ActiveTransferBalances []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
+	// Always zero: USDC provider payouts ended (owner decisions 2026-11-12 and
+	// 2026-11-13), so no payout is pending. Apps built before then parse it.
+	PendingPayoutUsdNanoCents model.NanoCents `json:"pending_payout_usd_nano_cents"`
+	UpdateTime                time.Time       `json:"update_time"`
 	/**
 	 * Guest - the network has no login method (no password/phone, SSO, wallet
 	 * or seedphrase sign-in): a legacy guest network. Read from the live auth
@@ -300,20 +302,16 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		})
 	}
 
-	// FIXME
-	pendingPayout := model.ByteCount(0)
-
 	return &SubscriptionBalanceResult{
-		BalanceByteCount:          transferBalanceSummary.BalanceByteCount,
-		StartBalanceByteCount:     transferBalanceSummary.StartBalanceByteCount,
-		OpenTransferByteCount:     transferBalanceSummary.OpenTransferByteCount,
-		CurrentSubscription:       currentSubscription,
-		Subscriptions:             subscriptions,
-		ActiveTransferBalances:    transferBalanceSummary.ActiveTransferBalances,
-		PendingPayoutUsdNanoCents: pendingPayout,
-		UpdateTime:                server.NowUtc(),
-		Guest:                     isGuestNetwork(session, model.HasAnyAuthMethod),
-		PaymentPastDue:            paymentPastDueForNetwork(session.Ctx, session.ByJwt.NetworkId, stripeDunningNow(), stripeDunningSettingsFunc()),
+		BalanceByteCount:       transferBalanceSummary.BalanceByteCount,
+		StartBalanceByteCount:  transferBalanceSummary.StartBalanceByteCount,
+		OpenTransferByteCount:  transferBalanceSummary.OpenTransferByteCount,
+		CurrentSubscription:    currentSubscription,
+		Subscriptions:          subscriptions,
+		ActiveTransferBalances: transferBalanceSummary.ActiveTransferBalances,
+		UpdateTime:             server.NowUtc(),
+		Guest:                  isGuestNetwork(session, model.HasAnyAuthMethod),
+		PaymentPastDue:         paymentPastDueForNetwork(session.Ctx, session.ByJwt.NetworkId, stripeDunningNow(), stripeDunningSettingsFunc()),
 	}, nil
 }
 

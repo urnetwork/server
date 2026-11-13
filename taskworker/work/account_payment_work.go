@@ -1,23 +1,17 @@
+// The USDC provider payout tasks, which ended with USDC provider payouts
+// (owner decisions 2026-11-12 and 2026-11-13: "settle closed rows, let's close
+// out usdc entirely"). Nothing schedules them. A row queued before then, or by
+// a taskworker of an older release during a deploy, still names one of these
+// targets, under its function name or its alternate name, so each stays
+// registered: such a row runs once, does nothing, and schedules nothing after
+// it. A retry row's `retry` field is ignored.
 package work
 
 import (
-	"time"
-
-	"github.com/urnetwork/glog"
-
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
 )
 
-// The weekly USDC payout run ended with USDC payouts (owner decision
-// 2026-11-12: USDC payouts ended), and nothing schedules it. A "payout" or
-// "payout_retry" row queued before then still names this target, under its
-// function name or its pre-2024.11 alternate name, so the target stays
-// registered: such a row runs once, plans and sends nothing, and schedules
-// nothing after it. A retry row's `retry` field is ignored.
 type SchedulePayoutArgs struct {
 }
 
@@ -42,30 +36,17 @@ func PayoutPost(
 	return nil
 }
 
-// run at start
 type ProcessPendingPayoutsArgs struct {
 }
 
 type ProcessPendingPayoutsResult struct {
 }
 
-func ScheduleProcessPendingPayouts(clientSession *session.ClientSession, tx server.PgTx) {
-	task.ScheduleTaskInTx(
-		tx,
-		ProcessPendingPayouts,
-		&ProcessPendingPayoutsArgs{},
-		clientSession,
-		task.RunOnce("process_pending_payouts"),
-		task.MaxTime(1*time.Hour),
-	)
-}
-
+// Schedules no payment.
 func ProcessPendingPayouts(
 	processPending *ProcessPendingPayoutsArgs,
 	clientSession *session.ClientSession,
 ) (*ProcessPendingPayoutsResult, error) {
-	controller.SchedulePendingPayments(clientSession)
-
 	return &ProcessPendingPayoutsResult{}, nil
 }
 
@@ -84,35 +65,20 @@ type CancelHungAccountPaymentsArgs struct {
 type CancelHungAccountPaymentsResult struct {
 }
 
-func ScheduleCancelHungAccountPayments(clientSession *session.ClientSession, tx server.PgTx) {
-	task.ScheduleTaskInTx(
-		tx,
-		CancelHungAccountPayments,
-		&CancelHungAccountPaymentsArgs{},
-		clientSession,
-		task.RunOnce("cancel_hung_account_payments"),
-		task.RunAt(server.NowUtc().Add(24*time.Hour)),
-		task.MaxTime(1*time.Hour),
-	)
-}
-
+// Cancels nothing: no payment is pending, and none is planned again.
 func CancelHungAccountPayments(
 	cancelHungAccountPayments *CancelHungAccountPaymentsArgs,
 	clientSession *session.ClientSession,
 ) (*CancelHungAccountPaymentsResult, error) {
-	canceledCount := model.CancelHungAccountPayments(clientSession.Ctx, server.NowUtc())
-	if 0 < canceledCount {
-		glog.Infof("[payw]canceled %d hung payments for re-planning.\n", canceledCount)
-	}
 	return &CancelHungAccountPaymentsResult{}, nil
 }
 
+// Schedules no next run.
 func CancelHungAccountPaymentsPost(
 	cancelHungAccountPayments *CancelHungAccountPaymentsArgs,
 	cancelHungAccountPaymentsResult *CancelHungAccountPaymentsResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleCancelHungAccountPayments(clientSession, tx)
 	return nil
 }

@@ -351,6 +351,12 @@ func StripePaymentSheet(
 		return nil, err
 	}
 	networkId := clientSession.ByJwt.NetworkId
+	// each sheet is a new card check: it spends the network's purchase starts
+	// with the Checkout sessions (subscription_stripe_purchase_limit.go)
+	if refusal := stripeNetworkPurchaseStartRefusal(clientSession.Ctx, networkId, stripePurchaseStartSettingsFunc()); refusal != "" {
+		glog.Infof("[stripe]payment sheet: network %s has no purchase start left: %s\n", networkId, refusal)
+		return stripePaymentSheetError(PurchaseErrorCodeRateLimited, refusal), nil
+	}
 	tier := ResolvePriceTier(clientSession, args.StorefrontCountry)
 
 	stripe.Key = stripeApiToken()
@@ -854,8 +860,11 @@ func (self *stripeEventSubscriptionObject) plan() string {
 
 // stripeHandleSubscriptionDeleted writes trial.cancelled when a subscription
 // with a trial ends before (or at) the trial's end: the trial never became a
-// paid period. Any other deletion is the end of a paid subscription, which the
-// entitlement code already handles by the paid-through date. Always 200.
+// paid period. Always 200. It does not end Pro: each window ends on its own
+// (its period plus the grace of its invoice's payment), and the hourly
+// reconciler ends what the deletion takes away sooner (reconcileStripe): a
+// window no payment paid for once Stripe cancels it for non-payment, and a
+// requested cancel's window once its paid period is over.
 func stripeHandleSubscriptionDeleted(object json.RawMessage, clientSession *session.ClientSession) (*StripeWebhookResult, error) {
 	var sub stripeEventSubscriptionObject
 	if err := json.Unmarshal(object, &sub); err != nil {

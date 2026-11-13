@@ -11,32 +11,29 @@
 //     open: the usage guard makes a set outcome and close time immutable;
 //   - every escrow of it is settled;
 //   - every sweep of it is discharged: paid by a payment that completed more
-//     than CompletedContractExpiration ago and whose retention stamping is
-//     done; of a payment the USDC close-out closed, which is settled as a
-//     completed one is (server.AccountPaymentRetentionSettledSql); or unpaid
-//     on a contract minted after the earning cutoff, whose provider earns
-//     through the subnet pool from the archived usage. A sweep with no payment
-//     on an older contract, or one whose payment is pending, held
-//     (server.ContractPaymentRetentionHoldSql) or canceled without being
-//     closed, is a legacy obligation the payout planner can still select, or
-//     the evidence a recovery reads, and keeps its contract. So does a sweep
-//     staged in a payment plan whose assignment is pending, and one whose
-//     payment completed under attribution review: completePaymentInTx queues
-//     no retention stamping for it, so the payment completion path keeps its
-//     contracts until the straggler horizon, and so does this reaper;
+//     than CompletedContractExpiration ago; of a payment that is otherwise
+//     settled (server.AccountPaymentRetentionSettledSql), closed by the USDC
+//     close-out or safely canceled; or unpaid. USDC payouts ended (owner
+//     decisions 2026-11-12 and 2026-11-13), so an unpaid legacy sweep and a
+//     safely canceled payment are forfeited (owner decision 2026-11-13), and a
+//     provider earns from post-cutoff traffic through the subnet pool, from
+//     the archived usage. A sweep whose payment holds retention
+//     (server.ContractPaymentRetentionHoldSql), pending or canceled with an
+//     external attempt the close-out never closed, or whose payment row is
+//     missing, keeps its contract. So does a sweep whose payment completed
+//     under attribution review, the evidence of that review;
 //   - no unpaid sweep of it is traffic of an operator block whose points can
 //     still be awarded (OperatorBlockPointsPendingWindows). An award reads a
 //     block's unpaid sweeps by sweep time, the settlement, which can come long
 //     after the contract closed: a dispute resolved late, say.
 //
 // The sweep rule is stricter than the partition drop's, which keeps only
-// contracts held by a pending payment. It means the reaper never deletes a
-// sweep the planner can select, so it never races a plan; contracts kept by it
-// age out through the payment completion path or the straggler horizon. The
-// block points rule keeps a contract only until its block is awarded or its
-// reliability passes retention for every award that can still be running, at
-// most ClientReliabilityRetention and OperatorBlockPointsMaxTime and an hour
-// after the block opened.
+// contracts held by a payment (server.ContractPaymentRetentionHoldSql).
+// Contracts kept by it age out through the straggler horizon, unless their
+// payment holds them. The block points rule keeps a contract only until its
+// block is awarded or its reliability passes retention for every award that
+// can still be running, at most ClientReliabilityRetention and
+// OperatorBlockPointsMaxTime and an hour after the block opened.
 //
 // Each contract goes in one transaction with its close reports, closes,
 // escrows, sweeps and extender parties. The usage archive trigger copies a
@@ -58,9 +55,8 @@
 // contracts-per-second rate. The contract rows are locked before their
 // dependents are deleted (closes and close reports are written only under
 // that lock), with SKIP LOCKED, so the reaper never queues behind a writer.
-// The sweeps are then locked, and the payment and plan checks read after both
-// locks, so no payout writer can move a sweep between the check and the
-// delete.
+// The sweeps are then locked, and the payment checks read after both locks,
+// so no writer can change a sweep between the check and the delete.
 //
 // The run returns its cursor for the next run, and a failed batch hands the
 // last committed position to the retry, so a stopped or failed run resumes at
@@ -142,8 +138,8 @@ func (self ContractHorizonMode) String() string {
 // (server.RemoveExpiredCloseEvidence) over its guard's 35-day floor
 // (server.CloseEvidenceRetentionFloor), each with its own brake; both keep 91
 // days in a dry run, with the mode off, or without the control. What keeps a
-// contract the payout planner, operator block points or a recovery can still
-// read is the reaper's row checks, never its horizon. The transfer audit
+// contract that operator block points or a USDC obligation can still read is
+// the reaper's row checks, never its horizon. The transfer audit
 // rollup never replaces a day the floor can reach
 // (TransferAuditRollupFirstDay).
 //
@@ -406,21 +402,14 @@ const (
 	contractHorizonProtectedUnsettled = "unsettled"
 	// a sweep belongs to a payment that holds retention
 	contractHorizonProtectedPaymentHold = "payment_hold"
-	// a sweep belongs to a payment that is not settled (completed, or closed
-	// by the USDC close-out) and holds nothing, such as a safely canceled one
-	// the planner re-plans, or to none that exists
+	// a sweep belongs to a payment row that does not exist
 	contractHorizonProtectedPaymentIncomplete = "payment_incomplete"
 	// a sweep's payment completed within CompletedContractExpiration
 	contractHorizonProtectedPaymentRecent = "payment_recent"
-	// a sweep has no payment, on a contract minted before the earning cutoff
-	contractHorizonProtectedUnpaidLegacy = "unpaid_legacy"
-	// a sweep is staged in a payment plan whose assignment is pending
-	contractHorizonProtectedPlanStaged = "plan_staged"
 	// an unpaid sweep is traffic of an operator block whose points can still
 	// be awarded
 	contractHorizonProtectedBlockPoints = "block_points"
-	// a sweep's payment completed under attribution review, which stamps no
-	// retention on its contracts
+	// a sweep's payment completed under attribution review
 	contractHorizonProtectedPaymentReview = "payment_review"
 )
 
@@ -433,8 +422,6 @@ var contractHorizonProtectedReasons = []string{
 	contractHorizonProtectedPaymentHold,
 	contractHorizonProtectedPaymentIncomplete,
 	contractHorizonProtectedPaymentRecent,
-	contractHorizonProtectedUnpaidLegacy,
-	contractHorizonProtectedPlanStaged,
 	contractHorizonProtectedBlockPoints,
 	contractHorizonProtectedPaymentReview,
 }
@@ -649,17 +636,14 @@ func RemoveContractsPastHorizon(
 		}
 	}()
 
-	// The planner's legacy selection reaches unpaid sweeps below this bound.
-	// Without the boundary nothing is deleted.
+	// Past the earning cutoff, operator block awards read the unpaid sweeps of
+	// their blocks. Read once a run: an award committed since only keeps more.
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		report.Stop = contractHorizonStopError
 		returnErr = err
 		return
 	}
-	reaper.unpaidLegacyBound = paymentPlanUnpaidContractIdBound(transition)
-	// Past the boundary, operator block awards read the unpaid sweeps of their
-	// blocks. Read once a run: an award committed since only keeps more.
 	reaper.blockPointsWindowStarts = []time.Time{}
 	reaper.blockPointsWindowEnds = []time.Time{}
 	if transition != nil {
@@ -791,13 +775,9 @@ type contractHorizonReaper struct {
 	horizon     time.Duration
 	horizonTime time.Time
 	horizonId   server.Id
-	// The first contract id whose unpaid sweeps the planner never selects;
-	// nil without an earning cutoff, when every unpaid sweep is a legacy
-	// obligation.
-	unpaidLegacyBound *server.Id
 	// The windows, [start, end), of the operator blocks whose points can still
 	// be awarded (OperatorBlockPointsPendingWindows); none without an earning
-	// cutoff, when payout plans award points.
+	// cutoff, when no block is awarded.
 	blockPointsWindowStarts []time.Time
 	blockPointsWindowEnds   []time.Time
 	// A sweep's completed payment discharges it once it completed before this.
@@ -933,9 +913,8 @@ var contractHorizonScanSql = fmt.Sprintf(contractHorizonScanSqlFormat, "", "cand
 var contractHorizonScanLockSql = fmt.Sprintf(contractHorizonScanSqlFormat, contractHorizonLockSql, "locked")
 
 // Locks the sweeps of the locked contracts, skipping any another transaction
-// holds, and returns the contracts with a sweep it could not lock. A planner
-// that assigns one of the locked sweeps waits for this transaction, and then
-// finds it gone.
+// holds, and returns the contracts with a sweep it could not lock. A writer of
+// one of the locked sweeps waits for this transaction, and then finds it gone.
 const contractHorizonSweepLockSql = `
 	WITH locked_sweep AS MATERIALIZED (
 		SELECT contract_id
@@ -956,16 +935,14 @@ const contractHorizonSweepLockSql = `
 `
 
 // The checks that read other tables, in a snapshot taken after the locks:
-// every escrow settled, every sweep discharged, none staged in a pending plan,
-// none unpaid in the window of an operator block still to be awarded, none
-// paid by a payment completed under attribution review. Each
-// reads the candidates' rows together, by their ids. A NULL flag counts
-// against deletion. $1 the candidate contract ids, $2 the first contract id
-// past the earning cutoff (paymentPlanUnpaidContractIdBound), NULL without a
-// cutoff, $3 the newest completion time that discharges a sweep, $4 and $5
-// the starts and ends of the pending block windows
-// (OperatorBlockPointsPendingWindows), which an award reads as
-// operatorBlockPointsSweepSql does: an unpaid sweep, by its sweep time.
+// every escrow settled, every sweep discharged, none unpaid in the window of
+// an operator block still to be awarded, none paid by a payment completed
+// under attribution review. Each reads the candidates' rows together, by their
+// ids. A NULL flag counts against deletion. $1 the candidate contract ids, $2
+// the newest completion time that discharges a sweep, $3 and $4 the starts and
+// ends of the pending block windows (OperatorBlockPointsPendingWindows), which
+// an award reads as operatorBlockPointsSweepSql does: an unpaid sweep, by its
+// sweep time.
 var contractHorizonHoldSql = `
 	WITH unsettled AS MATERIALIZED (
 		SELECT DISTINCT contract_id
@@ -976,26 +953,17 @@ var contractHorizonHoldSql = `
 			transfer_escrow_sweep.contract_id,
 			bool_or(account_payment.payment_id IS NOT NULL AND (` + server.ContractPaymentRetentionHoldSql + `) IS TRUE) AS payment_hold,
 			bool_or(transfer_escrow_sweep.payment_id IS NOT NULL AND (` + server.AccountPaymentRetentionSettledSql + `) IS NOT TRUE) AS payment_incomplete,
-			bool_or(account_payment.completed IS TRUE AND (account_payment.complete_time IS NULL OR $3 <= account_payment.complete_time)) AS payment_recent,
-			bool_or(transfer_escrow_sweep.payment_id IS NULL AND ($2::uuid IS NULL OR transfer_escrow_sweep.contract_id < $2::uuid)) AS unpaid_legacy,
+			bool_or(account_payment.completed IS TRUE AND (account_payment.complete_time IS NULL OR $2 <= account_payment.complete_time)) AS payment_recent,
 			bool_or(account_payment.completed IS TRUE AND account_payment.attribution_review_required IS TRUE) AS payment_review
 		FROM transfer_escrow_sweep
 		LEFT JOIN account_payment ON
 			account_payment.payment_id = transfer_escrow_sweep.payment_id
 		WHERE transfer_escrow_sweep.contract_id = ANY($1::uuid[])
 		GROUP BY transfer_escrow_sweep.contract_id
-	), staged AS MATERIALIZED (
-		SELECT DISTINCT payment_plan_sweep.contract_id
-		FROM payment_plan_sweep
-		INNER JOIN payment_plan_assignment ON
-			payment_plan_assignment.payment_plan_id = payment_plan_sweep.payment_plan_id
-		WHERE
-			payment_plan_sweep.contract_id = ANY($1::uuid[]) AND
-			payment_plan_assignment.complete_time IS NULL
 	), block_points AS MATERIALIZED (
 		SELECT DISTINCT transfer_escrow_sweep.contract_id
 		FROM transfer_escrow_sweep
-		INNER JOIN unnest($4::timestamp[], $5::timestamp[]) AS pending(window_start, window_end) ON
+		INNER JOIN unnest($3::timestamp[], $4::timestamp[]) AS pending(window_start, window_end) ON
 			pending.window_start <= transfer_escrow_sweep.sweep_time AND
 			transfer_escrow_sweep.sweep_time < pending.window_end
 		WHERE
@@ -1008,14 +976,11 @@ var contractHorizonHoldSql = `
 			coalesce(sweep.payment_hold, false) AS payment_hold,
 			coalesce(sweep.payment_incomplete, false) AS payment_incomplete,
 			coalesce(sweep.payment_recent, false) AS payment_recent,
-			coalesce(sweep.unpaid_legacy, false) AS unpaid_legacy,
-			staged.contract_id IS NOT NULL AS plan_staged,
 			block_points.contract_id IS NOT NULL AS block_points,
 			coalesce(sweep.payment_review, false) AS payment_review
 		FROM unnest($1::uuid[]) AS candidate(contract_id)
 		LEFT JOIN unsettled ON unsettled.contract_id = candidate.contract_id
 		LEFT JOIN sweep ON sweep.contract_id = candidate.contract_id
-		LEFT JOIN staged ON staged.contract_id = candidate.contract_id
 		LEFT JOIN block_points ON block_points.contract_id = candidate.contract_id
 	)
 	SELECT
@@ -1023,13 +988,11 @@ var contractHorizonHoldSql = `
 		(SELECT count(*) FROM classified WHERE NOT unsettled AND payment_hold),
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold) AND payment_incomplete),
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete) AND payment_recent),
-		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent) AND unpaid_legacy),
-		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy) AND plan_staged),
-		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged) AND block_points),
-		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points) AND payment_review),
+		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent) AND block_points),
+		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR block_points) AND payment_review),
 		ARRAY(
 			SELECT contract_id FROM classified
-			WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points OR payment_review)
+			WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR block_points OR payment_review)
 			ORDER BY contract_id
 		)
 `
@@ -1146,12 +1109,11 @@ func (self *contractHorizonReaper) removeBatch(
 				return
 			}
 
-			var unsettledCount, paymentHoldCount, paymentIncompleteCount, paymentRecentCount, unpaidLegacyCount, planStagedCount, blockPointsCount, paymentReviewCount int64
+			var unsettledCount, paymentHoldCount, paymentIncompleteCount, paymentRecentCount, blockPointsCount, paymentReviewCount int64
 			server.Raise(tx.QueryRow(
 				ctx,
 				contractHorizonHoldSql,
 				heldIds,
-				self.unpaidLegacyBound,
 				self.paymentDischargeTime,
 				self.blockPointsWindowStarts,
 				self.blockPointsWindowEnds,
@@ -1160,8 +1122,6 @@ func (self *contractHorizonReaper) removeBatch(
 				&paymentHoldCount,
 				&paymentIncompleteCount,
 				&paymentRecentCount,
-				&unpaidLegacyCount,
-				&planStagedCount,
 				&blockPointsCount,
 				&paymentReviewCount,
 				&batch.eligibleIds,
@@ -1170,8 +1130,6 @@ func (self *contractHorizonReaper) removeBatch(
 			batch.protected[contractHorizonProtectedPaymentHold] = paymentHoldCount
 			batch.protected[contractHorizonProtectedPaymentIncomplete] = paymentIncompleteCount
 			batch.protected[contractHorizonProtectedPaymentRecent] = paymentRecentCount
-			batch.protected[contractHorizonProtectedUnpaidLegacy] = unpaidLegacyCount
-			batch.protected[contractHorizonProtectedPlanStaged] = planStagedCount
 			batch.protected[contractHorizonProtectedBlockPoints] = blockPointsCount
 			batch.protected[contractHorizonProtectedPaymentReview] = paymentReviewCount
 			if dryRun || len(batch.eligibleIds) == 0 {

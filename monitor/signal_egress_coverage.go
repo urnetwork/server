@@ -615,7 +615,7 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 			context:   "This is a software rollout/operational boundary, not a Proxy hardware-capacity alert. The generic task canary remains responsible for individual claim, timeout, and reschedule errors.",
 			action:    action,
 			verify:    "Migration 657's exact ordered health-deadline index is valid and ready, every API is on the EDF scheduler generation, every Taskworker is on the selective-cleanup/task generation, all shard rows appear, and this signal observes fresh category-local output or no due work for two cadences.",
-			playbook:  "SIGNALS.md §2.19, §2.10, and §8.9",
+			playbook:  "SIGNALS.md §2.19 and §8.9",
 		}), nil
 	}
 

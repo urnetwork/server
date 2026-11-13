@@ -67,8 +67,8 @@ func (self *Service) competitionRuntimeStatus(ctx context.Context, settings *Set
 		PublicationHeld: holds.Evaluation || !gradingPurposeReady, FinalizationHeld: holds.Finalization}, nil
 }
 
-// Public scores, winners and round secrets share the grading hold. A payout
-// hold remains independent and does not suppress historical integrity notices.
+// A grading hold blocks new publication, not an already published immutable
+// round. Payout holds and public integrity notices remain independent.
 func (self *Service) competitionPublicationHeld(ctx context.Context, settings *Settings, round *roundRecord) (bool, error) {
 	if !competitionRoundUsesV2(round) {
 		return false, nil
@@ -76,6 +76,9 @@ func (self *Service) competitionPublicationHeld(ctx context.Context, settings *S
 	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
 	if err != nil || policy.CompetitionId != settings.CompetitionId {
 		return true, errors.New("frozen hold scope does not match the requested competition")
+	}
+	if roundPublished(round, server.NowUtc()) {
+		return false, nil
 	}
 	scoped := *settings
 	scoped.AutomationPolicy = *policy.AutomationPolicy

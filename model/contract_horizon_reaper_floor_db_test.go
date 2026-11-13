@@ -202,16 +202,17 @@ func TestContractHorizonControlHorizonAppliesFromNextBatch(t *testing.T) {
 // At the 35-day floor every protection the reaper applies still holds. In a
 // cohort minted 60 days ago, past the floor and inside 91 days, a contract
 // keeps every row when it is open, disputed or unsettled; when a sweep of it is
-// held by a pending, retention-stamping or externally attempted payment,
-// re-plannable through a safely canceled or missing payment, paid too
-// recently, or staged in a pending plan; when it closed inside the horizon; or
-// when another transaction holds it or its sweep. The earning cutoff falls 70
-// days back, as production's falls inside 91 days, and a contract minted
-// before it, 80 days ago, keeps its unpaid sweep for the legacy planner. The
-// rest goes, so the horizon was 35 days: a paid contract, a canceled one, an
-// unpaid one past the cutoff, whose provider earns through the subnet pool,
-// and a paid one before the cutoff. Once the other transaction ends, the held
-// contracts go too, and a fresh pass deletes nothing more.
+// held by a pending or externally attempted payment, of a missing payment, or
+// paid too recently; when it closed inside the horizon; or when another
+// transaction holds it or its sweep. The earning cutoff falls 70 days back, as
+// production's falls inside 91 days. The rest goes, so the horizon was 35
+// days: a paid contract, one whose completed payment still carries a former
+// release's retention stamping flag, a canceled one, an unpaid one past the
+// cutoff, whose provider earns through the subnet pool, a paid one before the
+// cutoff, one of a safely canceled payment, and one minted before the cutoff,
+// 80 days ago, with an unpaid legacy sweep. USDC payouts ended, so the last two
+// are forfeited (owner decision 2026-11-13). Once the other transaction ends,
+// the held contracts go too, and a fresh pass deletes nothing more.
 func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -244,7 +245,9 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 		unpaidAfterCutoff := newHorizonTestContract(at(2), "dispute_resolved_to_destination")
 		paidLegacy := newHorizonTestContract(legacyAt(0), "settled")
 		paidLegacy.paymentId = &completedOldPaymentId
-		eligible := []*horizonTestContract{paid, canceled, unpaidAfterCutoff, paidLegacy}
+		retentionPending := newHorizonTestContract(at(7), "settled")
+		retentionPending.paymentId = &retentionPendingPaymentId
+		eligible := []*horizonTestContract{paid, canceled, unpaidAfterCutoff, paidLegacy, retentionPending}
 
 		open := newHorizonTestContract(at(3), "")
 		open.closeTime = nil
@@ -256,8 +259,6 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 		unsettled.paymentId = &completedOldPaymentId
 		pending := newHorizonTestContract(at(6), "settled")
 		pending.paymentId = &pendingPaymentId
-		retentionPending := newHorizonTestContract(at(7), "settled")
-		retentionPending.paymentId = &retentionPendingPaymentId
 		canceledRecorded := newHorizonTestContract(at(8), "settled")
 		canceledRecorded.paymentId = &canceledRecordedPaymentId
 		canceledSafe := newHorizonTestContract(at(9), "settled")
@@ -266,7 +267,6 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 		missingPayment.paymentId = &missingPaymentId
 		recentPayment := newHorizonTestContract(at(11), "settled")
 		recentPayment.paymentId = &completedRecentPaymentId
-		staged := newHorizonTestContract(at(12), "settled")
 		recentClose := newHorizonTestContract(at(13), "settled")
 		recentClose.closeTime = horizonTestPointer(now.Add(-10 * day))
 		recentClose.paymentId = &completedOldPaymentId
@@ -274,16 +274,15 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 		heldSweep := newHorizonTestContract(at(15), "settled")
 		heldSweep.paymentId = &completedOldPaymentId
 		unpaidLegacy := newHorizonTestContract(legacyAt(1), "settled")
+		eligible = append(eligible, canceledSafe, unpaidLegacy)
 		protected := map[string][]*horizonTestContract{
 			contractHorizonProtectedOpen:              {open},
 			contractHorizonProtectedUnresolved:        {disputed},
 			contractHorizonProtectedUnsettled:         {unsettled},
-			contractHorizonProtectedPaymentHold:       {pending, retentionPending, canceledRecorded},
-			contractHorizonProtectedPaymentIncomplete: {canceledSafe, missingPayment},
+			contractHorizonProtectedPaymentHold:       {pending, canceledRecorded},
+			contractHorizonProtectedPaymentIncomplete: {missingPayment},
 			contractHorizonProtectedPaymentRecent:     {recentPayment},
-			contractHorizonProtectedPlanStaged:        {staged},
 			contractHorizonProtectedRecentClose:       {recentClose},
-			contractHorizonProtectedUnpaidLegacy:      {unpaidLegacy},
 			contractHorizonProtectedBusy:              {heldContract, heldSweep},
 		}
 		young := newHorizonTestContract(now.Add(-30*day), "canceled")
@@ -292,21 +291,13 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 			all = append(all, contracts...)
 		}
 		insertHorizonTestContracts(t, ctx, f, all...)
-		server.Tx(ctx, func(tx server.PgTx) {
-			paymentPlanId := server.NewId()
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO payment_plan_assignment(payment_plan_id,create_time,sweep_count)
-				VALUES($1,$2,1)`, paymentPlanId, now))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO payment_plan_sweep
-				(contract_id,balance_id,network_id,payment_plan_id,previous_payment_id,payment_id) VALUES($1,$2,$3,$4,NULL,$5)`,
-				staged.contractId, f.balanceId, f.destinationNetworkId, paymentPlanId, pendingPaymentId))
-		}, server.TxReadCommitted, server.OptNoRetry())
 		before := map[server.Id][6]int{}
 		for _, contract := range all {
 			before[contract.contractId], _ = countHorizonTestRows(t, ctx, contract.contractId)
 		}
 
 		// another transaction holds one contract, and the sweep of another, as
-		// a closer and the payout planner do
+		// a closer and a settlement do
 		holder := acquireContractLifecycleTestConnection(t, ctx)
 		defer holder.Release()
 		held, err := holder.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
@@ -347,26 +338,26 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 			t.Fatal("a contract minted inside the 35-day horizon changed", rows)
 		}
 		wantDeleted := map[string]int64{
-			"transfer_contract":     4,
-			"contract_close":        8,
-			"transfer_escrow":       4,
-			"transfer_escrow_sweep": 3,
-			"contract_extender":     4,
-			"contract_close_report": 8,
+			"transfer_contract":     7,
+			"contract_close":        14,
+			"transfer_escrow":       7,
+			"transfer_escrow_sweep": 6,
+			"contract_extender":     7,
+			"contract_close_report": 14,
 		}
 		for table, count := range wantDeleted {
 			if report.Deleted[table] != count {
 				t.Errorf("deleted %s = %d, want %d", table, report.Deleted[table], count)
 			}
 		}
-		if !report.HorizonTime.Equal(now.Add(-35*day)) || report.Scanned != int64(len(all)-1) || report.Eligible != 4 || report.Archived != 3 ||
+		if !report.HorizonTime.Equal(now.Add(-35*day)) || report.Scanned != int64(len(all)-1) || report.Eligible != 7 || report.Archived != 6 ||
 			!report.CaughtUp || report.Stop != contractHorizonStopHorizon || report.Mode != ContractHorizonModeOn {
 			t.Fatalf("wrong report: %+v", report)
 		}
 
 		server.Raise(held.Rollback(ctx))
 		report, _, err = RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, settings)
-		if err != nil || report.Eligible != 2 || report.Archived != 1 || report.Protected[contractHorizonProtectedBusy] != 0 || report.Scanned != int64(len(all)-1-4) {
+		if err != nil || report.Eligible != 2 || report.Archived != 1 || report.Protected[contractHorizonProtectedBusy] != 0 || report.Scanned != int64(len(all)-1-7) {
 			t.Fatalf("a later pass did not take the released contracts: %+v %v", report, err)
 		}
 		for _, contract := range []*horizonTestContract{heldContract, heldSweep} {
@@ -375,7 +366,7 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 			}
 		}
 		report, _, err = RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, settings)
-		if err != nil || report.Eligible != 0 || report.Deleted["transfer_contract"] != 0 || report.Scanned != int64(len(all)-1-6) {
+		if err != nil || report.Eligible != 0 || report.Deleted["transfer_contract"] != 0 || report.Scanned != int64(len(all)-1-9) {
 			t.Fatalf("a fresh pass deleted again or missed protected contracts: %+v %v", report, err)
 		}
 	})

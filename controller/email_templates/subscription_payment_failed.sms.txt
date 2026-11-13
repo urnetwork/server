@@ -1,1 +1,1 @@
-URnetwork: your UR Pro payment of {{.Amount}} didn't go through. Update your payment method at {{.UpdatePaymentUrl}}
+{{if .ActionRequired}}URnetwork: your bank needs you to confirm your UR Pro payment of {{.Amount}}. Confirm it at {{.UpdatePaymentUrl}}{{else}}URnetwork: your UR Pro payment of {{.Amount}} didn't go through. Update your payment method at {{.UpdatePaymentUrl}}{{end}}

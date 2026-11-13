@@ -80,6 +80,12 @@ const (
 	// An operator disposition: the reconciler does not grant from it, since
 	// a broadcast transaction can still fail on chain.
 	PaymentReconcileActionSettlementPending = "settlement_pending"
+	// A Stripe checkout paid with a delayed method (a bank debit or transfer)
+	// completed, and its payment failed afterwards
+	// (checkout.session.async_payment_failed). Nothing was fulfilled: a
+	// checkout fulfils only once its payment clears. Evidence is the checkout
+	// session; written once per session, for support.
+	PaymentReconcileActionPaymentFailed = "payment_failed"
 )
 
 // PaymentReconcileStoreAll is the store label for run-level rows (heartbeat).
@@ -509,6 +515,10 @@ type ReconcileSubscriptionRenewal struct {
 	EndTime       time.Time
 	PurchaseToken string
 	TransactionId string
+	// the end of the period the row's payment or trial covers, without its
+	// grace (SubscriptionRenewal.PaidEndTime); nil for a row written before the
+	// column and for a billing grace hold
+	PaidEndTime *time.Time
 }
 
 // RepairReconciledProEntitlement restores only the Pro metadata for an exact,
@@ -667,7 +677,8 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 			ctx,
 			`
 			SELECT renewal.network_id, renewal.start_time, renewal.end_time,
-			       COALESCE(renewal.purchase_token, ''), COALESCE(renewal.transaction_id, '')
+			       COALESCE(renewal.purchase_token, ''), COALESCE(renewal.transaction_id, ''),
+			       renewal.paid_end_time
 			FROM subscription_renewal renewal
 			INNER JOIN network ON network.network_id = renewal.network_id
 			WHERE renewal.market = $1
@@ -690,6 +701,7 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 					&renewal.EndTime,
 					&renewal.PurchaseToken,
 					&renewal.TransactionId,
+					&renewal.PaidEndTime,
 				))
 				renewals = append(renewals, renewal)
 			}

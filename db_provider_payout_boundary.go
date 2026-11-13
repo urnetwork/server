@@ -42,27 +42,6 @@ var ErrProviderEarningBoundaryMismatch = errors.New("provider earning boundary d
 var ErrProviderEarningBoundaryUnavailable = errors.New("provider earning boundary observation is unavailable; retained work may retry")
 var ErrProviderEarningBoundarySchema = errors.New("provider earning boundary migration or immutable guard is absent/changed")
 
-// A caller canceled its observation; a successful observation of conflicting
-// authority is also a hard refusal. Neither is turned into retry by a joined
-// timeout. Only an unavailable observation with no such cause permits retry.
-func ProviderEarningBoundaryRetryable(ctx context.Context, err error) bool {
-	if ctx == nil || ctx.Err() != nil {
-		return false
-	}
-	causes := InspectErrorCauses(err)
-	if !causes.Complete {
-		return false
-	}
-	unavailable := false
-	for _, node := range causes.Nodes {
-		if node.Err == context.Canceled || providerBoundaryHardCause(node.Err) != nil {
-			return false
-		}
-		unavailable = unavailable || node.Err == ErrProviderEarningBoundaryUnavailable
-	}
-	return unavailable
-}
-
 // These are positive, typed observations. Truncation or unknown causes must
 // never be converted to a schema/authority mismatch.
 func providerBoundaryHardCause(err error) error {
@@ -89,8 +68,7 @@ func providerBoundaryObservationError(err error) error {
 			return errors.Join(hard, err)
 		}
 	}
-	// An incomplete cause census is an unavailable observation. The retry
-	// admission above withholds a new attempt until its complete cause is known.
+	// An incomplete cause census is an unavailable observation.
 	return errors.Join(ErrProviderEarningBoundaryUnavailable, err)
 }
 
@@ -426,23 +404,14 @@ func LoadProviderPayoutEarningPolicy(ctx context.Context) (policy *ProviderPayou
 	return policy, nil
 }
 
-// Allocators inside a transaction validate the boundary on their existing owner.
-func LoadProviderPayoutEarningPolicyInTx(ctx context.Context, tx PgTx) (*ProviderPayoutTransition, error) {
-	return loadProviderPayoutEarningPolicy(ctx, tx)
-}
-
-// Statistics validate authority on the connection already holding their pool slot.
+// Statistics validate authority on the connection already holding their pool
+// slot. It checks retained identity even without policy.
 func LoadProviderPayoutEarningPolicyInConn(ctx context.Context, conn PgConn) (*ProviderPayoutTransition, error) {
-	return loadProviderPayoutEarningPolicy(ctx, conn)
-}
-
-// Both borrowed-owner variants check retained identity even without policy.
-func loadProviderPayoutEarningPolicy(ctx context.Context, query providerBoundaryQuery) (*ProviderPayoutTransition, error) {
 	policy, err := LoadProviderPayoutTransition(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := observeProviderPayoutBoundary(ctx, query, policy); err != nil {
+	if _, err := observeProviderPayoutBoundary(ctx, conn, policy); err != nil {
 		return nil, err
 	}
 	return policy, nil

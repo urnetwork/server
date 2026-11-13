@@ -41,6 +41,11 @@ var removedTaskTargets = []string{
 	// windows (FP2-PROTOCOL.md §12.4); a chain capability_probe.yml had not
 	// switched off yet leaves a row here
 	"github.com/urnetwork/server/taskworker/work.CapabilityProbe",
+	// USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13):
+	// each payment's send and status check, under both of its names. Only a
+	// pending payment was ever scheduled, and none is left.
+	"github.com/urnetwork/server/controller.AdvancePayment",
+	"bringyour.com/bringyour/controller.AdvancePayment",
 }
 
 // Every statement of a startup scheduling or reap transaction ends on the
@@ -103,8 +108,6 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleDeliverAccountMessages(clientSession, tx)
-		work.ScheduleProcessPendingPayouts(clientSession, tx)
-		work.ScheduleCancelHungAccountPayments(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		work.ScheduleCloseContractDeadlines(clientSession, tx)
@@ -204,6 +207,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
 		work.ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
 		work.ScheduleRemoveOldClientLocationReliabilities(clientSession, tx)
+		work.ScheduleRefreshCountryReliabilityMultipliers(clientSession, tx)
 		work.ScheduleUpdateClientScores(clientSession, tx)
 		work.ScheduleRemoveOldNetworkReliabilityWindow(clientSession, tx)
 		work.ScheduleSyncInitialProductUpdates(clientSession, tx)
@@ -348,8 +352,9 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredAuthCodesPost,
 			"bringyour.com/service/taskworker/work.RemoveExpiredAuthCodes",
 		),
-		// the weekly USDC payout ended (owner decision 2026-11-12); a queued
-		// "payout" or "payout_retry" row runs once as a no-op
+		// USDC provider payouts ended (owner decisions 2026-11-12 and
+		// 2026-11-13); a queued row of these runs once as a no-op
+		// (account_payment_work.go)
 		task.NewTaskTargetWithPost(
 			work.Payout,
 			work.PayoutPost,
@@ -474,11 +479,6 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			controller.RefreshReferralTransferBalances,
 			controller.RefreshReferralTransferBalancesPost,
 			"bringyour.com/bringyour/controller.RefreshReferralTransferBalances",
-		),
-		task.NewTaskTargetWithPost(
-			controller.AdvancePayment,
-			controller.AdvancePaymentPost,
-			"bringyour.com/bringyour/controller.AdvancePayment",
 		),
 		task.NewTaskTargetWithPost(
 			controller.ProviderIntentCheck,
@@ -667,6 +667,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveOldClientLocationReliabilities,
 			work.RemoveOldClientLocationReliabilitiesPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RefreshCountryReliabilityMultipliers,
+			work.RefreshCountryReliabilityMultipliersPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientScores,

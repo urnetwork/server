@@ -658,21 +658,12 @@
             "type": "loki",
             "uid": "warp-loki"
           },
-          "expr": "sum(count_over_time({env=\"$env\"} |~ `asset amount owned by the wallet is insufficient|insufficient token balance .* in wallet` [1m]))",
-          "refId": "K",
-          "legendFormat": "payout-wallet-insufficient (warn >5/min)"
-        },
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "warp-loki"
-          },
           "expr": "sum(count_over_time({env=\"$env\"} |~ `\\[taskworker\\]drain gave up` [1m]))",
           "refId": "L",
           "legendFormat": "taskworker-drain-gave-up (warn >1/min)"
         }
       ],
-      "description": "port-exhaustion self-drains ~60s after its target is fixed; redis-loading only matters sustained > 2 min; payout-wallet = fund the wallet (finance, not a bug); drain-gave-up = check stranded task leases (12.1)."
+      "description": "port-exhaustion self-drains ~60s after its target is fixed; redis-loading only matters sustained > 2 min; drain-gave-up = check stranded task leases (12.1)."
     },
     {
       "type": "timeseries",
@@ -3506,7 +3497,7 @@
     },
     {
       "type": "row",
-      "title": "external admission and proxy lock-cache pressure",
+      "title": "proxy lock-cache pressure",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -3514,205 +3505,6 @@
         "x": 0,
         "y": 166
       }
-    },
-    {
-      "type": "timeseries",
-      "title": "Circle transfer admission / s",
-      "description": "Fleet rates for Circle Wallets API transfer submissions admitted by the shared rolling-window gate, deferred because its window was full, or failed closed before an external request. Deferrals may exceed admissions because one submission can wait through several full windows.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 167
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "sum(rate(urnetwork_circle_transfer_admissions_total{env=\"$env\"}[$__rate_interval]))",
-          "refId": "A",
-          "legendFormat": "admissions / s"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "sum(rate(urnetwork_circle_transfer_deferrals_total{env=\"$env\"}[$__rate_interval]))",
-          "refId": "B",
-          "legendFormat": "deferrals / s"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "sum(rate(urnetwork_circle_transfer_admission_errors_total{env=\"$env\"}[$__rate_interval]))",
-          "refId": "C",
-          "legendFormat": "fail-closed / s"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Circle transfer admission wait",
-      "description": "Fleet histogram of time spent waiting for Circle transfer admission. Quantiles merge buckets across taskworkers; the mean merges the histogram sum and count. A nonzero fail-closed rate with no wait sample means admission failed before an external transfer was attempted.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 167
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
-          "refId": "A",
-          "legendFormat": "p50"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
-          "refId": "B",
-          "legendFormat": "p95"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "sum(rate(urnetwork_circle_transfer_admission_wait_seconds_sum{env=\"$env\"}[$__rate_interval])) / sum(rate(urnetwork_circle_transfer_admission_wait_seconds_count{env=\"$env\"}[$__rate_interval]))",
-          "refId": "C",
-          "legendFormat": "mean"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Circle transfer admission event capability by worker",
-      "description": "SIGNALS.md §2.14: 1 means this taskworker emits one bounded pre-POST event for each admitted Circle transfer. This is a build capability gauge; the admission rate and wait panels describe traffic. Each series keeps its host, block, and process instance. Samples older than 90 seconds and missing telemetry remain no-data; the §2.14 monitor checks coverage of every newest worker.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 175
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "last"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "urnetwork_circle_transfer_admission_observable_info{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (timestamp(urnetwork_circle_transfer_admission_observable_info{env=\"$env\",service=\"taskworker\",instance!=\"\"}) >= time() - 90)",
-          "refId": "A",
-          "legendFormat": "{{host}} / {{block}} / {{instance}}"
-        }
-      ]
     },
     {
       "type": "timeseries",
@@ -3726,7 +3518,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 183
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3790,7 +3582,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 183
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3867,7 +3659,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 191
+        "y": 175
       }
     },
     {
@@ -3882,7 +3674,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 192
+        "y": 176
       },
       "fieldConfig": {
         "defaults": {
@@ -3935,7 +3727,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 200
+        "y": 184
       },
       "fieldConfig": {
         "defaults": {
@@ -3984,7 +3776,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 208
+        "y": 192
       }
     },
     {
@@ -3995,7 +3787,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 209
+        "y": 193
       },
       "options": {
         "mode": "markdown",
@@ -4010,7 +3802,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 216
+        "y": 200
       }
     },
     {
@@ -4021,7 +3813,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 217
+        "y": 201
       },
       "datasource": {
         "type": "prometheus",
@@ -4061,7 +3853,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 217
+        "y": 201
       },
       "datasource": {
         "type": "prometheus",
@@ -4106,7 +3898,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 217
+        "y": 201
       },
       "datasource": {
         "type": "prometheus",
@@ -4146,7 +3938,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 225
+        "y": 209
       },
       "datasource": {
         "type": "prometheus",
@@ -4186,7 +3978,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 225
+        "y": 209
       },
       "datasource": {
         "type": "prometheus",
@@ -4236,7 +4028,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 225
+        "y": 209
       },
       "datasource": {
         "type": "prometheus",
@@ -4276,7 +4068,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 233
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4316,7 +4108,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 233
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4356,7 +4148,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 233
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4411,7 +4203,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 241
+        "y": 225
       },
       "datasource": {
         "type": "prometheus",
@@ -4451,7 +4243,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 241
+        "y": 225
       },
       "datasource": {
         "type": "prometheus",
@@ -4491,7 +4283,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 249
+        "y": 233
       }
     },
     {
@@ -4502,7 +4294,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 250
+        "y": 234
       },
       "datasource": {
         "type": "prometheus",
@@ -4552,7 +4344,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 250
+        "y": 234
       },
       "datasource": {
         "type": "prometheus",

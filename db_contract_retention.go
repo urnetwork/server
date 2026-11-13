@@ -5,7 +5,9 @@
 // each payment that was still pending and journaled it with one
 // usdc_payout_closed event, keyed paid elsewhere ones included. A closed
 // payment is settled for retention, as a completed one is: it holds no
-// contract, whether or not an attempt of it reached Circle.
+// contract, whether or not an attempt of it reached Circle. So is a canceled
+// payment no attempt of which reached Circle, closed or not: nothing pays it
+// any more, so it is forfeited (owner decision 2026-11-13).
 package server
 
 import (
@@ -38,32 +40,44 @@ func UsdcPayoutClosedSql(paymentIdSql string) string {
 	)
 }
 
-// The account_payment row is settled for retention: completed, or canceled by
-// the close-out. A closed payment that a writer unaware of the marker made
-// pending again is not settled. References the account_payment relation/alias.
+// The account_payment row is settled for retention: completed, or canceled
+// and either closed by the close-out or safely canceled, with no Circle
+// idempotency key, payment record or tx hash. A closed payment that a writer
+// unaware of the marker made pending again is not settled, and neither is a
+// canceled one with an external attempt the close-out never closed.
+// References the account_payment relation/alias.
 var AccountPaymentRetentionSettledSql = `(
 	account_payment.completed OR
-	(account_payment.canceled AND ` + UsdcPayoutClosedSql("account_payment.payment_id") + `)
+	(
+		account_payment.canceled AND
+		(
+			(
+				account_payment.circle_idempotency_key IS NULL AND
+				account_payment.payment_record IS NULL AND
+				account_payment.tx_hash IS NULL
+			) OR
+			` + UsdcPayoutClosedSql("account_payment.payment_id") + `
+		)
+	)
 )`
 
 // References the account_payment relation/alias. A pending payment is an open
 // obligation. A canceled external attempt (a Circle idempotency key, payment
 // record or tx hash) still needs reconciliation, unless the close-out closed
-// it. Completed payments can still need retention stamps.
+// it. A completed payment holds nothing: with no USDC completion since,
+// account_payment.contract_retention_pending, which queued a completion's
+// reap_time stamping, is never set again.
 var ContractPaymentRetentionHoldSql = `(
-	account_payment.contract_retention_pending OR
+	NOT account_payment.completed AND
 	(
-		NOT account_payment.completed AND
+		NOT account_payment.canceled OR
 		(
-			NOT account_payment.canceled OR
 			(
-				(
-					account_payment.circle_idempotency_key IS NOT NULL OR
-					account_payment.payment_record IS NOT NULL OR
-					account_payment.tx_hash IS NOT NULL
-				) AND
-				NOT ` + UsdcPayoutClosedSql("account_payment.payment_id") + `
-			)
+				account_payment.circle_idempotency_key IS NOT NULL OR
+				account_payment.payment_record IS NOT NULL OR
+				account_payment.tx_hash IS NOT NULL
+			) AND
+			NOT ` + UsdcPayoutClosedSql("account_payment.payment_id") + `
 		)
 	)
 )`

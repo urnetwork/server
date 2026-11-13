@@ -9,23 +9,18 @@ import (
 )
 
 const (
-	taskErrorClassConcurrentSettled             = "concurrent-settled"
-	taskErrorClassPostgresLocalBufferExhaustion = "postgres-local-buffer-exhaustion"
-	taskErrorClassWalletInsufficient            = "wallet-insufficient"
-	taskErrorClassIdleTransactionTimeout        = "idle-transaction-timeout"
-	taskErrorClassConnectionCleanupDeadline     = "connection-cleanup-deadline"
-	taskErrorClassProcessorRateLimit            = "processor-rate-limit"
-	taskErrorClassInvalidDestinationResetFailed = "invalid-destination-reset-failed"
-	taskErrorClassProcessorInvalidDestination   = "processor-invalid-destination"
-	taskErrorClassProcessorBadRequest           = "processor-bad-request"
-	taskErrorClassSchemaObjectMissing           = "schema-object-missing"
-	taskErrorClassPostgresStatementTimeout      = "postgres-statement-timeout"
-	taskErrorClassDeadlineTimeout               = "deadline-timeout"
-	taskErrorClassContextCanceled               = "context-canceled"
-	taskErrorClassDrained                       = "drained"
-	taskErrorClassTargetNotFound                = "target-not-found"
-	taskErrorClassPostMissingRecipient          = "post-missing-recipient"
-	taskErrorClassUnclassified                  = "unclassified"
+	taskErrorClassConcurrentSettled         = "concurrent-settled"
+	taskErrorClassConnectionCleanupDeadline = "connection-cleanup-deadline"
+	taskErrorClassProcessorRateLimit        = "processor-rate-limit"
+	taskErrorClassProcessorBadRequest       = "processor-bad-request"
+	taskErrorClassSchemaObjectMissing       = "schema-object-missing"
+	taskErrorClassPostgresStatementTimeout  = "postgres-statement-timeout"
+	taskErrorClassDeadlineTimeout           = "deadline-timeout"
+	taskErrorClassContextCanceled           = "context-canceled"
+	taskErrorClassDrained                   = "drained"
+	taskErrorClassTargetNotFound            = "target-not-found"
+	taskErrorClassPostMissingRecipient      = "post-missing-recipient"
+	taskErrorClassUnclassified              = "unclassified"
 )
 
 // observationStateUnavailableError marks a reducer that completed, but could
@@ -39,12 +34,6 @@ func (*observationStateUnavailableError) Error() string {
 
 var taskDeadlineTimeoutPattern = regexp.MustCompile(`(?i)^timeout(?:\s+\[[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\])?$`)
 
-// The controller changed both separators together. Share the complete owned
-// forms with PostgreSQL and logs; a suffix alone or empty detail is not proof.
-const invalidDestinationResetErrorPattern = `(?is)Payment create transaction error( = .*; invalid destination reset error = |: .*; invalid destination reset error: )[^[:space:]]`
-
-var invalidDestinationResetErrorRe = regexp.MustCompile(invalidDestinationResetErrorPattern)
-
 // classifyTaskError reduces task-owned or dependency-owned error text to a
 // fixed vocabulary before it reaches Alert Markdown. Callers may still use the
 // original text in memory to select established operational guidance, but no
@@ -54,24 +43,14 @@ func classifyTaskError(taskName, value string) string {
 	trimmed := strings.TrimSpace(value)
 	lower := strings.ToLower(trimmed)
 	switch {
-	case taskName == "AdvancePayment" && invalidDestinationResetErrorRe.MatchString(trimmed):
-		return taskErrorClassInvalidDestinationResetFailed
 	case strings.Contains(lower, "statement timeout") && strings.Contains(lower, "sqlstate 57014"):
 		return taskErrorClassPostgresStatementTimeout
 	case taskName == "CloseExpiredContracts" && strings.Contains(lower, "contract already closed with outcome settled:"):
 		return taskErrorClassConcurrentSettled
-	case taskName == "Payout" && strings.Contains(lower, "no empty local buffer available") && strings.Contains(lower, "sqlstate 53000"):
-		return taskErrorClassPostgresLocalBufferExhaustion
-	case strings.Contains(lower, "asset amount owned by the wal") || strings.Contains(lower, "insufficient token balance"):
-		return taskErrorClassWalletInsufficient
-	case taskName == "Payout" && strings.Contains(lower, "pgconn.connlockerror=conn closed"):
-		return taskErrorClassIdleTransactionTimeout
 	case strings.Contains(lower, "failed to deallocate cached statement(s): conn closed"):
 		return taskErrorClassConnectionCleanupDeadline
 	case strings.Contains(lower, "429 too many requests"):
 		return taskErrorClassProcessorRateLimit
-	case strings.Contains(lower, "invalid destination address"):
-		return taskErrorClassProcessorInvalidDestination
 	case strings.Contains(lower, "400 bad request"):
 		return taskErrorClassProcessorBadRequest
 	case strings.Contains(lower, "sqlstate 42703") ||
@@ -99,13 +78,8 @@ func classifyTaskError(taskName, value string) string {
 func fixedTaskErrorClass(value string) string {
 	switch strings.TrimSpace(value) {
 	case taskErrorClassConcurrentSettled,
-		taskErrorClassPostgresLocalBufferExhaustion,
-		taskErrorClassWalletInsufficient,
-		taskErrorClassIdleTransactionTimeout,
 		taskErrorClassConnectionCleanupDeadline,
 		taskErrorClassProcessorRateLimit,
-		taskErrorClassInvalidDestinationResetFailed,
-		taskErrorClassProcessorInvalidDestination,
 		taskErrorClassProcessorBadRequest,
 		taskErrorClassSchemaObjectMissing,
 		taskErrorClassPostgresStatementTimeout,

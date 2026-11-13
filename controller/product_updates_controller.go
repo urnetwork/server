@@ -85,6 +85,29 @@ func brevoApiUrl(path string) string {
 	return strings.TrimRight(brevoApiBaseUrl, "/") + "/" + strings.TrimLeft(path, "/")
 }
 
+// brevoPathSegment percent-encodes a value for one path segment of a Brevo
+// URL: every byte but RFC 3986's unreserved characters, so an address's "@"
+// and "+" reach Brevo as %40 and %2B, as its docs ask. A raw "+" in the path
+// is read as a space, and DELETE /contacts/a+b@example then names no contact:
+// Brevo answers document_not_found, which reads as already removed, and the
+// contact stays (the 2026-11-13 review).
+func brevoPathSegment(value string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(value); i += 1 {
+		c := value[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9', c == '-', c == '.', c == '_', c == '~':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&15])
+		}
+	}
+	return b.String()
+}
+
 func brevoHeader(header http.Header) {
 	header.Add("api-key", brevoApiKey())
 }
@@ -320,7 +343,7 @@ func BrevoAddContact(ctx context.Context, userEmail string) error {
 }
 
 func BrevoRemoveContact(ctx context.Context, userEmail string) error {
-	url := fmt.Sprintf("%s?identifierType=email_id", brevoApiUrl("contacts/"+userEmail))
+	url := fmt.Sprintf("%s?identifierType=email_id", brevoApiUrl("contacts/"+brevoPathSegment(userEmail)))
 
 	status, r, err := server.HttpDeleteWithStatus[BrevoContactResult](
 		ctx,
@@ -422,11 +445,14 @@ func BrevoRemoveFromList(ctx context.Context, userEmail string, listId int) erro
 }
 
 // Mark only acknowledged subscriptions, join both lists, and retain partial
-// failures for task retry. Successful markers make a replay idempotent.
+// failures for task retry. Successful markers make a replay idempotent. A
+// network whose sign-up country gets no marketing (the mail policy's
+// no_marketing_countries) joins neither list.
 func SyncInitialProductUpdates(ctx context.Context) error {
 	// this is *2 for both lists
 	// this seems to be the highest brevo will let us go
 	parallelCount := 5
+	noMarketingCountries := model.Onboarding().MailPolicy().NoMarketingCountryCodes()
 
 	var wg sync.WaitGroup
 	var stateLock sync.Mutex
@@ -442,7 +468,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		server.HandleError(func() {
-			userEmailNetworkIds := model.GetNetworkUserEmailsForProductUpdatesSync(ctx)
+			userEmailNetworkIds := model.GetNetworkUserEmailsForProductUpdatesSync(ctx, noMarketingCountries)
 			userEmails := slices.Collect(maps.Keys(userEmailNetworkIds))
 
 			var subWg sync.WaitGroup
@@ -487,7 +513,7 @@ func SyncInitialProductUpdates(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		server.HandleError(func() {
-			userEmailUserIds := model.GetUserEmailsForProductUpdatesSync(ctx)
+			userEmailUserIds := model.GetUserEmailsForProductUpdatesSync(ctx, noMarketingCountries)
 			userEmails := slices.Collect(maps.Keys(userEmailUserIds))
 
 			var subWg sync.WaitGroup
@@ -556,9 +582,72 @@ func ScheduleSyncProductUpdatesForUser(clientSession *session.ClientSession, use
 	)
 }
 
+// scheduleSyncProductUpdatesForUserAt is ScheduleSyncProductUpdatesForUser
+// from `at` on. A sync already queued for the user keeps the earlier start.
+func scheduleSyncProductUpdatesForUserAt(clientSession *session.ClientSession, userId server.Id, at time.Time, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		SyncProductUpdatesForUser,
+		&SyncProductUpdatesForUserArgs{
+			UserId: userId,
+		},
+		clientSession,
+		task.RunOnce("sync_product_updates_for_user", userId),
+		task.RunAt(at),
+	)
+}
+
+// ProductUpdatesMirrorSettings pace the product-updates syncs one batch
+// queues (an operator's suppression, the mirror backfill), so that their
+// Brevo calls stay inside the contacts API limit: 10 requests a second and
+// 36,000 an hour on the account's plan, shared with every other contacts
+// call. A sync that takes an admin off the lists makes two calls for each of
+// the admin's email logins (new_networks, then network_users). A 429 fails the
+// sync, and the task retries it with its backoff.
+type ProductUpdatesMirrorSettings struct {
+	// the most syncs a batch starts a second: its i-th sync is scheduled i
+	// slots of 1/SyncsPerSecond after the batch began. 2 is about 4 list calls
+	// a second for the usual single login, under half the limit, and 7,200
+	// syncs an hour. Non-positive starts every sync at once.
+	SyncsPerSecond float64
+}
+
+func DefaultProductUpdatesMirrorSettings() *ProductUpdatesMirrorSettings {
+	return &ProductUpdatesMirrorSettings{
+		SyncsPerSecond: 2,
+	}
+}
+
+// productUpdatesSyncPacer hands a batch's syncs their start times, one slot
+// each, in the order it is asked. Not safe for concurrent use.
+type productUpdatesSyncPacer struct {
+	start    time.Time
+	interval time.Duration
+	slots    int
+}
+
+func newProductUpdatesSyncPacer(start time.Time, settings *ProductUpdatesMirrorSettings) *productUpdatesSyncPacer {
+	interval := time.Duration(0)
+	if 0 < settings.SyncsPerSecond {
+		interval = time.Duration(float64(time.Second) / settings.SyncsPerSecond)
+	}
+	return &productUpdatesSyncPacer{
+		start:    start,
+		interval: interval,
+	}
+}
+
+// next takes the next slot.
+func (self *productUpdatesSyncPacer) next() time.Time {
+	at := self.start.Add(time.Duration(self.slots) * self.interval)
+	self.slots += 1
+	return at
+}
+
 // SyncProductUpdatesForUser makes Brevo's lists match the state at run time:
 // the user's email logins are on network_users while the network's product
-// updates are on and its marketing is not suppressed, and on neither list
+// updates are on, its marketing is not suppressed and its sign-up country gets
+// marketing (the mail policy's no_marketing_countries), and on neither list
 // otherwise. Every Brevo call is idempotent, so a replay or a successor
 // converges on the same lists; a provider failure fails the task, which
 // retries.
@@ -575,11 +664,12 @@ func SyncProductUpdatesForUser(
 		userId = clientSession.ByJwt.UserId
 	}
 
-	productUpdates, marketingSuppressed, userEmails := model.GetProductUpdateUserEmailsForUser(
+	productUpdates, marketingSuppressed, country, userEmails := model.GetProductUpdateUserEmailsForUser(
 		clientSession.Ctx,
 		userId,
 	)
-	if productUpdates && !marketingSuppressed {
+	noMarketingCountry := model.Onboarding().MailPolicy().NoMarketing(country)
+	if productUpdates && !marketingSuppressed && !noMarketingCountry {
 		for i, userEmail := range userEmails {
 			glog.Infof("[product_updates][%d/%d]add to product updates %s\n", i+1, len(userEmails), maskEmail(userEmail))
 			err := BrevoAddToList(clientSession.Ctx, userEmail, productUpdatesListId())
@@ -588,10 +678,14 @@ func SyncProductUpdatesForUser(
 			}
 		}
 	} else {
-		// an opt-out, or a marketing suppression the lists mirror
+		// an opt-out, or a marketing suppression or a country the lists leave out
 		reason := "opted out"
-		if productUpdates {
+		switch {
+		case !productUpdates:
+		case marketingSuppressed:
 			reason = "marketing suppressed"
+		default:
+			reason = "no marketing to the sign-up country"
 		}
 		for i, userEmail := range userEmails {
 			glog.Infof("[product_updates][%d/%d]remove from new networks %s (%s)\n", i+1, len(userEmails), maskEmail(userEmail), reason)
@@ -622,10 +716,12 @@ func SyncProductUpdatesForUserPost(
 // ----- the marketing suppression's Brevo mirror -----
 
 // SuppressNetworkMarketing stops every campaign's mail to the network (the
-// first suppression's time and reason stay) and mirrors it to Brevo: the
-// product-updates sync, queued in the same transaction, takes the admin's
-// email logins off the lists. Every call queues the sync, so a replayed bounce
-// or complaint also mirrors a suppression recorded before the mirror existed.
+// first suppression's time stays, and its reason unless a connection lifts
+// that reason and not this one; model.SuppressNetworkMarketingInTx) and
+// mirrors it to Brevo: the product-updates sync, queued in the same
+// transaction, takes the admin's email logins off the lists. Every call queues
+// the sync, so a replayed bounce or complaint also mirrors a suppression
+// recorded before the mirror existed.
 func SuppressNetworkMarketing(ctx context.Context, networkId server.Id, reason string, now time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		model.SuppressNetworkMarketingInTx(tx, ctx, networkId, reason, now)
@@ -668,27 +764,52 @@ func scheduleSyncProductUpdatesForNetworkInTx(tx server.PgTx, ctx context.Contex
 
 // MirrorNetworkMarketingSuppressions queues the product-updates sync for the
 // admin of every network whose marketing is suppressed, for the suppressions
-// recorded before the mirror existed (bringyourctl reengagement
-// mirror-suppressions). Safe to repeat: queued syncs coalesce per user, and
-// the sync of a mirrored suppression changes nothing. Returns how many
-// networks it queued.
-func MirrorNetworkMarketingSuppressions(ctx context.Context) (queued int) {
-	return mirrorNetworkMarketingSuppressions(ctx, 1000)
+// recorded before the mirror existed, and of every network whose sign-up
+// country gets no marketing, for the countries added to the mail policy's
+// no_marketing_countries after their networks joined the lists (bringyourctl
+// reengagement mirror-suppressions). The syncs are paced
+// (ProductUpdatesMirrorSettings). Safe to repeat: queued syncs coalesce per
+// user, and the sync of a mirrored network changes nothing. Returns how many
+// networks it queued, by kind.
+func MirrorNetworkMarketingSuppressions(ctx context.Context) (suppressed int, noMarketingCountry int) {
+	pacer := newProductUpdatesSyncPacer(server.NowUtc(), DefaultProductUpdatesMirrorSettings())
+	suppressed = mirrorNetworkMarketingSuppressions(ctx, pacer, 1000)
+	noMarketingCountry = mirrorNoMarketingCountryNetworks(ctx, model.Onboarding().MailPolicy().NoMarketingCountryCodes(), pacer, 1000)
+	return
 }
 
-func mirrorNetworkMarketingSuppressions(ctx context.Context, pageSize int) (queued int) {
+func mirrorNetworkMarketingSuppressions(ctx context.Context, pacer *productUpdatesSyncPacer, pageSize int) (queued int) {
+	return mirrorProductUpdatesNetworkAdmins(ctx, pacer, func(after *server.Id) []*model.ProductUpdatesNetworkAdmin {
+		return model.ListMarketingSuppressedNetworkAdmins(ctx, after, pageSize)
+	})
+}
+
+func mirrorNoMarketingCountryNetworks(ctx context.Context, countries []string, pacer *productUpdatesSyncPacer, pageSize int) (queued int) {
+	return mirrorProductUpdatesNetworkAdmins(ctx, pacer, func(after *server.Id) []*model.ProductUpdatesNetworkAdmin {
+		return model.ListNoMarketingCountryNetworkAdmins(ctx, countries, after, pageSize)
+	})
+}
+
+// mirrorProductUpdatesNetworkAdmins queues the product-updates sync of every
+// admin a paged listing returns, one transaction a page, each at the pacer's
+// next slot, and returns how many it queued.
+func mirrorProductUpdatesNetworkAdmins(ctx context.Context, pacer *productUpdatesSyncPacer, page func(after *server.Id) []*model.ProductUpdatesNetworkAdmin) (queued int) {
 	var after *server.Id
 	for {
-		admins := model.ListMarketingSuppressedNetworkAdmins(ctx, after, pageSize)
+		admins := page(after)
 		if len(admins) == 0 {
 			return
+		}
+		runAts := make([]time.Time, len(admins))
+		for i := range admins {
+			runAts[i] = pacer.next()
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			// the owner scheduleSyncProductUpdatesForNetworkInTx uses
 			clientSession := session.NewLocalClientSession(ctx, "", nil)
 			defer clientSession.Cancel()
-			for _, admin := range admins {
-				ScheduleSyncProductUpdatesForUser(clientSession, admin.AdminUserId, tx)
+			for i, admin := range admins {
+				scheduleSyncProductUpdatesForUserAt(clientSession, admin.AdminUserId, runAts[i], tx)
 			}
 		})
 		queued += len(admins)

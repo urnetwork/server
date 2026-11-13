@@ -347,11 +347,8 @@ func (self PostgresStore) AutomationResult(ctx context.Context, settings *Settin
 			}
 			server.Raise(loadErr)
 			observed := automationResultInTx(ctx, tx, roundId)
-			// Existing public integrity invalidations stay inspectable; their
-			// historical seal cannot acquire a newly elected valid winner.
-			if !observed.Invalidated {
-				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
-			}
+			// Claim/finalization holds cannot retract an already published result.
+			// New elections remain held; integrity invalidations remain visible.
 			result = observed
 		})
 	})

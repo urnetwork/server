@@ -106,6 +106,30 @@ func TestLapsedStream(t *testing.T) {
 	}
 }
 
+// A holdout network's R3 is a virtual send: nobody asked it "should I keep
+// writing?", so its silence at the sunset check is no answer. It exits done,
+// unsuppressed; before the 2026-11-13 review it was suppressed at day 60 like
+// a mailed network that never answered, and so dropped from all later mail.
+func TestHoldoutSunsetExitsDoneWithoutSuppression(t *testing.T) {
+	s := DefaultSchedule
+	for _, stream := range []string{StreamLapsed, StreamNeverActivated} {
+		f := healthy(stream)
+		f.Holdout = true
+		r3 := Decide(StepR3, f, s)
+		if r3.Action != ActionVirtual || r3.Template != TemplateR3Keep || r3.NextStep != StepEnd {
+			t.Errorf("%s holdout r3: %+v, want a virtual send", stream, r3)
+		}
+		if d := Decide(StepEnd, f, s); d.Action != ActionExit || d.ExitReason != ExitDone || d.Suppress != "" {
+			t.Errorf("%s holdout end: %+v, want exit done without a suppression", stream, d)
+		}
+		// the mailed arm's silence still ends in the sunset suppression
+		f.Holdout = false
+		if d := Decide(StepEnd, f, s); d.ExitReason != ExitSunset || d.Suppress != SuppressSunset {
+			t.Errorf("%s mailed end: %+v, want the sunset suppression", stream, d)
+		}
+	}
+}
+
 func TestNeverActivatedStream(t *testing.T) {
 	s := DefaultSchedule
 	f := healthy(StreamNeverActivated)
@@ -183,6 +207,24 @@ func TestRouteAnswer(t *testing.T) {
 	}
 	if !LiftableSuppression(SuppressSunset) || LiftableSuppression("complained") {
 		t.Error("liftable")
+	}
+}
+
+// A connection lifts only the program's own suppressions; an operator's
+// (sanctions, an automated sign-up cohort) stays for good.
+func TestOperatorSuppressionsAreNeverLiftable(t *testing.T) {
+	if !slices.Equal(OperatorSuppressions(), []string{SuppressSanctions, SuppressAutomatedSignup}) {
+		t.Fatal("operator suppressions", OperatorSuppressions())
+	}
+	for _, reason := range OperatorSuppressions() {
+		if LiftableSuppression(reason) || slices.Contains(LiftableSuppressions(), reason) {
+			t.Errorf("%s is liftable", reason)
+		}
+	}
+	for _, reason := range []string{SuppressSunset, SuppressSwitched} {
+		if !LiftableSuppression(reason) {
+			t.Errorf("%s is not liftable", reason)
+		}
 	}
 }
 

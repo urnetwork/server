@@ -155,19 +155,20 @@ type ReengagementResultsFilter struct {
 	// After is the keyset cursor: rows strictly after this key in
 	// (cohort_day, experiment, variant, stream, platform, tier) order.
 	After *reengagement.ResultsKey
-	// MinExposures suppresses rows under the volume floor.
+	// MinExposures is the volume floor, held on the totals the readout sums:
+	// an experiment's variant with fewer exposures than this over every row
+	// the filter selects (cohort days and dimensions; the cursor aside) has
+	// none of its rows returned, and one at or over it has all of them.
 	MinExposures int
 	Limit        int
 }
 
-const reengagementResultsSelect = `
-	SELECT
-		cohort_day, experiment, variant, stream, platform, tier,
-		exposures, virtual_exposures, sent, delivered, landing_clicked,
-		reason_answers, keeps, reactivation_7d, reactivation_30d,
-		retention_90d, pro_restart_30d, unsubscribe, complaint, hard_bounce,
-		matured_days, computed_at
-	FROM reengagement_results_daily
+const reengagementResultsColumns = `
+	cohort_day, experiment, variant, stream, platform, tier,
+	exposures, virtual_exposures, sent, delivered, landing_clicked,
+	reason_answers, keeps, reactivation_7d, reactivation_30d,
+	retention_90d, pro_restart_30d, unsubscribe, complaint, hard_bounce,
+	matured_days, computed_at
 `
 
 func scanReengagementResultsRow(result pgx.Rows) *ReengagementResultsRow {
@@ -183,7 +184,14 @@ func scanReengagementResultsRow(result pgx.Rows) *ReengagementResultsRow {
 	return r
 }
 
-// ListReengagementResults pages the aggregate. Returns the rows and, when more
+// ListReengagementResults pages the aggregate. The volume floor
+// (filter.MinExposures) holds on each experiment's variant totals over the
+// selected rows, the sums the readout compares, never on a single row: the
+// arms are made of a day's platform and tier cells of a few exposures each,
+// and a per-row floor dropped most of them (the 2026-11-13 review: 159 of 272
+// control and 162 of 250 holdout exposures of reengage_lapsed_1, every
+// matured reactivation among them). The totals are taken before the cursor,
+// so every page applies the same floor. Returns the rows and, when more
 // remain, the key of the last row returned (the caller encodes it).
 func ListReengagementResults(ctx context.Context, filter ReengagementResultsFilter) (rows []*ReengagementResultsRow, next *reengagement.ResultsKey) {
 	limit := filter.Limit
@@ -192,8 +200,8 @@ func ListReengagementResults(ctx context.Context, filter ReengagementResultsFilt
 	}
 	rows = []*ReengagementResultsRow{}
 	server.Db(ctx, func(conn server.PgConn) {
-		args := []any{onboarding.CohortDay(filter.From), onboarding.CohortDay(filter.To), filter.MinExposures}
-		where := []string{"cohort_day >= $1", "cohort_day <= $2", "exposures >= $3"}
+		args := []any{onboarding.CohortDay(filter.From), onboarding.CohortDay(filter.To)}
+		where := []string{"cohort_day >= $1", "cohort_day <= $2"}
 		add := func(column string, value string) {
 			if value == "" {
 				return
@@ -205,16 +213,23 @@ func ListReengagementResults(ctx context.Context, filter ReengagementResultsFilt
 		add("stream", filter.Stream)
 		add("platform", filter.Platform)
 		add("tier", filter.Tier)
+		args = append(args, filter.MinExposures)
+		outer := []string{"$" + itoa(len(args)) + " <= selected.arm_exposures"}
 		if filter.After != nil {
 			cohortDay, err := time.Parse(cohortDayLayout, filter.After.CohortDay)
 			server.Raise(err)
 			args = append(args, cohortDay, filter.After.Experiment, filter.After.Variant, filter.After.Stream, filter.After.Platform, filter.After.Tier)
 			n := len(args)
-			where = append(where, "(cohort_day, experiment, variant, stream, platform, tier) > ($"+itoa(n-5)+", $"+itoa(n-4)+", $"+itoa(n-3)+", $"+itoa(n-2)+", $"+itoa(n-1)+", $"+itoa(n)+")")
+			outer = append(outer, "(cohort_day, experiment, variant, stream, platform, tier) > ($"+itoa(n-5)+", $"+itoa(n-4)+", $"+itoa(n-3)+", $"+itoa(n-2)+", $"+itoa(n-1)+", $"+itoa(n)+")")
 		}
 		args = append(args, limit+1)
-		query := reengagementResultsSelect +
+		query := "SELECT " + reengagementResultsColumns +
+			" FROM (" +
+			"SELECT *, SUM(exposures) OVER (PARTITION BY experiment, variant) AS arm_exposures" +
+			" FROM reengagement_results_daily" +
 			" WHERE " + strings.Join(where, " AND ") +
+			") selected" +
+			" WHERE " + strings.Join(outer, " AND ") +
 			" ORDER BY cohort_day, experiment, variant, stream, platform, tier" +
 			" LIMIT $" + itoa(len(args))
 		result, err := conn.Query(ctx, query, args...)

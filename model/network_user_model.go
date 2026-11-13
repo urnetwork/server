@@ -37,8 +37,14 @@ type NetworkUserUserAuth struct {
 type NetworkUserSsoAuth struct {
 	UserId   *server.Id  `json:"user_id,omitempty"`
 	AuthType SsoAuthType `json:"auth_type"`
-	AuthJwt  string      `json:"auth_jwt"`
-	UserAuth *string     `json:"user_auth,omitempty"`
+	// Always empty. GET /network/user answers this type to any app
+	// credential, a client token included, and it carried the sign-in token
+	// stored when the sign-in was added: an unexpired one signs in at
+	// /auth/login as the network. The api documents the key as a required
+	// string, so it stays, empty; the readers below never read the stored
+	// token.
+	AuthJwt  string  `json:"auth_jwt"`
+	UserAuth *string `json:"user_auth,omitempty"`
 }
 
 type NetworkUserWalletAuth struct {
@@ -660,7 +666,6 @@ func getSsoAuths(
 			SELECT
 				user_id,
 				auth_type,
-				auth_jwt,
 				user_auth
 			FROM network_user_auth_sso
 			WHERE user_id = $1
@@ -677,7 +682,6 @@ func getSsoAuths(
 				server.Raise(result.Scan(
 					&ssoAuth.UserId,
 					&ssoAuth.AuthType,
-					&ssoAuth.AuthJwt,
 					&ssoAuth.UserAuth,
 				))
 				ssoAuths = append(ssoAuths, ssoAuth)
@@ -707,7 +711,6 @@ func getSsoAuthsByUserAuth(
 				SELECT
 					user_id,
 					auth_type,
-					auth_jwt,
 					user_auth
 				FROM network_user_auth_sso
 				WHERE user_auth = $1
@@ -724,7 +727,6 @@ func getSsoAuthsByUserAuth(
 				server.Raise(result.Scan(
 					&ssoAuth.UserId,
 					&ssoAuth.AuthType,
-					&ssoAuth.AuthJwt,
 					&ssoAuth.UserAuth,
 				))
 				ssoAuths = append(ssoAuths, ssoAuth)
@@ -1373,7 +1375,9 @@ func MigrateNetworkUserChildAuthsOriginal(
 					if err != nil {
 						glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
 					} else {
-						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+						// the auth type, never the token: the stored sign-in
+						// token must not reach the logs
+						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthType)
 					}
 
 				}
@@ -1534,7 +1538,9 @@ func MigrateNetworkUserChildAuths(
 				if err != nil {
 					glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
 				} else {
-					glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+					// the auth type, never the token: the stored sign-in token
+					// must not reach the logs
+					glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthType)
 				}
 
 			}

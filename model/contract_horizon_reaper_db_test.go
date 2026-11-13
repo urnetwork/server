@@ -191,12 +191,15 @@ func observeHorizonTestBatches(t testing.TB, observe func(batch int, last server
 }
 
 // Every contract past the horizon that each check admits goes with all of its
-// dependent rows, and a credit-bearing one leaves its usage in the archive.
-// Every other contract keeps every row: open, disputed, unsettled, held by a
-// pending, retention-stamping or externally attempted payment, re-plannable
-// by a safely canceled or missing payment, paid too recently, unpaid before
-// the earning cutoff, staged in a pending plan, closed inside the horizon, or
-// minted inside it. A second run finds nothing.
+// dependent rows, and a credit-bearing one leaves its usage in the archive,
+// including one of a completed payment whose retention stamping a former
+// release queued: the flag holds nothing since USDC completions ended. A
+// contract of a safely canceled payment and one unpaid before the earning
+// cutoff go too: USDC payouts ended, so both are forfeited (owner decision
+// 2026-11-13); before, each was kept. Every other contract keeps every row:
+// open, disputed, unsettled, held by a pending or externally attempted
+// payment, of a missing payment, paid too recently, closed inside the horizon,
+// or minted inside it. A second run finds nothing.
 func TestContractHorizonRemovesOnlyEligibleContracts(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -225,7 +228,9 @@ func TestContractHorizonRemovesOnlyEligibleContracts(t *testing.T) {
 		paid.paymentId = &completedOldPaymentId
 		canceled := newHorizonTestContract(at(1), "canceled")
 		unpaidAfterCutoff := newHorizonTestContract(at(2), "dispute_resolved_to_destination")
-		eligible := []*horizonTestContract{paid, canceled, unpaidAfterCutoff}
+		retentionPending := newHorizonTestContract(at(7), "settled")
+		retentionPending.paymentId = &retentionPendingPaymentId
+		eligible := []*horizonTestContract{paid, canceled, unpaidAfterCutoff, retentionPending}
 
 		open := newHorizonTestContract(at(3), "")
 		open.closeTime = nil
@@ -237,8 +242,6 @@ func TestContractHorizonRemovesOnlyEligibleContracts(t *testing.T) {
 		unsettled.paymentId = &completedOldPaymentId
 		pending := newHorizonTestContract(at(6), "settled")
 		pending.paymentId = &pendingPaymentId
-		retentionPending := newHorizonTestContract(at(7), "settled")
-		retentionPending.paymentId = &retentionPendingPaymentId
 		canceledRecorded := newHorizonTestContract(at(8), "settled")
 		canceledRecorded.paymentId = &canceledRecordedPaymentId
 		canceledSafe := newHorizonTestContract(at(9), "settled")
@@ -247,37 +250,27 @@ func TestContractHorizonRemovesOnlyEligibleContracts(t *testing.T) {
 		missingPayment.paymentId = &missingPaymentId
 		recentPayment := newHorizonTestContract(at(11), "settled")
 		recentPayment.paymentId = &completedRecentPaymentId
-		staged := newHorizonTestContract(at(12), "settled")
 		recentClose := newHorizonTestContract(at(13), "settled")
 		recentClose.closeTime = horizonTestPointer(now.Add(-10 * 24 * time.Hour))
 		recentClose.paymentId = &completedOldPaymentId
 		// minted and closed before the synthetic cutoff, never paid
 		unpaidLegacy := newHorizonTestContract(payoutTestCutoff.Add(-7*24*time.Hour), "settled")
+		eligible = append(eligible, canceledSafe, unpaidLegacy)
 		young := newHorizonTestContract(now.Add(-30*24*time.Hour), "canceled")
 		protected := map[string][]*horizonTestContract{
 			contractHorizonProtectedOpen:              {open},
 			contractHorizonProtectedUnresolved:        {disputed},
 			contractHorizonProtectedUnsettled:         {unsettled},
-			contractHorizonProtectedPaymentHold:       {pending, retentionPending, canceledRecorded},
-			contractHorizonProtectedPaymentIncomplete: {canceledSafe, missingPayment},
+			contractHorizonProtectedPaymentHold:       {pending, canceledRecorded},
+			contractHorizonProtectedPaymentIncomplete: {missingPayment},
 			contractHorizonProtectedPaymentRecent:     {recentPayment},
-			contractHorizonProtectedPlanStaged:        {staged},
 			contractHorizonProtectedRecentClose:       {recentClose},
-			contractHorizonProtectedUnpaidLegacy:      {unpaidLegacy},
 		}
 		all := append(slices.Clone(eligible), young)
 		for _, contracts := range protected {
 			all = append(all, contracts...)
 		}
 		insertHorizonTestContracts(t, ctx, f, all...)
-		server.Tx(ctx, func(tx server.PgTx) {
-			paymentPlanId := server.NewId()
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO payment_plan_assignment(payment_plan_id,create_time,sweep_count)
-				VALUES($1,$2,1)`, paymentPlanId, now))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO payment_plan_sweep
-				(contract_id,balance_id,network_id,payment_plan_id,previous_payment_id,payment_id) VALUES($1,$2,$3,$4,NULL,$5)`,
-				staged.contractId, f.balanceId, f.destinationNetworkId, paymentPlanId, pendingPaymentId))
-		}, server.TxReadCommitted, server.OptNoRetry())
 		before := map[server.Id][6]int{}
 		for _, contract := range all {
 			before[contract.contractId], _ = countHorizonTestRows(t, ctx, contract.contractId)
@@ -322,14 +315,14 @@ func TestContractHorizonRemovesOnlyEligibleContracts(t *testing.T) {
 			}
 		})
 		wantDeleted := map[string]int64{
-			"transfer_contract":     3,
-			"contract_close":        6,
-			"transfer_escrow":       3,
-			"transfer_escrow_sweep": 2,
-			"contract_extender":     3,
-			"contract_close_report": 6,
+			"transfer_contract":     6,
+			"contract_close":        12,
+			"transfer_escrow":       6,
+			"transfer_escrow_sweep": 5,
+			"contract_extender":     6,
+			"contract_close_report": 12,
 		}
-		if report.Scanned != int64(len(all)-1) || report.Eligible != 3 || report.Archived != 2 || report.Protected[contractHorizonProtectedBusy] != 0 ||
+		if report.Scanned != int64(len(all)-1) || report.Eligible != 6 || report.Archived != 5 || report.Protected[contractHorizonProtectedBusy] != 0 ||
 			!report.CaughtUp || report.Stop != contractHorizonStopHorizon || report.Mode != ContractHorizonModeOn {
 			t.Fatalf("wrong report: %+v", report)
 		}
@@ -347,15 +340,17 @@ func TestContractHorizonRemovesOnlyEligibleContracts(t *testing.T) {
 			t.Fatalf("a second run did not find the pass complete: %+v %v", again, err)
 		}
 		fresh, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, horizonTestSettings())
-		if err != nil || fresh.Eligible != 0 || fresh.Deleted["transfer_contract"] != 0 || fresh.Scanned != report.Scanned-3 {
+		if err != nil || fresh.Eligible != 0 || fresh.Deleted["transfer_contract"] != 0 || fresh.Scanned != report.Scanned-6 {
 			t.Fatalf("a fresh pass deleted again or missed protected contracts: %+v %v", fresh, err)
 		}
 	})
 }
 
-// Without an earning cutoff every unpaid sweep is a legacy obligation the
-// planner can select, so its contract stays; an unswept contract still goes.
-func TestContractHorizonKeepsUnpaidSweepsWithoutCutoff(t *testing.T) {
+// Without an earning cutoff no operator block can be awarded, so a contract
+// past the horizon with an unpaid sweep goes, as an unswept one does. USDC
+// payouts ended, so an unpaid sweep is forfeited (owner decision 2026-11-13);
+// before, such a contract stayed as a legacy obligation.
+func TestContractHorizonRemovesUnpaidSweepsWithoutCutoff(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -371,13 +366,12 @@ func TestContractHorizonKeepsUnpaidSweepsWithoutCutoff(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if rows, _ := countHorizonTestRows(t, ctx, unpaid.contractId); rows != [6]int{1, 2, 1, 1, 1, 2} {
-			t.Fatal("an unpaid legacy sweep's contract lost rows", rows)
+		for _, contract := range []*horizonTestContract{unpaid, unswept} {
+			if rows, archived := countHorizonTestRows(t, ctx, contract.contractId); rows != [6]int{} || archived != 1 {
+				t.Fatal("a contract past the horizon was kept", rows, archived)
+			}
 		}
-		if rows, archived := countHorizonTestRows(t, ctx, unswept.contractId); rows != [6]int{} || archived != 1 {
-			t.Fatal("an unswept contract past the horizon was kept", rows, archived)
-		}
-		if report.Protected[contractHorizonProtectedUnpaidLegacy] != 1 || report.Eligible != 1 {
+		if report.Eligible != 2 {
 			t.Fatalf("wrong report: %+v", report)
 		}
 	})

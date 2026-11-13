@@ -101,9 +101,6 @@ var accountMessageTemplates = map[string]func() Template{
 	(&GammaChargeSkippedTemplate{}).Name(): func() Template {
 		return &GammaChargeSkippedTemplate{}
 	},
-	(&MissingWalletTemplate{}).Name(): func() Template {
-		return &MissingWalletTemplate{}
-	},
 	// written by the model (model.AuthPasswordSetTemplateName)
 	(&AuthPasswordSetTemplate{}).Name(): func() Template {
 		return &AuthPasswordSetTemplate{}
@@ -133,7 +130,7 @@ var accountMessageTemplates = map[string]func() Template{
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,
-// withheld, lease_lost).
+// lease_lost).
 var accountMessageDeliveryCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -201,15 +198,6 @@ func addAccountMessageInTx(ctx context.Context, tx server.PgTx, message *account
 	return model.AddAccountMessageInTx(ctx, tx, message.args())
 }
 
-// Adds the messages in the caller's transaction in one round trip.
-func addAccountMessagesInTx(ctx context.Context, tx server.PgTx, messages []*accountMessage) {
-	argsList := []*model.AccountMessageArgs{}
-	for _, message := range messages {
-		argsList = append(argsList, message.args())
-	}
-	model.AddAccountMessagesInTx(ctx, tx, argsList)
-}
-
 // The template a stored message renders, decoded from its fields.
 func decodeAccountMessageTemplate(templateName string, templateJson string) (Template, error) {
 	newTemplate, ok := accountMessageTemplates[templateName]
@@ -259,11 +247,7 @@ type accountMessageDelivery struct {
 	sentCount               int
 	retryCount              int
 	abandonCount            int
-	withheldCount           int
 	consecutiveFailureCount int
-
-	// the templates this run abandons unsent, by the reason it records
-	withheldTemplates map[string]string
 }
 
 // A run that sends with `sender` and reads time from `now`.
@@ -285,7 +269,6 @@ func newAccountMessageDelivery(
 // budget or the context ended the run; a run that stops after failed sends
 // leaves the rest to the next interval.
 func (self *accountMessageDelivery) Run() (more bool) {
-	self.withheldTemplates = withheldAccountMessageTemplates()
 	endTime := self.now().Add(self.settings.runBudget)
 	for {
 		select {
@@ -308,17 +291,6 @@ func (self *accountMessageDelivery) Run() (more bool) {
 	}
 }
 
-// The templates no delivery sends now, by the reason recorded on each message
-// it abandons. While wallet requests are off, a missing-wallet notice that was
-// already released is abandoned unsent.
-func withheldAccountMessageTemplates() map[string]string {
-	withheld := map[string]string{}
-	if !usdcWalletRequestsOn() {
-		withheld[(&MissingWalletTemplate{}).Name()] = "withheld: wallet requests are off (usdc_payout.yml)"
-	}
-	return withheld
-}
-
 // The wait before a message's next attempt, after `attemptCount` failed ones.
 func (self *accountMessageDelivery) retryDelay(attemptCount int) time.Duration {
 	delay := self.settings.retryBaseDelay
@@ -339,15 +311,6 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 	defer recordCancel()
 
 	templateLabel := accountMessageTemplateLabel(message.TemplateName)
-	if reason, ok := self.withheldTemplates[message.TemplateName]; ok {
-		if !model.AbandonAccountMessage(recordCtx, message.MessageId, *message.ClaimId, self.now(), reason) {
-			self.reportLeaseLost(message)
-			return
-		}
-		self.withheldCount += 1
-		accountMessageDeliveryCounter.WithLabelValues(templateLabel, "withheld").Inc()
-		return
-	}
 	err := func() error {
 		if self.settings.maxAttemptCount < message.AttemptCount {
 			return fmt.Errorf("claimed %d times without a recorded outcome", message.AttemptCount)
@@ -440,10 +403,9 @@ type DeliverAccountMessagesArgs struct {
 
 // What one delivery run did.
 type DeliverAccountMessagesResult struct {
-	SentCount     int `json:"sent_count"`
-	RetryCount    int `json:"retry_count"`
-	AbandonCount  int `json:"abandon_count"`
-	WithheldCount int `json:"withheld_count"`
+	SentCount    int `json:"sent_count"`
+	RetryCount   int `json:"retry_count"`
+	AbandonCount int `json:"abandon_count"`
 	// due messages may be left; the next run starts at once
 	More bool `json:"more"`
 }
@@ -491,11 +453,10 @@ func DeliverAccountMessages(
 		)
 	}
 	return &DeliverAccountMessagesResult{
-		SentCount:     delivery.sentCount,
-		RetryCount:    delivery.retryCount,
-		AbandonCount:  delivery.abandonCount,
-		WithheldCount: delivery.withheldCount,
-		More:          more,
+		SentCount:    delivery.sentCount,
+		RetryCount:   delivery.retryCount,
+		AbandonCount: delivery.abandonCount,
+		More:         more,
 	}, nil
 }
 

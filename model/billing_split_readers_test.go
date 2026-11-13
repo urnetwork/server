@@ -82,8 +82,7 @@ func newBillingSplitReadersFixture(t testing.TB, ctx context.Context) *billingSp
 
 // What every remaining reader of the split returns for the fixture: the Unpaid
 // Data the apps show, the provider payout stats, the operator block points
-// traffic and the points an award gives it, the payout planner's selection and
-// the SN pool's provider usage.
+// traffic and the points an award gives it, and the SN pool's provider usage.
 func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
@@ -102,10 +101,11 @@ func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 		}
 		assertContractPayoutTestProviderAllocations(t, ctx, f.contractId, map[server.Id]int64{f.egressId: f.egressBytes, f.hopBId: f.hopBBytes})
 
-		// /transfer/stats, the apps' Unpaid Data
+		// /transfer/stats, the apps' Unpaid Data: none since USDC payouts
+		// ended (owner decision 2026-11-13)
 		for networkId, want := range map[server.Id]TransferStats{
-			f.networkA:       {PaidBytesProvided: 0, UnpaidBytesProvided: f.egressBytes},
-			f.networkB:       {PaidBytesProvided: 0, UnpaidBytesProvided: f.hopBBytes},
+			f.networkA:       {PaidBytesProvided: 0, UnpaidBytesProvided: 0},
+			f.networkB:       {PaidBytesProvided: 0, UnpaidBytesProvided: 0},
 			f.payerNetworkId: {PaidBytesProvided: 0, UnpaidBytesProvided: 0},
 		} {
 			if got := GetTransferStats(ctx, networkId); got == nil || *got != want {
@@ -211,22 +211,6 @@ func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 		if award.TotalComputedPayout != payoutA+payoutB || !maps.Equal(gotPoints, wantPoints) {
 			t.Fatalf("operator block award computed %d nanocents and points %v, want %d and %v", award.TotalComputedPayout, gotPoints, payoutA+payoutB, wantPoints)
 		}
-
-		// the payout planner's selection (USDC payouts are off; the planner
-		// and its reconciliation still read the same sweeps)
-		server.Tx(ctx, func(tx server.PgTx) {
-			planner := &PaymentPlanner{ctx: ctx, tx: tx, networkPayments: map[server.Id]*AccountPayment{}}
-			server.Raise(planner.planPayments())
-			if len(planner.networkPayments) != 2 {
-				t.Fatalf("planner selected %d networks, want 2", len(planner.networkPayments))
-			}
-			for networkId, want := range wantSweeps {
-				payment := planner.networkPayments[networkId]
-				if payment == nil || payment.PayoutByteCount != want.byteCount || payment.Payout != want.payout {
-					t.Fatalf("planner payment for %s = %+v, want %v", networkId, payment, want)
-				}
-			}
-		})
 
 		// the SN pool's provider usage, which counts the payer's own hop too
 		usages, err := GetStEpochProviderUsage(ctx, windowStart, windowEnd)

@@ -293,8 +293,9 @@ func StLedgerV2UsageSync(ctx context.Context, state *StEpochState) ([]*StLedgerV
 		steps = append(steps, &StLedgerV2UsageStep{Kind: kind, Epoch: epoch, RunAt: server.NowUtc()})
 	}
 	// The extender census is captured beside the users, as close to the
-	// boundary as a failed read allows (st_ledger_v2_extenders.go), and an epoch
-	// before E_x then gets its shadow report (st_ledger_v2_extender_shadow.go).
+	// boundary as a failed read allows (st_ledger_v2_extenders.go), for every
+	// epoch, and each of the two epochs before E_x then gets its shadow report
+	// (st_ledger_v2_extender_shadow.go).
 	if stLedgerV2ExtenderCensusDue(ctx, cfg, epoch) {
 		steps = append(steps, &StLedgerV2UsageStep{Kind: StLedgerV2UsageStepExtenderCensus, Epoch: epoch, RunAt: server.NowUtc()})
 	} else if stLedgerV2ExtenderShadowDue(ctx, cfg, epoch) {
@@ -328,7 +329,7 @@ func StLedgerV2RunUsageStep(ctx context.Context, step *StLedgerV2UsageStep) (*St
 		if err != nil {
 			return nil, err
 		}
-		return stLedgerV2RunExtenderShadow(ctx, cfg, stLedgerV2ExtenderShadowViews{client: v2}, step.Epoch), nil
+		return stLedgerV2RunExtenderShadow(ctx, cfg, stLedgerV2ExtenderShadowViews{client: v2}, step.Epoch, DefaultStLedgerV2ExtenderShadowSettings()), nil
 	case StLedgerV2UsageStepStatement:
 		_, v2, err := stLedgerV2Require()
 		if err != nil {

@@ -850,13 +850,12 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 			},
 		},
 		{
-			key: "circle-payout", resource: "circle.yml", purpose: "Circle wallet and provider payout submission", required: required,
+			// USDC provider payouts ended (owner decisions 2026-11-12 and
+			// 2026-11-13), so the payout wallets' entity secret and wallet ids
+			// are no longer read
+			key: "circle-wallet", resource: "circle.yml", purpose: "Circle user-controlled wallets: balances and transfers out", required: required,
 			fields: []credentialFieldSpec{
 				field("circle.api_token", "circle", "api_token"),
-				field("circle.entity_secret", "circle", "entity_secret"),
-				field("circle.wallet_set_id", "circle", "wallet_set_id"),
-				field("circle.solana_wallet_id", "circle", "solana_wallet_id"),
-				field("circle.polygon_wallet_id", "circle", "polygon_wallet_id"),
 			},
 		},
 		{

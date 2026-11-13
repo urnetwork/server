@@ -306,10 +306,11 @@ func TestSecurityNoticeOwedOnceForEachSignInChange(t *testing.T) {
 }
 
 // Each change of where payouts go owes exactly one notice, with the wallets
-// masked and their chains: the USDC payout wallet set, replaced, replaced by a
-// promotion when it is removed, and removed; and the subnet's Bittensor wallets
-// set, replaced, set for a provider, and moved by a provider or a network
-// consent. Selecting the payout wallet again owes none.
+// masked and their chains: the USDC payout wallet removed, and the subnet's
+// Bittensor wallets set, replaced, set for a provider, and moved by a provider
+// or a network consent. USDC payouts ended (owner decisions 2026-11-12 and
+// 2026-11-13), so nothing selects a payout wallet; removing the one selected
+// while they ran is its only change, and no other wallet takes over.
 func TestSecurityNoticeOwedOnceForEachPayoutWalletChange(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -333,41 +334,16 @@ func TestSecurityNoticeOwedOnceForEachPayoutWalletChange(t *testing.T) {
 		walletA, walletB := createWallet(addressA), createWallet(addressB)
 		requireNoTestNotice(t, ctx, networkId, "adding a wallet that is not the payout wallet")
 
-		if err := SetPayoutWallet(ctx, networkId, walletA); err != nil {
-			t.Fatal(err)
+		testingSelectPayoutWallet(ctx, networkId, walletA)
+		if removed := RemoveWallet(walletB, clientSession); !removed.Success {
+			t.Fatalf("remove a wallet: %+v", removed)
 		}
-		requireOneTestNotice(t, ctx, networkId, testPayoutWalletNoticeTemplate, recipients, map[string]any{
-			"destination": "usdc_payout", "new_chain": "SOL", "new_wallet": testMasked(addressA), "previous_wallet": nil,
-		})
-		if err := SetPayoutWallet(ctx, networkId, walletB); err != nil {
-			t.Fatal(err)
-		}
-		requireOneTestNotice(t, ctx, networkId, testPayoutWalletNoticeTemplate, recipients, map[string]any{
-			"destination": "usdc_payout", "previous_chain": "SOL", "previous_wallet": testMasked(addressA), "new_chain": "SOL", "new_wallet": testMasked(addressB),
-		})
-		if err := SetPayoutWallet(ctx, networkId, walletB); err != nil {
-			t.Fatal(err)
-		}
-		requireNoTestNotice(t, ctx, networkId, "selecting the payout wallet again")
-		// another network's wallet is refused and changes nothing
-		if err := SetPayoutWallet(ctx, networkId, server.NewId()); err == nil {
-			t.Fatal("selected a wallet the network does not own")
-		}
-		requireNoTestNotice(t, ctx, networkId, "a refused selection")
-
-		// removing the payout wallet promotes the other one: one change
-		if removed := RemoveWallet(walletB, clientSession); !removed.Success || removed.PayoutWalletId == nil || *removed.PayoutWalletId != walletA {
+		requireNoTestNotice(t, ctx, networkId, "removing a wallet that is not the payout wallet")
+		if removed := RemoveWallet(walletA, clientSession); !removed.Success {
 			t.Fatalf("remove the payout wallet: %+v", removed)
 		}
 		requireOneTestNotice(t, ctx, networkId, testPayoutWalletNoticeTemplate, recipients, map[string]any{
-			"previous_wallet": testMasked(addressB), "new_wallet": testMasked(addressA),
-		})
-		// removing the last one leaves none
-		if removed := RemoveWallet(walletA, clientSession); !removed.Success || removed.PayoutWalletId != nil {
-			t.Fatalf("remove the last wallet: %+v", removed)
-		}
-		requireOneTestNotice(t, ctx, networkId, testPayoutWalletNoticeTemplate, recipients, map[string]any{
-			"previous_wallet": testMasked(addressA), "new_wallet": nil,
+			"destination": "usdc_payout", "previous_wallet": testMasked(addressA), "new_wallet": nil,
 		})
 
 		// the subnet claim wallet
@@ -468,7 +444,8 @@ func TestSecurityNoticesSkipAccountsWithoutAnEmail(t *testing.T) {
 		ctx := context.Background()
 
 		// the same changes on each account: a wallet sign-in, a seedphrase, a
-		// payout wallet
+		// subnet wallet
+		subnetSeed := byte(210)
 		change := func(userId server.Id, networkId server.Id, clientSession *session.ClientSession) {
 			if result := addWalletThroughAddAuth(t, ctx, clientSession, newBittensorAcceptanceWalletSigner(t)); result.Error != nil {
 				t.Fatalf("add wallet: %+v", result.Error)
@@ -476,18 +453,9 @@ func TestSecurityNoticesSkipAccountsWithoutAnEmail(t *testing.T) {
 			if _, err := GenerateSeedphrase(ctx, userId); err != nil {
 				t.Fatal(err)
 			}
-			walletId := CreateAccountWalletExternal(clientSession, &CreateAccountWalletExternalArgs{
-				NetworkId:        networkId,
-				Blockchain:       SOL.String(),
-				WalletAddress:    testSolanaAddress(t),
-				DefaultTokenType: "USDC",
-			})
-			if walletId == nil {
-				t.Fatal("the wallet was not created")
-			}
-			if err := SetPayoutWallet(ctx, networkId, *walletId); err != nil {
-				t.Fatal(err)
-			}
+			subnetSeed += 1
+			_, coldkey, pubkey := testBittensorKey(t, subnetSeed)
+			SetStWalletOriginal(ctx, networkId, nil, coldkey, pubkey, nil, nil)
 		}
 		// every message the network owes, of any template
 		owed := func(networkId server.Id) int {
@@ -540,22 +508,17 @@ func TestSecurityNoticesCoalesceRepeatsWithinTheWindow(t *testing.T) {
 		ctx := context.Background()
 		userId, userAuth, clientSession := authParityAccount(t, ctx, "security-coalesce")
 		networkId := clientSession.ByJwt.NetworkId
-		createWallet := func(address string) server.Id {
-			walletId := CreateAccountWalletExternal(clientSession, &CreateAccountWalletExternalArgs{
-				NetworkId: networkId, Blockchain: SOL.String(), WalletAddress: address, DefaultTokenType: "USDC",
-			})
-			if walletId == nil {
-				t.Fatal("the wallet was not created")
-			}
-			return *walletId
+		_, addressA, pubkeyA := testBittensorKey(t, 221)
+		_, addressB, pubkeyB := testBittensorKey(t, 222)
+		setSubnetWallet := func(address string, pubkey [32]byte) {
+			SetStWalletOriginal(ctx, networkId, nil, address, pubkey, nil, nil)
 		}
-		addressA, addressB := testSolanaAddress(t), testSolanaAddress(t)
-		walletA, walletB := createWallet(addressA), createWallet(addressB)
 
-		for _, walletId := range []server.Id{walletA, walletB, walletA} {
-			if err := SetPayoutWallet(ctx, networkId, walletId); err != nil {
-				t.Fatal(err)
-			}
+		for _, wallet := range []struct {
+			address string
+			pubkey  [32]byte
+		}{{addressA, pubkeyA}, {addressB, pubkeyB}, {addressA, pubkeyA}} {
+			setSubnetWallet(wallet.address, wallet.pubkey)
 		}
 		notices := unsentTestNotices(t, ctx, networkId, testPayoutWalletNoticeTemplate)
 		if len(notices) != 1 {
@@ -580,9 +543,7 @@ func TestSecurityNoticesCoalesceRepeatsWithinTheWindow(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE account_message_outbox SET deliver_time = $2 WHERE message_id = $1`, notices[0].messageId, server.NowUtc().Add(-time.Second)))
 		})
-		if err := SetPayoutWallet(ctx, networkId, walletB); err != nil {
-			t.Fatal(err)
-		}
+		setSubnetWallet(addressB, pubkeyB)
 		notices = unsentTestNotices(t, ctx, networkId, testPayoutWalletNoticeTemplate)
 		if len(notices) != 2 || len(notices[0].changes(t)) != 3 || len(notices[1].changes(t)) != 1 {
 			t.Fatalf("a change after the notice was due owed %d notices, want a second one", len(notices))
@@ -591,9 +552,7 @@ func TestSecurityNoticesCoalesceRepeatsWithinTheWindow(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE account_message_outbox SET claim_id = $2, claim_until = $3, attempt_count = 1 WHERE message_id = $1`, notices[1].messageId, server.NewId(), server.NowUtc().Add(time.Minute)))
 		})
-		if err := SetPayoutWallet(ctx, networkId, walletA); err != nil {
-			t.Fatal(err)
-		}
+		setSubnetWallet(addressA, pubkeyA)
 		if notices := unsentTestNotices(t, ctx, networkId, testPayoutWalletNoticeTemplate); len(notices) != 3 {
 			t.Fatalf("a change while a delivery held the notice owed %d notices, want a third", len(notices))
 		}
@@ -644,9 +603,9 @@ func failTestOutboxStatements(ctx context.Context, networkId server.Id) (remove 
 }
 
 // A notice that cannot be owed never fails or rolls back the change it reports:
-// with every outbox write failing, a password reset, a payout wallet change and
-// sign-in changes all go through, owing nothing. Without the fault, the next
-// change owes its notice.
+// with every outbox write failing, a password reset, the payout wallet's
+// removal and sign-in changes all go through, owing nothing. Without the
+// fault, the next change owes its notice.
 func TestSecurityNoticeFailureNeverBlocksTheChange(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -659,6 +618,7 @@ func TestSecurityNoticeFailureNeverBlocksTheChange(t *testing.T) {
 		walletB := CreateAccountWalletExternal(clientSession, &CreateAccountWalletExternalArgs{
 			NetworkId: networkId, Blockchain: SOL.String(), WalletAddress: addressB, DefaultTokenType: "USDC",
 		})
+		testingSelectPayoutWallet(ctx, networkId, *walletA)
 		resetResult, err := AuthPasswordResetCreateCode(AuthPasswordResetCreateCodeArgs{UserAuth: userAuth}, clientSession)
 		if err != nil || resetResult.ResetCode == nil {
 			t.Fatal("reset code", err)
@@ -688,13 +648,13 @@ func TestSecurityNoticeFailureNeverBlocksTheChange(t *testing.T) {
 		if err != nil || login.Error != nil {
 			t.Fatalf("the new password does not sign in: %v %+v", err, login)
 		}
-		changeFailure("the payout wallet change", func() {
-			if err := SetPayoutWallet(ctx, networkId, *walletA); err != nil {
-				panic(err)
+		changeFailure("the payout wallet removed", func() {
+			if removed := RemoveWallet(*walletA, clientSession); !removed.Success {
+				panic(fmt.Errorf("remove the payout wallet: %+v", removed))
 			}
 		})
-		if payoutWalletId := GetPayoutWalletId(ctx, networkId); payoutWalletId == nil || *payoutWalletId != *walletA {
-			t.Fatalf("the payout wallet is %v, want the selected one", payoutWalletId)
+		if payoutWalletId := GetPayoutWalletId(ctx, networkId); payoutWalletId != nil {
+			t.Fatalf("the payout wallet is %v, want none", payoutWalletId)
 		}
 		phone := "+1 415-555-0142"
 		password := "synthetic-password-1"
@@ -716,11 +676,12 @@ func TestSecurityNoticeFailureNeverBlocksTheChange(t *testing.T) {
 		}
 
 		removeFault()
-		if err := SetPayoutWallet(ctx, networkId, *walletB); err != nil {
-			t.Fatal(err)
+		testingSelectPayoutWallet(ctx, networkId, *walletB)
+		if removed := RemoveWallet(*walletB, clientSession); !removed.Success {
+			t.Fatalf("remove the payout wallet: %+v", removed)
 		}
 		requireOneTestNotice(t, ctx, networkId, testPayoutWalletNoticeTemplate, []string{userAuth}, map[string]any{
-			"new_wallet": testMasked(addressB),
+			"previous_wallet": testMasked(addressB), "new_wallet": nil,
 		})
 	})
 }

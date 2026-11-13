@@ -13,7 +13,7 @@ import (
 
 // The selector, incident and public projection tests exercise these exact wire values.
 func TestCompetitionV2OpenApiEnumConformance(t *testing.T) {
-	content, err := os.ReadFile("../../sn/api/competition.yml")
+	content, err := readCompetitionTestSnContract()
 	if err != nil {
 		t.Fatal(err)
 	}
