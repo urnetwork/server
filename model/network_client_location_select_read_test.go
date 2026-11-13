@@ -11,6 +11,54 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Forced pools keep providers in their original family facet. A dualstack
+// provider classified as IPv4 must still be found by every compatible class draw.
+func TestLoadFindProviders2ExportedForcedDowngrades(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		scores := map[server.Id]*ClientScore{}
+		for _, families := range []uint8{ClientScoreIpFamilyV4, ClientScoreIpFamilyV4 | ClientScoreIpFamilyV6, ClientScoreIpFamilyV6} {
+			for _, downgrades := range []uint8{0, ClientScoreCapabilityDowngradeIpv6, ClientScoreCapabilityDowngradeUdp, ClientScoreCapabilityDowngradeIpv6 | ClientScoreCapabilityDowngradeUdp} {
+				score := clientScoreForTest(server.NewId(), families)
+				score.CapabilityDowngrades, score.Online = downgrades, true
+				scores[score.ClientId] = score
+			}
+		}
+		locationId := server.NewId()
+		payload := exportClientScores(true, RankModeQuality, scores)
+		server.Redis(ctx, func(r server.RedisClient) {
+			for facet, pages := range payload.facets {
+				server.Raise(r.Set(ctx, clientScoreLocationFacetCountsKey(true, RankModeQuality, locationId, server.Id{}, facet), pages.countsBytes, time.Hour).Err())
+				for index := range pages.counts {
+					server.Raise(r.Set(ctx, clientScoreLocationFacetSampleKey(true, RankModeQuality, locationId, server.Id{}, facet, index), pages.encodeSample(index), time.Hour).Err())
+				}
+			}
+		})
+		for _, classes := range []providerCapabilityClassSet{
+			newProviderCapabilityClassSet(providerCapabilityClassB),
+			newProviderCapabilityClassSet(providerCapabilityClassD),
+			newProviderCapabilityClassSet(providerCapabilityClassB, providerCapabilityClassD),
+			newProviderCapabilityClassSet(providerCapabilityClassA),
+			newProviderCapabilityClassSet(providerCapabilityClassC),
+			newProviderCapabilityClassSet(providerCapabilityClasses...),
+		} {
+			loaded, _, err := loadFindProviders2PoolUnion(true, RankModeQuality, &findProviders2PoolRead{
+				ctx: ctx, locationIds: map[server.Id]bool{locationId: true},
+				n: 1000, partition: clientScorePartitionOff, observation: &findProviders2LoadObservation{},
+			}, newFindProviders2PoolFacets(classes, true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for clientId, score := range scores {
+				want := classes.has(score.capabilityClass()) && score.IpFamily() != connect.IpFamilyV6Only
+				if (loaded[clientId] != nil) != want {
+					t.Errorf("classes %v: original family %s, downgrades %d: loaded %t, want %t", classes, score.IpFamily(), score.CapabilityDowngrades, loaded[clientId] != nil, want)
+				}
+			}
+		}
+	})
+}
+
 // The records of a selector-mode read, by client id.
 func selectReadTestIds(scores map[server.Id]*ClientScore) []server.Id {
 	clientIds := []server.Id{}

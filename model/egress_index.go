@@ -59,6 +59,9 @@ type EgressIndexSettings struct {
 	MaxFailureIndex int
 	// Evidence lifetime, capped at eight hours; the exact boundary is stale.
 	EvidenceMaxAge time.Duration
+	// Maximum age of a post-quantum export snapshot, in addition to the
+	// eight-hour proof lifetime. Non-positive gives no reusable proof.
+	PostQuantumMaxStaleness time.Duration
 	// A window passes when
 	// QualityOkNumerator·total ≤ QualityOkDenominator·ok over all its scored
 	// loads, compared in integers so the boundary is exact for every total.
@@ -198,14 +201,15 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 			"cdn":          1,
 			"site":         1,
 		},
-		DefaultClassWeight:   1,
-		MaxFailureIndex:      6,
-		EvidenceMaxAge:       ProviderEgressHealthMaxAge,
-		QualityOkNumerator:   4,
-		QualityOkDenominator: 5,
-		MinScoredLoads:       1,
-		CountryGate:          true,
-		BackfillTierOffset:   ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
+		DefaultClassWeight:      1,
+		MaxFailureIndex:         6,
+		EvidenceMaxAge:          ProviderEgressHealthMaxAge,
+		PostQuantumMaxStaleness: 30 * time.Minute,
+		QualityOkNumerator:      4,
+		QualityOkDenominator:    5,
+		MinScoredLoads:          1,
+		CountryGate:             true,
+		BackfillTierOffset:      ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
 		// modern-first priority replaces the modern provider gate (owner
 		// decision 2026-10-28)
 		RankModernFirst:       true,

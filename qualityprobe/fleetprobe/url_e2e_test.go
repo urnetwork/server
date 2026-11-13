@@ -14,6 +14,96 @@ import (
 	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
+// A classical request followed by a PQ rekey cannot become positive when
+// evidence is collected; the request and final observations name different epochs.
+func TestUrlProbeE2eObservationDoesNotCombineRequestAndRekey(t *testing.T) {
+	observation := connect.PeerCapabilityObservation{
+		E2eAttempted: true, E2eNegotiated: true, E2eSealed: true,
+		KeyExchange: "X25519", AckObserved: true,
+		Session: connect.PeerCapabilitySession{ClientId: connect.NewId(), EpochId: connect.NewId(), KeyExchange: "X25519"},
+	}
+	observer := &urlProbeE2eObservation{
+		read:         func() (connect.PeerCapabilityObservation, bool) { return observation, true },
+		settings:     DefaultUrlProbePostQuantumSettings(),
+		unmeasurable: func() bool { return false },
+		now:          time.Now,
+	}
+	observer.RequestStarted()
+	observer.RequestWritten()
+	observation.KeyExchange, observation.PostQuantum = "X25519MLKEM768", true
+	observation.Session.EpochId = connect.NewId()
+	observation.Session.KeyExchange, observation.Session.PostQuantum = "X25519MLKEM768", true
+	if evidence := observer.Evidence(true); evidence.Pq == egresshealth.UrlProbePqPositive {
+		t.Fatalf("a classical request borrowed the later PQ seal: %+v", evidence)
+	}
+}
+
+// A PQ request needs its own live epoch at completion. A second PQ epoch,
+// a demoted session and a sticky seal already stale at the write cannot prove it.
+func TestUrlProbeE2eObservationRejectsChangedOrStaleSession(t *testing.T) {
+	for _, transition := range []string{"rekey", "classical rekey", "demoted after write", "demoted before write", "unchanged"} {
+		observation := connect.PeerCapabilityObservation{
+			E2eAttempted: true, E2eNegotiated: true, E2eSealed: true,
+			KeyExchange: "X25519MLKEM768", PostQuantum: true,
+			Session: connect.PeerCapabilitySession{ClientId: connect.NewId(), EpochId: connect.NewId(), KeyExchange: "X25519MLKEM768", PostQuantum: true},
+		}
+		observer := &urlProbeE2eObservation{
+			read:     func() (connect.PeerCapabilityObservation, bool) { return observation, true },
+			settings: DefaultUrlProbePostQuantumSettings(), unmeasurable: func() bool { return false }, now: time.Now,
+		}
+		if transition == "demoted before write" {
+			observation.Session = connect.PeerCapabilitySession{}
+		}
+		observer.RequestStarted()
+		observer.RequestWritten()
+		switch transition {
+		case "rekey":
+			observation.Session.EpochId = connect.NewId()
+		case "classical rekey":
+			observation.Session.EpochId = connect.NewId()
+			observation.Session.KeyExchange, observation.Session.PostQuantum = "X25519", false
+			observation.KeyExchange, observation.PostQuantum = "X25519", false
+		case "demoted after write":
+			observation.Session = connect.PeerCapabilitySession{}
+		}
+		evidence := observer.Evidence(true)
+		wantPositive := transition == "unchanged"
+		if (evidence.Pq == egresshealth.UrlProbePqPositive) != wantPositive || evidence.SealedBeforeRequest != wantPositive {
+			t.Errorf("%s: %+v", transition, evidence)
+		}
+		if transition == "classical rekey" && evidence.Pq != egresshealth.UrlProbePqNegative {
+			t.Errorf("a later classical session lost its negative evidence: %+v", evidence)
+		}
+	}
+}
+
+// WroteRequest runs after the bytes have gone. A rekey between acquiring the
+// HTTP connection and that callback cannot supply proof for the earlier write.
+func TestUrlProbeE2eObservationRejectsRekeyDuringRequestWrite(t *testing.T) {
+	for _, group := range []string{"X25519", "X25519MLKEM768", ""} {
+		clientId := connect.NewId()
+		observation := connect.PeerCapabilityObservation{
+			E2eAttempted: true, E2eNegotiated: group != "", E2eSealed: group != "",
+			KeyExchange: group, PostQuantum: group == "X25519MLKEM768",
+		}
+		if group != "" {
+			observation.Session = connect.PeerCapabilitySession{ClientId: clientId, EpochId: connect.NewId(), KeyExchange: group, PostQuantum: observation.PostQuantum}
+		}
+		observer := &urlProbeE2eObservation{
+			read:     func() (connect.PeerCapabilityObservation, bool) { return observation, true },
+			settings: DefaultUrlProbePostQuantumSettings(), unmeasurable: func() bool { return false }, now: time.Now,
+		}
+		observer.RequestStarted()
+		observation.Session = connect.PeerCapabilitySession{ClientId: clientId, EpochId: connect.NewId(), KeyExchange: "X25519MLKEM768", PostQuantum: true}
+		observation.E2eNegotiated, observation.E2eSealed = true, true
+		observation.KeyExchange, observation.PostQuantum = "X25519MLKEM768", true
+		observer.RequestWritten()
+		if evidence := observer.Evidence(true); evidence.Pq == egresshealth.UrlProbePqPositive || evidence.SealedBeforeRequest {
+			t.Errorf("request started under %q borrowed a seal observed after its write: %+v", group, evidence)
+		}
+	}
+}
+
 // A turn's e2e evidence from what its recorder holds, case by case
 // (FP2-PROTOCOL.md §12.2): positive only for a post-quantum group sealed
 // before the IPv4 HTTPS leg's request with that leg passed, on one tunnel and
@@ -144,8 +234,11 @@ func TestUrlProbeE2eObservationReadsTheSealAtTheFirstRequest(t *testing.T) {
 		t.Fatalf("seal wait %s", e2e.SealWait())
 	}
 	// the request goes before the seal; a later write does not move it
+	e2e.RequestStarted()
 	e2e.RequestWritten()
 	observation.E2eNegotiated, observation.E2eSealed, observation.KeyExchange, observation.PostQuantum = true, true, "X25519MLKEM768", true
+	observation.Session = connect.PeerCapabilitySession{ClientId: connect.NewId(), EpochId: connect.NewId(), KeyExchange: "X25519MLKEM768", PostQuantum: true}
+	e2e.RequestStarted()
 	e2e.RequestWritten()
 	if evidence := e2e.Evidence(true); evidence.Pq != egresshealth.UrlProbePqUnmeasured || evidence.SealedBeforeRequest {
 		t.Fatalf("a session sealed after the request read %+v", evidence)
@@ -159,6 +252,7 @@ func TestUrlProbeE2eObservationReadsTheSealAtTheFirstRequest(t *testing.T) {
 		unmeasurable: func() bool { return unmeasurable },
 		now:          time.Now,
 	}
+	sealed.RequestStarted()
 	sealed.RequestWritten()
 	if evidence := sealed.Evidence(true); evidence.Pq != egresshealth.UrlProbePqPositive || !evidence.SealedBeforeRequest {
 		t.Fatalf("a session sealed before the request read %+v", evidence)

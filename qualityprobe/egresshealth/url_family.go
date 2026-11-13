@@ -274,10 +274,14 @@ func fetchUrlProbeLoad(ctx context.Context, client *http.Client, destination Des
 	ipv4Ctx := withUrlProbeIpVersion(ctx, 4)
 	httpsCtx := ipv4Ctx
 	if opts.E2e != nil {
-		// a post-quantum turn reads its session when the IPv4 HTTPS leg writes
-		// its first request: whether that request rode the sealed session
+		// Fence the request's writes with the same live sending epoch. A seal
+		// observed only after the writes cannot prove which epoch carried them.
+		var started sync.Once
 		var written sync.Once
 		httpsCtx = httptrace.WithClientTrace(ipv4Ctx, &httptrace.ClientTrace{
+			GotConn: func(httptrace.GotConnInfo) {
+				started.Do(opts.E2e.RequestStarted)
+			},
 			WroteRequest: func(info httptrace.WroteRequestInfo) {
 				if info.Err == nil {
 					written.Do(opts.E2e.RequestWritten)
