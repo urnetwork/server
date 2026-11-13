@@ -176,9 +176,12 @@ func GetNetworkMailContext(ctx context.Context, networkId server.Id) (mailContex
 }
 
 // RecordNetworkMailContext merges a report into the network's row
-// (MergeNetworkMailContext) and writes it when something changed. The read
-// locks the row, so two reports for one network merge in turn; the first
-// insert of two at once is last-writer-wins, both being the newest values.
+// (MergeNetworkMailContext) and writes it when something changed. A report
+// that changes nothing, as most of a device's many auth-clients do, costs one
+// read and no lock: a FOR UPDATE marks the row even when no update follows.
+// A change merges again under the row's lock, so two reports for one network
+// merge in turn; the first insert of two at once is last-writer-wins, both
+// being the newest values.
 func RecordNetworkMailContext(
 	ctx context.Context,
 	networkId server.Id,
@@ -186,6 +189,9 @@ func RecordNetworkMailContext(
 	now time.Time,
 	settings *onboarding.MailContextSettings,
 ) (changed bool) {
+	if _, unlockedChanged := MergeNetworkMailContext(GetNetworkMailContext(ctx, networkId), networkId, report, now, settings); !unlockedChanged {
+		return false
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		changed = false
 		var current *NetworkMailContext
