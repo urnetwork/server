@@ -2,14 +2,19 @@
 
 package controller
 
-// An operator's marketing suppression of a list of networks (bringyourctl
-// reengagement suppress): an account holder who said they are in a sanctioned
-// country (factury support/RUN-MAIN.md §9), or the networks of a sign-up
-// cohort that automation made (owner, 2026-11-13). The suppression stops every
-// marketing mail to those networks: the onboarding sequence in flight exits at
-// its next step, re-engagement opens no episode and ends any open one, and the
-// product-updates sync takes the admin's logins off the Brevo lists. Its
-// reason is one no connection lifts (reengagement.OperatorSuppressions).
+// An operator's marketing suppression of one network or a list of them
+// (bringyourctl reengagement suppress). Support runs it for an account holder
+// who said they are in a sanctioned country (--reason=sanctions; factury
+// support/RUN-MAIN.md §9; owner, 2026-11-13). --reason=automated_signup is
+// for a sign-up cohort that automation made, if the owner decides to suppress
+// one: on 2026-11-13 the owner chose to keep mailing every account, bots
+// included.
+//
+// The suppression stops every marketing mail to those networks: the
+// onboarding sequence in flight exits at its next step, re-engagement opens no
+// episode and ends any open one, and the product-updates sync takes the
+// admin's logins off the Brevo lists. Its reason is one no connection lifts
+// (reengagement.OperatorSuppressions).
 // Service and account mail (receipts, security notices, trial and Pro-ending
 // reminders) never reads a suppression and still goes.
 //
