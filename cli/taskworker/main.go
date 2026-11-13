@@ -64,6 +64,10 @@ Options:
 	if err != nil {
 		panic(err)
 	}
+	// the PgBouncer instances directly on the blocks the rollout lists, nginx's
+	// single port on the rest (server db_pgbouncer_path_rollout.go); init-tasks,
+	// which returns above, keeps the single port
+	server.SetServicePgBouncerPath("taskworker")
 	if err := taskworker.Run(ctx, taskworker.RunOptions{Port: port, Count: count, BatchSize: batchSize}); err != nil {
 		panic(err)
 	}

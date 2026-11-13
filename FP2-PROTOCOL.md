@@ -76,7 +76,9 @@ without a repo prefix are in the server repo; `connect/`, `sdk/`, `android/`,
   only the server's labels on both axes (D11.8).
 - Strict post-quantum (PQ) requests match only providers the quality probe has
   seen seal a PQ session within the last 8 hours. Neither a provider's
-  declaration nor the capability probe qualifies any more (D12, §12).
+  declaration nor the capability probe qualifies any more (D12, §12). While
+  the ready marker is down, the probe's modern evidence of the last 7 days
+  answers instead, never a declaration (D12.6, §12.8).
 
 **Goals.**
 1. Bring the providers that pass everything but UDP (about 20,700 on Main on
@@ -142,6 +144,7 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D12.3 | no new window: every window, the limited one included, uses the current PQ setting, and a toggle regenerates them all. Overflow never relaxes PQ. | "we already added postquantum as a selection criteria to fp2. when postquantum is enabled/disabled, the entire multi windows are regenerated. We should make sure to the use current post quantum setting on all window selection. We do not need a new window." | §12.5 |
 | D12.4 | 7918 (connect#220) is solved by strict selection with the positive signal; its fail-fast, cache and field-measurement options are not needed | "With the strong fp2 post quantum filter and quality probe positive signal, i think 7918 is solved by the multi client requiring a strong multi client selection when post quantum is enabled." | §12.7 |
 | D12.5 | PQ outcomes come from a scheduled third of URL turns, not every turn: a turn is a PQ turn when its claim ordinal is a multiple of 3 and its provider has no PQ outcome in the last 4 hours | accepted 2026-11-12, in place of every turn (S1 step 2, merge 86553321d) | §12.2, §13.2 |
+| D12.6 (2026-11-13) | no provider counts on its own claim, on either side of the ready marker: a network-only provider is modern or PQ only with the same probe evidence as a public one, and while the marker is down strict PQ reads the probe's modern evidence of the last 7 days instead of declarations. That evidence counts PQ only from the quality probe's positive outcome. | "1,2 sounds good, go ahead"; "They must have a positive quality probe handshake to count" | §12.4, §12.8 |
 
 D11.8 applies D7.5 to the shipped IPv6 local downgrade (B5) too: it is
 retired (§7.9). No owner question is open.
@@ -682,10 +685,13 @@ from declared or capability-probed to measured by the quality probe (§12.4):
 
 | | Old server | New server, before `client_score_post_quantum_v1_ready` | New server, after it |
 |---|---|---|---|
-| Any client sending either field | today's meaning | today's meaning | PQ-positive providers only |
+| Any client sending either field | today's meaning | the probe's modern evidence of the last 7 days, never a declaration (D12.6) | PQ-positive providers only |
 | Any client sending neither | unchanged | unchanged | unchanged |
 
-No client change is needed.
+No client change is needed. A server from before D12.6 (2026-11-13) answered
+the middle column with today's meaning: declarations for
+`post_quantum_encryption`, and for `require_modern_provider` a network-only
+provider's declaration.
 
 ### 5.5 Provider status (D11.6)
 
@@ -1498,11 +1504,14 @@ all):
 - **FP2:**
   - both fields keep only PQ-positive providers in every draw, named
     providers included;
-  - a declared but unmeasured provider is left out;
-  - a network-only provider is left out;
+  - a declared but unmeasured provider is left out, on both sides of the
+    ready marker (D12.6);
+  - a network-only provider is left out unless it has the same evidence as a
+    public one;
   - selector mode's phases and overflow never add a non-positive provider;
-  - before the ready marker the old sources answer, and after it the measured
-    signal.
+  - before the ready marker the probe's modern evidence of the last 7 days
+    answers, and after it the measured signal;
+  - a negotiated PQ session that never sealed is not PQ evidence (D12.6).
 - **connect:**
   - a PQ toggle regenerates every window, the limited one included;
   - every request, the limited window's included, carries
@@ -1558,8 +1567,9 @@ inert for them.
     or monitor §2.19g pages.
 
   **Rollback:** the previous taskworker. PQ turns stop, the marker expires,
-  and strict PQ returns to today's sources. The capability keys and sets
-  expire with the export TTL.
+  and strict PQ returns to the probe's modern evidence of the last 7 days
+  (D12.6, §12.8), which ages out without new PQ turns. The capability keys
+  and sets expire with the export TTL.
 - **Post-quantum (D12).** It rides the same steps:
   - **Step 1:** the migration adds `pq_outcome`.
   - **Step 2:** the taskworker's URL prober opens the PQ session on PQ turns
@@ -1568,7 +1578,8 @@ inert for them.
     the PQ-measuring prober started, a full evidence window, the export marks
     `client_score_post_quantum_v1_ready`.
   - **Step 3:** api, alt and the proxy use the measured signal once the marker
-    is set, and today's sources until then.
+    is set, and the probe's modern evidence of the last 7 days until then,
+    never a declaration (D12.6; before 2026-11-13, today's sources).
   - **The capability probe** is switched off (`capability_probe.yml`
     `enabled: false`) one day after step 3, and its code is deleted in the
     next release.
@@ -1615,7 +1626,8 @@ inert for them.
 | **IPv6 without B5 (D11.8).** A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns, typically a few hours (§3.5). | Only dual-stack providers are concerned, about 1% of supply. Applications fall back to IPv4, and B6's no-route still answers when no `dualstack` client exists. |
 | **Export cost.** About 75% more union pages, and a second native snapshot per non-forced target and mode. | Measured at step 2: Redis memory for `cs_` keys and export duration. Capability keys can be dropped by rollback. |
 | **Two selection bodies.** Selector mode repeats the legacy level body for each pool in a separate function (§6.1). A fix to one can miss the other. | Check every selection fix against both. The legacy JSON and today's-facet tests pin the legacy side. |
-| **Network-only providers under strict PQ** (D12.2). The URL probe cannot reach a provider that holds only a Network key, so it never has a positive signal, and a strict-PQ request no longer matches it. | This follows D12.2 ("any provider"). Such providers stay available to their network's requests without PQ. |
+| **Network-only providers under strict PQ** (D12.2, D12.6). The URL probe cannot reach a provider that holds only a Network key, so it never has a positive signal, and a strict-PQ request no longer matches it, on either side of the ready marker. Only evidence left from a former Public provide, while fresh, still counts. | This follows D12.2 ("any provider") and D12.6. Such providers stay available to their network's requests without PQ. |
+| **Strict supply while the marker is down** (D12.6). Strict requests then read only the probe's modern evidence of the last 7 days. A probe outage longer than that empties them. | The 7-day window outlasts any probe gap the marker covers. Strict supply empties only when no provider has fresh positive evidence, which is the rule (§12.8). |
 | **A provider that loses PQ** stays PQ-positive until its next run reads negative, typically within a turn (about 24 minutes). | Window clients stay fail-closed and verify every session (§12.5), so nothing is sent in the clear. |
 | **Prober cost** (§12.2). One key registration, one PQ handshake and up to a 3 s seal wait per PQ turn; about 3 GB a day of `st_client_key_history` at about 7 turns a second. | The schedule (D12.5) keeps it to a third of the turns of a provider without a recent outcome. The capability probe's own tunnels go away. Watch the insert rate and turn time at taskworker deploy. |
 | **A provider that seals but cannot open the probe client's frames** fails that PQ turn's URL legs. | At most one turn in three, and only without an outcome in 4 hours (§12.2). |
@@ -1635,6 +1647,9 @@ decided by D12.1-D12.5 (§12).
 |---|---|---|
 | `post_quantum_encryption` | The provider's latest provide declared PQ sessions. It is read per request (`readProvidePostQuantumEncryption`, model/provide_capability_model.go:38) and applied in every draw (model/network_client_location_model.go:5100-5105; candidates at :6653, named providers at :7364). | connect builds from before FP2-MODERN |
 | `require_modern_provider` | `ClientScore.Modern`: the capability probe measured end-to-end PQ (X25519MLKEM768) and resizable windows within 7 days (model/egress_modern_provider.go:1-31, :348). A Network-key-only provider counts by its declaration (model/network_client_location_model.go:5790). Applied by the request filter (model/network_client_selection_prefilter.go:20, 36) and for named providers (:6732-6734, :7351-7352). | connect today, whenever the profile asks for PQ (connect/ip_remote_multi_client_api.go:885, 926) |
+
+The table is as of 2026-11-12. D12.6 ended both declaration paths on
+2026-11-13 (§12.8).
 
 - **The declaration** comes from the provider's provide frame
   (connect/transfer_contract_manager.go:1512-1567). It sets
@@ -1810,13 +1825,16 @@ The capability probe's own tunnels, prober shard and passes go away (§12.4).
     deletes it otherwise.
   - The export reads it before it writes any score. FindProviders2 reads it
     through a per-process cache no older than the request settings' max age.
-  - Until it is set, strict PQ answers from today's sources (§10), in legacy
-    and selector mode alike.
+  - Until it is set, and whenever a probe gap clears it, strict PQ answers
+    from the probe's modern evidence of the last 7 days, in legacy and
+    selector mode alike, never from a declaration (D12.6, §12.8). Before
+    2026-11-13 it answered from today's sources (§10).
 - **Network-only providers:** a provider that holds only a Network key cannot
   be reached by the URL probe, so it never has a positive signal. Under D12.2
   ("any provider") a strict-PQ request does not match it. Its
-  declaration-based modern status (model/network_client_location_model.go:5790)
-  ends.
+  declaration-based modern status ended on 2026-11-13 on both sides of the
+  marker (D12.6): it is modern or PQ only with the same evidence as a public
+  provider.
 - **The capability probe is retired.** Both of its checks, PQ and resizable
   windows, move to the URL probe.
   - `capability_probe.yml` is set to `enabled: false` once the URL probe has
@@ -1887,6 +1905,76 @@ last 7 days.
 - The residual case is a provider that lost PQ after its last positive run.
   Its client fails closed within the existing ping budget, as today, and its
   next run reads negative.
+
+### 12.8 No provider counts on its claim (D12.6, 2026-11-13)
+
+**The hole.** Two matches still read a provider's own claim, both only while
+the ready marker was down (the first 8 hours of a stream, or after a prober
+went silent for 30 minutes or more):
+- `require_modern_provider`: a network-only provider was modern by its
+  declaration, in the export's `ClientScore.Modern` and in the named read
+  (`readProviderModernClientIds`).
+- `post_quantum_encryption`: every candidate and named provider was matched
+  on its declaration (`readProvidePostQuantumEncryption`).
+
+So providers that claimed PQ but could not complete the handshake were
+offered to PQ clients, which then failed closed on each one, as in 7918.
+
+**The rule.** "They must have a positive quality probe handshake to count."
+No provider counts on its claim, whatever keys it holds, on either side of the
+marker.
+- **Marker set:** unchanged (§12.4). The URL probe's positive outcome in the
+  8-hour window counts, with fresh window evidence for
+  `require_modern_provider`.
+- **Marker down:** the probe's modern evidence of the last 7 days counts
+  (`provider_modern_evidence`, `ProviderModernEvidenceMaxAge`).
+  - `require_modern_provider`: the row is modern, PQ with resizable windows.
+    Candidates are judged by `ClientScore.Modern`, which the export now takes
+    from the evidence for every provider. Named providers are judged by
+    `readProviderModernClientIds`.
+  - `post_quantum_encryption`: the row is fresh and PQ, whatever its window.
+    Candidates and named providers are both judged by
+    `readProviderPostQuantumEvidenceClientIds`.
+  - Either way the provider must hold a Public or a Network key. With
+    neither, it never counts.
+- **Network-only providers** need the same evidence. No probe can reach them,
+  so they count only while evidence from a former Public provide is fresh.
+- **The declaration** is still stored in `provide_capability`, as the
+  provider's record of what it announced. No selection reads it.
+  `readProvidePostQuantumEncryption` is deleted.
+
+**Why the marker gate stays.** The gate keeps strict supply from emptying
+while the 8-hour signal is incomplete (a stream's first 8 hours) or decaying
+(a silent prober). The fallback behind it is now evidence as well:
+- since the capability probe's retirement, only the URL probe's conclusive PQ
+  turns write `provider_modern_evidence`;
+- that evidence outlasts a probe gap by 7 days.
+
+So while the marker is down, strict requests get the providers with positive
+evidence from the last 7 days. They answer empty only when no provider has
+such evidence, which is what the rule requires.
+
+**Evidence counts PQ only from a positive outcome.** The URL ingest used to
+set `post_quantum` from the negotiated group, as the capability probe did. A
+PQ session that never sealed, which the quality probe reads as negative
+(§12.2), therefore still counted as PQ evidence. Since D12.6 the ingest sets
+`post_quantum` only for a positive outcome (`providerModernEvidenceOfE2e`): a
+PQ group sealed before the IPv4 HTTPS leg's request, and that leg passed. A
+negative never counts. The negotiated key exchange is still recorded.
+- Rows written before the change keep their reading until the provider's
+  next conclusive PQ turn, about two per 8 hours, or until they are 7 days
+  old. Rows the retired capability probe wrote age out the same way.
+- While the marker is down, the modern census and modern-first priority move
+  with it: a provider whose PQ session never sealed reads `not_post_quantum`.
+
+**Rollout.** It ships with the next api, alt, proxy and taskworker release
+(D46). No migration or config change is needed.
+- The readers (api, alt and the proxy's in-process FindProviders2) apply the
+  named reads and the `post_quantum_encryption` fallback from their deploy.
+- The ingest runs in api and alt (remote probers) and in the taskworker's
+  in-process operator. Each records the stricter reading from its deploy.
+- The taskworker export takes `Modern` from evidence from its first export
+  after deploy. Pages an older export wrote expire with the export TTL.
 
 ## 13. Implementation status
 
@@ -2331,8 +2419,9 @@ merge, which contains 3dcc7b138.
     model/network_client_score_capability.go:120, called at
     model/network_client_location_model.go:5982).
 - `Modern`: once the marker is set when the export starts, `Modern` is
-  `postQuantumModern`, and declaration-only modern status ends. Before that,
-  it is today's.
+  `postQuantumModern`. Before that, it is the evidence decision for every
+  provider, network-only ones included. Since D12.6 (§12.8) no declaration
+  counts on either side.
 - `exportClientScores` (model/network_client_score_targets.go:300) puts the
   copies (:311-320) into the union facets `i`, `t` and `x` (Online or native)
   and into the native capability facets, in non-forced modes only.
@@ -2428,8 +2517,11 @@ model/network_client_location_select.go:529):
     (`readFindProviders2PostQuantumEncryption`,
     model/network_client_location_select.go:486, and
     `readFindProviders2NamedModern`, :512).
-- Before the marker, today's calls run unchanged. This holds in legacy and
-  selector mode alike, and overflow never relaxes it.
+- Before the marker, the evidence reads of §12.8 run (D12.6):
+  `readProviderPostQuantumEvidenceClientIds` for `post_quantum_encryption`,
+  and `readProviderModernClientIds` for named providers under
+  `require_modern_provider`. This holds in legacy and selector mode alike, and
+  overflow never relaxes it.
 
 **Status** (model/provider_status_model.go):
 - The `url_checks` item gains `reason`, `reason_tcp_count` (mask & 5) and

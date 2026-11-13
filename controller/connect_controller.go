@@ -1582,9 +1582,11 @@ func createSourcePaidContract(
 }
 
 // Provide registers the client's provide keys, and the capabilities the provide
-// declares: post-quantum encryption sessions, which discovery requires of the
-// providers it offers a client that requires post-quantum encryption. A provide
-// from a release before the field declares none.
+// declares: post-quantum encryption sessions, kept as the record of what the
+// provider announced. Discovery never matches a provider on its declaration: a
+// client that requires post-quantum encryption is offered only providers with a
+// probe's positive evidence (model/provide_capability_model.go). A provide from
+// a release before the field declares none.
 func Provide(
 	ctx context.Context,
 	clientId server.Id,

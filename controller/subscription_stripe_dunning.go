@@ -37,6 +37,10 @@
 //     email). Its notices ask the customer to confirm the payment on the
 //     invoice's Stripe-hosted page, where the bank's check runs, instead of
 //     saying it was declined (owner, 2026-11-13).
+//   - an hourly taskworker sweep (subscription_stripe_dunning_sweep.go) runs
+//     the backfill's send over every subscription Stripe is retrying, so a
+//     notice that a lost, failed or mishandled webhook left unowed is owed
+//     within the hour (owner, 2026-11-13: "send now + schedule").
 //
 // The billing portal opens for the caller's own network only
 // (stripeCustomerIdForNetwork): the customer is found from what the server
@@ -104,13 +108,25 @@ type stripeDunningSettings struct {
 	FinalNoticeLead time.Duration
 	// How long after its latest recorded failure an open failure still shows the
 	// in-app past-due notice. Every failure and every resolution arrives by
-	// webhook; this ends the notice when an event that would resolve it never
-	// arrived. Stripe retries a few days apart at most.
+	// webhook, and the sweep records each failure again while Stripe still
+	// retries its subscription; this ends the notice when the subscription
+	// left the retries without an event that resolves the failure. Stripe
+	// retries a few days apart at most.
 	PastDueNoticeMaxAge time.Duration
 	// Bounds each Stripe API read the dunning makes.
 	StripeReadTimeout time.Duration
 	// Where the billing portal returns the customer.
 	PortalReturnUrl string
+	// The wait between two runs of the sweep (SweepStripeDunning), and before
+	// the first run a startup schedules. A notice falls due only when Stripe
+	// attempts the invoice again, days apart, and the final notice is due
+	// FinalNoticeLead before the retries run out, so an hour owes a notice a
+	// webhook missed well inside both, at about four Stripe reads per retrying
+	// subscription a run. Must be positive.
+	SweepInterval time.Duration
+	// The sweep's task max time: a run that has not finished by then is
+	// canceled, and the next run owes what it left. Must be positive.
+	SweepMaxTime time.Duration
 }
 
 func defaultStripeDunningSettings() *stripeDunningSettings {
@@ -121,6 +137,8 @@ func defaultStripeDunningSettings() *stripeDunningSettings {
 		PastDueNoticeMaxAge: 7 * 24 * time.Hour,
 		StripeReadTimeout:   15 * time.Second,
 		PortalReturnUrl:     StripeUpdatePaymentMethodUrl,
+		SweepInterval:       1 * time.Hour,
+		SweepMaxTime:        30 * time.Minute,
 	}
 }
 
@@ -918,9 +936,12 @@ func (self *StripeDunningReportRow) Amount() string {
 // Lists every subscription Stripe is retrying (past_due and unpaid) with what
 // the dunning owes its latest invoice now. With send it owes it: each invoice
 // goes through stripeDunningProcessInvoice, the processing of
-// invoice.payment_failed, so this run and the webhook decide on the same ledger
-// row and an invoice never gets more than its two notices. Without send nothing
-// is written; Stripe and the database are only read.
+// invoice.payment_failed, so this run, the webhook and the hourly sweep (which
+// runs this send) decide on the same ledger row and an invoice never gets more
+// than its two notices. A send logs each notice it owes; the rows carry what
+// owed nothing, which an hourly run would otherwise log for every retrying
+// subscription. Without send nothing is written; Stripe and the database are
+// only read.
 func StripeDunningReport(ctx context.Context, send bool) ([]*StripeDunningReportRow, error) {
 	settings := stripeDunningSettingsFunc()
 	rows := []*StripeDunningReportRow{}
@@ -954,7 +975,7 @@ func StripeDunningReport(ctx context.Context, send bool) ([]*StripeDunningReport
 			row.PaymentActionRequired = outcome.PaymentActionRequired
 			row.Notice = string(outcome.Notice)
 			row.Skip = outcome.Skip
-			if send {
+			if send && outcome.Notice != stripePaymentFailedNoticeNone {
 				stripeDunningLogOutcome(outcome)
 			}
 		}

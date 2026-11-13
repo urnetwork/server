@@ -329,6 +329,11 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			configurePgPoolNotices(config)
 		}
 		configurePgTestEnvDial(currentTestEnvDialGuard(), config.ConnConfig)
+		if self.vaultResourceName == DefaultPgVaultResourceName {
+			// after the guard, which then checks each instance address. The
+			// maintenance pool's sessions bypass PgBouncer.
+			configurePgBouncerPath(config, currentPgBouncerPath(), DefaultPgBouncerDirectSettings())
+		}
 		configurePgPoolDirectSession(config, self.vaultResourceName == MaintenancePgVaultResourceName)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
@@ -854,9 +859,12 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				needsCleanup := discard || physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
 				lifecycle.beginRelease()
 				txObservation.releaseEntered()
+				poolReturned := false
 				if discard {
 					discardPgConnection(ctx, conn)
 					conn = nil
+				} else if releasePolicyKnown {
+					poolReturned = conn.ReleaseWithIdleReturn()
 				} else {
 					conn.Release()
 				}
@@ -868,7 +876,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 						disposition = DbTxReleaseDestroyTransferred
 					}
 				}
-				txObservation.releaseReturned(disposition, cleanup)
+				txObservation.releaseReturned(disposition, cleanup, poolReturned)
 			}()
 			defer func() {
 				if err := recover(); err != nil {

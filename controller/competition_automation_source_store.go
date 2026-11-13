@@ -80,7 +80,7 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 		server.Tx(ctx, func(tx server.PgTx) {
 			observation.callbackEntered = true
 			observation.callbacks++
-			tx = observation.observeReadPrefix(tx, false)
+			tx = observation.observeLeaseRenewalPrefix(tx)
 			result = nil
 			result = self.renewAutomationLeaseInTx(ctx, tx, settings, lease, ttl, observation)
 		}, &observation.phase, &observation.timing, &observation.acquire, observation.read, &observation.transaction)
@@ -116,8 +116,7 @@ func (self PostgresStore) renewAutomationLeaseInTx(ctx context.Context, tx serve
 	}
 	lease.LeaseExpiresAt = now.Add(ttl)
 	observation.step = competitionSupervisorRenewalLeaseUpdate
-	updated, updateError := tx.Exec(ctx, `UPDATE competition_supervisor_lease SET lease_expires_at=$4,heartbeat_at=$5
-	 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND owner_id=$6 AND fencing_token=$7 AND $5<lease_expires_at`,
+	updated, updateError := tx.Exec(ctx, competitionSupervisorLeaseRenewalUpdateSql,
 		lease.Environment, lease.CompetitionId, lease.SeasonId, lease.LeaseExpiresAt, now, lease.OwnerId, lease.FencingToken)
 	server.Raise(updateError)
 	if updated.RowsAffected() != 1 {

@@ -44,9 +44,12 @@ type CapabilityObservation struct {
 	// while the session first establishes (connect's
 	// OpportunisticEstablishHold), so a provider that seals in time carries
 	// them sealed and one that does not gets them in plaintext once it ends.
-	// Zero, the capability probe's, keeps the client's own hold, none by
-	// default: its first sends go at once, in plaintext until the session
-	// seals.
+	// The URL phase that makes those sends gets it on top of its own budget
+	// (providerFirstSendsHold), so the hold is never timed as the provider's
+	// DNS or connect. A client generated once one has joined the window
+	// replaces it and holds nothing (apply). Zero, the capability probe's,
+	// keeps the client's own hold, none by default: its first sends go at
+	// once, in plaintext until the session seals.
 	EstablishHold time.Duration
 	// A replaced window client is recorded (Tunnel.ClientReplaced) and the
 	// tunnel keeps running, for a measurement that rides traffic the session
@@ -75,6 +78,8 @@ func (self *CapabilityObservation) paceRedial(settings *connect.MultiClientSetti
 }
 
 // Changes one generated client's settings in place; nil changes nothing.
+// replacement is whether a client of the tunnel has already joined its
+// window, so the one generated now replaces it.
 //
 // Sessions are opportunistic. A provider without the end-to-end responder
 // keeps carrying the probe's pings in plaintext, which is what lets the
@@ -87,7 +92,13 @@ func (self *CapabilityObservation) paceRedial(settings *connect.MultiClientSetti
 // provider can resolve the key from the first frame, rather than dropping
 // sealed frames until its own establishment window expires. The TLS timeouts
 // stay the defaults, which is what capprobe reads a missing answer against.
-func (self *CapabilityObservation) apply(settings *connect.ClientSettings) {
+//
+// Only a client generated before the window's first holds its first sends
+// (EstablishHold). A replacement takes over traffic mid-turn, where no budget
+// counts a second hold (providerFirstSendsHold), and its turn's session is
+// unmeasured by then (Tunnel.ClientReplaced), so its sends go at once and
+// seal when its session does.
+func (self *CapabilityObservation) apply(settings *connect.ClientSettings, replacement bool) {
 	if self == nil {
 		return
 	}
@@ -99,7 +110,7 @@ func (self *CapabilityObservation) apply(settings *connect.ClientSettings) {
 		encryption = &copied
 	}
 	encryption.Mode = connect.EncryptionModeOpportunistic
-	if 0 < self.EstablishHold {
+	if 0 < self.EstablishHold && !replacement {
 		encryption.OpportunisticEstablishHold = self.EstablishHold
 	}
 	if self.NewPeerClientPublicKeyFetcher != nil {

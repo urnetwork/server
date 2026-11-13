@@ -13,17 +13,30 @@ package model
 // cutoff received points.
 //
 // Each completed operator block (SubnetBlock: seven days from Sunday 00:00
-// UTC) now gets the points of its traffic past the cutoff, once, by the rules
-// a plan applied before the cutoff:
-//   - the plan's computation for the block's traffic: each paying network's
-//     subsidy share split over its providers by bytes, the subscription
-//     revenue, the net revenue and the reliability subsidy by reliability
-//     weight, over the block's window. It only weighs the points: no USDC is
-//     planned, sent or recorded, and the sweeps stay unassigned.
-//   - the plan's points rule (planPayoutPoints): payout points, which are
-//     account_points_per_payout scaled to the window, in proportion to that
-//     computed payout; reliability points; the seeker multiplier; and the
-//     referral parent and child bonuses.
+// UTC) now gets the points of its traffic past the cutoff, once. Since schema
+// v2 (owner decision 2026-11-13: "please make points proportional to traffic
+// served and not revenue/paid traffic. After this change revenue should not
+// have an affect on any payout."):
+//   - payout points: account_points_per_payout scaled to the window, shared
+//     exactly among the provider networks in proportion to the bytes each
+//     served in the window (operatorBlockPayoutPointShares). A network's bytes
+//     are the payout bytes of its sweeps, whatever balance funded them: a
+//     purchase, a Pro grant or a free grant, paid or unpaid, and whatever the
+//     payer. No revenue, net revenue, subscription revenue or revenue-sized
+//     subsidy enters an award, and no payer weighs more than another.
+//   - reliability points by reliability weight, the seeker multiplier, and the
+//     referral parent and child bonuses (planPayoutPoints), whose inputs are
+//     reliability evidence, seeker holdings and referrals, not revenue.
+// The blocks awarded before v2 keep what the payout plan's rule gave them,
+// which weighed the payout points by a computed payout of net revenue and a
+// revenue-sized subsidy: each block is awarded once. No USDC is planned, sent
+// or recorded, and the sweeps stay unassigned.
+//
+// A sweep is a provider network's share of one funding balance's debited bytes
+// of a settled contract (allocateContractParticipantPayouts). A participant on
+// the contract's paying network takes no share, and a contract the degradation
+// valve let settle without escrow has no sweep, so neither earns points here;
+// the SN pool's usage (GetStEpochProviderUsage) counts both.
 //
 // An award is its own ledger: a payment plan id derived from the block (the
 // award happens once whoever writes it), the plan's payment_report, and one
@@ -48,6 +61,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -56,7 +70,16 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const OperatorBlockPointsSchema = "urnetwork-operator-block-points-v1"
+// The schema of an award, which its dry run's file and digest carry. v2
+// (2026-11-13) shares the payout points by bytes served; v1 weighed them by a
+// computed revenue-based payout. A commit refuses an award of another schema,
+// so a v1 dry run cannot commit a block under the old rule.
+const OperatorBlockPointsSchema = "urnetwork-operator-block-points-v2"
+
+// The namespace of the blocks' payment plan ids: v1's, for every schema. A
+// block keeps one plan id, so an award of any schema finds an earlier award of
+// the block, and the leaderboard and the epoch history find either.
+const operatorBlockPointsPlanIdNamespace = "urnetwork-operator-block-points-v1"
 
 // The journal event that marks a payment row as an operator block points row
 // (audit_account_payment).
@@ -96,7 +119,7 @@ var (
 // points. It derives from the block, so every writer finds an earlier award by
 // its payment_report primary key.
 func OperatorBlockPointsPlanId(block int64) server.Id {
-	sum := md5.Sum([]byte(OperatorBlockPointsSchema + "/" + strconv.FormatInt(block, 10)))
+	sum := md5.Sum([]byte(operatorBlockPointsPlanIdNamespace + "/" + strconv.FormatInt(block, 10)))
 	return server.RequireIdFromBytes(sum[:])
 }
 
@@ -215,16 +238,13 @@ type OperatorBlockPoints struct {
 	WindowStart time.Time `json:"window_start"`
 	WindowEnd   time.Time `json:"window_end"`
 
-	// the plan's computation for the window (planSubsidyPayments)
-	SubsidyScale             float64   `json:"subsidy_scale"`
-	SubsidyNetPayoutUsd      float64   `json:"subsidy_net_payout_usd"`
-	ActiveUserCount          int       `json:"active_user_count"`
-	PaidUserCount            int       `json:"paid_user_count"`
-	TrafficUserCount         int       `json:"traffic_user_count"`
-	NetPayoutByteCountPaid   ByteCount `json:"net_payout_byte_count_paid"`
-	NetPayoutByteCountUnpaid ByteCount `json:"net_payout_byte_count_unpaid"`
-	NetRevenue               NanoCents `json:"net_revenue_nano_cents"`
-	SweepCount               int64     `json:"sweep_count"`
+	// the window's share of a subsidy period (subsidy.yml days), at most 1,
+	// which scales the points per period to the window
+	TimeScale float64 `json:"time_scale"`
+	// the bytes the provider networks served in the window, which share the
+	// payout points, and the sweeps that carry them
+	ByteCount  ByteCount `json:"byte_count"`
+	SweepCount int64     `json:"sweep_count"`
 
 	// the reliability window, in reliability blocks [min, max)
 	ReliabilityMinBlockNumber      int64 `json:"reliability_min_block_number"`
@@ -232,28 +252,23 @@ type OperatorBlockPoints struct {
 	ReliabilityEffectiveBlockCount int64 `json:"reliability_effective_block_count"`
 	ReliabilityNetworkCount        int   `json:"reliability_network_count"`
 
-	// account_points_per_payout scaled to the window
+	// account_points_per_payout scaled to the window: the payout points the
+	// networks share by bytes
 	PayoutNanoPoints NanoPoints `json:"payout_nano_points"`
 	PointsPerPayout  int        `json:"points_per_payout"`
-	// the payout the plan computed, which weighs the points; none is paid
-	TotalComputedPayout NanoCents `json:"total_computed_payout_nano_cents"`
 
 	Payments []*OperatorBlockPayment `json:"payments"`
 	Points   []*OperatorBlockPoint   `json:"points"`
 }
 
-// OperatorBlockPayment is one provider network's computed payment: what a
-// plan would have paid it for the window. The row it commits carries no USDC.
+// OperatorBlockPayment is one provider network's traffic in the window, which
+// its payment row records. The row carries no USDC.
 type OperatorBlockPayment struct {
-	NetworkId          server.Id `json:"network_id"`
-	PayoutByteCount    ByteCount `json:"payout_byte_count"`
-	MinSweepTime       time.Time `json:"min_sweep_time"`
-	NetRevenue         NanoCents `json:"net_revenue_nano_cents"`
-	SubsidyPayout      NanoCents `json:"subsidy_payout_nano_cents"`
-	ReliabilitySubsidy NanoCents `json:"reliability_subsidy_nano_cents"`
-	ComputedPayout     NanoCents `json:"computed_payout_nano_cents"`
-	// the earliest sweep with payout bytes: the operator block it earns in
-	MinPaidSweepTime *time.Time `json:"min_paid_sweep_time,omitempty"`
+	NetworkId server.Id `json:"network_id"`
+	// the bytes it served, always positive
+	PayoutByteCount ByteCount `json:"payout_byte_count"`
+	// its earliest sweep in the window: the operator block it earns in
+	MinSweepTime time.Time `json:"min_sweep_time"`
 }
 
 // OperatorBlockPoint is one account_point row, linked to the payment of
@@ -308,56 +323,33 @@ func OperatorBlockPointsDigest(awards []*OperatorBlockPoints) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// The block's traffic past the cutoff, as the plan aggregates its selection:
-// per provider (payee) and per paying network and provider.
+// The block's traffic past the cutoff: each provider network's bytes.
 type operatorBlockTraffic struct {
-	payees map[server.Id]*operatorBlockPayee
-	// payer -> payee
-	pairs map[server.Id]map[server.Id]*operatorBlockPair
-	// the balances that carry subscription revenue
-	revenueBalances map[server.Id]*subsidyRevenueBalance
-	sweepCount      int64
+	payees     map[server.Id]*operatorBlockPayee
+	sweepCount int64
 }
 
+// One provider network's bytes in the window, and its earliest sweep.
 type operatorBlockPayee struct {
-	payoutByteCount  ByteCount
-	netRevenue       NanoCents
-	minSweepTime     time.Time
-	minPaidSweepTime *time.Time
-}
-
-type operatorBlockPair struct {
-	paidByteCount   ByteCount
-	unpaidByteCount ByteCount
+	payoutByteCount ByteCount
+	minSweepTime    time.Time
 }
 
 func newOperatorBlockTraffic() *operatorBlockTraffic {
 	return &operatorBlockTraffic{
-		payees:          map[server.Id]*operatorBlockPayee{},
-		pairs:           map[server.Id]map[server.Id]*operatorBlockPair{},
-		revenueBalances: map[server.Id]*subsidyRevenueBalance{},
+		payees: map[server.Id]*operatorBlockPayee{},
 	}
 }
 
-// One read row: a provider's sweeps funded by one balance.
+// One read row: a provider network's sweeps in one read's sweep time.
 type operatorBlockSweepRow struct {
-	payeeNetworkId    server.Id
-	balanceId         server.Id
-	payerNetworkId    *server.Id
-	paid              bool
-	balanceStartTime  *time.Time
-	balanceEndTime    *time.Time
-	subsidyNetRevenue NanoCents
-	payoutByteCount   ByteCount
-	netRevenue        NanoCents
-	minSweepTime      time.Time
-	minPaidSweepTime  *time.Time
-	sweepCount        int64
+	payeeNetworkId  server.Id
+	payoutByteCount ByteCount
+	minSweepTime    time.Time
+	sweepCount      int64
 }
 
-// Adds a row as the plan aggregates it: every sweep counts toward its
-// provider's bytes and net revenue, and a sweep with a balance row counts
-// toward the subsidy (planSubsidyPayments joins the balance).
+// Adds a row to its provider network's bytes.
 func (self *operatorBlockTraffic) add(row *operatorBlockSweepRow) {
 	self.sweepCount += row.sweepCount
 	payee, ok := self.payees[row.payeeNetworkId]
@@ -366,76 +358,31 @@ func (self *operatorBlockTraffic) add(row *operatorBlockSweepRow) {
 		self.payees[row.payeeNetworkId] = payee
 	}
 	payee.payoutByteCount += row.payoutByteCount
-	payee.netRevenue += row.netRevenue
 	payee.minSweepTime = server.MinTime(payee.minSweepTime, row.minSweepTime)
-	if row.minPaidSweepTime != nil && (payee.minPaidSweepTime == nil || row.minPaidSweepTime.Before(*payee.minPaidSweepTime)) {
-		minPaidSweepTime := *row.minPaidSweepTime
-		payee.minPaidSweepTime = &minPaidSweepTime
-	}
-	if row.payerNetworkId == nil {
-		return
-	}
-	payees, ok := self.pairs[*row.payerNetworkId]
-	if !ok {
-		payees = map[server.Id]*operatorBlockPair{}
-		self.pairs[*row.payerNetworkId] = payees
-	}
-	pair, ok := payees[row.payeeNetworkId]
-	if !ok {
-		pair = &operatorBlockPair{}
-		payees[row.payeeNetworkId] = pair
-	}
-	if row.paid {
-		pair.paidByteCount += row.payoutByteCount
-	} else {
-		pair.unpaidByteCount += row.payoutByteCount
-	}
-	if 0 < row.subsidyNetRevenue && row.balanceStartTime != nil && row.balanceEndTime != nil {
-		self.revenueBalances[row.balanceId] = &subsidyRevenueBalance{
-			startTime:         *row.balanceStartTime,
-			endTime:           *row.balanceEndTime,
-			subsidyNetRevenue: row.subsidyNetRevenue,
-		}
-	}
 }
 
-// The unpaid sweeps of contracts that settled at or after the cutoff, with a
-// sweep time in [$1, $2), per provider and funding balance: the plan's
-// selection (planPayments) past the boundary. A sweep's paid traffic is
-// pointsPaidSweepSql, the definition of the operator blocks.
+// The sweeps no USDC payment owns (payment_id), with payout bytes
+// (pointsPaidSweepSql, the definition of the operator blocks), of contracts
+// that settled at or after the cutoff, with a sweep time in [$1, $2), per
+// provider network. Neither the funding balance, whether it was paid, nor the
+// sweep's revenue is read: the bytes alone weigh the points.
 var operatorBlockPointsSweepSql = `
 	SELECT
 		sweep.network_id,
-		sweep.balance_id,
-		balance.network_id,
-		COALESCE(balance.paid, false),
-		balance.start_time,
-		balance.end_time,
-		COALESCE(balance.subsidy_net_revenue_nano_cents, 0)::bigint,
 		SUM(sweep.payout_byte_count)::bigint,
-		SUM(sweep.payout_net_revenue_nano_cents)::bigint,
 		MIN(sweep.sweep_time),
-		MIN(sweep.sweep_time) FILTER (WHERE ` + pointsPaidSweepSql("sweep") + `),
 		COUNT(*)
 	FROM transfer_escrow_sweep AS sweep
 	INNER JOIN transfer_contract AS contract ON
 		contract.contract_id = sweep.contract_id
-	LEFT JOIN transfer_balance AS balance ON
-		balance.balance_id = sweep.balance_id
 	WHERE
 		$1 <= sweep.sweep_time AND
 		sweep.sweep_time < $2 AND
 		sweep.payment_id IS NULL AND
+		` + pointsPaidSweepSql("sweep") + ` AND
 		$3 <= contract.close_time AND
 		contract.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
-	GROUP BY
-		sweep.network_id,
-		sweep.balance_id,
-		balance.network_id,
-		balance.paid,
-		balance.start_time,
-		balance.end_time,
-		balance.subsidy_net_revenue_nano_cents
+	GROUP BY sweep.network_id
 `
 
 // Reads the window's traffic in bounded read-only statements. Like every read
@@ -458,16 +405,8 @@ func readOperatorBlockTraffic(ctx context.Context, start time.Time, end time.Tim
 					row := &operatorBlockSweepRow{}
 					server.Raise(result.Scan(
 						&row.payeeNetworkId,
-						&row.balanceId,
-						&row.payerNetworkId,
-						&row.paid,
-						&row.balanceStartTime,
-						&row.balanceEndTime,
-						&row.subsidyNetRevenue,
 						&row.payoutByteCount,
-						&row.netRevenue,
 						&row.minSweepTime,
-						&row.minPaidSweepTime,
 						&row.sweepCount,
 					))
 					rows = append(rows, row)
@@ -644,15 +583,16 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 	return reliability, nil
 }
 
-// The reliability subsidy of a plan (calculateReliabilityPayoutInTx) from the
-// networks' multiplied weights: reliability points and the reliability USDC
-// subsidy per subsidy period, scaled to the window, in proportion to weight.
-func operatorBlockReliabilitySubsidies(
+// The reliability points of the window from the networks' multiplied weights,
+// as a plan computed them (calculateReliabilityPayoutInTx):
+// reliability_points_per_payout scaled to the window, in proportion to weight.
+// A network of no weight, or whose share truncates to nothing, is absent.
+func operatorBlockReliabilityPoints(
 	networkWeights map[server.Id]float64,
-	subsidyScale float64,
+	timeScale float64,
 	subsidyConfig *SubsidyConfig,
-) map[server.Id]NetworkReliabilitySubsidy {
-	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
+) map[server.Id]NanoPoints {
+	networkPoints := map[server.Id]NanoPoints{}
 
 	networkIds := slices.SortedFunc(maps.Keys(networkWeights), server.Id.Cmp)
 	totalReliabilityWeight := 0.0
@@ -660,28 +600,17 @@ func operatorBlockReliabilitySubsidies(
 		totalReliabilityWeight += networkWeights[networkId]
 	}
 	if totalReliabilityWeight == 0 {
-		return networkReliabilitySubsidies
+		return networkPoints
 	}
 
-	reliabilityPointsPerPayout := PointsToNanoPoints(float64(subsidyConfig.ReliabilityPointsPerPayout) * subsidyScale)
-	reliabilitySubsidyPerPayout := NanoCents(float64(UsdToNanoCents(float64(subsidyConfig.ReliabilitySubsidyPerPayoutUsd))) * subsidyScale)
-
+	reliabilityPointsPerPayout := PointsToNanoPoints(float64(subsidyConfig.ReliabilityPointsPerPayout) * timeScale)
 	for _, networkId := range networkIds {
-		subsidy := NetworkReliabilitySubsidy{}
 		weight := networkWeights[networkId]
-
-		if reliabilityPoints := float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight); reliabilityPoints > 0 {
-			subsidy.Points = NanoPoints(reliabilityPoints)
+		if points := NanoPoints(float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight)); 0 < points {
+			networkPoints[networkId] = points
 		}
-		if reliabilitySubsidyPerPayout > 0 {
-			reliabilitySubsidy := NanoCents(float64(reliabilitySubsidyPerPayout) * (weight / totalReliabilityWeight))
-			if reliabilitySubsidy >= 0 {
-				subsidy.Usdc = reliabilitySubsidy
-			}
-		}
-		networkReliabilitySubsidies[networkId] = subsidy
 	}
-	return networkReliabilitySubsidies
+	return networkPoints
 }
 
 // The referring network of each network, from the referral map. A network
@@ -715,10 +644,12 @@ type operatorBlockPointsInputs struct {
 }
 
 // planOperatorBlockPoints computes the award from its reads, writing
-// nothing. The payout is planSubsidyPayments' computation over the window, and
-// the points are planPayoutPoints. A plan's withholding of small payments, its
-// minimum epoch duration and its carried USDC bonuses are USDC rules: with no
-// USDC, every provider with traffic in the block earns in the block.
+// nothing: one payment per provider network with bytes in the window, and the
+// points of planPayoutPoints. The traffic it is given carries no revenue and
+// no payer, so neither can weigh the points. A plan's withholding of small
+// payments, its minimum epoch duration and its carried USDC bonuses were USDC
+// rules: with no USDC, every provider with traffic in the block earns in the
+// block.
 func planOperatorBlockPoints(
 	inputs *operatorBlockPointsInputs,
 	traffic *operatorBlockTraffic,
@@ -727,13 +658,15 @@ func planOperatorBlockPoints(
 	subsidyConfig := inputs.subsidyConfig
 	planId := OperatorBlockPointsPlanId(inputs.block)
 	award := &OperatorBlockPoints{
-		Schema:                         OperatorBlockPointsSchema,
-		Block:                          inputs.block,
-		PaymentPlanId:                  planId,
-		PolicySha256:                   inputs.policySha256,
-		Cutoff:                         inputs.cutoff,
-		WindowStart:                    inputs.windowStart,
-		WindowEnd:                      inputs.windowEnd,
+		Schema:        OperatorBlockPointsSchema,
+		Block:         inputs.block,
+		PaymentPlanId: planId,
+		PolicySha256:  inputs.policySha256,
+		Cutoff:        inputs.cutoff,
+		WindowStart:   inputs.windowStart,
+		WindowEnd:     inputs.windowEnd,
+		// as a plan scaled its points to its epoch
+		TimeScale:                      min(float64(inputs.windowEnd.Sub(inputs.windowStart))/float64(subsidyConfig.Duration()), 1.0),
 		SweepCount:                     traffic.sweepCount,
 		ReliabilityMinBlockNumber:      reliability.minBlockNumber,
 		ReliabilityMaxBlockNumber:      reliability.maxBlockNumber,
@@ -744,140 +677,36 @@ func planOperatorBlockPoints(
 		Points:                         []*OperatorBlockPoint{},
 	}
 
-	// the computed payments, keyed by network; each placeholder payment id is
-	// its network until a commit assigns the row's id
-	payments := map[server.Id]*AccountPayment{}
-	for networkId, payee := range traffic.payees {
-		payments[networkId] = &AccountPayment{
-			PaymentId:       networkId,
-			PaymentPlanId:   planId,
+	networkByteCounts := map[server.Id]ByteCount{}
+	for _, networkId := range slices.SortedFunc(maps.Keys(traffic.payees), server.Id.Cmp) {
+		payee := traffic.payees[networkId]
+		if payee.payoutByteCount <= 0 {
+			continue
+		}
+		if math.MaxInt64-award.ByteCount < payee.payoutByteCount {
+			return nil, fmt.Errorf("operator block %d bytes overflow", inputs.block)
+		}
+		award.ByteCount += payee.payoutByteCount
+		networkByteCounts[networkId] = payee.payoutByteCount
+		award.Payments = append(award.Payments, &OperatorBlockPayment{
 			NetworkId:       networkId,
 			PayoutByteCount: payee.payoutByteCount,
-			Payout:          payee.netRevenue,
 			MinSweepTime:    payee.minSweepTime,
-		}
-	}
-
-	/**
-	 * The subsidy, as planSubsidyPayments computes it
-	 */
-	payerNetworkIds := slices.SortedFunc(maps.Keys(traffic.pairs), server.Id.Cmp)
-	for _, payerNetworkId := range payerNetworkIds {
-		payerPaid := ByteCount(0)
-		payerUnpaid := ByteCount(0)
-		for _, pair := range traffic.pairs[payerNetworkId] {
-			payerPaid += pair.paidByteCount
-			payerUnpaid += pair.unpaidByteCount
-		}
-		award.NetPayoutByteCountPaid += payerPaid
-		award.NetPayoutByteCountUnpaid += payerUnpaid
-		if subsidyConfig.ActiveUserByteCountThreshold() <= payerPaid+payerUnpaid {
-			award.ActiveUserCount += 1
-		}
-		if 0 < payerPaid {
-			award.PaidUserCount += 1
-		}
-		if 0 < payerPaid+payerUnpaid {
-			award.TrafficUserCount += 1
-		}
-	}
-
-	revenueBalances := []*subsidyRevenueBalance{}
-	for _, balanceId := range slices.SortedFunc(maps.Keys(traffic.revenueBalances), server.Id.Cmp) {
-		revenueBalances = append(revenueBalances, traffic.revenueBalances[balanceId])
-	}
-	award.NetRevenue = subsidyNetRevenuePerPeriod(
-		revenueBalances,
-		inputs.windowStart,
-		inputs.windowEnd,
-		subsidyConfig.Duration(),
-	)
-	subsidyPayoutUsd := max(
-		subsidyConfig.MinPayoutUsd,
-		subsidyConfig.UsdPerActiveUser*float64(award.ActiveUserCount),
-		subsidyConfig.SubscriptionNetRevenueFraction*NanoCentsToUsd(award.NetRevenue),
-	)
-	award.SubsidyScale = min(float64(inputs.windowEnd.Sub(inputs.windowStart))/float64(subsidyConfig.Duration()), 1.0)
-	award.SubsidyNetPayoutUsd = award.SubsidyScale * subsidyPayoutUsd
-
-	subsidyPayouts := map[server.Id]NanoCents{}
-	netPayout := NanoCents(0)
-	if 0 < award.TrafficUserCount {
-		for _, payerNetworkId := range payerNetworkIds {
-			payees := traffic.pairs[payerNetworkId]
-			netPayerPayoutByteCount := ByteCount(0)
-			for _, pair := range payees {
-				netPayerPayoutByteCount += pair.paidByteCount + pair.unpaidByteCount
-			}
-			if netPayerPayoutByteCount <= 0 {
-				continue
-			}
-			for _, payeeNetworkId := range slices.SortedFunc(maps.Keys(payees), server.Id.Cmp) {
-				pair := payees[payeeNetworkId]
-				// each user is weighted equally, relative to their own traffic
-				weight := float64(pair.paidByteCount+pair.unpaidByteCount) / float64(netPayerPayoutByteCount)
-				payout := UsdToNanoCents(weight * award.SubsidyNetPayoutUsd / float64(award.TrafficUserCount))
-				netPayout += payout
-				if 0 < payout {
-					subsidyPayouts[payeeNetworkId] += payout
-				}
-			}
-		}
-	}
-	// +1 for rounding errors
-	if UsdToNanoCents(award.SubsidyNetPayoutUsd+1) < netPayout {
-		return nil, fmt.Errorf("operator block %d subsidy exceeds the allowed amount: %d <> %d", inputs.block, UsdToNanoCents(award.SubsidyNetPayoutUsd), netPayout)
-	}
-	for networkId, payout := range subsidyPayouts {
-		payment := payments[networkId]
-		payment.Payout += payout
-		payment.SubsidyPayout += payout
-	}
-
-	/**
-	 * The reliability subsidy, as calculateReliabilityPayoutInTx computes it
-	 */
-	reliabilitySubsidies := operatorBlockReliabilitySubsidies(reliability.networkWeights, award.SubsidyScale, subsidyConfig)
-	for networkId, reliabilitySubsidy := range reliabilitySubsidies {
-		if payment, ok := payments[networkId]; ok {
-			payment.Payout += reliabilitySubsidy.Usdc
-			payment.ReliabilitySubsidy = reliabilitySubsidy.Usdc
-		}
-	}
-
-	for _, networkId := range slices.SortedFunc(maps.Keys(payments), server.Id.Cmp) {
-		payment := payments[networkId]
-		payee := traffic.payees[networkId]
-		award.TotalComputedPayout += payment.Payout - payment.BonusPayout
-		award.Payments = append(award.Payments, &OperatorBlockPayment{
-			NetworkId:          networkId,
-			PayoutByteCount:    payment.PayoutByteCount,
-			MinSweepTime:       payment.MinSweepTime,
-			NetRevenue:         payee.netRevenue,
-			SubsidyPayout:      payment.SubsidyPayout,
-			ReliabilitySubsidy: payment.ReliabilitySubsidy,
-			ComputedPayout:     payment.Payout,
-			MinPaidSweepTime:   payee.minPaidSweepTime,
 		})
 	}
 
-	/**
-	 * The points, by the plan's rule
-	 */
-	if 0 < award.SubsidyScale && 0 < award.TotalComputedPayout {
-		totalPoints := float64(subsidyConfig.AccountPointsPerPayout) * award.SubsidyScale
-		award.PayoutNanoPoints = PointsToNanoPoints(totalPoints)
+	if 0 < award.TimeScale && 0 < award.ByteCount {
+		award.PayoutNanoPoints = PointsToNanoPoints(float64(subsidyConfig.AccountPointsPerPayout) * award.TimeScale)
 		rows := planPayoutPoints(&payoutPointsPlan{
-			ctx:                  context.Background(),
-			subsidyConfig:        subsidyConfig,
-			paymentPlanId:        planId,
-			totalPoints:          totalPoints,
-			totalPayout:          award.TotalComputedPayout,
-			payments:             payments,
-			reliabilitySubsidies: reliabilitySubsidies,
-			seekerHolders:        inputs.seekerHolders,
-			referralParents:      operatorBlockReferralParents(inputs.networkReferrals),
-			networkReferrals:     inputs.networkReferrals,
+			ctx:               context.Background(),
+			subsidyConfig:     subsidyConfig,
+			paymentPlanId:     planId,
+			payoutNanoPoints:  award.PayoutNanoPoints,
+			networkByteCounts: networkByteCounts,
+			reliabilityPoints: operatorBlockReliabilityPoints(reliability.networkWeights, award.TimeScale, subsidyConfig),
+			seekerHolders:     inputs.seekerHolders,
+			referralParents:   operatorBlockReferralParents(inputs.networkReferrals),
+			networkReferrals:  inputs.networkReferrals,
 		})
 		for _, row := range rows {
 			point := &OperatorBlockPoint{
@@ -983,13 +812,13 @@ func ComputeOperatorBlockPoints(
 		return nil, err
 	}
 	glog.Infof(
-		"[obp]block %d [%s, %s): %d sweeps, %d providers, %d paying networks, %d reliability networks, %d point rows, %d nano points, read in %s\n",
+		"[obp]block %d [%s, %s): %d sweeps, %d providers, %d bytes, %d reliability networks, %d point rows, %d nano points, read in %s\n",
 		block,
 		start.Format(time.RFC3339),
 		end.Format(time.RFC3339),
 		award.SweepCount,
 		len(award.Payments),
-		award.TrafficUserCount,
+		award.ByteCount,
 		award.ReliabilityNetworkCount,
 		len(award.Points),
 		award.TotalNanoPoints(),
@@ -1037,7 +866,10 @@ func validateOperatorBlockPoints(award *OperatorBlockPoints, transition *server.
 			return fmt.Errorf("operator block %d lists network %s twice", award.Block, payment.NetworkId)
 		}
 		networks[payment.NetworkId] = true
-		if payment.MinPaidSweepTime != nil && (payment.MinPaidSweepTime.Before(start) || !payment.MinPaidSweepTime.Before(end)) {
+		if payment.PayoutByteCount <= 0 {
+			return fmt.Errorf("operator block %d payment of %s carries no bytes", award.Block, payment.NetworkId)
+		}
+		if payment.MinSweepTime.Before(start) || !payment.MinSweepTime.Before(end) {
 			return fmt.Errorf("operator block %d payment of %s is outside the block", award.Block, payment.NetworkId)
 		}
 	}
@@ -1094,10 +926,11 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 			VALUES ($1, $2, $3, $4, $5, $6)
 			`,
 			award.PaymentPlanId,
-			award.TotalComputedPayout,
+			// no payout weighs the points since v2: they follow bytes
+			0,
 			award.PayoutNanoPoints,
-			float64(award.PointsPerPayout)*award.SubsidyScale,
-			award.SubsidyScale,
+			float64(award.PointsPerPayout)*award.TimeScale,
+			award.TimeScale,
 			award.PointsPerPayout,
 		))
 
@@ -1105,10 +938,12 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		for _, payment := range award.Payments {
 			paymentIds[payment.NetworkId] = server.NewId()
 		}
+		// the schema records which rule awarded the block
 		eventDetails, err := json.Marshal(map[string]any{
 			"block":           award.Block,
 			"payment_plan_id": award.PaymentPlanId,
 			"policy_sha256":   award.PolicySha256,
+			"schema":          award.Schema,
 		})
 		server.Raise(err)
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
@@ -1154,8 +989,8 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		})
 
 		// the payments' operator blocks, by the plan's statement: the award's
-		// selection is one row per provider, its paid bytes at its earliest
-		// paid sweep, and the window is inside one block
+		// selection is one row per provider, its bytes at its earliest sweep,
+		// and the window is inside one block
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -1169,14 +1004,11 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		))
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range award.Payments {
-				if payment.MinPaidSweepTime == nil {
-					continue
-				}
 				batch.Queue(
 					`INSERT INTO temp_account_payment (network_id, payout_byte_count, sweep_time) VALUES ($1, $2, $3)`,
 					payment.NetworkId,
 					payment.PayoutByteCount,
-					*payment.MinPaidSweepTime,
+					payment.MinSweepTime,
 				)
 			}
 		})

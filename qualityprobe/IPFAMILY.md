@@ -310,7 +310,9 @@ document is unchanged:
 budget counts four per-request timeouts for it (`Options.RunBudget`), and the
 pass's turn reserve is the dual-stack one: 250 s (was 230 s), 340 s with
 publication, inside the six-minute renewal headroom with a 20 s margin (was
-40 s). An IPv4 provider's turn is bounded as before.
+40 s). An IPv4 provider's turn is bounded as before. Since 2026-11-13 the
+reserve also counts a post-quantum turn's seal waits, 3 s per tunnel
+generation: 259 s, 349 s with publication, an 11 s margin.
 
 ## Deploy chain
 
