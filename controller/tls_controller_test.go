@@ -317,11 +317,22 @@ func (self *tlsTestWorld) issued(device *tlsTestDevice) sidecar.Id {
 		NotBefore:           now,
 		NotAfter:            now.Add(45 * 24 * time.Hour),
 		State:               sidecar.TlsCertStateIssued,
+		StateTime:           now,
+		Chain:               [][]byte{[]byte("leaf of " + device.sidecarId.String()), []byte("intermediate")},
 	}
 	if err := self.store.InsertCert(self.ctx, row); err != nil {
 		self.t.Fatal(err)
 	}
 	return row.CertId
+}
+
+func (self *tlsTestWorld) row(certId sidecar.Id) *sidecar.TlsCertRecord {
+	self.t.Helper()
+	row, err := self.store.GetCert(self.ctx, certId)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	return row
 }
 
 func (self *tlsTestWorld) state(certId sidecar.Id) sidecar.TlsCertState {
@@ -449,5 +460,115 @@ func TestTlsCertRevokeByOwnClientAndByItsNetwork(t *testing.T) {
 	}
 	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: queued.CertId}, deviceSession); !tlsTestStatus(err, "409") {
 		t.Fatalf("a queued order's revocation answered %v", err)
+	}
+}
+
+// GET /tls/cert-order/<id> answers the chain the row keeps (cert-1; QD-741): the same after the
+// process restarted onto a new engine, to its own client alone.
+func TestTlsCertOrderStatusAnswersTheStoredChainAfterARestart(t *testing.T) {
+	world := newTlsTestWorld(t)
+	networkId := sidecar.NewId()
+	device := world.device(networkId, "acme")
+	sibling := world.device(networkId, "acme")
+	certId := world.issued(device)
+	want := world.row(certId).Chain
+
+	read := func() {
+		t.Helper()
+		status, err := TlsCertOrderStatus(world.ctx, device.token, server.Id(certId))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != sidecar.TlsCertStateIssued || status.RetryAfterMs != 0 || len(status.Chain) != 2 ||
+			string(status.Chain[0]) != string(want[0]) || string(status.Chain[1]) != string(want[1]) {
+			t.Fatalf("the status: %+v", status)
+		}
+		if _, err := TlsCertOrderStatus(world.ctx, sibling.token, server.Id(certId)); !tlsTestStatus(err, "404") {
+			t.Fatalf("another client's read answered %v", err)
+		}
+	}
+	read()
+
+	// a restart: nothing of the old engine is left, and the rows are where they were
+	previous := tlsCertsDeps.Load()
+	settings := certsservice.DefaultCertsSettings()
+	settings.RootDomain = tlsTestRoot
+	restarted, err := certsservice.NewCertsService(world.ctx, world.host.ServiceHost(), world.store, nil, nil, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetTlsCerts(nil)
+	if _, err := TlsCertOrderStatus(world.ctx, device.token, server.Id(certId)); !tlsTestStatus(err, "503") {
+		t.Fatalf("a status while nothing is installed answered %v", err)
+	}
+	SetTlsCerts(&TlsCertsDeps{Service: restarted, Store: world.store, Authenticator: previous.Authenticator, Subject: previous.Subject})
+	read()
+}
+
+// POST /tls/cert-revoke writes its reason into the row, where it waits for the revocation chain
+// (cert-1; QD-741): keyCompromise when the body says so, cessationOfOperation otherwise. A word of
+// compromise about a certificate already on its way out replaces the reason, and nothing later takes
+// it back.
+func TestTlsCertRevokeStoresItsReason(t *testing.T) {
+	world := newTlsTestWorld(t)
+	networkId := sidecar.NewId()
+	device := world.device(networkId, "acme")
+	plain := world.issued(device)
+	compromised := world.issued(device)
+	clientId := server.Id(device.clientId)
+	clientSession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId), ClientId: &clientId})
+	defer clientSession.Cancel()
+	revoke := func(certId sidecar.Id, keyCompromise bool) {
+		t.Helper()
+		result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: certId, KeyCompromise: keyCompromise}, clientSession)
+		if err != nil || result.State != sidecar.TlsCertStateRevoking {
+			t.Fatalf("the revocation: %+v, %v", result, err)
+		}
+	}
+
+	issuedTime := world.row(plain).StateTime
+	before := server.NowUtc()
+	revoke(plain, false)
+	row := world.row(plain)
+	if row.State != sidecar.TlsCertStateRevoking || row.RevocationReason != sidecar.TlsCertRevocationReasonCessationOfOperation {
+		t.Fatalf("a plain revocation left %+v", row)
+	}
+	if row.StateTime.Equal(issuedTime) || row.StateTime.Before(before) {
+		t.Fatalf("the revoking row's state time is %v, from before the request at %v", row.StateTime, before)
+	}
+	markedTime := row.StateTime
+	if len(row.Chain) != 2 {
+		t.Fatal("the revocation dropped the chain its CA must be shown")
+	}
+
+	// the device then says its key is compromised: the CA has not been asked yet
+	revoke(plain, true)
+	row = world.row(plain)
+	if row.RevocationReason != sidecar.TlsCertRevocationReasonKeyCompromise || !row.StateTime.Equal(markedTime) {
+		t.Fatalf("a word of compromise left %+v", row)
+	}
+	// and a plain request after it does not take the compromise back
+	revoke(plain, false)
+	if row = world.row(plain); row.RevocationReason != sidecar.TlsCertRevocationReasonKeyCompromise {
+		t.Fatalf("a later plain request left %+v", row)
+	}
+
+	revoke(compromised, true)
+	if row = world.row(compromised); row.RevocationReason != sidecar.TlsCertRevocationReasonKeyCompromise {
+		t.Fatalf("a compromise revocation left %+v", row)
+	}
+
+	// once the CA has taken it the row holds no reason, and a later request writes none
+	if moved, err := world.store.TransitionCert(world.ctx, &certsservice.CertsTransition{
+		CertId: compromised, From: []sidecar.TlsCertState{sidecar.TlsCertStateRevoking}, To: sidecar.TlsCertStateRevoked, At: server.NowUtc(),
+	}); err != nil || !moved {
+		t.Fatalf("the CA's answer: %v, %v", moved, err)
+	}
+	result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: compromised, KeyCompromise: true}, clientSession)
+	if err != nil || result.State != sidecar.TlsCertStateRevoked {
+		t.Fatalf("a revoked certificate's revocation: %+v, %v", result, err)
+	}
+	if row = world.row(compromised); row.State != sidecar.TlsCertStateRevoked || row.RevocationReason != "" {
+		t.Fatalf("a revoked row holds %+v", row)
 	}
 }

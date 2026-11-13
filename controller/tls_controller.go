@@ -11,7 +11,10 @@ package controller
 // and sidecar are the verified claims, and its identifier set, identity key
 // and §8 grant come from the network's newest verified projection through
 // this process's installed deps. Nothing here reaches a CA: a route writes or
-// reads a row, and certs' taskworker chains do the rest (TLS-M5-17).
+// reads a row, and certs' taskworker chains do the rest (TLS-M5-17). So an
+// order's status answers the chain its row keeps from the issuance, the same
+// after a restart, and a revocation writes its reason into the row, where it
+// waits for the chain that takes it to the CA (cert-1; QD-741).
 //
 // What the routes run on is installed per process (SetTlsCerts), as a gate's
 // states are. A process with nothing installed answers every route 503, and a
@@ -211,13 +214,15 @@ var tlsCertRevokeMemberPermitted = func(ctx context.Context, networkId server.Id
 	return ok && model.RoleAndScopesPermit(role, nil, model.RolePermissionDevices)
 }
 
-// POST /tls/cert-revoke: marks a certificate revoking, which certs'
-// revocation chain takes to its CA. A client token revokes its own client's
-// certificate. A network credential, which names no client, revokes any of
+// POST /tls/cert-revoke: marks a certificate revoking with its reason,
+// keyCompromise when the body says so and cessationOfOperation otherwise,
+// which certs' revocation chain takes to its CA. A client token revokes its
+// own client's certificate. A network credential, which names no client, revokes any of
 // its network's: a personal network's owner's, or a team member's whose role
 // holds devices; an API key, an OAuth identity or an admin token, whose scopes
 // this route does not read, none. A certificate of another network is not
-// found. One already on its way out answers its state.
+// found. One already on its way out answers its state, and a word of
+// compromise about one the CA has not taken yet replaces its reason.
 func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, clientSession *session.ClientSession) (*TlsCertRevokeResult, error) {
 	deps := tlsCertsDeps.Load()
 	if deps == nil {
@@ -248,17 +253,30 @@ func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, clientSession *session.Clien
 			return nil, errTlsCertsRoleRefused
 		}
 	}
+	reason := sidecar.TlsCertRevocationReasonCessationOfOperation
+	if args.KeyCompromise {
+		reason = sidecar.TlsCertRevocationReasonKeyCompromise
+	}
+	from := []sidecar.TlsCertState{sidecar.TlsCertStateIssued}
 	switch row.State {
-	case sidecar.TlsCertStateRevoking, sidecar.TlsCertStateRevoked:
+	case sidecar.TlsCertStateRevoked:
 		return &TlsCertRevokeResult{State: row.State}, nil
+	case sidecar.TlsCertStateRevoking:
+		if !args.KeyCompromise || row.RevocationReason == reason {
+			return &TlsCertRevokeResult{State: row.State}, nil
+		}
+		// the CA has not taken it yet, and is to hear of the compromise
+		from = append(from, sidecar.TlsCertStateRevoking)
 	case sidecar.TlsCertStateIssued:
 	default:
 		return nil, errTlsCertsNotRevocable
 	}
 	moved, err := deps.Store.TransitionCert(ctx, &certsservice.CertsTransition{
-		CertId: row.CertId,
-		From:   []sidecar.TlsCertState{sidecar.TlsCertStateIssued},
-		To:     sidecar.TlsCertStateRevoking,
+		CertId:           row.CertId,
+		From:             from,
+		To:               sidecar.TlsCertStateRevoking,
+		At:               server.NowUtc(),
+		RevocationReason: reason,
 	})
 	if err != nil {
 		return nil, tlsCertsError("cert-revoke", err)
