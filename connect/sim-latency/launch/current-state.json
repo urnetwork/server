@@ -42,9 +42,9 @@
   }],
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": true,
-    "publication_held": false,
-    "api_observed_at": "2026-11-13T03:06:31.322203Z",
+    "grading_ready": false,
+    "publication_held": true,
+    "api_observed_at": "2026-11-13T03:15:30.882842Z",
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
       "supervisor_pid": 211140,
@@ -72,6 +72,20 @@
   },
   "recovery": {
     "latest_user_directive": "Rerun all failed evaluations. Controlled recovery qualification is in progress; no rerun has started and submitted patch bytes and screening remain unchanged.",
+    "qualification_maintenance": {
+      "hold_revision": 32,
+      "hold_active": true,
+      "intake_open": true,
+      "active_goofe_attempt_uninterrupted": true,
+      "post_hold_sille_and_legacy_slots_empty": true,
+      "post_hold_private_sille_docker_empty": true,
+      "qa_cpus": "0,2",
+      "production_coordinator_cpus_unchanged": "20,22",
+      "evidence": "/var/lib/urnetwork/competition-recovery-qualification-maintenance-20261113.TOM4WJ2G",
+      "operator_plan_sha256": "2253e6bc0bbc7e43873a81fd415b89cceaf6694b4724e62f5cc2e33ba936d5dc",
+      "tests_started": true,
+      "service_restart_or_recovery_grant": false
+    },
     "authorized_failed_jobs": [
       "01a1c402-9ca1-79d8-e114-5af7c2ef343d",
       "01a1c4af-c928-3e6a-d183-6c9f319cc119",
@@ -93,7 +107,19 @@
       "failed_batch_partial_credit": false,
       "race_or_release_qualification_complete": false
     },
-    "active_qualification": null,
+    "active_qualification": {
+      "kind": "remaining24_original_census_cpu02",
+      "evidence": "/dev/shm/competition-wallet-remaining24-cpu02-20261113.QgW15S0C",
+      "actor_unit": "competition-guard-independent-qa-20261112.service",
+      "actor_pid": 2295983,
+      "actor_invocation_id": "36662a3a4e704d628899bbed6cbd1b57",
+      "guard_unit": "competition-guard-bootstrap-20261112.service",
+      "guard_pid": 2296021,
+      "guard_invocation_id": "106acc81c22448f99b3039b0f588c87e",
+      "admitted_at": "2026-11-13T03:18:16Z",
+      "recipe_sha256": "4f35c8ce89a85f8a17b83fea9a6cb39fff0543c56ce388ef1956ac1ebe5e7580",
+      "passed_credit_granted": false
+    },
     "last_original_batch": {
       "passed": 24,
       "failed": 0,
