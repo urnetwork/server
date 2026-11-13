@@ -192,17 +192,21 @@ func TestE2DesktopEmail(t *testing.T) {
 		{"windows", false, false, ""},
 		{"linux", false, false, ""},
 		{"web", true, false, ""},
-		// the widget platforms keep the widget email, and skip once a widget
-		// exists
+		// the phones keep the widget email, and skip once a widget exists
 		{"ios", false, true, VariantActivated},
 		{"android", false, true, VariantActivated},
-		{"macos", false, true, VariantActivated},
-		{"", false, true, VariantActivated},
 		{"ios", true, true, ""},
-		{"macos", true, true, ""},
+		{"android", true, true, ""},
+		// a Mac has no home or lock screen: the desktop email (the
+		// 2026-11-13 review); an unknown platform gets neither
+		{"macos", false, true, VariantDesktop},
+		{"macos", true, true, VariantDesktop},
+		{"", false, true, ""},
 	} {
 		f := healthy(PathB)
 		f.Platform = c.platform
+		// the reader's app has the widget wherever there is one
+		f.WidgetBuild = true
 		f.HasConnected = true
 		f.WidgetAdded = c.widgetAdded
 		f.DesktopTemplate = c.template

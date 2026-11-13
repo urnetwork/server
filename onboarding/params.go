@@ -53,9 +53,9 @@ type ParamsInput struct {
 	// the App Store or Google Play bills the network: the offer emails carry
 	// no price (the store charges its own local price; REVIEW.md finding 7)
 	StoreBilled bool
-	// the network signed up in a browser (platform web): E2's desktop email
-	// (VariantDesktop) asks to pin the extension, not to start the app with
-	// the computer
+	// E2's desktop email (VariantDesktop) went to the web
+	// (Decision.Browser): it asks to pin the extension, not to start the app
+	// with the computer
 	Browser bool
 
 	// the network's zone for the local date/time strings
@@ -288,10 +288,7 @@ func BuildParams(in ParamsInput) map[string]string {
 			p["days_active"] = FormatCount(daysActive, in.Locale)
 			p["countries_online"] = formatKnownCount(countries, in.Locale)
 		}
-		switch in.Variant {
-		case VariantActivated:
-			p["platform"] = in.Platform
-		case VariantDesktop:
+		if in.Variant == VariantDesktop {
 			// the browser's branch (pin the extension) or the app's (start it
 			// with the computer)
 			p["browser"] = flagParam(in.Browser)
@@ -308,8 +305,8 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["trial_end_at"] = trialEnd
 	case TemplateE4bOffer:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
-		// the Pro value line (email_pro_value: "10 TiB a month instead of
-		// {daily_data_gb} a day"; REVIEW.md finding 11)
+		// the Pro value line (email_pro_value: "Pro gives you 10 TiB of data
+		// a month, plus {daily_data_gb} a day."; REVIEW.md finding 11)
 		p["daily_data_gb"] = FormatGb(in.DailyDataGb)
 		p["store_billed"] = storeBilledFlag(in.StoreBilled)
 		p["offer_price"] = FormatUsd(in.OfferPriceUsd)

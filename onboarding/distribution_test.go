@@ -83,49 +83,63 @@ func TestOfferEmailWithheldByDistribution(t *testing.T) {
 	}
 }
 
-// The direct-download Mac has no widget to point E2 at (its URnetworkDirect
-// target embeds no widgets extension): it gets the desktop email, the app
-// started with the computer, as Windows and Linux do. The App Store Mac, and
-// a Mac app of unknown distribution, keep the widget email.
-func TestE2DirectMacGetsTheDesktopEmail(t *testing.T) {
+// E2's activated email points at the widget on the home screen and the lock
+// screen, which a Mac has in neither distribution: the App Store Mac got it
+// until the 2026-11-13 review, and so did a reader of unknown platform. A Mac
+// gets the desktop email now, the app started with the computer ("Launch
+// URnetwork on system startup" is in its Settings), as Windows and Linux do;
+// an unknown platform gets neither.
+func TestE2MacGetsTheDesktopEmail(t *testing.T) {
 	for _, c := range []struct {
-		distribution string
-		widgetAdded  bool
-		template     bool
-		want         string
+		platform    string
+		widgetAdded bool
+		template    bool
+		want        string
 	}{
-		{session.ClientDistributionMacDirect, false, true, VariantDesktop},
-		// the desktop email does not wait for a widget the build lacks
-		{session.ClientDistributionMacDirect, true, true, VariantDesktop},
+		{"macos", false, true, VariantDesktop},
+		// the desktop email does not wait for a widget
+		{"macos", true, true, VariantDesktop},
 		// not uploaded yet: skipped, as for Windows and Linux
-		{session.ClientDistributionMacDirect, false, false, ""},
-		{session.ClientDistributionAppStore, false, true, VariantActivated},
-		{session.ClientDistributionAppStore, true, true, ""},
-		{"", false, true, VariantActivated},
+		{"macos", false, false, ""},
+		// an unknown platform: the widget copy would be wrong on a computer
+		// and the desktop copy on a phone
+		{"", false, true, ""},
+		{"", false, false, ""},
+		{"", true, true, ""},
 	} {
 		f := healthy(PathB)
-		f.Platform = "macos"
-		f.Distribution = c.distribution
+		f.Platform = c.platform
+		// even a build with the widget: a Mac has no home screen
+		f.WidgetBuild = true
 		f.HasConnected = true
 		f.WidgetAdded = c.widgetAdded
 		f.DesktopTemplate = c.template
 		d := Decide(StepE2, f)
 		if c.want == "" {
 			if d.Action != ActionSkip || d.NextStep != StepE3 {
-				t.Errorf("e2 on macos/%q (widget %t, desktop template %t): %+v, want a skip", c.distribution, c.widgetAdded, c.template, d)
+				t.Errorf("e2 on %q (widget %t, desktop template %t): %+v, want a skip", c.platform, c.widgetAdded, c.template, d)
 			}
 		} else if d.Action != ActionSend || d.Template != TemplateE2Widget || d.Variant != c.want || d.NextStep != StepE3 {
-			t.Errorf("e2 on macos/%q (widget %t, desktop template %t): %+v, want %s", c.distribution, c.widgetAdded, c.template, d, c.want)
+			t.Errorf("e2 on %q (widget %t, desktop template %t): %+v, want %s", c.platform, c.widgetAdded, c.template, d, c.want)
+		}
+		// a reader who never connected gets the connect nudge, which names
+		// no widget, on every platform
+		f.HasConnected = false
+		if d := Decide(StepE2, f); d.Action != ActionSend || d.Variant != VariantNotActivated {
+			t.Errorf("e2 not activated on %q: %+v", c.platform, d)
 		}
 	}
-	for _, platform := range []string{"ios", "android", ""} {
-		if !WidgetPlatform(platform, "") {
-			t.Errorf("%q has a widget", platform)
+	for _, platform := range []string{"ios", "android"} {
+		if !WidgetPlatform(platform) || DesktopPlatform(platform) {
+			t.Errorf("%q is a widget platform", platform)
 		}
 	}
-	for _, platform := range []string{"windows", "linux", PlatformWeb} {
-		if WidgetPlatform(platform, "") {
-			t.Errorf("%q has no widget", platform)
+	for _, platform := range []string{"macos", "windows", "linux", PlatformWeb} {
+		if WidgetPlatform(platform) || !DesktopPlatform(platform) {
+			t.Errorf("%q is a desktop platform", platform)
 		}
+	}
+	if WidgetPlatform("") || DesktopPlatform("") {
+		t.Errorf("an unknown platform is neither")
 	}
 }
