@@ -105,6 +105,29 @@ func (c OnboardingAppleOfferCodesConfig) ReferenceName() string {
 	return OnboardingAppleOfferReferenceNameDefault
 }
 
+// AppleOneTimeOfferCodeBatchMin is the smallest one-time offer code batch App
+// Store Connect generates.
+const AppleOneTimeOfferCodeBatchMin = 500
+
+// OnboardingAppleOfferCodeMinAvailableDefault is the top-up's floor when
+// offer.apple.min_available is not set.
+const OnboardingAppleOfferCodeMinAvailableDefault = 200
+
+// EffectiveBatchSize is the batch a top-up requests: batch_size, never below
+// Apple's minimum.
+func (c OnboardingAppleOfferCodesConfig) EffectiveBatchSize() int {
+	return max(c.BatchSize, AppleOneTimeOfferCodeBatchMin)
+}
+
+// EffectiveMinAvailable is the top-up's floor: min_available, or the default
+// when it is not positive.
+func (c OnboardingAppleOfferCodesConfig) EffectiveMinAvailable() int {
+	if c.MinAvailable <= 0 {
+		return OnboardingAppleOfferCodeMinAvailableDefault
+	}
+	return c.MinAvailable
+}
+
 // Template variant and locale fallbacks.
 const (
 	TemplateVariantDefault = "default"
