@@ -92,13 +92,13 @@ type cryptoWalletReceipt struct {
 	ReviewReason string
 }
 
-// cryptoWalletWatched is a per-address coin's chain reader (ETH through
-// Alchemy, SOL through Helius): no daemon of ours knows every invoice
-// address, so the scanner names the addresses in play to read before each
-// scan, and IncomingSince and Transaction report only transfers to addresses
-// the pool holds; the scan's sweep reads every other issued address
-// (cryptoWalletSweeper, crypto_pay_sweep.go). Bitcoin and TAO are not ones:
-// their readers read every block and look every issued address up themselves
+// A per-address coin's chain reader (ETH through Alchemy, SOL through
+// Helius): no daemon of ours knows every invoice address, so the scanner
+// names the addresses in play to read before each scan, and IncomingSince
+// and Transaction report only transfers to addresses the pool holds; the
+// scan's sweep reads every other issued address (cryptoWalletSweeper,
+// crypto_pay_sweep.go). Bitcoin and TAO are not ones: their readers read
+// every block and look every issued address up themselves
 // (crypto_pay_bitcoin.go, crypto_pay_bittensor.go).
 type cryptoWalletWatched interface {
 	SetWatched(addresses []*model.CryptoPaymentWatchedAddress)

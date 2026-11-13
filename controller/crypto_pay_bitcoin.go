@@ -502,8 +502,8 @@ func (self *bitcoinWallet) readBlock(ctx context.Context, height uint64) (*bitco
 	return read, nil
 }
 
-// blockPayments reads what a block paid the invoice addresses: every
-// address its outputs pay, matched in one lookup.
+// What a block paid the invoice addresses: every address its outputs pay,
+// matched in one lookup.
 func (self *bitcoinWallet) blockPayments(ctx context.Context, block *bitcoinBlock) ([]*bitcoinChainPayment, error) {
 	addresses := []string{}
 	seen := map[string]bool{}

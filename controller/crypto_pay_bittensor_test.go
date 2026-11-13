@@ -408,7 +408,7 @@ func (self *fakeCryptoTaoNode) serveMetadata(t *testing.T, numbers ...uint64) {
 	}
 }
 
-// cryptoTaoTestWallet is a reader over the fake node, unpaced.
+// A reader over the fake node, unpaced.
 func cryptoTaoTestWallet(node *fakeCryptoTaoNode) *bittensorWallet {
 	wallet := newBittensorWallet(&cryptoWalletSettings{Asset: model.CryptoAssetTao, ChainRpcUrl: "ws://fake"}, &CryptoPayAssetConfig{Network: cryptoNetworkMainnet})
 	wallet.rpc = node
@@ -416,16 +416,16 @@ func cryptoTaoTestWallet(node *fakeCryptoTaoNode) *bittensorWallet {
 	return wallet
 }
 
-// cryptoTaoTestReset forgets the cached runtimes and blocks, and makes no TAO
-// address issued until the test issues some (cryptoTaoTestIssue).
+// Forgets the cached runtimes and blocks, and makes no TAO address issued
+// until the test issues some (cryptoTaoTestIssue).
 func cryptoTaoTestReset(t *testing.T) {
 	resetCryptoTaoCaches()
 	t.Cleanup(resetCryptoTaoCaches)
 	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{})
 }
 
-// cryptoTaoTestIssue makes the given addresses the TAO addresses invoices
-// were given, without a database, for the rest of the test.
+// Makes the given addresses the TAO addresses invoices were given, without a
+// database, for the rest of the test.
 func cryptoTaoTestIssue(t *testing.T, issued map[string]*model.CryptoPaymentIssuedAddress) {
 	previousIssued := cryptoTaoAddressesIssued
 	previousAddresses := cryptoTaoIssuedAddresses
@@ -447,8 +447,7 @@ func cryptoTaoTestIssue(t *testing.T, issued map[string]*model.CryptoPaymentIssu
 	})
 }
 
-// cryptoTaoTestIssued is one issued address at index, made long before any
-// block the tests read.
+// One issued address at index, made long before any block the tests read.
 func cryptoTaoTestIssued(index int64) *model.CryptoPaymentIssuedAddress {
 	return &model.CryptoPaymentIssuedAddress{AddressIndex: index, CreateTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 }

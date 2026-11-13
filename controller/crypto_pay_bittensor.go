@@ -1077,11 +1077,10 @@ func cryptoTaoIssuedOurs(ctx context.Context, blocks []*cryptoTaoBlock) map[[32]
 	return ours
 }
 
-// blockReceipts reads a block's transfers to our accounts as receipts: summed
-// per account and extrinsic, held for review (transfer_shape) unless the
-// extrinsic's shape is one the rail credits. An account whose invoice was
-// made after the block was mined (less the clock tolerance) is not matched
-// in it.
+// Reads a block's transfers to our accounts as receipts: summed per account
+// and extrinsic, held for review (transfer_shape) unless the extrinsic's
+// shape is one the rail credits. An account whose invoice was made after the
+// block was mined (less the clock tolerance) is not matched in it.
 func (self *bittensorWallet) blockReceipts(ctx context.Context, block *cryptoTaoBlock, ours map[[32]byte]*cryptoTaoOurs, onlyExtrinsic *int) ([]*cryptoWalletReceipt, error) {
 	type key struct {
 		extrinsic int
@@ -1152,11 +1151,11 @@ func (self *bittensorWallet) blockReceipts(ctx context.Context, block *cryptoTao
 	return receipts, nil
 }
 
-// cryptoTaoScanRange is which finalized blocks one scan reads: from
-// minHeight (the cursor less its window), never further back than the
-// lookback (the blocks passed over are counted), at most BlocksPerScan, up to
-// the finalized head. A first scan (minHeight 0) starts at the lookback
-// without counting. ok = false: the settings read no block.
+// Which finalized blocks one scan reads: from minHeight (the cursor less its
+// window), never further back than the lookback (the blocks passed over are
+// counted), at most BlocksPerScan, up to the finalized head. A first scan
+// (minHeight 0) starts at the lookback without counting. ok = false: the
+// settings read no block.
 func cryptoTaoScanRange(settings *CryptoTaoReaderSettings, minHeight uint64, finalized uint64) (start uint64, end uint64, skipped uint64, ok bool) {
 	if settings.BlocksPerScan <= 0 {
 		return 0, 0, 0, false

@@ -479,8 +479,8 @@ func (self *cryptoTestBitcoinNode) serve() string {
 
 // ----- the seams -----
 
-// cryptoTestBitcoinState stands in for the database: the cursor row's kept
-// chain, the invoice addresses, the pool, and every lookup made.
+// Stands in for the database: the cursor row's kept chain, the invoice
+// addresses, the pool, and every lookup made.
 type cryptoTestBitcoinState struct {
 	stateLock sync.Mutex
 	// the kept chain the last complete scan wrote

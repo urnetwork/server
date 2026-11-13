@@ -24,9 +24,8 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// cryptoOldInvoiceFlow is a coin's recorded chain behind its own reader, and
-// an invoice made three days before the scan at the recorded payment's
-// address.
+// A coin's recorded chain behind its own reader, and an invoice made three
+// days before the scan at the recorded payment's address.
 type cryptoOldInvoiceFlow struct {
 	asset   string
 	address string

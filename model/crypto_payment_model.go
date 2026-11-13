@@ -1597,12 +1597,11 @@ type CryptoPaymentWatchedAddress struct {
 	Hot bool
 }
 
-// ListCryptoPaymentWatchedAddressesInConn lists the invoice addresses of a
-// per-address coin (ETH, SOL) its scanner reads every scan or often: open
-// invoices, invoices with a receipt still in the mempool or not yet
-// confirmed, and invoices that expired, were credited or were voided after
-// watchSince. Hot first, newest first, at most limit. Every other address an
-// invoice was given is read by the scan's sweep
+// The invoice addresses of a per-address coin (ETH, SOL) its scanner reads
+// every scan or often: open invoices, invoices with a receipt still in the
+// mempool or not yet confirmed, and invoices that expired, were credited or
+// were voided after watchSince. Hot first, newest first, at most limit. Every
+// other address an invoice was given is read by the scan's sweep
 // (ListCryptoAddressesToSweepInConn). Reuse the caller's PostgreSQL session;
 // nil selects the outer acquisition boundary.
 func ListCryptoPaymentWatchedAddressesInConn(
