@@ -85,6 +85,29 @@ func brevoApiUrl(path string) string {
 	return strings.TrimRight(brevoApiBaseUrl, "/") + "/" + strings.TrimLeft(path, "/")
 }
 
+// brevoPathSegment percent-encodes a value for one path segment of a Brevo
+// URL: every byte but RFC 3986's unreserved characters, so an address's "@"
+// and "+" reach Brevo as %40 and %2B, as its docs ask. A raw "+" in the path
+// is read as a space, and DELETE /contacts/a+b@example then names no contact:
+// Brevo answers document_not_found, which reads as already removed, and the
+// contact stays (the 2026-11-13 review).
+func brevoPathSegment(value string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(value); i += 1 {
+		c := value[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9', c == '-', c == '.', c == '_', c == '~':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&15])
+		}
+	}
+	return b.String()
+}
+
 func brevoHeader(header http.Header) {
 	header.Add("api-key", brevoApiKey())
 }
@@ -320,7 +343,7 @@ func BrevoAddContact(ctx context.Context, userEmail string) error {
 }
 
 func BrevoRemoveContact(ctx context.Context, userEmail string) error {
-	url := fmt.Sprintf("%s?identifierType=email_id", brevoApiUrl("contacts/"+userEmail))
+	url := fmt.Sprintf("%s?identifierType=email_id", brevoApiUrl("contacts/"+brevoPathSegment(userEmail)))
 
 	status, r, err := server.HttpDeleteWithStatus[BrevoContactResult](
 		ctx,
