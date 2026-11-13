@@ -2815,6 +2815,7 @@ func heliusShopifyOrderPayment(clientSession *session.ClientSession, transaction
 	case err != nil:
 		solanaShopifyOrderPayments.WithLabelValues(leg, "error").Inc()
 		glog.Warningf("HeliusWebhook: the Shopify order of Solana Pay payment %s could not be looked up: %s\n", transaction.Signature, err)
+		note = "the order lookup failed"
 	case outcome == solanaShopifyRecorded:
 		solanaShopifyOrderPayments.WithLabelValues(leg, "recorded").Inc()
 		return true
@@ -2822,7 +2823,9 @@ func heliusShopifyOrderPayment(clientSession *session.ClientSession, transaction
 		return false
 	}
 	if !heliusReceiverLegRuns() {
-		solanaShopifyOrderPayments.WithLabelValues(leg, "unverified").Inc()
+		if err == nil {
+			solanaShopifyOrderPayments.WithLabelValues(leg, "unverified").Inc()
+		}
 		return false
 	}
 	solanaShopifyOrderPayments.WithLabelValues(leg, "deferred").Inc()

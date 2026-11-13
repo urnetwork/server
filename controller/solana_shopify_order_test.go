@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
@@ -282,28 +284,49 @@ func TestHeliusWebhookLeavesAnUnverifiedShopifyPaymentToTheReceiverLeg(t *testin
 	transaction := solanaShopifyTestHeliusPayment("not-yet", blockTime, solanaShopifyTestReceiver, solanaShopifyTestReceiverToken, 142_530_300, 1_295_730, 143_970)
 	webhookSession := &session.ClientSession{Ctx: context.Background()}
 
+	outcomes := func() map[string]float64 {
+		counted := map[string]float64{}
+		for _, outcome := range []string{"recorded", "unverified", "deferred", "error"} {
+			counted[outcome] = testutil.ToFloat64(solanaShopifyOrderPayments.WithLabelValues(model.SolanaShopifyOrderLegWebhook, outcome))
+		}
+		return counted
+	}
+	counted := func(before map[string]float64) map[string]float64 {
+		after := outcomes()
+		for outcome := range after {
+			after[outcome] -= before[outcome]
+		}
+		return after
+	}
+
 	unfulfilled := solanaShopifyTestWebhook(t, true)
 	shop := newSolanaShopifyTestStore(t)
+	before := outcomes()
 	_, err := HeliusWebhook([]*SolanaTransaction{transaction}, webhookSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, len(unfulfilled.recorded), 0)
 	connect.AssertEqual(t, len(shop.recorded), 0)
 	connect.AssertEqual(t, shop.lookups, 1)
+	connect.AssertEqual(t, counted(before), map[string]float64{"recorded": 0, "unverified": 0, "deferred": 1, "error": 0})
 
 	// a failed lookup is left to the leg too, and fails nothing
 	shop.lookupErr = errors.New("shopify orders: http 503")
+	before = outcomes()
 	_, err = HeliusWebhook([]*SolanaTransaction{transaction}, webhookSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, len(unfulfilled.recorded), 0)
+	connect.AssertEqual(t, counted(before), map[string]float64{"recorded": 0, "unverified": 0, "deferred": 1, "error": 1})
 
 	// no receiver leg: today's behaviour
 	unfulfilled = solanaShopifyTestWebhook(t, false)
 	shop.lookupErr = nil
+	before = outcomes()
 	_, err = HeliusWebhook([]*SolanaTransaction{transaction}, webhookSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, len(unfulfilled.recorded), 1)
 	connect.AssertEqual(t, unfulfilled.recorded[0].Reason, model.SolanaUnfulfilledReasonNoIntent)
 	connect.AssertEqual(t, len(shop.recorded), 0)
+	connect.AssertEqual(t, counted(before), map[string]float64{"recorded": 0, "unverified": 1, "deferred": 0, "error": 0})
 }
 
 // A payment the Solana Pay app did not build is never looked up in Shopify

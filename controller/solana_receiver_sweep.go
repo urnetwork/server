@@ -370,15 +370,21 @@ func solanaReceiverShopifyOrder(
 	}
 	leg := model.SolanaShopifyOrderLegReceiver
 	outcome, note, err := solanaRecognizeShopifyOrder(run.connOwner, run.clientSession.Ctx, transaction, decision.unfulfilled.TokenAmountUsd, leg, shopifySettings, run.dryRun)
+	count := func(outcome string) {
+		// a dry run writes nothing, and counts nothing
+		if !run.dryRun {
+			solanaShopifyOrderPayments.WithLabelValues(leg, outcome).Inc()
+		}
+	}
 	switch {
 	case err != nil:
-		solanaShopifyOrderPayments.WithLabelValues(leg, "error").Inc()
+		count("error")
 		return false, fmt.Errorf("the Shopify order lookup: %w", err)
 	case outcome == solanaShopifyRecorded:
-		solanaShopifyOrderPayments.WithLabelValues(leg, "recorded").Inc()
+		count("recorded")
 		return true, nil
 	case outcome == solanaShopifyUnverified:
-		solanaShopifyOrderPayments.WithLabelValues(leg, "unverified").Inc()
+		count("unverified")
 		matchNote := "a Solana Pay app payment no Shopify order verifies: " + note
 		if decision.unfulfilled.MatchNote != nil {
 			matchNote = *decision.unfulfilled.MatchNote + "; " + matchNote
