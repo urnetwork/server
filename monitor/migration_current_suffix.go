@@ -1008,6 +1008,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{cryptoAddressSweepMigrationContract},
 	// the Shopify orders paid with Solana Pay, versioned by its position
 	[]snMainnetMigrationContract{solanaShopifyOrderPaymentMigrationContract},
+	// the per-network mail context, versioned by its position
+	[]snMainnetMigrationContract{networkMailContextMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

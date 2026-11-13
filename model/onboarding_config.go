@@ -164,6 +164,43 @@ func (c *OnboardingBrevoConfig) TemplateIdLocale(step string, variant string, lo
 	return 0, "", false
 }
 
+// TemplateIdForReader selects the template for a reader: the step's variant
+// (else `default`), in the locale onboarding.ChooseTemplateLocale picks from
+// the reader's languages among the locales the variant has templates in.
+// source is where that locale came from ("" for the English default). ok is
+// false when nothing usable is configured.
+func (c *OnboardingBrevoConfig) TemplateIdForReader(
+	step string,
+	variant string,
+	languages onboarding.MailLanguages,
+	settings *onboarding.MailLanguageSettings,
+) (id int, locale string, source string, ok bool) {
+	variants, ok := c.Templates[step]
+	if !ok {
+		return 0, "", "", false
+	}
+	locales, ok := variants[variant]
+	if !ok || len(locales) == 0 {
+		locales, ok = variants[TemplateVariantDefault]
+		if !ok || len(locales) == 0 {
+			return 0, "", "", false
+		}
+	}
+	templateLocales := []string{}
+	for candidate, id := range locales {
+		if 0 < id {
+			templateLocales = append(templateLocales, candidate)
+		}
+	}
+	// the map's order must not decide between equals
+	sort.Strings(templateLocales)
+	locale, source = onboarding.ChooseTemplateLocale(languages, templateLocales, settings)
+	if locale == "" {
+		return 0, "", "", false
+	}
+	return locales[locale], locale, source, true
+}
+
 // HasTemplateVariant reports whether the step's variant itself has an uploaded
 // template in some locale, without the `default` fallback: a new variant
 // (e2_widget/desktop) goes only once the release has uploaded it and written
@@ -293,6 +330,46 @@ type OnboardingConfig struct {
 	Policy OnboardingPolicyConfig `yaml:"policy"`
 	// which app builds have the home screen widget of E2's widget email
 	Widgets OnboardingWidgetsConfig `yaml:"widgets"`
+	// the language the campaign emails (onboarding and re-engagement) of a
+	// reader known only by country are written in
+	MailLanguage OnboardingMailLanguageConfig `yaml:"mail_language"`
+}
+
+// OnboardingMailLanguageConfig lays the owner's choices over
+// onboarding.DefaultMailLanguageSettings, so a country's language is a config
+// change, not a server release.
+type OnboardingMailLanguageConfig struct {
+	// CountryOverrides maps an alpha-2 country to the language its readers
+	// known only by country get, entry by entry over the rule
+	// (onboarding.CountryLanguage): `UA: uk`, `KZ: ru`; `en` pins English.
+	// Ukraine, Kazakhstan and Belarus get English until the owner sets them.
+	CountryOverrides map[string]string `yaml:"country_overrides"`
+	// CountryLanguageMinPercent and CountryOtherLanguageMaxPercent replace
+	// the rule's thresholds when positive (defaults 80 and 50).
+	CountryLanguageMinPercent      float64 `yaml:"country_language_min_percent"`
+	CountryOtherLanguageMaxPercent float64 `yaml:"country_other_language_max_percent"`
+}
+
+// EffectiveMailLanguageSettings are onboarding.DefaultMailLanguageSettings
+// with mail_language laid over them. An override whose country is not two
+// letters or whose language does not parse is ignored.
+func (c *OnboardingConfig) EffectiveMailLanguageSettings() *onboarding.MailLanguageSettings {
+	s := onboarding.DefaultMailLanguageSettings()
+	for country, language := range c.MailLanguage.CountryOverrides {
+		country = NormalizeCountryCode(country)
+		language = onboarding.NormalizeLanguageTag(language)
+		if country == "" || language == "" {
+			continue
+		}
+		s.CountryOverrides[country] = language
+	}
+	if 0 < c.MailLanguage.CountryLanguageMinPercent {
+		s.CountryLanguageMinPercent = c.MailLanguage.CountryLanguageMinPercent
+	}
+	if 0 < c.MailLanguage.CountryOtherLanguageMaxPercent {
+		s.CountryOtherLanguageMaxPercent = c.MailLanguage.CountryOtherLanguageMaxPercent
+	}
+	return s
 }
 
 // OnboardingWidgetsConfig lays release records over
