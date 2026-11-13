@@ -13,7 +13,8 @@ import (
 // client token included, and it carried each sign-in method's stored token.
 // An unexpired token signs in at /auth/login as the network, so a client token
 // could become a network credential. The answer names each sign-in by its type
-// and user auth only. The token is synthetic.
+// and user auth; the documented `auth_jwt` key stays, empty. The token is
+// synthetic.
 func TestGetNetworkUserHoldsNoSignInToken(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -44,7 +45,7 @@ func TestGetNetworkUserHoldsNoSignInToken(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(answer), "synthetic-sso") || strings.Contains(string(answer), `"auth_jwt"`) {
+		if strings.Contains(string(answer), "synthetic-sso") {
 			t.Errorf("the user answer holds the stored sign-in token")
 		}
 		decoded := struct {
@@ -55,6 +56,10 @@ func TestGetNetworkUserHoldsNoSignInToken(t *testing.T) {
 		}
 		if len(decoded.SsoAuths) != 1 || decoded.SsoAuths[0]["auth_type"] != string(SsoAuthTypeGoogle) || decoded.SsoAuths[0]["user_auth"] != ssoUserAuth {
 			t.Errorf("the user answer names its sign-in as %v", decoded.SsoAuths)
+		}
+		// the documented key, empty
+		if authJwt, ok := decoded.SsoAuths[0]["auth_jwt"]; !ok || authJwt != "" {
+			t.Errorf("the user answer's sign-in has auth_jwt %v (present %t), want an empty string", authJwt, ok)
 		}
 	})
 }
