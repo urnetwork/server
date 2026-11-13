@@ -458,16 +458,54 @@ func providerModernGateShadowSummary(bucketOutcomeCounts map[string]map[string]i
 	return fmt.Sprintf("%s, evidence max age %s: %s", state, ProviderModernEvidenceMaxAge, strings.Join(bucketTexts, "; "))
 }
 
+// Whether the provider's row shows, at now, the post-quantum half of modern:
+// a fresh observation that is post-quantum, whatever its window. No row,
+// stale evidence and a newest observation that is not post-quantum are not.
+func providerModernEvidencePostQuantum(record *ProviderModernEvidenceRecord, now time.Time) bool {
+	switch classifyProviderModernEvidence(record, now) {
+	case ProviderModernOutcomeModern, ProviderModernOutcomeNoResizableWindows:
+		return true
+	default:
+		return false
+	}
+}
+
 // The ids among clientIds that are modern at now (FP2-MODERN.md,
 // "Definition"), for providers a request names, which the score index does
-// not hold. One statement per chunk of 256 reads, in one snapshot, each id's
-// current provide keys, its evidence row and its declaration: with a Public
-// key, the evidence decides; with a Network key and no Public one, the
-// declaration (provide_capability_model.go); with neither, the id is not
-// modern, whatever declaration an earlier provide left behind. Each query
-// observes the caller's context. An error is the caller's: a request that
-// requires modern providers cannot be answered without it.
+// not hold, while the post-quantum marker is not set (FP2-PROTOCOL.md
+// §12.4). The evidence row decides for every provider with a Public or a
+// Network key: a network-only provider, which no probe can reach, is modern
+// only with the same evidence as a public one. An id with neither key is
+// never modern, and no provider is modern by its own declaration (owner,
+// 2026-11-13: "They must have a positive quality probe handshake to count").
+// An error is the caller's: a request that requires modern providers cannot
+// be answered without it.
 func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
+	return readProviderEvidenceClientIds(ctx, clientIds, func(record *ProviderModernEvidenceRecord) bool {
+		return classifyProviderModernEvidence(record, now) == ProviderModernOutcomeModern
+	})
+}
+
+// The ids among clientIds whose evidence row shows post-quantum at now
+// (providerModernEvidencePostQuantum), by the rule of
+// readProviderModernClientIds without the window: the candidates and named
+// providers a post_quantum_encryption request may answer while the
+// post-quantum marker is not set (FP2-PROTOCOL.md §12.4). No provider
+// qualifies by its own declaration. An error is the caller's: a request that
+// requires post-quantum encryption cannot be answered without it, and an
+// unread provider never qualifies.
+func readProviderPostQuantumEvidenceClientIds(ctx context.Context, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
+	return readProviderEvidenceClientIds(ctx, clientIds, func(record *ProviderModernEvidenceRecord) bool {
+		return providerModernEvidencePostQuantum(record, now)
+	})
+}
+
+// The ids among clientIds that hold a Public or a Network provide key and
+// whose evidence row qualifies; an id without a row never does. One
+// statement per chunk of 256 reads, in one snapshot, each id's current
+// provide keys and its evidence row. Each query observes the caller's
+// context, and every error is returned, never raised.
+func readProviderEvidenceClientIds(ctx context.Context, clientIds []server.Id, qualifies func(*ProviderModernEvidenceRecord) bool) (map[server.Id]bool, error) {
 	const chunkSize = 256
 	uniqueClientIds := make([]server.Id, 0, len(clientIds))
 	seenClientIds := make(map[server.Id]bool, len(clientIds))
@@ -477,9 +515,9 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 			uniqueClientIds = append(uniqueClientIds, clientId)
 		}
 	}
-	modernClientIds := map[server.Id]bool{}
+	qualifiedClientIds := map[server.Id]bool{}
 	if len(uniqueClientIds) == 0 {
-		return modernClientIds, nil
+		return qualifiedClientIds, nil
 	}
 	var returnErr error
 	// a connection that cannot be acquired raises; it is the caller's error
@@ -496,22 +534,19 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 					ctx,
 					`
 					SELECT
-						named.client_id,
-						EXISTS (
-							SELECT 1 FROM provide_key
-							WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $2
-						),
-						EXISTS (
-							SELECT 1 FROM provide_key
-							WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $3
-						),
+						provider_modern_evidence.client_id,
 						provider_modern_evidence.post_quantum,
 						provider_modern_evidence.window_resizable,
-						provider_modern_evidence.measured_at,
-						COALESCE(provide_capability.post_quantum_encryption, false)
-					FROM unnest($1::uuid[]) AS named(client_id)
-					LEFT JOIN provider_modern_evidence ON provider_modern_evidence.client_id = named.client_id
-					LEFT JOIN provide_capability ON provide_capability.client_id = named.client_id
+						provider_modern_evidence.measured_at
+					FROM provider_modern_evidence
+					WHERE
+						provider_modern_evidence.client_id = ANY($1::uuid[]) AND
+						EXISTS (
+							SELECT 1 FROM provide_key
+							WHERE
+								provide_key.client_id = provider_modern_evidence.client_id AND
+								provide_key.provide_mode IN ($2, $3)
+						)
 					`,
 					chunkClientIds,
 					ProvideModePublic,
@@ -525,30 +560,13 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 					defer rows.Close()
 					for rows.Next() {
 						var clientId server.Id
-						var providePublic, provideNetwork, declared bool
-						var postQuantum, windowResizable *bool
-						var measuredAt *time.Time
-						if err := rows.Scan(&clientId, &providePublic, &provideNetwork, &postQuantum, &windowResizable, &measuredAt, &declared); err != nil {
+						record := &ProviderModernEvidenceRecord{}
+						if err := rows.Scan(&clientId, &record.PostQuantum, &record.WindowResizable, &record.MeasuredAt); err != nil {
 							returnErr = err
 							return
 						}
-						switch {
-						case providePublic:
-							var record *ProviderModernEvidenceRecord
-							if measuredAt != nil {
-								record = &ProviderModernEvidenceRecord{
-									PostQuantum:     postQuantum != nil && *postQuantum,
-									WindowResizable: windowResizable != nil && *windowResizable,
-									MeasuredAt:      *measuredAt,
-								}
-							}
-							if classifyProviderModernEvidence(record, now) == ProviderModernOutcomeModern {
-								modernClientIds[clientId] = true
-							}
-						case provideNetwork:
-							if declared {
-								modernClientIds[clientId] = true
-							}
+						if qualifies(record) {
+							qualifiedClientIds[clientId] = true
 						}
 					}
 					returnErr = rows.Err()
@@ -564,5 +582,5 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 	if returnErr != nil {
 		return nil, returnErr
 	}
-	return modernClientIds, nil
+	return qualifiedClientIds, nil
 }

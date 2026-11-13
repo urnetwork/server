@@ -822,8 +822,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(893, "provider union review, identity and retained source custody", competitionMigration893ArtifactQuery).removedAt(897),
 	},
 	[]snMainnetMigrationContract{
-		// the post-quantum declaration that find-providers2 reads for a
-		// request that requires post-quantum encryption
+		// the post-quantum declaration of each provider's latest provide,
+		// stored as its record; find-providers2 no longer reads it
 		migrationCurrentSuffix(894, "provider capability declarations",
 			migrationFp2Table("provide_capability"),
 			snMainnetMigrationColumns("provide_capability",

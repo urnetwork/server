@@ -17,9 +17,11 @@
 // export's ttl, while the stream has run for a whole window and is still
 // running, and deletes it otherwise. A stream silent for longer than
 // SeenMaxAge has ended, a prober rolled back for instance: the marker is
-// cleared at the next export, so strict post-quantum selection returns to
-// today's sources rather than to an emptying window, and the next stream
-// starts a window of its own.
+// cleared at the next export, so strict post-quantum selection returns to the
+// probe's modern evidence of the last seven days (provider_modern_evidence,
+// readProviderPostQuantumEvidenceClientIds and readProviderModernClientIds)
+// rather than to an emptying window, and the next stream starts a window of
+// its own. Neither side of the marker counts a provider's own declaration.
 //
 // Functions are safe for concurrent use; the stream's keys tolerate racing
 // writers, which can only move since by the time between two outcomes.
