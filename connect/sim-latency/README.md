@@ -338,7 +338,10 @@ return 503 with the real host checks false, while `/competition/info` reports
 `runtime_status.intake_ready: true`, `grading_ready: false` and
 `publication_held: true`, and authenticated v2 submissions queue normally.
 Existing separately approved private completed-score feedback is unchanged;
-public results, rankings and winner remain held.
+new public results, rankings and winner decisions remain held. A claim or
+grading pause does not retract results, scores or round secrets whose immutable
+publication boundary already passed. Published integrity invalidations remain
+visible; unpublished results and election/replay writes keep their hold checks.
 
 All non-host readiness checks, live protected archive checks and authentic
 runtime-envelope/frozen-policy validation remain mandatory. Both durable enqueue
