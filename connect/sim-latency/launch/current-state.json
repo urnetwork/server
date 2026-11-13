@@ -1,6 +1,23 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T06:14:30Z",
+  "observed_at": "2026-11-13T10:26:59Z",
+  "latest_recovery_checkpoint": {
+    "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
+    "sn_commit": "e9aa3ac282ed7e4bc48eaab60d03043a5f6a6dac",
+    "required_migration": 971,
+    "deployment_verified": false,
+    "worker_activated": false,
+    "ordinary_tests_passed": 169,
+    "focused_race_tests_passed": 69,
+    "postgres_init_permission_tests_passed": 4,
+    "final_migration_prefix_tests_passed": 6,
+    "consumer_binaries_built": 5,
+    "staged_release": "/usr/local/libexec/urnetwork/competition-recovery-0e35bcd8-go1274-20261113-v1",
+    "worker_sha256": "c91fe976448b957fc121c951b2cfd1dbd2fd42e9451be80d9f246708c029de93",
+    "recovery_cli_sha256": "58ccd4a081eff8a47dd735776b1e609f953e5b35d94c035ad4003985424c838e",
+    "next_action": "Verify main migration 971 and compatible API deployment, retain serving image identity, then activate the fixed worker at verified idle and authorize the three reviewed infrastructure recoveries. Keep hold 36 until recovery authority and host readiness are verified.",
+    "historical_sections_below": "Earlier source/test/process observations remain historical; this checkpoint supersedes their pending-build descriptions."
+  },
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -19,7 +36,7 @@
   "queue": {
     "succeeded": 18,
     "failed": 4,
-    "queued": 0,
+    "queued": 1,
     "running": 0
   },
   "last_completed_attempt": {
@@ -52,7 +69,7 @@
     "intake_ready": true,
     "grading_ready": false,
     "publication_held": true,
-    "api_observed_at": "2026-11-13T05:15:19.935814Z",
+    "api_observed_at": "2026-11-13T10:26:59Z",
     "current_maintenance": {
       "evaluation_hold_revision": 36,
       "active": true,
@@ -67,11 +84,11 @@
     },
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
-      "supervisor_pid": 2893527,
-      "worker_pid": 2893965,
-      "invocation_id": "3efc09ff222b438dbbcfd20e03389165",
-      "automatic_restarts": 0,
-      "last_start": "2026-11-13T06:07:27Z",
+      "supervisor_pid": 3129600,
+      "worker_pid": null,
+      "invocation_id": null,
+      "automatic_restarts": 74,
+      "last_start": "2026-11-13T09:21:08Z",
       "worker_source_or_binary_changed": true,
       "operator_hold_or_restart_performed": true,
       "service_stopped_or_restarted": true,
