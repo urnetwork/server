@@ -269,17 +269,15 @@ Options:
 		// turns warm at old-drain-end rather than at flip. Customer-driven
 		// lazy device opens are not blocked, but their identity restoration
 		// is held: they form fresh windows during the overlap and publish that
-		// snapshot when the gate opens. This same gate covers notification
-		// warmup, which otherwise bypasses Prewarm entirely. Wg endpoint
-		// seeding lands before the pre-warmed devices establish, in the order
-		// the packets will flow.
+		// snapshot when the gate opens. Wg endpoint seeding lands before the
+		// pre-warmed devices establish, in the order the packets will flow.
 		// The combined boundary isolates a handoff failure, always releases
 		// identity restoration, and only then runs pre-warm.
 		wg.CompleteDeploymentHandoff(ctx)
 	})
 	// add the wg clients of new and changed proxy clients, and periodically
 	// reconcile the wg peers against the full set of proxy clients for this
-	// host/block
+	// host/block. A new proxy opens no device: its device opens on first use.
 	unwatchProxyClients := wg.WatchProxyClients(notif)
 	defer unwatchProxyClients()
 

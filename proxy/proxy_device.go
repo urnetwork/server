@@ -411,6 +411,51 @@ func (self *ProxyDeviceManager) OpenProxyDeviceWithContext(ctx context.Context, 
 	return self.openProxyDevice(ctx, proxyId, true)
 }
 
+// Starts opening the proxy's device and returns at once, for a session that
+// signed in and dials next: the device's construction and its window's first
+// exit overlap the client's request round trip, and the dial joins this
+// construction (openProxyDevice coalesces one per proxy id). A live device or
+// a construction in flight starts nothing. The caller has admitted the caller
+// and the plan. A failure holds the next construction back for its cooldown,
+// as for any open, and the dial reports it. Shutdown joins the worker.
+func (self *ProxyDeviceManager) startOpenProxyDevice(proxyId server.Id) {
+	if self.proxyDeviceOpenOrOpening(proxyId) {
+		return
+	}
+	self.lifecycleLock.Lock()
+	if self.closed || self.ctx.Err() != nil {
+		self.lifecycleLock.Unlock()
+		return
+	}
+	self.openWorkers.Add(1)
+	self.lifecycleLock.Unlock()
+	go server.HandleError(func() {
+		defer self.openWorkers.Done()
+		if _, err := self.openProxyDevice(self.ctx, proxyId, false); err != nil {
+			if glog.V(1) {
+				glog.Infof("[proxy][%s]open at sign-in err=%s\n", proxyId, err)
+			}
+		}
+	})
+}
+
+// Whether the proxy's device is installed and live, or being constructed.
+func (self *ProxyDeviceManager) proxyDeviceOpenOrOpening(proxyId server.Id) bool {
+	self.stateLock.RLock()
+	pdState, ok := self.proxyDevices[proxyId]
+	self.stateLock.RUnlock()
+	if !ok {
+		return false
+	}
+	pdState.StateLock.Lock()
+	defer pdState.StateLock.Unlock()
+	if pdState.creating != nil {
+		return true
+	}
+	pd := pdState.ProxyDevice
+	return pd != nil && pd.Active()
+}
+
 // Admits an opener and coalesces one construction per id. A cancellable creator
 // transfers its construction to a separately retained manager worker.
 func (self *ProxyDeviceManager) openProxyDevice(ctx context.Context, proxyId server.Id, cancellableCreator bool) (*ProxyDevice, error) {

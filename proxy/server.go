@@ -205,7 +205,6 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyConnectTimeout:      httpProxySettings.ProxyConnectTimeout,
 		ProxyConnectBudget:       httpProxySettings.ProxyConnectBudget,
 		NotificationTimeout:      5 * time.Second,
-		WarmupTimeout:            30 * time.Minute,
 		MaxRequestBytes:          32 * model.Kib,
 		EventRateLimitTimeout:    1 * time.Second,
 		ReconcileTimeout:         30 * time.Minute,
@@ -260,7 +259,6 @@ type ProxySettings struct {
 	ProxyConnectTimeout      time.Duration
 	ProxyConnectBudget       time.Duration
 	NotificationTimeout      time.Duration
-	WarmupTimeout            time.Duration
 	MaxRequestBytes          model.ByteCount
 	EventRateLimitTimeout    time.Duration
 	// how often the wg peers are reconciled against the full set of proxy
@@ -533,6 +531,12 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 		}
 
 		valid = self.proxyDeviceManager.checkCallerWithContext(ctx, proxyId, addrPort.Addr()) == nil
+		if valid {
+			// the sign-in is the session's first use: start the device now, so
+			// its construction and its window's first exit overlap the client's
+			// request round trip, and the request's dial joins it
+			self.proxyDeviceManager.startOpenProxyDevice(proxyId)
+		}
 		return valid
 	}
 
@@ -1293,26 +1297,14 @@ func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncSt
 // WatchProxyClients registers this instance with the proxy client
 // notification of its (host, block): each delivery of new and changed clients
 // adds their WireGuard clients, and each periodic full set reconciles them. A
-// client created within WarmupTimeout also has its device opened. A delivery
+// delivery opens no device. A proxy's device opens on its first use: a SOCKS
+// sign-in or dial, an HTTP request, the first packet of a WireGuard session,
+// or a control api request signed with its id. So a proxy that is created and
+// never used costs no device, window or exits (owner 2026-11-13). A delivery
 // fails only when no client was applied, and the notification then delivers
 // the same clients again on its next poll. Returns the unsubscribe.
 func (self *wgServer) WatchProxyClients(notification *proxyClientNotification) func() {
 	unsubscribe := notification.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) error {
-		if 0 < self.settings.WarmupTimeout {
-			warmupStartTime := server.NowUtc().Add(-self.settings.WarmupTimeout)
-			for _, proxyClient := range proxyClients {
-				if warmupStartTime.Before(proxyClient.CreateTime) {
-					// warmup the device
-					_, err := self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
-					if err != nil {
-						glog.Infof("[proxy][%s]warmup err=%s\n", proxyClient.ProxyId, err)
-					} else {
-						glog.Infof("[proxy][%s]warmup\n", proxyClient.ProxyId)
-					}
-				}
-			}
-		}
-
 		// a returned error means the notification re-delivers these clients on
 		// the next poll instead of advancing past them
 		err := self.AddProxyClients(proxyClients...)
