@@ -427,7 +427,26 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 // after this process read its keys. The token is parsed directly into the
 // ByJwt struct (a gojwt.Claims via its embedded RegisteredClaims) to avoid a
 // MapClaims map plus a json marshal/unmarshal round-trip on every request.
+//
+// A token this keyring verified before answers from its verified claims cache
+// (by_jwt_verified_cache.go) with a copy of the claims it decoded to, and a
+// token verified now is remembered. The result is the caller's to change.
 func parseByJwtSigned(keyring *byJwtKeyring, jwtSigned string) (*ByJwt, error) {
+	keys := keyring.heldKeys()
+	if byJwt := keyring.verifiedCache.lookup(jwtSigned, keys.removalGeneration); byJwt != nil {
+		return byJwt.clone(), nil
+	}
+	byJwt, verifiedKeys, err := verifyByJwtSigned(keyring, keys, jwtSigned)
+	if err != nil {
+		return nil, err
+	}
+	keyring.verifiedCache.store(jwtSigned, byJwt, verifiedKeys.removalGeneration)
+	return byJwt, nil
+}
+
+// The verification of parseByJwtSigned against keys, rereading once as it
+// describes, with the key set that verified the token.
+func verifyByJwtSigned(keyring *byJwtKeyring, keys *byJwtKeys, jwtSigned string) (*ByJwt, *byJwtKeys, error) {
 	parserOptions := []gojwt.ParserOption{
 		gojwt.WithValidMethods([]string{"ES256", "ES384", "ES512", "RS512"}),
 		gojwt.WithoutClaimsValidation(),
@@ -447,15 +466,15 @@ func parseByJwtSigned(keyring *byJwtKeyring, jwtSigned string) (*ByJwt, error) {
 		return
 	}
 
-	keys := keyring.heldKeys()
 	byJwt, kidMissed, err := parse(keys)
 	if err != nil && kidMissed && errors.Is(err, gojwt.ErrTokenSignatureInvalid) && keyring.reread(keys) {
-		byJwt, _, err = parse(keyring.heldKeys())
+		keys = keyring.heldKeys()
+		byJwt, _, err = parse(keys)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return byJwt, nil
+	return byJwt, keys, nil
 }
 
 // ParseByJwtForAudience verifies the signature and the registered lifetime
@@ -474,12 +493,17 @@ func parseByJwtSigned(keyring *byJwtKeyring, jwtSigned string) (*ByJwt, error) {
 // to tolerate it; the parser layer checks decoding, the signature, and the
 // signing method only.
 func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience string) (*ByJwt, error) {
+	return parseByJwtForAudience(ctx, defaultByJwtKeyring, jwtSigned, audience)
+}
+
+// ParseByJwtForAudience, verifying with keyring.
+func parseByJwtForAudience(ctx context.Context, keyring *byJwtKeyring, jwtSigned string, audience string) (*ByJwt, error) {
 	if audience == "" {
 		return nil, errors.New("Missing JWT audience.")
 	}
 	rejectMissing := rejectMissingExpiration()
 
-	byJwt, err := parseByJwtSigned(defaultByJwtKeyring, jwtSigned)
+	byJwt, err := parseByJwtSigned(keyring, jwtSigned)
 	if err != nil {
 		// the caller-facing error stays opaque; the reason (malformed token
 		// vs bad signature) is only visible server-side
@@ -771,6 +795,15 @@ func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {
 // before anything is refused on its word; one that does not cannot be a
 // guest's, since removing the claim breaks its signature.
 func ByJwtLagGuestUnverified(jwtStr string) bool {
+	return byJwtLagGuestUnverified(defaultByJwtKeyring, jwtStr)
+}
+
+// ByJwtLagGuestUnverified, reading keyring's verified claims of the token when
+// it holds them (by_jwt_verified_cache.go): the claims the token decodes to.
+func byJwtLagGuestUnverified(keyring *byJwtKeyring, jwtStr string) bool {
+	if byJwt := keyring.verifiedClaims(jwtStr); byJwt != nil {
+		return byJwt.LagGuest
+	}
 	byJwt := &ByJwt{}
 	if _, _, err := gojwt.NewParser().ParseUnverified(jwtStr, byJwt); err != nil {
 		return false
@@ -782,11 +815,32 @@ func ByJwtLagGuestUnverified(jwtStr string) bool {
 // verifying the signature and without any lookup, name a client. It never
 // authenticates: a caller verifies the token before relying on its claims.
 func ByJwtNamesClientUnverified(jwtStr string) bool {
+	return byJwtNamesClientUnverified(defaultByJwtKeyring, jwtStr)
+}
+
+// ByJwtNamesClientUnverified, reading keyring's verified claims of the token
+// when it holds them (by_jwt_verified_cache.go): the claims the token decodes
+// to.
+func byJwtNamesClientUnverified(keyring *byJwtKeyring, jwtStr string) bool {
+	if byJwt := keyring.verifiedClaims(jwtStr); byJwt != nil {
+		return byJwt.ClientId != nil
+	}
 	byJwt := &ByJwt{}
 	if _, _, err := gojwt.NewParser().ParseUnverified(jwtStr, byJwt); err != nil {
 		return false
 	}
 	return byJwt.ClientId != nil
+}
+
+// The claims the keyring verified jwtStr to, when it remembers them, without
+// verifying or decoding anything; nil otherwise, and before the keyring read
+// its keys. The claims are shared: the caller only reads them.
+func (self *byJwtKeyring) verifiedClaims(jwtStr string) *ByJwt {
+	keys := self.loadedKeys()
+	if keys == nil {
+		return nil
+	}
+	return self.verifiedCache.peek(jwtStr, keys.removalGeneration)
 }
 
 // Testing_Sign constructs signed malformed/legacy fixtures. Production mints
@@ -827,6 +881,37 @@ func (self *ByJwt) clientRoot(clientId server.Id) *server.Id {
 		return nil
 	}
 	return &clientId
+}
+
+// A deep copy that shares no pointer, slice or map with self, so either may be
+// changed without the other seeing it.
+func (self *ByJwt) clone() *ByJwt {
+	copy := *self
+	cloneId := func(id *server.Id) *server.Id {
+		if id == nil {
+			return nil
+		}
+		value := *id
+		return &value
+	}
+	cloneNumericDate := func(numericDate *gojwt.NumericDate) *gojwt.NumericDate {
+		if numericDate == nil {
+			return nil
+		}
+		value := *numericDate
+		return &value
+	}
+	copy.DeviceId = cloneId(self.DeviceId)
+	copy.ClientId = cloneId(self.ClientId)
+	copy.SessionId = cloneId(self.SessionId)
+	copy.RootClientId = cloneId(self.RootClientId)
+	copy.Roles = slices.Clone(self.Roles)
+	copy.ClientLimitUpgrade = cloneClientLimitUpgrade(self.ClientLimitUpgrade)
+	copy.Audience = slices.Clone(self.Audience)
+	copy.ExpiresAt = cloneNumericDate(self.ExpiresAt)
+	copy.NotBefore = cloneNumericDate(self.NotBefore)
+	copy.IssuedAt = cloneNumericDate(self.IssuedAt)
+	return &copy
 }
 
 // Copies lineage and identity while refreshing only registered claims.
