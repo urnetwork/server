@@ -15,7 +15,7 @@ package monitor
 // leaves at_risk once the failure is repaired and such a full heal ends. Lost queue entries with every drive
 // online warn, and the warn says to start one full heal.
 //
-// The heal inputs are the minio fork's, read from Mimir (signal_filecluster_heal_debt.go): per pool and set each
+// The heal inputs are the minio fork's, read from Mimir (filecluster_heal_debt.go): per pool and set each
 // host's partial-write queue depth, the entries it lost, its unclean starts and its last loss, and when the
 // cluster's last full heal began and ended. A set's heal debt is known only while every host of its cluster shows
 // its queue and the full heal reads; otherwise it reads unknown, never zero (the owner's interim): the set does

@@ -459,7 +459,7 @@ func (self *prometheusSidecarStorageGauges) PublishQueueDebts(clusterId string, 
 }
 
 // The queues' sums as a collector: a gauge and two counters whose values are the hosts' own, summed (see
-// signal_filecluster_heal_debt.go). Safe for concurrent use.
+// filecluster_heal_debt.go). Safe for concurrent use.
 type fileClusterQueueDebtCollector struct {
 	depthDescription   *prometheus.Desc
 	droppedDescription *prometheus.Desc
