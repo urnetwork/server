@@ -32,6 +32,7 @@ cas:
   gts:
     profile: shortlived
 order_retry_after_s: 5
+chain_retention_s: 864000
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -51,8 +52,8 @@ order_retry_after_s: 5
 	if settings.Cas[certsservice.CertsCaGts].Profile != "shortlived" || settings.Cas[certsservice.CertsCaGts].BudgetCap != defaults.Cas[certsservice.CertsCaGts].BudgetCap {
 		t.Fatalf("GTS's settings: %+v", settings.Cas[certsservice.CertsCaGts])
 	}
-	if settings.OrderRetryAfter != 5*time.Second || settings.RowRetention != defaults.RowRetention {
-		t.Fatalf("the numbers: %v, %v", settings.OrderRetryAfter, settings.RowRetention)
+	if settings.OrderRetryAfter != 5*time.Second || settings.RowRetention != defaults.RowRetention || settings.ChainRetention != 10*24*time.Hour {
+		t.Fatalf("the numbers: %v, %v, %v", settings.OrderRetryAfter, settings.RowRetention, settings.ChainRetention)
 	}
 	if len(config.AccountFiles) != 1 || config.AccountFiles[certsservice.CertsCaLetsEncrypt] != "certs-account-letsencrypt.yml" {
 		t.Fatalf("the account files: %v", config.AccountFiles)
@@ -75,6 +76,7 @@ func TestCertsConfigRefusals(t *testing.T) {
 		"an account path":         "root: root.example\ncas: {letsencrypt: {account_file: '../vault/account.yml'}}\n",
 		"an account of no yml":    "root: root.example\ncas: {letsencrypt: {account_file: 'account.pem'}}\n",
 		"a zero number":           "root: root.example\nadmit_batch_count: 0\n",
+		"a zero chain retention":  "root: root.example\nchain_retention_s: 0\n",
 		"a dns_url of no scheme":  "root: root.example\ndns_url: dns.example.test\n",
 		"not yaml":                "root: [",
 	} {
