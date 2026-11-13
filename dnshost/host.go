@@ -95,6 +95,9 @@ type HostDeps struct {
 	// api: the store. nil is Store over host.Redis. Only a Store has <root>'s records written at start,
 	// since they go through model to Postgres, which a fake does not read.
 	Store dnsservice.DnsStore
+	// api: §8.10's gate on dns:<host> for the record routes (DNS-M5-12). nil is
+	// none, so a write under a grant answers 503 and the zone view is empty.
+	RecordGate dnsservice.DnsRecordGate
 	// api: each root's DNSKEY window released at now (§12.6's Keys). nil is DNS-M5-19's
 	// KeyWindowRelease over the window files in secret_files (hostKeyWindowRelease); server/local's test
 	// dns edge signs its own.
@@ -262,6 +265,16 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 		Challenges: NewChallenges(),
 		Canaries:   NewCanaries(),
 		KeyWindow:  deps.KeyWindow,
+		Records:    NewRecords(),
+		// no gate cache is wired into this block yet (plan-SOCK-gate-data's
+		// source for it), so a write under a grant answers 503 and GET
+		// /dns/zone shows no RRset: the closed direction
+		RecordGate: deps.RecordGate,
+	}
+	// the record writes read §21.7's standing and network_verified from the
+	// host's memory (ServiceHost.Abuse); a host with none answers them 503
+	if host.Abuse != nil {
+		model.SetDnsRecordsAbuseGate(host.Abuse)
 	}
 	if apiDeps.KeyWindow == nil {
 		release, err := hostKeyWindowRelease(settings, host)

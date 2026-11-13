@@ -329,6 +329,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/domain-verify":                   routeAccessNetwork,  // looks a domain's TXT record up, which routes its sign-ins once found
 	"POST /network/domain-remove":                   routeAccessNetwork,  // removes a team's domain
 	"POST /auth/sso-discover":                       routeAccessPublic,   // an address's domain to its team's IdP; says nothing of other addresses (§7.6)
+	"GET /network/dns":                              routeAccessNetwork,  // the network's label, alias, records and quota (§12.8), the read roles by the role gate
+	"POST /network/dns/records":                     routeAccessNetwork,  // writes the network's own records (§12.8), the DNS permission by the role gate
 	"GET /network/admin-events":                     routeAccessNetwork,  // a team's admin events (§7.11), Auditors and above by the role gate
 	"GET /network/usage":                            routeAccessNetwork,  // the network's usage and limits (§20.14), the read roles by the role gate
 	"POST /network/audit-webhook":                   routeAccessNetwork,  // sends a team's admin events to a SIEM (§7.11), the Owner's by its role gate

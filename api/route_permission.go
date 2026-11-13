@@ -102,6 +102,8 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"POST /network/block-location":   model.RolePermissionPolicy,
 	"POST /network/unblock-location": model.RolePermissionPolicy,
 	"POST /network/client-acl-group": model.RolePermissionPolicy,
+	// §7.5's DNS permission (§12.8)
+	"POST /network/dns/records": model.RolePermissionPolicy,
 
 	// keys and OAuth clients
 	"GET /account/api-keys":         model.RolePermissionKeys,
@@ -142,6 +144,7 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"GET /network/clients":                  model.RolePermissionRead,
 	"GET /network/admin-events":             model.RolePermissionRead,
 	"GET /network/usage":                    model.RolePermissionRead,
+	"GET /network/dns":                      model.RolePermissionRead,
 	"GET /network/client-data-caps":         model.RolePermissionRead,
 	"GET /network/embed":                    model.RolePermissionRead,
 	"GET /network/proxies":                  model.RolePermissionRead,
