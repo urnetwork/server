@@ -97,8 +97,10 @@ func TestCreateAccountWalletRefusalNamesWhatTheAddressIs(t *testing.T) {
 // Solana wallet is refused with a 400 and writes nothing. It used to return
 // the Polygon row, or reactivate it after the network removed it, which kept
 // the key on the wrong chain while the request reported success. A wallet on
-// its chain is still returned, and reactivated after removal. A mistyped
-// checksum is refused before anything is written.
+// its chain is still returned, and reactivated after removal; with USDC
+// provider payouts ended (owner decisions 2026-11-12 and 2026-11-13), it never
+// becomes the payout wallet, as the first wallet of a network did before. A
+// mistyped checksum is refused before anything is written.
 func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := tb.Context()
@@ -110,9 +112,6 @@ func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T)
 		legacyId := model.CreateAccountWalletExternal(owner, &model.CreateAccountWalletExternalArgs{NetworkId: networkId, Blockchain: "MATIC", WalletAddress: solanaAddress, DefaultTokenType: "USDC"})
 		if legacyId == nil {
 			tb.Fatal("legacy wallet fixture was not created")
-		}
-		if err := model.SetPayoutWallet(ctx, networkId, *legacyId); err != nil {
-			tb.Fatal(err)
 		}
 
 		const onAnotherChain = "the address is already a wallet of the network on another blockchain"
@@ -131,8 +130,8 @@ func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T)
 		if legacy := model.GetAccountWallet(ctx, *legacyId); legacy == nil || legacy.Blockchain != "MATIC" || legacy.WalletAddress != solanaAddress || !legacy.Active {
 			tb.Fatal("the legacy row changed", legacy)
 		}
-		if payoutWalletId := model.GetPayoutWalletId(ctx, networkId); payoutWalletId == nil || *payoutWalletId != *legacyId {
-			tb.Fatal("the refusal moved the payout wallet", payoutWalletId)
+		if payoutWalletId := model.GetPayoutWalletId(ctx, networkId); payoutWalletId != nil {
+			tb.Fatal("the refusal selected a payout wallet", payoutWalletId)
 		}
 
 		// a removed legacy row is not reactivated by adding the key on its chain
@@ -170,8 +169,8 @@ func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T)
 		if wallet := model.GetAccountWallet(ctx, other.WalletId); wallet == nil || wallet.Blockchain != "SOL" || !wallet.Active {
 			tb.Fatal("the Solana wallet was not created", wallet)
 		}
-		if payoutWalletId := model.GetPayoutWalletId(ctx, removedNetworkId); payoutWalletId == nil || *payoutWalletId != other.WalletId {
-			tb.Fatal("the new Solana wallet did not become the payout wallet of a network without one", payoutWalletId)
+		if payoutWalletId := model.GetPayoutWalletId(ctx, removedNetworkId); payoutWalletId != nil {
+			tb.Fatal("the new Solana wallet became the payout wallet", payoutWalletId)
 		}
 		again, err := CreateAccountWalletExternal(otherArgs(), removedOwner)
 		if err != nil || again.WalletId != other.WalletId {
@@ -204,47 +203,6 @@ func TestCreateAccountWalletOnItsChainDoesNotReuseAnotherChainsRow(t *testing.T)
 		requireRefusalAnswer(tb, err, http.StatusBadRequest, "invalid wallet address: the mixed-case checksum of this Polygon address does not match; check it for a typo")
 		if after := len(model.GetActiveAccountWallets(owner).Wallets); after != before {
 			tb.Fatal("a refused address was stored", before, after)
-		}
-	})
-}
-
-// A wallet whose address is not on its chain cannot be selected as the payout
-// wallet; the selection stays where it was, and a wallet on its chain can
-// still be selected.
-func TestSetPayoutWalletRefusesAWalletWhoseAddressIsNotOnItsChain(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
-		ctx := tb.Context()
-		networkId := server.NewId()
-		owner := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId})
-		defer owner.Cancel()
-		// the legacy row, written without validation as before
-		legacyId := model.CreateAccountWalletExternal(owner, &model.CreateAccountWalletExternalArgs{NetworkId: networkId, Blockchain: "MATIC", WalletAddress: walletAddressTestSolana("legacy payout"), DefaultTokenType: "USDC"})
-		if legacyId == nil {
-			tb.Fatal("legacy wallet fixture was not created")
-		}
-		solanaWallet, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{Blockchain: "SOL", WalletAddress: walletAddressTestSolana("payout"), DefaultTokenType: "USDC"}, owner)
-		if err != nil {
-			tb.Fatal(err)
-		}
-		polygonWallet, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{Blockchain: "MATIC", WalletAddress: walletAddressTestPolygon("payout"), DefaultTokenType: "USDC"}, owner)
-		if err != nil {
-			tb.Fatal(err)
-		}
-		if payoutWalletId := model.GetPayoutWalletId(ctx, networkId); payoutWalletId == nil || *payoutWalletId != solanaWallet.WalletId {
-			tb.Fatal("the first valid wallet did not become the payout wallet", payoutWalletId)
-		}
-
-		_, err = SetPayoutWallet(model.SetPayoutWalletArgs{WalletId: *legacyId}, owner)
-		requireRefusalAnswer(tb, err, http.StatusBadRequest, "The wallet's address is not an address on its blockchain, so it cannot be the payout wallet.")
-		if payoutWalletId := model.GetPayoutWalletId(ctx, networkId); payoutWalletId == nil || *payoutWalletId != solanaWallet.WalletId {
-			tb.Fatal("a refused selection moved the payout wallet", payoutWalletId)
-		}
-
-		if _, err := SetPayoutWallet(model.SetPayoutWalletArgs{WalletId: polygonWallet.WalletId}, owner); err != nil {
-			tb.Fatal(err)
-		}
-		if payoutWalletId := model.GetPayoutWalletId(ctx, networkId); payoutWalletId == nil || *payoutWalletId != polygonWallet.WalletId {
-			tb.Fatal("a Polygon wallet on its chain was not selected", payoutWalletId)
 		}
 	})
 }

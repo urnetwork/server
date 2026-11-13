@@ -45,16 +45,16 @@ const TrustedPriority = 200
 // and ambiguous processor payments are protected independently of age.
 const StragglerContractExpiration = 300 * 24 * time.Hour
 
-// completed contracts are reaped this long after their payment completes
-// (reap_time = complete_time + CompletedContractExpiration, assigned by the
-// bounded retention worker after CompletePayment durably queues the payment)
+// A completed payment discharges its contracts this long after it completed
+// (the contract horizon reaper's payment_recent rule;
+// BackfillCompletedContractReapTime stamps complete_time plus this)
 const CompletedContractExpiration = 7 * 24 * time.Hour
 
-// Per-phase wall-clock budget for the contract reaper's completed assignment,
-// straggler assignment, and delete passes. A large one-time backlog drains over
-// many 30-min runs instead of one unbounded transaction; steady state finishes
-// well under it. A var (not const) so tests can inject a tiny budget to exercise
-// the mid-backlog stop.
+// Per-phase wall-clock budget for the contract reaper's straggler assignment
+// and delete passes. A large one-time backlog drains over many 30-min runs
+// instead of one unbounded transaction; steady state finishes well under it. A
+// var (not const) so tests can inject a tiny budget to exercise the
+// mid-backlog stop.
 var reaperRunBudget = 5 * time.Minute
 
 // Wall clock for one RemoveCompletedContracts run, after which its delete pass
@@ -6206,11 +6206,12 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	removeCompletedTransferBalanceBatches(ctx, minTime)
 
 	// The reaper is driven by the indexed reap_time column. reap_time is the
-	// instant a contract becomes due for hard deletion:
-	//   - CompletePayment queues bounded retention work; the completed-payment
-	//     pass stamps complete_time + CompletedContractExpiration,
-	//   - the straggler pass stamps now() on aged closed contracts that are not
-	//     owned by an active or otherwise ambiguous payment.
+	// instant a contract becomes due for hard deletion: the straggler pass
+	// stamps now() on aged closed contracts that are not owned by an active or
+	// otherwise ambiguous payment. Completed USDC payouts once stamped it too,
+	// and USDC payouts ended (owner decisions 2026-11-12 and 2026-11-13); the
+	// contract horizon reaper (contract_horizon_reaper.go) deletes contracts
+	// past its horizon without it.
 	// The delete pass then removes every contract whose reap_time has passed,
 	// with its contract_close_report/contract_close/transfer_escrow/
 	// transfer_escrow_sweep/contract_extender rows, by those same contract ids in
@@ -6228,12 +6229,6 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	// net for orphans left by any other path (e.g. crashes mid-statement in older
 	// releases).
 
-	// CompletePayment only records the payment and queues this work. Advance each
-	// queued payment through its sweeps in keyset batches, committing the cursor
-	// after every batch so a timeout or worker restart resumes instead of replaying
-	// one enormous update.
-	assignCompletedContractReapTimeBatches(ctx, maxRowCount)
-
 	// assign pass: give aged closed-but-never-completed contracts a reap_time so
 	// the delete pass removes them. Bounded by the contract ids of the contracts
 	// created before the straggler horizon, so this is a range of the primary
@@ -6242,8 +6237,8 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 
 	// delete pass: hard delete every contract whose reap_time is due, with its
 	// dependent rows. Bounded by the transfer_contract_reap_time partial index.
-	// This reaps both completed contracts (reap_time = complete_time +
-	// CompletedContractExpiration) and the stragglers just assigned above.
+	// This reaps the stragglers just assigned above, and any contract stamped
+	// earlier.
 	// Candidate contract_ids are distinct (from the transfer_contract primary
 	// key). The pass drains in batches of dueContractReapBatchSize until no
 	// contract is due, a bound stops it, or the run's budget ends; protected
@@ -6255,95 +6250,6 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 		dueContractReapBatchSize,
 		runEnd,
 	).removeDue(ctx)
-}
-
-// assignCompletedContractReapTimeBatches drains the durable retention queue set
-// by CompletePayment. One payment is advanced by at most maxRowCount distinct
-// contract ids per transaction. The UUID cursor is committed with the contract
-// updates, making the work resumable without ever delaying payment completion.
-func assignCompletedContractReapTimeBatches(ctx context.Context, maxRowCount int) (assignedCount int64) {
-	budgetEnd := server.NowUtc().Add(reaperRunBudget)
-	for {
-		var batchCount int64
-		var stampedCount int64
-		processedPayment := false
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			result, err := tx.Query(
-				ctx,
-				`
-				WITH payment AS MATERIALIZED (
-					SELECT
-						account_payment.payment_id,
-						account_payment.complete_time,
-						account_payment.contract_retention_cursor
-					FROM account_payment
-					WHERE
-						account_payment.contract_retention_pending AND
-						account_payment.completed AND
-						account_payment.complete_time IS NOT NULL
-					ORDER BY account_payment.complete_time, account_payment.payment_id
-					LIMIT 1
-					FOR UPDATE SKIP LOCKED
-				), batch AS MATERIALIZED (
-					SELECT DISTINCT transfer_escrow_sweep.contract_id
-					FROM payment
-					INNER JOIN transfer_escrow_sweep ON
-						transfer_escrow_sweep.payment_id = payment.payment_id
-					WHERE
-						payment.contract_retention_cursor IS NULL OR
-						payment.contract_retention_cursor < transfer_escrow_sweep.contract_id
-					ORDER BY transfer_escrow_sweep.contract_id
-					LIMIT $1
-				), stamped AS (
-					UPDATE transfer_contract
-					SET reap_time = GREATEST(
-						COALESCE(transfer_contract.reap_time, '-infinity'::timestamp),
-						payment.complete_time + interval '7 days'
-					)
-					FROM payment, batch
-					WHERE
-						transfer_contract.contract_id = batch.contract_id AND
-						(
-							transfer_contract.reap_time IS NULL OR
-							transfer_contract.reap_time < payment.complete_time + interval '7 days'
-						)
-					RETURNING transfer_contract.contract_id
-				), advanced AS (
-					UPDATE account_payment
-					SET
-						contract_retention_cursor = COALESCE(
-							(
-								SELECT batch.contract_id
-								FROM batch
-								ORDER BY batch.contract_id DESC
-								LIMIT 1
-							),
-							account_payment.contract_retention_cursor
-						),
-						contract_retention_pending = ((SELECT COUNT(*) FROM batch) = $1)
-					FROM payment
-					WHERE account_payment.payment_id = payment.payment_id
-					RETURNING (SELECT COUNT(*) FROM batch) AS batch_count
-				)
-				SELECT
-					advanced.batch_count,
-					(SELECT COUNT(*) FROM stamped) AS stamped_count
-				FROM advanced
-				`,
-				maxRowCount,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					processedPayment = true
-					server.Raise(result.Scan(&batchCount, &stampedCount))
-				}
-			})
-		}, server.TxReadCommitted)
-		assignedCount += stampedCount
-		if !processedPayment || budgetEnd.Before(server.NowUtc()) {
-			return
-		}
-	}
 }
 
 // removeContractBatches repeatedly runs a bounded contract-delete cascade (one

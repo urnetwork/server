@@ -7,11 +7,12 @@ package server
 //
 // message_key is the SHA-256 of the template name and the key the writer derives
 // from its state change, so a writer that runs again adds nothing. A row with no
-// deliver_time is held for a later release (one missing-wallet notice per payout
-// run). claim_id and claim_until lease a row to the one delivery attempt in
-// flight; attempt_count counts claims. Delivered (sent_time) and abandoned
-// (abandon_time) rows are removed after a retention period, and with them the
-// recipient.
+// deliver_time was held for a later release: the missing-wallet notice, one per
+// payout run, which retired with USDC provider payouts (owner decisions
+// 2026-11-12 and 2026-11-13). claim_id and claim_until lease a row to the one
+// delivery attempt in flight; attempt_count counts claims. Delivered
+// (sent_time) and abandoned (abandon_time) rows are removed after a retention
+// period, and with them the recipient.
 const accountMessageOutboxSchemaSql = `
 	CREATE TABLE account_message_outbox (
 		message_id uuid NOT NULL,

@@ -2183,15 +2183,9 @@ func TestConnectH3DashboardPreservesMetricUnitsAndScope(t *testing.T) {
 	}
 }
 
-func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
+func TestCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	signalExpressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
 	for _, expression := range []string{
-		`sum(rate(urnetwork_circle_transfer_admissions_total{env="$env"}[$__rate_interval]))`,
-		`sum(rate(urnetwork_circle_transfer_deferrals_total{env="$env"}[$__rate_interval]))`,
-		`sum(rate(urnetwork_circle_transfer_admission_errors_total{env="$env"}[$__rate_interval]))`,
-		`histogram_quantile(0.50, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env="$env"}[$__rate_interval])))`,
-		`histogram_quantile(0.95, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env="$env"}[$__rate_interval])))`,
-		`sum(rate(urnetwork_circle_transfer_admission_wait_seconds_sum{env="$env"}[$__rate_interval])) / sum(rate(urnetwork_circle_transfer_admission_wait_seconds_count{env="$env"}[$__rate_interval]))`,
 		`max by (host, block, instance) (urnetwork_proxy_lock_cache_entries{env="$env"})`,
 		`max by (host, block, instance) (urnetwork_proxy_lock_cache_capacity{env="$env"})`,
 		`sum(rate(urnetwork_proxy_lock_cache_hits_total{env="$env"}[$__rate_interval]))`,
@@ -2213,41 +2207,6 @@ func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	sourceTarget := sourcePanel.Targets[0]
 	if sourceTarget.Expr != wantSourceQuery || sourceTarget.Format != "table" || !sourceTarget.Instant {
 		t.Errorf("running source revisions query = %+v, want instant table %q", sourceTarget, wantSourceQuery)
-	}
-}
-
-// The capability gauge identifies each freshly observed worker that emits a
-// bounded pre-POST admission event; missing workers must remain no-data.
-func TestCircleAdmissionDashboardPreservesPerWorkerCapability(t *testing.T) {
-	dashboard := readTestDashboard(t, "signals.json")
-	if slices.Contains(dashboard.Tags, PublicTag) {
-		t.Fatal("worker admission capability must remain authenticated")
-	}
-	var capabilityPanel *testPanel
-	for panelIndex := range dashboard.Panels {
-		panel := &dashboard.Panels[panelIndex]
-		if panel.Title == "Circle transfer admission event capability by worker" {
-			capabilityPanel = panel
-			break
-		}
-	}
-	if capabilityPanel == nil || len(capabilityPanel.Targets) != 1 {
-		t.Fatal("signals dashboard is missing a dedicated Circle admission capability panel")
-	}
-	const metric = `urnetwork_circle_transfer_admission_observable_info{env="$env",service="taskworker",instance!=""}`
-	wantQuery := metric + ` and on (env, service, block, host, instance) (timestamp(` + metric + `) >= time() - 90)`
-	target := capabilityPanel.Targets[0]
-	if target.Expr != wantQuery || target.LegendFormat != "{{host}} / {{block}} / {{instance}}" {
-		t.Errorf("Circle admission capability loses fresh per-worker gauge semantics: %+v", target)
-	}
-	if capabilityPanel.Type != "timeseries" || capabilityPanel.FieldConfig.Defaults.Unit != "short" ||
-		target.Instant || target.Range != nil && !*target.Range {
-		t.Error("Circle admission capability must be a unitless gauge time series")
-	}
-	for _, part := range []string{"1", "pre-POST", "90 seconds", "no-data", "§2.14"} {
-		if !strings.Contains(capabilityPanel.Description, part) {
-			t.Errorf("Circle admission capability does not explain %q", part)
-		}
 	}
 }
 

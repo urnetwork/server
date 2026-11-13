@@ -109,19 +109,6 @@ Usage:
     bringyourctl crypto void --intent=<intent_id>
     bringyourctl crypto refund --intent=<intent_id> --address=<payout_address>
     bringyourctl crypto alchemy-webhook [--signing-key-file=<path>]
-    bringyourctl payout single --account_payment_id=<account_payment_id>
-    bringyourctl payout pending
-    bringyourctl payouts list-pending [--plan_id=<plan_id>]
-    bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd> --adjustment_id=<adjustment_id> --reason=<reason>
-    bringyourctl payouts populate-tx-hashes
-    bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
-    bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
-    bringyourctl payouts close-parked [--paid=<paid>] [(--apply --expect=<digest>)] [--ids]
-    bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
-    bringyourctl payouts reimburse --file=<file> --reason=<reason> [--allow_prior_reimbursement] [(--send --expect=<digest>)]
-    bringyourctl payouts usdc-sent-notice --file=<file> [--send]
-    bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
-    bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
     bringyourctl contracts repair-expiry-route-check
     bringyourctl contracts repair-expiry --private-stdin [--apply]
@@ -268,9 +255,6 @@ Options:
     --contract_id=<contract_id> The contract to close
     --target_id=<target_id>     The contract_close.party (either "destination" or "source")
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
-    --amount_usd=<amount_usd>   Amount in USD.
-    --destination_address=<destination_address>  Destination address.
-    --blockchain=<blockchain>  Blockchain.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero, zcash, bittensor, bitcoin or ethereum.
     --asset=<asset>  A crypto payment asset: usdc_solana, zec or xmr.
     --state=<state>  A crypto invoice status: pending, seen, confirming, paid, expired or review.
@@ -279,17 +263,10 @@ Options:
     --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
-    --ids  With payouts close-parked, also list each payment: its id, plan week, reason and payout.
-    --paid=<paid>  With payouts close-parked, also close these keyed payments, each paid by another Circle transfer: <payment_id>:<circle_transaction_id>, comma separated. Each is checked with the database and Circle.
-    --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
-    --move_all_sweeps  Move every sweep of a corrected legacy attempt to its replacement instead of one anchor sweep.
-    --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
-    --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
-    --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, contracts close-due or reengagement suppress dry run printed; --send, --commit and --apply refuse any other census.
+    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, contracts close-due or reengagement suppress dry run printed; --commit and --apply refuse any other census.
     --network_ids_file=<path>  With reengagement suppress, the networks to suppress: one network id a line; blank lines and lines starting with # are skipped.
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
-    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
+    --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
     --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect; with crypto credit-usdc, credit the invoice from the payment as its dry run with that digest printed. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
@@ -298,7 +275,6 @@ Options:
     --rate=<rate>  With network trim-proxies --commit, hosted proxies removed a second, in batches of 500; omitted, 200.
     --balance_id=<balance_id>  With balance move-redeemed, the unused balance a redeemed balance code granted, left on a deleted network.
     --to_network_id=<network_id>  With balance move-redeemed, the network the balance and its code move to.
-    --allow_prior_reimbursement  With payouts reimburse, pay networks that already have an open manual reimbursement of another plan; each row lists them, and the digest binds the flag and exactly those.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -442,12 +418,6 @@ func main() {
 			os.Exit(cryptoCreditUsdcCommand(opts, os.Stdout, os.Stderr))
 		}
 		os.Exit(cryptoCommand(opts, os.Stdout))
-	} else if payout, _ := opts.Bool("payout"); payout {
-		if single, _ := opts.Bool("single"); single {
-			payoutByPaymentId(opts)
-		} else if pending, _ := opts.Bool("pending"); pending {
-			payoutPending()
-		}
 	} else if reengagement_, _ := opts.Bool("reengagement"); reengagement_ {
 		if status, _ := opts.Bool("status"); status {
 			reengagementStatus(opts)
@@ -477,40 +447,6 @@ func main() {
 			onboardingRollup(opts)
 		} else if experiments, _ := opts.Bool("experiments"); experiments {
 			onboardingExperiments(opts)
-		}
-	} else if payouts, _ := opts.Bool("payouts"); payouts {
-		if listPending, _ := opts.Bool("list-pending"); listPending {
-			listPendingPayouts(opts)
-		} else if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
-			server.Raise(payoutPlanApplyBonus(opts))
-		} else if ptxh, _ := opts.Bool("populate-tx-hashes"); ptxh {
-			populateTxHashes()
-		} else if reconcileLegacy, _ := opts.Bool("reconcile-legacy-attempts"); reconcileLegacy {
-			os.Exit(reconcileLegacyPayoutAttempts(opts))
-		} else if correctLegacy, _ := opts.Bool("correct-legacy-attempts"); correctLegacy {
-			os.Exit(correctLegacyPayoutAttempts(opts))
-		} else if closeParked, _ := opts.Bool("close-parked"); closeParked {
-			os.Exit(payoutsCloseParkedCommand(opts))
-		} else if usdcSentNotice, _ := opts.Bool("usdc-sent-notice"); usdcSentNotice {
-			os.Exit(payoutsUsdcSentNoticeCommand(opts))
-		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
-			send, _ := opts.Bool("--send")
-			snReconcileRequireReadOnly(send)
-			expect, _ := opts.String("--expect")
-			asJson, _ := opts.Bool("--json")
-			clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
-			os.Exit(runSnReconcile(os.Stdout, os.Stderr, send, expect, asJson, func(send bool, expect string) (*controller.SnReconcileReport, error) {
-				return controller.SnReconcile(clientSession, send, expect)
-			}))
-		} else if reimburse, _ := opts.Bool("reimburse"); reimburse {
-			os.Exit(payoutsReimburseCommand(opts))
-		}
-	} else if wallet, _ := opts.Bool("wallet"); wallet {
-		if send, _ := opts.Bool("transfer"); send {
-			adminWalletTransfer(opts)
-		}
-		if estimate, _ := opts.Bool("estimate-fee"); estimate {
-			adminWalletEstimateFee(opts)
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
 		if scheduleOpen, _ := opts.Bool("schedule-open-closures"); scheduleOpen {
@@ -1866,271 +1802,6 @@ func sendPayoutEmail(opts docopt.Opts) {
 	fmt.Printf("Sent\n")
 }
 
-// reconcileLegacyPayoutAttempts decides legacy keyed provider payments from
-// Circle's destination history (controller/account_payment_legacy_reconcile.go).
-// Without --apply it is a dry run that reads Circle and reports counts only.
-// The output carries counts only: no payment, network, wallet or amount.
-func reconcileLegacyPayoutAttempts(opts docopt.Opts) int {
-	apply, _ := opts.Bool("--apply")
-	groupLimit := 0
-	if groupLimitStr, _ := opts.String("--group_limit"); groupLimitStr != "" {
-		var err error
-		groupLimit, err = strconv.Atoi(groupLimitStr)
-		if err != nil || groupLimit < 0 {
-			fmt.Printf("invalid --group_limit %q\n", groupLimitStr)
-			return 2
-		}
-	}
-	settings := controller.DefaultLegacyProviderPaymentReconcileSettings()
-	settings.DryRun = !apply
-	settings.GroupLimit = groupLimit
-
-	ctx := context.Background()
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-	defer clientSession.Cancel()
-	result, err := controller.ReconcileLegacyProviderPaymentAttempts(clientSession, settings)
-	if result != nil {
-		mode := "dry run (nothing written)"
-		if apply {
-			mode = "applied"
-		}
-		fmt.Printf("legacy provider payment attempts: %s\n", mode)
-		fmt.Printf("  attempts:              %d\n", result.AttemptCount)
-		fmt.Printf("  destination groups:    %d (looked up %d, deferred %d)\n", result.GroupCount, result.LookedUpGroupCount, result.DeferredGroupCount)
-		fmt.Printf("  found (record bound):  %d\n", result.FoundCount)
-		fmt.Printf("  absent (key released): %d\n", result.AbsentCount)
-		fmt.Printf("  held, ambiguous:       %d\n", result.AmbiguousCount)
-		fmt.Printf("  held, lookup error:    %d\n", result.LookupErrorCount)
-		fmt.Printf("  held, ineligible:      %d\n", result.IneligibleCount)
-		fmt.Printf("  held, changed:         %d\n", result.RefusedCount)
-	}
-	if err != nil {
-		fmt.Printf("legacy provider payment reconciliation err = %s\n", err)
-		return 1
-	}
-	return 0
-}
-
-// correctLegacyPayoutAttempts replaces each inflated legacy keyed provider
-// payment that Circle shows was never sent with a corrected payment, and
-// records canceled payments that Circle completed
-// (controller/account_payment_legacy_correction.go). Without --apply it is a
-// dry run: the process is read only, so PostgreSQL refuses every write, and it
-// reads Circle. The output carries counts and totals only.
-func correctLegacyPayoutAttempts(opts docopt.Opts) int {
-	apply, _ := opts.Bool("--apply")
-	if !apply {
-		server.RequirePgReadOnly()
-	}
-	settings := controller.DefaultLegacyProviderPaymentCorrectionSettings()
-	settings.DryRun = !apply
-	moveAllSweeps, _ := opts.Bool("--move_all_sweeps")
-	settings.AnchorSweeps = !moveAllSweeps
-	settings.CountSweeps, _ = opts.Bool("--count_sweeps")
-	for _, option := range []struct {
-		name     string
-		value    *int
-		positive bool
-	}{
-		{name: "--group_limit", value: &settings.GroupLimit},
-		{name: "--sweep_batch_size", value: &settings.SweepBatchSize, positive: true},
-		{name: "--sweep_batch_limit", value: &settings.SweepBatchLimit},
-	} {
-		valueStr, _ := opts.String(option.name)
-		if valueStr == "" {
-			continue
-		}
-		value, err := strconv.Atoi(valueStr)
-		if err != nil || value < 0 || (option.positive && value == 0) {
-			fmt.Printf("invalid %s %q\n", option.name, valueStr)
-			return 2
-		}
-		*option.value = value
-	}
-
-	ctx := context.Background()
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-	defer clientSession.Cancel()
-	mode := "dry run (nothing written)"
-	if apply {
-		mode = "applied"
-	}
-	usd := func(nanoCents model.NanoCents) string { return fmt.Sprintf("$%.2f", model.NanoCentsToUsd(nanoCents)) }
-
-	completion, completionErr := controller.CompletePaidCanceledProviderPayments(clientSession, &controller.PaidCanceledProviderPaymentSettings{
-		DryRun:         !apply,
-		LookupInterval: settings.LookupInterval,
-	})
-	if completion != nil {
-		fmt.Printf("canceled payments Circle completed: %s\n", mode)
-		fmt.Printf("  candidates (canceled, record, no hash): %d\n", completion.CandidateCount)
-		fmt.Printf("  complete with exact amount:            %d (%s)\n", completion.CompleteCount, usd(completion.CompletePayout))
-		fmt.Printf("  not complete:                          %d\n", completion.NotCompleteCount)
-		fmt.Printf("  mismatched record or amount:           %d\n", completion.MismatchCount)
-		fmt.Printf("  lookup error:                          %d\n", completion.LookupErrorCount)
-		fmt.Printf("  recorded completed:                    %d (refused %d)\n", completion.RecordedCount, completion.RefusedCount)
-	}
-
-	result, err := controller.CorrectLegacyProviderPaymentAttempts(clientSession, settings)
-	if result != nil {
-		fmt.Printf("legacy provider payment corrections: %s\n", mode)
-		fmt.Printf("  attempts:                 %d\n", result.AttemptCount)
-		fmt.Printf("  destination groups:       %d (looked up %d, deferred %d)\n", result.GroupCount, result.LookedUpGroupCount, result.DeferredGroupCount)
-		fmt.Printf("  found, left to reconcile: %d\n", result.FoundCount)
-		fmt.Printf("  held, ambiguous:          %d\n", result.AmbiguousCount)
-		fmt.Printf("  held, lookup error:       %d\n", result.LookupErrorCount)
-		fmt.Printf("  held, ineligible:         %d\n", result.IneligibleCount)
-		fmt.Printf("  absent:                   %d\n", result.AbsentCount)
-		fmt.Printf("    no subsidy epoch:       %d\n", result.MissingWindowCount)
-		fmt.Printf("    unchanged:              %d (%s, left to reconcile)\n", result.UnchangedCount, usd(result.UnchangedPayout))
-		fmt.Printf("    corrected:              %d (%s -> %s)\n", result.CorrectionCount, usd(result.OriginalPayout), usd(result.CorrectedPayout))
-		fmt.Printf("      subsidy reduction:    %s\n", usd(result.SubsidyReduction))
-		fmt.Printf("      reliability reduction: %s\n", usd(result.ReliabilityReduction))
-		fmt.Printf("      at or below the fee:  %d (%s, held)\n", result.DustCount, usd(result.DustPayout))
-		if settings.CountSweeps {
-			fmt.Printf("      sweeps they own:      %d\n", result.SweepCount)
-		}
-		if settings.AnchorSweeps && !apply {
-			fmt.Printf("      anchor sweeps:        %d (no admissible sweep, held: %d)\n", result.AnchorCount, result.AnchorMissingCount)
-		}
-		if apply {
-			fmt.Printf("  replaced:                 %d (refused %d)\n", result.ReplacedCount, result.RefusedCount)
-			if settings.AnchorSweeps {
-				fmt.Printf("  anchor sweeps moved:      %d (no admissible sweep, held: %d)\n", result.AnchorCount, result.AnchorMissingCount)
-			} else {
-				fmt.Printf("  sweeps moved:             %d (still moving %d)\n", result.MovedSweepCount, result.MovingCount)
-			}
-			fmt.Printf("  released:                 %d (held at or below the fee %d)\n", result.ReleasedCount, result.DustHeldCount)
-			fmt.Printf("  scheduled:                %d\n", result.ScheduledCount)
-		}
-	}
-	exitCode := 0
-	if completionErr != nil {
-		fmt.Printf("canceled payment completion err = %s\n", completionErr)
-		exitCode = 1
-	}
-	if err != nil {
-		fmt.Printf("legacy provider payment correction err = %s\n", err)
-		exitCode = 1
-	}
-	return exitCode
-}
-
-func listPendingPayouts(opts docopt.Opts) {
-	ctx := context.Background()
-
-	planIdStr, _ := opts.String("--plan_id")
-
-	var payouts []*model.AccountPayment
-
-	if planIdStr != "" {
-		planId, err := server.ParseId(planIdStr)
-		if err != nil {
-			panic(err)
-		}
-		payouts = model.GetPendingPaymentsInPlan(ctx, planId)
-	} else {
-		payouts = model.GetPendingPayments(ctx)
-	}
-
-	if len(payouts) == 0 {
-		fmt.Println("No pending payouts")
-		return
-	}
-	fmt.Printf("%-40s %-40s %-16s\n", "Payment ID", "Wallet ID", "Payout Amount")
-	fmt.Println(strings.Repeat("-", 98))
-
-	for _, payout := range payouts {
-		payoutUsd := fmt.Sprintf("%.4f", model.NanoCentsToUsd(payout.Payout))
-		fmt.Printf("%-40s %-40s %-16s\n", payout.PaymentId, payout.WalletId, payoutUsd)
-	}
-
-}
-
-func payoutPending() {
-	ctx := context.Background()
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-	controller.SchedulePendingPayments(clientSession)
-}
-
-func payoutByPaymentId(opts docopt.Opts) {
-	accountPaymentIdStr, err := opts.String("--account_payment_id")
-	if err != nil {
-		panic(err)
-	}
-
-	ctx := context.Background()
-
-	accountPaymentId, err := server.ParseId(accountPaymentIdStr)
-	if err != nil {
-		panic(err)
-	}
-
-	accountPayment, err := model.GetPayment(ctx, accountPaymentId)
-	if err != nil {
-		panic(err)
-	}
-
-	if accountPayment.Completed {
-		fmt.Println("Payment already completed at ", accountPayment.CompleteTime.String())
-		return
-	}
-
-	if accountPayment.Canceled {
-		fmt.Println("Payment canceled at ", accountPayment.CancelTime.String())
-		return
-	}
-
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-
-	res, err := controller.AdvancePayment(&controller.AdvancePaymentArgs{
-		PaymentId: accountPayment.PaymentId,
-	}, clientSession)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Payout to %s processing complete: \n", accountPaymentIdStr)
-	fmt.Println("Complete Status: ", res.Complete)
-}
-
-func payoutPlanApplyBonus(opts docopt.Opts) error {
-	ctx := context.Background()
-
-	planIdStr, err := opts.String("--plan_id")
-	if err != nil {
-		return err
-	}
-
-	amountUsd, err := opts.Float64("--amount_usd")
-	if err != nil {
-		return err
-	}
-	if math.IsNaN(amountUsd) || math.IsInf(amountUsd, 0) || amountUsd <= 0 || amountUsd >= float64(math.MaxInt64)/1e9 {
-		return errors.New("bonus amount must be positive and within NanoCents range")
-	}
-
-	amountNanoCents := model.UsdToNanoCents(amountUsd)
-
-	planId, err := server.ParseId(planIdStr)
-	if err != nil {
-		return err
-	}
-	operationText, err := opts.String("--adjustment_id")
-	if err != nil {
-		return err
-	}
-	operationId, err := server.ParseId(operationText)
-	if err != nil {
-		return err
-	}
-	reason, err := opts.String("--reason")
-	if err != nil {
-		return err
-	}
-	return model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents, operationId, reason)
-}
-
 // paymentsStripeDunning lists every subscription Stripe is retrying (past_due,
 // unpaid) with what the failed-payment follow-up owes its latest invoice now
 // (controller/subscription_stripe_dunning.go): the network, whether the account
@@ -2314,84 +1985,6 @@ func paymentsReconcile(opts docopt.Opts) {
 	if 0 < result.Errors {
 		os.Exit(1)
 	}
-}
-
-func adminWalletEstimateFee(opts docopt.Opts) {
-	ctx := context.Background()
-
-	amountUsd, err := opts.Float64("--amount_usd")
-	if err != nil {
-		panic(err)
-	}
-
-	blockchain, err := opts.String("--blockchain")
-	if err != nil {
-		panic(err)
-	}
-
-	destinationAddress, err := opts.String("--destination_address")
-	if err != nil {
-		panic(err)
-	}
-
-	client := controller.NewCircleClient()
-
-	fees, err := client.EstimateTransferFee(ctx, amountUsd, destinationAddress, blockchain)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("Medium BaseFee: ", fees.Medium.BaseFee)
-	fmt.Println("Medium GasLimit: ", fees.Medium.GasLimit)
-	fmt.Println("Medium GasPrice: ", fees.Medium.GasPrice)
-	fmt.Println("Medium MaxFee: ", fees.Medium.MaxFee)
-	fmt.Println("Medium PriorityFee: ", fees.Medium.PriorityFee)
-
-	fee, err := controller.CalculateFee(*fees.Medium, blockchain)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Total Fee: %f\n", *fee)
-
-	usdFee, err := controller.ConvertFeeToUSDC(ctx, blockchain, *fee)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Total Fee in USD: %f\n", usdFee)
-}
-
-func adminWalletTransfer(opts docopt.Opts) {
-	ctx := context.Background()
-	server.Raise(controller.RequireUsdcPaymentsOn())
-
-	amountUsd, err := opts.Float64("--amount_usd")
-	if err != nil {
-		panic(err)
-	}
-
-	destinationAddress, err := opts.String("--destination_address")
-	if err != nil {
-		panic(err)
-	}
-
-	blockchain, err := opts.String("--blockchain")
-	if err != nil {
-		panic(err)
-	}
-
-	client := controller.NewCircleClient()
-
-	// a one-off manual transfer gets a fresh idempotency key
-	res, err := client.CreateTransferTransaction(ctx, server.NewId(), amountUsd, destinationAddress, blockchain)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("Transaction Successful")
-	fmt.Println("Transaction ID: ", res.Id)
-	fmt.Println("Transaction State: ", res.State)
 }
 
 func closeExpiredContracts(opts docopt.Opts) {
@@ -2654,12 +2247,6 @@ func accountPointsPopulate(opts docopt.Opts) {
 	planIdStr, _ := opts.String("--plan_id")
 	planId := server.RequireParseId(planIdStr)
 	model.PopulatePlanAccountPoints(ctx, planId)
-}
-
-// remove this after we check next payout correctly populates tx hashes
-func populateTxHashes() {
-	ctx := context.Background()
-	controller.PopulateTxHashes(ctx)
 }
 
 // func fixClientConnections(opts docopt.Opts) {

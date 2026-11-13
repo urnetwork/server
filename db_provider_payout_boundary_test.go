@@ -183,8 +183,8 @@ func TestProviderBoundaryRequiredSchemaAndImmutableRows(t *testing.T) {
 			Tx(ctx, func(tx PgTx) { RaisePgResult(tx.Exec(ctx, mutation.change)) })
 			_, err := RequireProviderPayoutBoundary(ctx, policy)
 			Tx(ctx, func(tx PgTx) { RaisePgResult(tx.Exec(ctx, mutation.restore)) })
-			if !errors.Is(err, ErrProviderEarningBoundarySchema) || ProviderEarningBoundaryRetryable(ctx, err) {
-				t.Fatal("observed schema damage became retryable outage", mutation.change, err)
+			if !errors.Is(err, ErrProviderEarningBoundarySchema) || errors.Is(err, ErrProviderEarningBoundaryUnavailable) {
+				t.Fatal("observed schema damage became an outage", mutation.change, err)
 			}
 			if _, err := RequireProviderPayoutBoundary(ctx, policy); err != nil {
 				t.Fatal("restored exact schema did not read original binding", err)
@@ -203,31 +203,19 @@ type providerBoundaryErrorRow struct{ err error }
 
 func (self providerBoundaryErrorRow) Scan(...any) error { return self.err }
 
-func TestProviderBoundaryObservationClassificationAndOwnerCancellation(t *testing.T) {
+func TestProviderBoundaryObservationClassification(t *testing.T) {
 	ctx := context.Background()
 	for _, cause := range []error{context.DeadlineExceeded, io.ErrUnexpectedEOF, &pgconn.PgError{Code: "57014", Message: "synthetic statement timeout"}} {
 		_, err := requireProviderPayoutBoundarySchema(ctx, providerBoundaryErrorQuery{err: cause}, true)
-		if !errors.Is(err, cause) || !ProviderEarningBoundaryRetryable(ctx, err) || errors.Is(err, ErrProviderEarningBoundarySchema) {
-			t.Fatal("unavailable physical observation poisoned active owner", err)
-		}
-		for _, hard := range []error{ErrProviderEarningBoundaryMismatch, ErrProviderEarningBoundarySchema, ErrProviderEarningBoundaryUnprepared, context.Canceled} {
-			if ProviderEarningBoundaryRetryable(ctx, errors.Join(err, hard)) {
-				t.Fatal("timeout overrode hard/canceled cause", hard)
-			}
-		}
-		canceled, cancel := context.WithCancel(ctx)
-		cancel()
-		expired, stop := context.WithDeadline(ctx, time.Unix(1, 0))
-		stop()
-		if ProviderEarningBoundaryRetryable(canceled, err) || ProviderEarningBoundaryRetryable(expired, err) || ProviderEarningBoundaryRetryable(nil, err) {
-			t.Fatal("expired owner acquired continuation")
+		if !errors.Is(err, cause) || !errors.Is(err, ErrProviderEarningBoundaryUnavailable) || errors.Is(err, ErrProviderEarningBoundarySchema) {
+			t.Fatal("unavailable physical observation became schema damage", err)
 		}
 	}
 	for _, code := range []string{"42P01", "42703", "42883", "42501"} {
 		cause := &pgconn.PgError{Code: code, Message: "synthetic incompatible schema"}
 		joined := errors.Join(context.DeadlineExceeded, cause)
 		_, err := requireProviderPayoutBoundarySchema(ctx, providerBoundaryErrorQuery{err: joined}, true)
-		if !errors.Is(err, ErrProviderEarningBoundarySchema) || !errors.Is(err, cause) || ProviderEarningBoundaryRetryable(ctx, err) {
+		if !errors.Is(err, ErrProviderEarningBoundarySchema) || !errors.Is(err, cause) || errors.Is(err, ErrProviderEarningBoundaryUnavailable) {
 			t.Fatal("SQL schema error hidden by timeout", code, err)
 		}
 		if _, err := readProviderPayoutBoundary(ctx, providerBoundaryErrorQuery{err: joined}); !errors.Is(err, ErrProviderEarningBoundarySchema) {
@@ -243,12 +231,12 @@ func TestProviderBoundaryPanicAndCancellationPreserveCause(t *testing.T) {
 		return nil
 	}
 	cause := errors.New("synthetic database connection refusal")
-	if err := capture(context.Background(), func() { panic(cause) }); !errors.Is(err, cause) || !ProviderEarningBoundaryRetryable(context.Background(), err) {
-		t.Fatal("database panic lost retryable cause", err)
+	if err := capture(context.Background(), func() { panic(cause) }); !errors.Is(err, cause) || !errors.Is(err, ErrProviderEarningBoundaryUnavailable) {
+		t.Fatal("database panic lost its cause", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := capture(canceled, func() { panic(DbContextDoneError) }); !errors.Is(err, context.Canceled) || ProviderEarningBoundaryRetryable(canceled, err) {
+	if err := capture(canceled, func() { panic(DbContextDoneError) }); !errors.Is(err, context.Canceled) {
 		t.Fatal("database cancellation lost owner cancellation", err)
 	}
 	var propagated any

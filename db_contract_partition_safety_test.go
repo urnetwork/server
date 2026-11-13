@@ -175,8 +175,10 @@ func testContractPartitionPaymentHolds(t testing.TB, ctx context.Context) ([]tes
 		{name: "canceled idempotency key", canceled: true, marker: "circle_idempotency_key", protected: true},
 		{name: "canceled payment record", canceled: true, marker: "payment_record", protected: true},
 		{name: "canceled transaction hash", canceled: true, marker: "tx_hash", protected: true},
-		{name: "completed retention pending", completed: true, retentionPending: true, protected: true},
-		{name: "canceled retention pending", canceled: true, retentionPending: true, protected: true},
+		// a former release's retention stamping flag holds nothing since USDC
+		// completions ended
+		{name: "completed retention pending", completed: true, retentionPending: true},
+		{name: "canceled retention pending", canceled: true, retentionPending: true},
 		{name: "canceled without attempt", canceled: true},
 		{name: "completed external attempt", completed: true, marker: "circle_idempotency_key"},
 		// USDC payouts ended (owner decision 2026-11-13): a closed payment is

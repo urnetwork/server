@@ -90,12 +90,11 @@ func TestAccountWallet(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(walletResults.Wallets), 1)
 
-		firstWalletId := walletResults.Wallets[0].WalletId
-
-		// check if a payout wallet has been created too
+		// USDC provider payouts ended (owner decisions 2026-11-12 and
+		// 2026-11-13), so adding a wallet selects no payout wallet
 		payoutWalletId = model.GetPayoutWalletId(ctx, networkId)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, payoutWalletId, firstWalletId)
+		connect.AssertEqual(t, payoutWalletId, nil)
 
 		wallet2 := &model.CreateAccountWalletExternalArgs{
 			Blockchain:    "SOL",
@@ -110,10 +109,10 @@ func TestAccountWallet(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(walletResults.Wallets), 2)
 
-		// payout wallet should still be the first wallet
+		// nor does adding another
 		payoutWalletId = model.GetPayoutWalletId(ctx, networkId)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, payoutWalletId, firstWalletId)
+		connect.AssertEqual(t, payoutWalletId, nil)
 
 		// fail with invalid wallet id string
 		toRemoveArgs := &model.RemoveWalletArgs{

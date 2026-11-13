@@ -67,7 +67,7 @@ type reengagementSuppressArgs struct {
 // checked the reason by then.
 func (self *reengagementSuppressArgs) flags() string {
 	if self.networkIdsFile != "" {
-		return fmt.Sprintf("--network_ids_file=%s --reason=%s", payoutsReimburseShellQuote(self.networkIdsFile), self.reason)
+		return fmt.Sprintf("--network_ids_file=%s --reason=%s", shellWordQuote(self.networkIdsFile), self.reason)
 	}
 	return fmt.Sprintf("--network_id=%s --reason=%s", strings.TrimSpace(self.networkId), self.reason)
 }
@@ -170,4 +170,9 @@ func readReengagementSuppressNetworkIds(
 		return nil, fmt.Errorf("%s names no network id", args.networkIdsFile)
 	}
 	return networkIds, nil
+}
+
+// One POSIX shell word.
+func shellWordQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }

@@ -298,25 +298,6 @@ func (self *SubscriptionPaymentFailedTemplate) NextAttemptDate() string {
 	return self.NextAttemptTime.UTC().Format("January 2, 2006")
 }
 
-// The notice that a network's USDC payout is withheld for want of a Solana
-// wallet, with the withheld total. Since USDC payouts ended (owner decision
-// 2026-11-12) no payout run writes one; delivery still renders, or withholds,
-// one already in the outbox.
-type MissingWalletTemplate struct {
-	PaymentId server.Id
-	Payout    model.NanoCents
-	BaseTemplate
-}
-
-func (self *MissingWalletTemplate) Name() string {
-	return "subscription_missing_wallet"
-}
-
-// The withheld total in USD with two decimals, as the templates print it.
-func (self *MissingWalletTemplate) AmountUsd() string {
-	return fmt.Sprintf("%.2f", model.NanoCentsToUsd(self.Payout))
-}
-
 // fixme - we can clean this up so all public functions are in the interface
 type MessageSender interface {
 	SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error

@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"maps"
-
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/glog"
@@ -68,27 +66,6 @@ func TestNanoCents(t *testing.T) {
 		connect.AssertEqual(t, usd, usd2)
 		connect.AssertEqual(t, a, a2)
 	})
-}
-
-// planPassThroughPayments plans payments under a zero-subsidy copy of the env
-// config. These ledger tests assert payouts equal the contract revenue share
-// exactly; the local config keeps time-window subsidy accruals enabled
-// (subsidy.yml), and a subsidy landing in the plan shows up as an excess
-// proportional to the test's wall-clock runtime.
-func planPassThroughPayments(ctx context.Context) (*PaymentPlan, error) {
-	subsidyConfig := *EnvSubsidyConfig()
-	// MinPayoutUsd is a floor inside the planner's max(), so it must be
-	// zeroed too or it becomes the whole subsidy. The minimum window is also
-	// zeroed: these tests exercise ledger settlement, not an environment's
-	// payout cadence, and a strict fixture cadence may legitimately defer it.
-	subsidyConfig.MinPayoutUsd = 0
-	subsidyConfig.Days = 1
-	subsidyConfig.MinDaysFraction = 0
-	subsidyConfig.ActiveUserByteCountThresholdHumanReadable = "1b"
-	subsidyConfig.UsdPerActiveUser = 0
-	subsidyConfig.SubscriptionNetRevenueFraction = 0
-	subsidyConfig.ReliabilitySubsidyPerPayoutUsd = 0
-	return PlanPaymentsWithConfig(ctx, &subsidyConfig)
 }
 
 func TestEscrow(t *testing.T) {
@@ -215,32 +192,10 @@ func TestEscrow(t *testing.T) {
 		}
 		connect.AssertEqual(t, netBalanceByteCount, netTransferByteCount-paidByteCount)
 
-		args := &CreateAccountWalletExternalArgs{
-			NetworkId:        destinationNetworkId,
-			Blockchain:       "matic",
-			WalletAddress:    "",
-			DefaultTokenType: "usdc",
-		}
-		walletId := CreateAccountWalletExternal(destinationSession, args)
-		connect.AssertNotEqual(t, walletId, nil)
-
-		wallet := GetAccountWallet(ctx, *walletId)
-		connect.AssertNotEqual(t, wallet, nil)
-
-		err = SetPayoutWallet(ctx, destinationNetworkId, wallet.WalletId)
-		connect.AssertEqual(t, err, nil)
-
-		// plan a payment and complete the payment
-		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan, err := planPassThroughPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
-		connect.AssertEqual(t, paymentPlan.WithheldNetworkIds, []server.Id{destinationNetworkId})
-
-		mockTxHash := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-
+		// more traffic: the provider's sweeps hold it, and no payment pays it
+		// (USDC payouts ended, owner decisions 2026-11-12 and 2026-11-13)
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
-		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+		for range 4 {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 			if err != nil || transferEscrow == nil || transferEscrow.TransferByteCount <= 0 || transferEscrow.TransferByteCount > usedTransferByteCount {
 				t.Fatal("escrow fixture did not receive a valid positive grant", transferEscrow, err)
@@ -261,27 +216,6 @@ func TestEscrow(t *testing.T) {
 		getAccountBalanceResult = GetAccountBalance(destinationSession)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
-		assertProviderSweepTotalsForTest(t, destinationSession, paidByteCount, paid, 0)
-
-		paymentPlan, err = planPassThroughPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{destinationNetworkId})
-
-		for _, payment := range paymentPlan.NetworkPayments {
-			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
-		}
-
-		// check that the payment is recorded
-		getAccountBalanceResult = GetAccountBalance(sourceSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
-
-		getAccountBalanceResult = GetAccountBalance(destinationSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, paidByteCount)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, paid)
 		assertProviderSweepTotalsForTest(t, destinationSession, paidByteCount, paid, 0)
 
 		// repeat escrow until it fails due to no balance
@@ -319,36 +253,13 @@ func TestEscrow(t *testing.T) {
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
 
-		paymentPlan, err = planPassThroughPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{destinationNetworkId})
-
-		for _, payment := range paymentPlan.NetworkPayments {
-			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
-		}
-
-		// check that the payment is recorded
-		getAccountBalanceResult = GetAccountBalance(sourceSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
-
-		// the revenue from
+		// the provider's sweeps hold the whole grant's revenue share, and
+		// nothing paid it
 		getAccountBalanceResult = GetAccountBalance(destinationSession)
 		// each contract can have a 1 nanocent rounding error
 		assertProviderSweepTotalsForTest(t, destinationSession, netTransferByteCount, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)), int64(contractCount))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, netTransferByteCount)
-		// each contract can have a 1 nanocent rounding error
-		if e := getAccountBalanceResult.Balance.PaidNetRevenue - UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)); e < -int64(contractCount) || int64(contractCount) < e {
-			connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)))
-		}
-
-		// there shoud be no more payments
-		paymentPlan, err = planPassThroughPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
+		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
+		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 	})
 }
 
@@ -489,27 +400,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		}
 		connect.AssertEqual(t, netBalanceByteCount, 2*netTransferByteCount-paidByteCount)
 
-		args := &CreateAccountWalletExternalArgs{
-			NetworkId:        sourceNetworkId,
-			Blockchain:       "matic",
-			WalletAddress:    "",
-			DefaultTokenType: "usdc",
-		}
-		walletId := CreateAccountWalletExternal(sourceSession, args)
-		connect.AssertNotEqual(t, walletId, nil)
-
-		wallet := GetAccountWallet(ctx, *walletId)
-
-		err = SetPayoutWallet(ctx, sourceNetworkId, wallet.WalletId)
-		connect.AssertEqual(t, err, nil)
-
-		// plan a payment and complete the payment
-		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan, err := planPassThroughPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
-		connect.AssertEqual(t, paymentPlan.WithheldNetworkIds, []server.Id{sourceNetworkId})
-
+		// more traffic: the provider's sweeps hold it, and no payment pays it
+		// (USDC payouts ended, owner decisions 2026-11-12 and 2026-11-13)
 		// Each completed forward reservation must be acknowledged before the
 		// next admission; checkpoint-only reverse contracts keep their tokens.
 		drainCompleted := func(want int) {
@@ -519,7 +411,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 			}
 		}
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
-		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+		for range 4 {
 			companionTransferEscrow, err := CreateTransferEscrow(ctx, destinationNetworkId, destinationId, sourceNetworkId, sourceId, usedTransferByteCount)
 			connect.AssertEqual(t, err, nil)
 			transferEscrow, err := CreateCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount, 1*time.Hour)
@@ -547,29 +439,6 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		getAccountBalanceResult = GetAccountBalance(sourceSession)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
-		assertProviderSweepTotalsForTest(t, sourceSession, paidByteCount, paid, 0)
-
-		paymentPlan, err = planPassThroughPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{sourceNetworkId})
-
-		mockTxHash := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-
-		for _, payment := range paymentPlan.NetworkPayments {
-			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
-		}
-
-		// check that the payment is recorded
-		getAccountBalanceResult = GetAccountBalance(destinationSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
-
-		getAccountBalanceResult = GetAccountBalance(sourceSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, paidByteCount)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, paid)
 		assertProviderSweepTotalsForTest(t, sourceSession, paidByteCount, paid, 0)
 
 		// repeat escrow until it fails due to no balance
@@ -634,37 +503,12 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		}
 		connect.AssertEqual(t, netBalanceByteCount, netTransferByteCount)
 
-		paymentPlan, err = planPassThroughPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{sourceNetworkId})
-
-		for _, payment := range paymentPlan.NetworkPayments {
-			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "", mockTxHash)
-		}
-
-		// check that the payment is recorded
-		getAccountBalanceResult = GetAccountBalance(destinationSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, ByteCount(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
-
-		// the revenue from
+		// the provider's sweeps hold the whole grant's revenue share, and
+		// nothing paid it
+		getAccountBalanceResult = GetAccountBalance(sourceSession)
 		// each contract can have a 1 nanocent rounding error
 		assertProviderSweepTotalsForTest(t, sourceSession, netTransferByteCount, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)), int64(contractCount))
-
-		// FIXME this is broken
-		// connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, netTransferByteCount)
-		// // each contract can have a 1 nanocent rounding error
-		// if e := getAccountBalanceResult.Balance.PaidNetRevenue - UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)); e < -int64(contractCount) || int64(contractCount) < e {
-		// 	connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)))
-		// }
-
-		// there shoud be no more payments
-		paymentPlan, err = planPassThroughPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
+		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 	})
 }
 
@@ -1423,7 +1267,8 @@ func TestGetOpenTransferByteCount(t *testing.T) {
 		sourceOpenTransferByteCount := GetOpenTransferByteCount(sourceSession.Ctx, sourceNetworkId)
 		connect.AssertEqual(t, sourceOpenTransferByteCount, ByteCount(0))
 
-		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+		// a few contracts' worth of provider revenue
+		for paid < UsdToNanoCents(0.20) {
 
 			companionTransferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 			connect.AssertEqual(t, err, nil)
