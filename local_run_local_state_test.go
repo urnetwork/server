@@ -7,8 +7,10 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -558,10 +560,49 @@ local_run_lock_acquire "$2" second-owner`
 	}
 }
 
+const localLifecycleSignalChild = "URNETWORK_LOCAL_LIFECYCLE_SIGNAL_CHILD"
+
+// Only a re-executed test child changes signal state. Keep Notify installed
+// through exec: caught handlers become defaults, while ignored ones survive.
+func runLocalLifecycleSignalChild(t *testing.T) {
+	t.Helper()
+	separator := 0
+	for separator < len(os.Args) && os.Args[separator] != "--" {
+		separator++
+	}
+	if separator == len(os.Args) {
+		t.Fatal("lifecycle child has no command boundary")
+	}
+	arguments := os.Args[separator+1:]
+	if len(arguments) != 7 || arguments[0] != "-c" || arguments[2] != "local-lifecycle-signal-test" {
+		t.Fatal("lifecycle child command is incomplete")
+	}
+	if os.Getenv(localLifecycleRequireIgnoredHup) == "1" && !signal.Ignored(syscall.SIGHUP) {
+		t.Fatal("forced lifecycle child did not inherit ignored HUP")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caught := make(chan os.Signal, 1)
+	signal.Notify(caught, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
+	if err := syscall.Exec(bash, append([]string{"bash"}, arguments...), os.Environ()); err != nil {
+		t.Fatal("exec lifecycle shell", err)
+	}
+}
+
 // Execute the production lifecycle and its traps, but never the launcher code
 // that invokes sudo, changes host networking, or starts Docker. Deterministic
 // command hooks deliver each signal in the otherwise tiny ownerless windows.
 func TestRunLocalLifecycleFinishesOwnershipTransitionsOnSignal(t *testing.T) {
+	if os.Getenv(localLifecycleSignalChild) == "1" {
+		runLocalLifecycleSignalChild(t)
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	content, err := os.ReadFile(filepath.Join("local", "run-local.sh"))
 	if err != nil {
 		t.Fatal(err)
@@ -626,9 +667,9 @@ exit 37
 `
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				cmd := exec.CommandContext(ctx, "bash", "-c", script, "local-lifecycle-signal-test",
+				cmd := exec.CommandContext(ctx, executable, "-test.run=^TestRunLocalLifecycleFinishesOwnershipTransitionsOnSignal$", "--", "-c", script, "local-lifecycle-signal-test",
 					filepath.Join("local", "run-local-state.sh"), tempDir, phase, signal.name)
-				cmd.Env = testCommandEnvironment(map[string]string{"TMPDIR": tempDir})
+				cmd.Env = testCommandEnvironment(map[string]string{"TMPDIR": tempDir, localLifecycleSignalChild: "1"})
 				output, err := cmd.CombinedOutput()
 				wantStatus := signal.status
 				if phase == "release" {
@@ -1356,5 +1397,28 @@ if suite_proxy_redis_responds 192.0.2.44 16379; then exit 97; fi`
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("suite proxy protocol probes: %v\n%s", err, output)
+	}
+}
+
+const localLifecycleRequireIgnoredHup = "URNETWORK_LOCAL_LIFECYCLE_REQUIRE_IGNORED_HUP"
+
+// Detached runners deliberately ignore HUP; the fixture must establish its
+// own catchable signals without changing the runner or the shared launcher.
+func TestRunLocalLifecycleHandlesInheritedIgnoredHup(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", `trap '' HUP
+exec "$@"`, "local-lifecycle-inherited-hup-test", executable,
+		"-test.run=^TestRunLocalLifecycleFinishesOwnershipTransitionsOnSignal$")
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"TMPDIR":                        t.TempDir(),
+		localLifecycleRequireIgnoredHup: "1",
+	}, "URNETWORK_LOCAL_LIFECYCLE_SIGNAL_CHILD")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("lifecycle with inherited ignored HUP: %v\n%s", err, output)
 	}
 }
