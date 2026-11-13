@@ -572,6 +572,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"store-notification-refused":                          incidentAlertClass,
 	"store-notification-silent":                           incidentAlertClass,
 	"store-notification-unverified":                       incidentAlertClass,
+	"apple-offer-code-supply-low":                         incidentAlertClass,
 	"payout-invalid-destination":                          incidentAlertClass,
 	"payout-invalid-destination-reset-failed":             incidentAlertClass,
 	"payout-retry-microburst":                             incidentAlertClass,
