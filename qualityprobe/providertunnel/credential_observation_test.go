@@ -94,6 +94,7 @@ func credentialObservationUrl(t *testing.T, state *providerRegistrationState) *e
 		started := time.Now()
 		result, err = egresshealth.Check(t.Context(), client, egresshealth.Options{
 			UrlProbe: true, ColdStartTimeout: time.Minute, PerRequestTimeout: 15 * time.Second,
+			// a fixed seed, so a run replays
 			Rand:         rand.New(rand.NewPCG(1, 0)),
 			Destinations: []egresshealth.Destination{{Name: "synthetic", Class: egresshealth.ClassSite, Url: "https://sample.probe.example/page"}},
 		})

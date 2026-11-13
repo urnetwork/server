@@ -340,6 +340,7 @@ func expectedPeersNetwork(
 	sampled func(i int) int,
 	settings *Settings,
 ) ([]Node, []Term) {
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(uint64(extenders+providers), 0))
 	nodes := make([]Node, 0, extenders+providers)
 	for i := 0; i < extenders+providers; i += 1 {

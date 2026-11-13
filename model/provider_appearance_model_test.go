@@ -327,6 +327,7 @@ func TestProviderAppearanceHashStaysBounded(t *testing.T) {
 	store := newTestingProviderAppearanceStore(func() time.Time { return now })
 	clientId := server.NewId()
 	key := providerAppearanceKey(clientId)
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(8, 0))
 
 	maxFields := 0

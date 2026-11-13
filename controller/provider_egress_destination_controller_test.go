@@ -267,6 +267,7 @@ func testPoolRows() []*model.ProviderEgressDestination {
 func TestBuildProviderEgressDestinationPoolServesTheActiveRows(t *testing.T) {
 	now := time.Date(2026, time.September, 20, 6, 0, 0, 0, time.UTC)
 	profile := egresshealth.DefaultRequestProfile()
+	// a fixed seed, so a run replays
 	pool, err := BuildProviderEgressDestinationPool(testPoolRows(), profile, now, 1, rand.New(rand.NewPCG(1, 0)))
 	if err != nil {
 		t.Fatalf("pool: %v", err)
@@ -285,6 +286,7 @@ func TestBuildProviderEgressDestinationPoolServesTheActiveRows(t *testing.T) {
 		t.Fatalf("pool = version %d generated %s", pool.Version, pool.GeneratedAt)
 	}
 
+	// a fixed seed, so a run replays
 	noCanary, err := BuildProviderEgressDestinationPool(testPoolRows(), profile, now, 0.0001, rand.New(rand.NewPCG(1, 0)))
 	if err != nil {
 		t.Fatalf("pool: %v", err)

@@ -382,6 +382,7 @@ func TestAcceptanceNoPings(t *testing.T) {
 // the earth, stale corrections from a micrometre to 10 000 km, one reputation
 // round or the default.
 func TestNoPingsReturnToGenesis(t *testing.T) {
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(7, 0))
 	largestKm := 0.0
 	for trial := 0; trial < 200; trial += 1 {

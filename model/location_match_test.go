@@ -102,6 +102,7 @@ func TestPlaceNameDistance(t *testing.T) {
 // beyond it, on random pairs of short strings over a small alphabet (so that
 // swaps and near misses are common).
 func TestPlaceRuneDistanceWithinLimitMatchesFullDistance(t *testing.T) {
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(1, 0))
 	randomName := func() []rune {
 		name := make([]rune, random.IntN(10))

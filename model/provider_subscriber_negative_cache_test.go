@@ -381,6 +381,7 @@ func TestSubscriberNegativeCacheRandomOverlapEvictionAndExpiry(t *testing.T) {
 	c := newSubscriberNegativeCache(4096, now)
 	events := map[string]int{}
 	c.observe = func(event string, count int) { events[event] += count }
+	// a fixed seed, so a run replays
 	rng := rand.New(rand.NewPCG(1, 0))
 	reads, readCandidates, requestedCandidates := 0, 0, 0
 	read := func(_ context.Context, ids []server.Id, _ func()) (map[server.Id]bool, error) {
@@ -445,6 +446,7 @@ func BenchmarkSubscriberNegativeCacheRandomPopulation256(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			clock, now := subscriberCacheTestClock()
 			c := newSubscriberNegativeCache(subscriberNegativeCapacity, now)
+			// a fixed seed, so a run replays
 			rng := rand.New(rand.NewPCG(2, 0))
 			reads, candidates := 0, 0
 			read := func(_ context.Context, ids []server.Id, _ func()) (map[server.Id]bool, error) {

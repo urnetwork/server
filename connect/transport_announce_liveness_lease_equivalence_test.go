@@ -348,6 +348,7 @@ func checkLivenessLeaseIndexForTest(t *testing.T, writer *providerLivenessLeaseW
 // fails at the first difference.
 func checkLivenessLeaseEquivalenceForTest(t *testing.T, settings livenessLeaseEquivalenceSettingsForTest) {
 	t.Helper()
+	// a fixed seed, so a run replays
 	rng := mathrand.New(mathrand.NewPCG(uint64(settings.seed), 0))
 	clientIds := livenessLeaseClientIdsForTest(rng, settings.clientCount)
 	start := time.UnixMilli(1_800_000_000_000)
@@ -628,6 +629,7 @@ func TestLivenessLeaseWriterMatchesTheFullWalkAcrossTheShards(t *testing.T) {
 func TestLivenessLeaseWriterLoopWritesLikeTheFullWalk(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		interval := 25 * time.Second
+		// a fixed seed, so a run replays
 		rng := mathrand.New(mathrand.NewPCG(7, 0))
 		clientIds := livenessLeaseClientIdsForTest(rng, 120)
 		start := time.Now()

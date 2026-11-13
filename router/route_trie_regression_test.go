@@ -405,6 +405,7 @@ func TestTrieMatchesLinear_Fuzz(t *testing.T) {
 		"api-key", "api-keys", "wallets", "remove", "files", "tail", "star",
 		"specific", "foo", "bar", "42", "network", "user", "update",
 	}
+	// a fixed seed, so a run replays
 	rng := rand.New(rand.NewPCG(0x5eed1234, 0))
 	tables := []namedTable{
 		{"api", realApiRoutes},

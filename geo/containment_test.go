@@ -194,6 +194,7 @@ func TestContainmentRegionHinge(t *testing.T) {
 // without ids spread across the sphere and a dense cluster where regions
 // interleave.
 func TestContainmentMatchesBruteForce(t *testing.T) {
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(2, 0))
 	randomPoint := func() (float64, float64) {
 		latitude := math.Asin(2*random.Float64()-1) * 180 / math.Pi

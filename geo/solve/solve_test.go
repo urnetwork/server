@@ -370,6 +370,7 @@ func TestSolveWarmStartAndOrder(t *testing.T) {
 		t.Fatalf("a warm start took %v sweeps, a cold one %v", warm.Sweeps, cold.Sweeps)
 	}
 
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(1, 0))
 	shuffledNodes := slices.Clone(network.nodes)
 	random.Shuffle(len(shuffledNodes), func(i int, j int) { shuffledNodes[i], shuffledNodes[j] = shuffledNodes[j], shuffledNodes[i] })
@@ -605,6 +606,7 @@ func TestSolveIgnoresTermOrder(t *testing.T) {
 	network.pings(aggregator, 16, 0.2, nil, nil)
 	terms := aggregator.Terms()
 	want := Solve(network.nodes, terms, nil, nil, settings)
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(9, 0))
 	reversed := slices.Clone(terms)
 	slices.Reverse(reversed)

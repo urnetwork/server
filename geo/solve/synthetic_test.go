@@ -54,7 +54,8 @@ func syntheticNodeId(i int) string {
 func newSyntheticNetwork(seed int64, settings *Settings, perturbed bool) *syntheticNetwork {
 	network := &syntheticNetwork{
 		settings: settings,
-		random:   mathrand.New(mathrand.NewPCG(uint64(seed), 0)),
+		// a fixed seed, so a run replays
+		random: mathrand.New(mathrand.NewPCG(uint64(seed), 0)),
 	}
 	for i := 0; i < syntheticNodeCount; i += 1 {
 		var truth LatLon

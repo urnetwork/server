@@ -880,6 +880,7 @@ func (self *directionalLink) close() {
 // All random and timing decisions are serialized in this lifecycle loop.
 func (self *directionalLink) run(seed int64) {
 	defer close(self.done)
+	// a fixed seed, so a run replays
 	random := rand.New(rand.NewPCG(uint64(seed), 0))
 	packets := &scheduledPacketHeap{}
 	heap.Init(packets)

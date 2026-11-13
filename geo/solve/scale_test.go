@@ -66,6 +66,7 @@ var scaleContinents = [][4]float64{
 // and each node's truth.
 func newScaleFleet(extenders int, providers int, extenderPeers int, providerPeers int, seed int64, settings *Settings) ([]Node, []Term, []LatLon) {
 	continentCount := len(scaleContinents)
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(uint64(seed), 0))
 	nodes := make([]Node, extenders+providers)
 	truths := make([]LatLon, extenders+providers)
@@ -120,6 +121,7 @@ func newScaleFleet(extenders int, providers int, extenderPeers int, providerPeer
 				if chunkCount <= c {
 					return
 				}
+				// a fixed seed, so a run replays
 				chunkRandom := mathrand.New(mathrand.NewPCG(uint64(seed*1000003+int64(c)), 0))
 				for i := c * chunk; i < min(len(nodes), (c+1)*chunk); i += 1 {
 					peers := termStarts[i+1] - termStarts[i]

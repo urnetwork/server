@@ -146,6 +146,7 @@ func testProviderEgressCatalogServesWhatItParses(t *testing.T, sites *ProviderEg
 		{name: "no candidate promoted", rows: nil},
 		{name: "every candidate promoted", rows: promoted},
 	} {
+		// a fixed seed, so a run replays
 		pool, err := BuildProviderEgressDestinationPool(sites.configuredRows(stored.rows), sites.Profile, now, 0, rand.New(rand.NewPCG(1, 0)))
 		if err != nil {
 			t.Errorf("%s: the general pool cannot be served: %v", stored.name, err)

@@ -343,6 +343,7 @@ places:
 // queries spread across the whole sphere (poles and antimeridian included)
 // and a dense cluster where cells matter most.
 func TestNearestCityMatchesBruteForce(t *testing.T) {
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(1, 0))
 	// uniform on the sphere, so the polar caps get their share
 	randomPoint := func() (float64, float64) {

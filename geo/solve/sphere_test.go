@@ -95,6 +95,7 @@ var _ Containment = (*geo.PlaceContainment)(nil)
 // haversine; they must agree, on the same sphere, for a derived point to map
 // where the solver put it.
 func TestDistanceAgreesWithThePlaceList(t *testing.T) {
+	// a fixed seed, so a run replays
 	random := mathrand.New(mathrand.NewPCG(3, 0))
 	for i := 0; i < 2000; i += 1 {
 		a := LatLon{Latitude: random.Float64()*180 - 90, Longitude: random.Float64()*360 - 180}

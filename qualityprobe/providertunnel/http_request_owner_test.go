@@ -213,6 +213,7 @@ func TestProbeHttpRequestOwnerHealthConcurrency(t *testing.T) {
 			result, err := egresshealth.Check(context.Background(), client, egresshealth.Options{
 				Destinations: destinations, AllDestinations: true,
 				PerRequestTimeout: 10 * time.Second, Concurrency: 6,
+				// a fixed seed, so a run replays
 				LoadAttempts: 1, Budget: time.Minute, Rand: rand.New(rand.NewPCG(1, 0)),
 			})
 			done <- outcome{result: result, err: err}
@@ -261,6 +262,7 @@ func TestProbeHttpRequestOwnerBlackholeRetriesMeasured(t *testing.T) {
 			done <- egresshealth.Blackhole(context.Background(), client, egresshealth.Options{
 				Destinations: probeRequestOwnerDestinations(), PerRequestTimeout: 15 * time.Second,
 				LoadAttempts: 2, LoadRetryMeanInterval: time.Nanosecond, Budget: time.Minute,
+				// a fixed seed, so a run replays
 				Rand: rand.New(rand.NewPCG(1, 0)),
 			})
 		}()
@@ -327,6 +329,7 @@ func TestProbeHttpRequestOwnerBlackholeLostPathUnmeasured(t *testing.T) {
 			done <- egresshealth.Blackhole(context.Background(), nil, egresshealth.Options{
 				Path:         &probeRequestOwnerLostPath{client: client, lost: lost},
 				Destinations: probeRequestOwnerDestinations(), PerRequestTimeout: 15 * time.Second,
+				// a fixed seed, so a run replays
 				LoadAttempts: 1, Budget: time.Minute, Rand: rand.New(rand.NewPCG(1, 0)),
 			})
 		}()

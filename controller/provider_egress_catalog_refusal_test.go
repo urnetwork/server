@@ -161,6 +161,7 @@ func TestServePoolDropsOnlyACountrySiteCollidingWithAServedEntry(t *testing.T) {
 	stored := []*model.ProviderEgressDestination{{Name: "candidate-shop", Active: true, Probation: true}}
 	dropped := testutil.ToFloat64(providerEgressCatalogRefusalsTotal.WithLabelValues(ProviderEgressRefusalStageServe, ProviderEgressRefusalCountryConflict))
 
+	// a fixed seed, so a run replays
 	pool, err := sites.servePool(stored, time.Date(2026, time.November, 7, 9, 0, 0, 0, time.UTC), rand.New(rand.NewPCG(1, 0)))
 	if err != nil {
 		t.Fatalf("one colliding country site refused the whole pool: %v", err)

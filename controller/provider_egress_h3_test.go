@@ -16,6 +16,7 @@ import (
 // fields by name, general and country lists alike.
 func testServedDestinationFields(t *testing.T, sites *ProviderEgressSites, stored []*model.ProviderEgressDestination) map[string]map[string]any {
 	t.Helper()
+	// a fixed seed, so a run replays
 	pool, err := sites.servePool(stored, time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC), rand.New(rand.NewPCG(1, 0)))
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +117,7 @@ destinations:
 		if err != nil {
 			t.Fatal(err)
 		}
+		// a fixed seed, so a run replays
 		pool, err := sites.servePool(nil, time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC), rand.New(rand.NewPCG(1, 0)))
 		if err != nil {
 			t.Fatal(err)

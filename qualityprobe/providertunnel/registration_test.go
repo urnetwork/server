@@ -107,6 +107,7 @@ func registrationProbeOptions() egresshealth.Options {
 		}
 	}
 	return egresshealth.Options{
+		// a fixed seed, so a run replays
 		Destinations: destinations, Rand: rand.New(rand.NewPCG(1, 0)), PerRequestTimeout: 5 * time.Second,
 		Sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
 	}

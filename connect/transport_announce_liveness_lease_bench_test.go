@@ -26,6 +26,7 @@ func livenessLeaseBenchmarkShardWrite(ctx context.Context, shard int, scored []s
 // A never-started writer holding the benchmark's connections: providing, then
 // not providing, then a few pending, all written once.
 func newLivenessLeaseBenchmarkWriter(b *testing.B) (*providerLivenessLeaseWriter, *mathrand.Rand) {
+	// a fixed seed, so a run replays
 	rng := mathrand.New(mathrand.NewPCG(1, 0))
 	writer := newProviderLivenessLeaseWriter(model.ProviderLivenessLeaseRefreshInterval)
 	writer.startOnce.Do(func() {})
@@ -45,6 +46,7 @@ func newLivenessLeaseBenchmarkWriter(b *testing.B) (*providerLivenessLeaseWriter
 }
 
 func newLivenessLeaseBenchmarkFullWalk(b *testing.B) (*livenessLeaseFullWalkWriterForTest, *mathrand.Rand) {
+	// a fixed seed, so a run replays
 	rng := mathrand.New(mathrand.NewPCG(1, 0))
 	fullWalk := newLivenessLeaseFullWalkWriterForTest(time.Now)
 	fullWalk.writeShard = livenessLeaseBenchmarkShardWrite

@@ -175,6 +175,7 @@ func TestUrlProbeTransportOutcomesSplitByFamily(t *testing.T) {
 			map[string]float64{"success": 1, "tcp ipv4 success": 1, "udp ipv4 country_disabled": 1, "tcp ipv6 success": 1, "udp ipv6 country_disabled": 1}},
 	} {
 		result, err := egresshealth.Check(context.Background(), &http.Client{Transport: c.path}, egresshealth.Options{
+			// a fixed seed, so a run replays
 			UrlProbe: true, Destinations: c.destinations, Rand: rand.New(rand.NewPCG(3, 0)),
 			ProviderIpFamily: egresshealth.IpFamilyDualstack, UdpProbesDisabled: c.udpDisabled,
 		})
@@ -280,6 +281,7 @@ func TestUrlProbeIpv6LegsAreCountedByTheUrlTheyLoaded(t *testing.T) {
 	} {
 		path := &testFamilyTransport{https: [2]http.RoundTripper{content, c.ipv6}, h3: [2]http.RoundTripper{content, content}}
 		result, err := egresshealth.Check(context.Background(), &http.Client{Transport: path}, egresshealth.Options{
+			// a fixed seed, so a run replays
 			UrlProbe: true, Destinations: c.destinations, Rand: rand.New(rand.NewPCG(3, 0)), ProviderIpFamily: c.family,
 		})
 		if err != nil {
