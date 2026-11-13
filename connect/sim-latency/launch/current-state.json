@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T14:01:16Z",
+  "observed_at": "2026-11-13T17:40:00Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -61,17 +61,21 @@
     "historical_sections_below": "Earlier source/test/process observations remain historical; this checkpoint supersedes their pending-build descriptions."
   },
   "review_runtime": {
-    "source_manifest_sha256": "90783495efde8893b6c6e1b7649b4a94c4699e140020cf9d8d157ee58739c2a0",
-    "overlay_sha256": "b4bfb4016171f2e6dd95a2cb9e2efeca5829812b951fdcc842b697887c99b5c7",
-    "focused_tests_passed": 79,
-    "normal_binary_sha256": "cb45e815100d768be04a2692133a8f5915927cf9951420e59f5c736f788f9686",
+    "source_manifest_sha256": "d6e21ac25afcf760f460e6239dea3f89ffa34b4e8a23eeb2175be0f35df42790",
+    "overlay_sha256": "693c4efa7f200aab7c9f8e97dfb2d9c8ea414d8768d24345537b8079c683ee7a",
+    "focused_tests_passed": 105,
+    "normal_binary_sha256": "c3926c554840295d793874b99859d06ed9f4e8ec6ba8eaa25345d7194ad66867",
     "real_offline_reconciliation_passed": true,
     "old_failure_preserved": true,
     "same_candidate_replacement_without_trusted_proof": false,
     "model_call_live_at_observation": false,
     "complete_candidate_approval_issued": false,
     "broader_registry_and_protected_hydration": "Parallel source work, not activated. No uncontrolled eviction, quota increase or namespace reset.",
-    "status": "PROSPECTIVE_REVIEW_PREPARATION_PENDING"
+    "status": "PRIVATE_REVIEW_IN_PROGRESS_NEXT_SCOPE_PREPARATION_RUNNING",
+    "current_preparation_unit": "competition-private-complete-review-prepare-20261113-v6.service",
+    "current_preparation_invocation_id": "a7bcbd9248434eea978349c9df25d874",
+    "current_preparation_generates_model_judgment": false,
+    "operation_outcomes": "Consult protected immutable operation receipts; do not infer candidate approval from operational status."
   },
   "qualified_clarification_metadata": {
     "source_manifest_sha256": "6d3863a8e575e59b697ffd8807efc0dc099ecd8340ad7b63bea89dfc79aea760",
@@ -87,7 +91,7 @@
     "actual_generation_finished": true,
     "actual_model_call_live": false,
     "metadata_grants_code_or_approval_credit": false,
-    "remaining": "Metadata execution finished; consult protected results. Preserve every original finding and never repeat a consumed operation. Prepare prospective review only for an unblocked candidate. Composite code-bearing integration remains incomplete."
+    "remaining": "Metadata execution finished; consult protected results. Preserve every original finding and never repeat a consumed operation. Full composite integration has passed synthetic qualification but is not the active runtime."
   },
   "qualified_prospective_and_composite_stages": {
     "prospective_format_tests_passed": 105,
@@ -95,7 +99,10 @@
     "prospective_normal_binary_sha256": "c3926c554840295d793874b99859d06ed9f4e8ec6ba8eaa25345d7194ad66867",
     "kernel_and_native_controls_passed": 23,
     "kernel_qualification_manifest_sha256": "5f2e1223effc9cea56c47f6a64ff7414477eed29923660c9ae2afb6e21f6060c",
-    "full_composite_integration_complete": false
+    "full_composite_integration_complete": true,
+    "full_composite_qualification_tests_passed": 132,
+    "full_composite_source_manifest_sha256": "c221b215de618928466f719e9158dc0489745ae3e024ed8ba1b798ab3e0c9ae6",
+    "full_composite_runtime_activated": false
   },
   "qualified_storage_renewal": {
     "source_manifest_sha256": "86a9e7e5f4acadbc9ddb442ff93e87814d8bc0b156a3e080f702c9bbd39a2f99",
@@ -144,7 +151,7 @@
     "source_baseline_submission_evidence_deleted": false
   },
   "next_actions": [
-    "Confirm and repair the provider-envelope parser against unchanged retained originals, with deterministic tests and no fresh inference. Consult the protected operator state; never silently rewrite old failures.",
+    "Join the existing preparation unit and inspect its immutable receipt before any next operation. Preserve consumed operations and old failures; never repeat inference because observation timed out.",
     "Verify advancing host heartbeats after the completed held worker handoff; retain compatible serving API identity before controlled recovery.",
     "Finish complete both-model reviews and bounded cohort/archive routing. Derive eligibility from authenticated scoring rules, never success state alone.",
     "Keep all candidate outcomes and operator proof payloads in protected storage. Publish results only through the authorized finalization path."
