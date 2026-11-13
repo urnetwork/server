@@ -29,11 +29,12 @@ import (
 //   - revocations: the sweep, which reads from Postgres which issued
 //     certificates must go (tlsCertRevocationSource), with no call from any
 //     other area, and takes every revoking row to its CA;
-//   - purge: the rows of network_tls_cert whose certificate's validity ended
-//     more than the row retention ago, 30 days, in any state
-//     (CertsStore.PurgeEnded). A row with no validity, a failed order's, has no
-//     time here to count from and stays until the row keeps one
-//     (tls-m5-14-cert-row-end-time).
+//   - purge: the rows of network_tls_cert that ended more than the row
+//     retention ago, 30 days: an expired row by its validity's end, and a
+//     revoked or failed one by its state's time (CertsStore.PurgeEnded;
+//     QD-742). Before that it drops the chains of rows whose certificate
+//     expired or was revoked more than the chain retention ago, 30 days
+//     (CertsStore.PurgeChains; QD-741).
 //
 // What the first three run on is installed per process (SetTlsCertChains), as
 // the routes' is (controller.SetTlsCerts): the engine over this process's
@@ -457,8 +458,11 @@ var ErrTlsCertRevocationSourceUnavailable = errors.New("the revocation sweep's t
 //     that is no longer live (CertsRevocationCauseAliasRetired).
 //
 // A takedown's certificates come marked (model.RequestTlsCertRevocation), not
-// through here. A compromise revocation reads as a removal: sidecar_identity
-// keeps no reason, so its CA is told cessationOfOperation.
+// through here, with their reason in the row, as a device's or an admin's
+// POST /tls/cert-revoke leaves its own; the engine stores the reason of each
+// cause found here the same way. A revoked sidecar reads as a removal:
+// sidecar_identity holds no word of why, so its CA is told
+// cessationOfOperation unless the row was marked keyCompromise first.
 type TlsCertRevocationSource struct {
 	settings *TlsCertRevocationSourceSettings
 }
@@ -625,17 +629,21 @@ type TlsCertPurgeSettings struct {
 	RetryInterval time.Duration
 	// Each run's task max time.
 	MaxTime time.Duration
-	// A row stays this long past its certificate's end: the engine's
-	// RowRetention, cert-1's 30 d.
+	// A row stays this long past its expiry, revocation or failure: the
+	// engine's RowRetention, cert-1's 30 d.
 	RowRetention time.Duration
+	// A row keeps its chain this long past its certificate's expiry or
+	// revocation: the engine's ChainRetention, cert-1's 30 d.
+	ChainRetention time.Duration
 }
 
 func DefaultTlsCertPurgeSettings() *TlsCertPurgeSettings {
 	return &TlsCertPurgeSettings{
-		RunInterval:   1 * time.Hour,
-		RetryInterval: 5 * time.Minute,
-		MaxTime:       10 * time.Minute,
-		RowRetention:  certsservice.DefaultCertsSettings().RowRetention,
+		RunInterval:    1 * time.Hour,
+		RetryInterval:  5 * time.Minute,
+		MaxTime:        10 * time.Minute,
+		RowRetention:   certsservice.DefaultCertsSettings().RowRetention,
+		ChainRetention: certsservice.DefaultCertsSettings().ChainRetention,
 	}
 }
 
@@ -643,8 +651,10 @@ type TlsCertPurgeArgs struct {
 }
 
 type TlsCertPurgeResult struct {
-	RemovedCount int  `json:"removed_count"`
-	More         bool `json:"more"`
+	RemovedCount int `json:"removed_count"`
+	// Rows that lost their chain and stay.
+	ChainCount int  `json:"chain_count"`
+	More       bool `json:"more"`
 }
 
 // Schedules the purge's first run. A binary that does not link MG5 schedules
@@ -681,11 +691,22 @@ func tlsCertPurgeAt(clientSession *session.ClientSession, now time.Time) (*TlsCe
 		return &TlsCertPurgeResult{}, nil
 	}
 	settings := DefaultTlsCertPurgeSettings()
-	removedCount, err := model.NewCertsStore(nil).PurgeEnded(clientSession.Ctx, now.Add(-settings.RowRetention))
+	store := model.NewCertsStore(nil)
+	result := &TlsCertPurgeResult{}
+	chainCount, err := store.PurgeChains(clientSession.Ctx, now.Add(-settings.ChainRetention))
+	if err != nil {
+		glog.Warningf("[tls]cert purge: chains: %v\n", err)
+		result.More = true
+	}
+	result.ChainCount = chainCount
+	// a failure above does not keep the rows past their ttl
+	removedCount, err := store.PurgeEnded(clientSession.Ctx, now.Add(-settings.RowRetention))
 	if err != nil {
 		glog.Warningf("[tls]cert purge: %v\n", err)
+		result.More = true
 	}
-	return &TlsCertPurgeResult{RemovedCount: removedCount, More: err != nil}, nil
+	result.RemovedCount = removedCount
+	return result, nil
 }
 
 // Schedules the next run, sooner when this one failed.

@@ -1,6 +1,7 @@
 // certs' purge chain on a private database (TLS-M5-17): scheduled only in a
-// binary that links MG5, and each run deleting the rows whose certificate
-// ended more than 30 days ago, and only those.
+// binary that links MG5, and each run deleting the rows that ended more than
+// 30 days ago, and only those: an expired row by its validity's end, a revoked
+// or failed one by its state's time (QD-742), each chain going with its row.
 package work
 
 import (
@@ -84,7 +85,12 @@ func TestTlsCertPurgeRemovesRowsPastTheirRetention(t *testing.T) {
 		if retention != 30*24*time.Hour {
 			t.Fatalf("the retention is %v", retention)
 		}
-		insert := func(state sidecar.TlsCertState, notAfter time.Time) sidecar.Id {
+		chainRetention := DefaultTlsCertPurgeSettings().ChainRetention
+		if chainRetention != 30*24*time.Hour {
+			t.Fatalf("the chain retention is %v", chainRetention)
+		}
+		// a row in state since stateTime, whose certificate's validity, if it has one, ends at notAfter
+		insert := func(state sidecar.TlsCertState, stateTime time.Time, notAfter time.Time) sidecar.Id {
 			t.Helper()
 			row := &sidecar.TlsCertRecord{
 				CertId:              sidecartest.CertsIdAt(now.Add(-100 * 24 * time.Hour)),
@@ -95,36 +101,65 @@ func TestTlsCertPurgeRemovesRowsPastTheirRetention(t *testing.T) {
 				SpkiSha256:          make([]byte, 32),
 				Attestation:         []byte("attestation"),
 				State:               state,
+				StateTime:           stateTime,
 			}
 			if !notAfter.IsZero() {
 				row.Serial = "0a"
 				row.NotBefore = notAfter.Add(-45 * 24 * time.Hour)
 				row.NotAfter = notAfter
+				row.Chain = [][]byte{[]byte("leaf"), []byte("intermediate")}
 			}
 			if err := store.InsertCert(ctx, row); err != nil {
 				t.Fatal(err)
 			}
 			return row.CertId
 		}
-		ended := insert(sidecar.TlsCertStateExpired, now.Add(-retention-time.Second))
-		revoked := insert(sidecar.TlsCertStateRevoked, now.Add(-retention-time.Hour))
-		atTheLine := insert(sidecar.TlsCertStateExpired, now.Add(-retention))
-		recent := insert(sidecar.TlsCertStateExpired, now.Add(-time.Hour))
-		live := insert(sidecar.TlsCertStateIssued, now.Add(time.Hour))
-		failed := insert(sidecar.TlsCertStateFailed, time.Time{})
+		past := now.Add(-retention - time.Second)
+		atTheLine := now.Add(-retention)
+		// expired rows count from their validity's end
+		ended := insert(sidecar.TlsCertStateExpired, past, past)
+		endedAtTheLine := insert(sidecar.TlsCertStateExpired, atTheLine, atTheLine)
+		recent := insert(sidecar.TlsCertStateExpired, now.Add(-time.Hour), now.Add(-time.Hour))
+		live := insert(sidecar.TlsCertStateIssued, now.Add(-44*24*time.Hour), now.Add(time.Hour))
+		// revoked rows count from their revocation, with weeks of validity left
+		revoked := insert(sidecar.TlsCertStateRevoked, past, now.Add(10*24*time.Hour))
+		revokedAtTheLine := insert(sidecar.TlsCertStateRevoked, atTheLine, now.Add(10*24*time.Hour))
+		// failed rows, which have no validity, count from their failure
+		failed := insert(sidecar.TlsCertStateFailed, past, time.Time{})
+		failedAtTheLine := insert(sidecar.TlsCertStateFailed, atTheLine, time.Time{})
+		// an order still on its way stays, however old
+		queued := insert(sidecar.TlsCertStateQueued, now.Add(-100*24*time.Hour), time.Time{})
+		// marked long ago and never taken by its CA: not revoked, so it counts from its validity's end
+		revoking := insert(sidecar.TlsCertStateRevoking, past, now.Add(10*24*time.Hour))
 
 		result, err := tlsCertPurgeAt(clientSession, now)
-		if err != nil || result.More || result.RemovedCount < 2 {
+		if err != nil || result.More || result.RemovedCount < 3 || result.ChainCount < 2 {
 			t.Fatalf("the purge: %+v, %v", result, err)
 		}
-		for _, certId := range []sidecar.Id{ended, revoked} {
+		for _, certId := range []sidecar.Id{ended, revoked, failed} {
 			if _, err := store.GetCert(ctx, certId); !errors.Is(err, certsservice.ErrCertsNotFound) {
 				t.Fatalf("a row past its retention stayed: %v", err)
 			}
 		}
-		for _, certId := range []sidecar.Id{atTheLine, recent, live, failed} {
+		for _, certId := range []sidecar.Id{endedAtTheLine, recent, live, revokedAtTheLine, failedAtTheLine, queued, revoking} {
 			if _, err := store.GetCert(ctx, certId); err != nil {
 				t.Fatalf("a row inside its retention went: %v", err)
+			}
+		}
+		// a chain inside its 30 days is still its row's
+		for _, certId := range []sidecar.Id{endedAtTheLine, recent, live, revokedAtTheLine, revoking} {
+			if row, err := store.GetCert(ctx, certId); err != nil || len(row.Chain) != 2 {
+				t.Fatalf("a chain inside its retention went: %+v, %v", row, err)
+			}
+		}
+		// a second later the rows at the line go too, each with its chain
+		result, err = tlsCertPurgeAt(clientSession, now.Add(time.Second))
+		if err != nil || result.More || result.RemovedCount < 3 || result.ChainCount < 2 {
+			t.Fatalf("the next purge: %+v, %v", result, err)
+		}
+		for _, certId := range []sidecar.Id{endedAtTheLine, revokedAtTheLine, failedAtTheLine} {
+			if _, err := store.GetCert(ctx, certId); !errors.Is(err, certsservice.ErrCertsNotFound) {
+				t.Fatalf("a row past its retention stayed: %v", err)
 			}
 		}
 	})
@@ -247,6 +282,8 @@ type testTlsCertChains struct {
 	store         *model.CertsStore
 	ca            certsservice.CertsCa
 	root          string
+	host          *sidecar.ServiceHost
+	settings      *certsservice.CertsSettings
 	service       *certsservice.CertsService
 }
 
@@ -289,8 +326,39 @@ func newTestTlsCertChains(t testing.TB, budgetCap int) *testTlsCertChains {
 	SetTlsCertChains(&TlsCertChainDeps{Service: service})
 	t.Cleanup(func() { SetTlsCertChains(nil) })
 	return &testTlsCertChains{
-		t: t, ctx: ctx, clientSession: clientSession, clock: clock, push: push, acme: acme, store: store, ca: ca, root: root, service: service,
+		t: t, ctx: ctx, clientSession: clientSession, clock: clock, push: push, acme: acme, store: store, ca: ca, root: root,
+		host: host, settings: settings, service: service,
 	}
+}
+
+// A restart of the process: another engine on the same rows, installed in the
+// old one's place.
+func (self *testTlsCertChains) restart() {
+	self.t.Helper()
+	SetTlsCertChains(nil)
+	service, err := certsservice.NewCertsService(self.ctx, self.host, self.store, nil, self.acme, self.settings)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	self.service = service
+	SetTlsCertChains(&TlsCertChainDeps{Service: service})
+}
+
+// What Postgres holds in certId's revocation_reason, empty for NULL.
+func (self *testTlsCertChains) storedReason(certId sidecar.Id) string {
+	self.t.Helper()
+	var reason *string
+	server.Db(self.ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			self.ctx,
+			`SELECT revocation_reason FROM network_tls_cert WHERE cert_id = $1`,
+			server.Id(certId),
+		).Scan(&reason))
+	})
+	if reason == nil {
+		return ""
+	}
+	return *reason
 }
 
 // One device of a network as other areas' rows hold it.
@@ -399,6 +467,7 @@ func (self *testTlsCertChains) row(device *testTlsCertDevice, state sidecar.TlsC
 		Attestation:         []byte("attestation"),
 		Csr:                 csr,
 		State:               state,
+		StateTime:           self.clock.Now(),
 	}
 }
 
@@ -538,6 +607,25 @@ func TestTlsCertOrderAndRenewalChains(t *testing.T) {
 		if kinds := chains.hintKinds(device, certId); !slices.Equal(kinds, []protocol.TlsHintKind{protocol.TlsHintKind_TLS_HINT_ORDER, protocol.TlsHintKind_TLS_HINT_ISSUED}) {
 			t.Fatalf("hints %v", kinds)
 		}
+		// the chain the CA issued is in Postgres, with the time of the issuance, and the process that
+		// comes up after a restart serves it to the device's GET
+		stored, err := chains.store.GetCert(chains.ctx, certId)
+		if err != nil || len(stored.Chain) != 2 || !slices.Equal(stored.Chain[1], chains.acme.issuer.Raw) || !stored.StateTime.Equal(chains.clock.Now()) {
+			t.Fatalf("the issued row %+v, %v", stored, err)
+		}
+		leaf, err := x509.ParseCertificate(stored.Chain[0])
+		if err != nil || certsservice.CertsSerialText(leaf.SerialNumber) != stored.Serial || !device.key.PublicKey.Equal(leaf.PublicKey) {
+			t.Fatalf("the stored leaf is not the device's certificate: %v", err)
+		}
+		chains.restart()
+		status, err := chains.service.OrderStatus(chains.ctx, device.networkId, device.clientId, certId)
+		if err != nil || status.State != sidecar.TlsCertStateIssued || len(status.Chain) != 2 ||
+			!slices.Equal(status.Chain[0], stored.Chain[0]) || !slices.Equal(status.Chain[1], stored.Chain[1]) {
+			t.Fatalf("the status after a restart %+v, %v", status, err)
+		}
+		if _, err := chains.service.OrderStatus(chains.ctx, device.networkId, waiting.clientId, certId); !errors.Is(err, certsservice.ErrCertsNotFound) {
+			t.Fatalf("another client's status: %v", err)
+		}
 
 		renewals, err := TlsCertRenewals(&TlsCertRenewalsArgs{}, chains.clientSession)
 		if err != nil || renewals.Idle || renewals.QueuedCount != 0 {
@@ -564,6 +652,10 @@ func TestTlsCertOrderAndRenewalChains(t *testing.T) {
 		sent := chains.acme.ordered()
 		if len(sent) != 2 || string(sent[1].Csr) != string(issued.Csr) {
 			t.Fatalf("the CA was sent %d orders, the renewal's not the stored CSR", len(sent))
+		}
+		// the renewal names the certificate it replaces, read from the stored chain
+		if sent[0].Replaces != "" || sent[1].Replaces == "" {
+			t.Fatalf("replaces %q, then %q", sent[0].Replaces, sent[1].Replaces)
 		}
 		if kinds := chains.hintKinds(device, renewalId); !slices.Equal(kinds, []protocol.TlsHintKind{
 			protocol.TlsHintKind_TLS_HINT_ORDER, protocol.TlsHintKind_TLS_HINT_ORDER, protocol.TlsHintKind_TLS_HINT_ISSUED,
@@ -728,6 +820,74 @@ func TestTlsCertRevocationChainSweeps(t *testing.T) {
 		renewals, err := TlsCertRenewals(&TlsCertRenewalsArgs{}, chains.clientSession)
 		if err != nil || renewals.QueuedCount != 1 {
 			t.Fatalf("renewals %+v, %v", renewals, err)
+		}
+	})
+}
+
+// A requested revocation's reason waits in Postgres until the CA has taken it
+// (cert-1; QD-741): a takedown's mark and a compromise's are each still in
+// their row after the process restarts, the revocation chain tells the CA each
+// row's own reason, and the column is NULL again once the CA has it.
+func TestTlsCertRevocationChainTellsTheCaTheStoredReason(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg5Linked() || !server.SidecarMg1Linked() {
+			return
+		}
+		chains := newTestTlsCertChains(t, 100)
+		networkId := chains.network()
+		compromisedId := chains.issued(chains.device(networkId, "k4reason01"))
+		takenDownId := chains.issued(chains.device(networkId, "k4reason02"))
+		routeId := chains.issued(chains.device(networkId, "k4reason03"))
+		issuedTime := chains.clock.Now()
+
+		for _, request := range []*model.TlsCertRevocationRequest{
+			{NetworkId: server.Id(networkId), CertId: server.Id(compromisedId), Reason: "compromise:test", KeyCompromise: true},
+			{NetworkId: server.Id(networkId), CertId: server.Id(takenDownId), Reason: "abuse:test"},
+		} {
+			if marked, err := model.RequestTlsCertRevocation(chains.ctx, request); err != nil || marked != 1 {
+				t.Fatalf("the mark: %d, %v", marked, err)
+			}
+		}
+		// POST /tls/cert-revoke with key_compromise, as the route writes it
+		if moved, err := chains.store.TransitionCert(chains.ctx, &certsservice.CertsTransition{
+			CertId: routeId, From: []sidecar.TlsCertState{sidecar.TlsCertStateIssued}, To: sidecar.TlsCertStateRevoking, At: issuedTime.Add(time.Minute),
+			RevocationReason: sidecar.TlsCertRevocationReasonKeyCompromise,
+		}); err != nil || !moved {
+			t.Fatalf("the route's mark: %v, %v", moved, err)
+		}
+		want := map[sidecar.Id]string{
+			compromisedId: "keyCompromise",
+			takenDownId:   "cessationOfOperation",
+			routeId:       "keyCompromise",
+		}
+		for certId, reason := range want {
+			if got := chains.storedReason(certId); got != reason {
+				t.Fatalf("the row holds %q, want %q", got, reason)
+			}
+		}
+
+		// the process restarts before the chain runs: nothing but the rows carries the reasons
+		chains.restart()
+		chains.clock.Advance(time.Hour)
+		revokedTime := chains.clock.Now()
+		result, err := TlsCertRevocations(&TlsCertRevocationsArgs{}, chains.clientSession)
+		if err != nil || result.Failed || result.MarkedCount != 0 || result.RevokedCount != 3 || result.WaitingCount != 0 || result.FailedCount != 0 {
+			t.Fatalf("the chain: %+v, %v", result, err)
+		}
+		// the revoking rows go in id order
+		if reasons := chains.acme.revocations(); !slices.Equal(reasons, []certsservice.CertsRevocationReason{
+			certsservice.CertsRevocationKeyCompromise, certsservice.CertsRevocationCessationOfOperation, certsservice.CertsRevocationKeyCompromise,
+		}) {
+			t.Fatalf("the CA was told %v", reasons)
+		}
+		for certId := range want {
+			row, err := chains.store.GetCert(chains.ctx, certId)
+			if err != nil || row.State != sidecar.TlsCertStateRevoked || row.RevocationReason != "" || !row.StateTime.Equal(revokedTime) || len(row.Chain) != 2 {
+				t.Fatalf("a revoked row %+v, %v", row, err)
+			}
+			if got := chains.storedReason(certId); got != "" {
+				t.Fatalf("a revoked row still holds %q", got)
+			}
 		}
 	})
 }

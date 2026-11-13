@@ -47,6 +47,7 @@ type certsConfigYaml struct {
 	RepeatSetRefillSeconds  *int                          `yaml:"repeat_set_refill_s"`
 	BudgetTtlSeconds        *int                          `yaml:"budget_ttl_s"`
 	RowRetentionSeconds     *int                          `yaml:"row_retention_s"`
+	ChainRetentionSeconds   *int                          `yaml:"chain_retention_s"`
 	AdmitBatchCount         *int                          `yaml:"admit_batch_count"`
 	OrderRetryAfterSeconds  *int                          `yaml:"order_retry_after_s"`
 	AccountRolloverAgeHours *int                          `yaml:"account_rollover_age_h"`
@@ -144,6 +145,7 @@ func ParseCertsConfig(data []byte) (*CertsConfig, error) {
 		{"repeat_set_refill_s", file.RepeatSetRefillSeconds, func(value int) { settings.RepeatSetRefill = time.Duration(value) * time.Second }},
 		{"budget_ttl_s", file.BudgetTtlSeconds, func(value int) { settings.BudgetTtl = time.Duration(value) * time.Second }},
 		{"row_retention_s", file.RowRetentionSeconds, func(value int) { settings.RowRetention = time.Duration(value) * time.Second }},
+		{"chain_retention_s", file.ChainRetentionSeconds, func(value int) { settings.ChainRetention = time.Duration(value) * time.Second }},
 		{"admit_batch_count", file.AdmitBatchCount, func(value int) { settings.AdmitBatchCount = value }},
 		{"order_retry_after_s", file.OrderRetryAfterSeconds, func(value int) { settings.OrderRetryAfter = time.Duration(value) * time.Second }},
 		{"account_rollover_age_h", file.AccountRolloverAgeHours, func(value int) { settings.AccountRolloverAge = time.Duration(value) * time.Hour }},
