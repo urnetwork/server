@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T01:44:49.567750Z",
+  "observed_at": "2026-11-13T03:06:19.353245Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,12 +17,12 @@
   },
   "source_index": "../EPOCH-SOURCE.md",
   "queue": {
-    "succeeded": 16,
+    "succeeded": 17,
     "failed": 4,
     "queued": 0,
     "running": 1
   },
-  "active_attempts": [{
+  "last_completed_attempt": {
     "job_id": "01a1d270-672a-80c0-4983-afa0464c8eae",
     "host_id": "sille",
     "run_id": "cb61142db0a92772f6d58ea327d613d521151d3eaf461d0c27dd5bff97a10725",
@@ -31,13 +31,20 @@
     "attempt": 1,
     "cycle": 0,
     "native_fencing_token": 20,
-    "last_progress": "Candidate replicate 04 container started; native state running. No cleanup or score completion claimed."
+    "last_progress": "Native evaluation and verified cleanup succeeded; authoritative database now counts17 succeeded and no running Sille job."
+  },
+  "active_attempts": [{
+    "job_id": "01a1d2c5-1653-b033-1203-34a0e6e9bf32",
+    "host_id": "goofe",
+    "started_at": "2026-11-13T02:38:32.584085Z",
+    "original_deadline_at": "2026-11-13T05:38:32.584085Z",
+    "no_operator_interruption": true
   }],
   "runtime_status": {
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "api_observed_at": "2026-11-13T01:44:49.567750Z",
+    "api_observed_at": "2026-11-13T03:06:31.322203Z",
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
       "supervisor_pid": 211140,
@@ -64,6 +71,7 @@
     }
   },
   "recovery": {
+    "latest_user_directive": "Rerun all failed evaluations. Controlled recovery qualification is in progress; no rerun has started and submitted patch bytes and screening remain unchanged.",
     "authorized_failed_jobs": [
       "01a1c402-9ca1-79d8-e114-5af7c2ef343d",
       "01a1c4af-c928-3e6a-d183-6c9f319cc119",
@@ -298,6 +306,20 @@
       "json_sha256": "f11836c06c3d98196c20112f57d4b50687793dd1b14dd3aaccab50c7c71593cc",
       "qualified_or_executed_against_models": false
     },
+    "context_slices_diagnostic": {
+      "source_sha256": "bc9c2b1600aad5567d23ffe56ce4cf482d364de02aebdacdaa7e8f1435e49525",
+      "discovered_cases": 69,
+      "passed_before_failfast": 12,
+      "failed": 1,
+      "unrun": 56,
+      "failure": "Named-caller composed workflow stalled at step45: duplicate retained original receipt. Preserve direct-parent duplicate refusal while allowing authenticated identical transitive ancestors to share storage.",
+      "duration_seconds": 274,
+      "evidence": "/dev/shm/competition-provider-bc9-diagnostic-20261113.rKwBR0kV",
+      "json_sha256": "a3f4706056676a74212fd7f192f03aaa9bb9ec047b941082c429cc330024e7d1",
+      "qualified_or_executed_against_models": false,
+      "next_source": "/home/by/urnetwork/temp/competition-epoch2-private-prereview-20261112/complete-review-provider-cas-draft-20261113",
+      "next_source_status": "Being authored: authenticated deduplicated payload ledger, bounded roots/hydration, collision and chain/diamond growth controls. No model calls before source/runtime qualification."
+    },
     "qwen_first_partial": "Original response validated offline; original failure receipt unchanged. Receipt 706f503960bf354ad2032442bc4323e91d5c30aa7e6b76c54a679e6ae1c74125; no complete review or approval.",
     "gemma_first_partial": "Rejected: non-JSON prefix and unseen-file findings; no reroll.",
     "qwen_scoring_partial": "Provider completed; rejected because canonical.patch is not a production source path. No rewriting or reroll.",
@@ -404,7 +426,7 @@
   "next_actions": [
     "Finish the remaining original census cases and race qualification using the pinned wallet-fixture binary; preserve native PostgreSQL and runtime limits.",
     "Qualify the new bounded multi-unit provider adapter and execute complete paired reviews from the authenticated coverage ledger; protected original and linked validation evidence are retained separately.",
-    "Independently qualify isolated idle-heartbeat fix 59b3ce0ca2bfcc96d29de8c98d14cc1c5e9ae9fa and its fifteen causal controls before any main merge or live deployment.",
+    "Activate the qualified and staged idle-heartbeat worker at a verified global idle boundary, using fresh signed native status and availability evidence for both actual latest host attempts; do not interrupt active evaluation.",
     "Complete recovery qualification and deploy compatible readers/worker before granting any of the three infrastructure recoveries; preserve original failure records and submission-order ties.",
     "Finish complete paired, bounded reviews for every eligible submission; partial observations never count as approvals.",
     "Monitor live API, supervisor leases and both hosts. Never restart a live attempt because an observation is quiet."
