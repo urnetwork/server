@@ -1262,6 +1262,8 @@ type ProxyDevice struct {
 	// Replaces the packet loop of Run for a device with no DeviceLocal or
 	// Tun; Run returns when it does.
 	runForTest func()
+	// Replaces the dial through the private Tun for a device with no Tun.
+	dialForTest func(ctx context.Context, network string, addr string) (net.Conn, error)
 
 	// The throughput share of a unique-exit proxy (proxy_unique_exit.go); nil
 	// for every other device. Set once at construction.
@@ -2030,6 +2032,9 @@ func (self *ProxyDevice) DialContext(ctx context.Context, network string, addr s
 }
 
 func (self *ProxyDevice) dialTun(ctx context.Context, network string, addr string) (net.Conn, error) {
+	if self.dialForTest != nil {
+		return self.dialForTest(ctx, network, addr)
+	}
 	return self.tun.DialContext(ctx, network, addr)
 }
 
