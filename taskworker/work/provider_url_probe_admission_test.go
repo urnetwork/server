@@ -232,15 +232,36 @@ func TestUrlProbeHealthyClaimStillMeasuresAndPublishes(t *testing.T) {
 	})
 }
 
+// The admission reserve is the longest turn a pass runs: a dual-stack
+// provider's turn that measures post-quantum, whose health run holds each
+// tunnel generation's first sends for the session's seal
+// (egresshealth.Options.RunBudget). At the pass's defaults that is the 60 s
+// probe timeout, four 10 s legs, three generations' 50 s cold-start allowance
+// and their 3 s seal waits: 259 s. A reserve without the seal waits was 250 s,
+// so a post-quantum turn admitted at the cutoff could run 9 s past it.
+func TestUrlProbeReserveCoversAPostQuantumTurn(t *testing.T) {
+	_, args, _ := urlAdmissionPass()
+	timeout := time.Duration(args.UrlProbe.ProbeTimeoutSeconds) * time.Second
+	generations := time.Duration(1 + args.TunnelRecreateAttempts)
+	sealWait := fleetprobe.DefaultUrlProbePostQuantumSettings().SealWait
+	turn := timeout + 4*egresshealth.DefaultPerRequestTimeout + generations*(timeout-egresshealth.DefaultPerRequestTimeout) + generations*sealWait
+	if turn != 259*time.Second {
+		t.Fatalf("the post-quantum dual-stack turn is %s", turn)
+	}
+	if reserve := providerUrlProbeRunBudget(args); reserve != turn {
+		t.Fatalf("the reserve is %s, the post-quantum turn it admits %s", reserve, turn)
+	}
+}
+
 // No endpoint is contacted. Existing policy still owns a complete 60-second
 // request, even though every individual network phase is capped at 15 seconds.
 func TestUrlProbeAdmissionKeepsRequestAndReservePolicy(t *testing.T) {
 	_, args, _ := urlAdmissionPass()
-	if budget := providerUrlProbeRunBudget(args); budget != 250*time.Second || budget+3*providerEgressControlPlaneTimeout != 340*time.Second {
+	if budget := providerUrlProbeRunBudget(args); budget != 259*time.Second || budget+3*providerEgressControlPlaneTimeout != 349*time.Second {
 		t.Fatalf("reserve policy changed: %s", budget)
 	}
 	reserve := providerUrlProbeRunBudget(args) + 3*providerEgressControlPlaneTimeout
-	if model.ProviderUrlProbeRenewalHeadroom-reserve != 20*time.Second {
+	if model.ProviderUrlProbeRenewalHeadroom-reserve != 11*time.Second {
 		t.Fatal("default turn and publication no longer fit the renewal scheduling margin")
 	}
 	opts := fleetprobe.EgressHealthOptions(time.Duration(args.UrlProbe.ProbeTimeoutSeconds)*time.Second, false)

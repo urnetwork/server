@@ -81,7 +81,7 @@ func TestUrlProbeRampLoaderPreservesPolicyAndPrivateBudget(t *testing.T) {
 		if !providerEgressProbeArgsMatchSettings(args, settings) {
 			t.Fatal("current ramp snapshot is incorrectly stale")
 		}
-		if got := providerUrlProbeRunBudget(args); got != 250*time.Second || got+3*providerEgressControlPlaneTimeout != 340*time.Second {
+		if got := providerUrlProbeRunBudget(args); got != 259*time.Second || got+3*providerEgressControlPlaneTimeout != 349*time.Second {
 			t.Fatalf("run/publication reserve changed: run=%s", got)
 		}
 		if got, err := providerUrlProbeCreditMinimum(args); err != nil || got != 2*1024*1024*1024*1024 {

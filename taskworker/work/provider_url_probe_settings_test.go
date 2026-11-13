@@ -42,10 +42,11 @@ load_retry_mean_interval_seconds: 0
 		t.Fatal("deep-copied URL settings compare by pointer identity")
 	}
 	// one URL's worst turn, a dual-stack provider's: the 45 s probe timeout,
-	// four 10 s legs (HTTPS and HTTP/3 over IPv4 and over IPv6) and three
-	// tunnel generations' 35 s cold-start allowance; a sampled run's retry
-	// spacing would add minutes per attempt
-	if budget := providerUrlProbeRunBudget(args); budget != 190*time.Second {
+	// four 10 s legs (HTTPS and HTTP/3 over IPv4 and over IPv6), three tunnel
+	// generations' 35 s cold-start allowance and, on a turn that measures
+	// post-quantum, their 3 s seal waits; a sampled run's retry spacing would
+	// add minutes per attempt
+	if budget := providerUrlProbeRunBudget(args); budget != 199*time.Second {
 		t.Fatalf("single URL retained the sampled retry budget: %s", budget)
 	}
 	credit, err := providerUrlProbeCreditMinimum(args)
