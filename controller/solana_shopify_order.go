@@ -121,7 +121,7 @@ func init() {
 	prometheus.MustRegister(solanaShopifyOrderPayments)
 }
 
-// solanaShopifyOrder is an order of the store as the lookup reads it.
+// An order of the store as the lookup reads it.
 type solanaShopifyOrder struct {
 	id           string
 	name         string
@@ -129,7 +129,7 @@ type solanaShopifyOrder struct {
 	transactions []*solanaShopifyOrderTransaction
 }
 
-// solanaShopifyOrderTransaction is one of an order's payment transactions.
+// One of an order's payment transactions.
 type solanaShopifyOrderTransaction struct {
 	kind        string
 	status      string
@@ -156,8 +156,8 @@ var solanaShopifyOrdersAround = func(ctx context.Context, at time.Time, settings
 // The write of a recognized payment. Replaceable only by tests.
 var solanaShopifyRecord = model.RecordSolanaShopifyOrderPaymentInConn
 
-// solanaShopifyAppPayment reports a transaction Shopify's Solana Pay app
-// built: one of its top-level instructions runs the app's payment program.
+// Whether Shopify's Solana Pay app built a transaction: one of its top-level
+// instructions runs the app's payment program.
 func solanaShopifyAppPayment(transaction *SolanaTransaction) bool {
 	for _, instruction := range transaction.Instructions {
 		if slices.Contains(solanaShopifyPayProgramIds, instruction.ProgramId) {
@@ -167,11 +167,10 @@ func solanaShopifyAppPayment(transaction *SolanaTransaction) bool {
 	return false
 }
 
-// solanaShopifyPaymentTotalMicro is the USDC the payment's source sent out
-// in the transaction, in micro-USDC: every USDC transfer from the token
-// account that paid our receiver, our share and the app's fee together. ok =
-// false when no transfer to our receiver names its source, or two sources
-// paid it.
+// The USDC the payment's source sent out in the transaction, in micro-USDC:
+// every USDC transfer from the token account that paid our receiver, our share
+// and the app's fee together. ok = false when no transfer to our receiver
+// names its source, or two sources paid it.
 func solanaShopifyPaymentTotalMicro(transaction *SolanaTransaction) (totalMicro int64, ok bool) {
 	source := ""
 	for _, transfer := range solanaReceivedUsdcTransfers(transaction) {
@@ -195,9 +194,8 @@ func solanaShopifyPaymentTotalMicro(transaction *SolanaTransaction) (totalMicro 
 	return totalMicro, 0 < totalMicro
 }
 
-// solanaShopifyMatchOrder is the one order whose Solana Pay sale paid
-// totalMicro within the match window of the block, with that sale; nil and
-// why not otherwise.
+// The one order whose Solana Pay sale paid totalMicro within the match window
+// of the block, with that sale; nil and why not otherwise.
 func solanaShopifyMatchOrder(
 	orders []*solanaShopifyOrder,
 	totalMicro int64,
@@ -254,10 +252,10 @@ const (
 	solanaShopifyUnverified
 )
 
-// solanaRecognizeShopifyOrder recognizes a payment the decision would record
-// as no_intent (see the file header) and records it as its Shopify order's
-// payment. A dry run writes nothing. note says why a Solana Pay app payment
-// was not verified. err: the order lookup failed, nothing was written.
+// Recognizes a payment the decision would record as no_intent (see the file
+// header) and records it as its Shopify order's payment. A dry run writes
+// nothing. note says why a Solana Pay app payment was not verified. err: the
+// order lookup failed, nothing was written.
 func solanaRecognizeShopifyOrder(
 	connOwner server.PgConn,
 	ctx context.Context,
@@ -311,9 +309,9 @@ func solanaRecognizeShopifyOrder(
 
 // ----- the Shopify Admin API -----
 
-// solanaShopifyCredentials are the Admin API's: vault shopify.yml, the store
-// app's client credentials (the support tool's), exchanged for a short-lived
-// access token that is never stored, logged or written into an error.
+// The Admin API's credentials: vault shopify.yml, the store app's client
+// credentials (the support tool's), exchanged for a short-lived access token
+// that is never stored, logged or written into an error.
 type solanaShopifyCredentials struct {
 	shop         string
 	apiVersion   string
@@ -362,7 +360,7 @@ var solanaShopifyBaseUrl = func(shop string) string {
 	return "https://" + shop
 }
 
-// solanaShopifyToken is an access token and when it is no longer used.
+// An access token and when it is no longer used.
 type solanaShopifyToken struct {
 	value     string
 	expiresAt time.Time
@@ -372,8 +370,8 @@ type solanaShopifyToken struct {
 var solanaShopifyTokensLock sync.Mutex
 var solanaShopifyTokens = map[string]*solanaShopifyToken{}
 
-// solanaShopifyPost posts a request and reads its answer into out. Errors
-// name the step and the status only.
+// Posts a request and reads its answer into out. Errors name the step and the
+// status only.
 func solanaShopifyPost(ctx context.Context, settings *SolanaShopifyOrderSettings, step string, requestUrl string, contentType string, body string, headers map[string]string, out any) error {
 	requestCtx, cancel := context.WithTimeout(ctx, settings.RequestTimeout)
 	defer cancel()
@@ -404,9 +402,8 @@ func solanaShopifyPost(ctx context.Context, settings *SolanaShopifyOrderSettings
 	return nil
 }
 
-// solanaShopifyAccessToken is an access token for the credentials: the
-// cached one while it is fresh, else a new one from the client credentials
-// grant.
+// An access token for the credentials: the cached one while it is fresh, else
+// a new one from the client credentials grant.
 func solanaShopifyAccessToken(ctx context.Context, credentials *solanaShopifyCredentials, settings *SolanaShopifyOrderSettings) (string, error) {
 	key := credentials.shop + "/" + credentials.clientId
 	now := time.Now()
@@ -455,8 +452,7 @@ const solanaShopifyOrdersQuery = `query($q: String!, $first: Int!) { orders(firs
   transactions(first: 20) { kind status gateway processedAt paymentId amountSet { shopMoney { amount currencyCode } } }
 } } } }`
 
-// solanaShopifyReadOrders reads the store's orders processed within the
-// match window of at.
+// The store's orders processed within the match window of at.
 func solanaShopifyReadOrders(ctx context.Context, credentials *solanaShopifyCredentials, at time.Time, settings *SolanaShopifyOrderSettings) ([]*solanaShopifyOrder, error) {
 	token, err := solanaShopifyAccessToken(ctx, credentials, settings)
 	if err != nil {
@@ -536,9 +532,9 @@ func solanaShopifyReadOrders(ctx context.Context, credentials *solanaShopifyCred
 	return orders, nil
 }
 
-// solanaShopifyCents reads a Shopify decimal amount ("141.48") as cents,
-// exactly; ok = false for anything else (a sign, more than two decimals that
-// are not zeros, not a number).
+// A Shopify decimal amount ("141.48") as cents, exactly; ok = false for
+// anything else (a sign, more than two decimals that are not zeros, not a
+// number).
 func solanaShopifyCents(amount string) (int64, bool) {
 	whole, fraction, _ := strings.Cut(strings.TrimSpace(amount), ".")
 	if whole == "" || 15 < len(whole) {

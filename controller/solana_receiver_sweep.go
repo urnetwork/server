@@ -349,12 +349,12 @@ func reconcileSolanaReceivers(run *paymentReconcileRun) {
 	}
 }
 
-// solanaReceiverShopifyOrder recognizes a payment the decision would record
-// as no_intent as a Shopify order's (solana_shopify_order.go): recognized =
-// true when it is recorded as the order's payment (a dry run writes nothing),
-// and nothing else is done with it. A Solana Pay app payment no order record
-// verifies keeps today's no_intent record, with why in its note. err: the
-// order lookup failed; the leg reads the transaction again next run.
+// Recognizes a payment the decision would record as no_intent as a Shopify
+// order's (solana_shopify_order.go): recognized = true when it is recorded as
+// the order's payment (a dry run writes nothing), and nothing else is done
+// with it. A Solana Pay app payment no order record verifies keeps today's
+// no_intent record, with why in its note. err: the order lookup failed; the
+// leg reads the transaction again next run.
 func solanaReceiverShopifyOrder(
 	run *paymentReconcileRun,
 	transaction *SolanaTransaction,

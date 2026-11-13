@@ -706,8 +706,8 @@ var solanaTokenProgramIds = []string{
 	"TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
 }
 
-// solanaParsedUsdcTransfer is one transfer of USDC between token accounts
-// an instruction of a parsed transaction made, top-level or inner.
+// One transfer of USDC between token accounts an instruction of a parsed
+// transaction made, top-level or inner.
 type solanaParsedUsdcTransfer struct {
 	source      string
 	destination string
@@ -715,10 +715,9 @@ type solanaParsedUsdcTransfer struct {
 	amount int64
 }
 
-// solanaParsedUsdcTransfers are a parsed transaction's token program
-// transfers of USDC (transfer, transferChecked), top-level and inner, in
-// order, with the owners of the USDC token accounts the transaction's token
-// balances name.
+// A parsed transaction's token program transfers of USDC (transfer,
+// transferChecked), top-level and inner, in order, with the owners of the USDC
+// token accounts the transaction's token balances name.
 func solanaParsedUsdcTransfers(parsed *solanaParsedTransaction, keys []string) (transfers []*solanaParsedUsdcTransfer, owners map[string]string) {
 	transfers = []*solanaParsedUsdcTransfer{}
 	owners = map[string]string{}
@@ -778,13 +777,13 @@ func solanaParsedUsdcTransfers(parsed *solanaParsedTransaction, keys []string) (
 	return
 }
 
-// solanaParsedNameUsdcSources names, as Helius's enhanced transactions do,
-// the token account that paid each transfer into one of our receivers
-// (FromTokenAccount, when one instruction transfer names it), and adds that
-// account's other USDC transfers in the transaction (a Solana Pay app's fee)
-// as transfers to their own owners: a Shopify order's payment is recognized
-// by all its source sent out (solana_shopify_order.go). The transfers into
-// our receivers, which every decision reads, are unchanged.
+// Names, as Helius's enhanced transactions do, the token account that paid
+// each transfer into one of our receivers (FromTokenAccount, when one
+// instruction transfer names it), and adds that account's other USDC transfers
+// in the transaction (a Solana Pay app's fee) as transfers to their own
+// owners: a Shopify order's payment is recognized by all its source sent out
+// (solana_shopify_order.go). The transfers into our receivers, which every
+// decision reads, are unchanged.
 func solanaParsedNameUsdcSources(transaction *SolanaTransaction, parsed *solanaParsedTransaction, keys []string) {
 	instructionTransfers, owners := solanaParsedUsdcTransfers(parsed, keys)
 	receiverTokenAccounts := []string{}

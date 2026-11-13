@@ -20,7 +20,7 @@ const (
 	SolanaShopifyOrderLegReceiver = "receiver"
 )
 
-// SolanaShopifyOrderPayment is one Shopify order's Solana Pay payment.
+// One Shopify order's Solana Pay payment.
 type SolanaShopifyOrderPayment struct {
 	TxSignature string
 	// the Shopify order's id (gid://shopify/Order/...) and name ("#1109")
@@ -38,12 +38,11 @@ type SolanaShopifyOrderPayment struct {
 	Leg string
 }
 
-// RecordSolanaShopifyOrderPaymentInConn keeps a recognized payment, once:
-// idempotent on the signature, and one payment per order. recorded = false
-// when another signature already holds the order (a second payment of one
-// order is no order payment of its own: the caller keeps it unfulfilled).
-// Reuse the caller's PostgreSQL session; nil selects the outer acquisition
-// boundary.
+// Keeps a recognized payment, once: idempotent on the signature, and one
+// payment per order. recorded = false when another signature already holds the
+// order (a second payment of one order is no order payment of its own: the
+// caller keeps it unfulfilled). Reuse the caller's PostgreSQL session; nil
+// selects the outer acquisition boundary.
 func RecordSolanaShopifyOrderPaymentInConn(
 	connOwner server.PgConn,
 	ctx context.Context,
@@ -85,9 +84,8 @@ func RecordSolanaShopifyOrderPaymentInConn(
 	return
 }
 
-// IsSolanaShopifyOrderPaymentRecordedInConn reports whether a signature was
-// recognized as a Shopify order's payment. Reuse the caller's PostgreSQL
-// session; nil selects the outer acquisition boundary.
+// Whether a signature was recognized as a Shopify order's payment. Reuse the
+// caller's PostgreSQL session; nil selects the outer acquisition boundary.
 func IsSolanaShopifyOrderPaymentRecordedInConn(
 	connOwner server.PgConn,
 	ctx context.Context,
@@ -106,9 +104,8 @@ func IsSolanaShopifyOrderPaymentRecordedInConn(
 	return
 }
 
-// GetSolanaShopifyOrderPaymentInConn reads one recognized payment by its
-// signature; nil when there is none. Reuse the caller's PostgreSQL session;
-// nil selects the outer acquisition boundary.
+// One recognized payment by its signature; nil when there is none. Reuse the
+// caller's PostgreSQL session; nil selects the outer acquisition boundary.
 func GetSolanaShopifyOrderPaymentInConn(
 	connOwner server.PgConn,
 	ctx context.Context,

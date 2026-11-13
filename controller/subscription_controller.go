@@ -2794,13 +2794,13 @@ var heliusReceiverLegRuns = func() bool {
 	return ok
 }
 
-// heliusShopifyOrderPayment is the webhook's Shopify branch for a payment it
-// would record as no_intent: true when the payment is a Shopify order's,
-// recorded as the order's payment, or a Solana Pay app payment Shopify cannot
-// verify yet (its order may be made seconds after the block; the lookup may
-// fail) that the receiver leg reads after its minimum age and decides. false
-// keeps today's behaviour: the payment is recorded as no_intent. A
-// redelivery of a payment already recorded as an order's is true at once.
+// The webhook's Shopify branch for a payment it would record as no_intent:
+// true when the payment is a Shopify order's, recorded as the order's payment,
+// or a Solana Pay app payment Shopify cannot verify yet (its order may be made
+// seconds after the block; the lookup may fail) that the receiver leg reads
+// after its minimum age and decides. false keeps today's behaviour: the
+// payment is recorded as no_intent. A redelivery of a payment already recorded
+// as an order's is true at once.
 func heliusShopifyOrderPayment(clientSession *session.ClientSession, transaction *SolanaTransaction, receivedUsd float64) bool {
 	ctx := clientSession.Ctx
 	if !solanaShopifyAppPayment(transaction) {
