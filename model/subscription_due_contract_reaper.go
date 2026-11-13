@@ -128,8 +128,7 @@ const dueContractDeleteDependentsSql = `
 // close-out closed (server.AccountPaymentRetentionSettledSql). All other due
 // contracts and their dependent rows are deleted.
 // Classifying only the already-bounded slice avoids turning the safety checks
-// into an anti-join over contract history. The payment guard also covers
-// completed payments whose queued retention cursor has not finished yet.
+// into an anti-join over contract history.
 //
 // Every write names its contracts with contract_id = ANY(ids), which lets each
 // statement prune to the partitions holding them. The classification locks the

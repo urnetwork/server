@@ -1,1 +1,0 @@
-URnetwork: {{.AmountUsd}} USDC is waiting. Connect a Solana wallet at https://ur.io/app/account/earnings?wallet=solana

@@ -106,7 +106,6 @@ func TestOperatorBlockPointsPlanIdIsTheBlocks(t *testing.T) {
 func operatorBlockPointsTestConfig() *SubsidyConfig {
 	return &SubsidyConfig{
 		Days:                           30,
-		MinDaysFraction:                0.1,
 		UsdPerActiveUser:               0.5,
 		SubscriptionNetRevenueFraction: 0.5,
 		MinPayoutUsd:                   10,
@@ -116,8 +115,6 @@ func operatorBlockPointsTestConfig() *SubsidyConfig {
 		AccountPointsPerPayout:                    1_000_000,
 		ReliabilityPointsPerPayout:                500_000,
 		ReliabilitySubsidyPerPayoutUsd:            250,
-		MinWalletPayoutUsd:                        5,
-		WalletPayoutTimeoutHumanReadable:          "720h",
 		SeekerHolderMultiplier:                    2,
 	}
 }

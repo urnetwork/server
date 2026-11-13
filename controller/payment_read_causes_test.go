@@ -60,7 +60,7 @@ func TestPaymentReadCircleBoundsMalformedTransportCauses(t *testing.T) {
 				return nil, cause
 			},
 		})
-		result, err := client.GetTransaction(t.Context(), paymentReadTestId)
+		result, err := client.getCircleWallet(t.Context(), paymentReadTestId)
 		retained := false
 		for _, node := range server.InspectErrorCauses(err).Nodes {
 			retained = retained || node.Err == cause

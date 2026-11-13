@@ -49,21 +49,20 @@ var AccountPaymentRetentionSettledSql = `(
 // References the account_payment relation/alias. A pending payment is an open
 // obligation. A canceled external attempt (a Circle idempotency key, payment
 // record or tx hash) still needs reconciliation, unless the close-out closed
-// it. Completed payments can still need retention stamps.
+// it. A completed payment holds nothing: with no USDC completion since,
+// account_payment.contract_retention_pending, which queued a completion's
+// reap_time stamping, is never set again.
 var ContractPaymentRetentionHoldSql = `(
-	account_payment.contract_retention_pending OR
+	NOT account_payment.completed AND
 	(
-		NOT account_payment.completed AND
+		NOT account_payment.canceled OR
 		(
-			NOT account_payment.canceled OR
 			(
-				(
-					account_payment.circle_idempotency_key IS NOT NULL OR
-					account_payment.payment_record IS NOT NULL OR
-					account_payment.tx_hash IS NOT NULL
-				) AND
-				NOT ` + UsdcPayoutClosedSql("account_payment.payment_id") + `
-			)
+				account_payment.circle_idempotency_key IS NOT NULL OR
+				account_payment.payment_record IS NOT NULL OR
+				account_payment.tx_hash IS NOT NULL
+			) AND
+			NOT ` + UsdcPayoutClosedSql("account_payment.payment_id") + `
 		)
 	)
 )`

@@ -640,16 +640,9 @@ func NetworkCreate(
 
 			SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 
-			/**
-			 * Create new payout wallet
-			 */
-
+			// the sign-in wallet of a Solana or Polygon sign-up is the
+			// network's first wallet
 			if networkCreate.WalletAuth.Blockchain == SOL.String() || networkCreate.WalletAuth.Blockchain == MATIC.String() {
-				/**
-				 * since we only support payouts on solana and polygon for now
-				 * only create payout wallets for those blockchains
-				 */
-
 				walletId := CreateAccountWalletExternal(
 					clientSession,
 					&CreateAccountWalletExternalArgs{
@@ -659,21 +652,11 @@ func NetworkCreate(
 						DefaultTokenType: "USDC",
 					},
 				)
-
-				/**
-				 * Set the payout wallet for the network
-				 */
-				if walletId != nil {
-					err := SetPayoutWallet(
-						clientSession.Ctx,
-						networkCreateResult.NetworkId,
-						*walletId,
-					)
-					if err != nil {
-						glog.Errorf("[net]could not set payout wallet for network %s: %s\n", networkCreateResult.NetworkId, err)
-					}
-				} else {
-					glog.Errorf("[net]could not create payout wallet for network %s\n", networkCreateResult.NetworkId)
+				// USDC provider payouts ended (owner decisions 2026-11-12 and
+				// 2026-11-13), so the wallet is recorded and never becomes
+				// the payout wallet
+				if walletId == nil {
+					glog.Errorf("[net]could not create the sign-in wallet for network %s\n", networkCreateResult.NetworkId)
 				}
 			}
 

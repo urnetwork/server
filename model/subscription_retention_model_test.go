@@ -53,11 +53,11 @@ func testingReapTime(ctx context.Context, contractId server.Id) *time.Time {
 	return reapTime
 }
 
-// testingSettledPayoutContracts funds a fresh source network, sets a payout
-// wallet on a fresh destination network, then closes and settles enough
-// contracts to reach the wallet payout threshold. Each returned contract is
-// settled with a transfer_escrow_sweep, so a caller can drive
-// PlanPayments/CompletePayment and retention on a known group.
+// testingSettledPayoutContracts funds a fresh source network, then closes and
+// settles a few contracts' worth of provider revenue to a fresh destination
+// network. Each returned contract is settled with a transfer_escrow_sweep, so
+// a caller can assign payments (testingAssignSweepPayment) and drive retention
+// on a known group.
 func testingSettledPayoutContracts(ctx context.Context, t testing.TB) (
 	sourceNetworkId server.Id,
 	sourceId server.Id,
@@ -76,10 +76,6 @@ func testingSettledPayoutContracts(ctx context.Context, t testing.TB) (
 		NetworkId: sourceNetworkId,
 		ClientId:  &sourceId,
 	})
-	destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
-		NetworkId: destinationNetworkId,
-		ClientId:  &destinationId,
-	})
 
 	// fund the source network
 	netTransferByteCount := ByteCount(1024 * 1024)
@@ -96,21 +92,10 @@ func testingSettledPayoutContracts(ctx context.Context, t testing.TB) (
 	connect.AssertEqual(t, err, nil)
 	testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
 
-	// a wallet to receive the payout
-	walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
-		NetworkId:        destinationNetworkId,
-		Blockchain:       "matic",
-		WalletAddress:    "",
-		DefaultTokenType: "usdc",
-	})
-	connect.AssertNotEqual(t, walletId, nil)
-	err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
-	connect.AssertEqual(t, err, nil)
-
-	// close and settle enough contracts to meet the payout threshold
+	// close and settle a few contracts' worth of provider revenue
 	usedTransferByteCount := ByteCount(1024)
 	paid := NanoCents(0)
-	for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
+	for paid < UsdToNanoCents(0.20) {
 		transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 		connect.AssertEqual(t, err, nil)
 
@@ -141,14 +126,13 @@ func testingSettleSweeplessContract(t testing.TB, ctx context.Context, contractI
 	})
 }
 
-// After a payment completes, RemoveCompletedContracts must hard delete each of
+// After a payment completed, RemoveCompletedContracts must hard delete each of
 // its contracts together with the contract_close/transfer_escrow/
 // transfer_escrow_sweep rows in the same pass (no orphans for a later sweep) --
 // but only once now() passes the contract's reap_time (complete_time +
-// CompletedContractExpiration). CompletePayment only queues that retention
-// work; the bounded worker stamps it after the payment commit. A contract whose
-// reap_time is still in the future and an open/live contract must both be left
-// untouched.
+// CompletedContractExpiration, as BackfillCompletedContractReapTime stamps
+// it). A contract whose reap_time is still in the future and an open/live
+// contract must both be left untouched.
 func TestRemoveCompletedContractsCascades(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -190,23 +174,14 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 			}
 		}
 
-		// Pay out the plan. Completing the payment must commit without fanning out
-		// an update to every contract.
+		// the payment completed, as the USDC sender left it; completion stamps
+		// nothing, and the backfill stamps complete_time + 7d
 		completeTime := server.NowUtc()
-		plan, err := PlanPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		for _, payment := range plan.NetworkPayments {
-			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "", "0xtest")
-		}
-
+		testingAssignSweepPayment(ctx, destinationNetworkId, paidContractIds, &completeTime)
 		for _, contractId := range paidContractIds {
 			connect.AssertEqual(t, testingReapTime(ctx, contractId) == nil, true)
 		}
-
-		// The recurring reaper drains the durable per-payment cursor in bounded
-		// transactions and stamps complete_time + 7d.
-		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
+		connect.AssertNotEqual(t, BackfillCompletedContractReapTime(ctx, 1000, nil), int64(0))
 		for _, contractId := range paidContractIds {
 			reapTime := testingReapTime(ctx, contractId)
 			connect.AssertEqual(t, reapTime != nil, true)
@@ -303,84 +278,6 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 		drainPayoutDebitTestPending(t, ctx, balanceId, before)
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(2*365*24*time.Hour))
 		connect.AssertEqual(t, countBalances(), 0)
-	})
-}
-
-// Contract retention for a completed payment is keyset-paged independently of
-// CompletePayment. A committed cursor must survive a worker budget cutoff and
-// resume with the remaining contracts on the next run.
-func TestCompletedContractRetentionResumesInBatches(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-
-		_, _, _, _, contractIds := testingSettledPayoutContracts(ctx, t)
-		connect.AssertEqual(t, 2 < len(contractIds), true)
-
-		plan, err := PlanPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(plan.NetworkPayments), 1)
-		var paymentId server.Id
-		for _, payment := range plan.NetworkPayments {
-			paymentId = payment.PaymentId
-			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			connect.AssertEqual(t, CompletePayment(ctx, payment.PaymentId, "", "0xtest"), nil)
-		}
-
-		countStamped := func() int {
-			count := 0
-			server.Db(ctx, func(conn server.PgConn) {
-				result, err := conn.Query(
-					ctx,
-					`SELECT COUNT(*) FROM transfer_contract WHERE contract_id = ANY($1) AND reap_time IS NOT NULL`,
-					contractIds,
-				)
-				server.WithPgResult(result, err, func() {
-					if result.Next() {
-						server.Raise(result.Scan(&count))
-					}
-				})
-			})
-			return count
-		}
-		countPendingCursor := func() int {
-			count := 0
-			server.Db(ctx, func(conn server.PgConn) {
-				result, err := conn.Query(
-					ctx,
-					`
-					SELECT COUNT(*)
-					FROM account_payment
-					WHERE
-						payment_id = $1 AND
-						contract_retention_pending AND
-						contract_retention_cursor IS NOT NULL
-					`,
-					paymentId,
-				)
-				server.WithPgResult(result, err, func() {
-					if result.Next() {
-						server.Raise(result.Scan(&count))
-					}
-				})
-			})
-			return count
-		}
-
-		defer func() { reaperRunBudget = 5 * time.Minute }()
-		reaperRunBudget = -time.Minute
-		connect.AssertEqual(t, assignCompletedContractReapTimeBatches(ctx, 2), int64(2))
-		connect.AssertEqual(t, countStamped(), 2)
-		connect.AssertEqual(t, countPendingCursor(), 1)
-
-		reaperRunBudget = 5 * time.Minute
-		connect.AssertEqual(
-			t,
-			assignCompletedContractReapTimeBatches(ctx, 2),
-			int64(len(contractIds)-2),
-		)
-		connect.AssertEqual(t, countStamped(), len(contractIds))
-		connect.AssertEqual(t, countPendingCursor(), 0)
-		connect.AssertEqual(t, assignCompletedContractReapTimeBatches(ctx, 2), int64(0))
 	})
 }
 
@@ -935,11 +832,9 @@ func TestRemoveStragglerContracts(t *testing.T) {
 
 		sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractIds := testingSettledPayoutContracts(ctx, t)
 
-		// plan the payments but never complete them: the payments stay pending, so
-		// CompletePayment never stamps reap_time on these contracts
-		plan, err := PlanPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertNotEqual(t, len(plan.NetworkPayments), 0)
+		// a pending payment of the contracts, never completed, so no completion
+		// ever stamps reap_time on these contracts
+		testingAssignSweepPayment(ctx, destinationNetworkId, contractIds, nil)
 
 		// a closed contract that was never swept at all (quarantine/corruption
 		// path) is also a straggler, reaped only once it ages past the window
@@ -1085,12 +980,7 @@ func TestBackfillContractReapTime(t *testing.T) {
 		// before the reap_time column existed (each test has its own database, so
 		// this global clear is scoped to this test's data)
 		completeTime := server.NowUtc()
-		plan, err := PlanPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		for _, payment := range plan.NetworkPayments {
-			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "", "0xtest")
-		}
+		testingAssignSweepPayment(ctx, destinationNetworkId, paidContractIds, &completeTime)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET reap_time = NULL`))
 		})
@@ -1141,197 +1031,6 @@ func TestBackfillContractReapTime(t *testing.T) {
 
 		// converged: every straggler carries a reap_time, so a re-run assigns none
 		connect.AssertEqual(t, BackfillStragglerContractReapTime(ctx, 1000, nil), int64(0))
-	})
-}
-
-// Only payments that never entered Circle retry can age out. The stable
-// idempotency key closes the pre-record submit window, payment_record covers
-// normal retries, and the planner independently refuses a legacy canceled row
-// that still has either marker.
-func TestCancelHungAccountPayments(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-
-		sourceNetworkId := server.NewId()
-		sourceId := server.NewId()
-		destinationNetworkId := server.NewId()
-		destinationId := server.NewId()
-		testingCreatePaymentClient(ctx, sourceNetworkId, sourceId)
-		testingCreatePaymentClient(ctx, destinationNetworkId, destinationId)
-
-		sourceSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
-			NetworkId: sourceNetworkId,
-			ClientId:  &sourceId,
-		})
-		destinationSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
-			NetworkId: destinationNetworkId,
-			ClientId:  &destinationId,
-		})
-
-		netTransferByteCount := ByteCount(1024 * 1024)
-		netRevenue := UsdToNanoCents(10.00)
-		balanceCode, err := CreateBalanceCode(
-			ctx,
-			netTransferByteCount,
-			365*24*time.Hour,
-			netRevenue,
-			"",
-			"",
-			"",
-		)
-		connect.AssertEqual(t, err, nil)
-		testingRedeemPaymentBalanceCode(t, sourceSession.Ctx, sourceSession.ByJwt.NetworkId, balanceCode.Secret)
-
-		walletId := CreateAccountWalletExternal(destinationSession, &CreateAccountWalletExternalArgs{
-			NetworkId:        destinationNetworkId,
-			Blockchain:       "matic",
-			WalletAddress:    "",
-			DefaultTokenType: "usdc",
-		})
-		connect.AssertNotEqual(t, walletId, nil)
-		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
-		connect.AssertEqual(t, err, nil)
-
-		usedTransferByteCount := ByteCount(1024)
-		paid := NanoCents(0)
-		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
-			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-			connect.AssertEqual(t, err, nil)
-
-			err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			connect.AssertEqual(t, err, nil)
-			err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			connect.AssertEqual(t, err, nil)
-			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
-		}
-
-		plan, err := PlanPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(plan.NetworkPayments), 1)
-		payment := plan.NetworkPayments[destinationNetworkId]
-		connect.AssertNotEqual(t, payment, nil)
-
-		// a recent pending payment is not hung
-		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
-
-		// age the payments past the hung expiration
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`UPDATE account_payment SET create_time = $1 WHERE NOT completed AND NOT canceled`,
-				server.NowUtc().Add(-HungPaymentExpiration-24*time.Hour),
-			))
-		})
-
-		// Once Circle has returned a record, age alone cannot cancel the retry.
-		connect.AssertEqual(t, SetPaymentRecord(ctx, payment.PaymentId, "USDC", 10, "circle-transaction-1"), nil)
-		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
-		connect.AssertNotEqual(t, CancelPayment(ctx, payment.PaymentId), nil)
-		retryPayment, err := GetPayment(ctx, payment.PaymentId)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, retryPayment.Canceled, false)
-
-		// The active payment still owns its sweeps, so there is nothing to
-		// re-plan while Circle reconciliation continues.
-		heldPlan, err := PlanPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(heldPlan.NetworkPayments), 0)
-
-		// Reproduce the pre-fix corruption directly. Defense in depth in the
-		// planner must not pay these sweeps again, and the anomalous canceled
-		// retry remains visible to the affected account.
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`UPDATE account_payment SET canceled = true, cancel_time = now() WHERE payment_id = $1`,
-				payment.PaymentId,
-			))
-		})
-		legacyPlan, err := PlanPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(legacyPlan.NetworkPayments), 0)
-		visible := false
-		networkPayments, err := GetNetworkPayments(destinationSession)
-		connect.AssertEqual(t, err, nil)
-		for _, networkPayment := range networkPayments {
-			if networkPayment.PaymentId == payment.PaymentId {
-				visible = true
-				connect.AssertEqual(t, networkPayment.Canceled, true)
-				connect.AssertNotEqual(t, networkPayment.PaymentRecord, nil)
-				connect.AssertEqual(t, *networkPayment.PaymentRecord, "circle-transaction-1")
-			}
-		}
-		connect.AssertEqual(t, visible, true)
-
-		// The idempotency key is written before the external Circle call. A
-		// timeout in that window has no payment_record yet, but is still a retry
-		// and must remain attached to the original payment.
-		idempotencyKey := server.NewId()
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				UPDATE account_payment
-				SET
-					canceled = false,
-					cancel_time = NULL,
-					payment_record = NULL,
-					circle_idempotency_key = $2
-				WHERE payment_id = $1
-				`,
-				payment.PaymentId,
-				idempotencyKey,
-			))
-		})
-		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
-		retryPayment, err = GetPayment(ctx, payment.PaymentId)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, retryPayment.Canceled, false)
-		connect.AssertNotEqual(t, CancelPayment(ctx, payment.PaymentId), nil)
-		retryPayment, err = GetPayment(ctx, payment.PaymentId)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, retryPayment.Canceled, false)
-
-		// A legacy hash without the other markers is still conclusive evidence
-		// that this payment reached the chain and must remain held.
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				UPDATE account_payment
-				SET circle_idempotency_key = NULL, tx_hash = $2
-				WHERE payment_id = $1
-				`,
-				payment.PaymentId,
-				"legacy-chain-hash",
-			))
-		})
-		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
-		connect.AssertNotEqual(t, CancelPayment(ctx, payment.PaymentId), nil)
-
-		// With every submit/retry marker absent, the old payment is genuinely
-		// unsubmitted and may be canceled and replaced.
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`UPDATE account_payment SET tx_hash = NULL WHERE payment_id = $1`,
-				payment.PaymentId,
-			))
-		})
-		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(1))
-
-		// the sweeps are re-planned into fresh pending payments
-		plan2, err := PlanPayments(ctx)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(plan2.NetworkPayments), 1)
-		connect.AssertNotEqual(t, plan2.NetworkPayments[destinationNetworkId].PaymentId, payment.PaymentId)
-
-		// Once safely canceled and replaced, the obsolete row is hidden again.
-		networkPayments, err = GetNetworkPayments(destinationSession)
-		connect.AssertEqual(t, err, nil)
-		for _, networkPayment := range networkPayments {
-			connect.AssertNotEqual(t, networkPayment.PaymentId, payment.PaymentId)
-		}
 	})
 }
 
