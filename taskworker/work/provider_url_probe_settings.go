@@ -30,7 +30,10 @@ func providerUrlProbeBatchMatches(left, right *ProviderEgressProbeBatchArgs) boo
 // One URL has one attempt. Failed measured requests are requeued durably;
 // the worker never retains its tunnel for a retry timer. The reserve is the
 // longest turn: a dual-stack provider's, whose URL may make both legs in both
-// families (egresshealth url_family.go).
+// families (egresshealth url_family.go), on a turn that measures post-quantum,
+// whose every tunnel generation holds its first sends for the session's seal
+// (fleetprobe url_e2e.go). Any claimed turn may be one, and a turn admitted at
+// the cutoff runs to its own run budget, so the reserve counts that hold too.
 func providerUrlProbeRunBudget(args *ProviderEgressProbeArgs) time.Duration {
 	batch := providerUrlProbeBatch(args)
 	timeout := time.Duration(batch.ProbeTimeoutSeconds) * time.Second
@@ -39,7 +42,32 @@ func providerUrlProbeRunBudget(args *ProviderEgressProbeArgs) time.Duration {
 	options.LoadAttempts = 1
 	options.TunnelRecreateAttempts = args.TunnelRecreateAttempts
 	options.ProviderIpFamily = egresshealth.IpFamilyDualstack
+	// the turns of a URL pass take fleetprobe's default post-quantum
+	// settings (newProviderUrlProbePass leaves FullOptions.PostQuantum unset)
+	options.E2e = &providerUrlProbeReserveE2e{sealWait: fleetprobe.DefaultUrlProbePostQuantumSettings().SealWait}
 	return timeout + options.RunBudget(1)
+}
+
+// A post-quantum turn's session as the reserve budgets it: its seal wait
+// alone (egresshealth.Options.RunBudget). It observes nothing.
+type providerUrlProbeReserveE2e struct {
+	sealWait time.Duration
+}
+
+// Implements egresshealth.UrlProbeE2eObserver.
+func (self *providerUrlProbeReserveE2e) SealWait() time.Duration {
+	return self.sealWait
+}
+
+// Implements egresshealth.UrlProbeE2eObserver.
+func (self *providerUrlProbeReserveE2e) RequestStarted() {}
+
+// Implements egresshealth.UrlProbeE2eObserver.
+func (self *providerUrlProbeReserveE2e) RequestWritten() {}
+
+// Implements egresshealth.UrlProbeE2eObserver.
+func (self *providerUrlProbeReserveE2e) Evidence(bool) *egresshealth.UrlProbeE2eEvidence {
+	return nil
 }
 
 func validateProviderUrlProbeArgs(args *ProviderEgressProbeArgs) error {
