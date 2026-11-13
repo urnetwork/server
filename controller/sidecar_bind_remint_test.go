@@ -77,7 +77,8 @@ func TestSidecarClaimKeptByRefreshAndNotByAChild(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		remintedSession := session.Testing_CreateClientSession(ctx, parseSidecarRemint(t, ctx, result))
+		reminted := parseSidecarRemint(t, ctx, result)
+		remintedSession := session.Testing_CreateClientSession(ctx, reminted)
 
 		refreshed, err := RefreshToken(remintedSession)
 		if err != nil || refreshed.Error != nil {
@@ -91,9 +92,14 @@ func TestSidecarClaimKeptByRefreshAndNotByAChild(t *testing.T) {
 			t.Fatalf("a refresh dropped or changed sidecar_id: %v", refreshedByJwt.SidecarId)
 		}
 
-		child, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{Description: "synthetic", DeviceSpec: "synthetic"}, remintedSession)
+		// a client token creates only children of its own client
+		child, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{
+			SourceClientId: reminted.ClientId,
+			Description:    "synthetic",
+			DeviceSpec:     "synthetic",
+		}, remintedSession)
 		if err != nil || child.Error != nil || child.ByClientJwt == nil {
-			t.Fatalf("child: %v %+v", err, child)
+			t.Fatalf("child: %v %+v %+v", err, child, child.Error)
 		}
 		childByJwt, err := session.ParseByJwt(ctx, *child.ByClientJwt)
 		if err != nil {
