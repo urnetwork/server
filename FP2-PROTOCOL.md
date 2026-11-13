@@ -7,9 +7,8 @@ Design for peer review. Nothing here is built yet.
 | Status | Ready for peer review: all owner decisions recorded. |
 | Date | 2026-11-12 |
 | Server | design base cbb7d7306 for §1-§12; §13 cites the implementation at its merges (S1: 86553321d) |
-| Connect | origin/main 885ab442; every connect file cited is identical at fc949b78 |
-| SDK | `feat/fp2-limited-window-1112` 2f945bea, which contains sdk main through dce4ab69; every sdk reference is at 2f945bea |
-| SDK, limited window | branch `feat/fp2-limited-window-1112` 2f945bea, not landed: it lands right after connect's change (§13) |
+| Connect | design base fc949b78 for §1-§12; §13 cites connect main 13a6c4f2 |
+| SDK | 2f945bea, the limited-window branch, landed on sdk main as 1777be51; every sdk reference is at 2f945bea |
 | Apps and localizations | android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813, localizations 19b89a4, all on their main (§5.5) |
 
 References are `path:line` at those commits. §1-§12 describe the design
@@ -622,11 +621,13 @@ The checks run before any spec is read, like `ip_family`'s
 - The server ignores `select` and answers the hard gate, with no
   `capabilities`, no `overflow_step` and no `select` echo.
 - The client sees no echo and treats the server as legacy:
-  - each entry's labels come from `ip_family` (`dualstack` gives
-    `dualstack`; anything else gives `ipv4`);
+  - each entry's labels come from `ip_family`: `dualstack` gives
+    `dualstack`, a `v6-only` provider stays v6-only, and anything else gives
+    `ipv4`;
   - the protocol is always `dualproto`, since every entry passed the hard
     UDP gate;
-  - the limited window does not fill;
+  - the limited window does not fill: it is disabled while the server is
+    known not to echo, and the next echoed answer enables it;
   - the normal windows keep sending today's `v6-capable` shortfall request
     (IPV6.md B1-B2);
   - placement still checks compatibility with these labels.
@@ -640,6 +641,11 @@ of a rolling deploy.
 
 **Hosted devices.** The proxy service runs one build of the server and the
 sdk, so its devices are always in a same-version cell.
+
+**Whatever the server's version,** a new client has B5 retired, sends UDP
+quality-first in auto, and answers UDP with no compatible exit with a
+port unreachable. With legacy labels every exit is `dualproto`, so that reply
+effectively never fires (§13.3).
 
 **Post-quantum (D12).** `post_quantum_encryption` and `require_modern_provider`
 already exist on every server, so no field is new. Only their meaning changes,
@@ -875,8 +881,11 @@ today's default (model/egress_index.go:208).
 - **`DestinationStats`** gains `Capabilities` (connect/ip_remote_multi_client.go:72-96).
 - **`addProviderDestinations`** (connect/ip_remote_multi_client_api.go:1000-1023)
   fills it:
-  - from `capabilities` when the answer echoes `select`;
+  - from `capabilities` when the answer echoes `select`. An echoed entry
+    without `capabilities` is labelled from `ip_family` with `dualproto`;
   - otherwise from `ip_family` with `dualproto` (§5.4).
+  - **Unknown values fail closed:** an unknown protocol reads `tcp`, and an
+    unknown or empty IP reads `ipv4`. An empty protocol reads `dualproto`.
 - **`multiClientChannel`** gains `supportsFlow(ipVersion, ipProtocol)`. It
   reads only these labels (D6.2, D7.5, D11.8). A fixed destination supports every
   flow: it is the user's choice, as `supportsIpVersion` already says
@@ -937,9 +946,9 @@ state changes a label between FP2 answers.
 | Selectors | `{"ip": "ipv4", "protocol": "tcp"}`: the `tcp` classes C and D, never a `dualproto` provider (§6.3) |
 | Rank mode | the performance profile's (D10): auto uses `quality`, a fixed Quality profile `quality`, a fixed Speed profile `speed`. Read from the window's profile when each request is built; normal windows read their own type (connect/ip_remote_multi_client_family.go:448). |
 | `ip_family` | `v4-capable` |
-| Size setting | `MultiClientSettings.LimitedWindowSizeFraction`, default 0.5 |
+| Size setting | `MultiClientSettings.LimitedWindowSizeFraction`, default 0.5. A runtime setter changes it; zero, a negative value, NaN or Inf turns the window off. It lives in `MultiClientSettings`, not `ReliabilitySettings`, because the sdk mirror's round trip zeroes unknown fields. |
 | Target | `max(1, floor(f × S))` for f > 0. S is the largest current target among the active normal windows, the `targetWindowSize` each window's resize pass computes (:14399-14425). In a fixed profile the inactive window's target is 0. f ≤ 0: no limited window. |
-| Hard max | `max(1, floor(f × the largest normal hard max))` |
+| Hard max | `max(1, floor(f × the largest normal hard max))`, or unbounded when an active normal window is unbounded. `LimitedWindowSizeMax` caps both target and hard max. |
 | Desktop auto | normal targets 6 (quality) and 1 (speed; max 2): S = 6, limited 3 |
 | iOS and hosted proxies (32 MiB memory target) | normal windows scale with the target (sdk/mobile_memory_policy.go:237-238, 292-299): quality 5, speed 1, so S = 5 and the limited window is 2 |
 | Android (64 MiB) | quality 10, speed 2, so S = 10 and the limited window is 5 |
@@ -949,21 +958,28 @@ state changes a label between FP2 answers.
 | Fixed destination | none: the fixed exit carries every flow |
 | Fill and refill | its own `resize` loop (:13895) and `expand` (:14845), like a normal window. Each request carries `target_count` (its target), `held_count` (its `tcp` clients) and `dualstack_target_count` 0. There is no IPv6 need. |
 | No `tcp` supply | the window stays empty and costs nothing |
-| Old server (no echo) | the window does not fill |
+| Readiness | No standing reserve and no watchdog. The window waits until every normal window has published its sizing, and its listing is held while its target is 0. |
+| Old server (no echo) | the window is disabled while the server is known not to echo, and the next echoed answer enables it. Without a capability-aware generator it stays disabled. |
 | Profile change | Handled exactly like the normal windows. An equal profile is a no-op (:3403-3408). Otherwise `SetPerformanceProfile` (:3394-3430) installs the new profile on every window in `self.windows`, the limited window included (:13381-13400: it also forgets sticky and recent exits). `shuffle` then cancels every client (:16231-16238). Those clients' flows go through `removeClient` (:5718): QUIC flows are rebound to compatible candidates, and TCP flows are torn down. The resize loop refills under the new rank mode, with the target recomputed from the new active normal windows. |
 | Count | one per multi client |
 
 **Normal windows.**
 - Each request carries `select: {"ip": "dualstack", "protocol": "dualproto"}`
   (D6.1) with:
-  - `target_count`: the window's target;
-  - `held_count`: its clients labelled `dualproto`;
+  - `target_count`: the window's pre-reserve demand target, seeded from
+    config before the first pass;
+  - `held_count`: its live, unwarned clients labelled `dualproto`;
   - `dualstack_target_count`: its IPv6 minimum (`WindowSizeMinIpv6Capable`:
-    quality 1, speed 0; connect/ip_remote_multi_client.go:232);
-  - `held_dualstack_count`: its clients labelled `dualstack` (D11.1).
-- In selector mode the main request carries the IPv6 need. The separate
-  `v6-capable` shortfall request (IPV6.md B1-B2) is therefore sent only to a
-  server that did not echo `select`.
+    quality 1, speed 0; connect/ip_remote_multi_client.go:232).
+    - It is floored at 1 for the auto quality window and for a fixed
+      profile's active window: mobile omits the minimum, and fixed profiles
+      carry 0, so they would otherwise lose today's dual-stack exit.
+  - `held_dualstack_count`: its live, unwarned clients labelled `dualstack`
+    (D11.1).
+- In selector mode the main request carries the IPv6 need, so the separate
+  `v6-capable` shortfall request (IPV6.md B1-B2) goes only to a server that
+  did not echo `select`. An echoed answer with no `dualstack` provider while
+  the shortfall is open marks the family starved.
 - The generator interface gains
   `NextDestinationsWithCapabilities(count, exclude, rankMode, ipFamily, select)`.
   `ApiMultiClientGenerator` implements it; a generator without it is called
@@ -1031,13 +1047,17 @@ state changes a label between FP2 answers.
   | IPv4 TCP or ICMP | every client is compatible, so this happens only with no client at all: today's wait and retry |
 
 - `UdpUnroutable()` mirrors `Ipv6Unroutable()`
-  (connect/ip_remote_multi_client_family.go:605-658): the windows have formed
-  and no window holds a `dualproto` client.
+  (connect/ip_remote_multi_client_family.go:605-658).
+- The reply judges only the flow's own windows. It is sent when the flow's
+  selected normal windows have formed and neither they nor the limited window
+  holds a client that can carry the flow. A fixed profile's inactive window
+  never keeps UDP routable.
 
 ### 7.8 sdk and apps
 
-The sdk's limited-window work is on `feat/fp2-limited-window-1112` (2f945bea).
-It lands right after connect's change (§13).
+The sdk's limited-window work, branch `feat/fp2-limited-window-1112`
+(2f945bea), landed on sdk main as 1777be51, right after connect's change
+(§13).
 
 - **Window status** (sdk/device.go:435-441):
   - `UdpAvailable` comes from the merged window event;
@@ -1075,10 +1095,13 @@ uses only the server's labels on both axes.
 - `noteIpFamilyDowngrade` (family.go:661-676);
 - the `ipFamilyDowngraded` latch
   (connect/ip_remote_multi_client.go:17253-17259);
-- `ipv6DialStarvedWithLock` (family.go:97-138).
+- `ipv6DialStarvedWithLock` (family.go:97-138);
+- `dialStrikeVersion` and `noteClientIpFamily`.
 
-**Kept:** the version-split dial-strike record, which ordinary starvation
-warnings read.
+**Kept:**
+- the version-split dial-strike record, which ordinary starvation warnings
+  read;
+- the monitor's `SetProviderIpFamily`, which now has no caller.
 
 **Changed:**
 - `IpFamily()` (family.go:40-51) returns the server's IP label.
@@ -1137,7 +1160,8 @@ keep the strict decision, unchanged (controller/stats_collector.go:80-86).
 ### 8.2 Hosted devices
 
 These are connect process counters that the proxy exports, like
-proxy/window_client_metrics.go:21-56.
+proxy/window_client_metrics.go:21-56. Connect counts them (§13.3), and S2's
+exporter publishes them.
 
 | Metric | Labels |
 |---|---|
@@ -1451,6 +1475,12 @@ inert for them.
     `enabled: false`) one day after step 3, and its code is deleted in the
     next release.
   - **Connect and sdk** need no change for PQ (§12.5).
+- **Connect (§13.3):** connect has no service deploy of its own.
+  - It ships with step 4, in the proxy build with S2's exporter, and with
+    step 5, in the apps through the nightly (sdk 1777be51 with connect).
+  - It is safe before any server step: an old server never echoes, so labels
+    come from `ip_family`, every exit is `dualproto`, and the limited window
+    stays empty.
 - **Apps, sdk and localizations (§13):**
   1. The provider status reason shows only after the server deploy that adds
      its fields (step 3); older servers omit them.
@@ -1735,11 +1765,10 @@ last 7 days.
 - sdk 1d00b3a3, f00867d6 and dce4ab69;
 - android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813.
 
-**Not landed yet:**
-- sdk `feat/fp2-limited-window-1112` (2f945bea) lands right after connect's
-  change. Once connect's ExitInfo fields reach connect main, the sdk's
-  `TestExitFromConnectCarriesEveryExitInfoField` fails until this branch
-  lands.
+**Then landed:** sdk `feat/fp2-limited-window-1112` (2f945bea), as 1777be51,
+right after connect's change. Until it landed, the sdk's
+`TestExitFromConnectCarriesEveryExitInfoField` failed against connect main's
+new ExitInfo fields.
 
 **Unmerged by design:** the /mainnet note, sn
 `docs/mainnet-fp2-capabilities-1112` (1c94ca1c) and web 42b091f6. It
@@ -1894,3 +1923,195 @@ panel 172 (PQ outcomes). Test: grafana/url_probe_fp2_evidence_dashboard_test.go.
 
 **Follow-up after the retirement:** remove monitor §2.19g and the model's
 capability-probe page query.
+
+### 13.3 Workstream C: connect
+
+All connect references in this section are at connect main 13a6c4f2.
+
+**Landed:**
+- connect 885ab442..8b52ea81, `Merge feat/fp2-connect-placement`:
+  - d1db68a3, the feature;
+  - 91585162, an origin merge;
+  - af6decb8, the UDP no-route verdict judges the flow's own windows;
+  - f8e4edce and 1b21a06d, CODESTYLE;
+  - 1d168653, tests.
+- 8b52ea81..13a6c4f2, `Merge feat/fp2-connect-spec` (38d3072e,
+  api/bringyour.yml), after S2's server model fields (server 3dcc7b138).
+- In all: 52 files, +4522/-649. No migrations or config.
+- D's sdk limited window landed right after it (sdk 1777be51).
+- S2's proxy exporter, server `feat/fp2-s2-proxy-window-metrics-1112`
+  (dd73d29a1), is S2's to land.
+
+**Wire and labels:**
+- `FindProviders2Args.Select` (connect/api.go:406), the echo (:419), and each
+  provider's `Capabilities` (:447) and `OverflowStep` (:451), all omitempty.
+- Without `select`, the request bytes are unchanged; a test pins them.
+- `ProviderCapabilities{Ip, Protocol}` (connect/ip_capability.go:42).
+- `Normalize` (:51) fails closed (§7.1).
+- `providerCapabilitiesFromIpFamily` (:84).
+- `FindProvidersSelect` (:103) sends all six members without omitempty,
+  because the server defaults `dualstack_target_count` to 1.
+- `flowNeed` (:122) and `carriedBy` (:141) implement §7.2.
+- `addProviderDestinations` (connect/ip_remote_multi_client_api.go:1108)
+  labels each entry. `DestinationStats` gains `Capabilities` and
+  `OverflowStep` (connect/ip_remote_multi_client.go:99-107).
+
+**Generator:**
+- `MultiClientGeneratorWithCapabilities` (connect/ip_remote_multi_client.go:237)
+  adds `NextDestinationsWithCapabilities` and
+  `NextDestinationsForClientIdWithCapabilities`, each returning the answer
+  and whether it was in selector mode, plus `SelectorMode()`.
+- The API generator implements it:
+  - connect/ip_remote_multi_client_api.go:749 and :760;
+  - `nextDestinationsContext` at :833;
+  - `observeSelectorMode` at :982;
+  - a tri-state at :1004.
+- Selector mode means the request carried `select` and the answer echoed it.
+  Each answer replaces the last, so a server rollback mid-session is followed.
+- `require_modern_provider` rides every request, the limited window's
+  included. A wrapper that embeds `*ApiMultiClientGenerator`, such as the
+  server qualityprobe's, inherits all of this.
+
+**Window requests** (connect/ip_remote_multi_client_limited.go):
+- `providerSelect` (:288) builds each window's `select` (§7.4).
+  - `target_count` comes through `setRequestSizing`
+    (connect/ip_remote_multi_client.go:14697), seeded by `initRequestSizing`
+    (connect/ip_remote_multi_client_limited.go:239).
+- `discoverDestinationsWithCapabilities` (:358):
+  - the limited window asks once, `v4-capable`;
+  - a normal window asks once, and the server serves its IPv6 need;
+  - `probeOnly` sends the IPv6 request alone.
+- Named lookups (`lookupClientId` :463, `relabelledStats` :491) overlay fresh
+  labels only in selector mode. The limited window drops a provider
+  relabelled `dualproto`.
+- The rank mode comes from `requestRankMode` (:276) and
+  `limitedWindowRankMode` (:266), per D10. Discovery demand uses
+  `admitsCapabilities` (:334).
+
+**The limited window:**
+- `WindowTypeLimited = 3` (connect/ip_remote_multi_client.go:139).
+  `RankMode()` returns "" for it, and `PerformanceProfile.Validate` refuses
+  it.
+- It is created at :3202, except under a fixed destination. Its hooks (:3228)
+  are stored as an atomic pointer once every window exists, followed by one
+  wake.
+- Settings:
+  - `LimitedWindowSizeFraction` (:698, default 0.5 at :314);
+  - `LimitedWindowSizeMax` (:702);
+  - at runtime, `SetLimitedWindowSizeFraction`
+    (connect/ip_remote_multi_client_limited.go:629) and
+    `LimitedWindowSizeFraction()` (:620).
+- Sizing:
+  - `limitedWindowSize` (:93): min, max and target are equal;
+  - `limitedWindowSizing` (:136) returns 0 until every normal window has
+    published (`publishSizing` :178);
+  - the window's `SetPerformanceProfile` resets the published sizing
+    (connect/ip_remote_multi_client.go:13629).
+- No standing reserve (:14728). The listing is held while the target is 0
+  (`limitedListingHeld`, connect/ip_remote_multi_client_limited.go:320;
+  enumerator at connect/ip_remote_multi_client.go:13834 and 13937).
+- Regeneration: `SetPerformanceProfile` (:3558) installs the profile on and
+  shuffles quality, speed, then limited. A PQ toggle is a profile change, so
+  it regenerates all three.
+- Accessors:
+  - `LimitedWindowSize()` and `LimitedWindowTargetSize()`
+    (connect/ip_remote_multi_client_limited.go:591, 607);
+  - `MultiClientMemorySnapshot.LimitedClientCount`
+    (connect/ip_remote_multi_client.go:2283);
+  - `ExitInfo.CapabilityIp`, `CapabilityProtocol` and `OverflowStep`
+    (:10791).
+
+**Placement:**
+- `supportsFlow` and `supportsIpPath`
+  (connect/ip_remote_multi_client_family.go:92, 104) replace
+  `supportsIpVersion` everywhere. They read only the server's labels, kept in
+  the channel's immutable args (`capabilities`, :55).
+- The sites of §7.3 are pinned by `TestEveryPlacementSiteReadsTheFlowLabels`
+  (connect/ip_remote_multi_client_capability_placement_test.go:423). Among
+  them:
+  - `raceCandidates` (connect/ip_remote_multi_client.go:4269) and
+    `raceField` (connect/ip_remote_multi_client_limited.go:519);
+  - `orderedClients` (connect/ip_remote_multi_client.go:16707) and
+    `lastResortClientsForFlow` (:16587);
+  - the IPv4 and IPv6 affinity donors (:4879, :4971) and the app-pin donors
+    (:5668);
+  - QUIC rebind's `carriesUpdates` (:6659), and adoption (:10340);
+  - `flowAvailable` (connect/ip_remote_multi_client_family.go:311) and
+    `candidatesForFlow` (:733).
+- The race: each window's field is followed by the limited window's. A
+  bounded race uses `limitedClientsLast(contractRateLimitHeldLast(...))`
+  (connect/ip_remote_multi_client.go:8552).
+- Auto sends UDP on any port to quality, then speed (`selectWindowTypes`,
+  :3722, :3745).
+- No route: `replyUdpNoRoute` (connect/ip_remote_multi_client_family.go:708,
+  sent at connect/ip_remote_multi_client.go:8917) answers when
+  `flowUnroutable` holds (connect/ip_remote_multi_client_family.go:653).
+  The accessors are `UdpAvailable` (:608), `UdpUnroutable` (:642) and
+  `UdpNoRouteCount` (:727). `Ipv6Available` now includes the limited window.
+- **B5 is retired** (§7.9), and IPV6.md B5 is marked superseded.
+
+**Status and stats:**
+- `WindowExpandEvent.UdpAvailable`
+  (connect/ip_remote_multi_client_monitor.go:46).
+  `AddWindowExpandEventWithAvailability` (:470) is new;
+  `AddWindowExpandEvent` is unchanged.
+- The merged monitor (`newMergedMultiClientMonitorWithAvailability`, :689)
+  takes only `Ipv6Available` and `UdpAvailable` from the limited window, and
+  nothing about size, readiness, failure, reason, location or provider
+  events.
+- `WindowClientStats` counts three things; the window label includes
+  `limited`:
+  - window clients by window, IP label and protocol label;
+  - flows, once at first bind, by window, IP version and protocol (`addFlow`,
+    connect/ip_remote_multi_client_window_client_stats.go:568);
+  - no-compatible replies (`addNoCompatible`, :579).
+
+  Visitors are at :591, :607 and :623.
+- The limited window is in the memory snapshot, the owner census, transfer
+  stats and pacing diagnostics. SYN readiness capacity adds its share.
+
+**Deviations from §7, folded in above:**
+1. A legacy v6-only provider stays v6-only (§5.4).
+2. No limited window under a fixed-IP destination: a second exit would change
+   the egress address.
+3. `dualstack_target_count` is floored at 1 for the auto quality window and a
+   fixed profile's active window (§7.4).
+4. `target_count` is the pre-reserve demand target, seeded from config.
+5. The limited window has no watchdog and no standing reserve. Its hard max is
+   unbounded when a normal window's is. It waits for every normal window to
+   publish, and it is disabled without an echoing server.
+6. The fraction lives in `MultiClientSettings`, with a runtime setter.
+   `LimitedWindowSizeMax` was added for D11.5, since Android's quality window
+   is 10 and no fraction yields 1.
+7. Unknown labels fail closed (§7.1).
+8. In selector mode, IPv6 starvation is read from the main answer.
+9. A bounded race puts normal candidates before limited ones.
+10. The UDP verdict judges only the flow's own windows (§7.7).
+11. Limited sizing counts only active normal windows.
+
+**Tests:**
+- **Pre-change probe at fc949b78:**
+  - auto UDP to ports 53 and 3478 went speed, then quality: FAIL;
+  - three IPv6 dial strikes latched v4-only: FAIL;
+  - window requests carried no `select`: FAIL;
+  - legacy request bytes: PASS, and pinned identical after the change.
+- **42 new tests:** connect/ip_capability_test.go (12),
+  connect/ip_remote_multi_client_limited_test.go (16),
+  connect/ip_remote_multi_client_capability_placement_test.go (11) and
+  connect/ip_remote_multi_client_capability_api_test.go (3). B5's tests were
+  removed or rewritten.
+- **The merged tree 8b52ea81:**
+  - the full `go test -race` root package ran in 2 h 57 min under load
+    40-300, with no race or panic;
+  - three timing-bound failures outside the change each pass 5 of 5 on both
+    the base and branch trees: `TestAltMemoryGoawayRetiresPoolAndJoinsShutdown`,
+    `TestChromeClientHelloResumesSessionsPerPath` and
+    `TestWindowRetainedCandidateUsesMeasuredRoundTrip`;
+  - the targeted `-race` run of 126 tests passed; build and vet are clean.
+- **Spec:**
+  - api/test_spec.py passes 7 of 7, and check-routes.sh shows no drift;
+  - server `TestSpecConformance` passes at 3dcc7b138;
+  - a control run on the old spec logs the 4 new fields as drift.
+
+**Memory:** about floor(0.5 × S) more clients: 3 on desktop in auto, 2 on
+iOS and 5 on Android (§7.10).
