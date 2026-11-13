@@ -12,6 +12,7 @@ import (
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/gkmservice"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 	"github.com/urnetwork/sidecar/sidecartest"
 )
@@ -267,6 +268,31 @@ func TestGkmReconcilerStartsOnTheHostsGateCache(t *testing.T) {
 	awaitTip()
 	if _, revoked, known, err := state.SidecarStanding(ctx, phone.SidecarId); err != nil || !known || !revoked {
 		t.Fatalf("the revoked device's standing: %t, %t, %v", revoked, known, err)
+	}
+
+	// evs's shred start and reconciler read the same cache (C-09): a RepoDelete it loaded comes dated by its row
+	// (QD-743), with its signer while the cache's log keeps the entry
+	repoId, deletionId := admission.Id("taskworker deleted repo"), admission.Id("taskworker deletion")
+	admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_REPO_CREATE, &protocol.RepoCreate{
+		Header: admission.Header(), RepoId: repoId.Bytes(), Kind: protocol.RepoKind_REPO_KIND_GENERAL,
+	}))
+	deleted := admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_REPO_DELETE, &protocol.RepoDelete{
+		Header: admission.Header(), RepoId: repoId.Bytes(), DeletionId: deletionId.Bytes(),
+	}))
+	hint()
+	awaitTip()
+	deletedEntry := &bridge.AuthEntry{}
+	if err := proto.Unmarshal(admission.Entry(deleted.Pin.GetVersion()), deletedEntry); err != nil {
+		t.Fatal(err)
+	}
+	source := evsDeletionSource()
+	if source == nil {
+		t.Fatal("the runtime gave evs's lifecycle jobs no projection")
+	}
+	deletion, err := source.RepoDeletion(ctx, networkId, repoId)
+	if err != nil || deletion == nil || deletion.DeletionId != deletionId || !deletion.Time.Equal(time.UnixMilli(deletedEntry.GetTimeMs())) ||
+		deletion.SignerSidecarId != owner.SidecarId || deletion.Now || deletion.Restored {
+		t.Fatalf("the RepoDelete evs's jobs read: %+v, %v", deletion, err)
 	}
 
 	// the runtime's end: the reconciler is no longer current
