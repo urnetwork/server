@@ -1533,6 +1533,20 @@ func newProxyDeviceLocalSettings(
 	// be one stored signed registration per window candidate. A post-quantum
 	// performance profile needs the key: connect publishes it anyway.
 	deviceLocalSettings.KeepWindowClientKeysLocal = true
+	// the normal windows take every provider, tcp ones included, ranked by
+	// their rank mode alone and with no ipv6 need, and there is no limited
+	// window, whatever connect's default fraction or the developer override
+	// says (owner, 2026-11-13: "hosted proxies should use main window as the
+	// limited window, so that dualproto and dualstack requirements are not
+	// applied on the main window for hosted proxies, and there is no need for
+	// a separate limited window"). Apps and iOS, which share the low-memory
+	// profile, keep connect's dualstack and dualproto windows. A flow still
+	// races only the exits whose labels carry it: udp never reaches a tcp exit.
+	deviceLocalSettings.NormalWindowSelectors = &connect.ProviderSelectors{
+		Ip:       connect.ProviderIpCapabilityIpv4,
+		Protocol: connect.ProviderProtocolCapabilityAny,
+	}
+	deviceLocalSettings.DisableLimitedWindow = true
 	return deviceLocalSettings
 }
 
