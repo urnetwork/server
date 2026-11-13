@@ -267,8 +267,8 @@ var writeClientTokenValid = func(ctx context.Context, validKey string, now time.
 	})
 }
 
-// Testing_FailClientTokenRecordReads fails every Client-class record read with
-// err until the returned function runs, as a lost Redis would.
+// Fails every Client-class record read with err until the returned function
+// runs, as a lost Redis would.
 func Testing_FailClientTokenRecordReads(err error) func() {
 	read := readClientTokenRecord
 	readClientTokenRecord = func(context.Context, string, []string, string) ([]any, string, bool, error) {
