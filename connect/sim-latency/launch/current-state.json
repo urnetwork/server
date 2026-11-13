@@ -70,6 +70,18 @@
     "broader_registry_and_protected_hydration": "Parallel source work, not activated. No uncontrolled eviction, quota increase or namespace reset.",
     "status": "OFFLINE_PROVIDER_ENVELOPE_COMPATIBILITY_DIAGNOSIS"
   },
+  "qualified_storage_renewal": {
+    "source_manifest_sha256": "86a9e7e5f4acadbc9ddb442ff93e87814d8bc0b156a3e080f702c9bbd39a2f99",
+    "overlay_sha256": "8eca0622dae6a3a190b7c52ddf95b61d25b7812df99d5a17b571f9dfc0d30c2f",
+    "evidence_directory": "/var/lib/urnetwork/competition-storage-renewal-qa-20261113.RsRstWr8",
+    "focused_tests_passed": 25,
+    "combined_regression_tests_passed": 104,
+    "sdk_tests_passed": 40,
+    "normal_consumer_built": false,
+    "runtime_activated": false,
+    "cache_limits_increased": false,
+    "remaining": "Compose selected-job routing and clarification lineage before full-cohort runtime qualification. Synthetic window coverage is not completed candidate review."
+  },
   "package_restart_deferral": {
     "hosts": [
       "sille",
