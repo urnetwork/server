@@ -817,11 +817,13 @@ func TestSweepOrphanContractDataStaleCursorRestarts(t *testing.T) {
 	})
 }
 
-// A closed contract with no payment owner is a straggler. It is retained for
-// the full 300-day window and then reaped. A contract owned by an active or
-// otherwise ambiguous incomplete payment is never a straggler: even if an old
-// deployment already stamped reap_time, the compatibility pass clears it and
-// the delete guard preserves the contract and sweep.
+// A closed contract with no payment owner is a straggler. One the former 90-day
+// rule stamped goes at once, inside the 300-day window: USDC payouts ended, so
+// its missing sweep is owed nothing (owner decision 2026-11-13); before, it was
+// retained for the full window. A contract owned by an active or otherwise
+// ambiguous incomplete payment is never a straggler: even if an old deployment
+// already stamped reap_time, the compatibility pass clears it and the delete
+// guard preserves the contract and sweep.
 func TestRemoveStragglerContracts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -863,9 +865,9 @@ func TestRemoveStragglerContracts(t *testing.T) {
 		}
 		connect.AssertNotEqual(t, countPendingPayments(), 0)
 
-		// Inside the straggler window the contracts carry no reap_time and survive.
-		// Age them beyond the old 90-day window to prove the new 300-day horizon is
-		// effective for the sweep-less contract too.
+		// Inside the straggler window, a stamp of the former 90-day rule: the
+		// pending payment's contracts survive with no reap_time, and the
+		// sweep-less contract goes.
 		agedIds := append(append([]server.Id{}, contractIds...), sweeplessEscrow.ContractId)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
@@ -888,8 +890,7 @@ func TestRemoveStragglerContracts(t *testing.T) {
 		connect.AssertEqual(t, sweepCount, 1)
 		connect.AssertEqual(t, testingReapTime(ctx, contractIds[0]) == nil, true)
 		sweeplessCount, _, _, _ := testingCountContractRows(ctx, sweeplessEscrow.ContractId)
-		connect.AssertEqual(t, sweeplessCount, 1)
-		connect.AssertEqual(t, testingReapTime(ctx, sweeplessEscrow.ContractId) == nil, true)
+		connect.AssertEqual(t, sweeplessCount, 0)
 
 		// Age the whole group past 300 days. Simulate reap_time left by the old
 		// 90-day implementation on the pending payment's contracts.

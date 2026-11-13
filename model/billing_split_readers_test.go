@@ -101,10 +101,11 @@ func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 		}
 		assertContractPayoutTestProviderAllocations(t, ctx, f.contractId, map[server.Id]int64{f.egressId: f.egressBytes, f.hopBId: f.hopBBytes})
 
-		// /transfer/stats, the apps' Unpaid Data
+		// /transfer/stats, the apps' Unpaid Data: none since USDC payouts
+		// ended (owner decision 2026-11-13)
 		for networkId, want := range map[server.Id]TransferStats{
-			f.networkA:       {PaidBytesProvided: 0, UnpaidBytesProvided: f.egressBytes},
-			f.networkB:       {PaidBytesProvided: 0, UnpaidBytesProvided: f.hopBBytes},
+			f.networkA:       {PaidBytesProvided: 0, UnpaidBytesProvided: 0},
+			f.networkB:       {PaidBytesProvided: 0, UnpaidBytesProvided: 0},
 			f.payerNetworkId: {PaidBytesProvided: 0, UnpaidBytesProvided: 0},
 		} {
 			if got := GetTransferStats(ctx, networkId); got == nil || *got != want {
