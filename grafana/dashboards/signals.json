@@ -4385,6 +4385,271 @@
           "legendFormat": "source completed age seconds"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "verified caches (session/by_jwt_verified_cache.go, connect net_tls_chain_cache.go)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 242
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "jwt verified claims cache / s",
+      "description": "Token verifications per second by service: a hit reused the remembered verification of the same token bytes (no decode, no signature check), a miss verified in full; stores are verifications remembered and evictions are entries dropped at the per-process bound. The expiration, session horizon, claims and every state and revocation check run on hits and misses alike, so a hit changes no decision. A falling hit ratio with rising evictions is pressure at the bound.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 243
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service, result) (rate(urnetwork_auth_jwt_verified_cache_lookups_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{service}} {{result}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_auth_jwt_verified_cache_stores_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "{{service}} stores"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_auth_jwt_verified_cache_evictions_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "{{service}} evictions"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "jwt verified claims cache entries",
+      "description": "Remembered token verifications held by each process. Each entry ends at its token's expiration or ten minutes after it was stored; the bound is 65,536 entries per process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 243
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service, host, block, instance) (urnetwork_auth_jwt_verified_cache_entries{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{service}} {{host}} / {{block}} / {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "tls verified chain cache / s",
+      "description": "Pinned-root tls handshakes per second by service: a hit reused the remembered verification of the same certificate bytes, server name and root pool, a miss verified the chain in full; stores are verifications remembered and evictions are entries dropped at the per-process bound. Key possession, the server name and the validity time are checked on every handshake. The taskworker's egress probe and the proxy's hosted devices make most of these dials.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 251
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service, result) (rate(urnetwork_tls_verified_chain_cache_lookups_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{service}} {{result}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_tls_verified_chain_cache_stores_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "{{service}} stores"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_tls_verified_chain_cache_evictions_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "{{service}} evictions"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "tls verified chain cache entries",
+      "description": "Remembered chain verifications held by each process. Each entry answers for at most an hour, and only while the dial's clock is inside every certificate's validity; the bound is 256 entries per process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 251
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service, host, block, instance) (urnetwork_tls_verified_chain_cache_entries{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{service}} {{host}} / {{block}} / {{instance}}"
+        }
+      ]
     }
   ]
 }
