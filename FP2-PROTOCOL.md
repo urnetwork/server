@@ -6,13 +6,14 @@ Design for peer review. Nothing here is built yet.
 |---|---|
 | Status | Ready for peer review: all owner decisions recorded. |
 | Date | 2026-11-12 |
-| Server | origin/main 017d11630; every server file cited is identical at cbb7d7306 |
+| Server | design base cbb7d7306 for §1-§12; §13 cites the implementation at its merges (S1: 86553321d) |
 | Connect | origin/main 885ab442; every connect file cited is identical at fc949b78 |
 | SDK | `feat/fp2-limited-window-1112` 2f945bea, which contains sdk main through dce4ab69; every sdk reference is at 2f945bea |
 | SDK, limited window | branch `feat/fp2-limited-window-1112` 2f945bea, not landed: it lands right after connect's change (§13) |
 | Apps and localizations | android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813, localizations 19b89a4, all on their main (§5.5) |
 
-References are `path:line` at those commits. Paths without a repo prefix are
+References are `path:line` at those commits. §1-§12 describe the design
+against the code as it stood; §13 records how it was built. Paths without a repo prefix are
 in the server repo; `connect/`, `sdk/`, `android/`, `apple/`, `windows/`,
 `linux/` and `localizations/` name the other repos.
 
@@ -138,6 +139,7 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D12.2 | strict PQ requires a positive signal. "No negative measurement means capable" (D7.4) does not apply to PQ, and a declaration alone no longer qualifies. | "We should require positive signal for any provider that gets matched to a strict post quantum criteria." | §12.4 |
 | D12.3 | no new window: every window, the limited one included, uses the current PQ setting, and a toggle regenerates them all. Overflow never relaxes PQ. | "we already added postquantum as a selection criteria to fp2. when postquantum is enabled/disabled, the entire multi windows are regenerated. We should make sure to the use current post quantum setting on all window selection. We do not need a new window." | §12.5 |
 | D12.4 | 7918 (connect#220) is solved by strict selection with the positive signal; its fail-fast, cache and field-measurement options are not needed | "With the strong fp2 post quantum filter and quality probe positive signal, i think 7918 is solved by the multi client requiring a strong multi client selection when post quantum is enabled." | §12.7 |
+| D12.5 | PQ outcomes come from a scheduled third of URL turns, not every turn: a turn is a PQ turn when its claim ordinal is a multiple of 3 and its provider has no PQ outcome in the last 4 hours | accepted 2026-11-12, in place of every turn (S1 step 2, merge 86553321d) | §12.2, §13.2 |
 
 D11.8 applies D7.5 to the shipped IPv6 local downgrade (B5) too: it is
 retired (§7.9). No owner question is open.
@@ -348,9 +350,8 @@ ALTER TABLE provider_egress_health_history
   long transaction. `db migrate` is then rerun.
 - **No CHECK constraint.** One would scan every partition to validate. The
   store writes only valid masks, and the tests pin them.
-- **Ordering.** The migration is appended after main's head when this lands.
-  Main is at 963, and migration 964 (the SN25 extender-pool amendment) is
-  pending on another branch.
+- **Built as migration 966** (§13.2), applied on Main 2026-11-13 00:14:53Z
+  (D42 migrated 964 to 967).
 - **Readiness.** A server built with it requires it before it runs
   (MinimumRuntimeMigrationVersion).
 - **Older builds** insert with an explicit column list
@@ -1423,6 +1424,20 @@ inert for them.
 | 4 | proxy service with the new connect and sdk (hosted devices), B5's retirement included (D11.8) | the app release, as the first fleet measurement of §8.2 | previous proxy build |
 | 5 | apps through the nightly, B5's retirement included (D11.8): the memory gate decides the mobile limited size (D11.5); the Apple status row shows the reason (D11.6); a /mainnet note goes out with it (D11.7) | none | the previous release |
 
+- **Post-quantum, as built (S1, §13.2):**
+  1. `db migrate` to 966 or later: done on 2026-11-13.
+  2. **taskworker.** Watch the `st_client_key_history` insert rate (about 27
+     a second for the first hour, then about 7), PQ turn time (up to 3 s
+     more) and the three new metrics.
+  3. **api and alt.** Remote probers can update in any order.
+  4. **Owner config release**, one day after step 3:
+     `capability_probe.yml` `enabled: false`.
+  5. **Next release:** merge the retirement branch
+     (`feat/fp2-s1-capprobe-retire-1112`). It must follow step 4, or monitor
+     §2.19g pages.
+
+  **Rollback:** the previous taskworker. PQ turns stop, the marker expires,
+  and strict PQ returns to today's sources.
 - **Post-quantum (D12).** It rides the same steps:
   - **Step 1:** the migration adds `pq_outcome`.
   - **Step 2:** the taskworker's URL prober opens the PQ session in every
@@ -1473,7 +1488,8 @@ inert for them.
 | **Export cost.** About 75% more union pages. | measured at step 2; capability keys can be dropped by rollback |
 | **Network-only providers under strict PQ** (D12.2). The URL probe cannot reach a provider that holds only a Network key, so it never has a positive signal, and a strict-PQ request no longer matches it. | This follows D12.2 ("any provider"). Such providers stay available to their network's requests without PQ. |
 | **A provider that loses PQ** stays PQ-positive until its next run reads negative, typically within a turn (about 24 minutes). | Window clients stay fail-closed and verify every session (§12.5), so nothing is sent in the clear. |
-| **Prober cost** (§12.2). One key registration, one PQ handshake and up to a 3 s seal wait per URL turn. | The capability probe's own tunnels go away. Watch the URL lane's turn time at step 2. |
+| **Prober cost** (§12.2). One key registration, one PQ handshake and up to a 3 s seal wait per PQ turn; about 3 GB a day of `st_client_key_history` at about 7 turns a second. | The schedule (D12.5) keeps it to a third of the turns of a provider without a recent outcome. The capability probe's own tunnels go away. Watch the insert rate and turn time at taskworker deploy. |
+| **A provider that seals but cannot open the probe client's frames** fails that PQ turn's URL legs. | At most one turn in three, and only without an outcome in 4 hours (§12.2). |
 
 ### Open questions
 
@@ -1527,40 +1543,48 @@ decided by D12.1-D12.4 (§12).
 Discovery offered providers that could not seal a PQ session, and fail-closed
 evaluation waited out each dead candidate before trying the next.
 
-### 12.2 The probe: PQ in every URL tunnel (D12.1)
+### 12.2 The probe: PQ on URL turns (D12.1, D12.5)
 
-**The tunnel.**
-- Every URL probe tunnel applies the capability observation the capability
-  probe uses today: `providertunnel.Config.CapabilityObservation`
-  (qualityprobe/providertunnel/tunnel.go:132, applied at :652).
-- That means `EncryptionModeOpportunistic`, the run's own
-  `PeerCapabilityRecorder`, and `ClientKeyRegistrationRequired`. It does not
-  include the capability probe's redial pacing, which URL tunnels never had.
-- Opportunistic means the URL legs never depend on it. A provider without the
-  end-to-end responder keeps carrying the turn in plaintext. So the URL
-  outcome, every bucket and the classification of §3 do not change with PQ.
-- A turn waits for its session to seal before its first URL request, up to
-  `pq_seal_wait`: the HTTPS connect bound, 3 s. A provider that seals in time
-  carries the turn's requests sealed.
+**Which turns.** A URL turn is a PQ turn when its claim ordinal is a multiple
+of 3 and its provider has no PQ outcome in the last 4 hours (D12.5).
+- PQ on every turn would mean about 68 key registrations a second and about
+  29 GB a day of `st_client_key_history`.
+- The schedule gives about 7 a second and about 3 GB a day, and still about
+  two outcomes per provider per 8 hours.
+- The claim marks the turn, and the mark travels to the prober with the due
+  provider (§13.2).
 
-**Each run records one PQ outcome:**
+**The tunnel of a PQ turn.**
+- It applies the capability observation the capability probe used:
+  `EncryptionModeOpportunistic`, the run's own `PeerCapabilityRecorder`, and
+  `ClientKeyRegistrationRequired`. It does not include the capability probe's
+  redial pacing, which URL tunnels never had.
+- The turn holds its first sends up to 3 s for the session to seal. That is
+  connect's `OpportunisticEstablishHold`; URL tunnels carry data only.
+- Opportunistic means a provider without the end-to-end responder keeps
+  carrying the turn in plaintext. So the URL outcome, every bucket and the
+  classification of §3 do not depend on the session, with one residual case:
+  a provider that seals but cannot open the probe client's frames fails that
+  turn's URL legs. That happens on at most one turn in three, and only for a
+  provider with no outcome in 4 hours.
+
+**Each PQ turn records one outcome:**
 
 | Outcome | When |
 |---|---|
-| positive | the session negotiated a post-quantum group (X25519MLKEM768) and sealed, and the run's IPv4 HTTPS leg passed through it |
-| negative | the session negotiated a classical group; or a post-quantum session had not sealed by the run's end; or a ClientHello went unanswered for a whole establishment window while the provider acknowledged pings (the capability probe's `no_responder`) |
-| unmeasured | anything else: a handshake still pending at the run's end, a lost or replaced tunnel client, a run that failed or was not measured |
+| positive | the session negotiated a post-quantum group (X25519MLKEM768), was sealed when the IPv4 HTTPS leg wrote its first request (`sealed_before_request`), and that leg passed |
+| negative | the session negotiated a classical group; or a post-quantum session was still unsealed 10 s into the run (a grace period); or a ClientHello went unanswered for a whole establishment window (60 s) while the provider acknowledged data |
+| unmeasured | anything else: a handshake still pending, a replaced window client or a re-created tunnel, a run that failed or was not measured. Short turns mostly read unmeasured. |
 
 The same session also shows whether the provider's acks advertise a receive
-window, as the capability probe reads it (capprobe/reading.go:51-60).
+window, as the capability probe read it (capprobe/reading.go:51-60).
 
-**Cost per URL turn:**
+**Cost per PQ turn:**
 - one key-registration round trip before admission;
 - one TLS 1.3 handshake with X25519MLKEM768 through the provider, carrying
   ML-KEM-768 flights of about 5 to 9 KB;
 - up to 3 s of waiting for a seal that a non-PQ provider never gives. The run
-  budget (`Options.RunBudget`, qualityprobe/egresshealth/egresshealth.go:917)
-  counts it.
+  budget counts it once per generation.
 
 The capability probe's own tunnels, prober shard and passes go away (§12.4).
 
@@ -1588,8 +1612,14 @@ The capability probe's own tunnels, prober shard and passes go away (§12.4).
 
 - **Modern evidence:** the URL-probe ingest records each conclusive
   observation in `provider_modern_evidence` (`RecordProviderModernEvidence`,
-  model/egress_modern_provider.go:222), as the capability probe does today.
-  The window reading keeps its table and its census gauges.
+  model/egress_modern_provider.go:222), as the capability probe did. The
+  window reading keeps its table and its census gauges.
+  - `post_quantum` means a post-quantum group was negotiated.
+  - `max_receive_window_byte_count` is stored as 0: the URL probe reads
+    whether the window is advertised, not its size.
+- **The stream:** each stored outcome of a PQ turn also notes the PQ stream
+  (about 7 a second, two Redis operations each). The ready marker reads it
+  (§12.4).
 
 ### 12.4 Strict match (D12.2)
 
@@ -1614,6 +1644,12 @@ The capability probe's own tunnels, prober shard and passes go away (§12.4).
     export like `{provider_hard_exclusions}`. They replace
     `readProvidePostQuantumEncryption` (:6653, :7364) and
     `readProviderModernClientIds` (:6732-6734, :7351-7352).
+- **The ready marker:** `client_score_post_quantum_v1_ready` holds the PQ
+  stream's start.
+  - After each complete export, the export sets it while the stream has run
+    for 8 hours or more and its last outcome is under 30 minutes old, and
+    deletes it otherwise.
+  - Until it is set, strict PQ answers from today's sources (§10).
 - **Network-only providers:** a provider that holds only a Network key cannot
   be reached by the URL probe, so it never has a positive signal. Under D12.2
   ("any provider") a strict-PQ request does not match it. Its
@@ -1720,3 +1756,141 @@ publishes with the stable app release (§10).
 **Follow-ups:**
 - the DeviceRemote (rpc) developer control for the fraction;
 - the memory gate on the iOS and Android nightlies (§10).
+
+### 13.2 Workstream S1: server evidence and probe
+
+All server references in this section are at origin/main 86553321d.
+
+**Landed:**
+- step 1, merge 2f3ebac8b (875789fcc, 8eb3b8eb4);
+- step 2, merge 86553321d (c4eda7229, 925c80009, 64a5e5d3f). c4eda7229's
+  message still says "deviation" and "1 h Redis key"; both are superseded,
+  and the merge message is correct.
+
+**Not merged:** the capability-probe retirement, branch
+`feat/fp2-s1-capprobe-retire-1112` (a253a22c9). It waits for the owner's
+config flip (§10).
+- It deletes `capprobe` (the README stays, marked "Retired."),
+  `taskworker/work/capability_probe_work.go` and their tests.
+- It removes panels 127-137 of egress-probes and panels 18-24 of
+  capability-probes.
+- It adds `work.CapabilityProbe` to `removedTaskTargets`, and
+  `ensureProviderBandwidthProbeChain` replaces the chain loop.
+
+**Migration 966:**
+- db_provider_egress_fp2_evidence.go:41 is one DO block with `lock_timeout`
+  5 s. It adds `failed_later_legs` and `pq_outcome` to
+  `provider_egress_health_history` (§4.1), in the catalog only, unattached
+  day tables included. A rerun takes no lock.
+- Accessor at :78; position db_migrations.go:11513.
+- Monitor contract: monitor/migration_provider_egress_fp2_evidence.go:14,
+  registered at monitor/migration_current_suffix.go:1003. It adds two schema
+  faults.
+- Applied on Main on 2026-11-13 at 00:14:53Z.
+
+**Mask and outcome** (the single source; S2 aliases them):
+- `UrlProbeFailedLaterLegIpv4Udp`, `Ipv6Tcp` and `Ipv6Udp` are 1, 2 and 4
+  (qualityprobe/egresshealth/url_evidence.go:87).
+- `FailedLaterLegs(ok, total)` (:105) is 0 unless the run is a failed single
+  run.
+- `UrlProbeE2eEvidence{pq, key_exchange, sealed_before_request, window}`
+  (qualityprobe/egresshealth/url_e2e.go:108):
+  - the pq values are at :44 and the window values at :60;
+  - `pq_outcome` 0, 1, 2 at :69;
+  - the post-quantum groups are at :83 and
+    `UrlProbeKeyExchangePostQuantum` at :94.
+- Validation (:123): `positive` needs a post-quantum group and
+  `sealed_before_request`; `negative` is refused for a sealed post-quantum
+  session; the key name is at most 64 bytes of UTF-8.
+- `PqOutcome` is at :161. qualityprobe/egresshealth/url_evidence.go:79 adds
+  the field. `ValidateOutcome` (:556) refuses a positive unless the IPv4
+  HTTPS leg passed.
+
+**Ingest:**
+- model/provider_egress_health_model.go:408-420 writes both columns.
+  Rechecks, probation runs and outcomes from older releases store 0 and 0; a
+  replay stores nothing.
+- `ProviderEgressHealthStored` gains both
+  (model/provider_egress_url_source.go:132-134).
+- `recordProviderEgressHealthE2e`
+  (model/provider_egress_post_quantum_ready.go:83) runs after the store
+  transaction (model/provider_egress_health_model.go:286, 297). It records
+  modern evidence and notes the stream.
+- Metrics: `urnetwork_egress_url_failed_later_legs_total{legs}`
+  (controller/provider_egress_url_source.go:249) and
+  `urnetwork_egress_url_pq_outcomes_total{pq}` (:258).
+
+**Ready marker:**
+- key at model/provider_egress_post_quantum_ready.go:46;
+- `ClientScorePostQuantumReadySettings{ReadyAfter 8h, SeenMaxAge 30m}` (:56);
+- `MarkClientScorePostQuantumReady` (:149), called by the export after each
+  complete export (model/network_client_location_model.go:6231).
+
+**The PQ turn schedule** (D12.5):
+- `ProviderUrlProbePostQuantumSettings{RefreshAge 4h, TurnStride 3}`
+  (model/provider_url_probe_post_quantum.go:38).
+- `markProviderUrlProbePostQuantumTurns` (:65) runs after the claim
+  transaction (model/provider_url_probe_due.go:311) and never fails a claim.
+- The flag travels:
+  1. `ProviderUrlProbeDue.PostQuantum` (model/provider_url_probe_due.go:48);
+  2. `ingest.DueProvider` (qualityprobe/ingest/schedule.go:166);
+  3. localoperator/operator.go:306;
+  4. `prober.Provider.PostQuantum` (qualityprobe/prober/prober.go:38);
+  5. qualityprobe/fleetprobe/pool.go:77.
+
+**Prober:**
+- Only PQ turns get a recorder and a capability observation
+  (qualityprobe/fleetprobe/full.go:251-263).
+- `UrlProbePostQuantumSettings{SealWait 3s, UnsealedGrace 10s,
+  NoResponderWindow 60s}` (qualityprobe/fleetprobe/url_e2e.go:32). The
+  observation is at :60, with `EstablishHold` equal to `SealWait` and
+  `KeepTunnelOnReplacement`. `readUrlProbeE2e` is at :129.
+- egresshealth:
+  - `Options.E2e` (qualityprobe/egresshealth/egresshealth.go:694);
+  - the run budget adds the seal wait once per generation (:943);
+  - qualityprobe/egresshealth/url_family.go:281 hooks the IPv4 HTTPS leg's
+    first request write, which defines `sealed_before_request`;
+  - qualityprobe/egresshealth/url_probe.go:127 sets the evidence.
+- providertunnel:
+  - `EstablishHold` and `KeepTunnelOnReplacement`
+    (qualityprobe/providertunnel/capability_observation.go:50, 56);
+  - `Tunnel.ClientReplaced` (qualityprobe/providertunnel/tunnel.go:794);
+  - `watchTunnelPath` (:857);
+  - qualityprobe/fleetprobe/path.go:173.
+- taskworker:
+  - the peer key fetcher (taskworker/work/provider_url_probe_post_quantum.go:29)
+    uses `model.GetClientPublicKey`, wired at
+    taskworker/work/provider_egress_probe_work.go:2163;
+  - `urnetwork_url_probe_e2e_outcomes_total{pq}` (:43), observed at
+    taskworker/work/provider_egress_probe_metrics.go:654.
+
+**Dashboard:** egress-probes.json row 170, panel 171 (failed later legs) and
+panel 172 (PQ outcomes). Test: grafana/url_probe_fp2_evidence_dashboard_test.go.
+
+**Deviations from §12, folded in above:**
+1. The seal wait is connect's `OpportunisticEstablishHold`.
+2. `sealed_before_request` is read at the IPv4 HTTPS leg's first request
+   write.
+3. `negative` is stricter: a 10 s unsealed grace, and a full 60 s no-responder
+   window while the provider acknowledges data.
+4. A replaced window client or a re-created tunnel reads `unmeasured`.
+5. `key_exchange` is omitted when empty, and the modern evidence's window size
+   is 0.
+6. The stream is noted on every stored outcome.
+7. The capability probe is switched off by a config flip, because a code
+   switch-off would trip monitor §2.19g.
+8. The residual case of §12.2.
+
+**Tests:**
+- 24 of 24 FP2 DB tests on the tested tree ddb722dda.
+- On 66bfa959a: 266 model and controller DB tests, taskworker 222 of 222, and
+  providertunnel 198 of 198.
+- One failure, `TestUrlProbeDueHundredThousandProviders`, is a load timeout
+  at load 100-285. It fails the same way without step 2.
+
+**Release status:**
+- D42, rolling now, is server a151cee8d. It contains step 1 only.
+- Step 2 (86553321d) ships in the next server release.
+
+**Follow-up after the retirement:** remove monitor §2.19g and the model's
+capability-probe page query.
