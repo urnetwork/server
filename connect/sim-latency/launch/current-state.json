@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T00:16:21Z",
+  "observed_at": "2026-11-13T01:44:49.567750Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -20,14 +20,24 @@
     "succeeded": 16,
     "failed": 4,
     "queued": 0,
-    "running": 0
+    "running": 1
   },
-  "active_attempts": [],
+  "active_attempts": [{
+    "job_id": "01a1d270-672a-80c0-4983-afa0464c8eae",
+    "host_id": "sille",
+    "run_id": "cb61142db0a92772f6d58ea327d613d521151d3eaf461d0c27dd5bff97a10725",
+    "started_at": "2026-11-13T01:06:37.281162Z",
+    "original_deadline_at": "2026-11-13T04:06:37.281162Z",
+    "attempt": 1,
+    "cycle": 0,
+    "native_fencing_token": 20,
+    "last_progress": "Candidate replicate 04 container started; native state running. No cleanup or score completion claimed."
+  }],
   "runtime_status": {
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "api_observed_at": "2026-11-13T00:16:21Z",
+    "api_observed_at": "2026-11-13T01:44:49.567750Z",
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
       "supervisor_pid": 211140,
@@ -36,7 +46,8 @@
       "automatic_restarts": 3,
       "last_start": "2026-11-12T19:27:21Z",
       "worker_source_or_binary_changed": false,
-      "operator_hold_or_restart_performed": false,
+      "operator_hold_or_restart_performed": true,
+      "service_stopped_or_restarted": false,
       "ops_maintenance_confirmation": "user_asking_ops_to_check_1918_to_1927_utc"
     },
     "transient_readiness_cause_confirmed": false,
@@ -213,8 +224,47 @@
       "actor_guard_and_capture_exit_zero": true,
       "binary_sha256": "9a3bacc690049b21a2565700f13df5856a1faad98533035a49c5388294c2607a",
       "build_profile": "Clean 59b3 source; Go1.27.4 linux/amd64-v1, CGO0, greenteagc, trimpath, original nine dependencies. No full-main build claim.",
-      "image_created": false,
-      "target_executed_installed_or_activated": false
+      "image_created_by_build_step": false,
+      "target_executed_installed_or_activated_by_build_step": false,
+      "durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-worker-buildonly-proof-20261113.f8zh3TXi",
+      "manifest_sha256": "f0b15539f8ada68adbeb7c9a56fd04eccff0b81698ea8b96311e068fc1d67248"
+    },
+    "staged_release": {
+      "directory": "/usr/local/libexec/urnetwork/competition-worker-idle-heartbeat-59b3ce0ca-go1274-20261113-v1",
+      "binary_sha256": "9a3bacc690049b21a2565700f13df5856a1faad98533035a49c5388294c2607a",
+      "image_digest": "sha256:042c5bc38b73966fd8f54fe5d7b21226297f66b8579be6be4fb043fb0e0c011c",
+      "archive_sha256": "106fc126b047f8267901a5a44855e79f74f3678c3f6226e8f07fb0d21986db25",
+      "passive_verification_passed": true,
+      "initial_verifier_setup_exit": 126,
+      "initial_verifier_setup_cause": "Retained verifier evidence had mode0400. Original failure/empty report preserved; identical authenticated bytes copied into new root0500 execution custody for successful independent verification.",
+      "verification_sha256": "a9b2c1edf5bb5631256bc3a72c4f1c6ef7a6d0c8685de1a272f7c74e67cdfc75",
+      "wrapper_sha256": "4ac008ab0ab3c84e354fdaad986205e22fecc769059e560fb7cf3f9623a068c6",
+      "candidate_override_sha256": "8f6be9ce36f155f5806488ffbc675c5b1c1d938df203e6ac0f0328c5fc49c181",
+      "stager_ordinary_passes": 21,
+      "stager_race_passes": 21,
+      "stager_old_size_causal_control_verified": true,
+      "stager_tool_sha256": "826c8bf2d9eee673ce2a2c305356d01fb7bbcf093adcb0548b1e3bf12440253b",
+      "actual_stage_exit": 0,
+      "stage_runtime_seconds": 5.613,
+      "stage_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-stage-20261113.h6Q3dxpS",
+      "continuous_stage_guard_started": false,
+      "stage_guard_basis": "Short actor completed before live guard capture; actual launcher exit0, unchanged pins, bounded single-payload copy and post-stage capacity above unchanged33GiB reserve verified.",
+      "runtime_override_installed": false,
+      "worker_payload_executed": false,
+      "deployed": false
+    },
+    "maintenance": {
+      "evidence": "/var/lib/urnetwork/competition-idle-heartbeat-handoff-20261113.ES1aO0Lx",
+      "hold_revision": 30,
+      "hold_release_revision": 31,
+      "hold_active": false,
+      "switch_deferred": true,
+      "reason": "Fresh post-hold database check discovered a new evaluation that started during release preparation. Worker was never stopped, native observer never executed, and only our hold was released with CAS30.",
+      "activation_requires_new_fresh_global_idle_and_native_proof": true,
+      "prepared_native_observer_sha256": "2e2be36a70ed78fe581537295617ecdd8b6305d0648406319c2c9eb533e2ee2c",
+      "prepared_native_observer_executed": false,
+      "prepared_observer_plan_must_not_be_reused_as_latest_after_new_job": true,
+      "no_active_attempt_interruption_or_clock_change": true
     },
     "race_compiler": {
       "unit": "competition-guard-independent-qa-20261112.service",
@@ -237,6 +287,17 @@
       "gemma-4-26b-a4b"
     ],
     "all_eligible_submissions_reviewed": false,
+    "complete_provider_diagnostic": {
+      "source_sha256": "afedc3e9f2d4689adc2239fc0f85d68504fd0a7ed8b8fff635614d6ae2506d41",
+      "discovered_cases": 56,
+      "passed_before_failfast": 13,
+      "failed": 1,
+      "unrun": 42,
+      "failure": "Context expansion accepted a filtered adverse ancestor via unbacked KnownCallIds. Fixes belong to a new context-slices cut; no test expectation relaxation.",
+      "evidence": "/dev/shm/competition-provider-afed-rgfix-diagnostic-20261113.dvl9vWwQ",
+      "json_sha256": "f11836c06c3d98196c20112f57d4b50687793dd1b14dd3aaccab50c7c71593cc",
+      "qualified_or_executed_against_models": false
+    },
     "qwen_first_partial": "Original response validated offline; original failure receipt unchanged. Receipt 706f503960bf354ad2032442bc4323e91d5c30aa7e6b76c54a679e6ae1c74125; no complete review or approval.",
     "gemma_first_partial": "Rejected: non-JSON prefix and unseen-file findings; no reroll.",
     "qwen_scoring_partial": "Provider completed; rejected because canonical.patch is not a production source path. No rewriting or reroll.",
@@ -306,6 +367,21 @@
     "root_available_bytes_after": 37700001792,
     "repository_baseline_or_evidence_deleted": false
   },
+  "retired_test_cache_objects": [
+    {
+      "original_path": "/home/by/.cache/go-build/8b/8b62004edf90d5a70be9995d9ddca86136bf9e07088b9c1105f1a9bed2e2f8ac-d",
+      "recoverable_ram_path": "/dev/shm/competition-retired-oldwatch-cache-20261113.HhvNh7wE/controller-oldwatch.a",
+      "sha256": "8b62004edf90d5a70be9995d9ddca86136bf9e07088b9c1105f1a9bed2e2f8ac",
+      "bytes": 174563000
+    },
+    {
+      "original_path": "/home/by/.cache/go-build/10/1036ac39965e7f7f280d15059a6b01bb3c2af50781d9ddb02e3d6f0559e9e9bb-d",
+      "recoverable_ram_path": "/dev/shm/competition-retired-oldrun-cache-20261113.O9vjPhQL/controller-oldrun.a",
+      "sha256": "1036ac39965e7f7f280d15059a6b01bb3c2af50781d9ddb02e3d6f0559e9e9bb",
+      "bytes": 174556336
+    }
+  ],
+  "retired_test_cache_recovery": "Only inactive rebuildable Go-cache objects moved after exact hash, inode and no-open checks. RAM copies are root0400 and volatile; original source, test binaries and durable proof remain unchanged. No authoritative evidence relies on cache survival.",
   "buildkit_cache_cleanup": {
     "removed_records": 14,
     "scope": "Exact validated unused, unshared, reclaimable regular BuildKit cache records, last used at least 24 hours ago; no images, containers, volumes, repositories, baselines or evidence removed.",
