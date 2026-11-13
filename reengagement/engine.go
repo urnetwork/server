@@ -426,9 +426,15 @@ func Decide(step string, f Facts, s Schedule) Decision {
 	return exit(ExitDone)
 }
 
-// sunset is the end of an episode that asked "should I keep writing?".
+// sunset is the end of an episode that asked "should I keep writing?". A
+// holdout network was never asked: its R3 was a virtual send, so its silence
+// says nothing about the address, and it exits done without the sunset
+// suppression (until the 2026-11-13 review every holdout network was
+// suppressed here at day 60, and so left out of all later mail).
 func sunset(f Facts) Decision {
 	switch {
+	case f.Holdout:
+		return Decision{Action: ActionExit, ExitReason: ExitDone}
 	case f.Kept:
 		return Decision{Action: ActionExit, ExitReason: ExitKept}
 	case f.Clicked || f.Reason != "":

@@ -71,6 +71,10 @@ func TestE2(t *testing.T) {
 	if d.Action != ActionSend || d.Template != TemplateE2Widget || d.Variant != VariantNotActivated || d.NextStep != StepE3 {
 		t.Errorf("e2 not activated: %+v", d)
 	}
+	// the widget email goes to a phone whose app has the widget
+	// (TestE2WidgetEmailOnlyWhereThereIsAWidget)
+	f.Platform = "android"
+	f.WidgetBuild = true
 	f.HasConnected = true
 	d = Decide(StepE2, f)
 	if d.Action != ActionSend || d.Variant != VariantActivated {
