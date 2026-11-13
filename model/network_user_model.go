@@ -37,8 +37,11 @@ type NetworkUserUserAuth struct {
 type NetworkUserSsoAuth struct {
 	UserId   *server.Id  `json:"user_id,omitempty"`
 	AuthType SsoAuthType `json:"auth_type"`
-	AuthJwt  string      `json:"auth_jwt"`
-	UserAuth *string     `json:"user_auth,omitempty"`
+	// the stored sign-in token, never serialized: GET /network/user answers
+	// this type to any app credential, a client token included, and an
+	// unexpired token signs in at /auth/login as the network
+	AuthJwt  string  `json:"-"`
+	UserAuth *string `json:"user_auth,omitempty"`
 }
 
 type NetworkUserWalletAuth struct {
@@ -1373,7 +1376,9 @@ func MigrateNetworkUserChildAuthsOriginal(
 					if err != nil {
 						glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
 					} else {
-						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+						// the auth type, never the token: the stored sign-in
+						// token must not reach the logs
+						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthType)
 					}
 
 				}
@@ -1534,7 +1539,9 @@ func MigrateNetworkUserChildAuths(
 				if err != nil {
 					glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
 				} else {
-					glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+					// the auth type, never the token: the stored sign-in token
+					// must not reach the logs
+					glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthType)
 				}
 
 			}
