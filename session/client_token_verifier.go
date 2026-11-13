@@ -150,10 +150,12 @@ func (self *ClientTokenVerifier) Check() error {
 	return nil
 }
 
+// An answer that says nothing about the token and asks for retryAfter.
 func (self *ClientTokenVerifier) unavailable(retryAfter time.Duration, err error) error {
 	return &ClientTokenUnavailableError{RetryAfter: retryAfter, Err: err}
 }
 
+// err as a refusal, which the engine answers 401.
 func clientTokenRefused(err error) error {
 	return fmt.Errorf("%w: %w", ErrClientTokenRefused, err)
 }
