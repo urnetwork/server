@@ -1667,18 +1667,17 @@ func ListCryptoPaymentWatchedAddressesInConn(
 	return
 }
 
-// CryptoPaymentIssuedAddress is an address an invoice of a coin was given:
-// the pool index the invoice drew it at, and when the invoice was made (the
-// day only, once the retention unlink has passed it).
+// An address an invoice of a coin was given: the pool index the invoice drew
+// it at, and when the invoice was made (the day only, once the retention
+// unlink has passed it).
 type CryptoPaymentIssuedAddress struct {
 	AddressIndex int64
 	CreateTime   time.Time
 }
 
-// CryptoPaymentAddressesIssuedInConn reports whether an invoice of the coin
-// was ever given an address of the pool: one probe of the invoice address
-// index. Reuse the caller's PostgreSQL session; nil selects the outer
-// acquisition boundary.
+// Whether an invoice of the coin was ever given an address of the pool: one
+// probe of the invoice address index. Reuse the caller's PostgreSQL session;
+// nil selects the outer acquisition boundary.
 func CryptoPaymentAddressesIssuedInConn(connOwner server.PgConn, ctx context.Context, asset string) (issued bool) {
 	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(
@@ -1695,15 +1694,15 @@ func CryptoPaymentAddressesIssuedInConn(connOwner server.PgConn, ctx context.Con
 	return
 }
 
-// GetCryptoPaymentIssuedAddressesInConn maps each given address of a coin that
-// an invoice was ever given to its pool index and the invoice's time, in one
-// lookup by the invoice address index: every invoice, open or closed,
-// credited, voided or past the retention unlink, since a payment can reach
-// any of them at any time. The block readers ask it with every address their
-// blocks pay (Bitcoin once a block, TAO once a scan) and judge the invoice's
-// time against the block's: an invoice made after its block was mined was
-// not paid in it. Addresses no invoice was given are absent. Reuse the
-// caller's PostgreSQL session; nil selects the outer acquisition boundary.
+// Maps each given address of a coin that an invoice was ever given to its
+// pool index and the invoice's time, in one lookup by the invoice address
+// index: every invoice, open or closed, credited, voided or past the
+// retention unlink, since a payment can reach any of them at any time. The
+// block readers ask it with every address their blocks pay (Bitcoin once a
+// block, TAO once a scan) and judge the invoice's time against the block's:
+// an invoice made after its block was mined was not paid in it. Addresses no
+// invoice was given are absent. Reuse the caller's PostgreSQL session; nil
+// selects the outer acquisition boundary.
 func GetCryptoPaymentIssuedAddressesInConn(
 	connOwner server.PgConn,
 	ctx context.Context,

@@ -1564,10 +1564,10 @@ var cryptoHeldReviewReasons = []string{
 	model.CryptoReviewReasonUnlinked,
 }
 
-// cryptoIntentUndeliverable reports an invoice whose credit has nowhere to
-// go: one delivered to a network, past the retention unlink, which forgot the
-// network (RunCryptoPaymentUnlink). A code invoice still delivers: its buyer
-// reads the code with the status token.
+// Whether an invoice's credit has nowhere to go: one delivered to a network,
+// past the retention unlink, which forgot the network
+// (RunCryptoPaymentUnlink). A code invoice still delivers: its buyer reads the
+// code with the status token.
 func cryptoIntentUndeliverable(intent *model.CryptoPaymentIntent) bool {
 	return intent.UnlinkedAt != nil && intent.Delivery != model.CryptoDeliveryCode
 }
@@ -1631,8 +1631,8 @@ func cryptoEvaluateIntent(
 	return view
 }
 
-// cryptoJudgeIntent is cryptoEvaluateIntent's table but its last row: what
-// the rules make of the invoice wherever its credit would go.
+// The table of cryptoEvaluateIntent but its last row: what the rules make of
+// the invoice wherever its credit would go.
 func cryptoJudgeIntent(
 	intent *model.CryptoPaymentIntent,
 	receipts []*model.CryptoPaymentReceipt,

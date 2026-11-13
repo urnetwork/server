@@ -101,11 +101,11 @@ func DefaultCryptoAddressSweepSettings() *CryptoAddressSweepSettings {
 	}
 }
 
-// cryptoWalletSweeper is a per-address coin's reader of one issued address's
-// incoming transfers since the address's cursor (ETH, SOL).
+// A per-address coin's reader of one issued address's incoming transfers
+// since the address's cursor (ETH, SOL).
 type cryptoWalletSweeper interface {
-	// SweepAddress reads the transfers to the address after its cursor (its
-	// whole history before the first read) up to the reader's final head, as
+	// Reads the transfers to the address after its cursor (its whole
+	// history before the first read) up to the reader's final head, as
 	// receipts, with the cursor after them. Each chain request is taken from
 	// spend first; complete = false when spend refused one: next is where the
 	// read stopped (nil: nothing was read), and the next read goes on from
@@ -119,9 +119,9 @@ type cryptoWalletSweeper interface {
 	) (receipts []*cryptoWalletReceipt, next *model.CryptoAddressSweepCursor, complete bool, returnErr error)
 }
 
-// cryptoWalletWebhookWatched is a coin whose provider webhook watches every
-// pool address it registered (ETH, when alchemy.yml names the webhook and the
-// Notify token): its sweep reads each address less often.
+// A coin whose provider webhook watches every pool address it registered (ETH,
+// when alchemy.yml names the webhook and the Notify token): its sweep reads
+// each address less often.
 type cryptoWalletWebhookWatched interface {
 	WebhookWatched() bool
 }
@@ -155,8 +155,8 @@ func init() {
 	prometheus.MustRegister(cryptoPaySweepReads)
 }
 
-// cryptoSweepReadEvery is how long a completely read address of the wallet's
-// coin waits before its next read: ReadEvery when a provider webhook watches
+// How long a completely read address of the wallet's coin waits before its
+// next read: ReadEvery when a provider webhook watches
 // the coin's addresses, else ReadEveryUnwatched.
 func cryptoSweepReadEvery(wallet cryptoWallet, settings *CryptoAddressSweepSettings) time.Duration {
 	if watched, ok := wallet.(cryptoWalletWebhookWatched); ok && watched.WebhookWatched() {
@@ -165,8 +165,8 @@ func cryptoSweepReadEvery(wallet cryptoWallet, settings *CryptoAddressSweepSetti
 	return settings.ReadEveryUnwatched
 }
 
-// cryptoSweepIssuedAddresses is one scan's sweep (see the file header), with
-// readEvery from cryptoSweepReadEvery. record records the receipts of one
+// One scan's sweep (see the file header), with readEvery from
+// cryptoSweepReadEvery. record records the receipts of one
 // address's read, as the scan records the ones its reader reported.
 func cryptoSweepIssuedAddresses(
 	ctx context.Context,
@@ -275,7 +275,7 @@ func cryptoSweepIssuedAddresses(
 	}
 }
 
-// cryptoReceiptIndexes are the address indexes the receipts name.
+// The address indexes the receipts name.
 func cryptoReceiptIndexes(receipts []*cryptoWalletReceipt) []int64 {
 	indexes := []int64{}
 	for _, receipt := range receipts {
@@ -286,8 +286,8 @@ func cryptoReceiptIndexes(receipts []*cryptoWalletReceipt) []int64 {
 	return indexes
 }
 
-// cryptoSweepFromHeight is the first block an ETH read of a swept address
-// asks for: after its cursor, or the chain's start before its first read.
+// The first block an ETH read of a swept address asks for: after its cursor,
+// or the chain's start before its first read.
 func cryptoSweepFromHeight(cursor *model.CryptoAddressSweepCursor) uint64 {
 	if cursor == nil || cursor.Height == nil || *cursor.Height < 0 {
 		return 0
@@ -295,7 +295,7 @@ func cryptoSweepFromHeight(cursor *model.CryptoAddressSweepCursor) uint64 {
 	return uint64(*cursor.Height) + 1
 }
 
-// cryptoHexBlock is a block number as a JSON-RPC quantity.
+// A block number as a JSON-RPC quantity.
 func cryptoHexBlock(number uint64) string {
 	return fmt.Sprintf("0x%x", number)
 }

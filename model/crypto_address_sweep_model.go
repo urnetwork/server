@@ -13,8 +13,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// CryptoAddressSweepCursor is how far one issued address's incoming transfers
-// have been read. Every transfer to the address up to it was recorded.
+// How far one issued address's incoming transfers have been read. Every
+// transfer to the address up to it was recorded.
 type CryptoAddressSweepCursor struct {
 	Asset   string
 	Address string
@@ -30,9 +30,8 @@ type CryptoAddressSweepCursor struct {
 	LastError string
 }
 
-// CryptoAddressSweepAddress is an address an invoice was given, as the sweep
-// reads it: its pool index, its invoice and its cursor (nil before its first
-// read).
+// An address an invoice was given, as the sweep reads it: its pool index, its
+// invoice and its cursor (nil before its first read).
 type CryptoAddressSweepAddress struct {
 	Address      string
 	AddressIndex int64
@@ -40,13 +39,12 @@ type CryptoAddressSweepAddress struct {
 	Cursor       *CryptoAddressSweepCursor
 }
 
-// ListCryptoAddressesToSweepInConn lists the coin's addresses that an invoice
-// was ever given, after afterAddressIndex in pool index order, at most limit,
-// each with its sweep cursor: every invoice, open or closed, credited,
-// voided or past the retention unlink. One indexed range read by the invoice
-// address index, so the work of a call is bounded by limit however many
-// addresses the coin has issued. Reuse the caller's PostgreSQL session; nil
-// selects the outer acquisition boundary.
+// The coin's addresses that an invoice was ever given, after afterAddressIndex
+// in pool index order, at most limit, each with its sweep cursor: every
+// invoice, open or closed, credited, voided or past the retention unlink. One
+// indexed range read by the invoice address index, so the work of a call is
+// bounded by limit however many addresses the coin has issued. Reuse the
+// caller's PostgreSQL session; nil selects the outer acquisition boundary.
 func ListCryptoAddressesToSweepInConn(
 	connOwner server.PgConn,
 	ctx context.Context,
@@ -123,7 +121,7 @@ func ListCryptoAddressesToSweepInConn(
 	return
 }
 
-// SetCryptoAddressSweepCursorInConn writes one address's cursor as given.
+// Writes one address's cursor as given.
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition
 // boundary.
 func SetCryptoAddressSweepCursorInConn(
@@ -154,10 +152,9 @@ func SetCryptoAddressSweepCursorInConn(
 	}, server.TxReadCommitted)
 }
 
-// GetCryptoAddressSweepPositionInConn is the pool index the coin's sweep
-// rotation last passed, -1 at the start of a rotation (and before the first).
-// Reuse the caller's PostgreSQL session; nil selects the outer acquisition
-// boundary.
+// The pool index the coin's sweep rotation last passed, -1 at the start of a
+// rotation (and before the first). Reuse the caller's PostgreSQL session; nil
+// selects the outer acquisition boundary.
 func GetCryptoAddressSweepPositionInConn(
 	connOwner server.PgConn,
 	ctx context.Context,
@@ -179,9 +176,9 @@ func GetCryptoAddressSweepPositionInConn(
 	return
 }
 
-// SetCryptoAddressSweepPositionInConn moves the coin's sweep rotation to after
-// afterAddressIndex (-1: the start of the next rotation). Reuse the caller's
-// PostgreSQL session; nil selects the outer acquisition boundary.
+// Moves the coin's sweep rotation to after afterAddressIndex (-1: the start of
+// the next rotation). Reuse the caller's PostgreSQL session; nil selects the
+// outer acquisition boundary.
 func SetCryptoAddressSweepPositionInConn(
 	connOwner server.PgConn,
 	ctx context.Context,

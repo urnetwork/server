@@ -393,8 +393,8 @@ func (self *solanaNativeWallet) IncomingSince(ctx context.Context, minHeight uin
 	return receipts, 0, nil
 }
 
-// SweepAddress reads an issued address's finalized transactions newer than
-// its cursor's signature (its whole history before the first read), oldest
+// Reads an issued address's finalized transactions newer than its cursor's
+// signature (its whole history before the first read), oldest
 // first, and reports their native SOL payments to it. The listing must reach
 // the cursor within settings.MaxPages pages, or nothing of it is acted on (an
 // older transaction it did not reach would be passed over for good). Each
