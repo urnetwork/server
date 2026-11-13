@@ -8,6 +8,7 @@
 package reengagement
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -134,11 +135,33 @@ const (
 	SuppressSwitched = "switched"
 )
 
-// LiftableSuppression reports whether a connection lifts the suppression: the
-// program's own (silence, "switched"); never a bounce, complaint or
-// unsubscribe.
+// Suppression reasons an operator records with `bringyourctl reengagement
+// suppress`. No connection lifts them.
+const (
+	// the account holder said they are in a sanctioned country (factury
+	// support/RUN-MAIN.md §9; owner, 2026-11-13)
+	SuppressSanctions = "sanctions"
+	// the network belongs to a sign-up cohort that automation made
+	SuppressAutomatedSignup = "automated_signup"
+)
+
+// OperatorSuppressions are the reasons `bringyourctl reengagement suppress`
+// accepts.
+func OperatorSuppressions() []string {
+	return []string{SuppressSanctions, SuppressAutomatedSignup}
+}
+
+// LiftableSuppressions are the reasons a connection lifts: the program's own
+// (silence, "switched"); never a bounce, complaint, unsubscribe or an
+// operator's suppression.
+func LiftableSuppressions() []string {
+	return []string{SuppressSunset, SuppressSwitched}
+}
+
+// LiftableSuppression reports whether a connection lifts the suppression
+// (LiftableSuppressions).
 func LiftableSuppression(reason string) bool {
-	return reason == SuppressSunset || reason == SuppressSwitched
+	return slices.Contains(LiftableSuppressions(), reason)
 }
 
 // Schedule holds the day offsets and limits (reengagement.yml `schedule`).

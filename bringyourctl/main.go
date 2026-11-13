@@ -99,6 +99,7 @@ Usage:
     bringyourctl reengagement rollup [--from=<from>] [--to=<to>]
     bringyourctl reengagement send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
     bringyourctl reengagement mirror-suppressions
+    bringyourctl reengagement suppress (--network_id=<network_id> | --network_ids_file=<path>) --reason=<reason> [(--apply --expect=<digest>)]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
@@ -263,7 +264,7 @@ Options:
                    major or full, mildest first.
 
     --private-stdin  Read the bounded private expiry request from stdin.
-    --apply          Apply the scoped expiry request; omission is a read-only preview.
+    --apply          Apply the scoped expiry request; omission is a read-only preview. With reengagement suppress, write the suppression of the dry run whose digest is --expect.
     --contract_id=<contract_id> The contract to close
     --target_id=<target_id>     The contract_close.party (either "destination" or "source")
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
@@ -285,7 +286,8 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc or contracts close-due dry run printed; --send and --commit refuse any other census.
+    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, contracts close-due or reengagement suppress dry run printed; --send, --commit and --apply refuse any other census.
+    --network_ids_file=<path>  With reengagement suppress, the networks to suppress: one network id a line; blank lines and lines starting with # are skipped.
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
@@ -459,6 +461,8 @@ func main() {
 			reengagementSendTest(opts)
 		} else if mirrorSuppressions, _ := opts.Bool("mirror-suppressions"); mirrorSuppressions {
 			reengagementMirrorSuppressions(opts)
+		} else if suppress, _ := opts.Bool("suppress"); suppress {
+			os.Exit(reengagementSuppressCommand(opts))
 		}
 	} else if onboarding_, _ := opts.Bool("onboarding"); onboarding_ {
 		if status, _ := opts.Bool("status"); status {
@@ -3521,12 +3525,13 @@ func reengagementSendTest(opts docopt.Opts) {
 }
 
 // reengagementMirrorSuppressions queues the Brevo mirror of every marketing
-// suppression (the product-updates sync of each suppressed network's admin):
-// run once after the mirror deploys, for the suppressions recorded before it.
-// Safe to repeat.
+// suppression and of every network whose sign-up country gets no marketing
+// (the product-updates sync of each one's admin): run after a release that
+// changes the mirror, and after a country joins the mail policy's
+// no_marketing_countries. Safe to repeat.
 func reengagementMirrorSuppressions(opts docopt.Opts) {
-	queued := controller.MirrorNetworkMarketingSuppressions(context.Background())
-	fmt.Printf("queued the product-updates sync for %d suppressed networks\n", queued)
+	suppressed, noMarketingCountry := controller.MirrorNetworkMarketingSuppressions(context.Background())
+	fmt.Printf("queued the product-updates sync for %d suppressed networks and %d networks of no-marketing countries\n", suppressed, noMarketingCountry)
 }
 
 // ----- onboarding campaign (mmm/onboarding/PLAN.md) -----
