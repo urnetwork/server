@@ -1235,7 +1235,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 73
       },
@@ -1287,8 +1287,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 73
       },
       "fieldConfig": {
@@ -1327,6 +1327,59 @@
           "expr": "sum by (result) (increase(urnetwork_onboarding_apple_offer_code_batches_total{env=\"$env\"}[1d]))",
           "refId": "A",
           "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "offer code outcomes / day by trigger and result",
+      "description": "Only a reader on an App Store build draws a code: in_app is the app's offer call, email is step E4b (deferred: the code waits for an App Store build's read), read is an App Store build reading an offer issued without one. not_app_store counts in-app offers to other readers, which draw nothing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 73
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (trigger, result) (increase(urnetwork_onboarding_apple_offer_code_draws_total{env=\"$env\"}[1d]))",
+          "refId": "A",
+          "legendFormat": "{{trigger}} {{result}}"
         }
       ]
     },
