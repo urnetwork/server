@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T19:43:13Z",
+  "observed_at": "2026-11-13T20:35:42Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,14 +17,14 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": false,
-    "publication_held": true,
-    "evaluation_hold_revision": 36,
-    "hold_active": true
+    "grading_ready": true,
+    "publication_held": false,
+    "evaluation_hold_revision": 37,
+    "hold_active": false
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.CQZ5wsYf/state.private.json",
-    "sha256": "3dd6c39dd32a6893927c4c3c40afbb852e3e46fa30bc1b29287972364f83f43b",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.7ev2yGJF/state.private.json",
+    "sha256": "5fb1f36af657b84c7f14e7d709831213864cff7f3801f6d280fb09926d2f609c",
     "mode": "root:root 0400 in root:root 0700 directory",
     "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
@@ -43,9 +43,9 @@
     "worker_identity_verified_at": "2026-11-13T18:44:13Z",
     "supervisor_manager_activated_at": "2026-11-13T18:43:48Z",
     "supervisor_manager_sha256": "a571706953456c944d66a75c7ce0c6c47b2fbfef6db8b392a98c5def69c3c5c5",
-    "supervisor_restarts_since_latest_manager_handoff": 1,
-    "supervisor_restarts_since_held_handoff": 3,
-    "last_observed_supervisor_fence": 72,
+    "supervisor_restarts_since_latest_manager_handoff": 3,
+    "supervisor_restarts_since_held_handoff": 5,
+    "last_observed_supervisor_fence": 74,
     "supervisor_renewal_diagnosis_pending": true,
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
@@ -62,11 +62,15 @@
     "staged_worker_archive_sha256": "be0d951cbb2d9c04077e1871f1066b12c1d399dbf37277f82354e9698f4dab1b",
     "staged_activation_config_sha256": "8a37f2660c286f52f8c390662f1953048cee57d74dfe9ec2c3c4b7d0df2419e1",
     "worker_sha256": "c91fe976448b957fc121c951b2cfd1dbd2fd42e9451be80d9f246708c029de93",
-    "recovery_cli_sha256": "58ccd4a081eff8a47dd735776b1e609f953e5b35d94c035ad4003985424c838e",
+    "recovery_cli_sha256": "b55ae9c86c74c4f1be07d1d9d098c2c0ef1b49c038e1788c334802c8275af213",
+    "recovery_cli_location": "/dev/shm/competition-cli-control-bins-20261113.FfNbcwu0/competitionreevaluate",
+    "recovery_cli_source_scope": "Qualified 0e dependencies plus the CLI-only control-context patch; not a rebuild of all advancing main dependencies.",
+    "recovery_cli_tests_passed": 14,
+    "recovery_cli_old_limit_causal_failure_verified": true,
     "api_runtime_self_report": "sha256:0a0b00a2d375a07a7531b8ab37814ccd01a1be49964efb1cb7e0adb02d6fdfa0",
     "api_runtime_self_report_matches_registry": true,
     "api_all_replica_convergence_proved": false,
-    "next_action": "The tested supervisor is active and the unchanged worker remains held. The first controlled recovery invocation was refused without a confirmed grant; retain its sealed authorization and idempotency identity, inspect durable audit state, and diagnose the failure before any replay. A coincident renewal timeout restarted the supervisor and advanced its fence. Do not reuse the old sealed fencing census. API runtime self-report is bound to an actual admission, not an all-replica or physical-container inspection claim.",
+    "next_action": "The reviewed infrastructure recoveries are durably authorized and provisional grading resumed under hold revision 37. Monitor existing attempts without reallocating their deadlines or replaying grants. The CLI-only two-minute control budget passed 14 tests and the old-limit causal failure; native-proof freshness, evaluation deadlines and scoring rules are unchanged. Qualification and deployment of additional supervisor diagnostics must wait for idle maintenance. API runtime self-report is bound to an actual admission, not an all-replica or physical-container inspection claim.",
     "historical_sections_below": "Earlier source/test/process observations remain historical; this checkpoint supersedes their pending-build descriptions."
   },
   "review_runtime": {
@@ -147,7 +151,7 @@
     "fresh_readonly_transition_checks_passed": true,
     "fresh_native_handoff_observation_passed": true,
     "operator_observer_correction": "Remove the extra RestrictAddressFamilies wrapper property; the paired read-only diagnostic passed without it. Evaluation-container and managed-agent controls are unchanged.",
-    "remaining": "The qualified supervisor is active. Preserve the existing hold and worker while completing controlled recovery authority; this checkpoint grants neither a retry nor hold release."
+    "remaining": "The qualified supervisor remains active; reviewed recovery grants and hold release are now committed. Monitor current attempts under their existing clocks. Additional renewal diagnostics remain source-only and require independent qualification at an idle boundary."
   },
   "qualified_offline_context_adapter": {
     "source_manifest_sha256": "06d3d625d6bb065154d7b5f412a5571eb2d2f8f66eedef744bdec0412d8cea85",
@@ -160,13 +164,17 @@
     "remaining": "Selection succeeded for the pinned as-of snapshot; it is explicitly not a full-population census. Authenticate newly exported originals and preserve every previous packet byte before assembly. No registry or completed-review credit."
   },
   "qualified_review_orchestrator": {
-    "source_manifest_sha256": "e578003dbf876b3be6a01cc35b0c3f7cf8b95a713bbbc460606f62cfda4ab321",
-    "normal_tests_passed": 30,
-    "normal_binary_sha256": "cc8c295e58177c13f87e67ea336e77cb2a1b87064ee0ac88146177e667ff2d2b",
+    "source_manifest_sha256": "0c1d517a440c0b4780306dbde781bd0e61419216b08651deda9465880984ba57",
+    "source_directory": "/home/by/urnetwork/temp/competition-epoch2-private-prereview-20261112/complete-review-ordinary-orchestrator-management-cpus-20261113.YWiA5GGm",
+    "normal_tests_passed": 32,
+    "normal_binary_sha256": "23093678d4f7348d2d8e22ac98bdb8e4d005070e674bc0b3270bf433cfb9610c",
+    "normal_binary_location": "/var/lib/urnetwork/competition-orchestrator-management-qa-20261113.mLQUjSud/ordinary-orchestrator",
     "independent_targeted_security_review_passed": true,
     "runtime_activated": false,
     "older_coordinator_activated": false,
-    "remaining": "Install and review a prospective custody/v2 operator profile using current immutable progress. Never activate the older coordinator with known ancestry and uncertainty-reporting defects."
+    "earlier_control_preflights_failed_before_any_actor": true,
+    "management_cpu_placement_qualified": false,
+    "remaining": "Do not activate existing custody/v2 or canonical/v3 configurations during grading: their actor CPUs overlap the evaluation set. The management-core-only v4 profile passed all 32 synthetic controls on reserved CPUs 20,22; stage a fresh immutable configuration, verify actual effective actor placement, then start an ordinary batch without changing prior claims, inner models, inputs, limits or gates. No model actor is currently active."
   },
   "package_restart_deferral": {
     "hosts": [
@@ -210,8 +218,8 @@
     "source_baseline_submission_evidence_deleted": false
   },
   "next_actions": [
-    "The current execution is terminal. Review and provision the newly qualified secure orchestrator against immutable progress; never replay a consumed operation or infer candidate approval from scoped evidence.",
-    "Verify advancing host heartbeats after the completed held worker handoff; retain compatible serving API identity before controlled recovery.",
+    "Review orchestration has no active model call. Qualify management-core placement before starting another review batch; never replay a consumed operation or infer candidate approval from scoped evidence.",
+    "Monitor active grading attempts and advancing host heartbeats under their existing deadlines. Recovery grants and hold release are committed; do not repeat them or restart a live owner on observation timeout.",
     "Finish complete both-model reviews and bounded cohort/archive routing. Derive eligibility from authenticated scoring rules, never success state alone.",
     "Keep all candidate outcomes and operator proof payloads in protected storage. Publish results only through the authorized finalization path."
   ],
