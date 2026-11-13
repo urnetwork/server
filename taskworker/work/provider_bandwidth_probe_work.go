@@ -56,10 +56,19 @@ import (
 // The prober shard slot the bandwidth probe owns: the registry's second to
 // last. The URL probe's shards take [0, shard_count), and its settings and
 // arguments refuse a shard_count past maxProviderUrlProbeShardCount, which
-// stops before this slot; the capability probe owns the last.
+// stops before this slot; the retired capability probe owned the last.
 const (
 	providerBandwidthProbeShardIndex = maxProviderEgressProbeShardCount - 2
 	providerBandwidthProbeShardCount = maxProviderEgressProbeShardCount
+)
+
+// The registry's last slot, which the capability probe owned until URL turns
+// took over its measurements (FP2-PROTOCOL.md §12.4). No probe takes it, so
+// an epoch the probe left is reaped like any other and retires no live
+// probe's owner.
+const (
+	retiredCapabilityProbeShardIndex = maxProviderEgressProbeShardCount - 1
+	retiredCapabilityProbeShardCount = maxProviderEgressProbeShardCount
 )
 
 // Every tunable of the probe. The defaults constructor is their one source;
@@ -181,7 +190,7 @@ func loadProviderBandwidthProbeSettings() (providerBandwidthProbeSettings, error
 	return settings, nil
 }
 
-// Package-level seams like the capability probe's: immutable in production,
+// Package-level seams like the URL probe's: immutable in production,
 // replaced by tests that must not open tunnels or read the deployment.
 var getProviderBandwidthProbeSettings = loadProviderBandwidthProbeSettings
 var executeProviderBandwidthProbe = runProviderBandwidthProbe
