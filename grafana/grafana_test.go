@@ -885,6 +885,10 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		"data-pack bytes fulfilled",
 		"Raw cancellation intent is not durably available",
 		"never renders an invented cancellation-intent zero",
+		"past due (in grace)",
+		"past due by store",
+		"open payment failures",
+		"payment failures resolved",
 	} {
 		if !strings.Contains(document, required) {
 			t.Errorf("subscriptions dashboard lacks %q", required)
@@ -892,6 +896,9 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	}
 	for _, metric := range []string{
 		"urnetwork_subscription_active_accounts",
+		"urnetwork_subscription_in_grace_accounts",
+		"urnetwork_subscription_payment_failures_open",
+		"urnetwork_subscription_payment_failures_resolved",
 		"urnetwork_subscription_trials_active",
 		"urnetwork_subscription_new_paid_accounts",
 		"urnetwork_subscription_engaged_accounts",
@@ -1022,6 +1029,34 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 			!strings.Contains(panel.Targets[0].Expr, `window="$window"`) {
 			t.Errorf("data-pack panel %d lacks the bounded deduplicated source/window contract", panelID)
 		}
+	}
+
+	// past due: a deduplicated total and the tracked stores; Stripe's failed
+	// renewals: open now, and resolved by the closed reason set per window
+	pastDue := dashboardPanelById(dashboard, 28)
+	if pastDue == nil || len(pastDue.Targets) != 1 ||
+		!strings.Contains(pastDue.Targets[0].Expr, `max(urnetwork_subscription_in_grace_accounts{`) ||
+		!strings.Contains(pastDue.Targets[0].Expr, `store="deduplicated"`) {
+		t.Fatal("subscriptions dashboard lacks the deduplicated past-due total")
+	}
+	pastDueByStore := dashboardPanelById(dashboard, 29)
+	if pastDueByStore == nil || len(pastDueByStore.Targets) != 1 ||
+		!strings.Contains(pastDueByStore.Targets[0].Expr, `max by (store) (urnetwork_subscription_in_grace_accounts{`) ||
+		!strings.Contains(pastDueByStore.Targets[0].Expr, trackedStores) {
+		t.Fatal("subscriptions dashboard lacks the bounded past-due view by tracked store")
+	}
+	failuresOpen := dashboardPanelById(dashboard, 30)
+	if failuresOpen == nil || len(failuresOpen.Targets) != 1 ||
+		!strings.Contains(failuresOpen.Targets[0].Expr, `max(urnetwork_subscription_payment_failures_open{`) ||
+		!strings.Contains(failuresOpen.Targets[0].Expr, `store="stripe"`) {
+		t.Fatal("subscriptions dashboard lacks the open payment failures")
+	}
+	failuresResolved := dashboardPanelById(dashboard, 31)
+	if failuresResolved == nil || len(failuresResolved.Targets) != 1 ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `max by (reason) (urnetwork_subscription_payment_failures_resolved{`) ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `reason=~"paid|voided|uncollectible|subscription_ended"`) ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `window="$window"`) {
+		t.Fatal("subscriptions dashboard lacks the bounded resolved payment failures by reason")
 	}
 
 	cancellation := dashboardPanelById(dashboard, 12)

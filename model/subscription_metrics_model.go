@@ -115,11 +115,44 @@ type SubscriptionMetricsDataPackWindow struct {
 	Window string
 }
 
+type SubscriptionMetricsStoreReasonWindow struct {
+	Store  string
+	Reason string
+	Window string
+}
+
+// The closed store label set of the failed-renewal counts: the stores whose
+// failed renewals the server records (stripe_invoice_payment_failure).
+var subscriptionMetricsPaymentFailureStores = []string{SubscriptionMarketStripe}
+
+// The closed reason label set of the resolved failed renewals.
+var subscriptionMetricsPaymentFailureResolveReasons = []string{
+	StripeInvoicePaymentFailureResolvePaid,
+	StripeInvoicePaymentFailureResolveVoided,
+	StripeInvoicePaymentFailureResolveUncollectible,
+	StripeInvoicePaymentFailureResolveSubscriptionEnded,
+}
+
+func SubscriptionMetricsPaymentFailureStores() []string {
+	return append([]string(nil), subscriptionMetricsPaymentFailureStores...)
+}
+
+func SubscriptionMetricsPaymentFailureResolveReasons() []string {
+	return append([]string(nil), subscriptionMetricsPaymentFailureResolveReasons...)
+}
+
 type SubscriptionMetricsSnapshot struct {
 	ActiveAccounts map[string]int64
+	// networks whose current window has outlived its paid period (past due),
+	// by store and deduplicated; they count in ActiveAccounts too
+	InGraceAccounts map[string]int64
 	// networks inside a free trial now, by store and plan; they count in
 	// ActiveAccounts too
-	TrialsActive             map[SubscriptionMetricsStorePlan]int64
+	TrialsActive map[SubscriptionMetricsStorePlan]int64
+	// failed renewals still failing now, by store
+	PaymentFailuresOpen map[string]int64
+	// failed renewals resolved inside the rolling window, by store and reason
+	PaymentFailuresResolved  map[SubscriptionMetricsStoreReasonWindow]int64
 	NewPaidAccounts          map[SubscriptionMetricsStoreWindow]int64
 	EngagedAccounts          map[SubscriptionMetricsStoreWindow]int64
 	ChurnedAccounts          map[SubscriptionMetricsStoreWindow]int64
@@ -204,9 +237,50 @@ GROUP BY rail
 ORDER BY rail
 `
 
+// subscriptionMetricsPaidEndSql is the end of the period a supporter renewal
+// row (alias) paid for, without its grace, as the Pro cycles read it
+// (proPaidPeriods): the paid end its credit recorded, or sooner when an end
+// path cut the row; the start of an App Store or Play billing grace hold, which
+// pays for no period (no revenue, no paid end); and on a row written before
+// paid_end_time, its end less the grace it was credited with
+// (legacyRenewalGrace): a day in the stores, the 30-day manual-payment grace
+// elsewhere when taking it off leaves a plan's length.
+func subscriptionMetricsPaidEndSql(alias string) string {
+	planLengths := []string{}
+	for _, span := range legacyPlanDurationSpans {
+		planLengths = append(planLengths, fmt.Sprintf(
+			"%[1]s.end_time - %[1]s.start_time - interval '%[2]d seconds' BETWEEN interval '%[3]d seconds' AND interval '%[4]d seconds'",
+			alias,
+			int64(legacyRenewalManualPaymentGrace/time.Second),
+			int64(span[0]/time.Second),
+			int64(span[1]/time.Second),
+		))
+	}
+	storeMarkets := subscriptionMetricsSqlList([]string{SubscriptionMarketApple, SubscriptionMarketGoogle})
+	return fmt.Sprintf(
+		`CASE
+            WHEN %[1]s.paid_end_time IS NOT NULL THEN LEAST(%[1]s.paid_end_time, %[1]s.end_time)
+            WHEN %[1]s.market IN (%[2]s) AND %[1]s.net_revenue_nano_cents = 0 THEN %[1]s.start_time
+            WHEN %[1]s.market IN (%[3]s) THEN %[1]s.end_time - interval '%[4]d seconds'
+            WHEN %[5]s THEN %[1]s.end_time - interval '%[6]d seconds'
+            ELSE %[1]s.end_time - interval '%[4]d seconds'
+        END`,
+		alias,
+		storeMarkets,
+		subscriptionMetricsSqlList([]string{SubscriptionMarketApple, SubscriptionMarketGoogle, SubscriptionMarketManual}),
+		int64(legacyRenewalStoreGrace/time.Second),
+		strings.Join(planLengths, " OR "),
+		int64(legacyRenewalManualPaymentGrace/time.Second),
+	)
+}
+
 // subscriptionMetricsAccountQuery defines the account semantics in one
 // snapshot:
 //   - active: distinct networks with an in-window supporter renewal;
+//   - in grace (past due): active networks none of whose in-window renewals
+//     still covers now with the period it paid for
+//     (subscriptionMetricsPaidEndSql): a grace after a failed or cancelled
+//     renewal, a store's billing grace hold, or the day after a free trial;
 //   - new paid: the first supporter window per network/store, plus the first
 //     such window across all tracked stores for the deduplicated total;
 //   - engagement: an active paid network with an active top-level client whose
@@ -214,8 +288,9 @@ ORDER BY rail
 //   - observed churn: the latest tracked supporter window ended inside the
 //     rolling window and no later window remains in that store/any store.
 //
-// The per-store active/engagement/churn series count a network once per store.
-// The deduplicated series count a network once across the tracked stores.
+// The per-store active/in-grace/engagement/churn series count a network once
+// per store. The deduplicated series count a network once across the tracked
+// stores: in grace there means no store's window covers now with a paid period.
 // `network_client_network_id_top_level` makes each active-subscriber
 // engagement EXISTS probe index-backed; starting from the much smaller active
 // paid cohort avoids scanning the fleet-wide 30-day auth band.
@@ -230,7 +305,8 @@ ORDER BY rail
 var subscriptionMetricsAccountQuery = `
 /* subscription-metrics-accounts */
 WITH tracked_renewal AS MATERIALIZED (
-    SELECT renewal.network_id, renewal.market, renewal.start_time, renewal.end_time
+    SELECT renewal.network_id, renewal.market, renewal.start_time, renewal.end_time,
+           ` + subscriptionMetricsPaidEndSql("renewal") + ` AS paid_end_time
     FROM subscription_renewal renewal
     WHERE renewal.subscription_type = 'supporter'
       AND renewal.market IN (` + subscriptionMetricsStoresSql + `)
@@ -256,6 +332,20 @@ WITH tracked_renewal AS MATERIALIZED (
 ), active_deduplicated AS (
     SELECT DISTINCT network_id
     FROM active_by_store
+), paid_now_by_store AS (
+    SELECT network_id, market, bool_or($1 < paid_end_time) AS paid_now
+    FROM tracked_renewal
+    WHERE start_time <= $1 AND $1 < end_time
+    GROUP BY network_id, market
+), in_grace_by_store AS (
+    SELECT network_id, market
+    FROM paid_now_by_store
+    WHERE NOT paid_now
+), in_grace_deduplicated AS (
+    SELECT network_id
+    FROM paid_now_by_store
+    GROUP BY network_id
+    HAVING NOT bool_or(paid_now)
 ), first_paid_by_store AS (
     SELECT network_id, market, min(start_time) AS first_start_time
     FROM tracked_renewal
@@ -281,6 +371,13 @@ WITH tracked_renewal AS MATERIALIZED (
     UNION ALL
     SELECT 'active', 'deduplicated', 'current', count(*)::bigint
     FROM active_deduplicated
+    UNION ALL
+    SELECT 'in_grace', market, 'current', count(*)::bigint
+    FROM in_grace_by_store
+    GROUP BY market
+    UNION ALL
+    SELECT 'in_grace', 'deduplicated', 'current', count(*)::bigint
+    FROM in_grace_deduplicated
     UNION ALL
     SELECT 'new_paid', first_paid_by_store.market, metric_window.window_name, count(*)::bigint
     FROM metric_window
@@ -359,16 +456,18 @@ ORDER BY kind, store, window_name
 //     the purchase has a charged window (an expiry at least 27 days after its
 //     start), none of its windows is a trial. Play sells the trial only on the
 //     yearly base plan.
-//   - Stripe: the trial's $0 invoice, inside its period (its window runs the
-//     30-day manual-payment grace past it). Stripe starts a trial only on the
-//     yearly plan.
+//   - Stripe: the trial's $0 invoice, inside its period: its paid end, or on a
+//     row written before paid_end_time its end less the 30-day manual-payment
+//     grace it was credited with (subscriptionMetricsPaidEndSql). A trial
+//     window credited now runs a day past its period. Stripe starts a trial
+//     only on the yearly plan.
 //   - App Store: a free transaction (the ledger's price is 0) that is not a
 //     sandbox purchase (one records no revenue), inside its period; its
 //     product names the plan.
 //
 // Apple and Play windows end SubscriptionGracePeriod (24 hours) past the
 // store's expiry.
-const subscriptionMetricsTrialQuery = `
+var subscriptionMetricsTrialQuery = `
 /* subscription-metrics-trials */
 WITH trial AS (
     SELECT renewal.network_id, 'google'::text AS store, 'yearly'::text AS plan
@@ -391,14 +490,19 @@ WITH trial AS (
             AND paid.start_time + interval '27 days' <= paid.end_time - interval '24 hours'
       )
     UNION ALL
-    SELECT renewal.network_id, 'stripe'::text, 'yearly'::text
-    FROM subscription_renewal renewal
-    WHERE renewal.subscription_type = 'supporter'
-      AND renewal.market = 'stripe'
-      AND renewal.net_revenue_nano_cents = 0
-      AND renewal.start_time <= $1
-      AND $1 < renewal.end_time - interval '30 days'
-      AND renewal.end_time - interval '30 days' < renewal.start_time + interval '27 days'
+    SELECT stripe_trial.network_id, 'stripe'::text, 'yearly'::text
+    FROM (
+        SELECT renewal.network_id, renewal.start_time,
+               ` + subscriptionMetricsPaidEndSql("renewal") + ` AS paid_end_time
+        FROM subscription_renewal renewal
+        WHERE renewal.subscription_type = 'supporter'
+          AND renewal.market = 'stripe'
+          AND renewal.net_revenue_nano_cents = 0
+          AND renewal.start_time <= $1
+          AND $1 < renewal.end_time
+    ) stripe_trial
+    WHERE $1 < stripe_trial.paid_end_time
+      AND stripe_trial.paid_end_time < stripe_trial.start_time + interval '27 days'
     UNION ALL
     SELECT renewal.network_id, 'apple'::text,
            CASE
@@ -445,6 +549,29 @@ WHERE event.store IN (` + subscriptionMetricsStoresSql + `)
   AND event.event_time <= $1
 GROUP BY event.store, event.action, metric_window.window_name
 ORDER BY event.store, event.action, metric_window.window_name
+`
+
+// The failed renewals of Stripe subscriptions (stripe_invoice_payment_failure):
+// those still failing now (open, whatever their age: a failure whose resolving
+// event never arrived stays visible), and those resolved inside each rolling
+// window, by the reason they stopped failing. Only counts leave PostgreSQL.
+var subscriptionMetricsPaymentFailureQuery = `
+/* subscription-metrics-payment-failures */
+WITH metric_window(window_name, since_time) AS (
+    VALUES ('24h', $2::timestamp), ('7d', $3::timestamp), ('30d', $4::timestamp)
+)
+SELECT 'open'::text AS kind, ''::text AS reason, 'current'::text AS window_name, count(*)::bigint
+FROM stripe_invoice_payment_failure failure
+WHERE failure.resolve_time IS NULL
+UNION ALL
+SELECT 'resolved', failure.resolve_reason, metric_window.window_name, count(*)::bigint
+FROM stripe_invoice_payment_failure failure
+CROSS JOIN metric_window
+WHERE failure.resolve_reason IN (` + subscriptionMetricsSqlList(subscriptionMetricsPaymentFailureResolveReasons) + `)
+  AND metric_window.since_time <= failure.resolve_time
+  AND failure.resolve_time <= $1
+GROUP BY failure.resolve_reason, metric_window.window_name
+ORDER BY kind, reason, window_name
 `
 
 // Each store's last successful reconciliation watermark.
@@ -507,7 +634,10 @@ ORDER BY source, metric_window.window_name
 func newSubscriptionMetricsSnapshot() *SubscriptionMetricsSnapshot {
 	return &SubscriptionMetricsSnapshot{
 		ActiveAccounts:             map[string]int64{},
+		InGraceAccounts:            map[string]int64{},
 		TrialsActive:               map[SubscriptionMetricsStorePlan]int64{},
+		PaymentFailuresOpen:        map[string]int64{},
+		PaymentFailuresResolved:    map[SubscriptionMetricsStoreReasonWindow]int64{},
 		NewPaidAccounts:            map[SubscriptionMetricsStoreWindow]int64{},
 		EngagedAccounts:            map[SubscriptionMetricsStoreWindow]int64{},
 		ChurnedAccounts:            map[SubscriptionMetricsStoreWindow]int64{},
@@ -555,6 +685,8 @@ func LoadSubscriptionMetricsSnapshotWithSettings(ctx context.Context, now time.T
 				switch kind {
 				case "active":
 					snapshot.ActiveAccounts[store] = value
+				case "in_grace":
+					snapshot.InGraceAccounts[store] = value
 				case "new_paid":
 					snapshot.NewPaidAccounts[SubscriptionMetricsStoreWindow{Store: store, Window: window}] = value
 				case "engaged":
@@ -577,6 +709,32 @@ func LoadSubscriptionMetricsSnapshotWithSettings(ctx context.Context, now time.T
 				var value int64
 				server.Raise(result.Scan(&store, &plan, &value))
 				snapshot.TrialsActive[SubscriptionMetricsStorePlan{Store: store, Plan: plan}] = value
+			}
+		})
+
+		result, err = conn.Query(
+			ctx,
+			subscriptionMetricsPaymentFailureQuery,
+			now,
+			cutoff24Hours,
+			cutoff7Days,
+			cutoff30Days,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var kind string
+				var reason string
+				var window string
+				var value int64
+				server.Raise(result.Scan(&kind, &reason, &window, &value))
+				switch kind {
+				case "open":
+					snapshot.PaymentFailuresOpen[SubscriptionMarketStripe] = value
+				case "resolved":
+					snapshot.PaymentFailuresResolved[SubscriptionMetricsStoreReasonWindow{
+						Store: SubscriptionMarketStripe, Reason: reason, Window: window,
+					}] = value
+				}
 			}
 		})
 

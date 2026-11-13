@@ -237,16 +237,19 @@ func legacyRenewalGrace(market SubscriptionMarket, startTime time.Time, endTime 
 	return legacyRenewalStoreGrace
 }
 
-// Whether d is the length of a plan some market sold: a 14-day trial, a month,
-// a year, or a year and a trial (the yearly welcome offer).
+// The lengths of the plans some market sold, each as its shortest and longest:
+// a 14-day trial, a month, a year, and a year and a trial (the yearly welcome
+// offer).
+var legacyPlanDurationSpans = [][2]time.Duration{
+	{12 * 24 * time.Hour, 16 * 24 * time.Hour},
+	{27 * 24 * time.Hour, 32 * 24 * time.Hour},
+	{363 * 24 * time.Hour, 368 * 24 * time.Hour},
+	{377 * 24 * time.Hour, 382 * 24 * time.Hour},
+}
+
+// Whether d is the length of a plan some market sold (legacyPlanDurationSpans).
 func legacyPlanDuration(d time.Duration) bool {
-	day := 24 * time.Hour
-	for _, span := range [][2]time.Duration{
-		{12 * day, 16 * day},
-		{27 * day, 32 * day},
-		{363 * day, 368 * day},
-		{377 * day, 382 * day},
-	} {
+	for _, span := range legacyPlanDurationSpans {
 		if span[0] <= d && d <= span[1] {
 			return true
 		}
