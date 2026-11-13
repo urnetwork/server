@@ -160,6 +160,10 @@ type DueProvider struct {
 	// as legacy: IPv4 alone. It decides which IP families the provider's URL
 	// loads are made over (egresshealth url_family.go).
 	IpFamily egresshealth.IpFamily `json:"ip_family,omitempty"`
+	// The turn measures post-quantum: its tunnel opens an opportunistic
+	// end-to-end session and its evidence carries e2e (egresshealth
+	// url_e2e.go). False from a server that predates it: no session.
+	PostQuantum bool `json:"post_quantum,omitempty"`
 }
 
 // Mirrors the server's due results. A server that knows where its

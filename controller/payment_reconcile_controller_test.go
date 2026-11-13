@@ -568,6 +568,16 @@ func newSolanaReconcileTestEnv(t testing.TB) *solanaReconcileTestEnv {
 			Params []any  `json:"params"`
 		}
 		json.NewDecoder(r.Body).Decode(&request)
+		if request.Method == "getTokenAccountsByOwner" {
+			// the receivers hold no USDC token account here: the receiver
+			// leg (solana_receiver_sweep.go) has no history to read
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"result":  map[string]any{"context": map[string]any{"slot": 1}, "value": []any{}},
+			})
+			return
+		}
 		if request.Method != "getSignatureStatuses" || len(request.Params) == 0 {
 			http.Error(w, "unknown method", http.StatusBadRequest)
 			return

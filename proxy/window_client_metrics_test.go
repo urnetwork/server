@@ -39,6 +39,18 @@ func (windowClientStatsTestSource) VisitWindows(visit func(window string, state 
 	visit("quality", "strict_hole", 11)
 }
 
+func (windowClientStatsTestSource) VisitWindowClients(visit func(window string, ip string, protocol string, count int64)) {
+	visit("limited", "ipv4", "tcp", 3)
+}
+
+func (windowClientStatsTestSource) VisitWindowFlows(visit func(window string, ipVersion string, protocol string, count uint64)) {
+	visit("limited", "4", "tcp", 17)
+}
+
+func (windowClientStatsTestSource) VisitNoCompatible(visit func(ipVersion string, protocol string, count uint64)) {
+	visit("4", "udp", 2)
+}
+
 // Every visited value is exported under its series with its label values.
 func TestWindowClientStatsCollectorExportsVisitedValues(t *testing.T) {
 	collector := newWindowClientStatsCollector(windowClientStatsTestSource{})
@@ -49,9 +61,18 @@ urnetwork_proxy_window_balance_probes_total{outcome="short",window="quality"} 13
 # HELP urnetwork_proxy_window_candidates_total Window client candidates hosted windows built, by the state of the expansion pass that built them and how they ended
 # TYPE urnetwork_proxy_window_candidates_total counter
 urnetwork_proxy_window_candidates_total{outcome="declined_strict_cap",state="strict_hole",window="quality"} 7
+# HELP urnetwork_proxy_window_clients Live hosted window clients by window and the ip and protocol labels FindProviders2 gave them
+# TYPE urnetwork_proxy_window_clients gauge
+urnetwork_proxy_window_clients{ip="ipv4",protocol="tcp",window="limited"} 3
 # HELP urnetwork_proxy_window_expand_passes_total Hosted window resize passes that wanted to grow, by the window state they found
 # TYPE urnetwork_proxy_window_expand_passes_total counter
 urnetwork_proxy_window_expand_passes_total{state="skipped_strict_full",window="speed"} 3
+# HELP urnetwork_proxy_window_flows_total Hosted device flows by the window of the exit that first carried them, their ip version and protocol
+# TYPE urnetwork_proxy_window_flows_total counter
+urnetwork_proxy_window_flows_total{ip_version="4",protocol="tcp",window="limited"} 17
+# HELP urnetwork_proxy_window_no_compatible_total Hosted device flows answered unreachable because no window held an exit labelled to carry them, by ip version and protocol
+# TYPE urnetwork_proxy_window_no_compatible_total counter
+urnetwork_proxy_window_no_compatible_total{ip_version="4",protocol="udp"} 2
 # HELP urnetwork_proxy_window_removals_total Hosted window clients removed from their window, by cause
 # TYPE urnetwork_proxy_window_removals_total counter
 urnetwork_proxy_window_removals_total{cause="handover",window="quality"} 5
@@ -91,16 +112,21 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 			}
 		}
 	}
-	// 3 windows x 3 building pass states x 9 outcomes, 3 x 7 pass states,
-	// 3 x 7 warning causes, 3 x 7 removal causes, 3 x 4 balance probe
-	// outcomes, 3 x 5 window states
+	// 4 windows (quality, speed, limited, auto) x 3 building pass states x 9
+	// outcomes, 4 x 7 pass states, 4 x 7 warning causes, 4 x 7 removal
+	// causes, 4 x 4 balance probe outcomes, 4 x 5 window states; the
+	// capability series: 4 windows x 2 ip x 2 protocol labels, 4 x 2 ip
+	// versions x 3 flow protocols, and 2 x 3 without a window
 	for name, want := range map[string]int{
-		"urnetwork_proxy_window_candidates_total":     81,
-		"urnetwork_proxy_window_expand_passes_total":  21,
-		"urnetwork_proxy_window_warnings_total":       21,
-		"urnetwork_proxy_window_removals_total":       21,
-		"urnetwork_proxy_window_balance_probes_total": 12,
-		"urnetwork_proxy_windows":                     15,
+		"urnetwork_proxy_window_candidates_total":     108,
+		"urnetwork_proxy_window_expand_passes_total":  28,
+		"urnetwork_proxy_window_warnings_total":       28,
+		"urnetwork_proxy_window_removals_total":       28,
+		"urnetwork_proxy_window_balance_probes_total": 16,
+		"urnetwork_proxy_windows":                     20,
+		"urnetwork_proxy_window_clients":              16,
+		"urnetwork_proxy_window_flows_total":          24,
+		"urnetwork_proxy_window_no_compatible_total":  6,
 	} {
 		if counts[name] != want {
 			t.Errorf("%s exports %d series, want %d", name, counts[name], want)
@@ -127,8 +153,22 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 		}
 	}
 	for value := range labels["window"] {
-		if value != "quality" && value != "speed" && value != "auto" {
+		if value != "quality" && value != "speed" && value != "limited" && value != "auto" {
 			t.Errorf("window label %q is outside the fixed vocabulary", value)
+		}
+	}
+	for _, values := range []struct {
+		label string
+		want  []string
+	}{
+		{label: "ip", want: []string{"dualstack", "ipv4"}},
+		{label: "protocol", want: []string{"dualproto", "tcp", "udp", "icmp"}},
+		{label: "ip_version", want: []string{"4", "6"}},
+	} {
+		for _, value := range values.want {
+			if !labels[values.label][value] {
+				t.Errorf("no series has %s %q", values.label, value)
+			}
 		}
 	}
 }

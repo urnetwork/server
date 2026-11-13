@@ -113,12 +113,39 @@ func stEpochProviderUsageWholeWindowPlanInTx(ctx context.Context, tx server.PgTx
 	return nil
 }
 
-// One usage statement row.
+// One usage statement row. The amended statement (st_extender_pool.go) also
+// reads a live contract's usage origin network and payer, which the extender
+// amendment classifies its shares by; the other statements leave them unset.
 type stEpochUsageRow struct {
 	contractId server.Id
 	data       []byte
 	closedAt   *time.Time
 	duplicate  bool
+	// live is a transfer_contract row, as opposed to an archived one or an
+	// undated probe; originNetworkId is nil for a legacy usage direction
+	live            bool
+	originNetworkId *server.Id
+	payerNetworkId  *server.Id
+	createTime      *time.Time
+}
+
+// The refusals one row raises alone, in the read's order. Safe to run
+// concurrently: it reads only the row.
+func checkStEpochUsageRow(row *stEpochUsageRow, epoch uint64) (*contractUsageSnapshot, error) {
+	if row.closedAt == nil {
+		return nil, fmt.Errorf("subnet contract %s has terminal usage without a close time; epoch completeness is unknown", row.contractId)
+	}
+	if row.duplicate {
+		return nil, fmt.Errorf("subnet contract %s has both live and archived usage", row.contractId)
+	}
+	snapshot, err := decodeContractUsageSnapshot(row.data)
+	if err != nil {
+		return nil, fmt.Errorf("subnet contract %s: %w", row.contractId, err)
+	}
+	if legacy := snapshot.LegacyExclusion; legacy != nil && (legacy.ContractId != row.contractId || !legacy.ClosedAt.Equal(*row.closedAt) || legacy.Epoch != epoch) {
+		return nil, fmt.Errorf("subnet contract %s: legacy usage exclusion differs from its terminal owner", row.contractId)
+	}
+	return snapshot, nil
 }
 
 // A whole window's rows are checked in batches on workers: decoding a usage
@@ -336,23 +363,8 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 	usagesByClientId := map[server.Id]*StProviderUsage{}
 	usageRows := 0
 	var returnErr error
-	// The refusals one row raises alone, in the read's order. Safe to run
-	// concurrently: it reads only the row.
 	check := func(row *stEpochUsageRow) (*contractUsageSnapshot, error) {
-		if row.closedAt == nil {
-			return nil, fmt.Errorf("subnet contract %s has terminal usage without a close time; epoch completeness is unknown", row.contractId)
-		}
-		if row.duplicate {
-			return nil, fmt.Errorf("subnet contract %s has both live and archived usage", row.contractId)
-		}
-		snapshot, err := decodeContractUsageSnapshot(row.data)
-		if err != nil {
-			return nil, fmt.Errorf("subnet contract %s: %w", row.contractId, err)
-		}
-		if legacy := snapshot.LegacyExclusion; legacy != nil && (legacy.ContractId != row.contractId || !legacy.ClosedAt.Equal(*row.closedAt) || legacy.Epoch != epoch) {
-			return nil, fmt.Errorf("subnet contract %s: legacy usage exclusion differs from its terminal owner", row.contractId)
-		}
-		return snapshot, nil
+		return checkStEpochUsageRow(row, epoch)
 	}
 	// Records a checked row in the census and the earning totals. Rows are
 	// added one at a time, in statement order.

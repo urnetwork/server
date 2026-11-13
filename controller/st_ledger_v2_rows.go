@@ -33,40 +33,72 @@ var ErrStLedgerV2WindowClipped = errors.New("st ledger v2: the cutoff_utc clips 
 // of an active fleet binding at either boundary. The selected wallets'
 // resolutions are retained as v1 retains them, before the rows are recorded.
 func stLedgerV2NewEpochRows(ctx context.Context, epoch uint64) ([]protocol.LedgerUsageRow, error) {
+	rows, _, err := stLedgerV2NewAmendedEpochRows(ctx, epoch, model.StExtenderAmendment{}, nil)
+	return rows, err
+}
+
+// An epoch's rows as stLedgerV2NewEpochRows builds them, under the SN25
+// extender amendment (sn WHITEPAPER.md §8.6.2). For an epoch the amendment
+// covers, the rows hold the contracts' hop shares less the ones it pools (a
+// platform endpoint's, and those on a contract's origin network), and the
+// pool returned is the epoch's extender pool: Z and its parts, the contracts
+// of declared measurement and test networks left out. For any other epoch the
+// rows are exactly stLedgerV2NewEpochRows's and the pool is nil. pool is the
+// extender pool's configuration, needed only when the amendment covers the
+// epoch.
+func stLedgerV2NewAmendedEpochRows(ctx context.Context, epoch uint64, amendment model.StExtenderAmendment, pool *stExtenderPoolConfig) ([]protocol.LedgerUsageRow, *model.StEpochExtenderPool, error) {
+	return stLedgerV2AmendedEpochRows(ctx, epoch, amendment, pool, true)
+}
+
+// As stLedgerV2NewAmendedEpochRows, retaining the selected wallets'
+// resolutions only when retain is set: a shadow report reads an epoch without
+// recording anything (st_ledger_v2_extender_shadow.go).
+func stLedgerV2AmendedEpochRows(ctx context.Context, epoch uint64, amendment model.StExtenderAmendment, pool *stExtenderPoolConfig, retain bool) ([]protocol.LedgerUsageRow, *model.StEpochExtenderPool, error) {
 	cfg, client, err := stRequire()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	authority, err := client.PayoutEpochAuthority(ctx, epoch)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if authority == nil || authority.Epoch != epoch || authority.PolicyHash != cfg.PolicyHash {
-		return nil, fmt.Errorf("st ledger v2: the payout authority of epoch %d is absent or differs", epoch)
+		return nil, nil, fmt.Errorf("st ledger v2: the payout authority of epoch %d is absent or differs", epoch)
 	}
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if start, _ := transition.SnWindow(authority.StartTime, authority.EndTime); !start.Equal(authority.StartTime) {
-		return nil, fmt.Errorf("%w: epoch %d starts at %s, before %s", ErrStLedgerV2WindowClipped, epoch, authority.StartTime.Format(time.RFC3339), transition.Cutoff.Format(time.RFC3339))
+		return nil, nil, fmt.Errorf("%w: epoch %d starts at %s, before %s", ErrStLedgerV2WindowClipped, epoch, authority.StartTime.Format(time.RFC3339), transition.Cutoff.Format(time.RFC3339))
+	}
+	var measurementNetworkIds map[server.Id]bool
+	if amendment.InForce(epoch) {
+		if pool == nil {
+			return nil, nil, fmt.Errorf("st ledger v2: epoch %d is covered by the extender amendment without the extender pool's configuration", epoch)
+		}
+		measurementNetworkIds = stExtenderPoolMeasurementNetworks(ctx, pool)
 	}
 	// the census is canonical: one usage per client, in client id order
-	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, authority.StartTime, authority.EndTime)
+	usages, extenders, err := model.GetStEpochAmendedUsageAtEpoch(ctx, epoch, authority.StartTime, authority.EndTime, amendment, measurementNetworkIds)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	// the rows: the roster's provider universe when one is signed, the
+	// wallets, and the head flags. With retain, the selected wallets'
+	// resolutions are retained, as v1 retains them, before the rows are
+	// recorded.
 	// a signed roster, when one is configured, fixes the provider universe
 	work, workConfigured, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
 	if err == nil {
 		usages, err = stProviderWorkUsages(ctx, work, usages)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resolutions, err := stLedgerV2Wallets(ctx, cfg, work, workConfigured, authority, usages)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rows := make([]protocol.LedgerUsageRow, 0, len(usages))
 	clientIds := make([][16]byte, 0, len(usages))
@@ -84,19 +116,22 @@ func stLedgerV2NewEpochRows(ctx context.Context, epoch uint64) ([]protocol.Ledge
 	}
 	excluded, err := stHeadExcludedClients(ctx, cfg, client, epoch, authority.Start.Block, authority.End.Block, clientIds)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for i := range rows {
 		rows[i].HeadExcluded = excluded[rows[i].ClientID] != nil
+	}
+	if !retain {
+		return rows, extenders, nil
 	}
 	retained := make([]*model.StPayoutWalletResolution, 0, len(resolutions))
 	for _, resolution := range resolutions {
 		retained = append(retained, resolution)
 	}
 	if err := model.AddStPayoutWalletResolutionsBatched(ctx, cfg.DeploymentKey(), epoch, cfg.NoId, retained); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return rows, nil
+	return rows, extenders, nil
 }
 
 // stLedgerV2Wallets selects each provider's earning wallet as v1 does, in

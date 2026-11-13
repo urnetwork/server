@@ -510,6 +510,20 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		// network's wins outlive its clients' rows.
 		{name: "ctf award network index absent", version: server.CtfAwardNetworkMigrationVersion(),
 			sql: `DROP INDEX ctf_award_network`},
+		// A platform endpoint registration stays one of sidecar's three edges,
+		// the kinds the signed amendment entry covers, and an epoch row's
+		// extender component stays null for an epoch the amendment does not
+		// cover.
+		{name: "platform endpoint of any kind", version: server.StLedgerV2ExtenderMigrationVersion(),
+			sql: `ALTER TABLE st_platform_endpoint DROP CONSTRAINT st_platform_endpoint_kind_check`},
+		{name: "extender bytes default to zero", version: server.StLedgerV2ExtenderMigrationVersion(),
+			sql: `ALTER TABLE st_ledger_v2_epoch_rows ALTER COLUMN extender_bytes SET DEFAULT 0`},
+		// A URL outcome an older release stores reads no failed later leg and
+		// no post-quantum observation: a plain failure, never positive.
+		{name: "post-quantum outcome defaults to positive", version: server.ProviderEgressFp2EvidenceMigrationVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN pq_outcome SET DEFAULT 1`},
+		{name: "failed later legs nullable", version: server.ProviderEgressFp2EvidenceMigrationVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN failed_later_legs DROP NOT NULL`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

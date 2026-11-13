@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1202,40 +1203,35 @@ type subnetUsageHistory struct {
 	More bool `json:"more"`
 }
 
-// Reads the operator's statements through both origins. A statement counts only if
-// it verifies under the reviewed artifact signer and names this deployment, operator,
-// epoch and its finalized boundaries. Two that verify for the same chunks with
-// different totals equivocate. Two for different chunks are a rebuild, which only the
-// committed header can choose between, and so unknown here: validators read the
-// ledger's rows, and this reader does not repeat that.
+// The evidence kinds a statement is published under: version 1, and version 2 for an
+// epoch whose committed header carries an extender component (sn WHITEPAPER.md
+// §8.6.4).
+var subnetUsageEvidenceKinds = []string{usage.EvidenceKind, usage.EvidenceKindV2}
+
+// Reads the operator's statements through both origins, of either version. A
+// statement counts only if it verifies under the reviewed artifact signer and names
+// this deployment, operator, epoch and its finalized boundaries. Two that verify for
+// the same chunks with different totals or extender pools, or of different versions,
+// equivocate. Two for different chunks are a rebuild, which only the committed header
+// can choose between, and so unknown here: validators read the ledger's rows, and the
+// version its header calls for, and this reader does not repeat that.
 func readSubnetUsageStatement(ctx context.Context, run *subnetRun, noId, epoch uint64, signer common.Address, start, end subnetEvmBlock) (subnetUsageStatementRead, error) {
 	deployment := run.settings.Deployment
 	runId := usage.RunID(noId, epoch)
-	found := map[string]*usage.Statement{}
+	contentHashStatements := map[string]*usage.Statement{}
 	invalid := false
-	answered := 0
-	for _, origin := range run.settings.ApiOrigins {
-		raw, _, err := readSubnetApi(ctx, run, origin, "/sn/evidence/history", url.Values{"deployment_id": []string{deployment.DeploymentId}, "netuid": []string{fmt.Sprint(deployment.Netuid)}, "kind": []string{usage.EvidenceKind}, "run_id": []string{runId}, "limit": []string{fmt.Sprint(maximumSubnetUsageObjects)}}, maximumSubnetUsageHistoryBytes)
-		if canceled := subnetCanceled(ctx); canceled != nil {
-			return subnetUsageStatementRead{}, canceled
-		}
-		if err != nil {
-			continue
-		}
-		var history subnetUsageHistory
-		if err := json.Unmarshal(raw, &history); err != nil || history.More || len(history.Objects) > maximumSubnetUsageObjects {
-			invalid = true
-			continue
-		}
+	// reads one history answer's statements, and reports whether every object
+	// was read; a statement that does not verify or decode marks invalid
+	readHistory := func(origin string, history subnetUsageHistory) bool {
 		complete := true
 		for _, object := range history.Objects {
 			contentHash := "sha256:" + strings.TrimSuffix(filepath.Base(object.Key), ".json")
-			if _, seen := found[contentHash]; seen {
+			if _, seen := contentHashStatements[contentHash]; seen {
 				continue
 			}
 			raw, etag, err := readSubnetApi(ctx, run, origin, "/sn/evidence", url.Values{"hash": []string{contentHash}}, maximumSubnetUsageEnvelopeBytes)
-			if canceled := subnetCanceled(ctx); canceled != nil {
-				return subnetUsageStatementRead{}, canceled
+			if subnetCanceled(ctx) != nil {
+				return false
 			}
 			if err != nil {
 				complete = false
@@ -1249,20 +1245,62 @@ func readSubnetUsageStatement(ctx context.Context, run *subnetRun, noId, epoch u
 				invalid = true
 				continue
 			}
-			found[contentHash] = statement
+			contentHashStatements[contentHash] = statement
+		}
+		return complete
+	}
+	answered := 0
+	for _, origin := range run.settings.ApiOrigins {
+		complete := true
+		for _, kind := range subnetUsageEvidenceKinds {
+			raw, _, err := readSubnetApi(ctx, run, origin, "/sn/evidence/history", url.Values{"deployment_id": []string{deployment.DeploymentId}, "netuid": []string{fmt.Sprint(deployment.Netuid)}, "kind": []string{kind}, "run_id": []string{runId}, "limit": []string{fmt.Sprint(maximumSubnetUsageObjects)}}, maximumSubnetUsageHistoryBytes)
+			if canceled := subnetCanceled(ctx); canceled != nil {
+				return subnetUsageStatementRead{}, canceled
+			}
+			if err != nil {
+				complete = false
+				continue
+			}
+			var history subnetUsageHistory
+			if err := json.Unmarshal(raw, &history); err != nil || history.More || len(history.Objects) > maximumSubnetUsageObjects {
+				invalid = true
+				complete = false
+				continue
+			}
+			if !readHistory(origin, history) {
+				complete = false
+			}
+			if canceled := subnetCanceled(ctx); canceled != nil {
+				return subnetUsageStatementRead{}, canceled
+			}
 		}
 		if complete {
 			answered++
 		}
 	}
+	// whether two verified statements for the same chunks attest the same
+	// usage: the same version, totals and, for version 2, extender pool
+	sameUsage := func(a, b *usage.Statement) bool {
+		if a.Schema != b.Schema || a.TotalUsageBytes != b.TotalUsageBytes || a.TotalUsers != b.TotalUsers || a.ProviderRows != b.ProviderRows {
+			return false
+		}
+		if a.ExtenderPool == nil || b.ExtenderPool == nil {
+			return a.ExtenderPool == nil && b.ExtenderPool == nil
+		}
+		pa, pb := a.ExtenderPool, b.ExtenderPool
+		return pa.IntraPlatformBytes == pb.IntraPlatformBytes && pa.IntraNetworkBytes == pb.IntraNetworkBytes && pa.ExtenderPoolBytes == pb.ExtenderPoolBytes &&
+			pa.ExtenderPoolWeightBytes == pb.ExtenderPoolWeightBytes && pa.ExtenderPoolContracts == pb.ExtenderPoolContracts && pa.ExtenderPoolPayers == pb.ExtenderPoolPayers &&
+			strings.Join(pa.ExtenderCensus, ",") == strings.Join(pb.ExtenderCensus, ",") && pa.ExtenderUnits == pb.ExtenderUnits &&
+			pa.EligibleExtenders == pb.EligibleExtenders && strings.Join(pa.ExtenderChunks, ",") == strings.Join(pb.ExtenderChunks, ",")
+	}
 	var chosen *usage.Statement
-	for _, statement := range found {
+	for _, statement := range contentHashStatements {
 		switch {
 		case chosen == nil:
 			chosen = statement
 		case strings.Join(chosen.ProviderChunks, ",") != strings.Join(statement.ProviderChunks, ","):
 			return subnetUsageStatementRead{reason: "usage-statement-rebuilt"}, nil
-		case chosen.TotalUsageBytes != statement.TotalUsageBytes || chosen.TotalUsers != statement.TotalUsers || chosen.ProviderRows != statement.ProviderRows:
+		case !sameUsage(chosen, statement):
 			return subnetUsageStatementRead{status: validator.DepositAuditEquivocation}, nil
 		}
 	}
@@ -1291,10 +1329,18 @@ func decodeSubnetUsageEnvelope(raw []byte, etag, contentHash, runId string, depl
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, err
 	}
-	if envelope.DeploymentID != deployment.DeploymentId || envelope.Netuid != deployment.Netuid || envelope.Kind != usage.EvidenceKind || envelope.RunID != runId || !strings.EqualFold(envelope.ContentHash, contentHash) || etag != `"`+envelope.ContentHash+`"` {
+	if envelope.DeploymentID != deployment.DeploymentId || envelope.Netuid != deployment.Netuid || !slices.Contains(subnetUsageEvidenceKinds, envelope.Kind) || envelope.RunID != runId || !strings.EqualFold(envelope.ContentHash, contentHash) || etag != `"`+envelope.ContentHash+`"` {
 		return nil, errors.New("usage statement envelope is outside the requested identity")
 	}
-	return usage.Decode(envelope.Payload)
+	statement, err := usage.Decode(envelope.Payload)
+	if err != nil {
+		return nil, err
+	}
+	// a statement is published under its own version's kind
+	if statement.Kind() != envelope.Kind {
+		return nil, errors.New("usage statement is published under another version's kind")
+	}
+	return statement, nil
 }
 
 func checkSubnetUsageStatement(statement *usage.Statement, deployment SubnetDeploymentIdentity, noId, epoch uint64, signer common.Address, start, end subnetEvmBlock) error {

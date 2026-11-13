@@ -1,17 +1,18 @@
 // The modern provider gate of the Quality and Speed buckets (FP2FIX.md,
 // 2026-10-14, option 4: probe-verified, shadow first). A provider is modern
-// when the capability probe (server/capprobe) has measured, on a real client
-// to provider session, both end-to-end post-quantum encryption (the TLS 1.3
-// hybrid X25519MLKEM768, which providers answer since v2026.7.21-999024260)
-// and resizable transfer windows (acks that carry receive_window_byte_count,
-// since v2026.9.14-1046484290). Versions are not read: most providers run a
-// custom lineage whose version says nothing of either.
+// when a probe has measured, on a real client to provider session, both
+// end-to-end post-quantum encryption (the TLS 1.3 hybrid X25519MLKEM768,
+// which providers answer since v2026.7.21-999024260) and resizable transfer
+// windows (acks that carry receive_window_byte_count, since
+// v2026.9.14-1046484290). Versions are not read: most providers run a custom
+// lineage whose version says nothing of either.
 //
-// The capability probe measures each provider in a short tunnel of its own,
-// apart from the URL probe, whose tunnels keep end-to-end encryption off,
-// and records each conclusive measurement in provider_modern_evidence, one
-// row per provider holding the latest observation
-// (RecordProviderModernEvidence).
+// URL turns that measure post-quantum (qualityprobe/fleetprobe url_e2e.go,
+// FP2-PROTOCOL.md §12.2) open an opportunistic session with their provider,
+// and the URL ingest records each conclusive observation in
+// provider_modern_evidence, one row per provider holding the latest
+// observation (RecordProviderModernEvidence), as the retired capability
+// probe (capprobe/README.md) did from tunnels of its own.
 // Every pass that decides the buckets classifies each provider's row into one
 // outcome (classifyProviderModernEvidence) and counts, over the providers the
 // other rules admit to Quality and to Speed, what the gate decides for them:

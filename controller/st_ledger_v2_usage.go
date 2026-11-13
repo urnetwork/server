@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -287,11 +288,22 @@ func StLedgerV2UsageSync(ctx context.Context, state *StEpochState) ([]*StLedgerV
 	if committed != nil && committed.Null {
 		giveUp("the root committed for epoch %d declares its rows unrecoverable, so it has no usage statement and the next epoch's priced deposit cannot be sized", epoch)
 	}
-	kind := stLedgerV2UsageDue(record, committed)
-	if kind == "" {
+	steps := []*StLedgerV2UsageStep{}
+	if kind := stLedgerV2UsageDue(record, committed); kind != "" {
+		steps = append(steps, &StLedgerV2UsageStep{Kind: kind, Epoch: epoch, RunAt: server.NowUtc()})
+	}
+	// The extender census is captured beside the users, as close to the
+	// boundary as a failed read allows (st_ledger_v2_extenders.go), and an epoch
+	// before E_x then gets its shadow report (st_ledger_v2_extender_shadow.go).
+	if stLedgerV2ExtenderCensusDue(ctx, cfg, epoch) {
+		steps = append(steps, &StLedgerV2UsageStep{Kind: StLedgerV2UsageStepExtenderCensus, Epoch: epoch, RunAt: server.NowUtc()})
+	} else if stLedgerV2ExtenderShadowDue(ctx, cfg, epoch) {
+		steps = append(steps, &StLedgerV2UsageStep{Kind: StLedgerV2UsageStepExtenderShadow, Epoch: epoch, RunAt: server.NowUtc()})
+	}
+	if len(steps) == 0 {
 		return nil, nil
 	}
-	return []*StLedgerV2UsageStep{{Kind: kind, Epoch: epoch, RunAt: server.NowUtc()}}, nil
+	return steps, nil
 }
 
 // StLedgerV2RunUsageStep runs one planned usage step. Each is idempotent.
@@ -309,6 +321,14 @@ func StLedgerV2RunUsageStep(ctx context.Context, step *StLedgerV2UsageStep) (*St
 	switch step.Kind {
 	case StLedgerV2UsageStepUsers:
 		return stLedgerV2CaptureUsers(ctx, cfg, client, step.Epoch), nil
+	case StLedgerV2UsageStepExtenderCensus:
+		return stLedgerV2CaptureExtenderCensus(ctx, cfg, client, step.Epoch), nil
+	case StLedgerV2UsageStepExtenderShadow:
+		_, v2, err := stLedgerV2Require()
+		if err != nil {
+			return nil, err
+		}
+		return stLedgerV2RunExtenderShadow(ctx, cfg, stLedgerV2ExtenderShadowViews{client: v2}, step.Epoch), nil
 	case StLedgerV2UsageStepStatement:
 		_, v2, err := stLedgerV2Require()
 		if err != nil {
@@ -352,6 +372,11 @@ type stLedgerV2StatementInput struct {
 	TotalBytes uint64
 	Rows       uint64
 	Users      uint64
+	// Extenders is the extender pool of an epoch whose committed header carries
+	// an extender component, which makes the statement version 2 (sn
+	// demand/usage, WHITEPAPER.md §8.6.4); nil for every other epoch, whose
+	// statement stays version 1, byte for byte. TotalBytes then holds all of Z.
+	Extenders *usage.ExtenderPool
 }
 
 // stLedgerV2SealStatement builds, signs and wraps one epoch's statement. Its only
@@ -377,6 +402,7 @@ func stLedgerV2SealStatement(cfg *StConfig, input *stLedgerV2StatementInput) (*u
 		Start:          usage.Boundary{Number: authority.Start.Block, Hash: strings.ToLower(common.Hash(authority.Start.Hash).Hex())},
 		End:            usage.Boundary{Number: authority.End.Block, Hash: strings.ToLower(common.Hash(authority.End.Hash).Hex())},
 		ProviderChunks: chunks, ProviderRows: input.Rows, TotalUsageBytes: input.TotalBytes, TotalUsers: input.Users,
+		ExtenderPool: input.Extenders,
 	}
 	if err := statement.Seal(cfg.ArtifactKey); err != nil {
 		return nil, nil, nil, err
@@ -387,7 +413,7 @@ func stLedgerV2SealStatement(cfg *StConfig, input *stLedgerV2StatementInput) (*u
 	}
 	envelope := &startifact.EvidenceEnvelope{
 		DeploymentID: cfg.DeploymentId, ChainID: cfg.ChainId, GenesisHash: statement.GenesisHash, Netuid: uint16(cfg.Netuid),
-		Kind: usage.EvidenceKind, RunID: usage.RunID(cfg.NoId, input.Epoch), CreatedAt: authority.EndTime.UTC().Format(time.RFC3339Nano), Payload: payload,
+		Kind: statement.Kind(), RunID: usage.RunID(cfg.NoId, input.Epoch), CreatedAt: authority.EndTime.UTC().Format(time.RFC3339Nano), Payload: payload,
 	}
 	if err := startifact.SignEvidence(envelope, cfg.ArtifactKey); err != nil {
 		return nil, nil, nil, err
@@ -446,12 +472,37 @@ func stLedgerV2PublishStatement(ctx context.Context, cfg *StConfig, client StCli
 	if err != nil {
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d provider chunks: %s", epoch, err))
 	}
-	totalBytes, count, err := usage.SumRows(decoded)
+	providerBytes, count, err := usage.SumRows(decoded)
 	if err != nil {
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d provider rows: %s", epoch, err))
 	}
-	_, payload, envelope, err := stLedgerV2SealStatement(cfg, &stLedgerV2StatementInput{Epoch: epoch, Authority: authority, Chunks: refs, TotalBytes: totalBytes, Rows: count, Users: record.TotalUsers})
+	// An epoch whose committed header carries an extender component has a
+	// version 2 statement: its extender pool, and all of Z in its total.
+	totalBytes := providerBytes
+	var pool *usage.ExtenderPool
+	var committedExtenders *usage.Extenders
+	if committed.Extenders != nil {
+		pool, committedExtenders, err = stLedgerV2StatementExtenderPool(ctx, cfg, epoch, committed.Extenders)
+		if errors.Is(err, errStLedgerV2UsageHeader) {
+			// nothing a turn can do changes it: alert once, and leave the epoch
+			// alone for a while, as the sync does
+			stLedgerV2Alert(cfg, StLedgerV2AlertUsageStatement, fmt.Sprintf("epoch %d", epoch), "%s, so it has no usage statement, and a deposit priced from it cannot be sized", stScrubEndpoints(err.Error()))
+			stLedgerV2UsageBackoff.Store(fmt.Sprintf("%s|%d|%d", deploymentKey, noId, epoch), server.NowUtc().Add(stLedgerV2UsageBackoffDelay))
+			return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: stScrubEndpoints(err.Error())}
+		}
+		if err != nil {
+			return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d extender pool: %s", epoch, err))
+		}
+		if totalBytes, err = usage.TotalUsage(providerBytes, pool.ExtenderPoolBytes); err != nil {
+			return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
+		}
+	}
+	statement, payload, envelope, err := stLedgerV2SealStatement(cfg, &stLedgerV2StatementInput{Epoch: epoch, Authority: authority, Chunks: refs, TotalBytes: totalBytes, Rows: count, Users: record.TotalUsers, Extenders: pool})
 	if err != nil {
+		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d statement: %s", epoch, err))
+	}
+	// What validators will check before a deposit is priced from it.
+	if err := errors.Join(statement.CheckSums(providerBytes, count), statement.CheckExtenders(committedExtenders)); err != nil {
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d statement: %s", epoch, err))
 	}
 	store, err := stLedgerV2Store()
@@ -466,7 +517,67 @@ func stLedgerV2PublishStatement(ctx context.Context, cfg *StConfig, client StCli
 		glog.Errorf("[st]v2 epoch %d usage statement could not be recorded: %s\n", epoch, err)
 		return stLedgerV2UsageRetry(err.Error())
 	}
-	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d statement %s: %d bytes in %d rows, %d users", epoch, published.ContentHash, totalBytes, count, record.TotalUsers)}
+	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d statement %s (%s): %d bytes in %d rows, %d users", epoch, published.ContentHash, statement.Kind(), totalBytes, count, record.TotalUsers)}
+}
+
+// A version 2 statement's extender pool for an epoch whose committed header
+// carries component: what the header and its census and share-row chunks hold,
+// with Z's parts and the contracts and payers behind it as the epoch's rows
+// record kept them when the component was first built. A record that does not
+// hold the committed component, the same Z and census chunks, cannot attest it
+// (errStLedgerV2UsageHeader).
+func stLedgerV2StatementExtenderPool(ctx context.Context, cfg *StConfig, epoch uint64, component *ledger.HeaderExtenders) (*usage.ExtenderPool, *usage.Extenders, error) {
+	recorded := model.GetStLedgerV2EpochRows(ctx, cfg.DeploymentKey(), cfg.NoId, epoch, epoch)[epoch]
+	if recorded == nil || recorded.Extenders == nil {
+		return nil, nil, fmt.Errorf("%w: epoch %d's committed extender component has no recorded pool", errStLedgerV2UsageHeader, epoch)
+	}
+	census := make([]string, len(component.Census))
+	for i, ref := range component.Census {
+		census[i] = ref.String()
+	}
+	if recorded.Extenders.Bytes != component.Bytes || !slices.Equal(recorded.Extenders.CensusChunks, census) {
+		return nil, nil, fmt.Errorf("%w: epoch %d's committed extender component is not the one its rows recorded", errStLedgerV2UsageHeader, epoch)
+	}
+	read := func(refs []ledger.Ref) ([][]byte, error) {
+		chunks := make([][]byte, len(refs))
+		for i, ref := range refs {
+			chunk, err := GetStLedgerV2Object(ctx, ref.String())
+			if err != nil {
+				return nil, err
+			}
+			chunks[i] = chunk
+		}
+		return chunks, nil
+	}
+	censusChunks, err := read(component.Census)
+	if err != nil {
+		return nil, nil, fmt.Errorf("census chunk: %w", err)
+	}
+	rows, err := ledger.DecodeCensusChunks(censusChunks)
+	if err == nil {
+		err = ledger.CheckCensusRows(rows)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: epoch %d census: %s", errStLedgerV2UsageHeader, epoch, err)
+	}
+	shareChunks, err := read(component.Rows)
+	if err != nil {
+		return nil, nil, fmt.Errorf("share-row chunk: %w", err)
+	}
+	shares, err := ledger.DecodeProviderChunks(shareChunks)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: epoch %d share rows: %s", errStLedgerV2UsageHeader, epoch, err)
+	}
+	committed, err := usage.CommittedExtenders(component, rows, shares)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: epoch %d: %s", errStLedgerV2UsageHeader, epoch, err)
+	}
+	parts := recorded.Extenders
+	pool, err := usage.NewExtenderPool(parts.IntraPlatform, parts.IntraNetwork, parts.Contracts, parts.Payers, committed)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: epoch %d: %s", errStLedgerV2UsageHeader, epoch, err)
+	}
+	return pool, committed, nil
 }
 
 // stDepositStatementUsage pins a recorded statement to this operator and the

@@ -118,3 +118,41 @@ func TestPayoutsCloseParkedDryRunProcessIsReadOnly(t *testing.T) {
 		t.Fatal("main does not run the close-parked command")
 	}
 }
+
+// --paid takes the comma-separated <payment_id>:<circle_transaction_id> list,
+// with or without --apply; the command parses it before any database session.
+func TestPayoutsCloseParkedPaidCommandLine(t *testing.T) {
+	parse := func(args []string) (docopt.Opts, error) {
+		return (&docopt.Parser{HelpHandler: docopt.NoHelpHandler}).ParseArgs(bringyourctlUsage, args, "test")
+	}
+	paid := server.NewId().String() + ":00000000-0000-4000-8000-000000000001"
+	for _, args := range [][]string{
+		{"payouts", "close-parked", "--paid=" + paid},
+		{"payouts", "close-parked", "--paid=" + paid, "--ids"},
+		{"payouts", "close-parked", "--paid=" + paid, "--apply", "--expect=digest"},
+	} {
+		opts, err := parse(args)
+		if err != nil {
+			t.Fatal(args, err)
+		}
+		value, _ := opts.String("--paid")
+		apply, _ := opts.Bool("--apply")
+		if value != paid || apply != slices.Contains(args, "--apply") {
+			t.Fatal("command line", args, opts)
+		}
+		entries, err := controller.ParsePayoutClosePaid(value)
+		if err != nil || len(entries) != 1 {
+			t.Fatal("entries", entries, err)
+		}
+	}
+	source, err := os.ReadFile("payouts_close_parked.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	parsed := strings.Index(text, "controller.ParsePayoutClosePaid(")
+	session := strings.Index(text, "session.NewLocalClientSession(")
+	if parsed < 0 || session < parsed {
+		t.Fatal("--paid is parsed after the database session opens")
+	}
+}

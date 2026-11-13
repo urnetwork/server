@@ -408,15 +408,48 @@ func (self *fakeCryptoTaoNode) serveMetadata(t *testing.T, numbers ...uint64) {
 	}
 }
 
+// A reader over the fake node, unpaced.
 func cryptoTaoTestWallet(node *fakeCryptoTaoNode) *bittensorWallet {
 	wallet := newBittensorWallet(&cryptoWalletSettings{Asset: model.CryptoAssetTao, ChainRpcUrl: "ws://fake"}, &CryptoPayAssetConfig{Network: cryptoNetworkMainnet})
 	wallet.rpc = node
+	wallet.settings.RequestSpacing = 0
 	return wallet
 }
 
+// Forgets the cached runtimes and blocks, and makes no TAO address issued
+// until the test issues some (cryptoTaoTestIssue).
 func cryptoTaoTestReset(t *testing.T) {
 	resetCryptoTaoCaches()
 	t.Cleanup(resetCryptoTaoCaches)
+	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{})
+}
+
+// Makes the given addresses the TAO addresses invoices were given, without a
+// database, for the rest of the test.
+func cryptoTaoTestIssue(t *testing.T, issued map[string]*model.CryptoPaymentIssuedAddress) {
+	previousIssued := cryptoTaoAddressesIssued
+	previousAddresses := cryptoTaoIssuedAddresses
+	cryptoTaoAddressesIssued = func(ctx context.Context) bool {
+		return 0 < len(issued)
+	}
+	cryptoTaoIssuedAddresses = func(ctx context.Context, addresses []string) map[string]*model.CryptoPaymentIssuedAddress {
+		found := map[string]*model.CryptoPaymentIssuedAddress{}
+		for _, address := range addresses {
+			if issuedAddress, ok := issued[address]; ok {
+				found[address] = issuedAddress
+			}
+		}
+		return found
+	}
+	t.Cleanup(func() {
+		cryptoTaoAddressesIssued = previousIssued
+		cryptoTaoIssuedAddresses = previousAddresses
+	})
+}
+
+// One issued address at index, made long before any block the tests read.
+func cryptoTaoTestIssued(index int64) *model.CryptoPaymentIssuedAddress {
+	return &model.CryptoPaymentIssuedAddress{AddressIndex: index, CreateTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 }
 
 func cryptoTaoTestAccount(seed byte) [32]byte {
@@ -508,7 +541,7 @@ func TestCryptoTaoHoldsATransferInABatchForReview(t *testing.T) {
 	node.serveMetadata(t, recorded.Number)
 	wallet := cryptoTaoTestWallet(node)
 	invoice := cryptoTaoAddressOf(transfers[0].to)
-	wallet.SetWatched([]*model.CryptoPaymentWatchedAddress{{Address: invoice, AddressIndex: 7, Hot: true}})
+	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{invoice: cryptoTaoTestIssued(7)})
 
 	receipts, walletHeight, err := wallet.IncomingSince(context.Background(), recorded.Number)
 	connect.AssertEqual(t, err, nil)
@@ -564,7 +597,7 @@ func TestCryptoTaoCreditsATopLevelTransfer(t *testing.T) {
 	node.serveMetadata(t, 9478300)
 	wallet := cryptoTaoTestWallet(node)
 	address := cryptoTaoAddressOf(invoice)
-	wallet.SetWatched([]*model.CryptoPaymentWatchedAddress{{Address: address, AddressIndex: 3, Hot: true}})
+	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{address: cryptoTaoTestIssued(3)})
 
 	receipts, walletHeight, err := wallet.IncomingSince(context.Background(), 9478300)
 	connect.AssertEqual(t, err, nil)
@@ -603,7 +636,7 @@ func TestCryptoTaoSumsPerExtrinsicAndKeepsTopUpsApart(t *testing.T) {
 	node.finalized, node.best = 9478400, 9478400
 	node.serveMetadata(t, 9478400)
 	wallet := cryptoTaoTestWallet(node)
-	wallet.SetWatched([]*model.CryptoPaymentWatchedAddress{{Address: cryptoTaoAddressOf(invoice), AddressIndex: 4, Hot: true}})
+	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{cryptoTaoAddressOf(invoice): cryptoTaoTestIssued(4)})
 	receipts, _, err := wallet.IncomingSince(context.Background(), 9478400)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, len(receipts), 2)
@@ -644,7 +677,7 @@ func TestCryptoTaoQuantumResistantSigners(t *testing.T) {
 	node.finalized, node.best = 9478500, 9478500
 	node.serveMetadata(t, 9478500)
 	wallet := cryptoTaoTestWallet(node)
-	wallet.SetWatched([]*model.CryptoPaymentWatchedAddress{{Address: cryptoTaoAddressOf(invoice), AddressIndex: 5, Hot: true}})
+	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{cryptoTaoAddressOf(invoice): cryptoTaoTestIssued(5)})
 	before := testutil.ToFloat64(cryptoPayTaoExtrinsicsUndecodable)
 	receipts, _, err := wallet.IncomingSince(context.Background(), 9478500)
 	connect.AssertEqual(t, err, nil)
@@ -665,7 +698,7 @@ func TestCryptoTaoPausesOnAnUnknownRuntime(t *testing.T) {
 	recorded := cryptoTaoTestRecorded(t)
 	meta := cryptoTaoTestMeta(t)
 	transfer := []cryptoTaoTestTransfer{{extrinsic: 1, from: signer, to: invoice, amount: 1_000}}
-	watched := []*model.CryptoPaymentWatchedAddress{{Address: cryptoTaoAddressOf(invoice), AddressIndex: 6, Hot: true}}
+	issued := map[string]*model.CryptoPaymentIssuedAddress{cryptoTaoAddressOf(invoice): cryptoTaoTestIssued(6)}
 
 	// the finalized head runs a runtime (999) whose metadata does not decode:
 	// block 9478600 (488, the one before it) reads, then 9478601 pauses
@@ -676,7 +709,7 @@ func TestCryptoTaoPausesOnAnUnknownRuntime(t *testing.T) {
 	node.serveMetadata(t, 9478600)
 	node.metadata[node.blocks[9478601].parentHash] = "0xdeadbeef"
 	wallet := cryptoTaoTestWallet(node)
-	wallet.SetWatched(watched)
+	cryptoTaoTestIssue(t, issued)
 	receipts, _, err := wallet.IncomingSince(context.Background(), 9478600)
 	connect.AssertEqual(t, receipts == nil, true)
 	connect.AssertEqual(t, errors.Is(err, errCryptoTaoRuntimeUnreadable), true)
@@ -691,7 +724,7 @@ func TestCryptoTaoPausesOnAnUnknownRuntime(t *testing.T) {
 	node.finalized, node.best = 9478702, 9478702
 	node.serveMetadata(t, 9478700, 9478701, 9478702)
 	wallet = cryptoTaoTestWallet(node)
-	wallet.SetWatched(watched)
+	cryptoTaoTestIssue(t, issued)
 	_, _, err = wallet.IncomingSince(context.Background(), 9478700)
 	connect.AssertEqual(t, errors.Is(err, errCryptoTaoRuntimeUnreadable), true)
 	connect.AssertEqual(t, strings.Contains(err.Error(), "spec 487"), true)
@@ -704,7 +737,7 @@ func TestCryptoTaoPausesOnAnUnknownRuntime(t *testing.T) {
 	node.finalized, node.best = 9478800, 9478800
 	node.serveMetadata(t, 9478800)
 	wallet = cryptoTaoTestWallet(node)
-	wallet.SetWatched(watched)
+	cryptoTaoTestIssue(t, issued)
 	receipts, _, err = wallet.IncomingSince(context.Background(), 9478800)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, len(receipts), 1)
@@ -729,7 +762,7 @@ func TestCryptoTaoReaderNeverPanics(t *testing.T) {
 	connect.AssertEqual(t, err != nil, true)
 }
 
-// With no TAO invoice in play no block is read: only the heads.
+// Until a TAO invoice address is issued no block is read: only the heads.
 func TestCryptoTaoIdleScanReadsNoBlock(t *testing.T) {
 	cryptoTaoTestReset(t)
 	recorded := cryptoTaoTestRecorded(t)
@@ -749,6 +782,7 @@ func TestCryptoTaoIdleScanReadsNoBlock(t *testing.T) {
 // The scan range: from the cursor, never past the lookback (counted), at most
 // a scan's worth of blocks.
 func TestCryptoTaoScanRange(t *testing.T) {
+	settings := DefaultCryptoTaoReaderSettings()
 	for _, c := range []struct {
 		minHeight, finalized uint64
 		start, end, skipped  uint64
@@ -763,29 +797,33 @@ func TestCryptoTaoScanRange(t *testing.T) {
 		// a young chain
 		{0, 120, 0, 99, 0},
 	} {
-		start, end, skipped := cryptoTaoScanRange(c.minHeight, c.finalized)
+		start, end, skipped, ok := cryptoTaoScanRange(settings, c.minHeight, c.finalized)
+		connect.AssertEqual(t, ok, true)
 		connect.AssertEqual(t, []uint64{start, end, skipped}, []uint64{c.start, c.end, c.skipped})
 	}
+	_, _, _, ok := cryptoTaoScanRange(&CryptoTaoReaderSettings{LookbackBlocks: 300}, 9_990, 10_000)
+	connect.AssertEqual(t, ok, false)
 
 	// the reader counts the blocks it passed over
 	cryptoTaoTestReset(t)
 	recorded := cryptoTaoTestRecorded(t)
 	node := newFakeCryptoTaoNode()
-	head := uint64(9_478_199 + cryptoTaoLookbackBlocks)
-	node.addBlock(t, head-cryptoTaoLookbackBlocks, 488, recorded.Events, time.Now(), recorded.Extrinsics)
+	lookback := settings.LookbackBlocks
+	head := uint64(9_478_199) + lookback
+	node.addBlock(t, head-lookback, 488, recorded.Events, time.Now(), recorded.Extrinsics)
 	node.finalized, node.best = head, head
 	node.addBlock(t, head, 488, recorded.Events, time.Now(), recorded.Extrinsics)
-	node.serveMetadata(t, head-cryptoTaoLookbackBlocks)
-	for number := head - cryptoTaoLookbackBlocks + 1; number < head; number += 1 {
+	node.serveMetadata(t, head-lookback)
+	for number := head - lookback + 1; number < head; number += 1 {
 		node.addBlock(t, number, 488, "0x00", time.Now(), []string{})
 	}
 	wallet := cryptoTaoTestWallet(node)
-	wallet.SetWatched([]*model.CryptoPaymentWatchedAddress{{Address: cryptoTaoAddressOf(cryptoTaoTestAccount(0x44)), AddressIndex: 9, Hot: true}})
+	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{cryptoTaoAddressOf(cryptoTaoTestAccount(0x44)): cryptoTaoTestIssued(9)})
 	before := testutil.ToFloat64(cryptoPayScanBlocksSkipped.WithLabelValues(model.CryptoAssetTao))
-	_, walletHeight, err := wallet.IncomingSince(context.Background(), head-cryptoTaoLookbackBlocks-25)
+	_, walletHeight, err := wallet.IncomingSince(context.Background(), head-lookback-25)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, testutil.ToFloat64(cryptoPayScanBlocksSkipped.WithLabelValues(model.CryptoAssetTao))-before, float64(25))
-	connect.AssertEqual(t, walletHeight, head-cryptoTaoLookbackBlocks+cryptoTaoBlocksPerScan-1)
+	connect.AssertEqual(t, walletHeight, head-lookback+uint64(settings.BlocksPerScan)-1)
 }
 
 // Transaction re-reads a receipt's block: within the lookback as a scan does,
@@ -828,7 +866,7 @@ func TestCryptoTaoTransactionReRead(t *testing.T) {
 	connect.AssertEqual(t, len(receipts), 0)
 
 	// past the lookback: read with its runtime cached, an error without
-	node.finalized = 9479000 + cryptoTaoLookbackBlocks + 10
+	node.finalized = 9479000 + DefaultCryptoTaoReaderSettings().LookbackBlocks + 10
 	node.addBlock(t, node.finalized, 488, "0x00", time.Now(), []string{})
 	node.best = node.finalized
 	wallet = cryptoTaoTestWallet(node)
@@ -899,4 +937,183 @@ func TestCryptoTaoRefundAddress(t *testing.T) {
 		_, err := cryptoTaoRefundAddressCanonical(refused)
 		connect.AssertEqual(t, err != nil, true)
 	}
+}
+
+// Every address a TAO invoice was ever given is matched in the blocks read,
+// whatever its invoice's state (no list of addresses in play): a transfer to
+// one is a receipt, a transfer to an address no invoice was given is not,
+// and the issued addresses are looked up once a scan for every destination
+// the read blocks pay. Root cause (2026-11-13): the reader matched only
+// invoice addresses in play and read no block while none was, so a payment
+// to an old or expired invoice was never recorded.
+func TestCryptoTaoMatchesEveryIssuedAddress(t *testing.T) {
+	cryptoTaoTestReset(t)
+	plain := cryptoTaoTestPlainTransfer(t)
+	signer, _ := cryptoTaoTestSigner(t, plain)
+	issued := cryptoTaoTestAccount(0x70)
+	stranger := cryptoTaoTestAccount(0x71)
+	at := time.Now().Add(-30 * time.Second)
+	node := newFakeCryptoTaoNode()
+	cryptoTaoTestPlainBlock(t, node, 9478900, plain, []cryptoTaoTestTransfer{{extrinsic: 1, from: signer, to: issued, amount: 5_000}}, at)
+	cryptoTaoTestPlainBlock(t, node, 9478901, plain, []cryptoTaoTestTransfer{{extrinsic: 1, from: signer, to: stranger, amount: 6_000}}, at.Add(12*time.Second))
+	node.finalized, node.best = 9478901, 9478901
+	node.serveMetadata(t, 9478900)
+	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{cryptoTaoAddressOf(issued): cryptoTaoTestIssued(12)})
+	lookups := [][]string{}
+	previousLookup := cryptoTaoIssuedAddresses
+	cryptoTaoIssuedAddresses = func(ctx context.Context, addresses []string) map[string]*model.CryptoPaymentIssuedAddress {
+		lookups = append(lookups, addresses)
+		return previousLookup(ctx, addresses)
+	}
+	t.Cleanup(func() {
+		cryptoTaoIssuedAddresses = previousLookup
+	})
+
+	wallet := cryptoTaoTestWallet(node)
+	receipts, walletHeight, err := wallet.IncomingSince(context.Background(), 9478900)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, walletHeight, uint64(9478901))
+	connect.AssertEqual(t, len(receipts), 1)
+	connect.AssertEqual(t, receipts[0].Address, cryptoTaoAddressOf(issued))
+	connect.AssertEqual(t, receipts[0].OutputKey, "12")
+	connect.AssertEqual(t, receipts[0].AmountAtomic, uint64(5_000))
+	connect.AssertEqual(t, len(lookups), 1)
+	connect.AssertEqual(t, len(lookups[0]), 2)
+	// the stranger's block paid none of ours: its body was never read
+	connect.AssertEqual(t, node.methodCalls("chain_getBlock"), 1)
+}
+
+// An invoice made after a block was mined, past the clock tolerance, was not
+// paid in it; one made within the tolerance is matched.
+func TestCryptoTaoSkipsAnInvoiceMadeAfterItsBlock(t *testing.T) {
+	cryptoTaoTestReset(t)
+	plain := cryptoTaoTestPlainTransfer(t)
+	signer, _ := cryptoTaoTestSigner(t, plain)
+	invoice := cryptoTaoTestAccount(0x72)
+	at := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+	node := newFakeCryptoTaoNode()
+	cryptoTaoTestPlainBlock(t, node, 9479000, plain, []cryptoTaoTestTransfer{{extrinsic: 1, from: signer, to: invoice, amount: 7_000}}, at)
+	node.finalized, node.best = 9479000, 9479000
+	node.serveMetadata(t, 9479000)
+	tolerance := DefaultCryptoTaoReaderSettings().ClockTolerance
+	for _, c := range []struct {
+		madeAt   time.Time
+		receipts int
+	}{
+		{at.Add(tolerance + time.Minute), 0},
+		{at.Add(tolerance - time.Minute), 1},
+		{at.Add(-48 * time.Hour), 1},
+	} {
+		cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{
+			cryptoTaoAddressOf(invoice): {AddressIndex: 13, CreateTime: c.madeAt},
+		})
+		receipts, _, err := cryptoTaoTestWallet(node).IncomingSince(context.Background(), 9479000)
+		connect.AssertEqual(t, err, nil)
+		if len(receipts) != c.receipts {
+			t.Fatalf("an invoice made %s after its block: %d receipts, want %d", c.madeAt.Sub(at), len(receipts), c.receipts)
+		}
+	}
+}
+
+// A scan stops reading blocks before its requests could pass
+// RequestsPerScan and reports the last block it read; the next scan goes on
+// from there, and together they read every block.
+func TestCryptoTaoStopsAtItsRequestBudget(t *testing.T) {
+	cryptoTaoTestReset(t)
+	plain := cryptoTaoTestPlainTransfer(t)
+	signer, _ := cryptoTaoTestSigner(t, plain)
+	invoice := cryptoTaoTestAccount(0x73)
+	recorded := cryptoTaoTestRecorded(t)
+	node := newFakeCryptoTaoNode()
+	const first = uint64(9479100)
+	for number := first; number < first+9; number += 1 {
+		node.addBlock(t, number, 488, cryptoTaoTestEvents(t, cryptoTaoTestMeta(t), nil), time.Now(), []string{recorded.Extrinsics[0]})
+	}
+	cryptoTaoTestPlainBlock(t, node, first+9, plain, []cryptoTaoTestTransfer{{extrinsic: 1, from: signer, to: invoice, amount: 8_000}}, time.Now())
+	node.finalized, node.best = first+9, first+9
+	node.serveMetadata(t, first)
+	cryptoTaoTestIssue(t, map[string]*model.CryptoPaymentIssuedAddress{cryptoTaoAddressOf(invoice): cryptoTaoTestIssued(14)})
+
+	limited := cryptoTaoTestWallet(node)
+	limited.settings.RequestsPerScan = 30
+	receipts, walletHeight, err := limited.IncomingSince(context.Background(), first)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, len(receipts), 0)
+	if first+9 <= walletHeight || walletHeight < first {
+		t.Fatalf("a budget of 30 requests read through block %d", walletHeight)
+	}
+	connect.AssertEqual(t, limited.requests <= 30, true)
+	readHeight, _, _, err := limited.Heights(context.Background())
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, readHeight, walletHeight)
+
+	// the next scan, from the cursor less its window of one block
+	receipts, walletHeight, err = cryptoTaoTestWallet(node).IncomingSince(context.Background(), walletHeight-1)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, walletHeight, first+9)
+	connect.AssertEqual(t, len(receipts), 1)
+	connect.AssertEqual(t, receipts[0].AmountAtomic, uint64(8_000))
+
+	// a budget too small for a block reads none, and holds the cursor
+	starved := cryptoTaoTestWallet(node)
+	starved.settings.RequestsPerScan = 5
+	receipts, walletHeight, err = starved.IncomingSince(context.Background(), first+4)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, len(receipts), 0)
+	connect.AssertEqual(t, walletHeight, first+3)
+}
+
+// The reader paces its requests to the node: one each RequestSpacing at
+// most, and time that passed between requests is not waited again. A request
+// whose wait is canceled never reaches the node. Every request is counted by
+// method.
+func TestCryptoTaoPacesItsRequests(t *testing.T) {
+	cryptoTaoTestReset(t)
+	recorded := cryptoTaoTestRecorded(t)
+	node := newFakeCryptoTaoNode()
+	node.addBlock(t, recorded.Number, 488, recorded.Events, time.Now(), recorded.Extrinsics)
+	node.finalized, node.best = recorded.Number, recorded.Number
+	clock := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	waits := []time.Duration{}
+	previousNow := cryptoTaoPaceNow
+	previousWait := cryptoTaoPaceWait
+	cryptoTaoPaceNow = func() time.Time {
+		return clock
+	}
+	cryptoTaoPaceWait = func(ctx context.Context, wait time.Duration) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		waits = append(waits, wait)
+		clock = clock.Add(wait)
+		return nil
+	}
+	t.Cleanup(func() {
+		cryptoTaoPaceNow = previousNow
+		cryptoTaoPaceWait = previousWait
+	})
+	wallet := cryptoTaoTestWallet(node)
+	wallet.settings.RequestSpacing = 50 * time.Millisecond
+	before := testutil.ToFloat64(cryptoPayTaoNodeRequests.WithLabelValues("chain_getHeader"))
+
+	// the heads: five requests, the first at once
+	_, err := wallet.readHeads(context.Background())
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, waits, []time.Duration{50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond})
+	connect.AssertEqual(t, wallet.requests, 5)
+	connect.AssertEqual(t, testutil.ToFloat64(cryptoPayTaoNodeRequests.WithLabelValues("chain_getHeader"))-before, float64(2))
+
+	// a request a second later waits for nothing
+	clock = clock.Add(time.Second)
+	var head string
+	connect.AssertEqual(t, wallet.call(context.Background(), &head, "chain_getFinalizedHead"), nil)
+	connect.AssertEqual(t, len(waits), 4)
+
+	// a paced request whose wait is canceled never reaches the node
+	calls := node.methodCalls("chain_getFinalizedHead")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = wallet.call(canceled, &head, "chain_getFinalizedHead")
+	connect.AssertEqual(t, errors.Is(err, context.Canceled), true)
+	connect.AssertEqual(t, node.methodCalls("chain_getFinalizedHead"), calls)
 }

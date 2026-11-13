@@ -125,8 +125,9 @@ type Config struct {
 	// owner that is full or closed, keeps the wait in Close.
 	Retirements *Retirements
 	// Optional, for a capability measurement in a tunnel of its own
-	// (server/capprobe). Nil, what the URL probe and every other probe
-	// tunnel use, leaves the clients the tunnel generates exactly as they
+	// (server/capprobe) or a URL turn that measures post-quantum
+	// (fleetprobe url_e2e.go). Nil, what every other URL turn and probe
+	// tunnel uses, leaves the clients the tunnel generates exactly as they
 	// were: end-to-end sessions off, nothing observed, and no wait for key
 	// registration.
 	CapabilityObservation *CapabilityObservation
@@ -545,6 +546,9 @@ type Tunnel struct {
 	lost    context.Context
 	lose    context.CancelCauseFunc
 	unwatch func()
+	// Set when a second client took the window of a tunnel that keeps
+	// running on a replacement (CapabilityObservation.KeepTunnelOnReplacement).
+	clientReplaced *atomic.Bool
 	// Whether the provider ever joined the multi-client, and the
 	// unsubscribe of the callback that records it.
 	providerAdded *atomic.Bool
@@ -712,7 +716,8 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// read failure to say why, and it is ended by Close, not by the caller's
 	// ctx -- the caller ending is its own signal, not the tunnel's loss.
 	lost, lose := context.WithCancelCause(context.Background())
-	unwatch := watchTunnelPath(multiClient.Monitor(), lose, cfg.CapabilityObservation != nil)
+	clientReplaced := &atomic.Bool{}
+	unwatch := watchTunnelPath(multiClient.Monitor(), lose, cfg.CapabilityObservation, clientReplaced)
 	unwatchSetup := setup.watch(multiClient.Monitor())
 
 	// pump tun -> provider
@@ -769,6 +774,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		lost:            lost,
 		lose:            lose,
 		unwatch:         unwatch,
+		clientReplaced:  clientReplaced,
 		providerAdded:   providerAdded,
 		unwatchAdded:    unwatchAdded,
 		packetSent:      packetSent,
@@ -779,6 +785,14 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		setup:           setup,
 		unwatchSetup:    unwatchSetup,
 	}, nil
+}
+
+// Whether a second client took the window of a tunnel whose capability
+// observation keeps the tunnel on a replacement (KeepTunnelOnReplacement):
+// what its recorder holds since may come from either client. Always false
+// for every other tunnel, whose replacement ends it instead (Lost).
+func (self *Tunnel) ClientReplaced() bool {
+	return self.clientReplaced.Load()
 }
 
 // Returns a context that is done once the tunnel's path to its provider is
@@ -836,36 +850,46 @@ func watchProviderPath(monitor connect.MultiClientMonitor, lose context.CancelCa
 }
 
 // Ends lost when the tunnel's path to its provider goes away
-// (watchProviderPath) and, for a capability measurement tunnel, also when
-// its window client is replaced (watchCapabilityWindowClient). Returns the
-// unsubscribe of every watcher it added.
-func watchTunnelPath(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc, capabilityObservation bool) func() {
+// (watchProviderPath) and, for a tunnel with a capability observation, acts
+// when its window client is replaced (watchCapabilityWindowClient): ends lost
+// too, or, for an observation that keeps the tunnel on a replacement, sets
+// clientReplaced. Returns the unsubscribe of every watcher it added.
+func watchTunnelPath(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc, observation *CapabilityObservation, clientReplaced *atomic.Bool) func() {
 	unwatchPath := watchProviderPath(monitor, lose)
-	if !capabilityObservation {
+	if observation == nil {
 		return unwatchPath
 	}
-	unwatchClient := watchCapabilityWindowClient(monitor, lose)
+	replace := func() {
+		lose(fmt.Errorf("%w: %w", ErrTunnelLost, ErrTunnelClientReplaced))
+	}
+	if observation.KeepTunnelOnReplacement {
+		replace = func() {
+			clientReplaced.Store(true)
+		}
+	}
+	unwatchClient := watchCapabilityWindowClient(monitor, replace)
 	return func() {
 		unwatchPath()
 		unwatchClient()
 	}
 }
 
-// Ends lost, with ErrTunnelClientReplaced, when a second client takes a
-// capability measurement tunnel's window: a replacement added before the
-// first client leaves, or after it. Returns the unsubscribe.
+// Calls replace once, when a second client takes a capability observation
+// tunnel's window: a replacement added before the first client leaves, or
+// after it. Returns the unsubscribe.
 //
 // The pinned provider's window holds one client at a time, and the
-// measurement's recorder merges what every client recorded. After a
+// observation's recorder merges what every client recorded. After a
 // replacement, the first attempt and the first acknowledgement it reads
 // belong to a client that is leaving or gone, and the new client's
 // ClientHello would be read against an establishment window that began
 // before it was sent: the provider could be read as having no responder
 // while the new ClientHello is still within its own window. So the
-// measurement ends there, with what it has. A candidate that never got into
-// the window is no replacement. The first client leaving with nothing in its
+// capability probe's measurement ends there, with what it has, and a URL
+// turn reads its session as unmeasured. A candidate that never got into the
+// window is no replacement. The first client leaving with nothing in its
 // place is watchProviderPath's loss.
-func watchCapabilityWindowClient(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc) func() {
+func watchCapabilityWindowClient(monitor connect.MultiClientMonitor, replace func()) func() {
 	var stateLock sync.Mutex
 	var windowClientId *connect.Id
 	replaced := false
@@ -891,7 +915,7 @@ func watchCapabilityWindowClient(monitor connect.MultiClientMonitor, lose contex
 			return replaced
 		}()
 		if replacedNow {
-			lose(fmt.Errorf("%w: %w", ErrTunnelLost, ErrTunnelClientReplaced))
+			replace()
 		}
 	})
 }

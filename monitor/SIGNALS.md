@@ -8545,7 +8545,9 @@ only says how long is left, not why. Facts on 10-22:
   (completion + 7 days), and subsidy payouts stopped with the epoch that ended
   2026-10-05. Rows therefore wait for the 300-day straggler horizon
   (`StragglerContractExpiration`); the first reach it on 2027-03-28. See
-  `server/CONTRACT-PARTITION.md`.
+  `server/CONTRACT-PARTITION.md`. Since 2026-11-01 the contract horizon reaper
+  (§2.4r) deletes them past its horizon instead, and check 2 below retired on
+  2026-11-13.
 - **`client_reliability` retention was pinned to the last subsidy epoch.**
   `clientReliabilityRetentionCutoffBlock` kept blocks from that epoch's end
   minus one day (2026-10-05) for the next payout, so the nightly drops stopped
@@ -8571,30 +8573,31 @@ only says how long is left, not why. Facts on 10-22:
 Checks, all cheap and read-only:
 1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
    The frontier no longer holds any retention, so its age is not a finding.
-2. Contract reap stamping: `TABLESAMPLE SYSTEM (0.0002)` on `transfer_contract`.
-   WARN `contract-reap-stalled` when fewer than 5% of sampled rows older than
-   14 days have `reap_time`.
+2. Retired 2026-11-13: contract reap stamping (`contract-reap-stalled`). Only
+   a completed USDC payout stamped `reap_time`, and USDC provider payouts
+   ended (owner decision 2026-11-13: "settle closed rows, let's close out usdc
+   entirely"), so the stamped share only falls. The contract horizon reaper
+   (§2.4r) reclaims contracts without `reap_time`, the payments the USDC
+   close-out closed included (`server.AccountPaymentRetentionSettledSql`), and
+   §2.4r watches it.
 3. Partition drop: WARN `partition-retention-stuck` when the oldest non-empty
    partition's upper bound is more than 2 days past its retention.
 4. Per relation over 100 GB: report net growth over 7 days with no deletes
    (`n_tup_del` unchanged) to the owners. This is a list, not an alert.
 
-Implementation (2026-10-22). Hourly, two bounded read-only queries run on
-the single enabled `pg-primary`, each behind a `hostname -s`, primary-role and
-30-second statement-clock guard. A catalog read returns the
-`client_reliability` parent's kind and every
+Implementation (2026-10-22; the reap sample retired 2026-11-13). Hourly, one
+bounded read-only query runs on the single enabled `pg-primary`, behind a
+`hostname -s`, primary-role and 30-second statement-clock guard. The catalog
+read returns the `client_reliability` parent's kind and every
 attached partition's name and heap size (at most 4,096), the statistics reset
 and postmaster start, and the public relations of at least 100 GB with their
 insert and delete counters, in fixed ten-cell frames bound by an end row. A
-second read counts `transfer_contract TABLESAMPLE SYSTEM (0.0002)` rows, rows
-older than 14 days, and those with `reap_time`. A failure in one read leaves
-only its own checks unknown. Targets are the primary's name plus a fixed
-check name; only counts, ages and fixed names leave SQL.
+failed read leaves the check unknown. The target is the primary's name plus a
+fixed check name; only counts, ages and fixed names leave SQL. A watcher that
+still holds a `contract-reap-stalled` incident clears it after two complete
+runs: the signal reports neither the class nor an unknown state for its
+target.
 
-- `contract-reap-stalled` (target `<primary>/contract-reap`, sustain 2,
-  because the page sample is random per run): fewer than 5% of at least 20
-  sampled rows older than 14 days have `reap_time`. A sample under 100 rows is
-  unknown; fewer than 20 old rows is a young table and healthy.
 - `partition-retention-stuck` (target
   `<primary>/client-reliability-partitions`, sustain 1): the oldest
   `client_reliability_pYYYYMMDD` partition whose heap holds a page has an
@@ -8612,34 +8615,34 @@ check name; only counts, ages and fixed names leave SQL.
   plain lowercase identifiers. A shorter window is
   `unqualified-stats-window`; old deletes outside the window can hide a
   relation, so the list is a lower bound.
-- `retention-liveness-unobservable` (per check target, sustain 2): no or
-  several primaries, a failed read, a wrong host or role, a skewed clock, an
+- `retention-liveness-unobservable` (target
+  `<primary>/client-reliability-partitions`, sustain 2): no or several
+  primaries, a failed read, a wrong host or role, a skewed clock, an
   incomplete or malformed frame.
 
 Every tunable, including the mirrored reliability horizon, is a field of
-`RetentionLivenessSettings`. Synthetic controls replay the 2026-10-22 state
-(0.75% stamped, the `st_client_key_history` append-only list, an old subsidy
-frontier that raises nothing), the 2026-10-31 state (27 days kept behind the
-frontier, judged stuck by the 21-day rule), every partition cutoff branch,
-reap share edges and sample sufficiency, malformed frames and failed reads,
-the list's window and name rules, inventory authority and cancellation.
+`RetentionLivenessSettings`. Synthetic controls replay the 2026-11-13 state
+(0.75% stamped, the `st_client_key_history` append-only list, nothing raised
+and the reap sample never read), a held `contract-reap-stalled` incident
+clearing after two complete runs, the 2026-10-31 state (27 days kept behind
+the frontier, judged stuck by the 21-day rule), every partition cutoff
+branch, malformed frames and failed reads, the list's window and name rules,
+inventory authority and cancellation.
 
 ACTION: retention horizons are owner decisions. Never drop
 `client_reliability` days inside the 10-day retention by hand: operator block
 points read a completed block's window, and a missing reliability block cuts
-provider credit. VERIFY: a complete observation inside each line on the next
-runs (two for the sampled check).
+provider credit. VERIFY: a complete observation inside the line on the next
+run.
 
 Partitioned contract tables (2026-10-23, `server/CONTRACT-PARTITION.md`).
-`TABLESAMPLE SYSTEM` on the partitioned `transfer_contract` samples the same
-share of every partition's pages, so `contract-reap-stalled` keeps its meaning;
-its context then notes that weeks past the 13-week horizon leave by partition
-drops (§2.4i). Check 4 counts a contract partition toward its contract table
+Check 4 counts a contract partition toward its contract table
 (sizes, inserts and deletes summed, the 100 GB line on the sum) and marks it
 `partitioned=true reclaimed_by=partition-drops`: a dropped week's deletes leave
 with its partition's statistics, so a partitioned table reads as append-only
-by construction. The catalog frame's ninth cell carries `transfer_contract`'s
-kind. A native PostgreSQL 18 test runs both reads before and after a cutover.
+by construction. The catalog frame's ninth cell, once `transfer_contract`'s
+kind for the reap sample, stays empty. A native PostgreSQL 18 test runs the
+catalog read before and after a cutover.
 
 ### 2.4h Contract partition runway — inserts past the last partition fail
 Probe: `contract-partition-runway`
@@ -22676,6 +22679,14 @@ establish:
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
+  Since 2026-11-13 a URnode order of our Shopify store paid with Solana Pay
+  into the same receiver is not one of these: when its Shopify order record
+  verifies it (one order paid through Solana Pay, a sale of exactly the
+  payment's total near its block), the webhook or the reconcile's receiver
+  leg records it in `solana_shopify_order_payment` instead, never credited.
+  A Solana Pay app payment no order verifies stays `no_intent`, its match
+  note saying why (no order, two, or an order another payment holds: a
+  second payment of one order); check it against the order in Shopify.
 - `payment-refund-unmatched` (PAGE): Stripe withdrew/disputed funds but the
   event could not be mapped to the immutable purchase ledger. Do not guess by
   email or manually edit a balance.
@@ -22737,6 +22748,47 @@ The count is distinct invoices; the ages are first-seen ages:
   older block range to recover. After a Bitcoin reorg deeper than the kept chain,
   check the chain on a second source, then clear `crypto_scan_cursor.recent_blocks`
   for `btc`: the scan reads its reorg window again from the cursor.
+
+Received but never credited (support inbox 6584, 6692, 6729: seven 40 USDC
+payments of 2025-09 to 2026-08 reached our Solana receivers, were never
+credited, and nothing told anyone). Every payment the rails receive and do
+not credit is counted per rail by the subscriptions snapshot as
+`urnetwork_subscription_payments_uncredited{rail}`, with
+`urnetwork_subscription_payments_uncredited_oldest_age_seconds{rail}`, once it is
+30 minutes old by default (`model.SubscriptionMetricsSettings.UncreditedMinAge`): `usdc_solana`
+(a `solana_unfulfilled_payment` row, written by the Helius webhook, the
+reconcile or its receiver leg), each crypto coin (a `crypto_payment_receipt`
+in `seen`, `confirmed` or `review`), and `gamma` (a spent `gamma_charge` whose
+intent is neither credited nor voided). The panel is "received payments not
+credited" on the subscriptions dashboard. The alerts read the same rows
+directly: a Solana row pages as `payment-solana-unfulfilled` above, a gamma
+charge as §2.22a, and the crypto receipts no class above names page or warn
+here, per coin, with first-seen ages:
+
+- `payment-received-uncredited` (PAGE): a receipt the scanner should have
+  credited by itself is still in the mempool or in a block two hours after it
+  was first seen (`PaymentFailuresSettings.ReceivedPendingAge`) (past the slowest coin's credit depth and past
+  `crypto-scanner-stalled`, so an outage pages as a stall first; a double spend
+  counts only once mined), or its credit failed five times in a row
+  (`credit_failed`). The customer paid and has nothing. Read the taskworker log
+  (`[cryptopay]`) and `bringyourctl crypto show`, fix the credit's cause, and
+  let the scanner credit it; a `credit_failed` receipt is credited with
+  `bringyourctl crypto credit` after review. Never credit twice.
+- `payment-received-held` (WARN): a receipt held for an operator or the
+  customer that no class above names, 30 minutes after it was first seen
+  (`PaymentFailuresSettings.ReceivedHeldAge`):
+  `underpaid`, `late_underpaid`, `extra`, `unknown_address`, `voided`,
+  `orphaned`, `unlinked`, or a sanctions or shape hold that names no invoice.
+  Since 2026-11-13 the BTC, ETH, SOL and TAO scanners record a payment to any
+  address an invoice was ever given, however old, so a payment to a long
+  closed invoice lands here when the late-payment rules do not credit it;
+  `unlinked` is one the rules would credit, to an invoice past the 30-day
+  retention unlink, whose network the unlink forgot. Match it to
+  its support thread; credit one that covers what was bought with
+  `bringyourctl crypto credit` after review, or keep it for the customer's
+  request with a documented disposition. Crypto returns wait for the
+  customer's request (owner, 2026-11-11): never return or offer one
+  unprompted, and never credit on an address or amount match alone.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal
@@ -23103,6 +23155,70 @@ Implementation convention: SIGNALS.md §2.22b (`gamma-watcher`) maps to
 cover the registration, the migration gate, every class with its severity,
 sustain and guidance, privacy, and malformed aggregates; a SQL test runs the
 SELECT on tables shaped as the Gamma migration makes them.
+
+### 2.22c Store notifications stopped while purchases continue
+Probe: `store-notifications`
+
+From 2026-10-19 to 10-27 Main refused every Google Play real-time developer
+notification (POST /pay/play answered 503: vault google.yml had no
+`webhook.audience`), about 74,000 refusals, and nothing noticed for eight
+days. Purchases went on being credited by the app's purchase report and the
+hourly reconcile, but a Play purchase cancelled before its first notification
+was processed was never acknowledged, and Google refunded it after three days
+(support inbox 8010, 8046, 8086, 8098). The App Store's notifications
+(POST /apple/notification) had the same blind spot.
+
+Every notification of either store now ends in one outcome
+(controller/store_notification_flow.go), counted on the api and alt as
+`urnetwork_store_notifications_total{store,outcome}` (`google`, `apple`):
+`accepted`; `refused_unavailable` (our verification config is missing: 503,
+with the `payment-webhook-refused` line); `refused_auth` (a Play push with no
+valid Google token of the configured publisher); `refused_audience` (the
+configured publisher's token for another audience: our google.yml and the
+Pub/Sub subscription disagree); `refused_signature` (an App Store JWS that does
+not verify against the pinned roots, or is too old); `refused_claims` (a
+verified App Store notification of another app, environment or version);
+`refused_malformed` (a body that is not a notification); `error` (verified,
+then processing failed; the store redelivers it). An accepted notification
+sets `urnetwork_store_notification_last_accepted_timestamp_seconds{store}` and,
+at most once a minute per process, the store's row of `store_notification_flow`,
+which the migration creates with its clock at the migration. The api
+dashboard's "store notifications" panels show both.
+
+- `store-notification-silent` (PAGE, this probe): a store accepted no
+  notification for 24 hours (`store_notification_flow.last_accepted_at`)
+  while `subscription_renewal` holds supporter purchases of it started inside
+  those 24 hours and at least an hour ago, which other paths credited. Every
+  purchase sends its store's notification within minutes, so the notifications
+  are refused, failing or no longer sent (a removed push subscription or
+  notification URL). Restore the verifier input or the store's endpoint
+  setting through their owners, let the stores redeliver, and reconcile the
+  purchases of the window, checking Play Console for any cancelled before
+  their first notification; never grant from this aggregate. An api older than
+  the flow writes nothing, so it reads as silent a day after the migration:
+  deploy the api and alt with the migration.
+- `store-notification-refused` (PAGE, from the §1.5 log tail at one line a
+  minute): the fixed line `[store-notification]<store> <outcome>` for
+  `refused_audience`, `refused_claims` or `error`, framed by store and
+  outcome: a notification that verified as the store's was refused or failed.
+  Our configuration and the store's disagree, or processing fails behind it.
+  Correct the configuration through the vault owner or fix the processing
+  error; never disable verification.
+- `store-notification-unverified` (WARN, from the log tail at five lines a
+  minute): the same line for `refused_auth`, `refused_signature` or
+  `refused_malformed`. Anyone can post to the routes, so these alone are not
+  an outage; a sustained rate while accepted notifications stop (the silent
+  page) is the store's own notifications failing to verify, a changed
+  publisher service account or Apple chain.
+
+Only stores, outcomes, counts and ages leave the api and PostgreSQL: no token,
+purchase token, transaction id, network or body.
+
+Implementation convention: SIGNALS.md §2.22c (`store-notifications`) maps to
+`signal_store_notifications.go` and `signal_store_notifications_test.go`. The
+log classes are in `tailer.go`. Synthetic tests cover the migration gate, the
+silent decision, privacy and malformed aggregates; a database test runs the
+query against the migrated schema.
 
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`
@@ -28690,7 +28806,7 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 |---|---|---|---|
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
-| contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
+| partition-retention-stuck (contract-reap-stalled retired 2026-11-13) | pg | §2.4g | WARN |
 | contract-horizon-reaper-stalled / contract-horizon-reaper-failing / contract-horizon-control-unavailable / contract-horizon-reaper-behind / contract-horizon-block-points-holding / contract-horizon-reaper-unobservable | Mimir taskworker metrics | §2.4r, added 2026-11-01 after the 35-day horizon review, implemented by `contract-horizon-reaper` | WARN: no run in 1 h; 3 error or control-unavailable runs without progress in 1 h; lag growth of 2 h in 6 h while on; any block points keep |
 | usage-archive-hash-budget / usage-archive-hash-budget-unobservable | pg catalog | §2.4s, implemented by `usage-archive-hash-budget` | WARN when twice the largest archive week passes half of work_mem * hash_mem_multiplier / 64 B |
 | contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover | runway PAGE under 2 covered future weeks; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its week |
@@ -29613,7 +29729,9 @@ The refusal itself was invisible to `log-errors`: the warning
 `[<webhook>]webhook refused, verification <secret|publisher|audience>
 unavailable: <detail>` can contain no error-shaped word. The
 `payment-webhook-refused` class pages on one matching line, framed only by
-play, stripe, coinbase or helius. Its fixed verification-input sample omits all
+play, stripe, coinbase, helius or apple (an App Store notification whose
+apple.yml cannot build the verifier is answered 503 the same way, no longer a
+panic). Its fixed verification-input sample omits all
 resource, field and loader-error details, without relabeling publisher/audience
 failures as missing secrets. The refusal header takes precedence over generic
 resource/transport signatures in its suffix; a plain unrelated resource or
@@ -50248,7 +50366,12 @@ until §27.2's DNS fix was deployed and its first tick landed. Extended
 2026-11-12, when the owner asked for each target country's resolvers: "use
 the dns resolver settings for the target country. The sdk gives a dns per
 country." The probe has two halves: the whole zone, below, and each
-connection region's resolvers, judged resolver by resolver.
+connection region's resolvers, judged resolver by resolver. Changed
+2026-11-12, after the owner chose to give China its own small TXT set that its
+resolvers deliver whole: the publisher answers China with sets of its own
+(below, "China's own set"), and the per-country half asks a region's resolvers
+with the resolver's own /24 as the client subnet, without which Alidns and
+DNSPod are never answered with China's set.
 
 #### The whole zone
 
@@ -50296,6 +50419,8 @@ records up to its cache life older; an hour covers that.
 False-negative qualifiers: the name is geo-routed, so the probe sees only
 the TXT sets of the resolvers' locations (or the default set). A set that
 fails only for another continent is §27.2's `extender-dns-publish-failing`.
+China's own set is seen only by the per-country half, which asks China's
+resolvers with a Chinese client subnet.
 A client behind a resolver that drops large answers, like the router above,
 gets no records at all, and this half does not see it; the per-country half
 below asks the resolvers the sdk gives each connection region. The
@@ -50355,6 +50480,16 @@ Each resolver is asked the way a client asks it (connect
   16 KiB and over it.
 - Plain DNS only when the client would fall back: when no DoH server of the
   region yields a TXT value. UDP, then TCP when truncated.
+- A region's resolvers are asked with the resolver's own /24 as the EDNS
+  client subnet (RFC 7871), in the DoH question's OPT record and in the plain
+  question's, standing in for the region's clients. Alidns and DNSPod forward
+  the asker's subnet to the name's nameservers: on 11-12, asked from here
+  without one, both were answered North America's set, and asked with any
+  Chinese /24, Asia's. Without the subnet the probe would judge China's
+  resolvers on a set no client in China is answered with, and never see
+  China's own set. A resolver that does not forward a subnet answers for its
+  own location, as before. The default path is asked with none, as a client
+  asks it.
 - A region's path here is its DoH presets, then its plain resolvers. A client
   puts the default DoH servers behind a region's presets too, but a region is
   in the sdk's table because those are known not to work there, and from here
@@ -50372,8 +50507,9 @@ with a resolver's /24 as the EDNS client subnet (RFC 7871). Route 53 answers
 a client subnet by its location, as it answers a resolver that forwards its
 client's subnet. On 11-12 it answered 15 records (5.2 KB) from here and for
 Russian /24s, and 13 for Iranian and Chinese ones; the sets shared no
-record. An answer is matched to a set by extender key (each record's signed
-public key), so a resolver one tick behind still matches.
+record. From 11-12 it answers a Chinese /24 with China's own set, one record
+by default. An answer is matched to a set by extender key (each record's
+signed public key), so a resolver one tick behind still matches.
 
 Each (country, resolver) is judged on its own:
 
@@ -50388,7 +50524,13 @@ Each (country, resolver) is judged on its own:
 - a partial set: the client's 16 KiB read cut records off (`client_cap`), or
   the answer is a strict subset of its location's set
   (`fewer_than_authoritative`). The second is judged only when the set for
-  the resolver's own /24 was read, since that set can be the smaller one;
+  the resolver's own /24 was read, since that set can be the smaller one. A
+  resolver known to cut an answer it cannot carry to a run of its whole
+  records (`TrimmingResolvers`: DNSPod, by the endpoints the sdk gives cn,
+  which delivers 481 bytes whole) is not judged partial for a run of whole
+  records that each decode, of a set larger than it delivers whole: that is
+  its trim, which China's own set is sized for (below). An empty answer from
+  it, or one with a value that does not decode, is judged as any other;
 - unreachable from here: no answer (to the TXT question nor, from a plain
   resolver, to the A question asked after it), a refusal, a server failure,
   an HTTP or TLS failure. Some regional resolvers refuse foreign questions
@@ -50460,8 +50602,10 @@ from here and its /24's set, and a set that equals either is whole.
 
 False-negative qualifiers: from here, an anycast resolver (Cloudflare,
 Quad9, DNS.SB, Alidns, DNSPod) answers from its nearest site, not from the
-region; a region's blocking of DoH or of the name, and anything only an
-in-country network does to the answer, is not seen. The device's own
+region. Alidns and DNSPod are answered by Route 53 for the client subnet the
+probe sends, but a site in China may cache or trim differently. A region's
+blocking of DoH or of the name, and anything only an in-country network does
+to the answer, is not seen. The device's own
 resolver, which a client's TXT fallback asks, is not asked. IPv6 endpoints
 are not asked. A region's plain resolvers are asked only in a run whose DoH
 presets yield nothing, as a client asks them.
@@ -50472,7 +50616,9 @@ alert names the country, the resolver and its endpoint:
 
 - `none_served`, `name_error` or `filtered` from a region's resolver: the
   region's resolver refuses the name; compare
-  `dig +tcp TXT extender.bringyour.com @<resolver ip>` with `@1.1.1.1`;
+  `dig +tcp +subnet=<resolver ip>/24 TXT extender.bringyour.com @<resolver ip>`
+  (the subnet stands in for the region's clients, as the probe asks) with
+  `@1.1.1.1`;
 - `truncated_empty` or `txt_dropped`: the resolver cannot carry the answer
   (a DoH answer marked truncated with none, a truncated UDP answer whose TCP
   retry failed, or a TXT question left unanswered while the A question is
@@ -50485,11 +50631,73 @@ alert names the country, the resolver and its endpoint:
   `response_bytes`;
 - `fewer_than_authoritative`: the resolver trims the set; compare its answer
   with `dig +tcp +norec +subnet=<resolver ip>/24 TXT extender.bringyour.com
-  @<a nameserver from dig NS extender.bringyour.com>`.
+  @<a nameserver from dig NS extender.bringyour.com>`. For cn, China's own
+  set is held to what Alidns delivered whole on 11-12, and DNSPod's run of
+  one whole record of it is not reported (below); a partial cn answer from
+  Alidns means its ceiling moved. Measure again as below before moving
+  `extenderDnsCnDnspodMaxMessageBytes` or
+  `extenderDnsCnAlidnsMaxMessageBytes`.
 
 A resolver that keeps failing its region belongs out of the sdk's
 per-country table (connect `net_http_doh_regional.go`), or the location's
-TXT set must shrink to what it carries.
+TXT set must shrink to what it carries, as China's did on 11-12.
+
+#### China's own set
+
+What China's resolvers deliver, measured by hand on 11-12 from this side:
+read-only lookups of public TXT names of known size hosted on Route 53, as the
+extender name is, paced 3 s apart, through both providers by DoH (a client's
+question, an OPT record of 1,232 bytes) and by plain DNS, each answer compared
+with the name's whole set over TCP. Sizes are the whole DNS message.
+
+| Resolver | Delivered whole | Larger answers |
+|---|---|---|
+| DNSPod: DoH 1.12.12.12 and 120.53.53.53, plain 119.29.29.29 over UDP | up to 481 bytes (one 410-character record) | 948 to 2,297 bytes cut at record boundaries, not marked truncated: all ten such answers parsed, every value a whole record of the set, 4 to 6 of them in 433 to 462 bytes, never a partial record and never none; 4,511 bytes marked truncated with none. The EDNS size asked (none, 1,232 or 4,096) changes nothing |
+| DNSPod: plain 119.29.29.29 over TCP | 948 bytes once | a 481-byte answer came back empty; a client never retries over TCP an answer that arrived unmarked |
+| Alidns: DoH 223.5.5.5 and 223.6.6.6, plain 223.5.5.5 over UDP and TCP | up to 1,144 bytes (16 records) | trimmed to 1,151 to 1,204 bytes, not marked truncated |
+
+A Main record is 264 to 368 characters, so Alidns delivers three of them
+whole (two near the longest, four of the shortest), and DNSPod cuts such an
+answer to one whole record. Both forward the asker's subnet, and a Chinese /24
+is answered
+Asia's set: 13 records, 4.6 KB, of which Alidns served 3 (1,200 bytes) and
+DNSPod none. A client takes the answer of whichever DoH server answers first,
+so a client in China learned three extenders from DNS, or none.
+
+From 11-12 the publisher answers China with sets of its own
+(`taskworker/work/extender_dns_publish.go`, `extenderDnsCnSet`; set
+identifiers `extender-country-CN-<type>`, Route 53's CN country, which answers
+China in place of Asia's sets):
+
+- a TXT set of as many records as Alidns delivers whole, all of them within
+  its 1,204 bytes, and each alone within the 462 bytes DNSPod's trimmed
+  answers ran to, so DNSPod's cut keeps one whole record of it, counting the
+  question, the OPT record and a /24 client subnet. `cn_record_count` (the
+  dns block) caps it, at 4 unset, which Alidns's ceiling reaches first for
+  every record Main signs: the best for users (owner, 2026-11-12);
+- A and AAAA sets of exactly the addresses those records name; a family none
+  of them has is not answered by China's sets, and Route 53 answers China's
+  question for it from Asia's set, whose addresses no record of China's
+  vouches for, so a client never dials them;
+- a window that moves one place along the extenders China's own vantage of
+  the dns channel is dealt each epoch every tick (R2: its partition of Asia's
+  open addresses, then the fill), canaries first while a slot is left to
+  rotate, so every extender heads a window once a cycle and a day's lookups in
+  China cover that vantage's partition and never more.
+
+A client whose lookup lands on Alidns gets about three records, and one on
+DNSPod one whole record, unmarked; this half takes DNSPod's run of whole
+records as its trim and reports it neither stale nor partial (above), while an
+empty or broken answer from DNSPod still alerts. Setting `cn_record_count` to
+1 gives every client in China the one record both deliver whole. The
+extenders dashboard's "China's own set" panel shows what Route 53 accepted
+each tick (`urnetwork_taskworker_extender_dns_country_records`).
+
+Expected once the taskworker carrying it and this monitor are deployed: every
+cn resolver fresh, Alidns whole (about three records, about 1.1 KB) and
+DNSPod one whole record of the set Route 53 gives the resolver's /24. Until
+the monitor carries the client subnet, its cn identities keep judging the set
+Route 53 gives the monitor's own location.
 
 ### 28.3 Provider fleet departure
 

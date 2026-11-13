@@ -51,7 +51,8 @@ type cryptoCoinFlow struct {
 	// called at the start of each attempt: the chain clock and the recorded
 	// chain's times
 	start func(t testing.TB)
-	// a coin whose reader scans blocks (Bitcoin): it watches no address list
+	// a coin whose reader scans blocks (Bitcoin, TAO): it watches no address
+	// list, and matches every issued address in each block
 	blockScanner bool
 	// called before the scan that credits: a block scanner's chain moves on
 	// to the block that holds the payment, mined after the invoice was made
@@ -355,13 +356,14 @@ func TestCryptoCoinFlowBittensor(t *testing.T) {
 	node.serveMetadata(t, paymentBlock-1, paymentBlock)
 
 	runCryptoCoinFlow(t, &cryptoCoinFlow{
-		asset:      model.CryptoAssetTao,
-		code:       "TAO",
-		network:    "bittensor",
-		address:    cryptoTaoAddressOf(invoice),
-		rate:       400,
-		paidAtomic: 1_000_000_000,
-		market:     model.SubscriptionMarketBittensor,
+		asset:        model.CryptoAssetTao,
+		code:         "TAO",
+		network:      "bittensor",
+		address:      cryptoTaoAddressOf(invoice),
+		rate:         400,
+		paidAtomic:   1_000_000_000,
+		market:       model.SubscriptionMarketBittensor,
+		blockScanner: true,
 		settings: func() *cryptoWalletSettings {
 			return &cryptoWalletSettings{Asset: model.CryptoAssetTao, ChainRpcUrl: "ws://fake", ChainProfile: cryptoNetworkMainnet}
 		},

@@ -966,8 +966,19 @@ func ListSolanaPaymentIntentsByAmountMicro(
 	amountMicro int64,
 	minExpiresAt time.Time,
 ) (intents []*SolanaPaymentIntent, returnErr error) {
+	return ListSolanaPaymentIntentsByAmountMicroInConn(nil, ctx, amountMicro, minExpiresAt)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition
+// boundary. The payment reconcile's legs read on the run's session.
+func ListSolanaPaymentIntentsByAmountMicroInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	amountMicro int64,
+	minExpiresAt time.Time,
+) (intents []*SolanaPaymentIntent, returnErr error) {
 	intents = []*SolanaPaymentIntent{}
-	server.Db(ctx, func(conn server.PgConn) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`

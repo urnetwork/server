@@ -31,6 +31,13 @@ package work
 // before it draws any set (a dns block with no record name) counts no change;
 // its gauges read zero.
 //
+// A country answered by sets of its own (extenderDnsCnSet) is counted in every
+// gauge above like any location, and on its own in a gauge per country and
+// record type, the values Route 53 accepted in its sets: addresses in its A
+// and AAAA sets, signed records in its TXT set. China's TXT set holds one
+// record by default, so a zero there is China answered by its continent's
+// sets again.
+//
 // Every label is a bounded enum, so the series count is fixed no matter how
 // large the extender population grows. Registered with the default prometheus
 // registry, which `server.StartStatsPusher` pushes to mimir automatically.
@@ -76,7 +83,22 @@ var (
 		"Distinct extenders reachable through the addresses Route 53 accepted in the last tick",
 		nil, nil,
 	)
+	extenderDnsCountryRecordsDesc = prometheus.NewDesc(
+		"urnetwork_taskworker_extender_dns_country_records",
+		"Values in the sets of a country answered by extender dns sets of its own that Route 53 accepted in the last tick, per country and record type: addresses in A and AAAA, signed records in TXT",
+		[]string{"country", "record_type"}, nil,
+	)
 )
+
+// The countries answered by sets of their own, each published with every
+// record type.
+var extenderDnsCountryCodes = []string{extenderDnsCnSet.countryCode}
+
+// One country's values of one record type.
+type extenderDnsCountryRecordsKey struct {
+	countryCode string
+	recordType  string
+}
 
 var extenderDnsChangesCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
@@ -92,6 +114,7 @@ type extenderDnsObservation struct {
 	addressesByVersion map[string]int
 	txtRecords         int
 	extenders          int
+	countryRecords     map[extenderDnsCountryRecordsKey]int
 }
 
 type extenderDnsCollector struct {
@@ -153,9 +176,19 @@ func observeExtenderDnsSets(
 	observation := &extenderDnsObservation{
 		setsByType:         map[string]int{"A": 0, "AAAA": 0, "TXT": 0},
 		addressesByVersion: map[string]int{"4": 0, "6": 0},
+		countryRecords:     map[extenderDnsCountryRecordsKey]int{},
+	}
+	for _, countryCode := range extenderDnsCountryCodes {
+		for _, recordType := range extenderDnsRecordTypes {
+			observation.countryRecords[extenderDnsCountryRecordsKey{countryCode: countryCode, recordType: recordType}] = 0
+		}
 	}
 	extenders := map[server.Id]bool{}
 	for _, acceptedSet := range acceptedSets {
+		if acceptedSet.countryCode != "" {
+			key := extenderDnsCountryRecordsKey{countryCode: acceptedSet.countryCode, recordType: acceptedSet.recordType()}
+			observation.countryRecords[key] += len(acceptedSet.ips) + len(acceptedSet.records)
+		}
 		switch {
 		case 0 < len(acceptedSet.records):
 			observation.setsByType["TXT"] += 1
@@ -187,6 +220,7 @@ func (self *extenderDnsCollector) Describe(descs chan<- *prometheus.Desc) {
 		extenderDnsAddressesDesc,
 		extenderDnsTxtRecordsDesc,
 		extenderDnsExtendersDesc,
+		extenderDnsCountryRecordsDesc,
 	} {
 		descs <- desc
 	}
@@ -210,4 +244,7 @@ func (self *extenderDnsCollector) Collect(metrics chan<- prometheus.Metric) {
 	}
 	gauge(extenderDnsTxtRecordsDesc, observation.txtRecords)
 	gauge(extenderDnsExtendersDesc, observation.extenders)
+	for key, count := range observation.countryRecords {
+		gauge(extenderDnsCountryRecordsDesc, count, key.countryCode, key.recordType)
+	}
 }

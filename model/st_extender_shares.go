@@ -5,6 +5,7 @@ package model
 import (
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -29,9 +30,11 @@ type stExtenderAmendment struct {
 	// E_x, the first epoch the amendment covers, as its signed amendment entry
 	// fixes it (sn WHITEPAPER.md §8.6.7); 0 while no entry is in force
 	FirstEpoch uint64
-	// the NO's registered platform endpoints, which hold a hop share but earn
-	// none; empty until sidecar's edges are registered
-	PlatformEndpoints map[server.Id]bool
+	// the NO's registered platform endpoints (st_platform_endpoint.go), which
+	// hold a hop share but earn none: a share is a platform endpoint's on a
+	// contract created while its registration was in force. Empty until
+	// sidecar's edges are registered.
+	PlatformEndpoints StPlatformEndpointSet
 }
 
 // Whether the amendment covers epoch.
@@ -48,6 +51,8 @@ type stContractEpochShares struct {
 	IntraPlatform ByteCount
 	// the shares on the origin's network: z_c's intra-network bytes
 	IntraNetwork ByteCount
+	// the shares that are z_c, both parts, in the snapshot's client order
+	Pooled []contractProviderUsage
 }
 
 // The contract's extender pool bytes z_c.
@@ -56,14 +61,16 @@ func (self *stContractEpochShares) ExtenderPoolBytes() ByteCount {
 }
 
 // Reads a contract's shares for epoch. Before the amendment's first epoch every
-// share is provider usage. From it, a platform endpoint's share is
-// intra-platform, even on the origin's network; any other share on the origin's
-// network is intra-network (contractShareIsIntraNetwork); and every other share
-// is provider usage, unchanged. Each share moves whole, to one place.
+// share is provider usage. From it, the share of a platform endpoint registered
+// when the contract was created (createTime) is intra-platform, even on the
+// origin's network; any other share on the origin's network is intra-network
+// (contractShareIsIntraNetwork); and every other share is provider usage,
+// unchanged. Each share moves whole, to one place.
 func stContractSharesForEpoch(
 	snapshot *contractUsageSnapshot,
 	epoch uint64,
 	originNetworkId server.Id,
+	createTime time.Time,
 	amendment stExtenderAmendment,
 ) (*stContractEpochShares, error) {
 	if snapshot == nil {
@@ -83,10 +90,12 @@ func stContractSharesForEpoch(
 		}
 		total += int64(provider.ByteCount)
 		switch {
-		case inForce && amendment.PlatformEndpoints[provider.ClientId]:
+		case inForce && amendment.PlatformEndpoints.holds(provider.ClientId, createTime):
 			shares.IntraPlatform += provider.ByteCount
+			shares.Pooled = append(shares.Pooled, provider)
 		case inForce && contractShareIsIntraNetwork(provider.NetworkId, originNetworkId):
 			shares.IntraNetwork += provider.ByteCount
+			shares.Pooled = append(shares.Pooled, provider)
 		default:
 			shares.Providers = append(shares.Providers, provider)
 		}

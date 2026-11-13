@@ -5,6 +5,8 @@ package providertunnel
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,10 +148,16 @@ func TestOpenRefusesACapabilityObservationWithoutObserver(t *testing.T) {
 // after the first leaves; a candidate that never got in is no replacement,
 // and the URL tunnel's rotation stays a live path.
 func TestCapabilityTunnelLostEndsWhenItsWindowClientIsReplaced(t *testing.T) {
+	recorder := connect.NewPeerCapabilityRecorder(1)
 	for _, capabilityObservation := range []bool{false, true} {
 		lostCtx, lose := context.WithCancelCause(context.Background())
 		monitor := newFakeMonitor()
-		unwatch := watchTunnelPath(monitor, lose, capabilityObservation)
+		var observation *CapabilityObservation
+		if capabilityObservation {
+			observation = &CapabilityObservation{Recorder: recorder}
+		}
+		clientReplaced := &atomic.Bool{}
+		unwatch := watchTunnelPath(monitor, lose, observation, clientReplaced)
 		first, failedCandidate, replacement := connect.NewId(), connect.NewId(), connect.NewId()
 		monitor.emit(failedCandidate, connect.ProviderStateInEvaluation)
 		monitor.emit(failedCandidate, connect.ProviderStateEvaluationFailed)
@@ -172,13 +180,18 @@ func TestCapabilityTunnelLostEndsWhenItsWindowClientIsReplaced(t *testing.T) {
 				t.Fatalf("a URL tunnel's make-before-break rotation counted as lost: %v", context.Cause(lostCtx))
 			}
 		}
+		if clientReplaced.Load() {
+			t.Fatalf("capability %t: a tunnel that ends on a replacement recorded one instead", capabilityObservation)
+		}
 		unwatch()
 	}
 
 	// a replacement coalesced to its removal, after the first left, is one too
 	lostCtx, lose := context.WithCancelCause(context.Background())
 	monitor := newFakeMonitor()
-	unwatch := watchCapabilityWindowClient(monitor, lose)
+	unwatch := watchCapabilityWindowClient(monitor, func() {
+		lose(fmt.Errorf("%w: %w", ErrTunnelLost, ErrTunnelClientReplaced))
+	})
 	defer unwatch()
 	first, replacement := connect.NewId(), connect.NewId()
 	monitor.emit(first, connect.ProviderStateAdded)
@@ -189,6 +202,45 @@ func TestCapabilityTunnelLostEndsWhenItsWindowClientIsReplaced(t *testing.T) {
 	monitor.emit(replacement, connect.ProviderStateRemoved)
 	if cause := context.Cause(lostCtx); !errors.Is(cause, ErrTunnelClientReplaced) {
 		t.Fatalf("a coalesced replacement left lost with %v", cause)
+	}
+}
+
+// A URL turn that measures post-quantum keeps its tunnel when its window
+// client is replaced: the URL legs must not depend on the session, so the
+// replacement is recorded for the turn to read its session as unmeasured,
+// and the path stays live.
+func TestPostQuantumUrlTunnelRecordsAReplacedWindowClient(t *testing.T) {
+	lostCtx, lose := context.WithCancelCause(context.Background())
+	monitor := newFakeMonitor()
+	clientReplaced := &atomic.Bool{}
+	observation := &CapabilityObservation{Recorder: connect.NewPeerCapabilityRecorder(1), KeepTunnelOnReplacement: true}
+	unwatch := watchTunnelPath(monitor, lose, observation, clientReplaced)
+	defer unwatch()
+	first, replacement := connect.NewId(), connect.NewId()
+	monitor.emit(first, connect.ProviderStateInEvaluation)
+	monitor.emit(first, connect.ProviderStateAdded)
+	if clientReplaced.Load() {
+		t.Fatal("the first client's admission was recorded as a replacement")
+	}
+	monitor.emit(replacement, connect.ProviderStateAdded)
+	if !clientReplaced.Load() {
+		t.Fatal("a replaced window client was not recorded")
+	}
+	if lostCtx.Err() != nil {
+		t.Fatalf("a post-quantum URL turn lost its tunnel at a replacement: %v", context.Cause(lostCtx))
+	}
+}
+
+// A URL turn's observation holds its first sends for the seal (connect's
+// OpportunisticEstablishHold); the capability probe's sends at once.
+func TestCapabilityObservationAppliesTheEstablishHold(t *testing.T) {
+	recorder := connect.NewPeerCapabilityRecorder(1)
+	for _, hold := range []time.Duration{0, 3 * time.Second} {
+		settings := connect.DefaultClientSettings()
+		(&CapabilityObservation{Recorder: recorder, EstablishHold: hold}).apply(settings)
+		if settings.EncryptionSettings.Mode != connect.EncryptionModeOpportunistic || settings.EncryptionSettings.OpportunisticEstablishHold != hold || !settings.ClientKeyRegistrationRequired {
+			t.Fatalf("hold %s applied %+v", hold, settings.EncryptionSettings)
+		}
 	}
 }
 

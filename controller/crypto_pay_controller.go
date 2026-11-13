@@ -163,7 +163,8 @@ type CryptoPaymentStatusResult struct {
 	NetworkName string `json:"network_name"`
 	// unknown | pending | seen | confirming | paid | expired | review
 	Status string `json:"status"`
-	// with review: underpaid | late_underpaid | extra | orphaned | voided
+	// with review: underpaid | late_underpaid | extra | orphaned | voided |
+	// unlinked
 	ReviewReason string `json:"review_reason"`
 	// exact decimal strings in coin units, and the same in atomic units
 	Amount          string `json:"amount"`
@@ -767,10 +768,12 @@ func CreateCryptoPaymentIntent(
 		networkId: &networkId,
 		reuse:     true,
 	}
+	// a plan and a data pack alike land on the caller's network
+	// (purchase_guest_guard.go)
+	if refuseGuestPurchase(clientSession) {
+		return cryptoIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestSignInRequiredMessage), nil
+	}
 	if plan != "" {
-		if refuseGuestPurchase(clientSession) {
-			return cryptoIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestSignInRequiredMessage), nil
-		}
 		if plan == model.SolanaPlanYearlyOnboarding {
 			if EligibleOnboardingOffer(clientSession, networkId) == nil {
 				return cryptoIntentError(PurchaseErrorCodeOfferUnavailable, "The welcome offer is not available."), nil
@@ -883,6 +886,9 @@ func CreateDataCryptoPaymentIntent(
 		networkId, storedName := model.FindNetworkByName(clientSession.Ctx, networkName)
 		if networkId == nil {
 			return cryptoIntentError(PurchaseErrorCodeNetworkNotFound, fmt.Sprintf("No network named %s", networkName)), nil
+		}
+		if refuseGuestDestination(clientSession.Ctx, *networkId) {
+			return cryptoIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestNetworkMessage), nil
 		}
 		request.delivery = model.CryptoDeliveryNetwork
 		request.networkId = networkId
@@ -1249,8 +1255,10 @@ func cryptoLoadIntentForToken(ctx context.Context, intentIdText string, token st
 	return intent
 }
 
-// CryptoPaymentStatus answers POST /pay/crypto/status. It reads Postgres
-// only: the scanner keeps the receipts current.
+// CryptoPaymentStatus answers POST /pay/crypto/status. The scanner keeps the
+// receipts of the scanned coins current; an open USDC invoice, which only its
+// webhook or the hourly reconcile credits, is read from the chain here
+// (solana_status_check.go).
 func CryptoPaymentStatus(
 	args *CryptoPaymentStatusArgs,
 	clientSession *session.ClientSession,
@@ -1263,6 +1271,8 @@ func CryptoPaymentStatus(
 	if intent == nil {
 		return &CryptoPaymentStatusResult{Status: CryptoPaymentStatusUnknown}, nil
 	}
+	// a USDC payment its webhook has not delivered is found on the chain
+	intent = cryptoUsdcStatusCheck(clientSession, intent)
 	config := cryptoPayConfigFunc()
 	receipts := []*model.CryptoPaymentReceipt{}
 	if intent.Asset != model.CryptoAssetUsdcSolana {
@@ -1549,6 +1559,17 @@ var cryptoHeldReviewReasons = []string{
 	model.CryptoReviewReasonAmountUnmatched,
 	model.CryptoReviewReasonVoided,
 	model.CryptoReviewReasonExtra,
+	// a payment to an invoice the retention unlink passed, which no longer
+	// knows its network
+	model.CryptoReviewReasonUnlinked,
+}
+
+// Whether an invoice's credit has nowhere to go: one delivered to a network,
+// past the retention unlink, which forgot the network
+// (RunCryptoPaymentUnlink). A code invoice still delivers: its buyer reads the
+// code with the status token.
+func cryptoIntentUndeliverable(intent *model.CryptoPaymentIntent) bool {
+	return intent.UnlinkedAt != nil && intent.Delivery != model.CryptoDeliveryCode
 }
 
 // cryptoBuyerReviewReason is the review reason a buyer is shown: either
@@ -1567,8 +1588,8 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 	return receipt.State == model.CryptoReceiptStateReview && slices.Contains(cryptoHeldReviewReasons, receipt.ReviewReason)
 }
 
-// cryptoEvaluateIntent judges an invoice and its receipts at now. Pure: the
-// status endpoint and the scanner share it, and the tests drive it directly.
+// Judges an invoice and its receipts at now. Pure: the status endpoint and
+// the scanner share it, and the tests drive it directly.
 //
 // "The quote" below ends at expires_at plus the coin's confirmation grace
 // (policy.onTimeUntil): Bitcoin's 3 hours, since its payments are first seen
@@ -1586,7 +1607,33 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 //	                          when anything arrived on time, late_underpaid otherwise)
 //	before the quote ends,    seen, with what remains to be sent
 //	short
+//	past the retention        what the rows above would credit is review/unlinked
+//	unlink, to a network      instead: the unlink forgot the network, so the credit
+//	                          has nowhere to go (a code invoice still credits)
 func cryptoEvaluateIntent(
+	intent *model.CryptoPaymentIntent,
+	receipts []*model.CryptoPaymentReceipt,
+	policy *cryptoIntentPolicy,
+	now time.Time,
+) *cryptoIntentView {
+	view := cryptoJudgeIntent(intent, receipts, policy, now)
+	if view.Action == cryptoIntentActionCredit && cryptoIntentUndeliverable(intent) {
+		view.Status = CryptoPaymentStatusReview
+		view.ReviewReason = model.CryptoReviewReasonUnlinked
+		view.RemainingAtomic = 0
+		view.Action = cryptoIntentActionReview
+		view.ActionReason = model.CryptoReviewReasonUnlinked
+		view.ReviewReceipts = view.CreditReceipts
+		view.CreditReceipts = nil
+		view.CreditUsd = 0
+		view.ReceiptUsdValue = map[model.CryptoPaymentReceiptKey]model.NanoCents{}
+	}
+	return view
+}
+
+// The table of cryptoEvaluateIntent but its last row: what the rules make of
+// the invoice wherever its credit would go.
+func cryptoJudgeIntent(
 	intent *model.CryptoPaymentIntent,
 	receipts []*model.CryptoPaymentReceipt,
 	policy *cryptoIntentPolicy,

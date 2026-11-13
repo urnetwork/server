@@ -72,6 +72,57 @@ type UrlProbeEvidence struct {
 	// udp_probes: false): no HTTP/3 leg was made in any family, and the
 	// outcome is judged on its HTTPS legs alone.
 	UdpProbesDisabled bool `json:"udp_probes_disabled,omitempty"`
+	// The end-to-end session a post-quantum turn opened with the provider
+	// (url_e2e.go): its post-quantum outcome, group and window reading.
+	// Absent for a turn that opened none, so a server that predates it sees
+	// the same document it always did.
+	E2e *UrlProbeE2eEvidence `json:"e2e,omitempty"`
+}
+
+// The bits of FailedLaterLegs: each is a later leg of a failed outcome that
+// the server's place judgement held against the provider (FP2-PROTOCOL.md
+// §3.2, §4.1). They are stored values of failed_later_legs.
+const (
+	// the IPv4 HTTP/3 leg was silent, judged the provider's
+	UrlProbeFailedLaterLegIpv4Udp int16 = 1
+	// the IPv6 HTTPS leg failed, judged the provider's
+	UrlProbeFailedLaterLegIpv6Tcp int16 = 2
+	// the IPv6 HTTP/3 leg was silent after a passed IPv6 HTTPS leg, judged
+	// the provider's
+	UrlProbeFailedLaterLegIpv6Udp int16 = 4
+)
+
+// The later legs of a failed measured outcome, of ok successes in total
+// loads, that the server judged the provider's (UrlProbeFailedLaterLeg*), or 0.
+// Later legs are made only after the IPv4 HTTPS leg passed (ValidateOutcome),
+// so a non-zero mask names an outcome that failed only on them; and the judge
+// stores an outcome as a pass when every failed later leg was the place's, so
+// a stored failure with a non-zero mask has one leg judged the provider's.
+// A leg the judge did not rule on (no verdict) is no evidence and sets no bit:
+// its outcome counts as a plain failure, the safe direction. The masks that
+// occur are 1, 2, 4, 1|2 and 1|4: an IPv6 HTTP/3 leg follows only a passed
+// IPv6 HTTPS leg, so 2|4 cannot.
+func (self *UrlProbeEvidence) FailedLaterLegs(ok int, total int) int16 {
+	if self == nil || total != 1 || ok != 0 {
+		return 0
+	}
+	mask := int16(0)
+	if leg := self.H3; leg != nil && leg.Udp == UrlProbeH3UdpSilent && leg.Verdict == UrlProbeH3VerdictProvider {
+		mask |= UrlProbeFailedLaterLegIpv4Udp
+	}
+	if leg := self.Ipv6; leg != nil {
+		switch leg.Tcp {
+		case UrlProbeIpv6TcpFailed:
+			if leg.Verdict == UrlProbeH3VerdictProvider {
+				mask |= UrlProbeFailedLaterLegIpv6Tcp
+			}
+		case UrlProbeIpv6TcpPassed:
+			if leg.H3 != nil && leg.H3.Udp == UrlProbeH3UdpSilent && leg.H3.Verdict == UrlProbeH3VerdictProvider {
+				mask |= UrlProbeFailedLaterLegIpv6Udp
+			}
+		}
+	}
+	return mask
 }
 
 // The URL the outcome's IPv6 legs loaded: their stand-in when they loaded one
@@ -359,6 +410,11 @@ func (self *UrlProbeEvidence) Validate() error {
 	if self.Ipv6 != nil && !self.IpFamily.Ipv6() {
 		return fmt.Errorf("URL evidence carries an IPv6 leg for a provider that advertises no IPv6")
 	}
+	if self.E2e != nil {
+		if err := self.E2e.validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -510,6 +566,11 @@ func (self *UrlProbeEvidence) ValidateOutcome(ok, total int, tlsFailure bool) er
 	}
 	if hasTlsFailure != tlsFailure {
 		return fmt.Errorf("URL security evidence disagrees with its aggregate TLS flag")
+	}
+	// a positive post-quantum outcome is one whose IPv4 HTTPS leg passed
+	// through the sealed session, so it needs that leg's measured pass
+	if self.E2e != nil && self.E2e.Pq == UrlProbePqPositive && (total != 1 || !self.HttpsOk(ok)) {
+		return fmt.Errorf("URL end-to-end evidence is positive without a passed IPv4 HTTPS leg")
 	}
 	https := func(failureStage string) urlProbeLegEvidence {
 		return urlProbeLegEvidence{

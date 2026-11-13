@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -61,6 +62,21 @@ import (
 // only an address a record vouched for, so an address without its record would
 // be a slot no client can use.
 //
+// China is answered by sets of its own (extenderDnsCnSet, owner, 2026-11-12).
+// The resolvers the sdk gives a client in China do not deliver a continent's
+// TXT set: on 11-12 Alidns served 3 of the Asia set's 13 records, trimmed
+// without being marked truncated, and DNSPod answered it truncated and empty,
+// so a client there learned three extenders from dns, or none. China's TXT set
+// holds as many whole records as Alidns delivers, about three, each of which
+// DNSPod also delivers alone: DNSPod trims a larger answer at record
+// boundaries, so its clients get one whole record of the set (owner,
+// 2026-11-12: "let's do the best thing for users"). The set rotates: each tick
+// answers the window one place further along the extenders China's own vantage
+// is dealt, canaries first, so a day of lookups covers that vantage's
+// partition and never more (R2). Its A and AAAA sets answer exactly the
+// addresses of the extenders its records vouch for. The sets of every other
+// location are drawn as if China's did not exist.
+//
 // Deletion is narrowed to sets this publisher owns -- the record name, an A,
 // AAAA or TXT type and a set identifier under the extender prefix. A record an
 // operator put at the same name by hand is not a set this tick "no longer
@@ -86,15 +102,24 @@ const (
 	// hold a client on addresses the next tick has already replaced.
 	ExtenderDnsDefaultTtl = 60
 
+	// The most signed records in China's set when the configuration does not
+	// say: as many as Alidns delivers whole, which its ceiling
+	// (extenderDnsCnAlidnsMaxMessageBytes) decides before this does. It holds
+	// four of the shortest records Main signed on 2026-11-12 (264
+	// characters), three of the usual ones and two of the longest (368).
+	ExtenderDnsDefaultCnRecordCount = 4
+
 	// Route 53 is a global service reached through one endpoint; the region
 	// only has to be a real one when the configuration leaves it out.
 	ExtenderDnsDefaultAwsRegion = "us-east-1"
 
-	// Set identifiers are `extender-<continent>-<type>` and
-	// `extender-default-<type>`. The prefix is also what marks a set as ours
-	// when the zone is read back.
+	// Set identifiers are `extender-<continent>-<type>`,
+	// `extender-default-<type>` and, for a country answered by sets of its
+	// own, `extender-country-<country>-<type>`. The prefix is also what marks
+	// a set as ours when the zone is read back.
 	extenderDnsSetIdentifierPrefix = "extender-"
 	extenderDnsDefaultSetLabel     = "default"
+	extenderDnsCountrySetLabel     = "country-"
 
 	// Route 53's quota on one ChangeResourceRecordSets request (developer
 	// guide, "Quotas", "Maximums on API requests"): the characters of every
@@ -119,6 +144,35 @@ const (
 	extenderDnsTxtMaxAnswerBytes = 15_000
 )
 
+// The largest TXT answers China's resolvers delivered on 2026-11-12, asked from
+// outside China with read-only lookups of public names of known size hosted on
+// Route 53, as the extender name is, by DoH as a client asks (id 0, an OPT
+// record of 1,232 bytes) and by plain DNS. Each is the whole DNS message:
+// header, question, records and OPT record.
+//
+// DNSPod (DoH at 1.12.12.12 and 120.53.53.53, plain at 119.29.29.29) delivered
+// a 481-byte answer whole, one record of 410 characters. It trimmed every
+// answer of 948 to 2,297 bytes at record boundaries without marking it
+// truncated: each of its ten trimmed answers parsed, every value in it was a
+// whole record of the name's set, and it kept a run of them in 433 to 462
+// bytes, never a partial record and never none. It answered one of 4.5 KB
+// truncated and empty, as it answers the continents' extender sets. The EDNS
+// size asked made no difference (none, 1,232 or 4,096). Its TCP answered whole
+// once and empty once, and a client's resolver never retries over TCP an
+// answer it got unmarked. A record whose answer alone fits the largest
+// trimmed answer, 462 bytes, therefore survives DNSPod's trim of China's set
+// as its first record.
+//
+// Alidns (DoH at 223.5.5.5 and 223.6.6.6, plain at 223.5.5.5) delivered every
+// answer of up to 1,144 bytes whole and trimmed every larger one, unmarked, to
+// between 1,151 and 1,204 bytes, over DoH, UDP and TCP alike. A trimmed answer
+// is cut to what fits its ceiling, so an answer within the largest it gave is
+// not cut.
+const (
+	extenderDnsCnDnspodMaxMessageBytes = 462
+	extenderDnsCnAlidnsMaxMessageBytes = 1_204
+)
+
 // The families a set can be published for, in the order a tick sends them.
 var extenderDnsIpVersions = []int{4, 6}
 
@@ -128,6 +182,11 @@ type extenderDnsRecordSet struct {
 	// the empty code is the default set, which answers every location no
 	// continent set covers
 	continentCode string
+	// set for a country answered by sets of its own (extenderDnsCnSet), which
+	// answer it in place of its continent's; continentCode is then the
+	// continent the country is on, whose canaries and addresses the sets are
+	// drawn from first
+	countryCode string
 	// 4 or 6 for an address set; 0 for the TXT set of the same location
 	ipVersion int
 	ips       []string
@@ -142,7 +201,10 @@ type extenderDnsRecordSet struct {
 // What Route 53 tells two sets of the same name and type apart by.
 func (self *extenderDnsRecordSet) setIdentifier() string {
 	label := self.continentCode
-	if label == "" {
+	switch {
+	case self.countryCode != "":
+		label = extenderDnsCountrySetLabel + self.countryCode
+	case label == "":
 		label = extenderDnsDefaultSetLabel
 	}
 	return fmt.Sprintf("%s%s-%s", extenderDnsSetIdentifierPrefix, label, self.recordType())
@@ -333,12 +395,19 @@ func publishExtenderDns(ctx context.Context, config *controller.ExtenderConfig) 
 		secret = nil
 	}
 	addresses := model.GetActiveNetworkExtenderDnsAddresses(ctx)
+	now := server.NowUtc()
 	desiredSets := sampleExtenderDnsRecordSets(
 		addresses,
 		extenderDnsSampleCount(config),
 		secret,
-		connect.ExtenderEpoch(server.NowUtc(), connect.ExtenderOpenEpochTimeout),
+		connect.ExtenderEpoch(now, connect.ExtenderOpenEpochTimeout),
 		newExtenderDnsRecordSigner(ctx, config),
+		extenderDnsCountrySample{
+			extenderDnsCountrySet: extenderDnsCnSet,
+			recordCount:           extenderDnsCnRecordCount(config),
+			rotation:              extenderDnsRotation(now),
+			recordName:            recordName,
+		},
 	)
 
 	var changes []*extenderDnsChange
@@ -415,6 +484,65 @@ func extenderDnsTtl(config *controller.ExtenderConfig) int {
 	return config.Dns.Ttl
 }
 
+// Records in China's TXT set, with the default for an unset or nonsense value.
+func extenderDnsCnRecordCount(config *controller.ExtenderConfig) int {
+	if config.Dns.CnRecordCount <= 0 {
+		return ExtenderDnsDefaultCnRecordCount
+	}
+	return config.Dns.CnRecordCount
+}
+
+// A country answered by sets of its own (C5): one whose resolvers do not
+// deliver a continent's TXT set whole, so its clients would learn a few of the
+// records or none. Its sets are a location of their own, drawn from its own
+// vantage of the dns channel, its continent's canaries first, then its
+// continent's addresses and the fill (R2, R4), and its TXT set holds only what
+// every resolver of the country delivers whole.
+type extenderDnsCountrySet struct {
+	// as Route 53 takes it, upper case
+	countryCode string
+	// the largest answer every resolver of the country delivers whole when it
+	// holds one record, and when it holds the whole set
+	maxRecordMessageBytes int
+	maxMessageBytes       int
+}
+
+// China (owner, 2026-11-12). A client there resolves through the resolvers
+// the sdk gives cn (connect net_http_doh_regional.go): Alidns and DNSPod, by
+// DoH and then by plain DNS. Alidns delivers about three records whole; DNSPod
+// trims the set at record boundaries to one whole record, whichever it caches
+// first, so each record must fit its trimmed answer alone.
+var extenderDnsCnSet = extenderDnsCountrySet{
+	countryCode:           "CN",
+	maxRecordMessageBytes: extenderDnsCnDnspodMaxMessageBytes,
+	maxMessageBytes:       extenderDnsCnAlidnsMaxMessageBytes,
+}
+
+// One tick's draw of a country's sets.
+type extenderDnsCountrySample struct {
+	extenderDnsCountrySet
+	// the most signed records its TXT set holds
+	recordCount int
+	// which window of its ranked extenders the tick answers
+	// (extenderDnsRotation)
+	rotation uint64
+	// the name the sets answer, which every answer repeats in its question
+	recordName string
+}
+
+// The window of a country's ranked extenders a tick answers: the index of the
+// tick's ten minutes since the Unix epoch, so each tick answers the window
+// after the last one's, and two taskworkers that run a tick in the same ten
+// minutes answer the same window.
+func extenderDnsRotation(now time.Time) uint64 {
+	return uint64(now.Unix()) / uint64(ExtenderPublishTimeout/time.Second)
+}
+
+// The vantage of a country's sets on the dns channel. A continent's is its
+// code and the default's extenderDnsDefaultVantage, so a country's is marked
+// apart from both.
+const extenderDnsCountryVantagePrefix = "country:"
+
 // One pool of candidate addresses: a family, narrowed to a continent when the
 // code is set. The empty code is the global pool of the family.
 type extenderDnsPool struct {
@@ -455,12 +583,18 @@ func extenderDnsAddressKeyHex(address *model.NetworkExtenderDnsAddress) string {
 // than no record, since a client that gets NXDOMAIN for AAAA falls straight
 // through to A. A continent with no open address of a family is not desired
 // either; its set is deleted.
+//
+// Each country sample adds the sets of a country answered by sets of its own
+// (extenderDnsCountryRecordSets), after every location's, and changes none of
+// theirs. A country's sets carry signed records, so with no signer there are
+// none, and the country is answered by its continent's address sets.
 func sampleExtenderDnsRecordSets(
 	addresses []*model.NetworkExtenderDnsAddress,
 	sampleCount int,
 	secret []byte,
 	epoch uint64,
 	signRecord extenderDnsRecordSigner,
+	countrySamples ...extenderDnsCountrySample,
 ) []*extenderDnsRecordSet {
 	if sampleCount <= 0 {
 		sampleCount = ExtenderDnsDefaultSampleCount
@@ -473,6 +607,18 @@ func sampleExtenderDnsRecordSets(
 	canaryIps := map[extenderDnsPool][]string{}
 	// which extender an address belongs to, for the TXT set of its location
 	ipExtenderIds := map[string]server.Id{}
+	// the address of each family of every extender a set can answer, and
+	// which of them are dns canaries, for a country's sets
+	extenderIps := map[server.Id]map[int]string{}
+	canaryExtenderIds := map[server.Id]bool{}
+	addExtenderIp := func(extenderId server.Id, ipVersion int, ip string) {
+		if _, ok := extenderIps[extenderId]; !ok {
+			extenderIps[extenderId] = map[int]string{}
+		}
+		if _, ok := extenderIps[extenderId][ipVersion]; !ok {
+			extenderIps[extenderId][ipVersion] = ip
+		}
+	}
 	addPool := func(pool extenderDnsPool, keyHex string, ip string) {
 		if _, ok := keyIps[pool]; !ok {
 			keyIps[pool] = map[string]string{}
@@ -502,9 +648,12 @@ func sampleExtenderDnsRecordSets(
 				if !slices.Contains(canaryIps[regionPool], ip) {
 					canaryIps[regionPool] = append(canaryIps[regionPool], ip)
 				}
+				addExtenderIp(address.ExtenderId, address.IpVersion, ip)
+				canaryExtenderIds[address.ExtenderId] = true
 			}
 			continue
 		}
+		addExtenderIp(address.ExtenderId, address.IpVersion, ip)
 		addPool(extenderDnsPool{ipVersion: address.IpVersion}, keyHex, ip)
 		if continentCode != "" {
 			addPool(extenderDnsPool{continentCode: continentCode, ipVersion: address.IpVersion}, keyHex, ip)
@@ -608,25 +757,29 @@ func sampleExtenderDnsRecordSets(
 			ok     bool
 		}
 		signed := map[server.Id]signedRecord{}
+		sign := func(extenderId server.Id) (string, bool) {
+			entry, seen := signed[extenderId]
+			if !seen {
+				entry.record, entry.ok = signRecord(extenderId)
+				signed[extenderId] = entry
+			}
+			return entry.record, entry.ok
+		}
 		txtSets := []*extenderDnsRecordSet{}
 		for _, location := range locationOrder {
 			budget := &extenderDnsTxtBudget{}
 			records := []string{}
 			heldBack := map[server.Id]bool{}
 			for _, extenderId := range extenderDnsLocationExtenderIds(locationAddressSets[location], ipExtenderIds) {
-				entry, seen := signed[extenderId]
-				if !seen {
-					entry.record, entry.ok = signRecord(extenderId)
-					signed[extenderId] = entry
-				}
-				if !entry.ok {
+				record, ok := sign(extenderId)
+				if !ok {
 					continue
 				}
-				if !budget.take(entry.record) {
+				if !budget.take(record) {
 					heldBack[extenderId] = true
 					continue
 				}
-				records = append(records, entry.record)
+				records = append(records, record)
 			}
 			if 0 < len(heldBack) {
 				// a released client dials only an address a record vouched
@@ -659,8 +812,137 @@ func sampleExtenderDnsRecordSets(
 			return len(desiredSet.ips) == 0
 		})
 		desiredSets = append(desiredSets, txtSets...)
+
+		// a country's sets, after every location's: drawn as a location of
+		// their own, from the country's vantage, its continent's canaries and
+		// addresses first and then the global fill, as a continent's are
+		for _, countrySample := range countrySamples {
+			continentCode := model.ContinentCodeForCountry(countrySample.countryCode)
+			vantage := []byte(extenderDnsCountryVantagePrefix + countrySample.countryCode)
+			rankedSets := []*extenderDnsRecordSet{}
+			for _, ipVersion := range extenderDnsIpVersions {
+				globalPool := extenderDnsPool{ipVersion: ipVersion}
+				continentPool := extenderDnsPool{continentCode: continentCode, ipVersion: ipVersion}
+				if len(poolKeyHexes[globalPool]) == 0 && len(canaryIps[continentPool]) == 0 {
+					continue
+				}
+				rankedSets = append(rankedSets, &extenderDnsRecordSet{
+					ipVersion: ipVersion,
+					ips:       sample(vantage, continentPool, globalPool, continentPool),
+				})
+			}
+			desiredSets = append(desiredSets, extenderDnsCountryRecordSets(
+				countrySample,
+				continentCode,
+				extenderDnsLocationExtenderIds(rankedSets, ipExtenderIds),
+				canaryExtenderIds,
+				extenderIps,
+				sign,
+			)...)
+		}
 	}
 	return desiredSets
+}
+
+// extenderDnsCountryRecordSets is a country's sets for one tick: its A and
+// AAAA sets, each only when it holds an address, then its TXT set; none when
+// no record could be signed.
+//
+// ranked is the extenders the country's vantage was dealt this epoch, best
+// first (extenderDnsLocationExtenderIds): its continent's dns canaries, then
+// the epoch's order of its partition, then the fill. The TXT set takes the
+// tick's window of them, which starts one place further along each tick, so
+// every extender of the ranking heads a window once a cycle -- the record a
+// resolver that keeps only the first may hand on -- however many records of
+// a window fit, and a day's lookups cover the whole of the ranking, while a
+// poller in the country still sees only what its vantage is dealt (R2) at the
+// pace of one new extender a tick. The canaries keep their place at the head
+// (R4) while a slot is left to rotate; with one record a canary takes its
+// turn at the head of the rotation instead, or the set would answer the canary
+// alone forever. A record the signer has nothing for, or that the country's
+// resolvers would not deliver whole (extenderDnsCountryTxtBudget), gives its
+// slot to the next in the window.
+//
+// The address sets answer each family's address of exactly the extenders the
+// TXT set vouches for -- every address a record names, and no other -- since a
+// released client dials only an address a record vouched for. A family none
+// of them has is not answered here, and the country's question for it falls
+// to its continent's set, whose addresses no record of the country's set
+// vouches for, so a client never dials them.
+func extenderDnsCountryRecordSets(
+	countrySample extenderDnsCountrySample,
+	continentCode string,
+	ranked []server.Id,
+	canaryExtenderIds map[server.Id]bool,
+	extenderIps map[server.Id]map[int]string,
+	sign func(extenderId server.Id) (string, bool),
+) []*extenderDnsRecordSet {
+	recordCount := max(1, countrySample.recordCount)
+	pinned := []server.Id{}
+	rotating := []server.Id{}
+	for _, extenderId := range ranked {
+		if canaryExtenderIds[extenderId] && len(pinned) < recordCount-1 {
+			pinned = append(pinned, extenderId)
+		} else {
+			rotating = append(rotating, extenderId)
+		}
+	}
+	candidates := slices.Clone(pinned)
+	if 0 < len(rotating) {
+		start := int(countrySample.rotation % uint64(len(rotating)))
+		for i := range rotating {
+			candidates = append(candidates, rotating[(start+i)%len(rotating)])
+		}
+	}
+
+	budget := newExtenderDnsCountryTxtBudget(countrySample)
+	records := []string{}
+	vouched := []server.Id{}
+	for _, extenderId := range candidates {
+		if recordCount <= len(records) {
+			break
+		}
+		record, ok := sign(extenderId)
+		if !ok || !budget.take(record) {
+			continue
+		}
+		records = append(records, record)
+		vouched = append(vouched, extenderId)
+	}
+	if len(records) == 0 {
+		if 0 < len(ranked) {
+			glog.Errorf(
+				"[extenderpublish]dns country %q has no set: none of its %d ranked extenders has a signed record that fits what its resolvers deliver whole, so its continent's sets answer it\n",
+				countrySample.countryCode,
+				len(ranked),
+			)
+		}
+		return nil
+	}
+
+	countrySets := []*extenderDnsRecordSet{}
+	for _, ipVersion := range extenderDnsIpVersions {
+		ips := []string{}
+		for _, extenderId := range vouched {
+			if ip, ok := extenderIps[extenderId][ipVersion]; ok {
+				ips = append(ips, ip)
+			}
+		}
+		if len(ips) == 0 {
+			continue
+		}
+		countrySets = append(countrySets, &extenderDnsRecordSet{
+			continentCode: continentCode,
+			countryCode:   countrySample.countryCode,
+			ipVersion:     ipVersion,
+			ips:           ips,
+		})
+	}
+	return append(countrySets, &extenderDnsRecordSet{
+		continentCode: continentCode,
+		countryCode:   countrySample.countryCode,
+		records:       records,
+	})
 }
 
 // The extenders a location's address sets answer with, best first: rank by
@@ -721,6 +1003,56 @@ func (self *extenderDnsTxtBudget) take(record string) bool {
 func extenderDnsTxtAnswerBytes(record string) int {
 	strs := max(1, (len(record)+extenderDnsTxtMaxStringLength-1)/extenderDnsTxtMaxStringLength)
 	return 2 + 10 + strs + len(record)
+}
+
+// The bytes of a TXT answer besides its records: the header (12), the question
+// (the name, then its type and class), and the OPT record (11) with the client
+// subnet a forwarding resolver echoes to a question that carried one, an IPv4
+// /24 (11), as the §28.2 monitor's questions do (RFC 1035 §4.1, RFC 6891 §6.1.2,
+// RFC 7871 §6). With extenderDnsTxtAnswerBytes it gives the size of Alidns's
+// answers of 2026-11-12 to the byte: 1,200 for three records of 1,096
+// characters with a client subnet, 1,053 for three of 960 without one.
+func extenderDnsTxtMessageOverheadBytes(recordName string) int {
+	return 12 + len(extenderDnsFqdn(recordName)) + 1 + 4 + 11 + 11
+}
+
+// What a country's TXT set has taken of what the country's resolvers deliver
+// whole (extenderDnsCountrySet): each record alone an answer within
+// maxRecordMessageBytes, and all of them together one within maxMessageBytes,
+// beside the limits every TXT set fits (extenderDnsTxtBudget). The number of
+// records is the caller's.
+type extenderDnsCountryTxtBudget struct {
+	extenderDnsTxtBudget
+	maxRecordMessageBytes int
+	maxMessageBytes       int
+	// the answer's bytes besides its records, and its records' so far
+	overheadBytes int
+	recordsBytes  int
+}
+
+func newExtenderDnsCountryTxtBudget(countrySample extenderDnsCountrySample) *extenderDnsCountryTxtBudget {
+	return &extenderDnsCountryTxtBudget{
+		maxRecordMessageBytes: countrySample.maxRecordMessageBytes,
+		maxMessageBytes:       countrySample.maxMessageBytes,
+		overheadBytes:         extenderDnsTxtMessageOverheadBytes(countrySample.recordName),
+	}
+}
+
+// Takes one more record when it fits every limit; false, and nothing taken,
+// when it does not.
+func (self *extenderDnsCountryTxtBudget) take(record string) bool {
+	recordBytes := extenderDnsTxtAnswerBytes(record)
+	if self.maxRecordMessageBytes < self.overheadBytes+recordBytes {
+		return false
+	}
+	if self.maxMessageBytes < self.overheadBytes+self.recordsBytes+recordBytes {
+		return false
+	}
+	if !self.extenderDnsTxtBudget.take(record) {
+		return false
+	}
+	self.recordsBytes += recordBytes
+	return true
 }
 
 // extenderDnsDeletedSetIdentifiers is the set identifiers an apply must
@@ -1079,11 +1411,13 @@ func (self *route53ExtenderDnsPublisher) listRecordSets(
 	return setIdentifiers, recordSets, nil
 }
 
-// The wire form of one desired set: geolocation routing by continent, or the
-// `*` country that Route 53 reads as the default location, and no health
-// check -- an address is in the set because the uptime probes say it answers,
-// and a second opinion from Route 53 would only remove addresses this
-// operator still believes in.
+// The wire form of one desired set: geolocation routing by country, by
+// continent, or the `*` country that Route 53 reads as the default location,
+// and no health check -- an address is in the set because the uptime probes
+// say it answers, and a second opinion from Route 53 would only remove
+// addresses this operator still believes in. Route 53 answers a question from
+// the smallest location that has a set of its type, so a country's set answers
+// the country in place of its continent's.
 func extenderDnsResourceRecordSet(
 	name string,
 	ttl int,
@@ -1092,7 +1426,12 @@ func extenderDnsResourceRecordSet(
 	geoLocation := &route53.GeoLocation{
 		CountryCode: aws.String("*"),
 	}
-	if desiredSet.continentCode != "" {
+	switch {
+	case desiredSet.countryCode != "":
+		geoLocation = &route53.GeoLocation{
+			CountryCode: aws.String(desiredSet.countryCode),
+		}
+	case desiredSet.continentCode != "":
 		geoLocation = &route53.GeoLocation{
 			ContinentCode: aws.String(desiredSet.continentCode),
 		}

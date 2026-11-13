@@ -11486,4 +11486,50 @@ var migrations = []any{
 	// five-second lock bound. ctf_award is empty until capture the flag is
 	// live. Apply before deploying the taskworker and api that use it.
 	ctfAwardNetworkMigration,
+
+	// The SN25 extender pool (db_st_ledger_v2_extenders.go, sn WHITEPAPER.md
+	// §8.6): the verified amendments file, each epoch's extender census, the
+	// shadow reports of the epochs before E_x, the platform endpoint registry
+	// and six nullable columns on st_ledger_v2_epoch_rows, each created only
+	// when absent, under a five-second lock bound. Nothing existing is
+	// rewritten. Apply before deploying the taskworker and api that read them.
+	stLedgerV2ExtenderMigration,
+
+	// The Solana receiver sweep's cursor (solana_receiver_sweep_schema.go,
+	// controller/solana_receiver_sweep.go): one new empty table, under a
+	// five-second lock bound, created only when absent. Nothing existing is
+	// locked or rewritten. Apply before deploying the taskworker that runs
+	// the payment reconcile.
+	solanaReceiverSweepCursorMigration,
+
+	// Capability-aware FindProviders2's URL evidence
+	// (db_provider_egress_fp2_evidence.go, FP2-PROTOCOL.md §4.1, §12.3): two
+	// constant-default smallint columns on the partitioned URL history, the
+	// failed later legs judged the provider's and the post-quantum outcome,
+	// added only when absent under a five-second lock bound. A catalog change
+	// only: nothing is rewritten or scanned, and every outcome stored before
+	// it reads 0. Apply before deploying the taskworker, api and alt that use
+	// them.
+	providerEgressFp2EvidenceMigration,
+
+	// The store notification flow (store_notification_flow_schema.go,
+	// controller/store_notification_flow.go): one new table with a row per
+	// store, under a five-second lock bound, created only when absent.
+	// Nothing existing is locked or rewritten. Apply with the api and alt
+	// that write it.
+	storeNotificationFlowMigration,
+
+	// The sweep of every address a per-address coin's invoices were ever
+	// given (crypto_address_sweep_schema.go, controller/crypto_pay_sweep.go):
+	// two new empty tables, each created only when absent, under a
+	// five-second lock bound. Nothing existing is locked or rewritten. Apply
+	// before deploying the taskworker that runs the scans.
+	cryptoAddressSweepMigration,
+
+	// The Shopify orders paid with Solana Pay (solana_shopify_order_schema.go,
+	// controller/solana_shopify_order.go): one new empty table, created only
+	// when absent, under a five-second lock bound. Nothing existing is locked
+	// or rewritten. Apply before deploying the api and alt (the Helius
+	// webhook) and the taskworker (the Solana reconcile) that use it.
+	solanaShopifyOrderPaymentMigration,
 }

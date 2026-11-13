@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,8 +18,6 @@ import (
 	"maps"
 
 	"github.com/docopt/docopt-go"
-
-	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -115,11 +112,10 @@ Usage:
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
     bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd> --adjustment_id=<adjustment_id> --reason=<reason>
-    bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
     bringyourctl payouts populate-tx-hashes
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
-    bringyourctl payouts close-parked [(--apply --expect=<digest>)] [--ids]
+    bringyourctl payouts close-parked [--paid=<paid>] [(--apply --expect=<digest>)] [--ids]
     bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
     bringyourctl payouts reimburse --file=<file> --reason=<reason> [--allow_prior_reimbursement] [(--send --expect=<digest>)]
     bringyourctl payouts usdc-sent-notice --file=<file> [--send]
@@ -177,6 +173,11 @@ Usage:
     bringyourctl st v1-sweep-status
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
     bringyourctl st ctf-outage --start=<start_time> --end=<end_time> --reason=<reason> --by=<operator>
+    bringyourctl st v2-extender-replay --epoch=<epoch> [--out=<path>]
+    bringyourctl st v2-extender-shadow --epoch=<epoch> [--out=<path>]
+    bringyourctl st v2-platform-endpoints
+    bringyourctl st v2-platform-endpoint-register --client_id=<client_id> --kind=<kind> --by=<operator>
+    bringyourctl st v2-platform-endpoint-revoke --client_id=<client_id> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>] [--dashboards_only]
     bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
     bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
@@ -269,7 +270,6 @@ Options:
     --amount_usd=<amount_usd>   Amount in USD.
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.
-    --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
     --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero, zcash, bittensor, bitcoin or ethereum.
     --asset=<asset>  A crypto payment asset: usdc_solana, zec or xmr.
     --state=<state>  A crypto invoice status: pending, seen, confirming, paid, expired or review.
@@ -279,6 +279,7 @@ Options:
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
     --ids  With payouts close-parked, also list each payment: its id, plan week, reason and payout.
+    --paid=<paid>  With payouts close-parked, also close these keyed payments, each paid by another Circle transfer: <payment_id>:<circle_transaction_id>, comma separated. Each is checked with the database and Circle.
     --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
     --move_all_sweeps  Move every sweep of a corrected legacy attempt to its replacement instead of one anchor sweep.
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
@@ -476,8 +477,6 @@ func main() {
 	} else if payouts, _ := opts.Bool("payouts"); payouts {
 		if listPending, _ := opts.Bool("list-pending"); listPending {
 			listPendingPayouts(opts)
-		} else if plan, _ := opts.Bool("plan"); plan {
-			planPayouts(opts)
 		} else if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
 			server.Raise(payoutPlanApplyBonus(opts))
 		} else if ptxh, _ := opts.Bool("populate-tx-hashes"); ptxh {
@@ -660,6 +659,16 @@ func main() {
 			stV2ActivationClear(opts)
 		} else if ctfOutage, _ := opts.Bool("ctf-outage"); ctfOutage {
 			stCtfOutage(opts)
+		} else if extenderReplay, _ := opts.Bool("v2-extender-replay"); extenderReplay {
+			stV2ExtenderReplay(opts)
+		} else if extenderShadow, _ := opts.Bool("v2-extender-shadow"); extenderShadow {
+			stV2ExtenderShadow(opts)
+		} else if platformEndpoints, _ := opts.Bool("v2-platform-endpoints"); platformEndpoints {
+			stV2PlatformEndpoints(opts)
+		} else if register, _ := opts.Bool("v2-platform-endpoint-register"); register {
+			stV2PlatformEndpointRegister(opts)
+		} else if revoke, _ := opts.Bool("v2-platform-endpoint-revoke"); revoke {
+			stV2PlatformEndpointRevoke(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
@@ -1851,156 +1860,6 @@ func sendPayoutEmail(opts docopt.Opts) {
 		panic(err)
 	}
 	fmt.Printf("Sent\n")
-}
-
-func planPayouts(opts docopt.Opts) {
-	send, _ := opts.Bool("--send")
-	dryRun, _ := opts.Bool("--dry-run")
-	maxDurationStr, _ := opts.String("--max_duration")
-
-	if send && dryRun {
-		fmt.Println("--dry-run cannot be combined with --send")
-		return
-	}
-
-	// --max_duration bounds the planning window to keep a single plan small.
-	// --send runs the automated payout path, which is intentionally unbounded,
-	// so the two cannot be combined.
-	var maxDuration time.Duration
-	if maxDurationStr != "" {
-		if send {
-			fmt.Println("--max_duration cannot be combined with --send")
-			return
-		}
-		var err error
-		maxDuration, err = server.ParseDurationExtended(maxDurationStr)
-		if err != nil {
-			fmt.Printf("invalid --max_duration %q: %s\n", maxDurationStr, err)
-			return
-		}
-		// Each slice advances the frontier only by forming a new subsidy epoch,
-		// and an epoch shorter than the minimum subsidy duration is dropped. A
-		// window at or below that minimum could never advance, so reject it up
-		// front instead of silently replanning the same slice forever.
-		minDuration := model.EnvSubsidyConfig().MinDurationPerPayout()
-		if maxDuration <= minDuration {
-			fmt.Printf("--max_duration must be greater than the minimum subsidy duration %s so each slice forms a subsidy epoch and the payout frontier advances\n", minDuration)
-			return
-		}
-	}
-
-	ctx := context.Background()
-
-	if send {
-		glog.Infof("[payouts]send\n")
-		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-		controller.SendPayments(clientSession)
-		return
-	}
-
-	// A real plan (no --dry-run) persists the plan: it creates the payments,
-	// marks the swept contracts paid, and applies points. A dry run computes the
-	// same plan but persists nothing, so it can be previewed first.
-	if dryRun {
-		// A dry run rolls its transaction back, so the frontier never advances —
-		// looping would replan the same slice forever. Preview a single slice.
-		plan, err := model.PlanPaymentsDryRunWithMaxDuration(ctx, maxDuration)
-		if err != nil {
-			fmt.Printf("payout plan err = %s\n", err)
-			return
-		}
-		printPayoutPlan(plan, true)
-		return
-	}
-
-	// When maxDuration is set, drain the backlog slice by slice — each slice is
-	// its own committed plan — until the frontier reaches now, so one command
-	// call catches up instead of needing one invocation per slice. maxDuration of
-	// 0 (flag omitted) plans the whole backlog as a single plan.
-	sliceCount := 0
-	plans, err := model.PlanPaymentsWithMaxDurationLoop(ctx, maxDuration, func(p *model.PaymentPlan) {
-		sliceCount += 1
-		if maxDuration > 0 {
-			fmt.Printf("\n===== slice %d =====\n", sliceCount)
-		}
-		printPayoutPlan(p, false)
-	})
-	if err != nil {
-		fmt.Printf("payout plan err = %s\n", err)
-		// fall through to summarize whatever slices did commit
-	}
-	if len(plans) > 1 {
-		printPayoutLoopSummary(plans)
-	}
-}
-
-func printPayoutPlan(plan *model.PaymentPlan, dryRun bool) {
-	if dryRun {
-		fmt.Println("DRY RUN - nothing was persisted. Preview of the payment plan:")
-		fmt.Println("Payout Plan (preview): ", plan.PaymentPlanId)
-	} else {
-		fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
-	}
-
-	// largest payout first, so the plan reads consistently across runs
-	payments := slices.Collect(maps.Values(plan.NetworkPayments))
-	slices.SortFunc(payments, func(a, b *model.AccountPayment) int {
-		return cmp.Compare(b.Payout, a.Payout)
-	})
-
-	fmt.Printf("%-40s %-40s %16s\n", "Network ID", "Wallet ID", "Payout (USD)")
-	fmt.Println(strings.Repeat("-", 98))
-
-	total := model.NanoCents(0)
-	missingWallet := 0
-	for _, payment := range payments {
-		walletStr := "(no payout wallet)"
-		if payment.WalletId != nil {
-			walletStr = payment.WalletId.String()
-		} else {
-			missingWallet += 1
-		}
-		fmt.Printf("%-40s %-40s %16.4f\n", payment.NetworkId, walletStr, model.NanoCentsToUsd(payment.Payout))
-		total += payment.Payout
-	}
-
-	fmt.Println(strings.Repeat("-", 98))
-	fmt.Printf("%d payment(s), %.4f USD total\n", len(payments), model.NanoCentsToUsd(total))
-	if missingWallet > 0 {
-		fmt.Printf("%d payment(s) have no payout wallet and will be held until a wallet is set\n", missingWallet)
-	}
-	if len(plan.WithheldNetworkIds) > 0 {
-		fmt.Printf("%d network(s) withheld below the minimum payout threshold\n", len(plan.WithheldNetworkIds))
-	}
-	if s := plan.SubsidyPayment; s != nil {
-		fmt.Printf(
-			"subsidy: %.4f USD net payout over %s .. %s (%d active users)\n",
-			model.NanoCentsToUsd(s.NetPayout),
-			s.StartTime.Format(time.RFC3339),
-			s.EndTime.Format(time.RFC3339),
-			s.ActiveUserCount,
-		)
-	}
-}
-
-// printPayoutLoopSummary prints the grand total across all slices a bounded
-// drain committed (PlanPaymentsWithMaxDurationLoop), after each slice's own
-// plan has been printed.
-func printPayoutLoopSummary(plans []*model.PaymentPlan) {
-	totalPayments := 0
-	total := model.NanoCents(0)
-	for _, plan := range plans {
-		for _, payment := range plan.NetworkPayments {
-			totalPayments += 1
-			total += payment.Payout
-		}
-	}
-	fmt.Println()
-	fmt.Println(strings.Repeat("=", 98))
-	fmt.Printf(
-		"drained %d slice(s): %d payment(s), %.4f USD total\n",
-		len(plans), totalPayments, model.NanoCentsToUsd(total),
-	)
 }
 
 // reconcileLegacyPayoutAttempts decides legacy keyed provider payments from

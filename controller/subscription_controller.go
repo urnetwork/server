@@ -1099,7 +1099,25 @@ var endPlaySubscriptionEntitlement = func(
 
 // https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
 // https://developer.android.com/google/play/billing/rtdn-reference
+//
+// A verified push is accepted when it is processed, else it is an error the
+// route answers 500 and Pub/Sub redelivers (store_notification_flow.go).
 func PlayWebhook(
+	webhookArgs *PlayWebhookArgs,
+	clientSession *session.ClientSession,
+) (*PlayWebhookResult, error) {
+	result, err := playWebhook(webhookArgs, clientSession)
+	if err != nil {
+		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationError)
+	} else {
+		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationAccepted)
+	}
+	return result, err
+}
+
+// Processes one verified push, as the route always has; PlayWebhook records
+// its outcome.
+func playWebhook(
 	webhookArgs *PlayWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*PlayWebhookResult, error) {
@@ -1270,7 +1288,6 @@ func PlayWebhook(
 			case "SUBSCRIPTION_STATE_CANCELED",
 				"SUBSCRIPTION_STATE_EXPIRED",
 				"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
-				acknowledgeAndCheckRenewal = false
 				// the onboarding trial outcome: a trial that stops renewing or
 				// expires before its first paid period is trial.cancelled
 				playStoreTrialCancelled(
@@ -1280,6 +1297,9 @@ func PlayWebhook(
 					plan,
 					server.NowUtc(),
 				)
+				// cancelled is not expired: paid time left is acknowledged (or Google
+				// refunds it after three days) and credited like an active purchase
+				acknowledgeAndCheckRenewal = playPurchasePaid(sub, server.NowUtc())
 			}
 
 			if acknowledgeAndCheckRenewal {
@@ -2106,8 +2126,21 @@ var playIdTokenClaims = func(ctx context.Context, idToken string) (map[string]an
 }
 
 // Fails closed: without the configured publisher and audience every push is
-// refused as unavailable, before Google is asked about its token.
-func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+// refused as unavailable, before Google is asked about its token. Every
+// refusal is recorded with its outcome (store_notification_flow.go).
+func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (body io.Reader, returnErr error) {
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		outcome := StoreNotificationRefusedMalformed
+		if returnErr == errWebhookVerificationUnavailable {
+			outcome = StoreNotificationRefusedUnavailable
+		} else if refused, ok := returnErr.(*playAuthError); ok {
+			outcome = refused.outcome
+		}
+		RecordStoreNotificationOutcome(req.Context(), model.SubscriptionMarketGoogle, outcome)
+	}()
 	publisherEmail, err := playPublisherEmail()
 	if err != nil {
 		glog.Warningf("[play]webhook refused, verification publisher unavailable: %s\n", err)
@@ -2127,7 +2160,7 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	authHeader := req.Header.Get("Authorization")
 
 	if authHeader == "" {
-		return nil, errors.New("missing authorization header")
+		return nil, &playAuthError{outcome: StoreNotificationRefusedAuth, message: "missing authorization header"}
 	}
 
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
@@ -2140,24 +2173,39 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	return bytes.NewReader(bodyBytes), nil
 }
 
+// Binds a push's Google id token to the configured publisher and audience. A
+// refusal says why (playAuthError): no token Google accepts, or one of
+// another publisher or issuer (refused_auth); the configured publisher's
+// token for another audience (refused_audience: our google.yml and the
+// Pub/Sub subscription disagree); or no answer from Google (error).
 func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string, audience string) error {
 	bearerPrefix := "Bearer "
 
 	if strings.HasPrefix(auth, bearerPrefix) {
 		claims, err := playIdTokenClaims(ctx, auth[len(bearerPrefix):])
 		if err != nil {
-			return err
+			var statusErr *server.HttpStatusError
+			if errors.As(err, &statusErr) {
+				// Google answered: the token is not one it issued, or expired
+				return &playAuthError{outcome: StoreNotificationRefusedAuth, message: err.Error()}
+			}
+			// Google could not be asked: the push is unverified, not refused
+			return &playAuthError{outcome: StoreNotificationError, message: err.Error()}
 		}
 		// Google's tokeninfo endpoint verifies the signature. Bind that token
 		// to this subscription and its verified service account as well.
 		issuer, _ := claims["iss"].(string)
 		verified := claims["email_verified"] == true || claims["email_verified"] == "true"
-		if claims["email"] == publisherEmail && claims["aud"] == audience && verified &&
-			(issuer == "https://accounts.google.com" || issuer == "accounts.google.com") {
+		publisher := claims["email"] == publisherEmail && verified &&
+			(issuer == "https://accounts.google.com" || issuer == "accounts.google.com")
+		if publisher && claims["aud"] == audience {
 			return nil
 		}
+		if publisher {
+			return playAuthRefused(StoreNotificationRefusedAudience)
+		}
 	}
-	return errors.New("Missing authorization.")
+	return playAuthRefused(StoreNotificationRefusedAuth)
 }
 
 // The grant windows (model.FreeGrantWindow, model.ReferralGrantWindow) and the Pro
@@ -2664,6 +2712,15 @@ func HeliusWebhook(
 			skipMessage = decision.skipMessage
 			continue
 		case solanaPaymentActionRecord:
+			// a payment of one of our Shopify store's orders, made with Solana
+			// Pay into the same receiver, bought an order, not an app purchase:
+			// recorded as the order's, or left to the receiver leg while Shopify
+			// cannot verify it yet (solana_shopify_order.go)
+			if decision.unfulfilled.Reason == model.SolanaUnfulfilledReasonNoIntent &&
+				heliusShopifyOrderPayment(clientSession, transaction, decision.unfulfilled.TokenAmountUsd) {
+				skipMessage = "A Shopify order's payment"
+				continue
+			}
 			// Money arrived at our address and bought nothing. Helius is still acked
 			// 200 (it never re-examines a delivered tx) once it is recorded where an
 			// operator can see and repair it.
@@ -2727,6 +2784,59 @@ func HeliusWebhook(
 		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
 	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
+}
+
+// Whether the receiver leg of the Solana reconcile runs (helius.yml names
+// the RPC key it reads the chain with), so the webhook can leave a payment to
+// it. Replaceable only by tests.
+var heliusReceiverLegRuns = func() bool {
+	_, ok := solanaChainRpcUrl()
+	return ok
+}
+
+// The webhook's Shopify branch for a payment it would record as no_intent:
+// true when the payment is a Shopify order's, recorded as the order's payment,
+// or a Solana Pay app payment Shopify cannot verify yet (its order may be made
+// seconds after the block; the lookup may fail) that the receiver leg reads
+// after its minimum age and decides. false keeps today's behaviour: the
+// payment is recorded as no_intent. A redelivery of a payment already recorded
+// as an order's is true at once.
+func heliusShopifyOrderPayment(clientSession *session.ClientSession, transaction *SolanaTransaction, receivedUsd float64) bool {
+	ctx := clientSession.Ctx
+	if !solanaShopifyAppPayment(transaction) {
+		return false
+	}
+	if heliusShopifyOrderRecorded(ctx, transaction.Signature) {
+		return true
+	}
+	leg := model.SolanaShopifyOrderLegWebhook
+	outcome, note, err := solanaRecognizeShopifyOrder(nil, ctx, transaction, receivedUsd, leg, DefaultSolanaShopifyOrderSettings(), false)
+	switch {
+	case err != nil:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "error").Inc()
+		glog.Warningf("HeliusWebhook: the Shopify order of Solana Pay payment %s could not be looked up: %s\n", transaction.Signature, err)
+		note = "the order lookup failed"
+	case outcome == solanaShopifyRecorded:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "recorded").Inc()
+		return true
+	case outcome == solanaShopifyNotApplicable:
+		return false
+	}
+	if !heliusReceiverLegRuns() {
+		if err == nil {
+			solanaShopifyOrderPayments.WithLabelValues(leg, "unverified").Inc()
+		}
+		return false
+	}
+	solanaShopifyOrderPayments.WithLabelValues(leg, "deferred").Inc()
+	glog.Infof("HeliusWebhook: Solana Pay payment %s is not verified as a Shopify order yet (%s); the receiver leg decides\n", transaction.Signature, note)
+	return true
+}
+
+// Whether a signature is recorded as a Shopify order's payment. Replaceable
+// only by tests.
+var heliusShopifyOrderRecorded = func(ctx context.Context, signature string) bool {
+	return model.IsSolanaShopifyOrderPaymentRecordedInConn(nil, ctx, signature)
 }
 
 // heliusHintNativeInvoices is the webhook's native branch: the native SOL

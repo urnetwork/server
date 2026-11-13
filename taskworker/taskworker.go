@@ -37,6 +37,10 @@ var removedTaskTargets = []string{
 	"github.com/urnetwork/server/taskworker/work.FlushLegacySettlements",
 	"github.com/urnetwork/server/model.ApplyLegacyPayerSettlements",
 	"github.com/urnetwork/server/model.ApplyLegacySourceSettlements",
+	// the capability probe retired once URL turns measured post-quantum and
+	// windows (FP2-PROTOCOL.md §12.4); a chain capability_probe.yml had not
+	// switched off yet leaves a row here
+	"github.com/urnetwork/server/taskworker/work.CapabilityProbe",
 }
 
 // Every statement of a startup scheduling or reap transaction ends on the
@@ -99,7 +103,6 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleDeliverAccountMessages(clientSession, tx)
-		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
@@ -156,9 +159,6 @@ func initTaskSchedule(ctx context.Context) {
 		// (connect/GEOMAP.md D24), and a pending row drains through the
 		// registered task below without scheduling a successor
 		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
-		// the modern provider gate's evidence (server/capprobe), apart from
-		// the URL probe's shards, quota and budget
-		work.ScheduleCapabilityProbe(clientSession, tx)
 		// active bandwidth samples in a shard of their own, apart from the
 		// URL probe's sampled-only quality tunnels
 		work.ScheduleProviderBandwidthProbe(clientSession, tx)
@@ -280,26 +280,24 @@ func reapRetiredTasks(ctx context.Context) {
 	})
 }
 
-// How often a production taskworker checks the capability probe's chain;
+// How often a production taskworker checks the bandwidth probe's chain;
 // replaced by tests.
-var capabilityProbeEnsureInterval = 10 * time.Minute
+var providerBandwidthProbeEnsureInterval = 10 * time.Minute
 
-// Every capabilityProbeEnsureInterval until ctx ends, schedules the
-// capability probe's chain again when it has no task row while this
-// taskworker's capability_probe.yml switches the probe on
-// (work.EnsureCapabilityProbe). The startup schedule covers the start; this
-// brings back a chain that a pass on a taskworker with an older config, or
-// maintenance, ended since.
-func ensureCapabilityProbeChain(ctx context.Context) {
-	interval := capabilityProbeEnsureInterval
+// Every providerBandwidthProbeEnsureInterval until ctx ends, schedules the
+// bandwidth probe's chain again when it has no task row while this
+// taskworker's settings switch the probe on
+// (work.EnsureProviderBandwidthProbe). The startup schedule covers the
+// start; this brings back a chain that a pass on a taskworker with an older
+// config, or maintenance, ended since.
+func ensureProviderBandwidthProbeChain(ctx context.Context) {
+	interval := providerBandwidthProbeEnsureInterval
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(interval):
 		}
-		server.HandleError(func() { work.EnsureCapabilityProbe(ctx) })
-		// the bandwidth probe's chain returns the same way
 		server.HandleError(func() { work.EnsureProviderBandwidthProbe(ctx) })
 	}
 }
@@ -350,7 +348,13 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredAuthCodesPost,
 			"bringyour.com/service/taskworker/work.RemoveExpiredAuthCodes",
 		),
-		work.NewPayoutTaskTarget(),
+		// the weekly USDC payout ended (owner decision 2026-11-12); a queued
+		// "payout" or "payout_retry" row runs once as a no-op
+		task.NewTaskTargetWithPost(
+			work.Payout,
+			work.PayoutPost,
+			"bringyour.com/service/taskworker/work.Payout",
+		),
 		task.NewTaskTargetWithPost(
 			work.ProcessPendingPayouts,
 			work.ProcessPendingPayoutsPost,
@@ -546,7 +550,6 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		work.NewProviderEgressProbeTaskTarget(),
 		work.NewProviderEgressProbeDisabledTaskTarget(),
-		work.NewCapabilityProbeTaskTarget(),
 		work.NewProviderBandwidthProbeTaskTarget(),
 		task.NewTaskTargetWithPost(work.RollupProviderEgressTallies, work.RollupProviderEgressTalliesPost),
 		task.NewTaskTargetWithPost(

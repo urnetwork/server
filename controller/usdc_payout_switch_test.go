@@ -1,18 +1,15 @@
 // The usdc_payout.yml switches (owner, 2026-10-26): "let's stop asking people
 // to connect their wallets now. Let's turn off all usdc payments after the
-// reconcile." With wallet requests off (the default) no payout run holds a
-// missing-wallet notice, and a notice already held or released is withdrawn
-// unsent. With payments off no payment Circle does not hold is submitted or
-// scheduled again, a payment Circle holds keeps its status check, and the
-// legacy tools refuse to send.
+// reconcile." With wallet requests off (the default) a missing-wallet notice
+// still in the outbox is withdrawn unsent. With payments off no payment Circle
+// does not hold is submitted or scheduled again, a payment Circle holds keeps
+// its status check, and the legacy tools refuse to send.
 package controller
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
-	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -112,92 +109,30 @@ func usdcSwitchTestAdvance(t testing.TB, clientSession *session.ClientSession, p
 	return result, err
 }
 
-// With wallet requests off (and without usdc_payout.yml, whose default is off),
-// a payout run holds and sends no missing-wallet notice.
-func TestWalletRequestsOffHoldsNoMissingWalletNotice(t *testing.T) {
+// A missing-wallet notice still in the outbox is withdrawn unsent while wallet
+// requests are off: delivery abandons it with the reason, and other messages
+// still go out.
+func TestWalletRequestsOffWithdrawsMissingWalletNotices(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		clientSession := session.Testing_CreateClientSession(ctx, nil)
-		defer clientSession.Cancel()
-
-		for i, declared := range []string{"", "wallet_requests: off\n"} {
-			func() {
-				if declared != "" {
-					defer server.Config.PushSimpleResource(server.UsdcPayoutPolicyResourceName, []byte(declared))()
-				} else if _, err := server.Config.SimpleResource(server.UsdcPayoutPolicyResourceName); err == nil {
-					// the environment declares the switches; the default is not observable
-					return
-				}
-				networkId, _ := newMissingWalletTestNetwork(ctx, fmt.Sprintf("synthetic-no-request-%d", i))
-				slice := missingWalletTestPlan(map[server.Id]model.NanoCents{
-					networkId: model.UsdToNanoCents(3),
-				}, nil)
-				err := sendPaymentsWithPlanner(clientSession, func(
-					plannerCtx context.Context,
-					maxDuration time.Duration,
-					writeInTx func(server.PgTx, *model.PaymentPlan),
-					onSlice func(*model.PaymentPlan),
-				) ([]*model.PaymentPlan, error) {
-					server.Tx(plannerCtx, func(tx server.PgTx) {
-						writeInTx(tx, slice)
-					})
-					return []*model.PaymentPlan{slice}, nil
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if count := outboxMessageCount(t, ctx, networkId); count != 0 {
-					t.Fatalf("declared %q: the run left %d notices, want none", declared, count)
-				}
-				sender := newOutboxTestSender()
-				deliverAccountMessagesAt(ctx, sender, server.NowUtc().Add(time.Hour))
-				if sends := sender.sent(); len(sends) != 0 {
-					t.Fatalf("declared %q: delivered %d notices", declared, len(sends))
-				}
-			}()
-		}
-	})
-}
-
-// Notices from before wallet requests turned off are withdrawn unsent: a held
-// one is removed by the release, and a released one is abandoned at delivery
-// with the reason, while other messages still go out.
-func TestWalletRequestsOffWithdrawsNoticesAlreadyHeldOrReleased(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		minPayout := missingWalletTestMinPayout(model.UsdToNanoCents(0.01))
-		heldNetworkId, _ := newMissingWalletTestNetwork(ctx, "synthetic-held-before-off")
-		releasedNetworkId, _ := newMissingWalletTestNetwork(ctx, "synthetic-released-before-off")
-
-		usdcSwitchTestDeclare(t, "wallet_requests: on\n")
+		networkId := server.NewId()
+		userAuth := model.Testing_CreateNetwork(ctx, networkId, "synthetic-notice-before-off", server.NewId())
 		server.Tx(ctx, func(tx server.PgTx) {
-			holdMissingWalletNoticesInTx(ctx, tx, missingWalletTestPlan(map[server.Id]model.NanoCents{
-				releasedNetworkId: model.UsdToNanoCents(2),
-			}, nil))
+			addAccountMessageInTx(ctx, tx, &accountMessage{
+				key:       server.NewId().String(),
+				networkId: &networkId,
+				userAuth:  userAuth,
+				template: &MissingWalletTemplate{
+					PaymentId: server.NewId(),
+					Payout:    model.UsdToNanoCents(2),
+				},
+			})
 		})
-		if releasedCount := releaseMissingWalletNotices(ctx, server.NowUtc(), minPayout); releasedCount != 1 {
-			t.Fatalf("released %d notices while requests were on, want 1", releasedCount)
-		}
-		server.Tx(ctx, func(tx server.PgTx) {
-			holdMissingWalletNoticesInTx(ctx, tx, missingWalletTestPlan(map[server.Id]model.NanoCents{
-				heldNetworkId: model.UsdToNanoCents(2),
-			}, nil))
-		})
-		if heldCount, _ := missingWalletTestMessages(t, ctx, heldNetworkId); heldCount != 1 {
-			t.Fatalf("held %d notices while requests were on, want 1", heldCount)
-		}
 		if !addOutboxTestMessage(ctx, server.NewId().String(), "synthetic-other@example.invalid") {
 			t.Fatal("the other message was not added")
 		}
 
 		usdcSwitchTestDeclare(t, "wallet_requests: off\n")
-		if releasedCount := releaseMissingWalletNotices(ctx, server.NowUtc(), minPayout); releasedCount != 0 {
-			t.Fatalf("released %d notices after requests turned off", releasedCount)
-		}
-		if heldCount, dueCount := missingWalletTestMessages(t, ctx, heldNetworkId); heldCount+dueCount != 0 {
-			t.Fatalf("the held notice remains: %d held, %d due", heldCount, dueCount)
-		}
-
 		sender := newOutboxTestSender()
 		delivery := deliverAccountMessagesAt(ctx, sender, server.NowUtc())
 		if delivery.withheldCount != 1 || delivery.sentCount != 1 {
@@ -205,7 +140,7 @@ func TestWalletRequestsOffWithdrawsNoticesAlreadyHeldOrReleased(t *testing.T) {
 		}
 		for _, send := range sender.sent() {
 			if _, ok := send.template.(*MissingWalletTemplate); ok {
-				t.Fatal("a missing-wallet notice was sent after requests turned off")
+				t.Fatal("a missing-wallet notice was sent while requests are off")
 			}
 		}
 		var abandoned bool
@@ -218,11 +153,11 @@ func TestWalletRequestsOffWithdrawsNoticesAlreadyHeldOrReleased(t *testing.T) {
 					FROM account_message_outbox
 					WHERE network_id = $1 AND template_name = 'subscription_missing_wallet'
 				`,
-				releasedNetworkId,
+				networkId,
 			).Scan(&abandoned, &lastError))
 		})
 		if !abandoned || lastError != "withheld: wallet requests are off (usdc_payout.yml)" {
-			t.Fatalf("released notice: abandoned %v with %q, want abandoned unsent with the reason", abandoned, lastError)
+			t.Fatalf("notice: abandoned %v with %q, want abandoned unsent with the reason", abandoned, lastError)
 		}
 	})
 }

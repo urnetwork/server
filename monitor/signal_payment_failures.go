@@ -42,7 +42,16 @@ func paymentFailuresSqlList(names []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-var paymentFailuresQuery = `
+// The query at the default settings, as the tests read it; the probe renders
+// its own settings' (paymentFailuresQueryWith).
+var paymentFailuresQuery = paymentFailuresQueryWith(DefaultPaymentFailuresSettings())
+
+// The payment failures query at the given settings: every kind's aggregate,
+// one row per kind and target.
+func paymentFailuresQueryWith(settings *PaymentFailuresSettings) string {
+	pendingAgeSql := paymentFailuresIntervalSql(settings.ReceivedPendingAge)
+	heldAgeSql := paymentFailuresIntervalSql(settings.ReceivedHeldAge)
+	return `
 /* monitor-signal-2.22-payment-failures */
 WITH active_supporter AS (
     SELECT DISTINCT renewal.network_id, renewal.market, min(renewal.start_time) OVER (PARTITION BY renewal.network_id, renewal.market) AS first_start
@@ -152,6 +161,42 @@ WITH active_supporter AS (
     WHERE scan.last_success_at IS NOT NULL
       AND scan.last_success_at < now() - interval '15 minutes'
       AND scan.last_success_at > now() - interval '7 days'
+), crypto_received AS (
+    -- a crypto rail payment received and never credited that no kind above
+    -- reports. uncredited: one the scanner should have credited by itself,
+    -- still in the mempool or in a block ` + pendingAgeSql + ` after it was first
+    -- seen (a double spend counts only once mined), or held after its credit
+    -- kept failing. held: one held for an operator or the customer's request
+    -- (short or late of its invoice, a second payment, an address no invoice
+    -- was given, a voided invoice, a payment that left the chain, a hold of
+    -- no invoice), ` + heldAgeSql + ` after it was first seen
+    SELECT receipt.asset AS target,
+           CASE WHEN receipt.state = 'review' AND COALESCE(receipt.review_reason, '') <> 'credit_failed'
+                THEN 'crypto_received_held'
+                ELSE 'crypto_received_uncredited'
+           END AS kind,
+           count(*)::bigint AS issue_count,
+           extract(epoch FROM now() - min(receipt.first_seen_at))::bigint AS oldest_age,
+           extract(epoch FROM now() - max(receipt.first_seen_at))::bigint AS newest_age
+    FROM crypto_payment_receipt receipt
+    WHERE (
+            receipt.state IN ('seen', 'confirmed')
+            AND COALESCE(receipt.review_reason, '') <> 'double_spend'
+            AND receipt.first_seen_at <= now() - interval '` + pendingAgeSql + `'
+          ) OR (
+            receipt.state = 'review'
+            AND receipt.review_reason = 'credit_failed'
+            AND receipt.first_seen_at <= now()
+          ) OR (
+            receipt.state = 'review'
+            AND COALESCE(receipt.review_reason, '') <> 'credit_failed'
+            AND NOT (
+                receipt.review_reason IN ('sanctions_hold', 'screening_unavailable', 'transfer_shape', 'amount_unmatched')
+                AND receipt.intent_id IS NOT NULL
+            )
+            AND receipt.first_seen_at <= now() - interval '` + heldAgeSql + `'
+          )
+    GROUP BY 1, 2
 )
 SELECT 'entitlement_missing' AS kind, target, issue_count, oldest_age, newest_age
 FROM missing_entitlement
@@ -170,8 +215,41 @@ FROM crypto_held
 UNION ALL
 SELECT 'crypto_scanner_stalled' AS kind, target, issue_count, oldest_age, newest_age
 FROM crypto_scanner
+UNION ALL
+SELECT kind, target, issue_count, oldest_age, newest_age
+FROM crypto_received
 ORDER BY kind, target
 `
+}
+
+// The payment failures probe's tunables.
+type PaymentFailuresSettings struct {
+	// How long a crypto rail payment the scanner credits by itself may wait in
+	// the mempool or below its credit depth before it pages
+	// (payment-received-uncredited).
+	ReceivedPendingAge time.Duration
+	// How long a received crypto payment held for an operator or the customer
+	// waits before it warns (payment-received-held).
+	ReceivedHeldAge time.Duration
+}
+
+// A new instance on every call.
+func DefaultPaymentFailuresSettings() *PaymentFailuresSettings {
+	return &PaymentFailuresSettings{
+		// past the slowest coin's credit depth (one Bitcoin block can take an
+		// hour), and past the scanner's own stall alert, so an outage pages
+		// as a stall first
+		ReceivedPendingAge: 2 * time.Hour,
+		// the uncredited payments metric's own minimum age
+		ReceivedHeldAge: model.DefaultSubscriptionMetricsSettings().UncreditedMinAge,
+	}
+}
+
+// A source-owned duration as the text of a SQL interval literal, in whole
+// seconds.
+func paymentFailuresIntervalSql(age time.Duration) string {
+	return fmt.Sprintf("%d seconds", int64(age/time.Second))
+}
 
 // The crypto rail's coins (model.CryptoAssets).
 var paymentFailuresCryptoAssets = paymentFailuresNameSet(model.CryptoAssets)
@@ -191,18 +269,25 @@ func NewPaymentFailuresSignal() Signal {
 		number: "2.22",
 		key:    "payment-failures",
 		name:   "Durable payment and entitlement failures",
-		probe:  paymentFailuresProbe{},
+		probe:  paymentFailuresProbe{settings: DefaultPaymentFailuresSettings()},
 	}
 }
 
-type paymentFailuresProbe struct{}
+// The payment failures probe, at its settings.
+type paymentFailuresProbe struct {
+	settings *PaymentFailuresSettings
+}
 
 func (paymentFailuresProbe) id() string             { return "pg/payment-failures" }
 func (paymentFailuresProbe) tier() string           { return tierPage }
 func (paymentFailuresProbe) cadence() time.Duration { return 5 * time.Minute }
 
-func (paymentFailuresProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
-	rows, err := env.runner.pg(ctx, paymentFailuresQuery)
+func (self paymentFailuresProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	settings := self.settings
+	if settings == nil {
+		settings = DefaultPaymentFailuresSettings()
+	}
+	rows, err := env.runner.pg(ctx, paymentFailuresQueryWith(settings))
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +374,7 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		}
 		common.class = "payment-solana-unfulfilled"
 		common.symptom = fmt.Sprintf("%d received Solana payment(s) remain unfulfilled with reason %s", count, target)
-		common.mechanism = "Helius delivered a confirmed transfer but the server could not match a live intent or the received amount was below the quoted amount. The webhook was acknowledged, so the durable row is the only bounded recovery source."
+		common.mechanism = "Helius delivered a confirmed transfer but the server could not match a live intent or the received amount was below the quoted amount. The webhook was acknowledged, so the durable row is the only bounded recovery source. A Shopify order paid with Solana Pay that its order record verifies is recorded as the order's payment instead (solana_shopify_order_payment) and never lands here; one no order verifies does, with why in its match note."
 		common.action = "Validate the on-chain transfer and intent lookup through the supported reconciliation path. Credit only an exactly matched, sufficiently funded payment; otherwise route the durable row for an authorized refund/support decision. Never delete it to clear the alert."
 		common.verify = "Every valid transfer is credited idempotently or receives a documented authorized resolution, the durable row clears through the supported path, and no duplicate grant is created."
 	case "refund_unmatched":
@@ -358,6 +443,27 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.mechanism = "The coin's scan chain fails every run (its chain source is down, refuses the key, lags or pauses on a runtime it cannot read, or its vault file is gone; for Bitcoin also a chain that changed below every block its scanner keeps, a reorg deeper than 24 blocks or a source on another chain): the coin is listed as unavailable, and payments to its open invoices are not read until it recovers. crypto_scan_cursor.last_error holds the reason."
 		common.action = "Read crypto_scan_cursor.last_error for the coin and the taskworker log ([cryptopay]). Restore the chain source (Alchemy, Helius, snow's Finney node, the wallet daemon) or its vault file. For TAO on a new runtime, check that the reader decodes it before forcing anything. For a Bitcoin reorg deeper than the kept chain, check the chain on a second source first, then clear crypto_scan_cursor.recent_blocks for btc: the scan reads its reorg window again from the cursor. Never point the scanner at an older block range."
 		common.verify = "The scanner succeeds again, the coin is listed as available, and payments made while it was down are credited from the chain."
+	case "crypto_received_uncredited":
+		if !paymentFailuresCryptoAssets[target] {
+			return finding{}, fmt.Errorf("payment failures returned an unknown crypto asset")
+		}
+		common.class = "payment-received-uncredited"
+		common.symptom = fmt.Sprintf("%d received %s payment(s) were never credited; the oldest arrived %d minutes ago", count, target, oldestAge/60)
+		common.mechanism = fmt.Sprintf("The scanner recorded the payment (crypto_payment_receipt) but no credit consumed it: it is still in the mempool or below its credit depth past the probe's pending age after it was first seen, or its credit failed %d times in a row and it is held as credit_failed. The customer paid and has no Pro or data, and nothing else pages: the scanner itself is succeeding (crypto-scanner-stalled is clear for a stall).", model.CryptoPaymentCreditFailureLimit)
+		common.context = "urnetwork_subscription_payments_uncredited{rail} on the subscriptions dashboard counts every received payment not credited after 30 minutes, held ones included; this kind is the part the rail should have credited by itself."
+		common.action = "Read the taskworker log ([cryptopay]) for the invoice's credit errors and the receipt's state with bringyourctl crypto show. Fix the credit's cause (the database, a deleted network, the coin's config); the scanner credits it on its next scan once its cause is gone. A credit_failed receipt is credited with bringyourctl crypto credit after review. Never credit a payment twice, and never move funds out for it without the owner's go."
+		common.verify = "Each payment is credited once (its receipt credited, the invoice's Pro or data granted), or has a documented disposition, and the aggregate returns to zero."
+	case "crypto_received_held":
+		if !paymentFailuresCryptoAssets[target] {
+			return finding{}, fmt.Errorf("payment failures returned an unknown crypto asset")
+		}
+		common.tier = tierWarn
+		common.class = "payment-received-held"
+		common.symptom = fmt.Sprintf("%d received %s payment(s) are held uncredited for an operator or the customer; the oldest arrived %d minutes ago", count, target, oldestAge/60)
+		common.mechanism = "The scanner held the payment for review instead of crediting it: short of its invoice at expiry (underpaid), late and short (late_underpaid), a second payment of a paid invoice (extra), a payment to an address no invoice was given (unknown_address), a payment to a voided invoice (voided), a credited payment that left the chain (orphaned), a late payment the rules would credit to an invoice past the retention unlink, whose network is forgotten (unlinked), or a sanctions or shape hold that names no invoice. The BTC, ETH, SOL and TAO scanners record a payment to any address an invoice was ever given, however old. The customer may have paid and have no Pro, and no other alert names these."
+		common.context = "Crypto returns are held until the customer asks for one (owner, 2026-11-11); a held payment is never returned or offered back unprompted. urnetwork_subscription_payments_uncredited{rail} on the subscriptions dashboard shows the same backlog with the payments the rail still credits by itself."
+		common.action = "Look the invoice up with bringyourctl crypto show and match it to its support thread. Credit a payment that covers what the customer bought with bringyourctl crypto credit after review, or keep it for the customer's request with a documented disposition. Never credit on an address or amount match alone, and never return funds without the customer's request and the owner's go."
+		common.verify = "Each held payment is credited once or has a documented disposition, and the aggregate returns to zero; a payment kept for the customer's request stays visible here."
 	default:
 		return finding{}, fmt.Errorf("payment failures returned an unknown kind")
 	}

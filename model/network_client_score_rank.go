@@ -178,6 +178,24 @@ func rankClientScore(
 	egressSettings *EgressIndexSettings,
 	minIndependentReliabilityWeights map[int]float64,
 ) {
+	counts, hasCounts := countFilter.healthCounts[clientScore.ClientId]
+	rankClientScoreWithCounts(clientScore, decision, counts, hasCounts, countFilter, egressSettings, minIndependentReliabilityWeights)
+}
+
+// rankClientScore with the window counts the decision was made on: the
+// filter's own for the strict decision, the classified counts for a
+// classified copy (FP2-PROTOCOL.md §3.4), whose URL weight reads the class's
+// forgiven runs as passes. hasCounts is false without accepted outcomes in
+// the window.
+func rankClientScoreWithCounts(
+	clientScore *ClientScore,
+	decision providerEgressDecision,
+	counts ProviderEgressHealthCounts,
+	hasCounts bool,
+	countFilter providerCountFilter,
+	egressSettings *EgressIndexSettings,
+	minIndependentReliabilityWeights map[int]float64,
+) {
 	lookbackIndexes := slices.Collect(maps.Keys(clientScore.LookbackClientScores))
 	slices.Sort(lookbackIndexes)
 	minLookbackIndex := lookbackIndexes[0]
@@ -216,8 +234,9 @@ func rankClientScore(
 	// a network-only score takes its declaration at export instead
 	// (FP2-MODERN.md, "The index flag")
 	clientScore.Modern = decision.modern
-	clientScore.UrlProbeSuccessWeight = providerUrlProbeSuccessWeight(countFilter.healthCounts[clientScore.ClientId])
-	if counts, ok := countFilter.healthCounts[clientScore.ClientId]; ok && counts.Total > 0 {
+	clientScore.UrlProbeSuccessWeight = providerUrlProbeSuccessWeight(counts)
+	clientScore.EgressValidUntil = nil
+	if hasCounts && counts.Total > 0 {
 		validUntil := clientScoreEgressValidUntil(counts, countFilter.healthWindowEnd, egressSettings)
 		clientScore.EgressValidUntil = &validUntil
 	}

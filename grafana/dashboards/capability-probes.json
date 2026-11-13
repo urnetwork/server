@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-capability-probes",
   "title": "urnetwork / capability probes",
-  "description": "The provider fleet's capabilities as the capability probe (server/capprobe) last read them: end-to-end post-quantum encryption and resizable transfer windows, what the modern provider gate holds quality and speed to. The census gauges are a database snapshot each taskworker's stats collector publishes every five minutes; every census panel reads the one latest snapshot, so no panel needs a host or block variable. The probe's own operational series are summarized here and charted in full on the egress probes dashboard.",
+  "description": "The provider fleet's capabilities as the probes last read them: end-to-end post-quantum encryption and resizable transfer windows. URL turns that measure post-quantum, about one per provider every four hours, write the evidence since the capability probe retired (FP2-PROTOCOL.md §12.2, §12.4); the census gauges are a database snapshot each taskworker's stats collector publishes every five minutes, and every census panel reads the one latest snapshot, so no panel needs a host or block variable. The URL turns' own post-quantum outcomes are charted on the egress probes dashboard, in its capability evidence row.",
   "tags": [
     "urnetwork",
     "providers",
@@ -69,7 +69,7 @@
     {
       "type": "stat",
       "title": "providers",
-      "description": "Connected providers in the capability census. The population is the capability probe's: connected, active top-level clients with a Public provide key and connected, valid reliability evidence, each counted once. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "description": "Connected providers in the capability census. The population is the probed fleet's: connected, active top-level clients with a Public provide key and connected, valid reliability evidence, each counted once. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -326,7 +326,7 @@
     {
       "type": "stat",
       "title": "evidence coverage",
-      "description": "Of the census, the providers with capability evidence newer than the seven-day staleness window. The rest have none or stale evidence and are due for the capability probe's next sweep. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "description": "Of the census, the providers with capability evidence newer than the seven-day staleness window. The rest have none or stale evidence and are due for their next post-quantum URL turn. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -458,7 +458,7 @@
     {
       "type": "barchart",
       "title": "capabilities now",
-      "description": "Connected providers by the capability probe's last reading: end-to-end (post_quantum, classical, no_responder) with window (resizable, fixed), or no_evidence / stale_evidence (seven days or older), which have no window reading. Modern is post_quantum / resizable. The population is the capability probe's: connected, active top-level clients with a Public provide key and connected, valid reliability evidence, each counted once. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "description": "Connected providers by the latest reading of their end-to-end session: end-to-end (post_quantum, classical, no_responder) with window (resizable, fixed), or no_evidence / stale_evidence (seven days or older), which have no window reading. Modern is post_quantum / resizable. The population is the probed fleet's: connected, active top-level clients with a Public provide key and connected, valid reliability evidence, each counted once. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
       "gridPos": {
         "h": 9,
         "w": 8,
@@ -539,7 +539,7 @@
     {
       "type": "barchart",
       "title": "evidence age now",
-      "description": "Connected providers by the age of their capability evidence: under 1d, 1d-3d, 3d-7d, stale (seven days or older) or none. The probe measures again once evidence is three days old by default (capability_probe.yml), so most fresh evidence sits under 3d while the probe keeps up. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "description": "Connected providers by the age of their capability evidence: under 1d, 1d-3d, 3d-7d, stale (seven days or older) or none. A URL turn measures a provider's session again once its newest measured outcome is four hours old, so fresh evidence sits under 1d while the URL probe keeps up. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
       "gridPos": {
         "h": 9,
         "w": 8,
@@ -620,7 +620,7 @@
     {
       "type": "barchart",
       "title": "key exchange groups now",
-      "description": "Connected providers with a fresh negotiated end-to-end session by the TLS key exchange group the provider chose from the capability probe's offer (crypto/tls names; X25519MLKEM768 is the post-quantum hybrid). The eight largest groups plus other. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "description": "Connected providers with a fresh negotiated end-to-end session by the TLS key exchange group the provider chose from the probe's offer (crypto/tls names; X25519MLKEM768 is the post-quantum hybrid). The eight largest groups plus other. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
       "gridPos": {
         "h": 9,
         "w": 8,
@@ -718,7 +718,7 @@
     {
       "type": "timeseries",
       "title": "providers by end-to-end reading",
-      "description": "The capability census over time, stacked by end-to-end reading. A rising no_evidence or stale_evidence band is the probe falling behind the fleet; a shrinking no_responder band is providers updating to apps with the end-to-end responder. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
+      "description": "The capability census over time, stacked by end-to-end reading. A rising no_evidence or stale_evidence band is the URL probe's post-quantum turns falling behind the fleet; a shrinking no_responder band is providers updating to apps with the end-to-end responder. Reads one latest taskworker snapshot of the census, at most 15 minutes old; the census refreshes every five minutes and missing data is not zero.",
       "gridPos": {
         "h": 9,
         "w": 12,
@@ -1141,397 +1141,6 @@
         }
       ],
       "id": 17,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      }
-    },
-    {
-      "type": "row",
-      "title": "probe activity",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 42
-      },
-      "panels": [],
-      "id": 18,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "last capability pass",
-      "description": "Seconds since any taskworker last finished a capability probe pass that measured or waited. A waiting probe passes every ten minutes, so past half an hour the probe has stopped (monitor signal capability-probe). The egress probes dashboard charts every capability probe series.",
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 0,
-        "y": 43
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 1200
-              },
-              {
-                "color": "red",
-                "value": 1800
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
-          "legendFormat": "",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          }
-        }
-      ],
-      "id": 19,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "last capability sweep",
-      "description": "How long the last completed capability probe sweep over the connected providers took, the longest any taskworker reports.",
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 43
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_capability_probe_last_sweep_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
-          "legendFormat": "",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          }
-        }
-      ],
-      "id": 20,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "capability sweeps / 7d",
-      "description": "Capability probe sweeps completed over the last seven days, across the taskworkers.",
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 43
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(increase(urnetwork_capability_probe_sweeps_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[7d]))",
-          "legendFormat": "",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          }
-        }
-      ],
-      "id": 21,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      }
-    },
-    {
-      "type": "stat",
-      "title": "capability breaker trips / 24h",
-      "description": "Capability probe passes over the last day that negotiated an end-to-end session with no provider and so recorded none of their negative readings: a fault on the probe's own side.",
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 18,
-        "y": 43
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          },
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto",
-        "justifyMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(increase(urnetwork_capability_probe_breaker_trips_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[24h]))",
-          "legendFormat": "",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          }
-        }
-      ],
-      "id": 22,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "capability measurements by outcome",
-      "description": "Finished capability measurements per hour by outcome: recorded with the gate's outcome (modern, not_post_quantum, no_resizable_windows), or why nothing was recorded.",
-      "gridPos": {
-        "h": 9,
-        "w": 12,
-        "x": 0,
-        "y": 47
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 30,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "showLegend": true,
-          "displayMode": "table",
-          "placement": "right",
-          "calcs": [
-            "lastNotNull",
-            "min",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (outcome) (increase(urnetwork_capability_probe_providers_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))",
-          "legendFormat": "{{outcome}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          }
-        }
-      ],
-      "id": 23,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "capability readings",
-      "description": "Final readings of opened capability measurements per hour, by capability (e2e, window) and reading. Unlike the census these keep sealed and unsealed sessions apart; not_tested and pending are not evidence.",
-      "gridPos": {
-        "h": 9,
-        "w": 12,
-        "x": 12,
-        "y": 47
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 30,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "showLegend": true,
-          "displayMode": "table",
-          "placement": "right",
-          "calcs": [
-            "lastNotNull",
-            "min",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (capability, reading) (increase(urnetwork_capability_probe_readings_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))",
-          "legendFormat": "{{capability}} {{reading}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          }
-        }
-      ],
-      "id": 24,
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"

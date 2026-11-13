@@ -1,5 +1,15 @@
 # capprobe — the modern provider gate's capability probe
 
+**Retired.** URL turns that measure post-quantum write `provider_modern_evidence`
+now (FP2-PROTOCOL.md §12.2, §12.4; `qualityprobe/fleetprobe/url_e2e.go`), and
+this package, its task and its panels are deleted. `capability_probe.yml` is
+read by nothing but the monitor's §2.19g switch, which reports a probe it
+switches off as healthy. A pending `work.CapabilityProbe` row is reaped at
+every taskworker start (`removedTaskTargets`), and its prober shard slot, the
+registry's last, stays unused. The rest of this file records the probe as it
+ran, and the config-release procedure under "Switching it on", which other
+documents cite.
+
 The FP2 modern provider gate ([FP2FIX.md](../FP2FIX.md#modern-provider-gate-2026-10-14))
 holds Quality and Speed to providers that negotiate end-to-end post-quantum
 encryption with a client and advertise resizable transfer windows. This

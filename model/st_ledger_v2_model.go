@@ -10,7 +10,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/holiman/uint256"
@@ -58,6 +60,50 @@ type StLedgerV2EpochRows struct {
 	DeclaredBy         string
 	RebuildRequestedBy string
 	CreateTime         time.Time
+	// Extenders is the epoch's extender component as it was first built,
+	// fixed with its provider rows; nil for an epoch the SN25 extender
+	// amendment does not cover (sn WHITEPAPER.md §8.6).
+	Extenders *StLedgerV2EpochExtenders
+}
+
+// An epoch's extender component as recorded: Z, its extender pool bytes, and
+// its census chunk references, with Z's parts and the contracts and payer
+// networks behind it, which the epoch's usage statement attests (sn
+// demand/usage, statement v2). Its share rows follow from Z, the census and
+// the provider rows.
+type StLedgerV2EpochExtenders struct {
+	Bytes        uint64
+	CensusChunks []string
+	// Z's parts, then the contracts behind Z and their distinct payer networks
+	IntraPlatform uint64
+	IntraNetwork  uint64
+	Contracts     uint64
+	Payers        uint64
+}
+
+// Reports the same component, both nil included.
+func (self *StLedgerV2EpochExtenders) Equal(other *StLedgerV2EpochExtenders) bool {
+	if self == nil || other == nil {
+		return self == other
+	}
+	return self.Bytes == other.Bytes && slices.Equal(self.CensusChunks, other.CensusChunks) &&
+		self.IntraPlatform == other.IntraPlatform && self.IntraNetwork == other.IntraNetwork &&
+		self.Contracts == other.Contracts && self.Payers == other.Payers
+}
+
+// Requires what the epoch reader's pool holds by construction: Z is the sum of
+// its parts, and the contracts and payers behind it exist exactly when Z is
+// positive, with no more payers than contracts.
+func (self *StLedgerV2EpochExtenders) Check() error {
+	switch {
+	case self.IntraPlatform > math.MaxUint64-self.IntraNetwork || self.IntraPlatform+self.IntraNetwork != self.Bytes:
+		return fmt.Errorf("st ledger v2: an extender component's %d bytes are not its %d intra-platform and %d intra-network bytes", self.Bytes, self.IntraPlatform, self.IntraNetwork)
+	case (self.Contracts != 0) != (self.Bytes != 0) || self.Payers > self.Contracts || (self.Payers != 0) != (self.Contracts != 0):
+		return fmt.Errorf("st ledger v2: an extender component's %d bytes do not fit its %d contracts of %d payers", self.Bytes, self.Contracts, self.Payers)
+	case self.Contracts > math.MaxInt64 || self.Payers > math.MaxInt64:
+		return fmt.Errorf("st ledger v2: an extender component counts more contracts than a record holds")
+	}
+	return nil
 }
 
 // Null reports the explicit unrecoverable declaration.
@@ -66,15 +112,32 @@ func (self *StLedgerV2EpochRows) Null() bool {
 }
 
 // RecordStLedgerV2EpochRows records an epoch's provider chunk references once
-// (§6.4 fixed inputs). Recording the same references again is a no-op; a
-// record whose rebuild the operator requested is replaced, which ends the
-// request; any other existing record is ErrStLedgerV2EpochRowsFixed.
+// (§6.4 fixed inputs), for an epoch without an extender component.
 func RecordStLedgerV2EpochRows(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, providerChunks []string) error {
+	return RecordStLedgerV2EpochComponents(ctx, deploymentKey, noId, epoch, providerChunks, nil)
+}
+
+// Records an epoch's provider chunk
+// references and its extender component, nil for none, once and together
+// (§6.4 fixed inputs). Recording the same again is a no-op; a record whose
+// rebuild the operator requested is replaced, which ends the request; any
+// other existing record is ErrStLedgerV2EpochRowsFixed.
+func RecordStLedgerV2EpochComponents(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, providerChunks []string, extenders *StLedgerV2EpochExtenders) error {
 	if providerChunks == nil {
 		providerChunks = []string{}
 	}
-	existing := recordStLedgerV2EpochRows(ctx, deploymentKey, noId, epoch, providerChunks, "")
-	if existing != nil && (existing.Null() || !slices.Equal(existing.ProviderChunks, providerChunks)) {
+	if extenders != nil {
+		if err := extenders.Check(); err != nil {
+			return err
+		}
+		if extenders.CensusChunks == nil {
+			copied := *extenders
+			copied.CensusChunks = []string{}
+			extenders = &copied
+		}
+	}
+	existing := recordStLedgerV2EpochRows(ctx, deploymentKey, noId, epoch, providerChunks, extenders, "")
+	if existing != nil && (existing.Null() || !slices.Equal(existing.ProviderChunks, providerChunks) || !existing.Extenders.Equal(extenders)) {
 		return fmt.Errorf("%w: epoch %d", ErrStLedgerV2EpochRowsFixed, epoch)
 	}
 	return nil
@@ -88,7 +151,7 @@ func DeclareStLedgerV2EpochUnrecoverable(ctx context.Context, deploymentKey StDe
 	if declaredBy == "" {
 		return errors.New("st ledger v2: an unrecoverable declaration must name who makes it")
 	}
-	existing := recordStLedgerV2EpochRows(ctx, deploymentKey, noId, epoch, nil, declaredBy)
+	existing := recordStLedgerV2EpochRows(ctx, deploymentKey, noId, epoch, nil, nil, declaredBy)
 	if existing != nil && !existing.Null() {
 		return fmt.Errorf("%w: epoch %d", ErrStLedgerV2EpochRowsFixed, epoch)
 	}
@@ -96,24 +159,46 @@ func DeclareStLedgerV2EpochUnrecoverable(ctx context.Context, deploymentKey StDe
 }
 
 // Inserts the record when absent, replaces with rows a record whose rebuild
-// was requested, and otherwise returns the existing one.
-func recordStLedgerV2EpochRows(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, providerChunks []string, declaredBy string) (existing *StLedgerV2EpochRows) {
+// was requested, and otherwise returns the existing one. An extender
+// component is written beside the rows, and replaced with them.
+func recordStLedgerV2EpochRows(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, providerChunks []string, extenders *StLedgerV2EpochExtenders, declaredBy string) (existing *StLedgerV2EpochRows) {
 	key := requireStDeploymentKey(deploymentKey)
 	var declared *string
 	if declaredBy != "" {
 		declared = &declaredBy
 	}
+	var extenderBytes, intraPlatform, intraNetwork *string
+	var contracts, payers *int64
+	var censusChunks []string
+	if extenders != nil {
+		text := func(value uint64) *string {
+			formatted := strconv.FormatUint(value, 10)
+			return &formatted
+		}
+		count := func(value uint64) *int64 {
+			counted := int64(value)
+			return &counted
+		}
+		extenderBytes, censusChunks = text(extenders.Bytes), extenders.CensusChunks
+		intraPlatform, intraNetwork = text(extenders.IntraPlatform), text(extenders.IntraNetwork)
+		contracts, payers = count(extenders.Contracts), count(extenders.Payers)
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				INSERT INTO st_ledger_v2_epoch_rows (deployment_key, no_id, epoch, provider_chunks, declared_by, create_time)
-				VALUES ($1, $2, $3, $4, $5, $6)
+				INSERT INTO st_ledger_v2_epoch_rows (deployment_key, no_id, epoch, provider_chunks, declared_by, create_time, extender_bytes, extender_census_chunks,
+					extender_intra_platform_bytes, extender_intra_network_bytes, extender_contracts, extender_payers)
+				VALUES ($1, $2, $3, $4, $5, $6, $7::text::numeric, $8, $9::text::numeric, $10::text::numeric, $11, $12)
 				ON CONFLICT (deployment_key, no_id, epoch) DO UPDATE
-				SET provider_chunks = EXCLUDED.provider_chunks, declared_by = NULL, rebuild_requested_by = NULL, create_time = EXCLUDED.create_time
+				SET provider_chunks = EXCLUDED.provider_chunks, declared_by = NULL, rebuild_requested_by = NULL, create_time = EXCLUDED.create_time,
+					extender_bytes = EXCLUDED.extender_bytes, extender_census_chunks = EXCLUDED.extender_census_chunks,
+					extender_intra_platform_bytes = EXCLUDED.extender_intra_platform_bytes, extender_intra_network_bytes = EXCLUDED.extender_intra_network_bytes,
+					extender_contracts = EXCLUDED.extender_contracts, extender_payers = EXCLUDED.extender_payers
 				WHERE st_ledger_v2_epoch_rows.rebuild_requested_by IS NOT NULL AND EXCLUDED.declared_by IS NULL
 			`,
-			key, int64(noId), int64(epoch), providerChunks, declared, server.NowUtc(),
+			key, int64(noId), int64(epoch), providerChunks, declared, server.NowUtc(), extenderBytes, censusChunks,
+			intraPlatform, intraNetwork, contracts, payers,
 		))
 		if tag.RowsAffected() == 0 {
 			existing = getStLedgerV2EpochRowsInTx(ctx, tx, key, noId, epoch, epoch)[epoch]
@@ -137,7 +222,9 @@ func getStLedgerV2EpochRowsInTx(ctx context.Context, tx server.PgTx, key string,
 	result, err := tx.Query(
 		ctx,
 		`
-			SELECT epoch, provider_chunks, declared_by, rebuild_requested_by, create_time
+			SELECT epoch, provider_chunks, declared_by, rebuild_requested_by, create_time,
+				extender_bytes::text, extender_census_chunks,
+				extender_intra_platform_bytes::text, extender_intra_network_bytes::text, extender_contracts, extender_payers
 			FROM st_ledger_v2_epoch_rows
 			WHERE deployment_key = $1 AND no_id = $2 AND epoch BETWEEN $3 AND $4
 		`,
@@ -147,14 +234,39 @@ func getStLedgerV2EpochRowsInTx(ctx context.Context, tx server.PgTx, key string,
 		for result.Next() {
 			record := &StLedgerV2EpochRows{}
 			var epoch int64
-			var declaredBy, rebuildRequestedBy *string
-			server.Raise(result.Scan(&epoch, &record.ProviderChunks, &declaredBy, &rebuildRequestedBy, &record.CreateTime))
+			var declaredBy, rebuildRequestedBy, extenderBytes, intraPlatform, intraNetwork *string
+			var contracts, payers *int64
+			var censusChunks []string
+			server.Raise(result.Scan(&epoch, &record.ProviderChunks, &declaredBy, &rebuildRequestedBy, &record.CreateTime, &extenderBytes, &censusChunks,
+				&intraPlatform, &intraNetwork, &contracts, &payers))
 			record.Epoch = uint64(epoch)
 			if declaredBy != nil {
 				record.DeclaredBy = *declaredBy
 			}
 			if rebuildRequestedBy != nil {
 				record.RebuildRequestedBy = *rebuildRequestedBy
+			}
+			// extender_bytes marks a component, recorded with its parts; its
+			// census may have no chunks
+			parts := intraPlatform != nil && intraNetwork != nil && contracts != nil && payers != nil
+			switch {
+			case extenderBytes != nil && parts:
+				parse := func(text string) uint64 {
+					value, err := strconv.ParseUint(text, 10, 64)
+					server.Raise(err)
+					return value
+				}
+				if censusChunks == nil {
+					censusChunks = []string{}
+				}
+				if *contracts < 0 || *payers < 0 {
+					server.Raise(fmt.Errorf("st ledger v2: epoch %d's extender component records a negative count", record.Epoch))
+				}
+				record.Extenders = &StLedgerV2EpochExtenders{Bytes: parse(*extenderBytes), CensusChunks: censusChunks,
+					IntraPlatform: parse(*intraPlatform), IntraNetwork: parse(*intraNetwork), Contracts: uint64(*contracts), Payers: uint64(*payers)}
+				server.Raise(record.Extenders.Check())
+			case extenderBytes != nil || censusChunks != nil || intraPlatform != nil || intraNetwork != nil || contracts != nil || payers != nil:
+				server.Raise(fmt.Errorf("st ledger v2: epoch %d's extender component is recorded in part", record.Epoch))
 			}
 			records[record.Epoch] = record
 		}

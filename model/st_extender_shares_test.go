@@ -8,15 +8,20 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 )
 
-// The amendment as SN25 sets it, from epoch 8 (§8.6.7).
+// When a test's contracts were created.
+var stExtenderTestCreateTime = time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC)
+
+// The amendment as SN25 sets it, from epoch 8 (§8.6.7), with platformEndpoints
+// registered from long before any test contract was created.
 func stExtenderAmendmentTestPolicy(platformEndpoints ...server.Id) stExtenderAmendment {
-	amendment := stExtenderAmendment{FirstEpoch: 8, PlatformEndpoints: map[server.Id]bool{}}
+	amendment := stExtenderAmendment{FirstEpoch: 8, PlatformEndpoints: StPlatformEndpointSet{}}
 	for _, clientId := range platformEndpoints {
-		amendment.PlatformEndpoints[clientId] = true
+		amendment.PlatformEndpoints[clientId] = []*StPlatformEndpoint{{ClientId: clientId, Kind: StPlatformEndpointTlsEdge, RegisterTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), RegisteredBy: "test"}}
 	}
 	return amendment
 }
@@ -66,7 +71,7 @@ func assertStExtenderSharesEachCountedOnce(
 	t.Helper()
 	var kept, platform, sameNetwork ByteCount
 	for _, share := range snapshot.Providers {
-		isPlatform := amendment.PlatformEndpoints[share.ClientId]
+		isPlatform := amendment.PlatformEndpoints.holds(share.ClientId, stExtenderTestCreateTime)
 		isSameNetwork := !isPlatform && share.NetworkId == originNetworkId
 		switch {
 		case isPlatform:
@@ -97,7 +102,7 @@ func assertStExtenderSharesEachCountedOnce(
 func countStExtenderPoolShares(snapshot *contractUsageSnapshot, originNetworkId server.Id, amendment stExtenderAmendment) int {
 	count := 0
 	for _, share := range snapshot.Providers {
-		if amendment.PlatformEndpoints[share.ClientId] || share.NetworkId == originNetworkId {
+		if amendment.PlatformEndpoints.holds(share.ClientId, stExtenderTestCreateTime) || share.NetworkId == originNetworkId {
 			count++
 		}
 	}
@@ -152,7 +157,7 @@ func TestStExtenderPartyIsOneOfTheContractsHops(t *testing.T) {
 			}
 
 			for _, epoch := range []uint64{7, 8, 9} {
-				shares, err := stContractSharesForEpoch(snapshot, epoch, origin.NetworkId, amendment)
+				shares, err := stContractSharesForEpoch(snapshot, epoch, origin.NetworkId, stExtenderTestCreateTime, amendment)
 				if err != nil {
 					t.Fatalf("%s, epoch %d: %v", name, epoch, err)
 				}
@@ -198,7 +203,7 @@ func TestStExtenderAmendmentChangesNothingBeforeItsFirstEpoch(t *testing.T) {
 		{name: "no amendment entry, epoch 1000", amendment: stExtenderAmendment{}, epoch: 1000},
 	} {
 		for _, origin := range []server.Id{originNetworkId, {}} {
-			shares, err := stContractSharesForEpoch(snapshot, c.epoch, origin, c.amendment)
+			shares, err := stContractSharesForEpoch(snapshot, c.epoch, origin, stExtenderTestCreateTime, c.amendment)
 			if err != nil {
 				t.Fatalf("%s: %v", c.name, err)
 			}
@@ -208,7 +213,7 @@ func TestStExtenderAmendmentChangesNothingBeforeItsFirstEpoch(t *testing.T) {
 		}
 	}
 
-	shares, err := stContractSharesForEpoch(snapshot, 8, originNetworkId, amendment)
+	shares, err := stContractSharesForEpoch(snapshot, 8, originNetworkId, stExtenderTestCreateTime, amendment)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +281,7 @@ func TestStExtenderCarriedPlatformContractKeepsTheExtendersShare(t *testing.T) {
 		}) {
 			t.Fatalf("%s: the platform endpoint is not one of the hops %+v", c.name, participants)
 		}
-		shares, err := stContractSharesForEpoch(snapshot, 8, origin.NetworkId, amendment)
+		shares, err := stContractSharesForEpoch(snapshot, 8, origin.NetworkId, stExtenderTestCreateTime, amendment)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -331,7 +336,7 @@ func TestStExtenderPoolNeverCreditsAShareTwice(t *testing.T) {
 	var intraPlatform, intraNetwork, total ByteCount
 	for _, c := range contracts {
 		snapshot, _ := stExtenderTestSnapshot(t, c.bytes, c.origin, c.egress, c.hops...)
-		shares, err := stContractSharesForEpoch(snapshot, 8, c.origin.NetworkId, amendment)
+		shares, err := stContractSharesForEpoch(snapshot, 8, c.origin.NetworkId, stExtenderTestCreateTime, amendment)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -383,11 +388,11 @@ func TestStExtenderAmendmentRefusesWhatItCannotClassify(t *testing.T) {
 	amendment := stExtenderAmendmentTestPolicy()
 	originNetworkId := contractPayoutTestId(101)
 	share := contractProviderUsage{ClientId: contractPayoutTestId(10), NetworkId: contractPayoutTestId(110), ByteCount: 10}
-	if _, err := stContractSharesForEpoch(nil, 8, originNetworkId, amendment); err == nil {
+	if _, err := stContractSharesForEpoch(nil, 8, originNetworkId, stExtenderTestCreateTime, amendment); err == nil {
 		t.Fatal("read a missing snapshot")
 	}
 	valid := &contractUsageSnapshot{Version: 1, ByteCount: 10, Providers: []contractProviderUsage{share}}
-	if _, err := stContractSharesForEpoch(valid, 8, server.Id{}, amendment); err == nil {
+	if _, err := stContractSharesForEpoch(valid, 8, server.Id{}, stExtenderTestCreateTime, amendment); err == nil {
 		t.Fatal("classified shares without the contract's origin network")
 	}
 	for _, snapshot := range []*contractUsageSnapshot{
@@ -397,7 +402,7 @@ func TestStExtenderAmendmentRefusesWhatItCannotClassify(t *testing.T) {
 		{Version: 1, ByteCount: -1, Providers: []contractProviderUsage{{ClientId: share.ClientId, NetworkId: share.NetworkId, ByteCount: -1}}},
 	} {
 		for _, epoch := range []uint64{7, 8} {
-			if shares, err := stContractSharesForEpoch(snapshot, epoch, originNetworkId, amendment); err == nil {
+			if shares, err := stContractSharesForEpoch(snapshot, epoch, originNetworkId, stExtenderTestCreateTime, amendment); err == nil {
 				t.Fatalf("epoch %d: read %+v as %+v", epoch, snapshot, shares)
 			}
 		}
@@ -441,11 +446,65 @@ func assertStContractUsageSnapshotHops(
 	if snapshot.ByteCount != byteCount || !slices.Equal(snapshot.Providers, want) {
 		t.Fatalf("usage snapshot = %+v, want %d bytes in the hop shares %+v", snapshot, byteCount, want)
 	}
-	shares, err := stContractSharesForEpoch(snapshot, 8, originNetworkId, stExtenderAmendmentTestPolicy())
+	shares, err := stContractSharesForEpoch(snapshot, 8, originNetworkId, stExtenderTestCreateTime, stExtenderAmendmentTestPolicy())
 	if err != nil {
 		t.Fatalf("read the usage snapshot: %v", err)
 	}
 	if !slices.Equal(shares.Providers, wantProviders) || shares.IntraNetwork != wantIntraNetwork || shares.IntraPlatform != 0 {
 		t.Fatalf("epoch 8 reads %+v, want providers %+v and %d intra-network bytes", shares, wantProviders, wantIntraNetwork)
+	}
+}
+
+// A platform endpoint's share is intra-platform exactly when the contract was
+// created while its registration was in force: from the registration, inclusive,
+// until its revocation, exclusive. Its class is fixed at creation, never inferred
+// later, so a contract created before the registration or after the revocation
+// keeps the endpoint's share as provider usage (sn WHITEPAPER.md §8.6.2).
+func TestStExtenderPlatformEndpointIsClassifiedByCreateTime(t *testing.T) {
+	origin := ContractParticipant{ClientId: contractPayoutTestId(201), NetworkId: contractPayoutTestId(101)}
+	edge := ContractParticipant{ClientId: contractPayoutTestId(5), NetworkId: contractPayoutTestId(160)}
+	x := ContractParticipant{ClientId: contractPayoutTestId(12), NetworkId: contractPayoutTestId(240)}
+	snapshot, _ := stExtenderTestSnapshot(t, 1_001, origin, edge, x)
+	registered := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	revoked := registered.Add(24 * time.Hour)
+	amendment := stExtenderAmendment{FirstEpoch: 8, PlatformEndpoints: StPlatformEndpointSet{edge.ClientId: {
+		{ClientId: edge.ClientId, NetworkId: edge.NetworkId, Kind: StPlatformEndpointTlsEdge, RegisterTime: registered, RegisteredBy: "test", RevokeTime: &revoked, RevokedBy: "test"},
+	}}}
+	for name, c := range map[string]struct {
+		created       time.Time
+		intraPlatform ByteCount
+	}{
+		"created before the registration": {registered.Add(-time.Microsecond), 0},
+		"created as it was registered":    {registered, 501},
+		"created while it was registered": {registered.Add(time.Hour), 501},
+		"created as it was revoked":       {revoked, 0},
+		"created after the revocation":    {revoked.Add(time.Hour), 0},
+	} {
+		shares, err := stContractSharesForEpoch(snapshot, 8, origin.NetworkId, c.created, amendment)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var providers ByteCount
+		for _, share := range shares.Providers {
+			providers += share.ByteCount
+		}
+		if shares.IntraPlatform != c.intraPlatform || shares.IntraNetwork != 0 || providers+shares.IntraPlatform != 1_001 {
+			t.Fatalf("%s: %+v", name, shares)
+		}
+		if (len(shares.Pooled) == 1) != (c.intraPlatform != 0) {
+			t.Fatalf("%s: pooled %+v", name, shares.Pooled)
+		}
+	}
+	// a revoked registration and a later one: each window counts on its own
+	again := registered.Add(48 * time.Hour)
+	amendment.PlatformEndpoints[edge.ClientId] = append(amendment.PlatformEndpoints[edge.ClientId],
+		&StPlatformEndpoint{ClientId: edge.ClientId, NetworkId: edge.NetworkId, Kind: StPlatformEndpointMxEdge, RegisterTime: again, RegisteredBy: "test"})
+	for created, want := range map[time.Time]bool{registered.Add(time.Hour): true, revoked.Add(time.Hour): false, again.Add(time.Hour): true} {
+		if got := amendment.PlatformEndpoints.holds(edge.ClientId, created); got != want {
+			t.Fatalf("created %s: %v", created, got)
+		}
+	}
+	if amendment.PlatformEndpoints.Count() != 2 || amendment.PlatformEndpoints.InForce(again) != 1 || amendment.PlatformEndpoints.InForce(revoked) != 0 {
+		t.Fatal("the registry's counts")
 	}
 }
