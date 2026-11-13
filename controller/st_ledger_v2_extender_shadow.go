@@ -39,6 +39,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/holiman/uint256"
 	"github.com/urfoundation/sn/amendment"
@@ -55,6 +56,40 @@ import (
 const StLedgerV2UsageStepExtenderShadow = "extender_shadow"
 
 const stExtenderShadowSchema = "urnetwork-extender-shadow-v1"
+
+// Raised once when an epoch's shadow is given up: its read kept running past
+// its bound (StLedgerV2GiveUpExtenderShadow).
+const StLedgerV2AlertExtenderShadow = "v2_extender_shadow"
+
+// Tunables of a shadow run.
+type StLedgerV2ExtenderShadowSettings struct {
+	// Close-time span of one slice of the epoch's contracts, each read in its
+	// own short REPEATABLE READ snapshot (model.GetStEpochAmendedUsageInSlices),
+	// so no snapshot pins the primary for the whole epoch. An hour of a 7-day
+	// epoch closes about 2.4M contracts on average, a read of 15 to 20 s, well
+	// inside the role's 15-minute transaction_timeout. Non-positive reads the
+	// epoch in one snapshot, as a root's build does.
+	ReadSliceSpan time.Duration
+	// Reads of one slice that may fail in a row, each from nothing, before the
+	// run fails and its step retries. Below 1 reads each slice once.
+	ReadSliceAttempts int
+	// Wait before a failed slice is read again.
+	ReadSliceRetryDelay time.Duration
+}
+
+// Hour-long slices, each tried three times, 15 s apart.
+func DefaultStLedgerV2ExtenderShadowSettings() *StLedgerV2ExtenderShadowSettings {
+	return &StLedgerV2ExtenderShadowSettings{
+		ReadSliceSpan:       1 * time.Hour,
+		ReadSliceAttempts:   3,
+		ReadSliceRetryDelay: 15 * time.Second,
+	}
+}
+
+// The epoch read's slicing.
+func (self *StLedgerV2ExtenderShadowSettings) slicing() model.StEpochUsageSlices {
+	return model.StEpochUsageSlices{Span: self.ReadSliceSpan, Attempts: self.ReadSliceAttempts, RetryDelay: self.ReadSliceRetryDelay}
+}
 
 // The chain as a shadow run reads it: views only.
 type stExtenderShadowChain interface {
@@ -134,6 +169,12 @@ func stExtenderShadowKey(cfg *StConfig, epoch uint64) string {
 	return fmt.Sprintf("%s|%d|%d", cfg.DeploymentKey(), cfg.NoId, epoch)
 }
 
+// Forgets the epochs this process's shadow steps concluded or gave up, for the
+// tests of other packages that share the process.
+func Testing_ClearStExtenderShadowConcluded() {
+	stExtenderShadowConcluded.Clear()
+}
+
 // Reports whether an epoch's shadow report is still to be built: it is one of
 // the two epochs before E_x, by the amendments this server holds
 // (stLedgerV2HeldAmendments, which fetches nothing), its census is captured,
@@ -174,6 +215,25 @@ func stExtenderShadowConclude(cfg *StConfig, epoch uint64, format string, args .
 	return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf(format, args...)}
 }
 
+// Gives up an epoch's shadow once timeouts of its chain's attempts ran past
+// bound, each a full read cut short: it alerts once, records the count in the
+// shadow phase's gauges, and the sync of this process plans the epoch no more.
+// The step's chain holds the epoch past its sync window, so no read starts
+// again after a restart (taskworker/work/st_ledger_v2_usage_work.go). Nothing
+// is recorded for the epoch; its shadow is missed, as §8.6.7 allows for epoch
+// 6 ("epoch 7 alone is the live shadow").
+func StLedgerV2GiveUpExtenderShadow(epoch uint64, timeouts int, bound time.Duration) {
+	cfg, _, err := stRequire()
+	if err != nil {
+		glog.Errorf("[st]v2 epoch %d extender shadow given up after %d timed-out attempts: %s\n", epoch, timeouts, err)
+		return
+	}
+	stExtenderShadowConcluded.Store(stExtenderShadowKey(cfg, epoch), true)
+	stExtenderPoolCounts.WithLabelValues("shadow", "timed_out_attempts").Set(float64(timeouts))
+	stLedgerV2Alert(cfg, StLedgerV2AlertExtenderShadow, fmt.Sprintf("epoch %d", epoch),
+		"epoch %d's extender shadow read ran past %s in %d attempts, so its shadow is given up: no report is built, and no read of it starts again", epoch, bound, timeouts)
+}
+
 // Builds, publishes and records epoch's shadow report. An epoch that does not
 // run live in shadow concludes first, by the amendments this server holds,
 // before any of its records, the chain or the published amendments are read;
@@ -181,8 +241,8 @@ func stExtenderShadowConclude(cfg *StConfig, epoch uint64, format string, args .
 // waits for the epoch's rows to be recorded by its live root and for its
 // close, and concludes without a report for an epoch the published amendments
 // put outside the shadow runs, one declared unrecoverable, or one with no
-// eligible usage.
-func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExtenderShadowChain, epoch uint64) *StPublishOutcome {
+// eligible usage. It reads the epoch's contracts in settings' short slices.
+func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExtenderShadowChain, epoch uint64, settings *StLedgerV2ExtenderShadowSettings) *StPublishOutcome {
 	file, fallback, err := stLedgerV2HeldAmendments(ctx, cfg)
 	if err != nil {
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d shadow: the amendments held: %s", epoch, err))
@@ -264,7 +324,7 @@ func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExt
 		return stLedgerV2UsageRetry(err.Error())
 	}
 	amendment := model.StExtenderAmendment{FirstEpoch: epoch, PlatformEndpoints: platformEndpoints}
-	rows, pool, err := stLedgerV2AmendedEpochRows(ctx, epoch, amendment, amendments.pool, false)
+	rows, pool, err := stLedgerV2AmendedEpochRows(ctx, epoch, amendment, amendments.pool, false, settings.slicing())
 	if err != nil {
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d shadow rows: %s", epoch, err))
 	}

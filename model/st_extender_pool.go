@@ -8,6 +8,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -229,6 +230,194 @@ func scanStEpochAmendedUsageRow(rows pgx.Rows, row *stEpochUsageRow) error {
 	return rows.Scan(&row.contractId, &row.data, &row.closedAt, &row.duplicate, &row.live, &row.originNetworkId, &row.payerNetworkId, &row.createTime)
 }
 
+// Adds the totals of other, a reader of the same epoch and amendment over rows
+// this one has not read, as adding those rows here would: the same sums, and
+// the same refusal of a client with two networks or a total that overflows.
+func (self *stEpochAmendedUsage) merge(other *stEpochAmendedUsage) error {
+	for clientId, usage := range other.clientIdUsages {
+		total := self.clientIdUsages[clientId]
+		if total == nil {
+			copied := *usage
+			self.clientIdUsages[clientId] = &copied
+			continue
+		}
+		if total.NetworkId != usage.NetworkId || usage.PayoutByteCount > math.MaxInt64-total.PayoutByteCount {
+			return fmt.Errorf("subnet provider usage has ambiguous network or overflowing total")
+		}
+		total.PayoutByteCount += usage.PayoutByteCount
+	}
+	for clientId, bytes := range other.pool.ClientIdPooledBytes {
+		total := self.pool.ClientIdPooledBytes[clientId]
+		if err := addStEpochPoolBytes(&total, bytes); err != nil {
+			return err
+		}
+		self.pool.ClientIdPooledBytes[clientId] = total
+	}
+	for _, part := range []struct{ total, bytes *ByteCount }{
+		{&self.pool.IntraPlatform, &other.pool.IntraPlatform}, {&self.pool.IntraNetwork, &other.pool.IntraNetwork},
+		{&self.pool.UnfundedBytes, &other.pool.UnfundedBytes}, {&self.pool.MeasurementBytes, &other.pool.MeasurementBytes},
+	} {
+		if err := addStEpochPoolBytes(part.total, *part.bytes); err != nil {
+			return err
+		}
+	}
+	if self.pool.IntraPlatform > math.MaxInt64-self.pool.IntraNetwork {
+		return fmt.Errorf("subnet extender pool bytes overflow")
+	}
+	self.pool.Contracts += other.pool.Contracts
+	self.pool.UnfundedContracts += other.pool.UnfundedContracts
+	self.pool.MeasurementContracts += other.pool.MeasurementContracts
+	for networkId := range other.payerNetworkIds {
+		self.payerNetworkIds[networkId] = true
+	}
+	return nil
+}
+
+// A row the amended read refuses for what it holds, which reading it again
+// cannot change. Its text is the refusal's.
+type stEpochUsageRefusal struct {
+	err error
+}
+
+func (self *stEpochUsageRefusal) Error() string { return self.err.Error() }
+
+func (self *stEpochUsageRefusal) Unwrap() error { return self.err }
+
+// Reads the amended usage statement's rows that closed in [windowStart,
+// windowEnd) into reader, in one REPEATABLE READ, read-only snapshot of one
+// maintenance session, planned as the usage statement is: a window past the
+// census record bound in one block-ordered pass, checked on workers and added
+// in statement order. exempt lifts the session's transaction_timeout for a
+// read that may run past it; without it the role's bound ends any snapshot that
+// would. It returns the rows read, and a refusal of a row as an
+// stEpochUsageRefusal.
+func readStEpochAmendedUsageWindow(
+	ctx context.Context,
+	reader *stEpochAmendedUsage,
+	windowStart time.Time,
+	windowEnd time.Time,
+	exempt bool,
+) (int, error) {
+	usageRows := 0
+	var returnErr error
+	check := func(row *stEpochUsageRow) (*contractUsageSnapshot, error) {
+		snapshot, err := checkStEpochUsageRow(row, reader.epoch)
+		if err != nil {
+			return nil, &stEpochUsageRefusal{err: err}
+		}
+		return snapshot, nil
+	}
+	add := func(row *stEpochUsageRow, snapshot *contractUsageSnapshot, _ []byte) error {
+		if row.closedAt.Before(windowStart) || !row.closedAt.Before(windowEnd) {
+			return nil
+		}
+		if err := reader.add(row, snapshot); err != nil {
+			return &stEpochUsageRefusal{err: err}
+		}
+		return nil
+	}
+	read := func(tx server.PgTx) {
+		rows, err := tx.Query(ctx, stEpochAmendedUsageSql, windowStart, windowEnd)
+		if err != nil {
+			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var row stEpochUsageRow
+			if err := scanStEpochAmendedUsageRow(rows, &row); err != nil {
+				returnErr = err
+				return
+			}
+			usageRows++
+			snapshot, err := check(&row)
+			if err != nil {
+				returnErr = err
+				return
+			}
+			if err := add(&row, snapshot, nil); err != nil {
+				returnErr = err
+				return
+			}
+		}
+		returnErr = rows.Err()
+	}
+	readWhole := func(tx server.PgTx) {
+		queryCtx, cancelQuery := context.WithCancel(ctx)
+		defer cancelQuery()
+		rows, err := tx.Query(queryCtx, stEpochAmendedUsageSql, windowStart, windowEnd)
+		if err != nil {
+			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+			return
+		}
+		defer rows.Close()
+		next := func(row *stEpochUsageRow) (bool, error) {
+			if !rows.Next() {
+				return false, rows.Err()
+			}
+			if err := scanStEpochAmendedUsageRow(rows, row); err != nil {
+				return false, err
+			}
+			usageRows++
+			return true, nil
+		}
+		returnErr = addStEpochUsageRowsInOrder(stEpochUsageCheckWorkers, cancelQuery, next, check, add)
+	}
+	readInTx := func(conn server.PgConn) {
+		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+		if err != nil {
+			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+			return
+		}
+		// read only, so a rollback ends it
+		defer tx.Rollback(context.WithoutCancel(ctx))
+		var bounded int
+		if err := tx.QueryRow(ctx, stEpochProviderUsageBoundSql, windowStart, windowEnd, payoutartifact.MaxClosedWorkRecords+1).Scan(&bounded); err != nil {
+			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+			return
+		}
+		if bounded <= payoutartifact.MaxClosedWorkRecords {
+			read(tx)
+			return
+		}
+		if err := stEpochProviderUsageWholeWindowPlanInTx(ctx, tx); err != nil {
+			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
+			return
+		}
+		readWhole(tx)
+		if returnErr == nil && usageRows <= payoutartifact.MaxClosedWorkRecords {
+			// one snapshot cannot return fewer rows than it counted
+			returnErr = fmt.Errorf("read epoch provider usage: %d rows read after %d were counted", usageRows, bounded)
+		}
+	}
+	// The same session, snapshot and plans as getStEpochProviderUsageWithCensus
+	// without a census.
+	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		if !exempt {
+			readInTx(conn)
+			return
+		}
+		server.WithoutTransactionTimeout(ctx, conn, func() {
+			readInTx(conn)
+		})
+	})
+	return usageRows, returnErr
+}
+
+// Logs an amended read's totals, and how many snapshots it read them in when
+// more than one.
+func logStEpochAmendedUsage(epoch uint64, usageRows int, snapshots int, usages []*StProviderUsage, pool *StEpochExtenderPool, elapsed time.Duration) {
+	read := fmt.Sprintf("%d closed contracts", usageRows)
+	if 1 < snapshots {
+		read = fmt.Sprintf("%d closed contracts in %d snapshots", usageRows, snapshots)
+	}
+	glog.Infof(
+		"[st]epoch %d amended usage read %s for %d providers in %s: Z = %d bytes (%d intra-platform, %d intra-network) from %d contracts of %d payers; left out %d unfunded bytes in %d contracts and %d measurement bytes in %d contracts\n",
+		epoch, read, len(usages), elapsed.Round(time.Millisecond), pool.Bytes(), pool.IntraPlatform, pool.IntraNetwork,
+		pool.Contracts, pool.Payers, pool.UnfundedBytes, pool.UnfundedContracts, pool.MeasurementBytes, pool.MeasurementContracts,
+	)
+}
+
 // Reads an epoch's provider usage under the extender amendment, and its
 // extender pool. An epoch the amendment does not cover is read exactly as
 // GetStEpochProviderUsageAtEpoch reads it, with no pool. One it covers reads
@@ -261,104 +450,123 @@ func GetStEpochAmendedUsageAtEpoch(
 		usages, pool := reader.result()
 		return usages, pool, nil
 	}
-	usageRows := 0
-	var returnErr error
-	check := func(row *stEpochUsageRow) (*contractUsageSnapshot, error) {
-		return checkStEpochUsageRow(row, epoch)
-	}
-	add := func(row *stEpochUsageRow, snapshot *contractUsageSnapshot, _ []byte) error {
-		if row.closedAt.Before(earningStart) || !row.closedAt.Before(earningEnd) {
-			return nil
-		}
-		return reader.add(row, snapshot)
-	}
-	read := func(tx server.PgTx) {
-		rows, err := tx.Query(ctx, stEpochAmendedUsageSql, earningStart, earningEnd)
-		if err != nil {
-			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var row stEpochUsageRow
-			if err := scanStEpochAmendedUsageRow(rows, &row); err != nil {
-				returnErr = err
-				return
-			}
-			usageRows++
-			snapshot, err := check(&row)
-			if err != nil {
-				returnErr = err
-				return
-			}
-			if err := add(&row, snapshot, nil); err != nil {
-				returnErr = err
-				return
-			}
-		}
-		returnErr = rows.Err()
-	}
-	readWhole := func(tx server.PgTx) {
-		queryCtx, cancelQuery := context.WithCancel(ctx)
-		defer cancelQuery()
-		rows, err := tx.Query(queryCtx, stEpochAmendedUsageSql, earningStart, earningEnd)
-		if err != nil {
-			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
-			return
-		}
-		defer rows.Close()
-		next := func(row *stEpochUsageRow) (bool, error) {
-			if !rows.Next() {
-				return false, rows.Err()
-			}
-			if err := scanStEpochAmendedUsageRow(rows, row); err != nil {
-				return false, err
-			}
-			usageRows++
-			return true, nil
-		}
-		returnErr = addStEpochUsageRowsInOrder(stEpochUsageCheckWorkers, cancelQuery, next, check, add)
-	}
 	readStart := time.Now()
-	// The same session, snapshot and plans as getStEpochProviderUsageWithCensus
-	// without a census.
-	server.MaintenanceDb(ctx, func(conn server.PgConn) {
-		server.WithoutTransactionTimeout(ctx, conn, func() {
-			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-			if err != nil {
-				returnErr = fmt.Errorf("read epoch provider usage: %w", err)
-				return
-			}
-			// read only, so a rollback ends it
-			defer tx.Rollback(context.WithoutCancel(ctx))
-			var bounded int
-			if err := tx.QueryRow(ctx, stEpochProviderUsageBoundSql, earningStart, earningEnd, payoutartifact.MaxClosedWorkRecords+1).Scan(&bounded); err != nil {
-				returnErr = fmt.Errorf("read epoch provider usage: %w", err)
-				return
-			}
-			if bounded <= payoutartifact.MaxClosedWorkRecords {
-				read(tx)
-				return
-			}
-			if err := stEpochProviderUsageWholeWindowPlanInTx(ctx, tx); err != nil {
-				returnErr = fmt.Errorf("read epoch provider usage: %w", err)
-				return
-			}
-			readWhole(tx)
-			if returnErr == nil && usageRows <= payoutartifact.MaxClosedWorkRecords {
-				// one snapshot cannot return fewer rows than it counted
-				returnErr = fmt.Errorf("read epoch provider usage: %d rows read after %d were counted", usageRows, bounded)
-			}
-		})
-	})
-	if returnErr != nil {
-		return nil, nil, returnErr
+	usageRows, err := readStEpochAmendedUsageWindow(ctx, reader, earningStart, earningEnd, true)
+	if err != nil {
+		return nil, nil, err
 	}
 	usages, pool := reader.result()
-	glog.Infof(
-		"[st]epoch %d amended usage read %d closed contracts for %d providers in %s: Z = %d bytes (%d intra-platform, %d intra-network) from %d contracts of %d payers; left out %d unfunded bytes in %d contracts and %d measurement bytes in %d contracts\n",
-		epoch, usageRows, len(usages), time.Since(readStart).Round(time.Millisecond), pool.Bytes(), pool.IntraPlatform, pool.IntraNetwork,
-		pool.Contracts, pool.Payers, pool.UnfundedBytes, pool.UnfundedContracts, pool.MeasurementBytes, pool.MeasurementContracts,
-	)
+	logStEpochAmendedUsage(epoch, usageRows, 1, usages, pool, time.Since(readStart))
+	return usages, pool, nil
+}
+
+// How a sliced epoch read is cut and retried (GetStEpochAmendedUsageInSlices).
+// Its owner's settings supply it.
+type StEpochUsageSlices struct {
+	// Close-time span of one slice, read in its own snapshot. Non-positive
+	// reads the whole window in one snapshot.
+	Span time.Duration
+	// Reads of one slice that may fail in a row, each from nothing, before
+	// the read fails. Below 1 reads each slice once.
+	Attempts int
+	// Wait before a failed slice is read again.
+	RetryDelay time.Duration
+}
+
+// Called before each attempt of a slice of a sliced read is read, and again,
+// with read set, once it is read and before it counts: an error then fails that
+// attempt. A seam the tests set; nil otherwise.
+var stEpochUsageSliceHook func(sliceStart time.Time, attempt int, read bool) error
+
+// Sets the sliced read's seam for another package's test, and returns what
+// restores it.
+func Testing_SetStEpochUsageSliceHook(hook func(sliceStart time.Time, attempt int, read bool) error) (restore func()) {
+	previous := stEpochUsageSliceHook
+	stEpochUsageSliceHook = hook
+	return func() { stEpochUsageSliceHook = previous }
+}
+
+// Reads an epoch's provider usage and extender pool as
+// GetStEpochAmendedUsageAtEpoch does, to the same totals, in close-time slices
+// of slicing.Span, each its own short REPEATABLE READ snapshot under the role's
+// transaction_timeout, so no snapshot pins the primary for the whole epoch.
+// Every row belongs to exactly one slice: its terminal close time never
+// changes, and each slice reads its live and archived rows in one snapshot,
+// refusing one that is both, as the whole read does. The totals are sums, so
+// the order slices are read in does not change them. A slice counts only once
+// it is read whole: one that fails is read again from nothing, up to
+// slicing.Attempts times, so a failed slice neither restarts the read nor counts
+// twice. A refused row fails the read at once. An epoch the amendment does not
+// cover, or a non-positive span, reads as GetStEpochAmendedUsageAtEpoch does.
+func GetStEpochAmendedUsageInSlices(
+	ctx context.Context,
+	epoch uint64,
+	startTime time.Time,
+	endTime time.Time,
+	amendment StExtenderAmendment,
+	measurementNetworkIds map[server.Id]bool,
+	slicing StEpochUsageSlices,
+) ([]*StProviderUsage, *StEpochExtenderPool, error) {
+	if !amendment.InForce(epoch) || slicing.Span <= 0 {
+		return GetStEpochAmendedUsageAtEpoch(ctx, epoch, startTime, endTime, amendment, measurementNetworkIds)
+	}
+	if !startTime.Before(endTime) {
+		return nil, nil, fmt.Errorf("invalid subnet usage window")
+	}
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	reader := newStEpochAmendedUsage(epoch, amendment, measurementNetworkIds)
+	earningStart, earningEnd := transition.SnWindow(startTime, endTime)
+	readStart := time.Now()
+	usageRows, sliceCount := 0, 0
+	for sliceStart := earningStart; sliceStart.Before(earningEnd); sliceCount++ {
+		sliceEnd := sliceStart.Add(slicing.Span)
+		if earningEnd.Before(sliceEnd) {
+			sliceEnd = earningEnd
+		}
+		for attempt := 1; ; attempt++ {
+			// a slice's own reader, merged only once the slice is read whole
+			sliceReader := newStEpochAmendedUsage(epoch, amendment, measurementNetworkIds)
+			rows, err := func() (int, error) {
+				if hook := stEpochUsageSliceHook; hook != nil {
+					if err := hook(sliceStart, attempt, false); err != nil {
+						return 0, err
+					}
+				}
+				rows, err := readStEpochAmendedUsageWindow(ctx, sliceReader, sliceStart, sliceEnd, false)
+				if err != nil {
+					return 0, err
+				}
+				if hook := stEpochUsageSliceHook; hook != nil {
+					if err := hook(sliceStart, attempt, true); err != nil {
+						return 0, err
+					}
+				}
+				return rows, nil
+			}()
+			if err == nil {
+				if err := reader.merge(sliceReader); err != nil {
+					return nil, nil, err
+				}
+				usageRows += rows
+				break
+			}
+			var refusal *stEpochUsageRefusal
+			if errors.As(err, &refusal) || ctx.Err() != nil || max(1, slicing.Attempts) <= attempt {
+				return nil, nil, fmt.Errorf("epoch %d usage slice from %s: %w", epoch, sliceStart.UTC().Format(time.RFC3339), err)
+			}
+			glog.Infof("[st]epoch %d amended usage slice from %s failed on attempt %d, read again: %s\n", epoch, sliceStart.UTC().Format(time.RFC3339), attempt, err)
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-time.After(slicing.RetryDelay):
+			}
+		}
+		sliceStart = sliceEnd
+	}
+	usages, pool := reader.result()
+	logStEpochAmendedUsage(epoch, usageRows, sliceCount, usages, pool, time.Since(readStart))
 	return usages, pool, nil
 }
