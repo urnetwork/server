@@ -33,7 +33,9 @@ type UrlProbePostQuantumSettings struct {
 	// How long the turn's first sends wait for the session to seal before
 	// they go in plaintext (pq_seal_wait): 3 s, the bound an HTTPS connect
 	// is given. A provider that seals in time carries the turn sealed; one
-	// without the responder costs the turn this much once.
+	// without the responder costs the turn this much once, which the tunnel
+	// adds to the budget of the URL phase that makes those sends
+	// (providertunnel CapabilityObservation.EstablishHold).
 	SealWait time.Duration
 	// A post-quantum session that negotiated and had not sealed this long
 	// after its first ClientHello reads negative, a younger one unmeasured:

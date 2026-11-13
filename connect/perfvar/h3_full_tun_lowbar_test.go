@@ -1127,6 +1127,21 @@ func TestH3LowBarFullTcpOneDatagramHybridTrack(t *testing.T) {
 	)
 }
 
+// One explicit experimental policy is shared by both endpoint transports and
+// server/connect; zero retains the production default.
+func h3FullTunPacketTrackDatagramSettings(maximumDatagramFragmentCount int) *clientconnect.H3DatagramSettings {
+	settings := clientconnect.DefaultH3DatagramSettings()
+	if 0 < maximumDatagramFragmentCount {
+		settings.MaxFragmentCount = maximumDatagramFragmentCount
+	}
+	if 1 < maximumDatagramFragmentCount {
+		// The fragmented control opts out of the independent single-packet
+		// selector while keeping every existing receive and reassembly bound.
+		settings.HybridDatagramMessageByteCount = settings.MaxMessageByteCount
+	}
+	return settings
+}
+
 func testH3LowBarFullTcpPacketTrackMtu(
 	t *testing.T,
 	applicationMtu int,
@@ -1185,8 +1200,7 @@ func testH3LowBarFullTcpPacketTrackMtu(
 			settings.H3SendLaneObserver = laneTrace.observe
 			settings.H3QuicPacketStats = quicStats
 			if 0 < maximumDatagramFragmentCount {
-				settings.H3DatagramSettings = clientconnect.DefaultH3DatagramSettings()
-				settings.H3DatagramSettings.MaxFragmentCount = maximumDatagramFragmentCount
+				settings.H3DatagramSettings = h3FullTunPacketTrackDatagramSettings(maximumDatagramFragmentCount)
 			}
 		}
 		hooks := &fullTunConstructionTestHooks{
@@ -1224,8 +1238,7 @@ func testH3LowBarFullTcpPacketTrackMtu(
 				settings.H3DatagramStats = serverDatagramStats
 				settings.H3QuicPacketStats = serverQuicStats
 				if 0 < maximumDatagramFragmentCount {
-					settings.H3DatagramSettings = clientconnect.DefaultH3DatagramSettings()
-					settings.H3DatagramSettings.MaxFragmentCount = maximumDatagramFragmentCount
+					settings.H3DatagramSettings = h3FullTunPacketTrackDatagramSettings(maximumDatagramFragmentCount)
 				}
 			},
 			configureProviderClientSettings: configureClient,

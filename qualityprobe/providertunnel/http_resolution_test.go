@@ -363,7 +363,7 @@ func TestProviderResolutionRegionalRaceSurvivesAnExitWithoutUdp(t *testing.T) {
 			if raced && (err != nil || conn != left || dials != 1 || elapsed != 1500*time.Millisecond) {
 				t.Fatalf("the race lost the DoH answer: dials=%d elapsed=%s stage=%s err=%v", dials, elapsed, stage, err)
 			}
-			if !raced && (err == nil || dials != 0 || stage != "dial_dns" || elapsed != urlProbeDnsTimeout) {
+			if !raced && (err == nil || dials != 0 || stage != "dial_dns" || elapsed != defaultProviderUrlPhaseSettings().DnsTimeout) {
 				t.Fatalf("plaintext alone resolved through an exit without UDP: dials=%d elapsed=%s stage=%s err=%v", dials, elapsed, stage, err)
 			}
 		}

@@ -28,6 +28,14 @@
 // failed lookup, a wallet that is missing or another network's, a transfer that
 // is foreign or matches several payments, an unverified asset, a tx hash
 // without a record, and records of earlier attempts in the payment's journal.
+//
+// The owner can forfeit held payments by id instead
+// (`--forfeit=<payment_ids>`, owner decision 2026-11-13 on the six whose
+// destinations Circle could not list): no Circle read, each named payment
+// closed as forfeited ("owner_forfeit") with the same event, all or none. Each
+// must be an unclosed attempted payment, one the pass reads; any other refuses
+// the whole run. A forfeit closes payments the pass would read, so the pass's
+// dry run digest changes once one commits.
 package controller
 
 import (
@@ -60,7 +68,13 @@ const (
 	UsdcAttemptedInFlight = "in_flight"
 	// not decidable: listed, not written
 	UsdcAttemptedHeld = "held"
+	// named for a forfeit and not an unclosed attempted payment: listed, and
+	// nothing is written
+	UsdcAttemptedRefused = "refused"
 )
+
+// The reason of a payment the owner forfeited by id, without a Circle read.
+const UsdcAttemptedOwnerForfeit = "owner_forfeit"
 
 // The fixed fee every legacy submit subtracted from the payout, in USDC.
 const usdcAttemptedLegacyFeeUsdc = 0.01
@@ -71,6 +85,12 @@ const usdcAttemptedLegacyFeeUsdc = 0.01
 const usdcAttemptedWindowMargin = 24 * time.Hour
 
 var ErrUsdcAttemptedDigestMismatch = errors.New("payouts close-attempted: --expect does not match the digest of these decisions; nothing was written")
+
+var ErrUsdcAttemptedForfeitIds = errors.New("payouts close-attempted --forfeit: name each payment once, at least one; nothing was written")
+
+var ErrUsdcAttemptedForfeitRefused = errors.New("payouts close-attempted --forfeit: a named payment is not an unclosed attempted payment; nothing was written")
+
+var ErrUsdcAttemptedForfeitChanged = errors.New("payouts close-attempted --forfeit: a named payment changed since the census; nothing was written")
 
 // Settings of the pass.
 type UsdcAttemptedCloseSettings struct {
@@ -522,9 +542,13 @@ func usdcAttemptedRelevant(rows []*UsdcAttemptedRow, owners map[string][]server.
 
 // The decisions of one run.
 type UsdcAttemptedReport struct {
-	RunId  server.Id           `json:"run_id"`
-	Time   time.Time           `json:"time"`
-	Mode   string              `json:"mode"`
+	RunId server.Id `json:"run_id"`
+	Time  time.Time `json:"time"`
+	Mode  string    `json:"mode"`
+	// the payments an owner's forfeit names, in payment id order; none for
+	// the Circle pass
+	Forfeit []server.Id `json:"forfeit,omitempty"`
+	// none when a forfeit refused
 	Digest string              `json:"digest"`
 	Rows   []*UsdcAttemptedRow `json:"rows"`
 	// commit: rows written, and rows that changed since the census and were not
@@ -752,12 +776,112 @@ func UsdcAttemptedClose(ctx context.Context, commit bool, expect string) (*UsdcA
 	return usdcAttemptedClose(ctx, &coreUsdcAttemptedCircle{core: &CoreCircleApiClient{}}, DefaultUsdcAttemptedCloseSettings(), commit, expect, server.NowUtc)
 }
 
+// The owner's forfeit of the named payments, read from Main only. Each must be
+// an unclosed attempted payment; otherwise the run refuses, listing each named
+// payment with why: unknown, completed, not_canceled, not_attempted or closed.
+// A dry run returns the decisions and their digest. A commit with the dry run's
+// digest closes every named payment in one transaction, or none when any
+// changed since the commit's census.
+func usdcAttemptedForfeit(ctx context.Context, paymentIds []server.Id, commit bool, expect string, now func() time.Time) (*UsdcAttemptedReport, error) {
+	forfeit := slices.Clone(paymentIds)
+	slices.SortFunc(forfeit, func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+	if len(forfeit) == 0 || len(slices.Compact(slices.Clone(forfeit))) != len(forfeit) {
+		return nil, ErrUsdcAttemptedForfeitIds
+	}
+	report := &UsdcAttemptedReport{
+		RunId:   server.NewId(),
+		Time:    now(),
+		Mode:    "dry_run",
+		Forfeit: forfeit,
+		Rows:    []*UsdcAttemptedRow{},
+	}
+	if commit {
+		report.Mode = "commit"
+	}
+	payments := model.GetUsdcForfeitPayments(ctx, forfeit)
+	refused := false
+	for _, paymentId := range forfeit {
+		payment, ok := payments[paymentId]
+		if !ok {
+			report.Rows = append(report.Rows, &UsdcAttemptedRow{PaymentId: paymentId, Class: UsdcAttemptedRefused, Reason: "unknown"})
+			refused = true
+			continue
+		}
+		row := newUsdcAttemptedRow(&payment.UsdcAttemptedPayment)
+		row.lookup = "owner_decision"
+		switch {
+		case payment.Completed:
+			row.decide(UsdcAttemptedRefused, "completed")
+		case !payment.Canceled:
+			row.decide(UsdcAttemptedRefused, "not_canceled")
+		case !payment.Attempted:
+			row.decide(UsdcAttemptedRefused, "not_attempted")
+		case payment.Closed:
+			row.decide(UsdcAttemptedRefused, "closed")
+		default:
+			row.decide(UsdcAttemptedClosed, UsdcAttemptedOwnerForfeit)
+		}
+		refused = refused || row.Class == UsdcAttemptedRefused
+		report.Rows = append(report.Rows, row)
+	}
+	if refused {
+		return report, ErrUsdcAttemptedForfeitRefused
+	}
+	report.Digest = usdcAttemptedDigest(report.Rows)
+	if !commit {
+		return report, nil
+	}
+	if expect != report.Digest {
+		return report, ErrUsdcAttemptedDigestMismatch
+	}
+	closing := []*model.UsdcAttemptedPayment{}
+	details := map[server.Id]string{}
+	for _, row := range report.Rows {
+		detail, err := json.Marshal(&usdcAttemptedCloseEvent{
+			RunId:           report.RunId,
+			Digest:          report.Digest,
+			Class:           row.Class,
+			Reason:          row.Reason,
+			Lookup:          row.lookup,
+			ObservedAt:      report.Time,
+			PayoutNanoCents: row.PayoutNanoCents,
+		})
+		if err != nil {
+			return report, err
+		}
+		closing = append(closing, row.payment)
+		details[row.PaymentId] = string(detail)
+	}
+	if !model.CloseUsdcAttemptedPayments(ctx, closing, now(), details) {
+		report.Skipped = len(closing)
+		return report, ErrUsdcAttemptedForfeitChanged
+	}
+	report.Closed = len(closing)
+	return report, nil
+}
+
+// Runs the owner's forfeit of the named payments against Main.
+func UsdcAttemptedForfeit(ctx context.Context, paymentIds []server.Id, commit bool, expect string) (*UsdcAttemptedReport, error) {
+	return usdcAttemptedForfeit(ctx, paymentIds, commit, expect, server.NowUtc)
+}
+
 // The report for a person: counts and payout by class and reason, every row
-// that is not closed, the digest, and on a dry run the command that writes
-// exactly these decisions.
+// that is not closed (a forfeit's every row), the digest, and on a dry run the
+// command that writes exactly these decisions. A refused forfeit has no digest
+// and no command.
 func (self *UsdcAttemptedReport) Text() string {
 	b := &strings.Builder{}
-	fmt.Fprintf(b, "payouts close-attempted %s run %s at %s\n", self.Mode, self.RunId, self.Time.Format(time.RFC3339))
+	forfeitIds := []string{}
+	for _, paymentId := range self.Forfeit {
+		forfeitIds = append(forfeitIds, paymentId.String())
+	}
+	forfeitArg := ""
+	if 0 < len(forfeitIds) {
+		forfeitArg = " --forfeit=" + strings.Join(forfeitIds, ",")
+	}
+	fmt.Fprintf(b, "payouts close-attempted%s %s run %s at %s\n", forfeitArg, self.Mode, self.RunId, self.Time.Format(time.RFC3339))
 	type total struct {
 		count  int
 		payout model.NanoCents
@@ -783,7 +907,7 @@ func (self *UsdcAttemptedReport) Text() string {
 		fmt.Fprintf(b, "  %s %s: %d payments, %.6f USD\n", key[0], key[1], totals[key].count, model.NanoCentsToUsd(totals[key].payout))
 	}
 	for _, row := range self.Rows {
-		if row.Class == UsdcAttemptedClosed {
+		if row.Class == UsdcAttemptedClosed && len(self.Forfeit) == 0 {
 			continue
 		}
 		fmt.Fprintf(b, "  %s %s payment %s network %s %.6f USD", row.Class, row.Reason, row.PaymentId, row.NetworkId, model.NanoCentsToUsd(row.PayoutNanoCents))
@@ -801,9 +925,12 @@ func (self *UsdcAttemptedReport) Text() string {
 	if self.Mode == "commit" {
 		fmt.Fprintf(b, "closed %d, completed %d, skipped as changed %d\n", self.Closed, self.Completed, self.Skipped)
 	}
+	if self.Digest == "" {
+		return b.String()
+	}
 	fmt.Fprintf(b, "digest %s\n", self.Digest)
 	if self.Mode == "dry_run" {
-		fmt.Fprintf(b, "commit with: bringyourctl payouts close-attempted --commit --expect=%s\n", self.Digest)
+		fmt.Fprintf(b, "commit with: bringyourctl payouts close-attempted%s --commit --expect=%s\n", forfeitArg, self.Digest)
 	}
 	return b.String()
 }
