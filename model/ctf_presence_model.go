@@ -18,8 +18,9 @@ package model
 // The provider half reads the score export's Online decisions, which the
 // export publishes for it (CtfPresenceProviders): P1 is exactly what the export
 // decided, an active, top-level, connected provider with a Public provide key,
-// a valid location and ClientScore.Online. The extender half reads the extender
-// tables (controller/ctf_presence.go).
+// a valid location and ClientScore.Online by the URL bar, never by the country
+// floor alone. The extender half reads the extender tables
+// (controller/ctf_presence.go).
 
 import (
 	"context"
@@ -251,7 +252,9 @@ func decodeCtfPresenceProviders(b []byte) (*CtfPresenceProviders, error) {
 // The export's Online set from its decided scores: each provider once, from any
 // of the location maps it sits in, since every map decides it the same way
 // (rankClientScore), flagged Public unless it is network-only. The country is
-// the one the provider is published under.
+// the one the provider is published under. Online is the URL bar's decision:
+// a membership only the country floor gave (network_client_score_country_floor.go)
+// is no presence, so the floor changes no census.
 func newCtfPresenceProviders(
 	measuredAt time.Time,
 	locationClientScores map[server.Id]map[server.Id]*ClientScore,
@@ -260,7 +263,7 @@ func newCtfPresenceProviders(
 	online := map[server.Id]*CtfPresenceProvider{}
 	for _, clientScores := range locationClientScores {
 		for clientId, clientScore := range clientScores {
-			if _, ok := online[clientId]; ok || !clientScore.Online {
+			if _, ok := online[clientId]; ok || !clientScore.Online || clientScore.countryFloor&clientScoreCountryFloorOnline != 0 {
 				continue
 			}
 			countryCode := CtfCountryUnknown

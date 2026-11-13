@@ -4352,11 +4352,19 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	// the URL-success rule's country guard over this same population, its
 	// margin held against the export's last published guard
 	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the location counts"))
+	// The providers the last score export's country floor admitted
+	// (network_client_score_country_floor.go), counted as that export serves
+	// them, so a floored country stays listed. Without a readable set the
+	// counts count the decisions alone, as before the floor.
+	countryFloorClientIds, err := readProviderCountryFloor(ctx, egressSettings.CountryFloorRedisTimeout)
+	if err != nil {
+		glog.Infof("[nclm]the location counts count no country floor (%s)\n", err)
+	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		// Count the providers exposed as online supply: the common-gate
-		// passes the URL-success rule keeps.
+		// passes the URL-success rule keeps, and the country floor's.
 		countProviderRows := func() map[server.Id]int {
 			locationClientCounts := map[server.Id]int{}
 			for _, row := range providerCountRows {
@@ -4366,8 +4374,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 				}
 
 				// Ordinary URL errors and missing probes still count online;
-				// a provider the URL-success rule excludes does not.
-				{
+				// a provider the URL-success rule excludes does not, unless
+				// the country floor admitted it.
+				if !countryFloorClientIds[row.clientId] {
 					decision := decideProviderEgress(
 						countFilter.egressFacts(
 							row.clientId,
@@ -5362,6 +5371,17 @@ type ClientScore struct {
 	// only to the capability facets (FP2-PROTOCOL.md §4.4); nil for a
 	// provider that is not downgraded. Unexported, so never encoded.
 	capabilityCopy *ClientScore
+	// Whether the provider passes the reliability minimums, and the weight
+	// each mode would draw it by, whatever its buckets
+	// (rankClientScoreWithCounts). The country floor admits by them.
+	// Unexported, so never encoded.
+	passesReliability bool
+	rankWeights       map[string]float32
+	// The buckets the country floor admitted this score to, as
+	// clientScoreCountryFloor bits (network_client_score_country_floor.go);
+	// zero for a score the URL bar admitted on its own. Unexported, so never
+	// encoded: a reader sees an admitted native by its tier alone.
+	countryFloor uint8
 }
 
 type ClientFilter struct {
@@ -5844,6 +5864,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// each: a client sits in several location and group maps, each with its
 	// own ClientScore, and must be decided the same way in all of them.
 	clientIdEgressDecisions := map[server.Id]providerEgressDecision{}
+	// the buckets the URL bar alone keeps each provider out of, which the
+	// country floor admits from (network_client_score_country_floor.go)
+	clientIdBarredBuckets := map[server.Id]uint8{}
 	reasonCounts := map[string]int{}
 	onlineCount := 0
 	// the modern provider gate's shadow over the pool this export decides
@@ -5861,6 +5884,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		decision := decideProviderEgress(facts, egressTestEnabled)
 		countProviderModernOnline(modernOnlineCounts, facts, decision)
 		clientIdEgressDecisions[clientId] = decision
+		if barredBuckets := providerEgressBarredBuckets(facts, decision, egressTestEnabled); barredBuckets != 0 {
+			clientIdBarredBuckets[clientId] = barredBuckets
+		}
 		if decision.reason != "" {
 			reasonCounts[decision.reason] += 1
 		}
@@ -5994,6 +6020,25 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
 	nativeCensus.Arindb = arindbDecision.nativeSummary()
 
+	// The country floor (network_client_score_country_floor.go), after the
+	// presence and the census read the decisions as the URL bar made them:
+	// each country keeps its best few below the bar in a bucket that holds
+	// too few, in every target its providers sit in.
+	countryCodes := map[server.Id]string{}
+	for countryCode, countryLocationId := range countryCodeLocationIds() {
+		countryCodes[countryLocationId] = countryCode
+	}
+	countryFloor := applyClientScoreCountryFloor(
+		egressSettings.CountryFloorProviders,
+		2*egressSettings.BackfillTierOffset,
+		locationClientScores,
+		locationGroupClientScores,
+		countryCodes,
+		clientIdBarredBuckets,
+		clientIdCapabilities,
+	)
+	glog.Infof("[nclm]country floor: %s\n", countryFloor.logSummary())
+
 	// location id -> network id
 	excludeLocationNetworkIds := map[server.Id]map[server.Id]bool{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -6054,12 +6099,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	ctx = context.WithValue(ctx, clientScoreExportExpiryContextKey{}, manifestTime.Add(ttl))
 	departedTargets, targetManifest := targetMaps.departedTargets(previousTargetManifest, manifestTime, ttl)
 	targets = append(targets, departedTargets...)
-	// the admitted supply these documents hold, published once they all are
-	countryCodes := map[server.Id]string{}
-	for countryCode, countryLocationId := range countryCodeLocationIds() {
-		countryCodes[countryLocationId] = countryCode
-	}
+	// the admitted supply these documents hold, the floor's admissions
+	// included, published once they all are
 	supply := newClientScoreSupply(manifestTime, locationClientScores, departedTargets, countryCodes)
+	supply.countryFloor = maps.Clone(countryFloor.countryCounts)
+	supply.countryFloorFleet = countryFloor.fleetCounts()
 	if err := writeClientScoreTargetManifest(ctx, targetManifest, ttl); err != nil {
 		return fmt.Errorf("publish client score target manifest: %w", err)
 	}
@@ -6206,6 +6250,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		// leaves the export standing.
 		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
 			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
+		}
+		// The country floor's strict admissions, which the location counts
+		// count as this export serves them. Counts without them count the
+		// decisions alone, so a failure here leaves the export standing.
+		if err := publishProviderCountryFloor(ctx, countryFloor.strictClientIds, ttl, egressSettings.CountryFloorRedisTimeout); err != nil {
+			glog.Errorf("[nclm]publish country floor: %s\n", err)
 		}
 		// published by this process alone while it holds the newest
 		// measurement (network_client_score_supply.go)
