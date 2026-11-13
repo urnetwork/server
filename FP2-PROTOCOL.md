@@ -145,6 +145,7 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D12.4 | 7918 (connect#220) is solved by strict selection with the positive signal; its fail-fast, cache and field-measurement options are not needed | "With the strong fp2 post quantum filter and quality probe positive signal, i think 7918 is solved by the multi client requiring a strong multi client selection when post quantum is enabled." | §12.7 |
 | D12.5 | PQ outcomes come from a scheduled third of URL turns, not every turn: a turn is a PQ turn when its claim ordinal is a multiple of 3 and its provider has no PQ outcome in the last 4 hours | accepted 2026-11-12, in place of every turn (S1 step 2, merge 86553321d) | §12.2, §13.2 |
 | D12.6 (2026-11-13) | no provider counts on its own claim, on either side of the ready marker: a network-only provider is modern or PQ only with the same probe evidence as a public one, and while the marker is down strict PQ reads the probe's modern evidence of the last 7 days instead of declarations. That evidence counts PQ only from the quality probe's positive outcome. | "1,2 sounds good, go ahead"; "They must have a positive quality probe handshake to count" | §12.4, §12.8 |
+| D14 (2026-11-13, about 22:25Z) | hosted proxies: the normal windows ask with `ip: ipv4` and a new protocol selector `any`, every class in one pool ranked by the rank mode alone (no IPv6 need, no overflow, no tier offset), and a hosted device has no limited window. Apps keep `dualstack` and `dualproto` with the limited window. | "hosted proxies should use main window as the limited window, so that dualproto and dualstack requirements are not applied on the main window for hosted proxies, and there is no need for a separate limited window" | §5.1-5.3, §6.3, §7.4 |
 
 D11.8 applies D7.5 to the shipped IPv6 local downgrade (B5) too: it is
 retired (§7.9). No owner question is open.
@@ -550,9 +551,9 @@ JSON Schema (draft 2020-12). Every existing field is unchanged.
       "type": ["object", "null"],
       "properties": {
         "ip": { "enum": ["dualstack", "ipv4"], "default": "dualstack" },
-        "protocol": { "enum": ["dualproto", "tcp"], "default": "dualproto" },
+        "protocol": { "enum": ["dualproto", "tcp", "any"], "default": "dualproto", "description": "any (D14): both protocol labels in one pool, no overflow; a selector only, never a provider's label" },
         "target_count": { "type": "integer", "minimum": 1, "description": "the window's target count, for the protocol axis; default: count, or 1 when count < 1" },
-        "held_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds whose protocol label is the requested one (D11.2)" },
+        "held_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds whose protocol label is the requested one, every one for any (D11.2)" },
         "dualstack_target_count": { "type": "integer", "minimum": 0, "description": "the window's IPv6 minimum (D11.1); default 1 when ip is dualstack; treated as 0 when ip is ipv4" },
         "held_dualstack_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds that are labelled dualstack" }
       }
@@ -608,7 +609,7 @@ Unknown members are ignored, as today: the body is decoded with
       "required": ["ip", "protocol", "target_count", "held_count", "dualstack_target_count", "held_dualstack_count"],
       "properties": {
         "ip": { "enum": ["dualstack", "ipv4"] },
-        "protocol": { "enum": ["dualproto", "tcp"] },
+        "protocol": { "enum": ["dualproto", "tcp", "any"] },
         "target_count": { "type": "integer", "minimum": 1 },
         "held_count": { "type": "integer", "minimum": 0 },
         "dualstack_target_count": { "type": "integer", "minimum": 0 },
@@ -627,7 +628,7 @@ Errors use the existing "<code> message" convention
 | Input | Answer |
 |---|---|
 | `select.ip` not `dualstack` or `ipv4` | 400 `unknown select.ip "<value>"` |
-| `select.protocol` not `dualproto` or `tcp` | 400 `unknown select.protocol "<value>"` |
+| `select.protocol` not `dualproto`, `tcp` or `any` (D14) | 400 `unknown select.protocol "<value>"`. A server from before D14 answers `any` this way too, but the hosted proxies, its only senders, run the server they call (§5.4). |
 | `select.target_count` present and < 1 | 400 `select.target_count must be at least 1` |
 | `select.held_count` < 0 | 400 `select.held_count must not be negative` |
 | `select.dualstack_target_count` < 0 | 400 `select.dualstack_target_count must not be negative` |
@@ -834,6 +835,31 @@ FindProviders2(args, session):
 | `ipv4`, `dualproto` | none | A ∪ B | C ∪ D, tier +33 |
 | `dualstack`, `tcp` | C | C ∪ D | none |
 | `ipv4`, `tcp` (the limited window) | none | C ∪ D | none |
+| `ipv4`, `any` (the hosted proxies' normal windows, D14) | none | A ∪ B ∪ C ∪ D | none |
+| `dualstack`, `any` | A ∪ C, one pool | A ∪ B ∪ C ∪ D | none |
+
+**`any` (D14).** A request for protocol `any` prefers neither protocol:
+- its main pool is every class, filled by the request's rank mode like any
+  other pool (§6.5): the requested mode's natives, borrowing at
+  `BackfillTierOffset`, the Online union at twice it;
+- a `tcp` provider keeps the tier of its band, with no overflow tier and no
+  `overflow_step`;
+- there is no overflow phase, so `target_count` and `held_count` change
+  nothing; they are echoed, `held_count` counting every held client;
+- with `ip: dualstack` its IPv6 need draws A and C as one pool;
+- the family filter narrows the pool as for any request;
+- `capabilities` still carry each provider's labels, and a provider is never
+  labelled `any`.
+
+As built: the validation (model/network_client_location_select.go:88),
+`needPools` (:153), `mainClasses` (:168), `overflowClasses` (:182) and
+`overflowPool` (:198); the request counter's `any` label sets (:475), while
+`urnetwork_findproviders2_select_answered_total` keeps the provider's label.
+Connect asks with it only where a host sets
+`MultiClientSettings.NormalWindowSelectors` (§7.4), and connect builds no
+limited window beside such windows. UDP flows still race only exits labelled
+`dualproto` (§7.2), so a hosted window whose exits are all `tcp` answers UDP
+as unroutable (§7.7).
 
 **How D7.2 and D11.1 combine.** The decided order A → B → C → D still holds:
 - `dualstack` comes before `ipv4` for the IPv6 need;
@@ -1023,10 +1049,12 @@ state changes a label between FP2 answers.
 | Old server (no echo) | the window is disabled while the server is known not to echo, and the next echoed answer enables it. Without a capability-aware generator it stays disabled. |
 | Profile change | Handled exactly like the normal windows. An equal profile is a no-op (:3403-3408). Otherwise `SetPerformanceProfile` (:3394-3430) installs the new profile on every window in `self.windows`, the limited window included (:13381-13400: it also forgets sticky and recent exits). `shuffle` then cancels every client (:16231-16238). Those clients' flows go through `removeClient` (:5718): QUIC flows are rebound to compatible candidates, and TCP flows are torn down. The resize loop refills under the new rank mode, with the target recomputed from the new active normal windows. |
 | Count | one per multi client |
+| Hosted proxies (D14) | none, whatever the sizes above say for them. Their normal windows ask for `ipv4` and `any` (§6.3) and hold the `tcp` providers themselves (server/proxy `newProxyDeviceLocalSettings`, sdk `DeviceLocalSettings.NormalWindowSelectors`). Connect builds no limited window beside normal windows that ask for `any` (`MultiClientSettings.NormalWindowSelectors`), and the proxy also sets the fraction to 0 (sdk `DeviceLocalSettings.DisableLimitedWindow`), which the developer override's set and reset do not change. |
 
 **Normal windows.**
 - Each request carries `select: {"ip": "dualstack", "protocol": "dualproto"}`
-  (D6.1) with:
+  (D6.1; a hosted proxy's carry `ipv4` and `any` with every live, unwarned
+  client held and no IPv6 minimum, D14) with:
   - `target_count`: the window's pre-reserve demand target, seeded from
     config before the first pass;
   - `held_count`: its live, unwarned clients labelled `dualproto`;

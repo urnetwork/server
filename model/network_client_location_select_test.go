@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
@@ -58,6 +61,19 @@ func TestFindProviders2SelectionDefaultsAndEcho(t *testing.T) {
 			sel:   FindProviders2Select{TargetCount: selectTestInt(6), HeldCount: selectTestInt(4), DualstackTargetCount: selectTestInt(1), HeldDualstackCount: selectTestInt(1)},
 			want:  findProviders2Selection{ip: "dualstack", protocol: "dualproto", targetCount: 6, heldCount: 4, dualstackTargetCount: 1, heldDualstackCount: 1},
 		},
+		{
+			// a hosted proxy's normal window (owner, 2026-11-13)
+			name:  "hosted window",
+			count: 20,
+			sel:   FindProviders2Select{Ip: selectTestString("ipv4"), Protocol: selectTestString("any"), TargetCount: selectTestInt(5), HeldCount: selectTestInt(3), DualstackTargetCount: selectTestInt(0), HeldDualstackCount: selectTestInt(1)},
+			want:  findProviders2Selection{ip: "ipv4", protocol: "any", targetCount: 5, heldCount: 3, heldDualstackCount: 1},
+		},
+		{
+			name:  "dualstack any",
+			count: 20,
+			sel:   FindProviders2Select{Protocol: selectTestString("any")},
+			want:  findProviders2Selection{ip: "dualstack", protocol: "any", targetCount: 20, dualstackTargetCount: 1},
+		},
 	} {
 		sel := c.sel
 		selection, err := newFindProviders2Selection(&FindProviders2Args{Count: c.count, Select: &sel})
@@ -85,6 +101,9 @@ func TestFindProviders2SelectionRefusals(t *testing.T) {
 		{sel: FindProviders2Select{Ip: selectTestString("v6")}, want: `400 unknown select.ip "v6"`},
 		{sel: FindProviders2Select{Ip: selectTestString("")}, want: `400 unknown select.ip ""`},
 		{sel: FindProviders2Select{Protocol: selectTestString("udp")}, want: `400 unknown select.protocol "udp"`},
+		{sel: FindProviders2Select{Protocol: selectTestString("ANY")}, want: `400 unknown select.protocol "ANY"`},
+		{sel: FindProviders2Select{Protocol: selectTestString("")}, want: `400 unknown select.protocol ""`},
+		{sel: FindProviders2Select{Ip: selectTestString("any")}, want: `400 unknown select.ip "any"`},
 		{sel: FindProviders2Select{TargetCount: selectTestInt(0)}, want: "400 select.target_count must be at least 1"},
 		{sel: FindProviders2Select{HeldCount: selectTestInt(-1)}, want: "400 select.held_count must not be negative"},
 		{sel: FindProviders2Select{DualstackTargetCount: selectTestInt(-1)}, want: "400 select.dualstack_target_count must not be negative"},
@@ -140,12 +159,16 @@ func TestFindProviders2SelectionPhases(t *testing.T) {
 	selection := func(ip string, protocol string, dualstackTargetCount int, heldDualstackCount int) *findProviders2Selection {
 		return &findProviders2Selection{ip: ip, protocol: protocol, targetCount: 6, dualstackTargetCount: dualstackTargetCount, heldDualstackCount: heldDualstackCount}
 	}
+	a := newProviderCapabilityClassSet(providerCapabilityClassA)
+	c := newProviderCapabilityClassSet(providerCapabilityClassC)
 	ab := newProviderCapabilityClassSet(providerCapabilityClassA, providerCapabilityClassB)
 	cd := newProviderCapabilityClassSet(providerCapabilityClassC, providerCapabilityClassD)
 
 	normal := selection("dualstack", "dualproto", 1, 0)
 	connect.AssertEqual(t, normal.ipv6Need(), 1)
-	connect.AssertEqual(t, normal.needClasses(), []providerCapabilityClass{providerCapabilityClassA, providerCapabilityClassC})
+	connect.AssertEqual(t, normal.needPools(), []providerCapabilityClassSet{a, c})
+	connect.AssertEqual(t, normal.overflowPool(a), false)
+	connect.AssertEqual(t, normal.overflowPool(c), true)
 	connect.AssertEqual(t, normal.mainClasses(), ab)
 	connect.AssertEqual(t, normal.overflowClasses(), cd)
 	connect.AssertEqual(t, normal.overflow(providerCapabilityClassA), false)
@@ -160,7 +183,8 @@ func TestFindProviders2SelectionPhases(t *testing.T) {
 	connect.AssertEqual(t, ipv4.overflowClasses(), cd)
 
 	dualstackTcp := selection("dualstack", "tcp", 1, 0)
-	connect.AssertEqual(t, dualstackTcp.needClasses(), []providerCapabilityClass{providerCapabilityClassC})
+	connect.AssertEqual(t, dualstackTcp.needPools(), []providerCapabilityClassSet{c})
+	connect.AssertEqual(t, dualstackTcp.overflowPool(c), false)
 	connect.AssertEqual(t, dualstackTcp.mainClasses(), cd)
 	connect.AssertEqual(t, dualstackTcp.overflowClasses(), providerCapabilityClassSet(0))
 	connect.AssertEqual(t, dualstackTcp.overflow(providerCapabilityClassC), false)
@@ -169,6 +193,60 @@ func TestFindProviders2SelectionPhases(t *testing.T) {
 	connect.AssertEqual(t, limited.ipv6Need(), 0)
 	connect.AssertEqual(t, limited.mainClasses(), cd)
 	connect.AssertEqual(t, limited.overflowClasses(), providerCapabilityClassSet(0))
+}
+
+// An any request (owner, 2026-11-13, the hosted proxies' windows) draws
+// every class as one main pool and has no overflow: no tcp class is overflow
+// for it, in the main pool or in its IPv6 need, which draws A and C as one
+// pool. With ip ipv4 it has no IPv6 need at all.
+func TestFindProviders2SelectionAnyIsOnePool(t *testing.T) {
+	all := newProviderCapabilityClassSet(providerCapabilityClasses...)
+	ac := newProviderCapabilityClassSet(providerCapabilityClassA, providerCapabilityClassC)
+
+	hosted := &findProviders2Selection{ip: "ipv4", protocol: "any", targetCount: 5}
+	connect.AssertEqual(t, hosted.ipv6Need(), 0)
+	connect.AssertEqual(t, hosted.mainClasses(), all)
+	connect.AssertEqual(t, hosted.overflowClasses(), providerCapabilityClassSet(0))
+	for _, class := range providerCapabilityClasses {
+		connect.AssertEqual(t, hosted.overflow(class), false)
+	}
+	connect.AssertEqual(t, hosted.overflowPool(all), false)
+
+	dualstackAny := &findProviders2Selection{ip: "dualstack", protocol: "any", targetCount: 5, dualstackTargetCount: 1}
+	connect.AssertEqual(t, dualstackAny.ipv6Need(), 1)
+	connect.AssertEqual(t, dualstackAny.needPools(), []providerCapabilityClassSet{ac})
+	connect.AssertEqual(t, dualstackAny.overflowPool(ac), false)
+	connect.AssertEqual(t, dualstackAny.mainClasses(), all)
+	connect.AssertEqual(t, dualstackAny.overflowClasses(), providerCapabilityClassSet(0))
+
+	// the family filter still narrows the one pool
+	v4Only, err := providerCapabilityClassesForIpFamily("v4-only")
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, hosted.mainClasses().intersect(v4Only), newProviderCapabilityClassSet(providerCapabilityClassB, providerCapabilityClassD))
+
+	// the request counter has every any label set from the first scrape, and
+	// an answered provider is counted by its label, never any
+	for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed, RankModeOnline} {
+		for _, ip := range []string{ProviderCapabilityIpDualstack, ProviderCapabilityIpIpv4} {
+			if _, err := findProviders2SelectRequests.GetMetricWithLabelValues(rankMode, ip, ProviderCapabilityProtocolAny); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	answeredLabels := map[string]bool{}
+	metrics := make(chan prometheus.Metric, 256)
+	findProviders2SelectAnswered.Collect(metrics)
+	close(metrics)
+	for metric := range metrics {
+		var written dto.Metric
+		connect.AssertEqual(t, metric.Write(&written), nil)
+		for _, label := range written.GetLabel() {
+			if label.GetName() == "protocol" {
+				answeredLabels[label.GetValue()] = true
+			}
+		}
+	}
+	connect.AssertEqual(t, answeredLabels, map[string]bool{ProviderCapabilityProtocolDualproto: true, ProviderCapabilityProtocolTcp: true})
 }
 
 // The facets a pool reads and the records each keeps (§6.4).

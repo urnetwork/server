@@ -5174,7 +5174,7 @@ type FindProviders2Args struct {
 type FindProviders2Select struct {
 	// "dualstack" (the default) or "ipv4"
 	Ip *string `json:"ip"`
-	// "dualproto" (the default) or "tcp"
+	// "dualproto" (the default), "tcp" or "any": both labels in one pool
 	Protocol *string `json:"protocol"`
 	// the window's target count, for the protocol axis; at least 1. Default:
 	// count, or 1 when count is less than 1.
