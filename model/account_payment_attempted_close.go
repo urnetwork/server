@@ -11,12 +11,18 @@
 // completed as the sender's status check completed one, and journaled too.
 // Each write locks the payment and reads it again first; a payment that
 // changed since the census is not written.
+//
+// The pass holds a payment it cannot decide from Circle. The owner can forfeit
+// held payments by id (`--forfeit`, owner decision 2026-11-13 on the six
+// lookup_failed ones): they are read from Main only and closed all together,
+// with the same event, or not at all.
 package model
 
 import (
 	"context"
 	"crypto/md5"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -141,6 +147,14 @@ func lockUsdcAttemptedPaymentInTx(ctx context.Context, tx server.PgTx, payment *
 	return
 }
 
+// Journals the payment's usdc_payout_closed event at `eventTime`, whose
+// details are `details`.
+func insertUsdcPayoutClosedEventInTx(ctx context.Context, tx server.PgTx, paymentId server.Id, eventTime time.Time, details string) {
+	server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment (event_id, event_time, payment_id, event_type, event_details)
+		VALUES ($1, $2, $3, '`+server.UsdcPayoutClosedEventType+`', $4)`,
+		UsdcPayoutClosedEventId(paymentId), eventTime, paymentId, details))
+}
+
 // Closes the payment as forfeited if it is still as `payment` read it: in one
 // READ COMMITTED transaction the row is locked and journaled with one
 // usdc_payout_closed event at `closeTime`, whose details are `details`. The
@@ -152,9 +166,79 @@ func CloseUsdcAttemptedPayment(ctx context.Context, payment *UsdcAttemptedPaymen
 		if !lockUsdcAttemptedPaymentInTx(ctx, tx, payment) {
 			return
 		}
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment (event_id, event_time, payment_id, event_type, event_details)
-			VALUES ($1, $2, $3, '`+server.UsdcPayoutClosedEventType+`', $4)`,
-			UsdcPayoutClosedEventId(payment.PaymentId), closeTime, payment.PaymentId, details))
+		insertUsdcPayoutClosedEventInTx(ctx, tx, payment.PaymentId, closeTime, details)
+		closed = true
+	}, server.TxReadCommitted)
+	return
+}
+
+// A payment named for the owner's forfeit, as it is now.
+type UsdcForfeitPayment struct {
+	UsdcAttemptedPayment
+	Canceled  bool
+	Completed bool
+	// it has a Circle idempotency key, payment record or tx hash
+	Attempted bool
+	// it has its usdc_payout_closed event
+	Closed bool
+}
+
+// The named payments that exist, by payment id, whatever their state. Read
+// only.
+func GetUsdcForfeitPayments(ctx context.Context, paymentIds []server.Id) (payments map[server.Id]*UsdcForfeitPayment) {
+	server.Db(ctx, func(conn server.PgConn) {
+		payments = map[server.Id]*UsdcForfeitPayment{}
+		result, err := conn.Query(ctx, `SELECT `+usdcAttemptedPaymentColumnsSql+`,
+			p.canceled, p.completed,
+			(p.circle_idempotency_key IS NOT NULL OR p.payment_record IS NOT NULL OR p.tx_hash IS NOT NULL),
+			`+server.UsdcPayoutClosedSql("p.payment_id")+`
+			FROM account_payment p
+			LEFT JOIN account_wallet w ON w.wallet_id = p.wallet_id AND w.network_id = p.network_id
+			WHERE p.payment_id = ANY($1::uuid[])`, paymentIds)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				payment := &UsdcForfeitPayment{}
+				args := append(payment.scanArgs(), &payment.Canceled, &payment.Completed, &payment.Attempted, &payment.Closed)
+				server.Raise(result.Scan(args...))
+				payments[payment.PaymentId] = payment
+			}
+		})
+	})
+	return
+}
+
+// Closes every payment as forfeited, all or none: in one READ COMMITTED
+// transaction each row is locked, in payment id order, and only when every one
+// is still as `payments` read it is each journaled with one usdc_payout_closed
+// event at `closeTime`, whose details are details[payment id]. The payments
+// stay canceled. Returns false, writing nothing, when any changed, or when
+// `payments` is empty, repeats a payment or misses its details.
+func CloseUsdcAttemptedPayments(ctx context.Context, payments []*UsdcAttemptedPayment, closeTime time.Time, details map[server.Id]string) (closed bool) {
+	ordered := slices.Clone(payments)
+	slices.SortFunc(ordered, func(a *UsdcAttemptedPayment, b *UsdcAttemptedPayment) int {
+		return a.PaymentId.Cmp(b.PaymentId)
+	})
+	if len(ordered) == 0 {
+		return false
+	}
+	for i, payment := range ordered {
+		if _, ok := details[payment.PaymentId]; !ok || 0 < i && ordered[i-1].PaymentId == payment.PaymentId {
+			return false
+		}
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		// the callback can run again; nothing of an earlier attempt committed
+		closed = false
+		// every lock before any write, so a changed payment leaves nothing
+		// written
+		for _, payment := range ordered {
+			if !lockUsdcAttemptedPaymentInTx(ctx, tx, payment) {
+				return
+			}
+		}
+		for _, payment := range ordered {
+			insertUsdcPayoutClosedEventInTx(ctx, tx, payment.PaymentId, closeTime, details[payment.PaymentId])
+		}
 		closed = true
 	}, server.TxReadCommitted)
 	return
@@ -209,9 +293,7 @@ func CompleteUsdcAttemptedPayment(
 			panic(fmt.Errorf("usdc attempted close completed %d rows of the locked payment %s", tag.RowsAffected(), payment.PaymentId))
 		}
 		creditCompletedPaymentAccountBalanceInTx(ctx, tx, payment.PaymentId)
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment (event_id, event_time, payment_id, event_type, event_details)
-			VALUES ($1, $2, $3, '`+server.UsdcPayoutClosedEventType+`', $4)`,
-			UsdcPayoutClosedEventId(payment.PaymentId), completeTime, payment.PaymentId, details))
+		insertUsdcPayoutClosedEventInTx(ctx, tx, payment.PaymentId, completeTime, details)
 		completed = true
 	}, server.TxReadCommitted)
 	return
