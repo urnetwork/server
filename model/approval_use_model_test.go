@@ -103,9 +103,9 @@ func (self *testApprovalState) Govern(action *sidecar.StoredCanonicalAction, spe
 	return self, nil
 }
 
-// Device evidence, known.
-func (self *testApprovalState) Evidence() ([]protocol.ApprovalChannel, bool) {
-	return []protocol.ApprovalChannel{protocol.ApprovalChannel_APPROVAL_CHANNEL_DEVICE}, true
+// Device evidence.
+func (self *testApprovalState) Evidence() []protocol.ApprovalChannel {
+	return []protocol.ApprovalChannel{protocol.ApprovalChannel_APPROVAL_CHANNEL_DEVICE}
 }
 
 // k = 1.
@@ -169,6 +169,13 @@ func testApprovalDnsAction(t testing.TB, value string, template bool) *sidecar.S
 // the laptop, as stored.
 func (self *testApprovalWorld) decision(t testing.TB, bound *sidecar.StoredCanonicalAction, approvalId sidecar.Id, uses uint32, notAfter time.Time, signer testApprovalDevice) []byte {
 	t.Helper()
+	return self.decisionOn(t, bound, approvalId, uses, notAfter, signer, protocol.ApprovalChannel_APPROVAL_CHANNEL_DEVICE)
+}
+
+// decision on channel: a harness decision is the requester's own, signed by the
+// laptop.
+func (self *testApprovalWorld) decisionOn(t testing.TB, bound *sidecar.StoredCanonicalAction, approvalId sidecar.Id, uses uint32, notAfter time.Time, signer testApprovalDevice, channel protocol.ApprovalChannel) []byte {
+	t.Helper()
 	payload := bound.PayloadSha256()
 	requestSha256 := sha256.Sum256(append([]byte("approval use test request "), approvalId[:]...))
 	body := &protocol.ApprovalDecision{
@@ -179,10 +186,14 @@ func (self *testApprovalWorld) decision(t testing.TB, bound *sidecar.StoredCanon
 		Uses:               uses,
 		NotAfterMillis:     notAfter.UnixMilli(),
 		ApproverMemberId:   signer.memberId.Bytes(),
-		Channel:            uint32(protocol.ApprovalChannel_APPROVAL_CHANNEL_DEVICE),
+		Channel:            uint32(channel),
 		RequesterSidecarId: self.laptop.sidecarId.Bytes(),
 		AuthPin:            self.state.pin,
 		Version:            1,
+	}
+	if channel == protocol.ApprovalChannel_APPROVAL_CHANNEL_HARNESS {
+		evidence := sha256.Sum256(append([]byte("approval use test hook event "), approvalId[:]...))
+		body.EvidenceSha256 = evidence[:]
 	}
 	return testApprovalSigned(t, signer, bridge.SignedType_SIGNED_APPROVAL_DECISION, body)
 }
@@ -308,7 +319,10 @@ func TestApprovalUseFirstSpendCommitsAndAReplayAnswersIt(t *testing.T) {
 }
 
 // A refusal writes nothing: another requester's decision, an effect key that is not
-// the action's, and a field the gate's request does not show.
+// the action's, a field the gate's request does not show, a non-approver's
+// decision, and the requester's own harness decision where the governing
+// evidence list, the document's evidenceDefault for a dns write (QD-727), names
+// device alone.
 func TestApprovalUseRefusalWritesNothing(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -326,19 +340,27 @@ func TestApprovalUseRefusalWritesNothing(t *testing.T) {
 		otherValue := world.request(decision, approvalId, action, nil)
 		otherValue.Fields.DnsValue = "192.0.2.99"
 		strangerSigned := world.request(world.decision(t, action, approvalId, 1, now.Add(time.Hour), world.stranger), approvalId, action, nil)
+		harnessDecision := world.decisionOn(t, action, approvalId, 1, now.Add(time.Hour), world.laptop, protocol.ApprovalChannel_APPROVAL_CHANNEL_HARNESS)
+		harness := world.request(harnessDecision, approvalId, action, nil)
 		for name, c := range map[string]struct {
 			request *ApprovalUseRequest
 			status  int
+			// the spend check's code where it is the one refusing
+			code sidecar.SpendRefusalCode
 		}{
-			"another requester":              {request: another, status: http.StatusForbidden},
-			"another effect key":             {request: wrongKey, status: http.StatusBadRequest},
-			"a field the request differs on": {request: otherValue, status: http.StatusForbidden},
-			"a non-approver's decision":      {request: strangerSigned, status: http.StatusForbidden},
+			"another requester":                      {request: another, status: http.StatusForbidden},
+			"another effect key":                     {request: wrongKey, status: http.StatusBadRequest},
+			"a field the request differs on":         {request: otherValue, status: http.StatusForbidden},
+			"a non-approver's decision":              {request: strangerSigned, status: http.StatusForbidden, code: sidecar.SpendRefusalApprover},
+			"a harness decision under a device list": {request: harness, status: http.StatusForbidden, code: sidecar.SpendRefusalEvidence},
 		} {
 			_, err := world.consume(ctx, c.request, now, effect.apply)
 			approvalErr := &ApprovalUseError{}
 			if !errors.As(err, &approvalErr) || approvalErr.Status != c.status {
 				t.Errorf("%s: %v", name, err)
+			}
+			if c.code != "" && sidecar.SpendRefusalCodeOf(err) != c.code {
+				t.Errorf("%s: %v, want the spend check's %s", name, err, c.code)
 			}
 		}
 		if rows := testApprovalRows(t, ctx, approvalId); len(rows) != 0 || effect.count.Load() != 0 {

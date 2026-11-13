@@ -169,15 +169,16 @@ func SetApprovalGateStates(states ApprovalGateStates) {
 }
 
 // A gate's states from ACL-M2-13's gate cache: the newest verified rows-only
-// state of the network, never forked at a gate, holding no evidenceDefault, which
-// rows do not carry (question mcp-m3-03-evidence-default-at-gates).
+// state of the network, never forked at a gate. Its rows carry the document's
+// evidenceDefault (AclRows.evidence_default, QD-727), which an action naming no
+// requests rule, a dns write among them, is held to here as at the daemon.
 func ApprovalGateStatesOf(cache *sidecar.AclGateCache) ApprovalGateStates {
 	return func(ctx context.Context, networkId server.Id) (sidecar.SpendState, error) {
 		snapshot, status := cache.State(sidecar.Id(networkId))
 		if status != sidecar.AclGateLoaded || snapshot == nil {
 			return nil, errors.New("the network's verified state is not loaded")
 		}
-		return sidecar.NewConfigSpendState(snapshot.Config, false, nil)
+		return sidecar.NewConfigSpendState(snapshot.Config, false)
 	}
 }
 
