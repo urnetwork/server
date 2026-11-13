@@ -14,8 +14,27 @@
     "grammar_fix_tests_passed": 20,
     "original_terminal_preserved": true,
     "replacement_generation_authorized": false,
+    "historical_admission_replay_test_passed": true,
+    "historical_admission_replay_evidence": "/var/lib/urnetwork/competition-formatter-replay-qa-20261113.4HzFQKcs",
     "next_action": "Bind trusted backend evidence for pre-sampling schema rejection, then qualify narrowly scoped historical-schema replay and recovery. Removing unsupported schema hints does not relax exact local ID validation. No candidate review has completed.",
     "supersedes": "The actual_prepare block below records historical oversized-prompt refusals. Bounded authenticated metadata now fits without clipping source; the subsequent first generation failed schema compilation."
+  },
+  "latest_private_review_archive": {
+    "operation_sha256": "3acd4a2869ed563262d4e171fb29d7c00687a57512090a24d93554d9bf16ea6e",
+    "inventory_sha256": "646104c7ab97a1de93da636069e27ee91a3168f2df9429872b6a194dc8e0a570",
+    "objects": 126,
+    "bytes": 72489348,
+    "missing_objects": 0,
+    "published_union_equals_inventory": true,
+    "all_objects_and_both_manifests_exact_version_readback_verified": true,
+    "retention_mode": "COMPLIANCE",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "batch0_receipt_sha256": "2274ac79813b3898b99f650ae32d66e65cb994eb16be832bfeb01c72cbed9ba4",
+    "batch1_receipt_sha256": "451c6ef1ff1d30c46e8b9f2e572bc0ced8b1cd852b23bc1201c48cd5e9c9567c",
+    "receipt_directory": "/mnt/data/competition-private-complete-review/archive-receipts",
+    "receipt_names": ["new-originals-batch0-20261113-v3", "new-originals-batch1-20261113-v3"],
+    "originals_deleted": false,
+    "review_or_approval": false
   },
   "package_restart_deferral": {
     "hosts": ["sille", "goofe"],
