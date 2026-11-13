@@ -34,9 +34,15 @@
     "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
     "sn_commit": "e9aa3ac282ed7e4bc48eaab60d03043a5f6a6dac",
     "required_migration": 971,
-    "observed_migration_head": 969,
+    "observed_migration_head": 971,
+    "migration_verified_at": "2026-11-13T15:17:17Z",
     "deployment_verified": false,
-    "worker_activated": false,
+    "worker_activated": true,
+    "worker_identity_verified_at": "2026-11-13T15:22:25Z",
+    "supervisor_restarted_with_recovery_wrapper": true,
+    "held_handoff_started_at": "2026-11-13T15:21:41Z",
+    "fresh_native_observation_passed": true,
+    "fresh_native_observation_receipt_sha256": "a8017da75e060552f492b976320fc25b221c1fd228a8cab2db2d4f0397f7970c",
     "ordinary_tests_passed": 169,
     "focused_race_tests_passed": 69,
     "postgres_init_permission_tests_passed": 4,
@@ -48,7 +54,7 @@
     "staged_activation_config_sha256": "8a37f2660c286f52f8c390662f1953048cee57d74dfe9ec2c3c4b7d0df2419e1",
     "worker_sha256": "c91fe976448b957fc121c951b2cfd1dbd2fd42e9451be80d9f246708c029de93",
     "recovery_cli_sha256": "58ccd4a081eff8a47dd735776b1e609f953e5b35d94c035ad4003985424c838e",
-    "next_action": "Verify main migration 971 and compatible API deployment, retain serving image identity, then consult protected per-job recovery state before any grant. Keep owned hold 36 until recovery authority and host readiness pass.",
+    "next_action": "Migration 971 and the held worker handoff are verified. Confirm advancing evaluator-host heartbeats and compatible serving API identity before any recovery grant. Keep owned hold 36 until recovery authority and host readiness pass.",
     "historical_sections_below": "Earlier source/test/process observations remain historical; this checkpoint supersedes their pending-build descriptions."
   },
   "review_runtime": {
@@ -85,7 +91,7 @@
   },
   "next_actions": [
     "Confirm and repair the provider-envelope parser against unchanged retained originals, with deterministic tests and no fresh inference. Consult the protected operator state; never silently rewrite old failures.",
-    "Verify main migration 971 and compatible API deployment, then perform the qualified worker handoff and controlled recovery under the owned hold and fresh authority.",
+    "Verify advancing host heartbeats after the completed held worker handoff; retain compatible serving API identity before controlled recovery.",
     "Finish complete both-model reviews and bounded cohort/archive routing. Derive eligibility from authenticated scoring rules, never success state alone.",
     "Keep all candidate outcomes and operator proof payloads in protected storage. Publish results only through the authorized finalization path."
   ],
