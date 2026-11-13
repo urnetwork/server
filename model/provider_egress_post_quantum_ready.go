@@ -3,8 +3,10 @@
 // marker strict post-quantum selection waits for.
 //
 // A conclusive observation is recorded in provider_modern_evidence, as the
-// capability probe records its own, so the window reading and the modern
-// census keep their table whichever probe measured the provider.
+// capability probe recorded its own, so the window reading and the modern
+// census keep their table whichever probe measured the provider. It is
+// post-quantum only when the turn's outcome is positive (FP2-PROTOCOL.md
+// §12.8).
 //
 // The ready marker. Strict post-quantum selection matches only providers whose
 // newest post-quantum outcome in the eight-hour window is positive, so it may
@@ -105,12 +107,17 @@ func recordProviderEgressHealthE2e(ctx context.Context, health *ProviderEgressHe
 }
 
 // The modern evidence of a URL turn's end-to-end observation, and whether it
-// is conclusive as the capability probe's readings are: the session
+// is conclusive as the capability probe's readings were: the session
 // concluded, positive or negative, and an acknowledgement read the window.
-// Post-quantum reads as a post-quantum group negotiated, sealed or not, as
-// the capability probe records it; strict selection reads the stricter
-// pq_outcome instead. The observation carries no window size, so a
-// resizable window records a largest size of 0.
+// Post-quantum is the turn's positive outcome alone: a post-quantum group
+// that sealed before the IPv4 HTTPS leg's request, and that leg passed. A
+// negative is never post-quantum, a post-quantum group that never sealed
+// included, though its group is recorded: strict selection reads this row
+// while the post-quantum marker is down, and only a positive quality probe
+// handshake counts (owner, 2026-11-13; FP2-PROTOCOL.md §12.8). The
+// capability probe and this ingest before it counted any negotiated
+// post-quantum group. The observation carries no window size, so a resizable
+// window records a largest size of 0.
 func providerModernEvidenceOfE2e(e2e *egresshealth.UrlProbeE2eEvidence, observedAt time.Time) (ProviderModernEvidence, bool) {
 	if e2e.Pq != egresshealth.UrlProbePqPositive && e2e.Pq != egresshealth.UrlProbePqNegative {
 		return ProviderModernEvidence{}, false
@@ -119,9 +126,10 @@ func providerModernEvidenceOfE2e(e2e *egresshealth.UrlProbeE2eEvidence, observed
 		return ProviderModernEvidence{}, false
 	}
 	return ProviderModernEvidence{
-		E2eNegotiated:    e2e.KeyExchange != "",
-		KeyExchange:      e2e.KeyExchange,
-		PostQuantum:      egresshealth.UrlProbeKeyExchangePostQuantum(e2e.KeyExchange),
+		E2eNegotiated: e2e.KeyExchange != "",
+		KeyExchange:   e2e.KeyExchange,
+		PostQuantum: e2e.Pq == egresshealth.UrlProbePqPositive &&
+			egresshealth.UrlProbeKeyExchangePostQuantum(e2e.KeyExchange),
 		WindowAdvertised: e2e.Window == egresshealth.UrlProbeWindowResizable,
 		ObservedAt:       observedAt.UTC(),
 	}, true

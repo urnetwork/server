@@ -105,7 +105,9 @@ type ProviderModernEvidence struct {
 	// the negotiated TLS key exchange group as crypto/tls names it, for
 	// example X25519MLKEM768; "" for none
 	KeyExchange string
-	// the negotiated group is a post-quantum hybrid
+	// the probe saw a post-quantum session with the provider work: for the
+	// URL ingest, the turn's positive outcome, never a post-quantum group
+	// that did not seal (providerModernEvidenceOfE2e)
 	PostQuantum bool
 	// the provider's acks carried receive_window_byte_count
 	WindowAdvertised bool
@@ -140,7 +142,7 @@ func (self ProviderModernEvidence) validate(now time.Time) error {
 // when it and the first observation were measured, and how many runs
 // advanced it.
 type ProviderModernEvidenceRecord struct {
-	// end-to-end encryption was negotiated with a post-quantum hybrid group
+	// the latest observation is post-quantum (ProviderModernEvidence)
 	PostQuantum bool
 	// the negotiated group, "" when no end-to-end session was negotiated
 	KeyExchange string
