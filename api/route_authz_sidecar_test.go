@@ -197,6 +197,11 @@ var sidecarAllowlist = []string{
 	"POST /acl/ack",
 	// §16.6's cancel (MCP-M3-23)
 	"POST /approval/cancel",
+	// §13.15's certificate routes (TLS-M5-16)
+	"POST /tls/cert-order",
+	"GET /tls/cert-order/([^/]+)",
+	"GET /tls/certs",
+	"POST /tls/cert-revoke",
 	// §6.8's sync routes (PROTO-M1-10)
 	"GET /sidecar/sync/poll",
 	"GET /sidecar/sync/versions",

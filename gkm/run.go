@@ -15,14 +15,16 @@
 //     plan-KEYS-hint-addressing's internal route, POST /sidecar/identity/clients, and its credential land, so a hint
 //     by sidecar id is counted as unresolved and lost, which the clients' hourly resync covers (§6.8);
 //   - Redis, Metrics, Gates and the service token Authenticator from sidecarhost.NewServiceHost, the gates read from
-//     sidecar.yml's gkm: {enabled, networks, percent} and reseed every 60 s (§19.11).
+//     sidecar.yml's gkm: {enabled, networks, percent} and reseed every 60 s (§19.11);
+//   - AuthState: gkm's newest verified authorization state, gkmservice.AclGkmAuthState over the block's one gate
+//     cache (C-09), which reads each network's log from the block's Redis and first metadata cluster and follows
+//     {acl_<networkId>}v, with §7.8's rev/ reader (auth_state.go; QD-718).
 //
 // Ready is §19.4's gkm row, §10.6's objects reachable: the engine's probe of the first cluster, every cluster's
 // sentinel read with this block's credentials and one pool shown (server.FileClusters.Ready), and every seam no
-// request is honored without. Server has no implementation yet of one: GkmAuthState, gkm's newest verified
-// authorization state over §8.9's gate cache (C-09: AclGateCache, with ACL-M2-14's HonorScope for the gkm audience,
-// sidecar rows and §7.8's rev/ reader). Until it lands a real block stays not ready, failing closed; HostDeps hands
-// it to a test, or to the change that lands it.
+// request is honored without. A host given no AuthState stays not ready, failing closed, and a block whose gate
+// cache cannot watch {acl_}v does not start. A network's state loads when a token first names it, and until it has
+// every route answers that network 503.
 //
 // The block's parts run on a context of the host's own, which ends only at Close, so a SIGTERM's drain still has its
 // clusters, budget and hint queue while requests in flight finish.
@@ -60,13 +62,19 @@ type HostSettings struct {
 	Gkm *gkmservice.GkmServiceSettings
 	// The process's write budget's. nil: evsservice.DefaultWriteBudgetSettings.
 	Budget *evsservice.WriteBudgetSettings
+	// The block's gate cache's, under its authorization state (§8.9). nil: sidecar.DefaultAclGateSettings.
+	Gate *sidecar.AclGateSettings
+	// The rev/ reader's (§7.8). nil: sidecar.DefaultRevocationSettings.
+	Revocation *sidecar.RevocationSettings
 }
 
 // The defaults.
 func DefaultHostSettings() *HostSettings {
 	return &HostSettings{
-		Gkm:    gkmservice.DefaultGkmServiceSettings(),
-		Budget: evsservice.DefaultWriteBudgetSettings(),
+		Gkm:        gkmservice.DefaultGkmServiceSettings(),
+		Budget:     evsservice.DefaultWriteBudgetSettings(),
+		Gate:       sidecar.DefaultAclGateSettings(),
+		Revocation: sidecar.DefaultRevocationSettings(),
 	}
 }
 
@@ -79,11 +87,10 @@ type HostClusters interface {
 	Close()
 }
 
-// The seams a test, or the change that lands a missing one, fills. Each nil takes the block's own, or, where server
-// has none yet, leaves the block not ready.
+// The seams a test fills. Each nil takes the block's own.
 type HostDeps struct {
-	// gkm's newest verified authorization state. nil: none until GkmAuthState over AclGateCache lands, and the block
-	// stays not ready, since the engine honors nothing without it.
+	// gkm's newest verified authorization state. nil: Run builds NewAuthState over the block's stores; NewHost, which
+	// builds nothing, leaves the host not ready, since the engine honors nothing without it.
 	AuthState gkmservice.GkmAuthState
 	// gkm-9's request log. nil: through glog, one line a request.
 	ServiceLog gkmservice.GkmServiceLog
@@ -138,7 +145,7 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	}
 	self := &Host{clustersReady: deps.ClustersReady}
 	if deps.AuthState == nil {
-		self.missing = append(self.missing, "gkm's newest verified authorization state, GkmAuthState over §8.9's gate cache with ACL-M2-14's HonorScope (C-09)")
+		self.missing = append(self.missing, "gkm's newest verified authorization state, a GkmAuthState such as NewAuthState's over §8.9's gate cache (C-09)")
 	}
 	engine, err := gkmservice.NewGkmEngine(ctx, host, settings.Gkm, &gkmservice.GkmEngineDeps{
 		AuthState:  deps.AuthState,
@@ -211,7 +218,7 @@ type RunOptions struct {
 	Port int
 	// nil: DefaultHostSettings.
 	Settings *HostSettings
-	// nil: the block's own stores, and no authorization state yet (the package header).
+	// nil: the block's own stores and its own authorization state (the package header).
 	Deps *HostDeps
 }
 
@@ -299,6 +306,14 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 	hostDeps := *deps
 	if hostDeps.ClustersReady == nil {
 		hostDeps.ClustersReady = clusters.Ready
+	}
+	if hostDeps.AuthState == nil {
+		authState, closeAuthState, err := NewAuthState(hostCtx, host, settings)
+		if err != nil {
+			return notReady(fmt.Errorf("the authorization state: %w", err))
+		}
+		closers = append(closers, closeAuthState)
+		hostDeps.AuthState = authState
 	}
 	gkmHost, err := NewHost(hostCtx, host, settings, &hostDeps)
 	if err != nil {

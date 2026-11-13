@@ -205,6 +205,12 @@ func initTaskSchedule(ctx context.Context) {
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
 		// months; not scheduled without MG5
 		work.ScheduleTlsConnectionRollup(clientSession, tx)
+		// §13.9's kills lifted once their until has passed, row and key; not
+		// scheduled without MG5
+		work.ScheduleTlsSuspensionSweep(clientSession, tx)
+		// cert-1's rows deleted 30 days past their certificate's end; not
+		// scheduled without MG5
+		work.ScheduleTlsCertPurge(clientSession, tx)
 		// §12's journal past 7 days, challenges and canaries past their hour,
 		// and zone suspensions past their until; not scheduled without MG5
 		work.ScheduleDnsMaintenance(clientSession, tx)
@@ -690,6 +696,14 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.TlsConnectionRollup,
 			work.TlsConnectionRollupPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.TlsSuspensionSweep,
+			work.TlsSuspensionSweepPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.TlsCertPurge,
+			work.TlsCertPurgePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.DnsMaintenance,

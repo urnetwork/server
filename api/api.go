@@ -454,6 +454,13 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/sidecar/close", handlers.SidecarClose),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
+		// §13.15's certificate routes: an order and its status on a service token, aud certs, the
+		// network's certificates, and a revocation's mark; 503 until the process installs what they run
+		// on (TLS-M5-16)
+		router.NewRoute("POST", "/tls/cert-order", handlers.TlsCertOrder),
+		router.NewRoute("GET", "/tls/cert-order/([^/]+)", handlers.GetTlsCertOrder),
+		router.NewRoute("GET", "/tls/certs", handlers.GetTlsCerts),
+		router.NewRoute("POST", "/tls/cert-revoke", handlers.TlsCertRevoke),
 		// §16.6's cancel of a server-gated approval's remaining uses (MCP-M3-23)
 		router.NewRoute("POST", "/approval/cancel", handlers.ApprovalCancel),
 		// §17.16's cross-network share tables, sealed (BRIDGE-M6-02)

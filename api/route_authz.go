@@ -400,6 +400,15 @@ var routeAccessByRoute = map[string]routeAccess{
 	// verified by hash; api carries the log, and the gate checks its chain and holds the rows to their hash (QD-680)
 	"GET /internal/gate/projection/([^/]+)":   routeAccessPublic,
 	"GET /internal/gate/rows/([^/]+)/([^/]+)": routeAccessPublic,
+
+	// §13.15's certificate routes (TLS-M5-16). The two order routes take a service token, aud certs, as their
+	// credential, and the subject is the token's. GET /tls/certs serves the bearer's network's certificates and
+	// attestations, for the CT watch (D-TLS-8). On POST /tls/cert-revoke a client token marks its own certificate
+	// and a network admin's credential any of its network's (the controller).
+	"POST /tls/cert-order":        routeAccessPublic,
+	"GET /tls/cert-order/([^/]+)": routeAccessPublic,
+	"GET /tls/certs":              routeAccessClient,
+	"POST /tls/cert-revoke":       routeAccessOwnClient,
 }
 
 // The only routes a lag.dev guest's client token is accepted on
@@ -455,6 +464,12 @@ var strictExpRoutes = map[string]bool{
 	"POST /acl/ack": true,
 	// §16.6's cancel (MCP-M3-23)
 	"POST /approval/cancel": true,
+	// §13.15's certificate routes (TLS-M5-16); the two order routes take a service token, so a
+	// strict_exp bearer is refused there by the controller, not by this gate
+	"POST /tls/cert-order":        true,
+	"GET /tls/cert-order/([^/]+)": true,
+	"GET /tls/certs":              true,
+	"POST /tls/cert-revoke":       true,
 	// §17.16's share tables (BRIDGE-M6-02)
 	"GET /network/bridge/share/([^/]+)": true,
 	"PUT /network/bridge/share/([^/]+)": true,
