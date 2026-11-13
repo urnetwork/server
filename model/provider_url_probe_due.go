@@ -53,10 +53,11 @@ type ProviderUrlProbeDue struct {
 const ProviderUrlProbeSlotCount = 1024
 
 // Replace measurements before they leave the four-hour window. This covers
-// the default 250-second URL turn (a dual-stack provider's, its HTTP/3 and
-// IPv6 legs included) plus 90 seconds for control/publication and 20 seconds
-// of scheduling margin. It is not extra quota credit or a promise that a
-// stalled worker finishes. Admission still owns one 15-minute claim.
+// the default 259-second URL turn (a dual-stack provider's, its HTTP/3 and
+// IPv6 legs included, measuring post-quantum, its seal waits included) plus
+// 90 seconds for control/publication and 11 seconds of scheduling margin. It
+// is not extra quota credit or a promise that a stalled worker finishes.
+// Admission still owns one 15-minute claim.
 const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
 
 // Owner decision 2026-10-15 (task #57, option A): a quota-full renewal is due
