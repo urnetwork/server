@@ -11,10 +11,10 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// /transfer/stats answers apps as it did while USDC payouts ran (owner
-// decisions 2026-11-12 and 2026-11-13: USDC payouts ended): settled traffic is
-// unpaid; a pending payment's payout byte count stays unpaid, also once its
-// sweep rows are gone; a completed payment's bytes are paid.
+// USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13), so
+// /transfer/stats reports no provided byte as unpaid: not settled traffic, not
+// a pending payment's payout bytes, not a canceled payment's sweeps. Before, it
+// reported each of them as unpaid. A completed payment's bytes are paid.
 func TestGetNetworkProvideStats(t *testing.T) {
 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -71,30 +71,25 @@ func TestGetNetworkProvideStats(t *testing.T) {
 			contractIds = append(contractIds, transferEscrow.ContractId)
 		}
 
-		// Check network stats
-		// Should register unpaid byte count
+		// settled traffic with no payment
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
-		connect.AssertEqual(t, transferStats.UnpaidBytesProvided, paidByteCount)
+		connect.AssertEqual(t, transferStats.UnpaidBytesProvided, ByteCount(0))
 		connect.AssertEqual(t, transferStats.PaidBytesProvided, ByteCount(0))
 
-		// a pending payment of the sweeps, as a plan left it: still unpaid
-		paymentId := testingAssignSweepPayment(ctx, destinationNetworkId, contractIds, nil)
-		transferStats = GetTransferStats(ctx, destinationNetworkId)
-		connect.AssertEqual(t, transferStats.UnpaidBytesProvided, paidByteCount)
-		connect.AssertEqual(t, transferStats.PaidBytesProvided, ByteCount(0))
-
-		// Once a payment owns the value, its payout_byte_count is the durable
-		// unpaid ledger. Losing the supporting sweep rows must not make the user's
-		// unpaid total fall while the processor payment remains incomplete.
+		// a pending payment of half the sweeps, as a plan left it, and a
+		// safely canceled payment of the other half
+		paymentId := testingAssignSweepPayment(ctx, destinationNetworkId, contractIds[:2], nil)
+		canceledPaymentId := testingAssignSweepPayment(ctx, destinationNetworkId, contractIds[2:], nil)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
-				`DELETE FROM transfer_escrow_sweep WHERE payment_id = $1`,
-				paymentId,
+				`UPDATE account_payment SET canceled = true, cancel_time = $2 WHERE payment_id = $1`,
+				canceledPaymentId,
+				server.NowUtc(),
 			))
 		})
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
-		connect.AssertEqual(t, transferStats.UnpaidBytesProvided, paidByteCount)
+		connect.AssertEqual(t, transferStats.UnpaidBytesProvided, ByteCount(0))
 		connect.AssertEqual(t, transferStats.PaidBytesProvided, ByteCount(0))
 
 		// the payment completed, as the sender left it: the bytes are paid
@@ -107,7 +102,7 @@ func TestGetNetworkProvideStats(t *testing.T) {
 			))
 		})
 		transferStats = GetTransferStats(ctx, destinationNetworkId)
-		connect.AssertEqual(t, transferStats.PaidBytesProvided, paidByteCount)
+		connect.AssertEqual(t, transferStats.PaidBytesProvided, paidByteCount/2)
 		connect.AssertEqual(t, transferStats.UnpaidBytesProvided, ByteCount(0))
 
 	})

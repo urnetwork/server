@@ -212,103 +212,33 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 }
 
 type TransferStats struct {
-	PaidBytesProvided   ByteCount `json:"paid_bytes_provided"`
+	// The bytes of the network's completed USDC payouts.
+	PaidBytesProvided ByteCount `json:"paid_bytes_provided"`
+	// Always zero: USDC provider payouts ended (owner decisions 2026-11-12 and
+	// 2026-11-13), so no provided byte is owed a payout. Apps built before then
+	// parse it.
 	UnpaidBytesProvided ByteCount `json:"unpaid_bytes_provided"`
 }
 
-// GetTransferStats returns the durable paid/unpaid byte totals for a network.
-// Unplanned and safely canceled value still comes from transfer_escrow_sweep.
-// Once a payment is active, its immutable payout_byte_count is authoritative.
-// This keeps the user's unpaid total stable if retention or repair removes some
-// of the payment's sweep rows. Canceled rows with processor evidence are
-// reconciliation anomalies rather than a second unpaid ledger: counting them
-// after their sweeps were reassigned would double-count the replacement
-// payment. The totals answer as they did while USDC payouts ran (owner
-// decisions 2026-11-12 and 2026-11-13: USDC payouts ended), so apps that read
-// them keep working.
+// The network's provided bytes: what its completed USDC payouts paid. Nothing
+// is unpaid any more.
 func GetTransferStats(
 	ctx context.Context,
 	networkId server.Id,
 ) *TransferStats {
-
 	var transferStats *TransferStats
-
 	// stats read: tolerates replica delay
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
+		transferStats = &TransferStats{}
+		server.Raise(conn.QueryRow(
 			ctx,
 			`
-				SELECT
-					0 AS paid_bytes_provided,
-					COALESCE(SUM(transfer_escrow_sweep.payout_byte_count), 0) AS unpaid_bytes_provided
-				FROM transfer_escrow_sweep
-
-				WHERE
-					transfer_escrow_sweep.network_id = $1 AND
-					transfer_escrow_sweep.payment_id IS NULL
-
-				UNION ALL
-
-				SELECT
-					0 AS paid_bytes_provided,
-					COALESCE(SUM(transfer_escrow_sweep.payout_byte_count), 0) AS unpaid_bytes_provided
-				FROM transfer_escrow_sweep
-
-				INNER JOIN account_payment ON
-					account_payment.payment_id = transfer_escrow_sweep.payment_id
-
-				WHERE
-					account_payment.network_id = $1 AND
-					NOT account_payment.completed AND
-					account_payment.canceled AND
-					account_payment.circle_idempotency_key IS NULL AND
-					account_payment.payment_record IS NULL AND
-					account_payment.tx_hash IS NULL
-
-				UNION ALL
-
-				SELECT
-					0 AS paid_bytes_provided,
-					COALESCE(SUM(p.payout_byte_count), 0) AS unpaid_bytes_provided
-				FROM account_payment p
-				WHERE
-					p.network_id = $1 AND
-					NOT p.completed AND
-					NOT p.canceled
-
-				UNION ALL
-
-				SELECT
-					COALESCE(SUM(account_payment.payout_byte_count), 0) AS paid_bytes_provided,
-					0 AS unpaid_bytes_provided
+				SELECT COALESCE(SUM(payout_byte_count), 0)
 				FROM account_payment
-				WHERE
-					account_payment.network_id = $1 AND
-					account_payment.completed = true
+				WHERE network_id = $1 AND completed
 			`,
 			networkId,
-		)
-
-		server.WithPgResult(result, err, func() {
-			transferStats = &TransferStats{}
-
-			for result.Next() {
-
-				var paidBytesProvided ByteCount
-				var unpaidBytesProvided ByteCount
-
-				server.Raise(
-					result.Scan(
-						&paidBytesProvided,
-						&unpaidBytesProvided,
-					),
-				)
-
-				transferStats.PaidBytesProvided += paidBytesProvided
-				transferStats.UnpaidBytesProvided += unpaidBytesProvided
-			}
-		})
+		).Scan(&transferStats.PaidBytesProvided))
 	})
-
 	return transferStats
 }

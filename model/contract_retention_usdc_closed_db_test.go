@@ -1,11 +1,13 @@
 // USDC payouts ended (owner decisions 2026-11-12 and 2026-11-13: "settle closed
 // rows, let's close out usdc entirely"). The close-out canceled every pending
-// payment and journaled it with a usdc_payout_closed event. Retention counts
-// such a payment settled, as a completed one, in every reaper that reads
-// payments: the contract horizon reaper, the due-contract delete pass and the
-// straggler stamp. Before, a closed payment kept its contracts until the
-// 300-day straggler horizon, and a closed keyed one (paid elsewhere) forever.
-// A contract of an obligation that is still open stays.
+// payment and journaled it with a usdc_payout_closed event, and a safely
+// canceled payment, closed or not, is forfeited (owner decision 2026-11-13).
+// Retention counts such a payment settled, as a completed one, in every reaper
+// that reads payments: the contract horizon reaper, the due-contract delete
+// pass and the straggler stamp. Before, a closed or safely canceled payment
+// kept its contracts until the 300-day straggler horizon, and a closed keyed
+// one (paid elsewhere) forever. A contract of an obligation that is still open
+// stays.
 package model
 
 import (
@@ -31,8 +33,9 @@ func insertUsdcClosedTestPayment(t testing.TB, ctx context.Context, networkId se
 	return paymentId
 }
 
-// The payment shapes of the close-out and of the obligations still open. Each
-// closed one is settled; each open one holds.
+// The payment shapes of the close-out, of safely canceled payments and of the
+// obligations still open. Each closed or safely canceled one is settled; each
+// open one holds.
 type usdcClosedTestPayments struct {
 	// closed by the close-out, never sent (wallet_less, dust, review_held,
 	// other)
@@ -70,11 +73,11 @@ func insertUsdcClosedTestPayments(t testing.TB, ctx context.Context, networkId s
 }
 
 // The horizon reaper deletes a contract past the horizon whose sweep belongs
-// to a closed payment, never sent or keyed; before, it kept the first as
-// payment_incomplete and the second as payment_hold. It keeps a contract of a
-// pending payment, a revived closed one or a canceled keyed one (payment_hold),
-// and of a safely canceled payment never closed or one whose event is not its
-// closure (payment_incomplete).
+// to a closed payment, never sent or keyed, or to a safely canceled one, closed
+// or not; before, it kept a closed or safely canceled one as
+// payment_incomplete and a closed keyed one as payment_hold. It keeps a
+// contract of a pending payment, a revived closed one or a canceled keyed one
+// (payment_hold).
 func TestContractHorizonReapsContractsOfClosedPayments(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -96,16 +99,14 @@ func TestContractHorizonReapsContractsOfClosedPayments(t *testing.T) {
 		eligible := []*horizonTestContract{
 			contract(payments.closedUnsent),
 			contract(payments.closedPaidElsewhere),
+			contract(payments.canceledSafe),
+			contract(payments.foreignEvent),
 		}
 		protected := map[string][]*horizonTestContract{
 			contractHorizonProtectedPaymentHold: {
 				contract(payments.pending),
 				contract(payments.revived),
 				contract(payments.canceledKeyed),
-			},
-			contractHorizonProtectedPaymentIncomplete: {
-				contract(payments.canceledSafe),
-				contract(payments.foreignEvent),
 			},
 		}
 		all := append([]*horizonTestContract{}, eligible...)
@@ -145,10 +146,9 @@ func TestContractHorizonReapsContractsOfClosedPayments(t *testing.T) {
 
 // The due-contract delete pass deletes a due contract inside the straggler
 // horizon (a stamp of the former 90-day rule) whose sweep belongs to a closed
-// payment, never sent or keyed; before, it repaired both to reap_time = NULL,
-// the first for having no completed payment and the second as a hold. It
-// repairs the contract of every open obligation, and of a safely canceled
-// payment never closed.
+// payment, never sent or keyed, or to a safely canceled one, closed or not;
+// before, it repaired each to reap_time = NULL, as holding no completed payment
+// or as a hold. It repairs the contract of every open obligation.
 func TestDueContractReapDeletesContractsOfClosedPayments(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -168,13 +168,13 @@ func TestDueContractReapDeletesContractsOfClosedPayments(t *testing.T) {
 		deleted := []*horizonTestContract{
 			contract(payments.closedUnsent),
 			contract(payments.closedPaidElsewhere),
+			contract(payments.canceledSafe),
+			contract(payments.foreignEvent),
 		}
 		repaired := []*horizonTestContract{
 			contract(payments.pending),
 			contract(payments.revived),
 			contract(payments.canceledKeyed),
-			contract(payments.canceledSafe),
-			contract(payments.foreignEvent),
 		}
 		all := append(append([]*horizonTestContract{}, deleted...), repaired...)
 		insertHorizonTestContracts(t, ctx, f, all...)
@@ -201,6 +201,48 @@ func TestDueContractReapDeletesContractsOfClosedPayments(t *testing.T) {
 			if reapTime := testingReapTime(ctx, contract.contractId); reapTime != nil {
 				t.Errorf("a due contract of an open payment kept reap_time %v", reapTime)
 			}
+		}
+	})
+}
+
+// The due-contract delete pass deletes a due contract inside the straggler
+// horizon whose sweep is unpaid, and one with no sweep: USDC payouts ended, so
+// an unpaid sweep is forfeited (owner decision 2026-11-13). Before, it repaired
+// both to reap_time = NULL as paid by no settled payment. It still repairs one
+// whose sweep's payment row is missing, as the contract horizon reaper keeps
+// it (payment_incomplete).
+func TestDueContractReapDeletesUnpaidContracts(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		now := server.NowUtc()
+		young := now.Add(-100 * 24 * time.Hour)
+		unpaid := newHorizonTestContract(young, "settled")
+		unswept := newHorizonTestContract(young.Add(time.Second), "settled")
+		unswept.unswept = true
+		missingPaymentId := server.NewId()
+		missingPayment := newHorizonTestContract(young.Add(2*time.Second), "settled")
+		missingPayment.paymentId = &missingPaymentId
+		insertHorizonTestContracts(t, ctx, f, unpaid, unswept, missingPayment)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET reap_time = $2 WHERE contract_id = ANY($1)`,
+				[]server.Id{unpaid.contractId, unswept.contractId, missingPayment.contractId}, now.Add(-time.Hour)))
+		}, server.TxReadCommitted, server.OptNoRetry())
+
+		removeDueContractBatches(ctx, now, now.Add(-StragglerContractExpiration), 100)
+
+		for _, contract := range []*horizonTestContract{unpaid, unswept} {
+			if rows := countReaperDependentTestRows(t, ctx, contract.contractId); rows != [6]int{} {
+				t.Errorf("a due unpaid contract kept rows %v", rows)
+			}
+		}
+		if rows := countReaperDependentTestRows(t, ctx, missingPayment.contractId); rows[0] != 1 || rows[3] != 1 {
+			t.Errorf("a due contract of a missing payment lost rows %v", rows)
+		}
+		if reapTime := testingReapTime(ctx, missingPayment.contractId); reapTime != nil {
+			t.Errorf("a due contract of a missing payment kept reap_time %v", reapTime)
 		}
 	})
 }

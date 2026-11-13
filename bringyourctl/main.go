@@ -106,6 +106,7 @@ Usage:
     bringyourctl crypto show --intent=<intent_id>
     bringyourctl crypto credit --intent=<intent_id> [--sanctions-cleared]
     bringyourctl crypto credit-usdc --intent=<intent_id> --tx=<signature> [(--commit --expect=<digest>)]
+    bringyourctl payouts close-attempted [(--commit --expect=<digest>)]
     bringyourctl crypto void --intent=<intent_id>
     bringyourctl crypto refund --intent=<intent_id> --address=<payout_address>
     bringyourctl crypto alchemy-webhook [--signing-key-file=<path>]
@@ -263,7 +264,7 @@ Options:
     --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
-    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, contracts close-due or reengagement suppress dry run printed; --commit and --apply refuse any other census.
+    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, payouts close-attempted, contracts close-due or reengagement suppress dry run printed; --commit and --apply refuse any other census.
     --network_ids_file=<path>  With reengagement suppress, the networks to suppress: one network id a line; blank lines and lines starting with # are skipped.
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
@@ -447,6 +448,10 @@ func main() {
 			onboardingRollup(opts)
 		} else if experiments, _ := opts.Bool("experiments"); experiments {
 			onboardingExperiments(opts)
+		}
+	} else if payouts, _ := opts.Bool("payouts"); payouts {
+		if closeAttempted, _ := opts.Bool("close-attempted"); closeAttempted {
+			os.Exit(payoutsCloseAttemptedCommand(opts, os.Stdout, os.Stderr))
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
 		if scheduleOpen, _ := opts.Bool("schedule-open-closures"); scheduleOpen {
@@ -2267,12 +2272,21 @@ func migrateUserAuth(opts docopt.Opts) {
 	fmt.Println("User auth migration completed successfully.")
 }
 
+// Refreshes the country reliability multipliers now, as their weekly task does
+// (model.RefreshCountryReliabilityMultipliers), and prints each change.
 func reliabilitySetMultipliers(opts docopt.Opts) {
 	ctx := context.Background()
 
 	countryReliabilityMultipliers1 := model.GetAllClientLocationReliabilityMultipliers(ctx)
 
-	model.UpdateClientLocationReliabilityMultipliersWithDefaults(ctx)
+	refreshed, err := model.RefreshCountryReliabilityMultipliers(ctx, server.NowUtc(), model.DefaultCountryReliabilityMultiplierSettings())
+	if err != nil {
+		panic(err)
+	}
+	if !refreshed {
+		fmt.Println("No usable reliability block in the window; the multipliers are unchanged.")
+		return
+	}
 
 	countryReliabilityMultipliers2 := model.GetAllClientLocationReliabilityMultipliers(ctx)
 

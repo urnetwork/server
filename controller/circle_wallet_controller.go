@@ -35,11 +35,6 @@ var circleConfig = sync.OnceValue(func() map[string]any {
 	return c["circle"].(map[string]any)
 })
 
-var walletSetId = sync.OnceValue(func() string {
-	c := server.Vault.RequireSimpleResource("circle.yml").Parse()
-	return c["wallet_set_id"].(string)
-})
-
 type WalletCircleInitResult struct {
 	UserToken   *CircleUserToken       `json:"user_token,omitempty"`
 	ChallengeId string                 `json:"challenge_id,omitempty"`
