@@ -11512,6 +11512,13 @@ var migrations = []any{
 	// them.
 	providerEgressFp2EvidenceMigration,
 
+	// The store notification flow (store_notification_flow_schema.go,
+	// controller/store_notification_flow.go): one new table with a row per
+	// store, under a five-second lock bound, created only when absent.
+	// Nothing existing is locked or rewritten. Apply with the api and alt
+	// that write it.
+	storeNotificationFlowMigration,
+
 	// Explicit distributed terminal-infrastructure recovery preserves original
 	// admission/failure and requires all-host closure before a new cycle queues.
 	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),

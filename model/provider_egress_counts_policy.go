@@ -75,8 +75,12 @@ func providerEgressCountsPolicyKey(
 		// Schema 7 adds the zero-carry verdict (provider_zero_carry.go) and
 		// its zero_carry reason, a hard exclusion a schema 6 snapshot neither
 		// applies nor carries, and whose reason set a schema 6 reader refuses.
+		// Schema 8 carries the classified decision's capability and
+		// post-quantum counts (ProviderEgressCounts.CapabilityCounts and
+		// PostQuantumCounts, FP2-PROTOCOL.md §8.1), which a schema 7 snapshot
+		// does not, and whose wire fields a schema 7 reader refuses.
 	}{
-		Schema: 7, MaxIndex: settings.MaxIndex(),
+		Schema: 8, MaxIndex: settings.MaxIndex(),
 		EvidenceMaxAge:   min(settings.EvidenceMaxAge, ProviderEgressHealthMaxAge),
 		QualityNumerator: settings.QualityOkNumerator, QualityDenominator: settings.QualityOkDenominator,
 		CountryGate: settings.CountryGate, EgressEnabled: enabled,

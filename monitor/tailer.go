@@ -461,6 +461,30 @@ var logClasses = []logClass{
 		action:    "Privately inspect one original loader reason, the configured webhook and its actual mounted generation before choosing a repair. Restore a proved missing or incompatible verification input only through the existing provider/Vault owner; verify provider agreement and the intended route outcome. Reconcile expired or unhandled events through the existing financial owner. Never disable verification or fabricate a secret to clear this page.",
 		verify:    "Require fresh complete log coverage with no matching refusals for two log-errors cadences after ingestion delay, independently successful verification and intended webhook handling, and the actual provider backlog/reconciliation outcome. Quiet logs, credential shape alone or an unrelated 2xx do not certify payment recovery.",
 	},
+	{name: "store-notification-refused", re: storeNotificationRefusedRe,
+		sample: func(line string) string {
+			return "[store-notification]" + storeNotificationLogGroup(storeNotificationRefusedRe)(line)
+		},
+		groupBy:       storeNotificationLogGroup(storeNotificationRefusedRe),
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §2.22c",
+		meaning:   "the api refused or failed a store notification that verified as the store's: a Google Play push of the configured publisher for another audience (refused_audience), an App Store notification for another app, environment or version (refused_claims), or a verified notification it could not process (error)",
+		mechanism: "Our configuration and the store's disagree, or our processing fails: google.yml webhook.audience no longer matches the Pub/Sub push subscription's audience, apple.yml app_store_notifications no longer matches the app, or the database or the store's API fails behind a verified notification. The store retries a refused or failed notification for a while; a purchase whose first notification is lost this way can go uncredited, and Google refunds a Play purchase left unacknowledged for three days.",
+		context:   "One line is one refused or failed delivery, not one purchase: the store retries the same notification. urnetwork_store_notifications_total{store,outcome} counts them on the api dashboard; store-notification-silent (§2.22c) pages when nothing is accepted for a day while purchases continue.",
+		action:    "Compare the store's configuration with ours through the vault owner (google.yml webhook.audience and publisher_email against the Play Pub/Sub push subscription; apple.yml app_store_notifications against App Store Connect), or fix the processing error the api log names next to the line. Never disable verification to clear the page; reconcile the purchases of the window once notifications are accepted again.",
+		verify:    "No store-notification-refused line for two log-errors cadences after ingestion delay, the accepted outcome count rising for the store, and purchases of the window acknowledged and credited once.",
+	},
+	{name: "store-notification-unverified", re: storeNotificationUnverifiedRe,
+		sample: func(line string) string {
+			return "[store-notification]" + storeNotificationLogGroup(storeNotificationUnverifiedRe)(line)
+		},
+		groupBy:       storeNotificationLogGroup(storeNotificationUnverifiedRe),
+		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §2.22c",
+		meaning:   "the api refused store notifications that did not verify: a Play push with no valid Google token of the configured publisher (refused_auth), an App Store JWS that does not verify against the pinned Apple roots (refused_signature), or a body that is not a notification (refused_malformed)",
+		mechanism: "Anyone can post to the notification routes, so a refusal of an unverified request alone is not an outage. A sustained rate is the store's own notifications failing to verify: Google signing the pushes for another service account than google.yml's publisher_email, or Apple signing with a chain our pinned roots do not hold.",
+		context:   "store-notification-silent (§2.22c) separates the two: it pages only when no notification was accepted for a day while purchases continue. urnetwork_store_notifications_total{store,outcome} counts the refusals on the api dashboard.",
+		action:    "Check whether accepted notifications of the store continue (the accepted outcome count, store_notification_flow). If they stopped, compare the push subscription's service account with google.yml webhook.publisher_email, or Apple's current certificate chain with the pinned roots, and correct ours through the vault owner or a release. If accepted ones continue, the refusals are not the store's; leave verification as it is.",
+		verify:    "The rate falls under the threshold for two log-errors cadences, and accepted notifications of the store continue.",
+	},
 	{name: "peerconn-teardown-stalled", re: peerConnectionTeardownStalledRe,
 		sample: func(line string) string {
 			return "[peerconn]teardown stalled stage=" + peerConnectionTeardownStalledStage(line) + " (peer identity omitted)"
@@ -1558,7 +1582,26 @@ var requiredVaultRouteRe = regexp.MustCompile(`route ([A-Z]+) \^?([^$:\s]+)\$?:`
 
 // subscription_handlers.go webhookVerifiable and the webhook body verifiers:
 // `[<webhook>]webhook refused, verification <secret|publisher|audience> unavailable: ...`
-var paymentWebhookRefusedRe = regexp.MustCompile(`\[(play|stripe|coinbase|helius)\]webhook refused, verification [a-z]+ unavailable`)
+var paymentWebhookRefusedRe = regexp.MustCompile(`\[(play|stripe|coinbase|helius|apple)\]webhook refused, verification [a-z]+ unavailable`)
+
+// controller/store_notification_flow.go RecordStoreNotificationOutcome: one
+// fixed line per refused or failed store notification,
+// `[store-notification]<google|apple> <outcome>`. Our side's refusals and
+// failures (a verified push for another audience or app, or one we could not
+// process) page; a push that never verified (no valid token or signature, a
+// malformed body) may be anyone's, and warns at a rate.
+var storeNotificationRefusedRe = regexp.MustCompile(`\[store-notification\](google|apple) (refused_audience|refused_claims|error)\b`)
+var storeNotificationUnverifiedRe = regexp.MustCompile(`\[store-notification\](google|apple) (refused_auth|refused_signature|refused_malformed)\b`)
+
+// The store and outcome of a store notification line.
+func storeNotificationLogGroup(re *regexp.Regexp) func(string) string {
+	return func(line string) string {
+		if match := re.FindStringSubmatch(line); len(match) > 2 {
+			return "store=" + match[1] + " outcome=" + match[2]
+		}
+		return "unknown"
+	}
+}
 
 // The refused webhook's bounded name; the resource and field stay in the service log.
 func paymentWebhookRefusedLogGroup(line string) string {

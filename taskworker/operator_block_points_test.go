@@ -17,15 +17,17 @@ import (
 )
 
 // The root cause of the paused points (owner decision 2026-10-28): past the
-// provider earning boundary the weekly payout run plans only contracts that
+// provider earning boundary the weekly payout run planned only contracts that
 // closed before it, and a plan applies points only inside a subsidy epoch,
 // which cannot form past the boundary. So the traffic of every completed
-// operator block after it earned no points. This runs the weekly payout task
-// in the production taskworker, with every task it queues, and requires
-// points for the traffic of the completed block it awards, linked to a
-// payment that stores that operator block, with the traffic's sweeps left
-// for the SN pool and no USDC paid for them.
-func TestWeeklyPayoutRunAwardsPostCutoffOperatorBlockPoints(t *testing.T) {
+// operator block after it earned no points. The daily award task gives them.
+// USDC payouts ended (owner decision 2026-11-12) and no payout run asks for an
+// award any more, so this runs the award task on its own in the production
+// taskworker, with every task it queues, and requires points for the traffic
+// of the completed block it awards, linked to a payment that stores that
+// operator block, with the traffic's sweeps left for the SN pool, no USDC paid
+// for them, and the task's own next daily run scheduled.
+func TestDailyAwardTaskAwardsPostCutoffOperatorBlockPoints(t *testing.T) {
 	t.Setenv("WARP_DOMAIN", "operator-block-points.example")
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -86,10 +88,17 @@ func TestWeeklyPayoutRunAwardsPostCutoffOperatorBlockPoints(t *testing.T) {
 			contracts = append(contracts, contractId)
 		}
 
-		// the weekly payout run, due now, and every task it queues
+		// the daily award task, due now, as its startup seed leaves it when the
+		// taskworker started inside the latest completed block
 		clientSession := session.NewLocalClientSession(ctx, "192.0.2.1:1", nil)
 		defer clientSession.Cancel()
-		task.ScheduleTask(work.Payout, &work.SchedulePayoutArgs{}, clientSession, task.RunOnce("payout"), task.RunAt(now.Add(-time.Minute)))
+		task.ScheduleTask(
+			controller.AwardOperatorBlockPoints,
+			&controller.AwardOperatorBlockPointsArgs{FromBlock: current - 1},
+			clientSession,
+			task.RunOnce("award_operator_block_points"),
+			task.RunAt(now.Add(-time.Minute)),
+		)
 		worker := InitTaskWorker(ctx)
 		defer worker.Close()
 		// the worker claims in fair turns over its functions, so it runs turns
@@ -128,7 +137,7 @@ func TestWeeklyPayoutRunAwardsPostCutoffOperatorBlockPoints(t *testing.T) {
 			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM transfer_escrow_sweep WHERE contract_id = ANY($1::uuid[]) AND payment_id IS NOT NULL`, contracts).Scan(&assigned))
 		})
 		if len(blocks) == 0 {
-			t.Fatalf("the weekly run gave the traffic of completed operator blocks %v past the boundary no points", trafficBlocks)
+			t.Fatalf("the award task gave the traffic of completed operator blocks %v past the boundary no points", trafficBlocks)
 		}
 		for _, block := range blocks {
 			if !slices.Contains(trafficBlocks, block) {
@@ -137,6 +146,23 @@ func TestWeeklyPayoutRunAwardsPostCutoffOperatorBlockPoints(t *testing.T) {
 		}
 		if paidUsdc != 0 || assigned != 0 {
 			t.Fatalf("traffic past the boundary was paid in USDC (%d) or its sweeps assigned (%d)", paidUsdc, assigned)
+		}
+
+		// the award task keeps its own daily schedule, and nothing queues a
+		// payout run
+		var nextAward int
+		var payoutRuns int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM pending_task WHERE function_name = $1 AND $2 < run_at`,
+				task.NewTaskTarget(controller.AwardOperatorBlockPoints).TargetFunctionName(), server.NowUtc()).Scan(&nextAward))
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM pending_task WHERE function_name = ANY($1)`,
+				[]string{task.NewTaskTarget(work.Payout).TargetFunctionName(), "bringyour.com/service/taskworker/work.Payout"}).Scan(&payoutRuns))
+		})
+		if nextAward != 1 {
+			t.Fatalf("the award task scheduled %d next runs, want its own next daily run", nextAward)
+		}
+		if payoutRuns != 0 {
+			t.Fatalf("%d payout runs are queued", payoutRuns)
 		}
 	})
 }

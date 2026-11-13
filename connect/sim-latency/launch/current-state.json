@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T22:31:27.047863Z",
+  "observed_at": "2026-11-13T03:06:19.353245Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,17 +17,34 @@
   },
   "source_index": "../EPOCH-SOURCE.md",
   "queue": {
-    "succeeded": 16,
+    "succeeded": 17,
     "failed": 4,
     "queued": 0,
-    "running": 0
+    "running": 1
   },
-  "active_attempts": [],
+  "last_completed_attempt": {
+    "job_id": "01a1d270-672a-80c0-4983-afa0464c8eae",
+    "host_id": "sille",
+    "run_id": "cb61142db0a92772f6d58ea327d613d521151d3eaf461d0c27dd5bff97a10725",
+    "started_at": "2026-11-13T01:06:37.281162Z",
+    "original_deadline_at": "2026-11-13T04:06:37.281162Z",
+    "attempt": 1,
+    "cycle": 0,
+    "native_fencing_token": 20,
+    "last_progress": "Native evaluation and verified cleanup succeeded; authoritative database now counts17 succeeded and no running Sille job."
+  },
+  "active_attempts": [{
+    "job_id": "01a1d2c5-1653-b033-1203-34a0e6e9bf32",
+    "host_id": "goofe",
+    "started_at": "2026-11-13T02:38:32.584085Z",
+    "original_deadline_at": "2026-11-13T05:38:32.584085Z",
+    "no_operator_interruption": true
+  }],
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": true,
-    "publication_held": false,
-    "api_observed_at": "2026-11-12T22:25:53Z",
+    "grading_ready": false,
+    "publication_held": true,
+    "api_observed_at": "2026-11-13T03:15:30.882842Z",
     "current_processes": {
       "unit": "urnetwork-competition-production-r2.service",
       "supervisor_pid": 211140,
@@ -36,7 +53,8 @@
       "automatic_restarts": 3,
       "last_start": "2026-11-12T19:27:21Z",
       "worker_source_or_binary_changed": false,
-      "operator_hold_or_restart_performed": false,
+      "operator_hold_or_restart_performed": true,
+      "service_stopped_or_restarted": false,
       "ops_maintenance_confirmation": "user_asking_ops_to_check_1918_to_1927_utc"
     },
     "transient_readiness_cause_confirmed": false,
@@ -53,6 +71,21 @@
     }
   },
   "recovery": {
+    "latest_user_directive": "Rerun all failed evaluations. Controlled recovery qualification is in progress; no rerun has started and submitted patch bytes and screening remain unchanged.",
+    "qualification_maintenance": {
+      "hold_revision": 32,
+      "hold_active": true,
+      "intake_open": true,
+      "active_goofe_attempt_uninterrupted": true,
+      "post_hold_sille_and_legacy_slots_empty": true,
+      "post_hold_private_sille_docker_empty": true,
+      "qa_cpus": "0,2",
+      "production_coordinator_cpus_unchanged": "20,22",
+      "evidence": "/var/lib/urnetwork/competition-recovery-qualification-maintenance-20261113.TOM4WJ2G",
+      "operator_plan_sha256": "2253e6bc0bbc7e43873a81fd415b89cceaf6694b4724e62f5cc2e33ba936d5dc",
+      "tests_started": true,
+      "service_restart_or_recovery_grant": false
+    },
     "authorized_failed_jobs": [
       "01a1c402-9ca1-79d8-e114-5af7c2ef343d",
       "01a1c4af-c928-3e6a-d183-6c9f319cc119",
@@ -69,18 +102,30 @@
     "database_grants_issued": false,
     "ordinary_qualification": {
       "original_scope": 271,
-      "qualified": 172,
-      "pending": 99,
+      "qualified": 244,
+      "pending": 27,
       "failed_batch_partial_credit": false,
       "race_or_release_qualification_complete": false
     },
     "active_qualification": {
-      "cases": 24,
-      "pid": 800014,
-      "invocation_id": "e2d553c7b6af4106809ccaf8d24a6734",
-      "evidence": "/dev/shm/competition-wallet-pinned-batch05-20261112.sD7o6hsp",
-      "manifest_sha256": "47356fe301842447bad4de5461de69a2a5af1dabe39620aec300b6bf4b11d32d",
-      "completed_or_credited": false
+      "kind": "remaining24_original_census_cpu02",
+      "evidence": "/dev/shm/competition-wallet-remaining24-cpu02-20261113.QgW15S0C",
+      "actor_unit": "competition-guard-independent-qa-20261112.service",
+      "actor_pid": 2295983,
+      "actor_invocation_id": "36662a3a4e704d628899bbed6cbd1b57",
+      "guard_unit": "competition-guard-bootstrap-20261112.service",
+      "guard_pid": 2296021,
+      "guard_invocation_id": "106acc81c22448f99b3039b0f588c87e",
+      "admitted_at": "2026-11-13T03:18:16Z",
+      "recipe_sha256": "4f35c8ce89a85f8a17b83fea9a6cb39fff0543c56ce388ef1956ac1ebe5e7580",
+      "passed_credit_granted": false
+    },
+    "last_original_batch": {
+      "passed": 24,
+      "failed": 0,
+      "skipped": 0,
+      "durable_evidence": "/var/lib/urnetwork/competition-native-batch07-green-20261112.pPqsi4x5",
+      "manifest_sha256": "6b6769aff44ac8fabef3afe7707957a0ba80a658064552a58bfd5af7be08c478"
     },
     "wallet_fixture": {
       "source_manifest_sha256": "6039cf2fc0176a6f5742ecbb300a19b73a7258d5d787dc21bb3f81914ec3ee03",
@@ -128,20 +173,147 @@
         "passed": 24,
         "failed": 0,
         "skipped": 0,
-        "log_sha256": "6b105b94ba86fe5152a2f10f3f5f4a0bab291bf979526da163430cd8ea6db28d",
-        "postgres_peak_bytes": 440471552,
+        "log_sha256": "13b9fd18907ad3a26018082857b013230174271a43149b4acd5f77fba766e601",
+        "postgres_peak_bytes": 482119680,
         "postgres_oom_kills": 0,
         "actor_guard_capture_cleanup_exit_zero": true,
-        "durable_evidence": "/var/lib/urnetwork/competition-native24-coverage11-qualification-20261112.VfutpY70",
-        "durable_manifest_sha256": "34ff83047cc325f5169aa4bef8db1d67a1e4f81368cc1f0432310a632f9924b4"
+        "durable_evidence": "/var/lib/urnetwork/competition-native-batch06-green-20261112.dH4z0o0k",
+        "durable_manifest_sha256": "0b590481421b0702afd146ab4e4d79ca2217584af3615207e0da0e8023626354"
       },
-      "tests_remaining": "Remaining 99 original census cases, race qualification and final exact-main/dependency compatibility."
+      "tests_remaining": "Remaining 27 original census cases, race qualification and final exact-main/dependency compatibility."
     },
-    "isolated_server_commit": "37fc05dc1",
+    "isolated_server_commit": "ae8920bd7a5ec9e97a51e179cf9b74600b1c8a7a",
     "isolated_sn_commit": "e908edda50378af63576109df88c603168716ce6",
     "isolated_main_qualified_or_deployed": false,
-    "integration_status": "Wallet fixture checkpoint and captured main 4b54fda91 merged in isolation; published Solana cursor migration precedes local recovery append, with captured-tail regression updated. Current original-census qualification inputs remain unchanged.",
+    "integration_status": "Wallet fixture checkpoint, captured main 189d1e558 and heartbeat fix 59b3ce0ca merged in isolation. Published Solana cursor and provider-egress evidence migrations precede local recovery append, with captured-tail regression updated. Integration receipt 47624a0c8b142c2c7b47e1413feb2712fccf4ca31f9d5baa400f7634ff8cbce1. Current original-census qualification inputs remain unchanged; no release claim.",
     "deployment_pending": "Only after qualification: append recovery migration after origin, deploy compatible API/monitor, install worker/reevaluate CLI, verify global idle and both host closures, individually authorize recovery preserving FIFO."
+  },
+  "idle_heartbeat_fix": {
+    "source_commit": "59b3ce0ca2bfcc96d29de8c98d14cc1c5e9ae9fa",
+    "source_manifest_sha256": "b4f079ab837696fabfb44370e6fda79db7a1b3a4f3a396e138fcb0481962647c",
+    "new_causal_cases": 15,
+    "adjacent_cases": 61,
+    "qualified_or_deployed": true,
+    "deployed": false,
+    "initial_normal_compile": "Resource-stopped: cache growth 613072896 bytes exceeded the predeclared 536870912-byte bound. No binary or native Go exit status was produced; zero tests ran. Wrapper EXIT 0 is not success; manager TERM and guard 2 are preserved.",
+    "durable_resource_failure": "/var/lib/urnetwork/competition-idle-heartbeat-normal-cache-stop-20261112.mqAX8YSx",
+    "durable_failure_manifest_sha256": "eb25526e7b36ff69349c00e698ab303219137de7258d1385235f5a4954306233",
+    "source_and_dependencies_unchanged": true,
+    "historical_old_run_control_source_sha256": "f0b03983dbfe1fa7a0fa5b0a51552d03cd809655a9af39662f18a8c76271f9d8",
+    "historical_control_executed": true,
+    "production_historical_control": {
+      "raw_test_and_actor_exit": 1,
+      "guard_exit": 0,
+      "intended_causal_assertion_verified": true,
+      "evidence": "/dev/shm/competition-idle-heartbeat-oldrun-control-20261113.jXuUIR24",
+      "json_sha256": "d0ebbecf27ed3d53ec43bb1a6cee618f62e7ea118de906947f40782902948b77",
+      "durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-oldrun-causal-red-20261113.fy3lpawR",
+      "manifest_sha256": "ea14637ea50631fe8b5fa4e5d5d694cd915c5fb0aa27a91da3e0ea1de70129b2",
+      "source_dependency_and_capture_checks_passed": true
+    },
+    "fixture_historical_control": {
+      "raw_test_and_actor_exit": 1,
+      "guard_exit": 0,
+      "intended_causal_assertion_verified": true,
+      "json_sha256": "cae592fd0caeed54ebbb5cf8e998866624c34457309fd525e23c57cc6661f2b4",
+      "durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-oldwatch-causal-red-20261113.Nn30gWax",
+      "manifest_sha256": "7c26ad0be8069767348b53e1c20a043cd3230dddb2faa1f8cefd9faf368b45e7"
+    },
+    "narrow_main_candidate": {
+      "commit": "ff6fa769d259956f6a6584b58ddaccaa289ea64a",
+      "captured_main_base": "6ced7799085bbc7a97643b07780185cf093c8849",
+      "production_blobs_equal_qualified_source": true,
+      "test_blobs_equal_corrected_fixture": true,
+      "schema_api_module_changes": false,
+      "merged_to_main_or_deployed": true,
+      "merged_to_main": true,
+      "main_merge_commit": "4ae5dc9bcd123d8ad328ace97382c190b3c588b2",
+      "deployed": false,
+      "full_main_abi_or_build_qualified": false
+    },
+    "warm_compile_result": "Compiled successfully; original smoke exposed a test-cleanup cancellation fixture defect. Failure preserved; production code unchanged by the correction.",
+    "corrected_fixture_source_sha256": "252a3f26dde8affe48a7116a9e28153a09c8f48a3913479e5bc68aa4a6cc0f9a",
+    "corrected_normal_binary_sha256": "63650e18d67da95301548688c9016a6c94cde4f782f7963ca8eadd1b829dca35",
+    "corrected_smoke_passed": 20,
+    "normal_executions_passed": 243,
+    "normal_failures_or_skips": 0,
+    "normal_durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-normal243-green-20261113.KlVhxljU",
+    "normal_manifest_sha256": "d8def8e2d36289cff01f3ecd4c7734c4849a0c049e4a861489c7668d06e67d39",
+    "race_executions_passed": 243,
+    "race_failures_or_skips": 0,
+    "race_evidence": "/dev/shm/competition-idle-heartbeat-fixture-race81-20261113.Puhsd0Gr",
+    "race_durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-race243-green-20261113.a1egzy3W",
+    "race_manifest_sha256": "e72f68b02e8f9678f631633c5359185ed0864e17387525f3fda0336f90b639ac",
+    "race_json_sha256": "180c6cd9353d6830c02f078d3a9b309b28fa3eb79c5760068d0b2df57c45f328",
+    "race_actor_guard_and_capture_exit_zero": true,
+    "race_and_historical_controls_complete": true,
+    "worker_build_only": {
+      "recipe_sha256": "b6e193ff12de4e0bd62ee507a943989e3c0b6b75147e211e6f5e98393fc60285",
+      "evidence": "/dev/shm/competition-idle-heartbeat-worker-buildonly-20261113.e70Wpr0v",
+      "last_reported_pid": 1257450,
+      "last_reported_invocation_id": "63455d40820e441ba4ad713203e49c8d",
+      "terminal_result_verified": true,
+      "actual_go_exit": 0,
+      "duration_seconds": 59,
+      "actor_guard_and_capture_exit_zero": true,
+      "binary_sha256": "9a3bacc690049b21a2565700f13df5856a1faad98533035a49c5388294c2607a",
+      "build_profile": "Clean 59b3 source; Go1.27.4 linux/amd64-v1, CGO0, greenteagc, trimpath, original nine dependencies. No full-main build claim.",
+      "image_created_by_build_step": false,
+      "target_executed_installed_or_activated_by_build_step": false,
+      "durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-worker-buildonly-proof-20261113.f8zh3TXi",
+      "manifest_sha256": "f0b15539f8ada68adbeb7c9a56fd04eccff0b81698ea8b96311e068fc1d67248"
+    },
+    "staged_release": {
+      "directory": "/usr/local/libexec/urnetwork/competition-worker-idle-heartbeat-59b3ce0ca-go1274-20261113-v1",
+      "binary_sha256": "9a3bacc690049b21a2565700f13df5856a1faad98533035a49c5388294c2607a",
+      "image_digest": "sha256:042c5bc38b73966fd8f54fe5d7b21226297f66b8579be6be4fb043fb0e0c011c",
+      "archive_sha256": "106fc126b047f8267901a5a44855e79f74f3678c3f6226e8f07fb0d21986db25",
+      "passive_verification_passed": true,
+      "initial_verifier_setup_exit": 126,
+      "initial_verifier_setup_cause": "Retained verifier evidence had mode0400. Original failure/empty report preserved; identical authenticated bytes copied into new root0500 execution custody for successful independent verification.",
+      "verification_sha256": "a9b2c1edf5bb5631256bc3a72c4f1c6ef7a6d0c8685de1a272f7c74e67cdfc75",
+      "wrapper_sha256": "4ac008ab0ab3c84e354fdaad986205e22fecc769059e560fb7cf3f9623a068c6",
+      "candidate_override_sha256": "8f6be9ce36f155f5806488ffbc675c5b1c1d938df203e6ac0f0328c5fc49c181",
+      "stager_ordinary_passes": 21,
+      "stager_race_passes": 21,
+      "stager_old_size_causal_control_verified": true,
+      "stager_tool_sha256": "826c8bf2d9eee673ce2a2c305356d01fb7bbcf093adcb0548b1e3bf12440253b",
+      "actual_stage_exit": 0,
+      "stage_runtime_seconds": 5.613,
+      "stage_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-stage-20261113.h6Q3dxpS",
+      "continuous_stage_guard_started": false,
+      "stage_guard_basis": "Short actor completed before live guard capture; actual launcher exit0, unchanged pins, bounded single-payload copy and post-stage capacity above unchanged33GiB reserve verified.",
+      "runtime_override_installed": false,
+      "worker_payload_executed": false,
+      "deployed": false
+    },
+    "maintenance": {
+      "evidence": "/var/lib/urnetwork/competition-idle-heartbeat-handoff-20261113.ES1aO0Lx",
+      "hold_revision": 30,
+      "hold_release_revision": 31,
+      "hold_active": false,
+      "switch_deferred": true,
+      "reason": "Fresh post-hold database check discovered a new evaluation that started during release preparation. Worker was never stopped, native observer never executed, and only our hold was released with CAS30.",
+      "activation_requires_new_fresh_global_idle_and_native_proof": true,
+      "prepared_native_observer_sha256": "2e2be36a70ed78fe581537295617ecdd8b6305d0648406319c2c9eb533e2ee2c",
+      "prepared_native_observer_executed": false,
+      "prepared_observer_plan_must_not_be_reused_as_latest_after_new_job": true,
+      "no_active_attempt_interruption_or_clock_change": true
+    },
+    "race_compiler": {
+      "unit": "competition-guard-independent-qa-20261112.service",
+      "pid": 1172372,
+      "invocation_id": "5fa580592a4f4bf5ad6fdcdf1e6d4857",
+      "evidence": "/dev/shm/competition-idle-heartbeat-fixture-race-prepare-20261113.TMMnZ46k",
+      "last_verified_live_at": "2026-11-13T00:24:12Z",
+      "compiler_only_cache_budget_bytes": 1073741824,
+      "runtime_cache_budget_unchanged_bytes": 134217728,
+      "completed_or_credited": true,
+      "actual_go_exit": 0,
+      "duration_seconds": 580,
+      "binary_sha256": "741660445b7b16e32983fa685c190fe08c1af70f0076c42a25576eeffd819951",
+      "oom_or_kills": 0
+    }
   },
   "private_reviews": {
     "members": [
@@ -149,13 +321,54 @@
       "gemma-4-26b-a4b"
     ],
     "all_eligible_submissions_reviewed": false,
+    "complete_provider_diagnostic": {
+      "source_sha256": "afedc3e9f2d4689adc2239fc0f85d68504fd0a7ed8b8fff635614d6ae2506d41",
+      "discovered_cases": 56,
+      "passed_before_failfast": 13,
+      "failed": 1,
+      "unrun": 42,
+      "failure": "Context expansion accepted a filtered adverse ancestor via unbacked KnownCallIds. Fixes belong to a new context-slices cut; no test expectation relaxation.",
+      "evidence": "/dev/shm/competition-provider-afed-rgfix-diagnostic-20261113.dvl9vWwQ",
+      "json_sha256": "f11836c06c3d98196c20112f57d4b50687793dd1b14dd3aaccab50c7c71593cc",
+      "qualified_or_executed_against_models": false
+    },
+    "context_slices_diagnostic": {
+      "source_sha256": "bc9c2b1600aad5567d23ffe56ce4cf482d364de02aebdacdaa7e8f1435e49525",
+      "discovered_cases": 69,
+      "passed_before_failfast": 12,
+      "failed": 1,
+      "unrun": 56,
+      "failure": "Named-caller composed workflow stalled at step45: duplicate retained original receipt. Preserve direct-parent duplicate refusal while allowing authenticated identical transitive ancestors to share storage.",
+      "duration_seconds": 274,
+      "evidence": "/dev/shm/competition-provider-bc9-diagnostic-20261113.rKwBR0kV",
+      "json_sha256": "a3f4706056676a74212fd7f192f03aaa9bb9ec047b941082c429cc330024e7d1",
+      "qualified_or_executed_against_models": false,
+      "next_source": "/home/by/urnetwork/temp/competition-epoch2-private-prereview-20261112/complete-review-provider-cas-draft-20261113",
+      "next_source_status": "Being authored: authenticated deduplicated payload ledger, bounded roots/hydration, collision and chain/diamond growth controls. No model calls before source/runtime qualification."
+    },
     "qwen_first_partial": "Original response validated offline; original failure receipt unchanged. Receipt 706f503960bf354ad2032442bc4323e91d5c30aa7e6b76c54a679e6ae1c74125; no complete review or approval.",
     "gemma_first_partial": "Rejected: non-JSON prefix and unseen-file findings; no reroll.",
     "qwen_scoring_partial": "Provider completed; rejected because canonical.patch is not a production source path. No rewriting or reroll.",
     "further_old_calls_held": true,
-    "coverage_planner": "Source 7332b2c2727d5301f9f898d9aa29cf132bd1b277261d1c15d5b9c861f115f244 passed eleven synthetic cases three times ordinary and race. Actual inventory plan execution remains pending.",
+    "coverage_planner": "Source 7332b2c2727d5301f9f898d9aa29cf132bd1b277261d1c15d5b9c861f115f244 passed eleven synthetic cases three times ordinary and race. Complete authenticated inventory plan execution passed; every obligation remains pending, with no model calls, observed/accepted findings, token admission, closure or authority.",
+    "complete_plan": {
+      "sha256": "de3ac1723be6001d80a584f85ae6ad3a73647c2028a7b6d40a8b13a7f47e1f2e",
+      "durable_evidence": "/var/lib/urnetwork/competition-complete-offline-coverage-plan-20261112.1CXy4E8r",
+      "durable_manifest_sha256": "2477560a6da91a75452a8ac8c67360df454f11012f807a3ec294e08a03b34a4d",
+      "all_context_input_bytes_and_modes_unchanged": true,
+      "actor_guard_capture_exit_zero": true
+    },
     "bounded_renderer": "Source 03ef12212a4e548e3721c7e92cd424c42d458594a985509c43aba65ca8ae55a5 passed six synthetic cases three times ordinary and race; typed provider boundary, conservative adjacent citation guards and complete paired/transitive review remain in progress. No new inference.",
-    "linked_validation_retention": "Source 954cc73b2496ed62987e6ee3c4c9fd05b5613cb8cc2b2b5c9e3a9d766ecf8e55 passed sixteen synthetic cases three times ordinary and race. Operator plan d4cbbc0399505ca1eabb262fc47cae0c90293ce78d9e2e530826be93bb358aa5 pins existing proof only; actual build/upload pending. No original receipt changed.",
+    "linked_validation_retention": "Source 954cc73b2496ed62987e6ee3c4c9fd05b5613cb8cc2b2b5c9e3a9d766ecf8e55 passed sixteen synthetic cases three times ordinary and race. Actual protected archival of operator plan d4cbbc0399505ca1eabb262fc47cae0c90293ce78d9e2e530826be93bb358aa5 passed: 23 leaves plus manifest, exact retained versions/readbacks, COMPLIANCE through 2028-01-01. All original eight call leaves and two validation leaves unchanged; no model/validator/DB execution or authority.",
+    "protected_linked_validation": {
+      "receipt_sha256": "f14b95a4c5c459c8418d9dedea6de9283e1660c751e920c213d0e0ddabd7af80",
+      "manifest_sha256": "9121b686574d720d6ef3daa17afb231a2a8b15dff1cb4fe7933417161cd2e549",
+      "manifest_version": "c1888ab7-0e27-4bc9-b198-df498bb27aa5",
+      "durable_evidence": "/var/lib/urnetwork/competition-linked-retention-build-runtime-20261112.XE4A5FMu",
+      "durable_manifest_sha256": "eac2ae6856bbf302c6650e1267f95d5747f23c28783c010285aa438c9f92ca00",
+      "actor_guard_capture_exit_zero": true,
+      "complete_review_or_approval": false
+    },
     "render_linked_qa_evidence": "/var/lib/urnetwork/competition-render-linked-synthetic-qualification-20261112.WtE2fpwl",
     "render_linked_qa_manifest_sha256": "553e2db57205e84950211b4c35da77b57810d8ed9da4d463e81d9e2e844cb78d",
     "publisher": "24 ordinary +24 race tests passed; compile-only preparation passed. Original Qwen call's eight evidence leaves and manifest retained with exact-version readback; original failed validation flag remains unchanged. Linked offline validation retention remains separate and pending.",
@@ -187,16 +400,64 @@
     "repository_baseline_or_evidence_deleted": false,
     "qualification_reserve_unchanged_bytes": 35433480192
   },
+  "additional_approved_disk_recovery": {
+    "archive_directory": "/var/lib/urnetwork/competition-compiler-recovery-20261113.HEPLmQp8",
+    "removed_paths": ["/tmp/go-build3486652901", "/tmp/go-build3223552786"],
+    "archives": [
+      {"name": "go-build3486652901.tar.gz", "bytes": 244437476, "sha256": "16c736da33d8dc76a27fd9aba2e5da283f81e0756a03f257b4d6cd6b8d84e424"},
+      {"name": "go-build3223552786.tar.gz", "bytes": 239435523, "sha256": "8f2bc95edf887cfdc443e1ee1a2bef1be257046bcc74f299c3c397b11855e77a"}
+    ],
+    "archive_owner_mode": "root:0400",
+    "gzip_integrity_and_tar_comparison_exit_zero": true,
+    "fresh_canonical_inode_and_open_file_checks_passed": true,
+    "user_approved": true,
+    "recoverable": true,
+    "root_available_bytes_after": 37700001792,
+    "repository_baseline_or_evidence_deleted": false
+  },
+  "retired_test_cache_objects": [
+    {
+      "original_path": "/home/by/.cache/go-build/8b/8b62004edf90d5a70be9995d9ddca86136bf9e07088b9c1105f1a9bed2e2f8ac-d",
+      "recoverable_ram_path": "/dev/shm/competition-retired-oldwatch-cache-20261113.HhvNh7wE/controller-oldwatch.a",
+      "sha256": "8b62004edf90d5a70be9995d9ddca86136bf9e07088b9c1105f1a9bed2e2f8ac",
+      "bytes": 174563000
+    },
+    {
+      "original_path": "/home/by/.cache/go-build/10/1036ac39965e7f7f280d15059a6b01bb3c2af50781d9ddb02e3d6f0559e9e9bb-d",
+      "recoverable_ram_path": "/dev/shm/competition-retired-oldrun-cache-20261113.O9vjPhQL/controller-oldrun.a",
+      "sha256": "1036ac39965e7f7f280d15059a6b01bb3c2af50781d9ddb02e3d6f0559e9e9bb",
+      "bytes": 174556336
+    }
+  ],
+  "retired_test_cache_recovery": "Only inactive rebuildable Go-cache objects moved after exact hash, inode and no-open checks. RAM copies are root0400 and volatile; original source, test binaries and durable proof remain unchanged. No authoritative evidence relies on cache survival.",
+  "buildkit_cache_cleanup": {
+    "removed_records": 14,
+    "scope": "Exact validated unused, unshared, reclaimable regular BuildKit cache records, last used at least 24 hours ago; no images, containers, volumes, repositories, baselines or evidence removed.",
+    "reported_reclaimed": "234 MB",
+    "root_available_before_bytes": 35802656768,
+    "root_available_after_bytes": 36036624384,
+    "docker_image_inventory_sha256_before_and_after": "04c2bc9e776a904676ebb44b63b5f009bc3c2bdc2af94dd5bed37b535f704890",
+    "recovery": "Disposable build caches can be recreated by rebuilding; authoritative source and retained artifacts are unchanged."
+  },
+  "epoch1_public_result_check": {
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "http_success": true,
+    "integrity_review": "approved",
+    "source_approval": "approved",
+    "has_winner": true,
+    "invalidated": false,
+    "settlement_status": "pending",
+    "interpretation": "The historical public result returned HTTP 200 near an observed epoch-2 readiness dip; those sequential reads do not prove a bracketed hold condition. Pending is the API's settlement-receipt status, not independent proof of an external payment's state."
+  },
   "next_actions": [
     "Finish the remaining original census cases and race qualification using the pinned wallet-fixture binary; preserve native PostgreSQL and runtime limits.",
-    "Qualify the coverage planner and linked-validation retention helper; retain linked validation separately without changing original calls.",
+    "Qualify the new bounded multi-unit provider adapter and execute complete paired reviews from the authenticated coverage ledger; protected original and linked validation evidence are retained separately.",
+    "Activate the qualified and staged idle-heartbeat worker at a verified global idle boundary, using fresh signed native status and availability evidence for both actual latest host attempts; do not interrupt active evaluation.",
     "Complete recovery qualification and deploy compatible readers/worker before granting any of the three infrastructure recoveries; preserve original failure records and submission-order ties.",
     "Finish complete paired, bounded reviews for every eligible submission; partial observations never count as approvals.",
     "Monitor live API, supervisor leases and both hosts. Never restart a live attempt because an observation is quiet."
   ],
-  "pending_authorizations": [
-    "Cleanup of the other two previously identified compiler directories remains unapproved. The specifically approved /tmp/go-build2752663447 cleanup is complete and recoverable from its verified private archive."
-  ],
+  "pending_authorizations": [],
   "historical_evidence": {
     "path": "../old/CURRENT-STATE-HISTORY-2026-11-12T211638.json",
     "sha256": "907fc91621e1baf820ce6cbf51a7a0b7fba0a8d34fb758f26fffb7dee204cd03",

@@ -43,42 +43,42 @@ const (
 	StPlatformEndpointMxEdge   = "mxedge"
 )
 
-// StPlatformEndpointKinds are the kinds a registration may name.
-var StPlatformEndpointKinds = []string{StPlatformEndpointTlsEdge, StPlatformEndpointSmtpEdge, StPlatformEndpointMxEdge}
+// The kinds a registration may name.
+var stPlatformEndpointKinds = []string{StPlatformEndpointTlsEdge, StPlatformEndpointSmtpEdge, StPlatformEndpointMxEdge}
 
-// StPlatformEndpoint is one registration of a client as a platform endpoint.
+// One registration of a client as a platform endpoint.
 type StPlatformEndpoint struct {
 	ClientId     server.Id
 	NetworkId    server.Id
 	Kind         string
 	RegisterTime time.Time
 	RegisteredBy string
-	// RevokeTime ends the registration; nil while it is in force.
+	// when the registration ended; nil while it is in force
 	RevokeTime *time.Time
 	RevokedBy  string
 }
 
-// Holds reports whether the registration was in force at t: from its
+// Reports whether the registration was in force at t: from its
 // registration, inclusive, until its revocation, exclusive.
-func (self *StPlatformEndpoint) Holds(t time.Time) bool {
+func (self *StPlatformEndpoint) holds(t time.Time) bool {
 	return !t.Before(self.RegisterTime) && (self.RevokeTime == nil || t.Before(*self.RevokeTime))
 }
 
-// StPlatformEndpointSet is every registration, by client.
+// Every registration, by client.
 type StPlatformEndpointSet map[server.Id][]*StPlatformEndpoint
 
-// Holds reports whether clientId was a registered platform endpoint when a
+// Reports whether clientId was a registered platform endpoint when a
 // contract was created at createTime.
-func (self StPlatformEndpointSet) Holds(clientId server.Id, createTime time.Time) bool {
+func (self StPlatformEndpointSet) holds(clientId server.Id, createTime time.Time) bool {
 	for _, registration := range self[clientId] {
-		if registration.Holds(createTime) {
+		if registration.holds(createTime) {
 			return true
 		}
 	}
 	return false
 }
 
-// Count is the number of registrations, revoked or not.
+// The number of registrations, revoked or not.
 func (self StPlatformEndpointSet) Count() int {
 	count := 0
 	for _, registrations := range self {
@@ -87,39 +87,39 @@ func (self StPlatformEndpointSet) Count() int {
 	return count
 }
 
-// InForce is the number of clients registered at t.
+// The number of clients registered at t.
 func (self StPlatformEndpointSet) InForce(t time.Time) int {
 	count := 0
 	for clientId := range self {
-		if self.Holds(clientId, t) {
+		if self.holds(clientId, t) {
 			count++
 		}
 	}
 	return count
 }
 
-// ErrStPlatformEndpoint refuses a registration or revocation.
-var ErrStPlatformEndpoint = errors.New("platform endpoint refused")
+// The error every refused registration or revocation wraps.
+var errStPlatformEndpoint = errors.New("platform endpoint refused")
 
-// StPlatformEndpointNetworks are the operator's networks a registration is
-// checked against: its own networks, which a platform endpoint must be on, and
-// its declared measurement networks, which it must not be on.
+// The operator's networks a registration is checked against: its own networks,
+// which a platform endpoint must be on, and its declared measurement networks,
+// which it must not be on.
 type StPlatformEndpointNetworks struct {
-	Operator    map[server.Id]bool
-	Measurement map[server.Id]bool
+	OperatorNetworkIds    map[server.Id]bool
+	MeasurementNetworkIds map[server.Id]bool
 }
 
-// RegisterStPlatformEndpoint registers clientId as a platform endpoint of kind
-// from now on. It is refused, before anything is read, for a kind other than
-// sidecar's three edges, the signed set; and for a client that does not exist or
-// is not active, a client whose network is not one of the operator's own or is a
-// measurement network, a client already registered, or an empty by.
+// Registers clientId as a platform endpoint of kind from now on. It is refused,
+// before anything is read, for a kind other than sidecar's three edges, the
+// signed set; and for a client that does not exist or is not active, a client
+// whose network is not one of the operator's own or is a measurement network, a
+// client already registered, or an empty by.
 func RegisterStPlatformEndpoint(ctx context.Context, clientId server.Id, kind string, by string, networks StPlatformEndpointNetworks) (*StPlatformEndpoint, error) {
-	if !slices.Contains(StPlatformEndpointKinds, kind) {
-		return nil, fmt.Errorf("%w: kind %q is not one of %v, the kinds the signed amendment entry covers; a new kind needs a new signed entry", ErrStPlatformEndpoint, kind, StPlatformEndpointKinds)
+	if !slices.Contains(stPlatformEndpointKinds, kind) {
+		return nil, fmt.Errorf("%w: kind %q is not one of %v, the kinds the signed amendment entry covers; a new kind needs a new signed entry", errStPlatformEndpoint, kind, stPlatformEndpointKinds)
 	}
 	if by == "" {
-		return nil, fmt.Errorf("%w: a registration names who makes it", ErrStPlatformEndpoint)
+		return nil, fmt.Errorf("%w: a registration names who makes it", errStPlatformEndpoint)
 	}
 	var registered *StPlatformEndpoint
 	var refused error
@@ -136,13 +136,13 @@ func RegisterStPlatformEndpoint(ctx context.Context, clientId server.Id, kind st
 		})
 		switch {
 		case !found || !active:
-			refused = fmt.Errorf("%w: client %s is not an active client", ErrStPlatformEndpoint, clientId)
+			refused = fmt.Errorf("%w: client %s is not an active client", errStPlatformEndpoint, clientId)
 			return
-		case !networks.Operator[networkId]:
-			refused = fmt.Errorf("%w: client %s is on network %s, which is not one of the operator's own networks (durable_network_ids or extender_pool.declared_network_ids)", ErrStPlatformEndpoint, clientId, networkId)
+		case !networks.OperatorNetworkIds[networkId]:
+			refused = fmt.Errorf("%w: client %s is on network %s, which is not one of the operator's own networks (durable_network_ids or extender_pool.declared_network_ids)", errStPlatformEndpoint, clientId, networkId)
 			return
-		case networks.Measurement[networkId]:
-			refused = fmt.Errorf("%w: client %s is on a declared measurement network, %s", ErrStPlatformEndpoint, clientId, networkId)
+		case networks.MeasurementNetworkIds[networkId]:
+			refused = fmt.Errorf("%w: client %s is on a declared measurement network, %s", errStPlatformEndpoint, clientId, networkId)
 			return
 		}
 		now := server.NowUtc()
@@ -152,7 +152,7 @@ func RegisterStPlatformEndpoint(ctx context.Context, clientId server.Id, kind st
 			WHERE NOT EXISTS (SELECT 1 FROM st_platform_endpoint WHERE client_id = $1 AND revoke_time IS NULL)
 		`, clientId, networkId, kind, now, by))
 		if tag.RowsAffected() == 0 {
-			refused = fmt.Errorf("%w: client %s is already registered", ErrStPlatformEndpoint, clientId)
+			refused = fmt.Errorf("%w: client %s is already registered", errStPlatformEndpoint, clientId)
 			return
 		}
 		registered = &StPlatformEndpoint{ClientId: clientId, NetworkId: networkId, Kind: kind, RegisterTime: now, RegisteredBy: by}
@@ -160,11 +160,10 @@ func RegisterStPlatformEndpoint(ctx context.Context, clientId server.Id, kind st
 	return registered, refused
 }
 
-// RevokeStPlatformEndpoint ends clientId's registration now. Contracts created
-// before keep their class.
+// Ends clientId's registration now. Contracts created before keep their class.
 func RevokeStPlatformEndpoint(ctx context.Context, clientId server.Id, by string) error {
 	if by == "" {
-		return fmt.Errorf("%w: a revocation names who makes it", ErrStPlatformEndpoint)
+		return fmt.Errorf("%w: a revocation names who makes it", errStPlatformEndpoint)
 	}
 	var refused error
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -173,14 +172,14 @@ func RevokeStPlatformEndpoint(ctx context.Context, clientId server.Id, by string
 			WHERE client_id = $1 AND revoke_time IS NULL AND register_time < $2
 		`, clientId, server.NowUtc(), by))
 		if tag.RowsAffected() == 0 {
-			refused = fmt.Errorf("%w: client %s has no registration in force to revoke", ErrStPlatformEndpoint, clientId)
+			refused = fmt.Errorf("%w: client %s has no registration in force to revoke", errStPlatformEndpoint, clientId)
 		}
 	})
 	return refused
 }
 
-// GetStPlatformEndpoints is every registration, revoked or not, by client, each
-// client's in registration order.
+// Every registration, revoked or not, by client, each client's in registration
+// order.
 func GetStPlatformEndpoints(ctx context.Context) StPlatformEndpointSet {
 	set := StPlatformEndpointSet{}
 	server.Db(ctx, func(conn server.PgConn) {

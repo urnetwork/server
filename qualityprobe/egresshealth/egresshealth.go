@@ -688,6 +688,10 @@ type Options struct {
 	// drawn by checkUrlProbe from the lane's URLs that do (url_family.go); nil
 	// otherwise, and for every other probe.
 	urlProbeIpv6StandIn *Destination
+	// The end-to-end session of a URL turn that measures post-quantum
+	// (url_e2e.go), which its evidence reports as e2e; nil, every other
+	// turn's and probe's, observes none.
+	E2e UrlProbeE2eObserver
 
 	// The run's clock, with Sleep. Nil uses the wall clock and a sleep that
 	// selects on time.After and the context. Tests inject both so a run whose
@@ -913,7 +917,9 @@ func SamplePerRunOf(dests []Destination) int {
 // per-request timeout (url_h3.go), so in URL mode every attempt round is
 // counted twice: any drawn URL may declare it. A provider that advertises
 // IPv6 makes both legs again over IPv6 (url_family.go), so its rounds are
-// counted four times: any drawn URL may serve IPv6.
+// counted four times: any drawn URL may serve IPv6. A URL turn that measures
+// post-quantum (E2e) holds each tunnel generation's first sends for its
+// session's seal, at most the observer's SealWait each.
 func (self Options) RunBudget(loads int) time.Duration {
 	if loads < 1 {
 		loads = 1
@@ -932,6 +938,10 @@ func (self Options) RunBudget(loads int) time.Duration {
 	budget += time.Duration(attempts-1) * retryDelayCapFactor * self.loadRetryMeanInterval()
 	generations := 1 + self.tunnelRecreateAttempts()
 	budget += time.Duration(generations) * max(0, self.coldStartTimeout()-self.perRequestTimeout())
+	if self.UrlProbe && self.E2e != nil {
+		// each tunnel generation's first sends wait for its session to seal
+		budget += time.Duration(generations) * self.E2e.SealWait()
+	}
 	return budget
 }
 

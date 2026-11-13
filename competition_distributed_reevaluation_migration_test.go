@@ -15,6 +15,7 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 		NetworkExtenderAddressPortsSchemaMigrationVersion(), CtfAwardNetworkMigrationVersion(),
 		StLedgerV2ExtenderMigrationVersion(), SolanaReceiverSweepCursorVersion(),
 		ProviderEgressFp2EvidenceMigrationVersion(),
+		StoreNotificationFlowVersion(),
 		CompetitionDistributedReevaluationMigrationVersion()}
 	for index, version := range versions {
 		if version < 1 || index > 0 && version != versions[index-1]+1 {
@@ -24,7 +25,7 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 	if versions[len(versions)-1] != MigrationCount() {
 		t.Fatal("local recovery must follow the entire captured origin tail", versions, MigrationCount())
 	}
-	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], MigrationCount())
+	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], MigrationCount())
 }
 
 // Deleting only each explicit addition recovers the complete reviewed old

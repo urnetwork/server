@@ -21,24 +21,21 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// StExtenderAmendment is the extender amendment as the epoch reader applies
-// it (stExtenderAmendment): its first epoch E_x, from the signed amendment
-// entry in force or its configured fallback, and the operator's registered
-// platform endpoints.
+// The extender amendment as the epoch reader applies it (stExtenderAmendment):
+// its first epoch E_x, from the signed amendment entry in force or its
+// configured fallback, and the operator's registered platform endpoints.
 type StExtenderAmendment = stExtenderAmendment
 
-// StEpochExtenderPool is an epoch's extender pool as the amended epoch reader
-// counts it. Each contract's pooled shares go to exactly one of its funded
-// parts, the unfunded bytes or the measurement bytes, and never to a provider.
+// An epoch's extender pool as the amended epoch reader counts it. Each
+// contract's pooled shares go to exactly one of its funded parts, the
+// unfunded bytes or the measurement bytes, and never to a provider.
 type StEpochExtenderPool struct {
-	// IntraPlatform and IntraNetwork are Z's parts: the platform endpoints'
-	// shares, and the shares on each contract's origin network, of the
-	// contracts a balance funded, free or paid, whose payer is not a declared
-	// measurement or test network.
+	// Z's parts: the platform endpoints' shares, and the shares on each
+	// contract's origin network, of the contracts a balance funded, free or
+	// paid, whose payer is not a declared measurement or test network
 	IntraPlatform ByteCount
 	IntraNetwork  ByteCount
-	// Contracts and Payers count the contracts behind Z and their distinct
-	// payer networks (M4).
+	// the contracts behind Z and their distinct payer networks (M4)
 	Contracts uint64
 	Payers    uint64
 	// The pooled shares Z leaves out, which enter neither the provider rows
@@ -49,18 +46,18 @@ type StEpochExtenderPool struct {
 	UnfundedContracts    uint64
 	MeasurementBytes     ByteCount
 	MeasurementContracts uint64
-	// PooledByClient sums each client's pooled shares, funded or not, the bytes
-	// the amendment takes out of its provider usage: what an offline replay of
-	// a recorded epoch checks its rows' change against.
-	PooledByClient map[server.Id]ByteCount
+	// each client's pooled shares, funded or not, the bytes the amendment
+	// takes out of its provider usage: what an offline replay of a recorded
+	// epoch checks its rows' change against
+	ClientIdPooledBytes map[server.Id]ByteCount
 }
 
-// PooledBytes is every pooled share: Z and the bytes it leaves out.
+// Every pooled share: Z and the bytes it leaves out.
 func (self *StEpochExtenderPool) PooledBytes() uint64 {
 	return uint64(self.IntraPlatform) + uint64(self.IntraNetwork) + uint64(self.UnfundedBytes) + uint64(self.MeasurementBytes)
 }
 
-// Bytes is Z.
+// Z.
 func (self *StEpochExtenderPool) Bytes() uint64 {
 	return uint64(self.IntraPlatform) + uint64(self.IntraNetwork)
 }
@@ -71,17 +68,19 @@ type stEpochAmendedUsage struct {
 	epoch     uint64
 	amendment stExtenderAmendment
 	// the payer networks the operator declares for measurement or testing
-	measurement map[server.Id]bool
-	usages      map[server.Id]*StProviderUsage
-	pool        StEpochExtenderPool
-	payers      map[server.Id]bool
+	measurementNetworkIds map[server.Id]bool
+	clientIdUsages        map[server.Id]*StProviderUsage
+	pool                  StEpochExtenderPool
+	payerNetworkIds       map[server.Id]bool
 }
 
-func newStEpochAmendedUsage(epoch uint64, amendment stExtenderAmendment, measurement map[server.Id]bool) *stEpochAmendedUsage {
-	return &stEpochAmendedUsage{epoch: epoch, amendment: amendment, measurement: measurement, usages: map[server.Id]*StProviderUsage{}, payers: map[server.Id]bool{},
-		pool: StEpochExtenderPool{PooledByClient: map[server.Id]ByteCount{}}}
+// A reader of one epoch under the amendment, with nothing counted yet.
+func newStEpochAmendedUsage(epoch uint64, amendment stExtenderAmendment, measurementNetworkIds map[server.Id]bool) *stEpochAmendedUsage {
+	return &stEpochAmendedUsage{epoch: epoch, amendment: amendment, measurementNetworkIds: measurementNetworkIds, clientIdUsages: map[server.Id]*StProviderUsage{}, payerNetworkIds: map[server.Id]bool{},
+		pool: StEpochExtenderPool{ClientIdPooledBytes: map[server.Id]ByteCount{}}}
 }
 
+// Adds bytes to a pool total, refusing a sum that would overflow.
 func addStEpochPoolBytes(total *ByteCount, bytes ByteCount) error {
 	if bytes < 0 || bytes > math.MaxInt64-*total {
 		return fmt.Errorf("subnet extender pool bytes overflow")
@@ -121,17 +120,17 @@ func (self *stEpochAmendedUsage) add(row *stEpochUsageRow, snapshot *contractUsa
 		return nil
 	}
 	for _, share := range shares.Pooled {
-		total := self.pool.PooledByClient[share.ClientId]
+		total := self.pool.ClientIdPooledBytes[share.ClientId]
 		if err := addStEpochPoolBytes(&total, share.ByteCount); err != nil {
 			return err
 		}
-		self.pool.PooledByClient[share.ClientId] = total
+		self.pool.ClientIdPooledBytes[share.ClientId] = total
 	}
 	switch {
 	case row.payerNetworkId == nil:
 		self.pool.UnfundedContracts++
 		return addStEpochPoolBytes(&self.pool.UnfundedBytes, pooled)
-	case self.measurement[*row.payerNetworkId]:
+	case self.measurementNetworkIds[*row.payerNetworkId]:
 		self.pool.MeasurementContracts++
 		return addStEpochPoolBytes(&self.pool.MeasurementBytes, pooled)
 	}
@@ -145,7 +144,7 @@ func (self *stEpochAmendedUsage) add(row *stEpochUsageRow, snapshot *contractUsa
 		return fmt.Errorf("subnet extender pool bytes overflow")
 	}
 	self.pool.Contracts++
-	self.payers[*row.payerNetworkId] = true
+	self.payerNetworkIds[*row.payerNetworkId] = true
 	return nil
 }
 
@@ -153,10 +152,10 @@ func (self *stEpochAmendedUsage) add(row *stEpochUsageRow, snapshot *contractUsa
 // amendment adds a snapshot's shares.
 func (self *stEpochAmendedUsage) addProviders(providers []contractProviderUsage) error {
 	for _, provider := range providers {
-		usage := self.usages[provider.ClientId]
+		usage := self.clientIdUsages[provider.ClientId]
 		if usage == nil {
 			usage = &StProviderUsage{ClientId: provider.ClientId, NetworkId: provider.NetworkId}
-			self.usages[provider.ClientId] = usage
+			self.clientIdUsages[provider.ClientId] = usage
 		}
 		if usage.NetworkId != provider.NetworkId || int64(provider.ByteCount) > math.MaxInt64-usage.PayoutByteCount {
 			return fmt.Errorf("subnet provider usage has ambiguous network or overflowing total")
@@ -169,14 +168,14 @@ func (self *stEpochAmendedUsage) addProviders(providers []contractProviderUsage)
 // The epoch's provider usages, one per client in client id order, and its
 // pool.
 func (self *stEpochAmendedUsage) result() ([]*StProviderUsage, *StEpochExtenderPool) {
-	usages := make([]*StProviderUsage, 0, len(self.usages))
-	for _, usage := range self.usages {
+	usages := make([]*StProviderUsage, 0, len(self.clientIdUsages))
+	for _, usage := range self.clientIdUsages {
 		usages = append(usages, usage)
 	}
 	slices.SortFunc(usages, func(a, b *StProviderUsage) int { return a.ClientId.Cmp(b.ClientId) })
 	pool := self.pool
-	pool.Payers = uint64(len(self.payers))
-	pool.PooledByClient = maps.Clone(self.pool.PooledByClient)
+	pool.Payers = uint64(len(self.payerNetworkIds))
+	pool.ClientIdPooledBytes = maps.Clone(self.pool.ClientIdPooledBytes)
 	return usages, &pool
 }
 
@@ -225,24 +224,25 @@ const stEpochAmendedUsageSql = `
 		AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
 `
 
+// Scans one row of the amended usage read into row.
 func scanStEpochAmendedUsageRow(rows pgx.Rows, row *stEpochUsageRow) error {
 	return rows.Scan(&row.contractId, &row.data, &row.closedAt, &row.duplicate, &row.live, &row.originNetworkId, &row.payerNetworkId, &row.createTime)
 }
 
-// GetStEpochAmendedUsageAtEpoch reads an epoch's provider usage under the
-// extender amendment, and its extender pool. An epoch the amendment does not
-// cover is read exactly as GetStEpochProviderUsageAtEpoch reads it, with no
-// pool. One it covers reads the same usage statement in one REPEATABLE READ
-// snapshot, planned the same way, with each contract's usage origin network
-// and payer: its provider shares are summed per client, its pooled shares
-// counted by payer, the payers in measurement left out of Z.
+// Reads an epoch's provider usage under the extender amendment, and its
+// extender pool. An epoch the amendment does not cover is read exactly as
+// GetStEpochProviderUsageAtEpoch reads it, with no pool. One it covers reads
+// the same usage statement in one REPEATABLE READ snapshot, planned the same
+// way, with each contract's usage origin network and payer: its provider shares
+// are summed per client, its pooled shares counted by payer, the payers in
+// measurement left out of Z.
 func GetStEpochAmendedUsageAtEpoch(
 	ctx context.Context,
 	epoch uint64,
 	startTime time.Time,
 	endTime time.Time,
 	amendment StExtenderAmendment,
-	measurement map[server.Id]bool,
+	measurementNetworkIds map[server.Id]bool,
 ) ([]*StProviderUsage, *StEpochExtenderPool, error) {
 	if !amendment.InForce(epoch) {
 		usages, err := GetStEpochProviderUsageAtEpoch(ctx, epoch, startTime, endTime)
@@ -255,7 +255,7 @@ func GetStEpochAmendedUsageAtEpoch(
 	if err != nil {
 		return nil, nil, err
 	}
-	reader := newStEpochAmendedUsage(epoch, amendment, measurement)
+	reader := newStEpochAmendedUsage(epoch, amendment, measurementNetworkIds)
 	earningStart, earningEnd := transition.SnWindow(startTime, endTime)
 	if !earningStart.Before(earningEnd) {
 		usages, pool := reader.result()

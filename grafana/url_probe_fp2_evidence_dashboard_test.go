@@ -33,7 +33,8 @@ func TestEgressProbeDashboardChartsCapabilityEvidence(t *testing.T) {
 		}, words: []string{"v4udp", "v6tcp", "v6udp", "v4udp_v6tcp", "v4udp_v6udp", "failed_later_legs", "place"}},
 		{title: "post-quantum outcomes of URL turns / min", unit: "short", exprs: []string{
 			`sum by (pq) (rate(urnetwork_egress_url_pq_outcomes_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
-		}, words: []string{"positive", "negative", "unmeasured", "pq_outcome", "X25519MLKEM768", "eight-hour window"}},
+			`sum by (pq) (rate(urnetwork_url_probe_e2e_outcomes_total{env="$env",service="taskworker",instance!=""}[$__rate_interval])) * 60`,
+		}, words: []string{"positive", "negative", "unmeasured", "pq_outcome", "X25519MLKEM768", "eight-hour window", "prober"}},
 	} {
 		panels := []testPanel{}
 		for _, panel := range dashboard.Panels {

@@ -329,6 +329,16 @@ type ProviderRankingNumber struct {
 	Count       int    `json:"count"`
 	Total       int    `json:"total"`
 	Explanation string `json:"explanation"`
+	// url_checks of a downgraded provider (FP2-PROTOCOL.md §5.5, D11.6):
+	// one English sentence per capability its checks took away, tcp first,
+	// joined by a space, which the explanation also ends with. Each count is
+	// its sentence's number, set exactly when the sentence is in the reason,
+	// so an app can say it in its own language: the checks that failed over
+	// HTTP/3 (UDP) for tcp, over IPv6 for ipv4. Empty and zero, absent from
+	// the wire, for every other provider and number.
+	Reason          string `json:"reason,omitempty"`
+	ReasonTcpCount  int    `json:"reason_tcp_count,omitempty"`
+	ReasonIpv4Count int    `json:"reason_ipv4_count,omitempty"`
 }
 
 // Where clients find the provider.
@@ -370,6 +380,9 @@ type ProviderRankingNumberCompact struct {
 	Passes  bool     `json:"passes"`
 	Count   *int     `json:"count,omitempty"`
 	Total   *int     `json:"total,omitempty"`
+	// the reason's sentence counts (ProviderRankingNumber), without its text
+	ReasonTcpCount  int `json:"reason_tcp_count,omitempty"`
+	ReasonIpv4Count int `json:"reason_ipv4_count,omitempty"`
 }
 
 // A ProviderStatusCountry without its explanation.
@@ -407,8 +420,10 @@ func NewProviderStatusCompact(status *ProviderStatus) *ProviderStatusCompact {
 	}
 	for _, number := range status.Ranking {
 		compactNumber := &ProviderRankingNumberCompact{
-			Name:   number.Name,
-			Passes: number.Passes,
+			Name:            number.Name,
+			Passes:          number.Passes,
+			ReasonTcpCount:  number.ReasonTcpCount,
+			ReasonIpv4Count: number.ReasonIpv4Count,
 		}
 		if number.HasValue {
 			value := number.Value
@@ -569,6 +584,10 @@ type providerStatusFacts struct {
 	egressQuality            *bool
 	publishedCountryCode     *string
 	countryName              string
+	// the families the provider's connections prove, which give its
+	// advertised capability labels (FP2-PROTOCOL.md §3.1)
+	ipv4Proven bool
+	ipv6Proven bool
 	// lookback index to its weights, as the pool query reads them: without
 	// score rows, one neutral lookback 0 (hasReliabilityHistory false)
 	lookbacks             map[int]providerStatusLookback
@@ -612,7 +631,9 @@ func loadProviderStatusFacts(ctx context.Context, networkId server.Id, clientIds
 				network_client_location_reliability.egress_index,
 				network_client_location_reliability.egress_quality,
 				country_location.country_code,
-				COALESCE(country_location.location_name, '')
+				COALESCE(country_location.location_name, ''),
+				COALESCE(network_client_location_reliability.ipv4_proven, false),
+				COALESCE(network_client_location_reliability.ipv6_proven, false)
 			FROM network_client
 			LEFT JOIN network_client_location_reliability ON
 				network_client_location_reliability.client_id = network_client.client_id
@@ -652,6 +673,8 @@ func loadProviderStatusFacts(ctx context.Context, networkId server.Id, clientIds
 					&facts.egressQuality,
 					&facts.publishedCountryCode,
 					&facts.countryName,
+					&facts.ipv4Proven,
+					&facts.ipv6Proven,
 				))
 				clientFacts[facts.clientId] = facts
 			}
@@ -721,6 +744,9 @@ type providerStatusEvaluation struct {
 	passesReliability bool
 	// the pool score as UpdateClientScores ranks it
 	clientScore *ClientScore
+	// the provider's capability labels, as the score export classifies it
+	// (FP2-PROTOCOL.md §3.3)
+	capability providerCapabilityClassification
 }
 
 // Decides one provider with the rules and ranking of UpdateClientScores.
@@ -783,6 +809,12 @@ func evaluateProviderStatus(
 		hardExcluded:      countFilter.hasHardEgressFailure(facts.clientId),
 		passesReliability: providerReliabilityPasses(weights, minIndependentReliabilityWeights),
 		clientScore:       clientScore,
+		capability: classifyProviderCapabilityOfFamilies(
+			countFilter.healthCounts[facts.clientId],
+			clientScoreIpFamilies(facts.ipv4Proven, facts.ipv6Proven),
+			countFilter.now,
+			egressSettings,
+		),
 	}
 
 	switch {
@@ -977,6 +1009,14 @@ func newProviderStatus(
 		urlChecks.Explanation = fmt.Sprintf("Test sites that loaded through this connection in the last %d hours: %d of %d. At least %d in %d must load; filtering by your internet provider lowers it.", int(min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge)/time.Hour), healthCounts.OKCount, healthCounts.Total, egressSettings.QualityOkNumerator, egressSettings.QualityOkDenominator)
 	} else {
 		urlChecks.Explanation = fmt.Sprintf("No network checks in the last %d hours yet. Until a check passes, clients are offered this device only when checked providers run out.", int(min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge)/time.Hour))
+	}
+	// a provider whose checks took a capability away is told why
+	// (FP2-PROTOCOL.md §5.5, D11.6); the number above stays the strict one
+	if reason := evaluation.capability.reason(healthCounts); reason.text != "" {
+		urlChecks.Reason = reason.text
+		urlChecks.ReasonTcpCount = reason.tcpCount
+		urlChecks.ReasonIpv4Count = reason.ipv4Count
+		urlChecks.Explanation += " " + reason.text
 	}
 	status.Ranking = append(status.Ranking, urlChecks)
 

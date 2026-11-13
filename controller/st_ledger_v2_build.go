@@ -153,10 +153,9 @@ func (self stLedgerV2Builder) Build(ctx context.Context, input *StLedgerV2BuildI
 	return build, nil
 }
 
-// stLedgerV2EpochPool is a covered epoch's extender pool beside its ledger
-// input: the parts the record keeps with the component
-// (stLedgerV2EpochExtenders), recorded or new, and, for an epoch first built
-// now, the epoch reader's pool.
+// A covered epoch's extender pool beside its ledger input: the parts the record
+// keeps with the component (stLedgerV2EpochExtenders), recorded or new, and,
+// for an epoch first built now, the epoch reader's pool.
 type stLedgerV2EpochPool struct {
 	parts *model.StLedgerV2EpochExtenders
 	read  *model.StEpochExtenderPool

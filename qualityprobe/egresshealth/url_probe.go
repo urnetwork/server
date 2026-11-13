@@ -121,6 +121,11 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 			// the country's switch turned UDP off for a URL of the outcome that
 			// declares h3: the load's own, or the stand-in its IPv6 legs loaded
 			result.UrlProbeEvidence.UdpProbesDisabled = check.UdpProbesDisabled || (check.Ipv6UdpProbesDisabled && check.Ipv6 != nil)
+			if opts.E2e != nil {
+				// the session's outcome once every leg ended; positive needs
+				// the IPv4 HTTPS leg to have passed through it
+				result.UrlProbeEvidence.E2e = opts.E2e.Evidence(result.UrlProbeEvidence.HttpsOk(result.OkCount))
+			}
 		}
 	}
 	return result, err

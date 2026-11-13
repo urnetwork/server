@@ -111,7 +111,11 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 		settings := egressIndexSettings()
 		// ModernOnlineCounts joined the dashboard counts with 92a738f17
 		// (FP2-MODERN.md); every Online member counts under its modern outcome
-		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex(), ModernGateShadowCounts: newProviderModernGateShadowCounts(), ModernOnlineCounts: newProviderModernOnlineCounts()}
+		// CapabilityCounts and PostQuantumCounts joined them with FP2-PROTOCOL.md
+		// §8.1: every provider here is v4-only with one run in the window, so it
+		// keeps its advertised labels, ipv4+dualproto, and has no
+		// post-quantum outcome
+		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex(), ModernGateShadowCounts: newProviderModernGateShadowCounts(), ModernOnlineCounts: newProviderModernOnlineCounts(), CapabilityCounts: newProviderEgressCapabilityCounts(), PostQuantumCounts: newProviderPostQuantumCounts()}
 		for _, bucket := range ProviderEgressBuckets {
 			wantCounts.BucketIndexCounts[bucket] = map[string]int64{}
 		}
@@ -129,12 +133,18 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 			countProviderModernOnline(wantCounts.ModernOnlineCounts, facts, d)
 			if d.quality {
 				wantCounts.BucketIndexCounts[RankModeQuality]["0"]++
+				wantCounts.CapabilityCounts[RankModeQuality][ProviderCapabilityIpIpv4][ProviderCapabilityProtocolDualproto]++
+				wantCounts.PostQuantumCounts[RankModeQuality][ProviderPostQuantumSignalNone]++
 			}
 			if d.speed {
 				wantCounts.BucketIndexCounts[RankModeSpeed]["0"]++
+				wantCounts.CapabilityCounts[RankModeSpeed][ProviderCapabilityIpIpv4][ProviderCapabilityProtocolDualproto]++
+				wantCounts.PostQuantumCounts[RankModeSpeed][ProviderPostQuantumSignalNone]++
 			}
 			if d.online {
 				wantCounts.BucketIndexCounts[ProviderEgressBucketOnline]["0"]++
+				wantCounts.CapabilityCounts[ProviderEgressBucketOnline][ProviderCapabilityIpIpv4][ProviderCapabilityProtocolDualproto]++
+				wantCounts.PostQuantumCounts[ProviderEgressBucketOnline][ProviderPostQuantumSignalNone]++
 			}
 			if d.reason != "" {
 				wantCounts.ReasonCounts[d.reason]++
