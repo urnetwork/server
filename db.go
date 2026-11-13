@@ -329,6 +329,11 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			configurePgPoolNotices(config)
 		}
 		configurePgTestEnvDial(currentTestEnvDialGuard(), config.ConnConfig)
+		if self.vaultResourceName == DefaultPgVaultResourceName {
+			// after the guard, which then checks each instance address. The
+			// maintenance pool's sessions bypass PgBouncer.
+			configurePgBouncerPath(config, currentPgBouncerPath(), DefaultPgBouncerDirectSettings())
+		}
 		configurePgPoolDirectSession(config, self.vaultResourceName == MaintenancePgVaultResourceName)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
