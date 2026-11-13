@@ -34,12 +34,14 @@ import (
 // and whether the session had sealed when the request was written. The
 // provider's end-to-end responder is on or off by responder.
 type postQuantumUrlTurn struct {
-	body            string
-	sealedAtRequest bool
-	observation     connect.PeerCapabilityObservation
-	found           bool
-	clientReplaced  bool
-	derivedKeys     int
+	body             string
+	sealedAtRequest  bool
+	sessionAtStart   connect.PeerCapabilitySession
+	sessionAtRequest connect.PeerCapabilitySession
+	observation      connect.PeerCapabilityObservation
+	found            bool
+	clientReplaced   bool
+	derivedKeys      int
 }
 
 func runPostQuantumUrlTurn(tb testing.TB, ctx context.Context, responder bool) postQuantumUrlTurn {
@@ -206,10 +208,15 @@ func runPostQuantumUrlTurn(tb testing.TB, ctx context.Context, responder bool) p
 	turn := postQuantumUrlTurn{}
 	client := tunnel.HttpClientForHosts(30*time.Second, []string{originHost})
 	request, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			observation, _ := recorder.Get(connect.Id(providerClientId))
+			turn.sessionAtStart = observation.Session
+		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
 			if info.Err == nil {
 				observation, found := recorder.Get(connect.Id(providerClientId))
 				turn.sealedAtRequest = found && observation.E2eSealed
+				turn.sessionAtRequest = observation.Session
 			}
 		},
 	}), http.MethodGet, "https://"+net.JoinHostPort(originHost, strconv.Itoa(port))+"/", nil)
@@ -230,18 +237,22 @@ func runPostQuantumUrlTurn(tb testing.TB, ctx context.Context, responder bool) p
 	turn.clientReplaced = tunnel.ClientReplaced()
 	// the turn's derived clients published their keys: a post-quantum turn
 	// reads its key, whatever KeepClientKeysLocal says for other turns
+	var derivedClientIds []server.Id
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `SELECT client_id FROM network_client WHERE source_client_id = $1`, sourceClientId)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var derivedClientId server.Id
 				server.Raise(result.Scan(&derivedClientId))
-				if publicKey, err := model.GetClientPublicKey(ctx, derivedClientId); err == nil && 0 < len(publicKey) {
-					turn.derivedKeys++
-				}
+				derivedClientIds = append(derivedClientIds, derivedClientId)
 			}
 		})
 	})
+	for _, derivedClientId := range derivedClientIds {
+		if publicKey, err := model.GetClientPublicKey(ctx, derivedClientId); err == nil && 0 < len(publicKey) {
+			turn.derivedKeys++
+		}
+	}
 	if err := tunnel.Close(); err != nil {
 		tb.Fatal("joined retirement", err)
 	}
@@ -268,6 +279,9 @@ func TestPostQuantumUrlTurnThroughALocalProvider(t *testing.T) {
 		}
 		if !turn.sealedAtRequest {
 			tb.Fatal("the session had not sealed when the request was written: the hold did not keep the first sends for the seal")
+		}
+		if turn.sessionAtStart.EpochId == (connect.Id{}) || !turn.sessionAtStart.PostQuantum || turn.sessionAtStart != turn.sessionAtRequest || turn.sessionAtRequest != observation.Session {
+			tb.Fatalf("the real seal did not bind request and completion to one live sending epoch: start %+v written %+v final %+v", turn.sessionAtStart, turn.sessionAtRequest, observation.Session)
 		}
 		if turn.clientReplaced {
 			tb.Fatal("the turn's window client was replaced")

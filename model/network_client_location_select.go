@@ -195,8 +195,8 @@ func providerCapabilityClassesForIpFamily(ipFamily string) (providerCapabilityCl
 // The facets a pool reads (§6.4) and the filter each applies. Non-forced:
 // A reads d and B reads 4, skipping a downgraded record there, whose
 // classified copy is in its capability facet; B also reads i, C t and D x.
-// Forced: today's forced records, d for the dualstack classes and 4 for the
-// ipv4 ones, each kept by the class its CapabilityDowngrades gives.
+// Forced: d can hold every class after downgrades, and 4 can hold B or D.
+// Read those original family facets, then keep each record by its class.
 type findProviders2PoolFacets struct {
 	familyFacets     []ipFamilyFacet
 	capabilityFacets []ipFamilyFacet
@@ -212,7 +212,7 @@ func newFindProviders2PoolFacets(classes providerCapabilityClassSet, forceMinimu
 		return classes.has(score.capabilityClass()) && score.IpFamily() != connect.IpFamilyV6Only
 	}
 	if forceMinimum {
-		if classes.has(providerCapabilityClassA) || classes.has(providerCapabilityClassC) {
+		if classes != 0 {
 			poolFacets.familyFacets = append(poolFacets.familyFacets, ipFamilyFacetDualstack)
 		}
 		if classes.has(providerCapabilityClassB) || classes.has(providerCapabilityClassD) {
@@ -483,7 +483,7 @@ func findProviders2PostQuantumReady(findProviders2 *FindProviders2Args, session 
 // the marker is set, a candidate whose record is post-quantum positive, and
 // a named provider in {provider_post_quantum_positive}; before it, today's
 // declarations.
-func readFindProviders2PostQuantumEncryption(session *session.ClientSession, postQuantumReady bool, scores map[server.Id]*ClientScore, clientIds []server.Id) (map[server.Id]bool, error) {
+func readFindProviders2PostQuantumEncryption(session *session.ClientSession, postQuantumReady bool, scores map[server.Id]*ClientScore, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
 	if !postQuantumReady {
 		return readProvidePostQuantumEncryption(session.Ctx, clientIds)
 	}
@@ -491,14 +491,14 @@ func readFindProviders2PostQuantumEncryption(session *session.ClientSession, pos
 	namedClientIds := []server.Id{}
 	for _, clientId := range clientIds {
 		if score := scores[clientId]; score != nil {
-			if score.PostQuantumPositive {
+			if score.postQuantumCurrent(now) {
 				capableClientIds[clientId] = true
 			}
 		} else {
 			namedClientIds = append(namedClientIds, clientId)
 		}
 	}
-	members, _, err := readProviderCapabilitySet(session.Ctx, providerPostQuantumPositiveKey, namedClientIds)
+	members, err := readProviderPostQuantumSet(session.Ctx, providerPostQuantumPositiveKey, namedClientIds, now)
 	if err != nil {
 		return nil, err
 	}
@@ -513,8 +513,7 @@ func readFindProviders2NamedModern(session *session.ClientSession, postQuantumRe
 	if !postQuantumReady {
 		return readProviderModernClientIds(session.Ctx, clientIds, now)
 	}
-	members, _, err := readProviderCapabilitySet(session.Ctx, providerPostQuantumModernKey, clientIds)
-	return members, err
+	return readProviderPostQuantumSet(session.Ctx, providerPostQuantumModernKey, clientIds, now)
 }
 
 // The answer's band of a discovered provider, for the answered-modern counts.
@@ -530,6 +529,7 @@ func findProviders2WithSelect(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
+	requestTime := server.NowUtc()
 	observation := newFindProviders2SelectionObservation(findProviders2)
 	observation.beginPrivateCapture(session.Ctx)
 	defer observation.finish(session.Ctx)
@@ -671,7 +671,7 @@ func findProviders2WithSelect(
 			incapableClientIds := map[server.Id]bool{}
 			exclusionReadClientIds := map[server.Id]bool{}
 			qualityReadClientIds := map[server.Id]bool{}
-			filterTime := server.NowUtc()
+			filterTime := requestTime
 			evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, filterTime)
 			validation := &providerQualityValidation{parent: session.Ctx}
 			defer validation.close()
@@ -748,7 +748,7 @@ func findProviders2WithSelect(
 					}
 				}
 				if findProviders2.PostQuantumEncryption {
-					capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, scores, candidateClientIds)
+					capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, scores, candidateClientIds, requestTime)
 					if err != nil {
 						return err
 					}
@@ -1124,6 +1124,7 @@ func findProviders2WithSelect(
 					requireModern:              findProviders2.RequireModernProvider,
 					capabilityClasses:          classes,
 					requirePostQuantumPositive: postQuantumReady,
+					now:                        requestTime,
 				}
 				read := &findProviders2PoolRead{
 					ctx:              session.Ctx,
@@ -1483,7 +1484,7 @@ func findProviders2WithSelect(
 			return nil, err
 		}
 		if findProviders2.RequireModernProvider {
-			modernClientIds, err := readFindProviders2NamedModern(session, postQuantumReady, specClientIds, server.NowUtc())
+			modernClientIds, err := readFindProviders2NamedModern(session, postQuantumReady, specClientIds, requestTime)
 			if err != nil {
 				return nil, err
 			}
@@ -1494,7 +1495,7 @@ func findProviders2WithSelect(
 			}
 		}
 		if findProviders2.PostQuantumEncryption {
-			capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, nil, specClientIds)
+			capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, nil, specClientIds, requestTime)
 			if err != nil {
 				return nil, err
 			}

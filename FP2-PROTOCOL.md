@@ -1707,6 +1707,14 @@ of 3 and its provider has no PQ outcome in the last 4 hours (D12.5).
 The same session also shows whether the provider's acks advertise a receive
 window, as the capability probe read it (capprobe/reading.go:51-60).
 
+The URL observer binds a positive to the live ordinary initiator session's
+client id, epoch id and key-exchange group before the first request writes
+(`GotConn`), after those writes (`WroteRequest`), and at completion. Later
+retry or redirect callbacks cannot replace that first observation. A rekey,
+demotion or closed session cannot borrow the recorder's sticky seal or the
+group from another epoch; a classical request remains classical evidence
+even if a later epoch negotiates PQ.
+
 **Cost per PQ turn:**
 - one key-registration round trip before admission;
 - one TLS 1.3 handshake with X25519MLKEM768 through the provider, carrying
@@ -1782,6 +1790,18 @@ The capability probe's own tunnels, prober shard and passes go away (§12.4).
     `readProviderModernClientIds` (:6732-6734, :7351-7352);
   - every export writes the flag and the sets, and readers use them only
     after the marker.
+
+  The exported positive also carries its own deadline: the positive's
+  measurement plus eight hours, capped by thirty minutes past the health
+  snapshot the exporter read (`PostQuantumMaxStaleness`). Modern proof is
+  additionally capped by the latest window evidence's seven-day lifetime.
+  Every strict draw compares those deadlines at one request instant; the
+  exact deadline is expired. Fresh ordinary URL results do not renew a PQ
+  proof. Named providers use batched deadline hashes at each existing set's
+  same-slot `:proof_v1` companion key, published atomically with that set.
+  The set types remain compatible with older writers and readers; after the
+  ready marker, a missing deadline from an older snapshot fails closed until
+  a current exporter publishes proof. No per-provider database read is added.
 - **The ready marker:** `client_score_post_quantum_v1_ready` holds the PQ
   stream's start.
   - After each complete export, the export sets it while the stream has run
@@ -2499,3 +2519,182 @@ model/network_client_location_select.go:529):
 - S2 (3dcc7b138 and 4fdf026c0) and S1 step 2 ship in the next server release,
   in §10's deploy order.
 - No config or vault change.
+
+## 14. Review findings and fixes (2026-11-12)
+
+This review used server `a6735f73e` and connect `13a6c4f2` as the original
+baselines. The findings, fixes and regression evidence are recorded below.
+The implementation follows connect's
+[CODESTYLE.md](../connect/CODESTYLE.md).
+
+### 14.1 P1: preserve the requested IPv6 minimum through admission and refill
+
+**Failure.** FP2 requested at least one dualstack provider for an active
+window, but mixed that candidate with IPv4 providers. Faster IPv4 evaluations
+could consume every admission slot. Initial formation, fixed profiles and
+mobile windows with no explicit IPv6 minimum then computed zero shortfall,
+so a full IPv4 window never recovered the requested capability.
+
+**Fix.** The same requested dualstack target now drives discovery ordering,
+admission reservations and refill shortfall. Scarce IPv6 candidates enter the
+bounded evaluation set first. Admission reserves the remaining needed slots
+until that expansion pass completes; completion admits healthy IPv4 fallback
+when IPv6 supply is absent. A full strict-cap window uses the existing safe
+victim/replacement path only after supply is ready. Fixed destinations remain
+exempt, and the window caps and client retirement ownership are preserved.
+See [request sizing and discovery](../connect/ip_remote_multi_client_limited.go),
+[shortfall](../connect/ip_remote_multi_client_family.go) and
+[resize/admission](../connect/ip_remote_multi_client.go).
+
+**Regression evidence.** Against the original production code,
+`TestExpandReservesRequestedIpv6Admission` admitted the fast IPv4 provider into
+the only slot. `TestResizeFormationReservesRequestedIpv6` reproduced that loss
+through real resize for both auto and fixed profiles.
+`TestResizeRecoversRequestedIpv6AtStrictCapacity` observed a requested target
+of one but zero refill shortfall in a full five-slot mobile window. All pass
+after the fix; recovery also covers the one-slot fixed profile.
+`TestExpandIpv6ReservationFallsBackWhenSupplyEnds` verifies bounded IPv4
+fallback for unknown and known-empty IPv6 supply. The fixtures use distinct
+providers, actual enumeration/admission, explicit callback barriers and
+complete client joins, without timing-based candidate races. See
+[admission tests](../connect/ip_remote_multi_client_expand_lifecycle_test.go)
+and [formation/recovery tests](../connect/ip_remote_multi_client_ipv6_admission_test.go).
+
+### 14.2 P2: expire PQ proof independently of ordinary URL health
+
+**Failure.** Score pages and named-provider sets retained only positive PQ
+booleans. A nearly eight-hour-old positive could remain eligible for the
+300-minute export TTL, even while newer ordinary URL probes kept ordinary
+health fresh. Both strict PQ and modern-provider selection could consume it.
+
+**Fix.** Exported scores retain a PQ-specific deadline: the earlier of the
+positive's eight-hour limit and the snapshot's freshness limit (30 minutes by
+default). Modern proof additionally respects its seven-day evidence limit.
+Scored and named reads share one request clock and reject the exact deadline
+and later times. The existing named sets retain their Redis keys and types;
+same-slot `:proof_v1` hashes carry deadlines and are published atomically with
+membership. Readers batch membership and proof reads, require both, and do
+not query the database per provider. Missing old-snapshot deadlines fail
+closed after the ready marker; the intended pre-marker legacy behavior
+remains. See [export and named proof](model/network_client_score_capability.go),
+[score fields and legacy selection](model/network_client_location_model.go),
+[selector reads](model/network_client_location_select.go) and
+[prefilter](model/network_client_selection_prefilter.go).
+
+**Regression evidence.** `TestPostQuantumExportCannotOutlivePositive` failed
+on the baseline: an actual exported/gob-decoded positive survived its own
+eight-hour window despite a fresh ordinary URL result. It passes after the
+fix. `TestPostQuantumExportProofBoundaries` and
+`TestNamedPostQuantumExportProofBoundaries` pass exact before/at/after
+boundaries for positive age, snapshot age and modern age. The named tests
+publish and read actual Redis sets/hashes and cover missing/malformed proof,
+missing readiness and membership removed by an older writer. The public API
+matrix, `TestFindProviders2ExpiredPostQuantumInEveryDraw`, exercises legacy
+and selector modes, PQ and modern requirements, discovered and named draws,
+and force-count fallback. These tests live in
+[network_client_post_quantum_expiry_test.go](model/network_client_post_quantum_expiry_test.go).
+
+### 14.3 P2: bind URL proof to one live sending epoch
+
+**Failure.** `RequestWritten` saved a sticky sealed boolean, while completion
+read the recorder's latest key-exchange group. A classical request followed
+by a PQ seal could therefore report positive. A seal retained after live
+session demotion could also be mistaken for usable encryption. Reading only
+at `WroteRequest` additionally left a gap because that callback follows the
+request's writes.
+
+**Fix.** The opt-in recorder exposes the live ordinary initiator's client,
+epoch and group separately from sticky capability evidence. It uses the
+actual cipher gate and a weak session reference, so retired clients are not
+retained and normal unobserved traffic gains no packet-path recording. The
+URL observer requires the same live epoch at `GotConn`, `WroteRequest` and
+completion; later request callbacks cannot overwrite the first bound epoch.
+Rekey, demotion or missing session proof leaves PQ unmeasured. Classical
+negative evidence is retained in either transition direction. Opportunistic
+URL requests still proceed without a responder. See
+[live recorder](../connect/transfer_peer_capability_observation.go),
+[cipher-gate observation](../connect/transfer_encrypt.go),
+[request trace](qualityprobe/egresshealth/url_family.go) and
+[URL evidence](qualityprobe/fleetprobe/url_e2e.go).
+
+**Regression evidence.** On the baseline,
+`TestUrlProbeE2eObservationDoesNotCombineRequestAndRekey` reported a positive
+PQ result for a classical request followed by a PQ rekey. The corrected test
+passes. `TestPeerCapabilityRecorderBindsLiveSendingEpoch` drives actual epoch
+promotion and cipher withholding and passes, including role/companion/closed
+session exclusions. Additional observer tests cover a different PQ epoch,
+classical rekey, demotion before/after the request, an unchanged positive,
+and rekey between `GotConn` and `WroteRequest`. See
+[recorder tests](../connect/transfer_peer_capability_observation_test.go),
+[observer tests](qualityprobe/fleetprobe/url_e2e_test.go),
+[trace tests](qualityprobe/egresshealth/url_e2e_test.go) and
+[local URL tunnel tests](qualityprobe/providertunnel/post_quantum_url_turn_integration_test.go).
+
+### 14.4 P2: read original dualstack facets for forced B/D pools
+
+**Failure.** Forced `v4-only` selection read the IPv4 export facet for B/D
+classes. Export retains a downgraded provider in its original address-family
+facet, so dualstack providers downgraded for IPv6 (B), or IPv6 and UDP (D),
+were compatible but invisible to that read.
+
+**Fix.** Forced pool loading includes the original dualstack facet for all
+requested classes, then applies the existing class filter. The original IPv4
+facet is still needed for B/D; IPv6-only providers remain excluded. See
+[pool facets](model/network_client_location_select.go).
+
+**Regression evidence.** `TestLoadFindProviders2ExportedForcedDowngrades`
+failed against baseline for B, D and combined B/D pools because downgraded
+dualstack records were missing. It passes after the fix through actual score
+export, Redis payload reads and pool union. Its matrix includes original
+IPv4/dualstack/IPv6-only families and class combinations. See
+[export/read regression](model/network_client_location_select_read_test.go).
+
+### 14.5 Validation and scope
+
+The failing-before runs used immutable copies of the two original heads via
+Go overlays, so later edits could not change a build's baseline. The Connect
+overlay added only an inert end-of-resize test barrier; its original
+decisions remained unchanged. Server regression adapters used the old APIs
+for the original expiry and epoch-mixing assertions. The final deadline and
+live-session API tests add coverage beyond those baseline adapters; their
+compilation was not presented as a baseline behavioral failure.
+
+Completed checks:
+
+- Connect composed regressions: `TestExpandReservesRequestedIpv6Admission`,
+  `TestResizeFormationReservesRequestedIpv6`,
+  `TestResizeRecoversRequestedIpv6AtStrictCapacity`,
+  `TestExpandIpv6ReservationFallsBackWhenSupplyEnds`,
+  `TestPeerCapabilityRecorderBindsLiveSendingEpoch` and
+  `TestIpv6CapableShortfall` passed.
+- Connect nearby family/discovery/window/recorder tests passed, followed by
+  the adjacent `TestEnumerateDestinations*`,
+  `TestCandidatePathsRespectIpVersion`,
+  `TestFixedDestinationExitCarriesEveryVersion`, `TestMultiClientExpand*`,
+  `TestEvaluationBudgetDeadlineOwnership*`,
+  `TestEndToEndHandshakeRecordsItsKeyExchange`,
+  `TestPeerInitiatedHandshakeRecordsNoEvidence`, `TestClientHello*`,
+  `TestEncryptionOffRecordsOnlyAcknowledgementEvidence` and
+  `TestAcknowledgementsRecordReceiveWindowEvidence`.
+- Connect race check passed with selector
+  `Test(ExpandReservesRequestedIpv6Admission|Resize.*RequestedIpv6|ExpandIpv6ReservationFallsBackWhenSupplyEnds|PeerCapabilityRecorderBindsLiveSendingEpoch|PeerCapabilityRecorderConcurrent)`.
+- Focused server expiry/boundary, named-proof, forced-facet and initial URL
+  epoch regressions passed against disposable PostgreSQL/Redis fixtures.
+- Final exact server regressions passed:
+  - `TestFindProviders2ExpiredPostQuantumInEveryDraw` passed after its fixture
+    was corrected to publish the full modern-partition export (19.533 s).
+  - The final fleet observer and egress trace regressions passed, including
+    `TestUrlProbeE2eObservationRejectsRekeyDuringRequestWrite` and
+    `TestUrlProbePostQuantumTurnReadsItsSessionAtTheIpv4HttpsRequest`.
+  - `TestPostQuantumUrlTurnThroughALocalProvider` passed (24.335 s), proving
+    that the real seal path supplies the same live epoch before the request,
+    after its write and at completion.
+  - `TestPostQuantumUrlTurnWithoutAResponderCarriesTheSameRequest` passed
+    (34.695 s), preserving the opportunistic plaintext fallback.
+- `git diff --check` passed in both repositories.
+
+Broader server validation is delegated to the already-running server test
+runner at the user's request. This work's overlapping broader run was
+stopped deliberately, not treated as a test failure or a blocked check. No
+production services, deployment or shared launcher repairs were part of
+these fixes.

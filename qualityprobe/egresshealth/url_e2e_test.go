@@ -16,6 +16,7 @@ type e2eTestObserver struct {
 
 	stateLock    sync.Mutex
 	currentLeg   string
+	startedLegs  []string
 	writtenLegs  []string
 	httpsPassed  []bool
 	evidenceRead int
@@ -23,6 +24,13 @@ type e2eTestObserver struct {
 
 func (self *e2eTestObserver) SealWait() time.Duration {
 	return self.sealWait
+}
+
+// Records the leg before its request writes.
+func (self *e2eTestObserver) RequestStarted() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.startedLegs = append(self.startedLegs, self.currentLeg)
 }
 
 func (self *e2eTestObserver) RequestWritten() {
@@ -54,8 +62,13 @@ func (self *e2eTestLeg) RoundTrip(request *http.Request) (*http.Response, error)
 		defer self.observer.stateLock.Unlock()
 		self.observer.currentLeg = self.leg
 	}()
-	if trace := httptrace.ContextClientTrace(request.Context()); trace != nil && trace.WroteRequest != nil {
-		trace.WroteRequest(httptrace.WroteRequestInfo{})
+	if trace := httptrace.ContextClientTrace(request.Context()); trace != nil {
+		if trace.GotConn != nil {
+			trace.GotConn(httptrace.GotConnInfo{})
+		}
+		if trace.WroteRequest != nil {
+			trace.WroteRequest(httptrace.WroteRequestInfo{})
+		}
 	}
 	return self.inner.RoundTrip(request)
 }
@@ -101,6 +114,9 @@ func TestUrlProbePostQuantumTurnReadsItsSessionAtTheIpv4HttpsRequest(t *testing.
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		observer.stateLock.Lock()
+		if len(observer.startedLegs) != len(c.written) || (0 < len(c.written) && observer.startedLegs[0] != c.written[0]) {
+			t.Errorf("%s: the session was read before the writes of %v, want %v", c.name, observer.startedLegs, c.written)
+		}
 		if len(observer.writtenLegs) != len(c.written) || (0 < len(c.written) && observer.writtenLegs[0] != c.written[0]) {
 			t.Errorf("%s: the session was read at the writes of %v, want %v", c.name, observer.writtenLegs, c.written)
 		}

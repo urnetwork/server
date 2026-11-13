@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -78,11 +79,13 @@ type clientScoreCapability struct {
 	counts    ProviderEgressHealthCounts
 	hasCounts bool
 	// the newest post-quantum outcome in the window is positive (§12.4)
-	postQuantumPositive bool
+	postQuantumPositive   bool
+	postQuantumValidUntil time.Time
 	// post-quantum positive with the latest modern evidence advertising
 	// resizable windows: ClientScore.Modern once the post-quantum marker is
 	// set (§12.4)
-	postQuantumModern bool
+	postQuantumModern           bool
+	postQuantumModernValidUntil time.Time
 }
 
 // Classifies one decided provider of the export. A v6-only provider is never
@@ -98,10 +101,22 @@ func newClientScoreCapability(
 ) *clientScoreCapability {
 	counts, hasCounts := countFilter.healthCounts[clientId]
 	capability := &clientScoreCapability{
-		classification:      classifyProviderCapabilityOfFamilies(counts, ipFamilies, countFilter.now, egressSettings),
-		postQuantumPositive: counts.postQuantumPositive(),
+		classification: classifyProviderCapabilityOfFamilies(counts, ipFamilies, countFilter.now, egressSettings),
+	}
+	if counts.postQuantumPositive() {
+		capability.postQuantumValidUntil = counts.PostQuantumPositiveAt.Add(ProviderEgressHealthMaxAge)
+		if snapshotEnd := countFilter.healthWindowEnd.Add(egressSettings.PostQuantumMaxStaleness); snapshotEnd.Before(capability.postQuantumValidUntil) {
+			capability.postQuantumValidUntil = snapshotEnd
+		}
+		capability.postQuantumPositive = countFilter.now.Before(capability.postQuantumValidUntil)
 	}
 	capability.postQuantumModern = providerPostQuantumModern(capability.postQuantumPositive, countFilter.modernEvidence[clientId], countFilter.now)
+	if capability.postQuantumModern {
+		capability.postQuantumModernValidUntil = capability.postQuantumValidUntil
+		if windowEnd := countFilter.modernEvidence[clientId].MeasuredAt.Add(ProviderModernEvidenceMaxAge); windowEnd.Before(capability.postQuantumModernValidUntil) {
+			capability.postQuantumModernValidUntil = windowEnd
+		}
+	}
 	if capability.classification.downgraded() {
 		facts := countFilter.classifiedEgressFacts(clientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings, capability.classification)
 		capability.decision = decideProviderEgress(facts, egressTestEnabled)
@@ -109,6 +124,25 @@ func newClientScoreCapability(
 		capability.hasCounts = hasCounts
 	}
 	return capability
+}
+
+// Strict requests need a still-current positive, including on forced and
+// Online fallback draws. Ordinary URL freshness does not renew this proof.
+func (self *ClientScore) postQuantumCurrent(now time.Time) bool {
+	return self.PostQuantumPositive && now.Before(self.PostQuantumValidUntil)
+}
+
+// Stamps the same bounded proof on every strict/classified exported score.
+func (self *clientScoreCapability) setPostQuantum(score *ClientScore) {
+	score.PostQuantumPositive = self.postQuantumPositive
+	score.PostQuantumValidUntil = self.postQuantumValidUntil
+	score.PostQuantumModernValidUntil = self.postQuantumModernValidUntil
+}
+
+// A versioned hash beside each existing set keeps old readers and writers
+// compatible. Missing deadlines fail closed after the PQ ready marker.
+func providerPostQuantumProofKey(setKey string) string {
+	return setKey + ":proof_v1"
 }
 
 // Sets a classified copy's scores and tiers from the ranking index of its
@@ -180,6 +214,10 @@ func publishProviderCapabilitySets(ctx context.Context, clientIdCapabilities map
 		providerPostQuantumPositiveKey: {providerCapabilitySetReadyMember},
 		providerPostQuantumModernKey:   {providerCapabilitySetReadyMember},
 	}
+	keyProofs := map[string]map[string]any{
+		providerPostQuantumPositiveKey: {providerCapabilitySetReadyMember: "1"},
+		providerPostQuantumModernKey:   {providerCapabilitySetReadyMember: "1"},
+	}
 	for clientId, capability := range clientIdCapabilities {
 		member := clientId.String()
 		ipFamily := (&ClientScore{IpFamilies: clientIdIpFamilies[clientId]}).IpFamily()
@@ -191,9 +229,11 @@ func publishProviderCapabilitySets(ctx context.Context, clientIdCapabilities map
 		}
 		if capability.postQuantumPositive {
 			keyMembers[providerPostQuantumPositiveKey] = append(keyMembers[providerPostQuantumPositiveKey], member)
+			keyProofs[providerPostQuantumPositiveKey][member] = capability.postQuantumValidUntil.UnixNano()
 		}
 		if capability.postQuantumModern {
 			keyMembers[providerPostQuantumModernKey] = append(keyMembers[providerPostQuantumModernKey], member)
+			keyProofs[providerPostQuantumModernKey][member] = capability.postQuantumModernValidUntil.UnixNano()
 		}
 	}
 	var returnErr error
@@ -203,6 +243,12 @@ func publishProviderCapabilitySets(ctx context.Context, clientIdCapabilities map
 				pipe.Del(ctx, key)
 				pipe.SAdd(ctx, key, members...)
 				pipe.Expire(ctx, key, ttl)
+				if proofs, ok := keyProofs[key]; ok {
+					proofKey := providerPostQuantumProofKey(key)
+					pipe.Del(ctx, proofKey)
+					pipe.HSet(ctx, proofKey, proofs)
+					pipe.Expire(ctx, proofKey, ttl)
+				}
 				return nil
 			})
 			if err != nil {
@@ -211,6 +257,56 @@ func publishProviderCapabilitySets(ctx context.Context, clientIdCapabilities map
 		}
 	})
 	return returnErr
+}
+
+// Batches set membership and proof deadlines in one same-slot transaction.
+// Old exports keep their set format; absence, malformed or expired proof
+// refuses strict membership without a per-provider database read.
+func readProviderPostQuantumSet(ctx context.Context, key string, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
+	members := map[server.Id]bool{}
+	if len(clientIds) == 0 {
+		return members, nil
+	}
+	fields := make([]string, 1, len(clientIds)+1)
+	args := make([]any, 1, len(clientIds)+1)
+	fields[0], args[0] = providerCapabilitySetReadyMember, providerCapabilitySetReadyMember
+	for _, clientId := range clientIds {
+		member := clientId.String()
+		fields = append(fields, member)
+		args = append(args, member)
+	}
+	var returnErr error
+	server.Redis(ctx, func(r server.RedisClient) {
+		var membership *redis.BoolSliceCmd
+		var proof *redis.SliceCmd
+		_, returnErr = r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			membership = pipe.SMIsMember(ctx, key, args...)
+			proof = pipe.HMGet(ctx, providerPostQuantumProofKey(key), fields...)
+			return nil
+		})
+		if returnErr != nil {
+			return
+		}
+		present, deadlines := membership.Val(), proof.Val()
+		if len(present) != len(fields) || len(deadlines) != len(fields) {
+			returnErr = fmt.Errorf("incomplete %s proof response", key)
+			return
+		}
+		if !present[0] || deadlines[0] != "1" {
+			return
+		}
+		for i, clientId := range clientIds {
+			value, ok := deadlines[i+1].(string)
+			if !present[i+1] || !ok {
+				continue
+			}
+			deadline, err := strconv.ParseInt(value, 10, 64)
+			if err == nil && now.Before(time.Unix(0, deadline)) {
+				members[clientId] = true
+			}
+		}
+	})
+	return members, returnErr
 }
 
 // Which of clientIds a published set holds; ready false when the set has no

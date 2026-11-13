@@ -2,6 +2,7 @@ package model
 
 import (
 	"slices"
+	"time"
 
 	"github.com/urnetwork/connect"
 
@@ -28,6 +29,8 @@ type clientScoreRequestFilter struct {
 	// refuses every provider without a positive signal (§12.4), in the
 	// same capability cell
 	requirePostQuantumPositive bool
+	// One instant shared by every draw and named-provider check of the request.
+	now time.Time
 }
 
 // The nonzero values match the existing request-filter observation cells;
@@ -50,8 +53,11 @@ func (self clientScoreRequestFilter) rejection(clientId server.Id, score *Client
 	if self.requireModern && !score.Modern {
 		return 4
 	}
-	if self.requirePostQuantumPositive && !score.PostQuantumPositive {
-		return 4
+	if self.requirePostQuantumPositive {
+		if !score.postQuantumCurrent(self.now) ||
+			(self.requireModern && !self.now.Before(score.PostQuantumModernValidUntil)) {
+			return 4
+		}
 	}
 	return 0
 }

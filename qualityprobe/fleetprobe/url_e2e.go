@@ -78,8 +78,10 @@ type urlProbeE2eObservation struct {
 	now          func() time.Time
 
 	stateLock       sync.Mutex
+	requestStarted  bool
 	requestWritten  bool
 	sealedAtRequest bool
+	requestSession  connect.PeerCapabilitySession
 }
 
 // Implements egresshealth.UrlProbeE2eObserver.
@@ -88,27 +90,52 @@ func (self *urlProbeE2eObservation) SealWait() time.Duration {
 }
 
 // Implements egresshealth.UrlProbeE2eObserver.
+func (self *urlProbeE2eObservation) RequestStarted() {
+	observation, found := self.read()
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !self.requestStarted {
+		self.requestStarted = true
+		if found {
+			self.requestSession = observation.Session
+		}
+	}
+}
+
+// Implements egresshealth.UrlProbeE2eObserver.
 func (self *urlProbeE2eObservation) RequestWritten() {
 	observation, found := self.read()
-	sealed := found && observation.E2eSealed
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if !self.requestWritten {
 		self.requestWritten = true
-		self.sealedAtRequest = sealed
+		self.sealedAtRequest = found && self.requestSession.EpochId != (connect.Id{}) && self.requestSession == observation.Session
 	}
 }
 
 // Implements egresshealth.UrlProbeE2eObserver.
 func (self *urlProbeE2eObservation) Evidence(httpsPassed bool) *egresshealth.UrlProbeE2eEvidence {
 	observation, found := self.read()
+	var requestSession connect.PeerCapabilitySession
 	sealedAtRequest := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		requestSession = self.requestSession
 		sealedAtRequest = self.sealedAtRequest
 	}()
-	return readUrlProbeE2e(observation, found, self.now(), sealedAtRequest, httpsPassed, self.unmeasurable(), self.settings)
+	sameSession := sealedAtRequest && requestSession == observation.Session
+	// The request's group remains its own evidence even if a later epoch
+	// sealed. A live PQ proof additionally requires that exact epoch at the
+	// end, so demotion, replacement and rekey cannot borrow a sticky seal.
+	finalClassical := (observation.E2eNegotiated || observation.E2eSealed) && !observation.PostQuantum
+	if requestSession.EpochId != (connect.Id{}) && !finalClassical {
+		observation.KeyExchange = requestSession.KeyExchange
+		observation.PostQuantum = requestSession.PostQuantum
+		observation.E2eNegotiated = true
+		observation.E2eSealed = true
+	}
+	return readUrlProbeE2e(observation, found, self.now(), sameSession, httpsPassed, self.unmeasurable(), self.settings)
 }
 
 // The e2e evidence of one turn's recorder at now, nil when it recorded

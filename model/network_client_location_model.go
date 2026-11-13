@@ -5346,6 +5346,11 @@ type ClientScore struct {
 	// requests read it once client_score_post_quantum_v1_ready is set; the
 	// zero value, as every older entry decodes, is not post-quantum.
 	PostQuantumPositive bool
+	// The positive's own eight-hour deadline, capped by snapshot freshness.
+	// Zero from an older export is not current positive authority.
+	PostQuantumValidUntil time.Time
+	// The positive deadline also capped by the window evidence's lifetime.
+	PostQuantumModernValidUntil time.Time
 
 	// Performance-only score for sampling weights. It never changes admission.
 	minimumScores map[string]int
@@ -5961,7 +5966,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			return
 		}
 		clientScore.CapabilityDowngrades = capability.classification.downgrades
-		clientScore.PostQuantumPositive = capability.postQuantumPositive
+		capability.setPostQuantum(clientScore)
 		if capability.classification.downgraded() {
 			// the classified copy, for the capability facets only: the
 			// classified decision's buckets and weights, the same
@@ -6566,6 +6571,7 @@ func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
+	requestTime := server.NowUtc()
 	recordFindProviders2PostQuantumRequest(findProviders2)
 	// a request that names capabilities is selector mode (FP2-PROTOCOL.md
 	// §6.2); every other request is answered below exactly as before
@@ -6786,6 +6792,7 @@ func FindProviders2(
 				excludedClientIds:          excludeFinalDestinations(),
 				requireModern:              findProviders2.RequireModernProvider,
 				requirePostQuantumPositive: postQuantumReady,
+				now:                        requestTime,
 			}
 			hardExcludedClientIds := map[server.Id]bool{}
 			qualityExcludedClientIds := map[server.Id]bool{}
@@ -6818,7 +6825,7 @@ func FindProviders2(
 			// rank_measured_first is off or for force_minimum
 			// (network_client_selection_evidence.go). The evidence rank and the
 			// neutral URL weight cannot disagree about an expiry.
-			filterTime := server.NowUtc()
+			filterTime := requestTime
 			evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, filterTime)
 			// Draws up to n of the candidates by their weight in `mode` and bands
 			// the draw by their tier in `mode`, each facet in the request's
@@ -6894,7 +6901,7 @@ func FindProviders2(
 				// encryption, so the reads below are only of declaring providers.
 				// An undeclared candidate is read once and leaves every draw.
 				if findProviders2.PostQuantumEncryption {
-					capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, scores, candidateClientIds)
+					capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, scores, candidateClientIds, requestTime)
 					if err != nil {
 						return err
 					}
@@ -7592,7 +7599,7 @@ func FindProviders2(
 		// a named provider that is not modern is not answered to a request
 		// that requires modern providers, as in discovery (FP2-MODERN.md)
 		if findProviders2.RequireModernProvider {
-			modernClientIds, err := readFindProviders2NamedModern(session, postQuantumReady, specClientIds, server.NowUtc())
+			modernClientIds, err := readFindProviders2NamedModern(session, postQuantumReady, specClientIds, requestTime)
 			if err != nil {
 				return nil, err
 			}
@@ -7605,7 +7612,7 @@ func FindProviders2(
 		// a named provider that did not declare post-quantum encryption is
 		// not answered to a request that requires it, as in discovery
 		if findProviders2.PostQuantumEncryption {
-			capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, nil, specClientIds)
+			capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, nil, specClientIds, requestTime)
 			if err != nil {
 				return nil, err
 			}
