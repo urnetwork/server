@@ -148,13 +148,40 @@
     "source_manifest_sha256": "b4f079ab837696fabfb44370e6fda79db7a1b3a4f3a396e138fcb0481962647c",
     "new_causal_cases": 15,
     "adjacent_cases": 61,
-    "qualified_or_deployed": false,
-    "normal_compile": "Resource-stopped: cache growth 613072896 bytes exceeded the predeclared 536870912-byte bound. No binary or native Go exit status was produced; zero tests ran. Wrapper EXIT 0 is not success; manager TERM and guard 2 are preserved.",
+    "qualified_or_deployed": true,
+    "deployed": false,
+    "initial_normal_compile": "Resource-stopped: cache growth 613072896 bytes exceeded the predeclared 536870912-byte bound. No binary or native Go exit status was produced; zero tests ran. Wrapper EXIT 0 is not success; manager TERM and guard 2 are preserved.",
     "durable_resource_failure": "/var/lib/urnetwork/competition-idle-heartbeat-normal-cache-stop-20261112.mqAX8YSx",
     "durable_failure_manifest_sha256": "eb25526e7b36ff69349c00e698ab303219137de7258d1385235f5a4954306233",
     "source_and_dependencies_unchanged": true,
     "historical_old_run_control_source_sha256": "f0b03983dbfe1fa7a0fa5b0a51552d03cd809655a9af39662f18a8c76271f9d8",
-    "historical_control_executed": false,
+    "historical_control_executed": true,
+    "production_historical_control": {
+      "raw_test_and_actor_exit": 1,
+      "guard_exit": 0,
+      "intended_causal_assertion_verified": true,
+      "evidence": "/dev/shm/competition-idle-heartbeat-oldrun-control-20261113.jXuUIR24",
+      "json_sha256": "d0ebbecf27ed3d53ec43bb1a6cee618f62e7ea118de906947f40782902948b77",
+      "durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-oldrun-causal-red-20261113.fy3lpawR",
+      "manifest_sha256": "ea14637ea50631fe8b5fa4e5d5d694cd915c5fb0aa27a91da3e0ea1de70129b2",
+      "source_dependency_and_capture_checks_passed": true
+    },
+    "fixture_historical_control": {
+      "raw_test_and_actor_exit": 1,
+      "guard_exit": 0,
+      "intended_causal_assertion_verified": true,
+      "json_sha256": "cae592fd0caeed54ebbb5cf8e998866624c34457309fd525e23c57cc6661f2b4",
+      "durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-oldwatch-causal-red-20261113.Nn30gWax",
+      "manifest_sha256": "7c26ad0be8069767348b53e1c20a043cd3230dddb2faa1f8cefd9faf368b45e7"
+    },
+    "narrow_main_candidate": {
+      "commit": "ff6fa769d259956f6a6584b58ddaccaa289ea64a",
+      "captured_main_base": "6ced7799085bbc7a97643b07780185cf093c8849",
+      "production_blobs_equal_qualified_source": true,
+      "test_blobs_equal_corrected_fixture": true,
+      "schema_api_module_changes": false,
+      "merged_to_main_or_deployed": false
+    },
     "warm_compile_result": "Compiled successfully; original smoke exposed a test-cleanup cancellation fixture defect. Failure preserved; production code unchanged by the correction.",
     "corrected_fixture_source_sha256": "252a3f26dde8affe48a7116a9e28153a09c8f48a3913479e5bc68aa4a6cc0f9a",
     "corrected_normal_binary_sha256": "63650e18d67da95301548688c9016a6c94cde4f782f7963ca8eadd1b829dca35",
@@ -163,7 +190,36 @@
     "normal_failures_or_skips": 0,
     "normal_durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-normal243-green-20261113.KlVhxljU",
     "normal_manifest_sha256": "d8def8e2d36289cff01f3ecd4c7734c4849a0c049e4a861489c7668d06e67d39",
-    "race_and_historical_controls_complete": false
+    "race_executions_passed": 243,
+    "race_failures_or_skips": 0,
+    "race_evidence": "/dev/shm/competition-idle-heartbeat-fixture-race81-20261113.Puhsd0Gr",
+    "race_durable_evidence": "/var/lib/urnetwork/competition-idle-heartbeat-race243-green-20261113.a1egzy3W",
+    "race_manifest_sha256": "e72f68b02e8f9678f631633c5359185ed0864e17387525f3fda0336f90b639ac",
+    "race_json_sha256": "180c6cd9353d6830c02f078d3a9b309b28fa3eb79c5760068d0b2df57c45f328",
+    "race_actor_guard_and_capture_exit_zero": true,
+    "race_and_historical_controls_complete": true,
+    "worker_build_only": {
+      "recipe_sha256": "b6e193ff12de4e0bd62ee507a943989e3c0b6b75147e211e6f5e98393fc60285",
+      "evidence": "/dev/shm/competition-idle-heartbeat-worker-buildonly-20261113.e70Wpr0v",
+      "last_reported_pid": 1257450,
+      "last_reported_invocation_id": "63455d40820e441ba4ad713203e49c8d",
+      "terminal_result_verified": false,
+      "target_executed_installed_or_activated": false
+    },
+    "race_compiler": {
+      "unit": "competition-guard-independent-qa-20261112.service",
+      "pid": 1172372,
+      "invocation_id": "5fa580592a4f4bf5ad6fdcdf1e6d4857",
+      "evidence": "/dev/shm/competition-idle-heartbeat-fixture-race-prepare-20261113.TMMnZ46k",
+      "last_verified_live_at": "2026-11-13T00:24:12Z",
+      "compiler_only_cache_budget_bytes": 1073741824,
+      "runtime_cache_budget_unchanged_bytes": 134217728,
+      "completed_or_credited": true,
+      "actual_go_exit": 0,
+      "duration_seconds": 580,
+      "binary_sha256": "741660445b7b16e32983fa685c190fe08c1af70f0076c42a25576eeffd819951",
+      "oom_or_kills": 0
+    }
   },
   "private_reviews": {
     "members": [
