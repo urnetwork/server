@@ -896,7 +896,9 @@ Connect asks with it only where a host sets
 `MultiClientSettings.NormalWindowSelectors` (§7.4), and connect builds no
 limited window beside such windows. UDP flows still race only exits labelled
 `dualproto` (§7.2), so a hosted window whose exits are all `tcp` answers UDP
-as unroutable (§7.7).
+as unroutable (§7.7). Connect then brings a `dualproto` exit in, and a hosted
+window sized to one exit lists a `dualproto` provider first when one ranks
+about as well (§7.7, windows that ask for `any`).
 
 **How D7.2 and D11.1 combine.** The decided order A → B → C → D still holds:
 - `dualstack` comes before `ipv4` for the IPv6 need;
@@ -1219,6 +1221,32 @@ state changes a label between FP2 answers.
   selected normal windows have formed and neither they nor the limited window
   holds a client that can carry the flow. A fixed profile's inactive window
   never keeps UDP routable.
+- **Windows that ask for `any`** (the hosted proxies, D14;
+  connect/ip_remote_multi_client_udp_swap.go). Nothing in their requests
+  prefers `dualproto`, so connect does two things, and nothing else changes:
+  - *The UDP swap.* A UDP flow answered as unroutable opens the UDP demand of
+    the first window it would use that asks for `any` (quality in auto), for
+    `UdpSwapDemandHold` (5 minutes), each such flow restarting it. While the
+    demand is open and the window holds no `dualproto` exit, the window has a
+    UDP shortfall of one, handled like the IPv6 family swap's shortfall (IPV6.md
+    B2): its target rises within its max, and discovery leads with one
+    request for `select.protocol: dualproto`. At capacity, the enumerator
+    first probes for a `dualproto` candidate, and only then does a flowless
+    `tcp` exit give up its slot. A strict window removes that exit, and a
+    non-strict one warns it out of selection. The swap takes one victim at a
+    time and does nothing while the backend is degraded. An answer with no
+    `dualproto` provider, or two failed candidates in a row, starves it for
+    60 s. The swap never takes a slot that carries flows, and it never
+    replaces the user's Fixed IP.
+  - *The single-exit preference.* A window that asks for `any` and is sized
+    to one exit (a single-exit profile or the Fixed IP) lists first a
+    provider labelled `dualproto` when that provider ranks about as well as
+    the best listed one. That means no less qualified, found at the same or a
+    nearer location match, and a tier at most `SingleExitDualprotoTierBand`
+    (0, so the same tier) above the best's. Hosted windows evaluate one
+    candidate per pass (server/proxy `defaultHostedEvaluationPoolMultiple`),
+    so the first provider listed takes the slot. With no such provider, the
+    listing keeps the answer's order.
 
 ### 7.8 sdk and apps
 
