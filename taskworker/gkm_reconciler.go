@@ -17,7 +17,8 @@ package taskworker
 // key-event subscriber and loads that network, and the reconciler is told once the new state is installed, so the
 // pass a hint wakes reads that state. The cache is this process's one gate cache (C-09): another job here that needs
 // §8.9's state reads this one, never a second, as evs's shred start and reconciler do once it is built
-// (evs_jobs_lifecycle.go's installEvsDeletionSource). A host whose Redis takes no such watch gives no state, and the
+// (evs_jobs_lifecycle.go's installEvsDeletionSource), and §21.6's published names do (tls_published_names.go's
+// installTlsPublishedNamesSource, QD-770). A host whose Redis takes no such watch gives no state, and the
 // runtime starts no reconciler; the sweep's name stays bound, so a run queued anyway fails and waits on server/task's
 // backoff rather than find no function.
 //
@@ -48,7 +49,7 @@ var gkmReconcilerStateSource = gkmReconcilerStateFromHost
 
 // gkm's authorization state over the process's gate cache on host, which needs Redis and Blobs: the cache follows
 // {acl_<networkId>}v on host's subscriber and lives until ctx ends, the runtime's, and is evs's lifecycle jobs'
-// projection for as long.
+// projection and the published-names source's states for as long.
 func gkmReconcilerStateFromHost(ctx context.Context, host *sidecar.ServiceHost) (gkmservice.GkmReconcilerState, error) {
 	if host == nil || host.Redis == nil || host.Blobs == nil {
 		return nil, errors.New("gkm's authorization state needs a host with Redis and Blobs")
@@ -66,6 +67,8 @@ func gkmReconcilerStateFromHost(ctx context.Context, host *sidecar.ServiceHost) 
 	context.AfterFunc(ctx, removeWatch)
 	// the one cache is evs's shred start's and reconciler's projection too, for the runtime's life (C-09; QD-743)
 	context.AfterFunc(ctx, installEvsDeletionSource(cache))
+	// and the states §21.6's published names are read from (QD-770)
+	context.AfterFunc(ctx, installTlsPublishedNamesSource(cache))
 	return gkmservice.NewAclGkmReconcilerState(cache), nil
 }
 
