@@ -31,7 +31,8 @@ package model
 //
 // The schedule's clock is the twin's fake clock, or, on a real Redis, real time plus what the schedule
 // advanced: a real master's TIME does not move with it, so a held apply is aged through the writers' test
-// hook and a pass is told its start.
+// hook and a pass is told its start. The primary's clock does not move with it either, so each row a
+// schedule commits is moved on to the schedule's clock before that clock moves or a pass runs (settle).
 
 import (
 	"bytes"
@@ -645,7 +646,17 @@ func newTestTokenRedisGround(t testing.TB, ctx context.Context) *testTokenGround
 			self.cluster = harness
 		}
 	}
-	for _, slot := range self.slots {
+	sentinelSlots := self.slots
+	if self.cluster != nil {
+		// the harness's cluster is the schedule's alone: every slot's sentinel names its master, as after a
+		// full reconcile, and a pass reconciles whatever a restart leaves found
+		self.passSettings.ReconcileSlotCount = DefaultSidecarPushTokenPassSettings().ReconcileSlotCount
+		sentinelSlots = make([]int, server.RedisSlotCount)
+		for slot := range sentinelSlots {
+			sentinelSlots[slot] = slot
+		}
+	}
+	for _, slot := range sentinelSlots {
 		self.setSentinel(slot, self.masterOf(masters, slot).RunId)
 	}
 	self.passState = &PushTokenPassState{LastCompletedStartTime: self.now()}
@@ -775,16 +786,17 @@ func (self *testTokenGround) settle() {
 	})
 }
 
-// A new client id in the n-th of the schedule's slots.
-func (self *testTokenGround) clientInSlot(n int) server.Id {
-	return testPushTokenClientInSlot(self.slots[n])
-}
-
 // A new active client of a new network, with no row, in the n-th of the schedule's slots.
 func (self *testTokenGround) newClient(n int) server.Id {
 	self.t.Helper()
+	return self.newClientInSlot(self.slots[n])
+}
+
+// A new active client of a new network, with no row, whose keys sit in slot.
+func (self *testTokenGround) newClientInSlot(slot int) server.Id {
+	self.t.Helper()
 	networkId := server.NewId()
-	clientId := self.clientInSlot(n)
+	clientId := testPushTokenClientInSlot(slot)
 	Testing_CreateNetwork(self.ctx, networkId, testPushTokenNetworkName(networkId), server.NewId())
 	Testing_CreateDevice(self.ctx, networkId, server.NewId(), clientId, "", "")
 	return clientId
@@ -943,6 +955,38 @@ func (self *testTokenGround) restart(dump *testTokenDump) {
 		held = dump.held
 	}
 	self.cluster.kill(master, held)
+	self.cluster.start(master)
+}
+
+// The twin's other master, which serves none of the schedule's slots.
+const testTokenTwinOtherMaster = "192.0.2.10:7000"
+
+// A slot that another master serves than the schedule's slots': one of the twin's other master's, or the
+// cluster's highest.
+func (self *testTokenGround) otherSlot() int {
+	self.t.Helper()
+	if self.twin != nil {
+		return self.twin.master(testTokenTwinOtherMaster).Slots[0]
+	}
+	return server.RedisSlotCount - 1
+}
+
+// The master serving otherSlot is killed and restarts empty, with a new run_id.
+func (self *testTokenGround) restartOther() {
+	self.t.Helper()
+	if self.twin != nil {
+		master := self.twin.master(testTokenTwinOtherMaster)
+		self.twin.restart(master.Address, master.RunId+"+", nil)
+		return
+	}
+	if self.cluster == nil {
+		self.t.Fatalf("%s: no master to restart", self.name)
+	}
+	master := self.cluster.masterOf(self.otherSlot())
+	if master == self.cluster.masterOf(self.slots[0]) {
+		self.t.Fatalf("%s: one master serves slots %d and %d", self.name, self.slots[0], self.otherSlot())
+	}
+	self.cluster.kill(master, nil)
 	self.cluster.start(master)
 }
 
