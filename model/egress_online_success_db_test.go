@@ -41,10 +41,13 @@ func assertOnlineSuccessTestAnswer(t testing.TB, where string, providers []*Find
 // and no count. Unprobed and warming providers stay online. The rule is no
 // hard exclusion: force_minimum with quality or speed and an explicit client
 // id still reach the provider, and its URL probes continue. force_minimum
-// with online changes nothing, so that answer leaves the provider out.
+// with online changes nothing, so that answer leaves the provider out. The
+// country floor is off: two natives are too few to keep it from admitting
+// the provider this test holds below the bar.
 func TestOnlineUrlSuccessRuleLeavesEveryBucketAndCount(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		egressTestCountryFloorOff(t)
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
 
 		// two of the four measured providers in us have a success, so the
@@ -109,10 +112,12 @@ func TestOnlineUrlSuccessRuleLeavesEveryBucketAndCount(t *testing.T) {
 }
 
 // The first success brings the provider back on the next pass, to Online and
-// the counts, however many failures it follows.
+// the counts, however many failures it follows. The country floor is off, as
+// one native is too few to keep it from admitting the provider before.
 func TestOnlineUrlSuccessRuleOneSuccessRestoresTheProvider(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		egressTestCountryFloorOff(t)
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
 
 		healthy := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
@@ -139,10 +144,13 @@ func TestOnlineUrlSuccessRuleOneSuccessRestoresTheProvider(t *testing.T) {
 
 // The country guard keeps the dead providers of a country where the probe
 // fails for most providers, while a country where the probe works loses its
-// own. The kill switch returns every dead provider to Online.
+// own. The kill switch returns every dead provider to Online. The country
+// floor is off: us's one native is too few to keep it from admitting the
+// dead provider this test holds out.
 func TestOnlineUrlSuccessCountryGuardAndKillSwitch(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		egressTestCountryFloorOff(t)
 		usCity := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
 		vnCity := egressTestCity(ctx, "Hanoi", "Hanoi", "Vietnam", "vn")
 
@@ -169,7 +177,7 @@ func TestOnlineUrlSuccessCountryGuardAndKillSwitch(t *testing.T) {
 		connect.AssertEqual(t, egressTestLocationCount(ctx, t, vnCity), 5)
 		connect.AssertEqual(t, CountProviderEgress(ctx).ReasonCounts["no_success"], int64(1))
 
-		t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_requires_url_success: false\n")))
+		t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_requires_url_success: false\n"+egressTestCountryFloorOffConfig)))
 		egressTestPasses(ctx, t)
 		assertOnlineSuccessTestAnswer(t, "us disabled", egressTestFind(ctx, t, egressTestLocationSpec(usCity), RankModeOnline, 10, false, server.NewId()),
 			[]*egressTestProvider{usHealthy, usDead}, nil)
