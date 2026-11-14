@@ -76,13 +76,14 @@ func bindCompetitionDistributedReevaluationRuntime(settings *Settings, proof mod
 func validateCompetitionDistributedRecoveryRequest(settings *Settings, principal *Principal, request model.CompetitionJobReevaluationRequest) error {
 	a := request.Authorization
 	d := a.Distributed
+	patchRetryPrincipal := settings != nil && competitionOperatorPatchRetryPrincipalAllows(settings, principal, a)
 	if settings == nil || !settings.AutomationPolicy.Enabled ||
 		(!competitionPrincipalAllows(principal, competitionSchedulerRole, settings.CompetitionId, settings.AutomationPolicy) &&
-			!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy)) {
+			!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) && !patchRetryPrincipal) {
 		return ErrAutomationDisabled
 	}
 	if a.IncidentClass == model.CompetitionJobReevaluationOperatorRequestedPatchRetry &&
-		!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) {
+		!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) && !patchRetryPrincipal {
 		return ErrAutomationDisabled
 	}
 	if a.Schema != 2 || !competitionDistributedRecoveryRequestClassAllowed(a) || d == nil || d.Schema != 1 ||

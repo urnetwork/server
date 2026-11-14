@@ -41,7 +41,7 @@ func newCompetitionDistributedRecoveryPgFixture(t *testing.T, tb testing.TB) *co
 
 // An early generic executor failure is created through the real original claim
 // and completion paths; it is never rewritten from an exhausted-budget row.
-func newCompetitionDistributedRecoveryPgFixtureWithPatchRetry(t *testing.T, tb testing.TB, patchRetry bool) *competitionDistributedRecoveryPgFixture {
+func newCompetitionDistributedRecoveryPgFixtureWithPatchRetry(t *testing.T, tb testing.TB, patchRetry bool, environment ...string) *competitionDistributedRecoveryPgFixture {
 	tb.Helper()
 	ctx := tb.Context()
 	var databaseNow time.Time
@@ -56,7 +56,7 @@ func newCompetitionDistributedRecoveryPgFixtureWithPatchRetry(t *testing.T, tb t
 	if patchRetry {
 		originalAt = databaseNow.Add(-time.Minute)
 	}
-	base := newCompetitionPreparedAnnouncedCompletionFixtureAt(t, tb, originalAt)
+	base := newCompetitionPreparedAnnouncedCompletionFixtureAt(t, tb, originalAt, environment...)
 	fixture := &competitionDistributedRecoveryPgFixture{competitionDistributedPgFixture: base}
 	selected := base.selected(0)
 	job, err := base.store.Claim(ctx, selected, "synthetic-original-worker", testWorkerImageDigest())

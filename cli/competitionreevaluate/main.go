@@ -277,11 +277,16 @@ func runRecovery(args []string, output io.Writer) error {
 	runtimePath := flags.String("runtime", "", "root-owned runtime qualification JSON")
 	runtimeSha := flags.String("runtime-file-sha256", "", "exact runtime qualification file digest")
 	tokenPath := flags.String("token-file", "", "root-owned scoped control token")
+	credentialPath := flags.String("credential-registration", "", "optional root-owned exact patch-retry credential registration")
+	credentialSha := flags.String("credential-registration-sha256", "", "exact local credential registration file digest")
 	idempotencyKey := flags.String("idempotency-key", "", "single-use operator request identity")
 	coordinatorPath := flags.String("distributed-coordinator", "", "root-pinned distributed coordinator profile for native closure observations only")
 	coordinatorSha256 := flags.String("distributed-coordinator-sha256", "", "exact distributed coordinator profile digest")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || len(*authSha) != 64 || len(*runtimeSha) != 64 || *idempotencyKey == "" {
 		return errors.New("reevaluation arguments rejected")
+	}
+	if (*credentialPath == "") != (*credentialSha == "") || *credentialSha != "" && len(*credentialSha) != 64 {
+		return errors.New("local credential registration arguments rejected")
 	}
 	if server.RequireEnv() != "main" {
 		return errors.New("reevaluation requires the main control environment")
@@ -313,6 +318,16 @@ func runRecovery(args []string, output io.Writer) error {
 	if err != nil {
 		return errors.New("competition configuration unavailable")
 	}
+	if *credentialPath != "" {
+		content, err := readRecoveryFile(*credentialPath, *credentialSha, limits.DocumentBytes)
+		if err != nil {
+			return err
+		}
+		settings, err = bindRecoveryCredential(settings, content, auth, limits, time.Now())
+		if err != nil {
+			return err
+		}
+	}
 	request := &http.Request{Header: http.Header{}}
 	request.Header.Set("Authorization", "Bearer "+string(token))
 	principal, ok := controller.Authenticate(request, settings)
@@ -336,7 +351,7 @@ func runRecovery(args []string, output io.Writer) error {
 	}
 	parent, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel, err := newRecoveryControlContext(parent, limits, time.Now())
+	ctx, cancel, err := newRecoveryCredentialContext(parent, limits, time.Now(), principal)
 	if err != nil {
 		return errors.New("recovery control context unavailable")
 	}
