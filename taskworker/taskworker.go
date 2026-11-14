@@ -246,6 +246,10 @@ func initTaskSchedule(ctx context.Context) {
 		// §20.9's Team periods written at their 00:00:00 UTC anchors; not
 		// scheduled without MG6
 		controller.ScheduleRefreshTeamTransferBalances(clientSession, tx)
+		// §20.9's Meters: Team's meter rows sent to Stripe, and the daily audit
+		// of what was sent against Stripe's summaries; not scheduled without MG6
+		work.ScheduleReportStripeMeters(clientSession, tx)
+		work.ScheduleAuditStripeMeters(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -783,6 +787,16 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.RefreshTeamTransferBalances,
 			controller.RefreshTeamTransferBalancesPost,
+		),
+		// §20.9's Meters (controller.ReportStripeMeters,
+		// controller.AuditStripeMeters)
+		task.NewTaskTargetWithPost(
+			work.ReportStripeMeters,
+			work.ReportStripeMetersPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AuditStripeMeters,
+			work.AuditStripeMetersPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,

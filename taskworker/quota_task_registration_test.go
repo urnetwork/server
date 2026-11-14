@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-// The spent pass, the usage jobs, the service debit flush and the Team grant job are sidecar billing, so only the
+// The spent pass, the usage jobs, the service debit flush, the Team grant job and Team's meter jobs are sidecar billing, so only the
 // production registry claims them, as the sidecar engines' jobs: a subnet operator hosts no sidecar
 // service, so it marks no network spent, journals no service debit and has no Team.
 func TestQuotaTasksAreProductionOnly(t *testing.T) {
@@ -19,6 +19,8 @@ func TestQuotaTasksAreProductionOnly(t *testing.T) {
 		task.NewTaskTarget(work.RemoveExpiredServiceUsage).TargetFunctionName(),
 		task.NewTaskTarget(work.FlushServiceDebits).TargetFunctionName(),
 		task.NewTaskTarget(controller.RefreshTeamTransferBalances).TargetFunctionName(),
+		task.NewTaskTarget(work.ReportStripeMeters).TargetFunctionName(),
+		task.NewTaskTarget(work.AuditStripeMeters).TargetFunctionName(),
 	}
 	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {
 		worker, err := InitTaskWorkerForProfile(t.Context(), nil, profile)

@@ -4,7 +4,9 @@ package work
 // by its cursor (CODESTYLE's bound work examined), production-only as the other quota chains are:
 //
 //	RollupServiceUsage          after each UTC day closes: each network's stored bytes for that day
-//	                            (model.RollupServiceUsage)
+//	                            (model.RollupServiceUsage), then, once MG6 links, each live Team's seats,
+//	                            overage and meter rows for that day (model.RollupTeamServiceUsage), which
+//	                            read the stored bytes the first phase fixed
 //	ReconcileSidecarCounters    nightly: storage_over, the connected sets and the spent marks
 //	                            (model.ReconcileSidecarCounters)
 //	RemoveExpiredServiceUsage   hourly: network_service_usage past 13 months and service_usage_batch past
@@ -31,23 +33,27 @@ type QuotaUsageWorkSettings struct {
 	ReconcileOffset time.Duration
 	// How often the retention pass runs once it finds nothing past its ttl: 1 h.
 	RetentionInterval time.Duration
-	// Networks a rollup or reconcile run takes, and rows a retention run deletes from each table.
-	RollupPageCount    int
-	ReconcilePageCount int
-	RetentionPageCount int
+	// Networks a rollup or reconcile run takes, Teams a rollup's Team phase takes, and rows a retention
+	// run deletes from each table.
+	RollupPageCount     int
+	TeamRollupPageCount int
+	ReconcilePageCount  int
+	RetentionPageCount  int
 	// Each run's task max time.
 	MaxTime time.Duration
 }
 
 func DefaultQuotaUsageWorkSettings() *QuotaUsageWorkSettings {
 	return &QuotaUsageWorkSettings{
-		RollupDelay:        10 * time.Minute,
-		ReconcileOffset:    2 * time.Hour,
-		RetentionInterval:  time.Hour,
-		RollupPageCount:    5000,
-		ReconcilePageCount: 500,
-		RetentionPageCount: 10000,
-		MaxTime:            5 * time.Minute,
+		RollupDelay:       10 * time.Minute,
+		ReconcileOffset:   2 * time.Hour,
+		RetentionInterval: time.Hour,
+		RollupPageCount:   5000,
+		// a Team's day is a few reads and seven writes in its own transaction
+		TeamRollupPageCount: 200,
+		ReconcilePageCount:  500,
+		RetentionPageCount:  10000,
+		MaxTime:             5 * time.Minute,
 	}
 }
 
@@ -66,6 +72,8 @@ type RollupServiceUsageArgs struct {
 	UsageDay time.Time `json:"usage_day"`
 	// Where the run starts; nil for the first network.
 	AfterNetworkId *server.Id `json:"after_network_id,omitempty"`
+	// The Team phase, which runs once every network's stored bytes for the day are written.
+	Team bool `json:"team,omitempty"`
 }
 
 type RollupServiceUsageResult struct {
@@ -98,7 +106,25 @@ func RollupServiceUsage(args *RollupServiceUsageArgs, clientSession *session.Cli
 	if !server.SidecarMg2Linked() {
 		return &RollupServiceUsageResult{}, nil
 	}
-	result, err := model.RollupServiceUsage(clientSession.Ctx, args.UsageDay, args.AfterNetworkId, DefaultQuotaUsageWorkSettings().RollupPageCount)
+	settings := DefaultQuotaUsageWorkSettings()
+	if args.Team {
+		if !server.SidecarMg6Linked() {
+			return &RollupServiceUsageResult{}, nil
+		}
+		teamResult, err := model.RollupTeamServiceUsage(clientSession.Ctx, args.UsageDay, args.AfterNetworkId, settings.TeamRollupPageCount, server.NowUtc())
+		if err != nil {
+			return nil, err
+		}
+		if glog.V(1) {
+			glog.Infof("[quota]team usage rollup wrote %d of %d teams' days\n", teamResult.WrittenCount, teamResult.LookedCount)
+		}
+		return &RollupServiceUsageResult{RollupServiceUsageResult: model.RollupServiceUsageResult{
+			LookedCount:   teamResult.LookedCount,
+			WrittenCount:  teamResult.WrittenCount,
+			LastNetworkId: teamResult.LastNetworkId,
+		}}, nil
+	}
+	result, err := model.RollupServiceUsage(clientSession.Ctx, args.UsageDay, args.AfterNetworkId, settings.RollupPageCount)
 	if err != nil {
 		return nil, err
 	}
@@ -108,10 +134,15 @@ func RollupServiceUsage(args *RollupServiceUsageArgs, clientSession *session.Cli
 	return &RollupServiceUsageResult{RollupServiceUsageResult: result}, nil
 }
 
-// The same day again at once from the run's cursor when it stopped short, else the next day's rollup.
+// The same phase again at once from the run's cursor when it stopped short; else, after the stored
+// bytes, the Team phase at once where MG6 links; else the next day's rollup.
 func RollupServiceUsagePost(args *RollupServiceUsageArgs, result *RollupServiceUsageResult, clientSession *session.ClientSession, tx server.PgTx) error {
 	if result.LastNetworkId != nil {
-		scheduleRollupServiceUsage(clientSession, tx, &RollupServiceUsageArgs{UsageDay: args.UsageDay, AfterNetworkId: result.LastNetworkId}, server.NowUtc())
+		scheduleRollupServiceUsage(clientSession, tx, &RollupServiceUsageArgs{UsageDay: args.UsageDay, AfterNetworkId: result.LastNetworkId, Team: args.Team}, server.NowUtc())
+		return nil
+	}
+	if !args.Team && server.SidecarMg6Linked() {
+		scheduleRollupServiceUsage(clientSession, tx, &RollupServiceUsageArgs{UsageDay: args.UsageDay, Team: true}, server.NowUtc())
 		return nil
 	}
 	ScheduleRollupServiceUsage(clientSession, tx)
