@@ -7,8 +7,8 @@ package model
 //	        head. A network whose log began after the sidecar dump has none, and its head goes in at the store's
 //	        verified tip with has_document, so a first policy document filed after the dumps holds there too; a
 //	        network with a head takes AdvanceAclHeadsAfterRestore's rule, never moving down or across
-//	repos   RestoreRepoIds: the repos a network's verified log names, which §19.10's deleted-network path marks
-//	        when the restored rows lack the network
+//	repos   RestoreRepoIds: the repos a network's verified log names, which §19.10's deleted-network path shreds
+//	        under the incident a week on when the restored rows lack the network (QD-813)
 
 import (
 	"context"
