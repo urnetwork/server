@@ -175,6 +175,7 @@ func NewSignals() []Signal {
 		NewSubtensorSignal(),
 		NewSubtensorConvergenceSignal(),
 		NewPointsReadinessSignal(),
+		NewOperatorBlockPointsSignal(),
 		NewEdgeIPv6Signal(),
 		NewTLSExpirySignal(),
 		NewJwtRejectionsSignal(),
