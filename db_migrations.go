@@ -11564,4 +11564,12 @@ var migrations = []any{
 	// A separately qualified operator may grant one unchanged-patch retry,
 	// preserving the original paid admission, source, terminal and full audit.
 	newSqlMigration(CompetitionOperatorRequestedPatchRetryMigrationSql()),
+
+	// The operator blocks the daily points award recorded expired
+	// (operator_block_points_expired_schema.go,
+	// model/operator_block_points.go): one new empty table, created only when
+	// absent, under a five-second lock bound. Nothing existing is locked or
+	// rewritten. Apply before deploying the taskworker and bringyourctl that
+	// use it.
+	operatorBlockPointsExpiredMigration,
 }

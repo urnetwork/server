@@ -1020,6 +1020,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{giftRefundSchemaMigrationContract},
 	// Exact unchanged-patch retry authority inherits every prior guard check.
 	[]snMainnetMigrationContract{competitionOperatorRequestedPatchRetryMigrationContract},
+	// the operator blocks the daily points award recorded expired, versioned
+	// by its position
+	[]snMainnetMigrationContract{operatorBlockPointsExpiredMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
