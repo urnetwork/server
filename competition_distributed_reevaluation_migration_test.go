@@ -17,7 +17,8 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 		ProviderEgressFp2EvidenceMigrationVersion(),
 		StoreNotificationFlowVersion(), CryptoAddressSweepVersion(),
 		SolanaShopifyOrderPaymentVersion(), NetworkMailContextVersion(),
-		CompetitionDistributedReevaluationMigrationVersion()}
+		CompetitionDistributedReevaluationMigrationVersion(), GiftSchemaVersion(), GiftRefundSchemaVersion(),
+		CompetitionOperatorRequestedPatchRetryMigrationVersion()}
 	for index, version := range versions {
 		if version < 1 || index > 0 && version != versions[index-1]+1 {
 			t.Fatal("captured published migration tail was moved, omitted or overwritten", versions)
@@ -29,7 +30,7 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 	if versions[len(versions)-1] != MigrationCount() {
 		t.Fatal("local recovery must follow the entire captured origin tail", versions, MigrationCount())
 	}
-	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d mail_context=%d recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], versions[11], MigrationCount())
+	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d mail_context=%d recovery=%d gift=%d gift_refund=%d operator_retry=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], versions[11], versions[12], versions[13], versions[14], MigrationCount())
 }
 
 // Deleting only each explicit addition recovers the complete reviewed old
@@ -63,7 +64,8 @@ func TestCompetitionDistributedRecoveryMigrationPreservesPredecessorGuards(t *te
 		}
 	}
 	version := CompetitionDistributedReevaluationMigrationVersion()
-	if version != MigrationCount() || version <= CompetitionExecutorAdmissionClaimMigrationVersion() {
+	if GiftSchemaVersion() != version+1 || GiftRefundSchemaVersion() != GiftSchemaVersion()+1 ||
+		CompetitionOperatorRequestedPatchRetryMigrationVersion() != GiftRefundSchemaVersion()+1 || version <= CompetitionExecutorAdmissionClaimMigrationVersion() {
 		t.Fatal("distributed recovery was not appended after origin migration prefix")
 	}
 }

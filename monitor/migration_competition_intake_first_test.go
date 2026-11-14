@@ -35,6 +35,7 @@ func competitionIntakeFirstCatalogTestPredicateAt(t testing.TB, head int) string
 		competitionExecutorAdmissionExceptionMigrationContract,
 		competitionExecutorAdmissionClaimMigrationContract,
 		competitionDistributedReevaluationMigrationContract,
+		competitionOperatorRequestedPatchRetryMigrationContract,
 	} {
 		version := successor.artifact.requiredVersion
 		prior := migrationCurrentSuffixTestContract(t, previous)
@@ -66,6 +67,7 @@ func TestMigrationsCompetitionIntakeFirstCatalogSelectsExactPublishedOwner(t *te
 		competitionExecutorAdmissionExceptionMigrationContract,
 		competitionExecutorAdmissionClaimMigrationContract,
 		competitionDistributedReevaluationMigrationContract,
+		competitionOperatorRequestedPatchRetryMigrationContract,
 	}
 	for index, owner := range owners {
 		heads := []int{owner.artifact.requiredVersion}

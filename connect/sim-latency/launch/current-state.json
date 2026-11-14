@@ -82,12 +82,14 @@
     "operator_requested_patch_retry_preparation": {
       "requested": true,
       "authorized_in_production": false,
-      "source_manifest_sha256": "3d67ac41d03bec57fefc10c0c2a50aed1010d048054377ae06b3c1d63e7a11c1",
+      "source_manifest_sha256": "d858d19cf712921c5acac4acfd61a55dbc8b1720cd82c6df9803a1ca0ceffc6b",
       "private_source_checkpoint": "/var/lib/urnetwork/competition-patch-retry-preparation-20261114.JlDEs2zN",
       "static_review": "Independent control-code review found no confirmed issues in the pinned implementation. This is not a candidate honesty review or runtime approval.",
-      "validation": "The original primary selection passed 15 of 18 cases; three stopped before authorization on incomplete synthetic fixtures. A test-only retained-workload correction is compiling independently. Existing controller regressions passed 116 of 116; the separate broader monitor regression selection is still running. No complete corrected primary pass is claimed.",
+      "validation": "All 19 primary cases, all six PostgreSQL controls, and nine affected historical regressions passed on the pinned 972 cut. The actual merged 974-prefix overlay then passed all 23 required cases plus four repeated prechecks: DDL/catalog 973-to-974, strict Gift972/Refund973 custody, old cycle-zero query compatibility and retry lifecycle. This is bounded prefix/control qualification, not a full current-main product suite or production runtime approval. Existing controller regressions passed 116 of 116; preserve the broad monitor deadline evidence, its successful exact rerun, and the remaining 168-case shard inventory.",
+      "merged_prefix_manifest_sha256": "fab224be0fdbb83c7fee3b17a7820d992b246fd139140ccb1ddbae7f00633fc5",
+      "credential_decision": "Pending explicit choice of a dedicated exact-scoped retry capability or a legacy-administrator exception. Existing credentials cannot satisfy the proposed exact-scoped operator gate, and the official issuer rejects scoped legacy operators. No permission or credential has been added. Local CLI authentication does not itself require API-host credential activation.",
       "authority_scope": "Separate explicit single-use operator authority, not an infrastructure-defect diagnosis. Preserve exact patch/source, stored failure, original submission order and history, and the existing three-hour execution policy.",
-      "next_action": "Finish corrected PostgreSQL lifecycle validation, checkpoint the matching server/SN changes, apply the additive migration through the normal main pipeline, deploy API/monitor, then qualify and activate one combined manager/worker/CLI release at an owned idle hold. A new exact runtime qualification and fresh signed closure observations are required before any retry grant. No config or vault schema change is required."
+      "next_action": "Checkpoint the qualified server/SN changes, preserving origin Gift 972 and Refund 973 before retry 974. Apply migrations only after push through the normal main pipeline, then deploy API/monitor. Resolve the credential choice before adding any authority. Qualify and activate one combined manager/worker/CLI release at an owned idle hold; bind its actual source independently from the serving API image. A new exact runtime qualification and fresh signed closure observations are required before any retry grant."
     },
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",

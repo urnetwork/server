@@ -4251,6 +4251,7 @@ func scoreJobEvaluationFailure(status string, evalError *CompetitionError) *Eval
 		"infrastructure\x00evaluator_process_failed",
 		"infrastructure\x00evaluator_result_invalid",
 		"infrastructure\x00evaluator_result_missing",
+		"infrastructure\x00executor_process_failed",
 		"infrastructure\x00g2_volume_policy_mismatch",
 		"infrastructure\x00incomplete_run_manifest",
 		"infrastructure\x00invalid_accounting",

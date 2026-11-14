@@ -200,6 +200,8 @@ func CompetitionJobReevaluationFailureAllowed(incidentClass string, failure Comp
 		return failure.Kind == "submission" && failure.Code == "run_unstable"
 	case CompetitionJobReevaluationDistributedInfrastructure:
 		return failure.Kind == "infrastructure" && failure.Code == "evaluation_time_budget_exhausted"
+	case CompetitionJobReevaluationOperatorRequestedPatchRetry:
+		return failure.Kind == "infrastructure" && failure.Code == "executor_process_failed"
 	default:
 		return false
 	}

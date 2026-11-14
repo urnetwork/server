@@ -22,19 +22,26 @@ import (
 // keys. The original job actually claims, reconciles and expires via the store.
 type competitionDistributedRecoveryPgFixture struct {
 	*competitionDistributedPgFixture
-	original     *queuedJob
-	principal    *Principal
-	runtime      model.CompetitionJobReevaluationRuntime
-	request      model.CompetitionJobReevaluationRequest
-	hold         *model.CompetitionAutomationHold
-	calls        int
-	beforeNative func(competitionagent.Request)
-	mutateNative func(*competitionagent.Response)
+	original       *queuedJob
+	principal      *Principal
+	runtime        model.CompetitionJobReevaluationRuntime
+	request        model.CompetitionJobReevaluationRequest
+	hold           *model.CompetitionAutomationHold
+	calls          int
+	beforeNative   func(competitionagent.Request)
+	mutateNative   func(*competitionagent.Response)
+	originalStatus *competitionagent.Response
 }
 
 // Backdated application history is separate from a live SQL supervisor lease
 // and current host qualification. No production trigger or fence is disabled.
 func newCompetitionDistributedRecoveryPgFixture(t *testing.T, tb testing.TB) *competitionDistributedRecoveryPgFixture {
+	return newCompetitionDistributedRecoveryPgFixtureWithPatchRetry(t, tb, false)
+}
+
+// An early generic executor failure is created through the real original claim
+// and completion paths; it is never rewritten from an exhausted-budget row.
+func newCompetitionDistributedRecoveryPgFixtureWithPatchRetry(t *testing.T, tb testing.TB, patchRetry bool) *competitionDistributedRecoveryPgFixture {
 	tb.Helper()
 	ctx := tb.Context()
 	var databaseNow time.Time
@@ -45,23 +52,43 @@ func newCompetitionDistributedRecoveryPgFixture(t *testing.T, tb testing.TB) *co
 	})
 	// The complete original budget has expired, while the independent default
 	// baseline-preparation cleanup lease remains live during synthetic setup.
-	base := newCompetitionPreparedAnnouncedCompletionFixtureAt(t, tb, databaseNow.Add(-3*time.Hour-time.Second))
+	originalAt := databaseNow.Add(-3*time.Hour - time.Second)
+	if patchRetry {
+		originalAt = databaseNow.Add(-time.Minute)
+	}
+	base := newCompetitionPreparedAnnouncedCompletionFixtureAt(t, tb, originalAt)
 	fixture := &competitionDistributedRecoveryPgFixture{competitionDistributedPgFixture: base}
 	selected := base.selected(0)
 	job, err := base.store.Claim(ctx, selected, "synthetic-original-worker", testWorkerImageDigest())
 	if err != nil || job == nil || job.ExecutionDeadline == nil {
 		tb.Fatal("guarded historical original claim failed", err)
 	}
-	base.clock.Advance(3*time.Hour + time.Second)
-	job, err = base.store.Claim(ctx, selected, "synthetic-original-successor", testWorkerImageDigest())
-	if err != nil || job == nil || job.AttemptCount != 1 {
-		tb.Fatal("same original attempt failed historical deadline reconciliation", err)
+	originalWorker := "synthetic-original-worker"
+	originalFailure := terminalInfrastructureError("executor_process_failed", "synthetic original generic process failure")
+	if patchRetry {
+		base.clock.Advance(time.Second)
+	} else {
+		base.clock.Advance(3*time.Hour + time.Second)
+		originalWorker = "synthetic-original-successor"
+		job, err = base.store.Claim(ctx, selected, originalWorker, testWorkerImageDigest())
+		if err != nil || job == nil || job.AttemptCount != 1 {
+			tb.Fatal("same original attempt failed historical deadline reconciliation", err)
+		}
+		originalFailure = terminalInfrastructureError("evaluation_time_budget_exhausted", "synthetic original infrastructure budget exhausted")
 	}
-	if retry, err := base.store.Complete(withCompetitionJobAuthority(ctx, job), selected, "synthetic-original-successor", job.JobId, EvaluationOutcome{
-		Error: terminalInfrastructureError("evaluation_time_budget_exhausted", "synthetic original infrastructure budget exhausted"),
-	}); err != nil || retry {
+	originalOutcome := EvaluationOutcome{Error: originalFailure}
+	if patchRetry {
+		before := readCompetitionReevaluationPgSnapshot(ctx, job)
+		if retry, err := base.store.Complete(withCompetitionJobAuthority(ctx, job), selected, originalWorker, job.JobId, originalOutcome); err == nil || retry ||
+			!reflect.DeepEqual(before, readCompetitionReevaluationPgSnapshot(ctx, job)) {
+			tb.Fatal("unretained generic failure bypassed original completion authority", retry, err)
+		}
+		originalOutcome, fixture.originalStatus = competitionOperatorPatchRetryRetainedFailureForTest(tb, selected, job)
+	}
+	if retry, err := base.store.Complete(withCompetitionJobAuthority(ctx, job), selected, originalWorker, job.JobId, originalOutcome); err != nil || retry {
 		tb.Fatal("genuine distributed original did not reach infrastructure terminal", retry, err)
 	}
+	originalOutcome.closeReceiveCustody()
 	fixture.original = job
 	server.Db(ctx, func(conn server.PgConn) {
 		var err error
@@ -85,6 +112,11 @@ func newCompetitionDistributedRecoveryPgFixture(t *testing.T, tb testing.TB) *co
 		Capability: model.CompetitionDistributedJobReevaluationCapability, Accepted: true, IncidentClasses: []string{model.CompetitionJobReevaluationDistributedInfrastructure},
 		SourceCommit: strings.Repeat("1", 40), WorkerSha256: strings.Repeat("2", 64), WorkerImageDigest: "sha256:" + strings.Repeat("3", 64), ApiImageDigest: testApiImageDigest(),
 		EvidenceSha256: strings.Repeat("4", 64), ApiCompatible: true, WorkerCompatible: true}
+	if patchRetry {
+		fixture.runtime.Kind = model.CompetitionOperatorRequestedPatchRetryRuntimeKind
+		fixture.runtime.Capability = model.CompetitionOperatorRequestedPatchRetryCapability
+		fixture.runtime.IncidentClasses = []string{model.CompetitionJobReevaluationOperatorRequestedPatchRetry}
+	}
 	runtimeDigest := competitionRecoveryTestDigest(tb, fixture.runtime)
 	if err := BindCompetitionJobReevaluationRuntime(base.settings, fixture.runtime, runtimeDigest); err != nil {
 		tb.Fatal(err)
@@ -115,6 +147,12 @@ func newCompetitionDistributedRecoveryPgFixture(t *testing.T, tb testing.TB) *co
 			OriginalManifestSha256: strings.Repeat("c", 64), OriginalRequestSha256: strings.Repeat("d", 64),
 			SourceLockSha256: base.settings.AutomationPolicy.SourceLockSha256, EvaluatorImageDigest: base.settings.EvaluatorImageDigest, PolicyApprovalSha256: base.settings.DistributedEvaluationPolicy.ApprovalSha256,
 			ClosureEvidenceSha256: strings.Repeat("6", 64), SupervisorOwnerId: base.settings.automationLease.OwnerId, SupervisorFencingToken: base.settings.automationLease.FencingToken}}
+	if patchRetry {
+		auth.Kind, auth.IncidentClass = model.CompetitionOperatorRequestedPatchRetryAuthorizationKind, model.CompetitionJobReevaluationOperatorRequestedPatchRetry
+		auth.Distributed.Reason = model.CompetitionJobReevaluationOperatorRequestedPatchRetry
+		auth.Distributed.PatchRetry = &model.CompetitionOperatorRequestedPatchRetry{Schema: 1, PatchSha256: job.PatchSha256, ApplicabilityEvidenceSha256: strings.Repeat("7", 64)}
+		auth.Distributed.OriginalManifestSha256, auth.Distributed.OriginalRequestSha256 = fixture.originalStatus.ManifestSha256, fixture.originalStatus.RequestSha256
+	}
 	fixture.request = model.CompetitionJobReevaluationRequest{IdempotencyKey: "synthetic-distributed-recovery", Authorization: auth}
 	fixture.refreshIdleCut(tb)
 	return fixture
@@ -143,7 +181,7 @@ func (self *competitionDistributedRecoveryPgFixture) refreshIdleCut(t testing.TB
 func (self *competitionDistributedRecoveryPgFixture) authorize(t testing.TB, ctx context.Context) (*model.CompetitionJobReevaluationReceipt, error) {
 	t.Helper()
 	return self.store.authorizeDistributedJobReevaluation(ctx, self.settings, self.principal, self.request, func(_ *Settings, host CompetitionExecutorHostPolicy) (competitionAgentTransport, error) {
-		return competitionDistributedRecoveryTestTransport{t: t, host: host, auth: self.request.Authorization, round: self.round, calls: &self.calls, before: self.beforeNative, mutate: self.mutateNative}, nil
+		return competitionDistributedRecoveryTestTransport{t: t, host: host, auth: self.request.Authorization, round: self.round, calls: &self.calls, before: self.beforeNative, mutate: self.mutateNative, originalStatus: self.originalStatus}, nil
 	})
 }
 

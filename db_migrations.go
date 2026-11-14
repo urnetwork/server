@@ -11560,4 +11560,8 @@ var migrations = []any{
 	// its index, under a five-second lock bound. Nothing existing is touched.
 	// Apply before deploying the api, alt and taskworker that use them.
 	giftRefundSchemaMigration,
+
+	// A separately qualified operator may grant one unchanged-patch retry,
+	// preserving the original paid admission, source, terminal and full audit.
+	newSqlMigration(CompetitionOperatorRequestedPatchRetryMigrationSql()),
 }
