@@ -19,7 +19,7 @@ package model
 //	effects   per entry, in one transaction:
 //	            a sidecar whose row the entry revoked (a SidecarRevoke, a
 //	            MemberRevoke's devices, a completed proposal of either, a
-//	            tick's reap): its bound clients deactivated through the
+//	            tick's reap or its activation of either): its bound clients deactivated through the
 //	            deactivation path, which writes their revocation records, so
 //	            connect closes their transports at its next authorization
 //	            recheck, within the 90 s lease (session/authorization_lease.go),
@@ -306,12 +306,18 @@ func (self *configLogNetwork) entryEffectWithLock(ctx context.Context, sequencer
 		effect.action = AdminEventActionConfigPrefix + configLogSignedTypeWord(bridge.SignedType(signed.GetType()))
 	case bridge.AuthEntryKindTick:
 		tick := &bridge.ApiTick{}
-		if proto.Unmarshal(entry.GetBody(), tick) != nil || len(tick.GetReapedSidecarIds()) == 0 {
+		if proto.Unmarshal(entry.GetBody(), tick) != nil || len(tick.GetReapedSidecarIds()) == 0 && len(tick.GetActivatedProposalIds()) == 0 {
 			return nil, nil
 		}
 		effect.action = AdminEventActionConfigPrefix + "tick"
-		// a reap deactivated the clients already; the rest follows it
-		effect.reason = sidecar.RevocationReasonDeactivated
+		if 0 < len(tick.GetReapedSidecarIds()) {
+			// a reap deactivated the clients already; the rest follows it
+			effect.reason = sidecar.RevocationReasonDeactivated
+		}
+		// an activation's statement takes effect at the tick (§7.9's
+		// Recovery), a removal or a role as its own entry would carry it,
+		// read from the states around the tick like any other; api's own
+		// activation ticks name no reap
 	default:
 		return nil, nil
 	}

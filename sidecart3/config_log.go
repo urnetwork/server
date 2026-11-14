@@ -5,9 +5,10 @@ package sidecart3
 // T3 runs take (server/api/sidecar_admission_t3_test.go). Its ids are sidecar's, and a model.ConfigLogError is the
 // suite's ConfigLogRefusal, as the store suite's factory maps it (model/config_log_model_test.go).
 //
-// Two things server's sequencer does not do, which ConfigLogSuiteSettings says so a row skips them here and logs it:
-// it refuses every tick that activates a recovery window, until its checkConfigLogTick takes them (TEAM-M2-14), and it
-// appends nothing its own check refuses, so a forged clause runs on T2 alone (plan-TEST-small-readings reading 6).
+// One thing server's sequencer does not do, which ConfigLogSuiteSettings says so a row skips it here and logs it: it
+// appends nothing its own check refuses, so a forged clause runs on T2 alone (plan-TEST-small-readings reading 6). A
+// tick that activates a recovery window it judges as every reader does (ConfigLog.CheckTick; TEAM-M2-14, QD-745): one
+// the window holds due lands, and an early one is refused where T2's FakeApi lands it for readers to refuse.
 
 import (
 	"context"
@@ -47,7 +48,6 @@ func ConfigLogApiWith(
 // The admission suite's settings on server's sequencer, as the package comment says.
 func ConfigLogSuiteSettings() *sidecartest.AdmissionSuiteSettings {
 	settings := sidecartest.DefaultAdmissionSuiteSettings()
-	settings.ApiTakesActivations = false
 	settings.ForgedAppends = false
 	return settings
 }

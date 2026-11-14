@@ -6,7 +6,7 @@ package api_test
 // real sequencer (sidecart3.ConfigLogApi, model.ConfigLogSequencer) over the local stack's MinIO as api's first
 // metadata cluster, one process with 8 drive directories at EC:4 (sidecar's local/docker-compose.yml), in a bucket of
 // this run's own. Every entry is read back from MinIO and applied by the suite's reference, a new device and a gate at
-// each base, and the writer's follower. The rows' activation ticks and forged appends run on T2 alone, as
+// each base, and the writer's follower. The rows' forged appends run on T2 alone, as
 // sidecart3.ConfigLogSuiteSettings says, and each row logs what it left. It carries the sidecar_localstack tag and
 // fails rather than skips when the stack is down (local/stack.sh up).
 

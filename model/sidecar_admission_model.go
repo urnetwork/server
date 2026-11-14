@@ -66,8 +66,8 @@ func ConfigAdmissionCount(state *sidecar.ConfigState, timeMs int64) int64 {
 // Whether a statement whose verdict at state is verdict takes an admission
 // where it lands: a SidecarAdmit, or the AuthorityProposal or cosign that
 // completes a proposal of one (§7.9's completion row). A refused statement
-// takes none. An ApiTick's activation would take one too, and none is built
-// yet (TEAM-M2-05), so a tick naming one is refused before this.
+// takes none. An ApiTick's activation of a proposed SidecarAdmit takes one
+// too, where the tick lands, which CheckConfigActivationCap counts.
 func ConfigStatementAdmits(state *sidecar.ConfigState, signedBytes []byte, verdict sidecar.ConfigVerdict) bool {
 	if !verdict.Accepted() {
 		return false
@@ -128,6 +128,45 @@ func CheckConfigAdmissionCap(ctx context.Context, networkId server.Id, state *si
 		return nil
 	}
 	if refusal := ConfigAdmissionsExceeded(ctx, networkId, ConfigAdmissionCount(state, timeMs)); refusal != nil {
+		return NewQuotaRefusalError(refusal)
+	}
+	return nil
+}
+
+// How many admissions a tick's activations take at state: its activated
+// proposals of a SidecarAdmit, as the tip's rows hold them. One the tip does
+// not show counts as one, which errs toward the cap.
+func ConfigTickAdmissionCount(state *sidecar.ConfigState, tick *bridge.ApiTick) int64 {
+	pending := state.PendingProposals()
+	count := int64(0)
+	for _, proposalId := range tick.GetActivatedProposalIds() {
+		admits := true
+		for _, proposal := range pending {
+			if bytes.Equal(proposal.GetProposalId(), proposalId) {
+				admits = bridge.SignedType(proposal.GetStatementType()) == bridge.SignedType_SIGNED_SIDECAR_ADMIT
+				break
+			}
+		}
+		if admits {
+			count += 1
+		}
+	}
+	return count
+}
+
+// The sequencer's cap on a tick's activations (ConfigLogSettings.ActivationCap):
+// a tick whose activations admit at state, the tip api appends at, is refused
+// when they would stand past config_admissions, with a *QuotaRefusalError.
+// The proposal stays open, and its task looks again (config_log_tick.go).
+func CheckConfigActivationCap(ctx context.Context, networkId server.Id, state *sidecar.ConfigState, tick *bridge.ApiTick, timeMs int64) error {
+	if !Pro().EnforceSidecarLimits {
+		return nil
+	}
+	admitCount := ConfigTickAdmissionCount(state, tick)
+	if admitCount == 0 {
+		return nil
+	}
+	if refusal := ConfigAdmissionsExceeded(ctx, networkId, ConfigAdmissionCount(state, timeMs)+admitCount-1); refusal != nil {
 		return NewQuotaRefusalError(refusal)
 	}
 	return nil
