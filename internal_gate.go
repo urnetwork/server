@@ -71,13 +71,16 @@ const (
 	InternalGateCallerMxedge  InternalGateCaller = "mxedge"
 	// connect's contract gate in CreateContract, which reads projections through api (QD-680)
 	InternalGateCallerConnect InternalGateCaller = "connect"
+	// an edge block's platform credential (QD-812): tlsedge, mxedge's router and smtpedge each mount it, and it
+	// reaches only the route that mints the block's own urnetwork-edge client jwts (EdgeClientMintPath)
+	InternalGateCallerEdge InternalGateCaller = "edge"
 )
 
 // Whether a class is one this release knows.
 func (self InternalGateCaller) known() bool {
 	switch self {
 	case InternalGateCallerEvs, InternalGateCallerGkm, InternalGateCallerSockets, InternalGateCallerTlsedge, InternalGateCallerMxedge,
-		InternalGateCallerConnect:
+		InternalGateCallerConnect, InternalGateCallerEdge:
 		return true
 	}
 	return false

@@ -27,6 +27,15 @@
 // host with no projection source stays not ready), so a real block stays not ready, failing closed, until it lands.
 // HostDeps hands each to a test, or to the change that lands it.
 //
+// A spent network reads at evs_unpaid_read_rate across the env's evs blocks with no shared counter (§20.6), so each
+// process paces at the rate ÷ the env's block count, which only the operator knows: sidecar.yml's evs gate carries
+// it as blocks, beside services.yml's evs block count (QD-639; server.SidecarConfig.EvsBlocks), and NewHost passes
+// it as QuotaGateSettings.Read.Blocks. It has no default, as tlsedge.yml's blocks has none (§13.9): a block whose
+// gate is enabled with no count does not start, since a count taken as 1 would hand a spent network the whole rate
+// from every process. A block is built once, so the count is read when it starts: a block that started under a
+// disabled gate with no count stays not ready once the gate reads enabled, until it restarts with one, and a count
+// changed under a running block takes that block's restart, shifting the rate until then and nothing else.
+//
 // The block's parts run on a context of the host's own, which ends only at Close, so a SIGTERM's drain still has
 // its clusters, clock check, budget and batches while requests in flight finish.
 package evshost
@@ -38,6 +47,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -75,6 +85,10 @@ type HostSettings struct {
 	UsageDrainTimeout time.Duration
 	// The segment cluster's HDD share. nil: evsservice.DefaultHddAdmissionSettings.
 	Hdd *evsservice.HddAdmissionSettings
+	// The storage gate and a spent network's reads. nil: evsservice.DefaultQuotaGateSettings. Its Read.Blocks is
+	// not the host's to set: NewHost takes the count from sidecar.yml's evs gate (QD-639), and keeps this one only
+	// for a block that starts under a disabled gate with no count, which serves nothing.
+	QuotaGate *evsservice.QuotaGateSettings
 }
 
 // The defaults.
@@ -83,6 +97,7 @@ func DefaultHostSettings() *HostSettings {
 		Evs:               evsservice.DefaultEvsSettings(),
 		Chrony:            server.DefaultChronyClockCheckSettings(),
 		UsageDrainTimeout: 10 * time.Second,
+		QuotaGate:         evsservice.DefaultQuotaGateSettings(),
 	}
 }
 
@@ -142,6 +157,13 @@ type Host struct {
 	quotaReady func() error
 	// what the engine cannot honor a request without and the block was not given, each said once
 	missing []string
+	// sidecar.yml's evs block count as the read gate took it at the start, 0 for a block that started under a
+	// disabled gate with none
+	blocks int
+	// the env's sidecar.yml as Ready reads it, for whether the gate is enabled now
+	sidecarConfig func() *server.SidecarConfig
+	// set once a block with no count has said the gate reads enabled
+	blocksMissingLogged atomic.Bool
 
 	quotaGate    *evsservice.QuotaGate
 	hdd          *evsservice.HddAdmission
@@ -157,8 +179,9 @@ var _ sidecar.HttpEngine = (*Host)(nil)
 // The engine on host, with the segment route's parts built here: the storage gate and usage producer over
 // host.Quota, and the HDD share over host.Redis for the segment cluster. host needs Blobs, Metrics and Budget;
 // a missing Quota, segment cluster, deps' AuthState or receipt keys leaves the host not ready, never an error, so
-// a block serves /status and says why. ctx bounds everything built here and should outlive the drain: RunHost
-// gives one that ends only at Close.
+// a block serves /status and says why. A host whose env enables the evs gate with no blocks count is an error: see
+// the package's header. ctx bounds everything built here and should outlive the drain: RunHost gives one that ends
+// only at Close.
 func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings, deps *HostDeps) (*Host, error) {
 	if host == nil || host.Blobs == nil {
 		return nil, errors.New("evs host: no clusters")
@@ -169,10 +192,18 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	if deps == nil {
 		deps = &HostDeps{}
 	}
+	// the env's count, never one a host works out from its peers (QD-639)
+	sidecarConfig := server.CurrentSidecarConfig()
+	blocks, ok := sidecarConfig.EvsBlocks()
+	if !ok && sidecarConfig.Service(server.SidecarGateEvs).Enabled() {
+		return nil, errors.New("evs host: sidecar.yml's evs gate is enabled with no blocks, the env's evs block count, which has no default (QD-639)")
+	}
 	self := &Host{
 		settings:      settings,
 		clock:         host.ClockOrReal(),
 		clustersReady: deps.ClustersReady,
+		blocks:        blocks,
+		sidecarConfig: server.CurrentSidecarConfig,
 	}
 	fail := func(err error) (*Host, error) {
 		self.closeParts()
@@ -217,7 +248,7 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	self.clusterLimit = clusterLimit
 	uploads := &evsservice.EvsUploadDeps{Keys: keys, ClusterLimit: clusterLimit}
 	if host.Quota != nil {
-		quotaGate, err := evsservice.NewQuotaGate(ctx, host, nil)
+		quotaGate, err := evsservice.NewQuotaGate(ctx, host, hostQuotaGateSettings(settings.QuotaGate, blocks))
 		if err != nil {
 			return fail(err)
 		}
@@ -260,6 +291,41 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	return self, nil
 }
 
+// The quota gate's settings with the env's block count as the read gate's: settings, the defaults when nil, copied
+// so the caller's stay its own. A count below 1, a block that started with none, leaves settings' own.
+func hostQuotaGateSettings(settings *evsservice.QuotaGateSettings, blocks int) *evsservice.QuotaGateSettings {
+	if settings == nil {
+		settings = evsservice.DefaultQuotaGateSettings()
+	}
+	gateSettings := *settings
+	if gateSettings.Read == nil {
+		gateSettings.Read = evsservice.DefaultQuotaReadSettings()
+	}
+	readSettings := *gateSettings.Read
+	if 1 <= blocks {
+		readSettings.Blocks = blocks
+	}
+	gateSettings.Read = &readSettings
+	return &gateSettings
+}
+
+// The env's evs block count as this block took it at its start, 0 when it started with none.
+func (self *Host) Blocks() int {
+	return self.blocks
+}
+
+// Whether the block's read gate holds the env's block count wherever the gate is enabled: false only for a block
+// that started under a disabled gate with no count once the gate reads enabled, which it says once.
+func (self *Host) blocksReady() bool {
+	if 1 <= self.blocks || !self.sidecarConfig().Service(server.SidecarGateEvs).Enabled() {
+		return true
+	}
+	if self.blocksMissingLogged.CompareAndSwap(false, true) {
+		glog.Errorf("[evs]not ready: sidecar.yml's evs gate reads enabled and this block started with no blocks count; it takes one at a restart (QD-639)\n")
+	}
+	return false
+}
+
 // The engine, for a test that drives its parts.
 func (self *Host) Engine() *evsservice.EvsEngine {
 	return self.engine
@@ -271,10 +337,13 @@ func (self *Host) Missing() []string {
 	return append([]string{}, self.missing...)
 }
 
-// §19.4's evs row: every seam given, the clusters ready, the Quota's first over-limit list read and the engine's
-// probe of the first cluster answered.
+// §19.4's evs row: every seam given, the env's block count held wherever the gate is enabled, the clusters ready,
+// the Quota's first over-limit list read and the engine's probe of the first cluster answered.
 func (self *Host) Ready() bool {
 	if 0 < len(self.missing) {
+		return false
+	}
+	if !self.blocksReady() {
 		return false
 	}
 	if self.clustersReady != nil && !self.clustersReady() {

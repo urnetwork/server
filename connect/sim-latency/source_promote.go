@@ -336,6 +336,7 @@ func sourceRepositoriesFromCommits(repositoryCommits map[string]string) sourceRe
 		Sn:            sourceRepository{Commit: repositoryCommits["sn"]},
 		Warp:          sourceRepository{Commit: repositoryCommits["warp"]},
 		Gvisor:        sourceRepository{Commit: repositoryCommits["gvisor"]},
+		Sidecar:       sourceRepository{Commit: repositoryCommits["sidecar"]},
 	}
 }
 

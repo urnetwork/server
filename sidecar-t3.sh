@@ -87,7 +87,7 @@ skip() {
 suites() {
   go_t3 ./sidecart3 -tags "$tags" -run '^(TestEveryStoreSuiteRunsOnT3|TestSuiteProblemsFailAFakeWithNoSuite|TestSidecarT3RunsEverySuiteTest|TestFailFastLeavesNoRerun|TestCrossslotKeysSpreadOverTheMasters|TestCrossslotCallsKeepEachShapeOnce|TestRunCrossslotRefusesOneNode|TestADialOutsideTheAttestedListIsRefused|TestInlinePathFailsAPlantedPostgresRead|TestInlinePathFailsOneRedisCallOverItsRow|TestInlinePathReadsAnUnsetLimitAsMissing|TestEveryPathRowResolvesOrReadsMissing|TestCapturePartReaderMakesAPartOnlyWhenTheScanReachesIt|TestCapturePartReaderEndsWithAPartsError|TestCapturePartReaderClosedPartWayEndsItsProducer)$'
   go_t3 ./sidecarhost -tags "$tags" -run '^(TestRedisConformsOnTheTestStore|TestCountingRedisConformsOnTheTestStore)$'
-  go_t3 ./model -tags "$tags" -run '^(TestSidecarPushStorePassesItsSuite|TestSocketStorePassesItsSuite|TestMxEdgeStorePassesTheSuite|TestSmtpEdgeStorePassesTheSuite|TestConfigLogSequencerPassesTheStoreSuite)$'
+  go_t3 ./model -tags "$tags" -run '^(TestSidecarPushStorePassesItsSuite|TestSocketStorePassesItsSuite|TestMxEdgeStorePassesTheSuite|TestTlsEdgeStorePassesItsSuite|TestSmtpEdgeStorePassesTheSuite|TestConfigLogSequencerPassesTheStoreSuite)$'
   go_t3 ./dnshost -tags "$tags" -run '^(TestStoreRunsTheDnsStoreSuite|TestRestoreStoreRunsItsSuite)$'
   if [ "$cadence" = nightly ] || stack_up; then
     go_t3 . -tags "$tags,sidecar_localstack" -run '^TestFileClustersConformOnTheLocalStack$'
@@ -125,12 +125,14 @@ cluster_faults() {
 
 # §22.8's disruption rows beyond the schedules (TEST-M2-15; sidecart3/disruption.go): a resident killed mid-stream, a
 # Redis master's restart under an evs world and a Postgres restart mid-request, carried out for real on the private
-# stores, and an lb drain through nginx from warp's directives (local/sidecar-lb-fixture). They use real time, so they
-# run here and never at merge.
+# stores, and an lb drain through nginx from warp's directives (local/sidecar-lb-fixture), with its client half, an evs
+# world's segment PUT the drain cut retried from the client and landing once, on the local stack's MinIO (QD-758).
+# They use real time, so they run here and never at merge.
 disruptions() {
   go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_disruption" -run '^(TestT3ResidentKilledMidStreamResetsTransferFailed|TestT3ResidentMigrationKeepsAStreamWholeOrResetsIt|TestT3ResidentKilledMidCallRetriesWithOneEffect|TestT3ResidentKilledUnderACallItsRetryJoinsTheRun|TestT3RedisMasterRestartLosesOnlyRebuildableState|TestT3PostgresRestartMidRequest)$'
   if command -v "${SIDECAR_LB_NGINX:-nginx}" >/dev/null 2>&1; then
     go_t3 ./sidecart3 -tags "$tags,sidecar_disruption" -run '^(TestT3LbDrainCutsAStreamedPutWith502|TestT3LbDrainRetriesABufferedPutOnTheSibling)$'
+    go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_disruption" -run '^TestT3LbDrainCutSegmentPutRetriesFromTheClientAndLandsOnce$'
   else
     skip "the lb drain rows: no nginx (SIDECAR_LB_NGINX or nginx on PATH)"
   fi

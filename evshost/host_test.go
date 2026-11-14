@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/protocol"
@@ -292,6 +294,193 @@ func TestHostWaitsForTheClustersSentinel(t *testing.T) {
 	}
 }
 
+// The quota gate's reread interval in the tests that wait on it: one no other part of the host waits for, so a
+// timer due that far ahead is the gate's own.
+const hostTestOverLimitInterval = 7*time.Second + 13*time.Millisecond
+
+// Waits until clock holds a timer due at at, with no sleep: the quota gate sets its next reread only once a
+// refresh has finished, so the timer is how a test knows the refresh before it is whole.
+func awaitHostTestTimer(t testing.TB, clock *sidecartest.FakeClock, at time.Time) {
+	t.Helper()
+	deadline := time.After(hostTestStepTimeout)
+	for {
+		pending, added := clock.WatchTimers()
+		if slices.ContainsFunc(pending, at.Equal) {
+			return
+		}
+		select {
+		case <-added:
+		case <-deadline:
+			t.Fatalf("no timer due at %s", at)
+		}
+	}
+}
+
+// QD-639 (§20.6's Empty balance): each evs process paces a spent network's reads of its own repos at the
+// network's evs_unpaid_read_rate ÷ the env's evs block count, which the host takes from sidecar.yml's evs gate:
+// at 1, 2 and 4 blocks, rounded up, and at §20.4's published rate split the same way until the network's limits
+// have been read. The count is the file's whether the gate is enabled or not, and the settings a caller gave
+// keep their own.
+func TestHostPacesASpentNetworkOverTheConfiguredBlocks(t *testing.T) {
+	const unpaidReadRate = int64(600_001)
+	fallbackRate := evsservice.DefaultQuotaReadSettings().FallbackRate
+	for _, c := range []struct {
+		file         string
+		blocks       int
+		fallbackRate int64
+		rate         int64
+	}{
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: 1}\n", blocks: 1, fallbackRate: fallbackRate, rate: 600_001},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: 2}\n", blocks: 2, fallbackRate: fallbackRate / 2, rate: 300_001},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: 4}\n", blocks: 4, fallbackRate: fallbackRate / 4, rate: 150_001},
+		// a gate that is off still gives the count, so a block that starts dark is right once the gate opens
+		{file: "sidecar:\n  evs: {enabled: false, blocks: 4}\n", blocks: 4, fallbackRate: fallbackRate / 4, rate: 150_001},
+	} {
+		func() {
+			defer server.Testing_PushSidecarConfig(c.file)()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+			fakeHost := sidecartest.NewFakeHost(ctx, clock, nil, nil, nil)
+			spentNetworkId, otherNetworkId := connect.Id{0x51}, connect.Id{0x52}
+			fakeHost.Quota.SetSpentRefusal(spentNetworkId, &sidecar.QuotaRefusal{LimitKey: "transfer_balance"})
+			fakeHost.Quota.SetLimits(spentNetworkId, &sidecar.QuotaLimits{
+				Tier:   "free",
+				Limits: map[string]int64{"evs_unpaid_read_rate": unpaidReadRate},
+			})
+			settings := DefaultHostSettings()
+			settings.QuotaGate.OverLimitInterval = hostTestOverLimitInterval
+			evsHost, err := NewHost(ctx, fakeHost.ServiceHost(), settings, &HostDeps{
+				AuthState:   hostTestAuthState{},
+				GateViews:   hostTestGateViews{},
+				ReceiptKeys: hostTestReceiptKeys(t, clock.Now()),
+			})
+			if err != nil {
+				t.Fatalf("%q: %v", c.file, err)
+			}
+			defer evsHost.Close()
+			if evsHost.Blocks() != c.blocks {
+				t.Fatalf("%q: the host took %d blocks", c.file, evsHost.Blocks())
+			}
+			if settings.QuotaGate.Read.Blocks != evsservice.DefaultQuotaReadSettings().Blocks {
+				t.Fatalf("%q: the host wrote its count into the caller's settings", c.file)
+			}
+
+			// the gate's first read of the spent set, whole once it waits for its second
+			start := clock.Now()
+			awaitHostTestTimer(t, clock, start.Add(hostTestOverLimitInterval))
+			if pace, refusal := evsHost.quotaGate.CheckRead(otherNetworkId, spentNetworkId); pace != nil || refusal != nil {
+				t.Fatalf("%q: a network that is not spent is paced or refused", c.file)
+			}
+			if pace, refusal := evsHost.quotaGate.CheckRead(spentNetworkId, otherNetworkId); pace != nil || refusal == nil || !refusal.Upgrade {
+				t.Fatalf("%q: a spent network reads another network's repo", c.file)
+			}
+			pace, refusal := evsHost.quotaGate.CheckRead(spentNetworkId, spentNetworkId)
+			if pace == nil || refusal != nil {
+				t.Fatalf("%q: a spent network does not read its own repo: %v", c.file, refusal)
+			}
+			// before its limits are read, the published rate over the blocks
+			if rate := pace.Rate(); rate != c.fallbackRate {
+				t.Errorf("%q: %d bytes a second before the limits were read, want %d", c.file, rate, c.fallbackRate)
+			}
+			// the gate's second read takes the network's own rate, over the blocks
+			clock.Advance(hostTestOverLimitInterval)
+			awaitHostTestTimer(t, clock, start.Add(2*hostTestOverLimitInterval))
+			if rate := pace.Rate(); rate != c.rate {
+				t.Errorf("%q: %d bytes a second of %d over %d blocks, want %d", c.file, rate, unpaidReadRate, c.blocks, c.rate)
+			}
+		}()
+	}
+}
+
+// QD-639: the block count has no default, as tlsedge's has none. A host whose env enables the evs gate with
+// blocks unset or below 1 does not start, since a count taken as 1 would hand a spent network the whole rate from
+// every process.
+func TestHostRefusesAnEnabledGateWithNoBlocks(t *testing.T) {
+	for _, file := range []string{
+		"sidecar:\n  evs: {enabled: true, percent: 100}\n",
+		"sidecar:\n  evs: {enabled: true, percent: 100, blocks: 0}\n",
+		"sidecar:\n  evs: {enabled: true, percent: 100, blocks: -2}\n",
+		"sidecar:\n  evs: {enabled: true, percent: 100, blocks: ~}\n",
+		// another gate's key is not evs's
+		"sidecar:\n  evs: {enabled: true, percent: 100}\n  tlsedge: {enabled: true, blocks: 3}\n",
+	} {
+		func() {
+			defer server.Testing_PushSidecarConfig(file)()
+			clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+			host := sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil).ServiceHost()
+			evsHost, err := NewHost(t.Context(), host, nil, &HostDeps{
+				AuthState:   hostTestAuthState{},
+				GateViews:   hostTestGateViews{},
+				ReceiptKeys: hostTestReceiptKeys(t, clock.Now()),
+			})
+			if err == nil {
+				evsHost.Close()
+				t.Errorf("%q: a host started with no block count", file)
+			} else if !strings.Contains(err.Error(), "blocks") {
+				t.Errorf("%q: %v does not name blocks", file, err)
+			}
+		}()
+	}
+}
+
+// A host under a disabled gate starts with or without a count, as a dark env's block does. One that started
+// with none serves nothing while the gate is off, and is not ready once the gate reads enabled, whatever count the
+// file then gives: it took none at its start, and takes one at a restart. One that started with a count is ready
+// when the gate opens.
+func TestHostUnderADisabledGateStartsWithNoBlocks(t *testing.T) {
+	for _, file := range []string{
+		"",
+		"sidecar:\n  gkm: {enabled: true, percent: 100}\n",
+		"sidecar:\n  evs: {enabled: false}\n",
+		"sidecar:\n  evs: {enabled: false, blocks: 0}\n",
+	} {
+		func() {
+			pop := server.Testing_PushSidecarConfig(file)
+			defer func() {
+				pop()
+			}()
+			evsHost := newHostTestHost(t, nil)
+			if evsHost.Blocks() != 0 {
+				t.Fatalf("%q: %d blocks from a file that gives none", file, evsHost.Blocks())
+			}
+			if missing := evsHost.Missing(); len(missing) != 0 || !evsHost.Ready() {
+				t.Fatalf("%q: a host under a disabled gate is not ready, missing %v", file, missing)
+			}
+			for _, enabled := range []string{
+				"sidecar:\n  evs: {enabled: true, percent: 100}\n",
+				"sidecar:\n  evs: {enabled: true, percent: 100, blocks: 2}\n",
+			} {
+				pop()
+				pop = server.Testing_PushSidecarConfig(enabled)
+				if evsHost.Ready() {
+					t.Errorf("%q then %q: ready with no block count taken", file, enabled)
+				}
+			}
+			// the gate off again, and the block is as it was
+			pop()
+			pop = server.Testing_PushSidecarConfig(file)
+			if !evsHost.Ready() {
+				t.Errorf("%q: not ready once the gate is off again", file)
+			}
+		}()
+	}
+
+	pop := server.Testing_PushSidecarConfig("sidecar:\n  evs: {enabled: false, blocks: 2}\n")
+	defer func() {
+		pop()
+	}()
+	evsHost := newHostTestHost(t, nil)
+	if evsHost.Blocks() != 2 || !evsHost.Ready() {
+		t.Fatalf("%d blocks, ready %t, under a disabled gate with a count", evsHost.Blocks(), evsHost.Ready())
+	}
+	pop()
+	pop = server.Testing_PushSidecarConfig("sidecar:\n  evs: {enabled: true, percent: 100, blocks: 2}\n")
+	if !evsHost.Ready() {
+		t.Fatal("a host that started with its count is not ready once the gate opens")
+	}
+}
+
 // A host with no clusters has nothing to serve from, and says so rather than start.
 func TestHostRefusesAHostWithNoClusters(t *testing.T) {
 	host := sidecartest.NewFakeHost(t.Context(), nil, nil, nil, nil).ServiceHost()
@@ -319,6 +508,38 @@ func TestBlockWithNoClustersFileIsNeverReady(t *testing.T) {
 	if err := options.Validate(); err != nil {
 		t.Error(err)
 	}
+}
+
+// A block whose env enables the evs gate with no block count cannot start (QD-639): its engine is never ready and
+// serves no route, and what was built for it is closed. On the private stores (.stack/server-test.sh), which
+// the block's host takes its Redis from.
+func TestBlockWithAnEnabledGateAndNoBlocksIsNeverReady(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(tb testing.TB) {
+		defer server.Testing_PushSidecarConfig("sidecar:\n  evs: {enabled: true, percent: 100}\n")()
+		clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+		clusters := newHostTestClusters(clock)
+		clusters.ready.Store(true)
+		deps := &HostDeps{
+			AuthState:   hostTestAuthState{},
+			GateViews:   hostTestGateViews{},
+			ReceiptKeys: hostTestReceiptKeys(tb, clock.Now()),
+			Clusters:    clusters,
+			ClockCheck:  sidecartest.NewFakeClockCheck(nil),
+			Quota:       sidecartest.NewFakeQuota(clock, nil, nil),
+			Clock:       clock,
+		}
+		engine := newBlockEngine(tb.Context(), nil, deps)
+		defer engine.Close()
+		if _, ok := engine.(notReadyEngine); !ok {
+			tb.Fatalf("a block with no block count built %T", engine)
+		}
+		if engine.Ready() || !clusters.closed.Load() {
+			tb.Fatalf("ready %t, clusters closed %t", engine.Ready(), clusters.closed.Load())
+		}
+		if options := blockRunOptions(engine, hostTestStatusPort, deps); options.Http != nil {
+			tb.Error("a block that cannot start serves routes")
+		}
+	})
 }
 
 // R-EVS-15: the block holds no Postgres pool and reads no pending group's tables, so sidecarhost.Run never

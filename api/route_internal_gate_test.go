@@ -57,6 +57,8 @@ func TestInternalGateRoutesReachTheirHandlerOnlyWithAHostsBearer(t *testing.T) {
 		// evs reads the log from the store itself, and this process holds no first metadata cluster
 		{method: "GET", path: "/internal/gate/projection/" + networkId + "?after=0", evsCode: http.StatusForbidden, connectCode: http.StatusServiceUnavailable},
 		{method: "GET", path: "/internal/gate/rows/" + networkId + "/" + hex.EncodeToString(rowsSha256[:]), evsCode: http.StatusForbidden, connectCode: http.StatusServiceUnavailable},
+		// an edge block's client mint takes the edge class alone (QD-812)
+		{method: "POST", path: "/internal/gate/edge-client", evsCode: http.StatusForbidden, connectCode: http.StatusForbidden},
 	}
 	for _, call := range calls {
 		if w := serveRouteAccess(handler, call.method, call.path, "Bearer "+evs); w.Code != call.evsCode {

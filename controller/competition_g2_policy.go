@@ -13,12 +13,16 @@ import (
 // An approved overlay and deployment executables are staged without changing
 // epoch one. Qualification supplies exact future image and binary identities.
 // All workload, resource, significance and submission-clock settings are kept.
+// Without a source graph the future epochs keep the current policy's; an
+// explicit sidecar/1 moves them to the eleven repositories (QD-769), and no
+// value moves a graph back to the ten.
 type CompetitionFutureEpochPolicy struct {
 	WorkCoveragePolicy          *model.CompetitionWorkCoveragePolicy        `yaml:"work_coverage_policy,omitempty"`
 	DistributedEvaluationPolicy *CompetitionDistributedEvaluationPolicy     `yaml:"distributed_evaluation_policy,omitempty"`
 	TrustedInstrument           *model.CompetitionTrustedInstrumentApproval `yaml:"trusted_instrument,omitempty"`
 	FromEpoch                   int                                         `yaml:"from_epoch"`
 	G2VolumePolicy              model.CompetitionG2VolumePolicy             `yaml:"g2_volume_policy"`
+	SourceGraphPolicy           model.CompetitionSourceGraphPolicy          `yaml:"source_graph_policy,omitempty"`
 	EvaluatorImageDigest        string                                      `yaml:"evaluator_image_digest"`
 	SimulatorSha256             string                                      `yaml:"simulator_sha256"`
 	ScorerSha256                string                                      `yaml:"scorer_sha256"`
@@ -45,6 +49,15 @@ func (self *CompetitionFutureEpochPolicy) cloneWorkCoverage() *CompetitionFuture
 	return &copy
 }
 
+// The source graph of the epochs the future policy covers: its own explicit
+// value, or the current policy's when it names none.
+func (self *Settings) futureSourceGraphPolicy() model.CompetitionSourceGraphPolicy {
+	if self.FutureEpochPolicy != nil && self.FutureEpochPolicy.SourceGraphPolicy != model.CompetitionSourceGraphPolicyLegacy {
+		return self.FutureEpochPolicy.SourceGraphPolicy
+	}
+	return self.EvaluationPolicy.SourceGraphPolicy
+}
+
 // Empty is intentionally legacy; the exported version-one constant remains
 // unchanged for historical callers and artifacts.
 func (self *Settings) scorerVersion() string {
@@ -61,6 +74,14 @@ func (self *Settings) validateFutureEpochPolicy() error {
 	if _, err := model.CompetitionScorerVersionForWorkCoverage(p.G2VolumePolicy, p.WorkCoveragePolicy); err != nil ||
 		p.WorkCoveragePolicy != nil && (p.TrustedInstrument == nil || !reflect.DeepEqual(p.WorkCoveragePolicy, p.TrustedInstrument.WorkCoveragePolicy)) {
 		return errors.New("future coverage policy lacks its exact independent instrument approval")
+	}
+	if err := model.ValidateCompetitionSourceGraphPolicy(p.SourceGraphPolicy); err != nil {
+		return err
+	}
+	// An evaluator image holds the checkouts of exactly one graph, so the image
+	// of the ten cannot be relabeled as the image of the eleven.
+	if self.futureSourceGraphPolicy() != self.EvaluationPolicy.SourceGraphPolicy && (p.EvaluatorImageDigest == "" || p.EvaluatorImageDigest == self.EvaluatorImageDigest) {
+		return errors.New("a future source graph requires its own evaluator image")
 	}
 	if self.AutomationPolicy.Staging || p.FromEpoch != 2 || p.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork ||
 		(p.EvaluatorImageDigest != "" && (!imageDigestPattern.MatchString(p.EvaluatorImageDigest) || (p.EvaluatorImageDigest == self.EvaluatorImageDigest && self.EvaluationPolicy.G2VolumePolicy != p.G2VolumePolicy))) ||
@@ -108,6 +129,7 @@ func (self *Settings) forCompetitionEpoch(epoch int, newActivation bool) (*Setti
 		copy.distributedRoundEpoch = epoch
 		copy.EvaluationPolicy.G2VolumePolicy = p.G2VolumePolicy
 		copy.EvaluationPolicy.WorkCoveragePolicy = p.WorkCoveragePolicy.Clone()
+		copy.EvaluationPolicy.SourceGraphPolicy = self.futureSourceGraphPolicy()
 		if p.WorkCoveragePolicy != nil {
 			dependency := "model/competition_work_coverage_policy.go"
 			if copy.PatchPolicy.PathBase == competitionMonoRootPathBase {

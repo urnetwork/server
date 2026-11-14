@@ -41,7 +41,7 @@ func TestHostFormat2GateReadsServersSidecarYml(t *testing.T) {
 		drop   sidecar.Format2Mode
 	}{
 		{name: "no file", file: "", out: []sidecar.Id{listed, at40, at41}, purge: sidecar.Format2Observe, drop: sidecar.Format2Observe},
-		{name: "no format2 block", file: "sidecar:\n  evs: {enabled: true, percent: 100}\n", out: []sidecar.Id{listed, at40, at41}, purge: sidecar.Format2Observe, drop: sidecar.Format2Observe},
+		{name: "no format2 block", file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: 1}\n", out: []sidecar.Id{listed, at40, at41}, purge: sidecar.Format2Observe, drop: sidecar.Format2Observe},
 		{name: "a file that does not parse", file: "sidecar:\n  format2: {enabled: true, percent: 100, purge: on\n", out: []sidecar.Id{listed, at40, at41}, purge: sidecar.Format2Observe, drop: sidecar.Format2Observe},
 		{name: "the design's default", file: "sidecar:\n  format2: {enabled: false, networks: [], percent: 0, purge: observe, drop: observe}\n", out: []sidecar.Id{listed, at40, at41}, purge: sidecar.Format2Observe, drop: sidecar.Format2Observe},
 		{name: "listed while disabled", file: fmt.Sprintf("sidecar:\n  format2: {enabled: false, networks: [%q], percent: 100}\n", listedStr), out: []sidecar.Id{listed, at40, at41}, purge: sidecar.Format2Observe, drop: sidecar.Format2Observe},

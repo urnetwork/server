@@ -61,6 +61,16 @@ func sourceSettingsFromIntent(settings *Settings, intent *model.CompetitionSourc
 	copy.EvaluationPolicy.G2VolumePolicy = intent.G2VolumePolicy
 	copy.EvaluationPolicy.WorkCoveragePolicy = intent.WorkCoveragePolicy
 	copy.EvaluationPolicy = copy.EvaluationPolicy.Clone()
+	// The source graph comes from the approved configuration for the target
+	// epoch, never from the intent, and the intent's lock must hold exactly that
+	// graph: a server commit that needs sidecar cannot be prepared for a round
+	// whose evaluator release copies the ten, nor a lock of the ten for the eleven.
+	if !model.CompetitionSourceLockMatchesGraphPolicy(intent.Commits, copy.EvaluationPolicy.SourceGraphPolicy) {
+		return nil, errors.New("source lock does not hold the source graph of its target epoch's evaluator release")
+	}
+	if copy.roundBaselinePreparation != nil && copy.roundBaselinePreparation.Config.SourceGraphPolicy != copy.EvaluationPolicy.SourceGraphPolicy {
+		return nil, errors.New("source requires the baseline preparation role of its own source graph")
+	}
 	copy.BaseSha, copy.EvaluatorImageDigest = intent.Commits["server"], intent.EvaluatorImageDigest
 	copy.EvaluationPolicy.TakeoverMargin, copy.EvaluationPolicy.HostQualificationSha256 = intent.Threshold, intent.HostQualificationSha256
 	copy.AutomationPolicy.SourceGeneration, copy.AutomationPolicy.SourceLockSha256, copy.AutomationPolicy.SourceActivationGeneration = intent.SourceGeneration, intent.SourceLockSha256, intent.Generation
