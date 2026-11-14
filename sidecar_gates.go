@@ -254,6 +254,15 @@ func (self *SidecarConfig) Reseed() bool {
 	return self.reseed
 }
 
+// §19.10's restore hold (plan-OPS-restore-hold, QD-076): while true, api's
+// public routes but its status route, the token exchange with them, answer 503
+// with Retry-After, and CreateContract answers Setup; open streams, sockets and
+// edges are untouched. The restore runbook sets it before the restored primary
+// answers, and clears it once the api step ends.
+func (self *SidecarConfig) RestoreHold() bool {
+	return self.restoreHold
+}
+
 // §19.9: the metadata cluster that takes new repos. Empty, when the file names
 // none, means the first cluster.
 func (self *SidecarConfig) PlaceNew() string {
