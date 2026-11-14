@@ -178,10 +178,15 @@ func addGiftOrderEmailsInTx(ctx context.Context, tx server.PgTx, order *model.Gi
 			GiftOrderId: order.GiftOrderId,
 		},
 	})
-	if order.Delivery != model.GiftDeliveryThem {
+	sendAt := GiftFriendsSendAt(order)
+	if sendAt == nil {
 		return
 	}
-	deliverTime := giftFriendDeliverTime(order, now)
+	// a time already past is due as it is owed, not before
+	deliverTime := *sendAt
+	if deliverTime.Before(now) {
+		deliverTime = now.UTC()
+	}
 	for recipientIndex, recipient := range order.Recipients {
 		if strings.TrimSpace(recipient) == "" {
 			continue
@@ -198,18 +203,48 @@ func addGiftOrderEmailsInTx(ctx context.Context, tx server.PgTx, order *model.Gi
 	}
 }
 
-// When the friends' emails are due: 9:00 on the order's send-on date in the
-// buyer's zone, the zone's offset on that date (daylight saving included); or
-// `now` for an order without a date, or a time already past.
-func giftFriendDeliverTime(order *model.GiftOrder, now time.Time) time.Time {
-	if order.SendOn == nil {
-		return now.UTC()
+// The card hold (GIFTOFPRIVACY.md §9.2): the friends' emails of an order paid
+// by card wait this long after the payment, past the early fraud warnings. A
+// refund or a dispute in the hold voids the codes or ends the order, and each
+// email is withdrawn when it comes due (GiftCardFriendTemplate's loader). A
+// coin payment has no chargeback, so its emails have no hold.
+const GiftFriendsCardHold = 2 * time.Hour
+
+// GiftFriendsSendAt is when a paid order's friends' emails go out: 9:00 on its
+// send-on date in the buyer's zone, or the payment for an order without a
+// date or whose date had passed by then; never before the payment, and for an
+// order not paid in a coin (by card) never before GiftFriendsCardHold after
+// it. nil when the order emails no friend: delivery "me", no friend's address
+// left, or not paid (pending, or refunded). The delivery owes the emails at
+// this time, POST /pay/gift/order answers it (friends_send_at), and the
+// buyer's email says it.
+func GiftFriendsSendAt(order *model.GiftOrder) *time.Time {
+	if order == nil || order.Status != model.GiftOrderStatusPaid || order.PaidTime == nil {
+		return nil
 	}
-	deliverTime := model.GiftOrderDeliverTime(*order.SendOn, order.SendTimezone)
-	if deliverTime.Before(now) {
-		return now.UTC()
+	if order.Delivery != model.GiftDeliveryThem || !giftOrderHasRecipients(order) {
+		return nil
 	}
-	return deliverTime
+	sendAt := giftFriendDeliverTime(order, *order.PaidTime)
+	return &sendAt
+}
+
+// When the friends' emails of the order, paid at paidTime, are due, by
+// GiftFriendsSendAt's rule whatever the order's state: the later of its
+// scheduled time (9:00 on its send-on date in the buyer's zone, at the zone's
+// offset that day) and the payment, plus the card hold unless it was paid in a
+// coin.
+func giftFriendDeliverTime(order *model.GiftOrder, paidTime time.Time) time.Time {
+	earliest := paidTime.UTC()
+	if order.Rail != model.GiftRailCrypto {
+		earliest = earliest.Add(GiftFriendsCardHold)
+	}
+	if order.SendOn != nil {
+		if scheduled := model.GiftOrderDeliverTime(*order.SendOn, order.SendTimezone); earliest.Before(scheduled) {
+			return scheduled
+		}
+	}
+	return earliest
 }
 
 // One code as an email lists it.
@@ -227,6 +262,20 @@ type giftEmailOrder struct {
 	order *model.GiftOrder
 	codes []*model.GiftCode
 	pdf   []byte
+	// when it was read to be sent; zero for one built in place, which reads
+	// as sent at the payment
+	loadTime time.Time
+}
+
+// When the email goes out: when it was read, else at the payment.
+func (self *giftEmailOrder) sendTime() time.Time {
+	if !self.loadTime.IsZero() {
+		return self.loadTime
+	}
+	if self.order != nil && self.order.PaidTime != nil {
+		return *self.order.PaidTime
+	}
+	return time.Time{}
 }
 
 func (self *giftEmailOrder) language() string {
@@ -278,6 +327,7 @@ func (self *giftEmailOrder) load(ctx context.Context, giftOrderId server.Id, par
 	self.order = order
 	self.codes = giftOrderCards(order, codes)
 	self.pdf = pdf
+	self.loadTime = server.NowUtc()
 	return nil
 }
 
@@ -356,18 +406,24 @@ func giftOrderHasRecipients(order *model.GiftOrder) bool {
 	return false
 }
 
-// What the email is about: the cards attached, or when the friends get theirs.
+// What the email is about: the cards attached, or when the friends get theirs
+// (GiftFriendsSendAt): now, once that time has come when this email goes out
+// (a coin payment's, or a late email); on the buyer's date; or, held after a
+// card payment, at the time, in the buyer's zone (else UTC).
 func (self *GiftCardsBuyerTemplate) Lead() string {
 	language := self.language()
 	if !self.Them() {
 		return giftCardTextCount(language, "buyer.me", self.count())
 	}
-	if self.order.SendOn != nil {
-		sendOn := self.order.SendOn.UTC()
-		date := giftCardDate(language, time.Date(sendOn.Year(), sendOn.Month(), sendOn.Day(), 0, 0, 0, 0, time.UTC))
-		return giftCardTextCount(language, "buyer.them_on", self.count(), "date", date)
+	sendAt := GiftFriendsSendAt(self.order)
+	if sendAt == nil || !self.sendTime().Before(*sendAt) {
+		return giftCardTextCount(language, "buyer.them_now", self.count())
 	}
-	return giftCardTextCount(language, "buyer.them_now", self.count())
+	location := model.GiftOrderLocation(self.order.SendTimezone)
+	if self.order.SendOn != nil && sendAt.Equal(model.GiftOrderDeliverTime(*self.order.SendOn, self.order.SendTimezone)) {
+		return giftCardTextCount(language, "buyer.them_on", self.count(), "date", giftCardDate(language, sendAt.In(location)))
+	}
+	return giftCardTextCount(language, "buyer.them_hold", self.count(), "time", giftCardTime(language, sendAt.In(location)))
 }
 
 // Delivery "them": the cards are here too.

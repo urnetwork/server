@@ -69,6 +69,11 @@ const (
 	GiftErrorCodeInvalidSendOn = "invalid_send_on"
 	// the note is over 240 characters, or the signature over 40
 	GiftErrorCodeMessageTooLong = "message_too_long"
+	// the note or the signature holds a link (model.GiftTextHasLink)
+	GiftErrorCodeNoteHasLink = "gift_note_has_link"
+	// the buyer's email already has model.GiftFriendEmailDailyLimit friend
+	// emails, with this order's, in the last 24 hours (gift_rails_controller.go)
+	GiftErrorCodeDailyLimit = "gift_daily_limit"
 )
 
 // The checkout metadata checkout.session.completed reads back: the order the
@@ -271,6 +276,13 @@ func giftValidatePurchase(
 	if giftSignatureMaxRunes < utf8.RuneCountInString(signature) {
 		return nil, GiftErrorCodeMessageTooLong, fmt.Sprintf("The signature can be up to %d characters.", giftSignatureMaxRunes)
 	}
+	// no links in what the cards and the friends' emails print
+	if model.GiftTextHasLink(message) {
+		return nil, GiftErrorCodeNoteHasLink, "The note can't include a link or a web address. Please take it out."
+	}
+	if model.GiftTextHasLink(signature) {
+		return nil, GiftErrorCodeNoteHasLink, "The signature can't include a link or a web address. Please take it out."
+	}
 
 	language := strings.ToLower(strings.TrimSpace(args.Language))
 	if language == "" {
@@ -349,7 +361,7 @@ func giftCleanText(text string, multiline bool) string {
 		case r == '\n' || r == '\t':
 			b.WriteRune(' ')
 		case unicode.IsControl(r):
-		case '‪' <= r && r <= '‮', '⁦' <= r && r <= '⁩':
+		case '\u202A' <= r && r <= '\u202E', '\u2066' <= r && r <= '\u2069':
 		default:
 			b.WriteRune(r)
 		}
@@ -405,11 +417,19 @@ func GiftCheckout(
 	}
 
 	ctx := clientSession.Ctx
+	// the buyer's daily friend emails, before and after the order is stored
+	// (gift_rails_controller.go)
+	if errCode, errMessage := giftFriendEmailLimitRefusal(ctx, order, giftConfig, server.NowUtc()); errMessage != "" {
+		return giftCheckoutError(errCode, errMessage), nil
+	}
 	order.Rail = model.GiftRailStripe
 	order.ReferrerNetworkId = giftReferrerNetworkId(&args.GiftPurchaseArgs, clientSession)
 	if err := model.CreateGiftOrder(ctx, order); err != nil {
 		glog.Errorf("[gift]could not store a gift order: %s\n", err)
 		return giftCheckoutError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
+	}
+	if errCode, errMessage := giftKeepFriendEmailLimit(ctx, order, giftConfig, server.NowUtc()); errMessage != "" {
+		return giftCheckoutError(errCode, errMessage), nil
 	}
 
 	stripe.Key = apiToken

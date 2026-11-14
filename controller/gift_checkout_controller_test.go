@@ -226,7 +226,7 @@ func TestGiftPurchaseValidation(t *testing.T) {
 		args.Recipients = []string{" a@example.com", "b@example.com ", "c@example.com"}
 		args.SendOn = "2026-12-24"
 		args.Timezone = "America/Chicago"
-		args.Message = "  Line one\r\nline two‮  "
+		args.Message = "  Line one\r\nline two\u202E  "
 		args.Signature = "Sam\nand Alex"
 	})
 	connect.AssertEqual(t, order.Quantity, 3)
@@ -258,8 +258,8 @@ func TestGiftPurchaseValidation(t *testing.T) {
 }
 
 func TestGiftPurchaseCleanText(t *testing.T) {
-	connect.AssertEqual(t, giftCleanText(" a\r\nb\rc\td\x00e⁦f ", true), "a\nb\nc def")
-	connect.AssertEqual(t, giftCleanText(" a\r\nb\rc\td\x00e‪f ", false), "a b c def")
+	connect.AssertEqual(t, giftCleanText(" a\r\nb\rc\td\x00e\u2066f ", true), "a\nb\nc def")
+	connect.AssertEqual(t, giftCleanText(" a\r\nb\rc\td\x00e\u202Af ", false), "a b c def")
 	connect.AssertEqual(t, giftCleanText("ok \xff", false), "ok")
 	connect.AssertEqual(t, giftCleanText("مع أطيب التمنيات", false), "مع أطيب التمنيات")
 }
@@ -590,4 +590,65 @@ func TestCryptoOperatorGiftRefundShare(t *testing.T) {
 	gift = cryptoOperatorGiftRefund(&model.CryptoPaymentIntent{Asset: model.CryptoAssetXmr}, 10, &model.GiftCryptoRefund{Quantity: 3})
 	connect.AssertEqual(t, gift.RefundAtomic, int64(0))
 	connect.AssertEqual(t, gift.RefundUsd, 0.0)
+}
+
+// A note or a signature with a link is refused as gift_note_has_link, with a
+// message naming which; ordinary prose with dots is not (model.GiftTextHasLink
+// holds the whole table).
+func TestGiftPurchaseRefusesLinks(t *testing.T) {
+	config := model.Testing_GiftConfig()
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	validate := func(message string, signature string) (*model.GiftOrder, string, string) {
+		args := giftPurchaseTestArgs()
+		args.Message = message
+		args.Signature = signature
+		return giftValidatePurchase(&args, config, now)
+	}
+
+	for _, message := range []string{
+		"Merry Christmas! See https://example.com",
+		"Claim it at www.example.org today",
+		"bit.ly/free-pro",
+		"Write me: sam@example.com",
+		"Join t.me/somechannel",
+	} {
+		order, errCode, errMessage := validate(message, "Sam")
+		connect.AssertEqual(t, order == nil, true)
+		connect.AssertEqual(t, errCode, GiftErrorCodeNoteHasLink)
+		connect.AssertEqual(t, strings.Contains(errMessage, "note"), true)
+	}
+	for _, signature := range []string{"sam.example.com", "Sam (example.net)", "HTTPS://X.CO"} {
+		order, errCode, errMessage := validate("Happy holidays", signature)
+		connect.AssertEqual(t, order == nil, true)
+		connect.AssertEqual(t, errCode, GiftErrorCodeNoteHasLink)
+		connect.AssertEqual(t, strings.Contains(errMessage, "signature"), true)
+	}
+	for _, text := range []string{
+		"Merry Christmas! 3.5 years of friendship, e.g. the U.S. trip at 10 a.m.",
+		"Love you.So much. Te quiero mucho.Es tuyo.",
+		"J.R.R. fan forever",
+	} {
+		order, errCode, errMessage := validate(text, "Ann.Marie")
+		connect.AssertEqual(t, errCode, "")
+		connect.AssertEqual(t, errMessage, "")
+		connect.AssertEqual(t, order.Message, text)
+	}
+}
+
+// The link rule reads the text as it is stored: a control or bidi character
+// removed from inside a domain does not hide it.
+func TestGiftPurchaseLinkAfterCleaning(t *testing.T) {
+	config := model.Testing_GiftConfig()
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	for _, message := range []string{"example\u0000.com", "bit\u202E.ly/x", "www\u2066.example"} {
+		args := giftPurchaseTestArgs()
+		args.Message = message
+		_, errCode, _ := giftValidatePurchase(&args, config, now)
+		connect.AssertEqual(t, errCode, GiftErrorCodeNoteHasLink)
+	}
+	// a line break or a tab still separates, as a space does
+	args := giftPurchaseTestArgs()
+	args.Message = "Love you\n.com\tpany"
+	_, errCode, _ := giftValidatePurchase(&args, config, now)
+	connect.AssertEqual(t, errCode, "")
 }

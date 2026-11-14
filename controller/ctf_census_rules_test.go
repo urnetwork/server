@@ -69,16 +69,18 @@ func (self *ctfCensusFixture) provider(clientId server.Id, countryCode string, u
 	return end
 }
 
-// An extender passing every end rule in country.
+// An extender passing every end rule in country, its wallet and its E3–E5
+// judgement in its facts, as the shared eligibility rules give them. Its
+// address label is unused: an extender's X4 is E3.
 func (self *ctfCensusFixture) extender(clientId server.Id, countryCode string, unitLabel string, addressLabel string) *ctfExtenderEnd {
 	networkId := server.Id{0x30, clientId[1]}
 	unit := ctfTestHash(unitLabel)
 	end := &ctfExtenderEnd{
 		ExtenderId: server.Id{0x40, clientId[1]}, NetworkId: &networkId, Active: true, CountryCode: countryCode,
-		Egress: &model.CtfEgress{Unit: &unit, UnitFamily: 6, Addresses: [][32]byte{ctfTestHash(addressLabel)}},
+		Coldkey: ctfTestHash("coldkey " + clientId.String()),
+		Egress:  &model.CtfEgress{Unit: &unit, UnitFamily: 6},
 	}
 	self.facts.Extenders[clientId] = end
-	self.facts.Coldkeys[clientId] = ctfTestHash("coldkey " + clientId.String())
 	return end
 }
 
@@ -361,20 +363,27 @@ func TestCtfCensusUnitsEnterTheirLowestClientsDraw(t *testing.T) {
 	}
 }
 
-// X1 to X6 for extenders: an inactive or revoked record, a canary, an own
-// network and an activation in another country each exclude it; a client may
-// be a candidate in both roles.
+// X1 to X6 for extenders: an inactive or revoked record (E1), a duplicate
+// (E3), a fleet binding or no wallet (E4), the operator's own network (E5:
+// gated, a canary or a network it controls) and an activation in another
+// country (X3) each exclude it; a client may be a candidate in both roles. A
+// provider's own networks (P6) do not judge an extender: its E5 is in its
+// facts.
 func TestCtfCensusExtenderRules(t *testing.T) {
 	f := newCtfCensusFixture()
-	ids := ctfTestClientIds(6)
+	ids := ctfTestClientIds(9)
 	for _, id := range ids {
 		f.extender(id, "ir", "x"+id.String(), "e"+id.String())
 		f.present(model.CtfRoleExtender, id, "ir", 0, 672)
 	}
 	f.facts.Extenders[ids[1]].Active = false
-	f.facts.Extenders[ids[2]].Canary = true
-	f.facts.OwnNetworks[*f.facts.Extenders[ids[3]].NetworkId] = true
+	f.facts.Extenders[ids[2]].OwnNetwork = true
+	f.facts.Extenders[ids[3]].Duplicate = true
 	f.facts.Extenders[ids[4]].ActivatedElsewhere = true
+	f.facts.Extenders[ids[6]].HeadBound = true
+	f.facts.Extenders[ids[7]].Coldkey = [32]byte{}
+	// a provider's own network judges no extender on it
+	f.facts.OwnNetworks[*f.facts.Extenders[ids[8]].NetworkId] = true
 	// ids[5] is a provider too
 	f.provider(ids[5], "ir", "p5", "pa5")
 	f.present(model.CtfRoleProvider, ids[5], "ir", 0, 672)
@@ -384,8 +393,11 @@ func TestCtfCensusExtenderRules(t *testing.T) {
 		0,
 		ctfFailedOf(model.CtfReasonRevoked),
 		ctfFailedOf(model.CtfReasonOwnNetwork),
-		ctfFailedOf(model.CtfReasonOwnNetwork),
+		ctfFailedOf(model.CtfReasonDuplicate),
 		ctfFailedOf(model.CtfReasonCountryChanged),
+		0,
+		ctfFailedOf(model.CtfReasonHeadBound),
+		ctfFailedOf(model.CtfReasonNoWallet),
 		0,
 	} {
 		member := ctfMember(t, decision, model.CtfRoleExtender, ids[i])
@@ -610,40 +622,6 @@ func TestCtfMissingSamples(t *testing.T) {
 	missing, providersMissing := ctfMissingSamples(samples, &excused)
 	if missing != model.CtfSamplesPerEpoch-10-1 || providersMissing != 1 {
 		t.Fatalf("missing %d providers missing %d", missing, providersMissing)
-	}
-}
-
-// P6, X6 fail closed: an extender.yml that cannot be read, or that names a
-// durable network that does not parse, stops the census rather than let the
-// operator's own fleet compete.
-func TestCtfDurableNetworkIds(t *testing.T) {
-	networkId := server.NewId()
-	installTestExtenderConfigYaml(t, "directory:\n  durable_network_ids:\n    - "+networkId.String()+"\n")
-	if ids, err := ctfDurableNetworkIds(); err != nil || !slices.Equal(ids, []server.Id{networkId}) {
-		t.Fatalf("durable networks %v %v", ids, err)
-	}
-	installTestExtenderConfigYaml(t, "directory:\n  durable_network_ids:\n    - "+networkId.String()+"\n    - fleet\n")
-	if _, err := ctfDurableNetworkIds(); err == nil {
-		t.Fatal("a durable network that does not parse was dropped")
-	}
-	installTestExtenderConfigYaml(t, "directory: [\n")
-	if _, err := ctfDurableNetworkIds(); err == nil {
-		t.Fatal("an unreadable extender.yml gave no durable networks")
-	}
-}
-
-// An extender member is judged by its client's record active at the end, the
-// lowest extender id, else its lowest record.
-func TestCtfExtenderRecord(t *testing.T) {
-	low, mid, high := server.Id{1}, server.Id{2}, server.Id{3}
-	if record := ctfExtenderRecord([]*model.CtfExtenderBoundary{{ExtenderId: high, Active: true}, {ExtenderId: low}, {ExtenderId: mid, Active: true}}); record.ExtenderId != mid {
-		t.Errorf("chose %s, want the lowest active", record.ExtenderId)
-	}
-	if record := ctfExtenderRecord([]*model.CtfExtenderBoundary{{ExtenderId: high}, {ExtenderId: low}}); record.ExtenderId != low {
-		t.Errorf("chose %s, want the lowest", record.ExtenderId)
-	}
-	if ctfExtenderRecord(nil) != nil {
-		t.Error("chose a record from none")
 	}
 }
 

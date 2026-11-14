@@ -20,11 +20,19 @@ package controller
 //     task never saw those trials, and nobody could confirm Stripe's own
 //     dashboard reminder (mmm/ONBOARDING-RETENTION.md P4). Each store gets
 //     the notice when service_reminders.trial_ending_stores names it.
+//   - A redeemed gift year never renews (GIFTOFPRIVACY.md §9.2): one notice
+//     14 days before it ends, when nothing else will carry Pro on, with a
+//     link to keep Pro at the regular price. That is an offer, so unlike the
+//     others it goes only where the mail policy lets an offer go
+//     (giftEndingRefusal), in the reader's language. It is no campaign: it
+//     writes no re-engagement event, opens no episode and never goes during
+//     one, so no re-engagement or win-back result counts it.
 //
-// A daily task finds the crypto years and the store trials and adds one
-// outbox message per window and notice; the outbox key makes a replayed run
-// (or a replayed Stripe event) add nothing. Both kinds are off until
-// reengagement.yml `service_reminders` turns them on; off, the task counts.
+// A daily task finds the crypto years, the store trials and the gift years,
+// and adds one outbox message per window and notice; the outbox key makes a
+// replayed run (or a replayed Stripe event) add nothing. Each kind is off
+// until reengagement.yml `service_reminders` turns it on; off, the task
+// counts.
 
 import (
 	"context"
@@ -32,6 +40,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	texttemplate "text/template"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -100,6 +109,61 @@ func (self *ProEndingTemplate) AssetName() string {
 const cryptoReminderAssetSol = "solana_sol"
 
 func (self *ProEndingTemplate) RenewUrl() string {
+	return "https://ur.io/app/subscription"
+}
+
+// GiftEndingTemplate is the notice that a redeemed gift year of Pro ends in 14
+// days with nothing else to carry Pro on (GIFTOFPRIVACY.md §9.2), in one of
+// the six gift languages, with a link to keep Pro at the regular price. It
+// names no price and no discount: ur.io's subscription page shows the plans.
+type GiftEndingTemplate struct {
+	// when the gift year ends: its renewal's end_time
+	EndTime time.Time `json:"end_time"`
+	// the reader's language, one of giftCardLanguages
+	Lang string `json:"language"`
+	// the reader's IANA zone the date is written in; "" is UTC
+	TimeZone string `json:"time_zone,omitempty"`
+	BaseTemplate
+}
+
+func (self *GiftEndingTemplate) Name() string {
+	return giftEndingTemplateName
+}
+
+const giftEndingTemplateName = "gift_ending"
+
+// The reader's language (LanguageTemplate).
+func (self *GiftEndingTemplate) Language() string {
+	return giftCardLanguage(self.Lang)
+}
+
+// `T` (giftCardText in the reader's language) and `Upper` (the text part's
+// headline).
+func (self *GiftEndingTemplate) Funcs(funcs texttemplate.FuncMap) {
+	self.BaseTemplate.Funcs(funcs)
+	language := self.Language()
+	funcs["T"] = func(key string, args ...string) string {
+		return giftCardText(language, key, args...)
+	}
+	funcs["Upper"] = strings.ToUpper
+}
+
+// The day the year ends, in the reader's zone.
+func (self *GiftEndingTemplate) EndDate() string {
+	return giftCardDate(self.Language(), self.EndTime.In(model.GiftOrderLocation(self.TimeZone)))
+}
+
+func (self *GiftEndingTemplate) Title() string {
+	return giftCardText(self.Language(), "ending.title", "date", self.EndDate())
+}
+
+func (self *GiftEndingTemplate) Body() string {
+	return giftCardText(self.Language(), "ending.body", "date", self.EndDate())
+}
+
+// Where Pro is kept, as the other reminders link it: ur.io's subscription
+// page, at the regular prices.
+func (self *GiftEndingTemplate) KeepUrl() string {
 	return "https://ur.io/app/subscription"
 }
 
@@ -282,6 +346,9 @@ var proEndingNoticeDays = []int{14, 2}
 // The notice before a store trial's first charge, in days.
 const trialEndingNoticeDays = 2
 
+// The notice before a gift year ends, in days.
+const giftEndingNoticeDays = 14
+
 // How many missed daily runs a run makes up for. A notice that was already
 // queued is not queued again (the outbox key), so the overlap is harmless; a
 // late notice still names the real date, and none names a date already past.
@@ -293,9 +360,13 @@ type ServiceRemindersArgs struct {
 }
 
 type ServiceRemindersResult struct {
-	ProEnding   int  `json:"pro_ending"`
-	TrialEnding int  `json:"trial_ending"`
-	DryRun      bool `json:"dry_run"`
+	ProEnding   int `json:"pro_ending"`
+	TrialEnding int `json:"trial_ending"`
+	GiftEnding  int `json:"gift_ending"`
+	// gift years ending whose notice the mail policy kept back, by reason
+	// (giftEndingRefusal)
+	GiftEndingRefused map[string]int `json:"gift_ending_refused,omitempty"`
+	DryRun            bool           `json:"dry_run"`
 }
 
 // NextServiceRemindersAt is the next 03:00 UTC after `now`.
@@ -374,9 +445,131 @@ func ServiceReminders(args *ServiceRemindersArgs, clientSession *session.ClientS
 			result.TrialEnding++
 		}
 	}
-	glog.Infof("[service_reminders]pro ending %d, trial ending %d, dry run %t (pro on %t, trial on %t)\n",
-		result.ProEnding, result.TrialEnding, args.DryRun, cfg.ServiceReminders.ProEnding, cfg.ServiceReminders.TrialEnding)
+
+	giftSend := cfg.ServiceReminders.GiftEnding && !args.DryRun
+	runGiftEndingReminders(ctx, now, giftSend, result)
+
+	glog.Infof("[service_reminders]pro ending %d, trial ending %d, gift ending %d (kept back %v), dry run %t (pro on %t, trial on %t, gift on %t)\n",
+		result.ProEnding, result.TrialEnding, result.GiftEnding, result.GiftEndingRefused, args.DryRun,
+		cfg.ServiceReminders.ProEnding, cfg.ServiceReminders.TrialEnding, cfg.ServiceReminders.GiftEnding)
 	return result, nil
+}
+
+// runGiftEndingReminders queues the notice of each gift year that ends in
+// giftEndingNoticeDays with nothing after it (model.ListGiftYearsEnding),
+// making up for missed runs as the others do, when the mail policy lets it
+// reach its reader (giftEndingNotice). One per gift year: the outbox key is
+// the year's code. With send false it only counts.
+func runGiftEndingReminders(ctx context.Context, now time.Time, send bool, result *ServiceRemindersResult) {
+	today := dayStart(now)
+	endTo := today.Add(time.Duration(giftEndingNoticeDays+1) * day)
+	endFrom := endTo.Add(-day - time.Duration(serviceRemindersCatchUpDays)*day)
+	if endFrom.Before(now) {
+		endFrom = now
+	}
+	for _, year := range model.ListGiftYearsEnding(ctx, endFrom, endTo, now, 5000) {
+		template, userAuth, refusal := giftEndingNotice(ctx, year, now)
+		if refusal != "" {
+			if result.GiftEndingRefused == nil {
+				result.GiftEndingRefused = map[string]int{}
+			}
+			result.GiftEndingRefused[refusal]++
+			continue
+		}
+		if !send {
+			result.GiftEnding++
+			continue
+		}
+		networkId := year.NetworkId
+		added := false
+		server.Tx(ctx, func(tx server.PgTx) {
+			added = addAccountMessageInTx(ctx, tx, &accountMessage{
+				key:       giftEndingKey(year),
+				networkId: &networkId,
+				userAuth:  userAuth,
+				template:  template,
+			})
+		})
+		if added {
+			result.GiftEnding++
+		}
+	}
+}
+
+// The notice's outbox key, one per gift year: its renewal's code, else its end.
+func giftEndingKey(year *model.GiftYearEnding) string {
+	if year.TransactionId != "" {
+		return fmt.Sprintf("%s/%s/%s", giftEndingTemplateName, year.NetworkId, year.TransactionId)
+	}
+	return fmt.Sprintf("%s/%s/%d", giftEndingTemplateName, year.NetworkId, year.EndTime.Unix())
+}
+
+// Why a gift-ending notice was kept back, besides the mail policy's own exits
+// (onboarding.ExitCountryNoMarketing, ExitCanadaConsent,
+// ExitConsentEvidence).
+const (
+	// the admin login is a phone number, or the network has none
+	giftEndingRefusalNoEmail = "no_email"
+	// the reader turned product updates off
+	giftEndingRefusalProductUpdates = "product_updates_off"
+	// an unsubscribe, a complaint or a bounce suppressed marketing mail
+	giftEndingRefusalSuppressed = "suppressed"
+	// a re-engagement or win-back episode is open
+	giftEndingRefusalEpisode = "reengagement_open"
+	// the country may not get an offer by email, or is unknown
+	giftEndingRefusalNoOffer = "country_no_offer"
+)
+
+// giftEndingNotice is the notice of the gift year for its network's admin
+// login, or the reason it does not go. It offers to keep Pro, so it goes only
+// where the mail policy lets an offer go, read as the campaigns read it: an
+// email login (no SMS), product updates on and no marketing suppression, no
+// open re-engagement or win-back episode (so a purchase after this notice is
+// never counted as theirs), the policy's country and consent rules for its
+// purpose (onboarding.MailPolicy.Exit with onboarding.PurposeGiftEnding: the
+// countries that get no marketing mail, Canada's consent, the evidence
+// countries' consent evidence), and a country that may get an offer
+// (OfferAllowed; an unknown one may not). It is written in the reader's
+// language as the campaigns choose theirs (the first of the reader's languages
+// a gift language serves, else their country's, else English), with the date
+// in the reader's zone (else UTC).
+func giftEndingNotice(ctx context.Context, year *model.GiftYearEnding, now time.Time) (template *GiftEndingTemplate, userAuth string, refusal string) {
+	networkId := year.NetworkId
+	_, userAuth, ok := model.GetNetworkAdminUserAuth(ctx, networkId)
+	if !ok || !strings.Contains(userAuth, "@") {
+		return nil, "", giftEndingRefusalNoEmail
+	}
+	mail := model.GetNetworkMailState(ctx, networkId)
+	if !mail.ProductUpdates {
+		return nil, "", giftEndingRefusalProductUpdates
+	}
+	if mail.SuppressedAt != nil {
+		return nil, "", giftEndingRefusalSuppressed
+	}
+	if episode := model.GetNetworkReengagement(ctx, networkId); episode != nil && !episode.Exited() {
+		return nil, "", giftEndingRefusalEpisode
+	}
+	mailContext, reader := reengagementContextReader(ctx, networkId, model.NetworkLastConnectDay(ctx, networkId))
+	_, createTime, _ := model.NetworkEnrollmentFacts(ctx, networkId)
+	policy := model.Onboarding().MailPolicy()
+	if exit := policy.Exit(onboarding.PurposeGiftEnding, onboarding.MailFacts{
+		Country:       mailContext.Country,
+		ConsentSource: mail.Source,
+		CreatedAt:     createTime,
+		LastPaidEnd:   model.NetworkLastPaidEnd(ctx, networkId),
+		Now:           now,
+	}); exit != "" {
+		return nil, "", exit
+	}
+	if !policy.OfferAllowed(mailContext.Country) {
+		return nil, "", giftEndingRefusalNoOffer
+	}
+	language, _ := onboarding.ChooseTemplateLocale(reader.Languages, giftCardLanguages, model.Onboarding().EffectiveMailLanguageSettings())
+	return &GiftEndingTemplate{
+		EndTime:  year.EndTime,
+		Lang:     giftCardLanguage(language),
+		TimeZone: mailContext.TimeZone,
+	}, userAuth, ""
 }
 
 func ServiceRemindersPost(args *ServiceRemindersArgs, result *ServiceRemindersResult, clientSession *session.ClientSession, tx server.PgTx) error {

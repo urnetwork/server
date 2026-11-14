@@ -264,6 +264,24 @@ var giftCardStrings = map[string]map[string]string{
 		"ru": "Мы отправим каждому получателю его подарочную открытку и вашу записку по почте {date}.",
 		"ar": "سنرسل إلى كل صديق بطاقة هديته ورسالتك عبر البريد الإلكتروني في {date}.",
 	},
+	// the card hold: a card payment's friend emails wait about two hours
+	// (giftCardTime writes {time}; Spanish's carries its article)
+	"buyer.them_hold.one": {
+		"en": "We'll email the gift card and your note at {time}, about two hours after your payment.",
+		"es": "Enviaremos por correo la tarjeta de regalo y tu nota a {time}, unas dos horas después de tu pago.",
+		"de": "Wir schicken die Geschenkkarte und deine Nachricht um {time} per E-Mail, etwa zwei Stunden nach deiner Zahlung.",
+		"zh": "我们将在 {time}（您付款约两小时后）通过邮件把礼品卡和您的留言发给好友。",
+		"ru": "Мы отправим подарочную открытку и вашу записку по почте в {time}, примерно через два часа после оплаты.",
+		"ar": "سنرسل بطاقة الهدية ورسالتك عبر البريد الإلكتروني في الساعة {time}، بعد نحو ساعتين من الدفع.",
+	},
+	"buyer.them_hold.other": {
+		"en": "We'll email each friend their own gift card and your note at {time}, about two hours after your payment.",
+		"es": "A {time}, unas dos horas después de tu pago, enviaremos por correo a cada destinatario su propia tarjeta de regalo y tu nota.",
+		"de": "Um {time}, etwa zwei Stunden nach deiner Zahlung, schicken wir jeder Person ihre eigene Geschenkkarte und deine Nachricht per E-Mail.",
+		"zh": "我们将在 {time}（您付款约两小时后）通过邮件把各自的礼品卡和您的留言发给每位好友。",
+		"ru": "В {time}, примерно через два часа после оплаты, мы отправим каждому получателю его подарочную открытку и вашу записку.",
+		"ar": "سنرسل إلى كل صديق بطاقة هديته ورسالتك عبر البريد الإلكتروني في الساعة {time}، بعد نحو ساعتين من الدفع.",
+	},
 	"buyer.them_copy.one": {
 		"en": "The card is attached here too, so you have its code.",
 		"es": "La tarjeta también va adjunta aquí, para que tengas su código.",
@@ -434,6 +452,68 @@ var giftCardStrings = map[string]map[string]string{
 		"ru": "Вы получили это письмо, потому что кто-то купил вам подарок URnetwork на ur.io и указал этот адрес. Если вы его не ждали, просто проигнорируйте письмо.",
 		"ar": "تلقيت هذه الرسالة لأن أحدهم اشترى لك هدية من URnetwork على ur.io وأدخل هذا العنوان. إذا لم تكن تتوقعها، يمكنك تجاهل هذه الرسالة.",
 	},
+
+	// the gift-ending reminder (gift_ending, service_reminders_controller.go):
+	// 14 days before a redeemed gift year ends. It offers Pro at the regular
+	// price, never a discount, and names no price; product updates turn it
+	// off, as the campaigns' do ("Product updates", the switch in ur.io's
+	// account settings)
+	"ending.title": {
+		"en": "Your gift year of URnetwork Pro ends on {date}",
+		"es": "Tu año de URnetwork Pro de regalo termina el {date}",
+		"de": "Dein geschenktes Jahr URnetwork Pro endet am {date}",
+		"zh": "您获赠的一年 URnetwork Pro 将于 {date} 结束",
+		"ru": "Подаренный вам год URnetwork Pro заканчивается {date}",
+		"ar": "ينتهي عام URnetwork Pro المُهدى إليك في {date}",
+	},
+	"ending.preheader": {
+		"en": "To keep Pro after that, choose a plan at the regular price. To go back to the free plan, there's nothing to do.",
+		"es": "Para seguir con Pro después, elige un plan al precio normal. Para volver al plan gratuito, no tienes que hacer nada.",
+		"de": "Wenn du Pro danach behalten möchtest, wähle einen Tarif zum regulären Preis. Für den kostenlosen Tarif musst du nichts tun.",
+		"zh": "如需在此之后继续使用 Pro，请按常规价格选择套餐。如果想回到免费套餐，无需任何操作。",
+		"ru": "Чтобы сохранить Pro и дальше, выберите тариф по обычной цене. Чтобы вернуться на бесплатный тариф, ничего делать не нужно.",
+		"ar": "للاحتفاظ بـ Pro بعد ذلك، اختر خطة بالسعر العادي. وللعودة إلى الخطة المجانية، لا داعي لفعل أي شيء.",
+	},
+	"ending.eyebrow": {
+		"en": "Reminder",
+		"es": "Recordatorio",
+		"de": "Erinnerung",
+		"zh": "提醒",
+		"ru": "Напоминание",
+		"ar": "تذكير",
+	},
+	"ending.body": {
+		"en": "The year of URnetwork Pro from your gift code ends on {date}. To keep Pro after that, choose a plan at the regular price.",
+		"es": "El año de URnetwork Pro de tu código de regalo termina el {date}. Para seguir con Pro después, elige un plan al precio normal.",
+		"de": "Das Jahr URnetwork Pro aus deinem Geschenkcode endet am {date}. Wenn du Pro danach behalten möchtest, wähle einen Tarif zum regulären Preis.",
+		"zh": "您通过礼品码获得的一年 URnetwork Pro 将于 {date} 结束。如需在此之后继续使用 Pro，请按常规价格选择套餐。",
+		"ru": "Год URnetwork Pro по вашему подарочному коду заканчивается {date}. Чтобы сохранить Pro и дальше, выберите тариф по обычной цене.",
+		"ar": "ينتهي عام URnetwork Pro الذي حصلت عليه برمز الهدية في {date}. للاحتفاظ بـ Pro بعد ذلك، اختر خطة بالسعر العادي.",
+	},
+	"ending.button": {
+		"en": "Keep URnetwork Pro",
+		"es": "Seguir con URnetwork Pro",
+		"de": "URnetwork Pro behalten",
+		"zh": "继续使用 URnetwork Pro",
+		"ru": "Сохранить URnetwork Pro",
+		"ar": "الاحتفاظ بـ URnetwork Pro",
+	},
+	"ending.free": {
+		"en": "If you'd rather go back to the free plan, there's nothing to do. Questions? Contact support@ur.io.",
+		"es": "Si prefieres volver al plan gratuito, no tienes que hacer nada. ¿Preguntas? Escribe a support@ur.io.",
+		"de": "Wenn du lieber zum kostenlosen Tarif zurückkehren möchtest, musst du nichts tun. Fragen? Schreib an support@ur.io.",
+		"zh": "如果您想回到免费套餐，无需任何操作。有疑问？请联系 support@ur.io。",
+		"ru": "Если вы предпочитаете вернуться на бесплатный тариф, ничего делать не нужно. Есть вопросы? Напишите на support@ur.io.",
+		"ar": "إذا كنت تفضل العودة إلى الخطة المجانية، فلا داعي لفعل أي شيء. لديك أسئلة؟ راسلنا على support@ur.io.",
+	},
+	"ending.why": {
+		"en": "Sent once to the address on your URnetwork account, 14 days before a year of URnetwork Pro from a gift code ends, because product updates are on. To stop emails like this, turn product updates off at ur.io/app/account/settings.",
+		"es": "Se envía una sola vez a la dirección de tu cuenta de URnetwork, 14 días antes de que termine un año de URnetwork Pro de un código de regalo, porque tienes activadas las novedades del producto. Para dejar de recibir correos como este, desactívalas en ur.io/app/account/settings.",
+		"de": "Einmalig an die Adresse deines URnetwork-Kontos gesendet, 14 Tage bevor ein Jahr URnetwork Pro aus einem Geschenkcode endet, weil Produkt-Updates aktiviert sind. Wenn du solche E-Mails nicht mehr erhalten möchtest, deaktiviere Produkt-Updates unter ur.io/app/account/settings.",
+		"zh": "由于您开启了产品更新，我们会在通过礼品码获得的一年 URnetwork Pro 结束前 14 天，向您 URnetwork 账户的邮箱发送一次此邮件。如不想再收到此类邮件，请在 ur.io/app/account/settings 关闭产品更新。",
+		"ru": "Это письмо отправляется один раз на адрес вашего аккаунта URnetwork за 14 дней до окончания года URnetwork Pro по подарочному коду, потому что у вас включены новости о продукте. Чтобы больше не получать такие письма, отключите их на ur.io/app/account/settings.",
+		"ar": "تُرسل هذه الرسالة مرة واحدة إلى عنوان حسابك على URnetwork قبل 14 يومًا من انتهاء عام URnetwork Pro من رمز هدية، لأن تحديثات المنتج مفعّلة لديك. لإيقاف رسائل كهذه، أوقف تحديثات المنتج من ur.io/app/account/settings.",
+	},
 }
 
 // The string for the key in the language, with each `{name}` replaced by the
@@ -496,4 +576,44 @@ func giftCardDate(language string, t time.Time) string {
 	default:
 		return fmt.Sprintf("%s %d, %d", giftCardMonthsEn[index], day, year)
 	}
+}
+
+// The time of day of `t` (in t's own location) as the language writes it,
+// with "UTC" after it when t is in UTC (a buyer whose zone is unknown): "3:04
+// PM", "las 15:04" (Spanish carries the article its hour takes: "la 1:04"),
+// "15:04 Uhr", and "15:04" in Chinese, Russian and Arabic (Western digits, as
+// the site writes them).
+func giftCardTime(language string, t time.Time) string {
+	hour, minute := t.Hour(), t.Minute()
+	utc := t.Location() == time.UTC
+	var text string
+	switch giftCardLanguage(language) {
+	case "en":
+		hour12 := hour % 12
+		if hour12 == 0 {
+			hour12 = 12
+		}
+		meridiem := "AM"
+		if 12 <= hour {
+			meridiem = "PM"
+		}
+		text = fmt.Sprintf("%d:%02d %s", hour12, minute, meridiem)
+	case "es":
+		article := "las"
+		if hour == 1 {
+			article = "la"
+		}
+		text = fmt.Sprintf("%s %d:%02d", article, hour, minute)
+	case "de":
+		text = fmt.Sprintf("%d:%02d", hour, minute)
+		if !utc {
+			text += " Uhr"
+		}
+	default:
+		text = fmt.Sprintf("%d:%02d", hour, minute)
+	}
+	if utc {
+		text += " UTC"
+	}
+	return text
 }

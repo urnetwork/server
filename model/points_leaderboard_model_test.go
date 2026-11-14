@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -68,6 +69,7 @@ func TestComputePointsLeaderboardStreaks(t *testing.T) {
 				EpochsWithPoints: epochsWithPoints,
 			}},
 			windows,
+			nil,
 		)
 		connect.AssertEqual(t, latestEpoch, uint64(6))
 		entry := pointsTestEntry(entries, networkId)
@@ -79,6 +81,177 @@ func TestComputePointsLeaderboardStreaks(t *testing.T) {
 				"%s: blocks=%d streak=%d longest=%d, want %d/%d/%d",
 				c.name, entry.BlocksWithPoints, entry.Streak, entry.LongestStreak, c.blocks, c.streak, c.longest,
 			)
+		}
+	}
+}
+
+// The epochs with points and the excused epochs of a test case.
+func pointsTestEpochSet(epochs ...uint64) map[uint64]bool {
+	set := map[uint64]bool{}
+	for _, epoch := range epochs {
+		set[epoch] = true
+	}
+	return set
+}
+
+// The one network's entry of a ranking of it alone over windows 1..count.
+func pointsTestStreakEntry(t *testing.T, count int, epochsWithPoints map[uint64]bool, excusedEpochs map[uint64]bool) *PointsLeaderboardEntry {
+	t.Helper()
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	networkId := server.NewId()
+	entries, latestEpoch := ComputePointsLeaderboard(
+		[]PointsNetworkInput{{
+			NetworkId:        networkId,
+			TotalNanoPoints:  PointsToNanoPoints(10),
+			CreateTime:       now,
+			EpochsWithPoints: epochsWithPoints,
+		}},
+		pointsTestWindows(now, count),
+		excusedEpochs,
+	)
+	connect.AssertEqual(t, latestEpoch, uint64(count))
+	entry := pointsTestEntry(entries, networkId)
+	if entry == nil {
+		t.Fatalf("no entry")
+	}
+	return entry
+}
+
+// The root cause (owner decision 2026-11-14): an operator block the daily
+// award recorded expired never gets its points, so a network whose only
+// points in its epoch would have come from that block had none there, and the
+// walk ended its run: a streak lost by our failure. That epoch is excused now.
+// Points in epochs 1 and 2, none in excused epoch 3, and points in 4 are a
+// streak of 3, over epochs 1, 2 and 4, and the longest streak is that run.
+func TestComputePointsLeaderboardExcusedEpochDoesNotBreakTheStreak(t *testing.T) {
+	entry := pointsTestStreakEntry(t, 4, pointsTestEpochSet(1, 2, 4), pointsTestEpochSet(3))
+	if entry.BlocksWithPoints != 3 || entry.Streak != 3 || entry.LongestStreak != 3 {
+		t.Fatalf("blocks=%d streak=%d longest=%d, want 3/3/3", entry.BlocksWithPoints, entry.Streak, entry.LongestStreak)
+	}
+}
+
+// Only an excused epoch keeps a run: a missing epoch that is not excused still
+// ends it, before and after an excused one.
+func TestComputePointsLeaderboardUnexcusedGapStillBreaksTheStreak(t *testing.T) {
+	// 1, excused 2, 3: a run of 2; 4 is missing and not excused; 5, 6: a run
+	// of 2
+	entry := pointsTestStreakEntry(t, 6, pointsTestEpochSet(1, 3, 5, 6), pointsTestEpochSet(2))
+	if entry.BlocksWithPoints != 4 || entry.Streak != 2 || entry.LongestStreak != 2 {
+		t.Fatalf("blocks=%d streak=%d longest=%d, want 4/2/2", entry.BlocksWithPoints, entry.Streak, entry.LongestStreak)
+	}
+	// the missing epoch 2 ends the run of 1 before excused epoch 3, which
+	// carries no run into 4
+	entry = pointsTestStreakEntry(t, 4, pointsTestEpochSet(1, 4), pointsTestEpochSet(3))
+	if entry.BlocksWithPoints != 2 || entry.Streak != 1 || entry.LongestStreak != 1 {
+		t.Fatalf("blocks=%d streak=%d longest=%d, want 2/1/1", entry.BlocksWithPoints, entry.Streak, entry.LongestStreak)
+	}
+}
+
+// A network that earned points in an excused epoch, from another source,
+// counts the epoch as any epoch with points: it adds to Blocks and to the
+// run, and nobody gets credit it did not earn.
+func TestComputePointsLeaderboardPointsInAnExcusedEpochCount(t *testing.T) {
+	entry := pointsTestStreakEntry(t, 4, pointsTestEpochSet(1, 2, 3, 4), pointsTestEpochSet(3))
+	if entry.BlocksWithPoints != 4 || entry.Streak != 4 || entry.LongestStreak != 4 {
+		t.Fatalf("blocks=%d streak=%d longest=%d, want 4/4/4", entry.BlocksWithPoints, entry.Streak, entry.LongestStreak)
+	}
+	// points only in the excused epoch: a run of 1, which missing epoch 4 ends
+	entry = pointsTestStreakEntry(t, 4, pointsTestEpochSet(3), pointsTestEpochSet(3))
+	if entry.BlocksWithPoints != 1 || entry.Streak != 0 || entry.LongestStreak != 1 {
+		t.Fatalf("blocks=%d streak=%d longest=%d, want 1/0/1", entry.BlocksWithPoints, entry.Streak, entry.LongestStreak)
+	}
+}
+
+// Where an excused epoch falls: at the latest epoch, before any points, in a
+// row, and outside the windows.
+func TestComputePointsLeaderboardExcusedEpochStreaks(t *testing.T) {
+	cases := []struct {
+		name    string
+		epochs  []uint64
+		excused []uint64
+		blocks  int
+		streak  int
+		longest int
+	}{
+		{"excused latest epoch keeps the streak", []uint64{1, 2, 3, 4, 5}, []uint64{6}, 5, 5, 5},
+		{"excused epochs start no run", nil, []uint64{1, 2}, 0, 0, 0},
+		{"excused epochs around one epoch with points", []uint64{2}, []uint64{1, 3, 4, 5, 6}, 1, 1, 1},
+		{"two excused epochs in a row", []uint64{1, 4, 5, 6}, []uint64{2, 3}, 4, 4, 4},
+		{"excused run then a missing latest epoch", []uint64{1, 4, 5}, []uint64{2, 3}, 3, 0, 3},
+		{"excused epoch outside the windows is ignored", []uint64{1, 2, 4, 5, 6}, []uint64{0, 7, 99}, 5, 3, 3},
+		{"longest run through an excused epoch, then a gap", []uint64{1, 2, 4, 6}, []uint64{3}, 4, 1, 3},
+	}
+	for _, c := range cases {
+		entry := pointsTestStreakEntry(t, 6, pointsTestEpochSet(c.epochs...), pointsTestEpochSet(c.excused...))
+		if entry.BlocksWithPoints != c.blocks || entry.Streak != c.streak || entry.LongestStreak != c.longest {
+			t.Errorf(
+				"%s: blocks=%d streak=%d longest=%d, want %d/%d/%d",
+				c.name, entry.BlocksWithPoints, entry.Streak, entry.LongestStreak, c.blocks, c.streak, c.longest,
+			)
+		}
+	}
+}
+
+// Without an excused epoch in the windows the ranking is the one before
+// 2026-11-14, whole: for every set of epochs with points over eight windows,
+// Blocks, Streak and Longest follow the rule as it was written, and nil, empty
+// and outside-the-windows excused sets give identical entries, ranks and
+// positions.
+func TestComputePointsLeaderboardWithoutExcusedEpochsIsUnchanged(t *testing.T) {
+	// the rule before excused epochs
+	streaksBefore := func(epochsWithPoints map[uint64]bool, epochsAsc []uint64) (blocks int, streak int, longest int) {
+		run := 0
+		for _, epoch := range epochsAsc {
+			if epochsWithPoints[epoch] {
+				blocks += 1
+				run += 1
+				if longest < run {
+					longest = run
+				}
+			} else {
+				run = 0
+			}
+		}
+		return blocks, run, longest
+	}
+
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	const epochCount = 8
+	windows := pointsTestWindows(now, epochCount)
+	epochsAsc := []uint64{}
+	for epoch := uint64(1); epoch <= epochCount; epoch += 1 {
+		epochsAsc = append(epochsAsc, epoch)
+	}
+	// one network per set of epochs, every point total distinct
+	inputs := []PointsNetworkInput{}
+	for mask := 0; mask < 1<<epochCount; mask += 1 {
+		epochsWithPoints := map[uint64]bool{}
+		for i, epoch := range epochsAsc {
+			if mask&(1<<i) != 0 {
+				epochsWithPoints[epoch] = true
+			}
+		}
+		inputs = append(inputs, PointsNetworkInput{
+			NetworkId:        server.NewId(),
+			TotalNanoPoints:  PointsToNanoPoints(float64(mask + 1)),
+			CreateTime:       now,
+			EpochsWithPoints: epochsWithPoints,
+		})
+	}
+
+	entries, _ := ComputePointsLeaderboard(inputs, windows, nil)
+	connect.AssertEqual(t, len(entries), len(inputs))
+	for i, input := range inputs {
+		blocks, streak, longest := streaksBefore(input.EpochsWithPoints, epochsAsc)
+		if entries[i].NetworkId != input.NetworkId ||
+			entries[i].BlocksWithPoints != blocks || entries[i].Streak != streak || entries[i].LongestStreak != longest {
+			t.Fatalf("epochs %v: blocks=%d streak=%d longest=%d, want %d/%d/%d", input.EpochsWithPoints, entries[i].BlocksWithPoints, entries[i].Streak, entries[i].LongestStreak, blocks, streak, longest)
+		}
+	}
+	for _, excusedEpochs := range []map[uint64]bool{{}, pointsTestEpochSet(0, epochCount+1, 99)} {
+		other, _ := ComputePointsLeaderboard(inputs, windows, excusedEpochs)
+		if !slices.Equal(other, entries) {
+			t.Fatalf("excused epochs %v changed the ranking", excusedEpochs)
 		}
 	}
 }
@@ -108,7 +281,7 @@ func TestComputePointsLeaderboardRanks(t *testing.T) {
 		// e: no points -> not ranked
 		{NetworkId: e, TotalNanoPoints: 0, CreateTime: now, EpochsWithPoints: set()},
 	}
-	entries, _ := ComputePointsLeaderboard(inputs, windows)
+	entries, _ := ComputePointsLeaderboard(inputs, windows, nil)
 	connect.AssertEqual(t, len(entries), 4)
 	connect.AssertEqual(t, pointsTestEntry(entries, e), (*PointsLeaderboardEntry)(nil))
 
@@ -150,6 +323,7 @@ func TestComputePointsLeaderboardNoEpochs(t *testing.T) {
 	a := server.NewId()
 	entries, latestEpoch := ComputePointsLeaderboard(
 		[]PointsNetworkInput{{NetworkId: a, TotalNanoPoints: PointsToNanoPoints(3), EpochsWithPoints: map[uint64]bool{}}},
+		nil,
 		nil,
 	)
 	connect.AssertEqual(t, latestEpoch, uint64(0))
@@ -410,7 +584,7 @@ func TestComputePointsLeaderboardFullTie(t *testing.T) {
 		{NetworkId: y, TotalNanoPoints: PointsToNanoPoints(7), CreateTime: now.Add(-time.Hour), EpochsWithPoints: map[uint64]bool{2: true}},
 		{NetworkId: x, TotalNanoPoints: PointsToNanoPoints(7), CreateTime: now, EpochsWithPoints: map[uint64]bool{2: true}},
 	}
-	entries, _ := ComputePointsLeaderboard(inputs, windows)
+	entries, _ := ComputePointsLeaderboard(inputs, windows, nil)
 	ex, ey := pointsTestEntry(entries, x), pointsTestEntry(entries, y)
 	for _, pair := range [][2]int64{{ex.RankPoints, ey.RankPoints}, {ex.RankBlocks, ey.RankBlocks}, {ex.RankStreak, ey.RankStreak}} {
 		connect.AssertEqual(t, pair[0], int64(1))

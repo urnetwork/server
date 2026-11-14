@@ -31,8 +31,13 @@ const pgBouncerEveryBlock = "*"
 var pgBouncerPathServices = []string{"api", "connect", "proxy", "taskworker", "alt", "gossip", "mcp"}
 
 // The blocks whose main pools dial the PgBouncer instances directly, by
-// service. Empty: every block of every service is on the single port.
-var pgBouncerDirectBlocks = map[string][]string{}
+// service. Every block not listed is on the single port.
+//
+// Stage 1 (owner go 2026-11-13 for Monday 2026-11-16, 14:00-18:00 UTC): api
+// beta, about 1.3% of the database connection requests.
+var pgBouncerDirectBlocks = map[string][]string{
+	"api": {"beta"},
+}
 
 // The path the table gives a service's block. Only a process in a block goes
 // direct.

@@ -127,6 +127,10 @@ var accountMessageTemplates = map[string]func() Template{
 	(&TrialEndingTemplate{}).Name(): func() Template {
 		return &TrialEndingTemplate{}
 	},
+	// a gift year ends in 14 days (email only; the mail policy decides who)
+	(&GiftEndingTemplate{}).Name(): func() Template {
+		return &GiftEndingTemplate{}
+	},
 	// a paid gift order's cards (gift_delivery.go): the buyer's now, each
 	// friend's on the buyer's date; each reads its order and card when sent
 	(&GiftCardsBuyerTemplate{}).Name(): func() Template {

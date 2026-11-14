@@ -126,6 +126,12 @@ func GiftCryptoIntent(
 		), nil
 	}
 
+	// the buyer's daily friend emails, before the invoice is made and after
+	// the order is stored (gift_rails_controller.go)
+	if errCode, errMessage := giftFriendEmailLimitRefusal(clientSession.Ctx, order, giftConfig, server.NowUtc()); errMessage != "" {
+		return giftCryptoIntentError(errCode, errMessage), nil
+	}
+
 	// the order keeps the buyer's email; the invoice needs none, since its
 	// credit never emails a code (the delivery does)
 	priceUsd := float64(order.TotalCents) / 100.0
@@ -153,6 +159,10 @@ func GiftCryptoIntent(
 	if err := model.CreateGiftOrder(ctx, order); err != nil {
 		glog.Errorf("[gift]could not store the gift order of invoice %s: %s\n", intentId, err)
 		return giftCryptoIntentError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
+	}
+	// refused here, the invoice is never handed out and expires unpaid
+	if errCode, errMessage := giftKeepFriendEmailLimit(ctx, order, giftConfig, server.NowUtc()); errMessage != "" {
+		return giftCryptoIntentError(errCode, errMessage), nil
 	}
 	if err := model.SetGiftOrderCryptoIntentId(ctx, order.GiftOrderId, intentId); err != nil {
 		// never hand out an invoice whose credit could not find its order;

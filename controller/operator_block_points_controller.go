@@ -89,7 +89,9 @@ func scheduleAwardOperatorBlockPoints(
 
 // AwardOperatorBlockPoints awards every due operator block the task owns
 // (model.AwardDueOperatorBlockPoints) and re-ranks the points leaderboard when
-// it awarded any.
+// it awarded any. A block past its client_reliability retention deadline is
+// recorded expired and passed over; any other error ends the run, and the
+// task's retry starts again at the block that failed.
 func AwardOperatorBlockPoints(
 	args *AwardOperatorBlockPointsArgs,
 	clientSession *session.ClientSession,
