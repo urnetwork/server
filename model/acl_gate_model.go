@@ -31,3 +31,30 @@ func ParseAclVersionKeyEvent(channel string) (server.Id, bool) {
 	}
 	return server.Id(networkId), true
 }
+
+// The end as §8.10's gate reads it (sidecar.AclContractEnd), for a client the
+// relationship's query or GetNetworkPeerAclEnds found: its network, the subject
+// it acts as and that subject's binding and marks. A sidecar's client or a
+// tagged one acts only as its sidecar. The caller adds what only it knows: a
+// platform end, a declared source, a hard deny.
+func (self *ProvideRelationshipAclEnd) ContractEnd() sidecar.AclContractEnd {
+	end := sidecar.AclContractEnd{
+		Known:        true,
+		NetworkId:    sidecar.Id(self.NetworkId),
+		SidecarHeld:  self.StrictExp || self.Tagged,
+		AclEnforcing: self.AclEnforcing,
+		Hosted:       self.Hosted,
+		Roles:        self.Roles,
+		Principal:    self.Principal,
+	}
+	if self.SubjectClientId != nil {
+		end.SubjectClientId = sidecar.Id(*self.SubjectClientId)
+	}
+	if self.SidecarId != nil {
+		end.SidecarId = sidecar.Id(*self.SidecarId)
+	}
+	if self.MemberId != nil {
+		end.MemberId = sidecar.Id(*self.MemberId)
+	}
+	return end
+}
