@@ -20,9 +20,10 @@ import (
 //	                     paged by network id so a pass is bounded and a pass killed mid-way resumes from its
 //	                     cursor; a day row is written once and never changed after, so a rerun writes nothing
 //	                     twice. Transfer meters are summed by the debit flush as it applies (QUOTA-M2-06), and
-//	                     QUOTA-M6-03 adds Team's rows
-//	retention            network_service_usage 13 months and service_usage_batch 24 h, deleted in bounded
-//	                     pages (D-OPS-18 lists both tables, so no backup outlives these ttls)
+//	                     RollupTeamServiceUsage adds Team's rows after it (team_usage_model.go)
+//	retention            network_service_usage 13 months, service_usage_batch 24 h and, once MG6 links,
+//	                     stripe_meter_report 13 months, deleted in bounded pages (D-OPS-18 lists the
+//	                     tables, so no backup outlives these ttls)
 
 // The meter a day's stored bytes roll up under: §20.4's storage key.
 const NetworkUsageStorageMeter = "storage"
@@ -223,7 +224,9 @@ func RollupServiceUsage(ctx context.Context, day time.Time, after *server.Id, pa
 type RemoveExpiredServiceUsageResult struct {
 	UsageRemovedCount int
 	BatchRemovedCount int
-	// whether either table had more past its ttl than one page took
+	// stripe_meter_report's rows past their 13 months, once MG6 links (QUOTA-M6-03)
+	ReportRemovedCount int
+	// whether any table had more past its ttl than one page took
 	More bool
 }
 
@@ -270,7 +273,8 @@ func RemoveExpiredServiceUsage(ctx context.Context, now time.Time, pageCount int
 			pageCount,
 		))
 		result.BatchRemovedCount = int(tag.RowsAffected())
+		result.ReportRemovedCount = removeExpiredStripeMeterReportsInTx(ctx, tx, oldestDay, pageCount)
 	})
-	result.More = result.UsageRemovedCount == pageCount || result.BatchRemovedCount == pageCount
+	result.More = result.UsageRemovedCount == pageCount || result.BatchRemovedCount == pageCount || result.ReportRemovedCount == pageCount
 	return
 }
