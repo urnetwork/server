@@ -69,7 +69,7 @@
     "supervisor_restarts_since_held_handoff": 5,
     "last_observed_supervisor_fence": 75,
     "latest_restart_observed_at": "2026-11-14T01:24:27Z",
-    "latest_restart_diagnosis": "The private worker terminal report records bare deadline_exceeded; no database-phase evidence identifies the precise owner return boundary. Do not infer a PostgreSQL outage. The supervisor reclaimed the same completed native execution without resetting its attempt or deadline; immutable retention and database acceptance were still pending at 01:36 UTC. Failure-only owner diagnostics are being prepared separately; no new control release was deployed.",
+    "latest_restart_diagnosis": "The private worker terminal report records bare deadline_exceeded; no database-phase evidence identifies the precise owner return boundary. Do not infer a PostgreSQL outage. The supervisor reclaimed the same completed native execution without resetting its attempt or deadline; immutable retention and database acceptance completed by 2026-11-14 01:39:49 UTC. Failure-only owner diagnostics are being prepared separately; no new control release was deployed.",
     "supervisor_renewal_diagnosis_pending": true,
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
