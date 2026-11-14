@@ -273,29 +273,30 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	// a data-code buyer as Pro.
 	isPro := model.IsProNetwork(session.Ctx, session.ByJwt.NetworkId)
 
-	var currentSubscription *Subscription
+	// every store with a window covering now, in market order
+	markets := model.GetActiveSubscriptionRenewalMarkets(
+		session.Ctx,
+		session.ByJwt.NetworkId,
+		model.SubscriptionTypeSupporter,
+	)
 
-	_, market := model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter)
+	var currentSubscription *Subscription
 
 	if isPro {
 		currentSubscription = &Subscription{
 			Plan: model.SubscriptionTypeSupporter,
 		}
 
-		if market != nil {
-			currentSubscription.Store = *market
+		if store, ok := currentSubscriptionStore(markets); ok {
+			currentSubscription.Store = store
 		}
 	}
 
-	// one entry per store billing this network. MIN(market) above can only name
-	// one of them, so a second store would otherwise be invisible -- and keep
-	// charging, with nowhere in the ui to go and cancel it.
+	// one entry per store billing this network. The current subscription can
+	// only name one of them, so a second store would otherwise be invisible --
+	// and keep charging, with nowhere in the ui to go and cancel it.
 	subscriptions := []*Subscription{}
-	for _, market := range model.GetActiveSubscriptionRenewalMarkets(
-		session.Ctx,
-		session.ByJwt.NetworkId,
-		model.SubscriptionTypeSupporter,
-	) {
+	for _, market := range markets {
 		subscriptions = append(subscriptions, &Subscription{
 			Store: market,
 			Plan:  model.SubscriptionTypeSupporter,
@@ -313,6 +314,27 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		Guest:                  isGuestNetwork(session, model.HasAnyAuthMethod),
 		PaymentPastDue:         paymentPastDueForNetwork(session.Ctx, session.ByJwt.NetworkId, stripeDunningNow(), stripeDunningSettingsFunc()),
 	}, nil
+}
+
+// currentSubscriptionStore is the store current_subscription names, from the
+// network's active markets in market order (GetActiveSubscriptionRenewalMarkets):
+// the first that is not a redeemed gift year, else the gift. Clients show the
+// manage or cancel link of this store only, and released apps do not know
+// "gift", so a subscriber who also redeemed a gift (its year queued after the
+// paid period, or overlapping once the subscription renews) keeps the link to
+// stop paying during the gift year: nothing on our side changes their billing
+// (mmm/GIFTOFPRIVACY.md §9, answer 4). Among the other markets this is the
+// first, as MIN(market) named it before. ok is false with no active market.
+func currentSubscriptionStore(markets []model.SubscriptionMarket) (store model.SubscriptionMarket, ok bool) {
+	for _, market := range markets {
+		if market != model.SubscriptionMarketGift {
+			return market, true
+		}
+	}
+	if 0 < len(markets) {
+		return markets[0], true
+	}
+	return "", false
 }
 
 // isGuestNetwork reports whether the session's network has no login method.

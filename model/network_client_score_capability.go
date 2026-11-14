@@ -78,6 +78,9 @@ type clientScoreCapability struct {
 	decision  providerEgressDecision
 	counts    ProviderEgressHealthCounts
 	hasCounts bool
+	// the URL bar alone keeps the classified decision out of Online
+	// (providerEgressBarredFromOnline), for a downgraded provider only
+	barredFromOnline bool
 	// the newest post-quantum outcome in the window is positive (§12.4)
 	postQuantumPositive   bool
 	postQuantumValidUntil time.Time
@@ -120,6 +123,7 @@ func newClientScoreCapability(
 	if capability.classification.downgraded() {
 		facts := countFilter.classifiedEgressFacts(clientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings, capability.classification)
 		capability.decision = decideProviderEgress(facts, egressTestEnabled)
+		capability.barredFromOnline = providerEgressBarredFromOnline(facts, capability.decision, egressTestEnabled)
 		capability.counts = capability.classification.classifiedCounts(counts)
 		capability.hasCounts = hasCounts
 	}

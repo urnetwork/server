@@ -4,6 +4,10 @@
 // it, and its own copy of each template. Today that is one language, English, at
 // the root (EMAIL1.md §7 designs the others). A language added later must carry
 // the security notices along with the other account emails.
+//
+// The root layout takes its lang from the template (`{{Lang}}`): English, unless
+// the template names its own language (LanguageTemplate). Only the gift emails
+// do, from the language their buyer chose; no account email does.
 package controller
 
 import (
@@ -46,7 +50,12 @@ func accountEmailLanguages(t *testing.T) map[string]string {
 			t.Errorf("%s declares no language", filePath)
 			return nil
 		}
-		languages[string(match[1])] = path.Dir(filePath)
+		language := string(match[1])
+		if language == "{{Lang}}" {
+			// the template's language, English for every account email
+			language = "en"
+		}
+		languages[language] = path.Dir(filePath)
 		return nil
 	})
 	if err != nil {

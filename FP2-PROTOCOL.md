@@ -336,6 +336,36 @@ What follows from it:
 - **Recheck and probation runs** never enter the window (`total_count` 0 or
   `url_probation`). Their mask is stored as 0.
 
+### 3.7 The country floor (owner, 2026-11-13)
+
+"Keep the 80% URL-probe bar, but never let a country go empty"
+([FP2FIX.md](FP2FIX.md), "The country floor"). After both decisions, the
+score export admits to Online a country's best providers that the bar alone
+keeps out of it, wherever fewer than `country_floor_providers` (3) of its
+public providers are online (`model/network_client_score_country_floor.go`).
+Quality and Speed keep the bar's members, so their answers lend the admitted
+providers only from the Online fallback, after every native and borrowed
+native. The two decisions get one pass each:
+
+- **Strict, today's facets.** Only a provider that is not downgraded
+  (`CapabilityDowngrades` 0) is a candidate, so a legacy request, which may
+  carry UDP and IPv6 flows on any provider it gets, never receives a provider
+  whose UDP or IPv6 legs the probe judged failing. This is the hard gate of
+  D7.1 and of 11-12 unchanged; the floor only relaxes the ratio for providers
+  no negative capability evidence explains.
+- **Classified, the capability facets.** A downgraded provider's classified
+  copy is a candidate on its classified decision. The pass counts what
+  selector mode draws: every class, the strict records and admissions
+  included, so a downgraded provider is admitted only where the country has
+  too few others. Only the windows that take its class draw it (§6.3), from
+  their pool's Online union, and connect routes only compatible flows through
+  it (§7.2): an app's limited window takes it for TCP flows, and a hosted
+  proxy's normal windows (D14, `ipv4` and `any`) take every class.
+
+A provider with negative capability evidence and no failure besides is
+already a native of its class, so the classified pass matters where a
+provider is downgraded and also fails the bar on its kept legs.
+
 ## 4. Data model and migration
 
 ### 4.1 The history column

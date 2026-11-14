@@ -227,6 +227,12 @@ func registry() []specEndpoint {
 		{method: "POST", path: "/pay/crypto/status", argType: rt(controller.CryptoPaymentStatusArgs{}), resultType: rt(controller.CryptoPaymentStatusResult{})},
 		{method: "POST", path: "/pay/crypto/requote", argType: rt(controller.CryptoPaymentStatusArgs{}), resultType: rt(controller.CryptoPaymentIntentResult{})},
 		{method: "POST", path: "/pay/crypto/quote", argType: rt(controller.CryptoPaymentQuoteArgs{}), resultType: rt(controller.CryptoPaymentQuoteResult{})},
+		// gift codes (controller/gift_*_controller.go, mmm/GIFTOFPRIVACY.md §10.2)
+		{method: "GET", path: "/pay/gift/config", argType: nil, resultType: rt(controller.GiftConfigResult{})},
+		{method: "POST", path: "/pay/gift/checkout", argType: rt(controller.GiftCheckoutArgs{}), resultType: rt(controller.GiftCheckoutResult{})},
+		{method: "POST", path: "/pay/gift/crypto-intent", argType: rt(controller.GiftCryptoIntentArgs{}), resultType: rt(controller.GiftCryptoIntentResult{})},
+		{method: "POST", path: "/pay/gift/order", argType: rt(controller.GiftOrderStatusArgs{}), resultType: rt(controller.GiftOrderStatusResult{})},
+		{method: "POST", path: "/pay/gift/check-code", argType: rt(controller.GiftCheckCodeArgs{}), resultType: rt(controller.GiftCheckCodeResult{})},
 		{method: "POST", path: "/pay/alchemy", argType: rt(controller.AlchemyWebhookArgs{}), resultType: rt(controller.AlchemyWebhookResult{})},
 		// Pay with Gamma (controller/gamma_controller.go)
 		{method: "GET", path: "/pay/gamma/services.json", argType: nil, resultType: rt(controller.GammaServicesDocument{})},
@@ -277,6 +283,7 @@ func skips() map[string]string {
 	return map[string]string{
 		"GET /device/share-code/{code}/qr.png": "image/png response, no JSON schema",
 		"GET /device/adopt-code/{code}/qr.png": "image/png response, no JSON schema",
+		"POST /pay/gift/cards.pdf":             "application/pdf response, no JSON schema",
 	}
 }
 

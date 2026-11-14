@@ -3210,8 +3210,12 @@ func testing_selectableClientScores(
 	return clientScores
 }
 
+// The one city of the URL health gate tests. They test the bar alone, and
+// with a provider or two in each bucket the country floor would admit the
+// very providers they hold below it, so it is off.
 func testing_healthGateCity(ctx context.Context, t testing.TB) *Location {
 	testing_enableProviderEgressTest(t)
+	egressTestCountryFloorOff(t)
 	city := &Location{
 		LocationType: LocationTypeCity,
 		City:         "Palo Alto",

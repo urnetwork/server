@@ -275,7 +275,9 @@ type ReengagementCohortEpisode struct {
 // come from the (name, at) index, and every other read is one network's range
 // of the (network_id, at) index (the row comparisons keep the planner on it, as
 // in insertConnectDayInTx), its network_reengagement row, or its
-// subscription_renewal rows by start.
+// subscription_renewal rows by start. A paid start is a supporter window with
+// revenue that the network bought: a redeemed gift year (market gift) carries
+// its giver's payment and is no conversion of the network's.
 //
 // An episode begins at its start: the network's latest reengage.episode.started
 // at or before the send, or its network_reengagement row's started_at when that
@@ -404,6 +406,8 @@ const reengagementCohortSql = `
 			e.name = $13
 	) connects
 	CROSS JOIN LATERAL (
+		-- the network's own purchases: a redeemed gift year carries its
+		-- giver's payment, not a purchase of the network's
 		SELECT array_agg(renewal.start_time ORDER BY renewal.start_time) AS starts
 		FROM subscription_renewal renewal
 		WHERE
@@ -411,7 +415,8 @@ const reengagementCohortSql = `
 			renewal.subscription_type = $17 AND
 			renewal.start_time >= episode.at AND
 			renewal.start_time <= episode.at + make_interval(secs => $16) AND
-			0 < renewal.net_revenue_nano_cents
+			0 < renewal.net_revenue_nano_cents AND
+			renewal.market <> $18
 	) paid
 	ORDER BY episode.at, episode.network_id
 `
@@ -442,6 +447,7 @@ func ListReengagementCohortEpisodes(ctx context.Context, cohortDay time.Time) (e
 			reengagement.ResultsConnectHorizon.Seconds(),
 			reengagement.ResultsPaidHorizon.Seconds(),
 			SubscriptionTypeSupporter,
+			SubscriptionMarketGift,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

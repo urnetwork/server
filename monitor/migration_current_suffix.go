@@ -1012,6 +1012,12 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{networkMailContextMigrationContract},
 	// Exact closure, cycle transition and inherited legacy/source custody.
 	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract},
+	// the gift of privacy's orders and Pro gift codes, versioned by their
+	// position
+	[]snMainnetMigrationContract{giftSchemaMigrationContract},
+	// what refunds, disputes and orphaned crypto payments did to a gift
+	// order's codes, versioned by their position
+	[]snMainnetMigrationContract{giftRefundSchemaMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
