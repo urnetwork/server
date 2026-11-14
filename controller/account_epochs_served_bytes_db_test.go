@@ -52,13 +52,15 @@ func resetSnEarningsCaches() {
 
 // Finalized epoch 5 holds the end of operator block b-1, whose award has
 // committed, and open epoch 6 holds the end of block b, which the rollup has
-// read a day past the epoch's start. Epoch 5 lists the award's bytes beside
-// the award's points and nothing of the network's USDC payment; the current
-// epoch carries block b's bytes so far, as of where the rollup read it,
-// within the open epoch's window, which starts where epoch 5 ends. A network
-// with no traffic lists zeros, and without an open epoch past the newest
-// finalized one the result has no current epoch.
-func TestAccountEpochsReportServedBytesAndTheCurrentEpoch(t *testing.T) {
+// read a day past the epoch's start. The open block is b+1, which the rollup
+// has read up to the settle time and which ends after epoch 6. Epoch 5 lists
+// the award's bytes beside the award's points and nothing of the network's
+// USDC payment; the current epoch carries block b's bytes so far, as of where
+// the rollup read it, within the open epoch's window, which starts where
+// epoch 5 ends; the current block carries block b+1's bytes so far and counts
+// in epoch 7. A network with no traffic lists zeros, and without an open
+// epoch past the newest finalized one the result has neither running figure.
+func TestAccountEpochsReportServedBytesAndTheRunningFigures(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		gib := model.ByteCount(1024 * 1024 * 1024)
@@ -113,6 +115,9 @@ func TestAccountEpochsReportServedBytesAndTheCurrentEpoch(t *testing.T) {
 		awardPlanId := model.OperatorBlockPointsPlanId(block - 1)
 		awardPaymentId := server.NewId()
 		readThrough := start6.Add(day)
+		// the open block b+1, read up to the settle time
+		openReadThrough := server.MaxTime(blockEnd, server.NowUtc().Add(-2*time.Hour)).Truncate(time.Second)
+		mib := model.ByteCount(1024 * 1024)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO payment_report (payment_plan_id, total_payout_nano_cents, total_nano_points, point_scale_factor, payout_points_per_payout, time_scale_factor)
@@ -138,6 +143,12 @@ func TestAccountEpochsReportServedBytesAndTheCurrentEpoch(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO operator_block_network_traffic (block_number, network_id, payout_byte_count) VALUES ($1, $2, $3)
 			`, block, networkA, gib))
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO operator_block_traffic (block_number, read_through, update_time) VALUES ($1, $2, $2)
+			`, block+1, openReadThrough))
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO operator_block_network_traffic (block_number, network_id, payout_byte_count) VALUES ($1, $2, $3)
+			`, block+1, networkA, 512*mib))
 		})
 
 		read := func(networkId server.Id) (*AccountEpochsResult, map[string]any) {
@@ -188,6 +199,25 @@ func TestAccountEpochsReportServedBytesAndTheCurrentEpoch(t *testing.T) {
 		if keys := slices.Sorted(maps.Keys(current)); !slices.Equal(keys, []string{"as_of_millis", "end_millis", "epoch", "served_byte_count", "start_millis"}) {
 			t.Fatalf("current_epoch encodes %v", keys)
 		}
+		// block b+1 ends seven days after block b, past epoch 6's end
+		wantBlock := &AccountCurrentBlock{
+			BlockNumber:     block + 1,
+			StartMillis:     blockEnd.UnixMilli(),
+			EndMillis:       blockEnd.Add(model.SubnetBlockDuration).UnixMilli(),
+			ServedByteCount: 512 * mib,
+			AsOfMillis:      openReadThrough.UnixMilli(),
+			Epoch:           7,
+		}
+		if result.CurrentBlock == nil || *result.CurrentBlock != *wantBlock {
+			t.Fatalf("current block %+v, want %+v", result.CurrentBlock, wantBlock)
+		}
+		currentBlock, ok := decoded["current_block"].(map[string]any)
+		if !ok {
+			t.Fatalf("no current_block in %v", decoded)
+		}
+		if keys := slices.Sorted(maps.Keys(currentBlock)); !slices.Equal(keys, []string{"as_of_millis", "block_number", "end_millis", "epoch", "served_byte_count", "start_millis"}) {
+			t.Fatalf("current_block encodes %v", keys)
+		}
 
 		// a network with no traffic
 		result, _ = read(networkB)
@@ -197,12 +227,18 @@ func TestAccountEpochsReportServedBytesAndTheCurrentEpoch(t *testing.T) {
 		if result.CurrentEpoch == nil || result.CurrentEpoch.ServedByteCount != 0 || result.CurrentEpoch.AsOfMillis != readThrough.UnixMilli() {
 			t.Fatalf("network B current epoch %+v", result.CurrentEpoch)
 		}
+		if result.CurrentBlock == nil || result.CurrentBlock.ServedByteCount != 0 || result.CurrentBlock.AsOfMillis != openReadThrough.UnixMilli() || result.CurrentBlock.Epoch != 7 {
+			t.Fatalf("network B current block %+v", result.CurrentBlock)
+		}
 
 		// no epoch is open past the newest finalized one
 		model.SetStEpochSummaryCache(ctx, key, &model.StEpochSummary{Epoch: 5, StartBlock: startBlock6 - epochBlocks, TEpochBlocks: epochBlocks}, time.Hour)
 		result, decoded = read(networkA)
 		if _, ok := decoded["current_epoch"]; ok || result.CurrentEpoch != nil {
 			t.Fatalf("a current epoch without an open one: %v", decoded)
+		}
+		if _, ok := decoded["current_block"]; ok || result.CurrentBlock != nil {
+			t.Fatalf("a current block without an open epoch: %v", decoded)
 		}
 		if len(result.Epochs) != 1 || result.Epochs[0].ServedByteCount != 3*gib {
 			t.Fatalf("epochs without an open one %+v", result.Epochs)
