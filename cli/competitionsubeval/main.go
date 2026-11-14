@@ -43,6 +43,17 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	if parsed.serveManaged {
 		return competitionagent.ServeManagedSsh(ctx, parsed.configPath, input, output, diagnostic)
 	}
+	if parsed.serveExistingManaged {
+		return competitionagent.ServeExistingManagedSsh(ctx, parsed.configPath, input, output, diagnostic)
+	}
+	if parsed.serveExisting {
+		settings := competitionagent.DefaultAgentSettings()
+		agent, err := competitionagent.NewExistingControlAgent(ctx, parsed.configPath, competitionagent.NewSystemdRunner(settings), settings)
+		if err != nil {
+			return err
+		}
+		return agent.ServeExisting(ctx, input, output)
+	}
 	if parsed.startPrivateEngine {
 		if os.Geteuid() != 0 {
 			return errors.New("private engine startup requires the fixed root role")

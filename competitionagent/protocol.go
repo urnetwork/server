@@ -136,6 +136,21 @@ type Response struct {
 	SelfCheck      json.RawMessage `json:"self_check,omitempty"`
 	Files          []File          `json:"files,omitempty"`
 	Signature      string          `json:"signature"`
+
+	ExistingRun *ExistingRunEvidence `json:"existing_run,omitempty"`
+}
+
+// Produced only by the independently placed existing-control role after native
+// readback. This is neither a fresh admission nor a renewable host qualification.
+type ExistingRunEvidence struct {
+	ApprovalSha256         string `json:"approval_sha256"`
+	OriginalConfigSha256   string `json:"original_config_sha256"`
+	ResourceBoundarySha256 string `json:"resource_boundary_sha256"`
+	CleanupPlanSha256      string `json:"cleanup_plan_sha256"`
+	NativeProofSha256      string `json:"native_proof_sha256"`
+	ExecutionStarted       bool   `json:"execution_started"`
+	CleanupVerified        bool   `json:"cleanup_verified"`
+	StopCleanupVerified    bool   `json:"stop_cleanup_verified"`
 }
 
 // Uses canonical Go JSON with the signature field empty on both endpoints.

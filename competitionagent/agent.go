@@ -38,6 +38,10 @@ type Agent struct {
 	runtimeAdmission     func(context.Context) (*RuntimeResourceBoundary, error)
 	beforeDirectoryOpen  func(string)
 	recoveryOnly         bool
+	existingOnly         bool
+	existingControl      *Config
+	existingPlacement    func(context.Context) error
+	existingProof        func(context.Context, *StartManifest, *cleanupPlan, *runState) (string, error)
 	recoveryPlacement    func(context.Context, bool) error
 }
 
@@ -153,7 +157,7 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 // One SSH invocation owns one authenticated operation. Response files are sent
 // only after a signed bounded manifest, never as an archive or arbitrary path.
 func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) error {
-	if self.recoveryOnly {
+	if self.recoveryOnly || self.existingOnly {
 		return errors.New("recovery role cannot serve or admit execution")
 	}
 	input, err := newControlReadStream(reader)
@@ -234,6 +238,9 @@ func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer
 // A same-run retry authenticates its duplicate body but never dispatches again
 // after LaunchAttempted. Ownership may advance without changing any input byte.
 func (self *Agent) start(ctx context.Context, request Request, reader io.Reader) (Response, error) {
+	if self.existingOnly || self.recoveryOnly {
+		return Response{}, errors.New("existing/recovery role cannot prepare or start an execution")
+	}
 	if err := self.validateManifest(*request.Start); err != nil {
 		return Response{}, err
 	}
@@ -579,7 +586,7 @@ func (self *Agent) cancel(ctx context.Context, request Request) (Response, error
 // The fixed systemd entrypoint reauthenticates persisted input and marks
 // execution exactly once before invoking the trusted unprivileged evaluator.
 func (self *Agent) Execute(ctx context.Context, runId string) error {
-	if self.recoveryOnly {
+	if self.recoveryOnly || self.existingOnly {
 		return errors.New("recovery role cannot execute an evaluator")
 	}
 	if !digestPattern.MatchString(runId) {

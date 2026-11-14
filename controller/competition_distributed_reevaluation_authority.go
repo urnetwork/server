@@ -76,13 +76,14 @@ func bindCompetitionDistributedReevaluationRuntime(settings *Settings, proof mod
 func validateCompetitionDistributedRecoveryRequest(settings *Settings, principal *Principal, request model.CompetitionJobReevaluationRequest) error {
 	a := request.Authorization
 	d := a.Distributed
+	patchRetryPrincipal := settings != nil && competitionOperatorPatchRetryPrincipalAllows(settings, principal, a)
 	if settings == nil || !settings.AutomationPolicy.Enabled ||
 		(!competitionPrincipalAllows(principal, competitionSchedulerRole, settings.CompetitionId, settings.AutomationPolicy) &&
-			!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy)) {
+			!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) && !patchRetryPrincipal) {
 		return ErrAutomationDisabled
 	}
 	if a.IncidentClass == model.CompetitionJobReevaluationOperatorRequestedPatchRetry &&
-		!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) {
+		!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) && !patchRetryPrincipal {
 		return ErrAutomationDisabled
 	}
 	if a.Schema != 2 || !competitionDistributedRecoveryRequestClassAllowed(a) || d == nil || d.Schema != 1 ||
@@ -126,7 +127,7 @@ func validateCompetitionDistributedRecoveryRequest(settings *Settings, principal
 // authenticates it. Neither unsigned fixtures nor another frozen host suffice.
 func validateCompetitionDistributedRecoveryEnvelope(response competitionagent.Response, host CompetitionExecutorHostPolicy) error {
 	key, err := base64.StdEncoding.DecodeString(host.AgentPublicKeyBase64)
-	if err != nil || len(key) != ed25519.PublicKeySize || competitionagent.VerifyResponse(response, key) != nil || response.Schema != competitionagent.Schema || response.HostId != host.HostId {
+	if err != nil || response.ExistingRun != nil || len(key) != ed25519.PublicKeySize || competitionagent.VerifyResponse(response, key) != nil || response.Schema != competitionagent.Schema || response.HostId != host.HostId {
 		return ErrConflict
 	}
 	return nil

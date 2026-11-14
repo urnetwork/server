@@ -22,13 +22,19 @@ type competitionAgentTransport interface {
 	Exchange(context.Context, competitionagent.Request, string, string) (competitionagent.Response, error)
 }
 
+// This capability has no input-body argument and cannot represent a start.
+type competitionExistingAgentTransport interface {
+	ExchangeExisting(context.Context, competitionagent.Request, string) (competitionagent.Response, error)
+}
+
 // Fixed root-pinned commands are independent of every submission byte. No SSH
 // agent, interactive config, environment forwarding or arbitrary remote shell
 // command is inherited from the coordinator's operator account.
 type competitionCommandAgentTransport struct {
-	profile    *competitionDistributedCoordinatorProfile
-	host       CompetitionExecutorHostPolicy
-	connection competitionExecutorConnection
+	profile      *competitionDistributedCoordinatorProfile
+	host         CompetitionExecutorHostPolicy
+	connection   competitionExecutorConnection
+	existingOnly bool
 }
 
 // Management placement precedes unauthenticated framing for both host classes.
@@ -37,6 +43,11 @@ type competitionCommandAgentTransport struct {
 func (self competitionCommandAgentTransport) commandArguments() (string, []string, error) {
 	command := self.connection.AgentCommand
 	arguments := []string{"--config", self.connection.AgentConfigPath, "--serve-managed"}
+	serveFlag := "--serve-managed"
+	if self.existingOnly {
+		serveFlag = "--serve-existing-managed"
+		arguments[len(arguments)-1] = serveFlag
+	}
 	switch self.host.Transport {
 	case "local":
 		if err := verifyPinnedExecutable(command, self.connection.AgentCommandSha256); err != nil {
@@ -53,7 +64,7 @@ func (self competitionCommandAgentTransport) commandArguments() (string, []strin
 			"-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "RequestTTY=no", "-o", "ConnectionAttempts=1",
 			"-o", "ConnectTimeout=" + strconv.Itoa(int(settings.ConnectionTimeout/time.Second)), "-o", "UserKnownHostsFile=" + self.connection.SshKnownHostsFile,
 			"-i", self.connection.SshIdentityFile, "--", self.connection.SshEndpoint,
-			self.connection.AgentCommand + " --config " + self.connection.AgentConfigPath + " --serve-managed"}
+			self.connection.AgentCommand + " --config " + self.connection.AgentConfigPath + " " + serveFlag}
 	default:
 		return "", nil, errors.New("unsupported executor transport")
 	}
@@ -63,6 +74,9 @@ func (self competitionCommandAgentTransport) commandArguments() (string, []strin
 // Both directions are authenticated before files are trusted. The caller's
 // absolute job deadline bounds this request timeout, including artifact copies.
 func (self competitionCommandAgentTransport) Exchange(parent context.Context, request competitionagent.Request, inputDirectory, outputDirectory string) (competitionagent.Response, error) {
+	if self.existingOnly && (inputDirectory != "" || request.Start != nil || request.Operation != "status" && request.Operation != "artifacts" && request.Operation != "cancel") {
+		return competitionagent.Response{}, errors.Join(competitionagent.ErrIntegrity, errors.New("existing control cannot admit execution"))
+	}
 	settings := self.profile.Config.Settings
 	ctx, cancel := context.WithTimeout(parent, settings.RequestTimeout)
 	defer cancel()
@@ -112,6 +126,20 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 		return competitionagent.Response{}, fmt.Errorf("authenticated executor transport failed: %w", err)
 	}
 	return response, nil
+}
+
+// The separate endpoint/executable/config pins are selected only here. Normal
+// Exchange continues to use the original forced role without any admission waiver.
+func (self competitionCommandAgentTransport) ExchangeExisting(ctx context.Context, request competitionagent.Request, outputDirectory string) (competitionagent.Response, error) {
+	connection := self.connection.ExistingControl
+	if connection == nil {
+		return competitionagent.Response{}, errors.New("existing control was not explicitly provisioned")
+	}
+	self.existingOnly = true
+	self.connection.AgentCommand, self.connection.AgentCommandSha256 = connection.AgentCommand, connection.AgentCommandSha256
+	self.connection.AgentConfigPath, self.connection.AgentConfigSha256 = connection.AgentConfigPath, connection.AgentConfigSha256
+	self.connection.SshEndpoint, self.connection.SshIdentityFile, self.connection.SshKnownHostsFile = connection.SshEndpoint, connection.SshIdentityFile, connection.SshKnownHostsFile
+	return self.Exchange(ctx, request, "", outputDirectory)
 }
 
 // One extra byte is definitive framing corruption; an I/O error without bytes

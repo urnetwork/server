@@ -54,6 +54,16 @@ func managementPolicyRole(policy *ManagementResourcePolicy, role string) (Manage
 // The native entrypoint has no alternate filesystem, caller PID, or proof
 // Boolean. Recovery may verify itself without querying the unhealthy engine.
 func verifyManagementRecoveryBoundary(parent context.Context, policy *ManagementResourcePolicy, systemctl Pin, settings AgentSettings, protected bool, requireCurrent bool) error {
+	purpose := managementFreshAdmission
+	if requireCurrent {
+		purpose = managementExistingContainment
+	}
+	return verifyManagementRecoveryForPurpose(parent, policy, systemctl, settings, protected, requireCurrent, purpose)
+}
+
+// Only the separate observer and a compatible current recovery owner can
+// recognize the finite control child. Fresh launch admission remains exclusive.
+func verifyManagementRecoveryForPurpose(parent context.Context, policy *ManagementResourcePolicy, systemctl Pin, settings AgentSettings, protected bool, requireCurrent bool, purpose managementObservationPurpose) error {
 	if policy == nil || ValidateManagementResourcePolicy(*policy, DefaultManagementBoundarySettings()) != nil ||
 		settings.ControlTimeout <= 0 || settings.ConfigBytes <= 0 || settings.DiagnosticBytes <= 0 || settings.CleanupObjectCount <= 0 ||
 		settings.RecoveryMemoryHeadroomBytes <= 0 || settings.RecoveryTasksHeadroom <= 0 {
@@ -76,7 +86,7 @@ func verifyManagementRecoveryBoundary(parent context.Context, policy *Management
 	if err != nil {
 		return err
 	}
-	if err := validateManagementRecoveryFacts(facts, *policy, role, settings, requireCurrent); err != nil {
+	if err := validateManagementRecoveryForPurpose(facts, *policy, role, settings, requireCurrent, purpose); err != nil {
 		return err
 	}
 	if err := validateFilePin(role.Unit, settings.ConfigBytes, protected); err != nil {
@@ -122,17 +132,21 @@ func validateManagementRecoveryManager(content []byte, policy ManagementResource
 // Every field comes from held descriptors in one observation. Only package
 // tests supply synthetic regular-file trees instead of the actual kernel roots.
 type managementRecoveryFacts struct {
-	Before, After       map[string]string
-	Ancestors           map[string]map[string]string
-	AncestorsAfter      map[string]map[string]string
-	ChildrenBefore      []string
-	ChildrenAfter       []string
-	ProcessStartBefore  uint64
-	ProcessStartAfter   uint64
-	ProcessCgroupBefore string
-	ProcessCgroupAfter  string
-	ProcessStatusBefore []byte
-	ProcessStatusAfter  []byte
+	Before, After          map[string]string
+	Ancestors              map[string]map[string]string
+	AncestorsAfter         map[string]map[string]string
+	ChildrenBefore         []string
+	ChildrenAfter          []string
+	ProcessStartBefore     uint64
+	ProcessStartAfter      uint64
+	ProcessCgroupBefore    string
+	ProcessCgroupAfter     string
+	ProcessStatusBefore    []byte
+	ProcessStatusAfter     []byte
+	ExistingControlsBefore map[string]map[string]string
+	ExistingControlsAfter  map[string]map[string]string
+	RecoveryServiceBefore  map[string]string
+	RecoveryServiceAfter   map[string]string
 }
 
 // Exact names are kernel ABI, not a configurable property-discovery surface.
@@ -264,18 +278,37 @@ func readManagementRecoveryFactsWithHook(ctx context.Context, role ManagementRol
 	if err != nil {
 		return facts, err
 	}
-	if len(facts.ChildrenBefore) > 1 || len(facts.ChildrenBefore) == 1 && facts.ChildrenBefore[0] != managementRecoveryServiceName {
-		return facts, errors.New("independent recovery slice contains another owner")
-	}
+	heldControls := map[string]*os.File{}
+	defer func() {
+		for _, child := range heldControls {
+			_ = child.Close()
+		}
+	}()
+	facts.ExistingControlsBefore, facts.ExistingControlsAfter = map[string]map[string]string{}, map[string]map[string]string{}
 	for _, name := range facts.ChildrenBefore {
+		if name != managementRecoveryServiceName && !validExistingControlUnit(name) || validExistingControlUnit(name) && len(facts.ExistingControlsBefore) != 0 {
+			return facts, errors.New("independent recovery slice contains another owner")
+		}
 		child, err := openRelativeNoFollow(group, name, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 		if err != nil {
 			return facts, err
 		}
 		children, err := readManagementRecoveryChildren(child, settings.CleanupObjectCount)
-		_ = child.Close()
 		if err != nil || len(children) != 0 {
+			_ = child.Close()
 			return facts, errors.New("independent recovery service has untracked child cgroups")
+		}
+		heldControls[name] = child
+		if validExistingControlUnit(name) {
+			facts.ExistingControlsBefore[name], err = readExistingControlCgroup(ctx, child, settings, requireKernel)
+			if err != nil {
+				return facts, err
+			}
+		} else {
+			facts.RecoveryServiceBefore, err = readExistingControlCgroup(ctx, child, settings, requireKernel)
+			if err != nil {
+				return facts, err
+			}
 		}
 	}
 	if requireCurrent {
@@ -332,6 +365,33 @@ func readManagementRecoveryFactsWithHook(ctx context.Context, role ManagementRol
 	}
 	facts.ChildrenAfter, err = readManagementRecoveryChildren(fresh, settings.CleanupObjectCount)
 	_ = fresh.Close()
+	if err != nil {
+		return facts, err
+	}
+	for name, held := range heldControls {
+		current, err := openRelativeNoFollow(group, name, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+		if err != nil {
+			return facts, err
+		}
+		beforeInfo, beforeErr := held.Stat()
+		afterInfo, afterErr := current.Stat()
+		_ = current.Close()
+		if beforeErr != nil || afterErr != nil || !os.SameFile(beforeInfo, afterInfo) {
+			return facts, errors.New("existing control cgroup generation changed")
+		}
+		children, childErr := readManagementRecoveryChildren(held, settings.CleanupObjectCount)
+		if childErr != nil || len(children) != 0 {
+			return facts, errors.New("existing observer gained untracked child cgroups")
+		}
+		if name == managementRecoveryServiceName {
+			facts.RecoveryServiceAfter, err = readExistingControlCgroup(ctx, held, settings, requireKernel)
+		} else {
+			facts.ExistingControlsAfter[name], err = readExistingControlCgroup(ctx, held, settings, requireKernel)
+		}
+		if err != nil {
+			return facts, err
+		}
+	}
 	return facts, err
 }
 
@@ -413,14 +473,27 @@ func readManagementRecoveryProcess(ctx context.Context, procPath string, role Ma
 // A zero process count is mandatory when arming a new launch; recovery itself
 // retains explicit task/memory headroom for bounded native kill/join helpers.
 func validateManagementRecoveryFacts(facts managementRecoveryFacts, policy ManagementResourcePolicy, role ManagementRolePolicy, settings AgentSettings, requireCurrent bool) error {
+	purpose := managementFreshAdmission
+	if requireCurrent {
+		purpose = managementExistingContainment
+	}
+	return validateManagementRecoveryForPurpose(facts, policy, role, settings, requireCurrent, purpose)
+}
+
+// The default fresh path cannot consume an observer's exemption. Matching
+// recovery code still verifies the exact native cap, closure and original margin.
+func validateManagementRecoveryForPurpose(facts managementRecoveryFacts, policy ManagementResourcePolicy, role ManagementRolePolicy, settings AgentSettings, requireCurrent bool, purpose managementObservationPurpose) error {
+	if purpose != managementFreshAdmission && purpose != managementExistingContainment || purpose == managementFreshAdmission && len(facts.ExistingControlsBefore) != 0 {
+		return errors.New("fresh launch cannot share existing-control recovery custody")
+	}
 	expectedRole, roleErr := managementPolicyRole(&policy, ManagementCleanupRole)
 	if roleErr != nil || role != expectedRole || ValidateManagementResourcePolicy(policy, DefaultManagementBoundarySettings()) != nil ||
 		!reflect.DeepEqual(facts.ChildrenBefore, facts.ChildrenAfter) || !reflect.DeepEqual(facts.Ancestors, facts.AncestorsAfter) || len(facts.Ancestors) != 1 ||
 		!pathWithin(managementParentCgroupPath, managementPrivateCgroupPath) || pathWithin(managementParentCgroupPath, role.CgroupPath) {
 		return errors.New("independent recovery closure or failure-domain lineage is invalid")
 	}
-	if len(facts.ChildrenBefore) > 1 || len(facts.ChildrenBefore) == 1 && facts.ChildrenBefore[0] != managementRecoveryServiceName || requireCurrent && len(facts.ChildrenBefore) != 1 {
-		return errors.New("recovery cgroup closure contains another owner or omits its running service")
+	if err := validateExistingRecoveryClosure(facts, policy, settings, requireCurrent); err != nil {
+		return err
 	}
 	ancestor, found := facts.Ancestors["/urnetwork.slice"]
 	if !found || len(ancestor) != 5 || ancestor["memory.max"] != "max" || ancestor["memory.high"] != "max" || ancestor["pids.max"] != "max" || ancestor["memory.oom.group"] != "0" {
@@ -455,7 +528,7 @@ func validateManagementRecoveryFacts(facts managementRecoveryFacts, policy Manag
 		if memoryErr != nil || taskErr != nil || memory < 0 || tasks < 0 || settings.RecoveryMemoryHeadroomBytes <= 0 || settings.RecoveryTasksHeadroom <= 0 ||
 			strconv.FormatInt(memory, 10) != limits["memory.current"] || strconv.FormatInt(tasks, 10) != limits["pids.current"] ||
 			settings.RecoveryMemoryHeadroomBytes > role.MemoryBytes || settings.RecoveryTasksHeadroom > role.TasksMaximum ||
-			memory > role.MemoryBytes-settings.RecoveryMemoryHeadroomBytes || tasks > role.TasksMaximum-settings.RecoveryTasksHeadroom || !requireCurrent && tasks != 0 || requireCurrent && tasks == 0 {
+			memory > role.MemoryBytes-settings.RecoveryMemoryHeadroomBytes || tasks > role.TasksMaximum-settings.RecoveryTasksHeadroom || !requireCurrent && len(facts.ExistingControlsBefore) == 0 && tasks != 0 || requireCurrent && tasks == 0 {
 			return errors.New("independent recovery has no positively measured runnable headroom")
 		}
 	}

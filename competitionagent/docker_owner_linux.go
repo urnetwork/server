@@ -355,7 +355,7 @@ func (self *Agent) verifyDockerOwnerPlan(manifest StartManifest, plan cleanupPla
 	resource := runResourceIdentity{EvaluationCpuSet: plan.DockerOwner.CpuSet, ManagementCpuSet: plan.ManagementCpuSet, BuildMemoryLimit: plan.DockerOwner.BuildMemory,
 		EvidenceMemoryLimitBytes: plan.DockerOwner.HostFiles.EvidenceBytes}
 	owner := self
-	if self.recoveryOnly {
+	if self.recoveryOnly || self.existingOnly {
 		if plan.DockerOwner.WorkerUid == 0 || plan.DockerOwner.HostFiles.WorkerGid == 0 {
 			return errors.New("authenticated cleanup plan omitted its original worker identity")
 		}
@@ -423,7 +423,7 @@ func (self *Agent) EmergencyFreeze(ctx context.Context, runId string) error {
 // unit. It never executes candidate code, loads main credentials, or restarts
 // an issued build after process loss. ExecStopPost owns emergency freezing.
 func (self *Agent) RunDockerOwner(ctx context.Context, runId string) (operationErr error) {
-	if self.recoveryOnly {
+	if self.recoveryOnly || self.existingOnly {
 		return errors.New("recovery role cannot launch or resume a Docker owner")
 	}
 	if err := ctx.Err(); err != nil {

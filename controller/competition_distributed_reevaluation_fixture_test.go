@@ -20,9 +20,9 @@ import (
 // No source, intake, job, baseline or executor trigger is disabled. An older
 // announced round is activated through its genuine two-role source authority;
 // it is not relabeled as an ASAP intake grant created in the past.
-func newCompetitionPreparedAnnouncedCompletionFixtureAt(t *testing.T, tb testing.TB, historicalNow time.Time) *competitionDistributedPgFixture {
+func newCompetitionPreparedAnnouncedCompletionFixtureAt(t *testing.T, tb testing.TB, historicalNow time.Time, environment ...string) *competitionDistributedPgFixture {
 	tb.Helper()
-	intake, round := newCompetitionAnnouncedAdmissionFixtureAt(t, tb, historicalNow)
+	intake, round := newCompetitionAnnouncedAdmissionFixtureAt(t, tb, historicalNow, environment...)
 	return finishCompetitionPreparedCompletionFixture(tb, intake, round, true, true)
 }
 
@@ -97,13 +97,20 @@ func TestCompetitionDistributedRecoveryPgReceiptJsonbRoundtripKeepsSignedAuthori
 
 // The returned candidates are genuinely admitted, but no control is published
 // yet. Negative controls can therefore exercise the real publication guard.
-func newCompetitionAnnouncedAdmissionFixtureAt(t *testing.T, tb testing.TB, historicalNow time.Time) (*competitionIntakeFirstDatabaseFixture, *roundRecord) {
+func newCompetitionAnnouncedAdmissionFixtureAt(t *testing.T, tb testing.TB, historicalNow time.Time, environment ...string) (*competitionIntakeFirstDatabaseFixture, *roundRecord) {
 	tb.Helper()
 	ctx := tb.Context()
 	if historicalNow.IsZero() {
 		tb.Fatal("historical announced fixture requires an explicit historical clock")
 	}
-	intake := newCompetitionIntakeFirstDatabaseFixtureAt(t, ctx, historicalNow, func(settings *Settings) {
+	environmentName := ""
+	if len(environment) > 1 {
+		tb.Fatal("announced fixture received ambiguous environment scope")
+	}
+	if len(environment) == 1 {
+		environmentName = environment[0]
+	}
+	intake := newCompetitionIntakeFirstDatabaseFixtureInEnvironmentAt(t, ctx, historicalNow, environmentName, func(settings *Settings) {
 		settings.FutureEpochPolicy.DistributedEvaluationPolicy = competitionDistributedSlotTestPolicy(tb)
 	})
 	intake.handoffAndPublish(tb, ctx)

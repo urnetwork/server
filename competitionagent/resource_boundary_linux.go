@@ -215,6 +215,16 @@ func validateRuntimeResourceBoundarySettings(settings RuntimeResourceBoundarySet
 
 // Native evidence remains mandatory after structural configuration admission.
 func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, host runtimeBoundaryHost) (*RuntimeResourceBoundary, error) {
+	return verifyRuntimeResourceBoundaryForPurpose(ctx, pin, scope, settings, host, managementFreshAdmission)
+}
+
+// Existing custody proves every same native hard boundary without treating
+// consumed candidate/backing disk watermarks as permission to start new work.
+// This verifier contains no memory-headroom or host-eligibility admission.
+func verifyRuntimeResourceBoundaryForPurpose(ctx context.Context, pin Pin, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, host runtimeBoundaryHost, purpose managementObservationPurpose) (*RuntimeResourceBoundary, error) {
+	if purpose != managementFreshAdmission && purpose != managementExistingContainment {
+		return nil, errors.New("invalid runtime resource observation purpose")
+	}
 	if err := validateRuntimeResourceBoundarySettings(settings); err != nil {
 		return nil, err
 	}
@@ -295,7 +305,7 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 	if err != nil {
 		return nil, err
 	}
-	if err := validateRuntimeBoundaryFacts(*boundary, scope, settings, facts); err != nil {
+	if err := validateRuntimeBoundaryFactsForPurpose(*boundary, scope, settings, facts, purpose); err != nil {
 		return nil, err
 	}
 	boundary.WorkDeviceId = facts.BlockDeviceId
@@ -681,6 +691,15 @@ func parseRuntimeBoundaryMounts(content []byte, settings RuntimeResourceBoundary
 // A full allocated backing file reserves host storage before candidate work.
 // Capacity and free-space arithmetic must not overflow into an admission proof.
 func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, facts runtimeBoundaryFacts) error {
+	return validateRuntimeBoundaryFactsForPurpose(boundary, scope, settings, facts, managementFreshAdmission)
+}
+
+// Only free-space startup floors differ; hard capacity, mounts, allocated
+// backing, native class, core policy and actual id delegation remain identical.
+func validateRuntimeBoundaryFactsForPurpose(boundary RuntimeResourceBoundary, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, facts runtimeBoundaryFacts, purpose managementObservationPurpose) error {
+	if purpose != managementFreshAdmission && purpose != managementExistingContainment {
+		return errors.New("invalid runtime boundary facts purpose")
+	}
 	if !bytes.Equal(facts.CorePattern, facts.CorePatternAfter) {
 		return errors.New("host core policy changed during resource admission")
 	}
@@ -737,9 +756,11 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 		facts.LoopBackingDevice != facts.BackingDevice || facts.LoopBackingInode != facts.BackingInode || facts.BackingInode == 0 || facts.BackingDevice == facts.BlockDeviceId ||
 		facts.LoopSizeLimit != 0 && facts.LoopSizeLimit != facts.BlockBytes || facts.FilesystemType != runtimeBoundaryExt4 ||
 		facts.BackingFilesystemType != runtimeBoundaryExt4 && facts.BackingFilesystemType != runtimeBoundaryXfs ||
-		facts.FilesystemBytes == 0 || facts.FilesystemBytes > facts.BlockBytes || facts.FreeBytes > facts.FilesystemBytes ||
-		facts.FreeBytes < boundary.MinimumFreeBytes || facts.BackingFreeBytes < boundary.MinimumBackingFreeBytes {
-		return errors.New("candidate hard capacity, backing allocation or minimum headroom is unproved")
+		facts.FilesystemBytes == 0 || facts.FilesystemBytes > facts.BlockBytes || facts.FreeBytes > facts.FilesystemBytes {
+		return errors.New("candidate hard capacity or backing allocation is unproved")
+	}
+	if purpose == managementFreshAdmission && (facts.FreeBytes < boundary.MinimumFreeBytes || facts.BackingFreeBytes < boundary.MinimumBackingFreeBytes) {
+		return errors.New("candidate startup free-space headroom is unproved")
 	}
 	for _, path := range []string{boundary.CandidateRoot, boundary.DockerDataRoot, boundary.ContainerdRoot, boundary.EngineExecRoot, boundary.WorkRoot, boundary.ScratchRoot} {
 		if facts.PathDeviceIds[path] != facts.BlockDeviceId {

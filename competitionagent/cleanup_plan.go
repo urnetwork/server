@@ -25,6 +25,9 @@ import (
 // BuildKit containers are not job-labelled. Freeze their exact release-derived
 // slice alongside the finite full-R9 evaluation slices before any launch.
 func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifest) (*cleanupPlan, error) {
+	if self.existingOnly || self.recoveryOnly {
+		return nil, errors.New("existing/recovery role cannot prepare a new execution plan")
+	}
 	boundary, err := self.runtimeAdmission(ctx)
 	if err != nil {
 		return nil, err

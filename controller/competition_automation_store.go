@@ -130,7 +130,13 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			result, stateErr = nil, nil
 			round, policy, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
 			server.Raise(loadErr)
-			server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+			if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"); holdErr != nil {
+				if holdErr == ErrAutomationHeld {
+					stateErr = ErrAutomationHeld
+					return
+				}
+				server.Raise(holdErr)
+			}
 			var existing []byte
 			sealErr := tx.QueryRow(ctx, `SELECT seal_json FROM competition_evaluation_seal WHERE round_id=$1`, roundId).Scan(&existing)
 			if sealErr == nil {

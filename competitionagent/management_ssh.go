@@ -28,6 +28,8 @@ var ErrManagedSshUnknown = errors.New("managed SSH control-service outcome remai
 // All session budgets are owned by one wrapper. Child caps are inside the
 // existing private aggregate, never another allowance outside the reserve.
 type ManagementSshSettings struct {
+	// Selected only by the separate fixed entrypoint, never request/config data.
+	existingOnly    bool
 	Agent           AgentSettings
 	MemoryBytes     int64         // Per-control child maximum; default 256 MiB requires separate native peak proof.
 	TasksMaximum    int64         // Per-control tasks; default 128 includes bounded native control helpers.
@@ -48,6 +50,7 @@ func DefaultManagementSshSettings() ManagementSshSettings {
 
 // No peer can choose the unit, marker, executable, properties or clock.
 type managementSshPlan struct {
+	ExistingOnly     bool          `json:"existing_only,omitempty"`
 	Schema           int           `json:"schema"`
 	Id               string        `json:"id"`
 	UnitName         string        `json:"unit_name"`
@@ -143,6 +146,16 @@ func (self *managementSshHost) serve(parent context.Context, configPath string, 
 	if err != nil {
 		return err
 	}
+	if self.settings.existingOnly {
+		lock, err := os.OpenFile(filepath.Join(config.StateDirectory, "existing-control.lock"), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			return errors.New("another existing control retains the independent observer allowance")
+		}
+	}
 	policy, manager, err := self.admit(parent, config)
 	if err != nil {
 		return err
@@ -152,7 +165,7 @@ func (self *managementSshHost) serve(parent context.Context, configPath string, 
 		return errors.New("managed SSH could not allocate its private control identity")
 	}
 	now := self.settings.Agent.Now().UTC()
-	plan := managementSshPlan{Schema: Schema, Id: id, UnitName: managementSshUnitName(id), ConfigSha256: config.configSha256, Agent: config.Agent,
+	plan := managementSshPlan{Schema: Schema, Id: id, UnitName: self.settings.unitName(id), ExistingOnly: self.settings.existingOnly, ConfigSha256: config.configSha256, Agent: config.Agent,
 		CreatedAt: now, ExpiresAt: now.Add(self.settings.MaximumRuntime), RuntimeMaximum: self.settings.MaximumRuntime,
 		MemoryBytes: self.settings.MemoryBytes, TasksMaximum: self.settings.TasksMaximum, ManagementCpuSet: policy.ManagementCpuSet}
 	if err := plan.validate(*config, *policy, self.settings); err != nil {
@@ -396,13 +409,24 @@ func managementSshUnitName(id string) string { return "urnetwork-subeval-control
 func (self ManagementSshSettings) validate() error {
 	profile := DefaultManagementBoundarySettings()
 	minimum := DefaultLimits().MaximumJobDuration
-	for _, allowance := range []time.Duration{self.Agent.ControlTimeout, self.Agent.SelfCheckTimeout, self.Agent.InputTransferTimeout, self.Agent.OutputTransferTimeout, self.Agent.CleanupTimeout, self.Agent.CancelGrace} {
+	allowances := []time.Duration{self.Agent.ControlTimeout, self.Agent.SelfCheckTimeout, self.Agent.InputTransferTimeout, self.Agent.OutputTransferTimeout, self.Agent.CleanupTimeout, self.Agent.CancelGrace}
+	memoryMaximum, tasksMaximum := profile.PrivateMemoryBytes, profile.PrivateTasksMaximum
+	if self.existingOnly {
+		observer := defaultExistingControlSettings()
+		if self.MaximumControls != observer.MaximumControls || self.MemoryBytes != observer.MemoryBytes || self.TasksMaximum != observer.TasksMaximum {
+			return errors.New("existing control cannot expand or duplicate its fixed reservation")
+		}
+		minimum = 0
+		allowances = []time.Duration{self.Agent.ControlTimeout, self.Agent.OutputTransferTimeout, self.Agent.ControlTimeout, self.Agent.CancelGrace}
+		memoryMaximum, tasksMaximum = self.Agent.RecoveryMemoryHeadroomBytes, self.Agent.RecoveryTasksHeadroom
+	}
+	for _, allowance := range allowances {
 		if allowance <= 0 || minimum+allowance <= minimum {
 			return errors.New("managed SSH request lifetime is unbounded or overflowed")
 		}
 		minimum += allowance
 	}
-	if self.MemoryBytes <= 0 || self.MemoryBytes > profile.PrivateMemoryBytes || self.TasksMaximum <= 0 || self.TasksMaximum > profile.PrivateTasksMaximum ||
+	if self.MemoryBytes <= 0 || self.MemoryBytes > memoryMaximum || self.TasksMaximum <= 0 || self.TasksMaximum > tasksMaximum ||
 		self.MaximumControls <= 0 || self.MaximumControls > (int(^uint(0)>>1)-1)/4 || self.MaximumRuntime < minimum || self.JoinTimeout <= self.Agent.CancelGrace ||
 		self.PollInterval <= 0 || self.Agent.Now == nil || self.Agent.ConfigBytes <= 0 || self.Agent.DiagnosticBytes <= 0 || self.Agent.ManagementCpuQuotaPercent <= 0 ||
 		self.Agent.ConfigBytes == math.MaxInt64 || int64(self.Agent.ManagementCpuQuotaPercent) > math.MaxInt64/1000000 ||
@@ -415,7 +439,7 @@ func (self ManagementSshSettings) validate() error {
 // Cleanup can validate an expired session; expiry never proves a process join.
 func (self managementSshPlan) validate(config Config, policy ManagementResourcePolicy, settings ManagementSshSettings) error {
 	if settings.validate() != nil || ValidateManagementResourcePolicy(policy, DefaultManagementBoundarySettings()) != nil || self.Schema != Schema || !digestPattern.MatchString(self.Id) ||
-		self.UnitName != managementSshUnitName(self.Id) || !digestPattern.MatchString(self.ConfigSha256) || self.ConfigSha256 != config.configSha256 || self.Agent != config.Agent || self.CreatedAt.IsZero() ||
+		self.UnitName != settings.unitName(self.Id) || self.ExistingOnly != settings.existingOnly || !digestPattern.MatchString(self.ConfigSha256) || self.ConfigSha256 != config.configSha256 || self.Agent != config.Agent || self.CreatedAt.IsZero() ||
 		self.ExpiresAt.Sub(self.CreatedAt) != self.RuntimeMaximum || self.RuntimeMaximum != settings.MaximumRuntime || self.MemoryBytes != settings.MemoryBytes || self.TasksMaximum != settings.TasksMaximum ||
 		validateRuntimeBoundaryManagementCpuSet(self.ManagementCpuSet, policy.ManagementCpuSet) != nil {
 		return errors.New("managed SSH receipt differs from its protected role or original session lifetime")
@@ -479,10 +503,10 @@ func openManagementSshRegistry(config Config, settings ManagementSshSettings, pr
 		return nil, err
 	}
 	defer state.Close()
-	if err := mkdirRelativeNoFollow(state, "managed-controls", 0700); err != nil {
+	if err := mkdirRelativeNoFollow(state, settings.registryName(), 0700); err != nil {
 		return nil, err
 	}
-	directory, err := openRelativeNoFollow(state, "managed-controls", os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	directory, err := openRelativeNoFollow(state, settings.registryName(), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -498,7 +522,7 @@ func openManagementSshRegistry(config Config, settings ManagementSshSettings, pr
 		directory.Close()
 		return nil, errors.New("managed SSH registry is not private root custody")
 	}
-	return &managementSshRegistry{directory: directory, path: filepath.Join(config.StateDirectory, "managed-controls"), settings: settings, protected: protected}, nil
+	return &managementSshRegistry{directory: directory, path: filepath.Join(config.StateDirectory, settings.registryName()), settings: settings, protected: protected}, nil
 }
 
 // Ownership is synchronous; there is no registry cleanup goroutine to abandon.

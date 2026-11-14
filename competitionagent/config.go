@@ -66,6 +66,10 @@ type Config struct {
 	Limits                     Limits           `json:"limits"`
 	configPath                 string
 	configSha256               string
+
+	ExistingControl *ExistingControlRole `json:"existing_control,omitempty"`
+	// Opt-in protected companion partition; absent preserves ordinary recovery.
+	ExistingRecoveryProfile string `json:"existing_recovery_profile,omitempty"`
 }
 
 // All scheduling and diagnostic bounds belong to an agent instance. Nonpositive
@@ -111,6 +115,8 @@ type AgentSettings struct {
 	// Values outside the cgroup v2 period range refuse launch.
 	ContainmentCpuPeriodMicros int64
 	Now                        func() time.Time
+	// Set only from the authenticated original-role config during native proof.
+	existingRecoveryProfile string
 }
 
 // Control calls are short; only the detached systemd service owns evaluation.
@@ -172,12 +178,18 @@ func (self *Config) validate(protected bool) error {
 // Only an absent first fingerprint is permitted for read-only observation;
 // malformed supplied fingerprints and every other role invariant still fail.
 func (self *Config) validateForPurpose(protected, dockerProbe bool) error {
+	if self != nil && self.ExistingControl != nil {
+		return errors.New("existing-control configuration cannot admit a worker, host qualification or fresh execution")
+	}
 	if self == nil || self.Schema != Schema || !namePattern.MatchString(self.HostId) || self.WorkerUser == "" || self.TrustedOperatorUser == "" || self.ExpectedDataDeviceId == 0 ||
 		!digestPattern.MatchString(self.SourceLockSha256) || (!digestPattern.MatchString(self.QualificationSha256) && !(dockerProbe && self.QualificationSha256 == "")) ||
 		!digestPattern.MatchString(self.SubmissionBuilderSha256) ||
 		!digestPattern.MatchString(self.ConfigLocalSha256) || !digestPattern.MatchString(self.VaultLocalSha256) ||
 		!strings.HasPrefix(self.EvaluatorImageDigest, "sha256:") || !digestPattern.MatchString(strings.TrimPrefix(self.EvaluatorImageDigest, "sha256:")) {
 		return errors.New("invalid subevaluation agent configuration")
+	}
+	if _, _, err := recoveryServiceLimits(*self, "--recover-active"); err != nil {
+		return err
 	}
 	if err := self.Limits.Validate(); err != nil {
 		return err

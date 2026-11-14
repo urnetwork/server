@@ -439,7 +439,11 @@ func renderRecoveryTestService(t *testing.T, config Config, settings AgentSettin
 	if err != nil {
 		t.Fatal(err)
 	}
-	for key, value := range map[string]string{"AGENT_PATH": config.Agent.Path, "CONFIG_PATH": config.configPath, "CLEANUP_MEMORY_BYTES": strconv.FormatInt(DefaultManagementBoundarySettings().CleanupMemoryBytes, 10), "CLEANUP_TASKS_MAXIMUM": strconv.FormatInt(DefaultManagementBoundarySettings().CleanupTasksMaximum, 10), "MANAGEMENT_CPU_QUOTA_PERCENT": strconv.Itoa(settings.ManagementCpuQuotaPercent), "CPU_PERIOD_MICROS": strconv.FormatInt(settings.ContainmentCpuPeriodMicros, 10), "MANAGEMENT_CPUSET": policy.ManagementCpuSet, "RECOVERY_TIMEOUT_SECONDS": strconv.FormatFloat(timeout.Seconds(), 'f', 6, 64), "CANCEL_GRACE_SECONDS": strconv.FormatFloat(settings.CancelGrace.Seconds(), 'f', 6, 64)} {
+	memory, tasks, err := recoveryServiceLimits(config, "--recover-active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{"AGENT_PATH": config.Agent.Path, "CONFIG_PATH": config.configPath, "CLEANUP_MEMORY_BYTES": strconv.FormatInt(memory, 10), "CLEANUP_TASKS_MAXIMUM": strconv.FormatInt(tasks, 10), "MANAGEMENT_CPU_QUOTA_PERCENT": strconv.Itoa(settings.ManagementCpuQuotaPercent), "CPU_PERIOD_MICROS": strconv.FormatInt(settings.ContainmentCpuPeriodMicros, 10), "MANAGEMENT_CPUSET": policy.ManagementCpuSet, "RECOVERY_TIMEOUT_SECONDS": strconv.FormatFloat(timeout.Seconds(), 'f', 6, 64), "CANCEL_GRACE_SECONDS": strconv.FormatFloat(settings.CancelGrace.Seconds(), 'f', 6, 64)} {
 		content = []byte(strings.ReplaceAll(string(content), "@"+key+"@", value))
 	}
 	return content
@@ -451,7 +455,8 @@ func recoveryTestProjection(config Config, settings AgentSettings, policy *Manag
 		values[key] = ""
 	}
 	timeout, _ := recoveryServiceTimeout(settings)
-	for key, value := range map[string]string{"Id": managementRecoveryServiceName, "LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "FragmentPath": config.RecoveryService.Path, "Slice": managementCleanupSliceName, "User": "root", "Group": "root", "Type": "oneshot", "Restart": "no", "KillMode": "control-group", "StartLimitIntervalUSec": "0", "PrivateNetwork": "no", "PrivateUsers": "no", "PrivateMounts": "no", "MemoryMax": strconv.FormatInt(DefaultManagementBoundarySettings().CleanupMemoryBytes, 10), "MemorySwapMax": "0", "TasksMax": strconv.FormatInt(DefaultManagementBoundarySettings().CleanupTasksMaximum, 10), "CPUQuotaPerSecUSec": fmt.Sprintf("%dus", settings.ManagementCpuQuotaPercent*10000), "CPUQuotaPeriodUSec": fmt.Sprintf("%dus", settings.ContainmentCpuPeriodMicros), "AllowedCPUs": strings.ReplaceAll(policy.ManagementCpuSet, ",", " "), "CPUAffinity": strings.ReplaceAll(policy.ManagementCpuSet, ",", " "), "TimeoutStartUSec": fmt.Sprintf("%dus", timeout.Microseconds()), "TimeoutStopUSec": fmt.Sprintf("%dus", settings.CancelGrace.Microseconds()), "Requires": managementCleanupSliceName + " sysinit.target", "After": managementCleanupSliceName + " sysinit.target basic.target"} {
+	memory, tasks, _ := recoveryServiceLimits(config, "--recover-active")
+	for key, value := range map[string]string{"Id": managementRecoveryServiceName, "LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "FragmentPath": config.RecoveryService.Path, "Slice": managementCleanupSliceName, "User": "root", "Group": "root", "Type": "oneshot", "Restart": "no", "KillMode": "control-group", "StartLimitIntervalUSec": "0", "PrivateNetwork": "no", "PrivateUsers": "no", "PrivateMounts": "no", "MemoryMax": strconv.FormatInt(memory, 10), "MemorySwapMax": "0", "TasksMax": strconv.FormatInt(tasks, 10), "CPUQuotaPerSecUSec": fmt.Sprintf("%dus", settings.ManagementCpuQuotaPercent*10000), "CPUQuotaPeriodUSec": fmt.Sprintf("%dus", settings.ContainmentCpuPeriodMicros), "AllowedCPUs": strings.ReplaceAll(policy.ManagementCpuSet, ",", " "), "CPUAffinity": strings.ReplaceAll(policy.ManagementCpuSet, ",", " "), "TimeoutStartUSec": fmt.Sprintf("%dus", timeout.Microseconds()), "TimeoutStopUSec": fmt.Sprintf("%dus", settings.CancelGrace.Microseconds()), "Requires": managementCleanupSliceName + " sysinit.target", "After": managementCleanupSliceName + " sysinit.target basic.target"} {
 		values[key] = value
 	}
 	pid := 0
@@ -480,7 +485,15 @@ func recoveryArmTestFixture(t *testing.T) (*agentTestFixture, *SystemdRunner, La
 	service := renderRecoveryTestService(t, *config, fixture.settings, policy)
 	writeRecoveryTestAuthority(t, fixture, config.RecoveryService.Path, service)
 	config.RecoveryService = testAgentPin(t, config.RecoveryService.Path)
-	boundary := RuntimeResourceBoundary{Schema: Schema, Systemctl: Pin{Path: "/usr/bin/systemctl", Sha256: strings.Repeat("a", 64)}}
+	boundaryBytes, err := os.ReadFile(config.DockerRole.ResourceBoundary.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var boundary RuntimeResourceBoundary
+	if err := json.Unmarshal(boundaryBytes, &boundary); err != nil {
+		t.Fatal(err)
+	}
+	boundary.Systemctl = Pin{Path: "/usr/bin/systemctl", Sha256: strings.Repeat("a", 64)}
 	content, err := json.Marshal(boundary)
 	if err != nil {
 		t.Fatal(err)

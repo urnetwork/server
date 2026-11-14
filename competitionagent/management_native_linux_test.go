@@ -16,7 +16,12 @@ import (
 
 // Every native-looking property is synthetic data, never a host snapshot.
 func managementRecoveryTestFacts(current bool) (ManagementResourcePolicy, ManagementRolePolicy, AgentSettings, managementRecoveryFacts) {
-	policy := managementTestPolicy(DefaultManagementBoundarySettings())
+	return managementRecoveryTestFactsForPolicy(current, managementTestPolicy(DefaultManagementBoundarySettings()))
+}
+
+// Composed fixtures derive every CPU observation from the same pinned policy,
+// not an unrelated default or the machine's current affinity.
+func managementRecoveryTestFactsForPolicy(current bool, policy ManagementResourcePolicy) (ManagementResourcePolicy, ManagementRolePolicy, AgentSettings, managementRecoveryFacts) {
 	role, _ := managementPolicyRole(&policy, ManagementCleanupRole)
 	settings := DefaultAgentSettings()
 	limits := map[string]string{"memory.max": strconv.FormatInt(role.MemoryBytes, 10), "memory.high": "max", "memory.swap.max": "0", "memory.current": "1024",
@@ -25,11 +30,15 @@ func managementRecoveryTestFacts(current bool) (ManagementResourcePolicy, Manage
 	facts := managementRecoveryFacts{Before: limits, After: maps.Clone(limits), Ancestors: map[string]map[string]string{"/urnetwork.slice": ancestor},
 		AncestorsAfter: map[string]map[string]string{"/urnetwork.slice": maps.Clone(ancestor)}, ChildrenBefore: []string{}, ChildrenAfter: []string{}}
 	if current {
+		facts.RecoveryServiceBefore = map[string]string{"memory.max": strconv.FormatInt(role.MemoryBytes, 10), "memory.high": "max", "memory.swap.max": "0", "memory.current": "1024", "pids.max": strconv.FormatInt(role.TasksMaximum, 10), "pids.current": "1",
+			"cpu.max":     strconv.FormatInt(int64(settings.ManagementCpuQuotaPercent)*settings.ContainmentCpuPeriodMicros/100, 10) + " " + strconv.FormatInt(settings.ContainmentCpuPeriodMicros, 10),
+			"cpuset.cpus": policy.ManagementCpuSet, "cpuset.cpus.effective": policy.ManagementCpuSet, "cgroup.type": "domain", "memory.oom.group": "1"}
+		facts.RecoveryServiceAfter = maps.Clone(facts.RecoveryServiceBefore)
 		facts.Before["pids.current"], facts.After["pids.current"] = "1", "1"
 		facts.ChildrenBefore, facts.ChildrenAfter = []string{managementRecoveryServiceName}, []string{managementRecoveryServiceName}
 		facts.ProcessStartBefore, facts.ProcessStartAfter = 123, 123
 		facts.ProcessCgroupBefore, facts.ProcessCgroupAfter = "0::"+role.CgroupPath+"/"+managementRecoveryServiceName, "0::"+role.CgroupPath+"/"+managementRecoveryServiceName
-		facts.ProcessStatusBefore, facts.ProcessStatusAfter = []byte("Cpus_allowed_list:\t2,4\n"), []byte("Cpus_allowed_list:\t2,4\n")
+		facts.ProcessStatusBefore, facts.ProcessStatusAfter = []byte("Cpus_allowed_list:\t"+policy.ManagementCpuSet+"\n"), []byte("Cpus_allowed_list:\t"+policy.ManagementCpuSet+"\n")
 	}
 	return policy, role, settings, facts
 }
@@ -38,7 +47,14 @@ func managementRecoveryTestFacts(current bool) (ManagementResourcePolicy, Manage
 // actual sysfs/proc. Own-PID naming is computed only for this test process.
 func managementRecoveryTestTree(t *testing.T, current bool) (ManagementResourcePolicy, ManagementRolePolicy, AgentSettings, string, string, string) {
 	t.Helper()
-	policy, role, settings, facts := managementRecoveryTestFacts(current)
+	return managementRecoveryTestTreeForPolicy(t, current, managementTestPolicy(DefaultManagementBoundarySettings()))
+}
+
+// The authenticated fixture policy owns its entire descriptor tree, including
+// outer/child CPU sets and the private synthetic process status.
+func managementRecoveryTestTreeForPolicy(t *testing.T, current bool, policy ManagementResourcePolicy) (ManagementResourcePolicy, ManagementRolePolicy, AgentSettings, string, string, string) {
+	t.Helper()
+	policy, role, settings, facts := managementRecoveryTestFactsForPolicy(current, policy)
 	root := t.TempDir()
 	cgroupRoot, procRoot := filepath.Join(root, "cgroup"), filepath.Join(root, "proc")
 	group := filepath.Join(cgroupRoot, strings.TrimPrefix(role.CgroupPath, "/"))
@@ -55,6 +71,11 @@ func managementRecoveryTestTree(t *testing.T, current bool) (ManagementResourceP
 	if current {
 		if err := os.Mkdir(filepath.Join(group, managementRecoveryServiceName), 0700); err != nil {
 			t.Fatal(err)
+		}
+		for name, value := range facts.RecoveryServiceBefore {
+			if err := os.WriteFile(filepath.Join(group, managementRecoveryServiceName, name), []byte(value+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
 		}
 		process := filepath.Join(procRoot, strconv.Itoa(os.Getpid()))
 		if err := os.MkdirAll(process, 0700); err != nil {

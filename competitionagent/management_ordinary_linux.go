@@ -35,6 +35,12 @@ func managementOrdinarySlices(policy ManagementResourcePolicy) ([]ManagementSlic
 // This entrypoint has no caller-selected filesystem, process or Boolean waiver.
 // It reads caps/closure before launch; it neither reparents nor stops anything.
 func verifyManagementOrdinaryBoundary(parent context.Context, policy *ManagementResourcePolicy, systemctl Pin, settings AgentSettings) error {
+	return verifyManagementOrdinaryForPurpose(parent, policy, systemctl, settings, managementFreshAdmission)
+}
+
+// Hard containment can be observed while the existing execution consumes its
+// admitted headroom. This purpose cannot return or register fresh eligibility.
+func verifyManagementOrdinaryForPurpose(parent context.Context, policy *ManagementResourcePolicy, systemctl Pin, settings AgentSettings, purpose managementObservationPurpose) error {
 	if policy == nil || !managementOrdinarySettingsValid(settings) {
 		return errors.New("ordinary management lacks finite observation settings")
 	}
@@ -62,7 +68,7 @@ func verifyManagementOrdinaryBoundary(parent context.Context, policy *Management
 	if err != nil {
 		return err
 	}
-	if err := validateManagementOrdinaryFacts(facts, *policy, settings); err != nil {
+	if err := validateManagementOrdinaryForPurpose(facts, *policy, settings, purpose); err != nil {
 		return err
 	}
 	for _, group := range groups {
@@ -274,6 +280,15 @@ func readManagementOrdinaryFacts(ctx context.Context, policy ManagementResourceP
 // Both independent role ceilings and their shared sixteen-GiB parent must be
 // real. Current headroom is an admission observation, not future peak proof.
 func validateManagementOrdinaryFacts(facts managementOrdinaryFacts, policy ManagementResourcePolicy, settings AgentSettings) error {
+	return validateManagementOrdinaryForPurpose(facts, policy, settings, managementFreshAdmission)
+}
+
+// Both purposes require the exact same native caps/closure. Only fresh work
+// additionally consumes the configured positive runnable admission margin.
+func validateManagementOrdinaryForPurpose(facts managementOrdinaryFacts, policy ManagementResourcePolicy, settings AgentSettings, purpose managementObservationPurpose) error {
+	if purpose != managementFreshAdmission && purpose != managementExistingContainment {
+		return errors.New("unknown management observation purpose")
+	}
 	groups, err := managementOrdinarySlices(policy)
 	if err != nil || !managementOrdinarySettingsValid(settings) {
 		return errors.New("ordinary observations have no exact role/settings owner")
@@ -330,6 +345,9 @@ func validateManagementOrdinaryFacts(facts managementOrdinaryFacts, policy Manag
 				key            string
 				limit, reserve int64
 			}{{key: "memory.current", limit: group.MemoryBytes, reserve: settings.ManagementMemoryHeadroomBytes}, {key: "pids.current", limit: group.TasksMaximum, reserve: settings.ManagementTasksHeadroom}} {
+				if purpose == managementExistingContainment {
+					usage.reserve = 0
+				}
 				value, err := strconv.ParseInt(values[usage.key], 10, 64)
 				if err != nil || value < 0 || strconv.FormatInt(value, 10) != values[usage.key] || usage.reserve > usage.limit || value > usage.limit-usage.reserve {
 					return errors.New("ordinary aggregate lacks positively observed runnable headroom")

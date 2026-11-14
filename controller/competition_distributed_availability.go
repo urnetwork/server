@@ -26,7 +26,7 @@ func (self *competitionAgentEvaluator) Available(ctx context.Context) (bool, err
 	if err != nil {
 		return false, err
 	}
-	if response.Identity != nil || response.ManifestSha256 != "" || response.RequestSha256 != "" || len(response.Files) != 0 || len(response.SelfCheck) != 0 || response.ExitCode != 0 || response.ErrorCode != "" {
+	if response.ExistingRun != nil || response.Identity != nil || response.ManifestSha256 != "" || response.RequestSha256 != "" || len(response.Files) != 0 || len(response.SelfCheck) != 0 || response.ExitCode != 0 || response.ErrorCode != "" {
 		return false, errors.New("executor physical availability observation was incomplete")
 	}
 	switch response.State {
