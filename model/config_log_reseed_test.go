@@ -134,6 +134,53 @@ func (self *reseedWorld) kept(sidecarId server.Id) *ConfigReseedUpload {
 	}
 }
 
+// The base an admin's device publishes at tip+1 once the adopted run is written (§7.9's resume): signed by the
+// owner's first device at the tip, over base 1's rows, fold and config head, which the re-seeded config repo still
+// names, with the tail's verdicts: every statement the world lands takes effect, and a base carries 0 (DESIGN-DETAILS
+// 5.2.2).
+func (self *reseedWorld) resumeBase() *ConfigLogBase {
+	self.t.Helper()
+	kept := self.kept(self.ownerSidecarId)
+	entry := &bridge.AuthEntry{}
+	signed := &bridge.Signed{}
+	baseOne := &bridge.ProjectionHeader{}
+	if err := proto.Unmarshal(kept.Entries[0], entry); err != nil {
+		self.t.Fatal(err)
+	}
+	if err := proto.Unmarshal(entry.GetBody(), signed); err != nil {
+		self.t.Fatal(err)
+	}
+	if err := proto.Unmarshal(signed.GetBody(), baseOne); err != nil {
+		self.t.Fatal(err)
+	}
+	rows := kept.Rows[0]
+	rowsSha256 := sha256.Sum256(rows)
+	foldedThrough := baseOne.GetFoldedThrough()
+	tailVerdicts := make([]byte, (2*(self.tip.GetVersion()-foldedThrough)+7)/8)
+	for n := foldedThrough + 1; n <= self.tip.GetVersion(); n += 1 {
+		tailEntry := &bridge.AuthEntry{}
+		if err := proto.Unmarshal(kept.Entries[n-1], tailEntry); err != nil {
+			self.t.Fatal(err)
+		}
+		if tailEntry.GetKind() != bridge.AuthEntryKindBase {
+			j := n - foldedThrough - 1
+			tailVerdicts[j/4] |= 1 << (2 * (j % 4))
+		}
+	}
+	signedHeader := self.world.SignAsOwner(bridge.SignedType_SIGNED_PROJECTION_HEADER, &bridge.ProjectionHeader{
+		NetworkId:        sidecar.Id(self.networkId).Bytes(),
+		Version:          self.tip.GetVersion() + 1,
+		PrevChain:        self.tip.GetChain(),
+		FoldedThrough:    foldedThrough,
+		ConfigVersion:    baseOne.GetConfigVersion(),
+		ConfigHeadSha256: baseOne.GetConfigHeadSha256(),
+		RowsSha256:       rowsSha256[:],
+		RowsByteCount:    uint32(len(rows)),
+		TailVerdicts:     tailVerdicts,
+	})
+	return &ConfigLogBase{SignedHeader: signedHeader, Rows: rows}
+}
+
 // An empty TICK at the tip's next position, its link good: what one device forges.
 func (self *reseedWorld) forgedTick() []byte {
 	self.t.Helper()
@@ -281,27 +328,6 @@ func TestAdoptedRunResumesTheLogAtUnchangedPositions(t *testing.T) {
 	if err := restored.WriteAdoptedRun(self.ctx, self.networkId, &forked); !errors.Is(err, ErrConfigReseedDisagrees) {
 		t.Fatalf("over other bytes: %v", err)
 	}
-}
-
-// Uploads keep each sidecar's newest, in the order they came, bounded.
-func TestConfigReseedUploadsKeepEachSidecarsNewest(t *testing.T) {
-	settings := DefaultConfigReseedSettings()
-	settings.MaxUploadCount = 2
-	uploads := NewConfigReseedUploads(settings)
-	networkId := server.NewId()
-	first, second, third := server.NewId(), server.NewId(), server.NewId()
-	uploads.Put(networkId, &ConfigReseedUpload{SidecarId: first, Pins: []*bridge.AuthPin{{Version: 1}}})
-	uploads.Put(networkId, &ConfigReseedUpload{SidecarId: second})
-	uploads.Put(networkId, &ConfigReseedUpload{SidecarId: first, Pins: []*bridge.AuthPin{{Version: 2}}})
-	listed := uploads.List(networkId)
-	connect.AssertEqual(t, len(listed), 2)
-	connect.AssertEqual(t, listed[0].SidecarId, second)
-	connect.AssertEqual(t, listed[1].Pins[0].GetVersion(), uint64(2))
-	uploads.Put(networkId, &ConfigReseedUpload{SidecarId: third})
-	listed = uploads.List(networkId)
-	connect.AssertEqual(t, []server.Id{listed[0].SidecarId, listed[1].SidecarId}, []server.Id{first, third})
-	uploads.Clear(networkId)
-	connect.AssertEqual(t, len(uploads.List(networkId)), 0)
 }
 
 // Uploads are taken only while sidecar.yml's reseed is true.

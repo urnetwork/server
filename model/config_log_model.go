@@ -84,8 +84,10 @@ import (
 // process installs a sequencer built
 // with NewApiConfigLogSettings, which sets all of these; a test's sequencer sets
 // what it tests. Ticks' schedule and retention are config_log_tick.go's and
-// config_log_retention.go's (TEAM-M2-14); reseed (§19.10), whose own walk from
-// C_0 is TEAM-M3-02's, is not built.
+// config_log_retention.go's (TEAM-M2-14); a site loss's uploads, adoption and
+// resumption are config_log_reseed.go's (TEAM-M3-02, §19.10), whose resumed
+// marker settings' BaseLanded sets when a base lands past an adopted run
+// (QD-724).
 
 // Tunables of the sequencer. §7.9's 4,096 is ConfigLog's.
 type ConfigLogSettings struct {
@@ -129,6 +131,10 @@ type ConfigLogSettings struct {
 	// tick that passed at state, the tip, sequenced at timeMs; a *QuotaRefusalError is answered as the
 	// QuotaRefusal itself. nil limits nothing.
 	ActivationCap func(ctx context.Context, networkId server.Id, state *sidecar.ConfigState, tick *bridge.ApiTick, timeMs int64) error
+	// Told each base at its pin, after this instance lands it and again when a retry finds it in the log: after a
+	// site loss, the base past a network's adopted run sets its resumed marker (§7.9, QD-724;
+	// config_log_reseed_redis.go). Best effort. nil tells nothing.
+	BaseLanded func(ctx context.Context, networkId server.Id, pin *bridge.AuthPin)
 }
 
 func DefaultConfigLogSettings() *ConfigLogSettings {
@@ -593,6 +599,9 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 			}
 		}
 		self.advance(ctx, networkId, network, pin)
+		if request.kind == bridge.AuthEntryKindBase && self.settings.BaseLanded != nil {
+			self.settings.BaseLanded(ctx, networkId, pin)
+		}
 		if landedBytes != nil {
 			self.published(ctx, networkId, network, pin, landedBytes)
 		} else {

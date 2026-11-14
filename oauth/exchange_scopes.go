@@ -36,8 +36,11 @@ package oauth
 // Owners and Admins (model.ConfigReseedAdminSidecar), for evs's POST
 // /evs/v1/repos/<id>/reseed and gkm's GroupForm alone, and answers every other
 // request restore_required: another scope, another audience, a forwarding
-// client, any other sidecar. It holds for every network while reseed is on,
-// those whose logs resumed included, until the operator turns it off.
+// client, any other sidecar. It holds for each network until its resume base
+// lands, which sets the network's resumed marker in Redis {acl_<networkId>}r
+// (model.ConfigReseedResumed; QD-724): from then the exchange asks Grant for
+// that network again, while every network whose log has not resumed stays in
+// re-seed mode until the operator turns reseed off.
 //
 // Refused whole: a client whose sidecar the state revoked, reaped, parked or
 // suspended, whose not_after passed or whose member left (invalid_grant); an
@@ -104,6 +107,9 @@ var (
 	// whether the restored rows list the sidecar under its network's Owners
 	// and Admins, and its member
 	exchangeScopeReseedAdminSidecar = model.ConfigReseedAdminSidecar
+	// whether the network's log resumed after a site loss, which ends its
+	// re-seed mode
+	exchangeReseedResumed = model.ConfigReseedResumed
 )
 
 // The real ExchangeScopeSource over a gate.

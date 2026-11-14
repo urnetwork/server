@@ -180,10 +180,13 @@ func TestReapplyRemovalEffectsAfterARestore(t *testing.T) {
 	})
 }
 
-// POST /network/config/reseed past its gate, on Postgres's bindings: a client that binds no sidecar is refused; the
-// owner's device alone adopts nothing in a two-member network; the member's device's upload adopts the run through the
-// tip; a re-seeded head from the member's device, which is no config writer, is refused; and the owner's device's walk
-// from C_0 writes the run back to the lost cluster and drops the network's uploads.
+// POST /network/config/reseed past its gate, on Postgres's bindings and Redis's {acl_}r, the owner's device reaching
+// one api instance and the member's another (QD-724): a client that binds no sidecar is refused; the owner's device
+// alone adopts nothing in a two-member network; the member's device's upload, at the other instance, adopts the run
+// through the tip; a re-seeded head from the member's device, which is no config writer, is refused; the owner's
+// device's walk from C_0 writes the run back to the lost cluster, the uploads staying for a retry; and the base at
+// tip+1 sets the network's resumed marker and drops them, after which an upload keeps nothing and answers written,
+// while a network that only uploaded stays in re-seed mode.
 func TestPostConfigReseedAdoptsWhatTwoMembersDevicesUpload(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		owner := newClientOwnerFixture(t)
@@ -217,7 +220,8 @@ func TestPostConfigReseedAdoptsWhatTwoMembersDevicesUpload(t *testing.T) {
 			}
 			return configLogError.Code
 		}
-		uploads := NewConfigReseedUploads(nil)
+		// two api instances: each holds nothing in its process
+		uploads, otherUploads := NewConfigReseedUploads(nil), NewConfigReseedUploads(nil)
 		settings := DefaultConfigReseedSettings()
 
 		unbound := owner.mint(t, owner.root, &AuthNetworkClientArgs{Description: "unbound", DeviceSpec: "test"})
@@ -228,7 +232,7 @@ func TestPostConfigReseedAdoptsWhatTwoMembersDevicesUpload(t *testing.T) {
 		result, err := postConfigReseed(args(self.kept(self.ownerSidecarId), nil), ownerDevice, uploads, settings)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Tip == nil, true)
-		result, err = postConfigReseed(args(self.kept(self.memberSidecarId), nil), memberDevice, uploads, settings)
+		result, err = postConfigReseed(args(self.kept(self.memberSidecarId), nil), memberDevice, otherUploads, settings)
 		connect.AssertEqual(t, err, nil)
 		if result.Tip == nil || result.Tip.N != self.tip.GetVersion() || !bytes.Equal(result.Tip.Chain, self.tip.GetChain()) {
 			t.Fatalf("the adopted tip: %+v", result.Tip)
@@ -236,15 +240,23 @@ func TestPostConfigReseedAdoptsWhatTwoMembersDevicesUpload(t *testing.T) {
 		connect.AssertEqual(t, result.StoppedAt, uint64(0))
 		connect.AssertEqual(t, result.Written, false)
 
-		adoption, err := AdoptConfigRun(self.tip, uploads.List(owner.networkId))
+		held, err := uploads.List(owner.ctx, owner.networkId)
+		connect.AssertEqual(t, err, nil)
+		adoption, err := AdoptConfigRun(self.tip, held.Uploads)
 		connect.AssertEqual(t, err, nil)
 		configPushes := self.world.ConfigPushes(0, adoption.NewestBase().GetConfigVersion())
-		_, err = postConfigReseed(args(self.kept(self.memberSidecarId), configPushes), memberDevice, uploads, settings)
+		_, err = postConfigReseed(args(self.kept(self.memberSidecarId), configPushes), memberDevice, otherUploads, settings)
 		connect.AssertEqual(t, refusal(err), "config_refused")
+
+		// another network whose devices uploaded, and whose log never resumes here
+		waitingNetworkId := server.NewId()
+		_, err = otherUploads.Put(owner.ctx, waitingNetworkId, self.kept(self.ownerSidecarId))
+		connect.AssertEqual(t, err, nil)
 
 		lost := testReseedFakeCluster(t)
 		sequencerSettings := DefaultConfigLogSettings()
 		sequencerSettings.Clock = self.world.Clock()
+		sequencerSettings.BaseLanded = NewConfigReseedBaseLanded(nil)
 		restored := NewConfigLogSequencer(lost, sequencerSettings, nil)
 		SetConfigLogSequencer(restored)
 		t.Cleanup(func() { SetConfigLogSequencer(nil) })
@@ -255,6 +267,48 @@ func TestPostConfigReseedAdoptsWhatTwoMembersDevicesUpload(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, tip.GetVersion(), self.tip.GetVersion())
 		connect.AssertEqual(t, bytes.Equal(tip.GetChain(), self.tip.GetChain()), true)
-		connect.AssertEqual(t, len(uploads.List(owner.networkId)), 0)
+
+		// written, not yet resumed: the uploads stay, so the owner's device's retry at the other instance adopts and
+		// writes the same run again, and the network is still in re-seed mode
+		held, err = otherUploads.List(owner.ctx, owner.networkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(held.Uploads), 2)
+		connect.AssertEqual(t, held.WrittenTip, self.tip.GetVersion())
+		connect.AssertEqual(t, held.Resumed, false)
+		result, err = postConfigReseed(args(self.kept(self.ownerSidecarId), configPushes), ownerDevice, otherUploads, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Written, true)
+		resumed, err := ConfigReseedResumed(owner.ctx, owner.networkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, resumed, false)
+
+		// the admin's device publishes the base at tip+1: the network's log has resumed
+		pin, err := restored.AppendBase(owner.ctx, owner.networkId, self.resumeBase())
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, pin.GetVersion(), self.tip.GetVersion()+1)
+		resumed, err = ConfigReseedResumed(owner.ctx, owner.networkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, resumed, true)
+		held, err = uploads.List(owner.ctx, owner.networkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(held.Uploads), 0)
+		connect.AssertEqual(t, held.Resumed, true)
+
+		// a late upload keeps nothing and is told the run is written
+		result, err = postConfigReseed(args(self.kept(self.memberSidecarId), nil), memberDevice, uploads, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Written, true)
+		connect.AssertEqual(t, result.Tip == nil, true)
+		held, err = otherUploads.List(owner.ctx, owner.networkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(held.Uploads), 0)
+
+		// the other network stays in re-seed mode, its upload kept
+		resumed, err = ConfigReseedResumed(owner.ctx, waitingNetworkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, resumed, false)
+		held, err = uploads.List(owner.ctx, waitingNetworkId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(held.Uploads), 1)
 	})
 }

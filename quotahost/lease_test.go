@@ -26,7 +26,6 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/sidecarhost"
-	"github.com/urnetwork/server/sidecart3"
 )
 
 // Balances a test sets by hand, and the spent marks a lease writes.
@@ -256,6 +255,11 @@ func TestLeaseSpendIsAtomicWithNoIo(t *testing.T) {
 	})
 }
 
+// sidecart3.InlinePath, answering the Redis calls the path made. This package's own tests cannot import
+// sidecart3, which reaches api's handlers and through them this package, so inline_path_hook_test.go, in the
+// external test package, sets it.
+var TestingInlinePath func(t testing.TB, name string, redis sidecar.Redis, path func(redis sidecar.Redis)) int
+
 // §22.5's hot-path gate on Spend's composed entry, budgets.yml's quota.spend row: no PostgreSQL acquisition
 // and no Redis call, a lease holding bytes.
 func TestLeaseSpendHoldsToItsInlinePathRow(t *testing.T) {
@@ -268,14 +272,14 @@ func TestLeaseSpendHoldsToItsInlinePathRow(t *testing.T) {
 		handle := testingOpenLease(t, fixture, networkId)
 		defer handle.Close()
 		calls := fixture.redis.callCount()
-		result := sidecart3.InlinePath(t, "quota.spend", sidecartest.NewFakeRedis(t.Context(), nil, nil, nil, nil), func(redis sidecar.Redis) {
+		redisCallCount := TestingInlinePath(t, "quota.spend", sidecartest.NewFakeRedis(t.Context(), nil, nil, nil, nil), func(redis sidecar.Redis) {
 			for range 100 {
 				if !handle.Spend(1) {
 					t.Error("a spend within the draw refused")
 				}
 			}
 		})
-		connect.AssertEqual(t, result.RedisCallCount, 0)
+		connect.AssertEqual(t, redisCallCount, 0)
 		connect.AssertEqual(t, fixture.redis.callCount(), calls)
 	})
 }
@@ -327,7 +331,7 @@ func TestLeaseOpensWithinItsInlinePathRow(t *testing.T) {
 		}
 		reads := balances.reads()
 		leases := []sidecar.QuotaLease{}
-		result := sidecart3.InlinePath(t, "quota.lease", sidecarhost.NewRedis(nil), func(counted sidecar.Redis) {
+		redisCallCount := TestingInlinePath(t, "quota.lease", sidecarhost.NewRedis(nil), func(counted sidecar.Redis) {
 			redis.use(counted)
 			defer redis.use(stackRedis)
 			for range 2 {
@@ -345,7 +349,7 @@ func TestLeaseOpensWithinItsInlinePathRow(t *testing.T) {
 			}
 		}()
 		connect.AssertEqual(t, len(leases), 2)
-		connect.AssertEqual(t, result.RedisCallCount, 1)
+		connect.AssertEqual(t, redisCallCount, 1)
 		connect.AssertEqual(t, balances.reads(), reads)
 		connect.AssertEqual(t, testingLeaseReserved(ctx, balance.BalanceId), testingLeaseSettings().DrawByteCount)
 		connect.AssertEqual(t, leases[1].Spend(1), true)

@@ -15,7 +15,7 @@ import (
 // so a gate changes with a config push and no deploy:
 //
 //	sidecar:
-//	  evs: {enabled: false, writes: true, networks: [], percent: 0}
+//	  evs: {enabled: false, writes: true, networks: [], percent: 0, blocks: <n>}
 //	  format2: {enabled: false, networks: [], percent: 0, purge: observe, drop: observe}
 //	  gkm: {enabled: false, networks: [], percent: 0}  # sockets, tlsedge, mxedge, smtpedge alike
 //	  dns: {enabled: false, writes: true}
@@ -45,6 +45,14 @@ import (
 // acl_contract_gate is not in it either: it is the switch ACL-M4-01's plan keeps
 // CreateContract's §8.10 gate dark behind, which a process consults only where it
 // installed a gate (controller.SetAclContractGate).
+// evs's blocks is QD-639's (question quota-m2-10-evs-block-count), which §19.4's
+// evs row picks up at the next records pass: how many evs blocks serve the env,
+// set by the operator with services.yml's evs block count, as tlsedge.yml's
+// blocks is (§13.9, TLS reading 12). Each evs process paces a spent network's
+// reads at evs_unpaid_read_rate ÷ blocks (§20.6), with no shared counter. It has
+// no default: unset, or below 1, reads as unset, and server/evshost refuses to
+// start a block whose gate is enabled without it. The count is the env's, never
+// what one host sees of its peers.
 // sidecar_gates.go holds what each gate answers.
 //
 // A gate that loosens when the file breaks would drop P0's enforcement, or open
@@ -56,7 +64,8 @@ import (
 // Taking a gate back off is an edit to the file, not its removal: a removal
 // holds until the process restarts. Within a file that parses, one bad entry
 // costs only itself: an id that does not parse is skipped, a percent out of
-// range reads 0, and a purge or drop that is not exactly on reads observe.
+// range reads 0, a purge or drop that is not exactly on reads observe, and an evs
+// blocks that is not a whole number of at least 1 reads as unset.
 
 // The file's name under config/<env>.
 const sidecarConfigResourceName = "sidecar.yml"
@@ -86,6 +95,8 @@ type sidecarGateYaml struct {
 	// format2's alone
 	Purge string `yaml:"purge"`
 	Drop  string `yaml:"drop"`
+	// evs's alone: a node, since it has no default and only a whole number counts
+	Blocks yaml.Node `yaml:"blocks"`
 }
 
 // A key that is only `enabled`.
@@ -154,6 +165,9 @@ type SidecarConfig struct {
 
 	// whether the file names escrow_draw_order at all, on or off
 	escrowDrawOrderNamed bool
+
+	// the evs gate's blocks, 0 when the file sets none that is at least 1
+	evsBlocks int
 }
 
 // Whether the network is listed in preview_networks.
@@ -174,6 +188,25 @@ func parseSidecarConfigIds(key string, idStrs []string) []Id {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// The evs gate's blocks: a whole number of at least 1, and 0 for anything else,
+// said once a read. A fraction is never rounded, since a count read low hands a
+// spent network more than its rate.
+func parseSidecarConfigEvsBlocks(node *yaml.Node) int {
+	if node.Kind == yaml.AliasNode && node.Alias != nil {
+		node = node.Alias
+	}
+	if node.Kind == 0 || node.ShortTag() == "!!null" {
+		// no key
+		return 0
+	}
+	blocks := 0
+	if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!int" || node.Decode(&blocks) != nil || blocks < 1 {
+		glog.Errorf("[sidecar]%s sets an evs blocks that is not a whole number of at least 1, which reads as unset\n", sidecarConfigResourceName)
+		return 0
+	}
+	return blocks
 }
 
 // One bad entry costs only that entry.
@@ -203,6 +236,9 @@ func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 		if gate != nil {
 			config.serviceGates[name] = newSidecarServiceGate(name, gate)
 		}
+	}
+	if gate := y.Sidecar.Evs; gate != nil {
+		config.evsBlocks = parseSidecarConfigEvsBlocks(&gate.Blocks)
 	}
 	if gate := y.Sidecar.Format2; gate != nil {
 		config.format2 = &SidecarFormat2Gate{

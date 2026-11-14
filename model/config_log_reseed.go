@@ -8,8 +8,10 @@ package model
 //	         config_pushes} from a member device that is not read_only: the
 //	         verbatim run it keeps (§7.9's retain row), the rows of its bases,
 //	         or a phone's (k, A_k) pins. api keeps each sidecar's newest upload
-//	         in this process's memory, soft state the devices upload again
-//	         until the log resumes
+//	         in Redis {acl_<networkId>}r for 24 h (config_log_reseed_redis.go;
+//	         QD-724), soft state the devices upload again until the log
+//	         resumes, so two members' uploads that reach two api instances
+//	         adopt
 //	verify   each upload's run is checked as a cold gate starts (a rows-only
 //	         ConfigLog from the run's newest base: its links, every base's and
 //	         statement's signature and each signer rule onward), and its
@@ -32,7 +34,10 @@ package model
 //	         (plan-TEAM-api-config-head-reach (5)); a run that fails is
 //	         discarded, written nowhere. The admin's device then publishes a
 //	         base at tip+1 through POST /network/config/projection, and signers
-//	         re-submit what no adopted entry holds
+//	         re-submit what no adopted entry holds. That base sets the
+//	         network's resumed marker in {acl_}r, where §7.8's re-seed mode ends
+//	         for it and its uploads are dropped; an upload after it keeps
+//	         nothing and answers written
 //
 // Nothing here writes a position another entry holds: a PUT that finds other
 // bytes refuses the whole run, so positions and digests resume unchanged and
@@ -47,10 +52,11 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 
@@ -73,15 +79,35 @@ type ConfigReseedSettings struct {
 	// The most devices whose uploads a network keeps: 4,096; past it the
 	// newest replaces the oldest.
 	MaxUploadCount int
+	// The most bytes one upload holds in {acl_}r: 16 MiB, what one request's
+	// body may carry; a larger one is refused.
+	MaxUploadByteCount int64
+	// The most bytes a network's uploads hold in {acl_}r together: 256 MiB;
+	// past it the oldest leave, the newest always staying.
+	MaxNetworkByteCount int64
+	// {acl_}r lives this long after its last write, or the last read that
+	// found its resumed marker: 24 h (QD-724; §2.8 api-7).
+	UploadTtl time.Duration
+	// How long one read or write of a network's uploads in {acl_}r waits for
+	// Redis: 10 s, for values of up to MaxNetworkByteCount.
+	RedisTimeout time.Duration
+	// How long a read or write of {acl_}r's marks alone waits for Redis: 1 s.
+	// The token exchange reads the resumed marker under it.
+	MarkerRedisTimeout time.Duration
 }
 
 func DefaultConfigReseedSettings() *ConfigReseedSettings {
 	return &ConfigReseedSettings{
-		MaxEntryCount:      16384,
-		MaxRowsCount:       64,
-		MaxPinCount:        16384,
-		MaxConfigPushCount: 65536,
-		MaxUploadCount:     4096,
+		MaxEntryCount:       16384,
+		MaxRowsCount:        64,
+		MaxPinCount:         16384,
+		MaxConfigPushCount:  65536,
+		MaxUploadCount:      4096,
+		MaxUploadByteCount:  16 * 1024 * 1024,
+		MaxNetworkByteCount: 256 * 1024 * 1024,
+		UploadTtl:           24 * time.Hour,
+		RedisTimeout:        10 * time.Second,
+		MarkerRedisTimeout:  time.Second,
 	}
 }
 
@@ -95,6 +121,8 @@ var (
 	// The adopted run, verified as one run, fails: a base whose tail_verdicts
 	// disagree with the run, or a run no cold start takes.
 	ErrConfigReseedRunRefused = errors.New("the adopted run does not verify")
+	// One upload holds more bytes than {acl_}r keeps for a sidecar.
+	ErrConfigReseedUploadTooLarge = errors.New("an upload past its byte bound")
 )
 
 // One device's upload.
@@ -522,69 +550,6 @@ func (self *ConfigLogSequencer) WriteAdoptedRun(ctx context.Context, networkId s
 	return nil
 }
 
-// Each network's uploads this process holds: soft state, which devices upload
-// again until their network's log resumes. Safe for concurrent use.
-type ConfigReseedUploads struct {
-	settings *ConfigReseedSettings
-
-	stateLock sync.Mutex
-	// network -> sidecar -> its newest upload, with the order they came in
-	networkUploads map[server.Id]map[server.Id]*ConfigReseedUpload
-	networkOrders  map[server.Id][]server.Id
-}
-
-func NewConfigReseedUploads(settings *ConfigReseedSettings) *ConfigReseedUploads {
-	if settings == nil {
-		settings = DefaultConfigReseedSettings()
-	}
-	return &ConfigReseedUploads{
-		settings:       settings,
-		networkUploads: map[server.Id]map[server.Id]*ConfigReseedUpload{},
-		networkOrders:  map[server.Id][]server.Id{},
-	}
-}
-
-// Keeps upload as its sidecar's newest for the network.
-func (self *ConfigReseedUploads) Put(networkId server.Id, upload *ConfigReseedUpload) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	uploads := self.networkUploads[networkId]
-	if uploads == nil {
-		uploads = map[server.Id]*ConfigReseedUpload{}
-		self.networkUploads[networkId] = uploads
-	}
-	order := slices.DeleteFunc(self.networkOrders[networkId], func(sidecarId server.Id) bool { return sidecarId == upload.SidecarId })
-	order = append(order, upload.SidecarId)
-	for max(1, self.settings.MaxUploadCount) < len(order) {
-		delete(uploads, order[0])
-		order = order[1:]
-	}
-	uploads[upload.SidecarId] = upload
-	self.networkOrders[networkId] = order
-}
-
-// The network's uploads, in the order their sidecars last uploaded.
-func (self *ConfigReseedUploads) List(networkId server.Id) []*ConfigReseedUpload {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	uploads := []*ConfigReseedUpload{}
-	for _, sidecarId := range self.networkOrders[networkId] {
-		uploads = append(uploads, self.networkUploads[networkId][sidecarId])
-	}
-	return uploads
-}
-
-// Drops the network's uploads once its run is written.
-func (self *ConfigReseedUploads) Clear(networkId server.Id) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	delete(self.networkUploads, networkId)
-	delete(self.networkOrders, networkId)
-}
-
-// This process's uploads.
-var configReseedUploads = NewConfigReseedUploads(nil)
-
 // POST /network/config/reseed's body.
 type ConfigReseedArgs struct {
 	Genesis      []byte          `json:"genesis,omitempty"`
@@ -653,13 +618,31 @@ func postConfigReseed(args *ConfigReseedArgs, clientSession *session.ClientSessi
 		}
 	}
 	networkId := byJwt.NetworkId
-	uploads.Put(networkId, upload)
+	unavailable := func(err error) error {
+		return &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Err: err}
+	}
+	resumed, err := uploads.Put(clientSession.Ctx, networkId, upload)
+	if errors.Is(err, ErrConfigReseedUploadTooLarge) {
+		return nil, refused(http.StatusBadRequest, "config_refused", "an upload past its bounds")
+	}
+	if err != nil {
+		return nil, unavailable(fmt.Errorf("the upload is not kept: %w", err))
+	}
+	if resumed {
+		// the network's resume base landed: its run is written, and nothing
+		// more is adopted from uploads
+		return &ConfigReseedResult{Written: true}, nil
+	}
 
 	restoredHead, err := configReseedRestoredHead(clientSession.Ctx, networkId)
 	if err != nil {
 		return nil, refused(http.StatusServiceUnavailable, "unavailable", "the restored head cannot be read")
 	}
-	adoption, err := AdoptConfigRun(restoredHead, uploads.List(networkId))
+	held, err := uploads.List(clientSession.Ctx, networkId)
+	if err != nil {
+		return nil, unavailable(fmt.Errorf("the uploads cannot be read: %w", err))
+	}
+	adoption, err := AdoptConfigRun(restoredHead, held.Uploads)
 	if err != nil {
 		if errors.Is(err, ErrConfigReseedNoRun) {
 			return &ConfigReseedResult{}, nil
@@ -676,7 +659,10 @@ func postConfigReseed(args *ConfigReseedArgs, clientSession *session.ClientSessi
 		return nil, refused(http.StatusForbidden, "config_refused", "only a config writer's device re-seeds the config")
 	}
 	if err := CheckConfigReseedPushes(adoption, args.ConfigPushes); err != nil {
-		uploads.Clear(networkId)
+		if clearErr := uploads.Clear(clientSession.Ctx, networkId); clearErr != nil {
+			// the run stays until its key's ttl, and fails this walk again
+			glog.Warningf("[config]%s {acl_}r keeps a discarded run: %v\n", networkId, clearErr)
+		}
 		return nil, &ConfigLogError{Status: http.StatusForbidden, Code: "config_refused", Err: err}
 	}
 	sequencer, err := CurrentConfigLogSequencer()
@@ -686,7 +672,13 @@ func postConfigReseed(args *ConfigReseedArgs, clientSession *session.ClientSessi
 	if err := sequencer.WriteAdoptedRun(clientSession.Ctx, networkId, adoption); err != nil {
 		return nil, &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Err: err}
 	}
-	uploads.Clear(networkId)
+	// the base that lands past the adopted tip resumes the network, and drops
+	// its uploads; until then they stay, so a retry of this upload adopts and
+	// writes the same run again. Without this mark no base ends re-seed mode,
+	// so an answer Redis did not take is the device's to retry
+	if err := uploads.MarkWritten(clientSession.Ctx, networkId, adoption.Tip.GetVersion()); err != nil {
+		return nil, unavailable(fmt.Errorf("the written run is not marked: %w", err))
+	}
 	result.Written = true
 	return result, nil
 }
