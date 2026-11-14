@@ -133,14 +133,18 @@ func TestOperatorBlockPointsBackfillDryRunDigestAndIdempotence(t *testing.T) {
 		subsidyConfig.AccountPointsPerPayout = 1000000
 
 		ctx := context.Background()
-		now := server.NowUtc()
-		current := int64(model.SubnetBlockNumber(now))
+		// two blocks after the wall clock's open block, so client_reliability
+		// retention is the dry run's clock's, which runs when the second
+		// block is due
+		current := int64(model.SubnetBlockNumber(server.NowUtc()))
 		// as on Main: the boundary is inside a block, and the payout plans'
-		// last subsidy epoch ends at it
-		first, second := current-3, current-2
+		// last subsidy epoch ends at it; five days in, so the first block's
+		// window is still retained when the second is due
+		first, second := current+2, current+3
 		firstStart := model.SubnetBlockGenesis.Add(time.Duration(first-1) * model.SubnetBlockDuration)
 		secondStart := firstStart.Add(model.SubnetBlockDuration)
-		cutoff := firstStart.Add(36 * time.Hour)
+		cutoff := firstStart.Add(5 * 24 * time.Hour)
+		now := secondStart.Add(model.SubnetBlockDuration + model.OperatorBlockPointsSettleTime)
 		useOperatorBlockPointsBackfillTransition(t, cutoff)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO subsidy_payment (payment_plan_id, start_time, end_time, active_user_count, paid_user_count, net_payout_byte_count_paid, net_payout_byte_count_unpaid, net_revenue_nano_cents, net_payout_nano_cents)
@@ -254,7 +258,7 @@ func TestOperatorBlockPointsBackfillDryRunDigestAndIdempotence(t *testing.T) {
 		}
 
 		// a block that is not a completed block past the boundary is refused
-		if _, err := PlanOperatorBlockPointsBackfill(ctx, []int64{current}, now); err == nil {
+		if _, err := PlanOperatorBlockPointsBackfill(ctx, []int64{second + 1}, now); err == nil {
 			t.Fatal("the backfill accepted an open block")
 		}
 	})
