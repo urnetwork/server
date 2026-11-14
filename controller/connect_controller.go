@@ -814,6 +814,14 @@ func CreateContract(
 	destinationId := server.RequireIdFromBytes(createContract.DestinationId)
 	var provideMode model.ProvideMode
 
+	// §19.10's restore hold, before any read: no contract while the restored
+	// rows wait for the api step (connect_restore_hold.go)
+	if contractRestoreHeld() {
+		rejectionCause = contractRestoreHoldCause
+		timingResult = server.ContractCreationRejected
+		return contractRestoreHoldFrames()
+	}
+
 	// V(2) diagnostic: log every contract request up front, including the
 	// companion requests rejected below (which never reach [contract][cert]).
 	glog.V(2).Infof("[contract][req]%s->%s companion=%t\n", clientId, destinationId, createContract.Companion)

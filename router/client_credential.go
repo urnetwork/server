@@ -79,6 +79,9 @@ func Testing_WithHandler(route *Route, handler http.HandlerFunc) *Route {
 	if route.intendedNetworkRefused {
 		replaced.handler = intendedNetworkGate(replaced.handler)
 	}
+	if route.restoreHeld != nil {
+		replaced.handler = restoreHoldGate(route.restoreHeld, route.restoreHoldRetryAfter, replaced.handler)
+	}
 	return &replaced
 }
 

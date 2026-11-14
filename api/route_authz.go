@@ -659,7 +659,9 @@ func strictExpProofHolds(r *http.Request, bearerToken string, byJwt *session.ByJ
 // bearer's network (AUTHZ1.md §10). The intended network gate runs first, so a
 // request meant for another network is refused before any other gate or the
 // handler looks at it. The strict_exp gate runs before the client token gate, so
-// a sidecar's token hears its own refusal on every route off its list.
+// a sidecar's token hears its own refusal on every route off its list. Outside
+// them all, every route but the status route answers 503 while sidecar.yml's
+// restore_hold holds it (restore_hold.go).
 func applyRouteAccess(routes []*router.Route) []*router.Route {
 	applied := make([]*router.Route, 0, len(routes))
 	for _, route := range routes {
@@ -700,6 +702,10 @@ func applyRouteAccess(routes []*router.Route) []*router.Route {
 		}
 		if access != routeAccessPublic {
 			route = router.RefuseIntendedNetworkMismatch(route)
+		}
+		// outermost, so a held route reads no credential and no row
+		if !restoreHoldOpenRoutes[routeKey] {
+			route = router.RefuseWhileRestoreHeld(route, restoreHeld, DefaultRestoreHoldSettings().RetryAfter)
 		}
 		applied = append(applied, route)
 	}
