@@ -109,12 +109,25 @@ func TestTeamFirstInvoicePaidWritesTeamBalances(t *testing.T) {
 		}
 		check()
 		connect.AssertEqual(t, model.NetworkTierOf(ctx, networkId), model.NetworkTierTeam)
+		// the subscription's row, once: its customer, the anchor and the start (owner decision 199)
+		checkRow := func() {
+			t.Helper()
+			subscriptions := model.GetTeamSubscriptions(ctx, networkId)
+			connect.AssertEqual(t, len(subscriptions), 1)
+			connect.AssertEqual(t, subscriptions[0].SubscriptionId, "sub_synthetic_first")
+			connect.AssertEqual(t, subscriptions[0].CustomerId, "cus_synthetic_sub_synthetic_first")
+			connect.AssertEqual(t, subscriptions[0].AnchorTime, periods.anchor)
+			connect.AssertEqual(t, subscriptions[0].StartTime, periods.firstStart)
+			connect.AssertEqual(t, subscriptions[0].EndTime == nil, true)
+		}
+		checkRow()
 
 		// Stripe delivers at least once
 		for range 2 {
 			env.deliverInvoiceEvent(t, clientSession, "invoice.paid", "in_synthetic_first_first")
 		}
 		check()
+		checkRow()
 	})
 }
 
@@ -338,8 +351,11 @@ func TestTeamSubscriptionDeletedEndsUnpaidPeriods(t *testing.T) {
 		// the month no invoice paid for ends, grant and line
 		connect.AssertEqual(t, !testTeamBalanceAt(balances, string(model.GrantKindTeam), periods.anchor).endTime.After(now), true)
 		connect.AssertEqual(t, !testTeamBalanceAt(balances, string(model.GrantKindTeamCredit), periods.anchor).endTime.After(now), true)
-		// one mark, and no renewal of the tier
-		connect.AssertEqual(t, len(testTeamRenewals(t, ctx, networkId, model.SubscriptionTypeTeamEnded)), 1)
+		// the row ended once, kept, and no renewal of the tier
+		subscriptions := model.GetTeamSubscriptions(ctx, networkId)
+		connect.AssertEqual(t, len(subscriptions), 1)
+		connect.AssertEqual(t, subscriptions[0].EndTime != nil && !subscriptions[0].EndTime.After(now), true)
+		connect.AssertEqual(t, model.GetLiveTeamSubscription(ctx, networkId) == nil, true)
 		connect.AssertEqual(t, len(testTeamRenewals(t, ctx, networkId, model.SubscriptionTypeTeam)), 1)
 
 		// the job writes an ended subscription nothing more
@@ -359,6 +375,9 @@ func TestTeamSubscriptionDeletedStopsTheJob(t *testing.T) {
 
 		env.setSubscriptionStatus(subscriptionId, "canceled")
 		env.deliverSubscriptionDeleted(t, clientSession, subscriptionId)
+		// the job reads the row's end_time
+		subscription := model.GetTeamSubscription(ctx, networkId, subscriptionId)
+		connect.AssertEqual(t, subscription != nil && subscription.EndTime != nil, true)
 		connect.AssertEqual(t, len(model.RefreshTeamTransferBalances(ctx, server.NowUtc(), server.NewId())), 0)
 		balances := testTeamBalances(t, ctx, networkId)
 		connect.AssertEqual(t, len(balances), 2)
@@ -414,5 +433,53 @@ func TestTeamInvoicePaidWithoutATeamOrAPeriod(t *testing.T) {
 		ledgerNetworkId, ok := model.GetStripeInvoiceNetworkId(ctx, "in_synthetic_final")
 		connect.AssertEqual(t, ok, true)
 		connect.AssertEqual(t, ledgerNetworkId, networkId)
+	})
+}
+
+// A resubscribe after an end writes a second row beside the ended one, which is kept, and the job
+// grants the new subscription's next period from the new row's anchor, never the ended one's.
+func TestTeamResubscribeAfterAnEndWritesASecondRow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		env := newTeamStripeTestEnv(t)
+		defer model.Testing_SetEscrowDrawOrder(true)()
+		periods := newTestTeamPeriods()
+		networkId, clientSession, subscriptionId := newTestPaidTeam(t, ctx, env, periods, "resubscribe")
+		env.setSubscriptionStatus(subscriptionId, "canceled")
+		env.deliverSubscriptionDeleted(t, clientSession, subscriptionId)
+		connect.AssertEqual(t, model.GetLiveTeamSubscription(ctx, networkId) == nil, true)
+
+		// a second checkout a minute past the first anchor, its own anchor the next 00:00 UTC
+		secondId := "sub_synthetic_resubscribe_second"
+		secondStart := periods.anchor.Add(time.Minute)
+		secondAnchor := periods.anchor.AddDate(0, 0, 1)
+		env.setSubscription(secondId, networkId, true, "active")
+		env.setInvoice(
+			"in_synthetic_resubscribe_second", secondId, "paid", "subscription_create", 139,
+			testTeamInvoiceLine(secondId, testTeamPriceBase, 139, secondStart, secondAnchor),
+		)
+		restore := testSetStripeDunningNow(secondStart.Add(time.Minute))
+		for range 2 {
+			env.deliverInvoiceEvent(t, clientSession, "invoice.paid", "in_synthetic_resubscribe_second")
+		}
+		restore()
+
+		subscriptions := model.GetTeamSubscriptions(ctx, networkId)
+		connect.AssertEqual(t, len(subscriptions), 2)
+		connect.AssertEqual(t, subscriptions[0].SubscriptionId, subscriptionId)
+		connect.AssertEqual(t, subscriptions[0].EndTime != nil, true)
+		connect.AssertEqual(t, subscriptions[1].SubscriptionId, secondId)
+		connect.AssertEqual(t, subscriptions[1].AnchorTime, secondAnchor)
+		connect.AssertEqual(t, subscriptions[1].StartTime, secondStart)
+		connect.AssertEqual(t, subscriptions[1].EndTime == nil, true)
+		live := model.GetLiveTeamSubscription(ctx, networkId)
+		connect.AssertEqual(t, live != nil && live.SubscriptionId == secondId, true)
+
+		// past the second anchor the job writes the month from it, by the new row's anchor day
+		grants := model.RefreshTeamTransferBalances(ctx, secondAnchor.Add(time.Hour), server.NewId())
+		connect.AssertEqual(t, len(grants), 1)
+		connect.AssertEqual(t, grants[0].NetworkId, networkId)
+		connect.AssertEqual(t, grants[0].StartTime, secondAnchor)
+		connect.AssertEqual(t, grants[0].EndTime, testTeamMonthAfter(secondAnchor).Add(model.ProGrantGrace))
 	})
 }

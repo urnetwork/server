@@ -406,6 +406,9 @@ func RemoveNetworkWithStoreSnapshot(
 			for userId := range userIds {
 				removeNetworkMembershipsOfUserInTx(ctx, tx, userId)
 			}
+			// §20.9's subscription rows live until their network is deleted
+			// (§2.8 api-13)
+			removeNetworkTeamSubscriptionsInTx(ctx, tx, networkId)
 		}
 		// §15.15's mail rows: mail_network and direct MX go, host keys retire
 		// and age out in 30 days

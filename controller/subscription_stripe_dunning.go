@@ -155,6 +155,8 @@ type stripeDunningSubscription struct {
 	Status   string            `json:"status"`
 	Customer json.RawMessage   `json:"customer"`
 	Metadata map[string]string `json:"metadata"`
+	// Unix seconds; 0 when Stripe gives none. A Team's row reads it (team_stripe_events.go).
+	BillingCycleAnchor int64 `json:"billing_cycle_anchor"`
 }
 
 // Whether Stripe is retrying a failed renewal of the subscription: past_due

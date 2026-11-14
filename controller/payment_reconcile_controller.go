@@ -1313,7 +1313,9 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 		}
 	}
 
-	return true, nil
+	// leg 3: a Team subscription whose customer.subscription.deleted was lost
+	// (team_stripe_events.go)
+	return reconcileStripeTeamSubscriptions(run)
 }
 
 func stripeRenewalMatchesInvoice(
