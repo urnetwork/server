@@ -470,10 +470,10 @@ func issueOrphanP0(ctx context.Context, budget sidecar.WriteBudget, priceTable *
 // each try, and answers repo/ as it then stands. A repo in any other state is answered as read, unchanged.
 func moveOrphanRepo(ctx context.Context, deps *OrphanLogDeps, settings *OrphanLogSettings, priceTable *evsservice.PriceTable, firstCluster sidecar.BlobCluster, incidentId sidecar.Id, networkId server.Id, repoId sidecar.Id, at time.Time) (*orphanRepoRead, error) {
 	read, err := readOrphanRepo(ctx, deps.Blobs, firstCluster, networkId, repoId)
-	for attempt := 0; ; attempt += 1 {
-		if err != nil || !read.movable() {
-			return read, err
-		}
+	if err != nil {
+		return nil, err
+	}
+	for attempt := 0; read.movable(); attempt += 1 {
 		next := proto.Clone(read.object).(*protocol.EvsRepoObject)
 		next.State = protocol.EvsRepoState_EVS_REPO_SHREDDING
 		next.DeletionId = incidentId.Bytes()
@@ -509,8 +509,13 @@ func moveOrphanRepo(ctx context.Context, deps *OrphanLogDeps, settings *OrphanLo
 		default:
 			return nil, err
 		}
+		// err here is the loop body's own, so the reread's error is checked where it is assigned
 		read, err = rereadOrphanRepo(ctx, read.cluster, networkId, repoId)
+		if err != nil {
+			return nil, err
+		}
 	}
+	return read, nil
 }
 
 // One run of the job (see the file header). Before its time, or with the network's rows back, it changes nothing. It

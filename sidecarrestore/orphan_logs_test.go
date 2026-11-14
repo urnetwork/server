@@ -130,10 +130,12 @@ func testKeyCount(t testing.TB, ctx context.Context, blobs *sidecartest.FakeBlob
 // own a day before the loss, and shredding under a deletion of its own, all on one fake host whose clock times the
 // step, the job and evs's shred.
 type testOrphanWorld struct {
-	t             testing.TB
-	ctx           context.Context
-	host          *sidecartest.FakeHost
-	clock         *sidecartest.FakeClock
+	t     testing.TB
+	ctx   context.Context
+	host  *sidecartest.FakeHost
+	clock *sidecartest.FakeClock
+	// the plans the host's fakes take
+	faults        *sidecartest.FaultQueue
 	restored      *testLogWorld
 	orphan        *testLogWorld
 	kept          sidecar.Id
@@ -145,7 +147,8 @@ type testOrphanWorld struct {
 func newTestOrphanWorld(t testing.TB, ctx context.Context) *testOrphanWorld {
 	t.Helper()
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
-	host := sidecartest.NewFakeHost(ctx, clock, nil, nil, nil)
+	faults := sidecartest.NewFaultQueue()
+	host := sidecartest.NewFakeHost(ctx, clock, faults, nil, nil)
 	first, err := host.Blobs.FirstCluster()
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +160,7 @@ func newTestOrphanWorld(t testing.TB, ctx context.Context) *testOrphanWorld {
 		ctx:      ctx,
 		host:     host,
 		clock:    clock,
+		faults:   faults,
 		restored: newTestLogWorld(t, ctx, first, restoredId, restoredOwner),
 		orphan:   newTestLogWorld(t, ctx, first, server.NewId(), server.NewId()),
 	}
@@ -426,6 +430,40 @@ func TestOrphanLogJobMovesEachRepoToShreddingAndQueuesItsShred(t *testing.T) {
 				connect.AssertEqual(t, shreddingOnceKeys[request.OnceKey], true)
 			}
 		}
+	})
+}
+
+// A move whose If-Match loses, as to another write, and whose reread then fails ends the run with the reread's error,
+// the repo unmoved, and the queue's retry moves it. The reread's error once fell into the loop body's own err and was
+// lost, and the next try read a nil repo/.
+func TestOrphanLogJobEndsWithTheRereadsErrorAfterALostMove(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		self := newTestOrphanWorld(t, ctx)
+		incident := testIncident(t, IncidentKindPostgres)
+		testMarkRestoredDatabase(t, ctx, incident.IncidentId())
+		self.runOpsStep(incident)
+		job := self.job()
+		self.clock.AdvanceTo(job.RunAt)
+
+		// the job's first read of the repo and its move's are the key's first two GETs
+		repoKey := sidecar.EvsRepoObjectKey(self.lostActive)
+		for _, plan := range []*sidecartest.FaultPlan{
+			{Op: sidecartest.FaultOpPut, KeyPrefix: repoKey, Result: sidecartest.Precondition},
+			{Op: sidecartest.FaultOpGet, KeyPrefix: repoKey, Nth: 3, Result: sidecartest.FailBeforeApply},
+		} {
+			if _, err := self.faults.Add(plan); err != nil {
+				t.Fatal(err)
+			}
+		}
+		connect.AssertEqual(t, RunOrphanLogJob(ctx, self.jobDeps(), job.Args) != nil, true)
+		connect.AssertEqual(t, len(self.faults.Unfired()), 0)
+		object, _ := testRepoObject(t, ctx, self.host.Blobs, self.lostActive)
+		connect.AssertEqual(t, object.GetState(), protocol.EvsRepoState_EVS_REPO_ACTIVE)
+
+		connect.AssertEqual(t, RunOrphanLogJob(ctx, self.jobDeps(), job.Args), nil)
+		self.assertShreddingUnder(incident, self.lostActive, protocol.EvsRepoState_EVS_REPO_SHREDDING, job.RunAt)
+		self.assertShreddingUnder(incident, self.lostDeleted, protocol.EvsRepoState_EVS_REPO_SHREDDING, job.RunAt)
 	})
 }
 
