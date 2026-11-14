@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"testing"
 
 	// "sort"
@@ -179,7 +179,7 @@ func searchSubstringRandom(t testing.TB, ctx context.Context, testSearch Search,
 	values := map[server.Id]string{}
 
 	for i := 0; i < n; i += 1 {
-		b := make([]byte, 8+mathrand.Intn(20))
+		b := make([]byte, 8+mathrand.IntN(20))
 		_, err := rand.Read(b)
 		server.Raise(err)
 
@@ -197,10 +197,10 @@ func searchSubstringRandom(t testing.TB, ctx context.Context, testSearch Search,
 
 	for i := 0; i < k; i += 1 {
 		valueIds := slices.Collect(maps.Keys(values))
-		valueId := valueIds[mathrand.Intn(len(valueIds))]
+		valueId := valueIds[mathrand.IntN(len(valueIds))]
 		value := values[valueId]
-		start := mathrand.Intn(len(value) / 2)
-		end := start + mathrand.Intn(len(value)+1-start)
+		start := mathrand.IntN(len(value) / 2)
+		end := start + mathrand.IntN(len(value)+1-start)
 		sub := value[start:end]
 
 		stats := OptStats()

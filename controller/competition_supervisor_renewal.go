@@ -1,5 +1,5 @@
-// Supervisor renewal may recover wholly unadmitted or closed read-only
-// deadlines. Historical lock budgets, confirmed fencing and workers stay separate.
+// Supervisor renewal may recover wholly unadmitted, closed read-only, or exact
+// rolled-back writer deadlines. Historical budgets and confirmed fencing remain.
 package controller
 
 import (
@@ -167,7 +167,7 @@ func defaultCompetitionSupervisorRenewalSettings() competitionSupervisorRenewalS
 // its immediate predecessor. A lock error can never grant that continuation.
 func retryCompetitionSupervisorRenewal(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error) error {
 	return retryCompetitionAuthorityRenewal(ctx, leaseExpiresAt, settings, operation, func(err error) bool {
-		return competitionSupervisorUnadmittedDeadline(err) || competitionSupervisorReadLockDeadline(err)
+		return competitionSupervisorUnadmittedDeadline(err) || competitionSupervisorReadLockDeadline(err) || competitionSupervisorRolledBackUpdateDeadline(err)
 	})
 }
 

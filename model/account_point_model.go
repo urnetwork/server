@@ -460,11 +460,6 @@ func PopulatePlanAccountPoints(ctx context.Context, planId server.Id) {
 	glog.Infof("Successfully wrote PlanPointsPayoutReport to %s", filename)
 }
 
-type NetworkReliabilitySubsidy struct {
-	Usdc   NanoCents
-	Points NanoPoints
-}
-
 // payoutChildrenReferralNetworksInTx walks the referral tree and hands each
 // child's account_point row to `apply` rather than inserting it directly, so
 // the caller decides how to persist: the plan collects the rows and inserts

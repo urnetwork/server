@@ -114,6 +114,9 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleGiftRetention(clientSession, tx, controller.NextGiftRetentionAt(server.NowUtc()))
 		// moves queued gift years up when the paid Pro ahead of them ends early (hourly)
 		controller.ScheduleRebaseQueuedGiftYears(clientSession, tx)
+		// the hourly Stripe dunning sweep: owes the payment-failed notices a
+		// webhook missed (controller/subscription_stripe_dunning_sweep.go)
+		controller.ScheduleSweepStripeDunning(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		work.ScheduleCloseContractDeadlines(clientSession, tx)
@@ -396,6 +399,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.RebaseQueuedGiftYears,
 			controller.RebaseQueuedGiftYearsPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.SweepStripeDunning,
+			controller.SweepStripeDunningPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.PlaySubscriptionRenewal,

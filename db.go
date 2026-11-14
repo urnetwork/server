@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	// "strconv"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -487,7 +487,7 @@ func (self *retryBackoff) NextRetryTimeout() time.Duration {
 		return self.retryMinTimeout
 	}
 	return self.retryMinTimeout + time.Duration(
-		mathrand.Int63n(int64(backoff-self.retryMinTimeout)),
+		mathrand.Int64N(int64(backoff-self.retryMinTimeout)),
 	)
 }
 
@@ -859,9 +859,12 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				needsCleanup := discard || physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
 				lifecycle.beginRelease()
 				txObservation.releaseEntered()
+				poolReturned := false
 				if discard {
 					discardPgConnection(ctx, conn)
 					conn = nil
+				} else if releasePolicyKnown {
+					poolReturned = conn.ReleaseWithIdleReturn()
 				} else {
 					conn.Release()
 				}
@@ -873,7 +876,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 						disposition = DbTxReleaseDestroyTransferred
 					}
 				}
-				txObservation.releaseReturned(disposition, cleanup)
+				txObservation.releaseReturned(disposition, cleanup, poolReturned)
 			}()
 			defer func() {
 				if err := recover(); err != nil {

@@ -231,8 +231,9 @@ func rankClientScoreWithCounts(
 	}
 	passesReliability := providerReliabilityPasses(weights, minIndependentReliabilityWeights)
 	clientScore.Online = decision.online && passesReliability
-	// a network-only score takes its declaration at export instead
-	// (FP2-MODERN.md, "The index flag")
+	// from the probe's evidence for every provider, network-only ones
+	// included (FP2-MODERN.md, "The index flag"); once the post-quantum
+	// marker is set the export replaces it (FP2-PROTOCOL.md §12.4)
 	clientScore.Modern = decision.modern
 	clientScore.UrlProbeSuccessWeight = providerUrlProbeSuccessWeight(counts)
 	clientScore.EgressValidUntil = nil

@@ -53,7 +53,7 @@ func TestPublishedMigrationMonitorExtenderArtifacts(t *testing.T) {
 			{name: "directory missing", sql: `ALTER TABLE network_extender RENAME TO missing_network_extender`, missing: []int{662, 669, 670, 671, 672, 794, 834, 921}},
 			{name: "directory column missing", sql: `ALTER TABLE network_extender DROP COLUMN network_id`, missing: []int{662}},
 			{name: "public key uniqueness missing", sql: `ALTER TABLE network_extender DROP CONSTRAINT network_extender_public_key_key`, missing: []int{662}},
-			{name: "address table missing", sql: `ALTER TABLE network_extender_address RENAME TO missing_network_extender_address`, missing: []int{663, 668}},
+			{name: "address table missing", sql: `ALTER TABLE network_extender_address RENAME TO missing_network_extender_address`, missing: []int{663, 668, server.NetworkExtenderAddressPortsSchemaMigrationVersion()}},
 			{name: "address family has wrong type", sql: `ALTER TABLE network_extender_address ALTER COLUMN ip_version TYPE integer`, missing: []int{663}},
 			{name: "address publish index reordered", sql: `
 				DROP INDEX network_extender_address_active_last_publish_time;

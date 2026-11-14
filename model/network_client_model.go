@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	// "crypto/sha256"
 	"errors"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	// "net"
 	"net/netip"
 	// "regexp"
@@ -2074,7 +2074,7 @@ func RemoveNetworkClients(
 	// immediately as before -- only deferred requests get spread out.
 	runAt := bucketStart
 	if currentBucket.Before(bucketStart) {
-		runAt = bucketStart.Add(time.Duration(mathrand.Int63n(int64(BulkClientRemovalBucketDuration))))
+		runAt = bucketStart.Add(time.Duration(mathrand.Int64N(int64(BulkClientRemovalBucketDuration))))
 	}
 
 	// one background bulk-delete run per network at a time.
@@ -3611,9 +3611,10 @@ func SetProvide(
 // provider for, touches the declaration: one that declares a capability writes
 // the client's row when it differs, and one that declares none deletes it. A
 // provide with neither key, as a window client's return-traffic provide,
-// writes nothing there, so most provides add no write. A row a deactivation
-// leaves behind is inert: discovery reads it only for active providers with
-// keys, and the provider's next provide with such a key replaces or deletes it.
+// writes nothing there, so most provides add no write. Discovery reads no
+// declaration (provide_capability_model.go): a provider counts as post-quantum
+// only with a probe's evidence. The provider's next provide with such a key
+// replaces or deletes its row.
 func SetProvideWithCapabilities(
 	ctx context.Context,
 	clientId server.Id,

@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"math/rand"
+	"math/rand/v2"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
+
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -606,8 +608,7 @@ func GetProviderEgressDestinationPool(ctx context.Context) (*egresshealth.Pool, 
 		return nil, err
 	}
 	model.SeedProviderEgressDestinations(ctx, sites.Destinations)
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	return sites.servePool(model.GetProviderEgressDestinations(ctx), server.NowUtc(), rng)
+	return sites.servePool(model.GetProviderEgressDestinations(ctx), server.NowUtc(), nil)
 }
 
 // The pool served over the stored rows: the general pool of the configured
@@ -616,7 +617,15 @@ func GetProviderEgressDestinationPool(ctx context.Context) (*egresshealth.Pool, 
 // general entry. A collision drops that one country site, counted and logged
 // under the serve stage, and never refuses the pool: one bad country entry
 // must not stop URL measurement fleet-wide.
+//
+// rng draws the canaries. Nil, which is what a request passes, draws them from
+// a fresh connect.NewSecureRand generator, so a provider that knows when a pool
+// was served cannot tell which marked sites it served as canaries; the draw was
+// seeded from the request time. Tests pass a deterministic generator.
 func (self *ProviderEgressSites) servePool(stored []*model.ProviderEgressDestination, now time.Time, rng *rand.Rand) (*egresshealth.Pool, error) {
+	if rng == nil {
+		rng = connect.NewSecureRand()
+	}
 	pool, err := BuildProviderEgressDestinationPool(
 		self.configuredRows(stored),
 		self.Profile,

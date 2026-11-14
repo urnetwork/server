@@ -383,10 +383,11 @@ func TestFindProviders2SelectModeAnswersByClass(t *testing.T) {
 	})
 }
 
-// Strict post-quantum requests (§12.4): before the marker, today's sources;
-// once it is set, only providers whose newest post-quantum outcome is
-// positive, in every draw of legacy and selector mode alike, named providers
-// included, and overflow never relaxes it.
+// Strict post-quantum requests (§12.4): before the marker, the probe's modern
+// evidence of the last seven days, never a declaration; once it is set, only
+// providers whose newest post-quantum outcome is positive, in every draw of
+// legacy and selector mode alike, named providers included, and overflow
+// never relaxes it.
 func TestFindProviders2StrictPostQuantumOnAPositiveSignal(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
@@ -405,9 +406,13 @@ func TestFindProviders2StrictPostQuantumOnAPositiveSignal(t *testing.T) {
 			return clientIds
 		}
 
-		// before the marker: declarations, which no provider made
-		result := fixture.find(ctx, t, postQuantum(&FindProviders2Args{Count: 10, ForceCount: true, RankMode: RankModeQuality}))
-		connect.AssertEqual(t, len(result.Providers), 0)
+		// before the marker: the probe's modern evidence, which every
+		// provider here has (capabilityTestHealth) and none declares, so the
+		// answer is the capability-blind one
+		blind := ids(fixture.find(ctx, t, &FindProviders2Args{Count: 10, ForceCount: true, RankMode: RankModeQuality}).Providers)
+		connect.AssertEqual(t, blind[fixture.a], true)
+		connect.AssertEqual(t, blind[fixture.b], true)
+		connect.AssertEqual(t, ids(fixture.find(ctx, t, postQuantum(&FindProviders2Args{Count: 10, ForceCount: true, RankMode: RankModeQuality})).Providers), blind)
 
 		// The marker as the URL probe's evidence sets it; the export's own
 		// marking follows the probe's state, which this test does not seed,

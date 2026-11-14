@@ -14,9 +14,10 @@ package connect
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"maps"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -293,7 +294,8 @@ func livenessLeaseClientIdsForTest(rng *mathrand.Rand, count int) []server.Id {
 	clientIds := []server.Id{}
 	for range count {
 		idBytes := make([]byte, 16)
-		rng.Read(idBytes)
+		binary.LittleEndian.PutUint64(idBytes[0:8], rng.Uint64())
+		binary.LittleEndian.PutUint64(idBytes[8:16], rng.Uint64())
 		clientIds = append(clientIds, server.RequireIdFromBytes(idBytes))
 	}
 	return clientIds
@@ -346,7 +348,8 @@ func checkLivenessLeaseIndexForTest(t *testing.T, writer *providerLivenessLeaseW
 // fails at the first difference.
 func checkLivenessLeaseEquivalenceForTest(t *testing.T, settings livenessLeaseEquivalenceSettingsForTest) {
 	t.Helper()
-	rng := mathrand.New(mathrand.NewSource(settings.seed))
+	// a fixed seed, so a run replays
+	rng := mathrand.New(mathrand.NewPCG(uint64(settings.seed), 0))
 	clientIds := livenessLeaseClientIdsForTest(rng, settings.clientCount)
 	start := time.UnixMilli(1_800_000_000_000)
 	now := start
@@ -394,14 +397,14 @@ func checkLivenessLeaseEquivalenceForTest(t *testing.T, settings livenessLeaseEq
 	}
 	chooseOperation := func() operationForTest {
 		l := live()
-		r := rng.Intn(100)
+		r := rng.IntN(100)
 		switch {
 		case r < 30 || len(l) == 0:
-			return operationForTest{kind: "begin", clientId: clientIds[rng.Intn(len(clientIds))]}
+			return operationForTest{kind: "begin", clientId: clientIds[rng.IntN(len(clientIds))]}
 		case r < 75:
-			return operationForTest{kind: "read", pair: l[rng.Intn(len(l))], mode: readModes[rng.Intn(len(readModes))]}
+			return operationForTest{kind: "read", pair: l[rng.IntN(len(l))], mode: readModes[rng.IntN(len(readModes))]}
 		default:
-			return operationForTest{kind: "end", pair: l[rng.Intn(len(l))]}
+			return operationForTest{kind: "end", pair: l[rng.IntN(len(l))]}
 		}
 	}
 	// operations on an ended connection do nothing in either writer
@@ -455,14 +458,14 @@ func checkLivenessLeaseEquivalenceForTest(t *testing.T, settings livenessLeaseEq
 	}
 
 	for step := range settings.steps {
-		now = now.Add(time.Duration(rng.Intn(3000)) * time.Millisecond)
+		now = now.Add(time.Duration(rng.IntN(3000)) * time.Millisecond)
 		if settings.drain && step == settings.steps/2 {
 			for _, pair := range live() {
 				pair.indexed.end()
 				pair.fullWalk.end()
 			}
 		}
-		if r := rng.Intn(100); r < 70 {
+		if r := rng.IntN(100); r < 70 {
 			operation := chooseOperation()
 			runIndexed(operation)
 			runFullWalk(operation)
@@ -472,21 +475,21 @@ func checkLivenessLeaseEquivalenceForTest(t *testing.T, settings livenessLeaseEq
 			// what each shard write answers and does, by its place in the write
 			held := map[server.Id]bool{}
 			for _, clientId := range clientIds {
-				held[clientId] = rng.Intn(2) == 0
+				held[clientId] = rng.IntN(2) == 0
 			}
 			failed := map[int]bool{}
 			during := map[int]operationForTest{}
 			aborted := -1
 			for ordinal := range 32 {
-				if rng.Intn(100) < settings.failPercent {
+				if rng.IntN(100) < settings.failPercent {
 					failed[ordinal] = true
 				}
-				if rng.Intn(100) < settings.duringPercent {
+				if rng.IntN(100) < settings.duringPercent {
 					during[ordinal] = chooseOperation()
 				}
 			}
-			if rng.Intn(100) < settings.abortPercent {
-				aborted = rng.Intn(4)
+			if rng.IntN(100) < settings.abortPercent {
+				aborted = rng.IntN(4)
 			}
 			var indexedWrites, fullWalkWrites []livenessLeaseEquivalenceWriteForTest
 			shardWriteFor := func(writes *[]livenessLeaseEquivalenceWriteForTest, cancel context.CancelFunc, runOperation func(operationForTest)) func(context.Context, int, []server.Id, []server.Id, []server.Id) ([]bool, error) {
@@ -626,7 +629,8 @@ func TestLivenessLeaseWriterMatchesTheFullWalkAcrossTheShards(t *testing.T) {
 func TestLivenessLeaseWriterLoopWritesLikeTheFullWalk(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		interval := 25 * time.Second
-		rng := mathrand.New(mathrand.NewSource(7))
+		// a fixed seed, so a run replays
+		rng := mathrand.New(mathrand.NewPCG(7, 0))
 		clientIds := livenessLeaseClientIdsForTest(rng, 120)
 		start := time.Now()
 
@@ -695,7 +699,7 @@ func TestLivenessLeaseWriterLoopWritesLikeTheFullWalk(t *testing.T) {
 		at := time.Duration(0)
 		for step := range 900 {
 			// off the full passes' instants, so a wake and a full pass never tie
-			at += time.Duration(100+rng.Intn(1500)) * time.Millisecond
+			at += time.Duration(100+rng.IntN(1500)) * time.Millisecond
 			if at%interval == 0 {
 				at += time.Millisecond
 			}
@@ -707,8 +711,8 @@ func TestLivenessLeaseWriterLoopWritesLikeTheFullWalk(t *testing.T) {
 					pair.indexed.end()
 					pair.fullWalk.end()
 				}
-			} else if r := rng.Intn(100); r < 35 || len(pairs) == 0 {
-				clientId := clientIds[rng.Intn(len(clientIds))]
+			} else if r := rng.IntN(100); r < 35 || len(pairs) == 0 {
+				clientId := clientIds[rng.IntN(len(clientIds))]
 				fullWalkConnection, fullWalkWakes := fullWalk.begin(clientId)
 				pairs = append(pairs, &pairForTest{
 					indexed:  writer.begin(clientId, nil),
@@ -716,12 +720,12 @@ func TestLivenessLeaseWriterLoopWritesLikeTheFullWalk(t *testing.T) {
 				})
 				wake = fullWalkWakes
 			} else if r < 85 {
-				pair := pairs[rng.Intn(len(pairs))]
-				mode := modes[rng.Intn(len(modes))]
+				pair := pairs[rng.IntN(len(pairs))]
+				mode := modes[rng.IntN(len(modes))]
 				pair.indexed.afterRead(mode)
 				wake = pair.fullWalk.afterRead(mode)
 			} else {
-				pair := pairs[rng.Intn(len(pairs))]
+				pair := pairs[rng.IntN(len(pairs))]
 				pair.indexed.end()
 				pair.fullWalk.end()
 			}

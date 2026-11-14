@@ -30,7 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"strconv"
 	"sync"
@@ -481,11 +481,14 @@ func findProviders2PostQuantumReady(findProviders2 *FindProviders2Args, session 
 
 // The candidates a post_quantum_encryption request may answer (§12.4): once
 // the marker is set, a candidate whose record is post-quantum positive, and
-// a named provider in {provider_post_quantum_positive}; before it, today's
-// declarations.
+// a named provider in {provider_post_quantum_positive}; before it, or after
+// a probe gap clears it, the providers whose modern evidence of the last
+// seven days is post-quantum (readProviderPostQuantumEvidenceClientIds),
+// named and discovered alike. Either way only a probe's positive counts,
+// never a provider's own declaration (owner, 2026-11-13).
 func readFindProviders2PostQuantumEncryption(session *session.ClientSession, postQuantumReady bool, scores map[server.Id]*ClientScore, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
 	if !postQuantumReady {
-		return readProvidePostQuantumEncryption(session.Ctx, clientIds)
+		return readProviderPostQuantumEvidenceClientIds(session.Ctx, clientIds, now)
 	}
 	capableClientIds := map[server.Id]bool{}
 	namedClientIds := []server.Id{}
@@ -507,8 +510,9 @@ func readFindProviders2PostQuantumEncryption(session *session.ClientSession, pos
 }
 
 // The named providers a require_modern_provider request may answer: once
-// the marker is set, members of {provider_modern} (§12.4); before it,
-// today's evidence and declarations.
+// the marker is set, members of {provider_modern} (§12.4); before it, those
+// modern by their evidence of the last seven days
+// (readProviderModernClientIds), network-only ones by the same evidence.
 func readFindProviders2NamedModern(session *session.ClientSession, postQuantumReady bool, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
 	if !postQuantumReady {
 		return readProviderModernClientIds(session.Ctx, clientIds, now)

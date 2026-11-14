@@ -145,38 +145,26 @@ func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if traffic.sweepCount != 2 || len(traffic.payees) != 2 || len(traffic.pairs) != 1 {
-			t.Fatalf("operator block traffic shape %d sweeps, %d payees, %d payers", traffic.sweepCount, len(traffic.payees), len(traffic.pairs))
+		if traffic.sweepCount != 2 || len(traffic.payees) != 2 {
+			t.Fatalf("operator block traffic shape %d sweeps, %d payees", traffic.sweepCount, len(traffic.payees))
 		}
-		for networkId, want := range map[server.Id]struct {
-			bytes   ByteCount
-			revenue NanoCents
-		}{
-			f.networkA: {f.egressBytes, f.egressRevenue},
-			f.networkB: {f.hopBBytes, f.hopBRevenue},
+		for networkId, bytes := range map[server.Id]ByteCount{
+			f.networkA: f.egressBytes,
+			f.networkB: f.hopBBytes,
 		} {
 			// both sweeps of the one settlement share its sweep time
 			payee := traffic.payees[networkId]
-			if payee == nil || payee.payoutByteCount != want.bytes || payee.netRevenue != want.revenue ||
-				!payee.minSweepTime.Equal(sweepTime) || payee.minPaidSweepTime == nil || !payee.minPaidSweepTime.Equal(sweepTime) {
-				t.Fatalf("operator block payee %s = %+v, want %+v at %s", networkId, payee, want, sweepTime)
-			}
-			// the balance carries net revenue, so it is paid (transfer_balance.paid)
-			pair := traffic.pairs[f.payerNetworkId][networkId]
-			if pair == nil || pair.paidByteCount != want.bytes || pair.unpaidByteCount != 0 {
-				t.Fatalf("operator block pair %s -> %s = %+v, want %d paid", f.payerNetworkId, networkId, pair, want.bytes)
+			if payee == nil || payee.payoutByteCount != bytes || !payee.minSweepTime.Equal(sweepTime) {
+				t.Fatalf("operator block payee %s = %+v, want %d bytes at %s", networkId, payee, bytes, sweepTime)
 			}
 		}
 
-		// the points an award over one fixed block gives that traffic, by the
-		// plan's rule (planOperatorBlockPoints): the minimum subsidy of the one
-		// paying network split over A and B by bytes, plus their net revenue,
-		// weighs the block's points. Reliability, seekers and referrals are off.
+		// the points an award over one fixed block gives that traffic
+		// (planOperatorBlockPoints): the block's payout points shared by A's and
+		// B's bytes, whatever their revenue. Reliability, seekers and referrals
+		// are off.
 		config := operatorBlockPointsTestConfig()
 		config.ReliabilityPointsPerPayout = 0
-		config.ReliabilitySubsidyPerPayoutUsd = 0
-		config.UsdPerActiveUser = 0
-		config.SubscriptionNetRevenueFraction = 0
 		awardStart := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
 		awardEnd := awardStart.Add(SubnetBlockDuration)
 		award, err := planOperatorBlockPoints(&operatorBlockPointsInputs{
@@ -191,16 +179,8 @@ func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		scale := min(float64(awardEnd.Sub(awardStart))/float64(config.Duration()), 1.0)
-		subsidyUsd := scale * config.MinPayoutUsd
-		trafficBytes := float64(f.egressBytes + f.hopBBytes)
-		payoutA := f.egressRevenue + UsdToNanoCents(float64(f.egressBytes)/trafficBytes*subsidyUsd)
-		payoutB := f.hopBRevenue + UsdToNanoCents(float64(f.hopBBytes)/trafficBytes*subsidyUsd)
-		totalPoints := float64(config.AccountPointsPerPayout) * scale
-		wantPoints := map[server.Id]NanoPoints{
-			f.networkA: PointsToNanoPoints(totalPoints * (float64(payoutA) / float64(payoutA+payoutB))),
-			f.networkB: PointsToNanoPoints(totalPoints * (float64(payoutB) / float64(payoutA+payoutB))),
-		}
+		// a whole block: 1,000,000 points x 7/30
+		payoutNanoPoints := NanoPoints(233_333_333_333)
 		gotPoints := map[server.Id]NanoPoints{}
 		for _, point := range award.Points {
 			if point.Event != string(AccountPointEventPayout) {
@@ -208,9 +188,10 @@ func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 			}
 			gotPoints[point.NetworkId] += point.PointValue
 		}
-		if award.TotalComputedPayout != payoutA+payoutB || !maps.Equal(gotPoints, wantPoints) {
-			t.Fatalf("operator block award computed %d nanocents and points %v, want %d and %v", award.TotalComputedPayout, gotPoints, payoutA+payoutB, wantPoints)
+		if award.PayoutNanoPoints != payoutNanoPoints || award.ByteCount != f.egressBytes+f.hopBBytes {
+			t.Fatalf("operator block award of %d payout points over %d bytes", award.PayoutNanoPoints, award.ByteCount)
 		}
+		operatorBlockPointsRequireByteShares(t, gotPoints, map[server.Id]ByteCount{f.networkA: f.egressBytes, f.networkB: f.hopBBytes}, payoutNanoPoints)
 
 		// the SN pool's provider usage, which counts the payer's own hop too
 		usages, err := GetStEpochProviderUsage(ctx, windowStart, windowEnd)

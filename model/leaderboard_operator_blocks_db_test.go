@@ -142,9 +142,6 @@ func TestDataLeaderboardCountsAPostBoundaryBlockAward(t *testing.T) {
 
 		config := operatorBlockPointsTestConfig()
 		config.ReliabilityPointsPerPayout = 0
-		config.ReliabilitySubsidyPerPayoutUsd = 0
-		config.UsdPerActiveUser = 0
-		config.SubscriptionNetRevenueFraction = 0
 		gib := ByteCount(1024 * 1024 * 1024)
 		mib := ByteCount(1024 * 1024)
 

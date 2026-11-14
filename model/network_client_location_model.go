@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net"
 	"slices"
 	"unicode/utf8"
@@ -5140,18 +5140,20 @@ type FindProviders2Args struct {
 	// "dualstack", "v4-only", "v6-only". See ipFamilyFacetsForFilter. An
 	// online request draws the families a filter names without preference.
 	IpFamily string `json:"ip_family"`
-	// PostQuantumEncryption keeps only providers whose latest provide with a
-	// Public or Network key declared post-quantum encryption sessions
-	// (provide_capability_model.go), in every draw of the request, named
-	// providers included. A provider that never declared it, as none before
-	// the field did, is left out. Unset keeps the capability-blind answer.
+	// PostQuantumEncryption keeps only providers with a positive post-quantum
+	// signal from the quality probe (FP2-PROTOCOL.md §12.4), in every draw of
+	// the request, named providers included: once the post-quantum marker is
+	// set, a positive outcome in the eight-hour window; before it, modern
+	// evidence of the last seven days that is post-quantum. A provider's own
+	// declaration never qualifies it (owner, 2026-11-13). Unset keeps the
+	// capability-blind answer.
 	PostQuantumEncryption bool `json:"post_quantum_encryption"`
 	// RequireModernProvider keeps only modern providers (ClientScore.Modern)
 	// in every draw of the request, named providers included (FP2-MODERN.md):
-	// with a Public key, measured modern by the capability probe within seven
-	// days; with only a Network key, declared post-quantum encryption. A
-	// client that requires end-to-end encryption sets it. Unset keeps the
-	// capability-blind answer.
+	// the probe's evidence of post-quantum encryption with resizable windows,
+	// whatever provide keys the provider holds, and never its own
+	// declaration. A client that requires end-to-end encryption sets it.
+	// Unset keeps the capability-blind answer.
 	RequireModernProvider bool `json:"require_modern_provider"`
 	// Strict answers the requested targets only. Unset, as every client
 	// before the field sends, a city or region target the score export
@@ -5307,10 +5309,12 @@ type ClientScore struct {
 	// each mode's native membership.
 	Online bool
 	// Whether the provider qualified as modern at the export's instant
-	// (FP2-MODERN.md): with a Public key, measured modern by the capability
-	// probe (egress_modern_provider.go); with only a Network key, which the
-	// probe cannot reach, declared post-quantum encryption in its latest
-	// provide. Set whatever buckets the provider is in. The zero value, as
+	// (FP2-MODERN.md): measured modern by the probe's evidence
+	// (egress_modern_provider.go), and once the post-quantum marker is set,
+	// post-quantum positive with resizable windows (FP2-PROTOCOL.md §12.4).
+	// A provider with only a Network key, which no probe can reach, needs
+	// the same evidence; no provider is modern by its own declaration.
+	// Set whatever buckets the provider is in. The zero value, as
 	// every entry written before the field decodes, is not modern, so a
 	// request that requires modern providers never takes one no export has
 	// shown to be modern. Set only on the top-level score, like the location
@@ -5796,21 +5800,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	}()
 	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
 
-	// A network-only provider, which the capability probe cannot reach, is
-	// modern by its declaration (FP2-MODERN.md, "Definition"); the source
-	// query yields only providers with a Public or Network key, so a
-	// network-only score holds a Network key. Read once for the cohort.
-	networkOnlyClientIds := []server.Id{}
-	for _, row := range pendingScores {
-		if row.score.NetworkOnly {
-			networkOnlyClientIds = append(networkOnlyClientIds, row.score.ClientId)
-		}
-	}
-	networkOnlyDeclaredClientIds, declarationErr := readProvidePostQuantumEncryption(ctx, networkOnlyClientIds)
-	if declarationErr != nil {
-		return fmt.Errorf("read network-only provider declarations: %w", declarationErr)
-	}
-
 	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
 	// The hour threshold is the gate that decides whether a provider is in the
 	// market at all. It sat at 0.99 -- less than one bad block in 60 -- which
@@ -5950,13 +5939,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			minIndependentReliabilityWeights,
 		)
 		capability := clientIdCapabilities[clientScore.ClientId]
-		// the index flag (FP2-MODERN.md), and once the post-quantum marker
-		// is set, a positive post-quantum signal with resizable windows:
-		// declaration-based modern status ends (FP2-PROTOCOL.md §12.4)
+		// the index flag (FP2-MODERN.md): the decision's, from the probe's
+		// evidence for every provider, network-only ones included, and once
+		// the post-quantum marker is set, a positive post-quantum signal with
+		// resizable windows (FP2-PROTOCOL.md §12.4). No provider is modern by
+		// its own declaration (owner, 2026-11-13).
 		setModern := func(clientScore *ClientScore) {
-			if clientScore.NetworkOnly {
-				clientScore.Modern = networkOnlyDeclaredClientIds[clientScore.ClientId]
-			}
 			if postQuantumReady {
 				clientScore.Modern = capability != nil && capability.postQuantumModern
 			}
@@ -6805,8 +6793,9 @@ func FindProviders2(
 			// verdict.
 			offlineClientIds := map[server.Id]bool{}
 			// For a request that requires post-quantum encryption, the candidates
-			// whose latest provide did not declare it (provide_capability_model.go),
-			// and for one that requires modern providers, the named providers
+			// without the quality probe's positive post-quantum signal
+			// (readFindProviders2PostQuantumEncryption), and for one that
+			// requires modern providers, the named providers
 			// that are not modern (readProviderModernClientIds; the index's
 			// candidates are refused by the request filter instead). Each leaves
 			// every draw of this request, named providers included. Like offline,
@@ -6898,8 +6887,9 @@ func FindProviders2(
 					}
 				}
 				// Read first for a request that requires post-quantum
-				// encryption, so the reads below are only of declaring providers.
-				// An undeclared candidate is read once and leaves every draw.
+				// encryption, so the reads below are only of providers with a
+				// positive signal. A candidate without one is read once and
+				// leaves every draw.
 				if findProviders2.PostQuantumEncryption {
 					capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, scores, candidateClientIds, requestTime)
 					if err != nil {
@@ -7074,9 +7064,10 @@ func FindProviders2(
 				for clientId := range offlineClientIds {
 					delete(clientScores, clientId)
 				}
-				// undeclared under a post-quantum request, or a named provider
-				// that is not modern under a modern one: out of every pool too,
-				// counted as a capability refusal
+				// without a positive post-quantum signal under a post-quantum
+				// request, or a named provider that is not modern under a
+				// modern one: out of every pool too, counted as a capability
+				// refusal
 				capabilityDropped := 0
 				for clientId := range incapableClientIds {
 					if _, ok := clientScores[clientId]; ok {
@@ -7609,8 +7600,8 @@ func FindProviders2(
 				}
 			}
 		}
-		// a named provider that did not declare post-quantum encryption is
-		// not answered to a request that requires it, as in discovery
+		// a named provider without a positive post-quantum signal is not
+		// answered to a request that requires it, as in discovery
 		if findProviders2.PostQuantumEncryption {
 			capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, nil, specClientIds, requestTime)
 			if err != nil {

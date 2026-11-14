@@ -123,6 +123,31 @@ func TestProviderModernEvidenceOutcomes(t *testing.T) {
 	connect.AssertEqual(t, ProviderModernOutcomes, []string{"modern", "not_post_quantum", "no_resizable_windows", "no_evidence", "stale_evidence"})
 }
 
+// The post-quantum half of modern, which a post_quantum_encryption request
+// reads before the post-quantum marker (readProviderPostQuantumEvidenceClientIds):
+// fresh post-quantum evidence with or without resizable windows; no row,
+// classical evidence and stale evidence are not, at the same boundary as the
+// whole outcome.
+func TestProviderModernEvidencePostQuantum(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		record      *ProviderModernEvidenceRecord
+		postQuantum bool
+	}{
+		{name: "no row", record: nil, postQuantum: false},
+		{name: "both", record: modernGateTestRecord(true, true, time.Hour), postQuantum: true},
+		{name: "post-quantum without windows", record: modernGateTestRecord(true, false, time.Hour), postQuantum: true},
+		{name: "windows without post-quantum", record: modernGateTestRecord(false, true, time.Hour), postQuantum: false},
+		{name: "neither", record: modernGateTestRecord(false, false, time.Hour), postQuantum: false},
+		{name: "both, too old", record: modernGateTestRecord(true, true, ProviderModernEvidenceMaxAge), postQuantum: false},
+		{name: "post-quantum, a microsecond younger than too old", record: modernGateTestRecord(true, false, ProviderModernEvidenceMaxAge-time.Microsecond), postQuantum: true},
+	} {
+		if postQuantum := providerModernEvidencePostQuantum(c.record, modernGateTestNow); postQuantum != c.postQuantum {
+			t.Errorf("%s: post-quantum %t, want %t", c.name, postQuantum, c.postQuantum)
+		}
+	}
+}
+
 // Evidence exactly ProviderModernEvidenceMaxAge old is stale, as a URL
 // outcome exactly eight hours old is; a microsecond younger, the smallest
 // step the column stores, it still decides.

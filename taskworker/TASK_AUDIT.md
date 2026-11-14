@@ -1,6 +1,6 @@
 # Async task correctness audit
 
-This inventory covers the 95 registered application targets in the production
+This inventory covers the 96 registered application targets in the production
 and subnet-operator registries, including factory-built financial targets and
 retired compatibility handlers. The built-in `RunPost` dispatcher is covered
 separately by the task-helper tests below. Unregistered/manual utilities are not
@@ -77,6 +77,7 @@ cases passed the final run.
 | [RefreshReferralTransferBalances](../controller/subscription_controller.go) | A committed task body cannot grant twice after lost completion; new task identity may grant. | [TestRecurringGrantTasksDoNotDuplicateCommittedBodyOnReplay](../controller/subscription_grant_task_test.go); [TestReferralGrantTaskRejectsDiscoveryFailureAndRecovers](../controller/subscription_grant_task_test.go); [TestReferralGrantSerializationRetryReturnsOnlyCommittedAmounts](../model/subscription_grant_retry_test.go) |
 | [RemoveProductUpdates](../controller/product_updates_controller.go) | HTTP failure propagates; successful/absent contact outcomes remain idempotent. | [TestRemoveProductUpdatesTaskPropagatesProviderOutcome](../controller/product_updates_task_test.go) |
 | [SubscriptionMetricsSync](../controller/subscription_metrics_controller.go) | Source-derived snapshot, replay, invalid-window rejection and recurrence. | [TestAsyncOnboardingAndSubscriptionSnapshots](../controller/async_snapshot_task_test.go) |
+| [SweepStripeDunning](../controller/subscription_stripe_dunning_sweep.go) | Owe each due payment-failed notice once on the shared invoice ledger row, concurrent with the webhooks and a hand send; a re-run owes nothing; recurrence. | [TestStripeDunningSweepOwesEachNoticeOnceAndReschedules](../controller/subscription_stripe_dunning_sweep_db_test.go); [TestStripeDunningSweepAndHandSendOweOneNotice](../controller/subscription_stripe_dunning_sweep_db_test.go); [TestStripeDunningSweepIsScheduledAtStartup](../taskworker/stripe_dunning_sweep_registration_test.go) |
 | [SyncProductUpdatesForUser](../controller/product_updates_controller.go) | Serialized user preference, provider failure recovery and one-shot opt-out effects. | [TestUserProductUpdatesTaskHonorsPreferenceAndProviderFailure](../controller/product_updates_task_test.go) |
 
 ### model

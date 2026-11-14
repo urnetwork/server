@@ -6,15 +6,13 @@ package egresshealth
 
 import (
 	"context"
-	crand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -22,6 +20,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/connect"
 )
 
 // Groups destinations so a partial failure is diagnosable: a provider
@@ -602,12 +602,12 @@ type Options struct {
 	// negative uses DefaultConcurrency.
 	Concurrency int
 	// Draws this run's sample and its retry spacing. Nil -- which is
-	// what production passes -- means a fresh generator seeded from
-	// crypto/rand for every run, which is the whole anti-gaming property: the
+	// what production passes -- means a fresh connect.NewSecureRand generator
+	// for every run, which is the whole anti-gaming property: the
 	// provider cannot know what it will be asked for, or when it will be asked
 	// again. Tests set it to make a run reproducible.
 	//
-	// It must not be shared between concurrent runs: math/rand.Rand is stateful
+	// It must not be shared between concurrent runs: a rand.Rand is stateful
 	// and not goroutine-safe, and the prober probes several providers at once.
 	// Within one run it is drawn from behind a lock. Leaving it nil is what
 	// makes the cross-run case safe, so production leaves it nil.
@@ -1060,24 +1060,18 @@ func (self Options) sleep(ctx context.Context, d time.Duration) error {
 // The randomness one run's sample and spacing are drawn from.
 //
 // A caller-supplied generator is used as given, which is what makes a test
-// reproducible. Otherwise a fresh one is built per run and seeded from
-// crypto/rand -- not from the clock, and never from the global generator. The
-// anti-gaming property is that a provider cannot predict which destinations it
-// will be asked for, and a clock seed is predictable to anyone who knows
-// roughly when the pass started. The global generator is avoided for a duller
-// reason: it is shared process-wide state that any other package can reseed.
+// reproducible. Otherwise a fresh connect.NewSecureRand generator is built per
+// run: ChaCha8 seeded from crypto/rand, so neither the clock nor the run's own
+// earlier draws predict it. The anti-gaming property is that a provider cannot
+// predict which destinations it will be asked for. A clock seed is predictable
+// to anyone who knows roughly when the pass started, and a Go 1 source gives
+// its state away in its outputs. There is no fallback: crypto/rand.Read cannot
+// fail since go 1.24.
 func (self Options) rng() *rand.Rand {
 	if self.Rand != nil {
 		return self.Rand
 	}
-	var b [8]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		// crypto/rand does not fail in practice. If it ever does, a clock seed
-		// still samples: a weaker unpredictability is worth having, a skipped
-		// run is not.
-		return rand.New(rand.NewSource(time.Now().UnixNano()))
-	}
-	return rand.New(rand.NewSource(int64(binary.BigEndian.Uint64(b[:]))))
+	return connect.NewSecureRand()
 }
 
 // The body read cap for this destination: its own, clamped to the
@@ -1154,7 +1148,7 @@ func sampleDestinations(dests []Destination, sizes map[Class]int, r *rand.Rand) 
 		}
 		shuffled := append([]int(nil), idx...)
 		for i := 0; i < n; i++ {
-			j := i + r.Intn(len(shuffled)-i)
+			j := i + r.IntN(len(shuffled)-i)
 			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 		}
 		picked = append(picked, shuffled[:n]...)

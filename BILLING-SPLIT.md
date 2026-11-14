@@ -170,13 +170,20 @@ How the numbers change. Each of these is an owner decision:
   points follow its revenue share, so serving paid traffic earns more points
   than serving free traffic. "All traffic counts as paid traffic" suggests
   weighting points by bytes alone. Recommended: bytes alone.
+  **Decided 2026-11-13** (owner: "please make points proportional to traffic
+  served and not revenue/paid traffic. After this change revenue should not
+  have an affect on any payout."): bytes alone. Built on the sweep read, before
+  the ledger move: operator block points schema v2 shares the block's payout
+  points exactly by each provider network's sweep bytes, paid or unpaid.
 - **D2, subsidy size.** The subsidy is the largest of a minimum, a per-active-
   user amount and a fraction of subscription revenue. Without sweeps, the
   subscription revenue term needs another source (the payer networks' active
   balances in the window) or goes. A block's points are a fixed total shared in
   proportion to computed payout, so the subsidy's size only sets its weight
   against the revenue term (D1) and the reliability subsidy. Recommended: drop
-  the revenue term together with D1.
+  the revenue term together with D1. **Decided 2026-11-13, with D1:** the
+  subsidy, its revenue term and the reliability USDC subsidy are gone from
+  points; the award reads no balance and no revenue.
 - **D3, same-network hops.** The ledger's snapshot credits a participant on
   the payer's own network as provider usage (the §8.6 amendment moves such
   shares to the extender pool from epoch 8); the split gives it nothing.
@@ -241,6 +248,11 @@ Once all are moved, settlement stops writing sweeps: one row per balance and
 provider network, about 20M a day.
 
 ### Status
+
+2026-11-13: D1 and D2 are decided and built on the sweep read (operator
+block points schema v2), from the first block the daily task awards after the
+taskworker ships it; blocks already awarded keep their points. The move onto
+the ledger (D3 to D6) and the rest are not implemented.
 
 Not implemented. It is not contained: D1 to D9 change numbers users see or
 retire API fields and app copy; the points change must not land inside a

@@ -3,7 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"sync"
 	"testing"
@@ -39,11 +39,11 @@ func TestNominateResident(t *testing.T) {
 			service := fmt.Sprintf("service_%d", i)
 			block := fmt.Sprintf("block_%d", i)
 			internalPorts := map[int]bool{}
-			for range mathrand.Intn(32) {
-				internalPorts[mathrand.Intn(10000)] = true
+			for range mathrand.IntN(32) {
+				internalPorts[mathrand.IntN(10000)] = true
 			}
 
-			if mathrand.Intn(4) == 0 {
+			if mathrand.IntN(4) == 0 {
 				instanceId = server.NewId()
 			}
 
@@ -128,8 +128,8 @@ func TestResidentTtl(t *testing.T) {
 			service := fmt.Sprintf("service_%d", i)
 			block := fmt.Sprintf("block_%d", i)
 			internalPorts := map[int]bool{}
-			for range mathrand.Intn(32) {
-				internalPorts[mathrand.Intn(10000)] = true
+			for range mathrand.IntN(32) {
+				internalPorts[mathrand.IntN(10000)] = true
 			}
 
 			ttl := 1 * time.Second
