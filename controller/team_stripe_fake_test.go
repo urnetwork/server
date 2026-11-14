@@ -90,6 +90,11 @@ func newTeamStripeTestEnv(t testing.TB) *teamStripeTestEnv {
 	mux.HandleFunc("GET /v1/checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
 		writeJson(w, http.StatusOK, map[string]any{"data": []any{}, "has_more": false})
 	})
+	// the reconciler's listing of paid invoices: every invoice the fake holds was delivered, so
+	// none is left to repair
+	mux.HandleFunc("GET /v1/invoices", func(w http.ResponseWriter, r *http.Request) {
+		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": []any{}, "has_more": false})
+	})
 	mux.HandleFunc("GET /v1/invoices/{invoiceId}", func(w http.ResponseWriter, r *http.Request) {
 		env.stateLock.Lock()
 		invoice, ok := env.invoices[r.PathValue("invoiceId")]

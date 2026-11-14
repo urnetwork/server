@@ -10,17 +10,20 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// What Team's Stripe events change in a Team's balances (QUOTA-M6-02; DESIGN.md 20.9's Post-paid;
-// plan-QUOTA-team-renewal-window):
+// What Team's Stripe events change in a Team's balances and its subscription row (QUOTA-M6-02,
+// QUOTA-M6-07; DESIGN.md 20.9's Post-paid; plan-QUOTA-team-renewal-window; owner decision 199):
 //
+//	invoice.paid, the first        writes the team_subscription row: the subscription and customer
+//	                               ids, the billing anchor and the start (AddTeamSubscriptionInTx)
 //	invoice.payment_failed         ends the lines in window, so overage refuses at once while the
 //	                               included bytes run out (EndTeamCreditLinesInTx); the open failure
 //	                               row stops the next grant (RefreshTeamTransferBalances)
 //	invoice.paid, a cycle invoice  gives a line ended by a failure its period back
 //	                               (RestoreTeamCreditLinesInTx)
-//	customer.subscription.deleted  ends the lines and every period no invoice paid for, and marks
-//	                               the subscription ended so the job writes it nothing more
-//	                               (EndTeamSubscriptionInTx)
+//	customer.subscription.deleted  ends the lines and every period no invoice paid for, and ends the
+//	                               subscription's row, so the job writes it nothing more
+//	                               (EndTeamSubscriptionInTx); the hourly reconciler does the same for
+//	                               a subscription Stripe shows deleted whose event was lost
 //
 // A balance ends by its end_time, never by its bytes, as a refund's clawback ends one: what it
 // has reserved still settles, and what it has paid stays paid. Each function here that moves an
@@ -29,13 +32,224 @@ import (
 // to Stripe's redelivery. A transaction takes ownership once, for its whole key set
 // (server.TryTxOwnership), so a caller runs at most one of the three in a transaction.
 //
-// Nothing here runs unless the binary links MG6, whose transfer_balance.tier these read.
+// team_subscription holds at most one live row a network (end_time NULL), which is what the grant
+// job and the meter reports read as a live subscription. An ended row is kept until its network is
+// deleted, and a resubscribe writes a second row beside it. No id here is logged.
+//
+// Nothing here runs unless the binary links MG6, whose transfer_balance.tier and team_subscription
+// these read.
 
-// A subscription_renewal row of this type marks the time a Team's Stripe subscription ended:
-// start_time and end_time are that time, and transaction_id is the subscription's id. It is no
-// renewal: it carries no revenue and no window, and every reader of renewals asks for a type of
-// its own.
-const SubscriptionTypeTeamEnded = "team_ended"
+// One Team's Stripe subscription, as team_subscription holds it.
+type TeamSubscription struct {
+	NetworkId      server.Id
+	SubscriptionId string
+	CustomerId     string
+	// The billing cycle anchor: a 00:00:00 UTC whose day of the month every period starts on.
+	AnchorTime time.Time
+	// The subscription's start: the first period's start.
+	StartTime time.Time
+	// nil while the subscription is live.
+	EndTime *time.Time
+}
+
+// Whether the subscription is live at now: not ended, or ended later.
+func (self *TeamSubscription) LiveAt(at time.Time) bool {
+	return self.EndTime == nil || at.Before(*self.EndTime)
+}
+
+const teamSubscriptionColumns = `network_id, subscription_id, customer_id, anchor_time, start_time, end_time`
+
+func scanTeamSubscription(row interface{ Scan(dest ...any) error }) *TeamSubscription {
+	subscription := &TeamSubscription{}
+	server.Raise(row.Scan(
+		&subscription.NetworkId,
+		&subscription.SubscriptionId,
+		&subscription.CustomerId,
+		&subscription.AnchorTime,
+		&subscription.StartTime,
+		&subscription.EndTime,
+	))
+	subscription.AnchorTime = subscription.AnchorTime.UTC()
+	subscription.StartTime = subscription.StartTime.UTC()
+	if subscription.EndTime != nil {
+		endTime := subscription.EndTime.UTC()
+		subscription.EndTime = &endTime
+	}
+	return subscription
+}
+
+func teamSubscriptionsInConn(ctx context.Context, conn server.PgCanQuery, sql string, args ...any) (subscriptions []*TeamSubscription) {
+	result, err := conn.Query(ctx, sql, args...)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			subscriptions = append(subscriptions, scanTeamSubscription(result))
+		}
+	})
+	return
+}
+
+// Writes the Team's subscription row at its first paid invoice, in the transaction that credits it.
+// written is false when the row is there already or the network holds another live row: a second
+// first invoice, or a redelivery, changes nothing.
+func AddTeamSubscriptionInTx(ctx context.Context, tx server.PgTx, subscription *TeamSubscription) (written bool) {
+	if !server.SidecarMg6Linked() {
+		return false
+	}
+	var endTime *time.Time
+	if subscription.EndTime != nil {
+		utc := subscription.EndTime.UTC()
+		endTime = &utc
+	}
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO team_subscription (
+				network_id,
+				subscription_id,
+				customer_id,
+				anchor_time,
+				start_time,
+				end_time
+			)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT DO NOTHING
+		`,
+		subscription.NetworkId,
+		subscription.SubscriptionId,
+		subscription.CustomerId,
+		subscription.AnchorTime.UTC(),
+		subscription.StartTime.UTC(),
+		endTime,
+	))
+	return tag.RowsAffected() == 1
+}
+
+// Ends the subscription's row at endTime if it is live. Returns whether it ended it: a rerun, or a
+// subscription with no row, ends nothing.
+func EndTeamSubscriptionRowInTx(ctx context.Context, tx server.PgTx, networkId server.Id, subscriptionId string, endTime time.Time) (ended bool) {
+	if !server.SidecarMg6Linked() {
+		return false
+	}
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE team_subscription
+			SET end_time = $3
+			WHERE
+				network_id = $1 AND
+				subscription_id = $2 AND
+				end_time IS NULL
+		`,
+		networkId,
+		subscriptionId,
+		endTime.UTC(),
+	))
+	return tag.RowsAffected() == 1
+}
+
+// The network's row for the subscription, live or ended, or nil.
+func GetTeamSubscriptionInTx(ctx context.Context, tx server.PgTx, networkId server.Id, subscriptionId string) *TeamSubscription {
+	if !server.SidecarMg6Linked() {
+		return nil
+	}
+	subscriptions := teamSubscriptionsInConn(
+		ctx,
+		tx,
+		`SELECT `+teamSubscriptionColumns+` FROM team_subscription WHERE network_id = $1 AND subscription_id = $2`,
+		networkId,
+		subscriptionId,
+	)
+	if len(subscriptions) == 0 {
+		return nil
+	}
+	return subscriptions[0]
+}
+
+// The network's row for the subscription, live or ended, or nil.
+func GetTeamSubscription(ctx context.Context, networkId server.Id, subscriptionId string) (subscription *TeamSubscription) {
+	if !server.SidecarMg6Linked() {
+		return nil
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		subscription = GetTeamSubscriptionInTx(ctx, tx, networkId, subscriptionId)
+	}, server.TxReadCommitted)
+	return
+}
+
+// The network's live subscription, or nil.
+func GetLiveTeamSubscriptionInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) (subscription *TeamSubscription) {
+	if !server.SidecarMg6Linked() {
+		return nil
+	}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		subscriptions := teamSubscriptionsInConn(
+			ctx,
+			conn,
+			`SELECT `+teamSubscriptionColumns+` FROM team_subscription WHERE network_id = $1 AND end_time IS NULL`,
+			networkId,
+		)
+		if 0 < len(subscriptions) {
+			subscription = subscriptions[0]
+		}
+	})
+	return
+}
+
+// The network's live subscription, or nil.
+func GetLiveTeamSubscription(ctx context.Context, networkId server.Id) *TeamSubscription {
+	return GetLiveTeamSubscriptionInConn(nil, ctx, networkId)
+}
+
+// The network's rows, oldest start first: every subscription it had, live or ended.
+func GetTeamSubscriptions(ctx context.Context, networkId server.Id) (subscriptions []*TeamSubscription) {
+	if !server.SidecarMg6Linked() {
+		return nil
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		subscriptions = teamSubscriptionsInConn(
+			ctx,
+			conn,
+			`SELECT `+teamSubscriptionColumns+` FROM team_subscription WHERE network_id = $1 ORDER BY start_time, subscription_id`,
+			networkId,
+		)
+	})
+	return
+}
+
+// A page of live subscriptions by network id after after (nil: the first), at most limit: what the
+// reconciler checks against Stripe.
+func ListLiveTeamSubscriptionsInConn(connOwner server.PgConn, ctx context.Context, after *server.Id, limit int) (subscriptions []*TeamSubscription) {
+	if !server.SidecarMg6Linked() || limit <= 0 {
+		return nil
+	}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		subscriptions = teamSubscriptionsInConn(
+			ctx,
+			conn,
+			`
+				SELECT `+teamSubscriptionColumns+`
+				FROM team_subscription
+				WHERE
+					end_time IS NULL AND
+					($1::uuid IS NULL OR $1 < network_id)
+				ORDER BY network_id
+				LIMIT $2
+			`,
+			after,
+			limit,
+		)
+	})
+	return
+}
+
+// Removes the network's rows in its deletion transaction, the one way a row goes.
+func removeNetworkTeamSubscriptionsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`DELETE FROM team_subscription WHERE network_id = $1`,
+		networkId,
+	))
+}
 
 // Whether the period that starts at periodStart has its team grant, live or ended.
 func HasTeamGrantInTx(ctx context.Context, tx server.PgTx, networkId server.Id, periodStart time.Time) (written bool) {
@@ -251,21 +465,27 @@ func unpaidTeamPeriodBalanceIdsInTx(ctx context.Context, tx server.PgTx, network
 	)
 }
 
-// A Team's Stripe subscription ended: ends, at now, every credit line that has not ended and the
-// grant of every period no paid renewal covers, and marks the subscription ended. A paid period
-// keeps its grant to its end, so lapse follows Pro. Returns the balances ended; a rerun ends
-// none and marks nothing twice. The caller refreshes the tier after commit (UpdateProNetwork).
+// A Team's Stripe subscription ended: when its row is live, ends, at now, every credit line that
+// has not ended and the grant of every period no paid renewal covers, and ends the row, so the job
+// writes the network nothing more. A paid period keeps its grant to its end, so lapse follows Pro.
+// Returns whether the row ended and the balances ended; a rerun, or a subscription with no live
+// row (it never paid an invoice, or it ended already), ends nothing. The caller refreshes the tier
+// after commit (UpdateProNetwork).
 func EndTeamSubscriptionInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	networkId server.Id,
 	subscriptionId string,
 	now time.Time,
-) (endedBalanceIds []server.Id) {
+) (ended bool, endedBalanceIds []server.Id) {
 	if !server.SidecarMg6Linked() {
-		return nil
+		return false, nil
 	}
 	now = now.UTC()
+	subscription := GetTeamSubscriptionInTx(ctx, tx, networkId, subscriptionId)
+	if subscription == nil || subscription.EndTime != nil {
+		return false, nil
+	}
 	// one key set for the transaction's one ownership probe
 	balanceIds := teamCreditLineIdsInTx(ctx, tx, networkId, now)
 	for _, balanceId := range unpaidTeamPeriodBalanceIdsInTx(ctx, tx, networkId, now) {
@@ -274,69 +494,9 @@ func EndTeamSubscriptionInTx(
 		}
 	}
 	endedBalanceIds = endTeamBalancesInTx(ctx, tx, networkId, balanceIds, now)
-	if 0 < len(endedBalanceIds) {
-		glog.Infof("[quota][team]%s subscription ended, balances ended: %d\n", networkId, len(endedBalanceIds))
-	}
-	MarkTeamSubscriptionEndedInTx(ctx, tx, networkId, subscriptionId, now)
+	ended = EndTeamSubscriptionRowInTx(ctx, tx, networkId, subscriptionId, now)
+	glog.Infof("[quota][team]%s subscription ended, balances ended: %d\n", networkId, len(endedBalanceIds))
 	return
-}
-
-// Marks the network's Team subscription ended at endedTime, so RefreshTeamTransferBalances writes
-// no period after a renewal that began at or before it. A new subscription's renewals begin
-// later, so the mark holds nothing of theirs back. Marking twice changes nothing.
-func MarkTeamSubscriptionEndedInTx(
-	ctx context.Context,
-	tx server.PgTx,
-	networkId server.Id,
-	subscriptionId string,
-	endedTime time.Time,
-) {
-	if !server.SidecarMg6Linked() {
-		return
-	}
-	// one mark per subscription, at the time its first delivery read
-	var marked bool
-	server.Raise(tx.QueryRow(
-		ctx,
-		`
-			SELECT EXISTS (
-				SELECT 1
-				FROM subscription_renewal
-				WHERE
-					network_id = $1 AND
-					subscription_type = $2 AND
-					transaction_id = $3
-			)
-		`,
-		networkId,
-		SubscriptionTypeTeamEnded,
-		subscriptionId,
-	).Scan(&marked))
-	if marked {
-		return
-	}
-	endedTime = endedTime.UTC()
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-			INSERT INTO subscription_renewal (
-				network_id,
-				subscription_type,
-				start_time,
-				end_time,
-				net_revenue_nano_cents,
-				market,
-				transaction_id
-			)
-			VALUES ($1, $2, $3, $3, 0, $4, $5)
-			ON CONFLICT (network_id, subscription_type, end_time, start_time, market) DO NOTHING
-		`,
-		networkId,
-		SubscriptionTypeTeamEnded,
-		endedTime,
-		SubscriptionMarketStripe,
-		subscriptionId,
-	))
 }
 
 // Whether a failed renewal of the network is on file and unresolved, which stops the next grant

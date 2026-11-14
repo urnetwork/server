@@ -1448,8 +1448,9 @@ func sidecarMg6BridgeMigrations() []any {
 	}
 }
 
-// MG6's §20 part: transfer_balance.tier, transfer_balance's team_credit index,
-// built concurrently, and stripe_meter_report (QUOTA's tasks).
+// MG6's §20 part, in §19.7's order: transfer_balance.tier, transfer_balance's
+// team_credit index, built concurrently, stripe_meter_report and
+// team_subscription (QUOTA's tasks).
 func sidecarMg6QuotaMigrations() []any {
 	return []any{
 		// §20.5's Source (QUOTA-M6-01): the Team grant's mark, 'team' on the
@@ -1478,6 +1479,56 @@ func sidecarMg6QuotaMigrations() []any {
 			`CREATE INDEX CONCURRENTLY transfer_balance_active_network_credit_end_start_id ON transfer_balance (network_id, (grant_kind IS NOT DISTINCT FROM 'team_credit'), end_time, start_time, balance_id) WHERE active`,
 			`CREATE INDEX transfer_balance_active_network_credit_end_start_id ON transfer_balance (network_id, (grant_kind IS NOT DISTINCT FROM 'team_credit'), end_time, start_time, balance_id) WHERE active`,
 		),
+		// §20.9's Meters (QUOTA-M6-03, QUOTA-M6-04): one row per (network,
+		// meter, closed UTC day, version), value in the meter's whole unit,
+		// identifier SHA-256(network_id || meter || usage_day || version) in
+		// hex, the send's state with its attempts and next try, kept 13 months
+		// (§2.8 api-13)
+		newSqlMigration(`
+			CREATE TABLE stripe_meter_report (
+				network_id uuid NOT NULL,
+				meter varchar(32) NOT NULL,
+				usage_day date NOT NULL,
+				version integer NOT NULL CHECK (version >= 1),
+				identifier varchar(64) NOT NULL,
+				value bigint NOT NULL CHECK (value >= 0),
+				state varchar(16) NOT NULL,
+				attempts integer NOT NULL DEFAULT 0,
+				next_time timestamp NOT NULL,
+
+				PRIMARY KEY (network_id, meter, usage_day, version)
+			)
+		`),
+		// the sender's page: the rows whose outcome is not known yet, by when
+		// each is due
+		newSqlMigration(`
+			CREATE INDEX stripe_meter_report_due ON stripe_meter_report (next_time, network_id, meter, usage_day, version) WHERE state IN ('queued', 'sending', 'uncertain')
+		`),
+		// the 13 months' retention sweeps by day
+		newSqlMigration(`
+			CREATE INDEX stripe_meter_report_usage_day ON stripe_meter_report (usage_day)
+		`),
+		// §20.9's Post-paid (owner decision 199; QUOTA-M6-07): each Team's
+		// Stripe subscription, written at its first invoice.paid and ended at
+		// customer.subscription.deleted or by the reconciler, kept once ended
+		// until its network is deleted (§2.8 api-13)
+		newSqlMigration(`
+			CREATE TABLE team_subscription (
+				network_id uuid NOT NULL,
+				subscription_id varchar(128) NOT NULL,
+				customer_id varchar(128) NOT NULL,
+				anchor_time timestamp NOT NULL,
+				start_time timestamp NOT NULL,
+				end_time timestamp NULL,
+
+				PRIMARY KEY (network_id, subscription_id)
+			)
+		`),
+		// one live subscription a network, which is also the job's and the
+		// reconciler's page of live subscriptions by network
+		newSqlMigration(`
+			CREATE UNIQUE INDEX team_subscription_live ON team_subscription (network_id) WHERE end_time IS NULL
+		`),
 	}
 }
 
