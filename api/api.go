@@ -429,6 +429,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/network/domain-verify", handlers.VerifyNetworkDomain),
 		router.NewRoute("POST", "/network/domain-remove", handlers.RemoveNetworkDomain),
 		router.NewRoute("POST", "/auth/sso-discover", handlers.NetworkSsoDiscover),
+		// §12.8's record API for the console and network credentials (DNS-M5-12)
+		router.NewRoute("GET", "/network/dns", handlers.GetNetworkDns),
+		router.NewRoute("POST", "/network/dns/records", handlers.WriteNetworkDnsRecords),
+		router.NewRoute("POST", "/network/dns/label-reclaim", handlers.ReclaimNetworkDnsLabel),
 		// §7.11's audit log reads and SIEM webhooks (TEAM-M6-09)
 		router.NewRoute("GET", "/network/admin-events", handlers.GetNetworkAdminEvents),
 		// §20.14's usage and limits (QUOTA-M2-12)

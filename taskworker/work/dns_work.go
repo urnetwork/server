@@ -11,11 +11,13 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// §12's taskworker chain (DNS-M5-09, DNS-M5-13, DNS-M5-14, DNS-M5-15): each
-// run purges dns_zone_journal's rows past their 7 days (§12.14), removes
-// challenges and canaries past their hour through the journal (D-DNS-8), lifts
-// zone suspensions whose until has passed (§12.9), and drops a restore's lists
-// and posted diffs past their 400 days (dns-1). A binary that does not link MG5
+// §12's taskworker chain (DNS-M5-09, DNS-M5-13, DNS-M5-14, DNS-M5-15,
+// DNS-M5-16): each run purges dns_zone_journal's rows past their 7 days
+// (§12.14), removes challenges and canaries past their hour through the journal
+// (D-DNS-8), lifts zone suspensions whose until has passed (§12.9), drops a
+// restore's lists, posted diffs and CT replay records past their 400 days
+// (dns-1), and tombstones the ownerless retiring names a restore's replay left
+// that nobody re-bound in 90 days (D-DNS-10). A binary that does not link MG5
 // neither schedules the chain nor, should an older row run, touches anything.
 
 // Cadences of the chain.
@@ -45,6 +47,8 @@ type DnsMaintenanceResult struct {
 	ExpiredCount           int  `json:"expired_count"`
 	LiftedCount            int  `json:"lifted_count"`
 	PurgedRestoreListCount int  `json:"purged_restore_list_count"`
+	TombstonedLabelCount   int  `json:"tombstoned_label_count"`
+	PurgedIncidentCount    int  `json:"purged_incident_count"`
 	More                   bool `json:"more"`
 }
 
@@ -104,6 +108,18 @@ func DnsMaintenance(
 		glog.Warningf("[dns]restore list purge: %v\n", err)
 		result.More = true
 	}
+	tombstonedCount, more, err := model.TombstoneUnclaimedDnsLabels(ctx, now)
+	result.TombstonedLabelCount = tombstonedCount
+	if err != nil {
+		glog.Warningf("[dns]unclaimed label tombstones: %v\n", err)
+	}
+	result.More = result.More || more || err != nil
+	purgedIncidentCount, more, err := model.PurgeDnsRestoreIncidents(ctx, now)
+	result.PurgedIncidentCount = purgedIncidentCount
+	if err != nil {
+		glog.Warningf("[dns]restore incident purge: %v\n", err)
+	}
+	result.More = result.More || more || err != nil
 	return result, nil
 }
 

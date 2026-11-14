@@ -526,11 +526,13 @@ func sidecarMg5Migrations() []any {
 // interface's report. No column holds a client address or a query (I-13), and
 // kinds and states are varchar, never ENUM. A serial is a bigint (plan reading
 // 4), whose low 32 bits the SOA carries. dns_label is MG2's
-// (plan-DNS-labels-before-m5). dns_restore_incident, dns_ns, dns_canary_verdict
-// and network_dns_host_suspension wait for §2.8's v9 rows (plan-DNS-metadata-
+// (plan-DNS-labels-before-m5). dns_ns, dns_canary_verdict and
+// network_dns_host_suspension wait for §2.8's v9 rows (plan-DNS-metadata-
 // rows), which §22.7's guard needs before a table is created; until then a
-// restore's posted diffs ride dns_root, the restore's incident record v8 names,
-// and a host suspension is a withheld owner's row in network_dns_record.
+// restore's posted diffs and lists ride dns_root, the restore's incident record
+// v8 names, and a host suspension is a withheld owner's row in
+// network_dns_record. dns_restore_incident, which dns-1's v10 store names,
+// holds the CT replay's reclaimable names and leaves (DNS-M5-16).
 // Nothing reads these tables unless the binary links MG5
 // (server.SidecarMg5Linked).
 func sidecarMg5DnsMigrations() []any {
@@ -684,6 +686,26 @@ func sidecarMg5DnsMigrations() []any {
 
 				PRIMARY KEY (interface_name)
 			)
+		`),
+		// a restore's incident record of the CT replay (DNS-M5-16; §12.5,
+		// §19.10's labels step; plan-DNS-metadata-rows #2, in dns-1's v10
+		// store and sees): each name the replay found logged and dns_label
+		// lacked, with the SHA-256 of each logged leaf naming it, which a
+		// label reclaim's certificate must be. Kept 400 days with the
+		// restore's lists (dns-1).
+		newSqlMigration(`
+			CREATE TABLE dns_restore_incident (
+				root varchar(256) NOT NULL,
+				incident_id uuid NOT NULL,
+				name varchar(63) NOT NULL,
+				leaf_sha256 bytea NOT NULL,
+				record_time timestamp NOT NULL,
+
+				PRIMARY KEY (root, incident_id, name, leaf_sha256)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX dns_restore_incident_record_time ON dns_restore_incident (record_time)
 		`),
 	}
 }
