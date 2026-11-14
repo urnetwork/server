@@ -184,6 +184,11 @@ func TestContractExpirationReleasesRedisReservationOnce(t *testing.T) {
 	})
 }
 
+// Fund the reverse companion's destination payer with an already-current grant.
+func addContractExpirationReversePayerGrant(ctx context.Context, payerNetworkId server.Id) {
+	AddBasicTransferBalance(ctx, payerNetworkId, 1000, server.NowUtc().Add(-time.Hour), server.NowUtc().Add(time.Hour))
+}
+
 // A new companion cannot extend an expired open origin. An eligible newer
 // origin is selected normally, and the companion receives its own lifetime.
 func TestContractExpirationCompanionSelectsLiveRenewal(t *testing.T) {
@@ -217,7 +222,7 @@ func TestContractExpirationCompanionSelectsLiveRenewal(t *testing.T) {
 		}
 		// A reverse companion remains a valid origin for the returning control
 		// carrier. Both directions retain independent deadlines and accounting.
-		AddBasicTransferBalance(ctx, f.destinationNetworkId, 1000, server.NowUtc(), server.NowUtc().Add(time.Hour))
+		addContractExpirationReversePayerGrant(ctx, f.destinationNetworkId)
 		reverse, err := CreateCompanionTransferEscrow(ctx, f.sourceNetworkId, f.sourceId,
 			f.destinationNetworkId, f.destinationId, 100, time.Minute)
 		if err != nil || reverse == nil || reverse.CompanionContractId == nil || *reverse.CompanionContractId != companion.ContractId {
