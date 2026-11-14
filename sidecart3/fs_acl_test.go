@@ -20,6 +20,21 @@ func TestFs19ConfigReadOnT3(t *testing.T) {
 	})
 }
 
+// ACL-M4-04's FS-19 cases (sidecartest/fault/fs_acl_m4.go): a tagged ephemeral agent in a Pro network, its tag's
+// grant, a read grant and an EvsShare each opening exactly their repo, and their revocations shrinks, judged by api's
+// verifier on server's sequencer.
+func TestFs19GrantOnT3(t *testing.T) {
+	testEnv().Run(t, func(tb testing.TB) {
+		RunRow(tb, "FS-19", "grant", nil)
+	})
+}
+
+func TestFs19ShareOnT3(t *testing.T) {
+	testEnv().Run(t, func(tb testing.TB) {
+		RunRow(tb, "FS-19", "share", nil)
+	})
+}
+
 func TestFs62AclGateOnT3(t *testing.T) {
 	testEnv().Run(t, func(tb testing.TB) {
 		fault.RunClause(tb, "FS-62", "acl gate", fault.Fs62AclGate, RuleSettings(tb, nil))
