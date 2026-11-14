@@ -101,7 +101,8 @@ type ExchangeScopeSource interface {
 }
 
 // A source that also mints §7.8's re-seed mode tokens while sidecar.yml's
-// reseed is true (§19.10): GrantReseed answers in place of Grant then, an
+// reseed is true and the network's log has not resumed (§19.10; QD-724's
+// resumed marker): GrantReseed answers in place of Grant then, an
 // error wrapping ErrRestoreRequired for every request it does not mint. With
 // an installed source that is no ExchangeReseedScopeSource the exchange
 // answers every request restore_required.
@@ -344,6 +345,16 @@ func Exchange(ctx context.Context, args *ExchangeArgs) (*ExchangeResult, error) 
 		MemberId:        &credentialMemberId,
 		Audience:        audience,
 		Scopes:          slices.Clone(scopes),
+	}
+	if reseed {
+		// re-seed mode ends for a network when its resume base lands (§7.9's
+		// site loss; QD-724), while reseed stays the switch that allows it at
+		// all. A marker that cannot be read decides nothing
+		resumed, err := exchangeReseedResumed(ctx, networkId)
+		if err != nil {
+			return nil, fmt.Errorf("the restore's state is unavailable: %w", err)
+		}
+		reseed = !resumed
 	}
 	var grant *ExchangeScopeGrant
 	if reseed {
