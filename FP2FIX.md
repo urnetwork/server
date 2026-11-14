@@ -700,10 +700,11 @@ score export alone:
   unable to carry UDP or the IPv6 it advertises (`CapabilityDowngrades`,
   [FP2-PROTOCOL.md](FP2-PROTOCOL.md) §3, §3.7), even as the best below the
   bar. Its classified copy can be admitted in its capability facet, which only
-  selector-mode requests that take its class read; there the labels keep UDP
-  flows off a tcp exit (§6, §7). That second pass counts what selector mode
-  draws, every class, with the strict admissions, so it adds downgraded
-  providers only where the country has too few others.
+  selector-mode requests that take its class read (an app's limited window,
+  and a hosted proxy's windows, which take every class since D14); there the
+  labels keep UDP flows off a tcp exit (§6, §7). That second pass counts what
+  selector mode draws, every class, with the strict admissions, so it adds
+  downgraded providers only where the country has too few others.
 - **Best** is the Online fallback's order: reliability weight times URL
   success weight (`0.1 + 0.9·ratio`), then the speed tier and score, then the
   URL success weight; ties go to the lower client id, so consecutive exports

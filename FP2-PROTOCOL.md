@@ -351,7 +351,8 @@ native. The two decisions get one pass each:
   included, so a downgraded provider is admitted only where the country has
   too few others. Only the windows that take its class draw it (§6.3), from
   their pool's Online union, and connect routes only compatible flows through
-  it (§7.2); a limited window takes it for TCP flows.
+  it (§7.2): an app's limited window takes it for TCP flows, and a hosted
+  proxy's normal windows (D14, `ipv4` and `any`) take every class.
 
 A provider with negative capability evidence and no failure besides is
 already a native of its class, so the classified pass matters where a
