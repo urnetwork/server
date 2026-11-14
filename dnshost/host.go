@@ -98,6 +98,9 @@ type HostDeps struct {
 	// api: §8.10's gate on dns:<host> for the record routes (DNS-M5-12). nil is
 	// none, so a write under a grant answers 503 and the zone view is empty.
 	RecordGate dnsservice.DnsRecordGate
+	// api: §8.10's receiver gate for POST /dns/key-record (DNS-M7-02). nil is
+	// none, so every key record answers 503.
+	KeyRecordGate dnsservice.DnsKeyRecordGate
 	// api: each root's DNSKEY window released at now (§12.6's Keys). nil is DNS-M5-19's
 	// KeyWindowRelease over the window files in secret_files (hostKeyWindowRelease); server/local's test
 	// dns edge signs its own.
@@ -266,6 +269,11 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 		Canaries:   NewCanaries(),
 		KeyWindow:  deps.KeyWindow,
 		Records:    NewRecords(),
+		Reclaims:   NewReclaims(),
+		KeyRecords: NewKeyRecords(),
+		// no gate cache is wired here yet either, so every key record
+		// answers 503 until one is
+		KeyRecordGate: deps.KeyRecordGate,
 		// no gate cache is wired into this block yet (plan-SOCK-gate-data's
 		// source for it), so a write under a grant answers 503 and GET
 		// /dns/zone shows no RRset: the closed direction

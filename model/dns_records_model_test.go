@@ -525,8 +525,11 @@ func TestDnsRecordsDecisionRetryAnswersTheStoredBytes(t *testing.T) {
 		use := world.action(t, owner, "11.22.33.30", false)
 		approvalId := sidecar.NewId()
 		decision := world.approval.decision(t, use, approvalId, 1, now.Add(time.Hour), world.approval.phone)
-		zero := uint64(0)
-		first, err := world.decisionWrite(ctx, approvalId, decision, use, nil, "11.22.33.30", &zero, now)
+		read, err := GetDnsZoneVersion(ctx, world.root, world.networkId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := world.decisionWrite(ctx, approvalId, decision, use, nil, "11.22.33.30", &read, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -534,7 +537,7 @@ func TestDnsRecordsDecisionRetryAnswersTheStoredBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 		serial := world.serial(t, ctx)
-		retry, err := world.decisionWrite(ctx, approvalId, decision, use, nil, "11.22.33.30", &zero, now.Add(2*time.Hour))
+		retry, err := world.decisionWrite(ctx, approvalId, decision, use, nil, "11.22.33.30", &read, now.Add(2*time.Hour))
 		if err != nil || string(retry) != string(first) {
 			t.Fatalf("the retry: %q %v, want %q", retry, err, first)
 		}

@@ -20,3 +20,8 @@ func GetNetworkDns(w http.ResponseWriter, r *http.Request) {
 func WriteNetworkDnsRecords(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.WriteNetworkDnsRecords, w, r)
 }
+
+// POST /network/dns/label-reclaim: re-binds an ownerless retiring name after a restore.
+func ReclaimNetworkDnsLabel(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.ReclaimNetworkDnsLabel, w, r)
+}

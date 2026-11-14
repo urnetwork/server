@@ -728,6 +728,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.DnsMaintenance,
 			work.DnsMaintenancePost,
 		),
+		// §19.10's labels step (DNS-M5-16), scheduled by the restore's frame
+		task.NewTaskTargetWithPost(
+			work.DnsCtReplay,
+			work.DnsCtReplayPost,
+		),
 		task.NewTaskTargetWithPost(
 			work.MailRetention,
 			work.MailRetentionPost,

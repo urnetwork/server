@@ -23,8 +23,9 @@ package model
 //     records are free;
 //  7. dns_changes_per_hour (§12.7's abuse cap), counted by the user writes' admin events in the window;
 //  8. dnsservice.ValidateUserRecordSet on each upsert, then §21.6's ScreenName on each label of a new owner;
-//  9. the zone's lock and the compare-and-swap on the version the caller read, the zone's system set on first need
-//     (EnsureNetworkZoneInTx), then DnsWriteInTx with its admin event (§7.11), all in this transaction.
+//  9. the compare-and-swap on the version the caller read, under the zone's lock, which step 2 took after the
+//     label's, the zone's system set on first need (EnsureNetworkZoneInTx), then DnsWriteInTx with its admin event
+//     (§7.11), all in this transaction.
 //
 // A refusal at any step rolls the transaction back, so it writes no journal row and, under a decision, takes no use.
 // Every refusal is a *sidecar.DnsApiError, whose status api's router and the dns block answer alike.
@@ -491,6 +492,9 @@ func applyDnsRecordsInTx(
 	if err != nil {
 		return nil, err
 	}
+	// the zone's lock after the label's, as every zone writer takes them, before the zone's rows are read, so no
+	// system writer changes a key this write judges between its read and its commit
+	lockDnsZoneInTx(ctx, tx, root, networkId)
 	apex := label + "." + root
 	for _, key := range dnsWriteKeys(parsed.upserts, parsed.deletes) {
 		if !dns.IsSubDomain(apex, key.Owner) {
@@ -647,8 +651,7 @@ func applyDnsRecordsInTx(
 		}
 	}
 
-	// 9: the zone's lock and the compare-and-swap on the version the caller read, the zone on first need, the write
-	lockDnsZoneInTx(ctx, tx, root, networkId)
+	// 9: the compare-and-swap on the version the caller read, under the zone's lock, the zone on first need, the write
 	version, err := getDnsZoneVersionOrZeroInTx(ctx, tx, root, networkId)
 	if err != nil {
 		return nil, err
