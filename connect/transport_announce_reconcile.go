@@ -40,7 +40,7 @@ import (
 	"cmp"
 	"context"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"runtime"
 	"slices"
 	"sync"
@@ -323,7 +323,7 @@ func (self *handlerConnectionReconcile) run() {
 func (self *handlerConnectionReconcile) interval() time.Duration {
 	interval := self.settings.ReconcileInterval
 	if 0 < self.settings.ReconcileIntervalJitter {
-		interval += time.Duration(mathrand.Int63n(int64(self.settings.ReconcileIntervalJitter)))
+		interval += time.Duration(mathrand.Int64N(int64(self.settings.ReconcileIntervalJitter)))
 	}
 	return max(interval, connectionReconcileMinInterval)
 }

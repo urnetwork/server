@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	"encoding/hex"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"runtime"
 
 	"maps"
@@ -277,7 +278,7 @@ func testConnect(
 	// send and forward idle timeouts can be arbirary values
 
 	randPauseTimeout := func() time.Duration {
-		return pauseTimeout/4 + time.Duration(mathrand.Int63n(int64(pauseTimeout)))
+		return pauseTimeout/4 + time.Duration(mathrand.Int64N(int64(pauseTimeout)))
 	}
 
 	caseTimeout := config.caseTimeout
@@ -480,7 +481,7 @@ func testConnect(
 
 	randServer := func() (string, testServerEndpoint) {
 		endpoints := slices.Collect(maps.Values(hostEndpoints))
-		endpoint := endpoints[mathrand.Intn(len(endpoints))]
+		endpoint := endpoints[mathrand.IntN(len(endpoints))]
 		return fmt.Sprintf("ws://127.0.0.1:%d", endpoint.h1Port), endpoint
 	}
 	// Every carrier generation uses the same hermetic endpoint policy. The DNS
@@ -1076,7 +1077,7 @@ func testConnect(
 	for _, messageContentSize := range messageContentSizes {
 		// the message bytes are hex encoded which doubles the size
 		messageContentBytes := make([]byte, messageContentSize/2)
-		mathrand.Read(messageContentBytes)
+		cryptorand.Read(messageContentBytes)
 		messageContent := hex.EncodeToString(messageContentBytes)
 		connect.AssertEqual(t, int(messageContentSize), len(messageContent))
 
@@ -1107,7 +1108,7 @@ func testConnect(
 					case <-time.After(randPauseTimeout()):
 					}
 					fmt.Printf("unpause\n")
-					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
+					if 0 < newInstanceM && 0 == mathrand.IntN(newInstanceM) {
 						fmt.Printf("new instance\n")
 						clientAInstanceId = server.NewId()
 					}
@@ -1281,7 +1282,7 @@ func testConnect(
 					case <-time.After(randPauseTimeout()):
 					}
 					fmt.Printf("unpause\n")
-					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
+					if 0 < newInstanceM && 0 == mathrand.IntN(newInstanceM) {
 						fmt.Printf("new instance\n")
 						clientBInstanceId = server.NewId()
 					}

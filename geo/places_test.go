@@ -3,7 +3,7 @@ package geo
 import (
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"strings"
 	"testing"
 )
@@ -343,7 +343,8 @@ places:
 // queries spread across the whole sphere (poles and antimeridian included)
 // and a dense cluster where cells matter most.
 func TestNearestCityMatchesBruteForce(t *testing.T) {
-	random := mathrand.New(mathrand.NewSource(1))
+	// a fixed seed, so a run replays
+	random := mathrand.New(mathrand.NewPCG(1, 0))
 	// uniform on the sphere, so the polar caps get their share
 	randomPoint := func() (float64, float64) {
 		latitude := math.Asin(2*random.Float64()-1) * 180 / math.Pi
@@ -409,14 +410,14 @@ func TestNearestCityMatchesBruteForce(t *testing.T) {
 		case 2:
 			// hug the antimeridian and the poles
 			longitude = 180 - random.Float64()*2
-			if random.Intn(2) == 0 {
+			if random.IntN(2) == 0 {
 				longitude = -longitude
 			}
-			latitude = (90 - random.Float64()*5) * float64(1-2*random.Intn(2))
+			latitude = (90 - random.Float64()*5) * float64(1-2*random.IntN(2))
 		}
 		countryCode := ""
 		if i%3 == 0 {
-			countryCode = countryCodes[random.Intn(len(countryCodes))]
+			countryCode = countryCodes[random.IntN(len(countryCodes))]
 		}
 		place, distanceKm := places.NearestCity(latitude, longitude, countryCode)
 		// compare at the point the search itself measures from

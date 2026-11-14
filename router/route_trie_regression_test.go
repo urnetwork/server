@@ -11,7 +11,7 @@ package router
 // to handler X (or 404/405'd) now does something else.
 
 import (
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strings"
@@ -405,7 +405,8 @@ func TestTrieMatchesLinear_Fuzz(t *testing.T) {
 		"api-key", "api-keys", "wallets", "remove", "files", "tail", "star",
 		"specific", "foo", "bar", "42", "network", "user", "update",
 	}
-	rng := rand.New(rand.NewSource(0x5eed1234))
+	// a fixed seed, so a run replays
+	rng := rand.New(rand.NewPCG(0x5eed1234, 0))
 	tables := []namedTable{
 		{"api", realApiRoutes},
 		{"adversarial", adversarialRoutes},
@@ -417,17 +418,17 @@ func TestTrieMatchesLinear_Fuzz(t *testing.T) {
 		trie := newRouteTrie(routes)
 		mismatches := 0
 		for iter := 0; iter < 60000; iter++ {
-			depth := 1 + rng.Intn(5)
+			depth := 1 + rng.IntN(5)
 			var b strings.Builder
 			for d := 0; d < depth; d++ {
 				b.WriteByte('/')
-				b.WriteString(alphabet[rng.Intn(len(alphabet))])
+				b.WriteString(alphabet[rng.IntN(len(alphabet))])
 			}
-			if rng.Intn(4) == 0 {
+			if rng.IntN(4) == 0 {
 				b.WriteByte('/') // random trailing slash
 			}
 			path := b.String()
-			method := probeMethods[rng.Intn(len(probeMethods))]
+			method := probeMethods[rng.IntN(len(probeMethods))]
 			wantID, wantStatus := linearMatch(routes, method, path)
 			gotID, gotStatus := trieMatchStatus(trie, method, path)
 			if gotStatus != wantStatus || gotID != wantID {

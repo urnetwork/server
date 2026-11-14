@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net/netip"
 	"slices"
 	"strings"
@@ -35,8 +35,8 @@ func TestSignProxyId(t *testing.T) {
 		var i int
 		var j int
 		for {
-			i = mathrand.Intn(16)
-			j = (i + 1 + mathrand.Intn(15)) % 16
+			i = mathrand.IntN(16)
+			j = (i + 1 + mathrand.IntN(15)) % 16
 			if b[i] != b[j] {
 				break
 			}

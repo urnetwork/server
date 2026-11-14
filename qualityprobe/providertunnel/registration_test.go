@@ -5,7 +5,7 @@ package providertunnel
 import (
 	"context"
 	"errors"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"sync"
@@ -107,7 +107,8 @@ func registrationProbeOptions() egresshealth.Options {
 		}
 	}
 	return egresshealth.Options{
-		Destinations: destinations, Rand: rand.New(rand.NewSource(1)), PerRequestTimeout: 5 * time.Second,
+		// a fixed seed, so a run replays
+		Destinations: destinations, Rand: rand.New(rand.NewPCG(1, 0)), PerRequestTimeout: 5 * time.Second,
 		Sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
 	}
 }

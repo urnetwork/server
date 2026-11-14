@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -98,7 +98,7 @@ func scheduleCloseExpiredContractsPageWithExpiration(clientSession *session.Clie
 	now := server.NowUtc()
 	runAt := now
 	if delay {
-		randomDelay := time.Minute + time.Duration(mathrand.Int63n(int64(4*time.Minute)))
+		randomDelay := time.Minute + time.Duration(mathrand.Int64N(int64(4*time.Minute)))
 		runAt = runAt.Add(randomDelay)
 	}
 	if expiration != nil && expiration.Before(runAt) {

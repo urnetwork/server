@@ -10,7 +10,7 @@ import (
 	"context"
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"os"
 	"reflect"
 	"runtime"
@@ -66,7 +66,8 @@ var scaleContinents = [][4]float64{
 // and each node's truth.
 func newScaleFleet(extenders int, providers int, extenderPeers int, providerPeers int, seed int64, settings *Settings) ([]Node, []Term, []LatLon) {
 	continentCount := len(scaleContinents)
-	random := mathrand.New(mathrand.NewSource(seed))
+	// a fixed seed, so a run replays
+	random := mathrand.New(mathrand.NewPCG(uint64(seed), 0))
 	nodes := make([]Node, extenders+providers)
 	truths := make([]LatLon, extenders+providers)
 	radiiKm := []float64{5, 10, 20, 50, 100, 200, 500}
@@ -82,7 +83,7 @@ func newScaleFleet(extenders int, providers int, extenderPeers int, providerPeer
 			Latitude:  continent[0] + random.Float64()*(continent[1]-continent[0]),
 			Longitude: continent[2] + random.Float64()*(continent[3]-continent[2]),
 		}
-		radiusKm := radiiKm[random.Intn(len(radiiKm))]
+		radiusKm := radiiKm[random.IntN(len(radiiKm))]
 		bearing := random.Float64() * 2 * math.Pi
 		shiftKm := random.Float64() * radiusKm
 		truths[i] = truth
@@ -120,7 +121,8 @@ func newScaleFleet(extenders int, providers int, extenderPeers int, providerPeer
 				if chunkCount <= c {
 					return
 				}
-				chunkRandom := mathrand.New(mathrand.NewSource(seed*1000003 + int64(c)))
+				// a fixed seed, so a run replays
+				chunkRandom := mathrand.New(mathrand.NewPCG(uint64(seed*1000003+int64(c)), 0))
 				for i := c * chunk; i < min(len(nodes), (c+1)*chunk); i += 1 {
 					peers := termStarts[i+1] - termStarts[i]
 					if peers == 0 {
@@ -137,7 +139,7 @@ func newScaleFleet(extenders int, providers int, extenderPeers int, providerPeer
 					stride := size / (peers + 1)
 					for j := 0; j < peers; j += 1 {
 						// distinct by stride, and never the source itself
-						offset := 1 + j*stride + chunkRandom.Intn(stride)
+						offset := 1 + j*stride + chunkRandom.IntN(stride)
 						target := first
 						if i < extenders {
 							target += (i - first + offset) % size
