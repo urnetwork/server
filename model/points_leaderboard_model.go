@@ -6,6 +6,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 )
 
@@ -261,7 +263,10 @@ func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64, excused
 // a rebuild changes the next one: the hourly rebuild reads it within the hour.
 // The latest block is pending while its award has not committed and it is not
 // recorded expired (loadPointsPendingEpochs); the award's commit triggers a
-// rebuild (controller.AwardOperatorBlockPoints), which counts its points.
+// rebuild (controller.AwardOperatorBlockPoints), which counts its points. An
+// earning boundary that cannot be read, which stops the awards as well, leaves
+// nothing pending: it is logged, and the rebuild ranks by the rule before
+// rather than failing, as the served bytes rollup stops and not the rebuild.
 func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) (*PointsLeaderboardSnapshot, error) {
 	blocks := make([]int64, len(windows))
 	for i, window := range windows {
@@ -276,7 +281,8 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 	// before the points (loadPointsPendingEpochs)
 	pendingEpochs, err := loadPointsPendingEpochs(ctx, windows, excusedEpochs)
 	if err != nil {
-		return nil, err
+		glog.Warningf("[points]no block is pending: the earning boundary cannot be read: %s\n", err)
+		pendingEpochs = map[uint64]bool{}
 	}
 	inputs, err := loadPointsNetworkInputs(ctx, windows)
 	if err != nil {
@@ -458,8 +464,9 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 // Only the latest completed block is ever pending: an older one without an
 // award or an expiry record is overdue, or was left to the backfill, and
 // counts as any block. Without an earning boundary there are no awards
-// (payout plans award the points), and nothing is pending. An expired block
-// is excused instead (`excusedEpochs`).
+// (payout plans award the points), and nothing is pending; an error is the
+// boundary's, one that cannot be read. An expired block is excused instead
+// (`excusedEpochs`).
 //
 // The award's record is read on the pool the points are then read from
 // (loadPointsNetworkInputs). An award commits its record and its points in one

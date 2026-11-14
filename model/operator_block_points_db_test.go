@@ -17,8 +17,7 @@ import (
 // An earning boundary at `cutoff`, prepared as Main's was.
 func useOperatorBlockPointsTransition(t testing.TB, cutoff time.Time) {
 	t.Helper()
-	data := fmt.Sprintf("schema: urnetwork-provider-payout-transition-v1\ncutoff_utc: %q\nattribution: settled_contract_close_time\nlegacy_usdc: finish_pre_cutoff_obligations\nmainnet:\n  profile: mainnet\n  chain_id: 964\n  genesis_hash: %q\n  netuid: 25\n  activation: blocked\n", cutoff.UTC().Format(time.RFC3339), "0x"+strings.Repeat("11", 32))
-	t.Cleanup(server.Config.PushSimpleResource("sn.yml", []byte(data)))
+	pushOperatorBlockPointsTransition(t, cutoff)
 	policy, err := server.LoadProviderPayoutTransition(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -26,6 +25,15 @@ func useOperatorBlockPointsTransition(t testing.TB, cutoff time.Time) {
 	if _, err := server.PrepareProviderPayoutBoundary(context.Background(), policy.ConfigSha256); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// The sn.yml of an earning boundary at `cutoff`, for the rest of the test,
+// without preparing it: after another boundary was prepared, it is a boundary
+// other than the recorded one, which no award or earning read accepts.
+func pushOperatorBlockPointsTransition(t testing.TB, cutoff time.Time) {
+	t.Helper()
+	data := fmt.Sprintf("schema: urnetwork-provider-payout-transition-v1\ncutoff_utc: %q\nattribution: settled_contract_close_time\nlegacy_usdc: finish_pre_cutoff_obligations\nmainnet:\n  profile: mainnet\n  chain_id: 964\n  genesis_hash: %q\n  netuid: 25\n  activation: blocked\n", cutoff.UTC().Format(time.RFC3339), "0x"+strings.Repeat("11", 32))
+	t.Cleanup(server.Config.PushSimpleResource("sn.yml", []byte(data)))
 }
 
 // One paying network and its balance, and the providers it uses.

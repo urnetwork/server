@@ -145,10 +145,11 @@ func TestPointsLeaderboardOnlyTheLatestBlockWaitsForItsAward(t *testing.T) {
 	})
 }
 
-// The latest block recorded expired is excused, not pending; and without an
+// The latest block recorded expired is excused, not pending. Without an
 // earning boundary no award owes a block its points, so nothing is pending
 // and a network without points in the latest block has no current streak, as
-// before.
+// before; under a boundary other than the recorded one, which stops the
+// awards too, nothing is pending either, and the rebuild still succeeds.
 func TestPointsLeaderboardLatestBlockExpiredOrWithoutABoundary(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -173,6 +174,16 @@ func TestPointsLeaderboardLatestBlockExpiredOrWithoutABoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		pointsTestRequireStreak(t, ctx, pending.SnapshotId, provider, "block 4 pending", 3, 3, 3)
+
+		pushOperatorBlockPointsTransition(t, SubnetBlockGenesis.Add(SubnetBlockDuration))
+		if _, err := server.LoadProviderPayoutEarningPolicy(ctx); err == nil {
+			t.Fatalf("a boundary other than the recorded one was accepted")
+		}
+		unreadable, err := RebuildPointsLeaderboard(ctx, windows)
+		if err != nil {
+			t.Fatalf("a boundary other than the recorded one failed the rebuild: %s", err)
+		}
+		pointsTestRequireStreak(t, ctx, unreadable.SnapshotId, provider, "a boundary other than the recorded one, no points in block 4", 3, 0, 3)
 
 		expiry, ok := OperatorBlockPointsExpiryAt(4, SubnetBlockGenesis, pointsBlockTime(6, 0))
 		if !ok {
