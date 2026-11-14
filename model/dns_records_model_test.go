@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -354,6 +355,93 @@ func TestDnsRecordsRefusesInOrder(t *testing.T) {
 			}
 			if world.serial(t, ctx) != serial {
 				t.Errorf("%s: a refusal wrote", c.name)
+			}
+		}
+	})
+}
+
+// QD-807: a new owner's host labels take the host screen, the brand rules and §12.7's owners, not §12.5's reserved
+// block. www, api, status and login write in the network's own zone, at the host, below an underscore label and
+// under a wildcard, and show in GET /network/dns; a listed brand without its verified domain is refused 403 and
+// writes once the network verifies one of the brand's domains; §12.7's owners, mx, mail, mta-sts, b, a system
+// underscore owner and a word-number label, stay refused; no refusal writes a journal row. Labels keep the block: the
+// draw's screen still refuses www and api below <root>.
+func TestDnsRecordsScreenHostsInTheZone(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestDnsRecordsWorld(t, ctx, sidecar.AbuseStandingStandard, true)
+		reservedHosts := []string{"www", "api", "status", "login"}
+		for index, host := range reservedHosts {
+			_, err := world.write(ctx, &sidecar.DnsRecordsRequest{
+				Upserts: []sidecar.DnsRecordUpsert{
+					{Name: host + "." + world.apex, Type: "A", Values: []string{fmt.Sprintf("11.22.33.%d", 10+index)}},
+					{Name: "_note." + host + "." + world.apex, Type: "TXT", Values: []string{`"synthetic note"`}},
+					{Name: "*." + host + "." + world.apex, Type: "A", Values: []string{fmt.Sprintf("11.22.34.%d", 10+index)}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("%s: %v", host, err)
+			}
+		}
+		view, err := GetNetworkDns(ctx, world.root, world.networkId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kinds := map[string]string{}
+		for _, recordSet := range view.RecordSets {
+			kinds[recordSet.Name+" "+recordSet.Type] = recordSet.Kind
+		}
+		for _, host := range reservedHosts {
+			for _, key := range []string{host + "." + world.apex + " A", "_note." + host + "." + world.apex + " TXT", "*." + host + "." + world.apex + " A"} {
+				if kinds[key] != "user" {
+					t.Errorf("%s: kind %q", key, kinds[key])
+				}
+			}
+		}
+
+		refuse := func(owner string, status int, code string) {
+			t.Helper()
+			serial := world.serial(t, ctx)
+			_, err := world.write(ctx, testDnsUpsert(owner, "TXT", `"x"`))
+			if apiError := testDnsApiError(t, err); apiError.Status != status || apiError.Code != code {
+				t.Errorf("%s: %+v, want %d %s", owner, apiError, status, code)
+			}
+			if world.serial(t, ctx) != serial {
+				t.Errorf("%s: a refusal wrote", owner)
+			}
+		}
+		// §12.7's owners, which the validator refuses before the screen and the screen would refuse too
+		for _, owner := range []string{"mx", "mail", "mta-sts", "b", "_dmarc", "otter-4821", "_note.otter-4821"} {
+			refuse(owner+"."+world.apex, http.StatusBadRequest, sidecar.DnsApiCodeInvalid)
+		}
+		// a listed brand, as a host and as the host of a deeper owner, until the network verifies its domain
+		for _, owner := range []string{"paypal", "www-paypal", "_note.paypal"} {
+			refuse(owner+"."+world.apex, http.StatusForbidden, sidecar.DnsApiCodeRefused)
+		}
+		var brandDomains []string
+		for _, brand := range sidecar.ScreenBrands() {
+			if brand.Brand == "paypal" {
+				brandDomains = brand.Domains
+			}
+		}
+		if len(brandDomains) == 0 {
+			t.Fatal("the screen lists no domain for the brand")
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO network_domain (network_id, domain, challenge, verify_time, check_time) VALUES ($1, $2, $3, $4, $4)`,
+				world.networkId, brandDomains[0], "synthetic-challenge", server.NowUtc(),
+			))
+		})
+		if _, err := world.write(ctx, testDnsUpsert("paypal."+world.apex, "TXT", `"x"`)); err != nil {
+			t.Fatalf("the brand with its domain verified: %v", err)
+		}
+
+		// a label is still drawn from below <root>, where §12.5's block keeps www and api
+		for _, label := range []string{"www", "api", "status", "login"} {
+			if DefaultDnsNameScreen(label) {
+				t.Errorf("the label draw's screen allows %s", label)
 			}
 		}
 	})

@@ -22,7 +22,9 @@ package model
 //  6. dns_entries under the lock (§20.4): one user RRset is one unit, and system, DKIM, challenge, alias and edge
 //     records are free;
 //  7. dns_changes_per_hour (§12.7's abuse cap), counted by the user writes' admin events in the window;
-//  8. dnsservice.ValidateUserRecordSet on each upsert, then §21.6's ScreenName on each label of a new owner;
+//  8. dnsservice.ValidateUserRecordSet on each upsert, then §21.6's host screen, sidecar.ScreenHost, on each host
+//     label of a new owner: the brand rules and §12.7's owner table, not §12.5's reserved block, which guards labels
+//     and aliases, so www, api, status and login are a network's to write in its own zone (owner, QD-807);
 //  9. the compare-and-swap on the version the caller read, under the zone's lock, which step 2 took after the
 //     label's, the zone's system set on first need (EnsureNetworkZoneInTx), then DnsWriteInTx with its admin event
 //     (§7.11), all in this transaction.
@@ -616,7 +618,9 @@ func applyDnsRecordsInTx(
 		}
 	}
 
-	// 8: §12.7's user table, then the screen on each new owner's labels
+	// 8: §12.7's user table, then the host screen on each new owner's host labels (QD-807). * and an underscore
+	// label are no host, and the validator has judged them; the apex has no label below it to screen. Neither the
+	// validator nor the facts name scope labels before M6.
 	recordContext := &dnsservice.DnsUserRecordContext{
 		Root:     root,
 		Apex:     apex,
@@ -645,7 +649,7 @@ func applyDnsRecordsInTx(
 			if ownerLabel == "*" || strings.HasPrefix(ownerLabel, "_") {
 				continue
 			}
-			if verdict := sidecar.ScreenName(ownerLabel, screenFacts); verdict != sidecar.ScreenVerdictAllow {
+			if verdict := sidecar.ScreenHost(ownerLabel, screenFacts); verdict != sidecar.ScreenVerdictAllow {
 				return nil, dnsRecordsRefused("the name %s is refused (§21.6)", ownerLabel)
 			}
 		}
