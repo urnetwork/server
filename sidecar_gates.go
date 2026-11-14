@@ -289,6 +289,15 @@ func (self *SidecarConfig) UrnetworkEdge() (Id, bool) {
 	return *self.urnetworkEdge, true
 }
 
+// §20.6's Empty balance (QD-639): how many evs blocks serve the env, which each
+// evs process divides evs_unpaid_read_rate by. The operator sets it with
+// services.yml's evs block count; no host derives it from its own view of its
+// peers. ok is false when the file sets none that is at least 1: there is no
+// default, and server/evshost starts no block whose gate is enabled without one.
+func (self *SidecarConfig) EvsBlocks() (blocks int, ok bool) {
+	return self.evsBlocks, 1 <= self.evsBlocks
+}
+
 // plan-EVSB-settle-gate's entry for one cluster; an absent entry has passed
 // nothing.
 func (self *SidecarConfig) FileCluster(clusterId string) (SidecarFileCluster, bool) {

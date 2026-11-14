@@ -759,3 +759,82 @@ func TestExchangeInReseedMode(t *testing.T) {
 		requireExchangeRefused(t, "a read scope", err, ErrRestoreRequired)
 	})
 }
+
+// §7.8's re-seed mode ends per network at its resumed marker in Redis {acl_<networkId>}r (QD-724), while
+// sidecar.yml's reseed stays on: a network whose adopted run is written but whose resume base has not landed is still
+// restore_required, as it is while another network resumes; once its own resume base lands the exchange asks Grant
+// again; and a marker that cannot be read mints nothing in either mode.
+func TestExchangeLeavesReseedModeAtTheNetworksResumedMarker(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		fixture := newExchangeFixture(t)
+		defer server.Testing_PushSidecarConfig("sidecar:\n  reseed: true\n")()
+		// a source with no re-seed grant: every request in re-seed mode is restore_required
+		source := &grantEverythingSource{memberId: server.NewId()}
+		defer SetExchangeScopeSource(source)()
+		readScope := repoScope(server.NewId(), "r")
+		uploads := model.NewConfigReseedUploads(nil)
+
+		_, err := Exchange(t.Context(), fixture.args("evs", readScope))
+		requireExchangeRefused(t, "before any upload", err, ErrRestoreRequired)
+
+		connect.AssertEqual(t, uploads.MarkWritten(t.Context(), fixture.networkId, 5), nil)
+		_, err = Exchange(t.Context(), fixture.args("evs", readScope))
+		requireExchangeRefused(t, "written, not resumed", err, ErrRestoreRequired)
+
+		// another network resumes
+		otherNetworkId := server.NewId()
+		connect.AssertEqual(t, uploads.MarkWritten(t.Context(), otherNetworkId, 5), nil)
+		resumed, err := uploads.MarkResumed(t.Context(), otherNetworkId, 6)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, resumed, true)
+		_, err = Exchange(t.Context(), fixture.args("evs", readScope))
+		requireExchangeRefused(t, "while another network resumed", err, ErrRestoreRequired)
+		connect.AssertEqual(t, len(source.requests), 0)
+
+		// its own resume base lands
+		resumed, err = uploads.MarkResumed(t.Context(), fixture.networkId, 6)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, resumed, true)
+		result, err := Exchange(t.Context(), fixture.args("evs", readScope))
+		connect.AssertEqual(t, err, nil)
+		claims, err := newTestServiceTokenVerifier(t).Verify(result.AccessToken, "evs")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, claims.Scopes(), []string{readScope})
+		connect.AssertEqual(t, len(source.requests), 1)
+		connect.AssertEqual(t, source.requests[0].NetworkId, fixture.networkId)
+
+		// the marker cannot be read: neither mode is guessed
+		previous := exchangeReseedResumed
+		exchangeReseedResumed = func(ctx context.Context, networkId server.Id) (bool, error) {
+			return false, errors.New("redis is away")
+		}
+		defer func() {
+			exchangeReseedResumed = previous
+		}()
+		result, err = Exchange(t.Context(), fixture.args("evs", readScope))
+		if err == nil || errors.Is(err, ErrRestoreRequired) || result != nil {
+			t.Fatalf("an unreadable marker: %v", err)
+		}
+		connect.AssertEqual(t, len(source.requests), 1)
+	})
+}
+
+// With reseed off the marker is never read: no restore, no re-seed mode.
+func TestExchangeReadsNoResumedMarkerOutsideARestore(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		fixture := newExchangeFixture(t)
+		source := &grantEverythingSource{memberId: server.NewId()}
+		defer SetExchangeScopeSource(source)()
+		previous := exchangeReseedResumed
+		exchangeReseedResumed = func(ctx context.Context, networkId server.Id) (bool, error) {
+			t.Errorf("the marker was read")
+			return false, nil
+		}
+		defer func() {
+			exchangeReseedResumed = previous
+		}()
+		_, err := Exchange(t.Context(), fixture.args("evs", repoScope(server.NewId(), "r")))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(source.requests), 1)
+	})
+}

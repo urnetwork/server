@@ -340,6 +340,103 @@ func TestSidecarGatesFailClosed(t *testing.T) {
 	}
 }
 
+// QD-639: the evs gate's blocks, the env's evs block count, parses with and
+// without the key. It has no default: unset, null or below 1 reads as unset. It
+// is evs's alone, the gate's enabled does not change it, and it changes nothing
+// the gate answers.
+func TestSidecarConfigEvsBlocks(t *testing.T) {
+	networkId := NewId()
+	for _, c := range []struct {
+		file    string
+		blocks  int
+		ok      bool
+		enabled bool
+	}{
+		{file: ""},
+		{file: "sidecar: {}\n"},
+		{file: "sidecar:\n  gkm: {enabled: true, percent: 100}\n"},
+		{file: "sidecar:\n  evs: {enabled: false, writes: true, networks: [], percent: 0}\n"},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100}\n", enabled: true},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: 1}\n", blocks: 1, ok: true, enabled: true},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: 2}\n", blocks: 2, ok: true, enabled: true},
+		{file: "sidecar:\n  evs:\n    enabled: true\n    percent: 100\n    blocks: 4\n", blocks: 4, ok: true, enabled: true},
+		{file: "sidecar:\n  evs: {enabled: false, blocks: 4}\n", blocks: 4, ok: true},
+		{file: "sidecar:\n  evs: {blocks: 3}\n", blocks: 3, ok: true},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: 0}\n", enabled: true},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: -1}\n", enabled: true},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100, blocks: ~}\n", enabled: true},
+		{file: "sidecar:\n  evs: {enabled: true, percent: 100}\n  tlsedge: {enabled: true, blocks: 3}\n  format2: {enabled: true, blocks: 5}\n", enabled: true},
+	} {
+		config, err := parseSidecarConfig([]byte(c.file))
+		if err != nil {
+			t.Fatalf("%q: %s", c.file, err)
+		}
+		blocks, ok := config.EvsBlocks()
+		if blocks != c.blocks || ok != c.ok {
+			t.Errorf("%q: blocks %d, %t", c.file, blocks, ok)
+		}
+		gate := config.Service(SidecarGateEvs)
+		if gate.Enabled() != c.enabled || gate.Admits(networkId) != c.enabled || gate.Writes() != c.enabled {
+			t.Errorf("%q: the gate reads enabled %t, admits %t, writes %t", c.file, gate.Enabled(), gate.Admits(networkId), gate.Writes())
+		}
+	}
+	// the zero value, a first read of a broken file, holds no count
+	if blocks, ok := (&SidecarConfig{}).EvsBlocks(); blocks != 0 || ok {
+		t.Errorf("the zero value holds %d blocks", blocks)
+	}
+	// a count that is not a whole number of at least 1 costs only itself: it reads
+	// as unset, never rounded, and the gate beside it stands
+	for _, file := range []string{
+		"sidecar:\n  evs: {enabled: true, blocks: two}\n",
+		"sidecar:\n  evs: {enabled: true, blocks: 2.5}\n",
+		"sidecar:\n  evs: {enabled: true, blocks: 2.0}\n",
+		"sidecar:\n  evs: {enabled: true, blocks: \"2\"}\n",
+		"sidecar:\n  evs: {enabled: true, blocks: [2]}\n",
+		"sidecar:\n  evs: {enabled: true, blocks: {count: 2}}\n",
+		"sidecar:\n  evs: {enabled: true, blocks: true}\n",
+		"sidecar:\n  evs: {enabled: true, blocks: 99999999999999999999}\n",
+	} {
+		config, err := parseSidecarConfig([]byte(file))
+		if err != nil {
+			t.Errorf("%q: %s", file, err)
+			continue
+		}
+		if blocks, ok := config.EvsBlocks(); blocks != 0 || ok {
+			t.Errorf("%q: blocks %d, %t", file, blocks, ok)
+		}
+		if !config.Service(SidecarGateEvs).Enabled() {
+			t.Errorf("%q: a bad count closed the gate beside it", file)
+		}
+	}
+	// an anchor's count is the count
+	if config, err := parseSidecarConfig([]byte("count: &count 3\nsidecar:\n  evs: {enabled: true, blocks: *count}\n")); err != nil {
+		t.Error(err)
+	} else if blocks, ok := config.EvsBlocks(); blocks != 3 || !ok {
+		t.Errorf("an anchored count reads %d, %t", blocks, ok)
+	}
+	// the reader's failure rules hold for the count as for the gates
+	newTestSidecarConfigHome(t)
+	var previous *SidecarConfig
+	func() {
+		defer Testing_PushSidecarConfig("sidecar:\n  evs: {enabled: true, percent: 100, blocks: 2}\n")()
+		previous = loadSidecarConfig(nil)
+	}()
+	if blocks, ok := previous.EvsBlocks(); blocks != 2 || !ok {
+		t.Fatalf("a read of the file holds %d blocks", blocks)
+	}
+	func() {
+		defer Testing_PushSidecarConfig("sidecar:\n  evs: {enabled: true, blocks: 2, percent: fifty}\n")()
+		if config := loadSidecarConfig(nil); config.Service(SidecarGateEvs).Enabled() {
+			t.Error("a first read of a broken file opens the gate")
+		} else if blocks, ok := config.EvsBlocks(); blocks != 0 || ok {
+			t.Errorf("a first read of a broken file holds %d blocks", blocks)
+		}
+		if config := loadSidecarConfig(previous); config != previous {
+			t.Error("a broken later read replaced the last good one")
+		}
+	}()
+}
+
 // A gate moves within the reread interval of a push and not before.
 func TestSidecarGatesMoveAtTheReread(t *testing.T) {
 	networkId := NewId()
@@ -468,6 +565,7 @@ func FuzzSidecarConfig(f *testing.F) {
 	f.Add("sidecar:\n  evs: {enabled: true, writes: false, networks: [5ca1ab1e-0000-4000-8000-000000000004], percent: 100}\n")
 	f.Add("sidecar:\n  p0_enforce: {enabled: true}\n  preview_networks: [5ca1ab1e-0000-4000-8000-000000000004]\n")
 	f.Add("sidecar: {format2: {enabled: true, percent: 7, purge: on, drop: \"on\"}, reseed: true}\n")
+	f.Add("sidecar:\n  evs: {enabled: true, percent: 100, blocks: 4}\n  tlsedge: {enabled: true, blocks: 3}\n")
 	f.Fuzz(func(t *testing.T, text string) {
 		config, err := parseSidecarConfig([]byte(text))
 		if err != nil {
@@ -539,6 +637,15 @@ func FuzzSidecarConfig(f *testing.F) {
 				t.Fatalf("%s previews, which %q does not list", networkId, text)
 			}
 		}
+		if evsBlocks, ok := config.EvsBlocks(); ok {
+			blocks := 0
+			value, found := sidecarYamlLookup(generic, "sidecar", SidecarGateEvs, "blocks")
+			if !found || value.Decode(&blocks) != nil || blocks != evsBlocks || evsBlocks < 1 {
+				t.Fatalf("evs has %d blocks with blocks %d in %q", evsBlocks, blocks, text)
+			}
+		} else if evsBlocks != 0 {
+			t.Fatalf("evs holds %d blocks it does not answer in %q", evsBlocks, text)
+		}
 		if edge, ok := config.UrnetworkEdge(); ok {
 			edgeStr := ""
 			value, found := sidecarYamlLookup(generic, "sidecar", "urnetwork_edge")
@@ -590,6 +697,16 @@ func TestSidecarConfigFilesAreDark(t *testing.T) {
 		}
 		if len(config.fileClusters) != 0 {
 			t.Errorf("%s records a settle pass", path)
+		}
+		// QD-639: the local stack runs one evs block; main's and canary's count is the
+		// operator's to set beside services.yml's, and unset it starts no enabled block
+		blocks, ok := config.EvsBlocks()
+		if env == "local" {
+			if blocks != 1 || !ok {
+				t.Errorf("%s gives evs %d blocks, want the local stack's 1", path, blocks)
+			}
+		} else if ok {
+			t.Errorf("%s gives evs %d blocks ahead of the operator", path, blocks)
 		}
 	}
 }
