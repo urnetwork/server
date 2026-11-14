@@ -51,3 +51,21 @@ func TestFs124CliOnT3(t *testing.T) {
 		RunRow(tb, "FS-124", "cli", nil)
 	})
 }
+
+func TestFs124CliApprovalsOnT3(t *testing.T) {
+	testEnvWithSchema().Run(t, func(tb testing.TB) {
+		Run(tb, fault.Fs124CliApprovals, nil)
+	})
+}
+
+func TestFs124CliCosignOnT3(t *testing.T) {
+	testEnvWithSchema().Run(t, func(tb testing.TB) {
+		Run(tb, fault.Fs124CliCosign, nil)
+	})
+}
+
+func TestFs124CliRecoveryRotateOnT3(t *testing.T) {
+	testEnvWithSchema().Run(t, func(tb testing.TB) {
+		Run(tb, fault.Fs124CliRecoveryRotate, nil)
+	})
+}

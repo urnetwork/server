@@ -85,3 +85,15 @@ func TestFs98CliProposalExpiresOnServersSequencer(t *testing.T) {
 func TestFs124CliOnServersSequencer(t *testing.T) {
 	fs98SequencerRow(t, "FS-124", "cli")
 }
+
+func TestFs124CliApprovalsOnServersSequencer(t *testing.T) {
+	fs98SequencerClause(t, fault.Fs124CliApprovals)
+}
+
+func TestFs124CliCosignOnServersSequencer(t *testing.T) {
+	fs98SequencerClause(t, fault.Fs124CliCosign)
+}
+
+func TestFs124CliRecoveryRotateOnServersSequencer(t *testing.T) {
+	fs98SequencerClause(t, fault.Fs124CliRecoveryRotate)
+}
