@@ -43530,9 +43530,10 @@ record's age.
 
 - `operator-block-points-expired` (WARN, sustain 1, target
   `operator-block-<block>`): the block was recorded expired in the last 7
-  days. Providers get no points for its traffic, and every Streak that ran
-  through it ends there. It clears once the record is older than 7 days; the
-  block stays unawarded.
+  days. Providers get no points for its traffic, GET /account/epochs counts
+  no bytes served for it (the served bytes rollup deletes its rows), and every
+  Streak that ran through it ends there. It clears once the record is older
+  than 7 days; the block stays unawarded.
 
 A missing table at or past the migration head, or a malformed record, is an
 observation failure. The taskworker counts each record in

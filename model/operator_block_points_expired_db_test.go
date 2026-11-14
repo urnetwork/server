@@ -378,3 +378,91 @@ func TestOperatorBlockPointsOtherErrorsStillStopTheRunInOrder(t *testing.T) {
 		}
 	})
 }
+
+// GET /account/epochs counts a block's bytes as its points: an expired block,
+// which never gets its points, counts no bytes once it is recorded, and its
+// traffic is counted through its end, as an awarded block's is. The served
+// bytes rollup deletes the expired block's rows as it deletes an awarded
+// block's, so they do not stay for good, and a rollup that starts again
+// never reads the expired block.
+func TestOperatorBlockPointsExpiredBlockLeavesNoServedBytes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		f := newOperatorBlockPointsExpiryFixture(t, ctx)
+		if _, err := AwardDueOperatorBlockPoints(ctx, f.config, operatorBlockPointsSettled(f.previous), f.previous); err != nil {
+			t.Fatal(err)
+		}
+		blockEnd := operatorBlockStart(f.block).Add(SubnetBlockDuration)
+		epoch := [2]time.Time{blockEnd.Add(-2 * 24 * time.Hour), blockEnd.Add(5 * 24 * time.Hour)}
+		gib := ByteCount(1024 * 1024 * 1024)
+		settings := operatorBlockTrafficTestSettings()
+
+		// the rollup reads the block through its end, and an hour of the next
+		rollupRun := operatorBlockPointsSettled(f.block).Add(time.Hour)
+		if _, err := AdvanceOperatorBlockTrafficRollup(ctx, settings, rollupRun); err != nil {
+			t.Fatal(err)
+		}
+		if rows := operatorBlockTrafficTestRows(t, ctx, f.block); rows[f.provider] != gib {
+			t.Fatalf("the rollup counted %v bytes of block %d", rows, f.block)
+		}
+		if readThrough := operatorBlockTrafficTestReadThrough(t, ctx, f.next); readThrough == nil {
+			t.Fatalf("the rollup did not start block %d", f.next)
+		}
+		if served := operatorBlockTrafficTestServed(ctx, f.provider, rollupRun, epoch)[0]; served.ByteCount != gib || served.AsOf == nil || !served.AsOf.Equal(blockEnd) {
+			t.Fatalf("before its deadline the block served %d bytes as of %v, want %d as of %s", served.ByteCount, served.AsOf, gib, blockEnd)
+		}
+
+		// past its deadline the daily run records it expired, before the next
+		// block is due
+		late := operatorBlockStart(f.block).Add(ClientReliabilityRetention + time.Hour)
+		if awards, err := AwardDueOperatorBlockPoints(ctx, f.config, late, f.previous); err != nil || len(awards) != 0 {
+			t.Fatalf("the late run: %v %v", awards, err)
+		}
+		if !GetOperatorBlockPointsExpired(ctx, []int64{f.block})[f.block] {
+			t.Fatalf("block %d was not recorded expired", f.block)
+		}
+		requireNoBytes := func() {
+			t.Helper()
+			served := operatorBlockTrafficTestServed(ctx, f.provider, late, epoch)[0]
+			if served.ByteCount != 0 || served.AsOf == nil || !served.AsOf.Equal(blockEnd) {
+				t.Fatalf("expired block %d served %d bytes as of %v, want none as of %s", f.block, served.ByteCount, served.AsOf, blockEnd)
+			}
+			if points := GetAccountNanoPointsInWindow(ctx, f.provider, epoch[0], epoch[1]); points != 0 {
+				t.Fatalf("expired block %d has %d points", f.block, points)
+			}
+		}
+		requireNoBytes()
+
+		// the next rollup run deletes the expired block's rows, not the
+		// newest block's
+		if _, err := AdvanceOperatorBlockTrafficRollup(ctx, settings, late); err != nil {
+			t.Fatal(err)
+		}
+		if rows := operatorBlockTrafficTestRows(t, ctx, f.block); len(rows) != 0 {
+			t.Fatalf("expired block %d keeps rollup rows %v", f.block, rows)
+		}
+		if readThrough := operatorBlockTrafficTestReadThrough(t, ctx, f.block); readThrough != nil {
+			t.Fatalf("expired block %d keeps its cursor at %s", f.block, readThrough)
+		}
+		if readThrough := operatorBlockTrafficTestReadThrough(t, ctx, f.next); readThrough == nil {
+			t.Fatalf("the rollup deleted block %d's cursor", f.next)
+		}
+		requireNoBytes()
+
+		// a rollup that starts again at the expired block passes over it
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM operator_block_network_traffic`))
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM operator_block_traffic`))
+		})
+		if _, err := AdvanceOperatorBlockTrafficRollup(ctx, settings, rollupRun); err != nil {
+			t.Fatal(err)
+		}
+		if readThrough := operatorBlockTrafficTestReadThrough(t, ctx, f.block); readThrough != nil {
+			t.Fatalf("the rollup read expired block %d through %s", f.block, readThrough)
+		}
+		if readThrough := operatorBlockTrafficTestReadThrough(t, ctx, f.next); readThrough == nil {
+			t.Fatalf("the rollup did not start block %d after the expired one", f.next)
+		}
+		requireNoBytes()
+	})
+}

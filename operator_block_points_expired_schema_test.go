@@ -10,14 +10,15 @@ import (
 )
 
 // The migration is a plain SQL migration appended to the list, after the
-// unchanged-patch retry's, and its version is its position.
+// operator block traffic's, which GET /account/epochs reads it with, and its
+// version is its position.
 func TestOperatorBlockPointsExpiredMigrationIsAppended(t *testing.T) {
 	version := OperatorBlockPointsExpiredVersion()
 	if version < 1 || len(migrations) < version || migrations[version-1] != operatorBlockPointsExpiredMigration {
 		t.Fatalf("operator block points expiry migration version %d is not its position", version)
 	}
-	if version <= CompetitionOperatorRequestedPatchRetryMigrationVersion() {
-		t.Fatalf("operator block points expiry migration %d is not after the unchanged-patch retry's %d", version, CompetitionOperatorRequestedPatchRetryMigrationVersion())
+	if version <= OperatorBlockTrafficVersion() {
+		t.Fatalf("operator block points expiry migration %d is not after the operator block traffic's %d", version, OperatorBlockTrafficVersion())
 	}
 }
 
