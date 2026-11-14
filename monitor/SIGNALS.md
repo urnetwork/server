@@ -49083,8 +49083,9 @@ Each minute, for each root:
   signature failing extends the root's run of clean minutes, a signature
   failing at an NS or, after the DS, at a public resolver ends it, and over
   10 minutes with no clean minute (an NS down or behind, a blind check, the
-  monitor stopped) restarts it at the next clean one. The run is kept in the
-  state directory (`dns-canary/clean-days.json`), so a restart keeps it.
+  monitor stopped) restarts it at the next clean one. Each copy keeps its own
+  run in its state directory (`dns-canary/clean-days.json`), so a restart
+  keeps it, and `monitor check-burn`'s one-shot run counts toward neither.
   `urnetwork_dns_canary_clean_days{source,root}` is its whole days and
   `urnetwork_dns_ds_ready{source,root}` turns 1 only at 30: the DS goes to
   the registrar after that, by hand, and then into dns.yml's `ds_published`.
