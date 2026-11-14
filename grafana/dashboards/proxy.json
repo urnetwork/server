@@ -3848,6 +3848,47 @@
           "legendFormat": "v{{ip_version}} {{protocol}}"
         }
       ]
+    },
+    {
+      "id": 83,
+      "type": "timeseries",
+      "title": "device idle closes / min, by whether the device carried traffic",
+      "description": "Hosted devices closed for idleness, per minute. used: the device carried user traffic (a WireGuard packet, a relay byte, or a device-rpc session) and was held 45 minutes past its last activity. unused: it carried none since it opened and was held 10 minutes past its last open (ProxyDeviceUnusedIdleTimeout). A walk of proxies that opens devices and relays nothing shows as unused closes about ten minutes after the walk.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 276
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (use) (rate(urnetwork_proxy_devices_closed_idle_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{use}}"
+        }
+      ]
     }
   ]
 }

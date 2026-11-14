@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/glog"
@@ -510,9 +512,10 @@ func (self *ProxyDeviceManager) openProxyDevice(ctx context.Context, proxyId ser
 			return nil, err
 		}
 
-		// reuse a live device
+		// reuse a live device. The open holds it like traffic but is not
+		// traffic (noteOpen): a device opened and never used closes sooner.
 		if pd := pdState.ProxyDevice; pd != nil {
-			if pd.Active() && pd.UpdateActivity() {
+			if pd.Active() && pd.noteOpen() {
 				pdState.StateLock.Unlock()
 				return pd, nil
 			}
@@ -1135,15 +1138,9 @@ type deviceCreation struct {
 	err  error
 }
 
-// defaultProxyDeviceIdleTimeout is how long a device is held with no user
-// traffic. Activity is user traffic only: packets from a WireGuard peer and
-// back to it, bytes on an HTTP or SOCKS relay connection, an open, or an
-// attached device-rpc session. The device's own upkeep on its tun (DoH
-// keepalive pings, resolver refreshes) does not hold it.
-const defaultProxyDeviceIdleTimeout = 45 * time.Minute
-
 // defaultProxyDeviceIdleRefillHold is how long a device may go without user
-// traffic (the activity above) before its below-target windows stop refilling
+// traffic or an open (its activity, see ProxyDeviceSettings.
+// ProxyDeviceIdleTimeout) before its below-target windows stop refilling
 // (connect IdleRefillHold). A held window keeps its exits, which keep serving,
 // and the device's next user traffic refills it at once; until then it lists,
 // mints and dials nothing. Without it every below-target window of an idle
@@ -1170,7 +1167,8 @@ func DefaultProxyDeviceSettingsWithBufferSize(bufferSize int) *ProxyDeviceSettin
 		ProxyDeviceDescription:       "resident proxy",
 		ProxyDeviceSpec:              "resident proxy",
 		Mtu:                          connect.DefaultMtu,
-		ProxyDeviceIdleTimeout:       defaultProxyDeviceIdleTimeout,
+		ProxyDeviceIdleTimeout:       45 * time.Minute,
+		ProxyDeviceUnusedIdleTimeout: 10 * time.Minute,
 		IdleRefillHold:               defaultProxyDeviceIdleRefillHold,
 		SequenceBufferSize:           bufferSize,
 		MemoryTargetByteCount:        defaultProxyDeviceMemoryTargetByteCount,
@@ -1183,7 +1181,27 @@ type ProxyDeviceSettings struct {
 	ProxyDeviceSpec               string
 	ClientSecurityPolicyGenerator func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 	Mtu                           int
-	ProxyDeviceIdleTimeout        time.Duration
+	// How long a device that has carried user traffic is held past its last
+	// activity. User traffic is a packet from a WireGuard peer or back to it, a
+	// byte either way on an HTTP or SOCKS relay connection, or an attached
+	// device-rpc session (UpdateActivity). Activity is user traffic or an open
+	// of the live device (noteOpen). The device's own upkeep on its tun (DoH
+	// keepalive pings, resolver refreshes) is neither. 45 minutes is the
+	// owner's hold, kept on 2026-11-05 (CPUOPT5).
+	ProxyDeviceIdleTimeout time.Duration
+	// How long a device that has carried no user traffic since it opened is
+	// held past its last activity, when that is shorter than
+	// ProxyDeviceIdleTimeout. An open is activity, so a device opened again and
+	// again keeps its hold while the opens keep coming, and its first user
+	// traffic gives it the full hold at once. Ten minutes: on 2026-11-14 a
+	// script walked about 57k bot-made hosted proxies once an hour, and since
+	// devices open on first use each walk opened 17-20k devices that relayed
+	// nothing yet held their windows' consumer connections for the whole 45
+	// minutes (live devices 17k to 46k, connected clients 156k to 300k). Ten
+	// minutes is the activity window of the idle refill hold, and a client
+	// retrying a dial within it never sees its device closed and made again
+	// between tries. Nonpositive holds an unused device as long as a used one.
+	ProxyDeviceUnusedIdleTimeout time.Duration
 	// How long the device may go without user traffic before its
 	// below-target windows stop refilling until the next user traffic
 	// (connect IdleRefillHold; see defaultProxyDeviceIdleRefillHold).
@@ -1267,6 +1285,9 @@ type ProxyDevice struct {
 	// per-device lock and — crucially — is never serialized under the wg proxy's
 	// single global state lock.
 	lastActivityNanos atomic.Int64
+	// Set by the device's first user traffic and never cleared. Until then the
+	// idle close waits only ProxyDeviceUnusedIdleTimeout.
+	carriedTraffic atomic.Bool
 	// stateLock guards only the receive-attachment fields below (swapped rarely),
 	// not the activity/liveness state above.
 	stateLock      sync.Mutex
@@ -1640,9 +1661,11 @@ func hostedDnsResolverSettings(dnsResolverSettings *connect.DnsResolverSettings)
 }
 
 // PushDeviceRpc serves a device-rpc websocket (relayed from the resident) to
-// this hosted device. An attached rpc session keeps the device alive: activity
-// is bumped for the session's duration so the idle reaper does not reap a
-// device a remote is actively controlling. Blocks until the session ends.
+// this hosted device. An attached rpc session keeps the device alive: it is
+// user traffic (UpdateActivity), so the device gets the full idle hold, and
+// activity is bumped for the session's duration so the idle reaper does not
+// reap a device a remote is actively controlling. Blocks until the session
+// ends.
 func (self *ProxyDevice) PushDeviceRpc(ws sdk.DeviceRpcWs) error {
 	if !self.UpdateActivity() {
 		return fmt.Errorf("proxy device closed")
@@ -2276,15 +2299,33 @@ func (self *ProxyDevice) Active() bool {
 }
 
 // UpdateActivity records user traffic, holding the device against the idle
-// reaper. The first traffic after a gap of proxyDeviceActivityWakeGap also
-// wakes any window that waits for a user (connect NoteUserActivity), so a
-// window whose refill the idle hold kept refills at once. False once the
-// device is done.
+// reaper for ProxyDeviceIdleTimeout from now on. The first traffic after a gap
+// of proxyDeviceActivityWakeGap also wakes any window that waits for a user
+// (connect NoteUserActivity), so a window whose refill the idle hold kept
+// refills at once. False once the device is done.
 func (self *ProxyDevice) UpdateActivity() bool {
+	return self.recordActivity(true)
+}
+
+// Records an open of the live device. It is activity, as user traffic is: it
+// holds the device and wakes its windows for the dial that follows. It is not
+// traffic, so a device opened again and again that carries nothing keeps the
+// shorter ProxyDeviceUnusedIdleTimeout. False once the device is done.
+func (self *ProxyDevice) noteOpen() bool {
+	return self.recordActivity(false)
+}
+
+// Records activity now, and marks the device as having carried user traffic
+// when it is traffic. The mark is read before it is written, so the packet
+// path writes it once per device rather than once per packet.
+func (self *ProxyDevice) recordActivity(userTraffic bool) bool {
 	select {
 	case <-self.ctx.Done():
 		return false
 	default:
+		if userTraffic && !self.carriedTraffic.Load() {
+			self.carriedTraffic.Store(true)
+		}
 		nowNanos := time.Now().UnixNano()
 		previousNanos := self.lastActivityNanos.Swap(nowNanos)
 		if proxyDeviceActivityWakesWindows(previousNanos, nowNanos) && self.deviceLocal != nil {
@@ -2320,6 +2361,30 @@ func (self *ProxyDevice) isDone() bool {
 	}
 }
 
+// Idle closes by whether the device had carried user traffic: "used" after
+// ProxyDeviceIdleTimeout, "unused" after ProxyDeviceUnusedIdleTimeout. Both
+// series exist from the start, so a fleet with no unused close shows a zero.
+var proxyDeviceIdleClosesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "devices_closed_idle_total",
+		Help:      "Proxy devices closed for idleness, by whether they had carried user traffic since they opened (used, held the full idle hold past their last activity) or not (unused, held the shorter unused hold)",
+	},
+	[]string{"use"},
+)
+
+var proxyDeviceIdleClosesUsedCounter = proxyDeviceIdleClosesCounter.WithLabelValues("used")
+var proxyDeviceIdleClosesUnusedCounter = proxyDeviceIdleClosesCounter.WithLabelValues("unused")
+
+func init() {
+	prometheus.MustRegister(proxyDeviceIdleClosesCounter)
+}
+
+// Cancels the device once it has been idle for its hold: ProxyDeviceIdleTimeout
+// past its last activity, or ProxyDeviceUnusedIdleTimeout when that is shorter
+// and the device has carried no user traffic since it opened. True when the
+// device is done, by this call or before it.
 func (self *ProxyDevice) CancelIfIdle() bool {
 	select {
 	case <-self.ctx.Done():
@@ -2327,9 +2392,19 @@ func (self *ProxyDevice) CancelIfIdle() bool {
 	default:
 	}
 
-	idleTimeout := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
-	if self.settings.ProxyDeviceIdleTimeout <= idleTimeout {
+	idle := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
+	carriedTraffic := self.carriedTraffic.Load()
+	idleTimeout := self.settings.ProxyDeviceIdleTimeout
+	if !carriedTraffic && 0 < self.settings.ProxyDeviceUnusedIdleTimeout {
+		idleTimeout = min(idleTimeout, self.settings.ProxyDeviceUnusedIdleTimeout)
+	}
+	if idleTimeout <= idle {
 		self.cancel()
+		if carriedTraffic {
+			proxyDeviceIdleClosesUsedCounter.Inc()
+		} else {
+			proxyDeviceIdleClosesUnusedCounter.Inc()
+		}
 		return true
 	}
 	return false

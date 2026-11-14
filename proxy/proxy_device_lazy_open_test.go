@@ -193,8 +193,8 @@ func (self *lazyOpenTestDevices) build(proxyId server.Id) (*ProxyDevice, error) 
 			return conn, nil
 		},
 	}
-	// as NewProxyDevice records its construction as activity
-	device.UpdateActivity()
+	// as NewProxyDevice records its construction: activity, not traffic
+	device.lastActivityNanos.Store(time.Now().UnixNano())
 
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -230,6 +230,35 @@ func (self *lazyOpenTestDevices) closed() []*ProxyDevice {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return append([]*ProxyDevice{}, self.closedDevices...)
+}
+
+// Carries one byte from the client to the destination over conn, the relay
+// connection of the devices' last dial: user traffic on the device it was
+// dialed through.
+func (self *lazyOpenTestDevices) carry(t *testing.T, conn net.Conn) {
+	t.Helper()
+	dialPipe := func() net.Conn {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if len(self.dialPipes) == 0 {
+			return nil
+		}
+		return self.dialPipes[len(self.dialPipes)-1]
+	}()
+	if dialPipe == nil {
+		t.Fatal("no dial to carry traffic over")
+	}
+	read := make(chan error, 1)
+	go func() {
+		_, err := dialPipe.Read(make([]byte, 1))
+		read <- err
+	}()
+	if _, err := conn.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-read; err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Serves the test's proxy clients as the change log of the watched host: each
@@ -549,8 +578,8 @@ func TestSocksSignInStartsTheDevice(t *testing.T) {
 	})
 }
 
-// A device that its first connection opened keeps the idle close: with no
-// traffic for the idle timeout it is closed and forgotten, and the next
+// A device that its first connection opened and used keeps the idle close:
+// with no traffic for the idle timeout it is closed and forgotten, and the next
 // connection opens a new one.
 func TestProxyDeviceOpenedOnFirstUseClosesWhenIdle(t *testing.T) {
 	configureHttpBudgetTest(t)
@@ -567,6 +596,7 @@ func TestProxyDeviceOpenedOnFirstUseClosesWhenIdle(t *testing.T) {
 		if first.err != nil {
 			t.Fatalf("the first CONNECT failed: %v", first.err)
 		}
+		devices.carry(t, first.conn)
 		_ = first.conn.Close()
 		if devices.starts() != 1 || manager.DeviceCount() != 1 {
 			t.Fatalf("the first CONNECT started %d constructions, want 1", devices.starts())
