@@ -271,7 +271,7 @@ func TestGkmReconcilerStartsOnTheHostsGateCache(t *testing.T) {
 	}
 
 	// evs's shred start and reconciler read the same cache (C-09): a RepoDelete it loaded comes dated by its row
-	// (QD-743), with its signer while the cache's log keeps the entry
+	// (QD-743) and signed by the entry the cache's log keeps here, as by its row once the log no longer does (QD-798)
 	repoId, deletionId := admission.Id("taskworker deleted repo"), admission.Id("taskworker deletion")
 	admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_REPO_CREATE, &protocol.RepoCreate{
 		Header: admission.Header(), RepoId: repoId.Bytes(), Kind: protocol.RepoKind_REPO_KIND_GENERAL,
