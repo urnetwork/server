@@ -121,8 +121,14 @@ func TestProxyCriticalControlUsesLocalAuthorityWithoutHttp(t *testing.T) {
 			}
 		}
 		payout := settledPayoutSum(ctx, h.pdNetworkId)
-		if payout < 16*testMib || pgActiveBalanceSum(ctx, h.pdNetworkId) != opts.pdInitialBalance-payout {
-			t.Fatal("actual transferred usage did not reconcile against the hosted payer")
+		expected := opts.pdInitialBalance - payout
+		var actual model.ByteCount
+		actualRead := payout >= 16*testMib
+		if actualRead {
+			actual = pgActiveBalanceSum(ctx, h.pdNetworkId)
+		}
+		if payout < 16*testMib || actual != expected {
+			t.Fatalf("actual transferred usage did not reconcile against the hosted payer: initial=%d payout=%d actual=%d actual_read=%t expected=%d", opts.pdInitialBalance, payout, actual, actualRead, expected)
 		}
 		if n := requests.Load(); n != 0 {
 			t.Fatalf("hosted critical path made %d HTTP API requests", n)

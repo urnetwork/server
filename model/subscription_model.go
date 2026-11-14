@@ -3096,9 +3096,10 @@ func closeContractReport(
 
 	terminalReplay := false
 	completion := contractCheckpointNoCompletion
+	settlementUnready := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		var reportCompletion contractCheckpointCompletion
-		applied, terminalReplay, addedByteCount, reportCompletion, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil, clientReport)
+		applied, terminalReplay, addedByteCount, reportCompletion, settlementUnready, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil, clientReport)
 		completion = contractCheckpointNoCompletion
 		if returnErr != nil {
 			return
@@ -3130,6 +3131,12 @@ func closeContractReport(
 		return
 	}
 	if returnErr != nil {
+		return
+	}
+	if settlementUnready {
+		// The applied report's locked snapshot proves it cannot settle. The
+		// opposing report will see this commit and own any later settlement.
+		returnErr = ctx.Err()
 		return
 	}
 
@@ -3174,7 +3181,7 @@ func applyContractCloseReportUsageInTx(ctx context.Context, tx server.PgTx,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount,
 	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
 ) (applied, terminalReplay bool, addedByteCount ByteCount, returnErr error) {
-	applied, terminalReplay, addedByteCount, _, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, expiry, false)
+	applied, terminalReplay, addedByteCount, _, _, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, expiry, false)
 	return
 }
 
@@ -3184,9 +3191,9 @@ func applyContractCloseReportOrderInTx(ctx context.Context, tx server.PgTx,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount,
 	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
 	clientReport bool,
-) (applied, terminalReplay bool, addedByteCount ByteCount, completion contractCheckpointCompletion, returnErr error) {
+) (applied, terminalReplay bool, addedByteCount ByteCount, completion contractCheckpointCompletion, settlementUnready bool, returnErr error) {
 	if expiry != nil && (!expiry.usageUnverifiedRetained || expiry.contractId != contractId) {
-		return false, false, 0, contractCheckpointNoCompletion, fmt.Errorf("expiry report continuation lacks retained ownership")
+		return false, false, 0, contractCheckpointNoCompletion, false, fmt.Errorf("expiry report continuation lacks retained ownership")
 	}
 	found := false
 	var sourceId server.Id
@@ -3267,7 +3274,7 @@ func applyContractCloseReportOrderInTx(ctx context.Context, tx server.PgTx,
 		return
 	}
 
-	applied, addedByteCount, completion = applyLockedContractCloseReportInTx(ctx, tx, contractId, sourceId, destinationId, party, usedTransferByteCount, checkpoint, reportId, clientReport)
+	applied, addedByteCount, completion, settlementUnready = applyLockedContractCloseReportInTx(ctx, tx, contractId, sourceId, destinationId, party, usedTransferByteCount, checkpoint, reportId, clientReport)
 	return
 }
 
@@ -3280,7 +3287,7 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 	contractId, sourceId, destinationId server.Id, party ContractParty,
 	usedTransferByteCount ByteCount, checkpoint bool, reportId *server.Id,
 	clientReport bool,
-) (applied bool, addedByteCount ByteCount, completion contractCheckpointCompletion) {
+) (applied bool, addedByteCount ByteCount, completion contractCheckpointCompletion, settlementUnready bool) {
 	// The existing contract row lock serializes the receipt with its party
 	// increment. No shared payer/network row is acquired here.
 	var senderFinal bool
@@ -3370,6 +3377,13 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 		// Only a client-origin final authorizes the zero-ACK settlement policy.
 		completion = contractSenderZeroFinalUnreported
 	}
+	// The statement returned the opposing party's state from under the
+	// contract lock. A newly applied report without two finals or an ordered
+	// completion needs no post-commit reread. Exact retries remain unknown and
+	// keep the existing fresh-read recovery path.
+	hasSenderFinal := senderFinal || party == ContractPartySource && !checkpoint
+	hasReceiverFinal := receiverFinal || party == ContractPartyDestination && !checkpoint
+	settlementUnready = applied && completion == contractCheckpointNoCompletion && (!hasSenderFinal || !hasReceiverFinal)
 	// A receiver that has not reported is asked for its final now that the
 	// sender is done (CLIENTCLOSE.md section 3). One that checkpointed, or a
 	// sender final reporting zero acknowledged bytes, settles with this final. A
