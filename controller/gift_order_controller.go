@@ -48,6 +48,11 @@ type GiftOrderStatusResult struct {
 	// delivery them: the local date the friend emails go out (YYYY-MM-DD);
 	// absent for right after payment
 	SendOn string `json:"send_on,omitempty"`
+	// when the friend emails go out (or went out), RFC 3339: the buyer's date
+	// at 09:00 their time, else right after payment, and for an order paid by
+	// card never before two hours after it (GiftFriendsSendAt); null when no
+	// friend is emailed: delivery me, not paid yet, or refunded
+	FriendsSendAt *time.Time `json:"friends_send_at"`
 	// the buyer's address with the local part hidden: b•••@example.com
 	EmailMasked string `json:"email_masked"`
 	// the cards are rendered: POST /pay/gift/cards.pdf answers them
@@ -91,11 +96,12 @@ func GiftOrderStatus(
 		return nil, errGiftOrderNotFound
 	}
 	result := &GiftOrderStatusResult{
-		Status:      order.Status,
-		Quantity:    order.Quantity,
-		Delivery:    order.Delivery,
-		EmailMasked: giftMaskEmail(order.BuyerEmail),
-		PdfReady:    order.PdfReady,
+		Status:        order.Status,
+		Quantity:      order.Quantity,
+		Delivery:      order.Delivery,
+		EmailMasked:   giftMaskEmail(order.BuyerEmail),
+		PdfReady:      order.PdfReady,
+		FriendsSendAt: GiftFriendsSendAt(order),
 	}
 	if order.SendOn != nil {
 		result.SendOn = order.SendOn.UTC().Format(time.DateOnly)

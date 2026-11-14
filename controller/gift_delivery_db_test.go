@@ -890,3 +890,148 @@ func TestGiftUnlinkedCryptoOrderForgetsItsBuyerAfterTheFriends(t *testing.T) {
 		}
 	})
 }
+
+// Owes the order's friends' emails right after payment: no send-on date.
+func giftDeliveryTestRightAfterPayment(t testing.TB, ctx context.Context, giftOrderId server.Id) {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE gift_order SET send_on = NULL WHERE gift_order_id = $1`,
+			giftOrderId,
+		))
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("no gift order %s", giftOrderId)
+		}
+	})
+}
+
+// The card hold (GIFTOFPRIVACY.md §9.2): a card-paid order's friend emails
+// are owed two hours after the payment and go out then, and a refund or a
+// dispute in those two hours withdraws them; a coin-paid order's go out at
+// once. The buyer's email goes at once either way, and POST /pay/gift/order
+// answers the same time (friends_send_at), null once refunded.
+func TestGiftCardHoldWithholdsFriendEmails(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer model.Testing_SetGiftConfig(model.Testing_GiftConfig())()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+
+		type paidOrder struct {
+			order *model.GiftOrder
+			token string
+		}
+		pay := func(rail string) *paidOrder {
+			t.Helper()
+			order, base, token := giftDeliveryTestPendingOrderOn(t, ctx, 2, model.GiftDeliveryThem, rail, giftDeliveryTestDate(40))
+			giftDeliveryTestRightAfterPayment(t, ctx, order.GiftOrderId)
+			giftDeliveryTestFulfil(t, ctx, order.GiftOrderId, base, server.NowUtc())
+			giftDeliveryTestPost(t, ctx, order.GiftOrderId)
+			return &paidOrder{order: model.GetGiftOrder(ctx, order.GiftOrderId), token: token}
+		}
+		status := func(paid *paidOrder) *GiftOrderStatusResult {
+			t.Helper()
+			result, err := GiftOrderStatus(&GiftOrderStatusArgs{OrderId: paid.order.GiftOrderId.String(), Token: paid.token}, clientSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+		friendEmails := func(paid *paidOrder) []*model.AccountMessage {
+			t.Helper()
+			messages := []*model.AccountMessage{}
+			for i := range paid.order.Quantity {
+				message := model.GetAccountMessageByKey(ctx, giftCardFriendTemplateName, giftFriendEmailKey(paid.order.GiftOrderId, i))
+				if message == nil {
+					t.Fatalf("order %s owes friend %d no email", paid.order.GiftOrderId, i)
+				}
+				messages = append(messages, message)
+			}
+			return messages
+		}
+
+		kept := pay(model.GiftRailStripe)
+		refunded := pay(model.GiftRailStripe)
+		disputed := pay(model.GiftRailStripe)
+		coin := pay(model.GiftRailCrypto)
+
+		// owed at the payment plus the hold; the coin's at once
+		for _, card := range []*paidOrder{kept, refunded, disputed} {
+			hold := card.order.PaidTime.Add(GiftFriendsCardHold)
+			for i, friend := range friendEmails(card) {
+				if !friend.DeliverTime.Equal(hold) {
+					t.Fatalf("card order friend %d due %s, want %s", i, friend.DeliverTime, hold)
+				}
+			}
+			if at := status(card).FriendsSendAt; at == nil || !at.Equal(hold) {
+				t.Fatalf("card order friends_send_at %v, want %s", at, hold)
+			}
+		}
+		for i, friend := range friendEmails(coin) {
+			if friend.DeliverTime.Before(*coin.order.PaidTime) || server.NowUtc().Before(*friend.DeliverTime) {
+				t.Fatalf("coin order friend %d due %s, want at once", i, friend.DeliverTime)
+			}
+		}
+		if at := status(coin).FriendsSendAt; at == nil || !at.Equal(*coin.order.PaidTime) {
+			t.Fatalf("coin order friends_send_at %v, want its payment %s", at, coin.order.PaidTime)
+		}
+
+		// within the hold: every buyer's email and the coin's friends' only
+		hold := kept.order.PaidTime.Add(GiftFriendsCardHold)
+		sender := newOutboxTestSender()
+		deliverAccountMessagesAt(ctx, sender, hold.Add(-time.Minute))
+		buyerCount := 0
+		coinFriendCount := 0
+		for _, send := range sender.sent() {
+			switch template := send.template.(type) {
+			case *GiftCardsBuyerTemplate:
+				buyerCount += 1
+			case *GiftCardFriendTemplate:
+				if template.GiftOrderId != coin.order.GiftOrderId {
+					t.Fatalf("a card order's friend %d was emailed inside the hold", template.RecipientIndex)
+				}
+				coinFriendCount += 1
+			}
+		}
+		if buyerCount != 4 || coinFriendCount != 2 {
+			t.Fatalf("inside the hold %d buyers' and %d coin friends' emails went, want 4 and 2", buyerCount, coinFriendCount)
+		}
+
+		// a refund and a dispute inside the hold
+		giftDeliveryTestRefund(t, ctx, refunded.order.GiftOrderId, refunded.order.PaidTime.Add(time.Hour))
+		server.Tx(ctx, func(tx server.PgTx) {
+			if voided := model.DisputeGiftOrderCodesInTx(tx, ctx, disputed.order.GiftOrderId, "dp_gift_hold_"+server.NewId().String(), server.NowUtc()); len(voided) != 2 {
+				t.Fatalf("the dispute voided %d codes, want 2", len(voided))
+			}
+		}, server.TxReadCommitted)
+		if at := status(refunded).FriendsSendAt; at != nil {
+			t.Fatalf("a refunded order's friends_send_at is %s", at)
+		}
+
+		// after the hold: the kept order's friends, and nothing for the others
+		deliverAccountMessagesAt(ctx, sender, hold.Add(time.Minute))
+		keptFriendCount := 0
+		for _, send := range sender.sent() {
+			if template, ok := send.template.(*GiftCardFriendTemplate); ok && template.GiftOrderId != coin.order.GiftOrderId {
+				if template.GiftOrderId != kept.order.GiftOrderId {
+					t.Fatalf("order %s friend %d was emailed after its refund or dispute", template.GiftOrderId, template.RecipientIndex)
+				}
+				keptFriendCount += 1
+			}
+		}
+		if keptFriendCount != 2 {
+			t.Fatalf("%d of the kept order's friends were emailed after the hold, want 2", keptFriendCount)
+		}
+		for _, c := range []struct {
+			paid   *paidOrder
+			reason string
+		}{{refunded, "refunded"}, {disputed, "voided"}} {
+			for i, friend := range friendEmails(c.paid) {
+				if friend.SentTime != nil || friend.AbandonTime == nil || friend.AttemptCount != 1 || !strings.Contains(friend.LastError, c.reason) {
+					t.Fatalf("%s order friend %d email %+v, want it withdrawn on its first attempt", c.reason, i, friend)
+				}
+			}
+		}
+	})
+}

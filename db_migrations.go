@@ -11565,11 +11565,21 @@ var migrations = []any{
 	// preserving the original paid admission, source, terminal and full audit.
 	newSqlMigration(CompetitionOperatorRequestedPatchRetryMigrationSql()),
 
+	// The bytes served per operator block of GET /account/epochs
+	// (operator_block_traffic_schema.go, model/operator_block_traffic.go): the
+	// operator_block_traffic and operator_block_network_traffic tables, new
+	// and empty, each created only when absent, under a five-second lock
+	// bound. Nothing existing is locked, scanned or rewritten. Apply before
+	// deploying the taskworker that advances the rollup and the api and alt
+	// that read it.
+	operatorBlockTrafficMigration,
+
 	// The operator blocks the daily points award recorded expired
 	// (operator_block_points_expired_schema.go,
 	// model/operator_block_points.go): one new empty table, created only when
 	// absent, under a five-second lock bound. Nothing existing is locked or
 	// rewritten. Apply before deploying the taskworker and bringyourctl that
-	// use it.
+	// write and read it, and the api and alt whose GET /account/epochs reads
+	// it.
 	operatorBlockPointsExpiredMigration,
 }
