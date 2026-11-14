@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/server/model"
 )
 
@@ -63,13 +65,16 @@ func TestProxyDeviceTunUpkeepDoesNotHoldAnIdleDevice(t *testing.T) {
 	if !time.Unix(0, device.lastActivityNanos.Load()).Equal(time.Unix(0, idleSince.UnixNano())) {
 		t.Fatalf("tun upkeep refreshed the device's activity: idle for %s", proxyDeviceIdleFor(device))
 	}
+	if device.carriedTraffic.Load() {
+		t.Fatal("tun upkeep marked the device as having carried user traffic")
+	}
 	if !device.CancelIfIdle() {
 		t.Fatal("an hour without user traffic did not reap the device")
 	}
 }
 
 // Bytes either way on an HTTP or SOCKS relay connection are user traffic:
-// they hold the device they were dialed through.
+// they hold the device they were dialed through, and mark it used.
 func TestProxyRelayConnectionTrafficHoldsTheDevice(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -79,6 +84,9 @@ func TestProxyRelayConnectionTrafficHoldsTheDevice(t *testing.T) {
 	defer destinationConn.Close()
 	relay := instrumentProxyConnection("http", relayConn, device.UpdateActivity)
 	defer relay.Close()
+	if device.carriedTraffic.Load() {
+		t.Fatal("a relay connection that moved nothing marked its device used")
+	}
 
 	// client to destination
 	device.lastActivityNanos.Store(time.Now().Add(-time.Hour).UnixNano())
@@ -88,6 +96,9 @@ func TestProxyRelayConnectionTrafficHoldsTheDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForProxyDeviceActivity(t, device, "a relay write did not refresh the device's activity")
+	if !device.carriedTraffic.Load() {
+		t.Fatal("a relay write did not mark the device as having carried traffic")
+	}
 
 	// destination to client
 	device.lastActivityNanos.Store(time.Now().Add(-time.Hour).UnixNano())
@@ -99,6 +110,119 @@ func TestProxyRelayConnectionTrafficHoldsTheDevice(t *testing.T) {
 	waitForProxyDeviceActivity(t, device, "a relay read did not refresh the device's activity")
 	if device.CancelIfIdle() {
 		t.Fatal("a device moving relay bytes was reaped")
+	}
+}
+
+// A device that has carried no user traffic since it opened is held ten
+// minutes past its last activity, and one that has carried traffic the full
+// 45. The manager's idle check runs often enough to close either on time.
+func TestProxyDeviceUnusedIdleHoldIs10Minutes(t *testing.T) {
+	for _, settings := range []*ProxyDeviceSettings{DefaultProxyDeviceSettings(), DefaultProxyDeviceSettingsWithBufferSize(64)} {
+		if settings.ProxyDeviceUnusedIdleTimeout != 10*time.Minute {
+			t.Fatalf("unused idle hold = %s, want 10m", settings.ProxyDeviceUnusedIdleTimeout)
+		}
+		if settings.ProxyDeviceIdleTimeout <= settings.ProxyDeviceUnusedIdleTimeout {
+			t.Fatalf("the unused hold %s is not shorter than the hold %s", settings.ProxyDeviceUnusedIdleTimeout, settings.ProxyDeviceIdleTimeout)
+		}
+	}
+	if checkTimeout := DefaultProxyDeviceManagerSettings().CheckProxyDeviceIdleTimeout; DefaultProxyDeviceSettings().ProxyDeviceUnusedIdleTimeout < 5*checkTimeout {
+		t.Fatalf("the idle check every %s is coarse against the unused hold", checkTimeout)
+	}
+}
+
+// An open of a live device is activity, not traffic: it refreshes the idle
+// clock and leaves the device unused. User traffic marks it used, and nothing
+// clears the mark.
+func TestProxyDeviceOpenIsActivityNotTraffic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	device := budgetTestProxyDevice(t, ctx)
+	if device.carriedTraffic.Load() {
+		t.Fatal("a new device reads as having carried user traffic")
+	}
+
+	device.lastActivityNanos.Store(time.Now().Add(-time.Hour).UnixNano())
+	if !device.noteOpen() {
+		t.Fatal("a live device refused an open")
+	}
+	if time.Minute < proxyDeviceIdleFor(device) {
+		t.Fatal("an open did not refresh the device's activity")
+	}
+	if device.carriedTraffic.Load() {
+		t.Fatal("an open marked the device as having carried user traffic")
+	}
+
+	if !device.UpdateActivity() {
+		t.Fatal("a live device refused user traffic")
+	}
+	device.noteOpen()
+	if !device.carriedTraffic.Load() {
+		t.Fatal("user traffic did not mark the device, or a later open cleared the mark")
+	}
+
+	device.Cancel()
+	if device.noteOpen() || device.UpdateActivity() {
+		t.Fatal("a done device recorded activity")
+	}
+}
+
+// The idle close waits ProxyDeviceUnusedIdleTimeout for a device that carried
+// nothing and ProxyDeviceIdleTimeout for one that carried traffic, and counts
+// each close by which it was. A nonpositive unused hold gives an unused device
+// the full hold.
+func TestProxyDeviceIdleCloseHoldsByUse(t *testing.T) {
+	newDevice := func(settings *ProxyDeviceSettings, carriedTraffic bool, idle time.Duration) *ProxyDevice {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		device := &ProxyDevice{ctx: ctx, cancel: cancel, settings: settings}
+		device.carriedTraffic.Store(carriedTraffic)
+		device.lastActivityNanos.Store(time.Now().Add(-idle).UnixNano())
+		return device
+	}
+	unusedCloses := func() float64 {
+		return testutil.ToFloat64(proxyDeviceIdleClosesUnusedCounter)
+	}
+	usedCloses := func() float64 {
+		return testutil.ToFloat64(proxyDeviceIdleClosesUsedCounter)
+	}
+
+	settings := DefaultProxyDeviceSettings()
+	if newDevice(settings, false, 9*time.Minute).CancelIfIdle() {
+		t.Fatal("an unused device closed before its hold")
+	}
+	unusedBefore, usedBefore := unusedCloses(), usedCloses()
+	if !newDevice(settings, false, 10*time.Minute+time.Second).CancelIfIdle() {
+		t.Fatal("an unused device was held past ten minutes without activity")
+	}
+	if unusedCloses() != unusedBefore+1 || usedCloses() != usedBefore {
+		t.Fatal("the unused close was not counted as unused")
+	}
+
+	if newDevice(settings, true, 44*time.Minute).CancelIfIdle() {
+		t.Fatal("a used device closed before 45 minutes without activity")
+	}
+	unusedBefore, usedBefore = unusedCloses(), usedCloses()
+	if !newDevice(settings, true, 45*time.Minute+time.Second).CancelIfIdle() {
+		t.Fatal("a used device was held past 45 minutes without activity")
+	}
+	if usedCloses() != usedBefore+1 || unusedCloses() != unusedBefore {
+		t.Fatal("the used close was not counted as used")
+	}
+
+	disabled := DefaultProxyDeviceSettings()
+	disabled.ProxyDeviceUnusedIdleTimeout = 0
+	if newDevice(disabled, false, 44*time.Minute).CancelIfIdle() {
+		t.Fatal("with no unused hold, an unused device closed before the full hold")
+	}
+	if !newDevice(disabled, false, 45*time.Minute+time.Second).CancelIfIdle() {
+		t.Fatal("with no unused hold, an unused device was held past the full hold")
+	}
+
+	// a hold set shorter than the unused one is the hold for both
+	short := DefaultProxyDeviceSettings()
+	short.ProxyDeviceIdleTimeout = 3 * time.Second
+	if !newDevice(short, false, 4*time.Second).CancelIfIdle() || !newDevice(short, true, 4*time.Second).CancelIfIdle() {
+		t.Fatal("a hold shorter than the unused hold did not close both devices")
 	}
 }
 
