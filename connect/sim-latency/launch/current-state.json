@@ -79,6 +79,16 @@
       "deployed": false,
       "rollout_constraint": "Both supervisor decoder consumers must use the updated closed schema before a worker can emit the additive owner diagnostics. Preserve current authority, retry predicates, budgets and original attempt deadlines."
     },
+    "operator_requested_patch_retry_preparation": {
+      "requested": true,
+      "authorized_in_production": false,
+      "source_manifest_sha256": "3d67ac41d03bec57fefc10c0c2a50aed1010d048054377ae06b3c1d63e7a11c1",
+      "private_source_checkpoint": "/var/lib/urnetwork/competition-patch-retry-preparation-20261114.JlDEs2zN",
+      "static_review": "Independent control-code review found no confirmed issues in the pinned implementation. This is not a candidate honesty review or runtime approval.",
+      "validation": "The original primary selection passed 15 of 18 cases; three stopped before authorization on incomplete synthetic fixtures. A test-only retained-workload correction is compiling independently. Existing controller regressions passed 116 of 116; the separate broader monitor regression selection is still running. No complete corrected primary pass is claimed.",
+      "authority_scope": "Separate explicit single-use operator authority, not an infrastructure-defect diagnosis. Preserve exact patch/source, stored failure, original submission order and history, and the existing three-hour execution policy.",
+      "next_action": "Finish corrected PostgreSQL lifecycle validation, checkpoint the matching server/SN changes, apply the additive migration through the normal main pipeline, deploy API/monitor, then qualify and activate one combined manager/worker/CLI release at an owned idle hold. A new exact runtime qualification and fresh signed closure observations are required before any retry grant. No config or vault schema change is required."
+    },
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
     "fresh_native_observation_passed": true,
