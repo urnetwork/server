@@ -185,6 +185,8 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveOldNetworkAdminEvents(clientSession, tx)
 		// §8.9's acks past their 7 days; a no-op without MG2
 		work.ScheduleRemoveOldNetworkAclAcks(clientSession, tx)
+		// §8.11's invites past their window; a no-op without MG6
+		work.ScheduleRemoveExpiredNetworkAclInvites(clientSession, tx)
 		// §7.8's rev/ objects 20 minutes after their last write; deletes
 		// nothing in a process with no first metadata cluster
 		work.ScheduleSweepSidecarRev(clientSession, tx)
@@ -661,6 +663,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveOldNetworkAclAcks,
 			work.RemoveOldNetworkAclAcksPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredNetworkAclInvites,
+			work.RemoveExpiredNetworkAclInvitesPost,
 		),
 		// §7.8's rev/ writes a removal owes, retried until each lands, and
 		// their deletion 20 minutes after the last write

@@ -519,6 +519,15 @@ tables:
       network_id: api-8
       url: api-8
       webhook_id: api-8
+  network_acl_share:
+    group: MG6
+    columns:
+      code_hash: api-9
+      create_time: api-9
+      expire_time: api-9
+      network_id: api-9
+      share_id: api-9
+      use_count: api-9
   network_bridge_share:
     group: MG6
     columns:

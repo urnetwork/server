@@ -399,6 +399,9 @@ func RemoveNetworkWithStoreSnapshot(
 		// §17.16's shares go with either of their networks
 		if server.SidecarMg6Linked() {
 			removeNetworkBridgeSharesInTx(ctx, tx, networkId)
+			// §8.11's invites the network filed go with it; one it was
+			// invited by holds no id of it until a claim binds a share
+			removeNetworkAclSharesInTx(ctx, tx, networkId)
 			// §7.5's Team rows go with a team network, and the removed users'
 			// memberships in other teams and IdP identities with them (§2.8
 			// api-1, api-3)
