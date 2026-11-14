@@ -39,6 +39,10 @@ const (
 	PurposeOnboarding   = "onboarding"
 	PurposeReengagement = "reengagement"
 	PurposeWinback      = "winback"
+	// the offer to keep Pro when a gift year ends
+	// (controller/service_reminders_controller.go): past the sign-up, as a
+	// win-back is, so Canada needs an opt-in or a purchase of the network's own
+	PurposeGiftEnding = "gift_ending"
 )
 
 // Policy exit reasons (recorded as campaign exits).

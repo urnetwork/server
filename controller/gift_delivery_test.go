@@ -581,3 +581,150 @@ func TestAWSMessageSenderSendsAttachmentsRaw(t *testing.T) {
 		t.Fatalf("SES call = %v, want SendEmail replying to the buyer", url.Values(request.PostForm))
 	}
 }
+
+// The friends' emails go out at the order's time and never before its
+// payment: a card payment holds them two hours, a coin payment not at all, a
+// date at 9:00 in the buyer's zone wins when it is later, and an order that
+// emails no friend has no time.
+func TestGiftFriendsSendAt(t *testing.T) {
+	chicago, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 08:30 in Chicago
+	paidTime := time.Date(2026, 11, 20, 14, 30, 0, 0, time.UTC)
+	order := func(rail string, sendOn *time.Time, mutate func(order *model.GiftOrder)) *model.GiftOrder {
+		order, _ := giftEmailTestOrder("en", model.GiftDeliveryThem, 2, "Sam", false)
+		order.Rail = rail
+		order.PaidTime = &paidTime
+		order.SendOn = sendOn
+		if mutate != nil {
+			mutate(order)
+		}
+		return order
+	}
+	date := func(year int, month time.Month, day int) *time.Time {
+		date := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+		return &date
+	}
+	for _, c := range []struct {
+		name  string
+		order *model.GiftOrder
+		want  *time.Time
+	}{
+		{"card, right after payment", order(model.GiftRailStripe, nil, nil), func() *time.Time {
+			at := paidTime.Add(GiftFriendsCardHold)
+			return &at
+		}()},
+		{"coin, right after payment", order(model.GiftRailCrypto, nil, nil), &paidTime},
+		{"card, a later date", order(model.GiftRailStripe, date(2026, 12, 24), nil), func() *time.Time {
+			at := time.Date(2026, 12, 24, 9, 0, 0, 0, chicago).UTC()
+			return &at
+		}()},
+		// 9:00 that day is within the hold: the hold wins
+		{"card, a date inside the hold", order(model.GiftRailStripe, date(2026, 11, 20), nil), func() *time.Time {
+			at := paidTime.Add(GiftFriendsCardHold)
+			return &at
+		}()},
+		// paid after its date's 9:00: right after payment
+		{"coin, a date already passed", order(model.GiftRailCrypto, date(2026, 11, 19), nil), &paidTime},
+		{"coin, a date inside what would be a hold", order(model.GiftRailCrypto, date(2026, 11, 20), nil), func() *time.Time {
+			at := time.Date(2026, 11, 20, 9, 0, 0, 0, chicago).UTC()
+			return &at
+		}()},
+		// a rail it does not know holds, as a card does
+		{"no rail", order("", nil, nil), func() *time.Time {
+			at := paidTime.Add(GiftFriendsCardHold)
+			return &at
+		}()},
+		{"delivery me", order(model.GiftRailStripe, nil, func(order *model.GiftOrder) { order.Delivery = model.GiftDeliveryMe }), nil},
+		{"pending", order(model.GiftRailStripe, nil, func(order *model.GiftOrder) {
+			order.Status = model.GiftOrderStatusPending
+			order.PaidTime = nil
+		}), nil},
+		{"refunded", order(model.GiftRailStripe, nil, func(order *model.GiftOrder) { order.Status = model.GiftOrderStatusRefunded }), nil},
+		{"no friend's address left", order(model.GiftRailCrypto, nil, func(order *model.GiftOrder) { order.Recipients = []string{"", " "} }), nil},
+	} {
+		got := GiftFriendsSendAt(c.order)
+		if (got == nil) != (c.want == nil) || (got != nil && !got.Equal(*c.want)) {
+			t.Errorf("%s: friends send at %v, want %v", c.name, got, c.want)
+		}
+	}
+	if GiftFriendsCardHold != 2*time.Hour {
+		t.Fatalf("the card hold is %s", GiftFriendsCardHold)
+	}
+}
+
+// The buyer's email says when the friends get theirs, from the same time:
+// now for a coin payment, the date for a date, and the time, in the buyer's
+// zone, for a card payment's hold; now once the time has come when it goes.
+func TestGiftBuyerLeadSaysWhenFriendsGetTheirs(t *testing.T) {
+	paidTime := time.Date(2026, 11, 20, 14, 30, 0, 0, time.UTC)
+	lead := func(language string, rail string, timezone string, sendOn *time.Time, loadTime time.Time) string {
+		order, codes := giftEmailTestOrder(language, model.GiftDeliveryThem, 2, "Sam", false)
+		order.Rail = rail
+		order.PaidTime = &paidTime
+		order.SendOn = sendOn
+		order.SendTimezone = timezone
+		template := giftBuyerTestTemplate(order, codes)
+		template.loadTime = loadTime
+		return template.Lead()
+	}
+	for _, language := range giftCardLanguages {
+		if got, want := lead(language, model.GiftRailCrypto, "America/Chicago", nil, time.Time{}), giftCardText(language, "buyer.them_now.other"); got != want {
+			t.Errorf("%s coin: %q, want %q", language, got, want)
+		}
+		holdTime := giftCardTime(language, paidTime.Add(GiftFriendsCardHold).In(model.GiftOrderLocation("America/Chicago")))
+		if got, want := lead(language, model.GiftRailStripe, "America/Chicago", nil, time.Time{}), giftCardText(language, "buyer.them_hold.other", "time", holdTime); got != want {
+			t.Errorf("%s card: %q, want %q", language, got, want)
+		}
+		sendOn := time.Date(2026, 12, 24, 0, 0, 0, 0, time.UTC)
+		date := giftCardDate(language, sendOn)
+		if got, want := lead(language, model.GiftRailStripe, "America/Chicago", &sendOn, paidTime.Add(time.Minute)), giftCardText(language, "buyer.them_on.other", "date", date); got != want {
+			t.Errorf("%s dated: %q, want %q", language, got, want)
+		}
+		// an email that goes out after the hold has passed
+		if got, want := lead(language, model.GiftRailStripe, "America/Chicago", nil, paidTime.Add(3*time.Hour)), giftCardText(language, "buyer.them_now.other"); got != want {
+			t.Errorf("%s late: %q, want %q", language, got, want)
+		}
+	}
+	// a buyer whose zone is unknown reads the time in UTC
+	if got, want := lead("en", model.GiftRailStripe, "", nil, time.Time{}), "We'll email each friend their own gift card and your note at 4:30 PM UTC, about two hours after your payment."; got != want {
+		t.Errorf("unknown zone: %q, want %q", got, want)
+	}
+	if got, want := lead("en", model.GiftRailStripe, "America/Chicago", nil, time.Time{}), "We'll email each friend their own gift card and your note at 10:30 AM, about two hours after your payment."; got != want {
+		t.Errorf("chicago: %q, want %q", got, want)
+	}
+}
+
+// Each language writes the time of day its way; UTC says so.
+func TestGiftCardTime(t *testing.T) {
+	chicago, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afternoon := time.Date(2026, 11, 20, 15, 4, 0, 0, chicago)
+	night := time.Date(2026, 11, 20, 1, 5, 0, 0, chicago)
+	midnight := time.Date(2026, 11, 20, 0, 30, 0, 0, time.UTC)
+	for _, c := range []struct {
+		language string
+		at       time.Time
+		want     string
+	}{
+		{"en", afternoon, "3:04 PM"},
+		{"en", night, "1:05 AM"},
+		{"en", midnight, "12:30 AM UTC"},
+		{"es", afternoon, "las 15:04"},
+		{"es", night, "la 1:05"},
+		{"es", midnight, "las 0:30 UTC"},
+		{"de", afternoon, "15:04 Uhr"},
+		{"de", midnight, "0:30 UTC"},
+		{"zh", afternoon, "15:04"},
+		{"ru", night, "1:05"},
+		{"ar", midnight, "0:30 UTC"},
+	} {
+		if got := giftCardTime(c.language, c.at); got != c.want {
+			t.Errorf("%s %s: %q, want %q", c.language, c.at, got, c.want)
+		}
+	}
+}
