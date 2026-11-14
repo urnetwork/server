@@ -2,6 +2,11 @@ package model
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -70,6 +75,7 @@ func TestComputePointsLeaderboardStreaks(t *testing.T) {
 			}},
 			windows,
 			nil,
+			nil,
 		)
 		connect.AssertEqual(t, latestEpoch, uint64(6))
 		entry := pointsTestEntry(entries, networkId)
@@ -97,6 +103,18 @@ func pointsTestEpochSet(epochs ...uint64) map[uint64]bool {
 // The one network's entry of a ranking of it alone over windows 1..count.
 func pointsTestStreakEntry(t *testing.T, count int, epochsWithPoints map[uint64]bool, excusedEpochs map[uint64]bool) *PointsLeaderboardEntry {
 	t.Helper()
+	return pointsTestPendingStreakEntry(t, count, epochsWithPoints, excusedEpochs, nil)
+}
+
+// pointsTestStreakEntry with pending epochs.
+func pointsTestPendingStreakEntry(
+	t *testing.T,
+	count int,
+	epochsWithPoints map[uint64]bool,
+	excusedEpochs map[uint64]bool,
+	pendingEpochs map[uint64]bool,
+) *PointsLeaderboardEntry {
+	t.Helper()
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	networkId := server.NewId()
 	entries, latestEpoch := ComputePointsLeaderboard(
@@ -108,6 +126,7 @@ func pointsTestStreakEntry(t *testing.T, count int, epochsWithPoints map[uint64]
 		}},
 		pointsTestWindows(now, count),
 		excusedEpochs,
+		pendingEpochs,
 	)
 	connect.AssertEqual(t, latestEpoch, uint64(count))
 	entry := pointsTestEntry(entries, networkId)
@@ -239,7 +258,7 @@ func TestComputePointsLeaderboardWithoutExcusedEpochsIsUnchanged(t *testing.T) {
 		})
 	}
 
-	entries, _ := ComputePointsLeaderboard(inputs, windows, nil)
+	entries, _ := ComputePointsLeaderboard(inputs, windows, nil, nil)
 	connect.AssertEqual(t, len(entries), len(inputs))
 	for i, input := range inputs {
 		blocks, streak, longest := streaksBefore(input.EpochsWithPoints, epochsAsc)
@@ -249,9 +268,132 @@ func TestComputePointsLeaderboardWithoutExcusedEpochsIsUnchanged(t *testing.T) {
 		}
 	}
 	for _, excusedEpochs := range []map[uint64]bool{{}, pointsTestEpochSet(0, epochCount+1, 99)} {
-		other, _ := ComputePointsLeaderboard(inputs, windows, excusedEpochs)
+		other, _ := ComputePointsLeaderboard(inputs, windows, excusedEpochs, nil)
 		if !slices.Equal(other, entries) {
 			t.Fatalf("excused epochs %v changed the ranking", excusedEpochs)
+		}
+	}
+}
+
+// The root cause (owner decision 2026-11-14): an operator block completes at
+// its Sunday 00:00 UTC close, but its award commits about 12:00 UTC that day,
+// or up to three days later while it keeps failing. Until then a network
+// whose points in the latest epoch would come only from that award had none
+// there, and the walk ended its run: a current streak of 0 after every close,
+// until the award. The latest epoch is pending until the award commits. Points
+// in epochs 1 to 3 with epoch 4 pending are a streak of 3, where the rule
+// before gave 0, with a longest of 3; once the award commits its points in
+// epoch 4 make the streak 4.
+func TestComputePointsLeaderboardPendingLatestEpochKeepsTheStreak(t *testing.T) {
+	entry := pointsTestPendingStreakEntry(t, 4, pointsTestEpochSet(1, 2, 3), nil, pointsTestEpochSet(4))
+	if entry.BlocksWithPoints != 3 || entry.Streak != 3 || entry.LongestStreak != 3 {
+		t.Fatalf("epoch 4 pending: blocks=%d streak=%d longest=%d, want 3/3/3", entry.BlocksWithPoints, entry.Streak, entry.LongestStreak)
+	}
+	entry = pointsTestPendingStreakEntry(t, 4, pointsTestEpochSet(1, 2, 3, 4), nil, nil)
+	if entry.BlocksWithPoints != 4 || entry.Streak != 4 || entry.LongestStreak != 4 {
+		t.Fatalf("epoch 4 awarded: blocks=%d streak=%d longest=%d, want 4/4/4", entry.BlocksWithPoints, entry.Streak, entry.LongestStreak)
+	}
+}
+
+// Where a pending epoch falls and what it meets. Only the latest epoch can be
+// pending: a missing epoch before it still ends a run, and a pending epoch
+// that is not the latest counts as any epoch. The longest streak is
+// unaffected, an excused epoch stays excused beside a pending one, and points
+// in the pending epoch count.
+func TestComputePointsLeaderboardPendingEpochStreaks(t *testing.T) {
+	cases := []struct {
+		name    string
+		count   int
+		epochs  []uint64
+		excused []uint64
+		pending []uint64
+		blocks  int
+		streak  int
+		longest int
+	}{
+		{"a missing older epoch still ends the run", 4, []uint64{1, 2}, nil, []uint64{4}, 2, 0, 2},
+		{"the run after a missing older epoch waits", 4, []uint64{1, 3}, nil, []uint64{4}, 2, 1, 1},
+		{"one missing older epoch among points", 6, []uint64{1, 2, 4, 5}, nil, []uint64{6}, 4, 2, 2},
+		{"the longest run is the earlier one", 6, []uint64{1, 2, 3, 5}, nil, []uint64{6}, 4, 1, 3},
+		{"a pending epoch before the latest is any epoch", 4, []uint64{1, 2, 4}, nil, []uint64{3}, 3, 1, 2},
+		{"pending epochs before the latest end runs", 4, []uint64{1, 3}, nil, []uint64{2, 4}, 2, 1, 1},
+		{"a pending epoch outside the windows is ignored", 4, []uint64{1, 2, 3}, nil, []uint64{0, 5, 99}, 3, 0, 3},
+		{"an excused epoch before the pending latest", 4, []uint64{1, 2}, []uint64{3}, []uint64{4}, 2, 2, 2},
+		{"an excused older epoch and the pending latest", 4, []uint64{1, 3}, []uint64{2}, []uint64{4}, 2, 2, 2},
+		{"an excused latest epoch stays excused", 4, []uint64{1, 2, 3}, []uint64{4}, []uint64{4}, 3, 3, 3},
+		{"points in the pending epoch count", 4, []uint64{1, 2, 3, 4}, nil, []uint64{4}, 4, 4, 4},
+		{"points only in the pending epoch count", 4, []uint64{4}, nil, []uint64{4}, 1, 1, 1},
+		{"a pending epoch starts no run", 4, nil, nil, []uint64{4}, 0, 0, 0},
+	}
+	for _, c := range cases {
+		entry := pointsTestPendingStreakEntry(t, c.count, pointsTestEpochSet(c.epochs...), pointsTestEpochSet(c.excused...), pointsTestEpochSet(c.pending...))
+		if entry.BlocksWithPoints != c.blocks || entry.Streak != c.streak || entry.LongestStreak != c.longest {
+			t.Errorf(
+				"%s: blocks=%d streak=%d longest=%d, want %d/%d/%d",
+				c.name, entry.BlocksWithPoints, entry.Streak, entry.LongestStreak, c.blocks, c.streak, c.longest,
+			)
+		}
+	}
+}
+
+// Without a pending latest epoch the ranking is byte-identical to the one
+// before the pending rule: over every set of epochs with points across six
+// windows, with five excused sets, the sha256 of the entries' JSON is the one
+// ComputePointsLeaderboard returned on main 05ffeaff8 (captured there with its
+// three-argument form). A nil, an empty, an outside-the-windows and a
+// not-the-latest pending set all give it.
+func TestComputePointsLeaderboardWithoutAPendingEpochIsUnchanged(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	const epochCount = 6
+	windows := pointsTestWindows(now, epochCount)
+	// one network per set of epochs, its id and total the same on every run;
+	// the totals repeat, so ranks tie and the id tie-break orders the ties, and
+	// a zero total is not ranked
+	inputs := []PointsNetworkInput{}
+	for mask := 0; mask < 1<<epochCount; mask += 1 {
+		epochsWithPoints := map[uint64]bool{}
+		for i := 0; i < epochCount; i += 1 {
+			if mask&(1<<i) != 0 {
+				epochsWithPoints[uint64(i+1)] = true
+			}
+		}
+		sum := md5.Sum([]byte(fmt.Sprintf("points-leaderboard-unchanged/%d", mask)))
+		inputs = append(inputs, PointsNetworkInput{
+			NetworkId:        server.RequireIdFromBytes(sum[:]),
+			TotalNanoPoints:  PointsToNanoPoints(float64(mask % 5)),
+			CreateTime:       now,
+			EpochsWithPoints: epochsWithPoints,
+		})
+	}
+	excusedSets := []map[uint64]bool{
+		nil,
+		pointsTestEpochSet(3),
+		pointsTestEpochSet(6),
+		pointsTestEpochSet(2, 5),
+		pointsTestEpochSet(1, 2, 3, 4, 5, 6),
+	}
+	digest := func(pendingEpochs map[uint64]bool) string {
+		hash := sha256.New()
+		for _, excusedEpochs := range excusedSets {
+			entries, latestEpoch := ComputePointsLeaderboard(inputs, windows, excusedEpochs, pendingEpochs)
+			data, err := json.Marshal(map[string]any{"latest_epoch": latestEpoch, "entries": entries})
+			if err != nil {
+				t.Fatal(err)
+			}
+			hash.Write(data)
+			hash.Write([]byte("\n"))
+		}
+		return hex.EncodeToString(hash.Sum(nil))
+	}
+	const before = "2019962601f536867173972551ec4a3f20b7112eb234de75ad3a0b9454e88b57"
+	for _, pendingEpochs := range []map[uint64]bool{
+		nil,
+		{},
+		pointsTestEpochSet(0, epochCount+1, 99),
+		pointsTestEpochSet(1, 2, 3, 4, 5),
+	} {
+		if got := digest(pendingEpochs); got != before {
+			t.Fatalf("pending epochs %v: digest %s, want %s", pendingEpochs, got, before)
 		}
 	}
 }
@@ -281,7 +423,7 @@ func TestComputePointsLeaderboardRanks(t *testing.T) {
 		// e: no points -> not ranked
 		{NetworkId: e, TotalNanoPoints: 0, CreateTime: now, EpochsWithPoints: set()},
 	}
-	entries, _ := ComputePointsLeaderboard(inputs, windows, nil)
+	entries, _ := ComputePointsLeaderboard(inputs, windows, nil, nil)
 	connect.AssertEqual(t, len(entries), 4)
 	connect.AssertEqual(t, pointsTestEntry(entries, e), (*PointsLeaderboardEntry)(nil))
 
@@ -323,6 +465,7 @@ func TestComputePointsLeaderboardNoEpochs(t *testing.T) {
 	a := server.NewId()
 	entries, latestEpoch := ComputePointsLeaderboard(
 		[]PointsNetworkInput{{NetworkId: a, TotalNanoPoints: PointsToNanoPoints(3), EpochsWithPoints: map[uint64]bool{}}},
+		nil,
 		nil,
 		nil,
 	)
@@ -584,7 +727,7 @@ func TestComputePointsLeaderboardFullTie(t *testing.T) {
 		{NetworkId: y, TotalNanoPoints: PointsToNanoPoints(7), CreateTime: now.Add(-time.Hour), EpochsWithPoints: map[uint64]bool{2: true}},
 		{NetworkId: x, TotalNanoPoints: PointsToNanoPoints(7), CreateTime: now, EpochsWithPoints: map[uint64]bool{2: true}},
 	}
-	entries, _ := ComputePointsLeaderboard(inputs, windows, nil)
+	entries, _ := ComputePointsLeaderboard(inputs, windows, nil, nil)
 	ex, ey := pointsTestEntry(entries, x), pointsTestEntry(entries, y)
 	for _, pair := range [][2]int64{{ex.RankPoints, ey.RankPoints}, {ex.RankBlocks, ey.RankBlocks}, {ex.RankStreak, ey.RankStreak}} {
 		connect.AssertEqual(t, pair[0], int64(1))
