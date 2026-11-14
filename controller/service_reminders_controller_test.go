@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -65,5 +66,78 @@ func TestNextServiceRemindersAt(t *testing.T) {
 	at = NextServiceRemindersAt(time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC))
 	if !at.Equal(time.Date(2026, 11, 2, 3, 0, 0, 0, time.UTC)) {
 		t.Fatalf("got %v", at)
+	}
+}
+
+// The gift-ending notice renders in the six languages: the subject and the
+// body name the day the year ends in the reader's zone, the button keeps Pro
+// on ur.io's subscription page, no price or discount appears, and the footer
+// says how to stop emails like it. Arabic reads right to left; a language
+// outside the six is English, and no zone is UTC. The outbox stores what it
+// needs and reads it back.
+func TestGiftEndingTemplateText(t *testing.T) {
+	// the evening of November 19 in Los Angeles
+	end := time.Date(2027, 11, 20, 3, 0, 0, 0, time.UTC)
+	for _, language := range giftCardLanguages {
+		template := &GiftEndingTemplate{EndTime: end, Lang: language, TimeZone: "America/Los_Angeles"}
+		subject, bodyHtml, bodyText, err := RenderEmailTemplate(template)
+		if err != nil {
+			t.Fatalf("%s: %v", language, err)
+		}
+		date := giftCardDate(language, time.Date(2027, 11, 19, 0, 0, 0, 0, time.UTC))
+		if want := giftCardText(language, "ending.title", "date", date); subject != want {
+			t.Errorf("%s: subject %q, want %q", language, subject, want)
+		}
+		dir := giftCardDir(language)
+		if !strings.Contains(bodyHtml, `<html lang="`+language+`" dir="`+dir+`"`) {
+			t.Errorf("%s: the page is not lang %s dir %s", language, language, dir)
+		}
+		for _, want := range []string{
+			htmlEscapedText(giftCardText(language, "ending.body", "date", date)),
+			`href="https://ur.io/app/subscription"`,
+			htmlEscapedText(giftCardText(language, "ending.button")),
+			htmlEscapedText(giftCardText(language, "ending.free")),
+			htmlEscapedText(giftCardText(language, "ending.why")),
+			htmlEscapedText(giftCardText(language, "ending.preheader")),
+		} {
+			if !strings.Contains(bodyHtml, want) {
+				t.Errorf("%s: the html part lacks %q", language, want)
+			}
+		}
+		for _, want := range []string{
+			giftCardText(language, "ending.body", "date", date),
+			giftCardText(language, "ending.button") + ": https://ur.io/app/subscription",
+			giftCardText(language, "ending.free"),
+			giftCardText(language, "ending.why"),
+		} {
+			if !strings.Contains(bodyText, want) {
+				t.Errorf("%s: the text part lacks %q:\n%s", language, want, bodyText)
+			}
+		}
+		if strings.Contains(bodyText, "<") || strings.Contains(bodyText, "{{") || strings.Contains(bodyHtml, "{{") {
+			t.Errorf("%s: markup or an unresolved action", language)
+		}
+		if strings.ContainsAny(subject+bodyText, "$€£%") {
+			t.Errorf("%s: the notice names a price or a discount", language)
+		}
+	}
+
+	// a language outside the six, and no zone
+	subject, _, _, err := RenderEmailTemplate(&GiftEndingTemplate{EndTime: end, Lang: "fr"})
+	if err != nil || subject != "Your gift year of URnetwork Pro ends on November 20, 2027" {
+		t.Fatalf("fallback subject %q, %v", subject, err)
+	}
+
+	// what the outbox stores, read back
+	stored, err := json.Marshal(&GiftEndingTemplate{EndTime: end, Lang: "es", TimeZone: "America/Mexico_City"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeAccountMessageTemplate(giftEndingTemplateName, string(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read, ok := decoded.(*GiftEndingTemplate); !ok || !read.EndTime.Equal(end) || read.Lang != "es" || read.TimeZone != "America/Mexico_City" {
+		t.Fatalf("the outbox reads back %#v from %s", decoded, stored)
 	}
 }

@@ -1,0 +1,9 @@
+{{define "headline"}}{{Upper .Title}}{{end}}
+{{define "why"}}{{T "ending.why"}}{{end}}
+{{define "content"}}
+{{.Body}}
+
+{{T "ending.button"}}: {{.KeepUrl}}
+
+{{T "ending.free"}}
+{{end}}

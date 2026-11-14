@@ -121,6 +121,11 @@ type ReengagementHighlightConfig struct {
 type ReengagementServiceRemindersConfig struct {
 	// crypto Pro stops in 14 and 2 days
 	ProEnding bool `yaml:"pro_ending"`
+	// a gift year ends in 14 days, with nothing else to carry Pro on
+	// (GIFTOFPRIVACY.md §9.2): unlike the others it offers to keep Pro, so it
+	// goes only where the mail policy lets an offer go (consent, country,
+	// product updates on)
+	GiftEnding bool `yaml:"gift_ending"`
 	// a free trial ends soon: an App Store or Play trial in 2 days (the daily
 	// task), a Stripe trial in 3 (Stripe's customer.subscription.trial_will_end)
 	TrialEnding bool `yaml:"trial_ending"`
