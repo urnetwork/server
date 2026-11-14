@@ -78,21 +78,25 @@ type Settings struct {
 	StoreClock *StoreClockSettings
 	// The stores' own clock, which their LastModified, ttls and deadlines run on: real time.
 	Store sidecar.Clock
+	// The AclExchangeTier each Net names (acl_exchange_tier.go): FS-21's sidecars on an exchange of its own under
+	// server's contract gate. nil: its defaults.
+	AclExchangeTier *AclExchangeTierSettings
 }
 
 func DefaultSettings() *Settings {
 	return &Settings{
-		Net:            sidecartest.DefaultNetSettings(),
-		MinioEndpoint:  "127.0.0.1:59000",
-		MinioAccessKey: "sidecar-local-test",
-		MinioSecretKey: "sidecar-local-test-only",
-		MinioRegion:    "us-east-1",
-		FileClusters:   server.DefaultFileClusterSettings(),
-		Redis:          sidecarhost.DefaultRedisSettings(),
-		CrossslotCalls: NewCrossslotCalls(),
-		Exchange:       DefaultExchangeSettings(),
-		ClusterFaults:  DefaultClusterFaultSettings(),
-		Store:          sidecar.RealClock{},
+		Net:             sidecartest.DefaultNetSettings(),
+		MinioEndpoint:   "127.0.0.1:59000",
+		MinioAccessKey:  "sidecar-local-test",
+		MinioSecretKey:  "sidecar-local-test-only",
+		MinioRegion:     "us-east-1",
+		FileClusters:    server.DefaultFileClusterSettings(),
+		Redis:           sidecarhost.DefaultRedisSettings(),
+		CrossslotCalls:  NewCrossslotCalls(),
+		Exchange:        DefaultExchangeSettings(),
+		ClusterFaults:   DefaultClusterFaultSettings(),
+		Store:           sidecar.RealClock{},
+		AclExchangeTier: DefaultAclExchangeTierSettings(),
 	}
 }
 
@@ -221,7 +225,11 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 	// an evs world's instances run evshost's block, its devices on oauth's tokens (evs_tier.go)
 	evsTier, removeEvsTier := newEvsTier()
 	fault.SetEvsTier(net, evsTier)
+	// FS-21's sidecars on server's exchange under its contract gate (acl_exchange_tier.go)
+	aclExchangeTier, closeAclExchangeTier := newAclExchangeTier(ctx, t, settings.AclExchangeTier)
+	fault.SetAclExchangeTier(net, aclExchangeTier)
 	closeHost := func() {
+		closeAclExchangeTier()
 		removeEvsTier()
 		stopPgCommits()
 		// a translation that did not hold, or a fault the store did not carry out, fails the run that relied on it
