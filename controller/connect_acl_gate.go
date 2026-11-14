@@ -45,6 +45,19 @@ func SetAclContractGate(gate *sidecar.AclContractGate) (restore func()) {
 	}
 }
 
+// The contract gate CreateContract consults now, nil while none is installed or sidecar.yml's acl_contract_gate switch
+// is off: what §8.19's peer-list filter reads too (server/connect's resident, ACL-M6-04).
+func ActiveAclContractGate() *sidecar.AclContractGate {
+	gate, _ := activeAclContractGate()
+	return gate
+}
+
+// Whether this process installed a contract gate, whatever sidecar.yml's switch says: a process with none, every
+// process today, starts no §8.19 recheck at all.
+func AclContractGateInstalled() bool {
+	return aclContractGate.Load() != nil
+}
+
 // The gate CreateContract consults and the sidecar.yml read that enabled it: the installed gate while the
 // acl_contract_gate switch is on, else nil.
 func activeAclContractGate() (*sidecar.AclContractGate, *server.SidecarConfig) {
@@ -95,27 +108,9 @@ func contractAclEnd(clientId server.Id, end *model.ProvideRelationshipAclEnd, co
 	if end == nil {
 		return sidecar.AclContractEnd{}
 	}
-	contractEnd := sidecar.AclContractEnd{
-		Known:     true,
-		NetworkId: sidecar.Id(end.NetworkId),
-		// a sidecar's client or a tagged one acts only as its sidecar
-		SidecarHeld:  end.StrictExp || end.Tagged,
-		AclEnforcing: end.AclEnforcing,
-		Hosted:       end.Hosted,
-		Roles:        end.Roles,
-		Principal:    end.Principal,
-	}
+	contractEnd := end.ContractEnd()
 	if edgeNetworkId, found := config.UrnetworkEdge(); found && end.NetworkId == edgeNetworkId {
 		contractEnd.Platform = true
-	}
-	if end.SubjectClientId != nil {
-		contractEnd.SubjectClientId = sidecar.Id(*end.SubjectClientId)
-	}
-	if end.SidecarId != nil {
-		contractEnd.SidecarId = sidecar.Id(*end.SidecarId)
-	}
-	if end.MemberId != nil {
-		contractEnd.MemberId = sidecar.Id(*end.MemberId)
 	}
 	return contractEnd
 }

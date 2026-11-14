@@ -1407,9 +1407,36 @@ func sidecarMg6TeamMigrations() []any {
 	}
 }
 
-// MG6's §8 part: network_acl_share (ACL's tasks).
+// MG6's §8 part: network_acl_share (ACL-M6-03), §8.11's invites. Every column
+// is one of §2.8 api-9's: the SHA-256 of the invite's 256-bit code, never the
+// code, the inviting network, the share its invite filed (network_bridge_share,
+// whose rows hold the accepting networks), the uses left and the 7-day window.
+// A row goes once its uses run out or its window closes, and with its network;
+// no dump holds it (§19.6). Nothing reads it unless the binary links MG6
+// (server.SidecarMg6Linked).
 func sidecarMg6AclMigrations() []any {
-	return []any{}
+	return []any{
+		newSqlMigration(`
+			CREATE TABLE network_acl_share (
+				code_hash bytea NOT NULL,
+				network_id uuid NOT NULL,
+				share_id uuid NOT NULL,
+				use_count integer NOT NULL CHECK (0 <= use_count),
+				create_time timestamp NOT NULL,
+				expire_time timestamp NOT NULL,
+
+				PRIMARY KEY (code_hash)
+			)
+		`),
+		// a network's deletion
+		newSqlMigration(`
+			CREATE INDEX network_acl_share_network_id ON network_acl_share (network_id, code_hash)
+		`),
+		// the sweep of closed windows
+		newSqlMigration(`
+			CREATE INDEX network_acl_share_expire_time ON network_acl_share (expire_time, code_hash)
+		`),
+	}
 }
 
 // MG6's §17 part: network_bridge_share (BRIDGE's tasks). Every column is one of

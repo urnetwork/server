@@ -29,6 +29,8 @@ const (
 	RetentionTableAccountApiKey     = "account_api_key"
 	// §8's sidecar table (MG2): acks past their 7 days
 	RetentionTableNetworkAclAck = "network_acl_ack"
+	// §8's sidecar table (MG6): invites whose 7-day window closed
+	RetentionTableNetworkAclShare = "network_acl_share"
 	// §13's sidecar table (MG5): tls-3's daily counts past their 13 months
 	RetentionTableTlsConnectionDay = "tls_connection_day"
 	// §15's sidecar table (MG7): host keys 30 days after their retirement
@@ -53,6 +55,7 @@ var retentionTables = []string{
 	RetentionTableNetworkAuthKey,
 	RetentionTableAccountApiKey,
 	RetentionTableNetworkAclAck,
+	RetentionTableNetworkAclShare,
 	RetentionTableTlsConnectionDay,
 	RetentionTableMailHostKey,
 }
