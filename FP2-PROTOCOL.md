@@ -6,10 +6,10 @@ Design and implementation record. What building it changed is folded into
 | | |
 |---|---|
 | Status | Implemented and landed (§13), except the capability-probe retirement and the /mainnet note, which wait for their release steps (§10). All owner decisions recorded. |
-| Date | 2026-11-12 |
+| Date | 2026-11-12; amended 2026-11-13 by D8, D13 and D13.1 (§7.4, §7.5, §7.10, §13.3) |
 | Server | design base cbb7d7306 for §1-§12; §13 cites the implementation at its merges (S1: 86553321d; S2: 4fdf026c0, which contains 3dcc7b138) |
-| Connect | design base fc949b78 for §1-§12; §13 cites connect main 13a6c4f2 |
-| SDK | 2f945bea, the limited-window branch, landed on sdk main as 1777be51; every sdk reference is at 2f945bea |
+| Connect | design base fc949b78 for §1-§12; §13 cites connect main 13a6c4f2, and its 2026-11-13 amendment connect bc776f20 |
+| SDK | 2f945bea, the limited-window branch, landed on sdk main as 1777be51; every sdk reference is at 2f945bea, except the 2026-11-13 amendment's (sdk d47cccdf) |
 | Apps and localizations | android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813, localizations 19b89a4, all on their main (§5.5) |
 
 References are `path:line` at those commits. §1-§12 describe the design
@@ -66,10 +66,12 @@ without a repo prefix are in the server repo; `connect/`, `sdk/`, `android/`,
   ever placed on a compatible client: UDP needs `dualproto`, IPv6 needs
   `dualstack`.
 - A new limited window holds `tcp` providers. Its clients join the race of
-  every flow they can carry.
-  - Size: half the largest normal window's target, at least 1 (D8). On a
-    low-memory device (iOS, Android, a hosted proxy) it is bounded at 1 if the
-    memory gate fails (D11.5).
+  every flow they can carry, in one order with the normal window's by the
+  weighted metrics, each window's top first (D13, D13.1).
+  - Size: the same as the largest normal window's target (D8). The 32-MiB
+    memory tier (iOS, hosted proxies) holds at half until the owner decides.
+    On a low-memory device (iOS, Android, a hosted proxy) it is bounded at 1
+    if the memory gate fails (D11.5).
   - Rank mode: the performance profile's, `quality` in auto (D10).
 - The provider status tells a downgraded provider why (D11.6).
 - Connect's shipped local IPv6 downgrade (B5) is retired. Placement uses
@@ -128,7 +130,7 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D7.3 | "not enough" means fewer matching providers in the location than the window's target count | "correct" | §6.3, refined by D11.1 and D11.2 |
 | D7.4 | labels come only from negative probe evidence | "if no negative measurement assume dual" (for both axes; unmeasured `udp_probes: false` countries count as `dualproto`) | §3.2-3.3 |
 | D7.5 | no local downgrade state on either axis | "it's impossible to tell per-flow failures from provider failures. also it's very hard to tell a failed udp flow" | §1 non-goals; applied to the shipped B5 by D11.8 (§7.9) |
-| D8 | limited window size | "I want to change the limited window to half the normal window size, min 1." Supersedes "min count 1, default 1" (D6.3). | §7.4 |
+| D8 (2026-11-13) | limited window size: the same as the normal window, on desktop and Android. The 32-MiB tier (iOS, hosted proxies) is held at half until the owner decides (hold of 2026-11-13, §7.4). | 2026-11-13: "I want the limited window to be the same size as the normal window." It supersedes 2026-11-12's "I want to change the limited window to half the normal window size, min 1.", which superseded "min count 1, default 1" (D6.3). | §7.4, §7.10 |
 | D9 | process | "Ok fully finish FP2-PROTOCOL.md and then i will have a peer review before we start implementation." | this document |
 | D10 | the limited window's rank mode follows the performance profile | "the limited window should match the same rank mode as the performance profile. if auto, the limited window should be quality" (answers open question Q3) | §6.2, §7.4, §7.6 |
 | D11 | open questions Q1, Q2 and Q4-Q7 settled as recommended | "Q1,Q2,Q4,Q5,Q6,Q7 accept recommendations" | rows D11.1-D11.7 |
@@ -145,6 +147,8 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D12.4 | 7918 (connect#220) is solved by strict selection with the positive signal; its fail-fast, cache and field-measurement options are not needed | "With the strong fp2 post quantum filter and quality probe positive signal, i think 7918 is solved by the multi client requiring a strong multi client selection when post quantum is enabled." | §12.7 |
 | D12.5 | PQ outcomes come from a scheduled third of URL turns, not every turn: a turn is a PQ turn when its claim ordinal is a multiple of 3 and its provider has no PQ outcome in the last 4 hours | accepted 2026-11-12, in place of every turn (S1 step 2, merge 86553321d) | §12.2, §13.2 |
 | D12.6 (2026-11-13) | no provider counts on its own claim, on either side of the ready marker: a network-only provider is modern or PQ only with the same probe evidence as a public one, and while the marker is down strict PQ reads the probe's modern evidence of the last 7 days instead of declarations. That evidence counts PQ only from the quality probe's positive outcome. | "1,2 sounds good, go ahead"; "They must have a positive quality probe handshake to count" | §12.4, §12.8 |
+| D13 (2026-11-13) | merged races take one order by the weighted metrics, whichever window a candidate comes from | "the windows need to merge in order based on the weighted metrics" | §7.5 |
+| D13.1 (2026-11-13) | each window's top always races: the tops first, then the merged order, so a race of two tries the best normal and the best limited candidate together | "if it's 2, i want to make sure a member of the limited window is always tried. I want to combine that with the merged sort, but keep the top from each list to be always included" | §7.5 |
 
 D11.8 applies D7.5 to the shipped IPv6 local downgrade (B5) too: it is
 retired (§7.9). No owner question is open.
@@ -1007,15 +1011,16 @@ state changes a label between FP2 answers.
 | Selectors | `{"ip": "ipv4", "protocol": "tcp"}`: the `tcp` classes C and D, never a `dualproto` provider (§6.3) |
 | Rank mode | the performance profile's (D10): auto uses `quality`, a fixed Quality profile `quality`, a fixed Speed profile `speed`. Read from the window's profile when each request is built; normal windows read their own type (connect/ip_remote_multi_client_family.go:448). |
 | `ip_family` | `v4-capable` |
-| Size setting | `MultiClientSettings.LimitedWindowSizeFraction`, default 0.5. A runtime setter changes it; zero, a negative value, NaN or Inf turns the window off. It lives in `MultiClientSettings`, not `ReliabilitySettings`, because the sdk mirror's round trip zeroes unknown fields. |
-| Target | `max(1, floor(f × S))` for f > 0. S is the largest current target among the active normal windows, the `targetWindowSize` each window's resize pass computes (:14399-14425). In a fixed profile the inactive window's target is 0. f ≤ 0: no limited window. |
+| Size setting | `MultiClientSettings.LimitedWindowSizeFraction`, default 1 (D8). The sdk passes 0.5 at or below the 32-MiB target (the 32-MiB hold below). A runtime setter changes it; zero, a negative value, NaN or Inf turns the window off. It lives in `MultiClientSettings`, not `ReliabilitySettings`, because the sdk mirror's round trip zeroes unknown fields. |
+| Target | `max(1, floor(f × S))` for f > 0. S is the largest current target among the active normal windows, the `targetWindowSize` each window's resize pass computes (:14399-14425). In a fixed profile the inactive window's target is 0. f ≤ 0: no limited window. At the default f = 1 the target is S: the limited window is the same size as the largest normal window (D8). |
 | Hard max | `max(1, floor(f × the largest normal hard max))`, or unbounded when an active normal window is unbounded. `LimitedWindowSizeMax` caps both target and hard max. |
-| Desktop auto | normal targets 6 (quality) and 1 (speed; max 2): S = 6, limited 3 |
-| iOS and hosted proxies (32 MiB memory target) | normal windows scale with the target (sdk/mobile_memory_policy.go:237-238, 292-299): quality 5, speed 1, so S = 5 and the limited window is 2 |
-| Android (64 MiB) | quality 10, speed 2, so S = 10 and the limited window is 5 |
+| Desktop auto | normal targets 6 (quality) and 1 (speed; max 2): S = 6, limited 6 |
+| iOS and hosted proxies (32 MiB memory target) | normal windows scale with the target (sdk/mobile_memory_policy.go:237-238, 292-299): quality 5, speed 1, so S = 5. The sdk holds this tier at f = 0.5, so the limited window is 2 (the 32-MiB hold below). |
+| Android (64 MiB) | quality 10, speed 2, so S = 10 and the limited window is 10 |
+| 32-MiB hold (2026-11-13) | Until the owner decides, a device under the low-memory policy at or below the 32-MiB target (iOS, and the hosted proxies that share it) takes f = 0.5 from the sdk's unexported `DeviceLocalSettings.lowMemoryLimitedWindowSizeFraction`, installed by `applyMobileLimitedWindowSettingsForPlatform`. The evidence, from the owner's iOS extension logs: with 8 window clients (quality 5, speed 1, limited 2) the tunnel sits at 35-40 MiB of phys_footprint with its Go heap at the 32-MiB soft limit; iOS fires 300+ memory-pressure frees a run, up to 42 a second, each wiping the DNS cache and DoH connections; one extension was jetsam-killed at about 48-50 MiB. The full size would make 11 window clients. Android at 64 MiB and desktop take connect's 1. |
 | Low-memory bound (D11.5) | `MultiClientSettings.LimitedWindowSizeMax` caps the limited window; 0 means no bound. The sdk feeds it from its unexported `DeviceLocalSettings.lowMemoryLimitedWindowSizeMax` (sdk/device_local.go:735, default 0 at :411), through `applyMobileLimitedWindowSettingsForPlatform` (sdk/mobile_memory_policy.go:590, called at sdk/device_local.go:5536). It applies on low-memory devices only: iOS, Android and hosted proxies. A fraction alone cannot give D11.5's 1 on Android. |
-| Memory gate | Steady memory is measured on the iOS and Android nightlies with every window full, before the stable release. If either is over its target, the bound is set to 1 at sdk/device_local.go:411. Until then the gate counts as not failed: no bound. Desktop is unaffected. |
-| Fixed profile of size N | `max(1, floor(N/2))` |
+| Memory gate | Steady memory is measured on the iOS and Android nightlies with every window full, before the stable release. If either is over its target, the bound is set to 1 at sdk/device_local.go:411. Until then the gate counts as not failed: no bound. Desktop is unaffected. On 2026-11-13 the gate had not run and no bound was set anywhere: the sdk default is 0 on every platform, and hosted proxies take the same default. |
+| Fixed profile of size N | N; `max(1, floor(N/2))` on the 32-MiB tier |
 | Fixed destination | none: the fixed exit carries every flow |
 | Fill and refill | its own `resize` loop (:13895) and `expand` (:14845), like a normal window. Each request carries `target_count` (its target), `held_count` (its `tcp` clients) and `dualstack_target_count` 0. There is no IPv6 need. |
 | No `tcp` supply | the window stays empty and costs nothing |
@@ -1046,21 +1051,61 @@ state changes a label between FP2 answers.
   `ApiMultiClientGenerator` implements it; a generator without it is called
   as today (connect/ip_remote_multi_client.go:171-173).
 - The single limited window is sized from the largest normal window. A
-  limited window per normal window would add the speed window's share again
-  (1 more client) for the same supply.
+  limited window per normal window would add the speed window's size again
+  (1 or 2 more clients) for the same supply.
 
 ### 7.5 Merged races
 
 - In `coalesceOrderedClients`, each selected normal window's compatible
-  candidates are followed by the limited window's compatible candidates.
+  candidates and the limited window's compatible candidates merge into one
+  order by the weighted metrics (D13; owner, 2026-11-13: "the windows need to
+  merge in order based on the weighted metrics"):
+  - each window first narrows to its own best rank, as a window alone does
+    (`raceCandidates`). One rank gate across both would drop the limited
+    window's candidates, whose overflow ranks sit below the normal window's;
+  - the union is then ordered as one window orders its own offer: a weighted
+    shuffle by each candidate's expected throughput,
+    `1 + ExpectedByteCountPerSecond`, at `StatsWindowEntropy`
+    (`mergeRaceField`). A strong limited candidate can come first and a weak
+    one later, by its metrics alone;
+  - the cross-tier and last-resort fields merge the same way;
+  - with no compatible limited candidate, the field is exactly the normal
+    window's, in its own order.
 - Today's filters then run on the merged list: service failures, reputation,
   performance, same-network and scored placement.
+- The race then takes each window's top first (D13.1; owner, 2026-11-13:
+  "if it's 2, i want to make sure a member of the limited window is always
+  tried. I want to combine that with the merged sort, but keep the top from
+  each list to be always included"):
+  - a window's top is its first candidate in the merged order whose contract
+    requests are not held. In the merged order that is the window's own
+    weighted top;
+  - the tops come first, ordered between themselves by the weighted
+    metrics, and every other candidate follows in the merged order
+    (`raceWindowTopsFirst`);
+  - it runs after the filters, right before the bound, so a top that a
+    filter removed, or a held top, gives way to its window's next;
+  - a race bounded to two therefore always tries the best normal candidate
+    and the best limited candidate together, and an unbounded race still
+    tries every candidate;
+  - it applies only where the limited window offers a candidate for the
+    flow, so to TCP flows. A UDP field holds one window and is unchanged.
 - The race dials every candidate in parallel and binds the lowest measured RTT
   (`MultiRaceClientCount` 0, :377-402). Limited clients therefore compete on
   equal terms for the TCP flows they can carry.
 - Under a degraded backend the race is bounded
-  (`MultiRaceDegradedClientCount`), and the normal windows' candidates come
-  first.
+  (`MultiRaceDegradedClientCount`, 2) to the two windows' tops. A client
+  whose contract requests the platform is holding still races last
+  (`contractRateLimitHeldLast`), and a race that would send to one is
+  bounded the same way.
+  - Until 2026-11-13 the normal windows' candidates came first
+    (`limitedClientsLast`), so a degraded race never dialed a limited client
+    while a normal window offered two. D13 and D13.1 retired that.
+- A SYN retry's fresh candidates are the first untried ones of the merged
+  order, within the same bound (`freshSynRetryCandidatesWithLock`).
+- A service refresh still rotates an idle slot of the flow's own windows
+  before one of the limited window's. That is the order in which windows give
+  up a slot, not a race order.
 - Limited clients are `tcp` (classes C and D), so they never join a UDP race.
   A class-C client also joins TCP/IPv6 races (§7.2).
 - When the selected windows offer nothing compatible, a TCP flow races the
@@ -1125,7 +1170,10 @@ The sdk's limited-window work, branch `feat/fp2-limited-window-1112`
   - `LimitedWindowSize` is set at sdk/device_local.go:5670 and 5812;
   - `GetWindowStatus` no longer calls the client while holding `stateLock`.
 - **Sizes:**
-  - The fraction stays connect's 0.5; the sdk never copies it.
+  - The fraction is connect's default, 1 (D8), except at or below the
+    32-MiB target, where the sdk passes 0.5 (the 32-MiB hold, §7.4): 2
+    limited clients on iOS and hosted proxies. The developer menu's reset
+    returns to the device's own default.
   - On low-memory devices the sdk sets `LimitedWindowSizeMax` (§7.4, D11.5).
 - **Developer controls:**
   - `GetLimitedWindowSizeFraction`, `SetLimitedWindowSizeFraction` and
@@ -1179,15 +1227,19 @@ uses only the server's labels on both axes.
 | | Desktop | iOS and hosted proxies (32 MiB) | Android (64 MiB) |
 |---|---|---|---|
 | Window clients today | quality 6, speed 1 (max 2): 7-8 | quality 5, speed 1: 6 | quality 10, speed 2: 12 |
-| Limited window | 3 | 2, or 1 with the bound (D11.5) | 5, or 1 with the bound |
-| Window clients after | 10-11 (+38-43%) | 8 (+33%), or 7 | 17 (+42%), or 13 |
-| Contracts | +3 per direction while the limited clients carry data. The wide race sends each cold-start TCP flow's first packet to them, so they open contracts early. | +2 (or +1) | +5 (or +1) |
-| Control plane | +3 client setups (auth and control registration) and continuous pings (`CPingRestTimeout` 10 s, `CPingMaxByteCountPerSecond` 32 KiB/s; connect/ip_remote_multi_client.go:255, 264) | +2 (or +1) | +5 (or +1) |
+| Limited window (D8, 2026-11-13) | 6 | 2, held at half (§7.4), or 1 with the bound (D11.5) | 10, or 1 with the bound |
+| Window clients after | 13-14 (+75-86%) | 8 (+33%), or 7 | 22 (+83%), or 13 |
+| Contracts | +6 per direction while the limited clients carry data. The wide race sends each cold-start TCP flow's first packet to them, so they open contracts early. | +2 (or +1) | +10 (or +1) |
+| Control plane | +6 client setups (auth and control registration) and continuous pings (`CPingRestTimeout` 10 s, `CPingMaxByteCountPerSecond` 32 KiB/s; connect/ip_remote_multi_client.go:255, 264) | +2 (or +1) | +10 (or +1) |
 | Memory | each client holds its own transport graph and buffers | the window sizes scale from the 24 MiB calibration (sdk/mobile_memory_policy.go:14, 292-299). Per-client buffers include a resend queue of 64-512 KiB and an unreliable flight of 128 KiB (:224-236). | the same, at 64 MiB |
 
-Race duplication: each cold-start TCP flow's first packet goes to up to 3 more
-exits on desktop, 2 on iOS and hosted proxies and 5 on Android, or 1 with the
+Race duplication: each cold-start TCP flow's first packet goes to up to 6 more
+exits on desktop, 2 on iOS and hosted proxies and 10 on Android, or 1 with the
 bound.
+
+Until 2026-11-13 the limited window was half the size everywhere (D8's first
+value): 3 on desktop and 5 on Android, 10-11 and 17 window clients after.
+The 32-MiB tier keeps that half for now (§7.4).
 
 ## 8. Metrics, dashboards, alerts, measures
 
@@ -1308,8 +1360,8 @@ all):
   - Online rises from 30.3k to 50.5k at the ratio level, about 44.5k after
     the gates (88%).
   - They reach users through:
-    - the limited windows: 3 per desktop device, 2 per iOS device or hosted
-      proxy, and 5 per Android device (1 on a low-memory device if the memory
+    - the limited windows: 6 per desktop device, 2 per iOS device or hosted
+      proxy, and 10 per Android device (1 on a low-memory device if the memory
       gate fails);
     - the normal windows, when a location has fewer `dualproto` providers
       than a window's target.
@@ -1467,8 +1519,8 @@ all):
 
 **sdk:**
 - the window status fields;
-- the limited window's size: 2 on iOS and hosted proxies, 5 on Android, and 1
-  with the low-memory bound set (D11.5);
+- the limited window's size: 2 on iOS and hosted proxies (the 32-MiB hold),
+  10 on Android, and 1 with the low-memory bound set (D11.5);
 - the window status fields, the exit fields and the diagnostics' limited
   counts (§7.8);
 - the developer controls set, read and reset the fraction for new windows;
@@ -1603,8 +1655,8 @@ inert for them.
      publishes with the stable app release.
 - **Measure between steps 2 and 3.** Watch Redis memory for `cs_` keys,
   export duration, and the new gauges filling over 8 hours.
-- **The client settings** `LimitedWindowSizeFraction` (0.5; 0 turns the
-  window off) and the selectors are compiled defaults. They are exposed in the
+- **The client settings** `LimitedWindowSizeFraction` (1, D8, and 0.5 from
+  the sdk at or below 32 MiB; 0 turns the window off) and the selectors are compiled defaults. They are exposed in the
   developer menu for testing; a production change is a release.
 - **IPV6.md B5** is marked superseded in the connect change that retires it
   (D11.8).
@@ -1620,8 +1672,8 @@ inert for them.
 | Risk | Mitigation |
 |---|---|
 | **Dual-stack concentration.** Measuring "enough" on the IP axis against the window's target would draw every window from class A wherever A fills it: us has 108 dual-stack providers of 20,991 on the hard gate. | Resolved by D11.1. The IPv6 need takes one dual-stack client per quality window, as today's soft minimum does, and A and B then draw together (§6.3). |
-| **Mobile memory.** Two more window clients on iOS and hosted proxies (32 MiB target), and five more on Android (64 MiB). | The memory gate on the nightlies before the stable release. If it fails, the low-memory bound is 1 (D11.5). |
-| **Platform load.** 3-4 more clients per device: setups, pings, contracts and race duplicates. | measure on the proxy fleet first (step 4) |
+| **Mobile memory.** Two more window clients on iOS and hosted proxies (32 MiB target), held at half because that tier is already at its limit (§7.4), and ten more on Android (64 MiB), since the limited window became the normal window's size there (D8, 2026-11-13). | The memory gate on the nightlies before the stable release. If it fails, the low-memory bound is 1 (D11.5). |
+| **Platform load.** 6 more clients per desktop device, 2 per iOS device or hosted proxy and 10 per Android device: setups, pings, contracts and race duplicates. | measure on the proxy fleet first (step 4) |
 | **Label lag without local downgrade (D7.5).** A provider that loses UDP keeps `dualproto` for a few hours, and its UDP flows stall until then. | The wide race hedges cold starts, and apps fall back from QUIC to TCP. |
 | **IPv6 without B5 (D11.8).** A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns, typically a few hours (§3.5). | Only dual-stack providers are concerned, about 1% of supply. Applications fall back to IPv4, and B6's no-route still answers when no `dualstack` client exists. |
 | **Export cost.** About 75% more union pages, and a second native snapshot per non-forced target and mode. | Measured at step 2: Redis memory for `cs_` keys and export duration. Capability keys can be dropped by rollback. |
@@ -2216,7 +2268,8 @@ All connect references in this section are at connect main 13a6c4f2.
   are stored as an atomic pointer once every window exists, followed by one
   wake.
 - Settings:
-  - `LimitedWindowSizeFraction` (:698, default 0.5 at :314);
+  - `LimitedWindowSizeFraction` (:698, default 0.5 at :314; 1 since
+    2026-11-13, see the amendment below);
   - `LimitedWindowSizeMax` (:702);
   - at runtime, `SetLimitedWindowSizeFraction`
     (connect/ip_remote_multi_client_limited.go:629) and
@@ -2260,7 +2313,8 @@ All connect references in this section are at connect main 13a6c4f2.
     `candidatesForFlow` (:733).
 - The race: each window's field is followed by the limited window's. A
   bounded race uses `limitedClientsLast(contractRateLimitHeldLast(...))`
-  (connect/ip_remote_multi_client.go:8552).
+  (connect/ip_remote_multi_client.go:8552). Replaced on 2026-11-13 by one
+  weighted order (D13, see the amendment below).
 - Auto sends UDP on any port to quality, then speed (`selectWindowTypes`,
   :3722, :3745).
 - No route: `replyUdpNoRoute` (connect/ip_remote_multi_client_family.go:708,
@@ -2305,7 +2359,8 @@ All connect references in this section are at connect main 13a6c4f2.
    is 10 and no fraction yields 1.
 7. Unknown labels fail closed (§7.1).
 8. In selector mode, IPv6 starvation is read from the main answer.
-9. A bounded race puts normal candidates before limited ones.
+9. A bounded race puts normal candidates before limited ones. Retired on
+   2026-11-13 by D13.
 10. The UDP verdict judges only the flow's own windows (§7.7).
 11. Limited sizing counts only active normal windows.
 
@@ -2334,7 +2389,44 @@ All connect references in this section are at connect main 13a6c4f2.
   - a control run on the old spec logs the 4 new fields as drift.
 
 **Memory:** about floor(0.5 × S) more clients: 3 on desktop in auto, 2 on
-iOS and 5 on Android (§7.10).
+iOS and 5 on Android (§7.10). Since 2026-11-13, S more on desktop and
+Android, 6 and 10; iOS and hosted proxies hold at 2.
+
+**Amendment, 2026-11-13 (D8, D13, D13.1):** connect merge bc776f20 and sdk
+merge d47cccdf. References are at those merges.
+- **Size (D8):** `LimitedWindowSizeFraction` defaults to 1
+  (connect/ip_remote_multi_client.go:327), so the limited window is the same
+  size as the largest normal window: 6 on desktop in auto, 10 on Android
+  (64 MiB). The sdk holds its 32-MiB tier at 0.5
+  (`DeviceLocalSettings.lowMemoryLimitedWindowSizeFraction`,
+  sdk/device_local.go:750, default 0.5 at :414; applied in
+  sdk/mobile_memory_policy.go:592), so iOS and hosted proxies stay at 2. The
+  developer menu's read and reset follow the device's default.
+  `LimitedWindowSizeMax` (D11.5) still caps every tier, and no platform sets
+  it. sdk/mobile_limited_window_test.go and
+  sdk/limited_window_controls_test.go pin 1 and 0.5 and the sizes 2 and 10.
+- **Order (D13):** `raceField`, `crossTierRaceField` and
+  `lastResortRaceField` merge each window's candidates with the limited
+  window's through `mergeRaceField`
+  (connect/ip_remote_multi_client_limited.go:593), a weighted shuffle of the
+  union by `raceWeight` at `StatsWindowEntropy`, the same as
+  `orderedClients`. `limitedClientsLast` is removed.
+- **Window tops (D13.1):** `raceWindowTopsFirst`
+  (connect/ip_remote_multi_client_limited.go:633) puts each window's top,
+  its first candidate that is not held, ahead of the merged order. The send
+  path applies it, then `contractRateLimitHeldLast`, before the bound
+  (connect/ip_remote_multi_client.go:8622).
+- **Placement width:** `affinityPerformanceCandidateStack` rises from 16 to
+  32, so the TLS performance preference still reads Android's merged field
+  of 20 candidates; a wider field fails open.
+- **Tests:** connect/ip_remote_multi_client_race_merge_test.go and
+  connect/ip_remote_multi_client_race_tops_test.go, beside the size and
+  stack tests in the limited, capability and affinity test files. The
+  shuffles are pinned with a scripted random source
+  (`MultiClientSettings.raceOrderRandomForTest`). The 13 tests of the merged
+  order, the window tops through the send path, the sizes and the stack
+  bound fail on the code before the change; the guards for UDP fields and
+  unmerged fields pass on both.
 
 ### 13.4 Workstream S2: server selection
 
