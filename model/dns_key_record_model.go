@@ -219,6 +219,11 @@ func DnsPutTlsaInTx(ctx context.Context, tx server.PgTx, networkId server.Id, ro
 	if err != nil {
 		return nil, err
 	}
+	// the zone's lock before the keys are read, so two receivers' writes rebuild one after the other and the second
+	// reads the first's committed key: the zone on first need takes it
+	if _, err := EnsureNetworkZoneInTx(ctx, tx, networkId, root, nil); err != nil {
+		return nil, err
+	}
 	owner := dnsTlsaOwner(host, label+"."+root)
 	values := []string{}
 	result, err := tx.Query(
@@ -258,9 +263,6 @@ func DnsPutTlsaInTx(ctx context.Context, tx server.PgTx, networkId server.Id, ro
 			return nil, nil
 		}
 		args.Upserts = []dnsservice.DnsRecordSet{set}
-	}
-	if _, err := EnsureNetworkZoneInTx(ctx, tx, networkId, root, nil); err != nil {
-		return nil, err
 	}
 	return DnsWriteInTx(ctx, tx, args)
 }
