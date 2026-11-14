@@ -515,8 +515,9 @@ func disruptionRedisSchedule(net *sidecartest.Net) *fault.Schedule {
 	sequenceBefore := uint64(0)
 	steps := []*fault.Step{
 		{Actor: "writerA", Action: world.Setup},
-		// §20.4's evs_subscribers_per_repo, which the lease route reads before it writes (FS-12's step)
-		{Actor: "admin", Action: world.SetQuotaLimits(map[string]int64{"evs_subscribers_per_repo": 16})},
+		// §20.4's evs_subscribers_per_repo and evs_repos_per_client, which the lease route reads before it writes
+		// (FS-12's step)
+		{Actor: "admin", Action: world.SetQuotaLimits(map[string]int64{"evs_subscribers_per_repo": 16, "evs_repos_per_client": 500})},
 		{Actor: "writerA", Action: world.Write("writerA", "a.txt", fault.EvsWorldContent("disruption a", 200))},
 		{Actor: "reader", Action: world.Subscribe("reader")},
 		{Actor: "check", Action: world.ExpectLease("reader", true)},
