@@ -77,7 +77,8 @@ func TestHostedDevicesAskEveryProviderWithoutALimitedWindow(t *testing.T) {
 // A hosted device built as the proxy builds it asks find-providers2 from each
 // normal window with ipv4 and any and no ipv6 minimum, and reads a limited
 // window fraction of 0 that the developer override's set and reset do not
-// change, so no limited window fills.
+// change, so no limited window fills, where the same settings without the
+// hosted policy read the low-memory tier's own fraction.
 func TestHostedDeviceWindowsAskWithIpv4AndAny(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -94,19 +95,36 @@ func TestHostedDeviceWindowsAskWithIpv4AndAny(t *testing.T) {
 		connect.DefaultClientStrategySettings(),
 	)
 	defer networkSpace.Close()
-	deviceLocal, err := sdk.NewPlatformDeviceLocal(
-		nil,
-		networkSpace,
-		proxyDeviceTransportTestJwt(connect.NewId()),
-		"hosted window selectors test",
-		"hosted window selectors test",
-		"test",
-		sdk.NewId(),
-		deviceLocalSettings,
-	)
-	if err != nil {
-		t.Fatal(err)
+	newDevice := func(settings *sdk.DeviceLocalSettings) *sdk.DeviceLocal {
+		deviceLocal, err := sdk.NewPlatformDeviceLocal(
+			nil,
+			networkSpace,
+			proxyDeviceTransportTestJwt(connect.NewId()),
+			"hosted window selectors test",
+			"hosted window selectors test",
+			"test",
+			sdk.NewId(),
+			settings,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return deviceLocal
 	}
+
+	// the same device without the hosted policy: its 32-MiB tier's own
+	// fraction (or connect's) gives it a limited window
+	control := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxyDeviceSettings)
+	control.NormalWindowSelectors = nil
+	control.DisableLimitedWindow = false
+	controlDevice := newDevice(control)
+	controlFraction := controlDevice.GetLimitedWindowSizeFraction()
+	_ = controlDevice.CloseAndWait(context.Background())
+	if controlFraction <= 0 {
+		t.Fatalf("without the hosted policy the device reads a limited window fraction of %v, want a limited window to override", controlFraction)
+	}
+
+	deviceLocal := newDevice(deviceLocalSettings)
 	defer func() {
 		_ = deviceLocal.CloseAndWait(context.Background())
 	}()
