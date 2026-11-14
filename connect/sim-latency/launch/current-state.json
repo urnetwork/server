@@ -75,7 +75,7 @@
       "source_sha256": "46fa01bc39c941d1abd0c541123603a84d9c87a82164066bf53dd6de78710a3e",
       "selected_distinct_tests_passed": 19,
       "qualification_scope": "Seven new controller controls, eight existing offline controller controls, two new CLI controls and two existing CLI controls passed independently. The expiry target also passed separately. PostgreSQL controls were not part of this positive selection. Initial build OOM and prior failed attribution control remain preserved.",
-      "causal_negative_check": "Running separately against the prior attribution helper; no result claimed yet.",
+      "causal_negative_check": "Confirmed: the corrected forced-order expiry test passes with the new helper and deterministically fails when only the previous attribution helper is restored. The unsafe test-only binary was retained separately and not installed.",
       "deployed": false,
       "rollout_constraint": "Both supervisor decoder consumers must use the updated closed schema before a worker can emit the additive owner diagnostics. Preserve current authority, retry predicates, budgets and original attempt deadlines."
     },
