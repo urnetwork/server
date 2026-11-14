@@ -14,8 +14,9 @@ package main
 //     <token>@ report is dropped unread;
 //   - Keys: plan-SMTP-report-seal-key's interim, so no raw report is sealed: its bytes drop and only its
 //     fields are kept;
-//   - Join and Sink: SMTP-M9-15's attribution and ABUSE's case flow behind it, so no ARF report or role mail
-//     is attributable, and the listener answers role mail plan-ABUSE-auto-reply's 550.
+//   - Join: SMTP-M9-15's attribution, so no ARF report or role mail is attributable, and the listener answers
+//     role mail plan-ABUSE-auto-reply's 550. The Sink behind it is §21's real one (model.NewAbuseSmtpSink,
+//     ABUSE-M5-09), which sees nothing until a Join attributes a report.
 //
 // <root>'s rows resolve through §12's label map (model.ResolveNetworkLabel), and reporters' DKIM keys come from
 // DNS through the process's resolver. The intake reads MG2's dns_label and writes MG5's report tables, so the
@@ -77,6 +78,7 @@ func newPlatformReportIntake(store smtpedgeservice.SmtpEdgeStore, settings *smtp
 		Tokens: tokens,
 		Labels: &reportLabelSource{root: settings.Root},
 		Txt:    txt,
+		Sink:   model.NewAbuseSmtpSink(nil),
 		Log:    reportIntakeLogger{},
 	}
 	intake, err := smtpedgeservice.NewSmtpReportIntake(host, store, deps, settings)

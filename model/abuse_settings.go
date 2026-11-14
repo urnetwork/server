@@ -5,7 +5,8 @@ package model
 // DSA Art. 20's six months (server.AbuseAppealWindowMinMonths). Everything else
 // a person could tune is here, with its unit and why it has its default: the
 // ladders' and clocks' (AbusePolicySettings, embedded), §21.7's standing windows,
-// coalescing, the action pass, retention and the abuse role's lookup cap.
+// coalescing, the action pass, retention, the abuse role's lookup cap and the
+// report joins' bounds.
 //
 // The environment's part comes from abuse.yml (server.GetAbuseConfig):
 // ApplyAbuseConfig lays its protected names over a copy, and AbuseReviewHoursOf
@@ -72,6 +73,17 @@ type AbuseSettings struct {
 	// (§21.10): never in bulk. A lookup past it answers the first rows and says
 	// more exist.
 	LookupRowLimit int
+
+	// How long after an edge connection ends a report may join by its
+	// connection_id (§21.8, tls-3): 24 hours. Non-positive joins none.
+	ConnectionJoinWindow time.Duration
+	// The most bytes of a reported url or host a join reads. 2048: past any
+	// host name, and a longer one is dropped unjoined rather than cut, since a
+	// cut url could name another host.
+	ReportUrlMaxByteCount int
+	// The longest host name and label a join looks up: RFC 1035's 253 and 63.
+	HostNameMaxByteCount  int
+	HostLabelMaxByteCount int
 }
 
 // §21's numbers. The protected names stay empty: they are the environment's,
@@ -93,6 +105,10 @@ func DefaultAbuseSettings() *AbuseSettings {
 		LegalRetentionYears:   3,
 		RetentionBatchSize:    1000,
 		LookupRowLimit:        100,
+		ConnectionJoinWindow:  24 * time.Hour,
+		ReportUrlMaxByteCount: 2048,
+		HostNameMaxByteCount:  253,
+		HostLabelMaxByteCount: 63,
 	}
 }
 

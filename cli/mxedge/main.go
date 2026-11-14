@@ -62,7 +62,9 @@ func main() {
 	// the block's own certificate and stores, and the report intake on smtpedge.yml (report_intake.go), ready
 	// only in a binary that links the groups it reads; without one every recipient gets 451
 	deps := &mxedgehost.HostDeps{}
-	intake, err := newConfiguredReportIntake(mxEdgeSettings)
+	// the url the refusal of unread role mail names is abuse.yml's form (abuse_auto_reply.go); two files that
+	// disagree on it leave the block without an intake
+	intake, err := newReportIntakeWithAutoReply(mxEdgeSettings, server.GetAbuseConfig().FormUrl())
 	if err != nil {
 		glog.Errorf("[mxedge]no report intake, so every recipient the listener answers for gets 451 4.3.0: %v\n", err)
 	} else {
