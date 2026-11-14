@@ -9,7 +9,9 @@
 // FS-24's hints with H1 and H2, FS-62's acks lost with Redis, FS-23's depositor and FS-102's key legs, a copied
 // Delegation bundle after a compromise and after a removal, and KEYS-M2-29's FS-103 (late delivery identity across key
 // replacement, an older key's object aging out, a same-generation RecoveryRebind) and FS-106 (35 days of key upkeep
-// under r, a parked device's ReaderKey). Like the other T3 tests here it carries the sidecar_localstack tag and
+// under r, a parked device's ReaderKey), and KEYS-M6-03's FS-87 key legs with S4b's and S3b's key parts in the team
+// directory's group (a MemberRevoke reaching leaves and wraps, a MemberAdmit adding and wrapping only readers); its
+// seats row at 1,000 leaves runs on T2 alone. Like the other T3 tests here it carries the sidecar_localstack tag and
 // fails, rather than skips, when the stack is down.
 
 package gkm
@@ -135,4 +137,12 @@ func TestFsKeysT3UpkeepUnderRHoldsThroughTheRetentionHorizon(t *testing.T) {
 
 func TestFsKeysT3AParkedDevicesReaderKeyWaitsForItsLift(t *testing.T) {
 	runFsKeysT3(t, gkmschedule.FsKeysScheduleParkedReaderKeyWaits)
+}
+
+func TestFsKeysT3AMemberRevokeReachesTheDirectoryGroupsLeavesAndWraps(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleDirectoryMemberRemoval)
+}
+
+func TestFsKeysT3AMemberAdmitAddsAndWrapsOnlyTheDirectorysReaders(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleDirectoryMemberAdd)
 }
