@@ -77,7 +77,11 @@ import (
 // (sidecar_admission_model.go). settings' Effects schedules §7.10's effects
 // task (config_log_effects.go) once before an append's first PUT, so a process
 // killed after the PUT still owes its effects, and again after each entry this
-// instance lands, so they run at once. api's process installs a sequencer built
+// instance lands, so they run at once. settings' Activation schedules the
+// activation task of each open proposal a recovery window holds that a landed
+// statement signed, at its window's end, and again when a retry finds that
+// statement in the log (config_log_tick.go; QD-745). api's
+// process installs a sequencer built
 // with NewApiConfigLogSettings, which sets all of these; a test's sequencer sets
 // what it tests. Ticks' schedule and retention are config_log_tick.go's and
 // config_log_retention.go's (TEAM-M2-14); reseed (§19.10), whose own walk from
@@ -117,6 +121,14 @@ type ConfigLogSettings struct {
 	// append's own outcome lands first, and without it after an entry lands, to run at once. Best effort: the
 	// task finds what to do from the log. nil schedules nothing.
 	Effects func(ctx context.Context, networkId server.Id, intent bool)
+	// Schedules the activation task of an open proposal a recovery window holds (§7.9's Recovery; QD-745), to run
+	// at runAt, the end of its window: called after each statement this instance lands, for each such proposal
+	// the entry signed. Best effort: the task judges the proposal at the tip when it runs. nil schedules nothing.
+	Activation func(ctx context.Context, networkId server.Id, proposalId []byte, runAt time.Time)
+	// §20.4's config_admissions for a tick's activations, which admit where the tick lands: an error refuses a
+	// tick that passed at state, the tip, sequenced at timeMs; a *QuotaRefusalError is answered as the
+	// QuotaRefusal itself. nil limits nothing.
+	ActivationCap func(ctx context.Context, networkId server.Id, state *sidecar.ConfigState, tick *bridge.ApiTick, timeMs int64) error
 }
 
 func DefaultConfigLogSettings() *ConfigLogSettings {
@@ -236,6 +248,10 @@ type configLogNetwork struct {
 	// (config_log_effects.go); 0 walks every retained entry again, each one
 	// applied before found by its admin event
 	effectsThrough uint64
+	// the time_ms of the newest tick entry this verifier loaded or applied,
+	// which spaces api's ticks (config_log_tick.go); false with none
+	lastTickTimeMs int64
+	lastTick       bool
 }
 
 // A base's facts retention needs.
@@ -458,8 +474,10 @@ func (self *configLogNetwork) loadWithLock(ctx context.Context, sequencer *Confi
 		return err
 	}
 	self.log, self.signedGenesis = log, signedGenesis
+	self.lastTickTimeMs, self.lastTick = 0, false
 	for _, entryBytes := range entries {
 		self.noteBaseWithLock(entryBytes)
+		self.noteTickWithLock(entryBytes)
 	}
 	return nil
 }
@@ -505,6 +523,7 @@ func (self *configLogNetwork) applyWithLock(ctx context.Context, sequencer *Conf
 		return err
 	}
 	self.noteBaseWithLock(entryBytes)
+	self.noteTickWithLock(entryBytes)
 	return nil
 }
 
@@ -576,6 +595,10 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 		self.advance(ctx, networkId, network, pin)
 		if landedBytes != nil {
 			self.published(ctx, networkId, network, pin, landedBytes)
+		} else {
+			// a retry of an entry whose first answer was lost, perhaps with
+			// its process: the activations it owes are scheduled again
+			self.scheduleActivationsWithLock(ctx, networkId, network, pin.GetVersion())
 		}
 		return pin, nil
 	}
@@ -669,6 +692,7 @@ func (self *ConfigLogSequencer) published(ctx context.Context, networkId server.
 	if self.settings.Effects != nil {
 		self.settings.Effects(ctx, networkId, false)
 	}
+	self.scheduleActivationsWithLock(ctx, networkId, network, pin.GetVersion())
 }
 
 // One entry's PUT at its position until its outcome is known: the new pin when
@@ -846,9 +870,22 @@ func (self *ConfigLogSequencer) AppendBase(ctx context.Context, networkId server
 
 // §7.9's tick row: api's own facts, a reap or a recovery window's end, which
 // readers check by content, so api appends only a tick its verifier takes at
-// the tip (checkConfigLogTick). Ticks never count against the append limits.
-// Their schedule, at most once a minute per network, is config_log_tick.go's.
+// the tip, judged as every reader judges it there (ConfigLog.CheckTick): each
+// reaped id an ephemeral admission, each activation from its proposal's row,
+// and then settings' ActivationCap for the admissions its activations take.
+// Ticks never count against the append limits. Their schedule, at most once a
+// minute per network, is config_log_tick.go's, whose tasks append through
+// AppendTickSpaced.
 func (self *ConfigLogSequencer) AppendTick(ctx context.Context, networkId server.Id, tick *bridge.ApiTick) (*bridge.AuthPin, error) {
+	return self.AppendTickSpaced(ctx, networkId, tick, 0)
+}
+
+// AppendTick, refused with a *ConfigLogTickSpacingError while the network's
+// newest tick is less than interval old by the time the entry would carry:
+// §7.9's at most one tick a minute per network, held under the network's lock
+// and again at each position an append tries, so against other instances'
+// ticks too. A non-positive interval spaces nothing.
+func (self *ConfigLogSequencer) AppendTickSpaced(ctx context.Context, networkId server.Id, tick *bridge.ApiTick, interval time.Duration) (*bridge.AuthPin, error) {
 	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(tick)
 	if err != nil {
 		return nil, err
@@ -860,7 +897,10 @@ func (self *ConfigLogSequencer) AppendTick(ctx context.Context, networkId server
 			if network.log.State().Base() == nil {
 				return nil, errors.New("no tick before base 1")
 			}
-			return nil, checkConfigLogTick(network.log.State(), tick)
+			if after, spaced := network.tickSpacedUntilWithLock(interval); spaced && timeMs < after {
+				return nil, &ConfigLogTickSpacingError{After: time.UnixMilli(after)}
+			}
+			return nil, self.checkTickWithLock(ctx, networkId, network, tick, timeMs)
 		},
 	})
 }

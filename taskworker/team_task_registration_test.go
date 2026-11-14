@@ -14,6 +14,7 @@ func TestTeamTasksAreProductionOnly(t *testing.T) {
 	names := []string{
 		task.NewTaskTarget(work.ReapEphemeralClients).TargetFunctionName(),
 		task.NewTaskTarget(model.AppendConfigLogTickTask).TargetFunctionName(),
+		task.NewTaskTarget(model.AppendConfigLogActivationTask).TargetFunctionName(),
 		task.NewTaskTarget(work.ConfigLogRetention).TargetFunctionName(),
 		task.NewTaskTarget(work.NetworkDomainRecheck).TargetFunctionName(),
 		task.NewTaskTarget(work.NetworkAuditWebhookDelivery).TargetFunctionName(),

@@ -676,6 +676,12 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			model.AppendConfigLogTickTask,
 			model.AppendConfigLogTickTaskPost,
 		),
+		// a recovery window's end, which the sequencer schedules a proposal
+		// at a time (model.AppendConfigLogActivationTask; QD-745)
+		task.NewTaskTargetWithPost(
+			model.AppendConfigLogActivationTask,
+			model.AppendConfigLogActivationTaskPost,
+		),
 		task.NewTaskTargetWithPost(
 			work.ConfigLogRetention,
 			work.ConfigLogRetentionPost,
