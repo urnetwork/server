@@ -10,6 +10,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
+	"github.com/urnetwork/server/controller"
 )
 
 func main() {
@@ -45,6 +46,9 @@ Options:
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
+	// §21's effects for the actions this process applies (ABUSE-M5-06); a
+	// binary that does not link MG5 installs none
+	controller.InstallAbuseEffects()
 	if err := api.Run(ctx, api.RunOptions{Port: port}); err != nil {
 		panic(err)
 	}

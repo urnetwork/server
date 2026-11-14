@@ -9,6 +9,7 @@ import (
 	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/taskworker"
 )
 
@@ -64,6 +65,9 @@ Options:
 	if err != nil {
 		panic(err)
 	}
+	// §21's effects for the owed actions the abuse pass finishes
+	// (ABUSE-M5-06); a binary that does not link MG5 installs none
+	controller.InstallAbuseEffects()
 	if err := taskworker.Run(ctx, taskworker.RunOptions{Port: port, Count: count, BatchSize: batchSize}); err != nil {
 		panic(err)
 	}

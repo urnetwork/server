@@ -24,10 +24,10 @@ package controller
 // server originates only denials (I-4). Logs and metrics carry no network id
 // and no target.
 //
-// The process installs its effects (ABUSE-M5-06) and its record mailer at
-// startup. Until then every effect and mail refuses, each action stays owed
-// with applied_time or mailed_time NULL, and the pass keeps retrying: nothing
-// reads as applied or mailed that was not.
+// The process installs its effects (InstallAbuseEffects, abuse_effects.go) and
+// its record mailer at startup. Until then every effect and mail refuses, each
+// action stays owed with applied_time or mailed_time NULL, and the pass keeps
+// retrying: nothing reads as applied or mailed that was not.
 
 import (
 	"context"
@@ -79,8 +79,9 @@ type AbuseEffects interface {
 // No effects are installed, so the action stays owed.
 var ErrAbuseEffectsUnavailable = errors.New("abuse effects unavailable")
 
-// What a process has before ABUSE-M5-06 installs the real effects: it refuses
-// every effect, so no action reads as applied.
+// What a process has before it installs the real effects
+// (InstallAbuseEffects): it refuses every effect, so no action reads as
+// applied.
 type unavailableAbuseEffects struct{}
 
 // Refuses: see the type.
@@ -178,6 +179,10 @@ type AbuseActionResult struct {
 	Applied bool
 	// whether its record has been mailed, now or before
 	Mailed bool
+	// for a lift of a revocation: the revocation stands, since nothing returns
+	// a revoked certificate, so the network's devices order new ones (§21.6).
+	// What the reviewer is told.
+	RevocationStands bool
 }
 
 // Records and applies one action under its case, the path in the file header.
@@ -230,7 +235,11 @@ func LiftAbuseAction(ctx context.Context, args *model.AbuseLiftArgs) (*AbuseActi
 		return nil, err
 	}
 	abuseActionStep(AbuseActionStepCommitted, lift.ActionId)
-	result := &AbuseActionResult{Action: lift, Inserted: inserted}
+	result := &AbuseActionResult{
+		Action:           lift,
+		Inserted:         inserted,
+		RevocationStands: lifted.Kind == model.AbuseActionKindCertRevoke,
+	}
 	result.Applied, result.Mailed, _, _ = completeAbuseAction(ctx, abuseCase.Barred, lift, lifted, true, true)
 	return result, nil
 }
