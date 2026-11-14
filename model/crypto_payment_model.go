@@ -125,10 +125,10 @@ const (
 	// address per invoice) whose amount is no open invoice's unique amount
 	CryptoReviewReasonAmountUnmatched = "amount_unmatched"
 	// a payment the late-payment rules would credit to an invoice the
-	// retention unlink has passed: the unlink forgot the network the invoice
-	// was for, so the rail cannot deliver it, and an operator matches it to
-	// its buyer (a code invoice still credits: its buyer reads the code with
-	// the status token)
+	// retention unlink has passed: the unlink forgot the network (or the gift
+	// order) the invoice was for, so the rail cannot deliver it, and an
+	// operator matches it to its buyer (a data code invoice still credits: its
+	// buyer reads the code with the status token)
 	CryptoReviewReasonUnlinked = "unlinked"
 )
 
@@ -2236,6 +2236,13 @@ func EndCryptoPaymentGrantInTx(
 		ended = 0 < len(endedNetworkIds)
 		return
 	}
+	// a gift order's invoice (the reconcile's orphan leg; an operator's refund
+	// of one is RefundCryptoGiftOrderInTx): every unredeemed code voided and
+	// every redeemed code's year ended, each recorded, so a credit again
+	// restores exactly them (gift_refund_model.go)
+	if giftOrderId := cryptoGiftOrderIdInTx(tx, ctx, intent.IntentId); giftOrderId != nil {
+		return endCryptoGiftOrderGrantInTx(tx, ctx, *giftOrderId, now)
+	}
 	if intent.BalanceCodeId != nil {
 		_, voidedCount, endedNetworks := ClawbackBalanceCodesForPurchaseEventInTx(tx, ctx, CryptoPaymentPurchaseEventId(intent.IntentId), now)
 		endedNetworkIds = append(endedNetworkIds, endedNetworks...)
@@ -2293,6 +2300,13 @@ type CryptoPaymentUnlinkResult struct {
 //     truncated to the day;
 //   - a code's purchase event id stops naming the invoice, and its purchase
 //     record and email are cleared;
+//   - a gift order the invoice paid forgets it: its codes' purchase events
+//     (crypto/<id>/gift/<n>) move to a fresh base, the order's own, and lose
+//     their purchase record and email, and the order loses the invoice's id,
+//     its exact times (its day stays), its referrer (its codes keep theirs)
+//     and, once no friend's email is owed, the buyer's email
+//     (unlinkCryptoGiftOrderInTx). The order keeps its codes, so its cards
+//     still deliver and its codes still redeem;
 //   - the invoice forgets its network, email and grant handles, and its times
 //     are truncated to the day, as are its receipts' and its pool address's;
 //     its quote history is deleted (the invoice keeps the final quote);
@@ -2394,6 +2408,7 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 				CryptoPaymentPurchaseEventId(row.intentId),
 				"crypto/unlinked/"+server.NewId().String(),
 			))
+			unlinkCryptoGiftOrderInTx(tx, ctx, row.intentId)
 			// the events name the invoice, or one of its receipts' transactions
 			// (a USDC invoice has no receipts: only its operator refund names it)
 			server.RaisePgResult(tx.Exec(
@@ -2474,6 +2489,136 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 		))
 	}, server.TxReadCommitted)
 	return
+}
+
+// unlinkCryptoGiftOrderInTx is the 30-day unlink of the gift order an
+// invoice paid for, or was made for (UnlinkCryptoPaymentIntents), in its
+// transaction: the order forgets the invoice's id, and its codes' purchase
+// events, "crypto/<intent id>/gift/<n>", become "<base>/gift/<n>" under a
+// fresh random base, "crypto/unlinked/<id>", which the order takes as its own
+// purchase event base, so it still finds its codes (GetGiftOrderCodes); like
+// an invoice's data code, they lose their purchase record and email. The
+// codes are matched by their exact purchase event ids, the unique key. Nothing
+// for an invoice no gift order names.
+func unlinkCryptoGiftOrderInTx(tx server.PgTx, ctx context.Context, intentId server.Id) {
+	var giftOrderId server.Id
+	var quantity int
+	var purchaseEventBase *string
+	found := false
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT gift_order_id, quantity, purchase_event_base
+			FROM gift_order
+			WHERE crypto_intent_id = $1
+			FOR UPDATE
+		`,
+		intentId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&giftOrderId, &quantity, &purchaseEventBase))
+			found = true
+		}
+	})
+	if !found {
+		return
+	}
+
+	invoiceBase := CryptoPaymentPurchaseEventId(intentId)
+	if purchaseEventBase == nil || *purchaseEventBase != invoiceBase {
+		// never paid: no code names the invoice
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE gift_order SET crypto_intent_id = NULL WHERE gift_order_id = $1`,
+			giftOrderId,
+		))
+		unlinkCryptoGiftOrderFactsInTx(tx, ctx, giftOrderId)
+		return
+	}
+	unlinkedBase := "crypto/unlinked/" + server.NewId().String()
+	fromIds := make([]string, 0, quantity)
+	toIds := make([]string, 0, quantity)
+	for n := 0; n < quantity; n += 1 {
+		fromIds = append(fromIds, giftPurchaseEventId(invoiceBase, n))
+		toIds = append(toIds, giftPurchaseEventId(unlinkedBase, n))
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE transfer_balance_code
+			SET
+				purchase_event_id = unlinked.to_id,
+				purchase_record = '',
+				purchase_email = ''
+			FROM unnest($1::text[], $2::text[]) AS unlinked(from_id, to_id)
+			WHERE
+				transfer_balance_code.purchase_event_id = unlinked.from_id AND
+				transfer_balance_code.gift_order_id = $3
+		`,
+		fromIds,
+		toIds,
+		giftOrderId,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE gift_order
+			SET crypto_intent_id = NULL, purchase_event_base = $2
+			WHERE gift_order_id = $1
+		`,
+		giftOrderId,
+		unlinkedBase,
+	))
+	unlinkCryptoGiftOrderFactsInTx(tx, ctx, giftOrderId)
+}
+
+// What else of a gift order could tie it to its unlinked invoice: its times
+// become their day, as the invoice's do, and so do its codes' (made at the
+// credit, voided at an operator's refund or the orphan leg, each the time of
+// an event or a transaction that names the invoice): create_time and
+// cancel_time, and gift_code_void's void_time. A void code stays void
+// (cancel_time stays set), and nothing reads those times but whether one is
+// set: a code's redeem window is its start_time and end_time, which its
+// fulfilment sets on day boundaries already. Its referrer goes (its codes keep
+// theirs, which the referral credit at redemption reads); and its buyer's
+// email is blanked unless a friend's email is still owed, whose reply-to it is
+// (ClearUnlinkedGiftOrderBuyerEmail blanks it once none is).
+func unlinkCryptoGiftOrderFactsInTx(tx server.PgTx, ctx context.Context, giftOrderId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE gift_order
+			SET
+				create_time = date_trunc('day', create_time),
+				paid_time = date_trunc('day', paid_time),
+				refunded_time = date_trunc('day', refunded_time),
+				referrer_network_id = NULL
+			WHERE gift_order_id = $1
+		`,
+		giftOrderId,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE transfer_balance_code
+			SET
+				create_time = date_trunc('day', create_time),
+				cancel_time = date_trunc('day', cancel_time)
+			WHERE gift_order_id = $1
+		`,
+		giftOrderId,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE gift_code_void
+			SET void_time = date_trunc('day', void_time)
+			WHERE gift_order_id = $1
+		`,
+		giftOrderId,
+	))
+	clearUnlinkedGiftOrderBuyerEmailInTx(tx, ctx, giftOrderId)
 }
 
 // CryptoUnlinkedSolTransactionPrefix starts the transaction id the 30-day

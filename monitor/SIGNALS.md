@@ -21672,6 +21672,10 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
 - every non-dry-run `credit_unfulfillable` Stripe event in the last 24 hours,
   reduced to distinct provider evidence, observation/run counts, and age;
   the complete unresolved-webhook tuple belongs to the separate §2.22 WARN.
+  A gift order's Checkout payment that did not match its order is recorded
+  under store `gift` (reason `gift_payment_mismatch`), which this probe never
+  reads: it is §2.22's `payment-gift-mismatch` WARN, not an invalid Stripe
+  tuple.
 
 The default publisher and health/repair readers recognize every reconciled
 store, including `x402`. Its local leg is always enabled and needs no external
@@ -22121,6 +22125,26 @@ establish:
   support disposition. Email alone is not safe write authority.
   The 24-hour audit count can persist after resolution, and aging out or a
   fresh reconciliation watermark is not proof of payment disposition.
+- `payment-gift-mismatch` (WARN): a gift order's Checkout payment did not
+  match its order. A gift session charges the order's total in usd, with
+  adaptive pricing off, and the Stripe webhook fulfils a gift order only when
+  the completed session paid exactly that amount in usd
+  (controller/gift_checkout_controller.go); one that paid another amount or
+  currency fulfilled nothing, so the buyer paid and has no codes, cards or
+  emails yet. The webhook records it once per session as a
+  `payment_reconciliation_event` with store `gift`, action
+  `credit_unfulfillable`, reason `gift_payment_mismatch` and the Checkout
+  session as evidence; its details carry the gift order, the amount and
+  currency paid and the order's total. It is the only `gift` record counted
+  here (the gift delivery's `error` records are not), and the count is
+  distinct sessions. The session never asks for another amount or currency,
+  so each one is a change in how Checkout priced it or a defect. An operator
+  settles each payment with its buyer: refund it in Stripe (the refund
+  webhook marks the unfulfilled order refunded) and let the buyer order
+  again, or record another disposition with the owner's go, and find why
+  Checkout charged another amount or currency before more gift sessions are
+  made. Never fulfil an order from the record alone, and never make or edit
+  codes by hand. §2.21 reads only Stripe's records and never pages it.
 - `payment-balance-code-undelivered` (PAGE, from the §1.5 log tail): a paid
   fulfillment durably created a balance code, automatic redemption failed,
   and no email recovery channel exists. Preserve the code and provider ledger;

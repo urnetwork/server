@@ -389,6 +389,8 @@ func cryptoItemDescription(item string) string {
 		return "URnetwork 1 TiB data"
 	case StripeItemData10Tib:
 		return "URnetwork 10 TiB data"
+	case giftCryptoItem:
+		return "URnetwork Pro gift codes"
 	}
 	return "URnetwork"
 }
@@ -722,6 +724,9 @@ type cryptoIntentRequest struct {
 	offerApplied bool
 	// open-invoice reuse applies (account and network delivery)
 	reuse bool
+	// the most this invoice may be: 0 is the quote's max_invoice_usd. A gift
+	// order's is gift.crypto_max_invoice_usd (gift_crypto_controller.go).
+	maxInvoiceUsd float64
 }
 
 // CreateCryptoPaymentIntent answers POST /pay/crypto/intent: an invoice for
@@ -913,7 +918,11 @@ func cryptoStartIntent(
 ) *CryptoPaymentIntentResult {
 	ctx := clientSession.Ctx
 	asset := request.asset
-	if config.Quote.MaxInvoiceUsd < request.priceUsd {
+	maxInvoiceUsd := config.Quote.MaxInvoiceUsd
+	if 0 < request.maxInvoiceUsd {
+		maxInvoiceUsd = request.maxInvoiceUsd
+	}
+	if maxInvoiceUsd < request.priceUsd {
 		glog.Errorf("[cryptopay]refusing to invoice %s with %s: the price is over the per-invoice cap\n", request.item, asset)
 		cryptoPayQuoteResults.WithLabelValues(asset, cryptoQuoteRefusedOverMax).Inc()
 		return cryptoIntentError(PurchaseErrorCodeItemUnavailable, "This purchase is not available with this coin.")
@@ -1338,7 +1347,9 @@ func cryptoStatusResult(
 			result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeUnderpaid, Message: "The payment is short of the quote. Contact support."}
 		}
 	case CryptoPaymentStatusPaid:
-		if intent.Delivery == model.CryptoDeliveryCode && intent.BalanceCodeId != nil {
+		// a gift order's codes are on its cards (GET /pay/gift/cards.pdf); its
+		// invoice's grant is only the first of them
+		if intent.Delivery == model.CryptoDeliveryCode && intent.BalanceCodeId != nil && !cryptoGiftInvoice(intent) {
 			result.BalanceCode = model.GetBalanceCodeSecretInConn(nil, ctx, *intent.BalanceCodeId)
 		}
 	}
@@ -1566,10 +1577,11 @@ var cryptoHeldReviewReasons = []string{
 
 // Whether an invoice's credit has nowhere to go: one delivered to a network,
 // past the retention unlink, which forgot the network
-// (RunCryptoPaymentUnlink). A code invoice still delivers: its buyer reads the
-// code with the status token.
+// (RunCryptoPaymentUnlink), and a gift order's, whose order the unlink forgot
+// in the same way. A code invoice still delivers: its buyer reads the code
+// with the status token.
 func cryptoIntentUndeliverable(intent *model.CryptoPaymentIntent) bool {
-	return intent.UnlinkedAt != nil && intent.Delivery != model.CryptoDeliveryCode
+	return intent.UnlinkedAt != nil && (intent.Delivery != model.CryptoDeliveryCode || cryptoGiftInvoice(intent))
 }
 
 // cryptoBuyerReviewReason is the review reason a buyer is shown: either

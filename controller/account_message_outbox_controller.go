@@ -127,6 +127,14 @@ var accountMessageTemplates = map[string]func() Template{
 	(&TrialEndingTemplate{}).Name(): func() Template {
 		return &TrialEndingTemplate{}
 	},
+	// a paid gift order's cards (gift_delivery.go): the buyer's now, each
+	// friend's on the buyer's date; each reads its order and card when sent
+	(&GiftCardsBuyerTemplate{}).Name(): func() Template {
+		return &GiftCardsBuyerTemplate{}
+	},
+	(&GiftCardFriendTemplate{}).Name(): func() Template {
+		return &GiftCardFriendTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,
@@ -170,6 +178,29 @@ type accountMessage struct {
 	networkId *server.Id
 	userAuth  string
 	template  Template
+	// nil is due at once; otherwise due at this time, at once when it has passed
+	deliverTime *time.Time
+}
+
+// A template that reads what it renders when it is sent instead of keeping it
+// in the outbox (a gift's order, codes and card PDF, so a PDF never sits in the
+// stored json). A load error is a failed attempt that says nothing about the
+// sender; errAccountMessageWithdrawn gives the message up at once.
+type accountMessageLoader interface {
+	LoadAccountMessage(ctx context.Context) error
+}
+
+// The state that owed a message no longer does (a refunded gift order): the
+// delivery gives the message up instead of retrying it.
+var errAccountMessageWithdrawn = errors.New("withdrawn")
+
+// A template that acts once its message is finished: sent, or given up after
+// it was decoded (a friend's gift email lets an unlinked crypto order forget
+// its buyer's address). It runs after the outcome is recorded and never
+// changes it; an error is logged, so the work must also be done elsewhere
+// for a message given up undecoded, or a run that stopped in between.
+type accountMessageFinisher interface {
+	AccountMessageFinished(ctx context.Context)
 }
 
 // The model's arguments for the message. The template must go through the
@@ -189,6 +220,7 @@ func (self *accountMessage) args() *model.AccountMessageArgs {
 		UserAuth:     self.userAuth,
 		TemplateName: templateName,
 		TemplateJson: string(templateJson),
+		DeliverTime:  self.deliverTime,
 	}
 }
 
@@ -311,14 +343,23 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 	defer recordCancel()
 
 	templateLabel := accountMessageTemplateLabel(message.TemplateName)
+	// nil until decoded
+	var template Template
 	err := func() error {
 		if self.settings.maxAttemptCount < message.AttemptCount {
 			return fmt.Errorf("claimed %d times without a recorded outcome", message.AttemptCount)
 		}
-		template, err := decodeAccountMessageTemplate(message.TemplateName, message.TemplateJson)
+		decoded, err := decodeAccountMessageTemplate(message.TemplateName, message.TemplateJson)
 		if err != nil {
 			// says nothing about the sender
 			return err
+		}
+		template = decoded
+		if loader, ok := template.(accountMessageLoader); ok {
+			// what the message renders, read now; says nothing about the sender
+			if err := loader.LoadAccountMessage(self.ctx); err != nil {
+				return err
+			}
 		}
 		if err := self.sender.SendAccountMessageTemplate(message.UserAuth, template); err != nil {
 			// failed sends in a row end the run
@@ -332,6 +373,7 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 		if model.CompleteAccountMessage(recordCtx, message.MessageId, *message.ClaimId, self.now()) {
 			self.sentCount += 1
 			accountMessageDeliveryCounter.WithLabelValues(templateLabel, "sent").Inc()
+			self.finished(template)
 		} else {
 			self.reportLeaseLost(message)
 		}
@@ -339,17 +381,21 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 	}
 
 	failure := "failed"
-	if errors.Is(err, context.DeadlineExceeded) {
+	withdrawn := errors.Is(err, errAccountMessageWithdrawn)
+	if withdrawn {
+		failure = "withdrawn"
+	} else if errors.Is(err, context.DeadlineExceeded) {
 		failure = "timeout"
 	}
 	now := self.now()
-	if self.settings.maxAttemptCount <= message.AttemptCount {
+	if self.settings.maxAttemptCount <= message.AttemptCount || withdrawn {
 		if !model.AbandonAccountMessage(recordCtx, message.MessageId, *message.ClaimId, now, err.Error()) {
 			self.reportLeaseLost(message)
 			return
 		}
 		self.abandonCount += 1
 		accountMessageDeliveryCounter.WithLabelValues(templateLabel, "abandoned").Inc()
+		self.finished(template)
 		if suppressedCount, ok := accountMessageAbandonReports.Allow(now); ok {
 			glog.Infof(
 				"[outbox]abandoned account message %s (%s) after %d attempts: the last %s; %d more abandoned since the last report\n",
@@ -380,6 +426,21 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 			suppressedCount,
 		)
 	}
+}
+
+// Lets a template act on its message's recorded outcome
+// (accountMessageFinisher), within its own bound; nothing for a template not
+// decoded.
+func (self *accountMessageDelivery) finished(template Template) {
+	finisher, ok := template.(accountMessageFinisher)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(self.ctx), accountMessageRecordTimeout)
+	defer cancel()
+	server.HandleError(func() {
+		finisher.AccountMessageFinished(ctx)
+	})
 }
 
 // Counts and reports a claim whose lease ended before its outcome was recorded.

@@ -299,3 +299,75 @@ INSERT INTO play_purchase_binding (purchase_token) VALUES ('play_bound_later'), 
 		})
 	})
 }
+
+// The gift mismatch record reaches its payment-failures WARN through the
+// actual query, once per session, with no private evidence; the
+// reconciliation signal reads only Stripe's records, so it pages nothing; and
+// no other gift record is counted. The same reason under store stripe is still
+// no known Stripe tuple: it pages as before.
+func TestPaymentFailuresGiftMismatchAuditSqlContract(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
+		server.Db(t.Context(), func(conn server.PgConn) {
+			paymentReconciliationAuditSqlFixture(t, conn)
+			mismatch := map[string]any{
+				"reason":            "gift_payment_mismatch",
+				"leg":               "webhook",
+				"gift_order":        "synthetic-private-details",
+				"amount_total":      8996,
+				"currency":          "eur",
+				"order_total_cents": 8997,
+			}
+			// one session's record, delivered twice; a dry run; and gift
+			// records no class reads
+			paymentReconciliationAuditSqlInsert(t, conn, "in_private_audit", mismatch, "gift", "credit_unfulfillable", false, 120)
+			paymentReconciliationAuditSqlInsert(t, conn, "in_private_audit", mismatch, "gift", "credit_unfulfillable", false, 60)
+			paymentReconciliationAuditSqlInsert(t, conn, "in_other_private_audit", mismatch, "gift", "credit_unfulfillable", true, 60)
+			paymentReconciliationAuditSqlInsert(t, conn, "in_other_private_audit", map[string]any{"reason": "synthetic-private-details"}, "gift", "credit_unfulfillable", false, 60)
+			paymentReconciliationAuditSqlInsert(t, conn, "in_other_private_audit", map[string]any{"reason": "synthetic-private-details"}, "gift", "error", false, 60)
+
+			groups := 0
+			result, err := conn.Query(t.Context(), paymentFailuresQuery)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var kind, store string
+					var count, oldestAge, newestAge int64
+					server.Raise(result.Scan(&kind, &store, &count, &oldestAge, &newestAge))
+					if kind != "credit_unfulfillable" || store != "gift" {
+						t.Fatal("the payment failure query counted another gift record")
+					}
+					groups += 1
+					if count != 1 {
+						t.Fatal("the gift mismatch is not counted once per session")
+					}
+					issue, err := paymentFailureFinding(kind, store, count, oldestAge, newestAge)
+					if err != nil || issue.class != "payment-gift-mismatch" || issue.tier != tierWarn {
+						t.Fatal("the gift mismatch is not its own WARN")
+					}
+					rendered := alertFromFinding(syntheticSettings(&syntheticSource{}), "2.22", "payment-failures", "Payment failures", issue).Markdown()
+					for _, forbidden := range []string{"in_private_audit", "in_other_private_audit", "synthetic-private-details"} {
+						if strings.Contains(rendered, forbidden) {
+							t.Fatal("private payment evidence escaped the gift mismatch WARN")
+						}
+					}
+				}
+			})
+			if groups != 1 {
+				t.Fatal("the payment failure query lost the gift mismatch")
+			}
+
+			row := paymentReconciliationAuditSqlRead(t, conn, paymentReconciliationUnfulfillableQuery)
+			issue, err := paymentReconciliationUnfulfillableFinding([]pgRow{row})
+			if err != nil || issue != nil || strings.Join(row, ",") != "0,0,0,0,-1" {
+				t.Fatal("the reconciliation signal pages a gift record")
+			}
+
+			server.RaisePgResult(conn.Exec(t.Context(), "TRUNCATE payment_reconciliation_event"))
+			paymentReconciliationAuditSqlInsert(t, conn, "in_private_audit", mismatch, "stripe", "credit_unfulfillable", false, 120)
+			row = paymentReconciliationAuditSqlRead(t, conn, paymentReconciliationUnfulfillableQuery)
+			issue, err = paymentReconciliationUnfulfillableFinding([]pgRow{row})
+			if err != nil || issue == nil || issue.class != "payment-reconciliation-credit-unfulfillable-invalid" || issue.tier != tierPage {
+				t.Fatal("a Stripe record of an unknown reason no longer pages as invalid")
+			}
+		})
+	})
+}
