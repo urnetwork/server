@@ -97,6 +97,7 @@ func TestWakeSenderOnHostFollowsTheSwitch(t *testing.T) {
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 	redis := sidecartest.NewFakeRedis(ctx, clock, nil, nil, nil)
 	defer redis.Close()
+	sidecartest.RegisterPushScripts(redis)
 	gates := sidecartest.NewFakeServiceGates(nil)
 	if err := gates.Set("sidecar:\n  wake: {enabled: true}\n"); err != nil {
 		t.Fatal(err)
