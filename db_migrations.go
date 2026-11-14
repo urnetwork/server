@@ -11573,4 +11573,13 @@ var migrations = []any{
 	// deploying the taskworker that advances the rollup and the api and alt
 	// that read it.
 	operatorBlockTrafficMigration,
+
+	// The operator blocks the daily points award recorded expired
+	// (operator_block_points_expired_schema.go,
+	// model/operator_block_points.go): one new empty table, created only when
+	// absent, under a five-second lock bound. Nothing existing is locked or
+	// rewritten. Apply before deploying the taskworker and bringyourctl that
+	// write and read it, and the api and alt whose GET /account/epochs reads
+	// it.
+	operatorBlockPointsExpiredMigration,
 }

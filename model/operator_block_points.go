@@ -51,6 +51,20 @@ package model
 // The daily task (controller.AwardOperatorBlockPoints) awards each block once
 // it completes; the backfill (bringyourctl account-points backfill-blocks)
 // awards the blocks that completed before the task ran, with an explicit go.
+//
+// An award must run before its window's reliability evidence passes
+// client_reliability retention, ClientReliabilityRetention after the window
+// opens, about three days after the block is due: past that some evidence
+// may be gone, and the award fails closed
+// (ErrOperatorBlockPointsReliabilityExpired). The daily task awards its blocks
+// oldest first and stops at the first error, since it owns only the blocks
+// after its last award, and a block it passed over on a transient error would
+// never be tried again. A block past its deadline is no transient error, as
+// retention only moves forward: the task records it expired, once
+// (operator_block_points_expired), and goes on to the later blocks. An
+// expired block never gets its points, by the task or by a backfill
+// (OperatorBlockPointsExpiry). Until 2026-11-14 the task stopped at such a
+// block on every run, so no later block was ever awarded again.
 
 import (
 	"context"
@@ -65,6 +79,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -113,7 +129,22 @@ var (
 	ErrOperatorBlockPointsReliabilityExpired = errors.New("operator block reliability evidence is past client_reliability retention")
 	// The client_reliability drain has not reached the end of the block.
 	ErrOperatorBlockPointsReliabilityPending = errors.New("operator block reliability evidence is not drained yet")
+	// The daily task recorded the block expired (OperatorBlockPointsExpiry):
+	// it is never awarded.
+	ErrOperatorBlockPointsExpired = errors.New("operator block expired: its reliability evidence passed client_reliability retention before any award, so it is never awarded")
 )
+
+// Operator blocks the daily task recorded expired, counted once each, when it
+// wrote the record. Every process registers it at zero; the taskworker that
+// ran the award counts.
+var operatorBlockPointsExpiredBlocksCounter = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork", Subsystem: "operator_block_points", Name: "expired_blocks_total",
+	Help: "Operator blocks the daily award recorded expired, once each: their reliability evidence passed client_reliability retention before any award, so they never get their points (operator_block_points_expired)",
+})
+
+func init() {
+	prometheus.MustRegister(operatorBlockPointsExpiredBlocksCounter)
+}
 
 // OperatorBlockPointsPlanId is the payment plan id of an operator block's
 // points. It derives from the block, so every writer finds an earlier award by
@@ -187,14 +218,18 @@ func GetOperatorBlockPointsAwarded(ctx context.Context, blocks []int64) map[int6
 }
 
 // operatorBlockPointsAutomaticBlocks is what one run of the daily task
-// awards, ascending:
+// awards, ascending, of the due blocks that have neither an award nor an
+// expiry record:
 //   - after any award, every later due block without one, so a missed run
 //     catches up
 //   - before the first award, the due blocks from fromBlock, the block that
 //     was open when the task was first scheduled: the blocks that completed
 //     before this code ran are the backfill's, which needs an explicit go
 //   - without either, only the latest due block
-func operatorBlockPointsAutomaticBlocks(due []int64, awarded map[int64]bool, fromBlock int64) []int64 {
+//
+// An expiry record leaves the last award where it was: it only drops its
+// block from the list.
+func operatorBlockPointsAutomaticBlocks(due []int64, awarded map[int64]bool, expired map[int64]bool, fromBlock int64) []int64 {
 	blocks := []int64{}
 	lastAwarded := int64(0)
 	for block := range awarded {
@@ -203,7 +238,7 @@ func operatorBlockPointsAutomaticBlocks(due []int64, awarded map[int64]bool, fro
 		}
 	}
 	for _, block := range due {
-		if awarded[block] {
+		if awarded[block] || expired[block] {
 			continue
 		}
 		switch {
@@ -445,10 +480,122 @@ func operatorBlockReliabilityBlockWindow(start time.Time, end time.Time) (minBlo
 // The reliability window that starts at minBlockNumber is still inside
 // client_reliability retention at now, so an award of it can still be
 // computed. One predicate for the award (readOperatorBlockReliability), which
-// fails closed past it, and for the blocks whose sweeps the contract horizon
-// reaper keeps (OperatorBlockPointsPendingWindows).
+// fails closed past it, for a block's expiry (OperatorBlockPointsExpiryAt),
+// and for the blocks whose sweeps the contract horizon reaper keeps
+// (OperatorBlockPointsPendingWindows).
 func operatorBlockReliabilityRetained(minBlockNumber int64, now time.Time) bool {
 	return clientReliabilityRetentionCutoffBlock(now) <= minBlockNumber
+}
+
+// A completed block past its deadline: its window's first reliability block
+// is older than the first one client_reliability retention keeps at the
+// award clock, so no award of it can read all its evidence, and one fails
+// closed (ErrOperatorBlockPointsReliabilityExpired). The deadline is the
+// window's start plus ClientReliabilityRetention, at reliability block
+// granularity: about three days after a whole block is due. Retention only
+// moves forward, so an expiry is permanent. The daily task records it
+// (operator_block_points_expired) and never awards the block; a commit of any
+// award of a recorded block is refused, and no backfill can compute one.
+type OperatorBlockPointsExpiry struct {
+	Block       int64
+	WindowStart time.Time
+	WindowEnd   time.Time
+	// the window's first reliability block, where an award reads from
+	ReliabilityMinBlockNumber int64
+	// the first reliability block retention keeps at ExpireTime, after the
+	// window's first
+	RetentionMinBlockNumber int64
+	// the award clock that found the block past its deadline
+	ExpireTime time.Time
+}
+
+// The block's expiry at the award clock now, or false while an award of it can
+// still read its whole window, and for a block with no traffic past the
+// cutoff. Pure.
+func OperatorBlockPointsExpiryAt(block int64, cutoff time.Time, now time.Time) (*OperatorBlockPointsExpiry, bool) {
+	start, end, ok := OperatorBlockPointsWindow(block, cutoff)
+	if !ok {
+		return nil, false
+	}
+	minBlockNumber, _ := operatorBlockReliabilityBlockWindow(start, end)
+	if operatorBlockReliabilityRetained(minBlockNumber, now) {
+		return nil, false
+	}
+	return &OperatorBlockPointsExpiry{
+		Block:                     block,
+		WindowStart:               start,
+		WindowEnd:                 end,
+		ReliabilityMinBlockNumber: minBlockNumber,
+		RetentionMinBlockNumber:   clientReliabilityRetentionCutoffBlock(now),
+		ExpireTime:                now,
+	}, true
+}
+
+// Which of the blocks the daily task recorded expired.
+func GetOperatorBlockPointsExpired(ctx context.Context, blocks []int64) map[int64]bool {
+	expired := map[int64]bool{}
+	if len(blocks) == 0 {
+		return expired
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT block_number FROM operator_block_points_expired WHERE block_number = ANY($1::bigint[])`,
+			blocks,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var block int64
+				server.Raise(result.Scan(&block))
+				expired[block] = true
+			}
+		})
+	})
+	return expired
+}
+
+// Records the block expired, once: under the awards' lock, and only while it
+// has no award, so no block is both awarded and expired
+// (CommitOperatorBlockPoints takes the same lock). recorded is true when this
+// call wrote the record, and false when the block was recorded already or has
+// an award.
+func recordOperatorBlockPointsExpiry(ctx context.Context, expiry *OperatorBlockPointsExpiry) (recorded bool, returnErr error) {
+	defer recoverOperatorBlockPointsError(&returnErr)
+	planId := OperatorBlockPointsPlanId(expiry.Block)
+	server.Tx(ctx, func(tx server.PgTx) {
+		recorded = false
+		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, operatorBlockPointsLockKey))
+		tag, err := tx.Exec(
+			ctx,
+			`
+			INSERT INTO operator_block_points_expired (
+				block_number,
+				window_start,
+				window_end,
+				reliability_min_block_number,
+				retention_min_block_number,
+				expire_time,
+				create_time
+			)
+			SELECT $1, $2, $3, $4, $5, $6, $7
+			WHERE
+				NOT EXISTS (SELECT 1 FROM payment_report WHERE payment_plan_id = $8) AND
+				NOT EXISTS (SELECT 1 FROM account_payment WHERE payment_plan_id = $8)
+			ON CONFLICT (block_number) DO NOTHING
+			`,
+			expiry.Block,
+			expiry.WindowStart,
+			expiry.WindowEnd,
+			expiry.ReliabilityMinBlockNumber,
+			expiry.RetentionMinBlockNumber,
+			expiry.ExpireTime,
+			server.NowUtc(),
+			planId,
+		)
+		server.Raise(err)
+		recorded = tag.RowsAffected() == 1
+	}, server.TxReadCommitted)
+	return recorded, nil
 }
 
 // The blocks with traffic past the cutoff that an award can still read,
@@ -883,7 +1030,9 @@ func validateOperatorBlockPoints(award *OperatorBlockPoints, transition *server.
 
 // CommitOperatorBlockPoints writes a computed award in one transaction,
 // unless the block already has its points: committed is false then and
-// nothing is written.
+// nothing is written. A block the daily task recorded expired is refused
+// (ErrOperatorBlockPointsExpired), even with an award computed before its
+// deadline: an expired block is never awarded.
 func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) (committed bool, returnErr error) {
 	defer recoverOperatorBlockPointsError(&returnErr)
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
@@ -894,8 +1043,10 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		return false, err
 	}
 
+	expired := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		committed = false
+		expired = false
 		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, operatorBlockPointsLockKey))
 		var awarded bool
 		server.Raise(tx.QueryRow(
@@ -903,11 +1054,18 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 			`
 			SELECT
 				EXISTS (SELECT 1 FROM payment_report WHERE payment_plan_id = $1) OR
-				EXISTS (SELECT 1 FROM account_payment WHERE payment_plan_id = $1)
+				EXISTS (SELECT 1 FROM account_payment WHERE payment_plan_id = $1),
+				EXISTS (SELECT 1 FROM operator_block_points_expired WHERE block_number = $2)
 			`,
 			award.PaymentPlanId,
-		).Scan(&awarded))
+			award.Block,
+		).Scan(&awarded, &expired))
 		if awarded {
+			// a block is never both (recordOperatorBlockPointsExpiry)
+			expired = false
+			return
+		}
+		if expired {
 			return
 		}
 
@@ -1059,6 +1217,9 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		committed = true
 	}, server.TxReadCommitted)
 
+	if expired {
+		return false, fmt.Errorf("%w: block %d", ErrOperatorBlockPointsExpired, award.Block)
+	}
 	if committed {
 		glog.Infof(
 			"[obp]block %d awarded: plan %s, %d payments, %d point rows, %d nano points\n",
@@ -1074,8 +1235,13 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 
 // AwardDueOperatorBlockPoints awards the blocks one run of the daily task owns
 // (operatorBlockPointsAutomaticBlocks), oldest first, and returns the awards
-// it committed. Without an earning boundary it does nothing: payout plans
-// award points.
+// it committed. A block past its deadline at now is recorded expired, once,
+// and passed over, so the later blocks are awarded as usual. Any other error
+// stops the run at its block, and the task's retry starts again there: the
+// task owns only the blocks after its last award, so a block passed over on a
+// transient error would never be tried again. An award whose reads outlast
+// its deadline fails closed on the clock; the retry finds it expired. Without
+// an earning boundary it does nothing: payout plans award points.
 func AwardDueOperatorBlockPoints(
 	ctx context.Context,
 	subsidyConfig *SubsidyConfig,
@@ -1092,9 +1258,29 @@ func AwardDueOperatorBlockPoints(
 	}
 	due := OperatorBlockPointsDueBlocks(transition.Cutoff, now)
 	awarded := GetOperatorBlockPointsAwarded(ctx, due)
-	blocks := operatorBlockPointsAutomaticBlocks(due, awarded, fromBlock)
-	glog.Infof("[obp]due blocks %v, awarded %v, from block %d: awarding %v\n", due, slices.Sorted(maps.Keys(awarded)), fromBlock, blocks)
+	expired := GetOperatorBlockPointsExpired(ctx, due)
+	blocks := operatorBlockPointsAutomaticBlocks(due, awarded, expired, fromBlock)
+	glog.Infof("[obp]due blocks %v, awarded %v, expired %v, from block %d: awarding %v\n", due, slices.Sorted(maps.Keys(awarded)), slices.Sorted(maps.Keys(expired)), fromBlock, blocks)
 	for _, block := range blocks {
+		if expiry, ok := OperatorBlockPointsExpiryAt(block, transition.Cutoff, now); ok {
+			recorded, err := recordOperatorBlockPointsExpiry(ctx, expiry)
+			if err != nil {
+				return awards, err
+			}
+			if recorded {
+				operatorBlockPointsExpiredBlocksCounter.Inc()
+				glog.Errorf(
+					"[obp]block %d expired without its points: its window [%s, %s) reads from reliability block %d, and client_reliability retention keeps from %d at %s; recorded, never awarded\n",
+					block,
+					expiry.WindowStart.Format(time.RFC3339),
+					expiry.WindowEnd.Format(time.RFC3339),
+					expiry.ReliabilityMinBlockNumber,
+					expiry.RetentionMinBlockNumber,
+					now.Format(time.RFC3339),
+				)
+			}
+			continue
+		}
 		award, err := ComputeOperatorBlockPoints(ctx, subsidyConfig, block, now)
 		if err != nil {
 			return awards, err

@@ -67,34 +67,96 @@ func TestOperatorBlockPointsDueBlocksWaitForTheSettleTime(t *testing.T) {
 
 // The daily task never awards a block that completed before it was first
 // scheduled: those wait for the backfill and its explicit go. After any award
-// it catches up every later block.
+// it catches up every later block. A block recorded expired is left out, and
+// moves nothing else: without expiry records the blocks are those before
+// expiry was recorded.
 func TestOperatorBlockPointsAutomaticBlocks(t *testing.T) {
 	due := []int64{15, 16, 17, 18, 19}
 	for _, test := range []struct {
 		name      string
 		awarded   []int64
+		expired   []int64
 		fromBlock int64
 		want      []int64
 	}{
-		{"first run after a mid-week deploy", nil, 20, []int64{}},
-		{"the first block that completed after the deploy", nil, 19, []int64{19}},
-		{"several blocks completed after the deploy", nil, 18, []int64{18, 19}},
-		{"a run a payout queued without a schedule", nil, 0, []int64{19}},
-		{"catch up after the backfill", []int64{15, 16, 17}, 20, []int64{18, 19}},
-		{"catch up after a missed week", []int64{18}, 18, []int64{19}},
-		{"a gap before the last award is the backfill's", []int64{15, 18}, 0, []int64{19}},
-		{"nothing left", []int64{15, 16, 17, 18, 19}, 0, []int64{}},
+		{"first run after a mid-week deploy", nil, nil, 20, []int64{}},
+		{"the first block that completed after the deploy", nil, nil, 19, []int64{19}},
+		{"several blocks completed after the deploy", nil, nil, 18, []int64{18, 19}},
+		{"a run a payout queued without a schedule", nil, nil, 0, []int64{19}},
+		{"catch up after the backfill", []int64{15, 16, 17}, nil, 20, []int64{18, 19}},
+		{"catch up after a missed week", []int64{18}, nil, 18, []int64{19}},
+		{"a gap before the last award is the backfill's", []int64{15, 18}, nil, 0, []int64{19}},
+		{"nothing left", []int64{15, 16, 17, 18, 19}, nil, 0, []int64{}},
+		{"an expired block after the last award is left out", []int64{17}, []int64{18}, 0, []int64{19}},
+		{"expired blocks leave the last award where it was", []int64{15}, []int64{16, 17}, 0, []int64{18, 19}},
+		{"an expired block before the first award", nil, []int64{18}, 18, []int64{19}},
+		{"the latest due block expired without a schedule", nil, []int64{19}, 0, []int64{}},
+		{"every block after the last award expired", []int64{16}, []int64{17, 18, 19}, 0, []int64{}},
 	} {
 		awarded := map[int64]bool{}
 		for _, block := range test.awarded {
 			awarded[block] = true
 		}
-		if got := operatorBlockPointsAutomaticBlocks(due, awarded, test.fromBlock); !slices.Equal(got, test.want) {
+		expired := map[int64]bool{}
+		for _, block := range test.expired {
+			expired[block] = true
+		}
+		if got := operatorBlockPointsAutomaticBlocks(due, awarded, expired, test.fromBlock); !slices.Equal(got, test.want) {
 			t.Fatalf("%s: %v, want %v", test.name, got, test.want)
 		}
 	}
-	if got := operatorBlockPointsAutomaticBlocks([]int64{}, map[int64]bool{}, 0); len(got) != 0 {
+	if got := operatorBlockPointsAutomaticBlocks([]int64{}, map[int64]bool{}, map[int64]bool{}, 0); len(got) != 0 {
 		t.Fatal("no due block awarded", got)
+	}
+}
+
+// A block expires when its window's first reliability block leaves
+// client_reliability retention: ClientReliabilityRetention after the window
+// opens, at reliability block granularity. A whole block is due its
+// settle time after it closes and expires about three days later; a block
+// whose window starts at a cutoff inside it expires that much later. A block
+// with no traffic past the cutoff never expires. The expiry carries the
+// window, its first reliability block and the first one retention keeps.
+func TestOperatorBlockPointsExpiryIsTheRetentionDeadline(t *testing.T) {
+	block := int64(20)
+	start := operatorBlockStart(block)
+	due := operatorBlockStart(block + 1).Add(OperatorBlockPointsSettleTime)
+	deadline := start.Add(ClientReliabilityRetention)
+	if !due.Before(deadline.Add(-ReliabilityBlockDuration)) {
+		t.Fatalf("block %d is due at %s, not before its deadline %s", block, due, deadline)
+	}
+	for _, test := range []struct {
+		cutoff  time.Time
+		now     time.Time
+		expired bool
+	}{
+		{operatorBlockPointsMainCutoff, due, false},
+		{operatorBlockPointsMainCutoff, deadline.Add(-ReliabilityBlockDuration), false},
+		// the first reliability block retention keeps passes the window's
+		// first one a block's length after the deadline
+		{operatorBlockPointsMainCutoff, deadline.Add(ReliabilityBlockDuration - time.Nanosecond), false},
+		{operatorBlockPointsMainCutoff, deadline.Add(ReliabilityBlockDuration), true},
+		{operatorBlockPointsMainCutoff, deadline.Add(30 * 24 * time.Hour), true},
+		// a cutoff a day into the block moves its deadline a day on
+		{start.Add(24 * time.Hour), deadline.Add(ReliabilityBlockDuration), false},
+		{start.Add(24 * time.Hour), deadline.Add(24*time.Hour + ReliabilityBlockDuration), true},
+		// a block that ends at the cutoff has no window to expire
+		{start.Add(SubnetBlockDuration), deadline.Add(30 * 24 * time.Hour), false},
+	} {
+		expiry, expired := OperatorBlockPointsExpiryAt(block, test.cutoff, test.now)
+		if expired != test.expired || (expiry != nil) != expired {
+			t.Fatalf("block %d with cutoff %s at %s: expired %t, want %t", block, test.cutoff, test.now, expired, test.expired)
+		}
+		if !expired {
+			continue
+		}
+		windowStart, windowEnd, _ := OperatorBlockPointsWindow(block, test.cutoff)
+		minBlockNumber, _ := operatorBlockReliabilityBlockWindow(windowStart, windowEnd)
+		if expiry.Block != block || !expiry.WindowStart.Equal(windowStart) || !expiry.WindowEnd.Equal(windowEnd) ||
+			expiry.ReliabilityMinBlockNumber != minBlockNumber || expiry.RetentionMinBlockNumber != clientReliabilityRetentionCutoffBlock(test.now) ||
+			expiry.RetentionMinBlockNumber <= expiry.ReliabilityMinBlockNumber || !expiry.ExpireTime.Equal(test.now) {
+			t.Fatalf("block %d with cutoff %s at %s: expiry %+v", block, test.cutoff, test.now, expiry)
+		}
 	}
 }
 

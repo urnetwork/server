@@ -424,7 +424,8 @@ type AccountEpochsArgs struct {
 // The points count each weekly operator block's award in the epoch that
 // contains the block's end, and the bytes served count the same blocks: the
 // bytes each block's award shared its payout points by, or the bytes so far
-// of a block whose award has not committed (model.GetAccountServedBytes).
+// of a block whose award has not committed, and none of a block that expired
+// without its points (model.GetAccountServedBytes).
 type AccountEpoch struct {
 	Epoch           uint64          `json:"epoch"`
 	StartMillis     int64           `json:"start_millis"`

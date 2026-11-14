@@ -43502,6 +43502,62 @@ controls, actual owner cancellation and private-source rendering.
 These controls do not establish a production incidence or repair the external
 points product's writer, rollout, accounting or task boundaries.
 
+### 17.7 Operator blocks expired without their points
+
+Probe: `operator-block-points`
+
+The daily points award (`controller.AwardOperatorBlockPoints`, 12:00 UTC,
+retried within about an hour after an error) awards each completed operator
+block once (`model/operator_block_points.go`). Its award reads the block's
+window of `client_reliability` evidence, which retention keeps for 10 days
+from the window's start (`model.ClientReliabilityRetention`): about 3 days
+after the block is due, its Sunday 00:00 UTC close plus the 2-hour settle
+time. Past that deadline some evidence may be gone and an award fails closed.
+The award records such a block expired, once, in
+`operator_block_points_expired` (migration
+`OperatorBlockPointsExpiredVersion`), never awards it, and goes on to the
+later blocks. A commit of any award of a recorded block is refused, and the
+backfill's dry run lists expired blocks and refuses them: no backfill exists
+for an expired block. Before 2026-11-14 the award stopped at an expired block
+on every run, so no later block was ever awarded either.
+
+Every 15 minutes a catalog-only preflight reads the migration head from
+`migration_audit` and whether the table exists; below the migration nothing
+is recorded and no observation is issued. Then one bounded read-only statement
+reads the blocks recorded in the last 7 days: block number, window, the
+window's first reliability block, the first one retention kept, and the
+record's age.
+
+- `operator-block-points-expired` (WARN, sustain 1, target
+  `operator-block-<block>`): the block was recorded expired in the last 7
+  days. Providers get no points for its traffic, GET /account/epochs counts
+  no bytes served for it (the served bytes rollup deletes its rows), and every
+  Streak that ran through it ends there. It clears once the record is older
+  than 7 days; the block stays unawarded.
+
+A missing table at or past the migration head, or a malformed record, is an
+observation failure. The taskworker counts each record in
+`urnetwork_operator_block_points_expired_blocks_total` (Taskworker dashboard).
+
+ACTION: nothing recovers an expired block. Find why the award did not run in
+time: the `award_operator_block_points` task in `pending_task` and
+`finished_task` (task health, §2.5, reports its repeated errors), and the
+taskworker's `[obp]` log lines; then fix that so the next block is awarded on
+time. If the next block is due and its award fails too, award it by hand
+before its own deadline with `bringyourctl account-points backfill-blocks
+--blocks=<block> --file=<file>`, a read-only dry run that prints a digest,
+then `--commit --expect=<digest> --file=<file>` with the owner's go. Never
+write points rows for the expired block, and never delete its record to award
+it without the owner's go. VERIFY: the next block has its award (a
+`payment_report` row with `model.OperatorBlockPointsPlanId`) and no other
+block is recorded expired.
+
+Implementation convention: SIGNALS.md §17.7 (`operator-block-points`) maps
+to `signal_operator_block_points.go` and `signal_operator_block_points_test.go`.
+Synthetic controls cover the migration gate, a warning per recorded block
+with its backfill guidance, no record, malformed records, and the query
+contract.
+
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
 ### 18.1 Exact-address HTTPS and upstream identity

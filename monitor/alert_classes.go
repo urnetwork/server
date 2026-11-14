@@ -522,6 +522,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"onboarding-post-primary-canceled":                    incidentAlertClass,
 	"oom-writes":                                          incidentAlertClass,
 	"open-set-size":                                       incidentAlertClass,
+	"operator-block-points-expired":                       incidentAlertClass,
 	"origin-notification-loss":                            incidentAlertClass,
 	"origin-wait-db-amplification":                        incidentAlertClass,
 	"panic":                                               incidentAlertClass,

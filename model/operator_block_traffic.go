@@ -18,7 +18,10 @@ package model
 //     no USDC payment owns that carry payout bytes, so a contract settled
 //     without escrow, which has no sweep, counts nothing, of contracts with a
 //     credit-bearing outcome that closed at or after the cutoff, by sweep
-//     (settlement) time in the block's window past the cutoff.
+//     (settlement) time in the block's window past the cutoff;
+//   - a block the daily award recorded expired (OperatorBlockPointsExpiry):
+//     none, as it has no points and never will, and the block counts as
+//     counted through its end, as an awarded block does.
 // The other point rows of an epoch, a payout plan's for traffic before the
 // cutoff, have no bytes here: USDC paid that traffic.
 //
@@ -35,7 +38,8 @@ package model
 // The hourly points leaderboard rebuild advances it
 // (controller.RebuildPointsLeaderboard). Once a block's award commits, the
 // award's rows supersede the block's rollup rows, which the rollup then
-// deletes, so the tables hold the open block and the blocks waiting for an
+// deletes; it deletes an expired block's rows too, and reads no expired
+// block. So the tables hold the open block and the blocks waiting for an
 // award. A request reads the award rows and the rollup rows by key.
 //
 // A rollup figure can differ from the award's only by what changes after the
@@ -99,8 +103,9 @@ type operatorBlockTrafficCursor struct {
 // newest block's row while its window is not read through; else the first
 // block after it (for an empty rollup, from the block before the one that
 // contains settled, which may still wait for its award) whose window past the
-// cutoff started before settled and that has no award, from its window start.
-// A block with an award needs no rollup. ok is false when no block is due.
+// cutoff started before settled and that has neither an award nor an expiry
+// record, from its window start. A block with an award needs no rollup, and
+// an expired block counts no bytes. ok is false when no block is due.
 func nextOperatorBlockTraffic(ctx context.Context, cutoff time.Time, settled time.Time) (cursor *operatorBlockTrafficCursor, ok bool) {
 	var newestBlock int64
 	var newestReadThrough time.Time
@@ -132,7 +137,7 @@ func nextOperatorBlockTraffic(ctx context.Context, cutoff time.Time, settled tim
 		if !ok || !windowStart.Before(settled) {
 			continue
 		}
-		if GetOperatorBlockPointsAwarded(ctx, []int64{block})[block] {
+		if GetOperatorBlockPointsAwarded(ctx, []int64{block})[block] || GetOperatorBlockPointsExpired(ctx, []int64{block})[block] {
 			continue
 		}
 		return &operatorBlockTrafficCursor{
@@ -219,10 +224,10 @@ func writeOperatorBlockTraffic(
 // provider network's bytes to its block. A block's reads of one run commit in
 // one transaction with its cursor (writeOperatorBlockTraffic); reads a
 // concurrent run beat are dropped, and this run stops. It then deletes the
-// rollup rows of one block whose award has committed
-// (removeAwardedOperatorBlockTraffic). Without an earning boundary there are
-// no operator block awards, and it reads nothing. Returns the statements it
-// read.
+// rollup rows of one block whose award has committed or that the daily award
+// recorded expired (removeFinishedOperatorBlockTraffic). Without an earning
+// boundary there are no operator block awards, and it reads nothing. Returns
+// the statements it read.
 func AdvanceOperatorBlockTrafficRollup(
 	ctx context.Context,
 	settings *OperatorBlockTrafficRollupSettings,
@@ -296,17 +301,18 @@ func AdvanceOperatorBlockTrafficRollup(
 			break
 		}
 	}
-	removeAwardedOperatorBlockTraffic(ctx)
+	removeFinishedOperatorBlockTraffic(ctx)
 	return chunkCount, nil
 }
 
 // Deletes the rollup rows of the oldest block, other than the newest, whose
-// award has committed: the award's rows supersede them, and a request reads
-// the award's once it exists (GetAccountServedBytesInWindows). The newest row
+// award has committed or that the daily award recorded expired: the award's
+// rows supersede them, and an expired block counts no bytes, so a request
+// never reads them again (GetAccountServedBytesInWindows). The newest row
 // stays, the rollup's cursor. One block a run, about one row per provider
 // network of the block. It logs the block's two totals first: the rollup's
-// check against the award.
-func removeAwardedOperatorBlockTraffic(ctx context.Context) {
+// check against the award, which is none for an expired block.
+func removeFinishedOperatorBlockTraffic(ctx context.Context) {
 	blocks := []int64{}
 	server.Db(ctx, func(conn server.PgConn) {
 		blocks = []int64{}
@@ -324,8 +330,9 @@ func removeAwardedOperatorBlockTraffic(ctx context.Context) {
 	}
 	older := blocks[:len(blocks)-1]
 	awarded := GetOperatorBlockPointsAwarded(ctx, older)
+	expired := GetOperatorBlockPointsExpired(ctx, older)
 	for _, block := range older {
-		if !awarded[block] {
+		if !awarded[block] && !expired[block] {
 			continue
 		}
 		var rollupByteCount ByteCount
@@ -348,7 +355,11 @@ func removeAwardedOperatorBlockTraffic(ctx context.Context) {
 			networkCount = tag.RowsAffected()
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM operator_block_traffic WHERE block_number = $1`, block))
 		}, server.TxReadCommitted)
-		glog.Infof("[obt]block %d awarded %d bytes; its rollup read %d bytes of %d networks, rows deleted\n", block, awardByteCount, rollupByteCount, networkCount)
+		if awarded[block] {
+			glog.Infof("[obt]block %d awarded %d bytes; its rollup read %d bytes of %d networks, rows deleted\n", block, awardByteCount, rollupByteCount, networkCount)
+		} else {
+			glog.Infof("[obt]block %d expired without an award; its rollup read %d bytes of %d networks, rows deleted\n", block, rollupByteCount, networkCount)
+		}
 		return
 	}
 }
@@ -360,30 +371,38 @@ type AccountServedBytes struct {
 	// in the block
 	ByteCount ByteCount
 	// the blocks' traffic is counted through this time, the earliest over the
-	// blocks that have started: a block's end once its award committed, else
-	// the sweep time the rollup read it through, or its start before the
-	// rollup read any of it. Nil when no block has started.
+	// blocks that have started: a block's end once its award committed or it
+	// was recorded expired, else the sweep time the rollup read it through, or
+	// its start before the rollup read any of it. Nil when no block has
+	// started.
 	AsOf *time.Time
 }
 
 // One block's bytes of a network, as GetAccountServedBytes reads them.
 type operatorBlockServedBytes struct {
-	awarded         bool
+	awarded bool
+	// recorded expired by the daily award, never awarded
+	expired         bool
 	awardByteCount  ByteCount
 	rollupByteCount ByteCount
 	// nil before the rollup read any of the block
 	readThrough *time.Time
 }
 
-// Each listed block, its award's bytes for the network and its rollup's. Each
-// lookup reads only its own keys, so each is its own index scan:
-// payment_report and the rollup tables by primary key, and the network's
-// payments by network_id, which has few rows a network.
+// Each listed block, its award's bytes for the network and its rollup's, and
+// whether the daily award recorded it expired. Each lookup reads only its own
+// keys, so each is its own index scan: payment_report, the expiry record and
+// the rollup tables by primary key, and the network's payments by network_id,
+// which has few rows a network.
 const operatorBlockServedBytesSql = `
 	WITH report AS MATERIALIZED (
 		SELECT payment_plan_id
 		FROM payment_report
 		WHERE payment_plan_id = ANY($3::uuid[])
+	), expired AS MATERIALIZED (
+		SELECT block_number
+		FROM operator_block_points_expired
+		WHERE block_number = ANY($2::bigint[])
 	), award AS MATERIALIZED (
 		SELECT payment_plan_id, SUM(payout_byte_count)::bigint AS payout_byte_count
 		FROM account_payment
@@ -401,11 +420,13 @@ const operatorBlockServedBytesSql = `
 	SELECT
 		block.block_number,
 		report.payment_plan_id IS NOT NULL,
+		expired.block_number IS NOT NULL,
 		COALESCE(award.payout_byte_count, 0)::bigint,
 		COALESCE(traffic.payout_byte_count, 0)::bigint,
 		progress.read_through
 	FROM unnest($2::bigint[], $3::uuid[]) AS block(block_number, payment_plan_id)
 	LEFT JOIN report ON report.payment_plan_id = block.payment_plan_id
+	LEFT JOIN expired ON expired.block_number = block.block_number
 	LEFT JOIN award ON award.payment_plan_id = block.payment_plan_id
 	LEFT JOIN progress ON progress.block_number = block.block_number
 	LEFT JOIN traffic ON traffic.block_number = block.block_number
@@ -414,9 +435,10 @@ const operatorBlockServedBytesSql = `
 // GetAccountServedBytes reads the network's bytes served in each window, as
 // GetAccountNanoPointsInWindow counts its points (the operator blocks that end
 // in the window), and in each listed block, all in one statement: the award's
-// bytes for a block whose award has committed, else the rollup's so far. A
-// block that has not started by now counts nothing yet. The results follow
-// the windows' and the blocks' order.
+// bytes for a block whose award has committed, none for a block recorded
+// expired, which has no points, else the rollup's so far. A block that has
+// not started by now counts nothing yet. The results follow the windows' and
+// the blocks' order.
 func GetAccountServedBytes(
 	ctx context.Context,
 	networkId server.Id,
@@ -455,6 +477,7 @@ func GetAccountServedBytes(
 					server.Raise(result.Scan(
 						&block,
 						&served.awarded,
+						&served.expired,
 						&served.awardByteCount,
 						&served.rollupByteCount,
 						&served.readThrough,
@@ -477,6 +500,9 @@ func GetAccountServedBytes(
 			if blockServed, ok := readBytes[block]; ok {
 				if blockServed.awarded {
 					served.ByteCount += blockServed.awardByteCount
+					countedThrough = blockStart.Add(SubnetBlockDuration)
+				} else if blockServed.expired {
+					// no points, so no bytes, and nothing more to count
 					countedThrough = blockStart.Add(SubnetBlockDuration)
 				} else {
 					served.ByteCount += blockServed.rollupByteCount
