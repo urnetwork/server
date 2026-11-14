@@ -75,6 +75,10 @@ func TestSocksSignInNotesSocksUseWhateverThePlanAnswers(t *testing.T) {
 	// below, so this test never parses pro.yml for the process
 	t.Cleanup(server.Vault.PushSimpleResource("proxy.yml", []byte("secrets:\n  - synthetic-feature-use-secret\n")))
 	manager := newHttpConnectTestManager(t)
+	// an admitted sign-in starts the proxy's device; this test builds none
+	manager.proxyDeviceBuilder = func(server.Id) (*ProxyDevice, error) {
+		return nil, errProxyDeviceNotFound
+	}
 	notes := &testFeatureUseNotes{}
 	manager.featureUseNoter = notes.note
 	var planAllows bool

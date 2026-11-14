@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T23:08:28Z",
+  "observed_at": "2026-11-14T00:52:27Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -23,24 +23,34 @@
     "hold_active": false
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.j1VfdWQU/state.private.json",
-    "sha256": "7114aa751d6d475276eceaa62b5aa8c1a49bbd370e1ab8602e60526b619e90d9",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261114.xWwIvXoP/state.private.json",
+    "sha256": "c18f0a7379f235e0549d4a15eb419f73bddb192a85cf7311888c5ad846cefee5",
     "mode": "root:root 0400 in root:root 0700 directory",
-    "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
+    "contains": "Protected queue observations, authenticated review progress/claims, recovery facts, qualified-tool receipts and next actions; follow the predecessor chain for earlier census evidence.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
     "embargo": "Do not publish candidate eligibility, scores, findings, rankings or per-job review status before authorized finalization. Repository updates carry control-plane status only."
   },
   "latest_maintenance_preparation": {
     "grading_interrupted": false,
     "review_runtime_activated": false,
-    "cache_helper_dependency_only_source_sha256": "af476fddca1d30829997875a7da302ffad6a1d1a4ec028849e43572ea128dc2c",
-    "cache_helper_tests_executed": 0,
-    "cache_helper_qa_status": "Initial build stopped on advancing local server/connect dependency mismatch. A dependency-only successor uses the qualified source tree; its QA awaits private-management memory headroom. No product code or test expectation changed.",
+    "cache_helper_source_sha256": "a2da38155782527b5fadbc8a9187268cbf6d59829523a4746f7d68621c5f47b5",
+    "cache_helper_tests_passed": 36,
+    "cache_helper_normal_binary_sha256": "1e6e9baa435824f67ac9dc9c5d191b111c3fe87661e4a128e6a76af7a6b678d3",
+    "cache_helper_qa_status": "All36 synthetic controls and normal build passed. Same test binary also passed36 with an empty synthetic WARP environment and real settings/vault/cache paths masked. Earlier dependency and noexec harness failures remain preserved. No live helper main or storage operation was invoked.",
+    "cache_helper_metadata_cap_bytes": 50331648,
+    "cache_helper_initial_required_free_bytes": 35673210880,
+    "cache_helper_fresh_admission_still_required": true,
     "review_orchestrator_v6_source_sha256": "adae37f44cb4d3a99d691f804c01a01c53075b7317cc91ed00bde63158cef79a",
-    "review_orchestrator_v6_status": "Independent source review found no remaining delta blocker. Fresh coordinator placement and parent-budget checks now run immediately before each dispatch; four composed regressions added. Unbuilt, untested and not activated. Supersedes v5's startup-only coordinator check; historical qualification below does not qualify v6.",
+    "review_orchestrator_v6_tests_passed": 41,
+    "review_orchestrator_v6_normal_binary_sha256": "0b56c46cccf65e4dea4a6911cd4c06c6d0de7e692cf28c7d500bfd36a3127656",
+    "review_orchestrator_v6_status": "Independent source review, all41 synthetic controls and normal build passed. Removing only the fresh dispatch check makes both targeted controls fail as expected. No operational activation or model dispatch occurred. Historical v4/v5 configurations remain superseded and must not be replayed.",
+    "review_orchestrator_staged_config_sha256": "1b1385918c7c6ac17a55b3c5679dd60d8f9610a90759b454befbe7f09425de96",
+    "review_orchestrator_readonly_loader_status": "LOADER_READY_READ_ONLY: constructor-only probe passed; new state stayed empty and captured namespace metadata/progress remained unchanged. This does not authorize activation.",
+    "reversible_temporary_baseline_cleanup_bytes": 1455112192,
+    "reversible_cleanup_scope": "Only clean tracked baseline copies in one completed temporary standalone clone were sparsely excluded under prior approval. HEAD, outside-baseline content/status hashes and Git objects were preserved. Exact receipt and restore command are in the protected operator record; no RAM cache was removed.",
     "live_cache_archive_or_eviction_performed": false,
     "live_cache_archive_and_eviction_approval": "Pending; earlier unrelated cleanup approvals do not authorize this operation.",
-    "next_action": "Keep existing evaluations and deadlines intact. Test auxiliary tools only after management-memory admission passes. Keep model calls stopped until global RAM backing and review placement are reconciled. Per-job recovery outcomes remain in the protected operator record."
+    "next_action": "Keep scoring and existing deadlines intact. Await explicit verified cache offload/removal approval; recheck source quiescence, disk/RAM admission and isolated management placement before any approved operation. Keep model calls stopped until global RAM backing and review placement are reconciled. Only the fresh staged v6 configuration preserves the checked progress/binary binding; never replay old configs or consumed claims. Constructor readiness is not operational admission. Per-job outcomes remain protected."
   },
   "control_release": {
     "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
@@ -55,10 +65,20 @@
     "worker_identity_verified_at": "2026-11-13T18:44:13Z",
     "supervisor_manager_activated_at": "2026-11-13T18:43:48Z",
     "supervisor_manager_sha256": "a571706953456c944d66a75c7ce0c6c47b2fbfef6db8b392a98c5def69c3c5c5",
-    "supervisor_restarts_since_latest_manager_handoff": 3,
+    "supervisor_restarts_since_latest_manager_handoff": 4,
     "supervisor_restarts_since_held_handoff": 5,
-    "last_observed_supervisor_fence": 74,
+    "last_observed_supervisor_fence": 75,
+    "latest_restart_observed_at": "2026-11-14T01:24:27Z",
+    "latest_restart_diagnosis": "The private worker terminal report records bare deadline_exceeded; no database-phase evidence identifies the precise owner return boundary. Do not infer a PostgreSQL outage. The supervisor reclaimed the same completed native execution without resetting its attempt or deadline; immutable retention and database acceptance completed by 2026-11-14 01:39:49 UTC. Failure-only owner diagnostics are being prepared separately; no new control release was deployed.",
     "supervisor_renewal_diagnosis_pending": true,
+    "worker_fence_diagnostic_preparation": {
+      "source_sha256": "46fa01bc39c941d1abd0c541123603a84d9c87a82164066bf53dd6de78710a3e",
+      "selected_distinct_tests_passed": 19,
+      "qualification_scope": "Seven new controller controls, eight existing offline controller controls, two new CLI controls and two existing CLI controls passed independently. The expiry target also passed separately. PostgreSQL controls were not part of this positive selection. Initial build OOM and prior failed attribution control remain preserved.",
+      "causal_negative_check": "Running separately against the prior attribution helper; no result claimed yet.",
+      "deployed": false,
+      "rollout_constraint": "Both supervisor decoder consumers must use the updated closed schema before a worker can emit the additive owner diagnostics. Preserve current authority, retry predicates, budgets and original attempt deadlines."
+    },
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
     "fresh_native_observation_passed": true,

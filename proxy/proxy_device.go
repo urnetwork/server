@@ -411,6 +411,51 @@ func (self *ProxyDeviceManager) OpenProxyDeviceWithContext(ctx context.Context, 
 	return self.openProxyDevice(ctx, proxyId, true)
 }
 
+// Starts opening the proxy's device and returns at once, for a session that
+// signed in and dials next: the device's construction and its window's first
+// exit overlap the client's request round trip, and the dial joins this
+// construction (openProxyDevice coalesces one per proxy id). A live device or
+// a construction in flight starts nothing. The caller has admitted the caller
+// and the plan. A failure holds the next construction back for its cooldown,
+// as for any open, and the dial reports it. Shutdown joins the worker.
+func (self *ProxyDeviceManager) startOpenProxyDevice(proxyId server.Id) {
+	if self.proxyDeviceOpenOrOpening(proxyId) {
+		return
+	}
+	self.lifecycleLock.Lock()
+	if self.closed || self.ctx.Err() != nil {
+		self.lifecycleLock.Unlock()
+		return
+	}
+	self.openWorkers.Add(1)
+	self.lifecycleLock.Unlock()
+	go server.HandleError(func() {
+		defer self.openWorkers.Done()
+		if _, err := self.openProxyDevice(self.ctx, proxyId, false); err != nil {
+			if glog.V(1) {
+				glog.Infof("[proxy][%s]open at sign-in err=%s\n", proxyId, err)
+			}
+		}
+	})
+}
+
+// Whether the proxy's device is installed and live, or being constructed.
+func (self *ProxyDeviceManager) proxyDeviceOpenOrOpening(proxyId server.Id) bool {
+	self.stateLock.RLock()
+	pdState, ok := self.proxyDevices[proxyId]
+	self.stateLock.RUnlock()
+	if !ok {
+		return false
+	}
+	pdState.StateLock.Lock()
+	defer pdState.StateLock.Unlock()
+	if pdState.creating != nil {
+		return true
+	}
+	pd := pdState.ProxyDevice
+	return pd != nil && pd.Active()
+}
+
 // Admits an opener and coalesces one construction per id. A cancellable creator
 // transfers its construction to a separately retained manager worker.
 func (self *ProxyDeviceManager) openProxyDevice(ctx context.Context, proxyId server.Id, cancellableCreator bool) (*ProxyDevice, error) {
@@ -1262,6 +1307,8 @@ type ProxyDevice struct {
 	// Replaces the packet loop of Run for a device with no DeviceLocal or
 	// Tun; Run returns when it does.
 	runForTest func()
+	// Replaces the dial through the private Tun for a device with no Tun.
+	dialForTest func(ctx context.Context, network string, addr string) (net.Conn, error)
 
 	// The throughput share of a unique-exit proxy (proxy_unique_exit.go); nil
 	// for every other device. Set once at construction.
@@ -1533,6 +1580,20 @@ func newProxyDeviceLocalSettings(
 	// be one stored signed registration per window candidate. A post-quantum
 	// performance profile needs the key: connect publishes it anyway.
 	deviceLocalSettings.KeepWindowClientKeysLocal = true
+	// the normal windows take every provider, tcp ones included, ranked by
+	// their rank mode alone and with no ipv6 need, and there is no limited
+	// window, whatever connect's default fraction or the developer override
+	// says (owner, 2026-11-13: "hosted proxies should use main window as the
+	// limited window, so that dualproto and dualstack requirements are not
+	// applied on the main window for hosted proxies, and there is no need for
+	// a separate limited window"). Apps and iOS, which share the low-memory
+	// profile, keep connect's dualstack and dualproto windows. A flow still
+	// races only the exits whose labels carry it: udp never reaches a tcp exit.
+	deviceLocalSettings.NormalWindowSelectors = &connect.ProviderSelectors{
+		Ip:       connect.ProviderIpCapabilityIpv4,
+		Protocol: connect.ProviderProtocolCapabilityAny,
+	}
+	deviceLocalSettings.DisableLimitedWindow = true
 	return deviceLocalSettings
 }
 
@@ -2030,6 +2091,9 @@ func (self *ProxyDevice) DialContext(ctx context.Context, network string, addr s
 }
 
 func (self *ProxyDevice) dialTun(ctx context.Context, network string, addr string) (net.Conn, error) {
+	if self.dialForTest != nil {
+		return self.dialForTest(ctx, network, addr)
+	}
 	return self.tun.DialContext(ctx, network, addr)
 }
 
