@@ -207,7 +207,12 @@ func (self *competitionExistingTestTransport) ExchangeExisting(ctx context.Conte
 // All clocks, source data, keys and native digests are visibly synthetic.
 func newCompetitionExistingWorkerFixture(t *testing.T, held bool) (*Worker, *competitionAgentEvaluator, *competitionExistingWorkerStore, *competitionExistingGuardEvaluator, *competitionExistingTestTransport) {
 	t.Helper()
-	settings := automationApiSettings()
+	return newCompetitionExistingWorkerFixtureWithSettings(t, held, automationApiSettings())
+}
+
+// Explicit policy variants use the same frozen baseline and signed observation.
+func newCompetitionExistingWorkerFixtureWithSettings(t *testing.T, held bool, settings *Settings) (*Worker, *competitionAgentEvaluator, *competitionExistingWorkerStore, *competitionExistingGuardEvaluator, *competitionExistingTestTransport) {
+	t.Helper()
 	settings.FutureEpochPolicy = g2FuturePolicyForTest(t)
 	settings.FutureEpochPolicy.DistributedEvaluationPolicy = competitionDistributedSlotTestPolicy(t)
 	var err error
@@ -236,7 +241,11 @@ func newCompetitionExistingWorkerFixture(t *testing.T, held bool) (*Worker, *com
 	}
 	started := server.NowUtc().Add(-2 * time.Minute).Truncate(time.Microsecond)
 	deadline, lease := started.Add(time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds)*time.Second), server.NowUtc().Add(-time.Minute)
-	baseline := testRoundBaseline(t, settings, round, []float64{100, 100, 100, 100, 100, 100, 100, 100, 100})
+	rawScores := make([]float64, settings.EvaluationPolicy.Replicates)
+	for index := range rawScores {
+		rawScores[index] = 100
+	}
+	baseline := testRoundBaseline(t, settings, round, rawScores)
 	baselineHash := sha256.Sum256(baseline)
 	job := &queuedJob{ScoreJobResult: ScoreJobResult{JobId: server.NewId(), RoundId: round.RoundId, StartedAt: &started, State: "running", EvaluatorImageDigest: settings.EvaluatorImageDigest,
 		ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(), PatchSha256: strings.Repeat("1", 64)}, Round: *round, AttemptCount: 1, LeaseOwner: "synthetic-old-owner", LeaseExpiresAt: &lease,
@@ -257,6 +266,61 @@ func newCompetitionExistingWorkerFixture(t *testing.T, held bool) (*Worker, *com
 		t.Fatal(err)
 	}
 	return worker, evaluator, store, guard, transport
+}
+
+// Both historical and production-sized fixtures retain their frozen count;
+// changing only the baseline count still fails the real identity validator.
+func TestCompetitionExistingWorkerFixtureBindsFrozenReplicatePolicy(t *testing.T) {
+	for _, replicateCount := range []int{3, 9} {
+		settings := automationApiSettings()
+		settings.EvaluationPolicy.Replicates = replicateCount
+		worker, evaluator, store, guard, transport := newCompetitionExistingWorkerFixtureWithSettings(t, true, settings)
+		policy, err := decodeRoundPolicySnapshot(store.job.Round.PolicyJson)
+		if err != nil || policy.EvaluationPolicy.Replicates != replicateCount || worker.settings.EvaluationPolicy.Replicates != replicateCount {
+			t.Fatalf("configured %d-replicate policy was not frozen: %v", replicateCount, err)
+		}
+		var baseline roundBaselineManifest
+		if err := json.Unmarshal(store.job.RoundBaseline.Json, &baseline); err != nil {
+			t.Fatal(err)
+		}
+		if len(baseline.Replicates) != replicateCount {
+			t.Fatalf("frozen %d-replicate policy received %d baseline samples", replicateCount, len(baseline.Replicates))
+		}
+		for _, replicate := range baseline.Replicates {
+			if replicate.RawScore != 100 {
+				t.Fatal("synthetic baseline score changed")
+			}
+		}
+		if digest, err := validateRoundBaselineJson(worker.settings, &store.job.Round, store.job.RoundBaseline.Json); err != nil || digest != store.job.RoundBaseline.Sha256 {
+			t.Fatal("matching frozen baseline was refused", err)
+		}
+		var request evaluatorRequest
+		if err := json.Unmarshal(transport.manifest.EvaluatorRequest, &request); err != nil || request.EvaluationPolicy.Replicates != replicateCount {
+			t.Fatal("existing manifest changed the frozen replicate count", err)
+		}
+		if witness, err := evaluator.observeExisting(t.Context(), worker.settings, store.job); err != nil || witness == nil {
+			t.Fatal("matching fixture could not authenticate its existing observation", err)
+		}
+		wrongCount := 9
+		if replicateCount == 9 {
+			wrongCount = 3
+		}
+		wrong := baseline
+		wrong.Replicates = make([]roundBaselineReplicate, wrongCount)
+		for index := range wrong.Replicates {
+			wrong.Replicates[index] = baseline.Replicates[0]
+		}
+		wrongJson, err := json.Marshal(wrong)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if digest, err := validateRoundBaselineJson(worker.settings, &store.job.Round, wrongJson); err == nil || err.Error() != "round baseline identity does not match the frozen round" || digest != "" {
+			t.Fatal("wrong baseline count escaped the unchanged frozen identity gate", err)
+		}
+		if store.claims != 0 || store.hostRegistrations != 0 || store.completions != 0 || guard.forbidden.Load() != 0 || transport.ordinary.Load() != 0 {
+			t.Fatal("fixture validation admitted fresh work or eligibility")
+		}
+	}
 }
 
 // Private opt-in metadata is absent by default and cannot change frozen public
