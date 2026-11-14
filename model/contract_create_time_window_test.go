@@ -376,10 +376,10 @@ func TestStragglerStampMatchesCreateTime(t *testing.T) {
 				) VALUES ($1,$2,$2,$2,$2,1024,$3,$4,$5,$6,TRUE,$7)`,
 					contractId, networkId, created.UTC(), closeTime, outcome, contractUsage, reapTime))
 			}
+			// a pending payment holds its contracts
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment (
-				payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time,
-				completed,contract_retention_pending
-			) VALUES ($1,$2,$3,1024,1,$4,TRUE,TRUE)`, paymentId, server.NewId(), networkId, horizon.UTC()))
+				payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time
+			) VALUES ($1,$2,$3,1024,1,$4)`, paymentId, server.NewId(), networkId, horizon.UTC()))
 			for index, created := range []time.Time{
 				horizon.Add(-time.Hour),
 				horizon.Add(-time.Microsecond),

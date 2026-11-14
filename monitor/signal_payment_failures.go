@@ -109,7 +109,12 @@ WITH active_supporter AS (
            extract(epoch FROM now() - max(event.event_time))::bigint AS newest_age
     FROM payment_reconciliation_event event
     WHERE (event.action = 'refund_unmatched'
-           OR (event.action = 'credit_unfulfillable' AND event.store IN ('apple', 'google', 'stripe')))
+           OR (event.action = 'credit_unfulfillable' AND event.store IN ('apple', 'google', 'stripe'))
+           -- a gift order's Checkout payment that did not match its order's
+           -- total in usd; no other gift record
+           OR (event.action = 'credit_unfulfillable'
+               AND event.store = 'gift'
+               AND COALESCE(event.details::jsonb ->> 'reason', '') = 'gift_payment_mismatch'))
       AND NOT event.dry_run
       AND event.event_time >= now() - interval '24 hours'
       -- a store purchase recorded before its owner was known and credited
@@ -374,7 +379,7 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		}
 		common.class = "payment-solana-unfulfilled"
 		common.symptom = fmt.Sprintf("%d received Solana payment(s) remain unfulfilled with reason %s", count, target)
-		common.mechanism = "Helius delivered a confirmed transfer but the server could not match a live intent or the received amount was below the quoted amount. The webhook was acknowledged, so the durable row is the only bounded recovery source."
+		common.mechanism = "Helius delivered a confirmed transfer but the server could not match a live intent or the received amount was below the quoted amount. The webhook was acknowledged, so the durable row is the only bounded recovery source. A Shopify order paid with Solana Pay that its order record verifies is recorded as the order's payment instead (solana_shopify_order_payment) and never lands here; one no order verifies does, with why in its match note."
 		common.action = "Validate the on-chain transfer and intent lookup through the supported reconciliation path. Credit only an exactly matched, sufficiently funded payment; otherwise route the durable row for an authorized refund/support decision. Never delete it to clear the alert."
 		common.verify = "Every valid transfer is credited idempotently or receives a documented authorized resolution, the durable row clears through the supported path, and no duplicate grant is created."
 	case "refund_unmatched":
@@ -387,6 +392,19 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.action = "Correlate the processor object with the immutable Stripe invoice/data-pack ledger using privileged tooling, repair the missing identity link, and apply the normal idempotent clawback. Do not guess from email or manually edit balances."
 		common.verify = "Each unmatched event has an authorized resolution, future refunds resolve through immutable IDs, and the 24-hour aggregate returns to zero without duplicate clawback."
 	case "credit_unfulfillable":
+		if target == "gift" {
+			// the gift store's only credit_unfulfillable record: a gift order's
+			// Checkout payment that did not match its order
+			common.tier = tierWarn
+			common.class = "payment-gift-mismatch"
+			common.symptom = fmt.Sprintf("%d gift order payment(s) did not match their order's amount or currency and were not fulfilled, in 24 hours", count)
+			common.mechanism = "A gift order's Checkout session charges the order's total in usd, with adaptive pricing off, and the Stripe webhook fulfils a gift order only when the completed session paid exactly that amount in usd (controller/gift_checkout_controller.go). A session that paid another amount or currency fulfilled nothing: no codes, cards or emails, so the buyer paid and has nothing yet. The webhook recorded it once per session (store=gift, action=credit_unfulfillable, reason gift_payment_mismatch) and acknowledged Stripe. The session never asks for another amount or currency, so each one is a change in how Checkout priced the session or a defect, not a buyer's mistake."
+			common.context = "The durable event (payment_reconciliation_event, store=gift, action=credit_unfulfillable, evidence=the Checkout session id) carries the gift order, the amount and currency paid and the order's total in cents. The count is distinct sessions."
+			common.baseline = "Every completed gift Checkout session pays its order's total in usd and is fulfilled once."
+			common.action = "An operator settles each payment with its buyer. Compare the session in the Stripe dashboard with its gift order, then refund the payment in Stripe (the refund webhook marks the unfulfilled order refunded) and let the buyer order again, or record another disposition with the owner's go. Find why Checkout charged another amount or currency and fix it before more gift sessions are made. Never fulfil an order from this record alone, and never make or edit codes by hand."
+			common.verify = "Each recorded session has a refund or a documented disposition, new gift sessions pay their order's total in usd and are fulfilled, and no new gift_payment_mismatch record appears. The 24-hour count can remain until its window expires; aging out does not prove disposition."
+			break
+		}
 		if !map[string]bool{"apple": true, "google": true, "stripe": true}[target] {
 			return finding{}, fmt.Errorf("payment failures returned an unknown unfulfillable-credit store")
 		}
@@ -460,7 +478,7 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.tier = tierWarn
 		common.class = "payment-received-held"
 		common.symptom = fmt.Sprintf("%d received %s payment(s) are held uncredited for an operator or the customer; the oldest arrived %d minutes ago", count, target, oldestAge/60)
-		common.mechanism = "The scanner held the payment for review instead of crediting it: short of its invoice at expiry (underpaid), late and short (late_underpaid), a second payment of a paid invoice (extra), a payment to an address no invoice was given (unknown_address), a payment to a voided invoice (voided), a credited payment that left the chain (orphaned), or a sanctions or shape hold that names no invoice. The customer may have paid and have no Pro, and no other alert names these."
+		common.mechanism = "The scanner held the payment for review instead of crediting it: short of its invoice at expiry (underpaid), late and short (late_underpaid), a second payment of a paid invoice (extra), a payment to an address no invoice was given (unknown_address), a payment to a voided invoice (voided), a credited payment that left the chain (orphaned), a late payment the rules would credit to an invoice past the retention unlink, whose network is forgotten (unlinked), or a sanctions or shape hold that names no invoice. The BTC, ETH, SOL and TAO scanners record a payment to any address an invoice was ever given, however old. The customer may have paid and have no Pro, and no other alert names these."
 		common.context = "Crypto returns are held until the customer asks for one (owner, 2026-11-11); a held payment is never returned or offered back unprompted. urnetwork_subscription_payments_uncredited{rail} on the subscriptions dashboard shows the same backlog with the payments the rail still credits by itself."
 		common.action = "Look the invoice up with bringyourctl crypto show and match it to its support thread. Credit a payment that covers what the customer bought with bringyourctl crypto credit after review, or keep it for the customer's request with a documented disposition. Never credit on an address or amount match alone, and never return funds without the customer's request and the owner's go."
 		common.verify = "Each held payment is credited once or has a documented disposition, and the aggregate returns to zero; a payment kept for the customer's request stays visible here."

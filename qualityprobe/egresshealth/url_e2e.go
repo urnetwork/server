@@ -18,8 +18,27 @@ package egresshealth
 import (
 	"crypto/tls"
 	"fmt"
+	"time"
 	"unicode/utf8"
 )
+
+// The end-to-end session of a turn that measures post-quantum, as the path
+// that opened it observes it (fleetprobe url_e2e.go). Methods are safe for
+// concurrent use.
+type UrlProbeE2eObserver interface {
+	// How long the tunnel holds the turn's first sends for the session to
+	// seal (pq_seal_wait): counted in the run's budget.
+	SealWait() time.Duration
+	// The turn's IPv4 HTTPS leg acquired its connection, before writing its
+	// first request. The session must already be usable at this boundary.
+	RequestStarted()
+	// The first request finished writing. Its session must still match the
+	// before-write observation for sealed_before_request to hold.
+	RequestWritten()
+	// The turn's evidence once its loads ended, given whether its IPv4 HTTPS
+	// leg passed; nil when the session observed nothing.
+	Evidence(httpsPassed bool) *UrlProbeE2eEvidence
+}
 
 // The outcome of a turn's post-quantum session, the json pq value.
 const (

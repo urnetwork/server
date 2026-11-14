@@ -3,7 +3,9 @@ package controller
 // The daily operator block points task (model/operator_block_points.go):
 // every completed operator block past the provider earning boundary gets the
 // points of its traffic, in parallel with the SN pool that pays for it. Owner
-// decision 2026-10-28.
+// decision 2026-10-28. Since 2026-11-13 the payout points follow the bytes
+// served, paid or unpaid, with no revenue term (owner decision 2026-11-13);
+// the first block the task awards after that change gets the new rule.
 
 import (
 	"time"
@@ -20,8 +22,9 @@ type AwardOperatorBlockPointsArgs struct {
 	// The block that was open when the task was first scheduled. Before the
 	// first award, the task awards the blocks from it on, so the blocks that
 	// completed earlier wait for the backfill and its explicit go
-	// (bringyourctl account-points backfill-blocks). Zero, for a run a payout
-	// queued before any was scheduled: only the latest due block.
+	// (bringyourctl account-points backfill-blocks). Zero, for a run the weekly
+	// USDC payout queued before any was scheduled (the payout ended, owner
+	// decision 2026-11-12, and queues none now): only the latest due block.
 	FromBlock int64 `json:"from_block,omitempty"`
 }
 
@@ -32,7 +35,8 @@ type AwardOperatorBlockPointsResult struct {
 const awardOperatorBlockPointsKey = "award_operator_block_points"
 
 // The daily run. A block closes Sunday 00:00 UTC and its traffic is read after
-// model.OperatorBlockPointsSettleTime; the Sunday payout also asks for a run.
+// model.OperatorBlockPointsSettleTime, so a block is awarded the Sunday it
+// closes.
 const operatorBlockPointsHourUtc = 12
 
 // After a taskworker starts, so a deploy picks up a missed run promptly.
@@ -64,12 +68,6 @@ func ScheduleAwardOperatorBlockPoints(clientSession *session.ClientSession, tx s
 		},
 		now.Add(operatorBlockPointsStartupDelay),
 	)
-}
-
-// TriggerAwardOperatorBlockPointsInTx asks for a run now: a payout run's
-// points are due when it runs. The run is its own task, with its own retries.
-func TriggerAwardOperatorBlockPointsInTx(clientSession *session.ClientSession, tx server.PgTx) {
-	scheduleAwardOperatorBlockPoints(clientSession, tx, &AwardOperatorBlockPointsArgs{}, server.NowUtc())
 }
 
 func scheduleAwardOperatorBlockPoints(

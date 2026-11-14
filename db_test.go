@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"testing"
 	"time"
 
@@ -431,7 +431,7 @@ func TestSerializableTx(t *testing.T) {
 							Raise(result.Scan(&b))
 						})
 
-						timeout := time.Duration(mathrand.Intn(1000)) * time.Millisecond
+						timeout := time.Duration(mathrand.IntN(1000)) * time.Millisecond
 						select {
 						case <-ctx.Done():
 							return
@@ -546,7 +546,7 @@ func TestUpdateTx(t *testing.T) {
 							Raise(result.Scan(&b))
 						})
 
-						timeout := time.Duration(mathrand.Intn(1000)) * time.Millisecond
+						timeout := time.Duration(mathrand.IntN(1000)) * time.Millisecond
 						select {
 						case <-ctx.Done():
 							return

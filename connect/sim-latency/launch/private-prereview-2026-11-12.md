@@ -249,3 +249,25 @@ These tests qualify their stated preparation/retention behavior, not complete
 reviews. No actual inventory plan or new model inference ran in those tests.
 The prospectively bound full-scope provider adapter, result validation,
 cross-scope context closure and actual paired reviews remain in progress.
+
+## Protected validation and complete offline ledger
+
+The separate offline Qwen validation is now protected without modifying its
+original failed call receipt. All 23 evidence leaves and the final manifest
+passed exact-version readback and COMPLIANCE retention through 2028-01-01.
+Publication receipt SHA-256:
+`f14b95a4c5c459c8418d9dedea6de9283e1660c751e920c213d0e0ddabd7af80`;
+manifest version: `c1888ab7-0e27-4bc9-b198-df498bb27aa5`.
+Durable private proof:
+`/var/lib/urnetwork/competition-linked-retention-build-runtime-20261112.XE4A5FMu`.
+
+The qualified planner also processed the complete authenticated context
+inventory offline, producing ledger SHA-256
+`de3ac1723be6001d80a584f85ae6ad3a73647c2028a7b6d40a8b13a7f47e1f2e`.
+Every obligation remains pending; model requests, observed obligations and
+accepted findings remain zero, and token admission, completion and authority
+remain false. All input bytes and custody metadata stayed unchanged.
+Durable private proof:
+`/var/lib/urnetwork/competition-complete-offline-coverage-plan-20261112.1CXy4E8r`.
+Neither operation called a model, executed a validator, queried the production
+database, or published a review decision.

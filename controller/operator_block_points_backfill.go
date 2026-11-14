@@ -208,8 +208,10 @@ func operatorBlockPointsText(nanoPoints model.NanoPoints) string {
 	return fmt.Sprintf("%.6f", float64(nanoPoints)/1_000_000)
 }
 
-// Text is the dry run's report: per block its window and computation, its
-// points by event, and every network's points.
+// Text is the dry run's report: per block its window and traffic, its points
+// by event, and every network's bytes, share of the block's bytes and points.
+// The payout points follow the bytes alone; no revenue is shown because none
+// is read (model.OperatorBlockPointsSchema v2).
 func (self *OperatorBlockPointsBackfill) Text() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "operator block points backfill (%s)\n", self.Schema)
@@ -221,26 +223,22 @@ func (self *OperatorBlockPointsBackfill) Text() string {
 	totalNanoPoints := model.NanoPoints(0)
 	networks := map[server.Id]bool{}
 	for _, award := range self.Awards {
-		fmt.Fprintf(&b, "\nblock %d [%s, %s) plan %s\n",
+		fmt.Fprintf(&b, "\nblock %d [%s, %s) plan %s, %s\n",
 			award.Block,
 			award.WindowStart.Format(time.RFC3339),
 			award.WindowEnd.Format(time.RFC3339),
 			award.PaymentPlanId,
+			award.Schema,
 		)
-		fmt.Fprintf(&b, "  traffic: %d sweeps, %d providers, %d paying networks (%d active, %d paid), %s paid + %s unpaid\n",
+		fmt.Fprintf(&b, "  traffic: %d sweeps, %d providers, %s served, paid or unpaid\n",
 			award.SweepCount,
 			len(award.Payments),
-			award.TrafficUserCount,
-			award.ActiveUserCount,
-			award.PaidUserCount,
-			model.ByteCountHumanReadable(award.NetPayoutByteCountPaid),
-			model.ByteCountHumanReadable(award.NetPayoutByteCountUnpaid),
+			model.ByteCountHumanReadable(award.ByteCount),
 		)
-		fmt.Fprintf(&b, "  computed payout (weighs the points; no USDC): $%.6f, subsidy scale %.6f, subsidy $%.6f, subscription revenue $%.6f\n",
-			model.NanoCentsToUsd(award.TotalComputedPayout),
-			award.SubsidyScale,
-			award.SubsidyNetPayoutUsd,
-			model.NanoCentsToUsd(award.NetRevenue),
+		fmt.Fprintf(&b, "  payout points %s (%d points per payout, time scale %.6f), shared by bytes\n",
+			operatorBlockPointsText(award.PayoutNanoPoints),
+			award.PointsPerPayout,
+			award.TimeScale,
 		)
 		fmt.Fprintf(&b, "  reliability: blocks [%d, %d), %d effective, %d networks\n",
 			award.ReliabilityMinBlockNumber,
@@ -257,18 +255,20 @@ func (self *OperatorBlockPointsBackfill) Text() string {
 			operatorBlockPointsText(award.TotalNanoPoints()),
 			len(award.Points),
 		)
-		fmt.Fprintf(&b, "  network_id\tpayout_bytes\tcomputed_payout_usd\tpayout\treliability\tseeker\treferral\ttotal\n")
+		fmt.Fprintf(&b, "  network_id\tpayout_bytes\tbyte_share\tpayout\treliability\tseeker\treferral\ttotal\n")
 		for _, points := range operatorBlockNetworksPoints(award) {
 			bytes := model.ByteCount(0)
-			computedPayout := model.NanoCents(0)
 			if points.payment != nil {
 				bytes = points.payment.PayoutByteCount
-				computedPayout = points.payment.ComputedPayout
+			}
+			byteShare := 0.0
+			if 0 < award.ByteCount {
+				byteShare = float64(bytes) / float64(award.ByteCount)
 			}
 			fmt.Fprintf(&b, "  %s\t%d\t%.9f\t%s\t%s\t%s\t%s\t%s\n",
 				points.networkId,
 				bytes,
-				model.NanoCentsToUsd(computedPayout),
+				byteShare,
 				operatorBlockPointsText(points.payout),
 				operatorBlockPointsText(points.reliability),
 				operatorBlockPointsText(points.multiplier),

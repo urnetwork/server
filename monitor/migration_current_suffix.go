@@ -822,8 +822,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(893, "provider union review, identity and retained source custody", competitionMigration893ArtifactQuery).removedAt(897),
 	},
 	[]snMainnetMigrationContract{
-		// the post-quantum declaration that find-providers2 reads for a
-		// request that requires post-quantum encryption
+		// the post-quantum declaration of each provider's latest provide,
+		// stored as its record; find-providers2 no longer reads it
 		migrationCurrentSuffix(894, "provider capability declarations",
 			migrationFp2Table("provide_capability"),
 			snMainnetMigrationColumns("provide_capability",
@@ -924,7 +924,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// The future executor slots and no-op evidence follow that origin prefix.
 	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
 	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
-	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract},
+	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract.removedAt(server.CompetitionDistributedReevaluationMigrationVersion())},
 	// Version is resolved from the appended coverage migration, never fixed.
 	[]snMainnetMigrationContract{competitionWorkCoverageMigrationContract().removedAt(server.CompetitionIntakeFirstMigrationVersion())},
 	// The successor retains all four retired composites, replacing only
@@ -977,7 +977,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the per-cycle Pro grants, versioned by their position
 	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
 	// The corrected claim trigger carries every earlier admission guard.
-	[]snMainnetMigrationContract{competitionExecutorAdmissionClaimMigrationContract},
+	[]snMainnetMigrationContract{competitionExecutorAdmissionClaimMigrationContract.removedAt(server.CompetitionDistributedReevaluationMigrationVersion())},
 	// the HTTP/3 place evidence, versioned by its position
 	[]snMainnetMigrationContract{providerEgressH3PlaceMigrationContract},
 	// the IPv6 place evidence, versioned by its position
@@ -1001,6 +1001,25 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// capability-aware FindProviders2's URL evidence columns, versioned by
 	// their position
 	[]snMainnetMigrationContract{providerEgressFp2EvidenceMigrationContract},
+	// the store notification flow, versioned by its position
+	[]snMainnetMigrationContract{storeNotificationFlowMigrationContract},
+	// the sweep of every issued address of a per-address coin, versioned by
+	// its position
+	[]snMainnetMigrationContract{cryptoAddressSweepMigrationContract},
+	// the Shopify orders paid with Solana Pay, versioned by its position
+	[]snMainnetMigrationContract{solanaShopifyOrderPaymentMigrationContract},
+	// the per-network mail context, versioned by its position
+	[]snMainnetMigrationContract{networkMailContextMigrationContract},
+	// Exact closure, cycle transition and inherited legacy/source custody.
+	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract.removedAt(server.CompetitionOperatorRequestedPatchRetryMigrationVersion())},
+	// the gift of privacy's orders and Pro gift codes, versioned by their
+	// position
+	[]snMainnetMigrationContract{giftSchemaMigrationContract},
+	// what refunds, disputes and orphaned crypto payments did to a gift
+	// order's codes, versioned by their position
+	[]snMainnetMigrationContract{giftRefundSchemaMigrationContract},
+	// Exact unchanged-patch retry authority inherits every prior guard check.
+	[]snMainnetMigrationContract{competitionOperatorRequestedPatchRetryMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

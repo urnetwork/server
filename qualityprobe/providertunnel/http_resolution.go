@@ -36,6 +36,19 @@ type providerUrlResolver struct {
 	// is what production leaves it. A test of a loopback origin sets it on its
 	// own tunnel's resolver.
 	publicAddress func(netip.Addr, int) bool
+	// The phase budgets; nil, a test's bare resolver, reads as the defaults.
+	phases *providerUrlPhaseSettings
+	// The tunnel's first-sends hold, shared by its every resolver; nil adds
+	// nothing.
+	firstSends *providerFirstSendsHold
+}
+
+// The resolver's phase budgets.
+func (self *providerUrlResolver) phaseSettings() *providerUrlPhaseSettings {
+	if self.phases == nil {
+		return defaultProviderUrlPhaseSettings()
+	}
+	return self.phases
 }
 
 // Whether a URL probe request of the family may be dialed to ip.
@@ -122,8 +135,10 @@ func (self *providerUrlResolver) resolve(ctx context.Context, address string, ob
 	}
 	observation.observe(connect.TunDialDnsStarted)
 	// One URL-only budget covers route waiting, all resolver waves and jitter.
-	// It must never become the target TCP/TLS/body deadline.
-	resolutionCtx, resolutionCancel := providerUrlPhaseContext(ctx, urlProbeDnsTimeout)
+	// It must never become the target TCP/TLS/body deadline. The tunnel's first
+	// query is its first send, so that resolution's budget also carries the
+	// tunnel's first-sends hold (providerFirstSendsHold).
+	resolutionCtx, resolutionCancel := providerUrlPhaseContext(ctx, self.phaseSettings().DnsTimeout+self.firstSends.claim())
 	defer resolutionCancel()
 	const attempts = 3
 	var addrs []netip.Addr
@@ -286,8 +301,11 @@ func raceProviderUrlQueries(queries ...providerUrlQuery) providerUrlQuery {
 // Starts a fresh socket budget after DNS; it cannot extend a shorter caller
 // deadline or affect the successfully returned connection's lifetime. A URL
 // probe request dials on its family's network alone (providerUrlDialNetwork).
+// A literal host makes no query, so its connect is the tunnel's first send
+// when nothing came before it, and then carries the tunnel's first-sends hold
+// (providerFirstSendsHold).
 func (self *providerUrlResolver) dialResolved(ctx context.Context, network, address string, addrs []netip.Addr) (net.Conn, error) {
-	dialCtx, cancel := providerUrlPhaseContext(ctx, urlProbeTcpTimeout)
+	dialCtx, cancel := providerUrlPhaseContext(ctx, self.phaseSettings().TcpTimeout+self.firstSends.claim())
 	defer cancel()
 	return self.dial(dialCtx, providerUrlDialNetwork(ctx, network), address, addrs)
 }

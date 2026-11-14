@@ -32,7 +32,7 @@ func TestE1OfferLineFollowsTheOfferRule(t *testing.T) {
 	}
 	in := ParamsInput{
 		Template: TemplateE1Connect, Variant: VariantDefault, NoOfferEmail: true,
-		OfferExpiresAt: &expires, DailyDataGb: 30, Location: time.UTC, Now: expires.Add(-4 * 24 * time.Hour),
+		OfferExpiresAt: &expires, DailyDataGb: 30, Location: time.UTC,
 		Token: "T", SiteUrl: "https://ur.io",
 	}
 	if got := BuildParams(in)["offer_expires_at"]; got != "" {
@@ -183,7 +183,7 @@ func TestDailyDataIsInGiB(t *testing.T) {
 	for _, template := range []string{TemplateE1Connect, TemplateE3LastChance, TemplateE4bOffer} {
 		p := BuildParams(ParamsInput{
 			Template: template, Variant: VariantDefault, DailyDataGb: 30, OfferExpiresAt: &expires,
-			Location: time.UTC, Now: expires.Add(-24 * time.Hour), Token: "T", SiteUrl: "https://ur.io",
+			Location: time.UTC, Token: "T", SiteUrl: "https://ur.io",
 		})
 		if got := p["daily_data_gb"]; got != "30 GiB" {
 			t.Errorf("%s: daily_data_gb %q", template, got)
@@ -332,23 +332,36 @@ func TestFeedbackEmailGoesOncePerNetwork(t *testing.T) {
 // {platform} it is one tap from the lock screen") had no platform check:
 // windows, linux and web rows got it (126 sends in 30 days on Main), and
 // those apps have no widget (the Windows app's WidgetAdded event is never
-// raised). It skips there now. iOS, Android and macOS have widgets (the
-// apple widgets target builds for macOS too); an unknown platform keeps the
-// email. The not-activated variant is a connect nudge and goes everywhere.
+// raised). It skips there now. Since the 2026-11-13 review it goes only to a
+// phone whose app build has the widget (Facts.WidgetBuild, WidgetSettings):
+// the App Store's 2026.8.17 has none, so an iPhone reader was told to add a
+// widget the app lacks. A Mac has no home screen (it gets the desktop email
+// once uploaded, TestE2MacGetsTheDesktopEmail), and an unknown platform gets
+// neither. The not-activated variant is a connect nudge and goes everywhere.
 func TestE2WidgetEmailOnlyWhereThereIsAWidget(t *testing.T) {
-	for platform, wantSend := range map[string]bool{
-		"ios": true, "android": true, "macos": true, "": true,
-		"windows": false, "linux": false, "web": false,
+	for _, c := range []struct {
+		platform    string
+		widgetBuild bool
+		wantSend    bool
+	}{
+		{"ios", true, true}, {"android", true, true},
+		// a phone whose app has no widget
+		{"ios", false, false}, {"android", false, false},
+		// no home screen, or no known platform, whatever the build
+		{"macos", true, false}, {"", true, false}, {"windows", true, false}, {"linux", true, false}, {"web", true, false},
+		{"macos", false, false}, {"", false, false},
 	} {
+		platform, wantSend := c.platform, c.wantSend
 		f := healthy(PathB)
 		f.Platform = platform
+		f.WidgetBuild = c.widgetBuild
 		f.HasConnected = true
 		d := Decide(StepE2, f)
 		if wantSend && (d.Action != ActionSend || d.Template != TemplateE2Widget || d.Variant != VariantActivated) {
 			t.Errorf("e2 activated on %q: %+v", platform, d)
 		}
 		if !wantSend && (d.Action != ActionSkip || d.NextStep != StepE3) {
-			t.Errorf("e2 activated on %q, which has no widget: %+v", platform, d)
+			t.Errorf("e2 activated on %q (widget build %t), which has no widget: %+v", platform, c.widgetBuild, d)
 		}
 		f.HasConnected = false
 		if d := Decide(StepE2, f); d.Action != ActionSend || d.Variant != VariantNotActivated {

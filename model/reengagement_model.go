@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/reengagement"
 )
 
 // NetworkReengagement is one network's re-engagement state.
@@ -541,12 +542,15 @@ func ListPendingReengagementFixes(ctx context.Context, answeredAfter time.Time, 
 	return
 }
 
-// The markets whose supporter windows record their end with the 30-day
-// manual-payment grace already in it (controller manualPaymentGracePeriod:
-// crypto_pay_credit.go, gamma_credit.go and payment_reconcile_controller.go
-// add it to end_time), so Pro stops at end_time; the App Store and Play end
+// The markets whose supporter windows record their end with the grace already
+// in it, so Pro stops at end_time: the 30-day manual-payment grace on a paid
+// period (controller manualPaymentGracePeriod: crypto_pay_credit.go,
+// gamma_credit.go and subscription_stripe_controller.go add it to end_time),
+// and a day on a Stripe period no payment paid for, a trial
+// (subscription_stripe_grace.go). A redeemed gift year has no grace and
+// never renews, so Pro stops at its end_time too. The App Store and Play end
 // theirs at the store's expiry and may retry a failed renewal after it.
-var reengagementGraceMarkets = []string{"stripe", "solana", "monero", "zcash", "bittensor", "bitcoin", "ethereum", "gamma", "x402", "manual"}
+var reengagementGraceMarkets = []string{"stripe", "solana", "monero", "zcash", "bittensor", "bitcoin", "ethereum", "gamma", "x402", "manual", SubscriptionMarketGift}
 
 // ReengagementGraceMarkets are the markets whose end_time includes the grace.
 func ReengagementGraceMarkets() []string {
@@ -554,9 +558,11 @@ func ReengagementGraceMarkets() []string {
 }
 
 // ListWinbackReengagementCandidates are networks that paid for Pro (a window
-// with revenue) whose latest supporter window ended in [endFrom, endTo), with
-// no later window on any market, no refund on record, and a market in
-// `graceMarkets` (grace = true) or not in it (grace = false).
+// with revenue that the network bought: a redeemed gift year carries its
+// giver's payment) whose latest supporter window ended in [endFrom, endTo),
+// with no later window on any market, no refund on record, and a market in
+// `graceMarkets` (grace = true) or not in it (grace = false). A network that
+// paid and then had a gift year is a candidate when the gift year ends.
 func ListWinbackReengagementCandidates(ctx context.Context, endFrom time.Time, endTo time.Time, grace bool, limit int) (candidates []*ReengagementCandidate) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -583,7 +589,8 @@ func ListWinbackReengagementCandidates(ctx context.Context, endFrom time.Time, e
 						WHERE
 							paid.network_id = candidate.network_id AND
 							paid.subscription_type = 'supporter' AND
-							0 < paid.net_revenue_nano_cents
+							0 < paid.net_revenue_nano_cents AND
+							paid.market <> $6
 					) AND
 					NOT EXISTS (SELECT 1 FROM stripe_refund WHERE stripe_refund.network_id = candidate.network_id) AND
 					`+reengagementMailableFilter+`
@@ -595,6 +602,7 @@ func ListWinbackReengagementCandidates(ctx context.Context, endFrom time.Time, e
 			reengagementGraceMarkets,
 			grace,
 			limit,
+			SubscriptionMarketGift,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -686,15 +694,19 @@ func NetworkOnboardingAnswer(ctx context.Context, networkId server.Id) (reason s
 }
 
 // NetworkLastPaidEnd is the end of the network's latest paid supporter window, or nil.
+// Paid means the network bought it: a redeemed gift year (market gift) carries
+// its giver's payment, so it is no purchase of the network's (CASL's purchase
+// window in onboarding.MailPolicy reads this).
 func NetworkLastPaidEnd(ctx context.Context, networkId server.Id) (at *time.Time) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 				SELECT MAX(end_time) FROM subscription_renewal
-				WHERE network_id = $1 AND subscription_type = 'supporter' AND 0 < net_revenue_nano_cents
+				WHERE network_id = $1 AND subscription_type = 'supporter' AND 0 < net_revenue_nano_cents AND market <> $2
 			`,
 			networkId,
+			SubscriptionMarketGift,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -706,18 +718,20 @@ func NetworkLastPaidEnd(ctx context.Context, networkId server.Id) (at *time.Time
 }
 
 // NetworkLastPaidWindow is the end and market of the network's latest paid
-// supporter window.
+// supporter window: one the network bought, never a redeemed gift year, so a
+// win-back offer goes to the store the network paid in.
 func NetworkLastPaidWindow(ctx context.Context, networkId server.Id) (end time.Time, market string, ok bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 				SELECT end_time, COALESCE(market, '') FROM subscription_renewal
-				WHERE network_id = $1 AND subscription_type = 'supporter' AND 0 < net_revenue_nano_cents
+				WHERE network_id = $1 AND subscription_type = 'supporter' AND 0 < net_revenue_nano_cents AND market <> $2
 				ORDER BY end_time DESC
 				LIMIT 1
 			`,
 			networkId,
+			SubscriptionMarketGift,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -839,6 +853,42 @@ func GetNetworkClientContext(ctx context.Context, networkId server.Id) *NetworkC
 	return c
 }
 
+// NetworkClientBuild is the app build of a network's newest active client:
+// its device's spec and the app version the device last connected with
+// (device.client_version, written at the connect auth; "" before its first
+// connection).
+type NetworkClientBuild struct {
+	DeviceSpec    string
+	ClientVersion string
+}
+
+// GetNetworkNewestClientBuild reads the network's newest active client that
+// has a device, by creation, or nil when it has none. One backward read of the
+// (network_id, create_time) index.
+func GetNetworkNewestClientBuild(ctx context.Context, networkId server.Id) (build *NetworkClientBuild) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT device.device_spec, COALESCE(device.client_version, '')
+				FROM network_client
+				INNER JOIN device ON device.device_id = network_client.device_id
+				WHERE network_client.network_id = $1 AND network_client.active
+				ORDER BY network_client.create_time DESC
+				LIMIT 1
+			`,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				build = &NetworkClientBuild{}
+				server.Raise(result.Scan(&build.DeviceSpec, &build.ClientVersion))
+			}
+		})
+	})
+	return
+}
+
 // ----- consent evidence and suppression (account_preferences) -----
 
 // NetworkMailState is the network's product-updates preference, how it was
@@ -898,7 +948,10 @@ func SetNetworkProductUpdatesSource(ctx context.Context, networkId server.Id, so
 }
 
 // SuppressNetworkMarketingInTx stops every campaign's mail to the network. The
-// first suppression's time and reason stay.
+// first suppression's time stays, and so does its reason, unless a connection
+// lifts that reason (reengagement.LiftableSuppressions) and not this one: a
+// complaint, a bounce or an operator's suppression after a sunset replaces
+// the sunset, or the next connection would lift it with the sunset.
 //
 // Callers use controller.SuppressNetworkMarketing, which mirrors the
 // suppression to Brevo's lists in the same transaction.
@@ -912,13 +965,127 @@ func SuppressNetworkMarketingInTx(tx server.PgTx, ctx context.Context, networkId
 				marketing_suppressed_at = COALESCE(account_preferences.marketing_suppressed_at, $3),
 				marketing_suppressed_reason = CASE
 					WHEN account_preferences.marketing_suppressed_at IS NULL THEN $2
+					WHEN account_preferences.marketing_suppressed_reason = ANY($4::text[]) AND NOT ($2::text = ANY($4::text[])) THEN $2
 					ELSE account_preferences.marketing_suppressed_reason
 				END
 		`,
 		networkId,
 		reason,
 		now,
+		reengagement.LiftableSuppressions(),
 	))
+}
+
+// MarketingSuppressionState is a network's marketing suppression as an
+// operator's batch reads it (controller.PlanNetworksMarketingSuppression).
+type MarketingSuppressionState struct {
+	// nil when the network's marketing is not suppressed
+	SuppressedAt     *time.Time
+	SuppressedReason string
+}
+
+// GetNetworksMarketingSuppression reads the suppression of every network among
+// `networkIds` that exists, in one query. An id that names no network has no
+// entry; a network without a preference row reads as not suppressed.
+func GetNetworksMarketingSuppression(ctx context.Context, networkIds []server.Id) (states map[server.Id]*MarketingSuppressionState) {
+	states = map[server.Id]*MarketingSuppressionState{}
+	if len(networkIds) == 0 {
+		return
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		states = getNetworksMarketingSuppression(ctx, conn, networkIds)
+	})
+	return
+}
+
+// GetNetworksMarketingSuppressionInTx is GetNetworksMarketingSuppression in
+// the caller's transaction.
+func GetNetworksMarketingSuppressionInTx(tx server.PgTx, ctx context.Context, networkIds []server.Id) (states map[server.Id]*MarketingSuppressionState) {
+	if len(networkIds) == 0 {
+		return map[server.Id]*MarketingSuppressionState{}
+	}
+	return getNetworksMarketingSuppression(ctx, tx, networkIds)
+}
+
+func getNetworksMarketingSuppression(ctx context.Context, query server.PgCanQuery, networkIds []server.Id) (states map[server.Id]*MarketingSuppressionState) {
+	states = map[server.Id]*MarketingSuppressionState{}
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT
+				network.network_id,
+				account_preferences.marketing_suppressed_at,
+				COALESCE(account_preferences.marketing_suppressed_reason, '')
+			FROM network
+			LEFT JOIN account_preferences ON account_preferences.network_id = network.network_id
+			WHERE network.network_id = ANY($1::uuid[])
+		`,
+		networkIds,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var networkId server.Id
+			state := &MarketingSuppressionState{}
+			server.Raise(result.Scan(&networkId, &state.SuppressedAt, &state.SuppressedReason))
+			states[networkId] = state
+		}
+	})
+	return
+}
+
+// SuppressNetworksMarketingInTx records the suppression for every network
+// among `networkIds` that exists and is not already suppressed for good: one
+// that is not suppressed, or is suppressed for a reason a connection lifts
+// while `reason` is not one. The rule is SuppressNetworkMarketingInTx's, and
+// the first suppression's time stays. Every other network is left as it is,
+// so a repeat writes nothing. Returns the networks it wrote, with their
+// admins, in network id order.
+//
+// Callers use controller.SuppressNetworksMarketing, which queues the Brevo
+// mirror of each written network in the same transaction.
+func SuppressNetworksMarketingInTx(tx server.PgTx, ctx context.Context, networkIds []server.Id, reason string, now time.Time) (written []*ProductUpdatesNetworkAdmin) {
+	if len(networkIds) == 0 {
+		return
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+			WITH target AS MATERIALIZED (
+				SELECT network_id, admin_user_id
+				FROM network
+				WHERE network_id = ANY($1::uuid[])
+			), written AS (
+				INSERT INTO account_preferences (network_id, product_updates, marketing_suppressed_at, marketing_suppressed_reason)
+				SELECT network_id, true, $3::timestamp, $2::text
+				FROM target
+				ON CONFLICT (network_id) DO UPDATE SET
+					marketing_suppressed_at = COALESCE(account_preferences.marketing_suppressed_at, EXCLUDED.marketing_suppressed_at),
+					marketing_suppressed_reason = EXCLUDED.marketing_suppressed_reason
+				WHERE
+					account_preferences.marketing_suppressed_at IS NULL OR (
+						account_preferences.marketing_suppressed_reason = ANY($4::text[]) AND
+						NOT ($2::text = ANY($4::text[]))
+					)
+				RETURNING network_id
+			)
+			SELECT written.network_id, target.admin_user_id
+			FROM written
+			INNER JOIN target ON target.network_id = written.network_id
+			ORDER BY written.network_id
+		`,
+		networkIds,
+		reason,
+		now,
+		reengagement.LiftableSuppressions(),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			admin := &ProductUpdatesNetworkAdmin{}
+			server.Raise(result.Scan(&admin.NetworkId, &admin.AdminUserId))
+			written = append(written, admin)
+		}
+	})
+	return
 }
 
 // LiftNetworkMarketingSuppressionInTx clears a suppression whose reason is in

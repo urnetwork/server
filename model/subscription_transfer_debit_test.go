@@ -370,7 +370,7 @@ func TestAsyncDebitDistinctPayerDrainCapacity(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_id=$2 WHERE balance_id=$1`, f.balanceId, replacement))
 			})
 			f.balanceId = replacement
-			contract := createRedisAdmissionTest(ctx, f, 100)
+			contract := createAsyncDebitCapacityTestContract(t, ctx, f, 100, index, count)
 			_ = asyncDebitTestSettle(ctx, contract.ContractId, 11)
 			balances = append(balances, f.balanceId)
 		}

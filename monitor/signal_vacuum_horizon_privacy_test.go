@@ -118,11 +118,7 @@ func TestVacuumHorizonPrivacyRejectsNormalizedPrefix(t *testing.T) {
 func TestVacuumHorizonPrivacyPreservesClassifiers(t *testing.T) {
 	for _, test := range []struct{ query, age, mechanism string }{
 		{query: "INSERT INTO client_reliability_running SELECT synthetic_value", age: "120", mechanism: "share this truncated prefix"},
-		{query: "UPDATE transfer_contract SET reap_time = $1", age: "120", mechanism: "legacy CompletePayment retention fan-out"},
 		{query: "UPDATE transfer_contract SET outcome = $1, close_time = $2", age: "2", mechanism: "bounded per-contract CloseExpiredContracts"},
-		{query: "CREATE TEMPORARY TABLE temp_account_payment AS SELECT synthetic_value", age: "120", mechanism: "Payout payment planner"},
-		{query: "SELECT subsidy_start_time, subsidy_end_time FROM transfer_escrow_sweep", age: "120", mechanism: "Payout payment planner"},
-		{query: "SELECT value FROM subsidy_payment WHERE start_time < $2 AND $1 < end_time", age: "120", mechanism: "Payout payment planner"},
 		{query: "SELECT value FROM synthetic_work", age: "2", mechanism: "fresh read-only snapshot, not a persistent horizon holder"},
 	} {
 		row := vacuumHorizonPrivacyRow()

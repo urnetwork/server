@@ -11511,4 +11511,57 @@ var migrations = []any{
 	// it reads 0. Apply before deploying the taskworker, api and alt that use
 	// them.
 	providerEgressFp2EvidenceMigration,
+
+	// The store notification flow (store_notification_flow_schema.go,
+	// controller/store_notification_flow.go): one new table with a row per
+	// store, under a five-second lock bound, created only when absent.
+	// Nothing existing is locked or rewritten. Apply with the api and alt
+	// that write it.
+	storeNotificationFlowMigration,
+
+	// The sweep of every address a per-address coin's invoices were ever
+	// given (crypto_address_sweep_schema.go, controller/crypto_pay_sweep.go):
+	// two new empty tables, each created only when absent, under a
+	// five-second lock bound. Nothing existing is locked or rewritten. Apply
+	// before deploying the taskworker that runs the scans.
+	cryptoAddressSweepMigration,
+
+	// The Shopify orders paid with Solana Pay (solana_shopify_order_schema.go,
+	// controller/solana_shopify_order.go): one new empty table, created only
+	// when absent, under a five-second lock bound. Nothing existing is locked
+	// or rewritten. Apply before deploying the api and alt (the Helius
+	// webhook) and the taskworker (the Solana reconcile) that use it.
+	solanaShopifyOrderPaymentMigration,
+
+	// The durable per-network mail context (network_mail_context_schema.go,
+	// controller/mail_context.go): one new empty table, created only when
+	// absent, under a five-second lock bound. Nothing existing is locked or
+	// rewritten. Apply before deploying the api and alt that write it and the
+	// taskworker that reads it.
+	networkMailContextMigration,
+
+	// Explicit distributed terminal-infrastructure recovery preserves original
+	// admission/failure and requires all-host closure before a new cycle queues.
+	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),
+
+	// The gift of privacy's Pro gift codes (gift_schema.go,
+	// mmm/GIFTOFPRIVACY.md §10.6): four columns on transfer_balance_code (kind
+	// with a constant default, three nullable), each added only when absent,
+	// and the gift_order, gift_order_recipient and gift_order_pdf tables,
+	// new and empty, under a five-second lock bound. A catalog change only:
+	// nothing is rewritten or scanned, and every code before it reads kind
+	// 'data'. Apply before deploying the api, alt and taskworker that use
+	// them.
+	giftSchemaMigration,
+
+	// What refunds, disputes and orphaned crypto payments did to a gift
+	// order's codes (gift_refund_schema.go, model/gift_refund_model.go): the
+	// gift_code_void and gift_order_refund tables, new and empty, each with
+	// its index, under a five-second lock bound. Nothing existing is touched.
+	// Apply before deploying the api, alt and taskworker that use them.
+	giftRefundSchemaMigration,
+
+	// A separately qualified operator may grant one unchanged-patch retry,
+	// preserving the original paid admission, source, terminal and full audit.
+	newSqlMigration(CompetitionOperatorRequestedPatchRetryMigrationSql()),
 }

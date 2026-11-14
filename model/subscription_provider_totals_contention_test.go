@@ -16,8 +16,7 @@ import (
 // Settlement writes no provider row (BILLING-SPLIT.md): while another
 // transaction holds the provider network's account_balance row, the entire
 // shared-grant cohort settles through the foreground owner, queues no provider
-// totals and leaves the held row untouched, and payment selection still reads
-// the committed sweeps. (Until 2026-11-11 settlement queued one provider total
+// totals and leaves the held row untouched. (Until 2026-11-11 settlement queued one provider total
 // per contract, and this test followed those rows through their blocked
 // projection while the cohort settled.)
 func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
@@ -89,16 +88,6 @@ func TestLegacyProviderTotalsHeldProviderDoesNotRetainGrant(t *testing.T) {
 			})
 		}
 		assertFinancial()
-		// This is the real payment selection, with the provider row still held.
-		// Its obligations come from committed sweeps.
-		server.Tx(ctx, func(tx server.PgTx) {
-			planner := &PaymentPlanner{ctx: ctx, tx: tx, networkPayments: map[server.Id]*AccountPayment{}}
-			server.Raise(planner.planPayments())
-			payment := planner.networkPayments[f.destinationNetworkId]
-			if len(planner.networkPayments) != 1 || payment == nil || payment.PayoutByteCount != 11*count || payment.Payout != 11*count {
-				t.Fatal("the held provider row changed payment selection")
-			}
-		})
 		release()
 		mirrorOwner := legacyMirrorTestOwner(t, ctx, f.balanceId)
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 100*count)

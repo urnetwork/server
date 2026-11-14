@@ -885,6 +885,10 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		"data-pack bytes fulfilled",
 		"Raw cancellation intent is not durably available",
 		"never renders an invented cancellation-intent zero",
+		"past due (in grace)",
+		"past due by store",
+		"open payment failures",
+		"payment failures resolved",
 	} {
 		if !strings.Contains(document, required) {
 			t.Errorf("subscriptions dashboard lacks %q", required)
@@ -892,6 +896,9 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	}
 	for _, metric := range []string{
 		"urnetwork_subscription_active_accounts",
+		"urnetwork_subscription_in_grace_accounts",
+		"urnetwork_subscription_payment_failures_open",
+		"urnetwork_subscription_payment_failures_resolved",
 		"urnetwork_subscription_trials_active",
 		"urnetwork_subscription_new_paid_accounts",
 		"urnetwork_subscription_engaged_accounts",
@@ -1022,6 +1029,34 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 			!strings.Contains(panel.Targets[0].Expr, `window="$window"`) {
 			t.Errorf("data-pack panel %d lacks the bounded deduplicated source/window contract", panelID)
 		}
+	}
+
+	// past due: a deduplicated total and the tracked stores; Stripe's failed
+	// renewals: open now, and resolved by the closed reason set per window
+	pastDue := dashboardPanelById(dashboard, 28)
+	if pastDue == nil || len(pastDue.Targets) != 1 ||
+		!strings.Contains(pastDue.Targets[0].Expr, `max(urnetwork_subscription_in_grace_accounts{`) ||
+		!strings.Contains(pastDue.Targets[0].Expr, `store="deduplicated"`) {
+		t.Fatal("subscriptions dashboard lacks the deduplicated past-due total")
+	}
+	pastDueByStore := dashboardPanelById(dashboard, 29)
+	if pastDueByStore == nil || len(pastDueByStore.Targets) != 1 ||
+		!strings.Contains(pastDueByStore.Targets[0].Expr, `max by (store) (urnetwork_subscription_in_grace_accounts{`) ||
+		!strings.Contains(pastDueByStore.Targets[0].Expr, trackedStores) {
+		t.Fatal("subscriptions dashboard lacks the bounded past-due view by tracked store")
+	}
+	failuresOpen := dashboardPanelById(dashboard, 30)
+	if failuresOpen == nil || len(failuresOpen.Targets) != 1 ||
+		!strings.Contains(failuresOpen.Targets[0].Expr, `max(urnetwork_subscription_payment_failures_open{`) ||
+		!strings.Contains(failuresOpen.Targets[0].Expr, `store="stripe"`) {
+		t.Fatal("subscriptions dashboard lacks the open payment failures")
+	}
+	failuresResolved := dashboardPanelById(dashboard, 31)
+	if failuresResolved == nil || len(failuresResolved.Targets) != 1 ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `max by (reason) (urnetwork_subscription_payment_failures_resolved{`) ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `reason=~"paid|voided|uncollectible|subscription_ended"`) ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `window="$window"`) {
+		t.Fatal("subscriptions dashboard lacks the bounded resolved payment failures by reason")
 	}
 
 	cancellation := dashboardPanelById(dashboard, 12)
@@ -2008,10 +2043,12 @@ func TestProvidersDashboardPinsInternalMeasurements(t *testing.T) {
 	// observes its own answers, so they are summed as rates across them, and
 	// TestProvidersDashboardShowsTheEgressBuckets pins those reads instead. So
 	// are the ARIN canary's decision reads, each process's own counter, which
-	// TestProvidersDashboardShowsTheArindbCanaryRow pins
+	// TestProvidersDashboardShowsTheArindbCanaryRow pins, and the selector-mode
+	// and strict post-quantum request counters, which
+	// TestProvidersDashboardShowsTheCapabilityAwareSelection pins
 	for _, expression := range expressions {
 		for _, metric := range metricNamePattern.FindAllString(expression, -1) {
-			if providersPerProcessMetric(metric) || metric == providersArindbDecisionReadsMetric {
+			if providersPerProcessMetric(metric) || metric == providersArindbDecisionReadsMetric || slices.Contains(providersCapabilityRequestMetrics, metric) {
 				continue
 			}
 			assertReplicaSafeReads(t, "providers dashboard", expression, metric, `{env="$env"`)
@@ -2181,15 +2218,9 @@ func TestConnectH3DashboardPreservesMetricUnitsAndScope(t *testing.T) {
 	}
 }
 
-func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
+func TestCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	signalExpressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
 	for _, expression := range []string{
-		`sum(rate(urnetwork_circle_transfer_admissions_total{env="$env"}[$__rate_interval]))`,
-		`sum(rate(urnetwork_circle_transfer_deferrals_total{env="$env"}[$__rate_interval]))`,
-		`sum(rate(urnetwork_circle_transfer_admission_errors_total{env="$env"}[$__rate_interval]))`,
-		`histogram_quantile(0.50, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env="$env"}[$__rate_interval])))`,
-		`histogram_quantile(0.95, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env="$env"}[$__rate_interval])))`,
-		`sum(rate(urnetwork_circle_transfer_admission_wait_seconds_sum{env="$env"}[$__rate_interval])) / sum(rate(urnetwork_circle_transfer_admission_wait_seconds_count{env="$env"}[$__rate_interval]))`,
 		`max by (host, block, instance) (urnetwork_proxy_lock_cache_entries{env="$env"})`,
 		`max by (host, block, instance) (urnetwork_proxy_lock_cache_capacity{env="$env"})`,
 		`sum(rate(urnetwork_proxy_lock_cache_hits_total{env="$env"}[$__rate_interval]))`,
@@ -2211,41 +2242,6 @@ func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	sourceTarget := sourcePanel.Targets[0]
 	if sourceTarget.Expr != wantSourceQuery || sourceTarget.Format != "table" || !sourceTarget.Instant {
 		t.Errorf("running source revisions query = %+v, want instant table %q", sourceTarget, wantSourceQuery)
-	}
-}
-
-// The capability gauge identifies each freshly observed worker that emits a
-// bounded pre-POST admission event; missing workers must remain no-data.
-func TestCircleAdmissionDashboardPreservesPerWorkerCapability(t *testing.T) {
-	dashboard := readTestDashboard(t, "signals.json")
-	if slices.Contains(dashboard.Tags, PublicTag) {
-		t.Fatal("worker admission capability must remain authenticated")
-	}
-	var capabilityPanel *testPanel
-	for panelIndex := range dashboard.Panels {
-		panel := &dashboard.Panels[panelIndex]
-		if panel.Title == "Circle transfer admission event capability by worker" {
-			capabilityPanel = panel
-			break
-		}
-	}
-	if capabilityPanel == nil || len(capabilityPanel.Targets) != 1 {
-		t.Fatal("signals dashboard is missing a dedicated Circle admission capability panel")
-	}
-	const metric = `urnetwork_circle_transfer_admission_observable_info{env="$env",service="taskworker",instance!=""}`
-	wantQuery := metric + ` and on (env, service, block, host, instance) (timestamp(` + metric + `) >= time() - 90)`
-	target := capabilityPanel.Targets[0]
-	if target.Expr != wantQuery || target.LegendFormat != "{{host}} / {{block}} / {{instance}}" {
-		t.Errorf("Circle admission capability loses fresh per-worker gauge semantics: %+v", target)
-	}
-	if capabilityPanel.Type != "timeseries" || capabilityPanel.FieldConfig.Defaults.Unit != "short" ||
-		target.Instant || target.Range != nil && !*target.Range {
-		t.Error("Circle admission capability must be a unitless gauge time series")
-	}
-	for _, part := range []string{"1", "pre-POST", "90 seconds", "no-data", "§2.14"} {
-		if !strings.Contains(capabilityPanel.Description, part) {
-			t.Errorf("Circle admission capability does not explain %q", part)
-		}
 	}
 }
 

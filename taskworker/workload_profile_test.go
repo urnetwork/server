@@ -72,7 +72,7 @@ func TestSubnetOperatorWorkloadKeepsRequiredTargets(t *testing.T) {
 	}
 	for _, target := range []task.Target{
 		task.NewTaskTarget(work.Payout), task.NewTaskTarget(work.ProcessPendingPayouts),
-		task.NewTaskTarget(controller.AdvancePayment), task.NewTaskTarget(controller.PlaySubscriptionRenewal),
+		task.NewTaskTarget(controller.PlaySubscriptionRenewal),
 		task.NewTaskTarget(controller.OnboardingCampaignStep), task.NewTaskTarget(work.PaymentReconcile),
 		task.NewTaskTarget(work.RefreshGeolocationSourcePins), task.NewTaskTarget(work.ProberBootstrap),
 		task.NewTaskTarget(work.ProviderEgressProbe), task.NewTaskTarget(work.ExtenderProbe),
@@ -162,7 +162,7 @@ func TestSubnetOperatorWorkloadClaimsPastRetainedAndApiTasks(t *testing.T) {
 		defer worker.Close()
 		// This is an independent controller-style enqueue after worker init;
 		// startup scheduling alone cannot prevent its execution.
-		retainedIds = append(retainedIds, task.ScheduleTask(controller.AdvancePayment, &controller.AdvancePaymentArgs{}, clientSession, task.RunAt(server.NowUtc().Add(-2*time.Hour))))
+		retainedIds = append(retainedIds, task.ScheduleTask(controller.PlaySubscriptionRenewal, &controller.PlaySubscriptionRenewalArgs{}, clientSession, task.RunAt(server.NowUtc().Add(-2*time.Hour))))
 		before := task.GetTasks(ctx, retainedIds...)
 		allowedId := task.ScheduleTask(work.RemoveExpiredWalletNonces, &work.RemoveExpiredWalletNoncesArgs{}, clientSession, task.RunAt(server.NowUtc().Add(-time.Hour)))
 		finished, retried, postRetried, err := worker.EvalTasks(1)
@@ -194,14 +194,20 @@ func TestSubnetOperatorWorkloadPreservesProductionDefault(t *testing.T) {
 		}
 		// the geolocation-source pin refresh is retired and no longer seeded
 		// (connect/GEOMAP.md D24); the pool refresh is the egress default now
-		for _, target := range []task.Target{task.NewTaskTarget(work.Payout), task.NewTaskTarget(work.RefreshEgressDestinations), task.NewTaskTarget(work.StSyncChain), task.NewTaskTarget(controller.DeliverAccountMessages)} {
+		for _, target := range []task.Target{task.NewTaskTarget(work.RefreshEgressDestinations), task.NewTaskTarget(work.StSyncChain), task.NewTaskTarget(controller.DeliverAccountMessages)} {
 			name := target.TargetFunctionName()
 			if !worker.HasTarget(name) || !seeded[name] {
 				t.Errorf("ordinary production default lost scheduled/registered task %s", name)
 			}
 		}
-		if !worker.HasTarget(task.NewTaskTarget(controller.AdvancePayment).TargetFunctionName()) {
+		if !worker.HasTarget(task.NewTaskTarget(controller.PlaySubscriptionRenewal).TargetFunctionName()) {
 			t.Fatal("ordinary production default lost controller-enqueued retail payments")
+		}
+		// the weekly payout ended with USDC payouts (owner decision 2026-11-12):
+		// its target stays registered to drain queued rows and is not seeded
+		payoutName := task.NewTaskTarget(work.Payout).TargetFunctionName()
+		if !worker.HasTarget(payoutName) || seeded[payoutName] {
+			t.Fatalf("payout target registered %v, seeded %v; want registered and not seeded", worker.HasTarget(payoutName), seeded[payoutName])
 		}
 	})
 }

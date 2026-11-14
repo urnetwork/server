@@ -132,6 +132,7 @@ func TestAccountActionConstantsAreDistinctAndHaveDisplayNames(t *testing.T) {
 		AccountActionExtenderPingReport,
 		AccountActionExtenderLatencyReport,
 		AccountActionExtenderBlockReport,
+		AccountActionStripePurchaseStart,
 	}
 
 	seen := map[string]bool{}

@@ -35,7 +35,7 @@ func TestPostgresStateSignalSyntheticIdleTransactionStorm(t *testing.T) {
 		"oldest transaction: pid=1742249 continuously_idle=277s",
 		"application=withheld query=withheld",
 		"backends=119 oldest_continuous_idle=1s",
-		"transaction-local idle-timeout fix",
+		"follow open-contract drain",
 		"Do not mass-terminate",
 		"battery begins after the state summary",
 	} {

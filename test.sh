@@ -44,8 +44,44 @@ test_pipeline_status() {
 # Real PostgreSQL+Redis and independent processes must prove the same-network
 # shared-grant path does not regain financial row queues or a local payer gate.
 # No retries or skip-on-short mode: a missing fixture fails the release gate.
-WARP_TEST_ENV_FAIL_FAST=1 go test -p=1 -race -count=1 -timeout=5m ./model ./taskworker/work \
-    -run '^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' || exit $?
+# Go's alarm covers a whole package, including every disposable database's
+# migrations. Give each mandatory root its own unchanged five-minute bound so
+# completed cases cannot consume a healthy successor's setup/operation budget.
+run_mandatory_admission_tests() {
+    local admission_pattern='^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$'
+    local admission_package admission_listing admission_status admission_test previous_test
+    local -a admission_tests
+    for admission_package in ./model ./taskworker/work; do
+        admission_listing="$(WARP_TEST_ENV_FAIL_FAST=1 go test -p=1 -race -count=1 -timeout=5m "$admission_package" -list "$admission_pattern")"
+        admission_status=$?
+        printf '%s\n' "$admission_listing"
+        [[ "$admission_status" -eq 0 ]] || return "$admission_status"
+        admission_tests=()
+        while IFS= read -r admission_test; do
+            [[ "$admission_test" == Test* ]] || continue
+            if [[ ! "$admission_test" =~ ^Test[[:alnum:]_]+$ || ! "$admission_test" =~ $admission_pattern ]]; then
+                echo "invalid mandatory admission test census for $admission_package: $admission_test" >&2
+                return 65
+            fi
+            for previous_test in "${admission_tests[@]}"; do
+                if [[ "$admission_test" == "$previous_test" ]]; then
+                    echo "duplicate mandatory admission test for $admission_package: $admission_test" >&2
+                    return 65
+                fi
+            done
+            admission_tests+=("$admission_test")
+        done <<< "$admission_listing"
+        if [[ "${#admission_tests[@]}" -eq 0 ]]; then
+            echo "empty mandatory admission test census for $admission_package" >&2
+            return 65
+        fi
+        for admission_test in "${admission_tests[@]}"; do
+            printf 'server admission test: %s %s\n' "$admission_package" "$admission_test"
+            WARP_TEST_ENV_FAIL_FAST=1 go test -p=1 -race -count=1 -timeout=5m "$admission_package" -run "^${admission_test}$" || return $?
+        done
+    done
+}
+run_mandatory_admission_tests || exit $?
 
 # The proxy integration tests (./proxy) drive real-time wireguard/gvisor packet
 # paths and real outbound TLS. Like the connect packet-translation tests, the

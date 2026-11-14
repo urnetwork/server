@@ -1,11 +1,9 @@
 package controller
 
-// The invoice addresses a per-address coin's scanner reads (ETH through
-// Alchemy, SOL through Helius, TAO through snow's node; mmm/BTCPAY.md §17.3).
-// Monero's and Zcash's daemons see every address of their wallet; a Coinbase
-// deposit address is ours only by the pool, so each scan names the addresses
-// in play (Bitcoin's block scanner looks them up itself, a block at a time,
-// with the same rules: crypto_pay_bitcoin.go):
+// The invoice addresses a per-address coin's scanner reads often (ETH through
+// Alchemy, SOL through Helius; mmm/BTCPAY.md §17.3). Monero's and Zcash's
+// daemons see every address of their wallet; a Coinbase deposit address is
+// ours only by the pool, so each scan names the addresses in play:
 //
 //   - hot, read every scan: an open invoice, or one with a payment not yet at
 //     its final depth;
@@ -15,9 +13,15 @@ package controller
 //   - hinted, read on the next scan whatever its age: an address a verified
 //     webhook delivery (Alchemy, Helius) named.
 //
+// Every other address an invoice was ever given (closed longer ago,
+// credited, voided or past the retention unlink) is read by the scan's
+// sweep, a few a scan from its own cursor (crypto_pay_sweep.go), so no
+// payment to an issued address goes unrecorded. Bitcoin's and TAO's readers
+// read every block and match every issued address in it themselves
+// (crypto_pay_bitcoin.go, crypto_pay_bittensor.go).
+//
 // The chain is the source of truth for every credit; a webhook only brings a
-// read forward. A payment to an address outside all three is still in our
-// Coinbase account, and support finds it there.
+// read forward.
 
 import (
 	"context"

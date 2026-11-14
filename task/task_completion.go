@@ -4,7 +4,7 @@ package task
 
 import (
 	"context"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -147,7 +147,7 @@ func (self *TaskWorker) finalizeTaskInTx(finalizeCtx context.Context, tx server.
 		task.TaskId,
 		err.Error(),
 	))
-	rescheduleTime := server.NowUtc().Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
+	rescheduleTime := server.NowUtc().Add(time.Second * time.Duration(mathrand.IntN(int(RescheduleTimeout/time.Second))))
 	clientSession, err := task.ClientSession(finalizeCtx)
 	server.Raise(err)
 	defer clientSession.Cancel()

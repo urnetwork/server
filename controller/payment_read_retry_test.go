@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const paymentReadTestId = "synthetic-transaction"
+const paymentReadTestId = "synthetic-wallet"
 
 type paymentReadTestBody struct {
 	reader    io.Reader
@@ -53,7 +53,7 @@ func paymentReadTestResponse(status int, payload string, closed *int) *http.Resp
 }
 
 func paymentReadTestPayload(id string) string {
-	return fmt.Sprintf(`{"data":{"transaction":{"id":%q,"state":"CONFIRMED"}}}`, id)
+	return fmt.Sprintf(`{"data":{"wallet":{"id":%q,"address":"synthetic-address","blockchain":"SYNTHETIC","createDate":"2026-10-01T00:00:00Z"}}}`, id)
 }
 
 func paymentReadTestCircle(hooks paymentReadHooks) *CoreCircleApiClient {
@@ -95,7 +95,7 @@ func awaitPaymentReadBarrier(t *testing.T, entered <-chan struct{}) {
 }
 
 // Only the retry clock is accelerated; the actual Core GET builds every request,
-// consumes each response body, and checks the processor transaction identity.
+// consumes each response body, and checks the processor wallet identity.
 func TestPaymentReadCircleSurvivesTransientOutageBeyondOneMinute(t *testing.T) {
 	started := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	now := started
@@ -111,8 +111,8 @@ func TestPaymentReadCircleSurvivesTransientOutageBeyondOneMinute(t *testing.T) {
 		},
 		do: func(request *http.Request) (*http.Response, error) {
 			requirePaymentReadRequest(t, request)
-			if request.URL.Path != "/v1/w3s/transactions/"+paymentReadTestId || request.Header.Get("Authorization") != "Bearer synthetic-read-token" || closed != calls {
-				t.Fatal("actual transaction request or prior body ownership changed")
+			if request.URL.Path != "/v1/w3s/wallets/"+paymentReadTestId || request.Header.Get("Authorization") != "Bearer synthetic-read-token" || closed != calls {
+				t.Fatal("actual wallet request or prior body ownership changed")
 			}
 			calls++
 			if now.Sub(started) < 65*time.Second {
@@ -121,8 +121,8 @@ func TestPaymentReadCircleSurvivesTransientOutageBeyondOneMinute(t *testing.T) {
 			return paymentReadTestResponse(http.StatusOK, paymentReadTestPayload(paymentReadTestId), &closed), nil
 		},
 	})
-	result, err := client.GetTransaction(context.Background(), paymentReadTestId)
-	if err != nil || result == nil || result.Transaction.Id != paymentReadTestId || calls < 2 || closed != calls || now.Sub(started) < 65*time.Second || now.Sub(started) >= 67*time.Second {
+	result, err := client.getCircleWallet(context.Background(), paymentReadTestId)
+	if err != nil || result == nil || result.ID != paymentReadTestId || calls < 2 || closed != calls || now.Sub(started) < 65*time.Second || now.Sub(started) >= 67*time.Second {
 		t.Fatalf("actual GET did not recover after the virtual 65-second outage: result=%v err=%v calls=%d closed=%d elapsed=%v", result, err, calls, closed, now.Sub(started))
 	}
 }
@@ -145,7 +145,7 @@ func TestPaymentReadCircleRetriesTypedTransportTimeoutAndDisconnect(t *testing.T
 			return paymentReadTestResponse(http.StatusOK, paymentReadTestPayload(paymentReadTestId), &closed), nil
 		},
 	})
-	result, err := client.GetTransaction(context.Background(), paymentReadTestId)
+	result, err := client.getCircleWallet(context.Background(), paymentReadTestId)
 	if err != nil || result == nil || calls != 3 || closed != 1 {
 		t.Fatalf("typed transport failures did not recover: %v calls=%d closed=%d", err, calls, closed)
 	}
@@ -172,7 +172,7 @@ func TestPaymentReadCircleExhaustsOwnedBudget(t *testing.T) {
 			},
 		})
 		client.readSettings = PaymentReadSettings{Budget: budget}
-		result, err := client.GetTransaction(context.Background(), paymentReadTestId)
+		result, err := client.getCircleWallet(context.Background(), paymentReadTestId)
 		expectedBudget := budget
 		if expectedBudget == 0 {
 			expectedBudget = 300 * time.Second
@@ -190,10 +190,10 @@ func TestPaymentReadCirclePermanentResponsesDoNotRetry(t *testing.T) {
 	}{
 		{status: http.StatusUnauthorized, payload: "authentication refused"},
 		{status: http.StatusForbidden, payload: "authorization refused"},
-		{status: http.StatusNotFound, payload: "unknown transaction"},
+		{status: http.StatusNotFound, payload: "unknown wallet"},
 		{status: http.StatusNotImplemented, payload: "unsupported operation"},
 		{status: http.StatusOK, payload: "{malformed"},
-		{status: http.StatusOK, payload: paymentReadTestPayload("different-transaction")},
+		{status: http.StatusOK, payload: paymentReadTestPayload("different-wallet")},
 	}
 	for _, item := range cases {
 		calls, closed, waits := 0, 0, 0
@@ -205,7 +205,7 @@ func TestPaymentReadCirclePermanentResponsesDoNotRetry(t *testing.T) {
 				return paymentReadTestResponse(item.status, item.payload, &closed), nil
 			},
 		})
-		result, err := client.GetTransaction(context.Background(), paymentReadTestId)
+		result, err := client.getCircleWallet(context.Background(), paymentReadTestId)
 		if result != nil || err == nil || calls != 1 || closed != 1 || waits != 0 {
 			t.Fatalf("permanent status/payload retried: status=%d result=%v err=%v calls=%d closed=%d waits=%d", item.status, result, err, calls, closed, waits)
 		}
@@ -229,7 +229,7 @@ func TestPaymentReadCircleJoinedHardCauseDominatesRetry(t *testing.T) {
 				return response, nil
 			},
 		})
-		result, err := client.GetTransaction(context.Background(), paymentReadTestId)
+		result, err := client.getCircleWallet(context.Background(), paymentReadTestId)
 		if result != nil || !errors.Is(err, hard) || calls != 1 || waits != 0 || withResponse && closed != 1 {
 			t.Fatalf("joined hard cause was retried: response=%v err=%v calls=%d closed=%d waits=%d", withResponse, err, calls, closed, waits)
 		}
@@ -251,7 +251,7 @@ func TestPaymentReadCircleCanceledTransportJoins(t *testing.T) {
 		},
 	})
 	done := make(chan error, 1)
-	go func() { _, err := client.GetTransaction(ctx, paymentReadTestId); done <- err }()
+	go func() { _, err := client.getCircleWallet(ctx, paymentReadTestId); done <- err }()
 	awaitPaymentReadBarrier(t, entered)
 	cancel()
 	if err := awaitPaymentReadResult(t, done); !errors.Is(err, context.Canceled) || calls.Load() != 1 {
@@ -284,7 +284,7 @@ func TestPaymentReadCircleCanceledPauseDoesNotSendAgain(t *testing.T) {
 		},
 	})
 	done := make(chan error, 1)
-	go func() { _, err := client.GetTransaction(ctx, paymentReadTestId); done <- err }()
+	go func() { _, err := client.getCircleWallet(ctx, paymentReadTestId); done <- err }()
 	awaitPaymentReadBarrier(t, entered)
 	cancel()
 	if err := awaitPaymentReadResult(t, done); !errors.Is(err, context.Canceled) || calls != 1 || closed != 1 {
@@ -304,7 +304,7 @@ func TestPaymentReadCircleCanceledCompleteBodyCannotBeAccepted(t *testing.T) {
 			return response, nil
 		},
 	})
-	result, err := client.GetTransaction(ctx, paymentReadTestId)
+	result, err := client.getCircleWallet(ctx, paymentReadTestId)
 	if result != nil || !errors.Is(err, context.Canceled) || calls != 1 || closed != 1 {
 		t.Fatalf("canceled full response was admitted or leaked: %v result=%v calls=%d closed=%d", err, result, calls, closed)
 	}
@@ -320,7 +320,7 @@ func TestPaymentReadCircleResponseBoundAndClose(t *testing.T) {
 			return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
 		},
 	})
-	result, err := client.GetTransaction(context.Background(), paymentReadTestId)
+	result, err := client.getCircleWallet(context.Background(), paymentReadTestId)
 	if result != nil || err == nil || !strings.Contains(err.Error(), "response exceeds") || body.readBytes != maximumPaymentReadBytes+1 || calls != 1 || closed != 1 || waits != 0 {
 		t.Fatalf("oversized body was not bounded, refused and closed: %v bytes=%d calls=%d closed=%d waits=%d", err, body.readBytes, calls, closed, waits)
 	}
@@ -335,9 +335,6 @@ func TestPaymentReadCallerPolicyAndCanceledAdmission(t *testing.T) {
 		{Budget: 59 * time.Second}, {Budget: -time.Second}, {Budget: 16 * time.Minute},
 		{AttemptTimeout: -time.Second}, {AttemptTimeout: 61 * time.Second},
 	} {
-		if _, err := NewCoreCircleApiClient(invalid); err == nil {
-			t.Fatalf("Circle admitted invalid policy %+v", invalid)
-		}
 		if _, err := NewCoreCoinbaseClient(invalid); err == nil {
 			t.Fatalf("Coinbase admitted invalid policy %+v", invalid)
 		}
@@ -349,7 +346,7 @@ func TestPaymentReadCallerPolicyAndCanceledAdmission(t *testing.T) {
 	expired, cancelExpired := context.WithDeadline(context.Background(), time.Unix(1, 0))
 	defer cancelExpired()
 	for _, ctx := range []context.Context{nil, canceled, expired} {
-		if result, err := circle.GetTransaction(ctx, paymentReadTestId); result != nil || err == nil {
+		if result, err := circle.getCircleWallet(ctx, paymentReadTestId); result != nil || err == nil {
 			t.Fatal("Circle admitted absent/canceled owner")
 		}
 		if result, err := coinbase.FetchExchangeRates(ctx, "USD"); result != nil || err == nil {
@@ -380,10 +377,10 @@ func TestPaymentReadConcurrentOwnersRemainIndependent(t *testing.T) {
 		},
 	})
 	canceledDone, healthyDone := make(chan error, 1), make(chan error, 1)
-	go func() { _, err := client.GetTransaction(ctx, "canceled-owner"); canceledDone <- err }()
+	go func() { _, err := client.getCircleWallet(ctx, "canceled-owner"); canceledDone <- err }()
 	go func() {
-		result, err := client.GetTransaction(context.Background(), "healthy-owner")
-		if err == nil && (result == nil || result.Transaction.Id != "healthy-owner") {
+		result, err := client.getCircleWallet(context.Background(), "healthy-owner")
+		if err == nil && (result == nil || result.ID != "healthy-owner") {
 			err = errors.New("healthy owner lost its result")
 		}
 		healthyDone <- err

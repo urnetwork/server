@@ -2,7 +2,7 @@ package egresshealth
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -62,7 +62,7 @@ func TestBlackholePassesAfterCheckingIntegrityOfWholeSample(t *testing.T) {
 	defer srv.Close()
 
 	res := blackhole(context.Background(), srv.Client(), stubDests(srv.URL, 3),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 
 	if !res.Ok {
 		t.Fatalf("OK = false, want true: every destination answered correctly")
@@ -91,7 +91,7 @@ func TestBlackholeChecksIntegritySampleConcurrently(t *testing.T) {
 	done := make(chan *BlackholeResult, 1)
 	go func() {
 		done <- blackhole(context.Background(), srv.Client(), stubDests(srv.URL, BlackholeSampleSize),
-			Options{Rand: rand.New(rand.NewSource(1)), PerRequestTimeout: 2 * time.Second, Sleep: noSleep})
+			Options{Rand: rand.New(rand.NewPCG(1, 0)), PerRequestTimeout: 2 * time.Second, Sleep: noSleep})
 	}()
 	for i := 0; i < BlackholeSampleSize; i++ {
 		select {
@@ -118,7 +118,7 @@ func TestBlackholeFailsOnlyWhenAllFail(t *testing.T) {
 	defer srv.Close()
 
 	res := blackhole(context.Background(), srv.Client(), stubDests(srv.URL, 3),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 
 	if res.Ok {
 		t.Fatalf("OK = true, want false: no destination met its contract")
@@ -153,7 +153,7 @@ func TestBlackholePartialReachabilityIsNotABlackhole(t *testing.T) {
 	defer srv.Close()
 
 	res := blackhole(context.Background(), srv.Client(), stubDests(srv.URL, 3),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 
 	if !res.Ok {
 		t.Errorf("OK = false, want true: the third destination answered, so traffic is getting through")
@@ -180,7 +180,7 @@ func TestBlackholeTlsAuthenticationFailureOverridesSuccess(t *testing.T) {
 		{Name: "good-b", Class: ClassConnectivity, Url: good.URL, Expect: ExpectStatus, Status: http.StatusNoContent},
 	}
 	res := blackhole(context.Background(), http.DefaultClient, dests,
-		Options{Rand: rand.New(rand.NewSource(1)), PerRequestTimeout: time.Second, Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), PerRequestTimeout: time.Second, Sleep: noSleep})
 
 	if res.Ok {
 		t.Fatal("OK = true, want false: a forged certificate is a hard provider failure")
@@ -200,7 +200,7 @@ func TestBlackholeTlsAuthenticationFailureOverridesSuccess(t *testing.T) {
 
 // Only the connectivity class is ever drawn.
 func TestBlackholeSampleDrawsConnectivityOnly(t *testing.T) {
-	sample := blackholeSample(stubDests("https://blackhole.example", 5), rand.New(rand.NewSource(7)))
+	sample := blackholeSample(stubDests("https://blackhole.example", 5), rand.New(rand.NewPCG(7, 0)))
 
 	if len(sample) != BlackholeSampleSize {
 		t.Fatalf("drew %d, want %d", len(sample), BlackholeSampleSize)
@@ -216,7 +216,7 @@ func TestBlackholeSampleDrawsConnectivityOnly(t *testing.T) {
 // silently degrades to "no sample, therefore a blackhole" and would condemn the
 // entire fleet.
 func TestBlackholeRealTableHasConnectivityDestinations(t *testing.T) {
-	sample := blackholeSample(testCatalogDestinations(), rand.New(rand.NewSource(1)))
+	sample := blackholeSample(testCatalogDestinations(), rand.New(rand.NewPCG(1, 0)))
 	if len(sample) == 0 {
 		t.Fatal("the real destination table drew no connectivity destinations: " +
 			"every provider would be recorded as a blackhole")
@@ -251,7 +251,7 @@ func TestBlackholeOneLoadPassingOnItsLastAttemptIsOk(t *testing.T) {
 		{Name: "down-b", Class: ClassConnectivity, Url: srv.URL + "/down", Expect: ExpectStatus, Status: http.StatusNoContent},
 		{Name: "late", Class: ClassConnectivity, Url: srv.URL + "/late", Expect: ExpectStatus, Status: http.StatusNoContent},
 	}
-	res := blackhole(context.Background(), srv.Client(), dests, Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+	res := blackhole(context.Background(), srv.Client(), dests, Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 
 	if !res.Ok || res.Failure != "" {
 		t.Fatalf("OK = %t failure = %q, want OK: one load passed on its last attempt", res.Ok, res.Failure)
@@ -280,7 +280,7 @@ func TestBlackholeEveryLoadFailingEveryAttemptIsAllDestinationsFailed(t *testing
 	}))
 	defer srv.Close()
 
-	res := blackhole(context.Background(), srv.Client(), stubDests(srv.URL, 5), Options{Rand: rand.New(rand.NewSource(2)), Sleep: noSleep})
+	res := blackhole(context.Background(), srv.Client(), stubDests(srv.URL, 5), Options{Rand: rand.New(rand.NewPCG(2, 0)), Sleep: noSleep})
 	if res.Ok || res.Failure != FailureAllDestinationsFailed {
 		t.Fatalf("OK = %t failure = %q, want %q", res.Ok, res.Failure, FailureAllDestinationsFailed)
 	}
@@ -316,7 +316,7 @@ func TestBlackholeIgnoresConfiguredEchoEvenWhenLoadsFail(t *testing.T) {
 	defer srv.Close()
 
 	res := blackhole(context.Background(), srv.Client(), stubDests(srv.URL, 3), Options{
-		Rand:      rand.New(rand.NewSource(3)),
+		Rand:      rand.New(rand.NewPCG(3, 0)),
 		Sleep:     noSleep,
 		IpEchoUrl: srv.URL + IpEchoPath,
 	})
@@ -349,7 +349,7 @@ func TestBlackholeDrawsFromThePool(t *testing.T) {
 	defer srv.Close()
 
 	res := Blackhole(context.Background(), srv.Client(), Options{
-		Rand:         rand.New(rand.NewSource(4)),
+		Rand:         rand.New(rand.NewPCG(4, 0)),
 		Sleep:        noSleep,
 		Destinations: stubDests(srv.URL, 4),
 	})

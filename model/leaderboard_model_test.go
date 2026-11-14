@@ -11,12 +11,28 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// Records one payout window, a subsidy epoch that ended now, with one payment
+// of the window's bytes per network.
+func leaderboardTestPayoutWindow(t testing.TB, ctx context.Context, networkByteCounts map[server.Id]ByteCount) {
+	t.Helper()
+	paymentPlanId := server.NewId()
+	now := server.NowUtc()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO subsidy_payment
+			(payment_plan_id,start_time,end_time,active_user_count,paid_user_count,net_payout_byte_count_paid,net_payout_byte_count_unpaid,net_revenue_nano_cents,net_payout_nano_cents)
+			VALUES($1,$2,$3,1,1,0,0,0,0)`, paymentPlanId, now.Add(-24*time.Hour), now))
+		for networkId, byteCount := range networkByteCounts {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment
+				(payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time)
+				VALUES($1,$2,$3,$4,0,$5)`, server.NewId(), paymentPlanId, networkId, byteCount, now.Add(-24*time.Hour)))
+		}
+	})
+}
+
 func TestLeaderboard(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
 		ctx := context.Background()
-		netTransferByteCount := ByteCount(1024 * 1024 * 1024 * 1024)
-		netRevenue := UsdToNanoCents(10.00)
 
 		/**
 		 * Network A and B will be the providers
@@ -49,10 +65,6 @@ func TestLeaderboard(t *testing.T) {
 		Testing_CreateDevice(ctx, networkIdA, server.NewId(), userIdA, "synthetic-leaderboard-provider-a", "synthetic")
 		Testing_CreateDevice(ctx, networkIdB, server.NewId(), userIdB, "synthetic-leaderboard-provider-b", "synthetic")
 		Testing_CreateDevice(ctx, networkIdC, server.NewId(), userIdC, "synthetic-leaderboard-caller", "synthetic")
-		clientSessionC := session.Testing_CreateClientSession(
-			ctx,
-			session.NewByJwt(networkIdC, userIdC, "c", false, isPro),
-		)
 
 		/**
 		 * Set public leaderboards
@@ -63,60 +75,14 @@ func TestLeaderboard(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 
 		/**
-		 * Create balance for network C
+		 * A payout window in which network C's traffic paid network B twice
+		 * network A's bytes, recorded as a payout plan recorded its subsidy
+		 * epoch and payments before USDC payouts ended
 		 */
-		subscriptionYearDuration := 365 * 24 * time.Hour
-		balanceCode, err := CreateBalanceCode(
-			ctx,
-			2*netTransferByteCount,
-			subscriptionYearDuration,
-			2*netRevenue,
-			"",
-			"",
-			"",
-		)
-
-		connect.AssertEqual(t, err, nil)
-		RedeemBalanceCode(&RedeemBalanceCodeArgs{
-			Secret:    balanceCode.Secret,
-			NetworkId: clientSessionC.ByJwt.NetworkId,
-		}, clientSessionC.Ctx)
-
-		usedTransferByteCount := ByteCount(1024 * 1024 * 1024)
-		paid := NanoCents(0)
-
-		for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
-			transferEscrow, err := CreateTransferEscrow(ctx, networkIdC, userIdC, networkIdA, userIdA, usedTransferByteCount)
-			connect.AssertEqual(t, err, nil)
-
-			err = CloseContract(ctx, transferEscrow.ContractId, userIdC, usedTransferByteCount, false)
-			connect.AssertEqual(t, err, nil)
-			err = CloseContract(ctx, transferEscrow.ContractId, userIdA, usedTransferByteCount, false)
-			connect.AssertEqual(t, err, nil)
-			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
-		}
-
-		paid = NanoCents(0)
-
-		for paid < 2*UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
-			transferEscrow, err := CreateTransferEscrow(ctx, networkIdC, userIdC, networkIdB, userIdB, usedTransferByteCount)
-			connect.AssertEqual(t, err, nil)
-
-			err = CloseContract(ctx, transferEscrow.ContractId, userIdC, usedTransferByteCount, false)
-			connect.AssertEqual(t, err, nil)
-			err = CloseContract(ctx, transferEscrow.ContractId, userIdB, usedTransferByteCount, false)
-			connect.AssertEqual(t, err, nil)
-			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
-		}
-
-		/**
-		 * Plan payments
-		 */
-		subsidyConfig := *EnvSubsidyConfig()
-		subsidyConfig.Days = 1
-		subsidyConfig.MinDaysFraction = 0
-		_, err = PlanPaymentsWithConfig(ctx, &subsidyConfig)
-		connect.AssertEqual(t, err, nil)
+		leaderboardTestPayoutWindow(t, ctx, map[server.Id]ByteCount{
+			networkIdA: 1024 * 1024 * 1024,
+			networkIdB: 2 * 1024 * 1024 * 1024,
+		})
 
 		/**
 		 * check leaderboard stats

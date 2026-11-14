@@ -50,23 +50,35 @@ func TestStripeInvoiceCreditPostsOncePerInvoice(t *testing.T) {
 	tx := newSalesLedgerTx(networkId)
 
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	monthEnd := start.Add(31*24*time.Hour + manualPaymentGracePeriod)
+	monthEnd := start.Add(31 * 24 * time.Hour)
 	newInvoice := &StripeEventInvoiceObject{Id: "in_new", Total: 499, Currency: "usd", BillingReason: "subscription_create"}
+	newCredit := &stripeInvoiceCredit{
+		networkId:   networkId,
+		startTime:   start,
+		paidEndTime: monthEnd,
+		endTime:     monthEnd.Add(manualPaymentGracePeriod),
+	}
 
 	for range 3 {
-		credited, err := stripeCreditInvoicePaidInTx(tx, ctx, networkId, newInvoice, model.UsdToNanoCents(3.49), start, monthEnd)
+		credited, err := stripeCreditInvoicePaidInTx(tx, ctx, newCredit, newInvoice, model.UsdToNanoCents(3.49))
 		connect.AssertEqual(t, err, nil)
 		_ = credited
 	}
 	connect.AssertEqual(t, len(notices()), 1)
 
 	renewalStart := start.Add(365 * 24 * time.Hour)
-	yearEnd := renewalStart.Add(365*24*time.Hour + manualPaymentGracePeriod)
+	yearEnd := renewalStart.Add(365 * 24 * time.Hour)
 	renewal := &StripeEventInvoiceObject{Id: "in_renewal", Total: 3999, Currency: "usd", BillingReason: "subscription_cycle"}
-	credited, err := stripeCreditInvoicePaidInTx(tx, ctx, networkId, renewal, model.UsdToNanoCents(27.99), renewalStart, yearEnd)
+	renewalCredit := &stripeInvoiceCredit{
+		networkId:   networkId,
+		startTime:   renewalStart,
+		paidEndTime: yearEnd,
+		endTime:     yearEnd.Add(manualPaymentGracePeriod),
+	}
+	credited, err := stripeCreditInvoicePaidInTx(tx, ctx, renewalCredit, renewal, model.UsdToNanoCents(27.99))
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, credited, true)
-	credited, err = stripeCreditInvoicePaidInTx(tx, ctx, networkId, renewal, model.UsdToNanoCents(27.99), renewalStart, yearEnd)
+	credited, err = stripeCreditInvoicePaidInTx(tx, ctx, renewalCredit, renewal, model.UsdToNanoCents(27.99))
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, credited, false)
 
@@ -84,7 +96,13 @@ func TestStripeInvoiceCreditForAMissingNetworkPostsNothing(t *testing.T) {
 	notices := captureSalesNotices(t)
 	tx := newSalesLedgerTx()
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	credited, err := stripeCreditInvoicePaidInTx(tx, context.Background(), server.NewId(), &StripeEventInvoiceObject{Id: "in_x", Total: 499, Currency: "usd"}, 0, start, start.Add(61*24*time.Hour))
+	credit := &stripeInvoiceCredit{
+		networkId:   server.NewId(),
+		startTime:   start,
+		paidEndTime: start.Add(31 * 24 * time.Hour),
+		endTime:     start.Add(61 * 24 * time.Hour),
+	}
+	credited, err := stripeCreditInvoicePaidInTx(tx, context.Background(), credit, &StripeEventInvoiceObject{Id: "in_x", Total: 499, Currency: "usd"}, 0)
 	connect.AssertEqual(t, err, model.ErrPaymentNetworkNotFound)
 	connect.AssertEqual(t, credited, false)
 	connect.AssertEqual(t, len(notices()), 0)
@@ -141,52 +159,52 @@ func TestStripeInvoiceSalesNoticeReadsThePaymentFromStripe(t *testing.T) {
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	cases := []struct {
 		invoice *StripeEventInvoiceObject
-		end     time.Time
+		paidEnd time.Time
 		want    string
 	}{
 		{
 			// as delivered, without the reason: the read back says new
 			invoice: &StripeEventInvoiceObject{Id: "in_card", Total: 499, Currency: "usd"},
-			end:     start.Add(31*24*time.Hour + manualPaymentGracePeriod),
+			paidEnd: start.Add(31 * 24 * time.Hour),
 			want:    salesNoticeText("Pro monthly (new)", "acme", "4.99 USD", "Stripe (card)"),
 		},
 		{
 			// the held trial invoice path delivers no currency
 			invoice: &StripeEventInvoiceObject{Id: "in_link", Total: 3999},
-			end:     start.Add(14 * 24 * time.Hour),
+			paidEnd: start.Add(14 * 24 * time.Hour),
 			want:    salesNoticeText("Pro yearly (renewal)", "acme", "39.99 USD", "Stripe (Link)"),
 		},
 		{
 			invoice: &StripeEventInvoiceObject{Id: "in_wallet"},
-			end:     start.Add(31*24*time.Hour + manualPaymentGracePeriod),
+			paidEnd: start.Add(31 * 24 * time.Hour),
 			want:    salesNoticeText("Pro monthly (renewal)", "acme", "4.99 EUR", "Stripe (Link)"),
 		},
 		{
 			// the yearly plan's 14-day trial: no charge, no sale
 			invoice: &StripeEventInvoiceObject{Id: "in_trial", BillingReason: "subscription_create"},
-			end:     start.Add(14*24*time.Hour + manualPaymentGracePeriod),
+			paidEnd: start.Add(14 * 24 * time.Hour),
 			want:    strings.Replace(salesNoticeText("Pro yearly (new)", "acme", "no charge (free trial until 2026-10-15)", "Stripe"), "*Sale:*", "*Trial:*", 1),
 		},
 		{
 			// a month for nothing (a 100% coupon) is no trial
 			invoice: &StripeEventInvoiceObject{Id: "in_coupon", BillingReason: "subscription_create"},
-			end:     start.Add(31*24*time.Hour + manualPaymentGracePeriod),
+			paidEnd: start.Add(31 * 24 * time.Hour),
 			want:    salesNoticeText("Pro monthly (new, no charge)", "acme", "0.00 USD", "Stripe (no charge)"),
 		},
 		{
 			// an API version whose invoice names no charge: through its payments
 			invoice: &StripeEventInvoiceObject{Id: "in_basil"},
-			end:     start.Add(31*24*time.Hour + manualPaymentGracePeriod),
+			paidEnd: start.Add(31 * 24 * time.Hour),
 			want:    salesNoticeText("Pro monthly (new)", "acme", "4.99 USD", "Stripe (card)"),
 		},
 		{
 			invoice: &StripeEventInvoiceObject{Id: "in_yen"},
-			end:     start.Add(365*24*time.Hour + manualPaymentGracePeriod),
+			paidEnd: start.Add(365 * 24 * time.Hour),
 			want:    salesNoticeText("Pro yearly (renewal)", "acme", "980 JPY", "Stripe (card, Apple Pay)"),
 		},
 	}
 	for _, c := range cases {
-		notice := stripeInvoiceSalesNotice(networkId, c.invoice, start, c.end)
+		notice := stripeInvoiceSalesNotice(networkId, c.invoice, start, c.paidEnd)
 		notice.Enrich(context.Background(), notice)
 		connect.AssertEqual(t, salesNoticeLines(notice, "acme"), c.want)
 	}
@@ -197,12 +215,12 @@ func TestStripeInvoiceSalesNoticeReadsThePaymentFromStripe(t *testing.T) {
 func TestStripeInvoiceSalesNoticeWithoutStripeKeepsTheDeliveredInvoice(t *testing.T) {
 	stripeSalesApi(t, map[string]string{})
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	notice := stripeInvoiceSalesNotice(server.NewId(), &StripeEventInvoiceObject{Id: "in_gone", Total: 499, Currency: "usd", BillingReason: "subscription_cycle"}, start, start.Add(30*24*time.Hour+manualPaymentGracePeriod))
+	notice := stripeInvoiceSalesNotice(server.NewId(), &StripeEventInvoiceObject{Id: "in_gone", Total: 499, Currency: "usd", BillingReason: "subscription_cycle"}, start, start.Add(30*24*time.Hour))
 	notice.Enrich(context.Background(), notice)
 	connect.AssertEqual(t, salesNoticeLines(notice, "acme"), salesNoticeText("Pro monthly (renewal)", "acme", "4.99 USD", "Stripe"))
 
 	// and without a currency the amount is not reported
-	notice = stripeInvoiceSalesNotice(server.NewId(), &StripeEventInvoiceObject{Id: "in_gone", Total: 499}, start, start.Add(30*24*time.Hour+manualPaymentGracePeriod))
+	notice = stripeInvoiceSalesNotice(server.NewId(), &StripeEventInvoiceObject{Id: "in_gone", Total: 499}, start, start.Add(30*24*time.Hour))
 	notice.Enrich(context.Background(), notice)
 	connect.AssertEqual(t, notice.Amount, "not reported by Stripe")
 }

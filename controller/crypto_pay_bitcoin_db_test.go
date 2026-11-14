@@ -365,45 +365,40 @@ func TestCryptoBitcoinScannerCreditsAPaymentMinedInTheGrace(t *testing.T) {
 }
 
 // The one indexed lookup a block: which of a block's output addresses are
-// invoice addresses in play as of the block's time. Open, or closed within
-// the watch window before the block, or with a receipt still in play; never
-// unlinked, never made after the block was mined; among many open invoices
-// and many addresses, in one query.
-func TestCryptoBitcoinInvoiceAddressesInPlay(t *testing.T) {
+// invoice addresses. Every address an invoice was ever given is matched,
+// open or long closed, credited, voided or past the retention unlink, so a
+// payment to an old or expired invoice is recorded; only an invoice made
+// after the block was mined is not; among many invoices and many addresses,
+// in one query. Root cause (2026-11-13): the lookup matched only invoices in
+// play as of the block (open, or closed within watch_after), so a payment to
+// an invoice closed longer ago was never recorded.
+func TestCryptoBitcoinInvoiceAddressesAreEveryIssuedAddress(t *testing.T) {
 	skipWithoutProYml(t)
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		cryptoDbBitcoinScanner(t, newCryptoTestBitcoinNode(t, 975402))
-		networkId, _, _ := cryptoDbTestNetwork(t, ctx, "btcinplay")
+		networkId, _, _ := cryptoDbTestNetwork(t, ctx, "btcissued")
 		now := server.NowUtc()
 		address := func(i int) string {
-			return fmt.Sprintf("bc1qsyntheticinplay%05d", i)
+			return fmt.Sprintf("bc1qsyntheticissued%05d", i)
 		}
 		for i := range 400 {
 			cryptoDbCreateCoinbaseIntent(t, ctx, model.CryptoAssetBtc, &networkId, StripeItemData1Tib, 3, int64(2000+i), address(i))
 		}
-		// open (in play): 0 to 399; then adjust a few
+		// open: 0 to 399; then close a few, long ago
 		set := func(i int, column string, value time.Time) {
 			cryptoDbExec(ctx, `UPDATE crypto_payment_intent SET `+column+` = $2 WHERE asset = 'btc' AND address = $1`, address(i), value)
 		}
-		set(1, "expires_at", now.Add(-time.Hour))     // expired an hour ago: in play
-		set(2, "expires_at", now.Add(-48*time.Hour))  // expired two days ago: not
-		set(3, "credited_at", now.Add(-2*time.Hour))  // credited two hours ago: in play
-		set(4, "credited_at", now.Add(-48*time.Hour)) // credited two days ago: not
+		set(1, "expires_at", now.Add(-time.Hour))     // expired an hour ago
+		set(2, "expires_at", now.Add(-48*time.Hour))  // expired two days ago
+		set(3, "credited_at", now.Add(-2*time.Hour))  // credited two hours ago
+		set(4, "credited_at", now.Add(-48*time.Hour)) // credited two days ago
 		set(4, "expires_at", now.Add(-48*time.Hour))  //
-		set(5, "unlinked_at", now.Add(-time.Minute))  // unlinked: not
-		set(6, "create_time", now.Add(4*time.Hour))   // made after the block: not
-		set(7, "voided_at", now.Add(-time.Hour))      // voided an hour ago: in play
-		set(8, "expires_at", now.Add(-48*time.Hour))  // expired long ago, but
-		inPlayReceipt := model.GetCryptoPaymentIntent(ctx, func() server.Id {
-			var intentId server.Id
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT intent_id FROM crypto_payment_intent WHERE address = $1`, address(8)).Scan(&intentId))
-			})
-			return intentId
-		}())
-		// ... a receipt of it still unconfirmed: in play
-		cryptoDbReceipt(t, ctx, inPlayReceipt, "btc-inplay-unconfirmed", 1, 0)
+		set(5, "unlinked_at", now.Add(-time.Minute))  // past the retention unlink
+		set(6, "create_time", now.Add(4*time.Hour))   // made after the block: not matched
+		set(7, "voided_at", now.Add(-time.Hour))      // voided an hour ago
+		set(8, "expires_at", now.Add(-40*24*time.Hour))
+		set(8, "voided_at", now.Add(-40*24*time.Hour)) // voided forty days ago
 
 		block := []string{}
 		for i := range 2000 {
@@ -414,15 +409,14 @@ func TestCryptoBitcoinInvoiceAddressesInPlay(t *testing.T) {
 		}
 		matched := cryptoBitcoinInvoiceAddresses(ctx, block, now)
 		want := map[string]int64{}
-		for _, i := range []int{0, 1, 3, 7, 8, 9} {
+		for _, i := range []int{0, 1, 2, 3, 4, 5, 7, 8, 9} {
 			want[address(i)] = int64(2000 + i)
 		}
 		connect.AssertEqual(t, matched, want)
-		// a block mined three days ago is matched as of its own time: the
-		// invoice that expired two days ago was open then, and those made since
-		// are not in play for it
-		matched = model.GetCryptoPaymentInvoiceAddressesInPlayInConn(nil, ctx, model.CryptoAssetBtc, []string{address(2), address(0)}, now.Add(-72*time.Hour-24*time.Hour), now.Add(-72*time.Hour+cryptoBitcoinClockTolerance))
+		// a block mined three days ago: every invoice here was made since, so
+		// none was paid in it
+		matched = cryptoBitcoinInvoiceAddresses(ctx, []string{address(2), address(0)}, now.Add(-72*time.Hour))
 		connect.AssertEqual(t, matched, map[string]int64{})
-		connect.AssertEqual(t, len(model.GetCryptoPaymentInvoiceAddressesInPlayInConn(nil, ctx, model.CryptoAssetBtc, []string{}, now, now)), 0)
+		connect.AssertEqual(t, len(cryptoBitcoinInvoiceAddresses(ctx, []string{}, now)), 0)
 	})
 }

@@ -658,21 +658,12 @@
             "type": "loki",
             "uid": "warp-loki"
           },
-          "expr": "sum(count_over_time({env=\"$env\"} |~ `asset amount owned by the wallet is insufficient|insufficient token balance .* in wallet` [1m]))",
-          "refId": "K",
-          "legendFormat": "payout-wallet-insufficient (warn >5/min)"
-        },
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "warp-loki"
-          },
           "expr": "sum(count_over_time({env=\"$env\"} |~ `\\[taskworker\\]drain gave up` [1m]))",
           "refId": "L",
           "legendFormat": "taskworker-drain-gave-up (warn >1/min)"
         }
       ],
-      "description": "port-exhaustion self-drains ~60s after its target is fixed; redis-loading only matters sustained > 2 min; payout-wallet = fund the wallet (finance, not a bug); drain-gave-up = check stranded task leases (12.1)."
+      "description": "port-exhaustion self-drains ~60s after its target is fixed; redis-loading only matters sustained > 2 min; drain-gave-up = check stranded task leases (12.1)."
     },
     {
       "type": "timeseries",
@@ -3506,7 +3497,7 @@
     },
     {
       "type": "row",
-      "title": "external admission and proxy lock-cache pressure",
+      "title": "proxy lock-cache pressure",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -3514,205 +3505,6 @@
         "x": 0,
         "y": 166
       }
-    },
-    {
-      "type": "timeseries",
-      "title": "Circle transfer admission / s",
-      "description": "Fleet rates for Circle Wallets API transfer submissions admitted by the shared rolling-window gate, deferred because its window was full, or failed closed before an external request. Deferrals may exceed admissions because one submission can wait through several full windows.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 167
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "sum(rate(urnetwork_circle_transfer_admissions_total{env=\"$env\"}[$__rate_interval]))",
-          "refId": "A",
-          "legendFormat": "admissions / s"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "sum(rate(urnetwork_circle_transfer_deferrals_total{env=\"$env\"}[$__rate_interval]))",
-          "refId": "B",
-          "legendFormat": "deferrals / s"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "sum(rate(urnetwork_circle_transfer_admission_errors_total{env=\"$env\"}[$__rate_interval]))",
-          "refId": "C",
-          "legendFormat": "fail-closed / s"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Circle transfer admission wait",
-      "description": "Fleet histogram of time spent waiting for Circle transfer admission. Quantiles merge buckets across taskworkers; the mean merges the histogram sum and count. A nonzero fail-closed rate with no wait sample means admission failed before an external transfer was attempted.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 167
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
-          "refId": "A",
-          "legendFormat": "p50"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
-          "refId": "B",
-          "legendFormat": "p95"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "sum(rate(urnetwork_circle_transfer_admission_wait_seconds_sum{env=\"$env\"}[$__rate_interval])) / sum(rate(urnetwork_circle_transfer_admission_wait_seconds_count{env=\"$env\"}[$__rate_interval]))",
-          "refId": "C",
-          "legendFormat": "mean"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Circle transfer admission event capability by worker",
-      "description": "SIGNALS.md §2.14: 1 means this taskworker emits one bounded pre-POST event for each admitted Circle transfer. This is a build capability gauge; the admission rate and wait panels describe traffic. Each series keeps its host, block, and process instance. Samples older than 90 seconds and missing telemetry remain no-data; the §2.14 monitor checks coverage of every newest worker.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 175
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "last"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "warp-mimir"
-          },
-          "expr": "urnetwork_circle_transfer_admission_observable_info{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (timestamp(urnetwork_circle_transfer_admission_observable_info{env=\"$env\",service=\"taskworker\",instance!=\"\"}) >= time() - 90)",
-          "refId": "A",
-          "legendFormat": "{{host}} / {{block}} / {{instance}}"
-        }
-      ]
     },
     {
       "type": "timeseries",
@@ -3726,7 +3518,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 183
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3790,7 +3582,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 183
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3867,7 +3659,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 191
+        "y": 175
       }
     },
     {
@@ -3882,7 +3674,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 192
+        "y": 176
       },
       "fieldConfig": {
         "defaults": {
@@ -3935,7 +3727,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 200
+        "y": 184
       },
       "fieldConfig": {
         "defaults": {
@@ -3984,7 +3776,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 208
+        "y": 192
       }
     },
     {
@@ -3995,7 +3787,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 209
+        "y": 193
       },
       "options": {
         "mode": "markdown",
@@ -4010,7 +3802,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 216
+        "y": 200
       }
     },
     {
@@ -4021,7 +3813,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 217
+        "y": 201
       },
       "datasource": {
         "type": "prometheus",
@@ -4061,7 +3853,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 217
+        "y": 201
       },
       "datasource": {
         "type": "prometheus",
@@ -4106,7 +3898,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 217
+        "y": 201
       },
       "datasource": {
         "type": "prometheus",
@@ -4146,7 +3938,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 225
+        "y": 209
       },
       "datasource": {
         "type": "prometheus",
@@ -4186,7 +3978,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 225
+        "y": 209
       },
       "datasource": {
         "type": "prometheus",
@@ -4236,7 +4028,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 225
+        "y": 209
       },
       "datasource": {
         "type": "prometheus",
@@ -4276,7 +4068,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 233
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4316,7 +4108,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 233
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4356,7 +4148,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 233
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4411,7 +4203,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 241
+        "y": 225
       },
       "datasource": {
         "type": "prometheus",
@@ -4451,7 +4243,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 241
+        "y": 225
       },
       "datasource": {
         "type": "prometheus",
@@ -4491,7 +4283,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 249
+        "y": 233
       }
     },
     {
@@ -4502,7 +4294,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 250
+        "y": 234
       },
       "datasource": {
         "type": "prometheus",
@@ -4552,7 +4344,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 250
+        "y": 234
       },
       "datasource": {
         "type": "prometheus",
@@ -4591,6 +4383,271 @@
           "refId": "C",
           "expr": "time() - max(urnetwork_stats_contract_hour_source_completed_seconds{env=\"$env\"} > 0)",
           "legendFormat": "source completed age seconds"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "verified caches (session/by_jwt_verified_cache.go, connect net_tls_chain_cache.go)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 242
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "jwt verified claims cache / s",
+      "description": "Token verifications per second by service: a hit reused the remembered verification of the same token bytes (no decode, no signature check), a miss verified in full; stores are verifications remembered and evictions are entries dropped at the per-process bound. The expiration, session horizon, claims and every state and revocation check run on hits and misses alike, so a hit changes no decision. A falling hit ratio with rising evictions is pressure at the bound.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 243
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service, result) (rate(urnetwork_auth_jwt_verified_cache_lookups_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{service}} {{result}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_auth_jwt_verified_cache_stores_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "{{service}} stores"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_auth_jwt_verified_cache_evictions_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "{{service}} evictions"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "jwt verified claims cache entries",
+      "description": "Remembered token verifications held by each process. Each entry ends at its token's expiration or ten minutes after it was stored; the bound is 65,536 entries per process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 243
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service, host, block, instance) (urnetwork_auth_jwt_verified_cache_entries{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{service}} {{host}} / {{block}} / {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "tls verified chain cache / s",
+      "description": "Pinned-root tls handshakes per second by service: a hit reused the remembered verification of the same certificate bytes, server name and root pool, a miss verified the chain in full; stores are verifications remembered and evictions are entries dropped at the per-process bound. Key possession, the server name and the validity time are checked on every handshake. The taskworker's egress probe and the proxy's hosted devices make most of these dials.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 251
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service, result) (rate(urnetwork_tls_verified_chain_cache_lookups_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{service}} {{result}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_tls_verified_chain_cache_stores_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "{{service}} stores"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_tls_verified_chain_cache_evictions_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "{{service}} evictions"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "tls verified chain cache entries",
+      "description": "Remembered chain verifications held by each process. Each entry answers for at most an hour, and only while the dial's clock is inside every certificate's validity; the bound is 256 entries per process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 251
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service, host, block, instance) (urnetwork_tls_verified_chain_cache_entries{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{service}} {{host}} / {{block}} / {{instance}}"
         }
       ]
     }

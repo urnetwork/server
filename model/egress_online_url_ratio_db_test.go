@@ -30,10 +30,12 @@ func onlineUrlRatioTestOnlineCount(ctx context.Context) int64 {
 // low_success, while unprobed and single-run providers stay. It is no hard
 // exclusion: force_minimum with speed and its explicit client id still reach
 // it, and the probe still claims it. Once its ratio reaches 0.8 it is back,
-// in Speed and Quality too.
+// in Speed and Quality too. The country floor is off: two natives are too
+// few to keep it from admitting the provider this test holds below the bar.
 func TestOnlineUrlRatioLeavesEveryBucketAndCountAndReturns(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		egressTestCountryFloorOff(t)
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
 
 		healthy := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
@@ -62,7 +64,7 @@ func TestOnlineUrlRatioLeavesEveryBucketAndCountAndReturns(t *testing.T) {
 		connect.AssertEqual(t, onlineUrlRatioTestOnlineCount(ctx), int64(5))
 		connect.AssertEqual(t, GetClientProviderStatus(ctx, low.networkId, low.clientId).Reason, ProviderStatusReasonEgressFailing)
 
-		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_url_success_ratio: 0.8\n"))
+		pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_url_success_ratio: 0.8\n"+egressTestCountryFloorOffConfig))
 		defer pop()
 		egressTestPasses(ctx, t)
 		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
@@ -128,7 +130,8 @@ func TestOnlineUrlRatioLeavesEveryBucketAndCountAndReturns(t *testing.T) {
 // 3 of 5 provider below the ratio included. Without it (variant a) the ratio
 // applies in vn too, and only the unprobed provider is left: the 3 of 5
 // provider is low_success and the four without a success, below every ratio,
-// are no_success.
+// are no_success. The country floor is off, as vn's providers are too few to
+// keep it from admitting the ones this test holds below the bar.
 func TestOnlineUrlRatioCountryExemptionInThePasses(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -155,7 +158,7 @@ func TestOnlineUrlRatioCountryExemptionInThePasses(t *testing.T) {
 			callback()
 		}
 
-		withProviderConfig("online_url_success_ratio: 0.8\n", func() {
+		withProviderConfig("online_url_success_ratio: 0.8\n"+egressTestCountryFloorOffConfig, func() {
 			egressTestPasses(ctx, t)
 			assertOnlineSuccessTestAnswer(t, "with the exemption", egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeOnline, 10, false, server.NewId()),
 				append([]*egressTestProvider{unprobed}, belowRatio...), nil)
@@ -166,7 +169,7 @@ func TestOnlineUrlRatioCountryExemptionInThePasses(t *testing.T) {
 			connect.AssertEqual(t, GetClientProviderStatus(ctx, low.networkId, low.clientId).Reason, ProviderStatusReasonEgressFailing)
 		})
 
-		withProviderConfig("online_url_success_ratio: 0.8\nonline_url_ratio_country_exemption: false\n", func() {
+		withProviderConfig("online_url_success_ratio: 0.8\nonline_url_ratio_country_exemption: false\n"+egressTestCountryFloorOffConfig, func() {
 			egressTestPasses(ctx, t)
 			assertOnlineSuccessTestAnswer(t, "without the exemption", egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeOnline, 10, false, server.NewId()),
 				[]*egressTestProvider{unprobed}, belowRatio)

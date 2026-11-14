@@ -78,13 +78,15 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
 			exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
 			claim := server.CompetitionExecutorAdmissionClaimMigrationVersion()
+			distributed := server.CompetitionDistributedReevaluationMigrationVersion()
+			patchRetry := server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
 			postClose := server.CompetitionReevaluationPostCloseMigrationVersion()
 			appendOnlyMissing = append(appendOnlyMissing, active([]dependency{
 				{721, 0}, {842, 0}, {843, 0}, {845, 0},
 				{server.CompetitionJobReevaluationMigrationVersion(), postClose},
 				{server.CompetitionFinalizationHoldMigrationVersion(), 0},
-				{executor, intake}, {postClose, 0}, {intake, handoff}, {handoff, official},
-				{official, control}, {control, recovery}, {recovery, exception}, {exception, claim}, {claim, 0},
+				{executor, intake}, {postClose, distributed}, {intake, handoff}, {handoff, official},
+				{official, control}, {control, recovery}, {recovery, exception}, {exception, claim}, {claim, distributed}, {distributed, patchRetry}, {patchRetry, 0},
 			})...)
 			var reviewMissing []int
 			if version == 677 {
@@ -95,7 +97,7 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 				// exception custody carry the baseline guard in turn
 				baselineMissing = append(baselineMissing, 678)
 				baselineMissing = append(baselineMissing, active([]dependency{
-					{executor, intake}, {intake, handoff}, {handoff, official}, {official, control}, {control, recovery}, {recovery, exception}, {exception, claim}, {claim, 0},
+					{executor, intake}, {intake, handoff}, {handoff, official}, {official, control}, {control, recovery}, {recovery, exception}, {exception, claim}, {claim, distributed}, {distributed, patchRetry}, {patchRetry, 0},
 				})...)
 				reviewMissing = []int{678}
 			}

@@ -86,9 +86,10 @@ func SetSolanaReceiverSweepCursorInConn(
 // Pay intent it paid (the webhook's, the reconcile's and a USDC invoice's
 // credit all set it, and the retention unlink keeps it), a Solana or x402
 // renewal keyed by it, a balance bought with it (a data pack, an x402 data
-// grant), a crypto rail receipt of it, or the unfulfilled record of a payment
-// that bought nothing. One read for the batch. Reuse the caller's PostgreSQL
-// session; nil selects the outer acquisition boundary.
+// grant), a crypto rail receipt of it, the unfulfilled record of a payment
+// that bought nothing, or a Shopify order it paid. One read for the batch.
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition
+// boundary.
 func ListSolanaSignaturesOnRecordInConn(
 	connOwner server.PgConn,
 	ctx context.Context,
@@ -119,6 +120,9 @@ func ListSolanaSignaturesOnRecordInConn(
 				) OR EXISTS (
 					SELECT 1 FROM crypto_payment_receipt receipt
 					WHERE receipt.asset = ANY($3) AND receipt.tx_id = candidate.signature
+				) OR EXISTS (
+					SELECT 1 FROM solana_shopify_order_payment shopify
+					WHERE shopify.tx_signature = candidate.signature
 				)
 			`,
 			signatures,

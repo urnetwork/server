@@ -81,18 +81,6 @@ func TestPgQueryRenderPrivacyActiveOrdinary(t *testing.T) {
 	}
 }
 
-// The separate legacy override must still classify below its polluted history band.
-func TestPgQueryRenderPrivacyActiveLegacy(t *testing.T) {
-	query := "SELECT MIN(transfer_contract.create_time), MAX(transfer_contract.close_time) FROM transfer_escrow_sweep WHERE synthetic_note='" + queryRenderPrivateLiteral + "'"
-	alert := queryRenderObserve(t, NewActiveQueriesSignal(), Row{"-7171", "1", "300", query, "600"})
-	if alert.Class != "persistent-active-query" || alert.Frame != "-7171" || alert.Sustain != 1 ||
-		alert.Observed != "query_id=-7171 active=1 oldest_s=300 historical_mean_s=600" ||
-		alert.Evidence != "legacy shape matched; query=withheld" || !strings.Contains(alert.Mechanism, "semantically overbroad") ||
-		!strings.Contains(alert.Mechanism, "temp_account_payment") || !strings.Contains(alert.Action, "payment planner") {
-		t.Fatal("legacy violation lost numeric authority, sustain or selected-set diagnosis")
-	}
-}
-
 // Withhold both free-text columns while preserving same-row attribution and shape diagnosis.
 func TestPgQueryRenderPrivacyWaitAttribution(t *testing.T) {
 	for _, test := range []struct {

@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/urnetwork/server/session"
 )
 
 // Steps of the sequence. Paths share the step names; the day offset and the
@@ -184,13 +182,14 @@ type Facts struct {
 	NoOfferEmail bool
 
 	// ----- step conditions -----
-	// the row's platform: ios, macos, android, windows, linux, web, or ""
-	// when unknown
+	// the row's platform: ios, macos, android, windows, linux, web; for a row
+	// without one, the platform of the network's newest active client; ""
+	// when neither is known
 	Platform string
-	// the distribution the platform's app reported with it
-	// (session.ClientDistribution*), "" when unknown: it tells the App Store
-	// Mac from the direct-download Mac
-	Distribution string
+	// the network's newest active client is an app build with the home
+	// screen widget (WidgetSettings.HasWidget): E2's widget email goes only
+	// then
+	WidgetBuild  bool
 	HasConnected bool
 	WidgetAdded  bool
 	OfferState   string // "" (none) | active | redeemed | expired
@@ -257,6 +256,9 @@ type Decision struct {
 	Variant  string
 	// Opening is the last-chance template's opening (params.opening)
 	Opening string
+	// Browser is E2's desktop email's browser branch (params.browser): the
+	// platform it was decided for is the web
+	Browser bool
 	// IssueOffer: issue the welcome offer by email before sending (E4b)
 	IssueOffer bool
 	// NoOfferEmail is Facts.NoOfferEmail at the send: the offer may not be
@@ -275,24 +277,34 @@ type Decision struct {
 // The web platform: a browser sign-up, whose app is the extension.
 const PlatformWeb = "web"
 
-// WidgetPlatform reports whether the platform's app, as its distribution
-// (session.ClientDistribution*) says, has a widget for E2's activated email
-// to point at: the iOS and Android apps, and the macOS App Store app (the
-// apple widgets target builds for macOS too). The Windows and Linux apps, the
-// web and the direct-download macOS build (mac_direct: the URnetworkDirect
-// target embeds no widgets extension) have none; they get the desktop email
-// (VariantDesktop). An unknown platform ("") keeps the widget email, as
-// before: Android app rows were often recorded without a platform. So does a
-// Mac app of unknown distribution: until the apps reported it, a Mac app was
-// taken for the App Store build, the one with a stable release.
-func WidgetPlatform(platform string, distribution string) bool {
+// WidgetPlatform reports whether E2's activated email, which points at the
+// widget on the home screen, fits the platform: a phone, iOS or Android, and
+// then only when the reader's app build has the widget (Facts.WidgetBuild). A
+// Mac has no home screen, in either distribution (the App Store build's
+// widgets would sit on the desktop and in the Notification Center; the
+// direct-download build has none), so a Mac reader gets the desktop email, as
+// Windows, Linux and the web do (DesktopPlatform). An unknown platform ("")
+// gets neither: the widget copy would be wrong on a computer and the desktop
+// copy on a phone. Until the 2026-11-13 review the widget email went to every
+// phone, to the App Store Mac and to an unknown platform, whatever the build.
+func WidgetPlatform(platform string) bool {
 	switch platform {
-	case "windows", "linux", PlatformWeb:
-		return false
-	case "macos":
-		return distribution != session.ClientDistributionMacDirect
+	case "ios", "android":
+		return true
 	}
-	return true
+	return false
+}
+
+// DesktopPlatform reports whether E2's desktop email fits the platform: the
+// Windows, Linux and macOS apps, whose Settings have "Launch URnetwork on
+// system startup" (the email's app branch), and the web, whose extension pins
+// to the browser's toolbar (its browser branch).
+func DesktopPlatform(platform string) bool {
+	switch platform {
+	case "windows", "linux", "macos", PlatformWeb:
+		return true
+	}
+	return false
 }
 
 // engaged is the feedback-variant rule: the network connected. Opens used to
@@ -367,26 +379,29 @@ func Decide(step string, f Facts) Decision {
 		}
 		return send(TemplateE1Connect, VariantDefault)
 	case StepE2:
-		// day 3: activated -> the widget habit unless a widget exists, or on
-		// a platform without one the desktop habit; not activated -> another
-		// connect nudge
+		// day 3: activated -> the widget habit on a phone whose app has the
+		// widget, unless one is added; the desktop habit on a computer or the
+		// web; nothing on a phone without the widget or an unknown platform.
+		// Not activated -> another connect nudge
 		if f.HasConnected {
-			if !WidgetPlatform(f.Platform, f.Distribution) {
-				// windows, linux and the direct-download Mac: the desktop
-				// email, the app started with the computer; the web: the
-				// extension pinned to the toolbar,
-				// once the extension is linked (widget.added on the web). Each
-				// once its template is uploaded (mmm/ONBOARDING-RETENTION.md
-				// P18)
-				if f.DesktopTemplate && (f.Platform != PlatformWeb || f.WidgetAdded) {
-					return send(TemplateE2Widget, VariantDesktop)
+			switch {
+			case WidgetPlatform(f.Platform):
+				if f.WidgetBuild && !f.WidgetAdded {
+					return send(TemplateE2Widget, VariantActivated)
 				}
-				return skip
+			case DesktopPlatform(f.Platform):
+				// windows, linux and macos: the desktop email, the app
+				// started with the computer; the web: the extension pinned to
+				// the toolbar, once the extension is linked (widget.added on
+				// the web). Each once its template is uploaded
+				// (mmm/ONBOARDING-RETENTION.md P18)
+				if f.DesktopTemplate && (f.Platform != PlatformWeb || f.WidgetAdded) {
+					d := send(TemplateE2Widget, VariantDesktop)
+					d.Browser = f.Platform == PlatformWeb
+					return d
+				}
 			}
-			if f.WidgetAdded {
-				return skip
-			}
-			return send(TemplateE2Widget, VariantActivated)
+			return skip
 		}
 		return send(TemplateE2Widget, VariantNotActivated)
 	case StepE3:

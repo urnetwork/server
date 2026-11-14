@@ -62,7 +62,7 @@ func TestAccountWallet(t *testing.T) {
 
 		// remove wallet (set account wallet as active = false)
 		// we also clear the payout wallet if it matches
-		SetPayoutWallet(ctx, networkId, *walletId)
+		testingSelectPayoutWallet(ctx, networkId, *walletId)
 
 		result := RemoveWallet(*walletId, clientSession)
 		connect.AssertEqual(t, result.Success, true)

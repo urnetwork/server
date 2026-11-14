@@ -8,6 +8,7 @@
 package reengagement
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -134,11 +135,33 @@ const (
 	SuppressSwitched = "switched"
 )
 
-// LiftableSuppression reports whether a connection lifts the suppression: the
-// program's own (silence, "switched"); never a bounce, complaint or
-// unsubscribe.
+// Suppression reasons an operator records with `bringyourctl reengagement
+// suppress`. No connection lifts them.
+const (
+	// the account holder said they are in a sanctioned country (factury
+	// support/RUN-MAIN.md §9; owner, 2026-11-13)
+	SuppressSanctions = "sanctions"
+	// the network belongs to a sign-up cohort that automation made
+	SuppressAutomatedSignup = "automated_signup"
+)
+
+// OperatorSuppressions are the reasons `bringyourctl reengagement suppress`
+// accepts.
+func OperatorSuppressions() []string {
+	return []string{SuppressSanctions, SuppressAutomatedSignup}
+}
+
+// LiftableSuppressions are the reasons a connection lifts: the program's own
+// (silence, "switched"); never a bounce, complaint, unsubscribe or an
+// operator's suppression.
+func LiftableSuppressions() []string {
+	return []string{SuppressSunset, SuppressSwitched}
+}
+
+// LiftableSuppression reports whether a connection lifts the suppression
+// (LiftableSuppressions).
 func LiftableSuppression(reason string) bool {
-	return reason == SuppressSunset || reason == SuppressSwitched
+	return slices.Contains(LiftableSuppressions(), reason)
 }
 
 // Schedule holds the day offsets and limits (reengagement.yml `schedule`).
@@ -403,9 +426,15 @@ func Decide(step string, f Facts, s Schedule) Decision {
 	return exit(ExitDone)
 }
 
-// sunset is the end of an episode that asked "should I keep writing?".
+// sunset is the end of an episode that asked "should I keep writing?". A
+// holdout network was never asked: its R3 was a virtual send, so its silence
+// says nothing about the address, and it exits done without the sunset
+// suppression (until the 2026-11-13 review every holdout network was
+// suppressed here at day 60, and so left out of all later mail).
 func sunset(f Facts) Decision {
 	switch {
+	case f.Holdout:
+		return Decision{Action: ActionExit, ExitReason: ExitDone}
 	case f.Kept:
 		return Decision{Action: ActionExit, ExitReason: ExitKept}
 	case f.Clicked || f.Reason != "":
@@ -550,18 +579,23 @@ func FixHighlights(highlights []*Highlight, platform string, country string, rea
 
 // ----- send time -----
 
-// SendAt places a step: `day` days after the episode start, at the schedule's
-// hour in the network's zone, clamped into the send window, and never in the
-// past.
+// SendAt places a step in a reader's own zone (SendAtZone).
 func SendAt(startedAt time.Time, day int, loc *time.Location, s Schedule, now time.Time) time.Time {
+	return SendAtZone(startedAt, day, onboarding.ZoneSendZone(loc), s, now)
+}
+
+// SendAtZone places a step: `day` days after the episode start, at the
+// schedule's hour in the zone's location, clamped into the send window as the
+// zone narrows it (a country's zone keeps the window inside every populated
+// zone of the country), and never in the past.
+func SendAtZone(startedAt time.Time, day int, zone onboarding.SendZone, s Schedule, now time.Time) time.Time {
 	s = s.WithDefaults()
-	if loc == nil {
-		loc = time.UTC
-	}
+	loc := zone.Loc()
 	w, err := onboarding.ParseSendWindow(s.SendWindow)
 	if err != nil {
 		w = onboarding.DefaultSendWindow
 	}
+	w = zone.Window(w)
 	local := startedAt.In(loc)
 	anchor := time.Date(local.Year(), local.Month(), local.Day(), s.SendHour, 0, 0, 0, loc)
 	at := onboarding.SendAt(anchor, day, loc, w)

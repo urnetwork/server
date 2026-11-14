@@ -59,16 +59,21 @@ printed as not established, never copied from an old or planned control. These
 new capability/command paths remain prepared release work until qualified and
 deployed; they do not assert that current production already supports them.
 
-Before production activation, start with
+When assuming operational control, start with
 [`launch/current-state.json`](launch/current-state.json), the compact preparation
-checkpoint, then verify its live process/session and linked evidence. It is a
-dated operator snapshot, not score/runtime authority or permission to restart an
+checkpoint. On the coordinator, read its referenced root-private operator record,
+then verify the live process/session and linked evidence. The repository checkpoint
+must not disclose per-job eligibility, scores, review findings or candidate progress
+before authorized finalization; those belong in protected operational storage.
+These are dated operator snapshots, not score/runtime authority or permission to restart an
 active qualification. Live season state remains authoritative in the API,
 database and the supervisor's state directory described below.
 
-Keep that file limited to the current jobs, verified release, pending approvals
-and next actions. Superseded preparation/incident snapshots belong in the linked
+Keep that file limited to public-safe control status, verified release, pending
+deployments, next actions and the protected record's path/digest. Public-safe
+superseded preparation/incident snapshots belong in the linked
 `old/CURRENT-STATE-HISTORY-*` files, with their original bytes and digest retained.
+Do not copy private per-job snapshots into repository history.
 Open history only for a specific investigation; its readiness, hold and next-action
 fields are not current instructions.
 
@@ -434,6 +439,43 @@ Resolve/build trusted binaries once per reviewed release, not once per poll.
 Do not leave a reviewer agent acting as the scheduler. The supervisor's default
 choice is safe carry-forward; separately prepared promotion intents require the
 real source-review, exact-base, patch and deadline interlocks before selection.
+
+### Fast control-plane fixes
+
+The main API, supervisor, runner and recovery CLI are trusted control programs,
+not the submitted product or scoring instrument. Ship their correctness fixes
+with a normal cached Go build, one run of the affected regression tests, focused
+race checks for changed concurrent ownership, and a deployment smoke test. Use
+isolated PostgreSQL/Redis when the change touches durable state. Additive
+migrations must still work with the currently serving release.
+Normal trusted builds may download their required modules through the approved
+Go proxy/checksum service. Repair missing dependency declarations or checksums
+when required by the imports, without unrelated version upgrades. The offline
+build restriction remains for untrusted submission builds, not this control-plane
+development step.
+
+Do not require two builds to produce identical bytes, repeatedly rebuild
+unchanged dependencies, replay the entire historical qualification suite, or
+restart validation for documentation-only changes. Record the artifact actually
+deployed and retain its test results; a digest identifies that artifact, not a
+requirement to recreate it byte-for-byte. Reuse valid earlier evidence for
+unchanged code. Extra repetitions are for a demonstrated intermittent failure,
+not a universal release prerequisite.
+
+Deploy worker changes at a verified idle boundary, smoke-test readiness and
+heartbeats, authorize recoveries, then release the claim hold and verify the
+first recovery. Keep
+original submission order, failure history and evaluation deadlines. This fast
+path does not change the frozen evaluated source, scorer, shared epoch baseline,
+R9 measurements, significance rules, artifact authentication or sandbox limits.
+Changes to those competition inputs still need an explicit epoch policy decision.
+
+On evaluation hosts, install `evaluator/needrestart-competition.conf` as
+`/etc/needrestart/conf.d/urnetwork-competition.conf`. Security updates still
+install, but competition-owned services are excluded from automatic
+package-triggered restarts. Apply their pending restarts under a claim hold at
+a verified idle boundary; do not leave patched runtime libraries indefinitely
+pending. Installing this configuration does not itself restart any service.
 
 #### Preparation-only qualification boundary — installed inactive
 

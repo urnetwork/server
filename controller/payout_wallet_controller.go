@@ -2,47 +2,27 @@ package controller
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
-/**
- * Associates the AccountWallet as the payout wallet for the network.
- */
+// USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13), so
+// no wallet is selected for payouts any more. An app built before then still
+// offers the choice, and shows this refusal as it shows any wallet refusal.
+var ErrPayoutWalletEnded = errors.New("400 USDC payouts have ended, so a payout wallet is no longer used.")
+
+// Refuses every selection (ErrPayoutWalletEnded).
 func SetPayoutWallet(
 	setWalletPayout model.SetPayoutWalletArgs,
 	session *session.ClientSession,
 ) (*model.SetPayoutWalletResult, error) {
-
-	networkId := session.ByJwt.NetworkId
-	// a wallet of the network whose address is not an address on its chain,
-	// stored before addresses were validated, cannot receive a payout. A
-	// wallet's chain and address never change, so reading it ahead of the
-	// selection is safe; the selection checks ownership again.
-	if wallet := model.GetAccountWallet(session.Ctx, setWalletPayout.WalletId); wallet != nil && wallet.NetworkId == networkId && wallet.Active && !model.PayoutWalletAddressValid(wallet.Blockchain, wallet.WalletAddress) {
-		return nil, payoutWalletAnswer(model.ErrPayoutWalletAddress)
-	}
-	err := model.SetPayoutWallet(session.Ctx, networkId, setWalletPayout.WalletId)
-	if err != nil {
-		return nil, payoutWalletAnswer(err)
-	}
-
-	return &model.SetPayoutWalletResult{}, nil
-
+	return nil, ErrPayoutWalletEnded
 }
 
-// A wallet the payout cannot go to is the caller's mistake, a 400 with the
-// refusal's text; any other failure is internal.
-func payoutWalletAnswer(err error) error {
-	if errors.Is(err, model.ErrPayoutWalletBittensor) || errors.Is(err, model.ErrPayoutWalletNotOwned) || errors.Is(err, model.ErrPayoutWalletAddress) {
-		return fmt.Errorf("400 %w", err)
-	}
-	return err
-}
-
+// The network's payout wallet as apps read it: the one selected while USDC
+// payouts ran, until that wallet is removed.
 type GetPayoutWalletResult struct {
 	WalletId *server.Id `json:"wallet_id"`
 }

@@ -39,12 +39,29 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// The most stored receipts one scan re-checks with the daemon after they
-// stopped being reported.
-const cryptoScanMaxVanishedChecks = 50
+// The scan's tunables.
+type CryptoPaymentScanSettings struct {
+	// The most stored receipts one scan re-checks with the daemon after they
+	// stopped being reported. Non-positive re-checks none.
+	MaxVanishedChecks int
+	// The most open receipts one scan judges, oldest first.
+	MaxOpenReceipts int
+	// The sweep of a per-address coin's issued addresses
+	// (crypto_pay_sweep.go).
+	Sweep *CryptoAddressSweepSettings
+}
 
-// The most open receipts one scan judges.
-const cryptoScanMaxOpenReceipts = 5000
+// A new instance on every call.
+func DefaultCryptoPaymentScanSettings() *CryptoPaymentScanSettings {
+	return &CryptoPaymentScanSettings{
+		MaxVanishedChecks: 50,
+		MaxOpenReceipts:   5000,
+		Sweep:             DefaultCryptoAddressSweepSettings(),
+	}
+}
+
+// The scan's settings. Replaceable only by tests.
+var cryptoPaymentScanSettingsFunc = DefaultCryptoPaymentScanSettings
 
 // The most addresses one refill run derives.
 const cryptoRefillMaxPerRun = 200
@@ -72,8 +89,13 @@ type CryptoPaymentScanResult struct {
 	CreditErrored int    `json:"credit_errored"`
 	// vanished receipts left alone because the wallet has not caught up
 	OrphanChecksSkipped int `json:"orphan_checks_skipped"`
-	// a per-address coin: the invoice addresses this scan read
+	// a per-address coin: the invoice addresses in play this scan read
 	Watched int `json:"watched,omitempty"`
+	// a per-address coin: the issued addresses the sweep read completely, the
+	// receipts it reported and the reads that failed (crypto_pay_sweep.go)
+	Swept         int `json:"swept,omitempty"`
+	SweptReceipts int `json:"swept_receipts,omitempty"`
+	SweepErrors   int `json:"sweep_errors,omitempty"`
 	// payments held for review by the sanctions screen (a match, or senders
 	// that could not be screened)
 	ScreeningHeld int `json:"screening_held,omitempty"`
@@ -104,7 +126,7 @@ func RunCryptoPaymentScan(clientSession *session.ClientSession, asset string) (*
 	result.Configured = true
 	wallet, _, err := cryptoWalletForAsset(config, asset)
 	if err == nil {
-		err = cryptoScan(clientSession, config, asset, wallet, result)
+		err = cryptoScan(clientSession, config, cryptoPaymentScanSettingsFunc(), asset, wallet, result)
 	}
 	ctx := clientSession.Ctx
 	if err != nil {
@@ -167,6 +189,7 @@ func cryptoCheckWallet(ctx context.Context, connOwner server.PgConn, asset strin
 func cryptoScan(
 	clientSession *session.ClientSession,
 	config *CryptoPayConfig,
+	settings *CryptoPaymentScanSettings,
 	asset string,
 	wallet cryptoWallet,
 	result *CryptoPaymentScanResult,
@@ -189,6 +212,7 @@ func cryptoScan(
 	}
 	result.MinHeight = minHeight
 	// a per-address coin reads the chain for the invoice addresses in play
+	// often, and its sweep reads every other issued address below
 	if watcher, ok := wallet.(cryptoWalletWatched); ok {
 		watched := cryptoWatchedAddresses(ctx, config, asset, cursor, server.NowUtc())
 		watcher.SetWatched(watched)
@@ -237,7 +261,9 @@ func cryptoScan(
 	finalKeys := []model.CryptoPaymentReceiptKey{}
 	affected := map[server.Id]bool{}
 	firstSeenHeight := int64(walletHeight)
-	for _, walletReceipt := range walletReceipts {
+	// records one reported receipt, new or seen again, and notes its invoice
+	// for judgment
+	recordReceipt := func(walletReceipt *cryptoWalletReceipt, intents map[int64]*model.CryptoPaymentIntent) {
 		receipt := cryptoReceiptOf(asset, walletReceipt, intents, now)
 		receipt.FirstSeenHeight = &firstSeenHeight
 		reported[receipt.Key()] = true
@@ -264,6 +290,25 @@ func cryptoScan(
 			finalKeys = append(finalKeys, receipt.Key())
 		}
 	}
+	for _, walletReceipt := range walletReceipts {
+		recordReceipt(walletReceipt, intents)
+	}
+
+	// every other address an invoice was ever given, a few a scan from its own
+	// cursor: a payment to an old or expired invoice is recorded, and judged
+	// below by the late-payment rules (crypto_pay_sweep.go)
+	if sweeper, ok := wallet.(cryptoWalletSweeper); ok {
+		readEvery := cryptoSweepReadEvery(wallet, settings.Sweep)
+		cryptoSweepIssuedAddresses(ctx, asset, sweeper, settings.Sweep, readEvery, now, func(sweptReceipts []*cryptoWalletReceipt) {
+			if len(sweptReceipts) == 0 {
+				return
+			}
+			sweptIntents := model.GetCryptoPaymentIntentsByAddressIndexesInConn(nil, ctx, asset, cryptoReceiptIndexes(sweptReceipts))
+			for _, walletReceipt := range sweptReceipts {
+				recordReceipt(walletReceipt, sweptIntents)
+			}
+		}, result)
+	}
 
 	// receipts the daemon stopped reporting: still there (the mined copy of a
 	// pool transfer, or below the window), or gone from the chain before
@@ -277,7 +322,7 @@ func cryptoScan(
 		model.CryptoReceiptStateSeen,
 		model.CryptoReceiptStateConfirmed,
 		model.CryptoReceiptStateReview,
-	}, cryptoScanMaxOpenReceipts)
+	}, settings.MaxOpenReceipts)
 	// a reader of final transactions only never loses one it reported
 	irreversible := false
 	if final, ok := wallet.(cryptoWalletIrreversible); ok {
@@ -299,7 +344,7 @@ func cryptoScan(
 			result.OrphanChecksSkipped += 1
 			continue
 		}
-		if cryptoScanMaxVanishedChecks <= checked {
+		if settings.MaxVanishedChecks <= checked {
 			break
 		}
 		checked += 1

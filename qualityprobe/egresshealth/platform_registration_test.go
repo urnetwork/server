@@ -7,7 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptrace"
 	"sync/atomic"
@@ -42,7 +42,7 @@ func TestBlackholeUnregisteredLocalControlFailureIsNotMeasured(t *testing.T) {
 	transport := &unregisteredControlTransport{}
 	client := &http.Client{Transport: transport}
 	result := blackhole(t.Context(), client, stubDests("https://registration.probe.example", BlackholeSampleSize),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 	if result.Ok || result.Failure != FailureNotMeasured || result.NotMeasured != BlackholeSampleSize {
 		t.Fatalf("unregistered local control failure became provider evidence: ok=%t failure=%q unknown=%d", result.Ok, result.Failure, result.NotMeasured)
 	}
@@ -63,7 +63,7 @@ func TestBlackholeUnregisteredLocalControlFailureIsNotMeasured(t *testing.T) {
 func TestFullUnregisteredLocalControlFailureHasNoMeasuredScore(t *testing.T) {
 	client := &http.Client{Transport: &unregisteredControlTransport{}}
 	result, err := check(t.Context(), client, stubDests("https://registration.probe.example", BlackholeSampleSize),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 	if err != nil || result.Total != 0 || result.OkCount != 0 || result.NotMeasured == 0 {
 		t.Fatalf("unregistered control produced a full quality score: result=%+v err=%v", result, err)
 	}
@@ -76,7 +76,7 @@ func TestBlackholeGenericTimeoutRemainsMeasured(t *testing.T) {
 		return nil, context.DeadlineExceeded
 	})}
 	result := blackhole(t.Context(), client, stubDests("https://registration.probe.example", BlackholeSampleSize),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 	if result.Ok || result.NotMeasured != 0 || result.Failure != FailureAllDestinationsFailed {
 		t.Fatalf("generic timeout lost provider evidence: %+v", result)
 	}
@@ -89,7 +89,7 @@ func TestBlackholeLocalRegistrationCannotHideTlsFailure(t *testing.T) {
 		return nil, &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}
 	}}
 	result := blackhole(t.Context(), &http.Client{Transport: transport}, stubDests("https://registration.probe.example", BlackholeSampleSize),
-		Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep})
+		Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep})
 	if result.Ok || result.Failure != FailureTlsAuthentication {
 		t.Fatalf("local setup hid TLS authentication failure: %+v", result)
 	}
@@ -132,7 +132,7 @@ func TestLoadLaterMeasuredFailureReplacesLocalRegistrationUnknown(t *testing.T) 
 	transport := &unregisteredControlTransport{}
 	transport.unavailable = func() bool { return transport.requests.Load() == 1 }
 	client := &http.Client{Transport: transport}
-	r := newRun(staticPath{client: client}, Options{Sleep: noSleep}, 1, time.Hour, rand.New(rand.NewSource(1)))
+	r := newRun(staticPath{client: client}, Options{Sleep: noSleep}, 1, time.Hour, rand.New(rand.NewPCG(1, 0)))
 	result := r.load(t.Context(), stubDests("https://registration.probe.example", 1)[1])
 	if result.NotMeasured || result.Ok || result.Attempts != DefaultLoadAttempts {
 		t.Fatalf("earlier local unknown suppressed later provider evidence: %+v", result)

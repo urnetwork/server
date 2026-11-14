@@ -47,8 +47,6 @@ func pgSampleFamily(q string) string {
  WHEN ` + q + ` ~ '^(autovacuum:|vacuum )' THEN 'vacuum'
  WHEN ` + q + ` LIKE 'delete from audit_contract_event%event_details%event_time%' THEN 'audit_daily_delete'
  WHEN ` + q + ` LIKE '%sum(contract_close.used_transfer_byte_count)%from transfer_contract%' THEN 'audit_daily_sum'
- WHEN ` + q + ` LIKE '%min(transfer_contract.create_time)%max(transfer_contract.close_time)%from transfer_escrow_sweep%' THEN 'legacy_payout_range'
- WHEN ` + q + ` LIKE 'update transfer_escrow_sweep%temp_account_payment%' THEN 'payout_finalize'
  WHEN ` + q + ` LIKE 'insert into network_connection_reliability_score%' THEN 'reliability_insert'
  WHEN ` + q + ` LIKE '%client_reliability_running%' THEN 'reliability_running'
  WHEN ` + q + ` LIKE 'select requested_balance.balance_id,%coalesce(revision.revision,%from unnest(%transfer_balance_net_escrow_revision%cross join lateral%sum(selected_escrow.balance_byte_count)%' THEN 'reservation_census_prefix'
@@ -326,7 +324,7 @@ var pgSampleAllowed = map[string][]string{
 	"app":     {"unset", "pg_dump", "pg_restore", "psql", "other"},
 	"scope":   {"current", "other"},
 	"backend": {"client backend", "parallel worker", "autovacuum worker", "autovacuum launcher", "checkpointer", "background writer", "walwriter", "walsender", "walreceiver", "logical replication worker", "logical replication launcher", "other"},
-	"family":  {"reservation_census_prefix", "reservation_snapshot_publish", "reservation_snapshot_read", "grant_all_lock", "grant_skip_locked", "grant_window_lock", "settlement_balance_lock", "settlement_escrow_read", "companion_fallback", "companion_origin", "commit", "rollback", "begin", "reindex_concurrent", "vacuum", "audit_daily_delete", "audit_daily_sum", "legacy_payout_range", "payout_finalize", "reliability_insert", "reliability_running", "pending_task_access", "tls_metadata_access", "signed_key_access", "escrow_access", "contract_close_access", "transfer_contract_access", "other"},
+	"family":  {"reservation_census_prefix", "reservation_snapshot_publish", "reservation_snapshot_read", "grant_all_lock", "grant_skip_locked", "grant_window_lock", "settlement_balance_lock", "settlement_escrow_read", "companion_fallback", "companion_origin", "commit", "rollback", "begin", "reindex_concurrent", "vacuum", "audit_daily_delete", "audit_daily_sum", "reliability_insert", "reliability_running", "pending_task_access", "tls_metadata_access", "signed_key_access", "escrow_access", "contract_close_access", "transfer_contract_access", "other"},
 	"wait":    {"none", "LWLock:WALWrite", "LWLock:WALInsert", "IO:WALWrite", "IO:WALSync", "LWLock:WALSync", "LWLock:BufferMapping", "IO:DataFileRead", "IO:DataFileWrite", "IO:DataFileExtend", "Client:ClientRead", "Client:ClientWrite", "Lock:transactionid", "Lock:tuple", "Lock:virtualxid", "Lock:relation", "IPC:MessageQueueReceive", "Activity:other", "BufferPin:other", "Client:other", "Extension:other", "IO:other", "IPC:other", "Lock:other", "LWLock:other", "Timeout:other", "other"},
 }
 

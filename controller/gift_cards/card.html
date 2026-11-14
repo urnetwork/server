@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="{{.Lang}}" dir="{{.Dir}}">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src file:; font-src file:; style-src 'unsafe-inline'; script-src 'none'; base-uri 'none'; form-action 'none'">
+<title>{{.Title}}</title>
+<!--
+  The gift card: mockup 4 of mmm/giftofprivacy/design.html (the .gc card), one
+  5 x 7 in card per page. Printed by headless Chromium (controller/gift_cards_pdf.go),
+  which loads the fonts and images beside this file, fits each card over the
+  DevTools protocol and prints. The page runs no script and fetches nothing but
+  those files (the Content-Security-Policy). Buyer text reaches it only through
+  html/template's contextual escaping. Colors and type follow the mockup;
+  League Gothic stands in for the site's display face.
+-->
+<style>
+@font-face { font-family: "Caveat"; src: url("fonts/Caveat.ttf") format("truetype"); font-weight: 400 700; font-display: block; }
+@font-face { font-family: "Geist"; src: url("fonts/Geist.ttf") format("truetype"); font-weight: 100 900; font-display: block; }
+@font-face { font-family: "Geist Mono"; src: url("fonts/GeistMono.ttf") format("truetype"); font-weight: 100 900; font-display: block; }
+@font-face { font-family: "League Gothic"; src: url("fonts/LeagueGothic.ttf") format("truetype"); font-weight: 400; font-display: block; }
+@font-face { font-family: "Noto Sans SC"; src: url("fonts/NotoSansSC.ttf") format("truetype"); font-weight: 100 900; font-display: block; }
+@font-face { font-family: "Noto Naskh Arabic"; src: url("fonts/NotoNaskhArabic.ttf") format("truetype"); font-weight: 400 700; font-display: block; }
+
+@page { size: 5in 7in; margin: 0; }
+
+:root {
+  --paper: #fbf6ea;
+  --ink: #22306b;
+  /* every stack ends in the faces for Chinese and Arabic, since the note is the
+     buyer's own text in any script */
+  --display: "League Gothic", "Geist", "Noto Sans SC", "Noto Naskh Arabic", sans-serif;
+  --ui: "Geist", "Noto Sans SC", "Noto Naskh Arabic", sans-serif;
+  --mono: "Geist Mono", "Geist", monospace;
+  --hand: "Caveat", "Noto Sans SC", "Noto Naskh Arabic", cursive;
+  --hand-size: 27px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--paper); }
+body { -webkit-print-color-adjust: exact; print-color-adjust: exact; text-rendering: geometricPrecision; }
+
+.gc { position: relative; width: 5in; height: 7in; overflow: hidden; padding: 16px 20px 12px; display: flex; flex-direction: column; gap: 12px; background: var(--paper); color: var(--ink); font-family: var(--ui); break-before: page; }
+.gc:first-of-type { break-before: auto; }
+
+/* the scene: the season's still, rendered at the mockup's frame (1.875:1),
+   over the mockup's night sky for a season without one */
+.gc-scene { position: relative; flex: none; aspect-ratio: 1.875; border-radius: 10px; overflow: hidden; isolation: isolate; background: radial-gradient(130% 100% at 72% 0%, #2c3176 0%, #171b47 46%, #0b0e27 100%); }
+.gc-sky { position: absolute; inset: 0; opacity: 0.85; background-image:
+  radial-gradient(1.2px 1.2px at 8% 18%, #fff 99%, transparent), radial-gradient(1px 1px at 22% 40%, #fff 99%, transparent), radial-gradient(1.4px 1.4px at 31% 12%, #fff 99%, transparent),
+  radial-gradient(1px 1px at 44% 30%, #fff 99%, transparent), radial-gradient(1.3px 1.3px at 58% 9%, #fff 99%, transparent), radial-gradient(1px 1px at 66% 34%, #fff 99%, transparent),
+  radial-gradient(1.2px 1.2px at 79% 21%, #fff 99%, transparent), radial-gradient(1px 1px at 88% 8%, #fff 99%, transparent), radial-gradient(1.4px 1.4px at 93% 37%, #fff 99%, transparent),
+  radial-gradient(1px 1px at 14% 52%, #fff 99%, transparent), radial-gradient(1px 1px at 72% 52%, #fff 99%, transparent), radial-gradient(1.1px 1.1px at 51% 47%, #fff 99%, transparent); }
+.gc-aurora { position: absolute; left: -10%; right: -10%; top: 8%; height: 62%; background: radial-gradient(55% 38% at 30% 50%, rgba(135, 251, 103, 0.2), transparent 70%), radial-gradient(48% 36% at 70% 42%, rgba(0, 227, 255, 0.16), transparent 70%), radial-gradient(40% 30% at 52% 64%, rgba(237, 143, 255, 0.15), transparent 70%); filter: blur(10px); }
+.gc-moon { position: absolute; top: 20px; left: 22px; width: 30px; height: 30px; border-radius: 50%; background: radial-gradient(circle at 36% 34%, #fffdf0, #f3e8bd 58%, #d8c88e); box-shadow: 0 0 26px rgba(255, 240, 190, 0.45); }
+.gc-scene img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.gc-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 0 4px; }
+.gc-kicker { margin: 0; font: 400 32px/0.92 var(--display); text-transform: uppercase; color: #101010; letter-spacing: 0.01em; }
+:lang(ru) .gc-kicker { font: 800 23px/1.05 var(--ui); letter-spacing: -0.01em; }
+:lang(zh) .gc-kicker { font: 700 26px/1.2 var(--ui); letter-spacing: 0.02em; }
+:lang(ar) .gc-kicker { font: 700 26px/1.3 "Noto Naskh Arabic", var(--ui); text-transform: none; letter-spacing: 0; }
+.gc-note { display: grid; gap: 2px; }
+.gc-msg { margin: 0; font: 500 var(--hand-size)/1.15 var(--hand); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.gc-from { margin: 0; font: 500 var(--hand-size)/1.1 var(--hand); color: var(--ink); overflow-wrap: anywhere; }
+.gc-code { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 10px; border: 1.5px solid rgba(34, 48, 107, 0.18); background: #fff; }
+.gc-code .k { display: block; font: 600 10px/1.2 var(--ui); letter-spacing: 0.12em; text-transform: uppercase; color: rgba(34, 48, 107, 0.6); }
+:lang(zh) .gc-code .k, :lang(ar) .gc-code .k { letter-spacing: 0; font-size: 11px; }
+.gc-code .v { display: block; font: 600 14px/1.3 var(--ui); color: #101010; margin-bottom: 6px; }
+.gc-code code { display: block; direction: ltr; text-align: start; unicode-bidi: isolate; white-space: nowrap; font: 600 16px/1.3 var(--mono); color: #101010; letter-spacing: 0.02em; }
+:dir(rtl) .gc-code code { text-align: end; }
+.gc-code code .g { display: inline-block; margin-right: 0.35em; }
+.gc-code code .g:last-child { margin-right: 0; }
+.gc-qr { width: 86px; height: 86px; display: block; image-rendering: pixelated; }
+.gc-steps { margin: 0; padding-inline-start: 18px; display: grid; gap: 2px; font-size: 11.5px; line-height: 1.35; color: #2a2f45; }
+.gc-meta { display: flex; justify-content: space-between; gap: 8px; font: 500 11px/1.3 var(--ui); color: rgba(34, 48, 107, 0.62); font-variant-numeric: tabular-nums; }
+.gc-foot { margin-top: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 8px; border-top: 1px solid rgba(34, 48, 107, 0.14); color: #101010; }
+.gc-foot svg.wm { height: 12px; width: auto; display: block; color: #101010; }
+.gc-foot .tag { font: 600 11px/1 var(--ui); color: rgba(16, 16, 16, 0.6); }
+.gc-foot .taoline { margin-inline-start: auto; display: inline-flex; align-items: center; gap: 6px; font: 600 12px/1 var(--ui); color: #101010; white-space: nowrap; }
+.gc-foot .taoline svg { width: 13px; height: 13px; display: block; color: #101010; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position: absolute" aria-hidden="true">
+<symbol id="wm" viewBox="0 0 980 139"><g fill="currentColor">
+<path d="M26.224 0.161339C23.3274 0.161339 20.9792 2.50952 20.9792 5.40614C20.9792 8.30277 18.631 10.6509 15.7344 10.6509C12.8378 10.6509 10.4896 12.9991 10.4896 15.8958C10.4896 18.7924 8.14143 21.1406 5.2448 21.1406C2.34818 21.1406 0 23.4887 0 26.3854V57.8542C0 60.7508 2.34818 63.099 5.2448 63.099C8.14143 63.099 10.4896 65.4472 10.4896 68.3438C10.4896 71.2404 12.8378 73.5886 15.7344 73.5886C18.631 73.5886 20.9792 75.9368 20.9792 78.8334C20.9792 81.73 23.3274 84.0782 26.224 84.0782H57.6928C60.5895 84.0782 62.9376 81.73 62.9376 78.8334C62.9376 75.9368 65.2858 73.5886 68.1825 73.5886C71.0791 73.5886 73.4273 71.2404 73.4273 68.3438C73.4273 65.4472 75.7754 63.099 78.6721 63.099C81.5687 63.099 83.9169 60.7508 83.9169 57.8542V26.3854C83.9169 23.4887 81.5687 21.1406 78.6721 21.1406C75.7754 21.1406 73.4273 18.7924 73.4273 15.8958C73.4273 12.9991 71.0791 10.6509 68.1825 10.6509C65.2858 10.6509 62.9376 8.30277 62.9376 5.40614C62.9376 2.50952 60.5895 0.161339 57.6928 0.161339H26.224Z"/>
+<path d="M246.506 0.161339C243.609 0.161339 241.261 2.50952 241.261 5.40615V131.281C241.261 134.178 243.609 136.526 246.506 136.526H256.995C259.892 136.526 262.24 134.178 262.24 131.281V89.323C262.24 86.4264 264.588 84.0782 267.485 84.0782H309.443C312.34 84.0782 314.688 86.4264 314.688 89.323C314.688 92.2196 317.036 94.5678 319.933 94.5678C322.83 94.5678 325.178 96.916 325.178 99.8126C325.178 102.709 327.526 105.057 330.423 105.057C333.319 105.057 335.667 107.406 335.667 110.302V131.281C335.667 134.178 338.016 136.526 340.912 136.526H351.402C354.298 136.526 356.647 134.178 356.647 131.281V99.8126C356.647 96.916 354.298 94.5678 351.402 94.5678C348.505 94.5678 346.157 92.2196 346.157 89.323C346.157 86.4264 343.809 84.0782 340.912 84.0782C338.016 84.0782 335.667 81.73 335.667 78.8334C335.667 75.9368 338.016 73.5886 340.912 73.5886C343.809 73.5886 346.157 71.2404 346.157 68.3438C346.157 65.4472 348.505 63.099 351.402 63.099C354.298 63.099 356.647 60.7508 356.647 57.8542V26.3854C356.647 23.4887 354.298 21.1406 351.402 21.1406C348.505 21.1406 346.157 18.7924 346.157 15.8958C346.157 12.9991 343.809 10.6509 340.912 10.6509C338.016 10.6509 335.667 8.30277 335.667 5.40614C335.667 2.50952 333.319 0.161339 330.423 0.161339H246.506ZM335.667 47.3646C335.667 50.2612 333.319 52.6094 330.423 52.6094C327.526 52.6094 325.178 54.9576 325.178 57.8542C325.178 60.7508 322.83 63.099 319.933 63.099H267.485C264.588 63.099 262.24 60.7508 262.24 57.8542V26.3854C262.24 23.4887 264.588 21.1406 267.485 21.1406H319.933C322.83 21.1406 325.178 23.4887 325.178 26.3854C325.178 29.282 327.526 31.6302 330.423 31.6302C333.319 31.6302 335.667 33.9783 335.667 36.875V47.3646Z" fill-rule="evenodd" clip-rule="evenodd"/>
+<path d="M110.141 0.161339C107.244 0.161339 104.896 2.50952 104.896 5.40615V110.302C104.896 113.199 107.244 115.547 110.141 115.547C113.038 115.547 115.386 117.895 115.386 120.792C115.386 123.688 117.734 126.037 120.63 126.037C123.527 126.037 125.875 128.385 125.875 131.281C125.875 134.178 128.223 136.526 131.12 136.526H194.058C196.954 136.526 199.303 134.178 199.303 131.281C199.303 128.385 201.651 126.037 204.547 126.037C207.444 126.037 209.792 123.688 209.792 120.792C209.792 117.895 212.14 115.547 215.037 115.547C217.934 115.547 220.282 113.199 220.282 110.302V5.40614C220.282 2.50952 217.934 0.161339 215.037 0.161339H204.547C201.651 0.161339 199.303 2.50952 199.303 5.40614V99.8126C199.303 102.709 196.954 105.057 194.058 105.057C191.161 105.057 188.813 107.406 188.813 110.302C188.813 113.199 186.465 115.547 183.568 115.547H141.61C138.713 115.547 136.365 113.199 136.365 110.302C136.365 107.406 134.017 105.057 131.12 105.057C128.223 105.057 125.875 102.709 125.875 99.8126V5.40614C125.875 2.50952 123.527 0.161339 120.63 0.161339H110.141Z"/>
+<path d="M377.626 136.527V31.2279H409.615V45.0329C413.805 35.5122 422.373 28.9429 433.703 28.9429C447.317 28.9429 454.839 37.9876 454.839 55.22V136.527H421.707V60.742C421.707 56.5529 419.517 54.8392 416.566 54.8392C413.424 54.8392 410.758 56.9337 410.758 61.6941V136.527H377.626Z"/>
+<path d="M502.823 138.812C478.26 138.812 462.836 125.673 462.836 100.729V68.1682C462.836 42.4623 478.64 28.9429 503.109 28.9429C527.386 28.9429 542.81 42.2719 542.81 67.5017V91.8747H495.968V105.584C495.968 110.63 497.967 114.153 502.823 114.153C507.679 114.153 509.487 111.011 509.487 105.87V98.3487H542.715V104.537C542.715 126.53 526.529 138.812 502.823 138.812ZM496.063 71.2148H509.487V61.5037C509.487 56.3625 507.488 53.0303 502.918 53.0303C498.063 53.0303 496.063 56.3625 496.063 61.5037V71.2148Z"/>
+<path d="M584.13 137.86C568.992 137.86 556.424 131.1 556.424 112.059V54.5536H545.285V31.2279H556.52V11.9961L589.556 2.95141V31.2279H602.6V54.5536H589.556V107.298C589.556 112.249 592.603 113.677 596.507 113.677C598.792 113.677 600.791 113.201 602.6 112.63V134.242C598.411 136.241 592.127 137.86 584.13 137.86Z"/>
+<path d="M620.213 136.527L605.456 31.2279H636.779L641.92 103.871H642.015L649.537 31.2279H682.669L690.19 103.68H690.285L695.522 31.2279H726.75L711.993 136.527H673.053L666.198 70.4531H666.008L659.153 136.527H620.213Z"/>
+<path d="M769.974 138.812C745.791 138.812 729.225 125.483 729.225 100.538V67.0257C729.225 41.7958 745.791 28.9429 769.974 28.9429C794.061 28.9429 810.722 41.7958 810.722 67.0257V100.538C810.722 125.483 794.251 138.812 769.974 138.812ZM763.309 104.823C763.309 110.821 765.404 114.439 769.974 114.439C774.543 114.439 776.638 110.821 776.638 104.823V62.8366C776.638 57.0289 774.543 53.3159 769.974 53.3159C765.404 53.3159 763.309 56.8385 763.309 62.8366V104.823Z"/>
+<path d="M819.005 136.527V31.2279H850.614V48.0795C854.803 36.1786 862.991 29.4189 872.987 29.4189C884.317 29.4189 890.029 36.9403 890.029 53.2207V89.3993H859.754V63.2174C859.754 60.1708 858.421 58.8379 856.231 58.8379C853.851 58.8379 852.137 60.5516 852.137 64.1695V136.527H819.005Z"/>
+<path d="M944.107 136.527L930.207 86.6383V136.527H897.075V0H930.207V73.8806L944.012 31.2279H979.524L960.863 79.3074L980 136.527H944.107Z"/>
+</g></symbol>
+<symbol id="tao" viewBox="0 0 24 24"><path fill="currentColor" d="M14.38 18.415V8.577C14.38 6.119 12.351 4.116 9.893 4.116V19.839C9.893 22.966 12.546 24 14.185 24C15.544 24 16.311 23.766 17.234 23.116C14.646 22.843 14.38 21.282 14.38 18.415ZM4.893 0C2.637 0 0.803 1.866 0.803 4.122H19.107C21.363 4.122 23.197 2.256 23.197 0Z"/></symbol>
+</svg>
+{{range .Cards}}
+<article class="gc">
+  <div class="gc-scene">
+    {{- if $.SceneSrc}}
+    <img src="{{$.SceneSrc}}" alt="">
+    {{- else}}
+    <span class="gc-sky"></span><span class="gc-aurora"></span><span class="gc-moon"></span>
+    {{- end}}
+  </div>
+  <div class="gc-body">
+    <p class="gc-kicker">{{$.Kicker}}</p>
+    {{- if or .Message .Signature}}
+    <div class="gc-note" dir="auto">
+      {{- if .Message}}
+      <p class="gc-msg">{{.Message}}</p>
+      {{- end}}
+      {{- if .Signature}}
+      <p class="gc-from">– {{.Signature}}</p>
+      {{- end}}
+    </div>
+    {{- end}}
+    <div class="gc-code">
+      <div>
+        <span class="k">{{$.GiftLabel}}</span><span class="v">{{$.GiftValue}}</span>
+        <span class="k">{{$.CodeLabel}}</span><code>{{range .CodeGroups}}<span class="g">{{.}}</span>{{end}}</code>
+      </div>
+      <img class="gc-qr" src="{{.QrSrc}}" alt="{{$.QrAlt}}">
+    </div>
+    <ol class="gc-steps">
+      {{- range $.Steps}}
+      <li>{{.}}</li>
+      {{- end}}
+    </ol>
+    <div class="gc-meta"><span>{{.RedeemBy}}</span>{{if .GiftN}}<span>{{.GiftN}}</span>{{end}}</div>
+    <footer class="gc-foot">
+      <svg class="wm" viewBox="0 0 980 139" role="img" aria-label="URnetwork"><use href="#wm"/></svg>
+      <span class="tag">{{$.Tagline}}</span>
+      {{- if $.Bittensor}}
+      <span class="taoline"><svg aria-hidden="true"><use href="#tao"/></svg>{{$.Bittensor}}</span>
+      {{- end}}
+    </footer>
+  </div>
+</article>
+{{end}}
+</body>
+</html>

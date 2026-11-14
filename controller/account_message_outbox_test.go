@@ -447,41 +447,6 @@ func TestAccountMessageOutboxKeepsAnUnregisteredTemplateDue(t *testing.T) {
 	})
 }
 
-// A held message is not delivered until it is released.
-func TestAccountMessageOutboxDeliversAHeldMessageOnlyAfterItsRelease(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		networkId := server.NewId()
-		server.Tx(ctx, func(tx server.PgTx) {
-			addAccountMessageInTx(ctx, tx, &accountMessage{
-				key:       "synthetic-held",
-				networkId: &networkId,
-				userAuth:  "outbox-held@synthetic.example",
-				template:  &SubscriptionEndedTemplate{},
-				held:      true,
-			})
-		})
-		sender := newOutboxTestSender()
-		deliverAccountMessagesAt(ctx, sender, server.NowUtc().Add(time.Hour))
-		if sends := sender.sent(); len(sends) != 0 {
-			t.Fatalf("sent %d held messages", len(sends))
-		}
-
-		releaseTime := server.NowUtc()
-		server.Tx(ctx, func(tx server.PgTx) {
-			held := model.GetHeldAccountMessagesForUpdateInTx(ctx, tx, "subscription_ended", releaseTime)
-			if len(held) != 1 {
-				t.Fatalf("held messages = %d, want 1", len(held))
-			}
-			model.ReleaseAccountMessageInTx(ctx, tx, held[0].MessageId, held[0].TemplateJson, releaseTime)
-		})
-		deliverAccountMessagesAt(ctx, sender, releaseTime)
-		if sends := sender.sent(); len(sends) != 1 {
-			t.Fatalf("sent %d released messages, want 1", len(sends))
-		}
-	})
-}
-
 // Delivered and abandoned messages are removed after the retention period; due
 // messages stay.
 func TestAccountMessageOutboxRemovesFinishedMessagesAfterRetention(t *testing.T) {

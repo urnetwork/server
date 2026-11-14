@@ -4,7 +4,7 @@ package providertunnel
 import (
 	"context"
 	"errors"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"sync"
@@ -94,7 +94,8 @@ func credentialObservationUrl(t *testing.T, state *providerRegistrationState) *e
 		started := time.Now()
 		result, err = egresshealth.Check(t.Context(), client, egresshealth.Options{
 			UrlProbe: true, ColdStartTimeout: time.Minute, PerRequestTimeout: 15 * time.Second,
-			Rand:         rand.New(rand.NewSource(1)),
+			// a fixed seed, so a run replays
+			Rand:         rand.New(rand.NewPCG(1, 0)),
 			Destinations: []egresshealth.Destination{{Name: "synthetic", Class: egresshealth.ClassSite, Url: "https://sample.probe.example/page"}},
 		})
 		if err != nil || result == nil || queries != 1 || time.Since(started) != 5*time.Second || len(result.Checks) != 1 || result.Checks[0].Attempts != 1 {

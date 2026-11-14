@@ -41,6 +41,11 @@ type ProviderUrlProbeDue struct {
 	// (qualityprobe/egresshealth url_family.go); a prober that predates it
 	// ignores it and probes IPv4.
 	IpFamily connect.IpFamily `json:"ip_family,omitempty"`
+	// The turn measures post-quantum: its tunnel opens an opportunistic
+	// end-to-end session with the provider and reports its outcome as e2e
+	// evidence (provider_url_probe_post_quantum.go). A prober that predates
+	// it ignores it and opens none.
+	PostQuantum bool `json:"post_quantum,omitempty"`
 }
 
 // A stable provider slot belongs to one logical shard, independently of the
@@ -48,10 +53,11 @@ type ProviderUrlProbeDue struct {
 const ProviderUrlProbeSlotCount = 1024
 
 // Replace measurements before they leave the four-hour window. This covers
-// the default 250-second URL turn (a dual-stack provider's, its HTTP/3 and
-// IPv6 legs included) plus 90 seconds for control/publication and 20 seconds
-// of scheduling margin. It is not extra quota credit or a promise that a
-// stalled worker finishes. Admission still owns one 15-minute claim.
+// the default 259-second URL turn (a dual-stack provider's, its HTTP/3 and
+// IPv6 legs included, measuring post-quantum, its seal waits included) plus
+// 90 seconds for control/publication and 11 seconds of scheduling margin. It
+// is not extra quota credit or a promise that a stalled worker finishes.
+// Admission still owns one 15-minute claim.
 const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
 
 // Owner decision 2026-10-15 (task #57, option A): a quota-full renewal is due
@@ -301,6 +307,9 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 	if ordinaryExpiryComplete {
 		_ = writeProviderUrlProbeOrdinaryExpiry(ctx, providerUrlProbeOrdinaryExpiryKey(shardIndex, shardCount), now)
 	}
+	// which issued turns measure post-quantum, decided after the claim's
+	// transaction so its row locks are not held for the reads
+	markProviderUrlProbePostQuantumTurns(ctx, now, result.Providers, DefaultProviderUrlProbePostQuantumSettings())
 	// Two-day receipt storage cleanup has a durable Taskworker owner. Current
 	// completion expiry above and measured-history clock predicates retain all
 	// admission authority even when that independent cleanup is delayed;

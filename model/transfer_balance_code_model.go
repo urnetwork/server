@@ -30,8 +30,14 @@ type RedeemBalanceCodeArgs struct {
 }
 
 type RedeemBalanceCodeResult struct {
+	// For a Pro gift (kind pro_gift) this is the year's Pro marker: its window,
+	// with no data.
 	TransferBalance *RedeemBalanceCodeTransferBalance `json:"transfer_balance,omitempty"`
-	Error           *RedeemBalanceCodeError           `json:"error,omitempty"`
+	// the year of Pro a gift code granted; nil for a data code
+	Pro   *RedeemBalanceCodePro   `json:"pro,omitempty"`
+	Error *RedeemBalanceCodeError `json:"error,omitempty"`
+	// the gift this redeem committed with, for FinishGiftRedemption; never sent
+	gift *GiftRedemption
 }
 
 type RedeemBalanceCodeTransferBalance struct {
@@ -47,6 +53,11 @@ type RedeemBalanceCodeError struct {
 
 // RedeemBalanceCodeInTx consumes one code only after locking its destination
 // network against concurrent deletion.
+//
+// A data code adds its data, data only. A Pro gift code (kind pro_gift) grants
+// its year of Pro instead (redeemGiftCodeInTx), and its result says so (Pro);
+// the caller owes the network FinishGiftRedemption once the transaction
+// commits (RedeemBalanceCode does that itself).
 func RedeemBalanceCodeInTx(
 	redeemBalanceCode *RedeemBalanceCodeArgs,
 	ctx context.Context,
@@ -58,40 +69,21 @@ func RedeemBalanceCodeInTx(
 		return
 	}
 
-	result, err := tx.Query(
-		ctx,
-		`
-            SELECT
-                balance_code_id,
-                start_time,
-                end_time,
-                balance_byte_count,
-                net_revenue_nano_cents
-            FROM transfer_balance_code
-            WHERE
-                balance_code_secret = $1 AND
-                redeem_balance_id IS NULL AND
-                cancel_time IS NULL
-        `,
-		redeemBalanceCode.Secret,
-	)
+	// every code with the secret, whatever its state: a data code that is
+	// redeemed or refunded reads as unknown, as it always did, and a gift code
+	// says which it is
+	codeState := getBalanceCodeState(ctx, tx, redeemBalanceCode.Secret)
+	if codeState != nil && codeState.isGift() {
+		return redeemGiftCodeInTx(tx, ctx, redeemBalanceCode.NetworkId, codeState, server.NowUtc())
+	}
 	var balanceCode *BalanceCode
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			balanceCode = &BalanceCode{}
-			server.Raise(result.Scan(
-				&balanceCode.BalanceCodeId,
-				&balanceCode.StartTime,
-				&balanceCode.EndTime,
-				&balanceCode.BalanceByteCount,
-				&balanceCode.NetRevenue,
-			))
-		}
-	})
+	if codeState != nil && !codeState.redeemed && !codeState.cancelled {
+		balanceCode = &codeState.BalanceCode
+	}
 	if balanceCode == nil {
 		redeemBalanceCodeResult = &RedeemBalanceCodeResult{
 			Error: &RedeemBalanceCodeError{
-				Message: "Unknown balance code.",
+				Message: balanceCodeUnknownMessage,
 			},
 		}
 		return
@@ -185,6 +177,10 @@ func RedeemBalanceCodeInTx(
 	return
 }
 
+// RedeemBalanceCode redeems one code in its own transaction (ReadCommitted, so
+// a gift's cycle grant is written with it), and finishes a redeemed gift once
+// that commits: the network's Pro is refreshed and the giver's referral linked
+// (FinishGiftRedemption).
 func RedeemBalanceCode(
 	redeemBalanceCode *RedeemBalanceCodeArgs,
 	ctx context.Context,
@@ -197,6 +193,9 @@ func RedeemBalanceCode(
 		)
 	}, server.TxReadCommitted)
 
+	if returnErr == nil && redeemBalanceCodeResult != nil {
+		FinishGiftRedemption(ctx, redeemBalanceCodeResult.gift)
+	}
 	return
 }
 
@@ -204,9 +203,18 @@ type CheckBalanceCodeArgs struct {
 	Secret string `json:"secret"`
 }
 
+// A code that can be redeemed has a Balance; one that cannot has an Error,
+// whose message says why: unknown, or for a gift code redeemed, expired or
+// refunded. Kind is the code's kind (BalanceCodeKindData or
+// BalanceCodeKindProGift), and a gift code also has ProDays and RedeemBy, the
+// last moment it can be redeemed. A data code that is redeemed or refunded
+// reads as unknown, as it always has.
 type CheckBalanceCodeResult struct {
-	Balance *CheckBalanceCodeBalance `json:"balance,omitempty"`
-	Error   *CheckBalanceCodeError   `json:"error,omitempty"`
+	Balance  *CheckBalanceCodeBalance `json:"balance,omitempty"`
+	Kind     string                   `json:"kind,omitempty"`
+	ProDays  int64                    `json:"pro_days,omitempty"`
+	RedeemBy *time.Time               `json:"redeem_by,omitempty"`
+	Error    *CheckBalanceCodeError   `json:"error,omitempty"`
 }
 
 type CheckBalanceCodeBalance struct {
@@ -224,57 +232,43 @@ func CheckBalanceCode(
 	session *session.ClientSession,
 ) (checkBalanceCodeResult *CheckBalanceCodeResult, returnErr error) {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		var balanceCode *BalanceCode
-
-		result, err := tx.Query(
-			session.Ctx,
-			`
-                SELECT
-                    balance_code_id,
-                    start_time,
-                    end_time,
-                    balance_byte_count,
-                    net_revenue_nano_cents
-                FROM transfer_balance_code
-                WHERE
-                    balance_code_secret = $1 AND
-                    redeem_balance_id IS NULL AND
-                    cancel_time IS NULL
-            `,
-			checkBalanceCode.Secret,
+		checkBalanceCodeResult = checkBalanceCodeResultOf(
+			getBalanceCodeState(session.Ctx, tx, checkBalanceCode.Secret),
+			server.NowUtc(),
 		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				balanceCode = &BalanceCode{}
-				server.Raise(result.Scan(
-					&balanceCode.BalanceCodeId,
-					&balanceCode.StartTime,
-					&balanceCode.EndTime,
-					&balanceCode.BalanceByteCount,
-					&balanceCode.NetRevenue,
-				))
-			}
-		})
-
-		if balanceCode == nil {
-			checkBalanceCodeResult = &CheckBalanceCodeResult{
-				Error: &CheckBalanceCodeError{
-					Message: "Unknown balance code.",
-				},
-			}
-			return
-		}
-
-		checkBalanceCodeResult = &CheckBalanceCodeResult{
-			Balance: &CheckBalanceCodeBalance{
-				StartTime:        balanceCode.StartTime,
-				EndTime:          balanceCode.EndTime,
-				BalanceByteCount: balanceCode.BalanceByteCount,
-			},
-		}
 	})
 
 	return
+}
+
+// The check answer for a code at now (nil: no such code).
+func checkBalanceCodeResultOf(code *balanceCodeState, now time.Time) *CheckBalanceCodeResult {
+	if code == nil || (!code.isGift() && (code.redeemed || code.cancelled)) {
+		return &CheckBalanceCodeResult{
+			Error: &CheckBalanceCodeError{
+				Message: balanceCodeUnknownMessage,
+			},
+		}
+	}
+	status := balanceCodeStatusOf(code, now)
+	result := &CheckBalanceCodeResult{
+		Kind:     status.Kind,
+		ProDays:  status.ProDays,
+		RedeemBy: status.RedeemBy,
+	}
+	if status.Status != GiftCodeStatusOk {
+		result.Error = &CheckBalanceCodeError{
+			Message: giftCodeStatusMessage(status.Status),
+		}
+		return result
+	}
+	// a gift code's window is its redeem window, and it adds no data
+	result.Balance = &CheckBalanceCodeBalance{
+		StartTime:        code.StartTime,
+		EndTime:          code.EndTime,
+		BalanceByteCount: code.BalanceByteCount,
+	}
+	return result
 }
 
 // typically called from a payment webhook
@@ -530,6 +524,14 @@ func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId str
 // Idempotent: a second pass finds the codes already cancelled and the
 // balances already ended, and changes nothing.
 // The caller must use OptNoRetry and let ownership refusal abort its receipt.
+//
+// A Pro gift order's codes are keyed <session>/gift/<n> or
+// crypto/<intent>/gift/<n> (gift_order_model.go), so the same scope voids an
+// order's unredeemed gift codes. A REDEEMED gift code's Pro marker is its
+// balance, ended like any; its gift renewal ends with it, and the network's
+// running Pro cycle grant when no other subscription is left open, so the
+// monthly sweep stops granting the year (endGiftRenewalsInTx). Those cycle
+// grants join the single ownership admission below.
 func ClawbackBalanceCodesForPurchaseEventInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -539,12 +541,14 @@ func ClawbackBalanceCodesForPurchaseEventInTx(
 	type codeRow struct {
 		balanceCodeId   server.Id
 		redeemBalanceId *server.Id
+		kind            string
+		networkId       *server.Id
 	}
 	codeRows := []codeRow{}
 	result, err := tx.Query(
 		ctx,
 		`
-            SELECT balance_code_id, redeem_balance_id
+            SELECT balance_code_id, redeem_balance_id, kind, network_id
             FROM transfer_balance_code
             WHERE
                 purchase_event_id = $1 OR
@@ -556,7 +560,7 @@ func ClawbackBalanceCodesForPurchaseEventInTx(
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			row := codeRow{}
-			server.Raise(result.Scan(&row.balanceCodeId, &row.redeemBalanceId))
+			server.Raise(result.Scan(&row.balanceCodeId, &row.redeemBalanceId, &row.kind, &row.networkId))
 			codeRows = append(codeRows, row)
 		}
 	})
@@ -565,10 +569,23 @@ func ClawbackBalanceCodesForPurchaseEventInTx(
 	}
 	found = true
 	balanceIds := []server.Id{}
+	giftCodeIds := []server.Id{}
+	giftNetworkIds := []server.Id{}
 	for _, row := range codeRows {
 		if row.redeemBalanceId != nil {
 			balanceIds = append(balanceIds, *row.redeemBalanceId)
+			if row.kind == BalanceCodeKindProGift {
+				giftCodeIds = append(giftCodeIds, row.balanceCodeId)
+				if row.networkId != nil {
+					giftNetworkIds = append(giftNetworkIds, *row.networkId)
+				}
+			}
 		}
+	}
+	var gifts *giftClawback
+	if 0 < len(giftCodeIds) {
+		gifts = giftClawbackOfInTx(tx, ctx, giftCodeIds, giftNetworkIds, now)
+		balanceIds = append(balanceIds, giftClawbackCycleBalanceIdsInTx(tx, ctx, gifts, now)...)
 	}
 	admitted, ownershipErr := tryTransferBalanceOwnershipInTx(ctx, tx, balanceIds)
 	server.Raise(ownershipErr)
@@ -633,15 +650,25 @@ func ClawbackBalanceCodesForPurchaseEventInTx(
 			}
 		})
 	}
+	if gifts != nil {
+		endedNetworkIds = append(endedNetworkIds, endGiftRenewalsInTx(tx, ctx, gifts, balanceIds, now)...)
+	}
 	return
 }
 
+// A code the network redeemed whose grant has not ended. A Pro gift code
+// (Kind BalanceCodeKindProGift) adds no data: its end is the end of its year
+// of Pro, which may be queued after a paid period, and ProDays its length.
 type RedeemedBalanceCode struct {
 	BalanceCodeId    server.Id `json:"balance_code_id"`
 	BalanceByteCount ByteCount `json:"balance_byte_count"`
 	RedeemTime       time.Time `json:"redeem_time"`
 	EndTime          time.Time `json:"end_time"`
 	Secret           string    `json:"secret"`
+	// BalanceCodeKindData or BalanceCodeKindProGift
+	Kind string `json:"kind"`
+	// the days of Pro a gift code granted; 0 for a data code
+	ProDays int64 `json:"pro_days"`
 }
 
 func FetchNetworkRedeemedBalanceCodes(
@@ -659,7 +686,9 @@ func FetchNetworkRedeemedBalanceCodes(
 				balance_byte_count,
 				redeem_time,
 				end_time,
-				balance_code_secret
+				balance_code_secret,
+				kind,
+				COALESCE(pro_duration_seconds, 0)
 			FROM transfer_balance_code
 			WHERE
 				network_id = $1 AND redeemed = TRUE AND end_time > $2
@@ -671,13 +700,21 @@ func FetchNetworkRedeemedBalanceCodes(
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				balanceCode := &RedeemedBalanceCode{}
+				var proDurationSeconds int64
 				server.Raise(result.Scan(
 					&balanceCode.BalanceCodeId,
 					&balanceCode.BalanceByteCount,
 					&balanceCode.RedeemTime,
 					&balanceCode.EndTime,
 					&balanceCode.Secret,
+					&balanceCode.Kind,
+					&proDurationSeconds,
 				))
+				// a redeemed gift's window is its year (redeemGiftCodeInTx), so it
+				// is listed while the year runs, a queued year included
+				if balanceCode.Kind == BalanceCodeKindProGift {
+					balanceCode.ProDays = giftDurationDays(time.Duration(proDurationSeconds) * time.Second)
+				}
 				balanceCodes = append(balanceCodes, balanceCode)
 			}
 		})

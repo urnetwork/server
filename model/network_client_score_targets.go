@@ -5,7 +5,7 @@
 package model
 
 import (
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 
 	"github.com/urnetwork/server"
 )
@@ -294,16 +294,30 @@ func pageClientScoreSamples(clientScores []*ClientScore) (counts []int, encodeSa
 
 // Encodes one target's providers for one export mode: the un-faceted union,
 // every family facet, the native facets of a non-forced mode, and the public
-// ClientFilter.
+// ClientFilter. A non-forced mode also gets every capability facet, union
+// and native, from the classified copies of the downgraded providers
+// (FP2-PROTOCOL.md §4.4); the filter does not count them.
 func exportClientScores(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) clientScoreExportPayload {
 	mapSpan := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseTargetMap)
 	defer mapSpan.finish()
 	clientScores := []*ClientScore{}
 	facetClientScores := map[ipFamilyFacet][]*ClientScore{}
 	nativeFacetClientScores := map[ipFamilyFacet][]*ClientScore{}
+	capabilityFacetClientScores := map[ipFamilyFacet][]*ClientScore{}
+	nativeCapabilityFacetClientScores := map[ipFamilyFacet][]*ClientScore{}
 	publicCount := 0
 	publicNetReliabilityWeight := float64(0)
 	for _, clientScore := range s {
+		if classified := clientScore.capabilityCopy; !forceMinimum && classified != nil {
+			if facet, ok := clientScoreCapabilityFacetOf(classified.capabilityClass()); ok {
+				if classified.PassesMinimums[rankMode] {
+					nativeCapabilityFacetClientScores[facet] = append(nativeCapabilityFacetClientScores[facet], classified)
+				}
+				if classified.PassesMinimums[rankMode] || classified.Online {
+					capabilityFacetClientScores[facet] = append(capabilityFacetClientScores[facet], classified)
+				}
+			}
+		}
 		if !forceMinimum && clientScore.PassesMinimums[rankMode] {
 			facet := clientScore.ipFamilyFacet()
 			nativeFacetClientScores[facet] = append(nativeFacetClientScores[facet], clientScore)
@@ -351,6 +365,14 @@ func exportClientScores(forceMinimum bool, rankMode RankMode, s map[server.Id]*C
 	// every facet, an empty one included: see the key layout comment
 	for _, facet := range ipFamilyFacets {
 		payload.facets[facet] = splitClientScoreSamplesModernFirst(facetClientScores[facet])
+	}
+	if !forceMinimum {
+		payload.capabilityFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
+		payload.nativeCapabilityFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
+		for _, facet := range clientScoreCapabilityFacets {
+			payload.capabilityFacets[facet] = splitClientScoreSamplesModernFirst(capabilityFacetClientScores[facet])
+			payload.nativeCapabilityFacets[facet] = splitClientScoreSamplesModernFirst(nativeCapabilityFacetClientScores[facet])
+		}
 	}
 
 	payload.filterBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, filter)

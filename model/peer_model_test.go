@@ -3,7 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
@@ -1863,7 +1863,7 @@ func TestNetworkPeerChurn(t *testing.T) {
 					select {
 					case <-ctx.Done():
 						return
-					case <-time.After(time.Duration(mathrand.Intn(20)) * time.Millisecond):
+					case <-time.After(time.Duration(mathrand.IntN(20)) * time.Millisecond):
 					}
 					switch op % 4 {
 					case 0:

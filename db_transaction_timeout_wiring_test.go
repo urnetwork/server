@@ -146,8 +146,6 @@ func TestLongOperationsLiftTransactionTimeout(t *testing.T) {
 		{directory: ".", function: "ApplySchemaFix", identifiers: []string{"SetTransactionTimeoutInTx"}},
 		// the subnet epoch census, one statement in one snapshot
 		{directory: "model", function: "getStEpochProviderUsageWithCensus", identifiers: []string{"MaintenanceDb", "WithoutTransactionTimeout"}},
-		// the weekly payment plan
-		{directory: "model", function: "configurePaymentPlanTransaction", identifiers: []string{"SetTransactionTimeoutInTx"}},
 		// the reliability transactions over every client
 		{directory: "model", function: "UpdateClientReliabilityScores", identifiers: []string{"boundReliabilityTransactionInTx"}},
 		{directory: "model", function: "UpdateNetworkReliabilityWindow", identifiers: []string{"boundReliabilityTransactionInTx"}},

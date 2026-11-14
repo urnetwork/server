@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
@@ -57,12 +58,24 @@ func newCompetitionPreparedIntakeCompletionFixture(t *testing.T, tb testing.TB, 
 	if err != nil {
 		tb.Fatal(err)
 	}
+	return finishCompetitionPreparedCompletionFixture(tb, intake, round, distributed, false)
+}
+
+// Announced and ASAP fixtures share only the guarded baseline/host bootstrap.
+// Their distinct source activation, opening and admission paths stay explicit.
+func finishCompetitionPreparedCompletionFixture(tb testing.TB, intake *competitionIntakeFirstDatabaseFixture, round *roundRecord, distributed, historical bool) *competitionDistributedPgFixture {
+	tb.Helper()
+	ctx := tb.Context()
 	frozen, err := settingsForCompetitionApiRound(ctx, intake.settings, intake.store, round)
 	if err != nil {
 		tb.Fatal(err)
 	}
 	frozen.automationLease, frozen.automationRoundId = &intake.lease, round.RoundId
-	frozen.roundBaselinePreparation = &roundBaselinePreparationProfile{Settings: defaultRoundBaselinePreparationSettings()}
+	frozen.roundBaselinePreparation = &roundBaselinePreparationProfile{
+		Config: roundBaselinePreparationConfig{Schema: 1, Kind: "sim-latency-round-baseline-preparation-config",
+			G2VolumePolicy: frozen.EvaluationPolicy.G2VolumePolicy, WorkCoveragePolicy: frozen.EvaluationPolicy.WorkCoveragePolicy.Clone()},
+		Settings: defaultRoundBaselinePreparationSettings(),
+	}
 	preparation, err := intake.store.ReserveRoundBaseline(ctx, frozen, "synthetic-prepared-coordinator", testWorkerImageDigest())
 	if err != nil || preparation == nil {
 		tb.Fatal("genuine reserved queued source did not own baseline preparation", err)
@@ -72,13 +85,25 @@ func newCompetitionPreparedIntakeCompletionFixture(t *testing.T, tb testing.TB, 
 		tb.Fatal("genuine reserved queued source could not publish its control", err)
 	}
 	clock := &competitionLeaseRetryClock{now: intake.now}
-	fixture := &competitionDistributedPgFixture{settings: frozen, store: intake.store, clock: clock, round: round,
+	fixture := &competitionDistributedPgFixture{settings: frozen, startupSettings: intake.settings, store: intake.store, clock: clock, round: round,
 		sourceJob: preparation.SourceJob, preparation: preparation, prepared: prepared}
 	fixture.store.now = clock.Now
 	if distributed {
+		// SQL independently bounds actual qualification publication. Synthetic
+		// original candidate history must not backdate that live SQL authority.
+		originalNow := clock.Now()
+		if historical {
+			var currentNow time.Time
+			server.Db(ctx, func(conn server.PgConn) {
+				currentNow, err = competitionIntakeFirstDatabaseTime(ctx, conn)
+				server.Raise(err)
+			})
+			clock.Advance(currentNow.Sub(clock.Now()))
+		}
 		for _, host := range frozen.DistributedEvaluationPolicy.Hosts {
 			fixture.qualifyHost(tb, host)
 		}
+		clock.Advance(originalNow.Sub(clock.Now()))
 	} else {
 		check := passingHostCheck(frozen)
 		check.RebaselinePassed, check.RebaselineRoundId = true, &round.RoundId

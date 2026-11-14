@@ -163,7 +163,8 @@ type CryptoPaymentStatusResult struct {
 	NetworkName string `json:"network_name"`
 	// unknown | pending | seen | confirming | paid | expired | review
 	Status string `json:"status"`
-	// with review: underpaid | late_underpaid | extra | orphaned | voided
+	// with review: underpaid | late_underpaid | extra | orphaned | voided |
+	// unlinked
 	ReviewReason string `json:"review_reason"`
 	// exact decimal strings in coin units, and the same in atomic units
 	Amount          string `json:"amount"`
@@ -388,6 +389,8 @@ func cryptoItemDescription(item string) string {
 		return "URnetwork 1 TiB data"
 	case StripeItemData10Tib:
 		return "URnetwork 10 TiB data"
+	case giftCryptoItem:
+		return "URnetwork Pro gift codes"
 	}
 	return "URnetwork"
 }
@@ -721,6 +724,9 @@ type cryptoIntentRequest struct {
 	offerApplied bool
 	// open-invoice reuse applies (account and network delivery)
 	reuse bool
+	// the most this invoice may be: 0 is the quote's max_invoice_usd. A gift
+	// order's is gift.crypto_max_invoice_usd (gift_crypto_controller.go).
+	maxInvoiceUsd float64
 }
 
 // CreateCryptoPaymentIntent answers POST /pay/crypto/intent: an invoice for
@@ -912,7 +918,11 @@ func cryptoStartIntent(
 ) *CryptoPaymentIntentResult {
 	ctx := clientSession.Ctx
 	asset := request.asset
-	if config.Quote.MaxInvoiceUsd < request.priceUsd {
+	maxInvoiceUsd := config.Quote.MaxInvoiceUsd
+	if 0 < request.maxInvoiceUsd {
+		maxInvoiceUsd = request.maxInvoiceUsd
+	}
+	if maxInvoiceUsd < request.priceUsd {
 		glog.Errorf("[cryptopay]refusing to invoice %s with %s: the price is over the per-invoice cap\n", request.item, asset)
 		cryptoPayQuoteResults.WithLabelValues(asset, cryptoQuoteRefusedOverMax).Inc()
 		return cryptoIntentError(PurchaseErrorCodeItemUnavailable, "This purchase is not available with this coin.")
@@ -1337,7 +1347,9 @@ func cryptoStatusResult(
 			result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeUnderpaid, Message: "The payment is short of the quote. Contact support."}
 		}
 	case CryptoPaymentStatusPaid:
-		if intent.Delivery == model.CryptoDeliveryCode && intent.BalanceCodeId != nil {
+		// a gift order's codes are on its cards (GET /pay/gift/cards.pdf); its
+		// invoice's grant is only the first of them
+		if intent.Delivery == model.CryptoDeliveryCode && intent.BalanceCodeId != nil && !cryptoGiftInvoice(intent) {
 			result.BalanceCode = model.GetBalanceCodeSecretInConn(nil, ctx, *intent.BalanceCodeId)
 		}
 	}
@@ -1558,6 +1570,18 @@ var cryptoHeldReviewReasons = []string{
 	model.CryptoReviewReasonAmountUnmatched,
 	model.CryptoReviewReasonVoided,
 	model.CryptoReviewReasonExtra,
+	// a payment to an invoice the retention unlink passed, which no longer
+	// knows its network
+	model.CryptoReviewReasonUnlinked,
+}
+
+// Whether an invoice's credit has nowhere to go: one delivered to a network,
+// past the retention unlink, which forgot the network
+// (RunCryptoPaymentUnlink), and a gift order's, whose order the unlink forgot
+// in the same way. A code invoice still delivers: its buyer reads the code
+// with the status token.
+func cryptoIntentUndeliverable(intent *model.CryptoPaymentIntent) bool {
+	return intent.UnlinkedAt != nil && (intent.Delivery != model.CryptoDeliveryCode || cryptoGiftInvoice(intent))
 }
 
 // cryptoBuyerReviewReason is the review reason a buyer is shown: either
@@ -1576,8 +1600,8 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 	return receipt.State == model.CryptoReceiptStateReview && slices.Contains(cryptoHeldReviewReasons, receipt.ReviewReason)
 }
 
-// cryptoEvaluateIntent judges an invoice and its receipts at now. Pure: the
-// status endpoint and the scanner share it, and the tests drive it directly.
+// Judges an invoice and its receipts at now. Pure: the status endpoint and
+// the scanner share it, and the tests drive it directly.
 //
 // "The quote" below ends at expires_at plus the coin's confirmation grace
 // (policy.onTimeUntil): Bitcoin's 3 hours, since its payments are first seen
@@ -1595,7 +1619,33 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 //	                          when anything arrived on time, late_underpaid otherwise)
 //	before the quote ends,    seen, with what remains to be sent
 //	short
+//	past the retention        what the rows above would credit is review/unlinked
+//	unlink, to a network      instead: the unlink forgot the network, so the credit
+//	                          has nowhere to go (a code invoice still credits)
 func cryptoEvaluateIntent(
+	intent *model.CryptoPaymentIntent,
+	receipts []*model.CryptoPaymentReceipt,
+	policy *cryptoIntentPolicy,
+	now time.Time,
+) *cryptoIntentView {
+	view := cryptoJudgeIntent(intent, receipts, policy, now)
+	if view.Action == cryptoIntentActionCredit && cryptoIntentUndeliverable(intent) {
+		view.Status = CryptoPaymentStatusReview
+		view.ReviewReason = model.CryptoReviewReasonUnlinked
+		view.RemainingAtomic = 0
+		view.Action = cryptoIntentActionReview
+		view.ActionReason = model.CryptoReviewReasonUnlinked
+		view.ReviewReceipts = view.CreditReceipts
+		view.CreditReceipts = nil
+		view.CreditUsd = 0
+		view.ReceiptUsdValue = map[model.CryptoPaymentReceiptKey]model.NanoCents{}
+	}
+	return view
+}
+
+// The table of cryptoEvaluateIntent but its last row: what the rules make of
+// the invoice wherever its credit would go.
+func cryptoJudgeIntent(
 	intent *model.CryptoPaymentIntent,
 	receipts []*model.CryptoPaymentReceipt,
 	policy *cryptoIntentPolicy,

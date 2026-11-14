@@ -1,3 +1,4 @@
+// Exercise release-gate ownership and isolation through the real shell helper.
 package server
 
 import (
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -221,6 +223,262 @@ release_gate_service_fixture() { shift 2; "$FIXTURE_GENERATOR" "$@"; }
 		"PRIVATE_PROBE": self.probe, "WARP_ENV": "local",
 	})
 	return command.CombinedOutput()
+}
+
+// Copy only the real generator's public inputs, reproducing a 0700 checkout
+// without widening or modifying the repository reached by the normal alias.
+func (self *releaseGateServicesFixture) privatePostgresInitdb(t *testing.T) string {
+	t.Helper()
+	server := filepath.Join(self.workspace, "server")
+	original, err := filepath.EvalSymlinks(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(server); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{
+		"local/postgres/initdb/01-init-app-db.sh",
+		"local/testdata/config/local/db.yml",
+		"local/testdata/config/local/redis.yml",
+		"local/suite-resource-manifest.txt",
+		"test-env.sh",
+	} {
+		data, err := os.ReadFile(filepath.Join(original, filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(server, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mode := os.FileMode(0o600)
+		if strings.HasSuffix(relative, ".sh") {
+			mode = 0o700
+		}
+		if err := os.WriteFile(target, data, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(server, "local", "postgres", "initdb")
+}
+
+// An inherited directory descriptor models a bind mount: its private host
+// ancestors remain inaccessible, while the mounted directory must be readable
+// by an unprivileged process. Root test runners explicitly drop their identity.
+func releaseGateReadInitdbAsNonroot(t *testing.T, directory string, body string) []byte {
+	t.Helper()
+	file, err := os.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestReleaseGateServicesStagePrivatePostgresInitdb$", "--", `set -euo pipefail
+(( EUID != 0 )) || exit 90
+`+body)
+	command.Dir = "/"
+	command.ExtraFiles = []*os.File{file}
+	command.Env = testCommandEnvironment(map[string]string{releaseGateInitdbReaderChild: "1"})
+	var output, diagnostics bytes.Buffer
+	command.Stdout, command.Stderr = &output, &diagnostics
+	if err := command.Run(); err != nil {
+		t.Fatalf("nonroot initdb traversal: %v\n%s\nchild setup diagnostics:\n%s", err, output.Bytes(), diagnostics.Bytes())
+	}
+	return output.Bytes()
+}
+
+// The complete service entry point must mount a readable copy from a private
+// checkout under umask 077, without publishing its vault or changing sources.
+func TestReleaseGateServicesStagePrivatePostgresInitdb(t *testing.T) {
+	if os.Getenv(releaseGateInitdbReaderChild) == "1" {
+		releaseGateExecInitdbReader(t)
+		return
+	}
+	self := newReleaseGateServicesFixture(t)
+	source := self.privatePostgresInitdb(t)
+	script, err := os.ReadFile(filepath.Join(source, "01-init-app-db.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(source, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sql := []byte("SELECT 'public init fixture';\n-- byte preservation: \x00\xff\n")
+	if err := os.WriteFile(filepath.Join(source, "nested", "02-data.sql"), sql, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := self.run(t, `
+umask 077
+trap 'release_gate_services_cleanup' EXIT
+release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"
+[[ "$(umask)" == 0077 ]] || exit 1
+id="$(< "$release_gate_service_root/postgres.cid")"
+[[ "$(< "$FAKE_STATE/$id.args")" == *"type=bind,src=$release_gate_service_root/postgres-initdb,dst=/docker-entrypoint-initdb.d,readonly"* ]] || exit 1
+[[ "$(< "$FAKE_STATE/$id.args")" != *"src=$FIXTURE_WORKSPACE/server/local/postgres/initdb,"* ]] || exit 1
+[[ "$(stat -c '%a' "$release_gate_service_root")" == 700 ]] || exit 1
+[[ "$(stat -c '%a' "$FIXTURE_WORKSPACE/server")" == 700 ]] || exit 1
+[[ "$(stat -c '%a' "$FIXTURE_WORKSPACE/server/local/postgres/initdb")" == 700 ]] || exit 1
+[[ "$(stat -c '%a' "$FIXTURE_WORKSPACE/server/local/postgres/initdb/01-init-app-db.sh")" == 700 ]] || exit 1
+[[ "$(stat -c '%a' "$FIXTURE_WORKSPACE/vault")" == 700 ]] || exit 1
+[[ "$(stat -c '%a' "$FIXTURE_WORKSPACE/vault/local/pg_maintenance.yml")" == 600 ]] || exit 1
+`)
+	if err != nil {
+		t.Fatalf("private checkout service setup: %v\n%s", err, output)
+	}
+	staged := filepath.Join(self.root, "services", "postgres-initdb")
+	for name, mode := range map[string]os.FileMode{
+		"": 0o755, "nested": 0o755, "01-init-app-db.sh": 0o755, "nested/02-data.sql": 0o644,
+	} {
+		info, err := os.Lstat(filepath.Join(staged, filepath.FromSlash(name)))
+		if err != nil || info.Mode().Perm() != mode || info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("staged %q mode, want %04o: %v %v", name, mode, info, err)
+		}
+	}
+	read := releaseGateReadInitdbAsNonroot(t, staged, "cat 01-init-app-db.sh nested/02-data.sql\n")
+	if !bytes.Equal(read, append(append([]byte{}, script...), sql...)) {
+		t.Fatal("nonroot mounted traversal changed public initdb bytes")
+	}
+	entries, err := os.ReadDir(staged)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("public initdb asset census: %v %v", entries, err)
+	}
+	if manifests, err := filepath.Glob(filepath.Join(self.root, "services", "postgres-initdb-list.*")); err != nil || len(manifests) != 0 {
+		t.Fatalf("private staging manifests survived setup: %v %v", manifests, err)
+	}
+}
+
+// The entrypoint sources non-executable shell files; chmodding every shell
+// asset executable silently changes that contract even when reads succeed.
+func TestReleaseGateServicesPreservePostgresInitdbShellModes(t *testing.T) {
+	self := newReleaseGateServicesFixture(t)
+	source := self.privatePostgresInitdb(t)
+	for name, data := range map[string]string{
+		"01-init-app-db.sh": "#!/usr/bin/env bash\nprintf 'executed\\n'\n",
+		"02-source.sh":      "initdb_source_marker=present\nprintf 'sourced\\n'\n",
+		"03-check.sh":       "#!/usr/bin/env bash\n[[ -z ${initdb_source_marker:-} ]] || exit 91\nprintf 'child\\n'\n",
+	} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(data), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(source, "02-source.sh"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := self.run(t, `
+umask 077
+trap 'release_gate_services_cleanup' EXIT
+release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"
+[[ "$(stat -c '%a' "$release_gate_service_root/postgres-initdb/02-source.sh")" == 644 ]] || exit 1
+[[ "$(stat -c '%a' "$FIXTURE_WORKSPACE/server/local/postgres/initdb/02-source.sh")" == 600 ]] || exit 1
+`)
+	if err != nil {
+		t.Fatalf("shell-mode service setup: %v\n%s", err, output)
+	}
+	output = releaseGateReadInitdbAsNonroot(t, filepath.Join(self.root, "services", "postgres-initdb"), `
+for asset in ./*.sh; do
+  if [[ -x "$asset" ]]; then "$asset"; else source "$asset"; fi
+done
+[[ "$initdb_source_marker" == present ]] || exit 1
+`)
+	if string(output) != "executed\nsourced\nchild\n" {
+		t.Fatalf("entrypoint execution/source behavior changed: %q", output)
+	}
+}
+
+// Neither aliases nor hard links may publish files outside the public initdb
+// tree; refusal precedes container creation and leaves private inputs intact.
+func TestReleaseGateServicesRejectLinkedPostgresInitdb(t *testing.T) {
+	for _, kind := range []string{"root", "ancestor", "file", "directory", "hardlink"} {
+		self := newReleaseGateServicesFixture(t)
+		source := self.privatePostgresInitdb(t)
+		secret := filepath.Join(self.workspace, "vault", "local", "private-init.sql")
+		const privateData = "synthetic private fixture, never an initdb asset\n"
+		if err := os.WriteFile(secret, []byte(privateData), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		switch kind {
+		case "root", "ancestor":
+			path := source
+			if kind == "ancestor" {
+				path = filepath.Dir(path)
+			}
+			physical := filepath.Join(self.workspace, "aliased-initdb-input")
+			if err := os.Rename(path, physical); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(physical, path); err != nil {
+				t.Fatal(err)
+			}
+		case "file":
+			if err := os.Symlink(secret, filepath.Join(source, "02-external.sql")); err != nil {
+				t.Fatal(err)
+			}
+		case "directory":
+			if err := os.Symlink(filepath.Dir(secret), filepath.Join(source, "nested")); err != nil {
+				t.Fatal(err)
+			}
+		case "hardlink":
+			if err := os.Link(secret, filepath.Join(source, "02-external.sql")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		output, err := self.run(t, `
+if release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"; then exit 90; fi
+[[ ! -e "$release_gate_service_root/postgres-initdb" && ! -e "$release_gate_service_root/postgres.cid" ]] || exit 1
+release_gate_services_cleanup
+`)
+		if err != nil {
+			t.Fatalf("%s initdb link refusal: %v\n%s", kind, err, output)
+		}
+		data, err := os.ReadFile(secret)
+		info, statErr := os.Stat(secret)
+		if err != nil || string(data) != privateData || statErr != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s refusal changed private input: %q %v %v %v", kind, data, err, info, statErr)
+		}
+		if files, err := filepath.Glob(filepath.Join(self.state, "*.args")); err != nil || len(files) != 0 {
+			t.Fatalf("%s initdb link reached container creation: %v %v", kind, files, err)
+		}
+	}
+}
+
+// Known initdb extensions are the only publishable files, and a fifo with a
+// recognized extension must be refused without blocking on a read.
+func TestReleaseGateServicesRejectNonInitdbAssets(t *testing.T) {
+	for _, kind := range []string{"credentials", "fifo", "empty"} {
+		self := newReleaseGateServicesFixture(t)
+		source := self.privatePostgresInitdb(t)
+		switch kind {
+		case "credentials":
+			if err := os.WriteFile(filepath.Join(source, "credentials.yml"), []byte("private-fixture: true\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		case "fifo":
+			if err := syscall.Mkfifo(filepath.Join(source, "02-pipe.sql"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		case "empty":
+			if err := os.Remove(filepath.Join(source, "01-init-app-db.sh")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		output, err := self.run(t, `
+if release_gate_services_start "$GATE_ROOT" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"; then exit 90; fi
+[[ ! -e "$release_gate_service_root/postgres-initdb" && ! -e "$release_gate_service_root/postgres.cid" ]] || exit 1
+release_gate_services_cleanup
+`)
+		if err != nil {
+			t.Fatalf("%s non-initdb refusal: %v\n%s", kind, err, output)
+		}
+		if files, err := filepath.Glob(filepath.Join(self.state, "*.args")); err != nil || len(files) != 0 {
+			t.Fatalf("%s non-initdb asset reached container creation: %v %v", kind, files, err)
+		}
+	}
 }
 
 // Tool selection must preserve the host's existing command namespace.
@@ -935,5 +1193,65 @@ func TestTestEnvironmentPrivatePortableRejectsNoncanonicalPort(t *testing.T) {
 	for _, port := range []string{"0", "65536", "035431", "-1"} {
 		t.Setenv("WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY", fmt.Sprintf("127.0.0.1:%s", port))
 		assertPrivatePortableRefusedBeforeProbe(t, "requires an explicit loopback host and port")
+	}
+}
+
+const releaseGateInitdbReaderChild = "URNETWORK_RELEASE_GATE_INITDB_READER_CHILD"
+
+// The same-binary child validates TestMain before any identity change. Only
+// this child drops privileges and changes cwd; the parent retains both.
+func releaseGateExecInitdbReader(t *testing.T) {
+	t.Helper()
+	separator := 0
+	for separator < len(os.Args) && os.Args[separator] != "--" {
+		separator++
+	}
+	if separator+2 != len(os.Args) {
+		t.Fatal("initdb reader has no exact script argument")
+	}
+	directory := os.NewFile(3, "inherited-initdb-directory")
+	if directory == nil {
+		t.Fatal("initdb reader has no directory descriptor")
+	}
+	defer directory.Close()
+	info, err := directory.Stat()
+	if err != nil || !info.IsDir() {
+		t.Fatal("initdb reader descriptor is not a directory", err)
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() == 0 {
+		if err := syscall.Setgroups([]int{65534}); err != nil {
+			t.Fatal("drop initdb reader groups", err)
+		}
+		if err := syscall.Setgid(65534); err != nil {
+			t.Fatal("drop initdb reader gid", err)
+		}
+		if err := syscall.Setuid(65534); err != nil {
+			t.Fatal("drop initdb reader uid", err)
+		}
+	}
+	if os.Geteuid() == 0 {
+		t.Fatal("initdb reader retained root identity")
+	}
+	if err := directory.Chdir(); err != nil {
+		t.Fatal("enter inherited initdb directory as nonroot", err)
+	}
+	current, err := os.Stat(".")
+	if err != nil || !os.SameFile(info, current) {
+		t.Fatal("initdb reader entered another directory", err)
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Go setup diagnostics use a separate pipe; Bash keeps the original
+	// combined stdout/stderr byte oracle from this boundary onward.
+	if err := unix.Dup2(int(os.Stdout.Fd()), int(os.Stderr.Fd())); err != nil {
+		t.Fatal("join initdb shell output", err)
+	}
+	if err := syscall.Exec(bash, []string{"bash", "-c", os.Args[separator+1]}, os.Environ()); err != nil {
+		t.Fatal("exec nonroot initdb reader", err)
 	}
 }

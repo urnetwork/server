@@ -123,6 +123,13 @@ type NetworkCreateArgs struct {
 	// as the body of its HTTP status (401), instead of the plain text message
 	// older clients expect; the status stays a refusal either way
 	ResultErrors bool `json:"result_errors,omitempty"`
+	// TimeZone is the device's or browser's IANA zone and Locales its
+	// languages, most preferred first (BCP 47): the campaign emails are
+	// placed in the reader's day and written in their language from them
+	// (controller/mail_context.go). Optional; kept only as the network's
+	// latest values, never with the request.
+	TimeZone string   `json:"time_zone,omitempty"`
+	Locales  []string `json:"locales,omitempty"`
 }
 
 type NetworkCreateResult struct {
@@ -136,6 +143,10 @@ type NetworkCreateResult struct {
 	// identities can authenticate immediately without causing verification or
 	// welcome-message sends from production infrastructure.
 	SuppressAccountMessages bool `json:"-"`
+	// GiftRedemption is server-internal: the Pro gift the create redeemed
+	// (`balance_code`), which the caller finishes after linking the sign-up's
+	// own referral code (FinishGiftRedemption).
+	GiftRedemption *GiftRedemption `json:"-"`
 }
 
 type NetworkCreateResultNetwork struct {
@@ -270,7 +281,8 @@ func NetworkCreate(
 			return result, nil
 		}
 
-		// rate limit: max 5 seedphrase accounts per IP per day
+		// the source's budgets: 5 seedphrase accounts per address bucket per
+		// day, and its /24 or /48 network's (network_create_source_limit.go)
 		if err := CheckNetworkCreateRateLimit(clientSession.Ctx, clientSession); err != nil {
 			return nil, err
 		}
@@ -294,7 +306,8 @@ func NetworkCreate(
 		if resultNetworkCreate.Created {
 			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, clientSession)
 
-			isPro := false
+			// Pro only with a gift code redeemed at sign-up
+			isPro := resultNetworkCreate.IsPro
 			byJwt := session.NewByJwt(
 				resultNetworkCreate.NetworkId,
 				resultNetworkCreate.UserId,
@@ -315,6 +328,7 @@ func NetworkCreate(
 					NetworkId:   resultNetworkCreate.NetworkId,
 					IsPro:       resultNetworkCreate.IsPro,
 				},
+				GiftRedemption: resultNetworkCreate.giftRedemption,
 			}
 			return result, nil
 		} else {
@@ -461,6 +475,7 @@ func NetworkCreate(
 					},
 					UserAuth:                userAuth,
 					SuppressAccountMessages: testAuthPolicy.SuppressAccountMessages,
+					GiftRedemption:          resultNetworkCreate.giftRedemption,
 				}, nil
 			}
 
@@ -473,6 +488,9 @@ func NetworkCreate(
 					NetworkId:   resultNetworkCreate.NetworkId,
 					IsPro:       resultNetworkCreate.IsPro,
 				},
+				// the network and its gift are committed; only sign-in waits
+				// on the verification
+				GiftRedemption: resultNetworkCreate.giftRedemption,
 			}
 			return result, nil
 		} else {
@@ -535,7 +553,8 @@ func NetworkCreate(
 						NetworkId:   resultNetworkCreate.NetworkId,
 						IsPro:       resultNetworkCreate.IsPro,
 					},
-					UserAuth: &authJwt.UserAuth,
+					UserAuth:       &authJwt.UserAuth,
+					GiftRedemption: resultNetworkCreate.giftRedemption,
 				}
 				return result, nil
 			} else {
@@ -640,16 +659,9 @@ func NetworkCreate(
 
 			SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
 
-			/**
-			 * Create new payout wallet
-			 */
-
+			// the sign-in wallet of a Solana or Polygon sign-up is the
+			// network's first wallet
 			if networkCreate.WalletAuth.Blockchain == SOL.String() || networkCreate.WalletAuth.Blockchain == MATIC.String() {
-				/**
-				 * since we only support payouts on solana and polygon for now
-				 * only create payout wallets for those blockchains
-				 */
-
 				walletId := CreateAccountWalletExternal(
 					clientSession,
 					&CreateAccountWalletExternalArgs{
@@ -659,21 +671,11 @@ func NetworkCreate(
 						DefaultTokenType: "USDC",
 					},
 				)
-
-				/**
-				 * Set the payout wallet for the network
-				 */
-				if walletId != nil {
-					err := SetPayoutWallet(
-						clientSession.Ctx,
-						networkCreateResult.NetworkId,
-						*walletId,
-					)
-					if err != nil {
-						glog.Errorf("[net]could not set payout wallet for network %s: %s\n", networkCreateResult.NetworkId, err)
-					}
-				} else {
-					glog.Errorf("[net]could not create payout wallet for network %s\n", networkCreateResult.NetworkId)
+				// USDC provider payouts ended (owner decisions 2026-11-12 and
+				// 2026-11-13), so the wallet is recorded and never becomes
+				// the payout wallet
+				if walletId == nil {
+					glog.Errorf("[net]could not create the sign-in wallet for network %s\n", networkCreateResult.NetworkId)
 				}
 			}
 
@@ -699,6 +701,7 @@ func NetworkCreate(
 					NetworkId:   networkCreateResult.NetworkId,
 					IsPro:       networkCreateResult.IsPro,
 				},
+				GiftRedemption: networkCreateResult.giftRedemption,
 			}
 			return result, nil
 		} else {
@@ -729,6 +732,8 @@ type networkCreateResult struct {
 	UserId      server.Id
 	Seedphrase  string
 	IsPro       bool
+	// a Pro gift the create redeemed (networkCreateRedeemBalanceCodeInTx)
+	giftRedemption *GiftRedemption
 	// Created=false alone also covers internal helper failures; only a
 	// completed existing-account/name check establishes a client refusal.
 	refusalStatus  int
@@ -754,6 +759,7 @@ func networkCreateWalletAuth(
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
+	var giftRedemption *GiftRedemption
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		// a rerun starts over
@@ -761,6 +767,7 @@ func networkCreateWalletAuth(
 		refusalStatus = 0
 		refusalMessage = ""
 		isPro = false
+		giftRedemption = nil
 		var userId *server.Id
 
 		result, err := tx.Query(
@@ -867,7 +874,7 @@ func networkCreateWalletAuth(
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
 
-		isPro = networkCreateRedeemBalanceCodeInTx(
+		isPro, giftRedemption = networkCreateRedeemBalanceCodeInTx(
 			networkCreate,
 			createdNetworkId,
 			ctx,
@@ -883,6 +890,7 @@ func networkCreateWalletAuth(
 		NetworkName:    networkCreate.NetworkName,
 		UserId:         createdUserId,
 		IsPro:          isPro,
+		giftRedemption: giftRedemption,
 		refusalStatus:  refusalStatus,
 		refusalMessage: refusalMessage,
 	}, nil
@@ -908,6 +916,7 @@ func networkCreateAuthJwt(
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
+	var giftRedemption *GiftRedemption
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		// a rerun starts over
@@ -915,6 +924,7 @@ func networkCreateAuthJwt(
 		refusalStatus = 0
 		refusalMessage = ""
 		isPro = false
+		giftRedemption = nil
 		var userId *server.Id
 
 		result, err := tx.Query(
@@ -1006,7 +1016,7 @@ func networkCreateAuthJwt(
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
 
-		isPro = networkCreateRedeemBalanceCodeInTx(
+		isPro, giftRedemption = networkCreateRedeemBalanceCodeInTx(
 			networkCreate,
 			createdNetworkId,
 			ctx,
@@ -1022,6 +1032,7 @@ func networkCreateAuthJwt(
 		NetworkName:    networkCreate.NetworkName,
 		UserId:         createdUserId,
 		IsPro:          isPro,
+		giftRedemption: giftRedemption,
 		refusalStatus:  refusalStatus,
 		refusalMessage: refusalMessage,
 	}
@@ -1047,6 +1058,7 @@ func networkCreateUserAuth(
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
+	var giftRedemption *GiftRedemption
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		// a rerun starts over
@@ -1054,6 +1066,7 @@ func networkCreateUserAuth(
 		refusalStatus = 0
 		refusalMessage = ""
 		isPro = false
+		giftRedemption = nil
 		var result server.PgResult
 		var err error
 
@@ -1148,7 +1161,7 @@ func networkCreateUserAuth(
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
 
-		isPro = networkCreateRedeemBalanceCodeInTx(
+		isPro, giftRedemption = networkCreateRedeemBalanceCodeInTx(
 			networkCreate,
 			createdNetworkId,
 			ctx,
@@ -1164,6 +1177,7 @@ func networkCreateUserAuth(
 		NetworkName:    networkCreate.NetworkName,
 		UserId:         createdUserId,
 		IsPro:          isPro,
+		giftRedemption: giftRedemption,
 		refusalStatus:  refusalStatus,
 		refusalMessage: refusalMessage,
 	}
@@ -1183,8 +1197,12 @@ func networkCreateSeedphrase(
 	var createdUserId server.Id
 	var seedphrase string
 	isPro := false
+	var giftRedemption *GiftRedemption
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		isPro = false
+		giftRedemption = nil
 		createdUserId = server.NewId()
 		createdNetworkId = server.NewId()
 
@@ -1215,7 +1233,7 @@ func networkCreateSeedphrase(
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
 
-		isPro = networkCreateRedeemBalanceCodeInTx(
+		isPro, giftRedemption = networkCreateRedeemBalanceCodeInTx(
 			networkCreate, createdNetworkId, ctx, tx,
 		)
 
@@ -1229,56 +1247,108 @@ func networkCreateSeedphrase(
 		UserId:      createdUserId,
 		Seedphrase:  seedphrase,
 		IsPro:       isPro,
+		// a gift redeemed at sign-up, for the caller once this commits
+		giftRedemption: giftRedemption,
 	}
 }
 
 /**
  * we use this in all flavors of network create to potentially redeem balance code
  */
+// isPro is true only for a Pro gift code, whose year starts now on a new
+// network: a data code adds data only, so it never makes the network Pro (nor
+// its token's pro claim). An unusable code leaves the network created without
+// it, as it always did. A redeemed gift is returned for the caller to finish
+// after the create commits (FinishGiftRedemption).
 func networkCreateRedeemBalanceCodeInTx(
 	networkCreate *NetworkCreateArgs,
 	createdNetworkId server.Id,
 	ctx context.Context,
 	tx server.PgTx,
-) bool {
-	isPro := false
+) (isPro bool, giftRedemption *GiftRedemption) {
 	if networkCreate.BalanceCode != nil {
 		balanceCode := &RedeemBalanceCodeArgs{
 			Secret:    *networkCreate.BalanceCode,
 			NetworkId: createdNetworkId,
 		}
 
-		// this will add transfer balance and mark the user as paid if successful
+		// a data code adds its data balance; a gift code adds its year of Pro
 		redeemBalanceCode, err := RedeemBalanceCodeInTx(balanceCode, ctx, tx)
 
-		if err == nil && redeemBalanceCode.Error == nil {
-			// successfully redeemed balance code
-			isPro = true
+		if err == nil && redeemBalanceCode.Error == nil && redeemBalanceCode.gift != nil {
+			giftRedemption = redeemBalanceCode.gift
+			isPro = !giftRedemption.Queued
 		}
 
 	}
-	return isPro
+	return
 }
 
-func auditNetworkCreate(
+// The sign-up request as the network-create audit stores it, under
+// `network_create` in audit_network_event.event_details: an allowlist of the
+// request fields that abuse correlation reads, copied one by one. A field added
+// to NetworkCreateArgs is not stored until it is added here, so a new credential
+// cannot reach the audit by default. The request's credentials are never
+// stored: the password, the sign-in token (`auth_jwt`), the balance code, and
+// the wallet's signature and signed message. The json names are the request's,
+// so these records read like the rows written before the allowlist, which held
+// the whole request until `bringyourctl db scrub-network-create-secrets`
+// removed the credentials from them.
+type auditNetworkCreateRequest struct {
+	UserName string `json:"user_name"`
+	// the email or phone number of a password sign-up, as the request sent it
+	UserAuth *string `json:"user_auth,omitempty"`
+	// the sign-in provider (apple or google) of a sign-in sign-up
+	AuthJwtType      *string `json:"auth_jwt_type,omitempty"`
+	NetworkName      string  `json:"network_name"`
+	Terms            bool    `json:"terms"`
+	VerifyUseNumeric bool    `json:"verify_use_numeric"`
+	ReferralCode     *string `json:"referral_code,omitempty"`
+	ProductUpdates   *bool   `json:"product_updates,omitempty"`
+	// the wallet of a wallet sign-up: its address and chain only
+	WalletAuth *auditNetworkCreateWallet `json:"wallet_auth,omitempty"`
+}
+
+// The wallet of a wallet sign-up as the audit stores it.
+type auditNetworkCreateWallet struct {
+	PublicKey  string `json:"wallet_address,omitempty"`
+	Blockchain string `json:"blockchain,omitempty"`
+}
+
+// The event details of a created network. The client address is the peppered
+// hash (server.ClientIpHash) and the port, never the raw ip:port: the hash
+// keeps the abuse-correlation value (same /29 or /56 bucket, same hash)
+// without holding the address. The rows are kept for
+// AuditNetworkEventExpiration (RemoveOldAuditNetworkEvents), longer than the
+// request, and backups keep them longer still. Rows written before the hash
+// were rewritten by migration_20260807_ScrubTaskAndAuditClientAddresses.
+func auditNetworkCreateDetails(
 	networkCreate NetworkCreateArgs,
-	networkId server.Id,
 	clientSession *session.ClientSession,
-) {
-	// The peppered address hash (server.ClientIpHash), never the raw ip:port.
-	// audit_network_event rows are permanent — there is no reaper — so a raw
-	// address stored here would outlive every retention promise we make. The
-	// hash keeps the abuse-correlation value (same /29 or /56 bucket ⇒ same
-	// hash) without holding the address itself. Rows written before this
-	// change are rewritten by migration_20260807_ScrubTaskAndAuditClientAddresses.
+) string {
 	type Details struct {
-		NetworkCreate     NetworkCreateArgs `json:"network_create"`
-		ClientAddressHash string            `json:"client_address_hash,omitempty"`
-		ClientPort        int               `json:"client_port,omitempty"`
+		NetworkCreate     auditNetworkCreateRequest `json:"network_create"`
+		ClientAddressHash string                    `json:"client_address_hash,omitempty"`
+		ClientPort        int                       `json:"client_port,omitempty"`
 	}
 
 	details := Details{
-		NetworkCreate: networkCreate,
+		NetworkCreate: auditNetworkCreateRequest{
+			UserName:         networkCreate.UserName,
+			UserAuth:         networkCreate.UserAuth,
+			AuthJwtType:      networkCreate.AuthJwtType,
+			NetworkName:      networkCreate.NetworkName,
+			Terms:            networkCreate.Terms,
+			VerifyUseNumeric: networkCreate.VerifyUseNumeric,
+			ReferralCode:     networkCreate.ReferralCode,
+			ProductUpdates:   networkCreate.ProductUpdates,
+		},
+	}
+	if networkCreate.WalletAuth != nil {
+		details.NetworkCreate.WalletAuth = &auditNetworkCreateWallet{
+			PublicKey:  networkCreate.WalletAuth.PublicKey,
+			Blockchain: networkCreate.WalletAuth.Blockchain,
+		}
 	}
 	if clientAddressHash, clientPort, err := clientSession.ClientAddressHashPort(); err == nil {
 		details.ClientAddressHash = hex.EncodeToString(clientAddressHash[:])
@@ -1289,7 +1359,16 @@ func auditNetworkCreate(
 	if err != nil {
 		panic(err)
 	}
-	detailsJsonString := string(detailsJson)
+	return string(detailsJson)
+}
+
+// Records the created network with its sign-up request's allowlisted fields.
+func auditNetworkCreate(
+	networkCreate NetworkCreateArgs,
+	networkId server.Id,
+	clientSession *session.ClientSession,
+) {
+	detailsJsonString := auditNetworkCreateDetails(networkCreate, clientSession)
 
 	auditNetworkEvent := NewAuditNetworkEvent(AuditEventTypeNetworkCreated)
 	auditNetworkEvent.NetworkId = networkId

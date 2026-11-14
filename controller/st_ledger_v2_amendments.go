@@ -131,19 +131,9 @@ type stLedgerV2Amendments struct {
 // none held the amendments are unknown, and the build stops
 // (amendment.ErrUnknown).
 func stLedgerV2ReadAmendments(ctx context.Context, cfg *StConfig) (*stLedgerV2Amendments, error) {
-	if cfg == nil || cfg.Netuid == 0 || cfg.Netuid > 65535 || cfg.NoId == 0 {
-		return nil, errors.New("st ledger v2: the amendments need the deployment's netuid and operator")
-	}
-	// st.yml's configured amendment lines
-	var lines []string
-	if node := &cfg.Amendments; !node.IsZero() {
-		if err := node.Decode(&lines); err != nil {
-			return nil, fmt.Errorf("st.yml %s amendments: %w", cfg.Profile, err)
-		}
-	}
-	fallback, err := amendment.ParseFallback(cfg.ChainId, uint16(cfg.Netuid), lines)
+	fallback, err := stLedgerV2ConfiguredAmendments(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("st.yml %s %w", cfg.Profile, err)
+		return nil, err
 	}
 	pool, err := stExtenderPoolSettings(cfg)
 	if err != nil {
@@ -183,6 +173,61 @@ func stLedgerV2ReadAmendments(ctx context.Context, cfg *StConfig) (*stLedgerV2Am
 	}
 	read.file = file
 	return read, nil
+}
+
+// Parses st.yml's configured amendment lines, the fallback, for the
+// deployment's netuid and operator.
+func stLedgerV2ConfiguredAmendments(cfg *StConfig) (*amendment.Fallback, error) {
+	if cfg == nil || cfg.Netuid == 0 || cfg.Netuid > 65535 || cfg.NoId == 0 {
+		return nil, errors.New("st ledger v2: the amendments need the deployment's netuid and operator")
+	}
+	var lines []string
+	if node := &cfg.Amendments; !node.IsZero() {
+		if err := node.Decode(&lines); err != nil {
+			return nil, fmt.Errorf("st.yml %s amendments: %w", cfg.Profile, err)
+		}
+	}
+	fallback, err := amendment.ParseFallback(cfg.ChainId, uint16(cfg.Netuid), lines)
+	if err != nil {
+		return nil, fmt.Errorf("st.yml %s %w", cfg.Profile, err)
+	}
+	return fallback, nil
+}
+
+// The amendments this server holds, read without fetching the published file:
+// the verified copy the deployment last stored (every read that takes the
+// published file stores it, stLedgerV2ReadAmendments), or the unpublished file
+// of a deployment without a pinned signer, and the configured lines. A pinned
+// deployment with no stored copy holds no file, and a stored copy that no
+// longer parses or verifies is none, as amendment.Source treats it. A failed
+// read or a malformed configured line is an error. It is for decisions that
+// must not wait on the published file; a build reads that file.
+func stLedgerV2HeldAmendments(ctx context.Context, cfg *StConfig) (*amendment.File, *amendment.Fallback, error) {
+	fallback, err := stLedgerV2ConfiguredAmendments(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	signer, pinned := stAmendmentSigner(cfg.ChainId, uint16(cfg.Netuid))
+	if !pinned {
+		file, err := stAmendmentUnpublished(cfg.ChainId, uint16(cfg.Netuid))
+		if err != nil {
+			return nil, nil, err
+		}
+		return file, fallback, nil
+	}
+	raw, err := stAmendmentStorer(cfg).Load(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(raw) == 0 {
+		return nil, fallback, nil
+	}
+	file, err := amendment.ParseVerified(raw, cfg.ChainId, uint16(cfg.Netuid), signer)
+	if err != nil {
+		glog.Errorf("[st]v2 the stored amendments file is not used: %s\n", stScrubEndpoints(err.Error()))
+		return nil, fallback, nil
+	}
+	return file, fallback, nil
 }
 
 // The extender_pool block of st.yml, parsed.

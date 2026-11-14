@@ -458,13 +458,21 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 // A blocked endpoint, or the wait for the transaction, can outlive a grant.
 // Admission rechecks the selected snapshot's time bounds after the endpoint
 // wait; expiry never creates new credit.
-func redisGrantSelectedCurrent(ctx context.Context, tx server.PgTx, ids []server.Id) error {
+func redisGrantSelectedCurrent(ctx context.Context, tx server.PgTx, ids []server.Id, deadline *time.Time) error {
 	var current bool
-	server.Raise(tx.QueryRow(ctx, `SELECT count(*)=$2 FROM transfer_balance
+	var observedAt time.Time
+	if deadline == nil {
+		server.Raise(tx.QueryRow(ctx, `SELECT count(*)=$2 FROM transfer_balance
 		WHERE balance_id=ANY($1) AND active AND start_time<=clock_timestamp() AT TIME ZONE 'UTC'
 		AND clock_timestamp() AT TIME ZONE 'UTC'<end_time`, ids, len(ids)).Scan(&current))
+	} else {
+		server.Raise(tx.QueryRow(ctx, `SELECT count(*)=$2,clock_timestamp() AT TIME ZONE 'UTC' FROM transfer_balance WHERE balance_id=ANY($1) AND active AND start_time<=clock_timestamp() AT TIME ZONE 'UTC' AND clock_timestamp() AT TIME ZONE 'UTC'<end_time`, ids, len(ids)).Scan(&current, &observedAt))
+	}
 	if !current {
 		return errors.New("selected Redis grant expired or changed before contract publication")
+	}
+	if deadline != nil && !observedAt.Before(*deadline) {
+		return ErrProberShardRetired
 	}
 	return nil
 }

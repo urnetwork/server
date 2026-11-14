@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net"
 	"slices"
 	"unicode/utf8"
@@ -137,13 +137,22 @@ type clientScoreExportPayload struct {
 	encodeSample func(int) []byte
 	facets       map[ipFamilyFacet]clientScoreFacetPayload
 	nativeFacets map[ipFamilyFacet]clientScoreFacetPayload
+	// the capability facets of a non-forced mode, union and native
+	// (FP2-PROTOCOL.md §4.4), every one present, an empty one included; nil
+	// for a forced mode, which writes none
+	capabilityFacets       map[ipFamilyFacet]clientScoreFacetPayload
+	nativeCapabilityFacets map[ipFamilyFacet]clientScoreFacetPayload
 }
 
 // Native publication has its own commit boundary; legacy aliases and online
 // union keys remain compatible with readers deployed before this schema.
+// The native capability snapshot (:native_cap_v1, FP2-PROTOCOL.md §4.4)
+// commits apart from today's; nil publishCapability publishes none.
 type clientScoreNativeFanout struct {
-	publish func(server.Id, map[ipFamilyFacet]clientScoreFacetPayload) error
-	alias   func(server.Id) error
+	publish           func(server.Id, map[ipFamilyFacet]clientScoreFacetPayload) error
+	alias             func(server.Id) error
+	publishCapability func(server.Id, map[ipFamilyFacet]clientScoreFacetPayload) error
+	aliasCapability   func(server.Id) error
 }
 
 type clientScoreTargetEncode func(map[server.Id]*ClientScore) clientScoreExportPayload
@@ -310,6 +319,16 @@ func emitClientScoreTargetFanoutWithMetrics(
 					value: payload.facets[facet].countsBytes,
 				})
 			}
+			// every capability facet of a non-forced mode, an empty one
+			// included (FP2-PROTOCOL.md §4.4)
+			if payload.capabilityFacets != nil {
+				for _, facet := range clientScoreCapabilityFacets {
+					sets = append(sets, clientScoreRedisSet{
+						key:   keys.facetCounts(callerId, facet),
+						value: payload.capabilityFacets[facet].countsBytes,
+					})
+				}
+			}
 			for _, set := range sets {
 				if err := emitOwned(callerId, set); err != nil {
 					return err
@@ -333,8 +352,17 @@ func emitClientScoreTargetFanoutWithMetrics(
 		}
 		// Dirty metadata remains visible until every payload write is acknowledged.
 		modernPageChecksums := map[ipFamilyFacet][][sha256.Size]byte{}
-		for _, facet := range ipFamilyFacets {
-			facetPayload := payload.facets[facet]
+		// today's facets, then the capability facets of a non-forced mode,
+		// in one partition document
+		partitionFacets := payload.facets
+		writeFacets := ipFamilyFacets
+		if payload.capabilityFacets != nil {
+			partitionFacets = maps.Clone(payload.facets)
+			maps.Copy(partitionFacets, payload.capabilityFacets)
+			writeFacets = append(slices.Clone(ipFamilyFacets), clientScoreCapabilityFacets...)
+		}
+		for _, facet := range writeFacets {
+			facetPayload := partitionFacets[facet]
 			for sampleIndex := range facetPayload.counts {
 				value := facetPayload.encodeSample(sampleIndex)
 				if sampleIndex < facetPayload.modernPageCount {
@@ -354,7 +382,7 @@ func emitClientScoreTargetFanoutWithMetrics(
 			if err := emit(clientScoreRedisSet{flush: true}); err != nil {
 				return err
 			}
-			partition := newClientScoreModernPartition(payload.facets, modernPageChecksums)
+			partition := newClientScoreModernPartition(partitionFacets, modernPageChecksums)
 			for _, callerId := range callerIds {
 				partition.Generation = publicationKVs[callerId].generation
 				partitionBytes := encodeClientScoreGobValue(metrics, partition)
@@ -387,6 +415,11 @@ func emitClientScoreTargetFanoutWithMetrics(
 		if err := nativeFanout.publish(server.Id{}, payload.nativeFacets); err != nil {
 			return err
 		}
+		if nativeFanout.publishCapability != nil && payload.nativeCapabilityFacets != nil {
+			if err := nativeFanout.publishCapability(server.Id{}, payload.nativeCapabilityFacets); err != nil {
+				return err
+			}
+		}
 	}
 	for _, clientLocationId := range unchangedClientLocationIds {
 		if err := emit(clientScoreRedisSet{
@@ -398,6 +431,11 @@ func emitClientScoreTargetFanoutWithMetrics(
 		if nativeFanout != nil {
 			if err := nativeFanout.alias(clientLocationId); err != nil {
 				return err
+			}
+			if nativeFanout.aliasCapability != nil && payload.nativeCapabilityFacets != nil {
+				if err := nativeFanout.aliasCapability(clientLocationId); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -417,6 +455,11 @@ func emitClientScoreTargetFanoutWithMetrics(
 			}
 			if err := nativeFanout.publish(clientLocationId, payload.nativeFacets); err != nil {
 				return err
+			}
+			if nativeFanout.publishCapability != nil && payload.nativeCapabilityFacets != nil {
+				if err := nativeFanout.publishCapability(clientLocationId, payload.nativeCapabilityFacets); err != nil {
+					return err
+				}
 			}
 		}
 		if err := emit(clientScoreRedisSet{
@@ -4309,11 +4352,19 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	// the URL-success rule's country guard over this same population, its
 	// margin held against the export's last published guard
 	countFilter.onlineSuccessBaseline = newProviderOnlineSuccessBaseline(countFilter, providerCountRowCountryCodes(providerCountRows), egressSettings, readProviderOnlineSuccessPreviousBaseline(ctx, "the location counts"))
+	// The providers the last score export's country floor admitted
+	// (network_client_score_country_floor.go), counted as that export serves
+	// them, so a floored country stays listed. Without a readable set the
+	// counts count the decisions alone, as before the floor.
+	countryFloorClientIds, err := readProviderCountryFloor(ctx, egressSettings.CountryFloorRedisTimeout)
+	if err != nil {
+		glog.Infof("[nclm]the location counts count no country floor (%s)\n", err)
+	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		// Count the providers exposed as online supply: the common-gate
-		// passes the URL-success rule keeps.
+		// passes the URL-success rule keeps, and the country floor's.
 		countProviderRows := func() map[server.Id]int {
 			locationClientCounts := map[server.Id]int{}
 			for _, row := range providerCountRows {
@@ -4323,8 +4374,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 				}
 
 				// Ordinary URL errors and missing probes still count online;
-				// a provider the URL-success rule excludes does not.
-				{
+				// a provider the URL-success rule excludes does not, unless
+				// the country floor admitted it.
+				if !countryFloorClientIds[row.clientId] {
 					decision := decideProviderEgress(
 						countFilter.egressFacts(
 							row.clientId,
@@ -5097,18 +5149,20 @@ type FindProviders2Args struct {
 	// "dualstack", "v4-only", "v6-only". See ipFamilyFacetsForFilter. An
 	// online request draws the families a filter names without preference.
 	IpFamily string `json:"ip_family"`
-	// PostQuantumEncryption keeps only providers whose latest provide with a
-	// Public or Network key declared post-quantum encryption sessions
-	// (provide_capability_model.go), in every draw of the request, named
-	// providers included. A provider that never declared it, as none before
-	// the field did, is left out. Unset keeps the capability-blind answer.
+	// PostQuantumEncryption keeps only providers with a positive post-quantum
+	// signal from the quality probe (FP2-PROTOCOL.md §12.4), in every draw of
+	// the request, named providers included: once the post-quantum marker is
+	// set, a positive outcome in the eight-hour window; before it, modern
+	// evidence of the last seven days that is post-quantum. A provider's own
+	// declaration never qualifies it (owner, 2026-11-13). Unset keeps the
+	// capability-blind answer.
 	PostQuantumEncryption bool `json:"post_quantum_encryption"`
 	// RequireModernProvider keeps only modern providers (ClientScore.Modern)
 	// in every draw of the request, named providers included (FP2-MODERN.md):
-	// with a Public key, measured modern by the capability probe within seven
-	// days; with only a Network key, declared post-quantum encryption. A
-	// client that requires end-to-end encryption sets it. Unset keeps the
-	// capability-blind answer.
+	// the probe's evidence of post-quantum encryption with resizable windows,
+	// whatever provide keys the provider holds, and never its own
+	// declaration. A client that requires end-to-end encryption sets it.
+	// Unset keeps the capability-blind answer.
 	RequireModernProvider bool `json:"require_modern_provider"`
 	// Strict answers the requested targets only. Unset, as every client
 	// before the field sends, a city or region target the score export
@@ -5116,6 +5170,33 @@ type FindProviders2Args struct {
 	// then its country, and each provider found there carries its
 	// FindProvidersProvider.Match (network_client_location_fallback.go).
 	Strict bool `json:"strict"`
+	// The capabilities the requesting window wants (FP2-PROTOCOL.md §5.1).
+	// Absent or null is legacy mode, today's answer exactly: the hard gate,
+	// no overflow and no new fields. Present is selector mode
+	// (findProviders2WithSelect).
+	Select *FindProviders2Select `json:"select,omitempty"`
+}
+
+// The selectors of a selector-mode request (FP2-PROTOCOL.md §5.1), and the
+// answer's echo of them with every default filled (§5.2). A member absent
+// from a request, or null, takes its default; the echo carries all six.
+type FindProviders2Select struct {
+	// "dualstack" (the default) or "ipv4"
+	Ip *string `json:"ip"`
+	// "dualproto" (the default), "tcp" or "any": both labels in one pool
+	Protocol *string `json:"protocol"`
+	// the window's target count, for the protocol axis; at least 1. Default:
+	// count, or 1 when count is less than 1.
+	TargetCount *int `json:"target_count"`
+	// the window clients the caller already holds whose protocol label is
+	// the requested one (D11.2); default 0
+	HeldCount *int `json:"held_count"`
+	// the window's IPv6 minimum (D11.1): default 1 when ip is dualstack,
+	// and always 0 when ip is ipv4
+	DualstackTargetCount *int `json:"dualstack_target_count"`
+	// the window clients the caller already holds labelled dualstack;
+	// default 0
+	HeldDualstackCount *int `json:"held_dualstack_count"`
 }
 
 type FindProviders2Result struct {
@@ -5126,6 +5207,19 @@ type FindProviders2Result struct {
 	// (controller window_strict_handover_control.go); FindProviders2 and its
 	// in-process callers leave it nil, and nil is absent from the wire.
 	WindowStrictHandover *bool `json:"window_strict_handover,omitempty"`
+	// Selector mode only: the selectors the server applied, every default
+	// filled (FP2-PROTOCOL.md §5.2). A client that finds no echo is talking
+	// to a server without selector mode. Absent in legacy mode.
+	Select *FindProviders2Select `json:"select,omitempty"`
+}
+
+// A provider's capability labels (FP2-PROTOCOL.md §3.1, §4.3), on every
+// provider of a selector-mode answer.
+type FindProvidersCapabilities struct {
+	// "dualstack" or "ipv4"
+	Ip string `json:"ip"`
+	// "dualproto" or "tcp"
+	Protocol string `json:"protocol"`
 }
 
 type FindProvidersProvider struct {
@@ -5150,6 +5244,14 @@ type FindProvidersProvider struct {
 	// absent from the wire, for a provider of the requested target itself and
 	// for a named provider, so an answer without a fallback is unchanged.
 	Match LocationType `json:"match,omitempty"`
+	// Selector mode only, on every provider: its labels (FP2-PROTOCOL.md
+	// §5.2). Absent in legacy mode.
+	Capabilities *FindProvidersCapabilities `json:"capabilities,omitempty"`
+	// Selector mode only: 1 for an overflow provider, a tcp provider given
+	// to a dualproto request that the requested protocol cannot fill
+	// (§6.3), whose tier carries the overflow band's offset (§6.6); absent
+	// otherwise.
+	OverflowStep int `json:"overflow_step,omitempty"`
 }
 
 type LocationCoordinates struct {
@@ -5216,10 +5318,12 @@ type ClientScore struct {
 	// each mode's native membership.
 	Online bool
 	// Whether the provider qualified as modern at the export's instant
-	// (FP2-MODERN.md): with a Public key, measured modern by the capability
-	// probe (egress_modern_provider.go); with only a Network key, which the
-	// probe cannot reach, declared post-quantum encryption in its latest
-	// provide. Set whatever buckets the provider is in. The zero value, as
+	// (FP2-MODERN.md): measured modern by the probe's evidence
+	// (egress_modern_provider.go), and once the post-quantum marker is set,
+	// post-quantum positive with resizable windows (FP2-PROTOCOL.md §12.4).
+	// A provider with only a Network key, which no probe can reach, needs
+	// the same evidence; no provider is modern by its own declaration.
+	// Set whatever buckets the provider is in. The zero value, as
 	// every entry written before the field decodes, is not modern, so a
 	// request that requires modern providers never takes one no export has
 	// shown to be modern. Set only on the top-level score, like the location
@@ -5240,8 +5344,42 @@ type ClientScore struct {
 	ScaledWeights  map[string]float32
 	PassesMinimums map[string]bool
 
+	// The capabilities the URL evidence took away (FP2-PROTOCOL.md §4.3):
+	// ClientScoreCapabilityDowngradeIpv6 and ClientScoreCapabilityDowngradeUdp.
+	// Zero, as every entry an older exporter wrote decodes, is no downgrade,
+	// for the same gob reason as NetworkOnly. The score in today's facets
+	// carries it with the strict decision's buckets, which legacy readers
+	// read; the classified copy in a capability facet carries it with the
+	// classified decision's (capabilityCopy). Selector-mode FindProviders2
+	// skips a downgraded record in today's facets and labels every record by
+	// it (CapabilityLabels).
+	CapabilityDowngrades uint8
+	// The newest post-quantum outcome of the URL probe in the eight-hour
+	// window is positive (FP2-PROTOCOL.md §12.4). Strict post-quantum
+	// requests read it once client_score_post_quantum_v1_ready is set; the
+	// zero value, as every older entry decodes, is not post-quantum.
+	PostQuantumPositive bool
+	// The positive's own eight-hour deadline, capped by snapshot freshness.
+	// Zero from an older export is not current positive authority.
+	PostQuantumValidUntil time.Time
+	// The positive deadline also capped by the window evidence's lifetime.
+	PostQuantumModernValidUntil time.Time
+
 	// Performance-only score for sampling weights. It never changes admission.
 	minimumScores map[string]int
+	// The export's classified copy of a downgraded provider's score, written
+	// only to the capability facets (FP2-PROTOCOL.md §4.4); nil for a
+	// provider that is not downgraded. Unexported, so never encoded.
+	capabilityCopy *ClientScore
+	// Whether the provider passes the reliability minimums, whatever its
+	// buckets (rankClientScoreWithCounts); the country floor admits only one
+	// that does. Unexported, so never encoded.
+	passesReliability bool
+	// Whether the country floor admitted this score to Online
+	// (network_client_score_country_floor.go), where the URL bar kept it
+	// out. Unexported, so never encoded: a reader lends it from Online as it
+	// lends every member there.
+	countryFloor bool
 }
 
 type ClientFilter struct {
@@ -5680,21 +5818,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	}()
 	countFilter.onlineSuccessBaseline = onlineSuccessBaseline
 
-	// A network-only provider, which the capability probe cannot reach, is
-	// modern by its declaration (FP2-MODERN.md, "Definition"); the source
-	// query yields only providers with a Public or Network key, so a
-	// network-only score holds a Network key. Read once for the cohort.
-	networkOnlyClientIds := []server.Id{}
-	for _, row := range pendingScores {
-		if row.score.NetworkOnly {
-			networkOnlyClientIds = append(networkOnlyClientIds, row.score.ClientId)
-		}
-	}
-	networkOnlyDeclaredClientIds, declarationErr := readProvidePostQuantumEncryption(ctx, networkOnlyClientIds)
-	if declarationErr != nil {
-		return fmt.Errorf("read network-only provider declarations: %w", declarationErr)
-	}
-
 	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
 	// The hour threshold is the gate that decides whether a provider is in the
 	// market at all. It sat at 0.99 -- less than one bad block in 60 -- which
@@ -5739,6 +5862,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// each: a client sits in several location and group maps, each with its
 	// own ClientScore, and must be decided the same way in all of them.
 	clientIdEgressDecisions := map[server.Id]providerEgressDecision{}
+	// the providers the URL bar alone keeps out of Online, which the country
+	// floor admits from (network_client_score_country_floor.go)
+	clientIdBarredFromOnline := map[server.Id]bool{}
 	reasonCounts := map[string]int{}
 	onlineCount := 0
 	// the modern provider gate's shadow over the pool this export decides
@@ -5756,6 +5882,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		decision := decideProviderEgress(facts, egressTestEnabled)
 		countProviderModernOnline(modernOnlineCounts, facts, decision)
 		clientIdEgressDecisions[clientId] = decision
+		if providerEgressBarredFromOnline(facts, decision, egressTestEnabled) {
+			clientIdBarredFromOnline[clientId] = true
+		}
 		if decision.reason != "" {
 			reasonCounts[decision.reason] += 1
 		}
@@ -5776,6 +5905,53 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	glog.Infof("[nclm]modern provider gate: %s\n", providerModernGateShadowSummary(modernGateShadowCounts, egressSettings, countFilter.now))
 	glog.Infof("[nclm]modern online providers: %s\n", providerModernOnlineSummary(modernOnlineCounts))
 
+	// The capability classification of every decided provider and, for a
+	// downgraded one, its classified decision (FP2-PROTOCOL.md §3.3, §3.4).
+	// The strict decisions above stay the ones today's facets, the counts
+	// and the hard gate read. Every location and group copy of a provider
+	// carries the same families.
+	clientIdIpFamilies := map[server.Id]uint8{}
+	for _, targetClientScores := range []map[server.Id]map[server.Id]*ClientScore{locationClientScores, locationGroupClientScores} {
+		for _, clientScores := range targetClientScores {
+			for clientId, clientScore := range clientScores {
+				clientIdIpFamilies[clientId] = clientScore.IpFamilies
+			}
+		}
+	}
+	clientIdCapabilities := map[server.Id]*clientScoreCapability{}
+	capabilityClassCounts := map[providerCapabilityClass]int{}
+	downgradedCount := 0
+	postQuantumPositiveCount := 0
+	for clientId, egress := range clientIdEgresses {
+		capability := newClientScoreCapability(clientId, clientIdIpFamilies[clientId], egress, countFilter, egressSettings, egressTestEnabled)
+		clientIdCapabilities[clientId] = capability
+		capabilityClassCounts[capability.classification.class] += 1
+		if capability.classification.downgraded() {
+			downgradedCount += 1
+		}
+		if capability.postQuantumPositive {
+			postQuantumPositiveCount += 1
+		}
+	}
+	// Strict post-quantum readers use the measured signal once the URL
+	// probe has measured a whole evidence window, and today's sources until
+	// then (§10 step 3): ClientScore.Modern follows the same marker, read
+	// before any score is written.
+	postQuantumReady, err := GetClientScorePostQuantumReady(ctx)
+	if err != nil {
+		return fmt.Errorf("read client score post-quantum marker: %w", err)
+	}
+	glog.Infof(
+		"[nclm]capabilities: classes A %d, B %d, C %d, D %d; %d downgraded; %d post-quantum positive; post-quantum marker %t\n",
+		capabilityClassCounts[providerCapabilityClassA],
+		capabilityClassCounts[providerCapabilityClassB],
+		capabilityClassCounts[providerCapabilityClassC],
+		capabilityClassCounts[providerCapabilityClassD],
+		downgradedCount,
+		postQuantumPositiveCount,
+		postQuantumReady,
+	)
+
 	// set each client score to its lowest lookback, decided the same way in
 	// every location and group map it sits in
 	migrateClientScore := func(clientScore *ClientScore) {
@@ -5786,8 +5962,44 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			egressSettings,
 			minIndependentReliabilityWeights,
 		)
-		if clientScore.NetworkOnly {
-			clientScore.Modern = networkOnlyDeclaredClientIds[clientScore.ClientId]
+		capability := clientIdCapabilities[clientScore.ClientId]
+		// the index flag (FP2-MODERN.md): the decision's, from the probe's
+		// evidence for every provider, network-only ones included, and once
+		// the post-quantum marker is set, a positive post-quantum signal with
+		// resizable windows (FP2-PROTOCOL.md §12.4). No provider is modern by
+		// its own declaration (owner, 2026-11-13).
+		setModern := func(clientScore *ClientScore) {
+			if postQuantumReady {
+				clientScore.Modern = capability != nil && capability.postQuantumModern
+			}
+		}
+		setModern(clientScore)
+		if capability == nil {
+			return
+		}
+		clientScore.CapabilityDowngrades = capability.classification.downgrades
+		capability.setPostQuantum(clientScore)
+		if capability.classification.downgraded() {
+			// the classified copy, for the capability facets only: the
+			// classified decision's buckets and weights, the same
+			// performance tiers (§4.3)
+			classified := *clientScore
+			rankClientScoreWithCounts(
+				&classified,
+				capability.decision,
+				capability.counts,
+				capability.hasCounts,
+				countFilter,
+				egressSettings,
+				minIndependentReliabilityWeights,
+			)
+			// the ranking index of the copy's class (§3.4): its forgiven runs
+			// are no failures of the capabilities it keeps
+			if egress := clientIdEgresses[clientScore.ClientId]; egress != nil && egress.egressIndex != nil {
+				rankClientScoreCapabilityTiers(&classified, capability.counts, countFilter.now, egressSettings)
+			}
+			setModern(&classified)
+			clientScore.capabilityCopy = &classified
 		}
 	}
 	for _, clientScores := range locationClientScores {
@@ -5805,6 +6017,24 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	publishCtfPresenceProviders(ctx, nativeSourceStartedAt, locationClientScores, clientIdEgresses)
 	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
 	nativeCensus.Arindb = arindbDecision.nativeSummary()
+
+	// The country floor (network_client_score_country_floor.go), after the
+	// presence and the census read the decisions as the URL bar made them:
+	// a country with too few online providers gets its best few below the
+	// bar online, in every target its providers sit in.
+	countryCodes := map[server.Id]string{}
+	for countryCode, countryLocationId := range countryCodeLocationIds() {
+		countryCodes[countryLocationId] = countryCode
+	}
+	countryFloor := applyClientScoreCountryFloor(
+		egressSettings.CountryFloorProviders,
+		locationClientScores,
+		locationGroupClientScores,
+		countryCodes,
+		clientIdBarredFromOnline,
+		clientIdCapabilities,
+	)
+	glog.Infof("[nclm]country floor: %s\n", countryFloor.logSummary())
 
 	// location id -> network id
 	excludeLocationNetworkIds := map[server.Id]map[server.Id]bool{}
@@ -5866,12 +6096,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	ctx = context.WithValue(ctx, clientScoreExportExpiryContextKey{}, manifestTime.Add(ttl))
 	departedTargets, targetManifest := targetMaps.departedTargets(previousTargetManifest, manifestTime, ttl)
 	targets = append(targets, departedTargets...)
-	// the admitted supply these documents hold, published once they all are
-	countryCodes := map[server.Id]string{}
-	for countryCode, countryLocationId := range countryCodeLocationIds() {
-		countryCodes[countryLocationId] = countryCode
-	}
+	// the admitted supply these documents hold, the floor's admissions
+	// included, published once they all are
 	supply := newClientScoreSupply(manifestTime, locationClientScores, departedTargets, countryCodes)
+	supply.countryFloor = maps.Clone(countryFloor.countryCounts)
+	supply.countryFloorFleet = countryFloor.fleetCounts()
 	if err := writeClientScoreTargetManifest(ctx, targetManifest, ttl); err != nil {
 		return fmt.Errorf("publish client score target manifest: %w", err)
 	}
@@ -6019,9 +6248,31 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := publishProviderOnlineSuccessBaseline(ctx, onlineSuccessBaseline, ttl); err != nil {
 			glog.Errorf("[nclm]publish online url-success guard: %s\n", err)
 		}
+		// The country floor's strict admissions, which the location counts
+		// count as this export serves them. Counts without them count the
+		// decisions alone, so a failure here leaves the export standing.
+		if err := publishProviderCountryFloor(ctx, countryFloor.strictClientIds, ttl, egressSettings.CountryFloorRedisTimeout); err != nil {
+			glog.Errorf("[nclm]publish country floor: %s\n", err)
+		}
 		// published by this process alone while it holds the newest
 		// measurement (network_client_score_supply.go)
 		clientScoreSupplyMetrics.publish(ctx, supply)
+		// The named-provider sets of this export (FP2-PROTOCOL.md §4.4,
+		// §12.4). A reader without them labels a named provider ipv4 and
+		// dualproto, and refuses it to a strict post-quantum request once
+		// the marker is set, so a failure here leaves the export standing.
+		if err := publishProviderCapabilitySets(ctx, clientIdCapabilities, clientIdIpFamilies, ttl); err != nil {
+			glog.Errorf("[nclm]publish provider capability sets: %s\n", err)
+		}
+		// after a complete export: the marker turns strict post-quantum
+		// readers to the measured signal once the URL probe has measured a
+		// whole evidence window, and back to today's sources when it stops
+		// (§10)
+		if postQuantumMarked, err := MarkClientScorePostQuantumReady(ctx, ttl); err != nil {
+			glog.Errorf("[nclm]mark client score post-quantum ready: %s\n", err)
+		} else if postQuantumMarked != postQuantumReady {
+			glog.Infof("[nclm]client score post-quantum marker now %t\n", postQuantumMarked)
+		}
 		glog.Infof(
 			"[nclm]update %d client locations x %d location scores, %d location group scores, %d of them empty, %d departed targets cleared\n",
 			len(clientLocationIds),
@@ -6134,6 +6385,24 @@ func loadClientScoresInFacetOrder(
 	partition clientScorePartitionMode,
 	observations ...*findProviders2LoadObservation,
 ) (clientScores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
+	return loadClientScoresWithOptions(forceMinimum, rankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, facetPriority, partition, clientScoreReadOptions{}, observations...)
+}
+
+// loadClientScoresInFacetOrder with read options (clientScoreReadOptions).
+func loadClientScoresWithOptions(
+	forceMinimum bool,
+	rankMode RankMode,
+	ctx context.Context,
+	locationIds map[server.Id]bool,
+	locationGroupIds map[server.Id]bool,
+	clientLocationId server.Id,
+	n int,
+	facets []ipFamilyFacet,
+	facetPriority bool,
+	partition clientScorePartitionMode,
+	options clientScoreReadOptions,
+	observations ...*findProviders2LoadObservation,
+) (clientScores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
 	var observation *findProviders2LoadObservation
 	if 0 < len(observations) {
 		observation = observations[0]
@@ -6158,7 +6427,7 @@ func loadClientScoresInFacetOrder(
 			return
 		}
 
-		facetPageSets, unfacetedPages, targetStates, sourceIncomplete, err := clientScoreTargetPages(
+		facetPageSets, unfacetedPages, targetStates, sourceIncomplete, err := clientScoreTargetPagesWithOptions(
 			forceMinimum,
 			rankMode,
 			clientLocationId,
@@ -6166,6 +6435,7 @@ func loadClientScoresInFacetOrder(
 			locationReads,
 			locationGroupReads,
 			observation,
+			options,
 		)
 		if err != nil {
 			returnErr = err
@@ -6336,6 +6606,13 @@ func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
+	requestTime := server.NowUtc()
+	recordFindProviders2PostQuantumRequest(findProviders2)
+	// a request that names capabilities is selector mode (FP2-PROTOCOL.md
+	// §6.2); every other request is answered below exactly as before
+	if findProviders2.Select != nil {
+		return findProviders2WithSelect(findProviders2, session)
+	}
 	observation := newFindProviders2SelectionObservation(findProviders2)
 	observation.beginPrivateCapture(session.Ctx)
 	defer observation.finish(session.Ctx)
@@ -6349,6 +6626,12 @@ func FindProviders2(
 	// an unknown filter is refused before any spec is read: a filter this
 	// server cannot interpret must not silently widen to "any family"
 	facets, err := ipFamilyFacetsForFilter(findProviders2.IpFamily)
+	if err != nil {
+		return nil, err
+	}
+	// strict post-quantum requests read the measured signal once the marker
+	// is set, and today's sources until then (FP2-PROTOCOL.md §12.4)
+	postQuantumReady, err := findProviders2PostQuantumReady(findProviders2, session)
 	if err != nil {
 		return nil, err
 	}
@@ -6539,10 +6822,12 @@ func FindProviders2(
 				callerNetworkId = session.ByJwt.NetworkId
 			}
 			requestFilter := clientScoreRequestFilter{
-				callerNetworkId:   callerNetworkId,
-				facets:            facets,
-				excludedClientIds: excludeFinalDestinations(),
-				requireModern:     findProviders2.RequireModernProvider,
+				callerNetworkId:            callerNetworkId,
+				facets:                     facets,
+				excludedClientIds:          excludeFinalDestinations(),
+				requireModern:              findProviders2.RequireModernProvider,
+				requirePostQuantumPositive: postQuantumReady,
+				now:                        requestTime,
 			}
 			hardExcludedClientIds := map[server.Id]bool{}
 			qualityExcludedClientIds := map[server.Id]bool{}
@@ -6555,8 +6840,9 @@ func FindProviders2(
 			// verdict.
 			offlineClientIds := map[server.Id]bool{}
 			// For a request that requires post-quantum encryption, the candidates
-			// whose latest provide did not declare it (provide_capability_model.go),
-			// and for one that requires modern providers, the named providers
+			// without the quality probe's positive post-quantum signal
+			// (readFindProviders2PostQuantumEncryption), and for one that
+			// requires modern providers, the named providers
 			// that are not modern (readProviderModernClientIds; the index's
 			// candidates are refused by the request filter instead). Each leaves
 			// every draw of this request, named providers included. Like offline,
@@ -6575,7 +6861,7 @@ func FindProviders2(
 			// rank_measured_first is off or for force_minimum
 			// (network_client_selection_evidence.go). The evidence rank and the
 			// neutral URL weight cannot disagree about an expiry.
-			filterTime := server.NowUtc()
+			filterTime := requestTime
 			evidence := findProviders2Evidence(requestSettings, findProviders2.ForceMinimum, filterTime)
 			// Draws up to n of the candidates by their weight in `mode` and bands
 			// the draw by their tier in `mode`, each facet in the request's
@@ -6648,10 +6934,11 @@ func FindProviders2(
 					}
 				}
 				// Read first for a request that requires post-quantum
-				// encryption, so the reads below are only of declaring providers.
-				// An undeclared candidate is read once and leaves every draw.
+				// encryption, so the reads below are only of providers with a
+				// positive signal. A candidate without one is read once and
+				// leaves every draw.
 				if findProviders2.PostQuantumEncryption {
-					capableClientIds, err := readProvidePostQuantumEncryption(session.Ctx, candidateClientIds)
+					capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, scores, candidateClientIds, requestTime)
 					if err != nil {
 						return err
 					}
@@ -6731,7 +7018,7 @@ func FindProviders2(
 			// named read, as in the named-only path
 			if findProviders2.RequireModernProvider && 0 < len(specClientIds) {
 				observation.enter("hard_exclusions")
-				modernClientIds, err := readProviderModernClientIds(session.Ctx, specClientIds, filterTime)
+				modernClientIds, err := readFindProviders2NamedModern(session, postQuantumReady, specClientIds, filterTime)
 				if err != nil {
 					return nil, err
 				}
@@ -6824,9 +7111,10 @@ func FindProviders2(
 				for clientId := range offlineClientIds {
 					delete(clientScores, clientId)
 				}
-				// undeclared under a post-quantum request, or a named provider
-				// that is not modern under a modern one: out of every pool too,
-				// counted as a capability refusal
+				// without a positive post-quantum signal under a post-quantum
+				// request, or a named provider that is not modern under a
+				// modern one: out of every pool too, counted as a capability
+				// refusal
 				capabilityDropped := 0
 				for clientId := range incapableClientIds {
 					if _, ok := clientScores[clientId]; ok {
@@ -7349,7 +7637,7 @@ func FindProviders2(
 		// a named provider that is not modern is not answered to a request
 		// that requires modern providers, as in discovery (FP2-MODERN.md)
 		if findProviders2.RequireModernProvider {
-			modernClientIds, err := readProviderModernClientIds(session.Ctx, specClientIds, server.NowUtc())
+			modernClientIds, err := readFindProviders2NamedModern(session, postQuantumReady, specClientIds, requestTime)
 			if err != nil {
 				return nil, err
 			}
@@ -7359,10 +7647,10 @@ func FindProviders2(
 				}
 			}
 		}
-		// a named provider that did not declare post-quantum encryption is
-		// not answered to a request that requires it, as in discovery
+		// a named provider without a positive post-quantum signal is not
+		// answered to a request that requires it, as in discovery
 		if findProviders2.PostQuantumEncryption {
-			capableClientIds, err := readProvidePostQuantumEncryption(session.Ctx, specClientIds)
+			capableClientIds, err := readFindProviders2PostQuantumEncryption(session, postQuantumReady, nil, specClientIds, requestTime)
 			if err != nil {
 				return nil, err
 			}

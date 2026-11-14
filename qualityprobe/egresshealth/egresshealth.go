@@ -6,15 +6,13 @@ package egresshealth
 
 import (
 	"context"
-	crand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -22,6 +20,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/connect"
 )
 
 // Groups destinations so a partial failure is diagnosable: a provider
@@ -602,12 +602,12 @@ type Options struct {
 	// negative uses DefaultConcurrency.
 	Concurrency int
 	// Draws this run's sample and its retry spacing. Nil -- which is
-	// what production passes -- means a fresh generator seeded from
-	// crypto/rand for every run, which is the whole anti-gaming property: the
+	// what production passes -- means a fresh connect.NewSecureRand generator
+	// for every run, which is the whole anti-gaming property: the
 	// provider cannot know what it will be asked for, or when it will be asked
 	// again. Tests set it to make a run reproducible.
 	//
-	// It must not be shared between concurrent runs: math/rand.Rand is stateful
+	// It must not be shared between concurrent runs: a rand.Rand is stateful
 	// and not goroutine-safe, and the prober probes several providers at once.
 	// Within one run it is drawn from behind a lock. Leaving it nil is what
 	// makes the cross-run case safe, so production leaves it nil.
@@ -688,6 +688,10 @@ type Options struct {
 	// drawn by checkUrlProbe from the lane's URLs that do (url_family.go); nil
 	// otherwise, and for every other probe.
 	urlProbeIpv6StandIn *Destination
+	// The end-to-end session of a URL turn that measures post-quantum
+	// (url_e2e.go), which its evidence reports as e2e; nil, every other
+	// turn's and probe's, observes none.
+	E2e UrlProbeE2eObserver
 
 	// The run's clock, with Sleep. Nil uses the wall clock and a sleep that
 	// selects on time.After and the context. Tests inject both so a run whose
@@ -913,7 +917,9 @@ func SamplePerRunOf(dests []Destination) int {
 // per-request timeout (url_h3.go), so in URL mode every attempt round is
 // counted twice: any drawn URL may declare it. A provider that advertises
 // IPv6 makes both legs again over IPv6 (url_family.go), so its rounds are
-// counted four times: any drawn URL may serve IPv6.
+// counted four times: any drawn URL may serve IPv6. A URL turn that measures
+// post-quantum (E2e) holds each tunnel generation's first sends for its
+// session's seal, at most the observer's SealWait each.
 func (self Options) RunBudget(loads int) time.Duration {
 	if loads < 1 {
 		loads = 1
@@ -932,6 +938,10 @@ func (self Options) RunBudget(loads int) time.Duration {
 	budget += time.Duration(attempts-1) * retryDelayCapFactor * self.loadRetryMeanInterval()
 	generations := 1 + self.tunnelRecreateAttempts()
 	budget += time.Duration(generations) * max(0, self.coldStartTimeout()-self.perRequestTimeout())
+	if self.UrlProbe && self.E2e != nil {
+		// each tunnel generation's first sends wait for its session to seal
+		budget += time.Duration(generations) * self.E2e.SealWait()
+	}
 	return budget
 }
 
@@ -1050,24 +1060,18 @@ func (self Options) sleep(ctx context.Context, d time.Duration) error {
 // The randomness one run's sample and spacing are drawn from.
 //
 // A caller-supplied generator is used as given, which is what makes a test
-// reproducible. Otherwise a fresh one is built per run and seeded from
-// crypto/rand -- not from the clock, and never from the global generator. The
-// anti-gaming property is that a provider cannot predict which destinations it
-// will be asked for, and a clock seed is predictable to anyone who knows
-// roughly when the pass started. The global generator is avoided for a duller
-// reason: it is shared process-wide state that any other package can reseed.
+// reproducible. Otherwise a fresh connect.NewSecureRand generator is built per
+// run: ChaCha8 seeded from crypto/rand, so neither the clock nor the run's own
+// earlier draws predict it. The anti-gaming property is that a provider cannot
+// predict which destinations it will be asked for. A clock seed is predictable
+// to anyone who knows roughly when the pass started, and a Go 1 source gives
+// its state away in its outputs. There is no fallback: crypto/rand.Read cannot
+// fail since go 1.24.
 func (self Options) rng() *rand.Rand {
 	if self.Rand != nil {
 		return self.Rand
 	}
-	var b [8]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		// crypto/rand does not fail in practice. If it ever does, a clock seed
-		// still samples: a weaker unpredictability is worth having, a skipped
-		// run is not.
-		return rand.New(rand.NewSource(time.Now().UnixNano()))
-	}
-	return rand.New(rand.NewSource(int64(binary.BigEndian.Uint64(b[:]))))
+	return connect.NewSecureRand()
 }
 
 // The body read cap for this destination: its own, clamped to the
@@ -1144,7 +1148,7 @@ func sampleDestinations(dests []Destination, sizes map[Class]int, r *rand.Rand) 
 		}
 		shuffled := append([]int(nil), idx...)
 		for i := 0; i < n; i++ {
-			j := i + r.Intn(len(shuffled)-i)
+			j := i + r.IntN(len(shuffled)-i)
 			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 		}
 		picked = append(picked, shuffled[:n]...)

@@ -29,7 +29,8 @@ import (
 
 // Limits belong to this command, not to the scoring instrument or job budget.
 type recoverySettings struct {
-	// Total control transaction lifetime; non-positive refuses execution.
+	// Total control operation lifetime, including sequential native observations.
+	// This is not the native-proof window or a paid execution clock.
 	Timeout time.Duration
 	// Maximum private document bytes; non-positive refuses a read.
 	DocumentBytes int64
@@ -39,7 +40,24 @@ type recoverySettings struct {
 
 // Control metadata remains small and cannot consume a submission's clock.
 func defaultRecoverySettings() recoverySettings {
-	return recoverySettings{Timeout: 30 * time.Second, DocumentBytes: 1024 * 1024, TokenBytes: 1025}
+	return recoverySettings{Timeout: 2 * time.Minute, DocumentBytes: 1024 * 1024, TokenBytes: 1025}
+}
+
+// One caller-owned absolute deadline includes preparation and sequential native
+// observations. The explicit clock seam is internal only; parent lifetime wins.
+func newRecoveryControlContext(parent context.Context, limits recoverySettings, startedAt time.Time) (context.Context, context.CancelFunc, error) {
+	if parent == nil || limits.Timeout <= 0 || startedAt.IsZero() {
+		return nil, nil, errors.New("invalid recovery control context bound")
+	}
+	if err := parent.Err(); err != nil {
+		return nil, nil, err
+	}
+	ctx, cancel := context.WithDeadline(parent, startedAt.Add(limits.Timeout))
+	if err := ctx.Err(); err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return ctx, cancel, nil
 }
 
 // Directory descriptors pin every traversed ancestor. No symlink or writable
@@ -260,6 +278,8 @@ func runRecovery(args []string, output io.Writer) error {
 	runtimeSha := flags.String("runtime-file-sha256", "", "exact runtime qualification file digest")
 	tokenPath := flags.String("token-file", "", "root-owned scoped control token")
 	idempotencyKey := flags.String("idempotency-key", "", "single-use operator request identity")
+	coordinatorPath := flags.String("distributed-coordinator", "", "root-pinned distributed coordinator profile for native closure observations only")
+	coordinatorSha256 := flags.String("distributed-coordinator-sha256", "", "exact distributed coordinator profile digest")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || len(*authSha) != 64 || len(*runtimeSha) != 64 || *idempotencyKey == "" {
 		return errors.New("reevaluation arguments rejected")
 	}
@@ -303,13 +323,23 @@ func runRecovery(args []string, output io.Writer) error {
 	if err := bindRecoveryRuntime(settings, runtime); err != nil {
 		return err
 	}
+	if auth.Schema == 2 {
+		if *coordinatorPath == "" || len(*coordinatorSha256) != 64 || controller.ConfigureCompetitionDistributedCoordinator(settings, *coordinatorPath, *coordinatorSha256) != nil {
+			return errors.New("distributed closure observation role rejected")
+		}
+	} else if *coordinatorPath != "" || *coordinatorSha256 != "" {
+		return errors.New("historical singleton recovery cannot select a distributed observation role")
+	}
 	authorizationDigest, err := model.CompetitionAutomationDigest(auth)
 	if err != nil || limits.Timeout <= 0 {
 		return errors.New("authorization binding rejected")
 	}
 	parent, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(parent, limits.Timeout)
+	ctx, cancel, err := newRecoveryControlContext(parent, limits, time.Now())
+	if err != nil {
+		return errors.New("recovery control context unavailable")
+	}
 	defer cancel()
 	receipt, err := (controller.PostgresStore{}).AuthorizeJobReevaluation(ctx, settings, principal, model.CompetitionJobReevaluationRequest{
 		IdempotencyKey: *idempotencyKey, AuthorizationSha256: authorizationDigest, Authorization: auth,
@@ -317,7 +347,18 @@ func runRecovery(args []string, output io.Writer) error {
 	if err != nil {
 		return errors.New("audited reevaluation refused; inspect restricted operator evidence")
 	}
-	return json.NewEncoder(output).Encode(receipt)
+	return writeRecoveryReceipt(output, receipt)
+}
+
+// Native signed inventories remain in the private immutable database audit.
+// Standard output retains only the previously public receipt and proof digest.
+func writeRecoveryReceipt(output io.Writer, receipt *model.CompetitionJobReevaluationReceipt) error {
+	if receipt == nil {
+		return errors.New("recovery receipt unavailable")
+	}
+	publicReceipt := *receipt
+	publicReceipt.DistributedProof = nil
+	return json.NewEncoder(output).Encode(publicReceipt)
 }
 
 // Standard output contains only the authenticated, message-free receipt.

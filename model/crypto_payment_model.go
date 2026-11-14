@@ -124,6 +124,12 @@ const (
 	// a payment to a coin's one shared deposit address (Coinbase gave no
 	// address per invoice) whose amount is no open invoice's unique amount
 	CryptoReviewReasonAmountUnmatched = "amount_unmatched"
+	// a payment the late-payment rules would credit to an invoice the
+	// retention unlink has passed: the unlink forgot the network (or the gift
+	// order) the invoice was for, so the rail cannot deliver it, and an
+	// operator matches it to its buyer (a data code invoice still credits: its
+	// buyer reads the code with the status token)
+	CryptoReviewReasonUnlinked = "unlinked"
 )
 
 // The most status tokens one invoice keeps: the first plus the ones handed to
@@ -1591,11 +1597,12 @@ type CryptoPaymentWatchedAddress struct {
 	Hot bool
 }
 
-// ListCryptoPaymentWatchedAddressesInConn lists the invoice addresses of a
-// per-address coin (Bitcoin, ETH, SOL, TAO) its scanner reads: open invoices,
-// invoices with a receipt still in the mempool or not yet confirmed, and
-// invoices that expired, were credited or were voided after watchSince. Hot
-// first, newest first, at most limit. Reuse the caller's PostgreSQL session;
+// The invoice addresses of a per-address coin (ETH, SOL) its scanner reads
+// every scan or often: open invoices, invoices with a receipt still in the
+// mempool or not yet confirmed, and invoices that expired, were credited or
+// were voided after watchSince. Hot first, newest first, at most limit. Every
+// other address an invoice was given is read by the scan's sweep
+// (ListCryptoAddressesToSweepInConn). Reuse the caller's PostgreSQL session;
 // nil selects the outer acquisition boundary.
 func ListCryptoPaymentWatchedAddressesInConn(
 	connOwner server.PgConn,
@@ -1659,25 +1666,49 @@ func ListCryptoPaymentWatchedAddressesInConn(
 	return
 }
 
-// GetCryptoPaymentInvoiceAddressesInPlayInConn maps each given address of a
-// coin that is an invoice address in play to the pool index the invoice drew
-// it at, in one lookup by the invoice address index: open, closed (expired,
-// credited or voided) after watchSince, or with a receipt still in the mempool
-// or unconfirmed, as ListCryptoPaymentWatchedAddressesInConn lists them, and
-// made before createdBefore. The Bitcoin block scanner asks it once a block,
-// with every address the block's outputs pay, and watchSince and
-// createdBefore from the block's time, so a block read late (a scanner that
-// was down) is matched as it would have been on time. Reuse the caller's
-// PostgreSQL session; nil selects the outer acquisition boundary.
-func GetCryptoPaymentInvoiceAddressesInPlayInConn(
+// An address an invoice of a coin was given: the pool index the invoice drew
+// it at, and when the invoice was made (the day only, once the retention
+// unlink has passed it).
+type CryptoPaymentIssuedAddress struct {
+	AddressIndex int64
+	CreateTime   time.Time
+}
+
+// Whether an invoice of the coin was ever given an address of the pool: one
+// probe of the invoice address index. Reuse the caller's PostgreSQL session;
+// nil selects the outer acquisition boundary.
+func CryptoPaymentAddressesIssuedInConn(connOwner server.PgConn, ctx context.Context, asset string) (issued bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+				SELECT EXISTS (
+					SELECT 1 FROM crypto_payment_intent
+					WHERE asset = $1 AND address_index IS NOT NULL AND solana_reference IS NULL
+				)
+			`,
+			asset,
+		).Scan(&issued))
+	})
+	return
+}
+
+// Maps each given address of a coin that an invoice was ever given to its
+// pool index and the invoice's time, in one lookup by the invoice address
+// index: every invoice, open or closed, credited, voided or past the
+// retention unlink, since a payment can reach any of them at any time. The
+// block readers ask it with every address their blocks pay (Bitcoin once a
+// block, TAO once a scan) and judge the invoice's time against the block's:
+// an invoice made after its block was mined was not paid in it. Addresses no
+// invoice was given are absent. Reuse the caller's PostgreSQL session; nil
+// selects the outer acquisition boundary.
+func GetCryptoPaymentIssuedAddressesInConn(
 	connOwner server.PgConn,
 	ctx context.Context,
 	asset string,
 	addresses []string,
-	watchSince time.Time,
-	createdBefore time.Time,
-) (indexes map[string]int64) {
-	indexes = map[string]int64{}
+) (issuedAddresses map[string]*CryptoPaymentIssuedAddress) {
+	issuedAddresses = map[string]*CryptoPaymentIssuedAddress{}
 	if len(addresses) == 0 {
 		return
 	}
@@ -1685,36 +1716,22 @@ func GetCryptoPaymentInvoiceAddressesInPlayInConn(
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT intent.address, intent.address_index
-				FROM crypto_payment_intent intent
-				WHERE intent.asset = $1
-				  AND intent.address = ANY($2)
-				  AND intent.solana_reference IS NULL
-				  AND intent.address_index IS NOT NULL
-				  AND intent.unlinked_at IS NULL
-				  AND intent.create_time < $4
-				  AND (
-					(intent.credited_at IS NULL AND intent.voided_at IS NULL AND $3 < intent.expires_at)
-					OR $3 < intent.credited_at
-					OR $3 < intent.voided_at
-					OR EXISTS (
-						SELECT 1 FROM crypto_payment_receipt receipt
-						WHERE receipt.intent_id = intent.intent_id
-						  AND receipt.state IN ('seen', 'confirmed')
-					)
-				  )
+				SELECT address, address_index, create_time
+				FROM crypto_payment_intent
+				WHERE asset = $1
+				  AND address = ANY($2)
+				  AND solana_reference IS NULL
+				  AND address_index IS NOT NULL
 			`,
 			asset,
 			addresses,
-			watchSince,
-			createdBefore,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var address string
-				var index int64
-				server.Raise(result.Scan(&address, &index))
-				indexes[address] = index
+				issuedAddress := &CryptoPaymentIssuedAddress{}
+				server.Raise(result.Scan(&address, &issuedAddress.AddressIndex, &issuedAddress.CreateTime))
+				issuedAddresses[address] = issuedAddress
 			}
 		})
 	})
@@ -2219,6 +2236,13 @@ func EndCryptoPaymentGrantInTx(
 		ended = 0 < len(endedNetworkIds)
 		return
 	}
+	// a gift order's invoice (the reconcile's orphan leg; an operator's refund
+	// of one is RefundCryptoGiftOrderInTx): every unredeemed code voided and
+	// every redeemed code's year ended, each recorded, so a credit again
+	// restores exactly them (gift_refund_model.go)
+	if giftOrderId := cryptoGiftOrderIdInTx(tx, ctx, intent.IntentId); giftOrderId != nil {
+		return endCryptoGiftOrderGrantInTx(tx, ctx, *giftOrderId, now)
+	}
 	if intent.BalanceCodeId != nil {
 		_, voidedCount, endedNetworks := ClawbackBalanceCodesForPurchaseEventInTx(tx, ctx, CryptoPaymentPurchaseEventId(intent.IntentId), now)
 		endedNetworkIds = append(endedNetworkIds, endedNetworks...)
@@ -2276,6 +2300,13 @@ type CryptoPaymentUnlinkResult struct {
 //     truncated to the day;
 //   - a code's purchase event id stops naming the invoice, and its purchase
 //     record and email are cleared;
+//   - a gift order the invoice paid forgets it: its codes' purchase events
+//     (crypto/<id>/gift/<n>) move to a fresh base, the order's own, and lose
+//     their purchase record and email, and the order loses the invoice's id,
+//     its exact times (its day stays), its referrer (its codes keep theirs)
+//     and, once no friend's email is owed, the buyer's email
+//     (unlinkCryptoGiftOrderInTx). The order keeps its codes, so its cards
+//     still deliver and its codes still redeem;
 //   - the invoice forgets its network, email and grant handles, and its times
 //     are truncated to the day, as are its receipts' and its pool address's;
 //     its quote history is deleted (the invoice keeps the final quote);
@@ -2377,6 +2408,7 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 				CryptoPaymentPurchaseEventId(row.intentId),
 				"crypto/unlinked/"+server.NewId().String(),
 			))
+			unlinkCryptoGiftOrderInTx(tx, ctx, row.intentId)
 			// the events name the invoice, or one of its receipts' transactions
 			// (a USDC invoice has no receipts: only its operator refund names it)
 			server.RaisePgResult(tx.Exec(
@@ -2457,6 +2489,136 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 		))
 	}, server.TxReadCommitted)
 	return
+}
+
+// unlinkCryptoGiftOrderInTx is the 30-day unlink of the gift order an
+// invoice paid for, or was made for (UnlinkCryptoPaymentIntents), in its
+// transaction: the order forgets the invoice's id, and its codes' purchase
+// events, "crypto/<intent id>/gift/<n>", become "<base>/gift/<n>" under a
+// fresh random base, "crypto/unlinked/<id>", which the order takes as its own
+// purchase event base, so it still finds its codes (GetGiftOrderCodes); like
+// an invoice's data code, they lose their purchase record and email. The
+// codes are matched by their exact purchase event ids, the unique key. Nothing
+// for an invoice no gift order names.
+func unlinkCryptoGiftOrderInTx(tx server.PgTx, ctx context.Context, intentId server.Id) {
+	var giftOrderId server.Id
+	var quantity int
+	var purchaseEventBase *string
+	found := false
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT gift_order_id, quantity, purchase_event_base
+			FROM gift_order
+			WHERE crypto_intent_id = $1
+			FOR UPDATE
+		`,
+		intentId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&giftOrderId, &quantity, &purchaseEventBase))
+			found = true
+		}
+	})
+	if !found {
+		return
+	}
+
+	invoiceBase := CryptoPaymentPurchaseEventId(intentId)
+	if purchaseEventBase == nil || *purchaseEventBase != invoiceBase {
+		// never paid: no code names the invoice
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE gift_order SET crypto_intent_id = NULL WHERE gift_order_id = $1`,
+			giftOrderId,
+		))
+		unlinkCryptoGiftOrderFactsInTx(tx, ctx, giftOrderId)
+		return
+	}
+	unlinkedBase := "crypto/unlinked/" + server.NewId().String()
+	fromIds := make([]string, 0, quantity)
+	toIds := make([]string, 0, quantity)
+	for n := 0; n < quantity; n += 1 {
+		fromIds = append(fromIds, giftPurchaseEventId(invoiceBase, n))
+		toIds = append(toIds, giftPurchaseEventId(unlinkedBase, n))
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE transfer_balance_code
+			SET
+				purchase_event_id = unlinked.to_id,
+				purchase_record = '',
+				purchase_email = ''
+			FROM unnest($1::text[], $2::text[]) AS unlinked(from_id, to_id)
+			WHERE
+				transfer_balance_code.purchase_event_id = unlinked.from_id AND
+				transfer_balance_code.gift_order_id = $3
+		`,
+		fromIds,
+		toIds,
+		giftOrderId,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE gift_order
+			SET crypto_intent_id = NULL, purchase_event_base = $2
+			WHERE gift_order_id = $1
+		`,
+		giftOrderId,
+		unlinkedBase,
+	))
+	unlinkCryptoGiftOrderFactsInTx(tx, ctx, giftOrderId)
+}
+
+// What else of a gift order could tie it to its unlinked invoice: its times
+// become their day, as the invoice's do, and so do its codes' (made at the
+// credit, voided at an operator's refund or the orphan leg, each the time of
+// an event or a transaction that names the invoice): create_time and
+// cancel_time, and gift_code_void's void_time. A void code stays void
+// (cancel_time stays set), and nothing reads those times but whether one is
+// set: a code's redeem window is its start_time and end_time, which its
+// fulfilment sets on day boundaries already. Its referrer goes (its codes keep
+// theirs, which the referral credit at redemption reads); and its buyer's
+// email is blanked unless a friend's email is still owed, whose reply-to it is
+// (ClearUnlinkedGiftOrderBuyerEmail blanks it once none is).
+func unlinkCryptoGiftOrderFactsInTx(tx server.PgTx, ctx context.Context, giftOrderId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE gift_order
+			SET
+				create_time = date_trunc('day', create_time),
+				paid_time = date_trunc('day', paid_time),
+				refunded_time = date_trunc('day', refunded_time),
+				referrer_network_id = NULL
+			WHERE gift_order_id = $1
+		`,
+		giftOrderId,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE transfer_balance_code
+			SET
+				create_time = date_trunc('day', create_time),
+				cancel_time = date_trunc('day', cancel_time)
+			WHERE gift_order_id = $1
+		`,
+		giftOrderId,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE gift_code_void
+			SET void_time = date_trunc('day', void_time)
+			WHERE gift_order_id = $1
+		`,
+		giftOrderId,
+	))
+	clearUnlinkedGiftOrderBuyerEmailInTx(tx, ctx, giftOrderId)
 }
 
 // CryptoUnlinkedSolTransactionPrefix starts the transaction id the 30-day

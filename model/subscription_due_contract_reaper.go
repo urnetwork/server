@@ -122,12 +122,16 @@ const dueContractDeleteDependentsSql = `
 
 // removeDueContractBatches consumes the first bounded slice of the reap_time
 // index before doing any payment lookup. Due contracts held by an active or
-// ambiguous payment are repaired to reap_time = NULL. So are unpaid contracts
-// stamped by the former 90-day rule that have not yet reached the new 300-day
-// horizon. All other due contracts and their dependent rows are deleted.
+// ambiguous payment are repaired to reap_time = NULL. So are contracts stamped
+// by the former 90-day rule that have not yet reached the 300-day horizon and
+// that have a sweep whose payment row is missing, as the contract horizon
+// reaper keeps them (payment_incomplete). USDC payouts ended (owner decisions
+// 2026-11-12 and 2026-11-13), so an unpaid sweep, or one of a settled payment
+// (server.AccountPaymentRetentionSettledSql: completed, closed by the USDC
+// close-out, or safely canceled), holds nothing. All other due contracts and
+// their dependent rows are deleted.
 // Classifying only the already-bounded slice avoids turning the safety checks
-// into an anti-join over contract history. The payment guard also covers
-// completed payments whose queued retention cursor has not finished yet.
+// into an anti-join over contract history.
 //
 // Every write names its contracts with contract_id = ANY(ids), which lets each
 // statement prune to the partitions holding them. The classification locks the
@@ -300,14 +304,15 @@ func (self *dueContractReaper) removeBatch(ctx context.Context) (processedCount 
 						) OR
 						(
 							due.create_time >= $2 AND
-							NOT EXISTS (
+							EXISTS (
 								SELECT 1
 								FROM transfer_escrow_sweep
-								INNER JOIN account_payment ON
+								LEFT JOIN account_payment ON
 									account_payment.payment_id = transfer_escrow_sweep.payment_id
 								WHERE
 									transfer_escrow_sweep.contract_id = due.contract_id AND
-									account_payment.completed
+									transfer_escrow_sweep.payment_id IS NOT NULL AND
+									(`+server.AccountPaymentRetentionSettledSql+`) IS NOT TRUE
 							)
 						)
 				), cleared AS (

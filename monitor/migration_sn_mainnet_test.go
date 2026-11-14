@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 )
 
@@ -89,6 +90,9 @@ func TestMigrationsFixtureBudgetFollowsTheRunDeadline(t *testing.T) {
 
 // Render catalog values as psql does, without replacing any predicate result.
 func (self *snMainnetMigrationTxSource) PostgreSQL(ctx context.Context, query string) ([]Row, error) {
+	if observation := migrationCensusFromContext(ctx); observation != nil {
+		return migrationCensusFixtureInTx(ctx, self.tx, query, observation, func() error { return nil })
+	}
 	result, err := self.tx.Query(ctx, query)
 	if err != nil {
 		return nil, err
@@ -125,7 +129,7 @@ func snMainnetMigrationFaultTx(t testing.TB, callback func(context.Context, serv
 	ctx, cancel := snMainnetMigrationFixtureContext(t)
 	defer cancel()
 	server.Db(ctx, func(conn server.PgConn) {
-		tx, err := conn.Begin(ctx)
+		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 		if err != nil {
 			t.Fatal(err)
 		}

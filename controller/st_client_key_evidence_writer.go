@@ -31,6 +31,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/startifact"
@@ -287,7 +288,8 @@ type stClientKeyEvidenceWriter struct {
 	known        *stClientKeyEvidenceKnown
 	pausedUntil  time.Time
 	failures     int
-	random       *rand.Rand
+	// the backoff jitter, a connect.NewSecureRand generator
+	random *rand.Rand
 	// closed while nothing is pending
 	idle chan struct{}
 
@@ -318,7 +320,7 @@ func newStClientKeyEvidenceWriter(settings stClientKeyEvidenceWriterSettings, me
 		wake:     make(chan struct{}, 1),
 		pending:  map[stClientKeyEvidenceKey]*stClientKeyEvidencePublication{},
 		known:    newStClientKeyEvidenceKnown(settings.KnownCapacity, settings.KnownTtl),
-		random:   rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())),
+		random:   connect.NewSecureRand(),
 		idle:     idle,
 		now:      time.Now,
 	}

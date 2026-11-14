@@ -769,10 +769,14 @@ func newStripeDisputeWonFixture(t testing.TB, name string) *stripeDisputeWonFixt
 	return fixture
 }
 
+// The invoice took the charge's payment, as every disputed invoice did, so its
+// window runs the manual-payment grace (stripeInvoiceTookPayment).
 func (self *stripeDisputeWonFixture) setSubscriptionStatus(status string) {
 	subscriptionId := "sub_" + self.invoiceId
 	self.env.fullInvoices[self.invoiceId] = map[string]any{
-		"id": self.invoiceId,
+		"id":          self.invoiceId,
+		"status":      "paid",
+		"amount_paid": 4000,
 		"lines": map[string]any{"data": []map[string]any{{
 			"type":         "subscription",
 			"subscription": subscriptionId,

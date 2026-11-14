@@ -35,6 +35,16 @@ func newClientScoreNativeFanout(ctx context.Context, r server.RedisClient, count
 				key: clientScoreNativeKey(countsKey(callerId)), value: []byte(clientScoreNativeBaseline),
 			})
 		},
+		// the native capability snapshot, published and aliased exactly
+		// like today's (FP2-PROTOCOL.md §4.4)
+		publishCapability: func(callerId server.Id, facets map[ipFamilyFacet]clientScoreFacetPayload) error {
+			return writeClientScoreNativeSnapshotOf(ctx, r, clientScoreNativeCapabilityKey(countsKey(callerId)), ttl, clientScoreCapabilityFacets, facets, census)
+		},
+		aliasCapability: func(callerId server.Id) error {
+			return emit(clientScoreRedisSet{
+				key: clientScoreNativeCapabilityKey(countsKey(callerId)), value: []byte(clientScoreNativeBaseline),
+			})
+		},
 	}
 }
 
@@ -175,6 +185,17 @@ type clientScoreNativePublication struct {
 	ttl        time.Duration
 	expiresAt  time.Time
 	pageFields []string
+	// the facets its manifest lists, exactly: today's family facets
+	// (:native_v1) unless set, the capability facets for :native_cap_v1
+	facets []ipFamilyFacet
+}
+
+// The facets the publication's manifest lists.
+func (self *clientScoreNativePublication) manifestFacets() []ipFamilyFacet {
+	if self.facets == nil {
+		return ipFamilyFacets
+	}
+	return self.facets
 }
 
 func prepareClientScoreNativePublication(ctx context.Context, r server.RedisClient, key string, ttl time.Duration) (*clientScoreNativePublication, error) {
@@ -282,7 +303,7 @@ func (self *clientScoreNativePublication) writePages(ctx context.Context, r serv
 }
 
 func (self *clientScoreNativePublication) commit(ctx context.Context, r server.RedisClient, manifest clientScoreNativeManifest) error {
-	if manifest.Generation != self.generation || len(manifest.Facets) != len(ipFamilyFacets) {
+	if manifest.Generation != self.generation || len(manifest.Facets) != len(self.manifestFacets()) {
 		return fmt.Errorf("native client score manifest does not describe this publication")
 	}
 	data := encodeClientScoreGobValue(updateClientScoresPhaseMetrics, manifest)
@@ -296,7 +317,7 @@ func (self *clientScoreNativePublication) commit(ctx context.Context, r server.R
 		}
 		written[field] = true
 	}
-	for _, facet := range ipFamilyFacets {
+	for _, facet := range self.manifestFacets() {
 		pages, ok := manifest.Facets[facet]
 		if !ok {
 			return fmt.Errorf("native client score manifest omitted a facet")
@@ -326,10 +347,18 @@ func (self *clientScoreNativePublication) commit(ctx context.Context, r server.R
 // The encoder already owns native-only, bounded pages. Retain only one
 // bounded write batch and small per-page count/checksum metadata during export.
 func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, key string, ttl time.Duration, facets map[ipFamilyFacet]clientScoreFacetPayload, sources ...*ClientScoreNativeCensus) error {
+	return writeClientScoreNativeSnapshotOf(ctx, r, key, ttl, ipFamilyFacets, facets, sources...)
+}
+
+// writeClientScoreNativeSnapshot of a snapshot whose manifest lists exactly
+// manifestFacets: today's family facets for :native_v1, the capability facets
+// for :native_cap_v1 (FP2-PROTOCOL.md §4.4).
+func writeClientScoreNativeSnapshotOf(ctx context.Context, r server.RedisClient, key string, ttl time.Duration, manifestFacets []ipFamilyFacet, facets map[ipFamilyFacet]clientScoreFacetPayload, sources ...*ClientScoreNativeCensus) error {
 	publication, err := prepareClientScoreNativePublication(ctx, r, key, ttl)
 	if err != nil {
 		return err
 	}
+	publication.facets = manifestFacets
 	manifest := clientScoreNativeManifest{
 		Generation:        publication.generation,
 		Facets:            map[ipFamilyFacet][]clientScoreNativePageInfo{},
@@ -346,7 +375,7 @@ func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, k
 	settings := defaultClientScoreExportSettings()
 	err = runClientScoreExportStream(ctx, settings.batchSize, settings.nativeBatchBytes, 1,
 		func(emit func(clientScoreRedisSet) error) error {
-			for _, facet := range ipFamilyFacets {
+			for _, facet := range manifestFacets {
 				payload, ok := facets[facet]
 				if !ok {
 					return fmt.Errorf("native client score publication omitted a facet")
@@ -398,6 +427,12 @@ func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, k
 // resolved before this read; generation and checksum make a reused old slot
 // unavailable instead of letting its pages become false native exhaustion.
 func readClientScoreNativeManifest(ctx context.Context, r server.RedisClient, key, rawPointer string) (*clientScoreNativeManifest, string, error) {
+	return readClientScoreNativeManifestOf(ctx, r, key, rawPointer, ipFamilyFacets)
+}
+
+// readClientScoreNativeManifest of a snapshot whose manifest must list
+// exactly manifestFacets.
+func readClientScoreNativeManifestOf(ctx context.Context, r server.RedisClient, key, rawPointer string, manifestFacets []ipFamilyFacet) (*clientScoreNativeManifest, string, error) {
 	pointer, err := parseClientScoreNativePointer(rawPointer)
 	if err != nil {
 		return nil, "", err
@@ -419,10 +454,10 @@ func readClientScoreNativeManifest(ctx context.Context, r server.RedisClient, ke
 	if err := gob.NewDecoder(bytes.NewBufferString(data)).Decode(manifest); err != nil {
 		return nil, "", fmt.Errorf("%w: invalid manifest", errClientScoreNativeUnavailable)
 	}
-	if manifest.Generation != generation || len(manifest.Facets) != len(ipFamilyFacets) {
+	if manifest.Generation != generation || len(manifest.Facets) != len(manifestFacets) {
 		return nil, "", fmt.Errorf("%w: incomplete manifest", errClientScoreNativeUnavailable)
 	}
-	for _, facet := range ipFamilyFacets {
+	for _, facet := range manifestFacets {
 		pages, ok := manifest.Facets[facet]
 		if !ok {
 			return nil, "", fmt.Errorf("%w: missing facet", errClientScoreNativeUnavailable)
@@ -452,104 +487,10 @@ func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locati
 // phase.
 func loadNativeClientScoresWithPartition(ctx context.Context, mode RankMode, locations, groups map[server.Id]bool, caller server.Id, n int, facets []ipFamilyFacet, partition clientScorePartitionMode, observation *findProviders2LoadObservation) (scores map[server.Id]*ClientScore, cursor *clientScoreCursor, available bool, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		type target struct {
-			callerKey   string
-			baselineKey string
-			callerRead  *redis.StringCmd
-			baseRead    *redis.StringCmd
-		}
-		targets := []target{}
-		pipe := r.Pipeline()
-		for _, set := range []struct {
-			ids map[server.Id]bool
-			key func(server.Id, server.Id) string
-		}{
-			{ids: locations, key: func(id, caller server.Id) string { return clientScoreLocationCountsKey(false, mode, id, caller) }},
-			{ids: groups, key: func(id, caller server.Id) string { return clientScoreLocationGroupCountsKey(false, mode, id, caller) }},
-		} {
-			for id := range set.ids {
-				key, baseline := clientScoreNativeKey(set.key(id, caller)), clientScoreNativeKey(set.key(id, server.Id{}))
-				read := target{callerKey: key, baselineKey: baseline, callerRead: pipe.Get(ctx, key)}
-				if key != baseline {
-					read.baseRead = pipe.Get(ctx, baseline)
-				}
-				targets = append(targets, read)
-			}
-		}
-		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
-			clientScoreReadMetrics.counts.Inc()
-			returnErr = err
-			// Failed metadata is an unavailable native source, not evidence of
-			// a legacy-only writer. Independently successful targets can still
-			// prove their own manifests and pages. Cancellation remains fatal.
-			available = true
-			if ctx.Err() != nil {
-				return
-			}
-		}
-		modernPagesByFacet := make([]map[string]clientScorePage, len(facets))
-		otherPagesByFacet := make([]map[string]clientScorePage, len(facets))
-		for i := range facets {
-			modernPagesByFacet[i] = map[string]clientScorePage{}
-			otherPagesByFacet[i] = map[string]clientScorePage{}
-		}
-		targetStates := map[string]int{}
-		for _, target := range targets {
-			if err := target.callerRead.Err(); err != nil && !errors.Is(err, redis.Nil) {
-				continue
-			}
-			key, rawPointer := target.callerKey, string(clientScoreCommandBytes(target.callerRead))
-			if rawPointer != "" {
-				available = true
-			}
-			if rawPointer == clientScoreNativeBaseline {
-				if target.baseRead == nil {
-					returnErr = errors.Join(returnErr, fmt.Errorf("%w: baseline cannot alias itself", errClientScoreNativeUnavailable))
-					continue
-				}
-				if err := target.baseRead.Err(); err != nil && !errors.Is(err, redis.Nil) {
-					continue
-				}
-				key, rawPointer = target.baselineKey, string(clientScoreCommandBytes(target.baseRead))
-				if rawPointer == "" {
-					returnErr = errors.Join(returnErr, fmt.Errorf("%w: missing aliased baseline", errClientScoreNativeUnavailable))
-					continue
-				}
-			}
-			if rawPointer == "" {
-				returnErr = errors.Join(returnErr, fmt.Errorf("%w: missing target metadata", errClientScoreNativeUnavailable))
-				continue
-			}
-			manifest, slotKey, err := readClientScoreNativeManifest(ctx, r, key, rawPointer)
-			if err != nil {
-				returnErr = errors.Join(returnErr, err)
-				continue
-			}
-			state := clientScoreModernAbsent
-			if manifest.ModernPartitioned {
-				state = clientScoreModernPartitioned
-				for _, facet := range facets {
-					if modernPages := manifest.ModernPages[facet]; modernPages < 0 || len(manifest.Facets[facet]) < modernPages {
-						state = clientScoreModernStale
-					}
-				}
-			}
-			targetStates[state] += 1
-			for i, facet := range facets {
-				modernPages := manifest.ModernPages[facet]
-				for index, info := range manifest.Facets[facet] {
-					field := clientScoreNativePageField(facet, index)
-					page := clientScorePage{
-						key: field, expectedCount: info.Count, nativeKey: slotKey,
-						nativeGeneration: manifest.Generation, nativeChecksum: info.Checksum,
-					}
-					if state == clientScoreModernStale || (state == clientScoreModernPartitioned && index < modernPages) {
-						modernPagesByFacet[i][slotKey+":"+field] = page
-					} else {
-						otherPagesByFacet[i][slotKey+":"+field] = page
-					}
-				}
-			}
+		pages, err := clientScoreNativeTargetPages(ctx, r, clientScoreNativeFamilySnapshot, mode, locations, groups, caller, facets)
+		available, returnErr = pages.available, err
+		if pages.canceled {
+			return
 		}
 		if !available {
 			// A legacy-only writer has not published this schema yet. Its
@@ -558,10 +499,11 @@ func loadNativeClientScoresWithPartition(ctx context.Context, mode RankMode, loc
 			return
 		}
 		if partition != clientScorePartitionOff {
-			for state, targetCount := range targetStates {
+			for state, targetCount := range pages.targetStates {
 				findProviders2ModernPartitionTargets.WithLabelValues("native", state).Add(float64(targetCount))
 			}
 		}
+		modernPagesByFacet, otherPagesByFacet := pages.modernByFacet, pages.otherByFacet
 		var modernGroups, otherGroups []map[string]clientScorePage
 		switch partition {
 		case clientScorePartitionModernFirst:
@@ -589,6 +531,148 @@ func loadNativeClientScoresWithPartition(ctx context.Context, mode RankMode, loc
 		scores, readErr = cursor.readWithClient(ctx, r, n)
 		returnErr = errors.Join(returnErr, readErr)
 	})
+	return
+}
+
+// One kind of native snapshot (FP2-PROTOCOL.md §4.4): its pointer key beside
+// a target's counts key and exactly the facets its manifest lists.
+type clientScoreNativeSnapshot struct {
+	key            func(countsKey string) string
+	manifestFacets []ipFamilyFacet
+}
+
+// Today's native snapshot, :native_v1, of the family facets.
+var clientScoreNativeFamilySnapshot = clientScoreNativeSnapshot{
+	key:            clientScoreNativeKey,
+	manifestFacets: ipFamilyFacets,
+}
+
+// The native capability snapshot, :native_cap_v1, of the capability facets.
+var clientScoreNativeCapabilitySnapshot = clientScoreNativeSnapshot{
+	key:            clientScoreNativeCapabilityKey,
+	manifestFacets: clientScoreCapabilityFacets,
+}
+
+// The native pages of the requested targets, for each requested facet by
+// partition class, with each target's partition state.
+type clientScoreNativePages struct {
+	modernByFacet []map[string]clientScorePage
+	otherByFacet  []map[string]clientScorePage
+	targetStates  map[string]int
+	// some target has native metadata of the snapshot, or its read failed
+	available bool
+	// the metadata read failed and the context ended
+	canceled bool
+}
+
+// Reads the requested targets' snapshot pointers and manifests, aliases
+// resolved, into the snapshot's pages of each requested facet. A manifest's
+// ModernPages place its leading pages per facet in the modern phase; one
+// written before the partition is absent, all its pages in the other phase,
+// and one whose partition does not fit its pages is stale, all its pages in
+// the modern phase. Errors of single targets are joined into returnErr while
+// the other targets' pages stand.
+func clientScoreNativeTargetPages(ctx context.Context, r server.RedisClient, snapshot clientScoreNativeSnapshot, mode RankMode, locations, groups map[server.Id]bool, caller server.Id, facets []ipFamilyFacet) (pages clientScoreNativePages, returnErr error) {
+	type target struct {
+		callerKey   string
+		baselineKey string
+		callerRead  *redis.StringCmd
+		baseRead    *redis.StringCmd
+	}
+	targets := []target{}
+	pipe := r.Pipeline()
+	for _, set := range []struct {
+		ids map[server.Id]bool
+		key func(server.Id, server.Id) string
+	}{
+		{ids: locations, key: func(id, caller server.Id) string { return clientScoreLocationCountsKey(false, mode, id, caller) }},
+		{ids: groups, key: func(id, caller server.Id) string { return clientScoreLocationGroupCountsKey(false, mode, id, caller) }},
+	} {
+		for id := range set.ids {
+			key, baseline := snapshot.key(set.key(id, caller)), snapshot.key(set.key(id, server.Id{}))
+			read := target{callerKey: key, baselineKey: baseline, callerRead: pipe.Get(ctx, key)}
+			if key != baseline {
+				read.baseRead = pipe.Get(ctx, baseline)
+			}
+			targets = append(targets, read)
+		}
+	}
+	if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+		clientScoreReadMetrics.counts.Inc()
+		returnErr = err
+		// Failed metadata is an unavailable native source, not evidence of
+		// a legacy-only writer. Independently successful targets can still
+		// prove their own manifests and pages. Cancellation remains fatal.
+		pages.available = true
+		if ctx.Err() != nil {
+			pages.canceled = true
+			return
+		}
+	}
+	pages.modernByFacet = make([]map[string]clientScorePage, len(facets))
+	pages.otherByFacet = make([]map[string]clientScorePage, len(facets))
+	for i := range facets {
+		pages.modernByFacet[i] = map[string]clientScorePage{}
+		pages.otherByFacet[i] = map[string]clientScorePage{}
+	}
+	pages.targetStates = map[string]int{}
+	for _, target := range targets {
+		if err := target.callerRead.Err(); err != nil && !errors.Is(err, redis.Nil) {
+			continue
+		}
+		key, rawPointer := target.callerKey, string(clientScoreCommandBytes(target.callerRead))
+		if rawPointer != "" {
+			pages.available = true
+		}
+		if rawPointer == clientScoreNativeBaseline {
+			if target.baseRead == nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("%w: baseline cannot alias itself", errClientScoreNativeUnavailable))
+				continue
+			}
+			if err := target.baseRead.Err(); err != nil && !errors.Is(err, redis.Nil) {
+				continue
+			}
+			key, rawPointer = target.baselineKey, string(clientScoreCommandBytes(target.baseRead))
+			if rawPointer == "" {
+				returnErr = errors.Join(returnErr, fmt.Errorf("%w: missing aliased baseline", errClientScoreNativeUnavailable))
+				continue
+			}
+		}
+		if rawPointer == "" {
+			returnErr = errors.Join(returnErr, fmt.Errorf("%w: missing target metadata", errClientScoreNativeUnavailable))
+			continue
+		}
+		manifest, slotKey, err := readClientScoreNativeManifestOf(ctx, r, key, rawPointer, snapshot.manifestFacets)
+		if err != nil {
+			returnErr = errors.Join(returnErr, err)
+			continue
+		}
+		state := clientScoreModernAbsent
+		if manifest.ModernPartitioned {
+			state = clientScoreModernPartitioned
+			for _, facet := range facets {
+				if modernPages := manifest.ModernPages[facet]; modernPages < 0 || len(manifest.Facets[facet]) < modernPages {
+					state = clientScoreModernStale
+				}
+			}
+		}
+		pages.targetStates[state] += 1
+		for i, facet := range facets {
+			modernPages := manifest.ModernPages[facet]
+			for index, info := range manifest.Facets[facet] {
+				field := clientScoreNativePageField(facet, index)
+				page := clientScorePage{
+					key: field, expectedCount: info.Count, nativeKey: slotKey,
+					nativeGeneration: manifest.Generation, nativeChecksum: info.Checksum,
+				}
+				if state == clientScoreModernStale || (state == clientScoreModernPartitioned && index < modernPages) {
+					pages.modernByFacet[i][slotKey+":"+field] = page
+				} else {
+					pages.otherByFacet[i][slotKey+":"+field] = page
+				}
+			}
+		}
+	}
 	return
 }
 

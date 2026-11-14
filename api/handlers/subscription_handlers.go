@@ -81,6 +81,7 @@ func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
 
 func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	if !webhookVerifiable(w, "play", controller.PlayWebhookVerifiable) {
+		controller.RecordStoreNotificationOutcome(r.Context(), model.SubscriptionMarketGoogle, controller.StoreNotificationRefusedUnavailable)
 		return
 	}
 	router.WrapWithInputBodyFormatterNoAuth(

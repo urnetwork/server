@@ -159,10 +159,12 @@ type testContractPartitionPaymentHold struct {
 	canceled         bool
 	retentionPending bool
 	marker           string
-	protected        bool
-	contractId       Id
-	paymentId        Id
-	week             contractWeek
+	// the USDC close-out's usdc_payout_closed event
+	closed     bool
+	protected  bool
+	contractId Id
+	paymentId  Id
+	week       contractWeek
 }
 
 // Includes each external-attempt marker and controls that must remain eligible.
@@ -173,14 +175,24 @@ func testContractPartitionPaymentHolds(t testing.TB, ctx context.Context) ([]tes
 		{name: "canceled idempotency key", canceled: true, marker: "circle_idempotency_key", protected: true},
 		{name: "canceled payment record", canceled: true, marker: "payment_record", protected: true},
 		{name: "canceled transaction hash", canceled: true, marker: "tx_hash", protected: true},
-		{name: "completed retention pending", completed: true, retentionPending: true, protected: true},
-		{name: "canceled retention pending", canceled: true, retentionPending: true, protected: true},
+		// a former release's retention stamping flag holds nothing since USDC
+		// completions ended
+		{name: "completed retention pending", completed: true, retentionPending: true},
+		{name: "canceled retention pending", canceled: true, retentionPending: true},
 		{name: "canceled without attempt", canceled: true},
 		{name: "completed external attempt", completed: true, marker: "circle_idempotency_key"},
+		// USDC payouts ended (owner decision 2026-11-13): a closed payment is
+		// settled, an attempt of it or not; one made pending again is not
+		{name: "closed idempotency key", canceled: true, marker: "circle_idempotency_key", closed: true},
+		{name: "closed without attempt", canceled: true, closed: true},
+		{name: "pending with a closure", closed: true, protected: true},
 	}
-	_, _, err := ensureContractWeekPartitions(ctx, week.Add(3*contractPartitionWeek))
-	if err != nil {
-		t.Fatal(err)
+	// a runway covers the week it is ensured from and ContractPartitionAheadWeeks
+	// past it: the first the cases through week 6, the second the rest
+	for _, ensured := range []time.Time{week.Add(3 * contractPartitionWeek), week.Add(6 * contractPartitionWeek)} {
+		if _, _, err := ensureContractWeekPartitions(ctx, ensured); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for i := range cases {
 		c := &cases[i]
@@ -208,10 +220,15 @@ func testContractPartitionPaymentHolds(t testing.TB, ctx context.Context) ([]tes
 			if c.marker != "" {
 				RaisePgResult(tx.Exec(ctx, fmt.Sprintf("UPDATE account_payment SET %s=$2 WHERE payment_id=$1", quoteIdentifier(c.marker)), c.paymentId, NewId().String()))
 			}
+			if c.closed {
+				RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment (event_id, payment_id, event_type, event_details)
+					VALUES (`+UsdcPayoutClosedEventIdSql("$1::uuid")+`, $1, $2, '{}')`, c.paymentId, UsdcPayoutClosedEventType))
+			}
 			RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow_sweep SET payment_id=$2 WHERE contract_id=$1`, c.contractId, c.paymentId))
 		})
 	}
-	return cases, week.Add(20 * contractPartitionWeek)
+	// when the last case's week is ContractRetention (13 weeks) past
+	return cases, week.Add(time.Duration(len(cases)+12) * contractPartitionWeek)
 }
 
 // Retirement must preserve all six tables and must not archive held contracts;

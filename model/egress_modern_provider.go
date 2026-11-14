@@ -1,17 +1,18 @@
 // The modern provider gate of the Quality and Speed buckets (FP2FIX.md,
 // 2026-10-14, option 4: probe-verified, shadow first). A provider is modern
-// when the capability probe (server/capprobe) has measured, on a real client
-// to provider session, both end-to-end post-quantum encryption (the TLS 1.3
-// hybrid X25519MLKEM768, which providers answer since v2026.7.21-999024260)
-// and resizable transfer windows (acks that carry receive_window_byte_count,
-// since v2026.9.14-1046484290). Versions are not read: most providers run a
-// custom lineage whose version says nothing of either.
+// when a probe has measured, on a real client to provider session, both
+// end-to-end post-quantum encryption (the TLS 1.3 hybrid X25519MLKEM768,
+// which providers answer since v2026.7.21-999024260) and resizable transfer
+// windows (acks that carry receive_window_byte_count, since
+// v2026.9.14-1046484290). Versions are not read: most providers run a custom
+// lineage whose version says nothing of either.
 //
-// The capability probe measures each provider in a short tunnel of its own,
-// apart from the URL probe, whose tunnels keep end-to-end encryption off,
-// and records each conclusive measurement in provider_modern_evidence, one
-// row per provider holding the latest observation
-// (RecordProviderModernEvidence).
+// URL turns that measure post-quantum (qualityprobe/fleetprobe url_e2e.go,
+// FP2-PROTOCOL.md §12.2) open an opportunistic session with their provider,
+// and the URL ingest records each conclusive observation in
+// provider_modern_evidence, one row per provider holding the latest
+// observation (RecordProviderModernEvidence), as the retired capability
+// probe (capprobe/README.md) did from tunnels of its own.
 // Every pass that decides the buckets classifies each provider's row into one
 // outcome (classifyProviderModernEvidence) and counts, over the providers the
 // other rules admit to Quality and to Speed, what the gate decides for them:
@@ -104,7 +105,9 @@ type ProviderModernEvidence struct {
 	// the negotiated TLS key exchange group as crypto/tls names it, for
 	// example X25519MLKEM768; "" for none
 	KeyExchange string
-	// the negotiated group is a post-quantum hybrid
+	// the probe saw a post-quantum session with the provider work: for the
+	// URL ingest, the turn's positive outcome, never a post-quantum group
+	// that did not seal (providerModernEvidenceOfE2e)
 	PostQuantum bool
 	// the provider's acks carried receive_window_byte_count
 	WindowAdvertised bool
@@ -139,7 +142,7 @@ func (self ProviderModernEvidence) validate(now time.Time) error {
 // when it and the first observation were measured, and how many runs
 // advanced it.
 type ProviderModernEvidenceRecord struct {
-	// end-to-end encryption was negotiated with a post-quantum hybrid group
+	// the latest observation is post-quantum (ProviderModernEvidence)
 	PostQuantum bool
 	// the negotiated group, "" when no end-to-end session was negotiated
 	KeyExchange string
@@ -457,16 +460,54 @@ func providerModernGateShadowSummary(bucketOutcomeCounts map[string]map[string]i
 	return fmt.Sprintf("%s, evidence max age %s: %s", state, ProviderModernEvidenceMaxAge, strings.Join(bucketTexts, "; "))
 }
 
+// Whether the provider's row shows, at now, the post-quantum half of modern:
+// a fresh observation that is post-quantum, whatever its window. No row,
+// stale evidence and a newest observation that is not post-quantum are not.
+func providerModernEvidencePostQuantum(record *ProviderModernEvidenceRecord, now time.Time) bool {
+	switch classifyProviderModernEvidence(record, now) {
+	case ProviderModernOutcomeModern, ProviderModernOutcomeNoResizableWindows:
+		return true
+	default:
+		return false
+	}
+}
+
 // The ids among clientIds that are modern at now (FP2-MODERN.md,
 // "Definition"), for providers a request names, which the score index does
-// not hold. One statement per chunk of 256 reads, in one snapshot, each id's
-// current provide keys, its evidence row and its declaration: with a Public
-// key, the evidence decides; with a Network key and no Public one, the
-// declaration (provide_capability_model.go); with neither, the id is not
-// modern, whatever declaration an earlier provide left behind. Each query
-// observes the caller's context. An error is the caller's: a request that
-// requires modern providers cannot be answered without it.
+// not hold, while the post-quantum marker is not set (FP2-PROTOCOL.md
+// §12.4). The evidence row decides for every provider with a Public or a
+// Network key: a network-only provider, which no probe can reach, is modern
+// only with the same evidence as a public one. An id with neither key is
+// never modern, and no provider is modern by its own declaration (owner,
+// 2026-11-13: "They must have a positive quality probe handshake to count").
+// An error is the caller's: a request that requires modern providers cannot
+// be answered without it.
 func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
+	return readProviderEvidenceClientIds(ctx, clientIds, func(record *ProviderModernEvidenceRecord) bool {
+		return classifyProviderModernEvidence(record, now) == ProviderModernOutcomeModern
+	})
+}
+
+// The ids among clientIds whose evidence row shows post-quantum at now
+// (providerModernEvidencePostQuantum), by the rule of
+// readProviderModernClientIds without the window: the candidates and named
+// providers a post_quantum_encryption request may answer while the
+// post-quantum marker is not set (FP2-PROTOCOL.md §12.4). No provider
+// qualifies by its own declaration. An error is the caller's: a request that
+// requires post-quantum encryption cannot be answered without it, and an
+// unread provider never qualifies.
+func readProviderPostQuantumEvidenceClientIds(ctx context.Context, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
+	return readProviderEvidenceClientIds(ctx, clientIds, func(record *ProviderModernEvidenceRecord) bool {
+		return providerModernEvidencePostQuantum(record, now)
+	})
+}
+
+// The ids among clientIds that hold a Public or a Network provide key and
+// whose evidence row qualifies; an id without a row never does. One
+// statement per chunk of 256 reads, in one snapshot, each id's current
+// provide keys and its evidence row. Each query observes the caller's
+// context, and every error is returned, never raised.
+func readProviderEvidenceClientIds(ctx context.Context, clientIds []server.Id, qualifies func(*ProviderModernEvidenceRecord) bool) (map[server.Id]bool, error) {
 	const chunkSize = 256
 	uniqueClientIds := make([]server.Id, 0, len(clientIds))
 	seenClientIds := make(map[server.Id]bool, len(clientIds))
@@ -476,9 +517,9 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 			uniqueClientIds = append(uniqueClientIds, clientId)
 		}
 	}
-	modernClientIds := map[server.Id]bool{}
+	qualifiedClientIds := map[server.Id]bool{}
 	if len(uniqueClientIds) == 0 {
-		return modernClientIds, nil
+		return qualifiedClientIds, nil
 	}
 	var returnErr error
 	// a connection that cannot be acquired raises; it is the caller's error
@@ -495,22 +536,19 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 					ctx,
 					`
 					SELECT
-						named.client_id,
-						EXISTS (
-							SELECT 1 FROM provide_key
-							WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $2
-						),
-						EXISTS (
-							SELECT 1 FROM provide_key
-							WHERE provide_key.client_id = named.client_id AND provide_key.provide_mode = $3
-						),
+						provider_modern_evidence.client_id,
 						provider_modern_evidence.post_quantum,
 						provider_modern_evidence.window_resizable,
-						provider_modern_evidence.measured_at,
-						COALESCE(provide_capability.post_quantum_encryption, false)
-					FROM unnest($1::uuid[]) AS named(client_id)
-					LEFT JOIN provider_modern_evidence ON provider_modern_evidence.client_id = named.client_id
-					LEFT JOIN provide_capability ON provide_capability.client_id = named.client_id
+						provider_modern_evidence.measured_at
+					FROM provider_modern_evidence
+					WHERE
+						provider_modern_evidence.client_id = ANY($1::uuid[]) AND
+						EXISTS (
+							SELECT 1 FROM provide_key
+							WHERE
+								provide_key.client_id = provider_modern_evidence.client_id AND
+								provide_key.provide_mode IN ($2, $3)
+						)
 					`,
 					chunkClientIds,
 					ProvideModePublic,
@@ -524,30 +562,13 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 					defer rows.Close()
 					for rows.Next() {
 						var clientId server.Id
-						var providePublic, provideNetwork, declared bool
-						var postQuantum, windowResizable *bool
-						var measuredAt *time.Time
-						if err := rows.Scan(&clientId, &providePublic, &provideNetwork, &postQuantum, &windowResizable, &measuredAt, &declared); err != nil {
+						record := &ProviderModernEvidenceRecord{}
+						if err := rows.Scan(&clientId, &record.PostQuantum, &record.WindowResizable, &record.MeasuredAt); err != nil {
 							returnErr = err
 							return
 						}
-						switch {
-						case providePublic:
-							var record *ProviderModernEvidenceRecord
-							if measuredAt != nil {
-								record = &ProviderModernEvidenceRecord{
-									PostQuantum:     postQuantum != nil && *postQuantum,
-									WindowResizable: windowResizable != nil && *windowResizable,
-									MeasuredAt:      *measuredAt,
-								}
-							}
-							if classifyProviderModernEvidence(record, now) == ProviderModernOutcomeModern {
-								modernClientIds[clientId] = true
-							}
-						case provideNetwork:
-							if declared {
-								modernClientIds[clientId] = true
-							}
+						if qualifies(record) {
+							qualifiedClientIds[clientId] = true
 						}
 					}
 					returnErr = rows.Err()
@@ -563,5 +584,5 @@ func readProviderModernClientIds(ctx context.Context, clientIds []server.Id, now
 	if returnErr != nil {
 		return nil, returnErr
 	}
-	return modernClientIds, nil
+	return qualifiedClientIds, nil
 }

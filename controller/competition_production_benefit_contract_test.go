@@ -5,7 +5,6 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 
@@ -18,7 +17,7 @@ import (
 // Real schema compilation catches reason/addendum/census drift without relying
 // on a second hand-written interpretation or mutating a live reviewer API.
 func TestCompetitionProductionBenefitPublicContractConformance(t *testing.T) {
-	content, err := os.ReadFile("../../sn/api/competition.yml")
+	content, err := readCompetitionTestSnContract()
 	if err != nil {
 		t.Fatal(err)
 	}

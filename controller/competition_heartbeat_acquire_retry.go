@@ -26,19 +26,31 @@ func defaultCompetitionHeartbeatAcquireRetrySettings() competitionHeartbeatAcqui
 // Startup/idle registration retains its original single-call behavior while
 // recording only a genuine timely acknowledgement for later heartbeat use.
 func (self *Worker) registerHost(ctx context.Context, check HostSelfCheck) error {
+	expiresAt, err := self.registerHostAcknowledged(ctx, check)
+	if err == nil {
+		self.confirmedHostLeaseExpiresAt = expiresAt
+	}
+	return err
+}
+
+// The idle owner retains its acknowledgement privately until it has joined;
+// only the existing job owner writes the worker's shared confirmed bound.
+func (self *Worker) registerHostAcknowledged(ctx context.Context, check HostSelfCheck) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
 	startedAt := self.heartbeatNow()
 	if err := self.store.RegisterHost(ctx, self.settings, check); err != nil {
-		return err
+		return time.Time{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return time.Time{}, err
 	}
 	expiresAt := startedAt.Add(time.Duration(self.settings.HostHeartbeatMaxAgeSeconds) * time.Second)
 	if !self.heartbeatNow().Before(expiresAt) {
-		return ErrLeaseLost
+		return time.Time{}, ErrLeaseLost
 	}
-	self.confirmedHostLeaseExpiresAt = expiresAt
-	return nil
+	return expiresAt, nil
 }
 
 // An unknown host bound preserves the historical lock-only first refresh; it

@@ -9,6 +9,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/controller/giftcardassets"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/onboarding"
 	"github.com/urnetwork/server/reengagement"
@@ -37,6 +38,15 @@ var removedTaskTargets = []string{
 	"github.com/urnetwork/server/taskworker/work.FlushLegacySettlements",
 	"github.com/urnetwork/server/model.ApplyLegacyPayerSettlements",
 	"github.com/urnetwork/server/model.ApplyLegacySourceSettlements",
+	// the capability probe retired once URL turns measured post-quantum and
+	// windows (FP2-PROTOCOL.md §12.4); a chain capability_probe.yml had not
+	// switched off yet leaves a row here
+	"github.com/urnetwork/server/taskworker/work.CapabilityProbe",
+	// USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13):
+	// each payment's send and status check, under both of its names. Only a
+	// pending payment was ever scheduled, and none is left.
+	"github.com/urnetwork/server/controller.AdvancePayment",
+	"bringyour.com/bringyour/controller.AdvancePayment",
 }
 
 // Every statement of a startup scheduling or reap transaction ends on the
@@ -99,9 +109,14 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleDeliverAccountMessages(clientSession, tx)
-		work.SchedulePayout(clientSession, tx)
-		work.ScheduleProcessPendingPayouts(clientSession, tx)
-		work.ScheduleCancelHungAccountPayments(clientSession, tx)
+		// the gift orders' retention (04:15 UTC): cards and personal data
+		// 30 days after an order's last email
+		controller.ScheduleGiftRetention(clientSession, tx, controller.NextGiftRetentionAt(server.NowUtc()))
+		// moves queued gift years up when the paid Pro ahead of them ends early (hourly)
+		controller.ScheduleRebaseQueuedGiftYears(clientSession, tx)
+		// the hourly Stripe dunning sweep: owes the payment-failed notices a
+		// webhook missed (controller/subscription_stripe_dunning_sweep.go)
+		controller.ScheduleSweepStripeDunning(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		work.ScheduleCloseContractDeadlines(clientSession, tx)
@@ -156,9 +171,6 @@ func initTaskSchedule(ctx context.Context) {
 		// (connect/GEOMAP.md D24), and a pending row drains through the
 		// registered task below without scheduling a successor
 		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
-		// the modern provider gate's evidence (server/capprobe), apart from
-		// the URL probe's shards, quota and budget
-		work.ScheduleCapabilityProbe(clientSession, tx)
 		// active bandwidth samples in a shard of their own, apart from the
 		// URL probe's sampled-only quality tunnels
 		work.ScheduleProviderBandwidthProbe(clientSession, tx)
@@ -204,6 +216,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveOldProvideKeyChanges(clientSession, tx)
 		work.ScheduleUpdateNetworkReliabilityWindow(clientSession, tx)
 		work.ScheduleRemoveOldClientLocationReliabilities(clientSession, tx)
+		work.ScheduleRefreshCountryReliabilityMultipliers(clientSession, tx)
 		work.ScheduleUpdateClientScores(clientSession, tx)
 		work.ScheduleRemoveOldNetworkReliabilityWindow(clientSession, tx)
 		work.ScheduleSyncInitialProductUpdates(clientSession, tx)
@@ -280,26 +293,24 @@ func reapRetiredTasks(ctx context.Context) {
 	})
 }
 
-// How often a production taskworker checks the capability probe's chain;
+// How often a production taskworker checks the bandwidth probe's chain;
 // replaced by tests.
-var capabilityProbeEnsureInterval = 10 * time.Minute
+var providerBandwidthProbeEnsureInterval = 10 * time.Minute
 
-// Every capabilityProbeEnsureInterval until ctx ends, schedules the
-// capability probe's chain again when it has no task row while this
-// taskworker's capability_probe.yml switches the probe on
-// (work.EnsureCapabilityProbe). The startup schedule covers the start; this
-// brings back a chain that a pass on a taskworker with an older config, or
-// maintenance, ended since.
-func ensureCapabilityProbeChain(ctx context.Context) {
-	interval := capabilityProbeEnsureInterval
+// Every providerBandwidthProbeEnsureInterval until ctx ends, schedules the
+// bandwidth probe's chain again when it has no task row while this
+// taskworker's settings switch the probe on
+// (work.EnsureProviderBandwidthProbe). The startup schedule covers the
+// start; this brings back a chain that a pass on a taskworker with an older
+// config, or maintenance, ended since.
+func ensureProviderBandwidthProbeChain(ctx context.Context) {
+	interval := providerBandwidthProbeEnsureInterval
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(interval):
 		}
-		server.HandleError(func() { work.EnsureCapabilityProbe(ctx) })
-		// the bandwidth probe's chain returns the same way
 		server.HandleError(func() { work.EnsureProviderBandwidthProbe(ctx) })
 	}
 }
@@ -321,6 +332,9 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 // initTaskWorkerWithSettings selects targets before the worker can claim rows.
 func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorker {
 	taskWorker := task.NewTaskWorker(ctx, taskWorkerSettingsForProfile(settings, profile))
+
+	// the gift cards' fonts and scenes, which link into the taskworker only
+	controller.InstallGiftCardAssets(giftcardassets.FS)
 
 	// 2024.11.15 migration from "bringyour.com" to new package
 
@@ -350,7 +364,14 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredAuthCodesPost,
 			"bringyour.com/service/taskworker/work.RemoveExpiredAuthCodes",
 		),
-		work.NewPayoutTaskTarget(),
+		// USDC provider payouts ended (owner decisions 2026-11-12 and
+		// 2026-11-13); a queued row of these runs once as a no-op
+		// (account_payment_work.go)
+		task.NewTaskTargetWithPost(
+			work.Payout,
+			work.PayoutPost,
+			"bringyour.com/service/taskworker/work.Payout",
+		),
 		task.NewTaskTargetWithPost(
 			work.ProcessPendingPayouts,
 			work.ProcessPendingPayoutsPost,
@@ -363,6 +384,25 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.DeliverAccountMessages,
 			controller.DeliverAccountMessagesPost,
+		),
+		// a paid gift order's cards, then its emails (gift_delivery.go)
+		task.NewTaskTargetWithPost(
+			controller.GiftRenderCards,
+			controller.GiftRenderCardsPost,
+		),
+		// the gift orders' daily retention
+		task.NewTaskTargetWithPost(
+			controller.GiftRetention,
+			controller.GiftRetentionPost,
+		),
+		// the gift year queue's hourly reconciliation (gift_requeue_task.go)
+		task.NewTaskTargetWithPost(
+			controller.RebaseQueuedGiftYears,
+			controller.RebaseQueuedGiftYearsPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.SweepStripeDunning,
+			controller.SweepStripeDunningPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.PlaySubscriptionRenewal,
@@ -472,11 +512,6 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			"bringyour.com/bringyour/controller.RefreshReferralTransferBalances",
 		),
 		task.NewTaskTargetWithPost(
-			controller.AdvancePayment,
-			controller.AdvancePaymentPost,
-			"bringyour.com/bringyour/controller.AdvancePayment",
-		),
-		task.NewTaskTargetWithPost(
 			controller.ProviderIntentCheck,
 			controller.ProviderIntentCheckPost,
 		),
@@ -546,7 +581,6 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		),
 		work.NewProviderEgressProbeTaskTarget(),
 		work.NewProviderEgressProbeDisabledTaskTarget(),
-		work.NewCapabilityProbeTaskTarget(),
 		work.NewProviderBandwidthProbeTaskTarget(),
 		task.NewTaskTargetWithPost(work.RollupProviderEgressTallies, work.RollupProviderEgressTalliesPost),
 		task.NewTaskTargetWithPost(
@@ -664,6 +698,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveOldClientLocationReliabilities,
 			work.RemoveOldClientLocationReliabilitiesPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RefreshCountryReliabilityMultipliers,
+			work.RefreshCountryReliabilityMultipliersPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.UpdateClientScores,

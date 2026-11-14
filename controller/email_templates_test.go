@@ -57,8 +57,6 @@ func TestEmailTemplatesRender(t *testing.T) {
 			Top200Rank:  9,
 			EpochEnd:    server.NowUtc(),
 		}, true},
-		{&MissingWalletTemplate{PaymentId: server.NewId(), Payout: model.UsdToNanoCents(5.00)}, true},
-		{&UsdcPayoutSentTemplate{Transfer: model.UsdToNanoCents(29.94), WalletSuffix: "AbCd", SentTime: server.NowUtc(), TxHash: "5synthetictransactionhash"}, false},
 		{&SubscriptionTransferBalanceCodeTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 10 * model.Tib}, false},
 		{&SubscriptionDataAppliedTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 1 * model.Tib, NetworkName: "brien"}, false},
 		{&X402ReceiptTemplate{
@@ -83,6 +81,23 @@ func TestEmailTemplatesRender(t *testing.T) {
 			Currency:         "usd",
 		}, true},
 		{&SubscriptionPaymentFailedTemplate{AmountDue: 1999, Currency: "eur"}, true},
+		// a payment waiting on the customer's bank (3D Secure): the reminders
+		// to confirm it
+		{&SubscriptionPaymentFailedTemplate{
+			ActionRequired:   true,
+			HostedInvoiceUrl: "https://invoice.stripe.com/i/acct_synthetic/live_synthetic?s=ap",
+			AmountDue:        4000,
+			Currency:         "usd",
+			NextAttemptTime:  &paymentFailedNextAttempt,
+		}, true},
+		{&SubscriptionPaymentFailedTemplate{
+			Final:            true,
+			ActionRequired:   true,
+			HostedInvoiceUrl: "https://invoice.stripe.com/i/acct_synthetic/live_synthetic?s=ap",
+			AmountDue:        500,
+			Currency:         "usd",
+		}, true},
+		{&SubscriptionPaymentFailedTemplate{ActionRequired: true, AmountDue: 1999, Currency: "eur"}, true},
 		// the security notices are email only: no sms body
 		{securityWalletNoticeSample(), false},
 		{securitySignInNoticeSample(model.SecuritySignInAdded, model.SecuritySignInRemoved), false},
@@ -94,6 +109,20 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStoreApple}, true},
 		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStorePlay}, true},
 		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStoreStripe}, true},
+		// a paid gift order's emails, as loaded when sent (gift_delivery.go);
+		// every language is in TestGiftEmailTemplatesRenderEveryLanguage
+		{func() Template {
+			order, codes := giftEmailTestOrder("en", model.GiftDeliveryThem, 3, "Sam", true)
+			return giftBuyerTestTemplate(order, codes)
+		}(), false},
+		{func() Template {
+			order, codes := giftEmailTestOrder("en", model.GiftDeliveryMe, 1, "", false)
+			return giftBuyerTestTemplate(order, codes)
+		}(), false},
+		{func() Template {
+			order, codes := giftEmailTestOrder("en", model.GiftDeliveryThem, 2, "Sam", true)
+			return giftFriendTestTemplate(order, codes, 1)
+		}(), false},
 	}
 
 	imageSrc := regexp.MustCompile(`src="([^"]+)"`)
@@ -271,54 +300,5 @@ func TestEmailTemplatesDeepLinks(t *testing.T) {
 	codeLink := "https://ur.io/app/balance-codes#code=K7QX3M2PNB4DLZ8R9YWC5AGHT6"
 	if !strings.Contains(bodyHtml, `href="`+codeLink+`"`) || !strings.Contains(bodyText, codeLink) {
 		t.Errorf("balance code deep link missing: want %s", codeLink)
-	}
-
-	// USDC is paid only to a Solana (or Polygon) payout wallet, never to the
-	// Bittensor wallet the Earnings screen connects, so the missing wallet
-	// reminder names Solana and opens the Solana connect flow on Earnings; the
-	// old wallets route only redirects to Earnings
-	missingWallet := &MissingWalletTemplate{PaymentId: server.NewId(), Payout: model.UsdToNanoCents(3.87)}
-	subject, bodyHtml, bodyText, err := RenderEmailTemplate(missingWallet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sms, err := RenderSmsTemplate(missingWallet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	walletLink := "https://ur.io/app/account/earnings?wallet=solana"
-	if !strings.Contains(bodyHtml, `href="`+walletLink+`"`) || !strings.Contains(bodyText, walletLink) || !strings.Contains(sms, walletLink) {
-		t.Errorf("missing wallet deep link missing: want %s", walletLink)
-	}
-	for _, want := range []string{
-		"Connect a Solana wallet",
-		"3.87 USDC waiting",
-		"not to a Bittensor wallet",
-		"three-dot menu (Wallet options)",
-		`"Connect Solana wallet"`,
-	} {
-		if !strings.Contains(bodyHtml, want) || !strings.Contains(bodyText, want) {
-			t.Errorf("missing wallet email missing %q", want)
-		}
-	}
-	if !strings.Contains(bodyHtml, ">Connect Solana wallet</a>") {
-		t.Errorf("missing wallet button should read Connect Solana wallet")
-	}
-	if !strings.Contains(subject, "Connect a Solana wallet") || !strings.Contains(sms, "Connect a Solana wallet") {
-		t.Errorf("missing wallet subject and sms should ask for a Solana wallet, got %q and %q", subject, sms)
-	}
-	for _, part := range []string{subject, bodyHtml, bodyText, sms} {
-		if strings.Contains(part, "https://ur.io/app/account/wallets") {
-			t.Errorf("missing wallet message still links the old wallets route")
-		}
-	}
-
-	// a phone account gets one GSM-7 segment even at a five-figure amount
-	bigSms, err := RenderSmsTemplate(&MissingWalletTemplate{PaymentId: server.NewId(), Payout: model.UsdToNanoCents(12345.67)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bigSms) > 160 {
-		t.Errorf("missing wallet sms is %d bytes, over one segment: %q", len(bigSms), bigSms)
 	}
 }

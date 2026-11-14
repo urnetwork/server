@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -41,12 +41,12 @@ func TestPorts(t *testing.T) {
 	connect.AssertEqual(t, RequireExpandPorts("1+2,5,7+1,10"), []int{1, 2, 3, 5, 7, 8, 10})
 
 	for range 1024 {
-		n := mathrand.Intn(128)
+		n := mathrand.IntN(128)
 
 		ports := []int{}
 		uniquePorts := map[int]bool{}
 		for range n {
-			p := mathrand.Intn(32)
+			p := mathrand.IntN(32)
 			ports = append(ports, p)
 			uniquePorts[p] = true
 		}

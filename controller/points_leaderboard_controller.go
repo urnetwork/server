@@ -31,8 +31,9 @@ const (
 	pointsLeaderboardMaxLimit     = 200
 
 	// pointsLeaderboardRebuildInterval is the fallback cadence. Rebuilds are
-	// also triggered when a payout plan commits and when a new operator week
-	// closes. ST finalization is not a points-leaderboard prerequisite.
+	// also triggered when an operator block award commits and when a new
+	// operator week closes. ST finalization is not a points-leaderboard
+	// prerequisite.
 	pointsLeaderboardRebuildInterval = 1 * time.Hour
 
 	pointsLeaderboardEmojiTagMessage = "Use 1 to 6 emoji."
@@ -520,7 +521,7 @@ func scheduleRebuildPointsLeaderboardAfter(clientSession *session.ClientSession,
 }
 
 // TriggerRebuildPointsLeaderboardInTx asks for a rebuild now: after an epoch
-// finalizes or a payout plan commits. It uses its own run-once key so a
+// finalizes or an operator block award commits. It uses its own run-once key so a
 // trigger that lands while a rebuild is running still queues one more run
 // instead of merging into the row being executed and getting lost.
 func TriggerRebuildPointsLeaderboardInTx(clientSession *session.ClientSession, tx server.PgTx) {

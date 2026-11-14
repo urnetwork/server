@@ -438,13 +438,15 @@ func TestProductUpdatesMirrorMarketingSuppression(t *testing.T) {
 		run("suppress")
 		expectLists("suppressed", false, false)
 
-		// a replayed suppression keeps the first reason and converges
-		SuppressNetworkMarketing(ctx, networkId, onboarding.ExitBounced, now.Add(time.Minute))
+		// a replayed suppression keeps the first reason and converges (a
+		// reason no connection lifts would replace the sunset:
+		// model.SuppressNetworkMarketingInTx)
+		SuppressNetworkMarketing(ctx, networkId, reengagement.SuppressSunset, now.Add(time.Minute))
 		requireQueuedMirror(tb, ctx, userId)
 		run("replayed suppression")
 		expectLists("replayed suppression", false, false)
-		if state := model.GetNetworkMailState(ctx, networkId); state.SuppressedReason != reengagement.SuppressSunset {
-			tb.Fatal("a replay replaced the first suppression's reason", state.SuppressedReason)
+		if state := model.GetNetworkMailState(ctx, networkId); state.SuppressedReason != reengagement.SuppressSunset || !state.SuppressedAt.Equal(now) {
+			tb.Fatal("a replay replaced the first suppression", state.SuppressedReason, state.SuppressedAt)
 		}
 
 		// a lift puts the address back on network_users; a replayed lift does nothing
@@ -612,7 +614,8 @@ func TestMirrorNetworkMarketingSuppressionsQueuesEverySuppressedNetwork(t *testi
 		}
 
 		for range 2 {
-			if queued := mirrorNetworkMarketingSuppressions(ctx, 2); queued != len(suppressedUserIds) {
+			pacer := newProductUpdatesSyncPacer(server.NowUtc(), DefaultProductUpdatesMirrorSettings())
+			if queued := mirrorNetworkMarketingSuppressions(ctx, pacer, 2); queued != len(suppressedUserIds) {
 				tb.Fatal("the backfill queued", queued, "want", len(suppressedUserIds))
 			}
 			for _, userId := range suppressedUserIds {
@@ -620,6 +623,95 @@ func TestMirrorNetworkMarketingSuppressionsQueuesEverySuppressedNetwork(t *testi
 			}
 			if syncs := pendingProductUpdatesSyncs(ctx); len(syncs) != len(suppressedUserIds) {
 				tb.Fatal("expected one queued sync per suppressed network", len(syncs))
+			}
+		}
+	})
+}
+
+// A network whose sign-up country gets no marketing (the mail policy's
+// default no_marketing_countries, Iran among them since 2026-11-13) comes off
+// both lists at its next sync, stays off on a repeat, and the initial sync
+// never puts it back, though its product updates are on. Before, the sync
+// added such an address to network_users like any other.
+func TestProductUpdatesKeepNoMarketingCountriesOffTheLists(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(tb testing.TB) {
+		ctx := tb.Context()
+		networkId, userId := server.NewId(), server.NewId()
+		email := model.Testing_CreateNetwork(ctx, networkId, "synthetic-country-mirror", userId)
+		model.AccountPreferencesSetForNetwork(ctx, networkId, true)
+		model.CreateNetworkOnboarding(ctx, &model.NetworkOnboarding{NetworkId: networkId, CreatedAt: server.NowUtc(), Email: true, Country: "IR"})
+		previousNetworks, previousUpdates := newNetworksListId, productUpdatesListId
+		newNetworksListId, productUpdatesListId = func() int { return 101 }, func() int { return 102 }
+		defer func() { newNetworksListId, productUpdatesListId = previousNetworks, previousUpdates }()
+		brevo := newBrevoListFixture(t, email)
+		// on both lists from before the country joined the policy
+		brevo.put(101)
+		brevo.put(102)
+		owner := session.NewLocalClientSession(ctx, "", nil)
+		defer owner.Cancel()
+		sync := func(label string) {
+			tb.Helper()
+			if _, err := SyncProductUpdatesForUser(&SyncProductUpdatesForUserArgs{UserId: userId}, owner); err != nil {
+				tb.Fatal(label, err)
+			}
+			if brevo.on(101) || brevo.on(102) {
+				tb.Fatal(label, "a no-marketing country's address is on the lists", brevo.on(101), brevo.on(102))
+			}
+		}
+		sync("sync")
+		sync("repeated sync")
+		if err := SyncInitialProductUpdates(ctx); err != nil {
+			tb.Fatal(err)
+		}
+		if brevo.on(101) || brevo.on(102) {
+			tb.Fatal("the initial sync put a no-marketing country's address on the lists")
+		}
+	})
+}
+
+// The backfill queues the sync of every network of a no-marketing country,
+// across pages, one paced slot each and never at once, and calls Brevo for
+// nothing itself; a repeat keeps each sync's slot.
+func TestMirrorNoMarketingCountryNetworksQueuesPacedSyncs(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(tb testing.TB) {
+		ctx := tb.Context()
+		newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("the backfill called Brevo instead of queueing the sync", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}))
+		now := server.NowUtc()
+		userIds := map[string]server.Id{}
+		networkIds := map[string]server.Id{}
+		for _, country := range []string{"IR", "SY", "US"} {
+			networkId, userId := server.NewId(), server.NewId()
+			model.Testing_CreateNetwork(ctx, networkId, "synthetic-backfill-"+strings.ToLower(country), userId)
+			model.AccountPreferencesSetForNetwork(ctx, networkId, true)
+			model.CreateNetworkOnboarding(ctx, &model.NetworkOnboarding{NetworkId: networkId, CreatedAt: now, Email: true, Country: country})
+			userIds[country], networkIds[country] = userId, networkId
+		}
+		// the slots in network id order
+		order := []string{"IR", "SY"}
+		if networkIds["SY"].Less(networkIds["IR"]) {
+			order = []string{"SY", "IR"}
+		}
+		start := now.Add(time.Hour)
+		for range 2 {
+			pacer := newProductUpdatesSyncPacer(start, &ProductUpdatesMirrorSettings{SyncsPerSecond: 4})
+			if queued := mirrorNoMarketingCountryNetworks(ctx, []string{"IR", "SY", "CU", "KP"}, pacer, 1); queued != 2 {
+				tb.Fatal("the backfill queued", queued)
+			}
+			if syncs := pendingProductUpdatesSyncs(ctx); len(syncs) != 2 {
+				tb.Fatal("expected one queued sync per no-marketing network", len(syncs))
+			}
+			for i, country := range order {
+				queued := requireQueuedMirror(tb, ctx, userIds[country])
+				if want := start.Add(time.Duration(i) * 250 * time.Millisecond); !queued.RunAt.Equal(want) {
+					tb.Fatal("slot of", country, queued.RunAt, "want", want)
+				}
 			}
 		}
 	})

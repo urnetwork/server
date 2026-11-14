@@ -101,9 +101,6 @@ var accountMessageTemplates = map[string]func() Template{
 	(&GammaChargeSkippedTemplate{}).Name(): func() Template {
 		return &GammaChargeSkippedTemplate{}
 	},
-	(&MissingWalletTemplate{}).Name(): func() Template {
-		return &MissingWalletTemplate{}
-	},
 	// written by the model (model.AuthPasswordSetTemplateName)
 	(&AuthPasswordSetTemplate{}).Name(): func() Template {
 		return &AuthPasswordSetTemplate{}
@@ -130,10 +127,18 @@ var accountMessageTemplates = map[string]func() Template{
 	(&TrialEndingTemplate{}).Name(): func() Template {
 		return &TrialEndingTemplate{}
 	},
+	// a paid gift order's cards (gift_delivery.go): the buyer's now, each
+	// friend's on the buyer's date; each reads its order and card when sent
+	(&GiftCardsBuyerTemplate{}).Name(): func() Template {
+		return &GiftCardsBuyerTemplate{}
+	},
+	(&GiftCardFriendTemplate{}).Name(): func() Template {
+		return &GiftCardFriendTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,
-// withheld, lease_lost).
+// lease_lost).
 var accountMessageDeliveryCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -173,8 +178,29 @@ type accountMessage struct {
 	networkId *server.Id
 	userAuth  string
 	template  Template
-	// a held message waits for its writer to release it
-	held bool
+	// nil is due at once; otherwise due at this time, at once when it has passed
+	deliverTime *time.Time
+}
+
+// A template that reads what it renders when it is sent instead of keeping it
+// in the outbox (a gift's order, codes and card PDF, so a PDF never sits in the
+// stored json). A load error is a failed attempt that says nothing about the
+// sender; errAccountMessageWithdrawn gives the message up at once.
+type accountMessageLoader interface {
+	LoadAccountMessage(ctx context.Context) error
+}
+
+// The state that owed a message no longer does (a refunded gift order): the
+// delivery gives the message up instead of retrying it.
+var errAccountMessageWithdrawn = errors.New("withdrawn")
+
+// A template that acts once its message is finished: sent, or given up after
+// it was decoded (a friend's gift email lets an unlinked crypto order forget
+// its buyer's address). It runs after the outcome is recorded and never
+// changes it; an error is logged, so the work must also be done elsewhere
+// for a message given up undecoded, or a run that stopped in between.
+type accountMessageFinisher interface {
+	AccountMessageFinished(ctx context.Context)
 }
 
 // The model's arguments for the message. The template must go through the
@@ -194,7 +220,7 @@ func (self *accountMessage) args() *model.AccountMessageArgs {
 		UserAuth:     self.userAuth,
 		TemplateName: templateName,
 		TemplateJson: string(templateJson),
-		Held:         self.held,
+		DeliverTime:  self.deliverTime,
 	}
 }
 
@@ -202,15 +228,6 @@ func (self *accountMessage) args() *model.AccountMessageArgs {
 // Returns false when a message with the key exists.
 func addAccountMessageInTx(ctx context.Context, tx server.PgTx, message *accountMessage) bool {
 	return model.AddAccountMessageInTx(ctx, tx, message.args())
-}
-
-// Adds the messages in the caller's transaction in one round trip.
-func addAccountMessagesInTx(ctx context.Context, tx server.PgTx, messages []*accountMessage) {
-	argsList := []*model.AccountMessageArgs{}
-	for _, message := range messages {
-		argsList = append(argsList, message.args())
-	}
-	model.AddAccountMessagesInTx(ctx, tx, argsList)
 }
 
 // The template a stored message renders, decoded from its fields.
@@ -262,11 +279,7 @@ type accountMessageDelivery struct {
 	sentCount               int
 	retryCount              int
 	abandonCount            int
-	withheldCount           int
 	consecutiveFailureCount int
-
-	// the templates this run abandons unsent, by the reason it records
-	withheldTemplates map[string]string
 }
 
 // A run that sends with `sender` and reads time from `now`.
@@ -288,7 +301,6 @@ func newAccountMessageDelivery(
 // budget or the context ended the run; a run that stops after failed sends
 // leaves the rest to the next interval.
 func (self *accountMessageDelivery) Run() (more bool) {
-	self.withheldTemplates = withheldAccountMessageTemplates()
 	endTime := self.now().Add(self.settings.runBudget)
 	for {
 		select {
@@ -311,17 +323,6 @@ func (self *accountMessageDelivery) Run() (more bool) {
 	}
 }
 
-// The templates no delivery sends now, by the reason recorded on each message
-// it abandons. While wallet requests are off, a missing-wallet notice that was
-// already released is abandoned unsent.
-func withheldAccountMessageTemplates() map[string]string {
-	withheld := map[string]string{}
-	if !usdcWalletRequestsOn() {
-		withheld[(&MissingWalletTemplate{}).Name()] = "withheld: wallet requests are off (usdc_payout.yml)"
-	}
-	return withheld
-}
-
 // The wait before a message's next attempt, after `attemptCount` failed ones.
 func (self *accountMessageDelivery) retryDelay(attemptCount int) time.Duration {
 	delay := self.settings.retryBaseDelay
@@ -342,23 +343,23 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 	defer recordCancel()
 
 	templateLabel := accountMessageTemplateLabel(message.TemplateName)
-	if reason, ok := self.withheldTemplates[message.TemplateName]; ok {
-		if !model.AbandonAccountMessage(recordCtx, message.MessageId, *message.ClaimId, self.now(), reason) {
-			self.reportLeaseLost(message)
-			return
-		}
-		self.withheldCount += 1
-		accountMessageDeliveryCounter.WithLabelValues(templateLabel, "withheld").Inc()
-		return
-	}
+	// nil until decoded
+	var template Template
 	err := func() error {
 		if self.settings.maxAttemptCount < message.AttemptCount {
 			return fmt.Errorf("claimed %d times without a recorded outcome", message.AttemptCount)
 		}
-		template, err := decodeAccountMessageTemplate(message.TemplateName, message.TemplateJson)
+		decoded, err := decodeAccountMessageTemplate(message.TemplateName, message.TemplateJson)
 		if err != nil {
 			// says nothing about the sender
 			return err
+		}
+		template = decoded
+		if loader, ok := template.(accountMessageLoader); ok {
+			// what the message renders, read now; says nothing about the sender
+			if err := loader.LoadAccountMessage(self.ctx); err != nil {
+				return err
+			}
 		}
 		if err := self.sender.SendAccountMessageTemplate(message.UserAuth, template); err != nil {
 			// failed sends in a row end the run
@@ -372,6 +373,7 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 		if model.CompleteAccountMessage(recordCtx, message.MessageId, *message.ClaimId, self.now()) {
 			self.sentCount += 1
 			accountMessageDeliveryCounter.WithLabelValues(templateLabel, "sent").Inc()
+			self.finished(template)
 		} else {
 			self.reportLeaseLost(message)
 		}
@@ -379,17 +381,21 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 	}
 
 	failure := "failed"
-	if errors.Is(err, context.DeadlineExceeded) {
+	withdrawn := errors.Is(err, errAccountMessageWithdrawn)
+	if withdrawn {
+		failure = "withdrawn"
+	} else if errors.Is(err, context.DeadlineExceeded) {
 		failure = "timeout"
 	}
 	now := self.now()
-	if self.settings.maxAttemptCount <= message.AttemptCount {
+	if self.settings.maxAttemptCount <= message.AttemptCount || withdrawn {
 		if !model.AbandonAccountMessage(recordCtx, message.MessageId, *message.ClaimId, now, err.Error()) {
 			self.reportLeaseLost(message)
 			return
 		}
 		self.abandonCount += 1
 		accountMessageDeliveryCounter.WithLabelValues(templateLabel, "abandoned").Inc()
+		self.finished(template)
 		if suppressedCount, ok := accountMessageAbandonReports.Allow(now); ok {
 			glog.Infof(
 				"[outbox]abandoned account message %s (%s) after %d attempts: the last %s; %d more abandoned since the last report\n",
@@ -422,6 +428,21 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 	}
 }
 
+// Lets a template act on its message's recorded outcome
+// (accountMessageFinisher), within its own bound; nothing for a template not
+// decoded.
+func (self *accountMessageDelivery) finished(template Template) {
+	finisher, ok := template.(accountMessageFinisher)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(self.ctx), accountMessageRecordTimeout)
+	defer cancel()
+	server.HandleError(func() {
+		finisher.AccountMessageFinished(ctx)
+	})
+}
+
 // Counts and reports a claim whose lease ended before its outcome was recorded.
 // Another attempt claimed the message, so it may be sent twice.
 func (self *accountMessageDelivery) reportLeaseLost(message *model.AccountMessage) {
@@ -443,10 +464,9 @@ type DeliverAccountMessagesArgs struct {
 
 // What one delivery run did.
 type DeliverAccountMessagesResult struct {
-	SentCount     int `json:"sent_count"`
-	RetryCount    int `json:"retry_count"`
-	AbandonCount  int `json:"abandon_count"`
-	WithheldCount int `json:"withheld_count"`
+	SentCount    int `json:"sent_count"`
+	RetryCount   int `json:"retry_count"`
+	AbandonCount int `json:"abandon_count"`
 	// due messages may be left; the next run starts at once
 	More bool `json:"more"`
 }
@@ -470,18 +490,12 @@ func scheduleDeliverAccountMessagesAt(clientSession *session.ClientSession, tx s
 	)
 }
 
-// Releases the missing-wallet notices a stopped payout run left held, delivers
-// the due account messages, then removes finished ones past their retention.
+// Delivers the due account messages, then removes finished ones past their
+// retention.
 func DeliverAccountMessages(
 	_ *DeliverAccountMessagesArgs,
 	clientSession *session.ClientSession,
 ) (*DeliverAccountMessagesResult, error) {
-	// a payout run that stopped before its release leaves its notices held
-	releaseMissingWalletNotices(
-		clientSession.Ctx,
-		server.NowUtc().Add(-missingWalletNoticeHoldTimeout),
-		configuredMissingWalletNoticeMinPayout,
-	)
 	delivery := newAccountMessageDelivery(
 		clientSession.Ctx,
 		GetAWSMessageSender(),
@@ -500,11 +514,10 @@ func DeliverAccountMessages(
 		)
 	}
 	return &DeliverAccountMessagesResult{
-		SentCount:     delivery.sentCount,
-		RetryCount:    delivery.retryCount,
-		AbandonCount:  delivery.abandonCount,
-		WithheldCount: delivery.withheldCount,
-		More:          more,
+		SentCount:    delivery.sentCount,
+		RetryCount:   delivery.retryCount,
+		AbandonCount: delivery.abandonCount,
+		More:         more,
 	}, nil
 }
 

@@ -43,6 +43,17 @@ import (
 // successes below it leaves every bucket, Online included, as one without a
 // success does, under the same kill switch and, unless
 // online_url_ratio_country_exemption is false, the same country guard.
+//
+// The country floor (network_client_score_country_floor.go) acts after these
+// decisions, in the score export: a country with fewer than
+// country_floor_providers public providers online gets its best providers
+// that the URL bar alone keeps out of Online (providerEgressBarredFromOnline)
+// admitted there, so no country goes empty while it has a connected provider
+// past every other gate. Quality and Speed keep the bar's members alone; their
+// answers reach the admitted providers through the Online fallback. The
+// decisions themselves are unchanged; the location counts add the admissions
+// the export publishes, and the dashboard counts, provider status and inspect
+// read the decisions alone.
 
 // The weights of the index and the bounds of its evidence, with the other
 // tunables of the egress rules. The `egress_index` block of provider.yml,
@@ -59,6 +70,9 @@ type EgressIndexSettings struct {
 	MaxFailureIndex int
 	// Evidence lifetime, capped at eight hours; the exact boundary is stale.
 	EvidenceMaxAge time.Duration
+	// Maximum age of a post-quantum export snapshot, in addition to the
+	// eight-hour proof lifetime. Non-positive gives no reusable proof.
+	PostQuantumMaxStaleness time.Duration
 	// A window passes when
 	// QualityOkNumerator·total ≤ QualityOkDenominator·ok over all its scored
 	// loads, compared in integers so the boundary is exact for every total.
@@ -178,6 +192,23 @@ type EgressIndexSettings struct {
 	// the kill switch, and a switch that is unreadable, given twice or given
 	// without a value is false. RequiresModernProvider applies it.
 	QualitySpeedRequiresModernProvider *bool
+	// The country floor (network_client_score_country_floor.go, owner
+	// decision 2026-11-13): the fewest public providers each country keeps
+	// online. Where fewer pass the URL bar, the score export admits to
+	// Online the country's best providers that the bar alone keeps out, in
+	// the Online fallback's order, until Online holds this many or the
+	// candidates run out. It only adds: Quality and Speed keep the bar's
+	// members, so their answers lend an admitted provider only from the
+	// Online fallback, after every native and borrowed native. The taskworker's
+	// score export and location counts read it, so a change is a config
+	// release and a taskworker restart. Non-positive is off, the kill switch.
+	// `country_floor_providers` in the egress_index block.
+	CountryFloorProviders int
+	// How long the export's publication of the floor's admissions, and the
+	// location counts' read of it, may wait on Redis
+	// (publishProviderCountryFloor). Neither holds up its pass: the export
+	// keeps its pages, and the counts count the decisions alone. Code only.
+	CountryFloorRedisTimeout time.Duration
 }
 
 // The most a connect client adds to a provider's tier from what it sees
@@ -198,14 +229,15 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 			"cdn":          1,
 			"site":         1,
 		},
-		DefaultClassWeight:   1,
-		MaxFailureIndex:      6,
-		EvidenceMaxAge:       ProviderEgressHealthMaxAge,
-		QualityOkNumerator:   4,
-		QualityOkDenominator: 5,
-		MinScoredLoads:       1,
-		CountryGate:          true,
-		BackfillTierOffset:   ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
+		DefaultClassWeight:      1,
+		MaxFailureIndex:         6,
+		EvidenceMaxAge:          ProviderEgressHealthMaxAge,
+		PostQuantumMaxStaleness: 30 * time.Minute,
+		QualityOkNumerator:      4,
+		QualityOkDenominator:    5,
+		MinScoredLoads:          1,
+		CountryGate:             true,
+		BackfillTierOffset:      ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
 		// modern-first priority replaces the modern provider gate (owner
 		// decision 2026-10-28)
 		RankModernFirst:       true,
@@ -231,6 +263,13 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		// Shadow first (owner decision 2026-10-14); absent is off, since
 		// modern-first priority replaced the gate (owner decision 2026-10-28)
 		QualitySpeedRequiresModernProvider: nil,
+		// On (owner decision 2026-11-13: keep the 80% URL bar, but never
+		// let a country go empty). Three keeps a country's answers off a
+		// single exit while admitting only its best few below the bar
+		// (FP2FIX.md, "The country floor", "Why three").
+		CountryFloorProviders: 3,
+		// as long as the online url-success guard's reads and writes wait
+		CountryFloorRedisTimeout: 2 * time.Second,
 	}
 }
 
@@ -250,6 +289,8 @@ type egressIndexSettingsBlock struct {
 	RankMeasuredFirst    *bool          `yaml:"rank_measured_first"`
 	RankModernFirst      *bool          `yaml:"rank_modern_first"`
 	LocationFallback     *bool          `yaml:"location_fallback"`
+	// non-positive turns the country floor off
+	CountryFloorProviders *int `yaml:"country_floor_providers"`
 }
 
 // Whether this process has logged that its provider.yml still carries the
@@ -500,6 +541,9 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	// below one past the highest native tier a borrowed provider could tie
 	// with, or rank ahead of, a native one even before the client's demerits
 	setInt("backfill_tier_offset", overrides.BackfillTierOffset, ClientScoreCutoffTier+1, &settings.BackfillTierOffset)
+	// zero turns the country floor off; a negative value is out of range
+	// and keeps the default, like any other
+	setInt("country_floor_providers", overrides.CountryFloorProviders, 0, &settings.CountryFloorProviders)
 
 	numerator := settings.QualityOkNumerator
 	denominator := settings.QualityOkDenominator
@@ -831,12 +875,53 @@ func (self providerCountFilter) egressFacts(
 	egressQuality *bool,
 	settings *EgressIndexSettings,
 ) *providerEgressFacts {
+	// Read accepted health directly so an old rollup cannot extend freshness.
+	counts, ok := self.healthCounts[clientId]
+	return self.egressFactsWithCounts(clientId, rollupCountryCode, egressIndex, egressQuality, settings, counts, ok)
+}
+
+// The facts the classified decision reads (FP2-PROTOCOL.md §3.4): the
+// provider's facts with the window counts its classification gives, in
+// which the runs its class forgives are passes. Every other fact, the
+// country guard the strict decision published among them, is unchanged, so
+// a provider that is not downgraded gets exactly its strict facts.
+func (self providerCountFilter) classifiedEgressFacts(
+	clientId server.Id,
+	rollupCountryCode *string,
+	egressIndex *int,
+	egressQuality *bool,
+	settings *EgressIndexSettings,
+	classification providerCapabilityClassification,
+) *providerEgressFacts {
+	counts, ok := self.healthCounts[clientId]
+	if ok {
+		counts = classification.classifiedCounts(counts)
+	}
+	return self.egressFactsWithCounts(clientId, rollupCountryCode, egressIndex, egressQuality, settings, counts, ok)
+}
+
+// The provider's facts with the window counts given: hasCounts false for a
+// provider without accepted outcomes in the window.
+func (self providerCountFilter) egressFactsWithCounts(
+	clientId server.Id,
+	rollupCountryCode *string,
+	egressIndex *int,
+	egressQuality *bool,
+	settings *EgressIndexSettings,
+	counts ProviderEgressHealthCounts,
+	hasCounts bool,
+) *providerEgressFacts {
 	publishedCountryCode := normalizeCountryCode(rollupCountryCode)
 	observedCountryCode := self.countryCodes[clientId]
-	// Read accepted health directly so an old rollup cannot extend freshness.
-	counts, urlIndex := self.urlIndex(clientId, settings)
+	urlIndex := EgressIndex{}
 	// the Online rule decides by the general catalog's outcomes alone
-	onlineCounts, onlineUrlIndex := self.onlineUrlIndex(clientId, settings)
+	onlineCounts := counts
+	onlineUrlIndex := EgressIndex{}
+	if hasCounts {
+		urlIndex = ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, self.now, settings)
+		onlineCounts = counts.onlineCounts()
+		onlineUrlIndex = ComputeEgressIndex(&EgressHealthRun{MeasuredAt: onlineCounts.MeasuredAt, OkCount: onlineCounts.OKCount, Total: onlineCounts.Total}, self.now, settings)
+	}
 	return &providerEgressFacts{
 		arinRisk:                self.arinRisk[clientId],
 		arinNonQuality:          self.arinNonQuality[clientId],
@@ -1302,6 +1387,106 @@ type ProviderEgressCounts struct {
 	// the Online members by modern outcome, every outcome present
 	// (FP2-MODERN.md, "Observability"); nil in a snapshot written before it
 	ModernOnlineCounts map[string]int64
+	// The classified decision's buckets by capability label
+	// (FP2-PROTOCOL.md §8.1): bucket, then IP label, then protocol label, to
+	// providers; every bucket and label pair present. A provider that is
+	// not downgraded counts by its strict decision, which the classified one
+	// equals for it.
+	CapabilityCounts map[string]map[string]map[string]int64
+	// The classified decision's buckets by post-quantum signal (§8.1,
+	// §12.4): bucket, then signal, to providers; every bucket and signal
+	// present.
+	PostQuantumCounts map[string]map[string]int64
+}
+
+// The IP and protocol labels the dashboard counts publish, in that order.
+var ProviderEgressCapabilityIps = []string{
+	ProviderCapabilityIpDualstack,
+	ProviderCapabilityIpIpv4,
+}
+
+var ProviderEgressCapabilityProtocols = []string{
+	ProviderCapabilityProtocolDualproto,
+	ProviderCapabilityProtocolTcp,
+}
+
+// A provider's post-quantum signal in the window (FP2-PROTOCOL.md §12.4):
+// its newest outcome positive, its newest outcome negative, or no outcome.
+const (
+	ProviderPostQuantumSignalPositive = "positive"
+	ProviderPostQuantumSignalNegative = "negative"
+	ProviderPostQuantumSignalNone     = "none"
+)
+
+// Every signal, in the order the gauge lists them.
+var ProviderPostQuantumSignals = []string{
+	ProviderPostQuantumSignalPositive,
+	ProviderPostQuantumSignalNegative,
+	ProviderPostQuantumSignalNone,
+}
+
+// The provider's post-quantum signal from its window counts. A positive and a
+// negative outcome at the same instant read negative, as postQuantumPositive
+// requires the positive one to be later.
+func providerPostQuantumSignal(counts ProviderEgressHealthCounts) string {
+	switch {
+	case counts.postQuantumPositive():
+		return ProviderPostQuantumSignalPositive
+	case counts.PostQuantumNegativeAt != nil:
+		return ProviderPostQuantumSignalNegative
+	default:
+		return ProviderPostQuantumSignalNone
+	}
+}
+
+// Every bucket with every label pair at zero, for CapabilityCounts.
+func newProviderEgressCapabilityCounts() map[string]map[string]map[string]int64 {
+	bucketCapabilityCounts := map[string]map[string]map[string]int64{}
+	for _, bucket := range ProviderEgressBuckets {
+		ipProtocolCounts := map[string]map[string]int64{}
+		for _, ip := range ProviderEgressCapabilityIps {
+			protocolCounts := map[string]int64{}
+			for _, protocol := range ProviderEgressCapabilityProtocols {
+				protocolCounts[protocol] = 0
+			}
+			ipProtocolCounts[ip] = protocolCounts
+		}
+		bucketCapabilityCounts[bucket] = ipProtocolCounts
+	}
+	return bucketCapabilityCounts
+}
+
+// Every bucket with every signal at zero, for PostQuantumCounts.
+func newProviderPostQuantumCounts() map[string]map[string]int64 {
+	bucketSignalCounts := map[string]map[string]int64{}
+	for _, bucket := range ProviderEgressBuckets {
+		signalCounts := map[string]int64{}
+		for _, signal := range ProviderPostQuantumSignals {
+			signalCounts[signal] = 0
+		}
+		bucketSignalCounts[bucket] = signalCounts
+	}
+	return bucketSignalCounts
+}
+
+// Counts one provider into CapabilityCounts and PostQuantumCounts: in each
+// bucket its classified decision admits, under its labels and its
+// post-quantum signal.
+func (self *ProviderEgressCounts) addCapability(decision providerEgressDecision, classification providerCapabilityClassification, signal string) {
+	buckets := []string{}
+	if decision.quality {
+		buckets = append(buckets, RankModeQuality)
+	}
+	if decision.speed {
+		buckets = append(buckets, RankModeSpeed)
+	}
+	if decision.online {
+		buckets = append(buckets, ProviderEgressBucketOnline)
+	}
+	for _, bucket := range buckets {
+		self.CapabilityCounts[bucket][classification.class.ip()][classification.class.protocol()] += 1
+		self.PostQuantumCounts[bucket][signal] += 1
+	}
 }
 
 // Decides every connected, valid, active, top-level provider with a Public
@@ -1317,6 +1502,8 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 		MaxIndex:               settings.MaxIndex(),
 		ModernGateShadowCounts: newProviderModernGateShadowCounts(),
 		ModernOnlineCounts:     newProviderModernOnlineCounts(),
+		CapabilityCounts:       newProviderEgressCapabilityCounts(),
+		PostQuantumCounts:      newProviderPostQuantumCounts(),
 	}
 	for _, bucket := range ProviderEgressBuckets {
 		counts.BucketIndexCounts[bucket] = map[string]int64{}
@@ -1327,6 +1514,9 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 
 	rows := []providerCountRow{}
 	clientIds := []server.Id{}
+	// the families each provider's connections prove, for its advertised
+	// capability labels (FP2-PROTOCOL.md §3.1)
+	clientIdIpFamilies := map[server.Id]uint8{}
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -1335,7 +1525,9 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 				network_client_location_reliability.client_id,
 				network_client_location_reliability.egress_index,
 				network_client_location_reliability.egress_quality,
-				country_location.country_code
+				country_location.country_code,
+				network_client_location_reliability.ipv4_proven,
+				network_client_location_reliability.ipv6_proven
 			FROM network_client_location_reliability
 			INNER JOIN network_client ON
 				network_client.client_id = network_client_location_reliability.client_id
@@ -1358,9 +1550,11 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var row providerCountRow
-				server.Raise(result.Scan(&row.clientId, &row.egressIndex, &row.egressQuality, &row.claimedCountryCode))
+				var ipv4Proven, ipv6Proven bool
+				server.Raise(result.Scan(&row.clientId, &row.egressIndex, &row.egressQuality, &row.claimedCountryCode, &ipv4Proven, &ipv6Proven))
 				rows = append(rows, row)
 				clientIds = append(clientIds, row.clientId)
+				clientIdIpFamilies[row.clientId] = clientScoreIpFamilies(ipv4Proven, ipv6Proven)
 			}
 		})
 	})
@@ -1392,6 +1586,17 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 			counts.ReasonCounts[decision.reason] += 1
 		}
 		countProviderModernGateShadow(counts.ModernGateShadowCounts, decision)
+		// the classified decision (FP2-PROTOCOL.md §3.4), which selector-mode
+		// requests draw by; the strict one above stays what the other counts
+		// read
+		healthCounts := countFilter.healthCounts[row.clientId]
+		classification := classifyProviderCapabilityOfFamilies(healthCounts, clientIdIpFamilies[row.clientId], countFilter.now, settings)
+		classifiedDecision := decision
+		if classification.downgraded() {
+			classifiedFacts := countFilter.classifiedEgressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings, classification)
+			classifiedDecision = decideProviderEgress(classifiedFacts, egressTestEnabled)
+		}
+		counts.addCapability(classifiedDecision, classification, providerPostQuantumSignal(healthCounts))
 	}
 	return counts
 }

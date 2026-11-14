@@ -30,6 +30,12 @@ type competitionIntakeFirstDatabaseFixture struct {
 // fixture clock is then moved backward to materialize its historical epoch;
 // all production triggers remain installed and active throughout bootstrap.
 func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context, configureFuture ...func(*Settings)) *competitionIntakeFirstDatabaseFixture {
+	return newCompetitionIntakeFirstDatabaseFixtureAt(t, ctx, time.Time{}, configureFuture...)
+}
+
+// Historical lifecycle tests backdate only their synthetic source/application
+// clock, never the real SQL lease or database clock used by a recovery claim.
+func newCompetitionIntakeFirstDatabaseFixtureAt(t *testing.T, ctx context.Context, historicalNow time.Time, configureFuture ...func(*Settings)) *competitionIntakeFirstDatabaseFixture {
 	t.Helper()
 	if server.CompetitionIntakeFirstMigrationVersion() == 0 {
 		t.Fatal("intake lifecycle fixture requires its actually registered composed migration")
@@ -74,6 +80,9 @@ func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context,
 		t.Fatal(err)
 	}
 	fixture.lease, settings.automationLease = *lease, lease
+	if !historicalNow.IsZero() {
+		currentTime = historicalNow.UTC().Truncate(time.Microsecond)
+	}
 	fixture.now = currentTime.Add(-8 * 24 * time.Hour)
 	manifest := []byte("synthetic historical immutable source manifest\n")
 	manifestHash := sha256.Sum256(manifest)
