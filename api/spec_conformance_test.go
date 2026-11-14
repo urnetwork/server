@@ -112,6 +112,7 @@ func registry() []specEndpoint {
 		{"GET", "/network/admin-events", nil, rt(model.GetNetworkAdminEventsResult{})},
 		{"GET", "/network/dns", nil, rt(sidecar.NetworkDns{})},
 		{"POST", "/network/dns/records", rt(sidecar.DnsRecordsRequest{}), rt(sidecar.DnsRecordsAnswer{})},
+		{"POST", "/network/dns/label-reclaim", rt(sidecar.DnsLabelReclaimRequest{}), rt(sidecar.DnsLabelReclaimAnswer{})},
 		{"POST", "/network/audit-webhook", rt(model.NetworkAuditWebhookArgs{}), rt(model.NetworkAuditWebhookResult{})},
 		{"POST", "/network/remove-client", rt(model.RemoveNetworkClientArgs{}), rt(model.RemoveNetworkClientResult{})},
 		{"GET", "/network/clients", nil, rt(model.NetworkClientsResult{})},

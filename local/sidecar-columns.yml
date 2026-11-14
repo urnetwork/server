@@ -249,6 +249,14 @@ tables:
       probe_time: dns-1
       probe_version: dns-1
       reported_version: dns-1
+  dns_restore_incident:
+    group: MG5
+    columns:
+      incident_id: dns-1
+      leaf_sha256: dns-1
+      name: dns-1
+      record_time: dns-1
+      root: dns-1
   network_tls_cert:
     group: MG5
     columns:
