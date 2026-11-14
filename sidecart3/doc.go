@@ -50,6 +50,11 @@
 //   - version_pair.go, §22.8's sidecar N against N±1 (TEST-M2-16): VersionPair, two dispatchers on
 //     server's exchange planting each other's newer and older types and wire majors, each answered
 //     UNIMPLEMENTED or VERSION; a binary of another commit set is not built, and every result says so.
+//   - acl_exchange_tier.go, the fault.AclExchangeTier every T3 Net names (ACL-M4-04's FS-21): sidecars'
+//     clients minted and bound as a sidecar's enrollment and bind leave them, on an exchange of the tier's
+//     own, under server's contract gate over the row's state source with sidecar.yml's switch on,
+//     network_acl_head raised as api's sequencer raises it, and a client's relay cut and restored, the one
+//     partition server's exchange takes.
 //
 // server/sidecar-t3.sh runs this with -tags sidecar_testhooks,sidecar_pending and
 // WARP_TEST_ENV_FAIL_FAST=1, inside the private test stores test-env.sh attests: its suites cadence on

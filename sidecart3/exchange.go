@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -267,14 +268,9 @@ func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, ca
 // controller as its out-of-band control, and an h1 platform transport to the handler. Answers once the controller has
 // taken its provide modes and server holds its key, so a peer's contract to it can be signed and carries that key.
 func (self *exchangePlatform) OpenClient(ctx context.Context, name string, settings *connect.ClientSettings) (platformClient *sidecartest.NetPlatformClient, returnErr error) {
-	// what ends the client once it exists, so a failure past that point leaves nothing running
-	var closeClient func()
 	defer func() {
 		// the model raises a database failure
 		if recovered := recover(); recovered != nil {
-			if closeClient != nil {
-				closeClient()
-			}
 			returnErr = fmt.Errorf("server refused client %q: %v", name, recovered)
 		}
 	}()
@@ -288,7 +284,139 @@ func (self *exchangePlatform) OpenClient(ctx context.Context, name string, setti
 	if result.Error != nil {
 		return nil, fmt.Errorf("server refused client %q: %+v", name, *result.Error)
 	}
-	clientId := *result.ClientId
+	opened, err := self.openClientAs(ctx, ctx, name, settings, *result.ClientId, *result.ByClientJwt)
+	if err != nil {
+		return nil, err
+	}
+	return &sidecartest.NetPlatformClient{
+		ClientId: connect.Id(opened.clientId),
+		Client:   opened.client,
+		Close:    opened.close,
+	}, nil
+}
+
+// One client open on server's exchange: its client, the auth its transports present, and the transport that carries
+// it now, nil while a partition holds it off the exchange (Partition). Safe for concurrent use.
+type exchangeClient struct {
+	platform *exchangePlatform
+	ctx      context.Context
+	name     string
+	clientId server.Id
+	client   *connect.Client
+	auth     *connect.ClientAuth
+
+	stateLock sync.Mutex
+	transport *connect.PlatformTransport
+	closed    bool
+}
+
+// A new h1 platform transport carrying the client to the handler, with its auth.
+func (self *exchangeClient) newTransport() *connect.PlatformTransport {
+	return connect.NewPlatformTransportWithTargetMode(
+		self.ctx,
+		self.platform.clientStrategy,
+		self.client.RouteManager(),
+		self.platform.platformUrl,
+		self.auth,
+		connect.TransportModeH1,
+		self.platform.settings.Transport,
+	)
+}
+
+// Ends the client's transport, if it has one, and the client. Safe to call again.
+func (self *exchangeClient) close() {
+	var transport *connect.PlatformTransport
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.closed {
+			return
+		}
+		self.closed = true
+		transport = self.transport
+		self.transport = nil
+	}()
+	self.client.Cancel()
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), self.platform.settings.CloseTimeout)
+	defer closeCancel()
+	if transport != nil {
+		if err := transport.CloseAndWait(closeCtx); err != nil {
+			self.platform.t.Errorf("client %q's transport did not close within %s: %v", self.name, self.platform.settings.CloseTimeout, err)
+		}
+	}
+	if err := self.client.CloseAndWait(closeCtx); err != nil {
+		self.platform.t.Errorf("client %q did not close within %s: %v", self.name, self.platform.settings.CloseTimeout, err)
+	}
+}
+
+// Takes the client off the exchange, as a server that stops relaying its frames does: its transport ends, so nothing
+// it sends reaches a peer and nothing a peer sends reaches it, while its out-of-band control, which the controller
+// answers in process, goes on. Partitioned false brings it back on a new transport and answers once that connects,
+// within settings.ProvideAckTimeout in real time.
+func (self *exchangeClient) partition(ctx context.Context, partitioned bool) error {
+	if partitioned {
+		var transport *connect.PlatformTransport
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			transport = self.transport
+			self.transport = nil
+		}()
+		if transport == nil {
+			return nil
+		}
+		closeCtx, closeCancel := context.WithTimeout(ctx, self.platform.settings.CloseTimeout)
+		defer closeCancel()
+		return transport.CloseAndWait(closeCtx)
+	}
+	var transport *connect.PlatformTransport
+	err := func() error {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.closed {
+			return fmt.Errorf("client %q is closed", self.name)
+		}
+		if self.transport == nil {
+			self.transport = self.newTransport()
+		}
+		transport = self.transport
+		return nil
+	}()
+	if err != nil {
+		return err
+	}
+	timeout := time.After(self.platform.settings.ProvideAckTimeout)
+	for {
+		// armed before the read, as ConnectedNotify asks
+		connected := transport.ConnectedNotify()
+		if transport.IsConnected() {
+			return nil
+		}
+		select {
+		case <-connected:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout:
+			return fmt.Errorf("client %q did not connect again within %s", self.name, self.platform.settings.ProvideAckTimeout)
+		}
+	}
+}
+
+// Opens a Required client as clientId, whose by-client jwt is byClientJwt, until clientCtx ends: the controller as its
+// out-of-band control and an h1 platform transport to the handler, answering once the controller has taken its provide
+// modes and server holds its key, so a peer's contract to it can be signed and carries that key. ctx bounds only the
+// waits. A failure leaves nothing running.
+func (self *exchangePlatform) openClientAs(clientCtx context.Context, ctx context.Context, name string, settings *connect.ClientSettings, clientId server.Id, byClientJwt string) (opened *exchangeClient, returnErr error) {
+	defer func() {
+		// the model raises a database failure
+		if recovered := recover(); recovered != nil {
+			if opened != nil {
+				opened.close()
+				opened = nil
+			}
+			returnErr = fmt.Errorf("server refused client %q: %v", name, recovered)
+		}
+	}()
 
 	// loopback candidates alone and no STUN server: a T3 client reaches nothing past this host
 	clientSettings := *settings
@@ -299,7 +427,7 @@ func (self *exchangePlatform) OpenClient(ctx context.Context, name string, setti
 	clientSettings.WebRtcSettings = &webRtcSettings
 
 	client := connect.NewClient(
-		ctx,
+		clientCtx,
 		connect.Id(clientId),
 		&controllerOutOfBandControl{
 			ctx:                     self.ctx,
@@ -308,29 +436,23 @@ func (self *exchangePlatform) OpenClient(ctx context.Context, name string, setti
 		},
 		&clientSettings,
 	)
-	transport := connect.NewPlatformTransportWithTargetMode(
-		ctx,
-		self.clientStrategy,
-		client.RouteManager(),
-		self.platformUrl,
-		&connect.ClientAuth{
-			ByJwt:      *result.ByClientJwt,
+	opened = &exchangeClient{
+		platform: self,
+		ctx:      clientCtx,
+		name:     name,
+		clientId: clientId,
+		client:   client,
+		auth: &connect.ClientAuth{
+			ByJwt:      byClientJwt,
 			InstanceId: connect.NewId(),
 			AppVersion: self.settings.AppVersion,
 		},
-		connect.TransportModeH1,
-		self.settings.Transport,
-	)
-	closeClient = func() {
-		client.Cancel()
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), self.settings.CloseTimeout)
-		defer closeCancel()
-		if err := transport.CloseAndWait(closeCtx); err != nil {
-			self.t.Errorf("client %q's transport did not close within %s: %v", name, self.settings.CloseTimeout, err)
-		}
-		if err := client.CloseAndWait(closeCtx); err != nil {
-			self.t.Errorf("client %q did not close within %s: %v", name, self.settings.CloseTimeout, err)
-		}
+	}
+	opened.transport = opened.newTransport()
+	fail := func(err error) (*exchangeClient, error) {
+		opened.close()
+		opened = nil
+		return nil, err
 	}
 
 	provideAck := make(chan error, 1)
@@ -346,15 +468,12 @@ func (self *exchangePlatform) OpenClient(ctx context.Context, name string, setti
 	select {
 	case err := <-provideAck:
 		if err != nil {
-			closeClient()
-			return nil, fmt.Errorf("the controller refused client %q's provide modes: %w", name, err)
+			return fail(fmt.Errorf("the controller refused client %q's provide modes: %w", name, err))
 		}
 	case <-ctx.Done():
-		closeClient()
-		return nil, ctx.Err()
+		return fail(ctx.Err())
 	case <-time.After(self.settings.ProvideAckTimeout):
-		closeClient()
-		return nil, fmt.Errorf("no ack of client %q's provide modes within %s", name, self.settings.ProvideAckTimeout)
+		return fail(fmt.Errorf("no ack of client %q's provide modes within %s", name, self.settings.ProvideAckTimeout))
 	}
 
 	// The controller seals into a contract the key server holds for its destination, and a client learns its peer's
@@ -370,19 +489,13 @@ func (self *exchangePlatform) OpenClient(ctx context.Context, name string, setti
 	for !keyRegistered() {
 		select {
 		case <-ctx.Done():
-			closeClient()
-			return nil, ctx.Err()
+			return fail(ctx.Err())
 		case <-keyRegistrationTimeout:
-			closeClient()
-			return nil, fmt.Errorf("server held no key for client %q within %s", name, self.settings.KeyRegistrationTimeout)
+			return fail(fmt.Errorf("server held no key for client %q within %s", name, self.settings.KeyRegistrationTimeout))
 		case <-time.After(self.settings.KeyRegistrationPollInterval):
 		}
 	}
-	return &sidecartest.NetPlatformClient{
-		ClientId: connect.Id(clientId),
-		Client:   client,
-		Close:    closeClient,
-	}, nil
+	return opened, nil
 }
 
 // Closes the http server, the handler and the exchange, and fails the test with any that does not go idle within

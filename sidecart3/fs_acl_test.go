@@ -35,6 +35,16 @@ func TestFs19ShareOnT3(t *testing.T) {
 	})
 }
 
+// ACL-M4-04's FS-21 (sidecartest/fault/fs21.go): a personal network's devices with no reach to each other, every client
+// on server's exchange under server's contract gate over the network's log on server's sequencer: HeadCheck over
+// control contracts, a data RPC, a stream and IP on them refused, the server partitioning its relays, and a grant's
+// data contract carrying all three. The fixed schedule, FI-10 after every step; TestT3Rows runs it under §22.8's rules.
+func TestFs21OnT3(t *testing.T) {
+	testEnvWithSchema().Run(t, func(tb testing.TB) {
+		Run(tb, fault.Fs21, nil)
+	})
+}
+
 func TestFs62AclGateOnT3(t *testing.T) {
 	testEnv().Run(t, func(tb testing.TB) {
 		fault.RunClause(tb, "FS-62", "acl gate", fault.Fs62AclGate, RuleSettings(tb, nil))

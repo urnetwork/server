@@ -4,11 +4,10 @@ package controller
 
 // §6.10.1's share rules at CreateContract (PROTO-M6-01; D-PROTO-9, X11, C13), checked across ACL's gate and this
 // code: §22.5's §8 row "no Network-mode share contract", a share's companion carrying its forward contract's seals,
-// and only the dialer's network escrowed in both directions. ACL-M6-03's rule, which turns a Public relationship
-// with a share into FriendsAndFamily and moves its escrow to the dialer's network, is not built yet, so a
-// cross-network pair's contracts here are Public, the path a share's take until that rule lands; when it lands,
-// these cases hold for FriendsAndFamily unchanged, with the destination's FriendsAndFamily key in place of its
-// Public one. On the private stack, with the seal test's fixtures.
+// and only the dialer's network escrowed in both directions. ACL-M6-03's rule, which turns a Public relationship a
+// share covers into FriendsAndFamily toward a marked sidecar and moves its escrow to the dialer's network, has its
+// own cases in connect_acl_share_test.go; no share covers a pair here, so its contracts are Public, the path of a
+// cross-network pair that no share covers. On the private stack, with the seal test's fixtures.
 
 import (
 	"bytes"
