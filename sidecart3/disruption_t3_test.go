@@ -5,13 +5,16 @@
 // Redis master's restart under an evs world, and a Postgres restart mid-request in server's api. They use real time
 // and real processes, so they build with sidecar_disruption and run in sidecar-t3.sh's nightly form only; the stream,
 // Redis and Postgres rows need the private test stores (and the Redis row the local stack's MinIO), and nginx the lb
-// rows. Each fails rather than skips without what it needs.
+// rows (and the lb row with a client the local stack's MinIO too). Each fails rather than skips without what it needs.
 //
 // What these show and what they do not:
 //
 //   - lb drain: nginx cannot retry a streamed segment PUT whose upstream is cut mid-body, and answers 502, while it
-//     re-sends a buffered PUT to the sibling. The client half, evs's client retrying that 502 and the segment landing
-//     once, is not here: the client does not retry a 502 (question test-m2-15-streamed-put-502-not-retried).
+//     re-sends a buffered PUT to the sibling. The client half (QD-758): an evs world's writer sends its segment PUTs
+//     through that nginx to two of the world's instances, a drain cuts the first one 1 KiB into its body and kills its
+//     instance, and evs's client reads nginx's 502 as no answer, sends the same bytes again, and the segment lands once
+//     on the sibling, the push committing once and reading back. Only segment PUTs go through nginx; the world's model
+//     of the lb carries the rest, which nginx buffers and re-sends itself, as the buffered twin shows.
 //   - resident: a stream whose peer's resident is killed, with the peer gone past the sender's ack timeout, resets
 //     TRANSFER_FAILED on the sender, and what the reader got is a prefix of what was sent; a resident killed under a peer
 //     that reconnects at once (a migration) keeps the stream's bytes whole or resets it, never a gap; and a mutating call
@@ -30,11 +33,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -181,6 +187,293 @@ func TestT3LbDrainRetriesABufferedPutOnTheSibling(t *testing.T) {
 	if len(served) != 2 || served[0] != drained || served[1] == drained {
 		t.Errorf("the buffered PUT reached %v, drained %s", served, drained)
 	}
+}
+
+// The client half of the lb drain row (QD-758; the file header). writerA's segment PUTs go through nginx to evs1 and
+// evs2, each block serving them with the world's own instance of its name (fault.EvsWorld.InstanceHandler); the first
+// to reach a block has that block drained, and its instance killed, once cutByteCount bytes of its body are through.
+// Safe for concurrent use.
+type lbDrainSegmentRow struct {
+	ctx     context.Context
+	content []byte
+	// how much of the first segment PUT's body its block reads before the drain
+	cutByteCount int
+	// writerA's transport to nginx, which keeps no connection, so each attempt dials it afresh
+	transport *http.Transport
+
+	stateLock sync.Mutex
+	lb        *LbFixture
+	world     *fault.EvsWorld
+	net       *sidecartest.Net
+	cutTaken  bool
+	drained   string
+	drainErr  error
+	// what each block took, in arrival order, and what writerA got for each segment PUT it sent nginx
+	attempts []*lbDrainSegmentAttempt
+	answers  []string
+}
+
+// One segment PUT as a block took it.
+type lbDrainSegmentAttempt struct {
+	upstream string
+	// the path and query, which name the segment and the push
+	target        string
+	contentLength int64
+	// what the block read of its body, and whether the drain cut it there
+	read []byte
+	cut  bool
+}
+
+// The read a block drained mid-body fails with.
+var errLbDrainCut = errors.New("the block was drained mid-body")
+
+func newLbDrainSegmentRow(ctx context.Context, content []byte, cutByteCount int) *lbDrainSegmentRow {
+	return &lbDrainSegmentRow{
+		ctx:          ctx,
+		content:      content,
+		cutByteCount: cutByteCount,
+		transport:    &http.Transport{DisableKeepAlives: true},
+	}
+}
+
+func (self *lbDrainSegmentRow) setLb(lb *LbFixture) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.lb = lb
+}
+
+// The block named name: the world's instance of that name, reading each request's body through lbDrainSegmentBody.
+func (self *lbDrainSegmentRow) upstream(name string) *LbUpstream {
+	return &LbUpstream{Name: name, Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempt := &lbDrainSegmentAttempt{upstream: name, target: request.URL.RequestURI(), contentLength: request.ContentLength}
+		var world *fault.EvsWorld
+		cutIn := -1
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			world = self.world
+			if !self.cutTaken {
+				self.cutTaken = true
+				cutIn = self.cutByteCount
+			}
+			self.attempts = append(self.attempts, attempt)
+		}()
+		if world == nil {
+			// no world yet: the row's schedule has not started, and a block answers nothing
+			panic(http.ErrAbortHandler)
+		}
+		request.Body = &lbDrainSegmentBody{ReadCloser: request.Body, row: self, attempt: attempt, cutIn: cutIn}
+		world.InstanceHandler(name).ServeHTTP(writer, request)
+	})}
+}
+
+// What a block reads of a segment PUT, kept on its attempt. On the attempt the row cuts, the read after cutIn bytes
+// drains the block and fails, as a read in a block killed there does, and so does every read after it.
+type lbDrainSegmentBody struct {
+	io.ReadCloser
+	row     *lbDrainSegmentRow
+	attempt *lbDrainSegmentAttempt
+	// bytes left before the cut, negative on an attempt not cut
+	cutIn   int
+	drained bool
+}
+
+func (self *lbDrainSegmentBody) Read(buffer []byte) (int, error) {
+	if 0 <= self.cutIn {
+		if self.cutIn == 0 {
+			if !self.drained {
+				self.drained = true
+				self.row.drain(self.attempt)
+			}
+			return 0, errLbDrainCut
+		}
+		buffer = buffer[:min(len(buffer), self.cutIn)]
+	}
+	n, err := self.ReadCloser.Read(buffer)
+	self.row.noteRead(self.attempt, buffer[:n])
+	if 0 <= self.cutIn {
+		self.cutIn -= n
+	}
+	return n, err
+}
+
+func (self *lbDrainSegmentRow) noteRead(attempt *lbDrainSegmentAttempt, read []byte) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	attempt.read = append(attempt.read, read...)
+}
+
+// attempt's block drained as warp drains one: nginx's connections to it cut and its listener closed
+// (LbFixture.Drain), and its instance killed, so neither nginx nor the world's model of the lb reaches it again.
+func (self *lbDrainSegmentRow) drain(attempt *lbDrainSegmentAttempt) {
+	self.stateLock.Lock()
+	lb, net := self.lb, self.net
+	self.stateLock.Unlock()
+	err := lb.Drain(attempt.upstream).Disrupt(self.ctx)
+	if err == nil {
+		err = net.Kill(attempt.upstream)
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.drained = attempt.upstream
+	self.drainErr = err
+	attempt.cut = true
+}
+
+// A RoundTripper of one function.
+type lbDrainRoundTrip func(request *http.Request) (*http.Response, error)
+
+func (self lbDrainRoundTrip) RoundTrip(request *http.Request) (*http.Response, error) {
+	return self(request)
+}
+
+// A device's transport (fault.EvsWorldSettings.DeviceTransport): writerA's segment PUTs to nginx, which streams them,
+// and every other request to the world's model of the lb, which stands in for what nginx buffers.
+func (self *lbDrainSegmentRow) deviceTransport(device string, worldLb http.RoundTripper) http.RoundTripper {
+	if device != "writerA" {
+		return worldLb
+	}
+	return lbDrainRoundTrip(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodPut || !strings.Contains(request.URL.Path, "/segments/") {
+			return worldLb.RoundTrip(request)
+		}
+		self.stateLock.Lock()
+		lb := self.lb
+		self.stateLock.Unlock()
+		lbUrl, err := url.Parse(lb.Url())
+		if err != nil {
+			return nil, err
+		}
+		throughLb := request.Clone(request.Context())
+		throughLb.URL.Scheme = lbUrl.Scheme
+		throughLb.URL.Host = lbUrl.Host
+		response, err := self.transport.RoundTrip(throughLb)
+		answer := "no answer"
+		if err == nil {
+			answer = fmt.Sprint(response.StatusCode)
+		}
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.answers = append(self.answers, answer)
+		return response, err
+	})
+}
+
+// The row on net: writerA writes the content, whose segment PUT the drain cuts, the reader reads it back, and the
+// check holds the segment to landing once.
+func (self *lbDrainSegmentRow) schedule(net *sidecartest.Net) *fault.Schedule {
+	settings := fault.DefaultEvsWorldSettings()
+	settings.Instances = []string{"evs1", "evs2", "evsr"}
+	settings.Devices = []*fault.EvsWorldDeviceSettings{
+		{Name: "writerA", Instances: []string{"evs1", "evs2"}, Writer: true},
+		{Name: "reader", Instances: []string{"evsr"}},
+	}
+	settings.DeviceTransport = self.deviceTransport
+	world := fault.NewEvsWorld(net, settings)
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.world = world
+		self.net = net
+	}()
+	steps := []*fault.Step{
+		{Actor: "writerA", Action: world.Setup},
+		{Actor: "writerA", Action: world.Write("writerA", "drained.bin", self.content)},
+		{Actor: "reader", Action: world.Verify("reader", "drained.bin")},
+		{Actor: "check", Action: world.Expect("the segment PUT the drain cut retried from the client and landed once", func(ctx context.Context) error {
+			return self.landedOnce(ctx, world, net)
+		})},
+	}
+	return &fault.Schedule{Id: "disruption lb drain segment put", Steps: steps, Check: world.Checks(), Tiers: []fault.Tier{fault.TierT3}}
+}
+
+// What the row's check holds: the drained block took the first segment PUT and read cutByteCount bytes of it; the
+// sibling took one more, the retry, whole, naming the same segment and push with the same bytes; writerA got
+// nginx's 502 and then a 200, under its one push id; and the segment cluster holds the segment once.
+func (self *lbDrainSegmentRow) landedOnce(ctx context.Context, world *fault.EvsWorld, net *sidecartest.Net) error {
+	self.stateLock.Lock()
+	drained, drainErr := self.drained, self.drainErr
+	attempts := []lbDrainSegmentAttempt{}
+	for _, attempt := range self.attempts {
+		attempts = append(attempts, *attempt)
+	}
+	answers := append([]string{}, self.answers...)
+	self.stateLock.Unlock()
+	if drainErr != nil {
+		return fmt.Errorf("the drain of %s: %w", drained, drainErr)
+	}
+	if len(attempts) != 2 {
+		return fmt.Errorf("the blocks took %d segment PUTs, not the one the drain cut and its retry", len(attempts))
+	}
+	cut, retry := attempts[0], attempts[1]
+	if !cut.cut || cut.upstream != drained || len(cut.read) != self.cutByteCount {
+		return fmt.Errorf("the first segment PUT reached %s, %q drained, and was read for %d bytes", cut.upstream, drained, len(cut.read))
+	}
+	if retry.cut || retry.upstream == drained || int64(len(retry.read)) != retry.contentLength {
+		return fmt.Errorf("the retry reached %s, %q drained, and was read for %d of %d bytes", retry.upstream, drained, len(retry.read), retry.contentLength)
+	}
+	if retry.target != cut.target || retry.contentLength != cut.contentLength || !bytes.HasPrefix(retry.read, cut.read) {
+		return errors.New("the retry named another segment or push, or sent other bytes")
+	}
+	if len(answers) != 2 || answers[0] != fmt.Sprint(http.StatusBadGateway) || answers[1] != fmt.Sprint(http.StatusOK) {
+		return fmt.Errorf("writerA got %v from nginx, not its 502 and then a 200", answers)
+	}
+	segmentPath, query, _ := strings.Cut(retry.target, "?")
+	segmentIdText := segmentPath[strings.LastIndex(segmentPath, "/")+1:]
+	segmentSum := sha256.Sum256(retry.read)
+	if hex.EncodeToString(segmentSum[:]) != segmentIdText {
+		return errors.New("the retry's bytes are not the segment its id names")
+	}
+	pushIds := world.DevicePushIds("writerA")
+	if len(pushIds) != 1 || query != "push="+hex.EncodeToString(pushIds[0][:]) {
+		return fmt.Errorf("writerA posted push ids %v, and its segment PUTs named %q", pushIds, query)
+	}
+	cluster, err := net.Host().Blobs.SegmentCluster()
+	if err != nil {
+		return err
+	}
+	infos, _, err := cluster.List(sidecartest.InspectContext(ctx), "seg/"+sidecar.EvsKeyId(world.RepoId)+"/", "", 16)
+	if err != nil {
+		return err
+	}
+	if len(infos) != 1 || !strings.HasSuffix(infos[0].Key, "/"+segmentIdText) || infos[0].ByteCount != retry.contentLength {
+		return fmt.Errorf("the segment cluster holds %d objects under the repo's seg/, not the one segment", len(infos))
+	}
+	return nil
+}
+
+// T3's settings for the row: writerA waits on nginx and the stores in real time, where the barrier driver reads its
+// goroutines as blocked with nothing at work, so no stall takes the baton, and a step may take the row's real-time
+// bound. One actor works at a time throughout, so no order is lost.
+func lbDrainSegmentSettings() *Settings {
+	settings := DefaultSettings()
+	netSettings := *settings.Net
+	barriers := *netSettings.Barriers
+	barriers.AwaitTimeout = testDisruptionTimeout
+	barriers.StallTimeout = 0
+	netSettings.Barriers = &barriers
+	settings.Net = &netSettings
+	return settings
+}
+
+// §22.8's lb drain row, its client half (QD-758; the file header): a streamed segment PUT cut by a drain retries from
+// the client and lands once.
+func TestT3LbDrainCutSegmentPutRetriesFromTheClientAndLandsOnce(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(tb testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), testDisruptionTimeout)
+		defer cancel()
+		row := newLbDrainSegmentRow(ctx, disruptionBytes(t, 1024*1024), 1024)
+		defer row.transport.CloseIdleConnections()
+		lb, err := NewLbFixture(tb, nil, row.upstream("evs1"), row.upstream("evs2"))
+		if err != nil {
+			tb.Fatal(err)
+		}
+		defer lb.Close()
+		row.setLb(lb)
+		if result := Run(tb, row.schedule, lbDrainSegmentSettings()); result.Err != nil {
+			tb.Logf("nginx's error log: %s", lb.ErrorLog())
+		}
+	})
 }
 
 // Two admitted sidecars' dispatchers on Required clients of platform (version_pair.go's sides), the sender's ack timeout
