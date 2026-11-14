@@ -31,15 +31,33 @@ import (
 // Never trimmed: Pro networks (listed when over the Pro cap) and networks with
 // an Embed client allowance (their row is their cap, and the disposablenetwork
 // customer was told on 11-05 that its existing proxies keep working).
+//
+// The one exception is a Pro network the trim names and opts in with
+// IncludePro (owner, 2026-11-14, support item 8327: the 2026.10.27 browser
+// extension filled a Pro network to the Pro cap with proxies it never released,
+// so the network's every new connect was refused). A scan never trims a Pro
+// network, and an Embed allowance keeps a network out of every trim. Such a
+// trim can keep more than the newest: every proxy with a description, which
+// its owner may have named on ur.io (KeepDescribed), and every proxy used since
+// a time (KeepUsedSince).
 
 const networkProxyTrimDigestVersion = "urnetwork network trim-proxies v1"
 
 var ErrNetworkProxyTrimDigestMismatch = errors.New("network trim-proxies: --expect does not match the digest of the networks as they are now; nothing was removed; run the dry run again")
 
+var ErrNetworkProxyTrimProNeedsNetworkIds = errors.New("network trim-proxies: --include_pro trims only the Pro networks named in --network_ids; name them")
+
 // Why a network over the keep count is not trimmed.
 const (
 	NetworkProxyTrimSkipPro      = "pro"
 	NetworkProxyTrimSkipOverride = "override"
+)
+
+// Why a trimmed network keeps a hosted proxy: the first of these that holds.
+const (
+	NetworkProxyTrimKeepNewest    = "newest"
+	NetworkProxyTrimKeepDescribed = "described"
+	NetworkProxyTrimKeepUsed      = "used"
 )
 
 var (
@@ -69,6 +87,17 @@ type NetworkProxyTrimOptions struct {
 	NetworkIds []server.Id
 	// active hosted proxies a trimmed network keeps, newest by client id
 	Keep int
+	// also trims the Pro networks NetworkIds names, within the Pro cap or over
+	// it; refused without NetworkIds, so a scan never trims a Pro network
+	IncludePro bool
+	// also keeps every hosted proxy with a description
+	KeepDescribed bool
+	// also keeps every hosted proxy used at or after this time: its last
+	// contract (contract_time, stamped when one of its egress clients creates
+	// a transfer contract) or its last auth (auth_time: its creation, or a
+	// connect of one of its clients) is that recent. Each marker is written at
+	// most once an hour. nil keeps none for its use.
+	KeepUsedSince *time.Time
 	// removals a second during a commit; 0 or less is unpaced
 	RatePerSecond float64
 	// called while the scan reads proxy_client and after each removal batch;
@@ -88,6 +117,26 @@ type NetworkProxyTrimProgress struct {
 	NetworkId server.Id
 }
 
+// An active hosted proxy as a plan read it.
+type NetworkProxyTrimProxy struct {
+	ClientId server.Id
+	// empty when the row has none
+	Description  string
+	CreateTime   time.Time
+	AuthTime     time.Time
+	ContractTime *time.Time
+	// why its trimmed network keeps it; empty when it is removed
+	KeepReason string
+}
+
+// The later of its last auth and its last contract.
+func (self *NetworkProxyTrimProxy) LastUseTime() time.Time {
+	if self.ContractTime != nil && self.AuthTime.Before(*self.ContractTime) {
+		return *self.ContractTime
+	}
+	return self.AuthTime
+}
+
 type NetworkProxyTrimNetwork struct {
 	NetworkId     server.Id
 	NetworkName   string
@@ -101,17 +150,23 @@ type NetworkProxyTrimNetwork struct {
 	KeepClientIds []server.Id
 	// newest first
 	RemoveClientIds []server.Id
+	// the same proxies as KeepClientIds and RemoveClientIds, newest first
+	KeepProxies   []*NetworkProxyTrimProxy
+	RemoveProxies []*NetworkProxyTrimProxy
 }
 
 type NetworkProxyTrimPlan struct {
-	Keep int
+	Keep          int
+	IncludePro    bool
+	KeepDescribed bool
+	KeepUsedSince *time.Time
 	// the networks over the keep count, trimmed or skipped, in network id order.
-	// A Pro network is listed only over the Pro cap.
+	// A Pro network the options do not include is listed only over the Pro cap.
 	Networks    []*NetworkProxyTrimNetwork
 	RemoveCount int
 	// proxy_client rows the scan read; 0 when networks were named
 	ScannedProxies int
-	// binds the keep count and exactly the clients a commit removes
+	// binds the keep options and exactly the clients a commit removes
 	Digest string
 }
 
@@ -128,7 +183,17 @@ func PlanNetworkProxyTrim(ctx context.Context, options NetworkProxyTrimOptions) 
 	if options.Keep < 0 {
 		return nil, fmt.Errorf("network trim-proxies: --keep must be 0 or more, not %d", options.Keep)
 	}
-	activeProxies := map[server.Id][]server.Id{}
+	if options.IncludePro && len(options.NetworkIds) == 0 {
+		return nil, ErrNetworkProxyTrimProNeedsNetworkIds
+	}
+	var keepUsedSince *time.Time
+	if options.KeepUsedSince != nil {
+		since := options.KeepUsedSince.UTC()
+		keepUsedSince = &since
+	}
+	activeProxies := map[server.Id][]*NetworkProxyTrimProxy{}
+	// the networks the options name
+	named := map[server.Id]bool{}
 	scanned := 0
 	if len(options.NetworkIds) == 0 {
 		activeProxies, scanned = scanActiveHostedProxies(ctx, options.Progress)
@@ -136,13 +201,14 @@ func PlanNetworkProxyTrim(ctx context.Context, options NetworkProxyTrimOptions) 
 		networkIds := slices.Clone(options.NetworkIds)
 		slices.SortFunc(networkIds, func(a server.Id, b server.Id) int { return a.Cmp(b) })
 		for _, networkId := range slices.Compact(networkIds) {
+			named[networkId] = true
 			activeProxies[networkId] = listNetworkActiveHostedProxies(ctx, networkId)
 		}
 	}
 
 	overNetworkIds := []server.Id{}
-	for networkId, clientIds := range activeProxies {
-		if options.Keep < len(clientIds) {
+	for networkId, proxies := range activeProxies {
+		if options.Keep < len(proxies) {
 			overNetworkIds = append(overNetworkIds, networkId)
 		}
 	}
@@ -151,16 +217,19 @@ func PlanNetworkProxyTrim(ctx context.Context, options NetworkProxyTrimOptions) 
 
 	plan := &NetworkProxyTrimPlan{
 		Keep:           options.Keep,
+		IncludePro:     options.IncludePro,
+		KeepDescribed:  options.KeepDescribed,
+		KeepUsedSince:  keepUsedSince,
 		ScannedProxies: scanned,
 	}
 	for _, networkId := range overNetworkIds {
-		clientIds := slices.Clone(activeProxies[networkId])
+		proxies := slices.Clone(activeProxies[networkId])
 		// client ids are time ordered: newest first
-		slices.SortFunc(clientIds, func(a server.Id, b server.Id) int { return b.Cmp(a) })
+		slices.SortFunc(proxies, func(a *NetworkProxyTrimProxy, b *NetworkProxyTrimProxy) int { return b.ClientId.Cmp(a.ClientId) })
 		network := &NetworkProxyTrimNetwork{
 			NetworkId:     networkId,
 			NetworkName:   names[networkId],
-			ActiveProxies: len(clientIds),
+			ActiveProxies: len(proxies),
 		}
 		limit := GetNetworkTopLevelClientLimit(ctx, networkId)
 		network.Override, network.OverrideLimit = limit.Override, limit.Limit
@@ -168,21 +237,46 @@ func PlanNetworkProxyTrim(ctx context.Context, options NetworkProxyTrimOptions) 
 		switch {
 		case network.Override:
 			network.Skip = NetworkProxyTrimSkipOverride
-		case network.Pro:
+		case network.Pro && !(options.IncludePro && named[networkId]):
 			network.Skip = NetworkProxyTrimSkipPro
-			if len(clientIds) <= proProxyClientLimit {
+			if len(proxies) <= proProxyClientLimit {
 				// within the Pro cap: nothing to report
 				continue
 			}
 		default:
-			network.KeepClientIds = clientIds[:options.Keep]
-			network.RemoveClientIds = clientIds[options.Keep:]
+			for i, proxy := range proxies {
+				proxy.KeepReason = networkProxyTrimKeepReason(i, proxy, options.Keep, options.KeepDescribed, keepUsedSince)
+				if proxy.KeepReason == "" {
+					network.RemoveProxies = append(network.RemoveProxies, proxy)
+					network.RemoveClientIds = append(network.RemoveClientIds, proxy.ClientId)
+				} else {
+					network.KeepProxies = append(network.KeepProxies, proxy)
+					network.KeepClientIds = append(network.KeepClientIds, proxy.ClientId)
+				}
+			}
 			plan.RemoveCount += len(network.RemoveClientIds)
 		}
 		plan.Networks = append(plan.Networks, network)
 	}
 	plan.Digest = networkProxyTrimDigest(plan)
 	return plan, nil
+}
+
+// Why a trimmed network keeps the hosted proxy at `index` of its active
+// proxies, newest first: the newest `keep`, then (when the options keep them)
+// a described one and one used at or after `keepUsedSince`. Empty when the
+// trim removes it.
+func networkProxyTrimKeepReason(index int, proxy *NetworkProxyTrimProxy, keep int, keepDescribed bool, keepUsedSince *time.Time) string {
+	switch {
+	case index < keep:
+		return NetworkProxyTrimKeepNewest
+	case keepDescribed && proxy.Description != "":
+		return NetworkProxyTrimKeepDescribed
+	case keepUsedSince != nil && !proxy.LastUseTime().Before(*keepUsedSince):
+		return NetworkProxyTrimKeepUsed
+	default:
+		return ""
+	}
 }
 
 // CommitNetworkProxyTrim plans the trim again and, when its digest is `expect`,
@@ -300,12 +394,17 @@ func deactivateActiveNetworkClientsInTx(ctx context.Context, tx server.PgTx, cli
 // (network_client_network_id_active_client_id) and proxy_client's unique
 // client_id. A proxy can be a derived client (one an app created with its client
 // token), so source_client_id is not a filter.
-func listNetworkActiveHostedProxies(ctx context.Context, networkId server.Id) (clientIds []server.Id) {
+func listNetworkActiveHostedProxies(ctx context.Context, networkId server.Id) (proxies []*NetworkProxyTrimProxy) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT network_client.client_id
+				SELECT
+					network_client.client_id,
+					network_client.description,
+					network_client.create_time,
+					network_client.auth_time,
+					network_client.contract_time
 				FROM network_client
 				INNER JOIN proxy_client ON proxy_client.client_id = network_client.client_id
 				WHERE
@@ -316,9 +415,19 @@ func listNetworkActiveHostedProxies(ctx context.Context, networkId server.Id) (c
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				clientIds = append(clientIds, clientId)
+				proxy := &NetworkProxyTrimProxy{}
+				var description *string
+				server.Raise(result.Scan(
+					&proxy.ClientId,
+					&description,
+					&proxy.CreateTime,
+					&proxy.AuthTime,
+					&proxy.ContractTime,
+				))
+				if description != nil {
+					proxy.Description = *description
+				}
+				proxies = append(proxies, proxy)
 			}
 		})
 	})
@@ -329,8 +438,8 @@ func listNetworkActiveHostedProxies(ctx context.Context, networkId server.Id) (c
 // by proxy_id, each page's clients looked up by network_client's primary key.
 // network_client has hundreds of millions of rows, so it is never joined
 // unbounded.
-func scanActiveHostedProxies(ctx context.Context, progress func(NetworkProxyTrimProgress)) (activeProxies map[server.Id][]server.Id, scanned int) {
-	activeProxies = map[server.Id][]server.Id{}
+func scanActiveHostedProxies(ctx context.Context, progress func(NetworkProxyTrimProgress)) (activeProxies map[server.Id][]*NetworkProxyTrimProxy, scanned int) {
+	activeProxies = map[server.Id][]*NetworkProxyTrimProxy{}
 	var after *server.Id
 	for {
 		pageClientIds := []server.Id{}
@@ -369,7 +478,13 @@ func scanActiveHostedProxies(ctx context.Context, progress func(NetworkProxyTrim
 			result, err := conn.Query(
 				ctx,
 				`
-					SELECT client_id, network_id
+					SELECT
+						client_id,
+						network_id,
+						description,
+						create_time,
+						auth_time,
+						contract_time
 					FROM network_client
 					WHERE
 						client_id = ANY($1) AND
@@ -379,9 +494,21 @@ func scanActiveHostedProxies(ctx context.Context, progress func(NetworkProxyTrim
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
-					var clientId, networkId server.Id
-					server.Raise(result.Scan(&clientId, &networkId))
-					activeProxies[networkId] = append(activeProxies[networkId], clientId)
+					proxy := &NetworkProxyTrimProxy{}
+					var networkId server.Id
+					var description *string
+					server.Raise(result.Scan(
+						&proxy.ClientId,
+						&networkId,
+						&description,
+						&proxy.CreateTime,
+						&proxy.AuthTime,
+						&proxy.ContractTime,
+					))
+					if description != nil {
+						proxy.Description = *description
+					}
+					activeProxies[networkId] = append(activeProxies[networkId], proxy)
 				}
 			})
 		})
@@ -418,11 +545,21 @@ func networkProxyTrimNames(ctx context.Context, networkIds []server.Id) map[serv
 	return names
 }
 
-// The digest binds the keep count and exactly the clients a commit removes, per
-// network. A skipped network is not bound: its own changes do not refuse a trim
-// of the others.
+// The digest binds the keep options and exactly the clients a commit removes,
+// per network. A skipped network is not bound: its own changes do not refuse a
+// trim of the others. The options added for Pro networks (2026-11-14) add a
+// line only when set, so a trim without them keeps the digest it had.
 func networkProxyTrimDigest(plan *NetworkProxyTrimPlan) string {
 	lines := []string{networkProxyTrimDigestVersion, "keep " + strconv.Itoa(plan.Keep)}
+	if plan.IncludePro {
+		lines = append(lines, "include pro")
+	}
+	if plan.KeepDescribed {
+		lines = append(lines, "keep described")
+	}
+	if plan.KeepUsedSince != nil {
+		lines = append(lines, "keep used since "+plan.KeepUsedSince.UTC().Format(time.RFC3339Nano))
+	}
 	for _, network := range plan.Networks {
 		if network.Skip != "" {
 			continue

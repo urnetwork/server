@@ -75,7 +75,7 @@ Usage:
     bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
     bringyourctl network sign-out-all --network_id=<network_id> [--remove-clients] [(--commit --expect=<digest>)]
-    bringyourctl network trim-proxies [--network_ids=<network_ids>] [--keep=<keep>] [--rate=<rate>] [(--commit --expect=<digest>)]
+    bringyourctl network trim-proxies [--network_ids=<network_ids>] [--include_pro] [--keep=<keep>] [--keep_described] [--keep_used_since=<since>] [--rate=<rate>] [--list] [(--commit --expect=<digest>)]
     bringyourctl health status
     bringyourctl health degrade --reason=<reason> [--level=<level>]
     bringyourctl health recover
@@ -277,7 +277,11 @@ Options:
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
     --forfeit=<payment_ids>  With payouts close-attempted, close these payments, comma separated, as the owner forfeited them, without reading Circle: each must be a canceled payment an attempt of which reached Circle, not completed and not closed, or the run refuses them all and writes nothing.
     --network_ids=<network_ids>  With network trim-proxies, the networks to trim, comma separated; omitted, every network that holds a hosted proxy (a paged scan of proxy_client).
-    --keep=<keep>  With network trim-proxies, the active hosted proxies each trimmed free network keeps, its newest by client id; omitted, the free cap (5).
+    --include_pro  With network trim-proxies, also trim the Pro networks named in --network_ids, at, over or under the Pro cap; refused without --network_ids. A Pro network not named, and a network with a client allowance (an Embed row), is never trimmed.
+    --keep=<keep>  With network trim-proxies, the active hosted proxies each trimmed network keeps, its newest by client id; omitted, the free cap (5).
+    --keep_described  With network trim-proxies, also keep every hosted proxy with a description (a name its owner gave it).
+    --keep_used_since=<since>  With network trim-proxies, also keep every hosted proxy used at or after this RFC 3339 time: its last contract (a transfer one of its clients created) or its last auth (its creation, or a connect of one of its clients) is that recent. Both are recorded at most once an hour.
+    --list  With network trim-proxies, also print each kept and removed hosted proxy of each trimmed network, with why it is kept.
     --rate=<rate>  With network trim-proxies --commit, hosted proxies removed a second, in batches of 500; omitted, 200.
     --balance_id=<balance_id>  With balance move-redeemed, the unused balance a redeemed balance code granted, left on a deleted network.
     --to_network_id=<network_id>  With balance move-redeemed, the network the balance and its code move to.
