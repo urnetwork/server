@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-14T00:24:11Z",
+  "observed_at": "2026-11-14T00:52:27Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -23,8 +23,8 @@
     "hold_active": false
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261114.PJEhKe3s/state.private.json",
-    "sha256": "1e8224509c4a3e6f82956aafb5b0df20e5b488e99cd0b010b2a60661c5f20e6f",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261114.xWwIvXoP/state.private.json",
+    "sha256": "c18f0a7379f235e0549d4a15eb419f73bddb192a85cf7311888c5ad846cefee5",
     "mode": "root:root 0400 in root:root 0700 directory",
     "contains": "Protected queue observations, authenticated review progress/claims, recovery facts, qualified-tool receipts and next actions; follow the predecessor chain for earlier census evidence.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
@@ -44,9 +44,13 @@
     "review_orchestrator_v6_tests_passed": 41,
     "review_orchestrator_v6_normal_binary_sha256": "0b56c46cccf65e4dea4a6911cd4c06c6d0de7e692cf28c7d500bfd36a3127656",
     "review_orchestrator_v6_status": "Independent source review, all41 synthetic controls and normal build passed. Removing only the fresh dispatch check makes both targeted controls fail as expected. No operational activation or model dispatch occurred. Historical v4/v5 configurations remain superseded and must not be replayed.",
+    "review_orchestrator_staged_config_sha256": "1b1385918c7c6ac17a55b3c5679dd60d8f9610a90759b454befbe7f09425de96",
+    "review_orchestrator_readonly_loader_status": "LOADER_READY_READ_ONLY: constructor-only probe passed; new state stayed empty and captured namespace metadata/progress remained unchanged. This does not authorize activation.",
+    "reversible_temporary_baseline_cleanup_bytes": 1455112192,
+    "reversible_cleanup_scope": "Only clean tracked baseline copies in one completed temporary standalone clone were sparsely excluded under prior approval. HEAD, outside-baseline content/status hashes and Git objects were preserved. Exact receipt and restore command are in the protected operator record; no RAM cache was removed.",
     "live_cache_archive_or_eviction_performed": false,
     "live_cache_archive_and_eviction_approval": "Pending; earlier unrelated cleanup approvals do not authorize this operation.",
-    "next_action": "Keep scoring and existing deadlines intact. Await explicit verified cache offload/removal approval; recheck source quiescence, disk/RAM admission and isolated management placement before any approved operation. Keep model calls stopped until global RAM backing and review placement are reconciled. Stage a fresh v6 config from unchanged authenticated progress before eventual launch; never replay old configs or consumed claims. Per-job outcomes remain protected."
+    "next_action": "Keep scoring and existing deadlines intact. Await explicit verified cache offload/removal approval; recheck source quiescence, disk/RAM admission and isolated management placement before any approved operation. Keep model calls stopped until global RAM backing and review placement are reconciled. Only the fresh staged v6 configuration preserves the checked progress/binary binding; never replay old configs or consumed claims. Constructor readiness is not operational admission. Per-job outcomes remain protected."
   },
   "control_release": {
     "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
