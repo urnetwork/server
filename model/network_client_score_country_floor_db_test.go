@@ -56,8 +56,8 @@ func countryFloorTestFind(ctx context.Context, t testing.TB, location *Location,
 // A country none of whose providers passes the bar, as pe, nz and ar went on
 // 2026-11-13, is served by its best three below it in every mode, at its
 // country and its city, and listed with them. Quality and Speed answer them
-// in the Online fallback's band, behind any provider of the request that
-// passed a bar. The two below them stay out.
+// in the Online fallback's band, where every native and borrowed native would
+// come first. The two below them stay out.
 func TestCountryFloorKeepsACountryBelowTheBarServed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()

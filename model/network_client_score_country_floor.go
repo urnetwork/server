@@ -22,9 +22,15 @@
 // members alone. A provider admitted as a native instead would be drawn with
 // the request's natives, ahead of the other bucket's natives that passed the
 // bar: it could take their places in a short answer and would put a worse
-// tier ahead of a better one. Lent from Online, an admitted provider fills
-// only the places every provider that passed a bar left, behind them all,
-// even with the client's demerits.
+// tier ahead of a better one. Lent from Online, an admitted provider comes
+// after every native and borrowed native of a Quality or Speed answer, even
+// with the client's demerits. Within the Online fallback, and in an Online
+// request's single draw, it is ordered with the bar's other Online members by
+// the existing order, reliability weight times URL weight, where its URL
+// weight is below every measured member's: an answer shorter than the
+// country's online providers, three at most where the floor acts, can hold it
+// in place of a member only the Online fallback lends (an unprobed provider,
+// say), never in place of one listed before that band.
 //
 // A candidate passes everything but the bar. It is in the export's cohort (an
 // active, top-level, connected and valid provider with a Public provide key),

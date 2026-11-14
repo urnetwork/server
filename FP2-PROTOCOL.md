@@ -335,9 +335,9 @@ What follows from it:
 score export admits to Online a country's best providers that the bar alone
 keeps out of it, wherever fewer than `country_floor_providers` (3) of its
 public providers are online (`model/network_client_score_country_floor.go`).
-Quality and Speed keep the bar's members; every answer lends the admitted
-providers last, from the Online fallback. The two decisions get one pass
-each:
+Quality and Speed keep the bar's members, so their answers lend the admitted
+providers only from the Online fallback, after every native and borrowed
+native. The two decisions get one pass each:
 
 - **Strict, today's facets.** Only a provider that is not downgraded
   (`CapabilityDowngrades` 0) is a candidate, so a legacy request, which may

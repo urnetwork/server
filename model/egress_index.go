@@ -198,8 +198,8 @@ type EgressIndexSettings struct {
 	// Online the country's best providers that the bar alone keeps out, in
 	// the Online fallback's order, until Online holds this many or the
 	// candidates run out. It only adds: Quality and Speed keep the bar's
-	// members, and every answer lends an admitted provider from Online, after
-	// every native and borrowed native that passed the bar. The taskworker's
+	// members, so their answers lend an admitted provider only from the
+	// Online fallback, after every native and borrowed native. The taskworker's
 	// score export and location counts read it, so a change is a config
 	// release and a taskworker restart. Non-positive is off, the kill switch.
 	// `country_floor_providers` in the egress_index block.

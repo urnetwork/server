@@ -7,8 +7,9 @@ deciding each provider. The score export then admits to Online, in each
 country with fewer than `country_floor_providers` (default 3, on without a
 config change, `0` the kill switch) public providers online, its best
 providers that the bar alone keeps out. Quality and Speed keep the bar's
-members; every answer lends the admitted providers last, from the Online
-fallback. Today's facets keep the hard gates of UDP and IP family. See
+members, so their answers lend the admitted providers only from the Online
+fallback, after every native and borrowed native. Today's facets keep the
+hard gates of UDP and IP family. See
 [the country floor](#the-country-floor-2026-11-13).
 
 Owner decision, 2026-10-28, superseding the decision of the same day
@@ -228,8 +229,9 @@ URL rows (one success, the 0.8 ratio, which Main applies to Online too since
 2026-10-15 as variant (c)) are the bar. Where fewer than
 `country_floor_providers` (3) of a country's public providers are online, the
 score export admits to Online its best providers that only those rows keep
-out of it, lent behind every provider that passed them. Quality and Speed
-membership is unchanged, every other row still holds for the admitted
+out of it, which Quality and Speed answers lend only from the Online
+fallback. Quality and Speed membership is unchanged, every other row still
+holds for the admitted
 providers, and a provider unable to carry UDP or its advertised IPv6 is never
 admitted to today's facets.
 
@@ -707,10 +709,20 @@ score export alone:
   URL success weight; ties go to the lower client id, so consecutive exports
   choose alike.
 - **It only adds.** No provider that passes the bar loses a bucket, a tier
-  or a weight. An admitted provider is lent last, from Online, filling only
-  the places every native and borrowed native left, behind them all even with
-  the client's demerits; the connect client runs flows on its lowest tier
-  first, so it carries traffic only where nothing that passed a bar can.
+  or a weight. A Quality or Speed answer lists an admitted provider in its
+  Online fallback band (twice `backfill_tier_offset`), after every native and
+  borrowed native it lists first, even with the client's demerits; the
+  connect client runs flows on its lowest tier first. Within that band, and
+  in an Online request's single draw, an admitted provider is ordered with
+  the bar's other Online members by the existing order, reliability weight
+  times URL weight, where its URL weight is below every measured member's.
+  So an answer shorter than the country's online providers, three at most
+  where the floor acts, can hold an admitted provider in place of a member
+  only the Online fallback lends (an unprobed provider, say), but never in
+  place of one listed before that band. The connect client's discovery asks
+  for one provider at a time, excluding those it holds, so it reaches that
+  band only once it holds every native and borrowed native the request
+  admits.
 - **Per-request filters still apply:** caller network exclusions, excluded
   ids and destinations, liveness leases, and the post-quantum and modern
   requirements of strict requests, which read flags the floor never sets.
