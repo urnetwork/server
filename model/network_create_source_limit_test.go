@@ -427,7 +427,10 @@ func TestDefaultNetworkCreateSourceLimitSettings(t *testing.T) {
 		ShortLimit:       20,
 		LongWindow:       24 * time.Hour,
 		LongLimit:        50,
-		AsnWindow:        time.Hour,
+		AsnShortWindow:   time.Hour,
+		AsnShortLimit:    200,
+		AsnLongWindow:    24 * time.Hour,
+		AsnLongLimit:     1500,
 	}
 	if *settings != want {
 		t.Fatalf("default settings %+v, want %+v", *settings, want)
@@ -476,21 +479,14 @@ func writeSourceLimitTestAsnDb(t testing.TB, networkAsns map[string]uint32) stri
 	return path
 }
 
-// TestSeedphraseSignupCountsItsAutonomousSystemWithoutLimitingIt: admitted
-// sign-ups are counted per autonomous system for the histogram, a refused one
-// is not, and the count refuses nothing.
-func TestSeedphraseSignupCountsItsAutonomousSystemWithoutLimitingIt(t *testing.T) {
+// TestSeedphraseSignupCountsItsAutonomousSystemAdmittedSignupsOnly: admitted
+// sign-ups are counted in both windows of their autonomous system, and one its
+// source network refuses, which the autonomous system admitted and counted
+// first, is taken back out of both.
+func TestSeedphraseSignupCountsItsAutonomousSystemAdmittedSignupsOnly(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		// documentation autonomous systems (RFC 5398)
-		restore, err := server.Testing_UseIpAsnDatabase(writeSourceLimitTestAsnDb(t, map[string]uint32{
-			"203.0.113.0/24":  64500,
-			"198.51.100.0/24": 64500,
-			"192.0.2.0/24":    64501,
-		}))
-		if err != nil {
-			t.Fatal(err)
-		}
+		restore := useSourceLimitTestAsnDb(t)
 		defer restore()
 
 		settings := DefaultNetworkCreateSourceLimitSettings()
@@ -508,7 +504,7 @@ func TestSeedphraseSignupCountsItsAutonomousSystemWithoutLimitingIt(t *testing.T
 			}
 		}
 		requireSourceNetworkRefusal(t, check(sourceNetworkV4Address(2, 41002)), "the signup over the /24's budget of 2")
-		// the same autonomous system on another /24: the count is not a budget
+		// the same autonomous system on another /24
 		for i := 0; i < 2; i += 1 {
 			if err := check(fmt.Sprintf("198.51.100.%d:%d", 8*i+1, 42000+i)); err != nil {
 				t.Fatalf("signup %d from another /24 of the same autonomous system was refused: %v", i+1, err)
@@ -518,11 +514,254 @@ func TestSeedphraseSignupCountsItsAutonomousSystemWithoutLimitingIt(t *testing.T
 			t.Fatalf("signup from another autonomous system was refused: %v", err)
 		}
 
-		if count := redisCount(t, ctx, networkCreateSourceAsnKey(64500, now, settings)); count != 4 {
-			t.Fatalf("autonomous system 64500 counts %d admitted sign-ups, want 4 (the refused one is not counted)", count)
-		}
-		if count := redisCount(t, ctx, networkCreateSourceAsnKey(64501, now, settings)); count != 1 {
-			t.Fatalf("autonomous system 64501 counts %d admitted sign-ups, want 1", count)
+		for _, c := range []struct {
+			asn  uint32
+			want int64
+		}{
+			{asn: 64500, want: 4},
+			{asn: 64501, want: 1},
+		} {
+			shortKey, _, longKey, _ := networkCreateSourceAsnKeys(c.asn, now, settings)
+			if count := redisCount(t, ctx, shortKey); count != c.want {
+				t.Errorf("autonomous system %d counts %d admitted sign-ups in the hour, want %d (the one its /24 refused taken back out)", c.asn, count, c.want)
+			}
+			if count := redisCount(t, ctx, longKey); count != c.want {
+				t.Errorf("autonomous system %d counts %d admitted sign-ups in the day, want %d", c.asn, count, c.want)
+			}
 		}
 	})
+}
+
+// TestSeedphraseSignupSpreadOverSlash24sOfOneAutonomousSystemIsRefused: the
+// 2026-11-14 farm spread its sign-ups over many /24s of one autonomous system,
+// each /24 inside its own budget. Here the sign-ups spread evenly over three
+// /24s of one system, 15 each against each /24's 20, and the one after the
+// system's budget is refused from a /24 with room and an address bucket that
+// has made none, with the 429 that names the shared provider. The refusal
+// spends no budget: not its address bucket's, its /24's or the system's. The
+// budget here is 45 because only three documentation /24s exist; the
+// production budget is pinned over /48s
+// (TestSeedphraseSignupOverItsAutonomousSystemHourlyBudgetIsRefused).
+func TestSeedphraseSignupSpreadOverSlash24sOfOneAutonomousSystemIsRefused(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		restore, err := server.Testing_UseIpAsnDatabase(writeSourceLimitTestAsnDb(t, map[string]uint32{
+			"203.0.113.0/24":  64500,
+			"198.51.100.0/24": 64500,
+			"192.0.2.0/24":    64500,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer restore()
+
+		settings := DefaultNetworkCreateSourceLimitSettings()
+		settings.AsnShortLimit = 45
+		now := time.Date(2026, 11, 14, 13, 20, 0, 0, time.UTC)
+		allowedBefore := seedphraseSignupAdmissionsCount(seedphraseSignupAllowed, "4")
+		limitedBefore := seedphraseSignupAdmissionsCount(seedphraseSignupLimitedAsnShort, "4")
+		check := func(address string) error {
+			clientSession := regressionSession(ctx, address)
+			defer clientSession.Cancel()
+			return checkNetworkCreateRateLimit(ctx, clientSession, now, settings)
+		}
+
+		slash24s := []string{"203.0.113", "198.51.100", "192.0.2"}
+		perSlash24 := settings.AsnShortLimit / len(slash24s)
+		if settings.ShortLimit <= perSlash24 {
+			t.Fatalf("%d sign-ups a /24 would spend its own budget of %d", perSlash24, settings.ShortLimit)
+		}
+		for i := 0; i < settings.AsnShortLimit; i += 1 {
+			slash24 := slash24s[i%len(slash24s)]
+			bucket := (i / len(slash24s)) / NetworkCreateDailyLimit
+			if err := check(fmt.Sprintf("%s.%d:%d", slash24, 8*bucket+1, 41000+i)); err != nil {
+				t.Fatalf("signup %d of the autonomous system's %d, from %s.0/24, was refused: %v", i+1, settings.AsnShortLimit, slash24, err)
+			}
+		}
+
+		overBucket := nextSourceNetworkBucket(perSlash24)
+		over := fmt.Sprintf("192.0.2.%d:42000", 8*overBucket+1)
+		if retryAfterSeconds := requireAsnRefusal(t, check(over), "a signup from a /24 with room in a spent autonomous system"); retryAfterSeconds != 40*60 {
+			t.Fatalf("the refusal says retry after %d seconds, want the 2,400 to the end of the hour", retryAfterSeconds)
+		}
+
+		if count := networkCreateAttemptRowCount(t, ctx); count != settings.AsnShortLimit {
+			t.Fatalf("network_create_attempt holds %d rows after %d sign-ups and 1 refusal, want %d", count, settings.AsnShortLimit, settings.AsnShortLimit)
+		}
+		if count := sourceNetworkShortCount(t, ctx, over, now); count != int64(perSlash24) {
+			t.Fatalf("the refused sign-up's /24 counts %d sign-ups, want its %d admitted", count, perSlash24)
+		}
+		shortKey, _, longKey, _ := networkCreateSourceAsnKeys(64500, now, settings)
+		if short, long := redisCount(t, ctx, shortKey), redisCount(t, ctx, longKey); short != int64(settings.AsnShortLimit) || long != int64(settings.AsnShortLimit) {
+			t.Fatalf("the autonomous system counts %d in the hour and %d in the day, want its %d admitted in both", short, long, settings.AsnShortLimit)
+		}
+		if delta := seedphraseSignupAdmissionsCount(seedphraseSignupAllowed, "4") - allowedBefore; delta != float64(settings.AsnShortLimit) {
+			t.Fatalf("allowed sign-ups counted %v, want %d", delta, settings.AsnShortLimit)
+		}
+		if delta := seedphraseSignupAdmissionsCount(seedphraseSignupLimitedAsnShort, "4") - limitedBefore; delta != 1 {
+			t.Fatalf("limited_asn_short sign-ups counted %v, want 1", delta)
+		}
+	})
+}
+
+// TestSeedphraseSignupAutonomousSystemBudgetsResetWithTheirWindows: the short
+// budget refuses until its hour ends and the long budget until its UTC day
+// ends, each refusal saying exactly how long, and a new window admits again.
+// Every attempt comes from a fresh address bucket, inside its /24's budgets, so
+// only the autonomous system's budgets can refuse.
+func TestSeedphraseSignupAutonomousSystemBudgetsResetWithTheirWindows(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		restore := useSourceLimitTestAsnDb(t)
+		defer restore()
+
+		settings := DefaultNetworkCreateSourceLimitSettings()
+		settings.AsnShortLimit = 3
+		settings.AsnLongLimit = 5
+		limitedLongBefore := seedphraseSignupAdmissionsCount(seedphraseSignupLimitedAsnLong, "4")
+
+		bucket := 0
+		check := func(now time.Time) error {
+			clientSession := regressionSession(ctx, sourceNetworkV4Address(bucket, 41000+bucket))
+			defer clientSession.Cancel()
+			bucket += 1
+			return checkNetworkCreateRateLimit(ctx, clientSession, now, settings)
+		}
+		admit := func(now time.Time, what string) {
+			t.Helper()
+			if err := check(now); err != nil {
+				t.Fatalf("%s was refused: %v", what, err)
+			}
+		}
+		refuse := func(now time.Time, what string, wantRetryAfterSeconds int) {
+			t.Helper()
+			if retryAfterSeconds := requireAsnRefusal(t, check(now), what); retryAfterSeconds != wantRetryAfterSeconds {
+				t.Fatalf("%s says retry after %d seconds, want %d", what, retryAfterSeconds, wantRetryAfterSeconds)
+			}
+		}
+
+		hour0 := time.Date(2026, 11, 13, 10, 15, 0, 0, time.UTC)
+		for i := 0; i < settings.AsnShortLimit; i += 1 {
+			admit(hour0, fmt.Sprintf("signup %d of the first hour", i+1))
+		}
+		// to the end of the hour, 10:15 to 11:00
+		refuse(hour0, "the signup over the hourly budget", 45*60)
+
+		hour1 := hour0.Add(time.Hour)
+		admit(hour1, "the first signup of the next hour")
+		admit(hour1, "the long budget's last signup")
+		// to the end of the UTC day, 11:15 to 00:00
+		refuse(hour1, "the signup over the daily budget", 12*3600+45*60)
+		refuse(hour1.Add(time.Hour), "a signup in a fresh hour of the spent day", 11*3600+45*60)
+
+		admit(time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC), "the first signup of the next day")
+
+		if delta := seedphraseSignupAdmissionsCount(seedphraseSignupLimitedAsnLong, "4") - limitedLongBefore; delta != 2 {
+			t.Fatalf("limited_asn_long sign-ups counted %v, want 2", delta)
+		}
+	})
+}
+
+// TestSeedphraseSignupAutonomousSystemBudgetFailsOpen: when the autonomous
+// system's budget cannot be read the sign-up goes on to its source network's
+// budget, which still refuses over its own budget, and an admitted one is
+// counted as unavailable.
+func TestSeedphraseSignupAutonomousSystemBudgetFailsOpen(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		restore := useSourceLimitTestAsnDb(t)
+		defer restore()
+
+		settings := DefaultNetworkCreateSourceLimitSettings()
+		// unreadable: no window
+		settings.AsnShortWindow = 0
+		settings.AsnShortLimit = 1
+		settings.ShortLimit = 2
+		now := time.Date(2026, 11, 13, 10, 15, 0, 0, time.UTC)
+		unavailableBefore := seedphraseSignupAdmissionsCount(seedphraseSignupUnavailable, "4")
+		check := func(bucket int) error {
+			clientSession := regressionSession(ctx, sourceNetworkV4Address(bucket, 41000+bucket))
+			defer clientSession.Cancel()
+			return checkNetworkCreateRateLimit(ctx, clientSession, now, settings)
+		}
+
+		for bucket := 0; bucket < settings.ShortLimit; bucket += 1 {
+			if err := check(bucket); err != nil {
+				t.Fatalf("signup %d with an unreadable autonomous system budget was refused: %v", bucket+1, err)
+			}
+		}
+		requireSourceNetworkRefusal(t, check(settings.ShortLimit), "the signup over its /24's budget")
+		if delta := seedphraseSignupAdmissionsCount(seedphraseSignupUnavailable, "4") - unavailableBefore; delta != float64(settings.ShortLimit) {
+			t.Fatalf("unavailable sign-ups counted %v, want %d", delta, settings.ShortLimit)
+		}
+	})
+}
+
+// TestSeedphraseSignupWithNoKnownAutonomousSystemHasNoAsnBudget: an address
+// the database names no autonomous system for, or a process with no database,
+// has only its address and source network budgets.
+func TestSeedphraseSignupWithNoKnownAutonomousSystemHasNoAsnBudget(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := DefaultNetworkCreateSourceLimitSettings()
+		settings.AsnShortLimit = 1
+		now := time.Date(2026, 11, 13, 10, 15, 0, 0, time.UTC)
+		check := func(address string) error {
+			clientSession := regressionSession(ctx, address)
+			defer clientSession.Cancel()
+			return checkNetworkCreateRateLimit(ctx, clientSession, now, settings)
+		}
+
+		// a database with no record for 198.51.100.0/24
+		restore, err := server.Testing_UseIpAsnDatabase(writeSourceLimitTestAsnDb(t, map[string]uint32{
+			"203.0.113.0/24": 64500,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i += 1 {
+			if err := check(fmt.Sprintf("198.51.100.%d:%d", 8*i+1, 41000+i)); err != nil {
+				restore()
+				t.Fatalf("signup %d from an address with no autonomous system was refused: %v", i+1, err)
+			}
+		}
+		restore()
+
+		// no database
+		restore, err = server.Testing_UseIpAsnDatabase("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer restore()
+		for i := 0; i < 2; i += 1 {
+			if err := check(fmt.Sprintf("203.0.113.%d:%d", 8*i+1, 42000+i)); err != nil {
+				t.Fatalf("signup %d with no autonomous system database was refused: %v", i+1, err)
+			}
+		}
+	})
+}
+
+// TestSeedphraseSignupAutonomousSystemKeysNameTheSystem: both windows'
+// counters of a system share one hash tag (one cluster slot for the script),
+// each names its window, and the hourly counter is the key the histogram
+// counted in before the budget, so the hour's count carries over a deploy.
+func TestSeedphraseSignupAutonomousSystemKeysNameTheSystem(t *testing.T) {
+	settings := DefaultNetworkCreateSourceLimitSettings()
+	now := time.Date(2026, 11, 14, 13, 20, 0, 0, time.UTC)
+	shortKey, shortEnd, longKey, longEnd := networkCreateSourceAsnKeys(64500, now, settings)
+	hour := now.UnixMilli() / time.Hour.Milliseconds()
+	day := now.UnixMilli() / (24 * time.Hour).Milliseconds()
+	if want := fmt.Sprintf("{ncsrc_asn_64500}w3600000_%d", hour); shortKey != want {
+		t.Errorf("hourly key %q, want %q", shortKey, want)
+	}
+	if want := fmt.Sprintf("{ncsrc_asn_64500}w86400000_%d", day); longKey != want {
+		t.Errorf("daily key %q, want %q", longKey, want)
+	}
+	if !shortEnd.Equal(time.Date(2026, 11, 14, 14, 0, 0, 0, time.UTC)) || !longEnd.Equal(time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("the windows end at %s and %s, want the hour's and the UTC day's ends", shortEnd, longEnd)
+	}
+	otherShortKey, _, _, _ := networkCreateSourceAsnKeys(64501, now, settings)
+	if otherShortKey == shortKey {
+		t.Error("two autonomous systems share a counter")
+	}
 }

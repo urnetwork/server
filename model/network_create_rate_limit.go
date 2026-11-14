@@ -44,14 +44,19 @@ func maxNetworkCreateAttemptsError(retryAfterSeconds int) error {
 // The budgets, in order (network_create_source_limit.go):
 //   - the address budget, NetworkCreateDailyLimit per address bucket per
 //     rolling NetworkCreateDailyWindow, in PostgreSQL;
+//   - the autonomous system budget, DefaultNetworkCreateSourceLimitSettings,
+//     in Redis, for a sign-up the address budget admitted;
 //   - the source network budget, DefaultNetworkCreateSourceLimitSettings, in
-//     Redis, for a sign-up the address budget admitted.
+//     Redis, for a sign-up both admitted.
 //
-// A sign-up refused by either is recorded in neither: the source network budget
-// counts only admitted sign-ups, and its refusal removes the attempt the
-// address budget recorded. So a person retrying a refusal does not extend it,
-// and repeated attempts from one address bucket the address budget refuses never
-// spend its source network's budget.
+// A sign-up refused by any is recorded in none: the source budgets count only
+// admitted sign-ups, a refusal removes the attempt the address budget
+// recorded, and a source network's refusal takes the sign-up back out of the
+// autonomous system's counters. So a person retrying a refusal does not extend
+// it, and repeated attempts that one budget refuses never spend the budgets
+// after it. The autonomous system goes before the source network because in a
+// wave it is the one that refuses, and its refusal leaves nothing in Redis to
+// undo.
 func CheckNetworkCreateRateLimit(
 	ctx context.Context,
 	session *session.ClientSession,
@@ -116,44 +121,82 @@ func checkNetworkCreateRateLimit(
 		return nil
 	}
 
-	decision, err := checkNetworkCreateSourceLimit(ctx, addr, now, sourceSettings)
-	if err != nil {
-		glog.Warningf("[signup]seed-phrase source network budget not counted; the sign-up goes ahead: %s\n", err)
-		observeSeedphraseSignupSource(seedphraseSignupScopeAddress, family, int64(result.Count)+1)
-		noteSeedphraseSignupAdmission(seedphraseSignupUnavailable, family)
-		return nil
-	}
-	if decision.limited != "" {
-		// the address budget recorded this attempt; a refused attempt must not
-		// spend it. When the removal fails, the attempt stays counted in the
-		// address budget and the refusal still stands.
+	// the address budget recorded this attempt; a refused attempt must not
+	// spend it. When the removal fails, the attempt stays counted in the
+	// address budget and the refusal still stands.
+	refuse := func(outcome seedphraseSignupOutcome, refusal error) error {
 		server.HandleError(func() {
 			server.RemoveNetworkCreateIpRateLimitAttempt(ctx, result.AttemptId)
 		}, func(err error) {
-			glog.Warningf("[signup]a seed-phrase sign-up refused by its source network stays counted in its address budget: %s\n", err)
+			glog.Warningf("[signup]a seed-phrase sign-up refused by its source budgets stays counted in its address budget: %s\n", err)
 		})
-		if decision.limited == networkCreateSourceBudgetShort {
-			noteSeedphraseSignupAdmission(seedphraseSignupLimitedNetworkShort, family)
-		} else {
-			noteSeedphraseSignupAdmission(seedphraseSignupLimitedNetworkLong, family)
+		noteSeedphraseSignupAdmission(outcome, family)
+		return refusal
+	}
+
+	// An address with no known autonomous system (none in the database, or no
+	// database deployed) has no autonomous system budget.
+	asn := server.GetIpAsn(addr)
+	var asnDecision networkCreateSourceDecision
+	asnCounted := false
+	unavailable := false
+	if asn != nil {
+		var asnErr error
+		asnDecision, asnErr = checkNetworkCreateSourceAsnLimit(ctx, asn.Number, now, sourceSettings)
+		switch {
+		case asnErr != nil:
+			glog.Warningf("[signup]seed-phrase autonomous system budget not counted; the sign-up goes on to its source network budget: %s\n", asnErr)
+			unavailable = true
+		case asnDecision.limited == networkCreateSourceBudgetShort:
+			return refuse(seedphraseSignupLimitedAsnShort, maxNetworkCreateSourceAsnAttemptsError(asnDecision.retryAfterSeconds))
+		case asnDecision.limited == networkCreateSourceBudgetLong:
+			return refuse(seedphraseSignupLimitedAsnLong, maxNetworkCreateSourceAsnAttemptsError(asnDecision.retryAfterSeconds))
+		default:
+			asnCounted = true
 		}
-		return maxNetworkCreateSourceAttemptsError(decision.retryAfterSeconds)
+	}
+
+	decision, networkErr := checkNetworkCreateSourceLimit(ctx, addr, now, sourceSettings)
+	if networkErr != nil {
+		glog.Warningf("[signup]seed-phrase source network budget not counted; the sign-up goes ahead: %s\n", networkErr)
+		unavailable = true
+	} else if decision.limited != "" {
+		if asnCounted {
+			// the autonomous system admitted and counted it
+			if err := uncountNetworkCreateSourceAsn(ctx, asn.Number, now, sourceSettings); err != nil {
+				glog.Warningf("[signup]a seed-phrase sign-up refused by its source network stays counted in its autonomous system budget: %s\n", err)
+			}
+		}
+		if decision.limited == networkCreateSourceBudgetShort {
+			return refuse(seedphraseSignupLimitedNetworkShort, maxNetworkCreateSourceAttemptsError(decision.retryAfterSeconds))
+		}
+		return refuse(seedphraseSignupLimitedNetworkLong, maxNetworkCreateSourceAttemptsError(decision.retryAfterSeconds))
 	}
 
 	observeSeedphraseSignupSource(seedphraseSignupScopeAddress, family, int64(result.Count)+1)
-	observeSeedphraseSignupSource(seedphraseSignupScopeNetworkShort, family, decision.shortCount)
-	observeSeedphraseSignupSource(seedphraseSignupScopeNetworkLong, family, decision.longCount)
-	if time.Millisecond <= sourceSettings.AsnWindow {
-		if asn := server.GetIpAsn(addr); asn != nil {
-			asnCount, err := countNetworkCreateSourceAsn(ctx, asn.Number, now, sourceSettings)
-			if err == nil {
-				observeSeedphraseSignupSource(seedphraseSignupScopeAsn, family, asnCount)
-			} else if glog.V(1) {
-				glog.Infof("[signup]seed-phrase sign-up not counted for its autonomous system: %s\n", err)
-			}
+	if networkErr == nil {
+		observeSeedphraseSignupSource(seedphraseSignupScopeNetworkShort, family, decision.shortCount)
+		observeSeedphraseSignupSource(seedphraseSignupScopeNetworkLong, family, decision.longCount)
+	}
+	if asnCounted {
+		observeSeedphraseSignupSource(seedphraseSignupScopeAsn, family, asnDecision.shortCount)
+		observeSeedphraseSignupSource(seedphraseSignupScopeAsnLong, family, asnDecision.longCount)
+		// the sign-up that spends a window's budget names the autonomous
+		// system, once per window: a public number, so the systems a farm
+		// holds, and whose real users the budget refuses with it, can be read
+		// back from the log
+		if 0 < sourceSettings.AsnShortLimit && asnDecision.shortCount == int64(sourceSettings.AsnShortLimit) {
+			glog.Infof("[signup]autonomous system AS%d (%s) spent its seed-phrase sign-up budget of %d per %s\n", asn.Number, asn.Organization, sourceSettings.AsnShortLimit, sourceSettings.AsnShortWindow)
+		}
+		if 0 < sourceSettings.AsnLongLimit && asnDecision.longCount == int64(sourceSettings.AsnLongLimit) {
+			glog.Infof("[signup]autonomous system AS%d (%s) spent its seed-phrase sign-up budget of %d per %s\n", asn.Number, asn.Organization, sourceSettings.AsnLongLimit, sourceSettings.AsnLongWindow)
 		}
 	}
-	noteSeedphraseSignupAdmission(seedphraseSignupAllowed, family)
+	if unavailable {
+		noteSeedphraseSignupAdmission(seedphraseSignupUnavailable, family)
+	} else {
+		noteSeedphraseSignupAdmission(seedphraseSignupAllowed, family)
+	}
 	return nil
 }
 
