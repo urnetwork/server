@@ -10,7 +10,7 @@ import (
 	"math"
 	"slices"
 	// "io"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"sync"
@@ -18,7 +18,7 @@ import (
 	"time"
 
 	// "errors"
-	// mathrand "math/rand"
+	// mathrand "math/rand/v2"
 	"bytes"
 	cryptorand "crypto/rand"
 	// "slices"
@@ -2268,7 +2268,7 @@ func (self *Exchange) broadcastResidentMigrates(
 				}
 				migrateTime := startTime
 				if jitterWindow := migrateEndTime.Sub(startTime); 0 < jitterWindow {
-					migrateTime = migrateTime.Add(time.Duration(rand.Int63n(int64(jitterWindow))))
+					migrateTime = migrateTime.Add(time.Duration(rand.Int64N(int64(jitterWindow))))
 				}
 				results <- migrateResult{
 					clientId: resident.clientId,
@@ -3906,7 +3906,7 @@ func (self *ResidentTransport) runWithResidentLookup(
 					continue
 				}
 			} else {
-				port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+				port := resident.ResidentInternalPorts[rand.IntN(len(resident.ResidentInternalPorts))]
 				exchangeConnection, err := NewExchangeConnection(
 					self.ctx,
 					headerCopy,
@@ -4200,7 +4200,7 @@ func (self *ResidentForward) runWithResidentLookup(
 				if beforeDial := self.exchange.beforeForwardDialForTest; beforeDial != nil {
 					beforeDial(header)
 				}
-				port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+				port := resident.ResidentInternalPorts[rand.IntN(len(resident.ResidentInternalPorts))]
 				exchangeConnection, err := NewExchangeConnection(
 					self.ctx,
 					header,

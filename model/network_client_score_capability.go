@@ -78,6 +78,9 @@ type clientScoreCapability struct {
 	decision  providerEgressDecision
 	counts    ProviderEgressHealthCounts
 	hasCounts bool
+	// the URL bar alone keeps the classified decision out of Online
+	// (providerEgressBarredFromOnline), for a downgraded provider only
+	barredFromOnline bool
 	// the newest post-quantum outcome in the window is positive (§12.4)
 	postQuantumPositive   bool
 	postQuantumValidUntil time.Time
@@ -120,6 +123,7 @@ func newClientScoreCapability(
 	if capability.classification.downgraded() {
 		facts := countFilter.classifiedEgressFacts(clientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings, capability.classification)
 		capability.decision = decideProviderEgress(facts, egressTestEnabled)
+		capability.barredFromOnline = providerEgressBarredFromOnline(facts, capability.decision, egressTestEnabled)
 		capability.counts = capability.classification.classifiedCounts(counts)
 		capability.hasCounts = hasCounts
 	}
@@ -377,7 +381,8 @@ func readNamedProviderCapabilities(ctx context.Context, clientIds []server.Id) (
 // Whether client_score_post_quantum_v1_ready is set, read through a
 // per-process cache no older than the request settings' max age, so a
 // strict post-quantum request costs no read of its own. Before the marker,
-// strict post-quantum requests read today's sources (§5.4, §10 step 3).
+// strict post-quantum requests read the probe's modern evidence of the last
+// seven days, never a provider's declaration (§12.4).
 type clientScorePostQuantumReadyCache struct {
 	stateLock sync.Mutex
 	ready     bool

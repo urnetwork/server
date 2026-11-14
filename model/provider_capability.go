@@ -35,6 +35,10 @@ const (
 	ProviderCapabilityIpIpv4            = "ipv4"
 	ProviderCapabilityProtocolDualproto = "dualproto"
 	ProviderCapabilityProtocolTcp       = "tcp"
+	// A protocol selector, never a label: both protocol labels in one pool,
+	// with no overflow (FP2-PROTOCOL.md §6.3; owner, 2026-11-13, for the
+	// hosted proxies' windows).
+	ProviderCapabilityProtocolAny = "any"
 )
 
 // The ClientScore.CapabilityDowngrades bits (§4.3). Zero, as every entry an

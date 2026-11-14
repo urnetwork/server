@@ -6,10 +6,10 @@ Design and implementation record. What building it changed is folded into
 | | |
 |---|---|
 | Status | Implemented and landed (§13), except the capability-probe retirement and the /mainnet note, which wait for their release steps (§10). All owner decisions recorded. |
-| Date | 2026-11-12 |
+| Date | 2026-11-12; amended 2026-11-13 by D8, D13 and D13.1 (§7.4, §7.5, §7.10, §13.3) |
 | Server | design base cbb7d7306 for §1-§12; §13 cites the implementation at its merges (S1: 86553321d; S2: 4fdf026c0, which contains 3dcc7b138) |
-| Connect | design base fc949b78 for §1-§12; §13 cites connect main 13a6c4f2 |
-| SDK | 2f945bea, the limited-window branch, landed on sdk main as 1777be51; every sdk reference is at 2f945bea |
+| Connect | design base fc949b78 for §1-§12; §13 cites connect main 13a6c4f2, and its 2026-11-13 amendment connect bc776f20 |
+| SDK | 2f945bea, the limited-window branch, landed on sdk main as 1777be51; every sdk reference is at 2f945bea, except the 2026-11-13 amendment's (sdk d47cccdf) |
 | Apps and localizations | android 130ed4526, apple e1c3cfac, windows 93af2d51, linux ff3a813, localizations 19b89a4, all on their main (§5.5) |
 
 References are `path:line` at those commits. §1-§12 describe the design
@@ -66,17 +66,24 @@ without a repo prefix are in the server repo; `connect/`, `sdk/`, `android/`,
   ever placed on a compatible client: UDP needs `dualproto`, IPv6 needs
   `dualstack`.
 - A new limited window holds `tcp` providers. Its clients join the race of
-  every flow they can carry.
-  - Size: half the largest normal window's target, at least 1 (D8). On a
-    low-memory device (iOS, Android, a hosted proxy) it is bounded at 1 if the
-    memory gate fails (D11.5).
+  every flow they can carry, in one order with the normal window's by the
+  weighted metrics, each window's top first (D13, D13.1).
+  - Size: the same as the largest normal window's target (D8). The 32-MiB
+    memory tier (iOS, hosted proxies) holds at half until the owner decides.
+    On a low-memory device (iOS, Android, a hosted proxy) it is bounded at 1
+    if the memory gate fails (D11.5).
   - Rank mode: the performance profile's, `quality` in auto (D10).
+  - Hosted proxies have none (D14): their normal windows ask for `ipv4` and
+    `any`, every class in one pool, so the sizes given for them elsewhere in
+    this document no longer apply.
 - The provider status tells a downgraded provider why (D11.6).
 - Connect's shipped local IPv6 downgrade (B5) is retired. Placement uses
   only the server's labels on both axes (D11.8).
 - Strict post-quantum (PQ) requests match only providers the quality probe has
   seen seal a PQ session within the last 8 hours. Neither a provider's
-  declaration nor the capability probe qualifies any more (D12, §12).
+  declaration nor the capability probe qualifies any more (D12, §12). While
+  the ready marker is down, the probe's modern evidence of the last 7 days
+  answers instead, never a declaration (D12.6, §12.8).
 
 **Goals.**
 1. Bring the providers that pass everything but UDP (about 20,700 on Main on
@@ -126,7 +133,7 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D7.3 | "not enough" means fewer matching providers in the location than the window's target count | "correct" | §6.3, refined by D11.1 and D11.2 |
 | D7.4 | labels come only from negative probe evidence | "if no negative measurement assume dual" (for both axes; unmeasured `udp_probes: false` countries count as `dualproto`) | §3.2-3.3 |
 | D7.5 | no local downgrade state on either axis | "it's impossible to tell per-flow failures from provider failures. also it's very hard to tell a failed udp flow" | §1 non-goals; applied to the shipped B5 by D11.8 (§7.9) |
-| D8 | limited window size | "I want to change the limited window to half the normal window size, min 1." Supersedes "min count 1, default 1" (D6.3). | §7.4 |
+| D8 (2026-11-13) | limited window size: the same as the normal window, on desktop and Android. The 32-MiB tier (iOS, hosted proxies) is held at half until the owner decides (hold of 2026-11-13, §7.4). | 2026-11-13: "I want the limited window to be the same size as the normal window." It supersedes 2026-11-12's "I want to change the limited window to half the normal window size, min 1.", which superseded "min count 1, default 1" (D6.3). | §7.4, §7.10 |
 | D9 | process | "Ok fully finish FP2-PROTOCOL.md and then i will have a peer review before we start implementation." | this document |
 | D10 | the limited window's rank mode follows the performance profile | "the limited window should match the same rank mode as the performance profile. if auto, the limited window should be quality" (answers open question Q3) | §6.2, §7.4, §7.6 |
 | D11 | open questions Q1, Q2 and Q4-Q7 settled as recommended | "Q1,Q2,Q4,Q5,Q6,Q7 accept recommendations" | rows D11.1-D11.7 |
@@ -142,6 +149,10 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D12.3 | no new window: every window, the limited one included, uses the current PQ setting, and a toggle regenerates them all. Overflow never relaxes PQ. | "we already added postquantum as a selection criteria to fp2. when postquantum is enabled/disabled, the entire multi windows are regenerated. We should make sure to the use current post quantum setting on all window selection. We do not need a new window." | §12.5 |
 | D12.4 | 7918 (connect#220) is solved by strict selection with the positive signal; its fail-fast, cache and field-measurement options are not needed | "With the strong fp2 post quantum filter and quality probe positive signal, i think 7918 is solved by the multi client requiring a strong multi client selection when post quantum is enabled." | §12.7 |
 | D12.5 | PQ outcomes come from a scheduled third of URL turns, not every turn: a turn is a PQ turn when its claim ordinal is a multiple of 3 and its provider has no PQ outcome in the last 4 hours | accepted 2026-11-12, in place of every turn (S1 step 2, merge 86553321d) | §12.2, §13.2 |
+| D12.6 (2026-11-13) | no provider counts on its own claim, on either side of the ready marker: a network-only provider is modern or PQ only with the same probe evidence as a public one, and while the marker is down strict PQ reads the probe's modern evidence of the last 7 days instead of declarations. That evidence counts PQ only from the quality probe's positive outcome. | "1,2 sounds good, go ahead"; "They must have a positive quality probe handshake to count" | §12.4, §12.8 |
+| D13 (2026-11-13) | merged races take one order by the weighted metrics, whichever window a candidate comes from | "the windows need to merge in order based on the weighted metrics" | §7.5 |
+| D13.1 (2026-11-13) | each window's top always races: the tops first, then the merged order, so a race of two tries the best normal and the best limited candidate together | "if it's 2, i want to make sure a member of the limited window is always tried. I want to combine that with the merged sort, but keep the top from each list to be always included" | §7.5 |
+| D14 (2026-11-13, about 22:25Z) | hosted proxies: the normal windows ask with `ip: ipv4` and a new protocol selector `any`, every class in one pool ranked by the rank mode alone (no IPv6 need, no overflow, no tier offset), and a hosted device has no limited window, so D8's hold of the 32-MiB tier no longer applies to hosted proxies. Apps keep `dualstack` and `dualproto` with the limited window. | "hosted proxies should use main window as the limited window, so that dualproto and dualstack requirements are not applied on the main window for hosted proxies, and there is no need for a separate limited window" | §5.1-5.3, §6.3, §7.4 |
 
 D11.8 applies D7.5 to the shipped IPv6 local downgrade (B5) too: it is
 retired (§7.9). No owner question is open.
@@ -324,6 +335,36 @@ What follows from it:
   4 exactly as the URL's own would.
 - **Recheck and probation runs** never enter the window (`total_count` 0 or
   `url_probation`). Their mask is stored as 0.
+
+### 3.7 The country floor (owner, 2026-11-13)
+
+"Keep the 80% URL-probe bar, but never let a country go empty"
+([FP2FIX.md](FP2FIX.md), "The country floor"). After both decisions, the
+score export admits to Online a country's best providers that the bar alone
+keeps out of it, wherever fewer than `country_floor_providers` (3) of its
+public providers are online (`model/network_client_score_country_floor.go`).
+Quality and Speed keep the bar's members, so their answers lend the admitted
+providers only from the Online fallback, after every native and borrowed
+native. The two decisions get one pass each:
+
+- **Strict, today's facets.** Only a provider that is not downgraded
+  (`CapabilityDowngrades` 0) is a candidate, so a legacy request, which may
+  carry UDP and IPv6 flows on any provider it gets, never receives a provider
+  whose UDP or IPv6 legs the probe judged failing. This is the hard gate of
+  D7.1 and of 11-12 unchanged; the floor only relaxes the ratio for providers
+  no negative capability evidence explains.
+- **Classified, the capability facets.** A downgraded provider's classified
+  copy is a candidate on its classified decision. The pass counts what
+  selector mode draws: every class, the strict records and admissions
+  included, so a downgraded provider is admitted only where the country has
+  too few others. Only the windows that take its class draw it (§6.3), from
+  their pool's Online union, and connect routes only compatible flows through
+  it (§7.2): an app's limited window takes it for TCP flows, and a hosted
+  proxy's normal windows (D14, `ipv4` and `any`) take every class.
+
+A provider with negative capability evidence and no failure besides is
+already a native of its class, so the classified pass matters where a
+provider is downgraded and also fails the bar on its kept legs.
 
 ## 4. Data model and migration
 
@@ -547,9 +588,9 @@ JSON Schema (draft 2020-12). Every existing field is unchanged.
       "type": ["object", "null"],
       "properties": {
         "ip": { "enum": ["dualstack", "ipv4"], "default": "dualstack" },
-        "protocol": { "enum": ["dualproto", "tcp"], "default": "dualproto" },
+        "protocol": { "enum": ["dualproto", "tcp", "any"], "default": "dualproto", "description": "any (D14): both protocol labels in one pool, no overflow; a selector only, never a provider's label" },
         "target_count": { "type": "integer", "minimum": 1, "description": "the window's target count, for the protocol axis; default: count, or 1 when count < 1" },
-        "held_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds whose protocol label is the requested one (D11.2)" },
+        "held_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds whose protocol label is the requested one, every one for any (D11.2)" },
         "dualstack_target_count": { "type": "integer", "minimum": 0, "description": "the window's IPv6 minimum (D11.1); default 1 when ip is dualstack; treated as 0 when ip is ipv4" },
         "held_dualstack_count": { "type": "integer", "minimum": 0, "default": 0, "description": "window clients the caller already holds that are labelled dualstack" }
       }
@@ -605,7 +646,7 @@ Unknown members are ignored, as today: the body is decoded with
       "required": ["ip", "protocol", "target_count", "held_count", "dualstack_target_count", "held_dualstack_count"],
       "properties": {
         "ip": { "enum": ["dualstack", "ipv4"] },
-        "protocol": { "enum": ["dualproto", "tcp"] },
+        "protocol": { "enum": ["dualproto", "tcp", "any"] },
         "target_count": { "type": "integer", "minimum": 1 },
         "held_count": { "type": "integer", "minimum": 0 },
         "dualstack_target_count": { "type": "integer", "minimum": 0 },
@@ -624,7 +665,7 @@ Errors use the existing "<code> message" convention
 | Input | Answer |
 |---|---|
 | `select.ip` not `dualstack` or `ipv4` | 400 `unknown select.ip "<value>"` |
-| `select.protocol` not `dualproto` or `tcp` | 400 `unknown select.protocol "<value>"` |
+| `select.protocol` not `dualproto`, `tcp` or `any` (D14) | 400 `unknown select.protocol "<value>"`. A server from before D14 answers `any` this way too, but the hosted proxies, its only senders, run the server they call (§5.4). |
 | `select.target_count` present and < 1 | 400 `select.target_count must be at least 1` |
 | `select.held_count` < 0 | 400 `select.held_count must not be negative` |
 | `select.dualstack_target_count` < 0 | 400 `select.dualstack_target_count must not be negative` |
@@ -682,10 +723,13 @@ from declared or capability-probed to measured by the quality probe (§12.4):
 
 | | Old server | New server, before `client_score_post_quantum_v1_ready` | New server, after it |
 |---|---|---|---|
-| Any client sending either field | today's meaning | today's meaning | PQ-positive providers only |
+| Any client sending either field | today's meaning | the probe's modern evidence of the last 7 days, never a declaration (D12.6) | PQ-positive providers only |
 | Any client sending neither | unchanged | unchanged | unchanged |
 
-No client change is needed.
+No client change is needed. A server from before D12.6 (2026-11-13) answered
+the middle column with today's meaning: declarations for
+`post_quantum_encryption`, and for `require_modern_provider` a network-only
+provider's declaration.
 
 ### 5.5 Provider status (D11.6)
 
@@ -694,7 +738,8 @@ The provider status already reports URL checks as the ranking item
 rule (:777). The item keeps its value, count, total and `passes` as today.
 
 **The fields.** A downgraded provider's item gains three fields. All are
-omitempty, and all are also carried in the compact form.
+omitempty. The full form carries the English `reason`; the compact form
+carries the two counts without the English text.
 
 | Field | Type | Value |
 |---|---|---|
@@ -827,6 +872,33 @@ FindProviders2(args, session):
 | `ipv4`, `dualproto` | none | A ∪ B | C ∪ D, tier +33 |
 | `dualstack`, `tcp` | C | C ∪ D | none |
 | `ipv4`, `tcp` (the limited window) | none | C ∪ D | none |
+| `ipv4`, `any` (the hosted proxies' normal windows, D14) | none | A ∪ B ∪ C ∪ D | none |
+| `dualstack`, `any` | A ∪ C, one pool | A ∪ B ∪ C ∪ D | none |
+
+**`any` (D14).** A request for protocol `any` prefers neither protocol:
+- its main pool is every class, filled by the request's rank mode like any
+  other pool (§6.5): the requested mode's natives, borrowing at
+  `BackfillTierOffset`, the Online union at twice it;
+- a `tcp` provider keeps the tier of its band, with no overflow tier and no
+  `overflow_step`;
+- there is no overflow phase, so `target_count` and `held_count` change
+  nothing; they are echoed, `held_count` counting every held client;
+- with `ip: dualstack` its IPv6 need draws A and C as one pool;
+- the family filter narrows the pool as for any request;
+- `capabilities` still carry each provider's labels, and a provider is never
+  labelled `any`.
+
+As built: the validation (model/network_client_location_select.go:88),
+`needPools` (:153), `mainClasses` (:168), `overflowClasses` (:182) and
+`overflowPool` (:198); the request counter's `any` label sets (:475), while
+`urnetwork_findproviders2_select_answered_total` keeps the provider's label.
+Connect asks with it only where a host sets
+`MultiClientSettings.NormalWindowSelectors` (§7.4), and connect builds no
+limited window beside such windows. UDP flows still race only exits labelled
+`dualproto` (§7.2), so a hosted window whose exits are all `tcp` answers UDP
+as unroutable (§7.7). Connect then brings a `dualproto` exit in, and a hosted
+window sized to one exit lists a `dualproto` provider first when one ranks
+about as well (§7.7, windows that ask for `any`).
 
 **How D7.2 and D11.1 combine.** The decided order A → B → C → D still holds:
 - `dualstack` comes before `ipv4` for the IPv6 need;
@@ -1000,15 +1072,16 @@ state changes a label between FP2 answers.
 | Selectors | `{"ip": "ipv4", "protocol": "tcp"}`: the `tcp` classes C and D, never a `dualproto` provider (§6.3) |
 | Rank mode | the performance profile's (D10): auto uses `quality`, a fixed Quality profile `quality`, a fixed Speed profile `speed`. Read from the window's profile when each request is built; normal windows read their own type (connect/ip_remote_multi_client_family.go:448). |
 | `ip_family` | `v4-capable` |
-| Size setting | `MultiClientSettings.LimitedWindowSizeFraction`, default 0.5. A runtime setter changes it; zero, a negative value, NaN or Inf turns the window off. It lives in `MultiClientSettings`, not `ReliabilitySettings`, because the sdk mirror's round trip zeroes unknown fields. |
-| Target | `max(1, floor(f × S))` for f > 0. S is the largest current target among the active normal windows, the `targetWindowSize` each window's resize pass computes (:14399-14425). In a fixed profile the inactive window's target is 0. f ≤ 0: no limited window. |
+| Size setting | `MultiClientSettings.LimitedWindowSizeFraction`, default 1 (D8). The sdk passes 0.5 at or below the 32-MiB target (the 32-MiB hold below). A runtime setter changes it; zero, a negative value, NaN or Inf turns the window off. It lives in `MultiClientSettings`, not `ReliabilitySettings`, because the sdk mirror's round trip zeroes unknown fields. |
+| Target | `max(1, floor(f × S))` for f > 0. S is the largest current target among the active normal windows, the `targetWindowSize` each window's resize pass computes (:14399-14425). In a fixed profile the inactive window's target is 0. f ≤ 0: no limited window. At the default f = 1 the target is S: the limited window is the same size as the largest normal window (D8). |
 | Hard max | `max(1, floor(f × the largest normal hard max))`, or unbounded when an active normal window is unbounded. `LimitedWindowSizeMax` caps both target and hard max. |
-| Desktop auto | normal targets 6 (quality) and 1 (speed; max 2): S = 6, limited 3 |
-| iOS and hosted proxies (32 MiB memory target) | normal windows scale with the target (sdk/mobile_memory_policy.go:237-238, 292-299): quality 5, speed 1, so S = 5 and the limited window is 2 |
-| Android (64 MiB) | quality 10, speed 2, so S = 10 and the limited window is 5 |
+| Desktop auto | normal targets 6 (quality) and 1 (speed; max 2): S = 6, limited 6 |
+| iOS and hosted proxies (32 MiB memory target) | normal windows scale with the target (sdk/mobile_memory_policy.go:237-238, 292-299): quality 5, speed 1, so S = 5. The sdk holds this tier at f = 0.5, so the limited window is 2 (the 32-MiB hold below). |
+| Android (64 MiB) | quality 10, speed 2, so S = 10 and the limited window is 10 |
+| 32-MiB hold (2026-11-13) | Until the owner decides, a device under the low-memory policy at or below the 32-MiB target (iOS, and the hosted proxies that share it) takes f = 0.5 from the sdk's unexported `DeviceLocalSettings.lowMemoryLimitedWindowSizeFraction`, installed by `applyMobileLimitedWindowSettingsForPlatform`. The evidence, from the owner's iOS extension logs: with 8 window clients (quality 5, speed 1, limited 2) the tunnel sits at 35-40 MiB of phys_footprint with its Go heap at the 32-MiB soft limit; iOS fires 300+ memory-pressure frees a run, up to 42 a second, each wiping the DNS cache and DoH connections; one extension was jetsam-killed at about 48-50 MiB. The full size would make 11 window clients. Android at 64 MiB and desktop take connect's 1. |
 | Low-memory bound (D11.5) | `MultiClientSettings.LimitedWindowSizeMax` caps the limited window; 0 means no bound. The sdk feeds it from its unexported `DeviceLocalSettings.lowMemoryLimitedWindowSizeMax` (sdk/device_local.go:735, default 0 at :411), through `applyMobileLimitedWindowSettingsForPlatform` (sdk/mobile_memory_policy.go:590, called at sdk/device_local.go:5536). It applies on low-memory devices only: iOS, Android and hosted proxies. A fraction alone cannot give D11.5's 1 on Android. |
-| Memory gate | Steady memory is measured on the iOS and Android nightlies with every window full, before the stable release. If either is over its target, the bound is set to 1 at sdk/device_local.go:411. Until then the gate counts as not failed: no bound. Desktop is unaffected. |
-| Fixed profile of size N | `max(1, floor(N/2))` |
+| Memory gate | Steady memory is measured on the iOS and Android nightlies with every window full, before the stable release. If either is over its target, the bound is set to 1 at sdk/device_local.go:411. Until then the gate counts as not failed: no bound. Desktop is unaffected. On 2026-11-13 the gate had not run and no bound was set anywhere: the sdk default is 0 on every platform, and hosted proxies take the same default. |
+| Fixed profile of size N | N; `max(1, floor(N/2))` on the 32-MiB tier |
 | Fixed destination | none: the fixed exit carries every flow |
 | Fill and refill | its own `resize` loop (:13895) and `expand` (:14845), like a normal window. Each request carries `target_count` (its target), `held_count` (its `tcp` clients) and `dualstack_target_count` 0. There is no IPv6 need. |
 | No `tcp` supply | the window stays empty and costs nothing |
@@ -1016,10 +1089,12 @@ state changes a label between FP2 answers.
 | Old server (no echo) | the window is disabled while the server is known not to echo, and the next echoed answer enables it. Without a capability-aware generator it stays disabled. |
 | Profile change | Handled exactly like the normal windows. An equal profile is a no-op (:3403-3408). Otherwise `SetPerformanceProfile` (:3394-3430) installs the new profile on every window in `self.windows`, the limited window included (:13381-13400: it also forgets sticky and recent exits). `shuffle` then cancels every client (:16231-16238). Those clients' flows go through `removeClient` (:5718): QUIC flows are rebound to compatible candidates, and TCP flows are torn down. The resize loop refills under the new rank mode, with the target recomputed from the new active normal windows. |
 | Count | one per multi client |
+| Hosted proxies (D14) | none, whatever the sizes above say for them. Their normal windows ask for `ipv4` and `any` (§6.3) and hold the `tcp` providers themselves (server/proxy `newProxyDeviceLocalSettings`, sdk `DeviceLocalSettings.NormalWindowSelectors`). Connect builds no limited window beside normal windows that ask for `any` (`MultiClientSettings.NormalWindowSelectors`), and the proxy also sets the fraction to 0 (sdk `DeviceLocalSettings.DisableLimitedWindow`), which the developer override's set and reset do not change. |
 
 **Normal windows.**
 - Each request carries `select: {"ip": "dualstack", "protocol": "dualproto"}`
-  (D6.1) with:
+  (D6.1; a hosted proxy's carry `ipv4` and `any` with every live, unwarned
+  client held and no IPv6 minimum, D14) with:
   - `target_count`: the window's pre-reserve demand target, seeded from
     config before the first pass;
   - `held_count`: its live, unwarned clients labelled `dualproto`;
@@ -1039,21 +1114,61 @@ state changes a label between FP2 answers.
   `ApiMultiClientGenerator` implements it; a generator without it is called
   as today (connect/ip_remote_multi_client.go:171-173).
 - The single limited window is sized from the largest normal window. A
-  limited window per normal window would add the speed window's share again
-  (1 more client) for the same supply.
+  limited window per normal window would add the speed window's size again
+  (1 or 2 more clients) for the same supply.
 
 ### 7.5 Merged races
 
 - In `coalesceOrderedClients`, each selected normal window's compatible
-  candidates are followed by the limited window's compatible candidates.
+  candidates and the limited window's compatible candidates merge into one
+  order by the weighted metrics (D13; owner, 2026-11-13: "the windows need to
+  merge in order based on the weighted metrics"):
+  - each window first narrows to its own best rank, as a window alone does
+    (`raceCandidates`). One rank gate across both would drop the limited
+    window's candidates, whose overflow ranks sit below the normal window's;
+  - the union is then ordered as one window orders its own offer: a weighted
+    shuffle by each candidate's expected throughput,
+    `1 + ExpectedByteCountPerSecond`, at `StatsWindowEntropy`
+    (`mergeRaceField`). A strong limited candidate can come first and a weak
+    one later, by its metrics alone;
+  - the cross-tier and last-resort fields merge the same way;
+  - with no compatible limited candidate, the field is exactly the normal
+    window's, in its own order.
 - Today's filters then run on the merged list: service failures, reputation,
   performance, same-network and scored placement.
+- The race then takes each window's top first (D13.1; owner, 2026-11-13:
+  "if it's 2, i want to make sure a member of the limited window is always
+  tried. I want to combine that with the merged sort, but keep the top from
+  each list to be always included"):
+  - a window's top is its first candidate in the merged order whose contract
+    requests are not held. In the merged order that is the window's own
+    weighted top;
+  - the tops come first, ordered between themselves by the weighted
+    metrics, and every other candidate follows in the merged order
+    (`raceWindowTopsFirst`);
+  - it runs after the filters, right before the bound, so a top that a
+    filter removed, or a held top, gives way to its window's next;
+  - a race bounded to two therefore always tries the best normal candidate
+    and the best limited candidate together, and an unbounded race still
+    tries every candidate;
+  - it applies only where the limited window offers a candidate for the
+    flow, so to TCP flows. A UDP field holds one window and is unchanged.
 - The race dials every candidate in parallel and binds the lowest measured RTT
   (`MultiRaceClientCount` 0, :377-402). Limited clients therefore compete on
   equal terms for the TCP flows they can carry.
 - Under a degraded backend the race is bounded
-  (`MultiRaceDegradedClientCount`), and the normal windows' candidates come
-  first.
+  (`MultiRaceDegradedClientCount`, 2) to the two windows' tops. A client
+  whose contract requests the platform is holding still races last
+  (`contractRateLimitHeldLast`), and a race that would send to one is
+  bounded the same way.
+  - Until 2026-11-13 the normal windows' candidates came first
+    (`limitedClientsLast`), so a degraded race never dialed a limited client
+    while a normal window offered two. D13 and D13.1 retired that.
+- A SYN retry's fresh candidates are the first untried ones of the merged
+  order, within the same bound (`freshSynRetryCandidatesWithLock`).
+- A service refresh still rotates an idle slot of the flow's own windows
+  before one of the limited window's. That is the order in which windows give
+  up a slot, not a race order.
 - Limited clients are `tcp` (classes C and D), so they never join a UDP race.
   A class-C client also joins TCP/IPv6 races (§7.2).
 - When the selected windows offer nothing compatible, a TCP flow races the
@@ -1106,6 +1221,32 @@ state changes a label between FP2 answers.
   selected normal windows have formed and neither they nor the limited window
   holds a client that can carry the flow. A fixed profile's inactive window
   never keeps UDP routable.
+- **Windows that ask for `any`** (the hosted proxies, D14;
+  connect/ip_remote_multi_client_udp_swap.go). Nothing in their requests
+  prefers `dualproto`, so connect does two things, and nothing else changes:
+  - *The UDP swap.* A UDP flow answered as unroutable opens the UDP demand of
+    the first window it would use that asks for `any` (quality in auto), for
+    `UdpSwapDemandHold` (5 minutes), each such flow restarting it. While the
+    demand is open and the window holds no `dualproto` exit, the window has a
+    UDP shortfall of one, handled like the IPv6 family swap's shortfall (IPV6.md
+    B2): its target rises within its max, and discovery leads with one
+    request for `select.protocol: dualproto`. At capacity, the enumerator
+    first probes for a `dualproto` candidate, and only then does a flowless
+    `tcp` exit give up its slot. A strict window removes that exit, and a
+    non-strict one warns it out of selection. The swap takes one victim at a
+    time and does nothing while the backend is degraded. An answer with no
+    `dualproto` provider, or two failed candidates in a row, starves it for
+    60 s. The swap never takes a slot that carries flows, and it never
+    replaces the user's Fixed IP.
+  - *The single-exit preference.* A window that asks for `any` and is sized
+    to one exit (a single-exit profile or the Fixed IP) lists first a
+    provider labelled `dualproto` when that provider ranks about as well as
+    the best listed one. That means no less qualified, found at the same or a
+    nearer location match, and a tier at most `SingleExitDualprotoTierBand`
+    (0, so the same tier) above the best's. Hosted windows evaluate one
+    candidate per pass (server/proxy `defaultHostedEvaluationPoolMultiple`),
+    so the first provider listed takes the slot. With no such provider, the
+    listing keeps the answer's order.
 
 ### 7.8 sdk and apps
 
@@ -1118,7 +1259,10 @@ The sdk's limited-window work, branch `feat/fp2-limited-window-1112`
   - `LimitedWindowSize` is set at sdk/device_local.go:5670 and 5812;
   - `GetWindowStatus` no longer calls the client while holding `stateLock`.
 - **Sizes:**
-  - The fraction stays connect's 0.5; the sdk never copies it.
+  - The fraction is connect's default, 1 (D8), except at or below the
+    32-MiB target, where the sdk passes 0.5 (the 32-MiB hold, §7.4): 2
+    limited clients on iOS and hosted proxies. The developer menu's reset
+    returns to the device's own default.
   - On low-memory devices the sdk sets `LimitedWindowSizeMax` (§7.4, D11.5).
 - **Developer controls:**
   - `GetLimitedWindowSizeFraction`, `SetLimitedWindowSizeFraction` and
@@ -1172,15 +1316,19 @@ uses only the server's labels on both axes.
 | | Desktop | iOS and hosted proxies (32 MiB) | Android (64 MiB) |
 |---|---|---|---|
 | Window clients today | quality 6, speed 1 (max 2): 7-8 | quality 5, speed 1: 6 | quality 10, speed 2: 12 |
-| Limited window | 3 | 2, or 1 with the bound (D11.5) | 5, or 1 with the bound |
-| Window clients after | 10-11 (+38-43%) | 8 (+33%), or 7 | 17 (+42%), or 13 |
-| Contracts | +3 per direction while the limited clients carry data. The wide race sends each cold-start TCP flow's first packet to them, so they open contracts early. | +2 (or +1) | +5 (or +1) |
-| Control plane | +3 client setups (auth and control registration) and continuous pings (`CPingRestTimeout` 10 s, `CPingMaxByteCountPerSecond` 32 KiB/s; connect/ip_remote_multi_client.go:255, 264) | +2 (or +1) | +5 (or +1) |
+| Limited window (D8, 2026-11-13) | 6 | 2, held at half (§7.4), or 1 with the bound (D11.5) | 10, or 1 with the bound |
+| Window clients after | 13-14 (+75-86%) | 8 (+33%), or 7 | 22 (+83%), or 13 |
+| Contracts | +6 per direction while the limited clients carry data. The wide race sends each cold-start TCP flow's first packet to them, so they open contracts early. | +2 (or +1) | +10 (or +1) |
+| Control plane | +6 client setups (auth and control registration) and continuous pings (`CPingRestTimeout` 10 s, `CPingMaxByteCountPerSecond` 32 KiB/s; connect/ip_remote_multi_client.go:255, 264) | +2 (or +1) | +10 (or +1) |
 | Memory | each client holds its own transport graph and buffers | the window sizes scale from the 24 MiB calibration (sdk/mobile_memory_policy.go:14, 292-299). Per-client buffers include a resend queue of 64-512 KiB and an unreliable flight of 128 KiB (:224-236). | the same, at 64 MiB |
 
-Race duplication: each cold-start TCP flow's first packet goes to up to 3 more
-exits on desktop, 2 on iOS and hosted proxies and 5 on Android, or 1 with the
+Race duplication: each cold-start TCP flow's first packet goes to up to 6 more
+exits on desktop, 2 on iOS and hosted proxies and 10 on Android, or 1 with the
 bound.
+
+Until 2026-11-13 the limited window was half the size everywhere (D8's first
+value): 3 on desktop and 5 on Android, 10-11 and 17 window clients after.
+The 32-MiB tier keeps that half for now (§7.4).
 
 ## 8. Metrics, dashboards, alerts, measures
 
@@ -1301,8 +1449,8 @@ all):
   - Online rises from 30.3k to 50.5k at the ratio level, about 44.5k after
     the gates (88%).
   - They reach users through:
-    - the limited windows: 3 per desktop device, 2 per iOS device or hosted
-      proxy, and 5 per Android device (1 on a low-memory device if the memory
+    - the limited windows: 6 per desktop device, 2 per iOS device or hosted
+      proxy, and 10 per Android device (1 on a low-memory device if the memory
       gate fails);
     - the normal windows, when a location has fewer `dualproto` providers
       than a window's target.
@@ -1460,8 +1608,8 @@ all):
 
 **sdk:**
 - the window status fields;
-- the limited window's size: 2 on iOS and hosted proxies, 5 on Android, and 1
-  with the low-memory bound set (D11.5);
+- the limited window's size: 2 on iOS and hosted proxies (the 32-MiB hold),
+  10 on Android, and 1 with the low-memory bound set (D11.5);
 - the window status fields, the exit fields and the diagnostics' limited
   counts (§7.8);
 - the developer controls set, read and reset the fraction for new windows;
@@ -1497,11 +1645,14 @@ all):
 - **FP2:**
   - both fields keep only PQ-positive providers in every draw, named
     providers included;
-  - a declared but unmeasured provider is left out;
-  - a network-only provider is left out;
+  - a declared but unmeasured provider is left out, on both sides of the
+    ready marker (D12.6);
+  - a network-only provider is left out unless it has the same evidence as a
+    public one;
   - selector mode's phases and overflow never add a non-positive provider;
-  - before the ready marker the old sources answer, and after it the measured
-    signal.
+  - before the ready marker the probe's modern evidence of the last 7 days
+    answers, and after it the measured signal;
+  - a negotiated PQ session that never sealed is not PQ evidence (D12.6).
 - **connect:**
   - a PQ toggle regenerates every window, the limited one included;
   - every request, the limited window's included, carries
@@ -1557,8 +1708,9 @@ inert for them.
     or monitor §2.19g pages.
 
   **Rollback:** the previous taskworker. PQ turns stop, the marker expires,
-  and strict PQ returns to today's sources. The capability keys and sets
-  expire with the export TTL.
+  and strict PQ returns to the probe's modern evidence of the last 7 days
+  (D12.6, §12.8), which ages out without new PQ turns. The capability keys
+  and sets expire with the export TTL.
 - **Post-quantum (D12).** It rides the same steps:
   - **Step 1:** the migration adds `pq_outcome`.
   - **Step 2:** the taskworker's URL prober opens the PQ session on PQ turns
@@ -1567,7 +1719,8 @@ inert for them.
     the PQ-measuring prober started, a full evidence window, the export marks
     `client_score_post_quantum_v1_ready`.
   - **Step 3:** api, alt and the proxy use the measured signal once the marker
-    is set, and today's sources until then.
+    is set, and the probe's modern evidence of the last 7 days until then,
+    never a declaration (D12.6; before 2026-11-13, today's sources).
   - **The capability probe** is switched off (`capability_probe.yml`
     `enabled: false`) one day after step 3, and its code is deleted in the
     next release.
@@ -1591,8 +1744,8 @@ inert for them.
      publishes with the stable app release.
 - **Measure between steps 2 and 3.** Watch Redis memory for `cs_` keys,
   export duration, and the new gauges filling over 8 hours.
-- **The client settings** `LimitedWindowSizeFraction` (0.5; 0 turns the
-  window off) and the selectors are compiled defaults. They are exposed in the
+- **The client settings** `LimitedWindowSizeFraction` (1, D8, and 0.5 from
+  the sdk at or below 32 MiB; 0 turns the window off) and the selectors are compiled defaults. They are exposed in the
   developer menu for testing; a production change is a release.
 - **IPV6.md B5** is marked superseded in the connect change that retires it
   (D11.8).
@@ -1608,13 +1761,14 @@ inert for them.
 | Risk | Mitigation |
 |---|---|
 | **Dual-stack concentration.** Measuring "enough" on the IP axis against the window's target would draw every window from class A wherever A fills it: us has 108 dual-stack providers of 20,991 on the hard gate. | Resolved by D11.1. The IPv6 need takes one dual-stack client per quality window, as today's soft minimum does, and A and B then draw together (§6.3). |
-| **Mobile memory.** Two more window clients on iOS and hosted proxies (32 MiB target), and five more on Android (64 MiB). | The memory gate on the nightlies before the stable release. If it fails, the low-memory bound is 1 (D11.5). |
-| **Platform load.** 3-4 more clients per device: setups, pings, contracts and race duplicates. | measure on the proxy fleet first (step 4) |
+| **Mobile memory.** Two more window clients on iOS and hosted proxies (32 MiB target), held at half because that tier is already at its limit (§7.4), and ten more on Android (64 MiB), since the limited window became the normal window's size there (D8, 2026-11-13). | The memory gate on the nightlies before the stable release. If it fails, the low-memory bound is 1 (D11.5). |
+| **Platform load.** 6 more clients per desktop device, 2 per iOS device or hosted proxy and 10 per Android device: setups, pings, contracts and race duplicates. | measure on the proxy fleet first (step 4) |
 | **Label lag without local downgrade (D7.5).** A provider that loses UDP keeps `dualproto` for a few hours, and its UDP flows stall until then. | The wide race hedges cold starts, and apps fall back from QUIC to TCP. |
 | **IPv6 without B5 (D11.8).** A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns, typically a few hours (§3.5). | Only dual-stack providers are concerned, about 1% of supply. Applications fall back to IPv4, and B6's no-route still answers when no `dualstack` client exists. |
 | **Export cost.** About 75% more union pages, and a second native snapshot per non-forced target and mode. | Measured at step 2: Redis memory for `cs_` keys and export duration. Capability keys can be dropped by rollback. |
 | **Two selection bodies.** Selector mode repeats the legacy level body for each pool in a separate function (§6.1). A fix to one can miss the other. | Check every selection fix against both. The legacy JSON and today's-facet tests pin the legacy side. |
-| **Network-only providers under strict PQ** (D12.2). The URL probe cannot reach a provider that holds only a Network key, so it never has a positive signal, and a strict-PQ request no longer matches it. | This follows D12.2 ("any provider"). Such providers stay available to their network's requests without PQ. |
+| **Network-only providers under strict PQ** (D12.2, D12.6). The URL probe cannot reach a provider that holds only a Network key, so it never has a positive signal, and a strict-PQ request no longer matches it, on either side of the ready marker. Only evidence left from a former Public provide, while fresh, still counts. | This follows D12.2 ("any provider") and D12.6. Such providers stay available to their network's requests without PQ. |
+| **Strict supply while the marker is down** (D12.6). Strict requests then read only the probe's modern evidence of the last 7 days. A probe outage longer than that empties them. | The 7-day window outlasts any probe gap the marker covers. Strict supply empties only when no provider has fresh positive evidence, which is the rule (§12.8). |
 | **A provider that loses PQ** stays PQ-positive until its next run reads negative, typically within a turn (about 24 minutes). | Window clients stay fail-closed and verify every session (§12.5), so nothing is sent in the clear. |
 | **Prober cost** (§12.2). One key registration, one PQ handshake and up to a 3 s seal wait per PQ turn; about 3 GB a day of `st_client_key_history` at about 7 turns a second. | The schedule (D12.5) keeps it to a third of the turns of a provider without a recent outcome. The capability probe's own tunnels go away. Watch the insert rate and turn time at taskworker deploy. |
 | **A provider that seals but cannot open the probe client's frames** fails that PQ turn's URL legs. | At most one turn in three, and only without an outcome in 4 hours (§12.2). |
@@ -1634,6 +1788,9 @@ decided by D12.1-D12.5 (§12).
 |---|---|---|
 | `post_quantum_encryption` | The provider's latest provide declared PQ sessions. It is read per request (`readProvidePostQuantumEncryption`, model/provide_capability_model.go:38) and applied in every draw (model/network_client_location_model.go:5100-5105; candidates at :6653, named providers at :7364). | connect builds from before FP2-MODERN |
 | `require_modern_provider` | `ClientScore.Modern`: the capability probe measured end-to-end PQ (X25519MLKEM768) and resizable windows within 7 days (model/egress_modern_provider.go:1-31, :348). A Network-key-only provider counts by its declaration (model/network_client_location_model.go:5790). Applied by the request filter (model/network_client_selection_prefilter.go:20, 36) and for named providers (:6732-6734, :7351-7352). | connect today, whenever the profile asks for PQ (connect/ip_remote_multi_client_api.go:885, 926) |
+
+The table is as of 2026-11-12. D12.6 ended both declaration paths on
+2026-11-13 (§12.8).
 
 - **The declaration** comes from the provider's provide frame
   (connect/transfer_contract_manager.go:1512-1567). It sets
@@ -1809,13 +1966,16 @@ The capability probe's own tunnels, prober shard and passes go away (§12.4).
     deletes it otherwise.
   - The export reads it before it writes any score. FindProviders2 reads it
     through a per-process cache no older than the request settings' max age.
-  - Until it is set, strict PQ answers from today's sources (§10), in legacy
-    and selector mode alike.
+  - Until it is set, and whenever a probe gap clears it, strict PQ answers
+    from the probe's modern evidence of the last 7 days, in legacy and
+    selector mode alike, never from a declaration (D12.6, §12.8). Before
+    2026-11-13 it answered from today's sources (§10).
 - **Network-only providers:** a provider that holds only a Network key cannot
   be reached by the URL probe, so it never has a positive signal. Under D12.2
   ("any provider") a strict-PQ request does not match it. Its
-  declaration-based modern status (model/network_client_location_model.go:5790)
-  ends.
+  declaration-based modern status ended on 2026-11-13 on both sides of the
+  marker (D12.6): it is modern or PQ only with the same evidence as a public
+  provider.
 - **The capability probe is retired.** Both of its checks, PQ and resizable
   windows, move to the URL probe.
   - `capability_probe.yml` is set to `enabled: false` once the URL probe has
@@ -1886,6 +2046,76 @@ last 7 days.
 - The residual case is a provider that lost PQ after its last positive run.
   Its client fails closed within the existing ping budget, as today, and its
   next run reads negative.
+
+### 12.8 No provider counts on its claim (D12.6, 2026-11-13)
+
+**The hole.** Two matches still read a provider's own claim, both only while
+the ready marker was down (the first 8 hours of a stream, or after a prober
+went silent for 30 minutes or more):
+- `require_modern_provider`: a network-only provider was modern by its
+  declaration, in the export's `ClientScore.Modern` and in the named read
+  (`readProviderModernClientIds`).
+- `post_quantum_encryption`: every candidate and named provider was matched
+  on its declaration (`readProvidePostQuantumEncryption`).
+
+So providers that claimed PQ but could not complete the handshake were
+offered to PQ clients, which then failed closed on each one, as in 7918.
+
+**The rule.** "They must have a positive quality probe handshake to count."
+No provider counts on its claim, whatever keys it holds, on either side of the
+marker.
+- **Marker set:** unchanged (§12.4). The URL probe's positive outcome in the
+  8-hour window counts, with fresh window evidence for
+  `require_modern_provider`.
+- **Marker down:** the probe's modern evidence of the last 7 days counts
+  (`provider_modern_evidence`, `ProviderModernEvidenceMaxAge`).
+  - `require_modern_provider`: the row is modern, PQ with resizable windows.
+    Candidates are judged by `ClientScore.Modern`, which the export now takes
+    from the evidence for every provider. Named providers are judged by
+    `readProviderModernClientIds`.
+  - `post_quantum_encryption`: the row is fresh and PQ, whatever its window.
+    Candidates and named providers are both judged by
+    `readProviderPostQuantumEvidenceClientIds`.
+  - Either way the provider must hold a Public or a Network key. With
+    neither, it never counts.
+- **Network-only providers** need the same evidence. No probe can reach them,
+  so they count only while evidence from a former Public provide is fresh.
+- **The declaration** is still stored in `provide_capability`, as the
+  provider's record of what it announced. No selection reads it.
+  `readProvidePostQuantumEncryption` is deleted.
+
+**Why the marker gate stays.** The gate keeps strict supply from emptying
+while the 8-hour signal is incomplete (a stream's first 8 hours) or decaying
+(a silent prober). The fallback behind it is now evidence as well:
+- since the capability probe's retirement, only the URL probe's conclusive PQ
+  turns write `provider_modern_evidence`;
+- that evidence outlasts a probe gap by 7 days.
+
+So while the marker is down, strict requests get the providers with positive
+evidence from the last 7 days. They answer empty only when no provider has
+such evidence, which is what the rule requires.
+
+**Evidence counts PQ only from a positive outcome.** The URL ingest used to
+set `post_quantum` from the negotiated group, as the capability probe did. A
+PQ session that never sealed, which the quality probe reads as negative
+(§12.2), therefore still counted as PQ evidence. Since D12.6 the ingest sets
+`post_quantum` only for a positive outcome (`providerModernEvidenceOfE2e`): a
+PQ group sealed before the IPv4 HTTPS leg's request, and that leg passed. A
+negative never counts. The negotiated key exchange is still recorded.
+- Rows written before the change keep their reading until the provider's
+  next conclusive PQ turn, about two per 8 hours, or until they are 7 days
+  old. Rows the retired capability probe wrote age out the same way.
+- While the marker is down, the modern census and modern-first priority move
+  with it: a provider whose PQ session never sealed reads `not_post_quantum`.
+
+**Rollout.** It ships with the next api, alt, proxy and taskworker release
+(D46). No migration or config change is needed.
+- The readers (api, alt and the proxy's in-process FindProviders2) apply the
+  named reads and the `post_quantum_encryption` fallback from their deploy.
+- The ingest runs in api and alt (remote probers) and in the taskworker's
+  in-process operator. Each records the stricter reading from its deploy.
+- The taskworker export takes `Modern` from evidence from its first export
+  after deploy. Pages an older export wrote expire with the export TTL.
 
 ## 13. Implementation status
 
@@ -2127,7 +2357,8 @@ All connect references in this section are at connect main 13a6c4f2.
   are stored as an atomic pointer once every window exists, followed by one
   wake.
 - Settings:
-  - `LimitedWindowSizeFraction` (:698, default 0.5 at :314);
+  - `LimitedWindowSizeFraction` (:698, default 0.5 at :314; 1 since
+    2026-11-13, see the amendment below);
   - `LimitedWindowSizeMax` (:702);
   - at runtime, `SetLimitedWindowSizeFraction`
     (connect/ip_remote_multi_client_limited.go:629) and
@@ -2171,7 +2402,8 @@ All connect references in this section are at connect main 13a6c4f2.
     `candidatesForFlow` (:733).
 - The race: each window's field is followed by the limited window's. A
   bounded race uses `limitedClientsLast(contractRateLimitHeldLast(...))`
-  (connect/ip_remote_multi_client.go:8552).
+  (connect/ip_remote_multi_client.go:8552). Replaced on 2026-11-13 by one
+  weighted order (D13, see the amendment below).
 - Auto sends UDP on any port to quality, then speed (`selectWindowTypes`,
   :3722, :3745).
 - No route: `replyUdpNoRoute` (connect/ip_remote_multi_client_family.go:708,
@@ -2216,7 +2448,8 @@ All connect references in this section are at connect main 13a6c4f2.
    is 10 and no fraction yields 1.
 7. Unknown labels fail closed (§7.1).
 8. In selector mode, IPv6 starvation is read from the main answer.
-9. A bounded race puts normal candidates before limited ones.
+9. A bounded race puts normal candidates before limited ones. Retired on
+   2026-11-13 by D13.
 10. The UDP verdict judges only the flow's own windows (§7.7).
 11. Limited sizing counts only active normal windows.
 
@@ -2245,7 +2478,44 @@ All connect references in this section are at connect main 13a6c4f2.
   - a control run on the old spec logs the 4 new fields as drift.
 
 **Memory:** about floor(0.5 × S) more clients: 3 on desktop in auto, 2 on
-iOS and 5 on Android (§7.10).
+iOS and 5 on Android (§7.10). Since 2026-11-13, S more on desktop and
+Android, 6 and 10; iOS and hosted proxies hold at 2.
+
+**Amendment, 2026-11-13 (D8, D13, D13.1):** connect merge bc776f20 and sdk
+merge d47cccdf. References are at those merges.
+- **Size (D8):** `LimitedWindowSizeFraction` defaults to 1
+  (connect/ip_remote_multi_client.go:327), so the limited window is the same
+  size as the largest normal window: 6 on desktop in auto, 10 on Android
+  (64 MiB). The sdk holds its 32-MiB tier at 0.5
+  (`DeviceLocalSettings.lowMemoryLimitedWindowSizeFraction`,
+  sdk/device_local.go:750, default 0.5 at :414; applied in
+  sdk/mobile_memory_policy.go:592), so iOS and hosted proxies stay at 2. The
+  developer menu's read and reset follow the device's default.
+  `LimitedWindowSizeMax` (D11.5) still caps every tier, and no platform sets
+  it. sdk/mobile_limited_window_test.go and
+  sdk/limited_window_controls_test.go pin 1 and 0.5 and the sizes 2 and 10.
+- **Order (D13):** `raceField`, `crossTierRaceField` and
+  `lastResortRaceField` merge each window's candidates with the limited
+  window's through `mergeRaceField`
+  (connect/ip_remote_multi_client_limited.go:593), a weighted shuffle of the
+  union by `raceWeight` at `StatsWindowEntropy`, the same as
+  `orderedClients`. `limitedClientsLast` is removed.
+- **Window tops (D13.1):** `raceWindowTopsFirst`
+  (connect/ip_remote_multi_client_limited.go:633) puts each window's top,
+  its first candidate that is not held, ahead of the merged order. The send
+  path applies it, then `contractRateLimitHeldLast`, before the bound
+  (connect/ip_remote_multi_client.go:8622).
+- **Placement width:** `affinityPerformanceCandidateStack` rises from 16 to
+  32, so the TLS performance preference still reads Android's merged field
+  of 20 candidates; a wider field fails open.
+- **Tests:** connect/ip_remote_multi_client_race_merge_test.go and
+  connect/ip_remote_multi_client_race_tops_test.go, beside the size and
+  stack tests in the limited, capability and affinity test files. The
+  shuffles are pinned with a scripted random source
+  (`MultiClientSettings.raceOrderRandomForTest`). The 13 tests of the merged
+  order, the window tops through the send path, the sizes and the stack
+  bound fail on the code before the change; the guards for UDP fields and
+  unmerged fields pass on both.
 
 ### 13.4 Workstream S2: server selection
 
@@ -2330,8 +2600,9 @@ merge, which contains 3dcc7b138.
     model/network_client_score_capability.go:120, called at
     model/network_client_location_model.go:5982).
 - `Modern`: once the marker is set when the export starts, `Modern` is
-  `postQuantumModern`, and declaration-only modern status ends. Before that,
-  it is today's.
+  `postQuantumModern`. Before that, it is the evidence decision for every
+  provider, network-only ones included. Since D12.6 (§12.8) no declaration
+  counts on either side.
 - `exportClientScores` (model/network_client_score_targets.go:300) puts the
   copies (:311-320) into the union facets `i`, `t` and `x` (Online or native)
   and into the native capability facets, in non-forced modes only.
@@ -2427,8 +2698,11 @@ model/network_client_location_select.go:529):
     (`readFindProviders2PostQuantumEncryption`,
     model/network_client_location_select.go:486, and
     `readFindProviders2NamedModern`, :512).
-- Before the marker, today's calls run unchanged. This holds in legacy and
-  selector mode alike, and overflow never relaxes it.
+- Before the marker, the evidence reads of §12.8 run (D12.6):
+  `readProviderPostQuantumEvidenceClientIds` for `post_quantum_encryption`,
+  and `readProviderModernClientIds` for named providers under
+  `require_modern_provider`. This holds in legacy and selector mode alike, and
+  overflow never relaxes it.
 
 **Status** (model/provider_status_model.go):
 - The `url_checks` item gains `reason`, `reason_tcp_count` (mask & 5) and

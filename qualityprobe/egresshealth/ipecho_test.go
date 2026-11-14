@@ -3,7 +3,7 @@ package egresshealth
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"testing"
 	"time"
@@ -16,7 +16,7 @@ func TestSampleColdStartWindowIsSharedAndFinite(t *testing.T) {
 	opts.PerRequestTimeout = 10 * time.Second
 	opts.ColdStartTimeout = time.Minute
 	client := &http.Client{}
-	run := newRun(staticPath{client: client}, opts, 2, time.Hour, rand.New(rand.NewSource(7)))
+	run := newRun(staticPath{client: client}, opts, 2, time.Hour, rand.New(rand.NewPCG(7, 0)))
 	if got := run.requestTimeout(client); got != time.Minute {
 		t.Fatalf("initial allowance=%s", got)
 	}

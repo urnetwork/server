@@ -3,8 +3,10 @@
 // marker strict post-quantum selection waits for.
 //
 // A conclusive observation is recorded in provider_modern_evidence, as the
-// capability probe records its own, so the window reading and the modern
-// census keep their table whichever probe measured the provider.
+// capability probe recorded its own, so the window reading and the modern
+// census keep their table whichever probe measured the provider. It is
+// post-quantum only when the turn's outcome is positive (FP2-PROTOCOL.md
+// §12.8).
 //
 // The ready marker. Strict post-quantum selection matches only providers whose
 // newest post-quantum outcome in the eight-hour window is positive, so it may
@@ -17,9 +19,11 @@
 // export's ttl, while the stream has run for a whole window and is still
 // running, and deletes it otherwise. A stream silent for longer than
 // SeenMaxAge has ended, a prober rolled back for instance: the marker is
-// cleared at the next export, so strict post-quantum selection returns to
-// today's sources rather than to an emptying window, and the next stream
-// starts a window of its own.
+// cleared at the next export, so strict post-quantum selection returns to the
+// probe's modern evidence of the last seven days (provider_modern_evidence,
+// readProviderPostQuantumEvidenceClientIds and readProviderModernClientIds)
+// rather than to an emptying window, and the next stream starts a window of
+// its own. Neither side of the marker counts a provider's own declaration.
 //
 // Functions are safe for concurrent use; the stream's keys tolerate racing
 // writers, which can only move since by the time between two outcomes.
@@ -103,12 +107,17 @@ func recordProviderEgressHealthE2e(ctx context.Context, health *ProviderEgressHe
 }
 
 // The modern evidence of a URL turn's end-to-end observation, and whether it
-// is conclusive as the capability probe's readings are: the session
+// is conclusive as the capability probe's readings were: the session
 // concluded, positive or negative, and an acknowledgement read the window.
-// Post-quantum reads as a post-quantum group negotiated, sealed or not, as
-// the capability probe records it; strict selection reads the stricter
-// pq_outcome instead. The observation carries no window size, so a
-// resizable window records a largest size of 0.
+// Post-quantum is the turn's positive outcome alone: a post-quantum group
+// that sealed before the IPv4 HTTPS leg's request, and that leg passed. A
+// negative is never post-quantum, a post-quantum group that never sealed
+// included, though its group is recorded: strict selection reads this row
+// while the post-quantum marker is down, and only a positive quality probe
+// handshake counts (owner, 2026-11-13; FP2-PROTOCOL.md §12.8). The
+// capability probe and this ingest before it counted any negotiated
+// post-quantum group. The observation carries no window size, so a resizable
+// window records a largest size of 0.
 func providerModernEvidenceOfE2e(e2e *egresshealth.UrlProbeE2eEvidence, observedAt time.Time) (ProviderModernEvidence, bool) {
 	if e2e.Pq != egresshealth.UrlProbePqPositive && e2e.Pq != egresshealth.UrlProbePqNegative {
 		return ProviderModernEvidence{}, false
@@ -117,9 +126,10 @@ func providerModernEvidenceOfE2e(e2e *egresshealth.UrlProbeE2eEvidence, observed
 		return ProviderModernEvidence{}, false
 	}
 	return ProviderModernEvidence{
-		E2eNegotiated:    e2e.KeyExchange != "",
-		KeyExchange:      e2e.KeyExchange,
-		PostQuantum:      egresshealth.UrlProbeKeyExchangePostQuantum(e2e.KeyExchange),
+		E2eNegotiated: e2e.KeyExchange != "",
+		KeyExchange:   e2e.KeyExchange,
+		PostQuantum: e2e.Pq == egresshealth.UrlProbePqPositive &&
+			egresshealth.UrlProbeKeyExchangePostQuantum(e2e.KeyExchange),
 		WindowAdvertised: e2e.Window == egresshealth.UrlProbeWindowResizable,
 		ObservedAt:       observedAt.UTC(),
 	}, true

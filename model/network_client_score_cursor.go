@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 
 	"github.com/redis/go-redis/v9"

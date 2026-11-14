@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -125,7 +125,7 @@ func clockedOptions(clock *fakeClock) Options {
 	return Options{
 		PerRequestTimeout: 200 * time.Millisecond,
 		Concurrency:       3,
-		Rand:              rand.New(rand.NewSource(7)),
+		Rand:              rand.New(rand.NewPCG(7, 0)),
 		Now:               clock.Now,
 		Sleep:             clock.Sleep,
 	}
@@ -141,7 +141,7 @@ func TestRetryDelayMeanAndCap(t *testing.T) {
 	const draws = 200000
 	mean := DefaultLoadRetryMeanInterval
 	limit := retryDelayCapFactor * mean
-	r := rand.New(rand.NewSource(1))
+	r := rand.New(rand.NewPCG(1, 0))
 
 	var sum float64
 	atCap, belowSecond := 0, 0
@@ -376,7 +376,7 @@ func TestLoadsInterleaveUnderConcurrency(t *testing.T) {
 			return ctx.Err()
 		}
 	}
-	r := newRun(staticPath{client: http.DefaultClient}, opts, 1, time.Minute, rand.New(rand.NewSource(1)))
+	r := newRun(staticPath{client: http.DefaultClient}, opts, 1, time.Minute, rand.New(rand.NewPCG(1, 0)))
 
 	flakyDone := make(chan CheckResult, 1)
 	go func() { flakyDone <- r.load(context.Background(), dests[0]) }()

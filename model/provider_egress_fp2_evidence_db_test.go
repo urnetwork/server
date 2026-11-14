@@ -201,9 +201,11 @@ func TestProviderEgressOutcomeFromAnOlderReleaseHasNoFp2Evidence(t *testing.T) {
 }
 
 // A stored post-quantum turn records its conclusive observation as modern
-// evidence, as the capability probe records its own: a positive session as
-// post-quantum with resizable windows, a classical one as neither. An
-// unmeasured session, a recheck and an outcome on probation record nothing.
+// evidence, as the capability probe recorded its own: a positive session as
+// post-quantum with resizable windows, a classical one as neither, and a
+// post-quantum group that never sealed with its windows but not as
+// post-quantum. An unmeasured session, a recheck and an outcome on probation
+// record nothing.
 func TestProviderEgressE2eRecordsConclusiveModernEvidence(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -217,14 +219,24 @@ func TestProviderEgressE2eRecordsConclusiveModernEvidence(t *testing.T) {
 		probation := fp2EvidenceTestOutcome(server.NewId(), now, egresshealth.UrlProbeH3UdpPassed, egresshealth.UrlProbeIpv6TcpPassed, "", "", &fp2EvidenceTestPositive)
 		probation.UrlProbation = true
 		StoreProviderEgressHealth(ctx, probation)
+		// a post-quantum group negotiated that never sealed: a negative
+		// outcome, never post-quantum evidence (FP2-PROTOCOL.md §12.8)
+		unsealed := server.NewId()
+		StoreProviderEgressHealth(ctx, fp2EvidenceTestOutcome(unsealed, now.Add(-90*time.Second), egresshealth.UrlProbeH3UdpPassed, egresshealth.UrlProbeIpv6TcpPassed, "", "", &egresshealth.UrlProbeE2eEvidence{
+			Pq: egresshealth.UrlProbePqNegative, KeyExchange: "X25519MLKEM768", SealedBeforeRequest: false, Window: egresshealth.UrlProbeWindowResizable,
+		}))
 
-		records := getProviderModernEvidenceRecords(ctx, []server.Id{modern, classical, unmeasured, probation.ClientId})
+		records := getProviderModernEvidenceRecords(ctx, []server.Id{modern, classical, unmeasured, probation.ClientId, unsealed})
 		if record := records[modern]; record == nil || !record.PostQuantum || !record.WindowResizable || record.KeyExchange != "X25519MLKEM768" ||
 			!record.MeasuredAt.Equal(now.Add(-3*time.Minute)) {
 			t.Fatalf("a positive turn recorded %+v", record)
 		}
 		if record := records[classical]; record == nil || record.PostQuantum || record.WindowResizable || record.KeyExchange != "X25519" {
 			t.Fatalf("a classical turn recorded %+v", record)
+		}
+		if record := records[unsealed]; record == nil || record.PostQuantum || !record.WindowResizable || record.KeyExchange != "X25519MLKEM768" ||
+			providerModernEvidencePostQuantum(record, now) || classifyProviderModernEvidence(record, now) != ProviderModernOutcomeNotPostQuantum {
+			t.Fatalf("an unsealed post-quantum turn recorded %+v", record)
 		}
 		if record, ok := records[unmeasured]; ok {
 			t.Fatalf("an unmeasured turn recorded %+v", record)

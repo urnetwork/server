@@ -3,11 +3,17 @@
 // filled from the classified buckets in the decided order (D7.2), as D11.1
 // and D11.2 refine it:
 //
-//  1. the window's IPv6 need, from dualstack providers: A, then C;
+//  1. the window's IPv6 need, from dualstack providers: A, then C; A and C
+//     as one pool for any;
 //  2. the requested protocol's classes as one pool: A and B for dualproto, C
-//     and D for tcp;
+//     and D for tcp, all four for any;
 //  3. only for a dualproto request that is not enough, the tcp classes C and
 //     D as overflow, each at the overflow band's tier.
+//
+// A request for protocol any (owner, 2026-11-13, for the hosted proxies'
+// windows) prefers neither protocol: its one pool ranks dualproto and tcp
+// providers by the request's rank mode alone, with no overflow and no
+// overflow band.
 //
 // Every answered provider carries its labels. A request without select never
 // comes here: it is answered by today's code, the hard gate exactly (D7.1).
@@ -30,7 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"strconv"
 	"sync"
@@ -79,7 +85,7 @@ func newFindProviders2Selection(args *FindProviders2Args) (*findProviders2Select
 	}
 	if protocol := args.Select.Protocol; protocol != nil {
 		switch *protocol {
-		case ProviderCapabilityProtocolDualproto, ProviderCapabilityProtocolTcp:
+		case ProviderCapabilityProtocolDualproto, ProviderCapabilityProtocolTcp, ProviderCapabilityProtocolAny:
 			selection.protocol = *protocol
 		default:
 			return nil, fmt.Errorf("400 unknown select.protocol %q", *protocol)
@@ -141,27 +147,40 @@ func (self *findProviders2Selection) ipv6Need() int {
 	return max(0, self.dualstackTargetCount-self.heldDualstackCount)
 }
 
-// The classes the IPv6 need draws, in order (§6.3): A, then C for a dualproto
-// request, where a C provider is overflow; C for a tcp request.
-func (self *findProviders2Selection) needClasses() []providerCapabilityClass {
-	if self.protocol == ProviderCapabilityProtocolTcp {
-		return []providerCapabilityClass{providerCapabilityClassC}
+// The pools the IPv6 need draws, in order (§6.3): A, then C for a dualproto
+// request, where a C provider is overflow; C for a tcp request; A and C as
+// one pool for an any request, which prefers neither protocol.
+func (self *findProviders2Selection) needPools() []providerCapabilityClassSet {
+	switch self.protocol {
+	case ProviderCapabilityProtocolTcp:
+		return []providerCapabilityClassSet{newProviderCapabilityClassSet(providerCapabilityClassC)}
+	case ProviderCapabilityProtocolAny:
+		return []providerCapabilityClassSet{newProviderCapabilityClassSet(providerCapabilityClassA, providerCapabilityClassC)}
+	default:
+		return []providerCapabilityClassSet{
+			newProviderCapabilityClassSet(providerCapabilityClassA),
+			newProviderCapabilityClassSet(providerCapabilityClassC),
+		}
 	}
-	return []providerCapabilityClass{providerCapabilityClassA, providerCapabilityClassC}
 }
 
-// The requested protocol's classes, one pool (§6.3).
+// The requested protocol's classes, one pool (§6.3): every class for any.
 func (self *findProviders2Selection) mainClasses() providerCapabilityClassSet {
-	if self.protocol == ProviderCapabilityProtocolTcp {
+	switch self.protocol {
+	case ProviderCapabilityProtocolTcp:
 		return newProviderCapabilityClassSet(providerCapabilityClassC, providerCapabilityClassD)
+	case ProviderCapabilityProtocolAny:
+		return newProviderCapabilityClassSet(providerCapabilityClasses...)
+	default:
+		return newProviderCapabilityClassSet(providerCapabilityClassA, providerCapabilityClassB)
 	}
-	return newProviderCapabilityClassSet(providerCapabilityClassA, providerCapabilityClassB)
 }
 
-// The overflow pool (§6.3): the tcp classes for a dualproto request, none for
-// a tcp request, which never receives a dualproto provider.
+// The overflow pool (§6.3): the tcp classes for a dualproto request. None for
+// a tcp request, which never receives a dualproto provider, or an any
+// request, whose one pool already holds them.
 func (self *findProviders2Selection) overflowClasses() providerCapabilityClassSet {
-	if self.protocol == ProviderCapabilityProtocolTcp {
+	if self.protocol != ProviderCapabilityProtocolDualproto {
 		return 0
 	}
 	return newProviderCapabilityClassSet(providerCapabilityClassC, providerCapabilityClassD)
@@ -171,6 +190,17 @@ func (self *findProviders2Selection) overflowClasses() providerCapabilityClassSe
 // provider given to a dualproto request.
 func (self *findProviders2Selection) overflow(class providerCapabilityClass) bool {
 	return self.protocol == ProviderCapabilityProtocolDualproto && class.protocol() == ProviderCapabilityProtocolTcp
+}
+
+// Whether the providers of a pool are overflow for the request: every class
+// of it is (overflow). A need pool is one class unless the request is for
+// any, which has no overflow.
+func (self *findProviders2Selection) overflowPool(classes providerCapabilityClassSet) bool {
+	overflow := classes != 0
+	for _, class := range classes.classes() {
+		overflow = overflow && self.overflow(class)
+	}
+	return overflow
 }
 
 // The classes an ip_family filter keeps (§6.3), as a filter on IP labels.
@@ -441,8 +471,11 @@ var findProviders2PostQuantumRequests = prometheus.NewCounterVec(prometheus.Coun
 func init() {
 	for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed, RankModeOnline} {
 		for _, ip := range []string{ProviderCapabilityIpDualstack, ProviderCapabilityIpIpv4} {
-			for _, protocol := range []string{ProviderCapabilityProtocolDualproto, ProviderCapabilityProtocolTcp} {
+			// a request may select any; an answered provider carries a label
+			for _, protocol := range []string{ProviderCapabilityProtocolDualproto, ProviderCapabilityProtocolTcp, ProviderCapabilityProtocolAny} {
 				findProviders2SelectRequests.WithLabelValues(rankMode, ip, protocol)
+			}
+			for _, protocol := range []string{ProviderCapabilityProtocolDualproto, ProviderCapabilityProtocolTcp} {
 				for _, overflowStep := range []string{"0", "1"} {
 					findProviders2SelectAnswered.WithLabelValues(rankMode, overflowStep, ip, protocol)
 				}
@@ -481,11 +514,14 @@ func findProviders2PostQuantumReady(findProviders2 *FindProviders2Args, session 
 
 // The candidates a post_quantum_encryption request may answer (§12.4): once
 // the marker is set, a candidate whose record is post-quantum positive, and
-// a named provider in {provider_post_quantum_positive}; before it, today's
-// declarations.
+// a named provider in {provider_post_quantum_positive}; before it, or after
+// a probe gap clears it, the providers whose modern evidence of the last
+// seven days is post-quantum (readProviderPostQuantumEvidenceClientIds),
+// named and discovered alike. Either way only a probe's positive counts,
+// never a provider's own declaration (owner, 2026-11-13).
 func readFindProviders2PostQuantumEncryption(session *session.ClientSession, postQuantumReady bool, scores map[server.Id]*ClientScore, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
 	if !postQuantumReady {
-		return readProvidePostQuantumEncryption(session.Ctx, clientIds)
+		return readProviderPostQuantumEvidenceClientIds(session.Ctx, clientIds, now)
 	}
 	capableClientIds := map[server.Id]bool{}
 	namedClientIds := []server.Id{}
@@ -507,8 +543,9 @@ func readFindProviders2PostQuantumEncryption(session *session.ClientSession, pos
 }
 
 // The named providers a require_modern_provider request may answer: once
-// the marker is set, members of {provider_modern} (§12.4); before it,
-// today's evidence and declarations.
+// the marker is set, members of {provider_modern} (§12.4); before it, those
+// modern by their evidence of the last seven days
+// (readProviderModernClientIds), network-only ones by the same evidence.
 func readFindProviders2NamedModern(session *session.ClientSession, postQuantumReady bool, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
 	if !postQuantumReady {
 		return readProviderModernClientIds(session.Ctx, clientIds, now)
@@ -1359,17 +1396,17 @@ func findProviders2WithSelect(
 			}
 			allDiscovered := func(*findProviders2SelectAnswer, *FindProvidersProvider) bool { return true }
 
-			// 1. the IPv6 need: A, then C (§6.3)
+			// 1. the IPv6 need: A, then C; A and C as one pool for any (§6.3)
 			ipv6Need := selection.ipv6Need()
 			if 0 < count && 0 < ipv6Need {
-				for _, class := range selection.needClasses() {
+				for _, pool := range selection.needPools() {
 					needCount := ipv6Need - discoveredCount(func(answer *findProviders2SelectAnswer, provider *FindProvidersProvider) bool {
 						return answer.need && provider.Capabilities != nil && provider.Capabilities.Ip == ProviderCapabilityIpDualstack
 					})
 					if needCount <= 0 {
 						break
 					}
-					if _, err := fill(newProviderCapabilityClassSet(class), min(needCount, count-discoveredCount(allDiscovered)), selection.overflow(class), true); err != nil {
+					if _, err := fill(pool, min(needCount, count-discoveredCount(allDiscovered)), selection.overflowPool(pool), true); err != nil {
 						return nil, err
 					}
 				}

@@ -38,6 +38,11 @@ Source/tests are not deployment or retry authority. The operator must first:
    A second SQL census must match all original fences. The database-clock proof
    bracket defaults to one minute and is checked again at deferred commit.
 
+The CLI's separate two-minute control-operation deadline includes source
+preparation, sequential signed host observations and both database gates.
+It does not extend the one-minute native-proof bracket or allocate/extend an
+evaluation clock. Parent cancellation or an earlier parent deadline still wins.
+
 The grant atomically retains the complete original terminal/authorization and
 signed native observations in the immutable private recovery audit, queues one
 cycle of the same job, and advances every idle database host fence once. It does

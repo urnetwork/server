@@ -25,8 +25,12 @@ func migrationDistributedRecoveryTestOwner(t testing.TB, priorVersion, head int)
 		}
 	}
 	current := migrationCurrentSuffixTestContract(t, version).artifact
-	if current.name != "separately authorized distributed infrastructure recovery" || current.removedVersion != 0 {
+	patchRetry := server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
+	if current.name != "separately authorized distributed infrastructure recovery" || current.removedVersion != patchRetry || patchRetry <= version {
 		t.Fatal("distributed owner oracle has an unreviewed successor")
+	}
+	if head >= patchRetry {
+		return migrationPatchRetryTestOwner(t)
 	}
 	if head >= version {
 		return current
@@ -41,7 +45,9 @@ func TestMigrationsDistributedRecoveryOwnerOracleClosedBoundaries(t *testing.T) 
 	for _, previous := range []int{server.CompetitionReevaluationPostCloseMigrationVersion(), server.CompetitionExecutorAdmissionClaimMigrationVersion()} {
 		for _, head := range []int{previous, version - 1, version, version + 1, server.MigrationCount()} {
 			want := previous
-			if head >= version {
+			if head >= server.CompetitionOperatorRequestedPatchRetryMigrationVersion() {
+				want = server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
+			} else if head >= version {
 				want = version
 			}
 			if owner := migrationDistributedRecoveryTestOwner(t, previous, head); owner.requiredVersion != want {
@@ -67,8 +73,8 @@ func TestMigrationsDistributedRecoveryRetainsExactCustody(t *testing.T) {
 			t.Fatal("new custody omitted inherited/new authority", required)
 		}
 	}
-	if current.artifact.removedVersion != 0 {
-		t.Fatal("new current distributed recovery custody was unexpectedly retired")
+	if current.artifact.removedVersion != server.CompetitionOperatorRequestedPatchRetryMigrationVersion() {
+		t.Fatal("distributed recovery custody did not transfer to its exact patch retry successor")
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -274,25 +275,31 @@ func releaseGateReadInitdbAsNonroot(t *testing.T, directory string, body string)
 	defer file.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, "bash", "-c", `set -euo pipefail
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestReleaseGateServicesStagePrivatePostgresInitdb$", "--", `set -euo pipefail
 (( EUID != 0 )) || exit 90
-cd /dev/fd/3
 `+body)
 	command.Dir = "/"
 	command.ExtraFiles = []*os.File{file}
-	if os.Geteuid() == 0 {
-		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534, Groups: []uint32{65534}}}
+	command.Env = testCommandEnvironment(map[string]string{releaseGateInitdbReaderChild: "1"})
+	var output, diagnostics bytes.Buffer
+	command.Stdout, command.Stderr = &output, &diagnostics
+	if err := command.Run(); err != nil {
+		t.Fatalf("nonroot initdb traversal: %v\n%s\nchild setup diagnostics:\n%s", err, output.Bytes(), diagnostics.Bytes())
 	}
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("nonroot initdb traversal: %v\n%s", err, output)
-	}
-	return output
+	return output.Bytes()
 }
 
 // The complete service entry point must mount a readable copy from a private
 // checkout under umask 077, without publishing its vault or changing sources.
 func TestReleaseGateServicesStagePrivatePostgresInitdb(t *testing.T) {
+	if os.Getenv(releaseGateInitdbReaderChild) == "1" {
+		releaseGateExecInitdbReader(t)
+		return
+	}
 	self := newReleaseGateServicesFixture(t)
 	source := self.privatePostgresInitdb(t)
 	script, err := os.ReadFile(filepath.Join(source, "01-init-app-db.sh"))
@@ -1186,5 +1193,65 @@ func TestTestEnvironmentPrivatePortableRejectsNoncanonicalPort(t *testing.T) {
 	for _, port := range []string{"0", "65536", "035431", "-1"} {
 		t.Setenv("WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY", fmt.Sprintf("127.0.0.1:%s", port))
 		assertPrivatePortableRefusedBeforeProbe(t, "requires an explicit loopback host and port")
+	}
+}
+
+const releaseGateInitdbReaderChild = "URNETWORK_RELEASE_GATE_INITDB_READER_CHILD"
+
+// The same-binary child validates TestMain before any identity change. Only
+// this child drops privileges and changes cwd; the parent retains both.
+func releaseGateExecInitdbReader(t *testing.T) {
+	t.Helper()
+	separator := 0
+	for separator < len(os.Args) && os.Args[separator] != "--" {
+		separator++
+	}
+	if separator+2 != len(os.Args) {
+		t.Fatal("initdb reader has no exact script argument")
+	}
+	directory := os.NewFile(3, "inherited-initdb-directory")
+	if directory == nil {
+		t.Fatal("initdb reader has no directory descriptor")
+	}
+	defer directory.Close()
+	info, err := directory.Stat()
+	if err != nil || !info.IsDir() {
+		t.Fatal("initdb reader descriptor is not a directory", err)
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() == 0 {
+		if err := syscall.Setgroups([]int{65534}); err != nil {
+			t.Fatal("drop initdb reader groups", err)
+		}
+		if err := syscall.Setgid(65534); err != nil {
+			t.Fatal("drop initdb reader gid", err)
+		}
+		if err := syscall.Setuid(65534); err != nil {
+			t.Fatal("drop initdb reader uid", err)
+		}
+	}
+	if os.Geteuid() == 0 {
+		t.Fatal("initdb reader retained root identity")
+	}
+	if err := directory.Chdir(); err != nil {
+		t.Fatal("enter inherited initdb directory as nonroot", err)
+	}
+	current, err := os.Stat(".")
+	if err != nil || !os.SameFile(info, current) {
+		t.Fatal("initdb reader entered another directory", err)
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Go setup diagnostics use a separate pipe; Bash keeps the original
+	// combined stdout/stderr byte oracle from this boundary onward.
+	if err := unix.Dup2(int(os.Stdout.Fd()), int(os.Stderr.Fd())); err != nil {
+		t.Fatal("join initdb shell output", err)
+	}
+	if err := syscall.Exec(bash, []string{"bash", "-c", os.Args[separator+1]}, os.Environ()); err != nil {
+		t.Fatal("exec nonroot initdb reader", err)
 	}
 }

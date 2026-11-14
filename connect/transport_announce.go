@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	// "fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net/netip"
 	"runtime"
 	"sync"
@@ -705,7 +705,7 @@ func (self *ConnectionAnnounce) run() {
 			self.nextSpeed()
 		}
 		timeout = self.settings.MinTestTimeout + time.Duration(
-			mathrand.Int63n(int64(self.settings.MaxTestTimeout-self.settings.MinTestTimeout)),
+			mathrand.Int64N(int64(self.settings.MaxTestTimeout-self.settings.MinTestTimeout)),
 		)
 		nextTestTime = server.NowUtc().Add(timeout)
 		return timeout

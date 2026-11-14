@@ -822,8 +822,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(893, "provider union review, identity and retained source custody", competitionMigration893ArtifactQuery).removedAt(897),
 	},
 	[]snMainnetMigrationContract{
-		// the post-quantum declaration that find-providers2 reads for a
-		// request that requires post-quantum encryption
+		// the post-quantum declaration of each provider's latest provide,
+		// stored as its record; find-providers2 no longer reads it
 		migrationCurrentSuffix(894, "provider capability declarations",
 			migrationFp2Table("provide_capability"),
 			snMainnetMigrationColumns("provide_capability",
@@ -1011,7 +1011,15 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the per-network mail context, versioned by its position
 	[]snMainnetMigrationContract{networkMailContextMigrationContract},
 	// Exact closure, cycle transition and inherited legacy/source custody.
-	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract},
+	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract.removedAt(server.CompetitionOperatorRequestedPatchRetryMigrationVersion())},
+	// the gift of privacy's orders and Pro gift codes, versioned by their
+	// position
+	[]snMainnetMigrationContract{giftSchemaMigrationContract},
+	// what refunds, disputes and orphaned crypto payments did to a gift
+	// order's codes, versioned by their position
+	[]snMainnetMigrationContract{giftRefundSchemaMigrationContract},
+	// Exact unchanged-patch retry authority inherits every prior guard check.
+	[]snMainnetMigrationContract{competitionOperatorRequestedPatchRetryMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

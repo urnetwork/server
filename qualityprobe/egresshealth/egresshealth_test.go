@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -1030,7 +1030,7 @@ func TestCheckSamplesABlackholedProviderToZero(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}, Request: r}, nil
 	})
 	opts := fastOptions()
-	opts.Rand = rand.New(rand.NewSource(42))
+	opts.Rand = rand.New(rand.NewPCG(42, 0))
 	res, err := Check(context.Background(), &http.Client{Transport: rt}, opts)
 	if err != nil {
 		t.Fatalf("a total blackhole must be a RESULT, not an error: %v", err)
@@ -1420,7 +1420,7 @@ func TestSampleSizesAreDeclaredForEveryClass(t *testing.T) {
 // package says it will, they are really from that class, and none is drawn
 // twice.
 func TestSampleDrawsTheConfiguredCountPerClass(t *testing.T) {
-	got := sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(1)))
+	got := sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewPCG(1, 0)))
 
 	perClass := map[Class]int{}
 	seen := map[string]bool{}
@@ -1463,9 +1463,9 @@ func TestSampleDrawsTheConfiguredCountPerClass(t *testing.T) {
 // Each run gets a freshly seeded generator, because a *rand.Rand is stateful:
 // handing the same one to two runs is a different experiment (and would fail).
 func TestSampleIsReproducibleForASeed(t *testing.T) {
-	first := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(7))))
+	first := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewPCG(7, 0))))
 	for i := 0; i < 20; i++ {
-		again := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(7))))
+		again := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewPCG(7, 0))))
 		if again != first {
 			t.Fatalf("seed 7 drew a different sample on iteration %d:\n first: %s\n again: %s", i, first, again)
 		}
@@ -1478,7 +1478,7 @@ func TestSampleIsReproducibleForASeed(t *testing.T) {
 	client := &http.Client{Transport: rt}
 	run := func(seed int64) string {
 		opts := fastOptions()
-		opts.Rand = rand.New(rand.NewSource(seed))
+		opts.Rand = rand.New(rand.NewPCG(uint64(seed), 0))
 		res, err := Check(context.Background(), client, opts)
 		if err != nil {
 			t.Fatalf("Check err = %v", err)
@@ -1505,10 +1505,10 @@ func TestSampleIsReproducibleForASeed(t *testing.T) {
 // per-run draw is what takes that away, and it is only taken away if the draw
 // really varies.
 func TestSampleDiffersBetweenSeeds(t *testing.T) {
-	first := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(1))))
+	first := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewPCG(1, 0))))
 	differed := 0
 	for seed := int64(2); seed <= 11; seed++ {
-		if names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(seed)))) != first {
+		if names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewPCG(uint64(seed), 0)))) != first {
 			differed++
 		}
 	}
@@ -1521,7 +1521,7 @@ func TestSampleDiffersBetweenSeeds(t *testing.T) {
 	// the classes happening to differ somewhere.
 	site := func(seed int64) string {
 		var out []string
-		for _, d := range sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(seed))) {
+		for _, d := range sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewPCG(uint64(seed), 0))) {
 			if d.Class == ClassSite {
 				out = append(out, d.Name)
 			}
@@ -1542,7 +1542,7 @@ func TestSampleTakesAWholeClassItCannotFill(t *testing.T) {
 		{Name: "a", Class: ClassDns}, {Name: "b", Class: ClassDns},
 		{Name: "c", Class: Class("undeclared")}, {Name: "d", Class: Class("undeclared")},
 	}
-	got := sampleDestinations(small, map[Class]int{ClassDns: 5}, rand.New(rand.NewSource(3)))
+	got := sampleDestinations(small, map[Class]int{ClassDns: 5}, rand.New(rand.NewPCG(3, 0)))
 	if len(got) != len(small) {
 		t.Fatalf("sample took %d of %d; a class it cannot fill, and a class with no declared size, must both be taken whole", len(got), len(small))
 	}

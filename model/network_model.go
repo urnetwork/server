@@ -143,6 +143,10 @@ type NetworkCreateResult struct {
 	// identities can authenticate immediately without causing verification or
 	// welcome-message sends from production infrastructure.
 	SuppressAccountMessages bool `json:"-"`
+	// GiftRedemption is server-internal: the Pro gift the create redeemed
+	// (`balance_code`), which the caller finishes after linking the sign-up's
+	// own referral code (FinishGiftRedemption).
+	GiftRedemption *GiftRedemption `json:"-"`
 }
 
 type NetworkCreateResultNetwork struct {
@@ -277,7 +281,8 @@ func NetworkCreate(
 			return result, nil
 		}
 
-		// rate limit: max 5 seedphrase accounts per IP per day
+		// the source's budgets: 5 seedphrase accounts per address bucket per
+		// day, and its /24 or /48 network's (network_create_source_limit.go)
 		if err := CheckNetworkCreateRateLimit(clientSession.Ctx, clientSession); err != nil {
 			return nil, err
 		}
@@ -301,7 +306,8 @@ func NetworkCreate(
 		if resultNetworkCreate.Created {
 			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, clientSession)
 
-			isPro := false
+			// Pro only with a gift code redeemed at sign-up
+			isPro := resultNetworkCreate.IsPro
 			byJwt := session.NewByJwt(
 				resultNetworkCreate.NetworkId,
 				resultNetworkCreate.UserId,
@@ -322,6 +328,7 @@ func NetworkCreate(
 					NetworkId:   resultNetworkCreate.NetworkId,
 					IsPro:       resultNetworkCreate.IsPro,
 				},
+				GiftRedemption: resultNetworkCreate.giftRedemption,
 			}
 			return result, nil
 		} else {
@@ -468,6 +475,7 @@ func NetworkCreate(
 					},
 					UserAuth:                userAuth,
 					SuppressAccountMessages: testAuthPolicy.SuppressAccountMessages,
+					GiftRedemption:          resultNetworkCreate.giftRedemption,
 				}, nil
 			}
 
@@ -480,6 +488,9 @@ func NetworkCreate(
 					NetworkId:   resultNetworkCreate.NetworkId,
 					IsPro:       resultNetworkCreate.IsPro,
 				},
+				// the network and its gift are committed; only sign-in waits
+				// on the verification
+				GiftRedemption: resultNetworkCreate.giftRedemption,
 			}
 			return result, nil
 		} else {
@@ -542,7 +553,8 @@ func NetworkCreate(
 						NetworkId:   resultNetworkCreate.NetworkId,
 						IsPro:       resultNetworkCreate.IsPro,
 					},
-					UserAuth: &authJwt.UserAuth,
+					UserAuth:       &authJwt.UserAuth,
+					GiftRedemption: resultNetworkCreate.giftRedemption,
 				}
 				return result, nil
 			} else {
@@ -689,6 +701,7 @@ func NetworkCreate(
 					NetworkId:   networkCreateResult.NetworkId,
 					IsPro:       networkCreateResult.IsPro,
 				},
+				GiftRedemption: networkCreateResult.giftRedemption,
 			}
 			return result, nil
 		} else {
@@ -719,6 +732,8 @@ type networkCreateResult struct {
 	UserId      server.Id
 	Seedphrase  string
 	IsPro       bool
+	// a Pro gift the create redeemed (networkCreateRedeemBalanceCodeInTx)
+	giftRedemption *GiftRedemption
 	// Created=false alone also covers internal helper failures; only a
 	// completed existing-account/name check establishes a client refusal.
 	refusalStatus  int
@@ -744,6 +759,7 @@ func networkCreateWalletAuth(
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
+	var giftRedemption *GiftRedemption
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		// a rerun starts over
@@ -751,6 +767,7 @@ func networkCreateWalletAuth(
 		refusalStatus = 0
 		refusalMessage = ""
 		isPro = false
+		giftRedemption = nil
 		var userId *server.Id
 
 		result, err := tx.Query(
@@ -857,7 +874,7 @@ func networkCreateWalletAuth(
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
 
-		isPro = networkCreateRedeemBalanceCodeInTx(
+		isPro, giftRedemption = networkCreateRedeemBalanceCodeInTx(
 			networkCreate,
 			createdNetworkId,
 			ctx,
@@ -873,6 +890,7 @@ func networkCreateWalletAuth(
 		NetworkName:    networkCreate.NetworkName,
 		UserId:         createdUserId,
 		IsPro:          isPro,
+		giftRedemption: giftRedemption,
 		refusalStatus:  refusalStatus,
 		refusalMessage: refusalMessage,
 	}, nil
@@ -898,6 +916,7 @@ func networkCreateAuthJwt(
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
+	var giftRedemption *GiftRedemption
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		// a rerun starts over
@@ -905,6 +924,7 @@ func networkCreateAuthJwt(
 		refusalStatus = 0
 		refusalMessage = ""
 		isPro = false
+		giftRedemption = nil
 		var userId *server.Id
 
 		result, err := tx.Query(
@@ -996,7 +1016,7 @@ func networkCreateAuthJwt(
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
 
-		isPro = networkCreateRedeemBalanceCodeInTx(
+		isPro, giftRedemption = networkCreateRedeemBalanceCodeInTx(
 			networkCreate,
 			createdNetworkId,
 			ctx,
@@ -1012,6 +1032,7 @@ func networkCreateAuthJwt(
 		NetworkName:    networkCreate.NetworkName,
 		UserId:         createdUserId,
 		IsPro:          isPro,
+		giftRedemption: giftRedemption,
 		refusalStatus:  refusalStatus,
 		refusalMessage: refusalMessage,
 	}
@@ -1037,6 +1058,7 @@ func networkCreateUserAuth(
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
+	var giftRedemption *GiftRedemption
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		// a rerun starts over
@@ -1044,6 +1066,7 @@ func networkCreateUserAuth(
 		refusalStatus = 0
 		refusalMessage = ""
 		isPro = false
+		giftRedemption = nil
 		var result server.PgResult
 		var err error
 
@@ -1138,7 +1161,7 @@ func networkCreateUserAuth(
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
 
-		isPro = networkCreateRedeemBalanceCodeInTx(
+		isPro, giftRedemption = networkCreateRedeemBalanceCodeInTx(
 			networkCreate,
 			createdNetworkId,
 			ctx,
@@ -1154,6 +1177,7 @@ func networkCreateUserAuth(
 		NetworkName:    networkCreate.NetworkName,
 		UserId:         createdUserId,
 		IsPro:          isPro,
+		giftRedemption: giftRedemption,
 		refusalStatus:  refusalStatus,
 		refusalMessage: refusalMessage,
 	}
@@ -1173,8 +1197,12 @@ func networkCreateSeedphrase(
 	var createdUserId server.Id
 	var seedphrase string
 	isPro := false
+	var giftRedemption *GiftRedemption
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		isPro = false
+		giftRedemption = nil
 		createdUserId = server.NewId()
 		createdNetworkId = server.NewId()
 
@@ -1205,7 +1233,7 @@ func networkCreateSeedphrase(
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
 
-		isPro = networkCreateRedeemBalanceCodeInTx(
+		isPro, giftRedemption = networkCreateRedeemBalanceCodeInTx(
 			networkCreate, createdNetworkId, ctx, tx,
 		)
 
@@ -1219,35 +1247,41 @@ func networkCreateSeedphrase(
 		UserId:      createdUserId,
 		Seedphrase:  seedphrase,
 		IsPro:       isPro,
+		// a gift redeemed at sign-up, for the caller once this commits
+		giftRedemption: giftRedemption,
 	}
 }
 
 /**
  * we use this in all flavors of network create to potentially redeem balance code
  */
+// isPro is true only for a Pro gift code, whose year starts now on a new
+// network: a data code adds data only, so it never makes the network Pro (nor
+// its token's pro claim). An unusable code leaves the network created without
+// it, as it always did. A redeemed gift is returned for the caller to finish
+// after the create commits (FinishGiftRedemption).
 func networkCreateRedeemBalanceCodeInTx(
 	networkCreate *NetworkCreateArgs,
 	createdNetworkId server.Id,
 	ctx context.Context,
 	tx server.PgTx,
-) bool {
-	isPro := false
+) (isPro bool, giftRedemption *GiftRedemption) {
 	if networkCreate.BalanceCode != nil {
 		balanceCode := &RedeemBalanceCodeArgs{
 			Secret:    *networkCreate.BalanceCode,
 			NetworkId: createdNetworkId,
 		}
 
-		// this will add transfer balance and mark the user as paid if successful
+		// a data code adds its data balance; a gift code adds its year of Pro
 		redeemBalanceCode, err := RedeemBalanceCodeInTx(balanceCode, ctx, tx)
 
-		if err == nil && redeemBalanceCode.Error == nil {
-			// successfully redeemed balance code
-			isPro = true
+		if err == nil && redeemBalanceCode.Error == nil && redeemBalanceCode.gift != nil {
+			giftRedemption = redeemBalanceCode.gift
+			isPro = !giftRedemption.Queued
 		}
 
 	}
-	return isPro
+	return
 }
 
 // The sign-up request as the network-create audit stores it, under

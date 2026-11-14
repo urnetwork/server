@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -349,7 +349,7 @@ func TestCheckWhoseTunnelNeverComesBackIsNotMeasured(t *testing.T) {
 	defer srv.Close()
 
 	res := blackhole(context.Background(), nil, stubDests(srv.URL, 3), Options{
-		Rand:      rand.New(rand.NewSource(1)),
+		Rand:      rand.New(rand.NewPCG(1, 0)),
 		Sleep:     noSleep,
 		Path:      path,
 		IpEchoUrl: srv.URL + IpEchoPath,
@@ -428,7 +428,7 @@ func TestCheckCarriedAcrossAReconnectIsOk(t *testing.T) {
 	defer srv.Close()
 
 	res := blackhole(context.Background(), nil, stubDests(srv.URL, 3), Options{
-		Rand:  rand.New(rand.NewSource(1)),
+		Rand:  rand.New(rand.NewPCG(1, 0)),
 		Sleep: noSleep,
 		Path:  path,
 	})

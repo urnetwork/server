@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-13T19:43:13Z",
+  "observed_at": "2026-11-14T00:52:27Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,18 +17,40 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": false,
-    "publication_held": true,
-    "evaluation_hold_revision": 36,
-    "hold_active": true
+    "grading_ready": true,
+    "publication_held": false,
+    "evaluation_hold_revision": 37,
+    "hold_active": false
   },
   "protected_operator_state": {
-    "path": "/var/lib/urnetwork/competition-private-operator-state-20261113.CQZ5wsYf/state.private.json",
-    "sha256": "3dd6c39dd32a6893927c4c3c40afbb852e3e46fa30bc1b29287972364f83f43b",
+    "path": "/var/lib/urnetwork/competition-private-operator-state-20261114.xWwIvXoP/state.private.json",
+    "sha256": "c18f0a7379f235e0549d4a15eb419f73bddb192a85cf7311888c5ad846cefee5",
     "mode": "root:root 0400 in root:root 0700 directory",
-    "contains": "Exact queue and eligibility census, active candidate/call identity, immutable progress/claims, recovery facts and next actions.",
+    "contains": "Protected queue observations, authenticated review progress/claims, recovery facts, qualified-tool receipts and next actions; follow the predecessor chain for earlier census evidence.",
     "instructions": "Operators: read the protected record, then revalidate its live service handles before taking action. Do not restart a call because output is quiet.",
     "embargo": "Do not publish candidate eligibility, scores, findings, rankings or per-job review status before authorized finalization. Repository updates carry control-plane status only."
+  },
+  "latest_maintenance_preparation": {
+    "grading_interrupted": false,
+    "review_runtime_activated": false,
+    "cache_helper_source_sha256": "a2da38155782527b5fadbc8a9187268cbf6d59829523a4746f7d68621c5f47b5",
+    "cache_helper_tests_passed": 36,
+    "cache_helper_normal_binary_sha256": "1e6e9baa435824f67ac9dc9c5d191b111c3fe87661e4a128e6a76af7a6b678d3",
+    "cache_helper_qa_status": "All36 synthetic controls and normal build passed. Same test binary also passed36 with an empty synthetic WARP environment and real settings/vault/cache paths masked. Earlier dependency and noexec harness failures remain preserved. No live helper main or storage operation was invoked.",
+    "cache_helper_metadata_cap_bytes": 50331648,
+    "cache_helper_initial_required_free_bytes": 35673210880,
+    "cache_helper_fresh_admission_still_required": true,
+    "review_orchestrator_v6_source_sha256": "adae37f44cb4d3a99d691f804c01a01c53075b7317cc91ed00bde63158cef79a",
+    "review_orchestrator_v6_tests_passed": 41,
+    "review_orchestrator_v6_normal_binary_sha256": "0b56c46cccf65e4dea4a6911cd4c06c6d0de7e692cf28c7d500bfd36a3127656",
+    "review_orchestrator_v6_status": "Independent source review, all41 synthetic controls and normal build passed. Removing only the fresh dispatch check makes both targeted controls fail as expected. No operational activation or model dispatch occurred. Historical v4/v5 configurations remain superseded and must not be replayed.",
+    "review_orchestrator_staged_config_sha256": "1b1385918c7c6ac17a55b3c5679dd60d8f9610a90759b454befbe7f09425de96",
+    "review_orchestrator_readonly_loader_status": "LOADER_READY_READ_ONLY: constructor-only probe passed; new state stayed empty and captured namespace metadata/progress remained unchanged. This does not authorize activation.",
+    "reversible_temporary_baseline_cleanup_bytes": 1455112192,
+    "reversible_cleanup_scope": "Only clean tracked baseline copies in one completed temporary standalone clone were sparsely excluded under prior approval. HEAD, outside-baseline content/status hashes and Git objects were preserved. Exact receipt and restore command are in the protected operator record; no RAM cache was removed.",
+    "live_cache_archive_or_eviction_performed": false,
+    "live_cache_archive_and_eviction_approval": "Pending; earlier unrelated cleanup approvals do not authorize this operation.",
+    "next_action": "Keep scoring and existing deadlines intact. Await explicit verified cache offload/removal approval; recheck source quiescence, disk/RAM admission and isolated management placement before any approved operation. Keep model calls stopped until global RAM backing and review placement are reconciled. Only the fresh staged v6 configuration preserves the checked progress/binary binding; never replay old configs or consumed claims. Constructor readiness is not operational admission. Per-job outcomes remain protected."
   },
   "control_release": {
     "server_commit": "0e35bcd8bcb01c2a864542be2fb0dcdde3599c03",
@@ -43,10 +65,32 @@
     "worker_identity_verified_at": "2026-11-13T18:44:13Z",
     "supervisor_manager_activated_at": "2026-11-13T18:43:48Z",
     "supervisor_manager_sha256": "a571706953456c944d66a75c7ce0c6c47b2fbfef6db8b392a98c5def69c3c5c5",
-    "supervisor_restarts_since_latest_manager_handoff": 1,
-    "supervisor_restarts_since_held_handoff": 3,
-    "last_observed_supervisor_fence": 72,
+    "supervisor_restarts_since_latest_manager_handoff": 4,
+    "supervisor_restarts_since_held_handoff": 5,
+    "last_observed_supervisor_fence": 75,
+    "latest_restart_observed_at": "2026-11-14T01:24:27Z",
+    "latest_restart_diagnosis": "The private worker terminal report records bare deadline_exceeded; no database-phase evidence identifies the precise owner return boundary. Do not infer a PostgreSQL outage. The supervisor reclaimed the same completed native execution without resetting its attempt or deadline; immutable retention and database acceptance completed by 2026-11-14 01:39:49 UTC. Failure-only owner diagnostics are being prepared separately; no new control release was deployed.",
     "supervisor_renewal_diagnosis_pending": true,
+    "worker_fence_diagnostic_preparation": {
+      "source_sha256": "46fa01bc39c941d1abd0c541123603a84d9c87a82164066bf53dd6de78710a3e",
+      "selected_distinct_tests_passed": 19,
+      "qualification_scope": "Seven new controller controls, eight existing offline controller controls, two new CLI controls and two existing CLI controls passed independently. The expiry target also passed separately. PostgreSQL controls were not part of this positive selection. Initial build OOM and prior failed attribution control remain preserved.",
+      "causal_negative_check": "Confirmed: the corrected forced-order expiry test passes with the new helper and deterministically fails when only the previous attribution helper is restored. The unsafe test-only binary was retained separately and not installed.",
+      "deployed": false,
+      "rollout_constraint": "Both supervisor decoder consumers must use the updated closed schema before a worker can emit the additive owner diagnostics. Preserve current authority, retry predicates, budgets and original attempt deadlines."
+    },
+    "operator_requested_patch_retry_preparation": {
+      "requested": true,
+      "authorized_in_production": false,
+      "source_manifest_sha256": "d858d19cf712921c5acac4acfd61a55dbc8b1720cd82c6df9803a1ca0ceffc6b",
+      "private_source_checkpoint": "/var/lib/urnetwork/competition-patch-retry-preparation-20261114.JlDEs2zN",
+      "static_review": "Independent control-code review found no confirmed issues in the pinned implementation. This is not a candidate honesty review or runtime approval.",
+      "validation": "All 19 primary cases, all six PostgreSQL controls, and nine affected historical regressions passed on the pinned 972 cut. The actual merged 974-prefix overlay then passed all 23 required cases plus four repeated prechecks: DDL/catalog 973-to-974, strict Gift972/Refund973 custody, old cycle-zero query compatibility and retry lifecycle. This is bounded prefix/control qualification, not a full current-main product suite or production runtime approval. Existing controller regressions passed 116 of 116; preserve the broad monitor deadline evidence, its successful exact rerun, and the remaining 168-case shard inventory.",
+      "merged_prefix_manifest_sha256": "fab224be0fdbb83c7fee3b17a7820d992b246fd139140ccb1ddbae7f00633fc5",
+      "credential_decision": "Pending explicit choice of a dedicated exact-scoped retry capability or a legacy-administrator exception. Existing credentials cannot satisfy the proposed exact-scoped operator gate, and the official issuer rejects scoped legacy operators. No permission or credential has been added. Local CLI authentication does not itself require API-host credential activation.",
+      "authority_scope": "Separate explicit single-use operator authority, not an infrastructure-defect diagnosis. Preserve exact patch/source, stored failure, original submission order and history, and the existing three-hour execution policy.",
+      "next_action": "Checkpoint the qualified server/SN changes, preserving origin Gift 972 and Refund 973 before retry 974. Apply migrations only after push through the normal main pipeline, then deploy API/monitor. Resolve the credential choice before adding any authority. Qualify and activate one combined manager/worker/CLI release at an owned idle hold; bind its actual source independently from the serving API image. A new exact runtime qualification and fresh signed closure observations are required before any retry grant."
+    },
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
     "fresh_native_observation_passed": true,
@@ -62,11 +106,15 @@
     "staged_worker_archive_sha256": "be0d951cbb2d9c04077e1871f1066b12c1d399dbf37277f82354e9698f4dab1b",
     "staged_activation_config_sha256": "8a37f2660c286f52f8c390662f1953048cee57d74dfe9ec2c3c4b7d0df2419e1",
     "worker_sha256": "c91fe976448b957fc121c951b2cfd1dbd2fd42e9451be80d9f246708c029de93",
-    "recovery_cli_sha256": "58ccd4a081eff8a47dd735776b1e609f953e5b35d94c035ad4003985424c838e",
+    "recovery_cli_sha256": "b55ae9c86c74c4f1be07d1d9d098c2c0ef1b49c038e1788c334802c8275af213",
+    "recovery_cli_location": "/dev/shm/competition-cli-control-bins-20261113.FfNbcwu0/competitionreevaluate",
+    "recovery_cli_source_scope": "Qualified 0e dependencies plus the CLI-only control-context patch; not a rebuild of all advancing main dependencies.",
+    "recovery_cli_tests_passed": 14,
+    "recovery_cli_old_limit_causal_failure_verified": true,
     "api_runtime_self_report": "sha256:0a0b00a2d375a07a7531b8ab37814ccd01a1be49964efb1cb7e0adb02d6fdfa0",
     "api_runtime_self_report_matches_registry": true,
     "api_all_replica_convergence_proved": false,
-    "next_action": "The tested supervisor is active and the unchanged worker remains held. The first controlled recovery invocation was refused without a confirmed grant; retain its sealed authorization and idempotency identity, inspect durable audit state, and diagnose the failure before any replay. A coincident renewal timeout restarted the supervisor and advanced its fence. Do not reuse the old sealed fencing census. API runtime self-report is bound to an actual admission, not an all-replica or physical-container inspection claim.",
+    "next_action": "The reviewed infrastructure recoveries are durably authorized and provisional grading resumed under hold revision 37. Monitor existing attempts without reallocating their deadlines or replaying grants. The CLI-only two-minute control budget passed 14 tests and the old-limit causal failure; native-proof freshness, evaluation deadlines and scoring rules are unchanged. Qualification and deployment of additional supervisor diagnostics must wait for idle maintenance. API runtime self-report is bound to an actual admission, not an all-replica or physical-container inspection claim.",
     "historical_sections_below": "Earlier source/test/process observations remain historical; this checkpoint supersedes their pending-build descriptions."
   },
   "review_runtime": {
@@ -147,7 +195,7 @@
     "fresh_readonly_transition_checks_passed": true,
     "fresh_native_handoff_observation_passed": true,
     "operator_observer_correction": "Remove the extra RestrictAddressFamilies wrapper property; the paired read-only diagnostic passed without it. Evaluation-container and managed-agent controls are unchanged.",
-    "remaining": "The qualified supervisor is active. Preserve the existing hold and worker while completing controlled recovery authority; this checkpoint grants neither a retry nor hold release."
+    "remaining": "The qualified supervisor remains active; reviewed recovery grants and hold release are now committed. Monitor current attempts under their existing clocks. Additional renewal diagnostics remain source-only and require independent qualification at an idle boundary."
   },
   "qualified_offline_context_adapter": {
     "source_manifest_sha256": "06d3d625d6bb065154d7b5f412a5571eb2d2f8f66eedef744bdec0412d8cea85",
@@ -160,13 +208,18 @@
     "remaining": "Selection succeeded for the pinned as-of snapshot; it is explicitly not a full-population census. Authenticate newly exported originals and preserve every previous packet byte before assembly. No registry or completed-review credit."
   },
   "qualified_review_orchestrator": {
-    "source_manifest_sha256": "e578003dbf876b3be6a01cc35b0c3f7cf8b95a713bbbc460606f62cfda4ab321",
-    "normal_tests_passed": 30,
-    "normal_binary_sha256": "cc8c295e58177c13f87e67ea336e77cb2a1b87064ee0ac88146177e667ff2d2b",
+    "source_manifest_sha256": "0c1d517a440c0b4780306dbde781bd0e61419216b08651deda9465880984ba57",
+    "source_directory": "/home/by/urnetwork/temp/competition-epoch2-private-prereview-20261112/complete-review-ordinary-orchestrator-management-cpus-20261113.YWiA5GGm",
+    "normal_tests_passed": 32,
+    "normal_binary_sha256": "23093678d4f7348d2d8e22ac98bdb8e4d005070e674bc0b3270bf433cfb9610c",
+    "normal_binary_location": "/var/lib/urnetwork/competition-orchestrator-management-qa-20261113.mLQUjSud/ordinary-orchestrator",
     "independent_targeted_security_review_passed": true,
     "runtime_activated": false,
     "older_coordinator_activated": false,
-    "remaining": "Install and review a prospective custody/v2 operator profile using current immutable progress. Never activate the older coordinator with known ancestry and uncertainty-reporting defects."
+    "earlier_control_preflights_failed_before_any_actor": true,
+    "management_cpu_placement_qualified": false,
+    "launch_suspended_for_memory_accounting": true,
+    "remaining": "DO NOT ACTIVATE any review configuration yet. Management-core v4 passed 32 synthetic controls and its immutable config is staged, but auxiliary RAM-backed allocations are outside the declared management/evaluation budgets. Restore globally backed headroom through approved verified offload, and account the reviewer inside the reserved management budget before launch. This review-only suspension does not pause grading. Keep all prior claims, inner models, inputs, limits and gates unchanged."
   },
   "package_restart_deferral": {
     "hosts": [
@@ -210,8 +263,8 @@
     "source_baseline_submission_evidence_deleted": false
   },
   "next_actions": [
-    "The current execution is terminal. Review and provision the newly qualified secure orchestrator against immutable progress; never replay a consumed operation or infer candidate approval from scoped evidence.",
-    "Verify advancing host heartbeats after the completed held worker handoff; retain compatible serving API identity before controlled recovery.",
+    "Review orchestration has no active model call. Keep it stopped until auxiliary RAM-cache offload is approved and verified and reserved-memory accounting is restored. Never replay a consumed operation or infer candidate approval from scoped evidence.",
+    "Monitor active grading attempts and advancing host heartbeats under their existing deadlines. Recovery grants and hold release are committed; do not repeat them or restart a live owner on observation timeout.",
     "Finish complete both-model reviews and bounded cohort/archive routing. Derive eligibility from authenticated scoring rules, never success state alone.",
     "Keep all candidate outcomes and operator proof payloads in protected storage. Publish results only through the authorized finalization path."
   ],

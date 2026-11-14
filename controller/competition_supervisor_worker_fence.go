@@ -37,6 +37,9 @@ func runCompetitionSupervisorWorkerFenced(ctx context.Context, expiresAt time.Ti
 		return err
 	}
 	done := make(chan struct{})
+	failureObservation, _ := ctx.Value(competitionWorkerFailureObservationKey{}).(*CompetitionWorkerFailureObservation)
+	var failedFenceError error
+	var failedFenceOwner *competitionHeartbeatOwnerObservation
 	go func() {
 		defer close(done)
 		currentExpiry := expiresAt
@@ -51,17 +54,24 @@ func runCompetitionSupervisorWorkerFenced(ctx context.Context, expiresAt time.Ti
 			case <-tick:
 			}
 			var nextExpiry time.Time
-			err := retryCompetitionAuthorityRenewal(authority.ctx, currentExpiry, settings.Retry, func(attempt context.Context) error {
+			var observation *competitionHeartbeatOwnerObservation
+			if failureObservation != nil {
+				observation = newCompetitionHeartbeatOwnerObservation(authority.ctx, currentExpiry, time.Time{})
+			}
+			err := retryCompetitionAuthorityRenewalObserved(authority.ctx, currentExpiry, settings.Retry, func(attempt context.Context) error {
+				observation.beginStore(attempt)
 				var err error
 				nextExpiry, err = read(attempt)
+				observation.finishStore(attempt, err == nil, nil)
 				return err
 			}, func(err error) bool {
 				return competitionSupervisorUnadmittedDeadline(err) || competitionSupervisorWorkerFenceDeadline(err)
-			})
+			}, observation)
 			if err == nil {
 				err = authority.confirm(nextExpiry)
 			}
 			if err != nil {
+				failedFenceError, failedFenceOwner = err, observation
 				authority.cancel(err)
 				return
 			}
@@ -76,10 +86,10 @@ func runCompetitionSupervisorWorkerFenced(ctx context.Context, expiresAt time.Ti
 	authority.close()
 	<-done
 	if cause != nil {
-		return cause
+		return observeCompetitionWorkerFenceReturn(failureObservation, cause, failedFenceError, failedFenceOwner)
 	}
 	if finalCause := context.Cause(authority.ctx); finalCause != nil && finalCause != context.Canceled {
-		return finalCause
+		return observeCompetitionWorkerFenceReturn(failureObservation, finalCause, failedFenceError, failedFenceOwner)
 	}
 	return err
 }

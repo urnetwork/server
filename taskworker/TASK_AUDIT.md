@@ -1,6 +1,6 @@
 # Async task correctness audit
 
-This inventory covers the 93 registered application targets in the production
+This inventory covers the 96 registered application targets in the production
 and subnet-operator registries, including factory-built financial targets and
 retired compatibility handlers. The built-in `RunPost` dispatcher is covered
 separately by the task-helper tests below. Unregistered/manual utilities are not
@@ -62,6 +62,9 @@ cases passed the final run.
 | --- | --- | --- |
 | [AppleOfferCodeTopUp](../controller/onboarding_apple_offer_codes_controller.go) | Provider failure/recovery, durable pool fill, replay and recurrence. | [TestAppleOfferCodeTaskFailureRecoveryAndPoolReplay](../controller/async_snapshot_task_test.go) |
 | [DeliverAccountMessages](../controller/account_message_outbox_controller.go) | Persisted delivery state and next delivery run. | [TestDeliverAccountMessagesTaskDeliversAndSchedulesTheNextRun](../controller/account_message_outbox_test.go) |
+| [GiftRenderCards](../controller/gift_delivery.go) | Print a paid order's cards (every friend's, then all), owe its emails once per order key; an unpaid order prints and owes nothing. | [TestGiftDeliveryOwesAndSendsTheEmails](../controller/gift_delivery_db_test.go); [TestGiftDeliveryWithdrawsTheEmailsOfARefundedOrder](../controller/gift_delivery_db_test.go); [TestGiftCardsPrintPdf](../controller/gift_cards_pdf_test.go) |
+| [GiftRetention](../controller/gift_delivery.go) | Remove an order's cards and personal data 30 days after its last email, and a never-paid order's personal data 30 days after it was made or refunded; forget the buyer's address of a crypto order the 30-day unlink passed once no friend's email needs it; keep every other order, and rearm daily. | [TestGiftRetention](../controller/gift_delivery_db_test.go); [TestGiftRetentionScrubsUnpaidOrders](../controller/gift_delivery_db_test.go); [TestGiftUnlinkedCryptoOrderForgetsItsBuyerAfterTheFriends](../controller/gift_delivery_db_test.go); [TestGiftRetentionTaskSchedulesTheNextRun](../controller/gift_delivery_db_test.go) |
+| [RebaseQueuedGiftYears](../controller/gift_requeue_task.go) | Move the queued gift years of a network left without paid Pro cover up to start now, back to back and each its full length (renewal, marker and code window together, the first cycle granted); a covered queue stays; a second run changes nothing; rearm hourly. | [TestRebaseQueuedGiftYears](../model/gift_redeem_model_test.go); [TestRebaseQueuedGiftYearsTaskMovesUpAWaitingYear](../controller/gift_requeue_task_test.go) |
 | [OnboardingCampaignStep](../controller/onboarding_campaign_controller.go) | Recover a committed advance after lost handback; stopped campaigns drain. | [TestOnboardingCampaignTaskRecoversCommittedSuccessorOnReplay](../controller/onboarding_campaign_task_test.go) |
 | [OnboardingEmailTrackerSync](../controller/onboarding_email_tracker_controller.go) | Source-derived snapshot, replay, invalid-window rejection and recurrence. | [TestAsyncOnboardingAndSubscriptionSnapshots](../controller/async_snapshot_task_test.go) |
 | [OnboardingResultsRollup](../controller/onboarding_results_controller.go) | Source-derived snapshot, replay, invalid-window rejection and recurrence. | [TestAsyncOnboardingAndSubscriptionSnapshots](../controller/async_snapshot_task_test.go) |

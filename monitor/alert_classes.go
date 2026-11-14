@@ -548,6 +548,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"gamma-unknown-reference":                             incidentAlertClass,
 	"payment-credit-unfulfillable":                        incidentAlertClass,
 	"payment-entitlement-missing":                         incidentAlertClass,
+	"payment-gift-mismatch":                               incidentAlertClass,
 	"payment-reconciliation-credit-unfulfillable":         incidentAlertClass,
 	"payment-reconciliation-credit-unfulfillable-invalid": incidentAlertClass,
 	"payment-reconciliation-repair":                       incidentAlertClass,

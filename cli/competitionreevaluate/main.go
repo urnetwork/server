@@ -29,7 +29,8 @@ import (
 
 // Limits belong to this command, not to the scoring instrument or job budget.
 type recoverySettings struct {
-	// Total control transaction lifetime; non-positive refuses execution.
+	// Total control operation lifetime, including sequential native observations.
+	// This is not the native-proof window or a paid execution clock.
 	Timeout time.Duration
 	// Maximum private document bytes; non-positive refuses a read.
 	DocumentBytes int64
@@ -39,7 +40,24 @@ type recoverySettings struct {
 
 // Control metadata remains small and cannot consume a submission's clock.
 func defaultRecoverySettings() recoverySettings {
-	return recoverySettings{Timeout: 30 * time.Second, DocumentBytes: 1024 * 1024, TokenBytes: 1025}
+	return recoverySettings{Timeout: 2 * time.Minute, DocumentBytes: 1024 * 1024, TokenBytes: 1025}
+}
+
+// One caller-owned absolute deadline includes preparation and sequential native
+// observations. The explicit clock seam is internal only; parent lifetime wins.
+func newRecoveryControlContext(parent context.Context, limits recoverySettings, startedAt time.Time) (context.Context, context.CancelFunc, error) {
+	if parent == nil || limits.Timeout <= 0 || startedAt.IsZero() {
+		return nil, nil, errors.New("invalid recovery control context bound")
+	}
+	if err := parent.Err(); err != nil {
+		return nil, nil, err
+	}
+	ctx, cancel := context.WithDeadline(parent, startedAt.Add(limits.Timeout))
+	if err := ctx.Err(); err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return ctx, cancel, nil
 }
 
 // Directory descriptors pin every traversed ancestor. No symlink or writable
@@ -318,7 +336,10 @@ func runRecovery(args []string, output io.Writer) error {
 	}
 	parent, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(parent, limits.Timeout)
+	ctx, cancel, err := newRecoveryControlContext(parent, limits, time.Now())
+	if err != nil {
+		return errors.New("recovery control context unavailable")
+	}
 	defer cancel()
 	receipt, err := (controller.PostgresStore{}).AuthorizeJobReevaluation(ctx, settings, principal, model.CompetitionJobReevaluationRequest{
 		IdempotencyKey: *idempotencyKey, AuthorizationSha256: authorizationDigest, Authorization: auth,

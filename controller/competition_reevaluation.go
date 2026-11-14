@@ -199,6 +199,9 @@ func CompetitionJobReevaluationSnapshotDigest(content json.RawMessage) (string, 
 // Only the privileged local CLI binds a separately pinned qualification. This
 // is not inferred from version strings, old image receipts or a successful Go run.
 func BindCompetitionJobReevaluationRuntime(settings *Settings, proof model.CompetitionJobReevaluationRuntime, digest string) error {
+	if proof.Kind == model.CompetitionOperatorRequestedPatchRetryRuntimeKind || proof.Capability == model.CompetitionOperatorRequestedPatchRetryCapability {
+		return bindCompetitionOperatorRequestedPatchRetryRuntime(settings, proof, digest)
+	}
 	if proof.Schema == 2 || proof.Kind == model.CompetitionDistributedJobReevaluationRuntimeKind {
 		return bindCompetitionDistributedReevaluationRuntime(settings, proof, digest)
 	}
@@ -455,7 +458,8 @@ func validateCompetitionReevaluationIncidentInTx(ctx context.Context, tx server.
 // One transaction records the complete old terminal projection before a
 // narrowly guarded queue transition. Exact replay is receipt-only, not a reset.
 func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings *Settings, principal *Principal, request model.CompetitionJobReevaluationRequest) (receipt *model.CompetitionJobReevaluationReceipt, err error) {
-	if request.Authorization.Schema == 2 || request.Authorization.Kind == model.CompetitionDistributedJobReevaluationAuthorizationKind {
+	if request.Authorization.Schema == 2 || request.Authorization.Kind == model.CompetitionDistributedJobReevaluationAuthorizationKind ||
+		request.Authorization.Kind == model.CompetitionOperatorRequestedPatchRetryAuthorizationKind {
 		return self.authorizeDistributedJobReevaluation(ctx, settings, principal, request, competitionTransportForHost)
 	}
 	if err := validateCompetitionReevaluationRequest(settings, principal, request); err != nil {
