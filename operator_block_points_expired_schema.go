@@ -10,8 +10,9 @@
 // rewritten. The five-second lock bound keeps a catalog wait from stalling
 // behind a long reader, and a table that exists already is left as it is, so
 // a failed lock wait is safe to retry. Old binaries never read it. Apply
-// before deploying the taskworker (the daily award) and bringyourctl (the
-// backfill) that use it.
+// before deploying the taskworker (the daily award and the served bytes
+// rollup), bringyourctl (the backfill), and the api and alt (GET
+// /account/epochs counts no bytes for an expired block) that use it.
 package server
 
 // The migration's statement.
