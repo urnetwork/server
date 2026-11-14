@@ -13,7 +13,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
 )
 
 // Compare against the declared dataset, not copied live identities or rounded
@@ -81,19 +85,44 @@ func TestFourExchangeCalibrationMatchesRawEvidenceAndControllerOutcomes(t *testi
 	if err != nil || fmt.Sprintf("%x", sha256.Sum256(manifestBytes)) != image.SourceConfigSha256 {
 		t.Fatal("retained source manifest differs from the image's embedded configuration", err)
 	}
-	manifest, err := decodeSourceManifest(manifestBytes)
-	if err != nil || validateSourceManifest(manifest) != nil {
-		t.Fatal("calibration source manifest no longer validates the complete live repository set", err)
+	// This calibration measured the ten repositories, before sidecar was the
+	// eleventh (QD-769). Its retained ledger is evidence, not a live ledger: the
+	// current decoder refuses it for exactly the pin it predates, and its own
+	// lock digest still binds exactly the ten commits it records.
+	if _, err := decodeSourceManifest(manifestBytes); err == nil || !strings.Contains(err.Error(), "source generation 0 repository sidecar has an invalid commit") {
+		t.Fatal("a retained ledger of the ten repositories is not refused only for its absent sidecar pin", err)
 	}
-	generation, err := manifest.generation(0)
-	if err != nil {
-		t.Fatal(err)
+	var retainedLedger struct {
+		Schema           int `yaml:"schema"`
+		EvaluationSource struct {
+			Generations []struct {
+				Generation       int    `yaml:"generation"`
+				SourceLockSha256 string `yaml:"source_lock_sha256"`
+				Repositories     map[string]struct {
+					Commit string `yaml:"commit"`
+				} `yaml:"repositories"`
+			} `yaml:"generations"`
+		} `yaml:"evaluation_source"`
+	}
+	if err := yaml.Unmarshal(manifestBytes, &retainedLedger); err != nil || retainedLedger.Schema != 2 || len(retainedLedger.EvaluationSource.Generations) == 0 ||
+		retainedLedger.EvaluationSource.Generations[0].Generation != 0 {
+		t.Fatal("retained source manifest lost its baseline generation", err)
+	}
+	retainedCommits := map[string]string{}
+	for repository, pin := range retainedLedger.EvaluationSource.Generations[0].Repositories {
+		retainedCommits[repository] = pin.Commit
+	}
+	if len(retainedCommits) != len(model.CompetitionSourceRepositoryNamesBeforeSidecar()) {
+		t.Fatal("retained source manifest does not hold exactly the ten repositories it measured")
+	}
+	if lock, err := model.CompetitionSourceLockDigest(retainedCommits); err != nil || lock != retainedLedger.EvaluationSource.Generations[0].SourceLockSha256 {
+		t.Fatal("retained source manifest's lock digest no longer binds its ten commits", err)
 	}
 	var record struct {
 		Repositories map[string]string `json:"repositories"`
 	}
 	read("source-record.json", &record)
-	if record.Repositories["server"] != image.BaseSha || !reflect.DeepEqual(record.Repositories, generation.Repositories.commits()) {
+	if record.Repositories["server"] != image.BaseSha || !reflect.DeepEqual(record.Repositories, retainedCommits) {
 		t.Fatal("retained source record differs from the source manifest or image")
 	}
 	providers, err := os.ReadFile(filepath.Join(root, "input", "providers.yml"))

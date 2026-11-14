@@ -19,7 +19,7 @@ import (
 
 // The independently enumerated set prevents accidental reintroduction in either mode.
 func TestSourceRepositorySetRetiresOperatorProxyInBothModes(t *testing.T) {
-	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
+	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor", "sidecar"}
 	if !slices.Equal(sourceRepositoryNamesForMode(true), want) || !slices.Equal(sourceRepositoryNames(), want) {
 		t.Fatal("retirement changed another required pin or left a retired production requirement")
 	}

@@ -50,10 +50,16 @@ type sourceRepositories struct {
 	OperatorProxy sourceRepository `yaml:"operator-proxy,omitempty" json:",omitzero"`
 	Warp          sourceRepository `yaml:"warp"`
 	Gvisor        sourceRepository `yaml:"gvisor"`
+	// The eleventh repository (QD-769). Every server commit that requires the
+	// sidecar module builds only beside this checkout, so a ledger without the
+	// pin is refused, as one that still names operator-proxy is.
+	Sidecar sourceRepository `yaml:"sidecar"`
 }
 
 // sourceRepositoryNames returns every repository copied into and built by the
-// evaluator. A fresh slice keeps callers from mutating the package policy.
+// evaluator: the ten it has held and sidecar, in the order of the producers of
+// the sidecar/1 source graph (evaluator-sidecar.sh and its two policy
+// siblings). A fresh slice keeps callers from mutating the package policy.
 func sourceRepositoryNames() []string {
 	return sourceRepositoryNamesForMode(false)
 }
@@ -71,7 +77,7 @@ func sourceRepositoryNamesForMode(_ bool) []string {
 		"userwireguard",
 		"sn",
 	}
-	return append(names, "warp", "gvisor")
+	return append(names, "warp", "gvisor", "sidecar")
 }
 
 // commits returns the complete evaluation-source identity for one epoch.
@@ -92,6 +98,7 @@ func (self sourceRepositories) commitsForMode(_ bool) map[string]string {
 		"sn":            self.Sn.Commit,
 		"warp":          self.Warp.Commit,
 		"gvisor":        self.Gvisor.Commit,
+		"sidecar":       self.Sidecar.Commit,
 	}
 	return commits
 }

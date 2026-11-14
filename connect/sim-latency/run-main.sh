@@ -160,7 +160,7 @@ verify_staging_source() {
     local record
     record=$("$(sim_binary)" staging-source-check --epoch=0 \
         --source-config="$source_config" --repos-root="$workspace_root")
-    jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","warp","gvisor"]' '
+    jq -e --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn","warp","gvisor","sidecar"]' '
         . as $record |
         .schema == 1 and .epoch == 0 and .branch == "sim-latency-staging" and
         (.repositories | type == "object") and

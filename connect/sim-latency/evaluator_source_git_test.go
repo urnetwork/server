@@ -344,7 +344,7 @@ emit_candidate_build_failure() { printf 'unexpected terminal submission failure\
 // Run the real mode selection before the extracted function so both the first
 // and last source entries must be inspected before ownership can be sealed.
 func TestEvaluatorRefusesToSealSourceWhenGitStatusFails(t *testing.T) {
-	repositoryPolicy := sourceGitScriptSection(t, "evaluator.sh", "REPOSITORIES=(", "\nround_id=")
+	repositoryPolicy := sourceGitScriptSection(t, "evaluator-sidecar.sh", "REPOSITORIES=(", "\nround_id=")
 	const prelude = `set -Eeuo pipefail
 baseline_source_root="$SOURCE_TEST_ROOT"
 candidate_source_root=/synthetic/candidate
@@ -369,7 +369,7 @@ git() {
 sudo() { printf 'unexpected source seal\n'; exit 99; }
 `
 	for _, staging := range []bool{false, true} {
-		for _, failedRepository := range []string{"server", "gvisor"} {
+		for _, failedRepository := range []string{"server", "sidecar"} {
 			root := t.TempDir()
 			commits := map[string]string{}
 			repositories := sourceRepositoryNamesForMode(staging)

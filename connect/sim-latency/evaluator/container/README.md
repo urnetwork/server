@@ -31,11 +31,11 @@ trusted baseline and scorer continue to execute from the pristine base image.
 
 For every production evaluation attempt, `prepare-evaluation-source.sh` copies fresh
 `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`,
-`sn`, `warp`, and `gvisor` repositories out of that authenticated base
+`sn`, `warp`, `gvisor`, and `sidecar` repositories out of that authenticated base
 image into a bounded temporary directory. It checks out a local
 `sim-latency` branch at each epoch source-lock commit without reading or
 changing any host repository checkout. Explicit v2 staging instead copies exactly
-the same ten repositories above, using only
+the same eleven repositories above, using only
 `sim-latency-staging` branches and a staging-authenticated image and source lock.
 The staging builder neither discovers nor contacts the retired remote. Existing
 production images and eleven-pin locks retain their original identity as
@@ -126,6 +126,46 @@ rootless daemon, a default-deny host firewall, and a root-owned parent slice.
 The evaluator must verify the actual container cgroup ids, limits, network,
 image ids, exit/OOM state, and accounting after every stage.
 
+## Releases by source graph
+
+The evaluator measures one of two source graphs, and a round's frozen
+`evaluation_policy.source_graph_policy` says which. Omitted, it is the ten
+repositories every earlier round measured. `sidecar/1` is those ten with
+`sidecar` as the eleventh, which every server commit that requires the sidecar
+module needs beside it to build.
+
+Each graph has its own immutable producer release for each scoring policy, and
+its own preparation program that pins that producer by SHA-256:
+
+| scoring policy | ten repositories (omitted) | eleven repositories (`sidecar/1`) |
+| --- | --- | --- |
+| legacy | `evaluator.sh`, `prepare-round-baseline.sh` | `evaluator-sidecar.sh`, `prepare-round-baseline-sidecar.sh` |
+| `minimum-work/1` | `evaluator-minimum-work.sh`, `prepare-round-baseline-minimum-work.sh` | `evaluator-minimum-work-sidecar.sh`, `prepare-round-baseline-minimum-work-sidecar.sh` |
+| `seeded-crawl-coverage/v1` | `evaluator-work-coverage.sh`, `prepare-round-baseline-work-coverage.sh` | `evaluator-work-coverage-sidecar.sh`, `prepare-round-baseline-work-coverage-sidecar.sh` |
+
+The six programs of the ten repositories are sealed: version-one controls are
+authenticated against their bytes, so they never change. A producer of the
+eleven is its sibling with the longer repository list and the selector in its
+request schema, and nothing else. It refuses a request that does not name
+`sidecar/1`, and a producer of the ten refuses one that does, because each
+checks the exact key set of `evaluation_policy`. A preparation program of the
+eleven writes `source_graph_policy` into its completion receipt, which the
+worker compares with the frozen round.
+
+`build-base.sh`, `prepare-evaluation-source.sh`, `build-submission.sh`,
+`evaluator-subevaluation.sh` and `Dockerfile.base` in this directory hold the
+eleven repositories, so this tree builds and runs only the `sidecar/1` graph.
+A round of the ten runs from its own installed release, whose helpers are the
+bytes that release pinned.
+
+The controller's dependency map for the eleven
+(`roundBaselineSidecarDependencyDigests` in
+`controller/competition_round_baseline_preparation.go`) pins each script at
+this tree's bytes. It records no digest for the compiled patch validator
+(`competitionpatch` and `competitionpatch.sha256`), which is built when the
+release is qualified on the evaluator hosts, and the worker refuses the release
+until both are recorded. Nothing here builds an image or qualifies a host.
+
 ## Trust and data flow
 
 1. The API authenticates a text patch, canonicalizes it, stores its SHA-256,
@@ -187,7 +227,7 @@ attempt_source="$(mktemp -d /var/lib/urnetwork/competition/source.XXXXXXXX)"
 The production form refuses a tag-only base. `--allow-local-base` exists for a
 daemon-local smoke image. The script emits strict JSON containing the image
 id/key, base SHA, deterministic candidate SHA, patch SHA-256, policy SHA-256,
-the complete ten-repository candidate commit map and its digest, original
+the complete candidate commit map of the source graph and its digest, original
 source-identity digest, validator digest, and composite builder digest.
 
 ### Prospective broad-repository release

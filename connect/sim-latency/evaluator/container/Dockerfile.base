@@ -72,6 +72,7 @@ RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
     && git config --system --add safe.directory /workspace/sn \
     && git config --system --add safe.directory /workspace/warp \
     && git config --system --add safe.directory /workspace/gvisor \
+    && git config --system --add safe.directory /workspace/sidecar \
     && chmod 0555 /usr/local/libexec/competition-container /usr/local/libexec/competition-official-run \
     && install -d -m 0755 /opt/urnetwork/bin /opt/urnetwork/submission /opt/urnetwork/go
 
