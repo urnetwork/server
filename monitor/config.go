@@ -1617,7 +1617,7 @@ func yamlString(v any) string {
 
 // monitor.yml's dns_canary block (SIGNALS.md §28.1): which copy this is and where the dns API block and
 // its bearer are. dns.yml gives the roots, the NS glue, the anchors and which roots' DS is published
-// (ds_published, DNS-M7-04), so the edges, the blocks and both copies read one statement of it.
+// (ds_published, DNS-M7-04), so both copies read the one file the anchors the DS names are in.
 type dnsCanaryYaml struct {
 	// site or outside
 	Source string `yaml:"source"`
