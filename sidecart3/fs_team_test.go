@@ -25,6 +25,13 @@ func TestFs16OnT3(t *testing.T) {
 	})
 }
 
+// FS-16's activation: the sequencer takes the tick at 72 h and refuses the one at 71 h (TEAM-M2-14).
+func TestFs16ActivationAcrossFoldsOnT3(t *testing.T) {
+	testEnv().Run(t, func(tb testing.TB) {
+		Run(tb, fault.Fs16ActivationAcrossFolds, nil)
+	})
+}
+
 func TestFs102OnT3(t *testing.T) {
 	testEnv().Run(t, func(tb testing.TB) {
 		RunRow(tb, "FS-102", "", nil)
