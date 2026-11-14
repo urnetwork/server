@@ -405,6 +405,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	// verified by hash; api carries the log, and the gate checks its chain and holds the rows to their hash (QD-680)
 	"GET /internal/gate/projection/([^/]+)":   routeAccessPublic,
 	"GET /internal/gate/rows/([^/]+)/([^/]+)": routeAccessPublic,
+	// an edge block's urnetwork-edge client jwts (TLS-M5-11; QD-812): the edge class's internal bearer, verified by
+	// hash, is its credential, and api admits only the clients config/<env>/edge.yml names
+	"POST /internal/gate/edge-client": routeAccessPublic,
 
 	// §13.15's certificate routes (TLS-M5-16). The two order routes take a service token, aud certs, as their
 	// credential, and the subject is the token's. GET /tls/certs serves the bearer's network's certificates and

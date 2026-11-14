@@ -47,6 +47,7 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/sidecar"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
 	"github.com/urnetwork/server/controller"
@@ -288,6 +289,8 @@ func registry() []specEndpoint {
 		// the internal gate's projection reads (ACL-M4-05): the client route's body, and a base's rows as raw bytes
 		{"GET", "/internal/gate/projection/{network_id}", nil, rt(controller.NetworkConfigProjectionResult{})},
 		{"GET", "/internal/gate/rows/{network_id}/{rows_sha256}", nil, nil},
+		// an edge block's client mint (TLS-M5-11, QD-812)
+		{"POST", "/internal/gate/edge-client", rt(server.EdgeClientMintArgs{}), rt(server.EdgeClientMintResult{})},
 	}
 }
 

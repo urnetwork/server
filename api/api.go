@@ -40,6 +40,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	providerWork := handlers.NewProviderWorkHandlers()
 	quotaService := handlers.NewQuotaServiceHandlers(nil, nil)
 	internalGateProjection := handlers.NewInternalGateProjectionHandlers(nil)
+	internalGateEdgeClient := handlers.NewInternalGateEdgeClientHandlers(nil)
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
 	connectControl := handlers.ConnectControl
@@ -518,5 +519,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	routes = append(routes, quotaService.Routes()...)
 	// the authorization log for the gate hosts that read it through api, on their internal bearers (ACL-M4-05; QD-680)
 	routes = append(routes, internalGateProjection.Routes()...)
+	// an edge block's urnetwork-edge client jwts, on the edge class's internal bearer (TLS-M5-11; QD-812)
+	routes = append(routes, internalGateEdgeClient.Routes()...)
 	return applyRouteAccess(append(routes, oauth.Routes()...))
 }
