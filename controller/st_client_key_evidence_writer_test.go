@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -899,4 +900,28 @@ func stClientKeyEvidenceReadbackRefusalsTest(requests []stClientKeyEvidenceS3Req
 		}
 	}
 	return refused
+}
+
+// A writer's backoff jitter draws from its own connect.NewSecureRand generator
+// (RANDUPDATE.md S4); it was a PCG, which gives its state away in its outputs.
+// Two writers built by the production constructor under one fixed fake clock
+// draw different jitters.
+func TestStClientKeyEvidenceWriterJitterIsDrawnPerWriter(t *testing.T) {
+	now := time.Date(2026, time.November, 13, 12, 0, 0, 0, time.UTC)
+	backoffs := func() []time.Duration {
+		writer := newStClientKeyEvidenceWriterTest(t, stClientKeyEvidenceWriterSettingsTest())
+		writer.now = func() time.Time { return now }
+		delays := []time.Duration{}
+		func() {
+			writer.stateLock.Lock()
+			defer writer.stateLock.Unlock()
+			for range 16 {
+				delays = append(delays, writer.backoffWithLock(8))
+			}
+		}()
+		return delays
+	}
+	if first, second := backoffs(), backoffs(); slices.Equal(first, second) {
+		t.Fatalf("two writers drew the same backoff jitters %v", first)
+	}
 }

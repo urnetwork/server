@@ -27,7 +27,7 @@ package connect
 
 import (
 	"context"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -136,7 +136,7 @@ func newHandlerHeartbeat(
 			if maxDelay <= 0 {
 				return 0
 			}
-			return time.Duration(mathrand.Int63n(int64(maxDelay)))
+			return time.Duration(mathrand.Int64N(int64(maxDelay)))
 		},
 		shutdown,
 	)

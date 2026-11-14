@@ -7,7 +7,7 @@ package egresshealth
 import (
 	"context"
 	"encoding/json"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -19,7 +19,7 @@ import (
 func udpCountryTestCheck(t *testing.T, transport http.RoundTripper, udpProbesDisabled bool) *Result {
 	t.Helper()
 	result, err := Check(context.Background(), &http.Client{Transport: transport}, Options{
-		UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewPCG(3, 0)),
 		UdpProbesDisabled: udpProbesDisabled,
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestUdpCountrySwitchLeavesOtherCountriesHttp3Legs(t *testing.T) {
 	}
 	// and a URL without h3 has no UDP leg to disable
 	plain, err := Check(context.Background(), &http.Client{Transport: transport}, Options{
-		UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalogWithoutH3), Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalogWithoutH3), Rand: rand.New(rand.NewPCG(3, 0)),
 		UdpProbesDisabled: true,
 	})
 	if err != nil || plain.OkCount != 1 || plain.Checks[0].UdpProbesDisabled || plain.UrlProbeEvidence.UdpProbesDisabled {

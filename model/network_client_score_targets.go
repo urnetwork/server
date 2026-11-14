@@ -5,7 +5,7 @@
 package model
 
 import (
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 
 	"github.com/urnetwork/server"
 )
