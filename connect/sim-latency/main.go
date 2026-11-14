@@ -101,6 +101,7 @@ Usage:
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
   sim-latency credentials rotate-token --vault=<path> --delivery=<path> --role=<role> --name=<name> [--environment=<env> --competition-id=<id> --season-id=<id>]
+  sim-latency credentials issue-patch-retry --registration=<path> --token-file=<path> --name=<name> --environment=<env> --competition-id=<id> --season-id=<id> --round-id=<id> --job-id=<id> --expires-at=<time>
   sim-latency credentials rotate-seed --vault=<path> --confirm-no-unrevealed-rounds
   sim-latency credentials revoke --vault=<path> --name=<name>
   sim-latency reset
@@ -180,6 +181,9 @@ Options:
   --environment=<env>    Exact v2 credential environment scope.
   --competition-id=<id>  Exact v2 credential competition scope.
   --season-id=<id>       Exact v2 credential season scope.
+  --registration=<path> New root-owned local patch-retry registration; never the API vault.
+  --token-file=<path>   New root-owned raw patch-retry bearer file.
+  --expires-at=<time>   Exact patch-retry credential expiry in RFC3339 format.
   --confirm-no-unrevealed-rounds  Confirm seed rotation cannot invalidate an unrevealed round.
   --out=<path>           Output path for the selected file-producing command.
   --count=<n>            Number of providers [default: 100000].

@@ -69,6 +69,9 @@ type IpRateLimitAttemptId struct {
 type NetworkCreateIpRateLimitResult struct {
 	Count             int
 	RetryAfterSeconds int
+	// the attempt the check recorded; zero when it recorded none (an excluded
+	// caller, or one over the limit)
+	AttemptId Id
 }
 
 // Configures Connect's burst and concurrent-connection budgets.
@@ -460,6 +463,9 @@ func CheckNetworkCreateIpRateLimit(
 	}
 
 	Tx(ctx, func(tx PgTx) {
+		// a rerun of the transaction starts over: only the committed run's
+		// insert is the recorded attempt
+		result = NetworkCreateIpRateLimitResult{}
 		queryResult, err := tx.Query(
 			ctx,
 			networkCreateIpRateLimitWindowSQL,
@@ -474,6 +480,7 @@ func CheckNetworkCreateIpRateLimit(
 		if limit <= result.Count {
 			return
 		}
+		attemptId := NewId()
 		RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -481,12 +488,32 @@ func CheckNetworkCreateIpRateLimit(
 				(network_create_attempt_id, client_address_hash, create_time)
 				VALUES ($1, $2, $3)
 			`,
-			NewId(),
+			attemptId,
 			client.clientIpHash[:],
 			NowUtc(),
 		))
+		result.AttemptId = attemptId
 	})
 	return
+}
+
+// Removes one recorded seedphrase account-creation attempt: an attempt this
+// check admitted that a later budget refused, so that the refusal does not
+// spend the caller's address budget. A zero id is a no-op.
+func RemoveNetworkCreateIpRateLimitAttempt(ctx context.Context, attemptId Id) {
+	if attemptId == (Id{}) {
+		return
+	}
+	Tx(ctx, func(tx PgTx) {
+		RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_create_attempt
+				WHERE network_create_attempt_id = $1
+			`,
+			attemptId,
+		))
+	})
 }
 
 // Atomically records and checks a wallet-challenge source-address history.

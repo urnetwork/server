@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -69,7 +69,7 @@ const h3TestCatalogWithoutH3 = `[{"name":"synthetic-tcp","class":"site","url":"h
 func h3TestCheck(t *testing.T, transport http.RoundTripper, destinations []Destination) *Result {
 	t.Helper()
 	result, err := Check(context.Background(), &http.Client{Transport: transport}, Options{
-		UrlProbe: true, Destinations: destinations, Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Destinations: destinations, Rand: rand.New(rand.NewPCG(3, 0)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestUrlProbeH3LegIsNotMadeAfterAFailedHttpsLeg(t *testing.T) {
 func TestUrlProbeH3DestinationWithoutAnH3PathIsNotMeasured(t *testing.T) {
 	transport := &h3TestTransport{https: h3TestContent(nil)}
 	result, err := Check(context.Background(), &http.Client{Transport: transport}, Options{
-		UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewSource(3)),
+		UrlProbe: true, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewPCG(3, 0)),
 	})
 	if err != nil {
 		t.Fatal(err)

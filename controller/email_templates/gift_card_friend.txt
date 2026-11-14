@@ -1,0 +1,33 @@
+{{define "headline"}}{{Upper (T "card.kicker")}}{{end}}
+{{define "why"}}{{T "friend.why"}}{{end}}
+{{define "content"}}
+{{- if .Note}}
+{{.Note}}
+{{- end}}
+{{- if .Signature}}
+– {{.Signature}}
+{{- end}}
+
+{{.Intro}}
+
+{{T "friend.code_label"}}
+
+    {{.Code}}
+
+{{.RedeemBy}}
+
+{{T "friend.button"}}: {{.RedeemLink}}
+
+{{T "friend.steps_title"}}
+1. {{T "card.step1"}}
+2. {{T "card.step2"}}
+3. {{T "card.step3"}}
+
+{{T "friend.attached"}}
+{{- if .Bittensor}}
+
+{{.Bittensor}}
+{{- end}}
+
+{{T "friend.reply"}}
+{{end}}

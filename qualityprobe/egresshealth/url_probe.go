@@ -55,14 +55,14 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 	rng := opts.rng()
 	source := "general"
 	standIns := generalStandIns
-	if len(opts.SecurityDestinations) > 0 && rng.Intn(2) == 0 {
+	if len(opts.SecurityDestinations) > 0 && rng.IntN(2) == 0 {
 		compatible = opts.SecurityDestinations
 		source = UrlSourceSecurityRecheck
 		standIns = nil
 	} else {
 		if len(country) == 0 {
 			source = "general_country_unavailable"
-		} else if rng.Intn(2) == 1 {
+		} else if rng.IntN(2) == 1 {
 			compatible = country
 			source = "country"
 			if 0 < len(countryStandIns) {
@@ -70,7 +70,7 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 			}
 		}
 	}
-	chosen := compatible[rng.Intn(len(compatible))]
+	chosen := compatible[rng.IntN(len(compatible))]
 	var standIn *Destination
 	if source == UrlSourceSecurityRecheck {
 		chosen.Canary = false
@@ -82,7 +82,7 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 		chosen.Ipv6 = false
 		chosen.Ipv4 = nil
 	} else if opts.ProviderIpFamily.Ipv6() && !chosen.ServesIpv6() && 0 < len(standIns) {
-		drawn := standIns[rng.Intn(len(standIns))]
+		drawn := standIns[rng.IntN(len(standIns))]
 		standIn = &drawn
 	}
 	opts.LoadAttempts = 1

@@ -38,6 +38,14 @@ func cloneApexReevaluationCycle(cycle *model.CompetitionJobReevaluationCycle) *m
 		return nil
 	}
 	copy := *cycle
+	if cycle.Distributed != nil {
+		distributed := *cycle.Distributed
+		if distributed.PatchRetry != nil {
+			retry := *distributed.PatchRetry
+			distributed.PatchRetry = &retry
+		}
+		copy.Distributed = &distributed
+	}
 	if cycle.StartedAt != nil {
 		startedAt := *cycle.StartedAt
 		copy.StartedAt = &startedAt
@@ -114,7 +122,8 @@ func prepareApexReevaluationRecord(record *ApexAdapterRecord, cycle *model.Compe
 		PreviousTerminalSha256: cycle.PreviousTerminalSha256, ObservedAt: now.UTC(),
 	}
 	if record.EvaluationStatus == "failed" {
-		if record.EvaluationFailure == nil || *record.EvaluationFailure != cycle.PreviousFailure {
+		missingPatchFailure := record.EvaluationFailure == nil && cycle.IncidentClass == model.CompetitionJobReevaluationOperatorRequestedPatchRetry
+		if !missingPatchFailure && (record.EvaluationFailure == nil || *record.EvaluationFailure != cycle.PreviousFailure) {
 			return errors.New("Apex reevaluation contradicts its cached original failure")
 		}
 		previous.State, previous.ObservedAt = record.State, record.UpdatedAt
@@ -252,14 +261,14 @@ func reconcileApexReevaluationAssociations(records []*ApexAdapterRecord, now tim
 }
 
 // A read-only owner probe is not reevaluation permission. An unstable run may
-// discover an explicit backing-service receipt; other submission failures,
-// completed scores, staging and an already-used recovery stay idle.
+// discover a typed operator receipt. Older APIs omitted some reviewed generic
+// failures; their bounded read-only lookup grants no execution authority.
 func apexReevaluationRefreshEligible(record ApexAdapterRecord) bool {
 	return record.JobId != (server.Id{}) && !record.Staging && !record.Published && record.Reevaluation == nil &&
-		record.EvaluationStatus == "failed" && record.EvaluationFailure != nil &&
-		!record.EvaluationFailure.Retriable &&
-		((record.EvaluationFailure.Kind == "infrastructure" && (record.EvaluationFailure.Code == "artifact_archive_failed" || record.EvaluationFailure.Code == "evaluation_time_budget_exhausted")) ||
-			(record.EvaluationFailure.Kind == "submission" && record.EvaluationFailure.Code == "run_unstable")) &&
+		record.EvaluationStatus == "failed" &&
+		(record.EvaluationFailure == nil || !record.EvaluationFailure.Retriable &&
+			((record.EvaluationFailure.Kind == "infrastructure" && (record.EvaluationFailure.Code == "artifact_archive_failed" || record.EvaluationFailure.Code == "evaluation_time_budget_exhausted" || record.EvaluationFailure.Code == "executor_process_failed")) ||
+				(record.EvaluationFailure.Kind == "submission" && record.EvaluationFailure.Code == "run_unstable"))) &&
 		record.PrivateScore == nil && record.Score == nil && record.EvalError == nil
 }
 

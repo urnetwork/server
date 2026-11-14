@@ -3,7 +3,7 @@ package egresshealth
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"

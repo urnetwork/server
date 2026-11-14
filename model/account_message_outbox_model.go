@@ -71,10 +71,18 @@ type AccountMessageArgs struct {
 	// the message is due this long after it is added (a security notice waits
 	// for more changes to join it); zero is due at once
 	DeliverAfter time.Duration
+	// when set, the message is due at this time instead of after DeliverAfter
+	// (a gift card sent on the buyer's chosen date); a time already past is due
+	// at once
+	DeliverTime *time.Time
 }
 
 // When a message added at `createTime` is due.
 func (self *AccountMessageArgs) deliverTime(createTime time.Time) *time.Time {
+	if self.DeliverTime != nil {
+		deliverTime := self.DeliverTime.UTC()
+		return &deliverTime
+	}
 	deliverTime := createTime.Add(max(self.DeliverAfter, 0))
 	return &deliverTime
 }

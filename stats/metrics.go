@@ -22,7 +22,7 @@ package stats
 import (
 	"encoding/json"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"sort"
 	"strings"
 
@@ -32,19 +32,20 @@ import (
 const reservoirCap = 100000
 
 // stat accumulates a mean and (via a bounded reservoir) approximate
-// percentiles. Not safe for concurrent use.
+// percentiles. Not safe for concurrent use. The reservoir draws from the
+// top-level math/rand/v2 generator, not from a generator of its own seeded
+// with a fixed value.
 type stat struct {
 	n    int64
 	sum  float64
 	min  float64
 	max  float64
 	res  []float64
-	rng  *mathrand.Rand
 	seen int64
 }
 
 func newStat() *stat {
-	return &stat{rng: mathrand.New(mathrand.NewSource(1)), min: 0, max: 0}
+	return &stat{min: 0, max: 0}
 }
 
 func (self *stat) add(v float64) {
@@ -60,7 +61,7 @@ func (self *stat) add(v float64) {
 	self.seen += 1
 	if len(self.res) < reservoirCap {
 		self.res = append(self.res, v)
-	} else if j := self.rng.Int63n(self.seen); j < int64(reservoirCap) {
+	} else if j := mathrand.Int64N(self.seen); j < int64(reservoirCap) {
 		self.res[j] = v
 	}
 }

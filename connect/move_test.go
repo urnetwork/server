@@ -1111,3 +1111,37 @@ func TestMoverLoopRunsUntilClosed(t *testing.T) {
 		t.Error("a disabled mover read its control")
 	}
 }
+
+// A mover built by NewMover draws its candidate sample, its target choice and
+// its migrate time jitter from its own connect.NewSecureRand generator
+// (RANDUPDATE.md S3). It was a PCG, which gives its state away in its outputs.
+// Two movers built the production way draw different streams. Neither ticks,
+// so nothing else draws from them.
+func TestNewMoverDrawsFromItsOwnSecureGenerator(t *testing.T) {
+	fixture := newMoveTestFixture(t, 0, 0)
+	fixture.settings.EnableMove = false
+	draws := func() []float64 {
+		mover := NewMover(
+			context.Background(),
+			fixture.identity,
+			fixture.settings,
+			&MoverDependencies{
+				Residents:     fixture.residents,
+				LoadSource:    fixture.loadSource,
+				Inventory:     fixture.inventory,
+				Executor:      fixture.executor,
+				TargetBreaker: fixture.breaker,
+				DbWait:        fixture.dbWait,
+			},
+		)
+		defer mover.Close()
+		values := []float64{}
+		for range 4 {
+			values = append(values, mover.random.Float64())
+		}
+		return values
+	}
+	if first, second := draws(), draws(); slices.Equal(first, second) {
+		t.Fatalf("two movers drew the same stream %v", first)
+	}
+}

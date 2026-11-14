@@ -4,7 +4,8 @@ package controller
 
 import (
 	"context"
-	"math/rand"
+	"fmt"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -266,7 +267,8 @@ func testPoolRows() []*model.ProviderEgressDestination {
 func TestBuildProviderEgressDestinationPoolServesTheActiveRows(t *testing.T) {
 	now := time.Date(2026, time.September, 20, 6, 0, 0, 0, time.UTC)
 	profile := egresshealth.DefaultRequestProfile()
-	pool, err := BuildProviderEgressDestinationPool(testPoolRows(), profile, now, 1, rand.New(rand.NewSource(1)))
+	// a fixed seed, so a run replays
+	pool, err := BuildProviderEgressDestinationPool(testPoolRows(), profile, now, 1, rand.New(rand.NewPCG(1, 0)))
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
@@ -284,7 +286,8 @@ func TestBuildProviderEgressDestinationPoolServesTheActiveRows(t *testing.T) {
 		t.Fatalf("pool = version %d generated %s", pool.Version, pool.GeneratedAt)
 	}
 
-	noCanary, err := BuildProviderEgressDestinationPool(testPoolRows(), profile, now, 0.0001, rand.New(rand.NewSource(1)))
+	// a fixed seed, so a run replays
+	noCanary, err := BuildProviderEgressDestinationPool(testPoolRows(), profile, now, 0.0001, rand.New(rand.NewPCG(1, 0)))
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
@@ -320,6 +323,50 @@ func TestBuildProviderEgressDestinationPoolRefusesAPoolTheProberWouldRefuse(t *t
 	rows[0].Expect = "sometimes"
 	if _, err := BuildProviderEgressDestinationPool(rows, egresshealth.DefaultRequestProfile(), time.Now(), 0, nil); err == nil {
 		t.Fatal("a pool with an unknown contract was served")
+	}
+}
+
+// A served pool draws its canaries from a fresh connect.NewSecureRand generator
+// per request (RANDUPDATE.md S2). The draw was seeded with the request time,
+// so a provider that knew roughly when a pool was served could tell which
+// marked sites it served as canaries. Two pools served the production way at
+// one fixed instant draw different canaries: with 64 marked sites at a 0.5
+// share, equal draws happen with probability 2^-64.
+func TestProviderEgressPoolCanariesAreNotSeededFromTheRequestTime(t *testing.T) {
+	catalog := strings.Builder{}
+	catalog.WriteString("schema_version: 1\ndestinations:\n")
+	for i := range 64 {
+		fmt.Fprintf(&catalog, "  - {name: marked-%02d, class: site, category: news, url: \"https://marked-%02d.example/\"}\n", i, i)
+	}
+	sites, err := ParseProviderEgressSites(func(out any) error { return yaml.Unmarshal([]byte(catalog.String()), out) })
+	if err != nil {
+		t.Fatalf("the parse refused the catalog: %v", err)
+	}
+	sites.Settings.SiteRegionCanaryShare = 0.5
+	markedAt := time.Date(2026, time.November, 1, 0, 0, 0, 0, time.UTC)
+	stored := []*model.ProviderEgressDestination{}
+	for _, row := range sites.Destinations {
+		copy := *row
+		copy.Active = true
+		copy.Incompatible = []model.ProviderEgressDestinationPlace{{Country: "cn", MarkedAt: &markedAt}}
+		stored = append(stored, &copy)
+	}
+	now := time.Date(2026, time.November, 13, 12, 0, 0, 0, time.UTC)
+	canaries := func() string {
+		pool, err := sites.servePool(stored, now, nil)
+		if err != nil {
+			t.Fatalf("the pool was not served: %v", err)
+		}
+		names := []string{}
+		for _, destination := range pool.Destinations {
+			if destination.Canary {
+				names = append(names, destination.Name)
+			}
+		}
+		return strings.Join(names, ",")
+	}
+	if first, second := canaries(), canaries(); first == second {
+		t.Fatalf("two pools served at one instant drew the same canaries %q", first)
 	}
 }
 

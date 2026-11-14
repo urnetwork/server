@@ -9,6 +9,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/controller/giftcardassets"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/onboarding"
 	"github.com/urnetwork/server/reengagement"
@@ -108,6 +109,11 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleDeliverAccountMessages(clientSession, tx)
+		// the gift orders' retention (04:15 UTC): cards and personal data
+		// 30 days after an order's last email
+		controller.ScheduleGiftRetention(clientSession, tx, controller.NextGiftRetentionAt(server.NowUtc()))
+		// moves queued gift years up when the paid Pro ahead of them ends early (hourly)
+		controller.ScheduleRebaseQueuedGiftYears(clientSession, tx)
 		// the hourly Stripe dunning sweep: owes the payment-failed notices a
 		// webhook missed (controller/subscription_stripe_dunning_sweep.go)
 		controller.ScheduleSweepStripeDunning(clientSession, tx)
@@ -327,6 +333,9 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorker {
 	taskWorker := task.NewTaskWorker(ctx, taskWorkerSettingsForProfile(settings, profile))
 
+	// the gift cards' fonts and scenes, which link into the taskworker only
+	controller.InstallGiftCardAssets(giftcardassets.FS)
+
 	// 2024.11.15 migration from "bringyour.com" to new package
 
 	addProfileTargets(taskWorker, profile,
@@ -375,6 +384,21 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.DeliverAccountMessages,
 			controller.DeliverAccountMessagesPost,
+		),
+		// a paid gift order's cards, then its emails (gift_delivery.go)
+		task.NewTaskTargetWithPost(
+			controller.GiftRenderCards,
+			controller.GiftRenderCardsPost,
+		),
+		// the gift orders' daily retention
+		task.NewTaskTargetWithPost(
+			controller.GiftRetention,
+			controller.GiftRetentionPost,
+		),
+		// the gift year queue's hourly reconciliation (gift_requeue_task.go)
+		task.NewTaskTargetWithPost(
+			controller.RebaseQueuedGiftYears,
+			controller.RebaseQueuedGiftYearsPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.SweepStripeDunning,

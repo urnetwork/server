@@ -36,6 +36,12 @@ func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context,
 // Historical lifecycle tests backdate only their synthetic source/application
 // clock, never the real SQL lease or database clock used by a recovery claim.
 func newCompetitionIntakeFirstDatabaseFixtureAt(t *testing.T, ctx context.Context, historicalNow time.Time, configureFuture ...func(*Settings)) *competitionIntakeFirstDatabaseFixture {
+	return newCompetitionIntakeFirstDatabaseFixtureInEnvironmentAt(t, ctx, historicalNow, "", configureFuture...)
+}
+
+// An explicit synthetic environment is selected before any initial source,
+// lease, handoff or round exists. The ordinary fixture retains its old scope.
+func newCompetitionIntakeFirstDatabaseFixtureInEnvironmentAt(t *testing.T, ctx context.Context, historicalNow time.Time, environment string, configureFuture ...func(*Settings)) *competitionIntakeFirstDatabaseFixture {
 	t.Helper()
 	if server.CompetitionIntakeFirstMigrationVersion() == 0 {
 		t.Fatal("intake lifecycle fixture requires its actually registered composed migration")
@@ -49,6 +55,9 @@ func newCompetitionIntakeFirstDatabaseFixtureAt(t *testing.T, ctx context.Contex
 	}
 	t.Logf("intake_lifecycle_fixture_schema_head=%d", actualHead)
 	fixture := &competitionIntakeFirstDatabaseFixture{settings: automationApiSettings()}
+	if environment != "" {
+		fixture.settings.AutomationPolicy.Environment = environment
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		var err error
 		fixture.now, err = competitionIntakeFirstDatabaseTime(ctx, conn)

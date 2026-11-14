@@ -98,7 +98,9 @@ func (t *OnboardingEmailTrackerTotals) Outcomes() map[string]int64 {
 // is accepted only when that network used it at one flow step; the shared
 // E3/E5 template is counted as attribution_ambiguous rather than guessed.
 // Product outcomes belong to the most recent email until the next send, with a
-// 14-day ceiling. Delivery events retain a 30-day correction window.
+// 14-day ceiling. Delivery events retain a 30-day correction window. A
+// subscription start is the network's own purchase: a redeemed gift year
+// (market gift) is no pro_started.
 //
 // Feedback and subscription starts are matched to sends by one semi join each,
 // never by a correlated probe per send. account_feedback has no network_id
@@ -170,6 +172,8 @@ const onboardingEmailTrackerRebuildSql = `
 		)
 	),
 	renewal_sends AS MATERIALIZED (
+		-- a Pro start the network bought: a redeemed gift year (market gift)
+		-- is its giver's purchase
 		SELECT sends.message_id
 		FROM sends
 		WHERE EXISTS (
@@ -177,6 +181,7 @@ const onboardingEmailTrackerRebuildSql = `
 			WHERE renewal.network_id = sends.network_id
 				AND renewal.start_time >= sends.sent_at
 				AND renewal.start_time < sends.engagement_ends_at
+				AND renewal.market <> '` + SubscriptionMarketGift + `'
 		)
 	),
 	classified AS (

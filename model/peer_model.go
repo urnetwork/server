@@ -7,7 +7,7 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"

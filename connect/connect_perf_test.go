@@ -42,9 +42,9 @@ package connect_test
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"fmt"
-	mathrand "math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -893,7 +893,7 @@ func perfRequireFrame(index uint32, count uint32, content string) *protocol.Fram
 func perfRandContent(byteCount int) string {
 	// hex encoding doubles the size
 	contentBytes := make([]byte, byteCount/2)
-	mathrand.Read(contentBytes)
+	cryptorand.Read(contentBytes)
 	return hex.EncodeToString(contentBytes)
 }
 

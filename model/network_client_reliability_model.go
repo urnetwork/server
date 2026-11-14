@@ -48,8 +48,13 @@ import (
 // and an operator block's points read the block's own 7-day window soon after
 // it closes (AwardDueOperatorBlockPoints), which leaves about 3 days of margin:
 // an award that first runs later than that fails closed
-// (ErrOperatorBlockPointsReliabilityExpired), and the contract horizon reaper
-// keeps a block's sweeps only while an award can still read it. The owner moved
+// (ErrOperatorBlockPointsReliabilityExpired), the daily award records the block
+// expired and never awards it (OperatorBlockPointsExpiry), and the contract
+// horizon reaper keeps a block's sweeps only while an award can still read it.
+// Raising this does not bring back evidence already removed: a block recorded
+// expired stays expired, but an unawarded block past the old deadline and not
+// yet recorded would read as retained again with part of its evidence gone, so
+// check for one first. The owner moved
 // this from 21 to 14 days on 2026-11-02, and from 14 to 10 days on 2026-11-10
 // (disk runway O3, temp/disk-runway/REPORT.md: about 250 GB on main, as each
 // day holds 35-67 GB).

@@ -1,0 +1,16 @@
+Gift card scenes, one per season: <season>.png, the season id of pro.yml's
+gift.season (for example winter-2026.png).
+
+Each is a lossless still of the season's 3D scene, the same render the site
+ships (as lossy WebP, mmm/ur.io/react/public/images/gift/<season>-scene.webp).
+The PNG is kept here because it is the right format for print; never derive it
+from the WebP. The card shows it in the mockup's scene frame, 1.875:1 (the
+mockup's 394 x 210 px; 4.58 x 2.44 in on the 5 x 7 in card), over the mockup's
+night sky (moon, stars and aurora, in CSS); an image of another shape is
+cropped to cover the frame. 2400 x 1280 px prints at about 520 dpi.
+
+winter-2026.png: the t=1.76 still of the winter loop scene, rendered from the
+mockup (mmm/giftofprivacy/design.html, the card's LoopScene); 2400 x 1280,
+sha256 b27579b3026084a1fe247ea45bfa59dde461d1bef51b88a795be271f8915f79e.
+
+A season without an image here prints the night sky alone.

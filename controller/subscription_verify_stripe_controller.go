@@ -114,6 +114,8 @@ type stripeVerifyCheckoutSession struct {
 	Subscription      json.RawMessage                       `json:"subscription"`
 	Metadata          map[string]string                     `json:"metadata"`
 	PaymentIntent     json.RawMessage                       `json:"payment_intent,omitempty"`
+	// the currency amount_total is in
+	Currency string `json:"currency,omitempty"`
 	// subscription, payment or setup
 	Mode string `json:"mode"`
 	// open, complete or expired
@@ -133,6 +135,7 @@ func (self *stripeVerifyCheckoutSession) completedObject() *StripeEventCheckoutC
 		Customer:          stripeIdFromRaw(self.Customer),
 		CustomerDetails:   self.CustomerDetails,
 		PaymentStatus:     self.PaymentStatus,
+		Currency:          self.Currency,
 		ClientReferenceId: self.ClientReferenceId,
 		Subscription:      stripeIdFromRaw(self.Subscription),
 		Metadata:          self.Metadata,

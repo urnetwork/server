@@ -547,9 +547,10 @@ func ListPendingReengagementFixes(ctx context.Context, answeredAfter time.Time, 
 // period (controller manualPaymentGracePeriod: crypto_pay_credit.go,
 // gamma_credit.go and subscription_stripe_controller.go add it to end_time),
 // and a day on a Stripe period no payment paid for, a trial
-// (subscription_stripe_grace.go). The App Store and Play end theirs at the
-// store's expiry and may retry a failed renewal after it.
-var reengagementGraceMarkets = []string{"stripe", "solana", "monero", "zcash", "bittensor", "bitcoin", "ethereum", "gamma", "x402", "manual"}
+// (subscription_stripe_grace.go). A redeemed gift year has no grace and
+// never renews, so Pro stops at its end_time too. The App Store and Play end
+// theirs at the store's expiry and may retry a failed renewal after it.
+var reengagementGraceMarkets = []string{"stripe", "solana", "monero", "zcash", "bittensor", "bitcoin", "ethereum", "gamma", "x402", "manual", SubscriptionMarketGift}
 
 // ReengagementGraceMarkets are the markets whose end_time includes the grace.
 func ReengagementGraceMarkets() []string {
@@ -557,9 +558,11 @@ func ReengagementGraceMarkets() []string {
 }
 
 // ListWinbackReengagementCandidates are networks that paid for Pro (a window
-// with revenue) whose latest supporter window ended in [endFrom, endTo), with
-// no later window on any market, no refund on record, and a market in
-// `graceMarkets` (grace = true) or not in it (grace = false).
+// with revenue that the network bought: a redeemed gift year carries its
+// giver's payment) whose latest supporter window ended in [endFrom, endTo),
+// with no later window on any market, no refund on record, and a market in
+// `graceMarkets` (grace = true) or not in it (grace = false). A network that
+// paid and then had a gift year is a candidate when the gift year ends.
 func ListWinbackReengagementCandidates(ctx context.Context, endFrom time.Time, endTo time.Time, grace bool, limit int) (candidates []*ReengagementCandidate) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -586,7 +589,8 @@ func ListWinbackReengagementCandidates(ctx context.Context, endFrom time.Time, e
 						WHERE
 							paid.network_id = candidate.network_id AND
 							paid.subscription_type = 'supporter' AND
-							0 < paid.net_revenue_nano_cents
+							0 < paid.net_revenue_nano_cents AND
+							paid.market <> $6
 					) AND
 					NOT EXISTS (SELECT 1 FROM stripe_refund WHERE stripe_refund.network_id = candidate.network_id) AND
 					`+reengagementMailableFilter+`
@@ -598,6 +602,7 @@ func ListWinbackReengagementCandidates(ctx context.Context, endFrom time.Time, e
 			reengagementGraceMarkets,
 			grace,
 			limit,
+			SubscriptionMarketGift,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -689,15 +694,19 @@ func NetworkOnboardingAnswer(ctx context.Context, networkId server.Id) (reason s
 }
 
 // NetworkLastPaidEnd is the end of the network's latest paid supporter window, or nil.
+// Paid means the network bought it: a redeemed gift year (market gift) carries
+// its giver's payment, so it is no purchase of the network's (CASL's purchase
+// window in onboarding.MailPolicy reads this).
 func NetworkLastPaidEnd(ctx context.Context, networkId server.Id) (at *time.Time) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 				SELECT MAX(end_time) FROM subscription_renewal
-				WHERE network_id = $1 AND subscription_type = 'supporter' AND 0 < net_revenue_nano_cents
+				WHERE network_id = $1 AND subscription_type = 'supporter' AND 0 < net_revenue_nano_cents AND market <> $2
 			`,
 			networkId,
+			SubscriptionMarketGift,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -709,18 +718,20 @@ func NetworkLastPaidEnd(ctx context.Context, networkId server.Id) (at *time.Time
 }
 
 // NetworkLastPaidWindow is the end and market of the network's latest paid
-// supporter window.
+// supporter window: one the network bought, never a redeemed gift year, so a
+// win-back offer goes to the store the network paid in.
 func NetworkLastPaidWindow(ctx context.Context, networkId server.Id) (end time.Time, market string, ok bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 				SELECT end_time, COALESCE(market, '') FROM subscription_renewal
-				WHERE network_id = $1 AND subscription_type = 'supporter' AND 0 < net_revenue_nano_cents
+				WHERE network_id = $1 AND subscription_type = 'supporter' AND 0 < net_revenue_nano_cents AND market <> $2
 				ORDER BY end_time DESC
 				LIMIT 1
 			`,
 			networkId,
+			SubscriptionMarketGift,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {

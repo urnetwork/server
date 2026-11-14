@@ -145,8 +145,11 @@ Options:
 	controller.StartMetrics(quit.Ctx)
 	flushStats := server.StartStatsPusher(quit.Ctx)
 	defer flushStats()
+	var failureObservation *controller.CompetitionWorkerFailureObservation
 	if supervised {
-		err = controller.RunCompetitionSupervisorWorker(quit.Ctx, settings, *supervisorRequest, workerId)
+		var workerCtx context.Context
+		workerCtx, failureObservation = controller.ObserveCompetitionWorkerFailure(quit.Ctx)
+		err = controller.RunCompetitionSupervisorWorker(workerCtx, settings, *supervisorRequest, workerId)
 	} else {
 		var worker *controller.Worker
 		worker, err = controller.NewWorker(settings, controller.PostgresStore{}, controller.CommandEvaluator{}, workerId)
@@ -154,17 +157,23 @@ Options:
 			err = worker.Run(quit.Ctx)
 		}
 	}
-	finishCompetitionWorker(err, supervised, os.Stderr)
+	finishCompetitionWorkerObserved(err, supervised, os.Stderr, failureObservation)
 }
 
 // Supervised failure drains the joined worker before emitting only finite
 // diagnostics. Panic retains the existing exit code and deferred owner cleanup.
 func finishCompetitionWorker(err error, supervised bool, diagnostics io.Writer) {
+	finishCompetitionWorkerObserved(err, supervised, diagnostics, nil)
+}
+
+// Optional owner facts come from this joined supervised invocation only.
+// Healthy/canceled behavior and the exact existing panic text stay unchanged.
+func finishCompetitionWorkerObserved(err error, supervised bool, diagnostics io.Writer, observation *controller.CompetitionWorkerFailureObservation) {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return
 	}
 	if supervised {
-		if content, reportErr := controller.MarshalCompetitionWorkerFailureReport(err); reportErr == nil {
+		if content, reportErr := controller.MarshalCompetitionWorkerFailureReportObserved(err, observation); reportErr == nil {
 			fmt.Fprintln(diagnostics, string(content))
 		}
 		panic("competition worker failed; bounded diagnostics emitted")

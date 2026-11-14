@@ -30,7 +30,9 @@ package model
 // It refuses unless exactly one code granted the balance, the code is not
 // cancelled and names the balance's network, that network no longer exists,
 // the balance is unused (no byte spent, no escrow, no debit journal row) and
-// unexpired, and the target network exists.
+// unexpired, and the target network exists. It never moves a Pro gift code
+// (kind pro_gift): that code's balance is only its year's 0-byte Pro marker,
+// and the year is a gift renewal with its cycle grants, which do not move.
 //
 // The plan only reads, in one read-only transaction. Its digest binds the
 // balance, the code, both networks and every balance field the move carries.
@@ -174,6 +176,8 @@ type RedeemedBalanceMovePlan struct {
 	// the network the code names now
 	CodeNetworkId *server.Id `json:"code_network_id,omitempty"`
 	CodeCancelled bool       `json:"code_cancelled"`
+	// the code's kind: a Pro gift code (BalanceCodeKindProGift) never moves
+	CodeKind string `json:"code_kind,omitempty"`
 	// whether the network holding the balance exists
 	FromNetworkExists bool `json:"from_network_exists"`
 	// nil when no network has the target id
@@ -469,6 +473,7 @@ func readRedeemedBalanceMovePlan(
 		networkId     *server.Id
 		redeemTime    *time.Time
 		cancelTime    *time.Time
+		kind          string
 	}
 	codes := []codeRow{}
 	result, err = tx.Query(
@@ -478,7 +483,8 @@ func readRedeemedBalanceMovePlan(
 				balance_code_id,
 				network_id,
 				redeem_time,
-				cancel_time
+				cancel_time,
+				kind
 			FROM transfer_balance_code
 			WHERE redeem_balance_id = $1
 			ORDER BY balance_code_id
@@ -493,6 +499,7 @@ func readRedeemedBalanceMovePlan(
 				&code.networkId,
 				&code.redeemTime,
 				&code.cancelTime,
+				&code.kind,
 			))
 			codes = append(codes, code)
 		}
@@ -506,6 +513,7 @@ func readRedeemedBalanceMovePlan(
 		}
 		plan.CodeNetworkId = code.networkId
 		plan.CodeCancelled = code.cancelTime != nil
+		plan.CodeKind = code.kind
 		plan.Move = move
 	}
 
@@ -588,6 +596,15 @@ func readRedeemedBalanceMovePlan(
 	}
 	if plan.CodeCancelled {
 		plan.refuse("the balance code %s is cancelled", move.BalanceCodeId)
+	}
+	if plan.CodeKind == BalanceCodeKindProGift {
+		// its balance is only the year's Pro marker; the year itself is a gift
+		// renewal and its monthly cycle grants, which stay on the network
+		plan.refuse(
+			"the balance code %s is a Pro gift code: its year of Pro is a subscription renewal and cycle grants on network %s, not a balance, so it does not move",
+			move.BalanceCodeId,
+			balanceNetworkId,
+		)
 	}
 	if len(codes) == 1 {
 		switch {

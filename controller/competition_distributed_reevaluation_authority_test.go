@@ -64,13 +64,14 @@ func competitionRecoveryTestDigest(t testing.TB, value any) string {
 // The transport returns actual Ed25519 envelopes and enforces the finite
 // read-only operation vocabulary. Mutation hooks run at an exact call boundary.
 type competitionDistributedRecoveryTestTransport struct {
-	t      testing.TB
-	host   CompetitionExecutorHostPolicy
-	auth   model.CompetitionJobReevaluationAuthorization
-	round  *roundRecord
-	mutate func(*competitionagent.Response)
-	before func(competitionagent.Request)
-	calls  *int
+	t              testing.TB
+	host           CompetitionExecutorHostPolicy
+	auth           model.CompetitionJobReevaluationAuthorization
+	round          *roundRecord
+	mutate         func(*competitionagent.Response)
+	before         func(competitionagent.Request)
+	calls          *int
+	originalStatus *competitionagent.Response
 }
 
 // Signed responses are generated using the visibly synthetic policy seeds.
@@ -96,6 +97,12 @@ func (self competitionDistributedRecoveryTestTransport) Exchange(ctx context.Con
 		response.Files = []competitionagent.File{{Path: "synthetic-original/worker-result.json", Sha256: strings.Repeat("e", 64), Bytes: 21}}
 		if d.Reason == model.CompetitionDistributedReevaluationLegacyPrelaunch {
 			response.State, response.ExitCode, response.ErrorCode = "failed", -1, "legacy_prelaunch_infrastructure_failure"
+		}
+		if d.Reason == model.CompetitionJobReevaluationOperatorRequestedPatchRetry {
+			response.State, response.ExitCode, response.ErrorCode = "failed", 1, "evaluator_process_failed"
+		}
+		if self.originalStatus != nil {
+			response = competitionRecoveryTestCopy(self.t, *self.originalStatus)
 		}
 	}
 	if self.mutate != nil {

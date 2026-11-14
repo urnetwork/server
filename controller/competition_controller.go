@@ -527,9 +527,19 @@ type Principal struct {
 	Environment   string
 	CompetitionId string
 	SeasonId      string
+	RoundId       server.Id
+	JobId         server.Id
+	ExpiresAt     time.Time
+	tokenSha256   string
 }
 
 func Authenticate(request *http.Request, settings *Settings) (*Principal, bool) {
+	return authenticateCompetitionAt(request, settings, server.NowUtc())
+}
+
+// A single authentication cut enforces scoped credential expiration without
+// changing legacy credentials, which have no expiry or job-level claims.
+func authenticateCompetitionAt(request *http.Request, settings *Settings, now time.Time) (*Principal, bool) {
 	if settings == nil {
 		return nil, false
 	}
@@ -557,13 +567,19 @@ func Authenticate(request *http.Request, settings *Settings) (*Principal, bool) 
 	}
 	// A revoked alias or a duplicate scope must not select a different capability
 	// merely because token configuration was reordered.
-	if matched == nil || matchCount != 1 || matched.Revoked || validateCompetitionTokenRole(*matched) != nil {
+	if matched == nil || matchCount != 1 || matched.Revoked || validateCompetitionTokenRole(*matched) != nil ||
+		!matched.ExpiresAt.IsZero() && !now.Before(matched.ExpiresAt) {
 		return nil, false
 	}
-	return &Principal{
+	principal := &Principal{
 		Id: matched.Name, Role: matched.Role, Environment: matched.Environment,
 		CompetitionId: matched.CompetitionId, SeasonId: matched.SeasonId,
-	}, true
+		RoundId: matched.RoundId, JobId: matched.JobId, ExpiresAt: matched.ExpiresAt,
+	}
+	if matched.Role == competitionOperatorPatchRetryRole {
+		principal.tokenSha256 = matched.Sha256
+	}
+	return principal, true
 }
 
 const (
@@ -675,13 +691,16 @@ type secretsFile struct {
 }
 
 type Token struct {
-	Name          string `yaml:"name"`
-	Role          string `yaml:"role"`
-	Sha256        string `yaml:"sha256"`
-	Environment   string `yaml:"environment,omitempty"`
-	CompetitionId string `yaml:"competition_id,omitempty"`
-	SeasonId      string `yaml:"season_id,omitempty"`
-	Revoked       bool   `yaml:"revoked,omitempty"`
+	Name          string    `yaml:"name"`
+	Role          string    `yaml:"role"`
+	Sha256        string    `yaml:"sha256"`
+	Environment   string    `yaml:"environment,omitempty"`
+	CompetitionId string    `yaml:"competition_id,omitempty"`
+	SeasonId      string    `yaml:"season_id,omitempty"`
+	Revoked       bool      `yaml:"revoked,omitempty"`
+	RoundId       server.Id `yaml:"round_id,omitempty"`
+	JobId         server.Id `yaml:"job_id,omitempty"`
+	ExpiresAt     time.Time `yaml:"expires_at,omitempty"`
 }
 
 func LoadSettings() (*Settings, error) {
@@ -4251,6 +4270,7 @@ func scoreJobEvaluationFailure(status string, evalError *CompetitionError) *Eval
 		"infrastructure\x00evaluator_process_failed",
 		"infrastructure\x00evaluator_result_invalid",
 		"infrastructure\x00evaluator_result_missing",
+		"infrastructure\x00executor_process_failed",
 		"infrastructure\x00g2_volume_policy_mismatch",
 		"infrastructure\x00incomplete_run_manifest",
 		"infrastructure\x00invalid_accounting",

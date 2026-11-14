@@ -242,6 +242,10 @@ func rankClientScoreWithCounts(
 		clientScore.EgressValidUntil = &validUntil
 	}
 
+	// the country floor (network_client_score_country_floor.go) admits only
+	// a provider that passes them
+	clientScore.passesReliability = passesReliability
+
 	for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
 		passesMinimum := rankModePassesBucket[rankMode] && passesReliability
 

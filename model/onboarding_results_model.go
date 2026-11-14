@@ -400,10 +400,13 @@ func LoadOnboardingCohortFacts(ctx context.Context, rows []*NetworkOnboarding) m
 			}
 		})
 
+		// the network's first Pro of its own: a redeemed gift year (market
+		// gift) is its giver's purchase, not the network's conversion
 		result, err = conn.Query(
 			ctx,
-			`SELECT network_id, MIN(start_time) FROM subscription_renewal WHERE network_id = ANY($1) GROUP BY network_id`,
+			`SELECT network_id, MIN(start_time) FROM subscription_renewal WHERE network_id = ANY($1) AND market <> $2 GROUP BY network_id`,
 			networkIds,
+			SubscriptionMarketGift,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

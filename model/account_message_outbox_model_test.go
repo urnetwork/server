@@ -4,6 +4,7 @@ package model
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -40,5 +41,34 @@ func TestBoundedAccountMessageErrorKeepsWholeCharacters(t *testing.T) {
 	}
 	if bounded != strings.Repeat("a", accountMessageLastErrorMaxLength-1) {
 		t.Fatalf("bounded error ends with %q, want the character before the cut", bounded[len(bounded)-4:])
+	}
+}
+
+// A message is due at once, after its delay, or at its absolute time (in UTC,
+// whatever zone it was given in), which wins over a delay; a past absolute time
+// is due at once because a claim takes every message due by now.
+func TestAccountMessageArgsDeliverTime(t *testing.T) {
+	createTime := time.Date(2026, 11, 13, 18, 0, 0, 0, time.UTC)
+	if got := (&AccountMessageArgs{}).deliverTime(createTime); !got.Equal(createTime) {
+		t.Fatalf("no delay: due %s", got)
+	}
+	if got := (&AccountMessageArgs{DeliverAfter: time.Hour}).deliverTime(createTime); !got.Equal(createTime.Add(time.Hour)) {
+		t.Fatalf("a delay: due %s", got)
+	}
+	if got := (&AccountMessageArgs{DeliverAfter: -time.Hour}).deliverTime(createTime); !got.Equal(createTime) {
+		t.Fatalf("a negative delay: due %s", got)
+	}
+	chicago, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localDeliverTime := time.Date(2026, 12, 24, 9, 0, 0, 0, chicago)
+	got := (&AccountMessageArgs{DeliverAfter: time.Hour, DeliverTime: &localDeliverTime}).deliverTime(createTime)
+	if !got.Equal(time.Date(2026, 12, 24, 15, 0, 0, 0, time.UTC)) || got.Location() != time.UTC {
+		t.Fatalf("an absolute time: due %s", got)
+	}
+	pastTime := createTime.Add(-24 * time.Hour)
+	if got := (&AccountMessageArgs{DeliverTime: &pastTime}).deliverTime(createTime); !got.Equal(pastTime) {
+		t.Fatalf("a past time: due %s", got)
 	}
 }

@@ -75,7 +75,7 @@ Usage:
     bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
     bringyourctl network sign-out-all --network_id=<network_id> [--remove-clients] [(--commit --expect=<digest>)]
-    bringyourctl network trim-proxies [--network_ids=<network_ids>] [--keep=<keep>] [--rate=<rate>] [(--commit --expect=<digest>)]
+    bringyourctl network trim-proxies [--network_ids=<network_ids>] [--include_pro] [--keep=<keep>] [--keep_described] [--keep_used_since=<since>] [--rate=<rate>] [--list] [(--commit --expect=<digest>)]
     bringyourctl health status
     bringyourctl health degrade --reason=<reason> [--level=<level>]
     bringyourctl health recover
@@ -127,7 +127,6 @@ Usage:
     bringyourctl task release <task_id>
     bringyourctl task kick <run_once_key>
     bringyourctl auth login <auth_code>
-    bringyourctl account-points populate --plan_id=<plan_id>
     bringyourctl account-points backfill-blocks [--blocks=<blocks>] [--file=<file>] [(--commit --expect=<digest>)]
     bringyourctl client connection fix
     bringyourctl migrate-user-auth
@@ -273,12 +272,16 @@ Options:
     --batch-pause=<duration>  With db scrub-network-create-secrets, the wait after each batch (Go duration; default 2s).
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
-    --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
+    --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary that has not expired. A block that has its points is skipped; an expired block, past client_reliability retention or recorded expired by the daily award, is refused.
     --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect; with crypto credit-usdc, credit the invoice from the payment as its dry run with that digest printed; with payouts close-attempted, write the decisions of the dry run whose digest is --expect. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
     --forfeit=<payment_ids>  With payouts close-attempted, close these payments, comma separated, as the owner forfeited them, without reading Circle: each must be a canceled payment an attempt of which reached Circle, not completed and not closed, or the run refuses them all and writes nothing.
     --network_ids=<network_ids>  With network trim-proxies, the networks to trim, comma separated; omitted, every network that holds a hosted proxy (a paged scan of proxy_client).
-    --keep=<keep>  With network trim-proxies, the active hosted proxies each trimmed free network keeps, its newest by client id; omitted, the free cap (5).
+    --include_pro  With network trim-proxies, also trim the Pro networks named in --network_ids, at, over or under the Pro cap; refused without --network_ids. A Pro network not named, and a network with a client allowance (an Embed row), is never trimmed.
+    --keep=<keep>  With network trim-proxies, the active hosted proxies each trimmed network keeps, its newest by client id; omitted, the free cap (5).
+    --keep_described  With network trim-proxies, also keep every hosted proxy with a description (a name its owner gave it).
+    --keep_used_since=<since>  With network trim-proxies, also keep every hosted proxy used at or after this RFC 3339 time: its last contract (a transfer one of its clients created) or its last auth (its creation, or a connect of one of its clients) is that recent. Both are recorded at most once an hour.
+    --list  With network trim-proxies, also print each kept and removed hosted proxy of each trimmed network, with why it is kept.
     --rate=<rate>  With network trim-proxies --commit, hosted proxies removed a second, in batches of 500; omitted, 200.
     --balance_id=<balance_id>  With balance move-redeemed, the unused balance a redeemed balance code granted, left on a deleted network.
     --to_network_id=<network_id>  With balance move-redeemed, the network the balance and its code move to.
@@ -520,9 +523,9 @@ func main() {
 			authLogin(opts)
 		}
 	} else if accountPoints, _ := opts.Bool("account-points"); accountPoints {
-		if populate, _ := opts.Bool("populate"); populate {
-			accountPointsPopulate(opts)
-		} else if backfillBlocks, _ := opts.Bool("backfill-blocks"); backfillBlocks {
+		// populate --plan_id is retired (owner, 2026-11-13: "yes retire it"): its
+		// points followed a USDC payout plan's payout, and a rerun double-awards.
+		if backfillBlocks, _ := opts.Bool("backfill-blocks"); backfillBlocks {
 			os.Exit(accountPointsBackfillBlocksCommand(opts))
 		}
 		// } else if accountPoints, _ := opts.Bool("client"); accountPoints {
@@ -2219,23 +2222,6 @@ func authLogin(opts docopt.Opts) {
 
 	fmt.Printf("RESULT: %+v\n", authCodeLoginResult)
 
-}
-
-func accountPointsPopulate(opts docopt.Opts) {
-	ctx := context.Background()
-
-	// Payment Plans since 5/1
-	// [x] 0197760f-b8c5-b2f3-b932-47689f9bb6eb
-	// [x] 019747af-e95b-73b8-61bd-217edd39ff34
-	// [x] 019728d3-d5a2-25eb-40f4-e50b326637cf
-	// [x] 0196f54a-2c73-3645-8b91-b25efe9c0792
-	// [x] 0196d13d-a58c-dd9f-611b-ea4384015ddf
-	// [x] 0196a80a-c8cf-74c7-1e20-d7c72958de80
-	// [x] 01968d61-7a3c-b3a9-41c3-810bce4be30f
-	//
-	planIdStr, _ := opts.String("--plan_id")
-	planId := server.RequireParseId(planIdStr)
-	model.PopulatePlanAccountPoints(ctx, planId)
 }
 
 // func fixClientConnections(opts docopt.Opts) {

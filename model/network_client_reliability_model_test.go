@@ -2,8 +2,9 @@ package model
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net/netip"
 	"slices"
 	"testing"
@@ -32,7 +33,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 		ips := []netip.Addr{}
 		for range ipCount {
 			ipv4 := make([]byte, 4)
-			mathrand.Read(ipv4)
+			cryptorand.Read(ipv4)
 			ip, ok := netip.AddrFromSlice(ipv4)
 			connect.AssertEqual(t, ok, true)
 			ips = append(ips, ip)
@@ -47,11 +48,11 @@ func TestAddClientReliabilityStats(t *testing.T) {
 			networkId := server.NewId()
 			clientCount := minClientPerNetworkCount
 			if d := maxClientPerNetworkCount - minClientPerNetworkCount; 0 < d {
-				clientCount += mathrand.Intn(d)
+				clientCount += mathrand.IntN(d)
 			}
 			for j := range clientCount {
 				clientId := server.NewId()
-				ip := ips[mathrand.Intn(len(ips))]
+				ip := ips[mathrand.IntN(len(ips))]
 
 				networkClientIds[networkId] = append(networkClientIds[networkId], clientId)
 				clientIps[clientId] = ip
@@ -113,24 +114,24 @@ func TestAddClientReliabilityStats(t *testing.T) {
 
 					stats := &ClientReliabilityStats{}
 
-					switch mathrand.Intn(3) {
+					switch mathrand.IntN(3) {
 					case 0:
 						// connection new
 
-						stats.ConnectionNewCount = uint64(1 + mathrand.Intn(4))
+						stats.ConnectionNewCount = uint64(1 + mathrand.IntN(4))
 					case 1:
 						// provide change
 
-						stats.ProvideChangedCount = uint64(1 + mathrand.Intn(4))
+						stats.ProvideChangedCount = uint64(1 + mathrand.IntN(4))
 					default:
 						// normal
 
-						stats.ConnectionEstablishedCount = uint64(1 + mathrand.Intn(4))
-						stats.ProvideEnabledCount = uint64(1 + mathrand.Intn(4))
-						stats.ReceiveMessageCount = uint64(1 + mathrand.Intn(4))
-						stats.ReceiveByteCount = ByteCount(1024 + mathrand.Intn(8192))
-						stats.SendMessageCount = uint64(1 + mathrand.Intn(4))
-						stats.SendByteCount = ByteCount(1024 + mathrand.Intn(8192))
+						stats.ConnectionEstablishedCount = uint64(1 + mathrand.IntN(4))
+						stats.ProvideEnabledCount = uint64(1 + mathrand.IntN(4))
+						stats.ReceiveMessageCount = uint64(1 + mathrand.IntN(4))
+						stats.ReceiveByteCount = ByteCount(1024 + mathrand.IntN(8192))
+						stats.SendMessageCount = uint64(1 + mathrand.IntN(4))
+						stats.SendByteCount = ByteCount(1024 + mathrand.IntN(8192))
 
 						validIpCounts[clientAddressHash] += 1
 						validBlocks[clientId] += 1

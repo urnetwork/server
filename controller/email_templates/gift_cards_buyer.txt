@@ -1,0 +1,18 @@
+{{define "headline"}}{{Upper .Headline}}{{end}}
+{{define "why"}}{{T "buyer.why"}}{{end}}
+{{define "content"}}
+{{T "buyer.thanks"}} {{.Lead}}
+{{- if .Them}}
+
+{{.ThemCopy}}
+{{- end}}
+
+{{.CodesTitle}}
+{{range .Codes}}
+    {{.Code}}
+    {{if .For}}{{.For}} · {{end}}{{.RedeemBy}}
+{{end}}
+{{T "buyer.how"}}
+
+{{T "buyer.keep"}}
+{{end}}

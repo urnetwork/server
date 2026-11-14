@@ -36,7 +36,8 @@ func budgetTestProxyDevice(t *testing.T, ctx context.Context) *ProxyDevice {
 		deviceState: deviceLocal, tun: tun, settings: DefaultProxyDeviceSettings(),
 		receiveMonitor: connect.NewMonitor(),
 	}
-	device.UpdateActivity()
+	// as NewProxyDevice records its construction: activity, not traffic
+	device.lastActivityNanos.Store(time.Now().UnixNano())
 	t.Cleanup(func() {
 		if err := device.Close(); err != nil {
 			t.Error(err)

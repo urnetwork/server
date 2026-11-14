@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"os"
 	"slices"
 	"strings"
@@ -181,7 +181,7 @@ func evidenceTestRequestEvidence(config string, forceMinimum bool, now time.Time
 
 // A uniform source of its own, seeded, so a draw is the same on every run.
 func evidenceTestUniform(seed int64) func() float64 {
-	return mathrand.New(mathrand.NewSource(seed)).Float64
+	return mathrand.New(mathrand.NewPCG(uint64(seed), 0)).Float64
 }
 
 // A uniform source for an order that must draw nothing.

@@ -11,9 +11,12 @@ import (
 )
 
 // Every common-gate pass stays online even without client performance samples.
+// The country floor is off: two natives are too few to keep it from admitting
+// the failing provider, whose bucket this test holds to the bar.
 func TestFp2BucketMembershipAndCommonGates(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
+		egressTestCountryFloorOff(t)
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Example City", "Example Region", "Example Country", "zz")
 		passing := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)

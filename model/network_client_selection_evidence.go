@@ -26,7 +26,7 @@ import (
 	"cmp"
 	"maps"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"time"
 

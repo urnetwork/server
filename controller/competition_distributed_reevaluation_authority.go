@@ -76,12 +76,17 @@ func bindCompetitionDistributedReevaluationRuntime(settings *Settings, proof mod
 func validateCompetitionDistributedRecoveryRequest(settings *Settings, principal *Principal, request model.CompetitionJobReevaluationRequest) error {
 	a := request.Authorization
 	d := a.Distributed
+	patchRetryPrincipal := settings != nil && competitionOperatorPatchRetryPrincipalAllows(settings, principal, a)
 	if settings == nil || !settings.AutomationPolicy.Enabled ||
 		(!competitionPrincipalAllows(principal, competitionSchedulerRole, settings.CompetitionId, settings.AutomationPolicy) &&
-			!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy)) {
+			!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) && !patchRetryPrincipal) {
 		return ErrAutomationDisabled
 	}
-	if a.Schema != 2 || a.Kind != model.CompetitionDistributedJobReevaluationAuthorizationKind || a.IncidentClass != model.CompetitionJobReevaluationDistributedInfrastructure || d == nil || d.Schema != 1 ||
+	if a.IncidentClass == model.CompetitionJobReevaluationOperatorRequestedPatchRetry &&
+		!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) && !patchRetryPrincipal {
+		return ErrAutomationDisabled
+	}
+	if a.Schema != 2 || !competitionDistributedRecoveryRequestClassAllowed(a) || d == nil || d.Schema != 1 ||
 		!tokenNamePattern.MatchString(request.IdempotencyKey) || !sha256Pattern.MatchString(request.AuthorizationSha256) ||
 		a.Environment != settings.AutomationPolicy.Environment || a.CompetitionId != settings.CompetitionId || a.SeasonId != settings.AutomationPolicy.SeasonId ||
 		a.JobId == (server.Id{}) || a.RoundId == (server.Id{}) || a.ExpectedCycle != 0 || a.ExpectedAttemptCount < 1 || !a.SingleUse ||
@@ -89,7 +94,6 @@ func validateCompetitionDistributedRecoveryRequest(settings *Settings, principal
 		!sha256Pattern.MatchString(a.ExpectedTerminalSha256) || a.IncidentEventId < 1 || !sha256Pattern.MatchString(a.IncidentEventSha256) ||
 		a.IncidentAttempt != a.ExpectedAttemptCount || a.FailureManifestSha256 != "" || a.RejectedArtifactPath != "" ||
 		a.BackingServiceEvidence != nil || a.OperatorInterruptionEvidence != nil || !sha256Pattern.MatchString(a.RoundPolicySha256) || !sha256Pattern.MatchString(a.BaselineSha256) ||
-		(d.Reason != model.CompetitionDistributedReevaluationRetentionBudget && d.Reason != model.CompetitionDistributedReevaluationLegacyPrelaunch) ||
 		!tokenNamePattern.MatchString(d.OriginalHostId) || d.OriginalSlotId < 1 || d.OriginalFencingToken < 1 || d.NativeFencingToken < 1 ||
 		d.NativeFencingToken > d.OriginalFencingToken || d.OriginalRunId != competitionagent.RunId(a.JobId.String(), 0, a.ExpectedAttemptCount) ||
 		!sha256Pattern.MatchString(d.OriginalManifestSha256) || !sha256Pattern.MatchString(d.OriginalRequestSha256) ||
@@ -151,7 +155,8 @@ func observeCompetitionDistributedRecovery(ctx context.Context, settings *Settin
 				return nil, ErrConflict
 			}
 			if d.Reason == model.CompetitionDistributedReevaluationRetentionBudget && (response.State != "succeeded" || response.ExitCode != 0 || response.ErrorCode != "") ||
-				d.Reason == model.CompetitionDistributedReevaluationLegacyPrelaunch && (response.State != "failed" || response.ExitCode != -1 || response.ErrorCode != "legacy_prelaunch_infrastructure_failure") {
+				d.Reason == model.CompetitionDistributedReevaluationLegacyPrelaunch && (response.State != "failed" || response.ExitCode != -1 || response.ErrorCode != "legacy_prelaunch_infrastructure_failure") ||
+				d.Reason == model.CompetitionJobReevaluationOperatorRequestedPatchRetry && (response.State != "failed" || response.ExitCode != 1 || response.ErrorCode != "evaluator_process_failed") {
 				return nil, ErrConflict
 			}
 			proof.OriginalStatus = response

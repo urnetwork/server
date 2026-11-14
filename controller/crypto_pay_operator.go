@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
 	"strings"
 	"time"
@@ -163,6 +164,49 @@ type CryptoOperatorRefundResult struct {
 	ReceivedAtomic  int64
 	// the amount received, in coin units, for the operator's transfer
 	Received string
+	// a gift order's invoice: which codes were refunded, and the amount to
+	// send back, only their share of what was received
+	Gift *CryptoOperatorGiftRefund
+}
+
+// CryptoOperatorGiftRefund is an operator's refund of a gift order's invoice
+// (decision 16): only the unredeemed codes are refundable, so only they are
+// voided and paid back; a redeemed code's year never ends.
+type CryptoOperatorGiftRefund struct {
+	Quantity int
+	// the unredeemed codes voided, the ones paid back
+	Refunded int
+	// the redeemed codes, not refundable
+	Redeemed int
+	// codes void before, by another cause
+	AlreadyVoid int
+	// the amount to send back: the refunded codes' share of what was received
+	// (Refunded / Quantity of it), in atomic units and in coin units
+	RefundAtomic int64
+	Refund       string
+	// the same share of the USD value the invoice was credited at
+	RefundUsd float64
+}
+
+// cryptoOperatorGiftRefund is what to send back for a gift invoice's refund:
+// each refunded code's share, at the invoice's credited valuation.
+func cryptoOperatorGiftRefund(intent *model.CryptoPaymentIntent, receivedAtomic int64, refund *model.GiftCryptoRefund) *CryptoOperatorGiftRefund {
+	gift := &CryptoOperatorGiftRefund{
+		Quantity:    refund.Quantity,
+		Refunded:    refund.Refunded,
+		Redeemed:    refund.Redeemed,
+		AlreadyVoid: refund.AlreadyVoid,
+	}
+	if 0 < refund.Quantity {
+		share := new(big.Int).Mul(big.NewInt(receivedAtomic), big.NewInt(int64(refund.Refunded)))
+		gift.RefundAtomic = share.Quo(share, big.NewInt(int64(refund.Quantity))).Int64()
+		if intent.CreditedUsdNanoCents != nil {
+			usd := new(big.Int).Mul(big.NewInt(*intent.CreditedUsdNanoCents), big.NewInt(int64(refund.Refunded)))
+			gift.RefundUsd = model.NanoCentsToUsd(usd.Quo(usd, big.NewInt(int64(refund.Quantity))).Int64())
+		}
+	}
+	gift.Refund = cryptoFormatAtomic(gift.RefundAtomic, cryptoAssetDecimals(intent.Asset))
+	return gift
 }
 
 // cryptoValidRefundAddress is a shape check of an address the account holder
@@ -197,12 +241,17 @@ var errCryptoRefundEndedNothing = errors.New("nothing the credit granted is stil
 // A refund of an invoice that was refunded (or unlinked) in the meantime.
 var errCryptoRefundRefused = errors.New("the invoice was refunded already")
 
+// A refund of a gift order's invoice none of whose codes is refundable.
+var errCryptoRefundGiftNothingRefundable = errors.New("every code of the gift order is redeemed or void: none is refundable, so no refund was recorded")
+
 // CryptoOperatorRefund ends what a credited invoice granted, at now, and
 // records the refund (with the address the coins go to) as a reconciliation
 // event, once: refunded_at is the one-shot (mmm/ZCASH-CONTRACT.md §3.13.8). It refuses
 // an invoice unlinked from its network (the grant can no longer be found)
 // and one whose grant ended already. The coins themselves are sent by hand
-// from the cold wallet.
+// from the cold wallet. A gift order's invoice refunds only its unredeemed
+// codes (decision 16), and the result's Gift says how much of what was
+// received to send back.
 func CryptoOperatorRefund(clientSession *session.ClientSession, intentId server.Id, payoutAddress string) (*CryptoOperatorRefundResult, error) {
 	ctx := clientSession.Ctx
 	intent := model.GetCryptoPaymentIntent(ctx, intentId)
@@ -251,6 +300,9 @@ func CryptoOperatorRefund(clientSession *session.ClientSession, intentId server.
 
 	market, transactionId := model.CryptoPaymentRenewalHandle(intent)
 	plan := slices.Contains(cryptoPayKnownPlans, intent.Item)
+	// a gift order's invoice refunds only its unredeemed codes
+	// (model.RefundCryptoGiftOrderInTx)
+	giftOrderId := giftOrderIdForCryptoRefund(clientSession, intent)
 	now := server.NowUtc()
 	var refundErr error
 	server.HandleError(func() {
@@ -258,24 +310,39 @@ func CryptoOperatorRefund(clientSession *session.ClientSession, intentId server.
 			if !model.MarkCryptoPaymentIntentRefundedInTx(tx, ctx, intent.IntentId, now) {
 				server.Raise(errCryptoRefundRefused)
 			}
-			endedNetworkIds, ended := model.EndCryptoPaymentGrantInTx(tx, ctx, intent, market, transactionId, plan, now)
-			if !ended {
-				server.Raise(errCryptoRefundEndedNothing)
+			details := map[string]any{
+				"asset":           intent.Asset,
+				"item":            intent.Item,
+				"received_atomic": fmt.Sprintf("%d", result.ReceivedAtomic),
+				"payout_address":  payoutAddress,
+				"leg":             "operator_refund",
 			}
-			result.EndedNetworkIds = endedNetworkIds
+			if giftOrderId != nil {
+				// only the unredeemed codes are refunded, and paid back; a
+				// redeemed code's year never ends. The order is not named: the
+				// event keeps the invoice's id
+				refund := model.RefundCryptoGiftOrderInTx(tx, ctx, *giftOrderId, now)
+				if refund == nil || refund.Refunded == 0 {
+					server.Raise(errCryptoRefundGiftNothingRefundable)
+				}
+				result.Gift = cryptoOperatorGiftRefund(intent, result.ReceivedAtomic, refund)
+				details["gift_codes_refunded"] = refund.Refunded
+				details["gift_codes_redeemed"] = refund.Redeemed
+				details["refund_atomic"] = fmt.Sprintf("%d", result.Gift.RefundAtomic)
+			} else {
+				endedNetworkIds, ended := model.EndCryptoPaymentGrantInTx(tx, ctx, intent, market, transactionId, plan, now)
+				if !ended {
+					server.Raise(errCryptoRefundEndedNothing)
+				}
+				result.EndedNetworkIds = endedNetworkIds
+			}
 			server.Raise(model.AddPaymentReconciliationEventInTx(tx, ctx, &model.PaymentReconciliationEvent{
 				RunId:     server.NewId(),
 				Store:     market,
 				NetworkId: intent.NetworkId,
 				Action:    model.PaymentReconcileActionRefunded,
 				Evidence:  intent.IntentId.String(),
-				Details: map[string]any{
-					"asset":           intent.Asset,
-					"item":            intent.Item,
-					"received_atomic": fmt.Sprintf("%d", result.ReceivedAtomic),
-					"payout_address":  payoutAddress,
-					"leg":             "operator_refund",
-				},
+				Details:   details,
 			}))
 		}, server.TxReadCommitted, server.OptNoRetry())
 	}, func(err error) {

@@ -6,7 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
@@ -98,7 +98,7 @@ func TestUrlCompletedResponseSurvivesLaterLoss(t *testing.T) {
 				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"text/plain"}}, ContentLength: int64(body.reader.Len()), Body: body}, nil
 			})}
 			path := &completedLossPath{client: client, signal: signal}
-			r := newRun(path, Options{UrlProbe: true, LoadAttempts: 1, Now: clock.Now}, 1, time.Minute, rand.New(rand.NewSource(1)))
+			r := newRun(path, Options{UrlProbe: true, LoadAttempts: 1, Now: clock.Now}, 1, time.Minute, rand.New(rand.NewPCG(1, 0)))
 			result := r.load(t.Context(), Destination{Name: "synthetic-page", Class: ClassSite, Url: "https://synthetic.example/page"})
 			wantUnknown := name == "lost_timeout" || name == "partial_body_loss" || name == "partial_body_loss_after_slow_headers" || name == "missing_request_clock_then_loss"
 			wantOK := name == "completed_success"

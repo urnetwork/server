@@ -46,37 +46,42 @@ type CompetitionDistributedJobReevaluationAuthorization struct {
 	SupervisorOwnerId      string                                       `json:"supervisor_owner_id"`
 	SupervisorFencingToken int64                                        `json:"supervisor_fencing_token"`
 	IdleSlots              []CompetitionDistributedReevaluationIdleSlot `json:"idle_slots"`
+	PatchRetry             *CompetitionOperatorRequestedPatchRetry      `json:"patch_retry,omitempty"`
 }
 
 // The authenticated public projection contains digests, never retained private
 // transport inventory or original terminal bytes. Those stay in the immutable
 // operator audit alongside the signed original-run and all-host observations.
 type CompetitionDistributedJobReevaluationCycle struct {
-	Schema                int       `json:"schema"`
-	Reason                string    `json:"reason"`
-	OriginalHostId        string    `json:"original_host_id"`
-	OriginalSlotId        int       `json:"original_slot_id"`
-	OriginalFencingToken  int64     `json:"original_fencing_token"`
-	OriginalRunId         string    `json:"original_run_id"`
-	OriginalStartedAt     time.Time `json:"original_started_at"`
-	OriginalDeadlineAt    time.Time `json:"original_deadline_at"`
-	SourceLockSha256      string    `json:"source_lock_sha256"`
-	EvaluatorImageDigest  string    `json:"evaluator_image_digest"`
-	PolicyApprovalSha256  string    `json:"policy_approval_sha256"`
-	ClosureEvidenceSha256 string    `json:"closure_evidence_sha256"`
-	NativeProofSha256     string    `json:"native_proof_sha256"`
+	Schema                int                                     `json:"schema"`
+	Reason                string                                  `json:"reason"`
+	OriginalHostId        string                                  `json:"original_host_id"`
+	OriginalSlotId        int                                     `json:"original_slot_id"`
+	OriginalFencingToken  int64                                   `json:"original_fencing_token"`
+	OriginalRunId         string                                  `json:"original_run_id"`
+	OriginalStartedAt     time.Time                               `json:"original_started_at"`
+	OriginalDeadlineAt    time.Time                               `json:"original_deadline_at"`
+	SourceLockSha256      string                                  `json:"source_lock_sha256"`
+	EvaluatorImageDigest  string                                  `json:"evaluator_image_digest"`
+	PolicyApprovalSha256  string                                  `json:"policy_approval_sha256"`
+	ClosureEvidenceSha256 string                                  `json:"closure_evidence_sha256"`
+	NativeProofSha256     string                                  `json:"native_proof_sha256"`
+	PatchRetry            *CompetitionOperatorRequestedPatchRetry `json:"patch_retry,omitempty"`
 }
 
 // Version-one bytes and failure classes retain their old meaning. Version two
 // requires its explicit distributed provenance and cannot relabel a scored or
 // submitter-caused outcome as an infrastructure recovery.
 func validCompetitionReevaluationCycleClass(cycle *CompetitionJobReevaluationCycle) bool {
+	if cycle.IncidentClass == CompetitionJobReevaluationOperatorRequestedPatchRetry {
+		return validCompetitionOperatorRequestedPatchRetryCycle(cycle)
+	}
 	if cycle.Schema == 1 {
 		return cycle.Distributed == nil && (cycle.IncidentClass == "" || cycle.IncidentClass == CompetitionJobReevaluationHeartbeatBudget ||
 			cycle.IncidentClass == CompetitionJobReevaluationBackingService || cycle.IncidentClass == CompetitionJobReevaluationOperatorInterruption)
 	}
 	proof := cycle.Distributed
-	return cycle.Schema == 2 && cycle.IncidentClass == CompetitionJobReevaluationDistributedInfrastructure && proof != nil && proof.Schema == 1 &&
+	return cycle.Schema == 2 && cycle.IncidentClass == CompetitionJobReevaluationDistributedInfrastructure && proof != nil && proof.Schema == 1 && proof.PatchRetry == nil &&
 		(proof.Reason == CompetitionDistributedReevaluationRetentionBudget || proof.Reason == CompetitionDistributedReevaluationLegacyPrelaunch) &&
 		competitionAutomationScope.MatchString(proof.OriginalHostId) && proof.OriginalSlotId > 0 && proof.OriginalFencingToken > 0 &&
 		competitionAutomationSha256.MatchString(proof.OriginalRunId) && !proof.OriginalStartedAt.IsZero() &&

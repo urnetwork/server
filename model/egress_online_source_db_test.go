@@ -54,10 +54,13 @@ func egressTestGraduatedCountryHealth(ctx context.Context, clientId server.Id, m
 //     under the ratio and out of Online;
 //   - a passing country list lifted a provider whose general outcomes mostly
 //     fail to the ratio, and kept it in Online.
+//
+// The country floor is off: us's one native is too few to keep it from
+// admitting the providers this test holds below the bar.
 func TestOnlineUrlRuleAndCountryGuardReadGeneralOutcomesOnly(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_url_success_ratio: 0.8\n")))
+		t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, []byte("online_url_success_ratio: 0.8\n"+egressTestCountryFloorOffConfig)))
 		usCity := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
 		geCity := egressTestCity(ctx, "Tbilisi", "Tbilisi", "Georgia", "ge")
 		now := server.NowUtc()

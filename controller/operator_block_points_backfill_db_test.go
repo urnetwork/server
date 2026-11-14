@@ -133,14 +133,18 @@ func TestOperatorBlockPointsBackfillDryRunDigestAndIdempotence(t *testing.T) {
 		subsidyConfig.AccountPointsPerPayout = 1000000
 
 		ctx := context.Background()
-		now := server.NowUtc()
-		current := int64(model.SubnetBlockNumber(now))
+		// two blocks after the wall clock's open block, so client_reliability
+		// retention is the dry run's clock's, which runs when the second
+		// block is due
+		current := int64(model.SubnetBlockNumber(server.NowUtc()))
 		// as on Main: the boundary is inside a block, and the payout plans'
-		// last subsidy epoch ends at it
-		first, second := current-3, current-2
+		// last subsidy epoch ends at it; five days in, so the first block's
+		// window is still retained when the second is due
+		first, second := current+2, current+3
 		firstStart := model.SubnetBlockGenesis.Add(time.Duration(first-1) * model.SubnetBlockDuration)
 		secondStart := firstStart.Add(model.SubnetBlockDuration)
-		cutoff := firstStart.Add(36 * time.Hour)
+		cutoff := firstStart.Add(5 * 24 * time.Hour)
+		now := secondStart.Add(model.SubnetBlockDuration + model.OperatorBlockPointsSettleTime)
 		useOperatorBlockPointsBackfillTransition(t, cutoff)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO subsidy_payment (payment_plan_id, start_time, end_time, active_user_count, paid_user_count, net_payout_byte_count_paid, net_payout_byte_count_unpaid, net_revenue_nano_cents, net_payout_nano_cents)
@@ -254,8 +258,89 @@ func TestOperatorBlockPointsBackfillDryRunDigestAndIdempotence(t *testing.T) {
 		}
 
 		// a block that is not a completed block past the boundary is refused
-		if _, err := PlanOperatorBlockPointsBackfill(ctx, []int64{current}, now); err == nil {
+		if _, err := PlanOperatorBlockPointsBackfill(ctx, []int64{second + 1}, now); err == nil {
 			t.Fatal("the backfill accepted an open block")
+		}
+	})
+}
+
+// An expired block has no backfill. The dry run leaves out of its default
+// selection every due block whose reliability evidence passed
+// client_reliability retention, whether the daily task recorded it or not,
+// lists them, and awards the rest, where before one such block failed the
+// whole dry run; asked for one, it refuses. A commit refuses a block the task
+// recorded expired, even from a dry run made before its deadline. The blocks
+// are after the wall clock's, so retention is the dry runs' clocks'.
+func TestOperatorBlockPointsBackfillLeavesOutExpiredBlocks(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		subsidyConfig := model.EnvSubsidyConfig()
+		previous := *subsidyConfig
+		defer func() { *subsidyConfig = previous }()
+		subsidyConfig.AccountPointsPerPayout = 1000000
+
+		ctx := context.Background()
+		older := int64(model.SubnetBlockNumber(server.NowUtc())) + 2
+		expired, next := older+1, older+2
+		blockStart := func(block int64) time.Time {
+			return model.SubnetBlockGenesis.Add(time.Duration(block-1) * model.SubnetBlockDuration)
+		}
+		settled := func(block int64) time.Time {
+			return blockStart(block + 1).Add(model.OperatorBlockPointsSettleTime)
+		}
+		useOperatorBlockPointsBackfillTransition(t, blockStart(older))
+		f := newOperatorBlockPointsBackfillFixture(t, ctx)
+		for _, block := range []int64{older, expired, next} {
+			f.contract(blockStart(block).Add(24*time.Hour), 1024*1024*1024)
+		}
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		defer clientSession.Cancel()
+
+		inTime, err := PlanOperatorBlockPointsBackfill(ctx, []int64{expired}, settled(expired))
+		if err != nil || len(inTime.Awards) != 1 || inTime.Awards[0].Block != expired {
+			t.Fatalf("the dry run of block %d in time: %+v %v", expired, inTime, err)
+		}
+
+		// the daily task records the block expired past its deadline, before
+		// the next block is due; the older block is past retention too, and
+		// not recorded
+		late := blockStart(expired).Add(model.ClientReliabilityRetention + time.Hour)
+		if awards, err := model.AwardDueOperatorBlockPoints(ctx, subsidyConfig, late, expired); err != nil || len(awards) != 0 {
+			t.Fatalf("the daily run past block %d's deadline: %v %v", expired, awards, err)
+		}
+		if recorded := model.GetOperatorBlockPointsExpired(ctx, []int64{older, expired}); recorded[older] || !recorded[expired] {
+			t.Fatalf("expiry records %v", recorded)
+		}
+
+		now := settled(next)
+		backfill, err := PlanOperatorBlockPointsBackfill(ctx, nil, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(backfill.ExpiredBlocks, []int64{older, expired}) || len(backfill.Awards) != 1 || backfill.Awards[0].Block != next {
+			t.Fatalf("the default dry run: expired %v, awards %+v", backfill.ExpiredBlocks, backfill.Awards)
+		}
+		if want := fmt.Sprintf("expired, never awarded (reliability evidence past client_reliability retention): %v", []int64{older, expired}); !strings.Contains(backfill.Text(), want) {
+			t.Fatalf("the report lacks %q:\n%s", want, backfill.Text())
+		}
+		for _, block := range []int64{older, expired} {
+			if _, err := PlanOperatorBlockPointsBackfill(ctx, []int64{block, next}, now); !errors.Is(err, model.ErrOperatorBlockPointsExpired) {
+				t.Fatalf("a dry run of expired block %d: %v", block, err)
+			}
+		}
+
+		before := f.tables(t)
+		if committed, _, err := CommitOperatorBlockPointsBackfill(clientSession, inTime, inTime.Digest); len(committed) != 0 || !errors.Is(err, model.ErrOperatorBlockPointsExpired) {
+			t.Fatalf("a commit of expired block %d: %v %v", expired, committed, err)
+		}
+		if after := f.tables(t); after != before {
+			t.Fatal("a refused commit wrote", before, after)
+		}
+		committed, skipped, err := CommitOperatorBlockPointsBackfill(clientSession, backfill, backfill.Digest)
+		if err != nil || !slices.Equal(committed, []int64{next}) || len(skipped) != 0 {
+			t.Fatal("commit", committed, skipped, err)
+		}
+		if awarded := model.GetOperatorBlockPointsAwarded(ctx, []int64{older, expired, next}); awarded[older] || awarded[expired] || !awarded[next] {
+			t.Fatalf("awards %v", awarded)
 		}
 	})
 }

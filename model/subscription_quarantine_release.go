@@ -10,7 +10,7 @@ import (
 	"context"
 	"errors"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/jackc/pgx/v5"

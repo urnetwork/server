@@ -7,7 +7,7 @@ package model
 // pro_daily_free_grant_db_test.go.
 
 import (
-	"math/rand"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -55,7 +55,7 @@ func fundingOrderTestNames(grants []fundingOrderTestGrant, order func(a *escrowT
 		balances = append(balances, grant.balance)
 	}
 	// from a shuffled order, so the result is the comparator's alone
-	rand.New(rand.NewSource(1)).Shuffle(len(balances), func(i int, j int) {
+	rand.New(rand.NewPCG(1, 0)).Shuffle(len(balances), func(i int, j int) {
 		balances[i], balances[j] = balances[j], balances[i]
 	})
 	slices.SortFunc(balances, order)

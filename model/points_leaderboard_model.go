@@ -14,7 +14,9 @@ import (
 // Every network with any points is ranked on three dimensions -- total points,
 // completed operator payout periods ("blocks") with points, and the current
 // streak of consecutive payout periods with points -- into a snapshot table that a
-// rebuild task rewrites whenever points can have changed. Reads page the
+// rebuild task rewrites whenever points can have changed. A period whose
+// operator block expired without its points is excused: a network without
+// points in it keeps its streak through it (pointsStreaks). Reads page the
 // newest snapshot with a keyset cursor and join `network` for the name, the
 // emoji tag and the two public flags, so a toggle shows on the next request
 // rather than the next rebuild. Every ranked network is listed, so the list
@@ -95,7 +97,9 @@ type PointsNetworkInput struct {
 }
 
 // ComputePointsLeaderboard ranks the inputs. It is pure so the streak and
-// rank rules are testable without a database.
+// rank rules are testable without a database. `excusedEpochs` are the epochs
+// whose operator block the daily award recorded expired (pointsStreaks); nil
+// excuses none, and an epoch outside the windows is ignored.
 //
 // The order per sort is the sdk's (ComparePointsLeaderboardKeys), the one
 // definition shared with the view controller: points = (points, streak,
@@ -107,6 +111,7 @@ type PointsNetworkInput struct {
 func ComputePointsLeaderboard(
 	inputs []PointsNetworkInput,
 	windows []PointsEpochWindow,
+	excusedEpochs map[uint64]bool,
 ) (entries []PointsLeaderboardEntry, latestEpoch uint64) {
 	epochs := make([]uint64, 0, len(windows))
 	for _, window := range windows {
@@ -122,7 +127,7 @@ func ComputePointsLeaderboard(
 		if input.TotalNanoPoints <= 0 {
 			continue
 		}
-		blocks, streak, longest := pointsStreaks(input.EpochsWithPoints, epochs)
+		blocks, streak, longest := pointsStreaks(input.EpochsWithPoints, epochs, excusedEpochs)
 		entries = append(entries, PointsLeaderboardEntry{
 			NetworkId:        input.NetworkId,
 			TotalNanoPoints:  input.TotalNanoPoints,
@@ -182,22 +187,35 @@ func ComputePointsLeaderboard(
 
 // pointsStreaks walks the finalized epochs in order. The current streak is
 // the run of consecutive epochs with points that ends at the latest finalized
-// epoch (0 when the latest epoch has none); the longest streak is the best
-// run anywhere.
-func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64) (blocks int, streak int, longest int) {
+// epoch (0 when the latest epoch has none and is not excused); the longest
+// streak is the best run anywhere.
+//
+// An excused epoch is one whose operator block the daily award recorded
+// expired (OperatorBlockPointsExpiry): the block never gets its points, by our
+// failure, not its providers' (owner decision 2026-11-14). A network without
+// points in an excused epoch keeps its run through it: the epoch neither
+// breaks the run nor adds to it, for the current streak and the longest alike.
+// A network with points in an excused epoch, from any other source, counts it
+// as any epoch with points, so no network gets a streak it did not earn.
+// Without excused epochs the rule is the one before.
+func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64, excusedEpochs map[uint64]bool) (blocks int, streak int, longest int) {
 	run := 0
 	for _, epoch := range epochsAsc {
-		if epochsWithPoints[epoch] {
+		switch {
+		case epochsWithPoints[epoch]:
 			blocks += 1
 			run += 1
 			if longest < run {
 				longest = run
 			}
-		} else {
+		case excusedEpochs[epoch]:
+			// the run goes on through it, one shorter than if it had points
+		default:
 			run = 0
 		}
 	}
-	// run is the trailing run: non-zero only when the latest epoch has points
+	// run is the trailing run: non-zero only when the latest epoch has points,
+	// or is excused after a run
 	streak = run
 	return
 }
@@ -215,6 +233,13 @@ func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64) (blocks
 // points in a completed block publishes a false zero. The returned snapshot's
 // Approximation counts those inputs; stored rows replace them on later
 // rebuilds as the rollup advances.
+//
+// The blocks the daily award recorded expired (operator_block_points_expired)
+// excuse their epochs (pointsStreaks). The epochs are the operator blocks, so
+// an expired block excuses its own epoch, the one whose window ends at the
+// block's end and that its award's points would have counted in (an award's
+// payments store its block, CommitOperatorBlockPoints). A record written after
+// a rebuild changes the next one: the hourly rebuild reads it within the hour.
 func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) (*PointsLeaderboardSnapshot, error) {
 	inputs, err := loadPointsNetworkInputs(ctx, windows)
 	if err != nil {
@@ -228,7 +253,17 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 			return nil, err
 		}
 	}
-	entries, latestEpoch := ComputePointsLeaderboard(inputs, windows)
+	blocks := make([]int64, len(windows))
+	for i, window := range windows {
+		blocks[i] = int64(window.Epoch)
+	}
+	excusedEpochs := map[uint64]bool{}
+	for block, expired := range GetOperatorBlockPointsExpired(ctx, blocks) {
+		if expired {
+			excusedEpochs[uint64(block)] = true
+		}
+	}
+	entries, latestEpoch := ComputePointsLeaderboard(inputs, windows, excusedEpochs)
 
 	snapshot := &PointsLeaderboardSnapshot{
 		SnapshotId:            server.NewId(),

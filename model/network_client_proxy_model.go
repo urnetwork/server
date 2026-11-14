@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net/netip"
 	"slices"
 	"strings"
@@ -719,12 +719,12 @@ func createProxyClientInTx(
 		returnErr = errNoProxyHosts
 		return
 	}
-	proxyHost := hosts[mathrand.Intn(len(hosts))]
+	proxyHost := hosts[mathrand.IntN(len(hosts))]
 
 	blockServicePorts := serverProxyConfig.Hosts[proxyHost]
 
 	blocks := slices.Collect(maps.Keys(blockServicePorts))
-	block := blocks[mathrand.Intn(len(blocks))]
+	block := blocks[mathrand.IntN(len(blocks))]
 
 	servicePorts := blockServicePorts[block]
 
@@ -812,7 +812,7 @@ func createProxyClientInTx(
 			`,
 			proxyHost,
 			block,
-			mathrand.Intn((31*ProxyClientIpv4Count)/32),
+			mathrand.IntN((31*ProxyClientIpv4Count)/32),
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {

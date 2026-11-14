@@ -494,6 +494,9 @@ type RebuildPointsLeaderboardResult struct {
 	UnlinkedPoints          int64 `json:"unlinked_points"`
 	ApproximateNetworks     int64 `json:"approximate_networks"`
 	BackfillPendingPayments int64 `json:"backfill_pending_payments"`
+	// the sweep statements the operator block traffic rollup read
+	// (model.AdvanceOperatorBlockTrafficRollup)
+	TrafficChunks int `json:"traffic_chunks"`
 }
 
 const (
@@ -547,12 +550,19 @@ func TriggerRebuildPointsLeaderboard(ctx context.Context) {
 }
 
 // RebuildPointsLeaderboard writes a new snapshot from current points and
-// completed seven-day operator payout blocks.
+// completed seven-day operator payout blocks. Each run first advances the
+// bytes served of the operator blocks without an award, which GET
+// /account/epochs reports (model.AdvanceOperatorBlockTrafficRollup), within
+// its own bounds; a failure there is logged and never fails the rebuild.
 func RebuildPointsLeaderboard(
 	args *RebuildPointsLeaderboardArgs,
 	clientSession *session.ClientSession,
 ) (*RebuildPointsLeaderboardResult, error) {
 	ctx := clientSession.Ctx
+	trafficChunks, err := model.AdvanceOperatorBlockTrafficRollup(ctx, model.DefaultOperatorBlockTrafficRollupSettings(), server.NowUtc())
+	if err != nil {
+		glog.Warningf("[points]operator block traffic rollup failed after %d statements: %s\n", trafficChunks, err)
+	}
 	rollupBatches, err := model.AdvancePointsBlockRollup(ctx, model.DefaultPointsBlockRollupSettings())
 	if err != nil {
 		return nil, err
@@ -592,6 +602,7 @@ func RebuildPointsLeaderboard(
 		UnlinkedPoints:          approximation.UnlinkedPoints,
 		ApproximateNetworks:     approximation.ApproximateNetworks,
 		BackfillPendingPayments: approximation.BackfillPendingPayments,
+		TrafficChunks:           trafficChunks,
 	}, nil
 }
 

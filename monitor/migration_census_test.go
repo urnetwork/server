@@ -119,7 +119,7 @@ func TestMigrationCensusBoundsCompletePublishedSource(t *testing.T) {
 	// comparison is offline and does not claim a production OOM observation.
 	priorContracts := []snMainnetMigrationContract{}
 	for _, contract := range migrationCurrentSuffixContracts {
-		if contract.artifact.requiredVersion != server.CompetitionDistributedReevaluationMigrationVersion() {
+		if contract.artifact.requiredVersion != server.CompetitionOperatorRequestedPatchRetryMigrationVersion() {
 			priorContracts = append(priorContracts, contract)
 		}
 	}

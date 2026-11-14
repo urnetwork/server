@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptrace"
 	"strings"
@@ -265,7 +265,8 @@ func TestUrlProbeTransportOutcomesSplitTcpAndUdp(t *testing.T) {
 		{"a URL without HTTP/3", tcp, &testH3Transport{https: testH3Leg(http.StatusOK, nil), h3: testH3Leg(0, errors.New("never asked"))}, counts{success: 1, tcpSuccess: 1}},
 	} {
 		result, err := egresshealth.Check(context.Background(), &http.Client{Transport: c.transport}, egresshealth.Options{
-			UrlProbe: true, Destinations: c.destinations, Rand: rand.New(rand.NewSource(3)),
+			// a fixed seed, so a run replays
+			UrlProbe: true, Destinations: c.destinations, Rand: rand.New(rand.NewPCG(3, 0)),
 		})
 		if err != nil {
 			t.Fatal(err)

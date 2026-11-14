@@ -109,6 +109,23 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStoreApple}, true},
 		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStorePlay}, true},
 		{&TrialEndingTemplate{EndTime: server.NowUtc().Add(2 * 24 * time.Hour), Store: model.OnboardingStoreStripe}, true},
+		// email only: the task queues it to email logins (every language is
+		// in TestGiftEndingTemplateText)
+		{&GiftEndingTemplate{EndTime: server.NowUtc().Add(14 * 24 * time.Hour), Lang: "en", TimeZone: "America/Chicago"}, false},
+		// a paid gift order's emails, as loaded when sent (gift_delivery.go);
+		// every language is in TestGiftEmailTemplatesRenderEveryLanguage
+		{func() Template {
+			order, codes := giftEmailTestOrder("en", model.GiftDeliveryThem, 3, "Sam", true)
+			return giftBuyerTestTemplate(order, codes)
+		}(), false},
+		{func() Template {
+			order, codes := giftEmailTestOrder("en", model.GiftDeliveryMe, 1, "", false)
+			return giftBuyerTestTemplate(order, codes)
+		}(), false},
+		{func() Template {
+			order, codes := giftEmailTestOrder("en", model.GiftDeliveryThem, 2, "Sam", true)
+			return giftFriendTestTemplate(order, codes, 1)
+		}(), false},
 	}
 
 	imageSrc := regexp.MustCompile(`src="([^"]+)"`)

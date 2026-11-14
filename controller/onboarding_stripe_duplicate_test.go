@@ -49,6 +49,12 @@ func TestSubscriptionMarketsBlockNewPurchase(t *testing.T) {
 		{"gamma plan, renewal off, and stripe", []model.SubscriptionMarket{model.SubscriptionMarketGamma, model.SubscriptionMarketStripe}, false, true},
 		// the renewal of a plan paid with Gamma is only about that plan
 		{"usdc year, gamma renewal on but no gamma plan", []model.SubscriptionMarket{model.SubscriptionMarketSolana}, true, false},
+		// the owner, 2026-11-13: a redeemed gift year never renews, like a
+		// crypto year (mmm/GIFTOFPRIVACY.md)
+		{"gift year", []model.SubscriptionMarket{model.SubscriptionMarketGift}, false, false},
+		{"gift year, gamma renewal on but no gamma plan", []model.SubscriptionMarket{model.SubscriptionMarketGift}, true, false},
+		{"gift year and stripe", []model.SubscriptionMarket{model.SubscriptionMarketGift, model.SubscriptionMarketStripe}, false, true},
+		{"gift year and a renewing gamma plan", []model.SubscriptionMarket{model.SubscriptionMarketGift, model.SubscriptionMarketGamma}, true, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -62,9 +68,9 @@ func TestSubscriptionMarketsBlockNewPurchase(t *testing.T) {
 // The full list: every market but the store subscriptions (Apple, Google,
 // Stripe) and a renewing plan paid with Gamma leaves a new purchase open.
 // Manual grants, x402, every one-time crypto market (Solana from P17, Monero,
-// Zcash, and TAO, Bitcoin and ETH) and a Gamma plan with renewal off never
-// renew, so a card checkout is never a second charge. A one-time crypto market
-// added later must join the list.
+// Zcash, and TAO, Bitcoin and ETH), a redeemed gift year and a Gamma plan with
+// renewal off never renew, so a card checkout is never a second charge. A
+// one-time crypto market added later must join the list.
 func TestSubscriptionMarketsBlockNewPurchaseFullList(t *testing.T) {
 	open := []model.SubscriptionMarket{
 		model.SubscriptionMarketManual,
@@ -75,6 +81,7 @@ func TestSubscriptionMarketsBlockNewPurchaseFullList(t *testing.T) {
 		model.SubscriptionMarketBittensor,
 		model.SubscriptionMarketBitcoin,
 		model.SubscriptionMarketEthereum,
+		model.SubscriptionMarketGift,
 	}
 	blocking := []model.SubscriptionMarket{
 		model.SubscriptionMarketApple,

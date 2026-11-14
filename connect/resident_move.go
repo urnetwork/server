@@ -37,7 +37,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -988,7 +988,7 @@ func (self *Exchange) drainMoveTargets() []netip.Addr {
 	if !ok {
 		return nil
 	}
-	return localHost.PickTargets(rand.Int63n)
+	return localHost.PickTargets(rand.Int64N)
 }
 
 // Sends one drain move: the intent, then the frame (compulsory with this

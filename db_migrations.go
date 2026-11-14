@@ -11543,4 +11543,43 @@ var migrations = []any{
 	// Explicit distributed terminal-infrastructure recovery preserves original
 	// admission/failure and requires all-host closure before a new cycle queues.
 	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),
+
+	// The gift of privacy's Pro gift codes (gift_schema.go,
+	// mmm/GIFTOFPRIVACY.md §10.6): four columns on transfer_balance_code (kind
+	// with a constant default, three nullable), each added only when absent,
+	// and the gift_order, gift_order_recipient and gift_order_pdf tables,
+	// new and empty, under a five-second lock bound. A catalog change only:
+	// nothing is rewritten or scanned, and every code before it reads kind
+	// 'data'. Apply before deploying the api, alt and taskworker that use
+	// them.
+	giftSchemaMigration,
+
+	// What refunds, disputes and orphaned crypto payments did to a gift
+	// order's codes (gift_refund_schema.go, model/gift_refund_model.go): the
+	// gift_code_void and gift_order_refund tables, new and empty, each with
+	// its index, under a five-second lock bound. Nothing existing is touched.
+	// Apply before deploying the api, alt and taskworker that use them.
+	giftRefundSchemaMigration,
+
+	// A separately qualified operator may grant one unchanged-patch retry,
+	// preserving the original paid admission, source, terminal and full audit.
+	newSqlMigration(CompetitionOperatorRequestedPatchRetryMigrationSql()),
+
+	// The bytes served per operator block of GET /account/epochs
+	// (operator_block_traffic_schema.go, model/operator_block_traffic.go): the
+	// operator_block_traffic and operator_block_network_traffic tables, new
+	// and empty, each created only when absent, under a five-second lock
+	// bound. Nothing existing is locked, scanned or rewritten. Apply before
+	// deploying the taskworker that advances the rollup and the api and alt
+	// that read it.
+	operatorBlockTrafficMigration,
+
+	// The operator blocks the daily points award recorded expired
+	// (operator_block_points_expired_schema.go,
+	// model/operator_block_points.go): one new empty table, created only when
+	// absent, under a five-second lock bound. Nothing existing is locked or
+	// rewritten. Apply before deploying the taskworker and bringyourctl that
+	// write and read it, and the api and alt whose GET /account/epochs reads
+	// it.
+	operatorBlockPointsExpiredMigration,
 }

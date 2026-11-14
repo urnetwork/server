@@ -3,7 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -362,7 +362,7 @@ func TestStream(t *testing.T) {
 			sourceId := clientId
 			destinationId := server.NewId()
 			var intermediaryIds []server.Id
-			n := mathrand.Intn(16)
+			n := mathrand.IntN(16)
 			for range n {
 				intermediaryId := server.NewId()
 				intermediaryIds = append(intermediaryIds, intermediaryId)
@@ -374,7 +374,7 @@ func TestStream(t *testing.T) {
 			sourceId := server.NewId()
 			destinationId := clientId
 			var intermediaryIds []server.Id
-			n := mathrand.Intn(16)
+			n := mathrand.IntN(16)
 			for range n {
 				intermediaryId := server.NewId()
 				intermediaryIds = append(intermediaryIds, intermediaryId)
@@ -391,11 +391,11 @@ func TestStream(t *testing.T) {
 		keepKeys := map[string]int{}
 		for range contractCount {
 			contractId := server.NewId()
-			i := mathrand.Intn(len(keys))
+			i := mathrand.IntN(len(keys))
 			key := keys[i]
 			// usedKeys[key.String()] += 1
 			contractStreamKeys[contractId] = key
-			remove := mathrand.Intn(2) == 0
+			remove := mathrand.IntN(2) == 0
 			removeContracts[contractId] = remove
 			if !remove {
 				keepKeys[key.String()] += 1
@@ -420,7 +420,7 @@ func TestStream(t *testing.T) {
 			go func() {
 				defer wg.Done()
 
-				addDelay := time.Duration(mathrand.Intn(int(delayMax/time.Millisecond))) * time.Millisecond
+				addDelay := time.Duration(mathrand.IntN(int(delayMax/time.Millisecond))) * time.Millisecond
 				select {
 				case <-ctx.Done():
 					return
@@ -436,7 +436,7 @@ func TestStream(t *testing.T) {
 				}()
 
 				if removeContracts[contractId] {
-					removeDelay := time.Duration(mathrand.Intn(int(delayMax/time.Millisecond))) * time.Millisecond
+					removeDelay := time.Duration(mathrand.IntN(int(delayMax/time.Millisecond))) * time.Millisecond
 					select {
 					case <-ctx.Done():
 						return

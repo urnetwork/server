@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	// "crypto/sha256"
 	"errors"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	// "net"
 	"net/netip"
 	// "regexp"
@@ -2074,7 +2074,7 @@ func RemoveNetworkClients(
 	// immediately as before -- only deferred requests get spread out.
 	runAt := bucketStart
 	if currentBucket.Before(bucketStart) {
-		runAt = bucketStart.Add(time.Duration(mathrand.Int63n(int64(BulkClientRemovalBucketDuration))))
+		runAt = bucketStart.Add(time.Duration(mathrand.Int64N(int64(BulkClientRemovalBucketDuration))))
 	}
 
 	// one background bulk-delete run per network at a time.

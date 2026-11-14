@@ -183,6 +183,21 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 			fmt.Fprintf(out, "could not refund: %s\n", err)
 			return 1
 		}
+		if gift := result.Gift; gift != nil {
+			// a gift order: only its unredeemed codes are refunded
+			fmt.Fprintf(
+				out,
+				"refunded %d of the %d gift codes of invoice %s; %d redeemed and %d already void are not refundable\n",
+				gift.Refunded, gift.Quantity, id, gift.Redeemed, gift.AlreadyVoid,
+			)
+			ticker := strings.ToUpper(cryptoTicker(result.Intent.Asset))
+			fmt.Fprintf(
+				out,
+				"now send the refund by hand from the cold wallet: %s %s, the refunded codes' share of the %s %s received (%.2f USD at the invoice's credited value), to the address given (recorded with the refund event)\n",
+				gift.Refund, ticker, result.Received, ticker, gift.RefundUsd,
+			)
+			return 0
+		}
 		fmt.Fprintf(out, "ended the grant of invoice %s for %d network(s)\n", id, len(result.EndedNetworkIds))
 		fmt.Fprintf(
 			out,

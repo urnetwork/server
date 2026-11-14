@@ -5,6 +5,7 @@ package connect
 import (
 	"bufio"
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"time"
 	// "runtime/debug"
 	"encoding/binary"
-	mathrand "math/rand"
 	"sort"
 	"strconv"
 	"sync"
@@ -2157,7 +2157,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					default:
 					}
-					mathrand.Read(chunk)
+					cryptorand.Read(chunk)
 					setSpeedTestProbeHeader(chunk, speedTestId)
 					chunkCopy := connect.MessagePoolCopy(chunk)
 					if write(chunkCopy, true) != nil {

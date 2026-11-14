@@ -39,7 +39,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net"
 	"strconv"
 	"sync"
@@ -147,7 +147,7 @@ func configurePgBouncerPath(config *pgxpool.Config, path PgBouncerPath, settings
 		time.Now,
 		// pools start at different instances, so the instances get even shares
 		// of the processes' first connections
-		mathrand.Intn(settings.InstanceCount),
+		mathrand.IntN(settings.InstanceCount),
 	)
 	config.ConnConfig.DialFunc = dialer.dialContext
 	glog.Infof(

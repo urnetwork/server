@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -11,8 +12,6 @@ import (
 	"runtime/debug"
 	"testing"
 	"time"
-
-	mathrand "math/rand"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -222,7 +221,7 @@ func testExchangeRelayPoolBalance(t testing.TB, delivery localDeliveryTestMode) 
 	transportB := newTransport(clientStrategyB, clientB.RouteManager(), networkIdB, userIdB, deviceIdB, clientIdB, clientBInstanceId)
 
 	messageContentBytes := make([]byte, messageContentSize/2)
-	mathrand.Read(messageContentBytes)
+	cryptorand.Read(messageContentBytes)
 	messageContent := hex.EncodeToString(messageContentBytes)
 
 	// send one message and wait for its receipt (round-trips the relay)

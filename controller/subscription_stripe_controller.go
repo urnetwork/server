@@ -124,7 +124,11 @@ type StripeEventCheckoutCompleteObject struct {
 	PaymentStatus     string                                `json:"payment_status"`
 	ClientReferenceId string                                `json:"client_reference_id"`
 	Subscription      string                                `json:"subscription"`
-	// set by /pay/data/checkout (apply_to_network, network_id, network_name, item_id)
+	// the three-letter currency amount_total is in, lowercase; a gift order is
+	// fulfilled only for its total in usd (gift_checkout_controller.go)
+	Currency string `json:"currency,omitempty"`
+	// set by /pay/data/checkout (apply_to_network, network_id, network_name,
+	// item_id), and by /pay/gift/checkout (gift_order_id)
 	Metadata map[string]string `json:"metadata"`
 	// the payment intent of a payment-mode session: an id, or an object when
 	// expanded. Read only for the sales notice's payment method.
@@ -212,6 +216,9 @@ type StripeEventDisputeObject struct {
 
 // The dispute status that gave the money back (charge.dispute.closed).
 const stripeDisputeStatusWon = "won"
+
+// The dispute status that kept the money from us (charge.dispute.closed).
+const stripeDisputeStatusLost = "lost"
 
 // The dispute statuses of an inquiry: warning_needs_response, warning_under_review
 // and warning_closed. No funds have left.
@@ -582,6 +589,15 @@ func stripeHandleCheckoutSessionCompleted(
 		// session before its money arrives: async_payment_succeeded fulfils it
 		// once it clears, and async_payment_failed records it when it does not
 		glog.Infof("[sub]checkout %s is %q, not paid: nothing is fulfilled until its payment clears\n", stripeSessionId, checkoutComplete.PaymentStatus)
+		return &StripeWebhookResult{}, nil
+	}
+
+	// a gift order's checkout (metadata gift_order_id) fulfils its order's
+	// codes, never the data pack skus below (gift_checkout_controller.go)
+	if stripeGiftCheckout(checkoutComplete) {
+		if err := stripeFulfillGiftCheckout(clientSession.Ctx, checkoutComplete); err != nil {
+			return nil, err
+		}
 		return &StripeWebhookResult{}, nil
 	}
 
@@ -1321,6 +1337,28 @@ func stripeFetchCharge(ctx context.Context, chargeId string) (*StripeEventCharge
 	)
 }
 
+// stripeCheckoutSessionIdForPaymentIntent is the checkout session a
+// single-charge purchase was paid through, "" when none is (a subscription's
+// invoice is not a session's).
+func stripeCheckoutSessionIdForPaymentIntent(ctx context.Context, paymentIntentId string) (string, error) {
+	url := fmt.Sprintf("%s/v1/checkout/sessions?payment_intent=%s", stripeApiBaseUrl, paymentIntentId)
+	sessions, err := server.HttpGetRequireStatusOk[*stripeCheckoutSessionList](
+		ctx,
+		url,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
+		},
+		server.ResponseJsonObject[*stripeCheckoutSessionList],
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch checkout session for payment intent %s: %v", paymentIntentId, err)
+	}
+	if 0 < len(sessions.Data) {
+		return sessions.Data[0].Id, nil
+	}
+	return "", nil
+}
+
 func stripeHandleChargeRefunded(
 	charge *StripeEventChargeObject,
 	clientSession *session.ClientSession,
@@ -1465,16 +1503,48 @@ func stripeHandleDisputeClosed(
 		glog.Infof("[sub]charge.dispute.closed with no dispute/charge id; ignoring\n")
 		return &StripeWebhookResult{}, nil
 	}
+	ctx := clientSession.Ctx
+	if dispute.Status == stripeDisputeStatusLost {
+		// a gift order's lost dispute ends its redeemed years and refunds the
+		// order (gift_refund_controller.go); any other lost dispute's clawback
+		// stands as it is
+		paymentIntentId := dispute.PaymentIntent
+		if paymentIntentId == "" {
+			// an older payload: the charge names it
+			charge, err := stripeFetchCharge(ctx, dispute.Charge)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch charge %s: %v", dispute.Charge, err)
+			}
+			if charge.Invoice != "" {
+				return &StripeWebhookResult{}, nil
+			}
+			paymentIntentId = charge.PaymentIntent
+		}
+		if giftOrderId, err := stripeGiftOrderIdForPaymentIntent(ctx, paymentIntentId); err != nil {
+			return nil, err
+		} else if giftOrderId != nil {
+			return stripeHandleGiftDisputeClosed(dispute, dispute.Charge, *giftOrderId, clientSession)
+		}
+		return &StripeWebhookResult{}, nil
+	}
 	if dispute.Status != stripeDisputeStatusWon {
 		return &StripeWebhookResult{}, nil
 	}
-	ctx := clientSession.Ctx
 	now := server.NowUtc()
 
 	// the store API reads, before the tx
 	charge, err := stripeFetchCharge(ctx, dispute.Charge)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch charge %s: %v", dispute.Charge, err)
+	}
+	// a gift order's won dispute restores exactly what the dispute voided
+	// (gift_refund_controller.go)
+	if charge.Invoice == "" {
+		if giftOrderId, err := stripeGiftOrderIdForPaymentIntent(ctx, charge.PaymentIntent); err != nil {
+			return nil, err
+		} else if giftOrderId != nil {
+			return stripeHandleGiftDisputeClosed(dispute, charge.Id, *giftOrderId, clientSession)
+		}
 	}
 	details := map[string]any{
 		"charge":     charge.Id,
@@ -1632,21 +1702,17 @@ func stripeHandleRefund(
 	} else if paymentIntentId != "" {
 		// a single-charge (data pack) purchase: the checkout session id keys
 		// the balance-code ledger
-		url := fmt.Sprintf("%s/v1/checkout/sessions?payment_intent=%s", stripeApiBaseUrl, paymentIntentId)
-		sessions, err := server.HttpGetRequireStatusOk[*stripeCheckoutSessionList](
-			ctx,
-			url,
-			func(header http.Header) {
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
-			},
-			server.ResponseJsonObject[*stripeCheckoutSessionList],
-		)
+		sessionId, err := stripeCheckoutSessionIdForPaymentIntent(ctx, paymentIntentId)
 		if err != nil {
-			return fmt.Errorf("failed to fetch checkout session for payment intent %s: %v", paymentIntentId, err)
+			return err
 		}
-		if 0 < len(sessions.Data) {
-			stripeSessionId = sessions.Data[0].Id
-		}
+		stripeSessionId = sessionId
+	}
+	// a gift order's checkout: its refunds and disputes follow the gift's own
+	// rules, never the data pack clawback (gift_refund_controller.go)
+	var giftOrderId *server.Id
+	if stripeSessionId != "" {
+		giftOrderId = model.GetGiftOrderIdForStripeSession(ctx, stripeSessionId)
 	}
 
 	handled := false
@@ -1704,6 +1770,12 @@ func stripeHandleRefund(
 				eventAction = model.PaymentReconcileActionRefundUnmatched
 				details["reason"] = "invoice_not_credited"
 			}
+		} else if stripeSessionId != "" && giftOrderId != nil {
+			// a gift order's charge: a refund voids its unredeemed codes by the
+			// amount refunded, partial or not, and a dispute every unredeemed
+			// one; neither ends a redeemed code's year
+			details["checkout_session"] = stripeSessionId
+			eventAction = stripeGiftRefundInTx(tx, ctx, *giftOrderId, refundId, action, amount, details, now)
 		} else if stripeSessionId != "" {
 			details["checkout_session"] = stripeSessionId
 			if !keepsPaidAmount {
