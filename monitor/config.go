@@ -1616,7 +1616,8 @@ func yamlString(v any) string {
 }
 
 // monitor.yml's dns_canary block (SIGNALS.md §28.1): which copy this is and where the dns API block and
-// its bearer are. dns.yml gives the roots, the NS glue and the anchors.
+// its bearer are. dns.yml gives the roots, the NS glue, the anchors and which roots' DS is published
+// (ds_published, DNS-M7-04), so the edges, the blocks and both copies read one statement of it.
 type dnsCanaryYaml struct {
 	// site or outside
 	Source string `yaml:"source"`
@@ -1625,7 +1626,6 @@ type dnsCanaryYaml struct {
 	BearerFile      string   `yaml:"bearer_file"`
 	UnboundHostPath string   `yaml:"unbound_host"`
 	PublicResolvers []string `yaml:"public_resolvers"`
-	DsPublished     bool     `yaml:"ds_published"`
 }
 
 // The canary's settings from its block, dns.yml and the bearer file: nil with no block, which reports the
@@ -1645,7 +1645,6 @@ func loadDnsCanarySettings(block *dnsCanaryYaml) *DnsCanarySettings {
 	}
 	settings.ApiUrl = strings.TrimSpace(block.ApiUrl)
 	settings.UnboundHostPath = strings.TrimSpace(block.UnboundHostPath)
-	settings.DsPublished = block.DsPublished
 	for _, text := range block.PublicResolvers {
 		address, err := netip.ParseAddrPort(strings.TrimSpace(text))
 		if err != nil {
