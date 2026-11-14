@@ -17,6 +17,21 @@ go test -tags sidecar_filecluster_t3 -count=1 -timeout 30m -run TestFileClusterS
 local/file-cluster-t3/t3.sh down     # removes the containers and their drives
 ```
 
+FS-41's storage losses (EVSB-M2-20; §19.10's site-loss runbook) run on these clusters through `wipe.sh`:
+
+```sh
+local/file-cluster-t3/wipe.sh drives seg-1 1 2 3   # those hosts' drives lost for good, past seg-1's parity
+local/file-cluster-t3/wipe.sh site                 # every cluster on new empty drives, its bucket made again
+go test -tags sidecar_filecluster_t3 -count=1 -timeout 30m -run '^TestFileClusterReseedStorageLossesOnT3$' .
+```
+
+`TestFileClusterReseedStorageLossesOnT3` (`file_cluster_reseed_test.go`) is the store's half of the row: a head
+that still reads while the segment it names does not, every bucket new and empty and passing the suite before any
+re-seed, and the new buckets taking a re-seed's segment, head and `reseed/` statement as first writes. It removes
+every drive T3 has and leaves the clusters up and empty, so `sidecar-t3.sh nightly` runs it last, and it is in no
+whole-suite script. What evs's `/reseed` admits and what a mirror returns through it run in sidecar on its fakes
+(`evsservice/reseed_test.go`, `sidecartest/evs_reseed_world_test.go`); the route has not run on these clusters.
+
 Containers are `sidecar-test-fc-*`, ports are on loopback above 50000, and the root user in `docker-compose.yml` is
 synthetic. Every host has a fixed address on the stack's own network (172.30.52.0/24), so a host a test stops and starts
 (sidecart3's HostDown and HostUp, the suite's host cases) comes back where the others dial it. The image is `FROM scratch` with two binaries built here, so nothing is fetched. Hosts run a drive timeout
