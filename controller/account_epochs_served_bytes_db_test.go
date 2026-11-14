@@ -7,8 +7,10 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,24 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
+
+// An earning boundary at cutoff, as sn.yml states it. prepare records it, as
+// Main's was recorded; without that the boundary is not in force.
+func pushServedBytesEarningBoundary(t testing.TB, ctx context.Context, cutoff time.Time, prepare bool) {
+	t.Helper()
+	data := fmt.Sprintf("schema: urnetwork-provider-payout-transition-v1\ncutoff_utc: %q\nattribution: settled_contract_close_time\nlegacy_usdc: finish_pre_cutoff_obligations\nmainnet:\n  profile: mainnet\n  chain_id: 964\n  genesis_hash: %q\n  netuid: 25\n  activation: blocked\n", cutoff.UTC().Format(time.RFC3339), "0x"+strings.Repeat("11", 32))
+	t.Cleanup(server.Config.PushSimpleResource("sn.yml", []byte(data)))
+	if !prepare {
+		return
+	}
+	policy, err := server.LoadProviderPayoutTransition(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.PrepareProviderPayoutBoundary(ctx, policy.ConfigSha256); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // Clears the chain state and epoch windows earlier tests cached.
 func resetSnEarningsCaches() {
@@ -186,6 +206,67 @@ func TestAccountEpochsReportServedBytesAndTheCurrentEpoch(t *testing.T) {
 		}
 		if len(result.Epochs) != 1 || result.Epochs[0].ServedByteCount != 3*gib {
 			t.Fatalf("epochs without an open one %+v", result.Epochs)
+		}
+	})
+}
+
+// The hourly points leaderboard rebuild keeps the bytes served of blocks
+// without an award moving (model.AdvanceOperatorBlockTrafficRollup): a run
+// reads the settled traffic of the completed block and reports the
+// statements it read. A rollup that cannot run, under an earning boundary
+// that differs from the recorded one, is logged, and the rebuild still
+// succeeds.
+func TestRebuildPointsLeaderboardAdvancesTheServedBytesRollup(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		gib := model.ByteCount(1024 * 1024 * 1024)
+		now := server.NowUtc()
+		block := int64(model.SubnetBlockNumber(now)) - 1
+		blockStart := model.SubnetBlockGenesis.Add(time.Duration(block-1) * model.SubnetBlockDuration)
+		blockEnd := blockStart.Add(model.SubnetBlockDuration)
+		// the block before has no window past the cutoff, so the rollup's first
+		// run starts at this block, wherever the wall clock is in the next one
+		pushServedBytesEarningBoundary(t, ctx, blockStart, true)
+
+		providerNetworkId, providerClientId := server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(ctx, providerNetworkId, "served-bytes-provider", server.NewId())
+		contractId := server.ContractIdFloor(blockStart)
+		contractId[15] = 1
+		swept := blockStart.Add(time.Hour)
+		usage := fmt.Sprintf(`{"version":1,"byte_count":%d,"providers":[{"client_id":%q,"network_id":%q,"byte_count":%d}]}`, gib, providerClientId, providerNetworkId, gib)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+				(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,'settled',$9::jsonb,true)`,
+				contractId, server.NewId(), server.NewId(), providerNetworkId, providerClientId, gib, blockStart, swept, usage))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep
+				(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time)
+				VALUES($1,$2,$3,$4,$5,0,$6)`,
+				contractId, server.NewId(), providerNetworkId, providerClientId, gib, swept))
+		})
+
+		anonymous := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer anonymous.Cancel()
+		result, err := RebuildPointsLeaderboard(&RebuildPointsLeaderboardArgs{}, anonymous)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.TrafficChunks <= 0 {
+			t.Fatalf("the rebuild read %d traffic statements", result.TrafficChunks)
+		}
+		window := []model.PointsEpochWindow{{Epoch: 1, Start: blockEnd.Add(-time.Hour), End: blockEnd.Add(time.Hour)}}
+		if served := model.GetAccountServedBytesInWindows(ctx, providerNetworkId, window, now)[0]; served.ByteCount != gib {
+			t.Fatalf("the provider served %d bytes in block %d, want %d", served.ByteCount, block, gib)
+		}
+
+		// a boundary other than the recorded one stops the rollup, not the rebuild
+		pushServedBytesEarningBoundary(t, ctx, blockStart.Add(-24*time.Hour), false)
+		result, err = RebuildPointsLeaderboard(&RebuildPointsLeaderboardArgs{}, anonymous)
+		if err != nil {
+			t.Fatalf("a rollup that cannot run failed the rebuild: %s", err)
+		}
+		if result.TrafficChunks != 0 {
+			t.Fatalf("the rollup read %d statements under a boundary not in force", result.TrafficChunks)
 		}
 	})
 }
