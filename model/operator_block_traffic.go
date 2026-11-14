@@ -1,8 +1,9 @@
 package model
 
 // The bytes served per operator block, which GET /account/epochs reports next
-// to each epoch's points (owner approval 2026-11-14, server#451: "We're adding
-// bytes served per epoch to /account/epochs, next to points and amount, with a
+// to each epoch's points, and as running figures for the open epoch and the
+// open block (owner approval 2026-11-14, server#451: "We're adding bytes
+// served per epoch to /account/epochs, next to points and amount, with a
 // running figure for the current epoch.").
 //
 // An epoch's points count each operator block's award in the epoch that
@@ -352,19 +353,20 @@ func removeAwardedOperatorBlockTraffic(ctx context.Context) {
 	}
 }
 
-// The bytes served in one window of GET /account/epochs
-// (GetAccountServedBytesInWindows).
+// The bytes served in one window or one block of GET /account/epochs
+// (GetAccountServedBytes).
 type AccountServedBytes struct {
-	// the network's bytes in the operator blocks that end in the window
+	// the network's bytes in the operator blocks that end in the window, or
+	// in the block
 	ByteCount ByteCount
 	// the blocks' traffic is counted through this time, the earliest over the
 	// blocks that have started: a block's end once its award committed, else
 	// the sweep time the rollup read it through, or its start before the
-	// rollup read any of it. Nil when no block of the window has started.
+	// rollup read any of it. Nil when no block has started.
 	AsOf *time.Time
 }
 
-// One block's bytes of a network, as GetAccountServedBytesInWindows reads them.
+// One block's bytes of a network, as GetAccountServedBytes reads them.
 type operatorBlockServedBytes struct {
 	awarded         bool
 	awardByteCount  ByteCount
@@ -409,30 +411,43 @@ const operatorBlockServedBytesSql = `
 	LEFT JOIN traffic ON traffic.block_number = block.block_number
 `
 
-// GetAccountServedBytesInWindows sums the network's bytes served in each
-// window as GetAccountNanoPointsInWindow sums its points: the bytes of the
-// operator blocks that end in the window, the award's for a block whose award
-// has committed, else the rollup's so far. A block that has not started by
-// now counts nothing yet. One statement for every window, in order.
-func GetAccountServedBytesInWindows(ctx context.Context, networkId server.Id, windows []PointsEpochWindow, now time.Time) []*AccountServedBytes {
-	windowBlocks := make([][]int64, len(windows))
+// GetAccountServedBytes reads the network's bytes served in each window, as
+// GetAccountNanoPointsInWindow counts its points (the operator blocks that end
+// in the window), and in each listed block, all in one statement: the award's
+// bytes for a block whose award has committed, else the rollup's so far. A
+// block that has not started by now counts nothing yet. The results follow
+// the windows' and the blocks' order.
+func GetAccountServedBytes(
+	ctx context.Context,
+	networkId server.Id,
+	windows []PointsEpochWindow,
+	blocks []int64,
+	now time.Time,
+) (windowBytes []*AccountServedBytes, blockBytes []*AccountServedBytes) {
+	// each window's blocks, then each listed block on its own
+	groups := make([][]int64, 0, len(windows)+len(blocks))
+	for _, window := range windows {
+		groups = append(groups, operatorBlocksEndingIn(window.Start, window.End))
+	}
+	for _, block := range blocks {
+		groups = append(groups, []int64{block})
+	}
 	blockSet := map[int64]bool{}
-	for i, window := range windows {
-		windowBlocks[i] = operatorBlocksEndingIn(window.Start, window.End)
-		for _, block := range windowBlocks[i] {
+	for _, group := range groups {
+		for _, block := range group {
 			blockSet[block] = true
 		}
 	}
-	blocks := slices.Sorted(maps.Keys(blockSet))
-	planIds := make([]server.Id, 0, len(blocks))
-	for _, block := range blocks {
+	readBlocks := slices.Sorted(maps.Keys(blockSet))
+	planIds := make([]server.Id, 0, len(readBlocks))
+	for _, block := range readBlocks {
 		planIds = append(planIds, OperatorBlockPointsPlanId(block))
 	}
-	blockBytes := map[int64]*operatorBlockServedBytes{}
-	if 0 < len(blocks) {
+	readBytes := map[int64]*operatorBlockServedBytes{}
+	if 0 < len(readBlocks) {
 		server.Db(ctx, func(conn server.PgConn) {
-			blockBytes = map[int64]*operatorBlockServedBytes{}
-			result, err := conn.Query(ctx, operatorBlockServedBytesSql, networkId, blocks, planIds)
+			readBytes = map[int64]*operatorBlockServedBytes{}
+			result, err := conn.Query(ctx, operatorBlockServedBytesSql, networkId, readBlocks, planIds)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					var block int64
@@ -444,27 +459,26 @@ func GetAccountServedBytesInWindows(ctx context.Context, networkId server.Id, wi
 						&served.rollupByteCount,
 						&served.readThrough,
 					))
-					blockBytes[block] = served
+					readBytes[block] = served
 				}
 			})
 		})
 	}
 
-	servedBytes := make([]*AccountServedBytes, 0, len(windows))
-	for i := range windows {
+	servedBytes := make([]*AccountServedBytes, 0, len(groups))
+	for _, group := range groups {
 		served := &AccountServedBytes{}
-		for _, block := range windowBlocks[i] {
+		for _, block := range group {
 			blockStart := operatorBlockStart(block)
 			if now.Before(blockStart) {
 				continue
 			}
 			countedThrough := blockStart
-			if blockServed, ok := blockBytes[block]; ok {
-				switch {
-				case blockServed.awarded:
+			if blockServed, ok := readBytes[block]; ok {
+				if blockServed.awarded {
 					served.ByteCount += blockServed.awardByteCount
 					countedThrough = blockStart.Add(SubnetBlockDuration)
-				default:
+				} else {
 					served.ByteCount += blockServed.rollupByteCount
 					if blockServed.readThrough != nil {
 						countedThrough = *blockServed.readThrough
@@ -477,5 +491,11 @@ func GetAccountServedBytesInWindows(ctx context.Context, networkId server.Id, wi
 		}
 		servedBytes = append(servedBytes, served)
 	}
-	return servedBytes
+	return servedBytes[:len(windows)], servedBytes[len(windows):]
+}
+
+// GetAccountServedBytesInWindows is GetAccountServedBytes of windows alone.
+func GetAccountServedBytesInWindows(ctx context.Context, networkId server.Id, windows []PointsEpochWindow, now time.Time) []*AccountServedBytes {
+	windowBytes, _ := GetAccountServedBytes(ctx, networkId, windows, nil, now)
+	return windowBytes
 }

@@ -424,7 +424,7 @@ type AccountEpochsArgs struct {
 // The points count each weekly operator block's award in the epoch that
 // contains the block's end, and the bytes served count the same blocks: the
 // bytes each block's award shared its payout points by, or the bytes so far
-// of a block whose award has not committed (model.GetAccountServedBytesInWindows).
+// of a block whose award has not committed (model.GetAccountServedBytes).
 type AccountEpoch struct {
 	Epoch           uint64          `json:"epoch"`
 	StartMillis     int64           `json:"start_millis"`
@@ -439,7 +439,8 @@ type AccountEpoch struct {
 // so far that count toward it, by the rule of the finalized epochs, so when
 // the epoch finalizes its served_byte_count continues this figure. Those are
 // the bytes of the operator blocks that end in its window; traffic in a block
-// that ends after the window counts toward the next epoch.
+// that ends after the window counts toward the next epoch, and shows in
+// AccountCurrentBlock until then.
 type AccountCurrentEpoch struct {
 	Epoch       uint64 `json:"epoch"`
 	StartMillis int64  `json:"start_millis"`
@@ -450,6 +451,23 @@ type AccountCurrentEpoch struct {
 	AsOfMillis int64 `json:"as_of_millis"`
 }
 
+// AccountCurrentBlock is the open weekly operator block, Sunday 00:00 UTC to
+// the next Sunday 00:00 UTC: the bytes served in it so far, a running figure
+// that follows live traffic at the rollup's settle time and cadence. The
+// block counts in the epoch whose window holds its end (Epoch): when that is
+// the open epoch, these bytes are part of AccountCurrentEpoch's figure; else
+// they count toward a later epoch, once it opens.
+type AccountCurrentBlock struct {
+	BlockNumber     int64           `json:"block_number"`
+	StartMillis     int64           `json:"start_millis"`
+	EndMillis       int64           `json:"end_millis"`
+	ServedByteCount model.ByteCount `json:"served_byte_count"`
+	// the traffic is counted through this time
+	AsOfMillis int64 `json:"as_of_millis"`
+	// the epoch the block counts in, projected from the open epoch's window
+	Epoch uint64 `json:"epoch"`
+}
+
 type AccountEpochsError struct {
 	Message string `json:"message"`
 }
@@ -458,7 +476,20 @@ type AccountEpochsResult struct {
 	Epochs []AccountEpoch `json:"epochs"`
 	// absent while the open epoch's window is unknown
 	CurrentEpoch *AccountCurrentEpoch `json:"current_epoch,omitempty"`
+	// absent while the open epoch's window is unknown, which places the block
+	CurrentBlock *AccountCurrentBlock `json:"current_block,omitempty"`
 	Error        *AccountEpochsError  `json:"error,omitempty"`
+}
+
+// snEpochOfBlockEnd is the epoch whose window holds a block's end: the open
+// epoch, or one after it, each the open epoch's length. ok is false for an
+// end before the open epoch's start, which no open block has.
+func snEpochOfBlockEnd(openWindow model.PointsEpochWindow, blockEnd time.Time) (epoch uint64, ok bool) {
+	length := openWindow.End.Sub(openWindow.Start)
+	if length <= 0 || blockEnd.Before(openWindow.Start) {
+		return 0, false
+	}
+	return openWindow.Epoch + uint64(blockEnd.Sub(openWindow.Start)/length), true
 }
 
 // snOpenEpochWindow is the epoch the contract is in when it is newer than the
@@ -492,7 +523,7 @@ func snOpenEpochWindow(ctx context.Context, cfg *StConfig, newest *model.StEpoch
 }
 
 // AccountEpochs lists the caller network's finalized epochs, newest first,
-// and the open epoch's running bytes served.
+// and the running bytes served of the open epoch and of the open block.
 func AccountEpochs(
 	args *AccountEpochsArgs,
 	clientSession *session.ClientSession,
@@ -529,11 +560,17 @@ func AccountEpochs(
 	if 0 < len(rows) {
 		openWindow.Epoch, openWindow.Start, openWindow.End, open = snOpenEpochWindow(ctx, cfg, rows[0], windows[0].Start, windows[0].End)
 	}
+	now := server.NowUtc()
+	// the open block, which only the open epoch's window places
+	currentBlock := int64(model.SubnetBlockNumber(now))
+	currentBlockStart := model.SubnetBlockStart(now)
+	currentBlockEnd := currentBlockStart.Add(model.SubnetBlockDuration)
+	blocks := []int64{}
 	if open {
 		windows = append(windows, openWindow)
+		blocks = append(blocks, currentBlock)
 	}
-	now := server.NowUtc()
-	servedBytes := model.GetAccountServedBytesInWindows(ctx, networkId, windows, now)
+	servedBytes, blockBytes := model.GetAccountServedBytes(ctx, networkId, windows, blocks, now)
 
 	result := &AccountEpochsResult{Epochs: []AccountEpoch{}}
 	for i, row := range rows {
@@ -565,6 +602,22 @@ func AccountEpochs(
 			EndMillis:       openWindow.End.UnixMilli(),
 			ServedByteCount: served.ByteCount,
 			AsOfMillis:      asOf.UnixMilli(),
+		}
+		if countEpoch, ok := snEpochOfBlockEnd(openWindow, currentBlockEnd); ok {
+			served := blockBytes[0]
+			// the block has started, so this is always set
+			asOf := currentBlockStart
+			if served.AsOf != nil {
+				asOf = *served.AsOf
+			}
+			result.CurrentBlock = &AccountCurrentBlock{
+				BlockNumber:     currentBlock,
+				StartMillis:     currentBlockStart.UnixMilli(),
+				EndMillis:       currentBlockEnd.UnixMilli(),
+				ServedByteCount: served.ByteCount,
+				AsOfMillis:      asOf.UnixMilli(),
+				Epoch:           countEpoch,
+			}
 		}
 	}
 	return result, nil
