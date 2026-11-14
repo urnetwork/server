@@ -531,7 +531,9 @@ const stripeGammaRenewsMessage = "Your Pro plan paid with Gamma renews from your
 // the customer would be charged for twice: a crypto year never renews. A USDC
 // year used to block card checkout through its 30-day grace, so the renewal
 // notices (service_reminders pro_ending) sent its buyers to a card checkout
-// that refused them (mmm/ONBOARDING-RETENTION.md P17).
+// that refused them (mmm/ONBOARDING-RETENTION.md P17). A redeemed gift year
+// (mmm/GIFTOFPRIVACY.md) never renews either, like a crypto year, so it blocks
+// nothing (the owner, 2026-11-13).
 //
 // A plan paid with Gamma renews from the account's deposit while its
 // automatic renewal is on (gammaRenews), so it blocks then. With renewal off
@@ -542,7 +544,8 @@ func subscriptionMarketsBlockNewPurchase(markets []model.SubscriptionMarket, gam
 		switch market {
 		case model.SubscriptionMarketManual, model.SubscriptionMarketX402,
 			model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
-			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
+			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum,
+			model.SubscriptionMarketGift:
 			continue
 		case model.SubscriptionMarketGamma:
 			if !gammaRenews {

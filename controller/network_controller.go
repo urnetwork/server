@@ -76,6 +76,13 @@ func NetworkCreate(
 
 	}
 
+	// A Pro gift code redeemed at sign-up (`balance_code`): its Pro is
+	// refreshed, and the new network becomes its giver's referral unless the
+	// sign-up's own referral code linked one above (mmm/GIFTOFPRIVACY.md §6).
+	// The refresh above granted its first cycle's data: a gift year is a
+	// supporter renewal.
+	model.FinishGiftRedemption(clientSession.Ctx, result.GiftRedemption)
+
 	verifyUseNumeric := false
 
 	if networkCreate.VerifyUseNumeric {

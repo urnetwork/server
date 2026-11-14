@@ -525,9 +525,14 @@ type ReengagementSendPlan struct {
 
 // reengagementProEndedAt is when Pro stopped for a win-back network: the end
 // of its last supporter window, which already carries our 30-day grace on the
-// markets that give one and the store's day of slack on the others.
+// markets that give one and the store's day of slack on the others. A gift
+// year redeemed after the network's last paid window held Pro until its own
+// end, so that is when Pro stopped.
 func reengagementProEndedAt(ctx context.Context, networkId server.Id) *time.Time {
 	end, _, ok := model.NetworkLastPaidWindow(ctx, networkId)
+	if giftEnd, giftOk := model.NetworkLastGiftWindowEnd(ctx, networkId); giftOk && (!ok || end.Before(giftEnd)) {
+		end, ok = giftEnd, true
+	}
 	if !ok {
 		return nil
 	}

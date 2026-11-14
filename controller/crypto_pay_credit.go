@@ -17,7 +17,9 @@ package controller
 //     transaction, on every path (the Solana reconciler used to skip both)
 //  4. a data pack to a network: a pro = false balance and the applied note
 //  5. a data pack as a code: the balance code, emailed through the account
-//     message outbox when the invoice has an email
+//     message outbox when the invoice has an email; a gift order's invoice
+//     (item gift_pro_year): the order's codes and its delivery
+//     (gift_crypto_controller.go)
 //  6. the receipts that made up the payment move to credited
 //  7. after commit, the Pro cache is refreshed
 //
@@ -96,6 +98,11 @@ func cryptoCreditIntentInConn(
 	intent *model.CryptoPaymentIntent,
 	credit *cryptoCredit,
 ) (credited bool, returnErr error) {
+	// a gift order's invoice buys the order's codes, not a plan or a data
+	// pack (gift_crypto_controller.go)
+	if cryptoGiftInvoice(intent) {
+		return cryptoCreditGiftIntentInConn(connOwner, clientSession, intent, credit)
+	}
 	ctx := clientSession.Ctx
 	plan := slices.Contains(cryptoPayKnownPlans, intent.Item)
 	market := cryptoAssetMarket(intent.Asset)
@@ -172,19 +179,8 @@ func cryptoCreditIntentInTx(
 		}
 	}
 	// the invoice one-shot first: when it loses, nothing was written
-	if !model.MarkCryptoPaymentIntentCreditedInTx(tx, ctx, intent.IntentId, now, credit.usdNanoCents) {
+	if !cryptoClaimIntentInTx(tx, clientSession, intent, credit, now) {
 		return false, nil
-	}
-	if intent.Asset == model.CryptoAssetUsdcSolana {
-		completed, err := model.MarkPaymentIntentCompletedInTx(tx, *intent.SolanaReference, credit.solanaSignature, clientSession)
-		server.Raise(err)
-		if !completed {
-			server.Raise(errCryptoSolanaOneShotDiverged)
-		}
-		if credit.resolvesUnfulfilled &&
-			!model.RemoveUnfulfilledSolanaPaymentInTx(tx, ctx, credit.solanaSignature, model.SolanaUnfulfilledReasonNoIntent) {
-			server.Raise(errCryptoUnfulfilledPaymentChanged)
-		}
 	}
 
 	var balanceId *server.Id
@@ -281,21 +277,64 @@ func cryptoCreditIntentInTx(
 	}
 
 	model.SetCryptoPaymentIntentGrantInTx(tx, ctx, intent.IntentId, balanceId, balanceCodeId)
-	if 0 < len(credit.receipts) {
-		intentId := intent.IntentId
-		model.SetCryptoPaymentReceiptsStateInTx(tx, ctx, &intentId, credit.receipts, model.CryptoReceiptStateCredited, "")
-		for _, key := range credit.receipts {
-			if value, ok := credit.receiptUsd[key]; ok {
-				model.SetCryptoPaymentReceiptUsdValueInTx(tx, ctx, key, value)
-			}
-		}
-	}
+	cryptoCreditReceiptsInTx(tx, ctx, intent, credit)
 	// this call won the invoice one-shot: a new payment, posted once the
 	// transaction commits
 	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
 		return cryptoSalesNotice(intent, credit, plan, byteCount)
 	})
 	return true, nil
+}
+
+// cryptoClaimIntentInTx wins an invoice's one-shot for this credit, and for
+// USDC the linked Solana intent's own in the same transaction (with an
+// operator's credit of a recorded unfulfilled payment, that record's removal).
+// false when another credit, or a void, got there first: nothing was written.
+// Past the invoice's own one-shot a failure raises, so the transaction rolls
+// back whole.
+func cryptoClaimIntentInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	intent *model.CryptoPaymentIntent,
+	credit *cryptoCredit,
+	now time.Time,
+) bool {
+	ctx := clientSession.Ctx
+	if !model.MarkCryptoPaymentIntentCreditedInTx(tx, ctx, intent.IntentId, now, credit.usdNanoCents) {
+		return false
+	}
+	if intent.Asset == model.CryptoAssetUsdcSolana {
+		completed, err := model.MarkPaymentIntentCompletedInTx(tx, *intent.SolanaReference, credit.solanaSignature, clientSession)
+		server.Raise(err)
+		if !completed {
+			server.Raise(errCryptoSolanaOneShotDiverged)
+		}
+		if credit.resolvesUnfulfilled &&
+			!model.RemoveUnfulfilledSolanaPaymentInTx(tx, ctx, credit.solanaSignature, model.SolanaUnfulfilledReasonNoIntent) {
+			server.Raise(errCryptoUnfulfilledPaymentChanged)
+		}
+	}
+	return true
+}
+
+// cryptoCreditReceiptsInTx moves the receipts that made up a credited payment
+// to credited, each with its share of the credit's value.
+func cryptoCreditReceiptsInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	intent *model.CryptoPaymentIntent,
+	credit *cryptoCredit,
+) {
+	if len(credit.receipts) == 0 {
+		return
+	}
+	intentId := intent.IntentId
+	model.SetCryptoPaymentReceiptsStateInTx(tx, ctx, &intentId, credit.receipts, model.CryptoReceiptStateCredited, "")
+	for _, key := range credit.receipts {
+		if value, ok := credit.receiptUsd[key]; ok {
+			model.SetCryptoPaymentReceiptUsdValueInTx(tx, ctx, key, value)
+		}
+	}
 }
 
 func cryptoCreditTiming(late bool) string {
