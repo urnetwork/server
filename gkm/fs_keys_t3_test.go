@@ -7,7 +7,9 @@
 // generation, its lost and killed claims, a commit below its predecessor's generation, a delivery to a non-holder, a
 // claim at a stale tip, a last-resort KeyPackage in two groups and the kills around its wrap, gen/ and epoch/ writes,
 // FS-24's hints with H1 and H2, FS-62's acks lost with Redis, FS-23's depositor and FS-102's key legs, a copied
-// Delegation bundle after a compromise and after a removal. Like the other T3 tests here it carries the sidecar_localstack tag and
+// Delegation bundle after a compromise and after a removal, and KEYS-M2-29's FS-103 (late delivery identity across key
+// replacement, an older key's object aging out, a same-generation RecoveryRebind) and FS-106 (35 days of key upkeep
+// under r, a parked device's ReaderKey). Like the other T3 tests here it carries the sidecar_localstack tag and
 // fails, rather than skips, when the stack is down.
 
 package gkm
@@ -113,4 +115,24 @@ func TestFsKeysT3PendingRepeatsWhileADroppedLeafStandsAndStopsPastIt(t *testing.
 
 func TestFsKeysT3AWaitingLeafsWantRaisesWrapPending(t *testing.T) {
 	runFsKeysT3(t, gkmschedule.FsKeysScheduleWaitingLeafWant)
+}
+
+func TestFsKeysT3ALateDeliveryKeepsItsIdentityAcrossKeyReplacement(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleLateDeliveryIdentity)
+}
+
+func TestFsKeysT3AnOlderKeysObjectAgesOutThirtyDaysPastTheNewerOnes(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleOlderKeyDeliveryAgesOut)
+}
+
+func TestFsKeysT3ASameGenerationRebindLeavesBothBindingsAtAKill(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleSameGenerationRebind)
+}
+
+func TestFsKeysT3UpkeepUnderRHoldsThroughTheRetentionHorizon(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleKeyUpkeepUnderR)
+}
+
+func TestFsKeysT3AParkedDevicesReaderKeyWaitsForItsLift(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleParkedReaderKeyWaits)
 }
