@@ -224,6 +224,9 @@ func initTaskSchedule(ctx context.Context) {
 		// mx-2's hours dropped at 24 h and mx-3's retired host keys at 30
 		// days; not scheduled without MG7
 		work.ScheduleMailRetention(clientSession, tx)
+		// §15.15's {mxr_} route projection, following the label map and
+		// rebuilding a page a run; not scheduled without MG7
+		work.ScheduleMailRouteProjection(clientSession, tx)
 		// §18.7's token pass every 60 s: slots whose master changed reconciled,
 		// lost applies swept, removed rows deleted at 24 h; not scheduled
 		// without MG8
@@ -746,6 +749,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.MailRetention,
 			work.MailRetentionPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.MailRouteProjection,
+			work.MailRouteProjectionPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.PushTokenPass,
