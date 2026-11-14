@@ -73,7 +73,7 @@ func sourceIndexRepositoryUrl(repository string) (string, error) {
 	switch repository {
 	case "sn":
 		return "https://github.com/urfoundation/sn", nil
-	case "server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "warp", "gvisor":
+	case "server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "warp", "gvisor", "sidecar":
 		return "https://github.com/urnetwork/" + repository, nil
 	default:
 		return "", errors.New("source index repository is outside the complete frozen graph")
@@ -115,7 +115,7 @@ func newSourceIndexCheckpoint(status *controller.CompetitionSourceLifecycleStatu
 	}
 	lockDigest, err := model.CompetitionSourceLockDigestForMode(intent.Commits, intent.Staging)
 	if err != nil || lockDigest != intent.SourceLockSha256 {
-		return nil, errors.New("source index requires the complete exact ten-repository source lock")
+		return nil, errors.New("source index requires the complete exact source lock of its frozen graph")
 	}
 	manifestDigest := sha256.Sum256(intent.Manifest)
 	if len(intent.Manifest) == 0 || hex.EncodeToString(manifestDigest[:]) != intent.ManifestSha256 {

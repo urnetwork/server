@@ -59,6 +59,10 @@ func TestEvaluatorWorkCoverageWorkerSchemaBindsExactVersionedShape(t *testing.T)
 			request["scorer_version"] = model.CompetitionWorkCoverageScorerVersion
 			request["evaluation_policy"].(map[string]any)["g2_volume_policy"] = string(model.CompetitionG2VolumePolicyMinimumWork)
 			request["evaluation_policy"].(map[string]any)["work_coverage_policy"] = policy
+			if script == "evaluator-subevaluation.sh" {
+				// This tree's private helper serves the eleven repositories (QD-769).
+				request["evaluation_policy"].(map[string]any)["source_graph_policy"] = string(model.CompetitionSourceGraphPolicySidecar)
+			}
 			if test.mutate != nil {
 				test.mutate(request)
 			}

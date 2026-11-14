@@ -97,6 +97,7 @@ evaluation_source:
     - sn
     - warp
     - gvisor
+    - sidecar
   canonical_patch_repository: server
   production_round_source_epoch_offset: -1
   staging_source_epoch: 0

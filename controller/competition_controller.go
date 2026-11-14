@@ -795,6 +795,9 @@ func (self *Settings) Validate() error {
 	if _, err := model.CompetitionScorerVersionForWorkCoverage(p.G2VolumePolicy, p.WorkCoveragePolicy); err != nil {
 		return err
 	}
+	if err := model.ValidateCompetitionSourceGraphPolicy(p.SourceGraphPolicy); err != nil {
+		return err
+	}
 	if p.WorkCoveragePolicy != nil {
 		dependency := "model/competition_work_coverage_policy.go"
 		if self.PatchPolicy.PathBase == competitionMonoRootPathBase {
@@ -1747,6 +1750,7 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 	// Its image and command pins must still match the immutable snapshot below.
 	copy.EvaluationPolicy.G2VolumePolicy = policy.EvaluationPolicy.G2VolumePolicy
 	copy.EvaluationPolicy.WorkCoveragePolicy = policy.EvaluationPolicy.WorkCoveragePolicy
+	copy.EvaluationPolicy.SourceGraphPolicy = policy.EvaluationPolicy.SourceGraphPolicy
 	copy.DistributedEvaluationPolicy = policy.DistributedEvaluationPolicy
 	copy.distributedRoundEpoch = round.Epoch
 	if policy.DistributedEvaluationPolicy != nil {
@@ -4436,6 +4440,9 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(policy.EvaluationPolicy.G2VolumePolicy, policy.EvaluationPolicy.WorkCoveragePolicy)
 	if err != nil || policy.ScorerVersion != scorerVersion || (policy.Schema == 1 && policy.EvaluationPolicy.G2VolumePolicy != "") {
 		return nil, errors.New("round scorer version does not match its frozen g2 volume policy")
+	}
+	if model.ValidateCompetitionSourceGraphPolicy(policy.EvaluationPolicy.SourceGraphPolicy) != nil || (policy.Schema == 1 && policy.EvaluationPolicy.SourceGraphPolicy != "") {
+		return nil, errors.New("round policy names a source graph no evaluator release was cut for")
 	}
 	if policy.Schema == 1 {
 		if policy.EvaluatorCommand != "" || policy.EvaluatorCommandSha256 != "" {

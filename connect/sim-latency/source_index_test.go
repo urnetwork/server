@@ -111,7 +111,7 @@ func TestSourceIndexExportsExactTenRepositoriesAndSanitizesPrivateInput(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(checkpoint.Repositories) != 10 || !checkpoint.CompilerVerified || checkpoint.CompilerEvidenceSha256 != status.CompilerEvidenceSha256 {
+	if len(checkpoint.Repositories) != 11 || !checkpoint.CompilerVerified || checkpoint.CompilerEvidenceSha256 != status.CompilerEvidenceSha256 {
 		t.Fatal("public source checkpoint omitted complete source or genuine compiler evidence")
 	}
 	commits := map[string]string{}
@@ -159,7 +159,7 @@ func TestSourceIndexKeepsSelectedProductSeparateFromInstrumentChild(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(checkpoint.SelectedProductRepositories) != 10 || checkpoint.SelectedProductSourceLockSha256 != intent.TrustedInstrument.SelectedProductSourceLockSha256 ||
+	if len(checkpoint.SelectedProductRepositories) != 11 || checkpoint.SelectedProductSourceLockSha256 != intent.TrustedInstrument.SelectedProductSourceLockSha256 ||
 		checkpoint.SelectedProductSourceLockSha256 == checkpoint.SourceLockSha256 || checkpoint.SelectedProductKind != "reviewed_source_carry_forward" {
 		t.Fatal("instrument child was substituted for actual selected product identity")
 	}

@@ -50,9 +50,13 @@ type CompetitionPatchPolicy struct {
 	ForbiddenPaths []string `json:"forbidden_paths" yaml:"forbidden_paths"`
 }
 
+// SourceGraphPolicy is omitted for every round of the ten repositories, so their
+// frozen policy bytes do not change; sidecar/1 selects the evaluator releases of
+// the eleven (QD-769).
 type CompetitionEvaluationPolicy struct {
 	G2VolumePolicy          CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty" yaml:"g2_volume_policy,omitempty"`
 	WorkCoveragePolicy      *CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty" yaml:"work_coverage_policy,omitempty"`
+	SourceGraphPolicy       CompetitionSourceGraphPolicy   `json:"source_graph_policy,omitempty" yaml:"source_graph_policy,omitempty"`
 	HardwareId              string                         `json:"hardware_id" yaml:"hardware_id"`
 	HostQualificationSha256 string                         `json:"host_qualification_sha256" yaml:"host_qualification_sha256"`
 	ConfigLocalSha256       string                         `json:"config_local_sha256" yaml:"config_local_sha256"`

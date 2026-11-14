@@ -2706,9 +2706,9 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	prepare := string(prepareBytes)
 	for _, required := range []string{
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)`,
 		`if [ "$staging" = true ]; then`,
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)`,
 		`readonly REPOSITORIES`,
 		`docker cp "$source_container:/workspace/$repository" "$destination/"`,
 		`checkout --quiet -B "$source_branch" "$expected_commit"`,
@@ -2728,6 +2728,8 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 		}
 	}
 
+	// The sealed producer keeps the ten repositories it was cut with; the
+	// helpers of this tree hold the eleven of the sidecar releases (QD-769).
 	evaluatorBytes, err := os.ReadFile("../connect/sim-latency/evaluator/container/evaluator.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -2762,9 +2764,9 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	for _, required := range []string{
 		`for repository in "${REPOSITORIES[@]}"; do`,
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)`,
 		`if [ "$staging" = true ]; then`,
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)`,
 		`readonly REPOSITORIES`,
 	} {
 		if !strings.Contains(string(buildSubmissionBytes), required) {
@@ -2891,9 +2893,9 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)`,
 		`if [ "$staging" = true ]; then`,
-		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)`,
+		`REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)`,
 		`readonly REPOSITORIES`,
 		`for repository in "${REPOSITORIES[@]}"; do`,
 	} {

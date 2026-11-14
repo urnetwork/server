@@ -32,6 +32,7 @@ import (
 type roundBaselinePreparationCompletion struct {
 	G2VolumePolicy         model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
 	WorkCoveragePolicy     *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	SourceGraphPolicy      model.CompetitionSourceGraphPolicy   `json:"source_graph_policy,omitempty"`
 	Schema                 int                                  `json:"schema"`
 	Kind                   string                               `json:"kind"`
 	Owner                  string                               `json:"owner"`
@@ -217,6 +218,7 @@ func authenticateRoundBaselinePreparation(directory string, settings *Settings, 
 	if receipt.Schema != 1 || receipt.Kind != "sim-latency-round-baseline-preparation-complete" || receipt.Owner != preparation.Owner || receipt.ContextSha256 != preparation.ContextSha256 ||
 		receipt.JobId != preparation.JobId.String() || receipt.RoundId != preparation.RoundId.String() || receipt.SourceEpoch != evaluationSourceEpoch(&preparation.SourceJob.Round) ||
 		receipt.BaseSha != settings.BaseSha || receipt.BaseImageId != settings.EvaluatorImageDigest || receipt.ProvidersSha256 != preparation.SourceJob.Round.ProvidersSha256 || receipt.ScorerVersion != settings.scorerVersion() || receipt.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || !reflect.DeepEqual(receipt.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) ||
+		receipt.SourceGraphPolicy != settings.EvaluationPolicy.SourceGraphPolicy ||
 		receipt.Replicates != 9 || len(receipt.ControlEvaluationIds) != 9 || receipt.SubmissionStarted == nil || *receipt.SubmissionStarted || receipt.CandidateExecuted == nil || *receipt.CandidateExecuted || receipt.CleanupComplete == nil || !*receipt.CleanupComplete {
 		return nil, document, errors.New("baseline preparation receipt changed purpose or frozen identity")
 	}
@@ -447,6 +449,12 @@ func (self CommandEvaluator) PrepareRoundBaseline(ctx context.Context, settings 
 	settings = frozen
 	profile := settings.roundBaselinePreparation
 	archive, ok := settings.artifactArchive.(roundBaselinePreparationArchive)
+	// A release measures one source graph. The producer of the ten repositories
+	// never prepares the control of a round frozen under sidecar/1, nor the
+	// reverse, whatever its request and receipt checks would later refuse.
+	if profile != nil && profile.Config.SourceGraphPolicy != settings.EvaluationPolicy.SourceGraphPolicy {
+		return nil, errors.New("baseline producer release was cut for another source graph than the frozen round's")
+	}
 	if profile == nil || !ok || preparation.SourceJob == nil {
 		return nil, errors.New("baseline producer/retained archive capability is unavailable")
 	}

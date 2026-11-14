@@ -16,6 +16,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
+	"gopkg.in/yaml.v3"
 )
 
 // Audit the repository under test through a private immutable Git object. The
@@ -102,9 +105,53 @@ func TestSourceRepositoryCoverageReadsPinnedCommitNotMovingMain(t *testing.T) {
 // This independent fixture prevents a removed main dependency from silently
 // shrinking every serializer, validator, image copy, and source ledger together.
 func TestSourceRepositorySetPreservesFrozenEvaluatorGraph(t *testing.T) {
-	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
+	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor", "sidecar"}
 	if got := sourceRepositoryNames(); !slices.Equal(got, want) {
 		t.Fatalf("frozen evaluator repositories = %v, want %v", got, want)
+	}
+	if got := model.CompetitionSourceRepositoryNames(); !slices.Equal(got, want) {
+		t.Fatalf("the control plane's graph of the eleven = %v, want %v", got, want)
+	}
+}
+
+// The ledger takes sidecar as it retired operator-proxy, strictly: every epoch
+// and generation pins it, and a ledger of the ten is refused, not completed.
+func TestSourceLedgerRequiresSidecarPin(t *testing.T) {
+	repositoryCommits := map[string]string{}
+	for index, repository := range sourceRepositoryNames() {
+		repositoryCommits[repository] = fmt.Sprintf("%040x", index+1)
+	}
+	manifest := sourceTestManifest(repositoryCommits)
+	if err := validateSourceManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	content, err := yaml.Marshal(manifest)
+	if err != nil || strings.Count(string(content), "sidecar:") != 1 {
+		t.Fatalf("the ledger does not serialize its sidecar pin: %v\n%s", err, content)
+	}
+	decoded, err := decodeSourceManifest(content)
+	if err != nil || decoded.EvaluationSource.Epochs[0].Repositories.Sidecar.Commit != repositoryCommits["sidecar"] {
+		t.Fatalf("the ledger's sidecar pin did not survive its codec: %v", err)
+	}
+	if commits := manifest.EvaluationSource.Epochs[0].Repositories.commits(); len(commits) != 11 || commits["sidecar"] != manifest.EvaluationSource.Epochs[0].Repositories.Sidecar.Commit {
+		t.Fatalf("the epoch's source identity does not name sidecar: %v", commits)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(content, &document); err != nil {
+		t.Fatal(err)
+	}
+	epochs := document["evaluation_source"].(map[string]any)["epochs"].([]any)
+	delete(epochs[0].(map[string]any)["repositories"].(map[string]any), "sidecar")
+	ten, err := yaml.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSourceManifest(ten); err == nil || !strings.Contains(err.Error(), "repository sidecar has an invalid commit") {
+		t.Fatalf("a ledger of the ten repositories was accepted: %v", err)
+	}
+	manifest.EvaluationSource.Epochs[0].Repositories.Sidecar.Commit = "not-a-commit"
+	if err := validateSourceManifest(manifest); err == nil {
+		t.Fatal("a malformed sidecar pin was accepted")
 	}
 }
 
@@ -136,7 +183,7 @@ func sourceModuleGraphBytes(t *testing.T, repositories []string) []byte {
 	return encoded
 }
 
-// Removing Warp on main must not change the ten-repository evaluator lock.
+// Removing Warp on main must not change the evaluator lock.
 func TestSourceRepositoryCoverageRetainsFrozenDependencyRemovedFromMain(t *testing.T) {
 	locked := sourceRepositoryNames()
 	frozen := slices.Clone(locked)
@@ -286,7 +333,10 @@ func TestEvaluatorSourceToolsUseCompleteRepositorySet(t *testing.T) {
 		{path: "evaluator/container/build-base.sh", validateJson: true},
 		{path: "evaluator/container/prepare-evaluation-source.sh", validateJson: true},
 		{path: "evaluator/container/build-submission.sh", validateJson: true},
-		{path: "evaluator/container/evaluator.sh", validateJson: false},
+		{path: "evaluator/container/evaluator-sidecar.sh", validateJson: false},
+		{path: "evaluator/container/evaluator-minimum-work-sidecar.sh", validateJson: false},
+		{path: "evaluator/container/evaluator-work-coverage-sidecar.sh", validateJson: false},
+		{path: "evaluator/container/evaluator-subevaluation.sh", validateJson: false},
 	} {
 		scriptBytes, err := os.ReadFile(fixture.path)
 		if err != nil {

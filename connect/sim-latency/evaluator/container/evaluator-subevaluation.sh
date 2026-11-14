@@ -3,6 +3,8 @@
 # Prospective private worker-to-Compose evaluator for protocol v1.
 # Submission bytes choose only the canonical patch. Every image, command,
 # resource ceiling, mount, and artifact name below is evaluator-owned.
+# This release measures the source graph of eleven repositories, the ten with
+# sidecar, and accepts only a request whose frozen policy names sidecar/1.
 
 set -Eeuo pipefail
 umask 077
@@ -125,7 +127,7 @@ validate_prepared_source_identity() {
 validate_worker_request_schema() {
     local request_keys='["api_image_digest","artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_baseline_path","round_baseline_sha256","round_id","round_seed_hex","schema","scorer_version","source_epoch","vault_local_directory","worker_image_digest"]'
     local patch_policy_keys='["allowed_paths","forbidden_paths","max_patch_bytes"]'
-    local evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","client_warmup_timeout_ms","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","takeover_margin","test_timeout_ms","vault_local_sha256"]'
+    local evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","client_warmup_timeout_ms","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","source_graph_policy","takeover_margin","test_timeout_ms","vault_local_sha256"]'
     jq -e \
         --argjson request_keys "$request_keys" \
         --argjson patch_policy_keys "$patch_policy_keys" \
@@ -134,6 +136,7 @@ validate_worker_request_schema() {
          ((keys - ["staging"] | sort) == $request_keys) and
          ((has("staging") | not) or (.staging | type == "boolean")) and
          (if .staging == true then .evaluation_policy.takeover_margin == 0 and (.evaluation_policy | has("work_coverage_policy") | not) else true end) and
+         (.evaluation_policy | type == "object" and .source_graph_policy == "sidecar/1") and
          (.patch_policy | type == "object" and
            (if has("path_base") then
               ((keys | sort) == ($patch_policy_keys + ["path_base"] | sort)) and
@@ -353,7 +356,7 @@ if [ "$staging" = true ]; then
     source_branch=sim-latency-staging
     source_mode_args=(--staging)
 fi
-REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
+REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)
 readonly REPOSITORIES
 repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
 round_id="$(jq -er '.round_id' "$request_path")"
