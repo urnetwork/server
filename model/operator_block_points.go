@@ -64,7 +64,9 @@ package model
 // (operator_block_points_expired), and goes on to the later blocks. An
 // expired block never gets its points, by the task or by a backfill
 // (OperatorBlockPointsExpiry). Until 2026-11-14 the task stopped at such a
-// block on every run, so no later block was ever awarded again.
+// block on every run, so no later block was ever awarded again. The points
+// leaderboard excuses an expired block's week: a network without points in it
+// keeps its Streak through it (pointsStreaks, owner decision 2026-11-14).
 
 import (
 	"context"
