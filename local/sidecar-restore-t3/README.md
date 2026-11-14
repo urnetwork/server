@@ -35,3 +35,9 @@ client deactivated between the dumps stays so; a network deleted between the dum
 rows, and a client created after the sidecar dump is deactivated to re-enroll and listed (main newer); a network
 newer than both is lost and its log listed as orphaned; and a revocation filed after both dumps is honoured once api
 replays proj/. Later owners add their steps on the same fixture at their milestones' Gn-outs.
+
+From M8 the api step also raises every push token row's revision by 2^32, once per incident (OPS-M8-01), which two
+tests here check: `TestFs42PushTokensRaisedOncePerIncident`, every restored row raised once by the frame's two runs
+and a third, above the revision the lost primary reached; and `TestFs42PushTokenRaiseSkippedBeforeMg8`, a primary
+with no `sidecar_push_token` restored and the step ending with the raise skipped and listed. FS-42's own M8 clause,
+the applies that follow and a client created after the dump re-registering, is SDK-M8-12's.
