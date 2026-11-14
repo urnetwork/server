@@ -12045,6 +12045,12 @@ with the fleet totals `urnetwork_client_score_admitted_providers_fleet`
 dualstack and IPv4-only providers, `v4` IPv4-only and `v6` dualstack and
 IPv6-only: the facets each request family draws. Admitted means in the
 non-forced union pool, online or native, before per-caller network exclusions.
+Since the country floor (server FP2FIX.md, owner 2026-11-13) that includes
+the providers it admits below the URL bar, so a country keeps up to three
+whenever it has a connected provider that only the bar keeps out; the same
+export publishes them as `urnetwork_client_score_country_floor_providers`
+(`country`, `bucket`, `decision`) and its `_fleet` totals, and a supply that
+rests on them is still supply to the probe.
 That is about 100 countries times three families, with no client, network,
 provider or location identity. A measurement is published for an hour after
 the export that made it, and only by the taskworker holding the newest one
