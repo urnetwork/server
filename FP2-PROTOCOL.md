@@ -332,30 +332,30 @@ What follows from it:
 
 "Keep the 80% URL-probe bar, but never let a country go empty"
 ([FP2FIX.md](FP2FIX.md), "The country floor"). After both decisions, the
-score export admits a country's best providers below the bar to each bucket
-that holds fewer than `country_floor_providers` (3) of its public providers
-(`model/network_client_score_country_floor.go`). The two decisions get one
-pass each:
+score export admits to Online a country's best providers that the bar alone
+keeps out of it, wherever fewer than `country_floor_providers` (3) of its
+public providers are online (`model/network_client_score_country_floor.go`).
+Quality and Speed keep the bar's members; every answer lends the admitted
+providers last, from the Online fallback. The two decisions get one pass
+each:
 
 - **Strict, today's facets.** Only a provider that is not downgraded
   (`CapabilityDowngrades` 0) is a candidate, so a legacy request, which may
   carry UDP and IPv6 flows on any provider it gets, never receives a provider
-  whose UDP or IPv6 legs the probe judged failing. This is the hard gate of D7.1
-  and of 11-12 unchanged; the floor only relaxes the ratio for providers no
-  negative capability evidence explains.
+  whose UDP or IPv6 legs the probe judged failing. This is the hard gate of
+  D7.1 and of 11-12 unchanged; the floor only relaxes the ratio for providers
+  no negative capability evidence explains.
 - **Classified, the capability facets.** A downgraded provider's classified
   copy is a candidate on its classified decision. The pass counts what
   selector mode draws: every class, the strict records and admissions
   included, so a downgraded provider is admitted only where the country has
-  too few others. It is drawn by the windows that take its class (§6.3), and
-  connect routes only compatible flows through it (§7.2); a limited window
-  takes it for TCP flows.
+  too few others. Only the windows that take its class draw it (§6.3), from
+  their pool's Online union, and connect routes only compatible flows through
+  it (§7.2); a limited window takes it for TCP flows.
 
 A provider with negative capability evidence and no failure besides is
 already a native of its class, so the classified pass matters where a
-provider is downgraded and also fails the bar on its kept legs. Admitted
-natives of either pass carry their tier moved into the Online fallback's band,
-and an overflowed class adds the overflow offset (§6.6) on top.
+provider is downgraded and also fails the bar on its kept legs.
 
 ## 4. Data model and migration
 

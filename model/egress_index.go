@@ -45,13 +45,15 @@ import (
 // online_url_ratio_country_exemption is false, the same country guard.
 //
 // The country floor (network_client_score_country_floor.go) acts after these
-// decisions, in the score export: a country whose public providers in a
-// bucket are fewer than country_floor_providers gets its best providers that
-// the URL bar alone keeps out (providerEgressBarredBuckets) admitted to it, so
-// no country goes empty while it has a connected provider past every other
-// gate. The decisions themselves are unchanged; the location counts add the
-// admissions the export publishes, and the dashboard counts, provider status
-// and inspect read the decisions alone.
+// decisions, in the score export: a country with fewer than
+// country_floor_providers public providers online gets its best providers
+// that the URL bar alone keeps out of Online (providerEgressBarredFromOnline)
+// admitted there, so no country goes empty while it has a connected provider
+// past every other gate. Quality and Speed keep the bar's members alone; their
+// answers reach the admitted providers through the Online fallback. The
+// decisions themselves are unchanged; the location counts add the admissions
+// the export publishes, and the dashboard counts, provider status and inspect
+// read the decisions alone.
 
 // The weights of the index and the bounds of its evidence, with the other
 // tunables of the egress rules. The `egress_index` block of provider.yml,
@@ -192,16 +194,15 @@ type EgressIndexSettings struct {
 	QualitySpeedRequiresModernProvider *bool
 	// The country floor (network_client_score_country_floor.go, owner
 	// decision 2026-11-13): the fewest public providers each country keeps
-	// in each bucket, Quality, Speed and Online. Where fewer pass the URL
-	// bar, the score export admits the country's best providers that the
-	// bar alone keeps out, in the bucket's own order, until the bucket holds
-	// this many or the candidates run out. It only adds: no provider that
-	// passes the bar leaves a bucket or loses its place, and an admitted
-	// native ranks in the Online fallback's band, behind every native and
-	// borrowed native of a request. Only the taskworker's score export reads
-	// it, so a change is a config release and a taskworker restart.
-	// Non-positive is off, the kill switch. `country_floor_providers` in the
-	// egress_index block.
+	// online. Where fewer pass the URL bar, the score export admits to
+	// Online the country's best providers that the bar alone keeps out, in
+	// the Online fallback's order, until Online holds this many or the
+	// candidates run out. It only adds: Quality and Speed keep the bar's
+	// members, and every answer lends an admitted provider from Online, after
+	// every native and borrowed native that passed the bar. The taskworker's
+	// score export and location counts read it, so a change is a config
+	// release and a taskworker restart. Non-positive is off, the kill switch.
+	// `country_floor_providers` in the egress_index block.
 	CountryFloorProviders int
 	// How long the export's publication of the floor's admissions, and the
 	// location counts' read of it, may wait on Redis
@@ -265,7 +266,7 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		// On (owner decision 2026-11-13: keep the 80% URL bar, but never
 		// let a country go empty). Three keeps a country's answers off a
 		// single exit while admitting only its best few below the bar
-		// (FP2FIX.md, "The country floor", measured on Main 2026-11-13).
+		// (FP2FIX.md, "The country floor", "Why three").
 		CountryFloorProviders: 3,
 		// as long as the online url-success guard's reads and writes wait
 		CountryFloorRedisTimeout: 2 * time.Second,

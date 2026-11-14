@@ -242,20 +242,19 @@ func rankClientScoreWithCounts(
 		clientScore.EgressValidUntil = &validUntil
 	}
 
-	// kept for the country floor (network_client_score_country_floor.go),
-	// which admits a provider the URL bar alone keeps out of a mode with the
-	// weight the mode would draw it by
+	// the country floor (network_client_score_country_floor.go) admits only
+	// a provider that passes them
 	clientScore.passesReliability = passesReliability
-	clientScore.rankWeights = map[string]float32{}
-	for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
-		u := max(0.0, min(1.0, float64(minClientScore.IndependentReliabilityWeight-minIndependentReliabilityWeights[minLookbackIndex])/(1.0-minIndependentReliabilityWeights[minLookbackIndex])))
-		reliabilityWeightScale := (1-u)*clientScoreMinReliabilityWeightScale + u*clientScoreMaxReliabilityWeightScale
-		v := max(0.0, min(1.0, float64(clientScoreMinimumMaxScore-clientScore.minimumScores[rankMode])/float64(clientScoreMinimumMaxScore)))
-		scoreScale := (1-v)*clientScoreMinScoreScale + v*clientScoreMaxScoreScale
-		clientScore.rankWeights[rankMode] = float32(reliabilityWeightScale * clientScore.ReliabilityWeight * scoreScale * clientScore.UrlProbeSuccessWeight)
 
-		if rankModePassesBucket[rankMode] && passesReliability {
-			clientScore.ScaledWeights[rankMode] = clientScore.rankWeights[rankMode]
+	for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
+		passesMinimum := rankModePassesBucket[rankMode] && passesReliability
+
+		if passesMinimum {
+			u := max(0.0, min(1.0, float64(minClientScore.IndependentReliabilityWeight-minIndependentReliabilityWeights[minLookbackIndex])/(1.0-minIndependentReliabilityWeights[minLookbackIndex])))
+			reliabilityWeightScale := (1-u)*clientScoreMinReliabilityWeightScale + u*clientScoreMaxReliabilityWeightScale
+			v := max(0.0, min(1.0, float64(clientScoreMinimumMaxScore-clientScore.minimumScores[rankMode])/float64(clientScoreMinimumMaxScore)))
+			scoreScale := (1-v)*clientScoreMinScoreScale + v*clientScoreMaxScoreScale
+			clientScore.ScaledWeights[rankMode] = float32(reliabilityWeightScale * clientScore.ReliabilityWeight * scoreScale * clientScore.UrlProbeSuccessWeight)
 			clientScore.PassesMinimums[rankMode] = true
 		}
 	}

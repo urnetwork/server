@@ -263,7 +263,7 @@ func newCtfPresenceProviders(
 	online := map[server.Id]*CtfPresenceProvider{}
 	for _, clientScores := range locationClientScores {
 		for clientId, clientScore := range clientScores {
-			if _, ok := online[clientId]; ok || !clientScore.Online || clientScore.countryFloor&clientScoreCountryFloorOnline != 0 {
+			if _, ok := online[clientId]; ok || !clientScore.Online || clientScore.countryFloor {
 				continue
 			}
 			countryCode := CtfCountryUnknown

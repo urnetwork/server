@@ -5371,17 +5371,15 @@ type ClientScore struct {
 	// only to the capability facets (FP2-PROTOCOL.md §4.4); nil for a
 	// provider that is not downgraded. Unexported, so never encoded.
 	capabilityCopy *ClientScore
-	// Whether the provider passes the reliability minimums, and the weight
-	// each mode would draw it by, whatever its buckets
-	// (rankClientScoreWithCounts). The country floor admits by them.
-	// Unexported, so never encoded.
+	// Whether the provider passes the reliability minimums, whatever its
+	// buckets (rankClientScoreWithCounts); the country floor admits only one
+	// that does. Unexported, so never encoded.
 	passesReliability bool
-	rankWeights       map[string]float32
-	// The buckets the country floor admitted this score to, as
-	// clientScoreCountryFloor bits (network_client_score_country_floor.go);
-	// zero for a score the URL bar admitted on its own. Unexported, so never
-	// encoded: a reader sees an admitted native by its tier alone.
-	countryFloor uint8
+	// Whether the country floor admitted this score to Online
+	// (network_client_score_country_floor.go), where the URL bar kept it
+	// out. Unexported, so never encoded: a reader lends it from Online as it
+	// lends every member there.
+	countryFloor bool
 }
 
 type ClientFilter struct {
@@ -5864,9 +5862,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// each: a client sits in several location and group maps, each with its
 	// own ClientScore, and must be decided the same way in all of them.
 	clientIdEgressDecisions := map[server.Id]providerEgressDecision{}
-	// the buckets the URL bar alone keeps each provider out of, which the
-	// country floor admits from (network_client_score_country_floor.go)
-	clientIdBarredBuckets := map[server.Id]uint8{}
+	// the providers the URL bar alone keeps out of Online, which the country
+	// floor admits from (network_client_score_country_floor.go)
+	clientIdBarredFromOnline := map[server.Id]bool{}
 	reasonCounts := map[string]int{}
 	onlineCount := 0
 	// the modern provider gate's shadow over the pool this export decides
@@ -5884,8 +5882,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		decision := decideProviderEgress(facts, egressTestEnabled)
 		countProviderModernOnline(modernOnlineCounts, facts, decision)
 		clientIdEgressDecisions[clientId] = decision
-		if barredBuckets := providerEgressBarredBuckets(facts, decision, egressTestEnabled); barredBuckets != 0 {
-			clientIdBarredBuckets[clientId] = barredBuckets
+		if providerEgressBarredFromOnline(facts, decision, egressTestEnabled) {
+			clientIdBarredFromOnline[clientId] = true
 		}
 		if decision.reason != "" {
 			reasonCounts[decision.reason] += 1
@@ -6022,19 +6020,18 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 
 	// The country floor (network_client_score_country_floor.go), after the
 	// presence and the census read the decisions as the URL bar made them:
-	// each country keeps its best few below the bar in a bucket that holds
-	// too few, in every target its providers sit in.
+	// a country with too few online providers gets its best few below the
+	// bar online, in every target its providers sit in.
 	countryCodes := map[server.Id]string{}
 	for countryCode, countryLocationId := range countryCodeLocationIds() {
 		countryCodes[countryLocationId] = countryCode
 	}
 	countryFloor := applyClientScoreCountryFloor(
 		egressSettings.CountryFloorProviders,
-		2*egressSettings.BackfillTierOffset,
 		locationClientScores,
 		locationGroupClientScores,
 		countryCodes,
-		clientIdBarredBuckets,
+		clientIdBarredFromOnline,
 		clientIdCapabilities,
 	)
 	glog.Infof("[nclm]country floor: %s\n", countryFloor.logSummary())

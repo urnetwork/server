@@ -1,7 +1,7 @@
 // The country floor (network_client_score_country_floor.go), pure: which
-// buckets the URL bar alone keeps a provider out of, the order each bucket
-// admits by, what the floor admits and to which copies, what it never
-// admits, and its kill switch. Every value below is synthetic.
+// providers the URL bar alone keeps out of Online, the order the floor admits
+// them in, what it admits and to which copies, what it never admits, its
+// kill switch, and what it publishes. Every value below is synthetic.
 package model
 
 import (
@@ -49,7 +49,6 @@ func countryFloorTestScore(clientId server.Id, provider countryFloorTestProvider
 		ReliabilityWeight:     provider.reliabilityWeight,
 		CapabilityDowngrades:  provider.downgrades,
 		passesReliability:     provider.passesReliability,
-		rankWeights:           map[string]float32{RankModeQuality: float32(provider.urlWeight), RankModeSpeed: float32(provider.urlWeight)},
 	}
 	if provider.quality {
 		clientScore.PassesMinimums[RankModeQuality] = true
@@ -70,9 +69,6 @@ var countryFloorTestNative = countryFloorTestProvider{quality: true, speed: true
 func countryFloorTestBelow(share float64) countryFloorTestProvider {
 	return countryFloorTestProvider{tier: 2, score: 50, urlWeight: 0.1 + 0.9*share, reliabilityWeight: 1, passesReliability: true}
 }
-
-// Every bucket the bar alone keeps the low_success providers out of.
-const countryFloorTestAllBuckets = clientScoreCountryFloorQuality | clientScoreCountryFloorSpeed | clientScoreCountryFloorOnline
 
 // The export's maps for one country, its region and city holding the same
 // providers, and one group holding them too; each map has its own copies.
@@ -108,38 +104,45 @@ func newCountryFloorTestMaps(countryCode string, providers map[server.Id]country
 	return testMaps
 }
 
-// The tier offset of the export's admitted natives: the Online fallback's
-// band under the default settings.
-func countryFloorTestTierOffset() int {
-	return 2 * DefaultEgressIndexSettings().BackfillTierOffset
+// Applies the floor of `providers` with barred, the providers the strict
+// decision's bar alone keeps out of Online, and no classified decision.
+func (self *countryFloorTestMaps) apply(providers int, barred map[server.Id]bool) *clientScoreCountryFloor {
+	return applyClientScoreCountryFloor(providers, self.locationClientScores, self.locationGroupClientScores, self.countryCodes, barred, map[server.Id]*clientScoreCapability{})
 }
 
-// Applies the floor of `providers` with barred, the strict decision's barred
-// buckets, and no classified decision.
-func (self *countryFloorTestMaps) apply(providers int, barred map[server.Id]uint8) *clientScoreCountryFloor {
-	return applyClientScoreCountryFloor(providers, countryFloorTestTierOffset(), self.locationClientScores, self.locationGroupClientScores, self.countryCodes, barred, map[server.Id]*clientScoreCapability{})
-}
-
-// The client ids each copy admits to the bucket, the same in every copy.
-func (self *countryFloorTestMaps) members(t *testing.T, bucket clientScoreCountryFloorBucket) []server.Id {
+// The client ids every copy holds in Online, or in a native mode, the same
+// in every copy.
+func (self *countryFloorTestMaps) members(t *testing.T, admits func(clientScore *ClientScore) bool) []server.Id {
 	t.Helper()
 	var members []server.Id
 	for _, targetClientScores := range []map[server.Id]map[server.Id]*ClientScore{self.locationClientScores, self.locationGroupClientScores} {
 		for _, clientScores := range targetClientScores {
 			copyMembers := []server.Id{}
 			for clientId, clientScore := range clientScores {
-				if bucket.admits(clientScore) {
+				if admits(clientScore) {
 					copyMembers = append(copyMembers, clientId)
 				}
 			}
 			slices.SortFunc(copyMembers, func(a server.Id, b server.Id) int { return a.Cmp(b) })
 			if members != nil && !slices.Equal(members, copyMembers) {
-				t.Fatalf("%s: the copies disagree: %v and %v", bucket.name, members, copyMembers)
+				t.Fatalf("the copies disagree: %v and %v", members, copyMembers)
 			}
 			members = copyMembers
 		}
 	}
 	return members
+}
+
+func countryFloorTestOnline(clientScore *ClientScore) bool {
+	return clientScore.Online
+}
+
+func countryFloorTestQuality(clientScore *ClientScore) bool {
+	return clientScore.PassesMinimums[RankModeQuality]
+}
+
+func countryFloorTestSpeed(clientScore *ClientScore) bool {
+	return clientScore.PassesMinimums[RankModeSpeed]
 }
 
 // The ids in client id order, as members lists them.
@@ -149,12 +152,11 @@ func countryFloorTestSorted(clientIds ...server.Id) []server.Id {
 	return sorted
 }
 
-// What the URL bar alone keeps a provider out of: low_success and no_success
-// every bucket, a failing ratio the native buckets, and nothing the other
-// rules decide. ARIN non-quality stays out of Quality, a provider short of
-// Quality's runs is barred from Speed and Online only, an unmeasured one and
-// a hard exclusion are barred from nothing.
-func TestCountryFloorBarredBucketsAreTheBarAlone(t *testing.T) {
+// What the URL bar alone keeps out of Online: low_success and no_success
+// providers, whatever the other rules say of their native buckets. A failing
+// ratio the Online rule keeps (health), an unmeasured provider, one short of
+// the native URL-run minimums and a hard exclusion are not.
+func TestCountryFloorBarredFromOnlineIsTheBarAlone(t *testing.T) {
 	settings := DefaultEgressIndexSettings()
 	settings.OnlineUrlSuccessRatio = 0.8
 	providers := []*onlineUrlRatioTestProvider{
@@ -163,43 +165,52 @@ func TestCountryFloorBarredBucketsAreTheBarAlone(t *testing.T) {
 		{name: "us 0 of 5", countryCode: "us", ok: 0, total: 5},
 		{name: "us arin non-quality 6 of 10", countryCode: "us", ok: 6, total: 10, arinNonQuality: true},
 		{name: "us 1 of 2", countryCode: "us", ok: 1, total: 2},
+		{name: "us 1 of 1", countryCode: "us", ok: 1, total: 1},
 		{name: "us unprobed", countryCode: "us"},
 		{name: "us arin risk 3 of 5", countryCode: "us", ok: 3, total: 5, arinRisk: true},
 		{name: "us tls 3 of 5", countryCode: "us", ok: 3, total: 5, tlsFailed: true},
+		{name: "us unreliable 3 of 5", countryCode: "us", ok: 3, total: 5, reliabilityFailed: true},
 		{name: "us 8 of 10 a", countryCode: "us", ok: 8, total: 10},
 		{name: "us 9 of 10 b", countryCode: "us", ok: 9, total: 10},
 	}
 	filter, nameClientIds := onlineUrlRatioTestFilter(providers, settings)
-	want := map[string]uint8{
-		"us 60 of 60":                 0,
-		"us 7 of 10":                  countryFloorTestAllBuckets,
-		"us 0 of 5":                   countryFloorTestAllBuckets,
-		"us arin non-quality 6 of 10": clientScoreCountryFloorSpeed | clientScoreCountryFloorOnline,
-		// a passing ratio needs three runs for Quality, two for Speed
-		"us 1 of 2":           clientScoreCountryFloorSpeed | clientScoreCountryFloorOnline,
-		"us unprobed":         0,
-		"us arin risk 3 of 5": 0,
-		"us tls 3 of 5":       0,
-		"us 8 of 10 a":        0,
-		"us 9 of 10 b":        0,
+	barred := map[string]bool{
+		"us 7 of 10":                  true,
+		"us 0 of 5":                   true,
+		"us arin non-quality 6 of 10": true,
+		"us 1 of 2":                   true,
 	}
-	for name, wantBuckets := range want {
-		clientId := nameClientIds[name]
+	for _, provider := range providers {
+		clientId := nameClientIds[provider.name]
 		countryCode := "us"
 		facts := filter.egressFacts(clientId, &countryCode, nil, nil, settings)
 		decision := decideProviderEgress(facts, false)
-		if got := providerEgressBarredBuckets(facts, decision, false); got != wantBuckets {
-			t.Errorf("%s (%s): barred %03b, want %03b", name, decision.reason, got, wantBuckets)
+		if got := providerEgressBarredFromOnline(facts, decision, false); got != barred[provider.name] {
+			t.Errorf("%s (%s): barred from Online %t, want %t", provider.name, decision.reason, got, barred[provider.name])
+		}
+	}
+
+	// with the ratio off a failing ratio is online, and only the rule of one
+	// success bars
+	settings.OnlineUrlSuccessRatio = 0
+	filter, nameClientIds = onlineUrlRatioTestFilter(providers, settings)
+	for _, provider := range providers {
+		clientId := nameClientIds[provider.name]
+		countryCode := "us"
+		facts := filter.egressFacts(clientId, &countryCode, nil, nil, settings)
+		decision := decideProviderEgress(facts, false)
+		want := provider.name == "us 0 of 5"
+		if got := providerEgressBarredFromOnline(facts, decision, false); got != want {
+			t.Errorf("ratio off, %s (%s): barred from Online %t, want %t", provider.name, decision.reason, got, want)
 		}
 	}
 }
 
-// A country without a provider above the bar gets its best N below it, in
-// every bucket and every copy (country, city, group), each joining Online
-// with its native admission; the rest stay out. The admitted natives draw
-// with their mode's weight and carry their tier moved into the Online
-// fallback's band.
-func TestCountryFloorAdmitsTheBestNOfAnEmptyCountry(t *testing.T) {
+// A country without a provider above the bar gets its best three below it
+// online, in every copy (country, city, group), in the Online fallback's
+// order; the two below them stay out. Quality and Speed keep the bar's
+// members, none, and every admitted copy keeps its tiers and weights.
+func TestCountryFloorAdmitsTheBestThreeOfAnEmptyCountryToOnline(t *testing.T) {
 	p70, p60, p50, p40, p0 := server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	providers := map[server.Id]countryFloorTestProvider{
 		p70: countryFloorTestBelow(0.7),
@@ -208,43 +219,34 @@ func TestCountryFloorAdmitsTheBestNOfAnEmptyCountry(t *testing.T) {
 		p40: countryFloorTestBelow(0.4),
 		p0:  countryFloorTestBelow(0),
 	}
-	barred := map[server.Id]uint8{}
+	barred := map[server.Id]bool{}
 	for clientId := range providers {
-		barred[clientId] = countryFloorTestAllBuckets
+		barred[clientId] = true
 	}
 	testMaps := newCountryFloorTestMaps("pe", providers)
 	countryFloor := testMaps.apply(3, barred)
 
-	best := countryFloorTestSorted(p70, p60, p50)
-	for _, bucket := range clientScoreCountryFloorBuckets {
-		connect.AssertEqual(t, testMaps.members(t, bucket), best)
-		connect.AssertEqual(t, countryFloor.countryCounts[clientScoreCountryFloorKey{country: "pe", decision: clientScoreCountryFloorStrict, bucket: bucket.name}], 3)
-		connect.AssertEqual(t, countryFloor.countryCounts[clientScoreCountryFloorKey{country: "pe", decision: clientScoreCountryFloorClassified, bucket: bucket.name}], 0)
-	}
+	connect.AssertEqual(t, testMaps.members(t, countryFloorTestOnline), countryFloorTestSorted(p70, p60, p50))
+	connect.AssertEqual(t, len(testMaps.members(t, countryFloorTestQuality)), 0)
+	connect.AssertEqual(t, len(testMaps.members(t, countryFloorTestSpeed)), 0)
+	connect.AssertEqual(t, countryFloor.countryCounts, map[clientScoreCountryFloorKey]int{{country: "pe", decision: clientScoreCountryFloorStrict}: 3})
 	connect.AssertEqual(t, countryFloor.strictClientIds, map[server.Id]bool{p70: true, p60: true, p50: true})
+	connect.AssertEqual(t, countryFloor.fleetCounts(), map[string]int{clientScoreCountryFloorStrict: 3, clientScoreCountryFloorClassified: 0})
 	for _, clientScore := range testMaps.locationClientScores[testMaps.cityId] {
-		if !slices.Contains(best, clientScore.ClientId) {
-			connect.AssertEqual(t, clientScore.countryFloor, uint8(0))
-			continue
-		}
-		connect.AssertEqual(t, clientScore.countryFloor, countryFloorTestAllBuckets)
-		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
-			connect.AssertEqual(t, clientScore.Tiers[rankMode], countryFloorTestTierOffset()+2)
-			connect.AssertEqual(t, clientScore.ScaledWeights[rankMode], clientScore.rankWeights[rankMode])
-		}
+		admitted := slices.Contains([]server.Id{p70, p60, p50}, clientScore.ClientId)
+		connect.AssertEqual(t, clientScore.countryFloor, admitted)
+		connect.AssertEqual(t, clientScore.Tiers, map[string]int{RankModeQuality: 2, RankModeSpeed: 2})
+		connect.AssertEqual(t, len(clientScore.ScaledWeights), 0)
 	}
-	fleetCounts := countryFloor.fleetCounts()
-	connect.AssertEqual(t, len(fleetCounts), 6)
-	connect.AssertEqual(t, fleetCounts[clientScoreCountryFloorFleetKey{decision: clientScoreCountryFloorStrict, bucket: RankModeOnline}], 3)
 }
 
-// A bucket that holds the floor's count above the bar is left exactly as
-// it was, and one that holds fewer is filled only to the count: the
-// providers above the bar keep their tiers and weights, and the one admitted
-// below it ranks behind them.
+// A country with three online is left exactly as it was, and one with two
+// gets only the best below the bar as the third: no provider above the bar
+// loses a bucket, a tier or a weight, and its native buckets stay the bar's.
 func TestCountryFloorFillsOnlyToTheFloorAndDisplacesNoProvider(t *testing.T) {
 	native1, native2, native3 := server.NewId(), server.NewId(), server.NewId()
 	below1, below2 := server.NewId(), server.NewId()
+	barred := map[server.Id]bool{below1: true, below2: true}
 	full := newCountryFloorTestMaps("nz", map[server.Id]countryFloorTestProvider{
 		native1: countryFloorTestNative,
 		native2: countryFloorTestNative,
@@ -252,7 +254,6 @@ func TestCountryFloorFillsOnlyToTheFloorAndDisplacesNoProvider(t *testing.T) {
 		below1:  countryFloorTestBelow(0.7),
 		below2:  countryFloorTestBelow(0.6),
 	})
-	barred := map[server.Id]uint8{below1: countryFloorTestAllBuckets, below2: countryFloorTestAllBuckets}
 	beforeTiers := map[server.Id]map[string]int{}
 	beforeWeights := map[server.Id]map[string]float32{}
 	for clientId, clientScore := range full.locationClientScores[full.countryId] {
@@ -260,18 +261,15 @@ func TestCountryFloorFillsOnlyToTheFloorAndDisplacesNoProvider(t *testing.T) {
 		beforeWeights[clientId] = maps.Clone(clientScore.ScaledWeights)
 	}
 	countryFloor := full.apply(3, barred)
-	for _, bucket := range clientScoreCountryFloorBuckets {
-		connect.AssertEqual(t, full.members(t, bucket), countryFloorTestSorted(native1, native2, native3))
-	}
+	connect.AssertEqual(t, full.members(t, countryFloorTestOnline), countryFloorTestSorted(native1, native2, native3))
 	connect.AssertEqual(t, len(countryFloor.countryCounts), 0)
 	connect.AssertEqual(t, len(countryFloor.strictClientIds), 0)
 	for clientId, clientScore := range full.locationClientScores[full.countryId] {
 		connect.AssertEqual(t, clientScore.Tiers, beforeTiers[clientId])
 		connect.AssertEqual(t, clientScore.ScaledWeights, beforeWeights[clientId])
-		connect.AssertEqual(t, clientScore.countryFloor, uint8(0))
+		connect.AssertEqual(t, clientScore.countryFloor, false)
 	}
 
-	// two above the bar: the best below it joins them, behind them
 	short := newCountryFloorTestMaps("uy", map[server.Id]countryFloorTestProvider{
 		native1: countryFloorTestNative,
 		native2: countryFloorTestNative,
@@ -279,99 +277,78 @@ func TestCountryFloorFillsOnlyToTheFloorAndDisplacesNoProvider(t *testing.T) {
 		below2:  countryFloorTestBelow(0.6),
 	})
 	short.apply(3, barred)
-	for _, bucket := range clientScoreCountryFloorBuckets {
-		connect.AssertEqual(t, short.members(t, bucket), countryFloorTestSorted(native1, native2, below1))
-	}
+	connect.AssertEqual(t, short.members(t, countryFloorTestOnline), countryFloorTestSorted(native1, native2, below1))
+	connect.AssertEqual(t, short.members(t, countryFloorTestQuality), countryFloorTestSorted(native1, native2))
+	connect.AssertEqual(t, short.members(t, countryFloorTestSpeed), countryFloorTestSorted(native1, native2))
 	clientScores := short.locationClientScores[short.countryId]
-	// the most a borrowed native ranks at: the other mode's past-cutoff tier
-	// with the offset, and every demerit the client adds
-	borrowedWorstTier := DefaultEgressIndexSettings().BackfillTierOffset + ClientScoreCutoffTier + MaxClientTierDemerit
 	for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 		connect.AssertEqual(t, clientScores[native1].Tiers[rankMode], 0)
 		connect.AssertEqual(t, clientScores[native1].ScaledWeights[rankMode], float32(1))
-		if clientScores[below1].Tiers[rankMode] <= borrowedWorstTier {
-			t.Fatalf("%s: the admitted provider's tier %d does not rank behind every borrowed native (%d)", rankMode, clientScores[below1].Tiers[rankMode], borrowedWorstTier)
-		}
 	}
-	connect.AssertEqual(t, clientScores[below2].Tiers[RankModeQuality], 2)
 }
 
-// Each bucket admits in its own order: the native modes by tier, then score,
-// then URL success weight; Online by reliability times URL weight; ties by
-// client id.
-func TestCountryFloorRanksByTheBucketsOwnOrder(t *testing.T) {
-	quality := clientScoreCountryFloorBuckets[0]
-	online := clientScoreCountryFloorBuckets[2]
-	score := func(tier int, scoreValue int, urlWeight float64, reliabilityWeight float64) *ClientScore {
-		return countryFloorTestScore(server.NewId(), countryFloorTestProvider{tier: tier, score: scoreValue, urlWeight: urlWeight, reliabilityWeight: reliabilityWeight, passesReliability: true})
+// The floor admits in the Online fallback's order: reliability times URL
+// weight, then the speed tier, then the URL weight; ties to the lower client
+// id.
+func TestCountryFloorRanksByTheOnlineFallbacksOrder(t *testing.T) {
+	score := func(speedTier int, urlWeight float64, reliabilityWeight float64) *ClientScore {
+		return countryFloorTestScore(server.NewId(), countryFloorTestProvider{tier: speedTier, score: 20 * speedTier, urlWeight: urlWeight, reliabilityWeight: reliabilityWeight, passesReliability: true})
 	}
-	// a lower tier wins over a better URL weight
-	lowTier, highTierBetterUrl := score(1, 30, 0.2, 1), score(2, 40, 0.9, 1)
-	connect.AssertEqual(t, quality.compare(lowTier, highTierBetterUrl) < 0, true)
-	// a lower score within the tier wins over a better URL weight
-	lowScore, highScoreBetterUrl := score(2, 40, 0.2, 1), score(2, 50, 0.9, 1)
-	connect.AssertEqual(t, quality.compare(lowScore, highScoreBetterUrl) < 0, true)
-	// at one tier and score, the better URL weight
-	betterUrl, worseUrl := score(2, 50, 0.8, 1), score(2, 50, 0.5, 1)
-	connect.AssertEqual(t, quality.compare(betterUrl, worseUrl) < 0, true)
-	// Online reads reliability times URL weight, not the native score
-	reliable, unreliableBetterScore := score(2, 50, 0.6, 1), score(0, 0, 0.7, 0.5)
-	connect.AssertEqual(t, online.compare(reliable, unreliableBetterScore) < 0, true)
+	// reliability times URL weight first: 0.6 against 0.35
+	reliable, unreliableBetterUrl := score(2, 0.6, 1), score(0, 0.7, 0.5)
+	connect.AssertEqual(t, compareClientScoreCountryFloor(reliable, unreliableBetterUrl) < 0, true)
+	// then the speed tier
+	faster, slower := score(1, 0.6, 1), score(2, 0.6, 1)
+	connect.AssertEqual(t, compareClientScoreCountryFloor(faster, slower) < 0, true)
 	// full ties go to the lower client id
-	a, b := score(2, 50, 0.5, 1), score(2, 50, 0.5, 1)
+	a, b := score(2, 0.5, 1), score(2, 0.5, 1)
 	if b.ClientId.Cmp(a.ClientId) < 0 {
 		a, b = b, a
 	}
-	connect.AssertEqual(t, quality.compare(a, b) < 0, true)
-	connect.AssertEqual(t, online.compare(a, b) < 0, true)
+	connect.AssertEqual(t, compareClientScoreCountryFloor(a, b) < 0, true)
 
 	// and the floor admits by it
 	worst, middle, top := server.NewId(), server.NewId(), server.NewId()
 	testMaps := newCountryFloorTestMaps("ar", map[server.Id]countryFloorTestProvider{
-		worst:  {tier: 2, score: 50, urlWeight: 0.9, reliabilityWeight: 1, passesReliability: true},
-		middle: {tier: 2, score: 40, urlWeight: 0.3, reliabilityWeight: 1, passesReliability: true},
-		top:    {tier: 1, score: 30, urlWeight: 0.2, reliabilityWeight: 1, passesReliability: true},
+		worst:  {tier: 0, score: 0, urlWeight: 0.3, reliabilityWeight: 1, passesReliability: true},
+		middle: {tier: 2, score: 40, urlWeight: 0.6, reliabilityWeight: 1, passesReliability: true},
+		top:    {tier: 2, score: 50, urlWeight: 0.7, reliabilityWeight: 1, passesReliability: true},
 	})
-	testMaps.apply(2, map[server.Id]uint8{worst: clientScoreCountryFloorQuality, middle: clientScoreCountryFloorQuality, top: clientScoreCountryFloorQuality})
-	connect.AssertEqual(t, testMaps.members(t, quality), countryFloorTestSorted(top, middle))
+	testMaps.apply(2, map[server.Id]bool{worst: true, middle: true, top: true})
+	connect.AssertEqual(t, testMaps.members(t, countryFloorTestOnline), countryFloorTestSorted(top, middle))
 }
 
-// The floor admits no provider a hard exclusion, the reliability minimums or
-// another rule keeps out: one the bar does not bar from a bucket stays out
-// of it, as does one below the reliability minimums, so a country with too
+// The floor admits only what the bar alone keeps out: never a provider below
+// the reliability minimums or kept out by another rule, so a country with too
 // few candidates stays below the floor. A network-only provider neither
 // counts nor is admitted.
 func TestCountryFloorAdmitsOnlyWhatTheBarAloneKeepsOut(t *testing.T) {
-	eligible, unreliable, notBarred, arinNonQuality, networkOnly := server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId()
+	eligible, unreliable, notBarred, networkOnly := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	networkOnlyNative := countryFloorTestNative
 	networkOnlyNative.networkOnly = true
+	networkOnlyBelow := countryFloorTestBelow(0.9)
+	networkOnlyBelow.networkOnly = true
 	unreliableProvider := countryFloorTestBelow(0.9)
 	unreliableProvider.passesReliability = false
+	networkOnlyBarred := server.NewId()
 	testMaps := newCountryFloorTestMaps("cl", map[server.Id]countryFloorTestProvider{
-		eligible:       countryFloorTestBelow(0.5),
-		unreliable:     unreliableProvider,
-		notBarred:      countryFloorTestBelow(0.9),
-		arinNonQuality: countryFloorTestBelow(0.8),
-		networkOnly:    networkOnlyNative,
+		eligible:          countryFloorTestBelow(0.5),
+		unreliable:        unreliableProvider,
+		notBarred:         countryFloorTestBelow(0.9),
+		networkOnly:       networkOnlyNative,
+		networkOnlyBarred: networkOnlyBelow,
 	})
-	countryFloor := testMaps.apply(3, map[server.Id]uint8{
-		eligible:       countryFloorTestAllBuckets,
-		unreliable:     countryFloorTestAllBuckets,
-		arinNonQuality: clientScoreCountryFloorSpeed | clientScoreCountryFloorOnline,
-	})
-	connect.AssertEqual(t, testMaps.members(t, clientScoreCountryFloorBuckets[0]), countryFloorTestSorted(eligible, networkOnly))
-	connect.AssertEqual(t, testMaps.members(t, clientScoreCountryFloorBuckets[1]), countryFloorTestSorted(eligible, arinNonQuality, networkOnly))
-	connect.AssertEqual(t, testMaps.members(t, clientScoreCountryFloorBuckets[2]), countryFloorTestSorted(eligible, arinNonQuality, networkOnly))
-	connect.AssertEqual(t, countryFloor.countryCounts[clientScoreCountryFloorKey{country: "cl", decision: clientScoreCountryFloorStrict, bucket: RankModeQuality}], 1)
-	connect.AssertEqual(t, countryFloor.countryCounts[clientScoreCountryFloorKey{country: "cl", decision: clientScoreCountryFloorStrict, bucket: RankModeSpeed}], 2)
-	connect.AssertEqual(t, countryFloor.strictClientIds, map[server.Id]bool{eligible: true, arinNonQuality: true})
+	countryFloor := testMaps.apply(3, map[server.Id]bool{eligible: true, unreliable: true, networkOnlyBarred: true})
+	connect.AssertEqual(t, testMaps.members(t, countryFloorTestOnline), countryFloorTestSorted(eligible, networkOnly))
+	connect.AssertEqual(t, countryFloor.countryCounts, map[clientScoreCountryFloorKey]int{{country: "cl", decision: clientScoreCountryFloorStrict}: 1})
+	connect.AssertEqual(t, countryFloor.strictClientIds, map[server.Id]bool{eligible: true})
 }
 
 // Today's facets keep the hard gates of UDP and IP family: a provider whose
-// UDP or IPv6 the probe dropped is never admitted to its strict record, even
-// as the best below the bar. Its classified copy is, in the capability
-// facets selector mode reads, where the country's supply counts every class
-// and the strict admissions with it.
+// UDP the probe dropped is never admitted to its strict record, even as the
+// best below the bar. Its classified copy is, in the capability facets
+// selector mode reads, where the country's supply counts every class and the
+// strict admissions with it.
 func TestCountryFloorKeepsDowngradedProvidersOutOfTodaysFacets(t *testing.T) {
 	plain, udpBest, udpNext, udpWorst := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	udpProvider := func(share float64) countryFloorTestProvider {
@@ -387,11 +364,10 @@ func TestCountryFloorKeepsDowngradedProvidersOutOfTodaysFacets(t *testing.T) {
 	})
 	capabilities := map[server.Id]*clientScoreCapability{}
 	for _, clientId := range []server.Id{udpBest, udpNext, udpWorst} {
-		capabilities[clientId] = &clientScoreCapability{barredBuckets: countryFloorTestAllBuckets}
+		capabilities[clientId] = &clientScoreCapability{barredFromOnline: true}
 		for _, targetClientScores := range []map[server.Id]map[server.Id]*ClientScore{testMaps.locationClientScores, testMaps.locationGroupClientScores} {
 			for _, clientScores := range targetClientScores {
-				// as the export makes it: its own buckets and weights, its
-				// tiers shared with the strict record
+				// as the export makes it: its own buckets and weights
 				classified := *clientScores[clientId]
 				classified.PassesMinimums = maps.Clone(classified.PassesMinimums)
 				classified.ScaledWeights = maps.Clone(classified.ScaledWeights)
@@ -399,51 +375,36 @@ func TestCountryFloorKeepsDowngradedProvidersOutOfTodaysFacets(t *testing.T) {
 			}
 		}
 	}
-	barred := map[server.Id]uint8{}
-	for _, clientId := range []server.Id{plain, udpBest, udpNext, udpWorst} {
-		barred[clientId] = countryFloorTestAllBuckets
-	}
-	countryFloor := applyClientScoreCountryFloor(3, countryFloorTestTierOffset(), testMaps.locationClientScores, testMaps.locationGroupClientScores, testMaps.countryCodes, barred, capabilities)
+	barred := map[server.Id]bool{plain: true, udpBest: true, udpNext: true, udpWorst: true}
+	countryFloor := applyClientScoreCountryFloor(3, testMaps.locationClientScores, testMaps.locationGroupClientScores, testMaps.countryCodes, barred, capabilities)
 
 	// today's facets: the plain provider alone
-	for _, bucket := range clientScoreCountryFloorBuckets {
-		connect.AssertEqual(t, testMaps.members(t, bucket), []server.Id{plain})
-	}
+	connect.AssertEqual(t, testMaps.members(t, countryFloorTestOnline), []server.Id{plain})
 	connect.AssertEqual(t, countryFloor.strictClientIds, map[server.Id]bool{plain: true})
-	// the capability facets: the best two downgraded copies fill the
+	// the capability facets: the best two downgraded copies make the
 	// country's three with the plain provider
-	for _, clientScores := range testMaps.locationClientScores {
-		for clientId, clientScore := range clientScores {
-			classified := clientScore.capabilityCopy
-			if classified == nil {
-				continue
-			}
-			admitted := clientId == udpBest || clientId == udpNext
-			connect.AssertEqual(t, classified.PassesMinimums[RankModeQuality], admitted)
-			connect.AssertEqual(t, classified.Online, admitted)
-			connect.AssertEqual(t, clientScore.PassesMinimums[RankModeQuality], false)
-			connect.AssertEqual(t, clientScore.Online, false)
-			// the copy's admission moves its own tier, never the strict
-			// record's it shared
-			connect.AssertEqual(t, clientScore.Tiers[RankModeQuality], 2)
-			if admitted {
-				connect.AssertEqual(t, classified.Tiers[RankModeQuality], countryFloorTestTierOffset()+2)
+	for _, targetClientScores := range []map[server.Id]map[server.Id]*ClientScore{testMaps.locationClientScores, testMaps.locationGroupClientScores} {
+		for _, clientScores := range targetClientScores {
+			for clientId, clientScore := range clientScores {
+				if classified := clientScore.capabilityCopy; classified != nil {
+					connect.AssertEqual(t, classified.Online, clientId == udpBest || clientId == udpNext)
+					connect.AssertEqual(t, classified.PassesMinimums[RankModeQuality], false)
+				}
 			}
 		}
 	}
-	for _, bucket := range clientScoreCountryFloorBuckets {
-		connect.AssertEqual(t, countryFloor.countryCounts[clientScoreCountryFloorKey{country: "ar", decision: clientScoreCountryFloorClassified, bucket: bucket.name}], 2)
-	}
+	connect.AssertEqual(t, countryFloor.countryCounts, map[clientScoreCountryFloorKey]int{
+		{country: "ar", decision: clientScoreCountryFloorStrict}:     1,
+		{country: "ar", decision: clientScoreCountryFloorClassified}: 2,
+	})
 }
 
 // A floor of zero is off: nothing is admitted and nothing is counted.
 func TestCountryFloorOfZeroAdmitsNothing(t *testing.T) {
 	below := server.NewId()
 	testMaps := newCountryFloorTestMaps("pe", map[server.Id]countryFloorTestProvider{below: countryFloorTestBelow(0.7)})
-	countryFloor := testMaps.apply(0, map[server.Id]uint8{below: countryFloorTestAllBuckets})
-	for _, bucket := range clientScoreCountryFloorBuckets {
-		connect.AssertEqual(t, len(testMaps.members(t, bucket)), 0)
-	}
+	countryFloor := testMaps.apply(0, map[server.Id]bool{below: true})
+	connect.AssertEqual(t, len(testMaps.members(t, countryFloorTestOnline)), 0)
 	connect.AssertEqual(t, len(countryFloor.countryCounts), 0)
 	connect.AssertEqual(t, countryFloor.logSummary(), "off (egress_index.country_floor_providers is not positive)")
 }
@@ -473,37 +434,34 @@ func TestEgressIndexSettingsReadTheCountryFloor(t *testing.T) {
 	}
 }
 
-// Capture the flag's presence counts the bar's Online alone: a provider in
-// Online only by the floor is not present, one the floor admitted to a
-// native mode while the bar kept it Online still is.
+// Capture the flag's presence counts the bar's Online alone: a provider the
+// floor admitted to Online is not present.
 func TestCtfPresenceProvidersLeaveOutTheCountryFloor(t *testing.T) {
-	barOnline, floorOnly, floorNative := server.NewId(), server.NewId(), server.NewId()
+	barOnline, floorOnline := server.NewId(), server.NewId()
 	clientScores := map[server.Id]*ClientScore{
 		barOnline:   {ClientId: barOnline, Online: true},
-		floorOnly:   {ClientId: floorOnly, Online: true, countryFloor: clientScoreCountryFloorOnline | clientScoreCountryFloorQuality},
-		floorNative: {ClientId: floorNative, Online: true, countryFloor: clientScoreCountryFloorQuality},
+		floorOnline: {ClientId: floorOnline, Online: true, countryFloor: true},
 	}
 	providers := newCtfPresenceProviders(onlineSuccessTestNow, map[server.Id]map[server.Id]*ClientScore{server.NewId(): clientScores}, map[server.Id]*clientScoreEgress{})
 	present := []server.Id{}
 	for _, provider := range providers.Providers {
 		present = append(present, provider.ClientId)
 	}
-	connect.AssertEqual(t, present, countryFloorTestSorted(barOnline, floorNative))
+	connect.AssertEqual(t, present, []server.Id{barOnline})
 }
 
 // The supply publishes the floor's admissions with the measurement they came
-// from: a series for each country, bucket and decision the floor admitted
-// to, a code the directory cannot vouch for left out, and the fleet totals
-// of every bucket and decision, zero included.
+// from: a series for each country and decision the floor admitted to, a code
+// the directory cannot vouch for left out, and the fleet totals of both
+// decisions, zero included.
 func TestClientScoreSupplyPublishesTheCountryFloor(t *testing.T) {
 	clock := newSupplyTestClock(time.Unix(1_800_000_000, 0))
 	collector := supplyTestProcess(clock, "taskworker-a", &supplyTestLease{now: clock.now})
 	supply := supplyTestMeasurement(clock.now(), 3, "pe")
 	countryFloor := &clientScoreCountryFloor{providers: 3, countryCounts: map[clientScoreCountryFloorKey]int{
-		{country: "pe", decision: clientScoreCountryFloorStrict, bucket: RankModeQuality}:          3,
-		{country: "pe", decision: clientScoreCountryFloorStrict, bucket: RankModeOnline}:           3,
-		{country: "pe", decision: clientScoreCountryFloorClassified, bucket: RankModeSpeed}:        2,
-		{country: "not-a-country", decision: clientScoreCountryFloorStrict, bucket: RankModeSpeed}: 1,
+		{country: "pe", decision: clientScoreCountryFloorStrict}:            3,
+		{country: "nz", decision: clientScoreCountryFloorStrict}:            1,
+		{country: "not-a-country", decision: clientScoreCountryFloorStrict}: 1,
 	}}
 	supply.countryFloor = countryFloor.countryCounts
 	supply.countryFloorFleet = countryFloor.fleetCounts()
@@ -525,25 +483,14 @@ func TestClientScoreSupplyPublishesTheCountryFloor(t *testing.T) {
 			}
 			switch family.GetName() {
 			case "urnetwork_client_score_country_floor_providers":
-				countrySeries[labels["country"]+" "+labels["bucket"]+" "+labels["decision"]] = metric.GetGauge().GetValue()
+				countrySeries[labels["country"]+" "+labels["decision"]] = metric.GetGauge().GetValue()
 			case "urnetwork_client_score_country_floor_providers_fleet":
-				fleetSeries[labels["bucket"]+" "+labels["decision"]] = metric.GetGauge().GetValue()
+				fleetSeries[labels["decision"]] = metric.GetGauge().GetValue()
 			}
 		}
 	}
-	connect.AssertEqual(t, countrySeries, map[string]float64{
-		"pe quality strict":   3,
-		"pe online strict":    3,
-		"pe speed classified": 2,
-	})
-	connect.AssertEqual(t, fleetSeries, map[string]float64{
-		"quality strict":     3,
-		"speed strict":       1,
-		"online strict":      3,
-		"quality classified": 0,
-		"speed classified":   2,
-		"online classified":  0,
-	})
+	connect.AssertEqual(t, countrySeries, map[string]float64{"pe strict": 3, "nz strict": 1})
+	connect.AssertEqual(t, fleetSeries, map[string]float64{"strict": 5, "classified": 0})
 }
 
 // The provider.yml line that turns the country floor off, for a test of the

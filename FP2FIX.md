@@ -3,12 +3,13 @@
 Latest owner decision, 2026-11-13 ~22:30 UTC, "accepted": **keep the 80%
 URL-probe bar, but never let a country go empty. Always admit each country's
 best few providers even below the bar.** The bar and every rule below keep
-deciding each provider. The score export then gives each country whose public
-providers in a bucket number fewer than `country_floor_providers` (default 3,
-on without a config change, `0` the kill switch) its best providers that the
-bar alone keeps out of that bucket. Today's facets keep the hard gates of UDP
-and IP family, and an admitted provider ranks behind every provider of a
-request that passed a bar. See [the country floor](#the-country-floor-2026-11-13).
+deciding each provider. The score export then admits to Online, in each
+country with fewer than `country_floor_providers` (default 3, on without a
+config change, `0` the kill switch) public providers online, its best
+providers that the bar alone keeps out. Quality and Speed keep the bar's
+members; every answer lends the admitted providers last, from the Online
+fallback. Today's facets keep the hard gates of UDP and IP family. See
+[the country floor](#the-country-floor-2026-11-13).
 
 Owner decision, 2026-10-28, superseding the decision of the same day
 below that postponed the automatic cutoff to 2026-11-11 00:00 UTC:
@@ -224,12 +225,13 @@ security-quarantined providers also need probes to establish recovery.
 
 Note, 2026-11-13 ([the country floor](#the-country-floor-2026-11-13)): the two
 URL rows (one success, the 0.8 ratio, which Main applies to Online too since
-2026-10-15 as variant (c)) are the bar. Where a country's public providers in
-a bucket number fewer than `country_floor_providers` (3), the score export
-admits its best providers that only those rows keep out, ranked behind every
-provider that passed them. Every other row still holds for them, and a
-provider unable to carry UDP or its advertised IPv6 is never admitted to
-today's facets.
+2026-10-15 as variant (c)) are the bar. Where fewer than
+`country_floor_providers` (3) of a country's public providers are online, the
+score export admits to Online its best providers that only those rows keep
+out of it, lent behind every provider that passed them. Quality and Speed
+membership is unchanged, every other row still holds for the admitted
+providers, and a provider unable to carry UDP or its advertised IPv6 is never
+admitted to today's facets.
 
 Note, 2026-10-28 ([FP2-MODERN.md](FP2-MODERN.md)): the row above is now
 priority, not membership. The gate this paragraph describes is retired: it
@@ -668,49 +670,50 @@ The bar stays every provider's decision. The floor
 (`model/network_client_score_country_floor.go`) acts after it, decided in the
 score export alone:
 
-- **Where.** Each country target, in each bucket: Quality, Speed, Online.
-  Where fewer than `country_floor_providers` of the country's public
-  providers are in the bucket, the export admits the country's best providers
-  that the bar alone keeps out of it, until the bucket holds that many or the
-  candidates run out. Quality and Speed fill first; each native the floor
-  admits joins Online, as every native does, so Online counts them before it
-  fills. An admission holds in every location and group copy of the provider;
-  a city or region with none of them answers from its country through the
-  location fallback above.
+- **Where.** Each country target. Where fewer than `country_floor_providers`
+  of the country's public providers are online, the export admits to Online
+  the country's best providers that the bar alone keeps out of it
+  (`no_success` and `low_success`), until Online holds that many or the
+  candidates run out. An admission holds in every location and group copy of
+  the provider; a city or region with none of them answers from its country
+  through the location fallback above.
+- **Why Online alone.** Online is the bucket every answer ends in: a Quality
+  or Speed request draws its own natives, borrows the other bucket's, and then
+  the Online fallback lends what is left at twice `backfill_tier_offset`. One
+  floor on Online keeps every mode of the country served, while Quality and
+  Speed keep the bar's members alone. A provider admitted as a native instead
+  would be drawn with the request's natives, ahead of the other bucket's
+  natives that passed the bar: it could take their places in a short answer
+  and put a worse tier ahead of a better one, which is the displacement the
+  floor must not cause.
 - **Who qualifies.** Everything but the bar: the export's cohort (active,
   top-level, connected, valid, a Public provide key), no hard exclusion
   (reliability, ARIN risk, a TLS finding the judge ruled the provider's, zero
-  carry), the reliability minimums, and every other rule of the bucket, which
-  the floor reads as the decision with the provider's URL evidence at the bar
-  (`providerEgressBarredBuckets`): ARIN non-quality stays out of Quality, the
-  native URL-run minimums and the modern provider gate hold, and an
-  unmeasured provider is no candidate for a native bucket. "Below the bar"
-  covers `low_success`, `no_success` and, for Quality and Speed, a failing
-  ratio (`health`). Network-only providers neither count nor qualify.
+  carry) and the reliability minimums. The floor reads the decision with the
+  provider's URL evidence at the bar (`providerEgressBarredFromOnline`), so
+  any later rule that keeps a provider out of Online keeps it out of the
+  floor too. Network-only providers neither count nor qualify.
 - **The hard gates of UDP and IP family stay.** Today's facets, which every
   request without a selector reads, never take a provider the probe found
   unable to carry UDP or the IPv6 it advertises (`CapabilityDowngrades`,
-  [FP2-PROTOCOL.md](FP2-PROTOCOL.md) §3), even as the best below the bar. Its
-  classified copy can be admitted in its capability facet, which only
+  [FP2-PROTOCOL.md](FP2-PROTOCOL.md) §3, §3.7), even as the best below the
+  bar. Its classified copy can be admitted in its capability facet, which only
   selector-mode requests that take its class read; there the labels keep UDP
   flows off a tcp exit (§6, §7). That second pass counts what selector mode
   draws, every class, with the strict admissions, so it adds downgraded
   providers only where the country has too few others.
-- **Best** is the bucket's own order: Quality and Speed by the mode's tier and
-  score, then the URL success weight (`0.1 + 0.9·ratio`); Online by the Online
-  fallback's order (reliability weight times URL weight, then the speed tier
-  and score); ties by client id, so consecutive exports choose alike.
-- **It only adds.** A provider that passes the bar keeps its bucket, tier and
-  weight. An admitted native draws with the weight its mode would give it and
-  carries its tier moved into the Online fallback's band (twice
-  `backfill_tier_offset`, 22 by default), behind every native and borrowed
-  native of the request even with the client's demerits. The connect client
-  runs flows on its lowest tier first, so an admitted provider carries traffic
-  only where nothing that passed a bar can.
+- **Best** is the Online fallback's order: reliability weight times URL
+  success weight (`0.1 + 0.9·ratio`), then the speed tier and score, then the
+  URL success weight; ties go to the lower client id, so consecutive exports
+  choose alike.
+- **It only adds.** No provider that passes the bar loses a bucket, a tier
+  or a weight. An admitted provider is lent last, from Online, filling only
+  the places every native and borrowed native left, behind them all even with
+  the client's demerits; the connect client runs flows on its lowest tier
+  first, so it carries traffic only where nothing that passed a bar can.
 - **Per-request filters still apply:** caller network exclusions, excluded
-  ids and destinations, liveness leases, live subscriber validation of Quality
-  natives, and the post-quantum and modern requirements of strict requests,
-  which read flags the floor never sets.
+  ids and destinations, liveness leases, and the post-quantum and modern
+  requirements of strict requests, which read flags the floor never sets.
 - **What reads it.** The pages FindProviders2 reads (api, alt and the proxy's
   hosted devices) carry the admissions, and the admitted supply gauge counts
   them. The export publishes its strict admissions as
@@ -720,11 +723,11 @@ score export alone:
   and `bringyourctl provider inspect` read the bar's decisions alone; a floored
   provider's status still says why the bar keeps it out.
 - **Observability.** `urnetwork_client_score_country_floor_providers{country,
-  bucket, decision}` (a series only for a country the floor admitted to) and
-  `urnetwork_client_score_country_floor_providers_fleet{bucket, decision}`,
-  published with the admitted supply by the newest exporter (api dashboard,
-  "country floor admissions"), and each export's `[nclm]country floor:` log
-  line, which also names the countries it left empty.
+  decision}` (a series only for a country the floor admitted to) and
+  `urnetwork_client_score_country_floor_providers_fleet{decision}`, published
+  with the admitted supply by the newest exporter (api dashboard, "country
+  floor admissions to Online"), and each export's `[nclm]country floor:` log
+  line, which also names the countries it left without an online provider.
 - **Settings.** `country_floor_providers` in the `egress_index` block of
   provider.yml, default 3, on with no config change (owner, 10-15: no
   off-by-default knobs). Zero is the kill switch; a change is a config
@@ -735,16 +738,17 @@ score export alone:
   survive one exit's lost lease or quarantine with two left. Auto mode shows
   Connected with one speed exit, and the fixed Quality profile once its
   active providers reach the location's provider count, which now counts the
-  floor's admissions too. Three also fits inside every country
-  that went empty on 11-13 (pe kept 20-24 connected providers, nz 4-14, ar
-  9-25), so the floor fills there from providers the bar alone keeps out
-  rather than running out of candidates.
+  floor's admissions too. Three also fits inside every country that went
+  empty on 11-13 (pe kept 20-24 connected providers, nz 4-14, ar 9-25), so
+  the floor fills there from providers the bar alone keeps out rather than
+  running out of candidates.
 - **Reading it after a deploy.** Each export logs `[nclm]country floor:` with
-  the admissions per decision and bucket and the countries they went to, and
-  the countries a bucket stayed empty in because no provider qualifies (the
-  hard gates of UDP and IP family keep a country empty for legacy requests
-  where every candidate lost UDP or IPv6).
+  the admissions per decision and the countries they went to, and the
+  countries left without an online provider because none qualifies (the hard
+  gates of UDP and IP family keep a country empty for legacy requests where
+  every candidate lost UDP or IPv6).
 
+## Metrics derived for ranking
 
 The indexer computes admission and ranking from the same eight-hour URL
 history and the existing connection-reliability lookbacks. Security exceptions
