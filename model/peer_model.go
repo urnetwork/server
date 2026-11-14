@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	mathrand "math/rand"
 	"slices"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -2619,4 +2622,195 @@ func GetNetworkPeersForSession(session *session.ClientSession) (*NetworkPeersRes
 	result.DisconnectedCount = len(result.Disconnected)
 
 	return result, nil
+}
+
+// §8.19's peer-list filter (ACL-M6-04; R-ACL-1, R-ACL-8, D-ACL-11). In a network
+// with a head row, while the process's contract gate is on, the resident sends
+// a client only the peers it may reach: reach(client, peer) in the network's
+// verified state, as §8.10's contract rule reads it, D-ACL-5's legacy rule
+// included. The list is one complete per-network list, read once and shared by
+// every listener of the network (PEERSSTREAMS2.md), so the filter runs at send,
+// per client, on a new slice, and never touches the shared peers. A network with
+// no head row, or a process with no gate on, keeps today's exact path and reads
+// nothing more (R-ACL-8). A state that is not loaded, or a fact the filter
+// cannot read, sends an empty list, never an unfiltered one. Isolated clients
+// stay as they are: unlisted, and sent no list (network_client_acl_group).
+//
+// The facts are each client's subject as the contract gate reads a contract's
+// end (ProvideRelationshipAclEnd), read for a batch of clients in one query and
+// kept per process: a client's subject, binding and owner row do not change
+// once its binding is written, so only those facts are kept, for FactsTtl, and
+// a sidecar's client read before its binding is read again next time. The
+// filter itself reads memory only.
+
+// Tunables of the peer filter's facts.
+type NetworkPeerAclSettings struct {
+	// How long a client's settled facts answer before they are read again: its
+	// subject, binding and owner row are fixed once its binding is written, so
+	// this bounds only what a removed client costs to keep.
+	FactsTtl time.Duration
+	// The most clients' facts one process keeps; a read past it empties the
+	// cache first.
+	FactsMaxCount int
+	// How long one read of a batch's facts may run.
+	FactsTimeout time.Duration
+}
+
+func DefaultNetworkPeerAclSettings() *NetworkPeerAclSettings {
+	return &NetworkPeerAclSettings{
+		FactsTtl:      10 * time.Minute,
+		FactsMaxCount: 100 * 1000,
+		FactsTimeout:  5 * time.Second,
+	}
+}
+
+// The facts a network's peer filter needs are not linked here (MG0, MG1, MG2).
+var ErrNetworkPeerAclUnavailable = errors.New("Peer facts need MG0, MG1 and MG2.")
+
+// One client's facts as the cache keeps them.
+type networkPeerAclFactsEntry struct {
+	networkId  server.Id
+	end        *ProvideRelationshipAclEnd
+	expireTime time.Time
+}
+
+// The process's settled facts by client.
+type networkPeerAclFactsCache struct {
+	stateLock       sync.Mutex
+	clientIdEntries map[server.Id]networkPeerAclFactsEntry
+}
+
+var networkPeerAclFacts = &networkPeerAclFactsCache{
+	clientIdEntries: map[server.Id]networkPeerAclFactsEntry{},
+}
+
+// Empties the process's facts, for tests.
+func Testing_ClearNetworkPeerAclFacts() {
+	networkPeerAclFacts.stateLock.Lock()
+	defer networkPeerAclFacts.stateLock.Unlock()
+	networkPeerAclFacts.clientIdEntries = map[server.Id]networkPeerAclFactsEntry{}
+}
+
+// Whether an end's facts are settled: a sidecar's client once its binding is
+// written, or any client that is no sidecar's.
+func (self *ProvideRelationshipAclEnd) settled() bool {
+	return self.SidecarId != nil || !(self.StrictExp || self.Tagged)
+}
+
+// The facts of clientIds in networkId: each kept one that is fresh, the rest
+// read in one query. A client the query does not find active in the network
+// maps to nothing. Errs, with nothing answered, when the read fails.
+func GetNetworkPeerAclEnds(ctx context.Context, networkId server.Id, clientIds []server.Id) (map[server.Id]*ProvideRelationshipAclEnd, error) {
+	if !server.SidecarMg0Linked() || !server.SidecarMg1Linked() || !server.SidecarMg2Linked() {
+		return nil, ErrNetworkPeerAclUnavailable
+	}
+	settings := DefaultNetworkPeerAclSettings()
+	now := time.Now()
+	ends := make(map[server.Id]*ProvideRelationshipAclEnd, len(clientIds))
+	missing := []server.Id{}
+	func() {
+		networkPeerAclFacts.stateLock.Lock()
+		defer networkPeerAclFacts.stateLock.Unlock()
+		for _, clientId := range clientIds {
+			entry, found := networkPeerAclFacts.clientIdEntries[clientId]
+			if found && entry.networkId == networkId && now.Before(entry.expireTime) {
+				ends[clientId] = entry.end
+			} else if !slices.Contains(missing, clientId) {
+				missing = append(missing, clientId)
+			}
+		}
+	}()
+	if len(missing) == 0 {
+		return ends, nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, settings.FactsTimeout)
+	defer cancel()
+	read := map[server.Id]*ProvideRelationshipAclEnd{}
+	if r := server.HandleError(func() {
+		server.Db(readCtx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				readCtx,
+				`
+					SELECT
+						c.client_id`+networkClientAclEndColumns("c")+`
+					FROM network_client c`+networkClientAclEndJoins("c")+`
+					WHERE
+						c.network_id = $1 AND
+						c.client_id = ANY($2) AND
+						c.active = true
+				`,
+				networkId,
+				missing,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					scan := &provideRelationshipAclScan{}
+					server.Raise(result.Scan(append([]any{&clientId}, scan.destinations()...)...))
+					read[clientId] = scan.end(&networkId)
+				}
+			})
+		})
+	}); r != nil {
+		return nil, fmt.Errorf("peer facts: %v", r)
+	}
+	func() {
+		networkPeerAclFacts.stateLock.Lock()
+		defer networkPeerAclFacts.stateLock.Unlock()
+		if settings.FactsMaxCount < len(networkPeerAclFacts.clientIdEntries)+len(read) {
+			networkPeerAclFacts.clientIdEntries = map[server.Id]networkPeerAclFactsEntry{}
+		}
+		for clientId, end := range read {
+			if end.settled() {
+				networkPeerAclFacts.clientIdEntries[clientId] = networkPeerAclFactsEntry{
+					networkId:  networkId,
+					end:        end,
+					expireTime: now.Add(settings.FactsTtl),
+				}
+			}
+		}
+	}()
+	for clientId, end := range read {
+		ends[clientId] = end
+	}
+	return ends, nil
+}
+
+// The peers of peers a client may be sent under view (§8.19), in a new slice:
+// every peer for an unfiltered view, none for an unavailable one, and for a
+// filtered one each peer the viewer may reach, a disconnect marker included, so
+// a client learns nothing of a peer it may not reach, even its leaving. ends
+// holds the viewer's facts and each peer's; a peer with none is not sent, and a
+// viewer with none is sent nothing.
+func FilterNetworkPeers(
+	view sidecar.AclPeerView,
+	viewerId server.Id,
+	ends map[server.Id]*ProvideRelationshipAclEnd,
+	peers []*NetworkPeer,
+	now time.Time,
+) []*NetworkPeer {
+	switch view.Listing {
+	case sidecar.AclPeerListingUnfiltered:
+		return slices.Clone(peers)
+	case sidecar.AclPeerListingFiltered:
+	default:
+		return []*NetworkPeer{}
+	}
+	listed := []*NetworkPeer{}
+	viewerEnd := ends[viewerId]
+	if viewerEnd == nil {
+		return listed
+	}
+	viewer := viewerEnd.ContractEnd()
+	for _, peer := range peers {
+		peerEnd := ends[peer.ClientId]
+		if peerEnd == nil {
+			continue
+		}
+		peerContractEnd := peerEnd.ContractEnd()
+		if view.Listed(&viewer, &peerContractEnd, now) {
+			listed = append(listed, peer)
+		}
+	}
+	return listed
 }

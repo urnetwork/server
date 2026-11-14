@@ -32,8 +32,10 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/pushservice"
 
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
 
@@ -545,6 +547,12 @@ type ExchangeSettings struct {
 	NetworkPeersPollInterval time.Duration
 	StreamHopsPollInterval   time.Duration
 	ListenerFullReadEvery    int
+	// How often a resident whose peer listener runs reads its network's view
+	// for §8.19's peer filter (ACL-M6-04), from memory alone, sending the whole
+	// list again, filtered, when the network's head row or verified position
+	// moved: 1 s, inside §8.9's 5 s for a revocation to reach a server gate.
+	// Non-positive reads it only when the list changes.
+	NetworkPeerAclRecheckInterval time.Duration
 
 	// redis key-event delta delivery for the peers + stream-hops listeners
 	// (PEERSSTREAMS2.md). Off -> pure PEERS2 poll behavior above.
@@ -695,10 +703,11 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		// This is the single source of truth: NewConnectHandler propagates it
 		// into ConnectionAnnounceSettings so one flag gates both. Canary by
 		// deploying to one connect block first (PEERS2.md §6).
-		EnableNetworkPeers:       true,
-		NetworkPeersPollInterval: 5 * time.Second,
-		StreamHopsPollInterval:   5 * time.Second,
-		ListenerFullReadEvery:    10,
+		EnableNetworkPeers:            true,
+		NetworkPeersPollInterval:      5 * time.Second,
+		StreamHopsPollInterval:        5 * time.Second,
+		ListenerFullReadEvery:         10,
+		NetworkPeerAclRecheckInterval: time.Second,
 		KeyEventDelivery: KeyEventDeliverySettings{
 			// ON (2026-07-18). PREREQUISITE: `notify-keyspace-events "Kg$sx"`
 			// must be live on every data node BEFORE this build deploys (xops
@@ -4911,6 +4920,9 @@ func (self *Resident) Run() {
 	// are counted but get no listener — a hosted device does not consume the
 	// peer list, and an isolated client (ACL group "isolated") receives none.
 	if self.exchange.settings.EnableNetworkPeers && self.peerNetworkId != nil && self.peerCategory == model.NetworkPeerCategoryClient {
+		// §8.19's filter reads the network's view as it stands before the
+		// listener's first delivery, so a change after it is seen below
+		aclView := self.networkPeerAclView()
 		networkPeerListener := model.NewNetworkPeerListener(
 			self.ctx,
 			*self.peerNetworkId,
@@ -4926,6 +4938,23 @@ func (self *Resident) Run() {
 			removePeerListener := self.exchange.keyEventSubscriber.AddPeerListener(*self.peerNetworkId, networkPeerListener)
 			defer removePeerListener()
 			networkPeerListener.Resync()
+		}
+		// only a process that installed a contract gate rechecks, so the rest
+		// pay no timer a resident
+		if controller.AclContractGateInstalled() {
+			recheckCtx, recheckCancel := context.WithCancel(self.ctx)
+			recheckDone := make(chan struct{})
+			go func() {
+				defer close(recheckDone)
+				server.HandleError(func() {
+					self.recheckNetworkPeerAcl(recheckCtx, networkPeerListener, aclView)
+				})
+			}()
+			// stopped and joined before the listener closes
+			defer func() {
+				recheckCancel()
+				<-recheckDone
+			}()
 		}
 	}
 
@@ -4955,7 +4984,7 @@ func (self *Resident) handleNetworkPeerEvent(event *model.NetworkPeerEvent) {
 			peers = []*protocol.NetworkPeer{}
 		}
 	}
-	for _, peer := range event.Peers {
+	for _, peer := range self.networkPeersToSend(event.Peers) {
 		if peer.ClientId == self.clientId {
 			continue
 		}
@@ -4968,6 +4997,75 @@ func (self *Resident) handleNetworkPeerEvent(event *model.NetworkPeerEvent) {
 
 	for _, frame := range frames {
 		self.sendListenerFrame(frame)
+	}
+}
+
+// §8.19's filter of the peers an event carries (ACL-M6-04): peers as they are
+// where no contract gate is on or the network has no head row, today's exact
+// path; else only the peers this client may reach in the network's verified
+// state, and none when that state, or a fact the filter needs, cannot be read
+// (model.FilterNetworkPeers). Runs on the listener's goroutine, never a
+// packet's; the facts it reads are kept per process (model.GetNetworkPeerAclEnds).
+func (self *Resident) networkPeersToSend(peers []*model.NetworkPeer) []*model.NetworkPeer {
+	gate := controller.ActiveAclContractGate()
+	if gate == nil || self.peerNetworkId == nil {
+		return peers
+	}
+	view := gate.PeerView(sidecar.Id(*self.peerNetworkId))
+	if view.Listing == sidecar.AclPeerListingUnfiltered {
+		return peers
+	}
+	ends := map[server.Id]*model.ProvideRelationshipAclEnd{}
+	if view.Listing == sidecar.AclPeerListingFiltered {
+		clientIds := make([]server.Id, 0, len(peers)+1)
+		clientIds = append(clientIds, self.clientId)
+		for _, peer := range peers {
+			if peer.ClientId != self.clientId {
+				clientIds = append(clientIds, peer.ClientId)
+			}
+		}
+		var err error
+		ends, err = model.GetNetworkPeerAclEnds(self.ctx, *self.peerNetworkId, clientIds)
+		if err != nil {
+			if glog.V(2) {
+				glog.Infof("[r]%s peer facts unread, sending no peers: %v\n", self.clientId, err)
+			}
+			return []*model.NetworkPeer{}
+		}
+	}
+	return model.FilterNetworkPeers(view, self.clientId, ends, peers, server.NowUtc())
+}
+
+// This resident's network's view as §8.19's filter reads it now: unfiltered
+// where no contract gate is on.
+func (self *Resident) networkPeerAclView() sidecar.AclPeerView {
+	gate := controller.ActiveAclContractGate()
+	if gate == nil || self.peerNetworkId == nil {
+		return sidecar.AclPeerView{Listing: sidecar.AclPeerListingUnfiltered}
+	}
+	return gate.PeerView(sidecar.Id(*self.peerNetworkId))
+}
+
+// Reads the network's view every NetworkPeerAclRecheckInterval until ctx ends,
+// from memory, and when it differs from view, its listing, verified position or
+// state moved, forces the listener's full read, which delivers the whole list
+// again, filtered at the new state: a grant's activation or revocation reaches
+// the list within §8.9's targets, though the registry did not change.
+func (self *Resident) recheckNetworkPeerAcl(ctx context.Context, listener *model.NetworkPeerListener, view sidecar.AclPeerView) {
+	interval := self.exchange.settings.NetworkPeerAclRecheckInterval
+	if interval <= 0 {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+		if next := self.networkPeerAclView(); next != view {
+			view = next
+			listener.Resync()
+		}
 	}
 }
 
