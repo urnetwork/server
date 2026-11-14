@@ -224,7 +224,7 @@ func (self *testOrphanWorld) job() *sidecar.TaskRequest {
 	return jobs[0]
 }
 
-// Each repo's repo/ ETag, which every write changes.
+// Each repo's repo/ ETag: the fake's is its bytes' MD5, so any change to repo/ changes it.
 func (self *testOrphanWorld) repoEtags(extraRepoIds ...sidecar.Id) map[sidecar.Id]string {
 	self.t.Helper()
 	etags := map[sidecar.Id]string{}
