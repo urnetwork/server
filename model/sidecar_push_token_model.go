@@ -129,12 +129,18 @@ func PushTokenSlot(clientId server.Id) int {
 }
 
 // The process's Redis for the token's scripts: server.Redis through the push adapter, which refuses a
-// call whose keys share no tag.
-var sidecarPushTokenRedis = sync.OnceValue(func() *SidecarPushRedis {
+// call whose keys share no tag. A variable, so that FS-120's schedules can run the writers on T2's twin.
+var sidecarPushTokenRedis func() pushservice.HintRedis = sync.OnceValue(func() pushservice.HintRedis {
 	return NewSidecarPushRedis(&SidecarPushRedisSettings{
 		CallTimeout: DefaultSidecarPushTokenSettings().CallTimeout,
 	})
 })
+
+// Runs in tests in a writer's apply, once its change has committed and before each try of the apply
+// script, with the row the try carries and the t0 it read: FS-120's barrier after a change's commit and
+// before its apply. The try carries the t0 it returns, so a test that holds a try there ages its t0 by
+// what its clock moved meanwhile. Nil outside tests. The pass's own applies do not run it.
+var pushTokenApplyTestHook func(row *SidecarPushTokenRow, t0 int64) int64
 
 // The columns every read takes, in scanPushTokenRow's order.
 const pushTokenColumns = `client_id, platform, token, rev, update_time, removed_time, slot`
@@ -592,6 +598,9 @@ func readPushTokenTime(ctx context.Context, clientId server.Id, settings *Sideca
 
 // One apply of row with t0, bounded by CallTimeout when ctx has no deadline.
 func applyPushTokenRow(ctx context.Context, row *SidecarPushTokenRow, t0 int64, settings *SidecarPushTokenSettings) (pushservice.WakeTokenApplyResult, error) {
+	if hook := pushTokenApplyTestHook; hook != nil {
+		t0 = hook(row, t0)
+	}
 	callCtx, cancel := pushTokenCallContext(ctx, settings)
 	defer cancel()
 	applied, err := pushservice.ApplyWakeToken(callCtx, sidecarPushTokenRedis(), row.wakeTokenRow(), t0, settings.ApplyWindow)
