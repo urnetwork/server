@@ -11564,4 +11564,13 @@ var migrations = []any{
 	// A separately qualified operator may grant one unchanged-patch retry,
 	// preserving the original paid admission, source, terminal and full audit.
 	newSqlMigration(CompetitionOperatorRequestedPatchRetryMigrationSql()),
+
+	// The bytes served per operator block of GET /account/epochs
+	// (operator_block_traffic_schema.go, model/operator_block_traffic.go): the
+	// operator_block_traffic and operator_block_network_traffic tables, new
+	// and empty, each created only when absent, under a five-second lock
+	// bound. Nothing existing is locked, scanned or rewritten. Apply before
+	// deploying the taskworker that advances the rollup and the api and alt
+	// that read it.
+	operatorBlockTrafficMigration,
 }
