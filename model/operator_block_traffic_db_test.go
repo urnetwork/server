@@ -204,10 +204,11 @@ func TestOperatorBlockTrafficCountsTheAwardsSweeps(t *testing.T) {
 }
 
 // The running figure: before a block completes, the rollup counts its bytes
-// through the settled sweep time, which is the figure's as-of. A run at the
-// same time reads nothing more, a write from a cursor another run has moved
-// adds nothing, and a later run adds the rest once, so the completed block's
-// bytes are the award's.
+// through the settled sweep time, which is the figure's as-of, for the epoch
+// that holds the block's end and for the block itself; a block that has not
+// started counts nothing. A run at the same time reads nothing more, a write
+// from a cursor another run has moved adds nothing, and a later run adds the
+// rest once, so the completed block's bytes are the award's.
 func TestOperatorBlockTrafficRunsAheadOfTheAward(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -253,6 +254,18 @@ func TestOperatorBlockTrafficRunsAheadOfTheAward(t *testing.T) {
 		}
 		requireServed(now, providerA, gib, settled)
 		requireServed(now, providerB, gib, settled)
+		// the open block's own figure is the same bytes, as of the same time;
+		// the next block has not started and counts nothing
+		windowBytes, blockBytes := GetAccountServedBytes(ctx, providerA, []PointsEpochWindow{{Epoch: 1, Start: epoch[0], End: epoch[1]}}, []int64{block, block + 1}, now)
+		if len(windowBytes) != 1 || windowBytes[0].ByteCount != gib || len(blockBytes) != 2 {
+			t.Fatalf("served %+v in the epoch and %+v in the blocks", windowBytes, blockBytes)
+		}
+		if blockBytes[0].ByteCount != gib || blockBytes[0].AsOf == nil || !blockBytes[0].AsOf.Equal(settled) {
+			t.Fatalf("block %d served %d bytes as of %v, want %d as of %s", block, blockBytes[0].ByteCount, blockBytes[0].AsOf, gib, settled)
+		}
+		if blockBytes[1].ByteCount != 0 || blockBytes[1].AsOf != nil {
+			t.Fatalf("block %d, not started, served %d bytes as of %v", block+1, blockBytes[1].ByteCount, blockBytes[1].AsOf)
+		}
 
 		// a second run at the same time reads nothing more
 		chunkCount, err := AdvanceOperatorBlockTrafficRollup(ctx, settings, now)
