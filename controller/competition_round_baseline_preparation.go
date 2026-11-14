@@ -55,6 +55,7 @@ type roundBaselinePreparationPin struct {
 type roundBaselinePreparationConfig struct {
 	G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
 	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	SourceGraphPolicy  model.CompetitionSourceGraphPolicy   `json:"source_graph_policy,omitempty"`
 	Schema             int                                  `json:"schema"`
 	Kind               string                               `json:"kind"`
 	Program            roundBaselinePreparationPin          `json:"program"`
@@ -124,6 +125,84 @@ func roundBaselinePreparationPolicyDependencies(policy model.CompetitionG2Volume
 	}
 }
 
+// The releases of the eleven-repository source graph (QD-769), one for each
+// scoring policy: a producer whose repository list ends in sidecar, and the
+// preparation program that pins it. The three historical producers above keep
+// their own programs and pins and never authenticate these bytes.
+func roundBaselineSidecarProducer(policy model.CompetitionG2VolumePolicy, coverage *model.CompetitionWorkCoveragePolicy) (producer string, digest string, program string, err error) {
+	if coverage != nil {
+		if _, err := model.CompetitionScorerVersionForWorkCoverage(policy, coverage); err != nil {
+			return "", "", "", err
+		}
+		return "evaluator-work-coverage-sidecar.sh", "7a98e73540e236c364d59e421d090c23b16e28da04977fc81d44ebe549c3f8d0", "prepare-round-baseline-work-coverage-sidecar.sh", nil
+	}
+	switch policy {
+	case model.CompetitionG2VolumePolicyLegacy:
+		return "evaluator-sidecar.sh", "ccb50d82ac9bc88f524c7aa2306fde74f820673a6f05c48cf3b70ee925b56cad", "prepare-round-baseline-sidecar.sh", nil
+	case model.CompetitionG2VolumePolicyMinimumWork:
+		return "evaluator-minimum-work-sidecar.sh", "ebacbbdc25a4ad2c49c1436e70aeda343124fb46bad9885068140b2d74105f16", "prepare-round-baseline-minimum-work-sidecar.sh", nil
+	default:
+		return "", "", "", errors.New("unsupported baseline preparation g2 volume policy")
+	}
+}
+
+// The files a producer of the eleven-repository graph runs beside, at the
+// bytes of the release this tree holds. It shares no digest map with the
+// sealed v3 release: the two helpers that carry the repository list differ,
+// and the helpers of this tree read their Docker scope from
+// subevaluation-ownership.sh, which the v3 release did not hold.
+//
+// The patch validator is a compiled binary, built and pinned when the release
+// is qualified on the evaluator hosts. Its two digests are empty until then,
+// and roundBaselinePreparationReleaseDependencies refuses a release with an
+// empty digest, so no configuration can name this release before that.
+func roundBaselineSidecarDependencyDigests() map[string]string {
+	return map[string]string{
+		"network-boundary.sh":            "ab08d9d480600c931e058756fc0c961e3ad1cb36df3d3fd7ea5ad063607f3c6d",
+		"compose.yml":                    "f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464",
+		"hash-local-mount.sh":            "94ee94b9cc42dfe2f7236d49cc24e26b7bd79e9b63c5d582315b7fd1878dcb86",
+		"docker-id-map.sh":               "ecf319fccdd00a2ab76871ec0a29693abca83e3a99ee1ee5c508bc1b076d96a0",
+		"resource-boundary.sh":           "2d8fee49fff639f7c44d0e865d299cf020e062f6c1fa35933e30d5fb6710db5a",
+		"retain-failure-evidence.sh":     "3aeea5ceaabe938da85e61ed7793ef25a514d91259e25f2664a7f3bbbe778521",
+		"postgres-init.sh":               "653b81b0fcf2fdaf4a3f4421a252a582484581e3a03463c0fad03186ee14d77c",
+		"timeout-budget.sh":              "7f3298edaca3bd31f4e5a02d17fd88ccb66f961e9d8493d9b047426d8fab476d",
+		"entrypoint.sh":                  "efbfe1a8dd8fb58b4fef8e57bea205e819dfdf21a85ec31d71d85365cf467758",
+		"build-submission.sh":            "86dfa74176f3d7a061eb67e5762a3d61de2c5c87354d783f30f5a12d5246b068",
+		"submission-builder-identity.sh": "97281a179b680778c416f708b2d0abb95810eaa84ed15b87d2644b4467a86c49",
+		"prepare-evaluation-source.sh":   "b07a3dccd5145915a4e4ebb8e58ab451b91fe0f8633236884c1de81809f48fa0",
+		"subevaluation-ownership.sh":     "dc697fd97c6b635c419be6724344f9c4bcbad655572c9eaad5af5604cbe1599a",
+		"Dockerfile.submission":          "255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034",
+		"competitionpatch":               "",
+		"competitionpatch.sha256":        "",
+	}
+}
+
+// The source graph selects the release before the scoring policy selects its
+// producer. Omission is the historical graph and its unchanged releases; a
+// graph no release was cut for, and a release with a dependency whose digest
+// has not been recorded, are refused.
+func roundBaselinePreparationReleaseDependencies(graph model.CompetitionSourceGraphPolicy, policy model.CompetitionG2VolumePolicy, coverage *model.CompetitionWorkCoveragePolicy) (map[string]string, string, error) {
+	switch graph {
+	case model.CompetitionSourceGraphPolicyLegacy:
+		return roundBaselinePreparationPolicyDependencies(policy, coverage)
+	case model.CompetitionSourceGraphPolicySidecar:
+		producer, digest, program, err := roundBaselineSidecarProducer(policy, coverage)
+		if err != nil {
+			return nil, "", err
+		}
+		dependencies := roundBaselineSidecarDependencyDigests()
+		dependencies[producer] = digest
+		for _, pinned := range dependencies {
+			if !sha256Pattern.MatchString(pinned) {
+				return nil, "", errors.New("the sidecar source graph release is not qualified: a dependency has no recorded digest")
+			}
+		}
+		return dependencies, program, nil
+	default:
+		return nil, "", errors.New("unsupported baseline preparation source graph policy")
+	}
+}
+
 // A reservation is append-only database evidence, not a claimed/running job.
 // Its identity contains no seed, providers, credentials or caller-selected command.
 type roundBaselinePreparation struct {
@@ -185,7 +264,8 @@ func ConfigureCompetitionFutureRoundBaselinePreparation(settings *Settings, path
 	if err := ConfigureCompetitionRoundBaselinePreparation(&copy, path, expected); err != nil {
 		return err
 	}
-	if copy.futureBaselinePreparation == nil || copy.futureBaselinePreparation.Config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy || !reflect.DeepEqual(copy.futureBaselinePreparation.Config.WorkCoveragePolicy, settings.FutureEpochPolicy.WorkCoveragePolicy) {
+	if copy.futureBaselinePreparation == nil || copy.futureBaselinePreparation.Config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy || !reflect.DeepEqual(copy.futureBaselinePreparation.Config.WorkCoveragePolicy, settings.FutureEpochPolicy.WorkCoveragePolicy) ||
+		copy.futureBaselinePreparation.Config.SourceGraphPolicy != settings.futureSourceGraphPolicy() {
 		return errors.New("future preparation config does not name the separately staged policy")
 	}
 	settings.futureBaselinePreparation = copy.futureBaselinePreparation
@@ -234,11 +314,14 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if err := decodeCompetitionPreparationJson(bytes.NewReader(content), 64*1024, &config); err != nil {
 		return err
 	}
-	if (config.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || !reflect.DeepEqual(config.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy)) &&
-		(settings.FutureEpochPolicy == nil || config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy || !reflect.DeepEqual(config.WorkCoveragePolicy, settings.FutureEpochPolicy.WorkCoveragePolicy)) {
+	current := config.G2VolumePolicy == settings.EvaluationPolicy.G2VolumePolicy && reflect.DeepEqual(config.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) &&
+		config.SourceGraphPolicy == settings.EvaluationPolicy.SourceGraphPolicy
+	if !current &&
+		(settings.FutureEpochPolicy == nil || config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy || !reflect.DeepEqual(config.WorkCoveragePolicy, settings.FutureEpochPolicy.WorkCoveragePolicy) ||
+			config.SourceGraphPolicy != settings.futureSourceGraphPolicy()) {
 		return errors.New("baseline preparation policy is neither current nor explicitly staged for a future epoch")
 	}
-	expectedDependencies, expectedProgram, err := roundBaselinePreparationPolicyDependencies(config.G2VolumePolicy, config.WorkCoveragePolicy)
+	expectedDependencies, expectedProgram, err := roundBaselinePreparationReleaseDependencies(config.SourceGraphPolicy, config.G2VolumePolicy, config.WorkCoveragePolicy)
 	if err != nil {
 		return err
 	}
@@ -285,7 +368,7 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if err := configureRoundBaselineRecovery(settings, profile); err != nil {
 		return err
 	}
-	if config.G2VolumePolicy == settings.EvaluationPolicy.G2VolumePolicy && reflect.DeepEqual(config.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) {
+	if current {
 		settings.roundBaselinePreparation = profile
 	} else {
 		settings.futureBaselinePreparation = profile
