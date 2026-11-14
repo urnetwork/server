@@ -135,7 +135,9 @@ func TestPgBouncerDirectBlocksNameServicesThatChoose(t *testing.T) {
 // window's go comes back to the owner). Until the first stage, every block of
 // every service keeps nginx's single port.
 func TestPgBouncerDirectRolloutStage(t *testing.T) {
-	stage := map[string][]string{}
+	stage := map[string][]string{
+		"api": {"beta"},
+	}
 	if !reflect.DeepEqual(pgBouncerDirectBlocks, stage) {
 		t.Fatalf("the table is %v, the stage %v", pgBouncerDirectBlocks, stage)
 	}
