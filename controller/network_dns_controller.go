@@ -73,3 +73,28 @@ func WriteNetworkDnsRecords(request *sidecar.DnsRecordsRequest, clientSession *s
 	}
 	return answer, nil
 }
+
+// POST /network/dns/label-reclaim (§12.8, DNS-M5-16): after a restore, binds an ownerless retiring name back to the
+// caller's network, given the tuple signed by the key of a CT-logged leaf naming it (model.ReclaimDnsLabel). The
+// DNS permission by the role gate; the tuple must name the credential's own network.
+func ReclaimNetworkDnsLabel(request *sidecar.DnsLabelReclaimRequest, clientSession *session.ClientSession) (*sidecar.DnsLabelReclaimAnswer, error) {
+	if request == nil {
+		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "A reclaim names its tuple.")
+	}
+	root, err := networkDnsRoot()
+	if err != nil {
+		return nil, err
+	}
+	actorKind, actorId := model.AdminEventActorOf(clientSession)
+	reclaim := &model.DnsLabelReclaim{
+		Root:      root,
+		NetworkId: clientSession.ByJwt.NetworkId,
+		Request:   request,
+		ActorKind: actorKind,
+		ActorId:   actorId,
+	}
+	if requestId, ok := session.RequestIdFromContext(clientSession.Ctx); ok {
+		reclaim.RequestId = &requestId
+	}
+	return model.ReclaimDnsLabel(clientSession.Ctx, reclaim)
+}
