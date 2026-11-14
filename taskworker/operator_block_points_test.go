@@ -33,6 +33,12 @@ func TestDailyAwardTaskAwardsPostCutoffOperatorBlockPoints(t *testing.T) {
 		ctx := context.Background()
 		controller.SetStConfig(&controller.StConfig{Enabled: false})
 		defer controller.SetStConfig(nil)
+		// the award must carry points, and the release gate's fixture
+		// subsidy.yml configures none
+		subsidyConfig := model.EnvSubsidyConfig()
+		previousSubsidyConfig := *subsidyConfig
+		defer func() { *subsidyConfig = previousSubsidyConfig }()
+		subsidyConfig.AccountPointsPerPayout = 1000000
 
 		now := server.NowUtc()
 		current := int64(model.SubnetBlockNumber(now))
