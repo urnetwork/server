@@ -461,6 +461,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/mail/status", handlers.GetMailStatus),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
+		router.NewRoute("POST", "/acl/invite", handlers.AclInvite),
+		router.NewRoute("POST", "/acl/accept-invite", handlers.AclAcceptInvite),
 		// §13.15's certificate routes: an order and its status on a service token, aud certs, the
 		// network's certificates, and a revocation's mark; 503 until the process installs what they run
 		// on (TLS-M5-16)

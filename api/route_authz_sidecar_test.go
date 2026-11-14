@@ -195,6 +195,9 @@ var sidecarAllowlist = []string{
 	"GET /sidecar/identity",
 	// §8.9's (ACL-M2-12)
 	"POST /acl/ack",
+	// §8.11's invites (ACL-M6-03)
+	"POST /acl/invite",
+	"POST /acl/accept-invite",
 	// §16.6's cancel (MCP-M3-23)
 	"POST /approval/cancel",
 	// §15.15's mail routes (MAIL-M7-22)

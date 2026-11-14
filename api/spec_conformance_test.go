@@ -210,6 +210,8 @@ func registry() []specEndpoint {
 		{"GET", "/network/members", nil, rt(model.GetNetworkMembersResult{})},
 		{"POST", "/network/team-checkout", rt(controller.TeamCheckoutArgs{}), rt(controller.TeamCheckoutResult{})},
 		{"POST", "/acl/ack", rt(model.AclAckArgs{}), rt(model.AclAckResult{})},
+		{"POST", "/acl/invite", rt(model.AclInviteArgs{}), rt(model.AclInviteResult{})},
+		{"POST", "/acl/accept-invite", rt(model.AclAcceptInviteArgs{}), rt(model.NetworkBridgeShareResult{})},
 		{"POST", "/account/payout-wallet", rt(model.SetPayoutWalletArgs{}), rt(model.SetPayoutWalletResult{})},
 		{"GET", "/account/payout-wallet", nil, rt(controller.GetPayoutWalletResult{})},
 		{"GET", "/account/points", nil, rt(controller.AccountPointsResult{})},
