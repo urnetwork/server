@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -154,6 +155,65 @@ func TestTlsPublishedNamesPageByCursorAndDropExpired(t *testing.T) {
 		})
 		if names, cursor, err := ListTlsPublishedNames(ctx, nil, now); !errors.Is(err, sourceErr) || names != nil || cursor != nil {
 			t.Fatalf("a failing network answered %v, %v, %v", names, cursor, err)
+		}
+	})
+}
+
+// One grant served under a label, an alias and a custom host is three names
+// with one host and port: every page size gives each once, in (host, port,
+// label, alias) order, a page's cursor falling between two of them.
+func TestTlsPublishedNamesPageBetweenTheNamesOfOneGrant(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg2Linked() {
+			return
+		}
+		ctx := context.Background()
+		now := server.NowUtc()
+		networkId := tlsPublishedNamesTestNetwork(ctx)
+		public := protocol.AclAudience_ACL_AUDIENCE_PUBLIC
+		SetTlsPublishedNamesSource(func(ctx context.Context, sourceNetworkId server.Id, now time.Time) ([]*TlsPublishedName, error) {
+			if sourceNetworkId != networkId {
+				return nil, nil
+			}
+			return []*TlsPublishedName{
+				{Host: "blog", Port: 443, Alias: "www.brand.example", Name: "www.brand.example", Audience: public},
+				{Host: "blog", Port: 443, Label: "acme", Name: "blog.acme.ur.example", Audience: public},
+				{Host: "blog", Port: 443, Label: "abcdefghij", Name: "blog.abcdefghij.ur.example", Audience: public},
+				{Host: "blog", Port: 8443, Label: "abcdefghij", Name: "blog.abcdefghij.ur.example", Audience: public},
+			}, nil
+		})
+		defer SetTlsPublishedNamesSource(nil)
+
+		// a custom host's name has no label, so it comes first
+		want := []string{
+			"blog:443::www.brand.example",
+			"blog:443:abcdefghij:",
+			"blog:443:acme:",
+			"blog:8443:abcdefghij:",
+		}
+		for _, limit := range []int{1, 2, 3, 1000} {
+			settings := &TlsPublishedNamesSettings{Limit: limit, NetworkBatchCount: 1}
+			got := []string{}
+			var cursor *TlsPublishedNamesCursor
+			for pageCount := 0; ; pageCount += 1 {
+				if 100 < pageCount {
+					t.Fatalf("limit %d: no end after %d pages", limit, pageCount)
+				}
+				names, next, err := ListTlsPublishedNamesWithSettings(ctx, cursor, now, settings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range names {
+					got = append(got, name.Host+":"+strconv.Itoa(name.Port)+":"+name.Label+":"+name.Alias)
+				}
+				if next == nil {
+					break
+				}
+				cursor = next
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("limit %d listed %v, want %v", limit, got, want)
+			}
 		}
 	})
 }

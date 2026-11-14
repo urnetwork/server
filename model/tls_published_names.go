@@ -15,7 +15,13 @@ package model
 //
 // A grant past its expiry at now is dropped here whatever the source
 // answered. A page ends at Limit names and its cursor is the last name it
-// gave, so a network's names may span pages and none is given twice.
+// gave, so a network's names may span pages and none is given twice. One
+// grant is served under each of the network's labels, aliases and custom
+// hosts, so its names share a host and port and the order and the cursor
+// take the label and alias too.
+//
+// taskworker installs the source over its gate cache
+// (tls_published_names_served.go has the join; QD-770).
 
 import (
 	"cmp"
@@ -34,31 +40,45 @@ import (
 // source is installed.
 var ErrTlsPublishedNamesUnavailable = errors.New("tls published names are unavailable in this process")
 
-// One active publish grant of a network, tls/<port>/<host>.
+// One active publish grant of a network, tls/<port>/<host>, under one name it
+// is served by.
 type TlsPublishedName struct {
 	NetworkId server.Id
-	// The grant's host, one label as the network's document names it.
+	// The grant's host, one label as the network's document names it, a glob
+	// kept.
 	Host string
 	Port int
 	// The name it is served under: Host under the network's edge label, or
-	// under an alias when Alias is set.
+	// under an alias when Alias is set. Label is a live label or alias of the
+	// network in a root (dns_label), the name <Host>.<Label>.<root>; Alias is
+	// an active custom host of the network under one of its verified domains
+	// whose owner is Host, served as itself (§12.8). Neither is set where the
+	// network holds no such name, so nothing serves the grant.
 	Label string
 	Alias string
+	// The served name in full as a visitor's SNI names it, lowercase with no
+	// trailing dot: <Host>.<Label>.<root>, <Label>.<root> for @, or Alias.
+	// Empty with Label and Alias.
+	Name string
 	// members, members-device, link or public.
 	Audience protocol.AclAudience
 	// When the last of its rules ends; zero for none.
 	ExpireTime time.Time
 }
 
-// Where a page resumes: after this name, in (network, host, port) order.
+// Where a page resumes: after this name, in (network, host, port, label,
+// alias) order.
 type TlsPublishedNamesCursor struct {
 	NetworkId server.Id `json:"network_id"`
 	Host      string    `json:"host"`
 	Port      int       `json:"port"`
+	Label     string    `json:"label"`
+	Alias     string    `json:"alias"`
 }
 
 // A network's active publish grants at now, from its newest verified
-// projection. A network with none answers an empty list and no error.
+// projection, one name for each name a grant is served under. A network with
+// none answers an empty list and no error.
 type TlsPublishedNamesSource func(ctx context.Context, networkId server.Id, now time.Time) ([]*TlsPublishedName, error)
 
 var tlsPublishedNamesSource atomic.Pointer[TlsPublishedNamesSource]
@@ -89,7 +109,12 @@ func DefaultTlsPublishedNamesSettings() *TlsPublishedNamesSettings {
 }
 
 func tlsPublishedNameCompare(a *TlsPublishedName, b *TlsPublishedName) int {
-	return cmp.Or(cmp.Compare(a.Host, b.Host), cmp.Compare(a.Port, b.Port))
+	return cmp.Or(
+		cmp.Compare(a.Host, b.Host),
+		cmp.Compare(a.Port, b.Port),
+		cmp.Compare(a.Label, b.Label),
+		cmp.Compare(a.Alias, b.Alias),
+	)
 }
 
 // The networks with a log from afterNetworkId on in id order, itself too
@@ -164,7 +189,7 @@ func ListTlsPublishedNamesWithSettings(
 					continue
 				}
 				if cursor != nil && cursor.NetworkId == networkId {
-					after := &TlsPublishedName{Host: cursor.Host, Port: cursor.Port}
+					after := &TlsPublishedName{Host: cursor.Host, Port: cursor.Port, Label: cursor.Label, Alias: cursor.Alias}
 					if tlsPublishedNameCompare(name, after) <= 0 {
 						continue
 					}
@@ -178,7 +203,13 @@ func ListTlsPublishedNamesWithSettings(
 			for _, name := range active {
 				if settings.Limit <= len(names) {
 					last := names[len(names)-1]
-					return names, &TlsPublishedNamesCursor{NetworkId: last.NetworkId, Host: last.Host, Port: last.Port}, nil
+					return names, &TlsPublishedNamesCursor{
+						NetworkId: last.NetworkId,
+						Host:      last.Host,
+						Port:      last.Port,
+						Label:     last.Label,
+						Alias:     last.Alias,
+					}, nil
 				}
 				names = append(names, name)
 			}
