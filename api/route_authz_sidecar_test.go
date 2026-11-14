@@ -197,6 +197,9 @@ var sidecarAllowlist = []string{
 	"POST /acl/ack",
 	// §16.6's cancel (MCP-M3-23)
 	"POST /approval/cancel",
+	// §15.15's mail routes (MAIL-M7-22)
+	"POST /mail/enable",
+	"GET /mail/status",
 	// §13.15's certificate routes (TLS-M5-16)
 	"POST /tls/cert-order",
 	"GET /tls/cert-order/([^/]+)",

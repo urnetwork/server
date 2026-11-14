@@ -350,6 +350,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sidecar/push-token":                      routeAccessClient,   // the bearer's own client's wake token (§18.7)
 	"POST /sidecar/wake":                            routeAccessClient,   // another admitted device of the bearer's member, by the controller (§6.16)
 	"POST /sidecar/close":                           routeAccessPublic,   // an ephemeral client's close capability, its own credential (§18.8)
+	"POST /mail/enable":                             routeAccessClient,   // turns mail on for the bearer's network (§15.15)
+	"GET /mail/status":                              routeAccessClient,   // the bearer's network's mail status (§15.15)
 	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
 	"POST /approval/cancel":                         routeAccessClient,   // an approver's signed cancel of its own decision's uses (§16.6)
 	"GET /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar of either network of the share (§17.16)
@@ -465,6 +467,9 @@ var strictExpRoutes = map[string]bool{
 	"POST /network/enroll": true,
 	// §8.9's ack (ACL-M2-12)
 	"POST /acl/ack": true,
+	// §15.15's mail routes (MAIL-M7-22)
+	"POST /mail/enable": true,
+	"GET /mail/status":  true,
 	// §16.6's cancel (MCP-M3-23)
 	"POST /approval/cancel": true,
 	// §13.15's certificate routes (TLS-M5-16); the two order routes take a service token, so a

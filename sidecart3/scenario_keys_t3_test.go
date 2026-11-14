@@ -9,6 +9,7 @@ package sidecart3
 import (
 	"testing"
 
+	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/sidecartest/scenarios"
 
 	"github.com/urnetwork/server"
@@ -22,21 +23,13 @@ func keysScenarioSettings() *Settings {
 }
 
 func TestScenarioS3aOnT3(t *testing.T) {
-	open := ""
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(tb testing.TB) {
-		open = scenarios.RunOnTheMlsSubset(t, scenarios.S3a(t), ScenarioSettings(t, keysScenarioSettings()))
+		sidecartest.RunScenario(t, scenarios.S3a(t), ScenarioSettings(t, keysScenarioSettings()))
 	})
-	if open != "" {
-		t.Skip(open)
-	}
 }
 
 func TestScenarioS4aOnT3(t *testing.T) {
-	open := ""
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(tb testing.TB) {
-		open = scenarios.RunOnTheMlsSubset(t, scenarios.S4a(t), ScenarioSettings(t, keysScenarioSettings()))
+		sidecartest.RunScenario(t, scenarios.S4a(t), ScenarioSettings(t, keysScenarioSettings()))
 	})
-	if open != "" {
-		t.Skip(open)
-	}
 }

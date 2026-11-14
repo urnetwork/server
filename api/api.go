@@ -456,6 +456,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/sidecar/wake", handlers.SidecarWake),
 		// §18.8's unload beacon of an ephemeral page, by its close capability (TEAM-M1-10)
 		router.NewRoute("POST", "/sidecar/close", handlers.SidecarClose),
+		// §15.15's mail routes: mail on for a network, and its status; dark until MG7 and a dns root (MAIL-M7-22)
+		router.NewRoute("POST", "/mail/enable", handlers.MailEnable),
+		router.NewRoute("GET", "/mail/status", handlers.GetMailStatus),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
 		// §13.15's certificate routes: an order and its status on a service token, aud certs, the

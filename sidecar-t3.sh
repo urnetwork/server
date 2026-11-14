@@ -11,7 +11,10 @@
 #                           T3's cluster faults on the 4-host file-cluster
 #                           layouts (server/local/file-cluster-t3/t3.sh up; TEST-M2-07), which kill and start
 #                           hosts and so run only here, and say "not run" when the layouts do not answer, then
-#                           §22.8's disruption rows (TEST-M2-15), which use real time and real processes
+#                           §22.8's disruption rows (TEST-M2-15), which use real time and real processes, and
+#                           last FS-41's storage losses on the same layouts (EVSB-M2-20;
+#                           local/file-cluster-t3/wipe.sh), which remove every drive the layouts have and leave
+#                           them up and empty
 #
 # Everything builds with -tags sidecar_testhooks,sidecar_pending, so the hooks and the pending migration
 # groups are in, and runs with -count=1 and WARP_TEST_ENV_FAIL_FAST=1: server's TestEnv reruns a failed
@@ -133,6 +136,20 @@ disruptions() {
   fi
 }
 
+# FS-41's storage losses on the 4-host layouts (EVSB-M2-20; file_cluster_reseed_test.go): drives lost past parity,
+# then the site, through local/file-cluster-t3/wipe.sh, which runs t3tool with the go this run names. It removes every
+# drive the layouts have, so it runs after everything else that reads them.
+site_loss() {
+  if layout_up; then
+    (
+      export GO
+      go_t3 . -tags "$tags,sidecar_filecluster_t3" -run '^TestFileClusterReseedStorageLossesOnT3$'
+    ) || exit $?
+  else
+    skip "FS-41's storage losses: the 4-host file-cluster layouts do not answer (local/file-cluster-t3/t3.sh up)"
+  fi
+}
+
 connect_pin() {
   awk '/path: connect$/ { found = 1; next } found && /ref:/ { print $2; exit }' "$here/local/source-graph/lock.yml"
 }
@@ -143,6 +160,7 @@ if [ "$cadence" = nightly ]; then
   scenarios
   cluster_faults
   disruptions
+  site_loss
 else
   pin=$(connect_pin)
   last_pin=$(cat "$state_dir/connect-pin" 2>/dev/null || true)
