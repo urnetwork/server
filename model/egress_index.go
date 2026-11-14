@@ -43,6 +43,17 @@ import (
 // successes below it leaves every bucket, Online included, as one without a
 // success does, under the same kill switch and, unless
 // online_url_ratio_country_exemption is false, the same country guard.
+//
+// The country floor (network_client_score_country_floor.go) acts after these
+// decisions, in the score export: a country with fewer than
+// country_floor_providers public providers online gets its best providers
+// that the URL bar alone keeps out of Online (providerEgressBarredFromOnline)
+// admitted there, so no country goes empty while it has a connected provider
+// past every other gate. Quality and Speed keep the bar's members alone; their
+// answers reach the admitted providers through the Online fallback. The
+// decisions themselves are unchanged; the location counts add the admissions
+// the export publishes, and the dashboard counts, provider status and inspect
+// read the decisions alone.
 
 // The weights of the index and the bounds of its evidence, with the other
 // tunables of the egress rules. The `egress_index` block of provider.yml,
@@ -181,6 +192,23 @@ type EgressIndexSettings struct {
 	// the kill switch, and a switch that is unreadable, given twice or given
 	// without a value is false. RequiresModernProvider applies it.
 	QualitySpeedRequiresModernProvider *bool
+	// The country floor (network_client_score_country_floor.go, owner
+	// decision 2026-11-13): the fewest public providers each country keeps
+	// online. Where fewer pass the URL bar, the score export admits to
+	// Online the country's best providers that the bar alone keeps out, in
+	// the Online fallback's order, until Online holds this many or the
+	// candidates run out. It only adds: Quality and Speed keep the bar's
+	// members, so their answers lend an admitted provider only from the
+	// Online fallback, after every native and borrowed native. The taskworker's
+	// score export and location counts read it, so a change is a config
+	// release and a taskworker restart. Non-positive is off, the kill switch.
+	// `country_floor_providers` in the egress_index block.
+	CountryFloorProviders int
+	// How long the export's publication of the floor's admissions, and the
+	// location counts' read of it, may wait on Redis
+	// (publishProviderCountryFloor). Neither holds up its pass: the export
+	// keeps its pages, and the counts count the decisions alone. Code only.
+	CountryFloorRedisTimeout time.Duration
 }
 
 // The most a connect client adds to a provider's tier from what it sees
@@ -235,6 +263,13 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		// Shadow first (owner decision 2026-10-14); absent is off, since
 		// modern-first priority replaced the gate (owner decision 2026-10-28)
 		QualitySpeedRequiresModernProvider: nil,
+		// On (owner decision 2026-11-13: keep the 80% URL bar, but never
+		// let a country go empty). Three keeps a country's answers off a
+		// single exit while admitting only its best few below the bar
+		// (FP2FIX.md, "The country floor", "Why three").
+		CountryFloorProviders: 3,
+		// as long as the online url-success guard's reads and writes wait
+		CountryFloorRedisTimeout: 2 * time.Second,
 	}
 }
 
@@ -254,6 +289,8 @@ type egressIndexSettingsBlock struct {
 	RankMeasuredFirst    *bool          `yaml:"rank_measured_first"`
 	RankModernFirst      *bool          `yaml:"rank_modern_first"`
 	LocationFallback     *bool          `yaml:"location_fallback"`
+	// non-positive turns the country floor off
+	CountryFloorProviders *int `yaml:"country_floor_providers"`
 }
 
 // Whether this process has logged that its provider.yml still carries the
@@ -504,6 +541,9 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	// below one past the highest native tier a borrowed provider could tie
 	// with, or rank ahead of, a native one even before the client's demerits
 	setInt("backfill_tier_offset", overrides.BackfillTierOffset, ClientScoreCutoffTier+1, &settings.BackfillTierOffset)
+	// zero turns the country floor off; a negative value is out of range
+	// and keeps the default, like any other
+	setInt("country_floor_providers", overrides.CountryFloorProviders, 0, &settings.CountryFloorProviders)
 
 	numerator := settings.QualityOkNumerator
 	denominator := settings.QualityOkDenominator
