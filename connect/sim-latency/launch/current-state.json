@@ -71,6 +71,14 @@
     "latest_restart_observed_at": "2026-11-14T01:24:27Z",
     "latest_restart_diagnosis": "The private worker terminal report records bare deadline_exceeded; no database-phase evidence identifies the precise owner return boundary. Do not infer a PostgreSQL outage. The supervisor reclaimed the same completed native execution without resetting its attempt or deadline; immutable retention and database acceptance completed by 2026-11-14 01:39:49 UTC. Failure-only owner diagnostics are being prepared separately; no new control release was deployed.",
     "supervisor_renewal_diagnosis_pending": true,
+    "worker_fence_diagnostic_preparation": {
+      "source_sha256": "46fa01bc39c941d1abd0c541123603a84d9c87a82164066bf53dd6de78710a3e",
+      "selected_distinct_tests_passed": 19,
+      "qualification_scope": "Seven new controller controls, eight existing offline controller controls, two new CLI controls and two existing CLI controls passed independently. The expiry target also passed separately. PostgreSQL controls were not part of this positive selection. Initial build OOM and prior failed attribution control remain preserved.",
+      "causal_negative_check": "Running separately against the prior attribution helper; no result claimed yet.",
+      "deployed": false,
+      "rollout_constraint": "Both supervisor decoder consumers must use the updated closed schema before a worker can emit the additive owner diagnostics. Preserve current authority, retry predicates, budgets and original attempt deadlines."
+    },
     "supervisor_restarted_with_recovery_wrapper": true,
     "held_handoff_started_at": "2026-11-13T15:21:41Z",
     "fresh_native_observation_passed": true,
