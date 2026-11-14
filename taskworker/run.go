@@ -179,6 +179,8 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 		startEvsJobs(ctx, &owner.lifetime)
 		// gkm's reconciler, on the evs host startEvsJobs just built (gkm_reconciler.go)
 		startGkmReconciler(ctx, &owner.lifetime)
+		// §19.4's push sender, a loop and not a job, once vault holds the vendors' keys (wake_sender.go)
+		startWakeSender(ctx, &owner.lifetime)
 	}
 	statsCollected := controller.StartStatsCollector(ctx)
 	queueMetricsDone := task.StartQueueMetrics(ctx)
