@@ -344,23 +344,3 @@ func GetCtfExtenderBoundaries(ctx context.Context, clientIds []server.Id, startT
 	}
 	return boundaries
 }
-
-// GetCtfCanaryNetworkIds reads the networks of every extender published on
-// its own canary channel: the operator's own (X6, P6).
-func GetCtfCanaryNetworkIds(ctx context.Context) []server.Id {
-	networkIds := []server.Id{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`SELECT DISTINCT network_id FROM network_extender WHERE canary_channel IS NOT NULL`,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var networkId server.Id
-				server.Raise(result.Scan(&networkId))
-				networkIds = append(networkIds, networkId)
-			}
-		})
-	})
-	return networkIds
-}
