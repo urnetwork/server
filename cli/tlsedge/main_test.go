@@ -24,6 +24,7 @@ import (
 	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/tlsedgeservice"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
@@ -685,6 +686,10 @@ func TestHostRoutesAVisitorAndLogsNoAddressOrName(t *testing.T) {
 	for _, line := range world.log.Lines() {
 		if strings.Contains(line, visitorAddress) || strings.Contains(line, "log-canary") || strings.Contains(line, label) {
 			t.Errorf("a log line holds a visitor's address or a name: %s", line)
+		}
+		// what ScrubCommandLogs would rewrite on the way out is an address the block should not have written
+		if server.ScrubAddrsText(line) != line {
+			t.Errorf("a log line holds an address the scrubber rewrites: %s", line)
 		}
 	}
 }
