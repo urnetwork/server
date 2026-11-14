@@ -3,6 +3,8 @@ package monitor
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -621,5 +623,39 @@ func TestDnsCanaryDsReadyGauges(t *testing.T) {
 		if got, ok := values[key]; !ok || got != value {
 			t.Errorf("%s: %v %v", key, got, ok)
 		}
+	}
+}
+
+// The registered signal's probe keeps its run in the state directory and reports it to its gauges; a bare probe, as
+// check-burn runs one, reads and writes neither, so a rollout gate's one-shot run never moves the monitor's count.
+func TestDnsCanaryOnlyTheRegisteredProbeKeepsTheCount(t *testing.T) {
+	block := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.Write([]byte(`{"serial":1}`))
+	}))
+	defer block.Close()
+	check, world := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+	settings := check.settings
+	settings.ApiUrl = block.URL
+	// no NS address and no resolver, so nothing is dialed: each NS fails its read
+	settings.NsAddresses = map[string][]netip.AddrPort{}
+	settings.PublicResolvers = nil
+	stateDir := t.TempDir()
+	env := &probeEnv{cfg: &monitorConfig{dnsCanary: settings, stateDir: stateDir}, now: func() time.Time { return dnsCanaryTestNow }}
+	if _, err := (dnsCanaryProbe{}).check(t.Context(), env); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dnsCanaryCleanPath(stateDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a bare probe touched the count: %v", err)
+	}
+	probe := dnsCanaryProbe{clean: newDnsCanaryCleanCounter(), gauges: func() dnsCanaryGauges { return world }}
+	if _, err := probe.check(t.Context(), env); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dnsCanaryCleanPath(stateDir)); err != nil {
+		t.Fatalf("the registered probe kept no count: %v", err)
+	}
+	if days, ok := world.cleanDays[dnsCanaryTestRoot]; !ok || days != 0 || world.dsReady[dnsCanaryTestRoot] {
+		t.Errorf("gauges %v %v", world.cleanDays, world.dsReady)
 	}
 }

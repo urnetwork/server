@@ -229,10 +229,11 @@ func (self dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		}}, nil
 	}
 	timeout := settings.Timeout
-	clean := self.clean
+	clean, stateDir := self.clean, env.cfg.stateDir
 	if clean == nil {
-		// a probe built bare keeps its count for this minute only, which never reports ready
-		clean = newDnsCanaryCleanCounter()
+		// a probe built bare, as check-burn's one-shot run: its minute counts toward nothing kept, and the state
+		// directory's run is the monitor's alone
+		clean, stateDir = newDnsCanaryCleanCounter(), ""
 	}
 	var gauges dnsCanaryGauges
 	if self.gauges != nil {
@@ -245,7 +246,7 @@ func (self dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		validator: &dnsCanaryUnbound{path: settings.UnboundHostPath, run: dnsCanaryRunCommand},
 		resolver:  &dnsCanaryDirectNs{timeout: timeout},
 		clean:     clean,
-		stateDir:  env.cfg.stateDir,
+		stateDir:  stateDir,
 		gauges:    gauges,
 	}
 	return check.run(ctx, env.now()), nil
