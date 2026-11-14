@@ -193,6 +193,16 @@ func NewConfigLogRedisLimiter(settings *ConfigLogLimitSettings) ConfigLogLimiter
 	return &configLogRedisLimiter{settings: settings, limits: NetworkSidecarLimits}
 }
 
+// NewConfigLogRedisLimiter counting on now's clock in place of the Redis master's, for a test whose statements
+// are signed on a fake clock, so its day turns only when the test moves it.
+func Testing_NewConfigLogRedisLimiterAt(settings *ConfigLogLimitSettings, now func() time.Time) ConfigLogLimiter {
+	limiter := NewConfigLogRedisLimiter(settings).(*configLogRedisLimiter)
+	limiter.nowMicros = func() int64 {
+		return now().UnixMicro()
+	}
+	return limiter
+}
+
 func (self *configLogRedisLimiter) ChargeStatement(ctx context.Context, networkId server.Id) error {
 	limits := self.limits(ctx, networkId)
 	return self.charge(
