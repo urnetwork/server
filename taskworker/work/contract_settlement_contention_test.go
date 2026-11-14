@@ -86,7 +86,7 @@ func TestContractSettlementSameNetworkLargeNContentionFree(t *testing.T) {
 		var remoteCreated privateLoadProcessReport
 		server.Raise(decoder.Decode(&remoteCreated))
 		if created.Completed+remoteCreated.Completed != count || created.Failed+remoteCreated.Failed != 0 {
-			t.Fatal("fully funded preparation failed")
+			t.Fatalf("fully funded preparation failed: phase=create count=%d local_completed=%d local_failed=%d remote_completed=%d remote_failed=%d local_classes=%v remote_classes=%v local_elapsed=%s remote_elapsed=%s", count, created.Completed, created.Failed, remoteCreated.Completed, remoteCreated.Failed, created.Errors, remoteCreated.Errors, created.Elapsed, remoteCreated.Elapsed)
 		}
 		observe := privateLoadStartObserver(ctx, t)
 		defer observe()
@@ -123,7 +123,7 @@ func TestContractSettlementSameNetworkLargeNContentionFree(t *testing.T) {
 				t.Fatal("independent settlement owners did not overlap")
 			}
 			if left.Elapsed > 3*time.Second || right.Elapsed > 3*time.Second {
-				t.Fatal("same-network settlement throughput regressed")
+				t.Fatalf("same-network settlement throughput regressed: phase=settle count=%d local_completed=%d local_failed=%d remote_completed=%d remote_failed=%d local_elapsed=%s remote_elapsed=%s activity=%v", count, left.Completed, left.Failed, right.Completed, right.Failed, left.Elapsed, right.Elapsed, activity)
 			}
 			for _, key := range []string{"balance_lock_peak", "cache_lock_peak", "census_lock_peak"} {
 				if activity[key] != 0 {
