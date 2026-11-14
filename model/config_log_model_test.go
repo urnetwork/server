@@ -3,15 +3,20 @@ package model
 // api's log sequencer (TEAM-M2-13): sidecartest's shared store suite, which T2's fake api passes too
 // (TEAM-M2-12), on T2's fake Blobs here and on the local stack's MinIO in
 // config_log_model_localstack_test.go; network_acl_head following each append; a refusal's body; the
-// writes spending the write budget as P0; and the gate path, a rows-only verifier reading the log from
-// the store, under the Postgres tripwire (I-12).
+// writes spending the write budget as P0; the gate path, a rows-only verifier reading the log from
+// the store, under the Postgres tripwire (I-12); and a RepoPrefixRules judged as every reader judges it
+// (ACL-M2-18).
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
@@ -274,5 +279,135 @@ func TestConfigLogRefusesTheDirectoryOutsideTheTeamTier(t *testing.T) {
 	team = true
 	if directory, err := sequencer.AppendStatement(ctx, networkId, world.RepoCreate(protocol.RepoKind_REPO_KIND_DIRECTORY)); err != nil || directory.GetVersion() != general.GetVersion()+1 {
 		t.Fatalf("the directory on the team tier: %v", err)
+	}
+}
+
+// ACL-M2-18 (DESIGN-DETAILS 16.2.2, QD-212): api sequences a RepoPrefixRules through the shared rule table as every
+// reader takes it, and refuses each row of the id-level table as the readers do, 403 with the tip and the readers'
+// refusal class: a signer that is neither a repo admin nor a config writer, a record repo, a deleted repo, a body of 47,
+// 48 and 303 B and one past the cap, and the 257th set in a repo, naming the limit. Each refused row's positive twin
+// lands: the same device once the repo names it admin, a general repo, 304 B, the 256th set. A gate reading the log as
+// the store holds it folds the 256 rows.
+func TestConfigLogSequencesRepoPrefixRulesAsReadersJudgeThem(t *testing.T) {
+	ctx := context.Background()
+	cluster := testConfigLogFakeCluster(t)
+	world := sidecartest.NewConfigLogSuiteWorld(ctx, cluster)
+	settings := DefaultConfigLogSettings()
+	settings.Clock = world.Clock()
+	sequencer := NewConfigLogSequencer(cluster, settings, nil)
+	networkId := server.Id(world.NetworkId())
+	signedHeader, rows, genesis, configPushes := world.BaseOne()
+	tip, err := sequencer.AppendBase(ctx, networkId, &ConfigLogBase{SignedHeader: signedHeader, Rows: rows, Genesis: genesis, ConfigPushes: configPushes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	world.SetTip(tip)
+	post := func(name string, signed []byte) {
+		t.Helper()
+		pin, err := sequencer.AppendStatement(ctx, networkId, signed)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		tip = pin
+		world.SetTip(pin)
+	}
+	refuse := func(name string, signed []byte, class error) *ConfigLogError {
+		t.Helper()
+		_, err := sequencer.AppendStatement(ctx, networkId, signed)
+		configLogError := &ConfigLogError{}
+		if !errors.As(err, &configLogError) || configLogError.Status != http.StatusForbidden || configLogError.Tip.GetVersion() != tip.GetVersion() ||
+			!errors.Is(err, class) {
+			t.Errorf("%s: %v, want a 403 of %v at %d", name, err, class, tip.GetVersion())
+		}
+		return configLogError
+	}
+	repo := func(kind protocol.RepoKind) sidecar.Id {
+		t.Helper()
+		repoId := sidecar.Id(server.NewId())
+		post("a RepoCreate", world.SignAsOwner(bridge.SignedType_SIGNED_REPO_CREATE, &protocol.RepoCreate{Header: world.Header(), RepoId: repoId.Bytes(), Kind: kind}))
+		return repoId
+	}
+	general, record, deleted := repo(protocol.RepoKind_REPO_KIND_GENERAL), repo(protocol.RepoKind_REPO_KIND_RECORD), repo(protocol.RepoKind_REPO_KIND_GENERAL)
+	post("a RepoDelete", world.SignAsOwner(bridge.SignedType_SIGNED_REPO_DELETE, &protocol.RepoDelete{
+		Header: world.Header(), RepoId: deleted.Bytes(), DeletionId: sidecar.Id(server.NewId()).Bytes(),
+	}))
+	prefixRules := func(repoId sidecar.Id, byteCount int) *protocol.RepoPrefixRules {
+		return &protocol.RepoPrefixRules{Header: world.Header(), RepoId: repoId.Bytes(), SealedRules: make([]byte, byteCount)}
+	}
+	asOwner := func(repoId sidecar.Id, byteCount int) []byte {
+		return world.SignAsOwner(bridge.SignedType_SIGNED_REPO_PREFIX_RULES, prefixRules(repoId, byteCount))
+	}
+
+	// a member's device the owner admits, whose key the test holds: neither a repo admin nor a config writer
+	memberId, deviceId := sidecar.Id(server.NewId()), sidecar.Id(server.NewId())
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post("a MemberAdmit", world.SignAsOwner(bridge.SignedType_SIGNED_MEMBER_ADMIT, &protocol.MemberAdmit{
+		Header: world.Header(), MemberId: memberId.Bytes(), Role: bridge.MemberRole_MEMBER_ROLE_MEMBER,
+	}))
+	post("the device's SidecarAdmit", world.SignAsOwner(bridge.SignedType_SIGNED_SIDECAR_ADMIT, &protocol.SidecarAdmit{
+		Header: world.Header(), NetworkId: world.NetworkId().Bytes(), SidecarId: deviceId.Bytes(), IdentityPublicKey: publicKey,
+		IdentityAlg: "ed25519", MemberId: memberId.Bytes(),
+	}))
+	asDevice := func(repoId sidecar.Id, byteCount int) []byte {
+		t.Helper()
+		body, err := proto.MarshalOptions{Deterministic: true}.Marshal(prefixRules(repoId, byteCount))
+		if err != nil {
+			t.Fatal(err)
+		}
+		signedType := bridge.SignedType_SIGNED_REPO_PREFIX_RULES
+		signed, err := proto.MarshalOptions{Deterministic: true}.Marshal(&bridge.Signed{
+			Body: body, SignerId: deviceId.Bytes(), Type: uint32(signedType),
+			Signature: ed25519.Sign(privateKey, bridge.SignedBytes(bridge.SignedPurposeAcl, signedType, body)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return signed
+	}
+
+	refuse("a signer that is neither", asDevice(general, 304), sidecar.ErrConfigAuthority)
+	refuse("a record repo", asOwner(record, 304), sidecar.ErrConfigRule)
+	refuse("a deleted repo", asOwner(deleted, 304), sidecar.ErrConfigRule)
+	refuse("a repo the log does not hold", asOwner(sidecar.Id(server.NewId()), 304), sidecar.ErrConfigRule)
+	for _, byteCount := range []int{47, 48, 303, 48 + 256*256} {
+		refuse("a body past the form or the cap", asOwner(general, byteCount), sidecar.ErrConfigRule)
+	}
+	post("a config writer's set of 304 B", asOwner(general, 304))
+	post("the device made the repo's admin", world.SignAsOwner(bridge.SignedType_SIGNED_REPO_ADMIN, &protocol.RepoAdmin{
+		Header: world.Header(), RepoId: general.Bytes(), SidecarId: deviceId.Bytes(), Change: protocol.RepoAdminChange_REPO_ADMIN_CHANGE_ADD,
+	}))
+	post("the repo admin's set", asDevice(general, 48+2*256))
+	setMaxCount := sidecar.DefaultAclPrefixSettings().SetMaxCount
+	for range setMaxCount - 2 {
+		post("a set up to the cap", asOwner(general, 304))
+	}
+	if refused := refuse("the 257th set", asOwner(general, 304), sidecar.ErrConfigRule); refused.Err == nil || !strings.Contains(refused.Err.Error(), "SetMaxCount") {
+		t.Errorf("the 257th set's refusal names no limit: %v", refused.Err)
+	}
+
+	// a gate reading the log as the store holds it holds the rows api's verifier folded
+	read, err := sequencer.Read(ctx, networkId, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := sidecar.NewConfigLogRowsOnly(nil, read.SignedGenesis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.ApplyRun(read.Entries, sidecar.ConfigRowsOnlySource(func(networkId sidecar.Id, rowsSha256 []byte) ([]byte, error) {
+		return configLogGetRows(ctx, cluster, networkId, rowsSha256)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	acl, err := gate.State().Acl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sets := acl.Repo(general).GetPrefixRules()
+	if len(sets) != setMaxCount || sets[1].GetAt() <= sets[0].GetAt() || string(sets[1].GetSigner()) != string(deviceId.Bytes()) {
+		t.Errorf("the gate holds %d sets", len(sets))
 	}
 }
