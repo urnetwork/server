@@ -469,8 +469,8 @@ func TestResolveNonCompanionProvideMode(t *testing.T) {
 	connect.AssertEqual(t, provideMode, model.ProvideModeStream)
 
 	// Friends-and-family relationship, destination advertising only Stream: same
-	// companion Stream fallback as the Network case (both are free NoEscrow modes
-	// the older destination cannot advertise).
+	// companion Stream fallback as the Network case (both are modes the older
+	// destination cannot advertise).
 	provideMode, companion, allowed = resolveNonCompanionProvideMode(
 		model.ProvideModeFriendsAndFamily,
 		map[model.ProvideMode]bool{model.ProvideModeStream: true},

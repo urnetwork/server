@@ -1009,6 +1009,13 @@ func CreateContract(
 		}
 	} else {
 		provideRelationship := relationshipDetails.Mode
+		// §6.10.1 item 4 (§8.11, D-ACL-10): a Public pair the gate found a share
+		// covering in both networks' projections, toward a marked sidecar and
+		// never an sdk device client, settles as FriendsAndFamily, escrowed from
+		// the dialer's network below; it is never normalized to Network
+		if model.AclShareBetween(&relationshipDetails, aclVerdict) {
+			provideRelationship = model.ProvideModeFriendsAndFamily
+		}
 		provideModes := GetProvideModes(ctx, destinationId)
 
 		var allowed bool
@@ -1597,8 +1604,11 @@ func newContract(
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	// Service has no escrow or payout either: §20's leases bill its bytes
-	// (§6.10.1 item 1)
-	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily || provideMode == model.ProvideModeService {
+	// (§6.10.1 item 1). FriendsAndFamily, a cross-network share's (§8.11), is
+	// not here: it takes Public's source-pays escrow below, from the dialer's
+	// network, and its companion the same network's as the destination pays a
+	// companion (owner decision 11; §20.6's table)
+	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeService {
 		// the insert writes the stream the contract joins below
 		// (model/contract_stream_binding.go)
 		if streamVersion != 0 {

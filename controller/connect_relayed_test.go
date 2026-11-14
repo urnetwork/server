@@ -94,14 +94,21 @@ func TestRelayedPairReservesAndAnUnmarkedPairDoesNot(t *testing.T) {
 		payer, _ = relayedContractPayer(ctx, contractId)
 		connect.AssertEqual(t, payer == nil, true)
 
-		// friends and family is never relayed
+		// friends and family is never relayed: a share's contract is escrowed from
+		// its dialer's network as Public (owner decision 11, ACL-M6-03), so it has
+		// escrow rows, which a relayed contract never has
 		contractId, _, _, _, _, err = newContract(relayedPairContext(ctx), clientIds[0], clientIds[1], nil, false, true,
 			MaxContractTransferByteCount, model.ProvideModeFriendsAndFamily, false, 0, settings)
 		if err != nil {
 			t.Fatal(err)
 		}
 		payer, _ = relayedContractPayer(ctx, contractId)
-		connect.AssertEqual(t, payer == nil, true)
+		connect.AssertEqual(t, payer != nil && *payer == networkId, true)
+		var escrowCount int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM transfer_escrow WHERE contract_id = $1`, contractId).Scan(&escrowCount))
+		})
+		connect.AssertEqual(t, 0 < escrowCount, true)
 	})
 }
 
