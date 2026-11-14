@@ -301,6 +301,8 @@ func TestFs45T3RelayedPairs(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(tb testing.TB) {
 		defer model.Testing_SetEnforceSidecarLimits(true)()
+		// the process's limit snapshot is dropped at the end, so the next test reads limits as a fresh process does
+		defer model.Testing_SetNetworkSidecarLimitSettings(model.DefaultNetworkSidecarLimitSettings())()
 		defer model.Testing_SetRelayedReservationSettings(model.DefaultRelayedReservationSettings())()
 		ctx := t.Context()
 		fs45T3GrantsShrinkAndStopAtTheBalance(t, ctx)

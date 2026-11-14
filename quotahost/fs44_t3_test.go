@@ -322,6 +322,8 @@ func TestFs44T3Producer(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(tb testing.TB) {
 		defer model.Testing_SetEnforceSidecarLimits(true)()
+		// the process's limit snapshot is dropped at the end, so the next test reads limits as a fresh process does
+		defer model.Testing_SetNetworkSidecarLimitSettings(model.DefaultNetworkSidecarLimitSettings())()
 		ctx := t.Context()
 		fs44T3KilledBeforeReportUsage(t, ctx)
 		fs44T3LostResponseRetried(t, ctx)
@@ -654,6 +656,8 @@ func TestFs44T3LeaseRows(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(tb testing.TB) {
 		defer model.Testing_SetEnforceSidecarLimits(true)()
+		// the process's limit snapshot is dropped at the end, so the next test reads limits as a fresh process does
+		defer model.Testing_SetNetworkSidecarLimitSettings(model.DefaultNetworkSidecarLimitSettings())()
 		ctx := t.Context()
 		fs44T3KilledBetweenCarveAndPost(t, ctx)
 		fs44T3LostAnswerAndAThirdCopy(t, ctx)
