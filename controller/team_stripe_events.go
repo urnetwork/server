@@ -38,12 +38,18 @@ import (
 //	                               grant, and the lines in window end, so overage refuses as an
 //	                               empty balance while the included bytes run out
 //	customer.subscription.deleted  the lines end, every period no invoice paid for ends, and the
-//	                               subscription is marked ended, so the job writes it nothing more;
-//	                               a paid period keeps its grant to its end, so lapse follows Pro
+//	                               subscription's team_subscription row ends, so the job writes it
+//	                               nothing more; a paid period keeps its grant to its end, so lapse
+//	                               follows Pro. The hourly reconciler ends a live row whose
+//	                               subscription Stripe shows deleted the same way, for an event
+//	                               that was lost (reconcileStripeTeamSubscriptions)
 //
 // A Team's first period runs from the payment to the anchor, the first 00:00:00 UTC after the
 // checkout session's expiry, so its renewal ends on the anchor and every later period starts at
-// 00:00:00 UTC.
+// 00:00:00 UTC. The first paid invoice writes the subscription's team_subscription row in the
+// transaction that credits it (QUOTA-M6-07, owner decision 199): the subscription and customer
+// ids, the anchor (Stripe's billing_cycle_anchor, else the first period's end) and the start (the
+// first period's start). The grant job and the meter reports read it.
 //
 // The tier is refreshed after each commit (model.UpdateProNetwork), never inside a transaction.
 
@@ -139,12 +145,13 @@ func stripeHandleTeamInvoicePaidInConn(
 	}
 	subscriptionEnded := stripeSubscriptionTerminal(sub.Status)
 	now := stripeDunningNow()
+	subscription := stripeTeamSubscriptionOf(credit, invoice, sub)
 
 	var credited bool
 	var returnErr error
 	if r := server.HandleError(func() {
 		server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-			credited, returnErr = stripeCreditTeamInvoicePaidInTx(tx, ctx, invoice, credit, subscriptionEnded, now)
+			credited, returnErr = stripeCreditTeamInvoicePaidInTx(tx, ctx, invoice, credit, subscription, subscriptionEnded, now)
 		}, server.TxReadCommitted, server.OptNoRetry())
 	}); r != nil {
 		return nil, fmt.Errorf("team invoice %s: %v", invoice.Id, r)
@@ -183,14 +190,61 @@ func stripeHandleTeamInvoicePaidInConn(
 	return &StripeWebhookResult{}, nil
 }
 
+// The team_subscription row a paid invoice of the subscription writes if the network has none for
+// it: the anchor is Stripe's billing_cycle_anchor, else the end of the invoice's base period, which
+// for the first invoice runs from the payment to the anchor; the start is the base period's start,
+// the first renewal's, so the job's read of this subscription's renewals takes the first. nil for
+// an invoice with no base line, which buys no period and dates nothing.
+func stripeTeamSubscriptionOf(credit *stripeInvoiceCredit, invoice *StripeEventInvoiceObject, sub *stripeDunningSubscription) *model.TeamSubscription {
+	teamInvoice := credit.team
+	if teamInvoice == nil || !teamInvoice.hasBase {
+		return nil
+	}
+	anchorTime := teamInvoice.periodEnd
+	if sub != nil && 0 < sub.BillingCycleAnchor {
+		anchorTime = time.Unix(sub.BillingCycleAnchor, 0).UTC()
+	}
+	customerId := invoice.Customer
+	if customerId == "" && sub != nil {
+		customerId = stripeCustomerIdOf(sub.Customer)
+	}
+	return &model.TeamSubscription{
+		NetworkId:      credit.networkId,
+		SubscriptionId: credit.subscriptionId,
+		CustomerId:     customerId,
+		AnchorTime:     anchorTime,
+		StartTime:      teamInvoice.periodStart,
+	}
+}
+
+// A customer field as Stripe gives it, an id or the expanded object, as its id; empty for neither.
+func stripeCustomerIdOf(customer json.RawMessage) string {
+	if len(customer) == 0 {
+		return ""
+	}
+	var customerId string
+	if err := json.Unmarshal(customer, &customerId); err == nil {
+		return customerId
+	}
+	var expanded struct {
+		Id string `json:"id"`
+	}
+	if err := json.Unmarshal(customer, &expanded); err == nil {
+		return expanded.Id
+	}
+	return ""
+}
+
 // One attempt of a Team invoice's credit, in the caller's no-retry ReadCommitted transaction.
 // credited is false for an invoice the ledger already holds. A raise rolls the ledger row back
-// with everything else.
+// with everything else. subscription is the row the invoice writes if the network has none for
+// its subscription (stripeTeamSubscriptionOf), nil for an invoice that buys no period.
 func stripeCreditTeamInvoicePaidInTx(
 	tx server.PgTx,
 	ctx context.Context,
 	invoice *StripeEventInvoiceObject,
 	credit *stripeInvoiceCredit,
+	subscription *model.TeamSubscription,
 	subscriptionEnded bool,
 	now time.Time,
 ) (credited bool, returnErr error) {
@@ -241,11 +295,20 @@ func stripeCreditTeamInvoicePaidInTx(
 	}); err != nil {
 		server.Raise(err)
 	}
+	// the first paid invoice of the subscription records it; a later one, or a redelivery whose
+	// ledger row this transaction wrote again, changes nothing
+	if subscription != nil && subscription.CustomerId != "" {
+		model.AddTeamSubscriptionInTx(ctx, tx, subscription)
+	} else if subscription != nil {
+		glog.Errorf("[sub][team]invoice %s of network %s names no customer; its subscription is not recorded\n", invoice.Id, networkId)
+	}
 
 	switch {
 	case subscriptionEnded:
-		// the job reads no live subscription behind this renewal
-		model.MarkTeamSubscriptionEndedInTx(ctx, tx, networkId, credit.subscriptionId, now)
+		// Stripe ended the subscription before its invoice was credited: the paid period is the
+		// last, the row ends, and the job writes nothing more. A lost customer.subscription.deleted
+		// leaves the lines to end here.
+		model.EndTeamSubscriptionInTx(ctx, tx, networkId, credit.subscriptionId, now)
 	case !model.HasTeamGrantInTx(ctx, tx, networkId, teamInvoice.periodStart):
 		if now.Before(teamInvoice.periodEnd) {
 			grant, err := model.AddTeamGrantInTx(ctx, tx, networkId, teamInvoice.periodStart, teamInvoice.periodEnd, netRevenue)
@@ -302,9 +365,10 @@ func stripeTeamPaymentFailed(ctx context.Context, networkId server.Id, now time.
 }
 
 // customer.subscription.deleted of a Team subscription. Nothing happens for a subscription
-// without the team mark, for one Stripe does not report ended, or for one that is not behind the
-// network's newest Team renewal. An error means Stripe or the database could not be read or a
-// balance was busy, and Stripe delivers the event again.
+// without the team mark, for one Stripe does not report ended, or for one with no live
+// team_subscription row: it never paid an invoice, so nothing was granted, or it ended already. An
+// error means Stripe or the database could not be read or a balance was busy, and Stripe delivers
+// the event again.
 func stripeHandleTeamSubscriptionDeleted(object json.RawMessage, clientSession *session.ClientSession) error {
 	var deleted struct {
 		Id       string            `json:"id"`
@@ -319,7 +383,7 @@ func stripeHandleTeamSubscriptionDeleted(object json.RawMessage, clientSession *
 	}
 	ctx := clientSession.Ctx
 	if !server.SidecarMg6Linked() {
-		return fmt.Errorf("team subscription %s: this binary does not link MG6", deleted.Id)
+		return errors.New("a team subscription's end: this binary does not link MG6")
 	}
 
 	// the current state, read from Stripe, decides, as the dunning's does
@@ -329,54 +393,116 @@ func stripeHandleTeamSubscriptionDeleted(object json.RawMessage, clientSession *
 		return err
 	}
 	if !stripeTeamMarked(sub.Metadata) || !stripeSubscriptionTerminal(sub.Status) {
-		glog.Infof("[stripe][team]subscription %s is %s; nothing ends\n", deleted.Id, sub.Status)
+		glog.Infof("[stripe][team]a deleted subscription is %s; nothing ends\n", sub.Status)
 		return nil
 	}
 	networkId, err := server.ParseId(sub.Metadata[stripeMetadataNetworkId])
 	if err != nil {
-		glog.Errorf("[stripe][team]subscription %s ended and names no network\n", deleted.Id)
+		glog.Errorf("[stripe][team]a subscription ended and names no network\n")
 		return nil
 	}
+	_, err = stripeEndTeamSubscriptionInConn(nil, ctx, networkId, deleted.Id, stripeDunningNow())
+	return err
+}
 
-	// only the subscription that bills the network now ends its balances
-	renewal := model.GetLastSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeTeam, model.SubscriptionMarketStripe)
-	if renewal == nil || renewal.TransactionId == "" {
-		// it never paid an invoice: nothing was granted
-		return nil
-	}
-	readCtx, cancel := context.WithTimeout(ctx, settings.StripeReadTimeout)
-	defer cancel()
-	billingSub, err := stripeSubscriptionFromInvoice(readCtx, renewal.TransactionId)
-	if err != nil {
-		return err
-	}
-	if billingSub.Id != deleted.Id {
-		glog.Infof("[stripe][team]subscription %s ended; network %s is billed by %s\n", deleted.Id, networkId, billingSub.Id)
-		return nil
-	}
-
-	now := stripeDunningNow()
-	ended := 0
-	var returnErr error
+// Ends the network's Team subscription as customer.subscription.deleted does, through the
+// caller's connection (nil: an acquisition of its own): the lines, the unpaid periods and the
+// team_subscription row (model.EndTeamSubscriptionInTx), then the tier after the commit. ended is
+// false when the subscription has no live row, which ends nothing. A gone network ends nothing and
+// is no error.
+func stripeEndTeamSubscriptionInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id, subscriptionId string, now time.Time) (ended bool, returnErr error) {
+	endedBalanceCount := 0
 	if r := server.HandleError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
-			ended = 0
+		server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
+			ended = false
+			endedBalanceCount = 0
 			if returnErr = model.LockPaymentNetworkInTx(tx, ctx, networkId); returnErr != nil {
 				return
 			}
-			ended = len(model.EndTeamSubscriptionInTx(ctx, tx, networkId, deleted.Id, now))
+			var endedBalanceIds []server.Id
+			ended, endedBalanceIds = model.EndTeamSubscriptionInTx(ctx, tx, networkId, subscriptionId, now)
+			endedBalanceCount = len(endedBalanceIds)
 		}, server.TxReadCommitted, server.OptNoRetry())
 	}); r != nil {
-		return fmt.Errorf("team subscription %s: %v", deleted.Id, r)
+		return false, fmt.Errorf("a team subscription's end for network %s: %v", networkId, r)
 	}
 	if errors.Is(returnErr, model.ErrPaymentNetworkNotFound) {
-		return nil
+		return false, nil
 	}
 	if returnErr != nil {
-		return returnErr
+		return false, returnErr
 	}
-	glog.Infof("[stripe][team]subscription %s of network %s ended: %d balance(s) ended\n", deleted.Id, networkId, ended)
-	model.UpdateProNetwork(ctx, networkId)
-	clearSubscriptionDetailsCached(ctx, networkId)
-	return nil
+	if ended {
+		glog.Infof("[stripe][team]network %s's subscription ended: %d balance(s) ended\n", networkId, endedBalanceCount)
+		model.UpdateProNetworkInConn(connOwner, ctx, networkId)
+		clearSubscriptionDetailsCached(ctx, networkId)
+	}
+	return ended, nil
+}
+
+// The reconciler's Team leg.
+type stripeTeamReconcileSettings struct {
+	// The live subscriptions one page of the leg reads.
+	PageCount int
+}
+
+func defaultStripeTeamReconcileSettings() *stripeTeamReconcileSettings {
+	return &stripeTeamReconcileSettings{
+		// ~1,000 Teams in year two (DESIGN.md 20.9's cost row): ten pages
+		PageCount: 100,
+	}
+}
+
+var stripeTeamReconcileSettingsFunc = defaultStripeTeamReconcileSettings
+
+// reconcileStripe's third leg (QUOTA-M6-07; owner decision 199): each live team_subscription row is
+// checked against Stripe, and one whose subscription Stripe shows ended is ended as
+// customer.subscription.deleted would end it, so a lost event is repaired within one run. Stripe's
+// read of each spends the run's budget; complete is false when the budget ran out first. A dry run
+// records what it would end and ends nothing.
+func reconcileStripeTeamSubscriptions(run *paymentReconcileRun) (complete bool, returnErr error) {
+	if !server.SidecarMg6Linked() {
+		return true, nil
+	}
+	ctx := run.clientSession.Ctx
+	store := model.SubscriptionMarketStripe
+	dunningSettings := stripeDunningSettingsFunc()
+	settings := stripeTeamReconcileSettingsFunc()
+	var after *server.Id
+	for {
+		page := model.ListLiveTeamSubscriptionsInConn(run.connOwner, ctx, after, settings.PageCount)
+		for _, subscription := range page {
+			run.examine(store)
+			if !run.spend(store) {
+				return false, nil
+			}
+			networkId := subscription.NetworkId
+			sub, err := stripeDunningFetchSubscription(ctx, subscription.SubscriptionId, dunningSettings)
+			if err != nil {
+				run.record(store, model.PaymentReconcileActionError, &networkId, subscription.SubscriptionId, map[string]any{"error": err.Error(), "leg": "team"})
+				continue
+			}
+			if !stripeSubscriptionTerminal(sub.Status) {
+				continue
+			}
+			details := map[string]any{"subscription_status": sub.Status, "leg": "team"}
+			if run.dryRun {
+				run.record(store, model.PaymentReconcileActionWouldEnd, &networkId, subscription.SubscriptionId, details)
+				continue
+			}
+			ended, err := stripeEndTeamSubscriptionInConn(run.connOwner, ctx, networkId, subscription.SubscriptionId, run.now)
+			if err != nil {
+				run.record(store, model.PaymentReconcileActionError, &networkId, subscription.SubscriptionId, map[string]any{"error": err.Error(), "leg": "team"})
+				continue
+			}
+			if ended {
+				run.record(store, model.PaymentReconcileActionEnded, &networkId, subscription.SubscriptionId, details)
+			}
+		}
+		if len(page) < settings.PageCount {
+			return true, nil
+		}
+		last := page[len(page)-1].NetworkId
+		after = &last
+	}
 }

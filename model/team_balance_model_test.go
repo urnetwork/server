@@ -261,9 +261,27 @@ func TestTeamDrawsNeitherFreeNorProGrant(t *testing.T) {
 	})
 }
 
-// The job writes the period after the newest paid renewal once its anchor has passed, once: a
-// rerun of the same run and a later run grant nothing more; an unresolved payment failure stops
-// the grant; a Team whose newest renewal ended more than a period ago has lapsed.
+// Writes the network's team_subscription row, live from start.
+func testingAddTeamSubscription(t testing.TB, ctx context.Context, networkId server.Id, anchor time.Time, start time.Time) string {
+	t.Helper()
+	subscriptionId := "sub_synthetic_" + networkId.String()
+	server.Tx(ctx, func(tx server.PgTx) {
+		written := AddTeamSubscriptionInTx(ctx, tx, &TeamSubscription{
+			NetworkId:      networkId,
+			SubscriptionId: subscriptionId,
+			CustomerId:     "cus_synthetic_" + networkId.String(),
+			AnchorTime:     anchor,
+			StartTime:      start,
+		})
+		connect.AssertEqual(t, written, true)
+	})
+	return subscriptionId
+}
+
+// The job writes the period after the newest paid renewal once its anchor has passed, once, for
+// a Team whose team_subscription row is live, reading the anchor's day from the row: a rerun of
+// the same run and a later run grant nothing more; an unresolved payment failure stops the grant;
+// an ended row stops it; a Team whose newest renewal ended more than a period ago has lapsed.
 func TestRefreshTeamTransferBalancesGrantsOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -284,15 +302,20 @@ func TestRefreshTeamTransferBalancesGrantsOnce(t *testing.T) {
 				}))
 			})
 		}
-		// paid through today: the next period starts today
+		// paid through today: the next period starts today, and ends on the anchor's day of the
+		// month the row names, whatever the renewals say
 		live := testingCreateTeamNetwork(t, ctx)
 		renew(live, today.AddDate(0, -1, 0), today)
+		anchor := time.Date(2026, time.January, 31, 0, 0, 0, 0, time.UTC)
+		testingAddTeamSubscription(t, ctx, live, anchor, today.AddDate(0, -1, 0))
 		// paid through two months ago: lapsed
 		lapsed := testingCreateTeamNetwork(t, ctx)
 		renew(lapsed, today.AddDate(0, -3, 0), today.AddDate(0, -2, 0))
+		testingAddTeamSubscription(t, ctx, lapsed, today.AddDate(0, -3, 0), today.AddDate(0, -3, 0))
 		// paid through today, and its last invoice failed
 		failing := testingCreateTeamNetwork(t, ctx)
 		renew(failing, today.AddDate(0, -1, 0), today)
+		testingAddTeamSubscription(t, ctx, failing, today, today.AddDate(0, -1, 0))
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -303,13 +326,25 @@ func TestRefreshTeamTransferBalancesGrantsOnce(t *testing.T) {
 		// paid through the end of the month to come: nothing to write yet
 		ahead := testingCreateTeamNetwork(t, ctx)
 		renew(ahead, today, today.AddDate(0, 1, 0))
+		testingAddTeamSubscription(t, ctx, ahead, today, today)
+		// paid through today, and its subscription ended
+		ended := testingCreateTeamNetwork(t, ctx)
+		renew(ended, today.AddDate(0, -1, 0), today)
+		endedSubscriptionId := testingAddTeamSubscription(t, ctx, ended, today, today.AddDate(0, -1, 0))
+		server.Tx(ctx, func(tx server.PgTx) {
+			connect.AssertEqual(t, EndTeamSubscriptionRowInTx(ctx, tx, ended, endedSubscriptionId, now.Add(-time.Hour)), true)
+			connect.AssertEqual(t, EndTeamSubscriptionRowInTx(ctx, tx, ended, endedSubscriptionId, now), false)
+		})
+		// paid through today, and no row: it was never recorded as a subscription
+		unrecorded := testingCreateTeamNetwork(t, ctx)
+		renew(unrecorded, today.AddDate(0, -1, 0), today)
 
 		runId := server.NewId()
 		grants := RefreshTeamTransferBalances(ctx, now, runId)
 		connect.AssertEqual(t, len(grants), 1)
 		connect.AssertEqual(t, grants[0].NetworkId, live)
 		connect.AssertEqual(t, grants[0].StartTime, today)
-		connect.AssertEqual(t, grants[0].EndTime, teamPeriodEnd(today.Day(), today).Add(ProGrantGrace))
+		connect.AssertEqual(t, grants[0].EndTime, teamPeriodEnd(anchor.Day(), today).Add(ProGrantGrace))
 		connect.AssertEqual(t, grants[0].LineBalanceId != nil, true)
 		connect.AssertEqual(t, NetworkTierOf(ctx, live), NetworkTierTeam)
 
@@ -317,7 +352,7 @@ func TestRefreshTeamTransferBalancesGrantsOnce(t *testing.T) {
 		connect.AssertEqual(t, len(RefreshTeamTransferBalances(ctx, now, runId)), 0)
 		connect.AssertEqual(t, len(RefreshTeamTransferBalances(ctx, now.Add(time.Hour), server.NewId())), 0)
 		connect.AssertEqual(t, len(testingTeamBalances(t, ctx, live)), 2)
-		for _, networkId := range []server.Id{lapsed, failing, ahead} {
+		for _, networkId := range []server.Id{lapsed, failing, ahead, ended, unrecorded} {
 			connect.AssertEqual(t, len(testingTeamBalances(t, ctx, networkId)), 0)
 		}
 	})
