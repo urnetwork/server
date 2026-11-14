@@ -231,20 +231,20 @@ func TestOperatorBlockPointsExpiryIsRecordedOnceAndNoBlockIsAwardedTwice(t *test
 
 		// the provider's points are those of the previous and next blocks,
 		// one award each
-		planBlocks := map[server.Id]int64{
+		planIdBlocks := map[server.Id]int64{
 			OperatorBlockPointsPlanId(f.previous): f.previous,
 			OperatorBlockPointsPlanId(f.next):     f.next,
 		}
-		pointBlocks := map[int64]int{}
+		blockPointCounts := map[int64]int{}
 		for _, row := range operatorBlockPointsTestRows(t, ctx, f.provider) {
-			block, ok := planBlocks[row.planId]
+			block, ok := planIdBlocks[row.planId]
 			if !ok || !slices.Equal(row.blocks, []int64{block}) {
 				t.Fatalf("a point of plan %s in blocks %v", row.planId, row.blocks)
 			}
-			pointBlocks[block] += 1
+			blockPointCounts[block] += 1
 		}
-		if pointBlocks[f.previous] != 1 || pointBlocks[f.next] != 1 {
-			t.Fatalf("payout points by block %v", pointBlocks)
+		if blockPointCounts[f.previous] != 1 || blockPointCounts[f.next] != 1 {
+			t.Fatalf("payout points by block %v", blockPointCounts)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var reports int
