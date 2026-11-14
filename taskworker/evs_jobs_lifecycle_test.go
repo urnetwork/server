@@ -44,21 +44,24 @@ func TestEvsJobsBindTheShredAndTheReconciler(t *testing.T) {
 }
 
 // The shred's start and the reconciler read the projection a runtime installs over its gate cache, from rows alone
-// (QD-743): none before a runtime installs it; then the repo's newest RepoDelete dated by its row, with no log behind
-// it, and a network the gate has not loaded an error that leaves the repo to a retry; a newer runtime's source
-// outlives the older runtime's end, and none is left once the newest ends.
+// (QD-743, QD-798): none before a runtime installs it; then the repo's newest RepoDelete dated and signed by its row,
+// with no log behind it, which the walk writes into repo/'s deleted state, and a network the gate has not loaded an
+// error that leaves the repo to a retry; a newer runtime's source outlives the older runtime's end, and none is left
+// once the newest ends.
 func TestEvsDeletionSourceIsTheRuntimesGateCache(t *testing.T) {
 	// an earlier test's runtime removes its own source when its context's AfterFunc runs, which may come later
 	evsDeletionSourceCurrent.Store(nil)
 	if evsDeletionSource() != nil {
 		t.Fatal("no source installed, and a projection all the same")
 	}
-	networkId, repoId, deletionId := sidecar.NewId(), sidecar.NewId(), sidecar.NewId()
+	networkId, repoId, deletionId, signerId := sidecar.NewId(), sidecar.NewId(), sidecar.NewId(), sidecar.NewId()
 	deletedTime := time.UnixMilli(sidecartest.DefaultClockStart().UnixMilli())
 	states := sidecartest.NewFakeAclContractStates()
 	rows := &protocol.AclRows{HasDocument: true, Repos: []*protocol.AclRepo{{
 		RepoId: repoId.Bytes(), Kind: protocol.RepoKind_REPO_KIND_GENERAL,
-		Deletion: &protocol.AclRepoDeletionRow{DeletionId: deletionId.Bytes(), DeletedAt: 7, DeletedTimeMs: deletedTime.UnixMilli()},
+		Deletion: &protocol.AclRepoDeletionRow{
+			DeletionId: deletionId.Bytes(), DeletedAt: 7, DeletedTimeMs: deletedTime.UnixMilli(), Signer: signerId.Bytes(),
+		},
 	}}}
 	if err := states.Install(networkId, rows, sidecartest.NewFakeAclView()); err != nil {
 		t.Fatal(err)
@@ -69,7 +72,8 @@ func TestEvsDeletionSourceIsTheRuntimesGateCache(t *testing.T) {
 		t.Fatal("no projection once a runtime installed one")
 	}
 	deletion, err := source.RepoDeletion(t.Context(), networkId, repoId)
-	if err != nil || deletion == nil || deletion.DeletionId != deletionId || !deletion.Time.Equal(deletedTime) || deletion.Restored || deletion.Now {
+	if err != nil || deletion == nil || deletion.DeletionId != deletionId || !deletion.Time.Equal(deletedTime) || deletion.SignerSidecarId != signerId ||
+		deletion.Restored || deletion.Now {
 		t.Fatalf("the deletion %+v: %v", deletion, err)
 	}
 	if _, err := source.RepoDeletion(t.Context(), sidecar.NewId(), repoId); err == nil {

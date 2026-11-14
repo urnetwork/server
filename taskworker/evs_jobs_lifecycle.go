@@ -10,12 +10,13 @@ package taskworker
 //
 // The projection both read is §8.9's state in the process's one gate cache (C-09), which gkm's reconciler start
 // builds on the runtime's host (gkm_reconciler.go): evsservice.AclEvsAuthState over it answers each repo's newest
-// RepoDelete from the network's AclRepo rows alone, dated by the row's deleted_time_ms and restored by its
-// restored_at, so a start 7 d 10 min after the RepoDelete's entry decides from rows the log may no longer hold
-// (QD-743). A network the cache has not loaded answers an error, which starts its load and leaves the repo to the
-// job's retry or the next walk. Until a runtime holds that cache, the source is nil: the walk applies nothing and
-// only queues, and a deleted repo's 7-day start waits, asked again a ShredHoldRecheckInterval on. A --now shred, which
-// needs no projection, runs to its tombstone.
+// RepoDelete from the network's AclRepo rows alone, dated by the row's deleted_time_ms, signed by its signer and
+// restored by its restored_at, so a start 7 d 10 min after the RepoDelete's entry decides from rows the log may no
+// longer hold (QD-743), and the walk applies a RepoDelete whose entry the cache's log no longer keeps, or never held,
+// writing repo/'s deleted{deletion_id, time, signer} from the row (QD-798). A network the cache has not loaded
+// answers an error, which starts its load and leaves the repo to the job's retry or the next walk. Until a runtime
+// holds that cache, the source is nil: the walk applies nothing and only queues, and a deleted repo's 7-day start
+// waits, asked again a ShredHoldRecheckInterval on. A --now shred, which needs no projection, runs to its tombstone.
 
 import (
 	"context"
