@@ -57,6 +57,10 @@ type Route struct {
 	// set by RequireRolePermission: decides which requests the route refuses
 	// for their credential's role before its handler runs; nil asks none
 	rolePermissionRefusal RolePermissionRefusal
+	// set by RefuseWhileRestoreHeld: whether §19.10's restore hold holds the
+	// route now, and the Retry-After it answers with; nil never holds it
+	restoreHeld           func() bool
+	restoreHoldRetryAfter time.Duration
 }
 
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {

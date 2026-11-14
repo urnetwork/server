@@ -35,6 +35,13 @@ import (
 //
 // p0_enforce is not in §19.11's list, which picks it up at the next records pass
 // (plan-OPS-small-readings #3), and file_clusters is plan-EVSB-settle-gate's.
+// restore_hold is plan-OPS-restore-hold's (QD-076): while it reads true, api
+// answers every public route but its status route 503 with Retry-After, the
+// token exchange among them, and CreateContract answers Setup, until §19.10's
+// api step ends and the runbook clears it. A process's first read of a file that
+// does not parse holds nothing, as it opens nothing: a broken push must not stop
+// every route of a running product, and a restore's runbook reads the hold back
+// before its api step runs (sidecarrestore).
 // acl_contract_gate is not in it either: it is the switch ACL-M4-01's plan keeps
 // CreateContract's §8.10 gate dark behind, which a process consults only where it
 // installed a gate (controller.SetAclContractGate).
@@ -105,6 +112,7 @@ type sidecarConfigYaml struct {
 		EscrowDrawOrder   *sidecarSwitchYaml `yaml:"escrow_draw_order"`
 		AclContractGate   *sidecarSwitchYaml `yaml:"acl_contract_gate"`
 		Reseed            bool               `yaml:"reseed"`
+		RestoreHold       bool               `yaml:"restore_hold"`
 		PlaceNew          string             `yaml:"place_new"`
 		Drained           []string           `yaml:"drained"`
 		SocketsControlQps *struct {
@@ -135,6 +143,7 @@ type SidecarConfig struct {
 	// the switches by name, each on only when the file says enabled: true
 	switches      map[string]bool
 	reseed        bool
+	restoreHold   bool
 	placeNew      string
 	drained       []string
 	socketsRate   float64
@@ -175,6 +184,7 @@ func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 		serviceGates:      map[string]*SidecarServiceGate{},
 		switches:          map[string]bool{},
 		reseed:            y.Sidecar.Reseed,
+		restoreHold:       y.Sidecar.RestoreHold,
 		placeNew:          y.Sidecar.PlaceNew,
 		fileClusters:      map[string]SidecarFileCluster{},
 	}
