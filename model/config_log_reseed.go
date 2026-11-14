@@ -88,8 +88,12 @@ type ConfigReseedSettings struct {
 	// {acl_}r lives this long after its last write, or the last read that
 	// found its resumed marker: 24 h (QD-724; §2.8 api-7).
 	UploadTtl time.Duration
-	// How long one read or write of {acl_}r waits for Redis.
+	// How long one read or write of a network's uploads in {acl_}r waits for
+	// Redis: 10 s, for values of up to MaxNetworkByteCount.
 	RedisTimeout time.Duration
+	// How long a read or write of {acl_}r's marks alone waits for Redis: 1 s.
+	// The token exchange reads the resumed marker under it.
+	MarkerRedisTimeout time.Duration
 }
 
 func DefaultConfigReseedSettings() *ConfigReseedSettings {
@@ -103,6 +107,7 @@ func DefaultConfigReseedSettings() *ConfigReseedSettings {
 		MaxNetworkByteCount: 256 * 1024 * 1024,
 		UploadTtl:           24 * time.Hour,
 		RedisTimeout:        10 * time.Second,
+		MarkerRedisTimeout:  time.Second,
 	}
 }
 

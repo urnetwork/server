@@ -102,7 +102,7 @@ func configReseedUploadBytes(upload *ConfigReseedUpload) ([]byte, error) {
 }
 
 // The upload a field holds, or an error for bytes configReseedUploadBytes
-// never wrote. Its slices are copies.
+// never wrote. Its slices alias b.
 func parseConfigReseedUpload(sidecarId server.Id, b []byte) (*ConfigReseedUpload, error) {
 	upload := &ConfigReseedUpload{SidecarId: sidecarId}
 	for 0 < len(b) {
@@ -119,7 +119,6 @@ func parseConfigReseedUpload(sidecarId server.Id, b []byte) (*ConfigReseedUpload
 			return nil, protowire.ParseError(valueByteCount)
 		}
 		b = b[valueByteCount:]
-		value = append([]byte{}, value...)
 		switch number {
 		case configReseedUploadFieldGenesis:
 			if upload.SignedGenesis != nil {
@@ -276,9 +275,9 @@ func (self *ConfigReseedUploads) ttlSeconds() int64 {
 	return max(1, int64(self.settings.UploadTtl/time.Second))
 }
 
-// One script on the network's key, bounded by settings' RedisTimeout.
-func (self *ConfigReseedUploads) run(ctx context.Context, script *redis.Script, networkId server.Id, args ...any) (result int64, returnErr error) {
-	boundedCtx, cancel := context.WithTimeout(ctx, self.settings.RedisTimeout)
+// One script on the network's key, bounded by timeout.
+func (self *ConfigReseedUploads) run(ctx context.Context, timeout time.Duration, script *redis.Script, networkId server.Id, args ...any) (result int64, returnErr error) {
+	boundedCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	returnErr = server.RedisWithDeadline(boundedCtx, func(r server.RedisClient) error {
 		var err error
@@ -301,6 +300,7 @@ func (self *ConfigReseedUploads) Put(ctx context.Context, networkId server.Id, u
 	}
 	kept, err := self.run(
 		ctx,
+		self.settings.RedisTimeout,
 		configReseedPutScript,
 		networkId,
 		upload.SidecarId.String(),
@@ -359,14 +359,14 @@ func (self *ConfigReseedUploads) List(ctx context.Context, networkId server.Id) 
 // Drops the network's uploads: a run that failed its walk from C_0 is
 // discarded.
 func (self *ConfigReseedUploads) Clear(ctx context.Context, networkId server.Id) error {
-	_, err := self.run(ctx, configReseedClearScript, networkId)
+	_, err := self.run(ctx, self.settings.MarkerRedisTimeout, configReseedClearScript, networkId)
 	return err
 }
 
 // Records that the adopted run through tip is written to proj/, so the base
 // that lands past it resumes the network.
 func (self *ConfigReseedUploads) MarkWritten(ctx context.Context, networkId server.Id, tip uint64) error {
-	_, err := self.run(ctx, configReseedWrittenScript, networkId, strconv.FormatUint(tip, 10), self.ttlSeconds())
+	_, err := self.run(ctx, self.settings.MarkerRedisTimeout, configReseedWrittenScript, networkId, strconv.FormatUint(tip, 10), self.ttlSeconds())
 	return err
 }
 
@@ -374,14 +374,14 @@ func (self *ConfigReseedUploads) MarkWritten(ctx context.Context, networkId serv
 // network's adopted run is written and ends below n. Answers whether the
 // network is resumed.
 func (self *ConfigReseedUploads) MarkResumed(ctx context.Context, networkId server.Id, n uint64) (bool, error) {
-	resumed, err := self.run(ctx, configReseedResumedScript, networkId, strconv.FormatUint(n, 10), self.ttlSeconds())
+	resumed, err := self.run(ctx, self.settings.MarkerRedisTimeout, configReseedResumedScript, networkId, strconv.FormatUint(n, 10), self.ttlSeconds())
 	return resumed == 1, err
 }
 
 // Whether the network's resume base landed. A read that finds the marker keeps
 // its key another UploadTtl.
 func (self *ConfigReseedUploads) Resumed(ctx context.Context, networkId server.Id) (bool, error) {
-	resumed, err := self.run(ctx, configReseedIsResumedScript, networkId, self.ttlSeconds())
+	resumed, err := self.run(ctx, self.settings.MarkerRedisTimeout, configReseedIsResumedScript, networkId, self.ttlSeconds())
 	return resumed == 1, err
 }
 

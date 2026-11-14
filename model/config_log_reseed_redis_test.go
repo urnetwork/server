@@ -341,6 +341,10 @@ func TestConfigReseedMarkerLivesWhileItIsRead(t *testing.T) {
 		uploads := NewConfigReseedUploads(nil)
 		networkId := server.NewId()
 		connect.AssertEqual(t, uploads.MarkWritten(ctx, networkId, 3), nil)
+		// a key written by a mark alone expires too
+		if ttl := testConfigReseedTtl(t, ctx, networkId); ttl <= 24*time.Hour-time.Minute || 24*time.Hour < ttl {
+			t.Fatalf("the key's ttl after its run is written: %s", ttl)
+		}
 
 		// no marker: the read leaves the key's ttl as it is
 		testConfigReseedExpireIn(t, ctx, networkId, time.Hour)

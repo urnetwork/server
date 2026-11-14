@@ -135,8 +135,9 @@ func (self *reseedWorld) kept(sidecarId server.Id) *ConfigReseedUpload {
 }
 
 // The base an admin's device publishes at tip+1 once the adopted run is written (§7.9's resume): signed by the
-// owner's first device at the tip, folding the log through it under base 1's rows and config head, which the
-// re-seeded config repo still names.
+// owner's first device at the tip, over base 1's rows, fold and config head, which the re-seeded config repo still
+// names, with the tail's verdicts: every statement the world lands takes effect, and a base carries 0 (DESIGN-DETAILS
+// 5.2.2).
 func (self *reseedWorld) resumeBase() *ConfigLogBase {
 	self.t.Helper()
 	kept := self.kept(self.ownerSidecarId)
@@ -154,15 +155,28 @@ func (self *reseedWorld) resumeBase() *ConfigLogBase {
 	}
 	rows := kept.Rows[0]
 	rowsSha256 := sha256.Sum256(rows)
+	foldedThrough := baseOne.GetFoldedThrough()
+	tailVerdicts := make([]byte, (2*(self.tip.GetVersion()-foldedThrough)+7)/8)
+	for n := foldedThrough + 1; n <= self.tip.GetVersion(); n += 1 {
+		tailEntry := &bridge.AuthEntry{}
+		if err := proto.Unmarshal(kept.Entries[n-1], tailEntry); err != nil {
+			self.t.Fatal(err)
+		}
+		if tailEntry.GetKind() != bridge.AuthEntryKindBase {
+			j := n - foldedThrough - 1
+			tailVerdicts[j/4] |= 1 << (2 * (j % 4))
+		}
+	}
 	signedHeader := self.world.SignAsOwner(bridge.SignedType_SIGNED_PROJECTION_HEADER, &bridge.ProjectionHeader{
 		NetworkId:        sidecar.Id(self.networkId).Bytes(),
 		Version:          self.tip.GetVersion() + 1,
 		PrevChain:        self.tip.GetChain(),
-		FoldedThrough:    self.tip.GetVersion(),
+		FoldedThrough:    foldedThrough,
 		ConfigVersion:    baseOne.GetConfigVersion(),
 		ConfigHeadSha256: baseOne.GetConfigHeadSha256(),
 		RowsSha256:       rowsSha256[:],
 		RowsByteCount:    uint32(len(rows)),
+		TailVerdicts:     tailVerdicts,
 	})
 	return &ConfigLogBase{SignedHeader: signedHeader, Rows: rows}
 }
