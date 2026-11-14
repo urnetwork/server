@@ -125,7 +125,8 @@ func gkmStackPin(version uint64) *bridge.AuthPin {
 
 // gkm's routes on the real stores: KF1's creation writes the form, epoch/0 and gen/1 on the repo's cluster; two
 // commits racing for epoch 1 leave one, the loser answered 409 with the winner; a REMOVE-free rotation stages its
-// delivery and claims gen/2; a leaf's ack lands in {gka_}; and ShredGroup leaves nothing of the group behind.
+// delivery and claims gen/2; a leaf's ack lands in {gka_}; and ShredGroup leaves nothing of the group behind. QD-747's
+// HEAD of welcome/1 answers 404 before the uploader's Welcome and 200 after it, as the store's HEAD does.
 func TestGkmRoutesOnTheLocalStack(t *testing.T) {
 	clusters := gkmStackClusters(t)
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(tb testing.TB) {
@@ -259,6 +260,47 @@ func TestGkmRoutesOnTheLocalStack(t *testing.T) {
 			tb.Fatalf("two commits racing for epoch 1: %v", codes)
 		}
 
+		// QD-747: whether epoch 1's Welcome stands, as the store answers the HEAD of its object: 404 before the
+		// uploader wrote it and 200 after, with no body either way, and nothing to a token without rw
+		readerToken := hostTestToken(fakeHost, networkId, reader, "repo:"+repoId.String()+":r")
+		welcomePath := "/gkm/groups/" + sidecar.EvsKeyId(groupId) + "/welcome/"
+		welcomeStands := func(token string, epoch string) int {
+			code, body := hostTestServe(handler, http.MethodHead, welcomePath+epoch, token, nil)
+			if len(body) != 0 {
+				tb.Fatalf("HEAD welcome/%s answered %d with a body of %d bytes", epoch, code, len(body))
+			}
+			return code
+		}
+		if code := welcomeStands(adminToken, "1"); code != http.StatusNotFound {
+			tb.Fatalf("epoch 1's Welcome before its uploader wrote it: %d", code)
+		}
+		if code := welcomeStands(readerToken, "1"); code != http.StatusForbidden {
+			tb.Fatalf("a reader's token before the Welcome: %d", code)
+		}
+		welcomeBody, _ := proto.Marshal(&protocol.GkmWelcomeRequest{
+			Welcome:    []byte("a Welcome without the tree"),
+			Recipients: []*protocol.GkmWelcomeRecipient{{SidecarId: reader.sidecarId.Bytes(), KeyPackageRef: bytes.Repeat([]byte{0xab}, 32)}},
+		})
+		if code, _ := hostTestServe(handler, http.MethodPost, welcomePath+"1", adminToken, welcomeBody); code != http.StatusOK {
+			tb.Fatalf("the uploader's Welcome: %d", code)
+		}
+		welcomePointerKey := gkmservice.GkmWelcomePointerKey(reader.sidecarId, groupId, 1)
+		if _, err := repoCluster.Head(ctx, gkmservice.GkmWelcomeKey(groupId, 1)); err != nil {
+			tb.Fatalf("the Welcome is not on the repo's cluster: %v", err)
+		}
+		if _, err := first.Head(ctx, welcomePointerKey); err != nil {
+			tb.Fatalf("the Welcome's pointer is not on the first cluster: %v", err)
+		}
+		if code := welcomeStands(adminToken, "1"); code != http.StatusOK {
+			tb.Fatalf("epoch 1's Welcome after its uploader wrote it: %d", code)
+		}
+		if code := welcomeStands(readerToken, "1"); code != http.StatusForbidden {
+			tb.Fatalf("a reader's token after the Welcome: %d", code)
+		}
+		if code := welcomeStands(adminToken, "2"); code != http.StatusNotFound {
+			tb.Fatalf("an epoch that does not stand: %d", code)
+		}
+
 		// a rotation stages its delivery, then claims gen/2
 		key2, rotate2, err := key1.NextGeneration(&sidecar.GkmGenerationArgs{
 			Cause:         sidecar.GkmCauseRequest,
@@ -333,6 +375,11 @@ func TestGkmRoutesOnTheLocalStack(t *testing.T) {
 		if fieldValues, err := host.Redis.HashGetAll(ctx, gkmservice.GkmAckRedisKey(groupId)); err != nil || len(fieldValues) != 0 {
 			tb.Fatalf("the shred left {gka_}: %v", err)
 		}
+		// the shred took the Welcome with the group, and its pointer is this test's to clear
+		if _, err := repoCluster.Head(ctx, gkmservice.GkmWelcomeKey(groupId, 1)); err == nil {
+			tb.Fatalf("the shred left the Welcome")
+		}
+		first.Delete(context.WithoutCancel(ctx), welcomePointerKey)
 		repoCluster.Delete(context.WithoutCancel(ctx), gkmservice.GkmEvsRepoKey(repoId))
 		first.Delete(context.WithoutCancel(ctx), sidecar.EvsPlaceKey(repoId))
 	})
