@@ -14,9 +14,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/sidecar/dnsservice"
 )
@@ -32,9 +34,18 @@ import (
 //     canary is validated through that NS alone by Unbound, with the KSK as a configured trust anchor
 //     (stub-addr, trust-anchor-file), so a second implementation checks what miekg/dns signed; a value
 //     over canary_fresh old reads as an NS behind;
-//   - two public resolvers check propagation only until the DS, then validate as well;
+//   - two public resolvers check propagation only until the DS, then validate as well (DNS-M7-04):
+//     once dns.yml's ds_published lists the root, an answer without AD is a propagation warning, and
+//     a SERVFAIL that the same question with checking disabled answers is the signature failing for
+//     every validator, which pages as dns-canary-signature;
 //   - the verdict goes to the block, ok only when every NS validated a fresh value, and GET
-//     /dns/ready reads it, so a bad minute pauses certs' orders within the minute.
+//     /dns/ready reads it, so a bad minute pauses certs' orders within the minute;
+//   - a clean-days counter (D-DNS-5; DNS-M7-04) runs over the minutes: an ok verdict with no
+//     signature failure extends the root's run of clean minutes, a signature failure ends it, and a
+//     stretch longer than CleanGap with no clean minute restarts it, since nothing proved those
+//     minutes clean. The run is kept in the monitor's state directory, so a restart does not restart
+//     the count, and urnetwork_dns_canary_clean_days and urnetwork_dns_ds_ready report it each
+//     minute, ready never below DsReadyCleanDays, §12.6's 30: the DS waits for that report.
 //
 // dns-canary-signature and dns-ns-down page §19.8's rota at any hour from M5 (owner decision 143);
 // dns-ns-failing, one NS failing an hour, is plan-DNS-running-ns's business-hours page, which the pager
@@ -45,7 +56,7 @@ import (
 func NewDnsCanarySignal() Signal {
 	return &signalAdapter{
 		number: "28.1", key: "dns-canary", name: "DNS canary, nameservers and DNSKEY window",
-		probe: dnsCanaryProbe{},
+		probe: dnsCanaryProbe{clean: newDnsCanaryCleanCounter(), gauges: defaultDnsCanaryGauges},
 	}
 }
 
@@ -75,10 +86,9 @@ type DnsCanarySettings struct {
 	Dns *dnsservice.DnsSettings
 	// Each NS's addresses on port 53: dns.yml's glue.
 	NsAddresses map[string][]netip.AddrPort
-	// The public resolvers' addresses, which check propagation until the DS.
+	// The public resolvers' addresses, which check propagation until the DS, and validate as well once
+	// Dns.DsPublished lists the root (owner decision 135).
 	PublicResolvers []netip.AddrPort
-	// The DS is published (owner decision 135): the public resolvers must validate too.
-	DsPublished bool
 	// unbound-host's path. Empty finds it on PATH.
 	UnboundHostPath string
 	// Each read and the validation's bound.
@@ -93,6 +103,13 @@ type DnsCanarySettings struct {
 	NsFailingSustain   int
 	DivergenceSustain  int
 	PropagationSustain int
+	// The clean canary days before the DS is reported ready: §12.6's 30 (D-DNS-5). Below it the report
+	// is never ready, and a non-positive value reports nothing ready.
+	DsReadyCleanDays int
+	// The longest stretch with no clean minute that a run of clean days outlasts: a monitor restart or
+	// one NS's deploy, one host at a time, fits in it; a longer one restarts the count at the next
+	// clean minute, since nothing proved the minutes between clean.
+	CleanGap time.Duration
 	// Why monitor.yml's block, dns.yml or the bearer file did not read. Set, the check reports itself
 	// blind rather than off, since a canary asked for and not running must hold incidents open. Never
 	// holds a bearer.
@@ -110,6 +127,8 @@ func DefaultDnsCanarySettings() *DnsCanarySettings {
 		NsFailingSustain:   60,
 		DivergenceSustain:  3,
 		PropagationSustain: 5,
+		DsReadyCleanDays:   30,
+		CleanGap:           10 * time.Minute,
 	}
 }
 
@@ -161,18 +180,38 @@ type dnsCanaryValidator interface {
 	validate(ctx context.Context, root string, addresses []netip.AddrPort, anchors []string) (*dnsCanaryValidation, error)
 }
 
-// Asks a public resolver, recursively, with DNSSEC OK. An error means it did not answer.
-type dnsCanaryResolver interface {
-	resolve(ctx context.Context, resolver netip.AddrPort, name string) (values []string, authenticated bool, err error)
+// What a public resolver answered for the canary's TXT.
+type dnsCanaryResolution struct {
+	// The answer's rcode: dns.RcodeSuccess, or SERVFAIL where a validating resolver refused the answer.
+	rcode  int
+	values []string
+	// AD: the resolver validated what it answered.
+	authenticated bool
 }
 
-type dnsCanaryProbe struct{}
+// Asks a public resolver, recursively, with DNSSEC OK, and with checking disabled when asked (RFC 4035
+// §3.2.2), so a validating resolver answers what it would otherwise refuse as bogus. An error means it
+// did not answer at all.
+type dnsCanaryResolver interface {
+	resolve(ctx context.Context, resolver netip.AddrPort, name string, checkingDisabled bool) (*dnsCanaryResolution, error)
+}
+
+// Where each minute's clean-days run goes besides the state directory: the process's gauges.
+type dnsCanaryGauges interface {
+	publishCleanDays(source string, root string, cleanDays int, dsReady bool)
+}
+
+// The probe and what outlives one minute: the clean-days counter and the gauges it reports to.
+type dnsCanaryProbe struct {
+	clean  *dnsCanaryCleanCounter
+	gauges func() dnsCanaryGauges
+}
 
 func (dnsCanaryProbe) id() string             { return dnsCanaryProbeId }
 func (dnsCanaryProbe) tier() string           { return tierPage }
 func (dnsCanaryProbe) cadence() time.Duration { return time.Minute }
 
-func (dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	settings := env.cfg.dnsCanary
 	if settings == nil {
 		return []finding{{
@@ -190,12 +229,25 @@ func (dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		}}, nil
 	}
 	timeout := settings.Timeout
+	clean, stateDir := self.clean, env.cfg.stateDir
+	if clean == nil {
+		// a probe built bare, as check-burn's one-shot run: its minute counts toward nothing kept, and the state
+		// directory's run is the monitor's alone
+		clean, stateDir = newDnsCanaryCleanCounter(), ""
+	}
+	var gauges dnsCanaryGauges
+	if self.gauges != nil {
+		gauges = self.gauges()
+	}
 	check := &dnsCanaryCheck{
 		settings:  settings,
 		api:       &dnsCanaryHttpApi{settings: settings, client: &http.Client{Timeout: timeout}},
 		ns:        &dnsCanaryDirectNs{timeout: timeout},
 		validator: &dnsCanaryUnbound{path: settings.UnboundHostPath, run: dnsCanaryRunCommand},
 		resolver:  &dnsCanaryDirectNs{timeout: timeout},
+		clean:     clean,
+		stateDir:  stateDir,
+		gauges:    gauges,
 	}
 	return check.run(ctx, env.now()), nil
 }
@@ -207,6 +259,11 @@ type dnsCanaryCheck struct {
 	ns        dnsCanaryNs
 	validator dnsCanaryValidator
 	resolver  dnsCanaryResolver
+	// the clean-days counter, kept under stateDir when it is set
+	clean    *dnsCanaryCleanCounter
+	stateDir string
+	// nil reports to nothing
+	gauges dnsCanaryGauges
 }
 
 // Every root's findings at now.
@@ -273,9 +330,13 @@ func (self *dnsCanaryCheck) runRoot(ctx context.Context, root string, now time.T
 	}
 	anchors := self.settings.Dns.TrustAnchors[root]
 	if len(anchors) == 0 {
+		// nothing proved this minute clean or failed
+		self.recordClean(root, now, dnsCanaryMinuteUnobserved)
 		return append(findings, self.finding(dnsCanaryClassUnobservable, root, "dns.yml names no trust anchor for the root, so nothing validates", ""))
 	}
 	verdictOk := true
+	// a canary that did not validate, at an NS or, once the DS is out, at a public resolver
+	signatureFailed := false
 	failingNs := []string{}
 	soaSerials := map[string]uint32{}
 	for _, ns := range self.settings.Dns.Ns {
@@ -304,6 +365,7 @@ func (self *dnsCanaryCheck) runRoot(ctx context.Context, root string, now time.T
 		case validation.bogus || !validation.secure:
 			findings = append(findings, self.finding(dnsCanaryClassSignature, target, "the canary does not validate against the KSK", strings.Join(validation.values, " ")))
 			verdictOk = false
+			signatureFailed = true
 		case !dnsCanaryFresh(validation.values, now, self.settings.Fresh):
 			// a validated value too old: the NS is behind the journal
 			failingNs = append(failingNs, ns)
@@ -331,17 +393,93 @@ func (self *dnsCanaryCheck) runRoot(ctx context.Context, root string, now time.T
 	if 1 < len(distinct) {
 		findings = append(findings, self.finding(dnsCanaryClassDivergence, root, "the nameservers' SOA serials differ", fmt.Sprint(soaSerials)))
 	}
+	dsPublished := self.settings.Dns.DsPublishedFor(root)
 	for _, resolver := range self.settings.PublicResolvers {
-		values, authenticated, err := self.resolver.resolve(ctx, resolver, dnsservice.DnsCanaryOwner(root))
-		if err != nil || !dnsCanaryFresh(values, now, self.settings.Fresh) || (self.settings.DsPublished && !authenticated) {
-			findings = append(findings, self.finding(dnsCanaryClassPropagation, resolver.Addr().String()+" "+root, "a public resolver lacks a fresh canary, or does not validate it once the DS is out", ""))
+		target := resolver.Addr().String() + " " + root
+		switch self.publicVerdict(ctx, resolver, root, now, dsPublished) {
+		case dnsCanaryPublicBogus:
+			findings = append(findings, self.finding(dnsCanaryClassSignature, target, "a public resolver refuses the canary as bogus once the DS is out: every validator fails the root", ""))
+			signatureFailed = true
+		case dnsCanaryPublicUnvalidated:
+			findings = append(findings, self.finding(dnsCanaryClassPropagation, target, "a public resolver holds the canary but does not validate it once the DS is out", ""))
+		case dnsCanaryPublicStale:
+			findings = append(findings, self.finding(dnsCanaryClassPropagation, target, "a public resolver lacks a fresh canary", ""))
 		}
 	}
 	report := &dnsservice.DnsCanaryReport{Root: root, Source: self.settings.Source, Serial: uint64(lowest), Ok: verdictOk}
 	if err := self.api.report(ctx, report); err != nil {
 		findings = append(findings, self.finding(dnsCanaryClassUnobservable, root, "the verdict could not be reported, so GET /dns/ready reads it as failing", err.Error()))
 	}
+	switch {
+	case signatureFailed:
+		self.recordClean(root, now, dnsCanaryMinuteFailed)
+	case verdictOk:
+		self.recordClean(root, now, dnsCanaryMinuteClean)
+	default:
+		// an NS down, behind or blind: no signature failed, and none proved the minute clean
+		self.recordClean(root, now, dnsCanaryMinuteUnobserved)
+	}
 	return findings
+}
+
+// What one public resolver's answer says of the canary.
+type dnsCanaryPublicVerdict int
+
+const (
+	// a fresh canary, validated once the DS is out
+	dnsCanaryPublicOk dnsCanaryPublicVerdict = iota
+	// no answer, or none fresh: propagation
+	dnsCanaryPublicStale
+	// a fresh canary without AD once the DS is out
+	dnsCanaryPublicUnvalidated
+	// once the DS is out, SERVFAIL for a canary the resolver holds: validation fails
+	dnsCanaryPublicBogus
+)
+
+// One public resolver's verdict on root's canary at now. Until the DS a resolver checks propagation
+// only, so neither AD nor a SERVFAIL's cause is judged; once it is out, an answer must carry AD, and a
+// SERVFAIL is asked again with checking disabled, an answer then meaning the canary is there and does
+// not validate, where no answer means the resolver itself failed.
+func (self *dnsCanaryCheck) publicVerdict(ctx context.Context, resolver netip.AddrPort, root string, now time.Time, dsPublished bool) dnsCanaryPublicVerdict {
+	owner := dnsservice.DnsCanaryOwner(root)
+	resolution, err := self.resolver.resolve(ctx, resolver, owner, false)
+	if err != nil {
+		return dnsCanaryPublicStale
+	}
+	if resolution.rcode == dns.RcodeServerFailure && dsPublished {
+		unchecked, err := self.resolver.resolve(ctx, resolver, owner, true)
+		if err == nil && unchecked.rcode == dns.RcodeSuccess && 0 < len(unchecked.values) {
+			return dnsCanaryPublicBogus
+		}
+		return dnsCanaryPublicStale
+	}
+	if resolution.rcode != dns.RcodeSuccess || !dnsCanaryFresh(resolution.values, now, self.settings.Fresh) {
+		return dnsCanaryPublicStale
+	}
+	if dsPublished && !resolution.authenticated {
+		return dnsCanaryPublicUnvalidated
+	}
+	return dnsCanaryPublicOk
+}
+
+// Records root's minute in the clean-days counter and reports the run to the gauges. A count that could
+// not be kept reports nothing ready, the closed direction.
+func (self *dnsCanaryCheck) recordClean(root string, now time.Time, minute dnsCanaryMinute) {
+	if self.clean == nil {
+		return
+	}
+	cleanDays, err := self.clean.record(self.stateDir, self.settings.Source, root, now, minute, self.settings.CleanGap)
+	if err != nil {
+		cleanDays = 0
+	}
+	if self.gauges != nil {
+		self.gauges.publishCleanDays(self.settings.Source, root, cleanDays, dnsCanaryDsReady(cleanDays, self.settings.DsReadyCleanDays))
+	}
+}
+
+// Whether cleanDays reach the DS: never below readyDays, and never with no readyDays set.
+func dnsCanaryDsReady(cleanDays int, readyDays int) bool {
+	return 0 < readyDays && readyDays <= cleanDays
 }
 
 // The API block over HTTPS with the copy's bearer.
@@ -449,21 +587,28 @@ func (self *dnsCanaryDirectNs) read(ctx context.Context, root string, addresses 
 	return read, nil
 }
 
-func (self *dnsCanaryDirectNs) resolve(ctx context.Context, resolver netip.AddrPort, name string) ([]string, bool, error) {
+// A public resolver's answer whatever its rcode, since a validating resolver's SERVFAIL is what a bogus
+// canary looks like there.
+func (self *dnsCanaryDirectNs) resolve(ctx context.Context, resolver netip.AddrPort, name string, checkingDisabled bool) (*dnsCanaryResolution, error) {
 	query := &dns.Msg{}
 	query.SetQuestion(name, dns.TypeTXT)
 	query.SetEdns0(dns.DefaultMsgSize, true)
-	reply, err := self.exchange(ctx, []netip.AddrPort{resolver}, query)
+	query.CheckingDisabled = checkingDisabled
+	client := &dns.Client{Net: "tcp", Timeout: self.timeout}
+	reply, _, err := client.ExchangeContext(ctx, query, resolver.String())
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	values := []string{}
+	if reply == nil || !reply.Response || len(reply.Question) != 1 || !strings.EqualFold(reply.Question[0].Name, name) {
+		return nil, errors.New("an answer to another question")
+	}
+	resolution := &dnsCanaryResolution{rcode: reply.Rcode, values: []string{}, authenticated: reply.AuthenticatedData}
 	for _, record := range reply.Answer {
-		if txt, ok := record.(*dns.TXT); ok {
-			values = append(values, strings.Join(txt.Txt, ""))
+		if txt, ok := record.(*dns.TXT); ok && strings.EqualFold(txt.Hdr.Name, name) {
+			resolution.values = append(resolution.values, strings.Join(txt.Txt, ""))
 		}
 	}
-	return values, reply.AuthenticatedData, nil
+	return resolution, nil
 }
 
 // Runs a command and returns its stdout. An error means it did not run; an exit status is not one,
@@ -573,3 +718,188 @@ func (self *dnsCanaryUnbound) validate(ctx context.Context, root string, address
 	}
 	return dnsCanaryParseUnbound(stdout), nil
 }
+
+// One minute of a root's canary, as the clean-days counter takes it.
+type dnsCanaryMinute int
+
+const (
+	// the verdict ok and no signature failed: the run goes on
+	dnsCanaryMinuteClean dnsCanaryMinute = iota
+	// a signature failed: the run ends
+	dnsCanaryMinuteFailed
+	// neither proved: the run is left as it was, and its gap grows
+	dnsCanaryMinuteUnobserved
+)
+
+// One root's run of clean minutes: its first and its latest.
+type dnsCanaryCleanRun struct {
+	Since time.Time `json:"since"`
+	Last  time.Time `json:"last"`
+}
+
+// The counter's file in the state directory: each source and root's run.
+type dnsCanaryCleanFile struct {
+	Format int                           `json:"format"`
+	Runs   map[string]*dnsCanaryCleanRun `json:"runs"`
+}
+
+// The counter file's format version.
+const dnsCanaryCleanFileFormat = 1
+
+// The counter's file under a state directory.
+func dnsCanaryCleanPath(stateDir string) string {
+	return filepath.Join(stateDir, "dns-canary", "clean-days.json")
+}
+
+// The clean-days counter (D-DNS-5; DNS-M7-04): each root's run of clean canary minutes, in the state
+// directory's file when there is one, so a monitor restart keeps the count, else in memory. A file that
+// does not read starts every run again, the closed direction: it can only delay the DS. Safe for
+// concurrent use.
+type dnsCanaryCleanCounter struct {
+	stateLock sync.Mutex
+	// the runs with no state directory, by source and root
+	memoryRuns map[string]*dnsCanaryCleanRun
+}
+
+func newDnsCanaryCleanCounter() *dnsCanaryCleanCounter {
+	return &dnsCanaryCleanCounter{memoryRuns: map[string]*dnsCanaryCleanRun{}}
+}
+
+// Records source's minute of root at now and answers the whole clean days the run holds then. A clean
+// minute extends the run, or starts one when the last clean minute is more than gap before it or after
+// it (a clock moved back); a failed minute ends the run; an unobserved one leaves it. A run whose last
+// clean minute is more than gap before now holds no day, since nothing proved the minutes since clean.
+// An error is a file that could not be written, whose count the caller reports as none.
+func (self *dnsCanaryCleanCounter) record(stateDir string, source string, root string, now time.Time, minute dnsCanaryMinute, gap time.Duration) (int, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	runs := self.memoryRuns
+	if stateDir != "" {
+		runs = readDnsCanaryCleanFile(dnsCanaryCleanPath(stateDir))
+	}
+	key := source + " " + root
+	run := runs[key]
+	lapsed := func(run *dnsCanaryCleanRun) bool {
+		return run == nil || now.Before(run.Last) || gap < now.Sub(run.Last)
+	}
+	switch minute {
+	case dnsCanaryMinuteClean:
+		if lapsed(run) {
+			run = &dnsCanaryCleanRun{Since: now, Last: now}
+		} else {
+			run.Last = now
+		}
+		runs[key] = run
+	case dnsCanaryMinuteFailed:
+		delete(runs, key)
+		run = nil
+	}
+	if stateDir != "" {
+		if err := writeDnsCanaryCleanFile(dnsCanaryCleanPath(stateDir), runs); err != nil {
+			return 0, err
+		}
+	}
+	if lapsed(run) {
+		return 0, nil
+	}
+	return int(run.Last.Sub(run.Since) / (24 * time.Hour)), nil
+}
+
+// The runs path holds, none when it is absent or does not read.
+func readDnsCanaryCleanFile(path string) map[string]*dnsCanaryCleanRun {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]*dnsCanaryCleanRun{}
+	}
+	file := &dnsCanaryCleanFile{}
+	if err := json.Unmarshal(data, file); err != nil || file.Format != dnsCanaryCleanFileFormat || file.Runs == nil {
+		return map[string]*dnsCanaryCleanRun{}
+	}
+	for key, run := range file.Runs {
+		if run == nil || run.Last.Before(run.Since) {
+			delete(file.Runs, key)
+		}
+	}
+	return file.Runs
+}
+
+// Replaces path with runs whole, through a file beside it renamed over it, in a directory only the
+// monitor's user reads.
+func writeDnsCanaryCleanFile(path string, runs map[string]*dnsCanaryCleanRun) error {
+	data, err := json.Marshal(&dnsCanaryCleanFile{Format: dnsCanaryCleanFileFormat, Runs: runs})
+	if err != nil {
+		return err
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, ".clean-days-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temporary.Name())
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporary.Name(), path)
+}
+
+// The clean-days series (SIGNALS.md §28.1).
+const (
+	dnsCanaryCleanDaysMetricName = "urnetwork_dns_canary_clean_days"
+	dnsDsReadyMetricName         = "urnetwork_dns_ds_ready"
+)
+
+// The counter's gauges in a prometheus registry. Safe for concurrent use.
+type prometheusDnsCanaryGauges struct {
+	cleanDaysGauge *prometheus.GaugeVec
+	dsReadyGauge   *prometheus.GaugeVec
+}
+
+// The gauges registered in registerer; ones it already holds are taken as they are, so every monitor of
+// a process shares one series set.
+func newPrometheusDnsCanaryGauges(registerer prometheus.Registerer) dnsCanaryGauges {
+	register := func(gauge *prometheus.GaugeVec) *prometheus.GaugeVec {
+		err := registerer.Register(gauge)
+		var already prometheus.AlreadyRegisteredError
+		if errors.As(err, &already) {
+			if existing, ok := already.ExistingCollector.(*prometheus.GaugeVec); ok {
+				return existing
+			}
+		}
+		return gauge
+	}
+	return &prometheusDnsCanaryGauges{
+		cleanDaysGauge: register(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: dnsCanaryCleanDaysMetricName,
+			Help: "Whole days of clean canary minutes for the root, as this monitor copy saw them (D-DNS-5).",
+		}, []string{"source", "root"})),
+		dsReadyGauge: register(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: dnsDsReadyMetricName,
+			Help: "1 once the root's clean canary days reach §12.6's 30, when its DS may go to the registrar; else 0.",
+		}, []string{"source", "root"})),
+	}
+}
+
+func (self *prometheusDnsCanaryGauges) publishCleanDays(source string, root string, cleanDays int, dsReady bool) {
+	self.cleanDaysGauge.WithLabelValues(source, root).Set(float64(cleanDays))
+	ready := 0.0
+	if dsReady {
+		ready = 1
+	}
+	self.dsReadyGauge.WithLabelValues(source, root).Set(ready)
+}
+
+// The process's gauges in its default registry, built once.
+var defaultDnsCanaryGauges = sync.OnceValue(func() dnsCanaryGauges {
+	return newPrometheusDnsCanaryGauges(prometheus.DefaultRegisterer)
+})

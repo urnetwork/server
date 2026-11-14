@@ -3,7 +3,11 @@ package monitor
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +16,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/sidecar/dnsservice"
 
@@ -33,6 +38,20 @@ type dnsCanaryTestWorld struct {
 	validatorErr error
 	resolved     map[netip.AddrPort][]string
 	authentic    bool
+	// a validating resolver refusing the canary as bogus: SERVFAIL, but the values with checking disabled
+	bogusAt map[netip.AddrPort]bool
+	// the questions asked with checking disabled
+	uncheckedCount int
+	// the clean-days gauges' last values, by root
+	cleanDays map[string]int
+	dsReady   map[string]bool
+}
+
+func (self *dnsCanaryTestWorld) publishCleanDays(source string, root string, cleanDays int, dsReady bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.cleanDays[root] = cleanDays
+	self.dsReady[root] = dsReady
 }
 
 func (self *dnsCanaryTestWorld) writeCanary(ctx context.Context, root string, value string) (uint64, error) {
@@ -78,14 +97,20 @@ func (self *dnsCanaryTestWorld) validate(ctx context.Context, root string, addre
 	return validation, nil
 }
 
-func (self *dnsCanaryTestWorld) resolve(ctx context.Context, resolver netip.AddrPort, name string) ([]string, bool, error) {
+func (self *dnsCanaryTestWorld) resolve(ctx context.Context, resolver netip.AddrPort, name string, checkingDisabled bool) (*dnsCanaryResolution, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if checkingDisabled {
+		self.uncheckedCount += 1
+	}
 	values, ok := self.resolved[resolver]
 	if !ok {
-		return nil, false, errors.New("no answer")
+		return nil, errors.New("no answer")
 	}
-	return values, self.authentic, nil
+	if self.bogusAt[resolver] && !checkingDisabled {
+		return &dnsCanaryResolution{rcode: dns.RcodeServerFailure, values: []string{}}, nil
+	}
+	return &dnsCanaryResolution{rcode: dns.RcodeSuccess, values: slices.Clone(values), authenticated: self.authentic && !checkingDisabled}, nil
 }
 
 // The fixed NS and resolvers, documentation addresses.
@@ -134,6 +159,9 @@ func newDnsCanaryTestCheck(t testing.TB, source string) (*dnsCanaryCheck, *dnsCa
 		nsReads:     map[string]*dnsCanaryNsRead{},
 		validations: map[string]*dnsCanaryValidation{},
 		resolved:    map[netip.AddrPort][]string{},
+		bogusAt:     map[netip.AddrPort]bool{},
+		cleanDays:   map[string]int{},
+		dsReady:     map[string]bool{},
 	}
 	for _, address := range []netip.AddrPort{dnsCanaryTestNs1, dnsCanaryTestNs2} {
 		world.nsReads[address.String()] = &dnsCanaryNsRead{soaSerial: 41, windowEnd: dnsCanaryTestNow.Add(10 * 24 * time.Hour)}
@@ -142,7 +170,7 @@ func newDnsCanaryTestCheck(t testing.TB, source string) (*dnsCanaryCheck, *dnsCa
 	for _, resolver := range dnsCanaryTestResolvers {
 		world.resolved[resolver] = []string{fresh}
 	}
-	check := &dnsCanaryCheck{settings: settings, api: world, ns: world, validator: world, resolver: world}
+	check := &dnsCanaryCheck{settings: settings, api: world, ns: world, validator: world, resolver: world, clean: newDnsCanaryCleanCounter(), gauges: world}
 	return check, world
 }
 
@@ -253,7 +281,7 @@ func TestDnsCanaryBlockRefusalsAreBlindAndTheDsValidates(t *testing.T) {
 	}
 
 	ds, dsWorld := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
-	ds.settings.DsPublished = true
+	ds.settings.Dns.DsPublished = []string{dnsCanaryTestRoot}
 	if got := dnsCanaryTestClasses(ds.run(t.Context(), dnsCanaryTestNow)); !slices.Equal(got, []string{dnsCanaryClassPropagation, dnsCanaryClassPropagation}) {
 		t.Errorf("unvalidated resolvers after the DS: %v", got)
 	}
@@ -374,5 +402,260 @@ func TestDnsCanaryReadsUnboundHost(t *testing.T) {
 	validation, err := unbound.validate(t.Context(), dnsCanaryTestRoot, []netip.AddrPort{dnsCanaryTestNs1}, []string{"257 3 13 abc="})
 	if err != nil || !validation.secure || len(ran) == 0 || ran[0] != "/unbound-host" || ran[len(ran)-1] != "canary.zone.example." {
 		t.Errorf("validate %+v %v ran %v", validation, err, ran)
+	}
+}
+
+// Every NS and resolver holds a canary written 20 s before now, so the minute at now is clean.
+func (self *dnsCanaryTestWorld) freshAt(now time.Time) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	fresh := strconv.FormatInt(now.Add(-20*time.Second).UnixMilli(), 10) + " site"
+	for _, validation := range self.validations {
+		validation.values = []string{fresh}
+	}
+	for resolver := range self.resolved {
+		self.resolved[resolver] = []string{fresh}
+	}
+	for _, read := range self.nsReads {
+		read.windowEnd = now.Add(10 * 24 * time.Hour)
+	}
+}
+
+// The check's minute at now on a world fresh then, and the root's clean days and readiness it reported.
+func dnsCanaryTestMinute(t testing.TB, check *dnsCanaryCheck, world *dnsCanaryTestWorld, now time.Time) (int, bool) {
+	t.Helper()
+	world.freshAt(now)
+	check.run(t.Context(), now)
+	world.stateLock.Lock()
+	defer world.stateLock.Unlock()
+	return world.cleanDays[dnsCanaryTestRoot], world.dsReady[dnsCanaryTestRoot]
+}
+
+// D-DNS-5's count, hour by hour on the fake clock with the gap widened to fit, in memory (the next test
+// holds the state directory's file to the same count): the DS is not reported ready on the 29th clean
+// day and is on the 30th, and a failed canary resets the count, which then starts again from the next
+// clean minute.
+func TestDnsCanaryFailedCanaryResetsTheCleanDays(t *testing.T) {
+	check, world := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+	check.settings.CleanGap = 2 * time.Hour
+	now := dnsCanaryTestNow
+	dnsCanaryTestMinute(t, check, world, now)
+	for range 29 * 24 {
+		now = now.Add(time.Hour)
+		dnsCanaryTestMinute(t, check, world, now)
+	}
+	days, ready := dnsCanaryTestMinute(t, check, world, now.Add(30*time.Minute))
+	if days != 29 || ready {
+		t.Fatalf("29 clean days: %d, ready %v", days, ready)
+	}
+	for range 24 {
+		now = now.Add(time.Hour)
+		days, ready = dnsCanaryTestMinute(t, check, world, now)
+	}
+	if days != 30 || !ready {
+		t.Fatalf("30 clean days: %d, ready %v", days, ready)
+	}
+
+	// one NS's canary fails validation: the count is gone at once
+	now = now.Add(time.Hour)
+	world.freshAt(now)
+	world.validations[dnsCanaryTestNs2.String()].secure = false
+	world.validations[dnsCanaryTestNs2.String()].bogus = true
+	check.run(t.Context(), now)
+	if days, ready := world.cleanDays[dnsCanaryTestRoot], world.dsReady[dnsCanaryTestRoot]; days != 0 || ready {
+		t.Fatalf("after a failed canary: %d, ready %v", days, ready)
+	}
+	world.validations[dnsCanaryTestNs2.String()].secure = true
+	world.validations[dnsCanaryTestNs2.String()].bogus = false
+	for range 25 {
+		now = now.Add(time.Hour)
+		days, ready = dnsCanaryTestMinute(t, check, world, now)
+	}
+	if days != 1 || ready {
+		t.Fatalf("a day after the failure: %d, ready %v", days, ready)
+	}
+}
+
+// The run lives in the state directory, so a new process's counter goes on with it; a minute no NS
+// proved clean, one NS down, neither extends nor ends it; a stretch past the gap with no clean minute
+// restarts it; and a file that does not read restarts it too.
+func TestDnsCanaryCleanDaysOutliveARestartAndLapseOverAGap(t *testing.T) {
+	check, world := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+	stateDir := t.TempDir()
+	check.stateDir = stateDir
+	check.settings.CleanGap = 2 * time.Hour
+	now := dnsCanaryTestNow
+	for range 3 * 24 {
+		now = now.Add(time.Hour)
+		dnsCanaryTestMinute(t, check, world, now)
+	}
+	// a new process: the counter starts empty and reads the file
+	check.clean = newDnsCanaryCleanCounter()
+	now = now.Add(time.Hour)
+	if days, _ := dnsCanaryTestMinute(t, check, world, now); days != 3 {
+		t.Fatalf("after a restart: %d days", days)
+	}
+
+	// one NS down for an hour: no failure, no proof
+	now = now.Add(time.Hour)
+	world.freshAt(now)
+	delete(world.nsReads, dnsCanaryTestNs1.String())
+	check.run(t.Context(), now)
+	if days := world.cleanDays[dnsCanaryTestRoot]; days != 3 {
+		t.Fatalf("an unobserved minute inside the gap: %d days", days)
+	}
+	world.nsReads[dnsCanaryTestNs1.String()] = &dnsCanaryNsRead{soaSerial: 41, windowEnd: now.Add(10 * 24 * time.Hour)}
+	now = now.Add(time.Hour)
+	if days, _ := dnsCanaryTestMinute(t, check, world, now); days != 3 {
+		t.Fatalf("a clean minute after it: %d days", days)
+	}
+
+	// the monitor stops for longer than the gap
+	now = now.Add(3 * time.Hour)
+	if days, _ := dnsCanaryTestMinute(t, check, world, now); days != 0 {
+		t.Fatalf("after a gap past CleanGap: %d days", days)
+	}
+	for range 25 {
+		now = now.Add(time.Hour)
+		dnsCanaryTestMinute(t, check, world, now)
+	}
+	if days := world.cleanDays[dnsCanaryTestRoot]; days != 1 {
+		t.Fatalf("a day into the new run: %d", days)
+	}
+
+	if err := os.WriteFile(dnsCanaryCleanPath(stateDir), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if days, _ := dnsCanaryTestMinute(t, check, world, now); days != 0 {
+		t.Fatalf("a file that does not read: %d days", days)
+	}
+	now = now.Add(time.Hour)
+	if days, _ := dnsCanaryTestMinute(t, check, world, now); days != 0 {
+		t.Fatalf("an hour into the restarted run: %d days", days)
+	}
+	if info, err := os.Stat(filepath.Dir(dnsCanaryCleanPath(stateDir))); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("the counter's directory: %v %v", info, err)
+	}
+}
+
+// Until the DS a public resolver checks propagation only: an answer without AD raises nothing, and a
+// SERVFAIL is propagation, never asked again. Once dns.yml's ds_published lists the root, an answer
+// without AD warns, and a SERVFAIL the resolver answers with checking disabled is the canary failing
+// for every validator: a page, which also ends the clean-days run.
+func TestDnsCanaryPublicResolversFailingValidationRaiseAnIncidentOnlyWithTheDs(t *testing.T) {
+	check, world := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+	world.authentic = false
+	if got := check.run(t.Context(), dnsCanaryTestNow); len(got) != 0 {
+		t.Fatalf("unvalidated answers before the DS: %v", dnsCanaryTestClasses(got))
+	}
+	world.bogusAt[dnsCanaryTestResolvers[0]] = true
+	if got := dnsCanaryTestClasses(check.run(t.Context(), dnsCanaryTestNow)); !slices.Equal(got, []string{dnsCanaryClassPropagation}) {
+		t.Fatalf("a SERVFAIL before the DS: %v", got)
+	}
+	if world.uncheckedCount != 0 {
+		t.Errorf("asked with checking disabled before the DS: %d", world.uncheckedCount)
+	}
+
+	ds, dsWorld := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+	ds.settings.Dns.DsPublished = []string{dnsCanaryTestRoot}
+	dsWorld.authentic = true
+	if got := ds.run(t.Context(), dnsCanaryTestNow); len(got) != 0 {
+		t.Fatalf("validated answers after the DS: %v", dnsCanaryTestClasses(got))
+	}
+	if days := dsWorld.cleanDays[dnsCanaryTestRoot]; days != 0 || dsWorld.dsReady[dnsCanaryTestRoot] {
+		t.Fatalf("a first clean minute: %d days", days)
+	}
+	dsWorld.bogusAt[dnsCanaryTestResolvers[0]] = true
+	findings := ds.run(t.Context(), dnsCanaryTestNow.Add(time.Minute))
+	if got := dnsCanaryTestClasses(findings); !slices.Equal(got, []string{dnsCanaryClassSignature}) {
+		t.Fatalf("a bogus canary at a public resolver after the DS: %v", got)
+	}
+	if findings[0].tier != tierPage || !strings.HasPrefix(findings[0].target, dnsCanaryTestResolvers[0].Addr().String()) {
+		t.Errorf("finding %+v", findings[0])
+	}
+	if dsWorld.uncheckedCount != 1 {
+		t.Errorf("questions with checking disabled: %d", dsWorld.uncheckedCount)
+	}
+	if run := ds.clean.memoryRuns[dnsservice.DnsCanarySourceSite+" "+dnsCanaryTestRoot]; run != nil {
+		t.Errorf("a bogus public answer left the run %+v", run)
+	}
+	// a SERVFAIL with nothing behind it is the resolver failing, not the canary
+	delete(dsWorld.resolved, dnsCanaryTestResolvers[0])
+	if got := dnsCanaryTestClasses(ds.run(t.Context(), dnsCanaryTestNow)); !slices.Equal(got, []string{dnsCanaryClassPropagation}) {
+		t.Fatalf("a resolver down after the DS: %v", got)
+	}
+}
+
+// Ready never below the setting, and never with none; the process's gauges carry both series by source
+// and root.
+func TestDnsCanaryDsReadyGauges(t *testing.T) {
+	if dnsCanaryDsReady(29, 30) || !dnsCanaryDsReady(30, 30) || !dnsCanaryDsReady(31, 30) || dnsCanaryDsReady(100, 0) {
+		t.Fatalf("readiness")
+	}
+	registry := prometheus.NewRegistry()
+	gauges := newPrometheusDnsCanaryGauges(registry)
+	gauges.publishCleanDays(dnsservice.DnsCanarySourceSite, dnsCanaryTestRoot, 30, true)
+	again := newPrometheusDnsCanaryGauges(registry)
+	again.publishCleanDays(dnsservice.DnsCanarySourceOutside, dnsCanaryTestRoot, 4, false)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]float64{}
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			labels := []string{}
+			for _, label := range metric.GetLabel() {
+				labels = append(labels, label.GetName()+"="+label.GetValue())
+			}
+			slices.Sort(labels)
+			values[family.GetName()+" "+strings.Join(labels, ",")] = metric.GetGauge().GetValue()
+		}
+	}
+	want := map[string]float64{
+		dnsCanaryCleanDaysMetricName + " root=" + dnsCanaryTestRoot + ",source=site":    30,
+		dnsDsReadyMetricName + " root=" + dnsCanaryTestRoot + ",source=site":            1,
+		dnsCanaryCleanDaysMetricName + " root=" + dnsCanaryTestRoot + ",source=outside": 4,
+		dnsDsReadyMetricName + " root=" + dnsCanaryTestRoot + ",source=outside":         0,
+	}
+	for key, value := range want {
+		if got, ok := values[key]; !ok || got != value {
+			t.Errorf("%s: %v %v", key, got, ok)
+		}
+	}
+}
+
+// The registered signal's probe keeps its run in the state directory and reports it to its gauges; a bare probe, as
+// check-burn runs one, reads and writes neither, so a rollout gate's one-shot run never moves the monitor's count.
+func TestDnsCanaryOnlyTheRegisteredProbeKeepsTheCount(t *testing.T) {
+	block := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.Write([]byte(`{"serial":1}`))
+	}))
+	defer block.Close()
+	check, world := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+	settings := check.settings
+	settings.ApiUrl = block.URL
+	// no NS address and no resolver, so nothing is dialed: each NS fails its read
+	settings.NsAddresses = map[string][]netip.AddrPort{}
+	settings.PublicResolvers = nil
+	stateDir := t.TempDir()
+	env := &probeEnv{cfg: &monitorConfig{dnsCanary: settings, stateDir: stateDir}, now: func() time.Time { return dnsCanaryTestNow }}
+	if _, err := (dnsCanaryProbe{}).check(t.Context(), env); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dnsCanaryCleanPath(stateDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a bare probe touched the count: %v", err)
+	}
+	probe := dnsCanaryProbe{clean: newDnsCanaryCleanCounter(), gauges: func() dnsCanaryGauges { return world }}
+	if _, err := probe.check(t.Context(), env); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dnsCanaryCleanPath(stateDir)); err != nil {
+		t.Fatalf("the registered probe kept no count: %v", err)
+	}
+	if days, ok := world.cleanDays[dnsCanaryTestRoot]; !ok || days != 0 || world.dsReady[dnsCanaryTestRoot] {
+		t.Errorf("gauges %v %v", world.cleanDays, world.dsReady)
 	}
 }

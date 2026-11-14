@@ -49058,11 +49058,12 @@ origin, read the publisher's outcomes (`store_error`, `sign_error`,
 Probe: `dns-canary`
 
 DNS-M5-17, §12.6's monitor (D-DNS-5, R-DNS-7, D-OPS-9, FS-50;
-plan-DNS-canary-route-state). One copy runs at the site and one on an outside
-host, each from monitor.yml's `dns_canary` block (`source: site|outside`,
-`api_url`, `bearer_file`, `unbound_host`, `public_resolvers`, `ds_published`)
-beside config's dns.yml, whose roots, NS glue and trust anchors it reads. Each
-minute, for each root:
+plan-DNS-canary-route-state), with DNS-M7-04's DS step. One copy runs at the
+site and one on an outside host, each from monitor.yml's `dns_canary` block
+(`source: site|outside`, `api_url`, `bearer_file`, `unbound_host`,
+`public_resolvers`) beside config's dns.yml, whose roots, NS glue, trust
+anchors and `ds_published` (the roots whose DS the registrar holds) it reads.
+Each minute, for each root:
 
 - the site copy writes `canary.<root>` TXT, its value the writer's unix
   milliseconds, through the dns API block's journal (`POST
@@ -49071,16 +49072,30 @@ minute, for each root:
   signatures, and the canary is validated through that NS alone by
   `unbound-host` with a stub zone at the NS and the KSK as its only trust
   anchor, a second implementation checking what the edge signed;
-- the public resolvers check propagation only, until the DS, then validate;
+- the public resolvers check propagation only, until the DS, then validate:
+  once `ds_published` lists the root, an answer without AD warns, and a
+  SERVFAIL that the same question with checking disabled answers is the canary
+  failing for every validator, which pages as `dns-canary-signature`;
 - the verdict, ok only when every NS validated a value under 180 s old, goes
   to `POST /dns/internal/canary-report`, which `GET /dns/ready` reads, so a bad
-  minute pauses certificate orders within the minute.
+  minute pauses certificate orders within the minute;
+- the clean-days counter (D-DNS-5): a minute with that verdict ok and no
+  signature failing extends the root's run of clean minutes, a signature
+  failing at an NS or, after the DS, at a public resolver ends it, and over
+  10 minutes with no clean minute (an NS down or behind, a blind check, the
+  monitor stopped) restarts it at the next clean one. Each copy keeps its own
+  run in its state directory (`dns-canary/clean-days.json`), so a restart
+  keeps it, and `monitor check-burn`'s one-shot run counts toward neither.
+  `urnetwork_dns_canary_clean_days{source,root}` is its whole days and
+  `urnetwork_dns_ds_ready{source,root}` turns 1 only at 30: the DS goes to
+  the registrar after that, by hand, and then into dns.yml's `ds_published`.
 
 Classes:
 
 - `dns-canary-signature` **PAGE**, sustained 2 minutes: an NS's canary does
-  not validate against the KSK (bogus or insecure). §19.8's rota at any hour
-  from M5 (owner decision 143); §12.6's runbook.
+  not validate against the KSK (bogus or insecure), or, once the DS is out, a
+  public resolver refuses it as bogus. §19.8's rota at any hour from M5 (owner
+  decision 143); §12.6's runbook.
 - `dns-ns-down` **PAGE**, sustained 2 minutes: every NS fails its SOA read, its
   validation or serves a canary over 180 s old.
 - `dns-ns-failing` **PAGE** in business hours, sustained an hour: one NS does.
@@ -49093,7 +49108,7 @@ Classes:
 - `dns-key-window` **WARN**: the DNSKEY window an NS serves has 7 d or less
   left; a ceremony's windows are due (DNS-M5-19).
 - `dns-canary-propagation` **WARN**, sustained 5 minutes: a public resolver
-  lacks a fresh canary, or, once the DS is out, does not validate it.
+  lacks a fresh canary, or, once the DS is out, answers it without AD.
 - `dns-canary-unobservable` (visibility): the check could not run, for no
   trust anchor, no validator, or a write or report the block refused; while it
   lasts no other dns-canary incident clears. With no `dns_canary` block the
