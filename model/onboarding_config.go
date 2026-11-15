@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -567,7 +568,23 @@ func newOnboardingConfig(y *onboardingYaml) *OnboardingConfig {
 
 // Onboarding returns the parsed onboarding config (cached; parsed once).
 func Onboarding() *OnboardingConfig {
+	if c := onboardingConfigOverride.Load(); c != nil {
+		return c
+	}
 	return onboardingConfig()
+}
+
+var onboardingConfigOverride atomic.Pointer[OnboardingConfig]
+
+// Testing_SetOnboardingConfig makes Onboarding() answer c, checked the way the
+// loader checks a parsed file, until the returned function restores the
+// previous answer. For tests of the campaign's controllers, which no
+// onboarding.yml reaches.
+func Testing_SetOnboardingConfig(c *OnboardingConfig) func() {
+	previous := onboardingConfigOverride.Swap(newOnboardingConfig(&onboardingYaml{Onboarding: *c}))
+	return func() {
+		onboardingConfigOverride.Store(previous)
+	}
 }
 
 // validExperiments drops registry entries that cannot be assigned safely and logs
