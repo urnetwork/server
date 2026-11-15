@@ -252,12 +252,12 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := r.URL.Query().Get("hash")
-	key, err := startifact.EvidenceContentKey(store, hash)
-	if err != nil {
+	if _, err := startifact.EvidenceContentKey(store, hash); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	reader, err := store.Get(r.Context(), key)
+	// the sharded key, then the legacy flat key of evidence written before it
+	reader, err := startifact.OpenEvidenceContent(r.Context(), store, hash)
 	if err != nil {
 		http.Error(w, "Evidence not found.", http.StatusNotFound)
 		return
