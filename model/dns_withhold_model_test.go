@@ -5,12 +5,16 @@ package model
 // §20.7's downgrade column, dns side (dns_withhold_model.go; DNS-M6-07), FS-51's dns side on Postgres: the newest
 // user RRsets past the limit withheld through the journal with their rows kept, MX and TLSA untouched; a second
 // pass writing nothing; releases oldest first; a withheld host's children keeping the wildcard by a copy row; a
-// suspension's changes leaving a downgrade's withholding alone; and the custom-host half refusing until its
-// question is answered.
+// suspension's changes leaving a downgrade's withholding alone; and the custom-host half (QD-840): web hosts
+// withheld out of the map and tlsedge's rows with their rows kept, while the zone, its MX, TLSA and router rows,
+// a strict-mode MX host and a host pending certs' checks stay as they were, and a release bringing each web host
+// back at the next map version, serving once every interface is current. FS-51's 14 days are QUOTA-M6-05's
+// clock, which calls these once they are past.
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -206,10 +210,10 @@ func TestDnsWithholdSurvivesASuspensionsChanges(t *testing.T) {
 	})
 }
 
-// FS-51's custom-host half (QD-840): each active web host goes withheld, out of the map at a new version and
-// routed by no edge, its row kept, while a strict-mode MX host and the zone's MX and TLSA stay; certs' verdict does
-// not touch a withheld host; a release brings each back active at the next version, pending until every
-// interface is current; and a pass with nothing to move writes nothing.
+// The custom-host half's round (QD-840): each active web host, weak or strong, goes withheld, out of the map at a
+// new version and routed by no edge, its row kept, while a strict-mode MX host stays active; certs' verdict does
+// not touch a withheld host; a pass with nothing to move writes nothing; and DnsReleaseWithheldInTx with its
+// custom hosts, the renewal's call, brings each back active at the next version with no ready time yet.
 func TestDnsWithholdCustomHostsAndReleaseThem(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -276,6 +280,243 @@ func TestDnsWithholdCustomHostsAndReleaseThem(t *testing.T) {
 			}
 		}
 		testDnsAdminResultsContain(t, ctx, world.networkId, AdminEventResultDnsWithheld, AdminEventResultDnsReleased)
+	})
+}
+
+// Withholds the world network's custom web hosts in a transaction of its own, answering how many went withheld.
+func (self *testDnsCustomHostWorld) withholdCustomHosts(t testing.TB, ctx context.Context) int {
+	t.Helper()
+	var count int
+	var returnErr error
+	server.Tx(ctx, func(tx server.PgTx) {
+		count, returnErr = DnsWithholdCustomHostsInTx(ctx, tx, self.networkId)
+	}, server.TxReadCommitted)
+	if returnErr != nil {
+		t.Fatal(returnErr)
+	}
+	return count
+}
+
+// Releases the world network's withheld custom web hosts in a transaction of its own, answering how many went
+// active.
+func (self *testDnsCustomHostWorld) releaseCustomHosts(t testing.TB, ctx context.Context) int {
+	t.Helper()
+	var count int
+	var returnErr error
+	server.Tx(ctx, func(tx server.PgTx) {
+		count, returnErr = DnsReleaseCustomHostsInTx(ctx, tx, self.networkId)
+	}, server.TxReadCommitted)
+	if returnErr != nil {
+		t.Fatal(returnErr)
+	}
+	return count
+}
+
+// The custom host GET /network/dns shows for host, which must be there.
+func (self *testDnsCustomHostWorld) shownCustomHost(t testing.TB, ctx context.Context, host string) sidecar.DnsCustomHost {
+	t.Helper()
+	networkDns, err := GetNetworkDns(ctx, self.root, self.networkId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, customHost := range networkDns.CustomHosts {
+		if customHost.Host == host {
+			return customHost
+		}
+	}
+	t.Fatalf("GET /network/dns shows no %s", host)
+	return sidecar.DnsCustomHost{}
+}
+
+// The zone's rows, one line each in owner and type order: what edges serve and what a downgrade keeps.
+func (self *testDnsCustomHostWorld) zoneLines(ctx context.Context) []string {
+	lines := []string{}
+	server.Db(ctx, func(conn server.PgConn) {
+		for _, row := range getDnsZoneRowsInTx(ctx, conn, self.root, self.networkId) {
+			lines = append(lines, fmt.Sprintf("%s %s %s %d %v withheld=%t", row.set.Owner, dns.TypeToString[row.set.Type], row.set.Kind, row.set.Ttl, row.set.Rdata, row.withheld))
+		}
+	})
+	return lines
+}
+
+// FS-51's custom-host half (QD-840): a Team lapse past its 14 days withholds the network's web hosts, which leave
+// the map lbmap loads and the rows tlsedge routes by while their rows, CAA mode and chain check stay, and GET
+// /network/dns shows them withheld, naming no interface; and mail still arrives: the zone takes no write, so its
+// MX, TLSA and router rows answer as they did, and the strict-mode MX host stays mapped for mxedge. A host pending
+// certs' checks stays pending, out of the map as it was.
+func TestDnsWithholdCustomHostsKeepsMailArriving(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestDnsCustomHostWorld(t, ctx)
+		t.Cleanup(Testing_SetDnsUserRoot(world.root))
+		if _, err := DnsSetMailRecords(ctx, world.networkId, world.root, true); err != nil {
+			t.Fatal(err)
+		}
+		tlsa := dnsservice.DnsRecordSet{Owner: "_25._tcp.mx." + world.apex, Type: dns.TypeTLSA, Ttl: 300, Kind: dnsservice.DnsRecordKindKey, Rdata: []string{"3 1 1 " + strings.Repeat("cd", 32)}}
+		if _, err := DnsWrite(ctx, &DnsWriteArgs{Root: world.root, NetworkId: world.networkId, Upserts: []dnsservice.DnsRecordSet{tlsa}}); err != nil {
+			t.Fatal(err)
+		}
+		weak := "a." + world.domain
+		strong := "s." + world.domain
+		pending := "p." + world.domain
+		strictMx := "mx1." + world.domain
+		if _, err := world.add(ctx, &sidecar.DnsCustomHostAddRequest{Host: weak, Owner: "blog." + world.apex, Mode: sidecar.DnsCustomHostModeWeak, WeakDisclosureAccepted: true}); err != nil {
+			t.Fatal(err)
+		}
+		world.strongHost(t, ctx, strong, "shop."+world.apex)
+		if _, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: strong, Pass: true}); err != nil {
+			t.Fatal(err)
+		}
+		world.strongHost(t, ctx, pending, "shop."+world.apex)
+		if _, err := world.add(ctx, &sidecar.DnsCustomHostAddRequest{Host: strictMx, Owner: "mx." + world.apex}); err != nil {
+			t.Fatal(err)
+		}
+		zone := world.zoneLines(ctx)
+		mailLines := 0
+		for _, line := range zone {
+			if (strings.Contains(line, " MX ") && strings.Contains(line, "mx."+world.apex)) || strings.Contains(line, " TLSA ") {
+				mailLines += 1
+			}
+		}
+		if mailLines < 2 {
+			t.Fatalf("the zone holds no MX into mx and TLSA to keep: %v", zone)
+		}
+		serial := world.serial(t, ctx)
+		before := world.customHostMap(t, ctx)
+		if !slices.Contains(before.Hosts, weak) || !slices.Contains(before.Hosts, strong) {
+			t.Fatalf("the map before %+v", before)
+		}
+
+		if count := world.withholdCustomHosts(t, ctx); count != 2 {
+			t.Fatalf("withheld %d", count)
+		}
+
+		after := world.customHostMap(t, ctx)
+		if after.Version != before.Version+1 || slices.Contains(after.Hosts, weak) || slices.Contains(after.Hosts, strong) {
+			t.Fatalf("the map lbmap loads after %+v", after)
+		}
+		for _, host := range []string{weak, strong} {
+			if testDnsCustomHostMapped(ctx, host) {
+				t.Errorf("tlsedge's rows still route %s", host)
+			}
+			if shown := world.shownCustomHost(t, ctx, host); shown.State != DnsCustomHostStateWithheld || shown.Ready || len(shown.PendingInterfaces) != 0 {
+				t.Errorf("GET /network/dns shows %+v", shown)
+			}
+		}
+		if row := world.row(ctx, strong); row == nil || row.State != DnsCustomHostStateWithheld || row.CaaMode != sidecar.DnsCustomHostModeStrong || !row.EffectiveCaaChainOk {
+			t.Errorf("the strong host's row %+v", row)
+		}
+		if row := world.row(ctx, weak); row == nil || row.State != DnsCustomHostStateWithheld || row.CaaMode != sidecar.DnsCustomHostModeWeak {
+			t.Errorf("the weak host's row %+v", row)
+		}
+		if row := world.row(ctx, pending); row == nil || row.State != sidecar.DnsCustomHostStatePending || testDnsCustomHostMapped(ctx, pending) {
+			t.Errorf("the pending host %+v", row)
+		}
+		// mail still arrives: mxedge's strict-mode MX row stands, and the zone took no write
+		if strict := DnsStrictMxHostRows(ctx, world.networkId); len(strict) != 1 || strict[0].Host != strictMx || strict[0].State != sidecar.DnsCustomHostStateActive {
+			t.Errorf("mxedge's rows %+v", strict)
+		}
+		if afterSerial := world.serial(t, ctx); afterSerial != serial {
+			t.Errorf("the zone took serial %d after %d", afterSerial, serial)
+		}
+		if afterZone := world.zoneLines(ctx); !slices.Equal(afterZone, zone) {
+			t.Errorf("the zone moved from %v to %v", zone, afterZone)
+		}
+	})
+}
+
+// A renewal's release (QD-840): the withheld web host goes active at the next map version with its CAA mode and
+// chain check as they stood and no zone write, so no new walk's canary; it is pending, naming every interface,
+// until each reports the version and passes its probes, and then serves; certs judges it again as an active host;
+// a host pending certs' checks stays pending through the withholding and the release, so no release activates a
+// host no walk passed; and a second release moves and raises nothing.
+func TestDnsReleasedCustomHostsServeOnceEveryInterfaceIsCurrent(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestDnsCustomHostWorld(t, ctx)
+		t.Cleanup(Testing_SetDnsUserRoot(world.root))
+		interfaces := []string{"edge-1-eth0", "edge-2-eth0"}
+		if err := SyncDnsCustomHostMapInterfaces(ctx, interfaces); err != nil {
+			t.Fatal(err)
+		}
+		host := "s." + world.domain
+		pending := "p." + world.domain
+		world.strongHost(t, ctx, host, "shop."+world.apex)
+		if _, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: host, Pass: true}); err != nil {
+			t.Fatal(err)
+		}
+		world.strongHost(t, ctx, pending, "shop."+world.apex)
+		if count := world.withholdCustomHosts(t, ctx); count != 1 {
+			t.Fatalf("withheld %d", count)
+		}
+		withheld := world.customHostMap(t, ctx)
+		serial := world.serial(t, ctx)
+
+		if count := world.releaseCustomHosts(t, ctx); count != 1 {
+			t.Fatalf("released %d", count)
+		}
+
+		released := world.customHostMap(t, ctx)
+		if released.Version != withheld.Version+1 || !slices.Equal(released.Hosts, []string{host}) {
+			t.Fatalf("the map after the release %+v", released)
+		}
+		if row := world.row(ctx, host); row.State != sidecar.DnsCustomHostStateActive || row.MapVersion != released.Version || row.ReadyTime != nil || row.CaaMode != sidecar.DnsCustomHostModeStrong || !row.EffectiveCaaChainOk {
+			t.Fatalf("the released row %+v", row)
+		}
+		if row := world.row(ctx, pending); row.State != sidecar.DnsCustomHostStatePending || row.MapVersion != 0 {
+			t.Fatalf("the pending host after the release %+v", row)
+		}
+		if afterSerial := world.serial(t, ctx); afterSerial != serial {
+			t.Fatalf("the release wrote the zone at serial %d", afterSerial)
+		}
+		if shown := world.shownCustomHost(t, ctx, host); shown.Ready || !slices.Equal(shown.PendingInterfaces, interfaces) {
+			t.Fatalf("before any report %+v", shown)
+		}
+		settings := dnsservice.DefaultDnsSettings()
+		now := server.NowUtc()
+		for index, name := range interfaces {
+			err := RecordDnsCustomHostMapReport(ctx, &dnsservice.DnsCustomHostMapReport{
+				Format: dnsservice.DnsFormat, Interface: name, Version: released.Version, Digest: released.Digest,
+				Master: &dnsservice.DnsMapMaster{Pid: 100, StartTimeMillis: 1}, Added: []string{host},
+			}, now, settings.Probe.RouteHostCount, settings.Map.ReportHostMaxCount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = RecordDnsRouteProbes(ctx, &dnsservice.DnsRouteProbeReport{Format: dnsservice.DnsFormat, Interfaces: []dnsservice.DnsRouteProbeResult{{
+				Name: name, Version: released.Version, ProbeName: dnsservice.DnsCustomHostMapProbeName(released.Digest), ProbePassed: true,
+				Hosts: []dnsservice.DnsRouteProbeHost{{Host: host, Passed: true}},
+			}}}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := GetDnsCustomHostMapState(ctx, world.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SetDnsCustomHostReadiness(ctx, world.root, settings.Map.Judge(state, now).Ready, now); err != nil {
+				t.Fatal(err)
+			}
+			shown := world.shownCustomHost(t, ctx, host)
+			if index == 0 && (shown.Ready || !slices.Equal(shown.PendingInterfaces, interfaces[1:])) {
+				t.Fatalf("one interface current %+v", shown)
+			}
+			if index == 1 && (!shown.Ready || len(shown.PendingInterfaces) != 0) {
+				t.Fatalf("both current %+v", shown)
+			}
+		}
+		if row := world.row(ctx, host); row.ReadyTime == nil {
+			t.Fatalf("the released host serves with no ready time %+v", row)
+		}
+		// an active host again, which certs' later schedule judges
+		if outcome, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: host, Pass: true}); err != nil || outcome != DnsCustomHostOutcomeChecked {
+			t.Fatalf("a verdict after the release: %s %v", outcome, err)
+		}
+		if count := world.releaseCustomHosts(t, ctx); count != 0 {
+			t.Fatalf("a second release moved %d", count)
+		}
+		if again := world.customHostMap(t, ctx); again.Version != released.Version {
+			t.Fatalf("a second release raised the map to %d", again.Version)
+		}
 	})
 }
 

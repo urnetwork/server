@@ -18,6 +18,11 @@ package model
 //     and Admins through the network authority notice, the host staying mapped; a pass sets it again.
 //   - DnsCustomHostActiveRows is the map's source: the active TLS hosts, which tlsedge routes by SNI to
 //     tls/<port>/<owner> (TLS-M6-02) and DNS-M6-03 versions for each lb interface.
+//   - A third state, withheld (QD-840), is a web host a downgrade took out of the map and tlsedge's routing
+//     after §20.7's 14 days (dns_withhold_model.go): its row, CAA mode and chain check stay for a renewal's
+//     release, which sets it active at the next map version with no new walk. Every reader of the active rows
+//     leaves it out, certs judges it neither way (ErrDnsCustomHostWithheld), and it still counts toward its
+//     owner's limit, so a release never takes an owner past it.
 //   - A strict-mode MX host (§15.4, owner decision 98; DNS-M7-03) is a row whose owner is the network's
 //     mail host, mx.<label>.<root>: the customer's own <mx>.<domain>, with its MX, TLSA and addresses in
 //     its own signed zone, mapped here for mxedge (§2.8 mx-3). dns publishes nothing for it, since only
@@ -77,6 +82,9 @@ const SecurityNetworkAuthorityCustomHostCaa = "custom_host_caa"
 var (
 	// The host is no custom host of the network.
 	ErrDnsCustomHostUnknown = errors.New("dns custom host unknown")
+	// A downgrade withholds the host (QD-840), so certs' verdict waits for a release: the error wraps
+	// ErrDnsCustomHostUnknown too, as for any host certs does not judge, and tells certs the row stands.
+	ErrDnsCustomHostWithheld = errors.New("dns custom host withheld")
 )
 
 // Whether the binary links what custom hosts read.
@@ -514,8 +522,9 @@ const (
 // while the host is pending, a pass activates it and a failure refuses it with
 // custom_host_caa_operator_alias; later, while it is active, a failure clears effective_caa_chain_ok and
 // records EX1's exception in an admin event and the network authority notice, the host staying mapped, and a
-// pass sets the flag again. ErrDnsCustomHostUnknown for a host no row holds, removed since certs began, for a
-// weak-mode or strict-mode MX host, which certs checks neither way, and for a host a downgrade withholds.
+// pass sets the flag again. ErrDnsCustomHostUnknown for a host no row holds, removed since certs began, and
+// for a weak-mode or strict-mode MX host, which certs checks neither way; for a strong-mode host a downgrade
+// withholds, ErrDnsCustomHostWithheld as well, with nothing written.
 func DnsCustomHostResultInTx(ctx context.Context, tx server.PgTx, result *DnsCustomHostResult) (DnsCustomHostOutcome, error) {
 	if !dnsCustomHostLinked() {
 		return "", ErrDnsUnlinked
@@ -528,9 +537,13 @@ func DnsCustomHostResultInTx(ctx context.Context, tx server.PgTx, result *DnsCus
 			row = scanDnsCustomHostRow(selected)
 		}
 	})
-	// a withheld host is no certs' to judge until a release makes it active again (QD-840)
-	if row == nil || row.CaaMode != sidecar.DnsCustomHostModeStrong || row.StrictMx() || row.State == DnsCustomHostStateWithheld {
+	if row == nil || row.CaaMode != sidecar.DnsCustomHostModeStrong || row.StrictMx() {
 		return "", fmt.Errorf("%w: %s", ErrDnsCustomHostUnknown, host)
+	}
+	// a withheld host is no certs' to judge until a release makes it active again (QD-840): it is in no map,
+	// so neither verdict applies, and its flag, row and events stay as they stood
+	if row.State == DnsCustomHostStateWithheld {
+		return "", fmt.Errorf("%w: %w: %s", ErrDnsCustomHostUnknown, ErrDnsCustomHostWithheld, host)
 	}
 	targetId := row.NetworkId
 	event := &AdminEvent{

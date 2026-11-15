@@ -21,15 +21,19 @@ package model
 //     on question dns-m6-05-custom-host-withheld-state): DnsWithholdCustomHostsInTx sets each active TLS web host
 //     of the network to network_dns_custom_host.state withheld, which takes it out of §13.4's map (its version
 //     raised) and tlsedge's routing while its row, verification and CAA mode stay. A release after a renewal
-//     (DnsReleaseWithheldInTx with its custom hosts) sets each back to active with map_version 0, so it re-enters
-//     the map at the next version and is pending until every interface is current, as a new host is, with no
-//     re-verification and no new CAA walk; certs' verdicts never turn a withheld host active
-//     (DnsCustomHostResultInTx refuses one). A strict-mode MX host, MX, TLSA and the router rows are never
-//     touched, so no inbound address breaks (D-QUOTA-6). A custom domain's mail From is smtpedge's From-domain
-//     gate (SMTP), and from M9 its delegated _domainkey zones.
+//     (DnsReleaseCustomHostsInTx, or DnsReleaseWithheldInTx with its custom hosts) sets each back to active with
+//     map_version 0, so it re-enters the map at the next version and is pending until every interface is
+//     current, as a new host is, with no re-verification and no new CAA walk; certs' verdicts never turn a
+//     withheld host active (DnsCustomHostResultInTx refuses one with ErrDnsCustomHostWithheld). A host pending
+//     certs' checks is neither withheld nor released, so a release never activates a host no walk passed. A
+//     strict-mode MX host, MX, TLSA and the router rows are never touched, and the zone takes no write, so no
+//     inbound address breaks (D-QUOTA-6). A custom domain's mail From is smtpedge's From-domain gate (SMTP), and
+//     from M9 its delegated _domainkey zones.
+//   - QUOTA's pass is daily, and each run withholds whatever web host is active then, so a host certs activates
+//     after one run leaves the map at the next; a run with nothing active writes nothing.
 //
 // Each change adds one admin event (§7.11), so the network's admins can see why records stopped answering.
-// Nothing here runs unless the binary links MG2 and MG5.
+// Nothing here runs unless the binary links MG2 and MG5, and the custom-host half MG6 as well.
 
 import (
 	"context"
@@ -217,15 +221,15 @@ func DnsWithholdOverQuotaInTx(ctx context.Context, tx server.PgTx, networkId ser
 
 // Serves again the network's user RRsets in root the downgrade withheld, oldest first, while the served count
 // stays within limit, -1 for no limit, as a renewal or a raised limit allows, and with customHosts its withheld
-// custom web hosts, as a Team renewal allows (see the file header). Returns the zone's write, nil when no RRset
-// changed.
+// custom web hosts through DnsReleaseCustomHostsInTx, as a Team renewal allows (see the file header). Returns the
+// zone's write, nil when no RRset changed.
 func DnsReleaseWithheldInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, limit int64, customHosts bool) (*DnsWriteResult, error) {
 	result, err := dnsApplyQuotaWithholdingInTx(ctx, tx, networkId, root, limit)
 	if err != nil {
 		return nil, err
 	}
 	if customHosts {
-		if _, err := dnsChangeCustomHostStatesInTx(ctx, tx, networkId, DnsCustomHostStateWithheld, sidecar.DnsCustomHostStateActive); err != nil {
+		if _, err := DnsReleaseCustomHostsInTx(ctx, tx, networkId); err != nil {
 			return nil, err
 		}
 	}
@@ -234,9 +238,18 @@ func DnsReleaseWithheldInTx(ctx context.Context, tx server.PgTx, networkId serve
 
 // Withholds the network's custom web hosts after the downgrade's 14 days (§20.7; QD-840): each active TLS host
 // goes withheld, leaving the map and tlsedge's routing with its row kept; MX, TLSA and routing for mail stay, a
-// strict-mode MX host among them. Answers how many went withheld, none when none was active.
+// strict-mode MX host among them, and a host pending certs' checks stays pending. Answers how many went
+// withheld, none when none was active.
 func DnsWithholdCustomHostsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (int, error) {
 	return dnsChangeCustomHostStatesInTx(ctx, tx, networkId, sidecar.DnsCustomHostStateActive, DnsCustomHostStateWithheld)
+}
+
+// Releases the network's withheld custom web hosts after a renewal (§20.7; QD-840): each goes active with
+// map_version 0, so it re-enters the map at the next version and is pending until every interface is current
+// for it, as a new host is, with its CAA mode and chain check as they stood, no re-verification and no new CAA
+// walk. Answers how many went active, none when none was withheld.
+func DnsReleaseCustomHostsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (int, error) {
+	return dnsChangeCustomHostStatesInTx(ctx, tx, networkId, DnsCustomHostStateWithheld, sidecar.DnsCustomHostStateActive)
 }
 
 // Moves the network's TLS custom hosts in state from to state to, a host going active again with map_version 0 so

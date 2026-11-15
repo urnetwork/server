@@ -6,7 +6,8 @@ package model
 // domain or at an apex or system owner; strong mode pending and out of the map; weak mode only with its
 // disclosure; each of certs' verdicts at setup and later with its admin event; removal and a domain's removal
 // withdrawing rows; an owner's 65th host refused naming the limit; a verified domain's acme_token, fixed and
-// shown, which certs' challenge route takes; and a strict-mode MX host mapped for mxedge with nothing published.
+// shown, which certs' challenge route takes; a strict-mode MX host mapped for mxedge with nothing published; and
+// a host a downgrade withholds (QD-840), which neither of certs' verdicts moves or removes.
 
 import (
 	"context"
@@ -284,6 +285,82 @@ func TestDnsCustomHostWeakModeAndRemovals(t *testing.T) {
 		})
 		if removedCount != 2 || world.row(ctx, "a."+world.domain) != nil {
 			t.Errorf("the domain's removal took %d hosts", removedCount)
+		}
+	})
+}
+
+// Certs' pass leaves a withheld host withheld (QD-840): a passing verdict does not activate it and a failing one
+// neither removes it, as a pending host's would, nor clears its flag, as an active host's would; neither raises
+// the map, adds an event or owes the authority notice, and each answers ErrDnsCustomHostWithheld, which is
+// ErrDnsCustomHostUnknown too. A withheld weak-mode host answers as any weak-mode host does. Once released, the
+// strong host takes certs' verdicts as an active host again.
+func TestDnsCustomHostVerdictsLeaveAWithheldHostWithheld(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestDnsCustomHostWorld(t, ctx)
+		host := "www." + world.domain
+		weak := "blog." + world.domain
+		world.strongHost(t, ctx, host, "shop."+world.apex)
+		if _, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: host, Pass: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := world.add(ctx, &sidecar.DnsCustomHostAddRequest{Host: weak, Owner: "shop." + world.apex, Mode: sidecar.DnsCustomHostModeWeak, WeakDisclosureAccepted: true}); err != nil {
+			t.Fatal(err)
+		}
+		if count := world.withholdCustomHosts(t, ctx); count != 2 {
+			t.Fatalf("withheld %d", count)
+		}
+		owedNotices := func() int {
+			owed := 0
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(
+					ctx,
+					`SELECT count(*) FROM account_message_outbox WHERE network_id = $1 AND template_name = $2`,
+					world.networkId,
+					SecurityNetworkAuthorityTemplateName,
+				).Scan(&owed))
+			})
+			return owed
+		}
+		withheld := world.row(ctx, host)
+		mapVersion := world.customHostMap(t, ctx).Version
+		verdictEvents := len(testDnsAdminEventResults(ctx, world.networkId, AdminEventActionDnsCustomHostCaa))
+		owed := owedNotices()
+		for _, pass := range []bool{true, false} {
+			outcome, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: host, Pass: pass})
+			if !errors.Is(err, ErrDnsCustomHostWithheld) || !errors.Is(err, ErrDnsCustomHostUnknown) || outcome != "" {
+				t.Fatalf("a verdict of %t on a withheld host: %s %v", pass, outcome, err)
+			}
+			row := world.row(ctx, host)
+			if row == nil || row.State != DnsCustomHostStateWithheld || row.EffectiveCaaChainOk != withheld.EffectiveCaaChainOk || row.MapVersion != withheld.MapVersion || row.ReadyTime != nil {
+				t.Fatalf("after a verdict of %t the row is %+v", pass, row)
+			}
+		}
+		if _, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: weak, Pass: false}); !errors.Is(err, ErrDnsCustomHostUnknown) || errors.Is(err, ErrDnsCustomHostWithheld) {
+			t.Errorf("a verdict on a withheld weak host: %v", err)
+		}
+		if row := world.row(ctx, weak); row == nil || row.State != DnsCustomHostStateWithheld {
+			t.Errorf("the weak host after a verdict %+v", row)
+		}
+		if version := world.customHostMap(t, ctx).Version; version != mapVersion {
+			t.Errorf("a verdict raised the map to %d from %d", version, mapVersion)
+		}
+		if events := len(testDnsAdminEventResults(ctx, world.networkId, AdminEventActionDnsCustomHostCaa)); events != verdictEvents {
+			t.Errorf("verdicts added %d events", events-verdictEvents)
+		}
+		if after := owedNotices(); after != owed {
+			t.Errorf("a verdict owed %d notices", after-owed)
+		}
+		// released, an active host again: a failing later check exposes it, mapped
+		if count := world.releaseCustomHosts(t, ctx); count != 2 {
+			t.Fatalf("released %d", count)
+		}
+		outcome, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: host, Pass: false})
+		if err != nil || outcome != DnsCustomHostOutcomeExposed {
+			t.Fatalf("a verdict after the release: %s %v", outcome, err)
+		}
+		if row := world.row(ctx, host); row.State != sidecar.DnsCustomHostStateActive || row.EffectiveCaaChainOk || !testDnsCustomHostMapped(ctx, host) {
+			t.Fatalf("after a failing check the released row is %+v", row)
 		}
 	})
 }

@@ -636,7 +636,11 @@ func sidecarMg5DnsMigrations() []any {
 		// M6's custom hosts (§12.8, §13.4): a customer's <host>.<domain>, or an
 		// apex <domain>, mapped to a host owner of the network, with its state,
 		// CAA mode, chain check, the map version that last changed it and when
-		// every interface was current for it.
+		// every interface was current for it. state is pending (a strong-mode
+		// host until certs' checks pass), active (in the map, routed by
+		// tlsedge) or withheld (QD-840): a web host a downgrade took out of the
+		// map and routing after §20.7's 14 days, its row kept for a renewal's
+		// release. varchar, so a value is a code change and no migration.
 		newSqlMigration(`
 			CREATE TABLE network_dns_custom_host (
 				host varchar(256) NOT NULL,
