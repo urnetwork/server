@@ -306,3 +306,44 @@ func TestUpdateProNetworkRefreshesNetworkVerified(t *testing.T) {
 		}
 	})
 }
+
+// The gate's one statement for many networks, on both legs: each network's creation, no row while none is written
+// (and none can be, without MG5), and network_verified beside them; a network that does not exist has no entry. The
+// standing it derives is probation or standard by age alone.
+func TestNetworkAbuseFactsLoadOnEveryLeg(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		verifiedId, verifiedAdminId := testVerifiedNetwork(t, ctx, now)
+		testAddPasswordAuth(t, ctx, verifiedAdminId, UserAuthTypeEmail, true)
+		unverifiedId, _ := testVerifiedNetwork(t, ctx, now)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network SET create_time = $2 WHERE network_id = $1`, unverifiedId, now.Add(-2*24*time.Hour)))
+		})
+		missingId := server.NewId()
+
+		var networkIdFacts map[server.Id]*networkAbuseFacts
+		server.Db(ctx, func(conn server.PgConn) {
+			networkIdFacts = loadNetworkAbuseFactsWithConn(ctx, conn, []server.Id{verifiedId, unverifiedId, missingId}, now, true)
+		})
+		if len(networkIdFacts) != 2 {
+			t.Fatalf("%d networks loaded", len(networkIdFacts))
+		}
+		if facts := networkIdFacts[verifiedId]; facts == nil || !facts.verified || facts.row != nil || facts.version == 0 ||
+			!facts.createTime.Equal(now.Add(-30*24*time.Hour)) {
+			t.Fatalf("the verified network: %+v", facts)
+		}
+		if facts := networkIdFacts[unverifiedId]; facts == nil || facts.verified || facts.row != nil {
+			t.Fatalf("the unverified network: %+v", facts)
+		}
+		if standing, found := GetNetworkAbuseStanding(ctx, verifiedId, now); !found || standing.Standing != AbuseStandingStandard {
+			t.Fatalf("a month old: %+v %t", standing, found)
+		}
+		if standing, found := GetNetworkAbuseStanding(ctx, unverifiedId, now); !found || standing.Standing != AbuseStandingProbation {
+			t.Fatalf("two days old: %+v %t", standing, found)
+		}
+		if _, found := GetNetworkAbuseStanding(ctx, missingId, now); found {
+			t.Fatal("a network that does not exist was found")
+		}
+	})
+}
