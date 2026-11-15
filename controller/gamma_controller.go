@@ -597,6 +597,9 @@ type gammaPurchase struct {
 	email string
 	// the SS58 coldkey that will mint (gammaColdkeyArg); "" for none
 	coldkey string
+	// the longest the purchase stays open, when shorter than gamma.yml's
+	// intent_ttl; 0 for intent_ttl
+	maxTtl time.Duration
 }
 
 // gammaPurchaseStart is a purchase that passed the checks every purchase
@@ -707,6 +710,10 @@ func (self *gammaPurchaseStart) issue(
 	}
 
 	purchase := self.purchase
+	ttl := self.view.settings.IntentTtl
+	if 0 < purchase.maxTtl && purchase.maxTtl < ttl {
+		ttl = purchase.maxTtl
+	}
 	token, tokenHash := cryptoNewStatusToken()
 	intent := &model.GammaPaymentIntent{
 		IntentId:                 server.NewId(),
@@ -723,7 +730,7 @@ func (self *gammaPurchaseStart) issue(
 		RegularPriceUsdNanoCents: model.UsdToNanoCents(purchase.regularUsd),
 		Email:                    purchase.email,
 		CreateTime:               self.now,
-		ExpiresAt:                self.now.Add(self.view.settings.IntentTtl),
+		ExpiresAt:                self.now.Add(ttl),
 	}
 	created := false
 	var refusal *GammaPaymentIntentResult

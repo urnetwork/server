@@ -14,8 +14,9 @@ package controller
 // is credited. It is priced at the order's total by the gift's quantity tiers,
 // with no price tier and no welcome offer, one gamma per dollar, and capped by
 // gift.crypto_max_invoice_usd ($500), the cap of a gift order paid in a coin or
-// with Gamma. Each order has an intent of its own: an open intent is never
-// handed out again, for this order or another. Its status is POST
+// with Gamma. It is open for at most two hours (giftGammaIntentMaxTtl). Each
+// order has an intent of its own: an open intent is never handed out again,
+// for this order or another. Its status is POST
 // /pay/gamma/status's, with the intent's status token; the order is read with
 // POST /pay/gift/order and its token.
 //
@@ -53,6 +54,13 @@ package controller
 // refunded, so the refund and dispute paths refuse or skip it
 // (model.ErrGiftOrderFinalSale), and, as for a coin, its friends' emails go out
 // with no card hold.
+//
+// Deploy order: apply migration 977 (gift_gamma_schema.go) on Main, deploy the
+// taskworker, then the api and alt. An older biller charges a gift intent as
+// it charges any open intent, and its credit then fails on gift_pro_year (no
+// data pack), leaving a final-sale payment uncredited until this taskworker
+// retries it from review. For the same reason, never roll the taskworker back
+// past this build once a Gamma gift has been sold.
 
 import (
 	"errors"
@@ -76,6 +84,18 @@ const GiftGammaItem = model.GammaGiftItem
 const GiftErrorCodePaymentInProgress = "payment_in_progress"
 
 const giftGammaPaymentInProgressMessage = "A Gamma payment for an earlier gift is still being processed. Try again in a few minutes."
+
+// giftGammaIntentMaxTtl is the longest a gift order's Gamma purchase stays
+// open: min(gamma.yml's intent_ttl, which every other purchase keeps, a day by
+// default; this). Every purchase of an account draws on its one deposit
+// hotkey, and the biller charges an account's open purchases oldest first
+// (model.ListChargeableGammaPaymentIntents). So a buyer who closed the gift
+// dialog and paid by card, then minted for a plan within the day, would have
+// the abandoned gift charged first, as a final sale. Two hours is ample to
+// mint, which lands in a block. Gamma is priced in US dollars (amount_gamma is
+// the order's total), so a short life carries no price risk; an expired
+// purchase is never charged, and unspent gamma stays in the deposit.
+const giftGammaIntentMaxTtl = 2 * time.Hour
 
 // GiftGammaIntentArgs is POST /pay/gift/gamma-intent: the order's fields, the
 // Bittensor footer, and the coldkey that will mint.
@@ -177,6 +197,7 @@ func GiftGammaIntent(
 		priceUsd:   priceUsd,
 		regularUsd: priceUsd,
 		coldkey:    coldkey,
+		maxTtl:     giftGammaIntentMaxTtl,
 	})
 	if refusal != nil {
 		return giftGammaIntentRefusal(refusal), nil
@@ -353,7 +374,8 @@ func gammaCreditGiftIntent(clientSession *session.ClientSession, intent *model.G
 		}, server.TxReadCommitted)
 	}, func(err error) {
 		credited = false
-		returnErr = err
+		// the biller logs it beside the intent's id
+		returnErr = giftHideOrderId(err, *giftOrderId)
 	})
 	if returnErr != nil || !credited {
 		return false, returnErr

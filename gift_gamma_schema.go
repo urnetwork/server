@@ -15,9 +15,16 @@
 // sales opened, and is added only when absent; both run under a five-second
 // lock bound, so a failed lock wait is safe to retry. Old binaries name the
 // columns they read and write, so they neither see nor need it, and never
-// store an order of rail gamma. Apply before deploying the api and alt (POST
-// /pay/gift/gamma-intent) and the taskworker (the Gamma biller's credit, the
-// gift retention's unlink) that use it.
+// store an order of rail gamma.
+//
+// Deploy order: apply this on Main; deploy the taskworker (the Gamma biller's
+// gift credit, the gift retention's unlink); then the api and alt (POST
+// /pay/gift/gamma-intent, which sells the gifts). Every build that reads gift
+// orders reads this column. An older biller charges a gift intent as it
+// charges any open intent, and its credit fails on gift_pro_year, leaving a
+// final-sale payment uncredited until the new taskworker retries it from
+// review; so the taskworker goes first, and is never rolled back past that
+// build once a Gamma gift has been sold.
 package server
 
 // The migration's statement.

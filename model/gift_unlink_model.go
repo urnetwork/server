@@ -185,11 +185,23 @@ const GiftGammaUnlinkAfter = 720 * time.Hour
 
 // UnlinkGammaGiftOrders is the 30-day unlink of gift orders from their Pay
 // with Gamma intents, as a coin's order is unlinked from its invoice
-// (UnlinkCryptoPaymentIntents): an order forgets its intent once the intent
-// was credited before cutoff, or, never credited, was made before cutoff and
-// can no longer be charged: voided, or expired at now, with no charge that is
-// pending (a pending charge may still go into a spend) or spent (a spent charge
-// is credited from the order this finds). For each, in one transaction
+// (UnlinkCryptoPaymentIntents). An order forgets its intent once the intent:
+//   - was credited before cutoff;
+//   - or, never credited and made before cutoff, expired by now with no charge
+//     that is pending (a pending charge of an open intent may still go into a
+//     spend) or spent (a spent charge is credited from the order this finds);
+//   - or, never credited and made before cutoff, was voided before cutoff (by
+//     a newer gift purchase, a cancel, the account's deletion, or an
+//     operator's disposition of a spend whose credit kept failing) with no
+//     charge in a spend batch that can still land. A voided intent is never
+//     charged again or credited: its pending charge in no batch never joins
+//     one (the account's deletion leaves such a charge pending), a skipped or
+//     failed one is never re-armed, and a spent one is the operator's,
+//     disposed of when the intent was voided. Only a charge already in a live
+//     batch, whose spend may still land, keeps the order linked until the
+//     batch lands or expires.
+//
+// For each, in one transaction
 // (unlinkGiftOrderPaymentInTx): its codes' purchase events
 // "gamma/<intent id>/gift/<n>" move to a fresh base, "gamma/unlinked/<id>",
 // the order's own, and lose their purchase record and email; the order loses
@@ -221,13 +233,29 @@ func UnlinkGammaGiftOrders(ctx context.Context, cutoff time.Time, limit int, now
 						(
 							intent.credited_at IS NULL AND
 							intent.create_time < $1 AND
-							(intent.voided_at IS NOT NULL OR intent.expires_at <= $2) AND
-							NOT EXISTS (
-								SELECT 1
-								FROM gamma_charge charge
-								WHERE
-									charge.intent_id = intent.intent_id AND
-									charge.state IN ($3, $4)
+							(
+								(
+									intent.voided_at IS NULL AND
+									intent.expires_at <= $2 AND
+									NOT EXISTS (
+										SELECT 1
+										FROM gamma_charge charge
+										WHERE
+											charge.intent_id = intent.intent_id AND
+											charge.state IN ($3, $4)
+									)
+								) OR
+								(
+									intent.voided_at < $1 AND
+									NOT EXISTS (
+										SELECT 1
+										FROM gamma_charge charge
+										WHERE
+											charge.intent_id = intent.intent_id AND
+											charge.state = $3 AND
+											charge.batch_id IS NOT NULL
+									)
+								)
 							)
 						)
 					)

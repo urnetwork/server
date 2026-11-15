@@ -229,7 +229,7 @@ func cryptoCreditGiftIntentInConn(
 		}, server.TxReadCommitted, server.OptNoRetry())
 	}, func(err error) {
 		outcome = nil
-		returnErr = err
+		returnErr = giftHideOrderId(err, *giftOrderId)
 	})
 	if returnErr != nil {
 		return false, returnErr
@@ -346,6 +346,33 @@ func cryptoCreditGiftIntentInTx(
 // for an error that also names the order's invoice.
 func giftWithoutOrderId(err error, giftOrderId server.Id) string {
 	return strings.ReplaceAll(err.Error(), giftOrderId.String(), "<gift order>")
+}
+
+// giftOrderHiddenError is a payment's credit error without its gift order's
+// id, which still unwraps to the error it hides it from.
+type giftOrderHiddenError struct {
+	text string
+	err  error
+}
+
+func (self *giftOrderHiddenError) Error() string {
+	return self.text
+}
+
+func (self *giftOrderHiddenError) Unwrap() error {
+	return self.err
+}
+
+// giftHideOrderId is err without the gift order's id, for what a coin's or
+// Gamma's credit returns: its caller logs it beside the payment's id, and a
+// log line must never name both (the 30-day unlink forgets which order a
+// payment paid for). Whatever the credit raised is covered, a raise from
+// deep in the fulfilment included. nil for nil.
+func giftHideOrderId(err error, giftOrderId server.Id) error {
+	if err == nil {
+		return nil
+	}
+	return &giftOrderHiddenError{text: giftWithoutOrderId(err, giftOrderId), err: err}
 }
 
 // giftOrderIdForCryptoRefund is the gift order of a gift invoice an operator

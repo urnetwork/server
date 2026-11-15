@@ -119,6 +119,8 @@ func TestGiftGammaOrderLifecycle(t *testing.T) {
 		connect.AssertEqual(t, strings.Contains(intent.MintCommand, firstHotkey), true)
 		connect.AssertEqual(t, intent.Status.Status, gammaStatusPending)
 		connect.AssertEqual(t, intent.Status.ItemId, "gift_pro_year")
+		// open for two hours, not intent_ttl's day
+		connect.AssertEqual(t, intent.ExpiresAt.Equal(f.now.Add(giftGammaIntentMaxTtl)), true)
 		connect.AssertEqual(t, intent.OrderId != "", true)
 		connect.AssertEqual(t, intent.OrderToken != "", true)
 		connect.AssertEqual(t, intent.BittensorFooter, true)
@@ -763,5 +765,127 @@ func TestGiftGammaConcurrentPurchasesLeaveOneOpen(t *testing.T) {
 				t.Fatalf("round %d: %d open gift purchases, want 1", round, open)
 			}
 		}
+	})
+}
+
+// A gift's Gamma purchase is open for two hours, or intent_ttl when that is
+// shorter, while every other purchase keeps intent_ttl. A buyer who leaves the
+// gift and mints for something else after that is charged only for that: the
+// expired gift is never charged, and its order stays pending.
+func TestGiftGammaPurchaseExpiresInTwoHours(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newGammaDbFixture(t)
+		ctx := f.ctx
+		giftPurchaseTestConfig(t)
+		_, _, clientSession := cryptoDbTestNetwork(t, ctx, "giftgammattl")
+		f.run()
+		connect.AssertEqual(t, f.settings.IntentTtl, 24*time.Hour)
+
+		gift := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+		connect.AssertEqual(t, gift.Error == nil, true)
+		connect.AssertEqual(t, gift.ExpiresAt.Equal(f.now.Add(2*time.Hour)), true)
+		stored := model.GetGammaPaymentIntent(ctx, server.RequireParseId(gift.IntentId))
+		connect.AssertEqual(t, stored.ExpiresAt.Equal(f.now.Add(2*time.Hour)), true)
+		// a data purchase keeps intent_ttl
+		data := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{ItemId: StripeItemData1Tib, Delivery: model.CryptoDeliveryCode})
+		connect.AssertEqual(t, data.ExpiresAt.Equal(f.now.Add(24*time.Hour)), true)
+		cryptoDbExec(ctx, `UPDATE gamma_payment_intent SET voided_at = $2 WHERE intent_id = $1`, server.RequireParseId(data.IntentId), f.now)
+
+		// a shorter intent_ttl wins
+		f.settings.IntentTtl = 30 * time.Minute
+		shorter := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+		connect.AssertEqual(t, shorter.Error == nil, true)
+		connect.AssertEqual(t, shorter.ExpiresAt.Equal(f.now.Add(30*time.Minute)), true)
+		f.settings.IntentTtl = 24 * time.Hour
+		last := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+		connect.AssertEqual(t, last.Error == nil, true)
+
+		// the buyer left the gift; past its two hours they mint for a data
+		// pack from the same deposit, which could pay both
+		f.now = f.now.Add(2*time.Hour + time.Minute)
+		f.run()
+		connect.AssertEqual(t, gammaDbStatus(t, clientSession, &last.GammaPaymentIntentResult).Status, gammaStatusExpired)
+		pack := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{ItemId: StripeItemData1Tib, Delivery: model.CryptoDeliveryCode})
+		connect.AssertEqual(t, pack.Error == nil, true)
+		hotkey := gammaTestAccount(t, pack.DepositHotkey)
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 100_000_000_000})
+		connect.AssertEqual(t, f.run().Charged, 1)
+		f.now = f.now.Add(time.Minute)
+		f.sim.mine()
+		f.run()
+		connect.AssertEqual(t, gammaDbStatus(t, clientSession, pack).Status, gammaStatusPaid)
+		lastIntentId := server.RequireParseId(last.IntentId)
+		connect.AssertEqual(t, model.GetGammaChargeForIntent(ctx, lastIntentId) == nil, true)
+		connect.AssertEqual(t, gammaDbStatus(t, clientSession, &last.GammaPaymentIntentResult).Status, gammaStatusExpired)
+		connect.AssertEqual(t, giftGammaTestOrderStatus(t, clientSession, last).Status, model.GiftOrderStatusPending)
+		packUnits, ok := gammaParseUnits(pack.AmountGamma)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, f.sim.deposit(hotkey).balance, uint64(100_000_000_000)-uint64(packUnits))
+	})
+}
+
+// A coin's or Gamma's gift credit that fails returns an error naming its
+// payment, never its gift order: the caller logs it beside the payment's id,
+// and the 30-day unlink forgets which order a payment paid for. A fulfilment
+// that cannot make a code (its purchase event already has one) raises from
+// deep in the fulfilment, and is covered too.
+func TestGiftCreditErrorsNeverNameTheOrder(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newGammaDbFixture(t)
+		ctx := f.ctx
+		giftPurchaseTestConfig(t)
+		_, _, clientSession := cryptoDbTestNetwork(t, ctx, "giftcrediterrors")
+		f.run()
+		taken := func(purchaseEventId string) {
+			t.Helper()
+			server.Tx(ctx, func(tx server.PgTx) {
+				_, created, err := model.CreateBalanceCodeInTx(tx, ctx, model.Gib, time.Hour, 0, purchaseEventId, "{}", "")
+				if err != nil || !created {
+					t.Fatalf("code for %s: %t %v", purchaseEventId, created, err)
+				}
+			})
+		}
+
+		// Gamma: the order's first code's purchase event is taken
+		gift := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(2, model.GiftDeliveryThem))
+		connect.AssertEqual(t, gift.Error == nil, true)
+		intent := model.GetGammaPaymentIntent(ctx, server.RequireParseId(gift.IntentId))
+		taken(fmt.Sprintf("gamma/%s/gift/0", intent.IntentId))
+		block := int64(1)
+		credited, err := gammaCreditIntent(f.session, intent, &model.GammaCharge{
+			Reference:   intent.Reference,
+			IntentId:    intent.IntentId,
+			Hotkey:      intent.Hotkey,
+			Amount:      intent.AmountGamma(),
+			State:       model.GammaChargeSpent,
+			BlockNumber: &block,
+		})
+		connect.AssertEqual(t, credited, false)
+		if err == nil || !strings.Contains(err.Error(), "already has a code") || strings.Contains(err.Error(), gift.OrderId) {
+			t.Fatalf("gamma credit error %v names the order %s", err, gift.OrderId)
+		}
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, intent.IntentId).CreditedAt == nil, true)
+		connect.AssertEqual(t, len(model.GetGiftOrderCodes(ctx, server.RequireParseId(gift.OrderId))), 0)
+
+		// a coin: the same
+		cryptoTestEnable(t, cryptoTestConfig(), map[string]*fakeCryptoWallet{})
+		order := giftCryptoTestOrderOf(1, model.GiftDeliveryMe, time.Time{})
+		connect.AssertEqual(t, model.CreateGiftOrder(ctx, order), nil)
+		invoice := cryptoDbCreateIntent(t, ctx, model.CryptoAssetXmr, nil, giftCryptoItem, float64(order.TotalCents)/100, 7101)
+		connect.AssertEqual(t, model.SetGiftOrderCryptoIntentId(ctx, order.GiftOrderId, invoice.IntentId), nil)
+		receipt := cryptoDbReceipt(t, ctx, invoice, "tx-gift-errors", invoice.AmountAtomic, 4)
+		taken(fmt.Sprintf("crypto/%s/gift/0", invoice.IntentId))
+		credited, err = cryptoCreditIntent(f.session, invoice, &cryptoCredit{
+			usdNanoCents: invoice.PriceUsdNanoCents,
+			receipts:     []model.CryptoPaymentReceiptKey{receipt.Key()},
+			receiptUsd:   map[model.CryptoPaymentReceiptKey]model.NanoCents{receipt.Key(): invoice.PriceUsdNanoCents},
+		})
+		connect.AssertEqual(t, credited, false)
+		if err == nil || !strings.Contains(err.Error(), "already has a code") || strings.Contains(err.Error(), order.GiftOrderId.String()) {
+			t.Fatalf("crypto credit error %v names the order %s", err, order.GiftOrderId)
+		}
+		connect.AssertEqual(t, model.GetCryptoPaymentIntent(ctx, invoice.IntentId).CreditedAt == nil, true)
 	})
 }

@@ -775,10 +775,13 @@ func FulfillGiftOrderInTx(
 			string(purchaseRecord),
 			order.buyerEmail,
 		)
-		// past the first write: never commit part of an order
+		// past the first write: never commit part of an order. A raised error
+		// never names the order: a coin's or Gamma's credit logs it beside its
+		// payment's id, and the 30-day unlink forgets which order a payment
+		// paid for
 		server.Raise(createErr)
 		if !created {
-			server.Raise(fmt.Errorf("gift order %s code %d: purchase event %s already has a code", giftOrderId, n, balanceCode.PurchaseEventId))
+			server.Raise(fmt.Errorf("gift code %d: purchase event %s already has a code", n, balanceCode.PurchaseEventId))
 		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -819,7 +822,7 @@ func FulfillGiftOrderInTx(
 				balanceCode.BalanceCodeId,
 			))
 			if recipientTag.RowsAffected() != 1 {
-				server.Raise(fmt.Errorf("gift order %s has no recipient %d", giftOrderId, n))
+				server.Raise(fmt.Errorf("the gift order has no recipient %d", n))
 			}
 			recipientIndex := n
 			code.RecipientIndex = &recipientIndex

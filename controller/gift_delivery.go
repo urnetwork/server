@@ -726,11 +726,12 @@ func runGiftRetention(ctx context.Context, now time.Time) (*GiftRetentionResult,
 		}
 	}
 
-	// Gamma orders whose intent was credited 30 days ago, or can no longer be
-	// charged 30 days after it was made, forget it, as a coin's order forgets
-	// its invoice (model.UnlinkCryptoPaymentIntents, the crypto rail's own
-	// daily unlink). First, so the step below clears the buyer's address of
-	// an order this unlinked once no friend's email needs it.
+	// Gamma orders whose intent was credited 30 days ago, expired unpaid 30
+	// days after it was made, or was voided 30 days ago with no spend left
+	// that can land, forget it, as a coin's order forgets its invoice
+	// (model.UnlinkCryptoPaymentIntents, the crypto rail's own daily unlink).
+	// First, so the step below clears the buyer's address of an order this
+	// unlinked once no friend's email needs it.
 	gammaCutoff := now.Add(-model.GiftGammaUnlinkAfter)
 	for running() {
 		unlinked := model.UnlinkGammaGiftOrders(ctx, gammaCutoff, giftRetentionBatchSize, now)

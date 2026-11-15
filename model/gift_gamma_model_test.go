@@ -270,7 +270,10 @@ func TestGiftGammaOrderIsFinalSale(t *testing.T) {
 // invoice: its codes move to a fresh base and still read and redeem, its
 // times become their day, its referrer and its buyer's email (once no friend's
 // email is owed) go. An intent that can still be charged or credited keeps
-// its order, and so does one credited or made since the cutoff.
+// its order, and so does one credited or made since the cutoff. A voided
+// intent is unlinked 30 days after its void, whatever its charge (pending in
+// no batch, as the account's deletion leaves it, or spent and disposed of by
+// an operator), unless that charge is in a live batch, which may still land.
 func TestUnlinkGammaGiftOrders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -311,16 +314,42 @@ func TestUnlinkGammaGiftOrders(t *testing.T) {
 		// made before the cutoff but still open: kept
 		open, openIntent := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, old)
 		giftGammaTestExec(ctx, `UPDATE gamma_payment_intent SET expires_at = $2 WHERE intent_id = $1`, openIntent.IntentId, now.Add(time.Hour))
+		// voided by the account's deletion, which leaves its pending charge in
+		// no batch: that charge never joins one, so unlinked
+		deleted, deletedIntent := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, old)
+		if !CreateGammaCharge(ctx, deletedIntent, old.Add(time.Minute)) {
+			t.Fatal("no charge")
+		}
+		giftGammaTestExec(ctx, `UPDATE gamma_payment_intent SET voided_at = $2 WHERE intent_id = $1`, deletedIntent.IntentId, old.Add(time.Hour))
+		// spent, its credit kept failing, voided by an operator's disposition:
+		// unlinked
+		disposed, disposedIntent := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, old)
+		if !CreateGammaCharge(ctx, disposedIntent, old.Add(time.Minute)) {
+			t.Fatal("no charge")
+		}
+		giftGammaTestExec(ctx, `UPDATE gamma_charge SET state = 'spent', block_number = 9, resolved_at = $2 WHERE intent_id = $1`, disposedIntent.IntentId, old.Add(time.Minute))
+		giftGammaTestExec(ctx, `UPDATE gamma_payment_intent SET voided_at = $2, credit_failure_count = 10 WHERE intent_id = $1`, disposedIntent.IntentId, old.Add(2*time.Hour))
+		// voided while its charge is in a live spend batch, which may still
+		// land: kept
+		landing, landingIntent := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, old)
+		if !CreateGammaCharge(ctx, landingIntent, old.Add(time.Minute)) {
+			t.Fatal("no charge")
+		}
+		giftGammaTestBatch(t, ctx, landingIntent)
+		giftGammaTestExec(ctx, `UPDATE gamma_payment_intent SET voided_at = $2 WHERE intent_id = $1`, landingIntent.IntentId, old.Add(time.Hour))
+		// voided since the cutoff: kept, for the 30 days after its void
+		lately, latelyIntent := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, old)
+		giftGammaTestExec(ctx, `UPDATE gamma_payment_intent SET voided_at = $2 WHERE intent_id = $1`, latelyIntent.IntentId, now.Add(-time.Hour))
 
 		unlinked := UnlinkGammaGiftOrders(ctx, cutoff, 100, now)
-		if unlinked != 4 {
-			t.Fatalf("unlinked %d orders, want 4", unlinked)
+		if unlinked != 6 {
+			t.Fatalf("unlinked %d orders, want 6", unlinked)
 		}
 		if again := UnlinkGammaGiftOrders(ctx, cutoff, 100, now); again != 0 {
 			t.Fatalf("unlinked %d more", again)
 		}
 
-		for _, kept := range []*GiftOrder{recent, spent, pending, open} {
+		for _, kept := range []*GiftOrder{recent, spent, pending, open, landing, lately} {
 			read := GetGiftOrder(ctx, kept.GiftOrderId)
 			if read.GammaIntentId == nil || *read.GammaIntentId != *kept.GammaIntentId || read.BuyerEmail == "" {
 				t.Fatalf("order %s was unlinked: %+v", kept.GiftOrderId, read)
@@ -374,7 +403,7 @@ func TestUnlinkGammaGiftOrders(t *testing.T) {
 			t.Fatal("the buyer's address of an unlinked order outlived its last friend's email")
 		}
 
-		for _, never := range []*GiftOrder{expired, voided} {
+		for _, never := range []*GiftOrder{expired, voided, deleted, disposed} {
 			read := GetGiftOrder(ctx, never.GiftOrderId)
 			if read.GammaIntentId != nil || read.BuyerEmail != "" || read.Status != GiftOrderStatusPending || read.PaidTime != nil {
 				t.Fatalf("a never paid order after the unlink: %+v", read)
