@@ -224,6 +224,21 @@ func TestDeviceGrantPollsUntilApprovedAndRedeemsOnce(t *testing.T) {
 			if _, err := device.poll(ctx, now.Add(time.Second), device.proof()); !errors.Is(err, ErrSlowDown) {
 				t.Fatalf("%T: a poll inside the interval: %v", store, err)
 			}
+			// the slow_down recorded the poll and the grown interval, which the next poll is held to
+			settings := DefaultDeviceGrantSettings()
+			polled, err := store.Get(ctx, device.deviceCodeSha256())
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, polled.LastPollTime.Equal(now.Add(time.Second)), true)
+			connect.AssertEqual(t, polled.Interval, settings.PollInterval+settings.SlowDownStep)
+			if _, err := device.poll(ctx, now.Add(time.Second+settings.PollInterval+time.Second), device.proof()); !errors.Is(err, ErrSlowDown) {
+				t.Fatalf("%T: a poll past the first interval and inside the grown one: %v", store, err)
+			}
+			polled, err = store.Get(ctx, device.deviceCodeSha256())
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, polled.Interval, settings.PollInterval+2*settings.SlowDownStep)
+			if _, err := device.poll(ctx, polled.LastPollTime.Add(polled.Interval), device.proof()); !errors.Is(err, ErrAuthorizationPending) {
+				t.Fatalf("%T: a poll that kept the grown interval: %v", store, err)
+			}
 
 			user := newTestUrcliUser(t, ctx)
 			if err := decideDeviceAt(ctx, device.response.UserCode, true, "", user, DefaultDeviceGrantSettings(), server.NowUtc); !errors.Is(err, ErrConsentRequired) {
