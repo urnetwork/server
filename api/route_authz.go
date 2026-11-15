@@ -381,6 +381,11 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sidecar/close":                           routeAccessPublic,   // an ephemeral client's close capability, its own credential (§18.8)
 	"POST /mail/enable":                             routeAccessClient,   // turns mail on for the bearer's network (§15.15)
 	"GET /mail/status":                              routeAccessClient,   // the bearer's network's mail status (§15.15)
+	"POST /abuse/report":                            routeAccessPublic,   // §21.8's form: no credential, counted by the caller's keyed address hash (§21.16)
+	"GET /abuse/cases":                              routeAccessNetwork,  // the network's own cases (§21.16), the read permission by the role gate
+	"POST /abuse/appeal":                            routeAccessNetwork,  // an Owner's or Admin's appeal, never a client token (§21.16), the admin permission by the role gate
+	"GET /abuse/status":                             routeAccessClient,   // the bearer's own network's standing (§21.16), sidecar-classified
+	"POST /abuse/action":                            routeAccessPublic,   // the abuse role's one route, off the public API: a staff bearer verified by hash, its own credential (§21.16, QD-126)
 	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
 	"POST /acl/invite":                              routeAccessClient,   // a sidecar of the inviting network files a code's hash and its sealed targets (§8.11)
 	"POST /acl/accept-invite":                       routeAccessClient,   // a sidecar of the invited network claims or completes (§8.11)
@@ -510,6 +515,9 @@ var strictExpRoutes = map[string]bool{
 	// §15.15's mail routes (MAIL-M7-22)
 	"POST /mail/enable": true,
 	"GET /mail/status":  true,
+	// §21.16's status, the one /abuse/ route a sidecar reaches (ABUSE-M5-11): the report, cases, appeal and staff
+	// routes refuse it here
+	"GET /abuse/status": true,
 	// §16.6's cancel (MCP-M3-23)
 	"POST /approval/cancel": true,
 	// §13.15's certificate routes (TLS-M5-16); the two order routes take a service token, so a

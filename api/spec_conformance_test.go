@@ -50,6 +50,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
+	"github.com/urnetwork/server/api/handlers"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
@@ -304,6 +305,13 @@ func registry() []specEndpoint {
 		{"GET", "/internal/gate/rows/{network_id}/{rows_sha256}", nil, nil},
 		// an edge block's client mint (TLS-M5-11, QD-812)
 		{"POST", "/internal/gate/edge-client", rt(server.EdgeClientMintArgs{}), rt(server.EdgeClientMintResult{})},
+		// §21.16's customer routes (ABUSE-M5-11)
+		{"POST", "/abuse/report", rt(handlers.AbuseReportArgs{}), rt(handlers.AbuseReportResult{})},
+		{"GET", "/abuse/cases", nil, rt(model.AbuseNetworkCasesResult{})},
+		{"POST", "/abuse/appeal", rt(model.AbuseAppealArgs{}), rt(model.AbuseAppealResult{})},
+		{"GET", "/abuse/status", nil, rt(sidecar.AbuseStatus{})},
+		// §21.16's staff route (ABUSE-M5-12): each kind reads its own body, so only the envelope is reflected
+		{"POST", "/abuse/action", nil, rt(controller.AbuseStaffResult{})},
 	}
 }
 
