@@ -236,6 +236,11 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 	if !created {
 		return
 	}
+	if hasEmail {
+		// the sign-up cohort the readouts are stratified by; after the row's
+		// own transaction, so a failure here costs a label, never the sequence
+		recordOnboardingSignupCohort(clientSession, networkId, row.Platform, now)
+	}
 	onboardingStartsTotal.WithLabelValues(fmt.Sprintf("%t", hasEmail), row.EmailVariant).Inc()
 	if row.ExitedAt != nil {
 		onboardingExitsTotal.WithLabelValues(row.ExitReason).Inc()
@@ -248,6 +253,37 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 			// do not depend on it
 			glog.Warningf("[onboarding]brevo contact upsert failed for network %s: %s\n", networkId, err)
 		}
+	}
+}
+
+// recordOnboardingSignupCohort records an email sign-up's cohort from its
+// request (onboarding.SignupCohort): signup.likely_bot with the reason, or
+// signup.likely_human. It decides nothing about mail; the results rollup reads
+// it to stratify the experiment readouts. Never fails the caller.
+func recordOnboardingSignupCohort(clientSession *session.ClientSession, networkId server.Id, platform string, now time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[onboarding]sign-up cohort failed for network %s: %v\n", networkId, r)
+		}
+	}()
+	cohort, reason := onboarding.SignupCohort(
+		strings.Join(clientSession.Header["User-Agent"], " "),
+		strings.Join(clientSession.Header["Accept-Language"], ","),
+		onboarding.DefaultSignupCohortSettings(),
+	)
+	event := &model.OnboardingEvent{
+		NetworkId: networkId,
+		Name:      model.EventSignupLikelyHuman,
+		At:        now,
+		Platform:  platform,
+		Props:     map[string]any{},
+	}
+	if cohort == onboarding.CohortBot {
+		event.Name = model.EventSignupLikelyBot
+		event.Props = map[string]any{"reason": reason}
+	}
+	if err := model.AddOnboardingEvent(clientSession.Ctx, event); err != nil {
+		glog.Warningf("[onboarding]sign-up cohort for network %s: %s\n", networkId, err)
 	}
 }
 
@@ -864,6 +900,11 @@ type OnboardingSendPlan struct {
 	TemplateId int               `json:"template_id"`
 	Params     map[string]string `json:"params"`
 	Tags       []string          `json:"tags"`
+	// the offer email experiment (surface offer.email) and arm this send is
+	// an exposure to: an offer email in the card branch while one runs; ""
+	// otherwise
+	OfferExperiment string `json:"offer_experiment,omitempty"`
+	OfferVariant    string `json:"offer_variant,omitempty"`
 }
 
 // buildOnboardingSendPlan resolves a send, in the reader's language (the
@@ -899,6 +940,15 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 	}
 	connectDays, _ := model.NetworkConnectDays(ctx, row.NetworkId, row.CreatedAt)
 	providers, countries := providersOnline(ctx)
+	// the offer email experiment covers the card branch of the offer emails,
+	// the only one its arms differ in (the crypto line); a store-billed
+	// reader is never exposed to it
+	offerExperiment, offerVariant := "", ""
+	if (decision.Template == onboarding.TemplateE4bOffer || decision.Template == onboarding.TemplateE3LastChance) && !decision.StoreBilled {
+		if a := cfg.AssignmentForSurface(row.NetworkId, model.ExperimentSurfaceOfferEmail, now); a != nil {
+			offerExperiment, offerVariant = a.ExperimentId, a.Variant
+		}
+	}
 	// StoreBilled is the decision's, made on the reader's app as the facts
 	// resolve it (a row recorded without a platform takes its newest
 	// client's), not on the row alone
@@ -908,6 +958,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		Opening:         decision.Opening,
 		Platform:        onboarding.DeviceName(row.Platform, templateLocale),
 		StoreBilled:     decision.StoreBilled,
+		CryptoLine:      offerVariant == onboarding.OfferEmailVariantCrypto,
 		Browser:         decision.Browser,
 		Locale:          templateLocale,
 		DailyDataGb:     float64(model.Pro().Free.Data) / float64(model.Gib),
@@ -924,14 +975,20 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		SiteUrl:         cfg.EffectiveSiteUrl(),
 		CompanyLine:     cfg.EffectiveCompanyLine(),
 	}
+	tags := onboarding.CampaignTags("onboarding", decision.Template, decision.Variant, row.ExperimentId, row.EmailVariant)
+	if offerExperiment != "" && offerVariant != "" {
+		tags = append(tags, onboarding.ExperimentTag(offerExperiment), onboarding.ArmTag(offerExperiment, offerVariant))
+	}
 	return &OnboardingSendPlan{
-		Step:       step,
-		Template:   decision.Template,
-		Variant:    decision.Variant,
-		Locale:     templateLocale,
-		TemplateId: templateId,
-		Params:     onboarding.BuildParams(in),
-		Tags:       onboarding.CampaignTags("onboarding", decision.Template, decision.Variant, row.ExperimentId, row.EmailVariant),
+		Step:            step,
+		Template:        decision.Template,
+		Variant:         decision.Variant,
+		Locale:          templateLocale,
+		TemplateId:      templateId,
+		Params:          onboarding.BuildParams(in),
+		Tags:            tags,
+		OfferExperiment: offerExperiment,
+		OfferVariant:    offerVariant,
 	}, nil
 }
 
@@ -1078,6 +1135,21 @@ func sendOnboardingCampaignEmail(ctx context.Context, row *model.NetworkOnboardi
 		})
 	})
 	writeOnboardingEmailEvent(ctx, row.NetworkId, model.EventEmailSent, plan.Template, step, row.ExperimentId, row.EmailVariant, row.Platform, now)
+	if plan.OfferExperiment != "" {
+		// the network's exposure to the offer email experiment, from its
+		// first such send (the rollup counts the first)
+		if err := model.AddOnboardingEvent(ctx, &model.OnboardingEvent{
+			NetworkId:  row.NetworkId,
+			Name:       model.EventOfferEmailExposed,
+			At:         now,
+			Platform:   row.Platform,
+			Experiment: plan.OfferExperiment,
+			Variant:    plan.OfferVariant,
+			Props:      map[string]any{"experiment": plan.OfferExperiment, "variant": plan.OfferVariant, "flow_step": step},
+		}); err != nil {
+			glog.Warningf("[onboarding]offer email exposure for network %s: %s\n", row.NetworkId, err)
+		}
+	}
 	return "sent", nil
 }
 

@@ -423,12 +423,53 @@ func experimentCoversCohort(e *model.OnboardingExperiment, at time.Time) bool {
 	return true
 }
 
+// onboardingRowCohorts is each cohort row's sign-up cohort (onboarding/
+// cohort.go), by network: the request's label the enrollment recorded
+// (signup.likely_bot or signup.likely_human), outranked by a burst among the
+// window's email sign-ups.
+func onboardingRowCohorts(cohort []*model.NetworkOnboarding, facts map[server.Id]*onboarding.NetworkFacts, settings *onboarding.SignupCohortSettings) map[server.Id]string {
+	signups := make([]onboarding.CohortSignup, len(cohort))
+	for i, row := range cohort {
+		request := ""
+		if f := facts[row.NetworkId]; f != nil {
+			if _, ok := f.FirstEventAt[model.EventSignupLikelyBot]; ok {
+				request = onboarding.CohortBot
+			} else if _, ok := f.FirstEventAt[model.EventSignupLikelyHuman]; ok {
+				request = onboarding.CohortHuman
+			}
+		}
+		signups[i] = onboarding.CohortSignup{
+			Email:         row.Email,
+			CreatedAt:     row.CreatedAt,
+			Platform:      row.Platform,
+			Locale:        row.Locale,
+			Country:       row.Country,
+			RequestCohort: request,
+		}
+	}
+	bursts := onboarding.SignatureBursts(signups, settings)
+	cohorts := make(map[server.Id]string, len(cohort))
+	for i, row := range cohort {
+		cohorts[row.NetworkId] = onboarding.Cohort(signups[i], bursts[i])
+	}
+	return cohorts
+}
+
 // buildOnboardingResultsRows aggregates the cohort into result rows. The
 // exposure of a network to an experiment is its registry assignment (so
 // holdout rows exist without any stamped event); for the email sequence it is
 // the variant the campaign row was actually served, and only networks with an
-// email address count as exposed to an email experiment.
+// email address count as exposed to an email experiment. The offer email
+// experiment (surface offer.email) counts only the networks it reached: an
+// offer email in the card branch, its exposure event, whenever the network
+// signed up.
+//
+// Every row is also written once more under its sign-up cohort, as
+// "<experiment>@<cohort>" (onboarding.CohortExperimentId) with the same
+// dimensions, so a readout can decide on the likely human cohort (owner,
+// 2026-11-15) from the same endpoint.
 func buildOnboardingResultsRows(config *model.OnboardingConfig, cohort []*model.NetworkOnboarding, facts map[server.Id]*onboarding.NetworkFacts, now time.Time) []*model.OnboardingResultsRow {
+	cohorts := onboardingRowCohorts(cohort, facts, onboarding.DefaultSignupCohortSettings())
 	byKey := map[onboarding.ResultsKey]*model.OnboardingResultsRow{}
 	add := func(row *model.NetworkOnboarding, experiment string, variant string, surface string, o onboarding.Outcomes, cohortDay time.Time) {
 		platform := row.Platform
@@ -470,9 +511,16 @@ func buildOnboardingResultsRows(config *model.OnboardingConfig, cohort []*model.
 		}
 		o := onboarding.ComputeOutcomes(*f, now)
 		cohortDay := onboarding.CohortDay(row.CreatedAt)
+		signupCohort := cohorts[row.NetworkId]
 		add(row, ResultsExperimentAll, ResultsVariantAll, "all", o, cohortDay)
+		add(row, onboarding.CohortExperimentId(ResultsExperimentAll, signupCohort), ResultsVariantAll, "all", o, cohortDay)
 		for _, e := range config.Experiments {
-			if !experimentCoversCohort(e, row.CreatedAt) {
+			if e.Surface == model.ExperimentSurfaceOfferEmail {
+				// exposed by its first offer email in the card branch
+				if _, exposed := f.FirstEventAt[model.EventOfferEmailExposed]; !exposed || e.Status == model.ExperimentStatusDraft {
+					continue
+				}
+			} else if !experimentCoversCohort(e, row.CreatedAt) {
 				continue
 			}
 			emailSurface := strings.HasPrefix(e.Surface, "email.")
@@ -484,6 +532,7 @@ func buildOnboardingResultsRows(config *model.OnboardingConfig, cohort []*model.
 				variant = row.EmailVariant
 			}
 			add(row, e.Id, variant, e.Surface, o, cohortDay)
+			add(row, onboarding.CohortExperimentId(e.Id, signupCohort), variant, e.Surface, o, cohortDay)
 		}
 	}
 	rows := make([]*model.OnboardingResultsRow, 0, len(byKey))

@@ -56,6 +56,9 @@ type ParamsInput struct {
 	// (Decision.Browser): it asks to pin the extension, not to start the app
 	// with the computer
 	Browser bool
+	// the offer email's crypto arm (OfferEmailVariantCrypto): the card branch
+	// adds that checkout also takes a one-time crypto payment for the year
+	CryptoLine bool
 
 	// the network's zone for the local date/time strings
 	Location *time.Location
@@ -293,6 +296,7 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["opening"] = in.Opening
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
 		p["store_billed"] = storeBilledFlag(in.StoreBilled)
+		p["crypto_line"] = flagParam(in.CryptoLine && !in.StoreBilled)
 		// the Pro value line, as in E4b (REVIEW.md finding 11)
 		p["daily_data_gb"] = FormatGb(in.DailyDataGb)
 		p["offer_price"] = FormatUsd(in.OfferPriceUsd)
@@ -300,6 +304,7 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["offer_expires_at"] = offerExpires
 	case TemplateE4bOffer:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
+		p["crypto_line"] = flagParam(in.CryptoLine && !in.StoreBilled)
 		// the Pro value line (email_pro_value: "Pro gives you 10 TiB of data
 		// a month, plus {daily_data_gb} a day."; REVIEW.md finding 11)
 		p["daily_data_gb"] = FormatGb(in.DailyDataGb)
@@ -336,6 +341,14 @@ func BuildParams(in ParamsInput) map[string]string {
 func connectDaysOfFirst(connectDays int, daysActive int) int {
 	return min(connectDays, daysActive)
 }
+
+// The offer email experiment's arms (surface email.offer): control is the
+// current copy; crypto adds, in the card branch only, that checkout also
+// takes a one-time crypto payment for the year (owner, 2026-11-15).
+const (
+	OfferEmailVariantControl = "control"
+	OfferEmailVariantCrypto  = "crypto"
+)
 
 // storeBilledFlag is the templates' `{% if params.store_billed %}` value.
 func storeBilledFlag(on bool) string {
