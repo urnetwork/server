@@ -65,7 +65,7 @@ func runCompetitionSupervisorWorkerFenced(ctx context.Context, expiresAt time.Ti
 				observation.finishStore(attempt, err == nil, nil)
 				return err
 			}, func(err error) bool {
-				return competitionSupervisorUnadmittedDeadline(err) || competitionSupervisorWorkerFenceDeadline(err)
+				return competitionSupervisorUnadmittedDeadline(err) || competitionSupervisorWorkerFenceDeadline(err) || competitionSupervisorWorkerBeginDeadline(err)
 			}, observation)
 			if err == nil {
 				err = authority.confirm(nextExpiry)
