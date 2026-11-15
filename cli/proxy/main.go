@@ -94,6 +94,11 @@ Options:
 		panic(err)
 	}
 
+	// the host's own Go memory limit when the vault names one
+	// (proxy_sizing.yml), before the process builds its working set; other
+	// hosts keep the service's GOMEMLIMIT
+	proxy.ApplyHostGoMemoryLimit()
+
 	// the PgBouncer instances directly on the blocks the rollout lists, nginx's
 	// single port on the rest (server db_pgbouncer_path_rollout.go)
 	server.SetServicePgBouncerPath("proxy")
