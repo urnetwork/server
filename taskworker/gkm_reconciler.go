@@ -69,6 +69,8 @@ func gkmReconcilerStateFromHost(ctx context.Context, host *sidecar.ServiceHost) 
 	context.AfterFunc(ctx, installEvsDeletionSource(cache))
 	// and the states §21.6's published names are read from (QD-770)
 	context.AfterFunc(ctx, installTlsPublishedNamesSource(cache))
+	// and the lock the drop jobs' start and verify read (evs_drop.go)
+	context.AfterFunc(ctx, installEvsDropLocks(cache))
 	return gkmservice.NewAclGkmReconcilerState(cache), nil
 }
 

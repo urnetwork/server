@@ -50,6 +50,12 @@ func runEvsEvacuate(ctx context.Context, host *sidecar.ServiceHost, args []byte)
 		if usage != nil {
 			deps.Usage = usage
 		}
+		// a kept DROP record the drop table lacks is appended before its batch goes (EVSB-M10-03)
+		drops, err := evsservice.NewDropTable(host, evsservice.NewBudgetedBlobs(host.Blobs), nil, evsBudgetLogger{})
+		if err != nil {
+			return err
+		}
+		deps.Drops = drops
 	}
 	result, err := evsservice.RunEvacuation(ctx, host, deps, args)
 	if result != nil && glog.V(1) {
