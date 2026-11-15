@@ -11,8 +11,10 @@ package model
 //	         expiry and only the SHA-256 of the invite's secret. The answer
 //	         alone holds ur-invite-<invite_id>-<secret>, the bearer; the
 //	         inviting device appends the link's client-only fragment (sidecar's
-//	         config_invite.go), which no request carries. New invites owe the
-//	         network authority notice and an admin event
+//	         config_invite.go), which no request carries. An admin token's use
+//	         keeps the answer without the bearer, so a replay answers the
+//	         invite with none. New invites owe the network authority notice and
+//	         an admin event
 //	accept   POST /network/member-invite-accept {invite_bearer}, the invitee's
 //	         network credential, never a client's, an API key or an admin
 //	         token: one of the person's verified emails is the invite's, the
@@ -241,6 +243,12 @@ func (self *networkInvites) create(args *CreateNetworkMemberInviteArgs, clientSe
 	var refusedErr error
 	server.Tx(ctx, func(tx server.PgTx) {
 		answer, refusedErr = nil, nil
+		// the caller first, so a refused caller spends no admin token use
+		caller := GetNetworkMemberOfUserInTx(ctx, tx, byJwt.NetworkId, byJwt.UserId)
+		if caller == nil || caller.Pending || !caller.Role.Permits(RolePermissionMembers) {
+			refusedErr = fmt.Errorf("%d %s", http.StatusForbidden, networkInviteRefusedMessage)
+			return
+		}
 		if adminCommand != nil {
 			storedResult, first, err := ClaimAdminTokenUseInTx(ctx, tx, adminCommand, now)
 			server.Raise(err)
@@ -251,11 +259,6 @@ func (self *networkInvites) create(args *CreateNetworkMemberInviteArgs, clientSe
 				answer = replayed
 				return
 			}
-		}
-		caller := GetNetworkMemberOfUserInTx(ctx, tx, byJwt.NetworkId, byJwt.UserId)
-		if caller == nil || caller.Pending || !caller.Role.Permits(RolePermissionMembers) {
-			refusedErr = fmt.Errorf("%d %s", http.StatusForbidden, networkInviteRefusedMessage)
-			return
 		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -285,7 +288,12 @@ func (self *networkInvites) create(args *CreateNetworkMemberInviteArgs, clientSe
 			Via:        securityNoticeVia(ctx),
 		})
 		if adminCommand != nil {
-			resultJson, err := json.Marshal(created)
+			// the bearer never rests on the server, which keeps only its hash:
+			// a replay answers the invite without it, and a person who lost the
+			// first answer invites again, the first invite expiring unspent
+			withoutBearer := *created
+			withoutBearer.InviteBearer = ""
+			resultJson, err := json.Marshal(&withoutBearer)
 			server.Raise(err)
 			server.Raise(StoreAdminTokenUseResultInTx(ctx, tx, adminCommand.Jti, resultJson))
 		}
