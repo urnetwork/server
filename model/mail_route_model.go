@@ -9,10 +9,12 @@ package model
 //     host's keys are named by the same function and written by nothing yet:
 //     scope routes wait on team_mail's member scopes (MAIL-M10-04) and custom
 //     MX hosts on §12.8's custom-host rows, so both route nothing.
-//   - The value is one JSON MailRoute: the network, the host its receivers
-//     listen at (mx), flags, and the receivers whose key for that host is
-//     published, newest first, at most 64 (plan-MAIL-hints #2), which the
-//     router hints on a miss.
+//   - The value is one JSON MailRoute, mxedgeservice.MailRoute's bytes: the
+//     network, its live label, which the router's stream target names even
+//     for an alias, the host its receivers listen at (mx), flags, and the
+//     receivers whose key for that host is published, newest first, at most
+//     64 (plan-MAIL-hints #2), which the router hints on a miss. A network
+//     with no live label routes nothing, since its receivers listen on it.
 //   - A name routes while its network has a mail_network row, the name is the
 //     network's live label or a live alias, neither the zone nor mx under the
 //     name is withheld (§12.9's SuspendZone and SuspendHost), and no direct MX
@@ -37,9 +39,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -49,6 +49,7 @@ import (
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
+	"github.com/urnetwork/sidecar/mxedgeservice"
 
 	"github.com/urnetwork/server"
 )
@@ -67,9 +68,12 @@ const (
 // and smtp/25/'s.
 const mailRouteHost = "mx"
 
-// One {mxr_<net>} value.
+// One {mxr_<net>} value, which mxedgeservice.ParseMailRoute reads.
 type MailRoute struct {
 	NetworkId server.Id `json:"network_id"`
+	// The network's live label, which the router's stream target
+	// <label>:smtp/25/<host> names even when the key is an alias.
+	Label string `json:"label"`
 	// mx, or mx.<scope>: the router Finds <network_id>:smtp/25/<host>.
 	Host  string `json:"host"`
 	Flags uint32 `json:"flags"`
@@ -102,9 +106,9 @@ func DefaultMailRouteSettings() *MailRouteSettings {
 	}
 }
 
-// The Redis key of name's route.
+// The Redis key of name's route: the router's own (mxedgeservice.MailRouteKey).
 func MailRouteKey(name string) string {
-	return fmt.Sprintf("{mxr_%s}", name)
+	return mxedgeservice.MailRouteKey(name)
 }
 
 // The key the pass sets at the end of a run: while it stands, Redis has not
@@ -112,19 +116,14 @@ func MailRouteKey(name string) string {
 // round at once.
 const mailRouteStandingKey = "{mxr_}standing"
 
-// The routable part of an SNI under root: <net> of mx.<net>.<root>, which is a
-// label or an alias, or <scope>.<net> of a scope's mx.<scope>.<net>.<root>;
-// any other name is a custom MX host and routes by its full name. Lowercase,
-// with no final dot. "" for an empty name.
+// The routable part of an SNI under root: the router's own
+// (mxedgeservice.MailRouteName), so the keys written here are the keys it
+// reads. <net> of mx.<net>.<root>, which is a label or an alias, or
+// <scope>.<net> of a scope's mx.<scope>.<net>.<root>; any other name is a
+// custom MX host and routes by its full name. Lowercase, with no final dot.
+// "" for an empty name.
 func MailRouteName(root string, sni string) string {
-	sni = strings.TrimSuffix(strings.ToLower(sni), ".")
-	root = strings.TrimSuffix(dnsLabelRoot(root), ".")
-	if within, found := strings.CutSuffix(sni, "."+root); found && root != "" {
-		if name, found := strings.CutPrefix(within, mailRouteHost+"."); found && name != "" {
-			return name
-		}
-	}
-	return sni
+	return mxedgeservice.MailRouteName(root, sni)
 }
 
 func mailRouteLinked() bool {
@@ -260,16 +259,24 @@ func readMailRouteChange(ctx context.Context, networkId server.Id, root string, 
 			}
 		})
 
+		// the network's live label, which every route's stream target names
+		networkLabel := ""
+		for _, row := range labels {
+			if row.kind == DnsLabelKindLabel && row.state == DnsLabelStateLive {
+				networkLabel = row.label
+			}
+		}
+
 		change.removed = nil
 		for _, row := range labels {
 			mailHost := mailRouteHost + "." + row.label + "." + root
-			routes := row.state == DnsLabelStateLive &&
+			routes := row.state == DnsLabelStateLive && networkLabel != "" &&
 				!slices.ContainsFunc(withheld, func(owner string) bool { return dnsOwnerAtOrBelow(mailHost, owner) })
 			if !routes {
 				change.removed = append(change.removed, row.label)
 				continue
 			}
-			route := &MailRoute{NetworkId: networkId, Host: mailRouteHost, ReceiverSidecarIds: receiverSidecarIds}
+			route := &MailRoute{NetworkId: networkId, Label: networkLabel, Host: mailRouteHost, ReceiverSidecarIds: receiverSidecarIds}
 			if row.kind == DnsLabelKindAlias {
 				route.Flags |= MailRouteFlagAlias
 			}

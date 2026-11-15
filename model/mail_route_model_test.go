@@ -98,7 +98,8 @@ func TestMailEnableRoutesTheNetworkWithinOneProjection(t *testing.T) {
 			t.Fatal(err)
 		}
 		route := testMailRoute(t, ctx, MailRouteName(root, "mx."+apex))
-		if route == nil || route.NetworkId != networkId || route.Host != "mx" || route.Flags != 0 || len(route.ReceiverSidecarIds) != 0 {
+		label := strings.TrimSuffix(apex, "."+root)
+		if route == nil || route.NetworkId != networkId || route.Label != label || route.Host != "mx" || route.Flags != 0 || len(route.ReceiverSidecarIds) != 0 {
 			t.Fatalf("route %+v", route)
 		}
 		if testMailRoute(t, ctx, otherLabel) != nil {
