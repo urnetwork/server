@@ -61,6 +61,14 @@ func providerWorkSessionHorizonCustodyPredicates() []string {
 	return providerWorkSessionPartitionCustodyPredicatesWithDropGuard(server.ProviderWorkSessionEventHorizonDropGuardBodySql())
 }
 
+// The legacy drop guard (owner, 2026-11-15) replaces only the drop guard's body
+// again, admitting the legacy partition an hour after the cutover week, and
+// republishes the rest of the custody. The custody reads the same with or
+// without the legacy partition, which its early drop removes.
+func providerWorkSessionLegacyDropCustodyPredicates() []string {
+	return providerWorkSessionPartitionCustodyPredicatesWithDropGuard(server.ProviderWorkSessionEventLegacyDropGuardBodySql())
+}
+
 // The custody with dropGuard as the drop guard's body.
 func providerWorkSessionPartitionCustodyPredicatesWithDropGuard(dropGuard string) []string {
 	admitFloor, sessionAppend, receiptReference, _ := server.ProviderWorkSessionPartitionBodiesSql()

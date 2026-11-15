@@ -36,6 +36,9 @@ import (
 //     the table again, so none is lost.
 //   - abort: before finalize, drop the staged parent and the check. The
 //     identity primary key stays: the generator proves sequence identity.
+//   - drop legacy: after the cutover week, detach and drop the legacy
+//     partition early (owner, 2026-11-15; dropLegacy in
+//     db_provider_work_session_legacy_drop.go).
 //
 // The prepared check refuses every event from C on, so finalize must run
 // before C; the runway pass abandons a cutover still unfinalized
@@ -51,7 +54,9 @@ type ProviderWorkSessionPartitionMigrateOptions struct {
 	Finalize    bool
 	Rollback    bool
 	Abort       bool
-	Logf        func(string, ...any)
+	// detach and drop the legacy partition once the drop guard admits it
+	DropLegacy bool
+	Logf       func(string, ...any)
 	// nil uses DefaultProviderWorkSessionPartitionSettings.
 	Settings *ProviderWorkSessionPartitionSettings
 }
@@ -89,29 +94,39 @@ type ProviderWorkSessionPartitionSettings struct {
 	ValidateLockTimeout   time.Duration
 	ValidateAttempts      int
 	ValidateRetryInterval time.Duration
+	// The lock wait of the legacy partition's detach. Every connection open
+	// and close queues behind its ACCESS EXCLUSIVE request on the parent, so
+	// it stays below a main-pool transaction's own lock bound (PgLockTimeout):
+	// a writer queued behind the detach gives up after it does.
+	LegacyDetachLockTimeout time.Duration
+	// The lock wait of the detached legacy table's drop. Nothing reads the
+	// detached table, so only maintenance (autovacuum, size reads) waits on it.
+	LegacyDropLockTimeout time.Duration
 }
 
 // The contract cutover's budgets: a day's lead, abandoned six hours before the
 // week, seconds of exclusive lock waits.
 func DefaultProviderWorkSessionPartitionSettings() *ProviderWorkSessionPartitionSettings {
 	return &ProviderWorkSessionPartitionSettings{
-		PrepareLead:           24 * time.Hour,
-		AbandonMargin:         6 * time.Hour,
-		FinalizeMargin:        10 * time.Minute,
-		MaxTransactionAge:     5 * time.Second,
-		LockTimeout:           3 * time.Second,
-		StatementTimeout:      30 * time.Second,
-		LockAttempts:          60,
-		LockRetryInterval:     10 * time.Second,
-		BuildLockTimeout:      30 * time.Minute,
-		ValidateLockTimeout:   60 * time.Second,
-		ValidateAttempts:      10,
-		ValidateRetryInterval: 30 * time.Second,
+		PrepareLead:             24 * time.Hour,
+		AbandonMargin:           6 * time.Hour,
+		FinalizeMargin:          10 * time.Minute,
+		MaxTransactionAge:       5 * time.Second,
+		LockTimeout:             3 * time.Second,
+		StatementTimeout:        30 * time.Second,
+		LockAttempts:            60,
+		LockRetryInterval:       10 * time.Second,
+		BuildLockTimeout:        30 * time.Minute,
+		ValidateLockTimeout:     60 * time.Second,
+		ValidateAttempts:        10,
+		ValidateRetryInterval:   30 * time.Second,
+		LegacyDetachLockTimeout: PgLockTimeout / 2,
+		LegacyDropLockTimeout:   30 * time.Second,
 	}
 }
 
 func (self *ProviderWorkSessionPartitionSettings) validate() error {
-	for _, timeout := range []time.Duration{self.LockTimeout, self.StatementTimeout, self.BuildLockTimeout, self.ValidateLockTimeout} {
+	for _, timeout := range []time.Duration{self.LockTimeout, self.StatementTimeout, self.BuildLockTimeout, self.ValidateLockTimeout, self.LegacyDetachLockTimeout, self.LegacyDropLockTimeout} {
 		if timeout < time.Millisecond {
 			return errors.New("the cutover needs database timeouts of at least a millisecond")
 		}
@@ -148,13 +163,13 @@ func MigrateProviderWorkSessionEventsToPartitions(ctx context.Context, options P
 		return err
 	}
 	actions := 0
-	for _, action := range []bool{options.Finalize, options.Rollback, options.Abort} {
+	for _, action := range []bool{options.Finalize, options.Rollback, options.Abort, options.DropLegacy} {
 		if action {
 			actions += 1
 		}
 	}
 	if 1 < actions {
-		return errors.New("choose one of finalize, rollback and abort")
+		return errors.New("choose one of finalize, rollback, abort and drop legacy")
 	}
 	cutover := newProviderWorkSessionCutover(settings, options.DryRun, logf)
 	switch {
@@ -164,6 +179,8 @@ func MigrateProviderWorkSessionEventsToPartitions(ctx context.Context, options P
 		return cutover.rollback(ctx)
 	case options.Abort:
 		return cutover.abort(ctx)
+	case options.DropLegacy:
+		return cutover.dropLegacy(ctx)
 	default:
 		return cutover.prepare(ctx, options.CutoverWeek)
 	}
@@ -220,9 +237,18 @@ func providerWorkSessionPrimaryKey(shape *contractTableShape) string {
 	return ""
 }
 
-// The transactions older than maxTransactionAge holding a lock on the journal
-// tables, which an ACCESS EXCLUSIVE request would queue traffic behind.
-func providerWorkSessionTablesBusy(ctx context.Context, maxTransactionAge time.Duration) (busy int, err error) {
+// The journal tables the cutover's exclusive steps lock.
+func providerWorkSessionJournalTables() []string {
+	return []string{
+		"public." + providerWorkSessionEventTable,
+		"public." + providerWorkSessionStagedParent(),
+		"public." + providerWorkSessionReceiptTable,
+	}
+}
+
+// The transactions older than maxTransactionAge holding a lock on relations,
+// which an ACCESS EXCLUSIVE request would queue traffic behind.
+func providerWorkSessionTablesBusy(ctx context.Context, relations []string, maxTransactionAge time.Duration) (busy int, err error) {
 	err = partitionRegistryRun(func() {
 		MaintenanceDb(ctx, func(conn PgConn) {
 			Raise(conn.QueryRow(
@@ -235,11 +261,7 @@ func providerWorkSessionTablesBusy(ctx context.Context, maxTransactionAge time.D
 					AND activity.pid <> pg_backend_pid()
 					AND activity.xact_start < now() - make_interval(secs => $2)
 				`,
-				[]string{
-					"public." + providerWorkSessionEventTable,
-					"public." + providerWorkSessionStagedParent(),
-					"public." + providerWorkSessionReceiptTable,
-				},
+				relations,
 				maxTransactionAge.Seconds(),
 			).Scan(&busy))
 		})
@@ -252,10 +274,18 @@ func providerWorkSessionTablesBusy(ctx context.Context, maxTransactionAge time.D
 // tables to be free of long transactions, and repeats the whole step, so it
 // reads state again under its own locks.
 func (self *providerWorkSessionCutover) retryExclusive(ctx context.Context, run func() error) (err error) {
+	return self.retryExclusiveOn(ctx, providerWorkSessionJournalTables(), run)
+}
+
+// As retryExclusive, waiting for relations to be free of long transactions;
+// with none, only retrying a busy lock.
+func (self *providerWorkSessionCutover) retryExclusiveOn(ctx context.Context, relations []string, run func() error) (err error) {
 	for attempt := 1; attempt <= self.settings.LockAttempts; attempt += 1 {
-		var busy int
-		if busy, err = providerWorkSessionTablesBusy(ctx, self.settings.MaxTransactionAge); err != nil {
-			return
+		busy := 0
+		if 0 < len(relations) {
+			if busy, err = providerWorkSessionTablesBusy(ctx, relations, self.settings.MaxTransactionAge); err != nil {
+				return
+			}
 		}
 		if 0 < busy {
 			self.logf("%d transaction(s) older than %s hold journal table locks (attempt %d/%d)", busy, self.settings.MaxTransactionAge, attempt, self.settings.LockAttempts)

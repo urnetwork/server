@@ -11594,4 +11594,14 @@ var migrations = []any{
 	// left uncredited until the new taskworker retries it from review. Never
 	// roll the taskworker back past that build once a Gamma gift is sold.
 	giftGammaSchemaMigration,
+
+	// The early drop of provider_work_session_event_legacy (owner, 2026-11-15;
+	// DBDISK-STABILIZE I4; db_provider_work_session_partition.go): the journal's
+	// drop guard also admits the legacy partition an hour after its upper bound,
+	// the cutover week, for the owner-run `bringyourctl model migrate
+	// provider-work-session-partition --drop-legacy`. It replaces the guard's
+	// function body only: no table lock, and every drop the running release
+	// makes stays admitted, so it applies before or after any deploy. No
+	// service reads it; the drop runs only after it is applied.
+	newSqlMigration(providerWorkSessionEventLegacyDropGuardSql),
 }

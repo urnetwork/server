@@ -887,8 +887,12 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		// after the index diet's drops, as in the migration list
 		migrationCurrentSuffix(contractCloseEvidenceHorizonGuardMigrationVersion, "close evidence custody with retention at the contract horizon",
 			contractCloseEvidenceHorizonArtifactQuery),
+		// the legacy drop guard replaces the drop guard body and republishes the
+		// rest
 		migrationCurrentSuffix(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider session custody with drops at the contract horizon",
-			providerWorkSessionHorizonCustodyPredicates()...),
+			providerWorkSessionHorizonCustodyPredicates()...).removedAt(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion()),
+		migrationCurrentSuffix(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), "provider session custody with the legacy partition's early drop",
+			providerWorkSessionLegacyDropCustodyPredicates()...),
 	},
 	[]snMainnetMigrationContract{
 		// the store country of each subscription row

@@ -219,6 +219,44 @@ func TestProviderWorkSessionEventHorizonDropGuardMigration(t *testing.T) {
 	}
 }
 
+// The legacy drop guard is the horizon drop guard with only the legacy clause
+// added before the age check, naming the registry's legacy partition and the
+// margin; it is the last migration that publishes the guard, follows the
+// horizon drop guard and bounds its lock wait. The early drop's detach waits
+// less than a main-pool writer queued behind it.
+func TestProviderWorkSessionEventLegacyDropGuardMigration(t *testing.T) {
+	version := ProviderWorkSessionEventLegacyDropGuardMigrationVersion()
+	if version == 0 || version <= ProviderWorkSessionEventHorizonDropGuardMigrationVersion() {
+		t.Fatalf("legacy drop guard version %d, horizon drop guard version %d", version, ProviderWorkSessionEventHorizonDropGuardMigrationVersion())
+	}
+	for index, migration := range migrations[version:] {
+		if sql, ok := migration.(*SqlMigration); ok && strings.Contains(sql.sql, "provider_work_session_event_drop_guard") {
+			t.Fatalf("migration %d republishes the drop guard after the legacy drop guard", version+index+1)
+		}
+	}
+	if !strings.HasPrefix(strings.TrimSpace(providerWorkSessionEventLegacyDropGuardSql), "SET LOCAL lock_timeout = '5s';") {
+		t.Error("the legacy drop guard does not bound its lock wait")
+	}
+	if count := strings.Count(providerWorkSessionEventLegacyDropGuardSql, "$event_drop_guard$"); count != 2 {
+		t.Fatalf("the delimiter occurs %d times", count)
+	}
+	ageCheck := " IF upper_bound IS NULL OR"
+	if strings.Count(providerWorkSessionEventHorizonDropGuardSql, ageCheck) != 1 ||
+		strings.Replace(providerWorkSessionEventHorizonDropGuardSql, ageCheck, providerWorkSessionEventLegacyDropClauseSql+ageCheck, 1) != providerWorkSessionEventLegacyDropGuardSql {
+		t.Fatal("the legacy drop guard differs from the horizon drop guard beyond the legacy clause")
+	}
+	legacy := PartitionLegacyLeafName(providerWorkSessionEventTable)
+	if strings.Count(providerWorkSessionEventLegacyDropClauseSql, "'"+legacy+"'") != 1 || strings.Count(providerWorkSessionEventLegacyDropClauseSql, "'public."+legacy+"'") != 1 {
+		t.Fatal("the legacy clause does not name the registry's legacy partition")
+	}
+	if ProviderWorkSessionEventLegacyDropMargin != time.Hour || !strings.Contains(providerWorkSessionEventLegacyDropClauseSql, "interval '1 hour'>=upper_bound") {
+		t.Fatal("the legacy clause's margin is not ProviderWorkSessionEventLegacyDropMargin")
+	}
+	if settings := DefaultProviderWorkSessionPartitionSettings(); PgLockTimeout <= settings.LegacyDetachLockTimeout || settings.validate() != nil {
+		t.Fatalf("the detach waits %s for its locks, a writer queued behind it %s", settings.LegacyDetachLockTimeout, PgLockTimeout)
+	}
+}
+
 // The fence names leaves as the registry does.
 func TestProviderWorkSessionEventLeafNames(t *testing.T) {
 	family := providerWorkSessionEventPartitionFamily
