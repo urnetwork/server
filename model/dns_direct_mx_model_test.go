@@ -91,12 +91,18 @@ func TestDnsDirectMxRefusals(t *testing.T) {
 		ctx := context.Background()
 		world := newTestDirectMxWorld(t, ctx)
 		before := world.serial(t, ctx)
+		// more addresses of a family than §12.7's RRset cap
+		tooMany := []netip.Addr{}
+		for index := range 9 {
+			tooMany = append(tooMany, netip.AddrFrom4([4]byte{11, 22, 33, byte(20 + index)}))
+		}
 		for _, addresses := range [][]netip.Addr{
 			{netip.MustParseAddr("10.1.2.3")},
 			{netip.MustParseAddr("192.0.2.9")},
 			{netip.MustParseAddr("2001:db8::9")},
 			{testDirectMxFirst, testDirectMxFirst},
 			{},
+			tooMany,
 		} {
 			if _, err := testSetDirectMx(ctx, world, addresses...); !errors.Is(err, dnsservice.ErrDnsDirectMxRefused) {
 				t.Errorf("%v: %v", addresses, err)
