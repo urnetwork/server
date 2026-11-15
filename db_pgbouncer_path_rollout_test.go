@@ -132,12 +132,14 @@ func TestPgBouncerDirectBlocksNameServicesThatChoose(t *testing.T) {
 
 // The rollout's current stage. A stage's merge, in its window, changes the
 // table and this expectation together (owner, 2026-11-13: each database-path
-// window's go comes back to the owner). Stage 2: every api block goes direct;
-// every block of every other service keeps nginx's single port.
+// window's go comes back to the owner). Stage 3: every api and connect block
+// goes direct; every block of every other service keeps nginx's single port.
 func TestPgBouncerDirectRolloutStage(t *testing.T) {
 	stage := map[string][]string{
-		"api": {pgBouncerEveryBlock},
+		"api":     {pgBouncerEveryBlock},
+		"connect": {pgBouncerEveryBlock},
 	}
+	directServices := []string{"api", "connect"}
 	if !reflect.DeepEqual(pgBouncerDirectBlocks, stage) {
 		t.Fatalf("the table is %v, the stage %v", pgBouncerDirectBlocks, stage)
 	}
@@ -158,7 +160,7 @@ func TestPgBouncerDirectRolloutStage(t *testing.T) {
 			continue
 		}
 		want := PgBouncerPathSinglePort
-		if service == "api" {
+		if slices.Contains(directServices, service) {
 			want = PgBouncerPathDirect
 		}
 		for _, block := range blocks {
