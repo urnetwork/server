@@ -624,33 +624,38 @@ func TestAbuseMailboxSealPrivateKeyFileRefusals(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		file string
+		// what the refusal says failed
+		want string
 	}{
-		{name: "an empty file", file: ""},
-		{name: "a comment alone", file: "# nothing here\n"},
-		{name: "a file that is not a mapping", file: "- " + encodedSeed + "\n"},
-		{name: "a file that does not parse", file: seedLine + "\t:" + encodedSeed + "\n  - ["},
-		{name: "an empty value", file: line(abuseMailboxSealPrivateKeyName, "")},
-		{name: "a value that is a list", file: abuseMailboxSealPrivateKeyName + ": [" + encodedSeed + "]\n"},
-		{name: "a value that is a mapping", file: abuseMailboxSealPrivateKeyName + ": {seed: " + encodedSeed + "}\n"},
-		{name: "the seed under another key", file: line("abuse_mailbox_seal_seed", encodedSeed)},
-		{name: "the mac key beside it", file: seedLine + line(abuseMailboxMacKeyName, macKey)},
-		{name: "the public key beside it", file: seedLine + line(abuseMailboxSealPublicKeyName, publicKey)},
-		{name: "abuse-mailbox.yml in its place", file: string(AbuseMailboxKeyFile(keys))},
-		{name: "a value misplaced as a key", file: seedLine + line(encodedSeed, "x")},
-		{name: "the key twice", file: seedLine + seedLine},
-		{name: "a second document", file: seedLine + "---\n" + seedLine},
-		{name: "a second, empty document", file: seedLine + "---\n"},
-		{name: "a value that is not base64", file: line(abuseMailboxSealPrivateKeyName, "not*base64")},
-		{name: "a value in base64url", file: line(abuseMailboxSealPrivateKeyName, base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 32)))},
-		{name: "a value in hex", file: line(abuseMailboxSealPrivateKeyName, hex.EncodeToString(seed))},
-		{name: "a 31-byte seed", file: line(abuseMailboxSealPrivateKeyName, base64.StdEncoding.EncodeToString(seed[:31]))},
-		{name: "a 33-byte seed", file: line(abuseMailboxSealPrivateKeyName, base64.StdEncoding.EncodeToString(append(bytes.Clone(seed), 1)))},
-		{name: "the public key in place of the seed", file: line(abuseMailboxSealPrivateKeyName, publicKey)},
+		{name: "an empty file", file: "", want: "has no abuse_mailbox_seal_private_key"},
+		{name: "a comment alone", file: "# nothing here\n", want: "has no abuse_mailbox_seal_private_key"},
+		{name: "a file that is not a mapping", file: "- " + encodedSeed + "\n", want: "does not parse"},
+		{name: "a file that does not parse", file: seedLine + "\t:" + encodedSeed + "\n  - [", want: "does not parse"},
+		{name: "an empty value", file: line(abuseMailboxSealPrivateKeyName, ""), want: "has no abuse_mailbox_seal_private_key"},
+		{name: "a value that is a list", file: abuseMailboxSealPrivateKeyName + ": [" + encodedSeed + "]\n", want: "has no abuse_mailbox_seal_private_key"},
+		{name: "a value that is a mapping", file: abuseMailboxSealPrivateKeyName + ": {seed: " + encodedSeed + "}\n", want: "has no abuse_mailbox_seal_private_key"},
+		{name: "the seed under another key", file: line("abuse_mailbox_seal_seed", encodedSeed), want: "holds a key other than"},
+		{name: "the mac key beside it", file: seedLine + line(abuseMailboxMacKeyName, macKey), want: "holds a key other than"},
+		{name: "the public key beside it", file: seedLine + line(abuseMailboxSealPublicKeyName, publicKey), want: "holds a key other than"},
+		{name: "abuse-mailbox.yml in its place", file: string(AbuseMailboxKeyFile(keys)), want: "holds a key other than"},
+		{name: "a value misplaced as a key", file: seedLine + line(encodedSeed, "x"), want: "holds a key other than"},
+		{name: "the key twice", file: seedLine + seedLine, want: "does not parse"},
+		{name: "a second document", file: seedLine + "---\n" + seedLine, want: "more than one document"},
+		{name: "a second, empty document", file: seedLine + "---\n", want: "more than one document"},
+		{name: "a value that is not base64", file: line(abuseMailboxSealPrivateKeyName, "not*base64"), want: "is not standard base64"},
+		{name: "a value in base64url", file: line(abuseMailboxSealPrivateKeyName, base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 32))), want: "is not standard base64"},
+		{name: "a value in hex", file: line(abuseMailboxSealPrivateKeyName, hex.EncodeToString(seed)), want: "is not 32 bytes"},
+		{name: "a 31-byte seed", file: line(abuseMailboxSealPrivateKeyName, base64.StdEncoding.EncodeToString(seed[:31])), want: "is not 32 bytes"},
+		{name: "a 33-byte seed", file: line(abuseMailboxSealPrivateKeyName, base64.StdEncoding.EncodeToString(append(bytes.Clone(seed), 1))), want: "is not 32 bytes"},
+		{name: "the public key in place of the seed", file: line(abuseMailboxSealPrivateKeyName, publicKey), want: "is not 32 bytes"},
 	} {
 		parsed, err := ParseAbuseMailboxSealPrivateKey([]byte(c.file))
 		if !errors.Is(err, ErrAbuseMailboxSealPrivateKey) || parsed != nil {
 			t.Errorf("%s parses: %v", c.name, err)
 			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: the refusal %q does not say %q", c.name, err, c.want)
 		}
 		for _, value := range []string{encodedSeed, hex.EncodeToString(seed), macKey, publicKey} {
 			if strings.Contains(err.Error(), value) || strings.Contains(err.Error(), value[:16]) {
