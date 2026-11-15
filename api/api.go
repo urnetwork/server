@@ -10,6 +10,26 @@ import (
 	"time"
 )
 
+// Tunables of the api route set.
+type RouteSettings struct {
+	// The streamed bodies of the provider work routes and of POST
+	// /verify/original/close: a body idle or in transfer for 60 s ends, the
+	// answer is due 300 s after the body is in hand, and a drain takes at most
+	// 5 s. router.StreamingBody says what each zero leaves in place.
+	ProviderWorkBody router.StreamingBody
+}
+
+func DefaultRouteSettings() *RouteSettings {
+	return &RouteSettings{
+		ProviderWorkBody: router.StreamingBody{
+			IdleTimeout:     60 * time.Second,
+			TransferTimeout: 60 * time.Second,
+			ResponseTimeout: 300 * time.Second,
+			DrainTimeout:    5 * time.Second,
+		},
+	}
+}
+
 // Routes returns the full set of api routes.
 //
 // It is shared by the apicli command and by integration tests that serve the
@@ -43,7 +63,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	internalGateProjection := handlers.NewInternalGateProjectionHandlers(nil)
 	internalGateEdgeClient := handlers.NewInternalGateEdgeClientHandlers(nil)
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
-	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
+	providerWorkBody := DefaultRouteSettings().ProviderWorkBody
 	connectControl := handlers.ConnectControl
 	if owners.notifications != nil || owners.stuckProviders != nil {
 		connectControl = handlers.ConnectControlWithOwners(owners.notifications, owners.stuckProviders)
@@ -426,6 +446,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/network/member-remove", handlers.RemoveNetworkMember),
 		// §7.6's SCIM queue for admin devices (TEAM-M6-07)
 		router.NewRoute("GET", "/network/scim-changes", handlers.GetNetworkScimChanges),
+		// §7.6's SCIM bearer, issued and removed by the team's Owner (QD-828)
+		router.NewRoute("POST", "/network/scim-token", handlers.SetNetworkScimToken),
 		// §7.5's invitations and network switching (TEAM-M6-04)
 		router.NewRoute("POST", "/network/member-invite", handlers.CreateNetworkMemberInvite),
 		router.NewRoute("POST", "/network/member-invite-accept", handlers.AcceptNetworkMemberInvite),
@@ -532,7 +554,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	routes = append(routes, internalGateProjection.Routes()...)
 	// an edge block's urnetwork-edge client jwts, on the edge class's internal bearer (TLS-M5-11; QD-812)
 	routes = append(routes, internalGateEdgeClient.Routes()...)
-	// §7.6's SCIM 2.0 for a team's IdP, on the team's SCIM bearer (TEAM-M6-07)
+	// §7.6's SCIM 2.0 for a team's IdP, on the team's SCIM bearer (TEAM-M6-07), checked against the SHA-256
+	// network_team keeps (QD-828): whatever serves this route set, api and alt alike, installs that source, which holds
+	// no state, so a SCIM request reads the column and answers 503 only while the binary does not link MG6
+	scim.SetBearerSource(scim.NetworkTeamBearerSource())
 	routes = append(routes, scim.Routes()...)
 	return applyRouteAccess(append(routes, oauth.Routes()...))
 }

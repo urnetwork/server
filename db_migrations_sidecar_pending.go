@@ -1220,9 +1220,10 @@ func sidecarMg6Migrations() []any {
 
 // MG6's §7 part: the Team tables (TEAM-M6-01 creates all nine, the later TEAM
 // tasks read and write them). Every column is one §2.8's rows name: api-2's
-// team settings, api-3's members, invitations, IdP configuration, verified
-// domains and SCIM changes, api-1's IdP identities, api-11's OAuth clients and
-// api-8's webhooks. Groups, tags, device names and admissions are never here:
+// team settings and SCIM bearer's SHA-256, api-3's members, invitations, IdP
+// configuration, verified domains and SCIM changes, api-1's IdP identities,
+// api-11's OAuth clients and api-8's webhooks. Groups, tags, device names and
+// admissions are never here:
 // they live in the config repo (owner decision 46). Roles are §7.5's seven as
 // lowercase words, mirrored from the config repo (TEAM-M6-03). Nothing reads or
 // writes these tables unless the binary links MG6 (server.SidecarMg6Linked), and
@@ -1232,11 +1233,14 @@ func sidecarMg6TeamMigrations() []any {
 		// §7.5's team: a network POST /network/team-create made, kept for the
 		// network's life. Its admin_user_id is a synthetic owner-of-record that
 		// never signs in (D-TEAM-2); sso_required is §7.6's sign-in rule, which
-		// refuses every sign-in but the team's IdP
+		// refuses every sign-in but the team's IdP; scim_token_sha256 is the
+		// SHA-256 of §7.6's SCIM bearer while SCIM is on, never the bearer,
+		// which POST /network/scim-token sets and clears (QD-828; §2.8 api-2)
 		newSqlMigration(`
 			CREATE TABLE network_team (
 				network_id uuid NOT NULL,
 				sso_required bool NOT NULL DEFAULT false,
+				scim_token_sha256 bytea NULL,
 
 				PRIMARY KEY (network_id)
 			)

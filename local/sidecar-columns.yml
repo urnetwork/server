@@ -449,6 +449,7 @@ tables:
     group: MG6
     columns:
       network_id: api-2
+      scim_token_sha256: api-2 SCIM bearer's SHA-256
       sso_required: api-2
   network_member:
     group: MG6
