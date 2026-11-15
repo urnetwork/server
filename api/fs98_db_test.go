@@ -97,3 +97,21 @@ func TestFs124CliCosignOnServersSequencer(t *testing.T) {
 func TestFs124CliRecoveryRotateOnServersSequencer(t *testing.T) {
 	fs98SequencerClause(t, fault.Fs124CliRecoveryRotate)
 }
+
+// §22.7's revocation suite with X revoked by its own member as lost and as a compromise, CORE's check judging each way
+// on server's sequencer.
+func TestRevocationSuiteOwnDeviceFormOnServersSequencer(t *testing.T) {
+	settings := sidecartest.DefaultRevocationSuiteSettings()
+	settings.Net = fs98SequencerNetSettings()
+	settings.Checks = []*sidecartest.RevocationCheck{fault.Fs98RevocationCheck}
+	report := sidecartest.RunRevocationSuite(t, sidecartest.RevocationFormOwnDevice, settings)
+	for _, way := range sidecartest.RevocationFormOwnDevice.Ways() {
+		judged := false
+		for _, result := range report.Of(way) {
+			judged = judged || (result.CheckId == fault.Fs98RevocationCheck.Id && result.Err == nil && result.Open == "")
+		}
+		if !judged {
+			t.Errorf("%s: CORE's check did not judge", way)
+		}
+	}
+}
