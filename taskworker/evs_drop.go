@@ -12,12 +12,10 @@ package taskworker
 //     subscriber (startEvsDropHints), and each queues its repo's run at once and is taken.
 //
 // Verify is dropverify.Verify, which evsservice cannot import, so it is injected here behind evsservice.DropVerifier
-// (D-EVS-64: the oracle is written apart from mark and shipped in taskworker). The lock the start and verify read is
-// §8.9's state in the process's one gate cache (C-09), which gkm's reconciler start installs (installEvsDropLocks).
-//
-// Not built yet: resolve and mark (EVSB-M10-04) and the deletes (EVSB-M10-06), whose seams stay nil here, so every
-// job waits as evsservice.DropWaitParts and starts nothing, and every dry run ends failed. Each lands its seam in
-// evsDropJobDeps.
+// (D-EVS-64: the oracle is written apart from mark and shipped in taskworker). Resolve and mark are evsservice's
+// DropResolve and DropMark (EVSB-M10-04), and the deletes its DropDelete (EVSB-M10-06), which read §19.11's drop mode
+// themselves, so observe deletes nothing whatever the job asks. The lock the start and verify read is §8.9's state in
+// the process's one gate cache (C-09), which gkm's reconciler start installs (installEvsDropLocks).
 
 import (
 	"context"
@@ -139,15 +137,31 @@ func (self evsDropVerifier) Verify(ctx context.Context, request *evsservice.Drop
 	}, nil
 }
 
-// The seams one run's job and dry runs take: verify injected, the lock from the gate cache, and resolve, mark and the
-// deletes nil until EVSB-M10-04 and -06 land theirs.
-func evsDropJobDeps(host *sidecar.ServiceHost) *evsservice.DropJobDeps {
-	return &evsservice.DropJobDeps{
-		Verifier: evsDropVerifier{},
-		Locks:    evsDropLocks(),
-		Format2:  evsservice.NewFormat2Gate(host),
-		Log:      evsBudgetLogger{},
+// The seams one run's job and dry runs take: resolve, mark and the deletes, verify injected, and the lock from the gate
+// cache. A seam that cannot be built stays nil, which starts no job.
+func evsDropJobDeps(host *sidecar.ServiceHost) (*evsservice.DropJobDeps, error) {
+	format2 := evsservice.NewFormat2Gate(host)
+	resolver, err := evsservice.NewDropResolve(host, &evsservice.DropResolveDeps{Log: evsBudgetLogger{}})
+	if err != nil {
+		return nil, err
 	}
+	marker, err := evsservice.NewDropMark(host, &evsservice.DropMarkDeps{Log: evsBudgetLogger{}})
+	if err != nil {
+		return nil, err
+	}
+	deleter, err := evsservice.NewDropDelete(host, &evsservice.DropDeleteDeps{Format2: format2, Log: evsBudgetLogger{}})
+	if err != nil {
+		return nil, err
+	}
+	return &evsservice.DropJobDeps{
+		Resolver: resolver,
+		Marker:   marker,
+		Verifier: evsDropVerifier{},
+		Deleter:  deleter,
+		Locks:    evsDropLocks(),
+		Format2:  format2,
+		Log:      evsBudgetLogger{},
+	}, nil
 }
 
 // One run: the daily start, or one repo's.
@@ -160,7 +174,10 @@ func runEvsDrop(ctx context.Context, host *sidecar.ServiceHost, args []byte) err
 		glog.Errorf("[evsjobs]%s with args that name no repo: dropped\n", evsservice.EvsDropTaskName)
 		return nil
 	}
-	deps := evsDropJobDeps(host)
+	deps, err := evsDropJobDeps(host)
+	if err != nil {
+		return err
+	}
 	job, err := evsservice.NewDropJob(host, deps)
 	if err != nil {
 		return err
