@@ -109,6 +109,18 @@ func ProviderWorkSessionEventHorizonDropGuardMigrationVersion() int {
 	return sqlMigrationVersion(providerWorkSessionEventHorizonDropGuardSql)
 }
 
+// The journal's drop guard that also admits the legacy partition an hour after
+// the cutover week (owner, 2026-11-15).
+func ProviderWorkSessionEventLegacyDropGuardBodySql() string {
+	return strings.Split(providerWorkSessionEventLegacyDropGuardSql, "$event_drop_guard$")[1]
+}
+
+// The version of the migration that publishes the legacy drop guard, found by
+// its SQL. Zero when the list lacks it.
+func ProviderWorkSessionEventLegacyDropGuardMigrationVersion() int {
+	return sqlMigrationVersion(providerWorkSessionEventLegacyDropGuardSql)
+}
+
 // Read-only consumers pin the provider successor's exact bodies without
 // changing any historical migration or reproducing its replacement logic.
 func CompetitionWinnerReviewProviderBodiesSql() (provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard string) {

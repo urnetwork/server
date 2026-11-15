@@ -145,7 +145,7 @@ Usage:
     bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model migrate provider-egress-health-partition [--copy-days=<n>] [--dry-run] [--swap] [--verify] [--rollback] [--abort] [--drop-old]
     bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
-    bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort] [--drop-legacy]
     bringyourctl model migrate finished-task-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
@@ -211,6 +211,11 @@ Options:
     --verify       Check the partitioned egress health history against the
                    old table.
     --drop-old     Drop the old egress health history once --verify passes.
+    --drop-legacy  Detach, then drop, provider_work_session_event_legacy once
+                   the journal's drop guard admits it, an hour after the
+                   cutover week starts (owner, 2026-11-15). A connection
+                   admitted before the cutover that retires later is
+                   journaled without its network id.
     --mode=<mode>  With db close-evidence-retention, set the close evidence
                    row retention's brake: on, or off to stop the row deletes
                    from their next batch. The weekly drops of partitioned
@@ -2619,7 +2624,8 @@ func modelMigrateContractPartition(opts docopt.Opts) {
 // Partitions provider_work_session_event by observed_at week
 // (PARTITION-MAINTENANCE-PLAN.md C4; server.MigrateProviderWorkSessionEventsToPartitions):
 // prepare (with --cutover-week), then --finalize before that week; --rollback
-// and --abort undo. Each step can be rehearsed with --dry-run.
+// and --abort undo; --drop-legacy drops the legacy partition early once the
+// drop guard admits it. Each step can be rehearsed with --dry-run.
 func modelMigrateProviderWorkSessionPartition(opts docopt.Opts) {
 	options, err := providerWorkSessionPartitionMigrateOptions(opts)
 	if err != nil {
@@ -2644,6 +2650,7 @@ func providerWorkSessionPartitionMigrateOptions(opts docopt.Opts) (options serve
 	options.Finalize, _ = opts.Bool("--finalize")
 	options.Rollback, _ = opts.Bool("--rollback")
 	options.Abort, _ = opts.Bool("--abort")
+	options.DropLegacy, _ = opts.Bool("--drop-legacy")
 	return
 }
 

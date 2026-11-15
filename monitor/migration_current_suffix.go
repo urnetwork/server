@@ -887,8 +887,10 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		// after the index diet's drops, as in the migration list
 		migrationCurrentSuffix(contractCloseEvidenceHorizonGuardMigrationVersion, "close evidence custody with retention at the contract horizon",
 			contractCloseEvidenceHorizonArtifactQuery),
+		// the legacy drop guard replaces the drop guard body and republishes the
+		// rest
 		migrationCurrentSuffix(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider session custody with drops at the contract horizon",
-			providerWorkSessionHorizonCustodyPredicates()...),
+			providerWorkSessionHorizonCustodyPredicates()...).removedAt(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion()),
 	},
 	[]snMainnetMigrationContract{
 		// the store country of each subscription row
@@ -1029,6 +1031,12 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the Pay with Gamma intent that pays a gift order, versioned by its
 	// position
 	[]snMainnetMigrationContract{giftGammaSchemaMigrationContract},
+	// the journal's drop guard with the legacy partition's early drop, which
+	// supersedes the horizon drop guard's contract, versioned by its position
+	[]snMainnetMigrationContract{
+		migrationCurrentSuffix(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), "provider session custody with the legacy partition's early drop",
+			providerWorkSessionLegacyDropCustodyPredicates()...),
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
