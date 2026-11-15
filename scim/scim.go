@@ -2,9 +2,10 @@
 // R-TEAM-4, D-TEAM-25, Q-TEAM-3, I-4, I-15).
 //
 // The IdP authenticates with the team's SCIM bearer, which the server keeps only hashed; this package compares the
-// SHA-256 of the presented bearer with the network's in constant time. Where that hash lives is open
-// (questions/team-m6-07-scim-bearer-row.md): api installs no BearerSource, so every request answers 503 until the
-// question is answered, and tests install their own.
+// SHA-256 of the presented bearer with the network's in constant time. The hash is network_team.scim_token_sha256,
+// which the team's Owner sets and clears with POST /network/scim-token (QD-828; model.SetNetworkScimToken), and
+// NetworkTeamBearerSource reads it, which api's route set installs: a request whose network holds no hash, or another
+// one, answers 401. Only a process with no source installed answers 503, and tests install their own.
 //
 //	users     a SCIM User is a member of the team, id its member_id, userName its email. Unsigned SCIM data adds no
 //	          reader (§7.6): POST /Users of a person who is no member queues a user_create for an admin device to
@@ -113,6 +114,19 @@ func currentBearerSource() BearerSource {
 		return nil
 	}
 	return *source
+}
+
+// The source over network_team.scim_token_sha256 (model.GetNetworkTeamScimTokenSha256), which POST
+// /network/scim-token sets and clears (QD-828): what api installs. It reads the primary at each request, so a new
+// bearer or a removal holds from its commit on, and holds no state, so installing it again changes nothing.
+func NetworkTeamBearerSource() BearerSource {
+	return networkTeamBearerSource{}
+}
+
+type networkTeamBearerSource struct{}
+
+func (self networkTeamBearerSource) BearerSha256(ctx context.Context, networkId server.Id) ([]byte, bool) {
+	return model.GetNetworkTeamScimTokenSha256(ctx, networkId)
 }
 
 // What the handlers depend on apart from the database, so tests can replace it.

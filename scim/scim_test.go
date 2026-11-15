@@ -5,9 +5,9 @@ package scim
 // §7.6's SCIM (scim.go; TEAM-M6-07), which needs MG6, through the router as an IdP calls it: the revocation suite's
 // SCIM active=false (denied at once at the server, queued for a signature), in Okta's and Entra's PATCH forms and as a
 // DELETE; provisioning queued for an invite and withdrawn; groups queued and read back; the queue's 7 days; every
-// refusal of the bearer and the tier; and RFC 7644's message shapes by fixture. The team tier is stubbed on, since
-// QUOTA-M6-01's tier is not in transfer_balance yet, and the bearer source is a test's, since where the bearer lives is
-// open (questions/team-m6-07-scim-bearer-row.md).
+// refusal of the bearer and the tier; RFC 7644's message shapes by fixture; and api's bearer source over
+// network_team (QD-828), with bearers POST /network/scim-token issues. The team tier is stubbed on, and every test but
+// the last installs a bearer source of its own.
 
 import (
 	"bytes"
@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -487,5 +488,78 @@ func TestScimMessagesConformToRfc7644(t *testing.T) {
 		connect.AssertEqual(t, status, http.StatusBadRequest)
 		connect.AssertEqual(t, answer["scimType"], scimTypeInvalidSyntax)
 		connect.AssertEqual(t, answer["schemas"], []any{schemaError})
+	})
+}
+
+// The team tier for the model's route, on as the fixture's is.
+func scimTestTeamTier(ctx context.Context, networkId server.Id) model.NetworkTier {
+	return model.NetworkTierTeam
+}
+
+// Issues the fixture's team a SCIM bearer as its Owner, through the model's route.
+func (self *scimFixture) issueBearer(t testing.TB) *model.NetworkScimTokenResult {
+	t.Helper()
+	issued, err := model.Testing_SetNetworkScimToken(&model.NetworkScimTokenArgs{}, self.ownerSession, server.NowUtc, scimTestTeamTier)
+	if err != nil || issued.Error != nil || !issued.ScimOn || !strings.HasPrefix(issued.ScimBearer, "ur-scim-") {
+		t.Fatalf("the issue: %v %+v", err, issued)
+	}
+	return issued
+}
+
+// api's bearer source over network_team (QD-828): a team that holds no bearer answers 401, never 503; the bearer POST
+// /network/scim-token issues authenticates, at the base URL its answer names too; another team's bearer and the
+// fixture's own test bearer are refused; a second issue retires the first at once; and a removal turns SCIM off.
+func TestScimNetworkTeamBearerSource(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		self := newScimFixture(t, "scim-source")
+		other := newScimFixture(t, "scim-source-other")
+		SetBearerSource(NetworkTeamBearerSource())
+		status, answer, header := self.do(t, "GET", self.path("/ServiceProviderConfig"), nil, "ur-scim-held-by-no-team")
+		connect.AssertEqual(t, status, http.StatusUnauthorized)
+		connect.AssertEqual(t, header.Get("WWW-Authenticate") != "", true)
+		connect.AssertEqual(t, answer["schemas"], []any{schemaError})
+
+		first := self.issueBearer(t)
+		status, _, _ = self.do(t, "GET", self.path("/ServiceProviderConfig"), nil, first.ScimBearer)
+		connect.AssertEqual(t, status, http.StatusOK)
+		scimUrl, err := url.Parse(first.ScimUrl)
+		if err != nil || scimUrl.Path != "/scim/v2/"+self.teamNetworkId.String() {
+			t.Fatalf("the answered base URL %q: %v", first.ScimUrl, err)
+		}
+		status, answer, _ = self.do(t, "GET", scimUrl.Path+"/Users", nil, first.ScimBearer)
+		connect.AssertEqual(t, status, http.StatusOK)
+		connect.AssertEqual(t, answer["totalResults"], float64(1))
+		for _, refused := range []struct {
+			path   string
+			bearer string
+		}{
+			{path: self.path("/Users"), bearer: scimTestBearer},
+			{path: self.path("/Users"), bearer: first.ScimBearer + "x"},
+			{path: other.path("/Users"), bearer: first.ScimBearer},
+		} {
+			status, _, _ = self.do(t, "GET", refused.path, nil, refused.bearer)
+			connect.AssertEqual(t, status, http.StatusUnauthorized)
+		}
+
+		second := self.issueBearer(t)
+		status, _, _ = self.do(t, "GET", self.path("/Users"), nil, first.ScimBearer)
+		connect.AssertEqual(t, status, http.StatusUnauthorized)
+		status, _, _ = self.do(t, "GET", self.path("/Users"), nil, second.ScimBearer)
+		connect.AssertEqual(t, status, http.StatusOK)
+		// the other team's own bearer is its own
+		otherBearer := other.issueBearer(t)
+		status, _, _ = self.do(t, "GET", other.path("/Users"), nil, otherBearer.ScimBearer)
+		connect.AssertEqual(t, status, http.StatusOK)
+		status, _, _ = self.do(t, "GET", self.path("/Users"), nil, otherBearer.ScimBearer)
+		connect.AssertEqual(t, status, http.StatusUnauthorized)
+
+		removed, err := model.Testing_SetNetworkScimToken(&model.NetworkScimTokenArgs{Remove: true}, self.ownerSession, server.NowUtc, scimTestTeamTier)
+		if err != nil || !removed.Removed || removed.ScimOn {
+			t.Fatalf("the removal: %v %+v", err, removed)
+		}
+		status, _, _ = self.do(t, "GET", self.path("/Users"), nil, second.ScimBearer)
+		connect.AssertEqual(t, status, http.StatusUnauthorized)
+		status, _, _ = self.do(t, "GET", other.path("/Users"), nil, otherBearer.ScimBearer)
+		connect.AssertEqual(t, status, http.StatusOK)
 	})
 }

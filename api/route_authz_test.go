@@ -329,6 +329,8 @@ func TestCredentialMintingRoutesAreAdminRoutes(t *testing.T) {
 		"POST /oauth/authorize":        routeAccessNetwork,
 		"POST /device/add":             routeAccessNetwork,
 		"POST /network/remove-clients": routeAccessNetwork,
+		// a team's SCIM bearer, with which its IdP denies members (§7.6; QD-828)
+		"POST /network/scim-token": routeAccessNetwork,
 		// §7.4's stage 2 six: Network in the table, app admin until stage 2 is
 		// live (TestStage2RoutesRefuseDeviceTokensOnceLive)
 		"POST /auth/code-create":           routeAccessNetwork,

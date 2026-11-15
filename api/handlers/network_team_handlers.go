@@ -42,6 +42,13 @@ func RemoveNetworkMember(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.RemoveNetworkMember, w, r)
 }
 
+// POST /network/scim-token {remove?}: the team's new SCIM bearer, answered once
+// and kept only as its SHA-256, or with remove SCIM turned off; the Owner's
+// (QD-828).
+func SetNetworkScimToken(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(model.SetNetworkScimToken, w, r)
+}
+
 // GET /network/scim-changes?after=<change_id>: the team's queued SCIM changes for
 // an admin device to carry out, a page at a time (TEAM-M6-07).
 func GetNetworkScimChanges(w http.ResponseWriter, r *http.Request) {

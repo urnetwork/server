@@ -51,6 +51,7 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	// the Owner's: deletion and the network's sessions
 	"POST /auth/network-delete": model.RolePermissionOwner,
 	"POST /network/idp":         model.RolePermissionOwner,
+	"POST /network/scim-token":  model.RolePermissionOwner,
 	// where the team's sign-ins route, and where its admin events are sent
 	"POST /network/domain-add":                model.RolePermissionOwner,
 	"POST /network/domain-verify":             model.RolePermissionOwner,

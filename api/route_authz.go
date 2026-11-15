@@ -321,6 +321,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5), Owners and Admins by the role gate
 	"POST /network/member-remove":                   routeAccessNetwork,  // denies a team's member at once (§7.10), Owners and Admins by the role gate
 	"GET /network/scim-changes":                     routeAccessNetwork,  // a team's queued SCIM changes (§7.6), Owners and Admins by the role gate
+	"POST /network/scim-token":                      routeAccessNetwork,  // issues a team's SCIM bearer, a credential, or removes it (§7.6), the Owner's by its role gate
 	"GET /network/oauth-clients":                    routeAccessNetwork,  // a team's CI credentials (§7.8), Owners and Admins by the role gate
 	"POST /network/oauth-clients":                   routeAccessNetwork,  // a new CI credential, which mints keys (escalation), Owners and Admins by the role gate
 	"POST /network/oauth-client-revoke":             routeAccessNetwork,  // ends a CI credential (§7.8), Owners and Admins by the role gate
