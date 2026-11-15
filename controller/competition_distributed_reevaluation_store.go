@@ -115,18 +115,33 @@ func (self PostgresStore) competitionDistributedRecoveryGateInTxWithLock(ctx con
 	if err != nil {
 		return nil, err
 	}
+	expectedCycle := 0
+	if auth.Schema == 3 {
+		if !competitionSecondRecoveryShape(auth) || !competitionSecondRecoveryJobAllowed(settings, auth.JobId) {
+			return nil, ErrConflict
+		}
+		expectedCycle = 1
+	}
 	if job.Round.Canceled || job.Round.FinalizedAt != nil || job.Round.AutomationSealedAt != nil || job.Round.AdmissionClosedAt != nil || job.Round.WinnerJobId != nil || job.Round.Staging ||
-		job.Round.CompetitionId != settings.CompetitionId || job.State != "failed" || job.EvaluationCycle != 0 || job.AttemptCount != auth.ExpectedAttemptCount ||
+		job.Round.CompetitionId != settings.CompetitionId || job.State != "failed" || job.EvaluationCycle != expectedCycle || job.AttemptCount != auth.ExpectedAttemptCount ||
 		job.StartedAt == nil || job.CompletedAt == nil || job.ExecutionDeadline == nil || job.Score != nil || job.LeaseOwner != "" || job.LeaseExpiresAt != nil ||
 		job.EvalError == nil || !model.CompetitionJobReevaluationFailureAllowed(auth.IncidentClass, model.CompetitionEvaluationFailure{Kind: job.EvalError.Kind, Code: job.EvalError.Code, Retriable: job.EvalError.Retriable}) {
 		return nil, ErrConflict
 	}
 	d := auth.Distributed
 	patchRetry := auth.IncidentClass == model.CompetitionJobReevaluationOperatorRequestedPatchRetry
+	originalStart := job.StartedAt
+	if expectedCycle == 1 {
+		originalStart = job.CycleStartedAt
+		if originalStart == nil || job.Reevaluation == nil || job.Reevaluation.Schema != 2 || job.Reevaluation.Cycle != 1 ||
+			job.Reevaluation.ReceiptSha256 != auth.SecondRecovery.PreviousReceiptSha256 {
+			return nil, ErrConflict
+		}
+	}
 	if job.ExecutorHostId != d.OriginalHostId || job.SlotId != d.OriginalSlotId || job.SlotFencingToken != d.OriginalFencingToken ||
-		!job.StartedAt.Equal(d.OriginalStartedAt) || !job.ExecutionDeadline.Equal(d.OriginalDeadlineAt) ||
+		!originalStart.Equal(d.OriginalStartedAt) || !job.ExecutionDeadline.Equal(d.OriginalDeadlineAt) ||
 		(!patchRetry && job.CompletedAt.Before(*job.ExecutionDeadline)) ||
-		(patchRetry && (d.PatchRetry == nil || d.PatchRetry.PatchSha256 != job.PatchSha256 || job.CompletedAt.Before(*job.StartedAt) || !job.CompletedAt.Before(*job.ExecutionDeadline))) ||
+		(patchRetry && (d.PatchRetry == nil || d.PatchRetry.PatchSha256 != job.PatchSha256 || job.CompletedAt.Before(*originalStart) || !job.CompletedAt.Before(*job.ExecutionDeadline))) ||
 		settings.DistributedEvaluationPolicy == nil || settings.DistributedEvaluationPolicy.ApprovalSha256 != d.PolicyApprovalSha256 ||
 		settings.AutomationPolicy.SourceLockSha256 != d.SourceLockSha256 || job.EvaluatorImageDigest != d.EvaluatorImageDigest ||
 		settings.EvaluationPolicy.ScoreTimeoutSeconds != 3*60*60 {
@@ -211,7 +226,7 @@ func (self PostgresStore) authorizeDistributedJobReevaluation(ctx context.Contex
 		return nil, err
 	}
 	if previous, err := readCompetitionReevaluationReceipt(ctx, settings, request, requestDigest); err != nil || previous != nil {
-		if err == nil && (previous.Schema != 2 || validateCompetitionDistributedRecoveryReceipt(previous) != nil) {
+		if err == nil && (previous.Schema != request.Authorization.Schema || validateCompetitionDistributedRecoveryReceipt(previous) != nil) {
 			return nil, ErrConflict
 		}
 		return previous, err
@@ -225,7 +240,7 @@ func (self PostgresStore) authorizeDistributedJobReevaluation(ctx context.Contex
 		return nil, ErrConflict
 	}
 	proof := settings.reevaluationRuntime
-	if proof == nil || settings.reevaluationRuntimeSha256 != a.RuntimeQualificationSha256 || proof.SourceCommit != a.FixedSourceCommit ||
+	if proof == nil || proof.Schema != a.Schema || settings.reevaluationRuntimeSha256 != a.RuntimeQualificationSha256 || proof.SourceCommit != a.FixedSourceCommit ||
 		proof.WorkerSha256 != a.FixedWorkerSha256 || proof.WorkerImageDigest != a.FixedWorkerImageDigest || proof.ApiImageDigest != a.ApiImageDigest {
 		return nil, ErrConflict
 	}
@@ -289,7 +304,7 @@ func (self PostgresStore) authorizeDistributedJobReevaluation(ctx context.Contex
 			automationScopeLockInTx(ctx, tx, frozen)
 			var oldKey, oldDigest string
 			var oldReceipt []byte
-			loadErr := tx.QueryRow(ctx, `SELECT idempotency_key,request_sha256,receipt_json FROM competition_job_reevaluation WHERE job_id=$1`, a.JobId).Scan(&oldKey, &oldDigest, &oldReceipt)
+			loadErr := tx.QueryRow(ctx, competitionRecoveryReceiptQuery(a), a.JobId).Scan(&oldKey, &oldDigest, &oldReceipt)
 			if loadErr == nil {
 				if oldKey != request.IdempotencyKey || oldDigest != requestDigest {
 					panic(ErrConflict)
@@ -310,9 +325,9 @@ func (self PostgresStore) authorizeDistributedJobReevaluation(ctx context.Contex
 			}
 			server.Raise(ctx.Err())
 			d := a.Distributed
-			cycle := model.CompetitionJobReevaluationCycle{Schema: 2, Environment: a.Environment, CompetitionId: a.CompetitionId, SeasonId: a.SeasonId,
+			cycle := model.CompetitionJobReevaluationCycle{Schema: a.Schema, Environment: a.Environment, CompetitionId: a.CompetitionId, SeasonId: a.SeasonId,
 				JobId: a.JobId, RoundId: a.RoundId, PatchSha256: current.job.PatchSha256, RoundPolicySha256: a.RoundPolicySha256, BaselineSha256: a.BaselineSha256,
-				Cycle: 1, AuthorizationSha256: request.AuthorizationSha256, EvidenceSha256: a.EvidenceSha256, PreviousTerminalSha256: a.ExpectedTerminalSha256,
+				Cycle: a.ExpectedCycle + 1, AuthorizationSha256: request.AuthorizationSha256, EvidenceSha256: a.EvidenceSha256, PreviousTerminalSha256: a.ExpectedTerminalSha256,
 				PreviousFailure: model.CompetitionEvaluationFailure{Kind: current.job.EvalError.Kind, Code: current.job.EvalError.Code, Retriable: current.job.EvalError.Retriable},
 				IncidentClass:   a.IncidentClass, RuntimeQualificationSha256: a.RuntimeQualificationSha256, FixedSourceCommit: a.FixedSourceCommit,
 				FixedWorkerSha256: a.FixedWorkerSha256, FixedWorkerImageDigest: a.FixedWorkerImageDigest, ApiImageDigest: a.ApiImageDigest, AuthorizedAt: current.now,
@@ -320,6 +335,11 @@ func (self PostgresStore) authorizeDistributedJobReevaluation(ctx context.Contex
 					OriginalSlotId: d.OriginalSlotId, OriginalFencingToken: d.OriginalFencingToken, OriginalRunId: d.OriginalRunId, OriginalStartedAt: d.OriginalStartedAt,
 					OriginalDeadlineAt: d.OriginalDeadlineAt, SourceLockSha256: d.SourceLockSha256, EvaluatorImageDigest: d.EvaluatorImageDigest,
 					PolicyApprovalSha256: d.PolicyApprovalSha256, ClosureEvidenceSha256: d.ClosureEvidenceSha256, NativeProofSha256: nativeDigest, PatchRetry: d.PatchRetry}}
+			if a.Schema == 3 {
+				second := *a.SecondRecovery
+				second.PreviousRecovery = cloneApexReevaluationCycle(current.job.Reevaluation)
+				cycle.SecondRecovery = &second
+			}
 			var digestErr error
 			cycle.ReceiptSha256, digestErr = model.CompetitionJobReevaluationCycleDigest(cycle)
 			server.Raise(digestErr)
@@ -334,7 +354,11 @@ func (self PostgresStore) authorizeDistributedJobReevaluation(ctx context.Contex
 			if a.IncidentClass == model.CompetitionJobReevaluationOperatorRequestedPatchRetry {
 				server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_patch_retry_proof',$1,true)`, nativeDigest))
 			}
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_job_reevaluation(job_id,round_id,environment,competition_id,season_id,operator_id,idempotency_key,request_sha256,authorization_sha256,authorized_at,original_terminal_json,authorization_json,receipt_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb)`, a.JobId, a.RoundId, a.Environment, a.CompetitionId, a.SeasonId, principal.Id, request.IdempotencyKey, requestDigest, request.AuthorizationSha256, current.now, string(current.terminal), string(authorizationJson), string(receiptJson)))
+			if a.Schema == 3 {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_job_second_reevaluation(job_id,round_id,environment,competition_id,season_id,operator_id,idempotency_key,request_sha256,authorization_sha256,authorized_at,original_terminal_json,authorization_json,receipt_json,previous_receipt_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14)`, a.JobId, a.RoundId, a.Environment, a.CompetitionId, a.SeasonId, principal.Id, request.IdempotencyKey, requestDigest, request.AuthorizationSha256, current.now, string(current.terminal), string(authorizationJson), string(receiptJson), a.SecondRecovery.PreviousReceiptSha256))
+			} else {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_job_reevaluation(job_id,round_id,environment,competition_id,season_id,operator_id,idempotency_key,request_sha256,authorization_sha256,authorized_at,original_terminal_json,authorization_json,receipt_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb)`, a.JobId, a.RoundId, a.Environment, a.CompetitionId, a.SeasonId, principal.Id, request.IdempotencyKey, requestDigest, request.AuthorizationSha256, current.now, string(current.terminal), string(authorizationJson), string(receiptJson)))
+			}
 			for _, slot := range d.IdleSlots {
 				updated, updateErr := tx.Exec(ctx, `UPDATE competition_execution_slot SET fencing_token=fencing_token+1 WHERE slot_id=$1 AND host_id=$2 AND fencing_token=$3 AND worker_id IS NULL AND job_id IS NULL AND lease_expires_at IS NULL`, slot.SlotId, slot.HostId, slot.FencingToken)
 				server.Raise(updateErr)
@@ -343,7 +367,17 @@ func (self PostgresStore) authorizeDistributedJobReevaluation(ctx context.Contex
 				}
 			}
 			server.Raise(ctx.Err())
-			updated, updateErr := tx.Exec(ctx, `UPDATE competition_job SET evaluation_cycle=1,cycle_attempt_offset=attempt_count,cycle_started_at=NULL,state='queued',available_at=$2,completed_at=NULL,score_json=NULL,eval_error_json=NULL,artifact_manifest_json=NULL,artifact_manifest_sha256=NULL,executor_host_id=NULL,executor_slot_id=NULL,executor_fencing_token=NULL,execution_deadline_at=NULL WHERE job_id=$1 AND state='failed' AND evaluation_cycle=0`, a.JobId, current.now)
+			updateSql := `UPDATE competition_job SET evaluation_cycle=1,cycle_attempt_offset=attempt_count,cycle_started_at=NULL,state='queued',available_at=$2,completed_at=NULL,score_json=NULL,eval_error_json=NULL,artifact_manifest_json=NULL,artifact_manifest_sha256=NULL,executor_host_id=NULL,executor_slot_id=NULL,executor_fencing_token=NULL,execution_deadline_at=NULL WHERE job_id=$1 AND state='failed' AND evaluation_cycle=0`
+			updateArgs := []any{a.JobId, current.now}
+			if a.Schema == 3 {
+				public := *receipt
+				public.DistributedProof = nil
+				projection, projectionErr := json.Marshal(public)
+				server.Raise(projectionErr)
+				updateSql = `UPDATE competition_job SET evaluation_cycle=2,cycle_attempt_offset=attempt_count,cycle_started_at=NULL,state='queued',available_at=$2,completed_at=NULL,score_json=NULL,eval_error_json=NULL,artifact_manifest_json=NULL,artifact_manifest_sha256=NULL,executor_host_id=NULL,executor_slot_id=NULL,executor_fencing_token=NULL,execution_deadline_at=NULL,second_recovery_receipt_json=$3::jsonb WHERE job_id=$1 AND state='failed' AND evaluation_cycle=1`
+				updateArgs = append(updateArgs, string(projection))
+			}
+			updated, updateErr := tx.Exec(ctx, updateSql, updateArgs...)
 			server.Raise(updateErr)
 			if updated.RowsAffected() != 1 {
 				panic(ErrConflict)

@@ -23,7 +23,8 @@ import (
 // Both existing transport contracts serialize the same owned recovery, keep
 // unpublished outcomes/private errors sealed, and refuse unauthorized cache reuse.
 func TestCompetitionReevaluationHttpPreservesOwnedReceiptAndPublicationEmbargo(t *testing.T) {
-	for _, v2 := range []bool{false, true} {
+	for _, testCase := range []struct{ v2, second bool }{{v2: false}, {v2: true}, {v2: false, second: true}, {v2: true, second: true}} {
+		v2 := testCase.v2
 		func() {
 			settings := validSettings()
 			if v2 {
@@ -49,6 +50,9 @@ func TestCompetitionReevaluationHttpPreservesOwnedReceiptAndPublicationEmbargo(t
 				t.Fatal(err)
 			}
 			cycle := newCompetitionReevaluationCycleTestFixture(t)
+			if testCase.second {
+				cycle = competitionSecondRecoveryCycleForTest(t)
+			}
 			cycle.CompetitionId = settings.CompetitionId
 			if v2 {
 				cycle.Environment, cycle.SeasonId = settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId
@@ -57,14 +61,26 @@ func TestCompetitionReevaluationHttpPreservesOwnedReceiptAndPublicationEmbargo(t
 			if err != nil {
 				t.Fatal(err)
 			}
+			if cycle.SecondRecovery != nil {
+				previous := cycle.SecondRecovery.PreviousRecovery
+				previous.Environment, previous.CompetitionId, previous.SeasonId = cycle.Environment, cycle.CompetitionId, cycle.SeasonId
+				previous.RoundPolicySha256 = cycle.RoundPolicySha256
+				sealApexReevaluationCycle(t, previous)
+				cycle.SecondRecovery.PreviousReceiptSha256 = previous.ReceiptSha256
+			}
 			cycleStartedAt := cycle.AuthorizedAt.Add(time.Second)
 			cycle.StartedAt = &cycleStartedAt
 			cycle.ReceiptSha256, err = model.CompetitionJobReevaluationCycleDigest(cycle)
 			if err != nil || model.ValidateCompetitionJobReevaluationCycle(&cycle) != nil {
 				t.Fatalf("canonical synthetic HTTP recovery marker: %v", err)
 			}
+			privateRequestDigest := sha256.Sum256([]byte("synthetic-private-http-recovery-request/v1"))
 			receipt := model.CompetitionJobReevaluationReceipt{CompetitionJobReevaluationCycle: cycle,
-				RequestSha256: strings.Repeat("f", 64), AttemptOffset: 3}
+				RequestSha256: hex.EncodeToString(privateRequestDigest[:]), AttemptOffset: 3}
+			publicCycle, err := json.Marshal(cycle)
+			if err != nil || bytes.Contains(publicCycle, []byte(receipt.RequestSha256)) {
+				t.Fatal("private HTTP fixture digest collides with a legitimate public receipt value", err)
+			}
 			receiptBefore, err := json.Marshal(receipt)
 			if err != nil {
 				t.Fatal(err)
@@ -75,9 +91,9 @@ func TestCompetitionReevaluationHttpPreservesOwnedReceiptAndPublicationEmbargo(t
 				ScoreJobResult: ScoreJobResult{
 					JobId: cycle.JobId, RoundId: cycle.RoundId, PatchSha256: cycle.PatchSha256, State: "failed",
 					StartedAt: &originalStartedAt, CompletedAt: &completedAt, Reevaluation: &receipt.CompetitionJobReevaluationCycle,
-					EvalError: terminalInfrastructureError("artifact_archive_failed", "synthetic-private-current-recovery-error"),
+					EvalError: terminalInfrastructureError(cycle.PreviousFailure.Code, "synthetic-private-current-recovery-error"),
 				},
-				EvaluationCycle: 1, AttemptCount: 4, CycleAttemptOffset: 3, CycleStartedAt: &cycleStartedAt,
+				EvaluationCycle: cycle.Cycle, AttemptCount: 4, CycleAttemptOffset: 3, CycleStartedAt: &cycleStartedAt,
 				Round: roundRecord{RoundResult: RoundResult{RoundId: cycle.RoundId, Epoch: 1,
 					RevealAt: time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)}, CompetitionId: settings.CompetitionId, PolicyJson: policy},
 			}

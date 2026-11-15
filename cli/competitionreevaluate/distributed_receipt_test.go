@@ -31,3 +31,20 @@ func TestDistributedRecoveryReceiptStdoutOmitsPrivateNativeProof(t *testing.T) {
 		t.Fatal("stdout redaction changed the private audit or omitted public receipt provenance")
 	}
 }
+
+// The schema-three stdout boundary keeps the public predecessor but excludes
+// the current private native proof and never mutates the retained audit.
+func TestSecondRecoveryReceiptStdoutKeepsPriorDigestButNoPrivateProof(t *testing.T) {
+	private := json.RawMessage(`{"synthetic_private_inventory":true}`)
+	receipt := &model.CompetitionJobReevaluationReceipt{CompetitionJobReevaluationCycle: model.CompetitionJobReevaluationCycle{Schema: 3, Cycle: 2,
+		SecondRecovery: &model.CompetitionOperatorSecondRecovery{Schema: 1, PreviousReceiptSha256: strings.Repeat("a", 64),
+			PreviousRecovery: &model.CompetitionJobReevaluationCycle{Schema: 2, Cycle: 1, ReceiptSha256: strings.Repeat("a", 64)}}}, DistributedProof: private}
+	var output bytes.Buffer
+	if err := writeRecoveryReceipt(&output, receipt); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "distributed_proof") || strings.Contains(output.String(), "synthetic_private_inventory") ||
+		!strings.Contains(output.String(), "previous_recovery") || !strings.Contains(output.String(), strings.Repeat("a", 64)) || !bytes.Equal(receipt.DistributedProof, private) {
+		t.Fatal("second recovery stdout lost predecessor or exposed/mutated private audit")
+	}
+}

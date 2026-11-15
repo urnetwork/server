@@ -29,6 +29,9 @@ func migrationDistributedRecoveryTestOwner(t testing.TB, priorVersion, head int)
 	if current.name != "separately authorized distributed infrastructure recovery" || current.removedVersion != patchRetry || patchRetry <= version {
 		t.Fatal("distributed owner oracle has an unreviewed successor")
 	}
+	if head >= server.CompetitionSecondRecoveryMigrationVersion() {
+		return migrationSecondRecoveryTestOwner(t)
+	}
 	if head >= patchRetry {
 		return migrationPatchRetryTestOwner(t)
 	}
@@ -45,7 +48,9 @@ func TestMigrationsDistributedRecoveryOwnerOracleClosedBoundaries(t *testing.T) 
 	for _, previous := range []int{server.CompetitionReevaluationPostCloseMigrationVersion(), server.CompetitionExecutorAdmissionClaimMigrationVersion()} {
 		for _, head := range []int{previous, version - 1, version, version + 1, server.MigrationCount()} {
 			want := previous
-			if head >= server.CompetitionOperatorRequestedPatchRetryMigrationVersion() {
+			if head >= server.CompetitionSecondRecoveryMigrationVersion() {
+				want = server.CompetitionSecondRecoveryMigrationVersion()
+			} else if head >= server.CompetitionOperatorRequestedPatchRetryMigrationVersion() {
 				want = server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
 			} else if head >= version {
 				want = version

@@ -12,7 +12,7 @@ import (
 // The same compiled program must be separately qualified for this capability;
 // an infrastructure-only receipt does not authorize retrying a submitted patch.
 func bindCompetitionOperatorRequestedPatchRetryRuntime(settings *Settings, proof model.CompetitionJobReevaluationRuntime, digest string) error {
-	if settings == nil || proof.Schema != 2 || proof.Kind != model.CompetitionOperatorRequestedPatchRetryRuntimeKind ||
+	if settings == nil || (proof.Schema != 2 && proof.Schema != 3) || proof.Kind != model.CompetitionOperatorRequestedPatchRetryRuntimeKind ||
 		proof.Capability != model.CompetitionOperatorRequestedPatchRetryCapability || !proof.Accepted || !proof.ApiCompatible || !proof.WorkerCompatible ||
 		len(proof.IncidentClasses) != 1 || proof.IncidentClasses[0] != model.CompetitionJobReevaluationOperatorRequestedPatchRetry ||
 		!gitShaPattern.MatchString(proof.SourceCommit) || !imageDigestPattern.MatchString(proof.ApiImageDigest) ||
@@ -37,6 +37,15 @@ func competitionDistributedRecoveryRequestClassAllowed(a model.CompetitionJobRee
 	if d == nil {
 		return false
 	}
+	expectedCycle := 0
+	if a.Schema == 3 {
+		if !competitionSecondRecoveryShape(a) {
+			return false
+		}
+		expectedCycle = 1
+	} else if a.SecondRecovery != nil {
+		return false
+	}
 	if a.Kind == model.CompetitionDistributedJobReevaluationAuthorizationKind && a.IncidentClass == model.CompetitionJobReevaluationDistributedInfrastructure {
 		return d.PatchRetry == nil && (d.Reason == model.CompetitionDistributedReevaluationRetentionBudget || d.Reason == model.CompetitionDistributedReevaluationLegacyPrelaunch)
 	}
@@ -55,6 +64,6 @@ func competitionDistributedRecoveryRequestClassAllowed(a model.CompetitionJobRee
 		Failure         model.CompetitionEvaluationFailure `json:"eval_error_json"`
 	}
 	return json.Unmarshal(a.ExpectedTerminalSnapshot, &terminal) == nil && terminal.JobId == a.JobId && terminal.RoundId == a.RoundId &&
-		terminal.PatchSha256 == d.PatchRetry.PatchSha256 && terminal.State == "failed" && terminal.EvaluationCycle == 0 &&
+		terminal.PatchSha256 == d.PatchRetry.PatchSha256 && terminal.State == "failed" && terminal.EvaluationCycle == expectedCycle &&
 		terminal.AttemptCount == a.ExpectedAttemptCount && model.CompetitionJobReevaluationFailureAllowed(a.IncidentClass, terminal.Failure)
 }

@@ -86,16 +86,23 @@ func validateCompetitionDistributedRecoveryRequest(settings *Settings, principal
 		!competitionPrincipalAllows(principal, "operator", settings.CompetitionId, settings.AutomationPolicy) && !patchRetryPrincipal {
 		return ErrAutomationDisabled
 	}
-	if a.Schema != 2 || !competitionDistributedRecoveryRequestClassAllowed(a) || d == nil || d.Schema != 1 ||
+	expectedCycle := 0
+	if a.Schema == 3 {
+		if !competitionSecondRecoveryShape(a) || !competitionSecondRecoveryJobAllowed(settings, a.JobId) {
+			return ErrConflict
+		}
+		expectedCycle = 1
+	}
+	if (a.Schema != 2 && a.Schema != 3) || !competitionDistributedRecoveryRequestClassAllowed(a) || d == nil || d.Schema != 1 ||
 		!tokenNamePattern.MatchString(request.IdempotencyKey) || !sha256Pattern.MatchString(request.AuthorizationSha256) ||
 		a.Environment != settings.AutomationPolicy.Environment || a.CompetitionId != settings.CompetitionId || a.SeasonId != settings.AutomationPolicy.SeasonId ||
-		a.JobId == (server.Id{}) || a.RoundId == (server.Id{}) || a.ExpectedCycle != 0 || a.ExpectedAttemptCount < 1 || !a.SingleUse ||
+		a.JobId == (server.Id{}) || a.RoundId == (server.Id{}) || a.ExpectedCycle != expectedCycle || a.ExpectedAttemptCount < 1 || !a.SingleUse ||
 		a.AuthorizedAt.IsZero() || !a.AuthorizedAt.Before(a.ExpiresAt) || !sha256Pattern.MatchString(a.EvidenceSha256) ||
 		!sha256Pattern.MatchString(a.ExpectedTerminalSha256) || a.IncidentEventId < 1 || !sha256Pattern.MatchString(a.IncidentEventSha256) ||
 		a.IncidentAttempt != a.ExpectedAttemptCount || a.FailureManifestSha256 != "" || a.RejectedArtifactPath != "" ||
 		a.BackingServiceEvidence != nil || a.OperatorInterruptionEvidence != nil || !sha256Pattern.MatchString(a.RoundPolicySha256) || !sha256Pattern.MatchString(a.BaselineSha256) ||
 		!tokenNamePattern.MatchString(d.OriginalHostId) || d.OriginalSlotId < 1 || d.OriginalFencingToken < 1 || d.NativeFencingToken < 1 ||
-		d.NativeFencingToken > d.OriginalFencingToken || d.OriginalRunId != competitionagent.RunId(a.JobId.String(), 0, a.ExpectedAttemptCount) ||
+		d.NativeFencingToken > d.OriginalFencingToken || d.OriginalRunId != competitionagent.RunId(a.JobId.String(), expectedCycle, a.ExpectedAttemptCount) ||
 		!sha256Pattern.MatchString(d.OriginalManifestSha256) || !sha256Pattern.MatchString(d.OriginalRequestSha256) ||
 		d.OriginalStartedAt.IsZero() || !d.OriginalDeadlineAt.Equal(d.OriginalStartedAt.Add(3*time.Hour)) ||
 		!sha256Pattern.MatchString(d.SourceLockSha256) || !imageDigestPattern.MatchString(d.EvaluatorImageDigest) ||
@@ -148,7 +155,7 @@ func observeCompetitionDistributedRecovery(ctx context.Context, settings *Settin
 			response, err := transport.Exchange(ctx, competitionagent.Request{Operation: "status", RunId: d.OriginalRunId, FencingToken: d.NativeFencingToken}, "", "")
 			if err != nil || validateCompetitionDistributedRecoveryEnvelope(response, host) != nil || response.RunId != d.OriginalRunId || response.FencingToken != d.NativeFencingToken ||
 				response.Identity == nil || response.Identity.HostId != d.OriginalHostId || response.Identity.JobId != a.JobId.String() || response.Identity.RoundId != a.RoundId.String() ||
-				response.Identity.RunId != d.OriginalRunId || response.Identity.Cycle != 0 || response.Identity.Attempt != a.ExpectedAttemptCount ||
+				response.Identity.RunId != d.OriginalRunId || response.Identity.Cycle != a.ExpectedCycle || response.Identity.Attempt != a.ExpectedAttemptCount ||
 				response.Identity.RoundEpoch != round.Epoch || response.Identity.SourceEpoch != evaluationSourceEpoch(round) ||
 				!response.Identity.StartedAt.Equal(d.OriginalStartedAt) || !response.Identity.DeadlineAt.Equal(d.OriginalDeadlineAt) ||
 				response.ManifestSha256 != d.OriginalManifestSha256 || response.RequestSha256 != d.OriginalRequestSha256 || len(response.SelfCheck) != 0 {
@@ -184,7 +191,7 @@ func validateCompetitionDistributedRecoveryReceipt(receipt *model.CompetitionJob
 		}
 		return nil
 	}
-	if receipt.Schema != 2 || receipt.Distributed == nil || len(receipt.DistributedProof) == 0 {
+	if (receipt.Schema != 2 && receipt.Schema != 3) || receipt.Distributed == nil || len(receipt.DistributedProof) == 0 {
 		return ErrConflict
 	}
 	var proof competitionDistributedRecoveryProof

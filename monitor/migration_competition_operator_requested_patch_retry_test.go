@@ -18,7 +18,7 @@ func migrationPatchRetryTestOwner(t testing.TB) migrationArtifact {
 	previous := server.CompetitionDistributedReevaluationMigrationVersion()
 	current := migrationCurrentSuffixTestContract(t, version).artifact
 	if version <= previous || migrationCurrentSuffixTestContract(t, previous).artifact.removedVersion != version ||
-		current.name != "separately authorized unchanged-patch retry" || current.removedVersion != 0 {
+		current.name != "separately authorized unchanged-patch retry" || current.removedVersion != server.CompetitionSecondRecoveryMigrationVersion() {
 		t.Fatal("patch retry catalog owner has an unreviewed boundary")
 	}
 	return current

@@ -223,7 +223,7 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			// claim's clock starts only after those waits and a fresh parent fence.
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
 			now = self.nowUtc().Truncate(time.Microsecond)
-			if job.EvaluationCycle > 0 && job.Reevaluation != nil && job.Reevaluation.Schema == 2 {
+			if job.EvaluationCycle > 0 && job.Reevaluation != nil && (job.Reevaluation.Schema == 2 || job.Reevaluation.Schema == 3) {
 				var clockErr error
 				now, clockErr = competitionDistributedRecoveryDatabaseTime(ctx, tx)
 				server.Raise(clockErr)

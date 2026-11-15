@@ -605,50 +605,52 @@ type Settings struct {
 	reevaluationRuntime                 *model.CompetitionJobReevaluationRuntime
 	reevaluationRuntimeSha256           string
 	distributedReevaluationSettings     *competitionDistributedReevaluationSettings
-	AutomationPolicy                    model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
-	Enabled                             bool                                    `yaml:"enabled"`
-	CompetitionId                       string                                  `yaml:"competition_id"`
-	BaseSha                             string                                  `yaml:"base_sha"`
-	EvaluatorImageDigest                string                                  `yaml:"evaluator_image_digest"`
-	PatchPolicy                         PatchPolicy                             `yaml:"patch_policy"`
-	EvaluationPolicy                    EvaluationPolicy                        `yaml:"evaluation_policy"`
-	FutureEpochPolicy                   *CompetitionFutureEpochPolicy           `yaml:"future_epoch_policy,omitempty"`
-	IntakeFirstPolicy                   *model.CompetitionIntakeFirstPolicy     `yaml:"intake_first_policy,omitempty"`
-	DistributedEvaluationPolicy         *CompetitionDistributedEvaluationPolicy `yaml:"-"`
-	SeasonPolicy                        SeasonPolicy                            `yaml:"season_policy"`
-	ArtifactRoot                        string                                  `yaml:"artifact_root"`
-	ArtifactBucket                      string                                  `yaml:"artifact_bucket"`
-	ConfigLocalDirectory                string                                  `yaml:"config_local_directory"`
-	VaultLocalDirectory                 string                                  `yaml:"vault_local_directory"`
-	SeasonEndsAt                        time.Time                               `yaml:"season_ends_at"`
-	RetainUntil                         time.Time                               `yaml:"retain_until"`
-	WorkerLeaseSeconds                  int                                     `yaml:"worker_lease_seconds"`
-	WorkerHeartbeatSeconds              int                                     `yaml:"worker_heartbeat_seconds"`
-	HostHeartbeatMaxAgeSeconds          int                                     `yaml:"host_heartbeat_max_age_seconds"`
-	MaxInfrastructureAttempts           int                                     `yaml:"max_infrastructure_attempts"`
-	SimulatorCommand                    string                                  `yaml:"simulator_command"`
-	EvaluatorCommand                    string                                  `yaml:"evaluator_command"`
-	EvaluatorCommandSha256              string                                  `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand                    string                                  `yaml:"self_check_command"`
-	SelfCheckCommandSha256              string                                  `yaml:"self_check_command_sha256"`
-	Tokens                              []Token                                 `yaml:"-"`
-	SeedKey                             []byte                                  `yaml:"-"`
-	workloadGenerator                   WorkloadGenerator
-	artifactArchive                     artifactArchive
-	automationLease                     *model.CompetitionSupervisorLease
-	automationRoundId                   server.Id
-	automationTargetRoundId             server.Id
-	roundBaselinePreparation            *roundBaselinePreparationProfile
-	futureBaselinePreparation           *roundBaselinePreparationProfile
-	intakeAdmission                     *competitionIntakeAdmission
-	intakeFirstActivation               *model.CompetitionSourceIntakeActivation
-	distributedCoordinator              *competitionDistributedCoordinatorProfile
-	distributedRoundEpoch               int
-	distributedPreparationOnly          bool
-	executorHostId                      string
-	executorSlotId                      int
-	executorReconcileExpiredOnly        bool
-	executorReconcileOnly               bool
+	// Isolated fixture scope only; never configurable or loaded from a document.
+	secondRecoveryJobIdForTest   server.Id
+	AutomationPolicy             model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
+	Enabled                      bool                                    `yaml:"enabled"`
+	CompetitionId                string                                  `yaml:"competition_id"`
+	BaseSha                      string                                  `yaml:"base_sha"`
+	EvaluatorImageDigest         string                                  `yaml:"evaluator_image_digest"`
+	PatchPolicy                  PatchPolicy                             `yaml:"patch_policy"`
+	EvaluationPolicy             EvaluationPolicy                        `yaml:"evaluation_policy"`
+	FutureEpochPolicy            *CompetitionFutureEpochPolicy           `yaml:"future_epoch_policy,omitempty"`
+	IntakeFirstPolicy            *model.CompetitionIntakeFirstPolicy     `yaml:"intake_first_policy,omitempty"`
+	DistributedEvaluationPolicy  *CompetitionDistributedEvaluationPolicy `yaml:"-"`
+	SeasonPolicy                 SeasonPolicy                            `yaml:"season_policy"`
+	ArtifactRoot                 string                                  `yaml:"artifact_root"`
+	ArtifactBucket               string                                  `yaml:"artifact_bucket"`
+	ConfigLocalDirectory         string                                  `yaml:"config_local_directory"`
+	VaultLocalDirectory          string                                  `yaml:"vault_local_directory"`
+	SeasonEndsAt                 time.Time                               `yaml:"season_ends_at"`
+	RetainUntil                  time.Time                               `yaml:"retain_until"`
+	WorkerLeaseSeconds           int                                     `yaml:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds       int                                     `yaml:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds   int                                     `yaml:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts    int                                     `yaml:"max_infrastructure_attempts"`
+	SimulatorCommand             string                                  `yaml:"simulator_command"`
+	EvaluatorCommand             string                                  `yaml:"evaluator_command"`
+	EvaluatorCommandSha256       string                                  `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand             string                                  `yaml:"self_check_command"`
+	SelfCheckCommandSha256       string                                  `yaml:"self_check_command_sha256"`
+	Tokens                       []Token                                 `yaml:"-"`
+	SeedKey                      []byte                                  `yaml:"-"`
+	workloadGenerator            WorkloadGenerator
+	artifactArchive              artifactArchive
+	automationLease              *model.CompetitionSupervisorLease
+	automationRoundId            server.Id
+	automationTargetRoundId      server.Id
+	roundBaselinePreparation     *roundBaselinePreparationProfile
+	futureBaselinePreparation    *roundBaselinePreparationProfile
+	intakeAdmission              *competitionIntakeAdmission
+	intakeFirstActivation        *model.CompetitionSourceIntakeActivation
+	distributedCoordinator       *competitionDistributedCoordinatorProfile
+	distributedRoundEpoch        int
+	distributedPreparationOnly   bool
+	executorHostId               string
+	executorSlotId               int
+	executorReconcileExpiredOnly bool
+	executorReconcileOnly        bool
 	// Existing custody is separate from admission; only a minted, short-lived
 	// native observation can authorize an attach without a fresh host check.
 	executorExistingWitness       *competitionExistingRunWitness
@@ -6010,7 +6012,8 @@ const jobSelect = `
 	       j.eval_error_json, j.patch_bytes, j.attempt_count, COALESCE(j.lease_owner, ''),
 	       j.lease_expires_at, j.api_image_digest, COALESCE(j.worker_image_digest, ''),
 	       j.evaluation_cycle,j.cycle_attempt_offset,j.cycle_started_at,
-	       (SELECT receipt_json FROM competition_job_reevaluation recovery WHERE recovery.job_id=j.job_id),
+	       CASE WHEN j.evaluation_cycle=2 THEN to_jsonb(j)->'second_recovery_receipt_json'
+	        ELSE (SELECT receipt_json FROM competition_job_reevaluation recovery WHERE recovery.job_id=j.job_id) END,
 	       COALESCE(j.executor_host_id,''),COALESCE(j.executor_slot_id,0),COALESCE(j.executor_fencing_token,0),j.execution_deadline_at,
 	       r.competition_id, r.workload_commitment, r.seed_nonce,
 	       r.seed_ciphertext, r.providers_sha256, r.providers_path,
@@ -6052,7 +6055,7 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 			return nil, err
 		}
 		if receipt.Cycle != job.EvaluationCycle || receipt.AttemptOffset != job.CycleAttemptOffset || receipt.JobId != job.JobId ||
-			receipt.RoundId != job.RoundId || receipt.PatchSha256 != job.PatchSha256 {
+			receipt.RoundId != job.RoundId || receipt.PatchSha256 != job.PatchSha256 || job.EvaluationCycle == 2 && len(receipt.DistributedProof) != 0 {
 			return nil, ErrConflict
 		}
 		receipt.StartedAt = job.CycleStartedAt

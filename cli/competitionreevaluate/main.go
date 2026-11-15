@@ -338,7 +338,7 @@ func runRecovery(args []string, output io.Writer) error {
 	if err := bindRecoveryRuntime(settings, runtime); err != nil {
 		return err
 	}
-	if auth.Schema == 2 {
+	if auth.Schema == 2 || auth.Schema == 3 {
 		if *coordinatorPath == "" || len(*coordinatorSha256) != 64 || controller.ConfigureCompetitionDistributedCoordinator(settings, *coordinatorPath, *coordinatorSha256) != nil {
 			return errors.New("distributed closure observation role rejected")
 		}

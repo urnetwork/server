@@ -11582,4 +11582,8 @@ var migrations = []any{
 	// write and read it, and the api and alt whose GET /account/epochs reads
 	// it.
 	operatorBlockPointsExpiredMigration,
+
+	// One separately approved job may receive a second recovery without replacing
+	// its original immutable audit or changing any other job's one-cycle limit.
+	newSqlMigration(CompetitionSecondRecoveryMigrationSql()),
 }
