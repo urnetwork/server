@@ -74,6 +74,7 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"GET /network/members":        model.RolePermissionMembers,
 	"POST /network/member-invite": model.RolePermissionMembers,
 	"POST /network/member-remove": model.RolePermissionMembers,
+	"GET /network/scim-changes":   model.RolePermissionMembers,
 
 	// the network's own settings
 	"POST /account/change-name":               model.RolePermissionAdmin,

@@ -6,6 +6,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/scim"
 	"time"
 )
 
@@ -419,6 +420,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/network/members", handlers.GetNetworkMembers),
 		// §7.10's member removal: the server's denial at once (TEAM-M6-11)
 		router.NewRoute("POST", "/network/member-remove", handlers.RemoveNetworkMember),
+		// §7.6's SCIM queue for admin devices (TEAM-M6-07)
+		router.NewRoute("GET", "/network/scim-changes", handlers.GetNetworkScimChanges),
 		// §7.5's invitations and network switching (TEAM-M6-04)
 		router.NewRoute("POST", "/network/member-invite", handlers.CreateNetworkMemberInvite),
 		router.NewRoute("POST", "/network/member-invite-accept", handlers.AcceptNetworkMemberInvite),
@@ -525,5 +528,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	routes = append(routes, internalGateProjection.Routes()...)
 	// an edge block's urnetwork-edge client jwts, on the edge class's internal bearer (TLS-M5-11; QD-812)
 	routes = append(routes, internalGateEdgeClient.Routes()...)
+	// §7.6's SCIM 2.0 for a team's IdP, on the team's SCIM bearer (TEAM-M6-07)
+	routes = append(routes, scim.Routes()...)
 	return applyRouteAccess(append(routes, oauth.Routes()...))
 }

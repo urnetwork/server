@@ -210,6 +210,7 @@ func registry() []specEndpoint {
 		{"POST", "/network/team-create", rt(model.CreateNetworkTeamArgs{}), rt(model.CreateNetworkTeamResult{})},
 		{"GET", "/network/members", nil, rt(model.GetNetworkMembersResult{})},
 		{"POST", "/network/member-remove", rt(controller.RemoveNetworkMemberArgs{}), rt(controller.RemoveNetworkMemberResult{})},
+		{"GET", "/network/scim-changes", nil, rt(model.GetNetworkScimChangesResult{})},
 		{"POST", "/network/team-checkout", rt(controller.TeamCheckoutArgs{}), rt(controller.TeamCheckoutResult{})},
 		{"POST", "/acl/ack", rt(model.AclAckArgs{}), rt(model.AclAckResult{})},
 		{"POST", "/acl/invite", rt(model.AclInviteArgs{}), rt(model.AclInviteResult{})},

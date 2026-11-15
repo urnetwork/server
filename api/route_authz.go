@@ -320,6 +320,22 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/team-create":                     routeAccessNetwork,  // makes a team network, its caller the first Owner (§7.5)
 	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5), Owners and Admins by the role gate
 	"POST /network/member-remove":                   routeAccessNetwork,  // denies a team's member at once (§7.10), Owners and Admins by the role gate
+	"GET /network/scim-changes":                     routeAccessNetwork,  // a team's queued SCIM changes (§7.6), Owners and Admins by the role gate
+	"GET /scim/v2/([^/]+)/ServiceProviderConfig":    routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"GET /scim/v2/([^/]+)/ResourceTypes":            routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"GET /scim/v2/([^/]+)/Schemas":                  routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"GET /scim/v2/([^/]+)/Users":                    routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"POST /scim/v2/([^/]+)/Users":                   routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"GET /scim/v2/([^/]+)/Users/([^/]+)":            routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"PUT /scim/v2/([^/]+)/Users/([^/]+)":            routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"PATCH /scim/v2/([^/]+)/Users/([^/]+)":          routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"DELETE /scim/v2/([^/]+)/Users/([^/]+)":         routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"GET /scim/v2/([^/]+)/Groups":                   routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"POST /scim/v2/([^/]+)/Groups":                  routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"GET /scim/v2/([^/]+)/Groups/([^/]+)":           routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"PUT /scim/v2/([^/]+)/Groups/([^/]+)":           routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"PATCH /scim/v2/([^/]+)/Groups/([^/]+)":         routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
+	"DELETE /scim/v2/([^/]+)/Groups/([^/]+)":        routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
 	"POST /network/member-invite":                   routeAccessNetwork,  // invites a person to a team (§7.5), Owners and Admins by the role gate
 	"POST /network/member-invite-accept":            routeAccessNetwork,  // a person joins a team from an invite with its own sign-in (§7.5)
 	"POST /auth/network-switch":                     routeAccessNetwork,  // a person's credential for another network it signs in to (§7.5)

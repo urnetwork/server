@@ -41,3 +41,21 @@ func GetNetworkMembers(w http.ResponseWriter, r *http.Request) {
 func RemoveNetworkMember(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.RemoveNetworkMember, w, r)
 }
+
+// GET /network/scim-changes?after=<change_id>: the team's queued SCIM changes for
+// an admin device to carry out, a page at a time (TEAM-M6-07).
+func GetNetworkScimChanges(w http.ResponseWriter, r *http.Request) {
+	args := &model.GetNetworkScimChangesArgs{}
+	if value := r.URL.Query().Get("after"); value != "" {
+		after, err := server.ParseId(value)
+		if err != nil {
+			http.Error(w, "Invalid change id.", http.StatusBadRequest)
+			return
+		}
+		args.After = &after
+	}
+	impl := func(clientSession *session.ClientSession) (*model.GetNetworkScimChangesResult, error) {
+		return model.GetNetworkScimChanges(args, clientSession)
+	}
+	router.WrapRequireAuth(impl, w, r)
+}
