@@ -738,8 +738,10 @@ func loadOnboardingFactsIn(ctx context.Context, row *model.NetworkOnboarding, zo
 	feedbackSubmitted := onboardingFeedbackAnswered(model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt), func(name string) bool {
 		return model.HasOnboardingEvent(ctx, row.NetworkId, name)
 	})
-	// E2's widget email goes only where the newest app build has the widget
-	platform, widgetBuild := onboardingClientBuild(row, model.GetNetworkNewestClientBuild(ctx, row.NetworkId), cfg.EffectiveWidgetSettings())
+	// E2's widget email goes only where the newest app build has the widget;
+	// the reader's app also decides who bills them (the offer emails' price)
+	// and whether the offer may be emailed
+	platform, distribution, widgetBuild := onboardingClientBuild(row, model.GetNetworkNewestClientBuild(ctx, row.NetworkId), cfg.EffectiveWidgetSettings())
 	facts := onboarding.Facts{
 		Path:           path,
 		HasEmail:       row.Email,
@@ -756,9 +758,12 @@ func loadOnboardingFactsIn(ctx context.Context, row *model.NetworkOnboarding, zo
 		// an App Store network on path B could not redeem the emailed offer
 		// while no code reaches it (REVIEW.md finding 2): no offer email until
 		// offer.apple_email_enabled says the codes flow. The direct-download
-		// Mac bills through Stripe and gets it (P6).
-		NoOfferEmail:      onboarding.OfferEmailWithheld(offerByCountry, row.Platform, row.Distribution, path, cfg.Offer.AppleEmailEnabled),
+		// Mac bills through Stripe and gets it (P6). Judged on the reader's
+		// app as Platform resolves it, so a row recorded without a platform
+		// takes its newest client's
+		NoOfferEmail:      onboarding.OfferEmailWithheld(offerByCountry, platform, distribution, path, cfg.Offer.AppleEmailEnabled),
 		Platform:          platform,
+		Distribution:      distribution,
 		WidgetBuild:       widgetBuild,
 		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
@@ -798,16 +803,24 @@ func onboardingFeedbackEmailSent(emails []*model.NetworkOnboardingEmail) bool {
 	return false
 }
 
-// onboardingClientBuild is the Platform and WidgetBuild facts from the
-// network's newest active client (nil when it has none). The platform is the
-// row's, else the client's (from its device spec): a row recorded without
-// one takes the app the reader uses. WidgetBuild judges that client's build
-// by its platform, the app version it last connected with and, when it is on
-// the row's platform, the row's distribution, the only one the server keeps
+// onboardingClientBuild is the Platform, Distribution and WidgetBuild facts
+// from the network's newest active client (nil when it has none). The
+// platform is the row's, else the client's (from its device spec): a row
+// recorded without one takes the app the reader uses. The distribution is
+// the row's when the platform is the row's, else unknown, since a device spec
+// names none; an Android app of unknown distribution counts as the Play
+// build (onboarding.StoreBilledPlatform). Email sign-ups from the Android
+// app are often recorded without a platform: its sign-up request names
+// none, and its first auth-client can run before the row exists. WidgetBuild
+// judges that client's build by its platform, the app version it last
+// connected with and, when it is on the row's platform, the row's
+// distribution, the only one the server keeps
 // (onboarding.WidgetSettings.HasWidget). Without a client there is no widget
 // build, and a row without a platform stays unknown.
-func onboardingClientBuild(row *model.NetworkOnboarding, build *model.NetworkClientBuild, widgets *onboarding.WidgetSettings) (platform string, widgetBuild bool) {
-	platform = row.Platform
+func onboardingClientBuild(row *model.NetworkOnboarding, build *model.NetworkClientBuild, widgets *onboarding.WidgetSettings) (platform string, distribution string, widgetBuild bool) {
+	if row.Platform != "" {
+		platform, distribution = row.Platform, row.Distribution
+	}
 	if build == nil {
 		return
 	}
@@ -815,11 +828,11 @@ func onboardingClientBuild(row *model.NetworkOnboarding, build *model.NetworkCli
 	if platform == "" {
 		platform = buildPlatform
 	}
-	distribution := ""
+	buildDistribution := ""
 	if buildPlatform == row.Platform {
-		distribution = row.Distribution
+		buildDistribution = row.Distribution
 	}
-	widgetBuild = widgets.HasWidget(buildPlatform, distribution, build.ClientVersion)
+	widgetBuild = widgets.HasWidget(buildPlatform, buildDistribution, build.ClientVersion)
 	return
 }
 
@@ -879,12 +892,15 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 	}
 	connectDays, _ := model.NetworkConnectDays(ctx, row.NetworkId, row.CreatedAt)
 	providers, countries := providersOnline(ctx)
+	// StoreBilled is the decision's, made on the reader's app as the facts
+	// resolve it (a row recorded without a platform takes its newest
+	// client's), not on the row alone
 	in := onboarding.ParamsInput{
 		Template:        decision.Template,
 		Variant:         decision.Variant,
 		Opening:         decision.Opening,
 		Platform:        onboarding.DeviceName(row.Platform, templateLocale),
-		StoreBilled:     onboarding.StoreBilledPlatform(row.Platform, row.Distribution),
+		StoreBilled:     decision.StoreBilled,
 		Browser:         decision.Browser,
 		Locale:          templateLocale,
 		DailyDataGb:     float64(model.Pro().Free.Data) / float64(model.Gib),
