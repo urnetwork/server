@@ -317,6 +317,7 @@ func (self *Worker) claimWithPreparedRoundBaselineOwned(ctx context.Context, hos
 		}
 		selected := *self.settings
 		selected.executorReconcileOnly = !available
+		selected.executorFreshOnly = competitionExistingControlEnabled(self.settings)
 		return self.store.Claim(ctx, &selected, self.workerId, self.workerImageDigest)
 	}
 	if self.settings.roundBaselinePreparation == nil {

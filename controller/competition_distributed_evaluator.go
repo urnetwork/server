@@ -57,7 +57,7 @@ func (self *competitionAgentEvaluator) SelfCheck(ctx context.Context, settings *
 		return HostSelfCheck{}, err
 	}
 	check, err := decodeHostSelfCheck(response.SelfCheck)
-	if err != nil || response.State != "ready" || !check.Eligible(settings) || validateCompetitionPrivateHostProbe(check) != nil {
+	if err != nil || response.ExistingRun != nil || response.State != "ready" || !check.Eligible(settings) || validateCompetitionPrivateHostProbe(check) != nil {
 		return check, errors.New("authenticated executor did not pass containment and exact-round readiness")
 	}
 	return check, nil
@@ -97,11 +97,26 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 		return failure("executor_bundle_unavailable", "authenticated frozen evaluation inputs are unavailable")
 	}
 	defer os.RemoveAll(inputDirectory)
+	return self.observePreparedRun(ctx, parent, settings, job, manifest, inputDirectory, false)
+}
+
+// Only fresh evaluation can supply an input directory or select start. The
+// existing-control branch is closed to status, artifact receipt and cancellation.
+func (self *competitionAgentEvaluator) observePreparedRun(ctx, parent context.Context, settings *Settings, job *queuedJob, manifest competitionagent.StartManifest, inputDirectory string, existing bool) EvaluationOutcome {
+	failure := func(code, message string) EvaluationOutcome {
+		return EvaluationOutcome{Error: terminalInfrastructureError(code, message)}
+	}
 	manifestDigest, err := competitionagent.ManifestDigest(manifest)
 	if err != nil {
 		return failure("executor_bundle_invalid", "frozen execution bundle could not be authenticated")
 	}
 	request := competitionagent.Request{Operation: "start", RunId: manifest.Identity.RunId, FencingToken: job.SlotFencingToken, Start: &manifest}
+	if existing {
+		if inputDirectory != "" {
+			return failure("executor_identity_invalid", "existing execution cannot receive another input bundle")
+		}
+		request.Operation, request.Start = "status", nil
+	}
 	for {
 		if ctx.Err() != nil {
 			now := server.NowUtc()
@@ -111,10 +126,17 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 			if now.Before(*job.ExecutionDeadline) && parent.Err() != nil {
 				return failure("executor_custody_relinquished", "coordinator relinquished custody of the original remote execution")
 			}
-			self.cancelExpiredRun(settings, job, manifest.Identity.RunId)
+			if existing {
+				self.cancelExistingRun(settings, job, manifest.Identity.RunId)
+			} else {
+				self.cancelExpiredRun(settings, job, manifest.Identity.RunId)
+			}
 			return failure("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
 		}
-		response, exchangeErr := self.transport.Exchange(ctx, request, inputDirectory, "")
+		response, exchangeErr := self.exchangeRun(ctx, request, inputDirectory, "", existing)
+		if exchangeErr == nil && existing {
+			exchangeErr = validateCompetitionExistingResponse(settings, job, manifest, response, self.host)
+		}
 		if errors.Is(exchangeErr, competitionagent.ErrIntegrity) {
 			return EvaluationOutcome{Error: terminalInfrastructureError("executor_integrity_rejected", "authenticated executor transport rejected altered or invalid evidence"), distributedIntegrityRejected: true}
 		}
@@ -132,7 +154,10 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 								}
 							}
 						}()
-						artifactResponse, artifactErr := self.transport.Exchange(ctx, competitionagent.Request{Operation: "artifacts", RunId: request.RunId, FencingToken: request.FencingToken}, "", directory)
+						artifactResponse, artifactErr := self.exchangeRun(ctx, competitionagent.Request{Operation: "artifacts", RunId: request.RunId, FencingToken: request.FencingToken}, "", directory, existing)
+						if artifactErr == nil && existing {
+							artifactErr = validateCompetitionExistingResponse(settings, job, manifest, artifactResponse, self.host)
+						}
 						if errors.Is(artifactErr, competitionagent.ErrIntegrity) {
 							_ = os.RemoveAll(directory)
 							return EvaluationOutcome{Error: terminalInfrastructureError("executor_integrity_rejected", "authenticated executor artifact transfer rejected altered or invalid evidence"), distributedIntegrityRejected: true}, true
@@ -165,7 +190,7 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 		// Repeating start is an idempotent reconciliation: the agent persists
 		// launch_attempted before systemd launch, including a lost start reply.
 		request.Operation, request.Start = "status", nil
-		if exchangeErr == nil && (response.State == "not_found" || response.State == "unknown" && response.ErrorCode == "run_not_found" && response.Identity == nil) {
+		if !existing && exchangeErr == nil && (response.State == "not_found" || response.State == "unknown" && response.ErrorCode == "run_not_found" && response.Identity == nil) {
 			request.Operation, request.Start = "start", &manifest
 		}
 		next := self.poll
@@ -177,6 +202,31 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 		case <-next:
 		}
 	}
+}
+
+// Dynamic dispatch cannot accidentally route existing custody through an
+// ordinary endpoint whose reconciliation is allowed to issue start.
+func (self *competitionAgentEvaluator) exchangeRun(ctx context.Context, request competitionagent.Request, inputDirectory, outputDirectory string, existing bool) (competitionagent.Response, error) {
+	if !existing {
+		response, err := self.transport.Exchange(ctx, request, inputDirectory, outputDirectory)
+		if err == nil && response.ExistingRun != nil {
+			return competitionagent.Response{}, errors.Join(competitionagent.ErrIntegrity, errors.New("existing observation cannot become ordinary evaluation authority"))
+		}
+		return response, err
+	}
+	transport, ok := self.transport.(competitionExistingAgentTransport)
+	if !ok || inputDirectory != "" || request.Start != nil || request.Operation != "status" && request.Operation != "artifacts" && request.Operation != "cancel" {
+		return competitionagent.Response{}, errors.Join(competitionagent.ErrIntegrity, errors.New("existing execution transport cannot prepare or start work"))
+	}
+	return transport.ExchangeExisting(ctx, request, outputDirectory)
+}
+
+// Only the original absolute deadline asks the existing-control role to stop.
+// Ordinary parent withdrawal leaves the remote native execution untouched.
+func (self *competitionAgentEvaluator) cancelExistingRun(settings *Settings, job *queuedJob, runId string) {
+	ctx, cancel := context.WithTimeout(context.Background(), settings.distributedCoordinator.Config.Settings.CancelTimeout)
+	defer cancel()
+	_, _ = self.exchangeRun(ctx, competitionagent.Request{Operation: "cancel", RunId: runId, FencingToken: job.SlotFencingToken}, "", "", true)
 }
 
 // Cancellation never gives an execution a fresh budget. Cleanup is bounded

@@ -74,6 +74,9 @@ func (self *Config) validateRecoveryRole(settings AgentSettings, protected, dock
 		settings.RecoveryMemoryHeadroomBytes <= 0 || settings.RecoveryTasksHeadroom <= 0 {
 		return errors.New("recovery requires exact static protected role authority")
 	}
+	if _, err := recoverySettingsForConfig(*self, settings); err != nil {
+		return err
+	}
 	if self.Limits.Validate() != nil || self.Limits.MaximumJobDuration > DefaultLimits().MaximumJobDuration {
 		return errors.New("recovery cannot widen original job limits")
 	}

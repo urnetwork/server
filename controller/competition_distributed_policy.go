@@ -136,6 +136,22 @@ type competitionExecutorConnection struct {
 	SshEndpoint             string `json:"ssh_endpoint,omitempty"`
 	SshIdentityFile         string `json:"ssh_identity_file,omitempty"`
 	SshKnownHostsFile       string `json:"ssh_known_hosts_file,omitempty"`
+
+	ExistingControl *competitionExistingControlConnection `json:"existing_control,omitempty"`
+}
+
+// A separately provisioned forced role cannot be selected by fresh work. Its
+// approval and pins require independent operational/native qualification.
+type competitionExistingControlConnection struct {
+	ApprovalSha256         string `json:"approval_sha256"`
+	ResourceBoundarySha256 string `json:"resource_boundary_sha256"`
+	AgentCommand           string `json:"agent_command"`
+	AgentCommandSha256     string `json:"agent_command_sha256"`
+	AgentConfigPath        string `json:"agent_config_path"`
+	AgentConfigSha256      string `json:"agent_config_sha256"`
+	SshEndpoint            string `json:"ssh_endpoint,omitempty"`
+	SshIdentityFile        string `json:"ssh_identity_file,omitempty"`
+	SshKnownHostsFile      string `json:"ssh_known_hosts_file,omitempty"`
 }
 
 // Operational bounds belong to the coordinator owner. No nonpositive bound
@@ -148,13 +164,18 @@ type competitionDistributedCoordinatorSettings struct {
 	CancelTimeout          time.Duration           `json:"cancel_timeout"`
 	MaximumDiagnosticBytes int64                   `json:"maximum_diagnostic_bytes"`
 	Limits                 competitionagent.Limits `json:"limits"`
+
+	// A live authenticated RPC mints at most one attachment inside this local
+	// age bound; nonpositive refuses existing-control attachment.
+	ExistingWitnessMaximumAge time.Duration `json:"existing_witness_maximum_age"`
 }
 
 // Defaults are transport bounds, never calibration or scoring policy.
 func defaultCompetitionDistributedCoordinatorSettings() competitionDistributedCoordinatorSettings {
 	return competitionDistributedCoordinatorSettings{SshCommand: "/usr/bin/ssh", ConnectionTimeout: 15 * time.Second,
 		RequestTimeout: 2 * time.Minute, PollInterval: 5 * time.Second, CancelTimeout: 30 * time.Second,
-		MaximumDiagnosticBytes: 1024 * 1024, Limits: competitionagent.DefaultLimits()}
+		ExistingWitnessMaximumAge: 15 * time.Second,
+		MaximumDiagnosticBytes:    1024 * 1024, Limits: competitionagent.DefaultLimits()}
 }
 
 // Private, root-pinned deployment role. The approved public policy separately
@@ -227,6 +248,9 @@ func ConfigureCompetitionDistributedCoordinator(settings *Settings, path, expect
 		}
 		seen[connection.HostId] = true
 		if err := validateCompetitionExecutorEvaluatorConnection(connection); err != nil {
+			return err
+		}
+		if err := validateCompetitionExistingControlConnection(connection, *host, config.Settings); err != nil {
 			return err
 		}
 		if host.Transport == "ssh" {

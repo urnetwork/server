@@ -12,6 +12,8 @@ type arguments struct {
 	configPath           string
 	serve                bool
 	serveManaged         bool
+	serveExisting        bool
+	serveExistingManaged bool
 	executeRunId         string
 	cleanupRunId         string
 	dockerClientRunId    string
@@ -33,6 +35,8 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.StringVar(&parsed.configPath, "config", "", "Protected root-owned subevaluation-role configuration")
 	flags.BoolVar(&parsed.serve, "serve", false, "Serve one signed framed operation on stdin/stdout")
 	flags.BoolVar(&parsed.serveManaged, "serve-managed", false, "Root forced SSH wrapper; place fixed control service before framing")
+	flags.BoolVar(&parsed.serveExisting, "serve-existing", false, "PID1-only existing-run observation; never admit execution")
+	flags.BoolVar(&parsed.serveExistingManaged, "serve-existing-managed", false, "Separately approved independently bounded existing-run forced role")
 	flags.StringVar(&parsed.executeRunId, "execute", "", "Systemd-only fixed persisted execution identity")
 	flags.StringVar(&parsed.cleanupRunId, "cleanup", "", "Systemd-only fixed persisted stop-cleanup identity")
 	flags.StringVar(&parsed.dockerClientRunId, "docker-client", "", "Non-root fixed-run Docker client; public sibling metadata only")
@@ -47,7 +51,7 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.serveManaged, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe, parsed.recoverActive, parsed.closeLegacyPrelaunch, parsed.startPrivateEngine} {
+	for _, enabled := range []bool{parsed.serve, parsed.serveManaged, parsed.serveExisting, parsed.serveExistingManaged, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe, parsed.recoverActive, parsed.closeLegacyPrelaunch, parsed.startPrivateEngine} {
 		if enabled {
 			roles++
 		}

@@ -288,6 +288,39 @@ func TestRuntimeResourceBoundaryRequiresAllNativeProofs(t *testing.T) {
 	}
 }
 
+// Existing custody uses the entire native verifier even after startup disk
+// floors are consumed. Native hard-cap/network failures remain fail-closed.
+func TestRuntimeResourceBoundaryExistingCustodyRetainsFullNativeProofsUnderPressure(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	fixture.host.facts.FreeBytes, fixture.host.facts.BackingFreeBytes = 0, 0
+	if _, err := verifyRuntimeResourceBoundary(t.Context(), fixture.pin, fixture.scope, fixture.settings, fixture.host); err == nil {
+		t.Fatal("ordinary fresh admission ignored consumed startup disk floors")
+	}
+	boundary, err := verifyRuntimeResourceBoundaryForPurpose(t.Context(), fixture.pin, fixture.scope, fixture.settings, fixture.host, managementExistingContainment)
+	if err != nil {
+		t.Fatal("existing custody depended on startup disk watermarks", err)
+	}
+	defer boundary.Close()
+	events := fixture.host.events
+	if len(events) < 4 || events[len(events)-4] != "kernel" || events[len(events)-3] != "namespace" || events[len(events)-2] != "daemon" || events[len(events)-1] != "network" {
+		t.Fatal("existing containment skipped a native hard-boundary proof")
+	}
+	for _, failure := range []string{"hard-cap", "network", "daemon", "namespace"} {
+		t.Run(failure, func(t *testing.T) {
+			invalid := newRuntimeBoundaryTest(t)
+			invalid.host.facts.FreeBytes, invalid.host.facts.BackingFreeBytes = 0, 0
+			if failure == "hard-cap" {
+				invalid.host.facts.BlockBytes = invalid.boundary.MaximumBytes + 1
+			} else {
+				invalid.host.fail = failure
+			}
+			if _, err := verifyRuntimeResourceBoundaryForPurpose(t.Context(), invalid.pin, invalid.scope, invalid.settings, invalid.host, managementExistingContainment); err == nil {
+				t.Fatal("existing control waived actual native containment", failure)
+			}
+		})
+	}
+}
+
 // The qualified host uses stock runc with explicitly empty arguments. Docker
 // reserves that name, so its daemon config must not redefine runtimes.runc.
 func TestRuntimeResourceBoundaryAcceptsOnlyExplicitStockRuncProfile(t *testing.T) {

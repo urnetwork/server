@@ -76,12 +76,26 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 	if settings.automationLease == nil || settings.automationRoundId == (server.Id{}) {
 		return nil, ErrLeaseLost
 	}
+	witness := settings.executorExistingWitness
+	if witness != nil && (witness.evaluator == nil || witness.slotFence <= 0 || witness.slotId != settings.executorSlotId || witness.identity.HostId != settings.executorHostId ||
+		!sameCompetitionAgentIdentity(&witness.manifest.Identity, &witness.identity) || !witness.consumed.CompareAndSwap(false, true)) {
+		return nil, ErrLeaseLost
+	}
+	var stateErr error
 	resultErr = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			job = nil
+			job, stateErr = nil, nil
 			automationScopeLockInTx(ctx, tx, settings)
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
-			server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+			if witness == nil {
+				if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"); holdErr != nil {
+					if holdErr == ErrAutomationHeld {
+						stateErr = ErrAutomationHeld
+						return
+					}
+					server.Raise(holdErr)
+				}
+			}
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			var legacyWorker *string
 			var legacyJob *server.Id
@@ -121,7 +135,14 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			if hostId != settings.executorHostId {
 				panic(ErrConflict)
 			}
+			if witness != nil && (slotJob == nil || slotJob.String() != witness.identity.JobId || slotWorker == nil || *slotWorker != witness.leaseOwner ||
+				slotLease == nil || !slotLease.Equal(witness.leaseExpiresAt) || slotFence != witness.slotFence) {
+				panic(ErrLeaseLost)
+			}
 			if (settings.executorReconcileExpiredOnly || settings.executorReconcileOnly) && slotJob == nil {
+				return
+			}
+			if settings.executorFreshOnly && slotJob != nil {
 				return
 			}
 			now := self.nowUtc().Truncate(time.Microsecond)
@@ -150,6 +171,9 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 				return
 			}
 			server.Raise(scanErr)
+			if witness != nil && (!reconcile || !witness.matches(settings, job, now)) {
+				panic(ErrLeaseLost)
+			}
 			if job.RoundId != settings.automationRoundId || !roundUsesAutomation(&job.Round) {
 				panic(ErrLeaseLost)
 			}
@@ -178,11 +202,15 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 				job = nil
 				return
 			}
-			allowed, gateErr := competitionIntakeFirstCandidateClaimInTx(ctx, tx, settings, job.RoundId)
-			server.Raise(gateErr)
-			if !allowed {
-				job = nil
-				return
+			if witness == nil {
+				// This gate authorizes a fresh candidate clock, and includes the
+				// claim-only hold. Existing native custody already has that clock.
+				allowed, gateErr := competitionIntakeFirstCandidateClaimInTx(ctx, tx, settings, job.RoundId)
+				server.Raise(gateErr)
+				if !allowed {
+					job = nil
+					return
+				}
 			}
 			executionWorkerImageDigest := workerImageDigest
 			if reconcile {
@@ -219,6 +247,9 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			}
 			if reconcile && (job.State != "running" || job.ExecutorHostId != hostId || job.SlotId != settings.executorSlotId ||
 				job.SlotFencingToken != slotFence || job.ExecutionDeadline == nil || job.LeaseExpiresAt == nil || now.Before(*job.LeaseExpiresAt)) {
+				panic(ErrLeaseLost)
+			}
+			if witness != nil && (!reconcile || !witness.matches(settings, job, now)) {
 				panic(ErrLeaseLost)
 			}
 			fence := slotFence + 1
@@ -263,11 +294,18 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			if reconcile {
 				eventType = "execution_reconciled"
 			}
-			appendEvent(ctx, tx, job.JobId, now, eventType, workerId, map[string]any{
+			eventPayload := map[string]any{
 				"attempt": job.AttemptCount + increment, "worker_image_digest": executionWorkerImageDigest,
 				"executor_host_id": hostId, "executor_slot_id": settings.executorSlotId,
 				"executor_fencing_token": fence, "execution_deadline_at": *deadline,
-			})
+			}
+			if witness != nil {
+				// No seed or signing credential occurs in this signed envelope.
+				eventPayload["existing_native_observation"] = witness.response
+				eventPayload["existing_observation_started_at"] = witness.observedAt
+				eventPayload["existing_observation_expires_at"] = witness.expiresAt
+			}
+			appendEvent(ctx, tx, job.JobId, now, eventType, workerId, eventPayload)
 			job.State, job.LeaseOwner, job.LeaseExpiresAt = "running", workerId, &leaseUntil
 			job.AttemptCount += increment
 			job.WorkerImageDigest, job.ExecutorHostId, job.SlotId, job.SlotFencingToken, job.ExecutionDeadline = executionWorkerImageDigest, hostId, settings.executorSlotId, fence, deadline
@@ -282,6 +320,9 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 	})
 	if resultErr != nil {
 		return nil, resultErr
+	}
+	if stateErr != nil {
+		return nil, stateErr
 	}
 	return job, nil
 }

@@ -125,14 +125,18 @@ func recoveryServiceTextPropertiesForRole(config Config, policy *ManagementResou
 	if err != nil {
 		return nil, err
 	}
+	memory, tasks, err := recoveryServiceLimits(config, role)
+	if err != nil {
+		return nil, err
+	}
 	expected := map[string]string{
 		"Unit.Description": "Independent subevaluation recovery outside ordinary management ancestry",
 		"Unit.Requires":    managementCleanupSliceName, "Unit.After": managementCleanupSliceName, "Unit.StartLimitIntervalSec": "0",
 		"Service.Type": "oneshot", "Service.User": "root", "Service.Group": "root", "Service.Slice": managementCleanupSliceName,
 		"Service.ExecStart": systemdCommandWord(config.Agent.Path) + " --config " + systemdCommandWord(config.configPath) + " " + role,
 		"Service.Restart":   "no", "Service.KillMode": "control-group", "Service.OOMPolicy": "kill", "Service.LimitCORE": "0", "Service.UMask": "0077",
-		"Service.MemoryMax": strconv.FormatInt(DefaultManagementBoundarySettings().CleanupMemoryBytes, 10), "Service.MemorySwapMax": "0",
-		"Service.TasksMax": strconv.FormatInt(DefaultManagementBoundarySettings().CleanupTasksMaximum, 10), "Service.CPUQuota": strconv.Itoa(settings.ManagementCpuQuotaPercent) + "%",
+		"Service.MemoryMax": strconv.FormatInt(memory, 10), "Service.MemorySwapMax": "0",
+		"Service.TasksMax": strconv.FormatInt(tasks, 10), "Service.CPUQuota": strconv.Itoa(settings.ManagementCpuQuotaPercent) + "%",
 		"Service.CPUQuotaPeriodSec": strconv.FormatInt(settings.ContainmentCpuPeriodMicros, 10) + "us",
 		"Service.AllowedCPUs":       policy.ManagementCpuSet, "Service.CPUAffinity": policy.ManagementCpuSet,
 		"Service.TimeoutStartSec": strconv.FormatFloat(timeout.Seconds(), 'f', 6, 64) + "s", "Service.TimeoutStopSec": strconv.FormatFloat(settings.CancelGrace.Seconds(), 'f', 6, 64) + "s",
@@ -149,6 +153,12 @@ func RenderRecoveryService(agentPath, configPath string, policy ManagementResour
 	return renderRecoveryServiceForRole(agentPath, configPath, policy, settings, "--recover-active")
 }
 
+// Inert provisioning for the explicit matching companion; ordinary rendering
+// and legacy closure keep their original full recovery limits.
+func RenderExistingRecoveryService(agentPath, configPath string, policy ManagementResourcePolicy, settings AgentSettings) ([]byte, error) {
+	return renderRecoveryServiceConfig(Config{Agent: Pin{Path: agentPath}, configPath: configPath, ExistingRecoveryProfile: existingRecoveryCapacityProfile}, policy, settings, "--recover-active")
+}
+
 // The authorization document replaces the ordinary config argument only for
 // the explicit operator closure role. Rendering grants no native permission.
 func RenderLegacyPrelaunchRecoveryService(agentPath, authorizationPath string, policy ManagementResourcePolicy, settings AgentSettings) ([]byte, error) {
@@ -157,10 +167,15 @@ func RenderLegacyPrelaunchRecoveryService(agentPath, authorizationPath string, p
 
 // Both closed roles use identical resource and independent-placement limits.
 func renderRecoveryServiceForRole(agentPath, configPath string, policy ManagementResourcePolicy, settings AgentSettings, role string) ([]byte, error) {
+	return renderRecoveryServiceConfig(Config{Agent: Pin{Path: agentPath}, configPath: configPath}, policy, settings, role)
+}
+
+// Rendering and strict admission consume the same authenticated profile values.
+func renderRecoveryServiceConfig(config Config, policy ManagementResourcePolicy, settings AgentSettings, role string) ([]byte, error) {
 	if err := ValidateManagementResourcePolicy(policy, DefaultManagementBoundarySettings()); err != nil {
 		return nil, err
 	}
-	expected, err := recoveryServiceTextPropertiesForRole(Config{Agent: Pin{Path: agentPath}, configPath: configPath}, &policy, settings, role)
+	expected, err := recoveryServiceTextPropertiesForRole(config, &policy, settings, role)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +362,11 @@ func validateRecoveryServiceProjectionForRole(content []byte, config Config, pol
 			return errors.New("recovery target omitted independent slice lifetime ordering")
 		}
 	}
-	for key, want := range map[string]int64{"MemoryMax": DefaultManagementBoundarySettings().CleanupMemoryBytes, "MemorySwapMax": 0, "TasksMax": DefaultManagementBoundarySettings().CleanupTasksMaximum} {
+	memory, tasks, err := recoveryServiceLimits(config, role)
+	if err != nil {
+		return err
+	}
+	for key, want := range map[string]int64{"MemoryMax": memory, "MemorySwapMax": 0, "TasksMax": tasks} {
 		got, err := strconv.ParseInt(values[key], 10, 64)
 		if err != nil || strconv.FormatInt(got, 10) != values[key] || got != want {
 			return errors.New("recovery target resource ceiling differs from its explicit class")
@@ -414,6 +433,15 @@ func verifyRecoveryServiceForRole(ctx context.Context, config Config, settings A
 	configPin := Pin{Path: config.configPath, Sha256: config.configSha256}
 	if validateFilePin(configPin, settings.ConfigBytes, protected) != nil {
 		return errors.New("recovery role configuration changed before manager proof")
+	}
+	settings, err := recoverySettingsForConfig(config, settings)
+	if err != nil {
+		return err
+	}
+	if current && protected && config.ExistingRecoveryProfile != "" {
+		if err := managementSshSelfExecutable(config.Agent); err != nil {
+			return err
+		}
 	}
 	policy, err := loadManagementResourcePolicy(config.ManagementPolicy, DefaultManagementBoundarySettings(), settings.ConfigBytes, protected)
 	if err != nil {

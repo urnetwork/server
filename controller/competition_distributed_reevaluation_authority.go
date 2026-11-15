@@ -127,7 +127,7 @@ func validateCompetitionDistributedRecoveryRequest(settings *Settings, principal
 // authenticates it. Neither unsigned fixtures nor another frozen host suffice.
 func validateCompetitionDistributedRecoveryEnvelope(response competitionagent.Response, host CompetitionExecutorHostPolicy) error {
 	key, err := base64.StdEncoding.DecodeString(host.AgentPublicKeyBase64)
-	if err != nil || len(key) != ed25519.PublicKeySize || competitionagent.VerifyResponse(response, key) != nil || response.Schema != competitionagent.Schema || response.HostId != host.HostId {
+	if err != nil || response.ExistingRun != nil || len(key) != ed25519.PublicKeySize || competitionagent.VerifyResponse(response, key) != nil || response.Schema != competitionagent.Schema || response.HostId != host.HostId {
 		return ErrConflict
 	}
 	return nil

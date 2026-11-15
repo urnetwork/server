@@ -145,9 +145,9 @@ func validateCompetitionDistributedBaselineHost(settings *Settings, check HostSe
 	return errors.New("baseline producer has no frozen local physical host")
 }
 
-// A failed preflight or acknowledgement cannot permanently strand an expired
-// remote run. Only already-owned, deadline-expired work can bypass host health;
-// fresh FIFO work still requires the genuine agent self-check.
+// A separately provisioned native witness can recover already-started custody
+// before fresh preflight. Historical roles retain deadline-only cleanup, and
+// every fresh FIFO clock still requires the complete genuine host admission.
 func runCompetitionExecutorWorker(ctx context.Context, worker *Worker, evaluator *competitionAgentEvaluator) error {
 	integrityRejected := false
 	for {
@@ -158,9 +158,19 @@ func runCompetitionExecutorWorker(ctx context.Context, worker *Worker, evaluator
 		// A grading pause is an idle worker state, not a reason to skip the
 		// preflight and heartbeat owner on a held coordinator restart.
 		if (err == nil || errors.Is(err, ErrAutomationHeld)) && !integrityRejected {
-			err = worker.Run(ctx)
-			if err == nil {
-				return nil
+			occupied, attachErr := worker.attachExisting(ctx, evaluator)
+			if occupied {
+				if attachErr == nil {
+					continue
+				}
+				err = attachErr
+			} else if attachErr != nil {
+				err = attachErr
+			} else {
+				err = worker.Run(ctx)
+				if err == nil {
+					return nil
+				}
 			}
 		}
 		if ctx.Err() != nil {
@@ -170,20 +180,22 @@ func runCompetitionExecutorWorker(ctx context.Context, worker *Worker, evaluator
 			integrityRejected = true
 		}
 		competitionExecutorTransportFailures.WithLabelValues(evaluator.host.HostId).Inc()
-		expiredSettings := *worker.settings
-		expiredSettings.executorReconcileExpiredOnly = true
-		job, claimErr := worker.store.Claim(ctx, &expiredSettings, worker.workerId, worker.workerImageDigest)
-		if claimErr == nil && job != nil {
-			if job.ExecutionDeadline == nil || server.NowUtc().Before(*job.ExecutionDeadline) {
-				return errors.New("executor expired-only claim returned unexpired work")
+		if !competitionExistingControlEnabled(worker.settings) {
+			expiredSettings := *worker.settings
+			expiredSettings.executorReconcileExpiredOnly = true
+			job, claimErr := worker.store.Claim(ctx, &expiredSettings, worker.workerId, worker.workerImageDigest)
+			if claimErr == nil && job != nil {
+				if job.ExecutionDeadline == nil || server.NowUtc().Before(*job.ExecutionDeadline) {
+					return errors.New("executor expired-only claim returned unexpired work")
+				}
+				evaluator.cancelExpiredRun(worker.settings, job, competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount))
+				outcome := EvaluationOutcome{Error: terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")}
+				lease := time.Time{}
+				if job.LeaseExpiresAt != nil {
+					lease = *job.LeaseExpiresAt
+				}
+				_, _ = worker.completeWithRetry(withCompetitionJobAuthority(ctx, job), job, lease, outcome)
 			}
-			evaluator.cancelExpiredRun(worker.settings, job, competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount))
-			outcome := EvaluationOutcome{Error: terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")}
-			lease := time.Time{}
-			if job.LeaseExpiresAt != nil {
-				lease = *job.LeaseExpiresAt
-			}
-			_, _ = worker.completeWithRetry(withCompetitionJobAuthority(ctx, job), job, lease, outcome)
 		}
 		select {
 		case <-ctx.Done():

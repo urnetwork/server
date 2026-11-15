@@ -649,9 +649,13 @@ type Settings struct {
 	executorSlotId                      int
 	executorReconcileExpiredOnly        bool
 	executorReconcileOnly               bool
-	distributedSourceCommits            map[string]string
-	executorControlAmendment            *competitionExecutorControlAmendmentRecord
-	executorQualificationRecovery       *competitionExecutorQualificationRecoveryRecord
+	// Existing custody is separate from admission; only a minted, short-lived
+	// native observation can authorize an attach without a fresh host check.
+	executorExistingWitness       *competitionExistingRunWitness
+	executorFreshOnly             bool
+	distributedSourceCommits      map[string]string
+	executorControlAmendment      *competitionExecutorControlAmendmentRecord
+	executorQualificationRecovery *competitionExecutorQualificationRecoveryRecord
 	// Non-serialized proof set only after exact retained runtime authentication.
 	runtimeIntentSha256 string
 }
@@ -6218,6 +6222,7 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 		)
 	}
 	discarded := []server.Id{}
+	var stateErr error
 	discardError, marshalErr := json.Marshal(submissionError(
 		"outside_epoch_window",
 		"submission timestamp is outside the epoch admission window",
@@ -6228,13 +6233,19 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
-			job, discarded = nil, []server.Id{}
+			job, discarded, stateErr = nil, []server.Id{}, nil
 			if settings.AutomationPolicy.Enabled {
 				automationScopeLockInTx(ctx, tx, settings)
 				if settings.automationLease != nil {
 					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
 				}
-				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+				if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"); holdErr != nil {
+					if holdErr == ErrAutomationHeld {
+						stateErr = ErrAutomationHeld
+						return
+					}
+					server.Raise(holdErr)
+				}
 				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			}
 			var slotWorker *string
@@ -6396,6 +6407,9 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	})
 	if err != nil {
 		return nil, err
+	}
+	if stateErr != nil {
+		return nil, stateErr
 	}
 	for _, jobId := range discarded {
 		if removeErr := removeCompetitionJobSignal(ctx, settings, jobId); removeErr != nil {
@@ -7392,6 +7406,12 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 		if !ok {
 			return false, ErrUnsupportedDecisionMode
 		}
+		if poll, ok := self.store.(competitionAutomationEpochPollStore); ok {
+			ready, err := poll.automationEpochSealReady(ctx, self.settings, latest.RoundId)
+			if err != nil || !ready {
+				return false, err
+			}
+		}
 		_, err := store.SealAndElect(ctx, self.settings, latest.RoundId)
 		if errors.Is(err, ErrReviewNotReady) || errors.Is(err, ErrFinalizationHeld) {
 			return false, nil
@@ -7428,7 +7448,14 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
+// Fresh work retains its full host gate and ordinary evaluator entrypoint.
 func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostCheck HostSelfCheck) error {
+	return self.evaluateOneOwned(parent, job, hostCheck, nil)
+}
+
+// Both paths retain the original heartbeat/completion and cancellation owners.
+// Existing observations never invoke Evaluate or publish host eligibility.
+func (self *Worker) evaluateOneOwned(parent context.Context, job *queuedJob, hostCheck HostSelfCheck, existing *competitionExistingRunWitness) error {
 	parent = withCompetitionJobAuthority(parent, job)
 	startedAt := time.Now()
 	metricOutcome := "infrastructure_failed"
@@ -7436,7 +7463,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		competitionEvaluationSeconds.Observe(time.Since(startedAt).Seconds())
 		competitionEvaluations.WithLabelValues(metricOutcome).Inc()
 	}()
-	if (!job.Staging || roundUsesAutomation(&job.Round)) && (!hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != job.RoundId) {
+	if existing == nil && (!job.Staging || roundUsesAutomation(&job.Round)) && (!hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != job.RoundId) {
 		metricOutcome = "rebaseline_mismatch"
 		_ = self.handBackJob(job, "round_rebaseline_mismatch")
 		return fmt.Errorf("competition evaluator host is not re-baselined for round %s", job.RoundId)
@@ -7461,6 +7488,9 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		time.Duration(self.settings.EvaluationPolicy.ScoreTimeoutSeconds) * time.Second,
 	)
 	if !server.NowUtc().Before(executionDeadline) {
+		if existing != nil {
+			existing.evaluator.cancelExistingRun(self.settings, job, existing.identity.RunId)
+		}
 		outcome := EvaluationOutcome{
 			Error: terminalInfrastructureError(
 				"evaluation_time_budget_exhausted",
@@ -7485,7 +7515,11 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 	type evalReturn struct{ outcome EvaluationOutcome }
 	done := make(chan evalReturn, 1)
 	go func() {
-		done <- evalReturn{outcome: self.evaluator.Evaluate(evalCtx, self.settings, job)}
+		if existing != nil {
+			done <- evalReturn{outcome: existing.evaluator.finishExisting(evalCtx, self.settings, job, existing)}
+		} else {
+			done <- evalReturn{outcome: self.evaluator.Evaluate(evalCtx, self.settings, job)}
+		}
 	}()
 	joinPreservingReceive := func() { result := <-done; result.outcome.closeReceiveCustody() }
 	heartbeatTicker := time.NewTicker(time.Duration(self.settings.WorkerHeartbeatSeconds) * time.Second)
@@ -7625,8 +7659,14 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			}
 			// Metadata owns the live worker parent, not the scoring deadline.
 			// Its original per-call/total budgets and confirmed fences still win.
-			observation := newCompetitionHeartbeatOwnerObservation(parent, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt)
-			attemptStartedAt, err := retryCompetitionJobHeartbeatOperationObserved(parent, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt, self.heartbeatSettings, func(ctx context.Context) error {
+			hostExpiry := self.confirmedHostLeaseExpiresAt
+			if existing != nil {
+				// Existing custody is not positive fresh-work host eligibility.
+				// Keep only the original acquisition-safe retry predicate.
+				hostExpiry = time.Time{}
+			}
+			observation := newCompetitionHeartbeatOwnerObservation(parent, confirmedLeaseExpiresAt, hostExpiry)
+			attemptStartedAt, err := retryCompetitionJobHeartbeatOperationObserved(parent, confirmedLeaseExpiresAt, hostExpiry, self.heartbeatSettings, func(ctx context.Context) error {
 				if observeBudget() && probeReadyEvaluation(false) {
 					return evaluationReady
 				}
@@ -7653,6 +7693,12 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			// PostgreSQL computes renewal time after its lock/fence waits. The
 			// successful public operation's start is a conservative committed bound.
 			confirmedLeaseExpiresAt = attemptStartedAt.Add(time.Duration(self.settings.WorkerLeaseSeconds) * time.Second)
+			if existing != nil {
+				if self.evaluationHeartbeatForTest != nil {
+					self.evaluationHeartbeatForTest()
+				}
+				continue
+			}
 
 			if observeBudget() {
 				if probeReadyEvaluation(true) {

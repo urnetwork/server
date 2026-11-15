@@ -28,15 +28,24 @@ const roundBaselinePreparationJobSql = `
 // Every preparation boundary retains the existing supervisor/source fence.
 // No database connection survives this short transaction into host work.
 func (self PostgresStore) roundBaselinePreparationFenceInTx(ctx context.Context, tx server.PgTx, settings *Settings) {
+	server.Raise(self.roundBaselinePreparationAdmissionFenceInTx(ctx, tx, settings))
+}
+
+// Initial held admission is normal idle control flow; existing preparation
+// checks retain their strict original error/cleanup path through the wrapper.
+func (self PostgresStore) roundBaselinePreparationAdmissionFenceInTx(ctx context.Context, tx server.PgTx, settings *Settings) error {
 	if settings.AutomationPolicy.Enabled {
 		automationScopeLockInTx(ctx, tx, settings)
 		if settings.automationLease == nil || settings.automationRoundId == (server.Id{}) {
 			panic(ErrLeaseLost)
 		}
 		server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
-		server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+		if err := ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"); err != nil {
+			return err
+		}
 	}
 	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
+	return nil
 }
 
 // Reconstructing the typed payload restores its original canonical Go encoding
@@ -114,10 +123,17 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 	if profile.TotalTimeout <= 0 || profile.CleanupTimeout <= 0 || profile.FenceInterval <= 0 || profile.MaximumRecordBytes <= 0 || profile.MaximumDiagnosticBytes <= 0 || profile.MaximumManifestBytes <= 0 || profile.MaximumEvidenceBytes <= 0 || profile.MaximumRawFileBytes <= 0 || profile.MaximumArtifacts <= 0 || profile.ArchiveAttempts <= 0 || profile.ArchiveBackoff <= 0 || profile.Now == nil {
 		return nil, errors.New("baseline preparation owner bounds are invalid")
 	}
+	var stateErr error
 	resultErr = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			preparation = nil
-			self.roundBaselinePreparationFenceInTx(ctx, tx, settings)
+			preparation, stateErr = nil, nil
+			if fenceErr := self.roundBaselinePreparationAdmissionFenceInTx(ctx, tx, settings); fenceErr != nil {
+				if fenceErr == ErrAutomationHeld {
+					stateErr = ErrAutomationHeld
+					return
+				}
+				server.Raise(fenceErr)
+			}
 			var slotOwner *string
 			var slotJob *server.Id
 			var slotDeadline *time.Time
@@ -198,6 +214,9 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE competition_worker_slot SET worker_id=$1,job_id=NULL,lease_expires_at=$2,heartbeat_at=$3 WHERE slot_id=1`, owner, preparation.Deadline.Add(profile.CleanupTimeout), now))
 		}, server.OptReadWrite())
 	})
+	if resultErr == nil {
+		resultErr = stateErr
+	}
 	return preparation, resultErr
 }
 

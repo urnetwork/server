@@ -46,8 +46,16 @@ type managementSshUnit struct {
 // Production constructors never install a filesystem/process/proof waiver.
 func newManagementSshHost(settings ManagementSshSettings) *managementSshHost {
 	self := &managementSshHost{settings: settings, protected: true, newId: newManagementSshId, joinContext: context.WithTimeout}
-	self.load = func(path string) (*Config, error) { return loadManagementSshConfig(path, settings) }
+	self.load = func(path string) (*Config, error) {
+		if settings.existingOnly {
+			return loadExistingManagementConfig(path, settings)
+		}
+		return loadManagementSshConfig(path, settings)
+	}
 	self.admit = func(ctx context.Context, config *Config) (*ManagementResourcePolicy, Pin, error) {
+		if settings.existingOnly {
+			return admitExistingManagement(ctx, config, settings)
+		}
 		return admitManagementSsh(ctx, config, settings)
 	}
 	self.start = func(ctx context.Context, config *Config, plan managementSshPlan, marker string, files []*os.File) (managementSshProcess, error) {
@@ -152,16 +160,16 @@ func admitManagementSsh(parent context.Context, config *Config, settings Managem
 // can obtain its exact generation. There is no OnFailure recovery hook here:
 // loss of a control connection must not reap a healthy durable evaluation.
 func managementSshArguments(config Config, plan managementSshPlan, marker string, settings ManagementSshSettings) ([]string, error) {
-	if settings.validate() != nil || !digestPattern.MatchString(plan.Id) || plan.UnitName != managementSshUnitName(plan.Id) ||
+	if settings.validate() != nil || !digestPattern.MatchString(plan.Id) || plan.UnitName != settings.unitName(plan.Id) || plan.ExistingOnly != settings.existingOnly ||
 		!managementSshAuthorityPath(config.Agent.Path) || !managementSshAuthorityPath(config.configPath) || !managementSshAuthorityPath(config.BaseDirectory) ||
-		marker != filepath.Join(config.StateDirectory, "managed-controls", plan.Id+".admit") || !managementSshAuthorityPath(marker) ||
+		marker != filepath.Join(config.StateDirectory, settings.registryName(), plan.Id+".admit") || !managementSshAuthorityPath(marker) ||
 		plan.Agent != config.Agent || plan.ConfigSha256 != config.configSha256 || plan.MemoryBytes != settings.MemoryBytes || plan.TasksMaximum != settings.TasksMaximum ||
 		plan.RuntimeMaximum != settings.MaximumRuntime || !dockerProxyCpuSetPattern.MatchString(plan.ManagementCpuSet) {
 		return nil, errors.New("managed SSH launch differs from its fixed root receipt")
 	}
 	cpus := strings.ReplaceAll(plan.ManagementCpuSet, ",", " ")
 	args := []string{"--quiet", "--no-ask-password", "--pipe", "--wait", "--remain-after-exit", "--service-type=exec", "--unit=" + plan.UnitName,
-		"--property=Slice=" + managementPrivateSliceName, "--property=User=root", "--property=Group=root",
+		"--property=Slice=" + settings.sliceName(), "--property=User=root", "--property=Group=root",
 		"--property=Restart=no", "--property=KillMode=control-group", "--property=SendSIGKILL=yes", "--property=OOMPolicy=kill", "--property=NoNewPrivileges=yes",
 		"--property=CapabilityBoundingSet=" + managementSshCapabilities, "--property=AmbientCapabilities=",
 		"--property=LimitCORE=0", "--property=UMask=0077", "--property=WorkingDirectory=/", "--property=MemoryMax=" + strconv.FormatInt(plan.MemoryBytes, 10),
@@ -173,7 +181,7 @@ func managementSshArguments(config Config, plan managementSshPlan, marker string
 	for _, environment := range controlEnvironment() {
 		args = append(args, "--setenv="+environment)
 	}
-	return append(args, "--", config.Agent.Path, "--config", config.configPath, "--serve"), nil
+	return append(args, "--", config.Agent.Path, "--config", config.configPath, settings.serveFlag()), nil
 }
 
 // Rendered forced-command/sudoers authority needs literal paths, not merely
@@ -291,7 +299,7 @@ func managementSshManager(parent context.Context, pin Pin, operation, unit strin
 // Unit spelling is derived from a local random nonce, never caller text.
 func validManagementSshUnit(unit string) bool {
 	id := strings.TrimSuffix(strings.TrimPrefix(unit, "urnetwork-subeval-control-"), ".service")
-	return digestPattern.MatchString(id) && unit == managementSshUnitName(id)
+	return digestPattern.MatchString(id) && unit == managementSshUnitName(id) || validExistingControlUnit(unit)
 }
 
 // Manager readback is fully typed/closed before its generation is trusted.
@@ -351,7 +359,7 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 		return unit, nil
 	}
 	if values["LoadState"] != "loaded" || values["Transient"] != "yes" || values["FragmentPath"] != "/run/systemd/transient/"+plan.UnitName || values["DropInPaths"] != "" ||
-		values["Slice"] != managementPrivateSliceName || values["User"] != "root" || values["Group"] != "root" || values["Type"] != "exec" ||
+		values["Slice"] != settings.sliceName() || values["User"] != "root" || values["Group"] != "root" || values["Type"] != "exec" ||
 		values["Restart"] != "no" || values["RemainAfterExit"] != "yes" || values["KillMode"] != "control-group" || values["MemoryHigh"] != "infinity" || values["NoNewPrivileges"] != "yes" {
 		return unit, errors.New("managed SSH unit changed its fixed placement or lifecycle")
 	}
@@ -388,7 +396,7 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 		len(invocation) != 32 || !digestPattern.MatchString(invocation+invocation) || invocation == strings.Repeat("0", 32) {
 		return unit, errors.New("managed SSH unit omitted its definite invocation generation")
 	}
-	group := managementPrivateCgroupPath + "/" + plan.UnitName
+	group := settings.cgroupPath() + "/" + plan.UnitName
 	unit.exists, unit.invocationId, unit.pid, unit.projection = true, invocation, pid, append([]byte(nil), content...)
 	switch values["ActiveState"] {
 	case "inactive", "failed":
@@ -405,7 +413,7 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 	default:
 		return managementSshUnit{}, errors.New("managed SSH unit is not a definite active or terminal invocation")
 	}
-	if err := validateManagementSshExec(values["ExecStart"], config, pid); err != nil {
+	if err := validateManagementSshExecForRole(values["ExecStart"], config, pid, settings.serveFlag()); err != nil {
 		return managementSshUnit{}, err
 	}
 	return unit, nil
@@ -414,6 +422,11 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 // Authority paths contain no quoting/whitespace, so systemctl's strv rendering
 // has one unambiguous argv. No prefix/suffix command or extra role is accepted.
 func validateManagementSshExec(value string, config Config, currentPid int) error {
+	return validateManagementSshExecForRole(value, config, currentPid, "--serve")
+}
+
+// The expected role comes only from one of the two fixed source entrypoints.
+func validateManagementSshExecForRole(value string, config Config, currentPid int, serveFlag string) error {
 	if !strings.HasPrefix(value, "{ ") || !strings.HasSuffix(value, " }") {
 		return errors.New("managed SSH has no exact executable metadata")
 	}
@@ -425,11 +438,11 @@ func validateManagementSshExec(value string, config Config, currentPid int) erro
 		}
 		fields[key] = value
 	}
-	if len(fields) != 8 || fields["path"] != config.Agent.Path || fields["argv[]"] != strings.Join([]string{config.Agent.Path, "--config", config.configPath, "--serve"}, " ") || fields["ignore_errors"] != "no" {
+	if len(fields) != 8 || fields["path"] != config.Agent.Path || fields["argv[]"] != strings.Join([]string{config.Agent.Path, "--config", config.configPath, serveFlag}, " ") || fields["ignore_errors"] != "no" {
 		return errors.New("managed SSH executable differs from the closed child role")
 	}
 	pid, err := strconv.Atoi(fields["pid"])
-	if err != nil || pid <= 1 || strconv.Itoa(pid) != fields["pid"] || currentPid > 0 && pid != currentPid {
+	if err != nil || currentPid >= 0 && pid <= 1 || currentPid < 0 && pid < 0 || strconv.Itoa(pid) != fields["pid"] || currentPid > 0 && pid != currentPid {
 		return errors.New("managed SSH executable has another process identity")
 	}
 	for _, name := range []string{"start_time", "stop_time"} {
@@ -446,7 +459,7 @@ func validateManagementSshExec(value string, config Config, currentPid int) erro
 // Empty is checked only after a known-generation stop acknowledgement. Missing
 // from the outset never becomes a successful join in the wrapper state machine.
 func managementSshKernelEmpty(ctx context.Context, unit string, settings ManagementSshSettings) (bool, error) {
-	if !validManagementSshUnit(unit) {
+	if !validManagementSshUnit(unit) || !strings.HasPrefix(unit, settings.unitPrefix()) {
 		return false, errors.New("invalid managed SSH kernel scope")
 	}
 	root, err := openDirectoryNoFollow("/sys/fs/cgroup")
@@ -454,7 +467,7 @@ func managementSshKernelEmpty(ctx context.Context, unit string, settings Managem
 		return false, err
 	}
 	defer root.Close()
-	group, err := openRelativeNoFollow(root, strings.TrimPrefix(managementPrivateCgroupPath+"/"+unit, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	group, err := openRelativeNoFollow(root, strings.TrimPrefix(settings.cgroupPath()+"/"+unit, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if errors.Is(err, syscall.ENOENT) {
 		return true, nil
 	}
@@ -533,12 +546,12 @@ func verifyManagementSshCurrent(parent context.Context, config *Config, policy *
 		return err
 	}
 	group := strings.TrimSuffix(string(membership), "\n")
-	prefix := "0::" + managementPrivateCgroupPath + "/"
+	prefix := "0::" + settings.cgroupPath() + "/"
 	unit := strings.TrimPrefix(group, prefix)
 	if !strings.HasPrefix(group, prefix) || !validManagementSshUnit(unit) {
 		return errors.New("direct serve is not the exact managed private control service")
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(unit, "urnetwork-subeval-control-"), ".service")
+	id := strings.TrimSuffix(strings.TrimPrefix(unit, settings.unitPrefix()), ".service")
 	registry, err := openManagementSshRegistry(*config, settings, true)
 	if err != nil {
 		return err
@@ -557,7 +570,7 @@ func verifyManagementSshCurrent(parent context.Context, config *Config, policy *
 		return err
 	}
 	defer cgroupRoot.Close()
-	cgroup, err := openRelativeNoFollow(cgroupRoot, strings.TrimPrefix(managementPrivateCgroupPath+"/"+unit, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	cgroup, err := openRelativeNoFollow(cgroupRoot, strings.TrimPrefix(settings.cgroupPath()+"/"+unit, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return err
 	}
@@ -584,7 +597,7 @@ func verifyManagementSshCurrent(parent context.Context, config *Config, policy *
 	if err != nil {
 		return err
 	}
-	return registry.write(id+".admitted", admitted)
+	return registry.recordCurrentAdmission(id, admitted)
 }
 
 // Static admission is independently testable without connecting to a native
@@ -594,7 +607,7 @@ func readManagementSshAdmission(registry *managementSshRegistry, config Config, 
 	if registry == nil || !validManagementSshUnit(unit) {
 		return plan, nil, nil, errors.New("invalid managed control admission identity")
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(unit, "urnetwork-subeval-control-"), ".service")
+	id := strings.TrimSuffix(strings.TrimPrefix(unit, settings.unitPrefix()), ".service")
 	content, err := registry.read(id + ".json")
 	if err != nil {
 		return plan, nil, nil, err
@@ -634,7 +647,7 @@ func verifyManagementSshDescriptorProfile(ctx context.Context, proc, group *os.F
 		}
 		birth = current
 		membership, err := readManagementSshFile(proc, "cgroup", settings.Agent.ConfigBytes, procMagic)
-		if err != nil || string(membership) != "0::"+managementPrivateCgroupPath+"/"+plan.UnitName+"\n" {
+		if err != nil || string(membership) != "0::"+settings.cgroupPath()+"/"+plan.UnitName+"\n" {
 			return errors.New("managed control process escaped its exact private group")
 		}
 		status, err := readManagementSshFile(proc, "status", settings.Agent.ConfigBytes, procMagic)
