@@ -677,6 +677,8 @@ func securityNetworkAuthorityAction(action string) string {
 		return "A person was invited to join the network"
 	case model.SecurityNetworkAuthorityOauthClient:
 		return "An OAuth client that can mint auth keys was added"
+	case model.SecurityNetworkAuthorityScimToken:
+		return "A new SCIM token for the network's identity provider was issued, and any earlier one stopped working"
 	default:
 		return "The network's authority changed"
 	}

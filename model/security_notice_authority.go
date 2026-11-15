@@ -19,6 +19,8 @@ package model
 //	             admin's device then admits (TEAM-M6-04)
 //	oauth_client  a team gained a network OAuth client, whose credentials
 //	             mint auth keys for CI (TEAM-M6-08)
+//	scim_token   a team was issued a SCIM bearer, with which its IdP denies
+//	             members at once and queues changes for admin devices (QD-828)
 //
 // The recipients are the sign-in email addresses of the network's Owners and
 // Admins: in a personal network its owner's, the account security notices
@@ -55,6 +57,8 @@ const (
 	// a team gained a network OAuth client, whose credentials mint auth keys
 	// (TEAM-M6-08)
 	SecurityNetworkAuthorityOauthClient = "oauth_client"
+	// a team was issued a SCIM bearer, which replaced any earlier one (QD-828)
+	SecurityNetworkAuthorityScimToken = "scim_token"
 )
 
 // One change of a network's authority.

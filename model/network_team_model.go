@@ -19,6 +19,27 @@ package model
 // only its users, emails and roles; groups, tags, device names and admissions
 // live in the config repo (owner decision 46).
 //
+// network_team also keeps §7.6's SCIM bearer, the credential a team's IdP
+// presents at /scim/v2/<network_id>/..., only as the SHA-256 of the whole
+// bearer, and only while SCIM is on (QD-828; §2.8 api-2):
+//
+//	issue    POST /network/scim-token {}, the Owner's: secret random bytes,
+//	         written ur-scim-<secret> as an invite's bearer is (lowercase RFC
+//	         4648 base32, no padding) and answered this once with the base URL
+//	         the IdP calls. Its SHA-256 replaces any earlier bearer's in the
+//	         same statement, so the earlier bearer stops working at once
+//	remove   POST /network/scim-token {remove: true} clears the hash, which
+//	         turns SCIM off: every SCIM request then answers 401
+//	read     scim's bearer source reads the hash from the primary at each SCIM
+//	         request (GetNetworkTeamScimTokenSha256), so an issue or a removal
+//	         holds from its commit on
+//
+// A new bearer owes Owners and Admins the network authority notice (R-TEAM-12),
+// and an issue or a removal writes an admin event. The bearer never enters a
+// log, an error or an admin token use's stored answer: a replay answers that
+// SCIM is on without it, and whoever lost the first answer issues another. An
+// API key or an OAuth client's token mints no bearer, which would outlive it.
+//
 // §7.5's Team routes (members, invitations, IdPs, domains, SCIM, OAuth clients,
 // admin events and audit webhooks) refuse a network outside the team tier with a
 // QuotaRefusal whose upgrade is set (RequireTeamTier). team-create is not one: it
@@ -30,6 +51,8 @@ package model
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"time"
@@ -56,13 +79,18 @@ type NetworkTeamSettings struct {
 	// The most members one GET /network/members answers. Non-positive answers
 	// one.
 	MemberReadLimit int
+	// The random bytes in a team's SCIM bearer: 32, which is 256 bits, as an
+	// invite's. Non-positive issues no bearer: POST /network/scim-token
+	// answers 503, and only removal works.
+	ScimBearerSecretByteCount int
 }
 
 func DefaultNetworkTeamSettings() *NetworkTeamSettings {
 	return &NetworkTeamSettings{
-		CreateLimit:     5,
-		CreateWindow:    24 * time.Hour,
-		MemberReadLimit: 1000,
+		CreateLimit:               5,
+		CreateWindow:              24 * time.Hour,
+		MemberReadLimit:           1000,
+		ScimBearerSecretByteCount: 32,
 	}
 }
 
@@ -393,4 +421,239 @@ func removeNetworkTeamInTx(ctx context.Context, tx server.PgTx, networkId server
 	} {
 		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM `+table+` WHERE network_id = $1`, networkId))
 	}
+}
+
+// The SCIM bearer's prefix: ur-scim-<secret>.
+const networkScimBearerPrefix = "ur-scim-"
+
+// The admin event words of the team's SCIM bearer. The target carries no id.
+const (
+	AdminEventTargetScimToken       = "scim_token"
+	AdminEventActionScimTokenIssue  = "scim_token.issue"
+	AdminEventActionScimTokenRemove = "scim_token.remove"
+)
+
+// The SCIM bearer route's refusals, fixed text that names no bearer.
+const (
+	networkScimTokenRefusedMessage     = "Only the team's Owners may issue or remove its SCIM bearer."
+	networkScimTokenUnavailableMessage = "SCIM bearers are not available."
+	networkScimTokenNoTeamMessage      = "Only a team network has a SCIM bearer."
+)
+
+func init() {
+	// `ur admin scim-token` (QD-828): a one-command admin token reaches the
+	// route, its use spent in the route's transaction
+	session.RegisterAdminCommandRoute(http.MethodPost, "/network/scim-token")
+}
+
+// The SHA-256 network_team keeps of the team's SCIM bearer; false while SCIM
+// is off, for a network team-create did not make, and while the binary does
+// not link MG6. scim's bearer source reads it at each request, from the
+// primary, so an issue or a removal holds from its commit on.
+func GetNetworkTeamScimTokenSha256(ctx context.Context, networkId server.Id) (scimTokenSha256 []byte, ok bool) {
+	if !server.SidecarMg6Linked() {
+		return nil, false
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT scim_token_sha256 FROM network_team WHERE network_id = $1`,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&scimTokenSha256))
+			}
+		})
+	})
+	// a hash of any other length matches no bearer, so SCIM is off
+	if len(scimTokenSha256) != sha256.Size {
+		return nil, false
+	}
+	return scimTokenSha256, true
+}
+
+// The network's SCIM base URL at the api's public origin, or its path where
+// the origin is unknown, as scim answers its resources' locations.
+func networkScimUrl(networkId server.Id) string {
+	path := "/scim/v2/" + networkId.String()
+	if origin, err := session.DpopApiOrigin(); err == nil {
+		return origin + path
+	}
+	return path
+}
+
+// POST /network/scim-token's body.
+type NetworkScimTokenArgs struct {
+	// turns SCIM off, clearing the bearer; without it a new bearer replaces any
+	// earlier one
+	Remove bool `json:"remove,omitempty"`
+}
+
+type NetworkScimTokenError struct {
+	Message string `json:"message"`
+}
+
+// Prints without the bearer.
+type NetworkScimTokenResult struct {
+	// ur-scim-<secret>, the team's new SCIM bearer, which this answer alone
+	// holds
+	ScimBearer string `json:"scim_bearer,omitempty"`
+	// the SCIM base URL the team's IdP calls with the bearer
+	ScimUrl string `json:"scim_url,omitempty"`
+	// whether SCIM is on for the team after the call: it holds a bearer's
+	// SHA-256
+	ScimOn bool `json:"scim_on"`
+	// the call turned SCIM off; false when it was off already
+	Removed bool                   `json:"removed,omitempty"`
+	Error   *NetworkScimTokenError `json:"error,omitempty"`
+}
+
+// Never the bearer.
+func (self *NetworkScimTokenResult) String() string {
+	return "NetworkScimTokenResult{}"
+}
+
+// As String, for %#v.
+func (self *NetworkScimTokenResult) GoString() string {
+	return self.String()
+}
+
+// POST /network/scim-token (§7.6; QD-828): issues the caller's team a new SCIM
+// bearer, answered once, or with remove turns SCIM off (the file header). The
+// Owner's: the route's role gate asks the Owner's permission, and the update's
+// transaction checks it again. A one-command admin token with the all scope
+// runs it once (`ur admin scim-token`), its use spent in the update's
+// transaction and a replay answering the first without the bearer.
+func SetNetworkScimToken(args *NetworkScimTokenArgs, clientSession *session.ClientSession) (*NetworkScimTokenResult, error) {
+	return newNetworkTeams().setScimToken(args, clientSession)
+}
+
+// POST /network/scim-token at a clock and tier a test gives.
+func Testing_SetNetworkScimToken(
+	args *NetworkScimTokenArgs,
+	clientSession *session.ClientSession,
+	now func() time.Time,
+	tierOf func(ctx context.Context, networkId server.Id) NetworkTier,
+) (*NetworkScimTokenResult, error) {
+	teams := newNetworkTeams()
+	teams.now = now
+	teams.tierOf = tierOf
+	return teams.setScimToken(args, clientSession)
+}
+
+func (self *networkTeams) setScimToken(args *NetworkScimTokenArgs, clientSession *session.ClientSession) (*NetworkScimTokenResult, error) {
+	if !server.SidecarMg6Linked() {
+		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, networkTeamsUnavailableMessage)
+	}
+	ctx := clientSession.Ctx
+	byJwt := clientSession.ByJwt
+	// the router refuses client tokens on this Network route; this holds without
+	// it, and no API key or OAuth client mints a bearer that would outlive it
+	if byJwt == nil || byJwt.ClientId != nil || clientSession.ApiKeyAuthenticated || clientSession.OauthClient != nil {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkScimTokenRefusedMessage)
+	}
+	if err := requireAdminCommandTeamScope(clientSession); err != nil {
+		return nil, err
+	}
+	adminCommand := clientSession.AdminCommand
+	// an OAuth or MCP request's identity is unsigned too; of those only an
+	// admin token's command runs here
+	if clientSession.UnsignedIdentity && adminCommand == nil {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkScimTokenRefusedMessage)
+	}
+	networkId := byJwt.NetworkId
+	if err := self.requireTeamTier(ctx, networkId); err != nil {
+		return nil, err
+	}
+
+	bearer := ""
+	var bearerSha256 []byte
+	if !args.Remove {
+		if self.settings.ScimBearerSecretByteCount < 1 {
+			return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, networkScimTokenUnavailableMessage)
+		}
+		secret := make([]byte, self.settings.ScimBearerSecretByteCount)
+		if _, err := rand.Read(secret); err != nil {
+			return nil, err
+		}
+		bearer = networkScimBearerPrefix + networkInviteEncoding.EncodeToString(secret)
+		clear(secret)
+		// the whole bearer, as scim hashes the one an IdP presents
+		bearerSum := sha256.Sum256([]byte(bearer))
+		bearerSha256 = bearerSum[:]
+	}
+	now := self.now().UTC().Truncate(time.Microsecond)
+	scimUrl := networkScimUrl(networkId)
+
+	refused, replayed := false, false
+	var answer *NetworkScimTokenResult
+	server.Tx(ctx, func(tx server.PgTx) {
+		refused, replayed, answer = false, false, nil
+		// the caller first, so a refused caller spends no admin token use
+		if !teamCallerPermitsWithQuery(ctx, tx, clientSession, RolePermissionOwner) {
+			refused = true
+			return
+		}
+		if adminCommand != nil {
+			stored := &NetworkScimTokenResult{}
+			replay, err := ReplayAdminTokenUseInTx(ctx, tx, adminCommand, now, stored)
+			server.Raise(err)
+			if replay {
+				// the first use's answer, which holds no bearer, and nothing runs
+				answer, replayed = stored, true
+				return
+			}
+		}
+		if args.Remove {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE network_team
+					SET scim_token_sha256 = NULL
+					WHERE network_id = $1 AND scim_token_sha256 IS NOT NULL
+				`,
+				networkId,
+			))
+			answer = &NetworkScimTokenResult{Removed: tag.RowsAffected() == 1}
+			if answer.Removed {
+				AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionScimTokenRemove, AdminEventTargetScimToken, nil))
+			}
+		} else {
+			// replaces any earlier bearer's hash, which then matches nothing
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE network_team
+					SET scim_token_sha256 = $2
+					WHERE network_id = $1
+				`,
+				networkId,
+				bearerSha256,
+			))
+			if tag.RowsAffected() != 1 {
+				answer = &NetworkScimTokenResult{Error: &NetworkScimTokenError{Message: networkScimTokenNoTeamMessage}}
+			} else {
+				AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionScimTokenIssue, AdminEventTargetScimToken, nil))
+				// a new credential, which denies members at once (R-TEAM-12)
+				oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{
+					ChangeTime: now,
+					Action:     SecurityNetworkAuthorityScimToken,
+					Via:        securityNoticeVia(ctx),
+				})
+				answer = &NetworkScimTokenResult{ScimUrl: scimUrl, ScimOn: true}
+			}
+		}
+		if adminCommand != nil {
+			// without the bearer, which no answer but the first holds
+			server.Raise(StoreAdminTokenUseAnswerInTx(ctx, tx, adminCommand, answer))
+		}
+	})
+	if refused {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkScimTokenRefusedMessage)
+	}
+	if !replayed && answer.ScimOn {
+		answer.ScimBearer = bearer
+	}
+	return answer, nil
 }

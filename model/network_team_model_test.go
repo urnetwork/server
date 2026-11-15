@@ -3,13 +3,17 @@
 package model
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -581,5 +585,218 @@ func TestTeamRowsGoWithTheirNetworkAndUser(t *testing.T) {
 		if owner := GetNetworkMemberOfUser(ctx, keptTeamNetworkId, ownerUserId); owner == nil || owner.Role != NetworkMemberRoleOwner {
 			t.Fatalf("the kept team's Owner is %+v", owner)
 		}
+	})
+}
+
+// The team routes at the team tier, for the SCIM bearer's tests.
+func testScimTokenTeams() *networkTeams {
+	teams := testNetworkTeams(server.NowUtc)
+	teams.tierOf = func(ctx context.Context, networkId server.Id) NetworkTier { return NetworkTierTeam }
+	return teams
+}
+
+// network_team.scim_token_sha256 as the table holds it, nil for NULL.
+func testScimTokenColumn(ctx context.Context, networkId server.Id) (scimTokenSha256 []byte) {
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT scim_token_sha256 FROM network_team WHERE network_id = $1`, networkId).Scan(&scimTokenSha256))
+	})
+	return
+}
+
+// The network's SCIM bearer admin event actions, oldest first.
+func testScimTokenEventActions(ctx context.Context, networkId server.Id) []string {
+	actions := []string{}
+	for _, action := range testAdminEventActions(ctx, networkId) {
+		if strings.HasPrefix(action, AdminEventTargetScimToken+".") {
+			actions = append(actions, action)
+		}
+	}
+	return actions
+}
+
+// QD-828's issue and removal: the answer alone holds ur-scim-<secret>, 32 random bytes as an invite's are written, and
+// the column only the whole bearer's SHA-256, which GetNetworkTeamScimTokenSha256 reads; a second issue replaces the
+// first at once; remove turns SCIM off, once; each issue and removal is an admin event, and each issue owes the
+// authority notice, which names no bearer.
+func TestScimTokenIssueKeepsOnlyItsHash(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		networkId, ownerSession := newTestDomainTeam(t, ctx)
+		teams := testScimTokenTeams()
+		if _, ok := GetNetworkTeamScimTokenSha256(ctx, networkId); ok || testScimTokenColumn(ctx, networkId) != nil {
+			t.Fatal("a new team holds a SCIM bearer")
+		}
+
+		first, err := teams.setScimToken(&NetworkScimTokenArgs{}, ownerSession)
+		if err != nil || first.Error != nil || !first.ScimOn || first.Removed {
+			t.Fatalf("the first issue: %v %+v", err, first)
+		}
+		secretText, found := strings.CutPrefix(first.ScimBearer, networkScimBearerPrefix)
+		if !found {
+			t.Fatal("the bearer lacks its prefix")
+		}
+		secret, err := networkInviteEncoding.DecodeString(secretText)
+		if err != nil || len(secret) != DefaultNetworkTeamSettings().ScimBearerSecretByteCount || networkInviteEncoding.EncodeToString(secret) != secretText {
+			t.Fatalf("the bearer's secret is not %d bytes as an invite's are written: %v", DefaultNetworkTeamSettings().ScimBearerSecretByteCount, err)
+		}
+		connect.AssertEqual(t, strings.HasSuffix(first.ScimUrl, "/scim/v2/"+networkId.String()), true)
+		connect.AssertEqual(t, strings.Contains(first.String()+first.GoString()+fmt.Sprintf("%v %+v %#v", first, first, first), secretText), false)
+		firstSha256 := sha256.Sum256([]byte(first.ScimBearer))
+		connect.AssertEqual(t, testScimTokenColumn(ctx, networkId), firstSha256[:])
+		stored, ok := GetNetworkTeamScimTokenSha256(ctx, networkId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, stored, firstSha256[:])
+
+		second, err := teams.setScimToken(&NetworkScimTokenArgs{}, ownerSession)
+		if err != nil || second.Error != nil || !second.ScimOn || second.ScimBearer == "" || second.ScimBearer == first.ScimBearer {
+			t.Fatalf("the second issue: %v %+v", err, second)
+		}
+		secondSha256 := sha256.Sum256([]byte(second.ScimBearer))
+		connect.AssertEqual(t, testScimTokenColumn(ctx, networkId), secondSha256[:])
+
+		removed, err := teams.setScimToken(&NetworkScimTokenArgs{Remove: true}, ownerSession)
+		if err != nil || removed.Error != nil || !removed.Removed || removed.ScimOn || removed.ScimBearer != "" {
+			t.Fatalf("the removal: %v %+v", err, removed)
+		}
+		connect.AssertEqual(t, testScimTokenColumn(ctx, networkId) == nil, true)
+		if _, ok := GetNetworkTeamScimTokenSha256(ctx, networkId); ok {
+			t.Fatal("a removed bearer still reads")
+		}
+		again, err := teams.setScimToken(&NetworkScimTokenArgs{Remove: true}, ownerSession)
+		if err != nil || again.Error != nil || again.Removed || again.ScimOn {
+			t.Fatalf("a removal with SCIM off: %v %+v", err, again)
+		}
+
+		connect.AssertEqual(t, testScimTokenEventActions(ctx, networkId), []string{
+			AdminEventActionScimTokenIssue,
+			AdminEventActionScimTokenIssue,
+			AdminEventActionScimTokenRemove,
+		})
+		issues := 0
+		for _, notice := range unsentTestNotices(t, ctx, networkId, SecurityNetworkAuthorityTemplateName) {
+			if strings.Contains(notice.templateJson, secretText) || strings.Contains(notice.templateJson, second.ScimBearer) {
+				t.Fatal("the notice names a bearer")
+			}
+			for _, change := range notice.changes(t) {
+				if change["action"] == SecurityNetworkAuthorityScimToken {
+					issues += 1
+				}
+			}
+		}
+		connect.AssertEqual(t, issues, 2)
+	})
+}
+
+// Who may not issue or remove the bearer, each refused before anything changes: an Admin, a Member and a pending
+// Owner of the team; a client token, an API key and an unsigned request identity of the Owner; a personal network's
+// owner; and a network outside the team tier, refused with the team tier's QuotaRefusal. No refusal names a bearer.
+func TestScimTokenRefusals(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		networkId, ownerSession := newTestDomainTeam(t, ctx)
+		teams := testScimTokenTeams()
+		issued, err := teams.setScimToken(&NetworkScimTokenArgs{}, ownerSession)
+		if err != nil || issued.ScimBearer == "" {
+			t.Fatalf("the issue: %v %+v", err, issued)
+		}
+		issuedSha256 := sha256.Sum256([]byte(issued.ScimBearer))
+
+		ownerByJwt := ownerSession.ByJwt
+		clientId := server.NewId()
+		clientToken := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId, UserId: ownerByJwt.UserId, MemberId: ownerByJwt.MemberId, ClientId: &clientId})
+		apiKey := session.Testing_CreateClientSession(ctx, ownerByJwt)
+		apiKey.ApiKeyAuthenticated = true
+		unsigned := session.Testing_CreateClientSession(ctx, ownerByJwt)
+		unsigned.UnsignedIdentity = true
+		_, _, _, personal := testTeamPersonalNetwork(t, ctx, "scim-token-personal")
+		refusedSessions := map[string]*session.ClientSession{
+			"an Admin":                 newTestTeamMemberSession(t, ctx, networkId, NetworkMemberRoleAdmin, false),
+			"a Member":                 newTestTeamMemberSession(t, ctx, networkId, NetworkMemberRoleMember, false),
+			"a pending Owner":          newTestTeamMemberSession(t, ctx, networkId, NetworkMemberRoleOwner, true),
+			"a client token":           clientToken,
+			"an API key":               apiKey,
+			"an unsigned identity":     unsigned,
+			"a personal network owner": personal,
+		}
+		for name, refusedSession := range refusedSessions {
+			for _, args := range []*NetworkScimTokenArgs{{}, {Remove: true}} {
+				result, err := teams.setScimToken(args, refusedSession)
+				if err == nil {
+					t.Errorf("%s set the bearer (remove %t): %+v", name, args.Remove, result)
+					continue
+				}
+				if strings.Contains(err.Error(), networkScimBearerPrefix) {
+					t.Errorf("%s's refusal names a bearer: %s", name, err)
+				}
+			}
+		}
+
+		outside := testNetworkTeams(server.NowUtc)
+		outside.tierOf = func(ctx context.Context, networkId server.Id) NetworkTier { return NetworkTierPro }
+		_, err = outside.setScimToken(&NetworkScimTokenArgs{}, ownerSession)
+		refusal := &QuotaRefusalError{}
+		if !errors.As(err, &refusal) || refusal.Refusal.LimitKey != TeamTierLimitKey || !refusal.Refusal.Upgrade {
+			t.Fatalf("a network outside the team tier: %v", err)
+		}
+
+		// nothing changed: the issued bearer's hash stands, and the issue is the only event
+		connect.AssertEqual(t, testScimTokenColumn(ctx, networkId), issuedSha256[:])
+		connect.AssertEqual(t, testScimTokenEventActions(ctx, networkId), []string{AdminEventActionScimTokenIssue})
+	})
+}
+
+// `ur admin scim-token` by one-command admin tokens: an Owner's token issues once and a replay answers the first
+// without its bearer, which the use's stored answer never holds, and runs nothing; a removal's replay answers it
+// again; a token without the all scope, and an Admin's token, are refused and spend no use.
+func TestScimTokenByAdminTokenOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		networkId, ownerSession := newTestDomainTeam(t, ctx)
+		teams := testScimTokenTeams()
+
+		jti := server.NewId().String()
+		first, err := teams.setScimToken(&NetworkScimTokenArgs{}, testAdminCommandSession(t, ctx, ownerSession, []string{"all"}, jti))
+		if err != nil || first.Error != nil || !first.ScimOn || first.ScimBearer == "" {
+			t.Fatalf("the first use: %v %+v", err, first)
+		}
+		replay, err := teams.setScimToken(&NetworkScimTokenArgs{}, testAdminCommandSession(t, ctx, ownerSession, []string{"all"}, jti))
+		if err != nil || replay.Error != nil || !replay.ScimOn || replay.ScimBearer != "" || replay.ScimUrl != first.ScimUrl {
+			t.Fatalf("the replay: %v %+v", err, replay)
+		}
+		firstSha256 := sha256.Sum256([]byte(first.ScimBearer))
+		connect.AssertEqual(t, testScimTokenColumn(ctx, networkId), firstSha256[:])
+		connect.AssertEqual(t, testScimTokenEventActions(ctx, networkId), []string{AdminEventActionScimTokenIssue})
+		stored, found := testAdminTokenUseResult(ctx, jti)
+		if !found || bytes.Contains(stored, []byte(first.ScimBearer)) || bytes.Contains(stored, []byte(networkScimBearerPrefix)) {
+			t.Fatalf("the use's stored answer: found %t, %q", found, stored)
+		}
+
+		removeJti := server.NewId().String()
+		removed, err := teams.setScimToken(&NetworkScimTokenArgs{Remove: true}, testAdminCommandSession(t, ctx, ownerSession, []string{"all"}, removeJti))
+		if err != nil || !removed.Removed || removed.ScimOn {
+			t.Fatalf("the removal: %v %+v", err, removed)
+		}
+		removedAgain, err := teams.setScimToken(&NetworkScimTokenArgs{Remove: true}, testAdminCommandSession(t, ctx, ownerSession, []string{"all"}, removeJti))
+		if err != nil || !removedAgain.Removed || removedAgain.ScimOn {
+			t.Fatalf("the removal's replay: %v %+v", err, removedAgain)
+		}
+		connect.AssertEqual(t, testScimTokenColumn(ctx, networkId) == nil, true)
+
+		narrowJti := server.NewId().String()
+		if _, err := teams.setScimToken(&NetworkScimTokenArgs{}, testAdminCommandSession(t, ctx, ownerSession, []string{"auth_keys"}, narrowJti)); err == nil {
+			t.Fatal("a token without all issued a bearer")
+		}
+		adminSession := newTestTeamMemberSession(t, ctx, networkId, NetworkMemberRoleAdmin, false)
+		adminJti := server.NewId().String()
+		if _, err := teams.setScimToken(&NetworkScimTokenArgs{}, testAdminCommandSession(t, ctx, adminSession, []string{"all"}, adminJti)); err == nil {
+			t.Fatal("an Admin's token issued a bearer")
+		}
+		for _, refusedJti := range []string{narrowJti, adminJti} {
+			if _, found := testAdminTokenUseResult(ctx, refusedJti); found {
+				t.Fatal("a refused token spent its use")
+			}
+		}
+		connect.AssertEqual(t, testScimTokenColumn(ctx, networkId) == nil, true)
+		connect.AssertEqual(t, testScimTokenEventActions(ctx, networkId), []string{AdminEventActionScimTokenIssue, AdminEventActionScimTokenRemove})
 	})
 }

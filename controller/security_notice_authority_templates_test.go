@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"html"
 	"strings"
 	"testing"
 	"time"
@@ -55,5 +56,22 @@ func TestSecurityNetworkAuthorityNoticeIsNeverSentBySms(t *testing.T) {
 	}
 	if _, ok := accountMessageTemplates[notice.Name()]; !ok {
 		t.Fatalf("%s does not go through the outbox", notice.Name())
+	}
+}
+
+// A new SCIM bearer (QD-828): the notice says one was issued and that the earlier one stopped working, and names no
+// bearer, IdP or member.
+func TestSecurityNetworkAuthorityNoticeSaysAScimTokenWasIssued(t *testing.T) {
+	notice := &SecurityNetworkAuthorityChangedTemplate{}
+	notice.Changes = []*model.SecurityNetworkAuthorityChange{
+		{ChangeTime: time.Date(2026, 11, 15, 9, 30, 0, 0, time.UTC), Action: model.SecurityNetworkAuthorityScimToken, Via: model.SecurityNoticeViaWeb},
+	}
+	_, bodyHtml, bodyText := securityNoticeText(t, notice)
+	want := "A new SCIM token for the network's identity provider was issued, and any earlier one stopped working"
+	if !strings.Contains(bodyText, "Change: "+want+"\n") || !strings.Contains(bodyHtml, html.EscapeString(want)) {
+		t.Fatalf("the notice does not say a SCIM token was issued:\n%s", bodyText)
+	}
+	if strings.Contains(bodyText, "ur-scim-") || strings.Contains(bodyHtml, "ur-scim-") {
+		t.Fatal("the notice names a bearer")
 	}
 }
