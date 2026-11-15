@@ -24,8 +24,10 @@ package controller
 // fulfilled and handled by hand: its codes are made, its buyer gets every card,
 // and no friend is emailed. An unpaid card order also loses its buyer's address
 // (model.RemoveGiftOrderBuyerEmail), as a Stripe session cannot be paid late,
-// and so does an order of either rail refunded before it was paid: nothing
-// needs it after that.
+// and so does an order of any rail refunded before it was paid: nothing needs
+// it after that. An order paid with Gamma forgets its intent 30 days on, as a
+// coin's order forgets its invoice (model.UnlinkGammaGiftOrders), and then its
+// buyer's address once no friend's email needs it.
 
 import (
 	"context"
@@ -207,14 +209,15 @@ func addGiftOrderEmailsInTx(ctx context.Context, tx server.PgTx, order *model.Gi
 // by card wait this long after the payment, past the early fraud warnings. A
 // refund or a dispute in the hold voids the codes or ends the order, and each
 // email is withdrawn when it comes due (GiftCardFriendTemplate's loader). A
-// coin payment has no chargeback, so its emails have no hold.
+// payment in a coin or with Gamma has no chargeback, so its emails have no hold
+// (the owner, 2026-11-14: the hold is for card orders only).
 const GiftFriendsCardHold = 2 * time.Hour
 
 // GiftFriendsSendAt is when a paid order's friends' emails go out: 9:00 on its
 // send-on date in the buyer's zone, or the payment for an order without a
 // date or whose date had passed by then; never before the payment, and for an
-// order not paid in a coin (by card) never before GiftFriendsCardHold after
-// it. nil when the order emails no friend: delivery "me", no friend's address
+// order paid by card (rail stripe) never before GiftFriendsCardHold after it.
+// nil when the order emails no friend: delivery "me", no friend's address
 // left, or not paid (pending, or refunded). The delivery owes the emails at
 // this time, POST /pay/gift/order answers it (friends_send_at), and the
 // buyer's email says it.
@@ -232,11 +235,11 @@ func GiftFriendsSendAt(order *model.GiftOrder) *time.Time {
 // When the friends' emails of the order, paid at paidTime, are due, by
 // GiftFriendsSendAt's rule whatever the order's state: the later of its
 // scheduled time (9:00 on its send-on date in the buyer's zone, at the zone's
-// offset that day) and the payment, plus the card hold unless it was paid in a
-// coin.
+// offset that day) and the payment, plus the card hold when it was paid by
+// card. A coin's or Gamma's payment is never held.
 func giftFriendDeliverTime(order *model.GiftOrder, paidTime time.Time) time.Time {
 	earliest := paidTime.UTC()
-	if order.Rail != model.GiftRailCrypto {
+	if order.Rail == model.GiftRailStripe {
 		earliest = earliest.Add(GiftFriendsCardHold)
 	}
 	if order.SendOn != nil {
@@ -408,8 +411,8 @@ func giftOrderHasRecipients(order *model.GiftOrder) bool {
 
 // What the email is about: the cards attached, or when the friends get theirs
 // (GiftFriendsSendAt): now, once that time has come when this email goes out
-// (a coin payment's, or a late email); on the buyer's date; or, held after a
-// card payment, at the time, in the buyer's zone (else UTC).
+// (a coin's or Gamma's payment, or a late email); on the buyer's date; or,
+// held after a card payment, at the time, in the buyer's zone (else UTC).
 func (self *GiftCardsBuyerTemplate) Lead() string {
 	language := self.language()
 	if !self.Them() {
@@ -505,8 +508,8 @@ func (self *GiftCardFriendTemplate) LoadAccountMessage(ctx context.Context) erro
 }
 
 // Once the friend's email is sent or given up, an order whose crypto invoice
-// the 30-day unlink has passed forgets its buyer's address, kept as the friends'
-// reply-to, when no friend's email still needs it
+// or Gamma intent the 30-day unlink has passed forgets its buyer's address,
+// kept as the friends' reply-to, when no friend's email still needs it
 // (accountMessageFinisher; model.ClearUnlinkedGiftOrderBuyerEmail does
 // nothing for any other order). The daily retention covers a missed one.
 func (self *GiftCardFriendTemplate) AccountMessageFinished(ctx context.Context) {
@@ -679,15 +682,19 @@ type GiftRetentionResult struct {
 	// orders never paid (pending, or refunded before payment) whose personal
 	// data was removed
 	UnpaidRemovedCount int `json:"unpaid_removed_count"`
-	// crypto orders the 30-day unlink passed that forgot their buyer's
-	// address, kept until no friend's email needed it
+	// crypto and Gamma orders the 30-day unlink passed that forgot their
+	// buyer's address, kept until no friend's email needed it
 	UnlinkedBuyerEmailClearedCount int `json:"unlinked_buyer_email_cleared_count"`
+	// Gamma orders the 30-day unlink passed in this run: each forgot its Pay
+	// with Gamma intent (model.UnlinkGammaGiftOrders)
+	GammaUnlinkedCount int `json:"gamma_unlinked_count"`
 }
 
-// Removes the personal data of every order whose last email went out 30 days
-// ago or more, and of every order never paid, 30 days after it was made or
-// refunded; and the buyer's address of a crypto order the unlink passed once
-// no friend's email needs it.
+// Unlinks every Gamma order from its intent 30 days on, as a coin's order is
+// unlinked from its invoice; removes the personal data of every order whose
+// last email went out 30 days ago or more, and of every order never paid, 30
+// days after it was made or refunded; and the buyer's address of a crypto or
+// Gamma order the unlink passed once no friend's email needs it.
 func GiftRetention(
 	args *GiftRetentionArgs,
 	clientSession *session.ClientSession,
@@ -719,13 +726,28 @@ func runGiftRetention(ctx context.Context, now time.Time) (*GiftRetentionResult,
 		}
 	}
 
-	// crypto orders the 30-day unlink passed (rail crypto, no invoice) that
-	// kept their buyer's address as the friends' reply-to: the delivery
-	// forgets it after the last friend's email, and this covers one it
-	// missed. First, while the order's cards are still stored: an order of
-	// delivery "them" without them reads as one whose emails are still owed.
-	// Only orders made before the cutoff, as every unlinked one was: a crypto
-	// order is made before its invoice is linked to it.
+	// Gamma orders whose intent was credited 30 days ago, or can no longer be
+	// charged 30 days after it was made, forget it, as a coin's order forgets
+	// its invoice (model.UnlinkCryptoPaymentIntents, the crypto rail's own
+	// daily unlink). First, so the step below clears the buyer's address of
+	// an order this unlinked once no friend's email needs it.
+	gammaCutoff := now.Add(-model.GiftGammaUnlinkAfter)
+	for running() {
+		unlinked := model.UnlinkGammaGiftOrders(ctx, gammaCutoff, giftRetentionBatchSize, now)
+		result.GammaUnlinkedCount += unlinked
+		if unlinked < giftRetentionBatchSize {
+			break
+		}
+	}
+
+	// crypto and Gamma orders the 30-day unlink passed (rail crypto with no
+	// invoice, rail gamma with no intent) that kept their buyer's address as
+	// the friends' reply-to: the delivery forgets it after the last friend's
+	// email, and this covers one it missed. First, while the order's cards are
+	// still stored: an order of delivery "them" without them reads as one
+	// whose emails are still owed. Only orders made before the cutoff, as
+	// every unlinked one was: an order is made before its invoice or intent is
+	// linked to it.
 	var afterOrderId *server.Id
 	for running() {
 		giftOrderIds := listUnlinkedGiftOrderBuyerEmails(ctx, cutoff, afterOrderId, giftRetentionBatchSize)
@@ -798,9 +820,10 @@ func runGiftRetention(ctx context.Context, now time.Time) (*GiftRetentionResult,
 		after = candidates[len(candidates)-1]
 	}
 
-	if 0 < result.RemovedCount || 0 < result.UnpaidRemovedCount || 0 < result.UnlinkedBuyerEmailClearedCount {
+	if 0 < result.RemovedCount || 0 < result.UnpaidRemovedCount || 0 < result.UnlinkedBuyerEmailClearedCount || 0 < result.GammaUnlinkedCount {
 		glog.Infof(
-			"[gift]retention removed the cards and personal data of %d gift orders, the personal data of %d never paid, and the buyer's address of %d unlinked\n",
+			"[gift]retention unlinked %d gift orders from their Gamma intents, and removed the cards and personal data of %d gift orders, the personal data of %d never paid, and the buyer's address of %d unlinked\n",
+			result.GammaUnlinkedCount,
 			result.RemovedCount,
 			result.UnpaidRemovedCount,
 			result.UnlinkedBuyerEmailClearedCount,
@@ -809,9 +832,9 @@ func runGiftRetention(ctx context.Context, now time.Time) (*GiftRetentionResult,
 	return result, nil
 }
 
-// The crypto orders the 30-day unlink may have passed that still hold their
-// buyer's address: rail crypto, no invoice, made before `cutoff`, by id after
-// `afterOrderId`.
+// The crypto and Gamma orders the 30-day unlink may have passed that still
+// hold their buyer's address: rail crypto with no invoice, or rail gamma with
+// no intent, made before `cutoff`, by id after `afterOrderId`.
 //
 // TODO(part 1): this listing belongs in model/gift_order_model.go too.
 func listUnlinkedGiftOrderBuyerEmails(ctx context.Context, cutoff time.Time, afterOrderId *server.Id, limit int) (giftOrderIds []server.Id) {
@@ -826,8 +849,10 @@ func listUnlinkedGiftOrderBuyerEmails(ctx context.Context, cutoff time.Time, aft
 				SELECT gift_order_id
 				FROM gift_order
 				WHERE
-					rail = $1 AND
-					crypto_intent_id IS NULL AND
+					(
+						(rail = $1 AND crypto_intent_id IS NULL) OR
+						(rail = $5 AND gamma_intent_id IS NULL)
+					) AND
 					buyer_email <> '' AND
 					create_time < $2 AND
 					gift_order_id > $3
@@ -838,6 +863,7 @@ func listUnlinkedGiftOrderBuyerEmails(ctx context.Context, cutoff time.Time, aft
 			cutoff,
 			afterId,
 			limit,
+			model.GiftRailGamma,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

@@ -10,8 +10,10 @@ import (
 )
 
 // Selling URnetwork Pro gift codes (controller/gift_checkout_controller.go,
-// mmm/GIFTOFPRIVACY.md §10.2). Every route is public; the two purchases take
-// an optional sign-in, which only `referral_credit` reads.
+// mmm/GIFTOFPRIVACY.md §10.2). Every route but the Gamma purchase is public;
+// the card and coin purchases take an optional sign-in, which only
+// `referral_credit` reads. The Gamma purchase is paid from the signed-in
+// network's deposit, so it needs a bearer, as POST /pay/gamma/intent does.
 
 // GiftConfig is GET /pay/gift/config: whether gifts are sold, the tiers and
 // the coins.
@@ -29,6 +31,13 @@ func GiftCheckout(w http.ResponseWriter, r *http.Request) {
 // coin, through the crypto invoice the site's CryptoPayPanel renders.
 func GiftCryptoIntent(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputOptionalAuth(controller.GiftCryptoIntent, w, r)
+}
+
+// GiftGammaIntent is POST /pay/gift/gamma-intent: an order paid with Gamma,
+// from the signed-in network's deposit hotkey. A bearer is required, as for
+// POST /pay/gamma/intent (controller/gift_gamma_controller.go).
+func GiftGammaIntent(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.GiftGammaIntent, w, r)
 }
 
 // GiftOrder is POST /pay/gift/order {order_id, token}: the order's status,

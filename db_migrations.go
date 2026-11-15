@@ -11582,4 +11582,13 @@ var migrations = []any{
 	// write and read it, and the api and alt whose GET /account/epochs reads
 	// it.
 	operatorBlockPointsExpiredMigration,
+
+	// Gift orders paid with Gamma (gift_gamma_schema.go,
+	// controller/gift_gamma_controller.go): gift_order.gamma_intent_id,
+	// nullable with no default and unique, each added only when absent, under
+	// a five-second lock bound. A catalog change and an index over gift_order;
+	// nothing is rewritten. Apply before deploying the api and alt (POST
+	// /pay/gift/gamma-intent) and the taskworker (the Gamma biller's credit
+	// and the gift retention) that use it.
+	giftGammaSchemaMigration,
 }

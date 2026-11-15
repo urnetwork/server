@@ -41,26 +41,31 @@ var gammaPaymentFailuresQuery = `
 /* monitor-signal-2.22a-gamma-payment-failures */
 WITH spent_uncredited AS (
     -- our finalized GammaSpent took the price, and the intent is neither
-    -- credited nor voided (voiding records an operator's disposition)
+    -- credited nor voided (voiding records an operator's disposition). A
+    -- gift order's intent is credited to its order, which needs no network:
+    -- it is creditable while its network is gone
     SELECT intent.intent_id,
            intent.credit_failure_count,
            charge.resolved_at,
-           EXISTS (
-               SELECT 1 FROM network
-               WHERE network.network_id = intent.network_id
-           ) AS network_exists
+           (
+               intent.item = '` + gammaPaymentFailuresSqlName(controller.GiftGammaItem) + `'
+               OR EXISTS (
+                   SELECT 1 FROM network
+                   WHERE network.network_id = intent.network_id
+               )
+           ) AS creditable
     FROM gamma_charge charge
     INNER JOIN gamma_payment_intent intent ON intent.intent_id = charge.intent_id
     WHERE charge.state = 'spent'
       AND intent.credited_at IS NULL
       AND intent.voided_at IS NULL
 ), credit_problem AS (
-    SELECT CASE WHEN spent_uncredited.network_exists THEN 'gamma_credit_failed' ELSE 'gamma_credit_unfulfillable' END AS kind,
+    SELECT CASE WHEN spent_uncredited.creditable THEN 'gamma_credit_failed' ELSE 'gamma_credit_unfulfillable' END AS kind,
            count(DISTINCT spent_uncredited.intent_id)::bigint AS issue_count,
            greatest(0, extract(epoch FROM now() - min(spent_uncredited.resolved_at)))::bigint AS oldest_age,
            greatest(0, extract(epoch FROM now() - max(spent_uncredited.resolved_at)))::bigint AS newest_age
     FROM spent_uncredited
-    WHERE NOT spent_uncredited.network_exists
+    WHERE NOT spent_uncredited.creditable
        OR ` + strconv.Itoa(controller.GammaMaxCreditFailures) + ` <= spent_uncredited.credit_failure_count
     GROUP BY 1
 ), batch_alarm AS (
@@ -185,15 +190,15 @@ func gammaPaymentFailureFinding(kind string, count, oldestAge, newestAge int64) 
 		common.class = "gamma-credit-unfulfillable"
 		common.symptom = fmt.Sprintf("%d gamma payment(s) were spent from the customer's deposit for an account that no longer exists, and were never credited", count)
 		common.mechanism = "Our own finalized GammaSpent took the price from the customer's SN25 gamma deposit, but the intent's network no longer exists, so its credit stops on the missing network (gamma alarm credit_unfulfillable). Account deletion waits for a gamma charge in flight (server 57f98311f), so only a network removed another way, or a build older than that, gets here. Nothing credits the payment by itself, and gamma cannot be refunded on chain."
-		common.context = "The count is distinct intents: a spent gamma_charge whose gamma_payment_intent is neither credited nor voided and names a network that is gone; ages are from the spend's resolution. The gamma_alarm row of kind credit_unfulfillable (key credit_unfulfillable/<intent id>) names the intent, network, deposit hotkey, block and reference; the biller retries the credit and counts the failures."
+		common.context = "The count is distinct intents: a spent gamma_charge whose gamma_payment_intent is neither credited nor voided and names a network that is gone; ages are from the spend's resolution. A gift order's intent (item gift_pro_year) is never counted here: it is credited to its order, whose codes go to the buyer's email, so a network that is gone does not stop it. The gamma_alarm row of kind credit_unfulfillable (key credit_unfulfillable/<intent id>) names the intent, network, deposit hotkey, block and reference; the biller retries the credit and counts the failures."
 		common.action = "From the alarm, find the intent and establish who paid from support evidence and the deposit's coldkey on chain. Bring each to the owner for an authorized disposition: a credit to the customer's verified live account, or a refund in another asset (gamma itself cannot be refunded). Never recreate the deleted network, and never credit an account on an email or name match. Once the disposition is done, record it by voiding the intent (gamma_payment_intent.voided_at): the biller stops retrying it and it leaves this count. Then find how the network was removed outside account deletion, and compare the running api and taskworker with server commit 57f98311f."
 		common.verify = "Each counted intent has the owner's documented disposition and is voided after its spend, the aggregate returns to zero, and no new spend lands for a network that is gone."
 	case "gamma_credit_failed":
 		common.class = "gamma-credit-failed"
 		common.symptom = fmt.Sprintf("%d gamma payment(s) were spent from the customer's deposit and their credit has failed %d times or more", count, controller.GammaMaxCreditFailures)
-		common.mechanism = fmt.Sprintf("Our own finalized GammaSpent took the price, and crediting the intent (the plan, data pack or balance code it buys) failed at least %d times for an account that still exists, so its status says review (credit_failed). The biller retries a few such credits each run, the least retried first, and credits the intent once the cause is fixed; nothing else credits it.", controller.GammaMaxCreditFailures)
-		common.context = "The count is distinct intents: a spent gamma_charge whose gamma_payment_intent is neither credited nor voided, names a live network and has failed its credit that many times; ages are from the spend's resolution."
-		common.action = "Read the taskworker log for \"[gamma]credit of intent <id> failed (<n>): <error>\" and fix the cause: the Pro configuration (the data code duration, the data pack catalog) or a database failure. Do not credit by hand or edit balances: the biller's retry credits the intent once, through its one-shot. If the cause cannot be fixed, bring it to the owner for an authorized disposition, and void the intent once that is done."
+		common.mechanism = fmt.Sprintf("Our own finalized GammaSpent took the price, and crediting the intent (the plan, data pack or balance code it buys, or a gift order's codes) failed at least %d times for an account that still exists, or for a gift order, so its status says review (credit_failed). The biller retries a few such credits each run, the least retried first, and credits the intent once the cause is fixed; nothing else credits it.", controller.GammaMaxCreditFailures)
+		common.context = "The count is distinct intents: a spent gamma_charge whose gamma_payment_intent is neither credited nor voided, names a live network or is a gift order's (item gift_pro_year, credited to its order whatever its network), and has failed its credit that many times; ages are from the spend's resolution."
+		common.action = "Read the taskworker log for \"[gamma]credit of intent <id> failed (<n>): <error>\" and fix the cause: the Pro configuration (the data code duration, the data pack catalog, the gift block), a gift intent with no gift order or a price that is not its order's total, or a database failure. Do not credit by hand or edit balances or codes: the biller's retry credits the intent once, through its one-shot. A gift order paid with Gamma is final sale and is never refunded. If the cause cannot be fixed, bring it to the owner for an authorized disposition, and void the intent once that is done."
 		common.verify = "Each counted intent is credited (status paid) or voided after a documented disposition, and the aggregate returns to zero."
 	case "gamma_batch_unfulfillable":
 		common.tier = tierWarn

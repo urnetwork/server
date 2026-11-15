@@ -21,6 +21,11 @@ package controller
 //     top-up on by default, from the hotkey that paid
 //  7. the receipt email to the network's admin, and the sales notice
 //
+// A gift order's intent (item gift_pro_year) is credited instead with the
+// order's codes and their delivery, and none of 1 and 3-7: no network is
+// credited, the account is not recorded as paying with gamma, and no receipt
+// is sent (gift_gamma_controller.go).
+//
 // Nothing here changes how the network provides: an automatic upgrade never
 // touches the provide mode.
 
@@ -43,6 +48,10 @@ func gammaCreditIntent(clientSession *session.ClientSession, intent *model.Gamma
 	ctx := clientSession.Ctx
 	if charge.State != model.GammaChargeSpent {
 		return false, fmt.Errorf("intent %s's charge is %s, not spent", intent.IntentId, charge.State)
+	}
+	if gammaGiftIntent(intent) {
+		// a gift order's codes, not a plan or data for a network
+		return gammaCreditGiftIntent(clientSession, intent)
 	}
 	plan := slices.Contains(gammaKnownPlans, intent.Item)
 	var byteCount model.ByteCount

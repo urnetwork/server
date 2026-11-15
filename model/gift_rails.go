@@ -163,8 +163,9 @@ func GetGiftFriendEmailCount(ctx context.Context, buyerEmail string, since time.
 }
 
 // RemoveUnstartedGiftOrder removes an order that was just stored and never
-// started: still pending, with no Checkout session, invoice or payment, as a
-// refusal does after storing it. false when the order is not such a one.
+// started: still pending, with no Checkout session, invoice, Gamma intent or
+// payment, as a refusal does after storing it. false when the order is not
+// such a one.
 func RemoveUnstartedGiftOrder(ctx context.Context, giftOrderId server.Id) (removed bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		removed = false
@@ -176,6 +177,7 @@ func RemoveUnstartedGiftOrder(ctx context.Context, giftOrderId server.Id) (remov
 					status = $2 AND
 					stripe_session_id IS NULL AND
 					crypto_intent_id IS NULL AND
+					gamma_intent_id IS NULL AND
 					purchase_event_base IS NULL
 				FROM gift_order
 				WHERE gift_order_id = $1

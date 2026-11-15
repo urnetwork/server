@@ -1125,40 +1125,48 @@ func scanGammaPaymentIntent(result pgx.Rows) *GammaPaymentIntent {
 // when the network no longer exists.
 func CreateGammaPaymentIntent(ctx context.Context, intent *GammaPaymentIntent) (created bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO gamma_payment_intent (
-					intent_id, status_token_hash, network_id, hotkey, purpose,
-					period_key, reference, delivery, item, tier, offer_applied,
-					price_usd_nano_cents, regular_price_usd_nano_cents, email,
-					term_start_time, create_time, expires_at
-				)
-				SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
-				WHERE EXISTS (SELECT 1 FROM network WHERE network.network_id = $3)
-				ON CONFLICT DO NOTHING
-			`,
-			intent.IntentId,
-			intent.StatusTokenHash,
-			intent.NetworkId,
-			intent.Hotkey,
-			intent.Purpose,
-			intent.PeriodKey,
-			intent.Reference,
-			intent.Delivery,
-			intent.Item,
-			nullIfEmptyString(intent.Tier),
-			intent.OfferApplied,
-			intent.PriceUsdNanoCents,
-			intent.RegularPriceUsdNanoCents,
-			nullIfEmptyString(intent.Email),
-			intent.TermStartTime,
-			intent.CreateTime,
-			intent.ExpiresAt,
-		))
-		created = tag.RowsAffected() == 1
+		created = CreateGammaPaymentIntentInTx(tx, ctx, intent)
 	})
 	return
+}
+
+// CreateGammaPaymentIntentInTx is CreateGammaPaymentIntent in the caller's
+// transaction, for a caller that records what the intent pays for with it (a
+// gift order's link, model.SetGiftOrderGammaIntentIdInTx): the biller charges
+// an intent from the moment it is committed.
+func CreateGammaPaymentIntentInTx(tx server.PgTx, ctx context.Context, intent *GammaPaymentIntent) (created bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO gamma_payment_intent (
+				intent_id, status_token_hash, network_id, hotkey, purpose,
+				period_key, reference, delivery, item, tier, offer_applied,
+				price_usd_nano_cents, regular_price_usd_nano_cents, email,
+				term_start_time, create_time, expires_at
+			)
+			SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+			WHERE EXISTS (SELECT 1 FROM network WHERE network.network_id = $3)
+			ON CONFLICT DO NOTHING
+		`,
+		intent.IntentId,
+		intent.StatusTokenHash,
+		intent.NetworkId,
+		intent.Hotkey,
+		intent.Purpose,
+		intent.PeriodKey,
+		intent.Reference,
+		intent.Delivery,
+		intent.Item,
+		nullIfEmptyString(intent.Tier),
+		intent.OfferApplied,
+		intent.PriceUsdNanoCents,
+		intent.RegularPriceUsdNanoCents,
+		nullIfEmptyString(intent.Email),
+		intent.TermStartTime,
+		intent.CreateTime,
+		intent.ExpiresAt,
+	))
+	return tag.RowsAffected() == 1
 }
 
 // GetGammaPaymentIntent is an intent, or nil.

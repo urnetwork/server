@@ -381,25 +381,35 @@ func TestGiftFriendDeliverTime(t *testing.T) {
 			t.Errorf("%s %s: deliver at %s, want %s", c.zone, c.sendOn.Format(time.DateOnly), got, c.want)
 		}
 	}
-	// a coin payment is never held: no date, or a past one, means now
-	order := &model.GiftOrder{SendTimezone: "America/Chicago", Delivery: model.GiftDeliveryThem, Rail: model.GiftRailCrypto}
-	if got := giftFriendDeliverTime(order, now); !got.Equal(now) {
-		t.Errorf("coin, no date: deliver at %s, want now", got)
-	}
+	// a coin's or Gamma's payment is never held: no date, or a past one,
+	// means now (owner, 2026-11-14: the hold is for card orders only)
 	sendOn := time.Date(2025, 12, 24, 0, 0, 0, 0, time.UTC)
-	order.SendOn = &sendOn
-	if got := giftFriendDeliverTime(order, now); !got.Equal(now) {
-		t.Errorf("coin, a past date: deliver at %s, want now", got)
-	}
-	// a card payment waits out the hold (owner, 2026-11-14), and an unknown rail is held like a card
-	for _, rail := range []string{model.GiftRailStripe, ""} {
-		card := &model.GiftOrder{SendTimezone: "America/Chicago", Delivery: model.GiftDeliveryThem, Rail: rail}
-		if got := giftFriendDeliverTime(card, now); !got.Equal(now.Add(GiftFriendsCardHold)) {
-			t.Errorf("rail %q, no date: deliver at %s, want the payment plus the hold", rail, got)
+	for _, rail := range []string{model.GiftRailCrypto, model.GiftRailGamma, ""} {
+		order := &model.GiftOrder{SendTimezone: "America/Chicago", Delivery: model.GiftDeliveryThem, Rail: rail}
+		if got := giftFriendDeliverTime(order, now); !got.Equal(now) {
+			t.Errorf("rail %q, no date: deliver at %s, want now", rail, got)
 		}
-		card.SendOn = &sendOn
-		if got := giftFriendDeliverTime(card, now); !got.Equal(now.Add(GiftFriendsCardHold)) {
-			t.Errorf("rail %q, a past date: deliver at %s, want the payment plus the hold", rail, got)
+		order.SendOn = &sendOn
+		if got := giftFriendDeliverTime(order, now); !got.Equal(now) {
+			t.Errorf("rail %q, a past date: deliver at %s, want now", rail, got)
+		}
+	}
+	// only a card payment waits out the hold
+	card := &model.GiftOrder{SendTimezone: "America/Chicago", Delivery: model.GiftDeliveryThem, Rail: model.GiftRailStripe}
+	if got := giftFriendDeliverTime(card, now); !got.Equal(now.Add(GiftFriendsCardHold)) {
+		t.Errorf("card, no date: deliver at %s, want the payment plus the hold", got)
+	}
+	card.SendOn = &sendOn
+	if got := giftFriendDeliverTime(card, now); !got.Equal(now.Add(GiftFriendsCardHold)) {
+		t.Errorf("card, a past date: deliver at %s, want the payment plus the hold", got)
+	}
+	// a date after the hold is kept on every rail
+	later := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	laterAt := time.Date(2026, 1, 2, 15, 0, 0, 0, time.UTC)
+	for _, rail := range []string{model.GiftRailStripe, model.GiftRailCrypto, model.GiftRailGamma} {
+		order := &model.GiftOrder{SendOn: &later, SendTimezone: "America/Chicago", Delivery: model.GiftDeliveryThem, Rail: rail}
+		if got := giftFriendDeliverTime(order, now); !got.Equal(laterAt) {
+			t.Errorf("rail %q, a later date: deliver at %s, want %s", rail, got, laterAt)
 		}
 	}
 }
@@ -644,11 +654,14 @@ func TestGiftFriendsSendAt(t *testing.T) {
 			at := time.Date(2026, 11, 20, 9, 0, 0, 0, chicago).UTC()
 			return &at
 		}()},
-		// a rail it does not know holds, as a card does
-		{"no rail", order("", nil, nil), func() *time.Time {
-			at := paidTime.Add(GiftFriendsCardHold)
+		// paid with Gamma: no hold, as for a coin
+		{"gamma, right after payment", order(model.GiftRailGamma, nil, nil), &paidTime},
+		{"gamma, a date inside what would be a hold", order(model.GiftRailGamma, date(2026, 11, 20), nil), func() *time.Time {
+			at := time.Date(2026, 11, 20, 9, 0, 0, 0, chicago).UTC()
 			return &at
 		}()},
+		// only a card is held (owner, 2026-11-14)
+		{"no rail", order("", nil, nil), &paidTime},
 		{"delivery me", order(model.GiftRailStripe, nil, func(order *model.GiftOrder) { order.Delivery = model.GiftDeliveryMe }), nil},
 		{"pending", order(model.GiftRailStripe, nil, func(order *model.GiftOrder) {
 			order.Status = model.GiftOrderStatusPending

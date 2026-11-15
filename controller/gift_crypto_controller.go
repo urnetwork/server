@@ -9,7 +9,8 @@ package controller
 // no network is credited, as for a data code bought without one. It is priced
 // at the order's total and capped by gift.crypto_max_invoice_usd ($500, an
 // order of 20 at $23.99 is $479.80) in place of the quote's max_invoice_usd,
-// which keeps the data rail at $100. Its status (/pay/crypto/status, which the
+// which keeps the data rail at $100; a gift order paid with Gamma has the
+// same cap (gift_gamma_controller.go). Its status (/pay/crypto/status, which the
 // site's CryptoPayPanel polls), its re-quote, the scanner, the reconcile legs
 // and the operator tools are the rail's own; the coins that take one are the
 // coins on offer that sell balance codes. Each order has its own invoice:

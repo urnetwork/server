@@ -131,3 +131,39 @@ func TestGiftRoutesThroughTheRouter(t *testing.T) {
 		t.Fatalf("check-code: %s", w.Body.String())
 	}
 }
+
+// POST /pay/gift/gamma-intent is paid from the signed-in network's Gamma
+// deposit, so it is classified and authenticated exactly as POST
+// /pay/gamma/intent is: any credential of the network, a client token
+// included, and a signed-out request is refused before the handler.
+func TestGiftGammaRouteIsAuthenticatedAsTheGammaIntent(t *testing.T) {
+	routes := map[string]*router.Route{}
+	for _, route := range Routes() {
+		routes[routeAccessKey(route)] = route
+	}
+	gift, ok := routes["POST /pay/gift/gamma-intent"]
+	if !ok {
+		t.Fatal("POST /pay/gift/gamma-intent is not served")
+	}
+	gamma, ok := routes["POST /pay/gamma/intent"]
+	if !ok {
+		t.Fatal("POST /pay/gamma/intent is not served")
+	}
+	if access := routeAccessFor(gift); access != routeAccessClient || access != routeAccessFor(gamma) {
+		t.Fatalf("gift gamma intent access %d, gamma intent access %d, want both client", access, routeAccessFor(gamma))
+	}
+	if gift.RefusesClientCredentials() != gamma.RefusesClientCredentials() ||
+		gift.RefusesIntendedNetworkMismatch() != gamma.RefusesIntendedNetworkMismatch() {
+		t.Fatal("the gift gamma intent's credential gates differ from the gamma intent's")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	apiRouter := router.NewRouter(ctx, Routes())
+	for _, path := range []string{"/pay/gift/gamma-intent", "/pay/gamma/intent"} {
+		w := serveGiftRoute(apiRouter, "POST", path, `{"quantity": 1, "email": "buyer@example.com"}`)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s signed out: status %d body %q, want 401", path, w.Code, w.Body.String())
+		}
+	}
+}
