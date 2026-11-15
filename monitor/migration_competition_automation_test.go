@@ -278,6 +278,7 @@ func TestMigrationsAutomation846FaultsFollowPublishedOwner(t *testing.T) {
 	}
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
 		for _, head := range []int{846, successor - 1, successor, handoff, official, control, recovery, exception, claim, distributed - 1, distributed, server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), server.CompetitionSecondRecoveryMigrationVersion()} {
+			tb.Logf("automation846_owner head=%d start", head)
 			server.ApplyDbMigrationsUpTo(tb.Context(), head)
 			if _, drift := migrationPingDatabaseCheck(tb, tb.Context()); drift != "" {
 				tb.Fatalf("healthy owner prefix %d drift: %s", head, drift)
@@ -302,6 +303,7 @@ func TestMigrationsAutomation846FaultsFollowPublishedOwner(t *testing.T) {
 					tb.Fatalf("restored owner prefix %d fault %d drift: %s", head, index, drift)
 				}
 			}
+			tb.Logf("automation846_owner head=%d complete", head)
 		}
 	})
 }

@@ -1,5 +1,5 @@
-// Native qualification replaces only the SSH carrier with docker exec into
-// the harness's exact owned PostgreSQL container. The production psql command,
+// Native qualification replaces only the SSH carrier with an explicitly owned
+// Docker or isolated direct-native fixture. The production psql command,
 // file-reader protocol, transaction and strict parser remain unchanged.
 package monitor
 
@@ -10,8 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,44 +19,36 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// This is an explicit fixture binding, not discovery or an arbitrary default
-// daemon target. TestEnv separately authenticates its generated test database.
-func migrationCensusNativeFixture(t *testing.T) string {
-	t.Helper()
-	if os.Getenv("URNETWORK_MIGRATION_CENSUS_NATIVE_PSQL") != "1" {
-		t.Skip("requires explicitly owned native psql migration-census fixture")
-	}
-	container := os.Getenv("URNETWORK_MIGRATION_TEST_PG_CONTAINER")
-	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(container) {
-		t.Fatal("native psql requires the exact owned PostgreSQL container id")
-	}
-	return container
-}
-
 // No connection is retained while the production psql observer starts. The
-// generated database/role must also exist in the exact fixture container;
+// generated database/role must also exist in the exact owned fixture;
 // wrong binding fails authentication, never falls back to another endpoint.
-func migrationCensusNativeRunner(t testing.TB, ctx context.Context) *runner {
+func migrationCensusNativeRunner(t testing.TB, ctx context.Context, fixture *migrationCensusNativeBackend) *runner {
 	t.Helper()
 	settings := syntheticSettings(nil).withDefaults()
 	cfg := configFromSignalSettings(settings)
+	cfg.pgPort = DefaultPostgreSQLSettings().Port
 	server.Db(ctx, func(conn server.PgConn) {
 		configuration := conn.Conn().Config()
 		cfg.pgUser, cfg.pgPassword, cfg.pgDb = configuration.User, configuration.Password, configuration.Database
+		if fixture.direct != nil {
+			port, err := migrationCensusNativeDirectPort(configuration.Host, configuration.Port, configuration.Database, fixture.direct.authority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.pgPort = port
+		}
 	})
 	if !regexp.MustCompile(`^[a-zA-Z0-9_]+$`).MatchString(cfg.pgUser) || !regexp.MustCompile(`^[a-zA-Z0-9_]+$`).MatchString(cfg.pgDb) || cfg.pgPassword == "" {
 		t.Fatal("native fixture SQL identity is incomplete or not source-safe")
 	}
-	cfg.pgPort = DefaultPostgreSQLSettings().Port
 	cfg.hosts[0].overlayIp = "192.0.2.72"
 	return newRunner(cfg)
 }
 
 // Run one real file-reader child and physically join it. Only finite private
 // errors are returned; neither command credentials nor query text are logged.
-func migrationCensusNativePsql(ctx context.Context, container, command, stdin string) (string, string, error) {
-	child := exec.CommandContext(ctx, "docker", "exec", "-i", container, "/bin/sh", "-c", command)
-	child.WaitDelay = 5 * time.Second
+func migrationCensusNativePsql(ctx context.Context, fixture *migrationCensusNativeBackend, command, stdin string) (string, string, error) {
+	child := fixture.command(ctx, command)
 	child.Stdin = strings.NewReader(stdin)
 	var output, diagnostic bytes.Buffer
 	child.Stdout, child.Stderr = &output, &diagnostic
@@ -73,18 +63,18 @@ func migrationCensusNativePsql(ctx context.Context, container, command, stdin st
 // columns. Run with the original 1-GiB PostgreSQL cap and retain native peak/OOM
 // counters in the external harness; no statement or command budget is raised.
 func TestMigrationCensusNativePsqlCompletePublishedPrefixes(t *testing.T) {
-	container := migrationCensusNativeFixture(t)
+	fixture := migrationCensusNativeFixture(t)
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
 		for _, head := range []int{server.CompetitionDistributedEvaluationMigrationVersion() - 1, server.MigrationCount()} {
 			server.ApplyDbMigrationsUpTo(tb.Context(), head)
-			runner := migrationCensusNativeRunner(tb, tb.Context())
+			runner := migrationCensusNativeRunner(tb, tb.Context(), fixture)
 			calls := 0
 			runner.runSSH = func(ctx context.Context, args []string, stdin string) (string, string, error) {
 				calls++
 				if !strings.Contains(args[len(args)-1], " -f -") || !strings.Contains(stdin, "REPEATABLE READ READ ONLY;") {
 					return "", "", errors.New("native observation did not use the production bounded session")
 				}
-				return migrationCensusNativePsql(ctx, container, args[len(args)-1], stdin)
+				return migrationCensusNativePsql(ctx, fixture, args[len(args)-1], stdin)
 			}
 			env := &probeEnv{cfg: runner.cfg, runner: runner, now: time.Now}
 			findings, err := (migrationsProbe{}).check(tb.Context(), env)
@@ -105,7 +95,7 @@ func TestMigrationCensusNativePsqlCompletePublishedPrefixes(t *testing.T) {
 // writer commits between batches; later reads and the identity census must
 // still see the original repeatable-read snapshot on the same physical pid.
 func TestMigrationCensusNativePsqlKeepsOneSnapshotThroughIdentities(t *testing.T) {
-	container := migrationCensusNativeFixture(t)
+	fixture := migrationCensusNativeFixture(t)
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
 		ctx, cancel := context.WithTimeout(tb.Context(), time.Minute)
 		defer cancel()
@@ -115,7 +105,7 @@ INSERT INTO migration_census_snapshot_fixture VALUES(7);
 CREATE TABLE migration_catalog(migration_index integer NOT NULL,identity_sha256 text NOT NULL);
 INSERT INTO migration_catalog VALUES(0,'synthetic-original-identity')`))
 		})
-		runner := migrationCensusNativeRunner(tb, ctx)
+		runner := migrationCensusNativeRunner(tb, ctx, fixture)
 		settings := DefaultMigrationCensusSettings()
 		settings.MaximumColumnsPerStatement = 1
 		query := `WITH version AS (SELECT 1 AS value) SELECT pg_backend_pid(),
@@ -154,8 +144,7 @@ UPDATE migration_catalog SET identity_sha256='synthetic-new-identity'`))
 				return "", "", errors.New("native snapshot lost first batch boundary")
 			}
 			boundary += len(plan.batches[0].query) + 1
-			child := exec.CommandContext(childCtx, "docker", "exec", "-i", container, "/bin/sh", "-c", args[len(args)-1])
-			child.WaitDelay = 5 * time.Second
+			child := fixture.command(childCtx, args[len(args)-1])
 			input, inputErr := child.StdinPipe()
 			if inputErr != nil {
 				return "", "", inputErr
@@ -194,6 +183,9 @@ UPDATE migration_catalog SET identity_sha256='synthetic-new-identity'`))
 				if err := encoder.Write(record); err != nil {
 					return "", "", err
 				}
+			}
+			if err := fixture.validateProcess(child.Process.Pid); err != nil {
+				return "", "", err
 			}
 			close(writeNow)
 			select {
