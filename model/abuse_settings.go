@@ -5,8 +5,10 @@ package model
 // DSA Art. 20's six months (server.AbuseAppealWindowMinMonths). Everything else
 // a person could tune is here, with its unit and why it has its default: the
 // ladders' and clocks' (AbusePolicySettings, embedded), §21.7's standing windows,
-// coalescing, the action pass, retention, the abuse role's lookup cap and the
-// report joins' bounds.
+// probation's caps and the standing pass, coalescing, the action pass, retention,
+// the abuse role's lookup cap and the report joins' bounds. The gates' memory has
+// its own (AbuseGateSettings, AbuseHardDenySettings), as network_verified's cache
+// does (NetworkVerifiedSettings).
 //
 // The environment's part comes from abuse.yml (server.GetAbuseConfig):
 // ApplyAbuseConfig lays its protected names over a copy, and AbuseReviewHoursOf
