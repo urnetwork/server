@@ -113,7 +113,7 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 		}
 	}
 	// 4 windows (quality, speed, limited, auto) x 3 building pass states x 9
-	// outcomes, 4 x 7 pass states, 4 x 7 warning causes, 4 x 7 removal
+	// outcomes, 4 x 7 pass states, 4 x 7 warning causes, 4 x 8 removal
 	// causes, 4 x 4 balance probe outcomes, 4 x 5 window states; the
 	// capability series: 4 windows x 2 ip x 2 protocol labels, 4 x 2 ip
 	// versions x 3 flow protocols, and 2 x 3 without a window
@@ -121,7 +121,7 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 		"urnetwork_proxy_window_candidates_total":     108,
 		"urnetwork_proxy_window_expand_passes_total":  28,
 		"urnetwork_proxy_window_warnings_total":       28,
-		"urnetwork_proxy_window_removals_total":       28,
+		"urnetwork_proxy_window_removals_total":       32,
 		"urnetwork_proxy_window_balance_probes_total": 16,
 		"urnetwork_proxy_windows":                     20,
 		"urnetwork_proxy_window_clients":              16,
@@ -147,7 +147,7 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 			t.Errorf("no series has state %q", state)
 		}
 	}
-	for _, cause := range []string{"drain", "silent", "unhealthy", "starved", "capacity", "quarantine", "family_swap", "verdict", "transport_down", "collapse", "handover", "closed"} {
+	for _, cause := range []string{"drain", "silent", "unhealthy", "starved", "capacity", "quarantine", "family_swap", "verdict", "transport_down", "collapse", "handover", "closed", "idle_trim"} {
 		if !labels["cause"][cause] {
 			t.Errorf("no series has cause %q", cause)
 		}

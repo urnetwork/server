@@ -1141,14 +1141,16 @@ type deviceCreation struct {
 // defaultProxyDeviceIdleRefillHold is how long a device may go without user
 // traffic or an open (its activity, see ProxyDeviceSettings.
 // ProxyDeviceIdleTimeout) before its below-target windows stop refilling
-// (connect IdleRefillHold). A held window keeps its exits, which keep serving,
-// and the device's next user traffic refills it at once; until then it lists,
-// mints and dials nothing. Without it every below-target window of an idle
-// device refills until the device is reaped: on Main at 17:20Z on 2026-11-05,
-// 22,200 devices were live and 3,268 had moved user traffic in the last ten
-// minutes, while the quality windows built about 48 candidates a second. Ten
-// minutes is the activity window the active-device count uses, so a user
-// pausing for less never sees the hold.
+// (connect IdleRefillHold). A held window keeps one exit once the device has
+// been idle for the longer of the hold and its sequence idle timeouts, ten
+// minutes in the hosted low memory profile (connect's idle trim, owner
+// 2026-11-15), and the device's next user traffic refills it at once; until
+// then it lists, mints and dials nothing. Without the hold every below-target
+// window of an idle device refills until the device is reaped: on Main at
+// 17:20Z on 2026-11-05, 22,200 devices were live and 3,268 had moved user
+// traffic in the last ten minutes, while the quality windows built about 48
+// candidates a second. Ten minutes is the activity window the active-device
+// count uses, so a user pausing for less never sees the hold.
 const defaultProxyDeviceIdleRefillHold = 10 * time.Minute
 
 // The gap in user traffic after which the next activity signals the device's
