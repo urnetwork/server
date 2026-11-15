@@ -112,12 +112,12 @@ func repositoryWorkCoverageSnapshot(root string, coverage *model.CompetitionWork
 	headArgs := append([]string{"--literal-pathspecs", "ls-tree", "-z", "--full-tree", "HEAD", "--"}, paths...)
 	head, err := runGit("server", headArgs...)
 	if err != nil {
-		return nil, errors.New("coverage helper HEAD entries are unavailable")
+		return nil, repositorySourceFailure("coverage helper HEAD entries are unavailable", err)
 	}
 	indexArgs := append([]string{"--literal-pathspecs", "ls-files", "--stage", "-z", "--"}, paths...)
 	index, err := runGit("server", indexArgs...)
 	if err != nil {
-		return nil, errors.New("coverage helper index entries are unavailable")
+		return nil, repositorySourceFailure("coverage helper index entries are unavailable", err)
 	}
 	parse := func(content string, staged bool) (map[string]repositoryWorkCoverageFile, error) {
 		entries := map[string]repositoryWorkCoverageFile{}
@@ -180,7 +180,7 @@ func repositoryWorkCoverageSnapshot(root string, coverage *model.CompetitionWork
 	hashed, err := runGit("server", hashArgs...)
 	worktreeBlobs := strings.Fields(hashed)
 	if err != nil || len(worktreeBlobs) != len(paths) {
-		return nil, errors.New("coverage helper working bytes are unavailable")
+		return nil, repositorySourceFailure("coverage helper working bytes are unavailable", err)
 	}
 	for index, path := range paths {
 		if worktreeBlobs[index] != headEntries[path].blob {
