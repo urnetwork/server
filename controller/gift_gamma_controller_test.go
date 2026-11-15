@@ -167,6 +167,8 @@ func TestGiftConfigGammaUnavailable(t *testing.T) {
 // tells apart from every plan and data pack it sells.
 func TestGiftGammaItemIsNoPlanOrPack(t *testing.T) {
 	connect.AssertEqual(t, GiftGammaItem, "gift_pro_year")
+	// the coin rails' gift item: one item on every gift invoice and intent
+	connect.AssertEqual(t, GiftGammaItem, giftCryptoItem)
 	connect.AssertEqual(t, slices.Contains(gammaKnownPlans, GiftGammaItem), false)
 	connect.AssertEqual(t, slices.Contains(gammaKnownItems(), GiftGammaItem), false)
 	connect.AssertEqual(t, gammaGiftIntent(&model.GammaPaymentIntent{Item: GiftGammaItem}), true)

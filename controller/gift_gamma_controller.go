@@ -26,6 +26,18 @@ package controller
 // without its order. A refusal after the order is stored removes it, never
 // started.
 //
+// An account has one open gift purchase at a time, since all of them draw on
+// its one deposit hotkey: a buyer who changes the gift (a new order) or leaves
+// it, and mints later, must never be charged for the purchase left behind, or
+// twice. The same transaction voids the account's other open gift purchases
+// (model.VoidOpenGammaGiftIntentsInTx; never a plan or a data purchase), and
+// POST /pay/gift/gamma-cancel voids an order's (GiftGammaCancel), for "pay
+// another way". Neither voids a purchase whose spend is in flight (in a spend
+// batch that can still land, or spent and not yet credited): a new purchase is
+// refused meanwhile, and so is the cancel (payment_in_progress). A voided
+// purchase is never charged, and its order, which stays pending, no longer
+// counts against the buyer's daily friend emails.
+//
 // The credit (gammaCreditIntent hands a gift intent here) wins the intent's
 // one-shot, then, in the same transaction, fulfils the order with the purchase
 // event base gamma/<intent id> (codes gamma/<intent id>/gift/<n>) and the price
@@ -56,7 +68,14 @@ import (
 
 // GiftGammaItem is the intent item of a gift order paid with Gamma: the same
 // item as a coin's gift invoice. The monitor tells gift intents apart by it.
-const GiftGammaItem = giftCryptoItem
+const GiftGammaItem = model.GammaGiftItem
+
+// The refusal of a new gift purchase, and of a cancel, while an earlier gift
+// purchase's Gamma spend is in flight: it can still land, so it cannot be
+// voided, and a new purchase beside it could be charged as well.
+const GiftErrorCodePaymentInProgress = "payment_in_progress"
+
+const giftGammaPaymentInProgressMessage = "A Gamma payment for an earlier gift is still being processed. Try again in a few minutes."
 
 // GiftGammaIntentArgs is POST /pay/gift/gamma-intent: the order's fields, the
 // Bittensor footer, and the coldkey that will mint.
@@ -129,15 +148,22 @@ func GiftGammaIntent(
 			"Too many payment attempts from this address. Try again in a minute.",
 		), nil
 	}
+	networkId := clientSession.ByJwt.NetworkId
 	// Gamma's own per-network limit, as POST /pay/gamma/intent's
-	if !allowNetworkIntent(clientSession.ByJwt.NetworkId) {
+	if !allowNetworkIntent(networkId) {
 		return giftGammaIntentError(PurchaseErrorCodeRateLimited, "Too many payment attempts. Try again in a minute."), nil
 	}
 
 	ctx := clientSession.Ctx
+	// an earlier gift's spend in flight can still land: refused before
+	// anything is stored, and again under the void's locks
+	if model.HasGammaGiftChargeInFlight(ctx, networkId) {
+		return giftGammaIntentError(GiftErrorCodePaymentInProgress, giftGammaPaymentInProgressMessage), nil
+	}
 	// the buyer's daily friend emails, before anything is stored and after the
-	// order is (gift_rails_controller.go)
-	if errCode, errMessage := giftFriendEmailLimitRefusal(ctx, order, giftConfig, server.NowUtc()); errMessage != "" {
+	// order is (gift_rails_controller.go), without the orders of the open gift
+	// purchases this one voids
+	if errCode, errMessage := giftFriendEmailLimitRefusalReplacing(ctx, order, giftConfig, server.NowUtc(), &networkId); errMessage != "" {
 		return giftGammaIntentError(errCode, errMessage), nil
 	}
 
@@ -164,13 +190,21 @@ func GiftGammaIntent(
 		return giftGammaIntentError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
 	}
 	// refused here, the order is removed and no intent is ever recorded
-	if errCode, errMessage := giftKeepFriendEmailLimit(ctx, order, giftConfig, server.NowUtc()); errMessage != "" {
+	if errCode, errMessage := giftKeepFriendEmailLimitReplacing(ctx, order, giftConfig, server.NowUtc(), &networkId); errMessage != "" {
 		return giftGammaIntentError(errCode, errMessage), nil
 	}
 
-	// the intent and the order's link to it, committed together or not at all
-	result := start.issue(clientSession, func(tx server.PgTx, intent *model.GammaPaymentIntent) error {
-		return model.SetGiftOrderGammaIntentIdInTx(tx, ctx, order.GiftOrderId, intent.IntentId)
+	// the account's other open gift purchases voided, the intent and the
+	// order's link to it, committed together or not at all
+	result := start.issue(clientSession, func(tx server.PgTx, intent *model.GammaPaymentIntent) (*GammaPaymentIntentResult, error) {
+		voided, inFlight := model.VoidOpenGammaGiftIntentsInTx(tx, ctx, networkId, intent.CreateTime)
+		if inFlight {
+			return gammaIntentError(GiftErrorCodePaymentInProgress, giftGammaPaymentInProgressMessage), nil
+		}
+		for _, voidedIntentId := range voided {
+			glog.Infof("[gift]gamma intent %s voided: a newer gift purchase replaces it\n", voidedIntentId)
+		}
+		return nil, model.SetGiftOrderGammaIntentIdInTx(tx, ctx, order.GiftOrderId, intent.IntentId)
 	})
 	if result.Error != nil {
 		// no intent was recorded, so the order was never started
@@ -197,6 +231,88 @@ func GiftGammaIntent(
 		OrderToken:               order.OrderToken,
 		BittensorFooter:          order.BittensorFooter,
 	}, nil
+}
+
+// GiftGammaCancelResult is POST /pay/gift/gamma-cancel.
+type GiftGammaCancelResult struct {
+	// the order's Gamma purchase is voided and can never be charged: now, or
+	// before (by a newer gift purchase or an earlier cancel), or the order has
+	// none left that can be
+	Cancelled bool `json:"cancelled"`
+	// the order's status, as POST /pay/gift/order answers it: pending | paid |
+	// refunded. A cancelled order stays pending. "" when no order matches the
+	// id and token.
+	Status string     `json:"status"`
+	Error  *GiftError `json:"error,omitempty"`
+}
+
+// The cancel's own limit, at the order status's (giftReadLimiter's) rate, with
+// counts of its own: a dialog polling the order never uses up its cancel.
+var giftGammaCancelLimiter = &payDataIpLimiter{limitPerMinute: payDataLookupIpLimitPerMinute}
+
+// GiftGammaCancel answers POST /pay/gift/gamma-cancel {order_id, token}: the
+// order's Gamma purchase is voided, unless its spend is in flight
+// (payment_in_progress) or the order is paid (cancelled false, with the paid
+// status). The order's token is the credential, as for POST /pay/gift/order;
+// an order it does not open, and an order not paid with Gamma, are
+// invalid_request. Rate limited per address as POST /pay/gift/order is.
+func GiftGammaCancel(
+	args *GiftOrderStatusArgs,
+	clientSession *session.ClientSession,
+) (*GiftGammaCancelResult, error) {
+	if !giftGammaCancelLimiter.allow(clientSession) {
+		return nil, errGiftReadRateLimited
+	}
+	order := giftOrderForToken(clientSession, args)
+	if order == nil {
+		return &GiftGammaCancelResult{Error: &GiftError{
+			Code:    PurchaseErrorCodeInvalidRequest,
+			Message: "No gift order matches this id and token.",
+		}}, nil
+	}
+	if order.Rail != model.GiftRailGamma {
+		return &GiftGammaCancelResult{
+			Status: order.Status,
+			Error: &GiftError{
+				Code:    PurchaseErrorCodeInvalidRequest,
+				Message: "This gift order is not paid with Gamma.",
+			},
+		}, nil
+	}
+	if order.Status != model.GiftOrderStatusPending || order.GammaIntentId == nil {
+		// paid (or refunded): nothing to cancel. Pending with no purchase
+		// left (the 30-day unlink passed one that could no longer be
+		// charged): nothing can charge it
+		return &GiftGammaCancelResult{
+			Cancelled: order.Status == model.GiftOrderStatusPending,
+			Status:    order.Status,
+		}, nil
+	}
+
+	ctx := clientSession.Ctx
+	switch outcome := model.CancelGammaGiftIntent(ctx, *order.GammaIntentId, gammaNow()); outcome {
+	case model.GammaGiftCancelVoided:
+		// never the order's id beside the intent's (GiftGammaIntent)
+		glog.Infof("[gift]gamma intent %s voided: its order was cancelled\n", *order.GammaIntentId)
+		return &GiftGammaCancelResult{Cancelled: true, Status: order.Status}, nil
+	case model.GammaGiftCancelClosed:
+		return &GiftGammaCancelResult{Cancelled: true, Status: order.Status}, nil
+	case model.GammaGiftCancelInFlight:
+		return &GiftGammaCancelResult{
+			Status: order.Status,
+			Error: &GiftError{
+				Code:    GiftErrorCodePaymentInProgress,
+				Message: "This gift's Gamma payment is being processed, so it can't be cancelled. Check the order again in a few minutes.",
+			},
+		}, nil
+	default:
+		// credited since the order was read: paid now
+		status := order.Status
+		if read := model.GetGiftOrder(ctx, order.GiftOrderId); read != nil {
+			status = read.Status
+		}
+		return &GiftGammaCancelResult{Status: status}, nil
+	}
 }
 
 // gammaGiftIntent reports a gift order's intent.

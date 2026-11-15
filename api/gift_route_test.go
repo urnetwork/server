@@ -26,6 +26,7 @@ var giftRouteKeys = []string{
 	"POST /pay/gift/order",
 	"POST /pay/gift/cards\\.pdf",
 	"POST /pay/gift/check-code",
+	"POST /pay/gift/gamma-cancel",
 }
 
 func TestGiftRoutesArePublic(t *testing.T) {
@@ -165,5 +166,38 @@ func TestGiftGammaRouteIsAuthenticatedAsTheGammaIntent(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("%s signed out: status %d body %q, want 401", path, w.Code, w.Body.String())
 		}
+	}
+}
+
+// POST /pay/gift/gamma-cancel takes the order's token in the body, signed out,
+// and answers an order it cannot open in-band with invalid_request and no
+// status; it takes no GET, so a token can never be sent in a url.
+func TestGiftGammaCancelRouteThroughTheRouter(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	apiRouter := router.NewRouter(ctx, Routes())
+	for _, body := range []string{
+		`{"order_id": "nonsense", "token": "ORDERTOKEN"}`,
+		`{"order_id": "01a1d62a-ad5a-c336-67d9-73f0321321f8", "token": ""}`,
+		`{}`,
+	} {
+		w := serveGiftRoute(apiRouter, "POST", "/pay/gift/gamma-cancel", body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status %d body %q", body, w.Code, w.Body.String())
+		}
+		var result controller.GiftGammaCancelResult
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		if result.Cancelled || result.Status != "" || result.Error == nil || result.Error.Code != controller.PurchaseErrorCodeInvalidRequest {
+			t.Fatalf("%s: %s", body, w.Body.String())
+		}
+		if w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s: cache control %q", body, w.Header().Get("Cache-Control"))
+		}
+	}
+	w := serveGiftRoute(apiRouter, "GET", "/pay/gift/gamma-cancel?order_id=nonsense&token=ORDERTOKEN", "")
+	if w.Code == http.StatusOK {
+		t.Fatal("GET /pay/gift/gamma-cancel is served")
 	}
 }

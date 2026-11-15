@@ -13,7 +13,8 @@ import (
 // mmm/GIFTOFPRIVACY.md §10.2). Every route but the Gamma purchase is public;
 // the card and coin purchases take an optional sign-in, which only
 // `referral_credit` reads. The Gamma purchase is paid from the signed-in
-// network's deposit, so it needs a bearer, as POST /pay/gamma/intent does.
+// network's deposit, so it needs a bearer, as POST /pay/gamma/intent does; its
+// cancel takes the order's token, as the order's status does.
 
 // GiftConfig is GET /pay/gift/config: whether gifts are sold, the tiers and
 // the coins.
@@ -38,6 +39,16 @@ func GiftCryptoIntent(w http.ResponseWriter, r *http.Request) {
 // POST /pay/gamma/intent (controller/gift_gamma_controller.go).
 func GiftGammaIntent(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.GiftGammaIntent, w, r)
+}
+
+// GiftGammaCancel is POST /pay/gift/gamma-cancel {order_id, token}: the
+// order's Gamma purchase voided, for "pay another way". The token travels in
+// the body, as for POST /pay/gift/order; no sign-in.
+func GiftGammaCancel(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(controller.GiftGammaCancel, w, r, func(_ *session.ClientSession, _ *controller.GiftGammaCancelResult) bool {
+		w.Header().Set("Cache-Control", "no-store")
+		return false
+	})
 }
 
 // GiftOrder is POST /pay/gift/order {order_id, token}: the order's status,

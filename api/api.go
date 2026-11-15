@@ -303,6 +303,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/pay/gift/checkout", handlers.GiftCheckout),
 		router.NewRoute("POST", "/pay/gift/crypto-intent", handlers.GiftCryptoIntent),
 		router.NewRoute("POST", "/pay/gift/gamma-intent", handlers.GiftGammaIntent),
+		router.NewRoute("POST", "/pay/gift/gamma-cancel", handlers.GiftGammaCancel),
 		router.NewRoute("POST", "/pay/gift/order", handlers.GiftOrder),
 		router.NewRoute("POST", "/pay/gift/cards\\.pdf", handlers.GiftCardsPdf),
 		router.NewRoute("POST", "/pay/gift/check-code", handlers.GiftCheckCode),

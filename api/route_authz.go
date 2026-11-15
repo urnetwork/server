@@ -211,6 +211,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/gift/checkout":                       routeAccessPublic, // optional bearer: referral credit for the caller's network
 	"POST /pay/gift/crypto-intent":                  routeAccessPublic, // optional bearer: referral credit for the caller's network
 	"POST /pay/gift/gamma-intent":                   routeAccessClient, // as POST /pay/gamma/intent: paid from the caller's network's deposit
+	"POST /pay/gift/gamma-cancel":                   routeAccessPublic, // the order's token, in the body, is the credential
 	"POST /pay/gift/order":                          routeAccessPublic, // the order's token, in the body, is the credential
 	"POST /pay/gift/cards\\.pdf":                    routeAccessPublic, // the order's token, in the body, is the credential
 	"POST /pay/gift/check-code":                     routeAccessPublic,

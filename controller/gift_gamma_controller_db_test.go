@@ -14,6 +14,7 @@ package controller
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -141,24 +142,16 @@ func TestGiftGammaOrderLifecycle(t *testing.T) {
 		connect.AssertEqual(t, stored.Email, "")
 		connect.AssertEqual(t, stored.PriceUsdNanoCents, model.UsdToNanoCents(89.97))
 
-		// each order has its own intent, from the same deposit
-		second := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
-		connect.AssertEqual(t, second.Error == nil, true)
-		connect.AssertEqual(t, second.IntentId != intent.IntentId, true)
-		connect.AssertEqual(t, second.OrderId != intent.OrderId, true)
-		connect.AssertEqual(t, second.DepositHotkey, intent.DepositHotkey)
-		connect.AssertEqual(t, second.AmountGamma, "39.99")
-
 		status := giftGammaTestOrderStatus(t, clientSession, intent)
 		connect.AssertEqual(t, status.Status, model.GiftOrderStatusPending)
 		connect.AssertEqual(t, status.FriendsSendAt == nil, true)
 
-		// the deposit pays both: the biller charges the gifts like any purchase
+		// the deposit pays: the biller charges the gift like any purchase
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
 		coldkey := gammaTestAccount(t, gammaTestColdkey)
 		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 200_000_000_000})
 		result := f.run()
-		connect.AssertEqual(t, result.Charged, 2)
+		connect.AssertEqual(t, result.Charged, 1)
 		connect.AssertEqual(t, len(f.sim.submitted), 1)
 		connect.AssertEqual(t, gammaDbStatus(t, clientSession, &intent.GammaPaymentIntentResult).Status, gammaStatusConfirming)
 		// nothing is credited before our spend is finalized
@@ -235,18 +228,22 @@ func TestGiftGammaOrderLifecycle(t *testing.T) {
 		connect.AssertEqual(t, notice.Kind, model.SalesPaymentKindOneTime)
 		connect.AssertEqual(t, notice.NetworkId == nil, true)
 		connect.AssertEqual(t, strings.HasPrefix(notice.Amount, "89.97 gamma"), true)
-		connect.AssertEqual(t, giftNotices["gamma_intent/"+second.IntentId].Item, "1 Pro gift code (one year)")
-
-		// the second order is paid too, every card to its buyer
-		secondOrder := giftGammaTestOrderStatus(t, clientSession, second)
-		connect.AssertEqual(t, secondOrder.Status, model.GiftOrderStatusPaid)
-		connect.AssertEqual(t, secondOrder.FriendsSendAt == nil, true)
 
 		// nothing is charged twice
 		f.run()
 		f.sim.mine()
 		f.run()
-		connect.AssertEqual(t, f.sim.deposit(hotkey).balance, uint64(200_000_000_000-89_970_000_000-39_990_000_000))
+		connect.AssertEqual(t, f.sim.deposit(hotkey).balance, uint64(200_000_000_000-89_970_000_000))
+
+		// the next gift from the same deposit is an order of its own
+		second := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+		connect.AssertEqual(t, second.Error == nil, true)
+		connect.AssertEqual(t, second.IntentId != intent.IntentId, true)
+		connect.AssertEqual(t, second.OrderId != intent.OrderId, true)
+		connect.AssertEqual(t, second.DepositHotkey, intent.DepositHotkey)
+		connect.AssertEqual(t, second.AmountGamma, "39.99")
+		// a paid gift is never voided by the next
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, intentId).VoidedAt == nil, true)
 		connect.AssertEqual(t, len(model.GetGiftOrderCodes(ctx, giftOrderId)), 3)
 
 		// final sale: a refund that named it would void nothing, for an
@@ -358,9 +355,10 @@ func TestGiftGammaIntentRefusals(t *testing.T) {
 		over := refused("over the daily friend emails", giftGammaTestArgs(1, model.GiftDeliveryThem), GiftErrorCodeDailyLimit)
 		connect.AssertEqual(t, strings.Contains(over.Error.Message, `("me")`), true)
 
-		// the network's open purchases' limit, Gamma's own
+		// the network's open purchases' limit, Gamma's own: a gift voids the
+		// account's other open gift, so data codes fill it
 		for i := range gammaMaxOpenIntentsPerNetwork {
-			open := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+			open := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{ItemId: StripeItemData1Tib, Delivery: model.CryptoDeliveryCode})
 			if open.Error != nil {
 				t.Fatalf("open purchase %d refused: %+v", i, open.Error)
 			}
@@ -388,8 +386,8 @@ func TestGiftGammaIntentRefusals(t *testing.T) {
 		})
 		connect.AssertEqual(t, refusal == nil, true)
 		_, intentsBefore = counts()
-		failed := start.issue(clientSession, func(tx server.PgTx, intent *model.GammaPaymentIntent) error {
-			return model.SetGiftOrderGammaIntentIdInTx(tx, ctx, server.NewId(), intent.IntentId)
+		failed := start.issue(clientSession, func(tx server.PgTx, intent *model.GammaPaymentIntent) (*GammaPaymentIntentResult, error) {
+			return nil, model.SetGiftOrderGammaIntentIdInTx(tx, ctx, server.NewId(), intent.IntentId)
 		})
 		connect.AssertEqual(t, failed.Error.Code, PurchaseErrorCodeStartFailed)
 		_, intentsAfter = counts()
@@ -495,5 +493,275 @@ func TestGiftRetentionUnlinksGammaOrders(t *testing.T) {
 		giftCryptoTestRedeem(t, ctx, unlinked[0].Secret)
 		// the intent still reads as paid with its token
 		connect.AssertEqual(t, gammaDbStatus(t, clientSession, &intent.GammaPaymentIntentResult).Status, gammaStatusPaid)
+	})
+}
+
+// Cancels the order's Gamma purchase with its token, as "pay another way"
+// does.
+func giftGammaTestCancel(t testing.TB, clientSession *session.ClientSession, orderId string, token string) *GiftGammaCancelResult {
+	t.Helper()
+	giftGammaCancelLimiter.stateLock.Lock()
+	giftGammaCancelLimiter.window = time.Time{}
+	giftGammaCancelLimiter.stateLock.Unlock()
+	result, err := GiftGammaCancel(&GiftOrderStatusArgs{OrderId: orderId, Token: token}, clientSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+// A new gift purchase voids the account's open gift purchase in the
+// transaction that records it, and never a data purchase. The order left
+// behind stays pending, and its friends no longer count toward the daily cap,
+// so changing a large gift is not refused. The deposit could pay both: the
+// biller charges only the new one, and never the voided one.
+func TestGiftGammaNewPurchaseVoidsTheOpenOne(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newGammaDbFixture(t)
+		ctx := f.ctx
+		giftPurchaseTestConfig(t)
+		_, _, clientSession := cryptoDbTestNetwork(t, ctx, "giftgammareplace")
+		f.run()
+
+		data := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{ItemId: StripeItemData1Tib, Delivery: model.CryptoDeliveryCode})
+		connect.AssertEqual(t, data.Error == nil, true)
+		// 15 friends, then changed to 12: 27 would pass the daily cap of 20
+		// if the first still counted
+		first := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(15, model.GiftDeliveryThem))
+		connect.AssertEqual(t, first.Error == nil, true)
+		second := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(12, model.GiftDeliveryThem))
+		if second.Error != nil {
+			t.Fatalf("the changed gift was refused: %+v", second.Error)
+		}
+		firstIntentId := server.RequireParseId(first.IntentId)
+		secondIntentId := server.RequireParseId(second.IntentId)
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, firstIntentId).VoidedAt != nil, true)
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, secondIntentId).VoidedAt == nil, true)
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, server.RequireParseId(data.IntentId)).VoidedAt == nil, true)
+		connect.AssertEqual(t, model.GetGiftFriendEmailCount(ctx, "buyer@synthetic.example", server.NowUtc().Add(-model.GiftFriendEmailWindow)), 12)
+
+		// the voided purchase reads voided, its order pending
+		voided := gammaDbStatus(t, clientSession, &first.GammaPaymentIntentResult)
+		connect.AssertEqual(t, voided.Status, gammaStatusReview)
+		connect.AssertEqual(t, voided.ReviewReason, "voided")
+		firstOrder := giftGammaTestOrderStatus(t, clientSession, first)
+		connect.AssertEqual(t, firstOrder.Status, model.GiftOrderStatusPending)
+		connect.AssertEqual(t, firstOrder.FriendsSendAt == nil, true)
+		// cancelling it again changes nothing
+		again := giftGammaTestCancel(t, clientSession, first.OrderId, first.OrderToken)
+		connect.AssertEqual(t, again.Cancelled, true)
+		connect.AssertEqual(t, again.Status, model.GiftOrderStatusPending)
+		connect.AssertEqual(t, again.Error == nil, true)
+
+		// the deposit could pay everything: the voided gift is never charged
+		hotkey := gammaTestAccount(t, second.DepositHotkey)
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 1_000_000_000_000})
+		connect.AssertEqual(t, f.run().Charged, 2)
+		f.now = f.now.Add(time.Minute)
+		f.sim.mine()
+		f.run()
+		connect.AssertEqual(t, gammaDbStatus(t, clientSession, &second.GammaPaymentIntentResult).Status, gammaStatusPaid)
+		connect.AssertEqual(t, gammaDbStatus(t, clientSession, data).Status, gammaStatusPaid)
+		connect.AssertEqual(t, model.GetGammaChargeForIntent(ctx, firstIntentId) == nil, true)
+		connect.AssertEqual(t, giftGammaTestOrderStatus(t, clientSession, second).Status, model.GiftOrderStatusPaid)
+		connect.AssertEqual(t, giftGammaTestOrderStatus(t, clientSession, first).Status, model.GiftOrderStatusPending)
+		dataUnits, ok := gammaParseUnits(data.AmountGamma)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, f.sim.deposit(hotkey).balance, uint64(1_000_000_000_000-287_880_000_000-dataUnits))
+		f.run()
+		f.sim.mine()
+		f.run()
+		connect.AssertEqual(t, model.GetGammaChargeForIntent(ctx, firstIntentId) == nil, true)
+	})
+}
+
+// While an earlier gift's spend is in flight, a new gift purchase is refused
+// with payment_in_progress, storing nothing, and so is the earlier order's
+// cancel. Once it is credited, the cancel answers paid, and the next gift is
+// sold. A spend that landed and is not yet credited is in flight too.
+func TestGiftGammaPaymentInProgress(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newGammaDbFixture(t)
+		ctx := f.ctx
+		giftPurchaseTestConfig(t)
+		_, _, clientSession := cryptoDbTestNetwork(t, ctx, "giftgammainflight")
+		f.run()
+		counts := func() (orders int, intents int) {
+			return gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gift_order`), gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_payment_intent`)
+		}
+
+		first := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+		connect.AssertEqual(t, first.Error == nil, true)
+		hotkey := gammaTestAccount(t, first.DepositHotkey)
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 100_000_000_000})
+		connect.AssertEqual(t, f.run().Charged, 1)
+		connect.AssertEqual(t, len(f.sim.submitted), 1)
+
+		// its spend is in a submitted batch
+		ordersBefore, intentsBefore := counts()
+		refused := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(2, model.GiftDeliveryMe))
+		connect.AssertEqual(t, refused.Error.Code, GiftErrorCodePaymentInProgress)
+		connect.AssertEqual(t, refused.Error.Message, "A Gamma payment for an earlier gift is still being processed. Try again in a few minutes.")
+		connect.AssertEqual(t, refused.OrderId, "")
+		ordersAfter, intentsAfter := counts()
+		connect.AssertEqual(t, ordersAfter, ordersBefore)
+		connect.AssertEqual(t, intentsAfter, intentsBefore)
+		cancel := giftGammaTestCancel(t, clientSession, first.OrderId, first.OrderToken)
+		connect.AssertEqual(t, cancel.Cancelled, false)
+		connect.AssertEqual(t, cancel.Status, model.GiftOrderStatusPending)
+		connect.AssertEqual(t, cancel.Error.Code, GiftErrorCodePaymentInProgress)
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, server.RequireParseId(first.IntentId)).VoidedAt == nil, true)
+
+		// landed and credited: paid
+		f.now = f.now.Add(time.Minute)
+		f.sim.mine()
+		f.run()
+		cancel = giftGammaTestCancel(t, clientSession, first.OrderId, first.OrderToken)
+		connect.AssertEqual(t, cancel.Cancelled, false)
+		connect.AssertEqual(t, cancel.Status, model.GiftOrderStatusPaid)
+		connect.AssertEqual(t, cancel.Error == nil, true)
+		next := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(2, model.GiftDeliveryMe))
+		connect.AssertEqual(t, next.Error == nil, true)
+
+		// a spend that landed and is not yet credited is in flight too
+		nextIntent := model.GetGammaPaymentIntent(ctx, server.RequireParseId(next.IntentId))
+		connect.AssertEqual(t, model.CreateGammaCharge(ctx, nextIntent, f.now), true)
+		cryptoDbExec(ctx, `UPDATE gamma_charge SET state = 'spent', block_number = 1, resolved_at = $2 WHERE intent_id = $1`, nextIntent.IntentId, f.now)
+		connect.AssertEqual(t, giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe)).Error.Code, GiftErrorCodePaymentInProgress)
+		connect.AssertEqual(t, giftGammaTestCancel(t, clientSession, next.OrderId, next.OrderToken).Error.Code, GiftErrorCodePaymentInProgress)
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, nextIntent.IntentId).VoidedAt == nil, true)
+	})
+}
+
+// POST /pay/gift/gamma-cancel in each state: a token that opens no order and a
+// card order are invalid_request; an open purchase is voided, with a pending
+// charge not yet in a batch or a skipped one, and a repeated cancel answers
+// the same; the biller never charges a voided purchase, nor re-arms its
+// skipped charge when the deposit changes.
+func TestGiftGammaCancel(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newGammaDbFixture(t)
+		ctx := f.ctx
+		giftPurchaseTestConfig(t)
+		_, _, clientSession := cryptoDbTestNetwork(t, ctx, "giftgammacancel")
+		signedOut := giftPurchaseTestSession()
+		f.run()
+
+		// a token that opens no order
+		unknown := giftGammaTestCancel(t, signedOut, server.NewId().String(), "ORDERTOKEN")
+		connect.AssertEqual(t, unknown.Cancelled, false)
+		connect.AssertEqual(t, unknown.Status, "")
+		connect.AssertEqual(t, unknown.Error.Code, PurchaseErrorCodeInvalidRequest)
+		// a card order
+		card := &model.GiftOrder{Quantity: 1, UnitPriceCents: 3999, TotalCents: 3999, Rail: model.GiftRailStripe, Delivery: model.GiftDeliveryMe, BuyerEmail: "buyer@synthetic.example", Language: "en"}
+		connect.AssertEqual(t, model.CreateGiftOrder(ctx, card), nil)
+		notGamma := giftGammaTestCancel(t, signedOut, card.GiftOrderId.String(), card.OrderToken)
+		connect.AssertEqual(t, notGamma.Cancelled, false)
+		connect.AssertEqual(t, notGamma.Status, model.GiftOrderStatusPending)
+		connect.AssertEqual(t, notGamma.Error.Code, PurchaseErrorCodeInvalidRequest)
+
+		// open, nothing charged yet; a wrong token opens nothing
+		open := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+		connect.AssertEqual(t, open.Error == nil, true)
+		wrong := giftGammaTestCancel(t, signedOut, open.OrderId, "WRONGTOKEN")
+		connect.AssertEqual(t, wrong.Error.Code, PurchaseErrorCodeInvalidRequest)
+		connect.AssertEqual(t, wrong.Status, "")
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, server.RequireParseId(open.IntentId)).VoidedAt == nil, true)
+		cancelled := giftGammaTestCancel(t, signedOut, open.OrderId, open.OrderToken)
+		connect.AssertEqual(t, cancelled.Cancelled, true)
+		connect.AssertEqual(t, cancelled.Status, model.GiftOrderStatusPending)
+		connect.AssertEqual(t, cancelled.Error == nil, true)
+		connect.AssertEqual(t, model.GetGammaPaymentIntent(ctx, server.RequireParseId(open.IntentId)).VoidedAt != nil, true)
+		connect.AssertEqual(t, giftGammaTestCancel(t, signedOut, open.OrderId, open.OrderToken).Cancelled, true)
+
+		// a pending charge not yet in a batch is voided with it
+		pending := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+		pendingIntent := model.GetGammaPaymentIntent(ctx, server.RequireParseId(pending.IntentId))
+		connect.AssertEqual(t, model.CreateGammaCharge(ctx, pendingIntent, f.now), true)
+		connect.AssertEqual(t, giftGammaTestCancel(t, signedOut, pending.OrderId, pending.OrderToken).Cancelled, true)
+		connect.AssertEqual(t, model.GetGammaChargeForIntent(ctx, pendingIntent.IntentId).State, model.GammaChargeVoided)
+
+		// the biller never charges a voided purchase, however much the
+		// deposit holds
+		hotkey := gammaTestAccount(t, pending.DepositHotkey)
+		coldkey := gammaTestAccount(t, gammaTestColdkey)
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 100_000_000_000})
+		connect.AssertEqual(t, f.run().Charged, 0)
+		connect.AssertEqual(t, len(f.sim.submitted), 0)
+		f.sim.mine()
+		f.run()
+		connect.AssertEqual(t, len(f.sim.submitted), 0)
+		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_spend_batch`), 0)
+		connect.AssertEqual(t, f.sim.deposit(hotkey).balance, uint64(100_000_000_000))
+
+		// a skipped charge: the deposit was emptied as the spend landed
+		skipped := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
+		connect.AssertEqual(t, skipped.Error == nil, true)
+		connect.AssertEqual(t, f.run().Charged, 1)
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 1_000_000_000})
+		f.now = f.now.Add(time.Minute)
+		f.sim.mine()
+		f.run()
+		skippedIntentId := server.RequireParseId(skipped.IntentId)
+		connect.AssertEqual(t, model.GetGammaChargeForIntent(ctx, skippedIntentId).State, model.GammaChargeSkipped)
+		connect.AssertEqual(t, gammaDbStatus(t, clientSession, &skipped.GammaPaymentIntentResult).Status, gammaStatusSeen)
+		cancelled = giftGammaTestCancel(t, signedOut, skipped.OrderId, skipped.OrderToken)
+		connect.AssertEqual(t, cancelled.Cancelled, true)
+		connect.AssertEqual(t, model.GetGammaChargeForIntent(ctx, skippedIntentId).State, model.GammaChargeVoided)
+		// the deposit changes and could pay: nothing is re-armed or sent
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 100_000_000_000})
+		f.run()
+		f.run()
+		connect.AssertEqual(t, len(f.sim.submitted), 0)
+		f.sim.mine()
+		f.run()
+		connect.AssertEqual(t, f.sim.deposit(hotkey).balance, uint64(100_000_000_000))
+		connect.AssertEqual(t, giftGammaTestOrderStatus(t, clientSession, skipped).Status, model.GiftOrderStatusPending)
+	})
+}
+
+// Two gift purchases of one account at once: the account's gift purchases are
+// serialized, so the later one voids the earlier and one stays open.
+func TestGiftGammaConcurrentPurchasesLeaveOneOpen(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newGammaDbFixture(t)
+		ctx := f.ctx
+		giftPurchaseTestConfig(t)
+		networkId, _, clientSession := cryptoDbTestNetwork(t, ctx, "giftgammaconcurrent")
+		f.run()
+		// the account's hotkey exists before the race, as after its first
+		// purchase
+		connect.AssertEqual(t, giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe)).Error == nil, true)
+
+		for round := range 3 {
+			giftPurchaseTestResetLimiters()
+			start := make(chan struct{})
+			var wait sync.WaitGroup
+			results := make([]*GiftGammaIntentResult, 2)
+			errs := make([]error, 2)
+			for i := range 2 {
+				wait.Add(1)
+				go func() {
+					defer wait.Done()
+					<-start
+					results[i], errs[i] = GiftGammaIntent(giftGammaTestArgs(i+1, model.GiftDeliveryMe), clientSession)
+				}()
+			}
+			close(start)
+			wait.Wait()
+			for i := range 2 {
+				if errs[i] != nil || results[i].Error != nil {
+					t.Fatalf("round %d purchase %d: %+v %v", round, i, results[i], errs[i])
+				}
+			}
+			open := gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_payment_intent WHERE network_id = $1 AND item = 'gift_pro_year' AND voided_at IS NULL AND credited_at IS NULL`, networkId)
+			if open != 1 {
+				t.Fatalf("round %d: %d open gift purchases, want 1", round, open)
+			}
+		}
 	})
 }

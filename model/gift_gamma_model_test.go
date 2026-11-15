@@ -386,3 +386,276 @@ func TestUnlinkGammaGiftOrders(t *testing.T) {
 		}
 	})
 }
+
+// An intent of the network that is not a gift's: a data pack, open for a day.
+func giftGammaTestDataIntent(t testing.TB, ctx context.Context, networkId server.Id, createTime time.Time) *GammaPaymentIntent {
+	t.Helper()
+	reference := make([]byte, 32)
+	if _, err := rand.Read(reference); err != nil {
+		t.Fatal(err)
+	}
+	intent := &GammaPaymentIntent{
+		IntentId:                 server.NewId(),
+		StatusTokenHash:          reference,
+		NetworkId:                networkId,
+		Hotkey:                   "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+		Purpose:                  GammaPurposePurchase,
+		Reference:                reference,
+		Delivery:                 "code",
+		Item:                     "data_1tib",
+		PriceUsdNanoCents:        UsdToNanoCents(5),
+		RegularPriceUsdNanoCents: UsdToNanoCents(5),
+		CreateTime:               createTime,
+		ExpiresAt:                createTime.Add(24 * time.Hour),
+	}
+	if !CreateGammaPaymentIntent(ctx, intent) {
+		t.Fatal("the data intent was not recorded")
+	}
+	return intent
+}
+
+// Puts the intents' pending charges in a live spend batch, as the biller does
+// before it submits one: their spend is in flight.
+func giftGammaTestBatch(t testing.TB, ctx context.Context, intents ...*GammaPaymentIntent) server.Id {
+	t.Helper()
+	references := [][]byte{}
+	for _, intent := range intents {
+		references = append(references, intent.Reference)
+	}
+	batch := &GammaSpendBatch{
+		BatchId:       server.NewId(),
+		Nonce:         1,
+		EraBirth:      100,
+		EraPeriod:     64,
+		Extrinsic:     []byte{0x01},
+		ExtrinsicHash: "0x" + strings.Repeat("ab", 32),
+		CreateTime:    server.NowUtc(),
+	}
+	if err := CreateGammaSpendBatch(ctx, batch, references); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	return batch.BatchId
+}
+
+func giftGammaTestChargeState(ctx context.Context, intentId server.Id) (state string) {
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT state FROM gamma_charge WHERE intent_id = $1`, intentId).Scan(&state))
+	})
+	return
+}
+
+// A new gift purchase voids the network's other open gift purchases in its
+// transaction, with every charge of theirs that could still be charged (a
+// pending one in no batch, a skipped one), and never a plan or data purchase
+// or another network's. While a gift purchase's spend is in flight (in a spend
+// batch, or spent and not credited), nothing is voided and the new purchase is
+// refused. A voided intent is never charged again.
+func TestVoidOpenGammaGiftIntents(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		defer Testing_SetGiftConfig(Testing_GiftConfig())()
+		networkId := giftGammaTestNetwork(t, ctx)
+		otherNetworkId := giftGammaTestNetwork(t, ctx)
+		now := server.NowUtc()
+		void := func() (voided []server.Id, inFlight bool) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				voided, inFlight = VoidOpenGammaGiftIntentsInTx(tx, ctx, networkId, now)
+			}, server.TxReadCommitted)
+			return
+		}
+
+		_, plain := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, now)
+		_, charged := giftGammaTestOrder(t, ctx, networkId, 2, GiftDeliveryMe, now)
+		if !CreateGammaCharge(ctx, charged, now) {
+			t.Fatal("no charge")
+		}
+		_, skipped := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, now)
+		if !CreateGammaCharge(ctx, skipped, now) {
+			t.Fatal("no charge")
+		}
+		giftGammaTestExec(ctx, `UPDATE gamma_charge SET state = 'skipped', resolved_at = $2, block_number = 7 WHERE intent_id = $1`, skipped.IntentId, now)
+		data := giftGammaTestDataIntent(t, ctx, networkId, now)
+		_, others := giftGammaTestOrder(t, ctx, otherNetworkId, 1, GiftDeliveryMe, now)
+
+		voided, inFlight := void()
+		if inFlight || len(voided) != 3 {
+			t.Fatalf("voided %v, in flight %t", voided, inFlight)
+		}
+		for _, intent := range []*GammaPaymentIntent{plain, charged, skipped} {
+			if read := GetGammaPaymentIntent(ctx, intent.IntentId); read.VoidedAt == nil || read.CreditedAt != nil {
+				t.Fatalf("intent %s was not voided", intent.IntentId)
+			}
+		}
+		if state := giftGammaTestChargeState(ctx, charged.IntentId); state != GammaChargeVoided {
+			t.Fatalf("the pending charge is %s", state)
+		}
+		if state := giftGammaTestChargeState(ctx, skipped.IntentId); state != GammaChargeVoided {
+			t.Fatalf("the skipped charge is %s", state)
+		}
+		// a plan or data purchase, and another network's, are never touched
+		if GetGammaPaymentIntent(ctx, data.IntentId).VoidedAt != nil || GetGammaPaymentIntent(ctx, others.IntentId).VoidedAt != nil {
+			t.Fatal("a data purchase or another network's gift was voided")
+		}
+		// a voided intent is never charged: no charge is made, none is
+		// batched, none re-armed
+		if CreateGammaCharge(ctx, plain, now) {
+			t.Fatal("a voided intent was charged")
+		}
+		if ReArmGammaCharge(ctx, skipped.Reference) {
+			t.Fatal("a voided intent's skipped charge was re-armed")
+		}
+		for _, charge := range ListUnbatchedGammaCharges(ctx, 100) {
+			if charge.IntentId == charged.IntentId {
+				t.Fatal("a voided intent's charge is listed for a batch")
+			}
+		}
+		if err := CreateGammaSpendBatch(ctx, &GammaSpendBatch{
+			BatchId: server.NewId(), Nonce: 1, EraBirth: 1, EraPeriod: 64, Extrinsic: []byte{1},
+			ExtrinsicHash: "0x" + strings.Repeat("cd", 32), CreateTime: now,
+		}, [][]byte{charged.Reference}); !errors.Is(err, ErrGammaChargeNotPayable) {
+			t.Fatalf("a voided intent's charge joined a batch: %v", err)
+		}
+		for _, intent := range ListChargeableGammaPaymentIntents(ctx, now, 1000) {
+			if intent.IntentId == plain.IntentId {
+				t.Fatal("a voided intent is chargeable")
+			}
+		}
+
+		// nothing open now: nothing to void
+		if voided, inFlight := void(); 0 < len(voided) || inFlight {
+			t.Fatalf("voided %v again", voided)
+		}
+
+		// a spend in a batch is in flight: nothing is voided
+		_, batched := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, now)
+		_, waiting := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, now)
+		if !CreateGammaCharge(ctx, batched, now) {
+			t.Fatal("no charge")
+		}
+		giftGammaTestBatch(t, ctx, batched)
+		if !HasGammaGiftChargeInFlight(ctx, networkId) || HasGammaGiftChargeInFlight(ctx, otherNetworkId) {
+			t.Fatal("the in-flight spend is not seen, or seen for another network")
+		}
+		if voided, inFlight := void(); !inFlight || 0 < len(voided) {
+			t.Fatalf("voided %v beside a spend in flight", voided)
+		}
+		if GetGammaPaymentIntent(ctx, waiting.IntentId).VoidedAt != nil || GetGammaPaymentIntent(ctx, batched.IntentId).VoidedAt != nil {
+			t.Fatal("an intent was voided beside a spend in flight")
+		}
+		// spent and not yet credited: still in flight
+		giftGammaTestExec(ctx, `UPDATE gamma_charge SET state = 'spent', block_number = 8, resolved_at = $2 WHERE intent_id = $1`, batched.IntentId, now)
+		if voided, inFlight := void(); !inFlight || 0 < len(voided) {
+			t.Fatalf("voided %v beside a spent charge not yet credited", voided)
+		}
+		// credited: the other open one is voided
+		server.Tx(ctx, func(tx server.PgTx) {
+			MarkGammaPaymentIntentCreditedInTx(tx, ctx, batched.IntentId, now)
+		})
+		if HasGammaGiftChargeInFlight(ctx, networkId) {
+			t.Fatal("a credited spend is in flight")
+		}
+		if voided, inFlight := void(); inFlight || len(voided) != 1 || voided[0] != waiting.IntentId {
+			t.Fatalf("voided %v, in flight %t", voided, inFlight)
+		}
+	})
+}
+
+// Cancelling an order's gift purchase voids it, once, unless its spend is in
+// flight; a credited purchase is paid; anything but a gift purchase is not
+// found.
+func TestCancelGammaGiftIntent(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		defer Testing_SetGiftConfig(Testing_GiftConfig())()
+		networkId := giftGammaTestNetwork(t, ctx)
+		now := server.NowUtc()
+
+		_, open := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, now)
+		if !CreateGammaCharge(ctx, open, now) {
+			t.Fatal("no charge")
+		}
+		if outcome := CancelGammaGiftIntent(ctx, open.IntentId, now); outcome != GammaGiftCancelVoided {
+			t.Fatalf("cancel: %s", outcome)
+		}
+		if state := giftGammaTestChargeState(ctx, open.IntentId); state != GammaChargeVoided {
+			t.Fatalf("the charge is %s", state)
+		}
+		if outcome := CancelGammaGiftIntent(ctx, open.IntentId, now); outcome != GammaGiftCancelClosed {
+			t.Fatalf("cancel again: %s", outcome)
+		}
+
+		_, flying := giftGammaTestOrder(t, ctx, networkId, 1, GiftDeliveryMe, now)
+		if !CreateGammaCharge(ctx, flying, now) {
+			t.Fatal("no charge")
+		}
+		giftGammaTestBatch(t, ctx, flying)
+		if outcome := CancelGammaGiftIntent(ctx, flying.IntentId, now); outcome != GammaGiftCancelInFlight {
+			t.Fatalf("cancel in flight: %s", outcome)
+		}
+		if GetGammaPaymentIntent(ctx, flying.IntentId).VoidedAt != nil {
+			t.Fatal("a purchase in flight was voided")
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			MarkGammaPaymentIntentCreditedInTx(tx, ctx, flying.IntentId, now)
+		})
+		if outcome := CancelGammaGiftIntent(ctx, flying.IntentId, now); outcome != GammaGiftCancelCredited {
+			t.Fatalf("cancel credited: %s", outcome)
+		}
+
+		data := giftGammaTestDataIntent(t, ctx, networkId, now)
+		if outcome := CancelGammaGiftIntent(ctx, data.IntentId, now); outcome != GammaGiftCancelNotFound {
+			t.Fatalf("cancel a data purchase: %s", outcome)
+		}
+		if GetGammaPaymentIntent(ctx, data.IntentId).VoidedAt != nil {
+			t.Fatal("a data purchase was voided")
+		}
+		if outcome := CancelGammaGiftIntent(ctx, server.NewId(), now); outcome != GammaGiftCancelNotFound {
+			t.Fatalf("cancel nothing: %s", outcome)
+		}
+	})
+}
+
+// A pending order whose Gamma purchase was voided never emails its friends,
+// so it no longer counts toward the buyer's daily friend emails; for a new
+// gift purchase of the same network, neither do the orders of the open gift
+// purchases it voids, unless their spend is in flight.
+func TestGiftFriendEmailCountLeavesOutVoidedGammaOrders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		defer Testing_SetGiftConfig(Testing_GiftConfig())()
+		networkId := giftGammaTestNetwork(t, ctx)
+		otherNetworkId := giftGammaTestNetwork(t, ctx)
+		now := server.NowUtc()
+		since := now.Add(-GiftFriendEmailWindow)
+		count := func(replacing *server.Id) int {
+			return GetGiftFriendEmailCountReplacing(ctx, "giver@example.invalid", since, replacing)
+		}
+
+		_, open := giftGammaTestOrder(t, ctx, networkId, 5, GiftDeliveryThem, now)
+		giftGammaTestOrder(t, ctx, otherNetworkId, 3, GiftDeliveryThem, now)
+		if got := GetGiftFriendEmailCount(ctx, "Giver@Example.invalid", since); got != 8 {
+			t.Fatalf("count %d, want 8", got)
+		}
+		// the network's new purchase will void its open one
+		if got := count(&networkId); got != 3 {
+			t.Fatalf("count replacing %d, want 3", got)
+		}
+		// not while its spend is in flight
+		if !CreateGammaCharge(ctx, open, now) {
+			t.Fatal("no charge")
+		}
+		giftGammaTestBatch(t, ctx, open)
+		if got := count(&networkId); got != 8 {
+			t.Fatalf("count replacing beside a spend in flight %d, want 8", got)
+		}
+		giftGammaTestExec(ctx, `UPDATE gamma_charge SET batch_id = NULL WHERE intent_id = $1`, open.IntentId)
+
+		// voided: never counted
+		if outcome := CancelGammaGiftIntent(ctx, open.IntentId, now); outcome != GammaGiftCancelVoided {
+			t.Fatalf("cancel: %s", outcome)
+		}
+		if got := count(nil); got != 3 {
+			t.Fatalf("count after the cancel %d, want 3", got)
+		}
+	})
+}

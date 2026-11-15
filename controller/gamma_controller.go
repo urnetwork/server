@@ -679,15 +679,25 @@ func gammaStartPurchase(clientSession *session.ClientSession, view *gammaView, p
 	return start, nil
 }
 
+// gammaIssueStep is what a purchase does in the ReadCommitted transaction that
+// records its new intent, before the intent is recorded: what the intent pays
+// for, and what it replaces. It may refuse the purchase, before it writes
+// anything; an error rolls the transaction back. The biller charges an intent
+// from the moment it is committed, so the intent is committed only with what
+// the step wrote, and never without it.
+type gammaIssueStep func(tx server.PgTx, intent *model.GammaPaymentIntent) (refusal *GammaPaymentIntentResult, err error)
+
+// The step's writes must not outlive an intent that was not recorded.
+var errGammaIntentNotRecorded = errors.New("the intent was not recorded: its network is gone")
+
 // issue hands the purchase out: the open one again, with a new status token,
-// or a new intent. link, when set, records what a new intent pays for in the
-// transaction that records the intent, and the intent is recorded only when
-// it succeeds: the biller charges an intent from the moment it is committed,
-// so nothing it pays for may be missing then. start_failed when no intent
-// could be recorded (the network is gone, or link failed).
+// or a new intent, recorded in one ReadCommitted transaction with what step,
+// when set, writes (gammaIssueStep). The step's refusal is answered as it is.
+// start_failed when no intent could be recorded (the network is gone, or the
+// step failed).
 func (self *gammaPurchaseStart) issue(
 	clientSession *session.ClientSession,
-	link func(tx server.PgTx, intent *model.GammaPaymentIntent) error,
+	step gammaIssueStep,
 ) *GammaPaymentIntentResult {
 	ctx := clientSession.Ctx
 	if self.open != nil {
@@ -716,18 +726,34 @@ func (self *gammaPurchaseStart) issue(
 		ExpiresAt:                self.now.Add(self.view.settings.IntentTtl),
 	}
 	created := false
+	var refusal *GammaPaymentIntentResult
 	var createErr error
 	server.HandleError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			created = model.CreateGammaPaymentIntentInTx(tx, ctx, intent)
-			if created && link != nil {
-				server.Raise(link(tx, intent))
+			created = false
+			refusal = nil
+			if step != nil {
+				stepRefusal, err := step(tx, intent)
+				server.Raise(err)
+				if stepRefusal != nil {
+					// the step wrote nothing
+					refusal = stepRefusal
+					return
+				}
 			}
-		})
+			created = model.CreateGammaPaymentIntentInTx(tx, ctx, intent)
+			if !created && step != nil {
+				server.Raise(errGammaIntentNotRecorded)
+			}
+		}, server.TxReadCommitted)
 	}, func(err error) {
 		created = false
+		refusal = nil
 		createErr = err
 	})
+	if refusal != nil {
+		return refusal
+	}
 	if !created {
 		if createErr != nil {
 			glog.Errorf("[gamma]could not record a %s intent: %s\n", intent.Item, createErr)
