@@ -19,7 +19,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"strings"
 	"sync"
@@ -352,7 +351,7 @@ func runTrashMode(ctx context.Context, args []string, stdout io.Writer) (bool, e
 	if err := flags.Parse(args); err != nil {
 		return false, err
 	}
-	if *sweep <= 0 || math.IsNaN(sweep.Seconds()) {
+	if *sweep <= 0 {
 		return false, refuseStart("-sweep must declare the interval the cluster runs with")
 	}
 	clusters, err := openClusters(ctx, common.clustersPath)
@@ -423,9 +422,10 @@ func runVerdictMode(ctx context.Context, args []string, stdout io.Writer) (bool,
 			if err := parseRowFile(data, measurement, true); err != nil {
 				return false, refuseStart("%s: %v", path, err)
 			}
-			verdict := JudgeHdd(measurement, DefaultHddSettings())
+			settings := DefaultHddSettings()
+			verdict := JudgeHdd(measurement, settings)
 			pass = pass && verdict.Pass
-			if err := WriteHddVerdict(stdout, measurement, verdict); err != nil {
+			if err := WriteHddVerdict(stdout, measurement, verdict, settings); err != nil {
 				return false, err
 			}
 		case ModeHosts:

@@ -54,7 +54,7 @@ func TestHddVerdictFindsThePlateauAndTheAdmittedThroughput(t *testing.T) {
 		t.Fatalf("cache hit %v, not %v", verdict.YearTwoCacheHit, want)
 	}
 	var text strings.Builder
-	if err := WriteHddVerdict(&text, fixtureHdd(), verdict); err != nil {
+	if err := WriteHddVerdict(&text, fixtureHdd(), verdict, DefaultHddSettings()); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(text.String(), "file_clusters: {seg-1: {hdd_capacity_ops: 6500}}") {

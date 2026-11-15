@@ -88,6 +88,8 @@ type HddSettings struct {
 	// The most operations in flight, and the distinct failure texts kept: 4,096 and 16.
 	MaxInFlight     int
 	MaxFailureKinds int
+	// The most latencies kept per operation in a window, a uniform sample past it: 1,000,000.
+	LatencySampleCount int
 	// The PUTs that fill the read pool before a step go this many at once: 256.
 	FillInFlight int
 	// How long admission's figures take to reach the admitter before a run starts: 15 s, three intervals.
@@ -122,6 +124,7 @@ func DefaultHddSettings() *HddSettings {
 		ReadsPerGetUncached:  16,
 		MaxInFlight:          4096,
 		MaxFailureKinds:      16,
+		LatencySampleCount:   1000 * 1000,
 		FillInFlight:         256,
 		AdmissionSettle:      15 * time.Second,
 		EvidenceStepDuration: 10 * time.Minute,
@@ -291,7 +294,7 @@ func JudgeHdd(measurement *HddMeasurement, settings *HddSettings) *HddVerdict {
 }
 
 // The verdict as text, ending in the line the operator records (plan-EVSB-settle-gate's sidecar.yml).
-func WriteHddVerdict(out io.Writer, measurement *HddMeasurement, verdict *HddVerdict) error {
+func WriteHddVerdict(out io.Writer, measurement *HddMeasurement, verdict *HddVerdict, settings *HddSettings) error {
 	b := &strings.Builder{}
 	fmt.Fprintf(b, "§22.8's hdd run on %s, %s: %s\n", measurement.ClusterId, measurement.Started.UTC().Format(time.RFC3339), map[bool]string{true: "pass", false: "fail"}[verdict.Pass])
 	for _, step := range measurement.CapacitySteps {
@@ -304,7 +307,7 @@ func WriteHddVerdict(out io.Writer, measurement *HddMeasurement, verdict *HddVer
 		}
 		fmt.Fprintf(b, "  %-12s %6.0f puts/s offered, %6.1f admitted, refusals %.4f%%, %6.1f gets/s, put p99 %.1f ms, get p99 %.1f ms, cache hit ~%.2f\n",
 			window.Name, window.OfferedPutsPerSecond, window.admittedPutsPerSecond(), 100*window.refusalShare(), float64(window.GetsServed)/max(window.Seconds, 1),
-			window.PutLatencyMillis.P99, window.GetLatencyMillis.P99, window.cacheHitEstimate(DefaultHddSettings().ReadsPerGetUncached))
+			window.PutLatencyMillis.P99, window.GetLatencyMillis.P99, window.cacheHitEstimate(settings.ReadsPerGetUncached))
 	}
 	for _, reason := range verdict.Reasons {
 		fmt.Fprintf(b, "  %s\n", reason)
@@ -477,8 +480,8 @@ func (self *hddRun) window(ctx context.Context, name string, putRate float64, ge
 		}
 	}
 	var putsStored, putsRefused, putsFailed, getsServed, getsFailed atomic.Int64
-	putLatencies := newLatencySample(1000*1000, 7)
-	getLatencies := newLatencySample(1000*1000, 8)
+	putLatencies := newLatencySample(self.settings.LatencySampleCount, 7)
+	getLatencies := newLatencySample(self.settings.LatencySampleCount, 8)
 	var nextGet atomic.Int64
 	putEvery := 0.0
 	if 0 < putRate {
@@ -740,7 +743,7 @@ func runHddMode(ctx context.Context, args []string, stdout io.Writer) (bool, err
 			return false, err
 		}
 		defer file.Close()
-		if err := WriteHddVerdict(file, measurement, verdict); err != nil {
+		if err := WriteHddVerdict(file, measurement, verdict, &settings); err != nil {
 			return false, err
 		}
 	}

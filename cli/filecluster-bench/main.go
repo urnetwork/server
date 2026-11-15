@@ -613,6 +613,16 @@ const (
 	fs116Pattern = "^TestFs116"
 )
 
+// The fs116 mode's bounds.
+type Fs116Settings struct {
+	// The longest line of go test's JSON it reads: 16 MiB, past any test's output line.
+	MaxLineByteCount int
+}
+
+func DefaultFs116Settings() *Fs116Settings {
+	return &Fs116Settings{MaxLineByteCount: 16 * 1024 * 1024}
+}
+
 // Runs FS-116 on the monoroot's sidecar commit and records what passed (D-TEST-11: the nvme run starts only after
 // it). A tree with changes is refused, so the record names a commit.
 func runFs116Mode(ctx context.Context, args []string, stdout io.Writer) (bool, error) {
@@ -685,7 +695,7 @@ func RunFs116(ctx context.Context, monoroot string, goCommand string, runCommand
 	}
 	failed := []string{}
 	scanner = bufio.NewScanner(bytes.NewReader(out))
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	scanner.Buffer(nil, DefaultFs116Settings().MaxLineByteCount)
 	for scanner.Scan() {
 		event := &testEvent{}
 		if json.Unmarshal(scanner.Bytes(), event) != nil || event.Test == "" || strings.Contains(event.Test, "/") {
