@@ -295,10 +295,47 @@ type SidecarIdentityView struct {
 	Bindings [][]byte
 }
 
+// Whether callerNetworkId may read an identity of networkId, §5.15's caller
+// rule (CORE-M6-04): its own network, or one an active §8.11 share binds to
+// it. A share binds its two networks once the invited one accepted it with
+// §17.9's status active (network_bridge_share, api-9), whichever of them
+// shares, and stops binding them when its row goes, at its revocation or
+// either network's deletion. A refused accept binds nothing, and nor does an
+// invite (network_acl_share), whose row goes once its uses run out while the
+// share it filed stands. Without MG6 linked no share is read, so only the
+// caller's own network is served.
+func sidecarIdentityReadable(ctx context.Context, conn server.PgConn, callerNetworkId server.Id, networkId server.Id) bool {
+	if networkId == callerNetworkId {
+		return true
+	}
+	if !server.SidecarMg6Linked() {
+		return false
+	}
+	shared := false
+	server.Raise(conn.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM network_bridge_share
+				WHERE
+					accept_status = $3 AND (
+						(network_id = $1 AND invited_network_id = $2) OR
+						(network_id = $2 AND invited_network_id = $1)
+					)
+			)
+		`,
+		callerNetworkId,
+		networkId,
+		string(NetworkBridgeShareAcceptStatusActive),
+	).Scan(&shared))
+	return shared
+}
+
 // The identity of sidecarId with its newest binding and a page of bindings
 // below beforeGeneration, newest first (0: from the newest), or nil when api
-// holds none for callerNetworkId. Only the caller's own network is served
-// until CORE-M6-04 adds §8.11's shares.
+// holds none that callerNetworkId may read: one of its own network, or of a
+// network an active §8.11 share binds to it (sidecarIdentityReadable).
 func GetSidecarIdentity(ctx context.Context, callerNetworkId server.Id, sidecarId server.Id, beforeGeneration int64) *SidecarIdentityView {
 	var view *SidecarIdentityView
 	server.Db(ctx, func(conn server.PgConn) {
@@ -317,7 +354,7 @@ func GetSidecarIdentity(ctx context.Context, callerNetworkId server.Id, sidecarI
 				server.Raise(result.Scan(&view.NetworkId, &view.IdentityPublicKey, &view.IdentityAlg, &view.Status))
 			}
 		})
-		if view == nil || view.NetworkId != callerNetworkId {
+		if view == nil || !sidecarIdentityReadable(ctx, conn, callerNetworkId, view.NetworkId) {
 			view = nil
 			return
 		}
@@ -366,8 +403,8 @@ func GetSidecarIdentity(ctx context.Context, callerNetworkId server.Id, sidecarI
 }
 
 // The identity a client of any generation is bound to, with that client's
-// binding, or nil when it has none in callerNetworkId
-// (plan-CORE-client-to-sidecar-lookup).
+// binding, or nil when it has none callerNetworkId may read, under the same
+// rule as GetSidecarIdentity (plan-CORE-client-to-sidecar-lookup).
 func GetSidecarIdentityByClient(ctx context.Context, callerNetworkId server.Id, clientId server.Id) *SidecarIdentityView {
 	var view *SidecarIdentityView
 	server.Db(ctx, func(conn server.PgConn) {
@@ -400,10 +437,10 @@ func GetSidecarIdentityByClient(ctx context.Context, callerNetworkId server.Id, 
 				))
 			}
 		})
+		if view != nil && !sidecarIdentityReadable(ctx, conn, callerNetworkId, view.NetworkId) {
+			view = nil
+		}
 	})
-	if view == nil || view.NetworkId != callerNetworkId {
-		return nil
-	}
 	return view
 }
 

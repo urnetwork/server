@@ -448,3 +448,77 @@ func TestRestoreRequiredReadsBindingsAndRegistrations(t *testing.T) {
 		}
 	})
 }
+
+// §5.15's caller rule across §8.11's shares (CORE-M6-04): a network reads
+// another's identities, by sidecar_id and by client, only while a share binds
+// the two, accepted with status active, whichever of them shares. An invite
+// not yet accepted, an accept refused for its size, a third network and a
+// share whose row went at its revocation read nothing, as though api held
+// none; the identity's own network always reads it.
+func TestIdentityReadableAcrossActiveShareOnly(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		bridgeShareTestAllowOutbound(t)
+		x := newBridgeShareTestSide(t, ctx)
+		y := newBridgeShareTestSide(t, ctx)
+		z := newBridgeShareTestSide(t, ctx)
+		// readable answers whether reader's network reads owner's identity by
+		// both lookups, failing the test when they disagree
+		readable := func(name string, reader *bridgeShareTestSide, owner *bridgeShareTestSide) bool {
+			t.Helper()
+			bySidecar := GetSidecarIdentity(ctx, reader.networkId, owner.sidecarId, 0)
+			byClient := GetSidecarIdentityByClient(ctx, reader.networkId, *owner.clientSession.ByJwt.ClientId)
+			if (bySidecar == nil) != (byClient == nil) {
+				t.Fatalf("%s: the lookups disagree, by sidecar_id %t, by client %t", name, bySidecar != nil, byClient != nil)
+			}
+			if bySidecar != nil && (bySidecar.SidecarId != owner.sidecarId || bySidecar.NetworkId != owner.networkId ||
+				len(bySidecar.Binding) == 0 || len(bySidecar.Bindings) != 1 || byClient.SidecarId != owner.sidecarId) {
+				t.Fatalf("%s: the view %+v, by client %+v", name, bySidecar, byClient)
+			}
+			return bySidecar != nil
+		}
+		for _, side := range []*bridgeShareTestSide{x, y, z} {
+			if !readable("its own network", side, side) {
+				t.Fatal("a network does not read its own identity")
+			}
+		}
+		if readable("no share", y, x) || readable("no share, the other way", x, y) {
+			t.Fatal("a network reads another's identity with no share between them")
+		}
+
+		// x files a share and y has not accepted it
+		pendingId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			if err := CreateNetworkBridgeShareInTx(ctx, tx, pendingId, x.networkId, bridgeShareTestSeal(t, []byte("targets")), 1); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+		})
+		if readable("an invite not accepted", y, x) {
+			t.Fatal("an unaccepted share binds the networks")
+		}
+		// an accept refused for its size binds nothing
+		refusedId, _, _ := bridgeShareTestAccepted(t, ctx, x, z, NetworkBridgeShareAcceptStatusRefusedTooLarge)
+		if readable("a refused accept", z, x) || readable("a refused accept, the other way", x, z) {
+			t.Fatal("a refused share binds the networks")
+		}
+
+		// once y accepts with status active, each network reads the other's
+		shareId, _, _ := bridgeShareTestAccepted(t, ctx, x, y, NetworkBridgeShareAcceptStatusActive)
+		if !readable("the invited network", y, x) || !readable("the sharing network", x, y) {
+			t.Fatal("an active share does not bind its networks")
+		}
+		if readable("a third network", z, y) || readable("a third network, the other way", y, z) {
+			t.Fatal("a share binds a network that is no side of it")
+		}
+
+		// the share's revocation removes its row: nothing reads across it after
+		if !RemoveNetworkBridgeShare(ctx, shareId) {
+			t.Fatal("the share's row did not go")
+		}
+		if readable("a revoked share", y, x) || readable("a revoked share, the other way", x, y) {
+			t.Fatal("a revoked share still binds the networks")
+		}
+		RemoveNetworkBridgeShare(ctx, pendingId)
+		RemoveNetworkBridgeShare(ctx, refusedId)
+	})
+}

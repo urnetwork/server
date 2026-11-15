@@ -14,9 +14,12 @@ package controller
 // sidecar_revoked, binding_invalid, generation_conflict or client_bound
 // (plan-CORE-binding-wire #6), and never repeats the binding.
 //
-// The lookups never return a user_id, and serve only the caller's own network
-// until CORE-M6-04 adds §8.11's shares. What they answer is untrusted: a
-// verifier checks each binding against its own pin.
+// The lookups never return a user_id, and serve the caller's own network or
+// one an active §8.11 share binds to it (CORE-M6-04; §5.15's caller rule,
+// model.GetSidecarIdentity): any other network's identity is 404, as though
+// api held none. What they answer is untrusted: a verifier checks each binding
+// against its own pin, a share link's against the host key its own log pinned
+// (§17.9's target row).
 
 import (
 	"errors"
@@ -156,7 +159,8 @@ type GetSidecarIdentityResult struct {
 }
 
 // GET /sidecar/identity/<sidecar_id> and GET /sidecar/identity?client_id=<id>.
-// An identity api does not hold for the caller's network is 404.
+// An identity of neither the caller's network nor one an active §8.11 share
+// binds to it is 404, the same answer as one api does not hold.
 func GetSidecarIdentity(lookup *GetSidecarIdentityArgs, clientSession *session.ClientSession) (*GetSidecarIdentityResult, error) {
 	if !server.SidecarMg1Linked() {
 		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, sidecarIdentityUnavailableMessage)

@@ -201,3 +201,65 @@ func TestRefreshAnswersRestoreRequired(t *testing.T) {
 		}
 	})
 }
+
+// Across an active §8.11 share (CORE-M6-04) the lookups answer the other
+// network's identity as they answer the caller's own, ids, keys, status and
+// bindings, and still never a user_id; once the share's row goes they answer
+// 404 again.
+func TestIdentityAcrossShareNeverReturnsUserId(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		restore := model.Testing_SetNetworkBridgeShareOutboundCheck(func(ctx context.Context, networkId server.Id) (bool, error) {
+			return true, nil
+		})
+		defer restore()
+		hostSession, hostUserId := newSidecarBindTestClient(t, ctx, "sidecar-identity-host")
+		keys := newSidecarBindTestKeys(t)
+		signedBinding := keys.bind(t, hostSession, 1)
+		if _, err := SidecarBind(&SidecarBindArgs{Binding: signedBinding}, hostSession); err != nil {
+			t.Fatal(err)
+		}
+		routerSession, _ := newSidecarBindTestClient(t, ctx, "sidecar-identity-router")
+		lookups := []*GetSidecarIdentityArgs{{SidecarId: &keys.sidecarId}, {ClientId: hostSession.ByJwt.ClientId}}
+		for _, lookup := range lookups {
+			if _, err := GetSidecarIdentity(lookup, routerSession); err == nil || !strings.HasPrefix(err.Error(), "404 ") {
+				t.Fatalf("no share: %v", err)
+			}
+		}
+
+		// the host's network shares, and the router's accepts
+		shareId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			if err := model.CreateNetworkBridgeShareInTx(ctx, tx, shareId, hostSession.ByJwt.NetworkId, []byte("targets sealed under K"), 1); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+		})
+		server.Tx(ctx, func(tx server.PgTx) {
+			if err := model.AcceptNetworkBridgeShareInTx(ctx, tx, shareId, routerSession.ByJwt.NetworkId, []byte("aliases sealed under K"), 1, model.NetworkBridgeShareAcceptStatusActive); err != nil {
+				t.Fatalf("accept: %v", err)
+			}
+		})
+		for _, lookup := range lookups {
+			result, err := GetSidecarIdentity(lookup, routerSession)
+			if err != nil || result.SidecarId != keys.sidecarId || string(result.Binding) != string(signedBinding) {
+				t.Fatalf("across the share: %v %+v", err, result)
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "user_id") || strings.Contains(string(encoded), hostUserId.String()) {
+				t.Fatalf("the answer names the user: %s", encoded)
+			}
+		}
+
+		if !model.RemoveNetworkBridgeShare(ctx, shareId) {
+			t.Fatal("the share's row did not go")
+		}
+		for _, lookup := range lookups {
+			if _, err := GetSidecarIdentity(lookup, routerSession); err == nil || !strings.HasPrefix(err.Error(), "404 ") {
+				t.Fatalf("a revoked share: %v", err)
+			}
+		}
+	})
+}
