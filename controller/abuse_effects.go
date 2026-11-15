@@ -164,8 +164,17 @@ func DefaultAbuseEffectsDeps() *AbuseEffectsDeps {
 			return err
 		},
 		SetNetworkSuspended: model.SetNetworkAbuseSuspended,
-		EndNetworkSuspended: model.EndNetworkAbuseSuspended,
-		StandingActions:     model.GetNetworkStandingAbuseActions,
+		EndNetworkSuspended: func(ctx context.Context, networkId server.Id, restrictedUntil *time.Time, now time.Time) (bool, error) {
+			ended, err := model.EndNetworkAbuseSuspended(ctx, networkId, restrictedUntil, now)
+			if err != nil {
+				return ended, err
+			}
+			// the restricted row as the whole history leaves it, not the
+			// lifted suspension's window alone (ABUSE-M5-07)
+			model.ReevaluateNetworkAbuseState(ctx, networkId, now)
+			return ended, nil
+		},
+		StandingActions: model.GetNetworkStandingAbuseActions,
 		ResolveLabel: func(ctx context.Context, root string, label string) (server.Id, error) {
 			networkId, _, err := model.ResolveNetworkLabel(ctx, root, label, false)
 			return networkId, err
