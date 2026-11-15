@@ -20,12 +20,19 @@ package oauth
 //	           slow_down for a poll inside the interval (which then grows by SlowDownStep), access_denied,
 //	           expired_token, or once the admin token, the authorization taken so it is redeemed once
 //
-// Where authorizations wait between their steps is soft state with no §2.8 row yet
-// (questions/team-m6-08-device-grant-row.md): api installs no DeviceAuthorizationStore, so the device endpoint
-// answers temporarily_unavailable and the metadata names none, and ur-cli refuses the device grant, naming why. Tests
-// install their own. The verification page itself is the consent page's (mmm), which this task does not build.
+// Authorizations wait between their steps in Redis (device_grant_store.go; QD-830, §2.8's api-11), the store api
+// installs at startup (cli/api/main.go), so the device endpoint serves and the issuer's metadata names it. A process
+// with no store answers temporarily_unavailable at each step and names no device endpoint, and ur-cli refuses the
+// device grant there, naming why.
+//
+// Each write is one atomic step of the store: a poll's bookkeeping and the consent page's answer replace only the
+// authorization they read (Swap), so neither undoes the other on any api instance, and redemption takes it once
+// (Take). A code the store does not hold answers expired_token: once Redis drops a key it cannot tell an expired code
+// from a taken or an unknown one, and each of them ends the grant. No device code, user code or token enters a log or
+// an error. The verification page itself is the consent page's (mmm), which nothing here builds.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -62,16 +69,24 @@ type DeviceGrantSettings struct {
 	UserCodeLength int
 	// The device code's random bytes: 32.
 	DeviceCodeByteCount int
+	// How many user codes a new authorization draws while each one drawn is another live authorization's: 4. Eight
+	// places of twenty letters make a second draw rare and a fourth all but impossible. Non-positive draws once.
+	UserCodeAttemptCount int
+	// How many times the consent page's answer reads and writes an authorization that a poll wrote in between: 4. A
+	// poll writes at most once a request, so the second attempt all but always lands. Non-positive attempts once.
+	DecisionAttemptCount int
 }
 
 // The defaults, a fresh value each call.
 func DefaultDeviceGrantSettings() *DeviceGrantSettings {
 	return &DeviceGrantSettings{
-		CodeDuration:        10 * time.Minute,
-		PollInterval:        5 * time.Second,
-		SlowDownStep:        5 * time.Second,
-		UserCodeLength:      8,
-		DeviceCodeByteCount: 32,
+		CodeDuration:         10 * time.Minute,
+		PollInterval:         5 * time.Second,
+		SlowDownStep:         5 * time.Second,
+		UserCodeLength:       8,
+		DeviceCodeByteCount:  32,
+		UserCodeAttemptCount: 4,
+		DecisionAttemptCount: 4,
 	}
 }
 
@@ -83,6 +98,9 @@ var (
 	ErrSlowDown             = errors.New("slow_down")
 	ErrAccessDenied         = errors.New("access_denied")
 	ErrExpiredToken         = errors.New("expired_token")
+	// A store's refusal of a new authorization whose user code another live authorization holds; the grant draws
+	// another code.
+	ErrDeviceUserCodeInUse = errors.New("the user code is in use")
 )
 
 // One device authorization as it waits between its steps.
@@ -110,20 +128,31 @@ type DeviceAuthorization struct {
 	UserId    server.Id
 	NetworkId server.Id
 	AuthTime  time.Time
+
+	// what the store answered this authorization from, opaque, which its Swap compares; set by the store's reads and
+	// never stored itself
+	storeVersion []byte
 }
 
-// Where device authorizations wait. Implementations must make Take remove at most once, so a code redeems once.
+// Where device authorizations wait. Each method is one atomic step, whatever api instance runs it, so a poll and the
+// consent page never undo each other's write, and a code is redeemed once.
 type DeviceAuthorizationStore interface {
-	// Keeps a new authorization until its ExpireTime; a key in use is refused.
+	// Keeps a new authorization until its ExpireTime. A device code in use is refused, and a user code another live
+	// authorization holds is refused with ErrDeviceUserCodeInUse, keeping nothing, so a user code names one
+	// authorization.
 	Put(ctx context.Context, authorization *DeviceAuthorization) error
-	// The authorization of a device code's hash, nil for none.
+	// The authorization of a device code's hash, with the version Swap compares, nil for none: never kept, past its
+	// life, or taken.
 	Get(ctx context.Context, deviceCodeSha256 [sha256.Size]byte) (*DeviceAuthorization, error)
-	// The authorization of a user code, nil for none.
+	// The authorization of a user code, nil for none, as Get.
 	GetByUserCode(ctx context.Context, userCode string) (*DeviceAuthorization, error)
-	// Replaces the stored authorization of the same device code hash.
-	Update(ctx context.Context, authorization *DeviceAuthorization) error
-	// Removes the authorization of a device code's hash, answering whether this call removed it.
-	Take(ctx context.Context, deviceCodeSha256 [sha256.Size]byte) (bool, error)
+	// Replaces read, an authorization this store's Get or GetByUserCode answered, with next, keeping its life, only while
+	// the store holds read unchanged: false, writing nothing, once another write came between or it is gone. next keeps
+	// read's device code, user code and ExpireTime.
+	Swap(ctx context.Context, read *DeviceAuthorization, next *DeviceAuthorization) (bool, error)
+	// Removes the authorization of a device code's hash and answers it, with its version, nil for none: of any number
+	// of takes, at most one is answered it.
+	Take(ctx context.Context, deviceCodeSha256 [sha256.Size]byte) (*DeviceAuthorization, error)
 }
 
 var deviceAuthorizationStore atomic.Pointer[DeviceAuthorizationStore]
@@ -243,7 +272,7 @@ func authorizeDeviceAt(ctx context.Context, args *DeviceAuthorizationArgs, setti
 	if store == nil {
 		return nil, ErrDeviceGrantUnavailable
 	}
-	authorization, err := ValidateUrcliRequest(&AuthorizationRequest{
+	urcliAuthorization, err := ValidateUrcliRequest(&AuthorizationRequest{
 		ClientId:             args.ClientId,
 		Scopes:               args.Scopes,
 		Resource:             args.Resource,
@@ -262,27 +291,34 @@ func authorizeDeviceAt(ctx context.Context, args *DeviceAuthorizationArgs, setti
 		return nil, err
 	}
 	deviceCode := base64.RawURLEncoding.EncodeToString(deviceCodeBytes)
-	userCode, err := newDeviceUserCode(random, settings)
-	if err != nil {
-		return nil, err
-	}
-	if err := store.Put(ctx, &DeviceAuthorization{
+	authorization := &DeviceAuthorization{
 		DeviceCodeSha256:     sha256.Sum256([]byte(deviceCode)),
-		UserCode:             userCode,
 		ClientId:             args.ClientId,
 		Scopes:               args.Scopes,
 		Resource:             resource,
 		DpopJkt:              args.DpopJkt,
 		AuthorizationDetails: args.AuthorizationDetails,
-		Cmd:                  authorization.Cmd,
+		Cmd:                  urcliAuthorization.Cmd,
 		ExpireTime:           now.Add(settings.CodeDuration),
 		Interval:             settings.PollInterval,
-	}); err != nil {
-		return nil, err
+	}
+	// a user code another live authorization holds is drawn again, so the code the person types names one
+	for attempt := 1; ; attempt += 1 {
+		authorization.UserCode, err = newDeviceUserCode(random, settings)
+		if err != nil {
+			return nil, err
+		}
+		err = store.Put(ctx, authorization)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrDeviceUserCodeInUse) || settings.UserCodeAttemptCount <= attempt {
+			return nil, err
+		}
 	}
 	return &DeviceAuthorizationResponse{
 		DeviceCode:      deviceCode,
-		UserCode:        formatDeviceUserCode(userCode),
+		UserCode:        formatDeviceUserCode(authorization.UserCode),
 		VerificationUri: DeviceVerificationUri(),
 		ExpiresIn:       int(settings.CodeDuration / time.Second),
 		Interval:        int(settings.PollInterval / time.Second),
@@ -329,36 +365,50 @@ func DecideDevice(ctx context.Context, userCode string, approve bool, receipt st
 	return decideDeviceAt(ctx, userCode, approve, receipt, user, DefaultDeviceGrantSettings(), server.NowUtc)
 }
 
+// The answer replaces only the authorization it read, so a poll's bookkeeping written in between is read again and
+// the answer applied to it, never lost under the poll's write nor the poll's under it.
 func decideDeviceAt(ctx context.Context, userCode string, approve bool, receipt string, user *AuthorizingUser, settings *DeviceGrantSettings, now func() time.Time) error {
 	store := currentDeviceAuthorizationStore()
 	if store == nil {
 		return ErrDeviceGrantUnavailable
 	}
-	authorization, err := deviceAuthorizationOfUserCode(ctx, store, userCode, settings, now())
-	if err != nil {
-		return err
+	for attempt := 1; ; attempt += 1 {
+		authorization, err := deviceAuthorizationOfUserCode(ctx, store, userCode, settings, now())
+		if err != nil {
+			return err
+		}
+		decided := *authorization
+		if approve {
+			if user.GuestMode {
+				return errUnauthorizedGuestNetwork
+			}
+			if user.NetworkId == (server.Id{}) {
+				return errUnauthorizedNoNetwork
+			}
+			if user.AuthTime.IsZero() || DefaultUrcliSettings().MaxAuthAge < now().Sub(user.AuthTime) {
+				return ErrUrcliReauthenticationRequired
+			}
+			if err := verifyUrcliConsentReceipt(receipt, user.UserId, authorization.authorizationRequest(), now); err != nil {
+				return err
+			}
+			decided.Approved = true
+			decided.UserId = user.UserId
+			decided.NetworkId = user.NetworkId
+			decided.AuthTime = user.AuthTime
+		} else {
+			decided.Denied = true
+		}
+		swapped, err := store.Swap(ctx, authorization, &decided)
+		if err != nil {
+			return err
+		}
+		if swapped {
+			return nil
+		}
+		if settings.DecisionAttemptCount <= attempt {
+			return fmt.Errorf("%w: the authorization kept changing under the answer", ErrDeviceGrantUnavailable)
+		}
 	}
-	if !approve {
-		authorization.Denied = true
-		return store.Update(ctx, authorization)
-	}
-	if user.GuestMode {
-		return errUnauthorizedGuestNetwork
-	}
-	if user.NetworkId == (server.Id{}) {
-		return errUnauthorizedNoNetwork
-	}
-	if user.AuthTime.IsZero() || DefaultUrcliSettings().MaxAuthAge < now().Sub(user.AuthTime) {
-		return ErrUrcliReauthenticationRequired
-	}
-	if err := verifyUrcliConsentReceipt(receipt, user.UserId, authorization.authorizationRequest(), now); err != nil {
-		return err
-	}
-	authorization.Approved = true
-	authorization.UserId = user.UserId
-	authorization.NetworkId = user.NetworkId
-	authorization.AuthTime = user.AuthTime
-	return store.Update(ctx, authorization)
 }
 
 // What a device code poll sent.
@@ -386,27 +436,35 @@ func exchangeDeviceCodeAt(ctx context.Context, args *ExchangeDeviceCodeArgs, pro
 	if err != nil {
 		return nil, err
 	}
+	// expired, taken or never issued: the store cannot tell which once its key is gone (the file header)
 	if authorization == nil {
-		return nil, fmt.Errorf("%w: no such device code", ErrInvalidGrant)
+		return nil, ErrExpiredToken
 	}
 	if !now.Before(authorization.ExpireTime) {
+		// a store that keeps a code past its life gives it up here, and the answer stands whatever the take answers
 		store.Take(ctx, deviceCodeSha256)
 		return nil, ErrExpiredToken
 	}
 	if authorization.Denied {
-		store.Take(ctx, deviceCodeSha256)
+		if _, err := store.Take(ctx, deviceCodeSha256); err != nil {
+			return nil, err
+		}
 		return nil, ErrAccessDenied
 	}
 	if !authorization.Approved {
 		tooSoon := !authorization.LastPollTime.IsZero() && now.Sub(authorization.LastPollTime) < authorization.Interval
-		authorization.LastPollTime = now
+		polled := *authorization
+		polled.LastPollTime = now
 		if tooSoon {
-			authorization.Interval += settings.SlowDownStep
+			polled.Interval += settings.SlowDownStep
 		}
-		if err := store.Update(ctx, authorization); err != nil {
+		swapped, err := store.Swap(ctx, authorization, &polled)
+		if err != nil {
 			return nil, err
 		}
-		if tooSoon {
+		// a poll that raced another write, the consent page's answer or a second poll, slows down and records
+		// nothing: the next poll reads what that write left
+		if tooSoon || !swapped {
 			return nil, ErrSlowDown
 		}
 		return nil, ErrAuthorizationPending
@@ -433,20 +491,21 @@ func exchangeDeviceCodeAt(ctx context.Context, args *ExchangeDeviceCodeArgs, pro
 	if err != nil {
 		return nil, err
 	}
-	if !taken {
+	// of any number of polls one takes the code, and only as the approved authorization the proof was checked against
+	if taken == nil || !taken.Approved || !bytes.Equal(taken.storeVersion, authorization.storeVersion) {
 		return nil, fmt.Errorf("%w: the device code was redeemed", ErrInvalidGrant)
 	}
-	memberId, err := urcliTokenMemberId(ctx, authorization.NetworkId, authorization.UserId)
+	memberId, err := urcliTokenMemberId(ctx, taken.NetworkId, taken.UserId)
 	if err != nil {
 		return nil, err
 	}
 	urcliSettings := DefaultUrcliSettings()
 	token, expiry, err := MintAdminToken(&MintAdminTokenArgs{
-		NetworkId: authorization.NetworkId,
+		NetworkId: taken.NetworkId,
 		MemberId:  memberId,
-		Scopes:    authorization.Scopes,
-		Jkt:       authorization.DpopJkt,
-		Cmd:       authorization.Cmd,
+		Scopes:    taken.Scopes,
+		Jkt:       taken.DpopJkt,
+		Cmd:       taken.Cmd,
 		Duration:  urcliSettings.AdminTokenDuration,
 	})
 	if err != nil {
@@ -456,6 +515,6 @@ func exchangeDeviceCodeAt(ctx context.Context, args *ExchangeDeviceCodeArgs, pro
 		AccessToken: token,
 		TokenType:   adminTokenResponseType,
 		ExpiresIn:   int(time.Until(expiry).Seconds()),
-		Scope:       FormatScope(authorization.Scopes),
+		Scope:       FormatScope(taken.Scopes),
 	}, nil
 }
