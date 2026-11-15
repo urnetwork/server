@@ -5,8 +5,10 @@ package model
 // DSA Art. 20's six months (server.AbuseAppealWindowMinMonths). Everything else
 // a person could tune is here, with its unit and why it has its default: the
 // ladders' and clocks' (AbusePolicySettings, embedded), §21.7's standing windows,
-// coalescing, the action pass, retention, the abuse role's lookup cap and the
-// report joins' bounds.
+// probation's caps and the standing pass, coalescing, the action pass, retention,
+// the abuse role's lookup cap and the report joins' bounds. The gates' memory has
+// its own (AbuseGateSettings, AbuseHardDenySettings), as network_verified's cache
+// does (NetworkVerifiedSettings).
 //
 // The environment's part comes from abuse.yml (server.GetAbuseConfig):
 // ApplyAbuseConfig lays its protected names over a copy, and AbuseReviewHoursOf
@@ -23,7 +25,8 @@ type AbuseSettings struct {
 	// The ladders and the review clocks (abuse_policy.go, abuse_clock.go).
 	AbusePolicySettings
 
-	// A network younger than this is on probation (§21.7): 7 days.
+	// A network younger than this is on probation (§21.7): 7 days. Non-positive
+	// puts no network on probation.
 	ProbationAge time.Duration
 	// How long a host, label or network kill, or a network halt, keeps a network
 	// restricted (§21.7, plan-ABUSE-small-readings #4): 30 days. Non-positive
@@ -35,6 +38,25 @@ type AbuseSettings struct {
 	// How long a trusted network must be free of any action not lifted as wrong
 	// (§21.7): 90 days.
 	TrustedCleanWindow time.Duration
+
+	// The most TLS endpoints a network on probation or restricted may hold,
+	// whatever its tier (§21.7's "1 endpoint"; C-20, QUOTA-M5-01).
+	ProbationTlsEndpoints int64
+	// The longest a publish by a network on probation or restricted may run
+	// (§21.7's "publishes ≤24 h"), below §13.9's own bound.
+	ProbationPublishMaxDuration time.Duration
+
+	// How often AbuseStandingPass re-derives the restricted rows past their
+	// until_time from the action history (QD-194's daily re-evaluation, §21.10's
+	// "only while current"): an hour, so a row every reader already ignores
+	// leaves the table within the hour.
+	StandingPassInterval time.Duration
+	// The most rows one pass reads at a time, by a cursor.
+	StandingPassBatchSize int
+	// One pass's bound; a pass that runs out leaves the rest to the next.
+	StandingPassMaxTime time.Duration
+	// The task runner's bound on one pass, past StandingPassMaxTime.
+	StandingPassTaskMaxTime time.Duration
 
 	// A report on the network, target and category of a case opened this
 	// recently joins it, adding no row (OpenAbuseCaseInTx). A day: long enough
@@ -95,11 +117,19 @@ type AbuseSettings struct {
 // and without them every ladder refuses every target.
 func DefaultAbuseSettings() *AbuseSettings {
 	return &AbuseSettings{
-		AbusePolicySettings:   *DefaultAbusePolicySettings(),
-		ProbationAge:          7 * 24 * time.Hour,
-		RestrictedWindow:      30 * 24 * time.Hour,
-		TrustedPaidWindow:     30 * 24 * time.Hour,
-		TrustedCleanWindow:    90 * 24 * time.Hour,
+		AbusePolicySettings: *DefaultAbusePolicySettings(),
+		ProbationAge:        7 * 24 * time.Hour,
+		RestrictedWindow:    30 * 24 * time.Hour,
+		TrustedPaidWindow:   30 * 24 * time.Hour,
+		TrustedCleanWindow:  90 * 24 * time.Hour,
+
+		ProbationTlsEndpoints:       1,
+		ProbationPublishMaxDuration: 24 * time.Hour,
+		StandingPassInterval:        time.Hour,
+		StandingPassBatchSize:       1000,
+		StandingPassMaxTime:         5 * time.Minute,
+		StandingPassTaskMaxTime:     10 * time.Minute,
+
 		CaseCoalesceWindow:    24 * time.Hour,
 		ActionPassInterval:    time.Minute,
 		ActionPassGrace:       time.Minute,

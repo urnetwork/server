@@ -478,7 +478,12 @@ func NewHost(ctx context.Context, role string, host *sidecar.ServiceHost, settin
 func RunHost(ctx context.Context, role string, settings *HostSettings, deps *HostDeps, ports *HostPorts) error {
 	switch role {
 	case HostRoleApi:
-		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})
+		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{
+			Postgres: true,
+			// §21.7's standing and network_verified in memory, loaded from
+			// this host's Postgres off the record writes' path (ABUSE-M5-07)
+			Abuse: model.NewAbuseGate(ctx, nil, nil),
+		})
 		engine, err := NewApiHost(ctx, host, settings, deps)
 		if err != nil {
 			glog.Errorf("[dns]the api role is not ready: %v\n", err)

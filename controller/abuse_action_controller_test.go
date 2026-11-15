@@ -580,3 +580,73 @@ func TestAbuseActionNoticeTemplateRenders(t *testing.T) {
 		}
 	}
 }
+
+// A kill restricts its network in the action's own transaction, already at its
+// commit, and a lift as wrong clears the restriction in the lift's (§21.7,
+// ABUSE-M5-07). The network is read 8 days on, past probation.
+func TestAbuseActionMovesTheNetworksStanding(t *testing.T) {
+	requireAbuseTables(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		newTestAbuseDeps(t)
+		networkId, _, caseId := newTestAbuseCase(t, ctx, false)
+		args := testAbuseKillArgs(caseId)
+		offProbation := server.NowUtc().Add(8 * 24 * time.Hour)
+		standingAt := func() model.AbuseStanding {
+			standing, found := model.GetNetworkAbuseStanding(ctx, networkId, offProbation)
+			if !found {
+				t.Fatal("no network")
+			}
+			return standing.Standing
+		}
+		var committed []model.AbuseStanding
+		defer Testing_SetAbuseActionHook(func(step string, actionId server.Id) {
+			if step == AbuseActionStepCommitted {
+				committed = append(committed, standingAt())
+			}
+		})()
+
+		if _, err := ApplyAbuseAction(ctx, args); err != nil {
+			t.Fatal(err)
+		}
+		reviewerId := server.NewId()
+		if _, err := LiftAbuseAction(ctx, &model.AbuseLiftArgs{
+			ActionId:       server.NewId(),
+			CaseId:         caseId,
+			LiftedActionId: args.ActionId,
+			ReviewState:    model.AbuseReviewStateLiftedWrong,
+			ReviewerId:     &reviewerId,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(committed) != 2 || committed[0] != model.AbuseStandingRestricted || committed[1] != model.AbuseStandingStandard {
+			t.Fatalf("the standing at each commit: %v", committed)
+		}
+	})
+}
+
+// The effects end a suspension and then re-derive the restricted row from the
+// whole history, so a kill inside the window keeps the network restricted
+// when its suspension is lifted as wrong (ABUSE-M5-07).
+func TestAbuseEffectsEndSuspensionRederivesTheRow(t *testing.T) {
+	requireAbuseTables(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		newTestAbuseDeps(t)
+		networkId, _, caseId := newTestAbuseCase(t, ctx, false)
+		if _, err := ApplyAbuseAction(ctx, testAbuseKillArgs(caseId)); err != nil {
+			t.Fatal(err)
+		}
+		now := server.NowUtc()
+		if err := model.SetNetworkAbuseSuspended(ctx, networkId, server.NewId(), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DefaultAbuseEffectsDeps().EndNetworkSuspended(ctx, networkId, nil, now); err != nil {
+			t.Fatal(err)
+		}
+		standing, _ := model.GetNetworkAbuseStanding(ctx, networkId, now.Add(8*24*time.Hour))
+		if standing.Standing != model.AbuseStandingRestricted || standing.CaseId == nil || *standing.CaseId != caseId {
+			t.Fatalf("after the suspension: %+v", standing)
+		}
+	})
+}

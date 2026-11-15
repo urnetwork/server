@@ -204,6 +204,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleNetworkAuditWebhookDelivery(clientSession, tx)
 		// §21's actions owed an effect or a mailed record; not scheduled without MG5
 		work.ScheduleAbuseActionPass(clientSession, tx)
+		// §21.7's restricted rows past their until_time re-derived every hour;
+		// not scheduled without MG5
+		work.ScheduleAbuseStandingPass(clientSession, tx)
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
 		// months; not scheduled without MG5
 		work.ScheduleTlsConnectionRollup(clientSession, tx)
@@ -718,6 +721,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.AbuseActionPass,
 			work.AbuseActionPassPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AbuseStandingPass,
+			work.AbuseStandingPassPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.TlsConnectionRollup,
