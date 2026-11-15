@@ -26,7 +26,12 @@ package model
 //   - a crypto payment that left the chain (endCryptoGiftOrderGrantInTx, from
 //     EndCryptoPaymentGrantInTx) voids every unredeemed code and ends the
 //     redeemed codes' years; credited again (RestoreCryptoGiftOrderInTx), the
-//     order gets exactly those back, unless it was refunded meanwhile.
+//     order gets exactly those back, unless it was refunded meanwhile;
+//   - an order paid with Gamma is final sale (the owner, 2026-11-14): Gamma
+//     cannot be refunded, so none of these touches it. Each refuses or skips
+//     it, voids none of its codes, ends none of its years, records nothing, and
+//     says so (FinalSale, ErrGiftOrderFinalSale); its payment never leaves the
+//     chain, since only a finalized spend is credited.
 //
 // Each void and each ended year is a gift_code_void row: its cause, its source
 // (the refund or the dispute) and its time, the time the year was cut at.
@@ -74,6 +79,11 @@ const giftChargeRefundIdPrefix = "charge/"
 // gift_card_friend), which the order owes while one is unsent.
 const giftCardFriendTemplateName = "gift_card_friend"
 
+// ErrGiftOrderFinalSale is what a refund, a dispute or an operator's refund of
+// a gift order paid with Gamma meets: the order is final sale, since Gamma
+// cannot be refunded, so its codes are never voided as a refund.
+var ErrGiftOrderFinalSale = errors.New("the gift order was paid with Gamma, which is final sale: Gamma cannot be refunded, so none of its codes is voided as a refund")
+
 // An order as its refunds and disputes read it, under its row lock.
 type giftRefundOrder struct {
 	giftOrderId       server.Id
@@ -82,6 +92,31 @@ type giftRefundOrder struct {
 	unitPriceCents    int64
 	delivery          string
 	purchaseEventBase *string
+	rail              string
+}
+
+// An order paid with Gamma is final sale: nothing refunds it or voids its
+// codes as a refund (ErrGiftOrderFinalSale).
+func (self *giftRefundOrder) finalSale() bool {
+	return self.rail == GiftRailGamma
+}
+
+// GiftOrderFinalSaleInTx reports whether the order is final sale, paid with
+// Gamma, in the caller's transaction: a refund, a dispute or an operator's
+// refund must refuse or skip it. false when there is no such order.
+func GiftOrderFinalSaleInTx(tx server.PgTx, ctx context.Context, giftOrderId server.Id) (finalSale bool) {
+	result, err := tx.Query(
+		ctx,
+		`SELECT rail = $2 FROM gift_order WHERE gift_order_id = $1`,
+		giftOrderId,
+		GiftRailGamma,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&finalSale))
+		}
+	})
+	return
 }
 
 // One code of an order, by its number n (purchase event "<base>/gift/<n>").
@@ -99,7 +134,7 @@ func lockGiftRefundOrderInTx(tx server.PgTx, ctx context.Context, giftOrderId se
 	result, err := tx.Query(
 		ctx,
 		`
-			SELECT status, quantity, unit_price_cents, delivery, purchase_event_base
+			SELECT status, quantity, unit_price_cents, delivery, purchase_event_base, rail
 			FROM gift_order
 			WHERE gift_order_id = $1
 			FOR UPDATE
@@ -115,6 +150,7 @@ func lockGiftRefundOrderInTx(tx server.PgTx, ctx context.Context, giftOrderId se
 				&order.unitPriceCents,
 				&order.delivery,
 				&order.purchaseEventBase,
+				&order.rail,
 			))
 		}
 	})
@@ -340,6 +376,9 @@ type GiftRefundOutcome struct {
 	OrderRefunded bool
 	// the order was never fulfilled: it has no codes, and is refunded
 	Unfulfilled bool
+	// the order was paid with Gamma, which is final sale: nothing was
+	// recorded, voided or refunded (ErrGiftOrderFinalSale)
+	FinalSale bool
 }
 
 // RefundGiftOrderCodesInTx applies one refund (its id, its amount in cents)
@@ -347,7 +386,8 @@ type GiftRefundOutcome struct {
 // refund once, and voids codes until ⌊the cumulative refunded cents / the
 // unit price⌋ codes are void by refunds, unredeemed ones only, the highest
 // code first. A redeemed code's year is never ended. nil when there is no
-// such order.
+// such order. An order paid with Gamma is final sale: nothing is recorded or
+// voided, and the outcome says FinalSale.
 func RefundGiftOrderCodesInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -359,6 +399,9 @@ func RefundGiftOrderCodesInTx(
 	order := lockGiftRefundOrderInTx(tx, ctx, giftOrderId)
 	if order == nil {
 		return nil
+	}
+	if order.finalSale() {
+		return &GiftRefundOutcome{FinalSale: true}
 	}
 	if refundId != "" && 0 < refundCents {
 		server.RaisePgResult(tx.Exec(
@@ -426,7 +469,8 @@ func GetGiftOrderRefundedCents(ctx context.Context, giftOrderId server.Id) (refu
 // DisputeGiftOrderCodesInTx voids every unredeemed code of a gift order whose
 // charge is disputed, in the caller's transaction; redeemed years continue,
 // and the order's status waits for the dispute's close. Returns the codes it
-// voided. A second call for the dispute voids nothing more.
+// voided. A second call for the dispute voids nothing more. An order paid with
+// Gamma is final sale, and has no charge to dispute: nothing is voided.
 func DisputeGiftOrderCodesInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -435,7 +479,7 @@ func DisputeGiftOrderCodesInTx(
 	now time.Time,
 ) (voidedCodeIds []server.Id) {
 	order := lockGiftRefundOrderInTx(tx, ctx, giftOrderId)
-	if order == nil {
+	if order == nil || order.finalSale() {
 		return nil
 	}
 	for _, code := range giftRefundCodesInTx(tx, ctx, order) {
@@ -463,7 +507,8 @@ type GiftDisputeLoss struct {
 // LoseGiftOrderDisputeInTx is a gift order's lost dispute, in the caller's
 // transaction (ReadCommitted, OptNoRetry): the funds are gone, so every
 // unredeemed code is void, every redeemed code's year ends, and the order is
-// refunded.
+// refunded. nil for an order paid with Gamma, which is final sale: nothing
+// ends.
 func LoseGiftOrderDisputeInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -472,7 +517,7 @@ func LoseGiftOrderDisputeInTx(
 	now time.Time,
 ) *GiftDisputeLoss {
 	order := lockGiftRefundOrderInTx(tx, ctx, giftOrderId)
-	if order == nil {
+	if order == nil || order.finalSale() {
 		return nil
 	}
 	loss := &GiftDisputeLoss{}
@@ -856,7 +901,8 @@ func giftRestorationOrderInTx(tx server.PgTx, ctx context.Context, restoration *
 // WinGiftOrderDisputeInTx is a gift order's won dispute, in the caller's
 // transaction (ReadCommitted, OptNoRetry): exactly the codes the dispute
 // voided and the years it ended come back, never a refund's voids, and the
-// order is paid again. nil when there is no such order.
+// order is paid again. nil when there is no such order, and for an order paid
+// with Gamma, which no dispute voided.
 func WinGiftOrderDisputeInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -864,7 +910,7 @@ func WinGiftOrderDisputeInTx(
 	disputeId string,
 ) *GiftRestoration {
 	order := lockGiftRefundOrderInTx(tx, ctx, giftOrderId)
-	if order == nil {
+	if order == nil || order.finalSale() {
 		return nil
 	}
 	restoration := restoreGiftOrderVoidsInTx(tx, ctx, order, GiftCodeVoidCauseDispute, disputeId)
@@ -900,13 +946,17 @@ type GiftCryptoRefund struct {
 	Redeemed int
 	// void before, by another cause
 	AlreadyVoid int
+	// the order was paid with Gamma, which is final sale: nothing was voided
+	// or refunded (ErrGiftOrderFinalSale)
+	FinalSale bool
 }
 
 // RefundCryptoGiftOrderInTx is an operator's refund of a gift order's crypto
 // invoice, in the caller's transaction: it voids every unredeemed code and
 // never ends a redeemed code's year, and the order is refunded when it voided
 // any. The caller pays back the refunded codes' share of what was received.
-// nil when there is no such order.
+// nil when there is no such order. An order paid with Gamma is final sale:
+// nothing is voided, and the refund says FinalSale.
 func RefundCryptoGiftOrderInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -918,6 +968,10 @@ func RefundCryptoGiftOrderInTx(
 		return nil
 	}
 	refund := &GiftCryptoRefund{Quantity: order.quantity}
+	if order.finalSale() {
+		refund.FinalSale = true
+		return refund
+	}
 	for _, code := range giftRefundCodesInTx(tx, ctx, order) {
 		switch {
 		case code.redeemed:
@@ -964,7 +1018,8 @@ func endCryptoGiftOrderGrantInTx(
 	now time.Time,
 ) (endedNetworkIds []server.Id, ended bool) {
 	order := lockGiftRefundOrderInTx(tx, ctx, giftOrderId)
-	if order == nil {
+	if order == nil || order.finalSale() {
+		// a Gamma order's spend was finalized before it was credited
 		return nil, false
 	}
 	voidedCodeIds, endedCodeIds, endedNetworkIds := endGiftOrderCodesInTx(tx, ctx, order, GiftCodeVoidCauseOrphan, "", now)
@@ -992,8 +1047,9 @@ func RestoreCryptoGiftOrderInTx(
 }
 
 // ClearUnlinkedGiftOrderBuyerEmail blanks the buyer's email of a gift order
-// whose crypto invoice the 30-day retention unlink has passed (rail crypto, no
-// invoice id), once no friend email of the order is owed any more: none of its
+// whose crypto invoice or Pay with Gamma intent the 30-day retention unlink has
+// passed (rail crypto with no invoice id, or rail gamma with no intent id), once
+// no friend email of the order is owed any more: none of its
 // gift_card_friend messages is unsent and not given up, and for delivery
 // "them" its cards are rendered (until then its friend emails are still to be
 // owed). The unlink blanks it itself when nothing is owed then; while a
@@ -1017,8 +1073,10 @@ func clearUnlinkedGiftOrderBuyerEmailInTx(tx server.PgTx, ctx context.Context, g
 			SET buyer_email = ''
 			WHERE
 				gift_order_id = $1 AND
-				rail = $2 AND
-				crypto_intent_id IS NULL AND
+				(
+					(rail = $2 AND crypto_intent_id IS NULL) OR
+					(rail = $7 AND gamma_intent_id IS NULL)
+				) AND
 				buyer_email <> '' AND
 				NOT (
 					delivery = $3 AND
@@ -1044,6 +1102,7 @@ func clearUnlinkedGiftOrderBuyerEmailInTx(tx server.PgTx, ctx context.Context, g
 		GiftOrderStatusPaid,
 		GiftOrderPdfPartAll,
 		giftCardFriendTemplateName,
+		GiftRailGamma,
 	))
 	return tag.RowsAffected() == 1
 }

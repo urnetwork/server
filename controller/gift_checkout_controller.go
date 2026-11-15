@@ -6,13 +6,16 @@ package controller
 //	GET  /pay/gift/config         whether gifts are sold, the tiers and the coins (gift_config_controller.go)
 //	POST /pay/gift/checkout       a card order: a Stripe Checkout for N codes (this file)
 //	POST /pay/gift/crypto-intent  a coin order: a crypto invoice for N codes (gift_crypto_controller.go)
+//	POST /pay/gift/gamma-intent   a Gamma order: a purchase from the signed-in account's deposit (gift_gamma_controller.go)
+//	POST /pay/gift/gamma-cancel   a Gamma order's purchase voided, by its id and token (gift_gamma_controller.go)
 //	POST /pay/gift/order          an order's status, by its id and token (gift_order_controller.go)
 //	POST /pay/gift/cards.pdf      an order's cards, by its id and token (gift_order_controller.go)
 //	POST /pay/gift/check-code     a code's kind and status, without signing in (gift_order_controller.go)
 //
-// Every route is public. The purchases take an optional sign-in: with one,
-// `referral_credit` links the codes to the caller's network, so a friend who
-// redeems one becomes its referral. The server prices every order from the
+// Every route is public but the Gamma order's, which is paid from the caller's
+// network's deposit and needs a sign-in. The card and coin purchases take an
+// optional sign-in: with one, `referral_credit` links the codes to the
+// caller's network, so a friend who redeems one becomes its referral. The server prices every order from the
 // pro.yml `gift:` block (model.Gift) and builds the Stripe Checkout and the
 // crypto invoice from it; a client never names a price. While the block's
 // `enabled` is false every purchase refuses with gift_sales_closed. Refusals

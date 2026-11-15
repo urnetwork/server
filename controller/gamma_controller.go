@@ -448,12 +448,10 @@ func gammaOtherProRenews(clientSession *session.ClientSession) bool {
 
 // CreateGammaPaymentIntent answers POST /pay/gamma/intent.
 func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession *session.ClientSession) (*GammaPaymentIntentResult, error) {
-	ctx := clientSession.Ctx
-	view := gammaLoadView(clientSession)
-	if view.settings == nil || view.readiness != gammaReady {
-		return gammaIntentError(PurchaseErrorCodeAssetUnavailable, gammaUnavailableMessage), nil
+	view, refusal := gammaPurchaseView(clientSession)
+	if refusal != nil {
+		return refusal, nil
 	}
-	settings := view.settings
 	networkId := clientSession.ByJwt.NetworkId
 
 	plan := strings.TrimSpace(args.Plan)
@@ -485,9 +483,9 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 	if email != "" && (delivery != model.CryptoDeliveryCode || !payDataValidEmail(email)) {
 		return gammaIntentError(PurchaseErrorCodeInvalidEmail, "That email address does not look right."), nil
 	}
-	coldkey := strings.TrimSpace(args.Coldkey)
-	if coldkey != "" && !model.IsValidBittensorAddress(coldkey) {
-		return gammaIntentError(PurchaseErrorCodeInvalidRequest, "The coldkey is not an SS58 address."), nil
+	coldkey, ok := gammaColdkeyArg(args.Coldkey)
+	if !ok {
+		return gammaIntentError(PurchaseErrorCodeInvalidRequest, gammaInvalidColdkeyMessage), nil
 	}
 
 	offerApplied := false
@@ -542,30 +540,114 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 		item = itemId
 	}
 
-	hotkey, err := gammaPickDepositHotkey(clientSession, settings, networkId, coldkey)
+	start, refusal := gammaStartPurchase(clientSession, view, &gammaPurchase{
+		item:         item,
+		delivery:     delivery,
+		tier:         tierName,
+		offerApplied: offerApplied,
+		priceUsd:     priceUsd,
+		regularUsd:   regularUsd,
+		email:        email,
+		coldkey:      coldkey,
+	})
+	if refusal != nil {
+		return refusal, nil
+	}
+	return start.issue(clientSession, nil), nil
+}
+
+const gammaInvalidColdkeyMessage = "The coldkey is not an SS58 address."
+
+// gammaColdkeyArg is a request's coldkey, trimmed: "" for none, and ok = false
+// for one that is not an SS58 address.
+func gammaColdkeyArg(coldkey string) (string, bool) {
+	coldkey = strings.TrimSpace(coldkey)
+	if coldkey != "" && !model.IsValidBittensorAddress(coldkey) {
+		return "", false
+	}
+	return coldkey, true
+}
+
+// gammaPurchaseView is what a purchase starts from: the view of Gamma while
+// purchases are available now (GET /pay/gamma/terms' available), else the
+// refusal, asset_unavailable.
+func gammaPurchaseView(clientSession *session.ClientSession) (*gammaView, *GammaPaymentIntentResult) {
+	view := gammaLoadView(clientSession)
+	if view.settings == nil || view.readiness != gammaReady {
+		return nil, gammaIntentError(PurchaseErrorCodeAssetUnavailable, gammaUnavailableMessage)
+	}
+	return view, nil
+}
+
+// gammaPurchase is a purchase as the intent endpoints start it, priced: POST
+// /pay/gamma/intent's plan or data pack, and POST /pay/gift/gamma-intent's
+// gift order (gift_gamma_controller.go).
+type gammaPurchase struct {
+	// a plan (gammaKnownPlans), a data pack (gammaKnownItems), or a gift
+	// order's codes (GiftGammaItem)
+	item     string
+	delivery string
+	// the price tier, and whether the welcome offer priced it; "" and false
+	// when neither priced it (a data pack, a gift order)
+	tier         string
+	offerApplied bool
+	priceUsd     float64
+	regularUsd   float64
+	// delivery code: where the code is also emailed; "" for none
+	email string
+	// the SS58 coldkey that will mint (gammaColdkeyArg); "" for none
+	coldkey string
+	// the longest the purchase stays open, when shorter than gamma.yml's
+	// intent_ttl; 0 for intent_ttl
+	maxTtl time.Duration
+}
+
+// gammaPurchaseStart is a purchase that passed the checks every purchase
+// shares: the deposit hotkey it is paid from, and the open purchase of the same
+// item to hand out again, if any.
+type gammaPurchaseStart struct {
+	view     *gammaView
+	purchase *gammaPurchase
+	hotkey   *model.GammaDepositHotkey
+	open     *model.GammaPaymentIntent
+	now      time.Time
+}
+
+// gammaStartPurchase applies the checks every purchase intent shares, after
+// the endpoint's own and its rate limit, to the caller's network: the deposit
+// hotkey (for a coldkey, one it can mint into); minting, which a deposit that
+// cannot already pay needs; the open purchase of the same item and delivery
+// account, from the same hotkey, which is handed out again rather than a
+// second intent the deposit would also pay; for a plan, no other Gamma plan
+// charge of the network in flight; and the open purchases' limit. The start,
+// to issue, or the refusal.
+func gammaStartPurchase(clientSession *session.ClientSession, view *gammaView, purchase *gammaPurchase) (*gammaPurchaseStart, *GammaPaymentIntentResult) {
+	ctx := clientSession.Ctx
+	networkId := clientSession.ByJwt.NetworkId
+	hotkey, err := gammaPickDepositHotkey(clientSession, view.settings, networkId, purchase.coldkey)
 	if err != nil {
 		if err == errGammaNoFreeHotkey {
-			return gammaIntentError(GammaErrorCodeDepositColdkeyMismatch, "Every deposit hotkey of this account belongs to another coldkey."), nil
+			return nil, gammaIntentError(GammaErrorCodeDepositColdkeyMismatch, "Every deposit hotkey of this account belongs to another coldkey.")
 		}
 		glog.Errorf("[gamma]could not assign a deposit hotkey: %s\n", err)
-		return gammaIntentError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
+		return nil, gammaIntentError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
 	}
 
 	now := gammaNow()
-	amount := model.UsdToNanoCents(priceUsd)
+	amount := model.UsdToNanoCents(purchase.priceUsd)
 	// with minting unavailable, only a deposit that already covers the price
 	// can pay
 	if view.mint != gammaReady && (hotkey.DepositSpendable == nil || *hotkey.DepositSpendable < amount) {
 		result := gammaIntentError(PurchaseErrorCodeAssetUnavailable, gammaMintUnavailableMessage(view.mint))
 		result.MintUnavailableReason = view.mint
-		return result, nil
+		return nil, result
 	}
 
 	var open *model.GammaPaymentIntent
-	if delivery == model.CryptoDeliveryAccount {
-		open = model.GetOpenGammaPaymentIntentForReuse(ctx, networkId, hotkey.Hotkey, item, delivery, now)
+	if purchase.delivery == model.CryptoDeliveryAccount {
+		open = model.GetOpenGammaPaymentIntentForReuse(ctx, networkId, hotkey.Hotkey, purchase.item, purchase.delivery, now)
 	}
-	if plan != "" {
+	if slices.Contains(gammaKnownPlans, purchase.item) {
 		// another Gamma plan charge of the network in flight (a renewal, a
 		// seat upgrade, another plan) cannot be voided: its spend may land.
 		// Asking again for the purchase being charged hands it back.
@@ -576,7 +658,7 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 		}
 		charging, paidSince := model.GetGammaPlanChargeState(ctx, networkId, gammaKnownPlans, exclude, since)
 		if charging {
-			return gammaIntentError(PurchaseErrorCodeAlreadySubscribed, gammaPlanChargingPurchaseMessage), nil
+			return nil, gammaIntentError(PurchaseErrorCodeAlreadySubscribed, gammaPlanChargingPurchaseMessage)
 		}
 		if paidSince {
 			// another plan was paid after the open one was made, so that one
@@ -584,37 +666,112 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 			open = nil
 		}
 	}
+	start := &gammaPurchaseStart{
+		view:     view,
+		purchase: purchase,
+		hotkey:   hotkey,
+		open:     open,
+		now:      now,
+	}
 	if open != nil {
-		token, tokenHash := cryptoNewStatusToken()
-		model.AddGammaPaymentIntentStatusToken(ctx, open.IntentId, tokenHash)
-		return gammaIntentResult(clientSession, view, open, hotkey, token, now), nil
+		return start, nil
 	}
 	if gammaMaxOpenIntentsPerNetwork <= model.CountOpenGammaPaymentIntents(ctx, networkId, now) {
-		return gammaIntentError(PurchaseErrorCodeRateLimited, "Too many open Gamma payments. Pay or let one expire first."), nil
+		return nil, gammaIntentError(PurchaseErrorCodeRateLimited, "Too many open Gamma payments. Pay or let one expire first.")
+	}
+	return start, nil
+}
+
+// gammaIssueStep is what a purchase does in the ReadCommitted transaction that
+// records its new intent, before the intent is recorded: what the intent pays
+// for, and what it replaces. It may refuse the purchase, before it writes
+// anything; an error rolls the transaction back. The biller charges an intent
+// from the moment it is committed, so the intent is committed only with what
+// the step wrote, and never without it.
+type gammaIssueStep func(tx server.PgTx, intent *model.GammaPaymentIntent) (refusal *GammaPaymentIntentResult, err error)
+
+// The step's writes must not outlive an intent that was not recorded.
+var errGammaIntentNotRecorded = errors.New("the intent was not recorded: its network is gone")
+
+// issue hands the purchase out: the open one again, with a new status token,
+// or a new intent, recorded in one ReadCommitted transaction with what step,
+// when set, writes (gammaIssueStep). The step's refusal is answered as it is.
+// start_failed when no intent could be recorded (the network is gone, or the
+// step failed).
+func (self *gammaPurchaseStart) issue(
+	clientSession *session.ClientSession,
+	step gammaIssueStep,
+) *GammaPaymentIntentResult {
+	ctx := clientSession.Ctx
+	if self.open != nil {
+		token, tokenHash := cryptoNewStatusToken()
+		model.AddGammaPaymentIntentStatusToken(ctx, self.open.IntentId, tokenHash)
+		return gammaIntentResult(clientSession, self.view, self.open, self.hotkey, token, self.now)
 	}
 
+	purchase := self.purchase
+	ttl := self.view.settings.IntentTtl
+	if 0 < purchase.maxTtl && purchase.maxTtl < ttl {
+		ttl = purchase.maxTtl
+	}
 	token, tokenHash := cryptoNewStatusToken()
 	intent := &model.GammaPaymentIntent{
 		IntentId:                 server.NewId(),
 		StatusTokenHash:          tokenHash,
-		NetworkId:                networkId,
-		Hotkey:                   hotkey.Hotkey,
+		NetworkId:                clientSession.ByJwt.NetworkId,
+		Hotkey:                   self.hotkey.Hotkey,
 		Purpose:                  model.GammaPurposePurchase,
 		Reference:                gammaNewReference(),
-		Delivery:                 delivery,
-		Item:                     item,
-		Tier:                     tierName,
-		OfferApplied:             offerApplied,
-		PriceUsdNanoCents:        amount,
-		RegularPriceUsdNanoCents: model.UsdToNanoCents(regularUsd),
-		Email:                    email,
-		CreateTime:               now,
-		ExpiresAt:                now.Add(settings.IntentTtl),
+		Delivery:                 purchase.delivery,
+		Item:                     purchase.item,
+		Tier:                     purchase.tier,
+		OfferApplied:             purchase.offerApplied,
+		PriceUsdNanoCents:        model.UsdToNanoCents(purchase.priceUsd),
+		RegularPriceUsdNanoCents: model.UsdToNanoCents(purchase.regularUsd),
+		Email:                    purchase.email,
+		CreateTime:               self.now,
+		ExpiresAt:                self.now.Add(ttl),
 	}
-	model.CreateGammaPaymentIntent(ctx, intent)
+	created := false
+	var refusal *GammaPaymentIntentResult
+	var createErr error
+	server.HandleError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			created = false
+			refusal = nil
+			if step != nil {
+				stepRefusal, err := step(tx, intent)
+				server.Raise(err)
+				if stepRefusal != nil {
+					// the step wrote nothing
+					refusal = stepRefusal
+					return
+				}
+			}
+			created = model.CreateGammaPaymentIntentInTx(tx, ctx, intent)
+			if !created && step != nil {
+				server.Raise(errGammaIntentNotRecorded)
+			}
+		}, server.TxReadCommitted)
+	}, func(err error) {
+		created = false
+		refusal = nil
+		createErr = err
+	})
+	if refusal != nil {
+		return refusal
+	}
+	if !created {
+		if createErr != nil {
+			glog.Errorf("[gamma]could not record a %s intent: %s\n", intent.Item, createErr)
+		} else {
+			glog.Errorf("[gamma]could not record a %s intent: its network is gone\n", intent.Item)
+		}
+		return gammaIntentError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+	}
 	gammaIntentsCreated.WithLabelValues(model.GammaPurposePurchase).Inc()
-	glog.Infof("[gamma]intent %s: %s, delivery %s, hotkey %s\n", intent.IntentId, item, delivery, hotkey.Hotkey)
-	return gammaIntentResult(clientSession, view, intent, hotkey, token, now), nil
+	glog.Infof("[gamma]intent %s: %s, delivery %s, hotkey %s\n", intent.IntentId, intent.Item, intent.Delivery, self.hotkey.Hotkey)
+	return gammaIntentResult(clientSession, self.view, intent, self.hotkey, token, self.now)
 }
 
 func gammaMintUnavailableMessage(reason string) string {

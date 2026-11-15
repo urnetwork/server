@@ -5,14 +5,16 @@ package model
 //
 // A gift order is one purchase of 1 to gift.max_quantity codes, each a year of
 // URnetwork Pro from its redemption. The order is created before payment
-// (pending), keyed to its Stripe Checkout session or crypto invoice, and
-// fulfilled once on payment (FulfillGiftOrderInTx): its codes are created, in
-// order, as transfer_balance_code rows of kind pro_gift, keyed by the purchase
-// event "<base>/gift/<n>" (base: the Stripe session id or "crypto/<intent
-// id>"), so the existing refund clawback, which matches a session's or an
-// invoice's id as a prefix, voids an order's unredeemed codes and ends its
-// redeemed ones' grants. Codes are numbered from 0; for delivery "them", code
-// n is recipient n's.
+// (pending), keyed to its Stripe Checkout session, crypto invoice or Pay with
+// Gamma intent, and fulfilled once on payment (FulfillGiftOrderInTx): its
+// codes are created, in order, as transfer_balance_code rows of kind pro_gift,
+// keyed by the purchase event "<base>/gift/<n>" (base: the Stripe session id,
+// "crypto/<intent id>" or "gamma/<intent id>"), so the existing refund
+// clawback, which matches a session's or an invoice's id as a prefix, voids an
+// order's unredeemed codes and ends its redeemed ones' grants. An order paid
+// with Gamma is final sale: Gamma cannot be refunded, so nothing refunds or
+// voids its codes (gift_refund_model.go). Codes are numbered from 0; for
+// delivery "them", code n is recipient n's.
 //
 // A code is redeemable until its redeem-by, gift.redeemable_for after the start
 // of the day it was bought (the code's end_time until it is redeemed, and the
@@ -39,7 +41,7 @@ import (
 const (
 	GiftOrderStatusPending, GiftOrderStatusPaid, GiftOrderStatusRefunded = "pending", "paid", "refunded"
 	GiftDeliveryMe, GiftDeliveryThem                                     = "me", "them"
-	GiftRailStripe, GiftRailCrypto                                       = "stripe", "crypto"
+	GiftRailStripe, GiftRailCrypto, GiftRailGamma                        = "stripe", "crypto", "gamma"
 	BalanceCodeKindData, BalanceCodeKindProGift                          = "data", "pro_gift"
 	// the renewal market of a redeemed gift. It carries its code's net
 	// revenue, so the year's traffic is paid (gift_redeem_model.go), and stays
@@ -100,9 +102,12 @@ type GiftOrder struct {
 	UnitPriceCents int64
 	TotalCents     int64
 	Rail           string
-	// set while pending (SetGiftOrderStripeSessionId, SetGiftOrderCryptoIntentId)
+	// set while pending (SetGiftOrderStripeSessionId, SetGiftOrderCryptoIntentId,
+	// SetGiftOrderGammaIntentIdInTx); a coin's invoice and a Gamma intent are
+	// unset again by the 30-day unlink
 	StripeSessionId string
 	CryptoIntentId  *server.Id
+	GammaIntentId   *server.Id
 	Delivery        string
 	BuyerEmail      string
 	// delivery "them": one address per gift, in code order
@@ -159,7 +164,7 @@ func CreateGiftOrder(ctx context.Context, order *GiftOrder) error {
 		return fmt.Errorf("gift order delivery %q is unknown", order.Delivery)
 	}
 	switch order.Rail {
-	case GiftRailStripe, GiftRailCrypto:
+	case GiftRailStripe, GiftRailCrypto, GiftRailGamma:
 	default:
 		return fmt.Errorf("gift order rail %q is unknown", order.Rail)
 	}
@@ -339,6 +344,39 @@ func SetGiftOrderCryptoIntentId(ctx context.Context, giftOrderId server.Id, inte
 	return setGiftOrderPaymentKey(ctx, giftOrderId, "crypto_intent_id", intentId)
 }
 
+// SetGiftOrderGammaIntentIdInTx keys a pending order of rail gamma to its Pay
+// with Gamma intent, whose credit fulfils it (GetGiftOrderIdForGammaIntent),
+// in the transaction that records the intent (controller.GiftGammaIntent): the
+// biller may charge an intent as soon as it is recorded, from a deposit that
+// already holds the price, so an intent is never recorded without its order.
+// An order that is not a pending gamma order without an intent is refused,
+// and the caller's transaction must not commit the intent.
+func SetGiftOrderGammaIntentIdInTx(tx server.PgTx, ctx context.Context, giftOrderId server.Id, intentId server.Id) error {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE gift_order
+			SET gamma_intent_id = $2
+			WHERE
+				gift_order_id = $1 AND
+				rail = $3 AND
+				status = $4 AND
+				gamma_intent_id IS NULL
+		`,
+		giftOrderId,
+		intentId,
+		GiftRailGamma,
+		GiftOrderStatusPending,
+	))
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	if giftOrderExistsInTx(tx, ctx, giftOrderId) {
+		return fmt.Errorf("gift order %s is not a pending gamma order without an intent", giftOrderId)
+	}
+	return ErrGiftOrderNotFound
+}
+
 // Sets the column (a source literal) while the order is pending, or leaves it
 // when it already holds the value.
 func setGiftOrderPaymentKey(ctx context.Context, giftOrderId server.Id, column string, value any) (returnErr error) {
@@ -406,6 +444,7 @@ func getGiftOrder(ctx context.Context, query server.PgCanQuery, giftOrderId serv
 				rail,
 				COALESCE(stripe_session_id, ''),
 				crypto_intent_id,
+				gamma_intent_id,
 				delivery,
 				buyer_email,
 				send_on,
@@ -446,6 +485,7 @@ func getGiftOrder(ctx context.Context, query server.PgCanQuery, giftOrderId serv
 				&order.Rail,
 				&order.StripeSessionId,
 				&order.CryptoIntentId,
+				&order.GammaIntentId,
 				&order.Delivery,
 				&order.BuyerEmail,
 				&order.SendOn,
@@ -529,6 +569,12 @@ func GetGiftOrderIdForCryptoIntent(ctx context.Context, intentId server.Id) *ser
 	return getGiftOrderIdFor(ctx, "crypto_intent_id", intentId)
 }
 
+// GetGiftOrderIdForGammaIntent is the order keyed to the Pay with Gamma
+// intent, nil when none is.
+func GetGiftOrderIdForGammaIntent(ctx context.Context, intentId server.Id) *server.Id {
+	return getGiftOrderIdFor(ctx, "gamma_intent_id", intentId)
+}
+
 // The order whose column (a source literal) holds value.
 func getGiftOrderIdFor(ctx context.Context, column string, value any) (giftOrderId *server.Id) {
 	server.Db(ctx, func(conn server.PgConn) {
@@ -560,17 +606,20 @@ type giftOrderFulfilment struct {
 	purchaseEventBase *string
 	stripeSessionId   *string
 	cryptoIntentId    *server.Id
+	gammaIntentId     *server.Id
 }
 
-// Whether base keys the order's codes where its refund looks for them: the
-// order's Stripe session, or "crypto/<intent>" of its invoice
-// (CryptoPaymentPurchaseEventId), when the order holds either.
+// Whether base keys the order's codes where its payment's own records find
+// them: the order's Stripe session, "crypto/<intent>" of its invoice
+// (CryptoPaymentPurchaseEventId), or "gamma/<intent>" of its Pay with Gamma
+// intent (GammaPaymentPurchaseEventId), when the order holds one.
 func (self *giftOrderFulfilment) keysPurchaseEvent(base string) bool {
-	if self.stripeSessionId == nil && self.cryptoIntentId == nil {
+	if self.stripeSessionId == nil && self.cryptoIntentId == nil && self.gammaIntentId == nil {
 		return true
 	}
 	return (self.stripeSessionId != nil && *self.stripeSessionId == base) ||
-		(self.cryptoIntentId != nil && CryptoPaymentPurchaseEventId(*self.cryptoIntentId) == base)
+		(self.cryptoIntentId != nil && CryptoPaymentPurchaseEventId(*self.cryptoIntentId) == base) ||
+		(self.gammaIntentId != nil && GammaPaymentPurchaseEventId(*self.gammaIntentId) == base)
 }
 
 // FulfillGiftOrderInTx fulfils a paid order, in the caller's transaction: it
@@ -586,10 +635,12 @@ func (self *giftOrderFulfilment) keysPurchaseEvent(base string) bool {
 // existing code-creation path (CreateBalanceCodeInTx), so UNIQUE
 // (purchase_event_id) holds for them like every code.
 //
-// purchaseEventBase is the order's Stripe session id, or
-// CryptoPaymentPurchaseEventId of its invoice: the scope its refund claws back
-// (ClawbackBalanceCodesForPurchaseEventInTx). A base that is neither, for an
-// order keyed to a session or an invoice, is refused.
+// purchaseEventBase is the order's Stripe session id,
+// CryptoPaymentPurchaseEventId of its invoice, or GammaPaymentPurchaseEventId
+// of its Gamma intent: the scope its refund claws back
+// (ClawbackBalanceCodesForPurchaseEventInTx; a Gamma order is never refunded).
+// A base that is none of them, for an order keyed to a session, an invoice or
+// an intent, is refused.
 //
 // An error before anything is written (no such order, a refunded order, an
 // order paid for another purchase event, no gift config) is returned; the
@@ -627,7 +678,8 @@ func FulfillGiftOrderInTx(
 				referrer_network_id,
 				purchase_event_base,
 				stripe_session_id,
-				crypto_intent_id
+				crypto_intent_id,
+				gamma_intent_id
 			FROM gift_order
 			WHERE gift_order_id = $1
 			FOR UPDATE
@@ -650,6 +702,7 @@ func FulfillGiftOrderInTx(
 				&order.purchaseEventBase,
 				&order.stripeSessionId,
 				&order.cryptoIntentId,
+				&order.gammaIntentId,
 			))
 		}
 	})
@@ -722,10 +775,13 @@ func FulfillGiftOrderInTx(
 			string(purchaseRecord),
 			order.buyerEmail,
 		)
-		// past the first write: never commit part of an order
+		// past the first write: never commit part of an order. A raised error
+		// never names the order: a coin's or Gamma's credit logs it beside its
+		// payment's id, and the 30-day unlink forgets which order a payment
+		// paid for
 		server.Raise(createErr)
 		if !created {
-			server.Raise(fmt.Errorf("gift order %s code %d: purchase event %s already has a code", giftOrderId, n, balanceCode.PurchaseEventId))
+			server.Raise(fmt.Errorf("gift code %d: purchase event %s already has a code", n, balanceCode.PurchaseEventId))
 		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -766,7 +822,7 @@ func FulfillGiftOrderInTx(
 				balanceCode.BalanceCodeId,
 			))
 			if recipientTag.RowsAffected() != 1 {
-				server.Raise(fmt.Errorf("gift order %s has no recipient %d", giftOrderId, n))
+				server.Raise(fmt.Errorf("the gift order has no recipient %d", n))
 			}
 			recipientIndex := n
 			code.RecipientIndex = &recipientIndex
@@ -1028,10 +1084,12 @@ func RemoveGiftOrderPersonalData(ctx context.Context, giftOrderId server.Id) {
 // RemoveGiftOrderBuyerEmail blanks the buyer's address of an order that was
 // never paid and that nothing can need again: one paid by card still pending
 // (a Stripe Checkout session expires within a day, so it can never be paid),
-// or one of either rail refunded before it was ever paid. Retention, 30 days
+// or one of any rail refunded before it was ever paid. Retention, 30 days
 // after the order was made or refunded, beside RemoveGiftOrderPersonalData. An
-// order once paid (refunded since or not) and a pending crypto order (a late
-// coin payment can still go to review) keep theirs.
+// order once paid (refunded since or not), a pending crypto order (a late coin
+// payment can still go to review) and a pending Gamma order (a charge sent
+// before its intent expired can still land) keep theirs until the 30-day
+// unlink passes them (ClearUnlinkedGiftOrderBuyerEmail).
 func RemoveGiftOrderBuyerEmail(ctx context.Context, giftOrderId server.Id) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(

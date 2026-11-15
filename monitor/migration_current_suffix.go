@@ -1026,6 +1026,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the operator blocks the daily points award recorded expired, versioned
 	// by its position
 	[]snMainnetMigrationContract{operatorBlockPointsExpiredMigrationContract},
+	// the Pay with Gamma intent that pays a gift order, versioned by its
+	// position
+	[]snMainnetMigrationContract{giftGammaSchemaMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

@@ -21,6 +21,11 @@ package controller
 // delivery (GiftCardFriendTemplate). When the code comes back (a won dispute,
 // or a crypto payment credited again), that email is owed again under a new
 // key (giftReoweFriendEmailsInTx).
+//
+// An order paid with Gamma is final sale (the owner, 2026-11-14): it has no
+// card charge, so no refund or dispute should ever name it, and one that did
+// voids nothing, ends nothing and is recorded for an operator
+// (gift_final_sale), never applied as a refund (model.ErrGiftOrderFinalSale).
 
 import (
 	"context"
@@ -63,6 +68,13 @@ func stripeGiftRefundInTx(
 	now time.Time,
 ) string {
 	details["gift_order"] = giftOrderId.String()
+	if model.GiftOrderFinalSaleInTx(tx, ctx, giftOrderId) {
+		// paid with Gamma: final sale, and there is no card charge to refund
+		// or dispute. Nothing is voided; an operator looks.
+		details["reason"] = giftFinalSaleReason
+		glog.Errorf("[gift]%s %s names gift order %s, which was paid with Gamma: final sale, nothing is voided\n", action, refundId, giftOrderId)
+		return model.PaymentReconcileActionRefundUnmatched
+	}
 	if action == model.PaymentReconcileActionDisputed {
 		voided := model.DisputeGiftOrderCodesInTx(tx, ctx, giftOrderId, refundId, now)
 		details["voided_codes"] = len(voided)
@@ -71,6 +83,10 @@ func stripeGiftRefundInTx(
 	outcome := model.RefundGiftOrderCodesInTx(tx, ctx, giftOrderId, refundId, int64(amount), now)
 	if outcome == nil {
 		details["reason"] = "gift_order_not_found"
+		return model.PaymentReconcileActionRefundUnmatched
+	}
+	if outcome.FinalSale {
+		details["reason"] = giftFinalSaleReason
 		return model.PaymentReconcileActionRefundUnmatched
 	}
 	details["voided_codes"] = len(outcome.VoidedCodeIds)
@@ -138,7 +154,20 @@ func stripeHandleGiftDisputeClosed(
 			"status":     dispute.Status,
 			"gift_order": giftOrderId.String(),
 		}
-		if won {
+		eventAction := action
+		if model.GiftOrderFinalSaleInTx(tx, ctx, giftOrderId) {
+			// paid with Gamma: final sale, with no card charge to dispute.
+			// Nothing is restored or ended; an operator looks.
+			details["reason"] = giftFinalSaleReason
+			glog.Errorf("[gift]dispute %s closed %s names gift order %s, which was paid with Gamma: final sale, nothing changes\n", dispute.Id, dispute.Status, giftOrderId)
+			eventAction = model.PaymentReconcileActionRefundUnmatched
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE stripe_refund SET action = $2 WHERE refund_id = $1`,
+				ledgerId,
+				eventAction,
+			))
+		} else if won {
 			if restoration := model.WinGiftOrderDisputeInTx(tx, ctx, giftOrderId, dispute.Id); restoration != nil {
 				restoredCodes, restoredYears := giftRestorationCounts(restoration)
 				details["restored_codes"] = restoredCodes
@@ -157,7 +186,7 @@ func stripeHandleGiftDisputeClosed(
 		server.Raise(model.AddPaymentReconciliationEventInTx(tx, ctx, &model.PaymentReconciliationEvent{
 			RunId:    server.NewId(),
 			Store:    model.SubscriptionMarketStripe,
-			Action:   action,
+			Action:   eventAction,
 			Evidence: dispute.Id,
 			Details:  details,
 		}))
@@ -171,6 +200,10 @@ func stripeHandleGiftDisputeClosed(
 	}
 	return &StripeWebhookResult{}, nil
 }
+
+// The reason a refund or dispute event records when it names a gift order
+// paid with Gamma, which is final sale: nothing was voided or ended.
+const giftFinalSaleReason = "gift_final_sale"
 
 // The unredeemed codes a restoration made good again, and the redeemed codes'
 // years it put back.
