@@ -65,9 +65,11 @@ Options:
 	if err != nil {
 		panic(err)
 	}
-	// §21's effects for the owed actions the abuse pass finishes
-	// (ABUSE-M5-06); a binary that does not link MG5 installs none
+	// §21's effects and sealed off-site records for the owed actions the
+	// abuse pass finishes (ABUSE-M5-06, QD-726); a binary that does not link
+	// MG5 installs neither
 	controller.InstallAbuseEffects()
+	controller.InstallAbuseRecordMailer()
 	if err := taskworker.Run(ctx, taskworker.RunOptions{Port: port, Count: count, BatchSize: batchSize}); err != nil {
 		panic(err)
 	}

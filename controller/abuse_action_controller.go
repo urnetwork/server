@@ -24,10 +24,11 @@ package controller
 // server originates only denials (I-4). Logs and metrics carry no network id
 // and no target.
 //
-// The process installs its effects (InstallAbuseEffects, abuse_effects.go) and
-// its record mailer at startup. Until then every effect and mail refuses, each
-// action stays owed with applied_time or mailed_time NULL, and the pass keeps
-// retrying: nothing reads as applied or mailed that was not.
+// api and taskworker install the effects (InstallAbuseEffects, abuse_effects.go)
+// and the record mailer (InstallAbuseRecordMailer, abuse_record_mail.go) at
+// startup. Until then, and in every other process, each effect and mail
+// refuses, each action stays owed with applied_time or mailed_time NULL, and
+// the pass keeps retrying: nothing reads as applied or mailed that was not.
 
 import (
 	"context"
@@ -54,8 +55,11 @@ const (
 	AbuseActionStepMailAfter    = "abuse.mail.after"
 )
 
-// The minimum time between two default-level reports of a failed effect or mail.
-const abuseActionReportInterval = 1 * time.Minute
+// The least time between two default-level reports of a failed effect, mail,
+// hint or intake action: AbuseSettings' ActionReportInterval, read once for the
+// process's report limiters here, in abuse_effects.go and in
+// abuse_intake_controller.go.
+var abuseActionReportInterval = model.DefaultAbuseSettings().ActionReportInterval
 
 // One action's effect, as the effects take it.
 type AbuseEffect struct {
@@ -97,7 +101,7 @@ var abuseActionDeps = struct {
 	hook      func(step string, actionId server.Id)
 }{
 	effects: &unavailableAbuseEffects{},
-	mailer:  &sesAbuseRecordMailer{},
+	mailer:  &unavailableAbuseRecordMailer{},
 }
 
 // The effects, mailer and hook in force now.

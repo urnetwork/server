@@ -148,6 +148,7 @@ var abuseSchemaColumnWords = map[string]string{
 	"abuse_action.until_time":    "actions",
 	"abuse_action.by_machine":    "actions",
 	"abuse_action.review_state":  "reviewers' reasons",
+	"abuse_action.reviewer_id":   "a reviewer id",
 	"abuse_action.review_reason": "reviewers' reasons",
 	"abuse_action.review_time":   "reviewers' reasons",
 	"abuse_action.applied_time":  "actions",
@@ -161,6 +162,7 @@ var abuseSchemaColumnWords = map[string]string{
 	"abuse_appeal.reason":          "appeals",
 	"abuse_appeal.state":           "appeals",
 	"abuse_appeal.decision_reason": "reviewers' reasons",
+	"abuse_appeal.reviewer_id":     "a reviewer id",
 	"abuse_appeal.create_time":     "appeals",
 	"abuse_appeal.decide_time":     "appeals",
 
@@ -176,11 +178,13 @@ var abuseSchemaColumnWords = map[string]string{
 	"abuse_legal_hold.scope":       "scope",
 	"abuse_legal_hold.expire_time": "expiry",
 	"abuse_legal_hold.copied_rows": "copied_rows",
+	"abuse_legal_hold.part":        "keyed by network, case and part",
 
 	"abuse_access_log.log_id":      "every abuse-role read",
 	"abuse_access_log.lookup_kind": "every abuse-role read",
 	"abuse_access_log.case_id":     "every abuse-role read",
 	"abuse_access_log.access_time": "every abuse-role read",
+	"abuse_access_log.reviewer_id": "a reviewer id",
 
 	"legal_request.request_id":       "legal requests",
 	"legal_request.case_id":          "legal requests",
@@ -198,14 +202,10 @@ var abuseSchemaColumnWords = map[string]string{
 // The columns whose words wait on a records pass, by the decided entry that
 // gives them.
 var abuseSchemaPendingColumns = map[string]abuseSchemaPendingWords{
-	"abuse_legal_hold.part":        {words: "part", resolution: "plan-ABUSE-metadata-rows #2 and #3 (QD-058, QD-457)"},
 	"abuse_legal_hold.place_time":  {words: "place_time", resolution: "plan-ABUSE-metadata-rows #2 (QD-058)"},
 	"abuse_legal_hold.report_time": {words: "report_time", resolution: "plan-ABUSE-metadata-rows #2 (QD-058)"},
 	"abuse_legal_hold.renew_time":  {words: "renew_time", resolution: "plan-ABUSE-metadata-rows #2 (QD-058)"},
 	"abuse_legal_hold.copy_state":  {words: "copy_state", resolution: "plan-ABUSE-metadata-rows #2 (QD-058)"},
-	"abuse_action.reviewer_id":     {words: "a reviewer id", resolution: "plan-ABUSE-metadata-rows #6 (QD-054)"},
-	"abuse_appeal.reviewer_id":     {words: "a reviewer id", resolution: "plan-ABUSE-metadata-rows #6 (QD-054)"},
-	"abuse_access_log.reviewer_id": {words: "a reviewer id", resolution: "plan-ABUSE-metadata-rows #6 (QD-054)"},
 	"legal_request.legal_signoff_id": {
 		words:      "sign-off",
 		resolution: "abuse-m5-03-signoff-ids, beside plan-ABUSE-metadata-rows #6",
