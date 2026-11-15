@@ -4,7 +4,8 @@ package api
 
 // §7.6's SCIM bearer through api's route set (QD-828), on Postgres with MG6: the team's Owner issues it with POST
 // /network/scim-token and SCIM, behind the source api's route set installs, accepts it; a second issue retires the
-// first; remove turns SCIM off; the role gate refuses every other role; and no answer or log line holds a bearer.
+// first; remove turns SCIM off; the route's class refuses a client token and the role gate every other role; and no
+// answer or log line holds a bearer.
 
 import (
 	"context"
@@ -25,6 +26,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/scim"
+	"github.com/urnetwork/server/session"
 )
 
 // One request through handler with a JSON body and an Authorization header.
@@ -42,9 +44,10 @@ func serveScimTokenRoute(handler http.Handler, method string, path string, autho
 
 // A team on the team tier, as QUOTA-M6-01's period writes its grant, issues its SCIM bearer as its Owner through api's
 // routes; SCIM accepts it at its base URL from a router built after the source was removed, since the route set
-// installs it, and answers 401, never 503, to a bearer the team does not hold; an Admin is refused by the role gate; a
-// second issue retires the first; remove turns SCIM off. At the router's most verbose level no answer and no log line
-// holds a bearer.
+// installs it, and answers 401, never 503, to a bearer the team does not hold; the Owner's client token is refused by
+// the route's class, issue and removal alike, and an Admin by the role gate, neither changing the bearer; a second
+// issue retires the first; remove turns SCIM off. At the router's most verbose level no answer and no log line holds a
+// bearer.
 func TestScimTokenThroughTheApiRoutes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -79,7 +82,7 @@ func TestScimTokenThroughTheApiRoutes(t *testing.T) {
 				string(model.NetworkTierTeam),
 			))
 		})
-		memberToken := func(role model.NetworkMemberRole) string {
+		memberByJwt := func(role model.NetworkMemberRole) *session.ByJwt {
 			userId := server.NewId()
 			model.Testing_CreateNetwork(ctx, server.NewId(), "member-"+userId.String(), userId)
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -90,10 +93,13 @@ func TestScimTokenThroughTheApiRoutes(t *testing.T) {
 			if signIn == nil || signIn.MemberId == nil {
 				t.Fatalf("no sign-in for the %s", role)
 			}
-			return "Bearer " + model.NewNetworkSignInByJwt(signIn, false).Testing_Sign()
+			return model.NewNetworkSignInByJwt(signIn, false)
 		}
-		ownerToken := memberToken(model.NetworkMemberRoleOwner)
-		adminToken := memberToken(model.NetworkMemberRoleAdmin)
+		ownerByJwt := memberByJwt(model.NetworkMemberRoleOwner)
+		ownerToken := "Bearer " + ownerByJwt.Testing_Sign()
+		// a client of the Owner's sign-in, which carries the Owner's role but names a client
+		ownerClientToken := "Bearer " + ownerByJwt.Client(server.NewId(), server.NewId()).Testing_Sign()
+		adminToken := "Bearer " + memberByJwt(model.NetworkMemberRoleAdmin).Testing_Sign()
 
 		previousVerbosity := flag.Lookup("v").Value.String()
 		flag.Set("v", "2")
@@ -165,11 +171,17 @@ func TestScimTokenThroughTheApiRoutes(t *testing.T) {
 			t.Fatalf("SCIM with another bearer: %d %s", w.Code, w.Body.String())
 		}
 
+		for _, body := range []string{`{}`, `{"remove":true}`} {
+			w := serve(http.MethodPost, "/network/scim-token", ownerClientToken, body)
+			if w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.ClientCredentialRefusedMessage {
+				t.Fatalf("the Owner's client token with %s: %d %s", body, w.Code, w.Body.String())
+			}
+		}
 		if _, w := issue(adminToken); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), router.RolePermissionRefusedMessage) {
 			t.Fatalf("an Admin's issue: %d %s", w.Code, w.Body.String())
 		}
 		if w := serve(http.MethodGet, scimPath+"/Users", "Bearer "+first.ScimBearer, ""); w.Code != http.StatusOK {
-			t.Fatalf("the Admin's refusal changed the bearer: %d %s", w.Code, w.Body.String())
+			t.Fatalf("a refusal changed the bearer: %d %s", w.Code, w.Body.String())
 		}
 
 		second, w := issue(ownerToken)
