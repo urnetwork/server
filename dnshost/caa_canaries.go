@@ -18,6 +18,7 @@ var _ dnsservice.DnsCaaCanaryWriter = (*CaaCanaries)(nil)
 // The writer. It holds nothing.
 type CaaCanaries struct{}
 
+// The writer over model.
 func NewCaaCanaries() *CaaCanaries {
 	return &CaaCanaries{}
 }

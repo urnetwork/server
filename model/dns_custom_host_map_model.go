@@ -47,6 +47,7 @@ type DnsCustomHostMapModelSettings struct {
 	VersionRetention time.Duration
 }
 
+// §12.14's 7 days.
 func DefaultDnsCustomHostMapModelSettings() *DnsCustomHostMapModelSettings {
 	return &DnsCustomHostMapModelSettings{
 		VersionRetention: 7 * 24 * time.Hour,
@@ -211,6 +212,7 @@ type dnsMapHostProbesJson struct {
 
 const dnsMapAppliedColumns = `interface_name, reported_version, digest, nginx_master, poll_time, probe_version, probe_time, host_probes`
 
+// One applied row as dnsservice reads it.
 func scanDnsMapInterface(result server.PgResult) *dnsservice.DnsMapInterface {
 	lbInterface := &dnsservice.DnsMapInterface{HostProbes: map[string]bool{}}
 	var reportedVersion int64
@@ -487,6 +489,7 @@ func DnsCustomHostReadiness(ctx context.Context, root string, networkId server.I
 	return rows, nil
 }
 
+// DnsCustomHostReadiness in query's transaction, judged at now.
 func getDnsCustomHostReadinessInTx(ctx context.Context, query server.PgCanQuery, root string, networkId server.Id, now time.Time) []*DnsCustomHostReadinessRow {
 	rows := []*DnsCustomHostReadinessRow{}
 	var judgment *dnsservice.DnsMapJudgment
