@@ -11,6 +11,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/oauth"
 )
 
 func main() {
@@ -55,6 +56,10 @@ Options:
 	// routes, and the hard deny its control route's CreateContract reads
 	// (ABUSE-M5-07)
 	controller.InstallAbuseStanding(ctx)
+	// RFC 8628's device grant for ur-cli: device authorizations wait in
+	// Redis (QD-830), so POST /oauth/device_authorization serves and the
+	// issuer's metadata names it
+	oauth.InstallDeviceAuthorizationStore()
 	if err := api.Run(ctx, api.RunOptions{Port: port}); err != nil {
 		panic(err)
 	}
