@@ -107,7 +107,7 @@ func TestCommandHostStatsMapsEachHostsPathsToDrives(t *testing.T) {
 	if commands[0] != `ssh store-1.example filecluster-bench hoststats '/srv/file-cluster/meta-1/d1' '/srv/file-cluster/meta-1/it'\''s'` {
 		t.Fatalf("command %q", commands[0])
 	}
-	if len(stats) != 3 || stats["0-0-0"].XfsLogByteCount != 1000 || stats["0-0-1"].Smart.DataUnitsWritten != 5 || stats["0-0-2"] == nil || stats["0-0-3"] != nil {
+	if len(stats) != 3 || *stats["0-0-0"].XfsLogByteCount != 1000 || stats["0-0-1"].Smart.DataUnitsWritten != 5 || stats["0-0-2"] == nil || stats["0-0-3"] != nil {
 		t.Fatalf("stats %v", stats)
 	}
 }

@@ -63,6 +63,9 @@ type EngineMixSettings struct {
 	TokenLife time.Duration
 	// The balance each network holds, so quota never refuses: 1 TiB of credit.
 	NetworkBalance int64
+	// How long before the run the upload receipts' one key was issued, so it is current throughout: 48 h, its
+	// previous key's keep (§11.13's keys row).
+	ReceiptKeyAge time.Duration
 }
 
 func DefaultEngineMixSettings() *EngineMixSettings {
@@ -76,6 +79,7 @@ func DefaultEngineMixSettings() *EngineMixSettings {
 		EvacuationInterval: time.Hour,
 		TokenLife:          15 * time.Minute,
 		NetworkBalance:     1024 * 1024 * 1024 * 1024,
+		ReceiptKeyAge:      48 * time.Hour,
 	}
 }
 
@@ -176,7 +180,7 @@ func newEngineMixTarget(
 	target.engine.InstanceFormat = sidecar.EvsRepoFormat1
 	receiptKey := sha256.Sum256([]byte("filecluster-bench receipt key"))
 	receiptKeys, err := evsservice.NewReceiptKeys([]*evsservice.ReceiptKey{
-		{KeyId: 1, Key: receiptKey[:], IssueFrom: clock.Now().Add(-48 * time.Hour)},
+		{KeyId: 1, Key: receiptKey[:], IssueFrom: clock.Now().Add(-settings.ReceiptKeyAge)},
 	}, nil)
 	if err != nil {
 		return nil, err

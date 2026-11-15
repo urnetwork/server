@@ -350,10 +350,11 @@ func classifyPushError(err error) string {
 	return "other"
 }
 
-// Records per batch on cluster over the minutes [from, to), from up to sampleCount batches spread over them.
+// Records per batch on cluster over the minutes from's through to's, from up to sampleCount batches spread over them:
+// a window inside one minute samples that minute.
 func sampleRecordsPerBatch(ctx context.Context, cluster sidecar.BlobCluster, from time.Time, to time.Time, sampleCount int, listLimit int, maxBatchByteCount int64) (float64, int, error) {
 	minutes := []uint32{}
-	for minute := evsservice.BatchMinute(from); minute < evsservice.BatchMinute(to); minute += 1 {
+	for minute := evsservice.BatchMinute(from); minute <= evsservice.BatchMinute(to); minute += 1 {
 		minutes = append(minutes, minute)
 	}
 	if len(minutes) == 0 {
