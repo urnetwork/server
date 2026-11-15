@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -39,7 +40,10 @@ type HostStatsDrive struct {
 	XfsLogByteCount  *uint64     `json:"xfs_log_byte_count,omitempty"`
 	XfsFileByteCount *uint64     `json:"xfs_file_byte_count,omitempty"`
 	Smart            *DriveSmart `json:"smart,omitempty"`
-	Errors           []string    `json:"errors,omitempty"`
+	// What the drive's .minio.sys/tmp/.trash holds, bytes and inodes: the trash row's.
+	TrashByteCount  *uint64  `json:"trash_byte_count,omitempty"`
+	TrashInodeCount *uint64  `json:"trash_inode_count,omitempty"`
+	Errors          []string `json:"errors,omitempty"`
 }
 
 // A host's answer.
@@ -107,8 +111,44 @@ func (self *hostStatsSource) read(ctx context.Context, paths []string) *HostStat
 		} else {
 			drive.Smart = smart
 		}
+		if byteCount, inodeCount, err := self.trash(path); err != nil {
+			drive.Errors = append(drive.Errors, err.Error())
+		} else {
+			drive.TrashByteCount = &byteCount
+			drive.TrashInodeCount = &inodeCount
+		}
 	}
 	return answer
+}
+
+// The bytes and inodes under a drive's .minio.sys/tmp/.trash, where MinIO moves what an overwrite or delete replaced
+// until its sweep removes it. A drive with none holds nothing there.
+func (self *hostStatsSource) trash(path string) (uint64, uint64, error) {
+	var byteCount, inodeCount uint64
+	directory := filepath.Join(self.root, path, ".minio.sys", "tmp", ".trash")
+	err := filepath.WalkDir(directory, func(entryPath string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			// a sweep removes entries while the walk reads them
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if entryPath == directory {
+			return nil
+		}
+		inodeCount += 1
+		if entry.Type().IsRegular() {
+			if info, err := entry.Info(); err == nil {
+				byteCount += uint64(info.Size())
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return 0, 0, err
+	}
+	return byteCount, inodeCount, nil
 }
 
 // Each mountpoint's device, from mountinfo: the source after the separator, symlinks resolved to the kernel name.
@@ -326,10 +366,16 @@ func (self *commandHostStats) ReadHostStats(ctx context.Context, clusterId strin
 		}
 		for _, drive := range answer.Drives {
 			driveId, ok := pathDriveIds[host+"\x00"+drive.Path]
-			if !ok || drive.XfsLogByteCount == nil || drive.XfsFileByteCount == nil {
+			if !ok {
 				continue
 			}
-			stats[driveId] = &DriveHostStats{XfsLogByteCount: *drive.XfsLogByteCount, XfsFileByteCount: *drive.XfsFileByteCount, Smart: drive.Smart}
+			stats[driveId] = &DriveHostStats{
+				XfsLogByteCount:  drive.XfsLogByteCount,
+				XfsFileByteCount: drive.XfsFileByteCount,
+				Smart:            drive.Smart,
+				TrashByteCount:   drive.TrashByteCount,
+				TrashInodeCount:  drive.TrashInodeCount,
+			}
 		}
 	}
 	if len(stats) == 0 && 0 < len(errs) {

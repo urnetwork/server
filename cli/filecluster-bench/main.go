@@ -51,7 +51,7 @@ import (
 )
 
 // A usage error: exit 2.
-var errUsage = errors.New("usage: filecluster-bench fs116|ops|mix|report|hoststats [flags]")
+var errUsage = errors.New("usage: filecluster-bench fs116|ops|mix|report|hdd|hosts|trash|verdict|hoststats [flags]")
 
 // A run that could not start: exit 2.
 type startError struct {
@@ -74,6 +74,10 @@ func benchModes() map[string]benchMode {
 		"ops":       runOpsMode,
 		"mix":       runMixMode,
 		"report":    runReportMode,
+		"hdd":       runHddMode,
+		"hosts":     runHostsMode,
+		"trash":     runTrashMode,
+		"verdict":   runVerdictMode,
 		"hoststats": runHostStatsMode,
 	}
 }
@@ -302,6 +306,63 @@ func (self *runFlags) header(ctx context.Context, mode string, clusters *server.
 		return nil, err
 	}
 	return measurement, nil
+}
+
+// An hdd, hosts or trash file's header: the build when -monoroot names one, which a run that is not a smoke must.
+func (self *runFlags) rowHeader(ctx context.Context, header *RowHeader, mode string, clusters *server.FileClusters, clusterId string, settings map[string]string) error {
+	host, _ := os.Hostname()
+	*header = RowHeader{Mode: mode, Label: self.label, Host: host, Smoke: self.smoke, Settings: settings, ClusterId: clusterId, CommitSet: map[string]string{}}
+	if self.smoke {
+		header.Notes = append(header.Notes, "run with -smoke: no evidence")
+	}
+	if clusterId != "" {
+		if info, err := clusters.ReadAdminInfo(ctx, clusterId); err == nil {
+			builds := []string{}
+			for _, host := range info.Hosts {
+				if !slices.Contains(builds, host.CommitId) {
+					builds = append(builds, host.CommitId)
+				}
+			}
+			sort.Strings(builds)
+			header.Settings["minio_build"] = strings.Join(builds, ",")
+		}
+	}
+	if self.monoroot == "" {
+		if !self.smoke {
+			return refuseStart("a run that is not a smoke needs -monoroot, so its build is named")
+		}
+		header.Notes = append(header.Notes, "no -monoroot: the build is not named")
+		return nil
+	}
+	commitSet, err := load.ReadCommitSet(self.monoroot, benchRepos...)
+	if err != nil {
+		return refuseStart("%v", err)
+	}
+	header.CommitSet = commitSet
+	return nil
+}
+
+// Writes an hdd, hosts or trash file to -out, or stdout.
+func writeRowFile(outPath string, stdout io.Writer, measurement any) error {
+	data, err := json.MarshalIndent(measurement, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if outPath == "" {
+		_, err := stdout.Write(data)
+		return err
+	}
+	return os.WriteFile(outPath, data, 0o644)
+}
+
+// An hdd, hosts or trash file into measurement, strict when asked: a field the shape lacks refuses it.
+func parseRowFile(data []byte, measurement any, strict bool) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if strict {
+		decoder.DisallowUnknownFields()
+	}
+	return decoder.Decode(measurement)
 }
 
 // Writes a measurement to -out, or stdout.

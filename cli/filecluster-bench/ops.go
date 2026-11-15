@@ -82,11 +82,14 @@ type HostStatsReader interface {
 	ReadHostStats(ctx context.Context, clusterId string) (map[string]*DriveHostStats, error)
 }
 
-// One drive's host stats at one reading.
+// One drive's host stats at one reading, each nil where the host could not read it.
 type DriveHostStats struct {
-	XfsLogByteCount  uint64
-	XfsFileByteCount uint64
+	XfsLogByteCount  *uint64
+	XfsFileByteCount *uint64
 	Smart            *DriveSmart
+	// What its .minio.sys/tmp/.trash holds: the trash row's.
+	TrashByteCount  *uint64
+	TrashInodeCount *uint64
 }
 
 // What a run measures against.
@@ -181,13 +184,14 @@ func driveDeltas(before *driveReading, after *driveReading) []*DriveDelta {
 		delta.ReadsCompleted = drive.ReadsCompleted - previous.ReadsCompleted
 		delta.Missing = false
 		if before.hostStats != nil && after.hostStats != nil {
-			if start, ok := before.hostStats[drive.DriveId]; ok {
-				if end, ok := after.hostStats[drive.DriveId]; ok && start.XfsLogByteCount <= end.XfsLogByteCount && start.XfsFileByteCount <= end.XfsFileByteCount {
-					logByteCount := end.XfsLogByteCount - start.XfsLogByteCount
-					fileByteCount := end.XfsFileByteCount - start.XfsFileByteCount
-					delta.XfsLogByteCount = &logByteCount
-					delta.XfsFileByteCount = &fileByteCount
-				}
+			start, startOk := before.hostStats[drive.DriveId]
+			end, endOk := after.hostStats[drive.DriveId]
+			if startOk && endOk && start.XfsLogByteCount != nil && start.XfsFileByteCount != nil && end.XfsLogByteCount != nil && end.XfsFileByteCount != nil &&
+				*start.XfsLogByteCount <= *end.XfsLogByteCount && *start.XfsFileByteCount <= *end.XfsFileByteCount {
+				logByteCount := *end.XfsLogByteCount - *start.XfsLogByteCount
+				fileByteCount := *end.XfsFileByteCount - *start.XfsFileByteCount
+				delta.XfsLogByteCount = &logByteCount
+				delta.XfsFileByteCount = &fileByteCount
 			}
 		}
 	}
