@@ -278,18 +278,23 @@ func runWithDependencies(
 // the routes stay served until the close joins its leases.
 //
 // The stuck provider reports keep their code ceiling off here, as alt needs;
-// the api service's own router allows them (newApiRouter).
+// the api service's own router turns them on (newApiRouter).
 func NewRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
 	return newRouterWithStuckProviderSignals(routeCtx, uploadCtx, controller.DefaultStuckProviderSignalSettings())
 }
 
-// The api service's router: NewRouter with stuck provider reports allowed, for
-// the Redis control to choose by block (controller/connect_control_stuck_provider.go).
-// StuckProviderSignalDefault keeps them off until it does.
+// The api service's router: NewRouter with stuck provider reports on
+// (controller/connect_control_stuck_provider.go).
 func newApiRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
-	stuckProviderSettings := controller.DefaultStuckProviderSignalSettings()
-	stuckProviderSettings.EnableStuckProviderSignal = true
-	return newRouterWithStuckProviderSignals(routeCtx, uploadCtx, stuckProviderSettings)
+	return newRouterWithStuckProviderSignals(routeCtx, uploadCtx, apiStuckProviderSignalSettings())
+}
+
+// The api service's stuck provider reports: the code defaults with the
+// ceiling on, so every api process reports.
+func apiStuckProviderSignalSettings() *controller.StuckProviderSignalSettings {
+	settings := controller.DefaultStuckProviderSignalSettings()
+	settings.EnableStuckProviderSignal = true
+	return settings
 }
 
 func newRouterWithStuckProviderSignals(
@@ -305,8 +310,7 @@ func newRouterWithStuckProviderSignals(
 	// appearance histogram; the close writes what the drain left
 	appearances := model.NewProviderAppearances(routeCtx, model.DefaultProviderAppearanceSettings())
 	// nil while the ceiling is off
-	block, _ := server.Block()
-	stuckProviders := controller.NewStuckProviderSignals(routeCtx, stuckProviderSettings, block)
+	stuckProviders := controller.NewStuckProviderSignals(routeCtx, stuckProviderSettings)
 	// FindProviders2 answers served here carry the platform's override of the
 	// apps' strict window handover, as the Redis control last set it
 	windowStrictHandover := controller.NewWindowStrictHandoverControl(routeCtx, controller.DefaultWindowStrictHandoverControlSettings())

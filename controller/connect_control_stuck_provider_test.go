@@ -1,9 +1,10 @@
 package controller
 
 // Stuck provider reports (connect_control_stuck_provider.go): the run
-// thresholds, the bound, the report results and pacing, the switch, and which
-// replays count. The fake store and clock keep these off Redis; the last test
-// runs the real control read and flag write.
+// thresholds, the bound, the report results and pacing, the code ceiling, and
+// which replays count. The fake store and clock keep these off Redis; the last
+// test runs the real constructor and flag write beside the retired control
+// fields.
 
 import (
 	"context"
@@ -121,50 +122,25 @@ func (self *stuckProviderTestStore) RequireCall(t *testing.T, clientId server.Id
 	}
 }
 
-// The control fields a test reader answers with. A set err fails each read.
-type stuckProviderTestControl struct {
-	stateLock sync.Mutex
-	fields    map[string]string
-	err       error
-}
-
-func (self *stuckProviderTestControl) Set(fields map[string]string, err error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.fields = fields
-	self.err = err
-}
-
-func (self *stuckProviderTestControl) Read(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.err != nil {
-		return nil, self.err
-	}
-	return model.NarrowConnectMoveControl(self.fields, ceiling), nil
-}
-
+// The api service's settings (api/run.go): the code defaults with the ceiling
+// on.
 func stuckProviderTestSettings() *StuckProviderSignalSettings {
 	settings := DefaultStuckProviderSignalSettings()
 	settings.EnableStuckProviderSignal = true
 	return settings
 }
 
-// An owner for block whose control holds fields, read once.
+// An owner over a test store and clock.
 func newStuckProviderTestSignals(
 	t *testing.T,
 	settings *StuckProviderSignalSettings,
-	block string,
-	fields map[string]string,
-) (*StuckProviderSignals, *stuckProviderTestControl, *stuckProviderTestStore, *stuckProviderTestClock) {
+) (*StuckProviderSignals, *stuckProviderTestStore, *stuckProviderTestClock) {
 	t.Helper()
-	control := &stuckProviderTestControl{fields: fields}
 	store := newStuckProviderTestStore()
 	clock := newStuckProviderTestClock()
-	signals := newStuckProviderSignalsWithStore(t.Context(), settings, block, control.Read, store.SetRecycle, clock.Now)
+	signals := newStuckProviderSignalsWithStore(t.Context(), settings, store.SetRecycle, clock.Now)
 	t.Cleanup(signals.Close)
-	signals.refresh()
-	return signals, control, store, clock
+	return signals, store, clock
 }
 
 func stuckProviderTestGauge(t *testing.T, name string) float64 {
@@ -234,9 +210,6 @@ func TestStuckProviderDefaultsSpanTheRetryCadence(t *testing.T) {
 	if settings.TrackedClientCount < 65536 {
 		t.Errorf("TrackedClientCount %d, want at least 65536", settings.TrackedClientCount)
 	}
-	if settings.ControlMaxFailedReads <= 0 {
-		t.Errorf("ControlMaxFailedReads %d keeps an unreadable control on forever", settings.ControlMaxFailedReads)
-	}
 	if settings.SignalsPerSecond <= 0 || settings.SignalBurst <= 0 {
 		t.Errorf("reports unpaced or closed: %v a second, burst %d", settings.SignalsPerSecond, settings.SignalBurst)
 	}
@@ -249,7 +222,7 @@ func TestStuckProviderDefaultsSpanTheRetryCadence(t *testing.T) {
 // MinRetryCount answers and no silence longer than MaxRetryGap, and then
 // starts over. The default thresholds.
 func TestStuckProviderRunCrossesItsThresholds(t *testing.T) {
-	signals, _, _, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings(), "g1", map[string]string{"stuckProviderSignal": "g1"})
+	signals, _, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings())
 
 	everyMinute := []float64{}
 	for minute := 0; minute <= 15; minute += 1 {
@@ -289,7 +262,7 @@ func TestStuckProviderRunCrossesItsThresholds(t *testing.T) {
 func TestStuckProviderTrackerIsBounded(t *testing.T) {
 	settings := stuckProviderTestSettings()
 	settings.TrackedClientCount = 3
-	signals, _, _, clock := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "all"})
+	signals, _, clock := newStuckProviderTestSignals(t, settings)
 
 	kept, dropped := server.NewId(), server.NewId()
 	noteStuckProviderRetries(signals, clock, kept, minutes(0)...)
@@ -365,7 +338,7 @@ func waitForStuckProviderDecisions(t *testing.T, result string, want float64) {
 func TestStuckProviderReportsCountTheirResults(t *testing.T) {
 	settings := stuckProviderTestSettings()
 	settings.MaxConcurrentSignals = 1
-	signals, _, store, clock := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "g1"})
+	signals, store, clock := newStuckProviderTestSignals(t, settings)
 	// the flag found 1 min, 30 min, and an unreadable time after it was set,
 	// as of each report's crossing
 	store.results = []stuckProviderTestResult{
@@ -435,7 +408,7 @@ func TestStuckProviderReportsCountTheirResults(t *testing.T) {
 // so the flags of clients reported together expire apart.
 func TestStuckProviderFlagTtlSpreadsOverAQuarterOfTheCooldown(t *testing.T) {
 	settings := stuckProviderTestSettings()
-	signals, _, _, _ := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "g1"})
+	signals, _, _ := newStuckProviderTestSignals(t, settings)
 	cooldown := settings.Cooldown
 	signals.randInt64N = func(n int64) int64 {
 		if n != int64(cooldown/4) {
@@ -472,7 +445,7 @@ func TestStuckProviderReportsArePaced(t *testing.T) {
 	// one token an hour, two at once
 	settings.SignalsPerSecond = 1.0 / 3600
 	settings.SignalBurst = 2
-	signals, _, store, clock := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "g1"})
+	signals, store, clock := newStuckProviderTestSignals(t, settings)
 	rateLimitedBefore := stuckProviderTestDecisions(t, stuckProviderRecycleRateLimited)
 	setBefore := stuckProviderTestDecisions(t, stuckProviderRecycleSet)
 
@@ -502,145 +475,34 @@ func TestStuckProviderReportsArePaced(t *testing.T) {
 	}
 }
 
-// Off by default, off past the ceiling, off for another block, and turned off
-// at run time: nothing is tracked or written. Turning off forgets every run.
-// A failed read keeps the last switch until ControlMaxFailedReads fail in a
-// row, which turn it off.
-func TestStuckProviderSwitchGatesReports(t *testing.T) {
-	answerFor := func(signals *StuckProviderSignals, clock *stuckProviderTestClock, clientId server.Id) {
-		for _, offset := range minutes(0, 3, 6, 9, 10, 12, 15, 18, 20) {
-			clock.Set(offset)
-			signals.observeTerminalRetry(clientId)
-		}
-	}
-	waitForNoWrite := func(store *stuckProviderTestStore) bool {
-		select {
-		case <-store.calls:
-			return false
-		case <-time.After(200 * time.Millisecond):
-			return true
-		}
-	}
+// The code default: the api service's settings make an owner that reports
+// with no control to read. A crossed run sets the client's flag, and the
+// enabled gauge reads 1.
+func TestStuckProviderSignalReportsWithoutAControl(t *testing.T) {
+	signals, store, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings())
+	setBefore := stuckProviderTestDecisions(t, stuckProviderRecycleSet)
 
-	// the ceiling off: no owner, and a nil owner does nothing
-	if signals := NewStuckProviderSignals(t.Context(), DefaultStuckProviderSignalSettings(), "g1"); signals != nil {
+	clientId := server.NewId()
+	crossStuckProviderRun(signals, clock, clientId, 0)
+	store.RequireCall(t, clientId)
+	waitForStuckProviderDecisions(t, stuckProviderRecycleSet, setBefore+1)
+	if gauge := stuckProviderTestGauge(t, "urnetwork_connect_stuck_provider_signal_enabled"); gauge != 1 {
+		t.Fatalf("the enabled gauge %v, want 1", gauge)
+	}
+}
+
+// The ceiling off, as alt's router keeps it: no owner is made, and a nil
+// owner counts and writes nothing.
+func TestStuckProviderSignalCeilingOffMakesNoOwner(t *testing.T) {
+	if signals := NewStuckProviderSignals(t.Context(), DefaultStuckProviderSignalSettings()); signals != nil {
 		t.Fatal("an owner was made with the ceiling off")
+	}
+	if signals := NewStuckProviderSignals(t.Context(), nil); signals != nil {
+		t.Fatal("an owner was made without settings")
 	}
 	var none *StuckProviderSignals
 	none.observeTerminalRetry(server.NewId())
 	none.Close()
-
-	for _, c := range []struct {
-		name   string
-		block  string
-		fields map[string]string
-	}{
-		{name: "the default", block: "g1", fields: nil},
-		{name: "the kill switch", block: "g1", fields: map[string]string{"stuckProviderSignal": "off"}},
-		{name: "another block", block: "g2", fields: map[string]string{"stuckProviderSignal": "g1"}},
-		{name: "the recycle field", block: "g1", fields: map[string]string{"stuckProviderRecycle": "all"}},
-	} {
-		signals, _, store, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings(), c.block, c.fields)
-		answerFor(signals, clock, server.NewId())
-		if signals.allows() || !waitForNoWrite(store) {
-			t.Fatalf("%s: reported with the switch off", c.name)
-		}
-		held := func() int {
-			signals.stateLock.Lock()
-			defer signals.stateLock.Unlock()
-			return len(signals.currentClientRetries) + len(signals.previousClientRetries)
-		}()
-		if held != 0 {
-			t.Fatalf("%s: tracked %d runs with the switch off", c.name, held)
-		}
-	}
-
-	// one block on: it reports
-	settings := stuckProviderTestSettings()
-	signals, control, store, clock := newStuckProviderTestSignals(t, settings, "g1", map[string]string{"stuckProviderSignal": "g1"})
-	if !signals.allows() || stuckProviderTestGauge(t, "urnetwork_connect_stuck_provider_signal_enabled") != 1 {
-		t.Fatal("the named block is off")
-	}
-	reportedClientId := server.NewId()
-	answerFor(signals, clock, reportedClientId)
-	store.RequireCall(t, reportedClientId)
-
-	// failed reads keep the switch on until the limit fail in a row, and a
-	// good read starts the count over
-	unavailable := errors.New("unavailable")
-	failReads := func(count int) {
-		control.Set(nil, unavailable)
-		for range count {
-			signals.refresh()
-		}
-	}
-	failReads(settings.ControlMaxFailedReads - 1)
-	if !signals.allows() {
-		t.Fatal("fewer failed reads than the limit turned the switch off")
-	}
-	control.Set(map[string]string{"stuckProviderSignal": "g1"}, nil)
-	signals.refresh()
-	failReads(settings.ControlMaxFailedReads - 1)
-	if !signals.allows() {
-		t.Fatal("failed reads on either side of a good one turned the switch off")
-	}
-	// a run under way when the control becomes unreadable is forgotten
-	unreadableClientId := server.NewId()
-	for _, offset := range minutes(21, 25, 29, 33) {
-		clock.Set(offset)
-		signals.observeTerminalRetry(unreadableClientId)
-	}
-	failReads(1)
-	if signals.allows() || stuckProviderTestGauge(t, "urnetwork_connect_stuck_provider_signal_enabled") != 0 {
-		t.Fatal("an unreadable control kept the switch on")
-	}
-	for _, offset := range minutes(34, 35) {
-		clock.Set(offset)
-		signals.observeTerminalRetry(unreadableClientId)
-	}
-	control.Set(map[string]string{"stuckProviderSignal": "g1"}, nil)
-	signals.refresh()
-	if !signals.allows() {
-		t.Fatal("a good read did not turn the switch back on")
-	}
-	// a run kept from 21 would cross at 41
-	for _, offset := range minutes(36, 38, 41) {
-		clock.Set(offset)
-		signals.observeTerminalRetry(unreadableClientId)
-	}
-	if !waitForNoWrite(store) {
-		t.Fatal("a run from before the unreadable control was reported")
-	}
-
-	// turned off mid-run: the run is forgotten, and once back on a client
-	// starts from zero
-	clientId := server.NewId()
-	for _, offset := range minutes(60, 63, 66, 69) {
-		clock.Set(offset)
-		signals.observeTerminalRetry(clientId)
-	}
-	control.Set(map[string]string{"stuckProviderSignal": "off"}, nil)
-	signals.refresh()
-	if signals.allows() || stuckProviderTestGauge(t, "urnetwork_connect_stuck_provider_signal_enabled") != 0 {
-		t.Fatal("the kill switch left the block on")
-	}
-	clock.Set(70 * time.Minute)
-	signals.observeTerminalRetry(clientId)
-	control.Set(map[string]string{"stuckProviderSignal": "g1"}, nil)
-	signals.refresh()
-	// a run kept from 60 would cross at 80
-	for _, offset := range minutes(71, 72, 74, 77, 80) {
-		clock.Set(offset)
-		signals.observeTerminalRetry(clientId)
-	}
-	if !waitForNoWrite(store) {
-		t.Fatal("a run from before the kill switch was reported")
-	}
-	for _, offset := range minutes(83, 86, 89, 91) {
-		clock.Set(offset)
-		signals.observeTerminalRetry(clientId)
-	}
-	store.RequireCall(t, clientId)
 }
 
 // Only a replay whose every refusal is terminal and was refused to a
@@ -654,7 +516,7 @@ func TestStuckProviderSwitchGatesReports(t *testing.T) {
 func TestReplayCountsOnlyTerminalRetriesOfTopLevelSourcesWithoutSenderRole(t *testing.T) {
 	ctx := newRefusalReplayOwnerContext(t)
 	owner := model.GetContractOriginNotifications(ctx)
-	signals, _, store, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings(), "g1", map[string]string{"stuckProviderSignal": "g1"})
+	signals, store, clock := newStuckProviderTestSignals(t, stuckProviderTestSettings())
 	ctx = WithStuckProviderSignals(ctx, signals)
 
 	missingRow := refusalReplayInactive()
@@ -799,22 +661,21 @@ func TestReplayCountsOnlyTerminalRetriesOfTopLevelSourcesWithoutSenderRole(t *te
 	}
 }
 
-// With the real control and flag: an api process of the named block sets the
+// With the real constructor and flag, and no control: an api process sets the
 // client's flag once, with the cooldown and up to a quarter more as its ttl,
-// and a second process's report finds it; a process of another block, and any
-// process with the switch off, sets none.
-func TestStuckProviderSignalSetsTheFlagOnlyOnItsBlock(t *testing.T) {
+// and a second process's report finds it. The retired control fields, set off,
+// change nothing: another process still sets a new client's flag.
+func TestStuckProviderSignalSetsTheFlagWithoutAControl(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		settings := stuckProviderTestSettings()
-		settings.ControlRefreshInterval = 0
-		newSignals := func(block string) (*StuckProviderSignals, *stuckProviderTestClock) {
+		cooldown := DefaultStuckProviderSignalSettings().Cooldown
+		newSignals := func() (*StuckProviderSignals, *stuckProviderTestClock) {
 			clock := newStuckProviderTestClock()
-			signals := newStuckProviderSignalsWithStore(ctx, settings, block, model.GetConnectMoveControl, model.SetClientRecycle, clock.Now)
-			signals.refresh()
-			return signals, clock
+			settings := stuckProviderTestSettings()
+			settings.Now = clock.Now
+			return NewStuckProviderSignals(ctx, settings), clock
 		}
 		decisions := func() float64 {
 			total := float64(0)
@@ -844,54 +705,49 @@ func TestStuckProviderSignalSetsTheFlagOnlyOnItsBlock(t *testing.T) {
 			return ttl
 		}
 
-		// absent control: dark
-		darkClientId := server.NewId()
-		darkSignals, darkClock := newSignals("g1")
-		answer(darkSignals, darkClock, darkClientId)
-		if 0 < flagTtl(darkClientId) {
-			t.Fatal("the default set a flag")
-		}
-
-		if err := model.SetConnectMoveControl(ctx, map[string]string{model.ConnectMoveControlFieldStuckProviderSignal: "g1"}); err != nil {
+		// the test env starts with no control
+		control, err := model.GetConnectMoveControl(ctx, model.ConnectMoveControlCeiling{})
+		if err != nil {
 			t.Fatal(err)
 		}
+		if control.Present {
+			t.Fatal("the move control is set")
+		}
 		clientId := server.NewId()
-		onSignals, onClock := newSignals("g1")
+		signals, clock := newSignals()
 		setBefore := testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleSet))
-		answer(onSignals, onClock, clientId)
+		answer(signals, clock, clientId)
 		if set := testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleSet)); set != setBefore+1 {
-			t.Fatalf("the named block's report set +%v flags, want +1", set-setBefore)
+			t.Fatalf("a report with no control set +%v flags, want +1", set-setBefore)
 		}
-		if ttl := flagTtl(clientId); ttl <= 0 || settings.Cooldown+settings.Cooldown/4 < ttl {
-			t.Fatalf("the named block's flag ttl %s, want (0, %s]", ttl, settings.Cooldown+settings.Cooldown/4)
+		if ttl := flagTtl(clientId); ttl <= 0 || cooldown+cooldown/4 < ttl {
+			t.Fatalf("the flag ttl %s, want (0, %s]", ttl, cooldown+cooldown/4)
 		}
-		// another process of the block reports the client: it finds the
-		// flag, and reads back its set time (the age is the fake store's test)
+		// another process reports the client: it finds the flag, and reads
+		// back its set time (the age is the fake store's test)
 		found := func() float64 {
 			return testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleCooldown)) +
 				testutil.ToFloat64(stuckProviderRecycleDecisionsCounter.WithLabelValues(stuckProviderRecycleStillStuck))
 		}
 		foundBefore := found()
-		secondSignals, secondClock := newSignals("g1")
+		secondSignals, secondClock := newSignals()
 		answer(secondSignals, secondClock, clientId)
 		if foundAfter := found(); foundAfter != foundBefore+1 {
 			t.Fatalf("a second report found +%v flags, want +1", foundAfter-foundBefore)
 		}
-		otherBlockClientId := server.NewId()
-		otherSignals, otherClock := newSignals("g2")
-		answer(otherSignals, otherClock, otherBlockClientId)
-		if 0 < flagTtl(otherBlockClientId) {
-			t.Fatal("another block set a flag")
-		}
 
-		if err := model.SetConnectMoveControl(ctx, map[string]string{model.ConnectMoveControlFieldStuckProviderSignal: "off"}); err != nil {
+		// the retired fields, still off in a hash ops has not cleaned
+		if err := model.SetConnectMoveControl(ctx, map[string]string{
+			"stuckProviderSignal":  "off",
+			"stuckProviderRecycle": "off",
+		}); err != nil {
 			t.Fatal(err)
 		}
-		offClientId := server.NewId()
-		offSignals, offClock := newSignals("g1")
-		answer(offSignals, offClock, offClientId)
-		if 0 < flagTtl(offClientId) {
-			t.Fatal("the kill switch set a flag")
+		retiredClientId := server.NewId()
+		retiredSignals, retiredClock := newSignals()
+		answer(retiredSignals, retiredClock, retiredClientId)
+		if flagTtl(retiredClientId) <= 0 {
+			t.Fatal("the retired control fields kept a report from setting the flag")
 		}
 	})
 }
