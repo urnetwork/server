@@ -473,16 +473,6 @@ func GetNetworkTeamScimTokenSha256(ctx context.Context, networkId server.Id) (sc
 	return scimTokenSha256, true
 }
 
-// The network's SCIM base URL at the api's public origin, or its path where
-// the origin is unknown, as scim answers its resources' locations.
-func networkScimUrl(networkId server.Id) string {
-	path := "/scim/v2/" + networkId.String()
-	if origin, err := session.DpopApiOrigin(); err == nil {
-		return origin + path
-	}
-	return path
-}
-
 // POST /network/scim-token's body.
 type NetworkScimTokenArgs struct {
 	// turns SCIM off, clearing the bearer; without it a new bearer replaces any
@@ -584,7 +574,12 @@ func (self *networkTeams) setScimToken(args *NetworkScimTokenArgs, clientSession
 		bearerSha256 = bearerSum[:]
 	}
 	now := self.now().UTC().Truncate(time.Microsecond)
-	scimUrl := networkScimUrl(networkId)
+	// the SCIM base URL at the api's public origin, or its path where the
+	// origin is unknown, as scim answers its resources' locations
+	scimUrl := "/scim/v2/" + networkId.String()
+	if origin, err := session.DpopApiOrigin(); err == nil {
+		scimUrl = origin + scimUrl
+	}
 
 	refused, replayed := false, false
 	var answer *NetworkScimTokenResult
