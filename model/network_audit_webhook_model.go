@@ -324,8 +324,15 @@ func newNetworkAudits() *networkAudits {
 	}
 }
 
+func init() {
+	// `ur admin audit-webhook` and `ur admin events` (TEAM-M6-08): a one-command
+	// admin token reaches each route, its use spent in the route's transaction
+	session.RegisterAdminCommandRoute(http.MethodPost, "/network/audit-webhook")
+	session.RegisterAdminCommandRoute(http.MethodGet, "/network/admin-events")
+}
+
 // The checks both audit routes make before their own work: MG1 and MG6, a
-// network credential, and the team tier.
+// network credential, an admin token's all scope, and the team tier.
 func (self *networkAudits) admit(clientSession *session.ClientSession, refusedMessage string) error {
 	if !server.SidecarMg1Linked() || !server.SidecarMg6Linked() {
 		return fmt.Errorf("%d %s", http.StatusServiceUnavailable, networkTeamsUnavailableMessage)
@@ -334,12 +341,19 @@ func (self *networkAudits) admit(clientSession *session.ClientSession, refusedMe
 	if byJwt == nil || byJwt.ClientId != nil {
 		return fmt.Errorf("%d %s", http.StatusForbidden, refusedMessage)
 	}
+	if err := requireAdminCommandTeamScope(clientSession); err != nil {
+		return err
+	}
 	return self.requireTeamTier(clientSession.Ctx, byJwt.NetworkId)
 }
 
 // GET /network/admin-events?after=<seq>&limit=<n> (§7.11): the caller's
 // team's admin events after a seq, in seq order. Auditors and above read
-// them; reading writes no event.
+// them; reading writes no event. A one-command admin token with the all scope
+// reads once (`ur admin events`, TEAM-M6-08), its use spent in the read's
+// transaction and a replay answering the first read. Its command covers no
+// query (§7.8's cmd), so it reads from the oldest event kept, at most
+// AdminCommandReadLimit, whose answer the use keeps for a replay.
 func GetNetworkAdminEventsForSession(args *GetNetworkAdminEventsArgs, clientSession *session.ClientSession) (*GetNetworkAdminEventsResult, error) {
 	return newNetworkAudits().getEvents(args, clientSession)
 }
@@ -350,28 +364,62 @@ func (self *networkAudits) getEvents(args *GetNetworkAdminEventsArgs, clientSess
 	}
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
-	permitted := false
-	server.Db(ctx, func(conn server.PgConn) {
-		permitted = teamCallerPermitsWithQuery(ctx, conn, clientSession, RolePermissionRead)
-	})
-	if !permitted {
-		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkAdminEventsRefusedMessage)
-	}
+	adminCommand := clientSession.AdminCommand
 	limit := max(self.eventSettings.ReadLimit, 1)
+	if adminCommand != nil {
+		limit = min(limit, max(self.eventSettings.AdminCommandReadLimit, 1))
+	}
 	if 0 < args.Limit && args.Limit < limit {
 		limit = args.Limit
 	}
-	// one past the page says whether more follow
-	events := GetNetworkAdminEvents(ctx, networkId, max(args.After, 0), limit+1)
-	result := &GetNetworkAdminEventsResult{
-		Events: make([]*NetworkAdminEventResult, 0, min(len(events), limit)),
-	}
-	for i, event := range events {
-		if limit <= i {
-			result.More = true
-			break
+	refused := false
+	var result *GetNetworkAdminEventsResult
+	read := func(query server.PgCanQuery) {
+		if !teamCallerPermitsWithQuery(ctx, query, clientSession, RolePermissionRead) {
+			refused = true
+			return
 		}
-		result.Events = append(result.Events, networkAdminEventResultOf(event))
+		// one past the page says whether more follow
+		events := getNetworkAdminEventsWithQuery(ctx, query, networkId, max(args.After, 0), limit+1)
+		result = &GetNetworkAdminEventsResult{
+			Events: make([]*NetworkAdminEventResult, 0, min(len(events), limit)),
+		}
+		for i, event := range events {
+			if limit <= i {
+				result.More = true
+				break
+			}
+			result.Events = append(result.Events, networkAdminEventResultOf(event))
+		}
+	}
+	if adminCommand == nil {
+		server.Db(ctx, func(conn server.PgConn) {
+			read(conn)
+		})
+	} else {
+		now := self.now().UTC().Truncate(time.Microsecond)
+		server.Tx(ctx, func(tx server.PgTx) {
+			refused, result = false, nil
+			if !teamCallerPermitsWithQuery(ctx, tx, clientSession, RolePermissionRead) {
+				refused = true
+				return
+			}
+			replayed := &GetNetworkAdminEventsResult{}
+			replay, err := ReplayAdminTokenUseInTx(ctx, tx, adminCommand, now, replayed)
+			server.Raise(err)
+			if replay {
+				result = replayed
+				return
+			}
+			read(tx)
+			if refused {
+				return
+			}
+			server.Raise(StoreAdminTokenUseAnswerInTx(ctx, tx, adminCommand, result))
+		})
+	}
+	if refused {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkAdminEventsRefusedMessage)
 	}
 	return result, nil
 }
@@ -498,7 +546,11 @@ func (self *NetworkAuditWebhookResult) GoString() string {
 const networkAuditWebhooksRefusedMessage = "Only the team's Owners may change its audit webhooks."
 
 // POST /network/audit-webhook (§7.11): adds a webhook to the caller's team,
-// removes one, or lists them. The Owner's.
+// removes one, or lists them. The Owner's. A one-command admin token with the
+// all scope runs it once (`ur admin audit-webhook`, TEAM-M6-08), its use spent
+// in the route's transaction and a replay answering the first; the use keeps
+// an added webhook's answer without its signing key, which the server never
+// holds, so a replay answers the webhook with no key.
 func SetNetworkAuditWebhook(args *NetworkAuditWebhookArgs, clientSession *session.ClientSession) (*NetworkAuditWebhookResult, error) {
 	return newNetworkAudits().setWebhook(args, clientSession)
 }
@@ -509,29 +561,39 @@ func (self *networkAudits) setWebhook(args *NetworkAuditWebhookArgs, clientSessi
 	}
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
+	adminCommand := clientSession.AdminCommand
 	add := args.Url != ""
 	webhookId := server.NewId()
 	var signingKey []byte
-	message := ""
+	argsMessage := ""
 	switch {
 	case add && args.RemoveWebhookId != nil:
-		message = "Add a webhook or remove one, not both."
+		argsMessage = "Add a webhook or remove one, not both."
 	case add:
 		if err := ValidNetworkAuditWebhookUrl(args.Url); err != nil {
-			message = err.Error()
+			argsMessage = err.Error()
 		} else if signingKey = networkAuditWebhookKey(webhookId); signingKey == nil {
-			message = "Audit webhooks are not available yet."
+			argsMessage = "Audit webhooks are not available yet."
 		}
 	}
 	now := self.now()
-	refused, removed := false, false
-	states := []*NetworkAuditWebhookState{}
+	refused, replayed := false, false
+	var answer *NetworkAuditWebhookResult
 	server.Tx(ctx, func(tx server.PgTx) {
-		refused, removed = false, false
-		states = []*NetworkAuditWebhookState{}
+		refused, replayed, answer = false, false, nil
 		if !teamCallerPermitsWithQuery(ctx, tx, clientSession, RolePermissionOwner) {
 			refused = true
 			return
+		}
+		if adminCommand != nil {
+			stored := &NetworkAuditWebhookResult{}
+			replay, err := ReplayAdminTokenUseInTx(ctx, tx, adminCommand, now, stored)
+			server.Raise(err)
+			if replay {
+				// the first use's answer, and nothing runs
+				answer, replayed = stored, true
+				return
+			}
 		}
 		// the network's webhooks change one at a time, so the limit holds
 		server.RaisePgResult(tx.Exec(
@@ -540,6 +602,8 @@ func (self *networkAudits) setWebhook(args *NetworkAuditWebhookArgs, clientSessi
 			networkId,
 		))
 		webhooks := getNetworkAuditWebhooksWithQuery(ctx, tx, networkId)
+		message := argsMessage
+		added, removed := false, false
 		switch {
 		case message != "":
 		case add && self.settings.WebhookLimit <= len(webhooks):
@@ -571,6 +635,7 @@ func (self *networkAudits) setWebhook(args *NetworkAuditWebhookArgs, clientSessi
 				Action:     SecurityNetworkAuthorityAuditWebhook,
 				Via:        securityNoticeVia(ctx),
 			})
+			added = true
 			webhooks = getNetworkAuditWebhooksWithQuery(ctx, tx, networkId)
 		case args.RemoveWebhookId != nil:
 			tag := server.RaisePgResult(tx.Exec(
@@ -586,8 +651,9 @@ func (self *networkAudits) setWebhook(args *NetworkAuditWebhookArgs, clientSessi
 				webhooks = getNetworkAuditWebhooksWithQuery(ctx, tx, networkId)
 			}
 		}
+		answer = &NetworkAuditWebhookResult{Webhooks: []*NetworkAuditWebhookState{}, Removed: removed}
 		for _, webhook := range webhooks {
-			states = append(states, &NetworkAuditWebhookState{
+			answer.Webhooks = append(answer.Webhooks, &NetworkAuditWebhookState{
 				WebhookId:    webhook.WebhookId,
 				Url:          webhook.Url,
 				DeliveredSeq: webhook.DeliveredSeq,
@@ -595,19 +661,24 @@ func (self *networkAudits) setWebhook(args *NetworkAuditWebhookArgs, clientSessi
 				NextTime:     webhook.NextTime,
 			})
 		}
+		switch {
+		case message != "":
+			answer.Error = &NetworkAuditWebhookError{Message: message}
+		case added:
+			answer.WebhookId = &webhookId
+		}
+		if adminCommand != nil {
+			// without the signing key, which no answer but the first holds
+			server.Raise(StoreAdminTokenUseAnswerInTx(ctx, tx, adminCommand, answer))
+		}
 	}, server.TxReadCommitted)
 	if refused {
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkAuditWebhooksRefusedMessage)
 	}
-	result := &NetworkAuditWebhookResult{Webhooks: states, Removed: removed}
-	switch {
-	case message != "":
-		result.Error = &NetworkAuditWebhookError{Message: message}
-	case add:
-		result.WebhookId = &webhookId
-		result.SigningKey = base64.RawURLEncoding.EncodeToString(signingKey)
+	if !replayed && answer.WebhookId != nil {
+		answer.SigningKey = base64.RawURLEncoding.EncodeToString(signingKey)
 	}
-	return result, nil
+	return answer, nil
 }
 
 // One delivery's body.

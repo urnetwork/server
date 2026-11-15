@@ -89,6 +89,17 @@ func SetAdminTokenAuthenticator(authenticator AdminTokenAuthenticator) {
 var adminCommandRoutesLock sync.Mutex
 var adminCommandRoutes = map[string]bool{}
 
+// A route's check of an admin command's body before any consent shows it
+// (TEAM-M6-08). ur-cli's authorization request carries the command's body in
+// the browser's URL, ur prints that URL, and the consent page shows the body,
+// so a route whose body may hold a lasting credential, such as an IdP's client
+// secret, refuses such a command there, before a browser or a page sees it. The
+// error's text names what was refused, never a value.
+type AdminCommandBodyCheck func(body []byte) error
+
+// By "METHOD path", under adminCommandRoutesLock.
+var adminCommandBodyChecks = map[string]AdminCommandBodyCheck{}
+
 // Adds a route whose model spends an admin token's use in its transaction.
 func RegisterAdminCommandRoute(method string, path string) {
 	adminCommandRoutesLock.Lock()
@@ -96,10 +107,31 @@ func RegisterAdminCommandRoute(method string, path string) {
 	adminCommandRoutes[method+" "+path] = true
 }
 
+// RegisterAdminCommandRoute for a route whose commands' bodies meet check
+// before a consent shows them.
+func RegisterAdminCommandRouteWithBodyCheck(method string, path string, check AdminCommandBodyCheck) {
+	adminCommandRoutesLock.Lock()
+	defer adminCommandRoutesLock.Unlock()
+	adminCommandRoutes[method+" "+path] = true
+	adminCommandBodyChecks[method+" "+path] = check
+}
+
 func adminCommandRoute(method string, path string) bool {
 	adminCommandRoutesLock.Lock()
 	defer adminCommandRoutesLock.Unlock()
 	return adminCommandRoutes[method+" "+path]
+}
+
+// The route's check of a command's body (RegisterAdminCommandRouteWithBodyCheck):
+// nil for a body its consent may show, and for a route with no check.
+func CheckAdminCommandBody(method string, path string, body []byte) error {
+	adminCommandRoutesLock.Lock()
+	check := adminCommandBodyChecks[method+" "+path]
+	adminCommandRoutesLock.Unlock()
+	if check == nil {
+		return nil
+	}
+	return check(body)
 }
 
 // One request of a network OAuth client's access token (§7.8, D-TEAM-6;

@@ -238,7 +238,8 @@ func TestMemberInviteRefusals(t *testing.T) {
 
 // §22.5's §7 row: a one-command admin token's invite works once and answers a retry after a lost response with the
 // stored result, so no second invite is made; its email and role are the ones it made (the token's cmd binds the body
-// at the authenticator, oauth's admin_token.go). A token without the all scope makes none.
+// at the authenticator, oauth's admin_token.go). The stored result holds no bearer, so the retry answers the invite
+// without one. A token without the all scope makes none.
 func TestMemberInviteAdminTokenWorksOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newInviteFixture(t)
@@ -264,7 +265,13 @@ func TestMemberInviteAdminTokenWorksOnce(t *testing.T) {
 		retry, err := self.invites.create(args, tokenSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, *retry.InviteId, *first.InviteId)
-		connect.AssertEqual(t, retry.InviteBearer, first.InviteBearer)
+		connect.AssertEqual(t, first.InviteBearer != "", true)
+		connect.AssertEqual(t, retry.InviteBearer, "")
+		var storedResult []byte
+		server.Db(self.ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(self.ctx, `SELECT result FROM admin_token_use WHERE jti = $1`, use.Jti).Scan(&storedResult))
+		})
+		connect.AssertEqual(t, strings.Contains(string(storedResult), first.InviteBearer), false)
 		count := testTeamCount(self.ctx, `SELECT COUNT(*) FROM network_invite WHERE network_id = $1`, self.teamNetworkId)
 		connect.AssertEqual(t, count, 1)
 		_, email, role, _ := self.inviteRow(t, *first.InviteId)
