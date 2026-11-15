@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest"
 
@@ -293,5 +294,49 @@ func TestLatencySampleKeepsABoundedUniformSample(t *testing.T) {
 	kept := sample.take()
 	if len(kept) != 100 {
 		t.Fatalf("kept %d", len(kept))
+	}
+}
+
+func TestRecordsPerBatchCountsTheWindowsBatches(t *testing.T) {
+	blobs := sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), nil, nil, nil)
+	cluster, err := blobs.Cluster("meta-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, time.November, 7, 10, 20, 10, 0, time.UTC)
+	minute := evsservice.BatchMinute(start)
+	put := func(minute uint32, seq uint32, records int) {
+		writer := sidecar.NewEvsBatchWriter(7, minute, seq, start.UnixMilli())
+		for i := range records {
+			record := &sidecar.EvsBatchRecord{
+				Type: protocol.EvsBatchRecordType_EVS_BATCH_PUSH, RepoId: sidecar.NewId(), RefId: sidecar.NewId(), PushId: sidecar.NewId(),
+				SignerSidecarId: sidecar.NewId(), TimeMs: start.UnixMilli(), Body: []byte(fmt.Sprintf("statement %d", i)),
+			}
+			if _, err := writer.Add(record); err != nil {
+				t.Fatal(err)
+			}
+		}
+		data, err := writer.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cluster.PutIfNoneMatch(context.Background(), evsservice.BatchKey(minute, 7, seq), data, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(minute, 1, 3)
+	put(minute, 2, 1)
+	put(minute+1, 1, 5)
+	// a minute past the window, which no sample reads
+	put(minute+2, 1, 100)
+
+	// a window inside one minute samples that minute
+	recordsPerBatch, batches, err := sampleRecordsPerBatch(context.Background(), cluster, start, start.Add(40*time.Second), 512, 1000, 64*1024*1024)
+	if err != nil || batches != 2 || recordsPerBatch != 2 {
+		t.Fatalf("%v records a batch over %d batches: %v", recordsPerBatch, batches, err)
+	}
+	recordsPerBatch, batches, err = sampleRecordsPerBatch(context.Background(), cluster, start, start.Add(70*time.Second), 512, 1000, 64*1024*1024)
+	if err != nil || batches != 3 || recordsPerBatch != 3 {
+		t.Fatalf("%v records a batch over %d batches: %v", recordsPerBatch, batches, err)
 	}
 }
