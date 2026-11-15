@@ -16,6 +16,12 @@ siblings:
   - repository: urnetwork/sidecar
     path: sidecar
     ref: d4e428249361a5bf7bf7ca6c854f890ddfca1242
+  # Server and sidecar require this module, the host contract between them
+  # (owner decision 251), and server its nested coretest module from the same
+  # revision. Build's operator-core gitlink pins this commit too.
+  - repository: urnetwork/operator-core
+    path: operator-core
+    ref: 0e491cdfc02970be77324a7a14e2e4500478e683
   - repository: urnetwork/glog
     path: glog
     ref: 558c4ce3f36671f72aad851170b4f0a2cbc41e78

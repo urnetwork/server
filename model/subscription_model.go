@@ -23,13 +23,15 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
+	operator "github.com/urnetwork/operator-core"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
 
-type ByteCount = int64
+// A count of bytes: operator-core's, an alias of int64 (owner decision 251).
+type ByteCount = operator.ByteCount
 
 const Kib = ByteCount(1024)
 const Mib = ByteCount(1024 * 1024)
@@ -165,7 +167,8 @@ func ParseByteCount(humanReadable string) (ByteCount, error) {
 	}
 }
 
-type NanoCents = int64
+// server's money unit, 10^9 to the US dollar: operator-core's, an alias of int64 (owner decision 251).
+type NanoCents = operator.NanoCents
 
 func UsdToNanoCents(usd float64) NanoCents {
 	return NanoCents(math.Round(usd * float64(1000000000)))
