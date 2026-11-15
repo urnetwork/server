@@ -1,0 +1,713 @@
+// Execute the owning migration probe against published DDL and rolled-back
+// schema faults; a catalog label without an operative query is insufficient.
+package monitor
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/urnetwork/server/v2026"
+)
+
+func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigrationContract {
+	t.Helper()
+	for _, contract := range migrationCurrentSuffixContracts {
+		if contract.artifact.requiredVersion == version {
+			return contract
+		}
+	}
+	t.Fatalf("missing current suffix contract at version %d", version)
+	return snMainnetMigrationContract{}
+}
+
+func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		poolRoleSuperuser := migrationPoolRoleSuperuserForTest(t, ctx)
+		for head := 793; head <= server.MigrationCount(); head++ {
+			server.ApplyDbMigrationsUpTo(ctx, head)
+			row, drift := migrationPingDatabaseCheck(t, ctx)
+			if drift != "" {
+				t.Fatalf("published prefix %d reports schema drift: %s", head, drift)
+			}
+			for _, contract := range migrationCurrentSuffixContracts {
+				artifact := contract.artifact
+				if len(row) <= artifact.rowColumn {
+					t.Fatalf("prefix %d omitted artifact column %d", head, artifact.rowColumn)
+				}
+				if artifact.removedVersion != 0 && artifact.removedVersion <= head {
+					// a later migration supersedes this contract and republishes
+					// what it keeps
+					continue
+				}
+				if present := migrationBool(row[artifact.rowColumn]); present != migrationCurrentSuffixExpectedPresenceForTest(artifact, head, poolRoleSuperuser) {
+					t.Fatalf("prefix %d artifact %d=%t", head, artifact.requiredVersion, present)
+				}
+			}
+		}
+	})
+}
+
+func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
+	// The explicit distributed successor carries the admitted-claim chain's
+	// complete historical custody; no unrelated future retirement is accepted.
+	custodian := migrationDistributedRecoveryTestOwner(t, server.CompetitionExecutorAdmissionClaimMigrationVersion(), server.MigrationCount()).requiredVersion
+	handoffBodies := server.CompetitionReviewHandoffBodiesSql()
+	_, _, _, _, twoMemberIdentityGuard, _, _, _ := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
+	_, _, _, unamendedEquivalenceGuard, _ := server.CompetitionDistributedEvaluationBodiesSql()
+	amendedEquivalenceGuard := server.CompetitionExecutorControlAmendmentBodiesSql().EquivalenceGuard
+	amendedHostsReady := server.CompetitionExecutorControlAmendmentBodiesSql().HostsReady
+	faults := []struct {
+		name    string
+		version int
+		sql     string
+	}{
+		{"wrong tier type", 794, `ALTER TABLE network_extender ALTER COLUMN directory_tier TYPE integer`},
+		{"changed legacy tier default", 794, `ALTER TABLE network_extender ALTER COLUMN directory_tier SET DEFAULT 1`},
+		{"missing request ledger", 794, `DROP TABLE network_extender_release_request`},
+		{"missing release identity", 794, `ALTER TABLE network_extender_release DROP CONSTRAINT network_extender_release_pkey`},
+		{"missing block report lookup", 794, `DROP INDEX network_extender_block_report_extender_id_country_code_report_time`},
+		{"reordered release lookup", 795, `DROP INDEX network_extender_release_identity_epoch; CREATE INDEX network_extender_release_identity_epoch ON network_extender_release(identity,extender_id,epoch)`},
+		{"non-durable client limit", 797, `ALTER TABLE network_top_level_client_limit SET UNLOGGED`},
+		{"nullable client limit", 797, `ALTER TABLE network_top_level_client_limit ALTER COLUMN top_level_client_limit DROP NOT NULL`},
+		{"required optional monthly cap", 798, `ALTER TABLE network_client_data_cap ALTER COLUMN monthly_byte_limit SET NOT NULL`},
+		{"invented usage default", 798, `ALTER TABLE network_client_data_cap ALTER COLUMN total_used_byte_count SET DEFAULT 1`},
+		{"cap lookup requires both limits", 798, `DROP INDEX network_client_data_cap_network_id_client_id; CREATE INDEX network_client_data_cap_network_id_client_id ON network_client_data_cap(network_id,client_id) WHERE monthly_byte_limit IS NOT NULL AND total_byte_limit IS NOT NULL`},
+		{"missing paused cap lookup", 798, `DROP INDEX network_client_data_cap_monthly_paused`},
+		{"wrong usage count type", 798, `ALTER TABLE network_client_data_usage ALTER COLUMN used_byte_count TYPE integer`},
+		{"missing drain deduplication", 798, `ALTER TABLE network_client_data_usage_drain DROP CONSTRAINT network_client_data_usage_drain_pkey`},
+		{"missing rollup cursor", 798, `DROP TABLE network_client_data_usage_rollup`},
+		{"wrong lead email width", 799, `ALTER TABLE services_lead ALTER COLUMN email TYPE varchar(255)`},
+		{"invented lead notification default", 799, `ALTER TABLE services_lead ALTER COLUMN notify_time SET DEFAULT now()`},
+		{"missing lead retention lookup", 799, `DROP INDEX services_lead_create_time`},
+		{"wrong ACL group width", 800, `ALTER TABLE network_client_acl_group ALTER COLUMN acl_group TYPE varchar(33)`},
+		{"reordered ACL owner lookup", 800, `DROP INDEX network_client_acl_group_network_id; CREATE INDEX network_client_acl_group_network_id ON network_client_acl_group(client_id,network_id)`},
+		{"missing Embed identity", 801, `ALTER TABLE network_embed DROP CONSTRAINT network_embed_pkey`},
+		{"nullable enablement time", 801, `ALTER TABLE network_embed ALTER COLUMN enable_time DROP NOT NULL`},
+		{"missing retained disable time", 802, `ALTER TABLE network_embed DROP COLUMN disable_time`},
+		{"required disable time", 802, `ALTER TABLE network_embed ALTER COLUMN disable_time SET NOT NULL`},
+		{"wrong client session type", 806, `ALTER TABLE network_client ALTER COLUMN session_id TYPE text`},
+		{"defaulted session create time", 806, `ALTER TABLE network_client ALTER COLUMN session_create_time SET DEFAULT now()`},
+		{"required auth-code session", 806, `ALTER TABLE auth_code ALTER COLUMN origin_session_id SET NOT NULL`},
+		{"wrong operation action width", 806, `ALTER TABLE network_session_operation ALTER COLUMN action TYPE varchar(17)`},
+		{"changed session target default", 806, `ALTER TABLE network_session_operation ALTER COLUMN target_session_ids SET DEFAULT '{}'::jsonb`},
+		{"changed quota reservation default", 806, `ALTER TABLE network_session_operation ALTER COLUMN quota_reserved SET DEFAULT false`},
+		{"recovery misses enforced operations", 806, `DROP INDEX network_session_operation_recovery; CREATE INDEX network_session_operation_recovery ON network_session_operation(update_time,network_id,operation_id) WHERE status='prepared'`},
+		{"missing redemption deduplication", 806, `ALTER TABLE auth_code_redemption DROP CONSTRAINT auth_code_redemption_request_id_key`},
+		{"missing session index repair cursor", 806, `DROP TABLE network_session_index_outbox`},
+		{"client session index includes inactive", 807, `DROP INDEX network_client_session_active; CREATE INDEX network_client_session_active ON network_client(network_id,session_id,client_id) WHERE session_id IS NOT NULL`},
+		{"client session index has extra included key", 807, `DROP INDEX network_client_session_active; CREATE INDEX network_client_session_active ON network_client(network_id,session_id,client_id) INCLUDE (active) WHERE active AND session_id IS NOT NULL`},
+		{"auth-code session index reordered", 808, `DROP INDEX auth_code_origin_session; CREATE INDEX auth_code_origin_session ON auth_code(origin_session_id,network_id) WHERE active AND origin_session_id IS NOT NULL`},
+		{"missing auth-code session index", 808, `DROP INDEX auth_code_origin_session`},
+		{"missing function poll index", 809, `DROP INDEX pending_task_function_poll_order`},
+		{"function poll normalization misses repeated version segments", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', ''), available_block, run_priority DESC, run_max_time_seconds DESC, task_id)`},
+		{"function poll priority precedes due range", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', '', 'g'), run_priority DESC, available_block, run_max_time_seconds DESC, task_id)`},
+		{"function poll priority direction reversed", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority, run_max_time_seconds DESC, task_id)`},
+		{"function poll index has an unowned predicate", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority DESC, run_max_time_seconds DESC, task_id) WHERE run_priority > 0`},
+		{"function poll index has an extra included key", 809, `DROP INDEX pending_task_function_poll_order; CREATE INDEX pending_task_function_poll_order ON pending_task(regexp_replace(function_name, '/v[0-9]+', '', 'g'), available_block, run_priority DESC, run_max_time_seconds DESC, task_id) INCLUDE (function_name)`},
+		{"missing closed-day audit index", 810, `DROP INDEX transfer_contract_audit_closed_null_day`},
+		{"closed-day audit key order reversed", 810, `DROP INDEX transfer_contract_audit_closed_null_day; CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(contract_id,close_time) WHERE outcome IS NULL AND close_time IS NOT NULL`},
+		{"closed-day audit includes completed outcomes", 810, `DROP INDEX transfer_contract_audit_closed_null_day; CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(close_time,contract_id) WHERE close_time IS NOT NULL`},
+		{"closed-day audit includes open contracts", 810, `DROP INDEX transfer_contract_audit_closed_null_day; CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(close_time,contract_id) WHERE outcome IS NULL`},
+		{"closed-day audit has an extra included key", 810, `DROP INDEX transfer_contract_audit_closed_null_day; CREATE INDEX transfer_contract_audit_closed_null_day ON transfer_contract(close_time,contract_id) INCLUDE (outcome) WHERE outcome IS NULL AND close_time IS NOT NULL`},
+		{"missing grant receipts", 811, `DROP TABLE transfer_balance_grant_run`},
+		{"grant receipt allows duplicate run", 811, `ALTER TABLE transfer_balance_grant_run DROP CONSTRAINT transfer_balance_grant_run_pkey`},
+		{"grant receipt kind has wrong width", 811, `ALTER TABLE transfer_balance_grant_run ALTER COLUMN grant_kind TYPE varchar(33)`},
+		{"deadline guard reverted to predecessor", 812, `CREATE OR REPLACE FUNCTION transfer_contract_usage_guard() RETURNS trigger LANGUAGE plpgsql AS $guard$` + server.ContractUsageGuardOriginalFunctionBodySql + `$guard$`},
+		{"missing legacy checkpoint bound", 813, `ALTER TABLE contract_close DROP COLUMN legacy_checkpoint_byte_count`},
+		{"legacy checkpoint bound truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN legacy_checkpoint_byte_count TYPE integer`},
+		{"invented legacy checkpoint bound", 813, `ALTER TABLE contract_close ALTER COLUMN legacy_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing identified checkpoint total", 813, `ALTER TABLE contract_close DROP COLUMN identified_checkpoint_byte_count`},
+		{"identified checkpoint total truncates bytes", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count TYPE integer`},
+		{"invented identified checkpoint total", 813, `ALTER TABLE contract_close ALTER COLUMN identified_checkpoint_byte_count SET DEFAULT 0`},
+		{"missing payout plan sweep staging", 814, `DROP TABLE payment_plan_sweep`},
+		{"payout plan allows two pending plans", 814, `DROP INDEX payment_plan_assignment_pending`},
+		{"missing sweep owner guard", 814, `DROP TRIGGER payment_plan_sweep_owner_guard ON transfer_escrow_sweep`},
+		{"sweep owner guard fires on every update", 814, `DROP TRIGGER payment_plan_sweep_owner_guard ON transfer_escrow_sweep; CREATE TRIGGER payment_plan_sweep_owner_guard BEFORE UPDATE ON transfer_escrow_sweep FOR EACH ROW EXECUTE FUNCTION payment_plan_sweep_owner_guard()`},
+		{"missing reliability window", 815, `DROP TABLE payment_plan_reliability_window CASCADE`},
+		{"missing reliability partials", 815, `DROP TABLE payment_plan_reliability_partial`},
+		{"dropped sweep destination index rebuilt", 816, `CREATE INDEX transfer_escrow_sweep_destination_id_sweep_time ON transfer_escrow_sweep (destination_id, sweep_time) INCLUDE (payout_net_revenue_nano_cents)`},
+		{"dropped open pair index rebuilt", 817, `CREATE INDEX transfer_contract_pair_open_create_time ON transfer_contract (source_id, destination_id, create_time) WHERE open AND companion_contract_id IS NULL`},
+		{"dropped open destination index rebuilt", 818, `CREATE INDEX transfer_contract_open_destination_partial ON transfer_contract (destination_id) WHERE open`},
+		{"dropped reschedule error index rebuilt", 819, `CREATE INDEX pending_task_has_reschedule_error ON pending_task (has_reschedule_error, task_id)`},
+		{"missing open connection handler index", 820, `DROP INDEX network_client_connection_connected_handler_id`},
+		{"open connection handler index includes closed rows", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(handler_id)`},
+		{"open connection handler index leads with client", 820, `DROP INDEX network_client_connection_connected_handler_id; CREATE INDEX network_client_connection_connected_handler_id ON network_client_connection(client_id,handler_id) WHERE connected`},
+		{"missing ledger epoch rows", 821, `DROP TABLE st_ledger_v2_epoch_rows`},
+		{"epoch rows with both chunks and a declaration", 821, `ALTER TABLE st_ledger_v2_epoch_rows DROP CONSTRAINT st_ledger_v2_epoch_rows_check`},
+		{"epoch rows without rebuild requests", 821, `ALTER TABLE st_ledger_v2_epoch_rows DROP COLUMN rebuild_requested_by`},
+		{"account coldkeys not unique per pool", 821, `ALTER TABLE st_ledger_v2_account DROP CONSTRAINT st_ledger_v2_account_deployment_key_no_id_coldkey_key`},
+		{"missing account coldkey lookup", 821, `DROP INDEX st_ledger_v2_account_coldkey`},
+		{"funding truncates rao", 821, `ALTER TABLE st_ledger_v2_funding ALTER COLUMN funded_through TYPE numeric(38,0)`},
+		{"root status not closed", 821, `ALTER TABLE st_ledger_v2_root DROP CONSTRAINT st_ledger_v2_root_status_check`},
+		{"open demand lookup includes answered demands", 821, `DROP INDEX st_ledger_v2_demand_open; CREATE INDEX st_ledger_v2_demand_open ON st_ledger_v2_demand(deployment_key,no_id,seq)`},
+		{"demands not keyed by their finalized root", 821, `ALTER TABLE st_ledger_v2_demand DROP CONSTRAINT st_ledger_v2_demand_pkey; ALTER TABLE st_ledger_v2_demand ADD PRIMARY KEY (deployment_key,no_id,seq,account_index)`},
+		{"amounts allow zero", 821, `ALTER TABLE st_ledger_v2_amount DROP CONSTRAINT st_ledger_v2_amount_amount_check`},
+		{"missing verified consent chains", 822, `DROP TABLE st_verified_wallet_consent`},
+		{"verified consent generations not unique", 822, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_pkey`},
+		{"verified consent kinds not closed", 822, `ALTER TABLE st_verified_wallet_consent DROP CONSTRAINT st_verified_wallet_consent_kind_check`},
+		{"verified consent epochs truncate", 822, `ALTER TABLE st_verified_wallet_consent ALTER COLUMN from_epoch TYPE integer`},
+		{"nullable verified consent signer", 822, `ALTER TABLE st_verified_wallet_consent ALTER COLUMN prospective_signer DROP NOT NULL`},
+		{"missing FleetBound scan checkpoint", 822, `DROP TABLE st_fleet_bound_sync`},
+		{"FleetBound checkpoints not unique", 822, `ALTER TABLE st_fleet_bound_sync DROP CONSTRAINT st_fleet_bound_sync_pkey`},
+		{"nullable FleetBound checkpoint", 822, `ALTER TABLE st_fleet_bound_sync ALTER COLUMN next_block DROP NOT NULL`},
+		{"missing App Store transaction price", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN price_milliunits`},
+		{"App Store transaction price truncates milliunits", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN price_milliunits TYPE integer`},
+		{"missing App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN currency`},
+		{"invented App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
+		// the journal's partition preparation republishes the 824 custody, and
+		// the horizon drop guard republishes it after
+		{"dropped provider session transaction index rebuilt", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
+		{"provider session head accepts a zero sequence", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
+		{"provider session retire lookup unbounded again", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
+			RETURNS bigint LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(snMainnetProviderSessionAppendBody)},
+		{"provider session admit floor not immutable", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER FUNCTION provider_work_session_admit_floor(uuid) STABLE`},
+		{"provider session receipt reference dropped", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `DROP TRIGGER provider_work_session_receipt_reference ON provider_work_session_receipt`},
+		{"provider session receipt reference disabled", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER provider_work_session_receipt_reference`},
+		{"provider session receipt depends on a mutable parent", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER TABLE provider_work_session_receipt ADD CONSTRAINT synthetic_receipt_client FOREIGN KEY (client_id) REFERENCES network_client(client_id) NOT VALID`},
+		{"provider session drop guard admits every drop", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS 'BEGIN END'`},
+		{"provider session drop guard back at 13 weeks", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), func() string {
+			_, _, _, dropGuard := server.ProviderWorkSessionPartitionBodiesSql()
+			return `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(dropGuard)
+		}()},
+		{"provider session journal row guard disabled", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER TABLE provider_work_session_event DISABLE TRIGGER original_guard`},
+		{"provider session journal partitioned by sequence", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER TABLE provider_work_session_event RENAME TO synthetic_plain_journal;
+			CREATE TABLE provider_work_session_event (LIKE synthetic_plain_journal INCLUDING ALL) PARTITION BY RANGE (sequence)`},
+		// the horizon guard republishes the 825 custody, including the dropped
+		// index, after 857 and the move guard
+		{"dropped close evidence contract index rebuilt", contractCloseEvidenceHorizonGuardMigrationVersion, `CREATE INDEX contract_close_report_evidence_contract ON contract_close_report_evidence (contract_id, party, accepted_at, report_id)`},
+		{"close evidence accepted time nullable", contractCloseEvidenceHorizonGuardMigrationVersion, `ALTER TABLE contract_close_report_evidence ALTER COLUMN accepted_at DROP NOT NULL`},
+		{"close evidence census index missing", contractCloseEvidenceHorizonGuardMigrationVersion, `DROP INDEX contract_close_original_census`},
+		{"dropped completed waiting probe index rebuilt", 826, `CREATE INDEX provider_probe_cycle_completed_waiting ON provider_egress_probe_cycle (next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
+		{"dropped slot completed waiting probe index rebuilt", 827, `CREATE INDEX provider_probe_cycle_slot_completed_waiting ON provider_egress_probe_cycle (slot_id, next_attempt_at, client_id) WHERE eligible AND NOT completed_priority_ready`},
+		{"connection table truncates on vacuum", 828, `ALTER TABLE network_client_connection RESET (vacuum_truncate)`},
+		{"handler table truncates on vacuum", 828, `ALTER TABLE network_client_handler SET (vacuum_truncate = true)`},
+		{"missing device network index", 829, `DROP INDEX device_network_id`},
+		{"device network index leads with device", 829, `DROP INDEX device_network_id; CREATE INDEX device_network_id ON device(device_id,network_id)`},
+		{"missing device-leading audit index", 830, `DROP INDEX audit_device_event_device_id_event_time`},
+		{"device-leading audit index lacks the covered event type", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id)`},
+		{"device-leading audit index leads with time", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(event_time,device_id,event_id) INCLUDE (event_type)`},
+		{"device-leading audit index is partial", 830, `DROP INDEX audit_device_event_device_id_event_time; CREATE INDEX audit_device_event_device_id_event_time ON audit_device_event(device_id,event_time,event_id) INCLUDE (event_type) WHERE event_type = 'device_added'`},
+		{"dropped time-leading device stats index rebuilt", 831, `CREATE INDEX audit_device_event_stats_device_id ON audit_device_event (event_time, device_id, event_id) INCLUDE (event_type)`},
+		{"missing v2 activation record", 832, `DROP TABLE st_ledger_v2_activation`},
+		{"v2 activations not one per deployment", 832, `ALTER TABLE st_ledger_v2_activation DROP CONSTRAINT st_ledger_v2_activation_pkey`},
+		{"v2 activation without a first epoch", 832, `ALTER TABLE st_ledger_v2_activation DROP CONSTRAINT st_ledger_v2_activation_first_epoch_check`},
+		{"nullable v2 activation vault", 832, `ALTER TABLE st_ledger_v2_activation ALTER COLUMN vault_v2_address DROP NOT NULL`},
+		{"v2 activation settlement truncates", 832, `ALTER TABLE st_ledger_v2_activation ALTER COLUMN settlement_v2_address TYPE varchar(41)`},
+		{"missing guest expiry record", 833, `DROP TABLE lag_guest`},
+		{"guest expiry sweep leads with network", 833, `DROP INDEX lag_guest_expires_at; CREATE INDEX lag_guest_expires_at ON lag_guest(network_id,expires_at)`},
+		{"invented track reissue count", 833, `ALTER TABLE lag_track ALTER COLUMN reissue_count SET DEFAULT 1`},
+		{"track source loses its web default", 833, `ALTER TABLE lag_track ALTER COLUMN source DROP DEFAULT`},
+		{"ticket position widened", 833, `ALTER TABLE lag_ticket ALTER COLUMN position TYPE integer`},
+		{"results not one per ticket", 833, `ALTER TABLE lag_result DROP CONSTRAINT lag_result_ticket_id`},
+		{"result ping times widened", 833, `ALTER TABLE lag_result ALTER COLUMN ping_micros TYPE bigint[]`},
+		{"missing result retention lookup", 833, `DROP INDEX lag_result_created_at`},
+		{"measurement exposure unguarded", 834, `ALTER TABLE network_extender DROP CONSTRAINT network_extender_measurement_exposure`},
+		{"measurement exposure accepted by default", 834, `ALTER TABLE network_extender ALTER COLUMN measurement_exposure_accepted SET DEFAULT true`},
+		{"missing measurement requests", 834, `DROP TABLE network_extender_measurement`},
+		{"pending request lookup includes settled requests", 834, `DROP INDEX network_extender_measurement_pending_time; CREATE INDEX network_extender_measurement_pending_time ON network_extender_measurement(pending_time,extender_id)`},
+		{"measurement certificates not unique", 834, `ALTER TABLE network_extender_measurement_cert DROP CONSTRAINT network_extender_measurement_cert_pkey`},
+		{"nullable measurement certificate expiry", 834, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN not_after DROP NOT NULL`},
+		{"live certificate lookup includes withdrawn", 834, `DROP INDEX network_extender_measurement_cert_live_not_after; CREATE INDEX network_extender_measurement_cert_live_not_after ON network_extender_measurement_cert(not_after)`},
+		{"revocation lookup includes revoked", 834, `DROP INDEX network_extender_measurement_cert_withdrawn_unrevoked; CREATE INDEX network_extender_measurement_cert_withdrawn_unrevoked ON network_extender_measurement_cert(withdraw_time) WHERE withdraw_time IS NOT NULL`},
+		{"missing measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert DROP COLUMN publish_time`},
+		{"required measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN publish_time SET NOT NULL`},
+		{"invented measurement certificate publish time", 835, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN publish_time SET DEFAULT now()`},
+		{"missing modern provider evidence", 836, `DROP TABLE provider_modern_evidence`},
+		{"modern provider evidence not one row per provider", 836, `ALTER TABLE provider_modern_evidence DROP CONSTRAINT provider_modern_evidence_pkey`},
+		{"nullable modern provider observation time", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN measured_at DROP NOT NULL`},
+		{"modern provider key exchange widened", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN key_exchange TYPE varchar(65)`},
+		{"modern provider receive window narrowed", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN max_receive_window_byte_count TYPE integer`},
+		{"invented modern provider run count", 836, `ALTER TABLE provider_modern_evidence ALTER COLUMN run_count SET DEFAULT 0`},
+		{"old slot verified by default", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_verified SET DEFAULT true`},
+		{"missing old slot epoch", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location DROP COLUMN arin_old_database_build_epoch`},
+		{"defaulted old slot token", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location ALTER COLUMN arin_old_quality_write_token SET DEFAULT '00000000-0000-0000-0000-000000000000'::uuid`},
+		{"missing rollup old epoch", arindbCanaryRollupMigrationVersion, `ALTER TABLE network_client_location_reliability DROP COLUMN arin_old_epoch`},
+		{"nullable rollup latest epoch", arindbCanaryRollupMigrationVersion, `ALTER TABLE network_client_location_reliability ALTER COLUMN arin_epoch DROP NOT NULL`},
+		{"disabled old slot guard", arindbCanaryLocationMigrationVersion, `ALTER TABLE network_client_location DISABLE TRIGGER network_client_location_arin_old_quality_guard`},
+		{"narrowed old slot guard", arindbCanaryLocationMigrationVersion, `DROP TRIGGER network_client_location_arin_old_quality_guard ON network_client_location;
+			CREATE TRIGGER network_client_location_arin_old_quality_guard BEFORE INSERT OR UPDATE OF arin_old_quality_verified
+			ON network_client_location FOR EACH ROW EXECUTE FUNCTION network_client_location_arin_old_quality_guard()`},
+		{"replaced old slot guard", arindbCanaryLocationMigrationVersion, `CREATE OR REPLACE FUNCTION network_client_location_arin_old_quality_guard() RETURNS trigger
+			LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+		{"missing measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert DROP COLUMN deliver_time`},
+		{"required measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET NOT NULL`},
+		{"invented measurement certificate deliver time", 839, `ALTER TABLE network_extender_measurement_cert ALTER COLUMN deliver_time SET DEFAULT now()`},
+		{name: "missing device client version", version: 852, sql: `ALTER TABLE device DROP COLUMN client_version`},
+		{name: "missing device client version time", version: 852, sql: `ALTER TABLE device DROP COLUMN client_version_time`},
+		{name: "device client version widened", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version TYPE varchar(65)`},
+		{name: "device client version time has a timezone", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time TYPE timestamp with time zone`},
+		{name: "required device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET NOT NULL`},
+		{name: "required device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET NOT NULL`},
+		{name: "invented device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET DEFAULT 'synthetic-version'`},
+		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
+		// the intake-first custody of these guards moved to the review handoff,
+		// which re-created their functions, and on with the handoff's custody
+		// to the official review, the executor control amendment, the
+		// qualification recovery and the admission exception
+		{name: "elected-winner review guard dropped", version: custodian, sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
+		{name: "elected-winner checkpoint guard dropped", version: custodian, sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
+		{name: "missing provider capability declarations", version: 894, sql: `DROP TABLE provide_capability`},
+		{name: "nullable post-quantum declaration", version: 894, sql: `ALTER TABLE provide_capability ALTER COLUMN post_quantum_encryption DROP NOT NULL`},
+		{name: "provider capability declarations without their key", version: 894, sql: `ALTER TABLE provide_capability DROP CONSTRAINT provide_capability_pkey`},
+		{name: "contract id floor made stable", version: 856, sql: `ALTER FUNCTION contract_id_floor(timestamptz) STABLE`},
+		{name: "close evidence guard refuses retention again", version: contractCloseEvidenceHorizonGuardMigrationVersion, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
+			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
+		{name: "close evidence guard back at its 91-day retention", version: contractCloseEvidenceHorizonGuardMigrationVersion, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
+			LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(server.ContractCloseEvidenceMoveGuardBodySql())},
+		{name: "key history guard back on its fixed 91 days", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: `CREATE OR REPLACE FUNCTION st_client_key_history_immutable_guard()
+			RETURNS trigger LANGUAGE plpgsql AS $guard$` + server.ClientKeyHistoryGuardBodySql() + `$guard$`},
+		{name: "key history floor rolled back to 91 days", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: server.ClientKeyHistoryRetentionFloorRollbackSql},
+		{name: "key history floor made immutable", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: `ALTER FUNCTION st_client_key_history_retention_floor() IMMUTABLE`},
+		{name: "task queue pages filled again", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task RESET (fillfactor)`},
+		{name: "task queue pages filled to 70", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task SET (fillfactor = 70)`},
+		{name: "legacy auth attempt table recreated", version: server.WritePathMigrationVersion(server.WritePathUserAuthAttemptDrop), sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},
+		{name: "dropped handler heartbeat index rebuilt", version: server.WritePathMigrationVersion(server.WritePathHandlerHeartbeatIndexDrop), sql: `CREATE INDEX network_client_handler_heartbeat_time ON network_client_handler (heartbeat_time, handler_id)`},
+		{name: "transfer balance pages filled", version: server.WritePathMigrationVersion(server.WritePathTransferBalanceFillfactor), sql: `ALTER TABLE transfer_balance RESET (fillfactor)`},
+		{name: "device pages filled", version: server.WritePathMigrationVersion(server.WritePathDeviceFillfactor), sql: `ALTER TABLE device SET (fillfactor = 100)`},
+		{name: "search provider stats pages filled", version: server.WritePathMigrationVersion(server.WritePathSearchProviderStatsFillfactor), sql: `ALTER TABLE search_provider_stats RESET (fillfactor)`},
+		{name: "missing debit journal age index", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time`},
+		{name: "debit journal age index keys applied", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time; CREATE INDEX transfer_debit_journal_shard_create_time ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "dropped debit journal applied age index rebuilt", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "debit journal shard index missing", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `DROP INDEX transfer_debit_journal_shard`},
+		{name: "debit journal pages filled", version: server.WritePathMigrationVersion(server.WritePathDebitJournalFillfactor), sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
+		{name: "dropped full probe deadline index rebuilt", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `CREATE INDEX provider_egress_probe_cycle_next_attempt ON provider_egress_probe_cycle (next_attempt_at, client_id)`},
+		{name: "probe queue identity missing", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `ALTER TABLE provider_egress_probe_cycle DROP CONSTRAINT provider_egress_probe_cycle_pkey`},
+		{name: "dropped client score window index rebuilt", version: server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), sql: `CREATE INDEX client_connection_reliability_score_lookback_max_block ON client_connection_reliability_score (lookback_index, max_block_number)`},
+		{name: "client score pages filled", version: server.WritePathMigrationVersion(server.WritePathClientScoreFillfactor), sql: `ALTER TABLE client_connection_reliability_score RESET (fillfactor)`},
+		{name: "location reliability pages filled", version: server.WritePathMigrationVersion(server.WritePathLocationReliabilityFillfactor), sql: `ALTER TABLE network_client_location_reliability RESET (fillfactor)`},
+		{name: "missing open connection client index", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id`},
+		{name: "open connection client index includes closed rows", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id; CREATE INDEX network_client_connection_connected_client_id_extender_id ON network_client_connection (client_id, extender_id)`},
+		{name: "open connection client index leads with extender", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), sql: `DROP INDEX network_client_connection_connected_client_id_extender_id; CREATE INDEX network_client_connection_connected_client_id_extender_id ON network_client_connection (extender_id, client_id) WHERE connected`},
+		{name: "missing open connection address index", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), sql: `DROP INDEX network_client_connection_connected_client_address_hash`},
+		{name: "open connection address index includes closed rows", version: server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), sql: `DROP INDEX network_client_connection_connected_client_address_hash; CREATE INDEX network_client_connection_connected_client_address_hash ON network_client_connection (client_address_hash)`},
+		{name: "missing closed connection index", version: server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), sql: `DROP INDEX network_client_connection_closed_disconnect_time`},
+		{name: "closed connection index includes open rows", version: server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), sql: `DROP INDEX network_client_connection_closed_disconnect_time; CREATE INDEX network_client_connection_closed_disconnect_time ON network_client_connection (disconnect_time)`},
+		{name: "dropped full connected client index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionConnectedClientIndexDrop), sql: `CREATE INDEX network_client_connection_connected_client_id ON network_client_connection (connected, client_id)`},
+		{name: "dropped full connection extender index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), sql: `CREATE INDEX network_client_connection_client_id_connected_extender_id ON network_client_connection (client_id, connected, extender_id)`},
+		{name: "dropped full connection address index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), sql: `CREATE INDEX network_client_connection_client_address_hash_connected ON network_client_connection (client_address_hash, connected)`},
+		{name: "dropped full connection disconnect time index rebuilt", version: server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), sql: `CREATE INDEX network_client_connection_connected_disconnect_time ON network_client_connection (connected, disconnect_time)`},
+		// the index diet's drops stay dropped
+		{name: "dropped reap-pending contract index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), sql: `CREATE INDEX transfer_contract_reap_pending_create_time ON transfer_contract (create_time) WHERE reap_time IS NULL AND close_time IS NOT NULL`},
+		{name: "dropped stream index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), sql: `CREATE INDEX transfer_contract_stream_id ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`},
+		{name: "dropped sweep payment index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), sql: `CREATE INDEX transfer_escrow_sweep_payment_id ON transfer_escrow_sweep (payment_id)`},
+		// The retired queue's guard, function and key stay gone; its empty
+		// table keeps the published shape.
+		{name: "retired legacy settlement guard function restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `CREATE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+		{name: "retired legacy settlement outcome guard restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `CREATE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+			CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome ON transfer_contract
+			FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`},
+		{name: "retired legacy settlement contract key restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id)`},
+		{name: "retained legacy settlement queue loses its due index", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `DROP INDEX legacy_settlement_intent_due`},
+		{name: "retained legacy settlement queue loses its shard check", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`},
+		{name: "retained legacy settlement queue invents an accounting failure", version: server.LegacySettlementIntentRetirementMigrationVersion(),
+			sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`},
+		// A new TLS finding is pending until judged; a provider default would
+		// exclude on arrival, and a missing column breaks every reader.
+		{name: "TLS finding verdict missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security DROP COLUMN tls_verdict`},
+		{name: "TLS finding verdict defaults to excluding", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security ALTER COLUMN tls_verdict SET DEFAULT 1`},
+		{name: "TLS finding decided failure missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security DROP COLUMN tls_verdict_measured_at`},
+		// Without the clearing column every legacy flag reader fails; a
+		// default would clear every flag at once.
+		{name: "legacy TLS flag clearing missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_cleared_at`},
+		{name: "legacy TLS flag cleared by default", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health ALTER COLUMN legacy_tls_cleared_at SET DEFAULT now()`},
+		{name: "legacy TLS recheck start missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_recheck_from`},
+		// The pending review handoff: an owner, call or completion row only
+		// through its guard, an append-only ledger, an operator-only import,
+		// and the exact winner-review bodies it re-created. The official review,
+		// the executor control amendment, the qualification recovery and the
+		// admission exception carry this custody on.
+		{name: "review handoff owner guard disabled", version: custodian,
+			sql: `ALTER TABLE competition_review_handoff DISABLE TRIGGER competition_review_handoff_before_insert`},
+		{name: "review handoff calls made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_review_handoff_call_immutable ON competition_review_handoff_call`},
+		{name: "review handoff call kinds widened", version: custodian,
+			sql: `ALTER TABLE competition_review_handoff_call DROP CONSTRAINT competition_review_handoff_call_kind_check`},
+		{name: "review handoff decision made repeatable", version: custodian,
+			sql: `ALTER TABLE competition_review_handoff DROP CONSTRAINT competition_review_handoff_round_id_decision_sha256_key`},
+		{name: "pending review import unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_review_handoff_import_before_insert ON competition_integrity_review`},
+		{name: "pending review observed at any time", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_review_handoff_observed(review_json jsonb, legacy_created_at timestamp) RETURNS timestamp LANGUAGE plpgsql STABLE AS 'BEGIN RETURN legacy_created_at; END'`},
+		{name: "winner source authorization accepts any handoff", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_source_authorized(intent jsonb, predecessor_id uuid) RETURNS boolean LANGUAGE plpgsql AS 'BEGIN RETURN true; END'`},
+		// An older release's outcome must read as the scored general outcome
+		// it was counted as; a probation default would take every outcome an
+		// older release stores out of the eight-hour window, and a missing
+		// column breaks every window reader.
+		{name: "URL outcome source missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history DROP COLUMN url_source`},
+		{name: "URL outcome probation defaults to unscored", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation SET DEFAULT true`},
+		{name: "URL outcome probation nullable", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation DROP NOT NULL`},
+		// A country site scores only once the refresh graduates it: a scored
+		// default would score every new site on arrival, and without the
+		// state or the pair tally the ingest fails.
+		{name: "country site state missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `DROP TABLE provider_egress_country_site`},
+		{name: "country site scored by default", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site ALTER COLUMN scored SET DEFAULT true`},
+		{name: "country site pair tally missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `DROP TABLE provider_egress_country_site_tally`},
+		// The refresh sums the tally by the network each row carries, and a
+		// row is updated about six times a day: without the column the ingest
+		// fails, and full pages turn those updates into index writes.
+		{name: "country site pair tally without its networks", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site_tally DROP COLUMN network_id`},
+		{name: "country site pair tally pages filled", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site_tally RESET (fillfactor)`},
+		// A zero-carry verdict excludes only until its expiry, one row per
+		// provider: without the expiry every reader fails, and without the
+		// key a provider could hold two verdicts.
+		{name: "zero-carry verdict expiry missing", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP COLUMN expire_time`},
+		{name: "zero-carry verdicts unkeyed", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP CONSTRAINT provider_zero_carry_pkey`},
+		{name: "zero-carry upgrade evidence missing", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP COLUMN client_version`},
+		// The epoch-one official review: an authorization row only through its
+		// guard and never changed, bound to its round, and the exact review
+		// bodies it re-created with the official review exception, so the
+		// handoff's winner review body and the two-member identity body are
+		// drift from it on. The executor control amendment, the qualification
+		// recovery and the admission exception carry this custody on.
+		{name: "official review authorization unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_official_review_authorization_before_insert ON competition_official_review_authorization`},
+		{name: "official review authorization made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_official_review_immutable ON competition_official_review_authorization`},
+		{name: "official review authorization without its round", version: custodian,
+			sql: `ALTER TABLE competition_official_review_authorization DROP CONSTRAINT competition_official_review_authorization_round_id_fkey`},
+		{name: "official review findings accept anything", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_official_review_findings_valid(request jsonb) RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT true'`},
+		{name: "official review authorized without its import", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_official_review_request_authorized(round_uuid uuid, request jsonb) RETURNS boolean LANGUAGE sql STABLE AS 'SELECT true'`},
+		{name: "winner review guard back on the handoff body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_review_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(handoffBodies.WinnerReviewGuard)},
+		{name: "review identity guard back on the two-member body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_review_identity_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(twoMemberIdentityGuard)},
+		// The executor control amendment: an amendment only through its guard,
+		// never changed or truncated, its canonical bytes bound to its JSON; a
+		// no-op receipt and a qualification clock bound to the current
+		// amendment; the amended host identity and its started-job lookup; and
+		// the exact equivalence guard it re-created, so the unamended host
+		// lookup is drift from it on. The qualification recovery and the
+		// admission exception carry this custody on.
+		{name: "executor control amendment unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_executor_control_amendment_identity ON competition_executor_control_amendment`},
+		{name: "executor control amendment made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_executor_control_amendment_append_only ON competition_executor_control_amendment`},
+		{name: "executor control amendment truncatable", version: custodian,
+			sql: `ALTER TABLE competition_executor_control_amendment DISABLE TRIGGER competition_executor_control_amendment_no_truncate`},
+		{name: "executor control amendment canonical bytes unbound", version: custodian,
+			sql: `ALTER TABLE competition_executor_control_amendment DROP CONSTRAINT competition_executor_control_amendment_check`},
+		{name: "no-op receipt ignores the amendment", version: custodian,
+			sql: `DROP TRIGGER competition_executor_control_receipt_identity ON competition_executor_equivalence`},
+		{name: "stale coordinator starts a host-admission clock", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_run DISABLE TRIGGER competition_executor_control_qualification_identity`},
+		{name: "amended host identity ignored", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_control_host(target uuid, identity text) RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT NULL::jsonb'`},
+		{name: "started job lookup missing", version: custodian,
+			sql: `DROP INDEX competition_executor_control_started_job`},
+		{name: "equivalence guard back on the unamended host lookup", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_equivalence_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(unamendedEquivalenceGuard)},
+		// Pay with Gamma: the unique indexes carry the biller's invariants. A
+		// derivation index assigns one deposit hotkey, an automatic intent is
+		// made once per account, purpose and period, an intent's reference and
+		// its charge are unique, and at most one spend batch is live; an
+		// account renews unless it turns renewal off.
+		{name: "gamma deposit hotkey derivation reusable", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_deposit_hotkey_index_unique`},
+		{name: "gamma automatic intent repeatable per period", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_payment_intent_period`},
+		{name: "gamma intent reference shared", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_payment_intent_reference`},
+		{name: "gamma intent charged twice", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_charge_intent`},
+		{name: "two live gamma spend batches", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_spend_batch_live; CREATE INDEX gamma_spend_batch_live ON gamma_spend_batch ((true)) WHERE state IN ('signed', 'submitted')`},
+		{name: "gamma renewal off by default", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `ALTER TABLE gamma_account ALTER COLUMN auto_renew SET DEFAULT false`},
+		{name: "gamma chain state not a singleton", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `ALTER TABLE gamma_chain_state DROP CONSTRAINT gamma_chain_state_singleton_check`},
+		// The single-use qualification recovery: a replacement only through its
+		// guard, never changed or truncated, bound to its original run and its
+		// exact digest; one replacement job per host that never becomes a public
+		// submission; a clock that reads the replacement; and the exact
+		// equivalence guard it re-created, so the amendment's body is drift from
+		// it on. The admission exception carries this custody on.
+		{name: "qualification recovery unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_executor_qualification_recovery_identity ON competition_executor_qualification_recovery`},
+		{name: "qualification recovery made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_executor_qualification_recovery_append_only ON competition_executor_qualification_recovery`},
+		{name: "qualification recovery truncatable", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_recovery DISABLE TRIGGER competition_executor_qualification_recovery_no_truncate`},
+		{name: "qualification recovery without its original run", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_recovery DROP CONSTRAINT competition_executor_qualification_recove_round_id_host_id_fkey`},
+		{name: "qualification recovery authorization digest unbound", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_recovery DROP CONSTRAINT competition_executor_qualification_recovery_check1`},
+		{name: "qualification recovery job reusable", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_recovery DROP CONSTRAINT competition_executor_qualification_recovery_job_id_key`},
+		{name: "replacement qualification job becomes a submission", version: custodian,
+			sql: `DROP TRIGGER zz_competition_executor_recovery_job_identity ON competition_job`},
+		{name: "qualification clock ignores the replacement", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_qualification_clock(target uuid, identity text) RETURNS TABLE(job_id uuid, started_at timestamp, deadline_at timestamp, api_image_digest varchar, worker_image_digest varchar) LANGUAGE sql STABLE AS 'SELECT q.job_id, q.started_at, q.deadline_at, q.api_image_digest, q.worker_image_digest FROM competition_executor_qualification_run q WHERE q.round_id=target AND q.host_id=identity'`},
+		{name: "equivalence guard back on the amendment body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_equivalence_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(amendedEquivalenceGuard)},
+		// The retained host admission exception: an exception only through its
+		// guard, never changed or truncated, bound to its round and to its exact
+		// receipt digest; the admitted evidence view over both receipt sources;
+		// and the exact whole-host readiness it re-created, so the amendment's
+		// readiness body is drift from it on.
+		{name: "admission exception unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_executor_admission_exception_identity ON competition_executor_admission_exception`},
+		{name: "admission exception made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_executor_admission_exception_append_only ON competition_executor_admission_exception`},
+		{name: "admission exception truncatable", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DISABLE TRIGGER competition_executor_admission_exception_no_truncate`},
+		{name: "admission exception without its round", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DROP CONSTRAINT competition_executor_admission_exception_round_id_fkey`},
+		{name: "admission exception receipt digest unbound", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DROP CONSTRAINT competition_executor_admission_exception_check3`},
+		{name: "admitted evidence omits the exceptions", version: custodian,
+			sql: `CREATE OR REPLACE VIEW competition_executor_admitted_evidence AS SELECT round_id, host_id, receipt_json, receipt_sha256, baseline_sha256, created_at FROM competition_executor_equivalence`},
+		{name: "whole-host readiness back on the amendment body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_control_hosts_ready(target uuid) RETURNS boolean LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(amendedHostsReady)},
+		// The onboarding distribution is required with an empty default, so an
+		// older release's insert, which does not name it, stores the empty
+		// distribution; through the signal now that the catalog reaches it.
+		{name: "onboarding distribution nullable", version: server.NetworkOnboardingDistributionMigrationVersion(),
+			sql: `ALTER TABLE network_onboarding ALTER COLUMN distribution DROP NOT NULL`},
+		{name: "onboarding distribution without its default", version: server.NetworkOnboardingDistributionMigrationVersion(),
+			sql: `ALTER TABLE network_onboarding ALTER COLUMN distribution DROP DEFAULT`},
+		// The ping target evidence count is nullable with no default, so the
+		// rows a release from before it stores read unknown rather than none.
+		{name: "ping target evidence count defaults to none", version: server.NetworkPingTargetEvidenceSchemaMigrationVersion(),
+			sql: `ALTER TABLE network_ping_target_hour_tally ALTER COLUMN evidence_rejection_count SET DEFAULT 0`},
+		// An extender address's ports are nullable with no default, so an
+		// address the running release stores reads null, the extender's ports
+		// (connect/EXTENDER.md S10), never a port of 0.
+		{name: "extender address tcp port defaults to zero", version: server.NetworkExtenderAddressPortsSchemaMigrationVersion(),
+			sql: `ALTER TABLE network_extender_address ALTER COLUMN tcp_port SET DEFAULT 0`},
+		{name: "extender address udp port required", version: server.NetworkExtenderAddressPortsSchemaMigrationVersion(),
+			sql: `UPDATE network_extender_address SET udp_port = 443; ALTER TABLE network_extender_address ALTER COLUMN udp_port SET NOT NULL`},
+		// A capture the flag award's network is read by its own index, so a
+		// network's wins outlive its clients' rows.
+		{name: "ctf award network index absent", version: server.CtfAwardNetworkMigrationVersion(),
+			sql: `DROP INDEX ctf_award_network`},
+		// A platform endpoint registration stays one of sidecar's three edges,
+		// the kinds the signed amendment entry covers, and an epoch row's
+		// extender component stays null for an epoch the amendment does not
+		// cover.
+		{name: "platform endpoint of any kind", version: server.StLedgerV2ExtenderMigrationVersion(),
+			sql: `ALTER TABLE st_platform_endpoint DROP CONSTRAINT st_platform_endpoint_kind_check`},
+		{name: "extender bytes default to zero", version: server.StLedgerV2ExtenderMigrationVersion(),
+			sql: `ALTER TABLE st_ledger_v2_epoch_rows ALTER COLUMN extender_bytes SET DEFAULT 0`},
+		// A URL outcome an older release stores reads no failed later leg and
+		// no post-quantum observation: a plain failure, never positive.
+		{name: "post-quantum outcome defaults to positive", version: server.ProviderEgressFp2EvidenceMigrationVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN pq_outcome SET DEFAULT 1`},
+		{name: "failed later legs nullable", version: server.ProviderEgressFp2EvidenceMigrationVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN failed_later_legs DROP NOT NULL`},
+	}
+	// Current-head fault expectations must name a custodian still active at
+	// that head; inherited guards transfer with the published contract.
+	for _, fault := range faults {
+		artifact := migrationCurrentSuffixTestContract(t, fault.version).artifact
+		if artifact.requiredVersion > server.MigrationCount() ||
+			(artifact.removedVersion != 0 && artifact.removedVersion <= server.MigrationCount()) {
+			t.Fatalf("%s expects inactive migration owner %d at head %d", fault.name, fault.version, server.MigrationCount())
+		}
+	}
+	var observed []snMainnetMigrationAlertObservation
+	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
+		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
+			t.Fatalf("healthy suffix reports drift: %s", drift)
+		}
+		for _, fault := range faults {
+			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
+				if _, err := tx.Exec(ctx, fault.sql); err != nil {
+					t.Fatalf("apply %s: %v", fault.name, err)
+				}
+				alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(&snMainnetMigrationTxSource{tx: tx}))
+				if err != nil {
+					t.Fatalf("inspect %s: %v", fault.name, err)
+				}
+				artifact := migrationCurrentSuffixTestContract(t, fault.version).artifact
+				observed = append(observed, snMainnetMigrationAlertObservation{
+					alerts: alerts, want: fmt.Sprintf("%s@v%d", artifact.name, fault.version),
+				})
+			})
+		}
+		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
+			t.Fatalf("rolled-back suffix faults left drift: %s", drift)
+		}
+	})
+	if len(observed) != len(faults) {
+		t.Fatalf("observed %d schema faults, want %d", len(observed), len(faults))
+	}
+	for index, observation := range observed {
+		if alert := requireAlertClass(t, observation.alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), observation.want) {
+			t.Fatalf("%s lost its owning migration: %s", faults[index].name, alert.Markdown())
+		}
+	}
+}
+
+// Project only index build state from the actual migrated index definition.
+// No privileged PostgreSQL catalog mutation is needed to model interruption.
+func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
+	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		server.Db(ctx, func(conn server.PgConn) {
+			for _, index := range []struct {
+				version     int
+				table, name string
+			}{
+				{807, "network_client", "network_client_session_active"},
+				{808, "auth_code", "auth_code_origin_session"},
+				{809, "pending_task", "pending_task_function_poll_order"},
+				{810, "transfer_contract", "transfer_contract_audit_closed_null_day"},
+				{820, "network_client_connection", "network_client_connection_connected_handler_id"},
+				{829, "device", "device_network_id"},
+				{830, "audit_device_event", "audit_device_event_device_id_event_time"},
+				{848, "account_feedback", "account_feedback_network_id_feedback_time"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionOpenClientIndex), "network_client_connection", "network_client_connection_connected_client_id_extender_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), "network_client_connection", "network_client_connection_connected_client_address_hash"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), "network_client_connection", "network_client_connection_closed_disconnect_time"},
+				{server.SnTopReplicaSchemaMigrationVersion(), "sn_head_summary", "sn_head_summary_replica_genesis"},
+			} {
+				// read as the signal's index catalog reads it, so a partitioned
+				// contract table's parent index compares without ONLY
+				var definition string
+				var predicate *string
+				server.Raise(conn.QueryRow(ctx, `SELECT `+migrationIndexDefinitionSql("index_relation", "table_relation.relname")+`,
+ pg_get_expr(index_record.indpred,index_record.indrelid)
+ FROM pg_index index_record
+ JOIN pg_class index_relation ON index_relation.oid=index_record.indexrelid
+ JOIN pg_class table_relation ON table_relation.oid=index_record.indrelid
+ WHERE index_record.indexrelid=to_regclass('public.'||$1)`, index.name).Scan(&definition, &predicate))
+				guard := migrationCurrentSuffixTestContract(t, index.version).query
+				for _, state := range []struct{ valid, ready, want bool }{
+					{valid: true, ready: true, want: true}, {valid: false, ready: true}, {valid: true, ready: false},
+				} {
+					var matched bool
+					server.Raise(conn.QueryRow(ctx, `WITH index_artifact AS (
+ SELECT $1::text AS table_name, $2::text AS index_name,
+ $3::text AS definition, $4::text AS predicate_definition,
+ $5::boolean AS indisvalid, $6::boolean AS indisready) SELECT `+guard,
+						index.table, index.name, definition, predicate, state.valid, state.ready).Scan(&matched))
+					if matched != state.want {
+						t.Fatalf("version %d index valid=%t ready=%t matched=%t", index.version, state.valid, state.ready, matched)
+					}
+				}
+			}
+			// An interrupted DROP INDEX CONCURRENTLY leaves the index invalid, and
+			// later not ready, until the drop is rerun. Only absence is removal.
+			for _, index := range []struct {
+				version     int
+				table, name string
+			}{
+				{816, "transfer_escrow_sweep", "transfer_escrow_sweep_destination_id_sweep_time"},
+				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
+				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
+				{819, "pending_task", "pending_task_has_reschedule_error"},
+				// the horizon drop guard republishes the 824 custody after the
+				// journal's partition preparation
+				{server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider_work_session_event", "provider_work_session_event_transaction"},
+				// the horizon guard republishes the 825 custody after 857 and the
+				// move guard
+				{contractCloseEvidenceHorizonGuardMigrationVersion, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
+				{826, "provider_egress_probe_cycle", "provider_probe_cycle_completed_waiting"},
+				{827, "provider_egress_probe_cycle", "provider_probe_cycle_slot_completed_waiting"},
+				{831, "audit_device_event", "audit_device_event_stats_device_id"},
+				{server.WritePathMigrationVersion(server.WritePathHandlerHeartbeatIndexDrop), "network_client_handler", "network_client_handler_heartbeat_time"},
+				{server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), "client_connection_reliability_score", "client_connection_reliability_score_lookback_max_block"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionConnectedClientIndexDrop), "network_client_connection", "network_client_connection_connected_client_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionClientExtenderIndexDrop), "network_client_connection", "network_client_connection_client_id_connected_extender_id"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionAddressIndexDrop), "network_client_connection", "network_client_connection_client_address_hash_connected"},
+				{server.WritePathMigrationVersion(server.WritePathConnectionDisconnectTimeIndexDrop), "network_client_connection", "network_client_connection_connected_disconnect_time"},
+				{server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), "transfer_contract", "transfer_contract_reap_pending_create_time"},
+				{server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), "transfer_contract", "transfer_contract_stream_id"},
+				{server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), "transfer_escrow_sweep", "transfer_escrow_sweep_payment_id"},
+			} {
+				guard := migrationCurrentSuffixTestContract(t, index.version).query
+				var absent bool
+				server.Raise(conn.QueryRow(ctx, `WITH index_artifact AS (
+ SELECT NULL::text AS table_name, NULL::text AS index_name WHERE false) SELECT `+guard).Scan(&absent))
+				if !absent {
+					t.Fatalf("version %d removed index is not recognized as absent", index.version)
+				}
+				for _, state := range []struct{ valid, ready bool }{{true, true}, {false, true}, {false, false}} {
+					var removed bool
+					server.Raise(conn.QueryRow(ctx, `WITH index_artifact AS (
+ SELECT $1::text AS table_name, $2::text AS index_name,
+ $3::boolean AS indisvalid, $4::boolean AS indisready) SELECT `+guard,
+						index.table, index.name, state.valid, state.ready).Scan(&removed))
+					if removed {
+						t.Fatalf("version %d leftover index valid=%t ready=%t reported as removed", index.version, state.valid, state.ready)
+					}
+				}
+			}
+		})
+	})
+}
+
+// Missing future columns are pending; published omissions must reach the public reducer.
+func TestMigrationsDeviceClientVersionPublicationBoundary(t *testing.T) {
+	head := server.MigrationCount()
+	if head < 852 {
+		t.Fatalf("device client-version migration is not published: head=%d", head)
+	}
+	artifact := migrationCurrentSuffixTestContract(t, 852).artifact
+	for _, test := range []struct {
+		version int
+		present bool
+		class   string
+	}{
+		{version: 851, class: "migration-behind"},
+		{version: head, present: true},
+		{version: head, class: "migration-schema-drift"},
+	} {
+		row := syntheticMigrationArtifactRow(test.version)
+		row[artifact.rowColumn] = "f"
+		if test.present {
+			row[artifact.rowColumn] = "t"
+		}
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				return syntheticMigrationCatalogRows(test.version), nil
+			}
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if test.class == "" {
+			if len(alerts) != 0 {
+				t.Fatalf("coherent device columns produced %d alerts", len(alerts))
+			}
+			continue
+		}
+		if len(alerts) != 1 {
+			t.Fatalf("version %d produced %d alerts, want exactly one %s", test.version, len(alerts), test.class)
+		}
+		alert := requireAlertClass(t, alerts, test.class)
+		if test.class == "migration-schema-drift" && !strings.Contains(alert.Markdown(), fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion)) {
+			t.Fatal("published device-column drift lost its owning artifact")
+		}
+	}
+}

@@ -1,0 +1,224 @@
+// One verified immutable wire owner is shared by an object's replica writes
+// and exact readbacks. No mutable envelope or corpus-wide cache is retained.
+package startifact
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/urnetwork/server/v2026"
+)
+
+// Only the verified canonical wire and routing identity survive preparation.
+// The caller owns this object until its synchronous replica checks finish.
+// Methods do not mutate the owner; store concurrency remains store-owned.
+type PreparedEvidence struct {
+	identity EvidenceEnvelope
+	encoded  []byte
+}
+
+// Snapshot the input before the existing identity, hash and signature checks.
+// The original envelope and its payload may be changed after this returns
+// without changing either the verified bytes or their publication namespace.
+func PrepareEvidence(envelope *EvidenceEnvelope) (*PreparedEvidence, error) {
+	if envelope == nil {
+		return nil, errors.New("evidence envelope is missing")
+	}
+	snapshot := *envelope
+	snapshot.Payload = bytes.Clone(envelope.Payload)
+	encoded, err := EvidenceBytes(&snapshot)
+	if err != nil {
+		return nil, err
+	}
+	// Do not retain a second payload beside its complete signed carrier.
+	snapshot.Payload = nil
+	return &PreparedEvidence{identity: snapshot, encoded: encoded}, nil
+}
+
+// Derive the immutable routes from the sealed signed identity for this store.
+// A kind outside the history index (EvidenceHistoryIndexed) has only its
+// content route, and its receipt names no history key.
+func (self *PreparedEvidence) publication(store server.BlobStore) (*Published, error) {
+	if self == nil || len(self.encoded) == 0 {
+		return nil, errors.New("prepared evidence is missing")
+	}
+	if store == nil {
+		return nil, errors.New("server/blob store is unavailable")
+	}
+	contentKey, err := EvidenceContentKey(store, self.identity.ContentHash)
+	if err != nil {
+		return nil, err
+	}
+	published := &Published{ContentHash: self.identity.ContentHash, ContentKey: contentKey, Bucket: store.Bucket()}
+	if !EvidenceHistoryIndexed(self.identity.Kind) {
+		return published, nil
+	}
+	runId := self.identity.RunID
+	if runId == "" {
+		runId = EvidenceDeploymentHistoryRunID
+	}
+	published.HistoryKey, err = EvidenceHistoryKey(store, self.identity.DeploymentID, self.identity.Netuid, self.identity.Kind, runId, self.identity.ContentHash)
+	if err != nil {
+		return nil, err
+	}
+	return published, nil
+}
+
+// The keys an evidence publication writes and verifies, content route first.
+func (self *Published) storedKeys() []string {
+	if self.HistoryKey == "" {
+		return []string{self.ContentKey}
+	}
+	return []string{self.ContentKey, self.HistoryKey}
+}
+
+// Every route executes its immutable create and exact winner readback using
+// one private synced carrier. Staging the same bytes again for the history
+// route adds a redundant synchronous disk flush to every publication.
+func (self *PreparedEvidence) Publish(ctx context.Context, store server.BlobStore) (*Published, error) {
+	published, _, err := self.publish(ctx, store)
+	return published, err
+}
+
+// Publish, also reporting whether this publication created any route; false
+// means every route already held exactly these bytes.
+func (self *PreparedEvidence) publish(ctx context.Context, store server.BlobStore) (result *Published, created bool, resultErr error) {
+	if ctx == nil {
+		return nil, false, errors.New("evidence publication context is missing")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	published, err := self.publication(store)
+	if err != nil {
+		return nil, false, err
+	}
+	file, err := os.CreateTemp("", "urnetwork-st-artifact-*.json")
+	if err != nil {
+		return nil, false, err
+	}
+	path := file.Name()
+	defer func() {
+		if file != nil {
+			resultErr = errors.Join(resultErr, file.Close())
+		}
+		resultErr = errors.Join(resultErr, os.Remove(path), ctx.Err())
+		if resultErr != nil {
+			result, created = nil, false
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		return nil, false, err
+	}
+	if _, err := file.Write(self.encoded); err != nil {
+		return nil, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if err := file.Sync(); err != nil {
+		return nil, false, err
+	}
+	closeErr := file.Close()
+	file = nil
+	if closeErr != nil {
+		return nil, false, closeErr
+	}
+	for _, key := range published.storedKeys() {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		routeCreated, err := putImmutableFromFile(ctx, store, key, path, self.encoded)
+		if err != nil {
+			return nil, false, err
+		}
+		created = created || routeCreated
+	}
+	return published, created, ctx.Err()
+}
+
+// Reads every stored route back before writing anything. stored is true only
+// when every route already holds exactly these bytes; a route that holds no
+// object ends the check with stored false and no error, and one that holds
+// other bytes is an ImmutableConflictError. The readback is the same exact
+// comparison a publication ends with, so a stored result needs no create.
+func (self *PreparedEvidence) readStored(ctx context.Context, store server.BlobStore) (stored bool, resultErr error) {
+	if ctx == nil {
+		return false, errors.New("evidence verification context is missing")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	published, err := self.publication(store)
+	if err != nil {
+		return false, err
+	}
+	for _, key := range published.storedKeys() {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		reader, err := store.Get(ctx, key)
+		if err != nil {
+			if server.IsBlobNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		equal, readErr := compareArtifactReader(ctx, reader, self.encoded)
+		closeErr := reader.Close()
+		if readErr != nil && server.IsBlobNotFound(readErr) {
+			return false, ctx.Err()
+		}
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return false, err
+		}
+		if !equal {
+			return false, &ImmutableConflictError{Key: key}
+		}
+	}
+	return true, ctx.Err()
+}
+
+// Verify receipt identity and independently read every complete stored route.
+// Equality is against the already verified immutable wire, not mutable input
+// fields or a digest-only substitute; exact length and Close remain required.
+func (self *PreparedEvidence) VerifyPublished(ctx context.Context, store server.BlobStore, published *Published) error {
+	if ctx == nil {
+		return errors.New("evidence verification context is missing")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	want, err := self.publication(store)
+	if err != nil {
+		return err
+	}
+	if published == nil || !strings.EqualFold(published.ContentHash, want.ContentHash) || published.Bucket != want.Bucket {
+		return errors.New("direct evidence receipt is invalid")
+	}
+	if published.ContentKey != want.ContentKey || published.HistoryKey != want.HistoryKey {
+		return errors.New("direct evidence receipt keys do not match the rendered store")
+	}
+	for _, key := range want.storedKeys() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		reader, err := store.Get(ctx, key)
+		if err != nil {
+			return fmt.Errorf("read direct evidence object %s: %w", key, err)
+		}
+		equal, readErr := compareArtifactReader(ctx, reader, self.encoded)
+		closeErr := reader.Close()
+		if readErr != nil || closeErr != nil {
+			return fmt.Errorf("read/close direct evidence object %s: %w", key, errors.Join(readErr, closeErr))
+		}
+		if !equal {
+			return fmt.Errorf("direct evidence object %s differs from its signed envelope", key)
+		}
+	}
+	return ctx.Err()
+}

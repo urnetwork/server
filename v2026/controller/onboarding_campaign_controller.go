@@ -1,0 +1,1416 @@
+// SPDX-License-Identifier: MPL-2.0
+
+package controller
+
+// The onboarding email campaign engine (mmm/onboarding/PLAN.md "THE EMAIL
+// SEQUENCE" and "ARCHITECTURE"): server-driven sends through Brevo's
+// transactional API, one scheduled task per network and step, each re-evaluated
+// at send time. The decisions are pure (server/onboarding); this file loads the
+// facts, talks to Brevo and the task scheduler, and records what happened.
+//
+// SAFETY: every outbound side effect is behind onboarding.yml `enabled`
+// (default false). While disabled the engine keeps its rows and schedule so a
+// later enable never replays old steps, and logs each send it would have made.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/urnetwork/glog/v2026"
+
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/model"
+	"github.com/urnetwork/server/v2026/onboarding"
+	"github.com/urnetwork/server/v2026/session"
+	"github.com/urnetwork/server/v2026/task"
+)
+
+// ----- metrics -----
+
+var onboardingStartsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "starts_total",
+	Help:      "Networks entering the onboarding campaign, by whether they can receive email and their sequence variant.",
+}, []string{"email", "variant"})
+
+var onboardingEmailsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "emails_total",
+	Help:      "Campaign step outcomes: sent, skipped (condition not met), deferred (the step waits, as E3a for a late offer's last day), dry_run (engine disabled), failed (Brevo error).",
+}, []string{"step", "template", "variant", "result"})
+
+var onboardingExitsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "exits_total",
+	Help:      "Networks leaving the campaign, by reason.",
+}, []string{"reason"})
+
+var onboardingWebhookEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "webhook_events_total",
+	Help:      "Brevo transactional webhook events attributed to a campaign send, by campaign event and step template.",
+}, []string{"event", "template"})
+
+var onboardingWebhookUnattributedEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "webhook_unattributed_events_total",
+	Help:      "Brevo transactional webhook events of campaign sends that name no recorded send, so no network records them, by campaign event, template (from the send's tags) and reason: anonymous (Brevo's anonymous tracking posts opens, clicks and spam reports with an an# message id and no email) or unknown_send (no send recorded the message id, as for a test send).",
+}, []string{"event", "template", "reason"})
+
+var onboardingAppleOfferCodesAvailable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "apple_offer_codes_available",
+	Help:      "Unassigned App Store one-time offer codes that an offer issued before the next daily top-up can still take, i.e. that outlive it (set by the top-up task).",
+})
+
+var onboardingAppleOfferCodeBatchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "apple_offer_code_batches_total",
+	Help:      "App Store Connect one-time code batch attempts, by result (created, skipped, failed).",
+}, []string{"result"})
+
+func init() {
+	prometheus.MustRegister(
+		onboardingStartsTotal,
+		onboardingEmailsTotal,
+		onboardingExitsTotal,
+		onboardingWebhookEventsTotal,
+		onboardingWebhookUnattributedEventsTotal,
+		onboardingAppleOfferCodesAvailable,
+		onboardingAppleOfferCodeBatchesTotal,
+	)
+}
+
+// ----- config -----
+
+// OnboardingCampaignEnabled is onboarding.yml `enabled`: the master switch of
+// every outbound side effect.
+func OnboardingCampaignEnabled() bool {
+	return model.Onboarding().Enabled
+}
+
+func onboardingSchedule() onboarding.Schedule {
+	cfg := model.Onboarding().Schedule
+	s := onboarding.Schedule{
+		E1Day: cfg.E1Day, E2Day: cfg.E2Day, E3aDay: cfg.E3aDay, E4aDay: cfg.E4aDay,
+		E3bDay: cfg.E3bDay, E4bDay: cfg.E4bDay, E5bDay: cfg.E5bDay,
+		SendWindow: cfg.SendWindow,
+	}
+	if s.E1Day <= 0 && s.E2Day <= 0 {
+		// no schedule block: the plan's table
+		s = onboarding.DefaultSchedule
+	}
+	return s
+}
+
+func onboardingSendWindow() onboarding.SendWindow {
+	w, err := onboarding.ParseSendWindow(model.Onboarding().Schedule.SendWindow)
+	if err != nil {
+		glog.Errorf("[onboarding]schedule.send_window: %s; using %02d:%02d-%02d:%02d\n", err,
+			onboarding.DefaultSendWindow.StartHour, onboarding.DefaultSendWindow.StartMinute,
+			onboarding.DefaultSendWindow.EndHour, onboarding.DefaultSendWindow.EndMinute)
+		return onboarding.DefaultSendWindow
+	}
+	return w
+}
+
+// ----- entering the campaign -----
+
+// EnrollNetworkOnboarding enters a network into the campaign: one row, the
+// cohort time being the enrollment time. Two entry points, one gate
+// (onboarding.Enroll, decision 2026-09-10 from the research readout):
+//
+//   - the account path (viaDevice false): NetworkCreate when no verification is
+//     required, and AuthVerify when it completes, with the login the account
+//     was created with. A network enters when that login is an email address;
+//     the sequence can mail it. One without an email login is left to the
+//     device path.
+//   - the device path (viaDevice true): the network's first device client
+//     (AuthNetworkClient). A network without an email login enters here, as a
+//     row that exits at once as no_email, so the results job counts it among
+//     the real population; a network older than onboarding.EnrollmentHorizon
+//     does not enter at all.
+//
+// A network with neither an email login nor a device never enters: on Main
+// about 85% of new networks are created through the API and never register a
+// device, and they can neither see an offer screen nor be mailed. A second
+// call for the same network is a no-op. Never fails the caller.
+func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId server.Id, userAuth string, viaDevice bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[onboarding]campaign enrollment failed for network %s: %v\n", networkId, r)
+		}
+	}()
+	now := server.NowUtc()
+	cfg := model.Onboarding()
+
+	createdAt := now
+	if viaDevice {
+		// the device path pays one row lookup, and one facts lookup only for a
+		// network that has no row yet
+		if model.GetNetworkOnboarding(clientSession.Ctx, networkId) != nil {
+			return
+		}
+		auth, createTime, ok := model.NetworkEnrollmentFacts(clientSession.Ctx, networkId)
+		if !ok {
+			return
+		}
+		userAuth = auth
+		createdAt = createTime
+	}
+	_, authType := model.NormalUserAuth(userAuth)
+	hasEmail := authType == model.UserAuthTypeEmail
+	if !onboarding.Enroll(hasEmail, viaDevice, createdAt, now) {
+		return
+	}
+
+	platform, distribution := platformFromRequest(clientSession)
+	row := &model.NetworkOnboarding{
+		NetworkId:    networkId,
+		CreatedAt:    now,
+		Email:        hasEmail,
+		Platform:     platform,
+		Distribution: distribution,
+		Locale:       localeFromSession(clientSession),
+	}
+	if ip, ok := clientIp(clientSession); ok {
+		if ipInfo, err := server.GetIpInfoFromString(ip); err == nil && ipInfo != nil {
+			row.TimeZone = ipInfo.Timezone
+			row.Country = model.NormalizeCountryCode(ipInfo.CountryCode)
+		}
+	}
+	if a := cfg.AssignmentForSurface(networkId, model.ExperimentSurfaceEmailSequence, now); a != nil {
+		row.ExperimentId = a.ExperimentId
+		row.EmailVariant = a.Variant
+	}
+
+	switch {
+	case !hasEmail:
+		row.ExitReason = onboarding.ExitNoEmail
+		row.ExitedAt = &now
+	case row.EmailVariant == model.ExperimentVariantHoldout:
+		row.ExitReason = onboarding.ExitHoldout
+		row.ExitedAt = &now
+	default:
+		// E1 in the reader's zone as the mail chain resolves it now: a device
+		// may have reported one already (the device path, a sign-in before
+		// verification), else the sign-up IP's, the country's, or the
+		// sign-up's own time of day
+		frameHour, frameMinute := onboardingFrameTime()
+		zone := resolveMailReader(mailReaderSources{
+			MailContext: model.GetNetworkMailContext(clientSession.Ctx, networkId),
+			Onboarding:  row,
+			ActivityAt:  &now,
+		}, frameHour, frameMinute).SendZone
+		day := onboardingSchedule().Day(onboarding.StepE1, onboarding.PathB)
+		at := onboarding.SendAt(now, day, zone.Loc(), zone.Window(onboardingSendWindow()))
+		row.NextStep = onboarding.StepE1
+		row.NextSendAt = &at
+	}
+
+	if !model.CreateNetworkOnboarding(clientSession.Ctx, row) {
+		return
+	}
+	onboardingStartsTotal.WithLabelValues(fmt.Sprintf("%t", hasEmail), row.EmailVariant).Inc()
+	if row.ExitedAt != nil {
+		onboardingExitsTotal.WithLabelValues(row.ExitReason).Inc()
+		return
+	}
+
+	if OnboardingCampaignEnabled() {
+		if err := brevoUpsertOnboardingContact(clientSession.Ctx, userAuth, row); err != nil {
+			// the contact is a nicety (timezone/platform attributes); the sends
+			// do not depend on it
+			glog.Warningf("[onboarding]brevo contact upsert failed for network %s: %s\n", networkId, err)
+		}
+	}
+	scheduleOnboardingCampaignStep(clientSession, networkId, onboarding.StepE1, *row.NextSendAt)
+}
+
+// onboardingFrameTime is the local time an activity frame reads a sign-up
+// as: the middle of the send window, so the sends keep the sign-up's own
+// time of day, unclamped, and a late step goes within half a window of it.
+func onboardingFrameTime() (hour int, minute int) {
+	return onboardingSendWindow().Middle()
+}
+
+// onboardingMailReader resolves a row's send zone and languages as of now
+// (controller/mail_context.go): the network's mail context, the row's own
+// zone, locale and country, the purchase countries and the newest client
+// event's locale where they can change it, and the sign-up as the activity an
+// unknown zone falls back to.
+func onboardingMailReader(ctx context.Context, row *model.NetworkOnboarding) mailReader {
+	createdAt := row.CreatedAt
+	hour, minute := onboardingFrameTime()
+	return resolveMailReader(loadMailReaderSources(ctx, row.NetworkId, row, "", &createdAt), hour, minute)
+}
+
+// RecordOnboardingClientContext stores what a device reports on auth-client:
+// its time zone, locale, and platform with its app's distribution. Cheap
+// updates, only while the sequence runs, never fail the caller.
+func RecordOnboardingClientContext(clientSession *session.ClientSession, networkId server.Id, timeZone string, locale string, deviceSpec string) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[onboarding]client context failed for network %s: %v\n", networkId, r)
+		}
+	}()
+	if tz := strings.TrimSpace(timeZone); tz != "" && len(tz) <= 64 {
+		if _, err := time.LoadLocation(tz); err == nil {
+			model.SetNetworkOnboardingTimeZone(clientSession.Ctx, networkId, tz)
+		}
+	}
+	if l := normalizeLocale(locale); l != "" {
+		model.SetNetworkOnboardingLocale(clientSession.Ctx, networkId, l)
+	}
+	if p, d := devicePlatform(clientSession, deviceSpec); p != "" {
+		model.SetNetworkOnboardingPlatform(clientSession.Ctx, networkId, p, d)
+	}
+}
+
+// devicePlatform is the platform of a device authenticating, with its app's
+// distribution: the ones its app declares (clientInfoPlatform), else the
+// platform its device spec names, of unknown distribution.
+func devicePlatform(clientSession *session.ClientSession, deviceSpec string) (platform string, distribution string) {
+	if p, d := clientInfoPlatform(clientSession); p != "" {
+		return p, d
+	}
+	return platformFromDeviceSpec(deviceSpec), ""
+}
+
+func clientIp(clientSession *session.ClientSession) (string, bool) {
+	if clientSession == nil {
+		return "", false
+	}
+	ip, _, err := clientSession.ClientIpPort()
+	if err != nil || ip == "" {
+		return "", false
+	}
+	return ip, true
+}
+
+// Platform values (model.EventPlatform*): ios, macos, android, web, windows, linux.
+
+// platformFromRequest is the platform of a sign-up (or of the first device,
+// on the device path), with its app's distribution: the ones the app declares
+// (clientInfoPlatform), else the browser's platform (platformFromUserAgent), of
+// unknown distribution.
+//
+// mmm/ONBOARDING-RETENTION.md P14 and P6: a browser sign-up was recorded as the
+// visitor's OS, so a sign-up on ur.io from a Mac got platform macos and with
+// it the App Store's offer rule (no offer email while the App Store codes do
+// not flow) and the store-billed copy (no price), though such a buyer pays by
+// card on the web. A Windows or Linux browser got the desktop app's platform.
+// A desktop browser is `web` now; a phone's or tablet's browser keeps the
+// phone's platform, since the site sends phones to the app's store.
+func platformFromRequest(clientSession *session.ClientSession) (platform string, distribution string) {
+	if p, d := clientInfoPlatform(clientSession); p != "" {
+		return p, d
+	}
+	return platformFromUserAgent(clientSession), ""
+}
+
+// clientInfoPlatform is the platform an app declares in X-UR-ClientInfo, with
+// the distribution it declares (session.ClientDistribution*, "" when unknown):
+// every app's sdk sets its device type and distribution on its api calls
+// (android, ios, macos, windows, linux), and ur.io's sdk host sets web. The
+// macOS App Store build and the direct-download build declare the same device
+// type, and only the distribution (app_store, mac_direct) tells them apart
+// (P6). The parser keeps a distribution only with a device type it pairs
+// with. "" and "" for cli, server, unknown and no header.
+func clientInfoPlatform(clientSession *session.ClientSession) (platform string, distribution string) {
+	if clientSession == nil {
+		return "", ""
+	}
+	switch deviceType := clientSession.ClientInfo.DeviceType; deviceType {
+	case "android", "ios", "macos", "windows", "linux", onboarding.PlatformWeb:
+		return deviceType, clientSession.ClientInfo.Distribution
+	}
+	return "", ""
+}
+
+// platformFromUserAgent reads the request's User-Agent: a browser's (every
+// browser's starts "Mozilla/") is web, or the phone's or tablet's platform
+// (iOS and iPadOS, Android); any other client's names its platform as a device
+// spec does.
+func platformFromUserAgent(clientSession *session.ClientSession) string {
+	if clientSession == nil {
+		return ""
+	}
+	ua := strings.ToLower(strings.TrimSpace(strings.Join(clientSession.Header["User-Agent"], " ")))
+	if !strings.HasPrefix(ua, "mozilla/") {
+		return platformFromDeviceSpec(ua)
+	}
+	switch {
+	case strings.Contains(ua, "iphone"), strings.Contains(ua, "ipad"), strings.Contains(ua, "ipod"):
+		return "ios"
+	case strings.Contains(ua, "android"):
+		return "android"
+	}
+	return onboarding.PlatformWeb
+}
+
+func platformFromDeviceSpec(spec string) string {
+	s := strings.ToLower(spec)
+	switch {
+	case s == "":
+		return ""
+	// before "ios": a fingerprint's build id can contain it ("NebulaAIOS1.0.3")
+	case androidBuildFingerprintSpec(s):
+		return "android"
+	case strings.Contains(s, "iphone"), strings.Contains(s, "ipad"), strings.Contains(s, "ios"):
+		return "ios"
+	case strings.Contains(s, "android"):
+		return "android"
+	case strings.Contains(s, "macos"), strings.Contains(s, "mac os"), strings.Contains(s, "macintosh"), strings.Contains(s, "darwin"):
+		return "macos"
+	case strings.Contains(s, "windows"):
+		return "windows"
+	case strings.Contains(s, "linux"), strings.Contains(s, "ubuntu"):
+		return "linux"
+	case strings.Contains(s, "mozilla"), strings.Contains(s, "chrome"), strings.Contains(s, "safari"), strings.Contains(s, "firefox"):
+		return "web"
+	case macAppModelSpec(s):
+		return "macos"
+	case androidAppModelSpec(s):
+		return "android"
+	}
+	return ""
+}
+
+// macAppModelPattern matches the model in the macOS app's spec: a Mac's retail
+// name from the app's DeviceModelNames table ("macbook pro (16-inch, nov
+// 2023)", "mac mini (2024)", "imac (24-inch, 2021)"), its hardware model id
+// when the table has no name ("mac16,10", "macbookpro18,3", "imacpro1,1"), or
+// "mac" when the id cannot be read.
+var macAppModelPattern = regexp.MustCompile(`^(?:(?:mac|imac|imac pro|mac mini|mac pro|mac studio|macbook|macbook air|macbook pro)(?: \(.*\))?|(?:mac|imac|imacpro|macbook|macbookair|macbookpro|macmini|macpro)\d+,\d+)$`)
+
+// macAppModelSpec is the spec the macOS app sends: "<os version> <model>"
+// (apple DeviceManager.getDeviceSpecs), e.g. "15.7.9 macbook air (m1, 2020)".
+// It names the Mac, not the store: the App Store build and the
+// direct-download build send the same spec (and declare the same device type
+// and version). Only the distribution their client info declares tells them
+// apart (clientInfoPlatform); a spec alone is macos of unknown distribution,
+// which the rules take for the App Store build, the one with a stable release
+// (mmm/ONBOARDING-RETENTION.md P6). s is lower case.
+func macAppModelSpec(s string) bool {
+	_, model, ok := strings.Cut(s, " ")
+	if !ok || !leadingOsVersion(s) {
+		return false
+	}
+	return macAppModelPattern.MatchString(strings.TrimSpace(model))
+}
+
+// androidBuildFingerprintSpec is the spec older Android apps sent:
+// "<os version> <Build.FINGERPRINT>", the fingerprint being
+// brand/product/device:release/id/incremental:type/tags, e.g.
+// "14 tecno/lh7n-ru/tecno-lh7n:14/up1a.231005.007/250416v782:user/release-keys".
+// It never names Android. s is lower case.
+func androidBuildFingerprintSpec(s string) bool {
+	_, fingerprint, ok := strings.Cut(s, " ")
+	if !ok || !leadingOsVersion(s) {
+		return false
+	}
+	if strings.Count(fingerprint, "/") < 5 || strings.Count(fingerprint, ":") < 2 {
+		return false
+	}
+	return strings.HasSuffix(fingerprint, "-keys")
+}
+
+// androidAppModelSpec is the spec the Android app sends now:
+// "<os version> <make model>" (android MainApplication.deviceSpec), e.g.
+// "16 samsung galaxy s24 ultra" or "17.1 pixel 8 pro". The Apple apps send the
+// same shape ("18.1 iphone 16 pro", "15.7.9 macbook air (m1, 2020)"): an
+// iPhone or iPad is decided before this, a Mac by macAppModelSpec, and any
+// other Apple model is left without a platform. s is lower case.
+func androidAppModelSpec(s string) bool {
+	_, model, ok := strings.Cut(s, " ")
+	if !ok || model == "" || !leadingOsVersion(s) {
+		return false
+	}
+	for _, apple := range []string{"iphone", "ipad", "ipod", "mac", "apple"} {
+		if strings.Contains(model, apple) {
+			return false
+		}
+	}
+	return true
+}
+
+// leadingOsVersion reports whether s starts with an os version and a space:
+// "16 ", "17.1 ", "8.1.0 ".
+func leadingOsVersion(s string) bool {
+	version, _, ok := strings.Cut(s, " ")
+	if !ok || version == "" {
+		return false
+	}
+	parts := strings.Split(version, ".")
+	if 3 < len(parts) {
+		return false
+	}
+	for i, part := range parts {
+		if part == "" || (i == 0 && 2 < len(part)) {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || '9' < r {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// platformDeviceName is the `platform` template param in English ("iPhone");
+// sends use onboarding.DeviceName with the template's locale.
+func platformDeviceName(platform string) string {
+	return onboarding.DeviceName(platform, "en")
+}
+
+func localeFromSession(clientSession *session.ClientSession) string {
+	if clientSession == nil {
+		return ""
+	}
+	for _, header := range clientSession.Header["Accept-Language"] {
+		first := strings.TrimSpace(strings.Split(strings.Split(header, ",")[0], ";")[0])
+		if l := normalizeLocale(first); l != "" {
+			return l
+		}
+	}
+	return ""
+}
+
+// normalizeLocale keeps a BCP 47 tag's language and region ("de-DE", "zh-HK"),
+// lower-case language and upper-case region, or "" for junk. Dropping a
+// Chinese script never switches the characters (onboarding.TraditionalChinese):
+// zh-Hant and zh-Hant-US are kept as zh-Hant, zh-Hans-HK becomes zh, and where
+// the region implies the script it stands in for it (zh-Hant-TW -> zh-TW).
+func normalizeLocale(locale string) string {
+	locale = strings.TrimSpace(strings.ReplaceAll(locale, "_", "-"))
+	if locale == "" || locale == "*" || 32 < len(locale) {
+		return ""
+	}
+	parts := strings.Split(locale, "-")
+	lang := strings.ToLower(parts[0])
+	if len(lang) < 2 || 3 < len(lang) {
+		return ""
+	}
+	for _, r := range lang {
+		if r < 'a' || 'z' < r {
+			return ""
+		}
+	}
+	normalized := lang
+	if 1 < len(parts) {
+		region := strings.ToUpper(parts[len(parts)-1])
+		if len(region) == 2 || len(region) == 3 {
+			normalized = lang + "-" + region
+		}
+	}
+	if lang == "zh" {
+		if traditional := onboarding.TraditionalChinese(locale); traditional != onboarding.TraditionalChinese(normalized) {
+			if traditional {
+				return "zh-Hant"
+			}
+			return "zh"
+		}
+	}
+	return normalized
+}
+
+// ----- the step task -----
+
+type OnboardingCampaignStepArgs struct {
+	NetworkId server.Id `json:"network_id"`
+	Step      string    `json:"step"`
+}
+
+type OnboardingCampaignStepResult struct {
+	Action     string     `json:"action"`
+	Template   string     `json:"template,omitempty"`
+	Variant    string     `json:"variant,omitempty"`
+	ExitReason string     `json:"exit_reason,omitempty"`
+	NextStep   string     `json:"next_step,omitempty"`
+	NextSendAt *time.Time `json:"next_send_at,omitempty"`
+}
+
+func scheduleOnboardingCampaignStep(clientSession *session.ClientSession, networkId server.Id, step string, at time.Time) {
+	task.ScheduleTask(
+		OnboardingCampaignStep,
+		&OnboardingCampaignStepArgs{NetworkId: networkId, Step: step},
+		clientSession,
+		task.RunOnce("onboarding_campaign_step", networkId, step),
+		task.RunAt(at),
+	)
+}
+
+func scheduleOnboardingCampaignStepInTx(tx server.PgTx, clientSession *session.ClientSession, networkId server.Id, step string, at time.Time) {
+	task.ScheduleTaskInTx(
+		tx,
+		OnboardingCampaignStep,
+		&OnboardingCampaignStepArgs{NetworkId: networkId, Step: step},
+		clientSession,
+		task.RunOnce("onboarding_campaign_step", networkId, step),
+		task.RunAt(at),
+	)
+}
+
+// OnboardingCampaignStep runs one step for one network: re-evaluates the
+// conditions and exits now, sends (or logs, when disabled), records, and hands
+// the next step to the post function to schedule. A Brevo failure returns an
+// error so the scheduler retries the step.
+func OnboardingCampaignStep(
+	args *OnboardingCampaignStepArgs,
+	clientSession *session.ClientSession,
+) (*OnboardingCampaignStepResult, error) {
+	ctx := clientSession.Ctx
+	now := server.NowUtc()
+	row := model.GetNetworkOnboarding(ctx, args.NetworkId)
+	if row == nil {
+		return &OnboardingCampaignStepResult{Action: onboarding.ActionSkip}, nil
+	}
+	if row.Exited() {
+		return &OnboardingCampaignStepResult{Action: onboarding.ActionExit, ExitReason: row.ExitReason}, nil
+	}
+	if row.NextStep != args.Step {
+		// The body can commit its advance before task completion is recorded.
+		// Recover the durable successor on replay without sending again. A
+		// stale task also follows the current row, never its obsolete step.
+		return &OnboardingCampaignStepResult{Action: onboarding.ActionSkip,
+			NextStep: row.NextStep, NextSendAt: row.NextSendAt}, nil
+	}
+
+	// the zone and the languages as of now: a device may have reported them
+	// since the row was created
+	reader := onboardingMailReader(ctx, row)
+	facts, offer := loadOnboardingFactsIn(ctx, row, reader.SendZone, now)
+	decision := onboarding.Decide(args.Step, facts)
+	result := &OnboardingCampaignStepResult{
+		Action:   decision.Action,
+		Template: decision.Template,
+		Variant:  decision.Variant,
+		NextStep: decision.NextStep,
+	}
+
+	if decision.Action == onboarding.ActionExit {
+		if model.ExitNetworkOnboarding(ctx, row.NetworkId, decision.ExitReason, now) {
+			onboardingExitsTotal.WithLabelValues(decision.ExitReason).Inc()
+		}
+		result.ExitReason = decision.ExitReason
+		return result, nil
+	}
+
+	loc := reader.SendZone.Loc()
+	window := reader.SendZone.Window(onboardingSendWindow())
+	if decision.Action == onboarding.ActionDefer {
+		// the step waits (E3a for a late offer's last day): the row keeps it as
+		// the next step, and the post schedules it again at its moment
+		at := decision.At
+		if !at.After(now) {
+			at = onboarding.DueSendAt(now, loc, window)
+		}
+		result.NextSendAt = &at
+		onboardingEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, "deferred").Inc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			model.AdvanceNetworkOnboardingInTx(tx, ctx, row.NetworkId, args.Step, nil, facts.Path, args.Step, result.NextSendAt, now)
+		})
+		return result, nil
+	}
+
+	var sentAt *time.Time
+	if decision.Action == onboarding.ActionSend {
+		if decision.IssueOffer {
+			tier := model.Pro().PriceTierForCountry(row.Country)
+			issued, _, err := IssueOnboardingOfferByEmail(clientSession, row.NetworkId, tier.Name)
+			if err != nil {
+				model.RecordNetworkOnboardingSendFailure(ctx, row.NetworkId, "offer: "+err.Error())
+				return nil, fmt.Errorf("issue offer by email for network %s: %w", row.NetworkId, err)
+			}
+			offer = issued
+		}
+		outcome, err := sendOnboardingCampaignEmail(ctx, row, reader, args.Step, decision, offer, now)
+		if err != nil {
+			onboardingEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, "failed").Inc()
+			model.RecordNetworkOnboardingSendFailure(ctx, row.NetworkId, err.Error())
+			return nil, err
+		}
+		onboardingEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, outcome).Inc()
+		if outcome == "sent" {
+			sentAt = &now
+		}
+	} else {
+		onboardingEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, "skipped").Inc()
+	}
+
+	if decision.NextStep != "" {
+		// a step that is already due (a long retry, a late enable) goes out at
+		// the next window edge rather than immediately, and never within
+		// MinSendGap of the email this step sent (a deferred E3a, then E4a)
+		day := onboardingSchedule().Day(decision.NextStep, facts.Path)
+		at := onboarding.NextSendAt(row.CreatedAt, day, sentAt, now, loc, window)
+		result.NextSendAt = &at
+	} else {
+		onboardingExitsTotal.WithLabelValues(onboarding.ExitDone).Inc()
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		model.AdvanceNetworkOnboardingInTx(tx, ctx, row.NetworkId, args.Step, sentAt, facts.Path, decision.NextStep, result.NextSendAt, now)
+	})
+	return result, nil
+}
+
+// OnboardingCampaignStepPost schedules the next step in the task's completion
+// transaction, so a crash between the send and the schedule cannot lose the
+// sequence (the row's next_step/next_send_at also let a sweep re-create it).
+func OnboardingCampaignStepPost(
+	args *OnboardingCampaignStepArgs,
+	result *OnboardingCampaignStepResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	if result != nil && result.NextStep != "" && result.NextSendAt != nil {
+		scheduleOnboardingCampaignStepInTx(tx, clientSession, args.NetworkId, result.NextStep, *result.NextSendAt)
+	}
+	return nil
+}
+
+// loadOnboardingFacts reads everything a decision looks at, as of now, in
+// the row's send zone as the mail chain resolves it.
+func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now time.Time) (onboarding.Facts, *model.OnboardingOffer) {
+	return loadOnboardingFactsIn(ctx, row, onboardingMailReader(ctx, row).SendZone, now)
+}
+
+// loadOnboardingFactsIn is loadOnboardingFacts in a send zone the caller
+// resolved.
+func loadOnboardingFactsIn(ctx context.Context, row *model.NetworkOnboarding, zone onboarding.SendZone, now time.Time) (onboarding.Facts, *model.OnboardingOffer) {
+	offer := model.GetOnboardingOffer(ctx, row.NetworkId)
+	path := row.Path
+	if p := model.OnboardingPathForNetwork(offer); p != "" {
+		path = p
+	}
+	if path == "" {
+		path = onboarding.PathB
+	}
+	offerState := onboarding.OfferStateNone
+	if offer != nil {
+		switch model.OnboardingOfferState(offer, now) {
+		case model.OnboardingOfferStateActive:
+			offerState = onboarding.OfferStateActive
+		case model.OnboardingOfferStateRedeemed:
+			offerState = onboarding.OfferStateRedeemed
+		case model.OnboardingOfferStateExpired:
+			offerState = onboarding.OfferStateExpired
+		}
+	}
+	// every step that asks whether the network connected (E1, E2 and the
+	// feedback step) reads this one fact: the connection rows, connect.day and
+	// connect.first, as the send plan's connect_days counts them
+	_, connected := model.NetworkConnectDays(ctx, row.NetworkId, row.CreatedAt)
+	// who may be mailed (country, consent evidence) and whether the offer
+	// steps may go (REVIEW.md findings 2, 3, 9 and 12)
+	cfg := model.Onboarding()
+	policy := cfg.MailPolicy()
+	mail := model.GetNetworkMailState(ctx, row.NetworkId)
+	// the country and consent rules reach the live campaign only when the
+	// config says so (policy.apply_to_onboarding): the reviewed config
+	// injection, not a server deploy, changes who gets onboarding mail
+	policyExit := ""
+	offerByCountry := true
+	if cfg.Policy.ApplyToOnboarding {
+		policyExit = policy.Exit(onboarding.PurposeOnboarding, onboarding.MailFacts{
+			Country:       row.Country,
+			ConsentSource: mail.Source,
+			CreatedAt:     row.CreatedAt,
+			Now:           now,
+		})
+		offerByCountry = policy.OfferAllowed(row.Country)
+	}
+	feedbackSubmitted := onboardingFeedbackAnswered(model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt), func(name string) bool {
+		return model.HasOnboardingEvent(ctx, row.NetworkId, name)
+	})
+	// E2's widget email goes only where the newest app build has the widget
+	platform, widgetBuild := onboardingClientBuild(row, model.GetNetworkNewestClientBuild(ctx, row.NetworkId), cfg.EffectiveWidgetSettings())
+	facts := onboarding.Facts{
+		Path:           path,
+		HasEmail:       row.Email,
+		Holdout:        row.EmailVariant == model.ExperimentVariantHoldout,
+		Paused:         row.ExperimentId != "" && model.PausedVariantsForExperiment(row.ExperimentId, now)[row.EmailVariant],
+		ProductUpdates: model.NetworkProductUpdates(ctx, row.NetworkId),
+		Pro:            model.IsProNetwork(ctx, row.NetworkId),
+		NetworkExists:  model.NetworkExists(ctx, row.NetworkId),
+		Bounced:        row.Bounced,
+		Complained:     row.Complained,
+		ComplainedStep: row.ComplainedStep,
+		Suppressed:     mail.SuppressedAt != nil,
+		PolicyExit:     policyExit,
+		// an App Store network on path B could not redeem the emailed offer
+		// while no code reaches it (REVIEW.md finding 2): no offer email until
+		// offer.apple_email_enabled says the codes flow. The direct-download
+		// Mac bills through Stripe and gets it (P6).
+		NoOfferEmail:      onboarding.OfferEmailWithheld(offerByCountry, row.Platform, row.Distribution, path, cfg.Offer.AppleEmailEnabled),
+		Platform:          platform,
+		WidgetBuild:       widgetBuild,
+		HasConnected:      connected,
+		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
+		OfferState:        offerState,
+		OfferEndsSoon:     offer != nil && onboarding.OfferEndsSoon(offer.ExpiresAt, now),
+		LastChanceAt:      onboardingLastChanceAt(offer, offerState, zone, now),
+		DesktopTemplate:   cfg.Brevo.HasTemplateVariant(onboarding.TemplateE2Widget, onboarding.VariantDesktop),
+		FeedbackSubmitted: feedbackSubmitted,
+		FeedbackEmailSent: onboardingFeedbackEmailSent(model.ListNetworkOnboardingEmails(ctx, row.NetworkId)),
+		EmailOpens:        model.CountOnboardingEvents(ctx, row.NetworkId, model.EventEmailOpened),
+	}
+	return facts, offer
+}
+
+// onboardingLastChanceAt is the Facts.LastChanceAt of an offer: the moment its
+// last-chance email goes in the network's send zone and window, while that
+// lies ahead; nil without an active offer or once the moment has passed.
+func onboardingLastChanceAt(offer *model.OnboardingOffer, offerState string, zone onboarding.SendZone, now time.Time) *time.Time {
+	if offer == nil || offerState != onboarding.OfferStateActive {
+		return nil
+	}
+	at := onboarding.LastChanceAt(offer.ExpiresAt, zone.Loc(), zone.Window(onboardingSendWindow()))
+	if !at.After(now) {
+		return nil
+	}
+	return &at
+}
+
+// onboardingFeedbackEmailSent reports whether a network's campaign sends
+// (network_onboarding_email) include the feedback email.
+func onboardingFeedbackEmailSent(emails []*model.NetworkOnboardingEmail) bool {
+	for _, email := range emails {
+		if email.Template == onboarding.TemplateE4Feedback {
+			return true
+		}
+	}
+	return false
+}
+
+// onboardingClientBuild is the Platform and WidgetBuild facts from the
+// network's newest active client (nil when it has none). The platform is the
+// row's, else the client's (from its device spec): a row recorded without
+// one takes the app the reader uses. WidgetBuild judges that client's build
+// by its platform, the app version it last connected with and, when it is on
+// the row's platform, the row's distribution, the only one the server keeps
+// (onboarding.WidgetSettings.HasWidget). Without a client there is no widget
+// build, and a row without a platform stays unknown.
+func onboardingClientBuild(row *model.NetworkOnboarding, build *model.NetworkClientBuild, widgets *onboarding.WidgetSettings) (platform string, widgetBuild bool) {
+	platform = row.Platform
+	if build == nil {
+		return
+	}
+	buildPlatform := platformFromDeviceSpec(build.DeviceSpec)
+	if platform == "" {
+		platform = buildPlatform
+	}
+	distribution := ""
+	if buildPlatform == row.Platform {
+		distribution = row.Distribution
+	}
+	widgetBuild = widgets.HasWidget(buildPlatform, distribution, build.ClientVersion)
+	return
+}
+
+// onboardingFeedbackAnswered is the feedback step's FeedbackSubmitted fact:
+// the app's feedback form since sign-up (appFeedback), its
+// feedback.submitted event, or feedback.tapped, the one-tap answer from the
+// feedback email (recorded when the link resolves, whether or not the
+// reader then sends the app's form).
+func onboardingFeedbackAnswered(appFeedback bool, hasEvent func(name string) bool) bool {
+	return appFeedback || hasEvent(model.EventFeedbackSubmitted) || hasEvent(model.EventFeedbackTapped)
+}
+
+// ----- rendering -----
+
+// OnboardingSendPlan is a fully resolved send: the template id and the params,
+// as `bringyourctl onboarding preview` shows it and the sender posts it.
+type OnboardingSendPlan struct {
+	Step       string            `json:"step"`
+	Template   string            `json:"template"`
+	Variant    string            `json:"variant"`
+	Locale     string            `json:"locale"`
+	TemplateId int               `json:"template_id"`
+	Params     map[string]string `json:"params"`
+	Tags       []string          `json:"tags"`
+}
+
+// buildOnboardingSendPlan resolves a send, in the reader's language (the
+// first of their languages a template serves, else their country's, else
+// English) with dates in their zone.
+func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, reader mailReader, step string, decision onboarding.Decision, offer *model.OnboardingOffer, now time.Time) (*OnboardingSendPlan, error) {
+	cfg := model.Onboarding()
+	templateId, templateLocale, _, ok := cfg.Brevo.TemplateIdForReader(decision.Template, decision.Variant, reader.Languages, cfg.EffectiveMailLanguageSettings())
+	if !ok || templateId <= 0 {
+		return nil, fmt.Errorf("no Brevo template for %s/%s/%s", decision.Template, decision.Variant, row.Locale)
+	}
+	token, err := onboarding.NewToken(&onboarding.TokenClaims{
+		NetworkId: row.NetworkId,
+		Step:      decision.Template,
+		FlowStep:  step,
+		ExpiresAt: now.Add(30 * 24 * time.Hour).Unix(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mint landing token: %w", err)
+	}
+	loc := reader.SendZone.DisplayLocation()
+	tier := model.Pro().PriceTierForCountry(row.Country)
+	regular := tier.YearlyUsd
+	offerPrice := cfg.OfferPriceUsd(regular)
+	var offerExpires *time.Time
+	if offer != nil {
+		if t := model.Pro().PriceTierByName(offer.Tier); t != nil {
+			regular = t.YearlyUsd
+			offerPrice = regular * float64(100-offer.PercentOff) / 100
+		}
+		expires := offer.ExpiresAt
+		offerExpires = &expires
+	}
+	connectDays, _ := model.NetworkConnectDays(ctx, row.NetworkId, row.CreatedAt)
+	providers, countries := providersOnline(ctx)
+	in := onboarding.ParamsInput{
+		Template:        decision.Template,
+		Variant:         decision.Variant,
+		Opening:         decision.Opening,
+		Platform:        onboarding.DeviceName(row.Platform, templateLocale),
+		StoreBilled:     onboarding.StoreBilledPlatform(row.Platform, row.Distribution),
+		Browser:         decision.Browser,
+		Locale:          templateLocale,
+		DailyDataGb:     float64(model.Pro().Free.Data) / float64(model.Gib),
+		DaysActive:      int(now.Sub(row.CreatedAt).Hours() / 24),
+		ConnectDays:     connectDays,
+		ProvidersOnline: providers,
+		CountriesOnline: countries,
+		OfferExpiresAt:  offerExpires,
+		NoOfferEmail:    decision.NoOfferEmail,
+		OfferPriceUsd:   offerPrice,
+		RegularYearUsd:  regular,
+		Location:        loc,
+		Token:           token,
+		SiteUrl:         cfg.EffectiveSiteUrl(),
+		CompanyLine:     cfg.EffectiveCompanyLine(),
+	}
+	return &OnboardingSendPlan{
+		Step:       step,
+		Template:   decision.Template,
+		Variant:    decision.Variant,
+		Locale:     templateLocale,
+		TemplateId: templateId,
+		Params:     onboarding.BuildParams(in),
+		Tags:       onboarding.CampaignTags("onboarding", decision.Template, decision.Variant, row.ExperimentId, row.EmailVariant),
+	}, nil
+}
+
+// providersOnline is the live provider and country count the E2 template
+// quotes, cached for an hour: it is one heavy query and every send in the hour
+// can share it. 0/0 until a query succeeds, which BuildParams sends as empty
+// counts (the template then leaves the line out).
+var providersOnlineCache struct {
+	sync.Mutex
+	providers int
+	countries int
+	at        time.Time
+}
+
+func providersOnline(ctx context.Context) (providers int, countries int) {
+	providersOnlineCache.Lock()
+	defer providersOnlineCache.Unlock()
+	if !providersOnlineCache.at.IsZero() && time.Since(providersOnlineCache.at) < time.Hour {
+		return providersOnlineCache.providers, providersOnlineCache.countries
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				glog.Warningf("[onboarding]providers online: %v\n", r)
+			}
+		}()
+		localSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer localSession.Cancel()
+		result, err := model.GetProviderLocations(localSession)
+		if err != nil || result == nil {
+			return
+		}
+		count := 0
+		for _, location := range result.Locations {
+			if location.LocationType == model.LocationTypeCountry {
+				count += location.ProviderCount
+			}
+		}
+		providersOnlineCache.providers = count
+		providersOnlineCache.countries = result.CountryCount
+		providersOnlineCache.at = time.Now()
+	}()
+	return providersOnlineCache.providers, providersOnlineCache.countries
+}
+
+// ----- sending -----
+
+type brevoSmtpEmailArgs struct {
+	To         []brevoEmailAddress `json:"to"`
+	TemplateId int                 `json:"templateId"`
+	Params     map[string]string   `json:"params"`
+	Tags       []string            `json:"tags,omitempty"`
+	ReplyTo    *brevoEmailAddress  `json:"replyTo,omitempty"`
+	Headers    map[string]string   `json:"headers,omitempty"`
+}
+
+type brevoEmailAddress struct {
+	Email string `json:"email"`
+	Name  string `json:"name,omitempty"`
+}
+
+type brevoSmtpEmailResult struct {
+	MessageId string `json:"messageId"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+}
+
+// brevoSendTemplate posts one transactional email. Callers gate on
+// OnboardingCampaignEnabled; this function itself refuses to run while
+// disabled so no path can bypass the switch.
+func brevoSendTemplate(ctx context.Context, to string, plan *OnboardingSendPlan) (messageId string, err error) {
+	if !OnboardingCampaignEnabled() {
+		return "", fmt.Errorf("onboarding campaign is disabled (onboarding.yml enabled: false)")
+	}
+	cfg := model.Onboarding()
+	return brevoPostSmtpEmail(ctx, &brevoSmtpEmailArgs{
+		To:         []brevoEmailAddress{{Email: to}},
+		TemplateId: plan.TemplateId,
+		Params:     plan.Params,
+		Tags:       plan.Tags,
+		ReplyTo:    &brevoEmailAddress{Email: cfg.EffectiveReplyTo()},
+		Headers:    map[string]string{"X-Mailin-custom": "onboarding:" + plan.Step + ":" + plan.Template + ":" + plan.Variant},
+	})
+}
+
+// brevoPostSmtpEmail posts one transactional template send (both campaigns;
+// each caller checks its own switch first).
+func brevoPostSmtpEmail(ctx context.Context, args *brevoSmtpEmailArgs) (messageId string, err error) {
+	status, r, err := server.HttpPostWithStatus[brevoSmtpEmailResult](
+		ctx,
+		brevoApiUrl("smtp/email"),
+		args,
+		brevoHeader,
+		brevoResponseJsonObject[brevoSmtpEmailResult],
+	)
+	if err != nil {
+		return "", fmt.Errorf("brevo send: %w", err)
+	}
+	if status == nil || status.Code < 200 || 300 <= status.Code {
+		code := "?"
+		if status != nil {
+			code = status.Status
+		}
+		return "", fmt.Errorf("brevo send: %s %s %s", code, r.Code, r.Message)
+	}
+	if r.MessageId == "" {
+		return "", fmt.Errorf("brevo send: no message id")
+	}
+	return r.MessageId, nil
+}
+
+// sendOnboardingCampaignEmail renders and sends one step to the network's
+// account email. Returns "sent" or "dry_run"; an error means retry.
+func sendOnboardingCampaignEmail(ctx context.Context, row *model.NetworkOnboarding, reader mailReader, step string, decision onboarding.Decision, offer *model.OnboardingOffer, now time.Time) (string, error) {
+	_, userAuth, ok := model.GetNetworkAdminUserAuth(ctx, row.NetworkId)
+	if !ok || userAuth == "" {
+		return "", fmt.Errorf("network %s has no admin email", row.NetworkId)
+	}
+	plan, err := buildOnboardingSendPlan(ctx, row, reader, step, decision, offer, now)
+	if err != nil {
+		return "", err
+	}
+	if !OnboardingCampaignEnabled() {
+		glog.V(1).Infof("[onboarding]dry run: would send %s/%s/%s (template %d) to %s for network %s\n",
+			plan.Template, plan.Variant, plan.Locale, plan.TemplateId, maskEmail(userAuth), row.NetworkId)
+		return "dry_run", nil
+	}
+	messageId, err := brevoSendTemplate(ctx, userAuth, plan)
+	if err != nil {
+		return "", err
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		model.AddNetworkOnboardingEmailInTx(tx, ctx, &model.NetworkOnboardingEmail{
+			MessageId:         messageId,
+			NetworkId:         row.NetworkId,
+			Step:              step,
+			Template:          plan.Template,
+			Variant:           plan.Variant,
+			Experiment:        row.ExperimentId,
+			ExperimentVariant: row.EmailVariant,
+			TemplateId:        plan.TemplateId,
+			Locale:            plan.Locale,
+			SentAt:            now,
+		})
+	})
+	writeOnboardingEmailEvent(ctx, row.NetworkId, model.EventEmailSent, plan.Template, step, row.ExperimentId, row.EmailVariant, row.Platform, now)
+	return "sent", nil
+}
+
+// writeOnboardingEmailEvent records an email.* event with the sequence
+// experiment stamped from the row (WriteServerEvent would stamp a per-step
+// surface instead). Never fails the caller.
+func writeOnboardingEmailEvent(ctx context.Context, networkId server.Id, name string, template string, flowStep string, experiment string, variant string, platform string, at time.Time) {
+	props := map[string]any{"step": template}
+	if onboarding.IsFlowStep(flowStep) {
+		props["flow_step"] = flowStep
+	}
+	if experiment != "" {
+		props["experiment"] = experiment
+		props["variant"] = variant
+	}
+	validated, err := model.ValidateServerEvent(name, props)
+	if err != nil {
+		glog.Errorf("[onboarding]refusing %s: %s\n", name, err)
+		return
+	}
+	event := &model.OnboardingEvent{
+		NetworkId:  networkId,
+		Name:       name,
+		At:         at,
+		ReceivedAt: server.NowUtc(),
+		Platform:   platform,
+		Path:       model.OnboardingPathForNetwork(model.GetOnboardingOffer(ctx, networkId)),
+		Experiment: experiment,
+		Variant:    variant,
+		Props:      validated,
+	}
+	if err := model.AddOnboardingEvent(ctx, event); err != nil {
+		glog.Errorf("[onboarding]could not write %s for network %s: %s\n", name, networkId, err)
+	}
+}
+
+// ----- Brevo contacts -----
+
+type brevoContactUpsertArgs struct {
+	Email         string            `json:"email"`
+	UpdateEnabled bool              `json:"updateEnabled"`
+	Attributes    map[string]string `json:"attributes,omitempty"`
+}
+
+var brevoContactAttributesEnsured sync.Once
+
+// brevoUpsertOnboardingContact creates or updates the Brevo contact with the
+// attributes the campaign's segments use. Creates the attributes once per
+// process (idempotent against the account).
+func brevoUpsertOnboardingContact(ctx context.Context, email string, row *model.NetworkOnboarding) error {
+	brevoContactAttributesEnsured.Do(func() {
+		for _, name := range []string{"EXT_ID", "CONTACT_TIMEZONE", "PLATFORM", "LOCALE"} {
+			status, _, err := server.HttpPostWithStatus[brevoContactResult](
+				ctx,
+				brevoApiUrl("contacts/attributes/normal/"+name),
+				map[string]string{"type": "text"},
+				brevoHeader,
+				brevoResponseJsonObject[brevoContactResult],
+			)
+			if err != nil {
+				glog.Warningf("[onboarding]brevo attribute %s: %s\n", name, err)
+				continue
+			}
+			// 400 duplicate_parameter = it exists
+			if status != nil && (status.Code == 400 || (200 <= status.Code && status.Code < 300)) {
+				continue
+			}
+			if status != nil {
+				glog.Warningf("[onboarding]brevo attribute %s: %s\n", name, status.Status)
+			}
+		}
+	})
+	args := &brevoContactUpsertArgs{
+		Email:         email,
+		UpdateEnabled: true,
+		Attributes: map[string]string{
+			"EXT_ID":           row.NetworkId.String(),
+			"CONTACT_TIMEZONE": row.TimeZone,
+			"PLATFORM":         row.Platform,
+			"LOCALE":           row.Locale,
+		},
+	}
+	status, r, err := server.HttpPostWithStatus[brevoContactResult](
+		ctx,
+		brevoApiUrl("contacts"),
+		args,
+		brevoHeader,
+		brevoResponseJsonObject[brevoContactResult],
+	)
+	if err != nil {
+		return err
+	}
+	if status == nil {
+		return fmt.Errorf("missing response status")
+	}
+	if (200 <= status.Code && status.Code < 300) || r.Code == "duplicate_parameter" {
+		return nil
+	}
+	return fmt.Errorf("%s %s %s", status.Status, r.Code, r.Message)
+}
+
+type brevoContactResult struct {
+	Id      uint64 `json:"id"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// ----- the transactional webhook -----
+
+// webhookTags reads the send's tags from either form Brevo uses.
+func webhookTags(args *BrevoWebhookArgs) []string {
+	if 0 < len(args.Tags) {
+		return args.Tags
+	}
+	if args.Tag != "" {
+		var tags []string
+		if err := json.Unmarshal([]byte(args.Tag), &tags); err == nil {
+			return tags
+		}
+		return []string{args.Tag}
+	}
+	return nil
+}
+
+// Why a campaign's webhook event names no recorded send, so that no network
+// records it: the reason label of the unattributed counters.
+const (
+	// Brevo's anonymous tracking (the account's transactional settings,
+	// Tracking) posts opens, clicks and spam reports with an "an#<digits>"
+	// message id and an empty email: by design they name neither the send nor
+	// the recipient
+	brevoWebhookUnattributedAnonymous = "anonymous"
+	// a message id that no campaign send recorded, as for a test send
+	brevoWebhookUnattributedUnknownSend = "unknown_send"
+)
+
+// brevoWebhookAnonymous is whether Brevo's anonymous tracking took the
+// event's recipient out: its message id is "an#<digits>" (Brevo's unique
+// proxy open sample in https://developers.brevo.com/docs/transactional-webhooks),
+// or it has neither a message id nor an email. No send has such an id, so the
+// event is not looked up.
+func brevoWebhookAnonymous(args *BrevoWebhookArgs) bool {
+	messageId := strings.TrimSpace(args.MessageId)
+	if strings.HasPrefix(messageId, "an#") {
+		return true
+	}
+	return messageId == "" && strings.TrimSpace(args.Email) == ""
+}
+
+var brevoWebhookTemplateLabelPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// brevoWebhookCampaignTemplate is the template a campaign send's tags name
+// ([<campaign>, <template>, <variant>]) when the event is that campaign's. A
+// second tag that is not a plain template name is "other", so the label stays
+// bounded.
+func brevoWebhookCampaignTemplate(args *BrevoWebhookArgs, campaign string) (template string, ok bool) {
+	tags := webhookTags(args)
+	if len(tags) == 0 || tags[0] != campaign {
+		return "", false
+	}
+	if len(tags) < 2 || !brevoWebhookTemplateLabelPattern.MatchString(tags[1]) {
+		return "other", true
+	}
+	return tags[1], true
+}
+
+// An anonymous spam report suppresses no network: one line a minute says so.
+var brevoWebhookAnonymousComplaintReports = newBoundedReport(time.Minute)
+
+func reportAnonymousBrevoComplaint(campaign string, template string) {
+	if suppressedCount, ok := brevoWebhookAnonymousComplaintReports.Allow(server.NowUtc()); ok {
+		glog.Warningf(
+			"[%s]an anonymous spam report for %s (Brevo's anonymous tracking) names no recipient, so it suppresses no network; Brevo blocks the address itself, and a later send to it comes back blocked, which does. %d more since the last report.\n",
+			campaign,
+			template,
+			suppressedCount,
+		)
+	}
+}
+
+// handleOnboardingBrevoWebhook records a campaign delivery event against the
+// network the message was sent to. A campaign event that names no recorded
+// send is only counted by template
+// (urnetwork_onboarding_webhook_unattributed_events_total): Brevo's anonymous
+// opens, clicks and spam reports, which are never looked up, and ids that no
+// send recorded. Other senders' messages are ignored here; the caller keeps
+// the account-wide unsubscribe behavior. Never fails the webhook.
+func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[onboarding]webhook %s failed: %v\n", args.Event, r)
+		}
+	}()
+	name := onboarding.EventForWebhook(args.Event)
+	if name == "" {
+		return
+	}
+	if brevoWebhookAnonymous(args) {
+		if template, ok := brevoWebhookCampaignTemplate(args, "onboarding"); ok {
+			onboardingWebhookUnattributedEventsTotal.WithLabelValues(name, template, brevoWebhookUnattributedAnonymous).Inc()
+			if name == model.EventEmailComplained {
+				reportAnonymousBrevoComplaint("onboarding", template)
+			}
+		}
+		return
+	}
+	email := model.GetNetworkOnboardingEmail(ctx, args.MessageId)
+	if email == nil {
+		if template, ok := brevoWebhookCampaignTemplate(args, "onboarding"); ok {
+			onboardingWebhookUnattributedEventsTotal.WithLabelValues(name, template, brevoWebhookUnattributedUnknownSend).Inc()
+			glog.V(1).Infof("[onboarding]webhook %s for unknown campaign message %q (%v)\n", args.Event, args.MessageId, webhookTags(args))
+		}
+		return
+	}
+	at := server.NowUtc()
+	if 0 < args.TsEvent {
+		at = time.Unix(args.TsEvent, 0).UTC()
+	}
+	onboardingWebhookEventsTotal.WithLabelValues(name, email.Template).Inc()
+	writeOnboardingEmailEvent(ctx, email.NetworkId, name, email.Template, email.Step, email.Experiment, email.ExperimentVariant, "", at)
+
+	switch name {
+	case model.EventEmailBounced:
+		model.MarkNetworkOnboardingBounced(ctx, email.NetworkId)
+		// every campaign stops for an address that bounced
+		SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitBounced, at)
+	case model.EventEmailComplained:
+		model.MarkNetworkOnboardingComplained(ctx, email.NetworkId, email.Step)
+		SuppressNetworkMarketing(ctx, email.NetworkId, onboarding.ExitComplained, at)
+	}
+	if reason := onboarding.WebhookExit(name); reason != "" {
+		if model.ExitNetworkOnboarding(ctx, email.NetworkId, reason, at) {
+			onboardingExitsTotal.WithLabelValues(reason).Inc()
+		}
+	}
+}
+
+// ----- webhook registration -----
+
+// The transactional events the campaigns record (Brevo's webhook event names).
+var onboardingBrevoWebhookEvents = []string{
+	"delivered", "opened", "uniqueOpened", "click", "hardBounce", "softBounce", "blocked", "spam", "unsubscribed", "invalid",
+}
+
+// EnsureOnboardingBrevoWebhook makes the transactional webhook for
+// onboarding.brevo.webhook_url carry a credential POST /updates/brevo accepts
+// and every campaign event: it creates the webhook, or updates the registered
+// one in place (ensureBrevoTransactionalWebhook). credential is how the
+// webhook carries it: "url" (the default) or "header". Refuses while the
+// engine is disabled. Returns what it did, the credential masked.
+func EnsureOnboardingBrevoWebhook(ctx context.Context, credential string) (string, error) {
+	if !OnboardingCampaignEnabled() {
+		return "", fmt.Errorf("onboarding campaign is disabled (onboarding.yml enabled: false); not registering")
+	}
+	carrier, err := parseBrevoWebhookCredentialCarrier(credential)
+	if err != nil {
+		return "", err
+	}
+	url := strings.TrimSpace(model.Onboarding().Brevo.WebhookUrl)
+	if url == "" {
+		return "skipped: onboarding.brevo.webhook_url is empty", nil
+	}
+	return ensureBrevoTransactionalWebhook(ctx, url, onboardingBrevoWebhookEvents, carrier)
+}
+
+// ----- tooling (bringyourctl onboarding) -----
+
+// OnboardingStatus is what `bringyourctl onboarding status` prints.
+type OnboardingStatus struct {
+	Row    *model.NetworkOnboarding        `json:"row"`
+	Offer  *model.OnboardingOffer          `json:"offer"`
+	Emails []*model.NetworkOnboardingEmail `json:"emails"`
+	Events []*model.OnboardingEvent        `json:"events"`
+	Facts  *onboarding.Facts               `json:"facts,omitempty"`
+	// what the network's apps and browsers last reported
+	MailContext *model.NetworkMailContext `json:"mail_context,omitempty"`
+}
+
+func OnboardingCampaignStatus(ctx context.Context, networkId server.Id) *OnboardingStatus {
+	status := &OnboardingStatus{
+		Row:         model.GetNetworkOnboarding(ctx, networkId),
+		Offer:       model.GetOnboardingOffer(ctx, networkId),
+		Emails:      model.ListNetworkOnboardingEmails(ctx, networkId),
+		Events:      model.ListOnboardingEvents(ctx, networkId, 500),
+		MailContext: model.GetNetworkMailContext(ctx, networkId),
+	}
+	if status.Row != nil {
+		facts, _ := loadOnboardingFacts(ctx, status.Row, server.NowUtc())
+		status.Facts = &facts
+	}
+	return status
+}
+
+// OnboardingPreview is `bringyourctl onboarding preview`: the decision the step
+// would make now and, when it would send, the resolved send.
+type OnboardingPreview struct {
+	Decision onboarding.Decision `json:"decision"`
+	Plan     *OnboardingSendPlan `json:"plan,omitempty"`
+	Error    string              `json:"error,omitempty"`
+}
+
+func OnboardingCampaignPreview(ctx context.Context, networkId server.Id, step string) (*OnboardingPreview, error) {
+	row := model.GetNetworkOnboarding(ctx, networkId)
+	if row == nil {
+		return nil, fmt.Errorf("network %s is not in the campaign", networkId)
+	}
+	now := server.NowUtc()
+	reader := onboardingMailReader(ctx, row)
+	facts, offer := loadOnboardingFactsIn(ctx, row, reader.SendZone, now)
+	decision := onboarding.Decide(step, facts)
+	preview := &OnboardingPreview{Decision: decision}
+	if decision.Action == onboarding.ActionSend {
+		plan, err := buildOnboardingSendPlan(ctx, row, reader, step, decision, offer, now)
+		if err != nil {
+			preview.Error = err.Error()
+		} else {
+			preview.Plan = plan
+		}
+	}
+	return preview, nil
+}
+
+// OnboardingCampaignSendTest sends ONE email of a template/variant/locale to
+// an explicit address with sample data, through the real Brevo template. The
+// only send path outside the scheduler; still behind `enabled`. Records no
+// row and no event.
+func OnboardingCampaignSendTest(ctx context.Context, to string, template string, variant string, locale string) (string, error) {
+	if !OnboardingCampaignEnabled() {
+		return "", fmt.Errorf("onboarding campaign is disabled (onboarding.yml enabled: false)")
+	}
+	if variant == "" {
+		variant = onboarding.VariantDefault
+	}
+	if locale == "" {
+		locale = "en"
+	}
+	cfg := model.Onboarding()
+	templateId, ok := cfg.Brevo.TemplateId(template, variant, locale)
+	if !ok || templateId <= 0 {
+		return "", fmt.Errorf("no Brevo template for %s/%s/%s", template, variant, locale)
+	}
+	now := server.NowUtc()
+	expires := now.Add(cfg.OfferValidity())
+	tier := model.Pro().PriceTiers()[0]
+	opening := onboarding.OpeningJoined
+	providers, countries := providersOnline(ctx)
+	plan := &OnboardingSendPlan{
+		Step: "test", Template: template, Variant: variant, Locale: locale, TemplateId: templateId,
+		Params: onboarding.BuildParams(onboarding.ParamsInput{
+			Template: template, Variant: variant, Opening: opening,
+			Platform: "iPhone", DailyDataGb: float64(model.Pro().Free.Data) / float64(model.Gib),
+			DaysActive: 3, ConnectDays: 2, ProvidersOnline: providers, CountriesOnline: countries,
+			OfferExpiresAt: &expires, OfferPriceUsd: cfg.OfferPriceUsd(tier.YearlyUsd), RegularYearUsd: tier.YearlyUsd,
+			Location: time.UTC, Token: "test", SiteUrl: cfg.EffectiveSiteUrl(), CompanyLine: cfg.EffectiveCompanyLine(),
+		}),
+		Tags: []string{"onboarding", "test", template, variant},
+	}
+	return brevoSendTemplate(ctx, to, plan)
+}
