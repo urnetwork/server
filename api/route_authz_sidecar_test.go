@@ -214,6 +214,8 @@ var sidecarAllowlist = []string{
 	"GET /sidecar/sync/([^/]+)",
 	// §20.7's limits (QUOTA-M1-03)
 	"GET /sidecar/limits",
+	// §7.6's SCIM queue for the indexer ServiceSettings.scim_signer names (QD-829)
+	"GET /sidecar/scim-changes",
 	// §18.7's wake token (SDK-M8-09)
 	"POST /sidecar/push-token",
 	// §6.16's summons (PROTO-M8-02)

@@ -20,6 +20,16 @@ package model
 // it, and only a signed statement changes the config (owner decisions 5, 46). Reads leave out rows past retention,
 // so a row lives at most 7 days whether or not the sweep has run (RemoveExpiredNetworkScimChanges).
 //
+// Two routes read the queue. GET /network/scim-changes is the console's and ur admin's: the team's Owners and Admins,
+// every change. GET /sidecar/scim-changes is the indexer's that ServiceSettings.scim_signer names (QD-829), a
+// sidecar-classified route on §7.4's strict_exp allowlist: api answers it only to the client of the sidecar the newest
+// projection's ProjectionSettings.scim_signer names, standing as a MemberRevoke it signs must find it, judged by the
+// rows api judges statements by (ConfigLogSequencer.CaughtUpState), and only with the queued member_revoke changes of
+// the members those rows hold outside the AdminSet, in the first route's form; any other client token is refused 403,
+// as is every network credential. The indexer acts on this unsigned word, so a breached server can have it remove
+// members outside the AdminSet: a denial only, since no reader is added (I-4), on a designation that is the owner's
+// choice (owner decision 150).
+//
 // Nothing here reads or writes network_scim_change unless the binary links MG6.
 
 import (
@@ -30,6 +40,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -39,7 +51,8 @@ type NetworkScimSettings struct {
 	// How long a queued change lives from its create_time: 7 days (§7.6's "each up to 7 days for an admin device",
 	// §2.8 api-3's "SCIM changes at most 7 d"). Reads leave out older rows.
 	ChangeRetention time.Duration
-	// The most changes GET /network/scim-changes answers at a time: 1,000, a team's member list's page.
+	// The most changes GET /network/scim-changes and GET /sidecar/scim-changes answer at a time: 1,000, a team's
+	// member list's page. A smaller limit the indexer asks is kept.
 	ChangeReadLimit int
 }
 
@@ -292,19 +305,48 @@ const networkScimChangesAdminScope = "all"
 
 const networkScimChangesRefusedMessage = "Only the team's Owners and Admins may read its SCIM changes."
 
-// What the queue's route depends on apart from the database, so tests can replace it.
+// What the queue's routes depend on apart from the database, so tests can replace it.
 type networkScimChanges struct {
 	settings *NetworkScimSettings
 	now      func() time.Time
 	tierOf   func(ctx context.Context, networkId server.Id) NetworkTier
+	// the sidecar whose current client clientId is, false for none (GET /sidecar/scim-changes)
+	clientSidecar func(ctx context.Context, networkId server.Id, clientId server.Id) (server.Id, bool)
+	// the network's verified state at the log's tip, nil before base 1 (GET /sidecar/scim-changes)
+	tipState func(ctx context.Context, networkId server.Id) (*sidecar.ConfigState, error)
 }
 
 func newNetworkScimChanges() *networkScimChanges {
 	return &networkScimChanges{
-		settings: DefaultNetworkScimSettings(),
-		now:      server.NowUtc,
-		tierOf:   NetworkTierOf,
+		settings:      DefaultNetworkScimSettings(),
+		now:           server.NowUtc,
+		tierOf:        NetworkTierOf,
+		clientSidecar: currentClientSidecar,
+		tipState:      configTipState,
 	}
+}
+
+// The sidecar clientId is the current client of: its binding's sidecar, an identity not revoked, and the binding its
+// sidecar's newest generation, so an older generation's token is no longer that sidecar's client (§5.15). False for
+// none, and for a failed lookup.
+func currentClientSidecar(ctx context.Context, networkId server.Id, clientId server.Id) (server.Id, bool) {
+	if _, err := GetClientBindingKey(ctx, clientId); err != nil {
+		return server.Id{}, false
+	}
+	view := GetSidecarIdentityByClient(ctx, networkId, clientId)
+	if view == nil || view.Status != SidecarIdentityStatusActive {
+		return server.Id{}, false
+	}
+	return view.SidecarId, true
+}
+
+// The network's verified state at the log's tip through this process's sequencer, nil before base 1.
+func configTipState(ctx context.Context, networkId server.Id) (*sidecar.ConfigState, error) {
+	sequencer, err := CurrentConfigLogSequencer()
+	if err != nil {
+		return nil, err
+	}
+	return sequencer.CaughtUpState(ctx, networkId)
 }
 
 // GET /network/scim-changes: the team's queued SCIM changes, unexpired, in change_id order, a page at a time, for
@@ -394,6 +436,97 @@ func (self *networkScimChanges) get(args *GetNetworkScimChangesArgs, clientSessi
 	return answer, nil
 }
 
+type GetSidecarScimChangesArgs struct {
+	// the change_id to read after, in change_id order; nil from the first
+	After *server.Id
+	// the most changes to answer, at most ChangeReadLimit; 0 for ChangeReadLimit
+	Limit int
+}
+
+const sidecarScimChangesRefusedMessage = "Only the indexer ServiceSettings.scim_signer names reads SCIM's queued removals."
+
+// GET /sidecar/scim-changes (the file header; QD-829): the queued member_revoke changes of the members the network's
+// newest rows hold outside the AdminSet, unexpired, in change_id order, a page at a time, in GET /network/scim-changes's
+// form, for the indexer ServiceSettings.scim_signer names to sign. Only that sidecar's current client token, the sidecar
+// standing; any other client token, a network credential, an API key, an admin or OAuth client token is refused 403.
+// No tier is asked: a removal is a denial, which a downgraded team still signs (§20.7's downgrade row).
+func GetSidecarScimChanges(args *GetSidecarScimChangesArgs, clientSession *session.ClientSession) (*GetNetworkScimChangesResult, error) {
+	return newNetworkScimChanges().getForScimSigner(args, clientSession)
+}
+
+func (self *networkScimChanges) getForScimSigner(args *GetSidecarScimChangesArgs, clientSession *session.ClientSession) (*GetNetworkScimChangesResult, error) {
+	if !server.SidecarMg6Linked() {
+		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, networkTeamsUnavailableMessage)
+	}
+	refused := fmt.Errorf("%d %s", http.StatusForbidden, sidecarScimChangesRefusedMessage)
+	ctx := clientSession.Ctx
+	byJwt := clientSession.ByJwt
+	// a client's token alone: every network credential names no client, as on every /sidecar route
+	if byJwt == nil || byJwt.ClientId == nil || clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity {
+		return nil, refused
+	}
+	sidecarId, ok := self.clientSidecar(ctx, byJwt.NetworkId, *byJwt.ClientId)
+	if !ok {
+		return nil, refused
+	}
+	// the store's reads first, holding no Postgres connection across them
+	state, err := self.tipState(ctx, byJwt.NetworkId)
+	if err != nil {
+		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, "The authorization log is unavailable.")
+	}
+	if state == nil || !state.ScimSignerStanding(sidecar.Id(sidecarId), self.now()) {
+		return nil, refused
+	}
+	result := &GetNetworkScimChangesResult{Changes: []*NetworkScimChange{}}
+	memberIds := []server.Id{}
+	for _, memberId := range state.ScimSignerMemberIds() {
+		memberIds = append(memberIds, server.Id(memberId))
+	}
+	if len(memberIds) == 0 {
+		return result, nil
+	}
+	limit := self.settings.ChangeReadLimit
+	if 0 < args.Limit {
+		limit = min(args.Limit, limit)
+	}
+	limit = max(limit, 1)
+	minCreateTime := self.now().Add(-self.settings.ChangeRetention)
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(
+			ctx,
+			`
+				SELECT `+networkScimChangeColumns+`
+				FROM network_scim_change
+				WHERE
+					network_id = $1 AND
+					kind = $2 AND
+					$3 <= create_time AND
+					member_id = ANY($4::uuid[]) AND
+					($5::uuid IS NULL OR $5::uuid < change_id)
+				ORDER BY change_id
+				LIMIT $6
+			`,
+			byJwt.NetworkId,
+			string(NetworkScimChangeKindMemberRevoke),
+			minCreateTime.UTC(),
+			memberIds,
+			args.After,
+			limit+1,
+		)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				change := scanNetworkScimChange(rows)
+				if limit <= len(result.Changes) {
+					result.More = true
+					continue
+				}
+				result.Changes = append(result.Changes, change)
+			}
+		})
+	})
+	return result, nil
+}
+
 func init() {
 	// a one-command admin token reads the queue once (`ur admin scim-changes`), its use spent in the read's
 	// transaction (session.RegisterAdminCommandRoute)
@@ -465,4 +598,24 @@ func GetNetworkMembersByEmailInTx(ctx context.Context, tx server.PgTx, networkId
 // GET /network/scim-changes at a clock and tier a test gives.
 func Testing_GetNetworkScimChanges(args *GetNetworkScimChangesArgs, clientSession *session.ClientSession, now func() time.Time, tierOf func(ctx context.Context, networkId server.Id) NetworkTier) (*GetNetworkScimChangesResult, error) {
 	return (&networkScimChanges{settings: DefaultNetworkScimSettings(), now: now, tierOf: tierOf}).get(args, clientSession)
+}
+
+// GET /sidecar/scim-changes at a clock, a client's sidecar and a log state a test gives; nil for either of the last two
+// reads api's own.
+func Testing_GetSidecarScimChanges(
+	args *GetSidecarScimChangesArgs,
+	clientSession *session.ClientSession,
+	now func() time.Time,
+	clientSidecar func(ctx context.Context, networkId server.Id, clientId server.Id) (server.Id, bool),
+	tipState func(ctx context.Context, networkId server.Id) (*sidecar.ConfigState, error),
+) (*GetNetworkScimChangesResult, error) {
+	changes := newNetworkScimChanges()
+	changes.now = now
+	if clientSidecar != nil {
+		changes.clientSidecar = clientSidecar
+	}
+	if tipState != nil {
+		changes.tipState = tipState
+	}
+	return changes.getForScimSigner(args, clientSession)
 }

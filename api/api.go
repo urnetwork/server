@@ -481,6 +481,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/sidecar/sync/([^/]+)", handlers.GetSidecarSyncTopic),
 		// §20.7's effective limits, for local pre-checks (QUOTA-M1-03)
 		router.NewRoute("GET", "/sidecar/limits", handlers.GetSidecarLimits),
+		// §7.6's SCIM removals outside the AdminSet, for the indexer ServiceSettings.scim_signer names alone (QD-829)
+		router.NewRoute("GET", "/sidecar/scim-changes", handlers.GetSidecarScimChanges),
 		// §18.7's wake token of the bearer's own client, dark until MG8 and the wake switch (SDK-M8-09)
 		router.NewRoute("POST", "/sidecar/push-token", handlers.SidecarPushToken),
 		// §6.16's summons of another admitted device of the caller's member, dark until MG1 and the wake switch

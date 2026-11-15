@@ -366,6 +366,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sidecar/sync/versions":                    routeAccessClient,   // the bearer's own client's versions (§6.8)
 	"GET /sidecar/sync/([^/]+)":                     routeAccessClient,   // core: the bearer's own client's state (§6.8)
 	"GET /sidecar/limits":                           routeAccessClient,   // the caller's network's limits (§20.7)
+	"GET /sidecar/scim-changes":                     routeAccessClient,   // SCIM's removals outside the AdminSet, to the indexer scim_signer names alone, by the model (§7.6; QD-829)
 	"GET /internal/gate/limits/([^/]+)":             routeAccessPublic,   // a host's internal bearer, verified by hash, is its credential (QD-055)
 	"GET /internal/gate/over-limit":                 routeAccessPublic,   // a host's internal bearer (QD-055)
 	"GET /internal/gate/draw-order/([^/]+)":         routeAccessPublic,   // a host's internal bearer (QD-055)
@@ -486,6 +487,9 @@ var strictExpRoutes = map[string]bool{
 	"GET /sidecar/sync/([^/]+)":  true,
 	// §20.7's limits (QUOTA-M1-03)
 	"GET /sidecar/limits": true,
+	// §7.6's SCIM queue for the indexer ServiceSettings.scim_signer names; every other client token is refused 403 by
+	// the model (QD-829)
+	"GET /sidecar/scim-changes": true,
 	// §18.7's wake token (SDK-M8-09)
 	"POST /sidecar/push-token": true,
 	// §6.16's summons of a silent own app host (PROTO-M8-02)

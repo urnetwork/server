@@ -211,6 +211,7 @@ func registry() []specEndpoint {
 		{"GET", "/network/members", nil, rt(model.GetNetworkMembersResult{})},
 		{"POST", "/network/member-remove", rt(controller.RemoveNetworkMemberArgs{}), rt(controller.RemoveNetworkMemberResult{})},
 		{"GET", "/network/scim-changes", nil, rt(model.GetNetworkScimChangesResult{})},
+		{"GET", "/sidecar/scim-changes", nil, rt(model.GetNetworkScimChangesResult{})},
 		{"POST", "/network/scim-token", rt(model.NetworkScimTokenArgs{}), rt(model.NetworkScimTokenResult{})},
 		{"GET", "/network/oauth-clients", nil, rt(model.GetNetworkOauthClientsResult{})},
 		{"POST", "/network/oauth-clients", rt(model.CreateNetworkOauthClientArgs{}), rt(model.CreateNetworkOauthClientResult{})},
