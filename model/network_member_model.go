@@ -102,8 +102,20 @@ func (self NetworkMemberRole) AdminSet() bool {
 	}
 }
 
-// The width of network_member.email and network_invite.email, user_auth's.
-const networkMemberEmailMaxLength = 256
+// Tunables of memberships.
+type NetworkMemberSettings struct {
+	// The longest email a membership or an invite keeps: 256 characters, the
+	// width of network_member.email and network_invite.email, user_auth's.
+	// A longer one is no email here.
+	EmailMaxLength int
+}
+
+// The defaults, a fresh value each call.
+func DefaultNetworkMemberSettings() *NetworkMemberSettings {
+	return &NetworkMemberSettings{
+		EmailMaxLength: 256,
+	}
+}
 
 // The answer of a member route while the binary does not link MG6.
 const networkTeamsUnavailableMessage = "Teams are not available."
@@ -147,7 +159,7 @@ func AddNetworkMemberInTx(ctx context.Context, tx server.PgTx, args *AddNetworkM
 		return nil, fmt.Errorf("%q is not a member role", args.Role)
 	}
 	email := args.Email
-	if email != nil && (*email == "" || networkMemberEmailMaxLength < len(*email)) {
+	if email != nil && (*email == "" || DefaultNetworkMemberSettings().EmailMaxLength < len(*email)) {
 		email = nil
 	}
 	member := &NetworkMember{
@@ -309,7 +321,7 @@ func networkMemberEmailOfUserInTx(ctx context.Context, tx server.PgTx, userId se
 			server.Raise(result.Scan(&email))
 		}
 	})
-	if email != nil && (!strings.Contains(*email, "@") || networkMemberEmailMaxLength < len(*email)) {
+	if email != nil && (!strings.Contains(*email, "@") || DefaultNetworkMemberSettings().EmailMaxLength < len(*email)) {
 		return nil
 	}
 	return

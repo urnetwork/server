@@ -51,6 +51,20 @@ func Routes() []*router.Route {
 	}
 }
 
+// Tunables of the authorization server's handlers.
+type OauthHandlerSettings struct {
+	// The longest body the consent page's calls send: 64 KiB, past an
+	// authorization request with its authorization_details and a receipt.
+	ConsentRequestMaxByteCount int64
+}
+
+// The defaults, a fresh value each call.
+func DefaultOauthHandlerSettings() *OauthHandlerSettings {
+	return &OauthHandlerSettings{
+		ConsentRequestMaxByteCount: 64 * 1024,
+	}
+}
+
 // rfc 6749 section 5.2 error envelope.
 type oauthError struct {
 	Error            string `json:"error"`
@@ -434,7 +448,7 @@ func ConsentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var consentRequest ConsentRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&consentRequest); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, DefaultOauthHandlerSettings().ConsentRequestMaxByteCount)).Decode(&consentRequest); err != nil {
 		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The request could not be parsed.")
 		return
 	}
@@ -528,7 +542,7 @@ func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var consentRequest ConsentRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&consentRequest); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, DefaultOauthHandlerSettings().ConsentRequestMaxByteCount)).Decode(&consentRequest); err != nil {
 		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The request could not be parsed.")
 		return
 	}
@@ -687,7 +701,7 @@ func DeviceConsentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var consentRequest DeviceConsentRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&consentRequest); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, DefaultOauthHandlerSettings().ConsentRequestMaxByteCount)).Decode(&consentRequest); err != nil {
 		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The request could not be parsed.")
 		return
 	}
@@ -719,7 +733,7 @@ func DeviceApproveHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var consentRequest DeviceConsentRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&consentRequest); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, DefaultOauthHandlerSettings().ConsentRequestMaxByteCount)).Decode(&consentRequest); err != nil {
 		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The request could not be parsed.")
 		return
 	}

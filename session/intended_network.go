@@ -161,7 +161,7 @@ func requestCredentialNetworkId(ctx context.Context, req *http.Request, intended
 	token := authorization[len(authBearerPrefix):]
 
 	if strings.HasPrefix(token, apiKeyTokenPrefix) {
-		if len(token) != apiKeyTokenLength {
+		if len(token) != DefaultClientSessionSettings().ApiKeyTokenLength {
 			return server.Id{}, false, nil
 		}
 		network := intendedNetworkApiKeyLookup(ctx, token)

@@ -24,7 +24,20 @@ const authBearerPrefix = "Bearer "
 
 // An API key (apikey) is sent as the bearer: "urn_" and 52 more characters.
 const apiKeyTokenPrefix = "urn_"
-const apiKeyTokenLength = 56
+
+// Tunables of a client session's credential parsing.
+type ClientSessionSettings struct {
+	// An API key's length, "urn_" and 52 characters (apikey's format): a bearer
+	// of that prefix and another length is no API key.
+	ApiKeyTokenLength int
+}
+
+// The defaults, a fresh value each call.
+func DefaultClientSessionSettings() *ClientSessionSettings {
+	return &ClientSessionSettings{
+		ApiKeyTokenLength: 56,
+	}
+}
 
 // The Warp ingress overwrites this with the address accepted from the client.
 const urForwardedForHeader = "X-UR-Forwarded-For"
@@ -492,7 +505,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 				// The network_client_proxy_model uses a sha1 hash with a local secret to avoid a db lookup on fake api keys.
 				// Could use a cryptographic hash like jwt/ncpm could be a done here to mitigate possible abuse.
 
-				if len(authStr) != apiKeyTokenLength {
+				if len(authStr) != DefaultClientSessionSettings().ApiKeyTokenLength {
 					return false, errors.New("Invalid API key.")
 				}
 

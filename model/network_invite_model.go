@@ -146,7 +146,7 @@ func parseNetworkInviteBearer(text string) (inviteId server.Id, secret []byte, o
 func normalizeNetworkInviteEmail(email string) (string, bool) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	local, domain, found := strings.Cut(email, "@")
-	if !found || local == "" || domain == "" || strings.ContainsAny(email, " \t\r\n") || networkMemberEmailMaxLength < len(email) {
+	if !found || local == "" || domain == "" || strings.ContainsAny(email, " \t\r\n") || DefaultNetworkMemberSettings().EmailMaxLength < len(email) {
 		return "", false
 	}
 	return email, true
