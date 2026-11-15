@@ -17,22 +17,27 @@ package model
 //     row again lets the next pass withhold it again.
 //   - The record API keeps growth frozen: a withheld row still counts as an entry, so a write past the limit is
 //     refused (§20.7), and a write of a withheld RRset serves it again until the next pass.
-//   - Custom domains, "web hosts and mail From withheld; mail hosts keep MX, TLSA and routing": a web host leaves
-//     the TLS map while its row stays, which network_dns_custom_host has no state or column to say, so
-//     DnsWithholdCustomHostsInTx refuses until question dns-m6-05-custom-host-withheld-state is answered: the
-//     downgrade's caller then knows nothing was withheld. A strict-mode MX host, MX, TLSA and the router rows are
-//     never touched, so no inbound address breaks (D-QUOTA-6).
+//   - Custom domains, "web hosts and mail From withheld; mail hosts keep MX, TLSA and routing" (owner, QD-840,
+//     on question dns-m6-05-custom-host-withheld-state): DnsWithholdCustomHostsInTx sets each active TLS web host
+//     of the network to network_dns_custom_host.state withheld, which takes it out of §13.4's map (its version
+//     raised) and tlsedge's routing while its row, verification and CAA mode stay. A release after a renewal
+//     (DnsReleaseWithheldInTx with its custom hosts) sets each back to active with map_version 0, so it re-enters
+//     the map at the next version and is pending until every interface is current, as a new host is, with no
+//     re-verification and no new CAA walk; certs' verdicts never turn a withheld host active
+//     (DnsCustomHostResultInTx refuses one). A strict-mode MX host, MX, TLSA and the router rows are never
+//     touched, so no inbound address breaks (D-QUOTA-6). A custom domain's mail From is smtpedge's From-domain
+//     gate (SMTP), and from M9 its delegated _domainkey zones.
 //
 // Each change adds one admin event (§7.11), so the network's admins can see why records stopped answering.
 // Nothing here runs unless the binary links MG2 and MG5.
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"time"
 
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
@@ -45,11 +50,12 @@ const (
 	AdminEventResultDnsReleased      = "released"
 )
 
-var (
-	// What withholding a custom domain's web hosts needs has no home yet (question
-	// dns-m6-05-custom-host-withheld-state): nothing was withheld.
-	ErrDnsCustomHostWithholdUnavailable = errors.New("dns custom host withholding is not built")
-)
+// network_dns_custom_host.state of a web host a downgrade withholds (QD-840): in no map and routed by no edge,
+// its row kept for the release.
+const DnsCustomHostStateWithheld = "withheld"
+
+// The admin event's target for a custom host's withholding and release.
+const AdminEventTargetDnsCustomHosts = "dns_custom_hosts"
 
 // One user RRset of the zone as the withholding orders it.
 type dnsQuotaRow struct {
@@ -210,15 +216,82 @@ func DnsWithholdOverQuotaInTx(ctx context.Context, tx server.PgTx, networkId ser
 }
 
 // Serves again the network's user RRsets in root the downgrade withheld, oldest first, while the served count
-// stays within limit, -1 for no limit, as a renewal or a raised limit allows (see the file header). Returns the
-// write, nil when nothing changed.
-func DnsReleaseWithheldInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, limit int64) (*DnsWriteResult, error) {
-	return dnsApplyQuotaWithholdingInTx(ctx, tx, networkId, root, limit)
+// stays within limit, -1 for no limit, as a renewal or a raised limit allows, and with customHosts its withheld
+// custom web hosts, as a Team renewal allows (see the file header). Returns the zone's write, nil when no RRset
+// changed.
+func DnsReleaseWithheldInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, limit int64, customHosts bool) (*DnsWriteResult, error) {
+	result, err := dnsApplyQuotaWithholdingInTx(ctx, tx, networkId, root, limit)
+	if err != nil {
+		return nil, err
+	}
+	if customHosts {
+		if _, err := dnsChangeCustomHostStatesInTx(ctx, tx, networkId, DnsCustomHostStateWithheld, sidecar.DnsCustomHostStateActive); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
-// Withholds a custom domain's web hosts and mail From after the downgrade's 14 days (§20.7), keeping MX, TLSA
-// and routing: refused until question dns-m6-05-custom-host-withheld-state is answered (see the file header),
-// so nothing is withheld and the caller knows it.
+// Withholds the network's custom web hosts after the downgrade's 14 days (§20.7; QD-840): each active TLS host
+// goes withheld, leaving the map and tlsedge's routing with its row kept; MX, TLSA and routing for mail stay, a
+// strict-mode MX host among them. Answers how many went withheld, none when none was active.
 func DnsWithholdCustomHostsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (int, error) {
-	return 0, fmt.Errorf("%w: network_dns_custom_host has no withheld state (question dns-m6-05-custom-host-withheld-state)", ErrDnsCustomHostWithholdUnavailable)
+	return dnsChangeCustomHostStatesInTx(ctx, tx, networkId, sidecar.DnsCustomHostStateActive, DnsCustomHostStateWithheld)
+}
+
+// Moves the network's TLS custom hosts in state from to state to, a host going active again with map_version 0 so
+// it re-enters the map at the next version, raises each root's map whose active rows changed, then adds one admin
+// event. Answers how many moved.
+func dnsChangeCustomHostStatesInTx(ctx context.Context, tx server.PgTx, networkId server.Id, from string, to string) (int, error) {
+	if !dnsCustomHostLinked() {
+		return 0, ErrDnsUnlinked
+	}
+	movedCount := 0
+	roots := []string{}
+	result, err := tx.Query(
+		ctx,
+		`
+			UPDATE network_dns_custom_host SET state = $3, map_version = 0, ready_time = NULL
+			WHERE network_id = $1 AND state = $2 AND owner NOT LIKE $4
+			RETURNING root
+		`,
+		networkId,
+		from,
+		to,
+		dnsMailHostLabel+".%",
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var root string
+			server.Raise(result.Scan(&root))
+			movedCount += 1
+			if !slices.Contains(roots, root) {
+				roots = append(roots, root)
+			}
+		}
+	})
+	if movedCount == 0 {
+		return 0, nil
+	}
+	// the map's raise before the admin event's chain lock, as every custom-host change takes them
+	slices.Sort(roots)
+	for _, root := range roots {
+		if _, err := DnsRaiseCustomHostMapInTx(ctx, tx, root); err != nil {
+			return 0, err
+		}
+	}
+	eventResult := AdminEventResultDnsWithheld
+	if to == sidecar.DnsCustomHostStateActive {
+		eventResult = AdminEventResultDnsReleased
+	}
+	targetId := networkId
+	AddAdminEventInTx(ctx, tx, &AdminEvent{
+		NetworkId:  networkId,
+		ActorKind:  AdminEventActorSystem,
+		Action:     AdminEventActionDnsQuotaWithhold,
+		TargetKind: AdminEventTargetDnsCustomHosts,
+		TargetId:   &targetId,
+		Result:     eventResult,
+	})
+	return movedCount, nil
 }

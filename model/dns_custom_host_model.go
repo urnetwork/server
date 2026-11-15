@@ -514,8 +514,8 @@ const (
 // while the host is pending, a pass activates it and a failure refuses it with
 // custom_host_caa_operator_alias; later, while it is active, a failure clears effective_caa_chain_ok and
 // records EX1's exception in an admin event and the network authority notice, the host staying mapped, and a
-// pass sets the flag again. ErrDnsCustomHostUnknown for a host no row holds, removed since certs began, and
-// for a weak-mode or strict-mode MX host, which certs checks neither way.
+// pass sets the flag again. ErrDnsCustomHostUnknown for a host no row holds, removed since certs began, for a
+// weak-mode or strict-mode MX host, which certs checks neither way, and for a host a downgrade withholds.
 func DnsCustomHostResultInTx(ctx context.Context, tx server.PgTx, result *DnsCustomHostResult) (DnsCustomHostOutcome, error) {
 	if !dnsCustomHostLinked() {
 		return "", ErrDnsUnlinked
@@ -528,7 +528,8 @@ func DnsCustomHostResultInTx(ctx context.Context, tx server.PgTx, result *DnsCus
 			row = scanDnsCustomHostRow(selected)
 		}
 	})
-	if row == nil || row.CaaMode != sidecar.DnsCustomHostModeStrong || row.StrictMx() {
+	// a withheld host is no certs' to judge until a release makes it active again (QD-840)
+	if row == nil || row.CaaMode != sidecar.DnsCustomHostModeStrong || row.StrictMx() || row.State == DnsCustomHostStateWithheld {
 		return "", fmt.Errorf("%w: %s", ErrDnsCustomHostUnknown, host)
 	}
 	targetId := row.NetworkId

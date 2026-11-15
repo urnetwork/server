@@ -71,7 +71,7 @@ func (self *testDnsRecordsWorld) quota(t testing.TB, ctx context.Context, limit 
 	var returnErr error
 	server.Tx(ctx, func(tx server.PgTx) {
 		if release {
-			result, returnErr = DnsReleaseWithheldInTx(ctx, tx, self.networkId, self.root, limit)
+			result, returnErr = DnsReleaseWithheldInTx(ctx, tx, self.networkId, self.root, limit, false)
 		} else {
 			result, returnErr = DnsWithholdOverQuotaInTx(ctx, tx, self.networkId, self.root, limit)
 		}
@@ -206,24 +206,76 @@ func TestDnsWithholdSurvivesASuspensionsChanges(t *testing.T) {
 	})
 }
 
-// The custom-host half refuses until its question is answered, with nothing withheld.
-func TestDnsWithholdCustomHostsRefusesUntilItsQuestionIsAnswered(t *testing.T) {
+// FS-51's custom-host half (QD-840): each active web host goes withheld, out of the map at a new version and
+// routed by no edge, its row kept, while a strict-mode MX host and the zone's MX and TLSA stay; certs' verdict does
+// not touch a withheld host; a release brings each back active at the next version, pending until every
+// interface is current; and a pass with nothing to move writes nothing.
+func TestDnsWithholdCustomHostsAndReleaseThem(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		world := newTestDnsCustomHostWorld(t, ctx)
 		if _, err := world.add(ctx, &sidecar.DnsCustomHostAddRequest{Host: "a." + world.domain, Owner: "blog." + world.apex, Mode: sidecar.DnsCustomHostModeWeak, WeakDisclosureAccepted: true}); err != nil {
 			t.Fatal(err)
 		}
-		var returnErr error
+		world.strongHost(t, ctx, "s."+world.domain, "shop."+world.apex)
+		if _, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: "s." + world.domain, Pass: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := world.add(ctx, &sidecar.DnsCustomHostAddRequest{Host: "mx." + world.domain, Owner: "mx." + world.apex}); err != nil {
+			t.Fatal(err)
+		}
+		before := world.customHostMap(t, ctx)
+		withhold := func() int {
+			t.Helper()
+			var count int
+			var returnErr error
+			server.Tx(ctx, func(tx server.PgTx) {
+				count, returnErr = DnsWithholdCustomHostsInTx(ctx, tx, world.networkId)
+			}, server.TxReadCommitted)
+			if returnErr != nil {
+				t.Fatal(returnErr)
+			}
+			return count
+		}
+		if count := withhold(); count != 2 {
+			t.Fatalf("withheld %d", count)
+		}
+		withheld := world.customHostMap(t, ctx)
+		if withheld.Version != before.Version+1 || len(withheld.Hosts) != 0 {
+			t.Fatalf("the map after withholding %+v", withheld)
+		}
+		for _, host := range []string{"a." + world.domain, "s." + world.domain} {
+			if row := world.row(ctx, host); row == nil || row.State != DnsCustomHostStateWithheld || row.MapVersion != 0 {
+				t.Fatalf("%s %+v", host, row)
+			}
+			if testDnsCustomHostMapped(ctx, host) {
+				t.Fatalf("%s still routed", host)
+			}
+		}
+		if row := world.row(ctx, "mx."+world.domain); row.State != sidecar.DnsCustomHostStateActive {
+			t.Fatalf("the strict-mode MX host %+v", row)
+		}
+		// certs' verdict leaves a withheld host as it is
+		if _, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: "s." + world.domain, Pass: true}); !errors.Is(err, ErrDnsCustomHostUnknown) {
+			t.Fatalf("a verdict on a withheld host: %v", err)
+		}
+		if count := withhold(); count != 0 {
+			t.Fatalf("a second pass withheld %d", count)
+		}
 		server.Tx(ctx, func(tx server.PgTx) {
-			_, returnErr = DnsWithholdCustomHostsInTx(ctx, tx, world.networkId)
-		})
-		if !errors.Is(returnErr, ErrDnsCustomHostWithholdUnavailable) {
-			t.Fatalf("%v", returnErr)
+			_, err := DnsReleaseWithheldInTx(ctx, tx, world.networkId, world.root, -1, true)
+			server.Raise(err)
+		}, server.TxReadCommitted)
+		released := world.customHostMap(t, ctx)
+		if released.Version != withheld.Version+1 || len(released.Hosts) != 2 {
+			t.Fatalf("the map after the release %+v", released)
 		}
-		if !testDnsCustomHostMapped(ctx, "a."+world.domain) {
-			t.Fatal("a refusal withheld the host")
+		for _, host := range []string{"a." + world.domain, "s." + world.domain} {
+			if row := world.row(ctx, host); row.State != sidecar.DnsCustomHostStateActive || row.MapVersion != released.Version || row.ReadyTime != nil {
+				t.Fatalf("%s after the release %+v", host, row)
+			}
 		}
+		testDnsAdminResultsContain(t, ctx, world.networkId, AdminEventResultDnsWithheld, AdminEventResultDnsReleased)
 	})
 }
 
