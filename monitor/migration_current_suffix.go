@@ -1026,6 +1026,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the operator blocks the daily points award recorded expired, versioned
 	// by its position
 	[]snMainnetMigrationContract{operatorBlockPointsExpiredMigrationContract},
+	// the Pay with Gamma intent that pays a gift order, versioned by its
+	// position
+	[]snMainnetMigrationContract{giftGammaSchemaMigrationContract},
 	// The exact-job successor inherits all old audit/source/slot custody.
 	[]snMainnetMigrationContract{competitionSecondRecoveryMigrationContract},
 )

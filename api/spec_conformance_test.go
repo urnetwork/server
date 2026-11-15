@@ -231,6 +231,8 @@ func registry() []specEndpoint {
 		{method: "GET", path: "/pay/gift/config", argType: nil, resultType: rt(controller.GiftConfigResult{})},
 		{method: "POST", path: "/pay/gift/checkout", argType: rt(controller.GiftCheckoutArgs{}), resultType: rt(controller.GiftCheckoutResult{})},
 		{method: "POST", path: "/pay/gift/crypto-intent", argType: rt(controller.GiftCryptoIntentArgs{}), resultType: rt(controller.GiftCryptoIntentResult{})},
+		{method: "POST", path: "/pay/gift/gamma-intent", argType: rt(controller.GiftGammaIntentArgs{}), resultType: rt(controller.GiftGammaIntentResult{})},
+		{method: "POST", path: "/pay/gift/gamma-cancel", argType: rt(controller.GiftOrderStatusArgs{}), resultType: rt(controller.GiftGammaCancelResult{})},
 		{method: "POST", path: "/pay/gift/order", argType: rt(controller.GiftOrderStatusArgs{}), resultType: rt(controller.GiftOrderStatusResult{})},
 		{method: "POST", path: "/pay/gift/check-code", argType: rt(controller.GiftCheckCodeArgs{}), resultType: rt(controller.GiftCheckCodeResult{})},
 		{method: "POST", path: "/pay/alchemy", argType: rt(controller.AlchemyWebhookArgs{}), resultType: rt(controller.AlchemyWebhookResult{})},

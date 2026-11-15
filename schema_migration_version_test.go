@@ -25,6 +25,7 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{"URL failed later legs and post-quantum outcome", ProviderEgressFp2EvidenceSql, ProviderEgressFp2EvidenceMigrationVersion},
 		{"gift orders and Pro gift codes", GiftSchemaSql, GiftSchemaVersion},
 		{"gift code voids and order refunds", GiftRefundSchemaSql, GiftRefundSchemaVersion},
+		{"gift orders paid with Gamma", GiftGammaSchemaSql, GiftGammaSchemaVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {

@@ -193,14 +193,17 @@ func TestGammaPaymentFailuresRejectsUnknownOrMalformedAggregate(t *testing.T) {
 // The actual SELECT on connection-local tables shaped as the Gamma migration
 // makes them: a spend for a network that is gone, and a spend whose credit
 // failed ten times, are counted; a credited, a voided (disposition recorded)
-// or a recently failing one is not; a batch alarm counts for 24 hours.
+// or a recently failing one is not; a gift order's spend is credited to its
+// order whatever its network, so it counts only as a credit failing ten
+// times; a batch alarm counts for 24 hours.
 func TestGammaPaymentFailuresSqlCountsSpendsNoCreditReaches(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		server.Db(t.Context(), func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(t.Context(), `
 CREATE TEMP TABLE network (network_id uuid);
 CREATE TEMP TABLE gamma_payment_intent (
-    intent_id uuid, network_id uuid, credited_at timestamp, voided_at timestamp,
+    intent_id uuid, network_id uuid, item varchar(32) NOT NULL DEFAULT 'data_1tib',
+    credited_at timestamp, voided_at timestamp,
     credit_failure_count int NOT NULL DEFAULT 0
 );
 CREATE TEMP TABLE gamma_charge (
@@ -233,6 +236,18 @@ INSERT INTO gamma_charge (reference, intent_id, state, resolved_at)
 VALUES ($1, $2, $3, localtimestamp - $4::bigint * interval '1 second')`,
 					intentId.Bytes(), intentId, state, int64(age/time.Second)))
 			}
+			// a gift order's intent: credited to its order, whatever its network
+			giftSpend := func(failures int, age time.Duration) {
+				t.Helper()
+				intentId := server.NewId()
+				server.RaisePgResult(conn.Exec(t.Context(), `
+INSERT INTO gamma_payment_intent (intent_id, network_id, item, credit_failure_count)
+VALUES ($1, $2, $3, $4)`, intentId, server.NewId(), controller.GiftGammaItem, failures))
+				server.RaisePgResult(conn.Exec(t.Context(), `
+INSERT INTO gamma_charge (reference, intent_id, state, resolved_at)
+VALUES ($1, $2, 'spent', localtimestamp - $3::bigint * interval '1 second')`,
+					intentId.Bytes(), intentId, int64(age/time.Second)))
+			}
 			alarm := func(kind string, age time.Duration) {
 				t.Helper()
 				server.RaisePgResult(conn.Exec(t.Context(), `
@@ -245,6 +260,10 @@ VALUES ($1, $2, localtimestamp - $3::bigint * interval '1 second')`,
 			spend(false, false, false, 12, "spent", 2*time.Hour)
 			spend(true, false, false, 10, "spent", 3*time.Hour)
 			alarm("batch_unfulfillable", time.Hour)
+			// a gift order's spend whose network is gone is no unfulfillable
+			// credit, and counts only once its credit keeps failing
+			giftSpend(0, time.Hour)
+			giftSpend(10, 4*time.Hour)
 			// not counted: credited, voided after a disposition, failing but not
 			// yet held for review, not spent, an alarm past 24 hours, another kind
 			spend(false, true, false, 0, "spent", time.Hour)
@@ -272,7 +291,7 @@ VALUES ($1, $2, localtimestamp - $3::bigint * interval '1 second')`,
 			})
 			want := map[string]int64{
 				"gamma_batch_unfulfillable":  1,
-				"gamma_credit_failed":        1,
+				"gamma_credit_failed":        2,
 				"gamma_credit_unfulfillable": 2,
 			}
 			if !maps.Equal(groups, want) {

@@ -244,6 +244,11 @@ var errCryptoRefundRefused = errors.New("the invoice was refunded already")
 // A refund of a gift order's invoice none of whose codes is refundable.
 var errCryptoRefundGiftNothingRefundable = errors.New("every code of the gift order is redeemed or void: none is refundable, so no refund was recorded")
 
+// A refund of a gift order paid with Gamma, which is final sale: Gamma cannot
+// be refunded, so no code is voided and no refund is recorded. No coin's
+// invoice pays such an order, so only a defect reaches this.
+var errCryptoRefundGiftFinalSale = fmt.Errorf("%w; no refund was recorded", model.ErrGiftOrderFinalSale)
+
 // CryptoOperatorRefund ends what a credited invoice granted, at now, and
 // records the refund (with the address the coins go to) as a reconciliation
 // event, once: refunded_at is the one-shot (mmm/ZCASH-CONTRACT.md §3.13.8). It refuses
@@ -322,6 +327,9 @@ func CryptoOperatorRefund(clientSession *session.ClientSession, intentId server.
 				// redeemed code's year never ends. The order is not named: the
 				// event keeps the invoice's id
 				refund := model.RefundCryptoGiftOrderInTx(tx, ctx, *giftOrderId, now)
+				if refund != nil && refund.FinalSale {
+					server.Raise(errCryptoRefundGiftFinalSale)
+				}
 				if refund == nil || refund.Refunded == 0 {
 					server.Raise(errCryptoRefundGiftNothingRefundable)
 				}

@@ -64,7 +64,9 @@ const (
 	// failed); re-armed like a skip
 	GammaChargeFailed = "failed"
 	// a pending charge in no batch whose automatic intent was voided when the
-	// account turned its switch off (VoidSwitchedOffGammaIntents): it never
+	// account turned its switch off (VoidSwitchedOffGammaIntents), or a pending
+	// charge in no batch, or a skipped or failed one, of a gift purchase voided
+	// by a newer gift purchase or its cancel (gift_gamma_model.go): it never
 	// joins a batch, is never re-armed, and takes nothing
 	GammaChargeVoided = "voided"
 )
@@ -1125,40 +1127,48 @@ func scanGammaPaymentIntent(result pgx.Rows) *GammaPaymentIntent {
 // when the network no longer exists.
 func CreateGammaPaymentIntent(ctx context.Context, intent *GammaPaymentIntent) (created bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO gamma_payment_intent (
-					intent_id, status_token_hash, network_id, hotkey, purpose,
-					period_key, reference, delivery, item, tier, offer_applied,
-					price_usd_nano_cents, regular_price_usd_nano_cents, email,
-					term_start_time, create_time, expires_at
-				)
-				SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
-				WHERE EXISTS (SELECT 1 FROM network WHERE network.network_id = $3)
-				ON CONFLICT DO NOTHING
-			`,
-			intent.IntentId,
-			intent.StatusTokenHash,
-			intent.NetworkId,
-			intent.Hotkey,
-			intent.Purpose,
-			intent.PeriodKey,
-			intent.Reference,
-			intent.Delivery,
-			intent.Item,
-			nullIfEmptyString(intent.Tier),
-			intent.OfferApplied,
-			intent.PriceUsdNanoCents,
-			intent.RegularPriceUsdNanoCents,
-			nullIfEmptyString(intent.Email),
-			intent.TermStartTime,
-			intent.CreateTime,
-			intent.ExpiresAt,
-		))
-		created = tag.RowsAffected() == 1
+		created = CreateGammaPaymentIntentInTx(tx, ctx, intent)
 	})
 	return
+}
+
+// CreateGammaPaymentIntentInTx is CreateGammaPaymentIntent in the caller's
+// transaction, for a caller that records what the intent pays for with it (a
+// gift order's link, model.SetGiftOrderGammaIntentIdInTx): the biller charges
+// an intent from the moment it is committed.
+func CreateGammaPaymentIntentInTx(tx server.PgTx, ctx context.Context, intent *GammaPaymentIntent) (created bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO gamma_payment_intent (
+				intent_id, status_token_hash, network_id, hotkey, purpose,
+				period_key, reference, delivery, item, tier, offer_applied,
+				price_usd_nano_cents, regular_price_usd_nano_cents, email,
+				term_start_time, create_time, expires_at
+			)
+			SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+			WHERE EXISTS (SELECT 1 FROM network WHERE network.network_id = $3)
+			ON CONFLICT DO NOTHING
+		`,
+		intent.IntentId,
+		intent.StatusTokenHash,
+		intent.NetworkId,
+		intent.Hotkey,
+		intent.Purpose,
+		intent.PeriodKey,
+		intent.Reference,
+		intent.Delivery,
+		intent.Item,
+		nullIfEmptyString(intent.Tier),
+		intent.OfferApplied,
+		intent.PriceUsdNanoCents,
+		intent.RegularPriceUsdNanoCents,
+		nullIfEmptyString(intent.Email),
+		intent.TermStartTime,
+		intent.CreateTime,
+		intent.ExpiresAt,
+	))
+	return tag.RowsAffected() == 1
 }
 
 // GetGammaPaymentIntent is an intent, or nil.
@@ -1454,6 +1464,12 @@ func scanGammaCharge(result pgx.Rows) *GammaCharge {
 // already has its charge, is no longer open, or its network no longer exists.
 func CreateGammaCharge(ctx context.Context, intent *GammaPaymentIntent, now time.Time) (created bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		// the intent is share-locked, so a void (VoidOpenGammaGiftIntentsInTx,
+		// CancelGammaGiftIntent), which locks it for update, is ordered with
+		// this: a void that commits first is read here (a row it changed after
+		// this transaction's snapshot fails the lock, and the transaction runs
+		// again with a fresh one), and one that waits sees the charge and voids
+		// it too
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -1462,6 +1478,7 @@ func CreateGammaCharge(ctx context.Context, intent *GammaPaymentIntent, now time
 				FROM gamma_payment_intent
 				WHERE intent_id = $1 AND credited_at IS NULL AND voided_at IS NULL AND $2 < expires_at
 				  AND `+gammaNetworkLiveSql("gamma_payment_intent")+`
+				FOR SHARE OF gamma_payment_intent
 				ON CONFLICT DO NOTHING
 			`,
 			intent.IntentId,

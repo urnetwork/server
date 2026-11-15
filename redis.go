@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	// "net/netip"
 	// "fmt"
@@ -365,7 +366,17 @@ func RedisAuth(ctx context.Context, callback func(context.Context, RedisClient) 
 
 var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "urnetwork_redis_key_event_merge_drops_total",
-	Help: "Keyspace notifications dropped at the process-wide merge; each drop terminates the subscription epoch and forces a full resync",
+	Help: "Keyspace notifications dropped at the process-wide merge after the subscription was handed to its caller; each drop terminates the subscription epoch and forces a full resync",
+})
+
+var redisKeyEventStartupDrops = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_redis_key_event_startup_drops_total",
+	Help: "Keyspace notifications dropped at a full merge before the subscription was handed to its caller; the caller's recovery read covers every event before the handoff, so these end no epoch",
+})
+
+var redisKeyEventIgnored = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_redis_key_event_ignored_total",
+	Help: "Keyspace notifications a node drain discarded before the merge as an ignored event, by default expire (a ttl refresh)",
 })
 
 // pool stats flow to grafana via the default registry (see StartStatsPusher).
@@ -379,6 +390,8 @@ func init() {
 	}
 	prometheus.MustRegister(
 		redisKeyEventMergeDrops,
+		redisKeyEventStartupDrops,
+		redisKeyEventIgnored,
 		prometheus.NewCounterFunc(
 			prometheus.CounterOpts{Name: "urnetwork_redis_pool_hits_total", Help: "redis pool free-connection hits"},
 			poolStat(func(s *redis.PoolStats) float64 { return float64(s.Hits) }),
@@ -696,6 +709,14 @@ type RedisKeyEventSubscriptionSettings struct {
 	TopologyRefreshInterval time.Duration
 	// Messages buffered per node and in the shared merge. Must be positive.
 	MessageBufferSize int
+	// Keyspace events, the payload of a `__keyspace@` message, that each node
+	// drain discards before the shared merge, so they take no merge slot and
+	// cannot end an epoch. expire: a ttl set on a key that still exists, which
+	// changes no value; no subscriber acts on it, and an expiry itself arrives
+	// as expired. Session ttl refreshes made expire 87% of connect's stream,
+	// and it overflowed the merge every few seconds (CPUOPT6, 2026-11-15).
+	// Empty delivers every event.
+	IgnoredKeyspaceEvents []string
 }
 
 // Allows establishment latency while bounding notification-free startup.
@@ -704,6 +725,7 @@ func DefaultRedisKeyEventSubscriptionSettings() *RedisKeyEventSubscriptionSettin
 		AcknowledgementTimeout:  5 * time.Second,
 		TopologyRefreshInterval: 60 * time.Second,
 		MessageBufferSize:       1024,
+		IgnoredKeyspaceEvents:   []string{"expire"},
 	}
 }
 
@@ -711,6 +733,8 @@ func DefaultRedisKeyEventSubscriptionSettings() *RedisKeyEventSubscriptionSettin
 // so the caller's recovery read covers the entire preceding gap. The done channel
 // closes on a lost subscription, merge overflow or master-set change; the caller
 // must unsubscribe, resubscribe and reconcile its state (PEERSSTREAMS2.md).
+// Ignored keyspace events never reach the merge, and a merge that overflows
+// before the subscription is returned drops the message without ending it.
 func SubscribeKeyEvents(
 	ctx context.Context,
 	topologyRefresh time.Duration,
@@ -758,6 +782,13 @@ func SubscribeKeyEventsWithSettings(
 	stopStartupCancel := context.AfterFunc(startupCtx, func() { cancel(context.Cause(startupCtx)) })
 	defer stopStartupCancel()
 	out := make(chan RedisMessage, settings.MessageBufferSize)
+	ignoredKeyspaceEvents := map[string]bool{}
+	for _, event := range settings.IgnoredKeyspaceEvents {
+		ignoredKeyspaceEvents[event] = true
+	}
+	// set just before the subscription is returned. The caller's recovery read
+	// runs after that, so it covers whatever a drain drops before it.
+	var handedOff atomic.Bool
 
 	// ForEachMaster runs its callback CONCURRENTLY, one goroutine per master —
 	// every write to state shared across callbacks must hold stateLock
@@ -824,11 +855,22 @@ func SubscribeKeyEventsWithSettings(
 					}
 					continue
 				case *redis.Message:
+					if ignoredKeyspaceEvents[value.Payload] && strings.HasPrefix(value.Channel, "__keyspace@") {
+						redisKeyEventIgnored.Inc()
+						continue
+					}
 					select {
 					case <-cancelCtx.Done():
 						return
 					case out <- value:
 					default:
+						if !handedOff.Load() {
+							// No one drains the merge until the subscription is
+							// returned, and the caller's recovery read covers
+							// this message, so the startup goes on without it.
+							redisKeyEventStartupDrops.Inc()
+							continue
+						}
 						// Never stop draining a node's PubSub socket behind a
 						// congested shared merge. A drop invalidates this
 						// epoch; reconnect + full resync restores state.
@@ -882,7 +924,8 @@ func SubscribeKeyEventsWithSettings(
 	}
 
 	// The node drains keep running while readiness waits, so early messages do
-	// not block acknowledgements. An overflow invalidates this startup too.
+	// not block acknowledgements. Early messages wait in the merge for the
+	// caller, and one that finds it full is dropped (redisKeyEventStartupDrops).
 	for _, ready := range readyChannels {
 		select {
 		case <-cancelCtx.Done():
@@ -916,6 +959,7 @@ func SubscribeKeyEventsWithSettings(
 		})
 	}
 
+	handedOff.Store(true)
 	started = true
 	messages = out
 	done = cancelCtx.Done()

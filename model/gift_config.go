@@ -63,7 +63,9 @@ type GiftConfig struct {
 	MaxQuantity   int
 	// in rising MinQuantity order
 	Tiers []GiftTier
-	// the cap of a gift order's crypto invoice; the data rail keeps its own
+	// pro.yml gift.crypto_max_invoice_usd: the cap of a gift order paid in a
+	// coin (its crypto invoice) or with Gamma (its intent), in USD; the data
+	// rail keeps its own. 0 sells no gift order in a coin or with Gamma.
 	CryptoMaxInvoiceUsd float64
 }
 

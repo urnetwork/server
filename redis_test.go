@@ -204,6 +204,63 @@ func TestRedisPublishSubscribe(t *testing.T) {
 	})
 }
 
+// A Redis ttl refresh publishes an expire event to every pattern subscriber.
+// On Main on 2026-11-15 the session hint reads' refreshes filled connect's
+// merge with them and ended its subscription every few seconds (CPUOPT6).
+// With nothing draining, more refreshes than the merge holds end no epoch,
+// and the change behind them is the first message delivered.
+func TestSubscribeKeyEventsTtlRefreshFloodKeepsEpoch(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		Testing_EnableKeyspaceNotifications(ctx)
+
+		prefix := fmt.Sprintf("test:kes:{%s}", NewId())
+		pattern := fmt.Sprintf("__keyspace@%d__:%s:*", RedisDb(), prefix)
+		refreshCount := 3 * DefaultRedisKeyEventSubscriptionSettings().MessageBufferSize
+		key := fmt.Sprintf("%s:refreshed", prefix)
+		changedKey := fmt.Sprintf("%s:changed", prefix)
+		Redis(ctx, func(r RedisClient) {
+			Raise(r.Set(ctx, key, "1", time.Hour).Err())
+		})
+
+		mergeDropsBefore := testutil.ToFloat64(redisKeyEventMergeDrops)
+		messages, done, unsub, err := SubscribeKeyEvents(ctx, 60*time.Second, pattern)
+		Raise(err)
+		defer unsub()
+
+		Redis(ctx, func(r RedisClient) {
+			pipe := r.Pipeline()
+			for i := range refreshCount {
+				pipe.PExpire(ctx, key, time.Hour+time.Duration(i)*time.Millisecond)
+			}
+			pipe.Set(ctx, changedKey, "1", NoTtl)
+			_, err := pipe.Exec(ctx)
+			Raise(err)
+		})
+
+		select {
+		case <-done:
+			t.Fatal("ttl refreshes ended the subscription")
+		case message := <-messages:
+			connect.AssertEqual(t, message.Channel, fmt.Sprintf("__keyspace@%d__:%s", RedisDb(), changedKey))
+			connect.AssertEqual(t, message.Payload, "set")
+		case <-time.After(15 * time.Second):
+			t.Fatal("the change behind the ttl refreshes was not delivered")
+		}
+		select {
+		case <-done:
+			t.Fatal("ttl refreshes ended the subscription")
+		default:
+		}
+		connect.AssertEqual(t, testutil.ToFloat64(redisKeyEventMergeDrops)-mergeDropsBefore, float64(0))
+		Redis(ctx, func(r RedisClient) {
+			r.Del(ctx, key, changedKey)
+		})
+	})
+}
+
 // TestSubscribeKeyEventsConnDeathResubscribes pins the reconnect-detection
 // contract of `SubscribeKeyEvents`: go-redis transparently reconnects and
 // re-PSUBSCRIBEs a killed pubsub connection, and events published during the

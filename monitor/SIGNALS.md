@@ -22470,16 +22470,22 @@ aggregated to kind, count and oldest/newest age:
   disposition is done, record it by voiding the intent
   (`gamma_payment_intent.voided_at`): the biller stops retrying and the count
   drops it. There is no operator tool for it yet (`bringyourctl gamma`,
-  BTCPAY §18.9).
+  BTCPAY §18.9). A gift order's intent (item `gift_pro_year`, POST
+  /pay/gift/gamma-intent) is never counted here: it is credited to its order,
+  whose codes go to the buyer's email, so a network that is gone does not stop
+  its credit.
 - `gamma-credit-failed` (PAGE): a spent charge whose credit failed
   `controller.GammaMaxCreditFailures` (10) times or more for a network that
-  still exists; its status says `review` (`credit_failed`). The biller retries
-  ten such credits a run, the least retried first, beside every other credit,
-  the fewest failures first, so they never hold a new credit back. Read the
-  taskworker log line `[gamma]credit of intent <id> failed (<n>): <error>` and
-  fix the cause (the Pro configuration such as the data code duration or the
-  data pack catalog, or the database); the retry then credits the intent once,
-  through its one-shot. Do not credit by hand or edit balances. A cause that
+  still exists, or for a gift order's intent whatever its network; its status
+  says `review` (`credit_failed`). The biller retries ten such credits a run,
+  the least retried first, beside every other credit, the fewest failures
+  first, so they never hold a new credit back. Read the taskworker log line
+  `[gamma]credit of intent <id> failed (<n>): <error>` and fix the cause (the
+  Pro configuration such as the data code duration, the data pack catalog or
+  the gift block, a gift intent with no gift order or a price that is not its
+  order's total, or the database); the retry then credits the intent once,
+  through its one-shot. Do not credit by hand or edit balances or codes. A
+  gift order paid with Gamma is final sale and is never refunded. A cause that
   cannot be fixed goes to the owner, and the intent is voided once its
   disposition is done.
 - `gamma-batch-unfulfillable` (WARN): a `batch_unfulfillable` alarm in the last
@@ -32510,7 +32516,19 @@ Signals for the redis keyspace-notification transport for peers + stream hops
   Occasional drops during a mass reconnect are self-healing; a SUSTAINED
   nonzero rate = a key-event burst storm outrunning the merge buffer, forcing
   continuous resubscribe/resync churn — find the write storm generating the
-  events before tuning buffer sizes or intervals.
+  events before tuning buffer sizes or intervals. Only drops after the
+  subscription is handed to its caller count here.
+- `urnetwork_redis_key_event_startup_drops_total` (`server/redis.go`) — merge
+  overflows before the subscription is handed to its caller. Nothing drains
+  the merge until then, and the caller's recovery read after the handoff covers
+  every earlier event, so these end no epoch. Near zero normally.
+- `urnetwork_redis_key_event_ignored_total` (`server/redis.go`) — `expire`
+  events (ttl refreshes, which change no value) the node drains discard before
+  the merge. On 2026-11-15 the session hint reads refreshed `{ns_*}eid` on every
+  read, the refreshes were 87% of connect's stream, and the busy processes
+  resubscribed every 7–9 s (CPUOPT6). A high rate means something refreshes a
+  subscribed key's ttl on every call again; it no longer ends epochs, but every
+  connect process still receives each event.
 - `urnetwork_network_peer_listener_resets_total` — full-read deliveries. In
   poll mode this is normal change delivery. In key-event mode it should be
   ≈ registrations + resyncs; a SUSTAINED rate above that means the corrective

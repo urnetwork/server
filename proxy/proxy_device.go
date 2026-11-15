@@ -39,6 +39,8 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 		CreationFailureSweepMinEntries: 1024,
 		WindowClientStats:              defaultWindowClientStats,
 		DisableStrictWindowHandover:    !proxyWindowStrictHandoverFromConfig(),
+		// the api's per-process budgets (see the field)
+		ContractOriginNotificationSettings: model.DefaultContractOriginNotificationSettings(),
 	}
 }
 
@@ -211,6 +213,23 @@ type ProxyDeviceManagerSettings struct {
 	// features notice (model ProxyFeatureUses). The process owns it; nil
 	// notes nothing.
 	FeatureUses *model.ProxyFeatureUses
+
+	// The budgets of the one contract origin notification owner the manager
+	// shares with every device's local authority (waiters, publish queue and
+	// workers, route refusal bounds and timeouts), in place of one owner per
+	// device with 16 bucket and 2 publisher goroutines and a 1024-entry queue
+	// each: 18 of a hosted device's 51 own goroutines, about 0.15-0.35 GB per
+	// process at sweep load (server CPUOPT6.md B #2). The default is the api's,
+	// which runs one owner per process too. On 2026-11-15 an api process
+	// enqueued 44 committed origins a second on average and 101 at its 24-hour
+	// peak, and a proxy process 16 and 34, with no queue_full drop in either.
+	// Watches are taken only inside a contract creation, which
+	// HostedContractConcurrency bounds for the whole manager (256), far below
+	// the 8192 waiters. The route refusal timeouts (60 s, and 6 h for
+	// terminal refusals) and their bounds are the same as per device. A
+	// nonpositive MaxWaiters (the zero value) shares no owner: each device's
+	// authority builds its own and closes it with itself.
+	ContractOriginNotificationSettings model.ContractOriginNotificationSettings
 }
 
 type ProxyDeviceManager struct {
@@ -254,6 +273,16 @@ type ProxyDeviceManager struct {
 	// this manager opens, instead of a detector goroutine and timer per
 	// client. Stops with the manager.
 	schedulerPauseDetector *connect.SchedulerPauseDetector
+	// The one contract origin notification owner every device's local
+	// authority borrows (settings.ContractOriginNotificationSettings). A
+	// device's watches are per request and closed by their requests before
+	// its authority closes, since a device joins every control owner first.
+	// Route refusals are keyed by route, so one recorded through a device is
+	// the right answer for an identical request through another device, or
+	// through a later generation of the same device that restores its window
+	// identities. Closed once every device worker has stopped. Nil when the
+	// settings share no owner.
+	contractOriginNotifications *model.ContractOriginNotifications
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -324,6 +353,10 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		mintAdmission:          localclient.NewMintAdmission(settings.HostedMintConcurrency),
 		contractAdmission:      localclient.NewContractAdmission(settings.HostedContractConcurrency),
 		schedulerPauseDetector: connect.NewSchedulerPauseDetector(cancelCtx),
+	}
+	if 0 < settings.ContractOriginNotificationSettings.MaxWaiters {
+		// its goroutines park without I/O until a request registers a watch
+		manager.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, settings.ContractOriginNotificationSettings)
 	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
 	manager.networkSpaceCloser = func(networkSpace *sdk.NetworkSpace) {
@@ -735,6 +768,7 @@ func (self *ProxyDeviceManager) proxyDeviceSettings() *ProxyDeviceSettings {
 	settings.windowIdentityGate = self.windowIdentityGate
 	settings.mintAdmission = self.mintAdmission
 	settings.contractAdmission = self.contractAdmission
+	settings.contractOriginNotifications = self.contractOriginNotifications
 	settings.schedulerPauseDetector = self.schedulerPauseDetector
 	settings.windowClientStats = self.settings.WindowClientStats
 	settings.DisableStrictWindowHandover = self.settings.DisableStrictWindowHandover
@@ -1084,6 +1118,10 @@ func (self *ProxyDeviceManager) Close() {
 			}
 			// every device's authority has stopped creating contracts
 			self.contractAdmission.Close()
+			// and holds no watch or route refusal lookup
+			if self.contractOriginNotifications != nil {
+				self.contractOriginNotifications.Close()
+			}
 			// Prevent a test-only direct lazy lookup from constructing an owned
 			// session after all admitted production opens have drained.
 			self.networkSpaceOnce.Do(func() {})
@@ -1141,14 +1179,16 @@ type deviceCreation struct {
 // defaultProxyDeviceIdleRefillHold is how long a device may go without user
 // traffic or an open (its activity, see ProxyDeviceSettings.
 // ProxyDeviceIdleTimeout) before its below-target windows stop refilling
-// (connect IdleRefillHold). A held window keeps its exits, which keep serving,
-// and the device's next user traffic refills it at once; until then it lists,
-// mints and dials nothing. Without it every below-target window of an idle
-// device refills until the device is reaped: on Main at 17:20Z on 2026-11-05,
-// 22,200 devices were live and 3,268 had moved user traffic in the last ten
-// minutes, while the quality windows built about 48 candidates a second. Ten
-// minutes is the activity window the active-device count uses, so a user
-// pausing for less never sees the hold.
+// (connect IdleRefillHold). A held window keeps one exit once the device has
+// been idle for the longer of the hold and its sequence idle timeouts, ten
+// minutes in the hosted low memory profile (connect's idle trim, owner
+// 2026-11-15), and the device's next user traffic refills it at once; until
+// then it lists, mints and dials nothing. Without the hold every below-target
+// window of an idle device refills until the device is reaped: on Main at
+// 17:20Z on 2026-11-05, 22,200 devices were live and 3,268 had moved user
+// traffic in the last ten minutes, while the quality windows built about 48
+// candidates a second. Ten minutes is the activity window the active-device
+// count uses, so a user pausing for less never sees the hold.
 const defaultProxyDeviceIdleRefillHold = 10 * time.Minute
 
 // The gap in user traffic after which the next activity signals the device's
@@ -1229,6 +1269,9 @@ type ProxyDeviceSettings struct {
 	mintAdmission *localclient.MintAdmission
 	// the owning manager's contract creation bound; nil is unbounded
 	contractAdmission *localclient.ContractAdmission
+	// the owning manager's contract origin notifications; nil builds one per
+	// device, which its authority closes
+	contractOriginNotifications *model.ContractOriginNotifications
 	// the owning manager's shared scheduler-pause detector; nil runs one per
 	// multi client
 	schedulerPauseDetector *connect.SchedulerPauseDetector
@@ -1241,11 +1284,12 @@ type ProxyDeviceSettings struct {
 	DisableStrictWindowHandover bool
 }
 
-// The owner's bounds the device's local authority shares.
+// The owner's bounds and notifications the device's local authority shares.
 func (self *ProxyDeviceSettings) authoritySettings() *localclient.AuthoritySettings {
 	return &localclient.AuthoritySettings{
-		MintAdmission:     self.mintAdmission,
-		ContractAdmission: self.contractAdmission,
+		MintAdmission:               self.mintAdmission,
+		ContractAdmission:           self.contractAdmission,
+		ContractOriginNotifications: self.contractOriginNotifications,
 	}
 }
 

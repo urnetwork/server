@@ -5,7 +5,9 @@ package controller
 // friend emails in any 24 hours, counted as the recipients of their delivery
 // "them" orders made in the last 24 hours that are pending or paid, this
 // order's included. Cards delivered to the buyer ("me") are not capped beyond
-// gift.max_quantity per order.
+// gift.max_quantity per order. A pending order whose Gamma purchase was voided
+// is never paid and is not counted, nor, for a new gift purchase with Gamma,
+// the orders of the account's open gift purchases it voids.
 //
 // An order is stored in its own transaction (model.CreateGiftOrder), so the cap
 // is checked twice: before anything is made, which refuses the usual case
@@ -23,6 +25,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -35,10 +38,24 @@ func giftFriendEmailLimitRefusal(
 	giftConfig *model.GiftConfig,
 	now time.Time,
 ) (errCode string, errMessage string) {
+	return giftFriendEmailLimitRefusalReplacing(ctx, order, giftConfig, now, nil)
+}
+
+// giftFriendEmailLimitRefusalReplacing is giftFriendEmailLimitRefusal for a
+// gift purchase with Gamma by the network replacingNetworkId, which voids that
+// network's open gift purchases: their orders are not counted
+// (model.GetGiftFriendEmailCountReplacing).
+func giftFriendEmailLimitRefusalReplacing(
+	ctx context.Context,
+	order *model.GiftOrder,
+	giftConfig *model.GiftConfig,
+	now time.Time,
+	replacingNetworkId *server.Id,
+) (errCode string, errMessage string) {
 	if order.Delivery != model.GiftDeliveryThem {
 		return "", ""
 	}
-	count := model.GetGiftFriendEmailCount(ctx, order.BuyerEmail, now.Add(-model.GiftFriendEmailWindow))
+	count := model.GetGiftFriendEmailCountReplacing(ctx, order.BuyerEmail, now.Add(-model.GiftFriendEmailWindow), replacingNetworkId)
 	if model.GiftFriendEmailDailyLimit < count+len(order.Recipients) {
 		return GiftErrorCodeDailyLimit, giftDailyLimitMessage(giftConfig)
 	}
@@ -55,10 +72,23 @@ func giftKeepFriendEmailLimit(
 	giftConfig *model.GiftConfig,
 	now time.Time,
 ) (errCode string, errMessage string) {
+	return giftKeepFriendEmailLimitReplacing(ctx, order, giftConfig, now, nil)
+}
+
+// giftKeepFriendEmailLimitReplacing is giftKeepFriendEmailLimit for a gift
+// purchase with Gamma by the network replacingNetworkId, as
+// giftFriendEmailLimitRefusalReplacing counts.
+func giftKeepFriendEmailLimitReplacing(
+	ctx context.Context,
+	order *model.GiftOrder,
+	giftConfig *model.GiftConfig,
+	now time.Time,
+	replacingNetworkId *server.Id,
+) (errCode string, errMessage string) {
 	if order.Delivery != model.GiftDeliveryThem {
 		return "", ""
 	}
-	count := model.GetGiftFriendEmailCount(ctx, order.BuyerEmail, now.Add(-model.GiftFriendEmailWindow))
+	count := model.GetGiftFriendEmailCountReplacing(ctx, order.BuyerEmail, now.Add(-model.GiftFriendEmailWindow), replacingNetworkId)
 	if count <= model.GiftFriendEmailDailyLimit {
 		return "", ""
 	}
