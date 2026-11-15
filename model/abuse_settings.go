@@ -58,6 +58,11 @@ type AbuseSettings struct {
 	// The task runner's bound on one pass, past ActionPassMaxTime, so a pass
 	// ends itself before the runner ends it.
 	ActionPassTaskMaxTime time.Duration
+	// The least time between two default-level log reports of a failed
+	// effect, record mail, hint or intake action: a minute, so an outage
+	// writes a line a minute with the count it suppressed, not one per action.
+	// Non-positive reports every failure.
+	ActionReportInterval time.Duration
 
 	// Cases, actions and appeals are kept this many calendar months after the
 	// case last closes (§21.10, §2.8 api-14, plan-ABUSE-small-readings #9): 13,
@@ -101,6 +106,7 @@ func DefaultAbuseSettings() *AbuseSettings {
 		ActionPassBatchSize:   100,
 		ActionPassMaxTime:     5 * time.Minute,
 		ActionPassTaskMaxTime: 10 * time.Minute,
+		ActionReportInterval:  time.Minute,
 		CaseRetentionMonths:   13,
 		LegalRetentionYears:   3,
 		RetentionBatchSize:    1000,
