@@ -203,9 +203,11 @@ func ApplyAbuseAction(ctx context.Context, args *model.AbuseActionArgs) (*AbuseA
 	var inserted bool
 	var err error
 	server.Tx(ctx, func(tx server.PgTx) {
-		action, abuseCase, inserted, err = model.RecordAbuseActionInTx(ctx, tx, args, server.NowUtc(), settings)
+		now := server.NowUtc()
+		action, abuseCase, inserted, err = model.RecordAbuseActionInTx(ctx, tx, args, now, settings)
 		if err == nil && inserted {
 			oweAbuseActionNoticeInTx(ctx, tx, abuseCase, action, nil)
+			reevaluateAbuseStandingInTx(ctx, tx, action, now, settings)
 		}
 	})
 	if err != nil {
@@ -224,15 +226,18 @@ func LiftAbuseAction(ctx context.Context, args *model.AbuseLiftArgs) (*AbuseActi
 	if !server.SidecarMg5Linked() {
 		return nil, model.ErrAbuseUnlinked
 	}
+	settings := model.DefaultAbuseSettings()
 	var lift *model.AbuseAction
 	var lifted *model.AbuseAction
 	var abuseCase *model.AbuseCase
 	var inserted bool
 	var err error
 	server.Tx(ctx, func(tx server.PgTx) {
-		lift, lifted, abuseCase, inserted, err = model.RecordAbuseLiftInTx(ctx, tx, args, server.NowUtc())
+		now := server.NowUtc()
+		lift, lifted, abuseCase, inserted, err = model.RecordAbuseLiftInTx(ctx, tx, args, now)
 		if err == nil && inserted {
 			oweAbuseActionNoticeInTx(ctx, tx, abuseCase, lift, lifted)
+			reevaluateAbuseStandingInTx(ctx, tx, lift, now, settings)
 		}
 	})
 	if err != nil {
@@ -246,6 +251,18 @@ func LiftAbuseAction(ctx context.Context, args *model.AbuseLiftArgs) (*AbuseActi
 	}
 	result.Applied, result.Mailed, _, _ = completeAbuseAction(ctx, abuseCase.Barred, lift, lifted, true, true)
 	return result, nil
+}
+
+// Re-derives the network's §21.7 restricted row in the action's or lift's own
+// transaction (ABUSE-M5-07): a kill or a network halt restricts its network,
+// and a lift as wrong takes it out of the window, so the standing moves in the
+// transaction that moved it. A suspension's row is the effects', which
+// re-derive once they end it. Nothing for an action with no network.
+func reevaluateAbuseStandingInTx(ctx context.Context, tx server.PgTx, action *model.AbuseAction, now time.Time, settings *model.AbuseSettings) {
+	if action.NetworkId == nil {
+		return
+	}
+	model.ReevaluateNetworkAbuseStateInTx(ctx, tx, *action.NetworkId, now, settings)
 }
 
 // Calls the test hook, if any, with no lock held.

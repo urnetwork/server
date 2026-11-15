@@ -10,6 +10,7 @@ import (
 
 	"github.com/urnetwork/server"
 	connectserver "github.com/urnetwork/server/connect"
+	"github.com/urnetwork/server/controller"
 )
 
 func main() {
@@ -58,6 +59,9 @@ Options:
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
+	// §21's hard deny for the residents' CreateContract (ABUSE-M5-07); a binary
+	// that does not link MG5 installs none
+	controller.InstallAbuseHardDeny(ctx)
 	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger, PrivateHeapProfileTarget: privateHeapTarget}); err != nil {
 		panic(err)
 	}

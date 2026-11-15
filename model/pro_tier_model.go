@@ -188,12 +188,17 @@ func NetworkTierOfFresh(ctx context.Context, networkId server.Id) NetworkTier {
 
 // Loads the network's entitlement once and refreshes both keys, Pro's and the tier's,
 // in both cache tiers, returning what it loaded. UpdateProNetworkInConn's body: call it
-// after the transaction that changed the balances commits, never inside it.
+// after the transaction that changed the balances commits, never inside it. Where MG5 is
+// linked it refreshes network_verified too (ABUSE-M5-07), since every payment path and
+// every sign-in's IsProFresh comes here after its commit; before M5 nothing reads it.
 func updateNetworkEntitlementInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) networkTierEntitlement {
 	entitlement, tierEntitlement := loadNetworkTierInConn(connOwner, ctx, networkId)
 	observeProNetworkLoaded(networkId)
 	storeProNetwork(ctx, networkId, entitlement)
 	storeNetworkTier(ctx, networkId, tierEntitlement)
+	if server.SidecarMg5Linked() {
+		UpdateNetworkVerifiedInConn(connOwner, ctx, networkId)
+	}
 	return tierEntitlement
 }
 

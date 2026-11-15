@@ -70,6 +70,9 @@ Options:
 	// MG5 installs neither
 	controller.InstallAbuseEffects()
 	controller.InstallAbuseRecordMailer()
+	// §21.7's standing and network_verified for the reports, record writes and
+	// grant activations this process runs (ABUSE-M5-07)
+	controller.InstallAbuseStanding(ctx)
 	if err := taskworker.Run(ctx, taskworker.RunOptions{Port: port, Count: count, BatchSize: batchSize}); err != nil {
 		panic(err)
 	}
