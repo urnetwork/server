@@ -41,7 +41,7 @@ func ConfigLogApiWith(
 		if edit != nil {
 			edit(settings)
 		}
-		return &configLogApi{sequencer: model.NewConfigLogSequencer(cluster, settings, advanceHead)}
+		return &configLogApi{sequencer: model.NewConfigLogSequencer(cluster, settings, advanceHead), settings: settings}
 	}
 }
 
@@ -54,6 +54,27 @@ func ConfigLogSuiteSettings() *sidecartest.AdmissionSuiteSettings {
 
 type configLogApi struct {
 	sequencer *model.ConfigLogSequencer
+	// the sequencer's own settings, which a world sets before the api's first append
+	settings *model.ConfigLogSettings
+}
+
+// §16.6's spend check in the sequencer's verifiers, as a world that spends approvals asks
+// (sidecartest.AdmissionSpendApi): set before the api's first append, when the sequencer holds no network yet.
+func (self *configLogApi) SetAclSpendCheck(check sidecar.AclSpendCheck) {
+	self.settings.AclSpendCheck = check
+}
+
+// Says every network of this api is on the team tier, or leaves the sequencer's own answer, as a team network's
+// world asks (sidecartest.AdmissionTeamApi): the tier is api's to say (§8.8), and a T3 world's network has no balance
+// row for NetworkTierOf to read. Set before the api's first append.
+func (self *configLogApi) SetTeamTier(team bool) {
+	if !team {
+		self.settings.TeamTier = nil
+		return
+	}
+	self.settings.TeamTier = func(ctx context.Context, networkId server.Id) bool {
+		return true
+	}
 }
 
 // A ConfigLogError as the suite's refusal.

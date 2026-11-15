@@ -108,6 +108,10 @@ type ConfigLogSettings struct {
 	// Whether a network is on the team tier, which a directory RepoCreate needs at api alone (§8.8). nil is
 	// NetworkTierOf's answer, team; a test passes its own.
 	TeamTier func(ctx context.Context, networkId server.Id) bool
+	// §16.6's spend check in each network's verifier, which every decision a GrantActivate carries must pass at
+	// api as at every reader (sidecar.ConfigLogSettings.AclSpendCheck; ACL-M2-07). nil installs none, so api refuses
+	// every GrantActivate as unbuilt, as it has until a process installs sidecar.NewSpendCheck here.
+	AclSpendCheck sidecar.AclSpendCheck
 	// Writes {acl_<networkId>}e and INCRs {acl_<networkId>}v after each entry this instance lands, with the
 	// newest base's position at it (§7.9's read cache, §8.9). nil writes nothing.
 	EntryCache func(ctx context.Context, networkId server.Id, n uint64, base uint64, entryBytes []byte) error
@@ -424,6 +428,14 @@ func configLogVerifierSettings() *sidecar.ConfigLogSettings {
 	return settings
 }
 
+// The settings of a network's verifier at this sequencer: a rows-only log's, with the spend check the sequencer's
+// settings name.
+func (self *ConfigLogSequencer) verifierSettings() *sidecar.ConfigLogSettings {
+	settings := configLogVerifierSettings()
+	settings.AclSpendCheck = self.settings.AclSpendCheck
+	return settings
+}
+
 // Loads the verifier from the store when this instance holds none: entry 0's
 // genesis, or genesisHint while entry 0 is unwritten and the hint is entry 1's
 // prev_chain (a retry of base 1 whose genesis step failed), then the retained
@@ -468,13 +480,13 @@ func (self *configLogNetwork) loadWithLock(ctx context.Context, sequencer *Confi
 	}
 	var log *sidecar.ConfigLog
 	if len(entries) == 0 || positions[0] == 1 {
-		log, err = sidecar.NewConfigLogRowsOnly(configLogVerifierSettings(), signedGenesis)
+		log, err = sidecar.NewConfigLogRowsOnly(sequencer.verifierSettings(), signedGenesis)
 		if err == nil && 0 < len(entries) {
 			_, err = log.ApplyRun(entries, sequencer.rowsSource(ctx))
 		}
 	} else {
 		retained := &sidecar.ConfigRetained{SignedGenesis: signedGenesis, Entries: entries}
-		log, err = sidecar.RestoreConfigLogRowsOnly(configLogVerifierSettings(), retained, sequencer.rowsSource(ctx), nil)
+		log, err = sidecar.RestoreConfigLogRowsOnly(sequencer.verifierSettings(), retained, sequencer.rowsSource(ctx), nil)
 	}
 	if err != nil {
 		return err
@@ -578,7 +590,7 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 		if request.genesis == nil {
 			return nil, &ConfigLogError{Status: http.StatusForbidden, Code: "config_no_log", Err: errors.New("only base 1 with its genesis starts a log")}
 		}
-		log, err := sidecar.NewConfigLogRowsOnly(configLogVerifierSettings(), request.genesis)
+		log, err := sidecar.NewConfigLogRowsOnly(self.verifierSettings(), request.genesis)
 		if err != nil {
 			return nil, &ConfigLogError{Status: http.StatusForbidden, Code: "config_refused", Err: err}
 		}
