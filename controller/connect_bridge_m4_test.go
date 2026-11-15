@@ -76,7 +76,9 @@ func (self *bridgeM4Platform) AddClient(ctx context.Context, args *sidecartest.B
 	model.Testing_CreateDevice(self.ctx, networkId, server.NewId(), clientId, "synthetic", "synthetic")
 	subject := clientId
 	if args.SidecarId != (sidecar.Id{}) {
-		// a sidecar's own client: admin_refused and strict_exp, as POST /network/enroll mints one (§7.4)
+		// a sidecar's own client: admin_refused and strict_exp, as POST /network/enroll mints one (§7.4), and bound to
+		// its sidecar at generation 1, as POST /sidecar/bind leaves it (§5.15), so the relationship's query names the
+		// sidecar a contract gate decides for; the binding's key is the client's once RegisterClientKey holds it
 		server.Tx(self.ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				self.ctx,
@@ -85,6 +87,18 @@ func (self *bridgeM4Platform) AddClient(ctx context.Context, args *sidecartest.B
 					VALUES ($1, NULL, false, true, true, false, true)
 				`,
 				clientId,
+			))
+			server.RaisePgResult(tx.Exec(
+				self.ctx,
+				`
+					INSERT INTO sidecar_identity_binding (sidecar_id, generation, client_id, client_public_key, signatures, create_time)
+					VALUES ($1, 1, $2, $3, $4, $5)
+				`,
+				server.Id(args.SidecarId),
+				clientId,
+				make([]byte, 32),
+				[]byte("synthetic binding signatures"),
+				server.NowUtc(),
 			))
 		})
 	}
@@ -122,6 +136,15 @@ func (self *bridgeM4Platform) Control(ctx context.Context, clientId connect.Id, 
 // platform transport, which sidecartest's exchange does not carry to server.
 func (self *bridgeM4Platform) RegisterClientKey(ctx context.Context, clientId connect.Id, publicKey []byte) error {
 	model.SetClientPublicKey(self.ctx, server.Id(clientId), publicKey)
+	// a sidecar's binding names the key its client holds
+	server.Tx(self.ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			self.ctx,
+			`UPDATE sidecar_identity_binding SET client_public_key = $2 WHERE client_id = $1`,
+			server.Id(clientId),
+			publicKey,
+		))
+	})
 	heldKey, err := model.GetClientPublicKey(self.ctx, server.Id(clientId))
 	if err != nil {
 		return err
