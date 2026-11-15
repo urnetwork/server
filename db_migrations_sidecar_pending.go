@@ -1209,6 +1209,7 @@ func sidecarMg6Migrations() []any {
 	return slices.Concat(
 		sidecarMg6TeamMigrations(),
 		sidecarMg6AclMigrations(),
+		sidecarMg6DnsMigrations(),
 		sidecarMg6BridgeMigrations(),
 		sidecarMg6QuotaMigrations(),
 		[]any{
@@ -1439,6 +1440,32 @@ func sidecarMg6AclMigrations() []any {
 		// the sweep of closed windows
 		newSqlMigration(`
 			CREATE INDEX network_acl_share_expire_time ON network_acl_share (expire_time, code_hash)
+		`),
+	}
+}
+
+// MG6's §12 part: the columns M6's aliases and custom domains first read
+// ungated, each nullable on a table an earlier part creates. dns_label's
+// certified_time is §2.8 api-2's (plan-DNS-metadata-rows #3): set by certs
+// when a chain naming an alias issues, after which the alias answers its
+// label's records (DNS-M6-01, reading 11); a label row never has one.
+// network_domain's acme_token is api-3's (QD-175, plan-DNS-metadata-rows #1):
+// 16 random bytes in lowercase base32 with no padding, minted when the domain
+// first verifies and fixed for the row's life, the name certs writes a
+// delegated DNS-01 value at, <acme_token>.acme.<root> (DNS-M6-02). Nothing
+// reads either column unless the binary links MG6
+// (server.SidecarMg6Linked).
+func sidecarMg6DnsMigrations() []any {
+	return []any{
+		newSqlMigration(`
+			ALTER TABLE dns_label ADD COLUMN certified_time timestamp NULL
+		`),
+		newSqlMigration(`
+			ALTER TABLE network_domain ADD COLUMN acme_token varchar(26) NULL
+		`),
+		// a token names one domain, which certs' challenge route resolves
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_domain_acme_token ON network_domain (acme_token) WHERE acme_token IS NOT NULL
 		`),
 	}
 }

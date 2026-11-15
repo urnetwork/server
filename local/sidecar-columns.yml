@@ -166,6 +166,7 @@ tables:
   dns_label:
     group: MG2
     columns:
+      certified_time: api-2
       change_serial: api-2
       kind: api-2
       label: api-2
@@ -488,6 +489,7 @@ tables:
   network_domain:
     group: MG6
     columns:
+      acme_token: api-3
       challenge: api-3
       check_time: api-3
       domain: api-3

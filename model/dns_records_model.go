@@ -826,29 +826,38 @@ func getDnsZoneViewInTx(ctx context.Context, tx server.PgTx, root string, networ
 		Label:      label,
 		RecordSets: []sidecar.DnsZoneRecordSet{},
 	}
-	result, err := tx.Query(
-		ctx,
-		`
-			SELECT label FROM dns_label
-			WHERE network_id = $1 AND root = $2 AND kind = $3 AND state = $4
-			ORDER BY label
-			LIMIT 1
-		`,
-		networkId,
-		root,
-		DnsLabelKindAlias,
-		DnsLabelStateLive,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&zone.Alias))
+	if server.SidecarMg6Linked() {
+		// M6's aliases, with whether a certificate names the live one (DNS-M6-01)
+		if alias := getNetworkLiveDnsAliasInTx(ctx, tx, root, networkId); alias != nil {
+			zone.Alias = alias.name
+			zone.AliasCertified = alias.certifiedTime != nil
 		}
-	})
+	} else {
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT label FROM dns_label
+				WHERE network_id = $1 AND root = $2 AND kind = $3 AND state = $4
+				ORDER BY label
+				LIMIT 1
+			`,
+			networkId,
+			root,
+			DnsLabelKindAlias,
+			DnsLabelStateLive,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&zone.Alias))
+			}
+		})
+	}
 	if zone.Version, err = getDnsZoneVersionOrZeroInTx(ctx, tx, root, networkId); err != nil {
 		return nil, err
 	}
 	for _, row := range getDnsZoneRowsInTx(ctx, tx, root, networkId) {
-		if row.withheld {
+		// the alias row is shown as Alias and AliasCertified, not as an RRset
+		if row.withheld || row.set.Kind == dnsservice.DnsRecordKindAlias {
 			continue
 		}
 		typeText, ok := dns.TypeToString[row.set.Type]
@@ -867,7 +876,8 @@ func getDnsZoneViewInTx(ctx context.Context, tx server.PgTx, root string, networ
 }
 
 // GET /network/dns's body: the zone as GetDnsZoneView reads it, with dns_entries' count and the network's limit, -1
-// for none or while sidecar limits are dark.
+// for none or while sidecar limits are dark, and from M6 each custom host and each verified domain's challenge
+// target.
 func GetNetworkDns(ctx context.Context, root string, networkId server.Id) (*sidecar.NetworkDns, error) {
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
 		return nil, dnsRecordsUnavailable("the zone tables are not linked")
@@ -888,6 +898,8 @@ func GetNetworkDns(ctx context.Context, root string, networkId server.Id) (*side
 				EntryCount: DnsEntryCountInTx(ctx, tx, networkId),
 				EntryLimit: proSidecarLimitNone,
 			}
+			// M6's custom hosts and the verified domains' challenge targets (DNS-M6-02)
+			networkDns.CustomHosts, networkDns.CustomDomains = getNetworkDnsCustomInTx(ctx, tx, root, networkId)
 			if limit, enforced := limits.LimitInTx(ctx, tx, networkId, DnsEntriesLimitKey); enforced {
 				networkDns.EntryLimit = limit
 			}
