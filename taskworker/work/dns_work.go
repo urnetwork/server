@@ -12,15 +12,17 @@ import (
 )
 
 // §12's taskworker chain (DNS-M5-09, DNS-M5-13, DNS-M5-14, DNS-M5-15,
-// DNS-M5-16, DNS-M6-01): each run purges dns_zone_journal's rows past their 7
-// days (§12.14), removes challenges and canaries past their hour through the
-// journal (D-DNS-8), lifts zone suspensions whose until has passed (§12.9),
-// drops a restore's lists, posted diffs and CT replay records past their 400
-// days (dns-1), tombstones the ownerless retiring names a restore's replay left
-// that nobody re-bound in 90 days, and tombstones the aliases a release or a
-// change retired 90 days ago, their rows and CAA leaving the root (D-DNS-10,
-// I-14). A binary that does not link MG5 neither schedules the chain nor,
-// should an older row run, touches anything.
+// DNS-M5-16, DNS-M6-01, DNS-M6-03, DNS-M6-05): each run purges
+// dns_zone_journal's rows past their 7 days (§12.14), removes challenges and
+// canaries past their hour through the journal (D-DNS-8), a strong-mode probe's
+// CAA canary and its copy among them, lifts zone suspensions whose until has
+// passed (§12.9), drops a restore's lists, posted diffs and CT replay records
+// past their 400 days (dns-1), tombstones the ownerless retiring names a
+// restore's replay left that nobody re-bound in 90 days, tombstones the aliases
+// a release or a change retired 90 days ago, their rows and CAA leaving the
+// root (D-DNS-10, I-14), and drops the custom-host map's versions past their 7
+// days, the newest kept (§12.14). A binary that does not link MG5 neither
+// schedules the chain nor, should an older row run, touches anything.
 
 // Cadences of the chain.
 type DnsMaintenanceSettings struct {
@@ -52,6 +54,7 @@ type DnsMaintenanceResult struct {
 	TombstonedLabelCount   int  `json:"tombstoned_label_count"`
 	PurgedIncidentCount    int  `json:"purged_incident_count"`
 	TombstonedAliasCount   int  `json:"tombstoned_alias_count"`
+	PurgedMapVersionCount  int  `json:"purged_map_version_count"`
 	More                   bool `json:"more"`
 }
 
@@ -129,6 +132,12 @@ func DnsMaintenance(
 		glog.Warningf("[dns]retired alias tombstones: %v\n", err)
 	}
 	result.More = result.More || more || err != nil
+	purgedMapVersionCount, err := model.PurgeDnsCustomHostMapVersions(ctx, now)
+	result.PurgedMapVersionCount = purgedMapVersionCount
+	if err != nil {
+		glog.Warningf("[dns]custom-host map purge: %v\n", err)
+		result.More = true
+	}
 	return result, nil
 }
 

@@ -149,8 +149,15 @@ type hostStreamServicesYaml struct {
 	} `yaml:"versions"`
 }
 
+// An lb interface's name as the feed, sidecar.yml's drained list, the
+// `<env>-lb` sets and lbmap name it (TLS-M5-03, TLS-M6-01): `<host>-<iface>`,
+// the host the inventory's short one with its dots made hyphens.
+func hostLbInterfaceName(host string, interfaceName string) string {
+	return strings.ReplaceAll(host, ".", "-") + "-" + interfaceName
+}
+
 // The lb inventory's interfaces as a feed answer names them: every edge host's
-// public interfaces, named host/interface, each a router (DNS-M7-01) when W4
+// public interfaces, named by hostLbInterfaceName, each a router (DNS-M7-01) when W4
 // sends its TCP routerPort to mxedge's router, by its own
 // tcp_stream_port_services or else its version's (§19.5). Until W4's M7 half
 // names mxedge no interface is a router, and mx answers no address: the closed
@@ -182,8 +189,8 @@ func hostLbInterfaces(servicesYaml []byte, routerPort int) ([]dnsservice.DnsLbIn
 	interfaces := []dnsservice.DnsLbInterface{}
 	for host, hostInterfaces := range inventory.Interfaces {
 		for _, lbInterface := range hostInterfaces {
-			entry := dnsservice.DnsLbInterface{Name: host + "/" + lbInterface.Interface}
-			entry.Router = routerNames[entry.Name]
+			entry := dnsservice.DnsLbInterface{Name: hostLbInterfaceName(host, lbInterface.Interface)}
+			entry.Router = routerNames[host+"/"+lbInterface.Interface]
 			if lbInterface.Ipv4 != "" {
 				if entry.Ipv4, err = netip.ParseAddr(lbInterface.Ipv4); err != nil {
 					return nil, err
@@ -267,10 +274,14 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 		SoaReader:  dnsservice.NewDnsTcpSoaReader(hostNsAddresses(settings.Dns)),
 		Challenges: NewChallenges(),
 		Canaries:   NewCanaries(),
-		KeyWindow:  deps.KeyWindow,
-		Records:    NewRecords(),
-		Reclaims:   NewReclaims(),
-		KeyRecords: NewKeyRecords(),
+		// certs' CAA canaries for a strong-mode custom host's probe (DNS-M6-05)
+		CaaCanaries: NewCaaCanaries(),
+		// the custom-host map for lbmap and the edges' route probes (DNS-M6-03)
+		CustomHostMaps: NewCustomHostMaps(),
+		KeyWindow:      deps.KeyWindow,
+		Records:        NewRecords(),
+		Reclaims:       NewReclaims(),
+		KeyRecords:     NewKeyRecords(),
 		// no gate cache is wired here yet either, so every key record
 		// answers 503 until one is
 		KeyRecordGate: deps.KeyRecordGate,

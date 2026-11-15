@@ -30,7 +30,8 @@ package model
 //     and its daily drop call), is one transaction a model function can join, where TLS-M6-05 adds 17.2.12's
 //     move of the host's certificate rows.
 //
-// The map's versions, readiness and map-stale are DNS-M6-03's: a row's map_version and ready_time are
+// The map's versions, readiness and map-stale are DNS-M6-03's (dns_custom_host_map_model.go): each change to
+// the active rows here raises the map's version in its transaction, and a row's map_version and ready_time are
 // written there. Nothing here runs unless the binary links MG2, MG5 and MG6.
 
 import (
@@ -374,6 +375,15 @@ func addDnsCustomHostInTx(ctx context.Context, tx server.PgTx, root string, host
 		mode,
 		now,
 	))
+	var mapVersion uint64
+	if state == sidecar.DnsCustomHostStateActive && !strictMx {
+		// a weak-mode host enters the map at once (DNS-M6-03), before the admin event's chain lock
+		version, err := DnsRaiseCustomHostMapInTx(ctx, tx, root)
+		if err != nil {
+			return nil, err
+		}
+		mapVersion = version
+	}
 	result := AdminEventResultOk
 	if mode == sidecar.DnsCustomHostModeWeak {
 		result = AdminEventResultDnsCustomHostWeak
@@ -389,7 +399,7 @@ func addDnsCustomHostInTx(ctx context.Context, tx server.PgTx, root string, host
 		Result:     result,
 		RequestId:  request.RequestId,
 	})
-	row := &DnsCustomHostRow{Host: host, Root: root, NetworkId: networkId, Owner: owner, State: state, CaaMode: mode, CreateTime: now}
+	row := &DnsCustomHostRow{Host: host, Root: root, NetworkId: networkId, Owner: owner, State: state, CaaMode: mode, MapVersion: mapVersion, CreateTime: now}
 	answer := &sidecar.DnsCustomHostAnswer{CustomHost: row.answer()}
 	if mode == sidecar.DnsCustomHostModeWeak {
 		answer.Disclosure = sidecar.DnsCustomHostWeakDisclosure
@@ -431,35 +441,52 @@ func RemoveDnsCustomHost(ctx context.Context, request *DnsCustomHostRequest) (*s
 
 // Removes the network's custom host in the caller's transaction, a strict-mode MX host included, and
 // answers whether a row went. The removal's one transaction, which TLS-M6-05's move of the host's
-// certificate rows joins (DESIGN-DETAILS 17.2.12).
+// certificate rows joins (DESIGN-DETAILS 17.2.12). An active TLS host leaving raises the map's version
+// (DNS-M6-03), so FS-35's route goes at the next version; call it before the transaction's admin events.
 func DnsRemoveCustomHostInTx(ctx context.Context, tx server.PgTx, networkId server.Id, host string) bool {
 	if !dnsCustomHostLinked() {
 		return false
 	}
-	tag := server.RaisePgResult(tx.Exec(
-		ctx,
-		`DELETE FROM network_dns_custom_host WHERE host = $1 AND network_id = $2`,
-		strings.ToLower(strings.TrimSuffix(host, ".")),
-		networkId,
-	))
-	return tag.RowsAffected() != 0
+	return 0 < deleteDnsCustomHostsInTx(ctx, tx, `host = $1 AND network_id = $2`, strings.ToLower(strings.TrimSuffix(host, ".")), networkId)
 }
 
 // Removes every custom host of the network at or under domain in the caller's transaction, as the
 // domain's removal and its daily drop do (§7.6): no host outlives the verification it stood on. Answers
-// how many went.
+// how many went, raising the map's version when an active TLS host was among them, as
+// DnsRemoveCustomHostInTx does.
 func DnsRemoveDomainCustomHostsInTx(ctx context.Context, tx server.PgTx, networkId server.Id, domain string) int {
 	if !dnsCustomHostLinked() {
 		return 0
 	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
-	tag := server.RaisePgResult(tx.Exec(
-		ctx,
-		`DELETE FROM network_dns_custom_host WHERE network_id = $1 AND (host = $2 OR host LIKE '%.' || $2)`,
-		networkId,
-		domain,
-	))
-	return int(tag.RowsAffected())
+	return deleteDnsCustomHostsInTx(ctx, tx, `network_id = $1 AND (host = $2 OR host LIKE '%.' || $2)`, networkId, domain)
+}
+
+// Deletes the rows where selects, raising each root's map that loses an active TLS host. Answers how many
+// went.
+func deleteDnsCustomHostsInTx(ctx context.Context, tx server.PgTx, where string, args ...any) int {
+	removedCount := 0
+	raiseRoots := []string{}
+	result, err := tx.Query(ctx, `DELETE FROM network_dns_custom_host WHERE `+where+` RETURNING root, owner, state`, args...)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var root string
+			var owner string
+			var state string
+			server.Raise(result.Scan(&root, &owner, &state))
+			removedCount += 1
+			row := &DnsCustomHostRow{Owner: owner}
+			if state == sidecar.DnsCustomHostStateActive && !row.StrictMx() && !slices.Contains(raiseRoots, root) {
+				raiseRoots = append(raiseRoots, root)
+			}
+		}
+	})
+	slices.Sort(raiseRoots)
+	for _, root := range raiseRoots {
+		_, err := DnsRaiseCustomHostMapInTx(ctx, tx, root)
+		server.Raise(err)
+	}
+	return removedCount
 }
 
 // What certs' walk and probe found for a custom host (§12.8 step 3; TLS-M6-04).
@@ -543,6 +570,12 @@ func DnsCustomHostResultInTx(ctx context.Context, tx server.PgTx, result *DnsCus
 			Action:     SecurityNetworkAuthorityCustomHostCaa,
 		})
 	}
+	if outcome == DnsCustomHostOutcomeActivated {
+		// the host enters the map (DNS-M6-03), before the admin event's chain lock
+		if _, err := DnsRaiseCustomHostMapInTx(ctx, tx, row.Root); err != nil {
+			return "", err
+		}
+	}
 	AddAdminEventInTx(ctx, tx, event)
 	return outcome, nil
 }
@@ -563,8 +596,17 @@ func getNetworkDnsCustomInTx(ctx context.Context, query server.PgCanQuery, root 
 	if !server.SidecarMg6Linked() {
 		return hosts, domains
 	}
+	readiness := map[string]*DnsCustomHostReadinessRow{}
+	for _, row := range getDnsCustomHostReadinessInTx(ctx, query, root, networkId, server.NowUtc()) {
+		readiness[row.Host] = row
+	}
 	for _, row := range getNetworkDnsCustomHostsInTx(ctx, query, networkId) {
-		hosts = append(hosts, *row.answer())
+		answer := row.answer()
+		// a host not yet ready names the interfaces not current for it (DNS-M6-03, §13.4)
+		if hostReadiness, ok := readiness[row.Host]; ok && !answer.Ready {
+			answer.PendingInterfaces = hostReadiness.PendingInterfaces
+		}
+		hosts = append(hosts, *answer)
 	}
 	result, err := query.Query(
 		ctx,

@@ -19,6 +19,7 @@ import (
 	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/warp"
 )
 
 const hostTestRoot = "zone.example."
@@ -306,13 +307,13 @@ func TestApiHostReleasesTheWindowFileInItsSecrets(t *testing.T) {
 	}
 }
 
-// The lb inventory as the feed names it: every edge host's public interfaces, by host/interface.
+// The lb inventory as the feed names it: every edge host's public interfaces, by <host>-<iface>.
 func TestHostLbInterfacesFromServicesYaml(t *testing.T) {
 	interfaces, err := hostLbInterfaces([]byte("domain: example\nversions:\n  - lb:\n      interfaces:\n        a-edge-1.example:\n          eth0: {ipv4: 192.0.2.10, ipv6: \"2001:db8::10\"}\n          eth1: {ipv4: 192.0.2.11, transparent: true}\n        a-core-1.example:\n          eth0: {ipv4: 192.0.2.20}\n"), 25)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(interfaces) != 1 || interfaces[0].Name != "a-edge-1/eth0" || interfaces[0].Ipv4 != netip.MustParseAddr("192.0.2.10") || interfaces[0].Ipv6 != netip.MustParseAddr("2001:db8::10") {
+	if len(interfaces) != 1 || interfaces[0].Name != "a-edge-1-eth0" || interfaces[0].Ipv4 != netip.MustParseAddr("192.0.2.10") || interfaces[0].Ipv6 != netip.MustParseAddr("2001:db8::10") {
 		t.Fatalf("interfaces %+v", interfaces)
 	}
 	if interfaces[0].Router {
@@ -356,7 +357,7 @@ versions:
 	for _, lbInterface := range interfaces {
 		routers[lbInterface.Name] = lbInterface.Router
 	}
-	want := map[string]bool{"a-edge-1/eth0": true, "a-edge-1/eth1": false, "a-edge-2/eth0": true}
+	want := map[string]bool{"a-edge-1-eth0": true, "a-edge-1-eth1": false, "a-edge-2-eth0": true}
 	if !maps.Equal(routers, want) {
 		t.Errorf("routers %v, want %v", routers, want)
 	}
@@ -381,5 +382,25 @@ func TestNewHostRefusesAnUnknownRole(t *testing.T) {
 	}
 	if err := RunHost(t.Context(), "both", &HostSettings{Dns: hostTestSettings(t, nil)}, nil, &HostPorts{Status: 80, Dns: 53}); err == nil {
 		t.Fatal("RunHost ran a role that is neither")
+	}
+}
+
+// An interface's name is the one lbmap, sidecar.yml's drained list and the <env>-lb sets give it (TLS-M5-03,
+// TLS-M6-01), so lbmap's polls and reports and a drained interface each find the feed's entry: a regression of
+// the host/interface form, which matched none of them.
+func TestHostLbInterfaceNameIsLbmapsName(t *testing.T) {
+	cases := []struct {
+		host          string
+		interfaceName string
+		block         string
+		domain        string
+	}{
+		{host: "main-edge-1", interfaceName: "eth0", block: "main-edge-1.example.com-eth0", domain: "example.com"},
+		{host: "main-edge-2.g1", interfaceName: "eth1", block: "main-edge-2.g1.example.com-eth1", domain: "example.com"},
+	}
+	for _, c := range cases {
+		if name, lbmap := hostLbInterfaceName(c.host, c.interfaceName), warp.LbMapInterfaceName(c.block, c.domain); name != lbmap {
+			t.Errorf("%s %s: the feed names %q, lbmap %q", c.host, c.interfaceName, name, lbmap)
+		}
 	}
 }
