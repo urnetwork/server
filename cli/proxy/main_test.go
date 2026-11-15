@@ -178,6 +178,28 @@ func TestProxyMainRecordsProFeatureUse(t *testing.T) {
 	}
 }
 
+// A host whose vault entry names its own Go memory limit gets it from main,
+// before the process builds its device manager and its working set
+// (proxy.TestHostGoMemoryLimitAppliesOnlyToTheNamedHost tests the entry).
+func TestProxyMainAppliesTheHostGoMemoryLimit(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainStart := strings.Index(string(source), "func main()")
+	if mainStart < 0 {
+		t.Fatal("main function not found")
+	}
+	mainSource := string(source[mainStart:])
+	applyIndex := strings.Index(mainSource, "proxy.ApplyHostGoMemoryLimit()")
+	if applyIndex < 0 {
+		t.Fatal("production main does not apply the host's Go memory limit")
+	}
+	if managerIndex := strings.Index(mainSource, "proxy.NewProxyDeviceManager("); managerIndex < 0 || managerIndex < applyIndex {
+		t.Fatal("production main builds its device manager before it applies the host's Go memory limit")
+	}
+}
+
 // The environment variable that makes this test binary run the proxy's main
 // with the arguments it holds, as the proxy binary would.
 const proxyMainTestArgsEnvironment = "URNETWORK_PROXY_MAIN_TEST_ARGS"
