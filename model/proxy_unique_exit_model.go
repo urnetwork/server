@@ -148,7 +148,8 @@ type UniqueExitSettings struct {
 	// least HeldRetryInterval and at most this. Searches that find nothing
 	// then back off geometrically instead of filling every pass (1,000-1,850
 	// per pass on 11-15), and a unique exit that appears is still taken
-	// within this bound
+	// within this bound. Zero or less turns the back-off off: every held
+	// proxy waits HeldRetryInterval
 	HeldNoSupplyRetryMaxInterval time.Duration
 	// a provider's egress key older than this is not trusted for allocation
 	EgressKeyMaxAge time.Duration
@@ -174,17 +175,19 @@ type UniqueExitSettings struct {
 	RotatesPerDay     int
 	// released assignments are the audit trail for abuse reports
 	ReleasedRetention time.Duration
-	// the sweeper's cadence, and the most assignments one run walks
+	// the sweeper's cadence, and the most assignments one run walks (at
+	// least one)
 	SweepInterval  time.Duration
 	SweepBatchSize int
 	// the assignments the walk reads, and snapshots the provider signals of,
-	// at a time
+	// at a time (at least one)
 	SweepPageSize int
 	// a run's bound, its task's MaxTime, and the time its walk may take within
 	// that bound. A walk that reaches its time ends the run through its Post,
 	// which schedules the next run from where this one stopped, so a pass
 	// longer than one run still reaches the newest assignments; the rest of
-	// the bound is for the in-flight assignment and the run's cleanup
+	// the bound is for the in-flight assignment and the run's cleanup. A walk
+	// time of zero or less walks one assignment a run
 	SweepMaxTime  time.Duration
 	SweepWalkTime time.Duration
 	// how often the sweeper recomputes the supply gauge
