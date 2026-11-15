@@ -1,16 +1,16 @@
 package connect
 
 // Stuck provider recycles (client_recycle.go): a recycle flag the api sets
-// reaches every exchange as a key event. Only an exchange whose block the
-// switch names acts, and each one that holds the client's transports or its
-// resident excuses the reconnect, closes those transports with the moved
-// close and retires the resident there. The dispatch only queues; paced,
-// bounded workers recycle. A removed client is left to its removal.
+// reaches every exchange as a key event. Every exchange with the code ceiling
+// on acts, with no control to read, and each one that holds the client's
+// transports or its resident excuses the reconnect, closes those transports
+// with the moved close and retires the resident there. The dispatch only
+// queues; paced, bounded workers recycle. A removed client is left to its
+// removal, and an exchange with the ceiling off, as alt's, to nothing.
 
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,71 +31,22 @@ func stuckProviderRecycleTestSettings() *ExchangeSettings {
 	return settings
 }
 
-// The Redis control in memory, narrowed as the model narrows the real one.
-type stuckProviderRecycleTestControl struct {
-	stateLock sync.Mutex
-	fields    map[string]string
-	err       error
-}
-
-// Sets the control's `stuckProviderRecycle`.
-func (self *stuckProviderRecycleTestControl) set(value string) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.fields = map[string]string{model.ConnectMoveControlFieldStuckProviderRecycle: value}
-	self.err = nil
-}
-
-// Makes every read fail.
-func (self *stuckProviderRecycleTestControl) fail(err error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.err = err
-}
-
-func (self *stuckProviderRecycleTestControl) read(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.err != nil {
-		return nil, self.err
-	}
-	return model.NarrowConnectMoveControl(self.fields, ceiling), nil
-}
-
-// The connect service allows recycles for the control to choose by block, and
-// ships them off: with no control no block recycles. Every other exchange
-// keeps the ceiling off.
-func TestStuckProviderRecycleShipsDark(t *testing.T) {
+// The connect service turns the ceiling on, so its exchanges recycle on every
+// block. Every other exchange, alt's among them, keeps it off and builds no
+// recycles.
+func TestStuckProviderRecycleIsOnInTheConnectService(t *testing.T) {
 	defaults := DefaultExchangeSettings()
 	if defaults.EnableStuckProviderRecycle {
 		t.Error("the default exchange settings allow stuck provider recycles")
 	}
 	runSettings := exchangeSettingsForRun(RunOptions{Port: 443})
 	if !runSettings.EnableStuckProviderRecycle {
-		t.Error("the connect service does not allow stuck provider recycles")
-	}
-	if runSettings.StuckProviderRecycleDefault != model.ConnectLocalTransportOff {
-		t.Errorf("the connect service's default = %q, want off", runSettings.StuckProviderRecycleDefault)
-	}
-	control := model.NarrowConnectMoveControl(nil, model.ConnectMoveControlCeiling{
-		EnableStuckProviderRecycle:  runSettings.EnableStuckProviderRecycle,
-		StuckProviderRecycleDefault: runSettings.StuckProviderRecycleDefault,
-	})
-	for _, block := range []string{"beta", "g1", "g2", "g3", "g4"} {
-		if control.StuckProviderRecycleAllows(block) {
-			t.Errorf("block %s recycles with no control", block)
-		}
-	}
-	if runSettings.StuckProviderRecycleControlRefreshInterval != 10*time.Second {
-		t.Errorf("refresh %s, want 10s", runSettings.StuckProviderRecycleControlRefreshInterval)
+		t.Error("the connect service does not recycle stuck providers")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if newExchangeStuckProviderRecycle(ctx, defaults, "g1", func(server.Id) {}) != nil {
-		t.Error("the ceiling off still built a switch that reads the control")
-	}
-	if runSettings.StuckProviderRecycleControlMaxFailedReads <= 0 {
-		t.Error("an unreadable control keeps recycles on forever")
+	if newExchangeStuckProviderRecycle(ctx, defaults, func(server.Id) {}) != nil {
+		t.Error("the ceiling off still built recycles")
 	}
 	if runSettings.StuckProviderRecyclesPerSecond <= 0 || runSettings.StuckProviderRecycleBurst <= 0 ||
 		runSettings.StuckProviderRecycleQueueSize <= 0 || runSettings.StuckProviderRecycleWorkerCount <= 0 {
@@ -131,82 +82,15 @@ func TestKeyEventSubscriberSubscribesRecycleFlagsOnlyUnderTheCeiling(t *testing.
 	}
 }
 
-// The switch follows the control for its own block and sets the enabled
-// gauge with it. A failed read keeps the last value until
-// StuckProviderRecycleControlMaxFailedReads fail in a row, which turn it off;
-// a good read starts the count over.
-func TestStuckProviderRecycleControlReadsTheSwitch(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	control := &stuckProviderRecycleTestControl{}
-	settings := stuckProviderRecycleTestSettings()
-	recycle := newExchangeStuckProviderRecycleWithStore(ctx, settings, "g1", control.read, func(server.Id) {})
-	if recycle.allows() || testutil.ToFloat64(stuckProviderRecycleEnabledGauge) != 0 {
-		t.Fatal("a dark default allowed recycles before the first read")
-	}
-	recycle.refresh()
-	if recycle.allows() {
-		t.Fatal("an absent control widened a dark default")
-	}
-	for _, c := range []struct {
-		value string
-		allow bool
-	}{
-		{value: "beta", allow: false},
-		{value: "g1", allow: true},
-		{value: "beta,g1", allow: true},
-		{value: "off", allow: false},
-		{value: "all", allow: true},
-	} {
-		control.set(c.value)
-		recycle.refresh()
-		if recycle.allows() != c.allow || (testutil.ToFloat64(stuckProviderRecycleEnabledGauge) == 1) != c.allow {
-			t.Errorf("control %q: allows=%t, want %t", c.value, recycle.allows(), c.allow)
-		}
-	}
-	failReads := func(count int) {
-		control.fail(errors.New("synthetic control read failure"))
-		for range count {
-			recycle.refresh()
-		}
-	}
-	failReads(settings.StuckProviderRecycleControlMaxFailedReads - 1)
-	if !recycle.allows() {
-		t.Error("fewer failed reads than the limit dropped the last good value")
-	}
-	control.set("all")
-	recycle.refresh()
-	failReads(settings.StuckProviderRecycleControlMaxFailedReads - 1)
-	if !recycle.allows() {
-		t.Error("failed reads on either side of a good one dropped the last good value")
-	}
-	failReads(1)
-	if recycle.allows() || testutil.ToFloat64(stuckProviderRecycleEnabledGauge) != 0 {
-		t.Error("an unreadable control kept recycles on")
-	}
-	control.set("all")
-	recycle.refresh()
-	if !recycle.allows() {
-		t.Error("a good read did not turn recycles back on")
-	}
-}
-
 func stuckProviderRecycleTestOutcome(outcome string) float64 {
 	return testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(outcome))
 }
 
-// The dispatch never blocks and never recycles: a flag for a client not held
-// here counts as not_held whatever the switch, a held one with the switch off
-// as disabled, and with the switch on a held client (by its resident or by a
-// transport alone) is queued for the workers. A flag past the queue counts as
-// queue_full, and a burst of them returns at once.
-func TestStuckProviderRecycleDispatchOnlyQueues(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	settings := stuckProviderRecycleTestSettings()
-	settings.StuckProviderRecycleQueueSize = 2
+// An exchange built by hand for the dispatch and the workers: its client maps
+// and lifecycle, with no residents run.
+func newStuckProviderRecycleTestExchange(ctx context.Context, settings *ExchangeSettings) *Exchange {
 	exchangeCtx, exchangeCancel := context.WithCancel(ctx)
-	exchange := &Exchange{
+	return &Exchange{
 		ctx:         exchangeCtx,
 		cancel:      exchangeCancel,
 		settings:    settings,
@@ -214,9 +98,67 @@ func TestStuckProviderRecycleDispatchOnlyQueues(t *testing.T) {
 		residents:   map[server.Id]*Resident{},
 		connections: map[server.Id]map[server.Id]context.CancelFunc{},
 	}
-	control := &stuckProviderRecycleTestControl{}
+}
+
+// The code default, through the connect service's own settings and
+// constructor: with no control to read, a flag for a client held here reaches
+// a worker, which recycles it, and a flag for a client not held here counts
+// as not_held and recycles nothing.
+func TestStuckProviderRecycleRecyclesAHeldClientWithoutAControl(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	settings := exchangeSettingsForRun(RunOptions{Port: 443})
+	exchange := newStuckProviderRecycleTestExchange(ctx, settings)
+	recycled := make(chan server.Id, 4)
+	exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(exchange.ctx, settings, func(clientId server.Id) {
+		recycled <- clientId
+	})
+	if exchange.stuckProviderRecycle == nil {
+		t.Fatal("the connect service built no recycles")
+	}
+
+	heldClientId := server.NewId()
+	exchange.registerConnection(heldClientId, server.NewId(), func() {})
+	notHeldBefore := stuckProviderRecycleTestOutcome(stuckProviderRecycleNotHeld)
+	exchange.handleClientRecycle(server.NewId())
+	exchange.handleClientRecycle(heldClientId)
+	select {
+	case clientId := <-recycled:
+		if clientId != heldClientId {
+			t.Fatalf("recycled %s, want the held client %s", clientId, heldClientId)
+		}
+	case <-ctx.Done():
+		t.Fatal("the held client was not recycled")
+	}
+	if notHeld := stuckProviderRecycleTestOutcome(stuckProviderRecycleNotHeld); notHeld != notHeldBefore+1 {
+		t.Fatalf("not_held +%v, want +1", notHeld-notHeldBefore)
+	}
+	if gauge := testutil.ToFloat64(stuckProviderRecycleEnabledGauge); gauge != 1 {
+		t.Fatalf("the enabled gauge %v, want 1", gauge)
+	}
+	exchange.Close()
+	if !exchange.WaitForIdle(ctx) {
+		t.Fatal("the workers outlived the exchange")
+	}
+	select {
+	case clientId := <-recycled:
+		t.Fatalf("recycled %s, a client not held here", clientId)
+	default:
+	}
+}
+
+// The dispatch never blocks and never recycles: a flag for a client not held
+// here counts as not_held, and a held client (by its resident or by a
+// transport alone) is queued for the workers. A flag past the queue counts as
+// queue_full, and a burst of them returns at once.
+func TestStuckProviderRecycleDispatchOnlyQueues(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	settings := stuckProviderRecycleTestSettings()
+	settings.StuckProviderRecycleQueueSize = 2
+	exchange := newStuckProviderRecycleTestExchange(ctx, settings)
 	recycled := make(chan server.Id, 64)
-	exchange.stuckProviderRecycle = newExchangeStuckProviderRecycleWithStore(exchangeCtx, settings, exchange.block, control.read, func(clientId server.Id) {
+	exchange.stuckProviderRecycle = newExchangeStuckProviderRecycleWithoutWorkers(exchange.ctx, settings, func(clientId server.Id) {
 		recycled <- clientId
 	})
 
@@ -226,24 +168,7 @@ func TestStuckProviderRecycleDispatchOnlyQueues(t *testing.T) {
 	exchange.residents[residentClientId] = &Resident{clientId: residentClientId}
 	exchange.registerConnection(transportClientId, server.NewId(), func() {})
 
-	disabledBefore := stuckProviderRecycleTestOutcome(stuckProviderRecycleDisabled)
 	notHeldBefore := stuckProviderRecycleTestOutcome(stuckProviderRecycleNotHeld)
-	exchange.handleClientRecycle(residentClientId)
-	exchange.handleClientRecycle(transportClientId)
-	exchange.handleClientRecycle(server.NewId())
-	if disabled := stuckProviderRecycleTestOutcome(stuckProviderRecycleDisabled); disabled != disabledBefore+2 {
-		t.Fatalf("with the switch off: disabled +%v, want +2", disabled-disabledBefore)
-	}
-	if notHeld := stuckProviderRecycleTestOutcome(stuckProviderRecycleNotHeld); notHeld != notHeldBefore+1 {
-		t.Fatalf("with the switch off: not_held +%v, want +1", notHeld-notHeldBefore)
-	}
-	if queued := len(exchange.stuckProviderRecycle.queue); queued != 0 {
-		t.Fatalf("queued %d with the switch off", queued)
-	}
-
-	control.set("g1")
-	exchange.stuckProviderRecycle.refresh()
-	notHeldBefore = stuckProviderRecycleTestOutcome(stuckProviderRecycleNotHeld)
 	queueFullBefore := stuckProviderRecycleTestOutcome(stuckProviderRecycleQueueFull)
 	exchange.handleClientRecycle(residentClientId)
 	exchange.handleClientRecycle(transportClientId)
@@ -252,7 +177,7 @@ func TestStuckProviderRecycleDispatchOnlyQueues(t *testing.T) {
 		t.Fatalf("queued %d held clients, want 2", queued)
 	}
 	if notHeld := stuckProviderRecycleTestOutcome(stuckProviderRecycleNotHeld); notHeld != notHeldBefore+1 {
-		t.Fatalf("with the switch on: not_held +%v, want +1", notHeld-notHeldBefore)
+		t.Fatalf("not_held +%v, want +1", notHeld-notHeldBefore)
 	}
 	// a burst past the full queue returns at once, each flag counted
 	burstDone := make(chan struct{})
@@ -279,7 +204,7 @@ func TestStuckProviderRecycleDispatchOnlyQueues(t *testing.T) {
 	if !exchange.WaitForIdle(ctx) {
 		t.Fatal("a dispatch left a worker")
 	}
-	// an exchange with the ceiling off has no switch and ignores flags
+	// an exchange with the ceiling off has no recycles and ignores flags
 	(&Exchange{ctx: ctx, settings: DefaultExchangeSettings(), residents: map[server.Id]*Resident{}}).handleClientRecycle(server.NewId())
 }
 
@@ -291,17 +216,8 @@ func runClientRecycleTestWorkers(t *testing.T, settings *ExchangeSettings, count
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	exchangeCtx, exchangeCancel := context.WithCancel(ctx)
-	exchange := &Exchange{
-		ctx:         exchangeCtx,
-		cancel:      exchangeCancel,
-		settings:    settings,
-		block:       "g1",
-		residents:   map[server.Id]*Resident{},
-		connections: map[server.Id]map[server.Id]context.CancelFunc{},
-	}
-	control := &stuckProviderRecycleTestControl{}
-	control.set("g1")
+	exchange := newStuckProviderRecycleTestExchange(ctx, settings)
+	exchangeCtx := exchange.ctx
 
 	raisingClientId := server.NewId()
 	var inFlight, maxInFlight, attempts atomic.Int64
@@ -325,7 +241,7 @@ func runClientRecycleTestWorkers(t *testing.T, settings *ExchangeSettings, count
 		case <-exchangeCtx.Done():
 		}
 	}
-	exchange.stuckProviderRecycle = newExchangeStuckProviderRecycleWithStore(exchangeCtx, settings, exchange.block, control.read, recycle)
+	exchange.stuckProviderRecycle = newExchangeStuckProviderRecycleWithoutWorkers(exchangeCtx, settings, recycle)
 	errorBefore := stuckProviderRecycleTestOutcome(stuckProviderRecycleError)
 
 	clientIds := []server.Id{raisingClientId}
@@ -398,48 +314,41 @@ func TestStuckProviderRecycleWorkersAreBounded(t *testing.T) {
 	}
 }
 
-// WaitForIdle joins the control loop and the workers, even while the loop
-// waits on a slow read.
-func TestStuckProviderRecycleWaitForIdleJoinsTheControlLoop(t *testing.T) {
+// WaitForIdle joins the workers, even while one is in a recycle slower than
+// the exchange's cancellation.
+func TestStuckProviderRecycleWaitForIdleJoinsARecycleInFlight(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	settings := stuckProviderRecycleTestSettings()
-	exchangeCtx, exchangeCancel := context.WithCancel(ctx)
-	exchange := &Exchange{
-		ctx:       exchangeCtx,
-		cancel:    exchangeCancel,
-		settings:  settings,
-		block:     "test-block",
-		residents: map[server.Id]*Resident{},
-	}
-	readEntered := make(chan struct{}, 16)
-	readRelease := make(chan struct{})
-	releaseRead := sync.OnceFunc(func() { close(readRelease) })
-	defer releaseRead()
-	var readCount atomic.Int64
-	read := func(context.Context, model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error) {
-		readCount.Add(1)
-		readEntered <- struct{}{}
+	exchange := newStuckProviderRecycleTestExchange(ctx, settings)
+	recycleEntered := make(chan struct{}, 1)
+	recycleRelease := make(chan struct{})
+	releaseRecycle := sync.OnceFunc(func() { close(recycleRelease) })
+	defer releaseRecycle()
+	exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(exchange.ctx, settings, func(server.Id) {
+		recycleEntered <- struct{}{}
 		// a store slower than the cancellation
-		<-readRelease
-		return nil, errors.New("synthetic slow store")
+		<-recycleRelease
+	})
+	clientId := server.NewId()
+	exchange.registerConnection(clientId, server.NewId(), func() {})
+	exchange.handleClientRecycle(clientId)
+	select {
+	case <-recycleEntered:
+	case <-ctx.Done():
+		t.Fatal("the held client was not recycled")
 	}
-	exchange.stuckProviderRecycle = newExchangeStuckProviderRecycleWithStore(exchangeCtx, settings, exchange.block, read, func(server.Id) {})
-	exchange.stuckProviderRecycle.start()
-	<-readEntered
 	exchange.Close()
-	heldCtx, heldCancel := context.WithTimeout(ctx, 200*time.Millisecond)
-	idle := exchange.WaitForIdle(heldCtx)
-	heldCancel()
-	if idle {
-		t.Fatal("WaitForIdle returned while the control loop was in a read")
+	// with the worker held in its recycle, the join cannot finish, so a done
+	// context returns at once
+	doneCtx, doneCancel := context.WithCancel(ctx)
+	doneCancel()
+	if exchange.WaitForIdle(doneCtx) {
+		t.Fatal("WaitForIdle returned while a worker was in a recycle")
 	}
-	releaseRead()
+	releaseRecycle()
 	if !exchange.WaitForIdle(ctx) {
-		t.Fatal("WaitForIdle did not return after the read")
-	}
-	if count := readCount.Load(); count != 1 {
-		t.Fatalf("the control loop read %d times after the close, want 1", count)
+		t.Fatal("WaitForIdle did not return after the recycle")
 	}
 }
 
@@ -451,18 +360,36 @@ func newClientRecycleTestEnv(ctx context.Context, t testing.TB, mutate func(*Exc
 		settings.KeyEventDelivery.CorrectivePollInterval = 10 * time.Minute
 		settings.KeyEventDelivery.ResyncSpreadTimeout = 1 * time.Second
 		settings.EnableStuckProviderRecycle = true
-		settings.StuckProviderRecycleControlRefreshInterval = 100 * time.Millisecond
 		if mutate != nil {
 			mutate(settings)
 		}
 	})
 }
 
-func setClientRecycleTestControl(ctx context.Context, t testing.TB, value string) {
+// Requires the move control to be absent, as the test env starts.
+func requireNoClientRecycleTestControl(ctx context.Context, t testing.TB) {
 	t.Helper()
 	controlCtx, controlCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer controlCancel()
-	if err := model.SetConnectMoveControl(controlCtx, map[string]string{model.ConnectMoveControlFieldStuckProviderRecycle: value}); err != nil {
+	control, err := model.GetConnectMoveControl(controlCtx, model.ConnectMoveControlCeiling{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control.Present {
+		t.Fatal("the move control is set")
+	}
+}
+
+// Writes value into both retired stuck provider fields of the move control, as
+// a hash ops has not cleaned still holds them.
+func setClientRecycleTestRetiredControl(ctx context.Context, t testing.TB, value string) {
+	t.Helper()
+	controlCtx, controlCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer controlCancel()
+	if err := model.SetConnectMoveControl(controlCtx, map[string]string{
+		"stuckProviderSignal":  value,
+		"stuckProviderRecycle": value,
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -558,13 +485,14 @@ func readClientRecycleTestClose(t testing.TB, ws connectlib.H1MessageConn, timeo
 	}
 }
 
-// With the switch naming this block, a flag excuses the reported client's
+// The code default, with no control: a flag excuses the reported client's
 // reconnect, closes its transports here with the moved close and retires its
 // resident, so the client nominates a fresh one. Another client is left
 // alone, and a flag for a client not held here only counts. A report inside
 // the flag's ttl sets nothing and emits no event; once the flag expires, the
-// next report recycles the client again.
-func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
+// next report recycles the client again, with the retired control fields set
+// off.
+func TestExchangeRecyclesReportedProviderWithoutAControl(t *testing.T) {
 	if testing.Short() {
 		return
 	}
@@ -572,15 +500,11 @@ func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		// the trial: one block, named by the control
-		setClientRecycleTestControl(ctx, t, "g1 test")
+		requireNoClientRecycleTestControl(ctx, t)
 		env := newClientRecycleTestEnv(ctx, t, nil)
 		defer env.Close()
-		if !waitFor(ctx, 10*time.Second, env.exchange.stuckProviderRecycle.allows) {
-			t.Fatal("the named block does not recycle")
-		}
-		if testutil.ToFloat64(stuckProviderRecycleEnabledGauge) != 1 {
-			t.Fatal("the enabled gauge is off")
+		if env.exchange.stuckProviderRecycle == nil {
+			t.Fatal("an exchange with the ceiling on has no recycles")
 		}
 		if !env.exchange.keyEventSubscriber.clientRecyclePattern {
 			t.Fatal("an exchange with the ceiling on does not subscribe the recycle flags")
@@ -637,6 +561,9 @@ func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
 		}) {
 			t.Fatal("the recycle was not counted")
 		}
+		if testutil.ToFloat64(stuckProviderRecycleEnabledGauge) != 1 {
+			t.Fatal("the enabled gauge is off")
+		}
 		// every one of its transports here, after one excuse
 		if closes := testutil.ToFloat64(stuckProviderRecycleTransportClosesCounter) - closesBefore; closes != float64(connectionsBefore) {
 			t.Fatalf("closed %v transports, want %d", closes, connectionsBefore)
@@ -670,7 +597,8 @@ func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
 			t.Fatal("a flag for a client not held here was not counted")
 		}
 
-		// the flag expires, and the next report recycles the client again
+		// the flag expires, and the next report recycles the client again,
+		// past the retired control fields set off
 		if !waitFor(ctx, 20*time.Second, func() bool {
 			return clientRecycleTestFlagTtl(ctx, reported.clientId) <= 0
 		}) {
@@ -679,6 +607,7 @@ func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
 		if freshResident.IsDone() {
 			t.Fatal("the flag's expiry retired the fresh resident")
 		}
+		setClientRecycleTestRetiredControl(ctx, t, "off")
 		setClientRecycleTestFlag(ctx, t, reported.clientId)
 		if !waitFor(ctx, 20*time.Second, freshResident.IsDone) || !freshResident.moved.Load() {
 			t.Fatal("a report after the flag expired did not recycle the client again")
@@ -697,93 +626,52 @@ func TestExchangeRecyclesReportedProviderOnItsBlock(t *testing.T) {
 	})
 }
 
-// A flag does nothing while the switch is off for this block: off by
-// default, turned off at run time, naming another block, or with the code
-// ceiling off.
-func TestExchangeIgnoresRecycleWhileSwitchOff(t *testing.T) {
+// An exchange with the code ceiling off, as alt's: it builds no recycles and
+// subscribes no recycle flags, so a flag for a client it holds does nothing,
+// even with the retired control fields set to all.
+func TestExchangeWithTheCeilingOffIgnoresRecycleFlags(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	cases := []struct {
-		name string
-		// the control before and after the env starts; "" leaves it absent
-		initial string
-		final   string
-		mutate  func(*ExchangeSettings)
-		// a handler runs and counts the flag as disabled
-		counted bool
-	}{
-		{name: "the default", counted: true},
-		{name: "the kill switch at run time", initial: "test", final: "off", counted: true},
-		{name: "another block", initial: "test", final: "g1", counted: true},
-		{name: "the ceiling off", initial: "all", mutate: func(settings *ExchangeSettings) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		setClientRecycleTestRetiredControl(ctx, t, "all")
+		env := newClientRecycleTestEnv(ctx, t, func(settings *ExchangeSettings) {
 			settings.EnableStuckProviderRecycle = false
-		}},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			server.DefaultTestEnv().Run(t, func(t testing.TB) {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-
-				if c.initial != "" {
-					setClientRecycleTestControl(ctx, t, c.initial)
-				}
-				env := newClientRecycleTestEnv(ctx, t, c.mutate)
-				defer env.Close()
-				if c.final != "" {
-					if !waitFor(ctx, 10*time.Second, env.exchange.stuckProviderRecycle.allows) {
-						t.Fatal("the block was never on")
-					}
-					setClientRecycleTestControl(ctx, t, c.final)
-					if !waitFor(ctx, 10*time.Second, func() bool { return !env.exchange.stuckProviderRecycle.allows() }) {
-						t.Fatal("the control did not turn the block off")
-					}
-				}
-				if c.mutate == nil && env.exchange.stuckProviderRecycle.allows() {
-					t.Fatal("the block recycles")
-				}
-				if c.mutate != nil && env.exchange.stuckProviderRecycle != nil {
-					t.Fatal("an exchange with the ceiling off has a recycle switch")
-				}
-				if subscribed := env.exchange.keyEventSubscriber.clientRecyclePattern; subscribed != (c.mutate == nil) {
-					t.Fatalf("recycle flags subscribed=%t with the ceiling on=%t", subscribed, c.mutate == nil)
-				}
-
-				reported := connectClientRecycleTestClient(ctx, t, env, "reported provider")
-				defer reported.close()
-				disabledBefore := testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleDisabled))
-				dispatchedBefore := testutil.ToFloat64(keyEventsDispatchedClientRecycle)
-
-				setClientRecycleTestFlag(ctx, t, reported.clientId)
-
-				if c.counted {
-					if !waitFor(ctx, 10*time.Second, func() bool {
-						return disabledBefore+1 <= testutil.ToFloat64(stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleDisabled))
-					}) {
-						t.Fatal("the flag was not counted as disabled")
-					}
-				} else {
-					// past the event's delivery
-					select {
-					case <-time.After(2 * time.Second):
-					}
-					if dispatched := testutil.ToFloat64(keyEventsDispatchedClientRecycle); dispatched != dispatchedBefore {
-						t.Fatalf("an exchange with the ceiling off dispatched %v flags", dispatched-dispatchedBefore)
-					}
-				}
-				if _, closed := readClientRecycleTestClose(t, reported.ws, 2*time.Second); closed {
-					t.Fatal("the flag closed the client's transport with the switch off")
-				}
-				if reported.resident.IsDone() || env.exchange.localResident(reported.clientId) != reported.resident {
-					t.Fatal("the flag retired the client's resident with the switch off")
-				}
-				if connections, _ := env.exchange.testingHoldsClient(reported.clientId); connections < 2 {
-					t.Fatalf("the flag closed the client's transports with the switch off: %d left", connections)
-				}
-			})
 		})
-	}
+		defer env.Close()
+		if env.exchange.stuckProviderRecycle != nil {
+			t.Fatal("an exchange with the ceiling off has recycles")
+		}
+		if env.exchange.keyEventSubscriber.clientRecyclePattern {
+			t.Fatal("an exchange with the ceiling off subscribes the recycle flags")
+		}
+
+		reported := connectClientRecycleTestClient(ctx, t, env, "reported provider")
+		defer reported.close()
+		dispatchedBefore := testutil.ToFloat64(keyEventsDispatchedClientRecycle)
+
+		setClientRecycleTestFlag(ctx, t, reported.clientId)
+
+		// past the event's delivery
+		select {
+		case <-time.After(2 * time.Second):
+		}
+		if dispatched := testutil.ToFloat64(keyEventsDispatchedClientRecycle); dispatched != dispatchedBefore {
+			t.Fatalf("an exchange with the ceiling off dispatched %v flags", dispatched-dispatchedBefore)
+		}
+		if _, closed := readClientRecycleTestClose(t, reported.ws, 2*time.Second); closed {
+			t.Fatal("the flag closed the client's transport with the ceiling off")
+		}
+		if reported.resident.IsDone() || env.exchange.localResident(reported.clientId) != reported.resident {
+			t.Fatal("the flag retired the client's resident with the ceiling off")
+		}
+		if connections, _ := env.exchange.testingHoldsClient(reported.clientId); connections < 2 {
+			t.Fatalf("the flag closed the client's transports with the ceiling off: %d left", connections)
+		}
+	})
 }
 
 // A provider whose transports are split over two exchanges, its resident on
@@ -799,14 +687,14 @@ func TestExchangeRecyclesTheProviderOnEveryExchangeThatHoldsIt(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		setClientRecycleTestControl(ctx, t, "test")
+		requireNoClientRecycleTestControl(ctx, t)
 		residentEnv := newClientRecycleTestEnv(ctx, t, nil)
 		defer residentEnv.Close()
 		transportEnv := newClientRecycleTestEnv(ctx, t, nil)
 		defer transportEnv.Close()
 		for _, env := range []*peerDiscoveryEnv{residentEnv, transportEnv} {
-			if !waitFor(ctx, 10*time.Second, env.exchange.stuckProviderRecycle.allows) {
-				t.Fatal("an exchange of the named block does not recycle")
+			if env.exchange.stuckProviderRecycle == nil {
+				t.Fatal("an exchange with the ceiling on has no recycles")
 			}
 		}
 
@@ -1124,7 +1012,6 @@ func TestExchangeRecycleRacesAMoveAndADrain(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		setClientRecycleTestControl(ctx, t, "test")
 		env := newClientRecycleTestEnv(ctx, t, func(settings *ExchangeSettings) {
 			settings.DrainAllTimeout = 5 * time.Second
 			settings.DrainStragglerSweepTimeout = 1 * time.Second

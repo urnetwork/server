@@ -66,9 +66,9 @@ func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	// `localForward` (LocalForwardDefault keeps them off until it names a
 	// block).
 	settings.EnableLocalForward = true
-	// The same for recycles of the stuck providers the api reports
-	// (client_recycle.go): StuckProviderRecycleDefault keeps them off until
-	// the control names a block, and alt's exchange keeps the ceiling off.
+	// The connect service recycles the stuck providers the api reports
+	// (client_recycle.go) on every block, with no runtime control; alt's
+	// exchange keeps the ceiling off.
 	settings.EnableStuckProviderRecycle = true
 	if options.MemoryOwnerLedger {
 		settings.MemoryOwnerLedger = &connectcore.TransferMemoryOwnerLedger{}
