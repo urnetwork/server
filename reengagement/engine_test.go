@@ -36,7 +36,7 @@ func TestGlobalExits(t *testing.T) {
 		for _, stream := range []string{StreamLapsed, StreamNeverActivated, StreamFix, StreamWinback} {
 			f := healthy(stream)
 			c.mutate(&f)
-			for _, step := range []string{StepR1, StepR2, StepR3, StepN1, StepF1, StepW1, StepEnd} {
+			for _, step := range []string{StepR1, StepR2, StepR3, StepN1, StepF1, StepW1} {
 				if d := Decide(step, f, DefaultSchedule); d.Action != ActionExit || d.ExitReason != c.want {
 					t.Errorf("%s/%s: got %+v, want exit %s", stream, step, d, c.want)
 				}
@@ -47,9 +47,6 @@ func TestGlobalExits(t *testing.T) {
 	f.SentLastYear = 6
 	if d := Decide(StepR2, f, DefaultSchedule); d.ExitReason != ExitCapped {
 		t.Errorf("yearly cap: %+v", d)
-	}
-	if d := Decide(StepEnd, f, DefaultSchedule); d.ExitReason == ExitCapped {
-		t.Errorf("the sunset check sends nothing and is never capped: %+v", d)
 	}
 }
 
@@ -67,19 +64,11 @@ func TestLapsedStream(t *testing.T) {
 	if d := Decide(StepR2, f, s); d.Action != ActionSend || d.Template != TemplateR2Reason || d.NextStep != StepR3 || d.NextDay != 30 {
 		t.Errorf("r2: %+v", d)
 	}
-	if d := Decide(StepR3, f, s); d.Action != ActionSend || d.Template != TemplateR3Keep || d.NextStep != StepEnd || d.NextDay != 60 {
+	// R3 is the episode's last email: the episode ends with it
+	if d := Decide(StepR3, f, s); d.Action != ActionSend || d.Template != TemplateR3Keep || d.NextStep != "" || d.Suppress != "" {
 		t.Errorf("r3: %+v", d)
 	}
-	// silence ends in a sunset suppression
-	if d := Decide(StepEnd, f, s); d.ExitReason != ExitSunset || d.Suppress != SuppressSunset {
-		t.Errorf("end silent: %+v", d)
-	}
-	kept := f
-	kept.Kept = true
-	if d := Decide(StepEnd, kept, s); d.ExitReason != ExitKept || d.Suppress != "" {
-		t.Errorf("end kept: %+v", d)
-	}
-	// a click or an answer means a live reader: no keep-or-go, no sunset
+	// a click or an answer means a live reader: no keep-or-go
 	clicked := f
 	clicked.Clicked = true
 	if d := Decide(StepR3, clicked, s); d.ExitReason != ExitEngaged {
@@ -93,7 +82,7 @@ func TestLapsedStream(t *testing.T) {
 	// a connection ends it at any step, without suppressing
 	back := f
 	back.Reactivated = true
-	for _, step := range []string{StepR1, StepR2, StepR3, StepEnd} {
+	for _, step := range []string{StepR1, StepR2, StepR3} {
 		if d := Decide(step, back, s); d.ExitReason != ExitReactivated || d.Suppress != "" {
 			t.Errorf("%s reactivated: %+v", step, d)
 		}
@@ -106,27 +95,33 @@ func TestLapsedStream(t *testing.T) {
 	}
 }
 
-// A holdout network's R3 is a virtual send: nobody asked it "should I keep
-// writing?", so its silence at the sunset check is no answer. It exits done,
-// unsuppressed; before the 2026-11-13 review it was suppressed at day 60 like
-// a mailed network that never answered, and so dropped from all later mail.
-func TestHoldoutSunsetExitsDoneWithoutSuppression(t *testing.T) {
+// Nobody is removed from marketing for not answering R3 ("Should I keep
+// writing to you?"; owner, 2026-11-15). Until then R3 scheduled a sunset check
+// 30 days later that suppressed every mailed network that hadn't tapped "Keep
+// me posted", clicked or answered. R3 is now the episode's last step, mailed or
+// virtual, and a task left for the old "end" step exits done without a
+// suppression.
+func TestR3SilenceSuppressesNobody(t *testing.T) {
 	s := DefaultSchedule
 	for _, stream := range []string{StreamLapsed, StreamNeverActivated} {
-		f := healthy(stream)
-		f.Holdout = true
-		r3 := Decide(StepR3, f, s)
-		if r3.Action != ActionVirtual || r3.Template != TemplateR3Keep || r3.NextStep != StepEnd {
-			t.Errorf("%s holdout r3: %+v, want a virtual send", stream, r3)
+		for _, holdout := range []bool{false, true} {
+			f := healthy(stream)
+			f.Holdout = holdout
+			r3 := Decide(StepR3, f, s)
+			want := ActionSend
+			if holdout {
+				want = ActionVirtual
+			}
+			if r3.Action != want || r3.Template != TemplateR3Keep || r3.NextStep != "" || r3.Suppress != "" {
+				t.Errorf("%s holdout=%t r3: %+v, want the last email of the episode", stream, holdout, r3)
+			}
+			if d := Decide("end", f, s); d.Action != ActionExit || d.ExitReason != ExitDone || d.Suppress != "" {
+				t.Errorf("%s holdout=%t legacy end step: %+v, want exit done without a suppression", stream, holdout, d)
+			}
 		}
-		if d := Decide(StepEnd, f, s); d.Action != ActionExit || d.ExitReason != ExitDone || d.Suppress != "" {
-			t.Errorf("%s holdout end: %+v, want exit done without a suppression", stream, d)
-		}
-		// the mailed arm's silence still ends in the sunset suppression
-		f.Holdout = false
-		if d := Decide(StepEnd, f, s); d.ExitReason != ExitSunset || d.Suppress != SuppressSunset {
-			t.Errorf("%s mailed end: %+v, want the sunset suppression", stream, d)
-		}
+	}
+	if slices.Contains(LiftableSuppressions(), "sunset") {
+		t.Error("the program no longer applies a sunset suppression")
 	}
 }
 
@@ -145,12 +140,12 @@ func TestNeverActivatedStream(t *testing.T) {
 	}
 	for _, reason := range []string{"", "other", "4"} {
 		f.OnboardingReason = reason
-		if d := Decide(StepN1, f, s); d.Action != ActionSend || d.Template != TemplateR3Keep || d.NextStep != StepEnd || d.NextDay != 30 {
-			t.Errorf("n1 %q goes straight to keep-or-go: %+v", reason, d)
+		if d := Decide(StepN1, f, s); d.Action != ActionSend || d.Template != TemplateR3Keep || d.NextStep != "" {
+			t.Errorf("n1 %q goes straight to keep-or-go, the episode's last email: %+v", reason, d)
 		}
 	}
 	f.OnboardingReason = "not_needed"
-	if d := Decide(StepR3, f, s); d.Template != TemplateR3Keep || d.NextStep != StepEnd || d.NextDay != 60 {
+	if d := Decide(StepR3, f, s); d.Template != TemplateR3Keep || d.NextStep != "" {
 		t.Errorf("n r3: %+v", d)
 	}
 	f.Reactivated = true
@@ -205,7 +200,7 @@ func TestRouteAnswer(t *testing.T) {
 	if AppReason(ReasonSlow) != onboarding.ReasonNotWorking || AppReason(ReasonSwitched) != onboarding.ReasonOther {
 		t.Error("app reasons")
 	}
-	if !LiftableSuppression(SuppressSunset) || LiftableSuppression("complained") {
+	if !LiftableSuppression(SuppressSwitched) || LiftableSuppression("complained") {
 		t.Error("liftable")
 	}
 }
@@ -221,7 +216,7 @@ func TestOperatorSuppressionsAreNeverLiftable(t *testing.T) {
 			t.Errorf("%s is liftable", reason)
 		}
 	}
-	for _, reason := range []string{SuppressSunset, SuppressSwitched} {
+	for _, reason := range []string{SuppressSwitched} {
 		if !LiftableSuppression(reason) {
 			t.Errorf("%s is not liftable", reason)
 		}

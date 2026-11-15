@@ -418,7 +418,7 @@ func TestProductUpdatesMirrorMarketingSuppression(t *testing.T) {
 				tb.Fatal(err)
 			}
 		}
-		liftable := []string{reengagement.SuppressSunset, reengagement.SuppressSwitched}
+		liftable := []string{reengagement.SuppressSwitched}
 		now := server.NowUtc()
 
 		// subscribed through settings; the initial sync put it on new_networks
@@ -427,7 +427,7 @@ func TestProductUpdatesMirrorMarketingSuppression(t *testing.T) {
 		brevo.put(101)
 		expectLists("subscribed", true, true)
 
-		SuppressNetworkMarketing(ctx, networkId, reengagement.SuppressSunset, now)
+		SuppressNetworkMarketing(ctx, networkId, reengagement.SuppressSwitched, now)
 		queued := requireQueuedMirror(tb, ctx, userId)
 		brevo.failRemovals.Store(true)
 		if _, _, err := target.RunSpecific(ctx, queued); err == nil {
@@ -439,19 +439,19 @@ func TestProductUpdatesMirrorMarketingSuppression(t *testing.T) {
 		expectLists("suppressed", false, false)
 
 		// a replayed suppression keeps the first reason and converges (a
-		// reason no connection lifts would replace the sunset:
+		// reason no connection lifts would replace "switched":
 		// model.SuppressNetworkMarketingInTx)
-		SuppressNetworkMarketing(ctx, networkId, reengagement.SuppressSunset, now.Add(time.Minute))
+		SuppressNetworkMarketing(ctx, networkId, reengagement.SuppressSwitched, now.Add(time.Minute))
 		requireQueuedMirror(tb, ctx, userId)
 		run("replayed suppression")
 		expectLists("replayed suppression", false, false)
-		if state := model.GetNetworkMailState(ctx, networkId); state.SuppressedReason != reengagement.SuppressSunset || !state.SuppressedAt.Equal(now) {
+		if state := model.GetNetworkMailState(ctx, networkId); state.SuppressedReason != reengagement.SuppressSwitched || !state.SuppressedAt.Equal(now) {
 			tb.Fatal("a replay replaced the first suppression", state.SuppressedReason, state.SuppressedAt)
 		}
 
 		// a lift puts the address back on network_users; a replayed lift does nothing
 		if !LiftNetworkMarketingSuppression(ctx, networkId, liftable) {
-			tb.Fatal("a sunset was not lifted")
+			tb.Fatal("a \"switched\" suppression was not lifted")
 		}
 		requireQueuedMirror(tb, ctx, userId)
 		run("lift")
@@ -556,9 +556,9 @@ func TestCampaignSuppressionsQueueBrevoMirror(t *testing.T) {
 		}
 
 		applyReengagementExit(ctx, &model.NetworkReengagement{NetworkId: exitNetworkId, Stream: reengagement.StreamLapsed},
-			reengagement.ExitSunset, reengagement.SuppressSunset, "", false, now)
+			reengagement.ExitAnswered, reengagement.SuppressSwitched, "", false, now)
 		requireQueuedMirror(tb, ctx, exitUserId)
-		expectReason(exitNetworkId, reengagement.SuppressSunset)
+		expectReason(exitNetworkId, reengagement.SuppressSwitched)
 		if syncs := pendingProductUpdatesSyncs(ctx); len(syncs) != 2 {
 			tb.Fatal("expected one queued sync per suppressed network", len(syncs))
 		}
@@ -593,7 +593,7 @@ func TestMirrorNetworkMarketingSuppressionsQueuesEverySuppressedNetwork(t *testi
 		}))
 		now := server.NowUtc()
 		suppressedUserIds := []server.Id{}
-		for i, reason := range []string{onboarding.ExitBounced, onboarding.ExitComplained, reengagement.SuppressSunset} {
+		for i, reason := range []string{onboarding.ExitBounced, onboarding.ExitComplained, reengagement.SuppressSwitched} {
 			networkId, userId := server.NewId(), server.NewId()
 			model.Testing_CreateNetwork(ctx, networkId, "synthetic-backfill-"+strconv.Itoa(i), userId)
 			// recorded before the mirror existed: no sync queued

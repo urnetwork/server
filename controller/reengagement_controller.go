@@ -476,7 +476,6 @@ func loadReengagementFacts(ctx context.Context, row *model.NetworkReengagement, 
 		PolicyExit:     reengagementPolicyExit(ctx, row.NetworkId, row.Stream, row.Country, now),
 		SentLastYear:   model.CountNetworkReengagementSendsSince(ctx, row.NetworkId, now.Add(-365*day)),
 		Reason:         row.Reason,
-		Kept:           row.KeepUntil != nil && now.Before(*row.KeepUntil),
 	}
 	if onb != nil {
 		f.Bounced = onb.Bounced

@@ -201,7 +201,7 @@ func TestSuppressNetworksMarketingAppliesInBatches(t *testing.T) {
 			return f
 		}
 		// an onboarding sequence in flight, a lapsed network, a fresh one,
-		// a sunset a connection would lift, and a complaint
+		// a "switched" answer a connection would lift, and a complaint
 		inFlight := create("synthetic-suppress-in-flight")
 		at := now.Add(time.Hour)
 		model.CreateNetworkOnboarding(ctx, &model.NetworkOnboarding{
@@ -210,18 +210,18 @@ func TestSuppressNetworksMarketingAppliesInBatches(t *testing.T) {
 		})
 		lapsed := create("synthetic-suppress-lapsed")
 		fresh := create("synthetic-suppress-fresh")
-		sunset := create("synthetic-suppress-sunset")
+		switched := create("synthetic-suppress-switched")
 		complained := create("synthetic-suppress-complained")
 		server.Tx(ctx, func(tx server.PgTx) {
-			model.SuppressNetworkMarketingInTx(tx, ctx, sunset.networkId, reengagement.SuppressSunset, earlier)
+			model.SuppressNetworkMarketingInTx(tx, ctx, switched.networkId, reengagement.SuppressSwitched, earlier)
 			model.SuppressNetworkMarketingInTx(tx, ctx, complained.networkId, onboarding.ExitComplained, earlier)
 		})
 		missingNetworkId := server.NewId()
 		networkIds := []server.Id{
-			inFlight.networkId, lapsed.networkId, fresh.networkId, sunset.networkId, complained.networkId,
+			inFlight.networkId, lapsed.networkId, fresh.networkId, switched.networkId, complained.networkId,
 			missingNetworkId, fresh.networkId,
 		}
-		written := []fixture{inFlight, lapsed, fresh, sunset}
+		written := []fixture{inFlight, lapsed, fresh, switched}
 		settings := testMarketingSuppressionSettings(2, 1)
 		reason := reengagement.SuppressAutomatedSignup
 		pending := func() int {
@@ -269,8 +269,8 @@ func TestSuppressNetworksMarketingAppliesInBatches(t *testing.T) {
 		if state := model.GetNetworkMailState(ctx, complained.networkId); state.SuppressedReason != onboarding.ExitComplained {
 			tb.Fatal("a complaint was replaced", state.SuppressedReason)
 		}
-		if state := model.GetNetworkMailState(ctx, sunset.networkId); !state.SuppressedAt.Equal(earlier) {
-			tb.Fatal("the replaced sunset lost its time", state.SuppressedAt)
+		if state := model.GetNetworkMailState(ctx, switched.networkId); !state.SuppressedAt.Equal(earlier) {
+			tb.Fatal("the replaced switched suppression lost its time", state.SuppressedAt)
 		}
 
 		// one sync per written network, none for the complaint, one second apart

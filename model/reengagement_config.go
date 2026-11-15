@@ -61,7 +61,6 @@ type ReengagementScheduleConfig struct {
 	DormantDays      int    `yaml:"dormant_days"`
 	R2AfterR1Days    int    `yaml:"r2_after_r1_days"`
 	R3Day            int    `yaml:"r3_day"`
-	EndAfterR3Days   int    `yaml:"end_after_r3_days"`
 	NeverActiveDay   int    `yaml:"never_active_day"`
 	NKeepAfterN1Days int    `yaml:"n_keep_after_n1_days"`
 	CooldownDays     int    `yaml:"cooldown_days"`
@@ -307,7 +306,7 @@ func (c *ReengagementConfig) ParsedHighlights() []*reengagement.Highlight {
 func (c *ReengagementConfig) ScheduleValue() reengagement.Schedule {
 	s := c.Schedule
 	return reengagement.Schedule{
-		DormantDays: s.DormantDays, R2AfterR1Days: s.R2AfterR1Days, R3Day: s.R3Day, EndAfterR3Days: s.EndAfterR3Days,
+		DormantDays: s.DormantDays, R2AfterR1Days: s.R2AfterR1Days, R3Day: s.R3Day,
 		NeverActiveDay: s.NeverActiveDay, NKeepAfterN1Days: s.NKeepAfterN1Days, CooldownDays: s.CooldownDays,
 		QuietDays: s.QuietDays, FixWindowDays: s.FixWindowDays, WinbackDays: s.WinbackDays, StoreRetryDays: s.StoreRetryDays, KeepDays: s.KeepDays,
 		MinGapDays: s.MinGapDays, MaxPerYear: s.MaxPerYear, SendHour: s.SendHour, SendWindow: s.SendWindow,
