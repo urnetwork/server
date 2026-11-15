@@ -45,7 +45,7 @@ gates:
     - item: Required RPC after §6.4's M1 identity check (§23.4's M1 exit; PROTO-M1-11)
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestSubprotocolRequiredRpcAfterTheIdentityCheck, TestSubprotocolNothingBeforeAVerifiedHello, TestSubprotocolNoSessionIsUnavailableEncryption, TestSubprotocolControlContractCarriesNoData]}
-        - {repo: server, package: ./connect, stores: true, names: [TestSidecarSubprotocolT3HelloHeadCheckAndClosedData]}
+        - {repo: server, package: ./connect, stores: true, names: [TestSidecarSubprotocolT3HelloHeadCheckAndSealedData]}
     - item: push resyncs after a resident restart (§23.4's M1 exit; PROTO-M1-11)
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestPushResyncsAfterAResidentRestart, TestPushPartialResetAppliesNothingUntilVersionsRefetched]}
@@ -79,6 +79,183 @@ gates:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
         - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+    - item: peer review of the schemas and state machines of §7.9's records, format 1 (§11.5 to §11.8 included), credential 0xF552, suite 0x0010 and D-KEYS-10's delivery wire, by their owning sections (§22.10's M2 entry)
+      external: 'people: the owning sections'' reviewers read and sign the schemas and state machines (owner decision 99: no external review stands in)'
+    - item: 'EvsCommit.tla and StoreSettle.tla passing TLC at their bounds, their mutants refused and their liveness held, by the runs sidecartest/model/modelled.yml records at these sources (§22.10''s M2 entry; D-PHASE-7; TEST-M2-08, EVS1-M2-02); where none stands, open: this report runs no TLC itself'
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InModelsPassTlc$, ./sidecartest/fault, -fault.gate-tlc]}
+    - item: FS-1 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-1]}
+    - item: FS-2 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-2]}
+    - item: FS-3 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-3]}
+    - item: FS-4 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-4]}
+    - item: FS-5 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-5]}
+    - item: FS-6 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-6]}
+    - item: FS-7 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-7]}
+    - item: FS-8 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-8]}
+    - item: FS-9 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-9]}
+    - item: FS-10 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-10]}
+    - item: FS-11 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-11]}
+    - item: FS-12 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-12]}
+    - item: FS-14 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-14]}
+    - item: FS-15 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-15]}
+    - item: FS-16 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-16]}
+    - item: FS-17 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-17]}
+    - item: FS-18 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-18]}
+    - item: FS-19's config-read written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-19/config-read]}
+    - item: FS-20 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-20]}
+    - item: FS-22 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-22]}
+    - item: FS-23 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-23]}
+    - item: FS-24 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-24]}
+    - item: FS-40 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-40]}
+    - item: FS-44 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-44]}
+    - item: FS-45 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-45]}
+    - item: FS-47 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-47]}
+    - item: FS-53 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-53]}
+    - item: FS-57 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-57]}
+    - item: FS-58 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-58]}
+    - item: FS-59 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-59]}
+    - item: FS-60 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-60]}
+    - item: FS-61 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-61]}
+    - item: FS-62 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-62]}
+    - item: FS-63 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-63]}
+    - item: FS-72's format-1 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-72/format-1]}
+    - item: FS-82's statement written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-82/statement]}
+    - item: FS-95's format-1 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-95/format-1]}
+    - item: FS-102 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-102]}
+    - item: FS-102's forged written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-102/forged]}
+    - item: FS-103 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-103]}
+    - item: FS-104 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-104]}
+    - item: FS-105 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-105]}
+    - item: FS-106 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-106]}
+    - item: FS-113 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-113]}
+    - item: FS-114's head written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-114/head]}
+    - item: FS-114's marker written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-114/marker]}
+    - item: FS-116 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-116]}
+    - item: FS-117 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-117]}
+    - item: FS-118 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-118]}
+    - item: FS-124 written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-124]}
+    - item: FS-124's forged written as a test against the fakes (§22.10's M2 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InRowWritten$, ./sidecartest/fault, -fault.gate-written=FS-124/forged]}
+    - item: 'the vector schemas fixed: the vector files of §7.9''s records, format 1, credential 0xF552, suite 0x0010 and the delivery wire, with the tests that hold the code to them byte for byte (§22.10''s M2 entry)'
+      tests:
+        - {repo: sidecar, package: ., names: [TestEvsChainVectors, TestEvsDigestVectors, TestEvsTokenVectors, TestEvsBatchVectors, TestEvsWindowVectors, TestEvsPushVectors, TestEvsRecordVectors, TestEvsSegmentVectors, TestGkmLadderVectors, TestGkmWrapAadVectors, TestGkmWrapPathVectors, TestAuthChainVectors, TestMlsCryptoBasicsVectors, TestMlsInteropTranscripts]}
+        - {repo: sidecar, package: ./protocol/bridge, names: [TestSignedVectorsAreByteEqual, TestAuthEntryVectorsAreByteEqual, TestAuthChainDigestFollowsTheVectors]}
+    - item: 'RECORD.md reviewed (§22.10''s M2 entry; owner decision 25; §23.8''s G0 row: here or by M2''s entry)'
+      external: 'people: a reviewer reads RECORD.md and signs it'
+    - item: 'format 2''s reserved numbers and format 1''s refusal vectors (§22.10''s M2 entry; D-PHASE-9; owner decision 163): EvsPush''s flags 256 and 512 and fields 33 and 34, EvsHead''s index_epoch, window bit 5, the read states drop_pending and dropped, and every number testdata/evs/reserved_numbers.yml holds; the directory''s kind, acl.proto''s autogroup:dst-owner atom, EvsShare.expires and config.proto''s ServiceSettings.directory'
+      tests:
+        - {repo: sidecar, package: ./protocol, names: [TestEvsReservesOnlyTheListedNumbers, TestEvsDeclaresTheListedFields, TestEvsDeclaresTheListedValues, TestEvsListHoldsTheDecidedReservations, TestPhaseReservations]}
+        - {repo: sidecar, package: ./sidecartest, names: [TestEvsFormat2ConstructsRefusedAtAFormat1Evs, TestEvsFormat2ConstructsAtAFormat1Reader, TestEvsFormat1EvsServesAFormat2RepoAndTakesNoPush, TestEvsFormat2WritesRefusedAtAFormat1Writer, TestEvsFormat2BatchLeftByAFormat1Evacuator, TestEvsSlotRuleRefusedAtAFormat1Evs, TestEvsFormat2RefusalVectorsCoverTheReservations]}
+    - item: acl.proto's RepoPrefixRules (SignedType 0x1111) and AclRepo.prefix_rules reserved, which code from M2 verifies and folds and M6 enforces (DESIGN-DETAILS 16.8's line for D-PHASE-9; QD-212; ACL-M2-18)
+      tests:
+        - {repo: sidecar, package: ./protocol, names: [TestPhaseReservations]}
+        - {repo: sidecar, package: ./protocol/bridge, names: [TestSignedTypeNumbersStable]}
+        - {repo: sidecar, package: ., names: [TestAclRepoPrefixRulesSigners, TestAclRepoPrefixRulesTakesOnlyALiveGeneralRepo, TestAclRepoPrefixRulesBodyByteCounts, TestAclRepoPrefixRulesStopsAtSetMaxCount, TestFoldAclReposAppendsAPrefixRulesRowPerSet, TestAclRepoPrefixRulesMovesNoRightAndReappliesAlike, TestAclRepoPrefixRulesRowsAgreeAcrossBases, TestAclPrefixRulesRowsAreBaseIndependentOverGeneratedLogs, TestAclRowsCheckLimitsCountsThePrefixRuleRows]}
+    - item: '§23.6''s M2 design closure: the head object and its pins; generation serialization; the delta-prefix commitment; the recovery veto; ref witnesses; path epochs; the git model with git-mode tip CAS; placement; the config leaf rule; IndexerSet; the ephemeral ceiling; deposit-only principals and the depositor rule; shred and restore; staged versions; orphans; the path-directory bound; format 2''s reserved numbers and format 1''s refusal of them; the directory kind, autogroup:dst-owner and EvsShare.expires; refusal records; the write budget''s accounts, wallet and P0 reports; the store''s deadline and settle rules; Delegation key drops and ends; key deliveries'' identity and authority, ReaderKey validity and gkm''s route scopes; the presence countersignature; usage batches, relayed reservations, quota maintenance; Q-CTX-4, Q-KEYS-11, Q-EVS-6, Q-OPS-2, Q-EVS-24'
+      external: 'people: the Gn-in review reads and signs the closure (§23.8)'
+    - item: the changes since G0 and §22's exit-test plan for M2 reviewed (§23.8's Gn-in)
+      external: 'people: the Gn-in review reads them'
   M2:
     - row: FS-1
       tests:
