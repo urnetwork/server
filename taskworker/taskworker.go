@@ -199,6 +199,9 @@ func initTaskSchedule(ctx context.Context) {
 		// §7.6's verified domains looked up again once a day and dropped
 		// after 7 failed days, a pass every hour; not scheduled without MG6
 		work.ScheduleNetworkDomainRecheck(clientSession, tx)
+		// §7.6's SCIM changes deleted past their 7 days, a pass every hour; not
+		// scheduled without MG6
+		work.ScheduleRemoveExpiredNetworkScimChanges(clientSession, tx)
 		// §7.11's admin events posted to each team's SIEM webhooks every 60 s,
 		// a failing one retried for 24 hours; not scheduled without MG1 and MG6
 		work.ScheduleNetworkAuditWebhookDelivery(clientSession, tx)
@@ -706,6 +709,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.NetworkDomainRecheck,
 			work.NetworkDomainRecheckPost,
+		),
+		// §7.6's SCIM queue past its 7 days (model.RemoveExpiredNetworkScimChanges)
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredNetworkScimChanges,
+			work.RemoveExpiredNetworkScimChangesPost,
 		),
 		// §7.11's webhook delivery (model.DeliverNetworkAuditWebhooks)
 		task.NewTaskTargetWithPost(
