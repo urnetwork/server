@@ -535,8 +535,9 @@ func RedisDoOnce(ctx context.Context, callback func(RedisClient)) {
 // its own first key: PING, GET, same-slot EVAL and other single-key commands,
 // alone or pipelined across slots. It must not route a command whose keys span
 // slots. EVAL callers must keep every declared key in one explicit Redis hash
-// tag. Each call first pings an arbitrary node unless the caller passes
-// OptRedisNoPreflight.
+// tag. No call pings before its callback (redisWithClient): a connection that
+// cannot serve fails the callback's first command, within that command's
+// deadline.
 func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error, options ...any) (returnErr error) {
 	if _, bounded := ctx.Deadline(); !bounded {
 		return fmt.Errorf("RedisWithDeadline requires an explicit deadline")
@@ -591,30 +592,36 @@ func OptRedisKeepLateReplies() RedisLateReplyOptions {
 	return RedisLateReplyOptions{keep: true}
 }
 
-// Whether a call on the non-retrying or deadline-bound pools pings first.
+// The option OptRedisNoPreflight returns.
 type RedisPreflightOptions struct {
 	skip bool
 }
 
-// Skips the preflight PING of the non-retrying and deadline-bound pools. Neither
-// pool replays a command, in go-redis or in the callback wrapper, so the PING
-// guards no command's outcome: it reaches an arbitrary node, never necessarily
-// the one a command routes to, and costs a round trip and a pool turn per call.
+// Accepted and ignored: no call pings before its callback since 2026-11-15
+// (redisWithClient), so there is no preflight to skip. It remains so that the
+// callers that pass it, and branches written before the change, still build.
 func OptRedisNoPreflight() RedisPreflightOptions {
 	return RedisPreflightOptions{skip: true}
 }
 
+// Runs callback with a client of pool. No pool pings before the callback:
+// until 2026-11-15 the non-retrying and deadline-bound pools sent a PING first
+// unless the caller passed OptRedisNoPreflight, about 77k a second across the
+// fleet (CPUOPT5 E 5.1, CPUOPT6 E #2). Those pools replay no command, so the
+// PING guarded no command's outcome: it reached an arbitrary node, not
+// necessarily the one a command routes to, could not promise that the next
+// command succeeds, and cost a round trip and a pool turn in the command's own
+// budget. A connection that cannot serve now fails the callback's first
+// command, under that command's deadline (the deadline pools put the caller's
+// context deadline on their sockets) or its pool's socket timeouts, through the
+// same error path. go-redis's own pool checks keep the connections healthy.
 func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(RedisClient), options ...any) {
 	observeTxIo(TxIoRedis)
 	retryOptions := OptRetryDefault()
-	preflight := true
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
-		switch v := option.(type) {
-		case DbRetryOptions:
+		if v, ok := option.(DbRetryOptions); ok {
 			retryOptions = v
-		case RedisPreflightOptions:
-			preflight = !v.skip
 		}
 	}
 
@@ -630,29 +637,9 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 		}
 		client := pool.open()
 
-		// Ordinary callbacks report their command errors through the existing
-		// retry boundary. A separate PING doubles a one-command round trip and
-		// cannot guarantee the next command succeeds. Dedicated non-retrying
-		// and deadline pools retain their existing preflight policy.
+		// every callback reports its command errors through the retry boundary
+		// below, with no preflight command
 		var connErr error
-		if preflight && (pool.disableCommandRetry || pool.contextTimeoutEnabled) {
-			connErr = client.Ping(ctx).Err()
-		}
-		if connErr != nil {
-			if retryOptions.rerunOnConnectionError {
-				select {
-				case <-ctx.Done():
-					panic(dbContextDoneCause(ctx, connErr))
-				case <-time.After(backoff.NextRetryTimeout()):
-					if retryEndTime.Before(NowUtc()) {
-						panic(connErr)
-					}
-					continue
-				}
-			}
-			panic(connErr)
-		}
-
 		func() {
 			defer func() {
 				if err := recover(); err != nil {
