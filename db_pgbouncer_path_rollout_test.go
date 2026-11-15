@@ -132,14 +132,44 @@ func TestPgBouncerDirectBlocksNameServicesThatChoose(t *testing.T) {
 
 // The rollout's current stage. A stage's merge, in its window, changes the
 // table and this expectation together (owner, 2026-11-13: each database-path
-// window's go comes back to the owner). Until the first stage, every block of
-// every service keeps nginx's single port.
+// window's go comes back to the owner). Stage 2: every api block goes direct;
+// every block of every other service keeps nginx's single port.
 func TestPgBouncerDirectRolloutStage(t *testing.T) {
 	stage := map[string][]string{
-		"api": {"beta"},
+		"api": {pgBouncerEveryBlock},
 	}
 	if !reflect.DeepEqual(pgBouncerDirectBlocks, stage) {
 		t.Fatalf("the table is %v, the stage %v", pgBouncerDirectBlocks, stage)
+	}
+	// the blocks warp runs on Main (warpctl ls versions main <service>, 2026-11-15)
+	deployedBlocks := map[string][]string{
+		"api":        {"beta", "g1", "g2", "g3", "g4"},
+		"connect":    {"beta", "g1", "g2", "g3", "g4"},
+		"proxy":      {"g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8", "g9", "g10"},
+		"taskworker": {"g1", "g2"},
+		"alt":        {"g1"},
+		"gossip":     {"g1"},
+		"mcp":        {"beta", "g1", "g2", "g3", "g4"},
+	}
+	for _, service := range pgBouncerPathServices {
+		blocks, ok := deployedBlocks[service]
+		if !ok {
+			t.Errorf("no deployed blocks listed for %s", service)
+			continue
+		}
+		want := PgBouncerPathSinglePort
+		if service == "api" {
+			want = PgBouncerPathDirect
+		}
+		for _, block := range blocks {
+			if got := pgBouncerPathOfBlock(pgBouncerDirectBlocks, service, block); got != want {
+				t.Errorf("%s %s: %s, want %s", service, block, got, want)
+			}
+		}
+		// a process outside warp, such as an operator's through the tunnel
+		if got := pgBouncerPathOfBlock(pgBouncerDirectBlocks, service, ""); got != PgBouncerPathSinglePort {
+			t.Errorf("%s outside warp: %s", service, got)
+		}
 	}
 }
 
