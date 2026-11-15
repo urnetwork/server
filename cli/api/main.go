@@ -46,9 +46,11 @@ Options:
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
-	// §21's effects for the actions this process applies (ABUSE-M5-06); a
-	// binary that does not link MG5 installs none
+	// §21's effects for the actions this process applies (ABUSE-M5-06), and
+	// the sealed off-site record of each, from abuse-mailbox.yml (QD-726); a
+	// binary that does not link MG5 installs neither
 	controller.InstallAbuseEffects()
+	controller.InstallAbuseRecordMailer()
 	if err := api.Run(ctx, api.RunOptions{Port: port}); err != nil {
 		panic(err)
 	}

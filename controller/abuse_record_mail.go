@@ -20,12 +20,15 @@ package controller
 // A record holds no reporter data, no reason and no reviewer: what a restore
 // re-applies, and nothing more.
 //
-// Before a record leaves the process it is sealed to a vault-held HPKE key, so
-// the mailbox provider and SES see sender, time and size only (QD-030). Neither
-// the sealed bytes nor the keys' vault homes are settled
-// (abuse-m5-03-record-seal.md), so the production mailer refuses every record:
-// each stays owed, mailed_time NULL, and the action pass retries it, and nothing
-// unsealed ever leaves.
+// Before a record leaves the process it is sealed to vault's HPKE-XWing key and
+// mailed as a text/plain body of the base64 (abuse_mailbox_seal.go, QD-726), so
+// the mailbox provider and SES see sender, time and size only (QD-030, owner
+// decision 208). The MAC key and the seal's public key are both in vault's
+// abuse-mailbox.yml. Only api and taskworker install the production mailer
+// (InstallAbuseRecordMailer); every other process refuses each record, as the
+// production mailer does while abuse.yml names no mailbox or the key file is
+// missing or refused: the record stays owed, mailed_time NULL, the action pass
+// retries it, and nothing unsealed ever leaves.
 
 import (
 	"bytes"
@@ -60,9 +63,9 @@ var ErrAbuseRecordMac = errors.New("abuse record mac does not verify")
 // MACed or verified without one.
 var ErrAbuseRecordMacKey = errors.New("abuse record mac key unavailable")
 
-// The mailer cannot send any record now: no mailbox, no seal or no key. The
-// record stays owed, and a pass that meets this mails nothing more until its
-// next run.
+// The mailer cannot send any record now: no mailer installed, no mailbox, no
+// key file or a refused one, or no SES sender. The record stays owed, and a
+// pass that meets this mails nothing more until its next run.
 var ErrAbuseRecordMailerUnavailable = errors.New("abuse record mailer unavailable")
 
 // §21.10's record of one action or lift.
@@ -237,16 +240,67 @@ type AbuseRecordMailer interface {
 	MailAbuseRecord(ctx context.Context, record *AbuseRecord) error
 }
 
-// The production mailer, through api's and taskworker's SES path. It refuses
-// every record until the seal and its keys are settled
-// (abuse-m5-03-record-seal.md), as it must not send a record unsealed, and
-// before that while abuse.yml names no mailbox.
-type sesAbuseRecordMailer struct{}
+// The production mailer: each record MACed under abuse-mailbox.yml's MAC key,
+// sealed to its seal key and mailed to abuse.yml's abuse_mailbox through api's
+// and taskworker's SES path. It sends nothing, answering
+// ErrAbuseRecordMailerUnavailable, while abuse.yml names no mailbox, the key
+// file is missing or refused, or the process has no SES sender. A failed seal
+// or send is any other error. Either way the record stays owed. The zero value
+// is the production mailer.
+type sesAbuseRecordMailer struct {
+	// nil is DefaultAbuseMailboxSettings
+	settings *AbuseMailboxSettings
+	// nil is SES (sesAbuseMailboxSender)
+	sender abuseMailboxSender
+}
 
-// Refuses: see the type.
+// Mails one record: see the type.
 func (self *sesAbuseRecordMailer) MailAbuseRecord(ctx context.Context, record *AbuseRecord) error {
-	if server.GetAbuseConfig().AbuseMailbox() == "" {
+	settings := self.settings
+	if settings == nil {
+		settings = DefaultAbuseMailboxSettings()
+	}
+	sender := self.sender
+	if sender == nil {
+		sender = &sesAbuseMailboxSender{settings: settings}
+	}
+	mailbox := server.GetAbuseConfig().AbuseMailbox()
+	if mailbox == "" {
 		return fmt.Errorf("%w: abuse.yml names no abuse_mailbox", ErrAbuseRecordMailerUnavailable)
 	}
-	return fmt.Errorf("%w: records are sealed before they leave, and the seal is not built (abuse-m5-03-record-seal.md)", ErrAbuseRecordMailerUnavailable)
+	keys, err := LoadAbuseMailboxKeys(settings)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrAbuseRecordMailerUnavailable, err)
+	}
+	plaintext, err := EncodeAbuseRecord(record, keys.MacKey)
+	if err != nil {
+		return err
+	}
+	if err := mailSealedAbuseMailboxRecord(ctx, sender, mailbox, plaintext, keys, settings); err != nil {
+		if errors.Is(err, ErrAbuseMailboxUnavailable) {
+			return fmt.Errorf("%w: %w", ErrAbuseRecordMailerUnavailable, err)
+		}
+		return err
+	}
+	return nil
+}
+
+// What a process has before it installs the production mailer
+// (InstallAbuseRecordMailer): it refuses every record, so a binary other than
+// api and taskworker mails none and leaves each owed for their action pass.
+type unavailableAbuseRecordMailer struct{}
+
+// Refuses: see the type.
+func (self *unavailableAbuseRecordMailer) MailAbuseRecord(ctx context.Context, record *AbuseRecord) error {
+	return fmt.Errorf("%w: this process mails no records; api and taskworker do", ErrAbuseRecordMailerUnavailable)
+}
+
+// Installs the production mailer in this process, in a binary that links MG5:
+// api's and taskworker's startup, the two that mount abuse-mailbox.yml
+// (QD-726). Returns what puts the previous mailer back.
+func InstallAbuseRecordMailer() (restore func()) {
+	if !server.SidecarMg5Linked() {
+		return func() {}
+	}
+	return SetAbuseRecordMailer(&sesAbuseRecordMailer{})
 }
