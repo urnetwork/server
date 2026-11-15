@@ -143,6 +143,13 @@ type UniqueExitSettings struct {
 	// most this often: each retry may draw from find-providers2, and a
 	// network's held proxies must not draw on every pass
 	HeldRetryInterval time.Duration
+	// a proxy held because its last replacement search found no unique exit
+	// waits, before the next search, as long as it has been held so far: at
+	// least HeldRetryInterval and at most this. Searches that find nothing
+	// then back off geometrically instead of filling every pass (1,000-1,850
+	// per pass on 11-15), and a unique exit that appears is still taken
+	// within this bound
+	HeldNoSupplyRetryMaxInterval time.Duration
 	// a provider's egress key older than this is not trusted for allocation
 	EgressKeyMaxAge time.Duration
 	// a provider whose connected address carries at least this many connected
@@ -167,9 +174,19 @@ type UniqueExitSettings struct {
 	RotatesPerDay     int
 	// released assignments are the audit trail for abuse reports
 	ReleasedRetention time.Duration
-	// the sweeper's cadence and the assignments it walks per run
+	// the sweeper's cadence, and the most assignments one run walks
 	SweepInterval  time.Duration
 	SweepBatchSize int
+	// the assignments the walk reads, and snapshots the provider signals of,
+	// at a time
+	SweepPageSize int
+	// a run's bound, its task's MaxTime, and the time its walk may take within
+	// that bound. A walk that reaches its time ends the run through its Post,
+	// which schedules the next run from where this one stopped, so a pass
+	// longer than one run still reaches the newest assignments; the rest of
+	// the bound is for the in-flight assignment and the run's cleanup
+	SweepMaxTime  time.Duration
+	SweepWalkTime time.Duration
 	// how often the sweeper recomputes the supply gauge
 	SupplyGaugeInterval time.Duration
 }
@@ -182,6 +199,7 @@ func DefaultUniqueExitSettings() *UniqueExitSettings {
 		MaxNetworkReplacementFractionPerHour: 0.10,
 		ReleasedProviderExclusion:            24 * time.Hour,
 		HeldRetryInterval:                    5 * time.Minute,
+		HeldNoSupplyRetryMaxInterval:         30 * time.Minute,
 		EgressKeyMaxAge:                      24 * time.Hour,
 		SharedAddressSlotThreshold:           10,
 		StableProbeCount:                     2,
@@ -196,6 +214,9 @@ func DefaultUniqueExitSettings() *UniqueExitSettings {
 		ReleasedRetention:                    90 * 24 * time.Hour,
 		SweepInterval:                        30 * time.Second,
 		SweepBatchSize:                       10000,
+		SweepPageSize:                        500,
+		SweepMaxTime:                         10 * time.Minute,
+		SweepWalkTime:                        8 * time.Minute,
 		SupplyGaugeInterval:                  10 * time.Minute,
 	}
 }
@@ -1999,32 +2020,77 @@ func Testing_SetUniqueExitProviderSignals(
 }
 
 type ProxyExitSweepResult struct {
-	LiveCount          int `json:"live_count"`
+	// assignments that are not released, all of them, as the run ended
+	LiveCount int `json:"live_count"`
+	// assignments this run walked
+	WalkedCount        int `json:"walked_count"`
 	MarkedFailingCount int `json:"marked_failing_count"`
 	ClearedCount       int `json:"cleared_count"`
 	ReplacedCount      int `json:"replaced_count"`
 	HeldCount          int `json:"held_count"`
-	KeyUpdatedCount    int `json:"key_updated_count"`
-	ReleasedCount      int `json:"released_count"`
-	DeletedCount       int `json:"deleted_count"`
+	// held proxies whose next replacement search was not due yet
+	HeldWaitingCount int `json:"held_waiting_count"`
+	KeyUpdatedCount  int `json:"key_updated_count"`
+	ReleasedCount    int `json:"released_count"`
+	DeletedCount     int `json:"deleted_count"`
+	// where the next run resumes: set when this run stopped at its walk time,
+	// its batch size or its context, nil when it walked past the newest
+	// assignment and the next run starts again at the oldest
+	Next *ProxyExitSweepCursor `json:"next,omitempty"`
+}
+
+// ProxyExitSweepCursor is the last assignment a sweep run walked, in the
+// walk's order: assigned_at, then assignment_id, which breaks the ties of
+// assignments created together. The next run resumes after it. It travels in
+// the sweep task's args, as the contract expiry's cursor does.
+type ProxyExitSweepCursor struct {
+	AssignedAt   time.Time `json:"assigned_at"`
+	AssignmentId server.Id `json:"assignment_id"`
 }
 
 var uniqueExitSupplyGaugeAt atomic.Int64
 
-func loadLiveProxyExitAssignments(ctx context.Context, limit int) []*proxyExitAssignment {
+// The clock a sweep measures its walk time by, and adds to the run's now as
+// the walk goes on. Tests replace it.
+var uniqueExitSweepClock = server.NowUtc
+
+func Testing_SetUniqueExitSweepClock(clock func() time.Time) func() {
+	previous := uniqueExitSweepClock
+	uniqueExitSweepClock = clock
+	return func() {
+		uniqueExitSweepClock = previous
+	}
+}
+
+// loadLiveProxyExitAssignments reads up to limit assignments that are not
+// released, in the walk's order, after the cursor, or from the oldest for a
+// nil cursor. The bound on assigned_at lets the live assigned_at index start
+// the scan at the cursor.
+func loadLiveProxyExitAssignments(ctx context.Context, after *ProxyExitSweepCursor, limit int) []*proxyExitAssignment {
 	assignments := []*proxyExitAssignment{}
+	query := `
+		SELECT ` + proxyExitAssignmentColumns + `
+		FROM proxy_exit_assignment
+		WHERE state IN ('pending', 'active', 'replacing')
+		ORDER BY assigned_at, assignment_id
+		LIMIT $1
+	`
+	args := []any{limit}
+	if after != nil {
+		query = `
+			SELECT ` + proxyExitAssignmentColumns + `
+			FROM proxy_exit_assignment
+			WHERE
+				state IN ('pending', 'active', 'replacing') AND
+				$2 <= assigned_at AND
+				($2 < assigned_at OR $3 < assignment_id)
+			ORDER BY assigned_at, assignment_id
+			LIMIT $1
+		`
+		args = append(args, after.AssignedAt.UTC(), after.AssignmentId)
+	}
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT `+proxyExitAssignmentColumns+`
-				FROM proxy_exit_assignment
-				WHERE state IN ('pending', 'active', 'replacing')
-				ORDER BY assigned_at
-				LIMIT $1
-			`,
-			limit,
-		)
+		result, err := conn.Query(ctx, query, args...)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				assignments = append(assignments, scanProxyExitAssignment(result.Scan))
@@ -2032,6 +2098,22 @@ func loadLiveProxyExitAssignments(ctx context.Context, limit int) []*proxyExitAs
 		})
 	})
 	return assignments
+}
+
+// uniqueExitHeldRetryWait is how long a held proxy waits after its last hold
+// before its next replacement search. A proxy held because the search found
+// no unique exit waits as long as it has been held so far, from its exit's
+// first failure to that hold, so repeated empty searches back off
+// geometrically (5, 5, 10, 20 minutes, ...) up to
+// HeldNoSupplyRetryMaxInterval. Every wait is at least HeldRetryInterval, and
+// a proxy held for a cap waits just that: the caps free up within the hour.
+func uniqueExitHeldRetryWait(config *proxyUniqueExitConfig, assignment *proxyExitAssignment, settings *UniqueExitSettings) time.Duration {
+	wait := settings.HeldRetryInterval
+	if config.State != ProxyExitStateNoSupply || assignment.FailingSince == nil {
+		return wait
+	}
+	held := config.UpdateTime.Sub(*assignment.FailingSince)
+	return max(wait, min(held, settings.HeldNoSupplyRetryMaxInterval))
 }
 
 // SweepProxyExits keeps every live unique exit honest:
@@ -2043,87 +2125,31 @@ func loadLiveProxyExitAssignments(ctx context.Context, limit int) []*proxyExitAs
 //   - a recovered provider is cleared;
 //   - a provider whose probes report a new key gets it, or is replaced when
 //     the new key collides;
-//   - a held proxy (replacing, auto) is retried.
+//   - a held proxy (replacing, auto) is retried once its wait is over
+//     (uniqueExitHeldRetryWait).
 //
-// Released rows past the retention are deleted, and the gauges are set.
-func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSettings) *ProxyExitSweepResult {
+// A run walks the live assignments in order from after the cursor (nil: the
+// oldest), SweepPageSize at a time with each page's provider signals read
+// together, and stops at SweepWalkTime, at SweepBatchSize or when its context
+// ends; the result's Next is where the next run resumes. The walk stops by
+// itself inside the run's bound (SweepMaxTime), so the run ends through its
+// Post, which carries the cursor on: a run the bound cuts never reaches its
+// Post, and its rerun starts again where it started. Every run walks at least
+// one assignment.
+//
+// now is the run's start; each assignment is decided at now plus the time the
+// walk has taken by the sweep's clock, so a long walk neither marks a failure
+// in the past nor shortens a grace. Released rows past the retention are
+// deleted, and the gauges are set, every run.
+func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSettings, after *ProxyExitSweepCursor) *ProxyExitSweepResult {
 	sweep := &ProxyExitSweepResult{}
-	live := loadLiveProxyExitAssignments(ctx, settings.SweepBatchSize)
-	sweep.LiveCount = len(live)
-
-	stateCounts := map[string]int{
-		proxyExitAssignmentPending:   0,
-		proxyExitAssignmentActive:    0,
-		proxyExitAssignmentReplacing: 0,
-	}
-	providerIds := []server.Id{}
-	proxyIds := []server.Id{}
-	seenProviders := map[server.Id]bool{}
-	for _, assignment := range live {
-		stateCounts[assignment.State] += 1
-		proxyIds = append(proxyIds, assignment.ProxyClientId)
-		if !seenProviders[assignment.ProviderClientId] {
-			seenProviders[assignment.ProviderClientId] = true
-			providerIds = append(providerIds, assignment.ProviderClientId)
-		}
+	walkStart := uniqueExitSweepClock()
+	// the walk's decision time, and whether its walk time is left
+	walkNow := func() (time.Time, bool) {
+		elapsed := max(0, uniqueExitSweepClock().Sub(walkStart))
+		return now.Add(elapsed), elapsed < settings.SweepWalkTime
 	}
 
-	activeProxies := map[server.Id]bool{}
-	currentKeys := map[server.Id]*struct {
-		key        []byte
-		observedAt time.Time
-	}{}
-	if 0 < len(live) {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`SELECT client_id FROM network_client WHERE client_id = ANY($1) AND active = true`,
-				proxyIds,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var clientId server.Id
-					server.Raise(result.Scan(&clientId))
-					activeProxies[clientId] = true
-				}
-			})
-			result, err = conn.Query(
-				ctx,
-				`
-					SELECT client_id, egress_key, egress_key_observed_at
-					FROM provider_egress_location
-					WHERE client_id = ANY($1) AND egress_key IS NOT NULL
-				`,
-				providerIds,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var clientId server.Id
-					current := &struct {
-						key        []byte
-						observedAt time.Time
-					}{}
-					server.Raise(result.Scan(&clientId, &current.key, &current.observedAt))
-					currentKeys[clientId] = current
-				}
-			})
-		})
-	}
-	offline := map[server.Id]bool{}
-	excluded := map[server.Id]bool{}
-	if 0 < len(providerIds) {
-		if o, err := uniqueExitProviderOffline(ctx, providerIds, now); err == nil {
-			offline = o
-		} else {
-			glog.Infof("[upe]liveness: %s\n", err)
-		}
-		if e, err := uniqueExitProviderExcluded(ctx, providerIds); err == nil {
-			excluded = e
-		} else {
-			glog.Infof("[upe]exclusions: %s\n", err)
-		}
-	}
-	configs := loadProxyUniqueExitConfigs(ctx, proxyIds)
 	sessions := map[server.Id]*session.ClientSession{}
 	networkSession := func(networkId server.Id) *session.ClientSession {
 		if s, ok := sessions[networkId]; ok {
@@ -2139,112 +2165,222 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 		}
 	}()
 
-	replace := func(config *proxyUniqueExitConfig, assignment *proxyExitAssignment, reason string) {
-		next, removed := replaceProxyExit(ctx, networkSession(assignment.NetworkId), config, assignment, reason, false, settings, now)
-		switch {
-		case next != nil:
-			sweep.ReplacedCount += 1
-		case removed:
-			// removed since this pass read the active proxies: the next pass
-			// releases its exit
-		default:
-			sweep.HeldCount += 1
-		}
-	}
-
-	sweepOne := func(assignment *proxyExitAssignment) {
-		if !activeProxies[assignment.ProxyClientId] {
-			released := false
-			server.Tx(ctx, func(tx server.PgTx) {
-				released = releaseProxyExitAssignmentInTx(ctx, tx, assignment, ProxyExitReasonProxyRemoved, now)
-				server.RaisePgResult(tx.Exec(
-					ctx,
-					`DELETE FROM proxy_unique_exit WHERE proxy_client_id = $1`,
-					assignment.ProxyClientId,
-				))
-			})
-			if released {
-				observeProxyExitLifetime(assignment, now)
+	// one page: its assignments and the signals read for them
+	sweepPage := func(live []*proxyExitAssignment, pageNow time.Time) (position *ProxyExitSweepCursor, stopped bool) {
+		providerIds := []server.Id{}
+		proxyIds := []server.Id{}
+		seenProviders := map[server.Id]bool{}
+		for _, assignment := range live {
+			proxyIds = append(proxyIds, assignment.ProxyClientId)
+			if !seenProviders[assignment.ProviderClientId] {
+				seenProviders[assignment.ProviderClientId] = true
+				providerIds = append(providerIds, assignment.ProviderClientId)
 			}
-			sweep.ReleasedCount += 1
-			return
-		}
-		config, ok := configs[assignment.ProxyClientId]
-		if !ok {
-			return
 		}
 
-		if assignment.State == proxyExitAssignmentReplacing {
-			if config.ReplaceMode == UniqueExitReplaceAuto {
-				if now.Sub(config.UpdateTime) < settings.HeldRetryInterval {
-					// held recently: the caps and the supply rarely change
-					// within a few passes
-					return
+		activeProxies := map[server.Id]bool{}
+		currentKeys := map[server.Id]*struct {
+			key        []byte
+			observedAt time.Time
+		}{}
+		if 0 < len(live) {
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`SELECT client_id FROM network_client WHERE client_id = ANY($1) AND active = true`,
+					proxyIds,
+				)
+				server.WithPgResult(result, err, func() {
+					for result.Next() {
+						var clientId server.Id
+						server.Raise(result.Scan(&clientId))
+						activeProxies[clientId] = true
+					}
+				})
+				result, err = conn.Query(
+					ctx,
+					`
+						SELECT client_id, egress_key, egress_key_observed_at
+						FROM provider_egress_location
+						WHERE client_id = ANY($1) AND egress_key IS NOT NULL
+					`,
+					providerIds,
+				)
+				server.WithPgResult(result, err, func() {
+					for result.Next() {
+						var clientId server.Id
+						current := &struct {
+							key        []byte
+							observedAt time.Time
+						}{}
+						server.Raise(result.Scan(&clientId, &current.key, &current.observedAt))
+						currentKeys[clientId] = current
+					}
+				})
+			})
+		}
+		offline := map[server.Id]bool{}
+		excluded := map[server.Id]bool{}
+		if 0 < len(providerIds) {
+			if o, err := uniqueExitProviderOffline(ctx, providerIds, pageNow); err == nil {
+				offline = o
+			} else {
+				glog.Infof("[upe]liveness: %s\n", err)
+			}
+			if e, err := uniqueExitProviderExcluded(ctx, providerIds); err == nil {
+				excluded = e
+			} else {
+				glog.Infof("[upe]exclusions: %s\n", err)
+			}
+		}
+		configs := loadProxyUniqueExitConfigs(ctx, proxyIds)
+
+		// now is the assignment's decision time
+		replace := func(config *proxyUniqueExitConfig, assignment *proxyExitAssignment, reason string, now time.Time) {
+			next, removed := replaceProxyExit(ctx, networkSession(assignment.NetworkId), config, assignment, reason, false, settings, now)
+			switch {
+			case next != nil:
+				sweep.ReplacedCount += 1
+			case removed:
+				// removed since this pass read the active proxies: the next pass
+				// releases its exit
+			default:
+				sweep.HeldCount += 1
+			}
+		}
+
+		sweepOne := func(assignment *proxyExitAssignment, now time.Time) {
+			if !activeProxies[assignment.ProxyClientId] {
+				released := false
+				server.Tx(ctx, func(tx server.PgTx) {
+					released = releaseProxyExitAssignmentInTx(ctx, tx, assignment, ProxyExitReasonProxyRemoved, now)
+					server.RaisePgResult(tx.Exec(
+						ctx,
+						`DELETE FROM proxy_unique_exit WHERE proxy_client_id = $1`,
+						assignment.ProxyClientId,
+					))
+				})
+				if released {
+					observeProxyExitLifetime(assignment, now)
 				}
+				sweep.ReleasedCount += 1
+				return
+			}
+			config, ok := configs[assignment.ProxyClientId]
+			if !ok {
+				return
+			}
+
+			if assignment.State == proxyExitAssignmentReplacing {
+				if config.ReplaceMode == UniqueExitReplaceAuto {
+					if now.Sub(config.UpdateTime) < uniqueExitHeldRetryWait(config, assignment, settings) {
+						// held recently: the caps rarely change within a few
+						// passes, and a search that found nothing backs off
+						sweep.HeldWaitingCount += 1
+						return
+					}
+					reason := assignment.FailingReason
+					if reason == "" {
+						reason = ProxyExitReasonOffline
+					}
+					replace(config, assignment, reason, now)
+				}
+				return
+			}
+
+			if excluded[assignment.ProviderClientId] {
+				replace(config, assignment, ProxyExitReasonVerdict, now)
+				return
+			}
+			if assignment.FailingReason == ProxyExitReasonCollision {
+				replace(config, assignment, ProxyExitReasonCollision, now)
+				return
+			}
+
+			if current, ok := currentKeys[assignment.ProviderClientId]; ok && !bytes.Equal(current.key, assignment.EgressKey) {
+				since := assignment.AssignedAt
+				if assignment.ConfirmedAt != nil && since.Before(*assignment.ConfirmedAt) {
+					since = *assignment.ConfirmedAt
+				}
+				if since.Before(current.observedAt) {
+					updated, collision := updateProxyExitKey(ctx, assignment, current.key)
+					if updated {
+						sweep.KeyUpdatedCount += 1
+					} else if collision {
+						replace(config, assignment, ProxyExitReasonCollision, now)
+						return
+					}
+				}
+			}
+
+			failing := offline[assignment.ProviderClientId] || assignment.FailingReason == ProxyExitReasonUnreachable
+			switch {
+			case failing && assignment.FailingSince == nil:
+				reason := ProxyExitReasonOffline
+				if !offline[assignment.ProviderClientId] {
+					reason = assignment.FailingReason
+				}
+				ReportProxyExitFailing(ctx, assignment.ProxyClientId, assignment.AssignmentId, reason, now)
+				sweep.MarkedFailingCount += 1
+			case failing && settings.ReplacementGrace <= now.Sub(*assignment.FailingSince):
 				reason := assignment.FailingReason
 				if reason == "" {
 					reason = ProxyExitReasonOffline
 				}
-				replace(config, assignment, reason)
-			}
-			return
-		}
-
-		if excluded[assignment.ProviderClientId] {
-			replace(config, assignment, ProxyExitReasonVerdict)
-			return
-		}
-		if assignment.FailingReason == ProxyExitReasonCollision {
-			replace(config, assignment, ProxyExitReasonCollision)
-			return
-		}
-
-		if current, ok := currentKeys[assignment.ProviderClientId]; ok && !bytes.Equal(current.key, assignment.EgressKey) {
-			since := assignment.AssignedAt
-			if assignment.ConfirmedAt != nil && since.Before(*assignment.ConfirmedAt) {
-				since = *assignment.ConfirmedAt
-			}
-			if since.Before(current.observedAt) {
-				updated, collision := updateProxyExitKey(ctx, assignment, current.key)
-				if updated {
-					sweep.KeyUpdatedCount += 1
-				} else if collision {
-					replace(config, assignment, ProxyExitReasonCollision)
-					return
-				}
+				replace(config, assignment, reason, now)
+			case !failing && assignment.FailingReason == ProxyExitReasonOffline:
+				clearProxyExitFailing(ctx, assignment)
+				sweep.ClearedCount += 1
 			}
 		}
 
-		failing := offline[assignment.ProviderClientId] || assignment.FailingReason == ProxyExitReasonUnreachable
-		switch {
-		case failing && assignment.FailingSince == nil:
-			reason := ProxyExitReasonOffline
-			if !offline[assignment.ProviderClientId] {
-				reason = assignment.FailingReason
+		for _, assignment := range live {
+			assignmentNow, inTime := walkNow()
+			if 0 < sweep.WalkedCount && (!inTime || ctx.Err() != nil) {
+				return position, true
 			}
-			ReportProxyExitFailing(ctx, assignment.ProxyClientId, assignment.AssignmentId, reason, now)
-			sweep.MarkedFailingCount += 1
-		case failing && settings.ReplacementGrace <= now.Sub(*assignment.FailingSince):
-			reason := assignment.FailingReason
-			if reason == "" {
-				reason = ProxyExitReasonOffline
+			// one assignment's failure (a lock timeout, a lost connection) must
+			// not stop the sweep of the rest
+			if r := server.HandleError(func() {
+				sweepOne(assignment, assignmentNow)
+			}); r != nil {
+				glog.Infof("[upe]sweep proxy %s: %v\n", assignment.ProxyClientId, r)
 			}
-			replace(config, assignment, reason)
-		case !failing && assignment.FailingReason == ProxyExitReasonOffline:
-			clearProxyExitFailing(ctx, assignment)
-			sweep.ClearedCount += 1
+			position = &ProxyExitSweepCursor{
+				AssignedAt:   assignment.AssignedAt,
+				AssignmentId: assignment.AssignmentId,
+			}
+			sweep.WalkedCount += 1
 		}
+		return position, false
 	}
-	for _, assignment := range live {
-		// one assignment's failure (a lock timeout, a lost connection) must not
-		// stop the sweep of the rest
-		if r := server.HandleError(func() {
-			sweepOne(assignment)
-		}); r != nil {
-			glog.Infof("[upe]sweep proxy %s: %v\n", assignment.ProxyClientId, r)
+
+	batchSize := max(1, settings.SweepBatchSize)
+	pageSize := max(1, settings.SweepPageSize)
+	position := after
+	for {
+		pageNow, inTime := walkNow()
+		if 0 < sweep.WalkedCount && (!inTime || ctx.Err() != nil) {
+			sweep.Next = position
+			break
+		}
+		limit := min(pageSize, batchSize-sweep.WalkedCount)
+		live := loadLiveProxyExitAssignments(ctx, position, limit)
+		pagePosition, stopped := sweepPage(live, pageNow)
+		if pagePosition != nil {
+			position = pagePosition
+		}
+		if stopped || (len(live) == limit && batchSize <= sweep.WalkedCount) {
+			sweep.Next = position
+			break
+		}
+		if len(live) < limit {
+			// past the newest assignment: the next run starts at the oldest
+			break
 		}
 	}
 
+	endNow, _ := walkNow()
 	server.Db(ctx, func(conn server.PgConn) {
 		tag := server.RaisePgResult(conn.Exec(
 			ctx,
@@ -2257,18 +2393,44 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 					LIMIT 5000
 				)
 			`,
-			now.UTC().Add(-settings.ReleasedRetention),
+			endNow.UTC().Add(-settings.ReleasedRetention),
 		))
 		sweep.DeletedCount = int(tag.RowsAffected())
 	})
 
+	// a run walks part of the assignments, so the gauges count all of them
+	stateCounts := map[string]int{
+		proxyExitAssignmentPending:   0,
+		proxyExitAssignmentActive:    0,
+		proxyExitAssignmentReplacing: 0,
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT state, count(*)
+				FROM proxy_exit_assignment
+				WHERE state IN ('pending', 'active', 'replacing')
+				GROUP BY state
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var state string
+				var count int
+				server.Raise(result.Scan(&state, &count))
+				stateCounts[state] = count
+			}
+		})
+	})
 	for state, count := range stateCounts {
+		sweep.LiveCount += count
 		proxyUniqueExitAssignments.WithLabelValues(state).Set(float64(count))
 	}
 	proxyUniqueExitSweepSnapshot.Set(float64(server.NowUtc().Unix()))
-	if last := uniqueExitSupplyGaugeAt.Load(); last == 0 || settings.SupplyGaugeInterval <= now.Sub(time.Unix(0, last)) {
-		uniqueExitSupplyGaugeAt.Store(now.UnixNano())
-		setUniqueExitSupplyGauge(ctx, now, settings)
+	if last := uniqueExitSupplyGaugeAt.Load(); last == 0 || settings.SupplyGaugeInterval <= endNow.Sub(time.Unix(0, last)) {
+		uniqueExitSupplyGaugeAt.Store(endNow.UnixNano())
+		setUniqueExitSupplyGauge(ctx, endNow, settings)
 	}
 	return sweep
 }
