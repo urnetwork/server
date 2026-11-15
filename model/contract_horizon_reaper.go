@@ -46,7 +46,15 @@
 // the contract, at the pace of its own brake.
 //
 // A pass walks transfer_contract's primary key from a cursor toward the
-// horizon. Each batch takes the next ids from an index-only range of that key,
+// horizon, and reads a contract only once its mint time is CloseSettleTime
+// past the horizon. The cursor moves past every contract a batch reads, kept
+// or deleted, so a contract read too early is lost to the pass: until
+// 2026-11-15 a pass read up to the horizon itself, and once it caught up it
+// read only contracts minted minutes before the horizon, which close after
+// it, kept every one as recent_close and moved past it to the next rescan. A
+// contract that lives no longer than the settle time has closed before the
+// horizon when the pass reaches it. Each batch takes the next ids from an
+// index-only range of that key,
 // then reads and deletes the rows of those ids in every table with bitmap
 // scans: each dependent table's key leads with the contract id, and each heap
 // page is read once, in block order, with prefetch, rather than one random
@@ -63,7 +71,10 @@
 // its last committed batch. A batch is idempotent: rereading a reaped range
 // finds nothing to delete. A pass that reaches the horizon starts over from
 // the oldest contract once it is RescanInterval old, to pick up contracts that
-// were protected when it passed them.
+// were protected when it passed them, and a pass that began before reads
+// stopped short of the horizon starts over at once
+// (contractHorizonSettledPassTime). The cursor also counts the contracts its
+// pass kept, by reason: what waits for the next pass.
 //
 // The runtime control, the Redis hash `{contract_horizon}control`, turns the
 // reaper on, off or to a dry run, slows it and shortens its horizon, without a
@@ -77,6 +88,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -160,6 +172,21 @@ type ContractHorizonSettings struct {
 	// control sets no horizon, and the longest horizon the control can set.
 	// Values below ContractHorizonFloor count as ContractHorizonFloor.
 	Horizon time.Duration
+	// How far past the horizon a contract's mint time must be before a pass
+	// reads it. The cursor moves past every contract a batch reads, so a pass
+	// that read up to the horizon itself would, once caught up, read only
+	// contracts minted minutes before it, whose closes fall after it, and leave
+	// each to the next rescan: on Main from 2026-11-13 a caught-up pass kept 99%
+	// of what it read as recent_close. A contract that lives no longer than this
+	// has closed before the horizon when the pass reads it; one that lives
+	// longer, closed late after an outage or held in a dispute, still waits for
+	// the next rescan, counted in the pass's skipped contracts. Twice the
+	// longest contract life (DefaultContractExpiration): every sampled contract
+	// created since 2026-10-12 closed within 75 minutes (CONTRACT-PARTITION.md),
+	// and the rest covers an expiry close that runs late. A caught-up pass
+	// deletes a contract at most this much later than the horizon alone would
+	// allow; the horizon is unchanged. Non-positive reads up to the horizon.
+	CloseSettleTime time.Duration
 	// Contracts read per batch transaction, at most. The control can lower it.
 	BatchSize int
 	// The adaptive batch size never goes below this.
@@ -186,7 +213,10 @@ type ContractHorizonSettings struct {
 	// once it began this long ago. A rescan rereads every contract still kept
 	// below the horizon at the same rate, so it is long. It deletes those whose
 	// checks pass since the pass kept them, such as the contracts of a payment
-	// the USDC close-out closed after the pass went by.
+	// the USDC close-out closed after the pass went by. With CloseSettleTime it
+	// rereads only what passes kept: payment holds and reviews (about 122M
+	// contracts in the pass of 2026-11-01, each locked again on every reread),
+	// disputes, and contracts that closed late.
 	RescanInterval time.Duration
 	// Gap between runs while a pass has work left.
 	ResumeInterval time.Duration
@@ -199,10 +229,11 @@ type ContractHorizonSettings struct {
 
 func DefaultContractHorizonSettings() *ContractHorizonSettings {
 	return &ContractHorizonSettings{
-		Enable:      true,
-		DefaultMode: ContractHorizonModeOff,
-		Horizon:     server.ContractRetention,
-		BatchSize:   2000,
+		Enable:          true,
+		DefaultMode:     ContractHorizonModeOff,
+		Horizon:         server.ContractRetention,
+		CloseSettleTime: 2 * DefaultContractExpiration,
+		BatchSize:       2000,
 		// a 2000-row batch halved four times
 		MinBatchSize:        125,
 		TargetBatchDuration: 10 * time.Second,
@@ -360,6 +391,16 @@ func RemoveContractHorizonControl(ctx context.Context) error {
 	}, server.OptRedisNoPreflight())
 }
 
+// When passes started reading only up to CloseSettleTime before the horizon.
+// A pass that began earlier read up to the horizon itself and may have moved
+// past contracts that were about to qualify, which only a new pass reads
+// again, so a batch with the mode on, run at or after this, starts a new pass
+// at the oldest contract when its cursor has moved past any and its pass began
+// before this. A pass that began since never starts over for it: a build from
+// before keeps the pass's start in the cursor it hands on, also while both
+// builds run.
+var contractHorizonSettledPassTime = time.Date(2026, time.November, 15, 0, 0, 0, 0, time.UTC)
+
 // Where a pass resumes. It round trips through the task args.
 type ContractHorizonCursor struct {
 	// The last contract id the pass committed past. The zero id starts the
@@ -370,6 +411,32 @@ type ContractHorizonCursor struct {
 	// The adaptive batch size, carried between runs. Zero starts at the
 	// control's batch size.
 	BatchSize int `json:"batch_size,omitempty"`
+	// Contracts the pass committed past and kept, by reason: each waits for
+	// the next pass. Empty when it kept none, and in a cursor a build from
+	// before 2026-11-15 handed on.
+	SkippedReasonCounts map[string]int64 `json:"skipped_reason_counts,omitempty"`
+}
+
+// The cursor of a new pass at the oldest contract, carrying the adaptive
+// batch size.
+func newContractHorizonPass(now time.Time, batchSize int) ContractHorizonCursor {
+	return ContractHorizonCursor{
+		PassStartTime: now.UTC(),
+		BatchSize:     batchSize,
+	}
+}
+
+// Adds the contracts one committed batch kept, by reason.
+func (self *ContractHorizonCursor) addSkipped(protected map[string]int64) {
+	for reason, count := range protected {
+		if count <= 0 {
+			continue
+		}
+		if self.SkippedReasonCounts == nil {
+			self.SkippedReasonCounts = map[string]int64{}
+		}
+		self.SkippedReasonCounts[reason] += count
+	}
 }
 
 // Why a run ended.
@@ -497,7 +564,11 @@ var (
 	}, []string{"mode"})
 	contractHorizonProtectedCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "urnetwork_contract_horizon_protected_contracts_total",
-		Help: "Contracts the contract horizon reaper read and kept, by reason",
+		Help: "Contracts the contract horizon reaper read and kept, by reason; the pass moves past each, which waits for the next pass",
+	}, []string{"reason"})
+	contractHorizonPassSkippedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "urnetwork_contract_horizon_pass_skipped_contracts",
+		Help: "Contracts the contract horizon reaper's current pass committed past and kept, by reason: each waits for the next pass. It restarts with each pass",
 	}, []string{"reason"})
 	contractHorizonBatchDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "urnetwork_contract_horizon_batch_duration_seconds",
@@ -522,7 +593,7 @@ var (
 	})
 	contractHorizonLagGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "urnetwork_contract_horizon_lag_seconds",
-		Help: "How far the contract horizon reaper's pass is behind its horizon; it restarts with each rescan",
+		Help: "How far the contract horizon reaper's pass is behind its horizon; a caught-up pass holds it near the close settle time, since it reads a contract only once its mint time is that far past the horizon, and it restarts with each pass",
 	})
 	contractHorizonPassStartGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "urnetwork_contract_horizon_pass_start_timestamp_seconds",
@@ -548,6 +619,7 @@ func init() {
 	}
 	for _, reason := range contractHorizonProtectedReasons {
 		contractHorizonProtectedCounter.WithLabelValues(reason)
+		contractHorizonPassSkippedGauge.WithLabelValues(reason)
 	}
 	for _, stop := range []string{
 		contractHorizonStopHorizon,
@@ -565,6 +637,7 @@ func init() {
 		contractHorizonScannedCounter,
 		contractHorizonEligibleCounter,
 		contractHorizonProtectedCounter,
+		contractHorizonPassSkippedGauge,
 		contractHorizonBatchDuration,
 		contractHorizonBatchSizeGauge,
 		contractHorizonCursorGauge,
@@ -612,15 +685,17 @@ func RemoveContractsPastHorizon(
 		Stop: contractHorizonStopError,
 	}
 	next = cursor
+	// the pass's counts are its own, never the caller's map
+	next.SkippedReasonCounts = maps.Clone(cursor.SkippedReasonCounts)
 	if next.PassStartTime.IsZero() {
 		next.PassStartTime = now.UTC()
 	}
-	contractHorizonPassStartGauge.Set(float64(next.PassStartTime.Unix()))
+	reaper.observePass(next)
 	defer func() {
 		contractHorizonRunCounter.WithLabelValues(report.Stop).Inc()
 		if glog.V(1) {
 			glog.Infof(
-				"[contract_horizon]run mode=%s stop=%s batches=%d scanned=%d eligible=%d deleted=%v archived=%d protected=%v caught_up=%t horizon_days=%g horizon=%s\n",
+				"[contract_horizon]run mode=%s stop=%s batches=%d scanned=%d eligible=%d deleted=%v archived=%d protected=%v caught_up=%t horizon_days=%g horizon=%s pass_start=%s pass_skipped=%v\n",
 				report.Mode,
 				report.Stop,
 				report.Batches,
@@ -632,6 +707,8 @@ func RemoveContractsPastHorizon(
 				report.CaughtUp,
 				reaper.horizon.Hours()/24,
 				report.HorizonTime.Format(time.RFC3339),
+				next.PassStartTime.Format(time.RFC3339),
+				next.SkippedReasonCounts,
 			)
 		}
 	}()
@@ -685,6 +762,21 @@ func RemoveContractsPastHorizon(
 			report.Stop = contractHorizonStopOff
 			return
 		}
+		// A run whose clock is before that time, as a fixture's can be, never
+		// starts over: the new pass would begin before it too, and start over
+		// again at every batch.
+		if control.Mode == ContractHorizonModeOn && next.ContractId != (server.Id{}) &&
+			next.PassStartTime.Before(contractHorizonSettledPassTime) && !reaper.now.Before(contractHorizonSettledPassTime) {
+			// it read up to the horizon itself: revisit what it moved past
+			glog.Infof(
+				"[contract_horizon]the pass of %s read up to the horizon, through %s; a new pass starts at the oldest contract\n",
+				next.PassStartTime.Format(time.RFC3339),
+				server.ContractIdTime(next.ContractId).Format(time.RFC3339),
+			)
+			next = newContractHorizonPass(now, next.BatchSize)
+			dryRunPosition = next.ContractId
+			reaper.observePass(next)
+		}
 
 		batchSize := next.BatchSize
 		if batchSize <= 0 || control.BatchSize < batchSize {
@@ -716,17 +808,17 @@ func RemoveContractsPastHorizon(
 			report.Stop = contractHorizonStopHorizon
 			if control.Mode == ContractHorizonModeOn && settings.RescanInterval <= now.Sub(next.PassStartTime) {
 				// revisit what this pass kept
-				next = ContractHorizonCursor{
-					PassStartTime: now.UTC(),
-					BatchSize:     next.BatchSize,
-				}
+				next = newContractHorizonPass(now, next.BatchSize)
+				reaper.observePass(next)
 			}
 			return
 		}
 		if control.Mode == ContractHorizonModeOn {
 			next.ContractId = batch.lastId
+			next.addSkipped(batch.protected)
 			dryRunPosition = batch.lastId
 			reaper.observeCursor(next.ContractId)
+			reaper.observePass(next)
 			if contractHorizonBatchCommitted != nil {
 				contractHorizonBatchCommitted(report.Batches, batch.lastId)
 			}
@@ -774,7 +866,9 @@ type contractHorizonReaper struct {
 	// How long past its creation and its close a contract is kept.
 	horizon     time.Duration
 	horizonTime time.Time
-	horizonId   server.Id
+	// A batch reads only ids below this: the floor of the horizon less
+	// CloseSettleTime.
+	windowId server.Id
 	// The windows, [start, end), of the operator blocks whose points can still
 	// be awarded (OperatorBlockPointsPendingWindows); none without an earning
 	// cutoff, when no block is awarded.
@@ -813,12 +907,20 @@ func (self *contractHorizonReaper) observe(batch *contractHorizonBatch, mode Con
 	contractHorizonArchivedCounter.Add(float64(batch.archived))
 }
 
-// The next batch reads the contracts minted and closed more than horizon
-// before the run's now.
+// The next batch deletes the contracts minted and closed more than horizon
+// before the run's now, and reads those minted CloseSettleTime before that.
 func (self *contractHorizonReaper) setHorizon(horizon time.Duration) {
 	self.horizon = horizon
 	self.horizonTime = self.now.Add(-horizon)
-	self.horizonId = server.ContractIdFloor(self.horizonTime)
+	self.windowId = server.ContractIdFloor(self.horizonTime.Add(-max(0, self.settings.CloseSettleTime)))
+}
+
+// Publishes the pass's start and the contracts it kept, by reason.
+func (self *contractHorizonReaper) observePass(cursor ContractHorizonCursor) {
+	contractHorizonPassStartGauge.Set(float64(cursor.PassStartTime.Unix()))
+	for _, reason := range contractHorizonProtectedReasons {
+		contractHorizonPassSkippedGauge.WithLabelValues(reason).Set(float64(cursor.SkippedReasonCounts[reason]))
+	}
 }
 
 // Publishes the horizon a control read set, and the stored cursor's lag
@@ -850,10 +952,10 @@ type contractHorizonBatch struct {
 	archived    int64
 }
 
-// The next batchSize contract ids after start and below the horizon, in id
+// The next batchSize contract ids after start and below the window, in id
 // order: an index-only range of the primary key, which reads the heap only for
-// pages vacuum has not marked all-visible. $1 start, $2 the horizon id, $3 the
-// batch size.
+// pages vacuum has not marked all-visible. $1 start, $2 the window id (the
+// horizon less CloseSettleTime), $3 the batch size.
 const contractHorizonWindowSql = `
 	SELECT ARRAY(
 		SELECT contract_id
@@ -1064,7 +1166,7 @@ func (self *contractHorizonReaper) removeBatch(
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
 
 			var windowIds []server.Id
-			server.Raise(tx.QueryRow(ctx, contractHorizonWindowSql, start, self.horizonId, batchSize).Scan(&windowIds))
+			server.Raise(tx.QueryRow(ctx, contractHorizonWindowSql, start, self.windowId, batchSize).Scan(&windowIds))
 			batch.scanned = int64(len(windowIds))
 			if batch.scanned == 0 {
 				return

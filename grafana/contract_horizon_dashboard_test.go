@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,7 @@ const (
 	contractHorizonBatchPanel     = 62
 	contractHorizonRunsPanel      = 63
 	contractHorizonRetentionPanel = 65
+	contractHorizonSkippedPanel   = 105
 )
 
 // The label matchers every reaper and retention selector starts with.
@@ -39,10 +41,11 @@ const contractHorizonTaskworkerFilter = `env="$env",service="taskworker",block=~
 
 // Every reaper and retention query reads taskworker series under the
 // dashboard's filters, and reads a counter or histogram only through a rate or
-// an increase. The three panels an operator watches while the reaper runs are
-// rows deleted by table, contracts kept by reason, and the pass's lag beside
-// its cursor and horizon. The runs panel also counts the transfer audit
-// rollups that resumed at the first day the reaper cannot reach.
+// an increase. The panels an operator watches while the reaper runs are rows
+// deleted by table, contracts kept by reason beside what the pass moved past
+// and kept, by reason, and the pass's lag beside its cursor and horizon. The
+// runs panel also counts the transfer audit rollups that resumed at the first
+// day the reaper cannot reach.
 func TestContractHorizonReaperDashboardPanels(t *testing.T) {
 	dashboard := readTestDashboard(t, "taskworker.json")
 	if slices.Contains(dashboard.Tags, PublicTag) {
@@ -50,7 +53,11 @@ func TestContractHorizonReaperDashboardPanels(t *testing.T) {
 	}
 	selectors := regexp.MustCompile(`\{[^}]*\}`)
 	counters := regexp.MustCompile(`(\w*\()?(urnetwork_(?:contract_horizon|retention|transfer_audit_rollup)_\w*(?:_total|_bucket|_count))\{`)
+	ids := []int{contractHorizonSkippedPanel}
 	for id := contractHorizonModePanel; id <= contractHorizonRetentionPanel; id++ {
+		ids = append(ids, id)
+	}
+	for _, id := range ids {
 		panel := dashboardPanelById(dashboard, id)
 		if panel == nil {
 			t.Fatalf("reaper panel %d is missing", id)
@@ -86,6 +93,21 @@ func TestContractHorizonReaperDashboardPanels(t *testing.T) {
 		if !strings.Contains(kept.Description, reason) {
 			t.Errorf("kept contracts panel does not explain %s", reason)
 		}
+	}
+	skipped := dashboardPanelById(dashboard, contractHorizonSkippedPanel)
+	newestRun := "topk(1, (urnetwork_contract_horizon_horizon_timestamp_seconds{" + contractHorizonTaskworkerFilter + "} + urnetwork_contract_horizon_horizon_seconds{" + contractHorizonTaskworkerFilter + "}) > time() - 1800)"
+	if skipped.Type != "timeseries" || skipped.Title != "contracts the pass moved past, by reason" || len(skipped.Targets) != 1 ||
+		skipped.Targets[0].LegendFormat != "{{reason}}" ||
+		skipped.Targets[0].Expr != "max by (reason) (urnetwork_contract_horizon_pass_skipped_contracts{"+contractHorizonTaskworkerFilter+"} and on (env, service, block, host, instance) "+newestRun+")" {
+		t.Errorf("skipped contracts panel must read the newest run's count by reason: %+v", skipped.Targets)
+	}
+	for _, explained := range []string{"recent_close", "close settle time", "starts from zero", "rescan"} {
+		if !strings.Contains(skipped.Description, explained) {
+			t.Errorf("skipped contracts panel does not explain %q", explained)
+		}
+	}
+	if skipped.GridPos.Y != kept.GridPos.Y || deleted.GridPos.Y != kept.GridPos.Y {
+		t.Error("the skipped contracts panel does not sit beside the deleted and kept panels")
 	}
 	runs := dashboardPanelById(dashboard, contractHorizonRunsPanel)
 	clamps := "sum(increase(urnetwork_transfer_audit_rollup_clamped_total{" + contractHorizonTaskworkerFilter + "}[1h]))"
@@ -174,6 +196,8 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 		cursor      float64
 		passStart   float64
 		batchSize   float64
+		// the pass's skipped contracts by reason
+		reasonSkippeds map[string]float64
 	}
 	inputs := func(runs ...reaperRun) []map[string]string {
 		series := []map[string]string{}
@@ -194,14 +218,23 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 				gauge("pass_start_timestamp_seconds", run.passStart),
 				gauge("batch_size", run.batchSize),
 			)
+			for _, reason := range slices.Sorted(maps.Keys(run.reasonSkippeds)) {
+				series = append(series, map[string]string{
+					"series": fmt.Sprintf(`urnetwork_contract_horizon_pass_skipped_contracts{env="synthetic",service=%q,block="b1",host="synthetic-host",instance=%q,reason=%q}`, run.service, run.instance, reason),
+					"values": strconv.FormatFloat(run.reasonSkippeds[reason], 'f', -1, 64) + "x60",
+				})
+			}
 		}
 		return series
 	}
 	// evaluated at 3000 s: a run is current when it started after 1200 s
-	older := reaperRun{service: "taskworker", instance: "older", start: 1500, horizonDays: 35, mode: 2, lag: 86400, cursor: 5000, passStart: 100, batchSize: 2000}
-	newest := reaperRun{service: "taskworker", instance: "newest", start: 2400, horizonDays: 91, mode: 1, lag: 3600, cursor: 7000, passStart: 200, batchSize: 500}
+	older := reaperRun{service: "taskworker", instance: "older", start: 1500, horizonDays: 35, mode: 2, lag: 86400, cursor: 5000, passStart: 100, batchSize: 2000,
+		reasonSkippeds: map[string]float64{"recent_close": 900, "payment_hold": 5}}
+	newest := reaperRun{service: "taskworker", instance: "newest", start: 2400, horizonDays: 91, mode: 1, lag: 3600, cursor: 7000, passStart: 200, batchSize: 500,
+		reasonSkippeds: map[string]float64{"recent_close": 3, "payment_hold": 7}}
 	idle := reaperRun{service: "taskworker", instance: "idle"}
-	api := reaperRun{service: "api", instance: "api", start: 2900, horizonDays: 50, mode: 2, lag: 1, cursor: 9999, passStart: 9999, batchSize: 9999}
+	api := reaperRun{service: "api", instance: "api", start: 2900, horizonDays: 50, mode: 2, lag: 1, cursor: 9999, passStart: 9999, batchSize: 9999,
+		reasonSkippeds: map[string]float64{"recent_close": 9999}}
 	newestOff := newest
 	newestOff.mode = 0
 	staleOlder := older
@@ -216,6 +249,13 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 
 	value := func(v float64) []map[string]any {
 		return []map[string]any{{"labels": "{}", "value": v}}
+	}
+	byReason := func(reasonValues map[string]float64) []map[string]any {
+		samples := []map[string]any{}
+		for _, reason := range slices.Sorted(maps.Keys(reasonValues)) {
+			samples = append(samples, map[string]any{"labels": fmt.Sprintf(`{reason=%q}`, reason), "value": reasonValues[reason]})
+		}
+		return samples
 	}
 	none := []map[string]any{}
 	type evaluation struct {
@@ -239,6 +279,7 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 			{contractHorizonPositionPanel, "B", value(7000 * 1000)},
 			{contractHorizonPositionPanel, "C", value((2400 - 91*day) * 1000)},
 			{contractHorizonBatchPanel, "C", value(500)},
+			{contractHorizonSkippedPanel, "A", byReason(map[string]float64{"recent_close": 3, "payment_hold": 7})},
 		}},
 		{name: "an off mode still reads", runs: []reaperRun{older, newestOff}, evaluations: []evaluation{
 			{contractHorizonModePanel, "A", value(0)},
@@ -250,6 +291,7 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 			{contractHorizonCursorPanel, "A", none},
 			{contractHorizonPositionPanel, "B", none},
 			{contractHorizonNewestRunPanel, "A", value(1100 * 1000)},
+			{contractHorizonSkippedPanel, "A", none},
 		}},
 		{name: "an uncommitted pass never borrows an older cursor", runs: []reaperRun{older, uncommitted}, evaluations: []evaluation{
 			{contractHorizonModePanel, "A", value(2)},

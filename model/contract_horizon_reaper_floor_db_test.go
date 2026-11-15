@@ -52,8 +52,9 @@ func checkHorizonTestExported(t testing.TB, now time.Time, report *ContractHoriz
 // horizonDays shortens the horizon to as few as 35 days. At 45 days a
 // contract 60 days old goes, into the archive since it bears credit; at 35 a
 // contract 40 days old goes too, and contracts 34 and 30 days old stay. The
-// boundary is exactly 35 days, for the mint time in the id and for the close
-// time, and a value below the floor reaches no closer. Without the field, or
+// boundary is exactly 35 days for the close time, and the pass reads a
+// contract once the mint time in its id is exactly the close settle time past
+// it; a value below the floor reaches no closer. Without the field, or
 // with one that does not parse or is past 91 days, the horizon is the code's
 // 91 days. Each run reports and exports the horizon it applied.
 func TestContractHorizonControlShortensHorizonToFloor(t *testing.T) {
@@ -139,11 +140,17 @@ func TestContractHorizonControlShortensHorizonToFloor(t *testing.T) {
 		if run(now.Add(time.Microsecond), "35"); present(closeBoundary) || !present(mintBoundary) {
 			t.Fatal("the 35-day horizon is not exact for the close time")
 		}
-		// a millisecond later the mint boundary is past, and a horizon below the
-		// floor still keeps the contract 34 days old
-		report = run(now.Add(time.Millisecond), "1")
-		if present(mintBoundary) || !present(aged34) || !present(aged30) || !report.HorizonTime.Equal(floor.Add(time.Millisecond)) {
-			t.Fatalf("a horizon below the floor is not exactly 35 days for the mint time: %s, %+v", now.Add(time.Millisecond).Sub(report.HorizonTime), report)
+		// the close settle time later the mint boundary is read only a
+		// millisecond after, and a horizon below the floor still keeps the
+		// contract 34 days old
+		settle := horizonTestSettings().CloseSettleTime
+		if run(now.Add(settle), "35"); !present(mintBoundary) {
+			t.Fatal("a contract minted exactly the close settle time before the 35-day horizon was read")
+		}
+		report = run(now.Add(settle+time.Millisecond), "1")
+		if present(mintBoundary) || !present(aged34) || !present(aged30) || !report.HorizonTime.Equal(floor.Add(settle+time.Millisecond)) {
+			t.Fatalf("a horizon below the floor is not exactly 35 days and the close settle time for the mint time: %s, %+v",
+				now.Add(settle+time.Millisecond).Sub(report.HorizonTime), report)
 		}
 	})
 }
