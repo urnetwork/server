@@ -458,6 +458,9 @@ func (self *networkScimChanges) getForScimSigner(args *GetSidecarScimChangesArgs
 	if !server.SidecarMg6Linked() {
 		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, networkTeamsUnavailableMessage)
 	}
+	if args == nil {
+		args = &GetSidecarScimChangesArgs{}
+	}
 	refused := fmt.Errorf("%d %s", http.StatusForbidden, sidecarScimChangesRefusedMessage)
 	ctx := clientSession.Ctx
 	byJwt := clientSession.ByJwt
