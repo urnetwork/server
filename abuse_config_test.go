@@ -137,7 +137,7 @@ abuse_mailbox: " records@mailbox.example "
 legal_request_mailbox: legal@mailbox.example
 counsel_contact: counsel@counsel.example
 feeds:
-  - {name: feed-one, url: "https://feed.example/list.txt"}
+  - {name: feed-one, url: "https://feed.example/list.txt", category: " Phishing "}
 web_risk: {enabled: true}
 notice_senders: {"Registrar.Example.": registrar, registry.example: registry, police.example: law_enforcement}
 appeal_window: 9
@@ -166,7 +166,8 @@ something_new: {ignored: true}
 	if config.CounselContact() != "counsel@counsel.example" {
 		t.Errorf("counsel_contact %q", config.CounselContact())
 	}
-	if feeds := config.Feeds(); len(feeds) != 1 || feeds[0].Name != "feed-one" || feeds[0].Url != "https://feed.example/list.txt" {
+	if feeds := config.Feeds(); len(feeds) != 1 || feeds[0].Name != "feed-one" || feeds[0].Url != "https://feed.example/list.txt" ||
+		feeds[0].Category != "phishing" {
 		t.Errorf("feeds %+v", feeds)
 	}
 	if !config.WebRiskEnabled() {
