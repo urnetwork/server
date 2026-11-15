@@ -1281,7 +1281,20 @@
           },
           "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -1303,9 +1316,27 @@
           "expr": "sum(rate(urnetwork_redis_key_event_merge_drops_total{env=\"$env\"}[$__rate_interval]))",
           "refId": "A",
           "legendFormat": "merge drops"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_redis_key_event_startup_drops_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "startup drops"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_redis_key_event_ignored_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "ignored ttl refreshes (right)"
         }
       ],
-      "description": "In-process consumer stall on the key-event channel (pairs with the \u00a74 pubsub-drops log class, playbook 5.5)."
+      "description": "In-process consumer stall on the key-event channel (pairs with the \u00a74 pubsub-drops log class, playbook 5.5). Each merge drop ends the subscription epoch: resubscribe after 5 s, then a full resync. Startup drops overflow the merge before the subscription is handed over; the caller's recovery read covers them, so they end no epoch. Ignored ttl refreshes (right axis) are expire events the node drains discard before the merge; a rise means something refreshes ttls on subscribed keys on every call again (CPUOPT6, 2026-11-15)."
     },
     {
       "type": "row",

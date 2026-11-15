@@ -32516,7 +32516,19 @@ Signals for the redis keyspace-notification transport for peers + stream hops
   Occasional drops during a mass reconnect are self-healing; a SUSTAINED
   nonzero rate = a key-event burst storm outrunning the merge buffer, forcing
   continuous resubscribe/resync churn — find the write storm generating the
-  events before tuning buffer sizes or intervals.
+  events before tuning buffer sizes or intervals. Only drops after the
+  subscription is handed to its caller count here.
+- `urnetwork_redis_key_event_startup_drops_total` (`server/redis.go`) — merge
+  overflows before the subscription is handed to its caller. Nothing drains
+  the merge until then, and the caller's recovery read after the handoff covers
+  every earlier event, so these end no epoch. Near zero normally.
+- `urnetwork_redis_key_event_ignored_total` (`server/redis.go`) — `expire`
+  events (ttl refreshes, which change no value) the node drains discard before
+  the merge. On 2026-11-15 the session hint reads refreshed `{ns_*}eid` on every
+  read, the refreshes were 87% of connect's stream, and the busy processes
+  resubscribed every 7–9 s (CPUOPT6). A high rate means something refreshes a
+  subscribed key's ttl on every call again; it no longer ends epochs, but every
+  connect process still receives each event.
 - `urnetwork_network_peer_listener_resets_total` — full-read deliveries. In
   poll mode this is normal change delivery. In key-event mode it should be
   ≈ registrations + resyncs; a SUSTAINED rate above that means the corrective
