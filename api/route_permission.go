@@ -153,8 +153,12 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"POST /sn/wallet/hotkey-delegation":   model.RolePermissionBilling,
 	"POST /sn/wallet/network-consent":     model.RolePermissionBilling,
 
+	// §21.16's appeal of an abuse action: an Owner or an Admin
+	"POST /abuse/appeal": model.RolePermissionAdmin,
+
 	// reading settings, clients and the network's earnings
 	"GET /network/clients":                  model.RolePermissionRead,
+	"GET /abuse/cases":                      model.RolePermissionRead,
 	"GET /network/admin-events":             model.RolePermissionRead,
 	"GET /network/usage":                    model.RolePermissionRead,
 	"GET /network/dns":                      model.RolePermissionRead,

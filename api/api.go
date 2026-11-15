@@ -498,6 +498,12 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// §15.15's mail routes: mail on for a network, and its status; dark until MG7 and a dns root (MAIL-M7-22)
 		router.NewRoute("POST", "/mail/enable", handlers.MailEnable),
 		router.NewRoute("GET", "/mail/status", handlers.GetMailStatus),
+		// §21.16's customer routes: a report from the form, the network's own cases, an Owner's or Admin's appeal and
+		// the network's standing (ABUSE-M5-11)
+		router.NewRoute("POST", "/abuse/report", handlers.AbuseReport),
+		router.NewRoute("GET", "/abuse/cases", handlers.AbuseCases),
+		router.NewRoute("POST", "/abuse/appeal", handlers.AbuseAppeal),
+		router.NewRoute("GET", "/abuse/status", handlers.AbuseStatus),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
 		router.NewRoute("POST", "/acl/invite", handlers.AclInvite),

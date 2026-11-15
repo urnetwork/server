@@ -396,16 +396,10 @@ func oweAbuseActionNoticeInTx(
 }
 
 // The appeal link of a case: abuse.yml's appeal_url with the case id, an opaque
-// id (I-13), or "" when the file names none.
+// id (I-13), or "" when the file names none. GET /abuse/cases carries the same
+// link (model.AbuseCaseAppealUrl).
 func abuseAppealUrl(appealUrl string, caseId server.Id) string {
-	if appealUrl == "" {
-		return ""
-	}
-	separator := "?"
-	if strings.Contains(appealUrl, "?") {
-		separator = "&"
-	}
-	return appealUrl + separator + "case_id=" + caseId.String()
+	return model.AbuseCaseAppealUrl(appealUrl, caseId)
 }
 
 // What one pass of AbuseActionPass did.

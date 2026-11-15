@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
@@ -692,4 +693,77 @@ func TestForwardOnlyTokenRoutes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// §21.16's customer routes take their classes (ABUSE-M5-11), checked through
+// their gates with the handler stubbed: the report route is Public and reads
+// no credential; the cases and appeal routes refuse every client token, the
+// appeal one never taking one at all; status serves a client token and the
+// network's own credential, and is the one /abuse/ route a sidecar's
+// strict_exp token reaches, the rest refusing it.
+func TestAbuseRoutesTakeTheirClasses(t *testing.T) {
+	want := map[string]routeAccess{
+		"POST /abuse/report": routeAccessPublic,
+		"GET /abuse/cases":   routeAccessNetwork,
+		"POST /abuse/appeal": routeAccessNetwork,
+		"GET /abuse/status":  routeAccessClient,
+	}
+	for key, access := range want {
+		if routeAccessByRoute[key] != access {
+			t.Fatalf("%s is class %d, want %d", key, routeAccessByRoute[key], access)
+		}
+	}
+	if !strictExpRoutes["GET /abuse/status"] || forwardOnlyRoutes["GET /abuse/status"] {
+		t.Fatal("GET /abuse/status is off the strict_exp allowlist, or on the forwarding one")
+	}
+	if routePermissionFor("GET /abuse/cases") != model.RolePermissionRead || routePermissionFor("POST /abuse/appeal") != model.RolePermissionAdmin {
+		t.Fatal("the abuse routes ask the wrong permissions of a member's role")
+	}
+
+	strict := newStrictExpTokens()
+	tokens := newRouteAccessTokens()
+	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
+		return false
+	})
+	setClientForwardOnly(t, func(ctx context.Context, networkId server.Id, clientId server.Id) (bool, error) {
+		return false, nil
+	})
+	routes := Routes()
+	byKey := func(key string) *router.Route {
+		index := slices.IndexFunc(routes, func(route *router.Route) bool { return routeAccessKey(route) == key })
+		if index < 0 {
+			t.Fatalf("no route %s", key)
+		}
+		return routes[index]
+	}
+
+	for key := range want {
+		w, reached := serveStubbed(byKey(key), "Bearer "+strict.strictToken, nil)
+		switch key {
+		case "GET /abuse/status":
+			if !reached || w.Code != http.StatusOK {
+				t.Errorf("%s: a strict_exp token got %d, handler ran = %t; want the handler", key, w.Code, reached)
+			}
+		default:
+			if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
+				t.Errorf("%s: a strict_exp token got %d %q, handler ran = %t; want the sidecar refusal", key, w.Code, w.Body.String(), reached)
+			}
+		}
+
+		w, reached = serveStubbed(byKey(key), "Bearer "+tokens.clientToken, nil)
+		switch key {
+		case "GET /abuse/cases", "POST /abuse/appeal":
+			if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.ClientCredentialRefusedMessage {
+				t.Errorf("%s: a client token got %d %q, handler ran = %t; want the client token refusal", key, w.Code, w.Body.String(), reached)
+			}
+		default:
+			if !reached || w.Code != http.StatusOK {
+				t.Errorf("%s: a client token got %d, handler ran = %t; want the handler", key, w.Code, reached)
+			}
+		}
+
+		if w, reached := serveStubbed(byKey(key), "Bearer "+tokens.networkToken, nil); !reached || w.Code != http.StatusOK {
+			t.Errorf("%s: the network's token got %d, handler ran = %t; want the handler", key, w.Code, reached)
+		}
+	}
 }
