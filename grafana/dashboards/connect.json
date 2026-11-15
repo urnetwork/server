@@ -4376,6 +4376,60 @@
                     "legendFormat": "{{party}} {{report}}"
                 }
             ]
+        },
+        {
+            "id": 111,
+            "type": "row",
+            "title": "send sequence exits (connect transfer_sequence_exit.go)",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 401
+            },
+            "panels": []
+        },
+        {
+            "id": 112,
+            "type": "timeseries",
+            "title": "send sequence exits / s by service and reason",
+            "description": "Send sequences of the connect library that ended on a terminal owner decision, by service and by the reason of each sequence's first decision: ack_lifetime and retained_silence are missing feedback, context is a canceled owner, contract_canceled and contract_creation are contract failures, head_rewrite a failed recovery write, ack_worker_exit a failed ACK worker, run_return and packs_closed the owner's own end. Idle ends are not counted. Each exit's detail line (event=sequence_exit) is logged at V(1) since 2026-11-15; it was an INFO line of about 900 a second on the services edges (CPUOPT6 A #2(b)).",
+            "gridPos": {
+                "h": 8,
+                "w": 24,
+                "x": 0,
+                "y": 402
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, reason) (rate(urnetwork_connect_send_sequence_exits_total{env=\"$env\"}[$__rate_interval]))",
+                    "legendFormat": "{{service}} {{reason}}"
+                }
+            ]
         }
     ]
 }
