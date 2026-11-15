@@ -444,6 +444,39 @@ func TestReengagementConfigFile(t *testing.T) {
 	connect.AssertEqual(t, 80.0, winback.Allocation[reengagement.ArmControl]+winback.Allocation[reengagement.ArmOffer])
 }
 
+// Stream L stays 50/50 past 2026-12-02 (owner, 2026-11-15): the checked-in
+// reengagement.yml must still hand the 2026-12-02 02:30 UTC scan, and every
+// later one, to reengage_lapsed_1, split evenly. Until then the config gave
+// that scan to reengage_lapsed_2's 80/20. A scan that no running test covers
+// would mail the whole stream, so a later one must still find the test.
+func TestReengagementLapsedTestStaysEvenPastDecember2(t *testing.T) {
+	data := configRepoFile(t, filepath.Join("main", "reengagement.yml"))
+	var y reengagementYaml
+	connect.AssertEqual(t, nil, yaml.Unmarshal(data, &y))
+	c := newReengagementConfig(&y.Reengagement)
+	for _, at := range []time.Time{
+		time.Date(2026, 12, 2, 2, 30, 0, 0, time.UTC),
+		time.Date(2027, 2, 1, 2, 30, 0, 0, time.UTC),
+	} {
+		arms := map[string]int{}
+		const networks = 4000
+		for i := 0; i < networks; i++ {
+			a := c.AssignmentForSurface(server.NewId(), ExperimentSurfaceReengagementLapsed, at)
+			if a == nil {
+				t.Fatalf("no running test covers the lapsed scan at %s", at)
+			}
+			connect.AssertEqual(t, "reengage_lapsed_1", a.ExperimentId)
+			arms[a.Variant] += 1
+		}
+		// 50/50 by hash: each arm within 5 points of half
+		for _, arm := range []string{"control", ExperimentVariantHoldout} {
+			if share := float64(arms[arm]) / networks; share < 0.45 || 0.55 < share {
+				t.Fatalf("%s: %s holds %.3f of the lapsed scan, want half", at, arm, share)
+			}
+		}
+	}
+}
+
 func TestCountryCodeFromStorefront(t *testing.T) {
 	connect.AssertEqual(t, "US", CountryCodeFromStorefront("USA"))
 	connect.AssertEqual(t, "DE", CountryCodeFromStorefront("deu"))
