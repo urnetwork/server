@@ -31,18 +31,33 @@ package controller
 // a private key above all, is refused as a missing or malformed one is, and
 // every record then stays owed (mailed_time NULL) until a good file arrives.
 // The private key is held offline beside §19.10's restore runbook and is
-// reachable by no running service; the owner creates the file. No error names
-// a key's bytes.
+// reachable by no running service. No error names a key's bytes.
 //
-// The seal's one ephemeral key is drawn inside crypto/hpke; nothing here
-// creates, derives or unwraps a key of its own.
+// The owner makes both files with `sidecarctl abuse mailbox-keygen` (QD-832),
+// which writes abuse-mailbox.yml with AbuseMailboxKeyFile and, to a file of its
+// own that never enters vault, the private key as one line:
+//
+//	abuse_mailbox_seal_private_key: <base64 of 32 bytes>   # the X-Wing seed
+//
+// That is draft-connolly-cfrg-xwing's private key, the seed crypto/hpke's
+// PrivateKey.Bytes gives and NewPrivateKey expands again. The restore reads it
+// with ParseAbuseMailboxSealPrivateKey, kept beside its writer
+// AbuseMailboxSealPrivateKeyFile. A rotation makes a new pair and MAC key, so
+// records sealed before it open only with the old seed and verify only with
+// the old MAC key: both are kept offline until the last such record's ttl ends.
+//
+// The seal's one ephemeral key is drawn inside crypto/hpke, and the private
+// key's reader expands a seed there too; no service calls that reader, only a
+// restore.
 
 import (
+	"bytes"
 	"context"
 	"crypto/hpke"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -58,6 +73,10 @@ const (
 	// The file's two keys.
 	abuseMailboxMacKeyName        = "abuse_mailbox_mac_key"
 	abuseMailboxSealPublicKeyName = "abuse_mailbox_seal_public_key"
+	// The private key file's one key (QD-832), which abuse-mailbox.yml refuses.
+	abuseMailboxSealPrivateKeyName = "abuse_mailbox_seal_private_key"
+	// X-Wing's private key, its seed: the KEM's own size, not a tunable.
+	abuseMailboxSealPrivateKeySeedByteCount = 32
 
 	// The sealed form's version, its first byte.
 	abuseMailboxSealVersion = 1
@@ -89,6 +108,12 @@ var ErrAbuseMailboxSeal = errors.New("abuse mailbox record cannot be sealed")
 // A sealed record that does not open: another key, changed bytes, or bytes no
 // sealer wrote.
 var ErrAbuseMailboxSealOpen = errors.New("abuse mailbox record does not open")
+
+// The private key file is refused: it does not parse, holds a key other than
+// its one, or a value that is not the base64 of a 32-byte X-Wing seed. Or a
+// key to be written has no seed to write. A restore that meets it opens
+// nothing.
+var ErrAbuseMailboxSealPrivateKey = errors.New("abuse mailbox seal private key unusable")
 
 // Tunables of the mailboxes' records. The first three are the format's: a
 // restore reads what a mailer wrote, so changing one is a format change, made
@@ -285,6 +310,85 @@ func OpenAbuseMailboxRecord(privateKey hpke.PrivateKey, sealed []byte, settings 
 		return nil, ErrAbuseMailboxSealOpen
 	}
 	return plaintext, nil
+}
+
+// The private key file's bytes for privateKey, as
+// ParseAbuseMailboxSealPrivateKey reads them: the one line holding its
+// 32-byte X-Wing seed in standard base64. What the key generator writes for
+// the owner to keep offline; abuse-mailbox.yml refuses it. A key that is not
+// X-Wing's, or that was built from its parts and so has no seed, is refused
+// with ErrAbuseMailboxSealPrivateKey.
+func AbuseMailboxSealPrivateKeyFile(privateKey hpke.PrivateKey) ([]byte, error) {
+	if privateKey == nil || privateKey.KEM().ID() != hpke.MLKEM768X25519().ID() {
+		return nil, fmt.Errorf("%w: the key is not an X-Wing private key", ErrAbuseMailboxSealPrivateKey)
+	}
+	seed, err := privateKey.Bytes()
+	if err != nil || len(seed) != abuseMailboxSealPrivateKeySeedByteCount {
+		return nil, fmt.Errorf(
+			"%w: the key has no %d-byte seed to write",
+			ErrAbuseMailboxSealPrivateKey,
+			abuseMailboxSealPrivateKeySeedByteCount,
+		)
+	}
+	return []byte(abuseMailboxSealPrivateKeyName + ": " + base64.StdEncoding.EncodeToString(seed) + "\n"), nil
+}
+
+// Reads the private key file: one YAML document holding exactly the key
+// abuse_mailbox_seal_private_key, its value the standard base64 of a 32-byte
+// X-Wing seed (whitespace inside ignored, as ParseAbuseMailboxKeys ignores
+// it), and returns the key the seed expands to, which OpenAbuseMailboxRecord
+// takes. §19.10's restore (ABUSE-M5-18) reads the owner's offline file with
+// it. Anything else, a second key or a second document above all, is refused
+// with ErrAbuseMailboxSealPrivateKey, naming the part and never a value: not
+// even an unknown key's name, which a misplaced value could be.
+func ParseAbuseMailboxSealPrivateKey(data []byte) (hpke.PrivateKey, error) {
+	keyValues := map[string]any{}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&keyValues); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: the private key file does not parse", ErrAbuseMailboxSealPrivateKey)
+	}
+	var extraDocument any
+	if err := decoder.Decode(&extraDocument); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: the private key file holds more than one document", ErrAbuseMailboxSealPrivateKey)
+	}
+	for key := range keyValues {
+		if key != abuseMailboxSealPrivateKeyName {
+			return nil, fmt.Errorf(
+				"%w: the private key file holds a key other than %s",
+				ErrAbuseMailboxSealPrivateKey,
+				abuseMailboxSealPrivateKeyName,
+			)
+		}
+	}
+	value, ok := keyValues[abuseMailboxSealPrivateKeyName].(string)
+	if !ok || strings.TrimSpace(value) == "" {
+		return nil, fmt.Errorf("%w: the private key file has no %s", ErrAbuseMailboxSealPrivateKey, abuseMailboxSealPrivateKeyName)
+	}
+	seed, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(value), ""))
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: the private key file's %s is not standard base64",
+			ErrAbuseMailboxSealPrivateKey,
+			abuseMailboxSealPrivateKeyName,
+		)
+	}
+	if len(seed) != abuseMailboxSealPrivateKeySeedByteCount {
+		return nil, fmt.Errorf(
+			"%w: the private key file's %s is not %d bytes",
+			ErrAbuseMailboxSealPrivateKey,
+			abuseMailboxSealPrivateKeyName,
+			abuseMailboxSealPrivateKeySeedByteCount,
+		)
+	}
+	privateKey, err := hpke.MLKEM768X25519().NewPrivateKey(seed)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: the private key file's %s is not an X-Wing seed",
+			ErrAbuseMailboxSealPrivateKey,
+			abuseMailboxSealPrivateKeyName,
+		)
+	}
+	return privateKey, nil
 }
 
 // A mail's text/plain body for sealed: standard base64 in lines of at most
