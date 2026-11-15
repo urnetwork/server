@@ -19,7 +19,9 @@ package model
 //     @'s SPF stays -all, since SPF never aligns on the header domain
 //     (D-SMTP-5). Mail off takes all of it back to the M5 set. _25._tcp.mx's
 //     TLSA is /dns/key-record's (DNS-M7-02), and a direct MX's addresses at mx
-//     are DNS-M7-03's, which this function's state then carries.
+//     are DNS-M7-03's, which this function's state then carries: rows of kind
+//     direct in place of the router rows, a family with no address having
+//     none (dns_direct_mx_model.go).
 //   - <root> (reading 19): SOA, NS and their glue, CAA per §13.8 with iodef,
 //     @ TXT v=spf1 -all, @ MX 10 to the report host, @ A and AAAA kind edge
 //     when the apex redirects, _dmarc strict with psd=y once company mail has
@@ -89,6 +91,11 @@ type DnsZoneState struct {
 	// Mail on: network_dns_zone.mail, which POST /mail/enable sets through
 	// DnsSetMailRecordsInTx (MAIL-M7-22).
 	Mail bool
+	// A direct MX's mail indexer addresses, which mx answers in place of the
+	// router interfaces while mail is on (§12.8, owner decision 33;
+	// DNS-M7-03), nil for the routers. The zone's own direct rows hold them, so
+	// every reconcile writes them back as they are.
+	DirectMx []netip.Addr
 }
 
 // A TXT row of one string.
@@ -128,9 +135,15 @@ func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) ([]dn
 		mailHost := dnsMailHostLabel + "." + apex
 		envelope := dnsMailEnvelopeLabel + "." + apex
 		spfInclude := dnsSpfIncludeLabel + "." + strings.TrimSuffix(root, ".")
+		if state.DirectMx == nil {
+			sets = append(sets,
+				dnsservice.DnsRecordSet{Owner: mailHost, Type: dns.TypeA, Ttl: ttl.MxHost, Kind: dnsservice.DnsRecordKindRouter},
+				dnsservice.DnsRecordSet{Owner: mailHost, Type: dns.TypeAAAA, Ttl: ttl.MxHost, Kind: dnsservice.DnsRecordKindRouter},
+			)
+		} else {
+			sets = append(sets, dnsDirectMxRows(mailHost, state.DirectMx, ttl.MxHost)...)
+		}
 		sets = append(sets,
-			dnsservice.DnsRecordSet{Owner: mailHost, Type: dns.TypeA, Ttl: ttl.MxHost, Kind: dnsservice.DnsRecordKindRouter},
-			dnsservice.DnsRecordSet{Owner: mailHost, Type: dns.TypeAAAA, Ttl: ttl.MxHost, Kind: dnsservice.DnsRecordKindRouter},
 			dnsservice.DnsRecordSet{Owner: envelope, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: mx},
 			dnsSystemTxt(envelope, "v=spf1 include:"+spfInclude+" -all", ttl.MailPolicy),
 		)
@@ -148,6 +161,30 @@ func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) ([]dn
 	}
 	sortDnsRecordSets(sets)
 	return sets, nil
+}
+
+// A direct MX's A and AAAA at the mail host, each family's addresses in order,
+// and none for a family it has no address of (DNS-M7-03).
+func dnsDirectMxRows(mailHost string, addresses []netip.Addr, ttl uint32) []dnsservice.DnsRecordSet {
+	ipv4s := []string{}
+	ipv6s := []string{}
+	sorted := slices.Clone(addresses)
+	slices.SortFunc(sorted, func(a netip.Addr, b netip.Addr) int { return a.Unmap().Compare(b.Unmap()) })
+	for _, address := range sorted {
+		if address.Unmap().Is4() {
+			ipv4s = append(ipv4s, address.Unmap().String())
+		} else {
+			ipv6s = append(ipv6s, address.String())
+		}
+	}
+	rows := []dnsservice.DnsRecordSet{}
+	if 0 < len(ipv4s) {
+		rows = append(rows, dnsservice.DnsRecordSet{Owner: mailHost, Type: dns.TypeA, Ttl: ttl, Kind: dnsservice.DnsRecordKindDirect, Rdata: ipv4s})
+	}
+	if 0 < len(ipv6s) {
+		rows = append(rows, dnsservice.DnsRecordSet{Owner: mailHost, Type: dns.TypeAAAA, Ttl: ttl, Kind: dnsservice.DnsRecordKindDirect, Rdata: ipv6s})
+	}
+	return rows
 }
 
 // The keys a network zone's system set manages: what DnsSystemRecords can

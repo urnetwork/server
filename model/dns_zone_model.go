@@ -10,6 +10,7 @@ package model
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"sync"
 
 	"github.com/urnetwork/glog"
@@ -73,6 +74,13 @@ func getDnsZoneStateInTx(ctx context.Context, query server.PgCanQuery, root stri
 // is read under both, so a toggle committing meanwhile is read and not
 // written back over.
 func EnsureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, ttl *dnsservice.DnsTtlSettings) (*DnsWriteResult, error) {
+	return ensureNetworkZoneInTx(ctx, tx, networkId, root, ttl, nil)
+}
+
+// EnsureNetworkZoneInTx with the direct MX directMx names, when set, in place of
+// the one the zone's direct rows hold: an empty list puts the router rows back
+// (DNS-M7-03).
+func ensureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, ttl *dnsservice.DnsTtlSettings, directMx *[]netip.Addr) (*DnsWriteResult, error) {
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
 		return nil, ErrDnsUnlinked
 	}
@@ -98,6 +106,12 @@ func EnsureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server
 	state := getDnsZoneStateInTx(ctx, tx, root, networkId)
 	state.Root = root
 	state.Apex = label + "." + root
+	switch {
+	case directMx == nil:
+		state.DirectMx = getDnsDirectMxInTx(ctx, tx, root, networkId, state.Apex)
+	case 0 < len(*directMx):
+		state.DirectMx = *directMx
+	}
 	desired, err := DnsSystemRecords(state, ttl)
 	if err != nil {
 		return nil, err
