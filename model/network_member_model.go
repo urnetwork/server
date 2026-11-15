@@ -23,9 +23,11 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -351,12 +353,20 @@ type GetNetworkMembersResult struct {
 // The refusal of a member route to a caller that may not use it.
 const networkMembersRefusedMessage = "Only the team's Owners and Admins may list its members."
 
+func init() {
+	// `ur admin members` reads the first page with a one-command admin token, its
+	// use spent in the read's transaction (session.RegisterAdminCommandRoute)
+	session.RegisterAdminCommandRoute(http.MethodGet, "/network/members")
+}
+
 // GET /network/members: the members of the session's network, a team on the team
 // tier, in member_id order, at most the settings' MemberReadLimit at a time.
 //
 // A member whose role holds RolePermissionMembers reads them, an Owner or an
 // Admin, as the route's role gate asks too (TEAM-M6-03). A pending member reads
-// nothing.
+// nothing. A one-command admin token with the all scope reads the first page
+// once (`ur admin members`, TEAM-M6-08), its use spent in the read's
+// transaction, a replay answering the first read.
 func GetNetworkMembers(args *GetNetworkMembersArgs, clientSession *session.ClientSession) (*GetNetworkMembersResult, error) {
 	return newNetworkTeams().getMembers(args, clientSession)
 }
@@ -374,18 +384,22 @@ func (self *networkTeams) getMembers(args *GetNetworkMembersArgs, clientSession 
 		return nil, err
 	}
 
+	adminCommand := clientSession.AdminCommand
+	if adminCommand != nil && !slices.Contains(adminCommand.Scopes, ApiKeyScopeAll) {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, "The admin token does not carry the all scope.")
+	}
 	limit := max(self.settings.MemberReadLimit, 1)
 	result := &GetNetworkMembersResult{
 		Members: []*NetworkMemberResult{},
 	}
 	refused := false
-	server.Db(ctx, func(conn server.PgConn) {
-		caller := getNetworkMemberOfUserWithQuery(ctx, conn, byJwt.NetworkId, byJwt.UserId)
+	read := func(query server.PgCanQuery) {
+		caller := getNetworkMemberOfUserWithQuery(ctx, query, byJwt.NetworkId, byJwt.UserId)
 		if caller == nil || caller.Pending || !caller.Role.Permits(RolePermissionMembers) {
 			refused = true
 			return
 		}
-		rows, err := conn.Query(
+		rows, err := query.Query(
 			ctx,
 			`
 				SELECT `+networkMemberColumns+`
@@ -415,7 +429,33 @@ func (self *networkTeams) getMembers(args *GetNetworkMembersArgs, clientSession 
 				})
 			}
 		})
-	})
+	}
+	if adminCommand == nil {
+		server.Db(ctx, func(conn server.PgConn) {
+			read(conn)
+		})
+	} else {
+		server.Tx(ctx, func(tx server.PgTx) {
+			refused = false
+			result.Members, result.More = []*NetworkMemberResult{}, false
+			read(tx)
+			if refused {
+				return
+			}
+			now := self.now().UTC().Truncate(time.Microsecond)
+			storedResult, first, err := ClaimAdminTokenUseInTx(ctx, tx, adminCommand, now)
+			server.Raise(err)
+			if !first {
+				replayed := &GetNetworkMembersResult{}
+				server.Raise(json.Unmarshal(storedResult, replayed))
+				result = replayed
+				return
+			}
+			resultJson, err := json.Marshal(result)
+			server.Raise(err)
+			server.Raise(StoreAdminTokenUseResultInTx(ctx, tx, adminCommand.Jti, resultJson))
+		})
+	}
 	if refused {
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkMembersRefusedMessage)
 	}
