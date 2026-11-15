@@ -55,7 +55,8 @@ type HostsSettings struct {
 	// Each probe's own deadline: 15 s, past the store's 10 s, so a refusal is the store's answer.
 	ProbeTimeout time.Duration
 	// The tries a probe makes past an unknown outcome, as evs retries one, the client having moved off the host that
-	// failed it: 3. A write whose retry meets 412 had landed on an earlier try.
+	// failed it: 5, so a probe rides over the client trying a stopped host again once its 30 s holdoff lapses. A
+	// write whose retry meets 412 had landed on an earlier try.
 	ProbeRetryCount  int
 	CleanupListLimit int
 	CleanupInFlight  int
@@ -73,7 +74,7 @@ func DefaultHostsSettings() *HostsSettings {
 		HealTimeout:      48 * time.Hour,
 		Rto:              4 * time.Hour,
 		ProbeTimeout:     15 * time.Second,
-		ProbeRetryCount:  3,
+		ProbeRetryCount:  5,
 		CleanupListLimit: 1000,
 		CleanupInFlight:  64,
 	}
@@ -92,6 +93,8 @@ type HostsProbe struct {
 	ProtectedRead  int `json:"protected_read"`
 	DegradedTried  int `json:"degraded_tried"`
 	DegradedRead   int `json:"degraded_read"`
+	// Each failure's text, its last try's, by count, for the drill's record.
+	Failures map[string]int `json:"failures"`
 }
 
 // One cluster's drill.
@@ -301,15 +304,17 @@ func runHostsDrill(ctx context.Context, cluster sidecar.BlobCluster, drill *Host
 	written := map[string][]string{}
 	// one state's probes: its writes, then reads of what earlier states wrote
 	probe := func(state string) *HostsProbe {
-		result := &HostsProbe{State: state}
+		result := &HostsProbe{State: state, Failures: map[string]int{}}
 		for n := range settings.ProbeCount {
 			key := probeKey(state, n)
 			result.WritesTried += 1
 			outcome := "unknown"
+			var lastErr error
 			for attempt := 0; attempt <= settings.ProbeRetryCount; attempt += 1 {
 				probeCtx, cancel := context.WithTimeout(ctx, settings.ProbeTimeout)
 				_, err := cluster.PutIfNoneMatch(probeCtx, key, opsBody(settings.ProbeByteCount, int64(n), 0), nil)
 				cancel()
+				lastErr = err
 				var unknown *sidecar.BlobUnknownError
 				if err == nil || (0 < attempt && errors.Is(err, sidecar.ErrBlobPrecondition)) {
 					outcome = "stored"
@@ -319,6 +324,9 @@ func runHostsDrill(ctx context.Context, cluster sidecar.BlobCluster, drill *Host
 					outcome = "refused"
 					break
 				}
+			}
+			if outcome != "stored" && lastErr != nil {
+				result.Failures["write: "+lastErr.Error()] += 1
 			}
 			switch outcome {
 			case "stored":
@@ -333,6 +341,7 @@ func runHostsDrill(ctx context.Context, cluster sidecar.BlobCluster, drill *Host
 		read := func(keys []string) (int, int) {
 			ok := 0
 			for _, key := range keys {
+				var lastErr error
 				for attempt := 0; attempt <= settings.ProbeRetryCount; attempt += 1 {
 					probeCtx, cancel := context.WithTimeout(ctx, settings.ProbeTimeout)
 					object, err := cluster.Get(probeCtx, key)
@@ -341,14 +350,16 @@ func runHostsDrill(ctx context.Context, cluster sidecar.BlobCluster, drill *Host
 						object.Body.Close()
 					}
 					cancel()
+					lastErr = err
 					var unknown *sidecar.BlobUnknownError
-					if err == nil {
-						ok += 1
+					if err == nil || !errors.As(err, &unknown) {
 						break
 					}
-					if !errors.As(err, &unknown) {
-						break
-					}
+				}
+				if lastErr == nil {
+					ok += 1
+				} else {
+					result.Failures["read: "+lastErr.Error()] += 1
 				}
 			}
 			return len(keys), ok
