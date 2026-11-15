@@ -30,9 +30,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The width of abuse_action's reason column.
-const abuseReviewReasonMaxLength = 2048
-
 // Arguments no row may hold. The message names no target (I-13).
 var ErrAbuseActionInvalid = errors.New("abuse action invalid")
 
@@ -284,7 +281,7 @@ func RecordAbuseActionInTx(
 	if args.Target == "" || abuseTargetMaxLength < len(args.Target) {
 		return nil, nil, false, fmt.Errorf("%w: a target of %d bytes", ErrAbuseActionInvalid, len(args.Target))
 	}
-	if abuseReviewReasonMaxLength < len(args.ReviewReason) {
+	if settings.ReviewReasonMaxByteCount < len(args.ReviewReason) {
 		return nil, nil, false, fmt.Errorf("%w: a reason of %d bytes", ErrAbuseActionInvalid, len(args.ReviewReason))
 	}
 	abuseCase = getAbuseCaseInTx(ctx, tx, args.CaseId, true)
@@ -348,6 +345,7 @@ func RecordAbuseLiftInTx(
 	tx server.PgTx,
 	args *AbuseLiftArgs,
 	now time.Time,
+	settings *AbuseSettings,
 ) (lift *AbuseAction, lifted *AbuseAction, abuseCase *AbuseCase, inserted bool, err error) {
 	if !server.SidecarMg5Linked() {
 		return nil, nil, nil, false, ErrAbuseUnlinked
@@ -358,7 +356,7 @@ func RecordAbuseLiftInTx(
 	if args.ReviewState != AbuseReviewStateLifted && args.ReviewState != AbuseReviewStateLiftedWrong {
 		return nil, nil, nil, false, fmt.Errorf("%w: a lift reviews to %q", ErrAbuseActionInvalid, args.ReviewState)
 	}
-	if abuseReviewReasonMaxLength < len(args.ReviewReason) {
+	if settings.ReviewReasonMaxByteCount < len(args.ReviewReason) {
 		return nil, nil, nil, false, fmt.Errorf("%w: a reason of %d bytes", ErrAbuseActionInvalid, len(args.ReviewReason))
 	}
 	abuseCase = getAbuseCaseInTx(ctx, tx, args.CaseId, true)
@@ -422,7 +420,9 @@ func RecordAbuseLiftInTx(
 	))
 	lifted = getAbuseActionInTx(ctx, tx, lifted.ActionId, false)
 
-	// the case closes once no action of it waits on review or stands unreviewed
+	// the case closes once no action of it waits on review or stands unreviewed,
+	// and no appeal of it waits on a decision, which closes it again
+	// (ABUSE-M5-12's DecideAbuseAppeal)
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -438,6 +438,11 @@ func RecordAbuseLiftInTx(
 						abuse_action.case_id = $1 AND
 						abuse_action.kind <> 'lift' AND
 						abuse_action.review_state NOT IN ('upheld', 'lifted', 'lifted_wrong')
+				) AND
+				NOT EXISTS (
+					SELECT 1
+					FROM abuse_appeal
+					WHERE abuse_appeal.case_id = $1 AND abuse_appeal.state = 'pending'
 				)
 		`,
 		abuseCase.CaseId,

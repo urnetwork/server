@@ -33,7 +33,7 @@ func testRecordAbuseLift(t testing.TB, ctx context.Context, args *AbuseLiftArgs,
 	var inserted bool
 	var err error
 	server.Tx(ctx, func(tx server.PgTx) {
-		lift, _, abuseCase, inserted, err = RecordAbuseLiftInTx(ctx, tx, args, now)
+		lift, _, abuseCase, inserted, err = RecordAbuseLiftInTx(ctx, tx, args, now, DefaultAbuseSettings())
 	})
 	return lift, abuseCase, inserted, err
 }

@@ -109,7 +109,7 @@ func testAbuseStandingLift(t testing.TB, ctx context.Context, caseId server.Id, 
 			LiftedActionId: actionId,
 			ReviewState:    reviewState,
 			ReviewerId:     &reviewerId,
-		}, now)
+		}, now, settings)
 		if err == nil && lift.NetworkId != nil {
 			ReevaluateNetworkAbuseStateInTx(ctx, tx, *lift.NetworkId, now, settings)
 		}
