@@ -12,12 +12,16 @@ package model
 //	          process's resolver and, when a value is the challenge, marks the
 //	          row verified. One network per verified domain: the first to
 //	          verify holds it, and another network's proof is refused while it
-//	          does
+//	          does. The first verification mints the row's acme_token, fixed
+//	          for its life, where certs writes the domain's delegated DNS-01
+//	          values (QD-175; DNS-M6-02)
 //	recheck   every verified domain is looked up again once a day
 //	          (RecheckNetworkDomains). A check that does not find the challenge,
 //	          a lookup error included, starts or continues a failing run, a
 //	          check that finds it ends the run, and a domain whose run reaches
-//	          7 days is dropped: its row goes, and discovery stops routing it
+//	          7 days is dropped: its row goes, and discovery stops routing it.
+//	          A removal and a drop take the domain's custom hosts with it
+//	          (§12.8; DNS-M6-02)
 //	pending   a domain added and never verified goes 7 days after it was added,
 //	          so no row outlasts §2.8 api-3's "while verified, dropped after 7
 //	          failed days"
@@ -49,6 +53,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base32"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -199,6 +204,18 @@ func NormalizeNetworkDomain(domain string) (string, error) {
 // The name a domain's challenge is published at.
 func NetworkDomainChallengeName(domain string) string {
 	return NetworkDomainChallengeLabel + "." + domain
+}
+
+// A domain's acme_token (QD-175; DNS-M6-02): 16 bytes from crypto/rand in lowercase base32 with no
+// padding, 26 characters, minted when the domain first verifies and fixed for the row's life. certs writes
+// the domain's delegated DNS-01 values at <acme_token>.acme.<root>, which its one-time _acme-challenge
+// CNAME names.
+func newNetworkDomainAcmeToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", err
+	}
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)), nil
 }
 
 // A new challenge: 256 random bits, base64url with no padding, 43 characters.
@@ -614,6 +631,10 @@ func (self *networkDomains) verify(args *NetworkDomainArgs, clientSession *sessi
 		return answer, nil
 	}
 
+	acmeToken, err := newNetworkDomainAcmeToken()
+	if err != nil {
+		return nil, err
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		answer = func() *NetworkDomainResult {
 			lockNetworkDomainInTx(ctx, tx, domain)
@@ -640,16 +661,18 @@ func (self *networkDomains) verify(args *NetworkDomainArgs, clientSession *sessi
 			if held {
 				return refusal(networkDomainHeldMessage, networkDomain)
 			}
+			// the first verification mints the row's acme_token, kept for its life (QD-175)
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
 					UPDATE network_domain
-					SET verify_time = $3, check_time = $3, fail_time = NULL
+					SET verify_time = $3, check_time = $3, fail_time = NULL, acme_token = COALESCE(acme_token, $4)
 					WHERE network_id = $1 AND domain = $2
 				`,
 				networkId,
 				domain,
 				now,
+				acmeToken,
 			))
 			verified := getNetworkDomainWithQuery(ctx, tx, networkId, domain, false)
 			AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainVerify, AdminEventTargetDomain, nil))
@@ -712,6 +735,8 @@ func (self *networkDomains) remove(args *NetworkDomainArgs, clientSession *sessi
 		))
 		answer = &NetworkDomainResult{Removed: tag.RowsAffected() != 0}
 		if answer.Removed {
+			// no custom host outlives its domain (§12.8; DNS-M6-02)
+			DnsRemoveDomainCustomHostsInTx(ctx, tx, networkId, domain)
 			AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainRemove, AdminEventTargetDomain, nil))
 		}
 		self.storeInTx(ctx, tx, clientSession, answer)
@@ -883,6 +908,8 @@ func (self *networkDomains) settle(ctx context.Context, examined *NetworkDomain,
 				current.NetworkId,
 				current.Domain,
 			))
+			// no custom host outlives its domain (§12.8; DNS-M6-02)
+			DnsRemoveDomainCustomHostsInTx(ctx, tx, current.NetworkId, current.Domain)
 			AddAdminEventInTx(ctx, tx, &AdminEvent{
 				NetworkId:  current.NetworkId,
 				ActorKind:  AdminEventActorSystem,

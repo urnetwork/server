@@ -8,6 +8,10 @@ package model
 //     alias (§12.7; reading 11: under a claimed alias before its other records
 //     answer), holds at most two values: a wildcard's and the apex's, which
 //     validate at one name (RFC 8555 §8.4). TTL §12.6's challenge, 60.
+//   - A verified custom domain's challenges sit at <acme_token>.acme.<root>
+//     itself, the target of the domain's one-time _acme-challenge CNAME
+//     (QD-175; DNS-M6-02): one of <root>'s own rows, under the same rules, for
+//     a token a verified network_domain holds.
 //   - At most dns_challenges_per_name_hour writes a name an hour (§12.7's 10,
 //     pro.yml's sidecar_abuse:), counted from the journal's last hour, so Let's
 //     Encrypt's failed-authorization limit is never reached by our retries. A
@@ -88,10 +92,14 @@ func Testing_SetDnsChallengesPerNameHour(limit int64) (restore func()) {
 }
 
 // The challenge owner of name in root, and the network whose live label or
-// alias it is.
+// alias it is: zero for a custom domain's <acme_token>.acme.<root>, which is
+// <root>'s own row.
 func resolveDnsChallengeNameInTx(ctx context.Context, query server.PgCanQuery, root string, name string) (string, server.Id, error) {
 	root = dnsLabelRoot(root)
 	name = strings.TrimPrefix(dns.CanonicalName(name), "*.")
+	if acmeToken, ok := strings.CutSuffix(name, "."+dnsAcmeChallengeLabel+"."+root); ok {
+		return resolveDnsAcmeChallengeTargetInTx(ctx, query, name, acmeToken)
+	}
 	label, rest, found := strings.Cut(name, ".")
 	if !found || rest != root || label == "" {
 		return "", server.Id{}, fmt.Errorf("%w: %s", ErrDnsChallengeName, name)
@@ -113,6 +121,29 @@ func resolveDnsChallengeNameInTx(ctx context.Context, query server.PgCanQuery, r
 		return "", server.Id{}, fmt.Errorf("%w: %s", ErrDnsChallengeName, name)
 	}
 	return DnsChallengeLabel + "." + name, *networkId, nil
+}
+
+// A custom domain's challenge target, <acme_token>.acme.<root>, for a token a
+// verified network_domain holds: the name itself, in <root>'s own rows (QD-175).
+func resolveDnsAcmeChallengeTargetInTx(ctx context.Context, query server.PgCanQuery, name string, acmeToken string) (string, server.Id, error) {
+	if !server.SidecarMg6Linked() || acmeToken == "" || strings.Contains(acmeToken, ".") {
+		return "", server.Id{}, fmt.Errorf("%w: %s", ErrDnsChallengeName, name)
+	}
+	held := false
+	result, err := query.Query(
+		ctx,
+		`SELECT EXISTS (SELECT 1 FROM network_domain WHERE acme_token = $1 AND verify_time IS NOT NULL)`,
+		acmeToken,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&held))
+		}
+	})
+	if !held {
+		return "", server.Id{}, fmt.Errorf("%w: %s", ErrDnsChallengeName, name)
+	}
+	return name, server.Id{}, nil
 }
 
 // The values as TXT rdata: each printable ASCII with no quote or backslash, at
@@ -206,17 +237,21 @@ func DnsPutChallenge(ctx context.Context, args *DnsChallengeArgs) (*DnsWriteResu
 func countDnsChallengeWritesInTx(ctx context.Context, query server.PgCanQuery, root string, networkId server.Id, owner string, since time.Time) int {
 	match := fmt.Sprintf(`{"upserts":[{"owner":%q,"type":%d}]}`, owner, dns.TypeTXT)
 	count := 0
-	result, err := query.Query(
-		ctx,
-		`
+	// a network's rows through its index; <root>'s own, a custom domain's challenge target among them, write
+	// with no network, through the commit time's
+	sql := `
+		SELECT count(*) FROM dns_zone_journal
+		WHERE network_id = $1 AND $2 <= commit_time AND root = $3 AND diff @> $4::jsonb
+	`
+	args := []any{networkId, since.UTC(), root, match}
+	if networkId == (server.Id{}) {
+		sql = `
 			SELECT count(*) FROM dns_zone_journal
-			WHERE network_id = $1 AND $2 <= commit_time AND root = $3 AND diff @> $4::jsonb
-		`,
-		networkId,
-		since.UTC(),
-		root,
-		match,
-	)
+			WHERE network_id IS NULL AND $1 <= commit_time AND root = $2 AND diff @> $3::jsonb
+		`
+		args = []any{since.UTC(), root, match}
+	}
+	result, err := query.Query(ctx, sql, args...)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
 			server.Raise(result.Scan(&count))
