@@ -25,3 +25,23 @@ func WriteNetworkDnsRecords(w http.ResponseWriter, r *http.Request) {
 func ReclaimNetworkDnsLabel(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.ReclaimNetworkDnsLabel, w, r)
 }
+
+// POST /network/dns/alias-claim: the network's name as its alias, public forever (CT).
+func ClaimNetworkDnsAlias(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.ClaimNetworkDnsAlias, w, r)
+}
+
+// POST /network/dns/alias-release: the live alias retires for 90 days, then tombstones for good.
+func ReleaseNetworkDnsAlias(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.ReleaseNetworkDnsAlias, w, r)
+}
+
+// POST /network/dns/custom-host-add: maps a verified domain's host to a host owner of the network, Team only.
+func AddNetworkDnsCustomHost(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.AddNetworkDnsCustomHost, w, r)
+}
+
+// POST /network/dns/custom-host-remove: withdraws a custom host.
+func RemoveNetworkDnsCustomHost(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.RemoveNetworkDnsCustomHost, w, r)
+}

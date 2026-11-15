@@ -465,6 +465,11 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/network/dns", handlers.GetNetworkDns),
 		router.NewRoute("POST", "/network/dns/records", handlers.WriteNetworkDnsRecords),
 		router.NewRoute("POST", "/network/dns/label-reclaim", handlers.ReclaimNetworkDnsLabel),
+		// §12.5's aliases (DNS-M6-01) and §12.8's custom hosts (DNS-M6-02)
+		router.NewRoute("POST", "/network/dns/alias-claim", handlers.ClaimNetworkDnsAlias),
+		router.NewRoute("POST", "/network/dns/alias-release", handlers.ReleaseNetworkDnsAlias),
+		router.NewRoute("POST", "/network/dns/custom-host-add", handlers.AddNetworkDnsCustomHost),
+		router.NewRoute("POST", "/network/dns/custom-host-remove", handlers.RemoveNetworkDnsCustomHost),
 		// §7.11's audit log reads and SIEM webhooks (TEAM-M6-09)
 		router.NewRoute("GET", "/network/admin-events", handlers.GetNetworkAdminEvents),
 		// §20.14's usage and limits (QUOTA-M2-12)

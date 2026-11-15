@@ -117,3 +117,108 @@ func ReclaimNetworkDnsLabel(request *sidecar.DnsLabelReclaimRequest, clientSessi
 	}
 	return model.ReclaimDnsLabel(clientSession.Ctx, reclaim)
 }
+
+// The caller of an alias or custom-host route: its network and the admin event's actor.
+func networkDnsActor(clientSession *session.ClientSession) (actorKind string, actorId *server.Id, requestId *server.Id) {
+	actorKind, actorId = model.AdminEventActorOf(clientSession)
+	if id, ok := session.RequestIdFromContext(clientSession.Ctx); ok {
+		requestId = &id
+	}
+	return
+}
+
+// POST /network/dns/alias-claim (§12.5, DNS-M6-01): claims the network's name as its alias, public forever (CT), or
+// changes the alias to it, the old one retiring (model.ClaimDnsAlias). The DNS permission by the role gate.
+func ClaimNetworkDnsAlias(request *sidecar.DnsAliasClaimRequest, clientSession *session.ClientSession) (*sidecar.DnsAliasAnswer, error) {
+	if request == nil {
+		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "A claim names its alias.")
+	}
+	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+		return nil, err
+	}
+	root, err := networkDnsRoot()
+	if err != nil {
+		return nil, err
+	}
+	actorKind, actorId, requestId := networkDnsActor(clientSession)
+	return model.ClaimDnsAlias(clientSession.Ctx, &model.DnsAliasRequest{
+		Root:      root,
+		NetworkId: clientSession.ByJwt.NetworkId,
+		Name:      request.Name,
+		ActorKind: actorKind,
+		ActorId:   actorId,
+		RequestId: requestId,
+	})
+}
+
+// POST /network/dns/alias-release (§12.5, D-DNS-10): the live alias retires for 90 days, then tombstones for good
+// (model.ReleaseDnsAlias). The DNS permission by the role gate.
+func ReleaseNetworkDnsAlias(request *sidecar.DnsAliasReleaseRequest, clientSession *session.ClientSession) (*sidecar.DnsAliasAnswer, error) {
+	if request == nil {
+		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "A release names its alias.")
+	}
+	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+		return nil, err
+	}
+	root, err := networkDnsRoot()
+	if err != nil {
+		return nil, err
+	}
+	actorKind, actorId, requestId := networkDnsActor(clientSession)
+	return model.ReleaseDnsAlias(clientSession.Ctx, &model.DnsAliasRequest{
+		Root:      root,
+		NetworkId: clientSession.ByJwt.NetworkId,
+		Name:      request.Name,
+		ActorKind: actorKind,
+		ActorId:   actorId,
+		RequestId: requestId,
+	})
+}
+
+// POST /network/dns/custom-host-add (§12.8, DNS-M6-02): maps a host of a verified domain to a host owner of the
+// network, Team only (model.AddDnsCustomHost). The DNS permission by the role gate.
+func AddNetworkDnsCustomHost(request *sidecar.DnsCustomHostAddRequest, clientSession *session.ClientSession) (*sidecar.DnsCustomHostAnswer, error) {
+	if request == nil {
+		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "An add names its host.")
+	}
+	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+		return nil, err
+	}
+	root, err := networkDnsRoot()
+	if err != nil {
+		return nil, err
+	}
+	actorKind, actorId, requestId := networkDnsActor(clientSession)
+	return model.AddDnsCustomHost(clientSession.Ctx, &model.DnsCustomHostRequest{
+		Root:      root,
+		NetworkId: clientSession.ByJwt.NetworkId,
+		Add:       request,
+		ActorKind: actorKind,
+		ActorId:   actorId,
+		RequestId: requestId,
+	})
+}
+
+// POST /network/dns/custom-host-remove (§12.8, DNS-M6-02): withdraws a custom host (model.RemoveDnsCustomHost).
+// The DNS permission by the role gate.
+func RemoveNetworkDnsCustomHost(request *sidecar.DnsCustomHostRemoveRequest, clientSession *session.ClientSession) (*sidecar.DnsCustomHostAnswer, error) {
+	if request == nil {
+		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "A removal names its host.")
+	}
+	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+		return nil, err
+	}
+	root, err := networkDnsRoot()
+	if err != nil {
+		return nil, err
+	}
+	actorKind, actorId, requestId := networkDnsActor(clientSession)
+	return model.RemoveDnsCustomHost(clientSession.Ctx, &model.DnsCustomHostRequest{
+		Root:      root,
+		NetworkId: clientSession.ByJwt.NetworkId,
+		Remove:    request,
+		ActorKind: actorKind,
+		ActorId:   actorId,
+		RequestId: requestId,
+	})
+}
