@@ -45,12 +45,18 @@ type NetworkAdminEventSettings struct {
 	Retention time.Duration
 	// The most events one read of the log returns.
 	ReadLimit int
+	// The most events one read by a one-command admin token returns (`ur admin
+	// events`, TEAM-M6-08): 50. The token's use keeps its answer for a replay,
+	// and ur-cli reads an answer of at most 64 KiB, which 50 events of the
+	// longest form fit in under half.
+	AdminCommandReadLimit int
 }
 
 func DefaultNetworkAdminEventSettings() *NetworkAdminEventSettings {
 	return &NetworkAdminEventSettings{
-		Retention: 400 * 24 * time.Hour,
-		ReadLimit: 1000,
+		Retention:             400 * 24 * time.Hour,
+		ReadLimit:             1000,
+		AdminCommandReadLimit: 50,
 	}
 }
 
@@ -321,6 +327,19 @@ func addAdminEventInTxAt(ctx context.Context, tx server.PgTx, event *AdminEvent,
 // The network's events after afterSeq, in seq order, at most limit (the
 // settings' ReadLimit when non-positive).
 func GetNetworkAdminEvents(ctx context.Context, networkId server.Id, afterSeq int64, limit int) []*NetworkAdminEvent {
+	events := []*NetworkAdminEvent{}
+	if !server.SidecarMg1Linked() {
+		return events
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		events = getNetworkAdminEventsWithQuery(ctx, conn, networkId, afterSeq, limit)
+	})
+	return events
+}
+
+// GetNetworkAdminEvents through query, a connection or the caller's
+// transaction. Empty without MG1.
+func getNetworkAdminEventsWithQuery(ctx context.Context, query server.PgCanQuery, networkId server.Id, afterSeq int64, limit int) []*NetworkAdminEvent {
 	if limit <= 0 {
 		limit = DefaultNetworkAdminEventSettings().ReadLimit
 	}
@@ -328,52 +347,50 @@ func GetNetworkAdminEvents(ctx context.Context, networkId server.Id, afterSeq in
 	if !server.SidecarMg1Linked() {
 		return events
 	}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT
-					network_id,
-					seq,
-					event_time,
-					actor_kind,
-					actor_id,
-					action,
-					target_kind,
-					target_id,
-					result,
-					request_id,
-					prev_sha256,
-					chain_sha256
-				FROM network_admin_event
-				WHERE network_id = $1 AND $2 < seq
-				ORDER BY seq
-				LIMIT $3
-			`,
-			networkId,
-			afterSeq,
-			limit,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				event := &NetworkAdminEvent{}
-				server.Raise(result.Scan(
-					&event.NetworkId,
-					&event.Seq,
-					&event.EventTime,
-					&event.ActorKind,
-					&event.ActorId,
-					&event.Action,
-					&event.TargetKind,
-					&event.TargetId,
-					&event.Result,
-					&event.RequestId,
-					&event.PrevSha256,
-					&event.ChainSha256,
-				))
-				events = append(events, event)
-			}
-		})
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT
+				network_id,
+				seq,
+				event_time,
+				actor_kind,
+				actor_id,
+				action,
+				target_kind,
+				target_id,
+				result,
+				request_id,
+				prev_sha256,
+				chain_sha256
+			FROM network_admin_event
+			WHERE network_id = $1 AND $2 < seq
+			ORDER BY seq
+			LIMIT $3
+		`,
+		networkId,
+		afterSeq,
+		limit,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			event := &NetworkAdminEvent{}
+			server.Raise(result.Scan(
+				&event.NetworkId,
+				&event.Seq,
+				&event.EventTime,
+				&event.ActorKind,
+				&event.ActorId,
+				&event.Action,
+				&event.TargetKind,
+				&event.TargetId,
+				&event.Result,
+				&event.RequestId,
+				&event.PrevSha256,
+				&event.ChainSha256,
+			))
+			events = append(events, event)
+		}
 	})
 	return events
 }

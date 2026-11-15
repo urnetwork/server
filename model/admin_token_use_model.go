@@ -16,15 +16,20 @@ package model
 // within it. The result a row holds is the command's answer as the route sent
 // it: for v0's POST /network/auth-keys, the single-use key of at most 5 minutes,
 // which a retry needs and which is spent or expired well before the row goes.
+// An answer that carries a lasting credential once keeps it out of the row, so
+// the server never holds it, and a replay answers without it: an OAuth client's
+// secret, an invite's bearer and an audit webhook's signing key.
 //
 // Nothing here reads or writes admin_token_use unless MG1 is linked; until then
 // an admin token's command answers unavailable and runs nothing.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -130,6 +135,55 @@ func StoreAdminTokenUseResultInTx(ctx context.Context, tx server.PgTx, jti strin
 	}
 	return nil
 }
+
+// ClaimAdminTokenUseInTx for a route whose answer is JSON: true with the first
+// use's answer decoded into replayed for a replay, false for the first use,
+// which runs the command and then stores its answer
+// (StoreAdminTokenUseAnswerInTx). A route calls it once its caller passed its
+// checks, so a refused caller spends nothing.
+func ReplayAdminTokenUseInTx(ctx context.Context, tx server.PgTx, use *session.AdminCommandUse, now time.Time, replayed any) (replay bool, err error) {
+	storedResult, first, err := ClaimAdminTokenUseInTx(ctx, tx, use, now)
+	if err != nil {
+		return false, err
+	}
+	if first {
+		return false, nil
+	}
+	if err := json.Unmarshal(storedResult, replayed); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// Stores answer's JSON as the use's result, for a replay to return. A route
+// whose answer carries a lasting credential once stores the answer without it.
+func StoreAdminTokenUseAnswerInTx(ctx context.Context, tx server.PgTx, use *session.AdminCommandUse, answer any) error {
+	resultJson, err := json.Marshal(answer)
+	if err != nil {
+		return err
+	}
+	return StoreAdminTokenUseResultInTx(ctx, tx, use.Jti, resultJson)
+}
+
+// The scope a Team route's admin command needs: §7.8's OAuth client scopes
+// hold none narrower for the Team routes, so only all.
+const adminCommandTeamScope = "all"
+
+// 403 for an admin token without the all scope; nil for any other credential.
+func requireAdminCommandTeamScope(clientSession *session.ClientSession) error {
+	adminCommand := clientSession.AdminCommand
+	if adminCommand != nil && !slices.Contains(adminCommand.Scopes, adminCommandTeamScope) {
+		return fmt.Errorf("%d %s", http.StatusForbidden, "The admin token does not carry the all scope.")
+	}
+	return nil
+}
+
+// The refusal of a replay that met a first use with no stored answer. A route
+// whose command spans two transactions, as domain-verify's lookup between them
+// does, claims the use in its first and stores the answer in its last, so a
+// replay racing that first use, or one after a first use that ended between
+// them, runs nothing and answers this.
+const adminTokenUseUnansweredMessage = "The admin token's command has not answered. Run the command again."
 
 // Deletes the rows used before minUseTime: what the hourly sweep runs with now
 // less Retention. A no-op without MG1.

@@ -199,8 +199,11 @@ func urcliJktWellFormed(jkt string) bool {
 // single-use, user-owned key of at most MaxAuthKeyDuration, a body of exactly
 // {duration_seconds, max_uses: 1} and nothing else, so no tag, ephemeral or
 // pre-approved key; and full `ur admin`'s, any other route whose model spends
-// an admin token's use, with a body that is empty or one JSON object. A route
-// that spends no use is refused, since its command could run again.
+// an admin token's use, with a body that is empty or one JSON object and that
+// the route's body check takes. A route that spends no use is refused, since
+// its command could run again, and so is a body holding a lasting credential
+// (session.AdminCommandBodyCheck), since the request carries it in the
+// browser's URL and the consent page shows it.
 func validateUrcliCommand(command *sidecar.AdminCommand, settings *UrcliSettings) error {
 	if command.Method != "POST" || command.Path != "/network/auth-keys" {
 		if !session.AdminCommandRouteRegistered(command.Method, command.Path) {
@@ -211,6 +214,9 @@ func validateUrcliCommand(command *sidecar.AdminCommand, settings *UrcliSettings
 			if err := json.Unmarshal(command.Body, &body); err != nil {
 				return fmt.Errorf("%w: the command's body is no JSON object", ErrUrcliCommandRefused)
 			}
+		}
+		if err := session.CheckAdminCommandBody(command.Method, command.Path, command.Body); err != nil {
+			return fmt.Errorf("%w: %w", ErrUrcliCommandRefused, err)
 		}
 		return nil
 	}

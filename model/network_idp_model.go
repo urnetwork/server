@@ -292,15 +292,59 @@ const (
 	AdminEventTargetIdp    = "idp"
 )
 
+// The refusals of the IdP route.
+const (
+	networkIdpRefusedMessage = "Only the team's Owners may add its IdPs."
+	// an admin token's command never carries a client secret (checkNetworkIdpAdminCommandBody)
+	networkIdpAdminCommandSecretMessage = "A client_secret IdP is added from a signed-in session: an admin token's command shows its body in the authorization URL and on the consent page, and a client secret never rides there."
+)
+
+func init() {
+	// `ur admin idp add` (TEAM-M6-08): a one-command admin token reaches the
+	// route, its use spent in the IdP's transaction, and a command carrying a
+	// client secret is refused before any consent shows it
+	session.RegisterAdminCommandRouteWithBodyCheck(http.MethodPost, "/network/idp", checkNetworkIdpAdminCommandBody)
+}
+
+// Refuses an admin command's body that carries a client secret or asks for a
+// client_secret IdP: ur-cli's authorization request carries the body in the
+// browser's URL, ur prints the URL and the consent page shows the body, and a
+// secret never rides there. Such an IdP is added from a signed-in session,
+// whose body goes to api alone. The body is read as the route reads it, so no
+// spelling of the member the route would take as the secret passes.
+func checkNetworkIdpAdminCommandBody(body []byte) error {
+	args := &CreateNetworkIdpArgs{}
+	if 0 < len(body) {
+		if err := json.Unmarshal(body, args); err != nil {
+			return errors.New("The IdP's body does not parse.")
+		}
+	}
+	if args.ClientSecret != "" || args.ClientAuth == NetworkIdpClientAuthClientSecret {
+		return errors.New(networkIdpAdminCommandSecretMessage)
+	}
+	return nil
+}
+
 // POST /network/idp (§7.6): adds an OIDC IdP to the caller's team, its secret
 // sealed under the vault key. Team only (§7.5's team routes), and the
-// Owner's: the route's role gate asks the Owner's permission.
+// Owner's: the route's role gate asks the Owner's permission, and the insert's
+// transaction checks it again. A one-command admin token with the all scope
+// adds a private_key_jwt IdP once (`ur admin idp add`, TEAM-M6-08), its use
+// spent in the insert's transaction and a replay answering the first; it never
+// adds a client_secret IdP (checkNetworkIdpAdminCommandBody).
 func CreateNetworkIdp(createNetworkIdp *CreateNetworkIdpArgs, clientSession *session.ClientSession) (*CreateNetworkIdpResult, error) {
 	refuse := func(message string) (*CreateNetworkIdpResult, error) {
 		return &CreateNetworkIdpResult{Error: &CreateNetworkIdpError{Message: message}}, nil
 	}
 	if !server.SidecarMg6Linked() {
 		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, networkTeamsUnavailableMessage)
+	}
+	if err := requireAdminCommandTeamScope(clientSession); err != nil {
+		return nil, err
+	}
+	adminCommand := clientSession.AdminCommand
+	if adminCommand != nil && (createNetworkIdp.ClientSecret != "" || createNetworkIdp.ClientAuth == NetworkIdpClientAuthClientSecret) {
+		return refuse(networkIdpAdminCommandSecretMessage)
 	}
 	networkId := clientSession.ByJwt.NetworkId
 	if err := networkIdpRequireTeamTier(clientSession.Ctx, networkId); err != nil {
@@ -341,7 +385,25 @@ func CreateNetworkIdp(createNetworkIdp *CreateNetworkIdpArgs, clientSession *ses
 	default:
 		return refuse("The client auth is private_key_jwt or client_secret.")
 	}
+	now := server.NowUtc()
+	refused := false
+	var answer *CreateNetworkIdpResult
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		refused, answer = false, nil
+		if !teamCallerPermitsWithQuery(clientSession.Ctx, tx, clientSession, RolePermissionOwner) {
+			refused = true
+			return
+		}
+		if adminCommand != nil {
+			replayed := &CreateNetworkIdpResult{}
+			replay, err := ReplayAdminTokenUseInTx(clientSession.Ctx, tx, adminCommand, now, replayed)
+			server.Raise(err)
+			if replay {
+				// the first use's answer, and nothing runs
+				answer = replayed
+				return
+			}
+		}
 		server.RaisePgResult(tx.Exec(
 			clientSession.Ctx,
 			`
@@ -358,12 +420,19 @@ func CreateNetworkIdp(createNetworkIdp *CreateNetworkIdpArgs, clientSession *ses
 		AddAdminEventInTx(clientSession.Ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionIdpAdd, AdminEventTargetIdp, &idpId))
 		// a new way to sign people in owes Owners and Admins a notice (§7.8)
 		oweSecurityNetworkAuthorityNoticeInTx(clientSession.Ctx, tx, networkId, &SecurityNetworkAuthorityChange{
-			ChangeTime: server.NowUtc(),
+			ChangeTime: now,
 			Action:     SecurityNetworkAuthorityIdp,
 			Via:        securityNoticeVia(clientSession.Ctx),
 		})
+		answer = &CreateNetworkIdpResult{IdpId: &idpId}
+		if adminCommand != nil {
+			server.Raise(StoreAdminTokenUseAnswerInTx(clientSession.Ctx, tx, adminCommand, answer))
+		}
 	})
-	return &CreateNetworkIdpResult{IdpId: &idpId}, nil
+	if refused {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkIdpRefusedMessage)
+	}
+	return answer, nil
 }
 
 // The IdP, nil for none. A binary that does not link MG6 has none.

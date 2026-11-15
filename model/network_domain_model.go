@@ -34,6 +34,13 @@ package model
 // (§7.8). An admin event names no domain: network_domain has no id, and an
 // event holds ids and fixed words only (I-13).
 //
+// A one-command admin token with the all scope runs each route once (`ur admin
+// domains`, TEAM-M6-08), its use spent in the route's transaction and a replay
+// answering the first. domain-verify looks the record up between two
+// transactions, holding no connection, so it claims the use in its first and
+// stores the answer in its last: a replay meanwhile runs nothing and is told the
+// command has not answered.
+//
 // Nothing here reads or writes network_domain unless the binary links MG6
 // (server.SidecarMg6Linked); until then each route answers 503 and discovery
 // finds nothing.
@@ -368,9 +375,17 @@ func networkDomainStateOf(networkDomain *NetworkDomain) *NetworkDomainState {
 
 const networkDomainsRefusedMessage = "Only the team's Owners may change its domains."
 
+func init() {
+	// `ur admin domains` (TEAM-M6-08): a one-command admin token reaches each
+	// route, its use spent in the route's transaction
+	session.RegisterAdminCommandRoute(http.MethodPost, "/network/domain-add")
+	session.RegisterAdminCommandRoute(http.MethodPost, "/network/domain-verify")
+	session.RegisterAdminCommandRoute(http.MethodPost, "/network/domain-remove")
+}
+
 // The checks every domain route makes before its own work: MG6, a network
-// credential, the team tier, and a domain that parses. A nil result and error
-// pass.
+// credential, an admin token's all scope, the team tier, and a domain that
+// parses. A nil result and error pass.
 func (self *networkDomains) admit(args *NetworkDomainArgs, clientSession *session.ClientSession) (domain string, result *NetworkDomainResult, returnErr error) {
 	if !server.SidecarMg6Linked() {
 		return "", nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, networkTeamsUnavailableMessage)
@@ -378,6 +393,9 @@ func (self *networkDomains) admit(args *NetworkDomainArgs, clientSession *sessio
 	byJwt := clientSession.ByJwt
 	if byJwt == nil || byJwt.ClientId != nil {
 		return "", nil, fmt.Errorf("%d %s", http.StatusForbidden, networkDomainsRefusedMessage)
+	}
+	if err := requireAdminCommandTeamScope(clientSession); err != nil {
+		return "", nil, err
 	}
 	if err := self.requireTeamTier(clientSession.Ctx, byJwt.NetworkId); err != nil {
 		return "", nil, err
@@ -419,57 +437,93 @@ func (self *networkDomains) add(args *NetworkDomainArgs, clientSession *session.
 	}
 	now := self.now()
 	refused := false
-	var networkDomain *NetworkDomain
-	var message string
+	var answer *NetworkDomainResult
+	var replayErr error
 	server.Tx(ctx, func(tx server.PgTx) {
-		refused, networkDomain, message = false, nil, ""
+		refused, answer, replayErr = false, nil, nil
 		if !teamCallerPermitsWithQuery(ctx, tx, clientSession, RolePermissionOwner) {
 			refused = true
 			return
 		}
-		// the network's rows change one at a time, so the limit holds
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`SELECT pg_advisory_xact_lock(hashtextextended('network_domain_network:' || $1::uuid::text, 0))`,
-			networkId,
-		))
-		if networkDomain = getNetworkDomainWithQuery(ctx, tx, networkId, domain, false); networkDomain != nil {
+		if answer, replayErr = self.replayInTx(ctx, tx, clientSession, now); answer != nil || replayErr != nil {
 			return
 		}
-		var count int
-		server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*) FROM network_domain WHERE network_id = $1`, networkId).Scan(&count))
-		if self.settings.DomainLimit <= count {
-			message = fmt.Sprintf("A network holds at most %d domains.", max(self.settings.DomainLimit, 0))
-			return
-		}
-		// fail_time starts the unverified row's 7 days
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_domain (network_id, domain, challenge, fail_time)
-				VALUES ($1, $2, $3, $4)
-			`,
-			networkId,
-			domain,
-			challenge,
-			now,
-		))
-		networkDomain = getNetworkDomainWithQuery(ctx, tx, networkId, domain, false)
-		AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainAdd, AdminEventTargetDomain, nil))
-		// a new domain owes Owners and Admins a notice (§7.8)
-		oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{
-			ChangeTime: now,
-			Action:     SecurityNetworkAuthorityDomain,
-			Via:        securityNoticeVia(ctx),
-		})
+		answer = func() *NetworkDomainResult {
+			// the network's rows change one at a time, so the limit holds
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`SELECT pg_advisory_xact_lock(hashtextextended('network_domain_network:' || $1::uuid::text, 0))`,
+				networkId,
+			))
+			if networkDomain := getNetworkDomainWithQuery(ctx, tx, networkId, domain, false); networkDomain != nil {
+				return &NetworkDomainResult{Domain: networkDomainStateOf(networkDomain)}
+			}
+			var count int
+			server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*) FROM network_domain WHERE network_id = $1`, networkId).Scan(&count))
+			if self.settings.DomainLimit <= count {
+				message := fmt.Sprintf("A network holds at most %d domains.", max(self.settings.DomainLimit, 0))
+				return &NetworkDomainResult{Error: &NetworkDomainError{Message: message}}
+			}
+			// fail_time starts the unverified row's 7 days
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO network_domain (network_id, domain, challenge, fail_time)
+					VALUES ($1, $2, $3, $4)
+				`,
+				networkId,
+				domain,
+				challenge,
+				now,
+			))
+			networkDomain := getNetworkDomainWithQuery(ctx, tx, networkId, domain, false)
+			AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainAdd, AdminEventTargetDomain, nil))
+			// a new domain owes Owners and Admins a notice (§7.8)
+			oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{
+				ChangeTime: now,
+				Action:     SecurityNetworkAuthorityDomain,
+				Via:        securityNoticeVia(ctx),
+			})
+			return &NetworkDomainResult{Domain: networkDomainStateOf(networkDomain)}
+		}()
+		self.storeInTx(ctx, tx, clientSession, answer)
 	}, server.TxReadCommitted)
 	switch {
 	case refused:
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkDomainsRefusedMessage)
-	case message != "":
-		return &NetworkDomainResult{Error: &NetworkDomainError{Message: message}}, nil
+	case replayErr != nil:
+		return nil, replayErr
 	}
-	return &NetworkDomainResult{Domain: networkDomainStateOf(networkDomain)}, nil
+	return answer, nil
+}
+
+// The admin token's part of a domain route's transaction, once its caller
+// passed: a replay's stored answer, the 409 of a replay that met a first use
+// with no answer yet, or nil and nil for a first use and any other credential,
+// whose route then runs and stores its answer (storeInTx).
+func (self *networkDomains) replayInTx(ctx context.Context, tx server.PgTx, clientSession *session.ClientSession, now time.Time) (*NetworkDomainResult, error) {
+	adminCommand := clientSession.AdminCommand
+	if adminCommand == nil {
+		return nil, nil
+	}
+	replayed := &NetworkDomainResult{}
+	replay, err := ReplayAdminTokenUseInTx(ctx, tx, adminCommand, now, replayed)
+	if errors.Is(err, ErrAdminTokenUseNoResult) {
+		return nil, fmt.Errorf("%d %s", http.StatusConflict, adminTokenUseUnansweredMessage)
+	}
+	server.Raise(err)
+	if !replay {
+		return nil, nil
+	}
+	return replayed, nil
+}
+
+// Stores a first use's answer for its replays; nothing for any other
+// credential.
+func (self *networkDomains) storeInTx(ctx context.Context, tx server.PgTx, clientSession *session.ClientSession, answer *NetworkDomainResult) {
+	if adminCommand := clientSession.AdminCommand; adminCommand != nil {
+		server.Raise(StoreAdminTokenUseAnswerInTx(ctx, tx, adminCommand, answer))
+	}
 }
 
 // What a claim of a verified domain answers when another network holds it. It
@@ -490,115 +544,126 @@ func (self *networkDomains) verify(args *NetworkDomainArgs, clientSession *sessi
 	if result != nil || err != nil {
 		return result, err
 	}
-	refuse := func(message string, networkDomain *NetworkDomain) (*NetworkDomainResult, error) {
+	refusal := func(message string, networkDomain *NetworkDomain) *NetworkDomainResult {
 		result := &NetworkDomainResult{Error: &NetworkDomainError{Message: message}}
 		if networkDomain != nil {
 			result.Domain = networkDomainStateOf(networkDomain)
 		}
-		return result, nil
+		return result
 	}
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
 	now := self.now()
 
-	// the row, and this lookup's turn taken on it, before any lookup
-	refused, throttled := false, false
+	// the row, and this lookup's turn taken on it, before any lookup; an admin
+	// token's use is claimed here and its answer stored in the transaction that
+	// decides it
+	refused := false
+	var answer *NetworkDomainResult
+	var replayErr error
 	var networkDomain *NetworkDomain
 	server.Tx(ctx, func(tx server.PgTx) {
-		refused, throttled, networkDomain = false, false, nil
+		refused, answer, replayErr, networkDomain = false, nil, nil, nil
 		if !teamCallerPermitsWithQuery(ctx, tx, clientSession, RolePermissionOwner) {
 			refused = true
 			return
 		}
+		if answer, replayErr = self.replayInTx(ctx, tx, clientSession, now); answer != nil || replayErr != nil {
+			return
+		}
 		networkDomain = getNetworkDomainWithQuery(ctx, tx, networkId, domain, true)
-		if networkDomain == nil || networkDomain.VerifyTime != nil {
+		switch {
+		case networkDomain == nil:
+			answer = refusal("Add the domain first.", nil)
+		case networkDomain.VerifyTime != nil:
+			answer = &NetworkDomainResult{Domain: networkDomainStateOf(networkDomain)}
+		case networkDomain.CheckTime != nil && now.Sub(*networkDomain.CheckTime) < self.settings.VerifyInterval:
+			answer = refusal("The domain was checked a moment ago. Try again shortly.", networkDomain)
+		default:
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_domain SET check_time = $3 WHERE network_id = $1 AND domain = $2`,
+				networkId,
+				domain,
+				now,
+			))
+			networkDomain.CheckTime = &now
+			// the answer waits for the lookup
 			return
 		}
-		if networkDomain.CheckTime != nil && now.Sub(*networkDomain.CheckTime) < self.settings.VerifyInterval {
-			throttled = true
-			return
-		}
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`UPDATE network_domain SET check_time = $3 WHERE network_id = $1 AND domain = $2`,
-			networkId,
-			domain,
-			now,
-		))
-		networkDomain.CheckTime = &now
+		self.storeInTx(ctx, tx, clientSession, answer)
 	}, server.TxReadCommitted)
 	switch {
 	case refused:
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkDomainsRefusedMessage)
-	case networkDomain == nil:
-		return refuse("Add the domain first.", nil)
-	case networkDomain.VerifyTime != nil:
-		return &NetworkDomainResult{Domain: networkDomainStateOf(networkDomain)}, nil
-	case throttled:
-		return refuse("The domain was checked a moment ago. Try again shortly.", networkDomain)
+	case replayErr != nil:
+		return nil, replayErr
+	case answer != nil:
+		return answer, nil
 	}
 
 	// the lookup, holding no connection
 	found := self.lookup(ctx, networkDomain)
 	if !found {
-		return refuse("The TXT record was not found. DNS changes can take a while to appear.", networkDomain)
+		answer = refusal("The TXT record was not found. DNS changes can take a while to appear.", networkDomain)
+		if clientSession.AdminCommand != nil {
+			server.Tx(ctx, func(tx server.PgTx) {
+				self.storeInTx(ctx, tx, clientSession, answer)
+			})
+		}
+		return answer, nil
 	}
 
-	held, gone := false, false
 	server.Tx(ctx, func(tx server.PgTx) {
-		held, gone = false, false
-		lockNetworkDomainInTx(ctx, tx, domain)
-		current := getNetworkDomainWithQuery(ctx, tx, networkId, domain, true)
-		if current == nil || current.Challenge != networkDomain.Challenge {
-			// removed, or removed and added again, while the lookup ran
-			gone = true
-			return
-		}
-		if current.VerifyTime != nil {
-			networkDomain = current
-			return
-		}
-		server.Raise(tx.QueryRow(
-			ctx,
-			`
-				SELECT EXISTS (
-					SELECT 1 FROM network_domain
-					WHERE domain = $1 AND verify_time IS NOT NULL AND network_id <> $2
-				)
-			`,
-			domain,
-			networkId,
-		).Scan(&held))
-		if held {
-			return
-		}
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				UPDATE network_domain
-				SET verify_time = $3, check_time = $3, fail_time = NULL
-				WHERE network_id = $1 AND domain = $2
-			`,
-			networkId,
-			domain,
-			now,
-		))
-		networkDomain = getNetworkDomainWithQuery(ctx, tx, networkId, domain, false)
-		AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainVerify, AdminEventTargetDomain, nil))
-		// from here the domain's sign-ins route to the team's IdP (§7.8)
-		oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{
-			ChangeTime: now,
-			Action:     SecurityNetworkAuthorityDomainVerified,
-			Via:        securityNoticeVia(ctx),
-		})
+		answer = func() *NetworkDomainResult {
+			lockNetworkDomainInTx(ctx, tx, domain)
+			current := getNetworkDomainWithQuery(ctx, tx, networkId, domain, true)
+			if current == nil || current.Challenge != networkDomain.Challenge {
+				// removed, or removed and added again, while the lookup ran
+				return refusal("Add the domain first.", nil)
+			}
+			if current.VerifyTime != nil {
+				return &NetworkDomainResult{Domain: networkDomainStateOf(current)}
+			}
+			held := false
+			server.Raise(tx.QueryRow(
+				ctx,
+				`
+					SELECT EXISTS (
+						SELECT 1 FROM network_domain
+						WHERE domain = $1 AND verify_time IS NOT NULL AND network_id <> $2
+					)
+				`,
+				domain,
+				networkId,
+			).Scan(&held))
+			if held {
+				return refusal(networkDomainHeldMessage, networkDomain)
+			}
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE network_domain
+					SET verify_time = $3, check_time = $3, fail_time = NULL
+					WHERE network_id = $1 AND domain = $2
+				`,
+				networkId,
+				domain,
+				now,
+			))
+			verified := getNetworkDomainWithQuery(ctx, tx, networkId, domain, false)
+			AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainVerify, AdminEventTargetDomain, nil))
+			// from here the domain's sign-ins route to the team's IdP (§7.8)
+			oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{
+				ChangeTime: now,
+				Action:     SecurityNetworkAuthorityDomainVerified,
+				Via:        securityNoticeVia(ctx),
+			})
+			return &NetworkDomainResult{Domain: networkDomainStateOf(verified)}
+		}()
+		self.storeInTx(ctx, tx, clientSession, answer)
 	}, server.TxReadCommitted)
-	switch {
-	case gone:
-		return refuse("Add the domain first.", nil)
-	case held:
-		return refuse(networkDomainHeldMessage, networkDomain)
-	}
-	return &NetworkDomainResult{Domain: networkDomainStateOf(networkDomain)}, nil
+	return answer, nil
 }
 
 // One lookup of the domain's challenge, bounded by LookupTimeout. A lookup
@@ -626,11 +691,17 @@ func (self *networkDomains) remove(args *NetworkDomainArgs, clientSession *sessi
 	}
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
-	refused, removed := false, false
+	now := self.now()
+	refused := false
+	var answer *NetworkDomainResult
+	var replayErr error
 	server.Tx(ctx, func(tx server.PgTx) {
-		refused, removed = false, false
+		refused, answer, replayErr = false, nil, nil
 		if !teamCallerPermitsWithQuery(ctx, tx, clientSession, RolePermissionOwner) {
 			refused = true
+			return
+		}
+		if answer, replayErr = self.replayInTx(ctx, tx, clientSession, now); answer != nil || replayErr != nil {
 			return
 		}
 		tag := server.RaisePgResult(tx.Exec(
@@ -639,16 +710,19 @@ func (self *networkDomains) remove(args *NetworkDomainArgs, clientSession *sessi
 			networkId,
 			domain,
 		))
-		if tag.RowsAffected() == 0 {
-			return
+		answer = &NetworkDomainResult{Removed: tag.RowsAffected() != 0}
+		if answer.Removed {
+			AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainRemove, AdminEventTargetDomain, nil))
 		}
-		removed = true
-		AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainRemove, AdminEventTargetDomain, nil))
+		self.storeInTx(ctx, tx, clientSession, answer)
 	}, server.TxReadCommitted)
-	if refused {
+	switch {
+	case refused:
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, networkDomainsRefusedMessage)
+	case replayErr != nil:
+		return nil, replayErr
 	}
-	return &NetworkDomainResult{Removed: removed}, nil
+	return answer, nil
 }
 
 // The IdP that sign-ins of the address's domain route to (§7.6): the oldest

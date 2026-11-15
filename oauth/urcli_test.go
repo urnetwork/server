@@ -176,6 +176,56 @@ func TestUrcliRequestAllowsOnlyTheV0Command(t *testing.T) {
 	}
 }
 
+// Full ur admin (TEAM-M6-08): a route whose model spends an admin token's use
+// validates under the all scope, and its body check runs before any consent
+// shows the command: POST /network/idp takes a private_key_jwt IdP and refuses
+// a client secret, which the authorization URL and the consent page would
+// carry, without naming it.
+func TestUrcliRequestRefusesASecretInItsCommand(t *testing.T) {
+	installUrcliTest(t)
+	request := func(body string) *AuthorizationRequest {
+		login := newTestUrcliLogin(t, &sidecar.AdminCommand{Method: "POST", Path: "/network/idp", Body: []byte(body)})
+		login.request.Scopes = []string{UrcliScopeAll}
+		return login.request
+	}
+	if _, err := ValidateUrcliRequest(request(`{"issuer":"https://idp.example","client_id":"c","client_auth":"private_key_jwt"}`)); err != nil {
+		t.Fatal(err)
+	}
+	secret := "synthetic-idp-secret-4f1e"
+	for _, body := range []string{
+		`{"issuer":"https://idp.example","client_id":"c","client_auth":"client_secret","client_secret":"` + secret + `"}`,
+		`{"issuer":"https://idp.example","client_id":"c","client_auth":"client_secret"}`,
+	} {
+		_, err := ValidateUrcliRequest(request(body))
+		if !errors.Is(err, ErrUrcliCommandRefused) {
+			t.Errorf("%s: %v", body, err)
+		} else if strings.Contains(err.Error(), secret) {
+			t.Errorf("the refusal names the secret: %s", err)
+		}
+	}
+	// every Team route of ur admin whose model is model's is an admin command
+	// route (POST /network/member-remove registers in controller, which oauth
+	// does not link)
+	for _, route := range [][2]string{
+		{"POST", "/network/idp"},
+		{"POST", "/network/domain-add"},
+		{"POST", "/network/domain-verify"},
+		{"POST", "/network/domain-remove"},
+		{"POST", "/network/audit-webhook"},
+		{"GET", "/network/admin-events"},
+		{"GET", "/network/members"},
+		{"POST", "/network/member-invite"},
+		{"GET", "/network/scim-changes"},
+		{"GET", "/network/oauth-clients"},
+		{"POST", "/network/oauth-clients"},
+		{"POST", "/network/oauth-client-revoke"},
+	} {
+		if !session.AdminCommandRouteRegistered(route[0], route[1]) {
+			t.Errorf("%s %s is no admin command route", route[0], route[1])
+		}
+	}
+}
+
 // No ur-cli authorization completes without a consent that showed its code:
 // the receipt /oauth/consent gave for this request, user and time.
 func TestUrcliAuthorizationNeedsAConsentReceipt(t *testing.T) {
