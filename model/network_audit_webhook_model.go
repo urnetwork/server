@@ -412,6 +412,9 @@ func (self *networkAudits) getEvents(args *GetNetworkAdminEventsArgs, clientSess
 				return
 			}
 			read(tx)
+			if refused {
+				return
+			}
 			server.Raise(StoreAdminTokenUseAnswerInTx(ctx, tx, adminCommand, result))
 		})
 	}
