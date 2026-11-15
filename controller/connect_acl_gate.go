@@ -17,6 +17,19 @@ package controller
 // Which processes install a gate: connect over api's internal gate surface (sidecar.AclGateApiSource), api and
 // taskworker over their first metadata cluster (sidecar.AclGateDirectSource). Neither source is wired into a process
 // yet, so none installs one and the gate stays dark wherever the switch says.
+//
+// §21's hard deny runs first, whether or not a gate is installed or switched on (ABUSE-M5-07; D-ABUSE-4, I-12): §8.6's
+// "abuse halt (§21)". A §21 suspension refuses new contracts for sidecar subjects only, shares included, so an
+// ordinary VPN client of a suspended network keeps its reach (plan-ABUSE-suspension-effects, QD-049). An end is a
+// sidecar subject when its subject is bound to a sidecar or its owner row marks it sidecar-held (strict_exp or
+// tagged), from the relationship's one query, which reads each end's network on every leg. The held networks come
+// from model.AbuseHardDenySnapshot, which the process installs (SetAbuseHardDeny; api, taskworker and connect at
+// startup) and which reloads network_abuse_state every 5 s off the request path, so a request pays one map read per
+// sidecar end and no query (DenyPostgresForTest). A snapshot not loaded, or too old to trust, refuses every sidecar
+// end, never passes one. A process with no snapshot installed holds no network, as one with no gate takes today's
+// path; a binary that does not link MG5 installs none, having no network_abuse_state. The refusal is NoPermission,
+// counted as the gate's own (acl_no_permission, or acl_unavailable for a snapshot not in force), never recorded as the
+// route's rejection, and it names no case: a barred case's network learns nothing beyond the deny itself (§21.8).
 
 import (
 	"context"
@@ -56,6 +69,102 @@ func ActiveAclContractGate() *sidecar.AclContractGate {
 // process today, starts no §8.19 recheck at all.
 func AclContractGateInstalled() bool {
 	return aclContractGate.Load() != nil
+}
+
+// The process's §21 hard deny, nil while none is installed.
+var abuseHardDeny atomic.Pointer[model.AbuseHardDenySnapshot]
+
+// Installs the snapshot CreateContract's hard deny reads, nil removing it, and answers what restores the one before.
+func SetAbuseHardDeny(snapshot *model.AbuseHardDenySnapshot) (restore func()) {
+	previous := abuseHardDeny.Swap(snapshot)
+	return func() {
+		abuseHardDeny.Store(previous)
+	}
+}
+
+// Installs a hard deny snapshot of its own in a process that runs CreateContract and nothing else of §21, connect at
+// startup, and answers what removes it and stops the snapshot. A binary that does not link MG5 installs none.
+func InstallAbuseHardDeny(ctx context.Context) (restore func()) {
+	if !server.SidecarMg5Linked() {
+		return func() {}
+	}
+	snapshot := model.NewAbuseHardDenySnapshot(ctx, nil)
+	restoreHardDeny := SetAbuseHardDeny(snapshot)
+	return func() {
+		restoreHardDeny()
+		snapshot.Close()
+	}
+}
+
+// Installs §21.7's reads in a process that holds Postgres, api's and taskworker's startup: model.InstallAbuseStanding's
+// gate, sources and checks, and its snapshot as CreateContract's hard deny, which api's control route runs. Answers what
+// puts the previous ones back and stops the snapshot and the gate. A binary that does not link MG5 installs the reads,
+// which then answer by a network's age alone, and no hard deny.
+func InstallAbuseStanding(ctx context.Context) (restore func()) {
+	hardDeny, restoreStanding := model.InstallAbuseStanding(ctx)
+	restoreHardDeny := func() {}
+	if server.SidecarMg5Linked() {
+		restoreHardDeny = SetAbuseHardDeny(hardDeny)
+	}
+	return func() {
+		restoreHardDeny()
+		restoreStanding()
+	}
+}
+
+// The network of an end that is a sidecar subject, false for any other end: one whose subject is bound to a sidecar or
+// whose owner row marks it sidecar-held. networkId and strictExp are the relationship's own, read on every leg and
+// where MG0 is linked; acl is the end's gate facts, nil where MG0, MG1 and MG2 are not all linked, whose network is
+// the same.
+func contractAbuseSidecarEnd(networkId *server.Id, strictExp bool, acl *model.ProvideRelationshipAclEnd) (server.Id, bool) {
+	sidecarHeld := strictExp
+	if acl != nil {
+		sidecarHeld = sidecarHeld || acl.SidecarId != nil || acl.StrictExp || acl.Tagged
+		if networkId == nil {
+			networkId = &acl.NetworkId
+		}
+	}
+	if networkId == nil {
+		// a client the server does not have, which creates nothing
+		return server.Id{}, false
+	}
+	return *networkId, sidecarHeld
+}
+
+// §21's hard deny for one CreateContract from the relationship's facts: refused when a sidecar end's network is held,
+// or when no snapshot is in force and an end is a sidecar's. One map read per sidecar end, no I/O and no allocation.
+func contractAbuseHardDeny(details *model.ProvideRelationshipDetails) (verdict sidecar.AclContractVerdict, refused bool) {
+	snapshot := abuseHardDeny.Load()
+	if snapshot == nil {
+		return sidecar.AclContractVerdict{}, false
+	}
+	check := func(networkId server.Id, sidecarEnd bool) (sidecar.AclContractVerdict, bool) {
+		if !sidecarEnd {
+			return sidecar.AclContractVerdict{}, false
+		}
+		_, denied, ok := snapshot.Denied(networkId)
+		switch {
+		case !ok:
+			return sidecar.AclContractVerdict{
+				Outcome:   sidecar.AclContractRefuse,
+				Reason:    sidecar.AclContractReasonNotLoaded,
+				NetworkId: sidecar.Id(networkId),
+				Decision:  sidecar.AclDecision{Reason: sidecar.AclReasonAbuseHalt},
+			}, true
+		case denied:
+			return sidecar.AclContractVerdict{
+				Outcome:   sidecar.AclContractRefuse,
+				Reason:    sidecar.AclContractReasonDenied,
+				NetworkId: sidecar.Id(networkId),
+				Decision:  sidecar.AclDecision{Reason: sidecar.AclReasonAbuseHalt},
+			}, true
+		}
+		return sidecar.AclContractVerdict{}, false
+	}
+	if verdict, refused := check(contractAbuseSidecarEnd(details.SourceNetworkId, details.SourceStrictExp, details.SourceAcl)); refused {
+		return verdict, true
+	}
+	return check(contractAbuseSidecarEnd(details.DestinationNetworkId, details.DestinationStrictExp, details.DestinationAcl))
 }
 
 // The gate CreateContract consults and the sidecar.yml read that enabled it: the installed gate while the
@@ -177,8 +286,9 @@ func contractAclRejectionCause(verdict sidecar.AclContractVerdict) string {
 	return "acl_no_permission"
 }
 
-// Runs the gate for CreateContract: nil frames and data when the contract goes on, with the class C13 seals
-// (PROTO-M4-02 writes the seal), or the refusal's frames, NoPermission. A gate of nil goes on as today, class data.
+// Runs §21's hard deny, then the gate, for CreateContract: nil frames and data when the contract goes on, with the
+// class C13 seals (PROTO-M4-02 writes the seal), or the refusal's frames, NoPermission. A gate of nil goes on as today,
+// class data, once the hard deny passes.
 func contractAclGate(
 	ctx context.Context,
 	gate *sidecar.AclContractGate,
@@ -190,19 +300,22 @@ func contractAclGate(
 	details *model.ProvideRelationshipDetails,
 	contractManagerSettings *connect.ContractManagerSettings,
 ) (sidecar.AclContractVerdict, []*protocol.Frame, error) {
-	if gate == nil {
-		return sidecar.AclContractVerdict{Outcome: sidecar.AclContractSkip, Class: sidecar.AclContractClassData}, nil, nil
-	}
-	verdict := decideContractAcl(gate, config, clientId, destinationId, createContract, details, server.NowUtc())
-	if verdict.Outcome == sidecar.AclContractReply {
-		originStands, err := contractAclReplyOrigin(ctx, notifications, clientId, destinationId, contractManagerSettings)
-		if err != nil {
-			return verdict, nil, err
+	verdict, abuseRefused := contractAbuseHardDeny(details)
+	if !abuseRefused {
+		if gate == nil {
+			return sidecar.AclContractVerdict{Outcome: sidecar.AclContractSkip, Class: sidecar.AclContractClassData}, nil, nil
 		}
-		verdict = verdict.Origin(originStands)
-	}
-	if verdict.Allowed() {
-		return verdict, nil, nil
+		verdict = decideContractAcl(gate, config, clientId, destinationId, createContract, details, server.NowUtc())
+		if verdict.Outcome == sidecar.AclContractReply {
+			originStands, err := contractAclReplyOrigin(ctx, notifications, clientId, destinationId, contractManagerSettings)
+			if err != nil {
+				return verdict, nil, err
+			}
+			verdict = verdict.Origin(originStands)
+		}
+		if verdict.Allowed() {
+			return verdict, nil, nil
+		}
 	}
 	if glog.V(2) {
 		glog.Infof("[contract][reject]%s->%s acl %s (companion=%t)\n", clientId, destinationId, verdict.Reason, createContract.Companion)

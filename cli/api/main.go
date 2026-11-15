@@ -51,6 +51,10 @@ Options:
 	// binary that does not link MG5 installs neither
 	controller.InstallAbuseEffects()
 	controller.InstallAbuseRecordMailer()
+	// §21.7's standing and network_verified for this process's gates and
+	// routes, and the hard deny its control route's CreateContract reads
+	// (ABUSE-M5-07)
+	controller.InstallAbuseStanding(ctx)
 	if err := api.Run(ctx, api.RunOptions{Port: port}); err != nil {
 		panic(err)
 	}
