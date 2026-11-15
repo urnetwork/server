@@ -22,7 +22,8 @@ package controller
 // "abuse halt (§21)". A §21 suspension refuses new contracts for sidecar subjects only, shares included, so an
 // ordinary VPN client of a suspended network keeps its reach (plan-ABUSE-suspension-effects, QD-049). An end is a
 // sidecar subject when its subject is bound to a sidecar or its owner row marks it sidecar-held (strict_exp or
-// tagged), from the relationship's one query, which reads each end's network on every leg. The held networks come
+// tagged), from the relationship's one query, which reads each end's network on every leg; the control id's contracts,
+// the platform's own channel, are skipped as §8.10's gate skips them. The held networks come
 // from model.AbuseHardDenySnapshot, which the process installs (SetAbuseHardDeny; api, taskworker and connect at
 // startup) and which reloads network_abuse_state every 5 s off the request path, so a request pays one map read per
 // sidecar end and no query (DenyPostgresForTest). A snapshot not loaded, or too old to trust, refuses every sidecar
@@ -132,10 +133,12 @@ func contractAbuseSidecarEnd(networkId *server.Id, strictExp bool, acl *model.Pr
 }
 
 // §21's hard deny for one CreateContract from the relationship's facts: refused when a sidecar end's network is held,
-// or when no snapshot is in force and an end is a sidecar's. One map read per sidecar end, no I/O and no allocation.
-func contractAbuseHardDeny(details *model.ProvideRelationshipDetails) (verdict sidecar.AclContractVerdict, refused bool) {
+// or when no snapshot is in force and an end is a sidecar's. The control id's contracts are the platform's own channel,
+// which §8.10's gate skips too, so a suspension never cuts a connected client off from it. One map read per sidecar end,
+// no I/O and no allocation.
+func contractAbuseHardDeny(clientId server.Id, destinationId server.Id, details *model.ProvideRelationshipDetails) (verdict sidecar.AclContractVerdict, refused bool) {
 	snapshot := abuseHardDeny.Load()
-	if snapshot == nil {
+	if snapshot == nil || clientId == ControlId || destinationId == ControlId {
 		return sidecar.AclContractVerdict{}, false
 	}
 	check := func(networkId server.Id, sidecarEnd bool) (sidecar.AclContractVerdict, bool) {
@@ -300,7 +303,7 @@ func contractAclGate(
 	details *model.ProvideRelationshipDetails,
 	contractManagerSettings *connect.ContractManagerSettings,
 ) (sidecar.AclContractVerdict, []*protocol.Frame, error) {
-	verdict, abuseRefused := contractAbuseHardDeny(details)
+	verdict, abuseRefused := contractAbuseHardDeny(clientId, destinationId, details)
 	if !abuseRefused {
 		if gate == nil {
 			return sidecar.AclContractVerdict{Outcome: sidecar.AclContractSkip, Class: sidecar.AclContractClassData}, nil, nil

@@ -71,7 +71,11 @@ func testingAbuseDetails(sourceNetworkId server.Id, sourceSidecar bool, destinat
 
 // One step of CreateContract's gate with no ACL gate installed, its verdict and whether it refused.
 func testingAbuseStep(ctx context.Context, details *model.ProvideRelationshipDetails) (sidecar.AclContractVerdict, bool) {
-	source, destination := server.NewId(), server.NewId()
+	return testingAbuseStepBetween(ctx, server.NewId(), server.NewId(), details)
+}
+
+// testingAbuseStep for a given source and destination.
+func testingAbuseStepBetween(ctx context.Context, source server.Id, destination server.Id, details *model.ProvideRelationshipDetails) (sidecar.AclContractVerdict, bool) {
 	verdict, refusal, err := contractAclGate(ctx, nil, nil, nil, source, destination, &protocol.CreateContract{DestinationId: destination.Bytes()}, details, connect.DefaultContractManagerSettings())
 	if err != nil {
 		panic(err)
@@ -124,6 +128,12 @@ func TestContractAbuseHardDenyRefusesSidecarEnds(t *testing.T) {
 	details.SourceAcl.StrictExp = false
 	if _, refused := testingAbuseStep(ctx, details); !refused {
 		t.Error("a bound sidecar read from its gate facts alone passed")
+	}
+	// the platform's control channel to a suspended sidecar, either way, as §8.10's gate skips it
+	for _, pair := range [][2]server.Id{{ControlId, server.NewId()}, {server.NewId(), ControlId}} {
+		if _, refused := testingAbuseStepBetween(ctx, pair[0], pair[1], testingAbuseDetails(suspended, true, suspended, true)); refused {
+			t.Error("the control id's contract was refused")
+		}
 	}
 	if 0 < attempts() {
 		t.Fatalf("the hard deny reached PostgreSQL %d times", attempts())
