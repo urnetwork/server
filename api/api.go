@@ -10,6 +10,26 @@ import (
 	"time"
 )
 
+// Tunables of the api route set.
+type RouteSettings struct {
+	// The streamed bodies of the provider work routes and of POST
+	// /verify/original/close: a body idle or in transfer for 60 s ends, the
+	// answer is due 300 s after the body is in hand, and a drain takes at most
+	// 5 s. router.StreamingBody says what each zero leaves in place.
+	ProviderWorkBody router.StreamingBody
+}
+
+func DefaultRouteSettings() *RouteSettings {
+	return &RouteSettings{
+		ProviderWorkBody: router.StreamingBody{
+			IdleTimeout:     60 * time.Second,
+			TransferTimeout: 60 * time.Second,
+			ResponseTimeout: 300 * time.Second,
+			DrainTimeout:    5 * time.Second,
+		},
+	}
+}
+
 // Routes returns the full set of api routes.
 //
 // It is shared by the apicli command and by integration tests that serve the
@@ -43,7 +63,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	internalGateProjection := handlers.NewInternalGateProjectionHandlers(nil)
 	internalGateEdgeClient := handlers.NewInternalGateEdgeClientHandlers(nil)
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
-	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
+	providerWorkBody := DefaultRouteSettings().ProviderWorkBody
 	connectControl := handlers.ConnectControl
 	if owners.notifications != nil || owners.stuckProviders != nil {
 		connectControl = handlers.ConnectControlWithOwners(owners.notifications, owners.stuckProviders)
