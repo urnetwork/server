@@ -33,8 +33,9 @@ func TestReleaseSourceGraphBuildsThePendingLeg(t *testing.T) {
 // Every command above links the root, protocol and protocol/bridge through controller's
 // sidecar identity routes, ./cli/dns links dnsservice and miekg/dns, ./cli/evs links
 // evsservice and pushservice, ./cli/gkm links gkmservice, evsservice's write budget and
-// pushservice, ./cli/mxedge links mxedgeservice, tlsedgeservice and
-// sidecar's go-smtp fork, ./cli/sockets links socketsservice, tlsedgeservice's
+// pushservice, ./cli/mxedge links mxedgeservice, tlsedgeservice, sidecar's
+// go-smtp fork and, for its router, the root's edge client pool and socket edge
+// dialer, ./cli/sockets links socketsservice, tlsedgeservice's
 // kill-hash reader and pushservice, and ./cli/tlsedge links tlsedgeservice and the root's edge client
 // pool, but none links smtpproof. Each ./cli/<svc> hosting a sidecar engine joins the list above as it lands,
 // with the requires its engine brings, and this compiles smtpproof, which the

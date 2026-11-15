@@ -576,6 +576,7 @@
     "gkm": "certificates",
     "gossip": "certificates",
     "mcp": "certificates",
+    "mxedge": "certificates",
     "mxedge-platform": "certificates",
     "proxy": "proxy",
     "sockets": "certificates",

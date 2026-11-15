@@ -1,34 +1,46 @@
-// server/cli/mxedge (MAIL-M5-04; §15.4, §15.15, §19.4): the mxedge engine's one binary in two roles on TCP
-// 25, each its own warp service on its own lb interfaces (W4, plan-OPS-small-readings #6): --role platform for
-// mxedge-platform, rpt.bringyour.com's listener, whose image server/cli/mxedge-platform builds from this main,
-// and --role router for mxedge, which MAIL-M7-19 builds and which refuses until then. Each is a block run by
+// server/cli/mxedge (MAIL-M5-04, MAIL-M7-19; §15.4, §15.15, §19.4): the mxedge engine's one binary in two roles
+// on TCP 25, each its own warp service on its own lb interfaces (W4, plan-OPS-small-readings #6): --role platform
+// for mxedge-platform, rpt.bringyour.com's listener, whose image server/cli/mxedge-platform builds from this
+// main, and --role router for mxedge, whose image this directory builds. Each is a block run by
 // mxedgehost.RunHost through sidecarhost.Run, with GET /status on port 80, TCP 25 behind the lb's PROXY header,
 // {vault: no, config: yes, site: no} and user 65532. It reads config/<env>/mxedge.yml at start, the platform
 // role's report intake reads smtpedge.yml beside it (report_intake.go, SMTP-M5-06), and the host rereads
 // sidecar.yml's mxedge gate every 60 s.
+//
+// The router holds no TLS key and mounts nothing of the platform role's: its secret_files hold redis.yml, the
+// Postgres role its session records are written under, its internal gate bearer for the quota surface
+// (internal-gate-mxedge.yml), the edge bearer its platform clients are minted on (internal-gate-edge.yml) and
+// the feed credential (MAIL-M7-20). It routes by SNI through {mxr_<net>} and splices to receivers found at the
+// sockets service (-sockets_url), its quota and clients at api (-api_url).
 package main
 
 import (
 	"context"
 	"errors"
 	"flag"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/mxedgeservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/mxedgehost"
+	"github.com/urnetwork/server/quotahost"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
 var (
-	role      = flag.String("role", "", "platform; router lands with MAIL-M7-19")
-	port      = flag.Int("port", 80, "the block's status port")
-	smtpPort  = flag.Int("smtp_port", 25, "the block's TCP 25 port, behind the lb's PROXY header")
-	secretDir = flag.String("secret_dir", sidecarhost.ScopedVaultHome, "where the block's secret_files mount")
+	role       = flag.String("role", "", "platform or router")
+	port       = flag.Int("port", 80, "the block's status port")
+	smtpPort   = flag.Int("smtp_port", 25, "the block's TCP 25 port, behind the lb's PROXY header")
+	secretDir  = flag.String("secret_dir", sidecarhost.ScopedVaultHome, "where the block's secret_files mount")
+	apiUrl     = flag.String("api_url", "", "router: api's base URL, whose internal gate the quota surface and the edge client route are read from; empty leaves the router not ready")
+	socketsUrl = flag.String("sockets_url", "", "router: the sockets service's base URL, which every Find is sent to; empty leaves the router not ready")
 )
 
 func main() {
@@ -43,8 +55,8 @@ func main() {
 		}
 		logs.Exit(2)
 	}
-	if *role != mxedgehost.HostRolePlatform {
-		glog.Errorf("[mxedge]--role must be %s; %s lands with MAIL-M7-19\n", mxedgehost.HostRolePlatform, mxedgehost.HostRoleRouter)
+	if *role != mxedgehost.HostRolePlatform && *role != mxedgehost.HostRoleRouter {
+		glog.Errorf("[mxedge]--role must be %s or %s\n", mxedgehost.HostRolePlatform, mxedgehost.HostRoleRouter)
 		logs.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
@@ -59,21 +71,130 @@ func main() {
 	settings := mxedgehost.DefaultHostSettings()
 	settings.MxEdge = mxEdgeSettings
 	settings.SecretDirectory = *secretDir
-	// the block's own certificate and stores, and the report intake on smtpedge.yml (report_intake.go), ready
-	// only in a binary that links the groups it reads; without one every recipient gets 451
 	deps := &mxedgehost.HostDeps{}
-	// the url the refusal of unread role mail names is abuse.yml's form (abuse_auto_reply.go); two files that
-	// disagree on it leave the block without an intake
-	intake, err := newReportIntakeWithAutoReply(mxEdgeSettings, server.GetAbuseConfig().FormUrl())
-	if err != nil {
-		glog.Errorf("[mxedge]no report intake, so every recipient the listener answers for gets 451 4.3.0: %v\n", err)
-	} else {
-		deps.Intake = intake
-		deps.IntakeGroups = reportIntakeGroups()
+	var routerDeps *mxedgehost.RouterDeps
+	switch *role {
+	case mxedgehost.HostRolePlatform:
+		// the block's own certificate and stores, and the report intake on smtpedge.yml (report_intake.go),
+		// ready only in a binary that links the groups it reads; without one every recipient gets 451. The url
+		// the refusal of unread role mail names is abuse.yml's form (abuse_auto_reply.go); two files that
+		// disagree on it leave the block without an intake
+		intake, err := newReportIntakeWithAutoReply(mxEdgeSettings, server.GetAbuseConfig().FormUrl())
+		if err != nil {
+			glog.Errorf("[mxedge]no report intake, so every recipient the listener answers for gets 451 4.3.0: %v\n", err)
+		} else {
+			deps.Intake = intake
+			deps.IntakeGroups = reportIntakeGroups()
+		}
+	case mxedgehost.HostRoleRouter:
+		// on a context of its own, so a SIGTERM's drain can still send the open usage window, ended after the block
+		quotaCtx, quotaCancel := context.WithCancel(context.WithoutCancel(ctx))
+		defer quotaCancel()
+		var end func()
+		routerDeps, end = routerBlockDeps(quotaCtx, mxEdgeSettings, *apiUrl, *socketsUrl)
+		defer end()
 	}
-	if err := mxedgehost.RunHost(ctx, *role, settings, deps, &mxedgehost.HostPorts{Status: *port, Smtp: *smtpPort}); err != nil {
+	if err := mxedgehost.RunHost(ctx, *role, settings, deps, routerDeps, &mxedgehost.HostPorts{Status: *port, Smtp: *smtpPort}); err != nil {
 		panic(err)
 	}
+}
+
+// The pool as the router's clients.
+type routerPoolClients struct {
+	*sidecar.EdgeClientPool
+}
+
+// The router's own deps: Quota over api's internal gate at apiUrl on the mxedge bearer, the store on the
+// block's Postgres role, the source on the edge bearer, and the pool and the dialer over it with Find at
+// socketsUrl. Each is left out, and said, when what it needs is missing, which leaves the block not ready.
+// quotaCtx outlives the drain, so the open usage window is sent. The returned call ends the quota's and
+// the source's loops.
+func routerBlockDeps(quotaCtx context.Context, mxEdgeSettings *mxedgeservice.MxEdgeSettings, apiUrl string, socketsUrl string) (*mxedgehost.RouterDeps, func()) {
+	deps := &mxedgehost.RouterDeps{
+		Store:       model.NewMxEdgeStore(nil),
+		StoreGroups: mxedgehost.RouterStoreGroups(),
+	}
+	ends := []func(){}
+	end := func() {
+		for _, end := range ends {
+			end()
+		}
+	}
+	if quota, err := quotahost.NewBlockQuota(quotaCtx, server.InternalGateCallerMxedge, apiUrl, nil); err != nil {
+		// the error names what is missing, never the bearer
+		glog.Errorf("[mxedge]no ServiceHost.Quota: %v\n", err)
+	} else {
+		deps.Quota = quota
+		ends = append(ends, func() { quota.Drain(context.Background()) })
+	}
+	bearer, err := server.LoadInternalGateCredential(server.InternalGateCallerEdge)
+	if err != nil {
+		glog.Errorf("[mxedge]no platform clients: %v\n", err)
+		return deps, end
+	}
+	blockHost, err := server.Host()
+	if err != nil {
+		glog.Errorf("[mxedge]no platform clients: %v\n", err)
+		return deps, end
+	}
+	sourceSettings := server.DefaultPlatformClientSourceSettings()
+	sourceSettings.ClientCount = mxEdgeSettings.Clients
+	source, err := server.NewPlatformClientSource(quotaCtx, &server.PlatformClientSourceArgs{
+		ApiUrl:   apiUrl,
+		Block:    "mxedge",
+		Host:     blockHost,
+		Bearer:   bearer,
+		Settings: sourceSettings,
+	})
+	if err != nil {
+		glog.Errorf("[mxedge]no platform clients: %v\n", err)
+		return deps, end
+	}
+	ends = append(ends, source.Close)
+	if socketsUrl == "" {
+		glog.Errorf("[mxedge]no platform clients: no sockets url for Find\n")
+		return deps, end
+	}
+	deps.Source = source
+	poolSettings := mxedgehost.DefaultRouterSettings(mxEdgeSettings).Clients
+	deps.NewClients = func(ctx context.Context) (mxedgehost.RouterClients, error) {
+		pool, err := sidecar.NewEdgeClientPool(ctx, &sidecar.EdgeClientPoolArgs{
+			Source:   source,
+			Settings: poolSettings,
+			Log:      mxedgehost.HostLogger(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return routerPoolClients{EdgeClientPool: pool}, nil
+	}
+	deps.NewDial = func(clients mxedgehost.RouterClients) (mxedgehost.RouterSocketDial, error) {
+		dialer, err := sidecar.NewSocketEdgeDialer(&sidecar.SocketEdgeDialerArgs{
+			Clients: clients.Clients(),
+			Find: &sidecar.SocketFindHttpArgs{
+				SocketsUrl: socketsUrl,
+				Transport:  &http.Transport{},
+				// a Find is the block's own call, on the first of its K clients' jwts
+				Bearer: func(ctx context.Context) (string, error) {
+					auth, err := source.ServiceClient(ctx, 0)
+					if err != nil {
+						return "", err
+					}
+					return auth.ByJwt, nil
+				},
+			},
+			Settings: &sidecar.SocketEdgeDialSettings{
+				FindTimeout:   mxEdgeSettings.FindTimeout,
+				FindCount:     mxEdgeSettings.FindCount,
+				AcceptTimeout: mxEdgeSettings.AcceptTicketTimeout,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		return dialer.Dial, nil
+	}
+	return deps, end
 }
 
 // mxedge.yml from config.

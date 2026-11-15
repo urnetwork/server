@@ -29,6 +29,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/mxedgeservice"
 	"github.com/urnetwork/sidecar/sidecartest"
@@ -197,6 +198,16 @@ func TestEngineDepsReachTlsedgeFunctions(t *testing.T) {
 	if NewEngineDeps(&sidecar.ServiceHost{}, nil).GateOpen() {
 		t.Fatal("a host with no gates read open")
 	}
+
+	// the router reads the gate's network list once SNI names a network
+	listed, unlisted := sidecar.NewId(), sidecar.NewId()
+	fakeHost.Gates.OpenService(sidecar.ServiceGateMxedge, connect.Id(listed))
+	if !deps.GateAdmits(listed) || deps.GateAdmits(unlisted) {
+		t.Fatal("the gate's network list read wrong")
+	}
+	if NewEngineDeps(&sidecar.ServiceHost{}, nil).GateAdmits(listed) {
+		t.Fatal("a host with no gates admitted a network")
+	}
 }
 
 // Only a pair that loads, matches and names the report host is the platform's certificate, and no refusal
@@ -321,11 +332,10 @@ func TestPlatformRunOptionsHoldPostgresAndTheProxyListener(t *testing.T) {
 	}
 }
 
-// Only the platform role is built: the router is MAIL-M7-19's, and any other role is refused before anything
-// is bound.
+// A role that is neither the platform nor the router is refused before anything is bound.
 func TestRunHostRefusesRolesItDoesNotRun(t *testing.T) {
-	for _, role := range []string{HostRoleRouter, "", "edge"} {
-		if err := RunHost(t.Context(), role, nil, nil, &HostPorts{Status: hostTestStatusPort, Smtp: hostTestSmtpPort}); err == nil {
+	for _, role := range []string{"", "edge", "Router"} {
+		if err := RunHost(t.Context(), role, nil, nil, nil, &HostPorts{Status: hostTestStatusPort, Smtp: hostTestSmtpPort}); err == nil {
 			t.Fatalf("role %q ran", role)
 		}
 	}

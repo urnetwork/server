@@ -13,7 +13,8 @@
 //     (plan-SMTP-report-intake-home) and which server/cli/mxedge's report_intake.go builds from smtpedge.yml
 //     and hands in as HostDeps.Intake (SMTP-M5-06); a block given none answers every recipient it takes
 //     451 4.3.0, so a sender retries and nothing is read.
-//   - router, the mxedge service on every other lb interface, is MAIL-M7-19's: RunHost refuses it until then.
+//   - router, the mxedge service on every other lb interface (router.go): mxedgeservice's router, which
+//     routes by SNI and splices, holding no TLS key and the platform and feed credentials alone.
 //
 // What the roles share is here: mxedge.yml's settings, the engine's MxEdgeDeps with tlsedgeservice's hello
 // functions (TLS reading 15: §4.4 keeps one engine from importing another, and server may import both),
@@ -38,6 +39,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/mxedgeservice"
@@ -115,8 +117,9 @@ type HostPorts struct {
 }
 
 // The engine's MxEdgeDeps on host: tlsedgeservice's hello functions, §19.11's mxedge gate as host's gates
-// answer it at each call, host's clock, and log, nil being glog. A platform session names no network, so the
-// gate it reads is the service's alone.
+// answer it at each call, the service's and, for the router once SNI names a network, its network list,
+// host's clock, and log, nil being glog. A platform session names no network, so the gate it reads is the
+// service's alone.
 func NewEngineDeps(host *sidecar.ServiceHost, log sidecar.Logger) *mxedgeservice.MxEdgeDeps {
 	if log == nil {
 		log = hostLogger{}
@@ -137,6 +140,9 @@ func NewEngineDeps(host *sidecar.ServiceHost, log sidecar.Logger) *mxedgeservice
 		},
 		GateOpen: func() bool {
 			return gates.Service(sidecar.ServiceGateMxedge).Enabled()
+		},
+		GateAdmits: func(networkId sidecar.Id) bool {
+			return gates.Service(sidecar.ServiceGateMxedge).Admits(connect.Id(networkId))
 		},
 		Clock: host.ClockOrReal(),
 		Log:   log,
@@ -386,10 +392,10 @@ func newPlatformBlockEngine(ctx context.Context, settings *HostSettings, deps *H
 
 // Runs role as a block until ctx ends, through sidecarhost.Run (§19.4): GET /status on ports.Status from the
 // first moment, TCP 25 on ports.Smtp behind the PROXY wrap once ready, then at ctx's end the drain and Close.
-// A role that cannot start logs why and serves /status not ready. Returns early for the router role, which
-// MAIL-M7-19 builds, a role that is neither, or options no block could run. settings must hold mxedge.yml;
-// deps may be nil.
-func RunHost(ctx context.Context, role string, settings *HostSettings, deps *HostDeps, ports *HostPorts) error {
+// A role that cannot start logs why and serves /status not ready. deps carries the platform's seams and
+// routerDeps the router's (RunRouterHost). Returns early for a role that is neither, or options no block
+// could run. settings must hold mxedge.yml; either deps may be nil.
+func RunHost(ctx context.Context, role string, settings *HostSettings, deps *HostDeps, routerDeps *RouterDeps, ports *HostPorts) error {
 	if deps == nil {
 		deps = &HostDeps{}
 	}
@@ -399,12 +405,21 @@ func RunHost(ctx context.Context, role string, settings *HostSettings, deps *Hos
 	switch role {
 	case HostRolePlatform:
 	case HostRoleRouter:
-		return errors.New("mxedge host: the router role is MAIL-M7-19's and not built yet")
+		var routerSettings *RouterSettings
+		if settings.MxEdge != nil {
+			routerSettings = DefaultRouterSettings(settings.MxEdge)
+		}
+		return RunRouterHost(ctx, settings, routerSettings, routerDeps, ports)
 	default:
 		return fmt.Errorf("mxedge host: role %q is neither %s nor %s", role, HostRolePlatform, HostRoleRouter)
 	}
 	engine := newPlatformBlockEngine(ctx, settings, deps)
 	return sidecarhost.Run(ctx, platformRunOptions(ctx, engine, settings, deps, ports))
+}
+
+// glog as a sidecar.Logger, for what the block's main builds around the engine.
+func HostLogger() sidecar.Logger {
+	return hostLogger{}
 }
 
 // glog as the engine's sidecar.Logger. The engine's lines name no address (I-13), and neither does a caller
