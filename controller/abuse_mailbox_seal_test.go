@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/hpke"
+	"crypto/mlkem"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -540,5 +541,196 @@ func TestAbuseMailboxSealVectorOpens(t *testing.T) {
 	}
 	if EncodeAbuseMailboxBody(sealed, settings) != vector.Body {
 		t.Fatal("the vector's body is not in the body's form")
+	}
+}
+
+// The private key file AbuseMailboxSealPrivateKeyFile writes is QD-832's one
+// line, the seed in standard base64, and reads back to a key that opens a
+// record sealed to the public key, its MAC verifying. So does a file an owner
+// has reformatted: a comment, quotes, a wrapped value, no final newline, CRLF.
+func TestAbuseMailboxSealPrivateKeyFileParses(t *testing.T) {
+	settings := DefaultAbuseMailboxSettings()
+	privateKey, keys := newTestAbuseMailboxKeys(t)
+	seed, err := privateKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seed) != 32 {
+		t.Fatalf("a seed of %d bytes", len(seed))
+	}
+	file, err := AbuseMailboxSealPrivateKeyFile(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedSeed := base64.StdEncoding.EncodeToString(seed)
+	if string(file) != "abuse_mailbox_seal_private_key: "+encodedSeed+"\n" {
+		t.Fatalf("the private key file is not its one line: %d bytes", len(file))
+	}
+
+	plaintext, err := EncodeAbuseRecord(testAbuseRecord(), keys.MacKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := SealAbuseMailboxRecord(keys.SealPublicKey, plaintext, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, form := range []string{
+		string(file),
+		"# the abuse mailboxes' private key, kept offline\n" + string(file),
+		abuseMailboxSealPrivateKeyName + ": \"" + encodedSeed + "\"\n",
+		abuseMailboxSealPrivateKeyName + ": |\n    " + encodedSeed[:20] + "\n    " + encodedSeed[20:] + "\n",
+		abuseMailboxSealPrivateKeyName + ": " + encodedSeed,
+		abuseMailboxSealPrivateKeyName + ": " + encodedSeed + "\r\n",
+	} {
+		parsed, err := ParseAbuseMailboxSealPrivateKey([]byte(form))
+		if err != nil {
+			t.Fatalf("a form of %d bytes: %v", len(form), err)
+		}
+		parsedSeed, err := parsed.Bytes()
+		if err != nil || !bytes.Equal(parsedSeed, seed) {
+			t.Fatalf("a form of %d bytes reads back to another seed: %v", len(form), err)
+		}
+		if !bytes.Equal(parsed.PublicKey().Bytes(), keys.SealPublicKey.Bytes()) {
+			t.Fatalf("a form of %d bytes reads back to another pair", len(form))
+		}
+		opened, err := OpenAbuseMailboxRecord(parsed, sealed, settings)
+		if err != nil || !bytes.Equal(opened, plaintext) {
+			t.Fatalf("a form of %d bytes does not open the record: %v", len(form), err)
+		}
+		if _, err := ParseAbuseRecord(opened, keys.MacKey); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A private key file is refused unless it is one document holding exactly its
+// one key, the base64 of a 32-byte seed: abuse-mailbox.yml's keys beside it, a
+// second document, the public key in its place and every malformed value
+// included. No refusal names a value.
+func TestAbuseMailboxSealPrivateKeyFileRefusals(t *testing.T) {
+	privateKey, keys := newTestAbuseMailboxKeys(t)
+	seed, err := privateKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedSeed := base64.StdEncoding.EncodeToString(seed)
+	macKey := base64.StdEncoding.EncodeToString(keys.MacKey)
+	publicKey := base64.StdEncoding.EncodeToString(keys.SealPublicKey.Bytes())
+	line := func(name string, value string) string {
+		return name + ": " + value + "\n"
+	}
+	seedLine := line(abuseMailboxSealPrivateKeyName, encodedSeed)
+	for _, c := range []struct {
+		name string
+		file string
+	}{
+		{name: "an empty file", file: ""},
+		{name: "a comment alone", file: "# nothing here\n"},
+		{name: "a file that is not a mapping", file: "- " + encodedSeed + "\n"},
+		{name: "a file that does not parse", file: seedLine + "\t:" + encodedSeed + "\n  - ["},
+		{name: "an empty value", file: line(abuseMailboxSealPrivateKeyName, "")},
+		{name: "a value that is a list", file: abuseMailboxSealPrivateKeyName + ": [" + encodedSeed + "]\n"},
+		{name: "a value that is a mapping", file: abuseMailboxSealPrivateKeyName + ": {seed: " + encodedSeed + "}\n"},
+		{name: "the seed under another key", file: line("abuse_mailbox_seal_seed", encodedSeed)},
+		{name: "the mac key beside it", file: seedLine + line(abuseMailboxMacKeyName, macKey)},
+		{name: "the public key beside it", file: seedLine + line(abuseMailboxSealPublicKeyName, publicKey)},
+		{name: "abuse-mailbox.yml in its place", file: string(AbuseMailboxKeyFile(keys))},
+		{name: "a value misplaced as a key", file: seedLine + line(encodedSeed, "x")},
+		{name: "the key twice", file: seedLine + seedLine},
+		{name: "a second document", file: seedLine + "---\n" + seedLine},
+		{name: "a second, empty document", file: seedLine + "---\n"},
+		{name: "a value that is not base64", file: line(abuseMailboxSealPrivateKeyName, "not*base64")},
+		{name: "a value in base64url", file: line(abuseMailboxSealPrivateKeyName, base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 32)))},
+		{name: "a value in hex", file: line(abuseMailboxSealPrivateKeyName, hex.EncodeToString(seed))},
+		{name: "a 31-byte seed", file: line(abuseMailboxSealPrivateKeyName, base64.StdEncoding.EncodeToString(seed[:31]))},
+		{name: "a 33-byte seed", file: line(abuseMailboxSealPrivateKeyName, base64.StdEncoding.EncodeToString(append(bytes.Clone(seed), 1)))},
+		{name: "the public key in place of the seed", file: line(abuseMailboxSealPrivateKeyName, publicKey)},
+	} {
+		parsed, err := ParseAbuseMailboxSealPrivateKey([]byte(c.file))
+		if !errors.Is(err, ErrAbuseMailboxSealPrivateKey) || parsed != nil {
+			t.Errorf("%s parses: %v", c.name, err)
+			continue
+		}
+		for _, value := range []string{encodedSeed, hex.EncodeToString(seed), macKey, publicKey} {
+			if strings.Contains(err.Error(), value) || strings.Contains(err.Error(), value[:16]) {
+				t.Errorf("%s: the refusal names a value: %v", c.name, err)
+			}
+		}
+	}
+}
+
+// A key that is not X-Wing's, or one crypto/hpke assembled from its parts and
+// so holds no seed, gives no private key file: there is nothing a restore
+// could read back.
+func TestAbuseMailboxSealPrivateKeyFileRefusesKeysWithoutASeed(t *testing.T) {
+	x25519PrivateKey, err := hpke.DHKEM(ecdh.X25519()).GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decapsulationKey, err := mlkem.GenerateKey768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchangeKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partsKey, err := hpke.NewHybridPrivateKey(decapsulationKey, exchangeKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partsKey.KEM().ID() != hpke.MLKEM768X25519().ID() {
+		t.Fatalf("the assembled key is KEM %#04x", partsKey.KEM().ID())
+	}
+	for _, c := range []struct {
+		name string
+		key  hpke.PrivateKey
+	}{
+		{name: "no key", key: nil},
+		{name: "an X25519 key", key: x25519PrivateKey},
+		{name: "an X-Wing key with no seed", key: partsKey},
+	} {
+		if file, err := AbuseMailboxSealPrivateKeyFile(c.key); !errors.Is(err, ErrAbuseMailboxSealPrivateKey) || file != nil {
+			t.Errorf("%s gives a file of %d bytes: %v", c.name, len(file), err)
+		}
+	}
+}
+
+// The seal vector's pair, written as a private key file and read back, opens
+// the record an earlier build mailed, so the file's form is pinned against the
+// seal's own vector with no private key on disk.
+func TestAbuseMailboxSealPrivateKeyFileOpensTheVector(t *testing.T) {
+	settings := DefaultAbuseMailboxSettings()
+	privateKey, macKey := testAbuseMailboxVectorKeys(t)
+	file, err := AbuseMailboxSealPrivateKeyFile(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseAbuseMailboxSealPrivateKey(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(testAbuseMailboxVectorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vector := &testAbuseMailboxVector{}
+	if err := json.Unmarshal(data, vector); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := DecodeAbuseMailboxBody(vector.Body, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := OpenAbuseMailboxRecord(parsed, sealed, settings)
+	if err != nil {
+		t.Fatalf("the vector does not open with the key the file reads back to: %v", err)
+	}
+	if string(opened) != vector.Plaintext {
+		t.Fatalf("the vector opens to %s", opened)
+	}
+	if _, err := ParseAbuseRecord(opened, macKey); err != nil {
+		t.Fatal(err)
 	}
 }
