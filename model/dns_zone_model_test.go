@@ -13,6 +13,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
@@ -148,6 +149,13 @@ func testDnsGoldenLines(lines []string, root string, apex string) []string {
 	return moved
 }
 
+// mail on's golden set as the model writes it in a test process, which holds no dns.yml: M7's rows and M8's
+// _mta-sts for the zone's own mail host, with no report host and so no rua or _smtp._tls (DNS-M8-01).
+func testDnsMailOnGolden(root string, apex string) []string {
+	id := sidecar.MtaStsPolicyId(sidecar.MtaStsPolicy("mx."+apex, nil), nil)
+	return testDnsGoldenLines(append(slices.Clone(dnsTestMailOnLines), "_mta-sts.abcdefghij.zone.example. TXT system \"v=STSv1; id="+id+"\""), root, apex)
+}
+
 // Whether network_dns_zone says mail is on.
 func testDnsZoneMail(t testing.TB, ctx context.Context, root string, networkId server.Id) bool {
 	t.Helper()
@@ -184,7 +192,7 @@ func TestDnsSetMailRecordsTransitions(t *testing.T) {
 			t.Fatal(err)
 		}
 		apex := label + "." + root
-		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsGoldenLines(dnsTestMailOnLines, root, apex); !slices.Equal(got, want) {
+		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsMailOnGolden(root, apex); !slices.Equal(got, want) {
 			t.Fatalf("mail on serves\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 		if !testDnsZoneMail(t, ctx, root, networkId) {
@@ -218,7 +226,8 @@ func TestDnsSetMailRecordsTransitions(t *testing.T) {
 			deleted = append(deleted, key.Owner+" "+dns.TypeToString[key.Type])
 		}
 		slices.Sort(deleted)
-		wantDeleted := []string{"b." + apex + " MX", "b." + apex + " TXT", "mx." + apex + " A", "mx." + apex + " AAAA"}
+		// M8's _mta-sts goes with mail (DNS-M8-01)
+		wantDeleted := []string{"_mta-sts." + apex + " TXT", "b." + apex + " MX", "b." + apex + " TXT", "mx." + apex + " A", "mx." + apex + " AAAA"}
 		if !slices.Equal(deleted, wantDeleted) {
 			t.Errorf("mail off deleted %v, want %v", deleted, wantDeleted)
 		}
@@ -351,7 +360,7 @@ func TestDnsSetMailRecordsWaitsOutASuspension(t *testing.T) {
 		if _, err := DnsSetMailRecords(ctx, networkId, root, true); err != nil {
 			t.Fatal(err)
 		}
-		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsGoldenLines(dnsTestMailOnLines, root, apex); !slices.Equal(got, want) {
+		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsMailOnGolden(root, apex); !slices.Equal(got, want) {
 			t.Fatalf("mail on after the lift\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 	})
