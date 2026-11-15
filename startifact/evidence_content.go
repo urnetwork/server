@@ -81,7 +81,7 @@ func EvidenceContentKey(store server.BlobStore, hash string) (string, error) {
 
 // The flat key content was written at before the sharded layout. It is read,
 // after the sharded key, and never written.
-func EvidenceLegacyContentKey(store server.BlobStore, hash string) (string, error) {
+func evidenceLegacyContentKey(store server.BlobStore, hash string) (string, error) {
 	keys, err := evidenceContentKeys(store, hash)
 	if err != nil {
 		return "", err

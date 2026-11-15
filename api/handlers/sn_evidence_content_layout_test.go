@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,14 @@ func TestSnEvidenceServesBothContentLayouts(t *testing.T) {
 	if !ok {
 		t.Fatal("the evidence fixture has no blob store")
 	}
+	// the last of a content hash's store-relative keys, in read order
+	legacyContentKey := func(contentHash string) string {
+		suffixes, err := startifact.EvidenceContentKeySuffixes(contentHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path.Join(store.Prefix(), suffixes[len(suffixes)-1])
+	}
 
 	// written at its legacy flat key, as every publication was before
 	legacyEvidence := signedSnEvidence(t, config, artifactKey)
@@ -34,10 +43,7 @@ func TestSnEvidenceServesBothContentLayouts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyKey, err := startifact.EvidenceLegacyContentKey(store, legacyEvidence.ContentHash)
-	if err != nil {
-		t.Fatal(err)
-	}
+	legacyKey := legacyContentKey(legacyEvidence.ContentHash)
 	source := filepath.Join(t.TempDir(), "legacy.json")
 	if err := os.WriteFile(source, legacyBytes, 0o600); err != nil {
 		t.Fatal(err)
@@ -71,10 +77,7 @@ func TestSnEvidenceServesBothContentLayouts(t *testing.T) {
 	if !strings.HasSuffix(published.ContentKey, "/st/v1/evidence/content/sha256/"+h[0:2]+"/"+h[2:4]+"/"+h+".json") {
 		t.Fatalf("published content key %q is not sharded", published.ContentKey)
 	}
-	unwritten, err := startifact.EvidenceLegacyContentKey(store, evidence.ContentHash)
-	if err != nil {
-		t.Fatal(err)
-	}
+	unwritten := legacyContentKey(evidence.ContentHash)
 	if reader, err := store.Get(t.Context(), unwritten); err == nil {
 		reader.Close()
 		t.Fatalf("the publication wrote its legacy flat key %s", unwritten)

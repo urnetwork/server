@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -891,6 +892,17 @@ func TestStClientKeyEvidenceWriterThrottledByFullRequestPool(t *testing.T) {
 	}
 }
 
+// The legacy flat key of content written before the sharded layout under
+// store: the last of the content's store-relative keys, in read order.
+func stLegacyEvidenceContentKeyTest(t testing.TB, store server.BlobStore, contentHash string) string {
+	t.Helper()
+	suffixes, err := startifact.EvidenceContentKeySuffixes(contentHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path.Join(store.Prefix(), suffixes[len(suffixes)-1])
+}
+
 // An unchanged key's registration whose evidence was stored at its legacy
 // flat key, before the sharded layout, is verified there: counted as exists,
 // with no create and no sharded copy. Evidence stored at neither key is
@@ -906,10 +918,7 @@ func TestStClientKeyEvidenceWriterVerifiesLegacyFlatEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		legacy, err := startifact.EvidenceLegacyContentKey(store, wrapper.contentHash)
-		if err != nil {
-			t.Fatal(err)
-		}
+		legacy := stLegacyEvidenceContentKeyTest(t, store, wrapper.contentHash)
 		keys[index] = [2]string{store.Bucket() + "/" + sharded, store.Bucket() + "/" + legacy}
 	}
 	func() {

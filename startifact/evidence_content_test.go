@@ -187,7 +187,7 @@ func TestEvidenceContentKeyShardsUnderTwoHexLevels(t *testing.T) {
 		if err != nil || sharded != wantSharded {
 			t.Fatalf("content key for %q = %q, %v; want %q", hash, sharded, err, wantSharded)
 		}
-		legacy, err := EvidenceLegacyContentKey(store, hash)
+		legacy, err := evidenceLegacyContentKey(store, hash)
 		if err != nil || legacy != wantLegacy {
 			t.Fatalf("legacy content key for %q = %q, %v; want %q", hash, legacy, err, wantLegacy)
 		}
@@ -200,7 +200,7 @@ func TestEvidenceContentKeyShardsUnderTwoHexLevels(t *testing.T) {
 		if key, err := EvidenceContentKey(store, hash); err == nil {
 			t.Errorf("invalid content hash %q produced content key %q", hash, key)
 		}
-		if key, err := EvidenceLegacyContentKey(store, hash); err == nil {
+		if key, err := evidenceLegacyContentKey(store, hash); err == nil {
 			t.Errorf("invalid content hash %q produced legacy content key %q", hash, key)
 		}
 		if suffixes, err := EvidenceContentKeySuffixes(hash); err == nil {
@@ -269,7 +269,7 @@ func TestEvidencePublicationWritesOnlyTheShardedContentKey(t *testing.T) {
 			t.Fatalf("history key = %q, want %q, %v", published.HistoryKey, historyPrefix+h+".json", err)
 		}
 	}
-	legacy, err := EvidenceLegacyContentKey(store, envelope.ContentHash)
+	legacy, err := evidenceLegacyContentKey(store, envelope.ContentHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestOpenEvidenceContentReadsLegacyFlatObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &preparedEvidenceStoreTest{BlobStore: server.NewLocalBlobStore(t.TempDir(), "blob")}
-	legacy, err := EvidenceLegacyContentKey(store, envelope.ContentHash)
+	legacy, err := evidenceLegacyContentKey(store, envelope.ContentHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestOpenEvidenceContentReadsBothLayoutsBehindLazyNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := EvidenceLegacyContentKey(store, legacyEnvelope.ContentHash)
+	legacy, err := evidenceLegacyContentKey(store, legacyEnvelope.ContentHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestOpenEvidenceContentReadsBothLayoutsBehindLazyNotFound(t *testing.T) {
 	if _, ok := fake.object("synthetic/" + published.ContentKey); !ok {
 		t.Fatal("the publication did not write its sharded key")
 	}
-	shardedLegacy, err := EvidenceLegacyContentKey(store, shardedEnvelope.ContentHash)
+	shardedLegacy, err := evidenceLegacyContentKey(store, shardedEnvelope.ContentHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestOpenEvidenceContentPrefersTheShardedObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := EvidenceLegacyContentKey(store, hash)
+	legacy, err := evidenceLegacyContentKey(store, hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +430,7 @@ func TestOpenEvidenceContentKeepsShardedReadFailures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		legacy, err := EvidenceLegacyContentKey(store, hash)
+		legacy, err := evidenceLegacyContentKey(store, hash)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -475,7 +475,7 @@ func TestOpenEvidenceContentReportsAbsentContentLikeOneGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := EvidenceLegacyContentKey(store, hash)
+	legacy, err := evidenceLegacyContentKey(store, hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +498,7 @@ func TestPreparedClientKeyEvidenceVerifyFirstAcceptsLegacyFlatObject(t *testing.
 	}
 	fake := newEvidenceContentS3Test(t)
 	store := fake.store(t)
-	legacy, err := EvidenceLegacyContentKey(store, contentHash)
+	legacy, err := evidenceLegacyContentKey(store, contentHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +531,7 @@ func TestPreparedClientKeyEvidenceVerifyFirstAcceptsLegacyFlatObject(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherLegacy, err := EvidenceLegacyContentKey(store, otherHash)
+	otherLegacy, err := evidenceLegacyContentKey(store, otherHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +553,7 @@ func TestPreparedClientKeyEvidenceVerifyFirstRefusesConflictingLegacyObject(t *t
 		t.Fatal(err)
 	}
 	store := newPreparedClientKeyStoreTest(t)
-	legacy, err := EvidenceLegacyContentKey(store, contentHash)
+	legacy, err := evidenceLegacyContentKey(store, contentHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +580,7 @@ func TestPreparedEvidenceVerifyPublishedAcceptsEitherCanonicalContentKey(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := EvidenceLegacyContentKey(store, envelope.ContentHash)
+	legacy, err := evidenceLegacyContentKey(store, envelope.ContentHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +631,7 @@ func TestPreparedEvidenceVerifyStoredFindsEitherLayout(t *testing.T) {
 	if err := prepared.VerifyStored(t.Context(), store); err != nil {
 		t.Fatalf("sharded evidence: %v", err)
 	}
-	legacy, err := EvidenceLegacyContentKey(store, envelope.ContentHash)
+	legacy, err := evidenceLegacyContentKey(store, envelope.ContentHash)
 	if err != nil {
 		t.Fatal(err)
 	}

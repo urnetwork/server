@@ -41,10 +41,7 @@ func TestStClientKeyEvidenceHistoryRulesScopeExactPrefixes(t *testing.T) {
 		t.Fatal(err)
 	}
 	// content written before the sharded layout keeps its retention too
-	legacyContentKey, err := startifact.EvidenceLegacyContentKey(store, contentHash)
-	if err != nil {
-		t.Fatal(err)
-	}
+	legacyContentKey := stLegacyEvidenceContentKeyTest(t, store, contentHash)
 	for index, kind := range kinds {
 		rule := rules[index]
 		want, err := startifact.EvidenceHistoryRunPrefix(store, config.DeploymentId, uint16(config.Netuid), kind, startifact.EvidenceDeploymentHistoryRunID)

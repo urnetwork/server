@@ -160,7 +160,7 @@ func (self *PreparedEvidence) readStored(ctx context.Context, store server.BlobS
 	if err != nil {
 		return false, err
 	}
-	legacyContentKey, err := EvidenceLegacyContentKey(store, self.identity.ContentHash)
+	legacyContentKey, err := evidenceLegacyContentKey(store, self.identity.ContentHash)
 	if err != nil {
 		return false, err
 	}
@@ -240,7 +240,7 @@ func (self *PreparedEvidence) VerifyPublished(ctx context.Context, store server.
 	if published == nil || !strings.EqualFold(published.ContentHash, want.ContentHash) || published.Bucket != want.Bucket {
 		return errors.New("direct evidence receipt is invalid")
 	}
-	legacyContentKey, err := EvidenceLegacyContentKey(store, want.ContentHash)
+	legacyContentKey, err := evidenceLegacyContentKey(store, want.ContentHash)
 	if err != nil {
 		return err
 	}
