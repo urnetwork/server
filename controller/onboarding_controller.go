@@ -684,7 +684,11 @@ type OnboardingClickResult struct {
 	Destination string `json:"destination,omitempty"`
 	// OpenUrl, when set, is where the landing page opens instead of the app: a
 	// W1 click by a network whose win-back offer is the App Store's opens
-	// Apple's direct link to it (https://apps.apple.com/win-back/<Apple ID>).
+	// Apple's direct link to it (https://apps.apple.com/win-back/<Apple ID>),
+	// and an offer click by a network the App Store bills, while its welcome
+	// offer can be redeemed, opens Apple's redeem sheet with its code filled
+	// in (https://apps.apple.com/redeem?ctx=offercodes&id=<Apple ID>&code=<code>;
+	// welcomeOfferLandingOpenUrl).
 	OpenUrl string `json:"open_url,omitempty"`
 	// invalid | expired
 	Error string `json:"error,omitempty"`
@@ -693,7 +697,10 @@ type OnboardingClickResult struct {
 // OnboardingClick records a landing-page click (the campaign's attribution event)
 // and tells the page where in the app to send the user. No auth: the token is the
 // credential, and the response carries nothing about the network beyond where
-// its email's button leads (Apple's win-back link, for a W1 that named it).
+// its email's button leads (Apple's win-back link, for a W1 that named it;
+// Apple's redeem link with the network's welcome offer code, for an offer
+// email to an App Store reader: the code is the offer the email itself
+// presents).
 func OnboardingClick(
 	args *OnboardingClickArgs,
 	clientSession *session.ClientSession,
@@ -736,6 +743,10 @@ func OnboardingClick(
 			props["flow_step"] = claims.FlowStep
 		}
 		WriteServerEvent(clientSession, claims.NetworkId, model.EventLandingClicked, props, "")
+		if slug == onboarding.SlugOffer {
+			// an App Store reader's welcome offer: Apple's redeem sheet
+			result.OpenUrl = welcomeOfferLandingOpenUrl(clientSession, claims.NetworkId, now)
+		}
 	}
 	return result, nil
 }
