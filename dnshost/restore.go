@@ -25,7 +25,10 @@ import (
 // dnsservice.DnsRestoreStore on Postgres. Safe for concurrent use.
 type RestoreStore struct{}
 
-var _ dnsservice.DnsRestoreStore = (*RestoreStore)(nil)
+var (
+	_ dnsservice.DnsRestoreStore    = (*RestoreStore)(nil)
+	_ dnsservice.DnsRestoreMapStore = (*RestoreStore)(nil)
+)
 
 // No NS is stopped until dns_ns exists.
 func (self *RestoreStore) StoppedNs(ctx context.Context, root string) ([]string, error) {
@@ -55,17 +58,49 @@ func (self *RestoreStore) ListRestoreChanges(ctx context.Context, root string, i
 	return
 }
 
+// model.DnsRaiseCustomHostMapForRestore at the server's now (DNS-M6-07).
+func (self *RestoreStore) RaiseCustomHostMapForRestore(ctx context.Context, root string, incidentId sidecar.Id) (version uint64, returnErr error) {
+	returnErr = storeCall(func() error {
+		var err error
+		version, err = model.DnsRaiseCustomHostMapForRestore(ctx, root, server.Id(incidentId), server.NowUtc())
+		return err
+	})
+	return
+}
+
+// model.GetDnsCustomHostMapState: each interface's report.
+func (self *RestoreStore) CustomHostMapState(ctx context.Context, root string) (state *dnsservice.DnsMapState, returnErr error) {
+	returnErr = storeCall(func() error {
+		var err error
+		state, err = model.GetDnsCustomHostMapState(ctx, root)
+		return err
+	})
+	return
+}
+
+// model.ListDnsRestoreCustomHosts at the server's now.
+func (self *RestoreStore) ListRestoreCustomHosts(ctx context.Context, root string, incidentId sidecar.Id, added []string, dropped []string) (listing *dnsservice.DnsRestoreListing, returnErr error) {
+	returnErr = storeCall(func() error {
+		var err error
+		listing, err = model.ListDnsRestoreCustomHosts(ctx, root, server.Id(incidentId), added, dropped, server.NowUtc())
+		return err
+	})
+	return
+}
+
 // The restore step over Store and RestoreStore, reading each NS's SOA over TCP
-// at dns.yml's glue. clock nil is the wall clock.
+// at dns.yml's glue, with the custom-host map's half (DNS-M6-07). clock nil is
+// the wall clock.
 func NewRestoreStep(store dnsservice.DnsStore, settings *dnsservice.DnsSettings, clock sidecar.Clock, log sidecar.Logger) (*dnsservice.RestoreStep, error) {
 	if store == nil {
 		return nil, errors.New("dns restore: no store")
 	}
 	return dnsservice.NewRestoreStep(settings, &dnsservice.RestoreStepDeps{
-		Store:     store,
-		Restore:   &RestoreStore{},
-		SoaReader: dnsservice.NewDnsTcpSoaReader(hostNsAddresses(settings)),
-		Clock:     clock,
-		Log:       log,
+		Store:          store,
+		Restore:        &RestoreStore{},
+		SoaReader:      dnsservice.NewDnsTcpSoaReader(hostNsAddresses(settings)),
+		CustomHostMaps: &RestoreStore{},
+		Clock:          clock,
+		Log:            log,
 	})
 }

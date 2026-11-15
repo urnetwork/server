@@ -149,6 +149,28 @@ func dnsSuspendHost(host string) (string, error) {
 	return host, nil
 }
 
+// Whether a suspension leaves a row visible: under a zone suspension only the
+// withheld owners at the apexes, else every row but those at or below a
+// suspended host, whose withheld owners are visible themselves.
+func dnsSuspensionVisible(suspension *dnsSuspension, apexes []string) func(set *dnsservice.DnsRecordSet) bool {
+	zoneSuspended := suspension.zoneSuspended
+	hostMarkers := []string{}
+	for _, apex := range apexes {
+		for host := range suspension.hosts {
+			hostMarkers = append(hostMarkers, host+"."+apex)
+		}
+	}
+	return func(set *dnsservice.DnsRecordSet) bool {
+		if zoneSuspended {
+			return set.Kind == dnsservice.DnsRecordKindWithheld && slices.Contains(apexes, set.Owner)
+		}
+		if set.Kind == dnsservice.DnsRecordKindWithheld {
+			return true
+		}
+		return !slices.ContainsFunc(hostMarkers, func(marker string) bool { return dnsOwnerAtOrBelow(set.Owner, marker) })
+	}
+}
+
 // Runs change on each of the network's zones, each in a transaction of its own.
 func changeDnsSuspension(ctx context.Context, networkId server.Id, change func(suspension *dnsSuspension)) error {
 	if !server.SidecarMg5Linked() {
@@ -221,31 +243,24 @@ func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, n
 		}
 	}
 
+	// a user row withheld while the suspension as it stood left it visible is
+	// the downgrade's (DNS-M6-07), and no change here releases it
+	visibleBefore := dnsSuspensionVisible(suspension, apexes)
+
 	change(suspension)
 
 	// the withheld owners the suspension asks for: one at each apex while the
 	// zone is suspended, and one at each host under each apex
 	markers := map[string]bool{}
-	hostMarkers := []string{}
 	for _, apex := range apexes {
 		if suspension.zoneSuspended {
 			markers[apex] = true
 		}
 		for host := range suspension.hosts {
-			owner := host + "." + apex
-			markers[owner] = true
-			hostMarkers = append(hostMarkers, owner)
+			markers[host+"."+apex] = true
 		}
 	}
-	visible := func(set *dnsservice.DnsRecordSet) bool {
-		if suspension.zoneSuspended {
-			return set.Kind == dnsservice.DnsRecordKindWithheld && slices.Contains(apexes, set.Owner)
-		}
-		if set.Kind == dnsservice.DnsRecordKindWithheld {
-			return true
-		}
-		return !slices.ContainsFunc(hostMarkers, func(marker string) bool { return dnsOwnerAtOrBelow(set.Owner, marker) })
-	}
+	visible := dnsSuspensionVisible(suspension, apexes)
 
 	upserts := []dnsservice.DnsRecordSet{}
 	deletes := []dnsservice.DnsRecordKey{}
@@ -270,6 +285,8 @@ func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, n
 		switch {
 		case !row.withheld && !visible(&set):
 			withholds = append(withholds, set.Key())
+		case row.withheld && visible(&set) && set.Kind == dnsservice.DnsRecordKindUser && visibleBefore(&set):
+			// withheld by the downgrade, not by a suspension: it stays
 		case row.withheld && visible(&set):
 			upserts = append(upserts, set)
 		}
