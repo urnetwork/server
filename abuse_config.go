@@ -24,8 +24,8 @@ import (
 //	abuse_mailbox: <address>           # §21.10's off-site record of every action and lift
 //	legal_request_mailbox: <address>   # one record per hold placed, renewed or ended
 //	counsel_contact: <contact>         # §21.8: production orders out of hours
-//	feeds: [{name: <name>, url: https://...}]
-//	web_risk: {enabled: false}
+//	feeds: [{name: <name>, url: https://..., category: phishing | malware | command_and_control}]
+//	web_risk: {enabled: false}         # true needs vault's abuse-web-risk.yml too
 //	notice_senders: {<domain>: registrar | registry | law_enforcement}
 //	appeal_window: 6                   # months, DSA Art. 20's floor
 //	appeal_url: https://...
@@ -87,6 +87,11 @@ type AbuseBusinessHours struct {
 type AbuseFeed struct {
 	Name string `yaml:"name"`
 	Url  string `yaml:"url"`
+	// The §21.4 row every hit of the feed takes: phishing, malware or
+	// command_and_control. The abuse worker reads no feed that names none of
+	// these (ABUSE-M5-13), since a hit's category is what its case and notice
+	// say.
+	Category string `yaml:"category"`
 }
 
 // The keys this reader reads.
@@ -281,7 +286,11 @@ func newAbuseConfig(y *abuseConfigYaml) *AbuseConfig {
 		if feedUrl == "" {
 			continue
 		}
-		config.feeds = append(config.feeds, AbuseFeed{Name: strings.TrimSpace(feed.Name), Url: feedUrl})
+		config.feeds = append(config.feeds, AbuseFeed{
+			Name:     strings.TrimSpace(feed.Name),
+			Url:      feedUrl,
+			Category: strings.ToLower(strings.TrimSpace(feed.Category)),
+		})
 	}
 	for domain, class := range y.NoticeSenders {
 		switch class {

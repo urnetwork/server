@@ -210,6 +210,13 @@ func initTaskSchedule(ctx context.Context) {
 		// §21.7's restricted rows past their until_time re-derived every hour;
 		// not scheduled without MG5
 		work.ScheduleAbuseStandingPass(clientSession, tx)
+		// §21.6's scanners, each hourly: Web Risk over published hosts and
+		// record names, abuse.yml's feeds, and the CT watch over each root;
+		// each idles until abuse.yml turns it on, and none is scheduled
+		// without MG5
+		work.ScheduleAbuseWebRisk(clientSession, tx)
+		work.ScheduleAbuseFeeds(clientSession, tx)
+		work.ScheduleAbuseCtWatch(clientSession, tx)
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
 		// months; not scheduled without MG5
 		work.ScheduleTlsConnectionRollup(clientSession, tx)
@@ -733,6 +740,18 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.AbuseStandingPass,
 			work.AbuseStandingPassPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AbuseWebRisk,
+			work.AbuseWebRiskPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AbuseFeeds,
+			work.AbuseFeedsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AbuseCtWatch,
+			work.AbuseCtWatchPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.TlsConnectionRollup,
