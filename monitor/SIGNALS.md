@@ -22470,16 +22470,22 @@ aggregated to kind, count and oldest/newest age:
   disposition is done, record it by voiding the intent
   (`gamma_payment_intent.voided_at`): the biller stops retrying and the count
   drops it. There is no operator tool for it yet (`bringyourctl gamma`,
-  BTCPAY §18.9).
+  BTCPAY §18.9). A gift order's intent (item `gift_pro_year`, POST
+  /pay/gift/gamma-intent) is never counted here: it is credited to its order,
+  whose codes go to the buyer's email, so a network that is gone does not stop
+  its credit.
 - `gamma-credit-failed` (PAGE): a spent charge whose credit failed
   `controller.GammaMaxCreditFailures` (10) times or more for a network that
-  still exists; its status says `review` (`credit_failed`). The biller retries
-  ten such credits a run, the least retried first, beside every other credit,
-  the fewest failures first, so they never hold a new credit back. Read the
-  taskworker log line `[gamma]credit of intent <id> failed (<n>): <error>` and
-  fix the cause (the Pro configuration such as the data code duration or the
-  data pack catalog, or the database); the retry then credits the intent once,
-  through its one-shot. Do not credit by hand or edit balances. A cause that
+  still exists, or for a gift order's intent whatever its network; its status
+  says `review` (`credit_failed`). The biller retries ten such credits a run,
+  the least retried first, beside every other credit, the fewest failures
+  first, so they never hold a new credit back. Read the taskworker log line
+  `[gamma]credit of intent <id> failed (<n>): <error>` and fix the cause (the
+  Pro configuration such as the data code duration, the data pack catalog or
+  the gift block, a gift intent with no gift order or a price that is not its
+  order's total, or the database); the retry then credits the intent once,
+  through its one-shot. Do not credit by hand or edit balances or codes. A
+  gift order paid with Gamma is final sale and is never refunded. A cause that
   cannot be fixed goes to the owner, and the intent is voided once its
   disposition is done.
 - `gamma-batch-unfulfillable` (WARN): a `batch_unfulfillable` alarm in the last

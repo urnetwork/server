@@ -297,10 +297,13 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/pay/crypto/status", handlers.CryptoPaymentStatus),
 		router.NewRoute("POST", "/pay/crypto/requote", handlers.CryptoPaymentRequote),
 		// gift codes, a year of Pro each (controller/gift_checkout_controller.go,
-		// mmm/GIFTOFPRIVACY.md §10.2): by card or with a coin, without signing in
+		// mmm/GIFTOFPRIVACY.md §10.2): by card or with a coin, without signing
+		// in, or with Gamma, from the signed-in network's deposit
 		router.NewRoute("GET", "/pay/gift/config", handlers.GiftConfig),
 		router.NewRoute("POST", "/pay/gift/checkout", handlers.GiftCheckout),
 		router.NewRoute("POST", "/pay/gift/crypto-intent", handlers.GiftCryptoIntent),
+		router.NewRoute("POST", "/pay/gift/gamma-intent", handlers.GiftGammaIntent),
+		router.NewRoute("POST", "/pay/gift/gamma-cancel", handlers.GiftGammaCancel),
 		router.NewRoute("POST", "/pay/gift/order", handlers.GiftOrder),
 		router.NewRoute("POST", "/pay/gift/cards\\.pdf", handlers.GiftCardsPdf),
 		router.NewRoute("POST", "/pay/gift/check-code", handlers.GiftCheckCode),

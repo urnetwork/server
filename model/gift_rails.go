@@ -129,7 +129,9 @@ func giftLowerAscii(text string) string {
 // GiftFriendEmailDailyLimit is the most friend emails one buyer (their email,
 // case-insensitive) has sent in any 24 hours: the recipients of their
 // delivery "them" orders made in the last 24 hours that are pending or paid.
-// Cards delivered to the buyer ("me") are not counted.
+// Cards delivered to the buyer ("me") are not counted, and neither is a
+// pending order whose Gamma purchase was voided, by a newer gift purchase or
+// a cancel: it can never be paid, so its friends are never emailed.
 const GiftFriendEmailDailyLimit = 20
 
 // GiftFriendEmailWindow is the window GiftFriendEmailDailyLimit counts over.
@@ -137,8 +139,19 @@ const GiftFriendEmailWindow = 24 * time.Hour
 
 // GetGiftFriendEmailCount is the number of friend emails the buyer's orders
 // owe: the recipients of their delivery "them" orders made after since that
-// are pending or paid, the buyer's email compared case-insensitively.
+// are pending or paid, the buyer's email compared case-insensitively. A
+// pending order whose Gamma purchase was voided is never paid, and is not
+// counted.
 func GetGiftFriendEmailCount(ctx context.Context, buyerEmail string, since time.Time) (count int) {
+	return GetGiftFriendEmailCountReplacing(ctx, buyerEmail, since, nil)
+}
+
+// GetGiftFriendEmailCountReplacing is GetGiftFriendEmailCount for a new gift
+// purchase with Gamma by the network replacingNetworkId: the pending orders
+// whose open gift purchase of that network the new one will void
+// (VoidOpenGammaGiftIntentsInTx: any whose spend is not in flight) are not
+// counted either. nil counts as GetGiftFriendEmailCount does.
+func GetGiftFriendEmailCountReplacing(ctx context.Context, buyerEmail string, since time.Time, replacingNetworkId *server.Id) (count int) {
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(
 			ctx,
@@ -151,20 +164,47 @@ func GetGiftFriendEmailCount(ctx context.Context, buyerEmail string, since time.
 					lower(gift_order.buyer_email) = lower($1) AND
 					gift_order.delivery = $2 AND
 					gift_order.status = ANY($3) AND
-					$4 < gift_order.create_time
+					$4 < gift_order.create_time AND
+					NOT (
+						gift_order.status = $5 AND
+						EXISTS (
+							SELECT 1
+							FROM gamma_payment_intent intent
+							WHERE
+								intent.intent_id = gift_order.gamma_intent_id AND
+								intent.credited_at IS NULL AND
+								(
+									intent.voided_at IS NOT NULL OR
+									(
+										$6::uuid IS NOT NULL AND
+										intent.network_id = $6::uuid AND
+										NOT EXISTS (
+											SELECT 1
+											FROM gamma_charge
+											WHERE
+												gamma_charge.intent_id = intent.intent_id AND
+												`+gammaChargeInFlightSql+`
+										)
+									)
+								)
+						)
+					)
 			`,
 			strings.TrimSpace(buyerEmail),
 			GiftDeliveryThem,
 			[]string{GiftOrderStatusPending, GiftOrderStatusPaid},
 			since,
+			GiftOrderStatusPending,
+			replacingNetworkId,
 		).Scan(&count))
 	})
 	return
 }
 
 // RemoveUnstartedGiftOrder removes an order that was just stored and never
-// started: still pending, with no Checkout session, invoice or payment, as a
-// refusal does after storing it. false when the order is not such a one.
+// started: still pending, with no Checkout session, invoice, Gamma intent or
+// payment, as a refusal does after storing it. false when the order is not
+// such a one.
 func RemoveUnstartedGiftOrder(ctx context.Context, giftOrderId server.Id) (removed bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		removed = false
@@ -176,6 +216,7 @@ func RemoveUnstartedGiftOrder(ctx context.Context, giftOrderId server.Id) (remov
 					status = $2 AND
 					stripe_session_id IS NULL AND
 					crypto_intent_id IS NULL AND
+					gamma_intent_id IS NULL AND
 					purchase_event_base IS NULL
 				FROM gift_order
 				WHERE gift_order_id = $1

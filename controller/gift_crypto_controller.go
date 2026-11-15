@@ -9,7 +9,8 @@ package controller
 // no network is credited, as for a data code bought without one. It is priced
 // at the order's total and capped by gift.crypto_max_invoice_usd ($500, an
 // order of 20 at $23.99 is $479.80) in place of the quote's max_invoice_usd,
-// which keeps the data rail at $100. Its status (/pay/crypto/status, which the
+// which keeps the data rail at $100; a gift order paid with Gamma has the
+// same cap (gift_gamma_controller.go). Its status (/pay/crypto/status, which the
 // site's CryptoPayPanel polls), its re-quote, the scanner, the reconcile legs
 // and the operator tools are the rail's own; the coins that take one are the
 // coins on offer that sell balance codes. Each order has its own invoice:
@@ -228,7 +229,7 @@ func cryptoCreditGiftIntentInConn(
 		}, server.TxReadCommitted, server.OptNoRetry())
 	}, func(err error) {
 		outcome = nil
-		returnErr = err
+		returnErr = giftHideOrderId(err, *giftOrderId)
 	})
 	if returnErr != nil {
 		return false, returnErr
@@ -345,6 +346,33 @@ func cryptoCreditGiftIntentInTx(
 // for an error that also names the order's invoice.
 func giftWithoutOrderId(err error, giftOrderId server.Id) string {
 	return strings.ReplaceAll(err.Error(), giftOrderId.String(), "<gift order>")
+}
+
+// giftOrderHiddenError is a payment's credit error without its gift order's
+// id, which still unwraps to the error it hides it from.
+type giftOrderHiddenError struct {
+	text string
+	err  error
+}
+
+func (self *giftOrderHiddenError) Error() string {
+	return self.text
+}
+
+func (self *giftOrderHiddenError) Unwrap() error {
+	return self.err
+}
+
+// giftHideOrderId is err without the gift order's id, for what a coin's or
+// Gamma's credit returns: its caller logs it beside the payment's id, and a
+// log line must never name both (the 30-day unlink forgets which order a
+// payment paid for). Whatever the credit raised is covered, a raise from
+// deep in the fulfilment included. nil for nil.
+func giftHideOrderId(err error, giftOrderId server.Id) error {
+	if err == nil {
+		return nil
+	}
+	return &giftOrderHiddenError{text: giftWithoutOrderId(err, giftOrderId), err: err}
 }
 
 // giftOrderIdForCryptoRefund is the gift order of a gift invoice an operator

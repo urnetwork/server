@@ -3,7 +3,8 @@ package controller
 // GET /pay/gift/config: what the gift dialog sells, from the pro.yml `gift:`
 // block (mmm/GIFTOFPRIVACY.md §10.2). The site reads its prices from here, so
 // the page and the charge cannot drift apart, and shows no gift peek while
-// `enabled` is false.
+// `enabled` is false. It also says how an order can be paid now besides a
+// card: the coins (crypto_assets) and Gamma (gamma_available).
 
 import (
 	"context"
@@ -41,6 +42,11 @@ type GiftConfigResult struct {
 	// the coins that can take a gift invoice now (POST /pay/gift/crypto-intent),
 	// in the order every UI shows them; [] while gifts are not sold
 	CryptoAssets []string `json:"crypto_assets"`
+	// a gift order can be paid with Gamma now (POST /pay/gift/gamma-intent):
+	// gifts are sold, Gamma purchases are available (GET /pay/gamma/terms'
+	// available), and gift.crypto_max_invoice_usd, the cap of a gift paid in
+	// a coin or with Gamma, is set
+	GammaAvailable bool `json:"gamma_available"`
 }
 
 const giftCurrency = "usd"
@@ -69,8 +75,28 @@ func GiftConfig(clientSession *session.ClientSession) (*GiftConfigResult, error)
 	}
 	if giftConfig.Enabled {
 		result.CryptoAssets = giftCryptoAssets(clientSession.Ctx, giftConfig)
+		result.GammaAvailable = giftGammaAvailable(clientSession, giftConfig)
 	}
 	return result, nil
+}
+
+// giftGammaAvailable reports whether a gift order can be paid with Gamma now:
+// Gamma purchases are available, as GET /pay/gamma/terms reports them
+// (gammaPurchaseView), and the gift cap, gift.crypto_max_invoice_usd, is
+// above 0. Never fails the config: Gamma's state that cannot be read is
+// unavailable.
+func giftGammaAvailable(clientSession *session.ClientSession, giftConfig *model.GiftConfig) (available bool) {
+	if giftConfig.CryptoMaxInvoiceUsd <= 0 {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[gift]could not read whether gamma takes gift orders: %v\n", r)
+			available = false
+		}
+	}()
+	_, refusal := gammaPurchaseView(clientSession)
+	return refusal == nil
 }
 
 // giftCryptoAssets are the coins that can take a gift invoice now: the coins
