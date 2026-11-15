@@ -221,7 +221,19 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 		row.NextSendAt = &at
 	}
 
-	if !model.CreateNetworkOnboarding(clientSession.Ctx, row) {
+	// the row and its first step's task commit together, before the Brevo
+	// contact upsert: E1 used to be scheduled after the upsert, in a
+	// transaction of its own, inside the post-primary timeout, and a failure or
+	// an expired context after the insert left a row whose sequence never
+	// started (OnboardingCampaignSweep repairs those)
+	created := false
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		created = model.CreateNetworkOnboardingInTx(tx, clientSession.Ctx, row)
+		if created && row.ExitedAt == nil {
+			scheduleOnboardingCampaignStepInTx(tx, clientSession, networkId, onboarding.StepE1, *row.NextSendAt)
+		}
+	})
+	if !created {
 		return
 	}
 	onboardingStartsTotal.WithLabelValues(fmt.Sprintf("%t", hasEmail), row.EmailVariant).Inc()
@@ -237,7 +249,6 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 			glog.Warningf("[onboarding]brevo contact upsert failed for network %s: %s\n", networkId, err)
 		}
 	}
-	scheduleOnboardingCampaignStep(clientSession, networkId, onboarding.StepE1, *row.NextSendAt)
 }
 
 // onboardingFrameTime is the local time an activity frame reads a sign-up
@@ -545,14 +556,10 @@ type OnboardingCampaignStepResult struct {
 	NextSendAt *time.Time `json:"next_send_at,omitempty"`
 }
 
-func scheduleOnboardingCampaignStep(clientSession *session.ClientSession, networkId server.Id, step string, at time.Time) {
-	task.ScheduleTask(
-		OnboardingCampaignStep,
-		&OnboardingCampaignStepArgs{NetworkId: networkId, Step: step},
-		clientSession,
-		task.RunOnce("onboarding_campaign_step", networkId, step),
-		task.RunAt(at),
-	)
+// onboardingStepRunOnce is the one task per network and step: every scheduler
+// and the sweep's pending check use this key.
+func onboardingStepRunOnce(networkId server.Id, step string) *task.RunOnceOption {
+	return task.RunOnce("onboarding_campaign_step", networkId, step)
 }
 
 func scheduleOnboardingCampaignStepInTx(tx server.PgTx, clientSession *session.ClientSession, networkId server.Id, step string, at time.Time) {
@@ -561,7 +568,7 @@ func scheduleOnboardingCampaignStepInTx(tx server.PgTx, clientSession *session.C
 		OnboardingCampaignStep,
 		&OnboardingCampaignStepArgs{NetworkId: networkId, Step: step},
 		clientSession,
-		task.RunOnce("onboarding_campaign_step", networkId, step),
+		onboardingStepRunOnce(networkId, step),
 		task.RunAt(at),
 	)
 }
