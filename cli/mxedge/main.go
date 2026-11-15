@@ -41,6 +41,7 @@ var (
 	secretDir  = flag.String("secret_dir", sidecarhost.ScopedVaultHome, "where the block's secret_files mount")
 	apiUrl     = flag.String("api_url", "", "router: api's base URL, whose internal gate the quota surface and the edge client route are read from; empty leaves the router not ready")
 	socketsUrl = flag.String("sockets_url", "", "router: the sockets service's base URL, which every Find is sent to; empty leaves the router not ready")
+	feedDir    = flag.String("feed_dir", "", "router: the IP listing feed's mirror directory; empty rejects no sender at the banner")
 )
 
 func main() {
@@ -93,6 +94,17 @@ func main() {
 		var end func()
 		routerDeps, end = routerBlockDeps(quotaCtx, mxEdgeSettings, *apiUrl, *socketsUrl)
 		defer end()
+		if *feedDir == "" {
+			glog.Infof("[mxedge]no listing feed mirror, so no sender is rejected at the banner\n")
+		} else {
+			mirrorSettings := mxedgehost.DefaultFeedMirrorSettings()
+			mirrorSettings.Directory = *feedDir
+			if source, err := mxedgehost.NewFeedMirrorSource(mirrorSettings); err != nil {
+				glog.Errorf("[mxedge]no listing feed mirror: %v\n", err)
+			} else {
+				routerDeps.Listings = source
+			}
+		}
 	}
 	if err := mxedgehost.RunHost(ctx, *role, settings, deps, routerDeps, &mxedgehost.HostPorts{Status: *port, Smtp: *smtpPort}); err != nil {
 		panic(err)

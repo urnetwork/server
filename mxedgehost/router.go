@@ -15,6 +15,8 @@ package mxedgehost
 //     them with Find at the sockets service, adapted to mxedgeservice.MxEdgeDialer (routerDialer). Until
 //     the clients exist the engine holds no client id and is not ready.
 //   - The PTR: the host's own resolver, net.DefaultResolver unless RouterDeps gives one.
+//   - The listings: the feed mirror (feed_mirror.go) when the block names its directory, else none, so
+//     nothing is rejected at the banner.
 //   - sidecar.yml's mxedge gate through sidecarhost's Gates, reread every 60 s: the service gate at each
 //     hello and plaintext transaction, and its network list once SNI names a network.
 //
@@ -92,6 +94,9 @@ type RouterDeps struct {
 	// The PTR's resolver. nil: net.DefaultResolver.
 	LookupPtr  func(ctx context.Context, sender netip.Addr) ([]string, error)
 	LookupHost func(ctx context.Context, name string) ([]netip.Addr, error)
+	// The listing feed's mirror (feed_mirror.go). nil: none, so nothing is rejected at the banner, as with
+	// the feed down.
+	Listings mxedgeservice.MxListingSource
 	// Each replaces the block's: a test's gates, a test's Redis.
 	Gates sidecar.ServiceGates
 	Redis sidecar.Redis
@@ -269,6 +274,7 @@ func NewRouterHost(ctx context.Context, settings *HostSettings, routerSettings *
 		Dialer:     self.dialer,
 		LookupPtr:  lookupPtr,
 		LookupHost: lookupHost,
+		Listings:   deps.Listings,
 	}, settings.MxEdge)
 	if err != nil {
 		cancel()

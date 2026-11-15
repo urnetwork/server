@@ -15,6 +15,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -462,3 +465,104 @@ type routerTestBufferedConn struct {
 }
 
 func (self *routerTestBufferedConn) Read(b []byte) (int, error) { return self.reader.Read(b) }
+
+// A mirror directory holding files, each modified at its time.
+func feedMirrorTestDirectory(t *testing.T, files map[string]string, modifiedTimes map[string]time.Time) string {
+	t.Helper()
+	directory := t.TempDir()
+	for name, text := range files {
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if modifiedTime, ok := modifiedTimes[name]; ok {
+			if err := os.Chtimes(path, modifiedTime, modifiedTime); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return directory
+}
+
+// What a load gave, prefix to its categories.
+func feedMirrorTestLoad(t *testing.T, directory string) (map[string][]string, time.Time, error) {
+	t.Helper()
+	settings := DefaultFeedMirrorSettings()
+	settings.Directory = directory
+	source, err := NewFeedMirrorSource(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := map[string][]string{}
+	currentTime, err := source.Load(t.Context(), func(prefix netip.Prefix, category string) error {
+		loaded[prefix.String()] = append(loaded[prefix.String()], category)
+		return nil
+	})
+	return loaded, currentTime, err
+}
+
+// Each zone file's entries load under its file's category, rbldnsd's comments, directives and values
+// skipped, and the mirror is as current as its oldest file.
+func TestFeedMirrorLoadsZoneFilesByCategory(t *testing.T) {
+	older := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	newer := older.Add(4 * time.Minute)
+	directory := feedMirrorTestDirectory(t, map[string]string{
+		"exploit.rbldnsd": "$SOA 300 ns.feed.example. hostmaster.feed.example. 1 3600 600 86400 300\n" +
+			"# exploited hosts\n" +
+			":127.0.0.4:Listed\n" +
+			"192.0.2.0/24\n" +
+			"203.0.113.9 :127.0.0.4:a listing's text\n" +
+			"; a comment\n" +
+			"\n",
+		"pbl.rbldnsd":  "198.51.100.7\n2001:db8::/32 :127.0.0.10:policy\n",
+		"README.txt":   "not a zone file, and not read\n",
+		"botnet.other": "192.0.2.1\n",
+	}, map[string]time.Time{"exploit.rbldnsd": newer, "pbl.rbldnsd": older})
+	loaded, currentTime, err := feedMirrorTestLoad(t, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"192.0.2.0/24":    {"exploit"},
+		"203.0.113.9/32":  {"exploit"},
+		"198.51.100.7/32": {"pbl"},
+		"2001:db8::/32":   {"pbl"},
+	}
+	if len(loaded) != len(want) {
+		t.Errorf("loaded %v", loaded)
+	}
+	for prefix, categories := range want {
+		if !slices.Equal(loaded[prefix], categories) {
+			t.Errorf("%s loaded as %v", prefix, loaded[prefix])
+		}
+	}
+	if !currentTime.Equal(older) {
+		t.Errorf("current at %v, not the oldest file's %v", currentTime, older)
+	}
+}
+
+// A file the adapter cannot read whole fails the load, an exclusion above all, so nothing it would misread
+// can reject mail; so does a mirror with no zone file.
+func TestFeedMirrorRefusesWhatItCannotReadWhole(t *testing.T) {
+	for name, line := range map[string]string{
+		"an exclusion":            "!192.0.2.7",
+		"a range":                 "192.0.2.1-192.0.2.9",
+		"an abbreviated address":  "10.1",
+		"a prefix with host bits": "192.0.2.1/24",
+		"text that is no value":   "192.0.2.1 listed",
+		"an address with a zone":  "fe80::1%eth0",
+	} {
+		directory := feedMirrorTestDirectory(t, map[string]string{"exploit.rbldnsd": "192.0.2.0/24\n" + line + "\n"}, nil)
+		if _, _, err := feedMirrorTestLoad(t, directory); err == nil {
+			t.Errorf("%s: loaded", name)
+		} else if strings.Contains(err.Error(), line) {
+			t.Errorf("%s: the refusal quotes the line: %v", name, err)
+		}
+	}
+	if _, _, err := feedMirrorTestLoad(t, t.TempDir()); err == nil {
+		t.Error("a mirror with no zone file loaded")
+	}
+	if _, err := NewFeedMirrorSource(DefaultFeedMirrorSettings()); err == nil {
+		t.Error("a mirror with no directory was made")
+	}
+}
