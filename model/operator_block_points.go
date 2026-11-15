@@ -66,7 +66,10 @@ package model
 // (OperatorBlockPointsExpiry). Until 2026-11-14 the task stopped at such a
 // block on every run, so no later block was ever awarded again. The points
 // leaderboard excuses an expired block's week: a network without points in it
-// keeps its Streak through it (pointsStreaks, owner decision 2026-11-14).
+// keeps its Streak through it (pointsStreaks, owner decision 2026-11-14). The
+// latest completed block is pending there until its award commits or it is
+// recorded expired: meanwhile it neither breaks nor extends a Streak
+// (loadPointsPendingEpochs, owner decision 2026-11-14).
 
 import (
 	"context"
@@ -190,7 +193,22 @@ func OperatorBlockPointsDueBlocks(cutoff time.Time, now time.Time) []int64 {
 }
 
 // GetOperatorBlockPointsAwarded reports which of the blocks have their points.
-func GetOperatorBlockPointsAwarded(ctx context.Context, blocks []int64) map[int64]bool {
+func GetOperatorBlockPointsAwarded(ctx context.Context, blocks []int64) (awarded map[int64]bool) {
+	awarded = map[int64]bool{}
+	if len(blocks) == 0 {
+		return
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		awarded = getOperatorBlockPointsAwardedInConn(ctx, conn, blocks)
+	})
+	return
+}
+
+// Which of the blocks have their points, read on the caller's connection: an
+// award commits its payment_report row, keyed by the block's plan id
+// (OperatorBlockPointsPlanId), in the transaction that writes its payments and
+// points (CommitOperatorBlockPoints).
+func getOperatorBlockPointsAwardedInConn(ctx context.Context, conn server.PgConn, blocks []int64) map[int64]bool {
 	awarded := map[int64]bool{}
 	if len(blocks) == 0 {
 		return awarded
@@ -202,19 +220,17 @@ func GetOperatorBlockPointsAwarded(ctx context.Context, blocks []int64) map[int6
 		planBlocks[planId] = block
 		planIds = append(planIds, planId)
 	}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`SELECT payment_plan_id FROM payment_report WHERE payment_plan_id = ANY($1::uuid[])`,
-			planIds,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var planId server.Id
-				server.Raise(result.Scan(&planId))
-				awarded[planBlocks[planId]] = true
-			}
-		})
+	result, err := conn.Query(
+		ctx,
+		`SELECT payment_plan_id FROM payment_report WHERE payment_plan_id = ANY($1::uuid[])`,
+		planIds,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var planId server.Id
+			server.Raise(result.Scan(&planId))
+			awarded[planBlocks[planId]] = true
+		}
 	})
 	return awarded
 }

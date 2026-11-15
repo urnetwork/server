@@ -81,6 +81,9 @@ func closeContractWithReportUsage(ctx context.Context, report ContractCloseRepor
 	if err != nil {
 		return false, 0, err
 	}
+	if admission.settlementUnready {
+		return admission.applied, admission.addedByteCount, ctx.Err()
+	}
 	if !admission.applied {
 		// A retained report outlives the mutable contract and client directory.
 		// Only an unfinished owner needs settlement resumed after a lost reply.
@@ -298,6 +301,8 @@ type contractCloseReportAdmission struct {
 	addedByteCount ByteCount
 	// admitted report ordering that permits receiver finalization
 	completion contractCheckpointCompletion
+	// only an applied report's locked snapshot can prove this; retries cannot
+	settlementUnready bool
 }
 
 // Admission takes three round trips: the locked reads, the reservation and the
@@ -402,9 +407,9 @@ func admitContractCloseReportInTx(ctx context.Context, tx server.PgTx, report Co
 	}
 	// The lock above owns both the old rolling receipt and the byte increment.
 	// Any refusal rolls back our reservation too.
-	applied, added, completion := applyLockedContractCloseReportInTx(ctx, tx, report.ContractId, sourceId, destinationId, party, report.AckedByteCount, report.Checkpoint, &report.ReportId, true)
+	applied, added, completion, settlementUnready := applyLockedContractCloseReportInTx(ctx, tx, report.ContractId, sourceId, destinationId, party, report.AckedByteCount, report.Checkpoint, &report.ReportId, true)
 	if !applied {
 		return contractCloseReportAdmission{}, ErrContractCloseReportClosed
 	}
-	return contractCloseReportAdmission{applied: true, addedByteCount: added, completion: completion}, nil
+	return contractCloseReportAdmission{applied: true, addedByteCount: added, completion: completion, settlementUnready: settlementUnready}, nil
 }

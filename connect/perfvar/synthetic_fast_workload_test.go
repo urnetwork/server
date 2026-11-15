@@ -212,7 +212,7 @@ func (self *syntheticFastOrigin) ServeHTTP(writer http.ResponseWriter, request *
 	}
 	if ownedRun != nil && self.providerForRequestForTest != nil {
 		provider := self.providerForRequestForTest(request)
-		if 0 <= provider && provider < 7 {
+		if 0 <= provider && provider < syntheticFastProviderCapacity {
 			ownedRun.providerMask.Or(uint32(1) << provider)
 			ownedRun.streamProviderMasks[stream].Or(uint32(1) << provider)
 		} else {
