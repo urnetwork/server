@@ -40,6 +40,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
@@ -475,6 +476,7 @@ func (self *networkScimChanges) getForScimSigner(args *GetSidecarScimChangesArgs
 	// the store's reads first, holding no Postgres connection across them
 	state, err := self.tipState(ctx, byJwt.NetworkId)
 	if err != nil {
+		glog.Infof("[scim]%s: the log's tip did not read for the scim_signer: %s\n", byJwt.NetworkId, err)
 		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, "The authorization log is unavailable.")
 	}
 	if state == nil || !state.ScimSignerStanding(sidecar.Id(sidecarId), self.now()) {
