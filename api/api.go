@@ -417,6 +417,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// §7.5's team networks and their members (TEAM-M6-01)
 		router.NewRoute("POST", "/network/team-create", handlers.CreateNetworkTeam),
 		router.NewRoute("GET", "/network/members", handlers.GetNetworkMembers),
+		// §7.10's member removal: the server's denial at once (TEAM-M6-11)
+		router.NewRoute("POST", "/network/member-remove", handlers.RemoveNetworkMember),
 		// §7.5's invitations and network switching (TEAM-M6-04)
 		router.NewRoute("POST", "/network/member-invite", handlers.CreateNetworkMemberInvite),
 		router.NewRoute("POST", "/network/member-invite-accept", handlers.AcceptNetworkMemberInvite),

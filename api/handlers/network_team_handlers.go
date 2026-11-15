@@ -4,13 +4,14 @@ import (
 	"net/http"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
 
-// §7.5's team routes (TEAM-M6-01), each the network credential's
-// (route_authz.go). Both answer 503 until the binary links MG6.
+// §7.5's team routes (TEAM-M6-01, TEAM-M6-11), each the network credential's
+// (route_authz.go). Each answers 503 until the binary links MG6.
 
 // POST /network/team-create: a new team network, its caller the first Owner.
 func CreateNetworkTeam(w http.ResponseWriter, r *http.Request) {
@@ -33,4 +34,10 @@ func GetNetworkMembers(w http.ResponseWriter, r *http.Request) {
 		return model.GetNetworkMembers(args, clientSession)
 	}
 	router.WrapRequireAuth(impl, w, r)
+}
+
+// POST /network/member-remove: denies a team's member at once, its MemberRevoke
+// owed to an admin device's signature (TEAM-M6-11).
+func RemoveNetworkMember(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.RemoveNetworkMember, w, r)
 }
