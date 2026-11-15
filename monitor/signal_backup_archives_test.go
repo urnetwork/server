@@ -753,6 +753,51 @@ func TestBackupArchivesSignalSyntheticStaleAndMissingGenerations(t *testing.T) {
 	}
 }
 
+// pg's objective is 7 days (owner, 2026-11-15): edge-6's Sun/Thu runs take 40
+// to 75 hours and the daily pull 20 to 25, so its newest copy is up to about
+// 6.6 days old when the next lands. The other archives keep 5 days. Until
+// then every archive was stale after 5 days, so a 6-day-old pg generation,
+// normal on that rhythm, paged.
+func TestBackupArchivesSignalPostgresObjectiveIsSevenDays(t *testing.T) {
+	now := time.Date(2026, 11, 15, 21, 0, 0, 0, time.UTC)
+	zero := float64(0)
+	sixDays := now.Add(-6 * 24 * time.Hour)
+	eightDays := now.Add(-8 * 24 * time.Hour)
+	fresh := now.Add(-24 * time.Hour)
+	code := func(createdAt *time.Time) []backupArchiveFixture {
+		return []backupArchiveFixture{
+			{archive: "github-urnetwork", generation: "main-code-urnetwork-current.tar.xz", createdAt: createdAt, progress: &zero},
+			{archive: "github-urfoundation", generation: "main-code-urfoundation-current.tar.xz", createdAt: createdAt, progress: &zero},
+		}
+	}
+
+	alerts := runBackupArchiveFixtures(t, now, append(code(&fresh),
+		backupArchiveFixture{archive: "pg", generation: "main-pg-2026-11-09-21-00-00.dir.tar", createdAt: &sixDays, progress: &zero},
+		backupArchiveFixture{archive: "redis", generation: "main-redis-2026-11-09-21-00-00", createdAt: &sixDays, progress: &zero},
+	)...)
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-stale", "backup-1/pg"); alert != nil {
+		t.Fatalf("a 6-day-old pg generation is inside its 7-day objective:\n%s", alert.Markdown())
+	}
+	redis := requireBackupArchiveAlert(t, alerts, "backup-archive-stale", "backup-1/redis")
+	if !strings.Contains(redis.Markdown(), "five-day recovery-point objective") {
+		t.Fatalf("stale Redis alert does not name its five-day objective:\n%s", redis.Markdown())
+	}
+
+	alerts = runBackupArchiveFixtures(t, now, append(code(&fresh),
+		backupArchiveFixture{archive: "pg", generation: "main-pg-2026-11-07-21-00-00.dir.tar", createdAt: &eightDays, progress: &zero},
+		backupArchiveFixture{archive: "redis", generation: "main-redis-2026-11-14-21-00-00", createdAt: &fresh, progress: &zero},
+	)...)
+	pg := requireBackupArchiveAlert(t, alerts, "backup-archive-stale", "backup-1/pg")
+	for _, want := range []string{"8 days", "seven-day recovery-point objective", "seven days for PostgreSQL"} {
+		if !strings.Contains(pg.Markdown(), want) {
+			t.Fatalf("stale pg alert missing %q:\n%s", want, pg.Markdown())
+		}
+	}
+	if findBackupArchiveAlert(alerts, "backup-archive-stale", "backup-1/redis") != nil {
+		t.Fatalf("a 1-day-old Redis generation was marked stale: %+v", alerts)
+	}
+}
+
 func TestBackupArchivesSignalSyntheticStaleActiveTransferNeedsCapacity(t *testing.T) {
 	now := time.Date(2026, 9, 2, 12, 30, 0, 0, time.UTC)
 	zero := float64(0)

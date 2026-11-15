@@ -14,9 +14,15 @@ import (
 )
 
 const (
-	backupArchiveMetricFreshness       = 90 * time.Second
-	backupArchiveHeartbeatAge          = 90 * time.Second
-	backupArchiveMaximumAge            = 5 * 24 * time.Hour
+	backupArchiveMetricFreshness = 90 * time.Second
+	backupArchiveHeartbeatAge    = 90 * time.Second
+	// The recovery-point objective of every archive but pg.
+	backupArchiveMaximumAge = 5 * 24 * time.Hour
+	// pg's objective (owner, 2026-11-15). Its generations come from edge-6's
+	// Sun/Thu 06:00 runs of 40 to 75 hours, and the daily 12:00 UTC pull takes
+	// 20 to 25 hours, so the newest copy is up to about 6.6 days old when the
+	// next lands. Grafana's backup-archive-pg-stale uses the same 7 days.
+	backupArchivePostgresMaximumAge    = 7 * 24 * time.Hour
 	backupArchiveIntegrityMaximumAge   = 48 * time.Hour
 	backupArchiveFutureTolerance       = 5 * time.Minute
 	backupArchiveStorageLookback       = 30 * 24 * time.Hour
@@ -24,6 +30,14 @@ const (
 	backupArchiveGenerationMaximumSize = 200
 	backupArchiveGitHubJournalMaxLines = int64(512)
 )
+
+// The recovery-point objective of one archive, and its name in alert text.
+func backupArchiveObjective(archive string) (time.Duration, string) {
+	if archive == "pg" {
+		return backupArchivePostgresMaximumAge, "seven-day"
+	}
+	return backupArchiveMaximumAge, "five-day"
+}
 
 var backupArchiveGenerationPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -1748,7 +1762,7 @@ func evaluateBackupArchiveRecoveryIdle(
 		class: class, target: target, frame: "post-reboot-no-invocation", sustain: 1,
 		symptom:   fmt.Sprintf("%s data archive recovery is idle after reboot", target),
 		mechanism: mechanism,
-		baseline:  "When PostgreSQL or Redis completion is missing or older than five days and the archive mount is usable, the data unit is executing, waiting in a bounded on-failure restart, has a real current-boot invocation result, or has an imminent timer trigger.",
+		baseline:  "When PostgreSQL or Redis completion is missing or older than its objective (seven days for PostgreSQL, five for Redis) and the archive mount is usable, the data unit is executing, waiting in a bounded on-failure restart, has a real current-boot invocation result, or has an imminent timer trigger.",
 		observed: fmt.Sprintf(
 			"recovery_required=%s unit_state=%s unit_substate=%s main_pid=%d invocation_id=%s exec_start_monotonic=%d result=%s exit_status=%d timer_state=%s timer_next=%s boot=%s mount_state=%s",
 			strings.Join(required, ","),
@@ -1767,7 +1781,7 @@ func evaluateBackupArchiveRecoveryIdle(
 		evidence: "The monitor joins raw Mimir completion state with the effective service InvocationID/start/result, timer state/next trigger, current boot time, and exact archive mount state. It does not call systemctl start or infer success from default zero-valued properties.",
 		context:  "This is a post-recovery scheduling gap, separate from the physical storage cause and the erased off-volume completion rows. A direct SSH banner and an enp65s0 route prove only present network reachability; they do not repair the archive filesystem, authenticate the source listing, preserve a multi-hour session, or create a recovery point.",
 		action:   "Do not wait for the next calendar trigger and do not start the data writer merely to clear this alert. First satisfy the simultaneous storage-recovery gates. With the volume proven safe and both writers still inactive, run only the bounded metrics refresh to reconstruct real completed rows from disk; validate those rows against the root-owned artifacts. Then obtain explicit operator authorization for exactly one catch-up data pull through the configured direct endpoints.",
-		verify:   "The metrics refresh exposes the real stored PostgreSQL and Redis generations on two direct Mimir reads without starting a pull. After storage clearance and explicit authorization, exactly one current-boot InvocationID/MainPID runs; both direct source authentications succeed, the unit completes, artifacts and manifests validate, and two direct Mimir reads show both recovery points inside five days. The unit then becomes normally inactive with a real invocation result.",
+		verify:   "The metrics refresh exposes the real stored PostgreSQL and Redis generations on two direct Mimir reads without starting a pull. After storage clearance and explicit authorization, exactly one current-boot InvocationID/MainPID runs; both direct source authentications succeed, the unit completes, artifacts and manifests validate, and two direct Mimir reads show both recovery points inside their objectives (seven days for PostgreSQL, five for Redis). The unit then becomes normally inactive with a real invocation result.",
 		playbook: "SIGNALS.md §11.22",
 	}
 }
@@ -1790,7 +1804,7 @@ func backupArchiveDataRecoveryRequired(
 				latest = sample.createdAt
 			}
 		}
-		if now.Sub(latest) > backupArchiveMaximumAge {
+		if maximumAge, _ := backupArchiveObjective(archive); now.Sub(latest) > maximumAge {
 			required = append(required, archive+":stale")
 		}
 	}
@@ -2192,7 +2206,7 @@ func evaluateBackupArchiveDataTimer(
 			"%s has no proven durable future PostgreSQL/Redis backup trigger",
 			target,
 		),
-		mechanism: "The PostgreSQL/Redis archive service is a oneshot and does not schedule itself. A timer that is inactive, not durably enabled, or has neither a current/future NextElapse nor an exact timer-linked running activation cannot launch the next data generation; valid latest/weekly/monthly artifacts can therefore hide a broken future schedule until the five-day recovery objective is breached.",
+		mechanism: "The PostgreSQL/Redis archive service is a oneshot and does not schedule itself. A timer that is inactive, not durably enabled, or has neither a current/future NextElapse nor an exact timer-linked running activation cannot launch the next data generation; valid latest/weekly/monthly artifacts can therefore hide a broken future schedule until the recovery objective (seven days for PostgreSQL, five for Redis) is breached.",
 		baseline:  "remote-backup-archive.timer is active and enabled, with either a current/future NextElapseUSecRealtime or a nonfuture LastTriggerUSec that is no earlier than the start of its still-running writer.",
 		observed: fmt.Sprintf(
 			"timer_state=%s timer_unit_file_state=%s timer_next=%s timer_last=%s writer_state=%s writer_main_pid_present=%t writer_start=%s writer_result=%s writer_exit_status=%d",
@@ -2751,15 +2765,16 @@ func evaluateBackupArchive(
 	latest, _ := newestBackupArchiveLatest(observation)
 	age := now.Sub(latest.createdAt)
 	ageText := backupArchiveAge(age)
-	if age > backupArchiveMaximumAge {
+	maximumAge, objective := backupArchiveObjective(observation.archive)
+	if age > maximumAge {
 		progress := "unknown"
 		if len(observation.progress) == 1 {
 			progress = strconv.FormatFloat(observation.progress[0], 'f', 0, 64)
 		}
-		mechanism := "The source textfile is current, but its archive timestamp has not advanced inside the five-day recovery-point objective. The scheduled pull may have failed before its atomic final rename; on 2026-09-01 the data job waited 15 minutes for an absent udisks mount and exited without replacing the August 20 generation."
+		mechanism := fmt.Sprintf("The source textfile is current, but its archive timestamp has not advanced inside the %s recovery-point objective. The scheduled pull may have failed before its atomic final rename; on 2026-09-01 the data job waited 15 minutes for an absent udisks mount and exited without replacing the August 20 generation.", objective)
 		context := "This alert is operational and may require persistent mount configuration, replacement media, or more archive capacity. A collector, Grafana, or code deploy alone cannot create a new recovery point."
 		action := "Read the owning unit result and journal, verify the configured archive path is a real mounted filesystem with enough free space, then repair the first failed prerequisite. Start a catch-up run only with operator authorization; never refresh the metric without producing and validating a new archive."
-		verify := "The exact unit exits successfully, the completed generation and manifest validate on mounted media, its timestamp is within five days, and two consecutive direct Mimir reads show the same new generation."
+		verify := fmt.Sprintf("The exact unit exits successfully, the completed generation and manifest validate on mounted media, its timestamp is within the %s objective, and two consecutive direct Mimir reads show the same new generation.", objective)
 		frame := ""
 		queueObserved := ""
 		if progress == "1" && volumeState != "read-write" {
@@ -2769,10 +2784,10 @@ func evaluateBackupArchive(
 			action = "Follow the simultaneous backup-archive-volume-unavailable alert. With explicit operator authorization, stop the existing writer before closing a stale mapper or repairing the offline filesystem. Do not start a duplicate transfer, manufacture a completed timestamp, or remount an aborted ext4 journal read-write in place."
 			verify = "After offline storage recovery, require the exact volume to remain read-write, then run one single-writer generation to a validated atomic artifact and observe two fresh Mimir reads with the new completion timestamp."
 		} else if progress == "1" {
-			mechanism = "The source textfile is current and a writer is active, but no new atomic recovery point exists until that transfer completes. A healthy process can remain outside the five-day objective when source backlog divided by sustained offsite throughput exceeds the available recovery window."
+			mechanism = fmt.Sprintf("The source textfile is current and a writer is active, but no new atomic recovery point exists until that transfer completes. A healthy process can remain outside the %s objective when source backlog divided by sustained offsite throughput exceeds the available recovery window.", objective)
 			context = "An active single-writer transfer is operationally pending, not fixed and not stalled merely because its final timestamp is unchanged. Software cannot create WAN bandwidth, attach seed media, or shorten the bytes that must cross the recovery boundary."
 			action = "Preserve the active writer. Confirm one stable unit/PID, one source transfer, a read-write mounted archive, fresh progress telemetry, and increasing receive bytes; verify the effective source route is the dedicated direct SSH path, then compare source backlog with sustained direct-transfer throughput. If the projected completion still misses the recovery-point objective, operations must provision a faster path or an approved offline seed. Do not restart, duplicate, or manually finalize the transfer to make the timestamp move."
-			verify = "The same authorized run completes atomically, its artifact and manifest validate, two direct Mimir reads expose the new generation, and a subsequent scheduled run proves the available offsite throughput can keep the archive inside the five-day objective."
+			verify = fmt.Sprintf("The same authorized run completes atomically, its artifact and manifest validate, two direct Mimir reads expose the new generation, and a subsequent scheduled run proves the available offsite throughput can keep the archive inside the %s objective.", objective)
 		} else if queue.activeArchive != "" {
 			frame = "queued-behind=" + queue.activeArchive
 			queueObserved = fmt.Sprintf(
@@ -2796,7 +2811,7 @@ func evaluateBackupArchive(
 				observation.archive,
 			)
 			verify = fmt.Sprintf(
-				"The same authorized unit completes %s atomically, then publishes %s in_progress=1 without a second unit generation; both artifacts and manifests validate, and two direct Mimir reads expose completed generations inside the five-day objective.",
+				"The same authorized unit completes %s atomically, then publishes %s in_progress=1 without a second unit generation; both artifacts and manifests validate, and two direct Mimir reads expose completed generations inside their objectives (seven days for PostgreSQL, five for Redis).",
 				queue.activeArchive,
 				observation.archive,
 			)
@@ -2809,7 +2824,7 @@ func evaluateBackupArchive(
 				target, ageText,
 			),
 			mechanism: mechanism,
-			baseline:  "Every structural archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale. Integrity health is evaluated independently.",
+			baseline:  "Every structural archive timestamp is inside its objective, seven days for PostgreSQL and five for the others; current scrapes continue even when the stored generation is stale. Integrity health is evaluated independently.",
 			observed: fmt.Sprintf(
 				"generation=%s completed_at=%s age=%s in_progress=%s archive_volume_state=%s fresh_latest_samples=%d metrics_gateway=%s%s",
 				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, volumeState, len(observation.latest), gateway, queueObserved,
