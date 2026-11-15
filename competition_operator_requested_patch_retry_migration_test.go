@@ -29,8 +29,17 @@ func TestCompetitionOperatorPatchRetryMigrationPreservesCompletePredecessors(t *
 	}
 	version := CompetitionOperatorRequestedPatchRetryMigrationVersion()
 	if GiftSchemaVersion() != CompetitionDistributedReevaluationMigrationVersion()+1 || GiftRefundSchemaVersion() != GiftSchemaVersion()+1 ||
-		version != GiftRefundSchemaVersion()+1 || version != MigrationCount() {
+		version != GiftRefundSchemaVersion()+1 {
 		t.Fatal("patch retry was not appended after the complete published prefix")
+	}
+	tail := []int{version, OperatorBlockTrafficVersion(), OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(), CompetitionSecondRecoveryMigrationVersion()}
+	for index, tailVersion := range tail {
+		if tailVersion != 974+index {
+			t.Fatal("reviewed migration tail after patch retry was moved, omitted or overwritten", tail)
+		}
+	}
+	if tail[len(tail)-1] != MigrationCount() {
+		t.Fatal("second recovery must follow the complete published tail", tail, MigrationCount())
 	}
 }
 

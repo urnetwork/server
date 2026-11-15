@@ -345,6 +345,83 @@ func TestCompetitionSecondRecoveryPgMigrationPreservesRunningFirstRecovery(t *te
 	})
 }
 
+// The actual DDL's validating CHECK owns the table lock. A test-local gate
+// records entry before blocking; only removing the new bound restores the old
+// success. No polling, secondary connection or elapsed-time guess is required.
+func TestCompetitionSecondRecoveryPgMigrationBoundsValidationLockHold(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		version := server.CompetitionSecondRecoveryMigrationVersion()
+		server.ApplyDbMigrationsUpTo(tb.Context(), version-1)
+		newCompetitionDistributedPgFixture(t, tb, true, true)
+		migration := server.CompetitionSecondRecoveryMigrationSql()
+		const statementBound = "SET LOCAL statement_timeout='30s';\n"
+		const validation = `ALTER TABLE competition_job ADD CONSTRAINT competition_job_evaluation_cycle_check CHECK (
+ evaluation_cycle IN (0,1) OR (evaluation_cycle=2 AND competition_second_recovery_job_allowed(job_id)));`
+		if strings.Count(migration, statementBound) != 1 || strings.Count(migration, validation) != 1 {
+			tb.Fatal("actual migration lost its unique statement bound or validating CHECK")
+		}
+		instrumentedValidation := strings.TrimSuffix(strings.Replace(validation, "CHECK (", "CHECK (pg_temp.second_recovery_validation_gate() AND (", 1), ";") + ");"
+		migration = strings.Replace(migration, validation, instrumentedValidation, 1)
+		server.MaintenanceDb(tb.Context(), func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(tb.Context(), `CREATE TEMP SEQUENCE second_recovery_validation_calls;
+CREATE FUNCTION pg_temp.second_recovery_validation_gate() RETURNS boolean LANGUAGE plpgsql AS $gate$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND relation='competition_job'::regclass
+  AND mode='AccessExclusiveLock' AND granted) THEN
+  RAISE EXCEPTION 'validation did not hold the actual table lock';
+ END IF;
+ PERFORM nextval('pg_temp.second_recovery_validation_calls');
+ PERFORM pg_sleep(1);
+ RETURN true;
+END;
+$gate$;`))
+			var initialStatementTimeout, initialLockTimeout string
+			server.Raise(conn.QueryRow(tb.Context(), `SELECT current_setting('statement_timeout'),current_setting('lock_timeout')`).Scan(&initialStatementTimeout, &initialLockTimeout))
+			var previousCalls int64
+			for _, control := range []struct {
+				name        string
+				sql         string
+				wantTimeout bool
+			}{
+				{name: "old lock bound only", sql: strings.Replace(migration, statementBound, "", 1)},
+				// The static test pins the full healthy 30s budget; shorten only
+				// this disposable execution's exact bound to exercise cancellation.
+				{name: "bounded validation", sql: strings.Replace(migration, statementBound, "SET LOCAL statement_timeout='100ms';\n", 1), wantTimeout: true},
+			} {
+				func() {
+					tx, err := conn.Begin(tb.Context())
+					if err != nil {
+						tb.Fatal(err)
+					}
+					defer tx.Rollback(tb.Context())
+					server.RaisePgResult(tx.Exec(tb.Context(), `SET LOCAL statement_timeout='0'; SET LOCAL lock_timeout='0';`))
+					_, err = tx.Exec(tb.Context(), control.sql)
+					var postgres *pgconn.PgError
+					if control.wantTimeout {
+						if !errors.As(err, &postgres) || postgres.Code != "57014" || !strings.Contains(postgres.Message, "statement timeout") || !strings.Contains(postgres.Where, "second_recovery_validation_gate") {
+							tb.Fatal("validating DDL was not canceled by the statement bound", err)
+						}
+					} else if err != nil {
+						tb.Fatal("lock-timeout-only counterfactual did not complete its validation", err)
+					}
+				}()
+				var calls int64
+				server.Raise(conn.QueryRow(tb.Context(), `SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM pg_temp.second_recovery_validation_calls`).Scan(&calls))
+				var statementTimeout, lockTimeout string
+				var retainedTableLock, retainedColumn bool
+				server.Raise(conn.QueryRow(tb.Context(), `SELECT current_setting('statement_timeout'),current_setting('lock_timeout'),
+ EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND relation='competition_job'::regclass AND mode='AccessExclusiveLock' AND granted),
+ EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='competition_job'::regclass AND attname='second_recovery_receipt_json' AND NOT attisdropped)`).Scan(&statementTimeout, &lockTimeout, &retainedTableLock, &retainedColumn))
+				if calls <= previousCalls || retainedTableLock || retainedColumn || statementTimeout != initialStatementTimeout || lockTimeout != initialLockTimeout {
+					tb.Fatal("validation did not enter its lock-held gate or rollback retained DDL, locks or local timeouts", control.name, calls, previousCalls, retainedTableLock, retainedColumn, statementTimeout, lockTimeout)
+				}
+				previousCalls = calls
+				tb.Logf("%s reached actual lock-held CHECK validation; timeout=%t; rollback restored schema, locks and session limits", control.name, control.wantTimeout)
+			}
+		}, server.OptReadWrite(), server.OptNoRetry())
+	})
+}
+
 // The actual production audit expression is parsed by PostgreSQL, not copied
 // into a synthetic validator. Removing only its grouping reproduces SQL42725.
 func TestCompetitionSecondRecoveryPgAuditProjectionSqlPrecedence(t *testing.T) {

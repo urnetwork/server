@@ -116,9 +116,12 @@ func CompetitionSecondRecoveryScopeBodySql() string {
 }
 
 // Migration-first permissive guards leave all existing jobs and receipts unchanged.
+// Lock acquisition has two seconds; each statement, including CHECK validation
+// while holding the table lock, has thirty seconds before the transaction aborts.
 func CompetitionSecondRecoveryMigrationSql() string {
 	bodies := CompetitionSecondRecoveryBodiesSql()
 	sql := `SET LOCAL lock_timeout='2s';
+SET LOCAL statement_timeout='30s';
 CREATE FUNCTION competition_second_recovery_job_allowed(target uuid) RETURNS boolean LANGUAGE sql IMMUTABLE AS $scope$` + CompetitionSecondRecoveryScopeBodySql() + `$scope$;
 ALTER TABLE competition_job ADD COLUMN second_recovery_receipt_json jsonb;
 ALTER TABLE competition_job DROP CONSTRAINT competition_job_evaluation_cycle_check;
