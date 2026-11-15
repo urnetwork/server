@@ -98,8 +98,9 @@ func TestEventSchemaLists(t *testing.T) {
 		connect.AssertEqual(t, EventOwnerClient, spec.Owner)
 	}
 	serverNames := ServerEventNames()
-	// 15 onboarding events, feedback.tapped and the 12 reengage.* events
-	connect.AssertEqual(t, 28, len(serverNames))
+	// 15 onboarding events, feedback.tapped, the 12 reengage.* events, the
+	// two sign-up cohort events and the offer email exposure
+	connect.AssertEqual(t, 31, len(serverNames))
 	for _, name := range serverNames {
 		spec := EventSpecFor(name)
 		connect.AssertEqual(t, true, spec.ServerOnly)
