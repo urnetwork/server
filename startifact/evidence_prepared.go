@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -142,7 +143,9 @@ func (self *PreparedEvidence) publish(ctx context.Context, store server.BlobStor
 }
 
 // Reads every stored route back before writing anything. stored is true only
-// when every route already holds exactly these bytes; a route that holds no
+// when every route already holds exactly these bytes. The content route holds
+// them at its sharded key or, written before that layout, at its legacy flat
+// key, read only when the sharded key holds no object. A route that holds no
 // object ends the check with stored false and no error, and one that holds
 // other bytes is an ImmutableConflictError. The readback is the same exact
 // comparison a publication ends with, so a stored result needs no create.
@@ -157,7 +160,12 @@ func (self *PreparedEvidence) readStored(ctx context.Context, store server.BlobS
 	if err != nil {
 		return false, err
 	}
-	for _, key := range published.storedKeys() {
+	legacyContentKey, err := EvidenceLegacyContentKey(store, self.identity.ContentHash)
+	if err != nil {
+		return false, err
+	}
+	// present is false when key holds no object
+	readBack := func(key string) (present bool, err error) {
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
@@ -177,15 +185,47 @@ func (self *PreparedEvidence) readStored(ctx context.Context, store server.BlobS
 			return false, err
 		}
 		if !equal {
-			return false, &ImmutableConflictError{Key: key}
+			return true, &ImmutableConflictError{Key: key}
+		}
+		return true, nil
+	}
+	for _, key := range published.storedKeys() {
+		present, err := readBack(key)
+		if err == nil && !present && key == published.ContentKey {
+			present, err = readBack(legacyContentKey)
+		}
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			return false, ctx.Err()
 		}
 	}
 	return true, ctx.Err()
 }
 
+// Reads back every stored route of this evidence, exactly as a stored check
+// before publication does: the content at its sharded key or, failing that,
+// its legacy flat key, and its history key when its kind has one. Evidence
+// that is not stored is an error wrapping fs.ErrNotExist, so
+// server.IsBlobNotFound reports it; other bytes under a route are an
+// ImmutableConflictError. For a caller that holds an envelope but no receipt.
+func (self *PreparedEvidence) VerifyStored(ctx context.Context, store server.BlobStore) error {
+	stored, err := self.readStored(ctx, store)
+	if err != nil {
+		return err
+	}
+	if !stored {
+		return fmt.Errorf("evidence %s is not stored: %w", self.identity.ContentHash, fs.ErrNotExist)
+	}
+	return nil
+}
+
 // Verify receipt identity and independently read every complete stored route.
 // Equality is against the already verified immutable wire, not mutable input
 // fields or a digest-only substitute; exact length and Close remain required.
+// A receipt names the sharded content key a publication writes now, or the
+// legacy flat key one wrote before; either is read at exactly the key named.
 func (self *PreparedEvidence) VerifyPublished(ctx context.Context, store server.BlobStore, published *Published) error {
 	if ctx == nil {
 		return errors.New("evidence verification context is missing")
@@ -200,10 +240,15 @@ func (self *PreparedEvidence) VerifyPublished(ctx context.Context, store server.
 	if published == nil || !strings.EqualFold(published.ContentHash, want.ContentHash) || published.Bucket != want.Bucket {
 		return errors.New("direct evidence receipt is invalid")
 	}
-	if published.ContentKey != want.ContentKey || published.HistoryKey != want.HistoryKey {
+	legacyContentKey, err := EvidenceLegacyContentKey(store, want.ContentHash)
+	if err != nil {
+		return err
+	}
+	if (published.ContentKey != want.ContentKey && published.ContentKey != legacyContentKey) || published.HistoryKey != want.HistoryKey {
 		return errors.New("direct evidence receipt keys do not match the rendered store")
 	}
-	for _, key := range want.storedKeys() {
+	routes := &Published{ContentKey: published.ContentKey, HistoryKey: want.HistoryKey}
+	for _, key := range routes.storedKeys() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

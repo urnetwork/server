@@ -77,8 +77,9 @@ func TestPreparedClientKeyEvidenceReportsCreation(t *testing.T) {
 	}
 }
 
-// Stored identical bytes cost one read and no write; absent evidence is read,
-// created and read back; other bytes under the key are a conflict, not a write.
+// Stored identical bytes cost one read and no write; absent evidence is read
+// at its sharded and its legacy key, created and read back; other bytes under
+// the key are a conflict, not a write.
 func TestPreparedClientKeyEvidenceVerifyFirstWritesOnlyWhenAbsent(t *testing.T) {
 	encoded, contentHash := sealedClientKeyRegistrationTest(t, 2)
 	evidence, err := PrepareClientKeyEvidence(encoded, contentHash)
@@ -87,11 +88,11 @@ func TestPreparedClientKeyEvidenceVerifyFirstWritesOnlyWhenAbsent(t *testing.T) 
 	}
 	store := newPreparedClientKeyStoreTest(t)
 	created, err := evidence.VerifyOrPublish(t.Context(), store)
-	if err != nil || !created || store.puts != 1 || store.gets != 2 {
+	if err != nil || !created || store.puts != 1 || store.gets != 3 {
 		t.Fatalf("absent evidence: created=%t err=%v puts=%d gets=%d", created, err, store.puts, store.gets)
 	}
 	created, err = evidence.VerifyOrPublish(t.Context(), store)
-	if err != nil || created || store.puts != 1 || store.gets != 3 || store.closes != 2 {
+	if err != nil || created || store.puts != 1 || store.gets != 4 || store.closes != 2 {
 		t.Fatalf("stored evidence: created=%t err=%v puts=%d gets=%d closes=%d", created, err, store.puts, store.gets, store.closes)
 	}
 
