@@ -284,6 +284,9 @@ type AbuseGateSettings struct {
 	// The most networks cached: 65,536, a few megabytes. Past it, entries unread within MaxAge are dropped first,
 	// then any, never more than a load needs.
 	MaxNetworkCount int
+	// How far a read must move an entry's read time before it is written: a second, so concurrent reads of one
+	// network seldom write its shared line, which eviction reads only to the minute. Non-positive writes at every read.
+	ReadTimeResolution time.Duration
 	// The most networks one load reads, in one statement: 256.
 	LoadBatchSize int
 	// One load's bound: 4 s.
@@ -310,6 +313,7 @@ func DefaultAbuseGateSettings() *AbuseGateSettings {
 		MaxAge:             5 * time.Minute,
 		AbsentRefreshAfter: 5 * time.Second,
 		MaxNetworkCount:    65536,
+		ReadTimeResolution: time.Second,
 		LoadBatchSize:      256,
 		LoadTimeout:        4 * time.Second,
 		LoadRetryInterval:  time.Second,
@@ -495,9 +499,8 @@ func (self *NetworkAbuseGate) entry(networkId server.Id, now time.Time) *abuseGa
 	if refreshAfter <= age {
 		self.ask(networkId)
 	}
-	// written only when it moves by a second, so concurrent reads seldom write the shared line
 	nowNanos := now.UnixNano()
-	if entry.readTime.Load() < nowNanos-int64(time.Second) {
+	if entry.readTime.Load() <= nowNanos-int64(self.settings.ReadTimeResolution) {
 		entry.readTime.Store(nowNanos)
 	}
 	return entry
