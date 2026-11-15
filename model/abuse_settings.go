@@ -100,6 +100,10 @@ type AbuseSettings struct {
 	// (§21.10): never in bulk. A lookup past it answers the first rows and says
 	// more exist.
 	LookupRowLimit int
+	// The most bytes of a review's, a lift's or an appeal decision's reasons:
+	// 2048, the width of abuse_action.review_reason and
+	// abuse_appeal.decision_reason, so a longer one is refused rather than cut.
+	ReviewReasonMaxByteCount int
 
 	// How long after an edge connection ends a report may join by its
 	// connection_id (§21.8, tls-3): 24 hours. Non-positive joins none.
@@ -130,21 +134,22 @@ func DefaultAbuseSettings() *AbuseSettings {
 		StandingPassMaxTime:         5 * time.Minute,
 		StandingPassTaskMaxTime:     10 * time.Minute,
 
-		CaseCoalesceWindow:    24 * time.Hour,
-		ActionPassInterval:    time.Minute,
-		ActionPassGrace:       time.Minute,
-		ActionPassBatchSize:   100,
-		ActionPassMaxTime:     5 * time.Minute,
-		ActionPassTaskMaxTime: 10 * time.Minute,
-		ActionReportInterval:  time.Minute,
-		CaseRetentionMonths:   13,
-		LegalRetentionYears:   3,
-		RetentionBatchSize:    1000,
-		LookupRowLimit:        100,
-		ConnectionJoinWindow:  24 * time.Hour,
-		ReportUrlMaxByteCount: 2048,
-		HostNameMaxByteCount:  253,
-		HostLabelMaxByteCount: 63,
+		CaseCoalesceWindow:       24 * time.Hour,
+		ActionPassInterval:       time.Minute,
+		ActionPassGrace:          time.Minute,
+		ActionPassBatchSize:      100,
+		ActionPassMaxTime:        5 * time.Minute,
+		ActionPassTaskMaxTime:    10 * time.Minute,
+		ActionReportInterval:     time.Minute,
+		CaseRetentionMonths:      13,
+		LegalRetentionYears:      3,
+		RetentionBatchSize:       1000,
+		LookupRowLimit:           100,
+		ReviewReasonMaxByteCount: 2048,
+		ConnectionJoinWindow:     24 * time.Hour,
+		ReportUrlMaxByteCount:    2048,
+		HostNameMaxByteCount:     253,
+		HostLabelMaxByteCount:    63,
 	}
 }
 
