@@ -17,6 +17,7 @@ func TestTeamTasksAreProductionOnly(t *testing.T) {
 		task.NewTaskTarget(model.AppendConfigLogActivationTask).TargetFunctionName(),
 		task.NewTaskTarget(work.ConfigLogRetention).TargetFunctionName(),
 		task.NewTaskTarget(work.NetworkDomainRecheck).TargetFunctionName(),
+		task.NewTaskTarget(work.RemoveExpiredNetworkScimChanges).TargetFunctionName(),
 		task.NewTaskTarget(work.NetworkAuditWebhookDelivery).TargetFunctionName(),
 	}
 	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {

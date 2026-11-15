@@ -143,8 +143,8 @@ func TestOauthClientRefusals(t *testing.T) {
 	})
 }
 
-// A one-command admin token with the all scope creates once: its replay answers the first result, secret and all,
-// and makes no second client.
+// A one-command admin token with the all scope creates once: its replay answers the first client without its secret,
+// which never rests on the server, and makes no second client.
 func TestOauthClientByAdminTokenOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newOauthClientFixture(t)
@@ -157,9 +157,16 @@ func TestOauthClientByAdminTokenOnce(t *testing.T) {
 		}
 		first, err := self.clients.create(&CreateNetworkOauthClientArgs{Scopes: []string{ApiKeyScopeAuthKeys}}, tokenSession)
 		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, strings.HasPrefix(first.ClientSecret, NetworkOauthClientSecretPrefix), true)
 		replay, err := self.clients.create(&CreateNetworkOauthClientArgs{Scopes: []string{ApiKeyScopeAuthKeys}}, tokenSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, *replay.OauthClientId, *first.OauthClientId)
+		connect.AssertEqual(t, replay.ClientSecret, "")
+		var storedResult []byte
+		server.Db(self.ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(self.ctx, `SELECT result FROM admin_token_use WHERE jti = $1`, jti).Scan(&storedResult))
+		})
+		connect.AssertEqual(t, strings.Contains(string(storedResult), first.ClientSecret), false)
 		listed, err := self.clients.list(self.admin)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(listed.OauthClients), 1)

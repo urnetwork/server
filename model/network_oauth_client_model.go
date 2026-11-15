@@ -6,7 +6,8 @@ package model
 // revoked.
 //
 //	create  POST /network/oauth-clients {scopes}: an Owner's or Admin's network credential (the keys permission) of a
-//	        team on the team tier, or a one-command admin token with the all scope whose use the transaction spends.
+//	        team on the team tier, or a one-command admin token with the all scope whose use the transaction spends;
+//	        the use keeps its answer without the secret, so a replay answers the client with no secret.
 //	        Scopes are §7.8's devices:core, auth_keys, policy:read, logs:read and all. network_oauth_client keeps the
 //	        scopes, the creating member and only the SHA-256 of the secret; the answer alone holds the secret. A new
 //	        client owes the network authority notice and an admin event
@@ -234,8 +235,8 @@ func (self *networkOauthClients) checkCaller(clientSession *session.ClientSessio
 
 // Runs a route's work in one transaction as an Owner or Admin: the caller's role first, so a refused caller writes
 // nothing; then an admin token's use, a replay answering the first use's stored result into replayed; then work,
-// whose answer the token's use stores.
-func (self *networkOauthClients) inTx(clientSession *session.ClientSession, now time.Time, replayed any, work func(tx server.PgTx) any) (answer any, err error) {
+// whose answer the token's use stores as stored gives it, nil storing it as it is.
+func (self *networkOauthClients) inTx(clientSession *session.ClientSession, now time.Time, replayed any, work func(tx server.PgTx) any, stored func(answer any) any) (answer any, err error) {
 	ctx := clientSession.Ctx
 	byJwt := clientSession.ByJwt
 	adminCommand := clientSession.AdminCommand
@@ -257,7 +258,11 @@ func (self *networkOauthClients) inTx(clientSession *session.ClientSession, now 
 		}
 		answer = work(tx)
 		if adminCommand != nil {
-			resultJson, marshalErr := json.Marshal(answer)
+			kept := answer
+			if stored != nil {
+				kept = stored(answer)
+			}
+			resultJson, marshalErr := json.Marshal(kept)
 			server.Raise(marshalErr)
 			server.Raise(StoreAdminTokenUseResultInTx(ctx, tx, adminCommand.Jti, resultJson))
 		}
@@ -334,6 +339,12 @@ func (self *networkOauthClients) create(args *CreateNetworkOauthClientArgs, clie
 			Via:        securityNoticeVia(ctx),
 		})
 		return created
+	}, func(answer any) any {
+		// the secret never rests on the server, which keeps only its hash (§2.8 api-11): a replay answers the client
+		// without it, and a person who lost the first answer revokes the client and creates another
+		withoutSecret := *answer.(*CreateNetworkOauthClientResult)
+		withoutSecret.ClientSecret = ""
+		return &withoutSecret
 	})
 	if err != nil {
 		return nil, err
@@ -387,7 +398,7 @@ func (self *networkOauthClients) list(clientSession *session.ClientSession) (*Ge
 			}
 		})
 		return listed
-	})
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +438,7 @@ func (self *networkOauthClients) revoke(args *RevokeNetworkOauthClientArgs, clie
 		oauthClientId := args.OauthClientId
 		AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionOauthClientRevoke, AdminEventTargetOauthClient, &oauthClientId))
 		return &RevokeNetworkOauthClientResult{OauthClientId: &oauthClientId}
-	})
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
