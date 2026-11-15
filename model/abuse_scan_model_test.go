@@ -315,7 +315,7 @@ func testAbuseScanLift(t testing.TB, ctx context.Context, caseId server.Id, acti
 			LiftedActionId: actionId,
 			ReviewState:    reviewState,
 			ReviewerId:     &reviewerId,
-		}, server.NowUtc())
+		}, server.NowUtc(), DefaultAbuseSettings())
 	})
 	if err != nil {
 		t.Fatal(err)

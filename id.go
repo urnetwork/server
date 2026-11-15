@@ -1,22 +1,22 @@
 package server
 
 import (
-	"bytes"
 	"fmt"
-	"hash/fnv"
 
 	"database/sql/driver"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/urnetwork/connect"
+	operator "github.com/urnetwork/operator-core"
 )
 
-// Id is the server's 16-byte identifier. It wraps connect.Id so the core
-// implementation (generation, parsing, formatting, comparison) lives in a
-// single place — see ../connect — while the server layers on its database glue:
-// the pgx codec below and the database/sql Scanner/Valuer and JSON codecs.
-type Id connect.Id
+// Id is the server's 16-byte identifier: operator-core's Id (owner decision 251), which is this type
+// moved there, so server and its extensions share one. It wraps connect.Id so the core implementation
+// (parsing, formatting, comparison) lives in a single place, see ../connect, with the database/sql
+// Scanner/Valuer and JSON codecs operator-core holds. The generators and parsers below stay here, and
+// so does the pgx codec, registered for that type.
+type Id = operator.Id
 
 func NewId() Id {
 	return Id(connect.NewId())
@@ -42,75 +42,6 @@ func RequireParseId(idStr string) Id {
 		panic(err)
 	}
 	return id
-}
-
-func (self Id) Less(b Id) bool {
-	return connect.Id(self).LessThan(connect.Id(b))
-}
-
-func (self Id) Cmp(b Id) int {
-	return connect.Id(self).Cmp(connect.Id(b))
-}
-
-func (self Id) Bytes() []byte {
-	return self[0:16]
-}
-
-func (self Id) String() string {
-	return connect.Id(self).String()
-}
-
-// Scan implements the database/sql Scanner interface.
-func (self *Id) Scan(src any) error {
-	if src == nil {
-		return fmt.Errorf("Scan with nil source not supported by Id (use *Id)")
-	}
-
-	switch src := src.(type) {
-	case string:
-		id, err := connect.ParseId(src)
-		if err != nil {
-			return err
-		}
-		*self = Id(id)
-		return nil
-	}
-
-	return fmt.Errorf("cannot scan %T", src)
-}
-
-// Value implements the database/sql/driver Valuer interface.
-func (self Id) Value() (driver.Value, error) {
-	return connect.Id(self).String(), nil
-}
-
-func (self Id) MarshalJSON() ([]byte, error) {
-	var buff bytes.Buffer
-	buff.WriteByte('"')
-	buff.WriteString(connect.Id(self).String())
-	buff.WriteByte('"')
-	return buff.Bytes(), nil
-}
-
-func (self *Id) UnmarshalJSON(src []byte) error {
-	if bytes.Equal(src, []byte("null")) {
-		return fmt.Errorf("Unmarshal with nil source not supported by Id (use *Id)")
-	}
-	if len(src) != 38 {
-		return fmt.Errorf("invalid length for UUID: %v", len(src))
-	}
-	id, err := connect.ParseId(string(src[1 : len(src)-1]))
-	if err != nil {
-		return err
-	}
-	*self = Id(id)
-	return nil
-}
-
-func (self Id) Hash() uint64 {
-	h := fnv.New64()
-	h.Write(self[0:16])
-	return h.Sum64()
 }
 
 func pgxRegisterIdType(typeMap *pgtype.Map) {

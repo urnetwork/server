@@ -48,6 +48,8 @@ require (
 	github.com/urfoundation/sn v0.0.0
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
+	github.com/urnetwork/operator-core v0.0.0
+	github.com/urnetwork/operator-core/coretest v0.0.0
 	github.com/urnetwork/proxy v0.0.0
 	github.com/urnetwork/sdk v0.0.0
 	github.com/urnetwork/sidecar v0.0.0
@@ -235,6 +237,10 @@ require (
 // Use the same sibling sources in local builds and frozen PERF arms.
 // Replacements in imported modules are not inherited by Go.
 replace github.com/urnetwork/connect => ../connect
+
+replace github.com/urnetwork/operator-core => ../operator-core
+
+replace github.com/urnetwork/operator-core/coretest => ../operator-core/coretest
 
 replace github.com/pion/sctp => ../connect/sctp
 

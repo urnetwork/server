@@ -327,6 +327,9 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"GET /network/admin-events":   {path: "/network/admin-events"},
 		"GET /network/usage":          {path: "/network/usage"},
 		"POST /network/audit-webhook": {path: "/network/audit-webhook", body: map[string]any{"url": "https://attacker.example/hook"}},
+		// §21.16's routes for the network's own credential (ABUSE-M5-11): an appeal, which would file one
+		"GET /abuse/cases":   {path: "/abuse/cases"},
+		"POST /abuse/appeal": {path: "/abuse/appeal", body: map[string]any{"case_id": server.NewId(), "reason": "attacker"}},
 		// app admin
 		"POST /auth/network-delete":               {path: "/auth/network-delete"},
 		"POST /auth/code-create":                  {path: "/auth/code-create", body: map[string]any{"uses": 1, "duration_minutes": 60}},
