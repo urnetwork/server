@@ -68,7 +68,7 @@ func DnsSetDirectMxInTx(ctx context.Context, tx server.PgTx, networkId server.Id
 	if !dnsCustomHostLinked() {
 		return nil, ErrDnsUnlinked
 	}
-	if err := dnsservice.ValidateDirectMxAddresses(addresses); err != nil {
+	if err := dnsservice.ValidateDirectMxAddresses(addresses, &dnsZoneSettings().UserRecords); err != nil {
 		return nil, err
 	}
 	if err := dnsRequireTeamTierInTx(ctx, tx, networkId); err != nil {

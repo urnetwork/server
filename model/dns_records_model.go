@@ -619,18 +619,34 @@ func applyDnsRecordsInTx(
 	}
 
 	// 8: §12.7's user table, then the host screen on each new owner's host labels (QD-807). * and an underscore
-	// label are no host, and the validator has judged them; the apex has no label below it to screen. Neither the
-	// validator nor the facts name scope labels before M6.
+	// label are no host, and the validator has judged them; the apex has no label below it to screen. From M6 each
+	// owner is judged in the zone it falls in, the network's or a Team scope's (dns_scope_model.go): the network's
+	// scope labels are no user owner there, and a scope's hosts sit one label below its apex, whose system set must
+	// already be written. A process with no scope source names no scope, so a name two labels below the apex is
+	// refused as no owner of §12.7's.
+	scopeLabels, _ := dnsNetworkScopeLabels(ctx, networkId)
 	recordContext := &dnsservice.DnsUserRecordContext{
-		Root:     root,
-		Apex:     apex,
-		TtlRange: ttl.UserRange,
+		Root:        root,
+		Apex:        apex,
+		TtlRange:    ttl.UserRange,
+		ScopeLabels: scopeLabels,
 		Tombstoned: func(label string) bool {
 			return isDnsLabelTombstonedInTx(ctx, tx, root, label)
 		},
+		Limits: &dnsZoneSettings().UserRecords,
 	}
+	var storedRows []*dnsStoredRow
 	for index := range parsed.upserts {
-		if err := dnsservice.ValidateUserRecordSet(recordContext, &parsed.upserts[index]); err != nil {
+		context := dnsUserRecordContextFor(recordContext, parsed.upserts[index].Owner, scopeLabels)
+		if context.Scope != "" {
+			if storedRows == nil {
+				storedRows = getDnsZoneRowsInTx(ctx, tx, root, networkId)
+			}
+			if !dnsScopeWritten(context.Apex, storedRows) {
+				return nil, dnsRecordsInvalid("the scope %s has no zone yet", context.Scope)
+			}
+		}
+		if err := dnsservice.ValidateUserRecordSet(context, &parsed.upserts[index]); err != nil {
 			return nil, dnsRecordsInvalid("%v", err)
 		}
 	}
@@ -643,12 +659,10 @@ func applyDnsRecordsInTx(
 			screenFacts = &sidecar.ScreenFacts{
 				VerifiedDomains: getNetworkVerifiedDomainsInTx(ctx, tx, networkId),
 				Probation:       probation,
+				ScopeLabels:     scopeLabels,
 			}
 		}
-		for _, ownerLabel := range dns.SplitDomainName(strings.TrimSuffix(set.Owner, apex)) {
-			if ownerLabel == "*" || strings.HasPrefix(ownerLabel, "_") {
-				continue
-			}
+		for _, ownerLabel := range dnsScreenedOwnerLabels(dnsUserRecordContextFor(recordContext, set.Owner, scopeLabels), set.Owner) {
 			if verdict := sidecar.ScreenHost(ownerLabel, screenFacts); verdict != sidecar.ScreenVerdictAllow {
 				return nil, dnsRecordsRefused("the name %s is refused (§21.6)", ownerLabel)
 			}

@@ -194,6 +194,7 @@ tables:
       edge_wildcard: dns-1
       mail: dns-1
       network_id: dns-1
+      report_token: dns-1
       root: dns-1
       suspend_reason: dns-1
       suspend_until: dns-1

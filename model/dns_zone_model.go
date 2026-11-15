@@ -9,11 +9,18 @@ package model
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"errors"
+	"io"
 	"net/netip"
+	"strings"
 	"sync"
 
+	"github.com/miekg/dns"
+
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
@@ -22,27 +29,31 @@ import (
 // dns.yml as config mounts it, which dns's blocks read and api may not hold.
 const dnsSettingsResourceName = "dns.yml"
 
-// The TTLs a zone's system set is written with: dns.yml's when the process
-// has it, else §12.6's defaults, which are the values dns.yml is held to. Read
-// once a process.
-var dnsZoneTtl = sync.OnceValue(func() *dnsservice.DnsTtlSettings {
-	ttl := dnsservice.DefaultDnsSettings().Ttl
+// dns.yml as this process reads it, for what the model writes and judges by: the
+// file's when the process has it and it loads, else DefaultDnsSettings, whose
+// TTLs, caps and windows are the values dns.yml is held to. Read once a process.
+var dnsZoneSettings = sync.OnceValue(func() *dnsservice.DnsSettings {
 	resource, err := server.Config.SimpleResource(dnsSettingsResourceName)
 	if err != nil {
-		return &ttl
+		return dnsservice.DefaultDnsSettings()
 	}
 	data, err := resource.BytesE()
 	if err != nil {
-		glog.Warningf("[dns]%s unreadable, zones take §12.6's TTLs: %v\n", dnsSettingsResourceName, err)
-		return &ttl
+		glog.Warningf("[dns]%s unreadable, zones take §12.6's defaults: %v\n", dnsSettingsResourceName, err)
+		return dnsservice.DefaultDnsSettings()
 	}
 	settings, err := dnsservice.LoadDnsSettings(data)
 	if err != nil {
-		glog.Warningf("[dns]%s refused, zones take §12.6's TTLs: %v\n", dnsSettingsResourceName, err)
-		return &ttl
+		glog.Warningf("[dns]%s refused, zones take §12.6's defaults: %v\n", dnsSettingsResourceName, err)
+		return dnsservice.DefaultDnsSettings()
 	}
-	return &settings.Ttl
+	return settings
 })
+
+// The TTLs a zone's system set is written with: dnsZoneSettings'.
+func dnsZoneTtl() *dnsservice.DnsTtlSettings {
+	return &dnsZoneSettings().Ttl
+}
 
 // The zone's state as its system set reads it, with no root or apex, or nil
 // before its row.
@@ -112,6 +123,7 @@ func ensureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server
 	case 0 < len(*directMx):
 		state.DirectMx = *directMx
 	}
+	state.MailPolicy = getDnsZoneMailPolicyInTx(ctx, tx, root, networkId)
 	desired, err := DnsSystemRecords(state, ttl)
 	if err != nil {
 		return nil, err
@@ -124,6 +136,79 @@ func ensureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server
 		touchDnsLabelMapInTx(ctx, tx, root, networkId, result.Serial)
 	}
 	return result, nil
+}
+
+// The bytes of a report token: 128 random bits (plan-DNS-rua-token).
+const dnsReportTokenByteCount = 16
+
+// A new report token: 16 bytes from crypto/rand in lowercase base32 with no
+// padding, 26 characters (plan-DNS-rua-token), which no local part a root's
+// _dmarc uses can equal.
+func newDnsReportToken() (string, error) {
+	tokenBytes := make([]byte, dnsReportTokenByteCount)
+	if _, err := io.ReadFull(rand.Reader, tokenBytes); err != nil {
+		return "", err
+	}
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(tokenBytes)), nil
+}
+
+// The zone's report token, minted in the caller's transaction where the zone
+// has none (plan-DNS-rua-token: written with the zone's set and fixed for the
+// network's life), and the report host and MTA-STS policy dns.yml gives
+// (DNS-M8-01). The zone's row must exist and its lock be held. A binary that
+// does not link MG6, where the column lives, has no token, so its zones
+// publish no rua.
+func getDnsZoneMailPolicyInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id) *DnsZoneMailPolicy {
+	policy := &DnsZoneMailPolicy{MtaSts: sidecar.DefaultMtaStsSettings()}
+	if records := dnsZoneSettings().RootRecords[root]; records != nil && records.ReportMx != "" {
+		policy.ReportHost = strings.TrimSuffix(dns.CanonicalName(records.ReportMx), ".")
+	}
+	if !server.SidecarMg6Linked() {
+		return policy
+	}
+	var token *string
+	result, err := tx.Query(ctx, `SELECT report_token FROM network_dns_zone WHERE root = $1 AND network_id = $2`, root, networkId)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&token))
+		}
+	})
+	if token != nil {
+		policy.ReportToken = *token
+		return policy
+	}
+	minted, err := newDnsReportToken()
+	server.Raise(err)
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`UPDATE network_dns_zone SET report_token = $3 WHERE root = $1 AND network_id = $2 AND report_token IS NULL`,
+		root,
+		networkId,
+		minted,
+	))
+	if tag.RowsAffected() == 1 {
+		policy.ReportToken = minted
+	}
+	return policy
+}
+
+// The network whose zone holds token as its report token, the key a report's
+// rua names (plan-DNS-rua-token, plan-SMTP-net-token), and whether one does.
+// None in a binary that does not link MG6.
+func GetDnsNetworkForReportToken(ctx context.Context, token string) (networkId server.Id, ok bool) {
+	if !server.SidecarMg5Linked() || !server.SidecarMg6Linked() || token == "" {
+		return
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT network_id FROM network_dns_zone WHERE report_token = $1`, token)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+				ok = true
+			}
+		})
+	})
+	return
 }
 
 // EnsureNetworkZoneInTx in a transaction of its own.

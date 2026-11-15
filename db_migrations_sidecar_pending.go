@@ -1452,9 +1452,13 @@ func sidecarMg6AclMigrations() []any {
 // network_domain's acme_token is api-3's (QD-175, plan-DNS-metadata-rows #1):
 // 16 random bytes in lowercase base32 with no padding, minted when the domain
 // first verifies and fixed for the row's life, the name certs writes a
-// delegated DNS-01 value at, <acme_token>.acme.<root> (DNS-M6-02). Nothing
-// reads either column unless the binary links MG6
-// (server.SidecarMg6Linked).
+// delegated DNS-01 value at, <acme_token>.acme.<root> (DNS-M6-02).
+// network_dns_zone's report_token is dns-1's (plan-DNS-rua-token,
+// plan-DNS-metadata-rows #8): 16 random bytes in lowercase base32 with no
+// padding, minted with the zone's system set and fixed for the network's life,
+// public in _dmarc's and _smtp._tls's rua (DNS-M8-01), and the key mxedge's
+// report listener maps a report to its network by. Nothing reads any of these
+// columns unless the binary links MG6 (server.SidecarMg6Linked).
 func sidecarMg6DnsMigrations() []any {
 	return []any{
 		newSqlMigration(`
@@ -1466,6 +1470,13 @@ func sidecarMg6DnsMigrations() []any {
 		// a token names one domain, which certs' challenge route resolves
 		newSqlMigration(`
 			CREATE UNIQUE INDEX network_domain_acme_token ON network_domain (acme_token) WHERE acme_token IS NOT NULL
+		`),
+		newSqlMigration(`
+			ALTER TABLE network_dns_zone ADD COLUMN report_token varchar(26) NULL
+		`),
+		// a token names one zone, which a report's rua resolves
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_dns_zone_report_token ON network_dns_zone (report_token) WHERE report_token IS NOT NULL
 		`),
 	}
 }

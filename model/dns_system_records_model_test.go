@@ -8,6 +8,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 )
 
@@ -274,5 +275,168 @@ root_records:
 `)
 	if _, err := DnsRootRecords("zone.example.", settings); err == nil {
 		t.Fatal("a report host inside the root passed")
+	}
+}
+
+// A report token and host the M8 tests name: visibly synthetic, the host outside every test root.
+const (
+	dnsTestReportToken = "abcdefghijklmnopqrstuvwxyz"
+	dnsTestReportHost  = "rpt.report.example"
+)
+
+func dnsTestMailPolicy() *DnsZoneMailPolicy {
+	return &DnsZoneMailPolicy{ReportToken: dnsTestReportToken, ReportHost: dnsTestReportHost, MtaSts: sidecar.DefaultMtaStsSettings()}
+}
+
+// M8's golden sets (reading 15): with mail on, _mta-sts names the policy's id and _smtp._tls the network's
+// report address, which _dmarc's rua names too; with mail off only _dmarc's rua is added. Each passes the lint.
+func TestDnsSystemRecordsMailPolicyGoldenSets(t *testing.T) {
+	ttl := dnsservice.DefaultDnsSettings().Ttl
+	root := "zone.example."
+	apex := "abcdefghij.zone.example."
+	id := sidecar.MtaStsPolicyId(sidecar.MtaStsPolicy("mx."+apex, nil), nil)
+	rua := "mailto:" + dnsTestReportToken + "@" + dnsTestReportHost
+	dmarc := "_dmarc.abcdefghij.zone.example. TXT system \"v=DMARC1; p=reject; sp=reject; np=reject; adkim=s; aspf=s; rua=" + rua + "\""
+	replaceDmarc := func(lines []string) []string {
+		replaced := []string{}
+		for _, line := range lines {
+			if strings.HasPrefix(line, "_dmarc.") {
+				line = dmarc
+			}
+			replaced = append(replaced, line)
+		}
+		return replaced
+	}
+	mailOn := slices.Concat(replaceDmarc(dnsTestMailOnLines), []string{
+		"_mta-sts.abcdefghij.zone.example. TXT system \"v=STSv1; id=" + id + "\"",
+		"_smtp._tls.abcdefghij.zone.example. TXT system \"v=TLSRPTv1; rua=" + rua + "\"",
+	})
+	cases := []struct {
+		name  string
+		state DnsZoneState
+		want  []string
+	}{
+		{name: "mail off", state: DnsZoneState{Root: root, Apex: apex, MailPolicy: dnsTestMailPolicy()}, want: replaceDmarc(dnsTestMailOffLines)},
+		{name: "mail on", state: DnsZoneState{Root: root, Apex: apex, Mail: true, MailPolicy: dnsTestMailPolicy()}, want: mailOn},
+		// no token: _dmarc keeps p=reject with no rua, and no _smtp._tls, whose rua RFC 8460 requires
+		{
+			name:  "mail on, no token",
+			state: DnsZoneState{Root: root, Apex: apex, Mail: true, MailPolicy: &DnsZoneMailPolicy{ReportHost: dnsTestReportHost, MtaSts: sidecar.DefaultMtaStsSettings()}},
+			want:  slices.Concat(dnsTestMailOnLines, []string{"_mta-sts.abcdefghij.zone.example. TXT system \"v=STSv1; id=" + id + "\""}),
+		},
+	}
+	for _, c := range cases {
+		sets := testDnsSystemRecords(t, &c.state, &ttl)
+		want := slices.Clone(c.want)
+		slices.Sort(want)
+		if got := dnsSystemRecordLines(sets); !slices.Equal(got, want) {
+			t.Errorf("%s:\n%s\nwant\n%s", c.name, strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+		if err := dnsservice.LintZoneWrite(root, nil, sets); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+		}
+		for _, set := range sets {
+			if strings.HasPrefix(set.Owner, "_mta-sts.") || strings.HasPrefix(set.Owner, "_smtp._tls.") {
+				if set.Ttl != ttl.MailPolicy {
+					t.Errorf("%s: %s TTL %d", c.name, set.Owner, set.Ttl)
+				}
+			}
+		}
+	}
+	// mail off's keys hold the policy records, so turning mail off deletes them
+	managed := dnsZoneSystemKeys(apex)
+	for _, set := range testDnsSystemRecords(t, &cases[1].state, &ttl) {
+		if !slices.Contains(managed, set.Key()) {
+			t.Errorf("%s %s is written and not managed", set.Owner, dns.TypeToString[set.Type])
+		}
+	}
+}
+
+// _mta-sts's id changes when the policy does, its mode, its max_age or its mail host, and stays when it does
+// not; a scope's policy is its own mail host's.
+func TestDnsMtaStsIdChangesWithThePolicy(t *testing.T) {
+	ttl := dnsservice.DefaultDnsSettings().Ttl
+	root := "zone.example."
+	apex := "abcdefghij.zone.example."
+	idOf := func(state *DnsZoneState) string {
+		for _, set := range testDnsSystemRecords(t, state, &ttl) {
+			if set.Owner == "_mta-sts."+state.Apex {
+				return set.Rdata[0]
+			}
+		}
+		t.Fatalf("no _mta-sts at %s", state.Apex)
+		return ""
+	}
+	base := idOf(&DnsZoneState{Root: root, Apex: apex, Mail: true, MailPolicy: dnsTestMailPolicy()})
+	if again := idOf(&DnsZoneState{Root: root, Apex: apex, Mail: true, EdgeWildcard: true, MailPolicy: dnsTestMailPolicy()}); again != base {
+		t.Errorf("an unrelated toggle moved the id: %s %s", base, again)
+	}
+	longer := dnsTestMailPolicy()
+	longer.MtaSts.MaxAgeSeconds += 1
+	testing := dnsTestMailPolicy()
+	testing.MtaSts.Mode = "testing"
+	for name, policy := range map[string]*DnsZoneMailPolicy{"max_age": longer, "mode": testing} {
+		if moved := idOf(&DnsZoneState{Root: root, Apex: apex, Mail: true, MailPolicy: policy}); moved == base {
+			t.Errorf("%s changed and the id did not", name)
+		}
+	}
+	scopeId := idOf(&DnsZoneState{Root: root, Apex: "eng." + apex, Mail: true, MailPolicy: dnsTestMailPolicy()})
+	if scopeId == base {
+		t.Error("a scope's policy names the network's mail host")
+	}
+	// the id is the receivers' policy's, which names the zone's mail host
+	want := `"v=STSv1; id=` + sidecar.MtaStsPolicyId(sidecar.MtaStsPolicy("mx."+apex, nil), nil) + `"`
+	if base != want {
+		t.Errorf("id %s, want %s", base, want)
+	}
+}
+
+// A report address in the root is refused: as the set's report host, which would send a zone's reports to a
+// user's name, and in a row the lint judges.
+func TestDnsSystemRecordsRefuseReportsIntoTheRoot(t *testing.T) {
+	ttl := dnsservice.DefaultDnsSettings().Ttl
+	policy := dnsTestMailPolicy()
+	policy.ReportHost = "rpt.zone.example"
+	if _, err := DnsSystemRecords(&DnsZoneState{Root: "zone.example.", Apex: "abcdefghij.zone.example.", Mail: true, MailPolicy: policy}, &ttl); !errors.Is(err, dnsservice.ErrDnsDmarcRefused) && !errors.Is(err, dnsservice.ErrDnsTlsRptRefused) {
+		t.Errorf("a report host in the root: %v", err)
+	}
+	row := dnsSystemTxt("_smtp._tls.abcdefghij.zone.example.", "v=TLSRPTv1; rua=mailto:x@abc.zone.example", ttl.MailPolicy)
+	if err := dnsservice.LintZoneWrite("zone.example.", nil, []dnsservice.DnsRecordSet{row}); !errors.Is(err, dnsservice.ErrDnsZoneLint) {
+		t.Errorf("a TLS-RPT row into the root: %v", err)
+	}
+	for _, text := range []string{"v=TLSRPTv1", "v=TLSRPTv1; rua=https://report.example/x", "v=TLSRPTv2; rua=mailto:x@report.example"} {
+		if err := dnsservice.ValidateTlsRptRecord("zone.example.", text); !errors.Is(err, dnsservice.ErrDnsTlsRptRefused) {
+			t.Errorf("%q: %v", text, err)
+		}
+	}
+	if err := dnsservice.ValidateTlsRptRecord("zone.example.", "v=TLSRPTv1; rua=mailto:"+dnsTestReportToken+"@"+dnsTestReportHost); err != nil {
+		t.Error(err)
+	}
+}
+
+// A Team scope's set is the network's function at the scope's apex, for every state, its mail set included.
+func TestDnsScopeRecordsAreTheNetworksFunction(t *testing.T) {
+	ttl := dnsservice.DefaultDnsSettings().Ttl
+	root := "zone.example."
+	apex := "abcdefghij.zone.example."
+	for _, flags := range [][3]bool{{false, false, false}, {true, false, false}, {false, true, false}, {false, false, true}, {true, true, true}} {
+		scope := &DnsScopeState{Root: root, Apex: apex, Scope: "eng", EdgeWildcard: flags[0], EdgeApex: flags[1], Mail: flags[2], MailPolicy: dnsTestMailPolicy()}
+		got, err := DnsScopeRecords(scope, &ttl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := testDnsSystemRecords(t, &DnsZoneState{Root: root, Apex: "eng." + apex, EdgeWildcard: flags[0], EdgeApex: flags[1], Mail: flags[2], MailPolicy: dnsTestMailPolicy()}, &ttl)
+		if !slices.Equal(dnsSystemRecordLines(got), dnsSystemRecordLines(want)) {
+			t.Errorf("%v: the scope's set is not the network's at its apex", flags)
+		}
+		if flags[2] && !slices.Contains(dnsSystemRecordLines(got), "mx.eng.abcdefghij.zone.example. A router ") {
+			t.Errorf("%v: no mx.<scope> host", flags)
+		}
+		if err := dnsservice.LintZoneWrite(root, nil, got); err != nil {
+			t.Errorf("%v: %v", flags, err)
+		}
+	}
+	if _, err := DnsScopeRecords(&DnsScopeState{Root: root, Apex: apex, Scope: "a.b"}, &ttl); !errors.Is(err, dnsservice.ErrDnsScopeLabelRefused) {
+		t.Errorf("a scope of two labels: %v", err)
 	}
 }

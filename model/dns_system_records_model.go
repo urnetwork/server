@@ -9,8 +9,8 @@ package model
 //     v=spf1 -all, and _dmarc p=reject with strict alignment, never ruf or fo;
 //     * A and AAAA, kind edge, only with an edge grant, and @'s only while the
 //     apex is published (plan-DNS-edge-record-trigger). * is never a CNAME.
-//     _dmarc carries no rua until network_dns_zone.report_token has §2.8's v9
-//     row (plan-DNS-rua-token's interim), and p=reject stands without it.
+//     _dmarc carries its rua once the zone has a report token and dns.yml a
+//     report host (below), and p=reject stands without it.
 //   - <net>.<root> with mail on (M7): @'s and *'s MX 10 mx.<net>.<root>, so
 //     every burner label under * takes mail with no record and no state (F10;
 //     §15.9); mx A and AAAA, kind router, which an edge answers from the router
@@ -22,6 +22,18 @@ package model
 //     are DNS-M7-03's, which this function's state then carries: rows of kind
 //     direct in place of the router rows, a family with no address having
 //     none (dns_direct_mx_model.go).
+//   - With mail on (M8; DNS-M8-01, reading 15): _mta-sts TXT v=STSv1; id=<n>,
+//     n the id of the policy the receivers serve for the zone's mail host
+//     (sidecar.MtaStsPolicyId), and _smtp._tls TXT v=TLSRPTv1;
+//     rua=mailto:<token>@<report host>, both TTL mail_policy. The token is the
+//     network's report token (network_dns_zone.report_token,
+//     plan-DNS-rua-token), minted with the zone's set, and the report host
+//     dns.yml's root_records report_mx, so no code names a platform host; the
+//     same rua joins _dmarc. A zone with no token or no report host publishes
+//     _dmarc with no rua, keeping p=reject, and no _smtp._tls, whose rua RFC
+//     8460 requires. A Team scope's set (dns_scope_model.go) is this same
+//     function at the scope's apex, with the network's token; a burner domain
+//     publishes no policy (RFC 8461 §3.4).
 //   - <root> (reading 19): SOA, NS and their glue, CAA per §13.8 with iodef,
 //     @ TXT v=spf1 -all, @ MX 10 to the report host, @ A and AAAA kind edge
 //     when the apex redirects, _dmarc strict with psd=y once company mail has
@@ -45,6 +57,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
@@ -71,6 +84,13 @@ const (
 // reading 16), which every envelope domain's SPF includes.
 const dnsSpfIncludeLabel = "_spf"
 
+// The policy records' owners below a zone's apex (RFC 8461 §3.1, RFC 8460
+// §3): _mta-sts.<apex> and _smtp._tls.<apex>.
+const (
+	dnsMtaStsLabel       = "_mta-sts"
+	dnsTlsRptOwnerPrefix = "_smtp._tls."
+)
+
 // RFC 7505's null MX, mail off's answer at @ and *.
 const dnsNullMx = "0 ."
 
@@ -96,6 +116,32 @@ type DnsZoneState struct {
 	// DNS-M7-03), nil for the routers. The zone's own direct rows hold them, so
 	// every reconcile writes them back as they are.
 	DirectMx []netip.Addr
+	// The report token, report host and MTA-STS policy the mail records name
+	// (DNS-M8-01). nil names none, as a zone with no token does.
+	MailPolicy *DnsZoneMailPolicy
+}
+
+// What §12.7's report and policy records read beyond a zone's flags
+// (DNS-M8-01; plan-DNS-rua-token).
+type DnsZoneMailPolicy struct {
+	// network_dns_zone.report_token: 26 lowercase base32 characters, "" while
+	// the zone has none.
+	ReportToken string
+	// dns.yml's root_records report_mx with no final dot, the host every rua
+	// sends to, "" while none is configured.
+	ReportHost string
+	// The policy the receivers serve, whose id _mta-sts carries. nil
+	// publishes no _mta-sts.
+	MtaSts *sidecar.MtaStsSettings
+}
+
+// The rua every report record of the zone names, "" when the zone has no
+// token or no report host.
+func (self *DnsZoneMailPolicy) rua() string {
+	if self == nil || self.ReportToken == "" || self.ReportHost == "" {
+		return ""
+	}
+	return "mailto:" + self.ReportToken + "@" + self.ReportHost
 }
 
 // A TXT row of one string.
@@ -121,6 +167,11 @@ func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) ([]dn
 		return nil, fmt.Errorf("%w: %s is no zone below %q", ErrDnsOwnerOutsideZone, apex, state.Root)
 	}
 	wildcard := "*." + apex
+	dmarc := dnsDmarcPolicy
+	rua := state.MailPolicy.rua()
+	if rua != "" {
+		dmarc += "; rua=" + rua
+	}
 	mx := []string{dnsNullMx}
 	if state.Mail {
 		mx = []string{fmt.Sprintf("%d %s.%s", dnsMailMxPreference, dnsMailHostLabel, apex)}
@@ -129,7 +180,7 @@ func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) ([]dn
 		{Owner: apex, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: mx},
 		dnsSystemTxt(apex, dnsSpfNone, ttl.MailPolicy),
 		{Owner: wildcard, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: mx},
-		dnsSystemTxt("_dmarc."+apex, dnsDmarcPolicy, ttl.MailPolicy),
+		dnsSystemTxt("_dmarc."+apex, dmarc, ttl.MailPolicy),
 	}
 	if state.Mail {
 		mailHost := dnsMailHostLabel + "." + apex
@@ -147,6 +198,14 @@ func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) ([]dn
 			dnsservice.DnsRecordSet{Owner: envelope, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: mx},
 			dnsSystemTxt(envelope, "v=spf1 include:"+spfInclude+" -all", ttl.MailPolicy),
 		)
+		// M8's policy records (reading 15)
+		if policy := state.MailPolicy; policy != nil && policy.MtaSts != nil {
+			id := sidecar.MtaStsPolicyId(sidecar.MtaStsPolicy(mailHost, policy.MtaSts), policy.MtaSts)
+			sets = append(sets, dnsSystemTxt(dnsMtaStsLabel+"."+apex, "v=STSv1; id="+id, ttl.MailPolicy))
+		}
+		if rua != "" {
+			sets = append(sets, dnsSystemTxt(dnsTlsRptOwnerPrefix+apex, "v=TLSRPTv1; rua="+rua, ttl.MailPolicy))
+		}
 	}
 	if state.EdgeApex {
 		sets = append(sets, dnsSystemEdgeRows(apex, ttl.Edge)...)
@@ -156,6 +215,14 @@ func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) ([]dn
 	}
 	for index := range sets {
 		if err := sets[index].Validate(root); err != nil {
+			return nil, err
+		}
+	}
+	if err := dnsservice.ValidateDmarcRecord(root, dmarc); err != nil {
+		return nil, err
+	}
+	if rua != "" {
+		if err := dnsservice.ValidateTlsRptRecord(root, "v=TLSRPTv1; rua="+rua); err != nil {
 			return nil, err
 		}
 	}
@@ -188,8 +255,8 @@ func dnsDirectMxRows(mailHost string, addresses []netip.Addr, ttl uint32) []dnss
 }
 
 // The keys a network zone's system set manages: what DnsSystemRecords can
-// write at @, *, _dmarc, mx and b, whether mail is on or off, so turning it
-// off deletes what turning it on wrote.
+// write at @, *, _dmarc, mx, b, _mta-sts and _smtp._tls, whether mail is on
+// or off, so turning it off deletes what turning it on wrote.
 func dnsZoneSystemKeys(apex string) []dnsservice.DnsRecordKey {
 	apex = dns.CanonicalName(apex)
 	wildcard := "*." + apex
@@ -208,6 +275,8 @@ func dnsZoneSystemKeys(apex string) []dnsservice.DnsRecordKey {
 		{Owner: mailHost, Type: dns.TypeAAAA},
 		{Owner: envelope, Type: dns.TypeMX},
 		{Owner: envelope, Type: dns.TypeTXT},
+		{Owner: dnsMtaStsLabel + "." + apex, Type: dns.TypeTXT},
+		{Owner: dnsTlsRptOwnerPrefix + apex, Type: dns.TypeTXT},
 	}
 }
 

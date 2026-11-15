@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -316,6 +317,11 @@ func addDnsCustomHostInTx(ctx context.Context, tx server.PgTx, root string, host
 	hostLabel, err := dnsCustomHostOwnerLabel(owner, apex)
 	if err != nil {
 		return nil, dnsRecordsInvalid("%v", err)
+	}
+	// a Team scope's @ is no host owner: its CAA would govern the scope's device certificates (DNS-M6-06)
+	if scopeLabels, _ := dnsNetworkScopeLabels(ctx, networkId); slices.Contains(scopeLabels, hostLabel) ||
+		dnsScopeWritten(owner, getDnsZoneRowsInTx(ctx, tx, root, networkId)) {
+		return nil, dnsRecordsInvalid("the owner %s is a Team scope's apex", owner)
 	}
 	strictMx := hostLabel == dnsMailHostLabel
 	domain := getNetworkDnsCustomHostDomainInTx(ctx, tx, networkId, host)

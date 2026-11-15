@@ -102,6 +102,13 @@ func PublishDnsKeyRecord(ctx context.Context, record *DnsKeyRecord) (*sidecar.Dn
 
 func publishDnsKeyRecordInTx(ctx context.Context, tx server.PgTx, root string, scope string, spkiSha256 [sha256.Size]byte, record *DnsKeyRecord) (*sidecar.DnsKeyRecordAnswer, error) {
 	networkId := record.NetworkId
+	// a scope's mail host is only a Team scope's the network's projection lists (DNS-M8-01); with no scope source
+	// none is, the closed direction
+	if scope != "" {
+		if scopes, ok := dnsNetworkScopeLabels(ctx, networkId); !ok || !slices.Contains(scopes, scope) {
+			return nil, dnsRecordsRefused("%s is no Team scope of the network", scope)
+		}
+	}
 	identityPublicKey := getActiveSidecarIdentityKeyInTx(ctx, tx, networkId, record.ReceiverSidecarId)
 	if identityPublicKey == nil {
 		return nil, dnsRecordsRefused("the caller is no active sidecar of the network")
