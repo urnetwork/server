@@ -109,14 +109,19 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"POST /network/dns/label-reclaim": model.RolePermissionPolicy,
 
 	// keys and OAuth clients
-	"GET /account/api-keys":         model.RolePermissionKeys,
-	"POST /account/api-key":         model.RolePermissionKeys,
-	"POST /account/api-key/remove":  model.RolePermissionKeys,
-	"GET /network/auth-keys":        model.RolePermissionKeys,
-	"POST /network/auth-keys":       model.RolePermissionKeys,
-	"POST /network/auth-key-revoke": model.RolePermissionKeys,
-	"POST /oauth/authorize":         model.RolePermissionKeys,
-	"POST /oauth/consent":           model.RolePermissionKeys,
+	"GET /account/api-keys":             model.RolePermissionKeys,
+	"POST /account/api-key":             model.RolePermissionKeys,
+	"POST /account/api-key/remove":      model.RolePermissionKeys,
+	"GET /network/auth-keys":            model.RolePermissionKeys,
+	"POST /network/auth-keys":           model.RolePermissionKeys,
+	"POST /network/auth-key-revoke":     model.RolePermissionKeys,
+	"GET /network/oauth-clients":        model.RolePermissionKeys,
+	"POST /network/oauth-clients":       model.RolePermissionKeys,
+	"POST /network/oauth-client-revoke": model.RolePermissionKeys,
+	"POST /oauth/authorize":             model.RolePermissionKeys,
+	"POST /oauth/consent":               model.RolePermissionKeys,
+	"POST /oauth/device_consent":        model.RolePermissionKeys,
+	"POST /oauth/device_approve":        model.RolePermissionKeys,
 
 	// billing, payouts and wallets
 	"GET /account/balance-codes":          model.RolePermissionBilling,
@@ -157,6 +162,26 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"POST /stats/providers-last-n":          model.RolePermissionRead,
 	"POST /stats/providers-overview-last-n": model.RolePermissionRead,
 	"GET /stats/providers-overview-last-90": model.RolePermissionRead,
+}
+
+// The routes a network OAuth client's token reaches (§7.8, D-TEAM-6;
+// TEAM-M6-08), by method and path: auth_keys' keys, which CI pairs with its
+// Delegation, devices:core's clients, and policy:read's and logs:read's reads.
+// Each route's role gate still cuts the token to its creator's role ∩ its
+// scopes; every other route refuses the token (session.RegisterOauthClientRoute).
+var oauthClientTokenRoutes = [][2]string{
+	{http.MethodGet, "/network/auth-keys"},
+	{http.MethodPost, "/network/auth-keys"},
+	{http.MethodPost, "/network/auth-key-revoke"},
+	{http.MethodGet, "/network/clients"},
+	{http.MethodPost, "/network/remove-clients"},
+	{http.MethodGet, "/network/admin-events"},
+}
+
+func init() {
+	for _, route := range oauthClientTokenRoutes {
+		session.RegisterOauthClientRoute(route[0], route[1])
+	}
 }
 
 // The permission routeKey asks: its table entry, and the Owner's for a route
@@ -205,6 +230,15 @@ func roleCredentialOf(r *http.Request) (*roleCredential, bool) {
 			return nil, false
 		}
 		return &roleCredential{networkId: byKey.NetworkId, memberId: byKey.MemberId, scopes: byKey.Scopes}, true
+	case strings.HasPrefix(authorization, "Bearer ") && session.IsOauthClientToken(authorization[len("Bearer "):]):
+		// a team's network OAuth client: its creating member's role, cut by the
+		// token's scopes (§7.8's scopes ∩ creator)
+		claims := &oauth.OauthClientTokenClaims{}
+		if _, _, err := gojwt.NewParser().ParseUnverified(authorization[len("Bearer "):], claims); err != nil {
+			return nil, false
+		}
+		memberId := claims.MemberId
+		return &roleCredential{networkId: claims.NetworkId, memberId: &memberId, scopes: strings.Fields(claims.Scope)}, true
 	case strings.HasPrefix(authorization, "Bearer "):
 		byJwt, err := session.ParseByJwtUnverified(ctx, authorization[len("Bearer "):])
 		if err != nil || byJwt.MemberId == nil {

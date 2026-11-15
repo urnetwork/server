@@ -675,6 +675,8 @@ func securityNetworkAuthorityAction(action string) string {
 		return "A webhook that receives the network's admin events was added"
 	case model.SecurityNetworkAuthorityMemberInvite:
 		return "A person was invited to join the network"
+	case model.SecurityNetworkAuthorityOauthClient:
+		return "An OAuth client that can mint auth keys was added"
 	default:
 		return "The network's authority changed"
 	}

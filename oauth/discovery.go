@@ -23,6 +23,9 @@ type AuthorizationServerMetadata struct {
 	RevocationEndpoint    string `json:"revocation_endpoint,omitempty"`
 	UserinfoEndpoint      string `json:"userinfo_endpoint,omitempty"`
 	JwksUri               string `json:"jwks_uri"`
+	// RFC 8628 §4: named only while the process holds a device authorization
+	// store (device_grant.go)
+	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint,omitempty"`
 
 	ScopesSupported                            []string `json:"scopes_supported"`
 	ResponseTypesSupported                     []string `json:"response_types_supported"`
@@ -75,6 +78,12 @@ func JwksUri() string {
 }
 
 func ServerMetadata() *AuthorizationServerMetadata {
+	grantTypes := []string{"authorization_code", "refresh_token", ClientCredentialsGrantType, ExchangeGrantType}
+	deviceAuthorizationEndpoint := ""
+	if currentDeviceAuthorizationStore() != nil {
+		grantTypes = append(grantTypes, DeviceCodeGrantType)
+		deviceAuthorizationEndpoint = DeviceAuthorizationEndpoint()
+	}
 	return &AuthorizationServerMetadata{
 		Issuer:                Issuer(),
 		AuthorizationEndpoint: AuthorizeEndpoint(),
@@ -84,16 +93,20 @@ func ServerMetadata() *AuthorizationServerMetadata {
 		UserinfoEndpoint:      UserinfoEndpoint(),
 		JwksUri:               JwksUri(),
 
+		DeviceAuthorizationEndpoint: deviceAuthorizationEndpoint,
+
 		ScopesSupported: SupportedScopes(),
 		// oauth 2.1: authorization code only, no implicit
 		ResponseTypesSupported: []string{"code"},
 		ResponseModesSupported: []string{"query"},
-		GrantTypesSupported:    []string{"authorization_code", "refresh_token", ExchangeGrantType},
+		GrantTypesSupported:    grantTypes,
 		// oauth 2.1 removes `plain`
 		CodeChallengeMethodsSupported: []string{PkceMethodS256},
-		// every client here is public: a native or browser client cannot keep
-		// a secret, and cimd clients have none by construction
-		TokenEndpointAuthMethodsSupported: []string{"none"},
+		// public clients authenticate with none: a native or browser client
+		// cannot keep a secret, and cimd clients have none by construction; a
+		// team's network OAuth clients, its CI, send their secret
+		// (client_credentials.go)
+		TokenEndpointAuthMethodsSupported: []string{"none", "client_secret_post", "client_secret_basic"},
 		SubjectTypesSupported:             []string{"public"},
 		IdTokenSigningAlgValuesSupported:  []string{signerAlgEs256},
 		ClaimsSupported: []string{

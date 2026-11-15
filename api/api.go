@@ -415,6 +415,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/network/auth-keys", handlers.GetNetworkAuthKeys),
 		router.NewRoute("POST", "/network/auth-keys", handlers.CreateNetworkAuthKey),
 		router.NewRoute("POST", "/network/auth-key-revoke", handlers.RevokeNetworkAuthKey),
+		// §7.8's network OAuth clients, a team's CI credentials (TEAM-M6-08)
+		router.NewRoute("GET", "/network/oauth-clients", handlers.GetNetworkOauthClients),
+		router.NewRoute("POST", "/network/oauth-clients", handlers.CreateNetworkOauthClient),
+		router.NewRoute("POST", "/network/oauth-client-revoke", handlers.RevokeNetworkOauthClient),
 		// §7.5's team networks and their members (TEAM-M6-01)
 		router.NewRoute("POST", "/network/team-create", handlers.CreateNetworkTeam),
 		router.NewRoute("GET", "/network/members", handlers.GetNetworkMembers),

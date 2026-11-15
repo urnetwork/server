@@ -89,6 +89,80 @@ func adminCommandRoute(method string, path string) bool {
 	return adminCommandRoutes[method+" "+path]
 }
 
+// One request of a network OAuth client's access token (§7.8, D-TEAM-6;
+// TEAM-M6-08): the token the client_credentials grant minted for a team's CI,
+// verified, its client still unrevoked and its creating member still a member.
+// It acts as that member within its scopes, which the role gate cuts to the
+// member's role on every request (route_permission.go), and reaches only the
+// routes RegisterOauthClientRoute names.
+type OauthClientUse struct {
+	NetworkId server.Id
+	// the client's creating member, whose role cuts the scopes
+	MemberId      server.Id
+	OauthClientId server.Id
+	// the token's scopes, within the client's
+	Scopes []string
+	// the token's exp
+	ExpireTime time.Time
+}
+
+// Verifies a network OAuth client's access token sent as "Bearer <token>":
+// the token, and that its client and creating member still stand. oauth
+// installs it; a process without one refuses every such token.
+type OauthClientTokenAuthenticator func(ctx context.Context, token string) (*OauthClientUse, error)
+
+var oauthClientTokenAuthenticator atomic.Pointer[OauthClientTokenAuthenticator]
+
+// Whether a bearer is a network OAuth client's access token, by its JOSE header
+// alone; oauth installs it beside the authenticator. Nil, none is.
+type OauthClientTokenRecognizer func(token string) bool
+
+var oauthClientTokenRecognizer atomic.Pointer[OauthClientTokenRecognizer]
+
+// Installs the process's OAuth client token check and recognizer; nil removes
+// them.
+func SetOauthClientTokenAuthenticator(recognizer OauthClientTokenRecognizer, authenticator OauthClientTokenAuthenticator) {
+	if recognizer == nil || authenticator == nil {
+		oauthClientTokenRecognizer.Store(nil)
+		oauthClientTokenAuthenticator.Store(nil)
+		return
+	}
+	oauthClientTokenRecognizer.Store(&recognizer)
+	oauthClientTokenAuthenticator.Store(&authenticator)
+}
+
+// Whether token is a network OAuth client's access token, by its header.
+func IsOauthClientToken(token string) bool {
+	recognizer := oauthClientTokenRecognizer.Load()
+	return recognizer != nil && (*recognizer)(token)
+}
+
+// The routes a network OAuth client's token reaches, by "METHOD path": its
+// scopes' work (§7.8's devices:core, auth_keys, policy:read, logs:read), each
+// route's own role gate cutting them further. Every other route refuses such a
+// token, so it never mints a session, a client token or a login.
+var oauthClientRoutesLock sync.Mutex
+var oauthClientRoutes = map[string]bool{}
+
+// Adds a route a network OAuth client's token reaches.
+func RegisterOauthClientRoute(method string, path string) {
+	oauthClientRoutesLock.Lock()
+	defer oauthClientRoutesLock.Unlock()
+	oauthClientRoutes[method+" "+path] = true
+}
+
+func oauthClientRoute(method string, path string) bool {
+	oauthClientRoutesLock.Lock()
+	defer oauthClientRoutesLock.Unlock()
+	return oauthClientRoutes[method+" "+path]
+}
+
+// Whether method and path name a route whose model spends an admin token's
+// use (RegisterAdminCommandRoute), which ur-cli may then run as one command.
+func AdminCommandRouteRegistered(method string, path string) bool {
+	return adminCommandRoute(method, path)
+}
+
 type clientObservationContextKey struct{}
 
 // Request-scoped client identity and authentication state.
@@ -131,6 +205,11 @@ type ClientSession struct {
 	// credential. Only authenticate sets it, with UnsignedIdentity, and ByJwt is
 	// then the token's network and member, built for this request only.
 	AdminCommand *AdminCommandUse
+	// The network OAuth client token this request authenticated with, nil for
+	// every other credential. Only authenticate sets it, with UnsignedIdentity,
+	// and ByJwt is then the client's network and creating member, built for this
+	// request only.
+	OauthClient *OauthClientUse
 	// An opaque id for this request, minted when the session is made from a
 	// request, which an admin event records (§7.11). It names nothing but the
 	// request, and a session not made from a request has none.
@@ -344,6 +423,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 	self.ApiKeyAuthenticated = false
 	self.ApiKeyId = nil
 	self.AdminCommand = nil
+	self.OauthClient = nil
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authDpopPrefix) {
 			// a one-command admin token (§7.8): only on a route whose model
@@ -376,6 +456,35 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 		}
 		if strings.HasPrefix(auth, authBearerPrefix) {
 			authStr := auth[len(authBearerPrefix):]
+
+			if IsOauthClientToken(authStr) {
+				// a network OAuth client's token (§7.8): only on its routes, as
+				// its creating member within its scopes
+				if !oauthClientRoute(req.Method, req.URL.Path) {
+					return false, errors.New("An OAuth client token cannot call this route.")
+				}
+				authenticator := oauthClientTokenAuthenticator.Load()
+				if authenticator == nil {
+					return false, errors.New("Invalid auth.")
+				}
+				use, err := (*authenticator)(ctx, authStr)
+				if err != nil {
+					return false, err
+				}
+				memberUserId, ok := teamMemberUser(ctx, use.NetworkId, use.MemberId)
+				if !ok {
+					return false, errors.New("The OAuth client's creator is no member of the network.")
+				}
+				memberId := use.MemberId
+				self.ByJwt = NewByJwt(use.NetworkId, memberUserId, "", false, false)
+				self.ByJwt.MemberId = &memberId
+				self.UnsignedIdentity = true
+				self.OauthClient = use
+				if glog.V(2) {
+					glog.Infof("[session]authed via an OAuth client token as %s (%s)\n", use.MemberId, use.NetworkId)
+				}
+				return false, nil
+			}
 
 			if strings.HasPrefix(authStr, apiKeyTokenPrefix) {
 				// handle API KEY authentication

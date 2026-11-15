@@ -321,6 +321,12 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5), Owners and Admins by the role gate
 	"POST /network/member-remove":                   routeAccessNetwork,  // denies a team's member at once (§7.10), Owners and Admins by the role gate
 	"GET /network/scim-changes":                     routeAccessNetwork,  // a team's queued SCIM changes (§7.6), Owners and Admins by the role gate
+	"GET /network/oauth-clients":                    routeAccessNetwork,  // a team's CI credentials (§7.8), Owners and Admins by the role gate
+	"POST /network/oauth-clients":                   routeAccessNetwork,  // a new CI credential, which mints keys (escalation), Owners and Admins by the role gate
+	"POST /network/oauth-client-revoke":             routeAccessNetwork,  // ends a CI credential (§7.8), Owners and Admins by the role gate
+	"POST /oauth/device_authorization":              routeAccessPublic,   // RFC 8628 for ur-cli: the OAuth protocol
+	"POST /oauth/device_consent":                    routeAccessNetwork,  // the consent page's read of a device authorization, as POST /oauth/consent
+	"POST /oauth/device_approve":                    routeAccessNetwork,  // the consent page's answer to a device authorization, as POST /oauth/authorize
 	"GET /scim/v2/([^/]+)/ServiceProviderConfig":    routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
 	"GET /scim/v2/([^/]+)/ResourceTypes":            routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind
 	"GET /scim/v2/([^/]+)/Schemas":                  routeAccessPublic,   // §7.6's SCIM for a team's IdP: the team's SCIM bearer, a credential of its own kind

@@ -43,6 +43,11 @@ func Routes() []*router.Route {
 		// page; and the id- set's keys its ID tokens verify by (edge_login.go)
 		router.NewRoute("GET", "/oauth/authorize", AuthorizeRedirectHandler),
 		router.NewRoute("GET", "/\\.well-known/ur/id-jwks\\.json", EdgeJwksHandler),
+		// RFC 8628's device grant for ur-cli, and the consent page's two calls
+		// for it (device_grant.go)
+		router.NewRoute("POST", "/oauth/device_authorization", DeviceAuthorizationHandler),
+		router.NewRoute("POST", "/oauth/device_consent", DeviceConsentHandler),
+		router.NewRoute("POST", "/oauth/device_approve", DeviceApproveHandler),
 	}
 }
 
@@ -90,6 +95,21 @@ func writeGrantError(w http.ResponseWriter, err error) {
 		writeOauthError(w, http.StatusForbidden, "consent_required", "No consent showed this command and its code.")
 	case errors.Is(err, ErrInvalidDpopProof):
 		writeOauthError(w, http.StatusBadRequest, "invalid_dpop_proof", "The DPoP proof is invalid.")
+	case errors.Is(err, ErrInvalidClient):
+		w.Header().Set("WWW-Authenticate", `Basic realm="oauth"`)
+		writeOauthError(w, http.StatusUnauthorized, "invalid_client", "The client could not be authenticated.")
+	case errors.Is(err, ErrInvalidScope):
+		writeOauthError(w, http.StatusBadRequest, "invalid_scope", "The scope is not granted.")
+	case errors.Is(err, ErrAuthorizationPending):
+		writeOauthError(w, http.StatusBadRequest, "authorization_pending", "The authorization is pending.")
+	case errors.Is(err, ErrSlowDown):
+		writeOauthError(w, http.StatusBadRequest, "slow_down", "Poll more slowly.")
+	case errors.Is(err, ErrAccessDenied):
+		writeOauthError(w, http.StatusBadRequest, "access_denied", "The authorization was denied.")
+	case errors.Is(err, ErrExpiredToken):
+		writeOauthError(w, http.StatusBadRequest, "expired_token", "The device code expired.")
+	case errors.Is(err, ErrDeviceGrantUnavailable):
+		writeOauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "The device grant is not available.")
 	case errors.Is(err, ErrUnauthorizedUser):
 		// a declared reason tells the user what to do; any other detail is logged
 		description := ErrUnauthorizedUser.Error()
@@ -125,6 +145,26 @@ func TokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	if r.PostFormValue("grant_type") == ExchangeGrantType {
 		ExchangeHandler(w, r)
+		return
+	}
+	if r.PostFormValue("grant_type") == ClientCredentialsGrantType {
+		// a network OAuth client's credentials, in the form or HTTP Basic
+		// (client_credentials.go)
+		clientId, clientSecret, basic := r.BasicAuth()
+		if !basic {
+			clientId, clientSecret = r.PostFormValue("client_id"), r.PostFormValue("client_secret")
+		}
+		response, err := ExchangeClientCredentials(r.Context(), &ClientCredentialsArgs{
+			ClientId:     clientId,
+			ClientSecret: clientSecret,
+			Scopes:       ParseScope(r.PostFormValue("scope")),
+			Resource:     r.PostFormValue("resource"),
+		})
+		if err != nil {
+			writeGrantError(w, err)
+			return
+		}
+		writeJson(w, http.StatusOK, response)
 		return
 	}
 
@@ -172,6 +212,20 @@ func TokenHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJson(w, http.StatusOK, response)
 
+	case DeviceCodeGrantType:
+		// ur-cli's device code poll, with a proof by the key its authorization
+		// named (device_grant.go)
+		response, err := ExchangeDeviceCode(r.Context(), &ExchangeDeviceCodeArgs{
+			ClientId:   clientId,
+			DeviceCode: r.PostFormValue("device_code"),
+			Resource:   r.PostFormValue("resource"),
+		}, r.Header.Values(session.DpopHeader))
+		if err != nil {
+			writeGrantError(w, err)
+			return
+		}
+		writeJson(w, http.StatusOK, response)
+
 	case "refresh_token":
 		response, err := Refresh(r.Context(), &RefreshArgs{
 			RefreshToken: r.PostFormValue("refresh_token"),
@@ -185,7 +239,7 @@ func TokenHandler(w http.ResponseWriter, r *http.Request) {
 		writeJson(w, http.StatusOK, response)
 
 	default:
-		writeOauthError(w, http.StatusBadRequest, "unsupported_grant_type", "Supported: authorization_code, refresh_token, "+ExchangeGrantType+".")
+		writeOauthError(w, http.StatusBadRequest, "unsupported_grant_type", "Supported: authorization_code, refresh_token, "+ClientCredentialsGrantType+", "+DeviceCodeGrantType+", "+ExchangeGrantType+".")
 	}
 }
 
@@ -579,4 +633,108 @@ func bearerToken(r *http.Request) string {
 // The window a rate limited caller must wait out, for the Retry-After header.
 func registrationRetryAfterSeconds() string {
 	return strconv.Itoa(int(rateLimitSettings.RegistrationBurstDuration / time.Second))
+}
+
+// RFC 8628 §3.1's device authorization request, ur-cli's alone (device_grant.go).
+func DeviceAuthorizationHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The form could not be parsed.")
+		return
+	}
+	response, err := AuthorizeDevice(r.Context(), &DeviceAuthorizationArgs{
+		ClientId:             r.PostFormValue("client_id"),
+		Scopes:               ParseScope(r.PostFormValue("scope")),
+		Resource:             r.PostFormValue("resource"),
+		DpopJkt:              r.PostFormValue("dpop_jkt"),
+		AuthorizationDetails: r.PostFormValue("authorization_details"),
+	})
+	if err != nil {
+		writeGrantError(w, err)
+		return
+	}
+	writeJson(w, http.StatusOK, response)
+}
+
+// What the consent page sends for a device authorization: the user code the
+// person typed, and on approval the receipt /oauth/device_consent gave.
+type DeviceConsentRequest struct {
+	UserCode       string `json:"user_code"`
+	ConsentReceipt string `json:"consent_receipt,omitempty"`
+	// /oauth/device_approve's answer: true approves, false denies
+	Approve bool `json:"approve,omitempty"`
+}
+
+// The consent page's description of a device authorization: the command and
+// the code to show beside it, with the receipt; or a fresh sign-in owed.
+type DeviceConsentResult struct {
+	ClientName               string        `json:"client_name,omitempty"`
+	NetworkName              string        `json:"network_name,omitempty"`
+	AdminCommand             *UrcliConsent `json:"admin_command,omitempty"`
+	ReauthenticationRequired bool          `json:"reauthentication_required,omitempty"`
+}
+
+// POST /oauth/device_consent: describes a device authorization to the signed-in
+// consent page, never remembered (device_grant.go).
+func DeviceConsentHandler(w http.ResponseWriter, r *http.Request) {
+	clientSession, err := session.NewClientSessionFromRequest(r)
+	if err != nil {
+		writeOauthError(w, http.StatusInternalServerError, "server_error", "Please try again.")
+		return
+	}
+	defer clientSession.Cancel()
+	if err := clientSession.Auth(r); err != nil {
+		writeOauthError(w, http.StatusUnauthorized, "login_required", "Sign in to continue.")
+		return
+	}
+	var consentRequest DeviceConsentRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&consentRequest); err != nil {
+		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The request could not be parsed.")
+		return
+	}
+	result := &DeviceConsentResult{ClientName: urcliClient().ClientName, NetworkName: clientSession.ByJwt.NetworkName}
+	adminCommand, err := DescribeDeviceConsent(clientSession.Ctx, consentRequest.UserCode, clientSession.ByJwt.UserId, clientSession.ByJwt.CreateTime)
+	switch {
+	case errors.Is(err, ErrUrcliReauthenticationRequired):
+		result.ReauthenticationRequired = true
+	case err != nil:
+		writeGrantError(w, err)
+		return
+	default:
+		result.AdminCommand = adminCommand
+	}
+	writeJson(w, http.StatusOK, result)
+}
+
+// POST /oauth/device_approve: the signed-in person's answer to a device
+// authorization, approval only with its consent receipt (device_grant.go).
+func DeviceApproveHandler(w http.ResponseWriter, r *http.Request) {
+	clientSession, err := session.NewClientSessionFromRequest(r)
+	if err != nil {
+		writeOauthError(w, http.StatusInternalServerError, "server_error", "Please try again.")
+		return
+	}
+	defer clientSession.Cancel()
+	if err := clientSession.Auth(r); err != nil {
+		writeOauthError(w, http.StatusUnauthorized, "login_required", "Sign in to continue.")
+		return
+	}
+	var consentRequest DeviceConsentRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&consentRequest); err != nil {
+		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The request could not be parsed.")
+		return
+	}
+	byJwt := clientSession.ByJwt
+	if err := DecideDevice(clientSession.Ctx, consentRequest.UserCode, consentRequest.Approve, consentRequest.ConsentReceipt, &AuthorizingUser{
+		UserId:      byJwt.UserId,
+		NetworkId:   byJwt.NetworkId,
+		NetworkName: byJwt.NetworkName,
+		GuestMode:   byJwt.GuestMode,
+		Principal:   byJwt.Principal,
+		Roles:       byJwt.Roles,
+		AuthTime:    byJwt.CreateTime,
+	}); err != nil {
+		writeGrantError(w, err)
+		return
+	}
+	writeJson(w, http.StatusOK, map[string]bool{"approved": consentRequest.Approve})
 }

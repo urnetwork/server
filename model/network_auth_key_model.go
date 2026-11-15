@@ -67,15 +67,20 @@ type NetworkAuthKeySettings struct {
 	// The longest lifetime of a new API key, and the lifetime of one created
 	// without an expiry: 365 days (§7.8; §2.8 api-11 publishes it).
 	ApiKeyMaxLifetime time.Duration
+	// The longest lifetime of a key a network OAuth client's token creates: an
+	// hour (§7.8's "auth_keys' ≤1 h keys", D-TEAM-6), so CI's keys pair with its
+	// Delegation and never outlive a run.
+	OauthClientMaxLifetime time.Duration
 }
 
 func DefaultNetworkAuthKeySettings() *NetworkAuthKeySettings {
 	return &NetworkAuthKeySettings{
-		MinLifetime:       5 * time.Minute,
-		MaxLifetime:       90 * 24 * time.Hour,
-		MaxUses:           1000000,
-		MaxTagCount:       64,
-		ApiKeyMaxLifetime: 365 * 24 * time.Hour,
+		MinLifetime:            5 * time.Minute,
+		MaxLifetime:            90 * 24 * time.Hour,
+		MaxUses:                1000000,
+		MaxTagCount:            64,
+		ApiKeyMaxLifetime:      365 * 24 * time.Hour,
+		OauthClientMaxLifetime: time.Hour,
 	}
 }
 
@@ -256,6 +261,10 @@ func createAuthKeyAt(
 			int64(settings.MinLifetime/time.Second),
 			int64(settings.MaxLifetime/time.Second),
 		))
+	}
+	if clientSession.OauthClient != nil && settings.OauthClientMaxLifetime < lifetime {
+		// a CI client's keys live at most an hour (D-TEAM-6)
+		return refuse(fmt.Sprintf("An OAuth client's auth key lives at most %d seconds.", int64(settings.OauthClientMaxLifetime/time.Second)))
 	}
 	if createAuthKey.MaxUses < 1 || settings.MaxUses < createAuthKey.MaxUses {
 		return refuse(fmt.Sprintf("An auth key allows 1 to %d uses.", settings.MaxUses))

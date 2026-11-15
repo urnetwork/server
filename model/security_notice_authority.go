@@ -17,6 +17,8 @@ package model
 //	             (TEAM-M6-09)
 //	member_invite  a team invited a person to join it, whose first device an
 //	             admin's device then admits (TEAM-M6-04)
+//	oauth_client  a team gained a network OAuth client, whose credentials
+//	             mint auth keys for CI (TEAM-M6-08)
 //
 // The recipients are the sign-in email addresses of the network's Owners and
 // Admins: in a personal network its owner's, the account security notices
@@ -50,6 +52,9 @@ const (
 	SecurityNetworkAuthorityDomainVerified = "domain_verified"
 	SecurityNetworkAuthorityAuditWebhook   = "audit_webhook"
 	SecurityNetworkAuthorityMemberInvite   = "member_invite"
+	// a team gained a network OAuth client, whose credentials mint auth keys
+	// (TEAM-M6-08)
+	SecurityNetworkAuthorityOauthClient = "oauth_client"
 )
 
 // One change of a network's authority.

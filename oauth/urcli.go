@@ -23,8 +23,12 @@ package oauth
 //	          or id token
 //
 // v0's one command is POST /network/auth-keys for a single-use, user-owned key
-// of at most 5 minutes (§5.6), which `ur login` hands the daemon. Full `ur admin`
-// and the device grant are TEAM-M6-08's.
+// of at most 5 minutes (§5.6), which `ur login` hands the daemon, under the
+// auth_keys scope. Full `ur admin` (TEAM-M6-08) runs every other route whose
+// model spends an admin token's use (session.RegisterAdminCommandRoute), the
+// Team routes among them, under the all scope, which the route's role gate
+// cuts to the member's role. In a team the token names the person's member_id,
+// never the user. The device grant is device_grant.go's.
 //
 // The code carries the consented cmd and the dpop_jkt as two scope entries,
 // admin_cmd:<cmd> and admin_jkt:<jkt>, beside auth_keys, so
@@ -45,14 +49,18 @@ import (
 	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
 const (
 	// ur-cli's client_id: preregistered, public, native
 	UrcliClientId = "ur-cli"
-	// the one scope an ur-cli token carries in v0 (§7.8's OAuth client scopes)
+	// the scope of v0's one command (§7.8's OAuth client scopes)
 	UrcliScopeAuthKeys = "auth_keys"
+	// the scope of every other admin command, which the route's role gate cuts
+	// to the member's role
+	UrcliScopeAll = "all"
 	// the code's scope entries that carry the consented command and DPoP key
 	urcliCmdScopePrefix = "admin_cmd:"
 	urcliJktScopePrefix = "admin_jkt:"
@@ -108,8 +116,32 @@ func urcliClient() *Client {
 			"http://127.0.0.1/callback",
 			"http://[::1]/callback",
 		},
-		Scopes: []string{UrcliScopeAuthKeys},
+		Scopes: []string{UrcliScopeAuthKeys, UrcliScopeAll},
 	}
+}
+
+// The one scope ur-cli asks for a command: auth_keys for POST /network/auth-keys,
+// all for every other admin command.
+func urcliCommandScope(command *sidecar.AdminCommand) string {
+	if command.Method == "POST" && command.Path == "/network/auth-keys" {
+		return UrcliScopeAuthKeys
+	}
+	return UrcliScopeAll
+}
+
+// The member an admin token names for userId acting in networkId: in a team,
+// the user's live membership's member_id, which the route's role gate reads; in
+// a personal network, the user. A team the user is no live member of is
+// refused.
+func urcliTokenMemberId(ctx context.Context, networkId server.Id, userId server.Id) (server.Id, error) {
+	if !model.NetworkIsTeam(ctx, networkId) {
+		return userId, nil
+	}
+	member := model.GetNetworkMemberOfUser(ctx, networkId, userId)
+	if member == nil || member.Pending {
+		return server.Id{}, fmt.Errorf("%w: no live member of the team", ErrUnauthorizedUser)
+	}
+	return member.MemberId, nil
 }
 
 // What an ur-cli request asks, once it validates.
@@ -136,9 +168,6 @@ func ValidateUrcliRequest(request *AuthorizationRequest) (*UrcliAuthorization, e
 	if err != nil || resource != origin {
 		return nil, fmt.Errorf("%w: ur-cli's resource is the api", ErrInvalidRequest)
 	}
-	if len(request.Scopes) != 1 || request.Scopes[0] != UrcliScopeAuthKeys {
-		return nil, fmt.Errorf("%w: ur-cli asks for %s alone", ErrUrcliCommandRefused, UrcliScopeAuthKeys)
-	}
 	if !urcliJktWellFormed(request.DpopJkt) {
 		return nil, fmt.Errorf("%w: no dpop_jkt", ErrUrcliCommandRefused)
 	}
@@ -149,6 +178,9 @@ func ValidateUrcliRequest(request *AuthorizationRequest) (*UrcliAuthorization, e
 	command := details.Command()
 	if err := validateUrcliCommand(command, DefaultUrcliSettings()); err != nil {
 		return nil, err
+	}
+	if scope := urcliCommandScope(command); len(request.Scopes) != 1 || request.Scopes[0] != scope {
+		return nil, fmt.Errorf("%w: ur-cli asks for %s alone for this command", ErrUrcliCommandRefused, scope)
 	}
 	cmd, err := command.Digest()
 	if err != nil {
@@ -163,13 +195,24 @@ func urcliJktWellFormed(jkt string) bool {
 	return err == nil && len(thumbprint) == sha256.Size
 }
 
-// v0's one command (§5.6, §7.8): POST /network/auth-keys for a single-use,
-// user-owned key of at most MaxAuthKeyDuration, a body of exactly
+// The commands ur-cli runs (§5.6, §7.8): v0's POST /network/auth-keys for a
+// single-use, user-owned key of at most MaxAuthKeyDuration, a body of exactly
 // {duration_seconds, max_uses: 1} and nothing else, so no tag, ephemeral or
-// pre-approved key.
+// pre-approved key; and full `ur admin`'s, any other route whose model spends
+// an admin token's use, with a body that is empty or one JSON object. A route
+// that spends no use is refused, since its command could run again.
 func validateUrcliCommand(command *sidecar.AdminCommand, settings *UrcliSettings) error {
 	if command.Method != "POST" || command.Path != "/network/auth-keys" {
-		return fmt.Errorf("%w: v0 runs POST /network/auth-keys alone", ErrUrcliCommandRefused)
+		if !session.AdminCommandRouteRegistered(command.Method, command.Path) {
+			return fmt.Errorf("%w: no admin command route %s %s", ErrUrcliCommandRefused, command.Method, command.Path)
+		}
+		if 0 < len(command.Body) {
+			body := map[string]json.RawMessage{}
+			if err := json.Unmarshal(command.Body, &body); err != nil {
+				return fmt.Errorf("%w: the command's body is no JSON object", ErrUrcliCommandRefused)
+			}
+		}
+		return nil
 	}
 	type authKeyBody struct {
 		DurationSeconds *int64 `json:"duration_seconds"`
@@ -354,7 +397,7 @@ func authorizeUrcli(ctx context.Context, request *AuthorizationRequest, user *Au
 		CodeChallengeMethod: request.CodeChallengeMethod,
 		Resource:            resource,
 		Scopes: []string{
-			UrcliScopeAuthKeys,
+			urcliCommandScope(authorization.Details.Command()),
 			urcliCmdScopePrefix + authorization.Cmd,
 			urcliJktScopePrefix + authorization.Jkt,
 		},
@@ -395,7 +438,7 @@ func ExchangeUrcliCode(ctx context.Context, args *ExchangeCodeArgs, proofs []str
 			scopes = append(scopes, scope)
 		}
 	}
-	if cmd == "" || jkt == "" || len(scopes) != 1 || scopes[0] != UrcliScopeAuthKeys {
+	if cmd == "" || jkt == "" || len(scopes) != 1 || (scopes[0] != UrcliScopeAuthKeys && scopes[0] != UrcliScopeAll) {
 		return nil, fmt.Errorf("%w: the code names no command", ErrInvalidGrant)
 	}
 	if err := session.VerifyDpopProof(ctx, &session.DpopRequest{
@@ -408,10 +451,14 @@ func ExchangeUrcliCode(ctx context.Context, args *ExchangeCodeArgs, proofs []str
 	}); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidDpopProof, err)
 	}
+	memberId, err := urcliTokenMemberId(ctx, code.NetworkId, code.UserId)
+	if err != nil {
+		return nil, err
+	}
 	settings := DefaultUrcliSettings()
 	token, expiry, err := MintAdminToken(&MintAdminTokenArgs{
 		NetworkId: code.NetworkId,
-		MemberId:  code.UserId,
+		MemberId:  memberId,
 		Scopes:    scopes,
 		Jkt:       jkt,
 		Cmd:       cmd,
