@@ -234,7 +234,7 @@ func LiftAbuseAction(ctx context.Context, args *model.AbuseLiftArgs) (*AbuseActi
 	var err error
 	server.Tx(ctx, func(tx server.PgTx) {
 		now := server.NowUtc()
-		lift, lifted, abuseCase, inserted, err = model.RecordAbuseLiftInTx(ctx, tx, args, now)
+		lift, lifted, abuseCase, inserted, err = model.RecordAbuseLiftInTx(ctx, tx, args, now, settings)
 		if err == nil && inserted {
 			oweAbuseActionNoticeInTx(ctx, tx, abuseCase, lift, lifted)
 			reevaluateAbuseStandingInTx(ctx, tx, lift, now, settings)

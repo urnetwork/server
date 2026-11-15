@@ -310,6 +310,8 @@ func registry() []specEndpoint {
 		{"GET", "/abuse/cases", nil, rt(model.AbuseNetworkCasesResult{})},
 		{"POST", "/abuse/appeal", rt(model.AbuseAppealArgs{}), rt(model.AbuseAppealResult{})},
 		{"GET", "/abuse/status", nil, rt(sidecar.AbuseStatus{})},
+		// §21.16's staff route (ABUSE-M5-12): each kind reads its own body, so only the envelope is reflected
+		{"POST", "/abuse/action", nil, rt(controller.AbuseStaffResult{})},
 	}
 }
 

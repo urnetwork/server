@@ -504,6 +504,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/abuse/cases", handlers.AbuseCases),
 		router.NewRoute("POST", "/abuse/appeal", handlers.AbuseAppeal),
 		router.NewRoute("GET", "/abuse/status", handlers.AbuseStatus),
+		// §21.16's staff route, x-internal, on a per-person bearer from vault's abuse-staff.yml (ABUSE-M5-12, QD-126)
+		router.NewRoute("POST", "/abuse/action", handlers.AbuseAction),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
 		router.NewRoute("POST", "/acl/invite", handlers.AclInvite),

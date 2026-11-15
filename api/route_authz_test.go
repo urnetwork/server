@@ -695,18 +695,20 @@ func TestForwardOnlyTokenRoutes(t *testing.T) {
 	})
 }
 
-// §21.16's customer routes take their classes (ABUSE-M5-11), checked through
-// their gates with the handler stubbed: the report route is Public and reads
-// no credential; the cases and appeal routes refuse every client token, the
-// appeal one never taking one at all; status serves a client token and the
+// §21.16's routes take their classes (ABUSE-M5-11, ABUSE-M5-12), checked
+// through their gates with the handler stubbed: the report route is Public and
+// reads no credential; the cases and appeal routes refuse every client token,
+// the appeal one never taking one at all; status serves a client token and the
 // network's own credential, and is the one /abuse/ route a sidecar's
-// strict_exp token reaches, the rest refusing it.
+// strict_exp token reaches, the rest refusing it; the staff route is Public,
+// its own bearer checked by its handler alone.
 func TestAbuseRoutesTakeTheirClasses(t *testing.T) {
 	want := map[string]routeAccess{
 		"POST /abuse/report": routeAccessPublic,
 		"GET /abuse/cases":   routeAccessNetwork,
 		"POST /abuse/appeal": routeAccessNetwork,
 		"GET /abuse/status":  routeAccessClient,
+		"POST /abuse/action": routeAccessPublic,
 	}
 	for key, access := range want {
 		if routeAccessByRoute[key] != access {

@@ -385,6 +385,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /abuse/cases":                              routeAccessNetwork,  // the network's own cases (§21.16), the read permission by the role gate
 	"POST /abuse/appeal":                            routeAccessNetwork,  // an Owner's or Admin's appeal, never a client token (§21.16), the admin permission by the role gate
 	"GET /abuse/status":                             routeAccessClient,   // the bearer's own network's standing (§21.16), sidecar-classified
+	"POST /abuse/action":                            routeAccessPublic,   // the abuse role's one route, off the public API: a staff bearer verified by hash, its own credential (§21.16, QD-126)
 	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
 	"POST /acl/invite":                              routeAccessClient,   // a sidecar of the inviting network files a code's hash and its sealed targets (§8.11)
 	"POST /acl/accept-invite":                       routeAccessClient,   // a sidecar of the invited network claims or completes (§8.11)

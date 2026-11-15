@@ -31,31 +31,6 @@ import (
 
 const testAbuseRouteRoot = "root.example"
 
-// A clock a test moves.
-type testAbuseRouteClock struct {
-	stateLock sync.Mutex
-	now       time.Time
-}
-
-func (self *testAbuseRouteClock) Now() time.Time {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	return self.now
-}
-
-func (self *testAbuseRouteClock) Advance(d time.Duration) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.now = self.now.Add(d)
-}
-
-// What a route answered.
-type testAbuseRouteAnswer struct {
-	status int
-	body   string
-	header http.Header
-}
-
 // One call of the four routes on handlers, from remoteAddr with authorization.
 func testAbuseRouteCall(t testing.TB, handlers *AbuseHandlers, method string, path string, authorization string, remoteAddr string, body string) *testAbuseRouteAnswer {
 	t.Helper()
@@ -415,6 +390,52 @@ func TestAbuseCasesAndStatusRoutes(t *testing.T) {
 		}
 		if answer := testAbuseRouteCall(t, handlers, "GET", "/abuse/status", "", "192.0.2.50:41000", ""); answer.status != http.StatusUnauthorized {
 			t.Fatalf("no bearer's status: %d", answer.status)
+		}
+	})
+}
+
+// A lookup through the route answers the case, uncached, and writes its access log row first.
+func TestAbuseActionLookupThroughTheRoute(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "abuse"+strings.ReplaceAll(networkId.String()[24:], "-", ""), server.NewId())
+		caseId := testAbuseRouteNoticedCase(t, ctx, networkId, "shop.staff.example", now.Add(-time.Hour))
+		reviewerId := server.NewId()
+		verifier := testAbuseActionStaffFile(t, map[string]string{
+			"reviewer-bearer": testAbuseActionStaffEntry(reviewerId, "reviewer", now.Add(24*time.Hour)),
+		})
+		handlers := NewAbuseActionHandlers(&AbuseActionHandlersDeps{
+			LoadVerifier: func() (*controller.AbuseStaffVerifier, error) { return verifier, nil },
+		})
+
+		answer := testAbuseActionCall(t, handlers, "Bearer reviewer-bearer", `{"kind":"lookup_case","case_id":"`+caseId.String()+`"}`)
+		if answer.status != http.StatusOK || answer.header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("the lookup: %d %q", answer.status, answer.body)
+		}
+		result := struct {
+			Kind   string `json:"kind"`
+			Result struct {
+				Case struct {
+					CaseId    server.Id `json:"case_id"`
+					NetworkId server.Id `json:"network_id"`
+				} `json:"case"`
+				Actions []json.RawMessage `json:"actions"`
+			} `json:"result"`
+		}{}
+		if err := json.Unmarshal([]byte(answer.body), &result); err != nil || result.Kind != "lookup_case" || result.Result.Case.CaseId != caseId || result.Result.Case.NetworkId != networkId || len(result.Result.Actions) != 1 {
+			t.Fatalf("the case read: %q, %v", answer.body, err)
+		}
+		var count int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM abuse_access_log WHERE reviewer_id = $1 AND case_id = $2`, reviewerId, caseId).Scan(&count))
+		})
+		if count != 1 {
+			t.Fatalf("%d access log rows", count)
+		}
+		if answer := testAbuseActionCall(t, handlers, "Bearer reviewer-bearer", `{"kind":"lookup_case","case_id":"`+server.NewId().String()+`"}`); answer.status != http.StatusNotFound {
+			t.Fatalf("an unknown case: %d", answer.status)
 		}
 	})
 }
