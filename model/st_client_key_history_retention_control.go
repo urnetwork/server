@@ -16,9 +16,9 @@ import (
 // before every batch, so a change applies from the next batch. Its fields, all
 // optional:
 //   - `mode`: on or off. Off, or any other value, deletes nothing.
-//   - `maxClientsPerSecond`: gone clients deleted per second, at most the
-//     code's MaxDeleteClientsPerSecond; zero, or a value that does not parse,
-//     is off.
+//   - `maxClientsPerSecond`: gone records the deletes examine per second, and
+//     so the most gone clients they delete per second, at most the code's
+//     MaxDeleteClientsPerSecond; zero, or a value that does not parse, is off.
 //   - `horizonDays`: the retention's horizon in whole days: history goes once
 //     this long has passed since its client went. It only narrows: it is never
 //     below the guard's floor (server.ClientKeyHistoryRetentionFloor, 7 days),
@@ -46,7 +46,8 @@ type StClientKeyHistoryRetentionControl struct {
 	Present bool
 	// deletes run
 	On bool
-	// gone clients deleted per second at most, while On
+	// gone records examined, and so clients deleted, per second at most, while
+	// On
 	MaxClientsPerSecond float64
 	// the retention's own horizon, from `horizonDays`; nil keeps the code's
 	// Retention (StClientKeyHistoryRetentionSettings.horizon)
