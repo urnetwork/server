@@ -66,14 +66,16 @@ func RemoveGoneStClientKeyHistory(
 		removeGoneStClientKeyHistory.Cursor,
 		model.DefaultStClientKeyHistoryRetentionSettings(),
 	)
-	if 0 < report.RemovedClientCount || 0 < report.DiscoveredClientCount {
+	if 0 < report.ExaminedRecordCount || 0 < report.DiscoveredClientCount || report.DeleteStop == model.StClientKeyHistoryRetentionStopBatchBound || report.DiscoverBounded {
 		glog.Infof(
-			"[ckh]removed the key history of %d clients gone over %s (%d registrations), recorded %d more as gone, deletes ended %s\n",
+			"[ckh]removed the key history of %d clients gone over %s (%d registrations) from %d records read, recorded %d more as gone, deletes ended %s, discovery bounded %t\n",
 			report.RemovedClientCount,
 			report.Horizon,
 			report.RemovedHistoryCount,
+			report.ExaminedRecordCount,
 			report.DiscoveredClientCount,
 			report.DeleteStop,
+			report.DiscoverBounded,
 		)
 	}
 	return &RemoveGoneStClientKeyHistoryResult{
