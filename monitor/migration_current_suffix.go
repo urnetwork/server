@@ -1037,6 +1037,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), "provider session custody with the legacy partition's early drop",
 			providerWorkSessionLegacyDropCustodyPredicates()...),
 	},
+	// the key history floor at 7 days, which supersedes the 30-day floor's
+	// contract, versioned by its position
+	[]snMainnetMigrationContract{clientKeyHistoryRetentionSevenDayFloorMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
