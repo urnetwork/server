@@ -27,6 +27,9 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{"gift code voids and order refunds", GiftRefundSchemaSql, GiftRefundSchemaVersion},
 		{"gift orders paid with Gamma", GiftGammaSchemaSql, GiftGammaSchemaVersion},
 		{name: "provider session legacy drop guard", sql: providerWorkSessionEventLegacyDropGuardSql, version: ProviderWorkSessionEventLegacyDropGuardMigrationVersion},
+		{name: "provider session provider append", sql: providerWorkSessionProviderAppendSql, version: ProviderWorkSessionProviderAppendMigrationVersion},
+		{name: "provider session head retention guard", sql: providerWorkSessionHeadRetentionGuardSql, version: ProviderWorkSessionHeadRetentionGuardMigrationVersion},
+		{name: "client key history seven-day floor", sql: clientKeyHistoryRetentionSevenDayFloorSql, version: ClientKeyHistoryRetentionSevenDayFloorMigrationVersion},
 		{name: "exact-job second recovery", sql: CompetitionSecondRecoveryMigrationSql(), version: CompetitionSecondRecoveryMigrationVersion},
 	} {
 		registered := 0

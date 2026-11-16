@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Captured main 3939d79b4's published tail must keep its exact order before the
+// Captured main 4bc9e8c7d's published tail must keep its exact order before the
 // local recovery append. Resolve positions from actual registered objects;
 // published migration identities cannot move when the local append is merged.
 func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *testing.T) {
@@ -20,7 +20,9 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 		CompetitionDistributedReevaluationMigrationVersion(), GiftSchemaVersion(), GiftRefundSchemaVersion(),
 		CompetitionOperatorRequestedPatchRetryMigrationVersion(), OperatorBlockTrafficVersion(),
 		OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(),
-		ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), CompetitionSecondRecoveryMigrationVersion()}
+		ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), ProviderWorkSessionProviderAppendMigrationVersion(),
+		ProviderWorkSessionHeadRetentionGuardMigrationVersion(), ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(),
+		CompetitionSecondRecoveryMigrationVersion()}
 	for index, version := range versions {
 		if version < 1 || index > 0 && version != versions[index-1]+1 {
 			t.Fatal("captured published migration tail was moved, omitted or overwritten", versions)
@@ -29,13 +31,15 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 	if versions[8] != 968 || versions[9] != 969 || versions[10] != 970 {
 		t.Fatal("captured main's published address-sweep, Shopify or mail migrations moved", versions)
 	}
-	if versions[14] != 974 || versions[15] != 975 || versions[16] != 976 || versions[17] != 977 || versions[18] != 978 || versions[19] != 979 {
-		t.Fatal("reviewed operator retry, traffic, expired points, Gamma, legacy drop guard or second recovery migration moved", versions)
+	for index, version := range versions[14:] {
+		if version != 974+index {
+			t.Fatal("reviewed published migration tail or second recovery append moved", versions)
+		}
 	}
 	if versions[len(versions)-1] != MigrationCount() {
 		t.Fatal("local recovery must follow the entire captured origin tail", versions, MigrationCount())
 	}
-	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d mail_context=%d recovery=%d gift=%d gift_refund=%d operator_retry=%d operator_traffic=%d expired_points=%d gift_gamma=%d legacy_drop_guard=%d second_recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], versions[11], versions[12], versions[13], versions[14], versions[15], versions[16], versions[17], versions[18], versions[19], MigrationCount())
+	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d mail_context=%d recovery=%d gift=%d gift_refund=%d operator_retry=%d operator_traffic=%d expired_points=%d gift_gamma=%d legacy_drop_guard=%d provider_append=%d head_retention=%d history_floor=%d second_recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], versions[11], versions[12], versions[13], versions[14], versions[15], versions[16], versions[17], versions[18], versions[19], versions[20], versions[21], versions[22], MigrationCount())
 }
 
 // Deleting only each explicit addition recovers the complete reviewed old

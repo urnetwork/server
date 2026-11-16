@@ -32,7 +32,10 @@ func TestCompetitionOperatorPatchRetryMigrationPreservesCompletePredecessors(t *
 		version != GiftRefundSchemaVersion()+1 {
 		t.Fatal("patch retry was not appended after the complete published prefix")
 	}
-	tail := []int{version, OperatorBlockTrafficVersion(), OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(), CompetitionSecondRecoveryMigrationVersion()}
+	tail := []int{version, OperatorBlockTrafficVersion(), OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(),
+		ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), ProviderWorkSessionProviderAppendMigrationVersion(),
+		ProviderWorkSessionHeadRetentionGuardMigrationVersion(), ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(),
+		CompetitionSecondRecoveryMigrationVersion()}
 	for index, tailVersion := range tail {
 		if tailVersion != 974+index {
 			t.Fatal("reviewed migration tail after patch retry was moved, omitted or overwritten", tail)

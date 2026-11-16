@@ -27,6 +27,7 @@ func TestCompetitionAutomationDashboardHasNoCandidateDisclosure(t *testing.T) {
 		"executor_heartbeat_age_seconds", "executor_transport_failures_total", "executor_remote_state",
 		"executor_reconciliation_required",
 		"executor_physical_available", "executor_physical_observed_at_seconds",
+		"receive_cleanup_failures_total",
 	} {
 		if !strings.Contains(queries, "urnetwork_competition_"+metric) {
 			t.Errorf("missing automation metric %s", metric)
@@ -39,6 +40,31 @@ func TestCompetitionAutomationDashboardHasNoCandidateDisclosure(t *testing.T) {
 	}
 	if !strings.Contains(dashboard.Description, "not a chain settlement") {
 		t.Fatal("delivery receipt must not imply payment finality")
+	}
+}
+
+// Receive housekeeping failures are counted by their finite phase only, beside
+// the physical admission observation, in the first-count form a counter needs
+// when its series starts at its first failure (counter_first_count_dashboard_test.go).
+func TestCompetitionReceiveCleanupFailuresByPhase(t *testing.T) {
+	dashboard := readTestDashboard(t, "competition-automation.json")
+	panel := dashboardPanelById(dashboard, competitionReceiveCleanupPanel)
+	if panel == nil || panel.Type != "timeseries" || panel.Title != "executor receive custody and cleanup failures" || panel.FieldConfig.Defaults.Unit != "short" || len(panel.Targets) != 1 {
+		t.Fatalf("receive cleanup failures panel is missing or not a one-query short time series: %+v", panel)
+	}
+	const counter = `urnetwork_competition_receive_cleanup_failures_total{env="$env"}`
+	want := "sum by (phase) ((increase(" + counter + "[1h]) and " + counter + " offset 1h) or " + counter + ")"
+	if target := panel.Targets[0]; target.Expr != want || target.LegendFormat != "{{phase}}" {
+		t.Errorf("receive cleanup failures panel reads %s as %q, want %s as {{phase}}", target.Expr, target.LegendFormat, want)
+	}
+	for _, explained := range []string{"capture", "retention", "cleanup", "close", "stays on disk", "Committed outcomes and scores are unchanged", "first failure"} {
+		if !strings.Contains(panel.Description, explained) {
+			t.Errorf("receive cleanup failures panel does not explain %q", explained)
+		}
+	}
+	admission := dashboardPanelById(dashboard, 15)
+	if admission == nil || panel.GridPos.Y != admission.GridPos.Y || panel.GridPos.X != admission.GridPos.X+admission.GridPos.W {
+		t.Error("receive cleanup failures panel does not sit beside the physical admission observation")
 	}
 }
 

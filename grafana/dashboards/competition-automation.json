@@ -129,6 +129,14 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "none", "min": -1, "max": 1, "color": {"mode": "thresholds"}, "mappings": [{"type": "value", "options": {"-1": {"color": "red", "index": 0, "text": "unknown or stale"}, "0": {"color": "orange", "index": 1, "text": "physical custody occupied"}, "1": {"color": "green", "index": 2, "text": "available observation"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0}, {"color": "green", "value": 1}]}}, "overrides": []},
       "targets": [{"refId": "A", "expr": "min by (executor_host) (((urnetwork_competition_executor_physical_available{env=\"$env\"} * ((time() - urnetwork_competition_executor_physical_observed_at_seconds{env=\"$env\"}) <= bool 60)) - ((time() - urnetwork_competition_executor_physical_observed_at_seconds{env=\"$env\"}) > bool 60)) and on (executor_host) urnetwork_competition_executor_noop_qualified{env=\"$env\"})", "legendFormat": "{{executor_host}}"}]
+    },
+    {
+      "id": 16, "type": "timeseries", "title": "executor receive custody and cleanup failures",
+      "description": "Failures of the worker's local housekeeping of a run's received result directory over the last hour, by phase: capture (custody of a new receive directory could not be taken when it was created, or its controller inputs did not validate), retention (the archived outcome did not bind the received files, so none may be removed), cleanup (the removal after the acknowledged completion failed or lost its ownership proof) and close (releasing the held directory descriptors failed). After a capture, retention or cleanup failure the directory stays on disk. Committed outcomes and scores are unchanged. A phase's series starts at its first failure in a process, which an increase cannot see, so a series that began within the hour reads its whole count instead.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 50},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (phase) ((increase(urnetwork_competition_receive_cleanup_failures_total{env=\"$env\"}[1h]) and urnetwork_competition_receive_cleanup_failures_total{env=\"$env\"} offset 1h) or urnetwork_competition_receive_cleanup_failures_total{env=\"$env\"})", "legendFormat": "{{phase}}"}]
     }
   ]
 }

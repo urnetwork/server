@@ -144,12 +144,12 @@ func (self ContractHorizonMode) String() string {
 // The shortest horizon the reaper applies, whatever its settings or control
 // say (owner, 2026-11-01: 35 days). It is the reaper's: server.ContractRetention,
 // which the partition drop and the sn-reconcile floor share, stays 91 days.
-// Key history and close evidence retention follow the reaper's horizon while
-// its mode is on: key history (RemoveGoneStClientKeyHistory) over its guard's
-// 30-day floor (server.ClientKeyHistoryRetentionFloor), close evidence
-// (server.RemoveExpiredCloseEvidence) over its guard's 35-day floor
-// (server.CloseEvidenceRetentionFloor), each with its own brake; both keep 91
-// days in a dry run, with the mode off, or without the control. What keeps a
+// Close evidence retention follows the reaper's horizon while its mode is on
+// (server.RemoveExpiredCloseEvidence), over its guard's 35-day floor
+// (server.CloseEvidenceRetentionFloor), with its own brake, and keeps 91 days
+// in a dry run, with the mode off, or without the control. Key history
+// retention no longer follows it: a gone client's history goes 7 days after
+// the client went (RemoveGoneStClientKeyHistory, owner 2026-11-16). What keeps a
 // contract that operator block points or a USDC obligation can still read is
 // the reaper's row checks, never its horizon. The transfer audit
 // rollup never replaces a day the floor can reach
@@ -210,13 +210,19 @@ type ContractHorizonSettings struct {
 	// Bounds the control read.
 	ControlTimeout time.Duration
 	// A pass that reached the horizon starts over from the oldest contract
-	// once it began this long ago. A rescan rereads every contract still kept
-	// below the horizon at the same rate, so it is long. It deletes those whose
-	// checks pass since the pass kept them, such as the contracts of a payment
-	// the USDC close-out closed after the pass went by. With CloseSettleTime it
-	// rereads only what passes kept: payment holds and reviews (about 122M
-	// contracts in the pass of 2026-11-01, each locked again on every reread),
-	// disputes, and contracts that closed late.
+	// once it began this long ago. Only a caught-up pass starts over: a pass
+	// still behind its horizon when the interval ends reads on from its cursor
+	// and starts over at its first run that reaches the horizon. A rescan
+	// rereads every contract still kept below the horizon at the same rate. It
+	// deletes those whose checks pass since the pass kept them, such as the
+	// contracts of a payment that has since completed
+	// CompletedContractExpiration ago, or that the USDC close-out closed after
+	// the pass went by. With CloseSettleTime it rereads only what passes kept:
+	// payment holds, recent payments and reviews (about 122M contracts in the
+	// pass of 2026-11-01, each locked again on every reread; about 21M kept for
+	// their payments in the pass of 2026-11-15), disputes, and contracts that
+	// closed late. The interval is not in the cursor: each run judges the
+	// pass's start by its own build's interval.
 	RescanInterval time.Duration
 	// Gap between runs while a pass has work left.
 	ResumeInterval time.Duration
@@ -246,10 +252,18 @@ func DefaultContractHorizonSettings() *ContractHorizonSettings {
 		StatementTimeout: 30 * time.Second,
 		LockTimeout:      2 * time.Second,
 		ControlTimeout:   2 * time.Second,
-		RescanInterval:   30 * 24 * time.Hour,
-		ResumeInterval:   15 * time.Second,
-		IdleInterval:     5 * time.Minute,
-		TaskMaxTime:      30 * time.Minute,
+		// weekly (owner, 2026-11-16), as long as CompletedContractExpiration,
+		// so the next pass finds the payments of the contracts this one kept
+		// as payment_recent completed long enough ago to delete them. The pass
+		// of 2026-11-15 kept about 5.8M as payment_recent that qualify about
+		// 11-19/20: a 30-day interval left them until about 12-15, a weekly one
+		// deletes them about 11-22. The cost the owner accepted: each week a
+		// rescan rereads the roughly 21M contracts kept for their payments, at
+		// about 1,900 a second, about three hours.
+		RescanInterval: 7 * 24 * time.Hour,
+		ResumeInterval: 15 * time.Second,
+		IdleInterval:   5 * time.Minute,
+		TaskMaxTime:    30 * time.Minute,
 	}
 }
 

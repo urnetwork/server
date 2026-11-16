@@ -1,19 +1,22 @@
-// Signed key history of a client that is gone is deleted once the contract
-// horizon has passed since it went (PARTITION-MAINTENANCE-PLAN.md Part D; owner
-// 2026-11-01): the horizon the contract horizon reaper deletes at while its
-// mode is on, which its runtime control shortens from 91 days down to the
-// reaper's floor, and 91 days otherwise; never less than the guard's floor,
-// server.ClientKeyHistoryRetentionFloor. A runtime brake of its own
-// (st_client_key_history_retention_control.go) stops or paces the deletes,
-// and its `horizonDays` can set the retention's own horizon in place of the
-// reaper's, down to the guard's floor.
+// Signed key history of a client that is gone is deleted 7 days after it went
+// (PARTITION-MAINTENANCE-PLAN.md Part D; owner 2026-11-01, and 2026-11-16 for
+// 7 days, PARTITION-CANDIDATES.md §8.4), never sooner than the guard's floor,
+// server.ClientKeyHistoryRetentionFloor. It no longer follows the contract
+// horizon reaper: no reader of a gone client's keys depends on how long
+// contracts are kept. A runtime brake of its own
+// (st_client_key_history_retention_control.go) stops or paces the deletes, and
+// its `horizonDays` can narrow the horizon, never below the floor.
 // Original-close verification reads the history of a report's own client
-// (contract_close_original.go) while that client's contract is open, and a
-// contract opens only between active clients, so the horizon outlasts every
-// close report that can still read it; db_identity_retention.go lists the
-// other readers. st_client_key_gone records when each client went; the history
-// guard admits a delete only from the retention transaction and only for a
-// client gone longer than the floor, with no client row and no head left.
+// (contract_close_original.go) for an unresolved, undisputed contract the
+// client is party to. A report needs the client's credential, which its
+// deactivation revokes in the same transaction and live transports recheck,
+// so a gone client's last report lands within minutes of its going; one past
+// the horizon is still admitted, recording history_not_found, and an admitted
+// report keeps its own copy of the registration. db_identity_retention.go
+// lists the other readers, each of which refuses or ignores a gone client.
+// st_client_key_gone records when each client went; the history guard admits a
+// delete only from the retention transaction and only for a client gone longer
+// than the floor, with no client row and no head left.
 // Functions are safe concurrently.
 package model
 
@@ -32,18 +35,15 @@ import (
 )
 
 type StClientKeyHistoryRetentionSettings struct {
-	// History goes this long after its client went unless the contract
-	// horizon reaper deletes at a shorter horizon: the longest horizon. The
-	// guard refuses anything newer than its floor, so no setting deletes
-	// earlier than server.ClientKeyHistoryRetentionFloor.
+	// History goes this long after its client went, and the brake's
+	// horizonDays can only narrow it. 7 days (owner, 2026-11-16), the guard's
+	// floor: close report admission, the one reader of a gone client's keys,
+	// needs the client's credential, which its deactivation revokes
+	// (db_identity_retention.go). The guard refuses anything newer than its
+	// floor, so no setting deletes earlier than
+	// server.ClientKeyHistoryRetentionFloor; a value below it counts as the
+	// floor.
 	Retention time.Duration
-	// History goes once the contract horizon reaper's horizon has passed since
-	// its client went, while the reaper's mode is on: the horizonDays of its
-	// runtime control as the reaper narrows it (NarrowContractHorizonControl).
-	// A dry run, the reaper off, no control or an unreadable one keep
-	// Retention, so trying a horizon in dry run deletes no key history. The
-	// brake's own horizonDays, when set, takes the place of both.
-	FollowContractHorizon bool
 	// Gone clients deleted per second while the brake sets no rate: a cautious
 	// start, so a backlog that comes due at once, such as the 2026-10-24..27
 	// records, drains under watch. The brake raises it.
@@ -64,11 +64,13 @@ type StClientKeyHistoryRetentionSettings struct {
 
 func DefaultStClientKeyHistoryRetentionSettings() *StClientKeyHistoryRetentionSettings {
 	return &StClientKeyHistoryRetentionSettings{
-		Retention:             server.ContractRetention,
-		FollowContractHorizon: true,
-		// a run deletes for half its budget, so 150 a second is about 18k
-		// clients a run and 5M a day, near the 4-9M that go each day; the
-		// brake raises it to drain a backlog, 1000 a second about 35M a day
+		Retention: 7 * 24 * time.Hour,
+		// a run deletes for half its budget and the next starts a minute after
+		// a run that left work, so 150 a second is about 18k clients a run and
+		// 8.6M a day; the brake raises it to drain a backlog, 1000 a second
+		// about 57M a day. A gone client has one registration on average, and
+		// a batch of 500 took 0.17 s on Main (2026-11-16), so the rate, not
+		// the batch, bounds the pace
 		DefaultDeleteClientsPerSecond: 150,
 		MaxDeleteClientsPerSecond:     2000,
 		ControlTimeout:                2 * time.Second,
@@ -79,32 +81,20 @@ func DefaultStClientKeyHistoryRetentionSettings() *StClientKeyHistoryRetentionSe
 	}
 }
 
-// The horizon of one run: the reaper's while its mode is on, otherwise
-// Retention, never below the guard's floor.
-func (self *StClientKeyHistoryRetentionSettings) horizon(ctx context.Context) time.Duration {
-	horizon := self.Retention
-	if self.FollowContractHorizon {
-		controlCtx, cancel := context.WithTimeout(ctx, self.ControlTimeout)
-		control, err := GetContractHorizonControl(controlCtx, DefaultContractHorizonSettings())
-		cancel()
-		switch {
-		case err != nil:
-			glog.V(1).Infof("[ckh]contract horizon control unread, keeping %s: %s\n", horizon, err)
-		case control.Mode == ContractHorizonModeOn:
-			horizon = control.Horizon
-		}
-	}
-	return max(horizon, server.ClientKeyHistoryRetentionFloor)
+// The horizon of one run without a brake horizon: Retention, never below the
+// guard's floor.
+func (self *StClientKeyHistoryRetentionSettings) horizon() time.Duration {
+	return max(self.Retention, server.ClientKeyHistoryRetentionFloor)
 }
 
 // The horizon of one run: the brake's own horizon when it sets one, otherwise
 // horizon's. brake is the run's first read of the brake, nil when it could not
 // be read; a run that cannot read the brake deletes nothing either way.
-func (self *StClientKeyHistoryRetentionSettings) runHorizon(ctx context.Context, brake *StClientKeyHistoryRetentionControl) time.Duration {
+func (self *StClientKeyHistoryRetentionSettings) runHorizon(brake *StClientKeyHistoryRetentionControl) time.Duration {
 	if brake != nil && brake.Horizon != nil {
 		return max(*brake.Horizon, server.ClientKeyHistoryRetentionFloor)
 	}
-	return self.horizon(ctx)
+	return self.horizon()
 }
 
 // Where the next run resumes.
@@ -238,7 +228,7 @@ func RemoveGoneStClientKeyHistory(
 	if runBrakeErr != nil {
 		runBrake = nil
 	}
-	report.Horizon = settings.runHorizon(ctx, runBrake)
+	report.Horizon = settings.runHorizon(runBrake)
 	minGoneTime := now.Add(-report.Horizon).UTC()
 	pace := newRetentionPace()
 	for {

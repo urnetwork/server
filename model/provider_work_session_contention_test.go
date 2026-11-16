@@ -32,6 +32,7 @@ func TestProviderWorkSessionDistinctClientWritesDoNotQueueBehindLegacyWriter(t *
 			clients[clientIds[i]] = f.sourceNetworkId
 		}
 		addContractPayoutTestClients(ctx, clients)
+		addProviderWorkSessionTestProvideKeys(ctx, clientIds...)
 		const insertSql = `INSERT INTO network_client_connection
 		 (client_id,connection_id,connect_time,connection_host,connection_service,connection_block,
 		 client_address_hash,client_address_port,handler_id)

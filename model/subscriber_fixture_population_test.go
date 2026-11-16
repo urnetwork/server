@@ -9,6 +9,8 @@ import (
 
 // Real admission transaction ids prove bounded commits while duplicate input
 // and an existing revoked member retain the original no-overwrite contract.
+// The members provide publicly, as the providers they stand for do, so the
+// journal (provider clients only) admits each connection.
 func TestSubscriberFixtureBatchesPreserveExistingFacts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -18,6 +20,7 @@ func TestSubscriberFixtureBatchesPreserveExistingFacts(t *testing.T) {
 			ids[i] = server.NewId()
 			scores[i] = &ClientScore{ClientId: ids[i]}
 		}
+		addProviderWorkSessionTestProvideKeys(ctx, ids...)
 		writeSubscriberFactsForScores(ctx, scores[:1])
 		var originalHandler, originalLocation server.Id
 		server.Tx(ctx, func(tx server.PgTx) {
