@@ -41,6 +41,10 @@ var alertClassKinds = map[string]alertClassKind{
 	// §19.8's M5 split row (SIGNALS.md §31.1); a probe that could not run holds the page open
 	"lb-split-probe-failing":      pageAlertClass,
 	"lb-split-probe-unobservable": visibilityAlertClass,
+	// §19.8's M6 map row (SIGNALS.md §31.2); a state that does not read holds the page open
+	"lb-map-stale":        pageAlertClass,
+	"lb-map-host-pending": pageAlertClass,
+	"lb-map-unobservable": visibilityAlertClass,
 	// §19.8's notice row, paged by taskworker's abuse worker through pager.PageNotice, never a signal
 	"abuse-notice": pageAlertClass,
 	// §19.8's business row, paged once the business calendar opens (QD-754; SIGNALS.md §28.1, §29.4, §29.7)
