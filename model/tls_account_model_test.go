@@ -444,45 +444,57 @@ func TestTlsCustomRegisterTakesOnlyTheRowsKeyAndName(t *testing.T) {
 }
 
 // The exact-set bucket keeps one certificate back: a host's first four devices are certified at once, and the fifth
-// is refused with a wait; the replay starts empty at its window's start, so a burst holds the bucket until it leaves
-// the window, 5 × 34 h on, when the fifth is granted (17.2.8; 17.6's six devices).
+// is refused with a wait. The replay starts empty two windows back, so the burst's window reads full at its start:
+// the fifth is granted when its retry_after_ms has passed, and the sixth 34 h after the fifth, each refusal's wait
+// answered by a grant (17.2.8, QD-990; 17.6's six devices, one host).
 func TestTlsCustomBudgetsCertifyFourDevicesAtOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		world := newTestTlsCustomWorld(t, ctx)
 		account := world.createAccount(t, newTestTlsCustomDevice(t))
 		desktop := newTestTlsCustomDevice(t)
-		certify := func() (sidecar.Id, error) {
-			phone := newTestTlsCustomDevice(t)
-			certId := world.queue(t, phone)
-			claim, err := world.store.Claim(ctx, world.caller(desktop, false), &sidecar.TlsCustomClaimArgs{Domain: world.domain, Purpose: sidecar.TlsCustomPurposeOrder, CertId: certId, KeySeq: account.KeySeq})
-			if err != nil {
-				return certId, err
-			}
-			err = world.store.Register(ctx, world.caller(desktop, false), &sidecar.TlsCertRegisterArgs{
-				CertId: certId, ClaimSeq: claim.ClaimSeq, AccountUri: account.AccountUri,
+		claim := func(certId sidecar.Id) (*sidecar.TlsCustomClaimResult, error) {
+			return world.store.Claim(ctx, world.caller(desktop, false), &sidecar.TlsCustomClaimArgs{Domain: world.domain, Purpose: sidecar.TlsCustomPurposeOrder, CertId: certId, KeySeq: account.KeySeq})
+		}
+		register := func(certId sidecar.Id, phone *testTlsCustomDevice, claimSeq uint64) error {
+			return world.store.Register(ctx, world.caller(desktop, false), &sidecar.TlsCertRegisterArgs{
+				CertId: certId, ClaimSeq: claimSeq, AccountUri: account.AccountUri,
 				Chain: world.chain(t, &phone.tlsKey.PublicKey, []string{world.host}, world.now.Add(45*24*time.Hour)),
 			})
-			return certId, err
 		}
 		for index := range 4 {
-			if _, err := certify(); err != nil {
+			phone := newTestTlsCustomDevice(t)
+			certId := world.queue(t, phone)
+			claimed, err := claim(certId)
+			if err != nil {
 				t.Fatalf("device %d: %v", index+1, err)
+			}
+			if err := register(certId, phone, claimed.ClaimSeq); err != nil {
+				t.Fatalf("device %d's register: %v", index+1, err)
 			}
 			world.now = world.now.Add(time.Second)
 		}
-		fifth, err := certify()
-		refusal := testTlsCustomRefused(t, err)
-		if refusal.Refusal.Reason != sidecar.TlsCustomRefusalBudget || refusal.Refusal.RetryAfterMs < uint32((33*time.Hour).Milliseconds()) {
-			t.Fatalf("the fifth device: %+v", refusal)
-		}
-		// a refused claim holds no one up: the row is queued, the lock free
-		if row := world.row(t, fifth); row.state != sidecar.TlsCertStateCustomQueued {
-			t.Fatalf("the refused row: %s", row.state)
-		}
-		world.now = world.now.Add(5*34*time.Hour + time.Minute)
-		if _, err := world.store.Claim(ctx, world.caller(desktop, false), &sidecar.TlsCustomClaimArgs{Domain: world.domain, Purpose: sidecar.TlsCustomPurposeOrder, CertId: fifth, KeySeq: account.KeySeq}); err != nil {
-			t.Fatalf("once the burst left the window: %v", err)
+		// the fifth and the sixth: each refused with about a refill's wait, and granted at its retry
+		for _, device := range []int{5, 6} {
+			phone := newTestTlsCustomDevice(t)
+			certId := world.queue(t, phone)
+			_, err := claim(certId)
+			refusal := testTlsCustomRefused(t, err)
+			if refusal.Refusal.Reason != sidecar.TlsCustomRefusalBudget || refusal.Refusal.RetryAfterMs < uint32((33*time.Hour).Milliseconds()) || uint32((34*time.Hour).Milliseconds()) < refusal.Refusal.RetryAfterMs {
+				t.Fatalf("device %d: %+v", device, refusal)
+			}
+			// a refused claim holds no one up: the row is queued, the lock free
+			if row := world.row(t, certId); row.state != sidecar.TlsCertStateCustomQueued {
+				t.Fatalf("device %d's refused row: %s", device, row.state)
+			}
+			world.now = world.now.Add(time.Duration(refusal.Refusal.RetryAfterMs) * time.Millisecond)
+			claimed, err := claim(certId)
+			if err != nil {
+				t.Fatalf("device %d at its retry: %v", device, err)
+			}
+			if err := register(certId, phone, claimed.ClaimSeq); err != nil {
+				t.Fatalf("device %d's register: %v", device, err)
+			}
 		}
 	})
 }

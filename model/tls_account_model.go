@@ -570,40 +570,44 @@ func (self *TlsCustomStore) grantCheckInTx(ctx context.Context, tx server.PgTx, 
 		newestRegister,
 	)
 	waits = append(waits, settings.FailureWait(failures, now))
+	// each bucket reads the spends of its replay, ReplayWindowCount windows back (QD-990)
+	orderBucket := settings.OrderBucket()
 	orders := tlsCustomSpendTimesInTx(
 		ctx,
 		tx,
 		`ca = $1 AND account_uri = $2 AND kind = 'new_order' AND $3 < at`,
 		account.ca,
 		account.accountUri,
-		now.Add(-time.Duration(settings.OrderCap)*settings.OrderRefill),
+		orderBucket.ReplayStart(now),
 	)
-	waits = append(waits, certsservice.CertsCustomBucket{Capacity: settings.OrderCap, Refill: settings.OrderRefill}.Wait(orders, now, 1))
+	waits = append(waits, orderBucket.Wait(orders, now, 1))
 	if !exempt {
 		need := settings.SetReserve + 1
 		if predecessor != nil && (predecessor.state == sidecar.TlsCertStateCustomRevoking || predecessor.state == sidecar.TlsCertStateRevoked) {
 			need = 1
 		}
+		setBucket := settings.SetBucket()
 		set := tlsCustomSpendTimesInTx(
 			ctx,
 			tx,
 			`ca = $1 AND custom_host = $2 AND kind = 'certificate' AND $3 < at AND cert_id IS DISTINCT FROM $4`,
 			account.ca,
 			r.customHost,
-			now.Add(-time.Duration(settings.SetCap)*settings.SetRefill),
+			setBucket.ReplayStart(now),
 			r.certId,
 		)
-		waits = append(waits, certsservice.CertsCustomBucket{Capacity: settings.SetCap, Refill: settings.SetRefill}.Wait(set, now, need))
+		waits = append(waits, setBucket.Wait(set, now, need))
+		domainBucket := settings.DomainBucket()
 		domainSpends := tlsCustomSpendTimesInTx(
 			ctx,
 			tx,
 			`ca = $1 AND registered_domain = $2 AND kind = 'certificate' AND $3 < at AND cert_id IS DISTINCT FROM $4`,
 			account.ca,
 			tlsCustomRegisteredDomain(r.customHost),
-			now.Add(-time.Duration(settings.DomainCap)*settings.DomainRefill),
+			domainBucket.ReplayStart(now),
 			r.certId,
 		)
-		waits = append(waits, certsservice.CertsCustomBucket{Capacity: settings.DomainCap, Refill: settings.DomainRefill}.Wait(domainSpends, now, 1))
+		waits = append(waits, domainBucket.Wait(domainSpends, now, 1))
 	}
 	if wait := slices.Max(waits); 0 < wait {
 		return nil, sidecar.TlsCustomRefusalBudget, wait
