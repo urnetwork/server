@@ -48,12 +48,16 @@ func pushBrevoWebhookTestUsers(t *testing.T) {
 	)))
 }
 
-// Output must never carry a user or its Basic value.
+// Output must never carry a user, its Basic value, or any of its characters
+// beside a mask (the user is the whole secret).
 func requireNoBrevoWebhookSecret(t *testing.T, text string) {
 	t.Helper()
 	for _, user := range []string{brevoWebhookTestUser, brevoWebhookTestSecondUser} {
 		if strings.Contains(text, user) || strings.Contains(text, base64.StdEncoding.EncodeToString([]byte(user+":"))) {
 			t.Fatalf("output carries a webhook credential:\n%s", strings.ReplaceAll(text, user, "<user>"))
+		}
+		if strings.Contains(text, user[:2]+"***") || strings.Contains(text, "***"+user[len(user)-2:]) {
+			t.Fatalf("output carries characters of a webhook credential:\n%s", text)
 		}
 	}
 }
@@ -337,7 +341,7 @@ func TestEnsureBrevoWebhookCreatesWithCredential(t *testing.T) {
 				}
 			}
 			if !strings.HasPrefix(outcome, "created: transactional webhook 1 ") ||
-				!strings.Contains(outcome, "user sy***er with an empty password") ||
+				!strings.Contains(outcome, "user brevo.webhook_bearers entry 2 with an empty password") ||
 				!strings.Contains(outcome, "check: Brevo's copy carries the credential and every event, unbatched") {
 				t.Fatalf("outcome:\n%s", outcome)
 			}
