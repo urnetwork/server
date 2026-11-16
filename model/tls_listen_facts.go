@@ -125,6 +125,12 @@ func GetTlsListenFactsWithSettings(ctx context.Context, networkId server.Id, now
 	if scopeLabels, ok := dnsNetworkScopeLabels(ctx, networkId); ok {
 		facts.ScopeLabels = scopeLabels
 	}
+	// 17.2.10's two lists, from TLS-M6-05's rows: with none, every listed name is dropped, the closed direction
+	if dnsCustomHostLinked() {
+		server.Db(ctx, func(conn server.PgConn) {
+			facts.CustomCertified, facts.AcmeClaims = getTlsCustomListenFactsInTx(ctx, conn, networkId, now)
+		})
+	}
 	return facts, nil
 }
 

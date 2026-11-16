@@ -57,6 +57,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -303,11 +304,80 @@ func buildTlsCerts(ctx context.Context, deps *TlsCertsInstallDeps, settings *Tls
 		Subject:       source.subject,
 	}
 	SetTlsCerts(installed)
+	// the custom-domain routes on the same gate (TLS-M6-05); QD-175's challenge writes need certs' DNS client,
+	// which api does not hold, so its two routes answer 503 here
+	var installedCustom *TlsCustomDeps
+	if customStore, err := model.NewTlsCustomStore(&model.TlsCustomStoreOptions{Roots: []string{config.Settings.RootDomain}}); err == nil {
+		installedCustom = &TlsCustomDeps{
+			Store:           customStore,
+			Caller:          source.customCaller,
+			Roots:           []string{config.Settings.RootDomain},
+			OrderRetryAfter: config.Settings.OrderRetryAfter,
+		}
+		SetTlsCustom(installedCustom)
+	}
 	return func() {
 		// only this install's deps: a later install's stay
 		tlsCertsDeps.CompareAndSwap(installed, nil)
+		if installedCustom != nil {
+			tlsCustomDeps.CompareAndSwap(installedCustom, nil)
+		}
 		closeGate()
 	}, nil
+}
+
+// A custom route's caller from the projection (TLS-M6-05; 17.2.6's orderer): the identity key the projection admits
+// the token's sidecar under, its §8 publish grants on any port of an owner label, and whether its user is an Owner
+// or Admin of the network (model.ConfigReseedAdminSidecar's reading). A sidecar the projection does not admit holds
+// no grant, so every route refuses it.
+func (self *tlsCertSubjectSource) customCaller(ctx context.Context, principal *sidecar.Principal, now time.Time) (*model.TlsCustomCaller, error) {
+	if principal == nil || principal.SidecarId == nil {
+		return nil, fmt.Errorf("%w: no sidecar", ErrTlsCertSubjectUnavailable)
+	}
+	networkId := sidecar.Id(principal.NetworkId)
+	sidecarId := sidecar.Id(*principal.SidecarId)
+	snapshot, err := self.state(ctx, networkId)
+	if err != nil {
+		return nil, err
+	}
+	caller := &model.TlsCustomCaller{
+		NetworkId: server.Id(principal.NetworkId),
+		ClientId:  server.Id(principal.ClientId),
+		SidecarId: server.Id(*principal.SidecarId),
+		PublishGranted: func(ownerLabel string) bool {
+			return false
+		},
+	}
+	identityPublicKey := tlsCertIdentityKey(snapshot, sidecarId)
+	if identityPublicKey == nil {
+		return caller, nil
+	}
+	caller.IdentityPublicKey = identityPublicKey
+	ports := []int{}
+	for _, name := range snapshot.Acl.PublishedNames(now) {
+		if !slices.Contains(ports, name.Port) {
+			ports = append(ports, name.Port)
+		}
+	}
+	subject := sidecar.AclSidecarSubject(sidecarId)
+	caller.PublishGranted = func(ownerLabel string) bool {
+		for _, port := range ports {
+			socketName := "tls/" + strconv.Itoa(port) + "/" + ownerLabel
+			for _, appMode := range []protocol.AclAppMode{protocol.AclAppMode_ACL_APP_MODE_HTTP, protocol.AclAppMode_ACL_APP_MODE_RAW} {
+				grant, decision := self.view.PublishGrant(networkId, subject, socketName, appMode, now)
+				if decision.Allowed && grant != nil {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	_, admin, err := model.ConfigReseedAdminSidecar(ctx, server.Id(principal.NetworkId), server.Id(*principal.SidecarId))
+	if err != nil {
+		return nil, fmt.Errorf("%w: the caller's standing: %w", ErrTlsCertSubjectUnavailable, err)
+	}
+	caller.Admin = admin
+	return caller, nil
 }
 
 // An order's subject from the projection. See the file header. Safe for

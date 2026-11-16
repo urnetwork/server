@@ -27,6 +27,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -149,6 +151,10 @@ func TlsCertOrder(ctx context.Context, token string, args *sidecar.TlsCertOrderA
 	}
 	if args == nil {
 		return nil, errTlsCertsRequest
+	}
+	// a CSR naming one name under no URnetwork root is a Team custom host's, never certs' own (17.2.5, C9)
+	if tlsCertOrderIsCustom(args) {
+		return tlsCustomCertOrder(ctx, token, args)
 	}
 	subject, err := deps.Subject(ctx, principal, server.NowUtc())
 	if err != nil || subject == nil {
@@ -329,4 +335,221 @@ func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, apiKey *TlsCertRevokeApiKey,
 		return &TlsCertRevokeResult{State: row.State}, nil
 	}
 	return &TlsCertRevokeResult{State: sidecar.TlsCertStateRevoking}, nil
+}
+
+// §13.15's custom-domain routes (TLS-M6-05; DESIGN-DETAILS 17.2.5, QD-175), each under a certs service token whose
+// claims name the caller and never the body:
+//
+//	POST /tls/cert-order           the custom branch: a CSR naming one name under no URnetwork root
+//	GET  /tls/certs?work=1         an ordering desktop's accounts and work list
+//	POST /tls/custom-claim         take or renew an account's lock
+//	POST /tls/custom-progress      what the holder learned at the CA
+//	POST /tls/cert-register        the chain of the row the caller holds the lock for
+//	POST /tls/custom-account       create the account row; begin, end, abort or repair a key change
+//	POST /tls/custom-challenge     a delegated DNS-01 value, which certs writes (QD-175)
+//	GET  /tls/custom-challenge/<id> whether the dns edges serve it
+//
+// The caller is built from the token and the network's verified projection (TlsCustomDeps.Caller): its §8 publish
+// grants by owner label and whether its user is an Owner or Admin. Every operation is model.TlsCustomStore's, one
+// transaction each; a refusal is a *sidecar.TlsCustomError, whose body and status the router answers. Nothing here
+// reaches a CA: the ordering desktops do, under the customer's own account. A process with nothing installed
+// answers 503, and the custom branch of an order is chosen before certsservice.Accept is reached, so no custom CSR
+// is ever queued for certs' own passes (17.3's C9).
+
+// What the custom routes run on, beside TlsCertsDeps. Every field but Dns is required.
+type TlsCustomDeps struct {
+	Store *model.TlsCustomStore
+	// The caller of a certs token at now, from its network's verified projection. An error is a projection that
+	// cannot answer, and the route answers 503.
+	Caller func(ctx context.Context, principal *sidecar.Principal, now time.Time) (*model.TlsCustomCaller, error)
+	// certs' roots, under none of which a custom host sits: the custom branch's test.
+	Roots []string
+	// QD-175's challenge writes. nil answers the challenge routes 503.
+	Dns certsservice.CertsDns
+	// How long a device waits before asking for its custom order again.
+	OrderRetryAfter time.Duration
+}
+
+var tlsCustomDeps atomic.Pointer[TlsCustomDeps]
+
+// Installs what this process's custom routes run on; nil, or deps missing a field, removes it.
+func SetTlsCustom(deps *TlsCustomDeps) {
+	if deps == nil || deps.Store == nil || deps.Caller == nil || len(deps.Roots) == 0 {
+		tlsCustomDeps.Store(nil)
+		return
+	}
+	tlsCustomDeps.Store(deps)
+}
+
+// The caller of a certs token: 401 for a token that will not authenticate, 503 where nothing can be said.
+func tlsCustomCaller(ctx context.Context, token string) (*TlsCustomDeps, *model.TlsCustomCaller, error) {
+	deps := tlsCertsDeps.Load()
+	customDeps := tlsCustomDeps.Load()
+	if deps == nil || customDeps == nil {
+		return nil, nil, errTlsCertsUnavailable
+	}
+	principal, err := tlsCertsPrincipal(ctx, deps, token)
+	if err != nil {
+		return nil, nil, err
+	}
+	if principal.SidecarId == nil {
+		return nil, nil, errTlsCertsNotSidecar
+	}
+	caller, err := customDeps.Caller(ctx, principal, server.NowUtc())
+	if err != nil || caller == nil {
+		glog.Infof("[tls]custom caller unavailable: %v\n", err)
+		return nil, nil, errTlsCertsUnavailable
+	}
+	return customDeps, caller, nil
+}
+
+// A store error as the route answers it: a refusal's own, and 503 for anything else, whose cause stays in the log.
+func tlsCustomError(route string, err error) error {
+	var refusal *sidecar.TlsCustomError
+	if errors.As(err, &refusal) {
+		return refusal
+	}
+	glog.Infof("[tls]%s unavailable: %v\n", route, err)
+	return errTlsCertsUnavailable
+}
+
+// Whether a CSR takes the custom branch of POST /tls/cert-order: one name under no URnetwork root.
+func tlsCertOrderIsCustom(args *sidecar.TlsCertOrderArgs) bool {
+	customDeps := tlsCustomDeps.Load()
+	if args == nil {
+		return false
+	}
+	roots := []string{}
+	if customDeps != nil {
+		roots = customDeps.Roots
+	}
+	_, custom := certsservice.CertsCustomCsrHost(args.Csr, roots)
+	// with no roots installed a CSR for a network name could read as custom: no custom branch then
+	return custom && customDeps != nil
+}
+
+// POST /tls/cert-order's custom branch (17.2.5).
+func tlsCustomCertOrder(ctx context.Context, token string, args *sidecar.TlsCertOrderArgs) (*sidecar.TlsCertOrderResult, error) {
+	customDeps, caller, err := tlsCustomCaller(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	result, err := customDeps.Store.QueueOrder(ctx, caller, args, server.NewId(), customDeps.OrderRetryAfter)
+	if err != nil {
+		return nil, tlsCustomError("cert-order custom", err)
+	}
+	return result, nil
+}
+
+// GET /tls/certs?work=1.
+func TlsCertsWork(ctx context.Context, token string) (*sidecar.TlsCertsResult, error) {
+	customDeps, caller, err := tlsCustomCaller(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	result, err := customDeps.Store.Work(ctx, caller)
+	if err != nil {
+		return nil, tlsCustomError("certs work", err)
+	}
+	return result, nil
+}
+
+// POST /tls/custom-claim.
+func TlsCustomClaim(ctx context.Context, token string, args *sidecar.TlsCustomClaimArgs) (*sidecar.TlsCustomClaimResult, error) {
+	customDeps, caller, err := tlsCustomCaller(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	result, err := customDeps.Store.Claim(ctx, caller, args)
+	if err != nil {
+		return nil, tlsCustomError("custom-claim", err)
+	}
+	return result, nil
+}
+
+// POST /tls/custom-progress: an order_invalid answers the claim as it stands, any other event an empty claim.
+func TlsCustomProgress(ctx context.Context, token string, args *sidecar.TlsCustomProgressArgs) (*sidecar.TlsCustomClaimResult, error) {
+	customDeps, caller, err := tlsCustomCaller(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	result, err := customDeps.Store.Progress(ctx, caller, args)
+	if err != nil {
+		return nil, tlsCustomError("custom-progress", err)
+	}
+	if result == nil {
+		result = &sidecar.TlsCustomClaimResult{}
+	}
+	return result, nil
+}
+
+// POST /tls/cert-register's answer.
+type TlsCertRegisterResult struct {
+	State sidecar.TlsCertState `json:"state"`
+}
+
+// POST /tls/cert-register.
+func TlsCertRegister(ctx context.Context, token string, args *sidecar.TlsCertRegisterArgs) (*TlsCertRegisterResult, error) {
+	customDeps, caller, err := tlsCustomCaller(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	if err := customDeps.Store.Register(ctx, caller, args); err != nil {
+		return nil, tlsCustomError("cert-register", err)
+	}
+	return &TlsCertRegisterResult{State: sidecar.TlsCertStateCustomIssued}, nil
+}
+
+// POST /tls/custom-account.
+func TlsCustomAccountOp(ctx context.Context, token string, args *sidecar.TlsCustomAccountArgs) (*sidecar.TlsCustomAccount, error) {
+	customDeps, caller, err := tlsCustomCaller(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	result, err := customDeps.Store.AccountOp(ctx, caller, args)
+	if err != nil {
+		return nil, tlsCustomError("custom-account", err)
+	}
+	return result, nil
+}
+
+// POST /tls/custom-challenge (QD-175): certs, the only writer, writes the value at the domain's
+// <acme_token>.acme.<root> for a caller holding a publish grant on a host mapped under the domain.
+func TlsCustomChallenge(ctx context.Context, token string, args *sidecar.TlsCustomChallengeArgs) (*sidecar.TlsCustomChallengeResult, error) {
+	customDeps, caller, err := tlsCustomCaller(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	if customDeps.Dns == nil {
+		return nil, errTlsCertsUnavailable
+	}
+	// a DNS-01 value is base64url of a SHA-256 digest
+	if args == nil || len(args.Value) != base64.RawURLEncoding.EncodedLen(sha256.Size) {
+		return nil, errTlsCertsRequest
+	}
+	name, err := customDeps.Store.ChallengeName(ctx, caller, args.Domain)
+	if err != nil {
+		return nil, tlsCustomError("custom-challenge", err)
+	}
+	serial, err := customDeps.Dns.WriteAcmeChallenge(ctx, name, []string{args.Value})
+	if err != nil {
+		return nil, tlsCustomError("custom-challenge", err)
+	}
+	return &sidecar.TlsCustomChallengeResult{ChallengeId: serial}, nil
+}
+
+// GET /tls/custom-challenge/<id>: GET /dns/ready for the write's serial, every answer passed through.
+func TlsCustomChallengeStatus(ctx context.Context, token string, challengeId uint64) (*sidecar.TlsCustomChallengeResult, error) {
+	customDeps, _, err := tlsCustomCaller(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	if customDeps.Dns == nil || challengeId == 0 {
+		return nil, errTlsCertsUnavailable
+	}
+	readiness, err := customDeps.Dns.Ready(ctx, challengeId)
+	if err != nil {
+		return nil, tlsCustomError("custom-challenge status", err)
+	}
+	return &sidecar.TlsCustomChallengeResult{ChallengeId: challengeId, Readiness: string(readiness)}, nil
 }

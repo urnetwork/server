@@ -210,6 +210,12 @@ var sidecarAllowlist = []string{
 	"GET /tls/cert-order/([^/]+)",
 	"GET /tls/certs",
 	"POST /tls/cert-revoke",
+	"POST /tls/cert-register",
+	"POST /tls/custom-claim",
+	"POST /tls/custom-progress",
+	"POST /tls/custom-account",
+	"POST /tls/custom-challenge",
+	"GET /tls/custom-challenge/([^/]+)",
 	// §6.8's sync routes (PROTO-M1-10)
 	"GET /sidecar/sync/poll",
 	"GET /sidecar/sync/versions",
