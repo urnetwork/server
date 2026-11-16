@@ -36,6 +36,11 @@
 // disabled gate with no count stays not ready once the gate reads enabled, until it restarts with one, and a count
 // changed under a running block takes that block's restart, shifting the rate until then and nothing else.
 //
+// The storage format a block runs as is its config's (block_config.go; QD-854): NewHost reads evs.yml's
+// instance_format into the engine's EvsSettings.InstanceFormat, 2 where the file is absent, so a rollback deploys this
+// binary with 1 and it runs format 1's rules and guard over format-2 data. A config that does not read, or names a
+// format this code does not know, is an error: the block does not start, and serves /status not ready.
+//
 // The block's parts run on a context of the host's own, which ends only at Close, so a SIGTERM's drain still has
 // its clusters, clock check, budget and batches while requests in flight finish.
 package evshost
@@ -74,7 +79,8 @@ const hostService = "evs"
 
 // The block's tunables beyond the engine's.
 type HostSettings struct {
-	// The engine's. nil: evsservice.DefaultEvsSettings.
+	// The engine's. nil: evsservice.DefaultEvsSettings. Its InstanceFormat is not the host's to set: NewHost takes
+	// the format from the block's config (QD-854), whatever this one holds.
 	Evs *evsservice.EvsSettings
 	// chronyd's check (§19.6's clocks row). nil: server.DefaultChronyClockCheckSettings, warp's services
 	// network name.
@@ -162,6 +168,8 @@ type Host struct {
 	blocks int
 	// the env's sidecar.yml as Ready reads it, for whether the gate is enabled now
 	sidecarConfig func() *server.SidecarConfig
+	// the storage format the block's config named at the start, which the engine runs as
+	instanceFormat uint32
 	// set once a block with no count has said the gate reads enabled
 	blocksMissingLogged atomic.Bool
 
@@ -179,9 +187,10 @@ var _ sidecar.HttpEngine = (*Host)(nil)
 // The engine on host, with the segment route's parts built here: the storage gate and usage producer over
 // host.Quota, and the HDD share over host.Redis for the segment cluster. host needs Blobs, Metrics and Budget;
 // a missing Quota, segment cluster, deps' AuthState or receipt keys leaves the host not ready, never an error, so
-// a block serves /status and says why. A host whose env enables the evs gate with no blocks count is an error: see
-// the package's header. ctx bounds everything built here and should outlive the drain: RunHost gives one that ends
-// only at Close.
+// a block serves /status and says why. A host whose env enables the evs gate with no blocks count is an error, and
+// so is one whose block config does not read or names an instance format this code does not know: see the package's
+// header. The engine runs as the config's format, never settings'. ctx bounds everything built here and should
+// outlive the drain: RunHost gives one that ends only at Close.
 func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings, deps *HostDeps) (*Host, error) {
 	if host == nil || host.Blobs == nil {
 		return nil, errors.New("evs host: no clusters")
@@ -198,12 +207,19 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	if !ok && sidecarConfig.Service(server.SidecarGateEvs).Enabled() {
 		return nil, errors.New("evs host: sidecar.yml's evs gate is enabled with no blocks, the env's evs block count, which has no default (QD-639)")
 	}
+	// the format this block was deployed as, from its config alone (QD-854)
+	blockConfig, err := LoadBlockConfig()
+	if err != nil {
+		return nil, fmt.Errorf("evs host: %w", err)
+	}
+	evsSettings := blockConfig.EvsSettings(settings.Evs)
 	self := &Host{
-		settings:      settings,
-		clock:         host.ClockOrReal(),
-		clustersReady: deps.ClustersReady,
-		blocks:        blocks,
-		sidecarConfig: server.CurrentSidecarConfig,
+		settings:       settings,
+		clock:          host.ClockOrReal(),
+		clustersReady:  deps.ClustersReady,
+		blocks:         blocks,
+		sidecarConfig:  server.CurrentSidecarConfig,
+		instanceFormat: blockConfig.InstanceFormat,
 	}
 	fail := func(err error) (*Host, error) {
 		self.closeParts()
@@ -235,7 +251,6 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 			}
 			return evsservice.ParseReceiptKeys(data, nil)
 		}
-		var err error
 		if keys, err = load(); err != nil {
 			self.missing = append(self.missing, fmt.Sprintf("the receipt keys in %s (%v)", HostReceiptKeysFileName, err))
 		}
@@ -274,7 +289,7 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 		self.hdd = hdd
 		uploads.Hdd = hdd
 	}
-	engine, err := evsservice.NewEvsEngine(ctx, host, settings.Evs, &evsservice.EvsEngineDeps{
+	engine, err := evsservice.NewEvsEngine(ctx, host, evsSettings, &evsservice.EvsEngineDeps{
 		AuthState:  deps.AuthState,
 		ServiceLog: deps.ServiceLog,
 		Log:        hostLogger{},
@@ -312,6 +327,11 @@ func hostQuotaGateSettings(settings *evsservice.QuotaGateSettings, blocks int) *
 // The env's evs block count as this block took it at its start, 0 when it started with none.
 func (self *Host) Blocks() int {
 	return self.blocks
+}
+
+// The storage format the engine runs as, which the block's config named at the start.
+func (self *Host) InstanceFormat() uint32 {
+	return self.instanceFormat
 }
 
 // Whether the block's read gate holds the env's block count wherever the gate is enabled: false only for a block
@@ -454,6 +474,18 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 		closeAll()
 		glog.Errorf("[evs]not ready: %v\n", err)
 		return notReadyEngine{}
+	}
+	// before any store is touched, so a config this code does not run under is said whatever else is missing;
+	// NewHost reads it again for the format the engine takes
+	blockConfig, err := LoadBlockConfig()
+	if err != nil {
+		return notReady(err)
+	}
+	if blockConfig.InstanceFormat < sidecar.EvsRepoFormat2 {
+		// a rollback's block, said at every start so nobody reads its refusals as a fault
+		glog.Warningf("[evs]%s sets instance format %d, a rollback's: this block refuses format-2 pushes and writes nothing to a format-2 repo\n", BlockConfigFileName, blockConfig.InstanceFormat)
+	} else {
+		glog.Infof("[evs]instance format %d\n", blockConfig.InstanceFormat)
 	}
 	clusters := deps.Clusters
 	if clusters == nil {
