@@ -63,19 +63,23 @@ import (
 // The task never fails on probe failures. They are what it went to find out;
 // returning them as an error would stop the chain re-arming and the whole
 // directory would silently stop being checked.
+//
+// A pass probes on two pools at once (ExtenderProbeSettings): the addresses
+// accepted on the webrtc carrier alone on one sized to their number, every
+// other address on one of fixed size. A webrtc probe that fails holds its
+// worker for the whole address budget -- it waits on the relayed answer and
+// then on ICE, where a dial to a closed tcp port fails at once -- so the
+// webrtc pool grows with those addresses until a pass in which every one of
+// them waits out its budget still ends inside the cadence, and neither pool
+// waits on the other's failures.
 
 const (
 	// How often the whole active set is probed.
 	ExtenderProbeTimeout = 5 * time.Minute
 
 	// One address's budget. Generous, because a slow extender is still a
-	// working one, and the concurrency below is what bounds the pass.
+	// working one, and the concurrency of the pools is what bounds the pass.
 	ExtenderProbeAddressTimeout = 15 * time.Second
-
-	// Addresses probed at once. The work is network wait, not cpu, and the
-	// bound exists so a large directory does not open thousands of sockets
-	// from one process at once.
-	ExtenderProbeConcurrency = 16
 
 	// Consecutive failures that deactivate an address.
 	ExtenderMaxConsecutiveProbeFailures = 6
@@ -102,6 +106,103 @@ const (
 	// still leaves webrtc the activation's whole budget of the address's.
 	ExtenderProbeTcpBeforeWebRtcTimeout = ExtenderProbeAddressTimeout - controller.ExtenderActivateProbeTimeout
 )
+
+// The worker pools of a pass. The addresses accepted on the webrtc carrier
+// alone (model.ExtenderAddressWebRtcOnly, as the activation's cap counts them)
+// are probed on a pool of their own, every other address on a pool of
+// Concurrency, and the two run at once. Each pool keeps the active addresses
+// ahead of those probed for their return.
+//
+// The webrtc pool is sized for the pass in which every one of its probes waits
+// out ExtenderProbeAddressTimeout: such a pass runs in rounds of the pool's
+// size, so it ends within WebRtcPassTimeout when its rounds are no more than
+// the whole address budgets that fit in it. At the activation's cap
+// (controller ExtenderActivateSettings.MaxWebRtcOnlyExtenders, 2,000), with
+// one address on each family, the most an extender holds, that is 4,000
+// addresses on 250 workers.
+//
+// What one webrtc probe in flight holds in a taskworker: its own carrier and
+// pion peer connection on one family (controller.ProbeExtenderWebRtcUptime),
+// with a udp socket for each host address -- one in a taskworker's bridged
+// container -- and one for each sampled stun server (three); a new P-256
+// certificate; ICE, DTLS and SCTP state and their goroutines; and, while it
+// waits for the relayed answer, at most AnswerTimeout (8 s), one Redis
+// connection in a BLPOP on the node of the extender client's slot. It also
+// resolves the names of its three stun servers and sends each a binding
+// request. Measured on that path (2026-11-16, a workstation with seven host
+// addresses and local stun responders, ICE checking a dead path for the 15 s
+// budget): 10 udp sockets, 15 goroutines, about 150 KiB of live heap and 8 ms
+// of cpu each.
+type ExtenderProbeSettings struct {
+	// Addresses probed at once on the pool of every address not accepted on
+	// webrtc alone -- one that lists tcp, with webrtc or without, and one that
+	// lists neither, which is judged by tcp -- and failures written at once
+	// after the verdict. The work is network wait, not cpu, and the bound
+	// keeps a large directory from opening thousands of sockets from one
+	// process at once. It is also the fewest webrtc probes at once. Values
+	// below one probe one address at a time.
+	Concurrency int
+	// The longest the probes of the addresses accepted on webrtc alone may take
+	// in a pass in which every one of them waits out its address budget. The
+	// webrtc pool is sized to fit it, up to MaxWebRtcConcurrency. A minute
+	// inside the five-minute cadence (ExtenderProbeTimeout), which leaves the
+	// control checks and the writes of the failures their time. Values below
+	// one address budget count as one.
+	WebRtcPassTimeout time.Duration
+	// The most webrtc probes at once, whatever the number of addresses, and so
+	// the most a taskworker holds for them: in a bridged container about 1,000
+	// udp sockets and ports, 2,500 to 4,000 goroutines, 40 MiB of live heap and
+	// two seconds of cpu every 15 s, and, in a pass in which every extender
+	// client takes the relayed offer and none answers, 256 BLPOPs on the
+	// taskworker's Redis pools of 32 connections a node (config redis.yml):
+	// about 8 on each of the 32 nodes, about 16 on the busiest. It fits the
+	// activation's cap with one address on each family, 4,000 addresses,
+	// within WebRtcPassTimeout. A pass with more addresses than fit runs
+	// longer, its active addresses first, up to the pass's probe window
+	// (ExtenderProbeMaxTime less ExtenderProbeRecordReserve); an address left
+	// unprobed is the oldest probed of the next pass. Values below one probe
+	// one address at a time.
+	MaxWebRtcConcurrency int
+}
+
+func DefaultExtenderProbeSettings() *ExtenderProbeSettings {
+	return &ExtenderProbeSettings{
+		Concurrency:          16,
+		WebRtcPassTimeout:    4 * time.Minute,
+		MaxWebRtcConcurrency: 256,
+	}
+}
+
+// The webrtc pool's size for a pass of webRtcCount addresses accepted on
+// webrtc alone, each of which may hold its worker for addressTimeout: the
+// fewest workers with which a pass whose every probe waits out its budget
+// ends within WebRtcPassTimeout, at least Concurrency, at most
+// MaxWebRtcConcurrency, and never below one. Pure.
+func (self *ExtenderProbeSettings) webRtcConcurrency(webRtcCount int, addressTimeout time.Duration) int {
+	concurrency := self.Concurrency
+	if 0 < webRtcCount && 0 < addressTimeout {
+		// the whole address budgets in the pass's time: a pass in which every
+		// probe waits out its budget runs in rounds of the pool's size
+		roundCount := max(1, int(self.WebRtcPassTimeout/addressTimeout))
+		concurrency = max(concurrency, (webRtcCount+roundCount-1)/roundCount)
+	}
+	return max(1, min(concurrency, self.MaxWebRtcConcurrency))
+}
+
+// How long count probes on concurrency workers take when every probe waits
+// out addressTimeout: their rounds of the pool, each addressTimeout long.
+// Pure.
+func extenderProbeWorstCaseDuration(count int, concurrency int, addressTimeout time.Duration) time.Duration {
+	if count <= 0 {
+		return 0
+	}
+	concurrency = max(1, concurrency)
+	return time.Duration((count+concurrency-1)/concurrency) * addressTimeout
+}
+
+// The settings of a pass. A variable for the reason probeExtenderAddress is
+// one.
+var newExtenderProbeSettings = DefaultExtenderProbeSettings
 
 // probeExtenderAddress probes one address over the required paths it was
 // accepted on (C2a, C3) and requires a challenge signature under the
@@ -349,6 +450,11 @@ type ExtenderProbeResult struct {
 	RecoveryProbed int `json:"recovery_probed,omitempty"`
 	Restored       int `json:"restored,omitempty"`
 	Unrevoked      int `json:"unrevoked,omitempty"`
+	// the addresses accepted on webrtc alone among the probed, active and for
+	// their return, and how many of them the pass probed at once
+	// (ExtenderProbeSettings)
+	WebRtcOnlyProbed  int `json:"webrtc_only_probed,omitempty"`
+	WebRtcConcurrency int `json:"webrtc_concurrency,omitempty"`
 }
 
 func ScheduleExtenderProbe(clientSession *session.ClientSession, tx server.PgTx) {
@@ -408,6 +514,7 @@ func ExtenderProbe(
 
 	pass := &extenderProbePass{
 		ctx:             clientSession.Ctx,
+		settings:        newExtenderProbeSettings(),
 		store:           newExtenderProbeStore(),
 		config:          config,
 		rootPrivateKey:  rootPrivateKey,
@@ -422,6 +529,7 @@ func ExtenderProbe(
 // One pass.
 type extenderProbePass struct {
 	ctx             context.Context
+	settings        *ExtenderProbeSettings
 	store           extenderProbeStore
 	config          *controller.ExtenderConfig
 	rootPrivateKey  ed25519.PrivateKey
@@ -514,7 +622,7 @@ func (self *extenderProbePass) run() {
 	self.record(judgements, lastWorkedSince)
 
 	glog.Infof(
-		"[extenderprobe]probed %d addresses: %d ok, %d failed, %d deactivated, %d revoked, %d block reports discounted; %d failures held; %d probed for their return, %d restored, %d extenders back\n",
+		"[extenderprobe]probed %d addresses: %d ok, %d failed, %d deactivated, %d revoked, %d block reports discounted; %d failures held; %d probed for their return, %d restored, %d extenders back; %d on webrtc alone, %d at once\n",
 		self.result.Probed,
 		self.result.Succeeded,
 		self.result.Failed,
@@ -525,6 +633,8 @@ func (self *extenderProbePass) run() {
 		self.result.RecoveryProbed,
 		self.result.Restored,
 		self.result.Unrevoked,
+		self.result.WebRtcOnlyProbed,
+		self.result.WebRtcConcurrency,
 	)
 }
 
@@ -538,9 +648,9 @@ func (self *extenderProbePass) checkControl(ipVersions []int) map[int]*extenderP
 	return checks
 }
 
-// Runs work on one of ExtenderProbeConcurrency workers.
-func runExtenderProbeWorkers[T any](items []T, work func(item T)) {
-	workers := make(chan struct{}, ExtenderProbeConcurrency)
+// Runs work on one of concurrency workers, at least one.
+func runExtenderProbeWorkers[T any](items []T, concurrency int, work func(item T)) {
+	workers := make(chan struct{}, max(1, concurrency))
 	wait := sync.WaitGroup{}
 	for _, item := range items {
 		wait.Add(1)
@@ -562,9 +672,11 @@ func runExtenderProbeWorkers[T any](items []T, work func(item T)) {
 	wait.Wait()
 }
 
-// The probes of the pass: the active addresses, then the ones probed for their
-// return. A success is written at once, since it counts whatever the verdict;
-// a failure waits for its family's verdict.
+// The probes of the pass, on two pools at once (ExtenderProbeSettings): the
+// addresses accepted on webrtc alone on one sized to their number, every other
+// address on the other. Each probes its active addresses, then the ones probed
+// for their return. A success is written at once, since it counts whatever
+// the verdict; a failure waits for its family's verdict.
 func (self *extenderProbePass) probe(
 	targets []*model.NetworkExtenderProbeTarget,
 	recoveryTargets []*model.NetworkExtenderRecoveryProbeTarget,
@@ -578,14 +690,38 @@ func (self *extenderProbePass) probe(
 		recovery *model.NetworkExtenderRecoveryProbeTarget
 	}
 	items := []probeItem{}
+	webRtcItems := []probeItem{}
+	addItem := func(item probeItem) {
+		// as the activation's cap counts an extender on webrtc without tcp
+		if model.ExtenderAddressWebRtcOnly(item.target.Carriers) {
+			webRtcItems = append(webRtcItems, item)
+		} else {
+			items = append(items, item)
+		}
+	}
 	for _, target := range targets {
-		items = append(items, probeItem{target: target})
+		addItem(probeItem{target: target})
 	}
 	for _, recoveryTarget := range recoveryTargets {
-		items = append(items, probeItem{target: &recoveryTarget.NetworkExtenderProbeTarget, recovery: recoveryTarget})
+		addItem(probeItem{target: &recoveryTarget.NetworkExtenderProbeTarget, recovery: recoveryTarget})
+	}
+	webRtcConcurrency := self.settings.webRtcConcurrency(len(webRtcItems), ExtenderProbeAddressTimeout)
+	// no probe runs yet
+	self.result.WebRtcOnlyProbed = len(webRtcItems)
+	if 0 < len(webRtcItems) {
+		self.result.WebRtcConcurrency = webRtcConcurrency
+	}
+	if webRtcPassDuration := extenderProbeWorstCaseDuration(len(webRtcItems), webRtcConcurrency, ExtenderProbeAddressTimeout); self.settings.WebRtcPassTimeout < webRtcPassDuration {
+		glog.Warningf(
+			"[extenderprobe]%d addresses on webrtc alone are more than %d probes at once fit in %s: a pass in which every one fails takes %s\n",
+			len(webRtcItems),
+			webRtcConcurrency,
+			self.settings.WebRtcPassTimeout,
+			webRtcPassDuration,
+		)
 	}
 
-	runExtenderProbeWorkers(items, func(item probeItem) {
+	probeItemFunc := func(item probeItem) {
 		if probeCtx.Err() != nil {
 			// past the pass's last start, or the pass ended
 			return
@@ -659,7 +795,17 @@ func (self *extenderProbePass) probe(
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.failures = append(self.failures, item.target)
+	}
+
+	// the two pools at once, so neither waits on the other's failures
+	pools := sync.WaitGroup{}
+	pools.Go(func() {
+		runExtenderProbeWorkers(items, self.settings.Concurrency, probeItemFunc)
 	})
+	pools.Go(func() {
+		runExtenderProbeWorkers(webRtcItems, webRtcConcurrency, probeItemFunc)
+	})
+	pools.Wait()
 }
 
 // A probe for one address's return. A success restores it at once; a failure
@@ -724,7 +870,7 @@ func (self *extenderProbePass) record(
 		return ok && judgement.held()
 	}
 
-	runExtenderProbeWorkers(self.failures, func(target *model.NetworkExtenderProbeTarget) {
+	runExtenderProbeWorkers(self.failures, self.settings.Concurrency, func(target *model.NetworkExtenderProbeTarget) {
 		ipVersionLabel := extenderProbeIpVersionLabel(target.IpVersion)
 		if held(target.IpVersion) {
 			self.stateLock.Lock()
@@ -773,7 +919,7 @@ func (self *extenderProbePass) record(
 		}
 	})
 
-	runExtenderProbeWorkers(self.recoveryFailures, func(target *model.NetworkExtenderRecoveryProbeTarget) {
+	runExtenderProbeWorkers(self.recoveryFailures, self.settings.Concurrency, func(target *model.NetworkExtenderRecoveryProbeTarget) {
 		ipVersionLabel := extenderProbeIpVersionLabel(target.IpVersion)
 		if held(target.IpVersion) {
 			// the probe for its return comes round again at the next pass

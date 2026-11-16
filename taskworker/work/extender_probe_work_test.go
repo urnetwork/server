@@ -575,8 +575,9 @@ func TestExtenderTasksAreInertWithoutAnExtenderNetwork(t *testing.T) {
 // because nothing waits this long when the bound holds.
 const testExtenderProbeConcurrencyTimeout = 60 * time.Second
 
-// The pass is bounded at ExtenderProbeConcurrency addresses at once, so a large
-// directory does not open thousands of sockets from one process.
+// The pass is bounded at ExtenderProbeSettings.Concurrency tcp addresses at
+// once, so a large directory does not open thousands of sockets from one
+// process.
 //
 // The bound is made exact rather than sampled: every probe blocks until exactly
 // that many are in flight, so a lower bound never reaches the barrier and a
@@ -587,7 +588,8 @@ func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
 		ctx := context.Background()
 		installTestExtenderWorkConfig(t)
 
-		const targetCount = 2 * ExtenderProbeConcurrency
+		concurrency := DefaultExtenderProbeSettings().Concurrency
+		targetCount := 2 * concurrency
 		for i := range targetCount {
 			createTestExtender(ctx, 200+i, 4)
 		}
@@ -604,7 +606,7 @@ func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
 				defer stateLock.Unlock()
 				inFlight += 1
 				maxInFlight = max(maxInFlight, inFlight)
-				if inFlight == ExtenderProbeConcurrency {
+				if inFlight == concurrency {
 					reached.Do(func() { close(atConcurrency) })
 				}
 			}()
@@ -635,17 +637,17 @@ func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
 		if stalled {
 			t.Fatalf(
 				"the task never had %d probes in flight; the high-water mark was %d",
-				ExtenderProbeConcurrency,
+				concurrency,
 				maxInFlight,
 			)
 		}
 		connect.AssertEqual(t, result.Probed, targetCount)
 		connect.AssertEqual(t, result.Succeeded, targetCount)
-		if ExtenderProbeConcurrency < maxInFlight {
+		if concurrency < maxInFlight {
 			t.Fatalf(
 				"the task had %d probes in flight, above the bound of %d",
 				maxInFlight,
-				ExtenderProbeConcurrency,
+				concurrency,
 			)
 		}
 	})

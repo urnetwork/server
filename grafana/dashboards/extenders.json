@@ -4809,7 +4809,7 @@
      "legendFormat": "refused at the cap"
     }
    ],
-   "description": "Active extenders with an active address accepted on the webrtc carrier without tcp (urnetwork_stats_webrtc_only_extenders), which the activation caps at ExtenderActivateSettings.MaxWebRtcOnlyExtenders (100 at first; connect/EXTENDER.md S8), and the activations the cap refused with their webrtc test untried in the hour. A population at the cap with refusals beside it is the cap binding: hosts that the internet reaches only over webrtc are being turned away."
+   "description": "Active extenders with an active address accepted on the webrtc carrier without tcp (urnetwork_stats_webrtc_only_extenders), which the activation caps at ExtenderActivateSettings.MaxWebRtcOnlyExtenders (2,000 from 2026-11-16, a safety limit; 100 from 2026-11-12, which filled on 11-14; connect/EXTENDER.md S8), and the activations the cap refused with their webrtc test untried in the hour. A population at the cap with refusals beside it is the cap binding: hosts that the internet reaches only over webrtc are being turned away."
   }
  ]
 }
