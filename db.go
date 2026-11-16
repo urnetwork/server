@@ -189,6 +189,14 @@ const DefaultPgConfigResourceName = "db.yml"
 const MaintenancePgVaultResourceName = "pg_maintenance.yml"
 const MaintenancePgConfigResourceName = "db_maintenance.yml"
 
+// The vault file of a block's own restricted Postgres role, pg-<service>.yml (QD-992, QD-029): a block that mounts
+// one, such as tlsedge or mxedge's router, connects its main pool with that role and never with the platform's
+// pg.yml, which it does not mount; every other process keeps pg.yml. Read first, as grafanaPushSettings reads
+// grafana-push-<service>.yml (QD-249).
+func pgServiceVaultResourceName(service string) string {
+	return fmt.Sprintf("pg-%s.yml", service)
+}
+
 type safePgPool struct {
 	vaultResourceName  string
 	configResourceName string
@@ -213,6 +221,18 @@ type safePgPool struct {
 // fallback still tolerates that resource being absent. The main pool's names
 // ARE the defaults, so its resolution is unchanged.
 func (self *safePgPool) resolveResources() (vaultKeys *SimpleResource, configKeys *SimpleResource) {
+	if self.vaultResourceName == DefaultPgVaultResourceName {
+		// a block's own restricted role, where it mounts one, and nothing else of the vault's (QD-992)
+		if service, err := Service(); err == nil && service != "" {
+			if r, err := Vault.SimpleResource(pgServiceVaultResourceName(service)); err == nil {
+				vaultKeys = r
+			}
+		}
+	}
+	if vaultKeys != nil {
+		configKeys = self.resolveConfigResource()
+		return
+	}
 	vaultKeys = Vault.RequireSimpleResource(DefaultPgVaultResourceName)
 	vaultResourceName := self.vaultResourceName
 	if pgReadOnly.Load() {
@@ -226,6 +246,12 @@ func (self *safePgPool) resolveResources() (vaultKeys *SimpleResource, configKey
 			vaultKeys = r
 		}
 	}
+	configKeys = self.resolveConfigResource()
+	return
+}
+
+// The pool-sizing resource: the pool's own where it defines the size, else db.yml.
+func (self *safePgPool) resolveConfigResource() (configKeys *SimpleResource) {
 	configKeys = Config.RequireSimpleResource(DefaultPgConfigResourceName)
 	if self.configResourceName != DefaultPgConfigResourceName {
 		// use the pool-specific config only if it actually defines the size, so
