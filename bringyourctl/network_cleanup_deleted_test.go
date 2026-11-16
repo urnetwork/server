@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/docopt/docopt-go"
 
@@ -156,4 +157,42 @@ func TestNetworkCleanupDeletedDryRunThenCommit(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// The command's usage parses in both forms, with every option, and a commit
+// needs the list the dry run wrote.
+func TestNetworkCleanupDeletedUsageParses(t *testing.T) {
+	parse := func(args ...string) (*networkCleanupDeletedOptions, error) {
+		opts, err := (&docopt.Parser{HelpHandler: docopt.NoHelpHandler}).ParseArgs(bringyourctlUsage, append([]string{"network", "cleanup-deleted"}, args...), "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parseNetworkCleanupDeletedOptions(opts)
+	}
+	options, err := parse()
+	if err != nil || options.commit || options.pageCount != 10000 || options.countChunk != 200 || options.cleanup.ClientBatchCount != 200 {
+		t.Fatalf("defaults = %+v, %v", options, err)
+	}
+	options, err = parse(
+		"--ids_file=ids.txt", "--page=5", "--count_chunk=7", "--client_batch=3", "--row_batch=11",
+		"--network_pause=1s", "--start_after=00000000-0000-0000-0000-000000000001", "--max_networks=9",
+		"--commit", "--expect=0123456789abcdef",
+	)
+	if err != nil || !options.commit || options.expectDigest != "0123456789abcdef" || options.idsFile != "ids.txt" ||
+		options.pageCount != 5 || options.countChunk != 7 || options.cleanup.ClientBatchCount != 3 ||
+		options.cleanup.RowBatchCount != 11 || options.pause != time.Second || options.startAfter == nil || options.maxNetworks != 9 {
+		t.Fatalf("options = %+v, %v", options, err)
+	}
+	if _, err := parse("--commit", "--expect=0123456789abcdef"); err == nil {
+		t.Fatal("a commit without the dry run's list parsed")
+	}
+	if _, err := parse("--count_chunk=0"); err == nil {
+		t.Fatal("a zero chunk parsed")
+	}
+	// the digest names the exact list, in order
+	a, b := server.NewId(), server.NewId()
+	if networkCleanupDeletedDigest([]server.Id{a, b}) == networkCleanupDeletedDigest([]server.Id{a}) ||
+		networkCleanupDeletedDigest(sortedUniqueNetworkIds([]server.Id{b, a, b})) != networkCleanupDeletedDigest(sortedUniqueNetworkIds([]server.Id{a, b})) {
+		t.Fatal("the digest does not name the sorted list")
+	}
 }
