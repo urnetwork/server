@@ -31,6 +31,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -560,12 +562,31 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 	if transition.At.IsZero() {
 		return false, certsservice.ErrCertsStateTime
 	}
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Tx(ctx, func(tx server.PgTx) {
+			var err error
+			applied, err = transitionCertInTx(ctx, tx, transition)
+			server.Raise(err)
+		})
+	})
+	return
+}
+
+// CertsStore.TransitionCert in the caller's transaction, which custom rows' moves join (TLS-M6-05): one
+// compare-and-move UPDATE. A revoking or custom_revoking row keeps the reason its CA is to be told (QD-741).
+func transitionCertInTx(ctx context.Context, tx server.PgTx, transition *certsservice.CertsTransition) (applied bool, returnErr error) {
+	if transition == nil || len(transition.From) == 0 || transition.To == "" {
+		return false, errors.New("certs store: a transition needs its states")
+	}
+	if transition.At.IsZero() {
+		return false, certsservice.ErrCertsStateTime
+	}
 	from := make([]string, 0, len(transition.From))
 	for _, state := range transition.From {
 		from = append(from, string(state))
 	}
-	returnErr = self.run(ctx, func(ctx context.Context) {
-		server.Tx(ctx, func(tx server.PgTx) {
+	{
+		{
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -583,7 +604,7 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 						ari_window_end = COALESCE($11, ari_window_end),
 						chain = COALESCE($13::bytea[], chain),
 						revocation_reason = CASE
-							WHEN $3::varchar = 'revoking' THEN COALESCE($14, revocation_reason)
+							WHEN $3::varchar IN ('revoking', 'custom_revoking') THEN COALESCE($14, revocation_reason)
 							ELSE NULL
 						END
 					WHERE cert_id = $1 AND state = ANY($2)
@@ -604,8 +625,8 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 				certsStoreNullString(string(transition.RevocationReason)),
 			))
 			applied = tag.RowsAffected() == 1
-		})
-	})
+		}
+	}
 	return
 }
 
@@ -863,6 +884,160 @@ func RequestTlsCertRevocation(ctx context.Context, request *TlsCertRevocationReq
 			string(revocationReason),
 		))
 		markedCount = int(tag.RowsAffected())
+	})
+	return
+}
+
+var _ certsservice.CertsCaaStore = (*CertsCaaStore)(nil)
+
+// certs' CAA checks' rows (TLS-M6-04; §12.8 step 3, §13.8): the strong-mode
+// custom hosts of network_dns_custom_host, pending ones for their setup check
+// and active ones at their newest custom chain's recheck, and each verdict
+// through DnsCustomHostResultInTx in a transaction of its own. A weak-mode
+// host and a strict-mode MX host are never listed, nor a withheld one
+// (QD-840). A binary that does not link what custom hosts read answers
+// ErrDnsUnlinked. Safe for concurrent use.
+type CertsCaaStore struct {
+	settings *CertsStoreSettings
+}
+
+// nil settings take the defaults.
+func NewCertsCaaStore(settings *CertsStoreSettings) *CertsCaaStore {
+	if settings == nil {
+		settings = DefaultCertsStoreSettings()
+	}
+	return &CertsCaaStore{settings: settings}
+}
+
+// Runs callback under the call's deadline and returns what it raised.
+func (self *CertsCaaStore) run(ctx context.Context, callback func(ctx context.Context)) error {
+	if !dnsCustomHostLinked() {
+		return ErrDnsUnlinked
+	}
+	return (&CertsStore{settings: self.settings}).run(ctx, callback)
+}
+
+// The custom-host rows where selects, in host order, at most count.
+func certsCaaRowsInTx(ctx context.Context, query server.PgCanQuery, where string, count int, args ...any) []*DnsCustomHostRow {
+	rows := []*DnsCustomHostRow{}
+	result, err := query.Query(
+		ctx,
+		`SELECT `+dnsCustomHostColumns+` FROM network_dns_custom_host WHERE `+where+` ORDER BY host LIMIT $`+strconv.Itoa(len(args)+1),
+		append(args, count)...,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			rows = append(rows, scanDnsCustomHostRow(result))
+		}
+	})
+	return rows
+}
+
+// The listed rows as the checks take them, strict-mode MX hosts left out.
+func certsCaaHosts(rows []*DnsCustomHostRow) []*certsservice.CertsCaaHost {
+	hosts := []*certsservice.CertsCaaHost{}
+	for _, row := range rows {
+		if row.StrictMx() {
+			continue
+		}
+		hosts = append(hosts, &certsservice.CertsCaaHost{
+			Host:      row.Host,
+			Owner:     strings.TrimSuffix(row.Owner, "."),
+			NetworkId: sidecar.Id(row.NetworkId),
+			Pending:   row.State == sidecar.DnsCustomHostStatePending,
+		})
+	}
+	return hosts
+}
+
+func (self *CertsCaaStore) ListCaaPending(ctx context.Context, afterHost string, count int) (hosts []*certsservice.CertsCaaHost, returnErr error) {
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Db(ctx, func(conn server.PgConn) {
+			hosts = certsCaaHosts(certsCaaRowsInTx(
+				ctx,
+				conn,
+				`state = $1 AND caa_mode = $2 AND host > $3`,
+				count,
+				sidecar.DnsCustomHostStatePending,
+				sidecar.DnsCustomHostModeStrong,
+				afterHost,
+			))
+		})
+	})
+	return
+}
+
+// A host's newest chain is its custom row with the latest not_before; its
+// recheck is not_before plus lifetimeFraction of its validity.
+func (self *CertsCaaStore) ListCaaDue(ctx context.Context, lifetimeFraction float64, since time.Time, until time.Time, afterHost string, count int) (hosts []*certsservice.CertsCaaHost, returnErr error) {
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Db(ctx, func(conn server.PgConn) {
+			hosts = certsCaaHosts(certsCaaRowsInTx(
+				ctx,
+				conn,
+				`
+					state = $1 AND caa_mode = $2 AND host > $3 AND EXISTS (
+						SELECT 1 FROM (
+							SELECT c.not_before, c.not_after
+							FROM network_tls_cert c
+							WHERE
+								c.custom_host = network_dns_custom_host.host AND
+								c.network_id = network_dns_custom_host.network_id AND
+								c.not_before IS NOT NULL AND
+								c.not_after IS NOT NULL
+							ORDER BY c.not_before DESC
+							LIMIT 1
+						) newest
+						WHERE
+							$5 < newest.not_before + (newest.not_after - newest.not_before) * $4::float8 AND
+							newest.not_before + (newest.not_after - newest.not_before) * $4::float8 <= $6
+					)
+				`,
+				count,
+				sidecar.DnsCustomHostStateActive,
+				sidecar.DnsCustomHostModeStrong,
+				afterHost,
+				lifetimeFraction,
+				since.UTC(),
+				until.UTC(),
+			))
+		})
+	})
+	return
+}
+
+func (self *CertsCaaStore) GetCaaHost(ctx context.Context, host string) (caaHost *certsservice.CertsCaaHost, returnErr error) {
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Db(ctx, func(conn server.PgConn) {
+			hosts := certsCaaHosts(certsCaaRowsInTx(
+				ctx,
+				conn,
+				`host = $1 AND caa_mode = $2 AND state IN ($3, $4)`,
+				1,
+				strings.ToLower(strings.TrimSuffix(host, ".")),
+				sidecar.DnsCustomHostModeStrong,
+				sidecar.DnsCustomHostStatePending,
+				sidecar.DnsCustomHostStateActive,
+			))
+			if 0 < len(hosts) {
+				caaHost = hosts[0]
+			}
+		})
+	})
+	return
+}
+
+func (self *CertsCaaStore) ApplyCaaVerdict(ctx context.Context, host string, pass bool) (outcome certsservice.CertsCaaOutcome, returnErr error) {
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		applied, err := DnsCustomHostResultApply(ctx, &DnsCustomHostResult{Host: host, Pass: pass})
+		switch {
+		case errors.Is(err, ErrDnsCustomHostUnknown):
+			outcome = certsservice.CertsCaaOutcomeGone
+		case err != nil:
+			server.Raise(err)
+		default:
+			outcome = certsservice.CertsCaaOutcome(applied)
+		}
 	})
 	return
 }
