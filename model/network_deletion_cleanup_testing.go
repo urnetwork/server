@@ -60,7 +60,7 @@ func Testing_CreateDeletedNetworkFixture(ctx context.Context, networkName string
 		exec(`INSERT INTO account_preferences (network_id, product_updates) VALUES ($1, true)`, fixture.NetworkId)
 		exec(`INSERT INTO account_api_key (api_key_id, network_id, api_key, name, create_time) VALUES ($1, $2, $3, 'synthetic', $4)`, server.NewId(), fixture.NetworkId, "synthetic-"+server.NewId().String(), now)
 		exec(`INSERT INTO account_feedback (feedback_id, network_id, user_id, feedback_time) VALUES ($1, $2, $3, $4)`, server.NewId(), fixture.NetworkId, fixture.UserId, now)
-		exec(`INSERT INTO network_referral_code (network_id, referral_code) VALUES ($1, $2)`, fixture.NetworkId, "SYN"+server.NewId().String()[:8])
+		exec(`INSERT INTO network_referral_code (network_id, referral_code) VALUES ($1, $2)`, fixture.NetworkId, "SYN"+server.NewId().String()[24:])
 		exec(`INSERT INTO network_referral (network_id, referral_network_id, create_time) VALUES ($1, $2, $3)`, fixture.NetworkId, server.NewId(), now)
 		exec(`INSERT INTO exclude_network_client_location (network_id, client_location_id) VALUES ($1, $2)`, fixture.NetworkId, server.NewId())
 		authCodeId := server.NewId()
@@ -88,7 +88,7 @@ func Testing_CreateDeletedNetworkFixture(ctx context.Context, networkName string
 
 		// the user's own rows
 		exec(`INSERT INTO user_auth_reset (user_auth_reset_id, user_id, reset_code) VALUES ($1, $2, $3)`, server.NewId(), fixture.UserId, "synthetic-"+server.NewId().String())
-		exec(`INSERT INTO user_auth_verify (user_auth_verify_id, user_id, verify_code) VALUES ($1, $2, $3)`, server.NewId(), fixture.UserId, server.NewId().String()[:8])
+		exec(`INSERT INTO user_auth_verify (user_auth_verify_id, user_id, verify_code) VALUES ($1, $2, $3)`, server.NewId(), fixture.UserId, server.NewId().String()[24:])
 		exec(`INSERT INTO network_user_action_attempt (network_user_action_attempt_id, user_id, action, create_time) VALUES ($1, $2, 'synthetic', $3)`, server.NewId(), fixture.UserId, now)
 
 		// each client's rows

@@ -57,8 +57,8 @@ func TestDeletedNetworkCleanupRemovesEverythingButFinancialRows(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		settings := DefaultDeletedNetworkCleanupSettings()
-		fixture := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[:8])
-		live := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[:8])
+		fixture := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[24:])
+		live := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[24:])
 		liveRowsBefore := Testing_CountDeletedNetworkFixtureRows(ctx, live)
 		keptBefore := Testing_CountDeletedNetworkFixtureKeptRows(ctx, fixture)
 		rowsBefore := Testing_CountDeletedNetworkFixtureRows(ctx, fixture)
@@ -141,7 +141,7 @@ func TestDeletedNetworkCleanupTouchesNothingThatExists(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		settings := DefaultDeletedNetworkCleanupSettings()
-		live := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[:8])
+		live := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[24:])
 		rowsBefore := Testing_CountDeletedNetworkFixtureRows(ctx, live)
 
 		result := RemoveDeletedNetworkData(ctx, &DeletedNetwork{NetworkId: live.NetworkId, UserIds: []server.Id{live.UserId}}, server.NowUtc().Add(48*time.Hour), settings)
@@ -151,7 +151,7 @@ func TestDeletedNetworkCleanupTouchesNothingThatExists(t *testing.T) {
 		connect.AssertEqual(t, Testing_CountDeletedNetworkFixtureRows(ctx, live), rowsBefore)
 
 		// a deleted network handed a user that exists: the user's rows stay
-		deleted := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[:8])
+		deleted := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[24:])
 		deletedNetwork := removeDeletedNetworkFixture(t, deleted)
 		deletedNetwork.UserIds = append(deletedNetwork.UserIds, live.UserId)
 		RemoveDeletedNetworkData(ctx, deletedNetwork, server.NowUtc(), settings)
@@ -171,7 +171,7 @@ func TestDeletedNetworkCleanupResumesWhereItStopped(t *testing.T) {
 		settings := DefaultDeletedNetworkCleanupSettings()
 		settings.ClientBatchCount = 2
 		settings.RowBatchCount = 1
-		fixture := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[:8])
+		fixture := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[24:])
 		// more children on the device, so the clients take three batches
 		server.Tx(ctx, func(tx server.PgTx) {
 			for range 3 {
@@ -304,8 +304,8 @@ func TestDeletedNetworkDiscoveryFindsOnlyGoneNetworks(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		live := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[:8])
-		deleted := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[:8])
+		live := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[24:])
+		deleted := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[24:])
 		removeDeletedNetworkFixture(t, deleted)
 		// a network that left only a client, only preferences, only an
 		// outbox message (a small anchor)
@@ -349,7 +349,7 @@ func TestReferralGrantSkipsDeletedNetworks(t *testing.T) {
 		now := server.NowUtc()
 		create := func(name string) server.Id {
 			networkId := server.NewId()
-			Testing_CreateNetwork(ctx, networkId, name+"-"+networkId.String()[:8], server.NewId())
+			Testing_CreateNetwork(ctx, networkId, name+"-"+networkId.String()[24:], server.NewId())
 			return networkId
 		}
 		referrerId := create("referrer")

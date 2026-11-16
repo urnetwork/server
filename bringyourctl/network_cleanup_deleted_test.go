@@ -40,16 +40,16 @@ func TestNetworkCleanupDeletedDryRunThenCommit(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		deletedA := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-a-"+server.NewId().String()[:8])
-		deletedB := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-b-"+server.NewId().String()[:8])
-		live := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[:8])
+		deletedA := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-a-"+server.NewId().String()[24:])
+		deletedB := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-b-"+server.NewId().String()[24:])
+		live := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[24:])
 		removeNetworkAsBefore(t, deletedA)
 		removeNetworkAsBefore(t, deletedB)
 		// a deleted network that left rows but no client or device
 		rowsOnlyNetworkId := server.NewId()
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_preferences (network_id, product_updates) VALUES ($1, true)`, rowsOnlyNetworkId))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_referral_code (network_id, referral_code) VALUES ($1, $2)`, rowsOnlyNetworkId, "SYN"+server.NewId().String()[:8]))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_referral_code (network_id, referral_code) VALUES ($1, $2)`, rowsOnlyNetworkId, "SYN"+server.NewId().String()[24:]))
 		})
 		rowsOnlyCount := func() (n int64) {
 			server.Db(ctx, func(conn server.PgConn) {

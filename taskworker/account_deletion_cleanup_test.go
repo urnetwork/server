@@ -24,18 +24,18 @@ func TestAccountDeletionLeavesNoActiveClientOrAccountRows(t *testing.T) {
 		ctx := t.Context()
 		networkId := server.NewId()
 		userId := server.NewId()
-		model.Testing_CreateGuestNetwork(ctx, networkId, "synthetic-deleted-"+networkId.String()[:8], userId)
+		model.Testing_CreateGuestNetwork(ctx, networkId, "synthetic-deleted-"+networkId.String()[24:], userId)
 		deviceId := server.NewId()
 		clientId := server.NewId()
 		model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "synthetic", "synthetic")
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_preferences (network_id, product_updates) VALUES ($1, true)`, networkId))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_api_key (api_key_id, network_id, api_key, name, create_time) VALUES ($1, $2, $3, 'synthetic', now())`, server.NewId(), networkId, "synthetic-"+server.NewId().String()))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_referral_code (network_id, referral_code) VALUES ($1, $2)`, networkId, "SYN"+server.NewId().String()[:8]))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_referral_code (network_id, referral_code) VALUES ($1, $2)`, networkId, "SYN"+server.NewId().String()[24:]))
 		})
 		// a live network beside it keeps everything
 		liveNetworkId := server.NewId()
-		model.Testing_CreateGuestNetwork(ctx, liveNetworkId, "synthetic-live-"+liveNetworkId.String()[:8], server.NewId())
+		model.Testing_CreateGuestNetwork(ctx, liveNetworkId, "synthetic-live-"+liveNetworkId.String()[24:], server.NewId())
 		model.Testing_CreateDevice(ctx, liveNetworkId, server.NewId(), server.NewId(), "synthetic", "synthetic")
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_preferences (network_id, product_updates) VALUES ($1, true)`, liveNetworkId))

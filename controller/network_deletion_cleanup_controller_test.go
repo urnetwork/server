@@ -24,7 +24,7 @@ func TestRemoveDeletedNetworkDataRunsUntilNothingIsLeft(t *testing.T) {
 		ctx := t.Context()
 		settings := model.DefaultDeletedNetworkCleanupSettings()
 		functionName := task.NewTaskTargetWithPost(RemoveDeletedNetworkData, RemoveDeletedNetworkDataPost).TargetFunctionName()
-		fixture := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[:8])
+		fixture := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[24:])
 		keptBefore := model.Testing_CountDeletedNetworkFixtureKeptRows(ctx, fixture)
 
 		// the deleting session carries a credential and an address
@@ -100,7 +100,7 @@ func TestRemoveDeletedNetworkDataRunsUntilNothingIsLeft(t *testing.T) {
 		connect.AssertEqual(t, model.Testing_CountDeletedNetworkFixtureKeptRows(ctx, fixture), keptBefore)
 
 		// a network that exists ends the chain without a change
-		live := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[:8])
+		live := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-live-"+server.NewId().String()[24:])
 		liveRows := model.Testing_CountDeletedNetworkFixtureRows(ctx, live)
 		result, err = removeDeletedNetworkDataWithSettings(ctx, &model.DeletedNetwork{NetworkId: live.NetworkId}, now, settings)
 		if err != nil || result.RunAt != nil || !result.Cleanup.NetworkExists {
@@ -117,7 +117,7 @@ func TestRefusedNetworkRemovalQueuesNoCleanup(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		functionName := task.NewTaskTargetWithPost(RemoveDeletedNetworkData, RemoveDeletedNetworkDataPost).TargetFunctionName()
-		fixture := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-refused-"+server.NewId().String()[:8])
+		fixture := model.Testing_CreateDeletedNetworkFixture(ctx, "synthetic-refused-"+server.NewId().String()[24:])
 		now := server.NowUtc()
 		if err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
 			NetworkId:          fixture.NetworkId,
