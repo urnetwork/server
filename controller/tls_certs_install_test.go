@@ -332,7 +332,7 @@ func TestTlsCertsInstallOffInstallsNothing(t *testing.T) {
 	if _, err := TlsCerts(clientSession); !tlsTestStatus(err, "503") {
 		t.Fatalf("the certificates with the switch off answered %v", err)
 	}
-	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: sidecar.NewId()}, clientSession); !tlsTestStatus(err, "503") {
+	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: sidecar.NewId()}, nil, clientSession); !tlsTestStatus(err, "503") {
 		t.Fatalf("a revocation with the switch off answered %v", err)
 	}
 	if len(world.store.Rows()) != 0 {

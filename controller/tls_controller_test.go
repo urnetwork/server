@@ -289,7 +289,7 @@ func TestTlsCertOrderRefusals(t *testing.T) {
 	if _, err := TlsCerts(clientSession); !tlsTestStatus(err, "503") {
 		t.Fatalf("a list with nothing installed answered %v", err)
 	}
-	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: sidecar.NewId()}, clientSession); !tlsTestStatus(err, "503") {
+	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: sidecar.NewId()}, nil, clientSession); !tlsTestStatus(err, "503") {
 		t.Fatalf("a revocation with nothing installed answered %v", err)
 	}
 	// deps missing a field install nothing
@@ -384,18 +384,18 @@ func TestTlsCertRevokeByOwnClientAndByItsNetwork(t *testing.T) {
 	defer networkSession.Cancel()
 
 	// another client's certificate, of its network: refused; another network's: not found
-	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: siblings}, deviceSession); !tlsTestStatus(err, "403") {
+	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: siblings}, nil, deviceSession); !tlsTestStatus(err, "403") {
 		t.Fatalf("another client's certificate answered %v", err)
 	}
 	for _, clientSession := range []*session.ClientSession{deviceSession, networkSession} {
-		if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: strangers}, clientSession); !tlsTestStatus(err, "404") {
+		if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: strangers}, nil, clientSession); !tlsTestStatus(err, "404") {
 			t.Fatalf("another network's certificate answered %v", err)
 		}
 	}
-	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: sidecar.NewId()}, deviceSession); !tlsTestStatus(err, "404") {
+	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: sidecar.NewId()}, nil, deviceSession); !tlsTestStatus(err, "404") {
 		t.Fatalf("an unknown certificate answered %v", err)
 	}
-	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{}, deviceSession); !tlsTestStatus(err, "400") {
+	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{}, nil, deviceSession); !tlsTestStatus(err, "400") {
 		t.Fatalf("no certificate answered %v", err)
 	}
 	if world.state(siblings) != sidecar.TlsCertStateIssued || world.state(strangers) != sidecar.TlsCertStateIssued {
@@ -421,7 +421,7 @@ func TestTlsCertRevokeByOwnClientAndByItsNetwork(t *testing.T) {
 		return memberPermitted && askedNetworkId == server.Id(networkId) && askedMemberId == memberId
 	}
 	for _, clientSession := range []*session.ClientSession{apiKeySession, oauthSession, memberSession} {
-		if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: siblings}, clientSession); !tlsTestStatus(err, "403") {
+		if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: siblings}, nil, clientSession); !tlsTestStatus(err, "403") {
 			t.Fatalf("a credential that is no admin's answered %v", err)
 		}
 	}
@@ -431,22 +431,22 @@ func TestTlsCertRevokeByOwnClientAndByItsNetwork(t *testing.T) {
 	// the member's role gains devices: any of its network's, and still none of another's
 	memberPermitted = true
 	membersOwn := world.issued(sibling)
-	if result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: membersOwn}, memberSession); err != nil || result.State != sidecar.TlsCertStateRevoking {
+	if result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: membersOwn}, nil, memberSession); err != nil || result.State != sidecar.TlsCertStateRevoking {
 		t.Fatalf("an admin member's revocation: %+v, %v", result, err)
 	}
-	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: strangers}, memberSession); !tlsTestStatus(err, "404") {
+	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: strangers}, nil, memberSession); !tlsTestStatus(err, "404") {
 		t.Fatalf("an admin member on another network's certificate answered %v", err)
 	}
 
 	// its own, twice: the second answers the state it is in
 	for range 2 {
-		result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: own}, deviceSession)
+		result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: own}, nil, deviceSession)
 		if err != nil || result.State != sidecar.TlsCertStateRevoking {
 			t.Fatalf("its own certificate: %+v, %v", result, err)
 		}
 	}
 	// the network's credential, any of its network's
-	if result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: siblings}, networkSession); err != nil || result.State != sidecar.TlsCertStateRevoking {
+	if result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: siblings}, nil, networkSession); err != nil || result.State != sidecar.TlsCertStateRevoking {
 		t.Fatalf("the network's revocation: %+v, %v", result, err)
 	}
 	if world.state(own) != sidecar.TlsCertStateRevoking || world.state(siblings) != sidecar.TlsCertStateRevoking || world.state(strangers) != sidecar.TlsCertStateIssued {
@@ -458,8 +458,128 @@ func TestTlsCertRevokeByOwnClientAndByItsNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: queued.CertId}, deviceSession); !tlsTestStatus(err, "409") {
+	if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: queued.CertId}, nil, deviceSession); !tlsTestStatus(err, "409") {
 		t.Fatalf("a queued order's revocation answered %v", err)
+	}
+}
+
+// POST /tls/cert-revoke under an API key (QD-847): the key revokes any certificate of its network
+// where the scopes the handler read of it reach devices, and, for a team's key, its creator's role
+// holds devices too. A key nothing was read of, another key's scopes, and scopes that stop short of
+// devices reach nothing, and the scopes lift no other credential.
+func TestTlsCertRevokeByApiKeyScopes(t *testing.T) {
+	world := newTlsTestWorld(t)
+	networkId := sidecar.NewId()
+	sibling := world.device(networkId, "acme")
+	stranger := world.device(sidecar.NewId(), "other")
+	strangers := world.issued(stranger)
+
+	apiKeyId := server.NewId()
+	keySession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId)})
+	defer keySession.Cancel()
+	keySession.ApiKeyAuthenticated = true
+	keySession.ApiKeyId = &apiKeyId
+	revoke := func(certId sidecar.Id, apiKey *TlsCertRevokeApiKey, clientSession *session.ClientSession) (*TlsCertRevokeResult, error) {
+		return TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: certId}, apiKey, clientSession)
+	}
+
+	// nothing read of the key, another key's scopes, and a session that names no key
+	refused := world.issued(sibling)
+	if _, err := revoke(refused, nil, keySession); !tlsTestStatus(err, "403") {
+		t.Fatalf("a key whose scopes were not read answered %v", err)
+	}
+	if _, err := revoke(refused, &TlsCertRevokeApiKey{ApiKeyId: server.NewId(), Scopes: []string{"all"}}, keySession); !tlsTestStatus(err, "403") {
+		t.Fatalf("another key's scopes answered %v", err)
+	}
+	unnamedSession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId)})
+	defer unnamedSession.Cancel()
+	unnamedSession.ApiKeyAuthenticated = true
+	if _, err := revoke(refused, &TlsCertRevokeApiKey{Scopes: []string{"all"}}, unnamedSession); !tlsTestStatus(err, "403") {
+		t.Fatalf("a key session with no key id answered %v", err)
+	}
+	// scopes that stop short of devices: a column that did not parse, another permission's, one this build does not know
+	for _, scopes := range [][]string{{}, {"policy:read"}, {"logs:read"}, {"auth_keys"}, {"policy:read", "auth_keys"}, {"devices"}} {
+		if _, err := revoke(refused, &TlsCertRevokeApiKey{ApiKeyId: apiKeyId, Scopes: scopes}, keySession); !tlsTestStatus(err, "403") {
+			t.Fatalf("a key with scopes %v answered %v", scopes, err)
+		}
+	}
+	if world.state(refused) != sidecar.TlsCertStateIssued {
+		t.Fatal("a refused key moved a row")
+	}
+
+	// scopes that reach devices, and a legacy key's none of its own: another client's certificate
+	for _, scopes := range [][]string{{"devices:core"}, {"policy:read", "devices:core"}, {"all"}, nil} {
+		certId := world.issued(sibling)
+		result, err := revoke(certId, &TlsCertRevokeApiKey{ApiKeyId: apiKeyId, Scopes: scopes}, keySession)
+		if err != nil || result.State != sidecar.TlsCertStateRevoking || world.state(certId) != sidecar.TlsCertStateRevoking {
+			t.Fatalf("a key with scopes %v: %+v, %v", scopes, result, err)
+		}
+	}
+	// still none of another network's
+	if _, err := revoke(strangers, &TlsCertRevokeApiKey{ApiKeyId: apiKeyId, Scopes: []string{"all"}}, keySession); !tlsTestStatus(err, "404") {
+		t.Fatalf("a key on another network's certificate answered %v", err)
+	}
+
+	// a team's key acts as its creator's membership: its role and its scopes both hold devices
+	memberId := server.NewId()
+	teamKeyId := server.NewId()
+	teamKeySession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId), MemberId: &memberId})
+	defer teamKeySession.Cancel()
+	teamKeySession.ApiKeyAuthenticated = true
+	teamKeySession.ApiKeyId = &teamKeyId
+	previousPermitted := tlsCertRevokeMemberPermitted
+	defer func() {
+		tlsCertRevokeMemberPermitted = previousPermitted
+	}()
+	memberPermitted := false
+	tlsCertRevokeMemberPermitted = func(ctx context.Context, askedNetworkId server.Id, askedMemberId server.Id) bool {
+		return memberPermitted && askedNetworkId == server.Id(networkId) && askedMemberId == memberId
+	}
+	teams := world.issued(sibling)
+	if _, err := revoke(teams, &TlsCertRevokeApiKey{ApiKeyId: teamKeyId, Scopes: []string{"devices:core"}}, teamKeySession); !tlsTestStatus(err, "403") {
+		t.Fatalf("a team key whose creator's role lacks devices answered %v", err)
+	}
+	memberPermitted = true
+	if _, err := revoke(teams, &TlsCertRevokeApiKey{ApiKeyId: teamKeyId, Scopes: []string{"policy:read"}}, teamKeySession); !tlsTestStatus(err, "403") {
+		t.Fatalf("a team key whose scopes lack devices answered %v", err)
+	}
+	if _, err := revoke(teams, nil, teamKeySession); !tlsTestStatus(err, "403") {
+		t.Fatalf("a team key whose scopes were not read answered %v", err)
+	}
+	if world.state(teams) != sidecar.TlsCertStateIssued {
+		t.Fatal("a refused team key moved a row")
+	}
+	if result, err := revoke(teams, &TlsCertRevokeApiKey{ApiKeyId: teamKeyId, Scopes: []string{"devices:core"}}, teamKeySession); err != nil || result.State != sidecar.TlsCertStateRevoking {
+		t.Fatalf("a team key whose role and scopes hold devices: %+v, %v", result, err)
+	}
+
+	// the scopes lift no other credential: a client token, an OAuth identity, an admin token, a member whose role lacks devices
+	memberPermitted = false
+	others := world.issued(sibling)
+	all := &TlsCertRevokeApiKey{ApiKeyId: apiKeyId, Scopes: []string{"all"}}
+	otherClientId := server.NewId()
+	clientSession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId), ClientId: &otherClientId})
+	defer clientSession.Cancel()
+	clientSession.ApiKeyId = &apiKeyId
+	oauthSession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId)})
+	defer oauthSession.Cancel()
+	oauthSession.UnsignedIdentity = true
+	oauthSession.ApiKeyId = &apiKeyId
+	adminSession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId)})
+	defer adminSession.Cancel()
+	adminSession.UnsignedIdentity = true
+	adminSession.AdminCommand = &session.AdminCommandUse{}
+	adminSession.ApiKeyId = &apiKeyId
+	memberSession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId), MemberId: &memberId})
+	defer memberSession.Cancel()
+	memberSession.ApiKeyId = &apiKeyId
+	for _, otherSession := range []*session.ClientSession{clientSession, oauthSession, adminSession, memberSession} {
+		if _, err := revoke(others, all, otherSession); !tlsTestStatus(err, "403") {
+			t.Fatalf("a credential that is no key, with a key's scopes passed, answered %v", err)
+		}
+	}
+	if world.state(others) != sidecar.TlsCertStateIssued {
+		t.Fatal("a credential that is no key moved a row")
 	}
 }
 
@@ -520,7 +640,7 @@ func TestTlsCertRevokeStoresItsReason(t *testing.T) {
 	defer clientSession.Cancel()
 	revoke := func(certId sidecar.Id, keyCompromise bool) {
 		t.Helper()
-		result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: certId, KeyCompromise: keyCompromise}, clientSession)
+		result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: certId, KeyCompromise: keyCompromise}, nil, clientSession)
 		if err != nil || result.State != sidecar.TlsCertStateRevoking {
 			t.Fatalf("the revocation: %+v, %v", result, err)
 		}
@@ -564,7 +684,7 @@ func TestTlsCertRevokeStoresItsReason(t *testing.T) {
 	}); err != nil || !moved {
 		t.Fatalf("the CA's answer: %v, %v", moved, err)
 	}
-	result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: compromised, KeyCompromise: true}, clientSession)
+	result, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: compromised, KeyCompromise: true}, nil, clientSession)
 	if err != nil || result.State != sidecar.TlsCertStateRevoked {
 		t.Fatalf("a revoked certificate's revocation: %+v, %v", result, err)
 	}

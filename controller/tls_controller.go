@@ -5,7 +5,7 @@ package controller
 //	POST /tls/cert-order       a service token, aud certs: the caller's CSR and attestation, queued
 //	GET  /tls/cert-order/<id>  the same token: the caller's own order
 //	GET  /tls/certs            a client token: its network's certificates and attestations
-//	POST /tls/cert-revoke      a client token for its own certificate, a network admin's credential for any of its network's
+//	POST /tls/cert-revoke      a client token for its own certificate, a network admin's credential or an API key whose scopes reach devices for any of its network's
 //
 // An order's subject is the token's and never the body's: its network, client
 // and sidecar are the verified claims, and its identifier set, identity key
@@ -211,6 +211,14 @@ type TlsCertRevokeResult struct {
 	State sidecar.TlsCertState `json:"state"`
 }
 
+// What POST /tls/cert-revoke's handler read of the API key its request
+// authenticated with (QD-847): the key's id, and the scopes its row holds, nil
+// for a legacy key, which has none of its own.
+type TlsCertRevokeApiKey struct {
+	ApiKeyId server.Id
+	Scopes   []string
+}
+
 // Whether a team member's network credential may revoke any certificate of
 // its network: its role holds devices (§7.5), the permission over the
 // network's clients and devices. A role that cannot be read holds nothing.
@@ -220,16 +228,34 @@ var tlsCertRevokeMemberPermitted = func(ctx context.Context, networkId server.Id
 	return ok && model.RoleAndScopesPermit(role, nil, model.RolePermissionDevices)
 }
 
+// Whether the API key the session authenticated with may revoke any
+// certificate of its network (QD-847): the handler read the session's own
+// key, its scopes reach devices (§7.8), and, since a team's key acts as its
+// creator's membership, that member's role holds devices too. A key the
+// handler read nothing of, or another key than the session's, reaches nothing.
+func tlsCertRevokeApiKeyPermitted(clientSession *session.ClientSession, apiKey *TlsCertRevokeApiKey) bool {
+	if apiKey == nil || clientSession.ApiKeyId == nil || apiKey.ApiKeyId != *clientSession.ApiKeyId {
+		return false
+	}
+	if !model.ScopesPermit(apiKey.Scopes, model.RolePermissionDevices) {
+		return false
+	}
+	byJwt := clientSession.ByJwt
+	return byJwt.MemberId == nil || tlsCertRevokeMemberPermitted(clientSession.Ctx, byJwt.NetworkId, *byJwt.MemberId)
+}
+
 // POST /tls/cert-revoke: marks a certificate revoking with its reason,
 // keyCompromise when the body says so and cessationOfOperation otherwise,
 // which certs' revocation chain takes to its CA. A client token revokes its
 // own client's certificate. A network credential, which names no client, revokes any of
-// its network's: a personal network's owner's, or a team member's whose role
-// holds devices; an API key, an OAuth identity or an admin token, whose scopes
-// this route does not read, none. A certificate of another network is not
-// found. One already on its way out answers its state, and a word of
-// compromise about one the CA has not taken yet replaces its reason.
-func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, clientSession *session.ClientSession) (*TlsCertRevokeResult, error) {
+// its network's: a personal network's owner's, a team member's whose role
+// holds devices, or an API key's whose scopes reach devices, which the
+// handler reads from the key's row and passes as apiKey (QD-847); an OAuth
+// identity or an admin token, whose scopes this route does not read, none. A
+// certificate of another network is not found. One already on its way out
+// answers its state, and a word of compromise about one the CA has not taken
+// yet replaces its reason.
+func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, apiKey *TlsCertRevokeApiKey, clientSession *session.ClientSession) (*TlsCertRevokeResult, error) {
 	deps := tlsCertsDeps.Load()
 	if deps == nil {
 		return nil, errTlsCertsUnavailable
@@ -251,9 +277,13 @@ func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, clientSession *session.Clien
 		if row.ClientId != sidecar.Id(*byJwt.ClientId) {
 			return nil, errTlsCertsNotOwn
 		}
-	case clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity || clientSession.AdminCommand != nil:
-		// a scoped credential's scopes are not read here, so none reaches another client's certificate
+	case clientSession.UnsignedIdentity || clientSession.AdminCommand != nil || clientSession.OauthClient != nil:
+		// an OAuth identity's and an admin token's scopes are not read here, so neither reaches another client's certificate
 		return nil, errTlsCertsRoleRefused
+	case clientSession.ApiKeyAuthenticated:
+		if !tlsCertRevokeApiKeyPermitted(clientSession, apiKey) {
+			return nil, errTlsCertsRoleRefused
+		}
 	case byJwt.MemberId != nil:
 		if !tlsCertRevokeMemberPermitted(ctx, byJwt.NetworkId, *byJwt.MemberId) {
 			return nil, errTlsCertsRoleRefused

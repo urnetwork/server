@@ -450,7 +450,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	// §13.15's certificate routes (TLS-M5-16). The two order routes take a service token, aud certs, as their
 	// credential, and the subject is the token's. GET /tls/certs serves the bearer's network's certificates and
 	// attestations, for the CT watch (D-TLS-8). On POST /tls/cert-revoke a client token marks its own certificate
-	// and a network admin's credential any of its network's (the controller).
+	// and a network admin's credential, or an API key whose scopes reach devices, any of its network's (the
+	// controller, which the handler passes the key's scopes; QD-847).
 	"POST /tls/cert-order":        routeAccessPublic,
 	"GET /tls/cert-order/([^/]+)": routeAccessPublic,
 	"GET /tls/certs":              routeAccessClient,
