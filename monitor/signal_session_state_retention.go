@@ -18,9 +18,9 @@ import (
 // have no event left in the journal and device audit state offline for a day.
 // Each run counts one run per table by why it ended. The signal reads the
 // counts in one Mimir evaluation and warns when the chain stops running, and
-// when its runs end in errors with none making progress. Missing evidence is
-// unobservable, never a measured zero. No row or process identifier leaves
-// Mimir.
+// when either table's runs end in errors with none of that table's making
+// progress. Missing evidence is unobservable, never a measured zero. No row
+// or process identifier leaves Mimir.
 func NewSessionStateRetentionSignal() Signal {
 	return NewSessionStateRetentionSignalWithSettings(DefaultSessionStateRetentionSignalSettings())
 }
@@ -43,8 +43,9 @@ type SessionStateRetentionSignalSettings struct {
 	// counting one run for each of the two tables, so two hours hold at least
 	// 16 runs.
 	Range time.Duration
-	// Runs in the range that end in errors, with none reaching the end of a
-	// pass, the run budget or a pass not yet due.
+	// One table's runs in the range that end in errors, with none of that
+	// table's reaching the end of a pass, the run budget or a pass not yet
+	// due.
 	StuckRuns float64
 	// A sample older than this is stale.
 	Freshness time.Duration
@@ -83,25 +84,38 @@ func (self sessionStateRetentionProbe) effectiveSettings() *SessionStateRetentio
 	return self.settings
 }
 
-// The parts of the evaluation, each a single series named by monitor_metric.
-var sessionStateRetentionClasses = []string{"runs", "error_runs", "progress_runs"}
+// The tables the retention's runs count under, as their metric labels.
+var sessionStateRetentionSignalTables = []string{"provider_work_session_head", "audit_device_state"}
 
-// One evaluation: the run counts over the range, all of them, those that
-// ended in errors and those that made progress.
+// The parts of the evaluation, each a single series named by monitor_metric:
+// all runs, then each table's error and progress runs.
+var sessionStateRetentionClasses = func() []string {
+	classes := []string{"runs"}
+	for _, table := range sessionStateRetentionSignalTables {
+		classes = append(classes, table+"_error_runs", table+"_progress_runs")
+	}
+	return classes
+}()
+
+// One evaluation: the run counts over the range, all of them, and for each
+// table those that ended in errors and those that made progress.
 func sessionStateRetentionQuery(environment string, settings *SessionStateRetentionSignalSettings) string {
 	env := strconv.Quote(environment)
 	window := stormDuration(settings.Range)
-	runs := func(stop string) string {
-		return fmt.Sprintf("sum(increase(urnetwork_session_state_retention_runs_total{env=%s%s}[%s]))", env, stop, window)
+	runs := func(matcher string) string {
+		return fmt.Sprintf("sum(increase(urnetwork_session_state_retention_runs_total{env=%s%s}[%s]))", env, matcher, window)
 	}
 	part := func(class string, expression string) string {
 		return fmt.Sprintf(`label_replace(%s,"monitor_metric",%s,"__name__",".*")`, expression, strconv.Quote(class))
 	}
-	return strings.Join([]string{
-		part("runs", runs("")),
-		part("error_runs", runs(`,stop="error"`)),
-		part("progress_runs", runs(`,stop=~"pass|budget|waiting"`)),
-	}, " or ")
+	parts := []string{part("runs", runs(""))}
+	for _, table := range sessionStateRetentionSignalTables {
+		parts = append(parts,
+			part(table+"_error_runs", runs(fmt.Sprintf(`,table="%s",stop="error"`, table))),
+			part(table+"_progress_runs", runs(fmt.Sprintf(`,table="%s",stop=~"pass|budget|waiting"`, table))),
+		)
+	}
+	return strings.Join(parts, " or ")
 }
 
 // One part's value, authoritative only when exactly one fresh, valid sample
@@ -210,7 +224,7 @@ func sessionStateRetentionUnobservable(target string, reasons string, gateway st
 		target: target, sustain: 2,
 		symptom:   "The session state retention's run counts are missing, partial, stale or ambiguous.",
 		mechanism: "Every taskworker registers the retention's run counter at zero for each table and stop, so its absence means no taskworker exports it: a build before the retention, a scrape gap, or a query that no longer matches. Missing evidence is not a measured zero.",
-		baseline:  "One fresh series for all runs, error runs and progress runs.",
+		baseline:  "One fresh series for all runs, and for each table's error runs and progress runs.",
 		observed:  "visibility_reason=" + reasons + " metrics_gateway=" + gateway,
 		evidence:  "Only fixed structural reasons are exported; raw samples are discarded.",
 		context:   "The retention runs by default; its brake {session_state_retention}control can stop it, and it still counts brake_off runs then.",
@@ -230,10 +244,12 @@ func sessionStateRetentionFindings(frame sessionStateRetentionFrame, settings *S
 	}
 	window := stormDuration(settings.Range)
 	runs := frame.get("runs")
-	errorRuns := frame.get("error_runs")
-	progressRuns := frame.get("progress_runs")
-	counts := fmt.Sprintf("runs_%[1]s=%[2]s error_runs_%[1]s=%[3]s progress_runs_%[1]s=%[4]s metrics_gateway=%[5]s",
-		window, runs.observed(), errorRuns.observed(), progressRuns.observed(), gateway)
+	counts := fmt.Sprintf("runs_%s=%s", window, runs.observed())
+	for _, table := range sessionStateRetentionSignalTables {
+		counts += fmt.Sprintf(" %[1]s_error_runs_%[2]s=%[3]s %[1]s_progress_runs_%[2]s=%[4]s",
+			table, window, frame.get(table+"_error_runs").observed(), frame.get(table+"_progress_runs").observed())
+	}
+	counts += " metrics_gateway=" + gateway
 	// a proven positive needs only its own parts; a clear needs the whole read
 	raise := func(proven bool, healthy bool, class string, raised finding) {
 		switch {
@@ -257,17 +273,30 @@ func sessionStateRetentionFindings(frame sessionStateRetentionFrame, settings *S
 		playbook:  "SIGNALS.md §2.4t",
 	})
 
-	noProgress := progressRuns.valid && math.Round(progressRuns.value) == 0
-	raise(errorRuns.valid && settings.StuckRuns <= math.Round(errorRuns.value) && noProgress, errorRuns.valid && progressRuns.valid, "session-state-retention-failing", finding{
+	// a table whose errors leave none of its runs making progress
+	failingTables := []string{}
+	failingKnown := true
+	for _, table := range sessionStateRetentionSignalTables {
+		errorRuns := frame.get(table + "_error_runs")
+		progressRuns := frame.get(table + "_progress_runs")
+		if !errorRuns.valid || !progressRuns.valid {
+			failingKnown = false
+			continue
+		}
+		if settings.StuckRuns <= math.Round(errorRuns.value) && math.Round(progressRuns.value) == 0 {
+			failingTables = append(failingTables, table)
+		}
+	}
+	raise(0 < len(failingTables), failingKnown, "session-state-retention-failing", finding{
 		probeId: sessionStateRetentionProbeId, tier: tierWarn, class: "session-state-retention-failing", target: target, sustain: 2,
-		symptom:   fmt.Sprintf("%s session state retention runs failed in %s and none made progress", errorRuns.observed(), window),
-		mechanism: "A batch that fails rolls back and ends its table's run with the cursor of the last committed batch, so it loses nothing, but a batch that fails every time stops the pass where it is: a lock wait past the batch's bound, a head guard that refuses the delete (a migration before the head retention guard), or a schema the build does not expect.",
-		baseline:  fmt.Sprintf("Errors are rare and some run ends a pass, spends its budget or finds no pass due in every %s.", window),
+		symptom:   fmt.Sprintf("The session state retention's runs for %s failed in %s and none made progress", strings.Join(failingTables, " and "), window),
+		mechanism: "A batch that fails rolls back and ends its table's run with the cursor of the last committed batch, so it loses nothing, but a batch that fails every time stops the pass where it is: a lock wait past the batch's bound, a head guard that refuses the delete (a database before the head retention guard's migration), or a schema the build does not expect. The other table's pass runs on, so the chain keeps running.",
+		baseline:  fmt.Sprintf("Errors are rare and some run of each table ends a pass, spends its budget or finds no pass due in every %s.", window),
 		observed:  counts,
-		evidence:  "increase(urnetwork_session_state_retention_runs_total{stop=\"error\"}) against stop pass, budget and waiting, over every taskworker process.",
+		evidence:  "increase(urnetwork_session_state_retention_runs_total{table,stop=\"error\"}) against stop pass, budget and waiting of the same table, over every taskworker process.",
 		context:   "Each batch skips rows another transaction holds and bounds its lock waits; the head guard admits a delete only for a head with no event and no receipt left.",
 		action:    "Read the taskworker's [ssr] errors for the failing table and statement, and check that Main's migration head includes the head retention guard. Lower the brake's maxHeadsPerSecond or maxDeviceStatesPerSecond, or set mode off, while it is fixed. Never delete heads by hand.",
-		verify:    "A run makes progress within two cadences.",
+		verify:    "A run of the table makes progress within two cadences.",
 		playbook:  "SIGNALS.md §2.4t",
 	})
 	return findings

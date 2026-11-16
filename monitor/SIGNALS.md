@@ -8769,15 +8769,16 @@ work, every 15 minutes otherwise, also with its brake
 
 Every 5 minutes one instant Mimir read through a services host's loopback
 Mimir evaluates, over the last two hours across all taskworker processes, the
-runs by stop (`urnetwork_session_state_retention_runs_total`): all runs, the
-error runs, and the runs that made progress (stops `pass`, `budget` and
-`waiting`).
+runs by table and stop (`urnetwork_session_state_retention_runs_total`): all
+runs, and each table's error runs and the runs that made progress (stops
+`pass`, `budget` and `waiting`).
 
 - `session-state-retention-stalled` (sustain 2): no run ended in two hours.
   The chain is lost or never claimed.
-- `session-state-retention-failing` (sustain 2): at least 3 runs ended in an
-  error and none made progress. A batch that fails every time stops its pass
-  at its cursor.
+- `session-state-retention-failing` (sustain 2): at least 3 of a table's runs
+  ended in an error and none of its runs made progress. A batch that fails
+  every time stops its pass at its cursor while the other table's pass runs
+  on.
 - `session-state-retention-unobservable` (sustain 2): a run count is missing,
   stale, duplicate or invalid. A positive its own parts prove still raises.
 

@@ -28,9 +28,15 @@ func (self sessionStateRetentionFixture) with(changes sessionStateRetentionFixtu
 	return values
 }
 
-// A retention that runs and makes progress.
+// A retention that runs and makes progress on both tables.
 func sessionStateRetentionHealthyFixture() sessionStateRetentionFixture {
-	return sessionStateRetentionFixture{"runs": 960, "error_runs": 0, "progress_runs": 960}
+	return sessionStateRetentionFixture{
+		"runs":                                  960,
+		"provider_work_session_head_error_runs": 0,
+		"provider_work_session_head_progress_runs": 480,
+		"audit_device_state_error_runs":            0,
+		"audit_device_state_progress_runs":         480,
+	}
 }
 
 var sessionStateRetentionFixtureNow = time.Date(2026, 11, 16, 8, 0, 0, 0, time.UTC)
@@ -61,8 +67,8 @@ func runSessionStateRetentionPayload(t *testing.T, payload string) []Alert {
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		for _, want := range []string{
 			"urnetwork_session_state_retention_runs_total",
-			"stop%3D%22error%22",
-			"stop%3D~%22pass%7Cbudget%7Cwaiting%22",
+			"table%3D%22provider_work_session_head%22%2Cstop%3D%22error%22",
+			"table%3D%22audit_device_state%22%2Cstop%3D~%22pass%7Cbudget%7Cwaiting%22",
 			"%5B2h%5D",
 			"%22synthetic%22",
 			"monitor_metric",
@@ -114,12 +120,16 @@ func TestSessionStateRetentionRegistered(t *testing.T) {
 }
 
 // A retention that runs and makes progress, one whose brake is off but still
-// runs, and errors among runs that make progress raise nothing.
+// runs, and errors among a table's runs that make progress raise nothing.
 func TestSessionStateRetentionHealthy(t *testing.T) {
 	for name, values := range map[string]sessionStateRetentionFixture{
-		"progress":            sessionStateRetentionHealthyFixture(),
-		"brake off":           sessionStateRetentionHealthyFixture().with(sessionStateRetentionFixture{"progress_runs": 0}),
-		"errors and progress": sessionStateRetentionHealthyFixture().with(sessionStateRetentionFixture{"error_runs": 40, "progress_runs": 900}),
+		"progress": sessionStateRetentionHealthyFixture(),
+		"brake off": sessionStateRetentionHealthyFixture().with(sessionStateRetentionFixture{
+			"provider_work_session_head_progress_runs": 0, "audit_device_state_progress_runs": 0,
+		}),
+		"errors and progress": sessionStateRetentionHealthyFixture().with(sessionStateRetentionFixture{
+			"provider_work_session_head_error_runs": 40, "provider_work_session_head_progress_runs": 400,
+		}),
 	} {
 		if alerts := runSessionStateRetentionFixture(t, values); len(alerts) != 0 {
 			t.Fatalf("%s raised %v", name, sessionStateRetentionAlertClasses(alerts))
@@ -129,7 +139,9 @@ func TestSessionStateRetentionHealthy(t *testing.T) {
 
 // No run in the range is a stalled chain.
 func TestSessionStateRetentionStalled(t *testing.T) {
-	alerts := runSessionStateRetentionFixture(t, sessionStateRetentionFixture{"runs": 0, "error_runs": 0, "progress_runs": 0})
+	alerts := runSessionStateRetentionFixture(t, sessionStateRetentionHealthyFixture().with(sessionStateRetentionFixture{
+		"runs": 0, "provider_work_session_head_progress_runs": 0, "audit_device_state_progress_runs": 0,
+	}))
 	if classes := sessionStateRetentionAlertClasses(alerts); len(classes) != 1 || !classes["session-state-retention-stalled"] {
 		t.Fatalf("a stalled chain raised %v", classes)
 	}
@@ -141,14 +153,23 @@ func TestSessionStateRetentionStalled(t *testing.T) {
 	}
 }
 
-// Errors with no progress are a failing chain; fewer than the threshold are
+// One table's errors with none of its runs making progress are a failing
+// chain, though the other table's pass runs on; fewer than the threshold are
 // not.
 func TestSessionStateRetentionFailing(t *testing.T) {
-	alerts := runSessionStateRetentionFixture(t, sessionStateRetentionFixture{"runs": 30, "error_runs": 30, "progress_runs": 0})
+	alerts := runSessionStateRetentionFixture(t, sessionStateRetentionHealthyFixture().with(sessionStateRetentionFixture{
+		"provider_work_session_head_error_runs": 30, "provider_work_session_head_progress_runs": 0,
+	}))
 	if classes := sessionStateRetentionAlertClasses(alerts); len(classes) != 1 || !classes["session-state-retention-failing"] {
-		t.Fatalf("a failing chain raised %v", classes)
+		t.Fatalf("a failing head pass raised %v", classes)
 	}
-	alerts = runSessionStateRetentionFixture(t, sessionStateRetentionFixture{"runs": 30, "error_runs": 2, "progress_runs": 0})
+	alert := requireAlertClass(t, alerts, "session-state-retention-failing")
+	if !strings.Contains(alert.Markdown(), "runs for provider_work_session_head failed in 2h") || strings.Contains(alert.Markdown(), "provider_work_session_head and audit_device_state failed") {
+		t.Fatalf("the failing alert does not name the head table alone:\n%s", alert.Markdown())
+	}
+	alerts = runSessionStateRetentionFixture(t, sessionStateRetentionHealthyFixture().with(sessionStateRetentionFixture{
+		"audit_device_state_error_runs": 2, "audit_device_state_progress_runs": 0,
+	}))
 	if classes := sessionStateRetentionAlertClasses(alerts); len(classes) != 0 {
 		t.Fatalf("two errors raised %v", classes)
 	}
@@ -157,7 +178,7 @@ func TestSessionStateRetentionFailing(t *testing.T) {
 // Missing, stale or duplicate parts are unobservable, not zeros, and a proven
 // stall still raises beside it.
 func TestSessionStateRetentionUnobservable(t *testing.T) {
-	alerts := runSessionStateRetentionFixture(t, sessionStateRetentionHealthyFixture().with(nil, "progress_runs"))
+	alerts := runSessionStateRetentionFixture(t, sessionStateRetentionHealthyFixture().with(nil, "audit_device_state_progress_runs"))
 	if classes := sessionStateRetentionAlertClasses(alerts); len(classes) != 1 || !classes["session-state-retention-unobservable"] {
 		t.Fatalf("a missing part raised %v", classes)
 	}
