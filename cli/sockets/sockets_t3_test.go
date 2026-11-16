@@ -12,8 +12,9 @@
 //   - D-SOCK-3's 3,000 names in three pages on real Redis, and the listing that opens them all;
 //   - DESIGN-DETAILS 17.2.10's custom host on the hot path (17.7's SOCK-M5-17 line, after TLS-M6-08): an edge Find
 //     carrying a custom host's server name, with tls/ open over listen facts the test sets and the edge's tls/ check
-//     answered as QD-852 has it (t3EdgeGate, until SOCK-M5-07 wires ACL-M5-01's view), is one script and one {svc_}
-//     write a ticket, and once its pairs are written within PairWriteInterval the one script alone.
+//     the production gate's own (QD-852: any audience's publish passes, the front judging it, and no publish is
+//     denied before the group is read), is one script and one {svc_} write a ticket, and once its pairs are written
+//     within PairWriteInterval the one script alone.
 //
 // FS-41's and FS-42's socket step is sockets_redis_loss_test.go's, and the load harness's scaled run and the Find
 // script's benchmark sockets_bench_test.go's. Nothing sleeps: the engine's first probe, the gate's first over-limit read
@@ -538,89 +539,13 @@ func TestT3ThreeThousandNamesInThreePages(t *testing.T) {
 	})
 }
 
-// The production gate with an urnetwork-edge caller's tls/ dial and publish answered as §8.10 has an edge Find stand
-// (QD-852): a visitor's Find passes where a sidecar of the network holds a publish grant for the name's host, whatever
-// its audience, which only the listener's front judges. SocketProjectionGate refuses every edge tls/ Find until
-// SOCK-M5-07's gate takes ACL-M5-01's view, so this stands in for that wiring, as sidecartest's tls suite does; every
-// other answer, the listener check Find makes of each picked listener under its own sidecar included, is the
-// production gate's on the network's real log.
-type t3EdgeGate struct {
-	*socketsservice.SocketProjectionGate
-	edgeNetworkId connect.Id
-	// the network's sidecars a publish grant is looked for under
-	publisherSidecarIds []connect.Id
-	clock               sidecar.Clock
-}
-
-var _ socketsservice.SocketGateFollower = (*t3EdgeGate)(nil)
-
-func (self *t3EdgeGate) View(networkId connect.Id) (socketsservice.SocketGateView, error) {
-	view, err := self.SocketProjectionGate.View(networkId)
-	if err != nil {
-		return nil, err
-	}
-	return &t3EdgeView{SocketGateView: view, gate: self}, nil
-}
-
-func (self *t3EdgeGate) MayDial(ctx context.Context, request *socketsservice.SocketGateRequest) (*socketsservice.SocketGateVerdict, error) {
-	view, err := self.View(request.NetworkId)
-	if err != nil {
-		return nil, err
-	}
-	return view.MayDial(request, self.clock.Now()), nil
-}
-
-func (self *t3EdgeGate) MayPublish(ctx context.Context, request *socketsservice.SocketGateRequest) (*socketsservice.SocketGateVerdict, error) {
-	view, err := self.View(request.NetworkId)
-	if err != nil {
-		return nil, err
-	}
-	return view.MayPublish(request, self.clock.Now()), nil
-}
-
-// One network's state with the edge's tls/ answers above.
-type t3EdgeView struct {
-	socketsservice.SocketGateView
-	gate *t3EdgeGate
-}
-
-// The first publish grant a sidecar of the network holds for the name's host, as the production view judges it under
-// that sidecar, for an urnetwork-edge caller's tls/ request; nil for any other request.
-func (self *t3EdgeView) edgeVerdict(request *socketsservice.SocketGateRequest, now time.Time) *socketsservice.SocketGateVerdict {
-	if request.CallerNetworkId != self.gate.edgeNetworkId || !strings.HasPrefix(request.Name, "tls/") {
-		return nil
-	}
-	for _, sidecarId := range self.gate.publisherSidecarIds {
-		publisher := *request
-		publisher.CallerNetworkId = request.NetworkId
-		publisher.SidecarId = &sidecarId
-		if verdict := self.SocketGateView.MayPublish(&publisher, now); verdict != nil && verdict.Allowed {
-			return verdict
-		}
-	}
-	return &socketsservice.SocketGateVerdict{}
-}
-
-func (self *t3EdgeView) MayDial(request *socketsservice.SocketGateRequest, now time.Time) *socketsservice.SocketGateVerdict {
-	if verdict := self.edgeVerdict(request, now); verdict != nil {
-		return verdict
-	}
-	return self.SocketGateView.MayDial(request, now)
-}
-
-func (self *t3EdgeView) MayPublish(request *socketsservice.SocketGateRequest, now time.Time) *socketsservice.SocketGateVerdict {
-	if verdict := self.edgeVerdict(request, now); verdict != nil {
-		return verdict
-	}
-	return self.SocketGateView.MayPublish(request, now)
-}
-
 // The custom host the T3 rows route by (DESIGN-DETAILS 17.2.10), mapped to tls/443/blog.
 const t3CustomHost = "app.customer.example"
 
-// The T3 world with tls/ open for tls/443/blog: members hold a public publish grant of it for a day; the listen facts
-// say the network is verified at Team, that both devices hold the network's pair and that both are certified for
-// t3CustomHost; and the engine judges an edge's tls/ Find through t3EdgeGate. With edge, its token and K client ids.
+// The T3 world with tls/ open for tls/443/blog: members hold a publish grant of it for a day, public unless a test
+// asks another audience; the listen facts say the network is verified at Team, that both devices hold the network's
+// pair and that both are certified for t3CustomHost; and the engine judges an edge's tls/ Find on the block's
+// production gate. With edge, its token and K client ids.
 type t3CustomWorld struct {
 	*t3World
 	edgeToken     string
@@ -629,9 +554,15 @@ type t3CustomWorld struct {
 
 func newT3CustomWorld(t testing.TB) *t3CustomWorld {
 	t.Helper()
+	return newT3CustomWorldUnder(t, "public")
+}
+
+// newT3CustomWorld with tls/443/blog published under audience.
+func newT3CustomWorldUnder(t testing.TB, audience string) *t3CustomWorld {
+	t.Helper()
 	publish := func(now time.Time) []string {
-		return []string{fmt.Sprintf(`{ "src": ["autogroup:member"], "dst": ["dns:blog", "sock:tls/443/blog"], "allow": ["publish", "listen"], "audience": "public", "expires": %q }`,
-			now.Add(24*time.Hour).UTC().Format(time.RFC3339))}
+		return []string{fmt.Sprintf(`{ "src": ["autogroup:member"], "dst": ["dns:blog", "sock:tls/443/blog"], "allow": ["publish", "listen"], "audience": %q, "expires": %q }`,
+			audience, now.Add(24*time.Hour).UTC().Format(time.RFC3339))}
 	}
 	var facts *socketsservice.TlsListenFacts
 	world := newT3WorldWith(t, publish, func(world *t3World, deps *hostDeps) {
@@ -650,14 +581,6 @@ func newT3CustomWorld(t testing.TB) *t3CustomWorld {
 			}
 			return facts, nil
 		})
-		deps.Gate = func(production *socketsservice.SocketProjectionGate) socketsservice.SocketGate {
-			return &t3EdgeGate{
-				SocketProjectionGate: production,
-				edgeNetworkId:        world.edgeNetworkId,
-				publisherSidecarIds:  []connect.Id{connect.Id(world.listener.device.SidecarId), connect.Id(world.dialer.device.SidecarId)},
-				clock:                world.world.clock,
-			}
-		}
 	})
 	if world.host.tlsHooks == nil {
 		t.Fatal("the host registered no tls/ hooks over its listen facts")
@@ -833,6 +756,55 @@ func TestT3CustomHostFindIsOneScriptAndAPairATicket(t *testing.T) {
 		}
 		if result.RedisCallCount != 1 || result.RedisCalls["script:sockets.pick"] != 1 {
 			t.Fatalf("the custom host's next Find made %v", result.RedisCalls)
+		}
+	})
+}
+
+// QD-852 on the block's own gate with real Redis: an edge's Find of tls/443/blog passes under each §13.7 audience's
+// publish, members, members-device, link and public alike, with every PostgreSQL acquisition in the process refused,
+// its ticket to the listener; the gate judges no audience, which is the listener's front's. An edge's Find of a host
+// no publish grant names is denied with no script run, so no group is read for it.
+func TestT3EdgeFindPassesUnderEachAudiencesPublish(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		for _, audience := range []string{"members", "members-device", "link", "public"} {
+			world := newT3CustomWorldUnder(t, audience)
+			world.registerOk(world.listener, 1, world.blogRegistration(world.listener, nil))
+
+			var code int
+			var answer []byte
+			attempts, stop := server.DenyPostgresForTest(t)
+			func() {
+				defer stop()
+				recorder := hostTestServe(world.host, http.MethodPost, "/socket/find", world.edgeToken, world.edgeFindArgs(""), "")
+				code = recorder.Code
+				answer = recorder.Body.Bytes()
+			}()
+			if 0 < attempts() {
+				t.Fatalf("%s: an edge's Find reached PostgreSQL %d times", audience, attempts())
+			}
+			if ticketed := world.ticketedListeners(code, answer); len(ticketed) != 1 || ticketed[0] != world.listener.clientId {
+				t.Fatalf("%s: the edge's tickets name %v, not the listener %s", audience, ticketed, world.listener.clientId)
+			}
+
+			// a host no grant names: denied, and no script reads a group
+			counting := sidecarhost.NewCountingRedis(sidecarhost.NewRedis(nil))
+			absent := world.edgeFindArgs("")
+			absent.Name = "tls/443/absent"
+			world.store.Testing_RunScriptsThrough(counting)
+			recorder := hostTestServe(world.host, http.MethodPost, "/socket/find", world.edgeToken, absent, "")
+			world.store.Testing_RunScriptsThrough(nil)
+			result := &sidecar.SocketFindResult{}
+			if err := json.Unmarshal(recorder.Body.Bytes(), result); err != nil || recorder.Code != http.StatusOK {
+				t.Fatalf("%s: an edge's Find with no publish answered %d, %v", audience, recorder.Code, err)
+			}
+			if result.Error == nil || result.Error.Code != sidecar.SocketErrorCodeDenied || result.Primary != nil {
+				t.Fatalf("%s: an edge's Find with no publish answered %+v", audience, result)
+			}
+			if counting.OpCount() != 0 {
+				t.Fatalf("%s: a denied edge Find made %v", audience, counting.OpCounts())
+			}
 		}
 	})
 }
