@@ -18,7 +18,13 @@ package model
 // revoking row: any other state clears it (QD-741). Nothing here is on a
 // connection's path.
 //
-// The table is MG5's: a binary that does not link the group answers
+// Beside the rows, network_tls_name_backoff keeps each URnetwork-zone name's
+// failure backoff at a CA (cert-1; QD-857). A failure is counted in one
+// transaction: the upsert raises the count and locks the row, and the time the
+// engine's rule gives the new count is written under that lock, never earlier
+// than the time already kept, so two failures counted at once count two.
+//
+// The tables are MG5's: a binary that does not link the group answers
 // ErrCertsStoreUnavailable for every call (server.SidecarMg5Linked).
 
 import (
@@ -705,6 +711,120 @@ func (self *CertsStore) PurgeChains(ctx context.Context, before time.Time) (drop
 				before.UTC(),
 			))
 			droppedCount = int(tag.RowsAffected())
+		})
+	})
+	return
+}
+
+func (self *CertsStore) ListNameBackoffs(ctx context.Context, names []string) (backoffs []*certsservice.CertsNameBackoff, returnErr error) {
+	backoffs = []*certsservice.CertsNameBackoff{}
+	if len(names) == 0 {
+		return backoffs, nil
+	}
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT name, ca, failure_count, next_order_time
+					FROM network_tls_name_backoff
+					WHERE name = ANY($1)
+					ORDER BY name, ca
+				`,
+				names,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					backoff := &certsservice.CertsNameBackoff{}
+					var ca string
+					server.Raise(result.Scan(&backoff.Name, &ca, &backoff.FailureCount, &backoff.NextOrderTime))
+					backoff.Ca = certsservice.CertsCa(ca)
+					backoff.NextOrderTime = backoff.NextOrderTime.UTC()
+					backoffs = append(backoffs, backoff)
+				}
+			})
+		})
+	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return backoffs, nil
+}
+
+func (self *CertsStore) AddNameFailure(ctx context.Context, name string, ca certsservice.CertsCa, failureTime time.Time, wait func(failureCount int) time.Duration) (backoff *certsservice.CertsNameBackoff, returnErr error) {
+	if name == "" || ca == "" || failureTime.IsZero() || wait == nil {
+		return nil, certsservice.ErrCertsNameFailure
+	}
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Tx(ctx, func(tx server.PgTx) {
+			backoff = &certsservice.CertsNameBackoff{Name: name, Ca: ca}
+			// a first failure is written whole; a later one raises the count and
+			// holds the row for the time below
+			server.Raise(tx.QueryRow(
+				ctx,
+				`
+					INSERT INTO network_tls_name_backoff (name, ca, failure_count, next_order_time)
+					VALUES ($1, $2, 1, $3)
+					ON CONFLICT (name, ca) DO UPDATE
+					SET failure_count = network_tls_name_backoff.failure_count + 1
+					RETURNING failure_count, next_order_time
+				`,
+				name,
+				string(ca),
+				failureTime.Add(wait(1)).UTC().Truncate(time.Microsecond),
+			).Scan(&backoff.FailureCount, &backoff.NextOrderTime))
+			backoff.NextOrderTime = backoff.NextOrderTime.UTC()
+			// a later time already kept stands; times are whole microseconds, as
+			// Postgres keeps them
+			if next := failureTime.Add(wait(backoff.FailureCount)).UTC().Truncate(time.Microsecond); next.After(backoff.NextOrderTime) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						UPDATE network_tls_name_backoff
+						SET next_order_time = $3
+						WHERE name = $1 AND ca = $2
+					`,
+					name,
+					string(ca),
+					next,
+				))
+				backoff.NextOrderTime = next
+			}
+		})
+	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return backoff, nil
+}
+
+func (self *CertsStore) ClearNameBackoffs(ctx context.Context, names []string, ca certsservice.CertsCa) (removedCount int, returnErr error) {
+	if len(names) == 0 {
+		return 0, nil
+	}
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Tx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_tls_name_backoff WHERE name = ANY($1) AND ca = $2`,
+				names,
+				string(ca),
+			))
+			removedCount = int(tag.RowsAffected())
+		})
+	})
+	return
+}
+
+func (self *CertsStore) PurgeNameBackoffs(ctx context.Context, before time.Time) (removedCount int, returnErr error) {
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Tx(ctx, func(tx server.PgTx) {
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_tls_name_backoff WHERE next_order_time < $1`,
+				before.UTC(),
+			))
+			removedCount = int(tag.RowsAffected())
 		})
 	})
 	return

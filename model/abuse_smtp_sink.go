@@ -23,6 +23,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -158,4 +159,19 @@ func (self *abuseSmtpSink) settings() *AbuseSettings {
 	settings := DefaultAbuseSettings()
 	ApplyAbuseConfig(settings, server.GetAbuseConfig())
 	return settings
+}
+
+// §14.8's last rung reaches §21 here (SMTP-M9-16), and nothing in §21 takes it
+// yet: the network's halts are smtp_halt rows, not mail_halt actions, so
+// AbuseNextStep's "3 halts in 30 d" counts none of them, and no case kind opens
+// a suspension from smtpedge. Until ABUSE's side lands, the request is refused,
+// so the ladder counts it failed and its halts stand alone.
+var ErrAbuseSmtpSuspensionUnbuilt = errors.New("abuse smtp suspension request not built")
+
+// See smtpedgeservice.SmtpAbuseSink. Refused: see ErrAbuseSmtpSuspensionUnbuilt.
+func (self *abuseSmtpSink) RequestSmtpSuspension(ctx context.Context, request *smtpedgeservice.SmtpSuspensionRequest) error {
+	if request == nil || request.NetworkId == (sidecar.Id{}) {
+		return fmt.Errorf("%w: no network", ErrAbuseReportInvalid)
+	}
+	return ErrAbuseSmtpSuspensionUnbuilt
 }

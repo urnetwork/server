@@ -10,7 +10,7 @@ import (
 // Actual service entry points expose stale sibling APIs that module pins and
 // dependency-only tests cannot detect, including ALT's admission constructor.
 func TestReleaseSourceGraphBuildsRuntimeConsumers(t *testing.T) {
-	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./cli/dns", "./cli/evs", "./cli/gkm", "./cli/mxedge", "./cli/sockets", "./cli/tlsedge", "./bringyourctl")
+	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./cli/dns", "./cli/evs", "./cli/gkm", "./cli/mxedge", "./cli/sockets", "./cli/smtpedge", "./cli/tlsedge", "./bringyourctl")
 	command.Dir = serverDirectory(t)
 	command.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local", "GOENV=off", "CGO_ENABLED=0", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off")
 	if output, err := command.CombinedOutput(); err != nil {
@@ -22,7 +22,7 @@ func TestReleaseSourceGraphBuildsRuntimeConsumers(t *testing.T) {
 // migration groups linked (cli/sidecar-tags.mk, §19.7), so a group that compiles
 // on one leg alone fails here rather than at a local run or a canary deploy.
 func TestReleaseSourceGraphBuildsThePendingLeg(t *testing.T) {
-	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-tags", "sidecar_pending", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./cli/dns", "./cli/evs", "./cli/gkm", "./cli/mxedge", "./cli/sockets", "./cli/tlsedge", "./bringyourctl")
+	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-tags", "sidecar_pending", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./cli/dns", "./cli/evs", "./cli/gkm", "./cli/mxedge", "./cli/sockets", "./cli/smtpedge", "./cli/tlsedge", "./bringyourctl")
 	command.Dir = serverDirectory(t)
 	command.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local", "GOENV=off", "CGO_ENABLED=0", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off")
 	if output, err := command.CombinedOutput(); err != nil {

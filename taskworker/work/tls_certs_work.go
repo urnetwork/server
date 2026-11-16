@@ -34,7 +34,9 @@ import (
 //     revoked or failed one by its state's time (CertsStore.PurgeEnded;
 //     QD-742). Before that it drops the chains of rows whose certificate
 //     expired or was revoked more than the chain retention ago, 30 days
-//     (CertsStore.PurgeChains; QD-741).
+//     (CertsStore.PurgeChains; QD-741). After it, it deletes each
+//     URnetwork-zone name's failure backoff at a CA whose time is more than
+//     its retention ago, 8 days (CertsStore.PurgeNameBackoffs; QD-857).
 //
 // What the first three run on is installed per process (SetTlsCertChains), as
 // the routes' is (controller.SetTlsCerts): the engine over this process's
@@ -644,15 +646,19 @@ type TlsCertPurgeSettings struct {
 	// A row keeps its chain this long past its certificate's expiry or
 	// revocation: the engine's ChainRetention, cert-1's 30 d.
 	ChainRetention time.Duration
+	// A name's failure backoff at a CA stays this long past the time it held
+	// orders until: the engine's FailureBackoffRetention, cert-1's 8 d.
+	NameBackoffRetention time.Duration
 }
 
 func DefaultTlsCertPurgeSettings() *TlsCertPurgeSettings {
 	return &TlsCertPurgeSettings{
-		RunInterval:    1 * time.Hour,
-		RetryInterval:  5 * time.Minute,
-		MaxTime:        10 * time.Minute,
-		RowRetention:   certsservice.DefaultCertsSettings().RowRetention,
-		ChainRetention: certsservice.DefaultCertsSettings().ChainRetention,
+		RunInterval:          1 * time.Hour,
+		RetryInterval:        5 * time.Minute,
+		MaxTime:              10 * time.Minute,
+		RowRetention:         certsservice.DefaultCertsSettings().RowRetention,
+		ChainRetention:       certsservice.DefaultCertsSettings().ChainRetention,
+		NameBackoffRetention: certsservice.DefaultCertsSettings().FailureBackoffRetention,
 	}
 }
 
@@ -662,8 +668,10 @@ type TlsCertPurgeArgs struct {
 type TlsCertPurgeResult struct {
 	RemovedCount int `json:"removed_count"`
 	// Rows that lost their chain and stay.
-	ChainCount int  `json:"chain_count"`
-	More       bool `json:"more"`
+	ChainCount int `json:"chain_count"`
+	// Names' failure backoffs deleted.
+	NameBackoffCount int  `json:"name_backoff_count"`
+	More             bool `json:"more"`
 }
 
 // Schedules the purge's first run. A binary that does not link MG5 schedules
@@ -715,6 +723,13 @@ func tlsCertPurgeAt(clientSession *session.ClientSession, now time.Time) (*TlsCe
 		result.More = true
 	}
 	result.RemovedCount = removedCount
+	// nor does any failure above keep a backoff past its ttl
+	backoffCount, err := store.PurgeNameBackoffs(clientSession.Ctx, now.Add(-settings.NameBackoffRetention))
+	if err != nil {
+		glog.Warningf("[tls]cert purge: name backoffs: %v\n", err)
+		result.More = true
+	}
+	result.NameBackoffCount = backoffCount
 	return result, nil
 }
 

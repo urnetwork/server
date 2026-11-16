@@ -56,6 +56,7 @@ var quotaServiceRouteCallers = map[string][]server.InternalGateCaller{
 		server.InternalGateCallerSockets,
 		server.InternalGateCallerTlsedge,
 		server.InternalGateCallerMxedge,
+		server.InternalGateCallerSmtpedge,
 	},
 	quotaServiceRouteOverLimit: {
 		server.InternalGateCallerEvs,
@@ -65,15 +66,18 @@ var quotaServiceRouteCallers = map[string][]server.InternalGateCaller{
 	quotaServiceRouteDrawOrder: {
 		server.InternalGateCallerTlsedge,
 		server.InternalGateCallerMxedge,
+		server.InternalGateCallerSmtpedge,
 	},
 	quotaServiceRouteSpent: {
 		server.InternalGateCallerTlsedge,
 		server.InternalGateCallerMxedge,
+		server.InternalGateCallerSmtpedge,
 	},
 	quotaServiceRouteUsageBatch: {
 		server.InternalGateCallerEvs,
 		server.InternalGateCallerTlsedge,
 		server.InternalGateCallerMxedge,
+		server.InternalGateCallerSmtpedge,
 	},
 }
 
