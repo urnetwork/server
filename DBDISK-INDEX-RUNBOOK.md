@@ -232,21 +232,29 @@ The two run back to back, so both use the same vacuum gap.
     (model/index_diet_plan_test.go).
 
 **Recording (same step, minutes after the drops):**
-1. Merge `feat/index-diet-v2` into server main with `--no-ff`. It was tested
-   on the merge with main (root tests pass). Push, then `git pull --ff-only`
-   on local main.
-2. Then `db migrate` from local main (memory `db-migrate-from-mac.md`; no
+1. Merge main into `feat/index-diet-v2` first, so the two records take the
+   next free numbers after main's migrations. Their versions are positional
+   (`IndexDietMigrationVersion`), and the monitor contracts follow them.
+   - On 11-16 main held 979 (the provider-only work session journal), so the
+     records were 980 and 981.
+   - If S4's head guard lands first as 980, the records become 981 and 982.
+2. Merge `feat/index-diet-v2` into server main with `--no-ff`, after testing
+   the merged tree. Push, then `git pull --ff-only` on local main.
+3. Then `db migrate` from local main (memory `db-migrate-from-mac.md`; no
    PGOPTIONS; the Main tunnel's 127.0.0.1).
-   - It records migrations 979 and 980 as no-ops (`DROP INDEX CONCURRENTLY IF
-     EXISTS`).
-   - Check: `migration_audit` shows 978 → 980 success.
+   - It must apply only the two records, as no-ops (`DROP INDEX CONCURRENTLY
+     IF EXISTS`).
+   - If any other migration is still pending on Main, stop and leave it to
+     its owner.
+   - Check: `migration_audit` shows the head moving by exactly the two
+     records, with success.
 - **Do not merge the records before the drops.** The next `db migrate` by
   anyone would run the drops itself, queued behind a vacuum, with no
   lock_timeout.
 - **Do not run `db audit --fix` between the drops and the migrate.** It would
   rebuild the indexes with a plain, write-blocking CREATE INDEX.
-- Binaries built from main after the merge need head 980 before they report
-  ready. So migrate before releasing the locks.
+- Binaries built from main after the merge need the new head before they
+  report ready. So migrate before releasing the locks.
 
 **Check after the drops:**
 - `to_regclass(...)` is NULL for both indexes.
