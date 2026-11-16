@@ -733,3 +733,105 @@ func TlsCertPurgePost(
 	scheduleTlsCertPurge(clientSession, tx, runAt)
 	return nil
 }
+
+// The custom-domain sweep (TLS-M6-05; DESIGN-DETAILS 17.2.11, 17.2.14), beside certs' own passes: renewals queued as
+// successor rows at their renew time, custom rows past their validity expired, spends past their retention dropped,
+// and the warnings raised. It makes no CA call: only the ordering desktops reach the customer's CA. It runs on the
+// engine the certs install put in place and the store it sets (SetTlsCustomSweep), and runs empty passes otherwise.
+// A binary that does not link what custom hosts read schedules nothing.
+
+// What the sweep runs on.
+type TlsCustomSweepDeps struct {
+	Service  *certsservice.CertsService
+	Store    certsservice.CertsCustomStore
+	Settings *certsservice.CertsCustomSettings
+}
+
+var tlsCustomSweepDeps atomic.Pointer[TlsCustomSweepDeps]
+
+// Installs what this process's custom sweep runs on; nil, or deps missing a part, removes it.
+func SetTlsCustomSweep(deps *TlsCustomSweepDeps) *TlsCustomSweepDeps {
+	if deps == nil || deps.Service == nil || deps.Store == nil || deps.Settings == nil {
+		tlsCustomSweepDeps.Store(nil)
+		return nil
+	}
+	installed := *deps
+	tlsCustomSweepDeps.Store(&installed)
+	return &installed
+}
+
+type TlsCustomSweepArgs struct {
+	// Where the renewal candidates are read from: the last pass's NextCertId.
+	AfterCertId string `json:"after_cert_id,omitempty"`
+}
+
+type TlsCustomSweepResult struct {
+	Idle         bool   `json:"idle"`
+	QueuedCount  int    `json:"queued_count"`
+	ExpiredCount int    `json:"expired_count"`
+	PurgedCount  int    `json:"purged_count"`
+	WarnedCount  int    `json:"warned_count"`
+	NextCertId   string `json:"next_cert_id,omitempty"`
+	Failed       bool   `json:"failed"`
+}
+
+// Whether this binary links what the sweep reads.
+func tlsCustomSweepLinked() bool {
+	return server.SidecarMg2Linked() && server.SidecarMg5Linked() && server.SidecarMg6Linked()
+}
+
+// Schedules the sweep's first run.
+func ScheduleTlsCustomSweep(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleTlsCustomSweep(clientSession, tx, &TlsCustomSweepArgs{}, server.NowUtc().Add(certsservice.DefaultCertsCustomSettings().SweepInterval))
+}
+
+func scheduleTlsCustomSweep(clientSession *session.ClientSession, tx server.PgTx, args *TlsCustomSweepArgs, runAt time.Time) {
+	if !tlsCustomSweepLinked() {
+		return
+	}
+	task.ScheduleTaskInTx(
+		tx,
+		TlsCustomSweep,
+		args,
+		clientSession,
+		task.RunOnce("tls_custom_sweep"),
+		task.RunAt(runAt),
+		task.MaxTime(DefaultTlsCertChainSettings().RenewalsMaxTime),
+	)
+}
+
+// One sweep.
+func TlsCustomSweep(args *TlsCustomSweepArgs, clientSession *session.ClientSession) (*TlsCustomSweepResult, error) {
+	result := &TlsCustomSweepResult{Idle: true}
+	deps := tlsCustomSweepDeps.Load()
+	if !tlsCustomSweepLinked() || deps == nil {
+		return result, nil
+	}
+	result.Idle = false
+	report, err := deps.Service.RunCustomSweep(clientSession.Ctx, deps.Store, deps.Settings, tlsCertCursor(args.AfterCertId))
+	if err != nil {
+		glog.Warningf("[tls]custom sweep: %v\n", err)
+		result.Failed = true
+	}
+	result.QueuedCount = report.QueuedCount
+	result.ExpiredCount = report.ExpiredCount
+	result.PurgedCount = report.PurgedCount
+	result.WarnedCount = report.WarnedCount
+	result.NextCertId = tlsCertCursorText(report.NextCertId)
+	if 0 < result.QueuedCount+result.ExpiredCount+result.WarnedCount {
+		glog.Infof("[tls]custom sweep: queued %d, expired %d, warned %d\n", result.QueuedCount, result.ExpiredCount, result.WarnedCount)
+	}
+	return result, nil
+}
+
+// Schedules the next sweep.
+func TlsCustomSweepPost(_ *TlsCustomSweepArgs, result *TlsCustomSweepResult, clientSession *session.ClientSession, tx server.PgTx) error {
+	settings := DefaultTlsCertChainSettings()
+	scheduleTlsCustomSweep(
+		clientSession,
+		tx,
+		&TlsCustomSweepArgs{AfterCertId: result.NextCertId},
+		tlsCertChainNextRun(settings, certsservice.DefaultCertsCustomSettings().SweepInterval, result.NextCertId != "", result.Failed),
+	)
+	return nil
+}

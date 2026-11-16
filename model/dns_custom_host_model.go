@@ -455,7 +455,10 @@ func DnsRemoveCustomHostInTx(ctx context.Context, tx server.PgTx, networkId serv
 	if !dnsCustomHostLinked() {
 		return false
 	}
-	return 0 < deleteDnsCustomHostsInTx(ctx, tx, `host = $1 AND network_id = $2`, strings.ToLower(strings.TrimSuffix(host, ".")), networkId)
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	// the host's custom certificates go to custom_revoking, or fail, in the removal's transaction (17.2.12)
+	TlsCustomRemoveRowsInTx(ctx, tx, &TlsCustomRemoval{NetworkId: networkId, Host: host})
+	return 0 < deleteDnsCustomHostsInTx(ctx, tx, `host = $1 AND network_id = $2`, host, networkId)
 }
 
 // Removes every custom host of the network at or under domain in the caller's transaction, as the
@@ -467,6 +470,8 @@ func DnsRemoveDomainCustomHostsInTx(ctx context.Context, tx server.PgTx, network
 		return 0
 	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	// the domain's custom certificates go to custom_revoking, or fail, in the removal's transaction (17.2.12)
+	TlsCustomRemoveRowsInTx(ctx, tx, &TlsCustomRemoval{NetworkId: networkId, Domain: domain})
 	return deleteDnsCustomHostsInTx(ctx, tx, `network_id = $1 AND (host = $2 OR host LIKE '%.' || $2)`, networkId, domain)
 }
 

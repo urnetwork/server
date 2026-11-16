@@ -254,6 +254,10 @@ func initTaskSchedule(ctx context.Context) {
 		// at setup and at its newest chain's half-life; empty passes until
 		// certs is installed, and not scheduled without MG2, MG5 and MG6
 		work.ScheduleTlsCaaChecks(clientSession, tx)
+		// Team custom-domain certificates' sweep: renewals queued as successor
+		// rows, expiry, spends dropped, warnings; no CA call; not scheduled
+		// without MG2, MG5 and MG6
+		work.ScheduleTlsCustomSweep(clientSession, tx)
 		// §12's journal past 7 days, challenges and canaries past their hour,
 		// and zone suspensions past their until; not scheduled without MG5
 		work.ScheduleDnsMaintenance(clientSession, tx)
@@ -823,6 +827,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.TlsCaaChecks,
 			work.TlsCaaChecksPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.TlsCustomSweep,
+			work.TlsCustomSweepPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.DnsMaintenance,

@@ -556,12 +556,31 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 	if transition.At.IsZero() {
 		return false, certsservice.ErrCertsStateTime
 	}
+	returnErr = self.run(ctx, func(ctx context.Context) {
+		server.Tx(ctx, func(tx server.PgTx) {
+			var err error
+			applied, err = transitionCertInTx(ctx, tx, transition)
+			server.Raise(err)
+		})
+	})
+	return
+}
+
+// CertsStore.TransitionCert in the caller's transaction, which custom rows' moves join (TLS-M6-05): one
+// compare-and-move UPDATE. A revoking or custom_revoking row keeps the reason its CA is to be told (QD-741).
+func transitionCertInTx(ctx context.Context, tx server.PgTx, transition *certsservice.CertsTransition) (applied bool, returnErr error) {
+	if transition == nil || len(transition.From) == 0 || transition.To == "" {
+		return false, errors.New("certs store: a transition needs its states")
+	}
+	if transition.At.IsZero() {
+		return false, certsservice.ErrCertsStateTime
+	}
 	from := make([]string, 0, len(transition.From))
 	for _, state := range transition.From {
 		from = append(from, string(state))
 	}
-	returnErr = self.run(ctx, func(ctx context.Context) {
-		server.Tx(ctx, func(tx server.PgTx) {
+	{
+		{
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -579,7 +598,7 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 						ari_window_end = COALESCE($11, ari_window_end),
 						chain = COALESCE($13::bytea[], chain),
 						revocation_reason = CASE
-							WHEN $3::varchar = 'revoking' THEN COALESCE($14, revocation_reason)
+							WHEN $3::varchar IN ('revoking', 'custom_revoking') THEN COALESCE($14, revocation_reason)
 							ELSE NULL
 						END
 					WHERE cert_id = $1 AND state = ANY($2)
@@ -600,8 +619,8 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 				certsStoreNullString(string(transition.RevocationReason)),
 			))
 			applied = tag.RowsAffected() == 1
-		})
-	})
+		}
+	}
 	return
 }
 

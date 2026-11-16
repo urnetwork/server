@@ -262,6 +262,13 @@ func buildTlsCertChains(ctx context.Context, deps *TlsCertChainsInstallDeps, set
 		return refuse("the engine: %s", err)
 	}
 	installed := setTlsCertChains(&TlsCertChainDeps{Service: service, RevocationSource: deps.RevocationSource})
+	// the custom-domain sweep on the same engine (TLS-M6-05)
+	var installedSweep *TlsCustomSweepDeps
+	if customStore, err := model.NewTlsCustomStore(&model.TlsCustomStoreOptions{Roots: config.CaaOperatorZones[:1]}); err == nil {
+		installedSweep = SetTlsCustomSweep(&TlsCustomSweepDeps{Service: service, Store: customStore, Settings: certsservice.DefaultCertsCustomSettings()})
+	} else {
+		glog.Warningf("[certs]the custom sweep is not installed: %v\n", err)
+	}
 	// the CAA checks, only where certs reaches the canary route (TLS-M6-04)
 	uninstallCaa := func() {}
 	if dnsClient != nil {
@@ -280,6 +287,7 @@ func buildTlsCertChains(ctx context.Context, deps *TlsCertChainsInstallDeps, set
 	return func() {
 		// only this install's deps: a later install's stay
 		tlsCertChainDeps.CompareAndSwap(installed, nil)
+		tlsCustomSweepDeps.CompareAndSwap(installedSweep, nil)
 		uninstallCaa()
 	}, nil
 }
