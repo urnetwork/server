@@ -214,8 +214,9 @@ func cryptoCreditGiftIntentInConn(
 		return false, fmt.Errorf("USDC invoice %s needs its Solana reference and the paying signature", intent.IntentId)
 	}
 	// read before the transaction: the link is written before the invoice is
-	// handed out and never changes
-	giftOrderId := model.GetGiftOrderIdForCryptoIntent(ctx, intent.IntentId)
+	// handed out and never changes. On the caller's session: the reconciler's
+	// crypto legs hold their run lock on it
+	giftOrderId := model.GetGiftOrderIdForCryptoIntentInConn(connOwner, ctx, intent.IntentId)
 	if giftOrderId == nil {
 		// the invoice stays open, and the credit failures put it in review
 		return false, fmt.Errorf("gift invoice %s has no gift order", intent.IntentId)

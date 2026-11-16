@@ -675,7 +675,14 @@ func ListPendingStripeGiftOrdersInConn(
 // GetGiftOrderIdForCryptoIntent is the order keyed to the invoice, nil when
 // none is.
 func GetGiftOrderIdForCryptoIntent(ctx context.Context, intentId server.Id) *server.Id {
-	return getGiftOrderIdFor(ctx, "crypto_intent_id", intentId)
+	return GetGiftOrderIdForCryptoIntentInConn(nil, ctx, intentId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition
+// boundary. The payment reconciler's crypto legs credit a gift invoice on the
+// session that holds their run lock.
+func GetGiftOrderIdForCryptoIntentInConn(connOwner server.PgConn, ctx context.Context, intentId server.Id) *server.Id {
+	return getGiftOrderIdForInConn(connOwner, ctx, "crypto_intent_id", intentId)
 }
 
 // GetGiftOrderIdForGammaIntent is the order keyed to the Pay with Gamma
@@ -685,8 +692,13 @@ func GetGiftOrderIdForGammaIntent(ctx context.Context, intentId server.Id) *serv
 }
 
 // The order whose column (a source literal) holds value.
-func getGiftOrderIdFor(ctx context.Context, column string, value any) (giftOrderId *server.Id) {
-	server.Db(ctx, func(conn server.PgConn) {
+func getGiftOrderIdFor(ctx context.Context, column string, value any) *server.Id {
+	return getGiftOrderIdForInConn(nil, ctx, column, value)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func getGiftOrderIdForInConn(connOwner server.PgConn, ctx context.Context, column string, value any) (giftOrderId *server.Id) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			fmt.Sprintf(`SELECT gift_order_id FROM gift_order WHERE %s = $1`, column),
