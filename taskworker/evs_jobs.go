@@ -14,6 +14,10 @@ package taskworker
 // production among them, and a job run there fails and waits on server/task's backoff: no job runs without its
 // clock check and its budget. The host ends with the runtime's lifetime, after the drain has cancelled the runs.
 //
+// The storage format the jobs run as is the block's config's (evs_block_config.go; QD-854), read before the host is
+// built: 2 with no file, 1 in a rollback's, and a config that does not read builds no host. Each run takes the
+// engine settings read for its host, bound to its context, and a job format 2 added does not run at format 1.
+//
 // The jobs land with their own tasks, each adding its evsJob to evsJobs: EVSB-M2-11's hourly evacuation,
 // EVSB-M2-12's nightly pass with EVSB-M2-13's orphan GC and EVSB-M2-14's marker collection, EVSB-M2-26's closing
 // job of the nightly count, EVS1-M2-15's lease sweep, EVS1-M2-17's path-epoch copies, EVS1-M2-19's shreds and
@@ -31,6 +35,7 @@ import (
 	"github.com/urnetwork/sidecar/evsservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/evshost"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
 	"github.com/urnetwork/server/sidecarhost"
@@ -51,6 +56,9 @@ type evsJob struct {
 	// For a job that repeats, the request that starts its chain at each start, given the host; its Name is the
 	// job's. nil for a job another job or a route queues.
 	first func(host *sidecar.ServiceHost) *sidecar.TaskRequest
+	// Whether format 2 added the job, so a format-1 binary holds none of it: in a taskworker at instance format 1
+	// its runs fail and wait (evs_block_config.go).
+	format2 bool
 }
 
 // evs's jobs, each added by its own task (see the file header).
@@ -69,7 +77,8 @@ var registerEvsJobsOnce sync.Once
 var startEvsJobs = startEvsJobsFromVault
 
 // Binds every job of jobs to its name in tasks, each run on the host current gives at its start, or failing with
-// errNoEvsJobHost when there is none.
+// errNoEvsJobHost when there is none, with the engine settings read for that host bound to its context, or failing
+// with errNoEvsJobSettings when none were. A job format 2 added fails with errEvsJobNeedsFormat2 at instance format 1.
 func registerEvsJobs(tasks sidecar.Tasks, jobs []*evsJob, current func() *sidecar.ServiceHost) {
 	for _, job := range jobs {
 		tasks.Register(job.name, func(ctx context.Context, args []byte) error {
@@ -77,18 +86,36 @@ func registerEvsJobs(tasks sidecar.Tasks, jobs []*evsJob, current func() *sideca
 			if host == nil {
 				return errNoEvsJobHost
 			}
-			return job.run(ctx, host, args)
+			evsSettings, err := evsJobSettingsOfHost(host)
+			if err != nil {
+				return err
+			}
+			if job.format2 && evsSettings.InstanceFormat < sidecar.EvsRepoFormat2 {
+				return errEvsJobNeedsFormat2
+			}
+			return job.run(withEvsJobSettings(ctx, evsSettings), host, args)
 		})
 	}
 }
 
-// Binds evs's jobs in the process's registry, builds the process's evs host from the vault file, and starts each
-// repeating job's chain. Returns once they are started; a vault without the file starts nothing, and the jobs'
-// names stay bound so a queued run fails and retries rather than find no function.
+// Binds evs's jobs in the process's registry, reads the block's config, builds the process's evs host from the vault
+// file, and starts each repeating job's chain. Returns once they are started; a config that does not read or a vault
+// without the file starts nothing, and the jobs' names stay bound so a queued run fails and retries rather than find
+// no function.
 func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 	registerEvsJobsOnce.Do(func() {
 		registerEvsJobs(sidecarTasks, evsJobs, evsJobHost.Load)
 	})
+	// before any store is touched: the format this taskworker was deployed as (evs_block_config.go)
+	evsSettings, err := LoadEvsJobSettings()
+	if err != nil {
+		glog.Errorf("[evsjobs]no instance format, so evs's jobs wait: %v\n", err)
+		return
+	}
+	if evsSettings.InstanceFormat < sidecar.EvsRepoFormat2 {
+		// a rollback's taskworker, said at every start so nobody reads what it leaves as a fault
+		glog.Warningf("[evsjobs]%s sets instance format %d: evs's jobs write nothing to a format-2 repo, and the format-2 jobs wait\n", evshost.BlockConfigFileName, evsSettings.InstanceFormat)
+	}
 	clusters, err := server.LoadFileClusters(ctx, evsBudgetFileClustersService, nil)
 	if err != nil {
 		glog.Infof("[evsjobs]no file clusters, so evs's jobs wait: %v\n", err)
@@ -124,7 +151,7 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 		holdStore = model.NewAbuseHoldStore(firstCluster)
 		model.SetAbuseHoldStore(holdStore)
 	}
-	startEvsJobsOnHost(ctx, lifetime, host, evsJobs, func() {
+	startEvsJobsOnHost(ctx, lifetime, host, evsSettings, evsJobs, func() {
 		if holdStore != nil {
 			model.SetAbuseHoldStore(nil)
 		}
@@ -134,13 +161,21 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 	})
 }
 
-// Installs host for evs's jobs until ctx ends, then removes it and ends what closeHost ends, and starts each of
-// jobs' chains through host.Tasks. A chain that does not start is said, and its next start tries again.
-func startEvsJobsOnHost(ctx context.Context, lifetime *sync.WaitGroup, host *sidecar.ServiceHost, jobs []*evsJob, closeHost func()) {
+// Installs host for evs's jobs until ctx ends, with evsSettings the engine settings its runs take, this code's
+// defaults when nil, then removes both and ends what closeHost ends, and starts each of jobs' chains through
+// host.Tasks. A chain that does not start is said, and its next start tries again.
+func startEvsJobsOnHost(ctx context.Context, lifetime *sync.WaitGroup, host *sidecar.ServiceHost, evsSettings *evsservice.EvsSettings, jobs []*evsJob, closeHost func()) {
+	if evsSettings == nil {
+		evsSettings = evsservice.DefaultEvsSettings()
+	}
+	// the settings first and removed last, so no run finds the host without them
+	hostSettings := &evsJobHostSettings{host: host, evsSettings: evsSettings}
+	evsJobHostSettingsCurrent.Store(hostSettings)
 	evsJobHost.Store(host)
 	lifetime.Go(func() {
 		<-ctx.Done()
 		evsJobHost.CompareAndSwap(host, nil)
+		evsJobHostSettingsCurrent.CompareAndSwap(hostSettings, nil)
 		closeHost()
 	})
 	for _, job := range jobs {
