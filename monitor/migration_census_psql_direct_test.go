@@ -216,7 +216,7 @@ func (self *migrationCensusNativeDirect) launcher() string {
 // No inherited HOME, PATH, libpq service, password file, TLS, GSS or loader
 // configuration can redirect a private loopback connection or load host code.
 func (self *migrationCensusNativeDirect) environment() []string {
-	return []string{"PATH=" + filepath.Dir(self.proof.Launcher), "HOME=" + self.home, "LC_ALL=C", "LANG=C", "PGHOSTADDR=127.0.0.1", "PGSSLMODE=disable", "PGGSSENCMODE=disable", "PGPASSFILE=/nonexistent", "PGSERVICE=", "PGSERVICEFILE=/nonexistent", "PGSYSCONFDIR=" + self.home, "PSQL_HISTORY=/nonexistent", "OPENSSL_CONF=/nonexistent"}
+	return []string{"PATH=" + filepath.Dir(self.proof.Launcher), "HOME=" + self.home, "LC_ALL=C", "LANG=C", "PGHOSTADDR=127.0.0.1", "PGSSLMODE=disable", "PGGSSENCMODE=disable", "PGPASSFILE=/nonexistent", "PGSERVICEFILE=/nonexistent", "PGSYSCONFDIR=" + self.home, "PSQL_HISTORY=/nonexistent", "OPENSSL_CONF=/nonexistent"}
 }
 
 // An explicit portable owner is required even before disposable DB creation.

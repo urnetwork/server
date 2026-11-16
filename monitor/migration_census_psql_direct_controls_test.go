@@ -248,13 +248,21 @@ func TestMigrationCensusNativeDirectCarrierPreservesProductionArgvAndStdinProtoc
 	}
 	t.Setenv("PGPASSWORD", "synthetic-inherited-must-not-pass")
 	t.Setenv("LD_PRELOAD", "synthetic-inherited-loader-must-not-pass")
+	t.Setenv("PGSERVICE", "synthetic-inherited-service-must-not-pass")
+	t.Setenv("PGSERVICEFILE", "synthetic-inherited-servicefile-must-not-pass")
 	direct := &migrationCensusNativeDirect{proof: migrationCensusNativeDirectProof{Launcher: "/synthetic/launcher/psql"}, loader: "/synthetic/image/loader", psql: "/synthetic/image/psql", libraries: []string{"/synthetic/image/lib"}, home: t.TempDir()}
 	child := (&migrationCensusNativeBackend{direct: direct}).command(t.Context(), command)
 	if !reflect.DeepEqual(child.Args, []string{"/bin/sh", "-c", command}) || child.Dir != direct.home || child.WaitDelay != docker.WaitDelay ||
 		strings.Contains(strings.Join(child.Env, "\n"), "synthetic-inherited") {
 		t.Fatal("direct carrier changed production argv, join bound or inherited host secrets")
 	}
-	for _, required := range []string{"PATH=/synthetic/launcher", "HOME=" + direct.home, "PGHOSTADDR=127.0.0.1", "PGSSLMODE=disable", "PGPASSFILE=/nonexistent", "PGSERVICE="} {
+	// An empty service still activates libpq's service-file lookup.
+	for _, value := range child.Env {
+		if strings.HasPrefix(value, "PGSERVICE=") {
+			t.Fatal("direct child selected a libpq service, including an empty one")
+		}
+	}
+	for _, required := range []string{"PATH=/synthetic/launcher", "HOME=" + direct.home, "PGHOSTADDR=127.0.0.1", "PGSSLMODE=disable", "PGPASSFILE=/nonexistent", "PGSERVICEFILE=/nonexistent"} {
 		found := false
 		for _, value := range child.Env {
 			found = found || value == required
