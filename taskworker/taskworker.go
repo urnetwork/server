@@ -141,6 +141,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleSweepProxyExits(clientSession, tx)
 		work.ScheduleRemoveGoneStClientKeyHistory(clientSession, tx)
 		work.ScheduleRemoveExpiredSessionState(clientSession, tx)
+		// the lingering origins' side table past its prune time
+		// (model/contract_origin_linger.go)
+		work.ScheduleRemoveExpiredContractOriginLinger(clientSession, tx)
 		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
 		work.ScheduleSweepOrphanContractData(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
@@ -467,6 +470,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredSessionState,
 			work.RemoveExpiredSessionStatePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredContractOriginLinger,
+			work.RemoveExpiredContractOriginLingerPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.SweepOrphanNetworkClientData,

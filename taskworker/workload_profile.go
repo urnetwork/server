@@ -151,6 +151,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.SweepProxyExits), schedule: work.ScheduleSweepProxyExits},
 		{target: task.NewTaskTarget(work.RemoveGoneStClientKeyHistory), schedule: work.ScheduleRemoveGoneStClientKeyHistory},
 		{target: task.NewTaskTarget(work.RemoveExpiredSessionState), schedule: work.ScheduleRemoveExpiredSessionState},
+		{target: task.NewTaskTarget(work.RemoveExpiredContractOriginLinger), schedule: work.ScheduleRemoveExpiredContractOriginLinger},
 		{target: task.NewTaskTarget(work.SweepOrphanNetworkClientData), schedule: work.ScheduleSweepOrphanNetworkClientData},
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
 		{target: model.NewLegacyProviderTotalsTaskTarget()},

@@ -1,9 +1,9 @@
 # OPEN-SOURCE-ID-RETIRE — dropping transfer_contract_open_source_id for good (design, 11-16)
 
 The owner, 11-16 about 15:15Z: "redesign the queries that use it if possible, drop it for good."
-This is the design and the rollout. It is not implemented yet: it adds a table, a trigger on
-transfer_contract and a sweep, so it needs its own implementation slot and the owner's go on the two
-decisions in §5.
+This is the design and the rollout. The owner's decisions (11-16 about 16:45Z, "accept
+recommendations"): the trigger on transfer_contract, created by hand by the operator, and option A for
+the prober retention. §6 records how it was built.
 
 ## 1. What still needs the index
 
@@ -139,3 +139,49 @@ which queues writers behind it and waits for any vacuum.
 - **The sweep:** bounded batches, the prune time honoured, settings-driven.
 - **The monitor:** the table's and the trigger's catalog contracts; the drop record's contract.
 - **The merge set:** ./grafana covers any new metric, and the alert classes are classified.
+
+## 6. As built (11-16)
+
+**The side table** (`contract_origin_linger_schema.go`, `model/contract_origin_linger.go`):
+- One migration adds `contract_origin_linger` (vacuum never truncates it: the truncation's exclusive
+  lock would stall every close behind the trigger's insert), its prune time index, the one-row
+  `contract_origin_linger_state` and the capture function, each only when absent. It creates the
+  trigger only on a database with no contract (new and test databases). On Main the operator creates
+  it after db migrate, with the state row in the same transaction (`ContractOriginLingerOperatorSql`).
+  The tables and the function belong to db migrate's role, so the trigger's inserts run with the
+  application's own privileges.
+- The trigger's WHEN keeps a close whose deadline is ahead of its close time or of the database
+  clock, so a close stamped by an application clock that runs ahead stays readable.
+- Each closed arm reads the side table's pair range, then each contract in a fenced lateral lookup by
+  the primary key, with every original condition as one test outside any index condition
+  (`contractOriginLingerClosedSql`). With the pair conditions as index conditions the planner
+  hash-joined the side table with a pair range of `transfer_contract_open_source_id` itself; the plan
+  proofs pin the lookup with the index present and dropped.
+- **The switch.** The state row's complete time is the trigger's commit plus 75 minutes. Each process
+  reads it before the read's connection, at most every 30 s, and keeps the previous statements
+  (`model/contract_origin_linger_legacy.go`) until then, or while the row is absent. So no reader
+  depends on when the trigger is created or when the services roll: a nightly that migrates and rolls
+  before the operator's step stays exact. `urnetwork_contract_origin_linger_reads_total{path}` counts
+  both paths; `legacy` at zero everywhere is part of step 4.
+- **The sweep** (`work.RemoveExpiredContractOriginLinger`, every minute): batches of 5,000 rows past
+  their prune time, oldest first, at most 120 a run; deletes count in
+  `urnetwork_retention_deleted_rows_total{table="contract_origin_linger"}`, with
+  `urnetwork_contract_origin_linger_sweep_runs_total` and `..._sweep_lag_seconds`.
+- **The monitor** pins the tables, index, storage options and the capture body; at this version the
+  trigger is absent or exactly the published one (the operator's window is not drift). The drop
+  record requires it present and the index absent.
+
+**The prober retention, option A** (`model/prober_shard_retention.go`): the drop walks each dropped
+generation's contract id range once (`ProberShardContractWalk`, its cursor in the task args like the
+horizon reaper's): from the first pass's creation to the last pass's deadline, each widened by the
+contract id margin. Each batch reads at most 5,000 ids from the primary key's index entries, keeps at
+most 500 whose payer is one of the generation's pass networks, then classifies and deletes them as
+before. A generation's passes drop once its walk completes; a pass inside its deadline guard holds its
+generation's walk and the newer ones. Pacing: `maxWalkRowsPerSecond` (default 3,000, at most 20,000) on
+the rows read and `maxContractsPerSecond` on the contracts kept; metrics
+`urnetwork_prober_retention_walked_contracts_total` and
+`urnetwork_prober_retention_walk_cursor_timestamp_seconds`.
+
+**The record** (branch `feat/open-source-id-drop-record-1116`, merged after the drop): the index
+diet's `DROP INDEX CONCURRENTLY IF EXISTS` record, the monitor's contract for it, and the removal of the
+previous statements and the switch.
