@@ -710,3 +710,59 @@ func TestSidecarConfigFilesAreDark(t *testing.T) {
 		}
 	}
 }
+
+// QD-846: the certs switch is off unless the file says enabled: true, off on a
+// first read of a broken file, kept by a broken later read, and never listed
+// to a client.
+func TestSidecarConfigCertsSwitch(t *testing.T) {
+	networkId := NewId()
+	for _, c := range []struct {
+		text string
+		on   bool
+	}{
+		{"", false},
+		{"sidecar: {}\n", false},
+		{"sidecar:\n  certs: {}\n", false},
+		{"sidecar:\n  certs: {enabled: false}\n", false},
+		{"sidecar:\n  tlsedge: {enabled: true, percent: 100}\n  push: {enabled: true}\n", false},
+		{"sidecar:\n  certs: {enabled: true}\n", true},
+	} {
+		config, err := parseSidecarConfig([]byte(c.text))
+		if err != nil {
+			t.Fatalf("%q: %s", c.text, err)
+		}
+		if config.Certs() != c.on || config.Switch(SidecarSwitchCerts) != c.on {
+			t.Errorf("%q: certs is %t", c.text, config.Certs())
+		}
+		if slices.Contains(config.GatesFor(networkId), SidecarSwitchCerts) {
+			t.Errorf("%q: certs is listed to a client", c.text)
+		}
+	}
+
+	const on = "sidecar:\n  certs: {enabled: true}\n"
+	const broken = "sidecar:\n  certs: {enabled: true}\n  evs: {enabled: true, percent: fifty}\n"
+	newTestSidecarConfigHome(t)
+	if loadSidecarConfig(nil).Certs() {
+		t.Fatal("an absent file turns certs on")
+	}
+	func() {
+		defer Testing_PushSidecarConfig(broken)()
+		if loadSidecarConfig(nil).Certs() {
+			t.Fatal("a first read of a broken file turns certs on")
+		}
+	}()
+	var previous *SidecarConfig
+	func() {
+		defer Testing_PushSidecarConfig(on)()
+		previous = loadSidecarConfig(nil)
+	}()
+	if !previous.Certs() {
+		t.Fatal("the file did not turn certs on")
+	}
+	func() {
+		defer Testing_PushSidecarConfig(broken)()
+		if config := loadSidecarConfig(previous); !config.Certs() {
+			t.Fatal("a broken later read moved the switch")
+		}
+	}()
+}

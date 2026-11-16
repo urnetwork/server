@@ -17,7 +17,9 @@ package controller
 // waits for the chain that takes it to the CA (cert-1; QD-741).
 //
 // What the routes run on is installed per process (SetTlsCerts), as a gate's
-// states are. A process with nothing installed answers every route 503, and a
+// states are: api installs it only while sidecar.yml's certs switch is on
+// (InstallTlsCerts, tls_certs_install.go; QD-846), with the subject read from
+// the projection through AclGateView. A process with nothing installed answers every route 503, and a
 // subject the projection cannot answer for is 503 too, never an order with no
 // grant check. An order the gate does not grant is 403, a CSR or attestation
 // that does not check 400, and an order or certificate that is not the
@@ -153,6 +155,10 @@ func TlsCertOrder(ctx context.Context, token string, args *sidecar.TlsCertOrderA
 		// the projection cannot answer: no order is taken on a doubt
 		glog.Infof("[tls]cert-order has no subject: %v\n", err)
 		return nil, errTlsCertsUnavailable
+	}
+	if !subject.Granted {
+		// before the engine reads the request: a caller with no grant learns nothing of its CSR
+		return nil, errTlsCertsNotGranted
 	}
 	result, err := deps.Service.Accept(ctx, &certsservice.CertsOrderRequest{
 		NetworkId:         sidecar.Id(principal.NetworkId),

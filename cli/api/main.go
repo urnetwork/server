@@ -61,6 +61,11 @@ Options:
 	// Redis (QD-830), so POST /oauth/device_authorization serves and the
 	// issuer's metadata names it
 	oauth.InstallDeviceAuthorizationStore()
+	// §13.15's /tls routes (QD-846): certs' engine, store, authenticator and
+	// the subject read from the projection, installed only while sidecar.yml's
+	// certs switch is on; off, or with certs.yml or file-clusters-api.yml
+	// missing, every /tls route answers 503
+	controller.InstallTlsCerts(ctx)
 	if err := api.Run(ctx, api.RunOptions{Port: port}); err != nil {
 		panic(err)
 	}

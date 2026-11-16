@@ -49,6 +49,9 @@ const (
 	// §8.10's contract gate (ACL-M4-01): CreateContract consults the gate its
 	// process installed only while this is on
 	SidecarSwitchAclContractGate = "acl_contract_gate"
+	// §13.8's certs engine (QD-846): api's /tls routes and taskworker's certs
+	// chains are installed only while this is on
+	SidecarSwitchCerts = "certs"
 )
 
 // A network's bucket, 0 to 99: the first 8 bytes of SHA-256 over the id's 16
@@ -210,7 +213,8 @@ func (self *SidecarConfig) Format2() *SidecarFormat2Gate {
 	return self.format2
 }
 
-// Whether the named switch is on: push, wake, bridge or escrow_draw_order.
+// Whether the named switch is on: push, wake, bridge, escrow_draw_order,
+// acl_contract_gate or certs.
 func (self *SidecarConfig) Switch(name string) bool {
 	return self.switches[name]
 }
@@ -239,6 +243,12 @@ func (self *SidecarConfig) EscrowDrawOrder() bool {
 // installed one.
 func (self *SidecarConfig) AclContractGate() bool {
 	return self.Switch(SidecarSwitchAclContractGate)
+}
+
+// §13.8's certs switch (QD-846), which api's and taskworker's certs installs
+// follow: off, absent or unreadable on a first read, neither is installed.
+func (self *SidecarConfig) Certs() bool {
+	return self.Switch(SidecarSwitchCerts)
 }
 
 // Whether the file names escrow_draw_order at all, on or off. A file that names it
@@ -308,8 +318,8 @@ func (self *SidecarConfig) FileCluster(clusterId string) (SidecarFileCluster, bo
 // The gates open to one network, for §6's core topic and GET
 // /sidecar/sync/core's gates (plan-CORE-core-hint-body #2): each per-network
 // gate that admits it, in §19.11's order, then dns while it is enabled and the
-// client-visible switches that are on. wake and escrow_draw_order are the
-// server's own and never listed.
+// client-visible switches that are on. wake, escrow_draw_order,
+// acl_contract_gate and certs are the server's own and never listed.
 func (self *SidecarConfig) GatesFor(networkId Id) []string {
 	gates := []string{}
 	for _, name := range []string{SidecarGateEvs, SidecarGateFormat2, SidecarGateGkm, SidecarGateSockets, SidecarGateTlsedge, SidecarGateMxedge, SidecarGateSmtpedge} {

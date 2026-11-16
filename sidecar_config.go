@@ -24,6 +24,7 @@ import (
 //	  bridge: {enabled: false}
 //	  escrow_draw_order: {enabled: false}
 //	  acl_contract_gate: {enabled: false}
+//	  certs: {enabled: false}
 //	  reseed: false
 //	  place_new: meta-1
 //	  drained: []
@@ -45,6 +46,12 @@ import (
 // acl_contract_gate is not in it either: it is the switch ACL-M4-01's plan keeps
 // CreateContract's §8.10 gate dark behind, which a process consults only where it
 // installed a gate (controller.SetAclContractGate).
+// certs is QD-846's (question tls-m5-17-certs-host-install), which §19.11's list
+// picks up at the next records pass: certs' engine is installed in api (its /tls
+// routes) and in taskworker (its order, renewal and revocation chains) only
+// while it reads on, so nothing reaches a CA or a zone because a vault file
+// arrived, and the first real order is the owner's act (SidecarSwitchInstall).
+// It is the server's own, like wake, and never listed to a client.
 // evs's blocks is QD-639's (question quota-m2-10-evs-block-count), which §19.4's
 // evs row picks up at the next records pass: how many evs blocks serve the env,
 // set by the operator with services.yml's evs block count, as tlsedge.yml's
@@ -122,6 +129,7 @@ type sidecarConfigYaml struct {
 		Bridge            *sidecarSwitchYaml `yaml:"bridge"`
 		EscrowDrawOrder   *sidecarSwitchYaml `yaml:"escrow_draw_order"`
 		AclContractGate   *sidecarSwitchYaml `yaml:"acl_contract_gate"`
+		Certs             *sidecarSwitchYaml `yaml:"certs"`
 		Reseed            bool               `yaml:"reseed"`
 		RestoreHold       bool               `yaml:"restore_hold"`
 		PlaceNew          string             `yaml:"place_new"`
@@ -253,6 +261,7 @@ func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 		SidecarSwitchBridge:          y.Sidecar.Bridge,
 		SidecarSwitchEscrowDrawOrder: y.Sidecar.EscrowDrawOrder,
 		SidecarSwitchAclContractGate: y.Sidecar.AclContractGate,
+		SidecarSwitchCerts:           y.Sidecar.Certs,
 	} {
 		config.switches[name] = value != nil && value.Enabled
 	}
