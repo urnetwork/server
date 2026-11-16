@@ -623,9 +623,13 @@ type PaymentReconcileStoreResult struct {
 	UnknownToStore int `json:"unknown_to_store,omitempty"`
 	// examined Stripe renewals whose subscription was canceled inside a paid
 	// period nothing was refunded or disputed from, kept to the period's end
-	CanceledPaidThrough int  `json:"canceled_paid_through,omitempty"`
-	Skipped             bool `json:"skipped,omitempty"`
-	BudgetExhausted     bool `json:"budget_exhausted,omitempty"`
+	CanceledPaidThrough int `json:"canceled_paid_through,omitempty"`
+	// card gift orders whose check failed (payment_reconcile_gift.go): in the
+	// run's errors, not in Errors, so one order's failure never holds the
+	// store's watermark, which belongs to the invoice listing
+	GiftCheckoutErrors int  `json:"gift_checkout_errors,omitempty"`
+	Skipped            bool `json:"skipped,omitempty"`
+	BudgetExhausted    bool `json:"budget_exhausted,omitempty"`
 }
 
 type PaymentReconcileRunResult struct {

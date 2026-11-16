@@ -105,5 +105,20 @@ func TestGiftOrderStatusReportsCardPayment(t *testing.T) {
 		connect.AssertEqual(t, giftReportTestPoll(t, short).Status, model.GiftOrderStatusPending)
 		connect.AssertEqual(t, giftPurchaseTestCodeCount(t, ctx, short.GiftOrderId), 0)
 		connect.AssertEqual(t, countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketGift, model.PaymentReconcileActionCreditUnfulfillable, short.StripeSessionId), 1)
+
+		// paid, and its charge disputed or refunded since: never fulfilled by
+		// the poll (the hourly reconciler records it)
+		for _, change := range []func(charge map[string]any){
+			func(charge map[string]any) { charge["disputed"] = true },
+			func(charge map[string]any) { charge["amount_refunded"] = 100 },
+		} {
+			order := giftReportTestOrder(t, ctx, "cs_giftreport_kept_"+server.NewId().String())
+			session := giftReconcileTestSession(model.GetGiftOrder(ctx, order.GiftOrderId), "complete", "paid")
+			change(giftReconcileTestCharge(session))
+			env.setCheckoutSession(order.StripeSessionId, session)
+			connect.AssertEqual(t, giftReportTestPoll(t, order).Status, model.GiftOrderStatusPending)
+			connect.AssertEqual(t, env.checkoutSessionReadCount(order.StripeSessionId), 1)
+			connect.AssertEqual(t, giftPurchaseTestCodeCount(t, ctx, order.GiftOrderId), 0)
+		}
 	})
 }

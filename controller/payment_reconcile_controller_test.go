@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -424,6 +426,14 @@ func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 				"code": "resource_missing",
 			}})
 			return
+		}
+		// as Stripe: the payment intent and its charge are objects only when
+		// the read expands them; otherwise the session names the intent's id
+		if intent, ok := session["payment_intent"].(map[string]any); ok &&
+			!slices.Contains(r.URL.Query()["expand[]"], "payment_intent.latest_charge") {
+			collapsed := maps.Clone(session)
+			collapsed["payment_intent"] = intent["id"]
+			session = collapsed
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(session)

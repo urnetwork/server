@@ -59,21 +59,40 @@ func giftReconcileTestOrder(t testing.TB, ctx context.Context, sessionId string,
 }
 
 // giftReconcileTestSession is the order's Checkout session as Stripe answers
-// a read of it, for the order's total in usd.
+// a read of it, for the order's total in usd, with its payment intent and the
+// charge that paid it, kept whole (the fake answers them expanded only to a
+// read that expands them).
 func giftReconcileTestSession(order *model.GiftOrder, status string, paymentStatus string) map[string]any {
 	return map[string]any{
-		"id":               order.StripeSessionId,
-		"object":           "checkout.session",
-		"mode":             "payment",
-		"status":           status,
-		"payment_status":   paymentStatus,
-		"amount_total":     order.TotalCents,
-		"currency":         "usd",
-		"payment_intent":   "pi_" + order.StripeSessionId,
+		"id":             order.StripeSessionId,
+		"object":         "checkout.session",
+		"mode":           "payment",
+		"status":         status,
+		"payment_status": paymentStatus,
+		"amount_total":   order.TotalCents,
+		"currency":       "usd",
+		"payment_intent": map[string]any{
+			"id":     "pi_" + order.StripeSessionId,
+			"object": "payment_intent",
+			"latest_charge": map[string]any{
+				"id":              "ch_" + order.StripeSessionId,
+				"object":          "charge",
+				"status":          "succeeded",
+				"amount":          order.TotalCents,
+				"amount_refunded": 0,
+				"refunded":        false,
+				"disputed":        false,
+			},
+		},
 		"metadata":         map[string]string{"gift_order_id": order.GiftOrderId.String()},
 		"customer_details": map[string]any{"email": order.BuyerEmail},
 		"created":          order.CreateTime.Unix(),
 	}
+}
+
+// The charge of a session giftReconcileTestSession made, to change.
+func giftReconcileTestCharge(session map[string]any) map[string]any {
+	return session["payment_intent"].(map[string]any)["latest_charge"].(map[string]any)
 }
 
 // giftReconcileTestRun is one pass of the Stripe store.
@@ -473,10 +492,12 @@ func TestPaymentReconcileGiftCheckoutWindowBound(t *testing.T) {
 	})
 }
 
-// A failed read and a session Stripe does not know are each recorded as a
-// stripe error, and the next order is read and fulfilled: one bad order does
-// not stop the rest. Reads failing in a row stop the leg until the next run,
-// and the leg reads at most its cap of sessions per run.
+// A failed read and a session Stripe does not know are each the order's
+// error, and the next order is read and fulfilled: one bad order does not
+// stop the rest. An order's error is a stripe error row the store-error alert
+// reads, counted in the run's errors but never as a store error, so the
+// invoice listing's watermark advances beside it. Reads failing in a row stop
+// the leg until the next run.
 func TestPaymentReconcileGiftCheckoutStripeErrors(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -493,6 +514,9 @@ func TestPaymentReconcileGiftCheckoutStripeErrors(t *testing.T) {
 		result := giftReconcileTestRun(t, ctx, false)
 		connect.AssertEqual(t, result.Errors, 2)
 		connect.AssertEqual(t, result.Credited, 1)
+		connect.AssertEqual(t, result.StoreResults[model.SubscriptionMarketStripe].Errors, 0)
+		connect.AssertEqual(t, result.StoreResults[model.SubscriptionMarketStripe].GiftCheckoutErrors, 2)
+		connect.AssertEqual(t, giftReconcileTestStripeDetails(t, ctx, result.RunId)["gift_checkout_errors"], float64(2))
 		connect.AssertEqual(t, model.GetGiftOrder(ctx, paid.GiftOrderId).Status, model.GiftOrderStatusPaid)
 		connect.AssertEqual(t, giftReconcileTestCount(giftCheckoutReconcileResultError)-errorBefore, float64(2))
 		readError := giftReconcileTestEvents(ctx, result.RunId, model.SubscriptionMarketStripe, model.PaymentReconcileActionError, failing.StripeSessionId)
@@ -502,22 +526,23 @@ func TestPaymentReconcileGiftCheckoutStripeErrors(t *testing.T) {
 		notFound := giftReconcileTestEvents(ctx, result.RunId, model.SubscriptionMarketStripe, model.PaymentReconcileActionError, unknown.StripeSessionId)
 		connect.AssertEqual(t, len(notFound), 1)
 		connect.AssertEqual(t, notFound[0].Details["reason"], "session_not_found")
-		// the errors keep the invoice listing's watermark where it was
-		_, watermarked := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
-		connect.AssertEqual(t, watermarked, false)
+		// the orders' errors never hold the invoice listing's watermark
+		firstWatermark, watermarked := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, watermarked, true)
 
 		// both failures are read again next run; once Stripe answers, the
-		// errors stop and the watermark moves
+		// errors stop
 		env.setCheckoutSession(failing.StripeSessionId, giftReconcileTestSession(failing, "open", "unpaid"))
 		env.setCheckoutSession(unknown.StripeSessionId, giftReconcileTestSession(unknown, "expired", "unpaid"))
 		result = giftReconcileTestRun(t, ctx, false)
 		connect.AssertEqual(t, result.Errors, 0)
 		connect.AssertEqual(t, env.checkoutSessionReadCount(failing.StripeSessionId), 2)
 		connect.AssertEqual(t, env.checkoutSessionReadCount(unknown.StripeSessionId), 2)
-		_, watermarked = model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
-		connect.AssertEqual(t, watermarked, true)
+		secondWatermark, _ := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, secondWatermark.After(firstWatermark), true)
 
-		// Stripe fails every read: two in a row stop the leg
+		// Stripe fails every read: two in a row stop the leg, newest first,
+		// and the watermark still advances
 		previousMaxErrors := giftCheckoutReconcileMaxConsecutiveErrors
 		giftCheckoutReconcileMaxConsecutiveErrors = 2
 		t.Cleanup(func() { giftCheckoutReconcileMaxConsecutiveErrors = previousMaxErrors })
@@ -530,29 +555,160 @@ func TestPaymentReconcileGiftCheckoutStripeErrors(t *testing.T) {
 		env.failCheckoutSession(failing.StripeSessionId, http.StatusServiceUnavailable)
 		result = giftReconcileTestRun(t, ctx, false)
 		connect.AssertEqual(t, result.Errors, 2)
-		connect.AssertEqual(t, env.checkoutSessionReadCount(failing.StripeSessionId), 3)
-		connect.AssertEqual(t, env.checkoutSessionReadCount(outage[0].StripeSessionId), 1)
-		for _, order := range outage[1:] {
-			connect.AssertEqual(t, env.checkoutSessionReadCount(order.StripeSessionId), 0)
-		}
+		connect.AssertEqual(t, result.StoreResults[model.SubscriptionMarketStripe].Errors, 0)
+		connect.AssertEqual(t, env.checkoutSessionReadCount(outage[2].StripeSessionId), 1)
+		connect.AssertEqual(t, env.checkoutSessionReadCount(outage[1].StripeSessionId), 1)
+		connect.AssertEqual(t, env.checkoutSessionReadCount(outage[0].StripeSessionId), 0)
+		connect.AssertEqual(t, env.checkoutSessionReadCount(failing.StripeSessionId), 2)
 		connect.AssertEqual(t, giftReconcileTestStripeDetails(t, ctx, result.RunId)["gift_checkout_stopped_on_errors"], true)
+		thirdWatermark, _ := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
+		connect.AssertEqual(t, thirdWatermark.After(secondWatermark), true)
+	})
+}
 
-		// Stripe is back; the cap reads the two oldest
-		previousMaxCalls := giftCheckoutReconcileMaxCalls
-		giftCheckoutReconcileMaxCalls = 2
-		t.Cleanup(func() { giftCheckoutReconcileMaxCalls = previousMaxCalls })
-		env.setCheckoutSession(failing.StripeSessionId, giftReconcileTestSession(failing, "open", "unpaid"))
-		for _, order := range outage {
+// A burst of open sessions (a card-testing wave) larger than the cap does not
+// keep a recent payment waiting: the newest pending orders are read first, and
+// the cap keeps a reserve for the oldest, so they are reached too.
+func TestPaymentReconcileGiftCheckoutReachesARecentPaymentInABurst(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer disableAllReconcileStores(t)()
+		env := newGiftReconcileTest(t)
+		previousMaxCalls, previousOldestCalls := giftCheckoutReconcileMaxCalls, giftCheckoutReconcileOldestCalls
+		giftCheckoutReconcileMaxCalls, giftCheckoutReconcileOldestCalls = 4, 1
+		t.Cleanup(func() {
+			giftCheckoutReconcileMaxCalls, giftCheckoutReconcileOldestCalls = previousMaxCalls, previousOldestCalls
+		})
+
+		// six open sessions, ten to five hours old, and a payment from half an
+		// hour ago whose webhook never came
+		burst := []*model.GiftOrder{}
+		for hours := 10; 5 <= hours; hours -= 1 {
+			order := giftReconcileTestOrder(t, ctx, fmt.Sprintf("cs_giftrec_burst_%d", hours), 1, time.Duration(hours)*time.Hour)
 			env.setCheckoutSession(order.StripeSessionId, giftReconcileTestSession(order, "open", "unpaid"))
+			burst = append(burst, order)
 		}
+		paid := giftReconcileTestOrder(t, ctx, "cs_giftrec_burst_paid", 1, 30*time.Minute)
+		env.setCheckoutSession(paid.StripeSessionId, giftReconcileTestSession(paid, "complete", "paid"))
+
+		result := giftReconcileTestRun(t, ctx, false)
+		connect.AssertEqual(t, result.Errors, 0)
+		connect.AssertEqual(t, result.Credited, 1)
+		connect.AssertEqual(t, model.GetGiftOrder(ctx, paid.GiftOrderId).Status, model.GiftOrderStatusPaid)
+		details := giftReconcileTestStripeDetails(t, ctx, result.RunId)
+		connect.AssertEqual(t, details["gift_checkout_calls"], float64(4))
+		connect.AssertEqual(t, details["gift_checkout_calls_exhausted"], true)
+		// the newest three (the payment, five and six hours) and the oldest
+		connect.AssertEqual(t, env.checkoutSessionReadCount(paid.StripeSessionId), 1)
+		reads := map[int]int{}
+		for i, order := range burst {
+			reads[10-i] = env.checkoutSessionReadCount(order.StripeSessionId)
+		}
+		connect.AssertEqual(t, reads, map[int]int{10: 1, 9: 0, 8: 0, 7: 0, 6: 1, 5: 1})
+
+		// the next run moves on through the burst from both ends
 		result = giftReconcileTestRun(t, ctx, false)
 		connect.AssertEqual(t, result.Errors, 0)
-		details := giftReconcileTestStripeDetails(t, ctx, result.RunId)
-		connect.AssertEqual(t, details["gift_checkout_calls"], float64(2))
-		connect.AssertEqual(t, details["gift_checkout_calls_exhausted"], true)
-		connect.AssertEqual(t, env.checkoutSessionReadCount(failing.StripeSessionId), 4)
-		connect.AssertEqual(t, env.checkoutSessionReadCount(outage[0].StripeSessionId), 2)
-		connect.AssertEqual(t, env.checkoutSessionReadCount(outage[1].StripeSessionId), 0)
+		for i, order := range burst {
+			reads[10-i] = env.checkoutSessionReadCount(order.StripeSessionId)
+		}
+		connect.AssertEqual(t, reads, map[int]int{10: 2, 9: 0, 8: 0, 7: 1, 6: 2, 5: 2})
+	})
+}
+
+// A paid session whose charge was refunded (in whole or in part) or disputed
+// is never fulfilled: a dispute of an order with no codes voids nothing, so
+// its codes would go live mid-dispute, and a refund the webhook missed would
+// be given away. Each is recorded once (store stripe, refunded or disputed)
+// and not read again. A charge that has not settled, or that cannot be read,
+// is the order's error, read again next run. A dry run records only its
+// dry-run rows.
+func TestPaymentReconcileGiftCheckoutRefundedOrDisputedChargeIsNotFulfilled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer disableAllReconcileStores(t)()
+		env := newGiftReconcileTest(t)
+		refundedBefore := giftReconcileTestCount(giftCheckoutReconcileResultRefunded)
+		disputedBefore := giftReconcileTestCount(giftCheckoutReconcileResultDisputed)
+
+		paidSession := func(order *model.GiftOrder, change func(charge map[string]any)) map[string]any {
+			session := giftReconcileTestSession(order, "complete", "paid")
+			change(giftReconcileTestCharge(session))
+			return session
+		}
+		refunded := giftReconcileTestOrder(t, ctx, "cs_giftrec_charge_refunded", 1, time.Hour)
+		env.setCheckoutSession(refunded.StripeSessionId, paidSession(refunded, func(charge map[string]any) {
+			charge["amount_refunded"] = refunded.TotalCents
+			charge["refunded"] = true
+		}))
+		partial := giftReconcileTestOrder(t, ctx, "cs_giftrec_charge_partial", 3, 2*time.Hour)
+		env.setCheckoutSession(partial.StripeSessionId, paidSession(partial, func(charge map[string]any) {
+			charge["amount_refunded"] = partial.UnitPriceCents
+		}))
+		disputed := giftReconcileTestOrder(t, ctx, "cs_giftrec_charge_disputed", 1, 3*time.Hour)
+		env.setCheckoutSession(disputed.StripeSessionId, paidSession(disputed, func(charge map[string]any) {
+			charge["disputed"] = true
+		}))
+		pending := giftReconcileTestOrder(t, ctx, "cs_giftrec_charge_pending", 1, 4*time.Hour)
+		env.setCheckoutSession(pending.StripeSessionId, paidSession(pending, func(charge map[string]any) {
+			charge["status"] = "pending"
+		}))
+		unexpanded := giftReconcileTestOrder(t, ctx, "cs_giftrec_charge_unexpanded", 1, 5*time.Hour)
+		unexpandedSession := giftReconcileTestSession(unexpanded, "complete", "paid")
+		unexpandedSession["payment_intent"] = "pi_" + unexpanded.StripeSessionId
+		env.setCheckoutSession(unexpanded.StripeSessionId, unexpandedSession)
+
+		// a dry run: its own rows, nothing settled
+		result := giftReconcileTestRun(t, ctx, true)
+		connect.AssertEqual(t, result.Credited, 0)
+		dryRows := giftReconcileTestEvents(ctx, result.RunId, model.SubscriptionMarketStripe, model.PaymentReconcileActionDisputed, disputed.StripeSessionId)
+		connect.AssertEqual(t, len(dryRows), 1)
+		connect.AssertEqual(t, dryRows[0].DryRun, true)
+
+		result = giftReconcileTestRun(t, ctx, false)
+		connect.AssertEqual(t, result.Credited, 0)
+		// the unsettled and the unreadable charge: the orders' errors only
+		connect.AssertEqual(t, result.Errors, 2)
+		connect.AssertEqual(t, result.StoreResults[model.SubscriptionMarketStripe].Errors, 0)
+		for _, check := range []struct {
+			order  *model.GiftOrder
+			reason string
+		}{{pending, "charge_not_settled"}, {unexpanded, "charge"}} {
+			rows := giftReconcileTestEvents(ctx, result.RunId, model.SubscriptionMarketStripe, model.PaymentReconcileActionError, check.order.StripeSessionId)
+			connect.AssertEqual(t, len(rows), 1)
+			connect.AssertEqual(t, rows[0].Details["reason"], check.reason)
+		}
+		for _, check := range []struct {
+			order  *model.GiftOrder
+			action string
+		}{
+			{refunded, model.PaymentReconcileActionRefunded},
+			{partial, model.PaymentReconcileActionRefunded},
+			{disputed, model.PaymentReconcileActionDisputed},
+		} {
+			rows := giftReconcileTestEvents(ctx, result.RunId, model.SubscriptionMarketStripe, check.action, check.order.StripeSessionId)
+			connect.AssertEqual(t, len(rows), 1)
+			connect.AssertEqual(t, rows[0].DryRun, false)
+			connect.AssertEqual(t, rows[0].Details["leg"], stripeGiftCheckoutLegName)
+			connect.AssertEqual(t, rows[0].Details["gift_order"], check.order.GiftOrderId.String())
+			connect.AssertEqual(t, rows[0].Details["charge"], "ch_"+check.order.StripeSessionId)
+			connect.AssertEqual(t, countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionCredited, check.order.StripeSessionId), 0)
+		}
+		for _, order := range []*model.GiftOrder{refunded, partial, disputed, pending, unexpanded} {
+			connect.AssertEqual(t, model.GetGiftOrder(ctx, order.GiftOrderId).Status, model.GiftOrderStatusPending)
+			connect.AssertEqual(t, giftPurchaseTestCodeCount(t, ctx, order.GiftOrderId), 0)
+		}
+		connect.AssertEqual(t, giftReconcileTestCount(giftCheckoutReconcileResultRefunded)-refundedBefore, float64(2))
+		connect.AssertEqual(t, giftReconcileTestCount(giftCheckoutReconcileResultDisputed)-disputedBefore, float64(1))
+
+		// recorded: not read again; the errors are
+		result = giftReconcileTestRun(t, ctx, false)
+		for _, order := range []*model.GiftOrder{refunded, partial, disputed} {
+			connect.AssertEqual(t, env.checkoutSessionReadCount(order.StripeSessionId), 2)
+		}
+		for _, order := range []*model.GiftOrder{pending, unexpanded} {
+			connect.AssertEqual(t, env.checkoutSessionReadCount(order.StripeSessionId), 3)
+		}
 	})
 }
 
@@ -598,10 +754,11 @@ func TestGiftCheckoutPaysTotal(t *testing.T) {
 	connect.AssertEqual(t, giftCheckoutPaysTotal(session(3999, ""), 3999), false)
 }
 
-// A session Stripe does not know is an error, which holds the stripe
-// watermark, until it has persisted through the bounded retry; then it is
-// recorded once as unknown_to_store and is no longer an error. It is still
-// read every run, so a later answer is reconciled as usual.
+// A session Stripe does not know is the order's error (never a store error,
+// so the stripe watermark advances) until it has persisted through the
+// bounded retry; then it is recorded once as unknown_to_store and is no
+// longer an error. It is still read every run, so a later answer is
+// reconciled as usual.
 func TestPaymentReconcileGiftCheckoutUnknownSessionBoundedRetry(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -616,12 +773,15 @@ func TestPaymentReconcileGiftCheckoutUnknownSessionBoundedRetry(t *testing.T) {
 		for run := 1; run <= 2; run += 1 {
 			result := giftReconcileTestRun(t, ctx, false)
 			connect.AssertEqual(t, result.Errors, 1)
+			connect.AssertEqual(t, result.StoreResults[model.SubscriptionMarketStripe].Errors, 0)
+			connect.AssertEqual(t, result.StoreResults[model.SubscriptionMarketStripe].GiftCheckoutErrors, 1)
 			errors := giftReconcileTestEvents(ctx, result.RunId, model.SubscriptionMarketStripe, model.PaymentReconcileActionError, order.StripeSessionId)
 			connect.AssertEqual(t, len(errors), 1)
 			connect.AssertEqual(t, errors[0].Details["reason"], giftCheckoutSessionNotFoundReason)
 		}
+		// the order's errors never held the invoice listing's watermark
 		_, watermarked := model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
-		connect.AssertEqual(t, watermarked, false)
+		connect.AssertEqual(t, watermarked, true)
 
 		// the third run spends the last retry: recorded once, not an error
 		result := giftReconcileTestRun(t, ctx, false)
@@ -632,8 +792,6 @@ func TestPaymentReconcileGiftCheckoutUnknownSessionBoundedRetry(t *testing.T) {
 		connect.AssertEqual(t, recorded[0].Details["leg"], stripeGiftCheckoutLegName)
 		connect.AssertEqual(t, recorded[0].Details["reason"], giftCheckoutSessionNotFoundReason)
 		connect.AssertEqual(t, giftReconcileTestCount(giftCheckoutReconcileResultUnknownToStore)-unknownBefore, float64(1))
-		_, watermarked = model.GetPaymentReconcileWatermark(ctx, model.SubscriptionMarketStripe)
-		connect.AssertEqual(t, watermarked, true)
 
 		// still read, still not an error, recorded once
 		result = giftReconcileTestRun(t, ctx, false)

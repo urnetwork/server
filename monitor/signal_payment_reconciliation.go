@@ -345,6 +345,8 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 			}
 			if state.store == "stripe" {
 				storeErrorFinding.action += " For credit-leg failures, compare bounded reason counts with the executing Taskworker source. Verify both destination_deleted and destination_unresolved terminal classifications and mandatory audit persistence; deploy the correction if missing. Absent credit_unfulfillable events alone do not prove either capability or a clean payment cohort. Keep malformed or incomplete provider data, transport failures, and audit-write failures as errors."
+				// the gift leg's orders (controller/payment_reconcile_gift.go)
+				storeErrorFinding.action += " Error rows with leg gift_checkout are one card gift order's own failure, with its reason and gift order in the restricted audit trail: they alert here but never hold the stripe watermark, so a fresh watermark beside them does not mean the order was checked."
 			}
 			if state.store == "x402" {
 				storeErrorFinding.mechanism = "The always-enabled local x402 leg retries settled_not_granted grants without external store credentials. Recorded local validation, grant or persistence failures can hold its watermark while other stores and the global heartbeat remain current; this aggregate does not identify the failed stage."

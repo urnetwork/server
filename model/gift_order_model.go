@@ -588,24 +588,31 @@ type PendingStripeGiftOrder struct {
 }
 
 // The payment_reconciliation_event actions of store stripe that settle a card
-// order's Checkout session unpaid for good, each recorded once per session
-// (evidence the session id): the session expired (the reconciler read it,
-// PaymentReconcileActionCheckoutExpired), or its delayed payment failed (the
+// order's Checkout session for good, each recorded once per session (evidence
+// the session id): the session expired (the reconciler read it,
+// PaymentReconcileActionCheckoutExpired) or its delayed payment failed (the
 // checkout.session.async_payment_failed webhook,
-// PaymentReconcileActionPaymentFailed). Neither session can be paid again. A
-// session that paid another amount or currency than its order (store gift,
-// PaymentReconcileActionCreditUnfulfillable, reason gift_payment_mismatch)
-// is settled too: an operator settles it, and no read of Stripe changes it.
+// PaymentReconcileActionPaymentFailed), so it can never be paid; or it was
+// paid and its charge was refunded or disputed before the order was fulfilled
+// (the reconciler read it, PaymentReconcileActionRefunded,
+// PaymentReconcileActionDisputed), so it is never fulfilled. The webhooks'
+// own refunded and disputed records name a refund or a dispute, never a
+// session. A session that paid another amount or currency than its order
+// (store gift, PaymentReconcileActionCreditUnfulfillable, reason
+// gift_payment_mismatch) is settled too. An operator settles the paid ones,
+// and no read of Stripe changes them.
 var stripeGiftCheckoutSettledActions = []string{
 	PaymentReconcileActionCheckoutExpired,
 	PaymentReconcileActionPaymentFailed,
+	PaymentReconcileActionRefunded,
+	PaymentReconcileActionDisputed,
 }
 
 // ListPendingStripeGiftOrdersInConn lists the card orders still pending that
 // were made in [createdFrom, createdBefore) and are keyed to a Checkout
 // session that no settled record names (stripeGiftCheckoutSettledActions, and
-// a gift credit_unfulfillable), at most limit, oldest first. The hourly
-// payment reconciler reads each one's session from Stripe
+// a gift credit_unfulfillable), at most limit, newest first or oldest first.
+// The hourly payment reconciler reads each one's session from Stripe
 // (controller/payment_reconcile_gift.go). A settled record is written after
 // its order was made, so only records from createdFrom on are read.
 func ListPendingStripeGiftOrdersInConn(
@@ -613,8 +620,14 @@ func ListPendingStripeGiftOrdersInConn(
 	ctx context.Context,
 	createdFrom time.Time,
 	createdBefore time.Time,
+	newestFirst bool,
 	limit int,
 ) (orders []*PendingStripeGiftOrder) {
+	// a source literal, never input
+	orderBy := "gift_order.create_time, gift_order.gift_order_id"
+	if newestFirst {
+		orderBy = "gift_order.create_time DESC, gift_order.gift_order_id DESC"
+	}
 	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -643,7 +656,7 @@ func ListPendingStripeGiftOrdersInConn(
 							NOT event.dry_run AND
 							$3 <= event.event_time
 					)
-				ORDER BY gift_order.create_time, gift_order.gift_order_id
+				ORDER BY `+orderBy+`
 				LIMIT $9
 			`,
 			GiftRailStripe,

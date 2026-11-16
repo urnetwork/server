@@ -23,9 +23,10 @@ package controller
 // The dialog's poll of a card order still pending is the buyer's report of the
 // payment, as VerifyStripeCheckout is for a data pack: at most once per order
 // every giftCheckoutReportInterval, across the api's processes, the order's
-// Checkout session is read from Stripe, and a paid one is fulfilled through
-// the webhook's own path (stripeFulfillGiftCheckoutInConn), so the buyer sees
-// the order paid even when the webhook is late or lost. Whichever of the
+// Checkout session is read from Stripe, and a paid one whose charge was kept
+// whole (neither refunded nor disputed) is fulfilled through the webhook's
+// own path (stripeFulfillGiftCheckoutInConn), so the buyer sees the order paid
+// even when the webhook is late or lost. Whichever of the
 // poll, the webhook and the hourly reconciler reports the session first pays
 // the order; the others find it paid. A poll that cannot read Stripe answers
 // the order as stored.
@@ -150,9 +151,10 @@ var giftCheckoutReportGateFunc = func(ctx context.Context, giftOrderId server.Id
 
 // giftReportCardOrder is the order as the buyer's poll answers it: a card
 // order still pending whose report is due has its session read from Stripe,
-// and is fulfilled through the webhook's path when the session is paid (see
-// the header). Every other order, and an order whose session cannot be read,
-// is answered as stored.
+// and is fulfilled through the webhook's path when the session is paid and
+// its charge kept whole (see the header). Every other order, an order whose
+// session or charge cannot be read, and one whose charge was refunded or
+// disputed (the hourly reconciler records it), is answered as stored.
 func giftReportCardOrder(clientSession *session.ClientSession, order *model.GiftOrder) *model.GiftOrder {
 	if order.Rail != model.GiftRailStripe || order.Status != model.GiftOrderStatusPending || order.StripeSessionId == "" {
 		return order
@@ -174,6 +176,17 @@ func giftReportCardOrder(clientSession *session.ClientSession, order *model.Gift
 	}
 	checkoutComplete := checkoutSession.completedObject()
 	if !stripeCheckoutSessionPaid(checkoutComplete) {
+		return order
+	}
+	// paid is not enough: a refunded or disputed charge is never fulfilled
+	// (payment_reconcile_gift.go)
+	charge, err := stripeCheckoutSessionCharge(checkoutSession)
+	if err != nil {
+		glog.Infof("[gift]checkout %s of gift order %s is paid; its charge could not be judged for its buyer's report: %s\n", order.StripeSessionId, order.GiftOrderId, err)
+		return order
+	}
+	if state := giftCheckoutChargeState(charge); state != giftCheckoutChargeKept {
+		glog.Infof("[gift]checkout %s of gift order %s is paid and its charge %s is %s: not fulfilled by its buyer's report\n", order.StripeSessionId, order.GiftOrderId, charge.Id, state)
 		return order
 	}
 	outcome, err := stripeFulfillGiftCheckoutInConn(nil, ctx, checkoutComplete, giftCheckoutAudit{leg: "client_report"})
