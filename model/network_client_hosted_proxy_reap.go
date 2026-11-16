@@ -117,10 +117,10 @@ const removeHostedProxyClientsSql = `
 // Hard deletes the hosted proxies deactivated more than ReapAfterDeactivate
 // before now, one short transaction per page, with their dependents after each
 // commit (removeReapedNetworkClientDependents: proxy_device_config,
-// proxy_client and its change rows, provide keys, certificates, the device
-// once nothing else references it, and Redis state). A run stops at the end of
-// proxy_device_config (passComplete, with the zero cursor), at MaxRemoveCount
-// deletions or at the run budget (more).
+// proxy_client and its change rows, provide keys, certificates, location
+// reliability rows, the device once nothing else references it, and Redis
+// state). A run stops at the end of proxy_device_config (passComplete, with
+// the zero cursor), at MaxRemoveCount deletions or at the run budget (more).
 func RemoveRetiredHostedProxyClients(
 	ctx context.Context,
 	now time.Time,
