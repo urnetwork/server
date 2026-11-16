@@ -233,7 +233,8 @@ in batches. A contract is deleted, with its closes, escrows, sweeps, reports and
 extenders, when it is resolved, its close time is before the horizon, its escrows are
 settled and its sweeps discharged. The cursor then moves to the batch's last id,
 **whether or not the batch's contracts were deleted**. A pass that reaches the horizon
-starts over from the oldest contract once it began `RescanInterval` (30 days) ago.
+starts over from the oldest contract once it began `RescanInterval` ago: 30 days when
+this was written, 7 days since the owner's go on 11-16 (§6).
 
 **What happens once it is caught up.** At the horizon the window holds contracts
 created in the last few minutes before `now − 35 days`. They close 12 minutes or more
@@ -282,7 +283,8 @@ shape:
 - The pile skipped since 11-12 must go now, not at the 12-01 rescan: an immediate
   rescan from the oldest contract. A shorter `RescanInterval` (7 days instead of 30)
   does that on the first caught-up run, since the current pass began 11-01, and keeps
-  later rescans cheap.
+  later rescans cheap. *(11-16: I1 started its new pass at 11-15 23:05Z itself; the
+  7-day interval came after it, for the contracts that pass keeps, §6.)*
 - A test that fails on today's code: contracts created 5 minutes before the horizon
   and closed 12 minutes after creation; a caught-up run must not move past them, and
   once their closes pass the horizon a later run deletes them.
@@ -856,6 +858,17 @@ and the backup runs' durations.
   full indexes after the backlog delete.
 - **I4**, dropping the legacy work-session events: approved about 20:55Z, done tonight.
 - **PostgreSQL 18.7 first,** then 19.
+
+**Decided on 11-16:**
+- **The reaper rescans weekly** (`ContractHorizonSettings.RescanInterval` 30 → 7 days),
+  approved about 03:45Z; it ships with the next taskworker. The pass I1 started at 11-15
+  23:05Z moves past what it keeps as `payment_review`, `payment_recent` or
+  `unsettled`. About 5.8M `payment_recent` contracts qualify about 11-19/20: with 30
+  days they waited until about 12-15, weekly they go about 11-22. The cost: each week
+  the rescan rereads the roughly 21M contracts kept for their payments at about 1,900 a
+  second, about three hours. A pass still behind its horizon when the week ends reads
+  on from its cursor and starts over once it reaches the horizon, as before. The 2,000/s
+  cap, the batch bounds, the 35-day floor and the 2-hour `CloseSettleTime` are unchanged.
 
 **Open:**
 1. **Queue tables (I5):** the recommended partition-and-swap design, or VACUUM FULL in a
