@@ -621,6 +621,54 @@ func deletedUserIdsInTx(ctx context.Context, tx server.PgTx, userIds []server.Id
 	return goneUserIds
 }
 
+// The users that rows still name together with the deleted networks: the
+// deletion of an account before 2026-11-16 left no record of its admin user,
+// so the cleanup of a past deletion finds the user here, in the rows that
+// name both. Only users whose rows are gone are ever touched
+// (deletedUserIdsInTx). Reads only.
+func deletedNetworkUserIds(ctx context.Context, networkIds []server.Id) []server.Id {
+	userIds := []server.Id{}
+	if len(networkIds) == 0 {
+		return userIds
+	}
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		userIds = []server.Id{}
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT DISTINCT named.user_id
+				FROM (
+					SELECT user_id FROM account_feedback WHERE network_id = ANY($1)
+					UNION ALL
+					SELECT user_id FROM auth_code WHERE network_id = ANY($1)
+					UNION ALL
+					SELECT user_id FROM feedback_log_upload WHERE network_id = ANY($1)
+					UNION ALL
+					SELECT user_id FROM lag_guest WHERE network_id = ANY($1)
+					UNION ALL
+					SELECT user_id FROM oauth_consent WHERE network_id = ANY($1)
+					UNION ALL
+					SELECT user_id FROM oauth_refresh_token WHERE network_id = ANY($1)
+					UNION ALL
+					SELECT user_id FROM oauth_authorization_code WHERE network_id = ANY($1)
+					UNION ALL
+					SELECT user_id FROM subscription_payment WHERE network_id = ANY($1)
+				) AS named
+				WHERE named.user_id IS NOT NULL
+			`,
+			idStrings(networkIds),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var userId server.Id
+				server.Raise(result.Scan(&userId))
+				userIds = append(userIds, userId)
+			}
+		})
+	}, server.TxReadCommitted, server.OptReadOnly())
+	return userIds
+}
+
 // Removes what a deleted network left, as far as RunBudget allows: its own
 // rows and its users', then its clients, then its devices. A client is
 // deactivated first and hard deleted ClientReapAfterDeactivate later, so a
@@ -675,13 +723,15 @@ func RemoveDeletedNetworkData(
 		return
 	}
 
-	// the network's and its users' own rows
+	// the network's and its users' own rows; the users the deletion handed
+	// over, and those the network's rows name, found before those rows go
+	userIds := append(slices.Clone(deletedNetwork.UserIds), deletedNetworkUserIds(ctx, []server.Id{networkId})...)
 	for {
 		if !budgetLeft() {
 			cleanupResult.More = true
 			return
 		}
-		full := removeDeletedNetworkRows(ctx, []server.Id{networkId}, deletedNetwork.UserIds, settings, cleanupResult)
+		full := removeDeletedNetworkRows(ctx, []server.Id{networkId}, userIds, settings, cleanupResult)
 		if !full {
 			break
 		}
@@ -800,8 +850,9 @@ func DeletedNetworksWithClientsOrDevices(ctx context.Context, networkIds []serve
 // round trip each, for `bringyourctl network cleanup-deleted`: most networks a
 // past deletion left have no client or device left
 // (DeletedNetworksWithClientsOrDevices), only a few rows, so a pass for many
-// networks replaces many runs. Networks that exist are left alone. Returns
-// the rows deleted by table.
+// networks replaces many runs. The rows of the users their rows name go too
+// (deletedNetworkUserIds). Networks and users that exist are left alone.
+// Returns the rows deleted by table.
 func RemoveDeletedNetworksRows(
 	ctx context.Context,
 	networkIds []server.Id,
@@ -813,8 +864,9 @@ func RemoveDeletedNetworksRows(
 			countDeletedNetworkCleanupRows(table, count)
 		}
 	}()
+	userIds := deletedNetworkUserIds(ctx, networkIds)
 	for {
-		full := removeDeletedNetworkRows(ctx, networkIds, nil, settings, cleanupResult)
+		full := removeDeletedNetworkRows(ctx, networkIds, userIds, settings, cleanupResult)
 		if !full || ctx.Err() != nil {
 			break
 		}
@@ -1403,7 +1455,9 @@ type DeletedNetworkData struct {
 
 // Counts what the deleted networks left, in one read-only transaction per
 // network set. Networks that exist count nothing. The client-keyed and
-// device-keyed tables count the rows of the networks' clients and devices.
+// device-keyed tables count the rows of the networks' clients and devices,
+// and the user tables those of the users given and of the users the
+// networks' rows name (deletedNetworkUserIds).
 func CountDeletedNetworkData(
 	ctx context.Context,
 	networkIds []server.Id,
@@ -1413,6 +1467,7 @@ func CountDeletedNetworkData(
 ) *DeletedNetworkData {
 	data := &DeletedNetworkData{RowCounts: map[string]int64{}}
 	dueTime := now.UTC().Add(-settings.ClientReapAfterDeactivate)
+	userIds = append(slices.Clone(userIds), deletedNetworkUserIds(ctx, networkIds)...)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		data = &DeletedNetworkData{RowCounts: map[string]int64{}}
 		goneNetworkIds := []server.Id{}
