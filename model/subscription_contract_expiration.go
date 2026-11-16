@@ -19,10 +19,12 @@ const DefaultContractExpiration = 60 * time.Minute
 // deadline, which never exceeds creation plus the lifetime above, and a close
 // follows creation: this close-time bound admits every unexpired closed origin.
 //
-// Every origin read also bounds contract_id below (unexpiredContractIdAge),
-// which keeps a closed origin read an index range on
-// transfer_contract_open_source_id (open, source_id, destination_id,
-// contract_id) instead of the pair's whole closed history.
+// A closed origin read takes the pair's early closes from the side table
+// contract_origin_linger, which a trigger fills on every close before the
+// deadline, then each contract by its primary key (contract_origin_linger.go);
+// every origin read also bounds contract_id below (unexpiredContractIdAge).
+// The side table's warmup after the operator creates its trigger is this
+// linger plus the contract id margin (server contract_origin_linger_schema.go).
 const CompanionOriginCloseLinger = DefaultContractExpiration
 
 // Reads the actual committed deadline for the signed contract response. Legacy

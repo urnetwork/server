@@ -2284,7 +2284,9 @@ var ErrMissingCompanionOrigin = fmt.Errorf("Missing origin contract for companio
 // createCompanionTransferEscrow, which differ only in companion_contract_id.
 // $1 and $2 are the origin's source and destination, the companion's reverse;
 // $3 is the earliest close time of a lingering origin. Like those selections,
-// both branches are bounded by the contract id (see unexpiredContractIdAge),
+// the open branch is bounded by the contract id (see unexpiredContractIdAge),
+// and the closed branch reads the pair's lingering contract ids from the side
+// table, then each contract by its primary key (contractOriginLingerClosedSql),
 // so each reads only the pair's recent contracts.
 var companionOriginExistsSql = `
 	SELECT EXISTS (
@@ -2300,16 +2302,7 @@ var companionOriginExistsSql = `
 			source_id = $1 AND
 			destination_id = $2
 	) OR EXISTS (
-		SELECT 1 FROM transfer_contract
-		WHERE
-			open = false AND
-			$3 <= close_time AND
-			-- ids lead with their creation millisecond: an unexpired
-			-- contract's id is at least this bound
-			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
-			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-			source_id = $1 AND
-			destination_id = $2
+		SELECT 1 FROM ` + contractOriginLingerClosedSql + ` AS closed_origin
 	)
 `
 
@@ -2328,13 +2321,17 @@ func companionOriginExists(
 	destinationId server.Id,
 	originContractTimeout time.Duration,
 ) (exists bool) {
+	existsSql := companionOriginExistsSql
+	if !contractOriginLingerReads.ready(ctx) {
+		existsSql = legacyCompanionOriginExistsSql
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		leaveRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionOriginPrecheck)
 		defer leaveRead()
 		// the origin direction is reversed
 		server.Raise(conn.QueryRow(
 			ctx,
-			companionOriginExistsSql,
+			existsSql,
 			destinationId,
 			sourceId,
 			server.NowUtc().Add(-originContractTimeout),
@@ -2411,6 +2408,10 @@ func createCompanionTransferEscrow(
 	var inheritedPayer *server.Id
 	var companionContractId *server.Id
 	var proberReservationByteCount *ByteCount
+	// The closed origin arms read the side table once it is complete, and
+	// their previous statements before (contract_origin_linger.go). Decided
+	// before the payer's turn and any connection.
+	lingerReads := contractOriginLingerReads.ready(ctx)
 	// Each read is an autocommit statement, so no transaction is open across
 	// the selection, the payer handoff or the reservation. Like any read
 	// committed statement it reads the latest committed origins.
@@ -2427,9 +2428,12 @@ func createCompanionTransferEscrow(
 		// Keep the full eligible maximum for every request above that anchor.
 		leavePlainOriginRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
 		defer leavePlainOriginRead()
-		result, err := conn.Query(
-			ctx,
-			`
+		var result server.PgResult
+		var err error
+		if lingerReads {
+			result, err = conn.Query(
+				ctx,
+				`
                 SELECT contract_id,
                     CASE WHEN transfer_byte_count >= $5::bigint THEN NULL
                     WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
@@ -2445,12 +2449,8 @@ func createCompanionTransferEscrow(
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
                             UNION ALL
-                            SELECT transfer_byte_count FROM transfer_contract
-                            WHERE open = false AND $3 <= close_time AND
-                                contract_id >= `+unexpiredContractIdFloorSql+` AND
-                                COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-                                source_id = $1 AND destination_id = $2 AND
-                                companion_contract_id IS NULL
+                            SELECT transfer_byte_count FROM `+contractOriginLingerClosedSql+` AS closed_origin
+                            WHERE companion_contract_id IS NULL
                         ) AS eligible_probe_origins
                     )) END AS prober_reservation_byte_count
                 FROM (
@@ -2478,19 +2478,10 @@ func createCompanionTransferEscrow(
                         SELECT contract_id, create_time, transfer_byte_count
                         FROM (
                             SELECT contract_id, create_time, transfer_byte_count
-                            FROM transfer_contract
-                            WHERE
-                                open = false AND
-                                $3 <= close_time AND
-                                -- ids lead with their creation millisecond: an
-                                -- unexpired contract's id is at least this bound
-                                contract_id >= `+unexpiredContractIdFloorSql+` AND
-                                COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-                                source_id = $1 AND
-                                destination_id = $2 AND
-                                companion_contract_id IS NULL
-                            -- read the bounded pair range whole: no ordered
-                            -- scan of another index may serve the LIMIT
+                            FROM `+contractOriginLingerClosedSql+` AS lingering_origin
+                            WHERE companion_contract_id IS NULL
+                            -- read the pair's lingering rows whole: no
+                            -- ordered scan of another index may serve the LIMIT
                             OFFSET 0
                         ) AS closed_origin
                         ORDER BY create_time ASC
@@ -2499,21 +2490,33 @@ func createCompanionTransferEscrow(
 
                     -- the two branches are disjoint on open, so the global
                     -- earliest is the earlier of each branch's earliest; each
-                    -- inner query is a bounded index range (the open pair
-                    -- partial indexes, and transfer_contract_open_source_id
-                    -- bounded by the contract id), which keeps the planner off
-                    -- the create_time full scan
+                    -- inner query is bounded (the open pair partial indexes
+                    -- bounded by the contract id, and the side table's pair
+                    -- range with each contract's primary key), which keeps
+                    -- the planner off the create_time full scan
                     ORDER BY create_time ASC
                     LIMIT 1
                 ) AS earliest_origin
             `,
-			// note the origin direction is reversed
-			destinationId,
-			sourceId,
-			server.NowUtc().Add(-originContractTimeout),
-			destinationNetworkId,
-			requestedBytes,
-		)
+				// note the origin direction is reversed
+				destinationId,
+				sourceId,
+				server.NowUtc().Add(-originContractTimeout),
+				destinationNetworkId,
+				requestedBytes,
+			)
+		} else {
+			result, err = conn.Query(
+				ctx,
+				legacyCompanionPlainOriginSql,
+				// note the origin direction is reversed
+				destinationId,
+				sourceId,
+				server.NowUtc().Add(-originContractTimeout),
+				destinationNetworkId,
+				requestedBytes,
+			)
+		}
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&companionContractId, &proberReservationByteCount))
@@ -2541,9 +2544,12 @@ func createCompanionTransferEscrow(
 			// direction).
 			leaveFallbackOriginRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionFallbackOrigin)
 			defer leaveFallbackOriginRead()
-			result, err := conn.Query(
-				ctx,
-				`
+			var result server.PgResult
+			var err error
+			if lingerReads {
+				result, err = conn.Query(
+					ctx,
+					`
                     SELECT contract_id,
                         CASE WHEN transfer_byte_count >= $7::bigint THEN NULL
                         WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
@@ -2563,12 +2569,8 @@ func createCompanionTransferEscrow(
                                 UNION ALL
                                 SELECT transfer_byte_count, payer_network_id,
                                     source_network_id, destination_network_id
-                                FROM transfer_contract
-                                WHERE open = false AND $3 <= close_time AND
-                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
-                                    COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-                                    source_id = $1 AND destination_id = $2 AND
-                                    companion_contract_id IS NOT NULL
+                                FROM `+contractOriginLingerClosedSql+` AS closed_companion_origin
+                                WHERE companion_contract_id IS NOT NULL
                                 -- Filter private ownership outside the pair boundary;
                                 -- false-zero stats must not substitute a payer scan.
                                 OFFSET 0
@@ -2608,15 +2610,8 @@ func createCompanionTransferEscrow(
                             FROM (
                                 SELECT contract_id, create_time, transfer_byte_count,
                                     payer_network_id, source_network_id, destination_network_id
-                                FROM transfer_contract
-                                WHERE
-                                    open = false AND
-                                    $3 <= close_time AND
-                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
-                                    COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-                                    source_id = $1 AND
-                                    destination_id = $2 AND
-                                    companion_contract_id IS NOT NULL
+                                FROM `+contractOriginLingerClosedSql+` AS lingering_companion_origin
+                                WHERE companion_contract_id IS NOT NULL
                                 OFFSET 0
                             ) AS closed_companion_origin
                             ORDER BY create_time ASC
@@ -2627,14 +2622,27 @@ func createCompanionTransferEscrow(
                         LIMIT 1
                     ) AS earliest_companion_origin
                 `,
-				destinationId,
-				sourceId,
-				server.NowUtc().Add(-originContractTimeout),
-				payerNetworkId,
-				sourceNetworkId,
-				destinationNetworkId,
-				requestedBytes,
-			)
+					destinationId,
+					sourceId,
+					server.NowUtc().Add(-originContractTimeout),
+					payerNetworkId,
+					sourceNetworkId,
+					destinationNetworkId,
+					requestedBytes,
+				)
+			} else {
+				result, err = conn.Query(
+					ctx,
+					legacyCompanionChainedOriginSql,
+					destinationId,
+					sourceId,
+					server.NowUtc().Add(-originContractTimeout),
+					payerNetworkId,
+					sourceNetworkId,
+					destinationNetworkId,
+					requestedBytes,
+				)
+			}
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
 					server.Raise(result.Scan(&companionContractId, &proberReservationByteCount, &inheritedPayer))

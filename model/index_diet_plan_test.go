@@ -8,10 +8,11 @@ package model
 //     primary key once transfer_contract_open_payer_network_id_transfer_byte_count
 //     is gone;
 //   - the force-close deadline pages read their own partial indexes once
-//     transfer_contract_create_time is gone;
-//   - the companion lingering-origin arm reads closed contracts of one pair
-//     as a range of transfer_contract_open_source_id, which an index of open
-//     rows only cannot replace.
+//     transfer_contract_create_time is gone.
+//
+// The companion lingering-origin arms read the side table and the primary key
+// instead of transfer_contract_open_source_id; their plan proofs are in
+// contract_origin_linger_plan_test.go.
 
 import (
 	"context"
@@ -264,99 +265,6 @@ func TestCloseDeadlinePagesNeedNoCreateTimeIndex(t *testing.T) {
 			reads := scans[0].reads
 			if len(reads) != 1 || reads[0].index != page.index {
 				t.Fatalf("without transfer_contract_create_time the page reads %v, want %s:\n%s", reads, page.index, raw)
-			}
-		}
-	})
-}
-
-// The companion lingering-origin arm: a closed origin anchors companions until
-// its deadline (CompanionOriginCloseLinger), so the origin reads ask for closed
-// contracts of one pair, bounded by the unexpired contract id floor. On Main
-// (11-16) that is about 1,200 scans a second of transfer_contract_open_source_id
-// (open, source_id, destination_id, contract_id). DBDISK-STABILIZE §S3 asked to
-// shrink that index to a partial index of open rows; this pins why it cannot
-// replace the full one while the arm reads closed rows. With the full index the
-// arm is a pair range; with the open-rows partial in its place the arm loses
-// every pair condition and reads the destination's whole recent fan-in or every
-// recent contract instead.
-func TestCompanionClosedOriginReadsNeedTheClosedPairIndex(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		if server.IsContractPartitioned(t.Context()) {
-			t.Skip("plain contract tables only")
-		}
-		runtimeQueries := coveredCompanionRuntimeQueries(t)
-		ctx := t.Context()
-		now := server.NowUtc()
-		sourceId := server.NewId()
-		destinationId := server.NewId()
-		payerNetworkId := server.NewId()
-		// the pair's own recent closed origins, the destination's fan-in from
-		// other sources, and recent closed contracts of other pairs
-		insertIndexDietClosedContracts(t, ctx, &sourceId, &destinationId, payerNetworkId, now, 50)
-		insertIndexDietClosedContracts(t, ctx, nil, &destinationId, server.NewId(), now, 20000)
-		insertIndexDietClosedContracts(t, ctx, nil, nil, server.NewId(), now, 20000)
-		analyzeIndexDietContracts(t, ctx)
-
-		closeFloor := now.Add(-CompanionOriginCloseLinger)
-		originArgs := []any{sourceId, destinationId, closeFloor, payerNetworkId}
-		if runtimeQueries["earliest_origin"].binds == 5 {
-			originArgs = append(originArgs, ByteCount(1024))
-		}
-		statements := []struct {
-			name string
-			sql  string
-			args []any
-		}{
-			{name: "companion origin exists", sql: companionOriginExistsSql, args: []any{sourceId, destinationId, closeFloor}},
-			{name: "earliest origin", sql: runtimeQueries["earliest_origin"].sql, args: originArgs},
-		}
-
-		// the closed arm's scans: the ones that test the close time
-		closedArmScans := func(scans []indexDietContractScan) []indexDietContractScan {
-			closed := []indexDietContractScan{}
-			for _, scan := range scans {
-				if strings.Contains(scan.conditions, "close_time") {
-					closed = append(closed, scan)
-				}
-			}
-			return closed
-		}
-		pairRange := func(read indexDietIndexRead) bool {
-			return strings.Contains(read.condition, "source_id") && strings.Contains(read.condition, "destination_id")
-		}
-
-		for _, statement := range statements {
-			scans, raw := planIndexDietStatement(t, ctx, nil, statement.sql, statement.args...)
-			closed := closedArmScans(scans)
-			if len(closed) == 0 {
-				t.Fatalf("%s: no scan tests the close time:\n%s", statement.name, raw)
-			}
-			for _, scan := range closed {
-				if len(scan.reads) == 0 || scan.reads[0].index != "transfer_contract_open_source_id" || !pairRange(scan.reads[0]) {
-					t.Fatalf("%s: the closed arm reads %v, want a pair range of transfer_contract_open_source_id:\n%s", statement.name, scan.reads, raw)
-				}
-			}
-		}
-
-		// the S3 shape: open rows only, in place of the full index
-		openRowsOnly := []string{
-			`DROP INDEX transfer_contract_open_source_id`,
-			`CREATE INDEX transfer_contract_open_source_id_open_rows ON transfer_contract (source_id, destination_id, contract_id) WHERE open`,
-		}
-		for _, statement := range statements {
-			scans, raw := planIndexDietStatement(t, ctx, openRowsOnly, statement.sql, statement.args...)
-			closed := closedArmScans(scans)
-			if len(closed) == 0 {
-				t.Fatalf("%s: no scan tests the close time:\n%s", statement.name, raw)
-			}
-			for _, scan := range closed {
-				for _, read := range scan.reads {
-					if read.index == "transfer_contract_open_source_id_open_rows" || pairRange(read) {
-						t.Fatalf("%s: the closed arm still reads a pair range (%s), so an open-rows index could replace the full one:\n%s", statement.name, read.index, raw)
-					}
-				}
 			}
 		}
 	})
