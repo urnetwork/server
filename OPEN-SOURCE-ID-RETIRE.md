@@ -183,5 +183,7 @@ the rows read and `maxContractsPerSecond` on the contracts kept; metrics
 `urnetwork_prober_retention_walk_cursor_timestamp_seconds`.
 
 **The record** (branch `feat/open-source-id-drop-record-1116`, merged after the drop): the index
-diet's `DROP INDEX CONCURRENTLY IF EXISTS` record, the monitor's contract for it, and the removal of the
-previous statements and the switch.
+diet's `DROP INDEX CONCURRENTLY IF EXISTS` record, the monitor's contract for it (the index absent, the
+trigger present and exact), and the removal of the previous statements, the switch, its counter and its
+panel. The reads use the side table unconditionally from here; the state row stays and is no longer
+read.

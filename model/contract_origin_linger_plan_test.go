@@ -5,10 +5,9 @@ package model
 // pair's lingering origins among a destination's fan-in and other pairs'
 // recent closes, all captured by the trigger, plans every statement that reads
 // closed origins with sequential scans disabled, with
-// transfer_contract_open_source_id present and then dropped, and walks the
-// JSON plan: no read of transfer_contract_open_source_id, every closed arm a
-// pair range of the side table's primary key joined to each contract's
-// primary key.
+// transfer_contract_open_source_id built again and without it, and walks the
+// JSON plan: no read of that index, every closed arm a pair range of the side
+// table's primary key joined to each contract's primary key.
 
 import (
 	"context"
@@ -121,9 +120,9 @@ func seedContractOriginLingerPlan(t testing.TB, ctx context.Context) (sourceId s
 }
 
 // Every statement that reads closed origins reads no
-// transfer_contract_open_source_id, with it present (the planner's real
-// choice) and dropped; each closed arm reads the side table's pair range and
-// each contract by its primary key, joined by the side table's ids.
+// transfer_contract_open_source_id; each closed arm reads the side table's
+// pair range and each contract by its primary key, joined by the side table's
+// ids.
 func TestContractOriginLingerReadsNeedNoClosedPairIndex(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -133,9 +132,11 @@ func TestContractOriginLingerReadsNeedNoClosedPairIndex(t *testing.T) {
 		}
 		ctx := t.Context()
 		sourceId, destinationId, payerNetworkId := seedContractOriginLingerPlan(t, ctx)
+		// the index is gone at the head: present again, where the planner
+		// could choose it, and absent
 		for _, setup := range [][]string{
+			{`CREATE INDEX transfer_contract_open_source_id ON transfer_contract (open, source_id, destination_id, contract_id)`},
 			nil,
-			{`DROP INDEX transfer_contract_open_source_id`},
 		} {
 			for _, statement := range lingerPlanStatements(t, sourceId, destinationId, payerNetworkId) {
 				nodes, raw := planContractOriginLingerStatement(t, ctx, setup, statement.sql, statement.args...)
@@ -181,43 +182,6 @@ func TestContractOriginLingerReadsNeedNoClosedPairIndex(t *testing.T) {
 				if lingerReads == 0 || lingerReads != closedReads {
 					t.Fatalf("%s (setup %v): %d side table reads for %d closed arms:\n%s", statement.name, setup, lingerReads, closedReads, raw)
 				}
-			}
-		}
-	})
-}
-
-// The previous statements, which the reads keep until the side table is
-// complete, read the closed pair range of transfer_contract_open_source_id:
-// the index this change retires.
-func TestLegacyCompanionOriginReadsUseTheClosedPairIndex(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		if server.IsContractPartitioned(t.Context()) {
-			t.Skip("plain contract tables only")
-		}
-		ctx := t.Context()
-		sourceId, destinationId, payerNetworkId := seedContractOriginLingerPlan(t, ctx)
-		closeFloor := server.NowUtc().Add(-CompanionOriginCloseLinger)
-		for _, statement := range []lingerPlanStatement{
-			{name: "companion origin exists", sql: legacyCompanionOriginExistsSql, args: []any{sourceId, destinationId, closeFloor}},
-			{name: "plain origin selection", sql: legacyCompanionPlainOriginSql, args: []any{sourceId, destinationId, closeFloor, payerNetworkId, ByteCount(1024)}},
-			{name: "chained origin selection", sql: legacyCompanionChainedOriginSql, args: []any{sourceId, destinationId, closeFloor, payerNetworkId, server.NewId(), server.NewId(), ByteCount(1024)}},
-			{name: "zero escrow plain origin", sql: legacyZeroEscrowPlainOriginSql, args: []any{sourceId, destinationId, closeFloor}},
-			{name: "zero escrow chained origin", sql: legacyZeroEscrowChainedOriginSql, args: []any{sourceId, destinationId, closeFloor, server.NewId(), server.NewId()}},
-		} {
-			nodes, raw := planContractOriginLingerStatement(t, ctx, nil, statement.sql, statement.args...)
-			pairRange := false
-			for _, node := range nodes {
-				if node.Index == "transfer_contract_open_source_id" && strings.Contains(node.IndexCondition, "source_id") && strings.Contains(node.IndexCondition, "destination_id") {
-					pairRange = true
-				}
-				if node.Relation == "contract_origin_linger" {
-					t.Fatalf("%s: the previous statement reads the side table:\n%s", statement.name, raw)
-				}
-			}
-			if !pairRange {
-				t.Fatalf("%s: the previous statement does not read the closed pair range of transfer_contract_open_source_id:\n%s", statement.name, raw)
 			}
 		}
 	})

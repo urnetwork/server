@@ -1,16 +1,12 @@
 // The lingering origins' side table (server contract_origin_linger_schema.go;
-// OPEN-SOURCE-ID-RETIRE.md §2): its readers' switch and its sweep.
+// OPEN-SOURCE-ID-RETIRE.md §2): its readers' closed arm and its sweep.
 //
-// The switch. Each companion origin read takes the pair's closed origins from
-// contract_origin_linger and then each contract by its primary key, once the
-// side table is complete: its state row's complete time has passed, so every
-// origin still lingering closed after the trigger existed. Before that, and
-// while the state row is absent, the reads keep their previous statements
-// (contract_origin_linger_legacy.go), which read the closed pair range of
-// transfer_contract_open_source_id; those go with the index's drop record.
-// Each process reads the state on its own pooled connection, before the read
-// that uses it acquires one, at most once per CompletionReadInterval, and the
-// first decision waits for the first read: a process never guesses complete.
+// The reads. Each companion origin read takes the pair's closed origins from
+// contract_origin_linger and then each contract by its primary key
+// (contractOriginLingerClosedSql). Until transfer_contract_open_source_id's
+// drop the reads kept their previous statements while the side table warmed
+// up, 75 minutes after the operator's trigger; the drop record removed them
+// and the switch with them, so the state row is no longer read.
 //
 // The sweep. Rows past their prune time can satisfy no read, since every read
 // requires an unexpired deadline. The taskworker deletes them in short
@@ -21,74 +17,12 @@ package model
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/urnetwork/glog"
-
 	"github.com/urnetwork/server"
 )
-
-type ContractOriginLingerSettings struct {
-	// How long a process trusts its last read of the side table's state. The
-	// state changes once, at its complete time, and back only with an
-	// operator's rollback, which waits this long before the trigger goes.
-	CompletionReadInterval time.Duration
-	// Bounds one read of the state.
-	CompletionReadTimeout time.Duration
-}
-
-func DefaultContractOriginLingerSettings() *ContractOriginLingerSettings {
-	return &ContractOriginLingerSettings{
-		CompletionReadInterval: 30 * time.Second,
-		CompletionReadTimeout:  5 * time.Second,
-	}
-}
-
-// Which statements an origin read used.
-const (
-	// the side table and the primary key
-	contractOriginLingerReadSideTable = "side_table"
-	// the previous statements, before the side table is complete
-	contractOriginLingerReadLegacy = "legacy"
-)
-
-var contractOriginLingerReadsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "urnetwork_contract_origin_linger_reads_total",
-	Help: "Companion origin reads by the statements they used: side_table (contract_origin_linger, then the contract's primary key) or legacy (the closed pair range of transfer_contract_open_source_id, before the side table's state row is complete). Legacy stays at zero in every process before transfer_contract_open_source_id is dropped",
-}, []string{"path"})
-
-var (
-	contractOriginLingerSideTableReads = contractOriginLingerReadsCounter.WithLabelValues(contractOriginLingerReadSideTable)
-	contractOriginLingerLegacyReads    = contractOriginLingerReadsCounter.WithLabelValues(contractOriginLingerReadLegacy)
-)
-
-func init() {
-	prometheus.MustRegister(contractOriginLingerReadsCounter)
-}
-
-// The side table's state as this process last read it. Safe for concurrent
-// use. A read that fails keeps the previous decision until the next read.
-type contractOriginLingerCompletion struct {
-	settings *ContractOriginLingerSettings
-
-	stateLock sync.Mutex
-	// the state row's complete time, nil while there is none
-	completeTime *time.Time
-	// a read has ended, and when
-	known    bool
-	readTime time.Time
-	// closed when the read in flight ends; nil while none is
-	reading chan struct{}
-}
-
-func newContractOriginLingerCompletion(settings *ContractOriginLingerSettings) *contractOriginLingerCompletion {
-	return &contractOriginLingerCompletion{
-		settings: settings,
-	}
-}
 
 // The pair's lingering origins: each early close of ($1, $2) still before its
 // deadline that the side table holds, read from transfer_contract by its
@@ -149,99 +83,6 @@ func contractOriginLingerRecover(do func()) (returnErr error) {
 		returnErr = err
 	})
 	return
-}
-
-// The process's switch for every companion origin read.
-var contractOriginLingerReads = newContractOriginLingerCompletion(DefaultContractOriginLingerSettings())
-
-// Whether the origin reads use the side table now. Call it before acquiring
-// the connection the read runs on: a stale state is read on a connection of
-// its own. Counts the decision.
-func (self *contractOriginLingerCompletion) ready(ctx context.Context) bool {
-	for {
-		completeTime, wait, refresh := func() (*time.Time, chan struct{}, bool) {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			if self.known && time.Since(self.readTime) < self.settings.CompletionReadInterval {
-				return self.completeTime, nil, false
-			}
-			if self.reading != nil {
-				if self.known {
-					// another caller reads it; keep the previous decision
-					return self.completeTime, nil, false
-				}
-				return nil, self.reading, false
-			}
-			self.reading = make(chan struct{})
-			return nil, nil, true
-		}()
-		if refresh {
-			self.refresh()
-			continue
-		}
-		if wait != nil {
-			select {
-			case <-wait:
-				continue
-			case <-ctx.Done():
-				// the caller's own read fails on its context; never guess
-				// complete
-				contractOriginLingerLegacyReads.Inc()
-				return false
-			}
-		}
-		if completeTime != nil && !server.NowUtc().Before(*completeTime) {
-			contractOriginLingerSideTableReads.Inc()
-			return true
-		}
-		contractOriginLingerLegacyReads.Inc()
-		return false
-	}
-}
-
-// Reads the state row on a connection of its own, outside the caller's
-// context: one short catalog check and one row, bounded by
-// CompletionReadTimeout.
-func (self *contractOriginLingerCompletion) refresh() {
-	var completeTime *time.Time
-	readErr := contractOriginLingerRecover(func() {
-		readCtx, cancel := context.WithTimeout(context.Background(), self.settings.CompletionReadTimeout)
-		defer cancel()
-		server.Db(readCtx, func(conn server.PgConn) {
-			var present bool
-			server.Raise(conn.QueryRow(readCtx, `SELECT to_regclass('public.contract_origin_linger_state') IS NOT NULL`).Scan(&present))
-			if !present {
-				return
-			}
-			result, err := conn.Query(readCtx, `SELECT complete_time FROM contract_origin_linger_state WHERE singleton`)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&completeTime))
-				}
-			})
-		})
-	})
-	if readErr != nil {
-		glog.Infof("[contract_origin_linger]state read: %s\n", readErr)
-	}
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if readErr == nil {
-		self.completeTime = completeTime
-	}
-	self.known = true
-	self.readTime = time.Now()
-	close(self.reading)
-	self.reading = nil
-}
-
-// Forgets the last read, so the next decision reads the state again. For
-// tests that change the state row.
-func (self *contractOriginLingerCompletion) forget() {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.known = false
-	self.completeTime = nil
 }
 
 type ContractOriginLingerSweepSettings struct {

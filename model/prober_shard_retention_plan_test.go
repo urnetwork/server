@@ -146,7 +146,8 @@ func TestProberRetentionLegacyWindowReadTheOpenSourceIdIndex(t *testing.T) {
 		}
 		ctx := t.Context()
 		fixture := newProberRetentionPlanFixture(t, ctx)
-		scans, raw := planIndexDietStatement(t, ctx, nil, legacyProberShardRetentionContractWindowSql,
+		// the index is gone at the head; the window read it while it existed
+		scans, raw := planIndexDietStatement(t, ctx, []string{`CREATE INDEX transfer_contract_open_source_id ON transfer_contract (open, source_id, destination_id, contract_id)`}, legacyProberShardRetentionContractWindowSql,
 			fixture.clientIds, fixture.networkId, fixture.cutoff, server.Id{}, 500)
 		openSourceId := false
 		for _, scan := range scans {
@@ -214,6 +215,9 @@ func TestProberRetentionDropReadsNoOpenSourceIdIndex(t *testing.T) {
 				defer func() {
 					_ = tx.Rollback(context.WithoutCancel(ctx))
 				}()
+				// the index is gone at the head: present again, where the
+				// planner could choose it
+				server.RaisePgResult(tx.Exec(ctx, `CREATE INDEX transfer_contract_open_source_id ON transfer_contract (open, source_id, destination_id, contract_id)`))
 				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL enable_seqscan = off`))
 				var raw []byte
 				server.Raise(tx.QueryRow(ctx, `EXPLAIN (FORMAT JSON) `+statement.sql, statement.args...).Scan(&raw))
@@ -253,9 +257,11 @@ func TestProberRetentionWalkReadsOnlyThePrimaryKey(t *testing.T) {
 		}
 
 		bitmap := append([]string{`SET LOCAL plan_cache_mode = force_custom_plan`}, proberShardRetentionBitmapSettings...)
+		// the index is gone at the head: present again, where the planner
+		// could choose it, and absent
 		for _, indexSetup := range [][]string{
+			{`CREATE INDEX transfer_contract_open_source_id ON transfer_contract (open, source_id, destination_id, contract_id)`},
 			nil,
-			{`DROP INDEX transfer_contract_open_source_id`},
 		} {
 			for _, statement := range []struct {
 				name  string

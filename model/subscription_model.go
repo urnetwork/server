@@ -2321,17 +2321,13 @@ func companionOriginExists(
 	destinationId server.Id,
 	originContractTimeout time.Duration,
 ) (exists bool) {
-	existsSql := companionOriginExistsSql
-	if !contractOriginLingerReads.ready(ctx) {
-		existsSql = legacyCompanionOriginExistsSql
-	}
 	server.Db(ctx, func(conn server.PgConn) {
 		leaveRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionOriginPrecheck)
 		defer leaveRead()
 		// the origin direction is reversed
 		server.Raise(conn.QueryRow(
 			ctx,
-			existsSql,
+			companionOriginExistsSql,
 			destinationId,
 			sourceId,
 			server.NowUtc().Add(-originContractTimeout),
@@ -2408,10 +2404,6 @@ func createCompanionTransferEscrow(
 	var inheritedPayer *server.Id
 	var companionContractId *server.Id
 	var proberReservationByteCount *ByteCount
-	// The closed origin arms read the side table once it is complete, and
-	// their previous statements before (contract_origin_linger.go). Decided
-	// before the payer's turn and any connection.
-	lingerReads := contractOriginLingerReads.ready(ctx)
 	// Each read is an autocommit statement, so no transaction is open across
 	// the selection, the payer handoff or the reservation. Like any read
 	// committed statement it reads the latest committed origins.
@@ -2428,12 +2420,9 @@ func createCompanionTransferEscrow(
 		// Keep the full eligible maximum for every request above that anchor.
 		leavePlainOriginRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
 		defer leavePlainOriginRead()
-		var result server.PgResult
-		var err error
-		if lingerReads {
-			result, err = conn.Query(
-				ctx,
-				`
+		result, err := conn.Query(
+			ctx,
+			`
                 SELECT contract_id,
                     CASE WHEN transfer_byte_count >= $5::bigint THEN NULL
                     WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
@@ -2498,25 +2487,13 @@ func createCompanionTransferEscrow(
                     LIMIT 1
                 ) AS earliest_origin
             `,
-				// note the origin direction is reversed
-				destinationId,
-				sourceId,
-				server.NowUtc().Add(-originContractTimeout),
-				destinationNetworkId,
-				requestedBytes,
-			)
-		} else {
-			result, err = conn.Query(
-				ctx,
-				legacyCompanionPlainOriginSql,
-				// note the origin direction is reversed
-				destinationId,
-				sourceId,
-				server.NowUtc().Add(-originContractTimeout),
-				destinationNetworkId,
-				requestedBytes,
-			)
-		}
+			// note the origin direction is reversed
+			destinationId,
+			sourceId,
+			server.NowUtc().Add(-originContractTimeout),
+			destinationNetworkId,
+			requestedBytes,
+		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&companionContractId, &proberReservationByteCount))
@@ -2544,12 +2521,9 @@ func createCompanionTransferEscrow(
 			// direction).
 			leaveFallbackOriginRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionFallbackOrigin)
 			defer leaveFallbackOriginRead()
-			var result server.PgResult
-			var err error
-			if lingerReads {
-				result, err = conn.Query(
-					ctx,
-					`
+			result, err := conn.Query(
+				ctx,
+				`
                     SELECT contract_id,
                         CASE WHEN transfer_byte_count >= $7::bigint THEN NULL
                         WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
@@ -2622,27 +2596,14 @@ func createCompanionTransferEscrow(
                         LIMIT 1
                     ) AS earliest_companion_origin
                 `,
-					destinationId,
-					sourceId,
-					server.NowUtc().Add(-originContractTimeout),
-					payerNetworkId,
-					sourceNetworkId,
-					destinationNetworkId,
-					requestedBytes,
-				)
-			} else {
-				result, err = conn.Query(
-					ctx,
-					legacyCompanionChainedOriginSql,
-					destinationId,
-					sourceId,
-					server.NowUtc().Add(-originContractTimeout),
-					payerNetworkId,
-					sourceNetworkId,
-					destinationNetworkId,
-					requestedBytes,
-				)
-			}
+				destinationId,
+				sourceId,
+				server.NowUtc().Add(-originContractTimeout),
+				payerNetworkId,
+				sourceNetworkId,
+				destinationNetworkId,
+				requestedBytes,
+			)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
 					server.Raise(result.Scan(&companionContractId, &proberReservationByteCount, &inheritedPayer))

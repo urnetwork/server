@@ -1,6 +1,7 @@
 // The lingering origins' side table panels on the taskworker dashboard
-// (model/contract_origin_linger.go): the companion origin reads by service
-// and statements, the sweep's deletes and runs, and its lag.
+// (model/contract_origin_linger.go): the sweep's deletes and runs, and its
+// lag. The companion origin reads' panel went with their previous statements
+// (the drop record of transfer_contract_open_source_id).
 package grafana
 
 import (
@@ -12,43 +13,29 @@ import (
 // The side table's row and panel ids on the taskworker dashboard.
 const (
 	contractOriginLingerRowPanel   = 131
-	contractOriginLingerReadsPanel = 132
 	contractOriginLingerSweepPanel = 133
 	contractOriginLingerLagPanel   = 134
 )
 
-// The reads panel reads every serving process, not only the taskworker, by
-// service and path; the sweep panels read the taskworker's deletes of its
-// table, its runs by stop and its lag. Each panel explains what it reads.
+// The sweep panels read the taskworker's deletes of its table, its runs by
+// stop and its lag. Each panel explains what it reads.
 func TestContractOriginLingerDashboardPanels(t *testing.T) {
 	dashboard := readTestDashboard(t, "taskworker.json")
 	if slices.Contains(dashboard.Tags, PublicTag) {
 		t.Fatal("side table diagnostics must remain authenticated")
 	}
 	row := dashboardPanelById(dashboard, contractOriginLingerRowPanel)
-	reads := dashboardPanelById(dashboard, contractOriginLingerReadsPanel)
 	sweep := dashboardPanelById(dashboard, contractOriginLingerSweepPanel)
 	lag := dashboardPanelById(dashboard, contractOriginLingerLagPanel)
-	if row == nil || reads == nil || sweep == nil || lag == nil {
+	if row == nil || sweep == nil || lag == nil {
 		t.Fatal("the side table row or panels are missing")
 	}
 	if row.Type != "row" || !strings.Contains(row.Title, "model/contract_origin_linger.go") {
 		t.Errorf("side table row = %q %q", row.Type, row.Title)
 	}
-	for _, panel := range []*testPanel{reads, sweep, lag} {
+	for _, panel := range []*testPanel{sweep, lag} {
 		if panel.GridPos.Y != row.GridPos.Y+row.GridPos.H {
 			t.Errorf("panel %d is not directly under its row", panel.Id)
-		}
-	}
-
-	if reads.Type != "timeseries" || len(reads.Targets) != 1 ||
-		reads.Targets[0].Expr != `sum by (service, path) (rate(urnetwork_contract_origin_linger_reads_total{env="$env",instance!=""}[$__rate_interval]))` ||
-		reads.Targets[0].LegendFormat != "{{service}} {{path}}" {
-		t.Errorf("reads panel lost its rate by service and path: %+v", reads.Targets)
-	}
-	for _, part := range []string{"side_table", "legacy", "75 minutes", "transfer_contract_open_source_id"} {
-		if !strings.Contains(reads.Description, part) {
-			t.Errorf("reads panel does not explain %s", part)
 		}
 	}
 
@@ -67,5 +54,18 @@ func TestContractOriginLingerDashboardPanels(t *testing.T) {
 		lag.Targets[0].Expr != `max(urnetwork_contract_origin_linger_sweep_lag_seconds{`+contractHorizonTaskworkerFilter+`})` ||
 		lag.FieldConfig.Defaults.Unit != "s" {
 		t.Errorf("lag panel lost its maximum in seconds: %+v", lag.Targets)
+	}
+}
+
+// The companion origin reads' counter and panel are gone with the switch.
+func TestContractOriginLingerDashboardDropsTheReadsPanel(t *testing.T) {
+	dashboard := readTestDashboard(t, "taskworker.json")
+	if dashboardPanelById(dashboard, 132) != nil {
+		t.Fatal("the companion origin reads panel is still on the dashboard")
+	}
+	for _, expression := range dashboardExpressions(dashboard) {
+		if strings.Contains(expression, "urnetwork_contract_origin_linger_reads_total") {
+			t.Fatalf("a panel still reads the removed counter: %s", expression)
+		}
 	}
 }

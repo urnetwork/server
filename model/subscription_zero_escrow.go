@@ -295,9 +295,6 @@ func CreateZeroEscrowCompanionContract(
 	// the stream state the insert binds is read before the transaction
 	// (contract_stream_binding.go)
 	resolveContractStreamBinding(ctx)
-	// the closed origin arms' statements, decided before the transaction
-	// (contract_origin_linger.go)
-	lingerReads := contractOriginLingerReads.ready(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	defer leaveTransaction()
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -312,7 +309,6 @@ func CreateZeroEscrowCompanionContract(
 			destinationNetworkId,
 			destinationId,
 			originContractTimeout,
-			lingerReads,
 		)
 		if companionContractId == nil {
 			originOutcome = server.ContractCompanionOriginMissing
@@ -449,8 +445,6 @@ func createZeroEscrowContractInTx(
 // the earliest such companion, which chains an asymmetric reply carrier (see
 // createCompanionTransferEscrow). Both are nil when there is neither. The
 // inherited payer is set only for a probe shard's chained reply carrier.
-// lingerReads selects the closed arms' statements: the side table once it is
-// complete, the previous statements before (contract_origin_linger.go).
 func zeroEscrowCompanionOriginInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -459,18 +453,13 @@ func zeroEscrowCompanionOriginInTx(
 	destinationNetworkId server.Id,
 	destinationId server.Id,
 	originContractTimeout time.Duration,
-	lingerReads bool,
 ) (originContractId *server.Id, inheritedPayerNetworkId *server.Id) {
 	lingerCloseTime := server.NowUtc().Add(-originContractTimeout)
-	plainOriginSql, chainedOriginSql := zeroEscrowPlainOriginSql, zeroEscrowChainedOriginSql
-	if !lingerReads {
-		plainOriginSql, chainedOriginSql = legacyZeroEscrowPlainOriginSql, legacyZeroEscrowChainedOriginSql
-	}
 	func() {
 		leaveRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
 		defer leaveRead()
 		// the origin direction is reversed
-		result, err := tx.Query(ctx, plainOriginSql, destinationId, sourceId, lingerCloseTime)
+		result, err := tx.Query(ctx, zeroEscrowPlainOriginSql, destinationId, sourceId, lingerCloseTime)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&originContractId))
@@ -485,7 +474,7 @@ func zeroEscrowCompanionOriginInTx(
 		defer leaveRead()
 		result, err := tx.Query(
 			ctx,
-			chainedOriginSql,
+			zeroEscrowChainedOriginSql,
 			destinationId,
 			sourceId,
 			lingerCloseTime,

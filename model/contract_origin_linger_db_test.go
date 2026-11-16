@@ -2,9 +2,8 @@ package model
 
 // The lingering origins' side table (contract_origin_linger.go): what its
 // trigger writes on each path that closes a contract, that the origin reads
-// through it stay exact without transfer_contract_open_source_id, that the
-// reads keep their previous statements until the side table is complete, and
-// that the sweep deletes only rows past their prune time, in bounded batches.
+// through it stay exact without transfer_contract_open_source_id, and that the
+// sweep deletes only rows past their prune time, in bounded batches.
 
 import (
 	"context"
@@ -326,8 +325,6 @@ func TestCompanionOriginReadsStayExactWithoutTheClosedPairIndex(t *testing.T) {
 		server.MaintenanceDb(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `DROP INDEX IF EXISTS transfer_contract_open_source_id`))
 		}, server.OptReadWrite(), server.OptNoRetry())
-		contractOriginLingerReads.forget()
-		defer contractOriginLingerReads.forget()
 
 		settled := ContractOutcomeSettled
 		deadline := 30 * time.Minute
@@ -406,83 +403,6 @@ func TestCompanionChainedOriginReadsALingeringCompanionWithoutTheClosedPairIndex
 			t.Fatalf("a companion chained to the lingering reply = %+v, %v", chained, err)
 		}
 	})
-}
-
-// The reads keep their previous statements until the side table is complete:
-// an origin that closed while the trigger did not exist is found by them, and
-// would be missed by the side table. Without the state row they keep them too.
-// Each decision is counted.
-func TestContractOriginLingerReadsWaitForTheCompleteTime(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := WithProviderWorkSessionSource(t.Context(), nil)
-		contractOriginLingerReads.forget()
-		defer contractOriginLingerReads.forget()
-		setCompleteTime := func(sql string) {
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, sql))
-			})
-			contractOriginLingerReads.forget()
-		}
-		if !contractOriginLingerReads.ready(ctx) {
-			t.Fatal("a new database's side table is not complete")
-		}
-
-		clients := newEscrowSelectionTestClients(t, ctx)
-		settled := ContractOutcomeSettled
-		expiration, closeOffset := 40*time.Minute, -10*time.Minute
-		// closed while the trigger did not exist
-		server.MaintenanceDb(ctx, func(conn server.PgConn) {
-			server.RaisePgResult(conn.Exec(ctx, `ALTER TABLE transfer_contract DISABLE TRIGGER transfer_contract_origin_linger`))
-		}, server.OptReadWrite(), server.OptNoRetry())
-		originId := lingerTestInsertContract(t, ctx, clients, -20*time.Minute, &expiration, &closeOffset, &settled, false)
-		server.MaintenanceDb(ctx, func(conn server.PgConn) {
-			server.RaisePgResult(conn.Exec(ctx, `ALTER TABLE transfer_contract ENABLE TRIGGER transfer_contract_origin_linger`))
-		}, server.OptReadWrite(), server.OptNoRetry())
-		if pruneTime := lingerTestPruneTime(t, ctx, originId); pruneTime != nil {
-			t.Fatal("the fixture's close wrote a side row")
-		}
-
-		observed, statements, closeScope := observePgStatements(t, ctx)
-		defer closeScope()
-		existsBy := func(want bool, sideTable bool, phase string) {
-			t.Helper()
-			legacyBefore := testutil.ToFloat64(contractOriginLingerLegacyReads)
-			sideBefore := testutil.ToFloat64(contractOriginLingerSideTableReads)
-			if exists := CompanionOriginExists(observed, clients.providerId, clients.payerId, time.Hour); exists != want {
-				t.Fatalf("%s: the existence read = %t, want %t", phase, exists, want)
-			}
-			reads := statements.take()
-			if len(reads) != 1 || strings.Contains(reads[0], "contract_origin_linger") != sideTable {
-				t.Fatalf("%s: the existence read used %q, want the side table %t", phase, reads, sideTable)
-			}
-			legacy := testutil.ToFloat64(contractOriginLingerLegacyReads) - legacyBefore
-			side := testutil.ToFloat64(contractOriginLingerSideTableReads) - sideBefore
-			if sideTable && (side != 1 || legacy != 0) || !sideTable && (legacy != 1 || side != 0) {
-				t.Fatalf("%s: counted %g side table and %g legacy reads", phase, side, legacy)
-			}
-		}
-
-		setCompleteTime(`UPDATE contract_origin_linger_state SET complete_time = clock_timestamp() AT TIME ZONE 'UTC' + interval '75 minutes'`)
-		existsBy(true, false, "warming up")
-		setCompleteTime(`DELETE FROM contract_origin_linger_state`)
-		existsBy(true, false, "no state row")
-		setCompleteTime(`INSERT INTO contract_origin_linger_state (singleton, complete_time) VALUES (true, clock_timestamp() AT TIME ZONE 'UTC' - interval '1 second')`)
-		// complete: the side table misses a close from before the trigger,
-		// which is why the reads wait out the warmup
-		existsBy(false, true, "complete")
-	})
-}
-
-// A decision before the first read of the state waits for it, and a read
-// failure never turns a process to the side table.
-func TestContractOriginLingerReadsNeverGuessComplete(t *testing.T) {
-	completion := newContractOriginLingerCompletion(DefaultContractOriginLingerSettings())
-	completion.reading = make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if completion.ready(ctx) {
-		t.Fatal("a decision before the first read guessed complete")
-	}
 }
 
 // Inserts side rows pruned at each offset from the database clock.
