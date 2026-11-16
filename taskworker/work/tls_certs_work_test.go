@@ -165,6 +165,68 @@ func TestTlsCertPurgeRemovesRowsPastTheirRetention(t *testing.T) {
 	})
 }
 
+// Each URnetwork-zone name's failure backoff at a CA goes 8 days past the time
+// it held orders until, and not before (QD-857).
+func TestTlsCertPurgeRemovesNameBackoffsPastTheirRetention(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg5Linked() {
+			return
+		}
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "", nil)
+		defer clientSession.Cancel()
+		store := model.NewCertsStore(nil)
+		// a time of this test's own, so the store's other backoffs are not in the run
+		now := time.Date(2052, time.March, 1, 0, 0, 0, 0, time.UTC)
+		retention := DefaultTlsCertPurgeSettings().NameBackoffRetention
+		if retention != 8*24*time.Hour {
+			t.Fatalf("the retention is %v", retention)
+		}
+		// a backoff of name at LE that holds orders until heldUntil
+		backoff := func(name string, heldUntil time.Time) {
+			t.Helper()
+			wait := func(int) time.Duration { return time.Hour }
+			if _, err := store.AddNameFailure(ctx, name, certsservice.CertsCaLetsEncrypt, heldUntil.Add(-time.Hour), wait); err != nil {
+				t.Fatal(err)
+			}
+		}
+		past := "k9purge-past.root.example"
+		atTheLine := "k9purge-line.root.example"
+		recent := "k9purge-recent.root.example"
+		backoff(past, now.Add(-retention-time.Second))
+		backoff(atTheLine, now.Add(-retention))
+		backoff(recent, now.Add(-time.Hour))
+		left := func() []string {
+			t.Helper()
+			backoffs, err := store.ListNameBackoffs(ctx, []string{past, atTheLine, recent})
+			if err != nil {
+				t.Fatal(err)
+			}
+			names := []string{}
+			for _, backoff := range backoffs {
+				names = append(names, backoff.Name)
+			}
+			return names
+		}
+
+		result, err := tlsCertPurgeAt(clientSession, now)
+		if err != nil || result.More || result.NameBackoffCount < 1 {
+			t.Fatalf("the purge: %+v, %v", result, err)
+		}
+		if names := left(); !slices.Equal(names, []string{atTheLine, recent}) {
+			t.Fatalf("after the purge: %v", names)
+		}
+		// a second later the backoff at the line goes too
+		result, err = tlsCertPurgeAt(clientSession, now.Add(time.Second))
+		if err != nil || result.More || result.NameBackoffCount < 1 {
+			t.Fatalf("the next purge: %+v, %v", result, err)
+		}
+		if names := left(); !slices.Equal(names, []string{recent}) {
+			t.Fatalf("after the next purge: %v", names)
+		}
+	})
+}
+
 // The order, renewal and revocation chains on a private database and the test
 // Redis (TLS-M5-17), the engine on a fake clock, a recording Push and a CA
 // scripted in this file: each chain armed once and idle until its process

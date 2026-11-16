@@ -283,6 +283,13 @@ tables:
       state: cert-1
       state_time: cert-1
       successor_cert_id: cert-1
+  network_tls_name_backoff:
+    group: MG5
+    columns:
+      ca: cert-1
+      failure_count: cert-1
+      name: cert-1
+      next_order_time: cert-1
   network_tls_suspension:
     group: MG5
     columns:
