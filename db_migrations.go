@@ -11672,4 +11672,30 @@ var migrations = []any{
 	// One separately approved job may receive a second recovery without replacing
 	// its original immutable audit or changing any other job's one-cycle limit.
 	newSqlMigration(CompetitionSecondRecoveryMigrationSql()),
+
+	// transfer_contract_create_time (301.6 GB, v373) served the reads of
+	// a create_time window of contracts: the public contract stats' live
+	// bucket count and hour fill, the degradation check's count of new
+	// contracts, the monitor's per-minute count and stale contract probe, and
+	// the straggler stamp's fallback. Each now bounds contract_id by its
+	// window's id range (model.ContractIdCreateTimeRange) and reads a range
+	// of the primary key. Drop it only once every running build has those
+	// reads, and pg_stat_statements has shown no call of the old statements
+	// for 7 days that include a Sunday payout and an epoch close. Ad hoc reads
+	// of transfer_contract by create_time need the same contract_id bound;
+	// without it they read the whole heap. Without this index the planner
+	// estimates a create_time range from the column's histogram, which
+	// autoanalyze refreshes about every 17 minutes on Main, instead of
+	// probing the index for the newest value.
+	createTimeIndexDropMigration,
+
+	// transfer_contract_open_payer_network_id_transfer_byte_count (36.7
+	// GB, v377) served only the prober shard cleanup's payer scan
+	// (model/prober_shard_model.go), which walked both values of open for the
+	// shard payer: 177k scans since the reset, about 5.5M tuples a call. That
+	// scan now reads the unresolved-payer and dispute partial indexes
+	// (04d883882), which plan the same contracts without this index. Drop it
+	// only once every running build has that rewrite and the index's idx_scan
+	// has stopped growing.
+	openPayerIndexDropMigration,
 }
