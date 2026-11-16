@@ -30,6 +30,8 @@ func TestSubscriptionsDashboardShowsExpectedRevenueAtTheTop(t *testing.T) {
 		{34, "expected trial conversion revenue", "currencyUSD", "urnetwork_subscription_trial_expected_revenue_usd{", []string{`store="deduplicated"`}},
 		{35, "trial conversion rate in use", "percentunit", "urnetwork_subscription_trial_conversion_rate{", []string{`store=~"apple|google|stripe"`, `store="all"`}},
 		{36, "net recurring revenue (30 days)", "currencyUSD", "urnetwork_subscription_recurring_revenue_usd{", []string{`store="all"`, `window="30d"`}},
+		// the revenue is its own step: why its panels can show no data
+		{40, "revenue refresh failures", "short", "urnetwork_subscription_revenue_refresh_failures{", nil},
 	} {
 		panel := dashboardPanelById(dashboard, c.id)
 		if panel == nil || panel.Type != "stat" || panel.Title != c.title {
@@ -114,7 +116,9 @@ func TestSubscriptionsDashboardShowsExpectedRevenueAtTheTop(t *testing.T) {
 		"A store's first paid window and trials never count",
 		"every Google Play credit records the play.yml supporter price",
 		"gift redemptions (no sale",
-		"Stripe trials only the payment reconcile credited",
+		"Stripe trials only the payment reconcile credited before the payment-sheet card check deployed",
+		"a trial the reconcile credited after it (a missed webhook) counts",
+		"**revenue refresh failures** counts the refreshes in a row it failed, and every other panel stays current",
 	} {
 		if !strings.Contains(text.Options.Content, required) {
 			t.Errorf("the definitions text does not say %q", required)

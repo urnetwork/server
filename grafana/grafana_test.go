@@ -924,6 +924,7 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		"urnetwork_subscription_trials_convertible",
 		"urnetwork_subscription_trial_conversion_rate",
 		"urnetwork_subscription_trial_conversion_trials",
+		"urnetwork_subscription_revenue_refresh_failures",
 	} {
 		if !strings.Contains(document, metric) {
 			t.Errorf("subscriptions dashboard does not cover %s", metric)

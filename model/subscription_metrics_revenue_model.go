@@ -18,16 +18,27 @@ package model
 //     ($5 less 30%), whatever the base plan, tier or trial;
 //   - an App Store sale in a currency other than USD records a $0.01 marker.
 //
-// A Stripe trial that only the payment reconcile credited is left out of every
-// revenue number and of the conversion rate: the reconcile's store-side leg
-// credits a payment sheet's $0 trial invoice without the hold that waits for
-// the card (stripeHandleInvoicePaidWithOnboarding), so those are abandoned
-// payment sheets with no card, which can never convert.
+// A Stripe trial that only the payment reconcile credited before the card
+// check shipped (SubscriptionMetricsStripeTrialCardGate) is left out of every
+// revenue number and of the conversion rate: until then the reconcile's
+// store-side leg credited a payment sheet's $0 trial invoice without the hold
+// that waits for the card (stripeHandleInvoicePaidWithOnboarding), so those
+// are abandoned payment sheets with no card, which can never convert.
+//
+// The revenue is its own step of the snapshot (loadSubscriptionMetricsRevenue):
+// its queries run on their own connection under their own time bound, and a
+// failure leaves the snapshot's other numbers whole.
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"slices"
 	"time"
+
+	"github.com/urnetwork/glog"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -39,10 +50,35 @@ const (
 	// the outcomes of a trial whose free period ended
 	SubscriptionMetricsTrialOutcomeConverted = "converted"
 	SubscriptionMetricsTrialOutcomeLapsed    = "lapsed"
-
-	// the window label of a value read at the snapshot's time
-	subscriptionMetricsWindowCurrent = "current"
 )
+
+// SubscriptionMetricsStripeTrialCardGate is when the payment-sheet card check
+// (feature/trial-card-check) deployed, RFC 3339 in UTC. From then on the
+// reconcile's store-side leg credits a payment sheet's $0 trial invoice only
+// once its card is attached, as invoice.paid does, so a reconcile credit is a
+// real trial whose webhook was missed and counts like any other. A reconcile
+// credit of a $0 Stripe invoice made before it is an abandoned payment sheet
+// and is left out.
+//
+// PLACEHOLDER: "" while the card check has not deployed, which leaves every
+// reconcile credit of a $0 Stripe invoice out. Set it to the deploy time (e.g.
+// "2026-11-18T19:00:00Z") in the release that ships the card check.
+const SubscriptionMetricsStripeTrialCardGate = ""
+
+// subscriptionMetricsParseStripeTrialCardGate is the gate as a time, nil while
+// it is "" (not deployed). A value that is not RFC 3339 panics, so a malformed
+// gate stops the release's tests rather than move the cutoff.
+func subscriptionMetricsParseStripeTrialCardGate(gate string) *time.Time {
+	if gate == "" {
+		return nil
+	}
+	gateTime, err := time.Parse(time.RFC3339, gate)
+	if err != nil {
+		panic(fmt.Sprintf("subscription metrics: Stripe trial card gate %q is not RFC 3339: %s", gate, err))
+	}
+	gateTime = gateTime.UTC()
+	return &gateTime
+}
 
 // The stores that sell a free trial. The crypto markets and gamma sell none.
 var subscriptionMetricsTrialStores = []string{
@@ -157,11 +193,13 @@ func subscriptionMetricsPeriodPlanSql(period string) string {
 }
 
 // subscriptionMetricsRevenueRowsSql is the start of the WITH list of both
-// revenue queries ($1 is now): every tracked supporter window, classified.
+// revenue queries ($1 is now, $<gateParam> the card check's deploy time or
+// NULL): every tracked supporter window, classified.
 //
 // supporter_window is the account query's tracked set, App Store sandbox
-// purchases left out, less the $0 Stripe invoices the reconcile credited (a
-// payment sheet abandoned before its card was attached). paid_end_time is the
+// purchases left out, less the $0 Stripe invoices the reconcile credited
+// before the card check deployed (a payment sheet abandoned before its card
+// was attached; SubscriptionMetricsStripeTrialCardGate). paid_end_time is the
 // period the window paid for as the trial query reads it (cut short by an
 // early end); billed_end_time is the period the store billed, uncut.
 //
@@ -191,9 +229,10 @@ func subscriptionMetricsPeriodPlanSql(period string) string {
 // crypto credit, gamma's credit (a gamma renewal's term can start later).
 // placeholder marks a payment whose ledger revenue is a placeholder: every
 // Play credit, and an App Store sale in another currency.
-func subscriptionMetricsRevenueRowsSql() string {
+func subscriptionMetricsRevenueRowsSql(gateParam int) string {
 	paidEnd := subscriptionMetricsPaidEndSql("tracked")
 	cryptoAndGamma := subscriptionMetricsSqlList(slices.Concat(SubscriptionOneTimeCryptoMarkets, []string{SubscriptionMarketGamma}))
+	gate := fmt.Sprintf("$%d::timestamp", gateParam)
 	return `reconcile_credited_invoice AS MATERIALIZED (
     SELECT DISTINCT event.evidence AS invoice_id
     FROM payment_reconciliation_event event
@@ -201,6 +240,7 @@ func subscriptionMetricsRevenueRowsSql() string {
       AND event.action = 'credited'
       AND NOT event.dry_run
       AND event.evidence IS NOT NULL
+      AND (` + gate + ` IS NULL OR event.event_time < ` + gate + `)
 ), supporter_window AS MATERIALIZED (
     SELECT tracked.network_id,
            tracked.market,
@@ -377,12 +417,13 @@ func subscriptionMetricsRevenueRowsSql() string {
 // trial, the trials whose free period ended between $2 and $3 (the trailing
 // period, less the days a first charge may take), and how many converted:
 // followed by a paid window in the same store that started from the trial's
-// start to $4 seconds after its end. A Play purchase's trial windows (the trial
-// and the days Play adds) are one trial; its conversion is the purchase's
-// charged window, which starts at the purchase's start too.
+// start to $4 seconds after its end. $5 is the card check's deploy time
+// (subscriptionMetricsRevenueRowsSql). A Play purchase's trial windows (the
+// trial and the days Play adds) are one trial; its conversion is the
+// purchase's charged window, which starts at the purchase's start too.
 var subscriptionMetricsTrialConversionQuery = `
 /* subscription-metrics-trial-conversion */
-WITH ` + subscriptionMetricsRevenueRowsSql() + `, trial AS (
+WITH ` + subscriptionMetricsRevenueRowsSql(5) + `, trial AS (
     SELECT r.network_id, r.market, r.start_time AS trial_start_time, r.trial_end_time
     FROM revenue_row r
     WHERE r.kind = 'trial'
@@ -422,7 +463,8 @@ ORDER BY market
 
 // subscriptionMetricsRevenueQuery values the tracked windows ($1 now; $2-$4
 // the rolling windows' starts; $5-$7 the price tiers, the first the default;
-// $8-$9 each store's fee fraction; $10-$11 each store's trial conversion rate):
+// $8-$9 each store's fee fraction; $10-$11 each store's trial conversion rate;
+// $12 the card check's deploy time, subscriptionMetricsRevenueRowsSql):
 //
 //   - trial_expected: each trial running now at its plan's yearly net price
 //     (the tier's yearly price, or 12 monthly prices, less the store's fee,
@@ -447,7 +489,7 @@ ORDER BY market
 // the offer's percent too.
 var subscriptionMetricsRevenueQuery = `
 /* subscription-metrics-revenue */
-WITH ` + subscriptionMetricsRevenueRowsSql() + `, metric_window(window_name, since_time) AS (
+WITH ` + subscriptionMetricsRevenueRowsSql(12) + `, metric_window(window_name, since_time) AS (
     VALUES ('24h', $2::timestamp), ('7d', $3::timestamp), ('30d', $4::timestamp)
 ), pro_tier(tier_name, yearly_usd, monthly_usd, tier_order) AS (
     SELECT DISTINCT ON (tier.tier_name) tier.tier_name, tier.yearly_usd, tier.monthly_usd, tier.tier_order
@@ -646,11 +688,13 @@ ORDER BY kind, store, window_name
 `
 
 // The parameters of subscriptionMetricsRevenueQuery after the four times:
-// the tiers, the fees and the conversion rates as parallel arrays.
+// the tiers, the fees and the conversion rates as parallel arrays, then the
+// card check's deploy time (nil: not deployed).
 func subscriptionMetricsRevenueArgs(
 	tiers []SubscriptionMetricsPriceTier,
 	feeFractions map[string]float64,
 	rates map[string]float64,
+	stripeTrialCardGate *time.Time,
 ) []any {
 	tierNames := []string{}
 	tierYearly := []float64{}
@@ -672,7 +716,7 @@ func subscriptionMetricsRevenueArgs(
 		rateStores = append(rateStores, store)
 		storeRates = append(storeRates, rates[store])
 	}
-	return []any{tierNames, tierYearly, tierMonthly, feeStores, fees, rateStores, storeRates}
+	return []any{tierNames, tierYearly, tierMonthly, feeStores, fees, rateStores, storeRates, stripeTrialCardGate}
 }
 
 // subscriptionMetricsRevenueSettings resolves the settings' revenue inputs:
@@ -693,12 +737,111 @@ func subscriptionMetricsRevenueSettings(settings *SubscriptionMetricsSettings) (
 }
 
 // The conversion query's period: trials whose free period ended from
-// period before now to settle before now, and the settle as the most a
-// conversion may start after its trial ended.
+// period before now to settle before now, the settle as the most a
+// conversion may start after its trial ended, and the card check's deploy
+// time (nil: not deployed).
 func subscriptionMetricsTrialConversionArgs(now time.Time, settings *SubscriptionMetricsSettings) []any {
 	return []any{
 		now.Add(-settings.TrialConversionPeriod),
 		now.Add(-settings.TrialConversionSettle),
 		int64(settings.TrialConversionSettle / time.Second),
+		settings.StripeTrialCardGateTime,
 	}
+}
+
+// loadSubscriptionMetricsRevenue is the snapshot's revenue step: the trial
+// conversion rates, then the revenue that values trials at them, into the
+// snapshot's revenue fields. It runs on its own connection under its own time
+// bound (settings.RevenueTimeout), after the snapshot's other queries, so a
+// slow or failing revenue query leaves every other number of the snapshot
+// current. On a failure it logs, leaves the revenue fields empty and returns
+// false; the collector then publishes no revenue series for the snapshot (no
+// data, never a false zero) and counts the failure.
+func loadSubscriptionMetricsRevenue(
+	ctx context.Context,
+	now time.Time,
+	settings *SubscriptionMetricsSettings,
+	snapshot *SubscriptionMetricsSnapshot,
+) (loaded bool) {
+	revenueCtx := ctx
+	if 0 < settings.RevenueTimeout {
+		var cancel context.CancelFunc
+		revenueCtx, cancel = context.WithTimeout(ctx, settings.RevenueTimeout)
+		defer cancel()
+	}
+	cutoff24Hours := now.Add(-24 * time.Hour)
+	cutoff7Days := now.Add(-7 * 24 * time.Hour)
+	cutoff30Days := now.Add(-30 * 24 * time.Hour)
+	// filled here and handed to the snapshot only once every query read
+	revenue := newSubscriptionMetricsSnapshot()
+	err := server.HandleError(func() {
+		server.ReplicaDb(revenueCtx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				revenueCtx,
+				subscriptionMetricsTrialConversionQuery,
+				append([]any{now}, subscriptionMetricsTrialConversionArgs(now, settings)...)...,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var store string
+					var converted int64
+					var ended int64
+					server.Raise(result.Scan(&store, &converted, &ended))
+					revenue.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: SubscriptionMetricsTrialOutcomeConverted}] = converted
+					revenue.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: SubscriptionMetricsTrialOutcomeLapsed}] = ended - converted
+				}
+			})
+			for _, outcome := range SubscriptionMetricsTrialOutcomes() {
+				pooled := int64(0)
+				for _, store := range SubscriptionMetricsStores() {
+					pooled += revenue.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: outcome}]
+				}
+				revenue.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: SubscriptionMetricsStoreAll, Outcome: outcome}] = pooled
+			}
+			revenue.TrialConversionRates = subscriptionMetricsTrialConversionRates(
+				revenue.TrialConversionTrials,
+				settings.TrialConversionMinTrials,
+			)
+
+			tiers, feeFractions := subscriptionMetricsRevenueSettings(settings)
+			result, err = conn.Query(
+				revenueCtx,
+				subscriptionMetricsRevenueQuery,
+				append(
+					[]any{now, cutoff24Hours, cutoff7Days, cutoff30Days},
+					subscriptionMetricsRevenueArgs(tiers, feeFractions, revenue.TrialConversionRates, settings.StripeTrialCardGateTime)...,
+				)...,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var kind string
+					var store string
+					var window string
+					var value float64
+					server.Raise(result.Scan(&kind, &store, &window, &value))
+					switch kind {
+					case "new_forecast":
+						revenue.NewForecastRevenueUsd[SubscriptionMetricsStoreWindow{Store: store, Window: window}] = value
+					case "recurring":
+						revenue.RecurringRevenueUsd[SubscriptionMetricsStoreWindow{Store: store, Window: window}] = value
+					case "trial_expected":
+						revenue.TrialExpectedRevenueUsd[store] = value
+					case "trials_convertible":
+						revenue.TrialsConvertible[store] = int64(math.Round(value))
+					}
+				}
+			})
+		})
+	})
+	if err != nil {
+		glog.Errorf("[subscription metrics]revenue not refreshed; this snapshot publishes no revenue series: %v\n", err)
+		return false
+	}
+	snapshot.NewForecastRevenueUsd = revenue.NewForecastRevenueUsd
+	snapshot.RecurringRevenueUsd = revenue.RecurringRevenueUsd
+	snapshot.TrialExpectedRevenueUsd = revenue.TrialExpectedRevenueUsd
+	snapshot.TrialsConvertible = revenue.TrialsConvertible
+	snapshot.TrialConversionRates = revenue.TrialConversionRates
+	snapshot.TrialConversionTrials = revenue.TrialConversionTrials
+	return true
 }

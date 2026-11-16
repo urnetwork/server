@@ -38,11 +38,15 @@ func TestSubscriptionMetricsCollectorPublishesRevenue(t *testing.T) {
 			{Store: model.SubscriptionMarketStripe, Outcome: model.SubscriptionMetricsTrialOutcomeConverted}: 2,
 			{Store: model.SubscriptionMarketStripe, Outcome: model.SubscriptionMetricsTrialOutcomeLapsed}:    2,
 		},
+		RevenueLoaded: true,
 	}
 	collector := newSubscriptionMetricsCollector()
 	collector.set(snapshot, refreshedAt)
 	metricFamilies := gatherSubscriptionMetricFamilies(t, collector)
 
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_revenue_refresh_failures", nil); got != 0 {
+		t.Errorf("revenue refresh failures = %v, want 0", got)
+	}
 	for _, c := range []struct {
 		name   string
 		labels map[string]string
@@ -143,5 +147,64 @@ func TestSubscriptionMetricsStoreFeeFractionsAreTheCreditPaths(t *testing.T) {
 	}
 	if got := subscriptionMetricsSettings().StoreFeeFractions[model.SubscriptionMarketStripe]; got != stripeInvoiceFeeFraction {
 		t.Errorf("settings stripe fee = %v, want %v", got, stripeInvoiceFeeFraction)
+	}
+}
+
+// The revenue is its own step of the snapshot. A snapshot whose revenue step
+// failed publishes every other series as usual and no revenue series at all
+// (no data, never a false zero, whatever the revenue fields hold), and the
+// failures in a row are counted until a refresh succeeds.
+func TestSubscriptionMetricsCollectorLeavesOutRevenueWhenItFailed(t *testing.T) {
+	refreshedAt := time.Date(2026, 11, 16, 6, 0, 0, 0, time.UTC)
+	revenueFamilies := []string{
+		"urnetwork_subscription_new_forecast_revenue_usd",
+		"urnetwork_subscription_recurring_revenue_usd",
+		"urnetwork_subscription_trial_expected_revenue_usd",
+		"urnetwork_subscription_trials_convertible",
+		"urnetwork_subscription_trial_conversion_rate",
+		"urnetwork_subscription_trial_conversion_trials",
+	}
+	failed := func() *model.SubscriptionMetricsSnapshot {
+		return &model.SubscriptionMetricsSnapshot{
+			ActiveAccounts: map[string]int64{
+				model.SubscriptionMarketApple:              4,
+				model.SubscriptionMetricsStoreDeduplicated: 9,
+			},
+			// a half-read revenue step: never published
+			NewForecastRevenueUsd: map[model.SubscriptionMetricsStoreWindow]float64{
+				{Store: model.SubscriptionMetricsStoreDeduplicated, Window: model.SubscriptionMetricsWindow30Days}: 99,
+			},
+			RevenueLoaded: false,
+		}
+	}
+	collector := newSubscriptionMetricsCollector()
+	for i, want := range []float64{1, 2} {
+		collector.set(failed(), refreshedAt.Add(time.Duration(i)*15*time.Minute))
+		metricFamilies := gatherSubscriptionMetricFamilies(t, collector)
+		if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_active_accounts", map[string]string{"store": model.SubscriptionMarketApple}); got != 4 {
+			t.Errorf("active apple = %v, want 4: the rest of the snapshot is published", got)
+		}
+		if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_snapshot_timestamp_seconds", nil); got != float64(refreshedAt.Add(time.Duration(i)*15*time.Minute).Unix()) {
+			t.Errorf("snapshot timestamp = %v, want this refresh's", got)
+		}
+		if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_revenue_refresh_failures", nil); got != want {
+			t.Errorf("revenue refresh failures = %v, want %v", got, want)
+		}
+		for _, name := range revenueFamilies {
+			if family := metricFamilies[name]; family != nil && 0 < len(family.Metric) {
+				t.Errorf("%s published %d series from a failed revenue step", name, len(family.Metric))
+			}
+		}
+	}
+
+	loaded := failed()
+	loaded.RevenueLoaded = true
+	collector.set(loaded, refreshedAt.Add(time.Hour))
+	metricFamilies := gatherSubscriptionMetricFamilies(t, collector)
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_revenue_refresh_failures", nil); got != 0 {
+		t.Errorf("revenue refresh failures after a success = %v, want 0", got)
+	}
+	if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_new_forecast_revenue_usd", map[string]string{"store": model.SubscriptionMetricsStoreDeduplicated, "window": model.SubscriptionMetricsWindow30Days}); got != 99 {
+		t.Errorf("forecast after a success = %v, want 99", got)
 	}
 }

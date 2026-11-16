@@ -87,14 +87,14 @@
       "id": 33,
       "type": "stat",
       "title": "net new forecasted revenue (30 days)",
-      "description": "The yearly net value, in USD after store fees, of the subscriptions that started in the last 30 days, each network counted once. A subscription counts at its first paid window's net for a year (a monthly net x 12, a yearly net x 1, by the plan), so a trial that converted counts at the payment that converted it. A trial still running counts at its expected trial conversion revenue (beside), which this total holds once; a trial that ended without a charge counts zero. Fixed to the 30-day window; it does not follow the rolling window selector.",
+      "description": "The yearly net value, in USD after store fees, of the subscriptions that started in the last 30 days, each network counted once. A subscription counts at its first paid window's net for a year (a monthly net x 12, a yearly net x 1, by the plan), so a trial that converted counts at the payment that converted it. A trial still running counts at its expected trial conversion revenue (beside), which this total holds once; a trial that ended without a charge counts zero. Fixed to the 30-day window; it does not follow the rolling window selector. No data while the latest revenue refresh failed (revenue refresh failures).",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
       "gridPos": {
         "h": 5,
-        "w": 7,
+        "w": 6,
         "x": 0,
         "y": 1
       },
@@ -144,15 +144,15 @@
       "id": 34,
       "type": "stat",
       "title": "expected trial conversion revenue",
-      "description": "Each free trial running now valued at its plan's yearly net price (the pro.yml price tier's yearly price, or 12 monthly prices, less the store's fee, and less the welcome offer's percent when the network redeemed it in that store) times its store's trial conversion rate (beside), each network counted once. It is the trial share of net new forecasted revenue (30 days). A Stripe trial only the payment reconcile credited (a payment sheet abandoned before its card was attached) can never convert and is left out.",
+      "description": "Each free trial running now valued at its plan's yearly net price (the pro.yml price tier's yearly price, or 12 monthly prices, less the store's fee, and less the welcome offer's percent when the network redeemed it in that store) times its store's trial conversion rate (beside), each network counted once. It is the trial share of net new forecasted revenue (30 days). Left out: a Stripe trial only the payment reconcile credited before the payment-sheet card check deployed (a payment sheet abandoned before its card was attached), which can never convert; a trial the reconcile credited after that (a missed webhook) counts.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
       "gridPos": {
         "h": 5,
-        "w": 5,
-        "x": 7,
+        "w": 4,
+        "x": 6,
         "y": 1
       },
       "fieldConfig": {
@@ -209,7 +209,7 @@
       "gridPos": {
         "h": 5,
         "w": 5,
-        "x": 12,
+        "x": 10,
         "y": 1
       },
       "fieldConfig": {
@@ -270,15 +270,15 @@
       "id": 36,
       "type": "stat",
       "title": "net recurring revenue (30 days)",
-      "description": "The net, in USD after store fees, collected from renewals in the last 30 days across every store: each paid window after a network's first paid window in that store, dated by its payment. A store's first paid window (a new subscription or a trial's first charge) and trials never count; a crypto year paid again in the same market does. Fixed to the 30-day window; it does not follow the rolling window selector.",
+      "description": "The net, in USD after store fees, collected from renewals in the last 30 days across every store: each paid window after a network's first paid window in that store, dated by its payment. A store's first paid window (a new subscription or a trial's first charge) and trials never count; a crypto year paid again in the same market does. Fixed to the 30-day window; it does not follow the rolling window selector. No data while the latest revenue refresh failed (revenue refresh failures).",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
       "gridPos": {
         "h": 5,
-        "w": 7,
-        "x": 17,
+        "w": 6,
+        "x": 15,
         "y": 1
       },
       "fieldConfig": {
@@ -317,6 +317,67 @@
             "uid": "warp-mimir"
           },
           "expr": "max(urnetwork_subscription_recurring_revenue_usd{env=\"$env\",service=\"taskworker\",store=\"all\",window=\"30d\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "revenue refresh failures",
+      "description": "Snapshot refreshes in a row whose revenue step failed or ran out of its own 2-minute bound; 0 once one succeeds. The revenue is its own step of the snapshot: while the latest refresh failed, the revenue panels show no data and every other panel stays current. The Taskworker logs each failure.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 21,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_subscription_revenue_refresh_failures{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "instant": true,
           "range": false
@@ -383,7 +444,7 @@
       "id": 38,
       "type": "bargauge",
       "title": "trials behind the forecast",
-      "description": "The free trials running now that the expected trial conversion revenue values (unlike current trials below, without the Stripe trials only the payment reconcile credited), and the trials whose free period ended 7 to 90 days ago that the conversion rates are read from, converted or lapsed. Only Google Play, Stripe and the App Store sell a trial.",
+      "description": "The free trials running now that the expected trial conversion revenue values (unlike current trials below, without a Stripe trial only the payment reconcile credited before the payment-sheet card check deployed (a payment sheet abandoned before its card was attached)), and the trials whose free period ended 7 to 90 days ago that the conversion rates are read from, converted or lapsed. Only Google Play, Stripe and the App Store sell a trial.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -527,7 +588,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Revenue** (the first row) is in USD, net of store fees, over the last 30 days, from the same supporter windows. **Net new forecasted revenue** is the yearly net value of the subscriptions that started in the last 30 days (a network's first window in a store; `deduplicated` is its first window in any tracked store), each counted once: at its first paid window's net for a year, a monthly net x 12 and a yearly net x 1 by the plan (never by a window's length), so a trial that converted counts at the payment that converted it. A trial still running counts instead at its **expected trial conversion revenue**: its plan's yearly net price (the pro.yml price tier's, less the store's fee, and less the welcome offer's percent when the network redeemed it there) x its store's **trial conversion rate**, the share of the trials whose free period ended 7 to 90 days ago that were followed by a paid window in the same store within 7 days of their end (a store with fewer than 30 such trials uses the pooled rate of every store's trials). Every trial running now started in the last 30 days, so the forecast holds the expected trial conversion revenue whole, once; a trial that ended without a charge counts zero. **Net recurring revenue** is the net collected from renewals in the last 30 days: every paid window after a network's first paid window in that store, dated by its payment (Stripe's invoice credit, the Google Play period's start, the App Store purchase, the crypto credit, Pay with Gamma's credit). A store's first paid window and trials never count; a Solana, Monero, Zcash or other crypto year paid again in the same market does; `all` adds every store. The ledger's net revenue is used, except where it holds a placeholder: every Google Play credit records the play.yml supporter price ($5 less 30%) whatever the plan or tier, and an App Store sale in another currency records $0.01, so those are valued at the plan's price tier less the store's fee (Stripe 30%, App Store 20%, Google Play 30%; the crypto markets and gamma record what was paid). Refunded or revoked payments, App Store sandbox purchases, gift redemptions (no sale; the gift, manual and x402 markets are not tracked) and Stripe trials only the payment reconcile credited (a payment sheet abandoned before its card was attached, which can never convert) count nothing. **Current trials** below still counts those Stripe trials; **trials behind the forecast** does not.\n\n**Subscriptions** come from durable supporter renewal windows for Apple, Google Play / Android (`google`), Stripe, Solana, Monero, Zcash, TAO (`bittensor`), Bitcoin, ETH (`ethereum`) and Pay with Gamma (`gamma`). A free trial is a subscription (owner decision 2026-11-08): a network counts while it is paid, inside a free trial, or inside a grace period after a failed charge (a store's billing grace; the 30-day manual-payment grace of a period paid through Stripe, the crypto rails or gamma; or, since 2026-11-13, the day after a Stripe free trial whose first charge failed). App Store sandbox purchases (TestFlight, App Review) record no revenue and are left out. Per-store counts are distinct networks in that store; `deduplicated` counts a network once across all tracked stores. **Current trials** are the networks inside a free trial now, nothing charged yet, by store and plan; they are part of the current subscriptions, not added to them. Google Play and Stripe sell the trial only with the yearly plan; the App Store product names its plan. **New subscriptions** count a network's first supporter window per store, a trial's start included, while `deduplicated` is its first-ever window across all tracked stores; a trial's first charge, renewals and store switches never count again. **Engaged** means a current subscriber has at least one active top-level client whose latest authentication falls inside the selected rolling window; it is subscriber engagement, not an all-network traffic proxy. **Observed churn** means the latest known supporter window ended during the window and the account remains inactive; it combines natural expiry, cancellation and a trial that ended without a charge, because the durable renewal ledger cannot distinguish them. Reactivated accounts are excluded. **Past due** counts the current subscribers whose window has outlived the period it paid for: the grace after a failed or cancelled renewal, a store's billing grace hold, or the day after a free trial; they are part of the current subscriptions, not added to them. **Payment failures** are Stripe's failed renewals, the ones the server sends payment notices for: those still failing now, and those that stopped failing inside the window, by reason (`paid`, `voided`, `uncollectible`, or `subscription_ended` when Stripe's final action canceled the subscription). Only the revenue row shows dollars; it is defined in the first paragraph.\n\nReconciliation panels count non-dry-run audit events. They require a fresh hourly run heartbeat and a fresh successful watermark for the matching store, so an unavailable provider source renders no-data rather than false zero. Gamma has no reconciliation leg, so it never has rows there. Data-pack panels are gross fulfilled grants: code-backed rows plus direct paid non-Pro balances, with a redeemed code's balance excluded from the direct side. The existing ledgers do not retain a reliable processor/product/quantity dimension for every grant; refunds and terminal provider events remain visible separately. All panels use one complete 15-minute Taskworker snapshot and export only bounded aggregate labels."
+        "content": "**Revenue** (the first row) is in USD, net of store fees, over the last 30 days, from the same supporter windows. **Net new forecasted revenue** is the yearly net value of the subscriptions that started in the last 30 days (a network's first window in a store; `deduplicated` is its first window in any tracked store), each counted once: at its first paid window's net for a year, a monthly net x 12 and a yearly net x 1 by the plan (never by a window's length), so a trial that converted counts at the payment that converted it. A trial still running counts instead at its **expected trial conversion revenue**: its plan's yearly net price (the pro.yml price tier's, less the store's fee, and less the welcome offer's percent when the network redeemed it there) x its store's **trial conversion rate**, the share of the trials whose free period ended 7 to 90 days ago that were followed by a paid window in the same store within 7 days of their end (a store with fewer than 30 such trials uses the pooled rate of every store's trials). Every trial running now started in the last 30 days, so the forecast holds the expected trial conversion revenue whole, once; a trial that ended without a charge counts zero. **Net recurring revenue** is the net collected from renewals in the last 30 days: every paid window after a network's first paid window in that store, dated by its payment (Stripe's invoice credit, the Google Play period's start, the App Store purchase, the crypto credit, Pay with Gamma's credit). A store's first paid window and trials never count; a Solana, Monero, Zcash or other crypto year paid again in the same market does; `all` adds every store. The ledger's net revenue is used, except where it holds a placeholder: every Google Play credit records the play.yml supporter price ($5 less 30%) whatever the plan or tier, and an App Store sale in another currency records $0.01, so those are valued at the plan's price tier less the store's fee (Stripe 30%, App Store 20%, Google Play 30%; the crypto markets and gamma record what was paid). Refunded or revoked payments, App Store sandbox purchases, gift redemptions (no sale; the gift, manual and x402 markets are not tracked) and Stripe trials only the payment reconcile credited before the payment-sheet card check deployed (a payment sheet abandoned before its card was attached, which can never convert) count nothing; a trial the reconcile credited after it (a missed webhook) counts. **Current trials** below still counts those Stripe trials; **trials behind the forecast** does not. The revenue is its own step of the snapshot: if it fails or runs out of time, the revenue panels show no data, **revenue refresh failures** counts the refreshes in a row it failed, and every other panel stays current.\n\n**Subscriptions** come from durable supporter renewal windows for Apple, Google Play / Android (`google`), Stripe, Solana, Monero, Zcash, TAO (`bittensor`), Bitcoin, ETH (`ethereum`) and Pay with Gamma (`gamma`). A free trial is a subscription (owner decision 2026-11-08): a network counts while it is paid, inside a free trial, or inside a grace period after a failed charge (a store's billing grace; the 30-day manual-payment grace of a period paid through Stripe, the crypto rails or gamma; or, since 2026-11-13, the day after a Stripe free trial whose first charge failed). App Store sandbox purchases (TestFlight, App Review) record no revenue and are left out. Per-store counts are distinct networks in that store; `deduplicated` counts a network once across all tracked stores. **Current trials** are the networks inside a free trial now, nothing charged yet, by store and plan; they are part of the current subscriptions, not added to them. Google Play and Stripe sell the trial only with the yearly plan; the App Store product names its plan. **New subscriptions** count a network's first supporter window per store, a trial's start included, while `deduplicated` is its first-ever window across all tracked stores; a trial's first charge, renewals and store switches never count again. **Engaged** means a current subscriber has at least one active top-level client whose latest authentication falls inside the selected rolling window; it is subscriber engagement, not an all-network traffic proxy. **Observed churn** means the latest known supporter window ended during the window and the account remains inactive; it combines natural expiry, cancellation and a trial that ended without a charge, because the durable renewal ledger cannot distinguish them. Reactivated accounts are excluded. **Past due** counts the current subscribers whose window has outlived the period it paid for: the grace after a failed or cancelled renewal, a store's billing grace hold, or the day after a free trial; they are part of the current subscriptions, not added to them. **Payment failures** are Stripe's failed renewals, the ones the server sends payment notices for: those still failing now, and those that stopped failing inside the window, by reason (`paid`, `voided`, `uncollectible`, or `subscription_ended` when Stripe's final action canceled the subscription). Only the revenue row shows dollars; it is defined in the first paragraph.\n\nReconciliation panels count non-dry-run audit events. They require a fresh hourly run heartbeat and a fresh successful watermark for the matching store, so an unavailable provider source renders no-data rather than false zero. Gamma has no reconciliation leg, so it never has rows there. Data-pack panels are gross fulfilled grants: code-backed rows plus direct paid non-Pro balances, with a redeemed code's balance excluded from the direct side. The existing ledgers do not retain a reliable processor/product/quantity dimension for every grant; refunds and terminal provider events remain visible separately. All panels use one complete 15-minute Taskworker snapshot and export only bounded aggregate labels."
       }
     },
     {

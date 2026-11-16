@@ -10,7 +10,6 @@ package model
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -179,7 +178,7 @@ type SubscriptionMetricsSnapshot struct {
 	TrialExpectedRevenueUsd map[string]float64
 	// the trials running now that the expected revenue values, by store and
 	// deduplicated: TrialsActive less the Stripe trials only the reconcile
-	// credited
+	// credited before the card check
 	TrialsConvertible map[string]int64
 	// the conversion rate each store's trials are valued at, and the pooled
 	// rate (all)
@@ -187,6 +186,10 @@ type SubscriptionMetricsSnapshot struct {
 	// the trials whose free period ended in the conversion rate's trailing
 	// period, by store (and all) and outcome
 	TrialConversionTrials map[SubscriptionMetricsStoreOutcome]int64
+	// whether the revenue step read the revenue fields above. It is its own
+	// step (loadSubscriptionMetricsRevenue): when it fails, the fields stay
+	// empty and the rest of the snapshot is whole
+	RevenueLoaded bool
 }
 
 // The subscriptions snapshot's tunables.
@@ -212,6 +215,16 @@ type SubscriptionMetricsSettings struct {
 	// The fewest ended trials a store needs for its own conversion rate; a
 	// store with fewer uses the pooled rate of every store's trials.
 	TrialConversionMinTrials int64
+	// When the payment-sheet card check deployed: a $0 Stripe invoice the
+	// reconcile credited before it is an abandoned payment sheet and is left
+	// out of the revenue, one credited after it is a real trial. Nil (not
+	// deployed) leaves every reconcile credit of a $0 Stripe invoice out.
+	// The default is SubscriptionMetricsStripeTrialCardGate.
+	StripeTrialCardGateTime *time.Time
+	// The revenue step's own time bound, inside the task's. When it runs out
+	// the revenue is left out of the snapshot and the rest is published.
+	// Non-positive bounds it only by the caller's context.
+	RevenueTimeout time.Duration
 }
 
 // A new instance on every call.
@@ -229,6 +242,9 @@ func DefaultSubscriptionMetricsSettings() *SubscriptionMetricsSettings {
 		TrialConversionSettle: 7 * 24 * time.Hour,
 		// a rate from fewer trials moves too much with each one
 		TrialConversionMinTrials: 30,
+		StripeTrialCardGateTime:  subscriptionMetricsParseStripeTrialCardGate(SubscriptionMetricsStripeTrialCardGate),
+		// well inside the task's 5 minutes, after the other queries' share
+		RevenueTimeout: 2 * time.Minute,
 	}
 }
 
@@ -874,65 +890,11 @@ func LoadSubscriptionMetricsSnapshotWithSettings(ctx context.Context, now time.T
 				snapshot.UncreditedOldestAgeSeconds[rail] = oldestAgeSeconds
 			}
 		})
-
-		// the trial conversion rates, then the revenue that values trials at
-		// them
-		result, err = conn.Query(
-			ctx,
-			subscriptionMetricsTrialConversionQuery,
-			append([]any{now}, subscriptionMetricsTrialConversionArgs(now, settings)...)...,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var store string
-				var converted int64
-				var ended int64
-				server.Raise(result.Scan(&store, &converted, &ended))
-				snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: SubscriptionMetricsTrialOutcomeConverted}] = converted
-				snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: SubscriptionMetricsTrialOutcomeLapsed}] = ended - converted
-			}
-		})
-		for _, outcome := range SubscriptionMetricsTrialOutcomes() {
-			pooled := int64(0)
-			for _, store := range SubscriptionMetricsStores() {
-				pooled += snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: outcome}]
-			}
-			snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: SubscriptionMetricsStoreAll, Outcome: outcome}] = pooled
-		}
-		snapshot.TrialConversionRates = subscriptionMetricsTrialConversionRates(
-			snapshot.TrialConversionTrials,
-			settings.TrialConversionMinTrials,
-		)
-
-		tiers, feeFractions := subscriptionMetricsRevenueSettings(settings)
-		result, err = conn.Query(
-			ctx,
-			subscriptionMetricsRevenueQuery,
-			append(
-				[]any{now, cutoff24Hours, cutoff7Days, cutoff30Days},
-				subscriptionMetricsRevenueArgs(tiers, feeFractions, snapshot.TrialConversionRates)...,
-			)...,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var kind string
-				var store string
-				var window string
-				var value float64
-				server.Raise(result.Scan(&kind, &store, &window, &value))
-				switch kind {
-				case "new_forecast":
-					snapshot.NewForecastRevenueUsd[SubscriptionMetricsStoreWindow{Store: store, Window: window}] = value
-				case "recurring":
-					snapshot.RecurringRevenueUsd[SubscriptionMetricsStoreWindow{Store: store, Window: window}] = value
-				case "trial_expected":
-					snapshot.TrialExpectedRevenueUsd[store] = value
-				case "trials_convertible":
-					snapshot.TrialsConvertible[store] = int64(math.Round(value))
-				}
-			}
-		})
 	})
+
+	// the revenue, as its own step: a failure there leaves the numbers above
+	// current and publishes no revenue series
+	snapshot.RevenueLoaded = loadSubscriptionMetricsRevenue(ctx, now, settings, snapshot)
 
 	return snapshot
 }

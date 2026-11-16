@@ -135,7 +135,8 @@ var subscriptionMetricsNewForecastRevenueDesc = prometheus.NewDesc(
 		"A subscription whose first supporter window in the store began inside the window counts at its first paid window's net for a year: a monthly net x 12, a yearly net x 1, by the plan, never by the window's length. A trial that converted counts at the paid window that converted it. "+
 		"A trial running now that started inside the window counts at its expected value instead (urnetwork_subscription_trial_expected_revenue_usd, counted once), and a trial that ended without a charge counts nothing. "+
 		"Net is the ledger's net revenue, except where it holds a placeholder: a Google Play credit (the play.yml supporter SKU's $5 less 30% whatever the plan) and an App Store sale in another currency (a $0.01 marker) are valued at the plan's pro.yml price tier less the store's fee, and less the welcome offer's percent on a first year the network redeemed it for. "+
-		"App Store sandbox purchases, Stripe trials only the payment reconcile credited (a payment sheet abandoned before its card was attached), refunded or revoked payments, gift redemptions and the manual and x402 markets count nothing.",
+		"App Store sandbox purchases, Stripe trials only the payment reconcile credited before the payment-sheet card check deployed (a payment sheet abandoned before its card was attached), refunded or revoked payments, gift redemptions and the manual and x402 markets count nothing. "+
+		"The revenue is its own step of the snapshot: when it fails or runs out of time, the snapshot publishes no revenue series (urnetwork_subscription_revenue_refresh_failures counts it) and every other series stays current.",
 	[]string{"store", "window"},
 	nil,
 )
@@ -162,7 +163,7 @@ var subscriptionMetricsTrialExpectedRevenueDesc = prometheus.NewDesc(
 var subscriptionMetricsTrialsConvertibleDesc = prometheus.NewDesc(
 	"urnetwork_subscription_trials_convertible",
 	"Distinct networks inside a free trial now that can convert: the trials urnetwork_subscription_trial_expected_revenue_usd values, per tracked store and deduplicated. "+
-		"They are urnetwork_subscription_trials_active less the Stripe trials only the payment reconcile credited: a payment sheet abandoned before its card was attached, which can never convert.",
+		"They are urnetwork_subscription_trials_active less the Stripe trials only the payment reconcile credited before the payment-sheet card check deployed: a payment sheet abandoned before its card was attached, which can never convert. A trial the reconcile credited after it (a missed webhook) counts.",
 	[]string{"store"},
 	nil,
 )
@@ -170,7 +171,7 @@ var subscriptionMetricsTrialsConvertibleDesc = prometheus.NewDesc(
 var subscriptionMetricsTrialConversionRateDesc = prometheus.NewDesc(
 	"urnetwork_subscription_trial_conversion_rate",
 	"The trial conversion rate each tracked store's trials are valued at: of the trials whose free period ended between 90 and 7 days ago, the share followed by a paid window in the same store that started no later than 7 days after the trial ended. "+
-		"A store with fewer than 30 such trials (every store that sells no trial among them) uses the pooled rate of every store's trials, store=all. Stripe trials only the payment reconcile credited are left out.",
+		"A store with fewer than 30 such trials (every store that sells no trial among them) uses the pooled rate of every store's trials, store=all. Stripe trials only the payment reconcile credited before the payment-sheet card check deployed are left out.",
 	[]string{"store"},
 	nil,
 )
@@ -179,6 +180,13 @@ var subscriptionMetricsTrialConversionTrialsDesc = prometheus.NewDesc(
 	"urnetwork_subscription_trial_conversion_trials",
 	"The trials behind urnetwork_subscription_trial_conversion_rate: those whose free period ended between 90 and 7 days ago, per tracked store and all stores, by outcome: converted (a paid window in the same store started no later than 7 days after the trial ended) or lapsed.",
 	[]string{"store", "outcome"},
+	nil,
+)
+
+var subscriptionMetricsRevenueRefreshFailuresDesc = prometheus.NewDesc(
+	"urnetwork_subscription_revenue_refresh_failures",
+	"Snapshot refreshes in a row, on this Taskworker, whose revenue step failed or ran out of its own time bound; 0 once one succeeds. The revenue is its own step: while the latest refresh failed, the snapshot publishes no revenue series and every other subscription series stays current.",
+	nil,
 	nil,
 )
 
@@ -204,6 +212,7 @@ var subscriptionMetricsDescs = []*prometheus.Desc{
 	subscriptionMetricsTrialsConvertibleDesc,
 	subscriptionMetricsTrialConversionRateDesc,
 	subscriptionMetricsTrialConversionTrialsDesc,
+	subscriptionMetricsRevenueRefreshFailuresDesc,
 }
 
 // One immutable sample slice makes every Prometheus collection a coherent
@@ -213,6 +222,8 @@ var subscriptionMetricsDescs = []*prometheus.Desc{
 type subscriptionMetricsCollector struct {
 	stateLock sync.Mutex
 	snapshot  *subscriptionMetricsCollectedSnapshot
+	// the refreshes in a row whose revenue step failed, guarded by stateLock
+	revenueRefreshFailures int64
 }
 
 // Contains const metrics that are never mutated after publication.
@@ -449,18 +460,31 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 		}
 	}
 
-	metrics = append(metrics, subscriptionMetricsRevenueSeries(snapshot)...)
+	// the revenue is its own step of the snapshot: when it failed, no revenue
+	// series (no data, never a false zero), and the failure counted
+	if snapshot.RevenueLoaded {
+		metrics = append(metrics, subscriptionMetricsRevenueSeries(snapshot)...)
+	}
 
 	metrics = append(metrics, prometheus.MustNewConstMetric(
 		subscriptionMetricsSnapshotTimestampDesc,
 		prometheus.GaugeValue,
 		float64(refreshedAt.UTC().Unix()),
 	))
-	collectedSnapshot := &subscriptionMetricsCollectedSnapshot{metrics: metrics}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		self.snapshot = collectedSnapshot
+		if snapshot.RevenueLoaded {
+			self.revenueRefreshFailures = 0
+		} else {
+			self.revenueRefreshFailures += 1
+		}
+		metrics = append(metrics, prometheus.MustNewConstMetric(
+			subscriptionMetricsRevenueRefreshFailuresDesc,
+			prometheus.GaugeValue,
+			float64(self.revenueRefreshFailures),
+		))
+		self.snapshot = &subscriptionMetricsCollectedSnapshot{metrics: metrics}
 	}()
 }
 

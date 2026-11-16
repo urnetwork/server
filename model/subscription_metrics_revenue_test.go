@@ -4,7 +4,38 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
+
+// The card check's deploy time: "" while it has not deployed (every reconcile
+// credit of a $0 Stripe invoice is an abandoned sheet), else an RFC 3339 time.
+// A malformed value panics rather than move the cutoff, and the released
+// constant parses.
+func TestSubscriptionMetricsStripeTrialCardGateParses(t *testing.T) {
+	if gate := subscriptionMetricsParseStripeTrialCardGate(""); gate != nil {
+		t.Errorf("empty gate = %v, want nil (not deployed)", gate)
+	}
+	gate := subscriptionMetricsParseStripeTrialCardGate("2026-11-18T13:00:00-06:00")
+	if want := time.Date(2026, 11, 18, 19, 0, 0, 0, time.UTC); gate == nil || !gate.Equal(want) || gate.Location() != time.UTC {
+		t.Errorf("gate = %v, want %v in UTC", gate, want)
+	}
+	for _, malformed := range []string{"2026-11-18", "2026-11-18 19:00:00", "soon"} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("malformed gate %q parsed", malformed)
+				}
+			}()
+			subscriptionMetricsParseStripeTrialCardGate(malformed)
+		}()
+	}
+	// the released constant parses, and is the default
+	released := subscriptionMetricsParseStripeTrialCardGate(SubscriptionMetricsStripeTrialCardGate)
+	defaultGate := DefaultSubscriptionMetricsSettings().StripeTrialCardGateTime
+	if (released == nil) != (defaultGate == nil) || (released != nil && !released.Equal(*defaultGate)) {
+		t.Errorf("default gate = %v, want the released constant's %v", defaultGate, released)
+	}
+}
 
 // A store's trials are valued at its own conversion rate when enough of them
 // ended in the period, else at the pooled rate of every store's trials.
@@ -68,7 +99,20 @@ func TestSubscriptionMetricsTrialConversionRates(t *testing.T) {
 
 func TestSubscriptionMetricsRevenueQueriesKeepContracts(t *testing.T) {
 	trackedMarkets := subscriptionMetricsSqlList(SubscriptionMarkets)
-	rows := subscriptionMetricsRevenueRowsSql()
+	rows := subscriptionMetricsRevenueRowsSql(5)
+	// a reconcile credit is an abandoned payment sheet only before the card
+	// check deployed, in both queries at their own parameter
+	for name, c := range map[string]struct {
+		query string
+		gate  string
+	}{
+		"trial conversion": {subscriptionMetricsTrialConversionQuery, "$5::timestamp"},
+		"revenue":          {subscriptionMetricsRevenueQuery, "$12::timestamp"},
+	} {
+		if required := "AND (" + c.gate + " IS NULL OR event.event_time < " + c.gate + ")"; !strings.Contains(c.query, required) {
+			t.Errorf("%s query is missing the card check cutoff %q", name, required)
+		}
+	}
 	for _, required := range []string{
 		// the account query's tracked set, App Store sandbox purchases left out
 		"renewal.market IN (" + trackedMarkets + ")",

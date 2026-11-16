@@ -306,6 +306,7 @@ func uniformSubscriptionMetricsSnapshot(value int64, sourceTime time.Time) *mode
 			snapshot.TrialConversionTrials[model.SubscriptionMetricsStoreOutcome{Store: store, Outcome: outcome}] = value
 		}
 	}
+	snapshot.RevenueLoaded = true
 	return snapshot
 }
 
@@ -329,9 +330,10 @@ func requireSubscriptionMetricsGeneration(
 	// revenue 121: the forecast and recurring revenue by eleven stores and
 	// three windows (66), the expected trial revenue, the convertible trials
 	// and the conversion rate by eleven stores (33), and the conversion's
-	// trials by eleven stores and two outcomes (22)
-	if len(metrics) != 520 {
-		t.Fatalf("collected metrics = %d, want 520 bounded samples", len(metrics))
+	// trials by eleven stores and two outcomes (22); and the revenue refresh
+	// failures in a row (1)
+	if len(metrics) != 521 {
+		t.Fatalf("collected metrics = %d, want 521 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric
@@ -346,6 +348,9 @@ func requireSubscriptionMetricsGeneration(
 			want = float64(refreshedAt.Unix())
 		case strings.Contains(desc, `fqName: "urnetwork_subscription_reconciliation_source_timestamp_seconds"`):
 			want = float64(sourceTime.Unix())
+		case strings.Contains(desc, `fqName: "urnetwork_subscription_revenue_refresh_failures"`):
+			// every uniform snapshot's revenue step succeeded
+			want = 0
 		case !strings.Contains(desc, `fqName: "urnetwork_subscription_`):
 			t.Fatalf("unexpected metric descriptor %s", desc)
 		}

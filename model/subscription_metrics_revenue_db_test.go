@@ -141,15 +141,20 @@ func (self *subscriptionMetricsRevenueFixture) offer(networkId server.Id, store 
 	})
 }
 
-// the reconcile's store-side leg credited the invoice
+// the reconcile's store-side leg credited the invoice an hour ago
 func (self *subscriptionMetricsRevenueFixture) reconcileCredited(networkId server.Id, invoiceId string) {
+	self.reconcileCreditedAt(networkId, invoiceId, self.now.Add(-time.Hour))
+}
+
+// the reconcile's store-side leg credited the invoice at the given time
+func (self *subscriptionMetricsRevenueFixture) reconcileCreditedAt(networkId server.Id, invoiceId string, at time.Time) {
 	server.Tx(self.ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			self.ctx,
 			`INSERT INTO payment_reconciliation_event
 			 (event_id, run_id, store, network_id, action, evidence, dry_run, event_time)
 			 VALUES ($1, $2, 'stripe', $3, 'credited', $4, false, $5)`,
-			server.NewId(), server.NewId(), networkId, invoiceId, self.now.Add(-time.Hour),
+			server.NewId(), server.NewId(), networkId, invoiceId, at,
 		))
 	})
 }
@@ -302,6 +307,9 @@ func TestLoadSubscriptionMetricsSnapshotForecastsNewRevenue(t *testing.T) {
 		f.stripe(twoStores, "in_two_stores_"+server.NewId().String(), now.Add(-4*day), month, UsdToNanoCents(3.5))
 
 		snapshot := LoadSubscriptionMetricsSnapshotWithSettings(ctx, now, subscriptionMetricsRevenueTestSettings())
+		if !snapshot.RevenueLoaded {
+			t.Fatal("the revenue step did not load")
+		}
 
 		// the conversion rates
 		sample := func(store string, outcome string) int64 {
@@ -480,5 +488,143 @@ func TestLoadSubscriptionMetricsSnapshotCountsRecurringRevenue(t *testing.T) {
 		if _, ok := snapshot.RecurringRevenueUsd[SubscriptionMetricsStoreWindow{Store: SubscriptionMarketGift, Window: SubscriptionMetricsWindow30Days}]; ok {
 			t.Error("the gift market has recurring revenue")
 		}
+	})
+}
+
+// A $0 Stripe invoice the reconcile credited before the payment-sheet card
+// check deployed is an abandoned payment sheet and is left out; one credited
+// after it is a real trial whose webhook was missed and counts, in the trials
+// running now and in the conversion rate alike. Unset, the gate leaves every
+// reconcile credit out. The trials gauge counts them all, whatever the gate.
+func TestLoadSubscriptionMetricsSnapshotCountsReconcileCreditsAfterTheCardCheck(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().UTC().Truncate(time.Second)
+		day := 24 * time.Hour
+		year := 365 * day
+		trial := 14 * day
+		f := &subscriptionMetricsRevenueFixture{t: t, ctx: ctx, now: now}
+
+		// running now, credited by the reconcile 2 days ago
+		running := f.network()
+		runningInvoice := "in_running_" + server.NewId().String()
+		runningStart := now.Add(-2 * day)
+		f.stripe(running, runningInvoice, runningStart, trial, 0)
+		f.reconcileCreditedAt(running, runningInvoice, runningStart)
+
+		// ended 20 days ago without a charge, credited by the reconcile 34
+		// days ago
+		lapsed := f.network()
+		lapsedInvoice := "in_lapsed_" + server.NewId().String()
+		lapsedStart := now.Add(-34 * day)
+		f.stripe(lapsed, lapsedInvoice, lapsedStart, trial, 0)
+		f.reconcileCreditedAt(lapsed, lapsedInvoice, lapsedStart)
+
+		// ended 36 days ago and converted, credited by the webhook
+		converted := f.network()
+		convertedStart := now.Add(-50 * day)
+		f.stripe(converted, "in_converted_trial_"+server.NewId().String(), convertedStart, trial, 0)
+		f.stripe(converted, "in_converted_paid_"+server.NewId().String(), convertedStart.Add(trial), year, UsdToNanoCents(28))
+
+		for _, c := range []struct {
+			name        string
+			gate        *time.Time
+			convertible int64
+			converted   int64
+			lapsed      int64
+			rate        float64
+		}{
+			// not deployed: both reconcile credits are abandoned sheets
+			{"no gate", nil, 0, 1, 0, 1},
+			// deployed 3 days ago: the running trial's credit came after it,
+			// the lapsed trial's before
+			{"gate 3 days ago", subscriptionMetricsTestTime(now.Add(-3 * day)), 1, 1, 0, 1},
+			// deployed 40 days ago: both credits came after it
+			{"gate 40 days ago", subscriptionMetricsTestTime(now.Add(-40 * day)), 1, 1, 1, 0.5},
+		} {
+			settings := subscriptionMetricsRevenueTestSettings()
+			settings.TrialConversionMinTrials = 1
+			settings.StripeTrialCardGateTime = c.gate
+			snapshot := LoadSubscriptionMetricsSnapshotWithSettings(ctx, now, settings)
+			if !snapshot.RevenueLoaded {
+				t.Fatalf("%s: the revenue step did not load", c.name)
+			}
+			if got := snapshot.TrialsConvertible[SubscriptionMarketStripe]; got != c.convertible {
+				t.Errorf("%s: convertible stripe trials = %d, want %d", c.name, got, c.convertible)
+			}
+			if got := snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: SubscriptionMarketStripe, Outcome: SubscriptionMetricsTrialOutcomeConverted}]; got != c.converted {
+				t.Errorf("%s: stripe trials converted = %d, want %d", c.name, got, c.converted)
+			}
+			if got := snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: SubscriptionMarketStripe, Outcome: SubscriptionMetricsTrialOutcomeLapsed}]; got != c.lapsed {
+				t.Errorf("%s: stripe trials lapsed = %d, want %d", c.name, got, c.lapsed)
+			}
+			subscriptionMetricsWantUsd(t, snapshot.TrialConversionRates[SubscriptionMarketStripe], c.rate, c.name+": stripe conversion rate")
+			// the running trial, standard tier: $40 less 30% at the rate
+			subscriptionMetricsWantUsd(t, snapshot.TrialExpectedRevenueUsd[SubscriptionMarketStripe], float64(c.convertible)*40*0.7*c.rate, c.name+": stripe expected trial revenue")
+			if got := snapshot.TrialsActive[SubscriptionMetricsStorePlan{Store: SubscriptionMarketStripe, Plan: PlanYearly}]; got != 1 {
+				t.Errorf("%s: active stripe trials = %d, want 1 whatever the gate", c.name, got)
+			}
+		}
+	})
+}
+
+func subscriptionMetricsTestTime(t time.Time) *time.Time {
+	return &t
+}
+
+// The revenue is its own step of the snapshot, under its own time bound: when
+// it fails (here it runs out of time at once), the snapshot's other numbers
+// are read and returned whole, and the revenue is left empty and marked not
+// loaded, so the collector publishes no revenue series.
+func TestLoadSubscriptionMetricsSnapshotKeepsTheRestWhenRevenueFails(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().UTC().Truncate(time.Second)
+		day := 24 * time.Hour
+		f := &subscriptionMetricsRevenueFixture{t: t, ctx: ctx, now: now}
+
+		applePaid := f.network()
+		f.apple(applePaid, now.Add(-3*day), 30*day, "supporter_monthly_26", 4990, "USD", UsdToNanoCents(3.992))
+		stripeTrial := f.network()
+		f.stripe(stripeTrial, "in_trial_"+server.NewId().String(), now.Add(-2*day), 14*day, 0)
+
+		settings := subscriptionMetricsRevenueTestSettings()
+		settings.RevenueTimeout = time.Nanosecond
+		snapshot := LoadSubscriptionMetricsSnapshotWithSettings(ctx, now, settings)
+
+		if snapshot.RevenueLoaded {
+			t.Fatal("the revenue step loaded within a nanosecond")
+		}
+		if got := snapshot.ActiveAccounts[SubscriptionMarketApple]; got != 1 {
+			t.Errorf("active apple = %d, want 1", got)
+		}
+		if got := snapshot.ActiveAccounts[SubscriptionMetricsStoreDeduplicated]; got != 2 {
+			t.Errorf("active deduplicated = %d, want 2", got)
+		}
+		if got := snapshot.TrialsActive[SubscriptionMetricsStorePlan{Store: SubscriptionMarketStripe, Plan: PlanYearly}]; got != 1 {
+			t.Errorf("active stripe trials = %d, want 1", got)
+		}
+		if got := snapshot.NewPaidAccounts[SubscriptionMetricsStoreWindow{Store: SubscriptionMetricsStoreDeduplicated, Window: SubscriptionMetricsWindow7Days}]; got != 2 {
+			t.Errorf("new deduplicated 7d = %d, want 2", got)
+		}
+		for name, size := range map[string]int{
+			"forecast":           len(snapshot.NewForecastRevenueUsd),
+			"recurring":          len(snapshot.RecurringRevenueUsd),
+			"expected trials":    len(snapshot.TrialExpectedRevenueUsd),
+			"convertible trials": len(snapshot.TrialsConvertible),
+			"conversion rates":   len(snapshot.TrialConversionRates),
+			"conversion trials":  len(snapshot.TrialConversionTrials),
+		} {
+			if size != 0 {
+				t.Errorf("%s holds %d values from a failed revenue step", name, size)
+			}
+		}
+
+		// the same snapshot with its time bound
+		snapshot = LoadSubscriptionMetricsSnapshotWithSettings(ctx, now, subscriptionMetricsRevenueTestSettings())
+		if !snapshot.RevenueLoaded {
+			t.Fatal("the revenue step did not load")
+		}
+		subscriptionMetricsWantUsd(t, snapshot.NewForecastRevenueUsd[SubscriptionMetricsStoreWindow{Store: SubscriptionMarketApple, Window: SubscriptionMetricsWindow30Days}], 3.992*12, "apple 30d forecast")
 	})
 }
