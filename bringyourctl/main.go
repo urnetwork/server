@@ -147,6 +147,7 @@ Usage:
     bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort] [--drop-legacy]
     bringyourctl model migrate finished-task-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
+    bringyourctl model migrate table-swap --table=<table> [--dry-run] [--rollback] [--drop-old]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
@@ -211,6 +212,13 @@ Options:
     --verify       Check the partitioned egress health history against the
                    old table.
     --drop-old     Drop the old egress health history once --verify passes.
+                   With model migrate table-swap, drop the table's kept old
+                   table once its rollback window (a day) has passed.
+    --table=<table>  With model migrate table-swap, the table whose live rows
+                   are copied into a fresh twin and swapped in under its name
+                   (PARTITION-CANDIDATES.md §4.4): pending_task, with every
+                   taskworker stopped. The old table is kept for --rollback
+                   until --drop-old.
     --drop-legacy  Detach, then drop, provider_work_session_event_legacy once
                    the journal's drop guard admits it, an hour after the
                    cutover week starts (owner, 2026-11-15). A connection
@@ -586,6 +594,8 @@ func main() {
 				modelMigrateProviderWorkSessionPartition(opts)
 			} else if finishedTaskPartition, _ := opts.Bool("finished-task-partition"); finishedTaskPartition {
 				modelMigrateFinishedTaskPartition(opts)
+			} else if tableSwap, _ := opts.Bool("table-swap"); tableSwap {
+				modelMigrateTableSwap(opts)
 			}
 		} else if upgradeClientReliabilityIndex, _ := opts.Bool("upgrade-client-reliability-index"); upgradeClientReliabilityIndex {
 			modelUpgradeClientReliabilityIndex(opts)
@@ -2692,6 +2702,38 @@ func finishedTaskPartitionMigrateOptions(opts docopt.Opts) (options server.Finis
 			err = fmt.Errorf("--max-copy-rows must not be negative: %d", options.Settings.RollbackMaxCopyRows)
 			return
 		}
+	}
+	return
+}
+
+// Copies a queue table's live rows into a fresh twin and swaps the names
+// (PARTITION-CANDIDATES.md §4.4; server.SwapTable): the swap, --rollback into
+// the kept old table, and --drop-old once the rollback window has passed.
+// Each step can be rehearsed with --dry-run.
+func modelMigrateTableSwap(opts docopt.Opts) {
+	options, err := tableSwapOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.SwapTable(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func tableSwapOptions(opts docopt.Opts) (options server.TableSwapOptions, err error) {
+	options.Table, _ = opts.String("--table")
+	if options.Table == "" {
+		err = fmt.Errorf("--table is required")
+		return
+	}
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.DropOld, _ = opts.Bool("--drop-old")
+	if options.Rollback && options.DropOld {
+		err = fmt.Errorf("choose one of --rollback and --drop-old")
 	}
 	return
 }
