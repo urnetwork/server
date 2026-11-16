@@ -11,10 +11,10 @@ import (
 
 // The side table's row and panel ids on the taskworker dashboard.
 const (
-	contractOriginLingerRowPanel   = 131
-	contractOriginLingerReadsPanel = 132
-	contractOriginLingerSweepPanel = 133
-	contractOriginLingerLagPanel   = 134
+	contractOriginLingerRowPanel   = 142
+	contractOriginLingerReadsPanel = 143
+	contractOriginLingerSweepPanel = 144
+	contractOriginLingerLagPanel   = 145
 )
 
 // The reads panel reads every serving process, not only the taskworker, by
