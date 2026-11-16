@@ -561,6 +561,8 @@ func abuseActionKindText(kind string) string {
 		return "Sending halted"
 	case model.AbuseActionKindMailLabelHalt:
 		return "Sending halted for one address"
+	case model.AbuseActionKindLimitTighten:
+		return "Limit tightened"
 	}
 	return "Action taken"
 }

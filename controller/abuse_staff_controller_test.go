@@ -132,7 +132,7 @@ func TestAbuseStaffActionRefusesBeforeRunning(t *testing.T) {
 	if _, err := AbuseStaffAction(ctx, reviewer, []byte(`{"kind":"review","case_id":"`+server.NewId().String()+`","decision":"uphold"}`)); !errors.Is(err, ErrAbuseStaffRequestInvalid) {
 		t.Errorf("a review with no reasons: %v", err)
 	}
-	if names := AbuseStaffKindNames(); !slices.Equal(names, []string{"action", "clear_restore_flag", "decide_appeal", "lift", "lookup_case", "lookup_join", "place_hold", "renew_hold", "report_csam", "review"}) {
+	if names := AbuseStaffKindNames(); !slices.Equal(names, []string{"action", "clear_restore_flag", "decide_appeal", "lift", "limit_tighten", "lookup_case", "lookup_join", "place_hold", "renew_hold", "report_csam", "review"}) {
 		t.Errorf("the table holds %v", names)
 	}
 }

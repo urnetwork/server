@@ -104,6 +104,17 @@ type AbuseSettings struct {
 	// The task runner's bound on one retention pass, past RetentionPassMaxTime.
 	RetentionPassTaskMaxTime time.Duration
 
+	// When in each UTC day the closure-growth pass runs (§21.7, QD-328), as a
+	// time past midnight: 23:30, late, so the day's closure bytes have
+	// accumulated and the night's stored count stands.
+	ClosureGrowthPassTime time.Duration
+	// The most networks one read of the closure-growth pass takes.
+	ClosureGrowthBatchSize int
+	// One closure-growth pass's bound.
+	ClosureGrowthPassMaxTime time.Duration
+	// The task runner's bound on one closure-growth pass.
+	ClosureGrowthPassTaskMaxTime time.Duration
+
 	// The most rows one abuse-role lookup returns, by case id or join key
 	// (§21.10): never in bulk. A lookup past it answers the first rows and says
 	// more exist.
@@ -155,12 +166,17 @@ func DefaultAbuseSettings() *AbuseSettings {
 		RetentionPassInterval:    time.Hour,
 		RetentionPassMaxTime:     5 * time.Minute,
 		RetentionPassTaskMaxTime: 10 * time.Minute,
-		LookupRowLimit:           100,
-		ReviewReasonMaxByteCount: 2048,
-		ConnectionJoinWindow:     24 * time.Hour,
-		ReportUrlMaxByteCount:    2048,
-		HostNameMaxByteCount:     253,
-		HostLabelMaxByteCount:    63,
+
+		ClosureGrowthPassTime:        23*time.Hour + 30*time.Minute,
+		ClosureGrowthBatchSize:       500,
+		ClosureGrowthPassMaxTime:     10 * time.Minute,
+		ClosureGrowthPassTaskMaxTime: 20 * time.Minute,
+		LookupRowLimit:               100,
+		ReviewReasonMaxByteCount:     2048,
+		ConnectionJoinWindow:         24 * time.Hour,
+		ReportUrlMaxByteCount:        2048,
+		HostNameMaxByteCount:         253,
+		HostLabelMaxByteCount:        63,
 	}
 }
 

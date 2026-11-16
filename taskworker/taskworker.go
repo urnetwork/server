@@ -230,6 +230,10 @@ func initTaskSchedule(ctx context.Context) {
 		// requests and the access log at 3 years, held networks skipped; not
 		// scheduled without MG5
 		work.ScheduleAbuseRetention(clientSession, tx)
+		// §21.7's closure growth once a day, late: a case, no action, for a
+		// network whose closures take it past its storage limit; not scheduled
+		// without MG2 and MG5
+		work.ScheduleAbuseClosureGrowth(clientSession, tx)
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
 		// months; not scheduled without MG5
 		work.ScheduleTlsConnectionRollup(clientSession, tx)
@@ -777,6 +781,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.AbuseRetention,
 			work.AbuseRetentionPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AbuseClosureGrowth,
+			work.AbuseClosureGrowthPost,
 		),
 		// a hold's placed, renewed or ended record for the legal-request
 		// mailbox, owed in the transaction that commits it

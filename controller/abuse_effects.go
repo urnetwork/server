@@ -19,6 +19,8 @@ package controller
 //	                 case orders a cert_revoke of its own. The mail halt joins at
 //	                 M9 (ABUSE-M9-01)
 //	notice_forward   nothing outside Postgres
+//	limit_tighten    its network_sidecar_limit row citing the case, which its
+//	                 lift clears (ABUSE-M5-19, abuse_limit_controller.go)
 //	mail_halt, mail_label_halt
 //	                 SMTP's, from M9 (ABUSE-M9-01): refused here, so one stays
 //	                 owed and never reads as applied
@@ -293,6 +295,10 @@ func (self *abuseEffects) ApplyAbuseEffect(ctx context.Context, effect *AbuseEff
 		}
 		return self.lift(ctx, effect)
 	}
+	if action.Kind == model.AbuseActionKindLimitTighten {
+		// §21.7: a network_sidecar_limit row citing the case (ABUSE-M5-19)
+		return applyAbuseLimitTightenEffect(ctx, action)
+	}
 	units, err := self.unitsOf(ctx, action)
 	if err != nil {
 		return err
@@ -360,6 +366,10 @@ func (self *abuseEffects) ApplyAbuseEffect(ctx context.Context, effect *AbuseEff
 // suspension, and while one stands the row names its case.
 func (self *abuseEffects) lift(ctx context.Context, effect *AbuseEffect) error {
 	lifted := effect.Lifted
+	if lifted.Kind == model.AbuseActionKindLimitTighten {
+		// the row outlives no case (ABUSE-M5-19)
+		return liftAbuseLimitTightenEffect(ctx, lifted)
+	}
 	units, err := self.unitsOf(ctx, lifted)
 	if err != nil {
 		return err
@@ -444,7 +454,8 @@ func (self *abuseEffects) lift(ctx context.Context, effect *AbuseEffect) error {
 func (self *abuseEffects) unitsOf(ctx context.Context, action *model.AbuseAction) (*abuseEffectUnits, error) {
 	units := &abuseEffectUnits{}
 	switch action.Kind {
-	case model.AbuseActionKindNoticeForward:
+	case model.AbuseActionKindNoticeForward, model.AbuseActionKindLimitTighten:
+		// a tightening's row is no unit a lift of another action frees
 		return units, nil
 	case model.AbuseActionKindMailHalt, model.AbuseActionKindMailLabelHalt:
 		return nil, fmt.Errorf("%w: %s", ErrAbuseEffectKindUnbuilt, action.Kind)

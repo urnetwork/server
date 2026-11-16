@@ -101,7 +101,8 @@ func abuseActionKindRecorded(kind AbuseActionKind) bool {
 	switch kind {
 	case AbuseActionKindNoticeForward, AbuseActionKindHostKill, AbuseActionKindLabelKill,
 		AbuseActionKindCertRevoke, AbuseActionKindZoneSuspend, AbuseActionKindHostSuspend,
-		AbuseActionKindNetworkSuspend, AbuseActionKindMailHalt, AbuseActionKindMailLabelHalt:
+		AbuseActionKindNetworkSuspend, AbuseActionKindMailHalt, AbuseActionKindMailLabelHalt,
+		AbuseActionKindLimitTighten:
 		return true
 	}
 	return false
@@ -287,6 +288,16 @@ func RecordAbuseActionInTx(
 	abuseCase = getAbuseCaseInTx(ctx, tx, args.CaseId, true)
 	if abuseCase == nil {
 		return nil, nil, false, ErrAbuseCaseNotFound
+	}
+	if args.Kind == AbuseActionKindLimitTighten {
+		// §21.7: only an allowed key and a row ValidateNetworkSidecarLimit takes, on a case naming its network
+		// (ABUSE-M5-19)
+		if abuseCase.NetworkId == nil {
+			return nil, nil, false, fmt.Errorf("%w: a tightening on a case naming no network", ErrAbuseActionInvalid)
+		}
+		if err := validateAbuseLimitTightenTarget(args.Target, args.CaseId); err != nil {
+			return nil, nil, false, err
+		}
 	}
 
 	now = now.UTC()
