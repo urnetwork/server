@@ -8,8 +8,9 @@ package controller
 // contract the windows ask for is server's controller's, so C13 seals what server writes from its rows and the
 // WindowDelegation a forwarding key signed rides server's contract unchanged to the host's verify. The twin opens its
 // flows under the forwarding key's tags; each refused delegation, a key no Delegation names, a superseded one's, a
-// revoked one's, another sidecar's, a short key id and a lapse, opens no upstream socket; and the operator's minted
-// contracts carrying a forged or replayed forwarding delegation open none either, beside server's honest ones.
+// revoked one's, another sidecar's, a short key id and a lapse, opens no upstream socket; the operator's minted
+// contracts carrying a forged or replayed forwarding delegation open none either, beside server's honest ones; and a
+// DelegationRevoke ends the live connection its key admitted while the identity key's carries on.
 //
 // The authorization log is sidecartest's FakeApi here, as on T2 (connect_bridge_m4_test.go says why). §7.4's
 // forward_only rule, that a forwarding client's exchange gets the config's r alone, is server/oauth's
@@ -28,6 +29,15 @@ func TestFs38ForwardingOnT3(t *testing.T) {
 	testingAclRun(t, func(t testing.TB, ctx context.Context) {
 		bridgeM4RunSchedule(t, ctx, "FS-38's forwarding twin", fault.Fs38ForwardingDelegation)
 		bridgeM4RunSchedule(t, ctx, "FS-38's forwarding refusals", fault.Fs38ForwardingCase)
+	})
+}
+
+// A DelegationRevoke of the subject's forwarding Delegation ends exactly the flows its key admitted, on server's
+// contracts, beside its twin, which keeps both connections open.
+func TestFs38ForwardingRevocationOnT3(t *testing.T) {
+	testingAclRun(t, func(t testing.TB, ctx context.Context) {
+		bridgeM4RunSchedule(t, ctx, "FS-38's forwarding revocation twin", fault.Fs38ForwardingFlowsStayUnrevoked)
+		bridgeM4RunSchedule(t, ctx, "FS-38's forwarding revocation", fault.Fs38ForwardingRevokeCase)
 	})
 }
 
