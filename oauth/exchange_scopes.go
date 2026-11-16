@@ -13,12 +13,12 @@ package oauth
 //	                   of an AdminSet member that is not read_only (QD-894):
 //	                   it creates the config repo (§11.12), pushes its head
 //	                   and forms its group (§10.6), and later re-forms the
-//	                   group (§10.8), posts its ladder and activates or
-//	                   re-places the repo after a restore. §7.9's bootstrap
-//	                   sidecar, the Genesis's owner_sidecar_id, is the first
-//	                   of them, and holds it only while it is one. ACL's
-//	                   table gives the same sidecars the config's admin, so
-//	                   evs and gkm honor what is granted here
+//	                   group (§10.8), posts its ladder and activates the
+//	                   repo. §7.9's bootstrap sidecar, the Genesis's
+//	                   owner_sidecar_id, is the first of them, and holds it
+//	                   only while it is one. ACL's table gives the same
+//	                   sidecars the config's admin, so evs and gkm honor
+//	                   what is granted here
 //	recovery:<M>       to an unadmitted client of member M alone, at gkm, for M's
 //	                   own recovery wraps (§7.9's Recovery before admission row):
 //	                   its sidecar holds no row in the state, its client is no
