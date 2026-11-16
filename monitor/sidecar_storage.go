@@ -183,6 +183,16 @@ type SidecarStorageSettings struct {
 	MoveToolLeadTime    time.Duration
 	NextClusterLeadTime time.Duration
 	HddTriggerLeadTime  time.Duration
+
+	// §19.8's format-2 rows (SIGNALS.md §29.8). The versionless sweep's `deleted` share of its DELETEs past this, 1%,
+	// over SweepShareWindow, a day, warns.
+	SweepDeletedShareWarn float64
+	SweepShareWindow      time.Duration
+	// The span drop jobs' moves between states are counted over, which a refused job's page stays open for and a
+	// stalled job's entries and exits are compared across: 7 d, past a `--now` drop's 26 h and a 7-day drop's start.
+	DropJobLookback time.Duration
+	// A drop job executing with no scan or delete progress over this, an hour, warns.
+	DropProgressWindow time.Duration
 }
 
 // §19.6's and §19.8's lines, and the write budget's own defaults for its drive and depth.
@@ -227,6 +237,10 @@ func DefaultSidecarStorageSettings() *SidecarStorageSettings {
 		MoveToolLeadTime:            182 * 24 * time.Hour,
 		NextClusterLeadTime:         182 * 24 * time.Hour,
 		HddTriggerLeadTime:          182 * 24 * time.Hour,
+		SweepDeletedShareWarn:       0.01,
+		SweepShareWindow:            24 * time.Hour,
+		DropJobLookback:             7 * 24 * time.Hour,
+		DropProgressWindow:          1 * time.Hour,
 	}
 }
 

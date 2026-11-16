@@ -236,6 +236,7 @@ func NewSignals() []Signal {
 		NewFileClusterSettleSignal(),
 		NewFileClusterWearSignal(),
 		NewFileClusterCohortSignal(),
+		NewEvsFormat2Signal(),
 		NewWriteBudgetSignal(),
 		NewSidecarDumpSignal(),
 		NewSloBurnSignal(),

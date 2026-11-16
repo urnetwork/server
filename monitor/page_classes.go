@@ -20,8 +20,8 @@ import (
 // page through pager.PageNotice from taskworker's abuse worker, never through
 // a signal, so their row's words are pager's and this table holds them only to
 // stay §19.8's whole table. §19.8's later rows join with their tasks: an
-// interface map-stale or a custom host pending at M6, a refused drop job at
-// M10.
+// interface map-stale or a custom host pending at M6; a refused drop job, at
+// M10, is evs-format2's (EVS2-M10-34).
 //
 // A row's hours say when its page may reach the rota (QD-754): any, the
 // default, pages at once at any hour, and business is §19.8's business row,
@@ -124,6 +124,12 @@ var pageClasses = []pageClass{
 		row:            "an interface's split probe failing (W1)",
 		firstMilestone: "M5",
 		action:         "that interface's prior lb version",
+	},
+	{
+		class:          "evs-drop-refused",
+		row:            "a drop job refused {verify} or {mismatch} (storage integrity)",
+		firstMilestone: "M10",
+		action:         "19.10's drop rows: on {verify}, format2's drop to observe (19.11)",
 	},
 	{
 		// pager.NoticePageClass, named here as every class is named, by its literal
