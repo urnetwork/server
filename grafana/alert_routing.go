@@ -8,22 +8,30 @@ package grafana
 // Writes send X-Disable-Provenance so the routing stays editable in the UI,
 // which is also the rollback path.
 //
-// Two pieces are managed:
+// Three pieces are managed:
 //   - the canonical child route for service=sim-latency warn and page alerts,
 //     through the existing native main receiver, never an unconfigured email
 //     transport; the support address identifies incident ownership;
 //   - the Slack default contact point, when vault monitor.yml carries
 //     alerts.slack_webhook_url. It becomes the root receiver, so every alert
 //     that matches no child route reaches Slack. Before it, the root routed to
-//     a receiver without integrations, and no alert reached anyone.
+//     a receiver without integrations, and no alert reached anyone;
+//   - the Watchdog heartbeat (owner, 2026-11-16), when vault monitor.yml
+//     carries alerts.watchdog_heartbeat_url: a webhook contact point to an
+//     external heartbeat check, and the first child route, which sends it the
+//     always-firing Watchdog rule (warp grafana/alerting/watchdog.yml) every
+//     5 minutes and nothing else. The check pages when the pings stop, so a
+//     silent alerting path (every Grafana, its Mimir queries, its
+//     notifications or its egress) pages someone. The rule's DatasourceError
+//     is not the Watchdog and goes to Slack. Without the url, the heartbeat's
+//     contact point and route are left as they are.
 //
-// The webhook URL is a credential. It is sent only in the contact-point write,
-// and Grafana returns it redacted. Grafana error text can quote a URL, so the
-// exported functions redact every error they return once, at their boundary:
-// of the webhook, its path, and anything shaped like a Slack webhook. Only
-// then is the error bounded to alertRoutingErrorLimit bytes, so the bound
-// cannot cut a secret in half. Inside the package, errors quote Grafana's
-// body whole.
+// The webhook and heartbeat URLs are credentials. Each is sent only in its
+// contact-point write. Grafana error text can quote a URL, so the exported
+// functions redact every error they return once, at their boundary: of both
+// URLs, their paths, and anything shaped like a Slack webhook. Only then is
+// the error bounded to alertRoutingErrorLimit bytes, so the bound cannot cut
+// a secret in half. Inside the package, errors quote Grafana's body whole.
 
 import (
 	"bytes"
@@ -53,8 +61,25 @@ const (
 	CompetitionIncidentContact  = "support@ur.xyz"
 	// The contact point for every alert that no child route matches. The uid
 	// names its single Slack integration; the name is the receiver.
-	DefaultAlertContactUid    = "urnetwork-default-slack"
-	DefaultAlertContactName   = "urnetwork-default"
+	DefaultAlertContactUid  = "urnetwork-default-slack"
+	DefaultAlertContactName = "urnetwork-default"
+	// The heartbeat's contact point: the uid names its single webhook
+	// integration; the name is the receiver, which only the Watchdog route
+	// names.
+	WatchdogAlertContactUid  = "urnetwork-watchdog-webhook"
+	WatchdogAlertContactName = "urnetwork-watchdog"
+	// The rule's title, which Grafana makes its alertname, and its service.
+	// The route matches both, so the rule's DatasourceError (alertname
+	// DatasourceError, the same service) is not a heartbeat.
+	WatchdogAlertName    = "Watchdog"
+	WatchdogAlertService = "watchdog"
+	// A ping every repeat interval, checked at each group interval, while any
+	// Grafana keeps the Watchdog firing. The external check's period must
+	// exceed it: 5 minutes with a 10-minute grace pages about 15 minutes
+	// after the last ping.
+	watchdogGroupWait         = "30s"
+	watchdogGroupInterval     = "1m"
+	watchdogRepeatInterval    = "5m"
 	alertRoutingResponseLimit = 1024 * 1024
 	// bytes of an error an exported function returns, after redaction
 	alertRoutingErrorLimit = 1024
@@ -86,9 +111,11 @@ type grafanaContactPoint struct {
 }
 
 // Optional integrations for the reconcile. An empty SlackWebhookUrl leaves the
-// root receiver as it is.
+// root receiver as it is; an empty WatchdogHeartbeatUrl leaves the heartbeat's
+// contact point and route as they are.
 type AlertRoutingSettings struct {
-	SlackWebhookUrl string
+	SlackWebhookUrl      string
+	WatchdogHeartbeatUrl string
 }
 
 // The reconciled default route, without secrets.
@@ -100,6 +127,8 @@ type AlertRoutingResult struct {
 	// which reaches no one.
 	DefaultReceiverHasIntegrations bool
 	SlackConfigured                bool
+	// the Watchdog route and its heartbeat contact point were written
+	WatchdogConfigured bool
 }
 
 // Grafana's verdict on one test notification. Error is redacted.
@@ -111,12 +140,15 @@ type AlertTestResult struct {
 
 // AlertRoutingSettingsFromMonitorVault reads the default alert webhook from a
 // vault monitor.yml document: alerts.slack_webhook_url, the key the monitor's
-// Slack notifier also reads (monitor/config.go). A decode failure names only
-// line numbers, because YAML errors can quote document values.
+// Slack notifier also reads (monitor/config.go), and the Watchdog's
+// alerts.watchdog_heartbeat_url, the external check's ping url. A decode
+// failure names only line numbers, because YAML errors can quote document
+// values.
 func AlertRoutingSettingsFromMonitorVault(data []byte) (AlertRoutingSettings, error) {
 	var document struct {
 		Alerts struct {
-			SlackWebhookUrl string `yaml:"slack_webhook_url"`
+			SlackWebhookUrl      string `yaml:"slack_webhook_url"`
+			WatchdogHeartbeatUrl string `yaml:"watchdog_heartbeat_url"`
 		} `yaml:"alerts"`
 	}
 	if err := yaml.Unmarshal(data, &document); err != nil {
@@ -126,7 +158,10 @@ func AlertRoutingSettingsFromMonitorVault(data []byte) (AlertRoutingSettings, er
 		}
 		return AlertRoutingSettings{}, fmt.Errorf("vault monitor.yml is not valid YAML (%s)", strings.Join(lines, ", "))
 	}
-	return AlertRoutingSettings{SlackWebhookUrl: strings.TrimSpace(document.Alerts.SlackWebhookUrl)}, nil
+	return AlertRoutingSettings{
+		SlackWebhookUrl:      strings.TrimSpace(document.Alerts.SlackWebhookUrl),
+		WatchdogHeartbeatUrl: strings.TrimSpace(document.Alerts.WatchdogHeartbeatUrl),
+	}, nil
 }
 
 // ReconcileAlertRouting converges the managed contact points and the live
@@ -140,6 +175,9 @@ func AlertRoutingSettingsFromMonitorVault(data []byte) (AlertRoutingSettings, er
 // unchanged and the result reports whether it has any integration. Without a
 // configured native main integration, competition reconciliation refuses
 // before policy mutation instead of creating an unusable email destination.
+// With a heartbeat url, its webhook contact point is written (always, like
+// Slack's) and the Watchdog route goes first in the tree, replacing any
+// top-level route to the heartbeat's receiver.
 func ReconcileAlertRouting(
 	ctx context.Context,
 	grafanaUrl string,
@@ -148,13 +186,19 @@ func ReconcileAlertRouting(
 	settings AlertRoutingSettings,
 ) (_ AlertRoutingResult, returnErr error) {
 	slackWebhookUrl := strings.TrimSpace(settings.SlackWebhookUrl)
+	watchdogHeartbeatUrl := strings.TrimSpace(settings.WatchdogHeartbeatUrl)
 	defer func() {
 		if returnErr != nil {
-			returnErr = boundaryError(returnErr, slackWebhookUrl)
+			returnErr = boundaryError(returnErr, slackWebhookUrl, watchdogHeartbeatUrl)
 		}
 	}()
 	if slackWebhookUrl != "" {
 		if err := validateSlackWebhookUrl(slackWebhookUrl); err != nil {
+			return AlertRoutingResult{}, err
+		}
+	}
+	if watchdogHeartbeatUrl != "" {
+		if err := validateWatchdogHeartbeatUrl(watchdogHeartbeatUrl); err != nil {
 			return AlertRoutingResult{}, err
 		}
 	}
@@ -189,9 +233,20 @@ func ReconcileAlertRouting(
 	} else if !configuredDefaultAlertContact(contacts) {
 		return AlertRoutingResult{}, errors.New("competition alerts require the configured existing main Slack integration")
 	}
+	if watchdogHeartbeatUrl != "" {
+		plannedContacts, err = withWatchdogContact(plannedContacts, watchdogHeartbeatUrl)
+		if err != nil {
+			return AlertRoutingResult{}, err
+		}
+	}
 	policy, previousDefaultReceiver, err := client.competitionPolicy(ctx, defaultReceiver)
 	if err != nil {
 		return AlertRoutingResult{}, err
+	}
+	if watchdogHeartbeatUrl != "" {
+		// competitionPolicy always leaves a routes list
+		routes, _ := policy["routes"].([]any)
+		policy["routes"] = withWatchdogRoute(routes)
 	}
 	contactsJson, err := json.Marshal(plannedContacts)
 	if err != nil {
@@ -209,6 +264,12 @@ func ReconcileAlertRouting(
 			return AlertRoutingResult{}, err
 		}
 	}
+	// the contact point exists before the policy that names it
+	if watchdogHeartbeatUrl != "" {
+		if err := client.upsertContact(ctx, contacts, watchdogContact(watchdogHeartbeatUrl), "Watchdog heartbeat"); err != nil {
+			return AlertRoutingResult{}, err
+		}
+	}
 	if err := client.writeCompetitionPolicy(ctx, policy); err != nil {
 		return AlertRoutingResult{}, err
 	}
@@ -216,6 +277,7 @@ func ReconcileAlertRouting(
 		PreviousDefaultReceiver: previousDefaultReceiver,
 		DefaultReceiver:         previousDefaultReceiver,
 		SlackConfigured:         slackWebhookUrl != "",
+		WatchdogConfigured:      watchdogHeartbeatUrl != "",
 	}
 	if result.SlackConfigured {
 		result.DefaultReceiver = DefaultAlertContactName
@@ -341,12 +403,26 @@ func validateSlackWebhookUrl(webhookUrl string) error {
 	return nil
 }
 
-// Removes the configured webhook, its path, and anything shaped like a Slack
-// webhook from text that may leave this package.
-func redactSlackWebhook(text string, webhookUrl string) string {
-	if webhookUrl != "" {
-		text = strings.ReplaceAll(text, webhookUrl, "[redacted]")
-		if parsed, err := url.Parse(webhookUrl); err == nil && parsed.Path != "" && parsed.Path != "/" {
+// The heartbeat must be an absolute https URL without userinfo. The error
+// never quotes it, since url.Parse errors embed their input.
+func validateWatchdogHeartbeatUrl(heartbeatUrl string) error {
+	parsed, err := url.Parse(heartbeatUrl)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return errors.New("alerts.watchdog_heartbeat_url must be an absolute https URL without userinfo")
+	}
+	return nil
+}
+
+// Removes each configured credential url (the Slack webhook, the heartbeat),
+// its path, and anything shaped like a Slack webhook from text that may leave
+// this package.
+func redactSlackWebhook(text string, secretUrls ...string) string {
+	for _, secretUrl := range secretUrls {
+		if secretUrl == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secretUrl, "[redacted]")
+		if parsed, err := url.Parse(secretUrl); err == nil && parsed.Path != "" && parsed.Path != "/" {
 			text = strings.ReplaceAll(text, parsed.Path, "[redacted]")
 		}
 	}
@@ -392,10 +468,15 @@ func configuredDefaultAlertContact(contacts []grafanaContactPoint) bool {
 // uid is managed: another integration an operator adds under the same name is
 // part of the same receiver and is kept.
 func (self *grafanaProvisioningClient) reconcileDefaultSlackContact(ctx context.Context, contacts []grafanaContactPoint, slackWebhookUrl string) error {
-	desired := defaultSlackContact(slackWebhookUrl)
+	return self.upsertContact(ctx, contacts, defaultSlackContact(slackWebhookUrl), "default Slack")
+}
+
+// Writes one managed integration by its uid: an update when contacts has it,
+// else a create. what names it in the error.
+func (self *grafanaProvisioningClient) upsertContact(ctx context.Context, contacts []grafanaContactPoint, desired grafanaContactPoint, what string) error {
 	found := false
 	for _, contact := range contacts {
-		if contact.Uid == DefaultAlertContactUid {
+		if contact.Uid == desired.Uid {
 			found = true
 		}
 	}
@@ -403,16 +484,79 @@ func (self *grafanaProvisioningClient) reconcileDefaultSlackContact(ctx context.
 	requestPath := "/api/v1/provisioning/contact-points"
 	if found {
 		method = http.MethodPut
-		requestPath += "/" + DefaultAlertContactUid
+		requestPath += "/" + desired.Uid
 	}
 	status, body, err := self.request(ctx, method, requestPath, desired)
 	if err != nil {
 		return err
 	}
 	if status < 200 || 300 <= status {
-		return fmt.Errorf("write Grafana default Slack contact point: HTTP %d: %s", status, strings.TrimSpace(string(body)))
+		return fmt.Errorf("write Grafana %s contact point: HTTP %d: %s", what, status, strings.TrimSpace(string(body)))
 	}
 	return nil
+}
+
+// The heartbeat's webhook. A resolve would reach the check as one more ping,
+// so resolve messages are off: a Watchdog that stops is silence.
+func watchdogContact(heartbeatUrl string) grafanaContactPoint {
+	return grafanaContactPoint{
+		Uid:                   WatchdogAlertContactUid,
+		Name:                  WatchdogAlertContactName,
+		Type:                  "webhook",
+		Settings:              map[string]any{"url": heartbeatUrl, "httpMethod": http.MethodPost},
+		DisableResolveMessage: true,
+	}
+}
+
+// The planned contact points with the heartbeat's webhook in place of its
+// uid's, or added. Another integration under the heartbeat's name would be
+// notified every 5 minutes too, so one is refused rather than kept.
+func withWatchdogContact(contacts []grafanaContactPoint, heartbeatUrl string) ([]grafanaContactPoint, error) {
+	planned := make([]grafanaContactPoint, 0, len(contacts)+1)
+	found := false
+	for _, contact := range contacts {
+		switch {
+		case contact.Uid == WatchdogAlertContactUid:
+			if found {
+				return nil, errors.New("Grafana Watchdog heartbeat integration identity is duplicated")
+			}
+			found = true
+			planned = append(planned, watchdogContact(heartbeatUrl))
+		case contact.Name == WatchdogAlertContactName:
+			return nil, errors.New("Grafana Watchdog heartbeat receiver has an integration this reconcile does not manage")
+		default:
+			planned = append(planned, contact)
+		}
+	}
+	if !found {
+		planned = append(planned, watchdogContact(heartbeatUrl))
+	}
+	return planned, nil
+}
+
+// The routes with the Watchdog route first, in place of every top-level route
+// to the heartbeat's receiver. First, so no other route takes the Watchdog;
+// its matchers take nothing else, the rule's DatasourceError included. The
+// Watchdog's alerts from every Grafana are one group.
+func withWatchdogRoute(routes []any) []any {
+	planned := []any{map[string]any{
+		"receiver": WatchdogAlertContactName,
+		"object_matchers": [][]string{
+			{"alertname", "=", WatchdogAlertName},
+			{"service", "=", WatchdogAlertService},
+		},
+		"group_by":        []string{"alertname"},
+		"group_wait":      watchdogGroupWait,
+		"group_interval":  watchdogGroupInterval,
+		"repeat_interval": watchdogRepeatInterval,
+	}}
+	for _, value := range routes {
+		if route, ok := value.(map[string]any); ok && route["receiver"] == WatchdogAlertContactName {
+			continue
+		}
+		planned = append(planned, value)
+	}
+	return planned
 }
 
 // Planning and the existing native upsert share exactly one managed integration shape.
@@ -554,9 +698,10 @@ func boundedErrorBody(body []byte) string {
 	return message
 }
 
-// An error leaving an exported function: redacted first, then bounded.
-func boundaryError(err error, slackWebhookUrl string) error {
-	message := redactSlackWebhook(err.Error(), slackWebhookUrl)
+// An error leaving an exported function: redacted of each credential url
+// first, then bounded.
+func boundaryError(err error, secretUrls ...string) error {
+	message := redactSlackWebhook(err.Error(), secretUrls...)
 	if alertRoutingErrorLimit < len(message) {
 		message = strings.ToValidUTF8(message[:alertRoutingErrorLimit], "")
 	}
