@@ -19,8 +19,8 @@ import (
 // lb-split-probe an interface's split probe (OPS-M5-05), and §21.8's notices
 // page through pager.PageNotice from taskworker's abuse worker, never through
 // a signal, so their row's words are pager's and this table holds them only to
-// stay §19.8's whole table. §19.8's later rows join with their tasks: an
-// interface map-stale or a custom host pending at M6; a refused drop job, at
+// stay §19.8's whole table. M6's: lb-map-stale reports an interface map-stale
+// and a custom host pending past 20 min (OPS-M6-01). A refused drop job, at
 // M10, is evs-format2's (EVS2-M10-34).
 //
 // A row's hours say when its page may reach the rota (QD-754): any, the
@@ -78,6 +78,8 @@ const (
 	pageActionClusterAtRisk = "the cold spare within 1 h of the page (19.10); restored within 4 h"
 	pageRowCohort           = "a metadata cluster's projected exhaustion within its move tool's lead time, or the cluster at its cohort limit"
 	pageActionCohort        = "19.9's cohorts row: date the move tool by the earliest projection, and confirm deletions and erasures pass"
+	pageRowLbMap            = "an interface map-stale, or a custom host pending past 20 min (W1)"
+	pageActionLbMap         = "that interface's lbmap and reload logs; else drain it (W1), naming its hosts"
 )
 
 var pageClasses = []pageClass{
@@ -124,6 +126,18 @@ var pageClasses = []pageClass{
 		row:            "an interface's split probe failing (W1)",
 		firstMilestone: "M5",
 		action:         "that interface's prior lb version",
+	},
+	{
+		class:          lbMapClassStale,
+		row:            pageRowLbMap,
+		firstMilestone: "M6",
+		action:         pageActionLbMap,
+	},
+	{
+		class:          lbMapClassHostPending,
+		row:            pageRowLbMap,
+		firstMilestone: "M6",
+		action:         pageActionLbMap,
 	},
 	{
 		class:          "evs-drop-refused",

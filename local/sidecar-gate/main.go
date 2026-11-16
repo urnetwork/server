@@ -54,6 +54,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/sidecar/sidecartest/fault"
+
+	"github.com/urnetwork/server"
 )
 
 // The repos a commit set records, in §4.8's merge order. vault is not read.
@@ -716,10 +718,11 @@ func runGateCommand(ctx context.Context, options *gateOptions, command gateComma
 	return gatePass, []string{where + ": pass"}
 }
 
-// The checks every gate runs beside its rows: check-tables, and each repo's
-// commit-msg scan of main..sidecar.
+// The checks every gate runs beside its rows: check-tables, each repo's
+// commit-msg scan of main..sidecar, and §19.11's escrow_draw_order rule
+// (escrow_gate.go).
 func runRepoChecks(ctx context.Context, options *gateOptions) []*gateResult {
-	results := []*gateResult{}
+	results := []*gateResult{escrowDrawOrderCheck(filepath.Join(options.root, "config"), server.SidecarMg6Linked)}
 	tables := &gateResult{label: "check-tables"}
 	outcome, details := runGateCommand(ctx, options, gateCommand{Repo: options.serverRelative, Command: []string{"go", "run", "./local/sidecar-migrations", "check-tables"}})
 	tables.outcome, tables.details = outcome, details

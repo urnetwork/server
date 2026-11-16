@@ -13,8 +13,10 @@
 // --incident names the incident by its id, the same id the restore script ran under, and --list its list,
 // incident-<id>.tsv. --kind, postgres or site, is recorded once, on the first command that gives it, and every later
 // command must agree with it. --statement carries what a step asks the operator to state by hand, such as how
-// restore_hold is held where sidecar.yml does not hold it. What the steps do is sidecarrestore's; this prints their
-// progress, ids and counts only, never a name or an address.
+// restore_hold is held where sidecar.yml does not hold it. --input name=value, repeated, gives a step a named input,
+// such as the abuse step's mailbox exports and seal key (abuse_mailbox, legal_mailbox, mailbox_key), and --apply lets a
+// step that prints its plan first act on it, as the abuse step does only when told. What the steps do is
+// sidecarrestore's; this prints their progress, ids and counts only, never a name or an address.
 
 package main
 
@@ -26,6 +28,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,7 +40,7 @@ import (
 func init() {
 	registerSidecarctlCommand(&sidecarctlCommand{
 		words:   "sidecar restore",
-		usage:   "<step>|run|status|end <step> --incident=<id> --list=<incident list> [--kind=postgres|site] [--statement=<text>] [--by-hand=<how>] [--timeout=<duration>]",
+		usage:   "<step>|run|status|end <step> --incident=<id> --list=<incident list> [--kind=postgres|site] [--statement=<text>] [--input=<name>=<value>]... [--apply] [--by-hand=<how>] [--timeout=<duration>]",
 		summary: "Drive §19.10's restore frame for an incident in the env WARP_ENV names: run one step once the steps before it ended, run every step left in order, record a step run by hand, or print where the incident stands.",
 		run:     runSidecarRestore,
 	})
@@ -78,6 +81,9 @@ func runSidecarRestoreWithSettings(ctx context.Context, args []string, settings 
 	kindFlag := flags.String("kind", "", "")
 	statementFlag := flags.String("statement", "", "")
 	byHandFlag := flags.String("by-hand", "", "")
+	inputs := sidecarRestoreInputs{}
+	flags.Var(inputs, "input", "")
+	applyFlag := flags.Bool("apply", false, "")
 	timeoutFlag := flags.Duration("timeout", settings.timeout, "")
 	positionals, err := parseSidecarctlArgs(flags, args)
 	if err != nil {
@@ -106,6 +112,10 @@ func runSidecarRestoreWithSettings(ctx context.Context, args []string, settings 
 	if *byHandFlag != "" && action != "end" {
 		return sidecarctlUsageErrorf("--by-hand goes with end only")
 	}
+	if (0 < len(inputs) || *applyFlag) && (action == "end" || action == "status") {
+		return sidecarctlUsageErrorf("--input and --apply go with a step or run")
+	}
+	options := &sidecarrestore.StepOptions{Statement: *statementFlag, Inputs: map[string]string(inputs), Apply: *applyFlag}
 	if *incidentFlag == "" || *listFlag == "" {
 		return sidecarctlUsageErrorf("--incident=<id> and --list=<incident list> name the incident")
 	}
@@ -155,19 +165,40 @@ func runSidecarRestoreWithSettings(ctx context.Context, args []string, settings 
 		}
 		fmt.Fprintf(out, "%s recorded as ended by hand under incident %s in %s\n", stepName, incidentId, env)
 	case "run":
-		err = sidecarctlServerCall(func() error { return settings.frame.Run(ctx, incident, out, *statementFlag) })
+		err = sidecarctlServerCall(func() error { return settings.frame.RunWithOptions(ctx, incident, out, options) })
 		if err != nil {
 			return sidecarRestoreError(err)
 		}
 	default:
 		err = sidecarctlServerCall(func() error {
-			return settings.frame.RunStep(ctx, incident, stepName, out, *statementFlag)
+			return settings.frame.RunStepWithOptions(ctx, incident, stepName, out, options)
 		})
 		if err != nil {
 			return sidecarRestoreError(err)
 		}
 		fmt.Fprintf(out, "%s ended under incident %s in %s\n", stepName, incidentId, env)
 	}
+	return nil
+}
+
+// --input's values: name=value, each name once.
+type sidecarRestoreInputs map[string]string
+
+// See flag.Value.
+func (self sidecarRestoreInputs) String() string {
+	return fmt.Sprint(len(self), " inputs")
+}
+
+// See flag.Value.
+func (self sidecarRestoreInputs) Set(text string) error {
+	name, value, ok := strings.Cut(text, "=")
+	if !ok || name == "" || value == "" {
+		return fmt.Errorf("%q is not name=value", text)
+	}
+	if _, given := self[name]; given {
+		return fmt.Errorf("%s is given twice", name)
+	}
+	self[name] = value
 	return nil
 }
 
@@ -178,6 +209,8 @@ func sidecarRestoreError(err error) error {
 		return sidecarctlUsageErrorf("%v", err)
 	case errors.Is(err, sidecarrestore.ErrStepOutOfOrder):
 		return fmt.Errorf("%w; sidecar restore status lists what has ended", err)
+	case errors.Is(err, sidecarrestore.ErrStepInput):
+		return sidecarctlUsageErrorf("%v", err)
 	}
 	return err
 }
