@@ -520,6 +520,12 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/tls/cert-order/([^/]+)", handlers.GetTlsCertOrder),
 		router.NewRoute("GET", "/tls/certs", handlers.GetTlsCerts),
 		router.NewRoute("POST", "/tls/cert-revoke", handlers.TlsCertRevoke),
+		router.NewRoute("POST", "/tls/cert-register", handlers.TlsCertRegister),
+		router.NewRoute("POST", "/tls/custom-claim", handlers.TlsCustomClaim),
+		router.NewRoute("POST", "/tls/custom-progress", handlers.TlsCustomProgress),
+		router.NewRoute("POST", "/tls/custom-account", handlers.TlsCustomAccount),
+		router.NewRoute("POST", "/tls/custom-challenge", handlers.TlsCustomChallenge),
+		router.NewRoute("GET", "/tls/custom-challenge/([^/]+)", handlers.GetTlsCustomChallenge),
 		// §16.6's cancel of a server-gated approval's remaining uses (MCP-M3-23)
 		router.NewRoute("POST", "/approval/cancel", handlers.ApprovalCancel),
 		// §17.16's cross-network share tables, sealed (BRIDGE-M6-02)

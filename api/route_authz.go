@@ -454,8 +454,17 @@ var routeAccessByRoute = map[string]routeAccess{
 	// controller, which the handler passes the key's scopes; QD-847).
 	"POST /tls/cert-order":        routeAccessPublic,
 	"GET /tls/cert-order/([^/]+)": routeAccessPublic,
-	"GET /tls/certs":              routeAccessClient,
 	"POST /tls/cert-revoke":       routeAccessOwnClient,
+	// GET /tls/certs takes a client token, which its handler requires, or with work=1 an ordering desktop's certs
+	// service token, which the controller verifies; the custom-domain routes take that token alone (TLS-M6-05,
+	// DESIGN-DETAILS 17.2.5)
+	"GET /tls/certs":                    routeAccessPublic,
+	"POST /tls/cert-register":           routeAccessPublic,
+	"POST /tls/custom-claim":            routeAccessPublic,
+	"POST /tls/custom-progress":         routeAccessPublic,
+	"POST /tls/custom-account":          routeAccessPublic,
+	"POST /tls/custom-challenge":        routeAccessPublic,
+	"GET /tls/custom-challenge/([^/]+)": routeAccessPublic,
 }
 
 // The only routes a lag.dev guest's client token is accepted on
@@ -529,6 +538,13 @@ var strictExpRoutes = map[string]bool{
 	"GET /tls/cert-order/([^/]+)": true,
 	"GET /tls/certs":              true,
 	"POST /tls/cert-revoke":       true,
+	// the custom-domain routes (TLS-M6-05), each a service token's
+	"POST /tls/cert-register":           true,
+	"POST /tls/custom-claim":            true,
+	"POST /tls/custom-progress":         true,
+	"POST /tls/custom-account":          true,
+	"POST /tls/custom-challenge":        true,
+	"GET /tls/custom-challenge/([^/]+)": true,
 	// §17.16's share tables (BRIDGE-M6-02)
 	"GET /network/bridge/share/([^/]+)": true,
 	"PUT /network/bridge/share/([^/]+)": true,
