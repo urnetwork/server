@@ -108,3 +108,29 @@ func TestRequirePgReadOnlyConnectsDirectly(t *testing.T) {
 		t.Fatal("a read-only process connects through the transaction pooler", got)
 	}
 }
+
+// A block that mounts its own restricted role, pg-<service>.yml, connects its main pool with that role, and every
+// other process, or a block mounting none, keeps pg.yml (QD-992). The maintenance pool keeps its own resource. The
+// resources are synthetic overrides; nothing connects.
+func TestAServicesOwnPgRoleReplacesPgYml(t *testing.T) {
+	t.Cleanup(Vault.PushSimpleResource(DefaultPgVaultResourceName, []byte("authority: platform.example:6432\nuser: synthetic\npassword: synthetic\ndb: synthetic\n")))
+	t.Cleanup(Vault.PushSimpleResource(pgServiceVaultResourceName("tlsedge"), []byte("authority: restricted.example:6432\nuser: synthetic_tlsedge\npassword: synthetic\ndb: synthetic\n")))
+	t.Cleanup(Config.PushSimpleResource(DefaultPgConfigResourceName, []byte("min_connections: 1\nmax_connections: 2\n")))
+	authority := func() string {
+		vaultKeys, configKeys := safePool.resolveResources()
+		configKeys.RequireInt("max_connections")
+		return vaultKeys.RequireString("authority")
+	}
+	t.Setenv("WARP_SERVICE", "tlsedge")
+	if got := authority(); got != "restricted.example:6432" {
+		t.Fatal("a block with its own role connected with", got)
+	}
+	t.Setenv("WARP_SERVICE", "api")
+	if got := authority(); got != "platform.example:6432" {
+		t.Fatal("a process with no role of its own connected with", got)
+	}
+	t.Setenv("WARP_SERVICE", "")
+	if got := authority(); got != "platform.example:6432" {
+		t.Fatal("a process with no service connected with", got)
+	}
+}
