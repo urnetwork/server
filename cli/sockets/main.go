@@ -33,9 +33,11 @@
 // (a source and one over-limit answer) and the key-event families subscribed. A Client-class verifier that cannot
 // answer yet, no jwt-jwks.json or the record not enabled, is said once at start and leaves readiness as §19.4 has
 // it: each authenticated route answers unavailable until it can. What server has no implementation of yet fails
-// closed, each said once at start: tls/'s ValidateListen (TLS-M5-22) and smtp/'s (MAIL-M7-22), so neither
-// namespace is registered and the engine refuses every entry of both. ur/ is the platform's (SOCK-M9-01) and opens
-// with the block: urnetwork-edge's clients list its services, and any sidecar Finds them.
+// closed, each said once at start: tls/'s ValidateListen (TLS-M5-22) opens only over a listen facts source, which
+// the block reads from api's GET /internal/gate/listen-facts/<network_id> (plan-SOCK-gate-data), a route not built
+// yet, so with no source in hostDeps tls/ is not registered; smtp/'s (MAIL-M7-22) does not exist. The engine refuses
+// every entry of a namespace that is not registered. ur/ is the platform's (SOCK-M9-01) and opens with the block:
+// urnetwork-edge's clients list its services, and any sidecar Finds them.
 //
 // The key file is the owner's to create in vault (SOCK.md's external list). The command that writes one is an
 // operations command, which sidecarctl holds (owner, 2026-11-07; server/sidecarctl since QD-750), so it is not
@@ -87,6 +89,8 @@ type hostSettings struct {
 	ControlQpsInterval time.Duration
 	// How long the block waits before it subscribes a key-event family again after a subscription failed: 5 s.
 	KeyEventsRetryInterval time.Duration
+	// tls/'s hooks' (TLS-M5-22). nil: socketsservice.DefaultTlsNamespaceSettings.
+	Tls *socketsservice.TlsNamespaceSettings
 }
 
 // The defaults.
@@ -97,6 +101,7 @@ func defaultHostSettings() *hostSettings {
 		ClientTokens:           session.DefaultClientTokenVerifierSettings(),
 		ControlQpsInterval:     60 * time.Second,
 		KeyEventsRetryInterval: 5 * time.Second,
+		Tls:                    socketsservice.DefaultTlsNamespaceSettings(),
 	}
 }
 
@@ -123,6 +128,9 @@ type hostDeps struct {
 	Log sidecar.Logger
 	// What the key events reach: the engine. A test records them instead.
 	Events hostEngineEvents
+	// tls/'s listen facts (TLS-M5-22): api's GET /internal/gate/listen-facts/<network_id> on the block's bearer
+	// (plan-SOCK-gate-data), which no route serves yet. nil leaves tls/ unregistered, refusing every entry.
+	TlsListenFacts socketsservice.TlsListenFactsSource
 }
 
 // What the block's key-event subscriber calls on the engine (sweep.go's methods), none blocking or doing I/O.
@@ -142,6 +150,8 @@ type socketsHost struct {
 	settings *hostSettings
 	engine   *socketsservice.SocketsService
 	gate     *socketsservice.SocketProjectionGate
+	// tls/'s hooks, nil while the block has no listen facts source
+	tlsHooks *socketsservice.TlsNamespaceHooks
 	events   hostEngineEvents
 	log      sidecar.Logger
 	// what the engine honors no request without and the block was not given, each said once
@@ -237,6 +247,22 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 		gate.Close()
 		return fail(err)
 	}
+	// tls/ opens over its listen facts (TLS-M5-22), which the block reads from api
+	if deps.TlsListenFacts != nil {
+		tlsHooks, err := socketsservice.NewTlsNamespaceHooks(hostCtx, deps.TlsListenFacts, host.ClockOrReal(), settings.Tls)
+		if err == nil {
+			err = engine.RegisterNamespace(sidecar.SocketNamespaceTls, tlsHooks)
+		}
+		if err != nil {
+			if tlsHooks != nil {
+				tlsHooks.Close()
+			}
+			engine.Close()
+			gate.Close()
+			return fail(err)
+		}
+		self.tlsHooks = tlsHooks
+	}
 	self.events = deps.Events
 	if self.events == nil {
 		self.events = engine
@@ -261,7 +287,10 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 			log.Errorf("[%s]Client-class tokens answer unavailable until their verifier can answer: %v", hostService, err)
 		}
 	}
-	log.Infof("[%s]tls/ and smtp/ refuse every entry until their ValidateListen lands (TLS-M5-22, MAIL-M7-22)", hostService)
+	if self.tlsHooks == nil {
+		log.Infof("[%s]tls/ refuses every entry until the block has a listen facts source (plan-SOCK-gate-data)", hostService)
+	}
+	log.Infof("[%s]smtp/ refuses every entry until its ValidateListen lands (MAIL-M7-22)", hostService)
 	// the first try at once, so a block whose Redis answers is ready as soon as the engine is
 	if failed := self.subscribe(self.keyEventFamilies()); 0 < len(failed) {
 		self.group.Add(1)
@@ -447,6 +476,9 @@ func (self *socketsHost) Close() {
 	}
 	self.cancel()
 	self.engine.Close()
+	if self.tlsHooks != nil {
+		self.tlsHooks.Close()
+	}
 	self.gate.Close()
 	self.group.Wait()
 }

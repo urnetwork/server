@@ -358,3 +358,31 @@ func TestHostLogsNoAddressOrSocketName(t *testing.T) {
 		}
 	}
 }
+
+// tls/ opens only over a listen facts source (TLS-M5-22): a block with none registers no tls/ hooks and says so once,
+// and one given a source holds the hooks its engine refers tls/ entries to, which Close stops with the engine.
+func TestHostRegistersTlsOnlyWithAListenFactsSource(t *testing.T) {
+	world := newHostTestWorld(t)
+	without := world.newHost(t, nil)
+	if without.tlsHooks != nil {
+		t.Fatal("a block with no listen facts source holds tls/ hooks")
+	}
+	said := false
+	for _, line := range world.log.Lines() {
+		said = said || strings.Contains(line, "tls/ refuses every entry until the block has a listen facts source")
+	}
+	if !said {
+		t.Fatalf("the block did not say why tls/ is closed: %v", world.log.Lines())
+	}
+	with := world.newHost(t, func(deps *hostDeps) {
+		deps.TlsListenFacts = socketsservice.TlsListenFactsFunc(func(ctx context.Context, networkId connect.Id) (*socketsservice.TlsListenFacts, error) {
+			return nil, errors.New("no listen facts route yet")
+		})
+	})
+	if with.tlsHooks == nil {
+		t.Fatal("a block given a listen facts source holds no tls/ hooks")
+	}
+	if err := with.engine.RegisterNamespace(sidecar.SocketNamespaceTls, with.tlsHooks); err == nil {
+		t.Fatal("tls/ took hooks twice: the block's were not registered")
+	}
+}

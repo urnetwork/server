@@ -328,6 +328,17 @@ func socketRegistrationRecord(registration *sidecar.SocketRegistration) string {
 	if registration.ListenId != nil {
 		listenId = socketHexId(*registration.ListenId)
 	}
+	// DESIGN-DETAILS 17.2.10's two lists, as ValidateListen left them
+	certifiedNames := make([]string, 0, len(registration.CertifiedNames))
+	for _, name := range registration.CertifiedNames {
+		certifiedNames = append(certifiedNames, hex.EncodeToString([]byte(name)))
+	}
+	acmeNames := make([]string, 0, len(registration.AcmeNames))
+	for _, acmeName := range registration.AcmeNames {
+		if acmeName != nil {
+			acmeNames = append(acmeNames, hex.EncodeToString([]byte(acmeName.Name))+":"+strconv.FormatUint(acmeName.ClaimSeq, 10))
+		}
+	}
 	return strings.Join([]string{
 		listenId,
 		hex.EncodeToString([]byte(registration.Protocol)),
@@ -341,32 +352,50 @@ func socketRegistrationRecord(registration *sidecar.SocketRegistration) string {
 		hex.EncodeToString(registration.NameToken),
 		base64.StdEncoding.EncodeToString(registration.SealedName),
 		base64.StdEncoding.EncodeToString(registration.Claim),
+		strings.Join(certifiedNames, ","),
+		strings.Join(acmeNames, ","),
 	}, ";")
 }
 
+// Where m:<L>'s lease fields begin, by its field count: an m with 17.2.10's two lists has fourteen
+// registration fields, one from before has twelve, and either may carry the three lease fields or not. 0
+// for no lease, -1 for a count no record has.
+func socketLeaseFieldIndex(fieldCount int) int {
+	switch fieldCount {
+	case 12, 14:
+		return 0
+	case 15:
+		return 12
+	case 17:
+		return 14
+	}
+	return -1
+}
+
 // What m:<L>'s last three fields hold: the listener's sidecar, the lease's position and its set
-// version. An m of the first twelve fields alone reads as nil, 0 and 0.
+// version. An m of its registration fields alone reads as nil, 0 and 0.
 func socketParseLeaseRecord(record string) (*connect.Id, uint64, uint64, error) {
 	fields := strings.Split(record, ";")
-	if len(fields) == 12 {
+	leaseIndex := socketLeaseFieldIndex(len(fields))
+	switch {
+	case leaseIndex == 0:
 		return nil, 0, 0, nil
-	}
-	if len(fields) != 15 {
+	case leaseIndex < 0:
 		return nil, 0, 0, errors.New("socket store: a malformed registration record")
 	}
 	var sidecarId *connect.Id
-	if fields[12] != "" {
-		id, err := socketParseHexId(fields[12])
+	if fields[leaseIndex] != "" {
+		id, err := socketParseHexId(fields[leaseIndex])
 		if err != nil {
 			return nil, 0, 0, err
 		}
 		sidecarId = &id
 	}
-	policyVersion, err := strconv.ParseUint(fields[13], 10, 64)
+	policyVersion, err := strconv.ParseUint(fields[leaseIndex+1], 10, 64)
 	if err != nil {
 		return nil, 0, 0, errors.New("socket store: a malformed lease position")
 	}
-	setVersion, err := strconv.ParseUint(fields[14], 10, 64)
+	setVersion, err := strconv.ParseUint(fields[leaseIndex+2], 10, 64)
 	if err != nil {
 		return nil, 0, 0, errors.New("socket store: a malformed lease set version")
 	}
@@ -377,7 +406,7 @@ func socketParseLeaseRecord(record string) (*connect.Id, uint64, uint64, error) 
 func socketParseRegistrationRecord(record string, inflightRecord string) (*sidecar.SocketRegistration, int64, error) {
 	malformed := errors.New("socket store: a malformed registration record")
 	fields := strings.Split(record, ";")
-	if len(fields) != 12 && len(fields) != 15 {
+	if socketLeaseFieldIndex(len(fields)) < 0 {
 		return nil, 0, malformed
 	}
 	hexText := func(text string) (string, error) {
@@ -435,6 +464,34 @@ func socketParseRegistrationRecord(record string, inflightRecord string) (*sidec
 	if registration.Claim, err = base64.StdEncoding.DecodeString(fields[11]); err != nil {
 		return nil, 0, malformed
 	}
+	if len(fields) == 14 || len(fields) == 17 {
+		if fields[12] != "" {
+			for _, nameHex := range strings.Split(fields[12], ",") {
+				name, err := hexText(nameHex)
+				if err != nil {
+					return nil, 0, malformed
+				}
+				registration.CertifiedNames = append(registration.CertifiedNames, name)
+			}
+		}
+		if fields[13] != "" {
+			for _, entry := range strings.Split(fields[13], ",") {
+				nameHex, seqText, found := strings.Cut(entry, ":")
+				if !found {
+					return nil, 0, malformed
+				}
+				name, err := hexText(nameHex)
+				if err != nil {
+					return nil, 0, malformed
+				}
+				claimSeq, err := strconv.ParseUint(seqText, 10, 64)
+				if err != nil {
+					return nil, 0, malformed
+				}
+				registration.AcmeNames = append(registration.AcmeNames, &sidecar.SocketAcmeName{Name: name, ClaimSeq: claimSeq})
+			}
+		}
+	}
 	reportMillis := int64(0)
 	if inflightRecord != "" {
 		inflightText, reportText, found := strings.Cut(inflightRecord, ";")
@@ -488,6 +545,11 @@ func socketParseListener(values []string) (*socketsservice.SocketStoreListener, 
 		ReportedInflight:     registration.Inflight,
 		ReportMillis:         reportMillis,
 		DialerClientIdShares: map[connect.Id]*socketsservice.SocketDialerShare{},
+		CertifiedNames:       slices.Clone(registration.CertifiedNames),
+		AcmeNames:            map[string]uint64{},
+	}
+	for _, acmeName := range registration.AcmeNames {
+		candidate.AcmeNames[acmeName.Name] = acmeName.ClaimSeq
 	}
 	if values[4] != "" {
 		for _, entry := range strings.Split(values[4], "|") {
@@ -921,6 +983,8 @@ func (self *SocketStore) pickArgs(request *socketsservice.SocketStorePickRequest
 		// the key rides ARGV alone and is never written (sock-2)
 		string(request.AffinityKey),
 		scheduler.AffinityLoadPercent,
+		// as is a custom host's or an alias's server name (17.2.10)
+		hex.EncodeToString([]byte(request.ServerName)),
 	}
 }
 

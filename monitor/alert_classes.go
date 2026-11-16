@@ -33,6 +33,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"postgres-primary-down":       pageAlertClass,
 	"slo-burn-page":               pageAlertClass,
 	"write-budget-p0-past-refill": pageAlertClass,
+	// §19.8's M10 drop row (SIGNALS.md §29.8)
+	"evs-drop-refused": pageAlertClass,
 	// §19.8's M5 dns rows (SIGNALS.md §28.1)
 	"dns-canary-signature": pageAlertClass,
 	"dns-ns-down":          pageAlertClass,
@@ -76,6 +78,9 @@ var alertClassKinds = map[string]alertClassKind{
 	"write-budget-shedding":           incidentAlertClass,
 	"write-budget-hdd-refusals":       incidentAlertClass,
 	"write-budget-unobservable":       visibilityAlertClass,
+	"evs-sweep-deleted-share":         incidentAlertClass,
+	"evs-drop-stalled":                incidentAlertClass,
+	"evs-format2-unobservable":        visibilityAlertClass,
 	"sidecar-dump-run-failed":         incidentAlertClass,
 	"sidecar-dump-offsite-stale":      incidentAlertClass,
 	"sidecar-dump-unobservable":       visibilityAlertClass,
