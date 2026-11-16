@@ -7,9 +7,25 @@ import (
 	"testing"
 )
 
-// Captured main 4bc9e8c7d's published tail must keep its exact order before the
-// local recovery append. Resolve positions from actual registered objects;
-// published migration identities cannot move when the local append is merged.
+// The captured tail keeps its exact ordinals after recovery publishes. Later
+// appends are valid; omissions, reordered entries and prefix inserts are not.
+func competitionCapturedRecoveryTailValid(versions []int, migrationCount int) bool {
+	const firstVersion = 974
+	const lastVersion = 982
+	if len(versions) != lastVersion-firstVersion+1 || migrationCount < lastVersion {
+		return false
+	}
+	for index, version := range versions {
+		if version != firstVersion+index {
+			return false
+		}
+	}
+	return true
+}
+
+// Captured main 4bc9e8c7d's published tail keeps its exact order before recovery
+// 982. Resolve positions from the actual registered objects, not the current
+// head, so publishing a subsequent migration never shifts these identities.
 func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *testing.T) {
 	versions := []int{CtfSchemaMigrationVersion(), NetworkPingTargetEvidenceSchemaMigrationVersion(),
 		NetworkExtenderAddressPortsSchemaMigrationVersion(), CtfAwardNetworkMigrationVersion(),
@@ -31,15 +47,52 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 	if versions[8] != 968 || versions[9] != 969 || versions[10] != 970 {
 		t.Fatal("captured main's published address-sweep, Shopify or mail migrations moved", versions)
 	}
-	for index, version := range versions[14:] {
-		if version != 974+index {
-			t.Fatal("reviewed published migration tail or second recovery append moved", versions)
-		}
-	}
-	if versions[len(versions)-1] != MigrationCount() {
-		t.Fatal("local recovery must follow the entire captured origin tail", versions, MigrationCount())
+	if !competitionCapturedRecoveryTailValid(versions[14:], MigrationCount()) {
+		t.Fatal("captured published migration tail or recovery ordinal changed", versions, MigrationCount())
 	}
 	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d mail_context=%d recovery=%d gift=%d gift_refund=%d operator_retry=%d operator_traffic=%d expired_points=%d gift_gamma=%d legacy_drop_guard=%d provider_append=%d head_retention=%d history_floor=%d second_recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], versions[11], versions[12], versions[13], versions[14], versions[15], versions[16], versions[17], versions[18], versions[19], versions[20], versions[21], versions[22], MigrationCount())
+}
+
+// The same helper used by both real tail assertions accepts future appends
+// without allowing an omission, duplicate, gap, reorder or prefix insertion.
+func TestCompetitionCapturedRecoveryTailAllowsOnlyAppendOnlySuccessors(t *testing.T) {
+	versions := []int{CompetitionOperatorRequestedPatchRetryMigrationVersion(), OperatorBlockTrafficVersion(),
+		OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(), ProviderWorkSessionEventLegacyDropGuardMigrationVersion(),
+		ProviderWorkSessionProviderAppendMigrationVersion(), ProviderWorkSessionHeadRetentionGuardMigrationVersion(),
+		ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(), CompetitionSecondRecoveryMigrationVersion()}
+	if !competitionCapturedRecoveryTailValid(versions, MigrationCount()) {
+		t.Fatal("actual registered tail does not match its captured ordinals", versions, MigrationCount())
+	}
+	gap := append([]int(nil), versions...)
+	gap[4]++
+	duplicate := append([]int(nil), versions...)
+	duplicate[4] = duplicate[3]
+	reordered := append([]int(nil), versions...)
+	reordered[3], reordered[4] = reordered[4], reordered[3]
+	shifted := append([]int(nil), versions...)
+	for index := range shifted {
+		shifted[index]++
+	}
+	omitted := append(append([]int(nil), versions[:4]...), versions[5:]...)
+	for _, test := range []struct {
+		name     string
+		versions []int
+		head     int
+		valid    bool
+	}{
+		{name: "captured head", versions: versions, head: 982, valid: true},
+		{name: "subsequent append", versions: versions, head: 983, valid: true},
+		{name: "incomplete head", versions: versions, head: 981, valid: false},
+		{name: "gap", versions: gap, head: 983, valid: false},
+		{name: "duplicate", versions: duplicate, head: 982, valid: false},
+		{name: "reorder", versions: reordered, head: 982, valid: false},
+		{name: "prefix insertion", versions: shifted, head: 983, valid: false},
+		{name: "omission", versions: omitted, head: 982, valid: false},
+	} {
+		if valid := competitionCapturedRecoveryTailValid(test.versions, test.head); valid != test.valid {
+			t.Errorf("%s validity = %t, want %t", test.name, valid, test.valid)
+		}
+	}
 }
 
 // Deleting only each explicit addition recovers the complete reviewed old

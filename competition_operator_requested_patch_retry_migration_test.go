@@ -36,13 +36,8 @@ func TestCompetitionOperatorPatchRetryMigrationPreservesCompletePredecessors(t *
 		ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), ProviderWorkSessionProviderAppendMigrationVersion(),
 		ProviderWorkSessionHeadRetentionGuardMigrationVersion(), ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(),
 		CompetitionSecondRecoveryMigrationVersion()}
-	for index, tailVersion := range tail {
-		if tailVersion != 974+index {
-			t.Fatal("reviewed migration tail after patch retry was moved, omitted or overwritten", tail)
-		}
-	}
-	if tail[len(tail)-1] != MigrationCount() {
-		t.Fatal("second recovery must follow the complete published tail", tail, MigrationCount())
+	if !competitionCapturedRecoveryTailValid(tail, MigrationCount()) {
+		t.Fatal("captured published migration tail or recovery ordinal changed", tail, MigrationCount())
 	}
 }
 
