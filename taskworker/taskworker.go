@@ -250,6 +250,10 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleTlsCertOrders(clientSession, tx)
 		work.ScheduleTlsCertRenewals(clientSession, tx)
 		work.ScheduleTlsCertRevocations(clientSession, tx)
+		// §12.8's CAA walk and canary probe of each strong-mode custom host,
+		// at setup and at its newest chain's half-life; empty passes until
+		// certs is installed, and not scheduled without MG2, MG5 and MG6
+		work.ScheduleTlsCaaChecks(clientSession, tx)
 		// §12's journal past 7 days, challenges and canaries past their hour,
 		// and zone suspensions past their until; not scheduled without MG5
 		work.ScheduleDnsMaintenance(clientSession, tx)
@@ -815,6 +819,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.TlsCertRevocations,
 			work.TlsCertRevocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.TlsCaaChecks,
+			work.TlsCaaChecksPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.DnsMaintenance,

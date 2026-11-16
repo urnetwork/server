@@ -858,6 +858,124 @@ func sidecarMg5TlsMigrations() []any {
 		newSqlMigration(`
 			CREATE INDEX tls_connection_day_day ON tls_connection_day (day)
 		`),
+
+		// Team custom-domain certificates (TLS-M6-05; DESIGN-DETAILS 17.2.3;
+		// cert-1): a custom row names one custom host and its domain, the ACME
+		// order its lock's holder recorded, the lock sequence of the claim
+		// that last took it, whether it is an ARI renewal outside the budgets,
+		// whether the CA refused its replaces, and why it failed or went back
+		// to custom_queued. Every other row keeps NULL and the defaults.
+		newSqlMigration(`
+			ALTER TABLE network_tls_cert ADD COLUMN custom_host varchar(253) NULL
+		`),
+		newSqlMigration(`
+			ALTER TABLE network_tls_cert ADD COLUMN custom_domain varchar(253) NULL
+		`),
+		newSqlMigration(`
+			ALTER TABLE network_tls_cert ADD COLUMN order_url varchar(1024) NULL
+		`),
+		newSqlMigration(`
+			ALTER TABLE network_tls_cert ADD COLUMN claim_seq bigint NOT NULL DEFAULT 0
+		`),
+		newSqlMigration(`
+			ALTER TABLE network_tls_cert ADD COLUMN exempt bool NOT NULL DEFAULT false
+		`),
+		newSqlMigration(`
+			ALTER TABLE network_tls_cert ADD COLUMN no_replaces bool NOT NULL DEFAULT false
+		`),
+		newSqlMigration(`
+			ALTER TABLE network_tls_cert ADD COLUMN custom_reason varchar(24) NULL
+		`),
+		// 17.2.3's exclusions, held by the database: one open row a device
+		// and host, one row in flight an account, one live certificate a
+		// device and host that nothing has succeeded
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_tls_cert_custom_open ON network_tls_cert (sidecar_id, custom_host) WHERE state IN ('custom_queued', 'custom_ordering')
+		`),
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_tls_cert_custom_in_flight ON network_tls_cert (network_id, custom_domain) WHERE state = 'custom_ordering'
+		`),
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_tls_cert_custom_live ON network_tls_cert (sidecar_id, custom_host) WHERE state = 'custom_issued' AND successor_cert_id IS NULL
+		`),
+		// an account's work list
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_custom_work ON network_tls_cert (network_id, custom_domain) WHERE state IN ('custom_queued', 'custom_ordering', 'custom_revoking')
+		`),
+		// a host's newest chain: the CAA checks' recheck (TLS-M6-04) and the
+		// listen facts' certified names
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_custom_host ON network_tls_cert (custom_host, not_before) WHERE custom_host IS NOT NULL
+		`),
+		// one customer ACME account a verified domain (17.2.3): its URI and
+		// CA, the key's sequence and RFC 7638 thumbprint, public values, the
+		// secret repo holding the key file and, while a key change is in
+		// flight, the next key's; the lock's sequence, holder, row, purpose
+		// and lease; the CA's 429 holds; and each ordering desktop's last
+		// poll, kept 7 days. The lock's and the holds' times are the
+		// database's clock. Never the account key.
+		newSqlMigration(`
+			CREATE TABLE network_tls_account (
+				network_id uuid NOT NULL,
+				domain varchar(253) NOT NULL,
+				ca varchar(16) NOT NULL,
+				account_uri varchar(1024) NOT NULL,
+				key_seq bigint NOT NULL,
+				key_thumbprint bytea NOT NULL,
+				key_repo_id uuid NOT NULL,
+				next_key_thumbprint bytea NULL,
+				next_key_repo_id uuid NULL,
+				lock_seq bigint NOT NULL DEFAULT 0,
+				lock_sidecar_id uuid NULL,
+				lock_cert_id uuid NULL,
+				lock_purpose varchar(8) NULL,
+				lock_until timestamp NULL,
+				hold_new_until timestamp NULL,
+				hold_all_until timestamp NULL,
+				orderer_seen jsonb NOT NULL DEFAULT '{}',
+				create_time timestamp NOT NULL,
+
+				PRIMARY KEY (network_id, domain)
+			)
+		`),
+		// what 17.2.8's budgets replay: one row each certificate, new order,
+		// failed authorization or failed route probe, kept 8 days
+		newSqlMigration(`
+			CREATE TABLE network_tls_custom_spend (
+				spend_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				domain varchar(253) NOT NULL,
+				custom_host varchar(253) NOT NULL,
+				registered_domain varchar(253) NOT NULL,
+				ca varchar(16) NOT NULL,
+				account_uri varchar(1024) NOT NULL,
+				kind varchar(16) NOT NULL,
+				cert_id uuid NULL,
+				at timestamp NOT NULL,
+
+				PRIMARY KEY (spend_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_tls_custom_spend_certificate ON network_tls_custom_spend (cert_id) WHERE kind = 'certificate'
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_tls_custom_spend_host ON network_tls_custom_spend (ca, custom_host, kind, at)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_tls_custom_spend_registered_domain ON network_tls_custom_spend (ca, registered_domain, kind, at)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_tls_custom_spend_account ON network_tls_custom_spend (account_uri, kind, at)
+		`),
+		// the 8-day retention
+		newSqlMigration(`
+			CREATE INDEX network_tls_custom_spend_at ON network_tls_custom_spend (at)
+		`),
+		// a network's deletion
+		newSqlMigration(`
+			CREATE INDEX network_tls_custom_spend_network_id ON network_tls_custom_spend (network_id, spend_id)
+		`),
 	}
 }
 

@@ -51,6 +51,7 @@ type certsConfigYaml struct {
 	AdmitBatchCount         *int                          `yaml:"admit_batch_count"`
 	OrderRetryAfterSeconds  *int                          `yaml:"order_retry_after_s"`
 	AccountRolloverAgeHours *int                          `yaml:"account_rollover_age_h"`
+	CaaOperatorZones        []string                      `yaml:"caa_operator_zones"`
 }
 
 // What certs.yml gives a host.
@@ -61,6 +62,10 @@ type CertsConfig struct {
 	DnsUrl string
 	// Each CA's account file, a secret_file's name in taskworker's vault.
 	AccountFiles map[certsservice.CertsCa]string
+	// The zones URnetwork controls, which no custom host's CAA walk may meet
+	// (TLS-M6-04, §12.8): root first, then caa_operator_zones, the platform
+	// domains beside it.
+	CaaOperatorZones []string
 }
 
 // Parses a certs.yml. An unknown key, a URL that is not an https origin or
@@ -160,6 +165,13 @@ func ParseCertsConfig(data []byte) (*CertsConfig, error) {
 	}
 	if err := settings.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrCertsConfigRefused, err)
+	}
+	config.CaaOperatorZones = []string{settings.RootDomain}
+	for _, zone := range file.CaaOperatorZones {
+		if zone == "" || strings.ToLower(zone) != zone || strings.HasSuffix(zone, ".") || !strings.Contains(zone, ".") {
+			return refuse("caa_operator_zones holds a name that is not a lowercase domain")
+		}
+		config.CaaOperatorZones = append(config.CaaOperatorZones, zone)
 	}
 	return config, nil
 }

@@ -95,6 +95,11 @@ type TlsCertChainsInstallDeps struct {
 	DnsTransport http.RoundTripper
 	// How every CA is reached. nil: a client on the system's roots.
 	AcmeHttpClient *http.Client
+	// What the CAA checks resolve with (TLS-M6-04). nil: a resolver on the
+	// system's.
+	CaaResolver certsservice.CertsCaaResolver
+	// The custom hosts the CAA checks judge. nil: model.NewCertsCaaStore.
+	CaaStore certsservice.CertsCaaStore
 }
 
 // taskworker's certs install as server.SidecarSwitchInstall drives it: nothing
@@ -195,6 +200,7 @@ func buildTlsCertChains(ctx context.Context, deps *TlsCertChainsInstallDeps, set
 
 	// the DNS client, only where certs.yml names the dns api
 	var dns certsservice.CertsDns = certsservice.ClosedCertsDns{}
+	var dnsClient *server.CertsDnsClient
 	if config.DnsUrl != "" {
 		credentialFile, err := readSecretFile(server.CertsDnsCredentialFileName)
 		if err != nil {
@@ -217,6 +223,7 @@ func buildTlsCertChains(ctx context.Context, deps *TlsCertChainsInstallDeps, set
 			return refuse("the dns client on %s's dns_url: %s", tlsCertChainsConfigFileName, err)
 		}
 		dns = client
+		dnsClient = client
 	} else {
 		glog.Infof("[certs]%s names no dns_url, so certs writes no challenge and no order passes DNS\n", tlsCertChainsConfigFileName)
 	}
@@ -255,8 +262,24 @@ func buildTlsCertChains(ctx context.Context, deps *TlsCertChainsInstallDeps, set
 		return refuse("the engine: %s", err)
 	}
 	installed := setTlsCertChains(&TlsCertChainDeps{Service: service, RevocationSource: deps.RevocationSource})
+	// the CAA checks, only where certs reaches the canary route (TLS-M6-04)
+	uninstallCaa := func() {}
+	if dnsClient != nil {
+		caaStore := deps.CaaStore
+		if caaStore == nil {
+			caaStore = model.NewCertsCaaStore(nil)
+		}
+		uninstallCaa = installTlsCaaChecks(&tlsCaaChecksBuild{
+			service:       service,
+			dns:           dnsClient,
+			resolver:      deps.CaaResolver,
+			store:         caaStore,
+			operatorZones: config.CaaOperatorZones,
+		})
+	}
 	return func() {
 		// only this install's deps: a later install's stay
 		tlsCertChainDeps.CompareAndSwap(installed, nil)
+		uninstallCaa()
 	}, nil
 }
