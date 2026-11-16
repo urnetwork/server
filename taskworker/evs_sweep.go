@@ -20,14 +20,16 @@ import (
 )
 
 func init() {
-	evsJobs = append(evsJobs, &evsJob{name: evsservice.EvsSweepTaskName, run: runEvsSweep})
+	// format 2's: a taskworker at instance format 1 runs no sweep (evs_block_config.go)
+	evsJobs = append(evsJobs, &evsJob{name: evsservice.EvsSweepTaskName, run: runEvsSweep, format2: true})
 }
 
 // One run of evs.sweep: a start, a cluster's scan page, or one repo's pass.
 func runEvsSweep(ctx context.Context, host *sidecar.ServiceHost, args []byte) error {
 	result, err := evsservice.RunSweepTask(ctx, host, &evsservice.SweepDeps{
-		Log:     evsBudgetLogger{},
-		Format2: evsservice.NewFormat2Gate(host),
+		EvsSettings: evsJobSettings(ctx),
+		Log:         evsBudgetLogger{},
+		Format2:     evsservice.NewFormat2Gate(host),
 	}, args)
 	if result != nil && glog.V(1) {
 		if swept := result.Swept; swept != nil {

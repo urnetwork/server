@@ -11,6 +11,9 @@
 # quota, which it reads from api's internal gate. Without them, and until ACL-M2-14's
 # authorization state lands, it stays not ready, serving /status alone, and its log
 # says what it waits for.
+#
+# The block runs as the storage format its config names: evs.yml's instance_format
+# under the config home, 2 with no such file and 1 for a rollback (QD-854).
 
 export WARP_HOST="127.0.0.1"
 export WARP_BLOCK="local"

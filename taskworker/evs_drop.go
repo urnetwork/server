@@ -82,7 +82,8 @@ func parseEvsDropRepoArgs(args []byte) (string, sidecar.Id, error) {
 }
 
 func init() {
-	evsJobs = append(evsJobs, &evsJob{name: evsservice.EvsDropTaskName, run: runEvsDrop, first: firstEvsDrop})
+	// format 2's: a taskworker at instance format 1 runs no drop job (evs_block_config.go)
+	evsJobs = append(evsJobs, &evsJob{name: evsservice.EvsDropTaskName, run: runEvsDrop, first: firstEvsDrop, format2: true})
 }
 
 // The daily start's chain, from the runtime's start.
@@ -139,28 +140,29 @@ func (self evsDropVerifier) Verify(ctx context.Context, request *evsservice.Drop
 
 // The seams one run's job and dry runs take: resolve, mark and the deletes, verify injected, and the lock from the gate
 // cache. A seam that cannot be built stays nil, which starts no job.
-func evsDropJobDeps(host *sidecar.ServiceHost) (*evsservice.DropJobDeps, error) {
+func evsDropJobDeps(host *sidecar.ServiceHost, evsSettings *evsservice.EvsSettings) (*evsservice.DropJobDeps, error) {
 	format2 := evsservice.NewFormat2Gate(host)
-	resolver, err := evsservice.NewDropResolve(host, &evsservice.DropResolveDeps{Log: evsBudgetLogger{}})
+	resolver, err := evsservice.NewDropResolve(host, &evsservice.DropResolveDeps{EvsSettings: evsSettings, Log: evsBudgetLogger{}})
 	if err != nil {
 		return nil, err
 	}
-	marker, err := evsservice.NewDropMark(host, &evsservice.DropMarkDeps{Log: evsBudgetLogger{}})
+	marker, err := evsservice.NewDropMark(host, &evsservice.DropMarkDeps{EvsSettings: evsSettings, Log: evsBudgetLogger{}})
 	if err != nil {
 		return nil, err
 	}
-	deleter, err := evsservice.NewDropDelete(host, &evsservice.DropDeleteDeps{Format2: format2, Log: evsBudgetLogger{}})
+	deleter, err := evsservice.NewDropDelete(host, &evsservice.DropDeleteDeps{EvsSettings: evsSettings, Format2: format2, Log: evsBudgetLogger{}})
 	if err != nil {
 		return nil, err
 	}
 	return &evsservice.DropJobDeps{
-		Resolver: resolver,
-		Marker:   marker,
-		Verifier: evsDropVerifier{},
-		Deleter:  deleter,
-		Locks:    evsDropLocks(),
-		Format2:  format2,
-		Log:      evsBudgetLogger{},
+		Resolver:    resolver,
+		Marker:      marker,
+		Verifier:    evsDropVerifier{},
+		Deleter:     deleter,
+		Locks:       evsDropLocks(),
+		Format2:     format2,
+		EvsSettings: evsSettings,
+		Log:         evsBudgetLogger{},
 	}, nil
 }
 
@@ -174,7 +176,8 @@ func runEvsDrop(ctx context.Context, host *sidecar.ServiceHost, args []byte) err
 		glog.Errorf("[evsjobs]%s with args that name no repo: dropped\n", evsservice.EvsDropTaskName)
 		return nil
 	}
-	deps, err := evsDropJobDeps(host)
+	evsSettings := evsJobSettings(ctx)
+	deps, err := evsDropJobDeps(host, evsSettings)
 	if err != nil {
 		return err
 	}
@@ -186,7 +189,7 @@ func runEvsDrop(ctx context.Context, host *sidecar.ServiceHost, args []byte) err
 	if err != nil {
 		return err
 	}
-	previews, err := evsservice.NewDropPreviews(host, &evsservice.DropPreviewDeps{Resolver: deps.Resolver, Marker: deps.Marker, Log: evsBudgetLogger{}})
+	previews, err := evsservice.NewDropPreviews(host, &evsservice.DropPreviewDeps{Resolver: deps.Resolver, Marker: deps.Marker, EvsSettings: evsSettings, Log: evsBudgetLogger{}})
 	if err != nil {
 		return err
 	}

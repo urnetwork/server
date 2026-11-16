@@ -3,7 +3,9 @@
 // site: no}, user 65532 and no Postgres. Its secret_files hold the audience's public JWKS, redis.yml,
 // file-clusters-evs.yml, the receipt keys, its internal gate bearer (internal-gate-evs.yml) and grafana-push.yml;
 // segments arrive on the block's streamable_paths. ServiceHost.Quota reaches api's internal gate at -api_url on
-// that bearer (QUOTA-M2-11, QD-055); a block without either has no Quota and stays not ready.
+// that bearer (QUOTA-M2-11, QD-055); a block without either has no Quota and stays not ready. The storage format the
+// block runs as is its config's: evs.yml's instance_format, 2 where the file is absent and 1 in a rollback's (QD-854;
+// evshost/block_config.go), and a block whose file names any other does not start.
 package main
 
 import (
