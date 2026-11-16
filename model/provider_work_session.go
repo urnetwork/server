@@ -203,6 +203,11 @@ var providerWorkSessionIndexRefusalLogUnixMilli atomic.Int64
 // concurrently and supersedes 824 in the migration signal; the signal pages
 // on a copy built by hand.
 //
+// The append journals provider clients only (owner, 2026-11-16; server
+// db_provider_work_session_providers.go): a payer endpoint has no head, so its
+// reservations are incomplete (providerWorkEndpointHeadInTx). The same
+// deployment needs a migration that journals every client again.
+//
 // This transaction's events were appended at or after it began, so the lookup
 // is bounded a day below its start, which prunes the weekly-partitioned journal
 // (PARTITION-MAINTENANCE-PLAN.md C4) to the current week, or the two around a

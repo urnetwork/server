@@ -1,9 +1,8 @@
 package model
 
-// The key history retention follows the contract horizon reaper's runtime
-// control. DB-backed: the guard below 91 days is migration 904's, so under the
-// owner rule this runs only after the branch is merged to main; on a database
-// whose guard keeps 91 days it fails, as on the code before the change.
+// The key history retention keeps a gone client's history 7 days, whatever
+// the contract horizon reaper's runtime control says (owner, 2026-11-16).
+// DB-backed.
 
 import (
 	"context"
@@ -29,46 +28,51 @@ func setGoneKeyHistoryTestContractHorizon(t testing.TB, ctx context.Context, fie
 	}
 }
 
-// The retention follows the contract horizon reaper's control while its mode
-// is on: at a 45-day horizon a client gone 50 days loses its history and one
-// gone 40 days keeps it, and without the control the 91-day contract
-// retention keeps both.
-func TestGoneStClientKeyHistoryFollowsContractHorizon(t *testing.T) {
+// The reaper's control no longer moves the key history horizon: with the
+// control absent, on at 45 days, in a dry run, off, or unreadable, a client
+// gone 8 days loses its history and one gone 6 days keeps it. Before
+// 2026-11-16 the retention followed the reaper while its mode was on and kept
+// 91 days otherwise, so the client gone 8 days kept its history in every case.
+func TestGoneStClientKeyHistoryIgnoresTheContractHorizon(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		keptId, removedId, laterId := server.NewId(), server.NewId(), server.NewId()
-		for _, clientId := range []server.Id{keptId, removedId, laterId} {
-			insertGoneKeyHistoryTestRows(t, ctx, clientId, server.NewId())
-		}
-		setGoneKeyHistoryTestDays(t, ctx, keptId, 40)
-		setGoneKeyHistoryTestDays(t, ctx, removedId, 50)
-
-		setGoneKeyHistoryTestContractHorizon(t, ctx, nil)
-		now := goneKeyHistoryTestDbNow(t, ctx)
-		report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
-		if report.RemovedClientCount != 0 {
-			t.Fatalf("without a control the retention = %+v, want none removed", report)
-		}
-		for _, clientId := range []server.Id{keptId, removedId} {
-			if rows := readGoneKeyHistoryTestRows(t, ctx, clientId); rows.history != 1 || rows.heads != 1 {
-				t.Fatalf("without a control a client gone under 91 days lost key history: %+v", rows)
+		const day = 24 * time.Hour
+		for _, test := range []struct {
+			name       string
+			control    map[string]string
+			unreadable bool
+		}{
+			{name: "no reaper control"},
+			{name: "the reaper on at 45 days", control: map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"}},
+			{name: "the reaper in a dry run", control: map[string]string{ContractHorizonControlFieldMode: "dry_run", ContractHorizonControlFieldHorizonDays: "45"}},
+			{name: "the reaper off", control: map[string]string{ContractHorizonControlFieldMode: "off"}},
+			{name: "an unreadable reaper control", unreadable: true},
+		} {
+			keptId, removedId := server.NewId(), server.NewId()
+			for _, clientId := range []server.Id{keptId, removedId} {
+				insertGoneKeyHistoryTestRows(t, ctx, clientId, server.NewId())
 			}
-		}
+			setGoneKeyHistoryTestDays(t, ctx, keptId, 6)
+			setGoneKeyHistoryTestDays(t, ctx, removedId, 8)
+			setGoneKeyHistoryTestContractHorizon(t, ctx, nil)
+			if test.control != nil {
+				setGoneKeyHistoryTestContractHorizon(t, ctx, test.control)
+			}
+			if test.unreadable {
+				setGoneKeyHistoryTestUnreadable(t, ctx, contractHorizonControlKey)
+			}
 
-		setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
-		now = goneKeyHistoryTestDbNow(t, ctx)
-		report, _ = RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
-		if report.RemovedClientCount != 1 || report.RemovedHistoryCount != 1 {
-			t.Fatalf("at a 45-day horizon the retention = %+v, want one client", report)
-		}
-		if rows := readGoneKeyHistoryTestRows(t, ctx, keptId); rows != (goneKeyHistoryTestRows{history: 1, heads: 1, gone: true}) {
-			t.Fatalf("a client gone 40 days lost key history at a 45-day horizon: %+v", rows)
-		}
-		if rows := readGoneKeyHistoryTestRows(t, ctx, removedId); rows != (goneKeyHistoryTestRows{}) {
-			t.Fatalf("a client gone 50 days kept key history at a 45-day horizon: %+v", rows)
-		}
-		if rows := readGoneKeyHistoryTestRows(t, ctx, laterId); rows.history != 1 || rows.heads != 1 {
-			t.Fatalf("a client that has not gone lost key history: %+v", rows)
+			now := goneKeyHistoryTestDbNow(t, ctx)
+			report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
+			if report.RemovedClientCount != 1 || report.RemovedHistoryCount != 1 || report.Horizon != 7*day {
+				t.Fatalf("with %s the retention = %+v, want one client at 7 days", test.name, report)
+			}
+			if rows := readGoneKeyHistoryTestRows(t, ctx, keptId); rows != (goneKeyHistoryTestRows{history: 1, heads: 1, gone: true}) {
+				t.Fatalf("with %s a client gone 6 days lost key history: %+v", test.name, rows)
+			}
+			if rows := readGoneKeyHistoryTestRows(t, ctx, removedId); rows != (goneKeyHistoryTestRows{}) {
+				t.Fatalf("with %s a client gone 8 days kept key history: %+v", test.name, rows)
+			}
 		}
 	})
 }

@@ -144,12 +144,12 @@ func (self ContractHorizonMode) String() string {
 // The shortest horizon the reaper applies, whatever its settings or control
 // say (owner, 2026-11-01: 35 days). It is the reaper's: server.ContractRetention,
 // which the partition drop and the sn-reconcile floor share, stays 91 days.
-// Key history and close evidence retention follow the reaper's horizon while
-// its mode is on: key history (RemoveGoneStClientKeyHistory) over its guard's
-// 30-day floor (server.ClientKeyHistoryRetentionFloor), close evidence
-// (server.RemoveExpiredCloseEvidence) over its guard's 35-day floor
-// (server.CloseEvidenceRetentionFloor), each with its own brake; both keep 91
-// days in a dry run, with the mode off, or without the control. What keeps a
+// Close evidence retention follows the reaper's horizon while its mode is on
+// (server.RemoveExpiredCloseEvidence), over its guard's 35-day floor
+// (server.CloseEvidenceRetentionFloor), with its own brake, and keeps 91 days
+// in a dry run, with the mode off, or without the control. Key history
+// retention no longer follows it: a gone client's history goes 7 days after
+// the client went (RemoveGoneStClientKeyHistory, owner 2026-11-16). What keeps a
 // contract that operator block points or a USDC obligation can still read is
 // the reaper's row checks, never its horizon. The transfer audit
 // rollup never replaces a day the floor can reach

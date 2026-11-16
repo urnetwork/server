@@ -1095,13 +1095,16 @@ func (self *SimpleResource) Int(path ...string) []int {
 	return values
 }
 
+// Exactly one string at path. The log line names the resource and the key,
+// never the value: vault strings are credentials (users, passwords, hosts,
+// peppers), and even a few of their characters must not reach a log.
 func (self *SimpleResource) RequireString(path ...string) string {
 	values := self.String(path...)
 	if len(values) != 1 {
 		panic(fmt.Sprintf("Must have one value (found %d).", len(values)))
 	}
 	value := values[0]
-	glog.Infof("[env]%s[%s] = %s\n", self.path, strings.Join(path, " "), MaskValue(value))
+	glog.Infof("[env]%s[%s] read (value not logged)\n", self.path, strings.Join(path, " "))
 	return value
 }
 
