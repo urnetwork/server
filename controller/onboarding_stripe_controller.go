@@ -416,6 +416,12 @@ func StripePaymentSheet(
 	}
 	trialDays := 0
 	if plan == model.PlanYearly {
+		// the trial collects its card through the subscription's
+		// pending_setup_intent, usage off_session (checked below), with
+		// request_three_d_secure left at Stripe's automatic: the bank's 3D
+		// Secure challenge happens in the sheet, while the customer is there,
+		// and covers the charge at the trial's end. The card's CVC check is
+		// read before the trial is credited (subscription_stripe_card_check.go).
 		trialDays = StripeSubscriptionTrialDays
 		params.TrialPeriodDays = stripe.Int64(StripeSubscriptionTrialDays)
 		params.TrialSettings = &stripe.SubscriptionTrialSettingsParams{
@@ -478,6 +484,11 @@ func StripePaymentSheet(
 	case sub.PendingSetupIntent != nil && sub.PendingSetupIntent.ClientSecret != "":
 		result.IntentType = "setup"
 		result.SetupIntentClientSecret = sub.PendingSetupIntent.ClientSecret
+		if usage := sub.PendingSetupIntent.Usage; usage != "" && usage != stripe.SetupIntentUsageOffSession {
+			// the trial's first charge comes after the customer has left: a card
+			// authenticated for on-session use only may need the bank again then
+			glog.Errorf("[stripe]payment sheet: subscription %s sets up its card for %s use, not off_session\n", sub.ID, usage)
+		}
 	case sub.LatestInvoice != nil && sub.LatestInvoice.ConfirmationSecret != nil && sub.LatestInvoice.ConfirmationSecret.ClientSecret != "":
 		result.IntentType = "payment"
 		result.PaymentIntentClientSecret = sub.LatestInvoice.ConfirmationSecret.ClientSecret
@@ -755,31 +766,67 @@ func stripeCheckoutTierAndDiscount(
 
 // stripeHandleInvoicePaidWithOnboarding wraps stripeHandleInvoicePaid: it holds
 // back the $0 trial invoice of a payment sheet whose card is not attached yet,
-// and after a credit it records the price tier on the subscription row and stamps
-// the welcome offer redeemed.
+// credits no trial refused for its card (subscription_stripe_card_check.go),
+// and after a credit it records the price tier on the subscription row and
+// stamps the welcome offer redeemed.
 func stripeHandleInvoicePaidWithOnboarding(
 	invoice *StripeEventInvoiceObject,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
-	sub := stripeSubscriptionForInvoice(clientSession.Ctx, invoice.Id)
-	if sub != nil && invoice.Total == 0 && sub.Metadata[stripeMetadataPaymentSheet] == stripePaymentSheetPending {
-		glog.Infof("[stripe]invoice %s: trial invoice of pending payment sheet subscription %s; crediting waits for the card\n", invoice.Id, sub.ID)
-		return &StripeWebhookResult{}, nil
+	if _, err := stripeCreditInvoiceWithOnboarding(invoice, clientSession); err != nil {
+		return nil, err
 	}
-	result, err := stripeHandleInvoicePaid(invoice, clientSession)
+	return &StripeWebhookResult{}, nil
+}
+
+// stripeCreditInvoiceWithOnboarding is stripeHandleInvoicePaidWithOnboarding,
+// with the card check's refusal for the purchase report: refusal is set, and
+// nothing is credited, when the invoice's trial was refused for its card, by
+// this call or an earlier one. A refusal with an error is still a refusal; the
+// error is a step of it to try again (the webhook's redelivery does).
+func stripeCreditInvoiceWithOnboarding(
+	invoice *StripeEventInvoiceObject,
+	clientSession *session.ClientSession,
+) (refusal *OnboardingError, returnErr error) {
+	ctx := clientSession.Ctx
+	sub, err := stripeSubscriptionForInvoice(ctx, invoice.Id)
 	if err != nil {
+		if invoice.Total == 0 {
+			// a trial invoice's hold and card check need its subscription
+			return nil, err
+		}
+		// a paid invoice credits without it; only its onboarding records wait
+		glog.Infof("[stripe]invoice %s: %s\n", invoice.Id, err)
+	}
+	decision, err := stripeInvoiceTrialCardGate(sub, invoice.Total, server.NowUtc(), false, func() bool {
+		_, credited := stripeInvoiceLedgerNetworkIdFunc(ctx, invoice.Id)
+		return credited
+	})
+	switch decision {
+	case stripeTrialCardHeld:
+		glog.Infof("[stripe]invoice %s: trial invoice of pending payment sheet subscription %s; crediting waits for the card\n", invoice.Id, sub.ID)
+		return nil, nil
+	case stripeTrialCardRefused:
+		glog.Infof("[stripe]invoice %s: the trial of subscription %s was refused for its card; not credited\n", invoice.Id, sub.ID)
+		return stripeCardCheckRefusalError(), err
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := stripeHandleInvoicePaid(invoice, clientSession); err != nil {
 		var unresolved *stripeInvoiceDestinationUnresolvedError
 		if errors.As(err, &unresolved) {
-			return stripeAcknowledgeUnresolvedInvoice(clientSession.Ctx, invoice, unresolved)
+			_, err := stripeAcknowledgeUnresolvedInvoice(ctx, invoice, unresolved)
+			return nil, err
 		}
-		return result, err
+		return nil, err
 	}
 	if sub != nil {
 		stripeRecordOnboardingForInvoice(clientSession, sub, invoice.Id)
-		stripeRecordTrialOutcomeForInvoice(clientSession.Ctx, sub, invoice)
-		stripeRecordWinbackForInvoice(clientSession.Ctx, sub)
+		stripeRecordTrialOutcomeForInvoice(ctx, sub, invoice)
+		stripeRecordWinbackForInvoice(ctx, sub)
 	}
-	return result, nil
+	return nil, nil
 }
 
 // stripePlanForSubscription is yearly or monthly from the subscription's first
@@ -896,11 +943,13 @@ func stripeHandleSubscriptionDeleted(object json.RawMessage, clientSession *sess
 	return &StripeWebhookResult{}, nil
 }
 
-// stripeSubscriptionForInvoice fetches the subscription an invoice bills, nil
-// when the invoice is not a subscription's or cannot be read.
-func stripeSubscriptionForInvoice(ctx context.Context, invoiceId string) *stripe.Subscription {
+// stripeSubscriptionForInvoice fetches the subscription an invoice bills, with
+// its default payment method expanded for the trial card check. nil when the
+// invoice is not a subscription's or Stripe does not know it; an error when
+// Stripe could not be read.
+func stripeSubscriptionForInvoice(ctx context.Context, invoiceId string) (*stripe.Subscription, error) {
 	if invoiceId == "" {
-		return nil
+		return nil, nil
 	}
 	stripe.Key = stripeApiToken()
 	fullInvoice, err := server.HttpGetRequireStatusOk[*stripeInvoiceSubscriptionRef](
@@ -911,19 +960,30 @@ func stripeSubscriptionForInvoice(ctx context.Context, invoiceId string) *stripe
 		},
 		server.ResponseJsonObject[*stripeInvoiceSubscriptionRef],
 	)
-	if err != nil || fullInvoice == nil {
-		return nil
+	if err != nil {
+		var statusErr *server.HttpStatusError
+		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("could not read invoice %s: %w", invoiceId, err)
+	}
+	if fullInvoice == nil {
+		return nil, nil
 	}
 	subscriptionId := fullInvoice.subscriptionId()
 	if subscriptionId == "" {
-		return nil
+		return nil, nil
 	}
-	sub, err := subscription.Get(subscriptionId, nil)
+	params := &stripe.SubscriptionParams{}
+	params.AddExpand("default_payment_method")
+	sub, err := subscription.Get(subscriptionId, params)
 	if err != nil {
-		glog.Infof("[stripe]could not read subscription %s: %s\n", subscriptionId, err)
-		return nil
+		if stripeErrorStatus(err) == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("could not read subscription %s: %w", subscriptionId, err)
 	}
-	return sub
+	return sub, nil
 }
 
 // stripeInvoiceSubscriptionRef reads the subscription id off an invoice in both
@@ -1008,6 +1068,9 @@ type stripeEventPaymentMethodObject struct {
 	Customer json.RawMessage `json:"customer"`
 	Card     *struct {
 		Country string `json:"country"`
+		Checks  *struct {
+			CvcCheck string `json:"cvc_check"`
+		} `json:"checks"`
 	} `json:"card"`
 	BillingDetails *struct {
 		Address *struct {
@@ -1043,7 +1106,10 @@ func stripeHandleSetupIntentSucceeded(object json.RawMessage, clientSession *ses
 	if paymentMethodId != "" {
 		country = stripePaymentMethodCountry(paymentMethodId)
 	}
-	stripeFinalizeTierForCustomer(clientSession, customerId, country)
+	if finalized := stripeFinalizeTierForCustomer(clientSession, customerId, country); finalized.Err != nil {
+		// a trial's card could not be judged: Stripe delivers the event again
+		return nil, finalized.Err
+	}
 	return &StripeWebhookResult{}, nil
 }
 
@@ -1065,8 +1131,17 @@ func stripeHandlePaymentMethodAttached(object json.RawMessage, clientSession *se
 	if country == "" && paymentMethod.Card != nil {
 		country = paymentMethod.Card.Country
 	}
+	if paymentMethod.Card != nil && paymentMethod.Card.Checks != nil &&
+		paymentMethod.Card.Checks.CvcCheck == string(stripe.PaymentMethodCardChecksCVCCheckFail) {
+		// a card refused for its CVC check (subscription_stripe_card_check.go)
+		// says nothing about where the customer is billed
+		country = ""
+	}
 	stripe.Key = stripeApiToken()
-	stripeFinalizeTierForCustomer(clientSession, customerId, country)
+	if finalized := stripeFinalizeTierForCustomer(clientSession, customerId, country); finalized.Err != nil {
+		// a trial's card could not be judged: Stripe delivers the event again
+		return nil, finalized.Err
+	}
 	return &StripeWebhookResult{}, nil
 }
 
@@ -1093,15 +1168,24 @@ func stripeHandleCustomerUpdated(object json.RawMessage, clientSession *session.
 	if country == "" {
 		return &StripeWebhookResult{}, nil
 	}
-	stripeFinalizeTierForCustomer(clientSession, c.Id, country)
+	if finalized := stripeFinalizeTierForCustomer(clientSession, c.Id, country); finalized.Err != nil {
+		// a trial's card could not be judged: Stripe delivers the event again
+		return nil, finalized.Err
+	}
 	return &StripeWebhookResult{}, nil
 }
 
 // stripePaymentMethodCountry is the billing country of a payment method: the
-// billing address country, else the card's issuing country.
+// billing address country, else the card's issuing country. "" for a card
+// whose CVC check failed: it is refused for a trial
+// (subscription_stripe_card_check.go), and says nothing about where the
+// customer is billed.
 func stripePaymentMethodCountry(paymentMethodId string) string {
 	pm, err := paymentmethod.Get(paymentMethodId, nil)
 	if err != nil || pm == nil {
+		return ""
+	}
+	if stripeCardCvcFailed(pm) {
 		return ""
 	}
 	if pm.BillingDetails != nil && pm.BillingDetails.Address != nil && pm.BillingDetails.Address.Country != "" {
@@ -1113,18 +1197,34 @@ func stripePaymentMethodCountry(paymentMethodId string) string {
 	return ""
 }
 
+// stripeFinalizeResult is what stripeFinalizeTierForCustomer did with the
+// customer's payment sheet trials and their cards.
+type stripeFinalizeResult struct {
+	// the payment sheet subscriptions whose trial was refused for its card
+	// (subscription_stripe_card_check.go), by this call or an earlier one
+	Refused map[string]bool
+	// a trial's card could not be read, or its refusal not written: that
+	// subscription stays pending with nothing credited, and the caller tries
+	// again (a webhook through Stripe's redelivery, the report through the
+	// app's retry)
+	Err error
+}
+
 // stripeFinalizeTierForCustomer records the customer's billing country and
 // brings every subscription still in its trial (or waiting on the payment sheet)
 // onto the tier that country resolves to: the item price is switched BEFORE the
 // trial ends (nothing has been charged yet, no proration), the metadata is
 // updated, a pending payment sheet is marked attached and its trial invoice is
-// credited now. Idempotent, so any of the three webhooks may run it. stripe.Key
-// must be set.
-func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, customerId string, countryCode string) {
+// credited now. A pending sheet's trial is attached only once its subscription
+// has a card that passed the card check; a card whose CVC check failed is
+// refused instead (stripeRefuseTrialCard). Idempotent, so any of the three
+// webhooks and the purchase report may run it. stripe.Key must be set.
+func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, customerId string, countryCode string) *stripeFinalizeResult {
+	result := &stripeFinalizeResult{Refused: map[string]bool{}}
 	networkId := model.GetStripeCustomerNetworkId(clientSession.Ctx, customerId)
 	if networkId == nil {
 		// not a customer of ours (a buy-data checkout customer, or a legacy one)
-		return
+		return result
 	}
 	code := model.NormalizeCountryCode(countryCode)
 	if code != "" {
@@ -1132,10 +1232,13 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 	}
 	now := server.NowUtc()
 
-	iter := subscription.List(&stripe.SubscriptionListParams{
+	listParams := &stripe.SubscriptionListParams{
 		Customer: stripe.String(customerId),
 		Status:   stripe.String("all"),
-	})
+	}
+	// each subscription's card, for the trial card check
+	listParams.AddExpand("data.default_payment_method")
+	iter := subscription.List(listParams)
 	for iter.Next() {
 		sub := iter.Subscription()
 		if sub.Metadata[stripeMetadataNetworkId] != networkId.String() {
@@ -1149,6 +1252,33 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 		currentTier := sub.Metadata[stripeMetadataPriceTier]
 		pending := sub.Metadata[stripeMetadataPaymentSheet] == stripePaymentSheetPending
 		inTrial := sub.Status == stripe.SubscriptionStatusTrialing && 0 < sub.TrialEnd && now.Before(time.Unix(sub.TrialEnd, 0))
+
+		if pending && sub.Status == stripe.SubscriptionStatusTrialing {
+			// a payment sheet's trial: its card is checked before the sheet is
+			// attached and the trial credited (subscription_stripe_card_check.go)
+			if stripeCardCheckRefused(sub) {
+				result.Refused[sub.ID] = true
+				continue
+			}
+			card, err := stripeSubscriptionCard(sub)
+			if err != nil {
+				glog.Errorf("[stripe]card check: %s\n", err)
+				result.Err = err
+				continue
+			}
+			if card == nil {
+				// no card on the subscription yet: still waiting on the sheet
+				continue
+			}
+			if stripeCardCvcFailed(card) {
+				result.Refused[sub.ID] = true
+				if err := stripeRefuseTrialCard(sub, card); err != nil {
+					glog.Errorf("[stripe]card check: %s\n", err)
+					result.Err = err
+				}
+				continue
+			}
+		}
 
 		metadata := map[string]string{}
 		var items []*stripe.SubscriptionItemsParams
@@ -1195,6 +1325,7 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 	if err := iter.Err(); err != nil {
 		glog.Errorf("[stripe]could not list subscriptions for customer %s: %s\n", customerId, err)
 	}
+	return result
 }
 
 // stripeCreditHeldInvoice runs the invoice.paid crediting for an invoice whose
