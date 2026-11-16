@@ -11615,4 +11615,16 @@ var migrations = []any{
 	// the append and ignores its result, so it applies before or after any
 	// deploy; the saving starts when it is applied.
 	newSqlMigration(providerWorkSessionProviderAppendSql),
+
+	// The retention of the provider work session heads (owner, 2026-11-16;
+	// DBDISK-STABILIZE S4; db_provider_work_session_head_retention.go): the
+	// head guard also admits a delete from the retention's transaction, which
+	// opts in with urnetwork.provider_work_session_head_retention, of a head
+	// whose client has no event left in the journal and no receipt. It
+	// replaces the guard's function body only, under a five-second lock
+	// bound: no table lock, and every update the running release makes stays
+	// admitted, so it applies before or after any deploy. Apply it before
+	// deploying the taskworker that deletes heads; an older guard refuses
+	// them, and the retention's head pass then stops on its error.
+	newSqlMigration(providerWorkSessionHeadRetentionGuardSql),
 }

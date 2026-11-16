@@ -132,6 +132,22 @@ func ProviderWorkSessionProviderAppendMigrationVersion() int {
 	return sqlMigrationVersion(providerWorkSessionProviderAppendSql)
 }
 
+// The v776 head guard, which refuses every delete.
+func ProviderWorkSessionHeadGuardBodySql() string {
+	return strings.Split(providerWorkSessionSchemaSql, "$head_guard$")[1]
+}
+
+// The head guard that admits the head retention's deletes (owner, 2026-11-16).
+func ProviderWorkSessionHeadRetentionGuardBodySql() string {
+	return strings.Split(providerWorkSessionHeadRetentionGuardSql, "$head_guard$")[1]
+}
+
+// The version of the migration that publishes the head retention guard, found
+// by its SQL. Zero when the list lacks it.
+func ProviderWorkSessionHeadRetentionGuardMigrationVersion() int {
+	return sqlMigrationVersion(providerWorkSessionHeadRetentionGuardSql)
+}
+
 // Read-only consumers pin the provider successor's exact bodies without
 // changing any historical migration or reproducing its replacement logic.
 func CompetitionWinnerReviewProviderBodiesSql() (provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard string) {
