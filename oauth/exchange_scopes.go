@@ -9,10 +9,16 @@ package oauth
 //	repo:<id>:<role>   §8's rows through ACL's AclExchangeScopes, which owns the
 //	                   deposit|r|rw|admin table, §10.6's audience split and the
 //	                   directory's scopes; one refused scope refuses itself alone
-//	repo:<config>:admin  from base 1 to the bootstrap sidecar alone, the
-//	                   Genesis's owner_sidecar_id while it stands as a config
-//	                   writer: it creates the config repo (§11.12), pushes its
-//	                   head and forms its group (§10.6); no row of §8 grants it
+//	repo:<config>:admin  from base 1 to each config writer, a member device
+//	                   of an AdminSet member that is not read_only (QD-894):
+//	                   it creates the config repo (§11.12), pushes its head
+//	                   and forms its group (§10.6), and later re-forms the
+//	                   group (§10.8), posts its ladder and activates the
+//	                   repo. §7.9's bootstrap sidecar, the Genesis's
+//	                   owner_sidecar_id, is the first of them, and holds it
+//	                   only while it is one. ACL's table gives the same
+//	                   sidecars the config's admin, so evs and gkm honor
+//	                   what is granted here
 //	recovery:<M>       to an unadmitted client of member M alone, at gkm, for M's
 //	                   own recovery wraps (§7.9's Recovery before admission row):
 //	                   its sidecar holds no row in the state, its client is no
@@ -23,7 +29,7 @@ package oauth
 //	                   gets repo:<config_repo_id>:r alone, at evs and gkm, and
 //	                   only while S's forwarding Delegation is live (§7.9's
 //	                   forwarding row), whatever S reads: no other repo scope, no
-//	                   bootstrap admin, no recovery scope, nothing at another
+//	                   config admin, no recovery scope, nothing at another
 //	                   audience. Only the newest active forwarding child of S's
 //	                   current client speaks for S (model.ForwardingClientSidecar),
 //	                   so a setup that supersedes S's Delegation with other keys
@@ -54,7 +60,6 @@ package oauth
 // concurrent use.
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -260,15 +265,15 @@ func (self *ProjectionExchangeScopeSource) Grant(ctx context.Context, request *E
 	if err != nil {
 		return nil, fmt.Errorf("the state's genesis names no config repo: %w", err)
 	}
-	// the bootstrap's admin scope is §7.9's, never the table's
-	bootstrapAdmin := aclAudience != 0 && state.Base() != nil &&
-		bytes.Equal(state.Genesis().GetOwnerSidecarId(), sidecarId.Bytes()) &&
-		state.IsConfigWriter(sidecarId)
+	// the config's admin goes to each config writer, from base 1 (QD-894); §7.9's
+	// bootstrap sidecar is the first of them. The table judges it too, so no
+	// scope is granted here that a gate would not honor
+	configAdmin := aclAudience != 0 && state.Base() != nil && state.IsConfigWriter(sidecarId)
 
 	tableScopes := []string{}
 	for _, scope := range request.Scopes {
 		repoId, role, ok := parseExchangeRepoScope(scope)
-		if ok && repoId == configRepoId && role == "admin" {
+		if ok && repoId == configRepoId && role == "admin" && !configAdmin {
 			continue
 		}
 		if ok {
@@ -300,13 +305,7 @@ func (self *ProjectionExchangeScopeSource) Grant(ctx context.Context, request *E
 		MemberId:    exchangeSidecarMember(state, sidecarId),
 	}
 	for _, scope := range request.Scopes {
-		repoId, role, ok := parseExchangeRepoScope(scope)
-		switch {
-		case ok && repoId == configRepoId && role == "admin":
-			if bootstrapAdmin {
-				grant.Scopes = append(grant.Scopes, scope)
-			}
-		case tableGranted[scope]:
+		if tableGranted[scope] {
 			grant.Scopes = append(grant.Scopes, scope)
 		}
 	}
