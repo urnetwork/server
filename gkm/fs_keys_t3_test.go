@@ -9,10 +9,11 @@
 // FS-24's hints with H1 and H2, FS-62's acks lost with Redis, FS-23's depositor and FS-102's key legs, a copied
 // Delegation bundle after a compromise and after a removal, and KEYS-M2-29's FS-103 (late delivery identity across key
 // replacement, an older key's object aging out, a same-generation RecoveryRebind) and FS-106 (35 days of key upkeep
-// under r, a parked device's ReaderKey), and KEYS-M6-03's FS-87 key legs with S4b's and S3b's key parts in the team
-// directory's group (a MemberRevoke reaching leaves and wraps, a MemberAdmit adding and wrapping only readers); its
-// seats row at 1,000 leaves runs on T2 alone. Like the other T3 tests here it carries the sidecar_localstack tag and
-// fails, rather than skips, when the stack is down.
+// under r, a parked device's ReaderKey), KEYS-M6-03's FS-87 key legs with S4b's and S3b's key parts in the team
+// directory's group (a MemberRevoke reaching leaves and wraps, a MemberAdmit adding and wrapping only readers), and
+// KEYS-M7-01's FS-23 mailbox case (a tag:mail receiver's drop keys and a removal, and the drop key's renewal and lapse
+// with the readers offline, owner decision 357); its seats row at 1,000 leaves runs on T2 alone. Like the other T3
+// tests here it carries the sidecar_localstack tag and fails, rather than skips, when the stack is down.
 
 package gkm
 
@@ -85,6 +86,22 @@ func TestFsKeysT3ADepositOnlyPrincipalFollowsTheDropKeyAndReadsNothing(t *testin
 
 func TestFsKeysT3ADepositorRefusesAnOlderGenRotateAfterARemoval(t *testing.T) {
 	runFsKeysT3(t, gkmschedule.FsKeysScheduleDepositorReplay)
+}
+
+func TestFsKeysT3MailboxTheReceiverFollowsTheDropKeyAndReadsNothing(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleMailboxReceiver)
+}
+
+func TestFsKeysT3MailboxTheReceiverRefusesAnUncoveredDropKeyAfterARemoval(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleMailboxReceiverAfterARemoval)
+}
+
+func TestFsKeysT3MailboxAWriterBackRenewsTheDropKeyBeforeItLapses(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleMailboxRenewal)
+}
+
+func TestFsKeysT3MailboxReadersOfflinePastTheDropKeysLife(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleMailboxReadersOffline)
 }
 
 func TestFsKeysT3ACopiedBundleAfterACompromiseOpensNothingNew(t *testing.T) {

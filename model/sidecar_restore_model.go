@@ -8,7 +8,9 @@ package model
 //	        verified tip with has_document, so a first policy document filed after the dumps holds there too; a
 //	        network with a head takes AdvanceAclHeadsAfterRestore's rule, never moving down or across
 //	repos   RestoreRepoIds: the repos a network's verified log names, which §19.10's deleted-network path shreds
-//	        under the incident a week on when the restored rows lack the network (QD-813)
+//	        under the incident a week on when the restored rows lack the network (QD-813); RestoreRepoRows: each
+//	        one's folded row, whose deletion says whether it is live, restorable or shredded, which the close step's
+//	        report reads (OPS-M3-05)
 
 import (
 	"context"
@@ -16,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 
 	"github.com/urnetwork/server"
@@ -93,6 +96,28 @@ func (self *ConfigLogSequencer) RestoreRepoIds(ctx context.Context, networkId se
 			return fmt.Errorf("%w: %v", ErrRestoreRepoIdsUnreadable, err)
 		}
 		repoIds = acl.RepoIds()
+		return nil
+	})
+	return
+}
+
+// Each repo's folded row the network's verified log holds, in repo order, false when the store holds no log for the
+// network (see the file header).
+func (self *ConfigLogSequencer) RestoreRepoRows(ctx context.Context, networkId server.Id) (rows []*protocol.AclRepo, found bool, returnErr error) {
+	returnErr = self.withFreshLog(ctx, networkId, func(log *sidecar.ConfigLog) error {
+		if log == nil {
+			return nil
+		}
+		found = true
+		acl, err := log.State().Acl()
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrRestoreRepoIdsUnreadable, err)
+		}
+		for _, repoId := range acl.RepoIds() {
+			if row := acl.Repo(repoId); row != nil {
+				rows = append(rows, row)
+			}
+		}
 		return nil
 	})
 	return

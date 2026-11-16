@@ -243,6 +243,7 @@ func NewSignals() []Signal {
 		NewSidecarServiceFailuresSignal(),
 		NewPostgresPrimarySignal(),
 		NewLbSplitProbeSignal(),
+		NewLbMapStaleSignal(),
 	}
 }
 

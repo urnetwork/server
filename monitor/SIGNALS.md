@@ -49534,6 +49534,39 @@ Classes:
   inventory lacks). While it lasts no lb-split-probe incident clears. With no
   `lb_split_probe` block the probe reports itself configured off.
 
+### 31.2 lb interfaces' custom-host map
+
+Probe: `lb-map-stale`
+
+OPS-M6-01 (§13.4's custom-host map, W1, §19.8's M6 row, FS-50, FS-122). Each
+minute the monitor reads the map's state as the dns block keeps it, through its
+read-only session to the primary: `dns_custom_host_map`'s versions with their
+creation times, `dns_custom_host_map_applied`'s row for each lb interface (its
+reported version, last poll, last passing probe and the probes of the hosts its
+version added) and the map versions `network_dns_custom_host`'s active rows of
+dns.yml's root hold. It judges the state with dns.yml's `map` windows through
+`dnsservice.DnsMapSettings.Judge`, the judgment the dns block sets readiness
+from and the dns edges drop interfaces from user-name answers by (DNS-M6-03).
+An interface is named by its row, `<host>-<interface>` as lbmap reports it and
+sidecar.yml's `drained` names it, a version by its number; no finding names a
+custom host or an address (I-13).
+
+Classes:
+
+- `lb-map-stale` **PAGE**: an interface not current for the newest map
+  version older than `map.stale_after_s` (§13.4's 20 minutes), which the edges
+  leave out of user-name answers (never all of them). §19.8's rota at any hour
+  from M6: that interface's lbmap and nginx reload logs; else drain it (W1),
+  naming its custom hosts from the dns block's `GET /network/dns`.
+- `lb-map-host-pending` **PAGE**: a map version that active custom hosts hold
+  is not current on every interface `map.stale_after_s` after it was made: a
+  custom host pending past 20 minutes. The same row and action, the finding
+  naming the interfaces not current for it.
+- `lb-map-unobservable` (visibility): dns.yml does not read or names no root,
+  the query fails (a database before MG6 among the causes), or a row does not
+  read. While it lasts no lb-map incident clears. With no dns.yml in config the
+  signal reports itself configured off.
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress
