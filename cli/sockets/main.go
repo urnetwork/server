@@ -131,6 +131,10 @@ type hostDeps struct {
 	// tls/'s listen facts (TLS-M5-22): api's GET /internal/gate/listen-facts/<network_id> on the block's bearer
 	// (plan-SOCK-gate-data), which no route serves yet. nil leaves tls/ unregistered, refusing every entry.
 	TlsListenFacts socketsservice.TlsListenFactsSource
+	// The gate the engine judges by, made from the block's production gate, whose readiness the block still reads: a
+	// test's stand-in for a check the production gate refuses until its wiring lands, such as an urnetwork-edge
+	// caller's tls/ Find (ACL-M5-01, QD-852). nil: the production gate itself.
+	Gate func(production *socketsservice.SocketProjectionGate) socketsservice.SocketGate
 }
 
 // What the block's key-event subscriber calls on the engine (sweep.go's methods), none blocking or doing I/O.
@@ -235,7 +239,11 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 		return fail(err)
 	}
 	self.gate = gate
-	engine, err := socketsservice.NewSocketsService(hostCtx, host, store, gate, settings.Sockets)
+	var engineGate socketsservice.SocketGate = gate
+	if deps.Gate != nil {
+		engineGate = deps.Gate(gate)
+	}
+	engine, err := socketsservice.NewSocketsService(hostCtx, host, store, engineGate, settings.Sockets)
 	if err != nil {
 		gate.Close()
 		return fail(err)
