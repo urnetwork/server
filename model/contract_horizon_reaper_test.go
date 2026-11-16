@@ -20,6 +20,17 @@ func TestContractHorizonCloseSettleTimeCoversContractLife(t *testing.T) {
 	}
 }
 
+// Pure: a pass that reached the horizon starts over weekly (owner,
+// 2026-11-16), no sooner than a recent payment stops keeping a contract, so
+// the next pass deletes what this one kept as payment_recent. The thirty days
+// before left those contracts three weeks past their payments' discharge.
+func TestContractHorizonRescansWeekly(t *testing.T) {
+	settings := DefaultContractHorizonSettings()
+	if settings.RescanInterval != 7*24*time.Hour || settings.RescanInterval < CompletedContractExpiration {
+		t.Fatalf("the rescan interval %s is not a week, or is shorter than a recent payment keeps a contract (%s)", settings.RescanInterval, CompletedContractExpiration)
+	}
+}
+
 // Pure: the cursor round trips through the task args with its skipped counts,
 // and a cursor a build from before 2026-11-15 stored, with only its id, pass
 // start and batch size, reads with no counts and keeps its pass start, which
