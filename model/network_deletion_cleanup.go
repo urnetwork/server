@@ -932,9 +932,12 @@ func removeDeletedNetworkRows(
 	return
 }
 
-// Deactivates one batch of the network's active clients, in client id order,
-// as a client removal does, with their active descendants. Returns how many
-// clients of the batch it deactivated, and how many in all.
+// Deactivates one batch of the network's active clients, newest first, as a
+// client removal does, with their active descendants. A derived client is
+// minted after its parent, so newest first takes a hosted proxy's windows in
+// batches before the proxy itself, and no batch pulls a large descendant tree
+// into its transaction. Returns how many clients of the batch it deactivated,
+// and how many in all.
 func deactivateDeletedNetworkClients(
 	ctx context.Context,
 	networkId server.Id,
@@ -955,7 +958,7 @@ func deactivateDeletedNetworkClients(
 				WHERE
 					network_id = $1 AND
 					active
-				ORDER BY client_id
+				ORDER BY client_id DESC
 				LIMIT $2
 				FOR UPDATE
 			`,

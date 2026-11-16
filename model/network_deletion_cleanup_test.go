@@ -482,3 +482,53 @@ func TestEveryAccountTableIsClassified(t *testing.T) {
 		}
 	})
 }
+
+// A deactivation batch takes a deleted network's newest clients first, so a
+// hosted proxy's windows, minted after the proxy, go in batches before it, and
+// no batch pulls the proxy's whole tree of windows into one transaction.
+func TestDeletedNetworkCleanupDeactivatesInBoundedBatches(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		settings := DefaultDeletedNetworkCleanupSettings()
+		settings.ClientBatchCount = 2
+		// the parent's id is the least, as a minted parent's is
+		clientIds := []server.Id{}
+		for range 6 {
+			clientIds = append(clientIds, server.NewId())
+		}
+		slices.SortFunc(clientIds, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		parentId := clientIds[0]
+		networkId := server.NewId()
+		deviceId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceId, parentId, "synthetic proxy", "synthetic")
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, childId := range clientIds[1:] {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						INSERT INTO network_client (client_id, network_id, device_id, description, create_time, auth_time, source_client_id)
+						VALUES ($1, $2, $3, 'synthetic window', now(), now(), $4)
+					`,
+					childId, networkId, deviceId, parentId,
+				))
+			}
+		})
+		activeCount := func() (n int64) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM network_client WHERE network_id = $1 AND active`, networkId).Scan(&n))
+			})
+			return
+		}
+
+		batchCount, deactivatedCount := deactivateDeletedNetworkClients(ctx, networkId, settings)
+		connect.AssertEqual(t, batchCount, int64(2))
+		connect.AssertEqual(t, deactivatedCount, int64(2))
+		connect.AssertEqual(t, activeCount(), int64(4))
+
+		result := RemoveDeletedNetworkData(ctx, &DeletedNetwork{NetworkId: networkId}, server.NowUtc(), settings)
+		connect.AssertEqual(t, result.RowCounts[DeletedNetworkCleanupDeactivatedClients], int64(4))
+		connect.AssertEqual(t, activeCount(), int64(0))
+	})
+}
