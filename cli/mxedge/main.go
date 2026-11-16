@@ -125,6 +125,8 @@ func routerBlockDeps(quotaCtx context.Context, mxEdgeSettings *mxedgeservice.MxE
 	deps := &mxedgehost.RouterDeps{
 		Store:       model.NewMxEdgeStore(nil),
 		StoreGroups: mxedgehost.RouterStoreGroups(),
+		// a Team direct MX's rows, read by the router's prober (MAIL-M7-23)
+		DirectMxStore: model.NewMxDirectMxStore(mxEdgeSettings.RouteRootDomainName),
 	}
 	ends := []func(){}
 	end := func() {
