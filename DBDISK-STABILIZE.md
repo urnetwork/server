@@ -637,8 +637,14 @@ since 11-02). Development and owner.
   the retire lookup and no signer. Writing it only for providers would save most of its
   20+ GiB/day and of its steady state *(inferred: most connections are hosted window
   clients, which are payers)*. This reverses the 10-24 "not chosen": owner decision.
+  **Approved 11-16 about 03:50Z; migration 979** (`db_provider_work_session_providers.go`):
+  a provider client holds a friends and family or public provide key. In the week leaf
+  of 11-16 (pg_stats, 10.7M events at 03:46Z) 78% of events were sequence 1 or 2, a
+  new client's first connection, which never holds those keys when it opens, and 9%
+  were from clients past their 140th event.
 - **Retention for provider_work_session_head and audit_device_state,** which have no
-  deletes: about 4 GiB/day between them.
+  deletes: about 4 GiB/day between them. Approved 11-16; the windows go to the owner
+  first.
 - Lazy contracts: about 60% of contracts carried no data when measured on 11-05. A
   protocol change; the largest long-term lever on every contract table.
 
@@ -886,6 +892,10 @@ and the backup runs' durations.
   second, about three hours. A pass still behind its horizon when the week ends reads
   on from its cursor and starts over once it reaches the horizon, as before. The 2,000/s
   cap, the batch bounds, the 35-day floor and the 2-hour `CloseSettleTime` are unchanged.
+- **S4, work-session events only for provider clients** (about 03:50Z): migration 979,
+  ships with the next release.
+- **S4, retention for the work-session heads and audit_device_state** (about 03:50Z):
+  approved; the windows come to the owner before it ships.
 
 **Open:**
 1. **Queue tables (I5):** the recommended partition-and-swap design, or VACUUM FULL in a
@@ -896,9 +906,8 @@ and the backup runs' durations.
 3. **18.7:** the window, and the playbook tag for it.
 4. **19:** `--link` (or `--swap`), and the date, against the free space and the trim's
    measured effect.
-5. **Structural items:** events only for provider clients and retention for the
-   work-session heads (S4, the first reverses a 10-24 choice); the index diet (S3); C1
-   with drops at the reaper's horizon once capacity exists (S1).
+5. **Structural items:** the index diet (S3); C1 with drops at the reaper's horizon once
+   capacity exists (S1); the retention windows of S4's head and audit state retention.
 6. **Alerts:** the days-to-full rules and the reaper signal (§5.6).
 7. **Windows, only if the trim and the steps above fall short:** the archive floor,
    audit retention, and as a contingency a contract horizon below 35 days (S5).

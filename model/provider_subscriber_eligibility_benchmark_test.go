@@ -23,6 +23,10 @@ func TestSubscriberGuardQueryPlan(t *testing.T) {
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `INSERT INTO network_client_handler (handler_id,heartbeat_time)
 				SELECT md5('subscriber-benchmark-handler-'||n)::uuid, $1::timestamp FROM generate_series(0,127) AS n`, server.NowUtc()))
+			// The providers provide publicly, so the journal (provider clients
+			// only) admits their connections.
+			server.RaisePgResult(conn.Exec(ctx, `INSERT INTO provide_key (client_id,provide_mode,secret_key)
+				SELECT md5('subscriber-benchmark-client-'||n)::uuid, $1, '\x01'::bytea FROM generate_series(1,20000) AS n`, ProvideModePublic))
 			// Preserve one fixture timestamp. Each batch commits before the next,
 			// releasing the real session trigger's endpoint fences.
 			connectionTime := server.NowUtc()
