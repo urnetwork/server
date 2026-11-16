@@ -114,6 +114,8 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 		subscriptionMetricsReconciliationQuery,
 		subscriptionMetricsDataPackQuery,
 		subscriptionMetricsPaymentFailureQuery,
+		subscriptionMetricsTrialConversionQuery,
+		subscriptionMetricsRevenueQuery,
 	} {
 		selectTail := query[strings.LastIndex(query, "SELECT "):]
 		for _, identifier := range []string{
