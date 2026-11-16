@@ -1255,10 +1255,21 @@ func runPaymentReconciliation(
 //	    for, a day past its period                                             -> end
 //	    (the free period's grace, subscription_stripe_grace.go)
 //	status active + cancel_at_period_end (time remaining)                      -> nothing
+//	a card gift order still pending whose Checkout session is paid             -> fulfil
+//	    (through stripeFulfillGiftCheckoutInConn, the webhook's path; the gift
+//	    leg, payment_reconcile_gift.go, has the gift rows of this table)
 //	anything else                                                              -> nothing
 func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketStripe
+
+	// the gift leg: card gift orders still pending whose Checkout session
+	// Stripe says is paid, a missed checkout.session.completed
+	// (payment_reconcile_gift.go). It keeps its own call cap and runs first,
+	// so the invoice legs cannot spend the budget it needs.
+	if !reconcileStripeGiftCheckouts(run) {
+		return false, nil
+	}
 
 	// leg 1: store-side listing -- paid invoices created since the watermark
 	// whose credit never landed (the lost invoice.paid repair)

@@ -547,6 +547,39 @@ func stripeGiftCheckout(checkoutComplete *StripeEventCheckoutCompleteObject) boo
 	return checkoutComplete.Metadata != nil && checkoutComplete.Metadata[giftStripeMetadataOrderId] != ""
 }
 
+// What a fulfilment of a paid gift checkout did (stripeFulfillGiftCheckoutInConn).
+type giftCheckoutOutcome string
+
+const (
+	// this call paid the order: its codes, its delivery and its sales notice
+	giftCheckoutOutcomeFulfilled giftCheckoutOutcome = "fulfilled"
+	// the order was already paid for this session: nothing more was made
+	giftCheckoutOutcomeAlreadyFulfilled giftCheckoutOutcome = "already_fulfilled"
+	// the order is refunded: nothing is fulfilled
+	giftCheckoutOutcomeRefunded giftCheckoutOutcome = "refunded"
+	// the session paid another amount or currency than the order's total in
+	// usd: recorded for an operator (stripeRecordGiftPaymentMismatch), nothing
+	// fulfilled
+	giftCheckoutOutcomeMismatch giftCheckoutOutcome = "mismatch"
+	// the session names no card order of ours to fulfil (metadata that is not
+	// an id, another rail's order, an order keyed to another session):
+	// logged, nothing fulfilled, and no retry changes it
+	giftCheckoutOutcomeIgnored giftCheckoutOutcome = "ignored"
+)
+
+// Where a gift checkout's audit records come from: the webhook, or the
+// payment reconciler's gift leg (payment_reconcile_gift.go).
+type giftCheckoutAudit struct {
+	// the run the records belong to; zero for a fresh provenance id, as the
+	// webhook's records have
+	runId server.Id
+	// the details' leg: "webhook", or the reconciler's leg
+	leg string
+}
+
+// The webhook's audit: a fresh provenance id per record.
+var giftCheckoutWebhookAudit = giftCheckoutAudit{leg: "webhook"}
+
 // stripeFulfillGiftCheckout fulfils the gift order of a paid checkout session
 // (the caller checked payment_status): the order's codes, keyed by the
 // session id, made once however many deliveries of the session arrive, and
@@ -557,43 +590,62 @@ func stripeFulfillGiftCheckout(
 	ctx context.Context,
 	checkoutComplete *StripeEventCheckoutCompleteObject,
 ) error {
+	_, err := stripeFulfillGiftCheckoutInConn(nil, ctx, checkoutComplete, giftCheckoutWebhookAudit)
+	return err
+}
+
+// stripeFulfillGiftCheckoutInConn is stripeFulfillGiftCheckout on the caller's
+// PostgreSQL session (nil selects the outer acquisition boundary), with what
+// it did. The webhook and the payment reconciler's gift leg both fulfil
+// through it, so an order is paid, its codes made, its delivery scheduled and
+// its sales notice posted once, whichever of them reports the session first.
+// An error is a failure a retry can change; the outcome is then empty.
+func stripeFulfillGiftCheckoutInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	checkoutComplete *StripeEventCheckoutCompleteObject,
+	audit giftCheckoutAudit,
+) (giftCheckoutOutcome, error) {
 	sessionId := checkoutComplete.Id
 	giftOrderId, err := server.ParseId(checkoutComplete.Metadata[giftStripeMetadataOrderId])
 	if err != nil {
 		glog.Errorf("[gift]checkout %s names gift order %q, which is not an id; nothing is fulfilled\n", sessionId, checkoutComplete.Metadata[giftStripeMetadataOrderId])
-		return nil
+		return giftCheckoutOutcomeIgnored, nil
 	}
-	order := model.GetGiftOrder(ctx, giftOrderId)
+	order := model.GetGiftOrderInConn(connOwner, ctx, giftOrderId)
 	if order == nil {
 		// a paid checkout whose order cannot be read: visible in Stripe's
 		// dashboard as a failing delivery, retried for 72 h
-		return fmt.Errorf("gift order %s of checkout %s was not found", giftOrderId, sessionId)
+		return "", fmt.Errorf("gift order %s of checkout %s was not found", giftOrderId, sessionId)
 	}
 	if order.Rail != model.GiftRailStripe {
 		glog.Errorf("[gift]checkout %s names gift order %s, which is a %s order; nothing is fulfilled\n", sessionId, giftOrderId, order.Rail)
-		return nil
+		return giftCheckoutOutcomeIgnored, nil
 	}
 	if order.StripeSessionId != "" && order.StripeSessionId != sessionId {
 		glog.Errorf("[gift]checkout %s names gift order %s, which belongs to checkout %s; nothing is fulfilled\n", sessionId, giftOrderId, order.StripeSessionId)
-		return nil
+		return giftCheckoutOutcomeIgnored, nil
 	}
 	if order.Status == model.GiftOrderStatusRefunded {
 		glog.Infof("[gift]checkout %s: gift order %s is refunded; nothing is fulfilled\n", sessionId, giftOrderId)
-		return nil
+		return giftCheckoutOutcomeRefunded, nil
 	}
 	if order.StripeSessionId == "" {
 		// not keyed to its session yet (GiftCheckout keys it before handing a
 		// session out): the refund handler finds the order by its session
-		if err := model.SetGiftOrderStripeSessionId(ctx, giftOrderId, sessionId); err != nil {
-			return fmt.Errorf("could not store checkout %s on gift order %s: %w", sessionId, giftOrderId, err)
+		if err := model.SetGiftOrderStripeSessionIdInConn(connOwner, ctx, giftOrderId, sessionId); err != nil {
+			return "", fmt.Errorf("could not store checkout %s on gift order %s: %w", sessionId, giftOrderId, err)
 		}
 	}
-	if !strings.EqualFold(checkoutComplete.Currency, giftCurrency) || int64(checkoutComplete.AmountTotal) != order.TotalCents {
+	if !giftCheckoutPaysTotal(checkoutComplete, order.TotalCents) {
 		// paid something else than the order's total in usd, which the session
 		// never asks for: nothing is fulfilled on such a payment's word, and an
 		// operator settles it (a refund in Stripe ends the order unfulfilled;
 		// the gift store's credit_unfulfillable event alerts)
-		return stripeRecordGiftPaymentMismatch(ctx, checkoutComplete, order)
+		if err := stripeRecordGiftPaymentMismatch(connOwner, ctx, checkoutComplete, order, audit); err != nil {
+			return "", err
+		}
+		return giftCheckoutOutcomeMismatch, nil
 	}
 	// the order's own total, which the session charged exactly
 	netRevenue := model.UsdToNanoCents((1.0 - giftStripeFeeFraction) * float64(order.TotalCents) / 100.0)
@@ -604,7 +656,7 @@ func stripeFulfillGiftCheckout(
 	var newlyPaid bool
 	var fulfillErr error
 	server.HandleError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
+		server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 			codes, newlyPaid, fulfillErr = model.FulfillGiftOrderInTx(tx, ctx, giftOrderId, sessionId, netRevenue, now)
 			if fulfillErr != nil {
 				// refused before anything was written
@@ -625,18 +677,42 @@ func stripeFulfillGiftCheckout(
 	if errors.Is(fulfillErr, model.ErrGiftOrderRefunded) {
 		// refunded since it was read above
 		glog.Infof("[gift]checkout %s: gift order %s is refunded; nothing is fulfilled\n", sessionId, giftOrderId)
-		return nil
+		return giftCheckoutOutcomeRefunded, nil
 	}
 	if fulfillErr != nil {
 		glog.Errorf("[gift]could not fulfil gift order %s of checkout %s: %s\n", giftOrderId, sessionId, fulfillErr)
-		return fulfillErr
+		return "", fulfillErr
 	}
 	if newlyPaid {
 		glog.Infof("[gift]checkout %s paid gift order %s: %d codes\n", sessionId, giftOrderId, len(codes))
-	} else {
-		glog.Infof("[gift]checkout %s: gift order %s was already fulfilled\n", sessionId, giftOrderId)
+		return giftCheckoutOutcomeFulfilled, nil
 	}
-	return nil
+	glog.Infof("[gift]checkout %s: gift order %s was already fulfilled\n", sessionId, giftOrderId)
+	return giftCheckoutOutcomeAlreadyFulfilled, nil
+}
+
+// giftCheckoutPaysTotal reports a session that paid exactly the order's total
+// (cents) in usd, the only payment a gift order is fulfilled on.
+func giftCheckoutPaysTotal(checkoutComplete *StripeEventCheckoutCompleteObject, totalCents int64) bool {
+	return strings.EqualFold(checkoutComplete.Currency, giftCurrency) && int64(checkoutComplete.AmountTotal) == totalCents
+}
+
+// giftPaymentMismatchDetails are the details of a mismatched gift payment's
+// record (stripeRecordGiftPaymentMismatch).
+func giftPaymentMismatchDetails(
+	checkoutComplete *StripeEventCheckoutCompleteObject,
+	giftOrderId server.Id,
+	totalCents int64,
+	leg string,
+) map[string]any {
+	return map[string]any{
+		"reason":            "gift_payment_mismatch",
+		"leg":               leg,
+		"gift_order":        giftOrderId.String(),
+		"amount_total":      checkoutComplete.AmountTotal,
+		"currency":          checkoutComplete.Currency,
+		"order_total_cents": totalCents,
+	}
 }
 
 // stripeRecordGiftPaymentMismatch records, once per session, a gift order's
@@ -645,25 +721,26 @@ func stripeFulfillGiftCheckout(
 // gift_payment_mismatch, evidence the session), which the payment-failures
 // monitor reports as payment-gift-mismatch (monitor SIGNALS.md §2.22), and
 // fulfils nothing. Answers 200 once the record is durable, so Stripe stops
-// delivering it.
+// delivering it. The webhook and the payment reconciler's gift leg both
+// record through it, on the caller's PostgreSQL session (nil selects the
+// outer acquisition boundary); the details' leg says which.
 func stripeRecordGiftPaymentMismatch(
+	connOwner server.PgConn,
 	ctx context.Context,
 	checkoutComplete *StripeEventCheckoutCompleteObject,
 	order *model.GiftOrder,
+	audit giftCheckoutAudit,
 ) error {
-	added, err := model.AddPaymentReconciliationEventOnce(ctx, &model.PaymentReconciliationEvent{
-		RunId:    server.NewId(),
+	runId := audit.runId
+	if runId == (server.Id{}) {
+		runId = server.NewId()
+	}
+	added, err := model.AddPaymentReconciliationEventOnceInConn(connOwner, ctx, &model.PaymentReconciliationEvent{
+		RunId:    runId,
 		Store:    model.SubscriptionMarketGift,
 		Action:   model.PaymentReconcileActionCreditUnfulfillable,
 		Evidence: checkoutComplete.Id,
-		Details: map[string]any{
-			"reason":            "gift_payment_mismatch",
-			"leg":               "webhook",
-			"gift_order":        order.GiftOrderId.String(),
-			"amount_total":      checkoutComplete.AmountTotal,
-			"currency":          checkoutComplete.Currency,
-			"order_total_cents": order.TotalCents,
-		},
+		Details:  giftPaymentMismatchDetails(checkoutComplete, order.GiftOrderId, order.TotalCents, audit.leg),
 	})
 	if err != nil {
 		return fmt.Errorf("could not record checkout %s's mismatched gift payment: %w", checkoutComplete.Id, err)

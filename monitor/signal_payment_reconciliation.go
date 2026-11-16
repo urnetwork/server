@@ -422,6 +422,14 @@ func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 			repair.action = "Validate the grant against the restricted settled_not_granted audit and idempotency state, then trace the original local grant failure. Preserve the successful repair; do not replay settlement, retarget a payment or manually grant from this aggregate."
 			repair.verify = "The settled transaction grants its original entitlement exactly once and no new local grant error or repeated credited repair appears through two complete reconciliation windows. Audit aging alone does not prove financial disposition."
 		}
+		if store == "stripe" && action == "credited" {
+			// two writers: the invoice listing and the gift leg
+			// (controller/payment_reconcile_gift.go)
+			repair.symptom = fmt.Sprintf("The payment reconciler applied %d Stripe payment(s) the webhook missed in 24 hours", count)
+			repair.mechanism = "The hourly safety net found a Stripe payment the ordinary webhook had not applied and applied it through the webhook's own idempotent path: a paid subscription invoice whose invoice.paid credit never landed (the stripe_invoice ledger), or a card gift order still pending whose Checkout session Stripe reports paid, a missed checkout.session.completed or checkout.session.async_payment_succeeded (audit details leg gift_checkout; the order, its codes, its delivery and its sales notice are made once). The repair protects the customer, but its existence is evidence of a lost, rejected or failed webhook delivery, or of a disabled endpoint."
+			repair.action = "Validate the repaired state from the restricted audit trail (the invoice's credit, or the gift order paid with its codes and its cards scheduled), then check the Stripe webhook endpoint's deliveries for the same window: failed or disabled deliveries, a rotated signing secret, non-2xx answers in the api log. Keep the safety-net repair and fix the delivery path rather than replaying Stripe events manually."
+			repair.verify = "Each repaired invoice or gift order was applied exactly once, later webhooks apply normally, and no new stripe/credited repair appears through two complete reconciliation windows."
+		}
 		if store == "stripe" && action == "ended" {
 			repair.symptom = fmt.Sprintf("The payment reconciler first applied %d terminal Stripe subscription state(s) in 24 hours", count)
 			repair.mechanism = "Stripe reported an existing local subscription as already terminal, and the hourly reconciliation safety net ended its remaining local renewal and matching Pro window. The current Stripe webhook has no real-time subscription-lifecycle consumer, so reconciliation is the first implemented application path; this aggregate does not prove a lost delivery from an implemented handler."

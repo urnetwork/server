@@ -21836,6 +21836,34 @@ account is protected, but every generic repair proves the ordinary
 notification/verification/idempotency path missed authoritative provider
 state or its metadata. Trace and fix that earlier stage.
 
+Stripe `credited` has two writers since 2026-11-16. One is the invoice
+listing: a paid subscription invoice whose `invoice.paid` credit never landed.
+The other is the gift leg (`controller/payment_reconcile_gift.go`), which runs
+first in the Stripe store. It reads the Checkout session of every card gift
+order still pending that was made from 15 minutes to 21 days ago, at most 100
+per run. When Stripe reports a session paid, the leg fulfils it through the
+webhook's own idempotent path (`stripeFulfillGiftCheckoutInConn`), so the
+order, its codes, its delivery and its sales notice are made once, whichever of
+the two reports the session first. Its `credited` row has evidence the session
+and details `leg=gift_checkout` with the gift order. Either kind of repair
+means a Stripe webhook delivery was lost, failed or rejected, or the endpoint
+is disabled: check the endpoint's deliveries for the same window. The gift
+leg's other records are not alarms. An expired session is a `checkout_expired`
+row, written once, after which the order is not read again; no probe reads
+those rows. A session paid in another amount or currency goes through the
+webhook's mismatch record (store `gift`, §2.22 `payment-gift-mismatch`, with
+`leg=gift_checkout`), and the order is not read again. A failed read or
+fulfilment is an ordinary stripe `error` row with `leg=gift_checkout` and a
+reason (`read`, `session_not_found`, `other_order`, `unknown_status`, `fulfil`,
+`not_fulfilled`, `raised`), and it counts toward
+`payment-reconciliation-store-error`. Three failed reads in a row stop the leg
+until the next run. A session Stripe does not know gets the App Store leg's
+bounded retry: it is a `session_not_found` error until it has persisted
+through 24 runs within seven days, then `unknown_to_store` is recorded once and
+the answer is no longer an error. The session is still read every run. Every read is
+counted on `urnetwork_gift_checkout_reconcile_total{result}` (taskworker
+dashboard, payment reconciliation row).
+
 Stripe `ended` is a distinct source boundary. At the revision described here,
 the Stripe webhook handles invoice credits, refunds, and disputes but has no
 real-time subscription-lifecycle consumer. A `store=stripe, action=ended`
