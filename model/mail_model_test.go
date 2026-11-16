@@ -546,25 +546,33 @@ func TestMailDirectMxRows(t *testing.T) {
 				t.Fatalf("%s answered %v", bad, err)
 			}
 		}
+		// a never-verified row stays pending on a failure, so nothing points at it (MAIL-M7-23); a verified one fails
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.Raise(SetMailDirectMxProbeInTx(ctx, tx, networkId, first, firstAddress, true))
 			server.Raise(SetMailDirectMxProbeInTx(ctx, tx, networkId, second, secondAddress, false))
 		})
-		rows := ListMailDirectMx(ctx, networkId)
+		states := func() map[server.Id]*MailDirectMx {
+			byReceiver := map[server.Id]*MailDirectMx{}
+			for _, row := range ListMailDirectMx(ctx, networkId) {
+				byReceiver[row.ReceiverSidecarId] = row
+			}
+			return byReceiver
+		}
+		rows := states()
 		if len(rows) != 2 {
 			t.Fatalf("rows %+v", rows)
 		}
-		for _, row := range rows {
-			switch row.ReceiverSidecarId {
-			case first:
-				if row.State != MailDirectMxStateVerified || row.VerifyTime.IsZero() || row.Address != firstAddress {
-					t.Errorf("first %+v", row)
-				}
-			case second:
-				if row.State != MailDirectMxStateFailing || !row.VerifyTime.IsZero() || row.Address != secondAddress {
-					t.Errorf("second %+v", row)
-				}
-			}
+		if row := rows[first]; row.State != MailDirectMxStateVerified || row.VerifyTime.IsZero() || row.Address != firstAddress {
+			t.Errorf("first %+v", row)
+		}
+		if row := rows[second]; row.State != MailDirectMxStatePending || !row.VerifyTime.IsZero() || row.Address != secondAddress {
+			t.Errorf("second %+v", row)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(SetMailDirectMxProbeInTx(ctx, tx, networkId, first, firstAddress, false))
+		})
+		if row := states()[first]; row.State != MailDirectMxStateFailing || row.VerifyTime.IsZero() {
+			t.Errorf("first after a failure %+v", row)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			removedCount, err := RemoveMailDirectMxReceiverInTx(ctx, tx, networkId, first)

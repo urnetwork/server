@@ -498,6 +498,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// §15.15's mail routes: mail on for a network, and its status; dark until MG7 and a dns root (MAIL-M7-22)
 		router.NewRoute("POST", "/mail/enable", handlers.MailEnable),
 		router.NewRoute("GET", "/mail/status", handlers.GetMailStatus),
+		// a Team's direct MX, Network class: an admin names its mail indexers or takes them back (MAIL-M7-23)
+		router.NewRoute("POST", "/mail/direct-mx", handlers.PutMailDirectMx),
+		router.NewRoute("DELETE", "/mail/direct-mx", handlers.DeleteMailDirectMx),
 		// §21.16's customer routes: a report from the form, the network's own cases, an Owner's or Admin's appeal and
 		// the network's standing (ABUSE-M5-11)
 		router.NewRoute("POST", "/abuse/report", handlers.AbuseReport),

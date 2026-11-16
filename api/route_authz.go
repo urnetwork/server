@@ -381,6 +381,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sidecar/close":                           routeAccessPublic,   // an ephemeral client's close capability, its own credential (§18.8)
 	"POST /mail/enable":                             routeAccessClient,   // turns mail on for the bearer's network (§15.15)
 	"GET /mail/status":                              routeAccessClient,   // the bearer's network's mail status (§15.15)
+	"POST /mail/direct-mx":                          routeAccessNetwork,  // a Team admin names its direct MX (§15.15), the Admin role by the model
+	"DELETE /mail/direct-mx":                        routeAccessNetwork,  // a Team admin takes its direct MX back (§15.15)
 	"POST /abuse/report":                            routeAccessPublic,   // §21.8's form: no credential, counted by the caller's keyed address hash (§21.16)
 	"GET /abuse/cases":                              routeAccessNetwork,  // the network's own cases (§21.16), the read permission by the role gate
 	"POST /abuse/appeal":                            routeAccessNetwork,  // an Owner's or Admin's appeal, never a client token (§21.16), the admin permission by the role gate
