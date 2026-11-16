@@ -188,14 +188,15 @@ func (self *requestMetricsObservation) finish(outcome string) {
 	if outcome == "canceled" && self.writer.controlDiscard != nil {
 		self.writer.controlDiscard.discardedCanceled.Inc()
 	}
-	// A 5xx that went out after the caller had gone reached nobody, and is
-	// the answer to the caller's own stop rather than an outage anyone saw
-	// (requestMetricsWriter.statusAfterCallerGone). It counts as no status,
-	// as when nothing is written. Every other status keeps its exact count
-	// beside the canceled outcome.
+	// A 5xx that went out after the caller had gone, as the answer to the
+	// caller's own stop (the outcome is canceled), reached nobody, and is not
+	// an outage anyone saw (requestMetricsWriter.statusAfterCallerGone). It
+	// counts as no status, as when nothing is written. A panic keeps its
+	// status, since it is a defect whoever was waiting, and every other status
+	// keeps its exact count beside the canceled outcome.
 	status := "none"
 	if self.writer.status != 0 {
-		if self.writer.status/100 != 5 || !self.writer.statusAfterCallerGone {
+		if self.writer.status/100 != 5 || !self.writer.statusAfterCallerGone || outcome != "canceled" {
 			status = strconv.Itoa(self.writer.status)
 		}
 	} else if !self.writer.hijacked && outcome == "completed" {
