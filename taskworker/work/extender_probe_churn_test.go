@@ -67,6 +67,8 @@ type testChurnExtender struct {
 	recordIssueTime *time.Time
 	// by family
 	addresses map[int]*testChurnAddress
+	// what every address of it lists; nil lists tcp
+	carriers []string
 }
 
 // One message the store queued, as the signer produced it.
@@ -220,6 +222,10 @@ func (self *testChurnStore) activeTargets(ctx context.Context) []*model.NetworkE
 
 // The probe target of one address.
 func testChurnProbeTarget(extender *testChurnExtender, address *testChurnAddress) *model.NetworkExtenderProbeTarget {
+	carriers := []string{connect.ExtenderCarrierTcp}
+	if extender.carriers != nil {
+		carriers = slices.Clone(extender.carriers)
+	}
 	return &model.NetworkExtenderProbeTarget{
 		ExtenderId: extender.extenderId,
 		NetworkId:  extender.networkId,
@@ -228,7 +234,7 @@ func testChurnProbeTarget(extender *testChurnExtender, address *testChurnAddress
 		DnsTld:     connect.DefaultExtenderDnsTld,
 		IpVersion:  address.ipVersion,
 		Ip:         address.ip,
-		Carriers:   []string{connect.ExtenderCarrierTcp},
+		Carriers:   carriers,
 	}
 }
 
