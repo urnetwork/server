@@ -114,7 +114,7 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 	}
 	if evsSettings.InstanceFormat < sidecar.EvsRepoFormat2 {
 		// a rollback's taskworker, said at every start so nobody reads what it leaves as a fault
-		glog.Warningf("[evsjobs]%s sets instance format %d: evs's jobs write nothing to a format-2 repo, and the format-2 jobs wait\n", evshost.BlockConfigFileName, evsSettings.InstanceFormat)
+		glog.Warningf("[evsjobs]%s sets instance format %d, a rollback's: evs's jobs keep format 1's rules over format-2 data, and the drop job and the sweeps wait\n", evshost.BlockConfigFileName, evsSettings.InstanceFormat)
 	}
 	clusters, err := server.LoadFileClusters(ctx, evsBudgetFileClustersService, nil)
 	if err != nil {
