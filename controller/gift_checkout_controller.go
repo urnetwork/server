@@ -387,8 +387,23 @@ func giftReferrerNetworkId(args *GiftPurchaseArgs, clientSession *session.Client
 // -----------------------------------------------------------------------------
 
 // GiftCheckout answers POST /pay/gift/checkout: the order and a Stripe
-// Checkout session for it, embedded or hosted.
+// Checkout session for it, embedded or hosted. Every answer counts in
+// urnetwork_gift_purchases_total (gift_purchase_metrics.go).
 func GiftCheckout(
+	args *GiftCheckoutArgs,
+	clientSession *session.ClientSession,
+) (*GiftCheckoutResult, error) {
+	result, err := giftCheckout(args, clientSession)
+	refused, code := false, ""
+	if result != nil && result.Error != nil {
+		refused, code = true, result.Error.Code
+	}
+	countGiftPurchase(giftPurchaseRailCard, err, result != nil, refused, code)
+	return result, err
+}
+
+// giftCheckout is GiftCheckout's answer, before it is counted.
+func giftCheckout(
 	args *GiftCheckoutArgs,
 	clientSession *session.ClientSession,
 ) (*GiftCheckoutResult, error) {

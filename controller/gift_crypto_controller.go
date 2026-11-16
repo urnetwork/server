@@ -81,8 +81,23 @@ func giftCryptoIntentError(code string, message string) *GiftCryptoIntentResult 
 // a new gift order. The invoice is made first, so a coin that cannot be
 // quoted now stores no order; the order and its link to the invoice are
 // stored before the invoice is handed out, so its credit always finds the
-// order.
+// order. Every answer counts in urnetwork_gift_purchases_total
+// (gift_purchase_metrics.go).
 func GiftCryptoIntent(
+	args *GiftCryptoIntentArgs,
+	clientSession *session.ClientSession,
+) (*GiftCryptoIntentResult, error) {
+	result, err := giftCryptoIntent(args, clientSession)
+	refused, code := false, ""
+	if result != nil && result.Error != nil {
+		refused, code = true, result.Error.Code
+	}
+	countGiftPurchase(giftPurchaseRailCoin, err, result != nil, refused, code)
+	return result, err
+}
+
+// giftCryptoIntent is GiftCryptoIntent's answer, before it is counted.
+func giftCryptoIntent(
 	args *GiftCryptoIntentArgs,
 	clientSession *session.ClientSession,
 ) (*GiftCryptoIntentResult, error) {
