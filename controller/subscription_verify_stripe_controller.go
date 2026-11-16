@@ -60,7 +60,9 @@ var (
 var (
 	stripeVerifyRateLimitFunc        = CheckVerifyPurchaseRateLimit
 	stripeVerifyInvoiceNetworkIdFunc = model.GetStripeInvoiceNetworkId
-	stripeVerifyCreditInvoiceFunc    = stripeHandleInvoicePaidWithOnboarding
+	// the invoice.paid handler, with the refusal of a trial refused for its
+	// card (subscription_stripe_card_check.go)
+	stripeVerifyCreditInvoiceFunc    = stripeCreditInvoiceWithOnboarding
 	stripeVerifyFinalizeCustomerFunc = stripeFinalizeTierForCustomer
 	// whether a data pack checkout already has its balance code (the
 	// purchase event id of its first line)
@@ -219,6 +221,9 @@ func (self *stripeVerifyInvoice) paidThrough() *time.Time {
 //	subscription incomplete_expired or canceled unpaid,
 //	  its invoice void or uncollectible                       -> invalid
 //	a payment sheet's trial whose card is not attached yet    -> pending
+//	a trial (payment sheet or checkout) whose card failed its
+//	  CVC check when it was attached                          -> invalid, with error
+//	                                                             incorrect_cvc
 //	paid and this report landed the credit                    -> credited
 //	paid and the credit was there (webhook, reconcile, report)-> already_credited
 //	Stripe api or database failure                            -> error (non-2xx, retry)
@@ -396,6 +401,10 @@ func verifyStripePaymentSheetSubscription(
 				return result, nil
 			}
 		}
+		if subscription.Metadata[stripeMetadataCardCheck] == stripeCardCheckCvcFailed {
+			// a sheet refused for its card, and replaced since
+			return verifyStripeCardRefused(), nil
+		}
 		return NewVerifyStorePurchaseInvalid(), nil
 	default:
 		// incomplete_expired: the sheet was abandoned, nothing was charged
@@ -408,24 +417,41 @@ func verifyStripePaymentSheetSubscription(
 	if subscription.Metadata[stripeMetadataPaymentSheet] == stripePaymentSheetPending && subscription.Status == "trialing" {
 		// the $0 trial invoice is held until the sheet attaches the card
 		// (stripeHandleInvoicePaidWithOnboarding). With the card on the
-		// subscription, finalize as setup_intent.succeeded does: the tier
-		// from the card's country, then the held invoice's credit.
+		// subscription, finalize as setup_intent.succeeded does: the card
+		// check, the tier from the card's country, then the held invoice's
+		// credit. The ledger is read first: a trial credited before is only
+		// ever answered so, never refused.
+		if result, done := stripeVerifyLedgerStatus(clientSession, invoiceId, nil); done {
+			return result, nil
+		}
 		paymentMethodId := stripeIdFromRaw(subscription.DefaultPaymentMethod)
 		if paymentMethodId == "" {
+			if subscription.Metadata[stripeMetadataCardCheck] == stripeCardCheckCvcFailed {
+				// refused when its card was attached, by a webhook or an earlier
+				// report, and no card since (subscription_stripe_card_check.go)
+				return verifyStripeCardRefused(), nil
+			}
 			return verifyStatusResult(VerifyPurchaseStatusPending), nil
 		}
 		customerId := stripeIdFromRaw(subscription.Customer)
 		if customerId == "" {
 			return NewVerifyStorePurchaseInvalid(), nil
 		}
-		if result, done := stripeVerifyLedgerStatus(clientSession, invoiceId, nil); done {
-			return result, nil
-		}
+		// a card on a refused sheet is judged like a first one: one that
+		// passes clears the refusal and starts the trial
 		// the finalization reads and updates the customer's subscriptions
 		// through the stripe-go sdk
 		stripe.Key = stripeApiToken()
-		stripeVerifyFinalizeCustomerFunc(clientSession, customerId, stripeVerifyPaymentMethodCountry(paymentMethodId))
-		return stripeVerifyInvoiceCreditStatus(clientSession, invoiceId, nil)
+		finalized := stripeVerifyFinalizeCustomerFunc(clientSession, customerId, stripeVerifyPaymentMethodCountry(paymentMethodId))
+		if finalized != nil && finalized.Refused[subscriptionId] {
+			return verifyStripeCardRefused(), nil
+		}
+		result, err := stripeVerifyInvoiceCreditStatus(clientSession, invoiceId, nil)
+		if err == nil && result.Status == VerifyPurchaseStatusPending && finalized != nil && finalized.Err != nil {
+			// the card could not be judged: a non-2xx, which the app retries
+			return nil, finalized.Err
+		}
+		return result, err
 	}
 
 	return verifyStripeInvoice(invoiceId, clientSession)
@@ -484,7 +510,16 @@ func verifyStripeInvoice(
 		model.StripeInvoicePaymentFailureResolvePaid,
 		stripeDunningNow(),
 	)
-	if _, err := stripeVerifyCreditInvoiceFunc(invoice.eventObject(), clientSession); err != nil {
+	refusal, err := stripeVerifyCreditInvoiceFunc(invoice.eventObject(), clientSession)
+	if refusal != nil {
+		// a trial refused for its card (subscription_stripe_card_check.go):
+		// never credited, whatever step of the refusal is left to retry
+		if err != nil {
+			glog.Infof("[sub]verify stripe invoice %s: refused for its card: %s\n", invoiceId, err)
+		}
+		return &VerifyStorePurchaseResult{Status: VerifyPurchaseStatusInvalid, Error: refusal}, nil
+	}
+	if err != nil {
 		var unresolved *stripeInvoiceDestinationUnresolvedError
 		if errors.As(err, &unresolved) {
 			// the invoice names no network; the webhook records it for support

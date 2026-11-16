@@ -49,6 +49,12 @@ const (
 type VerifyStorePurchaseResult struct {
 	Status     string     `json:"status"`
 	ExpiryTime *time.Time `json:"expiry_time,omitempty"`
+	// Why the purchase will never credit, beside status invalid, when there is
+	// something the buyer can do about it: a Stripe trial whose card failed its
+	// check when it was attached (PurchaseErrorCodeIncorrectCvc). The buyer
+	// tries again with a new payment sheet or checkout. Added after status;
+	// older clients ignore it and stop at invalid.
+	Error *OnboardingError `json:"error,omitempty"`
 }
 
 func verifyStatusResult(status string) *VerifyStorePurchaseResult {

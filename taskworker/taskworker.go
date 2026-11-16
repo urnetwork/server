@@ -120,6 +120,10 @@ func initTaskSchedule(ctx context.Context) {
 		// the hourly Stripe dunning sweep: owes the payment-failed notices a
 		// webhook missed (controller/subscription_stripe_dunning_sweep.go)
 		controller.ScheduleSweepStripeDunning(clientSession, tx)
+		// the hourly abandoned payment sheet sweep: cancels the sheets left
+		// without a card for over a day
+		// (controller/subscription_stripe_abandoned_sheet_sweep.go)
+		controller.ScheduleSweepStripeAbandonedSheets(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		work.ScheduleCloseContractDeadlines(clientSession, tx)
@@ -407,6 +411,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.SweepStripeDunning,
 			controller.SweepStripeDunningPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.SweepStripeAbandonedSheets,
+			controller.SweepStripeAbandonedSheetsPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.PlaySubscriptionRenewal,

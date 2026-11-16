@@ -1301,8 +1301,38 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 				// the webhook already handled this one
 				continue
 			}
+			if stripeReconcileTrialInvoiceTooOld(invoice, run.now) {
+				// a $0 invoice over a day old: its webhook, its report and the
+				// abandoned-sheet sweep have had it, and a held one is never
+				// settled into the ledger, so it is not read again every run
+				continue
+			}
 			if !run.spend(store) {
 				return false, nil
+			}
+			if invoice.Total == 0 {
+				// a trial's $0 invoice is credited here only as invoice.paid
+				// would: never while its payment sheet waits on the card, and
+				// never for a trial refused for its card
+				// (subscription_stripe_card_check.go). Before this, the repair
+				// credited every abandoned sheet's trial. Only invoices the
+				// ledger does not hold reach this, so a window already credited
+				// stays as it is (the owner, 2026-11-16: "ok just let them run
+				// out"). Its two reads (the invoice, its subscription) are
+				// spent from the budget.
+				for range 2 {
+					if !run.spend(store) {
+						return false, nil
+					}
+				}
+				held, err := stripeReconcileTrialInvoiceHeld(invoice, run.clientSession, run.now, run.dryRun)
+				if err != nil {
+					run.recordStripeCreditError(invoice, err)
+					continue
+				}
+				if held {
+					continue
+				}
 			}
 			if run.dryRun {
 				credit, err := stripeResolveInvoiceCredit(invoice.Id, run.clientSession)

@@ -161,9 +161,13 @@ type StripeEventInvoiceObject struct {
 	PeriodEnd   int    `json:"period_end"`
 	Customer    string `json:"customer"`
 	Currency    string `json:"currency"`
-	// subscription_create, subscription_cycle, ...; read only for the sales
-	// notice (new or renewal)
+	// subscription_create, subscription_cycle, ...; read for the sales notice
+	// (new or renewal) and by the trial card check, which only ever refuses a
+	// trial's first invoice (subscription_stripe_card_check.go)
 	BillingReason string `json:"billing_reason,omitempty"`
+	// unix seconds; read by the hourly reconcile, which leaves a $0 invoice
+	// alone after a day (stripeReconcileTrialInvoiceMaxAge)
+	Created int64 `json:"created,omitempty"`
 }
 
 type StripeEventDataObjectCustomerDetails struct {
