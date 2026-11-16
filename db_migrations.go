@@ -11713,4 +11713,13 @@ var migrations = []any{
 	// statements until the state row's complete time, 75 minutes after the
 	// trigger.
 	contractOriginLingerMigration,
+
+	// The relay chunks of an epoch's extender component
+	// (db_st_ledger_v2_extender_relay.go; owner 2026-11-16, half of the
+	// extender pool by relay bytes): one nullable text[] column on
+	// st_ledger_v2_epoch_rows, added only when absent under a five-second
+	// lock bound. Nothing existing is rewritten; a running release inserts
+	// its epoch rows without the column, which leaves it null, so it applies
+	// before or after any deploy.
+	stLedgerV2ExtenderRelayMigration,
 }

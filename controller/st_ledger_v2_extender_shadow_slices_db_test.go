@@ -45,7 +45,7 @@ func TestStLedgerV2ExtenderShadowReadsTheEpochInShortSlices(t *testing.T) {
 			}
 			return nil
 		}))
-		wholeRows, wholePool, err := stLedgerV2AmendedEpochRows(f.ctx, 2, amendment, pool, false, model.StEpochUsageSlices{})
+		wholeRows, wholePool, _, err := stLedgerV2AmendedEpochRows(f.ctx, 2, amendment, pool, false, model.StEpochUsageSlices{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +54,7 @@ func TestStLedgerV2ExtenderShadowReadsTheEpochInShortSlices(t *testing.T) {
 		}
 		settings := DefaultStLedgerV2ExtenderShadowSettings()
 		settings.ReadSliceSpan = 2 * time.Minute
-		slicedRows, slicedPool, err := stLedgerV2AmendedEpochRows(f.ctx, 2, amendment, pool, false, settings.slicing())
+		slicedRows, slicedPool, _, err := stLedgerV2AmendedEpochRows(f.ctx, 2, amendment, pool, false, settings.slicing(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -91,6 +91,13 @@ func (self *StLedgerV2ExtenderShadowSettings) slicing() model.StEpochUsageSlices
 	return model.StEpochUsageSlices{Span: self.ReadSliceSpan, Attempts: self.ReadSliceAttempts, RetryDelay: self.ReadSliceRetryDelay}
 }
 
+// The relay read's walk: the epoch read's slices and attempts, from the
+// default lookback (model.GetStEpochExtenderRelay).
+func (self *StLedgerV2ExtenderShadowSettings) relay() *model.StEpochRelaySettings {
+	return &model.StEpochRelaySettings{Span: self.ReadSliceSpan, Lookback: model.DefaultStEpochRelaySettings().Lookback,
+		Attempts: self.ReadSliceAttempts, RetryDelay: self.ReadSliceRetryDelay}
+}
+
 // The chain as a shadow run reads it: views only.
 type stExtenderShadowChain interface {
 	LedgerV2State(ctx context.Context, noId uint64) (*StLedgerV2State, error)
@@ -324,7 +331,7 @@ func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExt
 		return stLedgerV2UsageRetry(err.Error())
 	}
 	amendment := model.StExtenderAmendment{FirstEpoch: epoch, PlatformEndpoints: platformEndpoints}
-	rows, pool, err := stLedgerV2AmendedEpochRows(ctx, epoch, amendment, amendments.pool, false, settings.slicing())
+	rows, pool, relay, err := stLedgerV2AmendedEpochRows(ctx, epoch, amendment, amendments.pool, false, settings.slicing(), settings.relay())
 	if err != nil {
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d shadow rows: %s", epoch, err))
 	}
@@ -335,7 +342,7 @@ func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExt
 	input := &stExtenderShadowInput{
 		ChainId: cfg.ChainId, Netuid: uint16(cfg.Netuid), NoId: cfg.NoId, Epoch: epoch, Funding: funding,
 		Rows: rows, RecordedChunks: recorded.ProviderChunks, Recorded: recordedRows, Pool: pool, Census: census,
-		PlatformEndpoints: platformEndpoints.Count(),
+		Relay: stLedgerV2RelayRows(relay, census), PlatformEndpoints: platformEndpoints.Count(),
 	}
 	report, shadow, err := stExtenderShadowBuild(ctx, input)
 	if errors.Is(err, ledger.ErrEpochNotAllocated) {
@@ -365,8 +372,8 @@ func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExt
 	kept := model.RecordStLedgerV2ExtenderShadow(ctx, key, cfg.NoId, epoch, reportRef, report)
 	split := &shadow.Epochs[0].Extenders.ExtenderSplit
 	stExtenderPoolMetrics("shadow", epoch, pool, split, ledger.EligibleUsage(rows), platformEndpoints.InForce(server.NowUtc()))
-	glog.Infof("[st]v2 epoch %d extender shadow report %s: Z = %d bytes (%d intra-platform, %d intra-network), Z' = %d, N = %d in M = %d units, f_k = %s rao\n",
-		epoch, kept.ReportRef, pool.Bytes(), pool.IntraPlatform, pool.IntraNetwork, split.Weight, split.Eligible, split.Units, funding.Dec())
+	glog.Infof("[st]v2 epoch %d extender shadow report %s: Z = %d bytes (%d intra-platform, %d intra-network), Z' = %d: %d by unit over N = %d in M = %d units, %d by relay bytes over R = %d from %d relaying, f_k = %s rao\n",
+		epoch, kept.ReportRef, pool.Bytes(), pool.IntraPlatform, pool.IntraNetwork, split.Weight, split.UnitWeight, split.Eligible, split.Units, split.RelayWeight, split.RelayBytes, split.Relaying, funding.Dec())
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d shadow report %s", epoch, kept.ReportRef)}
 }
 
@@ -404,6 +411,8 @@ type stExtenderShadowInput struct {
 	Recorded       []protocol.LedgerUsageRow
 	RecordedChunks []string
 	Census         []ledger.CensusRow
+	// the census clients' relay bytes (stLedgerV2RelayRows)
+	Relay []ledger.RelayRow
 	// the number of registrations read
 	PlatformEndpoints int
 }
@@ -471,7 +480,7 @@ func stExtenderShadowBuild(ctx context.Context, in *stExtenderShadowInput) ([]by
 	}
 	epochFundedThroughs := map[uint64]uint256.Int{in.Epoch: in.Funding}
 	shadow, err := ledger.Build(ctx, ledger.BuildInput{NoID: in.NoId, Epoch: in.Epoch, FirstEpoch: in.Epoch, FundedThrough: epochFundedThroughs,
-		Epochs: []ledger.EpochInput{{Epoch: in.Epoch, Rows: in.Rows, Extenders: &ledger.ExtenderInput{Bytes: in.Pool.Bytes(), Census: in.Census}}}})
+		Epochs: []ledger.EpochInput{{Epoch: in.Epoch, Rows: in.Rows, Extenders: &ledger.ExtenderInput{Bytes: in.Pool.Bytes(), Census: in.Census, Relay: in.Relay}}}})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -501,8 +510,7 @@ func stExtenderShadowBuild(ctx context.Context, in *stExtenderShadowInput) ([]by
 	}
 	allocation := shadow.Epochs[0]
 	component := allocation.Extenders
-	header := &ledger.HeaderExtenders{Bytes: component.Bytes, Census: component.Census, Rows: component.Chunks}
-	committed, err := usage.CommittedExtenders(header, in.Census, component.Rows)
+	committed, err := usage.CommittedExtenders(component.Header(), in.Census, component.Rows)
 	if err != nil {
 		return nil, nil, err
 	}
