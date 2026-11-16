@@ -131,3 +131,53 @@ func TestSidecarctlRegistersSidecarRestore(t *testing.T) {
 	}
 	connect.AssertEqual(t, args, []string{"status"})
 }
+
+// --input gives a step its named inputs and --apply lets it act; a malformed or repeated input, or either on end or
+// status, is a usage error; a step's missing input is one too, naming it.
+func TestSidecarRestorePassesInputsAndApplyToTheStep(t *testing.T) {
+	frame := sidecarrestore.NewFrame()
+	frame.Register(sidecarrestore.StepOps, func(ctx context.Context, run *sidecarrestore.StepRun) error { return nil })
+	var seen *sidecarrestore.StepRun
+	frame.Register(sidecarrestore.StepAbuse, func(ctx context.Context, run *sidecarrestore.StepRun) error {
+		seen = run
+		if _, err := run.RequireInput(sidecarrestore.StepInputMailboxKey); err != nil {
+			return err
+		}
+		if !run.Apply {
+			return sidecarrestore.ErrStepPlanOnly
+		}
+		return nil
+	})
+	settings := defaultSidecarRestoreSettings()
+	settings.frame = frame
+	settings.requireEnv = func() (string, error) { return "test", nil }
+	incidentId := server.NewId()
+	list := testSidecarRestoreList(t, incidentId)
+	run := func(args ...string) error {
+		return runSidecarRestoreWithSettings(t.Context(), append(args, "--incident="+incidentId.String(), "--list="+list), settings, &bytes.Buffer{})
+	}
+	usageErr := &sidecarctlUsageError{}
+
+	connect.AssertEqual(t, run("ops", "--kind=postgres"), nil)
+	err := run("abuse", "--input=abuse_mailbox=/exports/abuse.mbox")
+	connect.AssertEqual(t, errors.As(err, &usageErr), true)
+	connect.AssertEqual(t, strings.Contains(err.Error(), sidecarrestore.StepInputMailboxKey), true)
+	connect.AssertEqual(t, seen.Inputs[sidecarrestore.StepInputAbuseMailbox], "/exports/abuse.mbox")
+
+	err = run("abuse", "--input=mailbox_key=/keys/seal.key")
+	connect.AssertEqual(t, errors.Is(err, sidecarrestore.ErrStepPlanOnly), true)
+	connect.AssertEqual(t, seen.Apply, false)
+	connect.AssertEqual(t, run("abuse", "--input=mailbox_key=/keys/seal.key", "--apply"), nil)
+	connect.AssertEqual(t, seen.Apply, true)
+
+	for _, args := range [][]string{
+		{"abuse", "--input=mailbox_key"},
+		{"abuse", "--input=mailbox_key=a", "--input=mailbox_key=b"},
+		{"status", "--apply"},
+		{"end", "dns", "--by-hand=ran it", "--input=x=y"},
+	} {
+		err := run(args...)
+		connect.AssertEqual(t, err != nil, true)
+		connect.AssertEqual(t, errors.As(err, &usageErr) || strings.Contains(err.Error(), "invalid value"), true)
+	}
+}

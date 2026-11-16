@@ -70,6 +70,31 @@ type StepRun struct {
 	// what the operator stated by hand for this run, such as how restore_hold is held where the step needs it; empty
 	// for none
 	Statement string
+	// the named inputs the operator gave this run, such as the abuse step's mailbox exports; each step names the
+	// ones it reads, and nil is none
+	Inputs map[string]string
+	// whether the operator asked the step to act: a step that prints its plan first, as the abuse step does,
+	// changes nothing and does not end until a run says so
+	Apply bool
+}
+
+// What the operator gives a run beside the incident.
+type StepOptions struct {
+	// see StepRun.Statement
+	Statement string
+	// see StepRun.Inputs
+	Inputs map[string]string
+	// see StepRun.Apply
+	Apply bool
+}
+
+// The input name names, or ErrStepInput naming it when the operator gave none.
+func (self *StepRun) RequireInput(name string) (string, error) {
+	value := self.Inputs[name]
+	if value == "" {
+		return "", fmt.Errorf("%w: give --input %s=<value>", ErrStepInput, name)
+	}
+	return value, nil
 }
 
 // One run of a step under its incident. It must be idempotent: it may run again after it ended, and again after it
@@ -96,6 +121,10 @@ var (
 	ErrStepUnregistered = errors.New("no function is registered for the step")
 	// The incident records no kind yet, so the frame cannot tell which steps it runs.
 	ErrIncidentKindUnknown = errors.New("the incident records no kind")
+	// The step needs an input the operator did not give.
+	ErrStepInput = errors.New("the step needs an input")
+	// The step printed its plan and changed nothing, since the run did not ask it to act.
+	ErrStepPlanOnly = errors.New("the step printed its plan and changed nothing")
 )
 
 // The order and each step's function. Safe for concurrent use.
@@ -214,6 +243,14 @@ func (self *Frame) checkRunnable(incident *Incident, step *Step) error {
 // Runs the step named name under incident, then records its end. A step that already ended runs again, changing
 // nothing it changed, and its end is not recorded twice.
 func (self *Frame) RunStep(ctx context.Context, incident *Incident, name string, out io.Writer, statement string) error {
+	return self.RunStepWithOptions(ctx, incident, name, out, &StepOptions{Statement: statement})
+}
+
+// RunStep with the operator's inputs and apply as well as the statement. options may be nil for none.
+func (self *Frame) RunStepWithOptions(ctx context.Context, incident *Incident, name string, out io.Writer, options *StepOptions) error {
+	if options == nil {
+		options = &StepOptions{}
+	}
 	step, err := self.step(name)
 	if err != nil {
 		return err
@@ -224,7 +261,14 @@ func (self *Frame) RunStep(ctx context.Context, incident *Incident, name string,
 	if step.Function == nil {
 		return fmt.Errorf("%w: %s; run it by hand, then state its end with sidecarctl sidecar restore end %s --by-hand=<how>", ErrStepUnregistered, step.Name, step.Name)
 	}
-	if err := step.Function(ctx, &StepRun{Incident: incident, Out: out, Statement: statement}); err != nil {
+	run := &StepRun{
+		Incident:  incident,
+		Out:       out,
+		Statement: options.Statement,
+		Inputs:    options.Inputs,
+		Apply:     options.Apply,
+	}
+	if err := step.Function(ctx, run); err != nil {
 		return fmt.Errorf("the %s step has not ended: %w", step.Name, err)
 	}
 	return incident.recordStepEnded(step.Name, self.now(), stepEndedRan)
@@ -233,6 +277,12 @@ func (self *Frame) RunStep(ctx context.Context, incident *Incident, name string,
 // Runs every step of the incident that has not ended, in order, stopping at the first that fails or that no task has
 // registered. The list must record the incident's kind (Incident.SetKind), which says whether the site steps run.
 func (self *Frame) Run(ctx context.Context, incident *Incident, out io.Writer, statement string) error {
+	return self.RunWithOptions(ctx, incident, out, &StepOptions{Statement: statement})
+}
+
+// Run with the operator's inputs and apply as well as the statement, each step given them all. options may be nil
+// for none.
+func (self *Frame) RunWithOptions(ctx context.Context, incident *Incident, out io.Writer, options *StepOptions) error {
 	steps, err := self.incidentSteps(incident)
 	if err != nil {
 		return err
@@ -241,7 +291,7 @@ func (self *Frame) Run(ctx context.Context, incident *Incident, out io.Writer, s
 		if incident.StepEnded(step.Name) {
 			continue
 		}
-		if err := self.RunStep(ctx, incident, step.Name, out, statement); err != nil {
+		if err := self.RunStepWithOptions(ctx, incident, step.Name, out, options); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "%s ended\n", step.Name)
