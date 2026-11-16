@@ -35,7 +35,8 @@ func TestCompetitionOperatorPatchRetryMigrationPreservesCompletePredecessors(t *
 	tail := []int{version, OperatorBlockTrafficVersion(), OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(),
 		ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), ProviderWorkSessionProviderAppendMigrationVersion(),
 		ProviderWorkSessionHeadRetentionGuardMigrationVersion(), ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(),
-		AuditDeviceDayVersion(), CompetitionSecondRecoveryMigrationVersion()}
+		AuditDeviceDayVersion(), TransferDebitJournalDropGuardMigrationVersion(),
+		ClientKeyHistoryRegistrationHashUniqueDropMigrationVersion(), CompetitionSecondRecoveryMigrationVersion()}
 	if !competitionCapturedRecoveryTailValid(tail, MigrationCount()) {
 		t.Fatal("captured published migration tail or recovery ordinal changed", tail, MigrationCount())
 	}

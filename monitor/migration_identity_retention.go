@@ -64,3 +64,14 @@ var clientKeyHistoryRetentionSevenDayFloorMigrationContract = migrationCurrentSu
 	server.ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(),
 	"client key history retention floor at 7 days",
 	clientKeyHistoryRetentionSevenDayFloorArtifactQuery)
+
+// The redundant unique registration hash constraint of the key history stays
+// dropped: a constraint or an index rebuilt under its name is drift.
+var clientKeyHistoryRegistrationHashUniqueDropArtifactQuery = `(NOT EXISTS (SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_history' AND constraint_name = 'st_client_key_history_registration_hash_key') AND ` +
+	migrationIndexRemoved("st_client_key_history", "st_client_key_history_registration_hash_key") + `)`
+
+var clientKeyHistoryRegistrationHashUniqueDropMigrationContract = migrationCurrentSuffix(
+	server.ClientKeyHistoryRegistrationHashUniqueDropMigrationVersion(),
+	"redundant unique registration hash of the key history removed",
+	clientKeyHistoryRegistrationHashUniqueDropArtifactQuery)

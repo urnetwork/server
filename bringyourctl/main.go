@@ -149,6 +149,7 @@ Usage:
     bringyourctl model migrate finished-task-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
     bringyourctl model migrate table-swap --table=<table> [--dry-run] [--rollback] [--drop-old]
     bringyourctl model migrate audit-device-event-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
+    bringyourctl model migrate debit-journal-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
@@ -204,6 +205,9 @@ Options:
     --cutover-day=<date>  The day (YYYY-MM-DD, UTC) from which finished tasks
                    (or device audit events) go to daily partitions, at least 12
                    hours ahead; prepare only.
+                   With debit-journal-partition, the day from whose contracts
+                   the transfer debit journal's rows go to daily partitions,
+                   at least 12 hours ahead; prepare only.
     --max-copy-rows=<n>  With a finished_task --rollback, the most rows of the
                    daily partitions it copies back under its exclusive lock;
                    omitted uses 200000 (1000000 for audit_device_event).
@@ -600,6 +604,8 @@ func main() {
 				modelMigrateTableSwap(opts)
 			} else if auditDeviceEventPartition, _ := opts.Bool("audit-device-event-partition"); auditDeviceEventPartition {
 				modelMigrateAuditDeviceEventPartition(opts)
+			} else if debitJournalPartition, _ := opts.Bool("debit-journal-partition"); debitJournalPartition {
+				modelMigrateDebitJournalPartition(opts)
 			}
 		} else if upgradeClientReliabilityIndex, _ := opts.Bool("upgrade-client-reliability-index"); upgradeClientReliabilityIndex {
 			modelUpgradeClientReliabilityIndex(opts)
@@ -2751,6 +2757,38 @@ func auditDeviceEventPartitionMigrateOptions(opts docopt.Opts) (options server.A
 			return
 		}
 	}
+	return
+}
+
+// Partitions transfer_debit_journal daily by contract day
+// (PARTITION-CANDIDATES.md §6.3; server.MigrateTransferDebitJournalToPartitions):
+// prepare (with --cutover-day), then --finalize at least 2 hours before that
+// day; --rollback and --abort undo. Each step can be rehearsed with --dry-run,
+// and an interrupted step can be run again.
+func modelMigrateDebitJournalPartition(opts docopt.Opts) {
+	options, err := debitJournalPartitionMigrateOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	if err := server.MigrateTransferDebitJournalToPartitions(context.Background(), options); err != nil {
+		panic(err)
+	}
+}
+
+func debitJournalPartitionMigrateOptions(opts docopt.Opts) (options server.TransferDebitJournalPartitionMigrateOptions, err error) {
+	if cutoverDay, _ := opts.String("--cutover-day"); cutoverDay != "" {
+		options.CutoverDay, err = time.Parse(time.DateOnly, cutoverDay)
+		if err != nil {
+			return
+		}
+	}
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Finalize, _ = opts.Bool("--finalize")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.Abort, _ = opts.Bool("--abort")
 	return
 }
 

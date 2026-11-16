@@ -241,22 +241,22 @@ const taskworkerPrinterUser = " && echo 'giftcard:x:10001:10001:gift card printe
 // Check the executable instructions rather than matching comments or whitespace.
 // This intentionally covers the simple service recipes, not arbitrary Dockerfiles.
 func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) error {
-	wanted := map[string]bool{}
+	checks := []string{}
 	for _, id := range lock.Sets[lock.Services[role]] {
 		for _, pkg := range lock.Packages {
 			if pkg.Id == id {
-				wanted["ADD --checksum=sha256:"+pkg.Sha256+" "+lock.Snapshot+pkg.Filename+" /runtime-packages/"+pkg.Architecture+"/"+pkg.Name+".deb"] = true
+				checks = append(checks, "'"+pkg.Sha256+"  /runtime-packages/"+pkg.Architecture+"/"+pkg.Name+".deb'")
 			}
 		}
 	}
 	// An archive is fetched beside the packages and unpacked by the same offline
 	// step, after dpkg installs unzip, only on its own target.
-	install := "RUN --network=none --mount=from=runtime-packages,source=/runtime-packages,target=/runtime-packages,ro dpkg -i /runtime-packages/\"$(dpkg --print-architecture)\"/*.deb /runtime-packages/all/*.deb && update-ca-certificates"
+	install := "RUN --network=none --mount=from=runtime-packages,source=/runtime-packages,target=/runtime-packages,ro CHECKSUMS dpkg -i /runtime-packages/\"$(dpkg --print-architecture)\"/*.deb /runtime-packages/all/*.deb && update-ca-certificates"
 	for _, id := range lock.ServiceArchives[role] {
 		for _, archive := range lock.Archives {
 			if archive.Id == id {
 				payload := "/runtime-packages/" + archive.Architecture + "/" + archive.Name + ".zip"
-				wanted["ADD --checksum=sha256:"+archive.Sha256+" "+archive.Url+" "+payload] = true
+				checks = append(checks, "'"+archive.Sha256+"  "+payload+"'")
 				parent := path.Dir(archive.InstallPath)
 				install += " && if [ \"$(dpkg --print-architecture)\" = " + archive.Architecture + " ]; then unzip -q " + payload + " -d " + parent + " && mv " + path.Join(parent, archive.Root) + " " + archive.InstallPath + "; fi"
 			}
@@ -266,7 +266,8 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 		install += taskworkerPrinterUser
 	}
 	install += " && rm -f /var/cache/ldconfig/aux-cache /var/log/dpkg.log"
-	stage, installs := 0, 0
+	install = strings.Replace(install, "CHECKSUMS", "printf '%s\\n' "+strings.Join(checks, " ")+" | sha256sum -c - &&", 1)
+	stage, installs, copies := 0, 0, 0
 	pending := ""
 	for _, line := range strings.Split(recipe, "\n") {
 		line = strings.TrimSpace(line)
@@ -286,14 +287,14 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 			if stage == 1 {
 				want += " AS runtime-packages"
 			}
-			if stage > 2 || instruction != want || stage == 2 && len(wanted) != 0 {
+			if stage > 2 || instruction != want || stage == 2 && copies != 1 {
 				return errors.New("unlocked or incomplete package base stage")
 			}
-		case strings.HasPrefix(instruction, "ADD "):
-			if stage != 1 || !wanted[instruction] {
-				return errors.New("unlocked, changed or repeated remote package input")
+		case instruction == "COPY --from=verified-runtime-packages / /runtime-packages/":
+			if stage != 1 {
+				return errors.New("runtime context copied into final stage")
 			}
-			delete(wanted, instruction)
+			copies++
 		case strings.HasPrefix(instruction, "RUN "):
 			if stage != 2 {
 				return errors.New("package download stage gained execution")
@@ -315,7 +316,7 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 			}
 		}
 	}
-	if pending != "" || stage != 2 || installs != 1 || len(wanted) != 0 {
+	if pending != "" || stage != 2 || installs != 1 || copies != 1 {
 		return errors.New("incomplete package install")
 	}
 	return nil
@@ -363,7 +364,7 @@ func TestRuntimePackagesRejectMovingAndIncompleteInputs(t *testing.T) {
 	if err := checkRuntimePackageRecipe(lock, "proxy", good); err != nil {
 		t.Fatal(err)
 	}
-	start := strings.Index(good, "ADD ")
+	start := strings.Index(good, "COPY --from=verified-runtime-packages")
 	end := start + strings.IndexByte(good[start:], '\n') + 1
 	for _, fault := range []string{"moving-repository", "missing-payload", "wrong-hash", "override", "online-install", "tag-only", "duplicate-payload", "deferred-resolver"} {
 		changed := good
@@ -373,9 +374,9 @@ func TestRuntimePackagesRejectMovingAndIncompleteInputs(t *testing.T) {
 		case "missing-payload":
 			changed = changed[:start] + changed[end:]
 		case "wrong-hash":
-			changed = strings.Replace(changed, "--checksum=sha256:", "--checksum=sha256:0", 1)
+			changed = strings.Replace(changed, lock.Packages[1].Sha256, strings.Repeat("0", 64), 1)
 		case "override":
-			changed = strings.Replace(changed, lock.Snapshot, "${PACKAGE_MIRROR}/", 1)
+			changed = strings.Replace(changed, "verified-runtime-packages", "unchecked-runtime-packages", 1)
 		case "online-install":
 			changed = strings.Replace(changed, "--network=none", "--network=default", 1)
 		case "tag-only":
@@ -434,49 +435,23 @@ func TestRuntimePackagesRejectUnpinnedChromiumArchive(t *testing.T) {
 	if err := checkRuntimePackageRecipe(lock, "taskworker", good); err != nil {
 		t.Fatal(err)
 	}
-	archive, armArchive := lock.Archives[0], lock.Archives[1]
-	add := "ADD --checksum=sha256:" + archive.Sha256 + " " + archive.Url + " /runtime-packages/amd64/chrome-headless-shell.zip\n"
-	armAdd := "ADD --checksum=sha256:" + armArchive.Sha256 + " " + armArchive.Url + " /runtime-packages/arm64/chrome-headless-shell.zip\n"
-	extract := "unzip -q /runtime-packages/amd64/chrome-headless-shell.zip -d /opt"
-	for _, fault := range []string{"wrong-checksum", "missing-checksum", "missing-archive", "duplicate-archive", "moved-url", "unpinned-url",
-		"online-extraction", "install-time-fetch", "download-stage-extraction", "final-stage-download", "copied-archive", "every-target",
-		"arm64-wrong-checksum", "arm64-missing-archive", "cross-target-archive"} {
-		changed := good
-		switch fault {
-		case "wrong-checksum":
-			changed = strings.Replace(changed, archive.Sha256, strings.Repeat("0", 63)+"1", 1)
-		case "arm64-wrong-checksum":
-			changed = strings.Replace(changed, armArchive.Sha256, strings.Repeat("0", 63)+"1", 1)
-		case "arm64-missing-archive":
-			changed = strings.Replace(changed, armAdd, "", 1)
-		case "cross-target-archive":
-			changed = strings.Replace(changed, armAdd, strings.Replace(add, "/runtime-packages/amd64/", "/runtime-packages/arm64/", 1), 1)
-		case "missing-checksum":
-			changed = strings.Replace(changed, add, "ADD "+archive.Url+" /runtime-packages/amd64/chrome-headless-shell.zip\n", 1)
-		case "missing-archive":
-			changed = strings.Replace(changed, add, "", 1)
-		case "duplicate-archive":
-			changed = strings.Replace(changed, add, add+add, 1)
-		case "moved-url":
-			changed = strings.Replace(changed, "https://storage.googleapis.com/chrome-for-testing-public/", "https://cdn.playwright.dev/chrome-for-testing-public/", 1)
-		case "unpinned-url":
-			changed = strings.Replace(changed, archive.Url, "${CHROME_HEADLESS_SHELL_URL}", 1)
-		case "online-extraction":
-			changed = strings.Replace(changed, "RUN --network=none --mount=", "RUN --network=default --mount=", 1)
-		case "install-time-fetch":
-			changed = strings.Replace(changed, extract, "curl -fsSL "+archive.Url+" -o /tmp/shell.zip && unzip -q /tmp/shell.zip -d /opt", 1)
-		case "download-stage-extraction":
-			changed = strings.Replace(changed, add, add+"RUN unzip -q /runtime-packages/amd64/chrome-headless-shell.zip -d /runtime-packages/amd64\n", 1)
-		case "final-stage-download":
-			changed = strings.Replace(strings.Replace(changed, add, "", 1), "COPY build/", add+"COPY build/", 1)
-		case "copied-archive":
-			changed = strings.Replace(changed, "COPY build/", "COPY --from=runtime-packages /runtime-packages/amd64/chrome-headless-shell.zip /opt/\nCOPY build/", 1)
-		case "every-target":
-			changed = strings.Replace(strings.Replace(changed, "if [ \"$(dpkg --print-architecture)\" = amd64 ]; then ", "", 1), "; fi \\", " \\", 1)
+	for _, archive := range lock.Archives {
+		check := "'" + archive.Sha256 + "  /runtime-packages/" + archive.Architecture + "/chrome-headless-shell.zip'"
+		for _, replacement := range []string{"", check + " " + check, strings.Replace(check, archive.Sha256, strings.Repeat("0", 64), 1), strings.Replace(check, "/"+archive.Architecture+"/", "/wrong-target/", 1)} {
+			changed := strings.Replace(good, check, replacement, 1)
+			if changed == good || checkRuntimePackageRecipe(lock, "taskworker", changed) == nil {
+				t.Fatal("missing, duplicate, changed or cross-target archive checksum escaped admission")
+			}
 		}
-		if changed == good || checkRuntimePackageRecipe(lock, "taskworker", changed) == nil {
-			t.Fatalf("%s escaped archive admission", fault)
+	}
+	for _, replacement := range []string{"--network=default", "--network=host"} {
+		if checkRuntimePackageRecipe(lock, "taskworker", strings.Replace(good, "--network=none", replacement, 1)) == nil {
+			t.Fatal("online extraction escaped admission")
 		}
+	}
+	changed := strings.Replace(good, "unzip -q", "curl https://example.invalid/file && unzip -q", 1)
+	if checkRuntimePackageRecipe(lock, "taskworker", changed) == nil {
+		t.Fatal("install-time fetching escaped admission")
 	}
 }
 

@@ -1000,6 +1000,16 @@ The window sets the size. At 5.4 GiB/day:
   - `ALTER TABLE ... DROP CONSTRAINT` takes ACCESS EXCLUSIVE for the catalog change only, with a
     short lock wait and retries; the commit unlinks the index after it releases the lock.
   - DBDISK-STABILIZE §3.3 called it an integrity guard; the owner decides.
+  - **Owner go 11-16; checked on Main 11-16 05:00Z (catalog only):** the index is owned by the
+    UNIQUE constraint of the same name (`contype u`; the index depends on it, `deptype i`), so
+    `DROP INDEX CONCURRENTLY` is refused and the drop is `ALTER TABLE ... DROP CONSTRAINT`. No
+    foreign key uses it (the head's key references the primary key), no code names it or uses it
+    as an `ON CONFLICT` target, and `idx_scan` is 0 with no `last_idx_scan` since the statistics
+    began on 10-23 20:08:05Z (the primary key: 2.25B scans since then, so the 11-16 02:02Z restart
+    kept the counters). `GetClientContractMetadata` reads the table on every CreateContract (about
+    1,180 a second), so the drop runs with `lock_timeout` 1 s and retries, never 0, in a vacuum gap
+    under the validator gate; `db_client_key_history_unique_drop.go` records it afterwards as a
+    catalog read.
 
 ## 9. The rest
 
