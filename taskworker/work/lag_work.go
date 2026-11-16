@@ -86,7 +86,7 @@ func sweepLag(
 	result := &SweepLagResult{}
 	endTime := time.Now().Add(guestTimeout)
 	for {
-		removed := model.RemoveExpiredLagGuests(ctx, now, batchSize)
+		removed := model.RemoveExpiredLagGuestsWithRemovals(ctx, now, batchSize, controller.ScheduleDeletedNetworkCleanup(ctx))
 		result.RemovedGuests += removed.Removed
 		result.KeptGuests += removed.Kept
 		if removed.Removed+removed.Kept < batchSize || endTime.Before(time.Now()) || ctx.Err() != nil {

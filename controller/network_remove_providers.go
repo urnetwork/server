@@ -32,7 +32,8 @@ const networkRemoveGammaChargeInFlightMessage = "A Gamma payment for your accoun
 // networkRemoveSteps are the store and storage steps of an account deletion.
 // NetworkRemove runs them in this order: the store snapshot, the App Store
 // check, Stripe cancellation, Google Play cancellation, then the network
-// removal, which queues the Brevo contact removals in its own transaction.
+// removal, which queues the Brevo contact removals and the cleanup of the
+// network's data in its own transaction.
 type networkRemoveSteps struct {
 	// reads the App Store and Google Play renewals once, for every step below
 	storeSnapshot func(clientSession *session.ClientSession) *model.RemoveNetworkStoreSnapshot
@@ -45,8 +46,8 @@ type networkRemoveSteps struct {
 	cancelPlay func(clientSession *session.ClientSession, purchaseTokens []string) error
 	// removes the network unless an App Store or Google Play renewal outside
 	// the snapshot is active, and in the same transaction queues the removal
-	// of its addresses from Brevo (RemoveNetworkAndContacts); returns the
-	// removed user auths
+	// of its addresses from Brevo and the cleanup of its data
+	// (RemoveNetworkAndContacts); returns the removed user auths
 	removeNetwork func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) (model.RemoveNetworkOutcome, map[string]bool)
 }
 
@@ -70,12 +71,15 @@ var defaultNetworkRemoveSteps = networkRemoveSteps{
 // RemoveNetworkAndContacts removes the network and its users
 // (model.RemoveNetworkWithRemovals) and, in the removal's own transaction,
 // before the sign-in addresses are deleted, queues RemoveProductUpdates for
-// each of them, which deletes its Brevo contact. Both the account deletion
-// (NetworkRemove) and the operator's `bringyourctl network remove` go
-// through it. Until the 2026-11-13 review the operator path dropped the
-// addresses and queued nothing, so the contact stayed in Brevo, and the
-// account deletion queued the removals in a second transaction after the
-// commit, which a crash in between could lose.
+// each of them, which deletes its Brevo contact, and the cleanup of
+// everything else the network leaves (RemoveDeletedNetworkData, owner
+// 2026-11-16). Both the account deletion (NetworkRemove) and the operator's
+// `bringyourctl network remove` go through it. Until the 2026-11-13 review the
+// operator path dropped the addresses and queued nothing, so the contact
+// stayed in Brevo, and the account deletion queued the removals in a second
+// transaction after the commit, which a crash in between could lose. Until
+// the 2026-11-16 cleanup both left the network's clients, devices and other
+// rows behind.
 func RemoveNetworkAndContacts(
 	clientSession *session.ClientSession,
 	networkId server.Id,
@@ -87,10 +91,11 @@ func RemoveNetworkAndContacts(
 		networkId,
 		adminUserId,
 		storeSnapshot,
-		func(tx server.PgTx, userAuths map[string]bool) {
+		func(tx server.PgTx, deletedNetwork *model.DeletedNetwork, userAuths map[string]bool) {
 			for userAuth, _ := range userAuths {
 				ScheduleRemoveProductUpdates(clientSession, userAuth, tx)
 			}
+			ScheduleRemoveDeletedNetworkDataInTx(clientSession.Ctx, tx, deletedNetwork, server.NowUtc())
 		},
 	)
 }

@@ -739,6 +739,12 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			controller.RemoveProductUpdates,
 			controller.RemoveProductUpdatesPost,
 		),
+		// the cleanup after an account deletion, queued by every deletion in
+		// its own transaction (owner 2026-11-16)
+		task.NewTaskTargetWithPost(
+			controller.RemoveDeletedNetworkData,
+			controller.RemoveDeletedNetworkDataPost,
+		),
 		// the onboarding email campaign: one task per network and step, and the
 		// daily App Store one-time offer code top-up
 		task.NewTaskTargetWithPost(
