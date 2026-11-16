@@ -69,8 +69,21 @@ func TestGrafanaAlertingCommandsNeverPrintTheWebhook(t *testing.T) {
 	if err := grafanaReconcileAlerting(context.Background(), &configured, grafanaUrl, "secret", grafana.AlertRoutingSettings{SlackWebhookUrl: webhookUrl}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(configured.String(), "default receiver "+grafana.DefaultAlertContactName+" (was empty)") {
+	if !strings.Contains(configured.String(), "default receiver "+grafana.DefaultAlertContactName+" (was empty)") ||
+		!strings.Contains(configured.String(), "alerts.watchdog_heartbeat_url is empty") {
 		t.Fatalf("configured output = %q", configured.String())
+	}
+
+	// the heartbeat is a credential too
+	heartbeatUrl := "https://heartbeat.example/ping/" + grafanaTestWebhookSecret + "heartbeat"
+	var watched bytes.Buffer
+	if err := grafanaReconcileAlerting(context.Background(), &watched, newGrafanaAlertingFake(t).URL, "secret", grafana.AlertRoutingSettings{
+		SlackWebhookUrl: webhookUrl, WatchdogHeartbeatUrl: heartbeatUrl,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(watched.String(), "goes only to "+grafana.WatchdogAlertContactName) {
+		t.Fatalf("heartbeat output = %q", watched.String())
 	}
 
 	var tested bytes.Buffer
@@ -78,9 +91,9 @@ func TestGrafanaAlertingCommandsNeverPrintTheWebhook(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "i/o timeout") {
 		t.Fatalf("test-alert error = %v", err)
 	}
-	for _, output := range []string{refused.String(), configured.String(), tested.String(), err.Error()} {
-		if strings.Contains(output, grafanaTestWebhookSecret) || strings.Contains(output, "hooks.slack.example") {
-			t.Fatalf("output quotes the webhook: %q", output)
+	for _, output := range []string{refused.String(), configured.String(), watched.String(), tested.String(), err.Error()} {
+		if strings.Contains(output, grafanaTestWebhookSecret) || strings.Contains(output, "hooks.slack.example") || strings.Contains(output, "heartbeat.example") {
+			t.Fatalf("output quotes the webhook or the heartbeat: %q", output)
 		}
 	}
 }
