@@ -1253,6 +1253,11 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
   (migration 824; `providerWorkSignSessionEventsInTx`).
 - **Not chosen:** stopping events for non-provider clients while no signer
   runs.
+- **Reversed (owner, 2026-11-16; DBDISK-STABILIZE.md S4):** since migration 979
+  the append journals provider clients only, those with a friends and family or
+  public provide key, and a retire whose connection's admit is in the journal
+  (`db_provider_work_session_providers.go`). A client that does not provide
+  gets no event and no head.
 - **Design:**
   - weekly `RANGE (observed_at)`, with primary key
     `(client_id, sequence, observed_at)`;
