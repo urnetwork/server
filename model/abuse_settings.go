@@ -95,6 +95,14 @@ type AbuseSettings struct {
 	LegalRetentionYears int
 	// The most rows one retention sweep deletes in a transaction.
 	RetentionBatchSize int
+	// How often AbuseRetention runs: an hour, so a row is gone within an hour of
+	// its ttl, as the published ttls read.
+	RetentionPassInterval time.Duration
+	// One retention pass's bound; a pass that runs out leaves the rest to the
+	// next.
+	RetentionPassMaxTime time.Duration
+	// The task runner's bound on one retention pass, past RetentionPassMaxTime.
+	RetentionPassTaskMaxTime time.Duration
 
 	// The most rows one abuse-role lookup returns, by case id or join key
 	// (§21.10): never in bulk. A lookup past it answers the first rows and says
@@ -144,6 +152,9 @@ func DefaultAbuseSettings() *AbuseSettings {
 		CaseRetentionMonths:      13,
 		LegalRetentionYears:      3,
 		RetentionBatchSize:       1000,
+		RetentionPassInterval:    time.Hour,
+		RetentionPassMaxTime:     5 * time.Minute,
+		RetentionPassTaskMaxTime: 10 * time.Minute,
 		LookupRowLimit:           100,
 		ReviewReasonMaxByteCount: 2048,
 		ConnectionJoinWindow:     24 * time.Hour,

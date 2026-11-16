@@ -321,6 +321,11 @@ func RemoveNetworkWithStoreSnapshot(
 			}
 		})
 
+		// a held network's deletion reads as done, its in-scope rows copied
+		// into each live hold first, with no refusal, hint or admin event
+		// (§21.9, plan-ABUSE-hold-deletions #1)
+		copyHeldNetworkRowsBeforeRemovalInTx(ctx, tx, networkId, slices.Collect(maps.Keys(userIds)), server.NowUtc())
+
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for userId, _ := range userIds {
 				batch.Queue(

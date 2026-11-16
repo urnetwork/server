@@ -35,6 +35,14 @@ const (
 	RetentionTableTlsConnectionDay = "tls_connection_day"
 	// §15's sidecar table (MG7): host keys 30 days after their retirement
 	RetentionTableMailHostKey = "mail_host_key"
+	// §21's tables (MG5): cases with their actions and appeals 13 months after
+	// the case closes, legal requests 3 years after they close and the access
+	// log 3 years after each read (§21.10)
+	RetentionTableAbuseCase      = "abuse_case"
+	RetentionTableAbuseAction    = "abuse_action"
+	RetentionTableAbuseAppeal    = "abuse_appeal"
+	RetentionTableLegalRequest   = "legal_request"
+	RetentionTableAbuseAccessLog = "abuse_access_log"
 )
 
 var retentionTables = []string{
@@ -58,6 +66,11 @@ var retentionTables = []string{
 	RetentionTableNetworkAclShare,
 	RetentionTableTlsConnectionDay,
 	RetentionTableMailHostKey,
+	RetentionTableAbuseCase,
+	RetentionTableAbuseAction,
+	RetentionTableAbuseAppeal,
+	RetentionTableLegalRequest,
+	RetentionTableAbuseAccessLog,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,
