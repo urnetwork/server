@@ -15,29 +15,36 @@ package controller
 //
 //   - the payment sheet, before its pending subscription is marked attached
 //     (stripeFinalizeTierForCustomer, which setup_intent.succeeded,
-//     payment_method.attached, customer.updated and the app's report run);
+//     payment_method.attached, customer.updated, the app's report and the
+//     abandoned-sheet sweep run). Only the card on the sheet's own
+//     subscription is judged: a returning customer's older default, judged
+//     before the new card lands, would refuse a good card;
 //   - Checkout, before its $0 trial invoice is credited
 //     (stripeInvoiceTrialCardGate, which invoice.paid, the report and the
-//     hourly reconcile run).
+//     hourly reconcile run). Only the trial's first invoice is judged.
 //
 // A card whose card.checks.cvc_check is "fail" is refused. The trial is not
 // credited, so no Pro. The card is unset as the subscription's default and
 // detached from the customer, so it is never charged. The subscription is
 // stamped card_check=cvc_failed, which every later webhook, report and
-// reconcile reads as the same refusal, whichever saw the card first. The
-// payment sheet's subscription stays pending: the app asks for a new sheet,
-// which replaces it (stripeCancelPendingPaymentSheetSubscriptions), or the
-// abandoned-sheet sweep cancels it a day later. A Checkout trial has no sheet
-// to try again in, so its subscription is canceled at once and the buyer
-// starts a new checkout. The report answers the refusal as status invalid
-// with error incorrect_cvc (verifyStripeCardRefused).
+// reconcile reads as the same refusal, whichever saw the card first; the
+// refusal is counted and logged once (stripeRefuseTrialCard). The payment
+// sheet's subscription stays pending: the app asks for a new sheet, which
+// replaces it (stripeCancelPendingPaymentSheetSubscriptions; a refused sheet
+// never blocks a new purchase), or the abandoned-sheet sweep cancels it a day
+// later. A card that passes on a refused sheet's subscription clears the
+// refusal and starts the trial. A Checkout trial has no sheet to try again
+// in, so its subscription is canceled at once and the buyer starts a new
+// checkout. The report answers the refusal as status invalid with error
+// incorrect_cvc (verifyStripeCardRefused).
 //
 // pass, unavailable and unchecked proceed as before: many cards and regions
-// return no CVC result, and those are never blocked. Only a credit not yet
-// made is refused: an invoice already in the stripe_invoice ledger, and the
-// window it credited, is never touched (the owner, 2026-11-16, on the windows
-// the hourly reconcile had credited to abandoned sheets: "ok just let them run
-// out").
+// return no CVC result, and those are never blocked. Nothing is refused,
+// stamped, detached or canceled before the subscription is known to be ours
+// (network_id) and its trial known not to be credited: an invoice already in
+// the stripe_invoice ledger, and the window it credited, is never touched
+// (the owner, 2026-11-16, on the windows the hourly reconcile had credited to
+// abandoned sheets: "ok just let them run out").
 //
 // 3D Secure: the trial's SetupIntent (the subscription's pending_setup_intent,
 // or Checkout's) is usage off_session, so an authentication the bank asks for
@@ -154,19 +161,23 @@ func stripeErrorStatus(err error) int {
 }
 
 // stripeSubscriptionCard is the card the subscription would charge: its own
-// default payment method, else its customer's invoice default, read from
-// Stripe when only its id is at hand. The payment sheet and Checkout both set
-// the subscription's own; the customer's is the fallback Stripe charges when
-// a subscription has none. nil when there is none, or Stripe no longer knows
-// it. stripe.Key must be set.
-func stripeSubscriptionCard(sub *stripe.Subscription) (*stripe.PaymentMethod, error) {
+// default payment method, read from Stripe when only its id is at hand, and,
+// with customerFallback, its customer's invoice default when it has none of
+// its own. A payment sheet's trial is judged by its own card only: the sheet
+// puts the card on the subscription, and a customer's older default judged
+// before the new card lands would refuse a good card. Checkout collects its
+// card before it makes the subscription, so for its trial the customer's
+// default is what Stripe would charge when the subscription names none. nil
+// when there is none, or Stripe no longer knows it. stripe.Key must be set.
+func stripeSubscriptionCard(sub *stripe.Subscription, customerFallback bool) (*stripe.PaymentMethod, error) {
 	if sub == nil {
 		return nil, nil
 	}
 	paymentMethod := sub.DefaultPaymentMethod
 	if paymentMethod == nil || paymentMethod.ID == "" {
-		if sub.DefaultSource != nil {
-			// a legacy source, not a payment method: no check to read
+		if sub.DefaultSource != nil || !customerFallback {
+			// none of its own (a legacy source is not a payment method: no check
+			// to read)
 			return nil, nil
 		}
 		customerCard, err := stripeCustomerDefaultCard(sub)
@@ -217,23 +228,49 @@ func stripeCustomerDefaultCard(sub *stripe.Subscription) (*stripe.PaymentMethod,
 	return owner.InvoiceSettings.DefaultPaymentMethod, nil
 }
 
+// The idempotency key of a card's refusal on a subscription: the calls that
+// refuse the same card at once send the same update under it.
+func stripeCardCheckRefusalKey(subscriptionId string, paymentMethodId string) string {
+	return fmt.Sprintf("card-check-refusal-%s-%s", subscriptionId, paymentMethodId)
+}
+
+// The header Stripe sets on the answer it replays for an idempotency key it
+// has applied before.
+const stripeIdempotentReplayedHeader = "Idempotent-Replayed"
+
 // stripeRefuseTrialCard refuses the card a trial was to start on. One update
 // stamps the subscription card_check=cvc_failed and unsets the card as its
 // default; once the stamp is on, nothing credits the trial, so it is written
 // first and a later step that fails is finished by the next pass. Then the
 // card is detached from the customer, and a Checkout trial is canceled.
-// Counted and logged once, by the call that stamps. stripe.Key must be set.
+//
+// The update carries the idempotency key of the subscription and the card, so
+// of the calls that refuse the same card at once (the webhook and the app's
+// report land together), Stripe applies one: that call counts, logs and goes
+// on, and the others get Stripe's replay, or its conflict while the first is
+// in flight, and stop there. stripe.Key must be set.
 func stripeRefuseTrialCard(sub *stripe.Subscription, card *stripe.PaymentMethod) error {
 	flow := stripeCardCheckFlow(sub)
 	params := &stripe.SubscriptionParams{
 		Metadata: map[string]string{stripeMetadataCardCheck: stripeCardCheckCvcFailed},
 	}
+	params.IdempotencyKey = stripe.String(stripeCardCheckRefusalKey(sub.ID, card.ID))
 	if sub.DefaultPaymentMethod != nil && sub.DefaultPaymentMethod.ID == card.ID {
 		// an empty value unsets it: the subscription keeps no card to charge
 		params.DefaultPaymentMethod = stripe.String("")
 	}
-	if _, err := subscription.Update(sub.ID, params); err != nil {
+	updated, err := subscription.Update(sub.ID, params)
+	if err != nil {
+		var stripeErr *stripe.Error
+		if errors.As(err, &stripeErr) && stripeErr.Code == stripe.ErrorCodeIdempotencyKeyInUse {
+			// another call is refusing this card now
+			return nil
+		}
 		return fmt.Errorf("stamp the refused card on subscription %s: %w", sub.ID, err)
+	}
+	if updated != nil && updated.LastResponse != nil && updated.LastResponse.Header.Get(stripeIdempotentReplayedHeader) == "true" {
+		// another call refused this card already
+		return nil
 	}
 	stripeCardCheckRefusalsTotal.WithLabelValues(flow).Inc()
 	glog.Infof(
@@ -286,19 +323,28 @@ const (
 	stripeTrialCardRefused
 )
 
+// The billing reason of a subscription's first invoice: a trial's $0 invoice
+// that starts it.
+const stripeInvoiceBillingReasonSubscriptionCreate = "subscription_create"
+
 // stripeInvoiceTrialCardGate decides whether an invoice of sub may be credited
-// now. Only a $0 invoice is gated: a paid one charged its card.
+// now. Only a $0 invoice is gated: a paid one charged its card. Nothing is
+// written to Stripe before the subscription is known to be ours and the
+// invoice known not to be credited.
 //
-//	the subscription carries a refused card's stamp      -> refused (a Checkout
-//	                                                         trial whose cancel
-//	                                                         failed is canceled)
-//	a payment sheet still pending                       -> held
+//	no network_id metadata: not a subscription of ours  -> credit, untouched
+//	a payment sheet still pending                       -> held (refused when
+//	                                                         its card was)
 //	a payment sheet attached (its card checked then)    -> credit
-//	not in its trial                                    -> credit
 //	the invoice is already credited (credited())        -> credit (the ledger
 //	                                                         absorbs it; its
 //	                                                         window is never
 //	                                                         touched)
+//	the subscription carries a refused card's stamp      -> refused (a Checkout
+//	                                                         trial whose cancel
+//	                                                         failed is canceled)
+//	not in its trial, or not its first invoice          -> credit (a later $0
+//	                                                         invoice never refuses)
 //	a trial with no card, or a card that did not fail   -> credit
 //	a trial whose card failed its CVC check             -> refused now (dryRun:
 //	                                                         decided, nothing done)
@@ -308,35 +354,43 @@ const (
 // be set.
 func stripeInvoiceTrialCardGate(
 	sub *stripe.Subscription,
-	invoiceTotal int,
+	invoice *StripeEventInvoiceObject,
 	now time.Time,
 	dryRun bool,
 	credited func() bool,
 ) (stripeTrialCardDecision, error) {
-	if sub == nil || invoiceTotal != 0 {
+	if sub == nil || invoice.Total != 0 {
 		return stripeTrialCardCredit, nil
 	}
-	if stripeCardCheckRefused(sub) {
-		if !dryRun && stripeCardCheckFlow(sub) == stripeCardCheckFlowCheckout {
+	if sub.Metadata[stripeMetadataNetworkId] == "" {
+		// another product's subscription in the account: never touched
+		return stripeTrialCardCredit, nil
+	}
+	refused := stripeCardCheckRefused(sub)
+	switch sub.Metadata[stripeMetadataPaymentSheet] {
+	case stripePaymentSheetPending:
+		if refused {
+			return stripeTrialCardRefused, nil
+		}
+		return stripeTrialCardHeld, nil
+	case stripePaymentSheetAttached:
+		return stripeTrialCardCredit, nil
+	}
+	if credited() {
+		return stripeTrialCardCredit, nil
+	}
+	if refused {
+		if !dryRun {
 			if err := stripeCancelRefusedTrial(sub); err != nil {
 				return stripeTrialCardRefused, err
 			}
 		}
 		return stripeTrialCardRefused, nil
 	}
-	switch sub.Metadata[stripeMetadataPaymentSheet] {
-	case stripePaymentSheetPending:
-		return stripeTrialCardHeld, nil
-	case stripePaymentSheetAttached:
+	if !stripeSubscriptionInTrial(sub, now) || invoice.BillingReason != stripeInvoiceBillingReasonSubscriptionCreate {
 		return stripeTrialCardCredit, nil
 	}
-	if !stripeSubscriptionInTrial(sub, now) {
-		return stripeTrialCardCredit, nil
-	}
-	if credited() {
-		return stripeTrialCardCredit, nil
-	}
-	card, err := stripeSubscriptionCard(sub)
+	card, err := stripeSubscriptionCard(sub, true)
 	if err != nil {
 		return stripeTrialCardCredit, err
 	}
@@ -347,6 +401,24 @@ func stripeInvoiceTrialCardGate(
 		return stripeTrialCardRefused, nil
 	}
 	return stripeTrialCardRefused, stripeRefuseTrialCard(sub, card)
+}
+
+// stripeReconcileTrialInvoiceMaxAge is how long after its creation the hourly
+// reconcile still looks at a $0 invoice its ledger does not hold. A trial's
+// invoice is paid when its subscription is made; within a day its webhook,
+// Stripe's redeliveries and the buyer's report have had their chance, and a
+// payment sheet's trial is the abandoned-sheet sweep's after a day (it
+// attaches the sheets with a card and cancels the rest). Held invoices are
+// never settled into the ledger, so this bounds what a run spends on them to
+// the last day's, even when the watermark is stuck.
+const stripeReconcileTrialInvoiceMaxAge = stripeAbandonedPaymentSheetAge
+
+// stripeReconcileTrialInvoiceTooOld reports whether the reconcile leaves a $0
+// invoice alone for its age. An invoice that names no creation time is looked
+// at.
+func stripeReconcileTrialInvoiceTooOld(invoice *StripeEventInvoiceObject, now time.Time) bool {
+	return invoice.Total == 0 && 0 < invoice.Created &&
+		time.Unix(invoice.Created, 0).Before(now.Add(-stripeReconcileTrialInvoiceMaxAge))
 }
 
 // stripeReconcileTrialInvoiceHeld is the hourly reconcile's gate for a $0
@@ -366,7 +438,7 @@ func stripeReconcileTrialInvoiceHeld(
 	if err != nil {
 		return false, err
 	}
-	decision, err := stripeInvoiceTrialCardGate(sub, invoice.Total, now, dryRun, func() bool {
+	decision, err := stripeInvoiceTrialCardGate(sub, invoice, now, dryRun, func() bool {
 		// the reconcile read the ledger before
 		return false
 	})

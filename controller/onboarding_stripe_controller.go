@@ -570,8 +570,10 @@ func subscriptionMarketsBlockNewPurchase(markets []model.SubscriptionMarket, gam
 
 // stripeSubscriptionBlocksNewPurchase reports whether a Stripe subscription is
 // a live one that a new purchase would duplicate. A payment sheet the customer
-// abandoned (still pending, no payment method) does not count; it is canceled
-// and replaced by stripeCancelPendingPaymentSheetSubscriptions.
+// abandoned (still pending, no payment method) does not count, and neither
+// does one refused for its card (subscription_stripe_card_check.go), whatever
+// card it holds now; each is canceled and replaced by
+// stripeCancelPendingPaymentSheetSubscriptions.
 func stripeSubscriptionBlocksNewPurchase(sub *stripe.Subscription) bool {
 	if sub == nil {
 		return false
@@ -581,7 +583,8 @@ func stripeSubscriptionBlocksNewPurchase(sub *stripe.Subscription) bool {
 	default:
 		return false
 	}
-	if sub.Metadata[stripeMetadataPaymentSheet] == stripePaymentSheetPending && sub.DefaultPaymentMethod == nil {
+	if sub.Metadata[stripeMetadataPaymentSheet] == stripePaymentSheetPending &&
+		(sub.DefaultPaymentMethod == nil || stripeCardCheckRefused(sub)) {
 		return false
 	}
 	return true
@@ -798,7 +801,7 @@ func stripeCreditInvoiceWithOnboarding(
 		// a paid invoice credits without it; only its onboarding records wait
 		glog.Infof("[stripe]invoice %s: %s\n", invoice.Id, err)
 	}
-	decision, err := stripeInvoiceTrialCardGate(sub, invoice.Total, server.NowUtc(), false, func() bool {
+	decision, err := stripeInvoiceTrialCardGate(sub, invoice, server.NowUtc(), false, func() bool {
 		_, credited := stripeInvoiceLedgerNetworkIdFunc(ctx, invoice.Id)
 		return credited
 	})
@@ -1200,13 +1203,15 @@ func stripePaymentMethodCountry(paymentMethodId string) string {
 // stripeFinalizeResult is what stripeFinalizeTierForCustomer did with the
 // customer's payment sheet trials and their cards.
 type stripeFinalizeResult struct {
-	// the payment sheet subscriptions whose trial was refused for its card
+	// the payment sheet subscriptions whose trial is refused for its card
 	// (subscription_stripe_card_check.go), by this call or an earlier one
 	Refused map[string]bool
+	// the payment sheet subscriptions this call marked attached
+	Attached map[string]bool
 	// a trial's card could not be read, or its refusal not written: that
 	// subscription stays pending with nothing credited, and the caller tries
 	// again (a webhook through Stripe's redelivery, the report through the
-	// app's retry)
+	// app's retry, the abandoned-sheet sweep's next run)
 	Err error
 }
 
@@ -1215,12 +1220,19 @@ type stripeFinalizeResult struct {
 // onto the tier that country resolves to: the item price is switched BEFORE the
 // trial ends (nothing has been charged yet, no proration), the metadata is
 // updated, a pending payment sheet is marked attached and its trial invoice is
-// credited now. A pending sheet's trial is attached only once its subscription
-// has a card that passed the card check; a card whose CVC check failed is
-// refused instead (stripeRefuseTrialCard). Idempotent, so any of the three
-// webhooks and the purchase report may run it. stripe.Key must be set.
+// credited now.
+//
+// A pending sheet's trial is judged by the card on its own subscription,
+// never the customer's default: the sheet puts its card there, and an older
+// default judged before the new card lands would refuse a good card. It is
+// attached once that card passed the card check, which also clears the
+// refusal of an earlier card; a card whose CVC check failed is refused
+// instead (stripeRefuseTrialCard), unless the trial was credited before, whose
+// window runs out as it is. Idempotent, so any of the three webhooks, the
+// purchase report and the abandoned-sheet sweep may run it. stripe.Key must be
+// set.
 func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, customerId string, countryCode string) *stripeFinalizeResult {
-	result := &stripeFinalizeResult{Refused: map[string]bool{}}
+	result := &stripeFinalizeResult{Refused: map[string]bool{}, Attached: map[string]bool{}}
 	networkId := model.GetStripeCustomerNetworkId(clientSession.Ctx, customerId)
 	if networkId == nil {
 		// not a customer of ours (a buy-data checkout customer, or a legacy one)
@@ -1253,14 +1265,13 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 		pending := sub.Metadata[stripeMetadataPaymentSheet] == stripePaymentSheetPending
 		inTrial := sub.Status == stripe.SubscriptionStatusTrialing && 0 < sub.TrialEnd && now.Before(time.Unix(sub.TrialEnd, 0))
 
+		metadata := map[string]string{}
 		if pending && sub.Status == stripe.SubscriptionStatusTrialing {
-			// a payment sheet's trial: its card is checked before the sheet is
-			// attached and the trial credited (subscription_stripe_card_check.go)
-			if stripeCardCheckRefused(sub) {
-				result.Refused[sub.ID] = true
-				continue
-			}
-			card, err := stripeSubscriptionCard(sub)
+			// a payment sheet's trial: the card on its own subscription is
+			// checked before the sheet is attached and the trial credited
+			// (subscription_stripe_card_check.go)
+			refused := stripeCardCheckRefused(sub)
+			card, err := stripeSubscriptionCard(sub, false)
 			if err != nil {
 				glog.Errorf("[stripe]card check: %s\n", err)
 				result.Err = err
@@ -1268,9 +1279,18 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 			}
 			if card == nil {
 				// no card on the subscription yet: still waiting on the sheet
+				// (or on a new card after a refused one)
+				if refused {
+					result.Refused[sub.ID] = true
+				}
 				continue
 			}
 			if stripeCardCvcFailed(card) {
+				if stripePaymentSheetTrialCredited(clientSession.Ctx, sub) {
+					// its trial was credited before (the reconcile once
+					// credited pending sheets): it runs out as it is
+					continue
+				}
 				result.Refused[sub.ID] = true
 				if err := stripeRefuseTrialCard(sub, card); err != nil {
 					glog.Errorf("[stripe]card check: %s\n", err)
@@ -1278,9 +1298,13 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 				}
 				continue
 			}
+			if refused {
+				// a card that passed replaces the refused one: the refusal clears
+				// with the attach
+				metadata[stripeMetadataCardCheck] = ""
+			}
 		}
 
-		metadata := map[string]string{}
 		var items []*stripe.SubscriptionItemsParams
 		if code != "" && plan != "" && (inTrial || pending) {
 			tier := model.Pro().PriceTierForCountry(code)
@@ -1317,9 +1341,12 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 			glog.Errorf("[stripe]could not update subscription %s: %s\n", sub.ID, err)
 			continue
 		}
-		if pending && metadata[stripeMetadataPaymentSheet] == stripePaymentSheetAttached && updated.LatestInvoice != nil {
-			// the trial invoice held back while the sheet was pending credits now
-			stripeCreditHeldInvoice(clientSession, updated.LatestInvoice.ID, customerId)
+		if pending && metadata[stripeMetadataPaymentSheet] == stripePaymentSheetAttached {
+			result.Attached[sub.ID] = true
+			if updated.LatestInvoice != nil {
+				// the trial invoice held back while the sheet was pending credits now
+				stripeCreditHeldInvoice(clientSession, updated.LatestInvoice.ID, customerId)
+			}
 		}
 	}
 	if err := iter.Err(); err != nil {

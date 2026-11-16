@@ -50,11 +50,15 @@ type stripeCardCheckFake struct {
 	// runs, with stateLock held, after each search is answered: what changes
 	// at Stripe between the search and the reads after it
 	afterSearch func()
+	// subscription updates by idempotency key: a repeated key is answered the
+	// first answer, replayed, and changes nothing, as Stripe does
+	idempotent map[string]map[string]any
 }
 
 // Serves the fake through both seams, restored when the test ends.
 func newStripeCardCheckFake(t testing.TB) *stripeCardCheckFake {
 	fake := &stripeCardCheckFake{
+		idempotent:     map[string]map[string]any{},
 		subscriptions:  map[string]map[string]any{},
 		invoices:       map[string]map[string]any{},
 		paymentMethods: map[string]map[string]any{},
@@ -246,6 +250,14 @@ func (self *stripeCardCheckFake) defaultPaymentMethod(subscriptionId string) str
 	return paymentMethod
 }
 
+// Removes a metadata key of a stored subscription.
+func (self *stripeCardCheckFake) deleteMetadata(subscriptionId string, key string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	metadata, _ := self.subscriptions[subscriptionId]["metadata"].(map[string]any)
+	delete(metadata, key)
+}
+
 // Sets a field of a stored subscription.
 func (self *stripeCardCheckFake) setSubscriptionField(subscriptionId string, key string, value any) {
 	self.stateLock.Lock()
@@ -392,6 +404,15 @@ func (self *stripeCardCheckFake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		switch r.Method {
 		case http.MethodPost:
+			idempotencyKey := r.Header.Get("Idempotency-Key")
+			if replay, ok := self.idempotent[idempotencyKey]; ok {
+				w.Header().Set("Idempotent-Replayed", "true")
+				answer(replay)
+				return
+			}
+			defer func() {
+				self.idempotent[idempotencyKey] = self.subscriptionObject(sub, expand)
+			}()
 			form := []string{}
 			for key, values := range r.PostForm {
 				form = append(form, fmt.Sprintf("%s=%s", key, strings.Join(values, ",")))

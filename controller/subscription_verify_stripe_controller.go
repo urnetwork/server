@@ -419,23 +419,26 @@ func verifyStripePaymentSheetSubscription(
 		// (stripeHandleInvoicePaidWithOnboarding). With the card on the
 		// subscription, finalize as setup_intent.succeeded does: the card
 		// check, the tier from the card's country, then the held invoice's
-		// credit.
-		if subscription.Metadata[stripeMetadataCardCheck] == stripeCardCheckCvcFailed {
-			// refused when its card was attached, by a webhook or an earlier
-			// report (subscription_stripe_card_check.go)
-			return verifyStripeCardRefused(), nil
+		// credit. The ledger is read first: a trial credited before is only
+		// ever answered so, never refused.
+		if result, done := stripeVerifyLedgerStatus(clientSession, invoiceId, nil); done {
+			return result, nil
 		}
 		paymentMethodId := stripeIdFromRaw(subscription.DefaultPaymentMethod)
 		if paymentMethodId == "" {
+			if subscription.Metadata[stripeMetadataCardCheck] == stripeCardCheckCvcFailed {
+				// refused when its card was attached, by a webhook or an earlier
+				// report, and no card since (subscription_stripe_card_check.go)
+				return verifyStripeCardRefused(), nil
+			}
 			return verifyStatusResult(VerifyPurchaseStatusPending), nil
 		}
 		customerId := stripeIdFromRaw(subscription.Customer)
 		if customerId == "" {
 			return NewVerifyStorePurchaseInvalid(), nil
 		}
-		if result, done := stripeVerifyLedgerStatus(clientSession, invoiceId, nil); done {
-			return result, nil
-		}
+		// a card on a refused sheet is judged like a first one: one that
+		// passes clears the refusal and starts the trial
 		// the finalization reads and updates the customer's subscriptions
 		// through the stripe-go sdk
 		stripe.Key = stripeApiToken()

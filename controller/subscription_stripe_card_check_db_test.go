@@ -97,13 +97,25 @@ func stripeCardCheckSetupIntent(customerId string, paymentMethodId string) map[s
 	}
 }
 
+// A trial's first invoice, as invoice.paid delivers it.
 func stripeCardCheckInvoicePaid(invoiceId string, customerId string) map[string]any {
 	return map[string]any{
-		"id":       invoiceId,
-		"object":   "invoice",
-		"total":    0,
-		"customer": customerId,
-		"currency": "usd",
+		"id":             invoiceId,
+		"object":         "invoice",
+		"total":          0,
+		"customer":       customerId,
+		"currency":       "usd",
+		"billing_reason": "subscription_create",
+	}
+}
+
+// A trial's first invoice, as the reconcile's listing of paid invoices has it.
+func stripeCardCheckListedInvoice(invoiceId string, created time.Time) map[string]any {
+	return map[string]any{
+		"id":             invoiceId,
+		"total":          0,
+		"billing_reason": "subscription_create",
+		"created":        created.Unix(),
 	}
 }
 
@@ -361,11 +373,19 @@ func TestStripeTrialCardCheckReconcileAndCreditedWindows(t *testing.T) {
 		addStripeCardCheckTrial(fake, checkoutBad, "recbad", false, "fail")
 		checkoutGood := newStripeCardCheckDbNetwork(t, ctx, "cardcheckrecgood")
 		addStripeCardCheckTrial(fake, checkoutGood, "recgood", false, "pass")
+		// a checkout trial whose card failed, its invoice made over a day ago:
+		// the reconcile leaves a $0 invoice that old alone, unread
+		checkoutOld := newStripeCardCheckDbNetwork(t, ctx, "cardcheckrecold")
+		oldCreated := now.Add(-stripeReconcileTrialInvoiceMaxAge - time.Hour)
+		fake.addCard("pm_recold", checkoutOld.customerId, "fail")
+		fake.addSubscription("sub_recold", checkoutOld.customerId, checkoutOld.networkId, "trialing", map[string]string{"plan": "yearly"}, "pm_recold", "in_recold", oldCreated, oldCreated.Add(14*24*time.Hour))
+		fake.addInvoice("in_recold", "sub_recold", 0, oldCreated, oldCreated.Add(14*24*time.Hour))
 		fake.listInvoices = []map[string]any{
-			{"id": "in_recpending", "total": 0},
-			{"id": "in_recrefused", "total": 0},
-			{"id": "in_recbad", "total": 0},
-			{"id": "in_recgood", "total": 0},
+			stripeCardCheckListedInvoice("in_recpending", now.Add(-time.Hour)),
+			stripeCardCheckListedInvoice("in_recrefused", now.Add(-time.Hour)),
+			stripeCardCheckListedInvoice("in_recbad", now.Add(-time.Minute)),
+			stripeCardCheckListedInvoice("in_recgood", now.Add(-time.Minute)),
+			stripeCardCheckListedInvoice("in_recold", oldCreated),
 		}
 
 		// a dry run decides and writes nothing
@@ -401,6 +421,10 @@ func TestStripeTrialCardCheckReconcileAndCreditedWindows(t *testing.T) {
 		connect.AssertEqual(t, len(updatesAfter), 1)
 		connect.AssertEqual(t, len(detachedAfter), 1)
 		connect.AssertEqual(t, len(canceledAfter), 1)
+		// the day-old invoice was never read, its trial never touched
+		connect.AssertEqual(t, fake.requestCount("GET /v1/invoices/in_recold"), 0)
+		connect.AssertEqual(t, fake.status("sub_recold"), "trialing")
+		connect.AssertEqual(t, fake.metadata("sub_recold")["card_check"], "")
 
 		// windows credited before the check: an abandoned sheet's trial the
 		// reconcile credited before the hold, and a checkout trial whose card
@@ -431,17 +455,19 @@ func TestStripeTrialCardCheckReconcileAndCreditedWindows(t *testing.T) {
 		// the reconcile lists them again, the webhooks redeliver, the report
 		// asks, and the sweep runs
 		fake.listInvoices = append(fake.listInvoices,
-			map[string]any{"id": "in_creditedsheet", "total": 0},
-			map[string]any{"id": "in_creditedcheckout", "total": 0},
+			stripeCardCheckListedInvoice("in_creditedsheet", abandonedCreated),
+			stripeCardCheckListedInvoice("in_creditedcheckout", now.Add(-time.Minute)),
 		)
 		reconcile(false)
 		deliverStripeCardCheckEvent(t, ctx, "invoice.paid", stripeCardCheckInvoicePaid("in_creditedsheet", abandoned.customerId))
 		deliverStripeCardCheckEvent(t, ctx, "invoice.paid", stripeCardCheckInvoicePaid("in_creditedcheckout", creditedCheckout.customerId))
 		result, err := VerifyStripeCheckout(&VerifyStripeCheckoutArgs{SessionId: "cs_test_creditedcheckout"}, creditedCheckout.clientSession)
 		requireVerifyStatus(t, "a checkout credited before the check", result, err, VerifyPurchaseStatusAlreadyCredited)
-		sweep, err := stripeSweepAbandonedSheets(ctx, now, defaultStripeAbandonedSheetSettings())
+		sweep, err := stripeSweepAbandonedSheets(session.Testing_CreateClientSession(ctx, nil), now, defaultStripeAbandonedSheetSettings())
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, sweep.CanceledCount, 0)
+		connect.AssertEqual(t, sweep.AttachedCount, 0)
+		connect.AssertEqual(t, sweep.RefusedCount, 0)
 		if sweep.CreditedCount < 1 {
 			t.Fatalf("the sweep did not keep the credited sheet: %+v", sweep)
 		}
@@ -459,5 +485,154 @@ func TestStripeTrialCardCheckReconcileAndCreditedWindows(t *testing.T) {
 		connect.AssertEqual(t, stripeCardCheckWindowEnd(t, ctx, creditedCheckout.networkId, "in_creditedcheckout").Equal(*checkoutWindow), true)
 		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, abandoned.networkId), true)
 		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, creditedCheckout.networkId), true)
+	})
+}
+
+// The payment sheet judges only the card on its own subscription: a
+// returning customer's older default, failed or not, never stands in for the
+// sheet's new card, whatever order the card reaches the customer and the
+// subscription. A card that passes on a refused sheet clears the refusal, and
+// a refused sheet never holds a new purchase back. A sheet whose trial was
+// credited before is never refused.
+func TestStripeTrialCardCheckSheetCardRaces(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		setProCycleTestData(t, 10*model.Tib)
+		fake := newStripeCardCheckFake(t)
+		now := server.NowUtc()
+		trialEnd := now.Add(StripeSubscriptionTrialDays * 24 * time.Hour)
+		refusalsBefore := stripeCardCheckRefusals(stripeCardCheckFlowPaymentSheet)
+
+		// a returning customer whose default card failed its CVC check opens a
+		// new sheet; the new card reaches the customer before the subscription
+		returning := newStripeCardCheckDbNetwork(t, ctx, "cardcheckreturning")
+		fake.addCard("pm_returningold", returning.customerId, "fail")
+		fake.addCustomer(returning.customerId, "pm_returningold")
+		fake.addCard("pm_returningnew", returning.customerId, "pass")
+		fake.addSubscription("sub_returning", returning.customerId, returning.networkId, "trialing", map[string]string{"plan": "yearly", "payment_sheet": "pending"}, "", "in_returning", now.Add(-time.Minute), trialEnd)
+		fake.addInvoice("in_returning", "sub_returning", 0, now.Add(-time.Minute), trialEnd)
+		deliverStripeCardCheckEvent(t, ctx, "invoice.paid", stripeCardCheckInvoicePaid("in_returning", returning.customerId))
+		deliverStripeCardCheckEvent(t, ctx, "payment_method.attached", map[string]any{
+			"id":       "pm_returningnew",
+			"object":   "payment_method",
+			"customer": returning.customerId,
+			"card":     map[string]any{"country": "DE", "checks": map[string]any{"cvc_check": "pass"}},
+		})
+		// nothing judged the old card: no refusal, nothing detached, still waiting
+		connect.AssertEqual(t, fake.metadata("sub_returning")["card_check"], "")
+		connect.AssertEqual(t, fake.metadata("sub_returning")["payment_sheet"], "pending")
+		_, detached, _ := fake.writes()
+		connect.AssertEqual(t, len(detached), 0)
+		result, err := VerifyStripeCheckout(&VerifyStripeCheckoutArgs{SubscriptionId: "sub_returning"}, returning.clientSession)
+		requireVerifyStatus(t, "before the card is on the subscription", result, err, VerifyPurchaseStatusPending)
+		// then the card lands on the subscription: the trial starts
+		fake.setSubscriptionField("sub_returning", "default_payment_method", "pm_returningnew")
+		deliverStripeCardCheckEvent(t, ctx, "setup_intent.succeeded", stripeCardCheckSetupIntent(returning.customerId, "pm_returningnew"))
+		connect.AssertEqual(t, fake.metadata("sub_returning")["payment_sheet"], "attached")
+		ledgerRows, _ := stripeVerifyDbCounts(t, ctx, returning.networkId, "in_returning")
+		connect.AssertEqual(t, ledgerRows, 1)
+		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, returning.networkId), true)
+		result, err = VerifyStripeCheckout(&VerifyStripeCheckoutArgs{SubscriptionId: "sub_returning"}, returning.clientSession)
+		requireVerifyStatus(t, "the returning customer's trial", result, err, VerifyPurchaseStatusAlreadyCredited)
+		_, detached, _ = fake.writes()
+		connect.AssertEqual(t, len(detached), 0)
+		connect.AssertEqual(t, stripeCardCheckRefusals(stripeCardCheckFlowPaymentSheet), refusalsBefore)
+
+		// a refused sheet, then a card that passes on the same subscription:
+		// the refused sheet holds no purchase back, card or not, and the report
+		// clears the refusal and starts the trial
+		cleared := newStripeCardCheckDbNetwork(t, ctx, "cardcheckcleared")
+		addStripeCardCheckTrial(fake, cleared, "clearedbad", true, "fail")
+		deliverStripeCardCheckEvent(t, ctx, "setup_intent.succeeded", stripeCardCheckSetupIntent(cleared.customerId, "pm_clearedbad"))
+		connect.AssertEqual(t, fake.metadata("sub_clearedbad")["card_check"], "cvc_failed")
+		connect.AssertEqual(t, stripeNewSubscriptionRefusal(cleared.clientSession, cleared.customerId), "")
+		fake.addCard("pm_clearedgood", cleared.customerId, "pass")
+		fake.setSubscriptionField("sub_clearedbad", "default_payment_method", "pm_clearedgood")
+		connect.AssertEqual(t, stripeNewSubscriptionRefusal(cleared.clientSession, cleared.customerId), "")
+		result, err = VerifyStripeCheckout(&VerifyStripeCheckoutArgs{SubscriptionId: "sub_clearedbad"}, cleared.clientSession)
+		requireVerifyStatus(t, "a refused sheet with a good card since", result, err, VerifyPurchaseStatusCredited)
+		connect.AssertEqual(t, fake.metadata("sub_clearedbad")["card_check"], "")
+		connect.AssertEqual(t, fake.metadata("sub_clearedbad")["payment_sheet"], "attached")
+		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, cleared.networkId), true)
+
+		// a sheet whose trial the reconcile credited before the hold, and whose
+		// card fails: never refused, and its window stands
+		prior := newStripeCardCheckDbNetwork(t, ctx, "cardcheckprior")
+		addStripeCardCheckTrial(fake, prior, "priorbad", true, "fail")
+		_, err = stripeHandleInvoicePaid(&StripeEventInvoiceObject{Id: "in_priorbad"}, session.Testing_CreateClientSession(ctx, nil))
+		connect.AssertEqual(t, err, nil)
+		window := stripeCardCheckWindowEnd(t, ctx, prior.networkId, "in_priorbad")
+		if window == nil {
+			t.Fatalf("no window credited")
+		}
+		deliverStripeCardCheckEvent(t, ctx, "setup_intent.succeeded", stripeCardCheckSetupIntent(prior.customerId, "pm_priorbad"))
+		connect.AssertEqual(t, fake.metadata("sub_priorbad")["card_check"], "")
+		connect.AssertEqual(t, fake.defaultPaymentMethod("sub_priorbad"), "pm_priorbad")
+		_, detached, _ = fake.writes()
+		connect.AssertEqual(t, slices.Contains(detached, "pm_priorbad"), false)
+		result, err = VerifyStripeCheckout(&VerifyStripeCheckoutArgs{SubscriptionId: "sub_priorbad"}, prior.clientSession)
+		requireVerifyStatus(t, "a sheet credited before", result, err, VerifyPurchaseStatusAlreadyCredited)
+		connect.AssertEqual(t, stripeCardCheckWindowEnd(t, ctx, prior.networkId, "in_priorbad").Equal(*window), true)
+		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, prior.networkId), true)
+		connect.AssertEqual(t, stripeCardCheckRefusals(stripeCardCheckFlowPaymentSheet), refusalsBefore+1)
+	})
+}
+
+// A completed sheet whose attach every path missed (no webhook attached it,
+// no report came) is attached by the sweep, its card checked and its trial
+// credited through the webhooks' own finalization; a sheet whose trial was
+// credited before is left as it is.
+func TestStripeTrialCardCheckSweepAttachesMissedSheets(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		setProCycleTestData(t, 10*model.Tib)
+		fake := newStripeCardCheckFake(t)
+
+		missed := newStripeCardCheckDbNetwork(t, ctx, "cardcheckmissed")
+		addStripeCardCheckTrial(fake, missed, "missed", true, "pass")
+		missedBad := newStripeCardCheckDbNetwork(t, ctx, "cardcheckmissedbad")
+		addStripeCardCheckTrial(fake, missedBad, "missedbad", true, "fail")
+		credited := newStripeCardCheckDbNetwork(t, ctx, "cardcheckmissedcredited")
+		addStripeCardCheckTrial(fake, credited, "missedcredited", true, "fail")
+		_, err := stripeHandleInvoicePaid(&StripeEventInvoiceObject{Id: "in_missedcredited"}, session.Testing_CreateClientSession(ctx, nil))
+		connect.AssertEqual(t, err, nil)
+		window := stripeCardCheckWindowEnd(t, ctx, credited.networkId, "in_missedcredited")
+		if window == nil {
+			t.Fatalf("no window credited")
+		}
+		// held: no trial yet
+		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, missed.networkId), false)
+
+		sweep, err := stripeSweepAbandonedSheets(session.Testing_CreateClientSession(ctx, nil), server.NowUtc(), defaultStripeAbandonedSheetSettings())
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, sweep.AttachedCount, 1)
+		connect.AssertEqual(t, sweep.RefusedCount, 1)
+		connect.AssertEqual(t, sweep.CreditedCount, 1)
+		connect.AssertEqual(t, sweep.CanceledCount, 0)
+
+		connect.AssertEqual(t, fake.metadata("sub_missed")["payment_sheet"], "attached")
+		ledgerRows, renewalRows := stripeVerifyDbCounts(t, ctx, missed.networkId, "in_missed")
+		connect.AssertEqual(t, ledgerRows, 1)
+		connect.AssertEqual(t, renewalRows, 1)
+		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, missed.networkId), true)
+		result, err := VerifyStripeCheckout(&VerifyStripeCheckoutArgs{SubscriptionId: "sub_missed"}, missed.clientSession)
+		requireVerifyStatus(t, "attached by the sweep", result, err, VerifyPurchaseStatusAlreadyCredited)
+
+		connect.AssertEqual(t, fake.metadata("sub_missedbad")["card_check"], "cvc_failed")
+		connect.AssertEqual(t, fake.defaultPaymentMethod("sub_missedbad"), "")
+		ledgerRows, _ = stripeVerifyDbCounts(t, ctx, missedBad.networkId, "in_missedbad")
+		connect.AssertEqual(t, ledgerRows, 0)
+		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, missedBad.networkId), false)
+		result, err = VerifyStripeCheckout(&VerifyStripeCheckoutArgs{SubscriptionId: "sub_missedbad"}, missedBad.clientSession)
+		requireVerifyCardRefusal(t, "refused by the sweep", result, err)
+
+		// the credited sheet: no stamp, its card on it, its window as it was
+		connect.AssertEqual(t, fake.metadata("sub_missedcredited")["card_check"], "")
+		connect.AssertEqual(t, fake.metadata("sub_missedcredited")["payment_sheet"], "pending")
+		connect.AssertEqual(t, fake.defaultPaymentMethod("sub_missedcredited"), "pm_missedcredited")
+		connect.AssertEqual(t, stripeCardCheckWindowEnd(t, ctx, credited.networkId, "in_missedcredited").Equal(*window), true)
+		_, detached, canceled := fake.writes()
+		connect.AssertEqual(t, detached, []string{"pm_missedbad"})
+		connect.AssertEqual(t, len(canceled), 0)
 	})
 }

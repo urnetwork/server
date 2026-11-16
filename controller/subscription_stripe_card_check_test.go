@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stripe/stripe-go/v82"
+	"github.com/stripe/stripe-go/v82/subscription"
 
 	"github.com/urnetwork/server"
 )
@@ -77,13 +78,19 @@ func TestStripeInvoiceTrialCardGate(t *testing.T) {
 		fake.addSubscription("sub_"+name, "cus_"+name, networkId, status, metadata, "pm_"+name, "in_"+name, now.Add(-time.Minute), trialEnd)
 		fake.addInvoice("in_"+name, "sub_"+name, total, now.Add(-time.Minute), trialEnd)
 	}
-	gate := func(name string, total int, dryRun bool, credited func() bool) (stripeTrialCardDecision, error) {
+	// the trial's first invoice, or a later one with another billing reason
+	gateFor := func(name string, total int, billingReason string, dryRun bool, credited func() bool) (stripeTrialCardDecision, error) {
 		t.Helper()
 		sub, err := stripeSubscriptionForInvoice(ctx, "in_"+name)
 		if err != nil || sub == nil {
 			t.Fatalf("%s: subscription = %v, err = %v", name, sub, err)
 		}
-		return stripeInvoiceTrialCardGate(sub, total, now, dryRun, credited)
+		invoice := &StripeEventInvoiceObject{Id: "in_" + name, Total: total, BillingReason: billingReason}
+		return stripeInvoiceTrialCardGate(sub, invoice, now, dryRun, credited)
+	}
+	gate := func(name string, total int, dryRun bool, credited func() bool) (stripeTrialCardDecision, error) {
+		t.Helper()
+		return gateFor(name, total, stripeInvoiceBillingReasonSubscriptionCreate, dryRun, credited)
 	}
 	requireDecision := func(name string, total int, dryRun bool, credited func() bool, want stripeTrialCardDecision) {
 		t.Helper()
@@ -132,6 +139,18 @@ func TestStripeInvoiceTrialCardGate(t *testing.T) {
 	add("credited", "trialing", checkout, "fail", 0)
 	requireDecision("credited", 0, false, func() bool { return true }, stripeTrialCardCredit)
 
+	// a later $0 invoice of a trial (not its first) never refuses: a window
+	// its first invoice credited stays
+	add("later", "trialing", checkout, "fail", 0)
+	if decision, err := gateFor("later", 0, "subscription_update", false, notCredited); err != nil || decision != stripeTrialCardCredit {
+		t.Fatalf("a later invoice: decision %d, err %v", decision, err)
+	}
+
+	// another product's trial in the account (no network_id): never touched
+	add("notours", "trialing", checkout, "fail", 0)
+	fake.deleteMetadata("sub_notours", "network_id")
+	requireDecision("notours", 0, false, notCredited, stripeTrialCardCredit)
+
 	// a dry run decides and does nothing
 	add("dryrun", "trialing", checkout, "fail", 0)
 	requireDecision("dryrun", 0, true, notCredited, stripeTrialCardRefused)
@@ -174,6 +193,12 @@ func TestStripeInvoiceTrialCardGate(t *testing.T) {
 	requireDecision("stamped", 0, false, notCredited, stripeTrialCardRefused)
 	if fake.status("sub_stamped") != "canceled" {
 		t.Fatalf("a stamped trial left %s", fake.status("sub_stamped"))
+	}
+	// but never for an invoice the ledger holds: its window stays
+	add("stampedcredited", "trialing", map[string]string{"plan": "yearly", "card_check": "cvc_failed"}, "fail", 0)
+	requireDecision("stampedcredited", 0, false, func() bool { return true }, stripeTrialCardCredit)
+	if fake.status("sub_stampedcredited") != "trialing" {
+		t.Fatalf("a credited trial was canceled")
 	}
 
 	// the stamp could not be written: still a refusal, with the error to retry,
@@ -218,13 +243,119 @@ func TestStripeInvoiceTrialCardGate(t *testing.T) {
 		ID:                   "sub_unread",
 		Status:               stripe.SubscriptionStatusTrialing,
 		TrialEnd:             trialEnd.Unix(),
-		Metadata:             map[string]string{"plan": "yearly"},
+		Metadata:             map[string]string{"plan": "yearly", "network_id": networkId.String()},
 		DefaultPaymentMethod: &stripe.PaymentMethod{ID: "pm_unread"},
 	}
-	if _, err := stripeInvoiceTrialCardGate(unexpanded, 0, now, false, notCredited); err == nil {
+	firstInvoice := &StripeEventInvoiceObject{Id: "in_unread", BillingReason: stripeInvoiceBillingReasonSubscriptionCreate}
+	if _, err := stripeInvoiceTrialCardGate(unexpanded, firstInvoice, now, false, notCredited); err == nil {
 		t.Fatalf("an unreadable card was judged")
 	}
 	if fake.requestCount("GET /v1/payment_methods/pm_unread") != 1 {
 		t.Fatalf("the unexpanded card was not read")
+	}
+}
+
+// A payment sheet's trial is judged by the card on its own subscription: a
+// customer's older default never stands in for it. Checkout's may fall back
+// to the customer's default, which is what Stripe would charge.
+func TestStripeSubscriptionCardOwnCardForTheSheet(t *testing.T) {
+	fake := newStripeCardCheckFake(t)
+	now := server.NowUtc()
+	networkId := server.NewId()
+	fake.addCard("pm_old", "cus_returning", "fail")
+	fake.addCustomer("cus_returning", "pm_old")
+	fake.addCard("pm_new", "cus_returning", "pass")
+	fake.addSubscription("sub_sheet", "cus_returning", networkId, "trialing", map[string]string{"payment_sheet": "pending"}, "", "in_sheet", now, now.Add(14*24*time.Hour))
+	read := func() *stripe.Subscription {
+		t.Helper()
+		params := &stripe.SubscriptionParams{}
+		params.AddExpand("default_payment_method")
+		sub, err := subscription.Get("sub_sheet", params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sub
+	}
+
+	// before the sheet's card lands: no card for the sheet, the old default for
+	// Checkout's fallback
+	if card, err := stripeSubscriptionCard(read(), false); err != nil || card != nil {
+		t.Fatalf("the sheet judged %v (err %v) before its card landed", card, err)
+	}
+	if card, err := stripeSubscriptionCard(read(), true); err != nil || card == nil || card.ID != "pm_old" {
+		t.Fatalf("the fallback read %v, err %v", card, err)
+	}
+	// the sheet's card on its subscription is the one judged
+	fake.setSubscriptionField("sub_sheet", "default_payment_method", "pm_new")
+	if card, err := stripeSubscriptionCard(read(), false); err != nil || card == nil || card.ID != "pm_new" || stripeCardCvcFailed(card) {
+		t.Fatalf("the sheet's own card: %v, err %v", card, err)
+	}
+}
+
+// Of the calls that refuse the same card at once, Stripe applies one: it alone
+// counts, logs, detaches and cancels.
+func TestStripeRefuseTrialCardCountsOnce(t *testing.T) {
+	fake := newStripeCardCheckFake(t)
+	now := server.NowUtc()
+	networkId := server.NewId()
+	fake.addCard("pm_twice", "cus_twice", "fail")
+	fake.addSubscription("sub_twice", "cus_twice", networkId, "trialing", map[string]string{"plan": "yearly"}, "pm_twice", "in_twice", now, now.Add(14*24*time.Hour))
+	params := &stripe.SubscriptionParams{}
+	params.AddExpand("default_payment_method")
+	// both read the subscription before either refuses
+	first, err := subscription.Get("sub_twice", params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := subscription.Get("sub_twice", params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusals := func() float64 {
+		return testutil.ToFloat64(stripeCardCheckRefusalsTotal.WithLabelValues(stripeCardCheckFlowCheckout))
+	}
+	before := refusals()
+	if err := stripeRefuseTrialCard(first, first.DefaultPaymentMethod); err != nil {
+		t.Fatal(err)
+	}
+	if err := stripeRefuseTrialCard(second, second.DefaultPaymentMethod); err != nil {
+		t.Fatal(err)
+	}
+	if got := refusals() - before; got != 1 {
+		t.Fatalf("refusals counted %v, want 1", got)
+	}
+	updates, detached, canceled := fake.writes()
+	if len(updates) != 1 || !slices.Equal(detached, []string{"pm_twice"}) || !slices.Equal(canceled, []string{"sub_twice"}) {
+		t.Fatalf("updates %v, detached %v, canceled %v", updates, detached, canceled)
+	}
+	if fake.requestCount("POST /v1/subscriptions/sub_twice") != 2 {
+		t.Fatalf("the second refusal did not reach Stripe")
+	}
+}
+
+// A sheet refused for its card never blocks a new purchase, whatever card it
+// holds: the new sheet replaces it.
+func TestStripeRefusedSheetNeverBlocksANewPurchase(t *testing.T) {
+	card := &stripe.PaymentMethod{ID: "pm_card"}
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		card     *stripe.PaymentMethod
+		want     bool
+	}{
+		{"abandoned", map[string]string{"payment_sheet": "pending"}, nil, false},
+		{"refused, no card", map[string]string{"payment_sheet": "pending", "card_check": "cvc_failed"}, nil, false},
+		{"refused, a card since", map[string]string{"payment_sheet": "pending", "card_check": "cvc_failed"}, card, false},
+		{"completed, waiting on its attach", map[string]string{"payment_sheet": "pending"}, card, true},
+		{"attached", map[string]string{"payment_sheet": "attached"}, card, true},
+		{"checkout", map[string]string{}, card, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sub := &stripe.Subscription{Status: stripe.SubscriptionStatusTrialing, Metadata: test.metadata, DefaultPaymentMethod: test.card}
+			if got := stripeSubscriptionBlocksNewPurchase(sub); got != test.want {
+				t.Fatalf("blocks = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
