@@ -581,12 +581,30 @@ func TestStripeTrialCardCheckSheetCardRaces(t *testing.T) {
 // A completed sheet whose attach every path missed (no webhook attached it,
 // no report came) is attached by the sweep, its card checked and its trial
 // credited through the webhooks' own finalization; a sheet whose trial was
-// credited before is left as it is.
+// credited before is left as it is. A sheet with no card on its subscription
+// and only its customer's default card from an earlier purchase is abandoned:
+// canceled after a day, the customer's card left as it is, and kept before
+// (the owner, 2026-11-16: "Cancel after a day"); one whose card lands on its
+// subscription just before the cancel is attached instead.
 func TestStripeTrialCardCheckSweepAttachesMissedSheets(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		setProCycleTestData(t, 10*model.Tib)
 		fake := newStripeCardCheckFake(t)
+		now := server.NowUtc()
+		dayOld := now.Add(-stripeAbandonedPaymentSheetAge - time.Hour)
+		pending := map[string]string{"plan": "yearly", "payment_sheet": "pending"}
+		// a sheet with no card on its subscription; customerCard, when set, is
+		// its customer's default card from an earlier purchase
+		addCardlessSheet := func(network *stripeCardCheckDbNetwork, name string, created time.Time, customerCard string) {
+			if customerCard != "" {
+				fake.addCard(customerCard, network.customerId, "pass")
+			}
+			fake.addCustomer(network.customerId, customerCard)
+			trialEnd := created.Add(StripeSubscriptionTrialDays * 24 * time.Hour)
+			fake.addSubscription("sub_"+name, network.customerId, network.networkId, "trialing", pending, "", "in_"+name, created, trialEnd)
+			fake.addInvoice("in_"+name, "sub_"+name, 0, created, trialEnd)
+		}
 
 		missed := newStripeCardCheckDbNetwork(t, ctx, "cardcheckmissed")
 		addStripeCardCheckTrial(fake, missed, "missed", true, "pass")
@@ -600,15 +618,58 @@ func TestStripeTrialCardCheckSweepAttachesMissedSheets(t *testing.T) {
 		if window == nil {
 			t.Fatalf("no window credited")
 		}
+		oldCustomer := newStripeCardCheckDbNetwork(t, ctx, "cardcheckoldcustomer")
+		addCardlessSheet(oldCustomer, "oldcustomer", dayOld, "pm_oldcustomer")
+		youngCustomer := newStripeCardCheckDbNetwork(t, ctx, "cardcheckyoungcustomer")
+		addCardlessSheet(youngCustomer, "youngcustomer", now.Add(-time.Hour), "pm_youngcustomer")
+		creditedCustomer := newStripeCardCheckDbNetwork(t, ctx, "cardcheckcreditedcustomer")
+		addCardlessSheet(creditedCustomer, "creditedcustomer", dayOld, "pm_creditedcustomer")
+		_, err = stripeHandleInvoicePaid(&StripeEventInvoiceObject{Id: "in_creditedcustomer"}, session.Testing_CreateClientSession(ctx, nil))
+		connect.AssertEqual(t, err, nil)
+		creditedCustomerWindow := stripeCardCheckWindowEnd(t, ctx, creditedCustomer.networkId, "in_creditedcustomer")
+		lastMoment := newStripeCardCheckDbNetwork(t, ctx, "cardchecklastmoment")
+		addCardlessSheet(lastMoment, "lastmoment", dayOld, "")
+		fake.addCard("pm_lastmoment", lastMoment.customerId, "pass")
+		fake.afterSearch = func() {
+			// the sheet's card lands on its subscription after the search found it
+			// card-less, before the read that comes before a cancel
+			if fake.subscriptions["sub_lastmoment"]["default_payment_method"] == nil {
+				fake.subscriptions["sub_lastmoment"]["default_payment_method"] = "pm_lastmoment"
+			}
+		}
 		// held: no trial yet
 		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, missed.networkId), false)
 
-		sweep, err := stripeSweepAbandonedSheets(session.Testing_CreateClientSession(ctx, nil), server.NowUtc(), defaultStripeAbandonedSheetSettings())
+		sweep, err := stripeSweepAbandonedSheets(session.Testing_CreateClientSession(ctx, nil), now, defaultStripeAbandonedSheetSettings())
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, sweep.AttachedCount, 1)
+		connect.AssertEqual(t, sweep.AttachedCount, 2)
 		connect.AssertEqual(t, sweep.RefusedCount, 1)
-		connect.AssertEqual(t, sweep.CreditedCount, 1)
-		connect.AssertEqual(t, sweep.CanceledCount, 0)
+		connect.AssertEqual(t, sweep.CreditedCount, 2)
+		connect.AssertEqual(t, sweep.CanceledCount, 1)
+
+		// the customer's old card is no reason to keep a day-old sheet: canceled,
+		// and the card is still the customer's default, never detached
+		connect.AssertEqual(t, fake.status("sub_oldcustomer"), "canceled")
+		ledgerRows, _ := stripeVerifyDbCounts(t, ctx, oldCustomer.networkId, "in_oldcustomer")
+		connect.AssertEqual(t, ledgerRows, 0)
+		fake.stateLock.Lock()
+		oldCustomerDefault := fake.customers[oldCustomer.customerId]["invoice_settings"].(map[string]any)["default_payment_method"]
+		oldCustomerCardOwner := fake.paymentMethods["pm_oldcustomer"]["customer"]
+		fake.stateLock.Unlock()
+		connect.AssertEqual(t, oldCustomerDefault, "pm_oldcustomer")
+		connect.AssertEqual(t, oldCustomerCardOwner, oldCustomer.customerId)
+		// under a day: kept
+		connect.AssertEqual(t, fake.status("sub_youngcustomer"), "trialing")
+		// credited before: never canceled, its window as it was
+		connect.AssertEqual(t, fake.status("sub_creditedcustomer"), "trialing")
+		connect.AssertEqual(t, stripeCardCheckWindowEnd(t, ctx, creditedCustomer.networkId, "in_creditedcustomer").Equal(*creditedCustomerWindow), true)
+		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, creditedCustomer.networkId), true)
+		// its card landed at the last moment: attached through the card check
+		connect.AssertEqual(t, fake.status("sub_lastmoment"), "trialing")
+		connect.AssertEqual(t, fake.metadata("sub_lastmoment")["payment_sheet"], "attached")
+		ledgerRows, _ = stripeVerifyDbCounts(t, ctx, lastMoment.networkId, "in_lastmoment")
+		connect.AssertEqual(t, ledgerRows, 1)
+		connect.AssertEqual(t, model.IsProNetworkFresh(ctx, lastMoment.networkId), true)
 
 		connect.AssertEqual(t, fake.metadata("sub_missed")["payment_sheet"], "attached")
 		ledgerRows, renewalRows := stripeVerifyDbCounts(t, ctx, missed.networkId, "in_missed")
@@ -633,6 +694,6 @@ func TestStripeTrialCardCheckSweepAttachesMissedSheets(t *testing.T) {
 		connect.AssertEqual(t, stripeCardCheckWindowEnd(t, ctx, credited.networkId, "in_missedcredited").Equal(*window), true)
 		_, detached, canceled := fake.writes()
 		connect.AssertEqual(t, detached, []string{"pm_missedbad"})
-		connect.AssertEqual(t, len(canceled), 0)
+		connect.AssertEqual(t, canceled, []string{"sub_oldcustomer"})
 	})
 }

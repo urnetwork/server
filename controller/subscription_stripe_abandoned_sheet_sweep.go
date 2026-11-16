@@ -18,10 +18,16 @@
 //	                                                             finalization the
 //	                                                             webhooks run
 //	no card, under stripeAbandonedPaymentSheetAge old         -> left (in progress)
-//	no card, older: read again, now attached, or with a card
-//	  as its customer's default                               -> kept
+//	no card, older: read again, now attached                  -> kept
 //	read again, a card on the subscription                    -> attached or refused
 //	otherwise                                                 -> canceled
+//
+// A card on the customer and none on the subscription is no reason to keep a
+// sheet (the owner, 2026-11-16: "Cancel after a day"): a completed sheet
+// always saves its card on its subscription, so that sheet was abandoned, and
+// left trialing Stripe would charge the customer's default card from an
+// earlier purchase at the trial's end, with no trial before it. The cancel
+// leaves the customer's card as it is.
 //
 // A completed sheet whose attach every path missed (the webhooks lost, or run
 // before the card was on the subscription, and the app's report never came)
@@ -121,8 +127,7 @@ const (
 	stripeAbandonedSheetOutcomeAttached = "attached"
 	// a sheet whose card failed its CVC check: refused
 	stripeAbandonedSheetOutcomeRefused = "refused"
-	// read again before a cancel, it was attached, or had a card as its
-	// customer's default
+	// read again before a cancel, it had been attached in the meantime
 	stripeAbandonedSheetOutcomeKept = "kept"
 	// its trial invoice was credited before: it runs out as it is, found
 	// again by every run until its trial ends
@@ -137,7 +142,7 @@ var stripeAbandonedSheetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts
 	Namespace: "urnetwork",
 	Subsystem: "subscription",
 	Name:      "stripe_abandoned_payment_sheets_total",
-	Help:      "Pending payment sheet subscriptions the hourly sweep settled, by outcome: canceled (no card for over a day); attached (a card on the subscription whose attach every path missed: attached and its trial credited); refused (that card failed its CVC check); kept (read again before a cancel, attached or with the customer's default card); credited (its trial invoice was credited before, so it runs out as it is, found again every run until its trial ends); failed (Stripe did not answer; the next run tries again)",
+	Help:      "Pending payment sheet subscriptions the hourly sweep settled, by outcome: canceled (no card on the subscription for over a day, whatever card its customer holds); attached (a card on the subscription whose attach every path missed: attached and its trial credited); refused (that card failed its CVC check); kept (read again before a cancel, it had been attached); credited (its trial invoice was credited before, so it runs out as it is, found again every run until its trial ends); failed (Stripe did not answer; the next run tries again)",
 }, []string{"outcome"})
 
 // Registers the metric, every series from the start so the first
@@ -169,7 +174,7 @@ type SweepStripeAbandonedSheetsResult struct {
 	AttachedCount int `json:"attached_count"`
 	// sheets whose card failed its CVC check
 	RefusedCount int `json:"refused_count"`
-	// attached, or with a card as the customer's default, when read again
+	// attached in the meantime, when read again before a cancel
 	KeptCount int `json:"kept_count"`
 	// its trial was credited before, so it runs out as it is
 	CreditedCount int `json:"credited_count"`
@@ -228,12 +233,13 @@ func SweepStripeAbandonedSheetsPost(
 	return nil
 }
 
-// stripePaymentSheetAbandoned reports whether a subscription is a payment
-// sheet left without a card for longer than stripeAbandonedPaymentSheetAge
-// before now: still pending, trialing or incomplete, created before the
-// cutoff, and no payment method on the subscription or as its customer's
-// default. The customer counts only when it was read with the subscription
-// (expanded); the sweep reads it so before every cancel.
+// stripePaymentSheetAbandoned reports whether a subscription is one of our
+// payment sheets left without a card for longer than
+// stripeAbandonedPaymentSheetAge before now: still pending, trialing or
+// incomplete, created before the cutoff, and no payment method on the
+// subscription itself. A card its customer holds from an earlier purchase
+// does not count (the owner, 2026-11-16: "Cancel after a day"): a completed
+// sheet always saves its card on its subscription.
 func stripePaymentSheetAbandoned(sub *stripe.Subscription, now time.Time) bool {
 	if sub == nil || sub.Metadata[stripeMetadataPaymentSheet] != stripePaymentSheetPending || sub.Metadata[stripeMetadataNetworkId] == "" {
 		return false
@@ -247,18 +253,7 @@ func stripePaymentSheetAbandoned(sub *stripe.Subscription, now time.Time) bool {
 		// a customer may still be completing it
 		return false
 	}
-	if sub.DefaultPaymentMethod != nil || sub.DefaultSource != nil {
-		return false
-	}
-	if customer := sub.Customer; customer != nil {
-		if customer.DefaultSource != nil {
-			return false
-		}
-		if customer.InvoiceSettings != nil && customer.InvoiceSettings.DefaultPaymentMethod != nil {
-			return false
-		}
-	}
-	return true
+	return sub.DefaultPaymentMethod == nil && sub.DefaultSource == nil
 }
 
 // stripePaymentSheetTrialCredited reports whether the sheet's trial invoice
@@ -426,9 +421,10 @@ func stripeSweepAbandonedSheets(
 			if !spend(1) {
 				break
 			}
+			// read again just before the cancel: a card that landed on the
+			// subscription meanwhile goes the attach path instead
 			getParams := &stripe.SubscriptionParams{}
 			getParams.Context = ctx
-			getParams.AddExpand("customer")
 			sub, err := subscription.Get(found.ID, getParams)
 			if err != nil {
 				glog.Warningf("[stripe]abandoned sheet sweep: could not read subscription %s: %s\n", found.ID, err)
@@ -449,7 +445,7 @@ func stripeSweepAbandonedSheets(
 				continue
 			}
 			if !stripePaymentSheetAbandoned(sub, now) {
-				// attached in the meantime, or a card as the customer's default
+				// attached in the meantime
 				count(&result.KeptCount, stripeAbandonedSheetOutcomeKept)
 				continue
 			}
