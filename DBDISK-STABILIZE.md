@@ -614,6 +614,23 @@ step exists. Not now.
 *(inferred)*. Readers must be rewritten first (`feat/index-diet-v2` df37ab075, held
 since 11-02). Development and owner.
 
+**S3, approved 11-16 about 03:50Z, then revised the same morning**
+(DBDISK-INDEX-RUNBOOK.md):
+- **M4 and M5 can drop.** Their readers have been on main since 11-01 (1400865e7,
+  88efea19b) and are in every running build. The old statements have had no call
+  since about 11-02.
+- **The partial `transfer_contract_open_source_id` is blocked.** The companion
+  lingering-origin arm reads closed contracts of one pair as a range of the full
+  index, about 1,200 scans a second on 11-16, and prober retention reads the same
+  closed rows. No other index serves them.
+  `TestCompanionClosedOriginReadsNeedTheClosedPairIndex` pins this.
+- **The permanent gain is therefore 362 GiB** (323.5 + 38.4 on 11-16), about
+  170 bytes per contract, not 600–680 GiB.
+- **open_source_id's bloat is left to I3.** About 158 GiB of it can still be
+  reclaimed by a rebuild.
+- **The drop records** (`feat/index-diet-v2`) merge only after the hand drops,
+  because the next `db migrate` would otherwise run them.
+
 **S4. Inflow at the source.**
 - The idle trim (I6).
 - **Work-session events only for provider clients.** The journal has no reader beyond
