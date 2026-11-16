@@ -10,10 +10,11 @@
 // clock follows real time until a clause moves it by days (evsgit.FollowRealTime), which evs, every device and each
 // commit's dates read; the race clause holds the prune at evs.lfs.prune.remove through the Net's barrier driver.
 //
-// The clauses share one world in this order, each on devices and refs of its own: store, skip, attributes, import,
-// pruned, race, missing, window, and last the twin, the pruned clause on a branch of its own with its pushing device's
-// tip check switched off, which the clause must catch. The report names exactly what ran and what the host lacks
-// (sidecartest.GitLfsMatrixReport), since a pass on this host's versions alone is not §22.9's evidence.
+// The clauses share one world in this order, each on devices and refs of its own: store, skip, transports (git's
+// http and ssh fronts), attributes, import, pruned, race, owned, missing, window, and last the twin, the pruned clause
+// on a branch of its own with its pushing device's tip check switched off, which the clause must catch. The report
+// names exactly what ran and what the host lacks (sidecartest.GitLfsMatrixReport), since a pass on this host's
+// versions alone is not §22.9's evidence.
 //
 // FS-73 runs here as evsgit's clauses, as FS-5 does (fs_git_test.go), not as a builder sidecartest/fault registers:
 // stock git's world is built on a test, which a fault.Builder has none of. What it does not run is in
@@ -75,10 +76,12 @@ func TestFs73OnT3(t *testing.T) {
 			tb.Logf("FS-73 on %s: git %s, git-lfs %s", run.Row.Name, run.GitVersion, run.GitLfsVersion)
 			evsgit.Fs73StoreAndSmudge(tb, world)
 			evsgit.Fs73SkipOptionsRefusedAlike(tb, world)
+			evsgit.Fs73OverHttpAndSsh(tb, world)
 			evsgit.Fs73AttributesChangeChecksTheObject(tb, world)
 			evsgit.Fs73ImportUploadsFirst(tb, world)
 			evsgit.Fs73PrunedHistory(tb, world)
 			evsgit.Fs73PruneLosesToATouch(tb, world, fs73T3Hold(net))
+			evsgit.Fs73OwnedRefHoldsWhenPrunedMeanwhile(tb, world, fs73T3Hold(net))
 			evsgit.Fs73PruneRefusesWithARefMissing(tb, world)
 			evsgit.Fs73WindowBelowSevenReadsAsSeven(tb, world)
 			evsgit.Fs73TipCheckOffTwin(tb, world)
