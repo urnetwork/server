@@ -1073,6 +1073,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the lingering origins' side table, state and capture, with the
 	// operator's trigger absent or exact, versioned by its position
 	[]snMainnetMigrationContract{contractOriginLingerMigrationContract},
+	// the relay chunks of an epoch's extender component, versioned by its
+	// position
+	[]snMainnetMigrationContract{stLedgerV2ExtenderRelayMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

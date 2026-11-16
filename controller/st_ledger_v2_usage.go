@@ -525,18 +525,15 @@ func stLedgerV2PublishStatement(ctx context.Context, cfg *StConfig, client StCli
 // carries component: what the header and its census and share-row chunks hold,
 // with Z's parts and the contracts and payers behind it as the epoch's rows
 // record kept them when the component was first built. A record that does not
-// hold the committed component, the same Z and census chunks, cannot attest it
-// (errStLedgerV2UsageHeader).
+// hold the committed component, the same Z and census and relay chunks, cannot
+// attest it (errStLedgerV2UsageHeader).
 func stLedgerV2StatementExtenderPool(ctx context.Context, cfg *StConfig, epoch uint64, component *ledger.HeaderExtenders) (*usage.ExtenderPool, *usage.Extenders, error) {
 	recorded := model.GetStLedgerV2EpochRows(ctx, cfg.DeploymentKey(), cfg.NoId, epoch, epoch)[epoch]
 	if recorded == nil || recorded.Extenders == nil {
 		return nil, nil, fmt.Errorf("%w: epoch %d's committed extender component has no recorded pool", errStLedgerV2UsageHeader, epoch)
 	}
-	census := make([]string, len(component.Census))
-	for i, ref := range component.Census {
-		census[i] = ref.String()
-	}
-	if recorded.Extenders.Bytes != component.Bytes || !slices.Equal(recorded.Extenders.CensusChunks, census) {
+	if recorded.Extenders.Bytes != component.Bytes || !slices.Equal(recorded.Extenders.CensusChunks, stLedgerV2RefTexts(component.Census)) ||
+		!slices.Equal(recorded.Extenders.RelayChunks, stLedgerV2RefTexts(component.Relay)) {
 		return nil, nil, fmt.Errorf("%w: epoch %d's committed extender component is not the one its rows recorded", errStLedgerV2UsageHeader, epoch)
 	}
 	read := func(refs []ledger.Ref) ([][]byte, error) {

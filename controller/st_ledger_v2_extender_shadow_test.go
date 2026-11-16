@@ -309,7 +309,7 @@ func TestStExtenderReplayOfTheWorkedExample(t *testing.T) {
 // the pool weight, by phase, and nothing that names a client.
 func TestStExtenderPoolMetrics(t *testing.T) {
 	_, _, pool, census := stExtenderExample()
-	split, err := ledger.SplitExtenderPool(pool.Bytes(), []protocol.LedgerUsageRow{{ClientID: stExtenderClient(1), Coldkey: stExtenderColdkey('a'), UsageBytes: 3_000_000_000_000}}, census)
+	split, err := ledger.SplitExtenderPool(pool.Bytes(), []protocol.LedgerUsageRow{{ClientID: stExtenderClient(1), Coldkey: stExtenderColdkey('a'), UsageBytes: 3_000_000_000_000}}, census, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +354,7 @@ func TestStLedgerV2SealsAVersion2StatementForAnExtenderComponent(t *testing.T) {
 	authority.Start.Block, authority.Start.Hash = 9_600_028, [32]byte{4}
 	authority.End.Block, authority.End.Hash = 9_650_428, [32]byte{5}
 	_, amended, pool, census := stExtenderExample()
-	split, err := ledger.SplitExtenderPool(pool.Bytes(), amended, census)
+	split, err := ledger.SplitExtenderPool(pool.Bytes(), amended, census, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
