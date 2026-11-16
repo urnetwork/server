@@ -794,6 +794,25 @@ func sidecarMg5TlsMigrations() []any {
 		newSqlMigration(`
 			CREATE INDEX network_tls_cert_ca ON network_tls_cert (ca, cert_id) WHERE ca IS NOT NULL
 		`),
+		// each URnetwork-zone name's failure backoff at a CA (cert-1; QD-857):
+		// failure_count is the name's failed authorizations at ca since its
+		// last success there, and no order for it goes there before
+		// next_order_time. A success there deletes the row, and the purge
+		// takes it 8 days, a setting, past next_order_time.
+		newSqlMigration(`
+			CREATE TABLE network_tls_name_backoff (
+				name varchar(253) NOT NULL,
+				ca varchar(32) NOT NULL,
+				failure_count integer NOT NULL,
+				next_order_time timestamp NOT NULL,
+
+				PRIMARY KEY (name, ca)
+			)
+		`),
+		// the purge, by the time each backoff held orders until
+		newSqlMigration(`
+			CREATE INDEX network_tls_name_backoff_next_order_time ON network_tls_name_backoff (next_order_time)
+		`),
 
 		// §13.9's kill switch (tls-4): a host of the network, or * for all of
 		// them, with its reason and until_time, NULL while its case holds it.

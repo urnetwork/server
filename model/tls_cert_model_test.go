@@ -240,5 +240,19 @@ func TestCertsStoreUnlinkedTouchesNothing(t *testing.T) {
 		if _, err := store.PurgeChains(ctx, server.NowUtc()); !errors.Is(err, ErrCertsStoreUnavailable) {
 			t.Fatalf("a chain purge without MG5 answered %v", err)
 		}
+		names := []string{"unlinked.root.example"}
+		wait := func(int) time.Duration { return time.Hour }
+		if _, err := store.AddNameFailure(ctx, names[0], certsservice.CertsCaLetsEncrypt, server.NowUtc(), wait); !errors.Is(err, ErrCertsStoreUnavailable) {
+			t.Fatalf("a name's failure without MG5 answered %v", err)
+		}
+		if _, err := store.ListNameBackoffs(ctx, names); !errors.Is(err, ErrCertsStoreUnavailable) {
+			t.Fatalf("a backoff read without MG5 answered %v", err)
+		}
+		if _, err := store.ClearNameBackoffs(ctx, names, certsservice.CertsCaLetsEncrypt); !errors.Is(err, ErrCertsStoreUnavailable) {
+			t.Fatalf("a backoff's end without MG5 answered %v", err)
+		}
+		if _, err := store.PurgeNameBackoffs(ctx, server.NowUtc()); !errors.Is(err, ErrCertsStoreUnavailable) {
+			t.Fatalf("a backoff purge without MG5 answered %v", err)
+		}
 	})
 }
