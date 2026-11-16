@@ -660,6 +660,11 @@ func RemoveDeletedNetworkData(
 		}
 	}()
 
+	// a run whose context is done before it starts touches nothing
+	if !budgetLeft() {
+		cleanupResult.More = true
+		return
+	}
 	// a network that exists is not touched; every transaction below checks
 	// again before it deletes
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
