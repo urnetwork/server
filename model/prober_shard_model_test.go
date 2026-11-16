@@ -325,7 +325,7 @@ func TestProberShardNewEpochRetiresOldAuthorityAndCrashReaps(t *testing.T) {
 		}
 		settings := DefaultProberShardRetentionSettings()
 		settings.DefaultMode = ProberShardRetentionModeOn
-		if report, err := RemoveProberShardGenerations(ctx, server.NowUtc().Add(9*24*time.Hour), settings); err != nil || report.Shards[proberShardRetentionShardDropped] != 1 {
+		if report, _, err := RemoveProberShardGenerations(ctx, server.NowUtc().Add(9*24*time.Hour), ProberShardContractWalk{}, settings); err != nil || report.Shards[proberShardRetentionShardDropped] != 1 {
 			t.Fatal("crashed epoch did not hard-delete with its generation", err)
 		}
 		if n, c, b := shardTestRows(t, ctx, current); n != 0 || c != 0 || b != 0 {
