@@ -63,6 +63,36 @@ func TestRecoveryCredentialBindsExactLocalRegistrationThroughRealAuthentication(
 	}
 }
 
+// A second-cycle document uses the same exact authenticated local job scope,
+// not a shared vault write or a reusable multi-cycle bearer capability.
+func TestSecondRecoveryCredentialKeepsExactJobLocalAuthentication(t *testing.T) {
+	settings, auth, registration, raw := recoveryCredentialForTest(t)
+	auth.Schema, auth.ExpectedCycle = 3, 1
+	auth.SecondRecovery = &model.CompetitionOperatorSecondRecovery{Schema: 1, JobId: auth.JobId,
+		PreviousReceiptSha256: strings.Repeat("7", 64), ApprovalEvidenceSha256: strings.Repeat("8", 64)}
+	content, err := json.Marshal(registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := bindRecoveryCredential(settings, content, auth, defaultRecoverySettings(), registration.IssuedAt)
+	if err != nil || len(settings.Tokens) != 0 {
+		t.Fatal("successor registration altered shared settings", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/synthetic-second-recovery-control", nil)
+	request.Header.Set("Authorization", "Bearer "+raw)
+	principal, ok := controller.Authenticate(request, local)
+	if !ok || principal.RoundId != auth.RoundId || principal.JobId != auth.JobId || principal.Role != "operator_patch_retry" {
+		t.Fatal("second recovery bypassed exact local authentication")
+	}
+	if _, ok := controller.Authenticate(request, settings); ok {
+		t.Fatal("local successor credential reached shared settings")
+	}
+	auth.JobId = server.NewId()
+	if _, err := bindRecoveryCredential(settings, content, auth, defaultRecoverySettings(), registration.IssuedAt); err == nil {
+		t.Fatal("second credential bound another job")
+	}
+}
+
 // A different typed class or exact job scope cannot borrow the registration,
 // even if its JSON and outer file digest are otherwise internally consistent.
 func TestRecoveryCredentialRejectsOtherClassesScopesAndAmbiguousDocuments(t *testing.T) {

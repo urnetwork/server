@@ -56,6 +56,7 @@ type CompetitionJobReevaluationAuthorization struct {
 	BackingServiceEvidence       *CompetitionJobReevaluationBackingServiceEvidence       `json:"backing_service_evidence,omitempty"`
 	OperatorInterruptionEvidence *CompetitionJobReevaluationOperatorInterruptionEvidence `json:"operator_interruption_evidence,omitempty"`
 	Distributed                  *CompetitionDistributedJobReevaluationAuthorization     `json:"distributed,omitempty"`
+	SecondRecovery               *CompetitionOperatorSecondRecovery                      `json:"second_recovery,omitempty"`
 }
 
 // The scoped operator binds retained stop evidence to an actual interrupted
@@ -143,6 +144,7 @@ type CompetitionJobReevaluationCycle struct {
 	StartedAt                  *time.Time                                  `json:"started_at,omitempty"`
 	ExecutionTimeoutSeconds    int                                         `json:"execution_timeout_seconds"`
 	Distributed                *CompetitionDistributedJobReevaluationCycle `json:"distributed,omitempty"`
+	SecondRecovery             *CompetitionOperatorSecondRecovery          `json:"second_recovery,omitempty"`
 }
 
 // The receipt is permanent and retry-stable. StartedAt belongs to the eventual
@@ -165,7 +167,8 @@ func CompetitionJobReevaluationCycleDigest(cycle CompetitionJobReevaluationCycle
 // A recovery marker cannot authorize another job, scored result, canceled
 // result or unknown infrastructure cause. The API authenticates its origin.
 func ValidateCompetitionJobReevaluationCycle(cycle *CompetitionJobReevaluationCycle) error {
-	if cycle == nil || (cycle.Schema != 1 && cycle.Schema != 2) || cycle.Cycle != 1 || cycle.JobId == (server.Id{}) || cycle.RoundId == (server.Id{}) ||
+	if cycle == nil || !((cycle.Schema == 1 || cycle.Schema == 2) && cycle.Cycle == 1 && cycle.SecondRecovery == nil ||
+		cycle.Schema == 3 && cycle.Cycle == 2 && cycle.SecondRecovery != nil) || cycle.JobId == (server.Id{}) || cycle.RoundId == (server.Id{}) ||
 		!competitionAutomationScope.MatchString(cycle.Environment) || !competitionAutomationScope.MatchString(cycle.CompetitionId) || !competitionAutomationScope.MatchString(cycle.SeasonId) ||
 		!competitionAutomationSha256.MatchString(cycle.PatchSha256) || !competitionAutomationSha256.MatchString(cycle.RoundPolicySha256) ||
 		!competitionAutomationSha256.MatchString(cycle.BaselineSha256) || !competitionAutomationSha256.MatchString(cycle.AuthorizationSha256) ||

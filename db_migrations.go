@@ -11669,6 +11669,10 @@ var migrations = []any{
 	// would take the table's ACCESS EXCLUSIVE lock itself.
 	newSqlMigration(clientKeyHistoryRegistrationHashUniqueDropSql),
 
+	// One separately approved job may receive a second recovery without replacing
+	// its original immutable audit or changing any other job's one-cycle limit.
+	newSqlMigration(CompetitionSecondRecoveryMigrationSql()),
+
 	// transfer_contract_create_time (301.6 GB, v373) served the reads of
 	// a create_time window of contracts: the public contract stats' live
 	// bucket count and hour fill, the degradation check's count of new

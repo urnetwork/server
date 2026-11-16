@@ -29,8 +29,16 @@ func TestCompetitionOperatorPatchRetryMigrationPreservesCompletePredecessors(t *
 	}
 	version := CompetitionOperatorRequestedPatchRetryMigrationVersion()
 	if GiftSchemaVersion() != CompetitionDistributedReevaluationMigrationVersion()+1 || GiftRefundSchemaVersion() != GiftSchemaVersion()+1 ||
-		version != GiftRefundSchemaVersion()+1 || version != MigrationCount() {
+		version != GiftRefundSchemaVersion()+1 {
 		t.Fatal("patch retry was not appended after the complete published prefix")
+	}
+	tail := []int{version, OperatorBlockTrafficVersion(), OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(),
+		ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), ProviderWorkSessionProviderAppendMigrationVersion(),
+		ProviderWorkSessionHeadRetentionGuardMigrationVersion(), ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(),
+		AuditDeviceDayVersion(), TransferDebitJournalDropGuardMigrationVersion(),
+		ClientKeyHistoryRegistrationHashUniqueDropMigrationVersion(), CompetitionSecondRecoveryMigrationVersion()}
+	if !competitionCapturedRecoveryTailValid(tail, MigrationCount()) {
+		t.Fatal("captured published migration tail or recovery ordinal changed", tail, MigrationCount())
 	}
 }
 

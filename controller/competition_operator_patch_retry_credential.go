@@ -68,7 +68,7 @@ func competitionOperatorPatchRetryPrincipalAllows(settings *Settings, principal 
 // cannot outlive its credential. The explicit cut makes boundary tests exact.
 func competitionOperatorPatchRetryPrincipalAllowsAt(settings *Settings, principal *Principal, auth model.CompetitionJobReevaluationAuthorization, now time.Time) bool {
 	if !(settings != nil && competitionPrincipalAllows(principal, competitionOperatorPatchRetryRole, settings.CompetitionId, settings.AutomationPolicy) &&
-		principal.Environment == "main" && !principal.ExpiresAt.IsZero() && !now.IsZero() && now.Before(principal.ExpiresAt) && auth.Schema == 2 &&
+		principal.Environment == "main" && !principal.ExpiresAt.IsZero() && !now.IsZero() && now.Before(principal.ExpiresAt) && (auth.Schema == 2 || competitionSecondRecoveryShape(auth)) &&
 		auth.Kind == model.CompetitionOperatorRequestedPatchRetryAuthorizationKind && auth.IncidentClass == model.CompetitionJobReevaluationOperatorRequestedPatchRetry &&
 		auth.RoundId != (server.Id{}) && auth.JobId != (server.Id{}) && principal.RoundId == auth.RoundId && principal.JobId == auth.JobId) {
 		return false

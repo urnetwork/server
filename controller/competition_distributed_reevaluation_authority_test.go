@@ -92,7 +92,7 @@ func (self competitionDistributedRecoveryTestTransport) Exchange(ctx context.Con
 	response := competitionagent.Response{Schema: 1, HostId: self.host.HostId, State: "available"}
 	if request.Operation == "status" {
 		response.RunId, response.FencingToken = request.RunId, request.FencingToken
-		response.Identity = &competitionagent.Identity{HostId: self.host.HostId, RunId: d.OriginalRunId, JobId: self.auth.JobId.String(), RoundId: self.auth.RoundId.String(), RoundEpoch: self.round.Epoch, SourceEpoch: evaluationSourceEpoch(self.round), Cycle: 0, Attempt: self.auth.ExpectedAttemptCount, StartedAt: d.OriginalStartedAt, DeadlineAt: d.OriginalDeadlineAt}
+		response.Identity = &competitionagent.Identity{HostId: self.host.HostId, RunId: d.OriginalRunId, JobId: self.auth.JobId.String(), RoundId: self.auth.RoundId.String(), RoundEpoch: self.round.Epoch, SourceEpoch: evaluationSourceEpoch(self.round), Cycle: self.auth.ExpectedCycle, Attempt: self.auth.ExpectedAttemptCount, StartedAt: d.OriginalStartedAt, DeadlineAt: d.OriginalDeadlineAt}
 		response.State, response.ManifestSha256, response.RequestSha256 = "succeeded", d.OriginalManifestSha256, d.OriginalRequestSha256
 		response.Files = []competitionagent.File{{Path: "synthetic-original/worker-result.json", Sha256: strings.Repeat("e", 64), Bytes: 21}}
 		if d.Reason == model.CompetitionDistributedReevaluationLegacyPrelaunch {
