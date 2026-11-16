@@ -49,9 +49,9 @@ func (self *ledgerV2BuildFixture) extenderParties(closed time.Time, clientIds ..
 // and of the unfunded one (300, not counted), the receiver, a census client
 // too, a party of the funded one (its share pooled, not counted), and a second
 // extender, alone in another unit, a party of a funded cross-network contract
-// with its hop 200 and own's 100 (own is no party). So R = 700, from 2
-// relaying: of Z' = 500, 250 by unit (125 each) and 250 by relay bytes (the
-// extender 179 with the larger remainder, the second 71).
+// with its hop 200 and a provider's 100 (that provider is no party). So R =
+// 700, from 2 relaying: of Z' = 500, 250 by unit (125 each) and 250 by relay
+// bytes (the extender 179 with the larger remainder, the second 71).
 type stExtenderRelayScenario struct {
 	*stExtenderPoolScenario
 	ext2, ext2Network server.Id
@@ -61,7 +61,7 @@ type stExtenderRelayScenario struct {
 func newStExtenderRelayScenario(t testing.TB, amendmentFrom uint64) *stExtenderRelayScenario {
 	s := &stExtenderRelayScenario{stExtenderPoolScenario: newStExtenderPoolScenario(t, amendmentFrom), ext2: server.NewId(), ext2Network: server.NewId()}
 	f := s.f
-	ext2Network, payer, ownNetwork := s.ext2Network, server.NewId(), server.NewId()
+	ext2Network, payer, provider, providerNetwork := s.ext2Network, server.NewId(), server.NewId(), server.NewId()
 	f.consents.providerChain(t, s.ext2, ext2Network, [2]uint64{17, 1})
 	f.consents.flush(t)
 	s.ext2Key = f.consents.public(t, 17)
@@ -75,7 +75,7 @@ func newStExtenderRelayScenario(t testing.TB, amendmentFrom uint64) *stExtenderR
 	f.extenderParties(two.StartTime.Add(time.Minute), s.ext, s.receiver)
 	f.extenderParties(two.StartTime.Add(3*time.Minute), s.ext)
 	relayed := two.StartTime.Add(6 * time.Minute)
-	f.pooledContract(relayed, payer, &payer, ledgerV2BuildUsage{s.ext2, ext2Network, 200}, ledgerV2BuildUsage{s.own, ownNetwork, 100})
+	f.pooledContract(relayed, payer, &payer, ledgerV2BuildUsage{s.ext2, ext2Network, 200}, ledgerV2BuildUsage{provider, providerNetwork, 100})
 	f.extenderParties(relayed, s.ext2)
 	return s
 }
