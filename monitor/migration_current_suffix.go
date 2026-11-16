@@ -1054,6 +1054,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the key history floor at 7 days, which supersedes the 30-day floor's
 	// contract, versioned by its position
 	[]snMainnetMigrationContract{clientKeyHistoryRetentionSevenDayFloorMigrationContract},
+	// the device day rollup, versioned by its position
+	[]snMainnetMigrationContract{auditDeviceDayMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

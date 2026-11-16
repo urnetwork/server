@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sort"
 	"time"
@@ -390,12 +391,17 @@ const auditDeviceSweepStatesSql = `
 // auditProviderReassertInterval so a long-lived device never ages out of
 // retention, and a no-change run emits nothing.
 func SweepDeviceAuditEvents(ctx context.Context) (addedCount int, removedCount int) {
+	return sweepDeviceAuditEventsAt(ctx, server.NowUtc)
+}
+
+// The sweep with its clock, read once per attempt; tests sweep at fixed times.
+func sweepDeviceAuditEventsAt(ctx context.Context, clock func() time.Time) (addedCount int, removedCount int) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		// reset in case the tx retries
 		addedCount = 0
 		removedCount = 0
 
-		now := server.NowUtc()
+		now := clock()
 
 		current := map[server.Id]server.Id{}
 		result, err := tx.Query(
@@ -447,6 +453,9 @@ func SweepDeviceAuditEvents(ctx context.Context) (addedCount int, removedCount i
 			eventType AuditEventType
 		}
 		events := []deviceAuditEvent{}
+		// the devices added that were not online at the read: the device day
+		// rollup counts each the first time it is touched in a day
+		firstAddIds := []server.Id{}
 
 		for deviceId, networkId := range current {
 			state, hasState := states[deviceId]
@@ -458,6 +467,9 @@ func SweepDeviceAuditEvents(ctx context.Context) (addedCount int, removedCount i
 					eventType: AuditEventTypeDeviceAdded,
 				})
 				addedCount += 1
+				if !hasState || !state.online {
+					firstAddIds = append(firstAddIds, deviceId)
+				}
 			}
 		}
 		for deviceId, state := range states {
@@ -470,6 +482,10 @@ func SweepDeviceAuditEvents(ctx context.Context) (addedCount int, removedCount i
 				removedCount += 1
 			}
 		}
+
+		// before the events and state below: the rollup reads the state as the
+		// sweep found it
+		updateAuditDeviceDayInTx(ctx, tx, now, len(states), firstAddIds)
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, event := range events {
@@ -561,6 +577,12 @@ func BackfillDeviceAuditEvents(
 		// application role's 15-minute transaction bound
 		server.SetTransactionTimeoutInTx(ctx, tx, 0)
 		eventCount = 0
+
+		// partitioned, the table keeps 7 days, and the device day rollup has
+		// counted the days the backfill would rewrite
+		if auditDeviceEventPartitionedInConn(ctx, tx) {
+			panic(errors.New("audit_device_event is partitioned: its days are counted by the device day rollup and kept 7 days, so a backfill would neither land nor count"))
+		}
 
 		endDay := startOfUtcDay(server.NowUtc())
 		result, err := tx.Query(
