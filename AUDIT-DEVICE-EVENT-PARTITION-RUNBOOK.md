@@ -187,6 +187,15 @@ Finalize refuses from then on; prepare a later day.
   CONSTRAINT IF EXISTS audit_device_event_event_id_key`. It is a no-op on Main
   and keeps fresh databases equal. It must not merge before the drop: inside
   `db migrate` it would take the exclusive lock itself.
-- **Whether hosted window children count as devices** (4c) is still open.
-  The measurement is in the merge report and PARTITION-CANDIDATES.md §7. If
-  they stop counting, the sweep skips them and the inflow falls about tenfold.
+- **Hosted window children are not devices** (4c, owner 11-16 about 15:15Z).
+  From the taskworker build that carries it, the device sweep counts top-level
+  clients only (`source_client_id IS NULL`), the definition the client limits
+  use. A derived client is a hosted proxy's window client or an app's
+  per-stream window.
+  - The first sweep after the deploy removes, once, every derived client still
+    marked online.
+  - The public series counts top-level clients from the next UTC day on.
+    Earlier days keep the counts they had.
+  - The raw-event inflow falls about tenfold *(inferred)*, so the daily
+    partitions after C are much smaller than §0 estimates. The legacy leaf
+    holds the events written before the deploy.
