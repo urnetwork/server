@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -276,7 +277,7 @@ func TestSnAttemptUploadRejectsMalformedFramingBeforeSideEffects(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		_, client := snAttemptUploadTestIdentity(tb)
 		token := client.Testing_Sign()
-		for _, fault := range []string{"query", "duplicate-hash", "path", "kind", "type", "type-parameter", "encoding", "range", "partial", "chunked", "trailer", "missing-size", "too-large", "method"} {
+		for _, fault := range []string{"query", "duplicate-hash", "path", "kind", "type", "type-parameter", "encoding", "zstd-without-length", "length-without-encoding", "zstd-over-bound", "range", "partial", "chunked", "trailer", "missing-size", "too-large", "method"} {
 			request := snAttemptUploadTestRequest(tb, token, "metadata", []byte("data"))
 			want := http.StatusBadRequest
 			switch fault {
@@ -293,7 +294,17 @@ func TestSnAttemptUploadRejectsMalformedFramingBeforeSideEffects(t *testing.T) {
 			case "type-parameter":
 				request.Header.Set("Content-Type", "application/json; charset=utf-8")
 			case "encoding":
+				// any encoding but zstd, answered with the one this api takes
 				request.Header.Set("Content-Encoding", "gzip")
+				want = http.StatusUnsupportedMediaType
+			case "zstd-without-length":
+				request.Header.Set("Content-Encoding", "zstd")
+			case "length-without-encoding":
+				request.Header.Set(snAttemptUploadDecodedLengthHeader, "4")
+			case "zstd-over-bound":
+				request.Header.Set("Content-Encoding", "zstd")
+				request.Header.Set(snAttemptUploadDecodedLengthHeader, strconv.FormatUint(snAttemptTestBounds().MetadataBytes+1, 10))
+				want = http.StatusRequestEntityTooLarge
 			case "range":
 				request.Header.Set("Range", "bytes=0-1")
 			case "partial":
@@ -318,6 +329,9 @@ func TestSnAttemptUploadRejectsMalformedFramingBeforeSideEffects(t *testing.T) {
 			serveSnUploadAttemptArtifact(response, request, func() (server.BlobStore, bool) { stores++; return nil, false }, func(context.Context, server.Id, uint64) error { reservations++; return nil }, snAttemptTestBounds(), make(chan struct{}, 1))
 			if response.Code != want || reads != 0 || reservations != 0 || stores != 0 {
 				tb.Fatalf("%s malformed upload crossed admission: status%d want%d reads%d quota%d stores%d", fault, response.Code, want, reads, reservations, stores)
+			}
+			if fault == "encoding" && response.Header().Get("Accept-Encoding") != snAttemptUploadEncodingZstd {
+				tb.Fatalf("the refused encoding was not answered with the one taken: %v", response.Header())
 			}
 		}
 	})
