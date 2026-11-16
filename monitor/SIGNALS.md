@@ -49365,6 +49365,39 @@ Classes:
   read, no filesystem of a cluster's drives reached Mimir, or a cluster's
   budget loop publishes no drive writes.
 
+
+### 29.8 evs format 2's purge and drop jobs
+
+Probe: `evs-format2`
+
+EVS2-M10-34 (§19.8's versionless and drop history rows, §19.10's drop rows,
+D-OPS-9, D-PHASE-10). Every 5 min, one Mimir query of the series format 2's
+purge, sweep and drop jobs push, summed across processes, none with a network
+or repo label: the versionless sweep's DELETEs over the last day,
+`urnetwork_evs_versionless_sweep_deletes_total{result}`; drop jobs' moves
+between states over 7 days, `urnetwork_evs_drop_jobs{state}`; and the jobs'
+scan and delete progress over the last hour,
+`urnetwork_evs_drop_scan_bytes_total` and `urnetwork_evs_drop_deletes_total`. A
+series no process has counted reads as zero, which is every series before
+format 2 runs. It runs under monitor.yml's `file_clusters` block, as §29.1 does.
+
+§19.8 exempts a stalled job whose cluster is past 50% of capacity or whose
+candidates are young, and no series shows either yet, so a job waiting on one
+by design may warn; its finding says so. §19.8's fourth format-2 row, observe's
+retained count staying flat for a day while purge is on (QD-635), is not built:
+no process exports a retained count (question
+`evs2-m10-34-observe-retained-series`).
+
+Classes:
+
+- `evs-drop-refused` **PAGE**: a drop job ended refused {verify} or {mismatch},
+  storage integrity, in the last 7 days; §19.10's drop rows.
+- `evs-sweep-deleted-share` **WARN**, sustained 2 runs: the sweep's `deleted`
+  share of its DELETEs past 1% in a day.
+- `evs-drop-stalled` **WARN**, sustained 2 runs: more drops moved into executing
+  than out of it over 7 days, with no scan or delete progress in an hour.
+- `evs-format2-unobservable` (visibility): Mimir did not read.
+
 ## 30. Sidecar services — §19.8's SLOs, failures and the primary
 
 OPS-M3-02 (R-OPS-7, D-OPS-8, D-OPS-9, FS-50, owner decision 143). monitor.yml's

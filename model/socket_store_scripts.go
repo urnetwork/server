@@ -13,11 +13,14 @@ package model
 // Records, all strings a script splits by hand, so that no number passes through cjson:
 //
 //	m:<L>  listen_id;protocol;version;weight;max_streams;flags;alpns;app_mode;name;token;sealed;claim;
-//	       sidecar;pv;sv
+//	       certified;acme;sidecar;pv;sv
 //	       ids, protocol, ALPN ids (comma separated), app mode, name and token in hex, sealed and claim
-//	       in base64; flags 1 exclusive, 2 affinity, 4 serving, 8 draining; sidecar the listener's
-//	       sidecar_id in hex, empty for ur/; pv the highest authorization log position the lease was
-//	       admitted at and sv the set_version of the page that last wrote it (DESIGN-DETAILS 13.2.3). An m
+//	       in base64; flags 1 exclusive, 2 affinity, 4 serving, 8 draining; certified the custom hosts and
+//	       aliases ValidateListen kept certified for a tls/ listener and acme the names it holds a
+//	       TLS-ALPN-01 claim for, each in hex, acme's as name:claim_seq, comma separated (DESIGN-DETAILS
+//	       17.2.10); sidecar the listener's sidecar_id in hex, empty for ur/; pv the highest authorization
+//	       log position the lease was admitted at and sv the set_version of the page that last wrote it
+//	       (DESIGN-DETAILS 13.2.3). An m written before 17.2.10 has no certified or acme field, and one
 //	       of the first twelve fields alone, written before positions were kept, reads as "", 0 and 0.
 //	r:<L>  inflight;report_ms
 //	i:<L>  dialer;exclusion_count;exclusion_start_ms;issue_ms,issue_ms,... per dialer, joined by |
@@ -78,6 +81,22 @@ local function parse_m(s)
     alpns = split(f[7], ",")
   end
   local flags = tonumber(f[6])
+  -- 14 or 17 fields carry 17.2.10's two lists, 12 or 15 do not
+  local certified = {}
+  local acme = {}
+  local lease_field = 13
+  if #f == 14 or #f == 17 then
+    if f[13] ~= "" then
+      certified = split(f[13], ",")
+    end
+    if f[14] ~= "" then
+      for _, entry in ipairs(split(f[14], ",")) do
+        local parts = split(entry, ":")
+        acme[parts[1]] = parts[2]
+      end
+    end
+    lease_field = 15
+  end
   return {
     listen = f[1],
     protocol = f[2],
@@ -89,9 +108,11 @@ local function parse_m(s)
     serving = bit.band(flags, 4) ~= 0,
     draining = bit.band(flags, 8) ~= 0,
     alpns = alpns,
-    sidecar = f[13] or "",
-    pv = f[14] or "0",
-    sv = f[15] or "0"
+    certified = certified,
+    acme = acme,
+    sidecar = f[lease_field] or "",
+    pv = f[lease_field + 1] or "0",
+    sv = f[lease_field + 2] or "0"
   }
 end
 
@@ -202,7 +223,7 @@ end
 
 // One group's put or del, a page's step or a removal (§9.5; DESIGN-DETAILS 13.2.3).
 //
-// KEYS: group, ix. put's ARGV: "put", now_ms, listener, lease_ms, m's first twelve fields, inflight,
+// KEYS: group, ix. put's ARGV: "put", now_ms, listener, lease_ms, m's fields up to acme, inflight,
 // protocol, exclusive ("1" or "0"), sidecar, sv, pv. del's ARGV: "del", now_ms, listener, cause, sv (""
 // for the lease's own, as a removal no page carries passes), pv, the tombstone's ttl_ms.
 //
@@ -343,7 +364,16 @@ return {"ok", int(first), int(redis.call("ZCARD", ix)), int(now + lease), prior,
 // KEYS: group, ix. ARGV: now_ms, dialer, dialer_network, protocol, min_version, alpns, first_draw,
 // second_draw, sample_count, ticket_lifetime_ms, clamp_floor, clamp_percent, ejection_step_ms,
 // ejection_max_ms, ejection_group_percent, reporter_window_ms, reporter_network_count, share_ttl_ms,
-// reports (listener:listen pairs, comma separated), affinity_key ("" for none), affinity_load_percent.
+// reports (listener:listen pairs, comma separated), affinity_key ("" for none), affinity_load_percent,
+// server_name in hex ("" for none).
+//
+// A server name (DESIGN-DETAILS 17.2.10) is a custom host's or an alias's, which tlsedge resolved. A Find
+// offering acme-tls/1 takes the live lease holding the highest claim for it, the lowest id on a tie, and
+// reads nothing else of a listener: serving, draining, weight, est, ejections and exclusions count for
+// nothing in one handshake, and it has a primary only; with no server name, or no claim for it, it finds
+// no listener. Any other Find never matches a listener whose one ALPN id is acme-tls/1, and with a server
+// name matches only the listeners certified for it. Either reads the whole group, never a sample, since
+// the few listeners that hold the name may lie outside one (C6, C7), as PickSocketListeners holds.
 //
 // A Find with an affinity key reads the whole group, never a sample, and after the filter picks by
 // rendezvous order among the listeners that opted in (socketsservice's affinity.go): redis.sha1hex of the
@@ -384,6 +414,15 @@ if ARGV[19] ~= "" then
 end
 local affinity_key = ARGV[20]
 local affinity_percent = tonumber(ARGV[21])
+local server_name = ARGV[22] or ""
+-- acme-tls/1 in hex, as m and ARGV write ALPN ids
+local acme_alpn = "61636d652d746c732f31"
+local acme = false
+for _, want in ipairs(want_alpns) do
+  if want == acme_alpn then
+    acme = true
+  end
+end
 
 local function active(count, start)
   return now < start + math.min(count * ejection_step, ejection_max)
@@ -510,7 +549,7 @@ for _, report in ipairs(reports) do
 end
 
 local members
-if sample_count < group_count and affinity_key == "" then
+if sample_count < group_count and affinity_key == "" and server_name == "" then
   members = redis.call("ZRANDMEMBER", ix, sample_count, "WITHSCORES")
 else
   members = redis.call("ZRANGE", ix, 0, -1, "WITHSCORES")
@@ -565,6 +604,21 @@ local function matches(candidate)
   if candidate.version < min_version then
     return false
   end
+  -- a listener only for TLS-ALPN-01 serves no visitor
+  if #candidate.alpns == 1 and candidate.alpns[1] == acme_alpn then
+    return false
+  end
+  if server_name ~= "" then
+    local certified = false
+    for _, name in ipairs(candidate.certified) do
+      if name == server_name then
+        certified = true
+      end
+    end
+    if not certified then
+      return false
+    end
+  end
   if #want_alpns == 0 then
     return true
   end
@@ -586,11 +640,38 @@ local function shunned(candidate)
   return share ~= nil and active(share.count, share.start)
 end
 
-local matched = false
+-- the claim holder for an acme-tls/1 Find, nil for none
+local function pick_acme()
+  if server_name == "" then
+    return nil
+  end
+  local best = nil
+  local best_seq = nil
+  for _, candidate in ipairs(candidates) do
+    local seq = candidate.acme[server_name]
+    if seq and now < candidate.lease then
+      if not best or version_less(best_seq, seq) or (best_seq == seq and less(candidate.id, best.id)) then
+        best = candidate
+        best_seq = seq
+      end
+    end
+  end
+  return best
+end
+
+local acme_primary = nil
+if acme then
+  acme_primary = pick_acme()
+  if not acme_primary then
+    return {2, exclusions, ejections}
+  end
+end
+
+local matched = acme
 local roomy = {}
 local pickable = {}
 for _, candidate in ipairs(candidates) do
-  if matches(candidate) then
+  if not acme and matches(candidate) then
     matched = true
     if estimate(candidate) < candidate.max then
       roomy[#roomy + 1] = candidate
@@ -606,7 +687,7 @@ end
 if #pickable == 0 then
   pickable = roomy
 end
-if #pickable == 0 then
+if #pickable == 0 and not acme then
   return {3, exclusions, ejections}
 end
 
@@ -644,9 +725,9 @@ local function pick_affinity()
   return first, nil
 end
 
-local primary = nil
+local primary = acme_primary
 local backup = nil
-if affinity_key ~= "" then
+if not primary and affinity_key ~= "" then
   primary, backup = pick_affinity()
 end
 
