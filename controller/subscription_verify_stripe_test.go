@@ -128,7 +128,7 @@ func newStripeVerifyTestEnv(t *testing.T) *stripeVerifyTestEnv {
 	}
 	// the invoice.paid handler, as far as the ledger goes: the network is the
 	// subscription's network_id, as stripeResolveInvoiceCredit resolves it
-	stripeVerifyCreditInvoiceFunc = func(invoice *StripeEventInvoiceObject, clientSession *session.ClientSession) (*StripeWebhookResult, error) {
+	stripeVerifyCreditInvoiceFunc = func(invoice *StripeEventInvoiceObject, clientSession *session.ClientSession) (*OnboardingError, error) {
 		env.stateLock.Lock()
 		defer env.stateLock.Unlock()
 		env.credited = append(env.credited, invoice)
@@ -142,15 +142,16 @@ func newStripeVerifyTestEnv(t *testing.T) *stripeVerifyTestEnv {
 		if _, ok := env.ledger[invoice.Id]; !ok {
 			env.ledger[invoice.Id] = networkId
 		}
-		return &StripeWebhookResult{}, nil
+		return nil, nil
 	}
-	stripeVerifyFinalizeCustomerFunc = func(clientSession *session.ClientSession, customerId string, countryCode string) {
+	stripeVerifyFinalizeCustomerFunc = func(clientSession *session.ClientSession, customerId string, countryCode string) *stripeFinalizeResult {
 		env.stateLock.Lock()
 		defer env.stateLock.Unlock()
 		env.finalized = append(env.finalized, customerId+" "+countryCode)
 		if invoiceId, ok := env.heldInvoices[customerId]; ok {
 			env.ledger[invoiceId] = clientSession.ByJwt.NetworkId
 		}
+		return &stripeFinalizeResult{Refused: map[string]bool{}}
 	}
 	stripeVerifyCheckoutCreditedFunc = func(clientSession *session.ClientSession, sessionId string) (bool, error) {
 		env.stateLock.Lock()
@@ -280,7 +281,7 @@ func (self *stripeVerifyTestEnv) setPaymentSheetSubscription(subscriptionId stri
 }
 
 // Fails unless the endpoint answered status without an error.
-func requireVerifyStatus(t *testing.T, name string, result *VerifyStorePurchaseResult, err error, status string) {
+func requireVerifyStatus(t testing.TB, name string, result *VerifyStorePurchaseResult, err error, status string) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("%s: err = %v, want status %s", name, err, status)

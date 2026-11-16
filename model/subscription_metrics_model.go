@@ -166,6 +166,30 @@ type SubscriptionMetricsSnapshot struct {
 	// the oldest, in seconds, for each rail that has one
 	UncreditedPayments         map[string]int64
 	UncreditedOldestAgeSeconds map[string]int64
+	// expected dollars in, net USD (subscription_metrics_revenue_model.go):
+	// the yearly net of the subscriptions that started inside the rolling
+	// window, by store and deduplicated
+	NewForecastRevenueUsd map[SubscriptionMetricsStoreWindow]float64
+	// the net collected from renewals inside the rolling window, by store and
+	// all stores
+	RecurringRevenueUsd map[SubscriptionMetricsStoreWindow]float64
+	// the trials running now at their expected conversion, by store and
+	// deduplicated; the trial part of the 30-day forecast
+	TrialExpectedRevenueUsd map[string]float64
+	// the trials running now that the expected revenue values, by store and
+	// deduplicated: TrialsActive less the Stripe trials only the reconcile
+	// credited before the card check
+	TrialsConvertible map[string]int64
+	// the conversion rate each store's trials are valued at, and the pooled
+	// rate (all)
+	TrialConversionRates map[string]float64
+	// the trials whose free period ended in the conversion rate's trailing
+	// period, by store (and all) and outcome
+	TrialConversionTrials map[SubscriptionMetricsStoreOutcome]int64
+	// whether the revenue step read the revenue fields above. It is its own
+	// step (loadSubscriptionMetricsRevenue): when it fails, the fields stay
+	// empty and the rest of the snapshot is whole
+	RevenueLoaded bool
 }
 
 // The subscriptions snapshot's tunables.
@@ -173,6 +197,34 @@ type SubscriptionMetricsSettings struct {
 	// How long a received payment may wait for its credit before it counts
 	// as uncredited. Zero counts every uncredited payment at once.
 	UncreditedMinAge time.Duration
+	// The Pro price tiers the revenue values a plan at, the first the default
+	// (for a window with no tier or one pro.yml no longer names). Nil reads
+	// pro.yml.
+	PriceTiers []SubscriptionMetricsPriceTier
+	// The fee each store keeps of a price, as its credit path takes it off
+	// when it records net revenue. Nil uses
+	// DefaultSubscriptionMetricsStoreFeeFractions.
+	StoreFeeFractions map[string]float64
+	// The trailing period the trial conversion rate reads trials from: those
+	// whose free period ended inside it.
+	TrialConversionPeriod time.Duration
+	// How long a trial's outcome takes to settle: a trial that ended more
+	// recently is left out of the rate, and a paid window that starts later
+	// than this after its trial ended is not its conversion.
+	TrialConversionSettle time.Duration
+	// The fewest ended trials a store needs for its own conversion rate; a
+	// store with fewer uses the pooled rate of every store's trials.
+	TrialConversionMinTrials int64
+	// When the payment-sheet card check deployed: a $0 Stripe invoice the
+	// reconcile credited before it is an abandoned payment sheet and is left
+	// out of the revenue, one credited after it is a real trial. Nil (not
+	// deployed) leaves every reconcile credit of a $0 Stripe invoice out.
+	// The default is SubscriptionMetricsStripeTrialCardGate.
+	StripeTrialCardGateTime *time.Time
+	// The revenue step's own time bound, inside the task's. When it runs out
+	// the revenue is left out of the snapshot and the rest is published.
+	// Non-positive bounds it only by the caller's context.
+	RevenueTimeout time.Duration
 }
 
 // A new instance on every call.
@@ -181,6 +233,18 @@ func DefaultSubscriptionMetricsSettings() *SubscriptionMetricsSettings {
 		// the webhook, the scanner and the reconcile's legs have had their
 		// turn
 		UncreditedMinAge: 30 * time.Minute,
+		// six two-week trial cohorts: enough trials per store for a steady
+		// rate, recent enough to follow the funnel's changes
+		TrialConversionPeriod: 90 * 24 * time.Hour,
+		// a trial's first charge lands up to a day after its period (the day
+		// Play adds, the day a Stripe trial's window runs past it) and a
+		// failed one is retried for days
+		TrialConversionSettle: 7 * 24 * time.Hour,
+		// a rate from fewer trials moves too much with each one
+		TrialConversionMinTrials: 30,
+		StripeTrialCardGateTime:  subscriptionMetricsParseStripeTrialCardGate(SubscriptionMetricsStripeTrialCardGate),
+		// well inside the task's 5 minutes, after the other queries' share
+		RevenueTimeout: 2 * time.Minute,
 	}
 }
 
@@ -648,6 +712,12 @@ func newSubscriptionMetricsSnapshot() *SubscriptionMetricsSnapshot {
 		DataPackBytes:              map[SubscriptionMetricsDataPackWindow]int64{},
 		UncreditedPayments:         map[string]int64{},
 		UncreditedOldestAgeSeconds: map[string]int64{},
+		NewForecastRevenueUsd:      map[SubscriptionMetricsStoreWindow]float64{},
+		RecurringRevenueUsd:        map[SubscriptionMetricsStoreWindow]float64{},
+		TrialExpectedRevenueUsd:    map[string]float64{},
+		TrialsConvertible:          map[string]int64{},
+		TrialConversionRates:       map[string]float64{},
+		TrialConversionTrials:      map[SubscriptionMetricsStoreOutcome]int64{},
 	}
 }
 
@@ -821,6 +891,10 @@ func LoadSubscriptionMetricsSnapshotWithSettings(ctx context.Context, now time.T
 			}
 		})
 	})
+
+	// the revenue, as its own step: a failure there leaves the numbers above
+	// current and publishes no revenue series
+	snapshot.RevenueLoaded = loadSubscriptionMetricsRevenue(ctx, now, settings, snapshot)
 
 	return snapshot
 }

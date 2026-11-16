@@ -161,9 +161,13 @@ type StripeEventInvoiceObject struct {
 	PeriodEnd   int    `json:"period_end"`
 	Customer    string `json:"customer"`
 	Currency    string `json:"currency"`
-	// subscription_create, subscription_cycle, ...; read only for the sales
-	// notice (new or renewal)
+	// subscription_create, subscription_cycle, ...; read for the sales notice
+	// (new or renewal) and by the trial card check, which only ever refuses a
+	// trial's first invoice (subscription_stripe_card_check.go)
 	BillingReason string `json:"billing_reason,omitempty"`
+	// unix seconds; read by the hourly reconcile, which leaves a $0 invoice
+	// alone after a day (stripeReconcileTrialInvoiceMaxAge)
+	Created int64 `json:"created,omitempty"`
 }
 
 type StripeEventDataObjectCustomerDetails struct {
@@ -1059,6 +1063,12 @@ func stripeCheckoutSessionNetworkId(ctx context.Context, subscriptionId string) 
 	return networkId, nil
 }
 
+// The fraction of a Stripe invoice's total the server keeps out of the net
+// revenue it records for a subscription period. The subscriptions dashboard's
+// revenue takes the same fraction off a Stripe price
+// (subscriptionMetricsStoreFeeFractions).
+const stripeInvoiceFeeFraction = 0.3
+
 // Credits through the same lifecycle and invoice ledger gate for webhook and
 // reconciliation delivery. Destination reads are shared with dry-run reports.
 func stripeHandleInvoicePaid(
@@ -1080,7 +1090,7 @@ func stripeHandleInvoicePaidInConn(connOwner server.PgConn,
 	if credit == nil {
 		return &StripeWebhookResult{}, nil
 	}
-	feeFraction := 0.3
+	feeFraction := stripeInvoiceFeeFraction
 	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(invoice.Total) / 100.0)
 
 	_, err = stripeCreditInvoicePaidInConn(connOwner,

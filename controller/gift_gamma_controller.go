@@ -134,8 +134,23 @@ func giftGammaIntentRefusal(refusal *GammaPaymentIntentResult) *GiftGammaIntentR
 }
 
 // GiftGammaIntent answers POST /pay/gift/gamma-intent: a Pay with Gamma intent
-// for a new gift order, from the caller's network's deposit hotkey.
+// for a new gift order, from the caller's network's deposit hotkey. Every
+// answer counts in urnetwork_gift_purchases_total (gift_purchase_metrics.go).
 func GiftGammaIntent(
+	args *GiftGammaIntentArgs,
+	clientSession *session.ClientSession,
+) (*GiftGammaIntentResult, error) {
+	result, err := giftGammaIntent(args, clientSession)
+	refused, code := false, ""
+	if result != nil && result.Error != nil {
+		refused, code = true, result.Error.Code
+	}
+	countGiftPurchase(giftPurchaseRailGamma, err, result != nil, refused, code)
+	return result, err
+}
+
+// giftGammaIntent is GiftGammaIntent's answer, before it is counted.
+func giftGammaIntent(
 	args *GiftGammaIntentArgs,
 	clientSession *session.ClientSession,
 ) (*GiftGammaIntentResult, error) {

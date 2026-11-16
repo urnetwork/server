@@ -143,6 +143,12 @@ func (self *validatedAppleTransaction) sandbox() bool {
 	return self.environment == appleEnvironmentSandbox
 }
 
+// The fraction of an App Store USD price the server keeps out of the net
+// revenue it records for a transaction. The subscriptions dashboard's revenue
+// takes the same fraction off an App Store price
+// (subscriptionMetricsStoreFeeFractions).
+const appleTransactionFeeFraction = 0.2
+
 // creditNetRevenue is the net revenue a credit records for the transaction:
 // zero for a sandbox purchase, which keeps its Pro entitlement but earned
 // nothing, and the validated net revenue otherwise.
@@ -739,7 +745,7 @@ func validateAppleTransactionAccount(
 	case validated.currency == appleUsdCurrency:
 		priceUsd := float64(priceMilliunits) / 1000
 		priceNanoCents := model.UsdToNanoCents(priceUsd)
-		validated.netRevenue = model.NanoCents(float64(priceNanoCents) * 0.8)
+		validated.netRevenue = model.NanoCents(float64(priceNanoCents) * (1 - appleTransactionFeeFraction))
 	default:
 		// A price in another currency, or with no currency, is not USD, and the
 		// server has no reliable rate to convert it. Record the same paid marker

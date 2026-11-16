@@ -81,8 +81,23 @@ func giftCryptoIntentError(code string, message string) *GiftCryptoIntentResult 
 // a new gift order. The invoice is made first, so a coin that cannot be
 // quoted now stores no order; the order and its link to the invoice are
 // stored before the invoice is handed out, so its credit always finds the
-// order.
+// order. Every answer counts in urnetwork_gift_purchases_total
+// (gift_purchase_metrics.go).
 func GiftCryptoIntent(
+	args *GiftCryptoIntentArgs,
+	clientSession *session.ClientSession,
+) (*GiftCryptoIntentResult, error) {
+	result, err := giftCryptoIntent(args, clientSession)
+	refused, code := false, ""
+	if result != nil && result.Error != nil {
+		refused, code = true, result.Error.Code
+	}
+	countGiftPurchase(giftPurchaseRailCoin, err, result != nil, refused, code)
+	return result, err
+}
+
+// giftCryptoIntent is GiftCryptoIntent's answer, before it is counted.
+func giftCryptoIntent(
 	args *GiftCryptoIntentArgs,
 	clientSession *session.ClientSession,
 ) (*GiftCryptoIntentResult, error) {
@@ -214,8 +229,9 @@ func cryptoCreditGiftIntentInConn(
 		return false, fmt.Errorf("USDC invoice %s needs its Solana reference and the paying signature", intent.IntentId)
 	}
 	// read before the transaction: the link is written before the invoice is
-	// handed out and never changes
-	giftOrderId := model.GetGiftOrderIdForCryptoIntent(ctx, intent.IntentId)
+	// handed out and never changes. On the caller's session: the reconciler's
+	// crypto legs hold their run lock on it
+	giftOrderId := model.GetGiftOrderIdForCryptoIntentInConn(connOwner, ctx, intent.IntentId)
 	if giftOrderId == nil {
 		// the invoice stays open, and the credit failures put it in review
 		return false, fmt.Errorf("gift invoice %s has no gift order", intent.IntentId)

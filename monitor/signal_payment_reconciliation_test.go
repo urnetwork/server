@@ -270,6 +270,89 @@ func TestPaymentReconciliationSurfacesSafetyNetRepairs(t *testing.T) {
 	}
 }
 
+// A Stripe credited repair has two writers, the missed invoice.paid credit and
+// the gift leg's missed Checkout fulfilment (controller/payment_reconcile_gift.go),
+// and the alert names both, so an operator reads the audit row's leg.
+func TestPaymentReconciliationStripeCreditedNamesInvoicesAndGiftCheckouts(t *testing.T) {
+	source := paymentReconciliationSource(
+		[]Row{
+			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
+		},
+		[]Row{{"stripe", "credited", "1", "60"}},
+	)
+	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("Stripe credited alerts = %d, want 1: %+v", len(alerts), alerts)
+	}
+	alert := requireAlertClass(t, alerts, "payment-reconciliation-repair")
+	if alert.Target != "stripe" || alert.Frame != "action=credited" || alert.Severity != SeverityWarn {
+		t.Fatalf("Stripe credited alert identity changed: %+v", alert)
+	}
+	rendered := alert.Markdown()
+	for _, expected := range []string{
+		"applied 1 Stripe payment(s) the webhook missed",
+		"invoice.paid",
+		"checkout.session.completed",
+		"gift_checkout",
+		"safety net",
+		"ordinary",
+		"exactly once",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("Stripe credited alert omits %q:\n%s", expected, rendered)
+		}
+	}
+	requireAlertOmits(t, alert, "synthetic-run-id", "synthetic-account-id", "synthetic-transaction-id")
+}
+
+// A card gift order's failure is a stripe error row that never holds the
+// watermark (controller/payment_reconcile_gift.go): the store-error alert
+// says so, so a fresh watermark beside the errors is not read as the order
+// checked.
+func TestPaymentReconciliationStripeStoreErrorNamesGiftCheckoutRows(t *testing.T) {
+	source := paymentReconciliationSource(
+		[]Row{
+			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"stripe", "600", "600", "0", "1", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
+		},
+		nil,
+	)
+	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "payment-reconciliation-store-error")
+	if alert.Target != "stripe" || alert.Severity != SeverityWarn {
+		t.Fatalf("Stripe store-error alert identity changed: %+v", alert)
+	}
+	rendered := alert.Markdown()
+	for _, expected := range []string{"leg gift_checkout", "never hold the stripe watermark"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("Stripe store-error alert omits %q:\n%s", expected, rendered)
+		}
+	}
+}
+
 func TestPaymentReconciliationSpecializesStripeEndedLifecycleGap(t *testing.T) {
 	source := paymentReconciliationSource(
 		[]Row{

@@ -623,9 +623,13 @@ type PaymentReconcileStoreResult struct {
 	UnknownToStore int `json:"unknown_to_store,omitempty"`
 	// examined Stripe renewals whose subscription was canceled inside a paid
 	// period nothing was refunded or disputed from, kept to the period's end
-	CanceledPaidThrough int  `json:"canceled_paid_through,omitempty"`
-	Skipped             bool `json:"skipped,omitempty"`
-	BudgetExhausted     bool `json:"budget_exhausted,omitempty"`
+	CanceledPaidThrough int `json:"canceled_paid_through,omitempty"`
+	// card gift orders whose check failed (payment_reconcile_gift.go): in the
+	// run's errors, not in Errors, so one order's failure never holds the
+	// store's watermark, which belongs to the invoice listing
+	GiftCheckoutErrors int  `json:"gift_checkout_errors,omitempty"`
+	Skipped            bool `json:"skipped,omitempty"`
+	BudgetExhausted    bool `json:"budget_exhausted,omitempty"`
 }
 
 type PaymentReconcileRunResult struct {
@@ -1255,10 +1259,21 @@ func runPaymentReconciliation(
 //	    for, a day past its period                                             -> end
 //	    (the free period's grace, subscription_stripe_grace.go)
 //	status active + cancel_at_period_end (time remaining)                      -> nothing
+//	a card gift order still pending whose Checkout session is paid             -> fulfil
+//	    (through stripeFulfillGiftCheckoutInConn, the webhook's path; the gift
+//	    leg, payment_reconcile_gift.go, has the gift rows of this table)
 //	anything else                                                              -> nothing
 func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketStripe
+
+	// the gift leg: card gift orders still pending whose Checkout session
+	// Stripe says is paid, a missed checkout.session.completed
+	// (payment_reconcile_gift.go). It keeps its own call cap and runs first,
+	// so the invoice legs cannot spend the budget it needs.
+	if !reconcileStripeGiftCheckouts(run) {
+		return false, nil
+	}
 
 	// leg 1: store-side listing -- paid invoices created since the watermark
 	// whose credit never landed (the lost invoice.paid repair)
@@ -1301,8 +1316,38 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 				// the webhook already handled this one
 				continue
 			}
+			if stripeReconcileTrialInvoiceTooOld(invoice, run.now) {
+				// a $0 invoice over a day old: its webhook, its report and the
+				// abandoned-sheet sweep have had it, and a held one is never
+				// settled into the ledger, so it is not read again every run
+				continue
+			}
 			if !run.spend(store) {
 				return false, nil
+			}
+			if invoice.Total == 0 {
+				// a trial's $0 invoice is credited here only as invoice.paid
+				// would: never while its payment sheet waits on the card, and
+				// never for a trial refused for its card
+				// (subscription_stripe_card_check.go). Before this, the repair
+				// credited every abandoned sheet's trial. Only invoices the
+				// ledger does not hold reach this, so a window already credited
+				// stays as it is (the owner, 2026-11-16: "ok just let them run
+				// out"). Its two reads (the invoice, its subscription) are
+				// spent from the budget.
+				for range 2 {
+					if !run.spend(store) {
+						return false, nil
+					}
+				}
+				held, err := stripeReconcileTrialInvoiceHeld(invoice, run.clientSession, run.now, run.dryRun)
+				if err != nil {
+					run.recordStripeCreditError(invoice, err)
+					continue
+				}
+				if held {
+					continue
+				}
 			}
 			if run.dryRun {
 				credit, err := stripeResolveInvoiceCredit(invoice.Id, run.clientSession)

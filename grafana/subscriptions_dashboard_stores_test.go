@@ -43,9 +43,11 @@ func TestSubscriptionsDashboardShowsEveryTrackedStore(t *testing.T) {
 				named := slices.DeleteFunc(strings.Split(match[1], "|"), func(name string) bool {
 					return name == model.SubscriptionMetricsStoreDeduplicated || name == model.PaymentReconcileStoreAll
 				})
-				if panel.Id == 23 {
-					if want := []string{model.SubscriptionMarketApple, model.SubscriptionMarketGoogle, model.SubscriptionMarketStripe}; !slices.Equal(named, want) {
-						t.Errorf("trial panel selects stores %v, want the stores that sell a trial %v", named, want)
+				// the trials by store and plan, the conversion rate in use, and
+				// the trials behind the forecast
+				if panel.Id == 23 || panel.Id == 35 || panel.Id == 38 {
+					if want := model.SubscriptionMetricsTrialStores(); !slices.Equal(named, want) {
+						t.Errorf("trial panel %d %q selects stores %v, want the stores that sell a trial %v", panel.Id, panel.Title, named, want)
 					}
 					continue
 				}
@@ -56,11 +58,12 @@ func TestSubscriptionsDashboardShowsEveryTrackedStore(t *testing.T) {
 			}
 		}
 	}
-	// current, new, engaged, churned and past-due subscribers by store, and
-	// the three reconciliation panels (terminal events and repairs gate on
-	// each store's source timestamp too)
-	if lists != 10 {
-		t.Errorf("subscriptions dashboard has %d tracked-store lists, want 10", lists)
+	// current, new, engaged, churned and past-due subscribers by store, the
+	// three reconciliation panels (terminal events and repairs gate on each
+	// store's source timestamp too), and the forecast and recurring revenue by
+	// store
+	if lists != 12 {
+		t.Errorf("subscriptions dashboard has %d tracked-store lists, want 12", lists)
 	}
 
 	documentBytes, err := dashboardsFs.ReadFile("dashboards/subscriptions.json")

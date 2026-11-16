@@ -5,6 +5,8 @@ package controller
 // labels here; customer and payment identifiers never enter Prometheus.
 
 import (
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -127,6 +129,67 @@ var subscriptionMetricsSnapshotTimestampDesc = prometheus.NewDesc(
 	nil,
 )
 
+var subscriptionMetricsNewForecastRevenueDesc = prometheus.NewDesc(
+	"urnetwork_subscription_new_forecast_revenue_usd",
+	"Net new forecasted revenue, in USD after store fees: the yearly net value of the subscriptions that started inside the rolling window, per tracked store and deduplicated (each network once, by its first window in any tracked store). "+
+		"A subscription whose first supporter window in the store began inside the window counts at its first paid window's net for a year: a monthly net x 12, a yearly net x 1, by the plan, never by the window's length. A trial that converted counts at the paid window that converted it. "+
+		"A trial running now that started inside the window counts at its expected value instead (urnetwork_subscription_trial_expected_revenue_usd, counted once), and a trial that ended without a charge counts nothing. "+
+		"Net is the ledger's net revenue, except where it holds a placeholder: a Google Play credit (the play.yml supporter SKU's $5 less 30% whatever the plan) and an App Store sale in another currency (a $0.01 marker) are valued at the plan's pro.yml price tier less the store's fee, and less the welcome offer's percent on a first year the network redeemed it for. "+
+		"App Store sandbox purchases, Stripe trials only the payment reconcile credited before the payment-sheet card check deployed (a payment sheet abandoned before its card was attached), refunded or revoked payments, gift redemptions and the manual and x402 markets count nothing. "+
+		"The revenue is its own step of the snapshot: when it fails or runs out of time, the snapshot publishes no revenue series (urnetwork_subscription_revenue_refresh_failures counts it) and every other series stays current.",
+	[]string{"store", "window"},
+	nil,
+)
+
+var subscriptionMetricsRecurringRevenueDesc = prometheus.NewDesc(
+	"urnetwork_subscription_recurring_revenue_usd",
+	"Net recurring revenue, in USD after store fees: the net collected from renewals inside the rolling window, per tracked store and all stores together (all adds every store's renewals). "+
+		"A renewal is a paid supporter window after the network's first paid window in that store; a store's first paid window (a new subscription, or a trial's first charge) and trials never count. "+
+		"Each renewal is dated by its payment: the Stripe invoice's credit, the start of the Google Play period it paid for, the App Store purchase, the crypto credit, Pay with Gamma's credit. A crypto year paid again in the same market is a renewal. "+
+		"Net is the ledger's net revenue, except where it holds a placeholder: a Google Play credit and an App Store sale in another currency are valued at the plan's pro.yml price tier less the store's fee. "+
+		"Refunded or revoked payments, App Store sandbox purchases, gift redemptions (no sale) and the manual and x402 markets count nothing.",
+	[]string{"store", "window"},
+	nil,
+)
+
+var subscriptionMetricsTrialExpectedRevenueDesc = prometheus.NewDesc(
+	"urnetwork_subscription_trial_expected_revenue_usd",
+	"Expected trial conversion revenue, in USD after store fees: each free trial running now at its plan's yearly net price (the pro.yml price tier's yearly price, or 12 monthly prices, less the store's fee, and less the welcome offer's percent when the network redeemed it in that store) times its store's trial conversion rate (urnetwork_subscription_trial_conversion_rate), per tracked store and deduplicated (a network once, at its largest). "+
+		"It is the trial part of urnetwork_subscription_new_forecast_revenue_usd{window=\"30d\"}, counted there once. The trials are urnetwork_subscription_trials_convertible.",
+	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsTrialsConvertibleDesc = prometheus.NewDesc(
+	"urnetwork_subscription_trials_convertible",
+	"Distinct networks inside a free trial now that can convert: the trials urnetwork_subscription_trial_expected_revenue_usd values, per tracked store and deduplicated. "+
+		"They are urnetwork_subscription_trials_active less the Stripe trials only the payment reconcile credited before the payment-sheet card check deployed: a payment sheet abandoned before its card was attached, which can never convert. A trial the reconcile credited after it (a missed webhook) counts.",
+	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsTrialConversionRateDesc = prometheus.NewDesc(
+	"urnetwork_subscription_trial_conversion_rate",
+	"The trial conversion rate each tracked store's trials are valued at: of the trials whose free period ended between 90 and 7 days ago, the share followed by a paid window in the same store that started no later than 7 days after the trial ended. "+
+		"A store with fewer than 30 such trials (every store that sells no trial among them) uses the pooled rate of every store's trials, store=all. Stripe trials only the payment reconcile credited before the payment-sheet card check deployed are left out.",
+	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsTrialConversionTrialsDesc = prometheus.NewDesc(
+	"urnetwork_subscription_trial_conversion_trials",
+	"The trials behind urnetwork_subscription_trial_conversion_rate: those whose free period ended between 90 and 7 days ago, per tracked store and all stores, by outcome: converted (a paid window in the same store started no later than 7 days after the trial ended) or lapsed.",
+	[]string{"store", "outcome"},
+	nil,
+)
+
+var subscriptionMetricsRevenueRefreshFailuresDesc = prometheus.NewDesc(
+	"urnetwork_subscription_revenue_refresh_failures",
+	"Snapshot refreshes in a row, on this Taskworker, whose revenue step failed or ran out of its own time bound; 0 once one succeeds. The revenue is its own step: while the latest refresh failed, the snapshot publishes no revenue series and every other subscription series stays current.",
+	nil,
+	nil,
+)
+
 var subscriptionMetricsDescs = []*prometheus.Desc{
 	subscriptionMetricsActiveAccountsDesc,
 	subscriptionMetricsInGraceAccountsDesc,
@@ -143,6 +206,13 @@ var subscriptionMetricsDescs = []*prometheus.Desc{
 	subscriptionMetricsUncreditedPaymentsDesc,
 	subscriptionMetricsUncreditedOldestAgeDesc,
 	subscriptionMetricsSnapshotTimestampDesc,
+	subscriptionMetricsNewForecastRevenueDesc,
+	subscriptionMetricsRecurringRevenueDesc,
+	subscriptionMetricsTrialExpectedRevenueDesc,
+	subscriptionMetricsTrialsConvertibleDesc,
+	subscriptionMetricsTrialConversionRateDesc,
+	subscriptionMetricsTrialConversionTrialsDesc,
+	subscriptionMetricsRevenueRefreshFailuresDesc,
 }
 
 // One immutable sample slice makes every Prometheus collection a coherent
@@ -152,6 +222,8 @@ var subscriptionMetricsDescs = []*prometheus.Desc{
 type subscriptionMetricsCollector struct {
 	stateLock sync.Mutex
 	snapshot  *subscriptionMetricsCollectedSnapshot
+	// the refreshes in a row whose revenue step failed, guarded by stateLock
+	revenueRefreshFailures int64
 }
 
 // Contains const metrics that are never mutated after publication.
@@ -388,17 +460,111 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 		}
 	}
 
+	// the revenue is its own step of the snapshot: when it failed, no revenue
+	// series (no data, never a false zero), and the failure counted
+	if snapshot.RevenueLoaded {
+		metrics = append(metrics, subscriptionMetricsRevenueSeries(snapshot)...)
+	}
+
 	metrics = append(metrics, prometheus.MustNewConstMetric(
 		subscriptionMetricsSnapshotTimestampDesc,
 		prometheus.GaugeValue,
 		float64(refreshedAt.UTC().Unix()),
 	))
-	collectedSnapshot := &subscriptionMetricsCollectedSnapshot{metrics: metrics}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		self.snapshot = collectedSnapshot
+		if snapshot.RevenueLoaded {
+			self.revenueRefreshFailures = 0
+		} else {
+			self.revenueRefreshFailures += 1
+		}
+		metrics = append(metrics, prometheus.MustNewConstMetric(
+			subscriptionMetricsRevenueRefreshFailuresDesc,
+			prometheus.GaugeValue,
+			float64(self.revenueRefreshFailures),
+		))
+		self.snapshot = &subscriptionMetricsCollectedSnapshot{metrics: metrics}
 	}()
+}
+
+// The revenue series, every label zero-filled: the forecast by tracked store
+// and deduplicated, recurring revenue by tracked store and all, per window;
+// the trials running now and their expected revenue by tracked store and
+// deduplicated; the conversion rate and its trials by tracked store and all.
+func subscriptionMetricsRevenueSeries(snapshot *model.SubscriptionMetricsSnapshot) []prometheus.Metric {
+	metrics := []prometheus.Metric{}
+	deduplicatedStores := append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreDeduplicated)
+	allStores := append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreAll)
+	gauge := func(desc *prometheus.Desc, value float64, labels ...string) {
+		metrics = append(metrics, prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, value, labels...))
+	}
+	for _, window := range model.SubscriptionMetricsWindows() {
+		for _, store := range deduplicatedStores {
+			key := model.SubscriptionMetricsStoreWindow{Store: store, Window: window}
+			gauge(subscriptionMetricsNewForecastRevenueDesc, snapshot.NewForecastRevenueUsd[key], store, window)
+		}
+		for _, store := range allStores {
+			key := model.SubscriptionMetricsStoreWindow{Store: store, Window: window}
+			gauge(subscriptionMetricsRecurringRevenueDesc, snapshot.RecurringRevenueUsd[key], store, window)
+		}
+	}
+	for _, store := range deduplicatedStores {
+		gauge(subscriptionMetricsTrialExpectedRevenueDesc, snapshot.TrialExpectedRevenueUsd[store], store)
+		gauge(subscriptionMetricsTrialsConvertibleDesc, float64(snapshot.TrialsConvertible[store]), store)
+	}
+	for _, store := range allStores {
+		gauge(subscriptionMetricsTrialConversionRateDesc, snapshot.TrialConversionRates[store], store)
+		for _, outcome := range model.SubscriptionMetricsTrialOutcomes() {
+			key := model.SubscriptionMetricsStoreOutcome{Store: store, Outcome: outcome}
+			gauge(subscriptionMetricsTrialConversionTrialsDesc, float64(snapshot.TrialConversionTrials[key]), store, outcome)
+		}
+	}
+	return metrics
+}
+
+// The fee each store keeps of a price, as its credit path takes it off when
+// it records net revenue: Stripe's invoice credit (stripeInvoiceFeeFraction),
+// the App Store's validation (appleTransactionFeeFraction), and Google Play's
+// supporter SKU (play.yml fee_fraction; the model's default when play.yml
+// names none). The subscriptions dashboard values a placeholder payment and a
+// trial's plan at a tier price less these.
+func subscriptionMetricsStoreFeeFractions() map[string]float64 {
+	feeFractions := model.DefaultSubscriptionMetricsStoreFeeFractions()
+	feeFractions[model.SubscriptionMarketStripe] = stripeInvoiceFeeFraction
+	feeFractions[model.SubscriptionMarketApple] = appleTransactionFeeFraction
+	if feeFraction, ok := subscriptionMetricsPlayFeeFraction(); ok {
+		feeFractions[model.SubscriptionMarketGoogle] = feeFraction
+	}
+	return feeFractions
+}
+
+// The fee play.yml's supporter SKU takes off each Play credit, the first by
+// product id when there are several. ok is false when play.yml is absent or
+// names no supporter SKU.
+func subscriptionMetricsPlayFeeFraction() (feeFraction float64, ok bool) {
+	err := server.HandleError(func() {
+		skus := playSkusFunc()
+		productIds := slices.Sorted(maps.Keys(skus))
+		for _, productId := range productIds {
+			if sku := skus[productId]; sku != nil && sku.Supporter {
+				feeFraction = sku.FeeFraction
+				ok = true
+				return
+			}
+		}
+	})
+	if err != nil {
+		return 0, false
+	}
+	return feeFraction, ok
+}
+
+// The snapshot's settings: the defaults, with the fees the credit paths take.
+func subscriptionMetricsSettings() *model.SubscriptionMetricsSettings {
+	settings := model.DefaultSubscriptionMetricsSettings()
+	settings.StoreFeeFractions = subscriptionMetricsStoreFeeFractions()
+	return settings
 }
 
 // Loads and atomically publishes one complete privacy-safe aggregate snapshot.
@@ -407,7 +573,7 @@ func SubscriptionMetricsSync(
 	clientSession *session.ClientSession,
 ) (*SubscriptionMetricsSyncResult, error) {
 	startedAt := server.NowUtc()
-	snapshot := model.LoadSubscriptionMetricsSnapshot(clientSession.Ctx, startedAt)
+	snapshot := model.LoadSubscriptionMetricsSnapshotWithSettings(clientSession.Ctx, startedAt, subscriptionMetricsSettings())
 	completedAt := server.NowUtc()
 	subscriptionMetrics.set(snapshot, completedAt)
 	return &SubscriptionMetricsSyncResult{
