@@ -201,12 +201,19 @@ func TestProberRetentionClassifyNeedsNoOpenPayerIndex(t *testing.T) {
 			t.Fatalf("window holds %d contracts, want 100", len(windowIds))
 		}
 
+		// the batch's payers are a generation's pass networks: about 1,600 a
+		// day on Main, the shard payer among them
+		networkIds := []server.Id{payerNetworkId}
+		for range 1599 {
+			networkIds = append(networkIds, server.NewId())
+		}
+
 		setup := append([]string{
 			`DROP INDEX IF EXISTS transfer_contract_open_payer_network_id_transfer_byte_count`,
 			`SET LOCAL plan_cache_mode = force_custom_plan`,
 		}, proberShardRetentionBitmapSettings...)
 		for _, sql := range []string{proberShardRetentionClassifySql, proberShardRetentionClassifyLockSql} {
-			scans, raw := planIndexDietStatement(t, ctx, setup, sql, windowIds, payerNetworkId, now, ContractPartyDestination)
+			scans, raw := planIndexDietStatement(t, ctx, setup, sql, windowIds, networkIds, now, ContractPartyDestination)
 			if len(scans) == 0 {
 				t.Fatalf("the classification reads no transfer_contract:\n%s", raw)
 			}
