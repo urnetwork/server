@@ -152,6 +152,24 @@ func TestMigrationCensusNativeDirectChecksEffectiveMountAndPhysicalNamespace(t *
 	}
 }
 
+// A hidden read-only mount cannot authenticate a writable mount stacked at the
+// same path. Mountinfo order is not authority; both observed orders refuse.
+func TestMigrationCensusNativeDirectRejectsAmbiguousStackedMounts(t *testing.T) {
+	const parent = "1 0 0:1 / / rw - overlay overlay rw\n"
+	const readOnly = "2 1 0:2 / /synthetic ro - ext4 fixture rw\n"
+	const writable = "3 2 0:3 / /synthetic rw - tmpfs tmpfs rw\n"
+	for _, mounts := range []string{parent + readOnly + writable, parent + writable + readOnly, parent + readOnly + readOnly} {
+		if _, err := migrationCensusNativeMountAt(mounts, "/synthetic/image/psql"); err == nil {
+			t.Fatal("stacked mounts authenticated an ambiguous effective view")
+		}
+	}
+	// An independently mounted, more-specific read-only file has no ambiguity.
+	const file = "4 3 0:4 / /synthetic/image/psql ro - ext4 fixture rw\n"
+	if _, err := migrationCensusNativeMountAt(parent+readOnly+writable+file, "/synthetic/image/psql"); err != nil {
+		t.Fatal("an unambiguous more-specific mount was rejected", err)
+	}
+}
+
 // Real filesystem aliases are safe only when their canonical targets remain
 // inside the pinned image. All files and hashes here are synthetic, not DSOs.
 func TestMigrationCensusNativeDirectRejectsHostAliasesAndUnpinnedLibraries(t *testing.T) {

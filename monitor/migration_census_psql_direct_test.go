@@ -148,6 +148,7 @@ type migrationCensusNativeMount struct {
 // Select the effective mount, including any more-specific writable override.
 func migrationCensusNativeMountAt(raw, path string) (migrationCensusNativeMount, error) {
 	var selected migrationCensusNativeMount
+	ambiguous := false
 	unescape := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
 	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
 		parts := strings.SplitN(line, " - ", 2)
@@ -159,11 +160,17 @@ func migrationCensusNativeMountAt(raw, path string) (migrationCensusNativeMount,
 			return selected, errors.New("incomplete native mount metadata")
 		}
 		mountPath := unescape.Replace(fields[4])
-		if (path == mountPath || strings.HasPrefix(path, strings.TrimSuffix(mountPath, "/")+"/")) && len(selected.path) < len(mountPath) {
-			selected = migrationCensusNativeMount{path: mountPath, readOnly: strings.Contains(","+fields[5]+",", ",ro,"), kind: filesystem[0]}
+		if path == mountPath || strings.HasPrefix(path, strings.TrimSuffix(mountPath, "/")+"/") {
+			if len(selected.path) < len(mountPath) {
+				selected = migrationCensusNativeMount{path: mountPath, readOnly: strings.Contains(","+fields[5]+",", ",ro,"), kind: filesystem[0]}
+				ambiguous = false
+			} else if selected.path == mountPath {
+				// Text order cannot identify the visible mount in a stacked mount.
+				ambiguous = true
+			}
 		}
 	}
-	if selected.path == "" || !selected.readOnly {
+	if selected.path == "" || !selected.readOnly || ambiguous {
 		return selected, errors.New("native evidence is not on its effective read-only mount")
 	}
 	return selected, nil
