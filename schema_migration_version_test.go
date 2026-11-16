@@ -31,6 +31,7 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{name: "provider session head retention guard", sql: providerWorkSessionHeadRetentionGuardSql, version: ProviderWorkSessionHeadRetentionGuardMigrationVersion},
 		{name: "client key history seven-day floor", sql: clientKeyHistoryRetentionSevenDayFloorSql, version: ClientKeyHistoryRetentionSevenDayFloorMigrationVersion},
 		{name: "exact-job second recovery", sql: CompetitionSecondRecoveryMigrationSql(), version: CompetitionSecondRecoveryMigrationVersion},
+		{name: "lingering origins' side table", sql: contractOriginLingerSchemaSql, version: ContractOriginLingerMigrationVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {

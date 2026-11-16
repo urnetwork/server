@@ -11698,4 +11698,19 @@ var migrations = []any{
 	// only once every running build has that rewrite and the index's idx_scan
 	// has stopped growing.
 	openPayerIndexDropMigration,
+
+	// The lingering origins' side table (OPEN-SOURCE-ID-RETIRE.md §2, owner
+	// 2026-11-16; contract_origin_linger_schema.go): contract_origin_linger
+	// and its prune time index, the one-row contract_origin_linger_state and
+	// the capture function, each created only when absent, under a
+	// five-second lock bound. Nothing existing is locked, scanned or
+	// rewritten. The trigger on transfer_contract is created here only on a
+	// database with no contract; on Main the operator creates it after this
+	// migration, by hand in a vacuum gap (ContractOriginLingerOperatorSql),
+	// since CREATE TRIGGER queues every writer behind its table lock. The
+	// running release never reads either table, so it applies before or after
+	// any deploy; a release with the side table reads keeps its previous
+	// statements until the state row's complete time, 75 minutes after the
+	// trigger.
+	contractOriginLingerMigration,
 }
