@@ -488,6 +488,7 @@ func TestProviderWorkSessionEvidenceRefusalKeepsConnectionOwner(t *testing.T) {
 		for _, expired := range []bool{false, true} {
 			clientId, networkId := server.NewId(), server.NewId()
 			addContractPayoutTestClients(f.ctx, map[server.Id]server.Id{clientId: networkId})
+			addProviderWorkSessionTestProvideKeys(f.ctx, clientId)
 			authority := f.source.authority
 			if expired {
 				authority.ThroughUnixMicro = server.NowUtc().Add(-time.Minute).UnixMicro()
@@ -529,6 +530,7 @@ func TestProviderWorkSessionUnknownGenesisKeepsAdmission(t *testing.T) {
 		f := newProviderWorkSessionFixture(t)
 		clientId, networkId := server.NewId(), server.NewId()
 		addContractPayoutTestClients(f.ctx, map[server.Id]server.Id{clientId: networkId})
+		addProviderWorkSessionTestProvideKeys(f.ctx, clientId)
 		server.Tx(f.ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(f.ctx, `ALTER TABLE network_client_connection DISABLE TRIGGER provider_work_session_mutation`))
 		})
