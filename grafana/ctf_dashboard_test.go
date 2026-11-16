@@ -20,21 +20,21 @@ import (
 
 // The capture the flag row's panel ids on the taskworker dashboard.
 const (
-	ctfRowPanel            = 106
-	ctfSamplesPanel        = 107
-	ctfPresentPanel        = 108
-	ctfSampleAgesPanel     = 109
-	ctfCensusRunsPanel     = 110
-	ctfCensusCountsPanel   = 111
-	ctfCensusExcludedPanel = 112
-	ctfCensusSamplesPanel  = 113
-	ctfCensusLagPanel      = 114
-	ctfEpochsPanel         = 115
-	ctfStepsPanel          = 116
-	ctfAlertsPanel         = 117
-	ctfDrandPanel          = 118
-	ctfBuildPanel          = 119
-	ctfWinnersPanel        = 120
+	ctfRowPanel            = 110
+	ctfSamplesPanel        = 111
+	ctfPresentPanel        = 112
+	ctfSampleAgesPanel     = 113
+	ctfCensusRunsPanel     = 114
+	ctfCensusCountsPanel   = 115
+	ctfCensusExcludedPanel = 116
+	ctfCensusSamplesPanel  = 117
+	ctfCensusLagPanel      = 118
+	ctfEpochsPanel         = 119
+	ctfStepsPanel          = 120
+	ctfAlertsPanel         = 121
+	ctfDrandPanel          = 122
+	ctfBuildPanel          = 123
+	ctfWinnersPanel        = 124
 )
 
 // The label matchers every capture the flag selector starts with.
