@@ -307,27 +307,45 @@ func TestExchangeScopesUnadmittedClientGetsOnlyItsRecoveryScopeAtGkm(t *testing.
 	requireExchangeRefused(t, "an unreadable owner row", err, ErrExchangeUnavailable)
 }
 
-// §7.9's bootstrap: from base 1, repo:<config_repo_id>:admin goes to the
-// genesis's sidecar alone, at evs and gkm. The owner's second device, a config
-// writer too, never gets it; nor does any audience but evs and gkm; nor the
-// first device once it is revoked.
-func TestExchangeScopesBootstrapSidecarAloneGetsTheConfigAdmin(t *testing.T) {
+// QD-894: from base 1, repo:<config_repo_id>:admin goes to each config writer,
+// at evs and gkm: the genesis's sidecar, §7.9's bootstrap, and the owner's
+// second device alike, which keeps it once the first is revoked. A read_only
+// device of the owner and an ephemeral one, no config writers, never get it;
+// nor does any audience but evs and gkm; nor the first device once it is
+// revoked.
+func TestExchangeScopesEachConfigWriterGetsTheConfigAdmin(t *testing.T) {
 	self := newExchangeScopesWorld(t)
-	secondSidecarId := server.NewId()
+	secondSidecarId, readOnlySidecarId, ephemeralSidecarId := server.NewId(), server.NewId(), server.NewId()
 	self.admitOwnerDevice(secondSidecarId, false, 0, 0)
+	self.admitOwnerDevice(readOnlySidecarId, false, 0, uint32(bridge.SidecarCapability_SIDECAR_CAPABILITY_READ_ONLY))
+	self.admitOwnerDevice(ephemeralSidecarId, true, self.world.Clock().Now().Add(24*time.Hour).UnixMilli(), 0)
 	snapshot := self.load()
 	source := self.source()
 	configAdmin := repoScope(self.configRepoId(snapshot), "admin")
+	configRead := repoScope(self.configRepoId(snapshot), "r")
 	connect.AssertEqual(t, snapshot.Config.IsConfigWriter(sidecar.Id(secondSidecarId)), true)
+	connect.AssertEqual(t, snapshot.Config.IsConfigWriter(sidecar.Id(readOnlySidecarId)), false)
+	connect.AssertEqual(t, snapshot.Config.IsConfigWriter(sidecar.Id(ephemeralSidecarId)), false)
 
 	for _, audience := range []string{"evs", "gkm"} {
-		grant, err := source.Grant(self.ctx, self.request(&self.ownerSidecarId, self.ownerMemberId, audience, configAdmin))
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, grant.Scopes, []string{configAdmin})
-		connect.AssertEqual(t, *grant.MemberId, self.ownerMemberId)
-
-		_, err = source.Grant(self.ctx, self.request(&secondSidecarId, self.ownerMemberId, audience, configAdmin))
-		requireExchangeRefused(t, "the second device at "+audience, err, ErrInvalidScope)
+		for _, writerSidecarId := range []server.Id{self.ownerSidecarId, secondSidecarId} {
+			grant, err := source.Grant(self.ctx, self.request(&writerSidecarId, self.ownerMemberId, audience, configAdmin))
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, grant.Scopes, []string{configAdmin})
+			connect.AssertEqual(t, *grant.MemberId, self.ownerMemberId)
+			// what is granted is what the gate's state honors (D-ACL-21)
+			aclAudience, _ := exchangeAclAudience(audience)
+			rights := snapshot.Acl.EvsAccess(sidecar.AclSidecarSubject(sidecar.Id(writerSidecarId)), sidecar.Id(self.configRepoId(snapshot)), aclAudience, self.world.Clock().Now()).Rights
+			connect.AssertEqual(t, rights.Has(sidecar.AclEvsAdmin), true)
+		}
+		for name, sidecarId := range map[string]server.Id{"a read_only device": readOnlySidecarId, "an ephemeral device": ephemeralSidecarId} {
+			_, err := source.Grant(self.ctx, self.request(&sidecarId, self.ownerMemberId, audience, configAdmin))
+			requireExchangeRefused(t, name+" at "+audience, err, ErrInvalidScope)
+			// beside a scope it holds, the admin alone is left out
+			grant, err := source.Grant(self.ctx, self.request(&sidecarId, self.ownerMemberId, audience, configAdmin, configRead))
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, grant.Scopes, []string{configRead})
+		}
 	}
 	_, err := source.Grant(self.ctx, self.request(&self.ownerSidecarId, self.ownerMemberId, "dns", configAdmin))
 	requireExchangeRefused(t, "at dns", err, ErrInvalidScope)
@@ -347,6 +365,14 @@ func TestExchangeScopesBootstrapSidecarAloneGetsTheConfigAdmin(t *testing.T) {
 	self.load()
 	_, err = source.Grant(self.ctx, self.request(&self.ownerSidecarId, self.ownerMemberId, "evs", configAdmin))
 	requireExchangeRefused(t, "the revoked first device", err, ErrInvalidGrant)
+	// the config's admin outlives the bootstrap sidecar: the other config writer still gets it
+	for _, audience := range []string{"evs", "gkm"} {
+		grant, err := source.Grant(self.ctx, self.request(&secondSidecarId, self.ownerMemberId, audience, configAdmin))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, []string{configAdmin})
+		_, err = source.Grant(self.ctx, self.request(&readOnlySidecarId, self.ownerMemberId, audience, configAdmin))
+		requireExchangeRefused(t, "a read_only device at "+audience+" once the first device is revoked", err, ErrInvalidScope)
+	}
 }
 
 // proj_v is the position of the state the scopes came from, and moves with it;
@@ -460,8 +486,8 @@ func TestExchangeScopesRefuseALapsedAdmission(t *testing.T) {
 
 // The exchange with the projection's source installed: an unadmitted client's
 // credential names its member, so its recovery scope reaches the token with
-// that member and the state's position; the bootstrap sidecar's config admin
-// does too.
+// that member and the state's position; a config writer's config admin does
+// too, the bootstrap sidecar's here.
 func TestExchangeWithTheProjectionsScopes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		fixture := newExchangeFixture(t)
@@ -581,7 +607,7 @@ func setExchangeScopeForwarding(t testing.TB, forwardingClients map[server.Id]*s
 
 // §7.8's forwarding rule (TEAM-M8-02): a forwarding client of S gets the config's r alone, at evs and gkm, naming S as
 // its sidecar, while S's forwarding Delegation is live, whatever S reads: not the general repo S administers, not the
-// config's admin S's bootstrap holds, no recovery scope, nothing at another audience. An older forwarding client, which
+// config's admin S holds as a config writer, no recovery scope, nothing at another audience. An older forwarding client, which
 // speaks for no sidecar, is refused, and once S revokes its forwarding Delegation the config's r is refused too.
 func TestExchangeScopesForwardingClientGetsTheConfigsReadAlone(t *testing.T) {
 	self := newExchangeScopesWorld(t)
