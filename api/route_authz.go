@@ -312,6 +312,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/claim-relay":                           routeAccessOwnClientPayout, // the network's own claim status
 	"POST /sn/claim-relay/claim-now":                routeAccessOwnClientPayout, // queues a claim to the network's own coldkey
 	"GET /sn/attempt-artifact":                      routeAccessPublic,
+	"HEAD /sn/attempt-artifact":                     routeAccessPublic,
 	"POST /sn/attempt-artifact":                     routeAccessClient,
 	// the validator's client token; its hotkey signature is the authority
 	"POST /sn/head-summary":                         routeAccessClient,
