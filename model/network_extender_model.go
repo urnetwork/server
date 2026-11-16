@@ -385,6 +385,17 @@ func ExtenderAddressFirstContact(carriers []string) bool {
 	return false
 }
 
+// Whether an address with these carriers is reached over the webrtc carrier
+// alone: it lists webrtc and can be no first contact
+// (ExtenderAddressFirstContact). A client reaches such an address only by
+// signaling the extender through a connection of its own to the platform, so a
+// caller on it is a relay only while its client holds one elsewhere
+// (ConnectNetworkClientWithIpFamily). An address that lists no carrier at all
+// is judged by tcp, as every address was before webrtc, and is not one.
+func ExtenderAddressSignaledOnly(carriers []string) bool {
+	return slices.Contains(carriers, connect.ExtenderCarrierWebRtc) && !ExtenderAddressFirstContact(carriers)
+}
+
 // The carriers column of an address that can be a first contact, as a
 // postgres regular expression: one of its comma-separated carriers is tcp,
 // quic or dns (ExtenderAddressFirstContact).
