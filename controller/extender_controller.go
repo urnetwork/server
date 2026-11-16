@@ -239,15 +239,19 @@ type ExtenderActivateSettings struct {
 	TcpChallengeTimeout time.Duration
 	// the most extenders the operator accepts on the webrtc carrier without
 	// tcp (connect/EXTENDER.md S8): active extenders with an active address
-	// that lists webrtc and not tcp, the activating key's own left out, so an
-	// extender already counted activates again. Past it an activation whose
-	// tcp path failed or was not offered is refused before the webrtc test
-	// runs, and its refusal names the cap. A first bound while the carrier is
-	// new (owner, 2026-11-12): every such address costs the uptime pass a
-	// relayed offer and an ICE join at the same probe concurrency
-	// (taskworker ExtenderProbeConcurrency), and a webrtc test that fails
-	// holds a worker for the whole address budget. Read only when the webrtc
-	// test is to run. Non-positive accepts none on webrtc without tcp.
+	// that lists webrtc and not tcp (model.ExtenderAddressWebRtcOnly), the
+	// activating key's own left out, so an extender already counted activates
+	// again. Past it an activation whose tcp path failed or was not offered is
+	// refused before the webrtc test runs, and its refusal names the cap. A
+	// safety limit against runaway load, not a target (owner, 2026-11-16: as
+	// many extenders as possible): every such address costs each uptime pass
+	// a relayed offer and an ICE join, and a webrtc probe that fails holds a
+	// worker for the whole address budget, so the uptime task probes these
+	// addresses on a pool sized to their number (taskworker
+	// ExtenderProbeSettings), which fits a pass at the cap, two addresses for
+	// each extender, inside its cadence. Raising it past what that pool's
+	// bound fits fails the taskworker's test of the two. Read only when the
+	// webrtc test is to run. Non-positive accepts none on webrtc without tcp.
 	MaxWebRtcOnlyExtenders int
 
 	// where every activation's outcome and probe step times are counted
@@ -527,10 +531,12 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		BusyRetryAfterMax: 3 * time.Minute,
 		// the uptime probe's address budget less the activation's
 		TcpChallengeTimeout: 5 * time.Second,
-		// a hundred, up to two hundred addresses: a pass's webrtc probes that
-		// all wait out their 15 s budget hold the 16 workers about three
-		// minutes, inside the five-minute cadence beside the tcp addresses
-		MaxWebRtcOnlyExtenders: 100,
+		// up to 4,000 addresses, which the uptime pass's webrtc pool probes on
+		// 250 workers in four minutes when every probe waits out its 15 s
+		// budget, inside the five-minute cadence beside the tcp addresses
+		// (taskworker ExtenderProbeSettings). The hundred of 2026-11-12 filled
+		// on 11-14 and refused about 1,300 activations a day
+		MaxWebRtcOnlyExtenders: 2000,
 		metrics:                defaultExtenderActivationMetrics,
 	}
 }

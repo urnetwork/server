@@ -140,6 +140,7 @@ func TestExtenderWebRtcOnlyRoom(t *testing.T) {
 	}{
 		{maxCount: 100, count: 100, want: "(100 accepted, the cap is 100)"},
 		{maxCount: 100, count: 120, want: "(120 accepted, the cap is 100)"},
+		{maxCount: 2000, count: 2000, want: "(2000 accepted, the cap is 2000)"},
 		{maxCount: 0, count: 0, want: "(0 accepted, the cap is 0)"},
 		{maxCount: -1, count: 0, want: "(0 accepted, the cap is 0)"},
 	} {
@@ -148,5 +149,41 @@ func TestExtenderWebRtcOnlyRoom(t *testing.T) {
 			t.Fatalf("cap %d at %d: err = %v, want %q", c.maxCount, c.count, err, c.want)
 		}
 	}
-	connect.AssertEqual(t, DefaultExtenderActivateSettings().MaxWebRtcOnlyExtenders, 100)
+}
+
+// The cap is a safety limit of 2,000 extenders (owner, 2026-11-16: as many
+// extenders as possible), which the uptime pass's webrtc pool fits
+// (taskworker ExtenderProbeSettings). Root cause: the first bound of a
+// hundred filled on 11-14 and refused about 1,300 activations a day whose tcp
+// path failed. Observable, judged at the default cap: an activation whose tcp
+// path failed is tried on webrtc and accepted at a hundred extenders already
+// on webrtc and at 1,999, and refused with the webrtc test untried at 2,000.
+func TestExtenderActivationTakesWebRtcExtendersUpToTheSafetyCap(t *testing.T) {
+	maxWebRtcOnlyExtenders := DefaultExtenderActivateSettings().MaxWebRtcOnlyExtenders
+	connect.AssertEqual(t, maxWebRtcOnlyExtenders, 2000)
+	tcpProbe := fmt.Sprintf("%s:%d", connect.ExtenderCarrierTcp, testAcceptanceTcpPort)
+	for _, count := range []int{100, 1999} {
+		probes := newTestActivationProbes()
+		probes.carrierErrs[tcpProbe] = errors.New("connection refused")
+		outcome, asked := probes.judgeWithWebRtcOnlyRoom(func(ctx context.Context) error {
+			return extenderWebRtcOnlyRoom(maxWebRtcOnlyExtenders, count)
+		}, connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc)
+		if outcome.refusal != "" || asked != 1 {
+			t.Fatalf("at %d extenders on webrtc: refused %q, the cap asked %d times", count, outcome.refusal, asked)
+		}
+		connect.AssertEqual(t, outcome.carriers, []string{connect.ExtenderCarrierWebRtc})
+		connect.AssertEqual(t, probes.probesSoFar(), []string{tcpProbe, testWebRtcProbe})
+	}
+
+	full := newTestActivationProbes()
+	full.carrierErrs[tcpProbe] = errors.New("connection refused")
+	outcome, asked := full.judgeWithWebRtcOnlyRoom(func(ctx context.Context) error {
+		return extenderWebRtcOnlyRoom(maxWebRtcOnlyExtenders, maxWebRtcOnlyExtenders)
+	}, connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc)
+	connect.AssertEqual(t, asked, 1)
+	connect.AssertEqual(t, full.probesSoFar(), []string{tcpProbe})
+	connect.AssertEqual(t, outcome.refusalOutcome, extenderActivationOutcomeCap)
+	if !strings.Contains(outcome.refusal, "(2000 accepted, the cap is 2000)") {
+		t.Fatalf("refusal = %q, want the cap at 2,000", outcome.refusal)
+	}
 }
