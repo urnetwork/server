@@ -36,7 +36,8 @@ func firstEvsEvacuate(host *sidecar.ServiceHost) *sidecar.TaskRequest {
 
 // One run: the hourly start, or one cluster's evacuation, at the instance format the block's config names
 // (evs_block_config.go): a format-1 run leaves format-2 batches where they are, alarming. Format 2's sweep reads
-// §19.11's purge mode from the host's gates (EVSB-M10-02), observe while sidecar.yml sets none.
+// §19.11's purge mode from the host's gates (EVSB-M10-02), observe while sidecar.yml sets none, and under observe
+// checks each kept list against every retained version (evsservice.PurgeObserveCheck, D-TEST-12).
 func runEvsEvacuate(ctx context.Context, host *sidecar.ServiceHost, args []byte) error {
 	deps := &evsservice.EvacuatorDeps{
 		EvsSettings: evsJobSettings(ctx),
@@ -58,6 +59,12 @@ func runEvsEvacuate(ctx context.Context, host *sidecar.ServiceHost, args []byte)
 			return err
 		}
 		deps.Drops = drops
+		// D-TEST-12's check of each kept list against every retained version, under purge: observe (EVS2-M10-33)
+		observe, err := evsservice.NewPurgeObserveCheck(host, &evsservice.PurgeObserveDeps{EvsSettings: deps.EvsSettings, Log: evsBudgetLogger{}})
+		if err != nil {
+			return err
+		}
+		deps.Observe = observe
 	}
 	result, err := evsservice.RunEvacuation(ctx, host, deps, args)
 	if result != nil && glog.V(1) {
