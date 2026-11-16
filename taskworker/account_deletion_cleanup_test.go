@@ -48,7 +48,11 @@ func TestAccountDeletionLeavesNoActiveClientOrAccountRows(t *testing.T) {
 			t.Fatalf("the deletion = %s", outcome)
 		}
 
-		// the work the deletion queued, until none is due
+		// the work the deletion queued, as the worker finds it once its block
+		// has passed, until none is due
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at = run_at - interval '10 minutes'`))
+		})
 		worker := InitTaskWorker(ctx)
 		defer worker.Close()
 		for range 10 {
