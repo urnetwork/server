@@ -623,9 +623,13 @@ type PaymentReconcileStoreResult struct {
 	UnknownToStore int `json:"unknown_to_store,omitempty"`
 	// examined Stripe renewals whose subscription was canceled inside a paid
 	// period nothing was refunded or disputed from, kept to the period's end
-	CanceledPaidThrough int  `json:"canceled_paid_through,omitempty"`
-	Skipped             bool `json:"skipped,omitempty"`
-	BudgetExhausted     bool `json:"budget_exhausted,omitempty"`
+	CanceledPaidThrough int `json:"canceled_paid_through,omitempty"`
+	// card gift orders whose check failed (payment_reconcile_gift.go): in the
+	// run's errors, not in Errors, so one order's failure never holds the
+	// store's watermark, which belongs to the invoice listing
+	GiftCheckoutErrors int  `json:"gift_checkout_errors,omitempty"`
+	Skipped            bool `json:"skipped,omitempty"`
+	BudgetExhausted    bool `json:"budget_exhausted,omitempty"`
 }
 
 type PaymentReconcileRunResult struct {
@@ -1255,10 +1259,21 @@ func runPaymentReconciliation(
 //	    for, a day past its period                                             -> end
 //	    (the free period's grace, subscription_stripe_grace.go)
 //	status active + cancel_at_period_end (time remaining)                      -> nothing
+//	a card gift order still pending whose Checkout session is paid             -> fulfil
+//	    (through stripeFulfillGiftCheckoutInConn, the webhook's path; the gift
+//	    leg, payment_reconcile_gift.go, has the gift rows of this table)
 //	anything else                                                              -> nothing
 func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketStripe
+
+	// the gift leg: card gift orders still pending whose Checkout session
+	// Stripe says is paid, a missed checkout.session.completed
+	// (payment_reconcile_gift.go). It keeps its own call cap and runs first,
+	// so the invoice legs cannot spend the budget it needs.
+	if !reconcileStripeGiftCheckouts(run) {
+		return false, nil
+	}
 
 	// leg 1: store-side listing -- paid invoices created since the watermark
 	// whose credit never landed (the lost invoice.paid repair)

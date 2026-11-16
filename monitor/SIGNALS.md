@@ -21884,6 +21884,51 @@ account is protected, but every generic repair proves the ordinary
 notification/verification/idempotency path missed authoritative provider
 state or its metadata. Trace and fix that earlier stage.
 
+Stripe `credited` has two writers since 2026-11-16. One is the invoice
+listing: a paid subscription invoice whose `invoice.paid` credit never landed.
+The other is the gift leg (`controller/payment_reconcile_gift.go`), which runs
+first in the Stripe store. It reads the Checkout session, with its charge, of
+every card gift order still pending that was made from 15 minutes to 21 days
+ago, at most 100 per run: the newest first, so a recent payment is reached at
+the next run even in a burst of open sessions, and 20 of the 100 for the oldest
+when more are pending. When Stripe reports a session paid and its charge kept
+whole (neither refunded nor disputed), the leg fulfils it through the
+webhook's own idempotent path (`stripeFulfillGiftCheckoutInConn`), so the
+order, its codes, its delivery and its sales notice are made once, whichever of
+the two reports the session first. Its `credited` row has evidence the session
+and details `leg=gift_checkout` with the gift order. Either kind of repair
+means a Stripe webhook delivery was lost, failed or rejected, or the endpoint
+is disabled: check the endpoint's deliveries for the same window. The gift
+leg's other records are not alarms. An expired session is a `checkout_expired`
+row, written once, after which the order is not read again; no probe reads
+those rows. A paid session whose charge was refunded or disputed before the
+order was fulfilled is a stripe `refunded` or `disputed` row (evidence the
+session, `leg=gift_checkout`, the charge), written once and never fulfilled:
+a dispute voids nothing of an order with no codes, so a fulfilment would make
+its codes live mid-dispute, and a refund the webhook missed would be given
+away. The order stays pending; a lost dispute still refunds it through its
+webhook, and an operator settles a won one. These rows also count on the
+subscriptions dashboard's provider-confirmed terminal events. A session paid in
+another amount or currency goes through the webhook's mismatch record (store
+`gift`, §2.22 `payment-gift-mismatch`, with `leg=gift_checkout`), and the order
+is not read again. A failed read, charge or fulfilment is a stripe `error` row
+with `leg=gift_checkout` and a reason (`read`, `session_not_found`,
+`other_order`, `unknown_status`, `charge`, `charge_not_settled`, `fulfil`,
+`not_fulfilled`, `raised`, `record`). It counts toward
+`payment-reconciliation-store-error` and the run's errors, but never as a
+store error that holds the stripe watermark: one order that keeps failing must
+not hold the invoice listing's watermark for its whole 21-day window, whose
+overlap would grow until the store's budget ran out before the renewal legs.
+So a fresh stripe watermark beside such errors does not mean the order was
+checked; the heartbeat's stripe details count them as `gift_checkout_errors`.
+Three failed reads in a row stop the leg until the next run. A session Stripe
+does not know gets the App Store leg's bounded retry: it is a
+`session_not_found` error until it has persisted through 24 runs within seven
+days, then `unknown_to_store` is recorded once and the answer is no longer an
+error. The session is still read every run. Every read is counted on
+`urnetwork_gift_checkout_reconcile_total{result}` (taskworker dashboard, payment
+reconciliation row).
+
 Stripe `ended` is a distinct source boundary. At the revision described here,
 the Stripe webhook handles invoice credits, refunds, and disputes but has no
 real-time subscription-lifecycle consumer. A `store=stripe, action=ended`

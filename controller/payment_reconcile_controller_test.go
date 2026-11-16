@@ -11,8 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -309,14 +312,49 @@ type stripeReconcileTestEnv struct {
 	// Overrides exercise invalid, partial, and failed destination lookups.
 	checkoutResponse any
 	checkoutStatus   int
+	// the gift leg's reads (payment_reconcile_gift.go): session id -> the
+	// object GET /v1/checkout/sessions/{id} serves (any other id is 404), or
+	// the status it fails with instead; set them with setCheckoutSession and
+	// failCheckoutSession
+	checkoutSessionsLock    sync.Mutex
+	checkoutSessions        map[string]map[string]any
+	checkoutSessionFailures map[string]int
+	checkoutSessionReads    map[string]int
+	// called with the session id before a session read is answered
+	onCheckoutSessionRead func(sessionId string)
 
 	testServer *httptest.Server
 }
 
+// The checkout session GET /v1/checkout/sessions/{id} serves from now on.
+func (self *stripeReconcileTestEnv) setCheckoutSession(sessionId string, session map[string]any) {
+	self.checkoutSessionsLock.Lock()
+	defer self.checkoutSessionsLock.Unlock()
+	self.checkoutSessions[sessionId] = session
+	delete(self.checkoutSessionFailures, sessionId)
+}
+
+// The status GET /v1/checkout/sessions/{id} fails with from now on.
+func (self *stripeReconcileTestEnv) failCheckoutSession(sessionId string, status int) {
+	self.checkoutSessionsLock.Lock()
+	defer self.checkoutSessionsLock.Unlock()
+	self.checkoutSessionFailures[sessionId] = status
+}
+
+// How many times the session was read.
+func (self *stripeReconcileTestEnv) checkoutSessionReadCount(sessionId string) int {
+	self.checkoutSessionsLock.Lock()
+	defer self.checkoutSessionsLock.Unlock()
+	return self.checkoutSessionReads[sessionId]
+}
+
 func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 	env := &stripeReconcileTestEnv{
-		fullInvoices: map[string]map[string]any{},
-		charges:      map[string]map[string]any{},
+		fullInvoices:            map[string]map[string]any{},
+		charges:                 map[string]map[string]any{},
+		checkoutSessions:        map[string]map[string]any{},
+		checkoutSessionFailures: map[string]int{},
+		checkoutSessionReads:    map[string]int{},
 	}
 
 	mux := http.NewServeMux()
@@ -362,6 +400,43 @@ func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
+	})
+	mux.HandleFunc("GET /v1/checkout/sessions/{sessionId}", func(w http.ResponseWriter, r *http.Request) {
+		sessionId := r.PathValue("sessionId")
+		env.checkoutSessionsLock.Lock()
+		env.checkoutSessionReads[sessionId] += 1
+		onRead := env.onCheckoutSessionRead
+		env.checkoutSessionsLock.Unlock()
+		if onRead != nil {
+			onRead(sessionId)
+		}
+		env.checkoutSessionsLock.Lock()
+		failure := env.checkoutSessionFailures[sessionId]
+		session, ok := env.checkoutSessions[sessionId]
+		env.checkoutSessionsLock.Unlock()
+		if failure != 0 {
+			http.Error(w, "synthetic checkout session failure", failure)
+			return
+		}
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+				"type": "invalid_request_error",
+				"code": "resource_missing",
+			}})
+			return
+		}
+		// as Stripe: the payment intent and its charge are objects only when
+		// the read expands them; otherwise the session names the intent's id
+		if intent, ok := session["payment_intent"].(map[string]any); ok &&
+			!slices.Contains(r.URL.Query()["expand[]"], "payment_intent.latest_charge") {
+			collapsed := maps.Clone(session)
+			collapsed["payment_intent"] = intent["id"]
+			session = collapsed
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(session)
 	})
 	env.testServer = httptest.NewServer(mux)
 
