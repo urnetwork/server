@@ -22,6 +22,9 @@ const (
 	RetentionTableStClientKeyHistory = "st_client_key_history"
 	RetentionTableStClientKeyHead    = "st_client_key_head"
 	RetentionTableStClientKeyGone    = "st_client_key_gone"
+	// the session state retention (session_state_retention.go)
+	RetentionTableProviderWorkSessionHead = "provider_work_session_head"
+	RetentionTableAuditDeviceState        = "audit_device_state"
 )
 
 var retentionTables = []string{
@@ -38,6 +41,8 @@ var retentionTables = []string{
 	RetentionTableStClientKeyHistory,
 	RetentionTableStClientKeyHead,
 	RetentionTableStClientKeyGone,
+	RetentionTableProviderWorkSessionHead,
+	RetentionTableAuditDeviceState,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,
