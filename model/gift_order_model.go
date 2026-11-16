@@ -104,7 +104,8 @@ type GiftOrder struct {
 	Rail           string
 	// set while pending (SetGiftOrderStripeSessionId, SetGiftOrderCryptoIntentId,
 	// SetGiftOrderGammaIntentIdInTx); a coin's invoice and a Gamma intent are
-	// unset again by the 30-day unlink
+	// unset again by the 30-day unlink, which keeps a coin's invoice that
+	// received a payment it was not credited for until the payment is resolved
 	StripeSessionId string
 	CryptoIntentId  *server.Id
 	GammaIntentId   *server.Id

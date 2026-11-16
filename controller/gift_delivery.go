@@ -22,12 +22,15 @@ package controller
 // was made, and of each refunded before it was paid, 30 days after its refund.
 // The codes and the buyer's address stay, so a late coin payment can still be
 // fulfilled and handled by hand: its codes are made, its buyer gets every card,
-// and no friend is emailed. An unpaid card order also loses its buyer's address
-// (model.RemoveGiftOrderBuyerEmail), as a Stripe session cannot be paid late,
-// and so does an order of any rail refunded before it was paid: nothing needs
-// it after that. An order paid with Gamma forgets its intent 30 days on, as a
-// coin's order forgets its invoice (model.UnlinkGammaGiftOrders), and then its
-// buyer's address once no friend's email needs it.
+// and no friend is emailed. A coin payment that arrived within the 30 days and
+// is still held keeps its invoice linked to the order until it is resolved
+// (model.UnlinkCryptoPaymentIntents), so the scan or `bringyourctl crypto
+// credit` credits it in that way. An unpaid card order also loses its buyer's
+// address (model.RemoveGiftOrderBuyerEmail), as a Stripe session cannot be
+// paid late, and so does an order of any rail refunded before it was paid:
+// nothing needs it after that. An order paid with Gamma forgets its intent 30
+// days on, as a coin's order forgets its invoice (model.UnlinkGammaGiftOrders),
+// and then its buyer's address once no friend's email needs it.
 
 import (
 	"context"

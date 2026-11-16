@@ -780,7 +780,13 @@ type CryptoPaymentUnlinkResult struct {
 // once unlink_after has passed since the credit, or since the invoice was
 // made when it was never credited (decision 9, mmm/ZCASH-CONTRACT.md §3.13.6;
 // model.UnlinkCryptoPaymentIntents has the steps). Transaction ids, amounts
-// and days stay.
+// and days stay. A gift order's invoice that was never credited but received
+// a payment (a receipt not credited yet or held for review, or a recorded
+// USDC payment that names it) is not unlinked while the payment is
+// unresolved, so the scan or `bringyourctl crypto credit` can still credit it
+// and deliver the order's cards; once it is credited, voided or refunded, the
+// first run past its due time unlinks it (owner, 2026-11-16). Network
+// invoices unlink as before, paid or not.
 //
 // The USDC paid through the old Solana Pay endpoints (POST
 // /solana/payment-intent, POST /pay/data/solana-intent), which older apps and

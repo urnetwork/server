@@ -87,7 +87,11 @@ func CryptoOperatorUnmatchedReceipts(ctx context.Context, asset string, limit in
 // payment seemed to leave the chain (its receipts in review/orphaned, and any
 // that stayed credited), once the operator has seen the payment on the chain
 // (mmm/ZCASH-CONTRACT.md §3.13.2). A voided invoice is never credited. USDC is credited
-// only by its webhook and reconciler, which know the paying transaction.
+// only by its webhook and reconciler, which know the paying transaction. A
+// gift order's invoice is credited past its 30 days while a payment to it
+// holds it linked (model.UnlinkCryptoPaymentIntents), which delivers the
+// order's cards; one the unlink passed is refused, as it no longer knows its
+// order.
 //
 // A payment the sanctions screen held as a match (sanctions_hold) is credited
 // only with sanctionsCleared: the owner and counsel cleared it (mmm/BTCPAY.md
@@ -117,6 +121,12 @@ func CryptoOperatorCredit(clientSession *session.ClientSession, intentId server.
 	}
 	if intent.Delivery != model.CryptoDeliveryCode && intent.NetworkId == nil {
 		return false, errors.New("the invoice is unlinked from its network (retention): grant by hand")
+	}
+	if cryptoGiftInvoice(intent) && intent.UnlinkedAt != nil {
+		// a gift invoice with a payment stays linked until the payment is
+		// resolved (model.UnlinkCryptoPaymentIntents): this one had none when
+		// it was unlinked, or was unlinked before that rule
+		return false, errors.New("the gift invoice is unlinked from its gift order (retention), so no credit can find the order: match the payment to its buyer by hand")
 	}
 	decimals := cryptoAssetDecimals(intent.Asset)
 	// on time as the scanner judges it: by the quote's expiry plus the coin's
