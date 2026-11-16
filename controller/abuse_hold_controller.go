@@ -331,8 +331,11 @@ var abuseHoldDeps = struct {
 	now    func() time.Time
 }{
 	mailer: &unavailableLegalHoldRecordMailer{},
-	placed: func(ctx context.Context, hold *model.LegalHold) {},
-	now:    server.NowUtc,
+	// the hold's copy starts at once (ABUSE-M5-15): the copy pass, pulled to now, finds it pending
+	placed: func(ctx context.Context, hold *model.LegalHold) {
+		model.KickAbuseHoldCopy(ctx)
+	},
+	now: server.NowUtc,
 }
 
 func currentAbuseHoldDeps() (LegalHoldRecordMailer, func(ctx context.Context, hold *model.LegalHold), func() time.Time) {

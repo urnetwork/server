@@ -110,7 +110,7 @@ func newSmtpSendPartitionFamily(settings *SmtpSendSettings) *server.PartitionFam
 	family.DropPrecondition = func(ctx context.Context, conn server.PgQuerier, r server.PartitionRange) string {
 		// a day's rows are keyed by their start, as an hour's connection
 		// records are
-		return connectionRecordRangeHold(ctx, conn, family.LeafName(smtpSendTable, r), "start_time", r, server.NowUtc())
+		return connectionRecordRangeHold(ctx, conn, smtpSendTable, family.LeafName(smtpSendTable, r), "start_time", r, server.NowUtc())
 	}
 	return family
 }

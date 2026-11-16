@@ -112,7 +112,7 @@ func newMailConnectionRecordPartitionFamily(settings *MailConnectionSettings) *s
 		return server.SidecarMg7Linked() && mailConnectionTablePartitioned(ctx)
 	}
 	family.DropPrecondition = func(ctx context.Context, conn server.PgQuerier, r server.PartitionRange) string {
-		return connectionRecordRangeHold(ctx, conn, family.LeafName(mailConnectionRecordTable, r), "start_time", r, server.NowUtc())
+		return connectionRecordRangeHold(ctx, conn, mailConnectionRecordTable, family.LeafName(mailConnectionRecordTable, r), "start_time", r, server.NowUtc())
 	}
 	return family
 }

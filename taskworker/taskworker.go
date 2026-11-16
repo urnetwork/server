@@ -222,6 +222,10 @@ func initTaskSchedule(ctx context.Context) {
 		// row's missing object is put back; ends nothing in a process with no
 		// first metadata cluster, and not scheduled without MG5
 		work.ScheduleAbuseHoldPass(clientSession, tx)
+		// §21.9's copied_rows: each minute, and at once when a hold is placed,
+		// every pending hold copy resumes from its parts; not scheduled
+		// without MG5
+		work.ScheduleAbuseHoldCopy(clientSession, tx)
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
 		// months; not scheduled without MG5
 		work.ScheduleTlsConnectionRollup(clientSession, tx)
@@ -761,6 +765,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.AbuseHoldPass,
 			work.AbuseHoldPassPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AbuseHoldCopy,
+			work.AbuseHoldCopyPost,
 		),
 		// a hold's placed, renewed or ended record for the legal-request
 		// mailbox, owed in the transaction that commits it

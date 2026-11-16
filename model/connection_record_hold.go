@@ -21,12 +21,15 @@ import (
 // tls_connection_record and mx-2's mail_connection_record: a range drops
 // whole at 24 h only once every hold has copied out its network's rows (owner
 // decision 133; §2.8's header). copied_rows, the copy that lets a held range
-// drop, is ABUSE-M5-15's (model.AbuseHoldCopyPending), which replaces this
-// check's body when it lands. Until then no hold's copy is known to be done,
-// so every hold that covers rows of a range keeps the range: the closed
-// direction, which may keep a range past its 24 h while a hold lives and never
-// loses a row a hold covers. With no hold placed, which holds_enabled keeps
-// true until counsel confirms, every range drops on time.
+// drop, is ABUSE-M5-15's: a table registered for it (model.RegisterHoldCopy)
+// is judged by AbuseHoldCopyPending, which lets a range go once each hold that
+// needs it has copied. A table not registered yet, such as
+// mail_connection_record until ABUSE-M7-01 and smtp_send until ABUSE-M9-01,
+// has no copy that is ever done, so every hold that covers rows of a range
+// keeps the range: the closed direction, which may keep a range past its 24 h
+// while a hold lives and never loses a row a hold covers. With no hold placed,
+// which holds_enabled keeps true until counsel confirms, every range drops on
+// time.
 //
 // A hold covers a network's server rows whatever its scope
 // (plan-ABUSE-hold-format #1), and only the rows that existed at its
@@ -35,13 +38,18 @@ import (
 // most the writer's batch, so a range that began after the placement holds no
 // row the hold covers.
 
-// Why range r, whose leaf of the family's first table is leaf, must stay: a
-// live hold, placed after r began, whose network has a row in leaf from before
-// the placement. "" when none does. A part-0 row with no placement or expiry
-// reads as live and covering, since a hold that cannot say what it spares
-// spares nothing. timeColumn is the column the family partitions on. leaf may
-// be attached or, inside the drop's transaction, just detached.
-func connectionRecordRangeHold(ctx context.Context, conn server.PgQuerier, leaf string, timeColumn string, r server.PartitionRange, now time.Time) string {
+// Why range r of table, whose leaf is leaf, must stay: a live hold, placed
+// after r began, whose network has a row in leaf from before the placement and
+// which has not copied the table (AbuseHoldCopyPending, for a registered
+// table; never, for another). "" when none does. A part-0 row with no
+// placement or expiry reads as live and covering, since a hold that cannot say
+// what it spares spares nothing. timeColumn is the column the family
+// partitions on. leaf may be attached or, inside the drop's transaction, just
+// detached.
+func connectionRecordRangeHold(ctx context.Context, conn server.PgQuerier, table string, leaf string, timeColumn string, r server.PartitionRange, now time.Time) string {
+	if HoldCopyRegistered(table) {
+		return AbuseHoldCopyPending(ctx, conn, table, leaf, r, now)
+	}
 	if r.Lower.IsZero() {
 		// the registry gives these families neither a legacy nor a DEFAULT
 		// partition, so an open range is nothing this check can judge

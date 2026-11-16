@@ -153,7 +153,7 @@ func newTlsConnectionRecordPartitionFamily(settings *TlsConnectionSettings) *ser
 		return server.SidecarMg5Linked() && tlsConnectionTablePartitioned(ctx)
 	}
 	family.DropPrecondition = func(ctx context.Context, conn server.PgQuerier, r server.PartitionRange) string {
-		return connectionRecordRangeHold(ctx, conn, family.LeafName(tlsConnectionRecordTable, r), "end_time", r, server.NowUtc())
+		return connectionRecordRangeHold(ctx, conn, tlsConnectionRecordTable, family.LeafName(tlsConnectionRecordTable, r), "end_time", r, server.NowUtc())
 	}
 	family.DropWork = func(ctx context.Context, tx server.PgTx, r server.PartitionRange) {
 		rollUpTlsConnectionHourInTx(ctx, tx, family.LeafName(tlsConnectionRecordTable, r))
