@@ -1056,6 +1056,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the key history floor at 7 days, which supersedes the 30-day floor's
 	// contract, versioned by its position
 	[]snMainnetMigrationContract{clientKeyHistoryRetentionSevenDayFloorMigrationContract},
+	// the device day rollup, versioned by its position
+	[]snMainnetMigrationContract{auditDeviceDayMigrationContract},
 	// the debit journal's drop guard and its custody in either partition
 	// layout, which supersedes its index, composite and fillfactor contracts,
 	// versioned by its position

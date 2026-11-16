@@ -441,6 +441,7 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 	d.acceptCloseEvidencePartitionCutover()
 	d.acceptProviderWorkSessionPartitionCutover()
 	d.acceptFinishedTaskPartitionCutover()
+	d.acceptAuditDeviceEventPartitionCutover()
 	d.acceptTransferDebitJournalPartitionCutover()
 
 	sort.Strings(d.missingTables)

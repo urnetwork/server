@@ -11638,6 +11638,14 @@ var migrations = []any{
 	// monitor pins the new body from this version on.
 	newSqlMigration(clientKeyHistoryRetentionSevenDayFloorSql),
 
+	// The device day rollup (owner, 2026-11-16, PARTITION-CANDIDATES.md §7.3;
+	// audit_device_day_schema.go, model/audit_device_day.go): one new empty
+	// table, created only when absent, under a five-second lock bound. Nothing
+	// existing is locked, scanned or rewritten. Apply before deploying the
+	// taskworker whose device sweep keeps today's row and whose stats export
+	// reads the rows; an older taskworker never touches it.
+	auditDeviceDayMigration,
+
 	// The drop guard of transfer_debit_journal's daily partitions (owner,
 	// 2026-11-16, PARTITION-CANDIDATES.md §6.3;
 	// db_transfer_debit_journal_partition.go): a new function only, under a

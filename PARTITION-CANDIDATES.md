@@ -789,6 +789,86 @@ The window sets the size. At 5.4 GiB/day:
   sweep can skip them, which cuts the inflow several-fold *(inferred)*. That is a product
   decision (§10).
 
+### 7.8 Built 11-16, and the hosted window children measured
+
+**Built** (AUDIT-DEVICE-EVENT-PARTITION-RUNBOOK.md):
+- **The rollup `audit_device_day`** comes from its own additive migration and
+  the files model/audit_device_day.go and audit_device_day_schema.go.
+  - **Writer:** the device sweep keeps today's row in its own transaction.
+    The first sweep of a day inserts the devices online at the day's start.
+    Each later sweep adds the devices it adds that were neither online at the
+    start nor touched earlier that day; those have an `audit_device_state`
+    row with that day's event time. A day is complete when its count saw the
+    whole day.
+  - **Export:** it publishes from the rows when every closed day of its
+    window is complete. While the table is plain, it otherwise replays the
+    raw events as before and writes each closed day it lacked. Once the table
+    is partitioned, it publishes from the rows alone.
+  - **Today, before its first sweep,** counts the devices online now.
+  - **Tests:** the rollup equals the reference replay day by day.
+- **The family and the cutover** live in db_audit_device_event_partition.go,
+  with `bringyourctl model migrate audit-device-event-partition`:
+  - daily partitions, 3 days ahead, kept 7 days, with no DEFAULT leaf;
+  - the legacy leaf retires at C + 7 days;
+  - prepare refuses until the rollup covers the window, then drops
+    `UNIQUE (event_id)`;
+  - the row delete stops once partitioned;
+  - contract 830 accepts the partitioned parent.
+- **Deviations:**
+  - **No weekly option.** The owner chose 7 days, so the family is daily
+    only.
+  - **The unique index's drop is an operator step,** in prepare. Its record
+    migration (`DROP CONSTRAINT IF EXISTS`) is a follow-up after the drop,
+    like the index-diet records, so that `db migrate` never takes the lock.
+
+**Hosted window children among devices and events** (owner 11-16; measured
+11-16 about 08:00Z from Mimir, Main's statistics views and the public
+`/stats/last-90`; no table data was read):
+- **The published series** counted 8.95M devices on 11-15, 5.66M on 11-14 and
+  2.77M on 11-13, against 1.45–2.17M a day from 11-07 to 11-12.
+- **Top-level clients with a connected connection** numbered 0.84M
+  (`urnetwork_stats_device_versions{population="client"}`; providers 0.80M of
+  them). So on 11-15 at least about 90% of the day's devices were derived
+  clients *(inferred: the top-level count is a snapshot, not the day's
+  distinct total)*.
+- **The last location-reliability pass** folded 918k derived clients against
+  107k top-level (89.6%). Its `hosted_child` label is any
+  `source_client_id IS NOT NULL`, which also covers the apps' per-stream
+  windows.
+- **Identities:** `network_client` holds about 514M rows, 98.4% of them
+  derived (`pg_stats` null_frac of `source_client_id` is 0.0159).
+  `proxy_device_config` holds 1.11M hosted proxies, the windows' parents.
+- **State:** `audit_device_state` holds about 123M rows, 99.7% offline
+  (`pg_stats` on `online`): devices seen once and gone, the shape of
+  short-lived windows. The S4 retention now deletes them a day after they go
+  offline.
+- **Events:** `audit_device_event` has about 15.7M distinct device ids
+  (`pg_stats` n_distinct) over 269M events, half `device_added` and half
+  `device_removed`. One add and one remove per short-lived device fits that.
+  - Top-level clients can be at most about 1M of those ids, so derived
+    clients hold at least about 94% of the device ids and, at two events
+    each, a similar share of the events *(inferred)*.
+  - The rollup will give exact daily counts once deployed. A per-kind split
+    would need a sweep metric labeled by identity kind; none exists today.
+
+**What reads device counts** (code, 11-16):
+- **Only the public devices series** (`computeStatsDevice`, Redis
+  `stats.last-90`, `GET /stats/last-90`, unauthenticated) reads the device
+  audit tables. Its consumer is bringyour.com's stats page; ur.io reads
+  `grafana.bringyour.com/stats.json` instead.
+- **Device and client limits** count top-level clients only
+  (`source_client_id IS NULL`), from `network_client` or the connected-peer
+  Redis sets. Hosted window children never count against a limit.
+  - The top-level create cap: network_client_limit_model.go:100.
+  - The concurrent connected limit: peer_model.go:1567, which returns early
+    for a client that is not top-level.
+  - The hosted proxy cap: network_client_proxy_limit.go, which counts proxy
+    devices, not windows.
+- **Nothing in payouts reads device counts,** nor in the SN epoch release
+  (which attests top-level users with contracts), account points or
+  reliability weights. The public Grafana "connected devices" panel is a
+  different source: the connect residents gauge, which includes windows.
+
 ## 8. `st_client_key_history`: retention, not partitions
 
 ### 8.1 Today
