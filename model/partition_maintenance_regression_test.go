@@ -93,6 +93,8 @@ func testProviderWorkSessionRetentionChain(t *testing.T, options providerWorkSes
 		clientId, networkId, connectionId := server.NewId(), server.NewId(), horizonTestContractId(admitWeek)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (client_id, network_id, active) VALUES ($1, $2, true)`, clientId, networkId))
+			// a public provider: the journal holds provider clients only
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provide_key (client_id, provide_mode, secret_key) VALUES ($1, $2, $3)`, clientId, ProvideModePublic, make([]byte, 32)))
 			// Historical fixture only: the production trigger always uses now.
 			server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE network_client_connection DISABLE TRIGGER provider_work_session_mutation`))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_connection
