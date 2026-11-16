@@ -134,6 +134,20 @@ type RemoveExpiredLagGuestsResult struct {
 // removed whole or not at all, and a guest that fails stays marked for the
 // next sweep.
 func RemoveExpiredLagGuests(ctx context.Context, now time.Time, limit int) RemoveExpiredLagGuestsResult {
+	return RemoveExpiredLagGuestsWithRemovals(ctx, now, limit, nil)
+}
+
+// RemoveExpiredLagGuests that hands each removed guest network to
+// scheduleRemovalsInTx in the removal's own transaction, as an account
+// deletion does (RemoveNetworkWithRemovals), so the cleanup of what the guest
+// leaves (RemoveDeletedNetworkData) commits with the removal. A guest has no
+// sign-in addresses. A nil scheduleRemovalsInTx queues nothing.
+func RemoveExpiredLagGuestsWithRemovals(
+	ctx context.Context,
+	now time.Time,
+	limit int,
+	scheduleRemovalsInTx ScheduleNetworkRemovalsInTx,
+) RemoveExpiredLagGuestsResult {
 	result := RemoveExpiredLagGuestsResult{}
 	networkIds := []server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -159,7 +173,7 @@ func RemoveExpiredLagGuests(ctx context.Context, now time.Time, limit int) Remov
 	})
 	for _, networkId := range networkIds {
 		server.HandleError(func() {
-			removed, kept := removeExpiredLagGuest(ctx, networkId, now)
+			removed, kept := removeExpiredLagGuest(ctx, networkId, now, scheduleRemovalsInTx)
 			if removed {
 				result.Removed += 1
 			}
@@ -173,7 +187,12 @@ func RemoveExpiredLagGuests(ctx context.Context, now time.Time, limit int) Remov
 
 // Removes one expired lag guest under the network's session lifecycle lock,
 // which orders the removal against every mint for the network.
-func removeExpiredLagGuest(ctx context.Context, networkId server.Id, now time.Time) (removed bool, kept bool) {
+func removeExpiredLagGuest(
+	ctx context.Context,
+	networkId server.Id,
+	now time.Time,
+	scheduleRemovalsInTx ScheduleNetworkRemovalsInTx,
+) (removed bool, kept bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		// a rerun starts over
 		removed = false
@@ -299,6 +318,13 @@ func removeExpiredLagGuest(ctx context.Context, networkId server.Id, now time.Ti
 			// as RemoveNetworkWithStoreSnapshot deletes an account. A lag guest
 			// has no sign-in method, so there are no auth rows to delete.
 			endGammaAutomaticChargesInTx(tx, ctx, networkId, now.UTC())
+			// what the guest leaves is cleaned up after the removal commits
+			if scheduleRemovalsInTx != nil {
+				scheduleRemovalsInTx(tx, &DeletedNetwork{
+					NetworkId: networkId,
+					UserIds:   []server.Id{adminUserId},
+				}, map[string]bool{})
+			}
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user WHERE user_id = $1`,
@@ -332,6 +358,12 @@ func removeExpiredLagGuest(ctx context.Context, networkId server.Id, now time.Ti
 // Removes a lag guest at once, whatever its expiry: the guest session's own
 // rollback when its client could not be created.
 func RemoveLagGuest(ctx context.Context, networkId server.Id) bool {
+	return RemoveLagGuestWithRemovals(ctx, networkId, nil)
+}
+
+// RemoveLagGuest that hands the removed guest network to scheduleRemovalsInTx
+// in the removal's own transaction (RemoveExpiredLagGuestsWithRemovals).
+func RemoveLagGuestWithRemovals(ctx context.Context, networkId server.Id, scheduleRemovalsInTx ScheduleNetworkRemovalsInTx) bool {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -340,7 +372,7 @@ func RemoveLagGuest(ctx context.Context, networkId server.Id) bool {
 			server.NowUtc(),
 		))
 	})
-	removed, _ := removeExpiredLagGuest(ctx, networkId, server.NowUtc())
+	removed, _ := removeExpiredLagGuest(ctx, networkId, server.NowUtc(), scheduleRemovalsInTx)
 	return removed
 }
 
@@ -364,6 +396,35 @@ func lagGuestNetworkIdsInTx(ctx context.Context, tx server.PgTx, networkIds []se
 		}
 	})
 	return lagGuests
+}
+
+// The networks among networkIds whose network row is gone, inside the
+// caller's transaction: deleted networks that rows elsewhere still name.
+func goneNetworkIdsInTx(ctx context.Context, tx server.PgTx, networkIds []server.Id) map[server.Id]bool {
+	goneNetworks := map[server.Id]bool{}
+	if len(networkIds) == 0 {
+		return goneNetworks
+	}
+	rows, err := tx.Query(
+		ctx,
+		`
+		SELECT candidate.network_id
+		FROM unnest($1::uuid[]) AS candidate(network_id)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM network
+			WHERE network.network_id = candidate.network_id
+		)
+		`,
+		idStrings(networkIds),
+	)
+	server.WithPgResult(rows, err, func() {
+		for rows.Next() {
+			var networkId server.Id
+			server.Raise(rows.Scan(&networkId))
+			goneNetworks[networkId] = true
+		}
+	})
+	return goneNetworks
 }
 
 // Every network of a referral map, referrers and the networks they referred.
