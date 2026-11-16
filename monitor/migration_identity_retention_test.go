@@ -46,6 +46,14 @@ func TestIdentityRetentionMigrationContracts(t *testing.T) {
 				strings.ReplaceAll(server.ClientKeyRetireDeletedClientBodySql(), "'", "''"),
 			},
 		},
+		{
+			contract: clientKeyHistoryRegistrationHashUniqueDropMigrationContract,
+			version:  server.ClientKeyHistoryRegistrationHashUniqueDropMigrationVersion(),
+			pins: []string{
+				"constraint_name = 'st_client_key_history_registration_hash_key'",
+				"index_name = 'st_client_key_history_registration_hash_key'",
+			},
+		},
 	} {
 		artifact := test.contract.artifact
 		if artifact.requiredVersion != test.version || artifact.rowColumn != test.version-589 {
@@ -136,6 +144,10 @@ func TestIdentityRetentionSchemaFaultsReachSignal(t *testing.T) {
 			LANGUAGE plpgsql AS 'BEGIN UPDATE st_client_key_head SET retired = true WHERE client_id = OLD.client_id; RETURN OLD; END'`},
 		{"gone time made optional", historyVersion, `ALTER TABLE st_client_key_gone ALTER COLUMN gone_time DROP NOT NULL`},
 		{"gone time lookup dropped", historyVersion, `DROP INDEX st_client_key_gone_gone_time`},
+		{"unique registration hash constraint rebuilt", server.ClientKeyHistoryRegistrationHashUniqueDropMigrationVersion(),
+			`ALTER TABLE st_client_key_history ADD CONSTRAINT st_client_key_history_registration_hash_key UNIQUE (registration_hash)`},
+		{"unique registration hash index rebuilt", server.ClientKeyHistoryRegistrationHashUniqueDropMigrationVersion(),
+			`CREATE UNIQUE INDEX st_client_key_history_registration_hash_key ON st_client_key_history (registration_hash)`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {

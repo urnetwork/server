@@ -1037,6 +1037,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), "provider session custody with the legacy partition's early drop",
 			providerWorkSessionLegacyDropCustodyPredicates()...),
 	},
+	// the redundant unique registration hash of the key history, dropped,
+	// versioned by its position
+	[]snMainnetMigrationContract{clientKeyHistoryRegistrationHashUniqueDropMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
