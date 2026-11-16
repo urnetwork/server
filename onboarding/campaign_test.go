@@ -439,7 +439,9 @@ func TestParamsMatchManifests(t *testing.T) {
 			t.Errorf("%s/%s params %v, manifest %v", tv[0], tv[1], gotKeys, wantKeys)
 		}
 		for k, v := range got {
-			if v == "" && k != "offer_expires_at" {
+			// crypto_line is a flag that is always "" in the store branch this
+			// base input takes (TestOfferParamsCryptoLine has its values)
+			if v == "" && k != "offer_expires_at" && k != "crypto_line" {
 				t.Errorf("%s/%s %s is empty", tv[0], tv[1], k)
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	// "net/netip"
 	// "fmt"
@@ -365,7 +366,17 @@ func RedisAuth(ctx context.Context, callback func(context.Context, RedisClient) 
 
 var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "urnetwork_redis_key_event_merge_drops_total",
-	Help: "Keyspace notifications dropped at the process-wide merge; each drop terminates the subscription epoch and forces a full resync",
+	Help: "Keyspace notifications dropped at the process-wide merge after the subscription was handed to its caller; each drop terminates the subscription epoch and forces a full resync",
+})
+
+var redisKeyEventStartupDrops = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_redis_key_event_startup_drops_total",
+	Help: "Keyspace notifications dropped at a full merge before the subscription was handed to its caller; the caller's recovery read covers every event before the handoff, so these end no epoch",
+})
+
+var redisKeyEventIgnored = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_redis_key_event_ignored_total",
+	Help: "Keyspace notifications a node drain discarded before the merge as an ignored event, by default expire (a ttl refresh)",
 })
 
 // pool stats flow to grafana via the default registry (see StartStatsPusher).
@@ -379,6 +390,8 @@ func init() {
 	}
 	prometheus.MustRegister(
 		redisKeyEventMergeDrops,
+		redisKeyEventStartupDrops,
+		redisKeyEventIgnored,
 		prometheus.NewCounterFunc(
 			prometheus.CounterOpts{Name: "urnetwork_redis_pool_hits_total", Help: "redis pool free-connection hits"},
 			poolStat(func(s *redis.PoolStats) float64 { return float64(s.Hits) }),
@@ -522,8 +535,9 @@ func RedisDoOnce(ctx context.Context, callback func(RedisClient)) {
 // its own first key: PING, GET, same-slot EVAL and other single-key commands,
 // alone or pipelined across slots. It must not route a command whose keys span
 // slots. EVAL callers must keep every declared key in one explicit Redis hash
-// tag. Each call first pings an arbitrary node unless the caller passes
-// OptRedisNoPreflight.
+// tag. No call pings before its callback (redisWithClient): a connection that
+// cannot serve fails the callback's first command, within that command's
+// deadline.
 func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error, options ...any) (returnErr error) {
 	if _, bounded := ctx.Deadline(); !bounded {
 		return fmt.Errorf("RedisWithDeadline requires an explicit deadline")
@@ -578,30 +592,36 @@ func OptRedisKeepLateReplies() RedisLateReplyOptions {
 	return RedisLateReplyOptions{keep: true}
 }
 
-// Whether a call on the non-retrying or deadline-bound pools pings first.
+// The option OptRedisNoPreflight returns.
 type RedisPreflightOptions struct {
 	skip bool
 }
 
-// Skips the preflight PING of the non-retrying and deadline-bound pools. Neither
-// pool replays a command, in go-redis or in the callback wrapper, so the PING
-// guards no command's outcome: it reaches an arbitrary node, never necessarily
-// the one a command routes to, and costs a round trip and a pool turn per call.
+// Accepted and ignored: no call pings before its callback since 2026-11-15
+// (redisWithClient), so there is no preflight to skip. It remains so that the
+// callers that pass it, and branches written before the change, still build.
 func OptRedisNoPreflight() RedisPreflightOptions {
 	return RedisPreflightOptions{skip: true}
 }
 
+// Runs callback with a client of pool. No pool pings before the callback:
+// until 2026-11-15 the non-retrying and deadline-bound pools sent a PING first
+// unless the caller passed OptRedisNoPreflight, about 77k a second across the
+// fleet (CPUOPT5 E 5.1, CPUOPT6 E #2). Those pools replay no command, so the
+// PING guarded no command's outcome: it reached an arbitrary node, not
+// necessarily the one a command routes to, could not promise that the next
+// command succeeds, and cost a round trip and a pool turn in the command's own
+// budget. A connection that cannot serve now fails the callback's first
+// command, under that command's deadline (the deadline pools put the caller's
+// context deadline on their sockets) or its pool's socket timeouts, through the
+// same error path. go-redis's own pool checks keep the connections healthy.
 func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(RedisClient), options ...any) {
 	observeTxIo(TxIoRedis)
 	retryOptions := OptRetryDefault()
-	preflight := true
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
-		switch v := option.(type) {
-		case DbRetryOptions:
+		if v, ok := option.(DbRetryOptions); ok {
 			retryOptions = v
-		case RedisPreflightOptions:
-			preflight = !v.skip
 		}
 	}
 
@@ -617,29 +637,9 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 		}
 		client := pool.open()
 
-		// Ordinary callbacks report their command errors through the existing
-		// retry boundary. A separate PING doubles a one-command round trip and
-		// cannot guarantee the next command succeeds. Dedicated non-retrying
-		// and deadline pools retain their existing preflight policy.
+		// every callback reports its command errors through the retry boundary
+		// below, with no preflight command
 		var connErr error
-		if preflight && (pool.disableCommandRetry || pool.contextTimeoutEnabled) {
-			connErr = client.Ping(ctx).Err()
-		}
-		if connErr != nil {
-			if retryOptions.rerunOnConnectionError {
-				select {
-				case <-ctx.Done():
-					panic(dbContextDoneCause(ctx, connErr))
-				case <-time.After(backoff.NextRetryTimeout()):
-					if retryEndTime.Before(NowUtc()) {
-						panic(connErr)
-					}
-					continue
-				}
-			}
-			panic(connErr)
-		}
-
 		func() {
 			defer func() {
 				if err := recover(); err != nil {
@@ -696,6 +696,14 @@ type RedisKeyEventSubscriptionSettings struct {
 	TopologyRefreshInterval time.Duration
 	// Messages buffered per node and in the shared merge. Must be positive.
 	MessageBufferSize int
+	// Keyspace events, the payload of a `__keyspace@` message, that each node
+	// drain discards before the shared merge, so they take no merge slot and
+	// cannot end an epoch. expire: a ttl set on a key that still exists, which
+	// changes no value; no subscriber acts on it, and an expiry itself arrives
+	// as expired. Session ttl refreshes made expire 87% of connect's stream,
+	// and it overflowed the merge every few seconds (CPUOPT6, 2026-11-15).
+	// Empty delivers every event.
+	IgnoredKeyspaceEvents []string
 }
 
 // Allows establishment latency while bounding notification-free startup.
@@ -704,6 +712,7 @@ func DefaultRedisKeyEventSubscriptionSettings() *RedisKeyEventSubscriptionSettin
 		AcknowledgementTimeout:  5 * time.Second,
 		TopologyRefreshInterval: 60 * time.Second,
 		MessageBufferSize:       1024,
+		IgnoredKeyspaceEvents:   []string{"expire"},
 	}
 }
 
@@ -711,6 +720,8 @@ func DefaultRedisKeyEventSubscriptionSettings() *RedisKeyEventSubscriptionSettin
 // so the caller's recovery read covers the entire preceding gap. The done channel
 // closes on a lost subscription, merge overflow or master-set change; the caller
 // must unsubscribe, resubscribe and reconcile its state (PEERSSTREAMS2.md).
+// Ignored keyspace events never reach the merge, and a merge that overflows
+// before the subscription is returned drops the message without ending it.
 func SubscribeKeyEvents(
 	ctx context.Context,
 	topologyRefresh time.Duration,
@@ -758,6 +769,13 @@ func SubscribeKeyEventsWithSettings(
 	stopStartupCancel := context.AfterFunc(startupCtx, func() { cancel(context.Cause(startupCtx)) })
 	defer stopStartupCancel()
 	out := make(chan RedisMessage, settings.MessageBufferSize)
+	ignoredKeyspaceEvents := map[string]bool{}
+	for _, event := range settings.IgnoredKeyspaceEvents {
+		ignoredKeyspaceEvents[event] = true
+	}
+	// set just before the subscription is returned. The caller's recovery read
+	// runs after that, so it covers whatever a drain drops before it.
+	var handedOff atomic.Bool
 
 	// ForEachMaster runs its callback CONCURRENTLY, one goroutine per master —
 	// every write to state shared across callbacks must hold stateLock
@@ -824,11 +842,22 @@ func SubscribeKeyEventsWithSettings(
 					}
 					continue
 				case *redis.Message:
+					if ignoredKeyspaceEvents[value.Payload] && strings.HasPrefix(value.Channel, "__keyspace@") {
+						redisKeyEventIgnored.Inc()
+						continue
+					}
 					select {
 					case <-cancelCtx.Done():
 						return
 					case out <- value:
 					default:
+						if !handedOff.Load() {
+							// No one drains the merge until the subscription is
+							// returned, and the caller's recovery read covers
+							// this message, so the startup goes on without it.
+							redisKeyEventStartupDrops.Inc()
+							continue
+						}
 						// Never stop draining a node's PubSub socket behind a
 						// congested shared merge. A drop invalidates this
 						// epoch; reconnect + full resync restores state.
@@ -882,7 +911,8 @@ func SubscribeKeyEventsWithSettings(
 	}
 
 	// The node drains keep running while readiness waits, so early messages do
-	// not block acknowledgements. An overflow invalidates this startup too.
+	// not block acknowledgements. Early messages wait in the merge for the
+	// caller, and one that finds it full is dropped (redisKeyEventStartupDrops).
 	for _, ready := range readyChannels {
 		select {
 		case <-cancelCtx.Done():
@@ -916,6 +946,7 @@ func SubscribeKeyEventsWithSettings(
 		})
 	}
 
+	handedOff.Store(true)
 	started = true
 	messages = out
 	done = cancelCtx.Done()

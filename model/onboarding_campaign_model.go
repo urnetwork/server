@@ -82,39 +82,94 @@ type NetworkOnboardingEmail struct {
 // false.
 func CreateNetworkOnboarding(ctx context.Context, row *NetworkOnboarding) (created bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_onboarding (
-					network_id, created_at, path, email, time_zone, platform, locale, country,
-					experiment_id, email_variant, next_step, next_send_at, exit_reason, exited_at,
-					distribution
-				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-				ON CONFLICT (network_id) DO NOTHING
-			`,
-			row.NetworkId,
-			row.CreatedAt,
-			row.Path,
-			row.Email,
-			row.TimeZone,
-			row.Platform,
-			row.Locale,
-			row.Country,
-			row.ExperimentId,
-			row.EmailVariant,
-			row.NextStep,
-			row.NextSendAt,
-			row.ExitReason,
-			row.ExitedAt,
-			row.Distribution,
-		))
-		created = 0 < tag.RowsAffected()
+		created = CreateNetworkOnboardingInTx(tx, ctx, row)
 	})
 	return
 }
 
-const networkOnboardingSelect = `
+// CreateNetworkOnboardingInTx is CreateNetworkOnboarding in the caller's
+// transaction, so the caller can commit the row's first step task with it.
+func CreateNetworkOnboardingInTx(tx server.PgTx, ctx context.Context, row *NetworkOnboarding) (created bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO network_onboarding (
+				network_id, created_at, path, email, time_zone, platform, locale, country,
+				experiment_id, email_variant, next_step, next_send_at, exit_reason, exited_at,
+				distribution
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			ON CONFLICT (network_id) DO NOTHING
+		`,
+		row.NetworkId,
+		row.CreatedAt,
+		row.Path,
+		row.Email,
+		row.TimeZone,
+		row.Platform,
+		row.Locale,
+		row.Country,
+		row.ExperimentId,
+		row.EmailVariant,
+		row.NextStep,
+		row.NextSendAt,
+		row.ExitReason,
+		row.ExitedAt,
+		row.Distribution,
+	))
+	return 0 < tag.RowsAffected()
+}
+
+// ListOnboardingRowsDueBefore lists running campaign rows whose next step was
+// due before `before`, oldest first, at most `limit` (the sweep's candidates;
+// the network_onboarding_next_send_at index serves it).
+func ListOnboardingRowsDueBefore(ctx context.Context, before time.Time, limit int) (rows []*NetworkOnboarding) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			networkOnboardingFrom+`
+				WHERE next_send_at IS NOT NULL AND next_send_at < $1
+					AND exited_at IS NULL AND next_step <> ''
+				ORDER BY next_send_at
+				LIMIT $2
+			`,
+			before,
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				rows = append(rows, scanNetworkOnboarding(result))
+			}
+		})
+	})
+	return
+}
+
+// ResumeNetworkOnboardingInTx moves a running row whose next step is still
+// `step` on to `nextStep` at `nextSendAt`, recording `lastStep` as the last one
+// (empty keeps it), in the caller's transaction. False when the row has moved
+// on or exited meanwhile, so the caller schedules nothing.
+func ResumeNetworkOnboardingInTx(tx server.PgTx, ctx context.Context, networkId server.Id, step string, lastStep string, nextStep string, nextSendAt time.Time) (resumed bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE network_onboarding
+			SET
+				last_step = CASE WHEN $3 = '' THEN last_step ELSE $3 END,
+				next_step = $4,
+				next_send_at = $5
+			WHERE network_id = $1 AND next_step = $2 AND exited_at IS NULL
+		`,
+		networkId,
+		step,
+		lastStep,
+		nextStep,
+		nextSendAt,
+	))
+	return 0 < tag.RowsAffected()
+}
+
+const networkOnboardingFrom = `
 	SELECT
 		network_id, created_at, path, email, time_zone, platform, locale, country,
 		experiment_id, email_variant,
@@ -123,6 +178,9 @@ const networkOnboardingSelect = `
 		bounced, complained, complained_step, send_failures, last_send_error,
 		distribution
 	FROM network_onboarding
+`
+
+const networkOnboardingSelect = networkOnboardingFrom + `
 	WHERE network_id = $1
 `
 

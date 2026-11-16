@@ -57,6 +57,10 @@ func TestBuildOnboardingResultsRowsPurchaseStarted(t *testing.T) {
 	countsAt := func(now time.Time) map[string]*model.OnboardingResultsRow {
 		byVariant := map[string]*model.OnboardingResultsRow{}
 		for _, r := range buildOnboardingResultsRows(config, cohort, facts, now) {
+			// the cohort rows (<experiment>@<cohort>) are TestBuildOnboardingResultsRowsByCohort's
+			if strings.Contains(r.Experiment, "@") {
+				continue
+			}
 			byVariant[r.Experiment+"/"+r.Variant] = r
 		}
 		connect.AssertEqual(t, 3, len(byVariant))

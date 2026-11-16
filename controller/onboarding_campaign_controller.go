@@ -221,8 +221,25 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 		row.NextSendAt = &at
 	}
 
-	if !model.CreateNetworkOnboarding(clientSession.Ctx, row) {
+	// the row and its first step's task commit together, before the Brevo
+	// contact upsert: E1 used to be scheduled after the upsert, in a
+	// transaction of its own, inside the post-primary timeout, and a failure or
+	// an expired context after the insert left a row whose sequence never
+	// started (OnboardingCampaignSweep repairs those)
+	created := false
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		created = model.CreateNetworkOnboardingInTx(tx, clientSession.Ctx, row)
+		if created && row.ExitedAt == nil {
+			scheduleOnboardingCampaignStepInTx(tx, clientSession, networkId, onboarding.StepE1, *row.NextSendAt)
+		}
+	})
+	if !created {
 		return
+	}
+	if hasEmail {
+		// the sign-up cohort the readouts are stratified by; after the row's
+		// own transaction, so a failure here costs a label, never the sequence
+		recordOnboardingSignupCohort(clientSession, networkId, row.Platform, now)
 	}
 	onboardingStartsTotal.WithLabelValues(fmt.Sprintf("%t", hasEmail), row.EmailVariant).Inc()
 	if row.ExitedAt != nil {
@@ -237,7 +254,37 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 			glog.Warningf("[onboarding]brevo contact upsert failed for network %s: %s\n", networkId, err)
 		}
 	}
-	scheduleOnboardingCampaignStep(clientSession, networkId, onboarding.StepE1, *row.NextSendAt)
+}
+
+// recordOnboardingSignupCohort records an email sign-up's cohort from its
+// request (onboarding.SignupCohort): signup.likely_bot with the reason, or
+// signup.likely_human. It decides nothing about mail; the results rollup reads
+// it to stratify the experiment readouts. Never fails the caller.
+func recordOnboardingSignupCohort(clientSession *session.ClientSession, networkId server.Id, platform string, now time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[onboarding]sign-up cohort failed for network %s: %v\n", networkId, r)
+		}
+	}()
+	cohort, reason := onboarding.SignupCohort(
+		strings.Join(clientSession.Header["User-Agent"], " "),
+		strings.Join(clientSession.Header["Accept-Language"], ","),
+		onboarding.DefaultSignupCohortSettings(),
+	)
+	event := &model.OnboardingEvent{
+		NetworkId: networkId,
+		Name:      model.EventSignupLikelyHuman,
+		At:        now,
+		Platform:  platform,
+		Props:     map[string]any{},
+	}
+	if cohort == onboarding.CohortBot {
+		event.Name = model.EventSignupLikelyBot
+		event.Props = map[string]any{"reason": reason}
+	}
+	if err := model.AddOnboardingEvent(clientSession.Ctx, event); err != nil {
+		glog.Warningf("[onboarding]sign-up cohort for network %s: %s\n", networkId, err)
+	}
 }
 
 // onboardingFrameTime is the local time an activity frame reads a sign-up
@@ -545,14 +592,10 @@ type OnboardingCampaignStepResult struct {
 	NextSendAt *time.Time `json:"next_send_at,omitempty"`
 }
 
-func scheduleOnboardingCampaignStep(clientSession *session.ClientSession, networkId server.Id, step string, at time.Time) {
-	task.ScheduleTask(
-		OnboardingCampaignStep,
-		&OnboardingCampaignStepArgs{NetworkId: networkId, Step: step},
-		clientSession,
-		task.RunOnce("onboarding_campaign_step", networkId, step),
-		task.RunAt(at),
-	)
+// onboardingStepRunOnce is the one task per network and step: every scheduler
+// and the sweep's pending check use this key.
+func onboardingStepRunOnce(networkId server.Id, step string) *task.RunOnceOption {
+	return task.RunOnce("onboarding_campaign_step", networkId, step)
 }
 
 func scheduleOnboardingCampaignStepInTx(tx server.PgTx, clientSession *session.ClientSession, networkId server.Id, step string, at time.Time) {
@@ -561,7 +604,7 @@ func scheduleOnboardingCampaignStepInTx(tx server.PgTx, clientSession *session.C
 		OnboardingCampaignStep,
 		&OnboardingCampaignStepArgs{NetworkId: networkId, Step: step},
 		clientSession,
-		task.RunOnce("onboarding_campaign_step", networkId, step),
+		onboardingStepRunOnce(networkId, step),
 		task.RunAt(at),
 	)
 }
@@ -738,8 +781,10 @@ func loadOnboardingFactsIn(ctx context.Context, row *model.NetworkOnboarding, zo
 	feedbackSubmitted := onboardingFeedbackAnswered(model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt), func(name string) bool {
 		return model.HasOnboardingEvent(ctx, row.NetworkId, name)
 	})
-	// E2's widget email goes only where the newest app build has the widget
-	platform, widgetBuild := onboardingClientBuild(row, model.GetNetworkNewestClientBuild(ctx, row.NetworkId), cfg.EffectiveWidgetSettings())
+	// E2's widget email goes only where the newest app build has the widget;
+	// the reader's app also decides who bills them (the offer emails' price)
+	// and whether the offer may be emailed
+	platform, distribution, widgetBuild := onboardingClientBuild(row, model.GetNetworkNewestClientBuild(ctx, row.NetworkId), cfg.EffectiveWidgetSettings())
 	facts := onboarding.Facts{
 		Path:           path,
 		HasEmail:       row.Email,
@@ -756,9 +801,12 @@ func loadOnboardingFactsIn(ctx context.Context, row *model.NetworkOnboarding, zo
 		// an App Store network on path B could not redeem the emailed offer
 		// while no code reaches it (REVIEW.md finding 2): no offer email until
 		// offer.apple_email_enabled says the codes flow. The direct-download
-		// Mac bills through Stripe and gets it (P6).
-		NoOfferEmail:      onboarding.OfferEmailWithheld(offerByCountry, row.Platform, row.Distribution, path, cfg.Offer.AppleEmailEnabled),
+		// Mac bills through Stripe and gets it (P6). Judged on the reader's
+		// app as Platform resolves it, so a row recorded without a platform
+		// takes its newest client's
+		NoOfferEmail:      onboarding.OfferEmailWithheld(offerByCountry, platform, distribution, path, cfg.Offer.AppleEmailEnabled),
 		Platform:          platform,
+		Distribution:      distribution,
 		WidgetBuild:       widgetBuild,
 		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
@@ -798,16 +846,24 @@ func onboardingFeedbackEmailSent(emails []*model.NetworkOnboardingEmail) bool {
 	return false
 }
 
-// onboardingClientBuild is the Platform and WidgetBuild facts from the
-// network's newest active client (nil when it has none). The platform is the
-// row's, else the client's (from its device spec): a row recorded without
-// one takes the app the reader uses. WidgetBuild judges that client's build
-// by its platform, the app version it last connected with and, when it is on
-// the row's platform, the row's distribution, the only one the server keeps
+// onboardingClientBuild is the Platform, Distribution and WidgetBuild facts
+// from the network's newest active client (nil when it has none). The
+// platform is the row's, else the client's (from its device spec): a row
+// recorded without one takes the app the reader uses. The distribution is
+// the row's when the platform is the row's, else unknown, since a device spec
+// names none; an Android app of unknown distribution counts as the Play
+// build (onboarding.StoreBilledPlatform). Email sign-ups from the Android
+// app are often recorded without a platform: its sign-up request names
+// none, and its first auth-client can run before the row exists. WidgetBuild
+// judges that client's build by its platform, the app version it last
+// connected with and, when it is on the row's platform, the row's
+// distribution, the only one the server keeps
 // (onboarding.WidgetSettings.HasWidget). Without a client there is no widget
 // build, and a row without a platform stays unknown.
-func onboardingClientBuild(row *model.NetworkOnboarding, build *model.NetworkClientBuild, widgets *onboarding.WidgetSettings) (platform string, widgetBuild bool) {
-	platform = row.Platform
+func onboardingClientBuild(row *model.NetworkOnboarding, build *model.NetworkClientBuild, widgets *onboarding.WidgetSettings) (platform string, distribution string, widgetBuild bool) {
+	if row.Platform != "" {
+		platform, distribution = row.Platform, row.Distribution
+	}
 	if build == nil {
 		return
 	}
@@ -815,11 +871,11 @@ func onboardingClientBuild(row *model.NetworkOnboarding, build *model.NetworkCli
 	if platform == "" {
 		platform = buildPlatform
 	}
-	distribution := ""
+	buildDistribution := ""
 	if buildPlatform == row.Platform {
-		distribution = row.Distribution
+		buildDistribution = row.Distribution
 	}
-	widgetBuild = widgets.HasWidget(buildPlatform, distribution, build.ClientVersion)
+	widgetBuild = widgets.HasWidget(buildPlatform, buildDistribution, build.ClientVersion)
 	return
 }
 
@@ -844,6 +900,11 @@ type OnboardingSendPlan struct {
 	TemplateId int               `json:"template_id"`
 	Params     map[string]string `json:"params"`
 	Tags       []string          `json:"tags"`
+	// the offer email experiment (surface offer.email) and arm this send is
+	// an exposure to: an offer email in the card branch while one runs; ""
+	// otherwise
+	OfferExperiment string `json:"offer_experiment,omitempty"`
+	OfferVariant    string `json:"offer_variant,omitempty"`
 }
 
 // buildOnboardingSendPlan resolves a send, in the reader's language (the
@@ -879,12 +940,25 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 	}
 	connectDays, _ := model.NetworkConnectDays(ctx, row.NetworkId, row.CreatedAt)
 	providers, countries := providersOnline(ctx)
+	// the offer email experiment covers the card branch of the offer emails,
+	// the only one its arms differ in (the crypto line); a store-billed
+	// reader is never exposed to it
+	offerExperiment, offerVariant := "", ""
+	if (decision.Template == onboarding.TemplateE4bOffer || decision.Template == onboarding.TemplateE3LastChance) && !decision.StoreBilled {
+		if a := cfg.AssignmentForSurface(row.NetworkId, model.ExperimentSurfaceOfferEmail, now); a != nil {
+			offerExperiment, offerVariant = a.ExperimentId, a.Variant
+		}
+	}
+	// StoreBilled is the decision's, made on the reader's app as the facts
+	// resolve it (a row recorded without a platform takes its newest
+	// client's), not on the row alone
 	in := onboarding.ParamsInput{
 		Template:        decision.Template,
 		Variant:         decision.Variant,
 		Opening:         decision.Opening,
 		Platform:        onboarding.DeviceName(row.Platform, templateLocale),
-		StoreBilled:     onboarding.StoreBilledPlatform(row.Platform, row.Distribution),
+		StoreBilled:     decision.StoreBilled,
+		CryptoLine:      offerVariant == onboarding.OfferEmailVariantCrypto,
 		Browser:         decision.Browser,
 		Locale:          templateLocale,
 		DailyDataGb:     float64(model.Pro().Free.Data) / float64(model.Gib),
@@ -901,14 +975,20 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		SiteUrl:         cfg.EffectiveSiteUrl(),
 		CompanyLine:     cfg.EffectiveCompanyLine(),
 	}
+	tags := onboarding.CampaignTags("onboarding", decision.Template, decision.Variant, row.ExperimentId, row.EmailVariant)
+	if offerExperiment != "" && offerVariant != "" {
+		tags = append(tags, onboarding.ExperimentTag(offerExperiment), onboarding.ArmTag(offerExperiment, offerVariant))
+	}
 	return &OnboardingSendPlan{
-		Step:       step,
-		Template:   decision.Template,
-		Variant:    decision.Variant,
-		Locale:     templateLocale,
-		TemplateId: templateId,
-		Params:     onboarding.BuildParams(in),
-		Tags:       onboarding.CampaignTags("onboarding", decision.Template, decision.Variant, row.ExperimentId, row.EmailVariant),
+		Step:            step,
+		Template:        decision.Template,
+		Variant:         decision.Variant,
+		Locale:          templateLocale,
+		TemplateId:      templateId,
+		Params:          onboarding.BuildParams(in),
+		Tags:            tags,
+		OfferExperiment: offerExperiment,
+		OfferVariant:    offerVariant,
 	}, nil
 }
 
@@ -1055,6 +1135,21 @@ func sendOnboardingCampaignEmail(ctx context.Context, row *model.NetworkOnboardi
 		})
 	})
 	writeOnboardingEmailEvent(ctx, row.NetworkId, model.EventEmailSent, plan.Template, step, row.ExperimentId, row.EmailVariant, row.Platform, now)
+	if plan.OfferExperiment != "" {
+		// the network's exposure to the offer email experiment, from its
+		// first such send (the rollup counts the first)
+		if err := model.AddOnboardingEvent(ctx, &model.OnboardingEvent{
+			NetworkId:  row.NetworkId,
+			Name:       model.EventOfferEmailExposed,
+			At:         now,
+			Platform:   row.Platform,
+			Experiment: plan.OfferExperiment,
+			Variant:    plan.OfferVariant,
+			Props:      map[string]any{"experiment": plan.OfferExperiment, "variant": plan.OfferVariant, "flow_step": step},
+		}); err != nil {
+			glog.Warningf("[onboarding]offer email exposure for network %s: %s\n", row.NetworkId, err)
+		}
+	}
 	return "sent", nil
 }
 

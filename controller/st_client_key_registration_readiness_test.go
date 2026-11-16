@@ -47,11 +47,10 @@ func testStClientKeyRegistrationReadinessRetry(t testing.TB, failPublication boo
 		if !ok || store.Authority() != "local:"+blobRoot {
 			t.Fatal("actual private local store was not configured")
 		}
-		anyContentKey, err := startifact.EvidenceContentKey(store, "sha256:"+strings.Repeat("00", sha256.Size))
-		if err != nil {
-			t.Fatal(err)
-		}
-		blockedContent = filepath.Join(blobRoot, filepath.FromSlash(path.Dir(anyContentKey)))
+		// a file in place of the content root's sha256 directory, which every
+		// content key of either layout sits under, fails any content write
+		anyLegacyContentKey := stLegacyEvidenceContentKeyTest(t, store, "sha256:"+strings.Repeat("00", sha256.Size))
+		blockedContent = filepath.Join(blobRoot, filepath.FromSlash(path.Dir(anyLegacyContentKey)))
 		if err := os.MkdirAll(filepath.Dir(blockedContent), 0o700); err != nil {
 			t.Fatal(err)
 		}

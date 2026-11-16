@@ -136,17 +136,6 @@ func EvidenceBytes(e *EvidenceEnvelope) ([]byte, error) {
 	return evidenceBytesFromValidatedPayload(e)
 }
 
-func EvidenceContentKey(store server.BlobStore, hash string) (string, error) {
-	h := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(hash)), "sha256:")
-	if len(h) != 64 {
-		return "", errors.New("content hash must be sha256 hex")
-	}
-	if _, err := hex.DecodeString(h); err != nil {
-		return "", errors.New("content hash must be sha256 hex")
-	}
-	return filepath.ToSlash(filepath.Join(store.Prefix(), "st", "v1", "evidence", "content", "sha256", h+".json")), nil
-}
-
 func EvidenceHistoryPrefix(store server.BlobStore, deploymentID string, netuid uint16, kind string) (string, error) {
 	if !evidenceSegment.MatchString(deploymentID) || (kind != "" && !evidenceSegment.MatchString(kind)) || netuid == 0 {
 		return "", errors.New("invalid evidence history identity")
@@ -174,16 +163,19 @@ func EvidenceHistoryRunPrefix(store server.BlobStore, deploymentID string, netui
 
 // EvidenceHistoryKey derives the one immutable history object from signed
 // identity fields and a validated content hash without enumerating its run.
+// Its file name is always the flat <hex>.json directly under the run prefix,
+// whatever layout the content route uses: the public history routes and
+// their verifiers require exactly that.
 func EvidenceHistoryKey(store server.BlobStore, deploymentID string, netuid uint16, kind string, runID string, contentHash string) (string, error) {
 	prefix, err := EvidenceHistoryRunPrefix(store, deploymentID, netuid, kind, runID)
 	if err != nil {
 		return "", err
 	}
-	contentKey, err := EvidenceContentKey(store, contentHash)
+	h, err := evidenceContentHashHex(contentHash)
 	if err != nil {
 		return "", err
 	}
-	return prefix + filepath.Base(contentKey), nil
+	return prefix + h + ".json", nil
 }
 
 func PublishEvidence(ctx context.Context, store server.BlobStore, e *EvidenceEnvelope) (*Published, error) {

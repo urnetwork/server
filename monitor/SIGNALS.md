@@ -32516,7 +32516,19 @@ Signals for the redis keyspace-notification transport for peers + stream hops
   Occasional drops during a mass reconnect are self-healing; a SUSTAINED
   nonzero rate = a key-event burst storm outrunning the merge buffer, forcing
   continuous resubscribe/resync churn — find the write storm generating the
-  events before tuning buffer sizes or intervals.
+  events before tuning buffer sizes or intervals. Only drops after the
+  subscription is handed to its caller count here.
+- `urnetwork_redis_key_event_startup_drops_total` (`server/redis.go`) — merge
+  overflows before the subscription is handed to its caller. Nothing drains
+  the merge until then, and the caller's recovery read after the handoff covers
+  every earlier event, so these end no epoch. Near zero normally.
+- `urnetwork_redis_key_event_ignored_total` (`server/redis.go`) — `expire`
+  events (ttl refreshes, which change no value) the node drains discard before
+  the merge. On 2026-11-15 the session hint reads refreshed `{ns_*}eid` on every
+  read, the refreshes were 87% of connect's stream, and the busy processes
+  resubscribed every 7–9 s (CPUOPT6). A high rate means something refreshes a
+  subscribed key's ttl on every call again; it no longer ends epochs, but every
+  connect process still receives each event.
 - `urnetwork_network_peer_listener_resets_total` — full-read deliveries. In
   poll mode this is normal change delivery. In key-event mode it should be
   ≈ registrations + resyncs; a SUSTAINED rate above that means the corrective
@@ -35799,14 +35811,14 @@ staging or retention promotion. `--revalidate-integrity` is the separate,
 explicit full-media-read mode. Scrape time, integrity check time, and artifact
 file time therefore remain independent evidence. A check older than 48 hours
 is stale even if Fluent Bit keeps scraping the report and the structural
-artifact remains inside its five-day recovery-point objective.
+artifact remains inside its recovery-point objective.
 
 A private source-completion read must retain three separate times: the
 generation start, the successful producer completion, and completion of the
 diagnostic observation. A 2026-10-02 23:24Z observation retained a generation
 started on October 1 at 00:00:15Z whose producer succeeded at 19:28:43Z that
 day. Calling the observation recent cannot make that producer completion less
-than 24 hours old. Keep the five-day archive objective separate from any
+than 24 hours old. Keep the archive objectives separate from any
 explicitly tighter migration prerequisite; qualify each against its owning
 timestamp. The private migration controls cover a fresh observation of an old
 producer, stale or future observations, missing producer evidence, and a
@@ -35967,8 +35979,9 @@ certificate of physical storage repair. Existing operations, forecast and
 migration ownership remain separate.
 
 HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
-at least one structurally complete candidate; each newest candidate is no more
-than five days old; and every archive has one scrape-fresh integrity report
+at least one structurally complete candidate; each newest candidate is inside
+its objective, seven days for `pg` and five days for the others; and every
+archive has one scrape-fresh integrity report
 whose producer-owned check time is no more than 48 hours old, whose generation
 matches structural latest exactly, and whose result is `verified`. An explicit
 `invalid`, `missing`, stale, unobservable, generation-mismatched, or
@@ -36064,7 +36077,12 @@ BROKEN:
   pending; it does not create a recovery point. Never infer physical absence
   from metric absence or manufacture a timestamp.
 - `backup-archive-stale` is immediate once the newest structural candidate is
-  more than five days old. A current scrape of an old value proves the
+  older than its objective: seven days for `pg`, five days for the others.
+  The owner set `pg` to seven days on 2026-11-15, when edge-6's Sun/Thu
+  runs began to take 40 to 75 hours and each generation's pull 20 to 25 more,
+  which leaves the newest copy up to about 6.6 days old when the next lands;
+  Grafana's `backup-archive-pg-stale` uses the same boundary. A current scrape
+  of an old value proves the
   telemetry path while reporting an expired recovery-point objective; the
   separate integrity join decides whether those bytes are validated. When
   `in_progress=1`, preserve the single active writer and compare increasing
@@ -36159,7 +36177,7 @@ BROKEN:
   operator authorization for exactly one catch-up pull.
 - `backup-archive-writer-failed` is immediate when the GitHub oneshot is not in
   an execution transition and its terminal ActiveState, Result, or
-  ExecMainStatus is unsuccessful. It is independent of the five-day age gate:
+  ExecMainStatus is unsuccessful. It is independent of the age gate:
   a valid prior tarball can remain fresh while the latest attempt to produce a
   new code recovery point has failed. The alert joins the terminal state to the
   privacy-reduced exact-invocation journal result above. `complete` identifies
@@ -36348,7 +36366,7 @@ authorizing a catch-up run are operator work. A persistent mount may require an
 approved fstab/systemd-mount design; replacement media and additional free
 capacity are hardware work. Software cannot attach an absent disk or create
 archive capacity. Never fabricate a timestamp, rename a partial artifact,
-refresh a stale value, or raise the five-day threshold to clear these classes.
+refresh a stale value, or raise an objective to clear these classes.
 
 The September 2 VPN run measured only about 0.95 MiB/s against roughly 705 GiB
 of complete PostgreSQL source data. That is evidence about the prohibited VPN
@@ -36696,7 +36714,7 @@ at one and both producer heartbeat values no more than 90 seconds old, followed
 by final zeros and no heartbeat helper after exit. Verify archive recovery only
 after the real unit exits successfully, the completed artifact and manifest
 validate on mounted media, and two consecutive direct Mimir reads show the same
-new generation inside the five-day band. The Grafana dashboard must agree with
+new generation inside its objective. The Grafana dashboard must agree with
 those raw inputs, but it is never the proof source.
 
 On 2026-09-11 the dashboard exposed a distinct whole-exporter outage as blank

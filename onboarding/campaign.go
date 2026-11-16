@@ -186,6 +186,12 @@ type Facts struct {
 	// without one, the platform of the network's newest active client; ""
 	// when neither is known
 	Platform string
+	// the distribution of Platform's app (session.ClientDistribution*): the
+	// row's when Platform is the row's, "" when it came from the client's
+	// device spec, which names no distribution. With Platform it decides who
+	// bills the reader (StoreBilledPlatform) and whether the offer may be
+	// emailed (OfferEmailWithheld)
+	Distribution string
 	// the network's newest active client is an app build with the home
 	// screen widget (WidgetSettings.HasWidget): E2's widget email goes only
 	// then
@@ -265,6 +271,13 @@ type Decision struct {
 	// emailed to the network, so E1 leaves out its offer line (the offer
 	// steps do not send at all then)
 	NoOfferEmail bool
+	// the App Store or Google Play bills the reader's app
+	// (StoreBilledPlatform of Facts.Platform and Facts.Distribution), so the
+	// offer emails name no price (params.store_billed). Decided on the
+	// reader's app as the facts resolve it, not on the row alone: a row
+	// recorded without a platform is often an Android app reader, who buys
+	// through Google Play, and used to be quoted the Stripe price in USD
+	StoreBilled bool
 	// ExitReason when Action == ActionExit
 	ExitReason string
 	// NextStep after this one on the effective path ("" = done); for
@@ -356,7 +369,8 @@ func Decide(step string, f Facts) Decision {
 	next := NextStep(step, path)
 	skip := Decision{Action: ActionSkip, NextStep: next}
 	send := func(template string, variant string) Decision {
-		return Decision{Action: ActionSend, Template: template, Variant: variant, NoOfferEmail: f.NoOfferEmail, NextStep: next}
+		return Decision{Action: ActionSend, Template: template, Variant: variant, NoOfferEmail: f.NoOfferEmail,
+			StoreBilled: StoreBilledPlatform(f.Platform, f.Distribution), NextStep: next}
 	}
 	feedback := func() Decision {
 		// once per network: a network that flips from B to A between day 5

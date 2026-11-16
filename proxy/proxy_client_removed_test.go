@@ -805,8 +805,10 @@ func (self *clientRemovedTestRecorder) recordedEvents() []string {
 	return slices.Clone(self.events)
 }
 
-// Events of a client's removed flag other than a SET (append, expire, expired
-// and del here) do not close the client's devices.
+// Events of a client's removed flag other than a SET (append, expired and del
+// here) do not close the client's devices. The flag's ttl refreshes (expire)
+// never reach the subscriber: the key-event transport discards them before
+// its merge (server.RedisKeyEventSubscriptionSettings.IgnoredKeyspaceEvents).
 func TestClientRemovedKeyEventIgnoresOtherEvents(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -859,13 +861,15 @@ func TestClientRemovedKeyEventIgnoresOtherEvents(t *testing.T) {
 		fixture.removeUntilClosed(ctx, controlClientId, control)
 		fixture.requireLive(target)
 		events := recorder.recordedEvents()
-		for _, event := range []string{"append", "expire", "del", "expired"} {
+		for _, event := range []string{"append", "del", "expired"} {
 			if !slices.Contains(events, event) {
 				t.Fatalf("the subscriber received %v for the target's flag, without %q", events, event)
 			}
 		}
-		if slices.Contains(events, "set") {
-			t.Fatalf("the subscriber received %v for the target's flag, with a set", events)
+		for _, event := range []string{"set", "expire"} {
+			if slices.Contains(events, event) {
+				t.Fatalf("the subscriber received %v for the target's flag, with %q", events, event)
+			}
 		}
 	})
 }

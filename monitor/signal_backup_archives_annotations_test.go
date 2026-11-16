@@ -95,7 +95,8 @@ func TestBackupArchivesAnnotationsPublicCompleteThenWarnings(t *testing.T) {
 // Omitted newer artifacts and corrective checks can reverse current-state claims.
 func TestBackupArchivesAnnotationsOmittedCorrectiveRowsRemainUnknown(t *testing.T) {
 	now := time.Date(2026, 9, 1, 18, 0, 0, 0, time.UTC)
-	old := now.Add(-6 * 24 * time.Hour)
+	// past pg's 7-day objective
+	old := now.Add(-8 * 24 * time.Hour)
 	oldCheck := now.Add(-time.Hour)
 	partial := healthyBackupArchiveFixtures(now)
 	partial[0].createdAt = &old
@@ -215,7 +216,8 @@ func TestBackupArchivesAnnotationsWriterErrorCannotAttestHealth(t *testing.T) {
 // Drives the public signal, actual cadence gate and notifier across warned runs.
 func TestBackupArchivesAnnotationsNotifierRequiresCompleteRecovery(t *testing.T) {
 	now := time.Date(2026, 9, 1, 18, 0, 0, 0, time.UTC)
-	old := now.Add(-6 * 24 * time.Hour)
+	// past pg's 7-day objective
+	old := now.Add(-8 * 24 * time.Hour)
 	stale := healthyBackupArchiveFixtures(now)
 	stale[0].createdAt = &old
 	clean := backupArchiveFixtureJSON(t, now, healthyBackupArchiveFixtures(now)...)

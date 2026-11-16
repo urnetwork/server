@@ -33,10 +33,20 @@ var pgBouncerPathServices = []string{"api", "connect", "proxy", "taskworker", "a
 // The blocks whose main pools dial the PgBouncer instances directly, by
 // service. Every block not listed is on the single port.
 //
-// Stage 1 (owner go 2026-11-13 for Monday 2026-11-16, 14:00-18:00 UTC): api
-// beta, about 1.3% of the database connection requests.
+// Stage 1 (owner go 2026-11-13; live from 2026-11-14 07:58 UTC, its 24-hour
+// watch passed 2026-11-15 09:00 UTC): api beta, about 1.3% of the database
+// connection requests.
+//
+// Stage 2 (owner go 2026-11-15 ~16:50 UTC, after the PgBouncer instances
+// were restarted for their listen backlog of 65535): every api block, about
+// 29% of the pool acquires (CPUOPT6 Part C §4.2, Part D #1).
+//
+// Stage 3 (same go; owner 2026-11-15 ~19:45 UTC: move as fast as possible,
+// next stage after 45 minutes clean): every connect block, about 43% of the
+// pool acquires.
 var pgBouncerDirectBlocks = map[string][]string{
-	"api": {"beta"},
+	"api":     {pgBouncerEveryBlock},
+	"connect": {pgBouncerEveryBlock},
 }
 
 // The path the table gives a service's block. Only a process in a block goes

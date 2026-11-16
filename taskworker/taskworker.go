@@ -101,6 +101,9 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(1*time.Hour))
 		controller.ScheduleOnboardingResultsRollup(clientSession, tx, onboarding.NextRollupAt(server.NowUtc()))
 		controller.ScheduleOnboardingEmailTrackerSync(clientSession, tx, server.NowUtc())
+		// the onboarding campaign sweep: its first run repairs the rows whose E1
+		// was lost before E1 committed with the row
+		controller.ScheduleOnboardingCampaignSweep(clientSession, tx, server.NowUtc())
 		// the re-engagement scan (02:30 UTC; inert until reengagement.yml enables it)
 		controller.ScheduleReengagementScan(clientSession, tx, controller.NextReengagementScanAt(server.NowUtc()))
 		// the re-engagement results rollup (02:45 UTC, after the scan)
@@ -742,6 +745,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.OnboardingEmailTrackerSync,
 			controller.OnboardingEmailTrackerSyncPost,
+		),
+		// re-schedules running campaign rows whose next step lost its task
+		task.NewTaskTargetWithPost(
+			controller.OnboardingCampaignSweep,
+			controller.OnboardingCampaignSweepPost,
 		),
 		// the re-engagement program: the daily scan that opens episodes, and
 		// one task per network, episode and step

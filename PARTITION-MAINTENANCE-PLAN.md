@@ -1332,6 +1332,30 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
     - **Effect:** the legacy partition (everything before the cutover week C)
       drops at C + H instead of C + 13 weeks, while no open connection still
       needs an admit in it; production connections reconnect within a day.
+  - **Early drop of the legacy partition (owner, 2026-11-15; DBDISK-STABILIZE
+    I4):** C was 2026-11-16 on Main, and the legacy partition held 366 GiB.
+    - **Accepted:** a connection admitted before C and still open at the drop
+      retires without its network id. The retire lookup reads the parent,
+      finds no admit, and the append writes `network_id` NULL, which the
+      journal allows. No event was ever signed, so no signed chain breaks.
+    - **Guard migration** (`providerWorkSessionEventLegacyDropGuardSql`): the
+      horizon drop guard plus one clause, which admits the legacy partition
+      (`FROM (MINVALUE)`) an hour after its upper bound, once no event can land
+      in it. It replaces the function body only. Its monitor contract
+      supersedes the horizon guard's.
+    - **Step:** `bringyourctl model migrate provider-work-session-partition
+      --drop-legacy [--dry-run]` (`db_provider_work_session_legacy_drop.go`).
+      It runs in two transactions:
+      - The detach transaction sets the opt-in, calls the guard, and runs
+        DETACH. It first waits for a quiet journal, then waits at most 1 s
+        for its locks, half a main-pool writer's `PgLockTimeout`, with
+        retries.
+      - The drop of the detached table runs under that table's own lock.
+      The registry's `DropRange` would do both in one transaction, holding
+      the parent's ACCESS EXCLUSIVE lock while the commit unlinks every file.
+      A rerun resumes after the detach.
+    - **Unchanged:** the registry's own retirement still keeps the legacy
+      partition until C + H and the open-admission check.
 
 ### C5. `contract_close_report_evidence` (170 GB): weekly partitions plus the row deletes (decided 2026-10-24)
 

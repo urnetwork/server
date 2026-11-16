@@ -492,7 +492,10 @@ func TestCompetitionDashboardOperationalSignals(t *testing.T) {
 	}
 }
 
-func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
+// Each archive's freshness reads ERROR past its objective, as Grafana's
+// alert rules and the monitor's §11.22 do: 7 days for pg (owner, 2026-11-15,
+// for edge-6's Sun/Thu runs of 40 to 75 hours), 5 days for the others.
+func TestBackupArchiveDashboardFailsClosedPastTheObjective(t *testing.T) {
 	dashboard := readTestDashboard(t, "backup-archives.json")
 	joined := strings.Join(dashboardExpressions(dashboard), "\n")
 	for _, required := range []string{
@@ -520,21 +523,28 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 		t.Errorf("backup activity does not identify the running archive: %s", activity.Targets[0].Expr)
 	}
 
-	archives := map[int]string{
-		5:  `archive="pg"`,
-		6:  `archive="redis"`,
-		7:  `archive="github-urnetwork"`,
-		8:  `archive="github-urfoundation"`,
-		17: `archive="router-config"`,
+	archives := map[int]struct{ selector, objective string }{
+		5:  {`archive="pg"`, "> bool 604800"},
+		6:  {`archive="redis"`, "> bool 432000"},
+		7:  {`archive="github-urnetwork"`, "> bool 432000"},
+		8:  {`archive="github-urfoundation"`, "> bool 432000"},
+		17: {`archive="router-config"`, "> bool 432000"},
 	}
-	for panelID, archiveSelector := range archives {
+	overall := dashboardPanelById(dashboard, 2)
+	if overall == nil || len(overall.Targets) != 1 ||
+		!strings.Contains(overall.Targets[0].Expr, `archive="pg"})) > bool 604800`) ||
+		!strings.Contains(overall.Targets[0].Expr, `archive=~"redis|github-urnetwork|github-urfoundation|router-config"})) > bool 432000`) ||
+		!strings.Contains(overall.Targets[0].Expr, "< bool 5") {
+		t.Errorf("overall archive status does not judge pg at 7 days and the others at 5, failing closed on a missing archive")
+	}
+	for panelID, archive := range archives {
 		panel := dashboardPanelById(dashboard, panelID)
 		if panel == nil || len(panel.Targets) != 1 {
 			t.Errorf("backup freshness panel %d is missing", panelID)
 			continue
 		}
 		expression := panel.Targets[0].Expr
-		for _, required := range []string{archiveSelector, "time()", "432000", "vector(1)"} {
+		for _, required := range []string{archive.selector, "time()", archive.objective, "vector(1)"} {
 			if !strings.Contains(expression, required) {
 				t.Errorf("backup freshness panel %d is missing %q: %s", panelID, required, expression)
 			}

@@ -347,6 +347,15 @@
           "expr": "sum by (step, result) (increase(urnetwork_onboarding_emails_total{env=\"$env\"}[1h]))",
           "refId": "A",
           "legendFormat": "{{step}} {{result}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (step, action) (increase(urnetwork_onboarding_sweep_rescheduled_total{env=\"$env\"}[1h]))",
+          "refId": "B",
+          "legendFormat": "swept {{step}} {{action}}"
         }
       ]
     },

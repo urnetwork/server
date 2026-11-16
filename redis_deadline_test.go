@@ -27,7 +27,9 @@ type deadlineRedisPeer struct {
 	dials       atomic.Int64
 	commands    sync.Map
 	stall       string
-	redirect    bool
+	// closes the connection, unanswered, when it reads this command
+	hangup   string
+	redirect bool
 	// replies to each named command this much later
 	late map[string]time.Duration
 }
@@ -103,6 +105,9 @@ func (p *deadlineRedisPeer) dial(context.Context, string, string) (net.Conn, err
 			v.(*atomic.Int64).Add(1)
 			if command == p.stall {
 				<-p.stop
+				return
+			}
+			if command == p.hangup {
 				return
 			}
 			if delay, ok := p.late[command]; ok {
@@ -256,8 +261,13 @@ func TestRedisWithDeadlineKeepsOrdinaryPoolsUnchanged(t *testing.T) {
 	})
 }
 
+// A node that never answers, at any step of a call, fails the call at its
+// deadline with the deadline's error, and nothing is replayed. With no
+// preflight PING (2026-11-15) the callback's first command dials, so a
+// handshake or write that never completes fails inside that command, within
+// the same deadline, as a stalled PING failed before.
 func TestRedisWithDeadlineNativeIoFaults(t *testing.T) {
-	for _, phase := range []string{"hello", "write", "ping", "get", "eval"} {
+	for _, phase := range []string{"hello", "write", "get", "eval"} {
 		t.Run(phase, func(t *testing.T) {
 			peer := newDeadlineRedisPeer(t, phase)
 			client := redis.NewClient(deadlineTestRedisOptions(peer))
@@ -272,14 +282,38 @@ func TestRedisWithDeadlineNativeIoFaults(t *testing.T) {
 					return r.Get(ctx, "synthetic-resident").Err()
 				})
 			})
-			want := 0
-			if phase == "get" || phase == "eval" {
-				want = 1
-			}
-			if calls != want || peer.dials.Load() != 1 {
-				t.Fatalf("fault caused callback/dial replay: calls=%d dials=%d", calls, peer.dials.Load())
+			if calls != 1 || peer.dials.Load() != 1 || peer.count("ping") != 0 {
+				t.Fatalf("fault caused callback/dial replay or a preflight: calls=%d dials=%d pings=%d", calls, peer.dials.Load(), peer.count("ping"))
 			}
 		})
+	}
+}
+
+// A connection the node closes fails the callback's first command at once,
+// through the call's error path, well inside its deadline; nothing replays it
+// and no PING precedes it.
+func TestRedisWithDeadlineDeadConnectionFailsInItsCommand(t *testing.T) {
+	peer := newDeadlineRedisPeer(t, "")
+	peer.hangup = "get"
+	client := redis.NewClient(deadlineTestRedisOptions(peer))
+	installDeadlineTestClient(t, client)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	calls := 0
+	start := time.Now()
+	err := RedisWithDeadline(ctx, func(r RedisClient) error {
+		calls++
+		return r.Get(ctx, "synthetic-resident").Err()
+	})
+	elapsed := time.Since(start)
+	if err == nil || errors.Is(err, RedisNil) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("closed connection answered %v, want its connection error", err)
+	}
+	if 2*time.Second < elapsed {
+		t.Fatalf("closed connection took %s of a 5s deadline", elapsed)
+	}
+	if calls != 1 || peer.dials.Load() != 1 || peer.count("get") != 1 || peer.count("ping") != 0 {
+		t.Fatalf("closed connection replayed or pinged: calls=%d dials=%d gets=%d pings=%d", calls, peer.dials.Load(), peer.count("get"), peer.count("ping"))
 	}
 }
 
@@ -296,11 +330,13 @@ func TestRedisWithDeadlinePoolWaitFault(t *testing.T) {
 	if err := held.Ping(warm).Err(); err != nil {
 		t.Fatal(err)
 	}
+	// with no preflight the callback's command waits for the pool turn, and
+	// the caller's deadline ends that wait
 	calls := 0
 	checkDeadlineFault(t, func(ctx context.Context) error {
-		return RedisWithDeadline(ctx, func(RedisClient) error { calls++; return nil })
+		return RedisWithDeadline(ctx, func(r RedisClient) error { calls++; return r.Get(ctx, "synthetic-resident").Err() })
 	})
-	if calls != 0 || peer.dials.Load() != 1 {
+	if calls != 1 || peer.dials.Load() != 1 || peer.count("get") != 0 {
 		t.Fatal("pool exhaustion created extra work")
 	}
 }
@@ -350,16 +386,17 @@ func TestRedisWithDeadlineDialAndResolverFaults(t *testing.T) {
 			}
 			client := redis.NewClient(options)
 			installDeadlineTestClient(t, client)
+			// with no preflight the callback's command makes the one dial
 			calls := 0
 			checkDeadlineFault(t, func(ctx context.Context) error {
-				return RedisWithDeadline(ctx, func(RedisClient) error { calls++; return nil })
+				return RedisWithDeadline(ctx, func(r RedisClient) error { calls++; return r.Get(ctx, "synthetic-resident").Err() })
 			})
 			client.Close()
 			// A canceled Go lookup can return before its internal completion.
 			// Close admission and join admitted callbacks. Later callbacks touch
 			// only the stable gate, without entering the group or counters.
 			closeResolver()
-			if calls != 0 || dials.Load() != 1 || (phase == "resolver" && dns.Load() == 0) {
+			if calls != 1 || dials.Load() != 1 || (phase == "resolver" && dns.Load() == 0) {
 				t.Fatalf("setup fault lost single-attempt bound: calls=%d dials=%d dns=%d", calls, dials.Load(), dns.Load())
 			}
 		})
@@ -392,12 +429,14 @@ func TestRedisWithDeadlineClusterStateWaitHonorsContext(t *testing.T) {
 	}
 	client := redis.NewClusterClient(options)
 	installDeadlineTestClient(t, client)
+	// with no preflight the callback's command waits for the cluster state,
+	// and the caller's deadline ends that wait
 	calls := 0
 	checkDeadlineFault(t, func(ctx context.Context) error {
-		return RedisWithDeadline(ctx, func(RedisClient) error { calls++; return nil })
+		return RedisWithDeadline(ctx, func(r RedisClient) error { calls++; return r.Get(ctx, "synthetic-resident").Err() })
 	})
-	if calls != 0 || lookups.Load() != 1 {
-		t.Fatal("cluster-state fault was replayed or reached callback")
+	if calls != 1 || lookups.Load() != 1 {
+		t.Fatal("cluster-state fault was replayed")
 	}
 }
 
@@ -456,7 +495,7 @@ func TestRedisWithDeadlineColdClusterSkipsDetachedCommandMetadata(t *testing.T) 
 		}
 		return RedisRemoveIfEqual(r, ctx, "synthetic-resident", []byte("original")).Err()
 	})
-	if err != nil || peer.count("command") != 0 || peer.count("ping") != 1 || peer.count("get") != 1 || peer.count("eval") != 1 {
+	if err != nil || peer.count("command") != 0 || peer.count("ping") != 0 || peer.count("get") != 1 || peer.count("eval") != 1 {
 		t.Fatalf("cold single-key cleanup escaped into detached metadata: err=%v command=%d", err, peer.count("command"))
 	}
 }
@@ -488,8 +527,13 @@ func TestRedisWithDeadlineResetStopsOwnedDialMaintenance(t *testing.T) {
 	installDeadlineTestClient(t, client)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	if err := RedisWithDeadline(ctx, func(RedisClient) error { t.Error("failed admission reached callback"); return nil }); err == nil {
+	// with no preflight the callback's command meets the failed dial
+	calls := 0
+	if err := RedisWithDeadline(ctx, func(r RedisClient) error { calls++; return r.Get(ctx, "synthetic-resident").Err() }); err == nil {
 		t.Fatal("dial failure was swallowed")
+	}
+	if calls != 1 {
+		t.Fatalf("failed dial replayed the callback: calls=%d", calls)
 	}
 	select {
 	case <-entered:

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +91,67 @@ func TestNetworkReplacementBudgetIsATenthAndAtLeastOne(t *testing.T) {
 }
 
 // The wire names the ur.io app, the docs and the examples use.
+// A proxy held because its replacement search found nothing waits as long as
+// it has been held before the next search, from HeldRetryInterval up to
+// HeldNoSupplyRetryMaxInterval, so a proxy that never finds supply is searched
+// for at gaps of 5, 5, 10, 20 and then 30 minutes, not every 5 (CPUOPT6 C #9:
+// 1,000-1,850 empty searches a pass). A cap hold keeps the plain interval.
+func TestUniqueExitHeldRetryWaitBacksOffEmptySearches(t *testing.T) {
+	settings := DefaultUniqueExitSettings()
+	t0 := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	wait := func(state string, failingSince *time.Time, lastHold time.Time) time.Duration {
+		return uniqueExitHeldRetryWait(
+			&proxyUniqueExitConfig{State: state, UpdateTime: lastHold},
+			&proxyExitAssignment{FailingSince: failingSince},
+			settings,
+		)
+	}
+	cases := []struct {
+		state   string
+		heldFor time.Duration
+		want    time.Duration
+	}{
+		{state: ProxyExitStateNoSupply, heldFor: 0, want: 5 * time.Minute},
+		{state: ProxyExitStateNoSupply, heldFor: 2 * time.Minute, want: 5 * time.Minute},
+		{state: ProxyExitStateNoSupply, heldFor: 7 * time.Minute, want: 7 * time.Minute},
+		{state: ProxyExitStateNoSupply, heldFor: 25 * time.Minute, want: 25 * time.Minute},
+		{state: ProxyExitStateNoSupply, heldFor: 40 * time.Minute, want: 30 * time.Minute},
+		{state: ProxyExitStateNoSupply, heldFor: 48 * time.Hour, want: 30 * time.Minute},
+		{state: ProxyExitStateReplacing, heldFor: 48 * time.Hour, want: 5 * time.Minute},
+	}
+	for _, c := range cases {
+		failingSince := t0
+		if got := wait(c.state, &failingSince, t0.Add(c.heldFor)); got != c.want {
+			t.Errorf("%s held %s: wait %s, want %s", c.state, c.heldFor, got, c.want)
+		}
+	}
+	if got := wait(ProxyExitStateNoSupply, nil, t0.Add(time.Hour)); got != settings.HeldRetryInterval {
+		t.Errorf("a hold without a failure time waits %s, want %s", got, settings.HeldRetryInterval)
+	}
+
+	// a proxy that never finds supply, searched for whenever its wait ends
+	failingSince := t0
+	lastHold := t0
+	gaps := []time.Duration{}
+	for range 6 {
+		gap := wait(ProxyExitStateNoSupply, &failingSince, lastHold)
+		gaps = append(gaps, gap)
+		lastHold = lastHold.Add(gap)
+	}
+	wantGaps := []time.Duration{5 * time.Minute, 5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute, 30 * time.Minute}
+	for i := range wantGaps {
+		if gaps[i] != wantGaps[i] {
+			t.Fatalf("search gaps %v, want %v", gaps, wantGaps)
+		}
+	}
+
+	// a maximum below the interval never shortens the interval
+	settings.HeldNoSupplyRetryMaxInterval = 0
+	if got := wait(ProxyExitStateNoSupply, &failingSince, t0.Add(time.Hour)); got != settings.HeldRetryInterval {
+		t.Errorf("with no back-off the wait is %s, want %s", got, settings.HeldRetryInterval)
+	}
+}
+
 func TestUniqueExitApiFieldsRoundTrip(t *testing.T) {
 	var config ProxyConfig
 	server.Raise(json.Unmarshal([]byte(`{"unique_exit": true, "unique_exit_replace": "manual"}`), &config))
@@ -265,7 +327,11 @@ func testDistinctKeys(keys [][]byte) bool {
 }
 
 func testUniqueExitEnv(t testing.TB, providers func() []*testExitProvider) func() {
+	// the sweep's clock stands still unless a test moves it, so each sweep
+	// decides at exactly the now the test passes
+	frozen := server.NowUtc()
 	restores := []func(){
+		Testing_SetUniqueExitSweepClock(func() time.Time { return frozen }),
 		Testing_SetProxyClientCreatesPerMinute(0, 0),
 		Testing_SetUniqueExitKeySecret(bytes.Repeat([]byte{3}, 32)),
 		Testing_SetUniqueExitCandidateSource(testExitSource(providers)),
@@ -570,15 +636,15 @@ func TestSweepProxyExitsReplacesALostProviderAfterTheGrace(t *testing.T) {
 
 		t0 := server.NowUtc()
 		signals.set(map[server.Id]bool{first.ProviderClientId: true}, nil)
-		sweep := SweepProxyExits(ctx, t0, settings)
+		sweep := SweepProxyExits(ctx, t0, settings, nil)
 		connect.AssertEqual(t, sweep.MarkedFailingCount, 1)
 		connect.AssertEqual(t, sweep.ReplacedCount, 0)
 
-		sweep = SweepProxyExits(ctx, t0.Add(119*time.Second), settings)
+		sweep = SweepProxyExits(ctx, t0.Add(119*time.Second), settings, nil)
 		connect.AssertEqual(t, sweep.ReplacedCount, 0)
 		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, proxyClientId).AssignmentId, first.AssignmentId)
 
-		sweep = SweepProxyExits(ctx, t0.Add(121*time.Second), settings)
+		sweep = SweepProxyExits(ctx, t0.Add(121*time.Second), settings, nil)
 		connect.AssertEqual(t, sweep.ReplacedCount, 1)
 		second := loadLiveProxyExitAssignment(ctx, proxyClientId)
 		connect.AssertEqual(t, second.AssignmentId != first.AssignmentId, true)
@@ -590,8 +656,8 @@ func TestSweepProxyExitsReplacesALostProviderAfterTheGrace(t *testing.T) {
 		// for a day, so there is no supply and the proxy is held
 		signals.set(map[server.Id]bool{second.ProviderClientId: true}, nil)
 		t1 := t0.Add(10 * time.Minute)
-		SweepProxyExits(ctx, t1, settings)
-		sweep = SweepProxyExits(ctx, t1.Add(121*time.Second), settings)
+		SweepProxyExits(ctx, t1, settings, nil)
+		sweep = SweepProxyExits(ctx, t1.Add(121*time.Second), settings, nil)
 		connect.AssertEqual(t, sweep.HeldCount, 1)
 		held := GetProxyExits(ctx, []server.Id{proxyClientId})[proxyClientId]
 		connect.AssertEqual(t, held.State, ProxyExitStateNoSupply)
@@ -619,14 +685,14 @@ func TestSweepProxyExitsVerdictsAndCaps(t *testing.T) {
 
 		aFirst := loadLiveProxyExitAssignment(ctx, a)
 		signals.set(nil, map[server.Id]bool{aFirst.ProviderClientId: true})
-		connect.AssertEqual(t, SweepProxyExits(ctx, now, settings).ReplacedCount, 1)
+		connect.AssertEqual(t, SweepProxyExits(ctx, now, settings, nil).ReplacedCount, 1)
 		aSecond := loadLiveProxyExitAssignment(ctx, a)
 		connect.AssertEqual(t, aSecond.ProviderClientId != aFirst.ProviderClientId, true)
 
 		// the network's hourly budget is spent: b is held for the cap
 		bFirst := loadLiveProxyExitAssignment(ctx, b)
 		signals.set(nil, map[server.Id]bool{bFirst.ProviderClientId: true})
-		sweep := SweepProxyExits(ctx, now.Add(time.Minute), settings)
+		sweep := SweepProxyExits(ctx, now.Add(time.Minute), settings, nil)
 		connect.AssertEqual(t, sweep.ReplacedCount, 0)
 		connect.AssertEqual(t, sweep.HeldCount, 1)
 		heldB := GetProxyExits(ctx, []server.Id{b})[b]
@@ -635,12 +701,12 @@ func TestSweepProxyExitsVerdictsAndCaps(t *testing.T) {
 
 		// a's own cap of one an hour holds it too
 		signals.set(nil, map[server.Id]bool{aSecond.ProviderClientId: true})
-		SweepProxyExits(ctx, now.Add(2*time.Minute), settings)
+		SweepProxyExits(ctx, now.Add(2*time.Minute), settings, nil)
 		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, a).State, proxyExitAssignmentReplacing)
 
 		// an hour later the caps have room: the held proxies move
 		signals.set(nil, nil)
-		sweep = SweepProxyExits(ctx, now.Add(62*time.Minute), settings)
+		sweep = SweepProxyExits(ctx, now.Add(62*time.Minute), settings, nil)
 		connect.AssertEqual(t, 1 <= sweep.ReplacedCount, true)
 	})
 }
@@ -664,20 +730,261 @@ func TestSweepProxyExitsRetriesAHeldProxyAtTheRetryInterval(t *testing.T) {
 
 		// a verdict on the only provider: there is no other exit to take
 		signals.set(nil, map[server.Id]bool{first.ProviderClientId: true})
-		sweep := SweepProxyExits(ctx, now, settings)
+		sweep := SweepProxyExits(ctx, now, settings, nil)
 		connect.AssertEqual(t, sweep.HeldCount, 1)
 		connect.AssertEqual(t, GetProxyExits(ctx, []server.Id{proxyClientId})[proxyClientId].State, ProxyExitStateNoSupply)
 
 		providers = append(providers, testExitProviders(ctx, []string{"192.0.2.161"}, 2)...)
-		sweep = SweepProxyExits(ctx, now.Add(settings.HeldRetryInterval-time.Second), settings)
+		sweep = SweepProxyExits(ctx, now.Add(settings.HeldRetryInterval-time.Second), settings, nil)
 		connect.AssertEqual(t, sweep.HeldCount, 0)
 		connect.AssertEqual(t, sweep.ReplacedCount, 0)
 		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, proxyClientId).AssignmentId, first.AssignmentId)
 
-		sweep = SweepProxyExits(ctx, now.Add(settings.HeldRetryInterval), settings)
+		sweep = SweepProxyExits(ctx, now.Add(settings.HeldRetryInterval), settings, nil)
 		connect.AssertEqual(t, sweep.ReplacedCount, 1)
 		connect.AssertEqual(t, GetProxyExits(ctx, []server.Id{proxyClientId})[proxyClientId].State, ProxyExitStateAssigned)
 		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, proxyClientId).ProviderClientId != first.ProviderClientId, true)
+	})
+}
+
+// A sweep clock that moves only when a replacement search draws from the
+// candidate source, drawCost per draw, so a walk's time is the searches it
+// made, as on 11-15, when empty searches filled every run.
+type testSweepClock struct {
+	mutex    sync.Mutex
+	now      time.Time
+	drawCost time.Duration
+	draws    int
+}
+
+func newTestSweepClock() *testSweepClock {
+	return &testSweepClock{now: server.NowUtc()}
+}
+
+// installs the clock and a candidate source that answers as testExitSource,
+// after moving the clock; returns the restore
+func (self *testSweepClock) install(providers func() []*testExitProvider) func() {
+	source := testExitSource(providers)
+	restoreClock := Testing_SetUniqueExitSweepClock(func() time.Time {
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		return self.now
+	})
+	restoreSource := Testing_SetUniqueExitCandidateSource(func(clientSession *session.ClientSession, specs []*ProviderSpec, excludeClientIds []server.Id, count int) ([]*FindProvidersProvider, error) {
+		func() {
+			self.mutex.Lock()
+			defer self.mutex.Unlock()
+			self.now = self.now.Add(self.drawCost)
+			self.draws += 1
+		}()
+		return source(clientSession, specs, excludeClientIds, count)
+	})
+	return func() {
+		restoreSource()
+		restoreClock()
+	}
+}
+
+func (self *testSweepClock) setDrawCost(drawCost time.Duration) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.drawCost = drawCost
+}
+
+func (self *testSweepClock) drawCount() int {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.draws
+}
+
+// the proxies' live assignments in the sweep's walk order
+func testSweepWalkOrder(ctx context.Context, proxyClientIds []server.Id) []*proxyExitAssignment {
+	assignments := []*proxyExitAssignment{}
+	for _, proxyClientId := range proxyClientIds {
+		assignments = append(assignments, loadLiveProxyExitAssignment(ctx, proxyClientId))
+	}
+	sort.Slice(assignments, func(i int, j int) bool {
+		a, b := assignments[i], assignments[j]
+		if !a.AssignedAt.Equal(b.AssignedAt) {
+			return a.AssignedAt.Before(b.AssignedAt)
+		}
+		return bytes.Compare(a.AssignmentId.Bytes(), b.AssignmentId.Bytes()) < 0
+	})
+	return assignments
+}
+
+func testProxyExitState(ctx context.Context, proxyClientId server.Id) string {
+	return GetProxyExits(ctx, []server.Id{proxyClientId})[proxyClientId].State
+}
+
+// The root cause of CPUOPT6 C #9: from 11-15 10Z every run of the sweep hit its
+// 10-minute bound on held proxies' empty replacement searches, so it never
+// reached its Post, and its rerun began again at the oldest assignment: the
+// newest were never swept. A run now stops at its own walk time, inside the
+// bound, and the next run resumes after the last assignment walked, through
+// the task args' JSON, also between two assignments created at one instant,
+// until it passes the newest; then the next run starts at the oldest again.
+// Every assignment is searched for once.
+func TestSweepProxyExitsResumesAfterItsWalkTimeAndReachesTheNewest(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var providers []*testExitProvider
+		defer testUniqueExitEnv(t, func() []*testExitProvider { return providers })()
+		signals := newTestExitSignals()
+		defer signals.install()()
+		clock := newTestSweepClock()
+		defer clock.install(func() []*testExitProvider { return providers })()
+		providers = testExitProviders(ctx, []string{"192.0.2.180", "192.0.2.181", "192.0.2.182", "192.0.2.183", "192.0.2.184", "192.0.2.185"}, 2)
+		_, userSession := testUniqueExitProNetwork(ctx)
+		proxyIds := []server.Id{}
+		for range 6 {
+			proxyIds = append(proxyIds, *testAuthUniqueExitProxy(t, userSession, "").ClientId)
+		}
+		// the third and fourth in the walk were created at one instant
+		order := testSweepWalkOrder(ctx, proxyIds)
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(
+				ctx,
+				`UPDATE proxy_exit_assignment SET assigned_at = $2 WHERE assignment_id = $1`,
+				order[3].AssignmentId,
+				order[2].AssignedAt.UTC(),
+			))
+		})
+		order = testSweepWalkOrder(ctx, proxyIds)
+		connect.AssertEqual(t, order[2].AssignedAt.Equal(order[3].AssignedAt), true)
+
+		// every exit has a bad verdict and there is no other supply: each
+		// assignment the walk reaches costs one empty search, a minute
+		excluded := map[server.Id]bool{}
+		for _, assignment := range order {
+			excluded[assignment.ProviderClientId] = true
+		}
+		signals.set(nil, excluded)
+		providers = nil
+		clock.setDrawCost(time.Minute)
+		drawsBefore := clock.drawCount()
+		settings := DefaultUniqueExitSettings()
+		settings.SweepWalkTime = 150 * time.Second
+		now := server.NowUtc()
+
+		first := SweepProxyExits(ctx, now, settings, nil)
+		connect.AssertEqual(t, first.WalkedCount, 3)
+		connect.AssertEqual(t, first.HeldCount, 3)
+		connect.AssertEqual(t, first.LiveCount, 6)
+		connect.AssertEqual(t, first.Next != nil, true)
+		connect.AssertEqual(t, first.Next.AssignmentId, order[2].AssignmentId)
+		for i, assignment := range order {
+			want := ProxyExitStateAssigned
+			if i < 3 {
+				want = ProxyExitStateNoSupply
+			}
+			connect.AssertEqual(t, testProxyExitState(ctx, assignment.ProxyClientId), want)
+		}
+
+		// the cursor travels in the next run's task args
+		cursorJson, err := json.Marshal(first.Next)
+		server.Raise(err)
+		var cursor ProxyExitSweepCursor
+		server.Raise(json.Unmarshal(cursorJson, &cursor))
+		second := SweepProxyExits(ctx, now.Add(4*time.Minute), settings, &cursor)
+		connect.AssertEqual(t, second.WalkedCount, 3)
+		connect.AssertEqual(t, second.HeldCount, 3)
+		connect.AssertEqual(t, second.Next == nil, true)
+		for _, assignment := range order {
+			connect.AssertEqual(t, testProxyExitState(ctx, assignment.ProxyClientId), ProxyExitStateNoSupply)
+		}
+		connect.AssertEqual(t, clock.drawCount()-drawsBefore, 6)
+
+		// past the newest: the next run starts at the oldest, whose holds are
+		// not due yet (the oldest was held at now, for HeldRetryInterval)
+		third := SweepProxyExits(ctx, now.Add(4*time.Minute+30*time.Second), settings, second.Next)
+		connect.AssertEqual(t, third.WalkedCount, 6)
+		connect.AssertEqual(t, third.HeldWaitingCount, 6)
+		connect.AssertEqual(t, third.Next == nil, true)
+		connect.AssertEqual(t, clock.drawCount()-drawsBefore, 6)
+	})
+}
+
+// The other half of CPUOPT6 C #9: held proxies whose searches find nothing were
+// searched for again every HeldRetryInterval, 1,000-1,850 of them a pass, and
+// filled each run before it reached the assignments behind them. Here four held
+// proxies stand before a removed proxy's exit. Two bounded runs reach and
+// release that exit, and after their empty searches the held proxies back off:
+// once the plain 5-minute interval has passed for each, they are still not
+// searched for, and each is searched again only once it has waited as long as
+// it has been held.
+func TestSweepProxyExitsHeldProxiesWithNothingToFindDoNotStarveThePass(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var providers []*testExitProvider
+		defer testUniqueExitEnv(t, func() []*testExitProvider { return providers })()
+		signals := newTestExitSignals()
+		defer signals.install()()
+		clock := newTestSweepClock()
+		defer clock.install(func() []*testExitProvider { return providers })()
+		providers = testExitProviders(ctx, []string{"192.0.2.190", "192.0.2.191", "192.0.2.192", "192.0.2.193", "192.0.2.194"}, 2)
+		networkId, userSession := testUniqueExitProNetwork(ctx)
+		proxyIds := []server.Id{}
+		for range 5 {
+			proxyIds = append(proxyIds, *testAuthUniqueExitProxy(t, userSession, "").ClientId)
+		}
+		order := testSweepWalkOrder(ctx, proxyIds)
+		removedProxy := order[4]
+
+		// the four oldest lose their exits with no supply left, and are held
+		excluded := map[server.Id]bool{}
+		for _, assignment := range order[:4] {
+			excluded[assignment.ProviderClientId] = true
+		}
+		signals.set(nil, excluded)
+		providers = nil
+		settings := DefaultUniqueExitSettings()
+		t0 := server.NowUtc()
+		held := SweepProxyExits(ctx, t0, settings, nil)
+		connect.AssertEqual(t, held.HeldCount, 4)
+		connect.AssertEqual(t, held.Next == nil, true)
+
+		testRemoveClient(t, userSession, removedProxy.ProxyClientId)
+		clock.setDrawCost(time.Minute)
+		drawsBefore := clock.drawCount()
+		settings.SweepWalkTime = 150 * time.Second
+
+		// every hold is due: the walk time ends the run after three searches
+		first := SweepProxyExits(ctx, t0.Add(6*time.Minute), settings, nil)
+		connect.AssertEqual(t, first.WalkedCount, 3)
+		connect.AssertEqual(t, first.HeldCount, 3)
+		connect.AssertEqual(t, first.Next != nil, true)
+		connect.AssertEqual(t, first.Next.AssignmentId, order[2].AssignmentId)
+		connect.AssertEqual(t, first.ReleasedCount, 0)
+
+		second := SweepProxyExits(ctx, t0.Add(9*time.Minute), settings, first.Next)
+		connect.AssertEqual(t, second.WalkedCount, 2)
+		connect.AssertEqual(t, second.HeldCount, 1)
+		connect.AssertEqual(t, second.ReleasedCount, 1)
+		connect.AssertEqual(t, second.Next == nil, true)
+		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, removedProxy.ProxyClientId) == nil, true)
+		connect.AssertEqual(t, clock.drawCount()-drawsBefore, 4)
+
+		// the oldest was searched for at t0+6m, 6 minutes into its hold: 5.5
+		// minutes later is past HeldRetryInterval, which searched for it again
+		// before the back-off, and short of its 6-minute wait
+		third := SweepProxyExits(ctx, t0.Add(11*time.Minute+30*time.Second), settings, nil)
+		connect.AssertEqual(t, third.WalkedCount, 4)
+		connect.AssertEqual(t, third.HeldWaitingCount, 4)
+		connect.AssertEqual(t, third.HeldCount, 0)
+		connect.AssertEqual(t, clock.drawCount()-drawsBefore, 4)
+
+		// the oldest is due at t0+12m; the next two, searched for at t0+7m and
+		// t0+8m, are past HeldRetryInterval by the time the walk reaches them
+		// and still wait their 7 and 8 minutes
+		fourth := SweepProxyExits(ctx, t0.Add(12*time.Minute), settings, nil)
+		connect.AssertEqual(t, fourth.HeldCount, 1)
+		connect.AssertEqual(t, fourth.HeldWaitingCount, 3)
+		connect.AssertEqual(t, clock.drawCount()-drawsBefore, 5)
+		for _, assignment := range order[:4] {
+			connect.AssertEqual(t, testProxyExitState(ctx, assignment.ProxyClientId), ProxyExitStateNoSupply)
+		}
+		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 0)
 	})
 }
 
@@ -698,7 +1005,7 @@ func TestSweepProxyExitsManualModeHoldsUntilRotate(t *testing.T) {
 		settings := DefaultUniqueExitSettings()
 
 		signals.set(nil, map[server.Id]bool{first.ProviderClientId: true})
-		sweep := SweepProxyExits(ctx, server.NowUtc(), settings)
+		sweep := SweepProxyExits(ctx, server.NowUtc(), settings, nil)
 		connect.AssertEqual(t, sweep.HeldCount, 1)
 		held := GetProxyExits(ctx, []server.Id{proxyClientId})[proxyClientId]
 		connect.AssertEqual(t, held.State, ProxyExitStateReplacing)
@@ -743,7 +1050,7 @@ func TestConfirmProxyExitMatchChangeAndCollision(t *testing.T) {
 		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, a).FailingReason, ProxyExitReasonCollision)
 		connect.AssertEqual(t, ConfirmProxyExit(ctx, a, server.NewId(), aExit.EgressKey, now), ProxyExitConfirmStale)
 
-		sweep := SweepProxyExits(ctx, now, DefaultUniqueExitSettings())
+		sweep := SweepProxyExits(ctx, now, DefaultUniqueExitSettings(), nil)
 		connect.AssertEqual(t, sweep.ReplacedCount, 1)
 		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, a).AssignmentId != aExit.AssignmentId, true)
 		connect.AssertEqual(t, testDistinctKeys(testLiveExitKeys(ctx, aExit.NetworkId)), true)
@@ -790,7 +1097,7 @@ func TestRotateProxyExitAndRemovedProxyRelease(t *testing.T) {
 		removed, err := RemoveNetworkClient(&RemoveNetworkClientArgs{ClientId: proxyClientId}, userSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, removed.Error == nil, true)
-		sweep := SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings())
+		sweep := SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings(), nil)
 		connect.AssertEqual(t, sweep.ReleasedCount, 1)
 		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 0)
 		connect.AssertEqual(t, testAuthUniqueExitProxy(t, userSession, "").Error == nil, true)
@@ -862,7 +1169,7 @@ func TestRotateProxyExitRefusesARemovedProxy(t *testing.T) {
 		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 1)
 
 		// the sweeper releases the exit; the answer stays the same
-		sweep := SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings())
+		sweep := SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings(), nil)
 		connect.AssertEqual(t, sweep.ReleasedCount, 1)
 		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 0)
 		after := testRotateExit(t, userSession, proxyClientId)
@@ -937,13 +1244,13 @@ func TestSweepProxyExitsLeavesAProxyRemovedDuringThePass(t *testing.T) {
 			},
 		)()
 
-		sweep := SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings())
+		sweep := SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings(), nil)
 		connect.AssertEqual(t, sweep.ReplacedCount, 0)
 		live := loadLiveProxyExitAssignment(ctx, proxyClientId)
 		connect.AssertEqual(t, live != nil && live.AssignmentId == first.AssignmentId, true)
 		connect.AssertEqual(t, testPinnedProvider(t, ctx, result.ProxyConfigResult.ProxyId), first.ProviderClientId)
 
-		sweep = SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings())
+		sweep = SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings(), nil)
 		connect.AssertEqual(t, sweep.ReleasedCount, 1)
 		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 0)
 	})
