@@ -40,6 +40,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/durablevolume"
 	"github.com/urnetwork/glog"
+	operator "github.com/urnetwork/operator-core"
 )
 
 // DefaultBlobPrefix is the general blob-storage namespace used when
@@ -70,66 +71,28 @@ const (
 // writes cannot select it, and listings never expose these private owners.
 const blobPartialSuffix = ".partial"
 
+// The object records below are operator-core's, shared with server's extensions (owner decision 251);
+// BlobObject is operator.BlobListObject there, since operator.BlobObject names an open file-cluster Get.
+
 // BlobObject is a stored object's key and size, as returned by List.
-type BlobObject struct {
-	Key  string
-	Size int64
-}
+type BlobObject = operator.BlobListObject
 
-// A version is a separate retained storage charge, including a noncurrent
-// version of the same key. Delete markers carry no object-body bytes.
-type BlobObjectVersion struct {
-	Key          string
-	Size         int64
-	VersionId    string
-	DeleteMarker bool
-}
+// A version is a separate retained storage charge, including a noncurrent version of the same key.
+type BlobObjectVersion = operator.BlobObjectVersion
 
-// Immutable retention proof returned for a write that the backend protects
-// through the requested absolute date. Production MinIO writes use compliance
-// object lock and name the exact retained object version. The local backend is
-// only a development substitute and reports mode LOCAL.
-type BlobRetention struct {
-	Key         string
-	Size        int64
-	VersionId   string
-	Mode        string
-	RetainUntil time.Time
-}
+// Immutable retention proof returned for a write that the backend protects through the requested
+// absolute date.
+type BlobRetention = operator.BlobRetention
 
-// BlobUsage is a bounded namespace capacity proof. CapacityBytes is an
-// operator allocation for the configured prefix, not an estimate of the whole
-// MinIO cluster; cluster free-space alerts remain sourced from MinIO metrics.
-type BlobUsage struct {
-	Authority              string  `json:"authority"`
-	Bucket                 string  `json:"bucket"`
-	Prefix                 string  `json:"prefix"`
-	ObjectCount            int     `json:"object_count"`
-	UsedBytes              int64   `json:"used_bytes"`
-	CapacityBytes          int64   `json:"capacity_bytes"`
-	FreeBytes              int64   `json:"free_bytes"`
-	UsedPercent            float64 `json:"used_percent"`
-	IncludesObjectVersions bool    `json:"includes_object_versions,omitempty"`
-}
+// BlobUsage is a bounded namespace capacity proof.
+type BlobUsage = operator.BlobUsage
 
-// BlobProtection is the non-secret production proof for one immutable
-// evidence bucket. ReplicationTargets contains only configured destination
-// bucket identities; credentials and endpoint secrets are never included.
-type BlobProtection struct {
-	Authority          string   `json:"authority"`
-	Bucket             string   `json:"bucket"`
-	ObjectLock         string   `json:"object_lock"`
-	Versioning         bool     `json:"versioning"`
-	ReplicationTargets []string `json:"replication_targets"`
-}
+// BlobProtection is the non-secret production proof for one immutable evidence bucket.
+type BlobProtection = operator.BlobProtection
 
-// BlobLifecycleRule expires (deletes) objects whose key starts with KeyPrefix
-// once they are older than TTL. This is how per-"stream" retention is set: each
-// stats stream maps to a key-prefix rule (see stats.RegisterStreamTTL).
-type BlobLifecycleRule struct {
-	KeyPrefix string
-	TTL       time.Duration
-}
+// BlobLifecycleRule expires (deletes) objects whose key starts with KeyPrefix once they are older than
+// TTL (see stats.RegisterStreamTTL).
+type BlobLifecycleRule = operator.BlobLifecycleRule
 
 // localReapInterval is how often the local backend scans for expired objects.
 const localReapInterval = 1 * time.Hour

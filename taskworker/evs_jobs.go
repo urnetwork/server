@@ -31,6 +31,7 @@ import (
 	"github.com/urnetwork/sidecar/evsservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
 	"github.com/urnetwork/server/sidecarhost"
 )
@@ -117,7 +118,16 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 		return
 	}
 	host.Budget = budget
+	// §21.9's hold/ writer for the abuse hold pass, on the same first metadata cluster (ABUSE-M5-14)
+	var holdStore *model.AbuseHoldStore
+	if firstCluster, err := clusters.FirstCluster(); err == nil {
+		holdStore = model.NewAbuseHoldStore(firstCluster)
+		model.SetAbuseHoldStore(holdStore)
+	}
 	startEvsJobsOnHost(ctx, lifetime, host, evsJobs, func() {
+		if holdStore != nil {
+			model.SetAbuseHoldStore(nil)
+		}
 		budget.Close()
 		quota.Drain(context.Background())
 		clusters.Close()
