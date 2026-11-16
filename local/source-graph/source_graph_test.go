@@ -169,6 +169,14 @@ func TestReleaseSourceGraphPinsSidecar(t *testing.T) {
 	requireReviewedSibling(t, "github.com/urnetwork/sidecar/smtpproof", "sidecar", "urnetwork/sidecar", "smtpproof")
 }
 
+// Dependency replacements are not inherited, so server repeats sidecar's
+// operator-core replace, and coretest is that same reviewed revision's nested
+// module. Build's operator-core gitlink pins this commit too (build/.gitmodules).
+func TestReleaseSourceGraphPinsOperatorCore(t *testing.T) {
+	requireReviewedSibling(t, "github.com/urnetwork/operator-core", "operator-core", "urnetwork/operator-core", "")
+	requireReviewedSibling(t, "github.com/urnetwork/operator-core/coretest", "operator-core", "urnetwork/operator-core", "coretest")
+}
+
 // The quality probes live in qualityprobe/ with their history, and their
 // standalone repository is retired. A pin for it would send every clean
 // checkout after source that nothing builds or tests.
