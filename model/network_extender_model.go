@@ -218,7 +218,10 @@ type NetworkExtenderProbeTarget struct {
 // key is what the sampler partitions by (R2), the tier and the canary channel
 // decide whether and where the address may appear at all (R1, R4).
 type NetworkExtenderDnsAddress struct {
-	ExtenderId    server.Id
+	ExtenderId server.Id
+	// the network that activated the extender, which a sample holds a quota
+	// of (ExtenderSampleSettings)
+	NetworkId     server.Id
 	PublicKey     []byte
 	IpVersion     int
 	Ip            netip.Addr
@@ -1253,6 +1256,7 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 			`
 			SELECT
 				network_extender.extender_id,
+				network_extender.network_id,
 				network_extender.public_key,
 				COALESCE(LOWER(derived_country.country_code::text), network_extender.country_code::text),
 				network_extender_address.ip_version,
@@ -1280,6 +1284,7 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 				var carriers string
 				server.Raise(result.Scan(
 					&address.ExtenderId,
+					&address.NetworkId,
 					&address.PublicKey,
 					&address.CountryCode,
 					&address.IpVersion,
@@ -1421,9 +1426,27 @@ func GetNetworkExtenderIdsForPublish(ctx context.Context, limit int, staleBefore
 // from, and an extender accepted on the webrtc carrier alone is reached only
 // through an exchange connection (connect/EXTENDER.md S8). Its record keeps
 // every active address of the extender.
+//
+// Every network may fill the whole sample. An activation's bootstrap holds each
+// network to its quota (GetRandomActiveNetworkExtendersUnderNetworkQuota).
 func GetRandomActiveNetworkExtenders(
 	ctx context.Context,
 	limit int,
+	excludeExtenderId server.Id,
+) []*NetworkExtenderWithAddresses {
+	return GetRandomActiveNetworkExtendersUnderNetworkQuota(ctx, limit, limit, excludeExtenderId)
+}
+
+// GetRandomActiveNetworkExtendersUnderNetworkQuota is GetRandomActiveNetworkExtenders
+// with each network held to networkQuota of the sample while others can fill
+// it (ExtenderSampleSettings): the candidates are drawn in a random order, and
+// the sample takes, in that order, each one among the first networkQuota of
+// its network's, then, when that leaves it short, the rest in the same order.
+// A quota of limit or more is no cap.
+func GetRandomActiveNetworkExtendersUnderNetworkQuota(
+	ctx context.Context,
+	limit int,
+	networkQuota int,
 	excludeExtenderId server.Id,
 ) []*NetworkExtenderWithAddresses {
 	extenders := []*NetworkExtenderWithAddresses{}
@@ -1467,19 +1490,36 @@ func GetRandomActiveNetworkExtenders(
 			LEFT JOIN location AS derived_country ON
 				derived_country.location_id = derived_location.country_location_id
 			WHERE network_extender.extender_id IN (
-				SELECT sampled.extender_id
-				FROM network_extender sampled
-				INNER JOIN network_extender_address sampled_address ON
-					sampled_address.extender_id = sampled.extender_id AND
-					sampled_address.active
-				WHERE
-					sampled.active AND
-					sampled.extender_id != $2 AND
-					sampled.directory_tier = $4 AND
-					sampled.canary_channel IS NULL AND
-					sampled_address.carriers ~ $5
-				GROUP BY sampled.extender_id
-				ORDER BY random()
+				SELECT drawn.extender_id
+				FROM (
+					SELECT
+						candidate.extender_id,
+						candidate.draw,
+						ROW_NUMBER() OVER (
+							PARTITION BY candidate.network_id
+							ORDER BY candidate.draw
+						) AS network_rank
+					FROM (
+						SELECT
+							sampled.extender_id,
+							sampled.network_id,
+							random() AS draw
+						FROM network_extender sampled
+						INNER JOIN network_extender_address sampled_address ON
+							sampled_address.extender_id = sampled.extender_id AND
+							sampled_address.active
+						WHERE
+							sampled.active AND
+							sampled.extender_id != $2 AND
+							sampled.directory_tier = $4 AND
+							sampled.canary_channel IS NULL AND
+							sampled_address.carriers ~ $5
+						GROUP BY sampled.extender_id, sampled.network_id
+					) AS candidate
+				) AS drawn
+				-- the first of each network's, up to its quota, in the draw's
+				-- order, and then the rest in the same order
+				ORDER BY drawn.network_rank > $6, drawn.draw
 				LIMIT $1
 			)
 			ORDER BY network_extender.extender_id, network_extender_address.ip_version
@@ -1489,6 +1529,7 @@ func GetRandomActiveNetworkExtenders(
 			DerivedLocationNodeKindExtender,
 			connect.ExtenderDirectoryTierOpen,
 			extenderFirstContactCarriersPattern,
+			networkQuota,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
