@@ -32,12 +32,13 @@ func TestFs38ForwardingOnT3(t *testing.T) {
 	})
 }
 
-// A DelegationRevoke of the subject's forwarding Delegation ends exactly the flows its key admitted, on server's
-// contracts, beside its twin, which keeps both connections open.
+// A DelegationRevoke of the subject's forwarding Delegation, and a newer one superseding it, each end exactly the flows
+// its key admitted, on server's contracts, beside their twin, which keeps both connections open.
 func TestFs38ForwardingRevocationOnT3(t *testing.T) {
 	testingAclRun(t, func(t testing.TB, ctx context.Context) {
 		bridgeM4RunSchedule(t, ctx, "FS-38's forwarding revocation twin", fault.Fs38ForwardingFlowsStayUnrevoked)
 		bridgeM4RunSchedule(t, ctx, "FS-38's forwarding revocation", fault.Fs38ForwardingRevokeCase)
+		bridgeM4RunSchedule(t, ctx, "FS-38's forwarding supersession", fault.Fs38ForwardingSupersedeCase)
 	})
 }
 
