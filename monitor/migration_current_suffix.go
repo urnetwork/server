@@ -773,13 +773,15 @@ var migrationCurrentSuffixContracts = slices.Concat(
 			migrationFillfactor("device", 90)),
 		migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathSearchProviderStatsFillfactor), "search provider stats pages keep room for open-hour rollups",
 			migrationFillfactor("search_provider_stats", 70)),
+		// the journal's three contracts below are superseded by its custody in
+		// either partition layout, from the drop guard's migration on
 		migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), "transfer debit journal age index keyed without applied",
-			financialIndexArtifact("transfer_debit_journal", "transfer_debit_journal_shard_create_time", "shard, create_time")),
+			financialIndexArtifact("transfer_debit_journal", "transfer_debit_journal_shard_create_time", "shard, create_time")).removedAt(server.TransferDebitJournalDropGuardMigrationVersion()),
 		// retires the v758 composite, which pinned the dropped age index
 		migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), "transfer debit journal custody without the applied age index",
-			transferDebitJournalHotArtifactQuery),
+			transferDebitJournalHotArtifactQuery).removedAt(server.TransferDebitJournalDropGuardMigrationVersion()),
 		migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathDebitJournalFillfactor), "transfer debit journal pages keep room for the applied version",
-			migrationFillfactor("transfer_debit_journal", 70)),
+			migrationFillfactor("transfer_debit_journal", 70)).removedAt(server.TransferDebitJournalDropGuardMigrationVersion()),
 		// retires the v723 composite, which pinned the dropped index
 		migrationCurrentSuffix(server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), "URL receipt history and durable probe queue without the unread full deadline index",
 			migrationFp2DurableQueueWithoutFullDeadlineIndexQuery),
@@ -1056,6 +1058,13 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{clientKeyHistoryRetentionSevenDayFloorMigrationContract},
 	// the device day rollup, versioned by its position
 	[]snMainnetMigrationContract{auditDeviceDayMigrationContract},
+	// the debit journal's drop guard and its custody in either partition
+	// layout, which supersedes its index, composite and fillfactor contracts,
+	// versioned by its position
+	[]snMainnetMigrationContract{
+		migrationCurrentSuffix(server.TransferDebitJournalDropGuardMigrationVersion(), "transfer debit journal custody in either partition layout with its drop guard",
+			transferDebitJournalPartitionCustodyArtifactQuery),
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

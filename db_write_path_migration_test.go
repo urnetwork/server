@@ -28,9 +28,12 @@ func TestUserAuthAttemptTableIsDropped(t *testing.T) {
 // exact for the transaction that reads them, unlike the shared counters.
 func writePathTestTransactionUpdates(t testing.TB, ctx context.Context, tx PgTx, table string) (updated int64, hot int64) {
 	t.Helper()
+	// a partitioned table's updates land in its leaves, so count the tree;
+	// pg_partition_tree lists nothing for a plain table, so add the table
 	Raise(tx.QueryRow(
 		ctx,
-		`SELECT pg_stat_get_xact_tuples_updated(to_regclass($1)), pg_stat_get_xact_tuples_hot_updated(to_regclass($1))`,
+		`SELECT coalesce(sum(pg_stat_get_xact_tuples_updated(tree.relid)), 0)::bigint, coalesce(sum(pg_stat_get_xact_tuples_hot_updated(tree.relid)), 0)::bigint
+		FROM (SELECT relid FROM pg_partition_tree(to_regclass($1)) UNION SELECT to_regclass($1)) tree`,
 		"public."+table,
 	).Scan(&updated, &hot))
 	return
@@ -83,12 +86,17 @@ func TestWritePathTableFillfactors(t *testing.T) {
 			{table: "client_connection_reliability_score", fillfactor: "50"},
 			{table: "network_client_location_reliability", fillfactor: "85"},
 		} {
+			// every leaf's, the table itself when it is not partitioned (a
+			// partitioned parent holds no storage settings, and
+			// pg_partition_tree lists nothing for a plain table)
 			var fillfactor *string
 			MaintenanceDb(ctx, func(conn PgConn) {
 				Raise(conn.QueryRow(
 					ctx,
-					`SELECT (SELECT option_value FROM pg_options_to_table(relation.reloptions) WHERE option_name = 'fillfactor')
-					FROM pg_class relation WHERE relation.oid = to_regclass('public.'||$1)`,
+					`SELECT CASE WHEN count(DISTINCT coalesce(option.option_value, '')) = 1 THEN max(option.option_value) END
+					FROM (SELECT relid FROM pg_partition_tree(to_regclass('public.'||$1)) UNION SELECT to_regclass('public.'||$1)) tree
+					JOIN pg_class relation ON relation.oid = tree.relid AND relation.relkind = 'r'
+					LEFT JOIN LATERAL (SELECT option_value FROM pg_options_to_table(relation.reloptions) WHERE option_name = 'fillfactor') option ON true`,
 					expected.table,
 				).Scan(&fillfactor))
 			}, OptReadOnly())

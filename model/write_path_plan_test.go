@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -73,14 +74,31 @@ func writePathTestIndexNames(indexes map[string]bool) []string {
 	return names
 }
 
+// The plan's indexes with each partition's index named by the partitioned
+// index it belongs to, so a plan reads the same on the plain journal and on
+// its daily partitions (server.MigrateTransferDebitJournalToPartitions).
+func writePathTestRootIndexes(t testing.TB, ctx context.Context, indexes map[string]bool) map[string]bool {
+	t.Helper()
+	roots := map[string]bool{}
+	for name := range indexes {
+		var root string
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT coalesce(pg_partition_root(to_regclass($1))::regclass::text, $1)`, "public."+name).Scan(&root))
+		})
+		roots[strings.TrimPrefix(root, "public.")] = true
+	}
+	return roots
+}
+
 // The flush's oldest-age gauge reads a shard's journal through the
 // (shard, create_time) index, oldest first, in either applied state. No index
-// keys applied any more.
+// keys applied any more. On the daily partitions it reads each partition's
+// copy of that index.
 func TestTransferDebitOldestAgeReadsTheShardTimeIndex(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		for _, applied := range []bool{false, true} {
-			indexes := writePathTestPlanIndexes(t, ctx, transferDebitOldestAgeSql, 3, applied)
+			indexes := writePathTestRootIndexes(t, ctx, writePathTestPlanIndexes(t, ctx, transferDebitOldestAgeSql, 3, applied))
 			if len(indexes) != 1 || !indexes["transfer_debit_journal_shard_create_time"] {
 				t.Fatalf("applied=%t: the age gauge reads %v, want transfer_debit_journal_shard_create_time", applied, writePathTestIndexNames(indexes))
 			}

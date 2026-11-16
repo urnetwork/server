@@ -82,3 +82,47 @@ var transferDebitJournalHotArtifactQuery = func() string {
 	}
 	return strings.Replace(transferDebitArtifactQuery, ageIndex, migrationIndexRemoved("transfer_debit_journal", "transfer_debit_journal_age"), 1)
 }()
+
+// One index of the journal in either layout: the plain table's, or the
+// partitioned parent's, which pg_get_indexdef renders ON ONLY and which is
+// valid only once every partition's index is attached and valid.
+func transferDebitJournalIndexArtifact(name, columns string) string {
+	return `EXISTS(SELECT 1 FROM pg_index i WHERE i.indrelid=to_regclass('public.transfer_debit_journal')
+ AND i.indexrelid=to_regclass('public.` + name + `') AND i.indisvalid AND i.indisready
+ AND pg_get_indexdef(i.indexrelid) IN ('CREATE INDEX ` + name + ` ON public.transfer_debit_journal USING btree (` + columns + `)',
+ 'CREATE INDEX ` + name + ` ON ONLY public.transfer_debit_journal USING btree (` + columns + `)'))`
+}
+
+// The journal's layout: the plain table with fillfactor 70, or the parent the
+// owner-run cutover partitions by contract_id (server.
+// MigrateTransferDebitJournalToPartitions), which holds no storage settings,
+// with fillfactor 70 on every leaf.
+const transferDebitJournalLayoutArtifactQuery = `(EXISTS(SELECT 1 FROM pg_class relation
+ WHERE relation.oid=to_regclass('public.transfer_debit_journal') AND relation.relkind='r'
+ AND coalesce(relation.reloptions,ARRAY[]::text[]) @> ARRAY['fillfactor=70']::text[])
+ OR EXISTS(SELECT 1 FROM pg_class relation
+ WHERE relation.oid=to_regclass('public.transfer_debit_journal') AND relation.relkind='p'
+ AND pg_get_partkeydef(relation.oid)='RANGE (contract_id)'
+ AND EXISTS(SELECT 1 FROM pg_partition_tree(relation.oid) tree WHERE tree.isleaf)
+ AND NOT EXISTS(SELECT 1 FROM pg_partition_tree(relation.oid) tree JOIN pg_class leaf ON leaf.oid=tree.relid
+ WHERE tree.isleaf AND NOT coalesce(leaf.reloptions,ARRAY[]::text[]) @> ARRAY['fillfactor=70']::text[])))`
+
+// The journal's custody from the drop guard's migration on, in either layout:
+// what the three contracts it supersedes pinned (the columns, keys and checks,
+// the contract, shard and shard time indexes, the applied age index absent,
+// the pending debit guard on transfer_balance, no foreign key and no trigger,
+// fillfactor 70), and the drop guard's published body.
+var transferDebitJournalPartitionCustodyArtifactQuery = `(` +
+	financialColumnsArtifact("transfer_debit_journal", `('contract_id','uuid','NO',NULL),('balance_id','uuid','NO',NULL),('shard','smallint','NO',NULL),('debit_byte_count','bigint','NO',NULL),('applied','boolean','NO','false'),('create_time','timestamp without time zone','NO','(clock_timestamp() AT TIME ZONE ''UTC''::text)')`) + ` AND ` +
+	financialConstraintsArtifact("transfer_debit_journal", `('PRIMARY KEY (balance_id, contract_id)'),('CHECK ((shard = (get_byte(uuid_send(balance_id), 15) % 16)))'),('CHECK ((debit_byte_count >= 0))')`) + ` AND ` +
+	transferDebitJournalIndexArtifact("transfer_debit_journal_contract", "contract_id, balance_id") + ` AND ` +
+	transferDebitJournalIndexArtifact("transfer_debit_journal_shard", "shard, balance_id, contract_id") + ` AND ` +
+	transferDebitJournalIndexArtifact("transfer_debit_journal_shard_create_time", "shard, create_time") + ` AND ` +
+	migrationIndexRemoved("transfer_debit_journal", "transfer_debit_journal_age") + ` AND ` +
+	financialGuardArtifact("transfer_balance", "transfer_balance_pending_debit_guard", "protect_pending_transfer_debit", server.TransferDebitGuardBodySql(), 11) + ` AND ` +
+	transferDebitJournalLayoutArtifactQuery + ` AND ` +
+	`EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('public.transfer_debit_journal_drop_guard(text)')
+ AND p.prorettype='void'::regtype AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+ AND p.prokind='f' AND NOT p.prosecdef AND p.proconfig IS NULL AND p.prosrc=` + snMainnetMigrationLiteral(server.TransferDebitJournalDropGuardBodySql()) + `)
+ AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.transfer_debit_journal') AND contype='f')
+ AND NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('public.transfer_debit_journal') AND NOT tgisinternal))`
