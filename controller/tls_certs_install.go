@@ -185,18 +185,11 @@ func InstallTlsCerts(ctx context.Context) *server.SidecarSwitchInstall {
 	return install
 }
 
-// The config file's bytes from this process's mount. An error names the file.
+// certs.yml's bytes from this process's config mount. An error names the file.
 func readTlsCertsConfigFile(name string) ([]byte, error) {
-	resource, err := server.Config.SimpleResource(name)
+	data, err := server.ReadSidecarInstallFile(server.Config, "config", name)
 	if err != nil {
-		if errors.Is(err, server.ErrResourceNotFound) && !errors.Is(err, server.ErrResourceUnavailable) {
-			return nil, fmt.Errorf("%w: config holds no %s", ErrTlsCertsInstall, name)
-		}
-		return nil, fmt.Errorf("%w: config's %s cannot be read", ErrTlsCertsInstall, name)
-	}
-	data, err := resource.BytesE()
-	if err != nil {
-		return nil, fmt.Errorf("%w: config's %s cannot be read", ErrTlsCertsInstall, name)
+		return nil, fmt.Errorf("%w: %w", ErrTlsCertsInstall, err)
 	}
 	return data, nil
 }

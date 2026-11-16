@@ -151,3 +151,20 @@ func TestSidecarSwitchInstallRunRemovesAtTheEnd(t *testing.T) {
 		t.Fatalf("%d builds, %d removals", world.builds, world.removes)
 	}
 }
+
+// An install's file read names the mount and the file for a file that is not
+// there, and answers a pushed file's bytes.
+func TestReadSidecarInstallFile(t *testing.T) {
+	newTestSidecarConfigHome(t)
+	const name = "install-file-test.yml"
+	_, err := ReadSidecarInstallFile(Config, "config", name)
+	if !errors.Is(err, ErrSidecarInstallFile) || !strings.Contains(err.Error(), "config holds no "+name) {
+		t.Fatalf("an absent file answered %v", err)
+	}
+	pop := Config.PushSimpleResource(name, []byte("key: value\n"))
+	defer pop()
+	data, err := ReadSidecarInstallFile(Config, "config", name)
+	if err != nil || string(data) != "key: value\n" {
+		t.Fatalf("a pushed file answered %q, %v", data, err)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/taskworker"
+	"github.com/urnetwork/server/taskworker/work"
 )
 
 func main() {
@@ -74,6 +75,11 @@ Options:
 	// §21.7's standing and network_verified for the reports, record writes and
 	// grant activations this process runs (ABUSE-M5-07)
 	controller.InstallAbuseStanding(ctx)
+	// certs' order, renewal and revocation chains (QD-846): the engine with
+	// its DNS client, ACME client and hint writer, installed only while
+	// sidecar.yml's certs switch is on and certs.yml, its account files and
+	// internal-certs.yml are there; otherwise each chain runs empty passes
+	work.InstallTlsCertChains(ctx)
 	if err := taskworker.Run(ctx, taskworker.RunOptions{Port: port, Count: count, BatchSize: batchSize}); err != nil {
 		panic(err)
 	}

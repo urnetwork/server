@@ -568,3 +568,57 @@ func TestTlsCertsInstallMissingFilesLeaveItUninstalled(t *testing.T) {
 		t.Fatalf("an order once installed: %+v, %v", result, err)
 	}
 }
+
+// The install as api starts it reads the process's own sidecar.yml and config
+// mount: off in sidecar.yml the routes answer 503, and on, with certs.yml in
+// the mount, an order queues.
+func TestTlsCertsInstallFollowsSidecarYmlAndTheConfigMount(t *testing.T) {
+	world := newTlsInstallTestWorld(t)
+	network := world.network("acme")
+	device := network.device(tlsInstallTestImplicitTargets, tlsInstallTestPublish...)
+	network.load()
+	defer server.Config.PushSimpleResource(TlsCertsConfigFileName, world.certsConfig)()
+	settings := DefaultTlsCertsInstallSettings()
+	settings.SubjectLoadWait = 0
+	install := NewTlsCertsInstall(&TlsCertsInstallDeps{
+		Gate: func(ctx context.Context) (*TlsCertsGate, error) {
+			return &TlsCertsGate{Host: world.host.ServiceHost(), States: world.states, Abuse: world.abuse}, nil
+		},
+		Store: world.store,
+		Names: func(ctx context.Context, networkId sidecar.Id, root string, allocate bool) (string, []string, error) {
+			return world.labels[networkId], world.aliases[networkId], nil
+		},
+	}, settings)
+	install.Testing_SetLog(func(format string, arguments ...any) {
+		world.lines = append(world.lines, fmt.Sprintf(format, arguments...))
+	})
+	defer install.Close()
+
+	func() {
+		defer server.Testing_PushSidecarConfig("sidecar:\n  certs: {enabled: false}\n  tlsedge: {enabled: true, percent: 100}\n")()
+		if install.Sync(world.ctx) {
+			t.Fatal("installed with sidecar.yml's certs off")
+		}
+		if _, err := world.order(device); !tlsTestStatus(err, "503") {
+			t.Fatalf("an order with sidecar.yml's certs off answered %v", err)
+		}
+	}()
+	func() {
+		defer server.Testing_PushSidecarConfig("sidecar:\n  certs: {enabled: true}\n")()
+		if !install.Sync(world.ctx) {
+			t.Fatalf("not installed with sidecar.yml's certs on: %q", world.lines)
+		}
+		if result, err := world.order(device); err != nil || result.State != sidecar.TlsCertStateQueued {
+			t.Fatalf("an order with sidecar.yml's certs on: %+v, %v", result, err)
+		}
+	}()
+	func() {
+		defer server.Testing_PushSidecarConfig("sidecar: {}\n")()
+		if install.Sync(world.ctx) {
+			t.Fatal("still installed once sidecar.yml names no certs switch")
+		}
+		if _, err := world.order(device); !tlsTestStatus(err, "503") {
+			t.Fatalf("an order once sidecar.yml names no certs switch answered %v", err)
+		}
+	}()
+}

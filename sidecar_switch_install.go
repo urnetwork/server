@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -208,4 +210,27 @@ func (self *SidecarSwitchInstall) Run(ctx context.Context) {
 		}
 		self.Sync(ctx)
 	}
+}
+
+// A file an install is built from is not there or cannot be read. The text
+// names the mount and the file, never what the file holds.
+var ErrSidecarInstallFile = errors.New("install file")
+
+// A whole file an install is built from, by name, from one of the process's
+// mounts: Config, called "config", or Vault, called "vault". The error says
+// whether the mount holds no such file or holds one that cannot be read, and
+// never carries the cause, which may quote the file.
+func ReadSidecarInstallFile(resolver *Resolver, mount string, name string) ([]byte, error) {
+	resource, err := resolver.SimpleResource(name)
+	if err != nil {
+		if errors.Is(err, ErrResourceNotFound) && !errors.Is(err, ErrResourceUnavailable) {
+			return nil, fmt.Errorf("%w: %s holds no %s", ErrSidecarInstallFile, mount, name)
+		}
+		return nil, fmt.Errorf("%w: %s's %s cannot be read", ErrSidecarInstallFile, mount, name)
+	}
+	data, err := resource.BytesE()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s's %s cannot be read", ErrSidecarInstallFile, mount, name)
+	}
+	return data, nil
 }

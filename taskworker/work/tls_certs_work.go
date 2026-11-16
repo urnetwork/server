@@ -38,7 +38,9 @@ import (
 //
 // What the first three run on is installed per process (SetTlsCertChains), as
 // the routes' is (controller.SetTlsCerts): the engine over this process's
-// store, Redis, Push, DNS client and ACME client. A process with nothing
+// store, Redis, Push, DNS client and ACME client. taskworker installs it only
+// while sidecar.yml's certs switch is on and its files are there
+// (InstallTlsCertChains, tls_certs_install.go; QD-846). A process with nothing
 // installed runs an empty pass and schedules the next, so nothing reaches a CA
 // or a zone until its host has built the engine. A binary that does not link
 // MG5 neither schedules a chain nor, should an older row run, touches
@@ -60,15 +62,22 @@ var tlsCertChainDeps atomic.Pointer[TlsCertChainDeps]
 // Installs what this process's certs chains run on; nil, or deps with no
 // service, removes it, and each chain runs empty passes.
 func SetTlsCertChains(deps *TlsCertChainDeps) {
+	setTlsCertChains(deps)
+}
+
+// SetTlsCertChains, answering what it installed, nil when it removed: the
+// install that put it there removes only that (tls_certs_install.go).
+func setTlsCertChains(deps *TlsCertChainDeps) *TlsCertChainDeps {
 	if deps == nil || deps.Service == nil {
 		tlsCertChainDeps.Store(nil)
-		return
+		return nil
 	}
 	installed := *deps
 	if installed.RevocationSource == nil {
 		installed.RevocationSource = NewTlsCertRevocationSource(nil)
 	}
 	tlsCertChainDeps.Store(&installed)
+	return &installed
 }
 
 // Cadences of the order, renewal and revocation chains.
