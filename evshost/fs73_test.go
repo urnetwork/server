@@ -11,7 +11,8 @@
 // commit's dates read; the race clause holds the prune at evs.lfs.prune.remove through the Net's barrier driver.
 //
 // The clauses share one world in this order, each on devices and refs of its own: store, skip, transports (git's
-// http and ssh fronts), attributes, import, pruned, race, owned, missing, window, and last the twin, the pruned clause
+// http and ssh fronts and git-remote-ur, this test binary as the world's helper dialing the device's daemon in git
+// mode), attributes, import, pruned, race, owned, missing, window, and last the twin, the pruned clause
 // on a branch of its own with its pushing device's tip check switched off, which the clause must catch. The report
 // names exactly what ran and what the host lacks (sidecartest.GitLfsMatrixReport), since a pass on this host's
 // versions alone is not §22.9's evidence.
@@ -58,6 +59,12 @@ func TestEvsGitLfsAgentHelperProcess(t *testing.T) {
 	evsgit.LfsAgentHelper()
 }
 
+// Not a test: git-remote-ur as the world's git execs it for a ur:// remote, dialing its device's daemon in git mode
+// (evsgit.RemoteHelper).
+func TestEvsGitRemoteHelperProcess(t *testing.T) {
+	evsgit.RemoteHelper()
+}
+
 func TestFs73OnT3(t *testing.T) {
 	settings := defaultFs73T3Settings()
 	matrixCtx, cancel := context.WithTimeout(t.Context(), settings.MatrixTimeout)
@@ -76,7 +83,7 @@ func TestFs73OnT3(t *testing.T) {
 			tb.Logf("FS-73 on %s: git %s, git-lfs %s", run.Row.Name, run.GitVersion, run.GitLfsVersion)
 			evsgit.Fs73StoreAndSmudge(tb, world)
 			evsgit.Fs73SkipOptionsRefusedAlike(tb, world)
-			evsgit.Fs73OverHttpAndSsh(tb, world)
+			evsgit.Fs73OverEachTransport(tb, world)
 			evsgit.Fs73AttributesChangeChecksTheObject(tb, world)
 			evsgit.Fs73ImportUploadsFirst(tb, world)
 			evsgit.Fs73PrunedHistory(tb, world)
@@ -116,6 +123,7 @@ func newFs73T3World(tb testing.TB, settings *fs73T3Settings, run *sidecartest.Gi
 	worldSettings.Clock = clock
 	worldSettings.Format2 = true
 	worldSettings.Lfs = &evsgit.WorldLfs{AgentCommand: []string{binary, "-test.run=^TestEvsGitLfsAgentHelperProcess$"}, GitLfs: run.GitLfsPath}
+	worldSettings.RemoteHelperCommand = []string{binary, "-test.run=^TestEvsGitRemoteHelperProcess$", "--"}
 	worldSettings.Evs = &evsgit.WorldEvs{
 		NewHost: func(ctx context.Context, deps *evsgit.WorldEvsDeps) (*evsgit.WorldEvsHost, error) {
 			fakes := net.Fakes()
