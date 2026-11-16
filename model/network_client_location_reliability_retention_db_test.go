@@ -180,12 +180,15 @@ func TestProviderStatusFindsATopLevelRowAtTwentyDays(t *testing.T) {
 		}
 
 		report, _ := RemoveOldClientLocationReliabilities(ctx, now, ClientLocationReliabilityRetentionCursor{}, DefaultClientLocationReliabilityRetentionSettings())
-		if report.RemovedCount != 1 || locationReliabilityRetentionTestRowExists(t, childId) {
+		if locationReliabilityRetentionTestRowExists(t, childId) {
 			t.Fatalf("the retention %+v kept the child's 20-day row", report)
 		}
 		after := status()
 		if !after.Admission.LocationValid || after.Admission.Connected || after.Country == nil || after.Country.CountryCode != "rc" {
-			t.Fatalf("after the retention the status reads admission %+v country %+v, want the 20-day row's valid location in rc", after.Admission, after.Country)
+			t.Fatalf("after the retention %+v the status reads admission %+v country %+v, want the 20-day row's valid location in rc", report, after.Admission, after.Country)
+		}
+		if report.RemovedCount != 1 {
+			t.Fatalf("the retention %+v removed more than the child's row", report)
 		}
 	})
 }
