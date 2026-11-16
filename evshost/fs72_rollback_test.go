@@ -14,8 +14,10 @@
 // and no EvsAuthState (evshost's header at that commit), so it serves nothing whatever its config, and a run needs a
 // harness built from the same trees that hosts that block with T3's seams. And the pinned sidecar predates format 1's
 // guard for format-2 data (evsservice/format1_guard.go: no fold, page-out, path-epoch copy or marker collection on a
-// format-2 repo), which landed in one commit with format 2's raise, so no commit is a format-1 binary carrying it;
-// which build a rollback goes to is question evs2-m10-30-format1-rollback-binary.
+// format-2 repo), which landed in one commit with format 2's raise, so no commit is a format-1 binary carrying it. The
+// owner's answer (QD-854) makes a rollback a configuration: evs's and taskworker's blocks take InstanceFormat from their
+// block config, and the run is a real binary from a pinned release commit with InstanceFormat 1 set through it, the pins
+// moving to the first commit with that field, which none has yet.
 //
 // The schedules hold instances at barriers, so this needs sidecar_testhooks; the stack must be up
 // (sidecar/local/stack.sh), and these fail rather than skip without it.
