@@ -281,6 +281,45 @@ func runNetworkCleanupDeleted(
 	if options.startAfter != nil {
 		resumeAfter = options.startAfter.String()
 	}
+	// a network's runs until it is complete or its clients wait for the
+	// client delay; then its cleanup task is queued for when they are due,
+	// and the taskworker finishes them
+	cleanupToWait := func(networkId server.Id) (status string, rowCounts map[string]int64, returnErr error) {
+		deletedNetwork := &model.DeletedNetwork{NetworkId: networkId}
+		rowCounts = map[string]int64{}
+		for {
+			var cleanup *model.DeletedNetworkCleanupResult
+			if r := server.HandleError(func() {
+				cleanup = model.RemoveDeletedNetworkData(ctx, deletedNetwork, server.NowUtc(), options.cleanup)
+			}); r != nil {
+				return "", rowCounts, fmt.Errorf("%v", r)
+			}
+			for table, count := range cleanup.RowCounts {
+				rowCounts[table] += count
+			}
+			if cleanup.More && ctx.Err() == nil {
+				continue
+			}
+			switch {
+			case cleanup.NetworkExists:
+				return "skipped: the network exists", rowCounts, nil
+			case cleanup.Complete:
+				return "complete", rowCounts, nil
+			}
+			runAt := server.NowUtc().Add(options.cleanup.ContinueInterval)
+			if cleanup.NextClientDueTime != nil && runAt.Before(*cleanup.NextClientDueTime) {
+				runAt = *cleanup.NextClientDueTime
+			}
+			if r := server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					controller.ScheduleRemoveDeletedNetworkDataInTx(ctx, tx, deletedNetwork, runAt)
+				})
+			}); r != nil {
+				return "", rowCounts, fmt.Errorf("queue the cleanup task: %v", r)
+			}
+			return fmt.Sprintf("waiting: its clients are due at %s; queued for the taskworker", runAt.Format(time.RFC3339)), rowCounts, nil
+		}
+	}
 	cleanedCount := 0
 	for chunk := range slices.Chunk(pendingNetworkIds, options.countChunk) {
 		if 0 < cleanedCount && 0 < options.pause {
@@ -314,7 +353,7 @@ func runNetworkCleanupDeleted(
 			if !withClients[networkId] {
 				continue
 			}
-			status, rowCounts, err := cleanupDeletedNetworkToWait(ctx, networkId, options)
+			status, rowCounts, err := cleanupToWait(networkId)
 			if err != nil {
 				fmt.Fprintf(stderr, "network %s failed: %v; resume with --start_after=%s after checking it\n", networkId, err, resumeAfter)
 				return 1
@@ -327,50 +366,6 @@ func runNetworkCleanupDeleted(
 	}
 	fmt.Fprintf(stdout, "done: %d networks\n", cleanedCount)
 	return 0
-}
-
-// Runs a network's cleanup until it is complete or its clients wait for the
-// client delay, and then queues the network's cleanup task for when they are
-// due, which the taskworker finishes.
-func cleanupDeletedNetworkToWait(
-	ctx context.Context,
-	networkId server.Id,
-	options *networkCleanupDeletedOptions,
-) (status string, rowCounts map[string]int64, returnErr error) {
-	deletedNetwork := &model.DeletedNetwork{NetworkId: networkId}
-	rowCounts = map[string]int64{}
-	for {
-		var cleanup *model.DeletedNetworkCleanupResult
-		if r := server.HandleError(func() {
-			cleanup = model.RemoveDeletedNetworkData(ctx, deletedNetwork, server.NowUtc(), options.cleanup)
-		}); r != nil {
-			return "", rowCounts, fmt.Errorf("%v", r)
-		}
-		for table, count := range cleanup.RowCounts {
-			rowCounts[table] += count
-		}
-		if cleanup.More && ctx.Err() == nil {
-			continue
-		}
-		switch {
-		case cleanup.NetworkExists:
-			return "skipped: the network exists", rowCounts, nil
-		case cleanup.Complete:
-			return "complete", rowCounts, nil
-		}
-		runAt := server.NowUtc().Add(options.cleanup.ContinueInterval)
-		if cleanup.NextClientDueTime != nil && runAt.Before(*cleanup.NextClientDueTime) {
-			runAt = *cleanup.NextClientDueTime
-		}
-		if r := server.HandleError(func() {
-			server.Tx(ctx, func(tx server.PgTx) {
-				controller.ScheduleRemoveDeletedNetworkDataInTx(ctx, tx, deletedNetwork, runAt)
-			})
-		}); r != nil {
-			return "", rowCounts, fmt.Errorf("queue the cleanup task: %v", r)
-		}
-		return fmt.Sprintf("waiting: its clients are due at %s; queued for the taskworker", runAt.Format(time.RFC3339)), rowCounts, nil
-	}
 }
 
 func formatNetworkCleanupCounts(rowCounts map[string]int64) string {

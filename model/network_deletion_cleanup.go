@@ -890,46 +890,33 @@ func removeDeletedNetworkRows(
 		if len(goneNetworkIds) == 0 && len(goneUserIds) == 0 {
 			return
 		}
-		full = execDeletedNetworkStatementsInTx(
-			ctx,
-			tx,
-			deletedNetworkRowStatements(goneNetworkIds, goneUserIds, rowBatchCount),
-			rowBatchCount,
-			tableCounts,
-		)
-	}, server.TxReadCommitted, server.TxLockTimeout(settings.LockTimeout))
-	for table, count := range tableCounts {
-		cleanupResult.add(table, count)
-	}
-	return
-}
-
-// The statements of one pass over the tables of gone networks and gone users,
-// in dependency order: roles before codes, results before tracks.
-func deletedNetworkRowStatements(goneNetworkIds []server.Id, goneUserIds []server.Id, rowBatchCount int) []*deletedNetworkStatement {
-	networkIdStrings := idStrings(goneNetworkIds)
-	userIdStrings := idStrings(goneUserIds)
-	statements := []*deletedNetworkStatement{
-		{table: "auth_code_role", sql: deletedNetworkAuthCodeRoleSql, args: []any{networkIdStrings, rowBatchCount, userIdStrings}, limited: true},
-		{table: "auth_code", sql: deletedNetworkAuthCodeSql, args: []any{networkIdStrings, rowBatchCount, userIdStrings}, limited: true},
-	}
-	if 0 < len(goneNetworkIds) {
-		statements = append(
-			statements,
-			&deletedNetworkStatement{table: "lag_result", sql: deletedNetworkLagResultSql, args: []any{networkIdStrings, rowBatchCount}, limited: true},
-			&deletedNetworkStatement{table: "network_points_leaderboard", sql: deletedNetworkPointsLeaderboardSql, args: []any{networkIdStrings}},
-		)
-		for _, table := range deletedNetworkTables {
-			statements = append(statements, &deletedNetworkStatement{
-				table:   table.table,
-				sql:     table.deleteSql(),
-				args:    []any{networkIdStrings, rowBatchCount},
-				limited: true,
-			})
+		// one pass over the tables, in dependency order: roles before codes,
+		// results before tracks
+		networkIdStrings := idStrings(goneNetworkIds)
+		userIdStrings := idStrings(goneUserIds)
+		statements := []*deletedNetworkStatement{
+			{table: "auth_code_role", sql: deletedNetworkAuthCodeRoleSql, args: []any{networkIdStrings, rowBatchCount, userIdStrings}, limited: true},
+			{table: "auth_code", sql: deletedNetworkAuthCodeSql, args: []any{networkIdStrings, rowBatchCount, userIdStrings}, limited: true},
 		}
-	}
-	if 0 < len(goneUserIds) {
+		if 0 < len(goneNetworkIds) {
+			statements = append(
+				statements,
+				&deletedNetworkStatement{table: "lag_result", sql: deletedNetworkLagResultSql, args: []any{networkIdStrings, rowBatchCount}, limited: true},
+				&deletedNetworkStatement{table: "network_points_leaderboard", sql: deletedNetworkPointsLeaderboardSql, args: []any{networkIdStrings}},
+			)
+			for _, table := range deletedNetworkTables {
+				statements = append(statements, &deletedNetworkStatement{
+					table:   table.table,
+					sql:     table.deleteSql(),
+					args:    []any{networkIdStrings, rowBatchCount},
+					limited: true,
+				})
+			}
+		}
 		for _, table := range deletedUserTables {
+			if len(goneUserIds) == 0 {
+				break
+			}
 			statements = append(statements, &deletedNetworkStatement{
 				table:   table.table,
 				sql:     table.deleteSql(),
@@ -937,8 +924,12 @@ func deletedNetworkRowStatements(goneNetworkIds []server.Id, goneUserIds []serve
 				limited: true,
 			})
 		}
+		full = execDeletedNetworkStatementsInTx(ctx, tx, statements, rowBatchCount, tableCounts)
+	}, server.TxReadCommitted, server.TxLockTimeout(settings.LockTimeout))
+	for table, count := range tableCounts {
+		cleanupResult.add(table, count)
 	}
-	return statements
+	return
 }
 
 // Deactivates one batch of the network's active clients, in client id order,
