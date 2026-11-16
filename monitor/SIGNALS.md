@@ -8753,6 +8753,44 @@ or slow the reaper's `maxRowsPerSecond`. Never delete archive rows: the
 subnet's epochs read them. VERIFY: twice the largest week back under the line,
 or one hash batch in the window's plan.
 
+### 2.4t Session state retention — runs that stop or fail
+Probe: `session-state-retention`
+
+The session state retention (`model.RemoveExpiredSessionState`, owner
+2026-11-16, DBDISK-STABILIZE.md S4) deletes the provider work session heads
+whose clients have no event left in the journal, no open connection and no
+receipt, and the device audit state (`audit_device_state`) of devices offline
+for a day. Online device state is never deleted. Both tables had no deletes
+before: about 4 GiB a day between them. It runs as one taskworker chain
+(`remove_expired_session_state`), each table's pass side by side from its own
+cursor, at most 2,000 rows a second each: every 15 seconds while a pass has
+work, every 15 minutes otherwise, also with its brake
+`{session_state_retention}control` off.
+
+Every 5 minutes one instant Mimir read through a services host's loopback
+Mimir evaluates, over the last two hours across all taskworker processes, the
+runs by stop (`urnetwork_session_state_retention_runs_total`): all runs, the
+error runs, and the runs that made progress (stops `pass`, `budget` and
+`waiting`).
+
+- `session-state-retention-stalled` (sustain 2): no run ended in two hours.
+  The chain is lost or never claimed.
+- `session-state-retention-failing` (sustain 2): at least 3 runs ended in an
+  error and none made progress. A batch that fails every time stops its pass
+  at its cursor.
+- `session-state-retention-unobservable` (sustain 2): a run count is missing,
+  stale, duplicate or invalid. A positive its own parts prove still raises.
+
+Every tunable is a field of `SessionStateRetentionSignalSettings`; the
+retention's own are `model.SessionStateRetentionSettings`. Synthetic controls
+cover progress, a brake that is off, errors among progress, each finding's
+edge, and each unobservable reason.
+
+ACTION: the windows are the owner's. The brake narrows or stops a table's pass
+(`mode off`, `maxHeadsPerSecond`, `maxDeviceStatesPerSecond`). Never delete
+heads by hand: the head guard refuses any delete outside the retention.
+VERIFY: a complete read inside every line for two cadences.
+
 ### 2.5 Task-system meta-health
 Probe: `task-health`
 
