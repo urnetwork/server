@@ -69,6 +69,8 @@ const (
 	InternalGateCallerSockets InternalGateCaller = "sockets"
 	InternalGateCallerTlsedge InternalGateCaller = "tlsedge"
 	InternalGateCallerMxedge  InternalGateCaller = "mxedge"
+	// smtpedge's quota surface and its gate's reads (SMTP-M9-20)
+	InternalGateCallerSmtpedge InternalGateCaller = "smtpedge"
 	// connect's contract gate in CreateContract, which reads projections through api (QD-680)
 	InternalGateCallerConnect InternalGateCaller = "connect"
 	// an edge block's platform credential (QD-812): tlsedge, mxedge's router and smtpedge each mount it, and it
@@ -80,7 +82,7 @@ const (
 func (self InternalGateCaller) known() bool {
 	switch self {
 	case InternalGateCallerEvs, InternalGateCallerGkm, InternalGateCallerSockets, InternalGateCallerTlsedge, InternalGateCallerMxedge,
-		InternalGateCallerConnect, InternalGateCallerEdge:
+		InternalGateCallerSmtpedge, InternalGateCallerConnect, InternalGateCallerEdge:
 		return true
 	}
 	return false
