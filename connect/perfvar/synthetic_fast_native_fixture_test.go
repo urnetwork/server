@@ -139,7 +139,13 @@ func (self *syntheticFastNativeFixture) applicationTunSettings(resources tunReso
 
 // Construction never changes process memory, production queues, contracts,
 // window sizes, flow policy, or an existing browsing fixture.
-func newSyntheticFastNativeFixture(t testing.TB, target int64, profile, providerProfile networkProfile) (fixture *syntheticFastNativeFixture, resultErr error) {
+func newSyntheticFastNativeFixture(t testing.TB, target int64, profile, providerProfile networkProfile) (*syntheticFastNativeFixture, error) {
+	return newSyntheticFastNativeFixtureWithCleanup(t, target, profile, providerProfile, t.Cleanup)
+}
+
+// Sequential measurements own explicit close/drain defers instead of retaining
+// every completed fixture through the outer test's cleanup callback list.
+func newSyntheticFastNativeFixtureWithCleanup(t testing.TB, target int64, profile, providerProfile networkProfile, registerCleanup func(func())) (fixture *syntheticFastNativeFixture, resultErr error) {
 	t.Helper()
 	settings, err := syntheticFastConsumerSettings(target)
 	if err != nil {
@@ -160,11 +166,13 @@ func newSyntheticFastNativeFixture(t testing.TB, target int64, profile, provider
 			resultErr = errors.Join(resultErr, fixture.close())
 		}
 	}()
-	t.Cleanup(func() {
-		if err := fixture.close(); err != nil {
-			t.Error(err)
-		}
-	})
+	if registerCleanup != nil {
+		registerCleanup(func() {
+			if err := fixture.close(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
 	fixture.environment = newRouteEnvironmentWithNetworkPeers(ctx, t, profile, false)
 	fixture.environment.deviceAccessProfile, fixture.environment.providerAccessProfile = profile, providerProfile
 	fixture.ownedDoh, err = newSyntheticFastOwnedDoh(t)

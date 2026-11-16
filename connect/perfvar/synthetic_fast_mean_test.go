@@ -1,5 +1,6 @@
-// The acceptance scalar is the equal arithmetic mean of all five original
-// whole-run rates. Invalid, missing, or unjoined windows never supply a mean.
+// Each iteration retains the equal arithmetic mean of all five original
+// whole-run rates; the native roots select the median of three such means.
+// Invalid, missing, or unjoined windows never supply an iteration mean.
 package perfvar
 
 import (
@@ -19,6 +20,17 @@ import (
 
 const syntheticFastMinimumMeanMbps = 200.0
 const syntheticFastNavigationLimit = 5 * time.Second
+
+// Only this owned error denotes complete evidence below the numeric bar.
+// Joined workload or cleanup errors never have this concrete type.
+type syntheticFastMeanMinimumError struct {
+	MeanMbps float64
+}
+
+// Preserve the five-window error text and failed numeric verdict.
+func (self *syntheticFastMeanMinimumError) Error() string {
+	return fmt.Sprintf("synthetic Fast five-window arithmetic mean %.6f Mbps is below %.0f Mbps", self.MeanMbps, syntheticFastMinimumMeanMbps)
+}
 
 // The real SDK separates normal locations from its all-window exit list.
 // These controls preserve both populated limited classes and fail closed on
@@ -164,8 +176,11 @@ func syntheticFastFiveWindowMean(sequence syntheticFastSequenceReport) (syntheti
 		report.WindowMbps[index] = rate
 		report.ArithmeticMeanMbps += rate / 5
 	}
-	if math.IsNaN(report.ArithmeticMeanMbps) || math.IsInf(report.ArithmeticMeanMbps, 0) || report.ArithmeticMeanMbps < syntheticFastMinimumMeanMbps {
-		return report, fmt.Errorf("synthetic Fast five-window arithmetic mean %.6f Mbps is below %.0f Mbps", report.ArithmeticMeanMbps, syntheticFastMinimumMeanMbps)
+	if math.IsNaN(report.ArithmeticMeanMbps) || math.IsInf(report.ArithmeticMeanMbps, 0) {
+		return report, errors.New("synthetic Fast five-window arithmetic mean is not finite")
+	}
+	if report.ArithmeticMeanMbps < syntheticFastMinimumMeanMbps {
+		return report, &syntheticFastMeanMinimumError{MeanMbps: report.ArithmeticMeanMbps}
 	}
 	report.Valid = true
 	return report, nil
