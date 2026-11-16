@@ -161,6 +161,14 @@ func serve(configPath string) error {
 	if err != nil || competitionagent.VerifyRequest(request, ed25519.PublicKey(coordinatorKey)) != nil {
 		return errors.New("synthetic request did not authenticate")
 	}
+	if config.Mode == "complete-request-eof" {
+		// Positive EOF proves the parent's request close completed before its
+		// later cancellation can race that close in the ownership test.
+		var trailing [1]byte
+		if count, err := os.Stdin.Read(trailing[:]); count != 0 || err != io.EOF {
+			return errors.New("synthetic request did not reach exact EOF")
+		}
+	}
 	if err := startHolder(config); err != nil {
 		return err
 	}

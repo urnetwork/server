@@ -360,9 +360,19 @@ func runRecovery(args []string, output io.Writer) error {
 		IdempotencyKey: *idempotencyKey, AuthorizationSha256: authorizationDigest, Authorization: auth,
 	})
 	if err != nil {
-		return errors.New("audited reevaluation refused; inspect restricted operator evidence")
+		return recoveryReevaluationFailure(err)
 	}
 	return writeRecoveryReceipt(output, receipt)
+}
+
+// Only the transport's closed stage crosses the private command boundary.
+// Original error text, diagnostics, paths and command data remain restricted.
+func recoveryReevaluationFailure(err error) error {
+	var failure *controller.CompetitionAgentTransportError
+	if errors.As(err, &failure) && failure != nil {
+		return fmt.Errorf("audited reevaluation refused; transport_stage=%s; inspect restricted operator evidence", failure.Stage())
+	}
+	return errors.New("audited reevaluation refused; inspect restricted operator evidence")
 }
 
 // Native signed inventories remain in the private immutable database audit.
