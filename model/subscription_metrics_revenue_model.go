@@ -60,10 +60,10 @@ const (
 // credit of a $0 Stripe invoice made before it is an abandoned payment sheet
 // and is left out.
 //
-// PLACEHOLDER: "" while the card check has not deployed, which leaves every
-// reconcile credit of a $0 Stripe invoice out. Set it to the deploy time (e.g.
-// "2026-11-18T19:00:00Z") in the release that ships the card check.
-const SubscriptionMetricsStripeTrialCardGate = ""
+// The card check shipped in the taskworker release of 2026-11-16 (the hourly
+// reconcile runs there), set to that deploy's expected completion; "" would
+// leave every reconcile credit of a $0 Stripe invoice out.
+const SubscriptionMetricsStripeTrialCardGate = "2026-11-16T15:45:00Z"
 
 // subscriptionMetricsParseStripeTrialCardGate is the gate as a time, nil while
 // it is "" (not deployed). A value that is not RFC 3339 panics, so a malformed
