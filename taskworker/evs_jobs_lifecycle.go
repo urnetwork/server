@@ -84,6 +84,7 @@ func runEvsShred(ctx context.Context, host *sidecar.ServiceHost, args []byte) er
 			return gkmservice.ShredGroup(ctx, host, cluster, repoId, final, nil)
 		},
 		Deletions: evsDeletionSource(),
+		Settings:  evsJobSettings(ctx),
 	}, args)
 	if err != nil {
 		return err
@@ -105,7 +106,7 @@ func runEvsReconcile(ctx context.Context, host *sidecar.ServiceHost, args []byte
 	}); err != nil {
 		return err
 	}
-	counts, err := evsservice.RunReconcile(ctx, host, &evsservice.EvsReconcileDeps{Deletions: evsDeletionSource()})
+	counts, err := evsservice.RunReconcile(ctx, host, &evsservice.EvsReconcileDeps{Deletions: evsDeletionSource(), Settings: evsJobSettings(ctx)})
 	if err != nil {
 		return err
 	}

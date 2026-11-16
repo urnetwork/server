@@ -101,9 +101,10 @@ func evsNightlyCountsError(err error) error {
 	return err
 }
 
-// One run: the nightly start, or one shard's pass.
+// One run: the nightly start, or one shard's pass, at the instance format the block's config names
+// (evs_block_config.go).
 func runEvsNightly(ctx context.Context, host *sidecar.ServiceHost, args []byte) error {
-	result, err := evsservice.RunNightlyPass(ctx, host, &evsservice.NightlyPassDeps{Log: evsBudgetLogger{}}, args)
+	result, err := evsservice.RunNightlyPass(ctx, host, &evsservice.NightlyPassDeps{EvsSettings: evsJobSettings(ctx), Log: evsBudgetLogger{}}, args)
 	if result == nil {
 		return err
 	}

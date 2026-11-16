@@ -76,7 +76,8 @@ func runEvsEpochCopy(ctx context.Context, host *sidecar.ServiceHost, args []byte
 		glog.Errorf("[evsjobs]%s with args that name no copy: dropped\n", evsservice.EvsEpochCopyTaskName)
 		return nil
 	}
-	result, err := evsservice.RunPathEpochCopy(ctx, host, nil, args)
+	// at the instance format the block's config names (evs_block_config.go)
+	result, err := evsservice.RunPathEpochCopy(ctx, host, &evsservice.EvsEpochCopyDeps{Settings: evsJobSettings(ctx)}, args)
 	// a run that failed before it counted its moves leaves the ref's last figure standing
 	if result != nil && result.ClusterId != "" && (err == nil || 0 < result.MovesLeft) {
 		evsCopyLiabilities.report(host.Metrics, result.ClusterId, sidecar.EvsKeyId(repoId)+":"+sidecar.EvsKeyId(refId), result.MovesLeft)
