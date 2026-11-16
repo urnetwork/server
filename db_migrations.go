@@ -11637,4 +11637,14 @@ var migrations = []any{
 	// floor on the database clock. Apply before or after any deploy. The
 	// monitor pins the new body from this version on.
 	newSqlMigration(clientKeyHistoryRetentionSevenDayFloorSql),
+
+	// The drop guard of transfer_debit_journal's daily partitions (owner,
+	// 2026-11-16, PARTITION-CANDIDATES.md §6.3;
+	// db_transfer_debit_journal_partition.go): a new function only, under a
+	// five-second lock bound, so no table is locked, scanned or rewritten.
+	// Nothing calls it before the owner-run cutover (bringyourctl model
+	// migrate debit-journal-partition), so it applies before or after any
+	// deploy; the cutover's prepare refuses without it. The monitor pins its
+	// body and the journal's custody in both layouts from this version on.
+	transferDebitJournalDropGuardMigration,
 }
