@@ -1,8 +1,28 @@
 # Service image package inputs
 
 The seven Ubuntu service Dockerfiles pin both the base image and every added or
-updated package payload. Their `runtime-packages` stage downloads only literal
-URLs with literal `ADD --checksum=sha256:...` values. The final stage installs the
+updated package payload. `prepare-runtime-packages.py` downloads the lock's exact
+URLs with four attempts for HTTP 429/500/502/503/504 only, four concurrent workers,
+a 300-second transfer budget and a 30-second socket timeout. An in-flight read
+may finish up to that socket timeout after the deadline; failures cancel queued
+work. Other HTTP errors and successful responses with wrong sizes or hashes
+fail immediately. Error pages never enter the verified cache.
+Requests use `Cache-Control: no-cache` so a cached transient response is not
+treated as the package object's current response.
+
+The release preflight warms all 107 locked payloads before candidate builds or
+version allocation. Every service's image Makefile invokes the same helper
+again: it verifies cached size and SHA256 on every read, stages fresh copies,
+and verifies those copies before passing a named local context to BuildKit.
+The content-addressed cache is host scratch under
+`~/Library/Caches/urnetwork/runtime-packages`, outside the sealed source graph;
+it is never trusted as a new input authority. Temporary downloads publish
+atomically only after verification; corrupt entries are downloaded again, and
+cache symlinks are not followed. A late provider outage can therefore use the
+already verified bytes without retrying an image publication.
+
+The `runtime-packages` stage copies that context. The final stage independently
+checks every literal SHA256 against the mounted payloads before installing the
 selected architecture's packages from a read-only stage mount with
 `RUN --network=none`. It has no APT resolution or package-repository fetch. The
 downloaded archives and the other architecture's files do not enter final image
@@ -39,13 +59,15 @@ be downloaded again. `dpkg` must configure the entire selected set successfully;
 there is no resolver, forced dependency acceptance or online repair fallback.
 An unsupported base architecture has no matching input directory and fails.
 
-Qualification verified Canonical's InRelease signatures using archive key
+The package URLs, sizes, hashes and selected versions are unchanged by the
+download/cache transport. Qualification verified Canonical's InRelease signatures using archive key
 `F6ECB3762474EDA9D21B7022871920D1991BC93C`, then followed each signed SHA256 and
 size to the compressed Packages table and each exact `.deb`. Every retained
 payload matched. The lock records the selected signed-parent and package-table
 hashes; original signature/index/package bytes are retained in the qualification
 bundle. These references do not claim that the Docker build independently repeats
-GPG verification: the reviewed Dockerfile checksum is its package trust boundary.
+GPG verification: the reviewed Dockerfile's literal checksum checks remain its
+package trust boundary.
 
 Both an actual amd64 API image probe and an actual amd64 proxy image probe passed
 offline installation, package/version inspection and embedded-binary comparison.
@@ -78,8 +100,8 @@ matched the bucket's stored size, MD5 and CRC32C (`x-goog-hash`: amd64
 Google's stored objects, but it is not an independent signature. Each listing has
 287 files under one top directory and no absolute, parent or link entries.
 
-The download stage fetches each zip to its target's `/runtime-packages/<arch>/`,
-so every platform build downloads both (about 256 MB). The install step's
+The helper caches each zip and stages it at `/runtime-packages/<arch>/`,
+so every platform build verifies both (about 256 MB). The install step's
 `dpkg -i` installs `unzip`; then each target unpacks only its own zip offline and
 moves the tree to `/opt/chrome-headless-shell`. The image sets
 `WARP_GIFT_CHROMIUM=/opt/chrome-headless-shell/chrome-headless-shell`. The tests

@@ -11638,6 +11638,37 @@ var migrations = []any{
 	// monitor pins the new body from this version on.
 	newSqlMigration(clientKeyHistoryRetentionSevenDayFloorSql),
 
+	// The device day rollup (owner, 2026-11-16, PARTITION-CANDIDATES.md §7.3;
+	// audit_device_day_schema.go, model/audit_device_day.go): one new empty
+	// table, created only when absent, under a five-second lock bound. Nothing
+	// existing is locked, scanned or rewritten. Apply before deploying the
+	// taskworker whose device sweep keeps today's row and whose stats export
+	// reads the rows; an older taskworker never touches it.
+	auditDeviceDayMigration,
+
+	// The drop guard of transfer_debit_journal's daily partitions (owner,
+	// 2026-11-16, PARTITION-CANDIDATES.md §6.3;
+	// db_transfer_debit_journal_partition.go): a new function only, under a
+	// five-second lock bound, so no table is locked, scanned or rewritten.
+	// Nothing calls it before the owner-run cutover (bringyourctl model
+	// migrate debit-journal-partition), so it applies before or after any
+	// deploy; the cutover's prepare refuses without it. The monitor pins its
+	// body and the journal's custody in both layouts from this version on.
+	transferDebitJournalDropGuardMigration,
+
+	// The redundant UNIQUE (registration_hash) of st_client_key_history
+	// (owner, 2026-11-16, PARTITION-CANDIDATES.md §8.5;
+	// db_client_key_history_unique_drop.go): 20.6 GiB, never scanned, and
+	// redundant with the primary key, since the hashed registration bytes
+	// encode the key's client, domain and generation. No reader, writer, ON
+	// CONFLICT target or monitor contract uses it. The operator drops it first
+	// on Main with ALTER TABLE ... DROP CONSTRAINT in a vacuum gap under a
+	// short lock timeout; this records the drop, and is a catalog read once
+	// the constraint is gone, so db migrate takes no lock on the table. Merge
+	// it only after the operator's drop: merged first, the next db migrate
+	// would take the table's ACCESS EXCLUSIVE lock itself.
+	newSqlMigration(clientKeyHistoryRegistrationHashUniqueDropSql),
+
 	// transfer_contract_create_time (301.6 GB, v373) served the reads of
 	// a create_time window of contracts: the public contract stats' live
 	// bucket count and hour fill, the degradation check's count of new

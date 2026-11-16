@@ -8794,6 +8794,54 @@ ACTION: the windows are the owner's. The brake narrows or stops a table's pass
 heads by hand: the head guard refuses any delete outside the retention.
 VERIFY: a complete read inside every line for two cadences.
 
+### 2.4u Client location reliability retention — runs that stop or fail
+Probe: `location-reliability-retention`
+
+`network_client_location_reliability` holds one row per client, its location
+fold, about 475M rows and 190 GiB on 2026-11-16, most of them hosted window
+children's and gone clients'. The owner decided on 2026-11-16 ("11 days except
+top-level", PARTITION-CANDIDATES.md §9.1):
+- A reaped client's row goes with it, in the reaps' shared cascade
+  (`removeReapedNetworkClientDependents`).
+- A child's or a gone client's row goes 11 days after its last refresh.
+- A top-level client's row keeps 31 days: the provider status page reads every
+  active top-level client's row with no time bound.
+
+The retention (`model.RemoveOldClientLocationReliabilities`) is one taskworker
+chain (`remove_old_client_location_reliabilities`). Each run first trims every
+row past 31 days, as before. It then walks the rows past 11 days in
+`(update_block_number, client_id)` order from a cursor, deleting those of
+children and gone clients and passing over top-level ones, at most 1,000 rows
+a second by default (2,000 at most). It runs every 15 seconds while the walk
+has work and every 15 minutes otherwise, also with its brake
+`{client_location_reliability_retention}control` off.
+
+Every 5 minutes one instant Mimir read through a services host's loopback
+Mimir evaluates the walk's runs by stop
+(`urnetwork_client_location_reliability_retention_runs_total`) over the last
+two hours across all taskworker processes: all runs, the runs that ended in an
+error, and the runs that made progress (stops `caught_up` and `budget`).
+
+- `location-reliability-retention-stalled` (sustain 2): no run ended in two
+  hours. The chain is lost or never claimed.
+- `location-reliability-retention-failing` (sustain 2): at least 3 runs ended
+  in an error and none made progress. A batch that fails every time stops the
+  walk at its cursor; the trim still takes rows at 31 days.
+- `location-reliability-retention-unobservable` (sustain 2): a run count is
+  missing, stale, duplicate or invalid. A positive its own parts prove still
+  raises.
+
+Every tunable is a field of `ClientLocationReliabilityRetentionSignalSettings`;
+the retention's own are `model.ClientLocationReliabilityRetentionSettings`.
+Synthetic controls cover progress, a brake that is off, errors among progress,
+each finding's edge, and each unobservable reason.
+
+ACTION: the windows are the owner's. The brake narrows or stops the walk
+(`mode off`, `maxRowsPerSecond`); stopped, every row keeps 31 days as before.
+Keep heavy deletes out of the backup windows. The taskworker dashboard shows
+how far the walk has reached (its cursor's refresh time trails now by 11 days
+once caught up). VERIFY: a complete read inside every line for two cadences.
+
 ### 2.5 Task-system meta-health
 Probe: `task-health`
 
