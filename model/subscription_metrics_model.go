@@ -10,6 +10,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -166,6 +167,26 @@ type SubscriptionMetricsSnapshot struct {
 	// the oldest, in seconds, for each rail that has one
 	UncreditedPayments         map[string]int64
 	UncreditedOldestAgeSeconds map[string]int64
+	// expected dollars in, net USD (subscription_metrics_revenue_model.go):
+	// the yearly net of the subscriptions that started inside the rolling
+	// window, by store and deduplicated
+	NewForecastRevenueUsd map[SubscriptionMetricsStoreWindow]float64
+	// the net collected from renewals inside the rolling window, by store and
+	// all stores
+	RecurringRevenueUsd map[SubscriptionMetricsStoreWindow]float64
+	// the trials running now at their expected conversion, by store and
+	// deduplicated; the trial part of the 30-day forecast
+	TrialExpectedRevenueUsd map[string]float64
+	// the trials running now that the expected revenue values, by store and
+	// deduplicated: TrialsActive less the Stripe trials only the reconcile
+	// credited
+	TrialsConvertible map[string]int64
+	// the conversion rate each store's trials are valued at, and the pooled
+	// rate (all)
+	TrialConversionRates map[string]float64
+	// the trials whose free period ended in the conversion rate's trailing
+	// period, by store (and all) and outcome
+	TrialConversionTrials map[SubscriptionMetricsStoreOutcome]int64
 }
 
 // The subscriptions snapshot's tunables.
@@ -173,6 +194,24 @@ type SubscriptionMetricsSettings struct {
 	// How long a received payment may wait for its credit before it counts
 	// as uncredited. Zero counts every uncredited payment at once.
 	UncreditedMinAge time.Duration
+	// The Pro price tiers the revenue values a plan at, the first the default
+	// (for a window with no tier or one pro.yml no longer names). Nil reads
+	// pro.yml.
+	PriceTiers []SubscriptionMetricsPriceTier
+	// The fee each store keeps of a price, as its credit path takes it off
+	// when it records net revenue. Nil uses
+	// DefaultSubscriptionMetricsStoreFeeFractions.
+	StoreFeeFractions map[string]float64
+	// The trailing period the trial conversion rate reads trials from: those
+	// whose free period ended inside it.
+	TrialConversionPeriod time.Duration
+	// How long a trial's outcome takes to settle: a trial that ended more
+	// recently is left out of the rate, and a paid window that starts later
+	// than this after its trial ended is not its conversion.
+	TrialConversionSettle time.Duration
+	// The fewest ended trials a store needs for its own conversion rate; a
+	// store with fewer uses the pooled rate of every store's trials.
+	TrialConversionMinTrials int64
 }
 
 // A new instance on every call.
@@ -181,6 +220,15 @@ func DefaultSubscriptionMetricsSettings() *SubscriptionMetricsSettings {
 		// the webhook, the scanner and the reconcile's legs have had their
 		// turn
 		UncreditedMinAge: 30 * time.Minute,
+		// six two-week trial cohorts: enough trials per store for a steady
+		// rate, recent enough to follow the funnel's changes
+		TrialConversionPeriod: 90 * 24 * time.Hour,
+		// a trial's first charge lands up to a day after its period (the day
+		// Play adds, the day a Stripe trial's window runs past it) and a
+		// failed one is retried for days
+		TrialConversionSettle: 7 * 24 * time.Hour,
+		// a rate from fewer trials moves too much with each one
+		TrialConversionMinTrials: 30,
 	}
 }
 
@@ -648,6 +696,12 @@ func newSubscriptionMetricsSnapshot() *SubscriptionMetricsSnapshot {
 		DataPackBytes:              map[SubscriptionMetricsDataPackWindow]int64{},
 		UncreditedPayments:         map[string]int64{},
 		UncreditedOldestAgeSeconds: map[string]int64{},
+		NewForecastRevenueUsd:      map[SubscriptionMetricsStoreWindow]float64{},
+		RecurringRevenueUsd:        map[SubscriptionMetricsStoreWindow]float64{},
+		TrialExpectedRevenueUsd:    map[string]float64{},
+		TrialsConvertible:          map[string]int64{},
+		TrialConversionRates:       map[string]float64{},
+		TrialConversionTrials:      map[SubscriptionMetricsStoreOutcome]int64{},
 	}
 }
 
@@ -818,6 +872,64 @@ func LoadSubscriptionMetricsSnapshotWithSettings(ctx context.Context, now time.T
 				server.Raise(result.Scan(&rail, &count, &oldestAgeSeconds))
 				snapshot.UncreditedPayments[rail] = count
 				snapshot.UncreditedOldestAgeSeconds[rail] = oldestAgeSeconds
+			}
+		})
+
+		// the trial conversion rates, then the revenue that values trials at
+		// them
+		result, err = conn.Query(
+			ctx,
+			subscriptionMetricsTrialConversionQuery,
+			append([]any{now}, subscriptionMetricsTrialConversionArgs(now, settings)...)...,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var store string
+				var converted int64
+				var ended int64
+				server.Raise(result.Scan(&store, &converted, &ended))
+				snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: SubscriptionMetricsTrialOutcomeConverted}] = converted
+				snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: SubscriptionMetricsTrialOutcomeLapsed}] = ended - converted
+			}
+		})
+		for _, outcome := range SubscriptionMetricsTrialOutcomes() {
+			pooled := int64(0)
+			for _, store := range SubscriptionMetricsStores() {
+				pooled += snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: store, Outcome: outcome}]
+			}
+			snapshot.TrialConversionTrials[SubscriptionMetricsStoreOutcome{Store: SubscriptionMetricsStoreAll, Outcome: outcome}] = pooled
+		}
+		snapshot.TrialConversionRates = subscriptionMetricsTrialConversionRates(
+			snapshot.TrialConversionTrials,
+			settings.TrialConversionMinTrials,
+		)
+
+		tiers, feeFractions := subscriptionMetricsRevenueSettings(settings)
+		result, err = conn.Query(
+			ctx,
+			subscriptionMetricsRevenueQuery,
+			append(
+				[]any{now, cutoff24Hours, cutoff7Days, cutoff30Days},
+				subscriptionMetricsRevenueArgs(tiers, feeFractions, snapshot.TrialConversionRates)...,
+			)...,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var kind string
+				var store string
+				var window string
+				var value float64
+				server.Raise(result.Scan(&kind, &store, &window, &value))
+				switch kind {
+				case "new_forecast":
+					snapshot.NewForecastRevenueUsd[SubscriptionMetricsStoreWindow{Store: store, Window: window}] = value
+				case "recurring":
+					snapshot.RecurringRevenueUsd[SubscriptionMetricsStoreWindow{Store: store, Window: window}] = value
+				case "trial_expected":
+					snapshot.TrialExpectedRevenueUsd[store] = value
+				case "trials_convertible":
+					snapshot.TrialsConvertible[store] = int64(math.Round(value))
+				}
 			}
 		})
 	})

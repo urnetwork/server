@@ -1059,6 +1059,12 @@ func stripeCheckoutSessionNetworkId(ctx context.Context, subscriptionId string) 
 	return networkId, nil
 }
 
+// The fraction of a Stripe invoice's total the server keeps out of the net
+// revenue it records for a subscription period. The subscriptions dashboard's
+// revenue takes the same fraction off a Stripe price
+// (subscriptionMetricsStoreFeeFractions).
+const stripeInvoiceFeeFraction = 0.3
+
 // Credits through the same lifecycle and invoice ledger gate for webhook and
 // reconciliation delivery. Destination reads are shared with dry-run reports.
 func stripeHandleInvoicePaid(
@@ -1080,7 +1086,7 @@ func stripeHandleInvoicePaidInConn(connOwner server.PgConn,
 	if credit == nil {
 		return &StripeWebhookResult{}, nil
 	}
-	feeFraction := 0.3
+	feeFraction := stripeInvoiceFeeFraction
 	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(invoice.Total) / 100.0)
 
 	_, err = stripeCreditInvoicePaidInConn(connOwner,

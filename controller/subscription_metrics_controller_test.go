@@ -282,6 +282,30 @@ func uniformSubscriptionMetricsSnapshot(value int64, sourceTime time.Time) *mode
 			snapshot.DataPackBytes[key] = value
 		}
 	}
+	// the revenue: the forecast and the trials by store and deduplicated,
+	// recurring revenue and the conversion rate by store and all
+	snapshot.NewForecastRevenueUsd = map[model.SubscriptionMetricsStoreWindow]float64{}
+	snapshot.RecurringRevenueUsd = map[model.SubscriptionMetricsStoreWindow]float64{}
+	snapshot.TrialExpectedRevenueUsd = map[string]float64{}
+	snapshot.TrialsConvertible = map[string]int64{}
+	snapshot.TrialConversionRates = map[string]float64{}
+	snapshot.TrialConversionTrials = map[model.SubscriptionMetricsStoreOutcome]int64{}
+	for _, store := range stores {
+		snapshot.TrialExpectedRevenueUsd[store] = float64(value)
+		snapshot.TrialsConvertible[store] = value
+		for _, window := range model.SubscriptionMetricsWindows() {
+			snapshot.NewForecastRevenueUsd[model.SubscriptionMetricsStoreWindow{Store: store, Window: window}] = float64(value)
+		}
+	}
+	for _, store := range append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreAll) {
+		snapshot.TrialConversionRates[store] = float64(value)
+		for _, window := range model.SubscriptionMetricsWindows() {
+			snapshot.RecurringRevenueUsd[model.SubscriptionMetricsStoreWindow{Store: store, Window: window}] = float64(value)
+		}
+		for _, outcome := range model.SubscriptionMetricsTrialOutcomes() {
+			snapshot.TrialConversionTrials[model.SubscriptionMetricsStoreOutcome{Store: store, Outcome: outcome}] = value
+		}
+	}
 	return snapshot
 }
 
@@ -301,9 +325,13 @@ func requireSubscriptionMetricsGeneration(
 	// series each (96), and gamma 32 more; the received payments not credited
 	// add a count and an oldest age for each of eight rails (16); the past-due
 	// accounts one per store and deduplicated (11), and Stripe's failed
-	// renewals one open count and four reasons by three windows (13)
-	if len(metrics) != 399 {
-		t.Fatalf("collected metrics = %d, want 399 bounded samples", len(metrics))
+	// renewals one open count and four reasons by three windows (13); the
+	// revenue 121: the forecast and recurring revenue by eleven stores and
+	// three windows (66), the expected trial revenue, the convertible trials
+	// and the conversion rate by eleven stores (33), and the conversion's
+	// trials by eleven stores and two outcomes (22)
+	if len(metrics) != 520 {
+		t.Fatalf("collected metrics = %d, want 520 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric
