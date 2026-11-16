@@ -75,8 +75,14 @@ func TestRemoveDeletedNetworkDataRunsUntilNothingIsLeft(t *testing.T) {
 		if err != nil || result.RunAt == nil || result.Cleanup.Complete {
 			t.Fatalf("first run = %+v, %v; want the clients to wait", result, err)
 		}
-		if result.RunAt.Before(now.Add(settings.ClientReapAfterDeactivate)) {
-			t.Fatalf("the next run is at %s, before the clients are due", result.RunAt)
+		// the clients are due a client delay after the deactivation the
+		// database stamped
+		var deactivateTime time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT max(deactivate_time) FROM network_client WHERE network_id = $1`, fixture.NetworkId).Scan(&deactivateTime))
+		})
+		if !result.RunAt.Equal(deactivateTime.Add(settings.ClientReapAfterDeactivate)) {
+			t.Fatalf("the next run is at %s, want when the clients are due, %s after %s", result.RunAt, settings.ClientReapAfterDeactivate, deactivateTime)
 		}
 		// the post queues the next run for that time
 		server.Tx(ctx, func(tx server.PgTx) {
