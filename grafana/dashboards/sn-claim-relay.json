@@ -432,7 +432,7 @@
       "description": "Claim now taps an hour at a time, on the api: accepted, or refused because it is not available for that coldkey now.",
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 37
       },
@@ -449,6 +449,36 @@
       ],
       "fieldConfig": {
         "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "pools unavailable",
+      "description": "The operator's pools whose ledger the relay's latest read could not read, at the newest pass: its pool and, with capture the flag on, its capture the flag pool, so 0 to 2. Their accounts wait. The pass claims the pools it could read or, when no pool with a finalized root is readable, ends ledger_unavailable. A pass that ended before it read the ledger keeps the previous pass's count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_pools_unavailable{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "pools unavailable"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 0
+        },
         "overrides": []
       }
     }
