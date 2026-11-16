@@ -1,0 +1,195 @@
+package model
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server/v2026"
+)
+
+// A private grant can be exhausted before a zero-byte contract is admitted.
+// Such a contract has no escrow anchor; even a disputed one must prevent the
+// account from being reaped. Checking only its balance's escrows is insufficient.
+func TestProberShardUnanchoredDisputedZeroBlocksCleanup(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		owner := shardTestOwner(t, ctx, shardTestKey(0))
+		peer := newEscrowSelectionTestClients(t, ctx)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=0 WHERE balance_id=$1`, owner.BalanceId))
+		})
+		zero, err := CreateTransferEscrow(ctx, owner.NetworkId, owner.ClientId,
+			peer.providerNetworkId, peer.providerId, 0)
+		if err != nil || zero == nil || len(zero.Balances) != 0 {
+			t.Fatalf("fixture did not create an unanchored zero-byte contract: %+v, %v", zero, err)
+		}
+		server.Raise(DrainProberShard(ctx, owner.Key))
+		if deleted, err := ReapProberShard(ctx, owner.Key); err != nil || deleted {
+			t.Fatalf("unanchored zero-byte contract was discarded: deleted=%t err=%v", deleted, err)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=true WHERE contract_id=$1`, zero.ContractId))
+		})
+		if deleted, err := ReapProberShard(ctx, owner.Key); err != nil || deleted {
+			t.Fatalf("disputed zero-byte contract was discarded: deleted=%t err=%v", deleted, err)
+		}
+		// Two actual matching reports let the normal settlement path finish.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close
+				(contract_id,party,used_transfer_byte_count,checkpoint)
+				VALUES($1,'source',0,false),($1,'destination',0,false)`, zero.ContractId))
+		})
+		if deleted, err := ReapProberShard(ctx, owner.Key); err != nil || !deleted {
+			t.Fatalf("reported disputed zero-byte contract did not finish through settlement: deleted=%t err=%v", deleted, err)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var retained bool
+			server.Raise(conn.QueryRow(ctx, `SELECT outcome='settled' AND provider_usage IS NOT NULL
+				FROM transfer_contract WHERE contract_id=$1`, zero.ContractId).Scan(&retained))
+			if !retained {
+				t.Fatal("cleanup lost the immutable settlement receipt")
+			}
+		})
+	})
+}
+
+// Use the complete migrated schema, including the dropped full payer index.
+// A retained writer snapshot makes global outcome/open partial indexes report
+// zero rows although 2,000 unrelated open contracts become visible afterwards.
+// Both plan modes must read only this payer's unresolved contracts: one range
+// of the unresolved-payer index and one scan of the open disputes, plus
+// primary-key report lookups, preserving disputed and zero-byte obligations.
+// The payer's resolved history is never read, and the plans stay the same
+// once the (open,payer_network_id,transfer_byte_count) index is dropped.
+func TestProberShardContractPlansStayInsidePayerWithFalseZeroStats(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+		defer cancel()
+		owner := shardTestOwner(t, ctx, shardTestKey(0))
+		peer := newEscrowSelectionTestClients(t, ctx)
+		seedFalseZeroOpenContractStats(t, ctx, server.NewId(), server.NewId(), server.NewId(), server.NewId())
+		server.Raise(DrainProberShard(ctx, owner.Key))
+		// 1-4 open, 5-6 disputed, 7-12 canceled, and a resolved history of
+		// 300 more that a settled shard must never read again
+		const historyCount = 300
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+				(contract_id,source_network_id,source_id,destination_network_id,destination_id,
+				 payer_network_id,transfer_byte_count,dispute,outcome,close_time)
+				SELECT md5('shard-scope-owned-'||n)::uuid,$1,$2,$3,$4,$1,0,n IN (5,6),
+				 CASE WHEN n>6 THEN 'canceled' ELSE NULL END,
+				 CASE WHEN n>6 THEN now() ELSE NULL END
+				FROM generate_series(1,12+$5::int) AS n`, owner.NetworkId, owner.ClientId, peer.providerNetworkId, peer.providerId, historyCount))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close
+				(contract_id,party,used_transfer_byte_count,checkpoint)
+				SELECT md5('shard-scope-owned-'||n)::uuid,party,0,n=6 AND party='destination'
+				FROM generate_series(1,12) AS n CROSS JOIN (VALUES('source'),('destination')) AS parties(party)`))
+		})
+		server.Db(ctx, func(conn server.PgConn) {
+			var removedIndex *string
+			server.Raise(conn.QueryRow(ctx, `SELECT to_regclass('transfer_contract_payer_network_id')::text`).Scan(&removedIndex))
+			if removedIndex != nil {
+				t.Fatal("fixture restored the removed full payer index")
+			}
+			assertOpenPlanStatsAreFalseZero(t, ctx, conn)
+			var openDisputeCount int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE dispute AND outcome IS NULL`).Scan(&openDisputeCount))
+			if openDisputeCount != 2 {
+				t.Fatalf("fixture open disputes = %d, want 2", openDisputeCount)
+			}
+			const beforeExists = `SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE payer_network_id=$1 AND outcome IS NULL)`
+			for _, query := range []struct{ name, sql string }{
+				{"shard_scope_before", beforeExists},
+				{"shard_scope_exists", proberShardHasUnresolvedContractsSql},
+				{"shard_scope_reported", proberShardReportedContractsSql},
+			} {
+				server.RaisePgResult(conn.Exec(ctx, `PREPARE `+query.name+` AS `+query.sql))
+				defer conn.Exec(context.WithoutCancel(ctx), `DEALLOCATE `+query.name)
+			}
+			missingPayer := server.NewId()
+			checkPlans := func(schema string) {
+				for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
+					server.RaisePgResult(conn.Exec(ctx, `SET plan_cache_mode=`+mode))
+					for _, query := range []struct{ name, arguments string }{
+						{"shard_scope_before", fmt.Sprintf("'%s'::uuid", missingPayer)},
+						{"shard_scope_exists", fmt.Sprintf("'%s'::uuid", missingPayer)},
+						{"shard_scope_reported", fmt.Sprintf("'%s'::uuid,'%s'::uuid,'source','destination'", owner.Key.TaskId, owner.Key.Epoch)},
+					} {
+						var raw []byte
+						server.Raise(conn.QueryRow(ctx, `EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) EXECUTE `+query.name+`(`+query.arguments+`)`).Scan(&raw))
+						var plans []map[string]any
+						server.Raise(json.Unmarshal(raw, &plans))
+						root := plans[0]["Plan"].(map[string]any)
+						contractRows, payerRanges, payerRangeRows, disputeScans := 0, 0, 0, 0
+						var inspect func(map[string]any)
+						inspect = func(node map[string]any) {
+							if planNodeContractTable(node) == "transfer_contract" {
+								loops := node["Actual Loops"].(float64)
+								rows := node["Actual Rows"].(float64)
+								if removed, ok := node["Rows Removed by Filter"].(float64); ok {
+									rows += removed
+								}
+								contractRows += int(rows * loops)
+								switch {
+								case query.name == "shard_scope_before":
+								case node["Index Name"] == "transfer_contract_unresolved_payer_transfer_byte_count":
+									condition, _ := node["Index Cond"].(string)
+									if !strings.Contains(condition, "payer_network_id =") {
+										t.Fatalf("%s %s %s unresolved range lost its payer equality: %s", schema, mode, query.name, raw)
+									}
+									payerRanges += int(loops)
+									payerRangeRows += int(rows * loops)
+								case node["Index Name"] == "transfer_contract_dispute_partial_create_time":
+									disputeScans += int(loops)
+								default:
+									t.Fatalf("%s %s %s escaped the unresolved partial indexes: %s", schema, mode, query.name, raw)
+								}
+							}
+							if query.name == "shard_scope_reported" && planNodeContractTable(node) == "contract_close" {
+								condition, _ := node["Index Cond"].(string)
+								partyEquality := strings.Contains(condition, "party =") || strings.Contains(condition, "(party)::text =")
+								if node["Index Name"] != "contract_close_pkey" || !strings.Contains(condition, "contract_id =") || !partyEquality {
+									t.Fatalf("report read lost exact contract/party lookup: %s", raw)
+								}
+							}
+							if children, ok := node["Plans"].([]any); ok {
+								for _, child := range children {
+									inspect(child.(map[string]any))
+								}
+							}
+						}
+						inspect(root)
+						if query.name == "shard_scope_before" {
+							if contractRows < 2000 {
+								t.Fatalf("old absent-payer query failed to reproduce global work: %s", raw)
+							}
+						} else if payerRanges != 1 || disputeScans != 1 ||
+							// a missing payer reads no unresolved range rows, only
+							// the open disputes of every payer
+							(query.name == "shard_scope_exists" && (payerRangeRows != 0 || contractRows != openDisputeCount)) ||
+							// the 4 open and 2 disputed contracts, never the 306
+							// resolved ones
+							(query.name == "shard_scope_reported" && (contractRows != 6 || root["Actual Rows"].(float64) != 5)) {
+							t.Fatalf("%s %s %s changed payer/report bounds: ranges=%d dispute_scans=%d contract_rows=%d plan=%s",
+								schema, mode, query.name, payerRanges, disputeScans, contractRows, raw)
+						}
+						t.Logf("%s %s %s contract_rows=%d payer_ranges=%d dispute_scans=%d buffers=%v execution_ms=%v", schema, mode, query.name,
+							contractRows, payerRanges, disputeScans, root["Shared Hit Blocks"], plans[0]["Execution Time"])
+					}
+				}
+			}
+			checkPlans("with_open_payer_index")
+			// the index whose only reader was the old two-value scan
+			server.RaisePgResult(conn.Exec(ctx, `DROP INDEX transfer_contract_open_payer_network_id_transfer_byte_count`))
+			checkPlans("without_open_payer_index")
+		})
+	})
+}
