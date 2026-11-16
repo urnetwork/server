@@ -171,6 +171,33 @@ func newTestAbuseRestoreWorld(t testing.TB, ctx context.Context) *testAbuseResto
 	return world
 }
 
+// The restore's keys come from the offline private file through its strict parser; a file that does not read or
+// parse is refused naming no value.
+func TestLoadAbuseRestoreKeysReadsTheOfflineFile(t *testing.T) {
+	dir := t.TempDir()
+	privateKey, _ := hpke.MLKEM768X25519().GenerateKey()
+	data, err := AbuseMailboxSealPrivateKeyFile(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "abuse-mailbox-private.yml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadAbuseRestoreKeys(filepath.Join(dir, "missing.yml"), DefaultAbuseMailboxSettings()); !errors.Is(err, ErrAbuseMailboxSealPrivateKey) {
+		t.Fatalf("a missing file: %v", err)
+	}
+	bad := filepath.Join(dir, "bad.yml")
+	os.WriteFile(bad, []byte("abuse_mailbox_seal_private_key: notbase64!\n"), 0o600)
+	if _, err := LoadAbuseRestoreKeys(bad, DefaultAbuseMailboxSettings()); !errors.Is(err, ErrAbuseMailboxSealPrivateKey) || strings.Contains(err.Error(), "notbase64") {
+		t.Fatalf("a bad file: %v", err)
+	}
+	// the private file parses; the MAC key needs vault's abuse-mailbox.yml, which a test process does not mount
+	if _, err := LoadAbuseRestoreKeys(path, DefaultAbuseMailboxSettings()); !errors.Is(err, ErrAbuseMailboxKeys) {
+		t.Fatalf("with no abuse-mailbox.yml: %v", err)
+	}
+}
+
 // The export reads back: every record opened and verified, the forged one and the noise refused in their places.
 func TestParseAbuseRecordsOpensAndVerifies(t *testing.T) {
 	requireAbuseTables(t)

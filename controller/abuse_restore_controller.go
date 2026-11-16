@@ -36,6 +36,7 @@ import (
 	"io"
 	"mime/quotedprintable"
 	"net/mail"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -45,6 +46,32 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
+
+// What the step opens and verifies records with: the seal's private key from the owner's offline file (QD-832),
+// read through ParseAbuseMailboxSealPrivateKey, and the MAC key from this process's abuse-mailbox.yml. Neither is
+// printed or logged; an error names the file's part, never a value.
+type AbuseRestoreKeys struct {
+	PrivateKey hpke.PrivateKey
+	MacKey     []byte
+}
+
+// Reads the restore's keys: privateKeyPath names the offline private file `sidecarctl abuse mailbox-keygen` wrote,
+// and the MAC key comes from vault's abuse-mailbox.yml as the mailers read it.
+func LoadAbuseRestoreKeys(privateKeyPath string, settings *AbuseMailboxSettings) (*AbuseRestoreKeys, error) {
+	data, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the private key file does not read", ErrAbuseMailboxSealPrivateKey)
+	}
+	privateKey, err := ParseAbuseMailboxSealPrivateKey(data)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := LoadAbuseMailboxKeys(settings)
+	if err != nil {
+		return nil, err
+	}
+	return &AbuseRestoreKeys{PrivateKey: privateKey, MacKey: keys.MacKey}, nil
+}
 
 // One message of an exported mailbox, opened, or why it could not be.
 type AbuseMailboxMessage struct {
