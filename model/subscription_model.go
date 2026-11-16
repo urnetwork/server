@@ -1641,7 +1641,7 @@ func SetContractStream(
 // that comes from an extender should treat the extender as a 1/n party on the
 // contract", and only contracts actually relayed through an extender earn that
 // share). A connection is tagged by its caller address alone (J1), so a client
-// on the extender's own address is tagged as if the extender carried it. Two
+// on the extender's own address is tagged as if the extender carried it. Three
 // kinds of tag carry nothing, and are no party, so they take no hop share in
 // settlement and count in no extender statistic, every one of which reads
 // these rows:
@@ -1657,10 +1657,27 @@ func SetContractStream(
 //     with an extender is one on the extender's address, which the extender
 //     does not relay. The public mode is its ProvideModePublic key
 //     (setProvideMode in the sdk), which no consumer's client holds.
+//   - an extender reached over the webrtc carrier alone, tagged on a client
+//     that holds no connection elsewhere: an address with no tcp, quic or dns
+//     carrier is no first contact (ExtenderAddressFirstContact), since the
+//     carrier signals through the dialer's own connection to the platform
+//     (S8), and a window client is derived from the client that signals. So
+//     an endpoint whose every connected connection, and whose source client's
+//     every one, arrived through the extender shares its address -- a host
+//     behind the same nat -- and was carried by no one. On 2026-11-16 one such
+//     extender was a party to every contract of 84 clients of two other
+//     networks behind its address, on a release that cannot dial the webrtc
+//     carrier. A connection through another extender is a path the endpoint
+//     signals over, and so is an untagged one. The rule holds only while the
+//     extender has an active address listing webrtc and none that is a first
+//     contact (ExtenderAddressSignaledOnly), so a tcp extender, and one whose
+//     addresses all lapsed, are judged as before.
 //
 // A cross-network tag of any other client stays a party: a client relayed by
 // another network's extender reaches the platform from the extender's
-// address, which is what the tag sees.
+// address, which is what the tag sees. Such a client behind the address of an
+// extender that is a first contact is still tagged as a relay; the connection
+// carries nothing that tells the two apart.
 //
 // The two branches carry different party values so they cannot collide, and
 // each is distinct in itself, so several connections of one client through one
@@ -1679,8 +1696,12 @@ func SetContractStream(
 //
 // The endpoint's network is the contract's own source or destination network,
 // and its public provide key is read by the provide_key primary key, so the
-// two exclusions add one key lookup per tagged endpoint and nothing for the
-// untagged ones, which are nearly all.
+// first two exclusions add one key lookup per tagged endpoint and nothing for
+// the untagged ones, which are nearly all. The third reads the extender's
+// address rows by their primary key's extender id, at most two, and only for
+// an extender reached over the webrtc carrier alone the endpoint's and its
+// source client's connections, by
+// network_client_connection_client_id_connected_extender_id.
 //
 // $1 contract, $2 source client, $3 destination client, $4 source party,
 // $5 destination party.
@@ -1736,6 +1757,43 @@ const contractExtenderInsertSql = `
 			WHERE
 				provide_key.client_id = endpoint.client_id AND
 				provide_key.provide_mode = ` + contractExtenderPublicProvideModeSql + `
+		) AND
+		-- an extender reached over the webrtc carrier alone carries only a
+		-- client that signaled it from a connection elsewhere (S8)
+		(
+			NOT EXISTS (
+				SELECT 1
+				FROM network_extender_address
+				WHERE
+					network_extender_address.extender_id = endpoint.extender_id AND
+					network_extender_address.active AND
+					network_extender_address.carriers ~ '` + contractExtenderWebRtcCarriersSql + `'
+			) OR
+			EXISTS (
+				SELECT 1
+				FROM network_extender_address
+				WHERE
+					network_extender_address.extender_id = endpoint.extender_id AND
+					network_extender_address.active AND
+					network_extender_address.carriers ~ '` + contractExtenderFirstContactCarriersSql + `'
+			) OR
+			EXISTS (
+				SELECT 1
+				FROM network_client_connection
+				WHERE
+					network_client_connection.client_id = endpoint.client_id AND
+					network_client_connection.connected AND
+					network_client_connection.extender_id IS DISTINCT FROM endpoint.extender_id
+			) OR
+			EXISTS (
+				SELECT 1
+				FROM network_client
+				INNER JOIN network_client_connection ON
+					network_client_connection.client_id = network_client.source_client_id AND
+					network_client_connection.connected AND
+					network_client_connection.extender_id IS DISTINCT FROM endpoint.extender_id
+				WHERE network_client.client_id = endpoint.client_id
+			)
 		)
 `
 
@@ -1744,6 +1802,17 @@ const contractExtenderInsertSql = `
 // provide_key.provide_mode with. A constant statement cannot format the mode
 // in, so TestContractExtenderPublicProvideModeIsTheModel pins this to it.
 const contractExtenderPublicProvideModeSql = "3"
+
+// The carriers patterns contractExtenderInsertSql matches an extender's
+// address rows with, as the literals the statement holds: an address that
+// lists webrtc, and one that is a first contact. A constant statement cannot
+// format the model's patterns in, so
+// TestContractExtenderCarriersPatternsAreTheModels pins these to
+// extenderWebRtcCarriersPattern and extenderFirstContactCarriersPattern.
+const (
+	contractExtenderWebRtcCarriersSql       = "(^|,)webrtc(,|$)"
+	contractExtenderFirstContactCarriersSql = "(^|,)(tcp|quic|dns)(,|$)"
+)
 
 // MinShrinkContractTransferByteCount is the floor for shrink-to-fit escrow.
 // When the payer's available balance is below the requested contract size but
