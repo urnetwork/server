@@ -6,7 +6,8 @@
 // with its provider, which the provider can open only with the probe client's
 // published key: the turn's derived client registers its key before
 // admission, a signed st_client_key_history row of about 5 KB plus evidence
-// blobs, kept at least 30 days (FP2FIX.md, "URL tunnel client keys"). On every
+// blobs, kept at least 7 days after the client goes, 30 before 2026-11-16
+// (FP2FIX.md, "URL tunnel client keys"). On every
 // turn, about 68 a second, that is about 29 GB a day of Postgres, the
 // 2026-10-14 incident's cost again. So the claim asks for the session only
 // when the provider needs a measurement: it has no measured post-quantum

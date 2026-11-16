@@ -1039,11 +1039,21 @@ var migrationCurrentSuffixContracts = slices.Concat(
 			providerWorkSessionLegacyDropCustodyPredicates()...).removedAt(server.ProviderWorkSessionProviderAppendMigrationVersion()),
 	},
 	// the journal's append for provider clients only, which supersedes the
-	// legacy drop guard's contract, versioned by its position
+	// legacy drop guard's contract, versioned by its position; the head
+	// retention guard supersedes it
 	[]snMainnetMigrationContract{
 		migrationCurrentSuffix(server.ProviderWorkSessionProviderAppendMigrationVersion(), "provider session custody with events for provider clients only",
-			providerWorkSessionProviderAppendCustodyPredicates()...),
+			providerWorkSessionProviderAppendCustodyPredicates()...).removedAt(server.ProviderWorkSessionHeadRetentionGuardMigrationVersion()),
 	},
+	// the journal's head guard with the head retention's deletes, which
+	// supersedes the provider append's contract, versioned by its position
+	[]snMainnetMigrationContract{
+		migrationCurrentSuffix(server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), "provider session custody with the head retention",
+			providerWorkSessionHeadRetentionCustodyPredicates()...),
+	},
+	// the key history floor at 7 days, which supersedes the 30-day floor's
+	// contract, versioned by its position
+	[]snMainnetMigrationContract{clientKeyHistoryRetentionSevenDayFloorMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

@@ -671,9 +671,10 @@ func dbScrubClientAddresses(opts docopt.Opts) {
 }
 
 // dbKeyHistoryFloor prints the floor the key history guard and the retention's
-// batch apply (migration 904, server.ClientKeyHistoryRetentionFloor), and
-// with --rollback moves it back to 91 days or with --restore puts the
-// published floor back, then prints it again.
+// batch apply (migration 904's function, published at 7 days since 2026-11-16,
+// server.ClientKeyHistoryRetentionFloor), and with --rollback moves it back to
+// 91 days or with --restore puts the published 7-day floor back, then prints
+// it again.
 func dbKeyHistoryFloor(opts docopt.Opts) {
 	ctx := context.Background()
 	floor, published := server.GetClientKeyHistoryRetentionFloor(ctx)

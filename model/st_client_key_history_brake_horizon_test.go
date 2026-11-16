@@ -1,48 +1,25 @@
 package model
 
-// The key history retention's brake can set the retention's own horizon,
-// `horizonDays`, apart from the contract horizon reaper's, down to the guard's
-// 30-day floor. DB-backed, on main's migrations only (the floor function is
-// migration 904's).
+// The key history retention's brake can narrow the retention's horizon,
+// `horizonDays`, never below the guard's 7-day floor nor above the code's
+// Retention. DB-backed tests first, then pure ones.
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/server"
 )
 
-// With the reaper on at 35 days, as on main since 2026-11-02, a brake horizon
-// of 30 days deletes a client gone 32 days, a client gone 29 days keeps its
-// history under the guard's floor, the brake's horizon applies whatever the
-// reaper's mode, a value that does not parse keeps 91 days, and removing the
-// field returns the retention to the reaper's horizon.
-func TestGoneStClientKeyHistoryBrakeSetsItsOwnHorizon(t *testing.T) {
+// The brake Main has carried since 2026-11-02 (horizonDays 30) and raised
+// rates no longer keep 30 days: at the default 7-day Retention every
+// horizonDays counts as 7, so a client gone 8 days loses its history and one
+// gone 6 days keeps it, as under a value below the floor and one that does not
+// parse. Before 2026-11-16 horizonDays 30 kept the client gone 8 days.
+func TestGoneStClientKeyHistoryBrakeHorizonNarrowsOnlyWithinTheRetention(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		const day = 24 * time.Hour
-		floorDays := int(server.ClientKeyHistoryRetentionFloor / day)
-		belowFloorId, brakeId, reaperId, unparsedId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
-		for _, clientId := range []server.Id{belowFloorId, brakeId, reaperId, unparsedId} {
-			insertGoneKeyHistoryTestRows(t, ctx, clientId, server.NewId())
-		}
-		setGoneKeyHistoryTestDays(t, ctx, belowFloorId, floorDays-1)
-		setGoneKeyHistoryTestDays(t, ctx, brakeId, floorDays+2)
-		setGoneKeyHistoryTestDays(t, ctx, reaperId, 36)
-		run := func() *StClientKeyHistoryRetentionReport {
-			now := goneKeyHistoryTestDbNow(t, ctx)
-			report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), DefaultStClientKeyHistoryRetentionSettings())
-			return report
-		}
-		reaper := func(mode string) {
-			setGoneKeyHistoryTestContractHorizon(t, ctx, nil)
-			setGoneKeyHistoryTestContractHorizon(t, ctx, map[string]string{ContractHorizonControlFieldMode: mode, ContractHorizonControlFieldHorizonDays: "35"})
-		}
-		brake := func(horizonDays string) {
-			setGoneKeyHistoryTestBrake(t, ctx, nil)
-			setGoneKeyHistoryTestBrake(t, ctx, map[string]string{StClientKeyHistoryRetentionControlFieldHorizonDays: horizonDays})
-		}
 		kept := func(clientId server.Id, what string) {
 			t.Helper()
 			if rows := readGoneKeyHistoryTestRows(t, ctx, clientId); rows != (goneKeyHistoryTestRows{history: 1, heads: 1, gone: true}) {
@@ -55,98 +32,105 @@ func TestGoneStClientKeyHistoryBrakeSetsItsOwnHorizon(t *testing.T) {
 				t.Fatalf("%s kept key history: %+v", what, rows)
 			}
 		}
-
-		reaper("on")
-		setGoneKeyHistoryTestBrake(t, ctx, nil)
-		if report := run(); report.RemovedClientCount != 1 || report.Horizon != 35*day {
-			t.Fatalf("with the reaper on at 35 days and no brake horizon the retention = %+v, want one client at 35 days", report)
-		}
-		removed(reaperId, "a client gone 36 days at the reaper's 35")
-		kept(brakeId, "a client gone 32 days at the reaper's 35")
-
-		brake("30")
-		if report := run(); report.RemovedClientCount != 1 || report.Horizon != 30*day {
-			t.Fatalf("a 30-day brake horizon = %+v, want one client at 30 days", report)
-		}
-		removed(brakeId, "a client gone 32 days at the brake's 30")
-		kept(belowFloorId, "a client gone 29 days at the brake's 30")
-
-		brake("1")
-		if report := run(); report.RemovedClientCount != 0 || report.Horizon != server.ClientKeyHistoryRetentionFloor {
-			t.Fatalf("a one-day brake horizon = %+v, want none removed at the guard's floor %v", report, server.ClientKeyHistoryRetentionFloor)
-		}
-		kept(belowFloorId, "a client gone a day less than the guard's floor")
-
-		for _, mode := range []string{"dry_run", "off"} {
-			goneId := server.NewId()
-			insertGoneKeyHistoryTestRows(t, ctx, goneId, server.NewId())
-			setGoneKeyHistoryTestDays(t, ctx, goneId, floorDays+1)
-			reaper(mode)
-			brake("30")
-			if report := run(); report.RemovedClientCount != 1 || report.Horizon != 30*day {
-				t.Fatalf("with the reaper in %s a 30-day brake horizon = %+v, want one client at 30 days", mode, report)
+		// one client gone a day short of the horizon and one a day past it
+		pair := func(horizonDays int) (keptId server.Id, removedId server.Id) {
+			keptId, removedId = server.NewId(), server.NewId()
+			for _, clientId := range []server.Id{keptId, removedId} {
+				insertGoneKeyHistoryTestRows(t, ctx, clientId, server.NewId())
 			}
-			removed(goneId, "a client gone 31 days at the brake's 30 with the reaper in "+mode)
+			setGoneKeyHistoryTestDays(t, ctx, keptId, horizonDays-1)
+			setGoneKeyHistoryTestDays(t, ctx, removedId, horizonDays+1)
+			return
 		}
-		setGoneKeyHistoryTestContractHorizon(t, ctx, nil)
-		goneId := server.NewId()
-		insertGoneKeyHistoryTestRows(t, ctx, goneId, server.NewId())
-		setGoneKeyHistoryTestDays(t, ctx, goneId, floorDays+1)
-		brake("30")
-		if report := run(); report.RemovedClientCount != 1 || report.Horizon != 30*day {
-			t.Fatalf("without a reaper control a 30-day brake horizon = %+v, want one client at 30 days", report)
+		run := func(settings *StClientKeyHistoryRetentionSettings) *StClientKeyHistoryRetentionReport {
+			now := goneKeyHistoryTestDbNow(t, ctx)
+			report, _ := RemoveGoneStClientKeyHistory(ctx, now, goneKeyHistoryTestDeleteOnly(now), settings)
+			return report
 		}
-		removed(goneId, "a client gone 31 days at the brake's 30 without a reaper control")
 
-		reaper("on")
-		setGoneKeyHistoryTestDays(t, ctx, unparsedId, 50)
-		brake("soon")
-		if report := run(); report.RemovedClientCount != 0 || report.Horizon != server.ContractRetention {
-			t.Fatalf("a brake horizon that does not parse = %+v, want none removed at 91 days", report)
+		for _, brake := range []map[string]string{
+			{StClientKeyHistoryRetentionControlFieldMode: "on", StClientKeyHistoryRetentionControlFieldMaxClientsPerSecond: "300", StClientKeyHistoryRetentionControlFieldHorizonDays: "30"},
+			{StClientKeyHistoryRetentionControlFieldHorizonDays: "1"},
+			{StClientKeyHistoryRetentionControlFieldHorizonDays: "soon"},
+			nil,
+		} {
+			keptId, removedId := pair(7)
+			setGoneKeyHistoryTestBrake(t, ctx, nil)
+			if brake != nil {
+				setGoneKeyHistoryTestBrake(t, ctx, brake)
+			}
+			if report := run(DefaultStClientKeyHistoryRetentionSettings()); report.RemovedClientCount != 1 || report.Horizon != 7*day {
+				t.Fatalf("under brake %v the retention = %+v, want one client at 7 days", brake, report)
+			}
+			kept(keptId, "a client gone 6 days")
+			removed(removedId, "a client gone 8 days")
 		}
-		kept(unparsedId, "a client gone 50 days under a brake horizon that does not parse")
 
+		// a longer Retention: the brake narrows within the floor and it
+		settings := DefaultStClientKeyHistoryRetentionSettings()
+		settings.Retention = 20 * day
+		keptId, removedId := pair(10)
 		setGoneKeyHistoryTestBrake(t, ctx, nil)
-		if report := run(); report.RemovedClientCount != 1 || report.Horizon != 35*day {
-			t.Fatalf("after the brake horizon is removed the retention = %+v, want one client at the reaper's 35 days", report)
+		setGoneKeyHistoryTestBrake(t, ctx, map[string]string{StClientKeyHistoryRetentionControlFieldHorizonDays: "10"})
+		if report := run(settings); report.RemovedClientCount != 1 || report.Horizon != 10*day {
+			t.Fatalf("a 10-day brake horizon under a 20-day retention = %+v, want one client at 10 days", report)
 		}
-		removed(unparsedId, "a client gone 50 days at the reaper's 35")
-		kept(belowFloorId, "a client gone 29 days at the reaper's 35")
+		kept(keptId, "a client gone 9 days at the brake's 10")
+		removed(removedId, "a client gone 11 days at the brake's 10")
+
+		keptId, removedId = pair(20)
+		setGoneKeyHistoryTestBrake(t, ctx, nil)
+		setGoneKeyHistoryTestBrake(t, ctx, map[string]string{StClientKeyHistoryRetentionControlFieldHorizonDays: "30"})
+		if report := run(settings); report.RemovedClientCount != 1 || report.Horizon != 20*day {
+			t.Fatalf("a 30-day brake horizon under a 20-day retention = %+v, want one client at 20 days", report)
+		}
+		kept(keptId, "a client gone 19 days under a 20-day retention")
+		removed(removedId, "a client gone 21 days under a 20-day retention")
 	})
 }
 
-// Pure: the brake's horizonDays narrows to whole days between the guard's
-// floor and the retention's longest horizon, a value that does not parse is
-// the longest, and the field leaves the mode and the rate alone.
+// Pure: horizonDays narrows to whole days between the guard's floor and the
+// code's Retention, a value that does not parse is Retention, and the field
+// leaves the mode and the rate alone. At the default Retention, the floor,
+// every value is 7 days.
 func TestNarrowStClientKeyHistoryRetentionControlHorizon(t *testing.T) {
 	const day = 24 * time.Hour
-	settings := DefaultStClientKeyHistoryRetentionSettings()
 	floor := server.ClientKeyHistoryRetentionFloor
+	settings := DefaultStClientKeyHistoryRetentionSettings()
+	for _, value := range []string{"30", " 33 ", "8", "7", "6", "1", "0", "-7", "-9223372036854775808", "91", "9223372036854775807", "3.5", "soon", ""} {
+		control := NarrowStClientKeyHistoryRetentionControl(map[string]string{StClientKeyHistoryRetentionControlFieldHorizonDays: value}, settings)
+		if control.Horizon == nil || *control.Horizon != 7*day {
+			t.Fatalf("at the default retention horizonDays %q narrowed to %v, want 7 days", value, control.Horizon)
+		}
+		if !control.On || control.MaxClientsPerSecond != settings.DefaultDeleteClientsPerSecond {
+			t.Fatalf("horizonDays %q changed the brake: %+v", value, control)
+		}
+	}
+
+	long := DefaultStClientKeyHistoryRetentionSettings()
+	long.Retention = 60 * day
 	for _, test := range []struct {
 		value   string
 		horizon time.Duration
 	}{
 		{"30", 30 * day},
 		{" 33 ", 33 * day},
-		{"45", 45 * day},
-		{"29", floor},
-		{"1", floor},
+		{"8", 8 * day},
+		{"7", floor},
+		{"6", floor},
 		{"0", floor},
 		{"-7", floor},
 		{"-9223372036854775808", floor},
-		{"91", settings.Retention},
-		{"92", settings.Retention},
-		{"9223372036854775807", settings.Retention},
-		{"3.5", settings.Retention},
-		{"soon", settings.Retention},
-		{"", settings.Retention},
+		{"60", long.Retention},
+		{"61", long.Retention},
+		{"9223372036854775807", long.Retention},
+		{"3.5", long.Retention},
+		{"soon", long.Retention},
+		{"", long.Retention},
 	} {
-		control := NarrowStClientKeyHistoryRetentionControl(map[string]string{StClientKeyHistoryRetentionControlFieldHorizonDays: test.value}, settings)
+		control := NarrowStClientKeyHistoryRetentionControl(map[string]string{StClientKeyHistoryRetentionControlFieldHorizonDays: test.value}, long)
 		if control.Horizon == nil || *control.Horizon != test.horizon {
-			t.Fatalf("horizonDays %q narrowed to %v, want %v", test.value, control.Horizon, test.horizon)
-		}
-		if !control.On || control.MaxClientsPerSecond != settings.DefaultDeleteClientsPerSecond {
-			t.Fatalf("horizonDays %q changed the brake: %+v", test.value, control)
+			t.Fatalf("under a 60-day retention horizonDays %q narrowed to %v, want %v", test.value, control.Horizon, test.horizon)
 		}
 	}
 	for _, fields := range []map[string]string{nil, {StClientKeyHistoryRetentionControlFieldMode: "on"}, {StClientKeyHistoryRetentionControlFieldMaxClientsPerSecond: "500"}} {
@@ -163,12 +147,10 @@ func TestNarrowStClientKeyHistoryRetentionControlHorizon(t *testing.T) {
 }
 
 // Pure: a run's horizon is the brake's when it sets one, never below the
-// guard's floor, and otherwise the retention's own, here not followed.
+// guard's floor, and otherwise Retention.
 func TestStClientKeyHistoryRunHorizon(t *testing.T) {
 	const day = 24 * time.Hour
-	ctx := context.Background()
 	settings := DefaultStClientKeyHistoryRetentionSettings()
-	settings.FollowContractHorizon = false
 	settings.Retention = 60 * day
 	thirty, one := 30*day, day
 	for _, test := range []struct {
@@ -181,8 +163,11 @@ func TestStClientKeyHistoryRunHorizon(t *testing.T) {
 		{&StClientKeyHistoryRetentionControl{On: true}, 60 * day},
 		{nil, 60 * day},
 	} {
-		if horizon := settings.runHorizon(ctx, test.brake); horizon != test.horizon {
+		if horizon := settings.runHorizon(test.brake); horizon != test.horizon {
 			t.Fatalf("brake %+v ran at %v, want %v", test.brake, horizon, test.horizon)
 		}
+	}
+	if horizon := DefaultStClientKeyHistoryRetentionSettings().runHorizon(nil); horizon != 7*day {
+		t.Fatalf("the default settings ran at %v, want 7 days", horizon)
 	}
 }

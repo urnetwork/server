@@ -854,6 +854,20 @@ The window sets the size. At 5.4 GiB/day:
   - the brake ramps 300 → 1,000 a second, outside the reaper's backlog and the backup (§11). At
     1,000 a second the bulk takes about 1.3 days.
 - **Alternative:** 14 days, for about half of the gain.
+- **Implemented (owner go 11-16, 7 days):** the retention no longer follows the reaper; its default
+  `Retention` is 7 days, the guard's floor moves to 7 days by its own migration (904's function, new
+  body), and the brake's `horizonDays` only narrows within the floor and `Retention`, so the 30 set on
+  11-02 counts as 7 with no control write. There is no new switch. The brake keeps its rate and its
+  off switch. Every reader of a gone client's keys refuses or ignores it, and close-report admission
+  is bounded by the reporter's credential, which deactivation revokes in the same transaction; a
+  report past the horizon is still admitted, recording `history_not_found`.
+  - **Backlog at 7 days** (Main, 11-16 05:00Z): 119.3M gone records, about 99% gone before 11-09
+    (pg_stats, analyzed 03:11Z), so about 118M come due at once; a gone client has 1.00
+    registrations on average (Mimir, 24 h). A batch of 500 took 0.17 s and wrote 1.9 MB of WAL
+    (pg_stat_statements since 10-23). A run deletes for 2 minutes of every 3, so the backlog takes
+    about 14 days at the default 150 a second, about 7 days at 300 (the rate Main's brake has
+    carried since 11-09, by Mimir's 10-minute peaks of 209–215 a second), about 2 days at 1,000 (3.8
+    MB/s of WAL while it runs, against about 45 MB/s in all) and about 1 day at the 2,000 cap.
 
 ### 8.5 The disk file, and the redundant unique index
 

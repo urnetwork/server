@@ -8251,7 +8251,9 @@ only says how long is left, not why. Facts on 10-22:
   stays on this append-only list until the first deletes. Those come when the
   30-day reap has recorded the children deactivated from 2026-10-09, at their
   deactivation times, and those times reach the horizon: about 2026-11-13 at a
-  35-day horizon, 2026-11-08 at a 30-day one.
+  35-day horizon, 2026-11-08 at a 30-day one. Since the 7-day floor migration
+  (owner, 2026-11-16) the retention deletes 7 days after the client went,
+  whatever the reaper says, and the brake's `horizonDays` can only narrow it.
 
 Checks, all cheap and read-only:
 1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
@@ -8752,6 +8754,45 @@ on a replica or in a maintenance window, raise the read session's `work_mem`,
 or slow the reaper's `maxRowsPerSecond`. Never delete archive rows: the
 subnet's epochs read them. VERIFY: twice the largest week back under the line,
 or one hash batch in the window's plan.
+
+### 2.4t Session state retention — runs that stop or fail
+Probe: `session-state-retention`
+
+The session state retention (`model.RemoveExpiredSessionState`, owner
+2026-11-16, DBDISK-STABILIZE.md S4) deletes the provider work session heads
+whose clients have no event left in the journal, no open connection and no
+receipt, and the device audit state (`audit_device_state`) of devices offline
+for a day. Online device state is never deleted. Both tables had no deletes
+before: about 4 GiB a day between them. It runs as one taskworker chain
+(`remove_expired_session_state`), each table's pass side by side from its own
+cursor, at most 2,000 rows a second each: every 15 seconds while a pass has
+work, every 15 minutes otherwise, also with its brake
+`{session_state_retention}control` off.
+
+Every 5 minutes one instant Mimir read through a services host's loopback
+Mimir evaluates, over the last two hours across all taskworker processes, the
+runs by table and stop (`urnetwork_session_state_retention_runs_total`): all
+runs, and each table's error runs and the runs that made progress (stops
+`pass`, `budget` and `waiting`).
+
+- `session-state-retention-stalled` (sustain 2): no run ended in two hours.
+  The chain is lost or never claimed.
+- `session-state-retention-failing` (sustain 2): at least 3 of a table's runs
+  ended in an error and none of its runs made progress. A batch that fails
+  every time stops its pass at its cursor while the other table's pass runs
+  on.
+- `session-state-retention-unobservable` (sustain 2): a run count is missing,
+  stale, duplicate or invalid. A positive its own parts prove still raises.
+
+Every tunable is a field of `SessionStateRetentionSignalSettings`; the
+retention's own are `model.SessionStateRetentionSettings`. Synthetic controls
+cover progress, a brake that is off, errors among progress, each finding's
+edge, and each unobservable reason.
+
+ACTION: the windows are the owner's. The brake narrows or stops a table's pass
+(`mode off`, `maxHeadsPerSecond`, `maxDeviceStatesPerSecond`). Never delete
+heads by hand: the head guard refuses any delete outside the retention.
+VERIFY: a complete read inside every line for two cadences.
 
 ### 2.5 Task-system meta-health
 Probe: `task-health`
@@ -30511,6 +30552,16 @@ strictness or configuration. The retention task deletes a gone client's
 history once the contract horizon reaper's horizon has passed since the
 client went while the reaper's mode is on, never below the floor; the catalog
 checks do not show where the retention task is.
+
+The 7-day floor migration (owner, 2026-11-16, PARTITION-CANDIDATES.md §8.4;
+its version follows its position) replaces only the floor function's body,
+now `interval '7 days'`, so its contract supersedes the 904 contract and
+republishes the same custody with the new body. From its version the 30-day
+body is drift like any other floor body, and the rollback stays drift until
+the floor is restored. From that build on, the retention deletes a gone
+client's history 7 days after the client went, whatever the contract horizon
+reaper's control says; the brake's `horizonDays` can only narrow that, so
+the 30 set on Main on 2026-11-02 counts as 7.
 
 The onboarding results' purchase.started count
 (`onboarding_results_purchase_started_schema.go`) adds one column to
