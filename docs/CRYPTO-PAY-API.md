@@ -375,7 +375,7 @@ Response `CryptoPaymentStatusResult`:
 |---|---|
 | `unknown` | no such invoice, or the token does not match. Nothing else is filled in |
 | `paid` | credited. A credited invoice that later received a second payment stays `paid` (the second payment is held, `extra`, for an operator) |
-| `review` | needs an operator: `underpaid` (short at expiry; Bitcoin: at the end of its grace), `late_underpaid` (arrived after expiry, Bitcoin after its grace, worth less than the price at its first-seen rate), `orphaned` (a credited payment left the chain: its entitlement was ended and its credit taken back, `credited_at` is `null` again, until an operator grants it again), `voided` (a payment to an invoice an operator closed), `credit_failed` (the payment is there but its credit kept failing; an operator credits it by hand), `screening` (the payment is held by the sanctions screen; it is credited once it clears), `transfer_shape` (a TAO transfer sent as a batch, a proxy or multisig call, an EVM precompile send or a stake transfer: an operator confirms it reached Coinbase, then credits it), `amount_unmatched` (reserved for a coin whose deposit address is shared, matched by amount; not produced while every invoice has its own address), `unlinked` (a late payment worth the price to an invoice older than the retention window, 30 days: the invoice no longer knows the account it was for, so an operator matches the payment to its buyer; a `code` invoice is still credited) |
+| `review` | needs an operator: `underpaid` (short at expiry; Bitcoin: at the end of its grace), `late_underpaid` (arrived after expiry, Bitcoin after its grace, worth less than the price at its first-seen rate), `orphaned` (a credited payment left the chain: its entitlement was ended and its credit taken back, `credited_at` is `null` again, until an operator grants it again), `voided` (a payment to an invoice an operator closed), `credit_failed` (the payment is there but its credit kept failing; an operator credits it by hand), `screening` (the payment is held by the sanctions screen; it is credited once it clears), `transfer_shape` (a TAO transfer sent as a batch, a proxy or multisig call, an EVM precompile send or a stake transfer: an operator confirms it reached Coinbase, then credits it), `amount_unmatched` (reserved for a coin whose deposit address is shared, matched by amount; not produced while every invoice has its own address), `unlinked` (a late payment worth the price to an invoice older than the retention window, 30 days: the invoice no longer knows the account it was for, so an operator matches the payment to its buyer; a `code` invoice is still credited; a gift order's invoice that received a payment within its 30 days stays linked until the payment is resolved, so it reads `unlinked` only for a payment first seen after its unlink) |
 | `confirming` | received at least 99.5% of the amount (or, after expiry, a late payment worth the price at its first-seen rate), not yet at `confirmations_required` |
 | `seen` | something arrived, less than 99.5% of the amount; `remaining` says how much more to send to the same address |
 | `expired` | past `expires_at` with nothing received; for Bitcoin, past `expires_at` and its 3-hour confirmation grace |
@@ -564,6 +564,16 @@ deleted, and its renewal's transaction id becomes a random id. A SOL year's beco
 the term and Manage subscription still name SOL. A Coinbase address keeps the invoice id it was named with,
 which names no network after the unlink. The sanctions screen keeps no record of its own: a hold is its receipts'
 state and reason (which stay, for the owner and counsel), and the senders it read are never stored.
+
+A gift order's invoice (item `gift_pro_year`) is unlinked from its order the same way, with one exception (owner,
+2026-11-16): one never credited that received a payment is kept linked while the payment is unresolved, so the
+scan or `bringyourctl crypto credit` (`credit-usdc` for USDC) can still credit it and deliver the order's cards. A
+payment holds it while a receipt is `seen`, `confirmed` or in `review` (any reason), or, for USDC, while a recorded
+unfulfilled Solana payment names its reference (an underpayment, or a payment without the reference whose match
+note names it). A receipt `ignored` or `orphaned` before any credit holds nothing. The hold ends when the invoice
+is credited (then unlinked 30 days after the credit, like any credited invoice), voided or refunded (unlinked at
+the next daily run), or when no payment holds it any more (the next run). A gift invoice that never received a
+payment is unlinked at 30 days as before, and so is every network invoice, paid or not.
 
 ### Database
 

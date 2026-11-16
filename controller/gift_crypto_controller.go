@@ -202,6 +202,11 @@ func giftCryptoIntent(
 	}, nil
 }
 
+// CryptoGiftInvoice reports a gift order's invoice, for the operator tools.
+func CryptoGiftInvoice(intent *model.CryptoPaymentIntent) bool {
+	return cryptoGiftInvoice(intent)
+}
+
 // cryptoGiftInvoice reports a gift order's invoice.
 func cryptoGiftInvoice(intent *model.CryptoPaymentIntent) bool {
 	return intent.Item == giftCryptoItem

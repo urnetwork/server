@@ -128,7 +128,10 @@ const (
 	// retention unlink has passed: the unlink forgot the network (or the gift
 	// order) the invoice was for, so the rail cannot deliver it, and an
 	// operator matches it to its buyer (a data code invoice still credits: its
-	// buyer reads the code with the status token)
+	// buyer reads the code with the status token). A gift order's invoice that
+	// received a payment before the unlink stays linked until the payment is
+	// resolved (cryptoGiftInvoiceHeldSql), so on a gift invoice this is a
+	// payment first seen after the unlink
 	CryptoReviewReasonUnlinked = "unlinked"
 )
 
@@ -2293,8 +2296,10 @@ type CryptoPaymentUnlinkResult struct {
 
 // UnlinkCryptoPaymentIntents drops the link between invoices and the networks
 // they were for (decision 9, mmm/ZCASH-CONTRACT.md §3.13.6): invoices credited before
-// cutoff, and invoices never credited that were created before it. For each,
-// in one transaction:
+// cutoff, and invoices never credited that were created before it, except a
+// gift order's invoice that has received a payment it was not credited for
+// yet, which stays linked until that payment is resolved
+// (cryptoGiftInvoiceHeldSql). For each, in one transaction:
 //   - the renewal's transaction id becomes a fresh random id;
 //   - a USDC invoice's Solana intent loses its network, and its times are
 //     truncated to the day;
@@ -2341,8 +2346,9 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 					)
 					UNION ALL
 					(
-						SELECT intent_id FROM crypto_payment_intent
+						SELECT intent_id FROM crypto_payment_intent intent
 						WHERE credited_at IS NULL AND unlinked_at IS NULL AND create_time < $1
+						  AND NOT `+cryptoGiftInvoiceHeldSql("intent")+`
 						ORDER BY create_time
 						LIMIT $2
 					)
@@ -2489,6 +2495,78 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 		))
 	}, server.TxReadCommitted)
 	return
+}
+
+// cryptoGiftInvoiceHeldSql is whether the never-credited invoice of alias is
+// held from the retention unlink (owner, 2026-11-16: only unpaid gift invoices
+// unlink): a gift order's invoice (one a gift_order names) that is neither
+// voided nor refunded, and has received a payment the rail can still credit or
+// an operator holds:
+//   - a receipt in the mempool or a block and not credited yet (seen,
+//     confirmed), or one held for review for any reason (review): underpaid,
+//     late_underpaid, credit_failed, a sanctions or screening hold, a TAO
+//     transfer shape, a credited payment that left the chain (orphaned, its
+//     credit taken back), and the rest;
+//   - for USDC, a recorded unfulfilled Solana payment that names the
+//     invoice's Solana Pay reference: an underpayment of it, or a payment sent
+//     without the reference whose match note names it. A code invoice's, so a
+//     gift invoice's, is never matched by its amount alone: an operator
+//     credits it with `bringyourctl crypto credit-usdc`, which needs the
+//     Solana Pay intent that the sweep deletes once the invoice is unlinked.
+//
+// Unlinked, the invoice would forget its order (unlinkCryptoGiftOrderInTx)
+// and nothing could credit the payment or deliver the order's cards: the scan
+// holds a late credit as unlinked, and `bringyourctl crypto credit` finds no
+// order. Held, the scan or an operator still credits it, and the order's codes
+// are made and its cards delivered. Every payment that holds an invoice is on
+// a payment alert until it is resolved (monitor/SIGNALS.md §2.22: the crypto
+// hold classes, payment-received-uncredited, payment-received-held,
+// payment-solana-unfulfilled), so no invoice is held unseen.
+//
+// The hold ends with the payment's resolution, and the unlink then takes the
+// invoice at its first run past its due time:
+//   - credited: by the credited rule, as every credited invoice is, at the
+//     first run unlink_after past the credit;
+//   - voided (`bringyourctl crypto void`: the coins are returned by hand, or
+//     the payment is given up) or refunded (a refunded invoice whose payment
+//     then left the chain, uncredited again): by the never-credited rule,
+//     unlink_after past the invoice's creation, which an invoice the hold
+//     kept is already past, so at the next run;
+//   - no payment left that holds it (each receipt orphaned or ignored, each
+//     USDC record resolved): at the next run too.
+//
+// A receipt never counted (ignored: time-locked, or a transparent Zcash
+// output) or one that left the chain before any credit (orphaned) does not
+// hold an invoice: neither the scan nor `bringyourctl crypto credit` credits
+// one, and no alert names it. One that comes back on the chain is seen again
+// and holds the invoice from then on. A payment first recorded while an unlink
+// batch is running is not seen by that batch: at its invoice's due time to the
+// second, it is held as unlinked, as every payment after the unlink is.
+func cryptoGiftInvoiceHeldSql(alias string) string {
+	return `(
+		` + alias + `.voided_at IS NULL AND
+		` + alias + `.refunded_at IS NULL AND
+		EXISTS (
+			SELECT 1 FROM gift_order held_order
+			WHERE held_order.crypto_intent_id = ` + alias + `.intent_id
+		) AND
+		(
+			EXISTS (
+				SELECT 1 FROM crypto_payment_receipt held_receipt
+				WHERE held_receipt.intent_id = ` + alias + `.intent_id
+				  AND held_receipt.state IN ('` + CryptoReceiptStateSeen + `', '` + CryptoReceiptStateConfirmed + `', '` + CryptoReceiptStateReview + `')
+			) OR
+			(
+				` + alias + `.solana_reference IS NOT NULL AND
+				` + alias + `.solana_reference <> '' AND
+				EXISTS (
+					SELECT 1 FROM solana_unfulfilled_payment held_unfulfilled
+					WHERE held_unfulfilled.payment_reference = ` + alias + `.solana_reference
+					   OR strpos(held_unfulfilled.match_note, ` + alias + `.solana_reference) > 0
+				)
+			)
+		)
+	)`
 }
 
 // unlinkCryptoGiftOrderInTx is the 30-day unlink of the gift order an

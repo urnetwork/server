@@ -22237,6 +22237,11 @@ establish:
   A Solana Pay app payment no order verifies stays `no_intent`, its match
   note saying why (no order, two, or an order another payment holds: a
   second payment of one order); check it against the order in Shopify.
+  A row that names a gift order's USDC invoice (an underpayment of its
+  reference, or a payment without the reference whose match note names it)
+  keeps that invoice linked to its order past 30 days, so `bringyourctl
+  crypto credit-usdc` can still credit it; void the invoice once the payment
+  is returned or given up (`payment-received-held` below).
 - `payment-refund-unmatched` (PAGE): Stripe withdrew/disputed funds but the
   event could not be mapped to the immutable purchase ledger. Do not guess by
   email or manually edit a balance.
@@ -22353,12 +22358,26 @@ here, per coin, with first-seen ages:
   address an invoice was ever given, however old, so a payment to a long
   closed invoice lands here when the late-payment rules do not credit it;
   `unlinked` is one the rules would credit, to an invoice past the 30-day
-  retention unlink, whose network the unlink forgot. Match it to
+  retention unlink, whose network (or gift order) the unlink forgot. Match it to
   its support thread; credit one that covers what was bought with
   `bringyourctl crypto credit` after review, or keep it for the customer's
   request with a documented disposition. Crypto returns wait for the
   customer's request (owner, 2026-11-11): never return or offer one
   unprompted, and never credit on an address or amount match alone.
+  A gift order's invoice is not unlinked while a payment it received is
+  unresolved (owner, 2026-11-16): a receipt not yet credited (`seen`,
+  `confirmed`) or held for review for any reason, or a USDC record of
+  `payment-solana-unfulfilled` that names its reference. It stays linked to
+  its order, so the scan or `bringyourctl crypto credit` (`credit-usdc` for
+  USDC) credits it at any age and delivers the order's cards; past 30 days
+  the order has lost its note, signature and friends' addresses to the gift
+  retention, so the buyer gets every card. Once it is credited, the usual
+  unlink follows 30 days after the credit; void it (`bringyourctl crypto
+  void`) once its coins are returned or the payment is given up, and the next
+  daily unlink forgets the order. A gift invoice therefore reads `unlinked`
+  only for a payment first seen after its unlink, which no tool credits.
+  Network invoices are unlinked at 30 days paid or not: one with a held
+  payment then reads `unlinked`, and is granted by hand.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal

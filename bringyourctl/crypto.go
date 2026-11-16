@@ -111,7 +111,11 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 			fmt.Fprintf(out, "  %d failed credits in a row\n", intent.CreditFailureCount)
 		}
 		if intent.UnlinkedAt != nil {
-			fmt.Fprintf(out, "  unlinked from its network %s\n", intent.UnlinkedAt.Format("2006-01-02 15:04:05"))
+			if controller.CryptoGiftInvoice(intent) {
+				fmt.Fprintf(out, "  unlinked from its gift order %s\n", intent.UnlinkedAt.Format("2006-01-02 15:04:05"))
+			} else {
+				fmt.Fprintf(out, "  unlinked from its network %s\n", intent.UnlinkedAt.Format("2006-01-02 15:04:05"))
+			}
 		}
 		for _, receipt := range invoice.Receipts {
 			height := "mempool"
