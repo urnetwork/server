@@ -288,6 +288,40 @@ took its snapshot before it started waiting.
 - The cost: a second write per queue change while mirroring, and more code (the trigger, the
   backfill, the compare, the rollback). A first rotation does not need it.
 
+**Implemented 11-16** (db_table_swap.go, db_table_swap_catalog.go and
+task/pending_task_swap.go; the runbook is PENDING-TASK-SWAP-RUNBOOK.md). Where
+it differs from the design above:
+- **One script, one message, under the lock.** The swap is a single script
+  sent in one message, BEGIN to COMMIT, so its lock is held for the database's
+  work and no network round trip. The operator's Mac is about 90 ms from
+  edge-2, and a statement-by-statement swap would hold the lock for seconds of
+  round trips alone.
+  - Under the lock, the script compares catalog fingerprints in SQL: the
+    table's against the one the rehearsal read, and the twin's against the
+    table's.
+  - The rich, column-by-column comparison runs in the rehearsal.
+- **A rehearsal before the swap.** The whole copy runs in a rolled-back
+  transaction under ACCESS SHARE. It measures the lock time, warms the live
+  rows, and runs in a dry run even while the taskworker still runs.
+- **No twin in a separate step.** The twin is created inside the swap
+  transaction, so an interrupted swap leaves nothing behind.
+- **Live owners, not live leases.** The taskworker check refuses a leased row
+  only if a session holds its task advisory lock, or its heartbeat is under
+  ReleaseTimeout old. A claim that a stopped worker left (its lease runs at
+  most TaskLeaseTimeout, 5 minutes) is copied as it is and claimed again once
+  the lease ends.
+- **Copy and checksums.** The copy goes through the primary key, with indexes
+  built after it. The checksums are two order-independent 64-bit hashes over
+  every column, generated ones included.
+- **Bounds:**
+  - lock waits of 500 ms, a quarter of a writer's PgLockTimeout, retried 60
+    times;
+  - a refusal while any client transaction older than 2 minutes is open;
+  - at most 1,000,000 rows under the lock;
+  - a rollback window of a day before `--drop-old`.
+- **Rollback** empties the kept old table under its own lock first, so the
+  swap's commit unlinks no file.
+
 ### 4.5 Readers, writers and the monitor
 
 - **No reader or writer changes.** Names, columns, keys and indexes are identical. Cached plans
@@ -980,6 +1014,16 @@ The window sets the size. At 5.4 GiB/day:
 | 5c | **st_client_key_history:** a rewrite (REPACK) after PostgreSQL 19 | **Decide then**, from the live share after the bulk deletes |
 | 6 | **network_client_location_reliability:** delete with the client, and 11 days instead of 31 | **Yes**, after the sample of §9.1 |
 | 7 | Confirm the tables that are not partitioned (§9.2–§9.4) | **Confirm** |
+
+**Answered by the owner, 11-16 about 04:47–04:52Z, one at a time:**
+- **2, pending_task:** yes, the swap, run Wed 11-18.
+- **3, transfer_debit_journal:** daily partitions by contract day, not the swap.
+- **4, audit_device_event:**
+  - daily partitions by `event_time`, keeping 7 days of raw events;
+  - a per-day summary that the stats export reads instead;
+  - drop `UNIQUE (event_id)`.
+- **The share of hosted window children** among devices and events: measure
+  it and report what reads device counts. Device counting is unchanged.
 
 ## 11. Order, effort and risks
 

@@ -437,6 +437,7 @@ func diffSchemas(expected, actual *SchemaSnapshot) *SchemaDiff {
 
 	d.acceptContractPartitionCutover()
 	d.acceptPartitionCutoverTables(PartitionFamilies())
+	d.acceptTableSwapTables()
 	d.acceptCloseEvidencePartitionCutover()
 	d.acceptProviderWorkSessionPartitionCutover()
 	d.acceptFinishedTaskPartitionCutover()
@@ -512,6 +513,28 @@ func (d *SchemaDiff) acceptPartitionCutoverTables(families []*PartitionFamily) {
 	})
 	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
 		return cutover[d.actual.indexes[name].table]
+	})
+}
+
+// A table swap's twin and its kept old table (db_table_swap.go) are not drift
+// either: the old table stays beside its table, under a dated name with its
+// indexes, until its rollback window passes and the drop step removes it. A
+// fix must not drop the indexes they hold.
+func (d *SchemaDiff) acceptTableSwapTables() {
+	swap := map[string]bool{}
+	for table := range d.actual.tables {
+		if _, ok := TableSwapRelation(table); ok && !d.expected.tables[table] {
+			swap[table] = true
+		}
+	}
+	if len(swap) == 0 {
+		return
+	}
+	d.extraTables = slices.DeleteFunc(d.extraTables, func(table string) bool {
+		return swap[table]
+	})
+	d.extraIdx = slices.DeleteFunc(d.extraIdx, func(name string) bool {
+		return swap[d.actual.indexes[name].table]
 	})
 }
 
