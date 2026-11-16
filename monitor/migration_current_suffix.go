@@ -1065,6 +1065,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(server.TransferDebitJournalDropGuardMigrationVersion(), "transfer debit journal custody in either partition layout with its drop guard",
 			transferDebitJournalPartitionCustodyArtifactQuery),
 	},
+	// the redundant unique registration hash of the key history, dropped,
+	// versioned by its position
+	[]snMainnetMigrationContract{clientKeyHistoryRegistrationHashUniqueDropMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
