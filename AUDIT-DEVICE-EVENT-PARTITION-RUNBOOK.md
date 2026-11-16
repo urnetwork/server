@@ -147,11 +147,17 @@ Finalize refuses from then on; prepare a later day.
   - keeps 3 days ahead (runway every 10 minutes);
   - analyzes the parent once a day and each closed day an hour after it ends;
   - drops a day once its upper bound is 7 days past.
-- **The legacy partition** (everything before C, about 80 GB by then) drops
-  at C + 7 days in the same way. Its drop transaction holds the parent's
-  ACCESS EXCLUSIVE lock while the commit unlinks the files, about a second
-  *(inferred)*. A sweep that meets it waits up to its 2 s lock bound, or
-  retries on its next 15-minute run.
+- **The legacy partition** (everything before C) drops at C + 7 days in the
+  same way. It holds about 100 GB for C = Mon 11-23: 75 GB on 11-16, less the
+  7.8 GB unique index, plus about 5 GiB a day until C.
+  - Its drop transaction holds the parent's ACCESS EXCLUSIVE lock for the
+    catalog work only. PostgreSQL unlinks a dropped relation's files and
+    drops its buffers after the commit has released the locks
+    (`CommitTransaction` calls `smgrDoPendingDeletes` after the lock release,
+    because it "may take many seconds").
+  - A sweep that meets the lock waits up to its 2 s lock bound, or retries on
+    its next 15-minute run.
+  - Expect an IO burst while about 100 GB of files are unlinked.
 - **The hourly row delete stops** (`RemoveOldAuditDeviceEvents` deletes
   nothing from a partitioned table). The REINDEX rotation skips the parent and
   its days. The export reads only the rollup.

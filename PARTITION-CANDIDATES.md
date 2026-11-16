@@ -782,7 +782,7 @@ The window sets the size. At 5.4 GiB/day:
 | 7 days (needs the rollup) | about 40 GiB |
 
 - **Partitioning alone saves nothing until C + window,** apart from the 7.8 GiB unique index.
-- **With the rollup and 7 days,** the legacy leaf (about 80 GiB at C) drops at C + 7. The table
+- **With the rollup and 7 days,** the legacy leaf (about 100 GiB for C = 11-23) drops at C + 7. The table
   then holds about 40 GiB: −35 GiB against today, and about −900 GiB against the 180-day path by
   May.
 - **The inflow is the other lever.** If hosted window children should not count as devices, the
@@ -997,8 +997,8 @@ The window sets the size. At 5.4 GiB/day:
   - So identical bytes already collide on the primary key, and distinct bytes with one hash would
     be a SHA-256 collision.
   - The index has never been scanned, and no monitor contract pins it.
-  - `ALTER TABLE ... DROP CONSTRAINT` takes ACCESS EXCLUSIVE for the catalog change and the
-    unlink, with a short lock wait and retries.
+  - `ALTER TABLE ... DROP CONSTRAINT` takes ACCESS EXCLUSIVE for the catalog change only, with a
+    short lock wait and retries; the commit unlinks the index after it releases the lock.
   - DBDISK-STABILIZE §3.3 called it an integrity guard; the owner decides.
 
 ## 9. The rest
