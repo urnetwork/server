@@ -44,9 +44,19 @@ var pgBouncerPathServices = []string{"api", "connect", "proxy", "taskworker", "a
 // Stage 3 (same go; owner 2026-11-15 ~19:45 UTC: move as fast as possible,
 // next stage after 45 minutes clean): every connect block, about 43% of the
 // pool acquires.
+//
+// Stage 4 (same go): every block of taskworker, proxy, alt, gossip and mcp,
+// the remaining 28% of the pool acquires, so no deployed service uses nginx's
+// stream hop. The single port stays for the tools and the tunnel (owner
+// 2026-11-13: keep both options).
 var pgBouncerDirectBlocks = map[string][]string{
-	"api":     {pgBouncerEveryBlock},
-	"connect": {pgBouncerEveryBlock},
+	"api":        {pgBouncerEveryBlock},
+	"connect":    {pgBouncerEveryBlock},
+	"proxy":      {pgBouncerEveryBlock},
+	"taskworker": {pgBouncerEveryBlock},
+	"alt":        {pgBouncerEveryBlock},
+	"gossip":     {pgBouncerEveryBlock},
+	"mcp":        {pgBouncerEveryBlock},
 }
 
 // The path the table gives a service's block. Only a process in a block goes
