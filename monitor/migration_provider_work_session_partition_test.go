@@ -14,11 +14,11 @@ import (
 )
 
 // The contract of the journal's current custody, at its computed version:
-// the legacy drop guard's, which republishes the horizon drop guard's and the
-// partition preparation's.
+// the append for provider clients only's, which republishes the legacy drop
+// guard's, the horizon drop guard's and the partition preparation's.
 func migrationProviderWorkSessionPartitionTestContract(t testing.TB) snMainnetMigrationContract {
 	t.Helper()
-	return migrationCurrentSuffixTestContract(t, server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion())
+	return migrationCurrentSuffixTestContract(t, server.ProviderWorkSessionProviderAppendMigrationVersion())
 }
 
 // The partition preparation's contract ends at the horizon drop guard, whose
@@ -53,7 +53,8 @@ func TestMigrationsProviderWorkSessionHorizonDropGuardContract(t *testing.T) {
 
 // The horizon drop guard's contract ends at the legacy drop guard, whose
 // contract republishes the same custody with only the drop guard's body
-// replaced, by the horizon body with the legacy clause, and is not superseded.
+// replaced, by the horizon body with the legacy clause, until the append for
+// provider clients only supersedes it.
 func TestMigrationsProviderWorkSessionLegacyDropGuardContract(t *testing.T) {
 	version := server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion()
 	horizon := server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion()
@@ -61,7 +62,7 @@ func TestMigrationsProviderWorkSessionLegacyDropGuardContract(t *testing.T) {
 		t.Fatalf("legacy drop guard version %d, horizon drop guard version %d", version, horizon)
 	}
 	contract := migrationCurrentSuffixTestContract(t, version)
-	if contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 {
+	if contract.artifact.removedVersion != server.ProviderWorkSessionProviderAppendMigrationVersion() || contract.artifact.rowColumn != version-589 {
 		t.Fatalf("legacy drop guard contract %+v", contract.artifact)
 	}
 	horizonGuard := server.ProviderWorkSessionEventHorizonDropGuardBodySql()
@@ -72,6 +73,34 @@ func TestMigrationsProviderWorkSessionLegacyDropGuardContract(t *testing.T) {
 	horizonQuery := migrationCurrentSuffixTestContract(t, horizon).query
 	if strings.ReplaceAll(contract.query, snMainnetMigrationLiteral(legacyGuard), snMainnetMigrationLiteral(horizonGuard)) != horizonQuery {
 		t.Fatal("the legacy drop guard contract differs from the horizon's beyond the drop guard's body")
+	}
+}
+
+// The legacy drop guard's contract ends at the append for provider clients
+// only, whose contract republishes the same custody with only the append's
+// body replaced, and is not superseded. The new body reads the provide keys of
+// the friends and family and public modes only.
+func TestMigrationsProviderWorkSessionProviderAppendContract(t *testing.T) {
+	version := server.ProviderWorkSessionProviderAppendMigrationVersion()
+	legacyDrop := server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion()
+	if version == 0 || version <= legacyDrop {
+		t.Fatalf("provider append version %d, legacy drop guard version %d", version, legacyDrop)
+	}
+	contract := migrationCurrentSuffixTestContract(t, version)
+	if contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 {
+		t.Fatalf("provider append contract %+v", contract.artifact)
+	}
+	_, sessionAppend, _, _ := server.ProviderWorkSessionPartitionBodiesSql()
+	providerAppend := server.ProviderWorkSessionProviderAppendBodySql()
+	if !strings.Contains(contract.query, snMainnetMigrationLiteral(providerAppend)) || strings.Contains(contract.query, snMainnetMigrationLiteral(sessionAppend)) {
+		t.Fatal("the provider append contract does not pin the provider append's body")
+	}
+	legacyDropQuery := migrationCurrentSuffixTestContract(t, legacyDrop).query
+	if strings.ReplaceAll(contract.query, snMainnetMigrationLiteral(providerAppend), snMainnetMigrationLiteral(sessionAppend)) != legacyDropQuery {
+		t.Fatal("the provider append contract differs from the legacy drop guard's beyond the append's body")
+	}
+	if strings.Count(providerAppend, "provide_mode IN (2,3)") != 2 || strings.Count(providerAppend, "provide_key") != 2 {
+		t.Fatal("the provider append does not read the friends and family and public provide keys at both gates")
 	}
 }
 

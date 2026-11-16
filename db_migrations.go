@@ -11604,4 +11604,15 @@ var migrations = []any{
 	// makes stays admitted, so it applies before or after any deploy. No
 	// service reads it; the drop runs only after it is applied.
 	newSqlMigration(providerWorkSessionEventLegacyDropGuardSql),
+
+	// The provider work session journal for provider clients only (owner,
+	// 2026-11-16; DBDISK-STABILIZE S4; db_provider_work_session_providers.go):
+	// provider_work_session_append appends a client's admit only while it
+	// holds a friends and family or public provide key, and a retire when its
+	// connection's admit is in the journal, or as before for a provider. It
+	// replaces the function's body only, under a five-second lock bound: no
+	// table lock or rewrite. The running release's connection trigger performs
+	// the append and ignores its result, so it applies before or after any
+	// deploy; the saving starts when it is applied.
+	newSqlMigration(providerWorkSessionProviderAppendSql),
 }
