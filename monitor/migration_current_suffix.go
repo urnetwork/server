@@ -1070,6 +1070,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{clientKeyHistoryRegistrationHashUniqueDropMigrationContract},
 	// The exact-job successor inherits all old audit/source/slot custody.
 	[]snMainnetMigrationContract{competitionSecondRecoveryMigrationContract},
+	// the redundant unique event id of the device events, dropped by the
+	// owner-run prepare and recorded, versioned by its position
+	[]snMainnetMigrationContract{auditDeviceEventUniqueRecordMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
