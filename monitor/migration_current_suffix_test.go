@@ -311,6 +311,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "dropped sweep payment index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), sql: `CREATE INDEX transfer_escrow_sweep_payment_id ON transfer_escrow_sweep (payment_id)`},
 		{name: "dropped contract create-time index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietCreateTimeIndexDrop), sql: `CREATE INDEX transfer_contract_create_time ON transfer_contract (create_time, open, contract_id)`},
 		{name: "dropped open payer contract index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietOpenPayerIndexDrop), sql: `CREATE INDEX transfer_contract_open_payer_network_id_transfer_byte_count ON transfer_contract (open, payer_network_id, transfer_byte_count)`},
+		{name: "dropped closed pair contract index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietOpenSourceIdIndexDrop), sql: `CREATE INDEX transfer_contract_open_source_id ON transfer_contract (open, source_id, destination_id, contract_id)`},
+		{name: "lingering origin trigger dropped after the closed pair index", version: server.IndexDietMigrationVersion(server.IndexDietOpenSourceIdIndexDrop), sql: `DROP TRIGGER transfer_contract_origin_linger ON transfer_contract`},
 		// The retired queue's guard, function and key stay gone; its empty
 		// table keeps the published shape.
 		{name: "retired legacy settlement guard function restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
@@ -663,6 +665,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), "transfer_escrow_sweep", "transfer_escrow_sweep_payment_id"},
 				{server.IndexDietMigrationVersion(server.IndexDietCreateTimeIndexDrop), "transfer_contract", "transfer_contract_create_time"},
 				{server.IndexDietMigrationVersion(server.IndexDietOpenPayerIndexDrop), "transfer_contract", "transfer_contract_open_payer_network_id_transfer_byte_count"},
+				{server.IndexDietMigrationVersion(server.IndexDietOpenSourceIdIndexDrop), "transfer_contract", "transfer_contract_open_source_id"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

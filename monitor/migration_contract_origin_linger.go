@@ -6,7 +6,7 @@
 // migration, so from this version a trigger of that name is either absent or
 // exactly the published one: any other trigger under the name, a disabled one,
 // or one that runs another function, is drift. The index's drop record
-// requires it present.
+// requires it present (contractOriginLingerDropRecordMigrationContract).
 package monitor
 
 import (
@@ -60,4 +60,14 @@ var contractOriginLingerMigrationContract = migrationCurrentSuffix(
 	snMainnetMigrationConstraints("contract_origin_linger_state", "PRIMARY KEY (singleton)", "CHECK (singleton)"),
 	snMainnetMigrationFunction("contract_origin_linger_capture()", "trigger", "plpgsql", "v", false, server.ContractOriginLingerCaptureBodySql()),
 	"("+contractOriginLingerTriggerAbsent+" OR "+contractOriginLingerTriggerPresent+")",
+)
+
+// The drop record of transfer_contract_open_source_id: the index stays
+// dropped, and the operator's trigger, which every closed origin read needs
+// without it, is present and exactly the published one.
+var contractOriginLingerDropRecordMigrationContract = migrationCurrentSuffix(
+	server.IndexDietMigrationVersion(server.IndexDietOpenSourceIdIndexDrop),
+	"closed pair contract index removed for the lingering origins' side table",
+	migrationIndexRemoved("transfer_contract", "transfer_contract_open_source_id"),
+	contractOriginLingerTriggerPresent,
 )
