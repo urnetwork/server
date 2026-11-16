@@ -764,8 +764,9 @@ func (self *t3CustomWorld) ticketedListeners(code int, answer []byte) []connect.
 // host's server name, its whole authenticated request through the host with every PostgreSQL acquisition in the process
 // refused and every Redis call the store makes counted, is one script, the group's pick, which reads the whole group
 // for the name, and one {svc_} write a ticket: of three listeners of tls/443/blog, the two certified for the host take
-// the primary and the backup, each with its pair. The same Find again within PairWriteInterval writes no pair, so it
-// is the one script alone, within budgets.yml's sockets.find.
+// the primary and the backup, each with its pair, while the third, which lists a host no row bears out, is kept on
+// Redis as ValidateListen narrowed it, with no certified name. The same Find again within PairWriteInterval writes no
+// pair, so it is the one script alone, within budgets.yml's sockets.find.
 func TestT3CustomHostFindIsOneScriptAndAPairATicket(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -776,12 +777,22 @@ func TestT3CustomHostFindIsOneScriptAndAPairATicket(t *testing.T) {
 		for _, listener := range certified {
 			world.registerOk(listener, 1, world.blogRegistration(listener, []string{t3CustomHost}))
 		}
-		world.registerOk(plain, 1, world.blogRegistration(plain, nil))
+		world.registerOk(plain, 1, world.blogRegistration(plain, []string{"unrowed.customer.example"}))
 		listeners, err := world.store.ListListeners(world.ctx, world.networkId, []byte("tls/443/blog"))
 		if err != nil || len(listeners) != 3 {
 			t.Fatalf("the group holds %d leases, %v", len(listeners), err)
 		}
 		certifiedClientIds := []connect.Id{certified[0].clientId, certified[1].clientId}
+		for _, listener := range listeners {
+			want := []string(nil)
+			if slices.Contains(certifiedClientIds, listener.Candidate.ListenerClientId) {
+				want = []string{t3CustomHost}
+			}
+			if !slices.Equal(listener.Registration.CertifiedNames, want) || !slices.Equal(listener.Candidate.CertifiedNames, want) {
+				t.Fatalf("Redis keeps %s's certified names as %v and %v, not %v", listener.Candidate.ListenerClientId,
+					listener.Registration.CertifiedNames, listener.Candidate.CertifiedNames, want)
+			}
+		}
 
 		// the first Find writes a pair for each ticket
 		var code int
