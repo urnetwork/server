@@ -122,9 +122,9 @@ sizes are in DBDISK-STABILIZE.md §S3 and §3.6.
   applied, at least 15 minutes to the next 360-block boundary, and no
   `stage=measurement` begin in the last 40 minutes (`validator_ok` in
   `cpuopt5ops/lib.sh`).
-- **Deploy locks:** hold `$T/deploy.lock.d` and then
-  `$T/deploy-proxy.lock.d` for steps D and the record merge, so no release
-  rolls or migrates in between.
+- **Deploy locks:** step D holds `$T/deploy.lock.d` around each drop, so it
+  is the only production change at the time. The record merge and its
+  migrate are sequenced by the coordinator.
 
 ## 2. Step P — partial `transfer_contract_open_source_id`: do not run
 
@@ -140,25 +140,45 @@ All the services listed in §0.1 already run builds with the rewritten
 readers. Before step D, **the monitor's build must be confirmed** to be at or
 after 1400865e7.
 
-## 4. Step D — drop open_payer, then create_time, and record both
+## 4. Step D — drop create_time, then open_payer, and record both
 
-**What runs.** On a direct session on edge-2, as postgres on the local
-socket, not through PgBouncer and never inside BEGIN. Psql runs each `-c` in
-its own transaction:
+**Never leave a drop waiting behind a vacuum.**
+- While DROP INDEX CONCURRENTLY waits for the table lock, it holds an active
+  snapshot. PortalRunUtility pushes it, and index_drop pops it only after its
+  first commit.
+- That snapshot pins Main's vacuum horizon for every table for as long as the
+  wait lasts: the pattern of the 11-03 dump snapshot.
+- On 11-16 a drop queued behind transfer_contract's anti-wraparound pass held
+  the oldest backend_xmin from 06:39Z until it was cancelled at 07:00Z.
+- So every lock wait is bounded with `lock_timeout = '30s'`. On a timeout the
+  run releases everything and polls again with short read-only statements.
+
+**What runs.** `idiet1116/scripts/stepd_after_vac.sh` (dcdb2db1 job tmp).
+- It polls until no anti-wraparound vacuum holds transfer_contract, then takes
+  `deploy.lock.d`, then re-checks the table and the validator gate.
+- Each drop runs in its own direct session on edge-2, as postgres on the local
+  socket, not through PgBouncer and never inside BEGIN:
 
 ```
-sudo -u postgres psql -X -v ON_ERROR_STOP=1 -d bringyour \
-  -c "SET application_name = 'index-diet-drop'" \
-  -c "SET lock_timeout = 0" -c "SET statement_timeout = 0" \
-  -c "DROP INDEX CONCURRENTLY IF EXISTS public.transfer_contract_open_payer_network_id_transfer_byte_count" \
-  -c "DROP INDEX CONCURRENTLY IF EXISTS public.transfer_contract_create_time"
+SET application_name = 'index-diet-drop';
+SET lock_timeout = '30s';
+SET statement_timeout = 0;
+DROP INDEX CONCURRENTLY IF EXISTS public.transfer_contract_create_time;
+-- then, in a new session:
+DROP INDEX CONCURRENTLY IF EXISTS public.transfer_contract_open_payer_network_id_transfer_byte_count;
 ```
 
-The two run back to back, so both use the same vacuum gap.
+- `ROUTINE=cancel` keeps the server's 1 s deadlock_timeout, so PostgreSQL
+  cancels an ordinary autovacuum that holds the table (rule (a) applied to the
+  drops).
+- `ROUTINE=wait` sets deadlock_timeout to 6 h, so no autovacuum is cancelled
+  and the run waits for a gap instead.
+- A drop interrupted after its first commit leaves an invalid index; the next
+  try drops it again.
 
 **Gates, read right before the launch:**
 1. The validator is idle, with at least 15 minutes to the boundary.
-2. Both deploy locks are held, and local server main equals origin/main.
+2. `deploy.lock.d` is held.
 3. The monitor's build is confirmed (step R).
 4. No CREATE INDEX or REINDEX runs on transfer_contract:
    `SELECT count(*) FROM pg_stat_progress_create_index WHERE relid =
@@ -172,13 +192,10 @@ The two run back to back, so both use the same vacuum gap.
    JOIN pg_stat_activity a USING (pid) WHERE p.relid =
    'transfer_contract'::regclass`.
    - **No row:** launch now.
-   - **Anti-wraparound pass:** launch. The drop queues behind it until the
-     pass ends, which harms no reads or writes: a queued SHARE UPDATE
-     EXCLUSIVE conflicts only with vacuum, analyze and DDL.
-   - **Routine pass:** wait for its end, polling every 5 s, and launch in
-     the gap, so the pass's work is kept. Alternatively, launch at once if
-     the owner extends rule (a) to drops: after `deadlock_timeout` (1 s) the
-     waiting drop cancels the routine pass and loses that pass's work.
+   - **Anti-wraparound pass:** do not launch. Poll until it ends; the drop
+     must not wait behind it (see above).
+   - **Routine pass:** with ROUTINE=cancel, launch. PostgreSQL cancels the
+     pass after 1 s and loses its work. With ROUTINE=wait, poll for the gap.
 
 **Lock behavior:**
 - SHARE UPDATE EXCLUSIVE on transfer_contract, held across the drop's
@@ -192,10 +209,12 @@ The two run back to back, so both use the same vacuum gap.
 **Duration:**
 - The work itself takes seconds: two catalog commits, one sweep of
   shared_buffers, and the unlink.
-- Wall time is the lock wait (none, or the remainder of an anti-wraparound
-  pass) plus two waits for the longest transaction holding a lock on
-  transfer_contract. Those are seconds today; reaper batches take about
-  2 s.
+- Wall time is the lock wait (at most 30 s) plus two waits for the longest
+  transaction holding a lock on transfer_contract. Those are seconds today;
+  reaper batches take about 2 s. The waits after the first commit hold no
+  snapshot.
+- If they pass 30 s, the drop stops with the index invalid, and the next try
+  finishes it.
 
 **Free space:**
 - **+361.9 GiB at commit:** 4,986 becomes about 5,348 GiB, unlinked
@@ -382,7 +401,7 @@ reclaims about 19 GiB more.
 
 | When | Step | Notes |
 |---|---|---|
-| **Mon 11-16, first window from about 05:00Z** (after the 03:00Z maintenance; avoid 06:30–07:30Z) | **R** confirm the monitor build; **D** drop open_payer then create_time, in the first vacuum gap or queued behind the anti-wraparound pass; merge the records and migrate | Before the reaper's backlog delete (11-17 00:00Z). The transfer_contract pass is in its last phase now, so a gap is likely within the hour, followed by an anti-wraparound pass |
+| **Mon 11-16, after transfer_contract's anti-wraparound pass (started 06:36Z)** | **R** confirm the monitor build; **D** drop create_time then open_payer with stepd_after_vac.sh (bounded 30 s lock waits, never queued behind a pass); then merge the records | Before the reaper's backlog delete (11-17 00:00Z). The 06:35Z gap was skipped during a release roll; a drop queued behind the pass was cancelled at 07:00Z because it pinned the horizon |
 | Mon 11-16, if a gap allows, by about 20:00Z | **I2** transfer_escrow_unsettled_balance_contract, then the two contract partials after transfer_contract's anti-wraparound pass | Otherwise from 11-20 08:00Z |
 | 11-17..11-19 05:00Z | none | the backlog delete; D could still run if it slipped (it is cheap) |
 | Thu 11-19 05:00Z – Fri 11-20 ~08:00Z | none | the edge-6 full copy |
@@ -401,8 +420,8 @@ before ordinary growth:**
 ## 8. Owner decisions in this runbook
 
 1. Go for D on 11-16, and whether rule (a) also lets the drop's lock cancel a
-   routine autovacuum. Without it, D waits for a gap or for the
-   anti-wraparound pass to end.
+   routine autovacuum (ROUTINE=cancel). Without it (ROUTINE=wait), D waits for
+   a gap. It never waits behind an anti-wraparound pass.
 2. The monitor's build, as the other developer runs it (≥ 1400865e7).
 3. The partial open_source_id stays blocked. Choose one:
    - (i) keep the index and rebuild it in I3 (−158 GiB, half regrows);
