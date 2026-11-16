@@ -302,8 +302,11 @@ func TestProberShardCompanionPayerHandoffRechecksOriginAndCancellation(t *testin
 
 // EXPLAIN the actual runtime literal against every migrated index with the
 // false-zero open catalog. Both discovery and inherited-payer attempts must
-// retain exact open-pair and closed-endpoint index ranges in both plan modes.
-// The existing closed branch filters the other endpoint and linger window.
+// retain exact open-pair index ranges in both plan modes, and the closed
+// branch reads each lingering origin the side table names from the primary
+// key, filtering the endpoints and the linger window there
+// (contractOriginLingerClosedSql); before the side table it read a
+// closed-endpoint index range.
 func TestProberShardCompanionReplyPlansStayEndpointScoped(t *testing.T) {
 	// the executed statement, whole: its literals and the rendered id bound
 	sql := coveredCompanionRuntimeQueries(t)["earliest_companion_origin"].sql
@@ -334,8 +337,9 @@ func TestProberShardCompanionReplyPlansStayEndpointScoped(t *testing.T) {
 							filter, _ := node["Filter"].(string)
 							index, _ := node["Index Name"].(string)
 							pair := strings.Contains(condition, "source_id =") && strings.Contains(condition, "destination_id =")
-							closed := (index == "transfer_contract_destination_id_close_time" || index == "transfer_contract_destination_id_create_time") &&
-								strings.Contains(condition, "destination_id =") && strings.Contains(filter, "source_id =") && strings.Contains(filter, "NOT open")
+							closed := index == "transfer_contract_pkey" &&
+								(strings.Contains(condition, "contract_id = contract_origin_linger") || strings.Contains(condition, "contract_id = linger.contract_id")) &&
+								strings.Contains(filter, "source_id =") && strings.Contains(filter, "destination_id =") && strings.Contains(filter, "NOT open")
 							if !pair && !closed {
 								t.Fatalf("%s companion plan escaped its endpoint indexes: %s", mode, raw)
 							}
