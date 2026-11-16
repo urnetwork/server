@@ -41,6 +41,7 @@ func newTestQuotaServiceBearers(t testing.TB) *testQuotaServiceBearers {
 		server.InternalGateCallerSockets,
 		server.InternalGateCallerTlsedge,
 		server.InternalGateCallerMxedge,
+		server.InternalGateCallerSmtpedge,
 	}
 	bearers := &testQuotaServiceBearers{callerBearers: map[server.InternalGateCaller]string{}}
 	verifyFile := ""
@@ -160,6 +161,8 @@ func TestQuotaServiceRefusesAClassOffItsRoutes(t *testing.T) {
 		server.InternalGateCallerSockets: {quotaServiceRouteDrawOrder, quotaServiceRouteSpent, quotaServiceRouteUsageBatch},
 		server.InternalGateCallerTlsedge: {quotaServiceRouteOverLimit},
 		server.InternalGateCallerMxedge:  {},
+		// smtpedge reads limits, leases and reports usage, and reads no over-limit list (SMTP-M9-20)
+		server.InternalGateCallerSmtpedge: {quotaServiceRouteOverLimit},
 	}
 	for caller, refused := range refusedRoutes {
 		for _, call := range testQuotaServiceCalls(t, string(caller)) {
