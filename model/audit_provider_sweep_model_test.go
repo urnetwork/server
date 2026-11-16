@@ -671,7 +671,7 @@ func TestRollupTransferAuditEvents(t *testing.T) {
 	})
 }
 
-// The device sweep covers ALL connected clients (pure consumers included,
+// The device sweep covers all connected top-level clients (pure consumers included,
 // no provide key needed), counts a multi-connection device once, emits
 // removed only when the last connection is gone, and under connected-per-day
 // semantics a device that disconnects mid-day still counts that day.

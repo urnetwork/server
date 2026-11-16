@@ -43,6 +43,14 @@ const (
 	// credit_unfulfillable: nothing is credited or ended from it, the store is
 	// still asked every run, and the object no longer counts as a store error.
 	PaymentReconcileActionUnknownToStore = "unknown_to_store"
+	// A card gift order's Stripe Checkout session expired unpaid
+	// (controller/payment_reconcile_gift.go). Nothing was paid, so nothing is
+	// fulfilled, and the session can never be paid: the reconciler stops
+	// reading it (ListPendingStripeGiftOrdersInConn). The order stays pending,
+	// as an abandoned order of every rail does. Evidence is the session;
+	// written once per session, under store stripe. Not an alarm: most are
+	// checkouts the buyer left.
+	PaymentReconcileActionCheckoutExpired = "checkout_expired"
 )
 
 // Webhook-written operator events (UPGRADE.md §2 S7/S11) that join the

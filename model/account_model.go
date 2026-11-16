@@ -241,20 +241,27 @@ func RemoveNetworkWithStoreSnapshot(
 	return RemoveNetworkWithRemovals(ctx, networkId, adminUserId, storeSnapshot, nil)
 }
 
+// Queues, in a deletion's own transaction, what must follow the deletion: the
+// cleanup of what the network leaves (DeletedNetwork, RemoveDeletedNetworkData)
+// and, for an account, the removal of its sign-in addresses (password and SSO
+// logins) from Brevo. It must use tx and acquire no other database connection.
+type ScheduleNetworkRemovalsInTx func(tx server.PgTx, deletedNetwork *DeletedNetwork, userAuths map[string]bool)
+
 // RemoveNetworkWithRemovals is RemoveNetworkWithStoreSnapshot that hands the
-// network's sign-in user auths (password and SSO logins) to
-// scheduleRemovalsInTx inside the removal's own transaction, before they are
-// deleted. What it queues there with tx, the removal of each address from
-// Brevo (controller.RemoveNetworkAndContacts), commits with the removal or not
-// at all: a refused or failed removal queues nothing, and a removed network
-// cannot leave its addresses behind unqueued. A nil scheduleRemovalsInTx
-// queues nothing. It must use tx and acquire no other database connection.
+// removed network, its users and their sign-in user auths (password and SSO
+// logins) to scheduleRemovalsInTx inside the removal's own transaction, before
+// they are deleted. What it queues there with tx, the cleanup of the network's
+// data and the removal of each address from Brevo
+// (controller.RemoveNetworkAndContacts), commits with the removal or not at
+// all: a refused or failed removal queues nothing, and a removed network
+// cannot leave its data or addresses behind unqueued. A nil
+// scheduleRemovalsInTx queues nothing.
 func RemoveNetworkWithRemovals(
 	ctx context.Context,
 	networkId server.Id,
 	adminUserId *server.Id,
 	storeSnapshot *RemoveNetworkStoreSnapshot,
-	scheduleRemovalsInTx func(tx server.PgTx, userAuths map[string]bool),
+	scheduleRemovalsInTx ScheduleNetworkRemovalsInTx,
 ) (outcome RemoveNetworkOutcome, userAuths map[string]bool) {
 	var posts []server.PostFunction
 	retirementId := server.NewId()
@@ -357,7 +364,11 @@ func RemoveNetworkWithRemovals(
 
 		// queued while the addresses still exist, in the removal's transaction
 		if scheduleRemovalsInTx != nil {
-			scheduleRemovalsInTx(tx, userAuths)
+			deletedNetwork := &DeletedNetwork{
+				NetworkId: networkId,
+				UserIds:   slices.SortedFunc(maps.Keys(userIds), func(a server.Id, b server.Id) int { return a.Cmp(b) }),
+			}
+			scheduleRemovalsInTx(tx, deletedNetwork, userAuths)
 		}
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {

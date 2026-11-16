@@ -345,6 +345,8 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 			}
 			if state.store == "stripe" {
 				storeErrorFinding.action += " For credit-leg failures, compare bounded reason counts with the executing Taskworker source. Verify both destination_deleted and destination_unresolved terminal classifications and mandatory audit persistence; deploy the correction if missing. Absent credit_unfulfillable events alone do not prove either capability or a clean payment cohort. Keep malformed or incomplete provider data, transport failures, and audit-write failures as errors."
+				// the gift leg's orders (controller/payment_reconcile_gift.go)
+				storeErrorFinding.action += " Error rows with leg gift_checkout are one card gift order's own failure, with its reason and gift order in the restricted audit trail: they alert here but never hold the stripe watermark, so a fresh watermark beside them does not mean the order was checked."
 			}
 			if state.store == "x402" {
 				storeErrorFinding.mechanism = "The always-enabled local x402 leg retries settled_not_granted grants without external store credentials. Recorded local validation, grant or persistence failures can hold its watermark while other stores and the global heartbeat remain current; this aggregate does not identify the failed stage."
@@ -421,6 +423,14 @@ func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 			repair.mechanism = "The local x402 safety net retried a retained settled_not_granted event and recorded a successful idempotent grant. This is local post-settlement recovery, not proof of a missing external store notification. Audit recording is best effort, so absent repair rows do not prove an empty recovery cohort."
 			repair.action = "Validate the grant against the restricted settled_not_granted audit and idempotency state, then trace the original local grant failure. Preserve the successful repair; do not replay settlement, retarget a payment or manually grant from this aggregate."
 			repair.verify = "The settled transaction grants its original entitlement exactly once and no new local grant error or repeated credited repair appears through two complete reconciliation windows. Audit aging alone does not prove financial disposition."
+		}
+		if store == "stripe" && action == "credited" {
+			// two writers: the invoice listing and the gift leg
+			// (controller/payment_reconcile_gift.go)
+			repair.symptom = fmt.Sprintf("The payment reconciler applied %d Stripe payment(s) the webhook missed in 24 hours", count)
+			repair.mechanism = "The hourly safety net found a Stripe payment the ordinary webhook had not applied and applied it through the webhook's own idempotent path: a paid subscription invoice whose invoice.paid credit never landed (the stripe_invoice ledger), or a card gift order still pending whose Checkout session Stripe reports paid, a missed checkout.session.completed or checkout.session.async_payment_succeeded (audit details leg gift_checkout; the order, its codes, its delivery and its sales notice are made once). The repair protects the customer, but its existence is evidence of a lost, rejected or failed webhook delivery, or of a disabled endpoint."
+			repair.action = "Validate the repaired state from the restricted audit trail (the invoice's credit, or the gift order paid with its codes and its cards scheduled), then check the Stripe webhook endpoint's deliveries for the same window: failed or disabled deliveries, a rotated signing secret, non-2xx answers in the api log. Keep the safety-net repair and fix the delivery path rather than replaying Stripe events manually."
+			repair.verify = "Each repaired invoice or gift order was applied exactly once, later webhooks apply normally, and no new stripe/credited repair appears through two complete reconciliation windows."
 		}
 		if store == "stripe" && action == "ended" {
 			repair.symptom = fmt.Sprintf("The payment reconciler first applied %d terminal Stripe subscription state(s) in 24 hours", count)

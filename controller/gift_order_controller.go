@@ -19,12 +19,26 @@ package controller
 // address, like the buy-data page's network lookup. A code is a 26-character
 // random secret, so a check by guessing finds nothing. A data code that is
 // redeemed or refunded reads as not found, as the signed-in check answers it.
+//
+// The dialog's poll of a card order still pending is the buyer's report of the
+// payment, as VerifyStripeCheckout is for a data pack: at most once per order
+// every giftCheckoutReportInterval, across the api's processes, the order's
+// Checkout session is read from Stripe, and a paid one whose charge was kept
+// whole (neither refunded nor disputed) is fulfilled through the webhook's
+// own path (stripeFulfillGiftCheckoutInConn), so the buyer sees the order paid
+// even when the webhook is late or lost. Whichever of the
+// poll, the webhook and the hourly reconciler reports the session first pays
+// the order; the others find it paid. A poll that cannot read Stripe answers
+// the order as stored.
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -95,6 +109,7 @@ func GiftOrderStatus(
 	if order == nil {
 		return nil, errGiftOrderNotFound
 	}
+	order = giftReportCardOrder(clientSession, order)
 	result := &GiftOrderStatusResult{
 		Status:        order.Status,
 		Quantity:      order.Quantity,
@@ -107,6 +122,86 @@ func GiftOrderStatus(
 		result.SendOn = order.SendOn.UTC().Format(time.DateOnly)
 	}
 	return result, nil
+}
+
+// How often a poll of a pending card order may read its session from Stripe.
+const giftCheckoutReportInterval = 20 * time.Second
+
+// How long the poll waits for the report gate before answering without it.
+const giftCheckoutReportGateTimeout = 2 * time.Second
+
+// Whether this poll may read the order's session now: the first in
+// giftCheckoutReportInterval, across the api's processes. false when the gate
+// cannot be read (the poll answers the order as stored). Replaceable by tests.
+var giftCheckoutReportGateFunc = func(ctx context.Context, giftOrderId server.Id) (due bool) {
+	gateCtx, cancel := context.WithTimeout(ctx, giftCheckoutReportGateTimeout)
+	defer cancel()
+	server.HandleError(func() {
+		server.Redis(gateCtx, func(r server.RedisClient) {
+			var err error
+			due, err = r.SetNX(gateCtx, "gift_checkout_report_"+giftOrderId.String(), "1", giftCheckoutReportInterval).Result()
+			server.Raise(err)
+		})
+	}, func(err error) {
+		due = false
+		glog.Infof("[gift]the checkout report gate of gift order %s could not be read: %s\n", giftOrderId, err)
+	})
+	return
+}
+
+// giftReportCardOrder is the order as the buyer's poll answers it: a card
+// order still pending whose report is due has its session read from Stripe,
+// and is fulfilled through the webhook's path when the session is paid and
+// its charge kept whole (see the header). Every other order, an order whose
+// session or charge cannot be read, and one whose charge was refunded or
+// disputed (the hourly reconciler records it), is answered as stored.
+func giftReportCardOrder(clientSession *session.ClientSession, order *model.GiftOrder) *model.GiftOrder {
+	if order.Rail != model.GiftRailStripe || order.Status != model.GiftOrderStatusPending || order.StripeSessionId == "" {
+		return order
+	}
+	if _, ok := giftStripeApiToken(); !ok {
+		return order
+	}
+	ctx := clientSession.Ctx
+	if !giftCheckoutReportGateFunc(ctx, order.GiftOrderId) {
+		return order
+	}
+	checkoutSession, found, err := stripeReconcileFetchCheckoutSession(ctx, order.StripeSessionId)
+	if err != nil || !found {
+		glog.Infof("[gift]checkout %s of gift order %s could not be read for its buyer's report (found %t): %v\n", order.StripeSessionId, order.GiftOrderId, found, err)
+		return order
+	}
+	if checkoutSession.Status != "complete" || checkoutSession.Metadata[giftStripeMetadataOrderId] != order.GiftOrderId.String() {
+		return order
+	}
+	checkoutComplete := checkoutSession.completedObject()
+	if !stripeCheckoutSessionPaid(checkoutComplete) {
+		return order
+	}
+	// paid is not enough: a refunded or disputed charge is never fulfilled
+	// (payment_reconcile_gift.go)
+	charge, err := stripeCheckoutSessionCharge(checkoutSession)
+	if err != nil {
+		glog.Infof("[gift]checkout %s of gift order %s is paid; its charge could not be judged for its buyer's report: %s\n", order.StripeSessionId, order.GiftOrderId, err)
+		return order
+	}
+	if state := giftCheckoutChargeState(charge); state != giftCheckoutChargeKept {
+		glog.Infof("[gift]checkout %s of gift order %s is paid and its charge %s is %s: not fulfilled by its buyer's report\n", order.StripeSessionId, order.GiftOrderId, charge.Id, state)
+		return order
+	}
+	outcome, err := stripeFulfillGiftCheckoutInConn(nil, ctx, checkoutComplete, giftCheckoutAudit{leg: "client_report"})
+	if err != nil {
+		// the webhook and the reconciler still fulfil it
+		glog.Errorf("[gift]checkout %s of gift order %s is paid; its buyer's report could not fulfil it: %s\n", order.StripeSessionId, order.GiftOrderId, err)
+		return order
+	}
+	if outcome == giftCheckoutOutcomeFulfilled {
+		glog.Infof("[gift]checkout %s: gift order %s was fulfilled by its buyer's report, before its webhook\n", order.StripeSessionId, order.GiftOrderId)
+	}
+	if reported := model.GetGiftOrder(ctx, order.GiftOrderId); reported != nil {
+		return reported
+	}
+	return order
 }
 
 // GiftCardsPdf answers POST /pay/gift/cards.pdf: 404 until the cards are

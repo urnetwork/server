@@ -392,6 +392,12 @@ const (
 	PurchaseErrorCodeQuoteExpired = "quote_expired"
 	// a crypto invoice ended short of its quote; the UI shows the review copy
 	PurchaseErrorCodeUnderpaid = "underpaid"
+	// a Stripe trial's card failed its CVC check when it was attached, so the
+	// trial did not start and the card is never charged; the buyer checks the
+	// card and tries again in a new payment sheet or checkout
+	// (subscription_stripe_card_check.go). Only the purchase report
+	// (/subscription/verify-stripe-checkout) answers it.
+	PurchaseErrorCodeIncorrectCvc = "incorrect_cvc"
 )
 
 const purchaseGuestSignInRequiredMessage = "Add a sign-in to your account before buying a plan."

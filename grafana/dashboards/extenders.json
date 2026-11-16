@@ -4810,6 +4810,160 @@
     }
    ],
    "description": "Active extenders with an active address accepted on the webrtc carrier without tcp (urnetwork_stats_webrtc_only_extenders), which the activation caps at ExtenderActivateSettings.MaxWebRtcOnlyExtenders (2,000 from 2026-11-16, a safety limit; 100 from 2026-11-12, which filled on 11-14; connect/EXTENDER.md S8), and the activations the cap refused with their webrtc test untried in the hour. A population at the cap with refusals beside it is the cap binding: hosts that the internet reaches only over webrtc are being turned away."
+  },
+  {
+   "id": 189,
+   "type": "row",
+   "title": "concentration",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 218
+   },
+   "panels": []
+  },
+  {
+   "id": 190,
+   "type": "timeseries",
+   "title": "share of the pool held by the network holding the most",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 219
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_top_network_units{env=\"$env\"}) / max(urnetwork_stats_extender_units{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "of pool units"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_top_network_extenders{env=\"$env\"}) / max(urnetwork_stats_online_extenders{env=\"$env\"})",
+     "refId": "B",
+     "legendFormat": "of active extenders"
+    }
+   ],
+   "description": "The share of the extender pool held by the network that holds the most (sn WHITEPAPER \u00a78.6.3): of the pool units (urnetwork_stats_extender_top_network_units over urnetwork_stats_extender_units; a unit is an extender's active ipv4 address's /29, else its active ipv6 address's /48, which is what the \u00a78.6 pool pays per), and of the active extenders (urnetwork_stats_extender_top_network_extenders over urnetwork_stats_online_extenders). The whitepaper names one operator's share of units growing as the condition for coarser units or a weighting by use. On 2026-11-16 one network held 1,803 of 3,370 units, about 54%, and two networks of one fork build about 90%."
+  },
+  {
+   "id": 191,
+   "type": "timeseries",
+   "title": "networks and pool units",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 219
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_units{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "pool units"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_top_network_units{env=\"$env\"})",
+     "refId": "B",
+     "legendFormat": "units of the network holding the most"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_networks{env=\"$env\"})",
+     "refId": "C",
+     "legendFormat": "networks with an extender"
+    }
+   ],
+   "description": "The pool units holding an active extender (urnetwork_stats_extender_units), the units of the network whose extenders hold the most (urnetwork_stats_extender_top_network_units), and the networks with an active extender (urnetwork_stats_extender_networks). Every stats gauge is published by each taskworker alike, so the panels read max, never sum."
   }
  ]
 }

@@ -254,6 +254,13 @@ type ExtenderActivateSettings struct {
 	// webrtc test is to run. Non-positive accepts none on webrtc without tcp.
 	MaxWebRtcOnlyExtenders int
 
+	// the largest share of an activation's bootstrap one network holds while
+	// other networks can fill it (model.ExtenderSampleSettings): of
+	// ExtenderBootstrapCount records, a network holds this share rounded up,
+	// and more only when too few other networks have candidates.
+	// Non-positive takes no account of networks
+	BootstrapMaxNetworkShare float64
+
 	// where every activation's outcome and probe step times are counted
 	// (extender_activation_metrics.go). Nil counts nothing, which is what a
 	// test that builds the settings itself gets.
@@ -536,8 +543,9 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		// budget, inside the five-minute cadence beside the tcp addresses
 		// (taskworker ExtenderProbeSettings). The hundred of 2026-11-12 filled
 		// on 11-14 and refused about 1,300 activations a day
-		MaxWebRtcOnlyExtenders: 2000,
-		metrics:                defaultExtenderActivationMetrics,
+		MaxWebRtcOnlyExtenders:   2000,
+		BootstrapMaxNetworkShare: model.DefaultExtenderSampleSettings().MaxNetworkShare,
+		metrics:                  defaultExtenderActivationMetrics,
 	}
 }
 
@@ -1839,9 +1847,12 @@ func (self *extenderActivateService) activate(
 	}
 
 	bootstrap := []string{}
-	for _, other := range model.GetRandomActiveNetworkExtenders(
+	// no network holds more than its quota of the sample while others can
+	// fill it (model.ExtenderSampleSettings)
+	for _, other := range model.GetRandomActiveNetworkExtendersUnderNetworkQuota(
 		clientSession.Ctx,
 		ExtenderBootstrapCount,
+		model.ExtenderSampleNetworkQuota(ExtenderBootstrapCount, settings.BootstrapMaxNetworkShare),
 		activated.Extender.ExtenderId,
 	) {
 		// the sample is signed now rather than replayed from the publish

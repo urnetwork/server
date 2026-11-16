@@ -16,4 +16,8 @@ var indexDietMigrationContracts = []snMainnetMigrationContract{
 		migrationIndexRemoved("transfer_contract", "transfer_contract_stream_id")),
 	migrationCurrentSuffix(server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), "sweep payment index removed for the payment-contract index",
 		migrationIndexRemoved("transfer_escrow_sweep", "transfer_escrow_sweep_payment_id")),
+	migrationCurrentSuffix(server.IndexDietMigrationVersion(server.IndexDietCreateTimeIndexDrop), "contract create-time index removed for contract id ranges",
+		migrationIndexRemoved("transfer_contract", "transfer_contract_create_time")),
+	migrationCurrentSuffix(server.IndexDietMigrationVersion(server.IndexDietOpenPayerIndexDrop), "open payer contract index removed for the unresolved and dispute partial indexes",
+		migrationIndexRemoved("transfer_contract", "transfer_contract_open_payer_network_id_transfer_byte_count")),
 }

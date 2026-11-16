@@ -21884,6 +21884,51 @@ account is protected, but every generic repair proves the ordinary
 notification/verification/idempotency path missed authoritative provider
 state or its metadata. Trace and fix that earlier stage.
 
+Stripe `credited` has two writers since 2026-11-16. One is the invoice
+listing: a paid subscription invoice whose `invoice.paid` credit never landed.
+The other is the gift leg (`controller/payment_reconcile_gift.go`), which runs
+first in the Stripe store. It reads the Checkout session, with its charge, of
+every card gift order still pending that was made from 15 minutes to 21 days
+ago, at most 100 per run: the newest first, so a recent payment is reached at
+the next run even in a burst of open sessions, and 20 of the 100 for the oldest
+when more are pending. When Stripe reports a session paid and its charge kept
+whole (neither refunded nor disputed), the leg fulfils it through the
+webhook's own idempotent path (`stripeFulfillGiftCheckoutInConn`), so the
+order, its codes, its delivery and its sales notice are made once, whichever of
+the two reports the session first. Its `credited` row has evidence the session
+and details `leg=gift_checkout` with the gift order. Either kind of repair
+means a Stripe webhook delivery was lost, failed or rejected, or the endpoint
+is disabled: check the endpoint's deliveries for the same window. The gift
+leg's other records are not alarms. An expired session is a `checkout_expired`
+row, written once, after which the order is not read again; no probe reads
+those rows. A paid session whose charge was refunded or disputed before the
+order was fulfilled is a stripe `refunded` or `disputed` row (evidence the
+session, `leg=gift_checkout`, the charge), written once and never fulfilled:
+a dispute voids nothing of an order with no codes, so a fulfilment would make
+its codes live mid-dispute, and a refund the webhook missed would be given
+away. The order stays pending; a lost dispute still refunds it through its
+webhook, and an operator settles a won one. These rows also count on the
+subscriptions dashboard's provider-confirmed terminal events. A session paid in
+another amount or currency goes through the webhook's mismatch record (store
+`gift`, §2.22 `payment-gift-mismatch`, with `leg=gift_checkout`), and the order
+is not read again. A failed read, charge or fulfilment is a stripe `error` row
+with `leg=gift_checkout` and a reason (`read`, `session_not_found`,
+`other_order`, `unknown_status`, `charge`, `charge_not_settled`, `fulfil`,
+`not_fulfilled`, `raised`, `record`). It counts toward
+`payment-reconciliation-store-error` and the run's errors, but never as a
+store error that holds the stripe watermark: one order that keeps failing must
+not hold the invoice listing's watermark for its whole 21-day window, whose
+overlap would grow until the store's budget ran out before the renewal legs.
+So a fresh stripe watermark beside such errors does not mean the order was
+checked; the heartbeat's stripe details count them as `gift_checkout_errors`.
+Three failed reads in a row stop the leg until the next run. A session Stripe
+does not know gets the App Store leg's bounded retry: it is a
+`session_not_found` error until it has persisted through 24 runs within seven
+days, then `unknown_to_store` is recorded once and the answer is no longer an
+error. The session is still read every run. Every read is counted on
+`urnetwork_gift_checkout_reconcile_total{result}` (taskworker dashboard, payment
+reconciliation row).
+
 Stripe `ended` is a distinct source boundary. At the revision described here,
 the Stripe webhook handles invoice credits, refunds, and disputes but has no
 real-time subscription-lifecycle consumer. A `store=stripe, action=ended`
@@ -22192,6 +22237,11 @@ establish:
   A Solana Pay app payment no order verifies stays `no_intent`, its match
   note saying why (no order, two, or an order another payment holds: a
   second payment of one order); check it against the order in Shopify.
+  A row that names a gift order's USDC invoice (an underpayment of its
+  reference, or a payment without the reference whose match note names it)
+  keeps that invoice linked to its order past 30 days, so `bringyourctl
+  crypto credit-usdc` can still credit it; void the invoice once the payment
+  is returned or given up (`payment-received-held` below).
 - `payment-refund-unmatched` (PAGE): Stripe withdrew/disputed funds but the
   event could not be mapped to the immutable purchase ledger. Do not guess by
   email or manually edit a balance.
@@ -22308,12 +22358,26 @@ here, per coin, with first-seen ages:
   address an invoice was ever given, however old, so a payment to a long
   closed invoice lands here when the late-payment rules do not credit it;
   `unlinked` is one the rules would credit, to an invoice past the 30-day
-  retention unlink, whose network the unlink forgot. Match it to
+  retention unlink, whose network (or gift order) the unlink forgot. Match it to
   its support thread; credit one that covers what was bought with
   `bringyourctl crypto credit` after review, or keep it for the customer's
   request with a documented disposition. Crypto returns wait for the
   customer's request (owner, 2026-11-11): never return or offer one
   unprompted, and never credit on an address or amount match alone.
+  A gift order's invoice is not unlinked while a payment it received is
+  unresolved (owner, 2026-11-16): a receipt not yet credited (`seen`,
+  `confirmed`) or held for review for any reason, or a USDC record of
+  `payment-solana-unfulfilled` that names its reference. It stays linked to
+  its order, so the scan or `bringyourctl crypto credit` (`credit-usdc` for
+  USDC) credits it at any age and delivers the order's cards; past 30 days
+  the order has lost its note, signature and friends' addresses to the gift
+  retention, so the buyer gets every card. Once it is credited, the usual
+  unlink follows 30 days after the credit; void it (`bringyourctl crypto
+  void`) once its coins are returned or the payment is given up, and the next
+  daily unlink forgets the order. A gift invoice therefore reads `unlinked`
+  only for a payment first seen after its unlink, which no tool credits.
+  Network invoices are unlinked at 30 days paid or not: one with a held
+  payment then reads `unlinked`, and is granted by hand.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal

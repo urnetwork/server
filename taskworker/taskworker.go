@@ -120,6 +120,10 @@ func initTaskSchedule(ctx context.Context) {
 		// the hourly Stripe dunning sweep: owes the payment-failed notices a
 		// webhook missed (controller/subscription_stripe_dunning_sweep.go)
 		controller.ScheduleSweepStripeDunning(clientSession, tx)
+		// the hourly abandoned payment sheet sweep: cancels the sheets left
+		// without a card for over a day
+		// (controller/subscription_stripe_abandoned_sheet_sweep.go)
+		controller.ScheduleSweepStripeAbandonedSheets(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
 		work.ScheduleOpenContractClosuresOnStartup(clientSession, tx)
 		work.ScheduleCloseContractDeadlines(clientSession, tx)
@@ -137,6 +141,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleSweepProxyExits(clientSession, tx)
 		work.ScheduleRemoveGoneStClientKeyHistory(clientSession, tx)
 		work.ScheduleRemoveExpiredSessionState(clientSession, tx)
+		// the lingering origins' side table past its prune time
+		// (model/contract_origin_linger.go)
+		work.ScheduleRemoveExpiredContractOriginLinger(clientSession, tx)
 		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
 		work.ScheduleSweepOrphanContractData(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
@@ -409,6 +416,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			controller.SweepStripeDunningPost,
 		),
 		task.NewTaskTargetWithPost(
+			controller.SweepStripeAbandonedSheets,
+			controller.SweepStripeAbandonedSheetsPost,
+		),
+		task.NewTaskTargetWithPost(
 			controller.PlaySubscriptionRenewal,
 			controller.PlaySubscriptionRenewalPost,
 			"bringyour.com/bringyour/controller.PlaySubscriptionRenewal",
@@ -459,6 +470,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredSessionState,
 			work.RemoveExpiredSessionStatePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredContractOriginLinger,
+			work.RemoveExpiredContractOriginLingerPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.SweepOrphanNetworkClientData,
@@ -730,6 +745,12 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.RemoveProductUpdates,
 			controller.RemoveProductUpdatesPost,
+		),
+		// the cleanup after an account deletion, queued by every deletion in
+		// its own transaction (owner 2026-11-16)
+		task.NewTaskTargetWithPost(
+			controller.RemoveDeletedNetworkData,
+			controller.RemoveDeletedNetworkDataPost,
 		),
 		// the onboarding email campaign: one task per network and step, and the
 		// daily App Store one-time offer code top-up

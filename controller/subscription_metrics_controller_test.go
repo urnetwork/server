@@ -282,6 +282,31 @@ func uniformSubscriptionMetricsSnapshot(value int64, sourceTime time.Time) *mode
 			snapshot.DataPackBytes[key] = value
 		}
 	}
+	// the revenue: the forecast and the trials by store and deduplicated,
+	// recurring revenue and the conversion rate by store and all
+	snapshot.NewForecastRevenueUsd = map[model.SubscriptionMetricsStoreWindow]float64{}
+	snapshot.RecurringRevenueUsd = map[model.SubscriptionMetricsStoreWindow]float64{}
+	snapshot.TrialExpectedRevenueUsd = map[string]float64{}
+	snapshot.TrialsConvertible = map[string]int64{}
+	snapshot.TrialConversionRates = map[string]float64{}
+	snapshot.TrialConversionTrials = map[model.SubscriptionMetricsStoreOutcome]int64{}
+	for _, store := range stores {
+		snapshot.TrialExpectedRevenueUsd[store] = float64(value)
+		snapshot.TrialsConvertible[store] = value
+		for _, window := range model.SubscriptionMetricsWindows() {
+			snapshot.NewForecastRevenueUsd[model.SubscriptionMetricsStoreWindow{Store: store, Window: window}] = float64(value)
+		}
+	}
+	for _, store := range append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreAll) {
+		snapshot.TrialConversionRates[store] = float64(value)
+		for _, window := range model.SubscriptionMetricsWindows() {
+			snapshot.RecurringRevenueUsd[model.SubscriptionMetricsStoreWindow{Store: store, Window: window}] = float64(value)
+		}
+		for _, outcome := range model.SubscriptionMetricsTrialOutcomes() {
+			snapshot.TrialConversionTrials[model.SubscriptionMetricsStoreOutcome{Store: store, Outcome: outcome}] = value
+		}
+	}
+	snapshot.RevenueLoaded = true
 	return snapshot
 }
 
@@ -301,9 +326,14 @@ func requireSubscriptionMetricsGeneration(
 	// series each (96), and gamma 32 more; the received payments not credited
 	// add a count and an oldest age for each of eight rails (16); the past-due
 	// accounts one per store and deduplicated (11), and Stripe's failed
-	// renewals one open count and four reasons by three windows (13)
-	if len(metrics) != 399 {
-		t.Fatalf("collected metrics = %d, want 399 bounded samples", len(metrics))
+	// renewals one open count and four reasons by three windows (13); the
+	// revenue 121: the forecast and recurring revenue by eleven stores and
+	// three windows (66), the expected trial revenue, the convertible trials
+	// and the conversion rate by eleven stores (33), and the conversion's
+	// trials by eleven stores and two outcomes (22); and the revenue refresh
+	// failures in a row (1)
+	if len(metrics) != 521 {
+		t.Fatalf("collected metrics = %d, want 521 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric
@@ -318,6 +348,9 @@ func requireSubscriptionMetricsGeneration(
 			want = float64(refreshedAt.Unix())
 		case strings.Contains(desc, `fqName: "urnetwork_subscription_reconciliation_source_timestamp_seconds"`):
 			want = float64(sourceTime.Unix())
+		case strings.Contains(desc, `fqName: "urnetwork_subscription_revenue_refresh_failures"`):
+			// every uniform snapshot's revenue step succeeded
+			want = 0
 		case !strings.Contains(desc, `fqName: "urnetwork_subscription_`):
 			t.Fatalf("unexpected metric descriptor %s", desc)
 		}

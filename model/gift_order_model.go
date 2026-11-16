@@ -104,7 +104,8 @@ type GiftOrder struct {
 	Rail           string
 	// set while pending (SetGiftOrderStripeSessionId, SetGiftOrderCryptoIntentId,
 	// SetGiftOrderGammaIntentIdInTx); a coin's invoice and a Gamma intent are
-	// unset again by the 30-day unlink
+	// unset again by the 30-day unlink, which keeps a coin's invoice that
+	// received a payment it was not credited for until the payment is resolved
 	StripeSessionId string
 	CryptoIntentId  *server.Id
 	GammaIntentId   *server.Id
@@ -329,13 +330,18 @@ func GiftRedeemByDate(redeemBy time.Time) time.Time {
 // session, whose completion fulfils it (GetGiftOrderIdForStripeSession). A
 // session id too long to key the order's codes is refused before anyone pays.
 func SetGiftOrderStripeSessionId(ctx context.Context, giftOrderId server.Id, sessionId string) error {
+	return SetGiftOrderStripeSessionIdInConn(nil, ctx, giftOrderId, sessionId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func SetGiftOrderStripeSessionIdInConn(connOwner server.PgConn, ctx context.Context, giftOrderId server.Id, sessionId string) error {
 	if sessionId == "" {
 		return errors.New("gift order stripe session id is empty")
 	}
 	if giftPurchaseEventBaseMaxLength < len(sessionId) {
 		return fmt.Errorf("gift order stripe session id is longer than %d", giftPurchaseEventBaseMaxLength)
 	}
-	return setGiftOrderPaymentKey(ctx, giftOrderId, "stripe_session_id", sessionId)
+	return setGiftOrderPaymentKeyInConn(connOwner, ctx, giftOrderId, "stripe_session_id", sessionId)
 }
 
 // SetGiftOrderCryptoIntentId keys a pending order to its crypto invoice,
@@ -379,8 +385,13 @@ func SetGiftOrderGammaIntentIdInTx(tx server.PgTx, ctx context.Context, giftOrde
 
 // Sets the column (a source literal) while the order is pending, or leaves it
 // when it already holds the value.
-func setGiftOrderPaymentKey(ctx context.Context, giftOrderId server.Id, column string, value any) (returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
+func setGiftOrderPaymentKey(ctx context.Context, giftOrderId server.Id, column string, value any) error {
+	return setGiftOrderPaymentKeyInConn(nil, ctx, giftOrderId, column, value)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func setGiftOrderPaymentKeyInConn(connOwner server.PgConn, ctx context.Context, giftOrderId server.Id, column string, value any) (returnErr error) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
 		returnErr = nil
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
@@ -420,8 +431,13 @@ func giftOrderExistsInTx(tx server.PgTx, ctx context.Context, giftOrderId server
 }
 
 // GetGiftOrder is the order with its recipients, nil when there is none.
-func GetGiftOrder(ctx context.Context, giftOrderId server.Id) (order *GiftOrder) {
-	server.Db(ctx, func(conn server.PgConn) {
+func GetGiftOrder(ctx context.Context, giftOrderId server.Id) *GiftOrder {
+	return GetGiftOrderInConn(nil, ctx, giftOrderId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetGiftOrderInConn(connOwner server.PgConn, ctx context.Context, giftOrderId server.Id) (order *GiftOrder) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		order = getGiftOrder(ctx, conn, giftOrderId)
 	})
 	return
@@ -563,10 +579,124 @@ func GetGiftOrderIdForStripeSession(ctx context.Context, sessionId string) *serv
 	return getGiftOrderIdFor(ctx, "stripe_session_id", sessionId)
 }
 
+// PendingStripeGiftOrder is a card order the payment reconciler reads from
+// Stripe (ListPendingStripeGiftOrdersInConn).
+type PendingStripeGiftOrder struct {
+	GiftOrderId     server.Id
+	StripeSessionId string
+	CreateTime      time.Time
+	TotalCents      int64
+}
+
+// The payment_reconciliation_event actions of store stripe that settle a card
+// order's Checkout session for good, each recorded once per session (evidence
+// the session id): the session expired (the reconciler read it,
+// PaymentReconcileActionCheckoutExpired) or its delayed payment failed (the
+// checkout.session.async_payment_failed webhook,
+// PaymentReconcileActionPaymentFailed), so it can never be paid; or it was
+// paid and its charge was refunded or disputed before the order was fulfilled
+// (the reconciler read it, PaymentReconcileActionRefunded,
+// PaymentReconcileActionDisputed), so it is never fulfilled. The webhooks'
+// own refunded and disputed records name a refund or a dispute, never a
+// session. A session that paid another amount or currency than its order
+// (store gift, PaymentReconcileActionCreditUnfulfillable, reason
+// gift_payment_mismatch) is settled too. An operator settles the paid ones,
+// and no read of Stripe changes them.
+var stripeGiftCheckoutSettledActions = []string{
+	PaymentReconcileActionCheckoutExpired,
+	PaymentReconcileActionPaymentFailed,
+	PaymentReconcileActionRefunded,
+	PaymentReconcileActionDisputed,
+}
+
+// ListPendingStripeGiftOrdersInConn lists the card orders still pending that
+// were made in [createdFrom, createdBefore) and are keyed to a Checkout
+// session that no settled record names (stripeGiftCheckoutSettledActions, and
+// a gift credit_unfulfillable), at most limit, newest first or oldest first.
+// The hourly payment reconciler reads each one's session from Stripe
+// (controller/payment_reconcile_gift.go). A settled record is written after
+// its order was made, so only records from createdFrom on are read.
+func ListPendingStripeGiftOrdersInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	createdFrom time.Time,
+	createdBefore time.Time,
+	newestFirst bool,
+	limit int,
+) (orders []*PendingStripeGiftOrder) {
+	// a source literal, never input
+	orderBy := "gift_order.create_time, gift_order.gift_order_id"
+	if newestFirst {
+		orderBy = "gift_order.create_time DESC, gift_order.gift_order_id DESC"
+	}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT
+					gift_order.gift_order_id,
+					gift_order.stripe_session_id,
+					gift_order.create_time,
+					gift_order.total_cents
+				FROM gift_order
+				WHERE
+					gift_order.rail = $1 AND
+					gift_order.status = $2 AND
+					gift_order.stripe_session_id IS NOT NULL AND
+					$3 <= gift_order.create_time AND
+					gift_order.create_time < $4 AND
+					NOT EXISTS (
+						SELECT 1
+						FROM payment_reconciliation_event event
+						WHERE
+							(
+								(event.store = $5 AND event.action = ANY($6)) OR
+								(event.store = $7 AND event.action = $8)
+							) AND
+							event.evidence = gift_order.stripe_session_id AND
+							NOT event.dry_run AND
+							$3 <= event.event_time
+					)
+				ORDER BY `+orderBy+`
+				LIMIT $9
+			`,
+			GiftRailStripe,
+			GiftOrderStatusPending,
+			createdFrom.UTC(),
+			createdBefore.UTC(),
+			SubscriptionMarketStripe,
+			stripeGiftCheckoutSettledActions,
+			SubscriptionMarketGift,
+			PaymentReconcileActionCreditUnfulfillable,
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				order := &PendingStripeGiftOrder{}
+				server.Raise(result.Scan(
+					&order.GiftOrderId,
+					&order.StripeSessionId,
+					&order.CreateTime,
+					&order.TotalCents,
+				))
+				orders = append(orders, order)
+			}
+		})
+	})
+	return
+}
+
 // GetGiftOrderIdForCryptoIntent is the order keyed to the invoice, nil when
 // none is.
 func GetGiftOrderIdForCryptoIntent(ctx context.Context, intentId server.Id) *server.Id {
-	return getGiftOrderIdFor(ctx, "crypto_intent_id", intentId)
+	return GetGiftOrderIdForCryptoIntentInConn(nil, ctx, intentId)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition
+// boundary. The payment reconciler's crypto legs credit a gift invoice on the
+// session that holds their run lock.
+func GetGiftOrderIdForCryptoIntentInConn(connOwner server.PgConn, ctx context.Context, intentId server.Id) *server.Id {
+	return getGiftOrderIdForInConn(connOwner, ctx, "crypto_intent_id", intentId)
 }
 
 // GetGiftOrderIdForGammaIntent is the order keyed to the Pay with Gamma
@@ -576,8 +706,13 @@ func GetGiftOrderIdForGammaIntent(ctx context.Context, intentId server.Id) *serv
 }
 
 // The order whose column (a source literal) holds value.
-func getGiftOrderIdFor(ctx context.Context, column string, value any) (giftOrderId *server.Id) {
-	server.Db(ctx, func(conn server.PgConn) {
+func getGiftOrderIdFor(ctx context.Context, column string, value any) *server.Id {
+	return getGiftOrderIdForInConn(nil, ctx, column, value)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func getGiftOrderIdForInConn(connOwner server.PgConn, ctx context.Context, column string, value any) (giftOrderId *server.Id) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			fmt.Sprintf(`SELECT gift_order_id FROM gift_order WHERE %s = $1`, column),

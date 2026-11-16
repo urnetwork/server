@@ -40,6 +40,11 @@ import (
 //     from candidates with an IPv4 address and up to half from candidates with
 //     an IPv6 address, then the rest by rank, so an IPv4-only and an
 //     IPv6-only client each find candidates.
+//   - No network holds more of the cohort than its quota while other networks
+//     can fill it (model.ExtenderSampleSettings): every step above passes over
+//     a candidate whose network holds its quota, and only once no other
+//     candidate is left are those passed over offered, in the same order, so
+//     the cohort is never smaller than it was without the quota.
 //
 // The partition and the ranking are keyed by the operator's directory secret,
 // so every replica draws the same cohort and nobody without the root key can
@@ -80,9 +85,12 @@ func extenderSeedRecordCount(configured int) int {
 // key it, and the families it has an active address of.
 type extenderSeedCandidate struct {
 	extenderId server.Id
-	keyHex     string
-	ipv4       bool
-	ipv6       bool
+	// the network that activated the extender, which the cohort holds a quota
+	// of
+	networkId server.Id
+	keyHex    string
+	ipv4      bool
+	ipv6      bool
 }
 
 // The open pool of the dns sets, by identity key. Only the open tier with no
@@ -106,6 +114,7 @@ func extenderSeedCandidates(addresses []*model.NetworkExtenderDnsAddress) (map[s
 		if !ok {
 			candidate = &extenderSeedCandidate{
 				extenderId: address.ExtenderId,
+				networkId:  address.NetworkId,
 				keyHex:     keyHex,
 			}
 			candidates[keyHex] = candidate
@@ -135,7 +144,8 @@ func extenderSeedCandidates(addresses []*model.NetworkExtenderDnsAddress) (map[s
 // order, when that bundle is of the same cohort epoch; nil otherwise. Each
 // that is still an open candidate is offered first, in its place. Then the
 // epoch's ranking of the union of the dns default partitions is offered, each
-// family first up to half the cohort.
+// family first up to half the cohort. All of it under the network quota
+// first, and then, while the cohort is short, without it.
 type extenderSeedCohortDraw struct {
 	candidates map[string]*extenderSeedCandidate
 	previous   []string
@@ -146,6 +156,9 @@ type extenderSeedCohortDraw struct {
 	chosen     []*extenderSeedCandidate
 	ipv4Count  int
 	ipv6Count  int
+	// what each network holds of the cohort, under its quota
+	// (model.ExtenderSampleSettings)
+	sampler *model.ExtenderNetworkSampler
 }
 
 func newExtenderSeedCohortDraw(
@@ -164,6 +177,7 @@ func newExtenderSeedCohortDraw(
 		count:      count,
 		quota:      (count + 1) / 2,
 		offered:    map[string]bool{},
+		sampler:    newExtenderSampleSettings().NewNetworkSampler(count),
 	}
 }
 
@@ -223,7 +237,8 @@ func extenderSeedRingOrder(pools map[int][]string, secret []byte, epoch uint64) 
 }
 
 // The most preferred candidate not offered yet, or nil when the cohort is full
-// or no candidate is left.
+// or no candidate is left: the most preferred whose network holds less than its
+// quota, and only when there is none, the most preferred passed over for it.
 func (self *extenderSeedCohortDraw) next() *extenderSeedCandidate {
 	if self.count <= len(self.chosen) {
 		return nil
@@ -236,35 +251,49 @@ func (self *extenderSeedCohortDraw) next() *extenderSeedCandidate {
 		self.offered[keyHex] = true
 		return candidate
 	}
-	for _, keyHex := range self.previous {
-		if candidate := offer(keyHex); candidate != nil {
-			return candidate
-		}
-	}
-	pick := func(wants func(candidate *extenderSeedCandidate) bool) *extenderSeedCandidate {
-		for _, keyHex := range self.ranked {
-			if self.offered[keyHex] || !wants(self.candidates[keyHex]) {
-				continue
+	// the previous members, then the ranking by family, among the candidates
+	// admits takes
+	nextAdmitted := func(admits func(candidate *extenderSeedCandidate) bool) *extenderSeedCandidate {
+		for _, keyHex := range self.previous {
+			if candidate, ok := self.candidates[keyHex]; ok && admits(candidate) {
+				if candidate := offer(keyHex); candidate != nil {
+					return candidate
+				}
 			}
-			return offer(keyHex)
 		}
-		return nil
-	}
-	if self.ipv6Count < self.quota {
-		if candidate := pick(func(candidate *extenderSeedCandidate) bool { return candidate.ipv6 }); candidate != nil {
-			return candidate
+		pick := func(wants func(candidate *extenderSeedCandidate) bool) *extenderSeedCandidate {
+			for _, keyHex := range self.ranked {
+				candidate := self.candidates[keyHex]
+				if self.offered[keyHex] || !admits(candidate) || !wants(candidate) {
+					continue
+				}
+				return offer(keyHex)
+			}
+			return nil
 		}
-	}
-	if self.ipv4Count < self.quota {
-		if candidate := pick(func(candidate *extenderSeedCandidate) bool { return candidate.ipv4 }); candidate != nil {
-			return candidate
+		if self.ipv6Count < self.quota {
+			if candidate := pick(func(candidate *extenderSeedCandidate) bool { return candidate.ipv6 }); candidate != nil {
+				return candidate
+			}
 		}
+		if self.ipv4Count < self.quota {
+			if candidate := pick(func(candidate *extenderSeedCandidate) bool { return candidate.ipv4 }); candidate != nil {
+				return candidate
+			}
+		}
+		return pick(func(candidate *extenderSeedCandidate) bool { return true })
 	}
-	return pick(func(candidate *extenderSeedCandidate) bool { return true })
+	if candidate := nextAdmitted(func(candidate *extenderSeedCandidate) bool {
+		return self.sampler.Admits(candidate.networkId)
+	}); candidate != nil {
+		return candidate
+	}
+	return nextAdmitted(func(candidate *extenderSeedCandidate) bool { return true })
 }
 
 // Takes an offered candidate into the cohort.
 func (self *extenderSeedCohortDraw) accept(candidate *extenderSeedCandidate) {
+	self.sampler.Take(candidate.networkId)
 	self.chosen = append(self.chosen, candidate)
 	if candidate.ipv4 {
 		self.ipv4Count += 1

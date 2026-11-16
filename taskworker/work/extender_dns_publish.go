@@ -176,6 +176,11 @@ const (
 // The families a set can be published for, in the order a tick sends them.
 var extenderDnsIpVersions = []int{4, 6}
 
+// The settings of what one network may hold of a sample the operator draws for
+// clients: the dns sets and the seed cohort (model.ExtenderSampleSettings). A
+// variable for the reason probeExtenderAddress is one.
+var newExtenderSampleSettings = model.DefaultExtenderSampleSettings
+
 // One geolocation set: the addresses one continent, or the default, is
 // answered with for one family.
 type extenderDnsRecordSet struct {
@@ -584,6 +589,14 @@ func extenderDnsAddressKeyHex(address *model.NetworkExtenderDnsAddress) string {
 // through to A. A continent with no open address of a family is not desired
 // either; its set is deleted.
 //
+// No network holds more of a set than its quota while other networks can fill
+// it (model.ExtenderSampleSettings): the set is walked in the order above, an
+// address whose extender's network holds its quota is passed over, and the
+// walk goes on around the ring only as far as the set needs. When the ring
+// runs out with the set short, the addresses passed over fill it, in the same
+// order, so a set is never smaller than it was without the quota. A pinned
+// canary is taken whatever its network holds, and counts toward it.
+//
 // Each country sample adds the sets of a country answered by sets of its own
 // (extenderDnsCountryRecordSets), after every location's, and changes none of
 // theirs. A country's sets carry signed records, so with no signer there are
@@ -599,6 +612,7 @@ func sampleExtenderDnsRecordSets(
 	if sampleCount <= 0 {
 		sampleCount = ExtenderDnsDefaultSampleCount
 	}
+	sampleSettings := newExtenderSampleSettings()
 	// the open pool's keys per family and continent, each key once, and the
 	// address of each key per family
 	poolKeyHexes := map[extenderDnsPool][]string{}
@@ -607,6 +621,8 @@ func sampleExtenderDnsRecordSets(
 	canaryIps := map[extenderDnsPool][]string{}
 	// which extender an address belongs to, for the TXT set of its location
 	ipExtenderIds := map[string]server.Id{}
+	// the network of each extender, which a set holds a quota of
+	extenderNetworkIds := map[server.Id]server.Id{}
 	// the address of each family of every extender a set can answer, and
 	// which of them are dns canaries, for a country's sets
 	extenderIps := map[server.Id]map[int]string{}
@@ -637,6 +653,7 @@ func sampleExtenderDnsRecordSets(
 		}
 		ip := address.Ip.String()
 		ipExtenderIds[ip] = address.ExtenderId
+		extenderNetworkIds[address.ExtenderId] = address.NetworkId
 		keyHex := extenderDnsAddressKeyHex(address)
 		// an extender whose country has no continent -- unset, or a code the
 		// table does not carry -- is in the global pool only, rather than
@@ -666,30 +683,56 @@ func sampleExtenderDnsRecordSets(
 	// the set of one location and family
 	sample := func(vantage []byte, localPool extenderDnsPool, globalPool extenderDnsPool, canaryPool extenderDnsPool) []string {
 		ips := []string{}
-		take := func(ip string) {
-			if sampleCount <= len(ips) || slices.Contains(ips, ip) {
+		sampler := sampleSettings.NewNetworkSampler(sampleCount)
+		// every address offered once, in the order offered, and those passed
+		// over for their network's quota, in that order
+		offered := map[string]bool{}
+		passedIps := []string{}
+		ipNetworkId := func(ip string) server.Id {
+			return extenderNetworkIds[ipExtenderIds[ip]]
+		}
+		take := func(ip string, pinned bool) {
+			if sampler.Full() || offered[ip] {
 				return
 			}
+			offered[ip] = true
+			networkId := ipNetworkId(ip)
+			if !pinned && !sampler.Admits(networkId) {
+				passedIps = append(passedIps, ip)
+				return
+			}
+			sampler.Take(networkId)
 			ips = append(ips, ip)
 		}
+		// the addresses passed over, in their order, once the walk is done
+		// with the set short
+		fill := func() []string {
+			for _, ip := range passedIps {
+				if !sampler.TakeOver(ipNetworkId(ip)) {
+					break
+				}
+				ips = append(ips, ip)
+			}
+			return ips
+		}
 		for _, ip := range canaryIps[canaryPool] {
-			take(ip)
+			take(ip, true)
 		}
 		// the location's own partition first
 		if localKeyHexes := poolKeyHexes[localPool]; 0 < len(localKeyHexes) {
 			members, _, _ := connect.ExtenderPartitionMembers(secret, connect.ExtenderChannelDns, vantage, localKeyHexes)
 			for _, keyHex := range connect.ExtenderPartitionOrder(secret, connect.ExtenderChannelDns, vantage, epoch, members) {
-				take(keyIps[localPool][keyHex])
+				take(keyIps[localPool][keyHex], false)
 			}
 		}
-		if sampleCount <= len(ips) {
+		if sampler.Full() {
 			return ips
 		}
 		// then the location's partition of the global pool, and the ring
 		// after it, each in the epoch's order
 		globalKeyHexes := poolKeyHexes[globalPool]
 		if len(globalKeyHexes) == 0 {
-			return ips
+			return fill()
 		}
 		_, partition, partitionCount := connect.ExtenderPartitionMembers(secret, connect.ExtenderChannelDns, vantage, globalKeyHexes)
 		partitionKeyHexes := map[int][]string{}
@@ -698,15 +741,15 @@ func sampleExtenderDnsRecordSets(
 			partitionKeyHexes[p] = append(partitionKeyHexes[p], keyHex)
 		}
 		for offset := range partitionCount {
-			if sampleCount <= len(ips) {
+			if sampler.Full() {
 				break
 			}
 			members := partitionKeyHexes[(partition+offset)%partitionCount]
 			for _, keyHex := range connect.ExtenderPartitionOrder(secret, connect.ExtenderChannelDns, vantage, epoch, members) {
-				take(keyIps[globalPool][keyHex])
+				take(keyIps[globalPool][keyHex], false)
 			}
 		}
-		return ips
+		return fill()
 	}
 
 	desiredSets := []*extenderDnsRecordSet{}
@@ -837,6 +880,8 @@ func sampleExtenderDnsRecordSets(
 				extenderDnsLocationExtenderIds(rankedSets, ipExtenderIds),
 				canaryExtenderIds,
 				extenderIps,
+				extenderNetworkIds,
+				sampleSettings,
 				sign,
 			)...)
 		}
@@ -863,6 +908,12 @@ func sampleExtenderDnsRecordSets(
 // resolvers would not deliver whole (extenderDnsCountryTxtBudget), gives its
 // slot to the next in the window.
 //
+// No network holds more of the TXT set than its quota of recordCount while
+// other networks can fill it (model.ExtenderSampleSettings): a record whose
+// extender's network holds its quota gives its slot to the next in the window,
+// and the records passed over fill the slots left once the window runs out. A
+// pinned canary is taken whatever its network holds, and counts toward it.
+//
 // The address sets answer each family's address of exactly the extenders the
 // TXT set vouches for -- every address a record names, and no other -- since a
 // released client dials only an address a record vouched for. A family none
@@ -875,6 +926,8 @@ func extenderDnsCountryRecordSets(
 	ranked []server.Id,
 	canaryExtenderIds map[server.Id]bool,
 	extenderIps map[server.Id]map[int]string,
+	extenderNetworkIds map[server.Id]server.Id,
+	sampleSettings *model.ExtenderSampleSettings,
 	sign func(extenderId server.Id) (string, bool),
 ) []*extenderDnsRecordSet {
 	recordCount := max(1, countrySample.recordCount)
@@ -896,16 +949,37 @@ func extenderDnsCountryRecordSets(
 	}
 
 	budget := newExtenderDnsCountryTxtBudget(countrySample)
+	sampler := sampleSettings.NewNetworkSampler(recordCount)
 	records := []string{}
 	vouched := []server.Id{}
-	for _, extenderId := range candidates {
-		if recordCount <= len(records) {
+	// the candidates passed over for their network's quota, in window order
+	passedExtenderIds := []server.Id{}
+	for i, extenderId := range candidates {
+		if sampler.Full() {
+			break
+		}
+		networkId := extenderNetworkIds[extenderId]
+		if pinnedCanary := i < len(pinned); !pinnedCanary && !sampler.Admits(networkId) {
+			passedExtenderIds = append(passedExtenderIds, extenderId)
+			continue
+		}
+		record, ok := sign(extenderId)
+		if !ok || !budget.take(record) {
+			continue
+		}
+		sampler.Take(networkId)
+		records = append(records, record)
+		vouched = append(vouched, extenderId)
+	}
+	for _, extenderId := range passedExtenderIds {
+		if sampler.Full() {
 			break
 		}
 		record, ok := sign(extenderId)
 		if !ok || !budget.take(record) {
 			continue
 		}
+		sampler.TakeOver(extenderNetworkIds[extenderId])
 		records = append(records, record)
 		vouched = append(vouched, extenderId)
 	}

@@ -44,8 +44,10 @@ func TestSubscriptionMetricsQueriesTrackEveryPublishedStore(t *testing.T) {
 		}
 	}
 	for name, list := range map[string][]string{
-		"account":        subscriptionMetricsInList(t, subscriptionMetricsAccountQuery, "renewal.market"),
-		"reconciliation": subscriptionMetricsInList(t, subscriptionMetricsReconciliationQuery, "event.store"),
+		"account":          subscriptionMetricsInList(t, subscriptionMetricsAccountQuery, "renewal.market"),
+		"reconciliation":   subscriptionMetricsInList(t, subscriptionMetricsReconciliationQuery, "event.store"),
+		"trial conversion": subscriptionMetricsInList(t, subscriptionMetricsTrialConversionQuery, "renewal.market"),
+		"revenue":          subscriptionMetricsInList(t, subscriptionMetricsRevenueQuery, "renewal.market"),
 	} {
 		if !slices.Equal(list, stores) {
 			t.Errorf("%s query tracks %v, want the store labels %v", name, list, stores)

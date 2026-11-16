@@ -1115,6 +1115,20 @@ The window sets the size. At 5.4 GiB/day:
 - **The share of hosted window children** among devices and events: measure
   it and report what reads device counts. Device counting is unchanged.
 
+**Answered by the owner, 11-16 about 15:15Z, on the implementation report:**
+- **2, pending_task:** run the swap as soon as possible: the rehearsal dry run,
+  then the swap, then the drop of the old table 24 h later, with owner-run
+  scripts.
+- **3, transfer_debit_journal:** prepare Fri 11-20 07:30–12:00Z, C = Sat 11-21
+  00:00Z, finalize before 22:00Z. The daily drops may run during backups and
+  the payout block.
+- **4, audit_device_event:** prepare and finalize Fri 11-20 after 08:00Z, after
+  the journal's, with C = Mon 11-23.
+- **4c:** hosted window clients are not devices ("we don't need these as
+  devices"). The device sweep counts top-level clients only, the definition
+  the client limits use (AUDIT-DEVICE-EVENT-PARTITION-RUNBOOK §3). The client
+  limits are unchanged.
+
 ## 11. Order, effort and risks
 
 **Constraints.**

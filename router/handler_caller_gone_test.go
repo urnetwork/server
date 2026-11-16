@@ -63,10 +63,10 @@ func requireRouteCount(t *testing.T, metrics *httpMetrics, route *Route, status 
 	}
 }
 
-// Through every wrapper, a 503 answered to a caller that has gone counts as
-// canceled with no status: the authentication stop's 503 and the cache's 503.
-// Any other answer to a gone caller, such as a declared refusal or an
-// undeclared failure, keeps its exact status beside the canceled outcome, and
+// Through every wrapper, a 5xx answered to a caller that has gone counts as
+// canceled with no status: the authentication stop's 503, the cache's 503 and
+// an undeclared failure's 500. Any other answer to a gone caller, such as a
+// declared refusal, keeps its exact status beside the canceled outcome, and
 // the same request from a caller that waits counts its status as before. The
 // answers themselves do not change.
 func TestRouterCountsAGoneCallerCanceledNotUnavailable(t *testing.T) {
@@ -139,9 +139,9 @@ func TestRouterCountsAGoneCallerCanceledNotUnavailable(t *testing.T) {
 				if response.Code != goneWant {
 					t.Fatalf("gone caller answered %d, want the unchanged %d", response.Code, goneWant)
 				}
-				if goneWant == http.StatusServiceUnavailable {
+				if goneWant/100 == 5 {
 					requireRouteCount(t, metrics, route, "none", "canceled", 1)
-					requireRouteCount(t, metrics, route, "503", "canceled", 0)
+					requireRouteCount(t, metrics, route, fmt.Sprint(goneWant), "canceled", 0)
 				} else {
 					requireRouteCount(t, metrics, route, fmt.Sprint(goneWant), "canceled", 1)
 					requireRouteCount(t, metrics, route, "none", "canceled", 0)

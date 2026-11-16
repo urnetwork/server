@@ -1,6 +1,6 @@
 # Async task correctness audit
 
-This inventory covers the 96 registered application targets in the production
+This inventory covers the 97 registered application targets in the production
 and subnet-operator registries, including factory-built financial targets and
 retired compatibility handlers. The built-in `RunPost` dispatcher is covered
 separately by the task-helper tests below. Unregistered/manual utilities are not
@@ -78,6 +78,7 @@ cases passed the final run.
 | [RemoveProductUpdates](../controller/product_updates_controller.go) | HTTP failure propagates; successful/absent contact outcomes remain idempotent. | [TestRemoveProductUpdatesTaskPropagatesProviderOutcome](../controller/product_updates_task_test.go) |
 | [SubscriptionMetricsSync](../controller/subscription_metrics_controller.go) | Source-derived snapshot, replay, invalid-window rejection and recurrence. | [TestAsyncOnboardingAndSubscriptionSnapshots](../controller/async_snapshot_task_test.go) |
 | [SweepStripeDunning](../controller/subscription_stripe_dunning_sweep.go) | Owe each due payment-failed notice once on the shared invoice ledger row, concurrent with the webhooks and a hand send; a re-run owes nothing; recurrence. | [TestStripeDunningSweepOwesEachNoticeOnceAndReschedules](../controller/subscription_stripe_dunning_sweep_db_test.go); [TestStripeDunningSweepAndHandSendOweOneNotice](../controller/subscription_stripe_dunning_sweep_db_test.go); [TestStripeDunningSweepIsScheduledAtStartup](../taskworker/stripe_dunning_sweep_registration_test.go) |
+| [SweepStripeAbandonedSheets](../controller/subscription_stripe_abandoned_sheet_sweep.go) | Cancel each payment sheet left pending with no card on its subscription for over a day, whatever card its customer holds from an earlier purchase (owner, 2026-11-16: "Cancel after a day"), read again first so a card attached at the last moment goes the attach path instead; attach (card check, tier, held credit) a completed sheet whose attach every webhook and the report missed; never touch a sheet whose trial invoice the ledger holds; bounded Stripe calls and errors per run; recurrence. | [TestStripeAbandonedSheetSweep](../controller/subscription_stripe_abandoned_sheet_sweep_test.go); [TestStripeAbandonedSheetSweepBoundsStripe](../controller/subscription_stripe_abandoned_sheet_sweep_test.go); [TestStripeTrialCardCheckSweepAttachesMissedSheets](../controller/subscription_stripe_card_check_db_test.go); [TestStripeTrialCardCheckReconcileAndCreditedWindows](../controller/subscription_stripe_card_check_db_test.go); [TestStripeAbandonedSheetSweepIsScheduledAtStartup](../taskworker/stripe_abandoned_sheet_sweep_registration_test.go) |
 | [SyncProductUpdatesForUser](../controller/product_updates_controller.go) | Serialized user preference, provider failure recovery and one-shot opt-out effects. | [TestUserProductUpdatesTaskHonorsPreferenceAndProviderFailure](../controller/product_updates_task_test.go) |
 
 ### model

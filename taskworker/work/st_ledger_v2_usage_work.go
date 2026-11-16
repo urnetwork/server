@@ -62,8 +62,10 @@ type StLedgerV2UsageStepSettings struct {
 // for a shadow step. A shadow attempt's work stops at 1 h 50 min, and a chain
 // gives its epoch up after two timed-out attempts, for 8 days. A shadow read in
 // short slices takes about 45 to 70 minutes for a 7-day epoch
-// (controller.StLedgerV2ExtenderShadowSettings), so a timeout means the
-// database is struggling, and a third read would add to it.
+// (controller.StLedgerV2ExtenderShadowSettings), and its walk of the relay bytes
+// about 9 minutes more (model.GetStEpochExtenderRelay: 192 hour slices of about
+// 3 s each on Main, measured 2026-11-16), so a timeout means the database is
+// struggling, and a third read would add to it.
 func DefaultStLedgerV2UsageStepSettings() *StLedgerV2UsageStepSettings {
 	return &StLedgerV2UsageStepSettings{
 		MaxAttempts:       100,
