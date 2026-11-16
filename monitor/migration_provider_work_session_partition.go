@@ -69,9 +69,24 @@ func providerWorkSessionLegacyDropCustodyPredicates() []string {
 	return providerWorkSessionPartitionCustodyPredicatesWithDropGuard(server.ProviderWorkSessionEventLegacyDropGuardBodySql())
 }
 
-// The custody with dropGuard as the drop guard's body.
+// The append for provider clients only (owner, 2026-11-16) replaces only the
+// append's body, keeping the legacy drop guard's, and republishes the rest of
+// the custody.
+func providerWorkSessionProviderAppendCustodyPredicates() []string {
+	return providerWorkSessionPartitionCustodyPredicatesWith(server.ProviderWorkSessionProviderAppendBodySql(), server.ProviderWorkSessionEventLegacyDropGuardBodySql())
+}
+
+// The custody with dropGuard as the drop guard's body and the partition
+// preparation's append.
 func providerWorkSessionPartitionCustodyPredicatesWithDropGuard(dropGuard string) []string {
-	admitFloor, sessionAppend, receiptReference, _ := server.ProviderWorkSessionPartitionBodiesSql()
+	_, sessionAppend, _, _ := server.ProviderWorkSessionPartitionBodiesSql()
+	return providerWorkSessionPartitionCustodyPredicatesWith(sessionAppend, dropGuard)
+}
+
+// The custody with sessionAppend as the append's body and dropGuard as the
+// drop guard's.
+func providerWorkSessionPartitionCustodyPredicatesWith(sessionAppend string, dropGuard string) []string {
+	admitFloor, _, receiptReference, _ := server.ProviderWorkSessionPartitionBodiesSql()
 	return []string{
 		migrationFp2Table("provider_work_session_head"),
 		snMainnetMigrationColumns("provider_work_session_head",

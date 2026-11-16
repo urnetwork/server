@@ -1032,10 +1032,17 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// position
 	[]snMainnetMigrationContract{giftGammaSchemaMigrationContract},
 	// the journal's drop guard with the legacy partition's early drop, which
-	// supersedes the horizon drop guard's contract, versioned by its position
+	// supersedes the horizon drop guard's contract, versioned by its position;
+	// the append for provider clients only supersedes it
 	[]snMainnetMigrationContract{
 		migrationCurrentSuffix(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), "provider session custody with the legacy partition's early drop",
-			providerWorkSessionLegacyDropCustodyPredicates()...),
+			providerWorkSessionLegacyDropCustodyPredicates()...).removedAt(server.ProviderWorkSessionProviderAppendMigrationVersion()),
+	},
+	// the journal's append for provider clients only, which supersedes the
+	// legacy drop guard's contract, versioned by its position
+	[]snMainnetMigrationContract{
+		migrationCurrentSuffix(server.ProviderWorkSessionProviderAppendMigrationVersion(), "provider session custody with events for provider clients only",
+			providerWorkSessionProviderAppendCustodyPredicates()...),
 	},
 )
 

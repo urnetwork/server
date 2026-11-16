@@ -121,6 +121,17 @@ func ProviderWorkSessionEventLegacyDropGuardMigrationVersion() int {
 	return sqlMigrationVersion(providerWorkSessionEventLegacyDropGuardSql)
 }
 
+// The journal's append for provider clients only (owner, 2026-11-16).
+func ProviderWorkSessionProviderAppendBodySql() string {
+	return strings.Split(providerWorkSessionProviderAppendSql, "$session_append$")[1]
+}
+
+// The version of the migration that publishes the append for provider clients
+// only, found by its SQL. Zero when the list lacks it.
+func ProviderWorkSessionProviderAppendMigrationVersion() int {
+	return sqlMigrationVersion(providerWorkSessionProviderAppendSql)
+}
+
 // Read-only consumers pin the provider successor's exact bodies without
 // changing any historical migration or reproducing its replacement logic.
 func CompetitionWinnerReviewProviderBodiesSql() (provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard string) {
