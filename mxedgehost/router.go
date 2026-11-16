@@ -32,9 +32,14 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/dnsservice"
 	"github.com/urnetwork/sidecar/mxedgeservice"
+	"github.com/urnetwork/sidecar/protocol"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
@@ -97,6 +102,11 @@ type RouterDeps struct {
 	// The listing feed's mirror (feed_mirror.go). nil: none, so nothing is rejected at the banner, as with
 	// the feed down.
 	Listings mxedgeservice.MxListingSource
+	// A Team direct MX's rows (MAIL-M7-23): model.NewMxDirectMxStore on the route root. nil: no prober runs, so
+	// no direct MX is verified and mx keeps the routers.
+	DirectMxStore mxedgeservice.MxDirectMxStore
+	// TCP to a direct-MX receiver. nil: the host's dialer.
+	DirectMxDial func(ctx context.Context, address netip.AddrPort) (net.Conn, error)
 	// Each replaces the block's: a test's gates, a test's Redis.
 	Gates sidecar.ServiceGates
 	Redis sidecar.Redis
@@ -284,6 +294,11 @@ func NewRouterHost(ctx context.Context, settings *HostSettings, routerSettings *
 	if 0 < len(self.missing) {
 		log.Errorf("[%s]not ready without %s", hostRouterService, strings.Join(self.missing, "; "))
 	}
+	if deps.DirectMxStore != nil {
+		if err := self.startDirectMxProber(settings.MxEdge, deps); err != nil {
+			log.Errorf("[%s]no direct-MX prober: %v", hostRouterService, err)
+		}
+	}
 	if deps.NewClients != nil && deps.NewDial != nil {
 		self.group.Add(1)
 		go self.runClients()
@@ -291,6 +306,64 @@ func NewRouterHost(ctx context.Context, settings *HostSettings, routerSettings *
 		close(self.clientsMade)
 	}
 	return self, nil
+}
+
+// Starts a Team direct MX's prober (mxedgeservice.MxDirectMxProber) on the block's context: the host's dial to TCP 25,
+// §12.7's A rules beside the engine's own, and its alert as a forced mail hint to the network's published receivers
+// (plan-MAIL-hints#2), off every connection's path.
+func (self *RouterHost) startDirectMxProber(mxEdge *mxedgeservice.MxEdgeSettings, deps *RouterDeps) error {
+	dial := deps.DirectMxDial
+	if dial == nil {
+		dial = func(ctx context.Context, address netip.AddrPort) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "tcp", address.String())
+		}
+	}
+	settings := mxedgeservice.DefaultMxDirectMxSettings()
+	settings.EhloName = mxEdge.BannerHostName
+	prober, err := mxedgeservice.NewMxDirectMxProber(&mxedgeservice.MxDirectMxProberArgs{
+		Store: deps.DirectMxStore,
+		Dial:  dial,
+		PublicAddress: func(address netip.Addr) bool {
+			return dnsservice.ValidateDirectMxAddresses([]netip.Addr{address}, nil) == nil
+		},
+		Alert:    self.directMxAlert,
+		Clock:    deps.Clock,
+		Log:      self.log,
+		Settings: settings,
+	})
+	if err != nil {
+		return err
+	}
+	self.group.Add(1)
+	go func() {
+		defer self.group.Done()
+		prober.Run(self.ctx)
+	}()
+	return nil
+}
+
+// A failing direct MX's alert: MailHint{receiver_needed, mx}, forced, to the network's published receivers. Nothing
+// with no push or no receiver to hint.
+func (self *RouterHost) directMxAlert(ctx context.Context, row *mxedgeservice.MxDirectMxRow) error {
+	if self.host.Push == nil || len(row.HintSidecarIds) == 0 {
+		return nil
+	}
+	body, err := proto.Marshal(&protocol.MailHint{Kind: protocol.MailHintKind_MAIL_HINT_RECEIVER_NEEDED, Host: "mx"})
+	if err != nil {
+		return err
+	}
+	sidecarIds := make([]connect.Id, 0, len(row.HintSidecarIds))
+	for _, sidecarId := range row.HintSidecarIds {
+		sidecarIds = append(sidecarIds, connect.Id(sidecarId))
+	}
+	return self.host.Push.HintSidecars(ctx, sidecarIds, &sidecar.ClientHint{
+		Topic:   sidecar.PushTopicMail,
+		Version: uint64(max(time.Now().UnixMilli(), 0)),
+		Kind:    uint32(protocol.MessageType_MAIL_HINT),
+		Body:    body,
+		Forced:  true,
+	})
 }
 
 // Makes the block's clients and the dial over them, again each ClientsRetryInterval until both exist or

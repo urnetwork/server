@@ -30,14 +30,27 @@ const (
 	MailDirectMxStateFailing MailDirectMxState = "failing"
 )
 
-// The most direct-MX receivers a network names (§15.4).
-const MailDirectMxMaxReceiverCount = 2
+// Tunables of the direct-MX rows (QD-702).
+type MailDirectMxSettings struct {
+	// The most direct-MX receivers a network names (§15.4's two).
+	MaxReceiverCount int
+	// The most rows the prober's list reads in one pass, across every Team network.
+	ListMaxCount int
+}
+
+// §15.4's two receivers, and a list far past the Team networks that name any.
+func DefaultMailDirectMxSettings() *MailDirectMxSettings {
+	return &MailDirectMxSettings{
+		MaxReceiverCount: 2,
+		ListMaxCount:     100000,
+	}
+}
 
 var (
 	// A row no network could name: no network or receiver, an address that is
 	// not a public unicast one, or an unknown state.
 	ErrMailDirectMxInvalid = errors.New("mail direct mx invalid")
-	// The network already names MailDirectMxMaxReceiverCount others.
+	// The network already names MailDirectMxSettings.MaxReceiverCount others.
 	ErrMailDirectMxFull = errors.New("mail direct mx full")
 )
 
@@ -84,7 +97,7 @@ func PutMailDirectMxInTx(ctx context.Context, tx server.PgTx, networkId server.I
 		networkId,
 		receiverSidecarId,
 	).Scan(&otherCount))
-	if MailDirectMxMaxReceiverCount <= otherCount {
+	if DefaultMailDirectMxSettings().MaxReceiverCount <= otherCount {
 		return ErrMailDirectMxFull
 	}
 	server.RaisePgResult(tx.Exec(
@@ -103,7 +116,9 @@ func PutMailDirectMxInTx(ctx context.Context, tx server.PgTx, networkId server.I
 }
 
 // Sets a row's state from a probe: verified with its time, or failing, which
-// keeps the last verify_time. A row that is gone stays gone.
+// keeps the last verify_time. A row never verified stays pending on a failure,
+// so §12.8 never points mx at a receiver that has not passed (MAIL-M7-23). A row
+// that is gone stays gone.
 func SetMailDirectMxProbeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, receiverSidecarId server.Id, address netip.Addr, passed bool) error {
 	if !server.SidecarMg7Linked() {
 		return ErrMailUnlinked
@@ -127,12 +142,13 @@ func SetMailDirectMxProbeInTx(ctx context.Context, tx server.PgTx, networkId ser
 		ctx,
 		`
 		UPDATE mail_direct_mx SET state = $4
-		WHERE network_id = $1 AND receiver_sidecar_id = $2 AND address = $3
+		WHERE network_id = $1 AND receiver_sidecar_id = $2 AND address = $3 AND state <> $5
 		`,
 		networkId,
 		receiverSidecarId,
 		address.Unmap().String(),
 		string(MailDirectMxStateFailing),
+		string(MailDirectMxStatePending),
 	))
 	return nil
 }
