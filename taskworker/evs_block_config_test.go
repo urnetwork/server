@@ -230,3 +230,51 @@ func TestEvsJobSettingsOfARun(t *testing.T) {
 		t.Fatal("a bound run does not take its settings")
 	}
 }
+
+// Every evs job that builds a part of the engine builds it under the settings bound to its run, the block config's:
+// a run bound to settings no part takes, a format this code does not know and a block size with no price table,
+// fails as that part's refusal, where the same run on the same host otherwise goes on to its stores.
+func TestEvsJobsBuildTheirPartsUnderTheRunsSettings(t *testing.T) {
+	names := map[string]*evsJob{}
+	for _, job := range evsJobs {
+		names[job.name] = job
+	}
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	fake := sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil)
+	sidecartest.RegisterEvsTwins(fake.Redis)
+	host := fake.ServiceHost()
+	clusterId := host.Blobs.MetadataClusterIds()[0]
+	repoId, refId, deletionId := sidecar.Id{1}, sidecar.Id{2}, sidecar.Id{3}
+	refused := evsservice.DefaultEvsSettings()
+	refused.InstanceFormat = 3
+	refused.PriceBlockByteCount = 7
+	ctx := withEvsJobSettings(t.Context(), refused)
+	for _, c := range []struct {
+		name string
+		args []byte
+	}{
+		{name: evsservice.EvsEvacuateTaskName},
+		{name: evsservice.EvsEvacuateTaskName, args: []byte(clusterId)},
+		{name: evsservice.EvsNightlyTaskName},
+		{name: evsservice.EvsCollectTaskName, args: evsservice.EvsCollectArgs(clusterId, repoId, refId)},
+		{name: evsservice.EvsSweepTaskName, args: evsservice.EvsSweepTurnOnTaskRequest().Args},
+		{name: evsservice.EvsDropTaskName, args: evsDropRepoRequest(clusterId, repoId, clock.Now()).Args},
+		{name: evsservice.EvsEpochCopyTaskName, args: evsservice.EvsEpochCopyArgs(repoId, refId, 2)},
+		{name: evsservice.EvsShredTaskName, args: evsservice.EvsShredArgs(repoId, deletionId, false)},
+		{name: evsservice.EvsReconcileTaskName},
+	} {
+		job := names[c.name]
+		if job == nil {
+			t.Errorf("no %s job", c.name)
+			continue
+		}
+		err := job.run(ctx, host, c.args)
+		if !errors.Is(err, evsservice.ErrEvsSettings) && !errors.Is(err, evsservice.ErrPriceTableBlockSize) {
+			t.Errorf("%s with args %q under settings no part takes: %v", c.name, c.args, err)
+		}
+		// and the refusal is the bound settings', not the run's own
+		if err := job.run(t.Context(), host, c.args); errors.Is(err, evsservice.ErrEvsSettings) || errors.Is(err, evsservice.ErrPriceTableBlockSize) {
+			t.Errorf("%s with args %q under this code's defaults: %v", c.name, c.args, err)
+		}
+	}
+}
