@@ -1021,7 +1021,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// order's codes, versioned by their position
 	[]snMainnetMigrationContract{giftRefundSchemaMigrationContract},
 	// Exact unchanged-patch retry authority inherits every prior guard check.
-	[]snMainnetMigrationContract{competitionOperatorRequestedPatchRetryMigrationContract},
+	[]snMainnetMigrationContract{competitionOperatorRequestedPatchRetryMigrationContract.removedAt(server.CompetitionSecondRecoveryMigrationVersion())},
 	// the bytes served per operator block of GET /account/epochs, versioned
 	// by their position
 	[]snMainnetMigrationContract{operatorBlockTrafficMigrationContract},
@@ -1037,6 +1037,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), "provider session custody with the legacy partition's early drop",
 			providerWorkSessionLegacyDropCustodyPredicates()...),
 	},
+	// The exact-job successor inherits all old audit/source/slot custody.
+	[]snMainnetMigrationContract{competitionSecondRecoveryMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

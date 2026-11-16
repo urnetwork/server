@@ -11604,4 +11604,8 @@ var migrations = []any{
 	// makes stays admitted, so it applies before or after any deploy. No
 	// service reads it; the drop runs only after it is applied.
 	newSqlMigration(providerWorkSessionEventLegacyDropGuardSql),
+
+	// One separately approved job may receive a second recovery without replacing
+	// its original immutable audit or changing any other job's one-cycle limit.
+	newSqlMigration(CompetitionSecondRecoveryMigrationSql()),
 }

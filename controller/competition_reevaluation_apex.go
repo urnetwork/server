@@ -38,6 +38,18 @@ func cloneApexReevaluationCycle(cycle *model.CompetitionJobReevaluationCycle) *m
 		return nil
 	}
 	copy := *cycle
+	if cycle.SecondRecovery != nil {
+		second := *cycle.SecondRecovery
+		if previous := second.PreviousRecovery; previous != nil {
+			if previous.SecondRecovery != nil {
+				invalid := *previous
+				second.PreviousRecovery = &invalid
+			} else {
+				second.PreviousRecovery = cloneApexReevaluationCycle(previous)
+			}
+		}
+		copy.SecondRecovery = &second
+	}
 	if cycle.Distributed != nil {
 		distributed := *cycle.Distributed
 		if distributed.PatchRetry != nil {
@@ -79,15 +91,20 @@ func validateApexReevaluationRecord(record ApexAdapterRecord) error {
 	if err := validateApexReevaluationScope(record, record.Reevaluation); err != nil {
 		return err
 	}
-	if len(record.ReevaluationHistory) != 1 {
-		return errors.New("Apex reevaluation must retain one original failure")
+	expected := []*model.CompetitionJobReevaluationCycle{record.Reevaluation}
+	if record.Reevaluation.Schema == 3 {
+		expected = []*model.CompetitionJobReevaluationCycle{record.Reevaluation.SecondRecovery.PreviousRecovery, record.Reevaluation}
 	}
-	previous := record.ReevaluationHistory[0]
-	if previous.Cycle != 0 || previous.EvaluationStatus != "failed" ||
-		(previous.State != "completed" && previous.State != "failed") || previous.ObservedAt.IsZero() ||
-		previous.EvaluationFailure != record.Reevaluation.PreviousFailure ||
-		previous.PreviousTerminalSha256 != record.Reevaluation.PreviousTerminalSha256 {
-		return errors.New("Apex reevaluation changed its original failure history")
+	if len(record.ReevaluationHistory) != len(expected) {
+		return errors.New("Apex reevaluation must retain each prior failure")
+	}
+	for index, receipt := range expected {
+		previous := record.ReevaluationHistory[index]
+		if previous.Cycle != index || previous.EvaluationStatus != "failed" ||
+			(previous.State != "completed" && previous.State != "failed") || previous.ObservedAt.IsZero() ||
+			previous.EvaluationFailure != receipt.PreviousFailure || previous.PreviousTerminalSha256 != receipt.PreviousTerminalSha256 {
+			return errors.New("Apex reevaluation changed its original failure history")
+		}
 	}
 	return nil
 }
@@ -95,6 +112,9 @@ func validateApexReevaluationRecord(record ApexAdapterRecord) error {
 // First observation may follow an offline interval. A receipt can supply the
 // missed prior failure, but never contradict already known completed scoring.
 func prepareApexReevaluationRecord(record *ApexAdapterRecord, cycle *model.CompetitionJobReevaluationCycle, now time.Time) error {
+	if cycle != nil && cycle.Schema == 3 {
+		return prepareApexSecondRecoveryRecord(record, cycle, now)
+	}
 	if err := validateApexReevaluationScope(*record, cycle); err != nil {
 		return err
 	}
@@ -218,6 +238,24 @@ func reconcileApexReevaluationAssociations(records []*ApexAdapterRecord, now tim
 		records[i] = &copy
 	}
 	var observation *ApexAdapterRecord
+	var successor *model.CompetitionJobReevaluationCycle
+	for _, record := range records {
+		if record.Reevaluation != nil && record.Reevaluation.Schema == 3 {
+			if validateApexReevaluationRecord(*record) != nil || successor != nil && successor.ReceiptSha256 != record.Reevaluation.ReceiptSha256 {
+				return true, errors.New("Apex aliases disagree on second recovery authority")
+			}
+			successor = record.Reevaluation
+		}
+	}
+	if successor != nil {
+		for _, record := range records {
+			if record.Reevaluation == nil || record.Reevaluation.Cycle != 2 {
+				if err := prepareApexReevaluationRecord(record, successor, now); err != nil {
+					return true, err
+				}
+			}
+		}
+	}
 	for _, record := range records {
 		if !apexAdapterJobIdentityMatches(*records[0], *record) {
 			return false, errors.New("Apex reevaluation changed a cached admission association")
@@ -264,7 +302,16 @@ func reconcileApexReevaluationAssociations(records []*ApexAdapterRecord, now tim
 // discover a typed operator receipt. Older APIs omitted some reviewed generic
 // failures; their bounded read-only lookup grants no execution authority.
 func apexReevaluationRefreshEligible(record ApexAdapterRecord) bool {
-	return record.JobId != (server.Id{}) && !record.Staging && !record.Published && record.Reevaluation == nil &&
+	return apexReevaluationRefreshEligibleForJob(record, server.CompetitionOperatorSecondRecoveryJobId())
+}
+
+// The caller supplies the immutable production approval, never a request or
+// configurable retry policy. Synthetic fixtures substitute only their own Id.
+func apexReevaluationRefreshEligibleForJob(record ApexAdapterRecord, approvedJobId server.Id) bool {
+	first := record.Reevaluation
+	secondDiscovery := record.JobId == approvedJobId && first != nil && first.Schema == 2 && first.Cycle == 1 &&
+		first.IncidentClass == model.CompetitionJobReevaluationOperatorRequestedPatchRetry && validateApexReevaluationRecord(record) == nil
+	return record.JobId != (server.Id{}) && !record.Staging && !record.Published && (first == nil || secondDiscovery) &&
 		record.EvaluationStatus == "failed" &&
 		(record.EvaluationFailure == nil || !record.EvaluationFailure.Retriable &&
 			((record.EvaluationFailure.Kind == "infrastructure" && (record.EvaluationFailure.Code == "artifact_archive_failed" || record.EvaluationFailure.Code == "evaluation_time_budget_exhausted" || record.EvaluationFailure.Code == "executor_process_failed")) ||

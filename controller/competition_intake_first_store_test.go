@@ -50,8 +50,15 @@ func newCompetitionIntakeFirstDatabaseFixtureInEnvironmentAt(t *testing.T, ctx c
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(max(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actualHead))
 	})
-	if actualHead != server.MigrationCount() {
-		t.Fatalf("intake lifecycle fixture schema=%d want=%d", actualHead, server.MigrationCount())
+	expectedHead := server.MigrationCount()
+	if predecessor, explicit := ctx.Value(competitionSecondRecoveryFixtureMigrationHeadKey{}).(int); explicit {
+		if predecessor != server.CompetitionSecondRecoveryMigrationVersion()-1 {
+			t.Fatal("intake lifecycle fixture predecessor is not the exact second-recovery boundary")
+		}
+		expectedHead = predecessor
+	}
+	if actualHead != expectedHead {
+		t.Fatalf("intake lifecycle fixture schema=%d want=%d", actualHead, expectedHead)
 	}
 	t.Logf("intake_lifecycle_fixture_schema_head=%d", actualHead)
 	fixture := &competitionIntakeFirstDatabaseFixture{settings: automationApiSettings()}
