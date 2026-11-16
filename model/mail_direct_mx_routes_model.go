@@ -200,25 +200,29 @@ func mailDirectMxRepointInTx(ctx context.Context, tx server.PgTx, networkId serv
 // The name the direct-MX removal effect registers under.
 const RemovalEffectMailDirectMx = "mail_direct_mx"
 
-// The removal effect (I-15): each removed sidecar's direct-MX rows go, and §12.8's records name the network's other
-// verified receivers, or the routers with none left, in the deactivation's transaction. Idempotent: a removal applied
-// again finds no row and writes nothing. A records write the zone refuses, the tier or mail gone, falls back to the
-// routers, so a removal never fails on a zone it cannot point.
+// The removal effect (I-15): each removed sidecar's direct-MX rows go, and in each root the network has a zone in,
+// §12.8's records name its other verified receivers, or the routers with none left, in the deactivation's
+// transaction, whichever process runs it. Idempotent: a removal applied again finds no row and writes nothing. A
+// records write the zone refuses, the tier or mail gone, falls back to the routers, and a zone waiting on its lock
+// is left to its next write, as the TLSA effect leaves it, so a removal never fails on a zone it cannot point.
 func applyMailDirectMxRemovalEffectInTx(ctx context.Context, tx server.PgTx, removal *Removal) error {
 	if !server.SidecarMg7Linked() {
 		return nil
 	}
-	root := DnsUserRoot()
 	for _, subject := range removal.SubjectsOf(sidecar.RevocationKindSidecar) {
 		removedCount, err := RemoveMailDirectMxReceiverInTx(ctx, tx, subject.NetworkId, subject.SubjectId)
 		if err != nil {
 			return err
 		}
-		if removedCount == 0 || root == "" {
+		if removedCount == 0 || !dnsCustomHostLinked() {
 			continue
 		}
-		if err := mailDirectMxRepointInTx(ctx, tx, subject.NetworkId, root); err != nil {
-			if _, clearErr := DnsClearDirectMxInTx(ctx, tx, subject.NetworkId, root, nil); clearErr != nil && !errors.Is(clearErr, ErrDnsUnlinked) {
+		for _, root := range getNetworkDnsRootsInTx(ctx, tx, subject.NetworkId) {
+			if err := mailDirectMxRepointInTx(ctx, tx, subject.NetworkId, root); err == nil || IsDnsZoneWaiting(err) {
+				continue
+			}
+			if _, clearErr := DnsClearDirectMxInTx(ctx, tx, subject.NetworkId, root, nil); clearErr != nil &&
+				!errors.Is(clearErr, ErrDnsUnlinked) && !IsDnsZoneWaiting(clearErr) {
 				return clearErr
 			}
 		}
