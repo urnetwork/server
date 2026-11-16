@@ -1,0 +1,12 @@
+{
+  "about": "§21.10's abuse mailbox as a test seals it (ABUSE-M5-18): each record's fields, its commit time in hours from the sidecar dump, and its place in the export, which a retried mail can put out of commit order. The test MACs each under a test key and seals it to a key pair it draws, so no key is kept here.",
+  "records": [
+    {"name": "kill_before_dump", "kind": "host_kill", "category": "phishing", "target": "shop.root.example", "hours": -30},
+    {"name": "lift_after_dump_of_kill_before_dump", "kind": "lift", "lifts": "kill_before_dump", "hours": 20},
+    {"name": "kill_after_dump", "kind": "host_kill", "category": "phishing", "target": "www.root.example", "hours": 2},
+    {"name": "suspension_after_dump", "kind": "network_suspend", "category": "other", "target": "network", "hours": 3},
+    {"name": "kill_past_its_until", "kind": "host_kill", "category": "malware", "target": "old.root.example", "hours": 4, "until_hours": 6},
+    {"name": "lift_mailed_before_its_kill", "kind": "lift", "lifts": "retried_kill", "hours": 9},
+    {"name": "retried_kill", "kind": "label_kill", "category": "phishing", "target": "label.root.example", "hours": 8}
+  ]
+}

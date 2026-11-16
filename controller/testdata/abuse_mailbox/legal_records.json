@@ -1,0 +1,10 @@
+{
+  "about": "§21.10's legal-request mailbox as a test seals it (ABUSE-M5-18): each hold's record, its placement and expiry in days from the sidecar dump. The test MACs and seals each as records.json's are.",
+  "records": [
+    {"name": "placed_before_dump", "event": "placed", "kind": "preserve_2703f", "place_days": -10, "expire_days": 80},
+    {"name": "placed_after_dump", "event": "placed", "kind": "preserve_2703f", "place_days": 2, "expire_days": 92},
+    {"name": "report_after_dump", "event": "placed", "kind": "report_2258a", "place_days": 3, "expire_days": 368},
+    {"name": "renewed_after_dump", "event": "renewed", "kind": "preserve_2703f", "place_days": -10, "expire_days": 170, "same_hold_as": "placed_before_dump"},
+    {"name": "ended_long_ago", "event": "placed", "kind": "preserve_2703f", "place_days": -200, "expire_days": -110}
+  ]
+}
