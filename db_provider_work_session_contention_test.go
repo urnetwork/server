@@ -11,13 +11,15 @@ import (
 )
 
 // Real statement and row triggers for a second client must commit while the
-// first client's actual connection insertion remains uncommitted.
+// first client's actual connection insertion remains uncommitted. Both clients
+// provide publicly, so the journal holds their events at every version.
 func assertProviderWorkSessionIndependentClients(t testing.TB, ctx context.Context) {
 	t.Helper()
 	clientIds := []Id{NewId(), NewId()}
 	Tx(ctx, func(tx PgTx) {
 		for _, clientId := range clientIds {
 			RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client(client_id,network_id,active) VALUES($1,$2,true)`, clientId, NewId()))
+			RaisePgResult(tx.Exec(ctx, `INSERT INTO provide_key(client_id,provide_mode,secret_key) VALUES($1,3,$2)`, clientId, make([]byte, 32)))
 		}
 	})
 	const insertSql = `INSERT INTO network_client_connection

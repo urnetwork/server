@@ -37,6 +37,9 @@ type providerWorkSessionFixture struct {
 
 // A dedicated synthetic source signs actual model operations independently of
 // all artifact/SDK keys. Both endpoint baselines precede their first admission.
+// The journal holds provider clients only (server
+// db_provider_work_session_providers.go), so every endpoint here provides
+// publicly before its first connection.
 func newProviderWorkSessionFixture(t testing.TB) *providerWorkSessionFixture {
 	t.Helper()
 	Testing_ResetExtenderAddressCache()
@@ -51,6 +54,7 @@ func newProviderWorkSessionFixture(t testing.TB) *providerWorkSessionFixture {
 	ctx := WithProviderWorkSessionSource(t.Context(), source)
 	f := &providerWorkSessionFixture{ctx: ctx, source: source, sourceId: server.NewId(), destinationId: server.NewId(), intermediaryId: server.NewId(), sourceNetworkId: server.NewId(), destinationNetworkId: server.NewId(), intermediaryNetworkId: server.NewId()}
 	addContractPayoutTestClients(ctx, map[server.Id]server.Id{f.sourceId: f.sourceNetworkId, f.destinationId: f.destinationNetworkId, f.intermediaryId: f.intermediaryNetworkId})
+	addProviderWorkSessionTestProvideKeys(ctx, f.sourceId, f.destinationId, f.intermediaryId)
 	// Complete independent analytics before admission. The real connection
 	// owners reuse the recorded day without leaving a worker in a query scope.
 	waitConnectDayWrites(
@@ -68,6 +72,23 @@ func newProviderWorkSessionFixture(t testing.TB) *providerWorkSessionFixture {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// Gives each client a public provide key, the row SetProvide writes, so the
+// journal holds its connections.
+func addProviderWorkSessionTestProvideKeys(ctx context.Context, clientIds ...server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		for _, clientId := range clientIds {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO provide_key (client_id, provide_mode, secret_key) VALUES ($1, $2, $3)
+				 ON CONFLICT (client_id, provide_mode) DO NOTHING`,
+				clientId,
+				ProvideModePublic,
+				make([]byte, 32),
+			))
+		}
+	})
 }
 
 func (self *providerWorkSessionFixture) contract(t testing.TB) server.Id {

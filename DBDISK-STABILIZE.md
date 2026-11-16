@@ -637,8 +637,29 @@ since 11-02). Development and owner.
   the retire lookup and no signer. Writing it only for providers would save most of its
   20+ GiB/day and of its steady state *(inferred: most connections are hosted window
   clients, which are payers)*. This reverses the 10-24 "not chosen": owner decision.
+  **Approved 11-16 about 03:50Z; migration 979** (`db_provider_work_session_providers.go`):
+  a provider client holds a friends and family or public provide key. In the week leaf
+  of 11-16 (pg_stats, 10.7M events at 03:46Z) 78% of events were sequence 1 or 2, a
+  new client's first connection, which never holds those keys when it opens, and 9%
+  were from clients past their 140th event.
 - **Retention for provider_work_session_head and audit_device_state,** which have no
-  deletes: about 4 GiB/day between them.
+  deletes: about 4 GiB/day between them. **Approved 11-16 with its windows (about
+  04:50Z)**, `model/session_state_retention.go`, one taskworker chain
+  (`remove_expired_session_state`), at most 2,000 rows a second for each table, brake
+  `{session_state_retention}control`, signal §2.4t:
+  - a work-session head goes once its client's last event has left the journal (the
+    weekly leaves drop at the contract horizon), never while the client has an open
+    connection or a receipt. The head guard admits only that delete (its migration).
+    About 600M of 609M heads were due on 11-16 (95.9% at sequence 2, a client seen for
+    one connection), about 3.5 days at 2,000/s;
+  - an audit_device_state row goes 1 day after its device went offline; online rows
+    never. The sweep reads online rows only and the transition stays in
+    audit_device_event (180 days). About 117M of 121M rows were due, about 16 hours.
+  - The deletes return no disk by themselves (`vacuum_truncate` off): new rows reuse
+    the space, so the tables stop growing. After the backlog deletes, with the I3
+    rebuilds from 11-20: `REINDEX CONCURRENTLY` of provider_work_session_head_pkey
+    (about 24 GiB back) and audit_device_state_pkey (about 3.5 GiB). The heaps (31 and 9
+    GiB) return only with a rewrite.
 - Lazy contracts: about 60% of contracts carried no data when measured on 11-05. A
   protocol change; the largest long-term lever on every contract table.
 
@@ -819,7 +840,7 @@ rows reuse.
 | 11-16..11-18 | The backlog delete (about 2 days at 2,000/s): watch WAL, vacuum, debit lag, archive growth, and `recent_close` falling to about zero. I6 before/after measurement. I8 alert and signal written. The 18.7 playbook tag and the I5 code written | read-only and code |
 | 11-18 | I2 partials, under rule (a), once the backlog delete is done (its deletes keep autovacuum busy on the same tables) | **no heavy I/O from 11-19 05:00Z** until the Thursday backup ends |
 | week of 11-16 or 11-23 | The 18.7 restart window (owner picks), with the pending_task swap inside it if its code has landed, then the full base copy on edge-6 (about 20 h; limit raised first) | no I3 during the full copy |
-| 11-20..11-28 | Fresh bloat run; I3: transfer_escrow's two, contract_close_pkey, sweeps, evidence; the I5 release, then the finished_task and journal cutovers | outside Sun 11-22, Thu 11-26 and the Saturday payout block |
+| 11-20..11-28 | Fresh bloat run; I3: transfer_escrow's two, contract_close_pkey, sweeps, evidence; the S4 retention's two primary keys (provider_work_session_head_pkey, audit_device_state_pkey) once its backlog is deleted; the I5 release, then the finished_task and journal cutovers | outside Sun 11-22, Thu 11-26 and the Saturday payout block |
 | 11-23..12-03 | Key history bulk deletes: check its brake and vacuums | |
 | 11-26..12-06 | I3: transfer_contract's six (largest heap, 1–2 h each) | outside the Sun/Thu runs |
 | by 12-08 | Evidence brake to 1,500/s; decide 19's date from the free space and the trim's measured effect | |
@@ -886,6 +907,13 @@ and the backup runs' durations.
   second, about three hours. A pass still behind its horizon when the week ends reads
   on from its cursor and starts over once it reaches the horizon, as before. The 2,000/s
   cap, the batch bounds, the 35-day floor and the 2-hour `CloseSettleTime` are unchanged.
+- **S4, work-session events only for provider clients** (about 03:50Z): migration 979,
+  ships with the next release.
+- **S4, retention for the work-session heads and audit_device_state** (about 03:50Z;
+  windows about 04:50Z): heads once the client's last event has left the journal, never
+  with an open connection or receipt; offline device state after 1 day, online never;
+  at most 2,000 rows a second each. The index rebuilds follow the backlog deletes, with
+  the I3 rebuilds from 11-20.
 
 **Open:**
 1. **Queue tables (I5):** the recommended partition-and-swap design, or VACUUM FULL in a
@@ -896,9 +924,8 @@ and the backup runs' durations.
 3. **18.7:** the window, and the playbook tag for it.
 4. **19:** `--link` (or `--swap`), and the date, against the free space and the trim's
    measured effect.
-5. **Structural items:** events only for provider clients and retention for the
-   work-session heads (S4, the first reverses a 10-24 choice); the index diet (S3); C1
-   with drops at the reaper's horizon once capacity exists (S1).
+5. **Structural items:** the index diet (S3); C1 with drops at the reaper's horizon once
+   capacity exists (S1).
 6. **Alerts:** the days-to-full rules and the reaper signal (§5.6).
 7. **Windows, only if the trim and the steps above fall short:** the archive floor,
    audit retention, and as a contingency a contract horizon below 35 days (S5).
