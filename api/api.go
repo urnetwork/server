@@ -437,6 +437,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/sn/claim-relay", handlers.SnClaimRelay),
 		router.NewRoute("POST", "/sn/claim-relay/claim-now", handlers.SnClaimRelayClaimNow),
 		router.NewRoute("GET", "/sn/attempt-artifact", handlers.SnAttemptArtifact),
+		router.NewRoute("HEAD", "/sn/attempt-artifact", handlers.SnAttemptArtifactHead),
 		router.NewRoute("POST", "/sn/attempt-artifact", handlers.SnUploadAttemptArtifactWithReserved(reserved)),
 		router.NewRoute("POST", "/sn/head-summary", handlers.SnUploadHeadSummary),
 		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),
