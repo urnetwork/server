@@ -570,7 +570,7 @@ func (self *TlsCustomStore) grantCheckInTx(ctx context.Context, tx server.PgTx, 
 		newestRegister,
 	)
 	waits = append(waits, settings.FailureWait(failures, now))
-	// each bucket reads the spends of its replay, ReplayWindowCount windows back (QD-990)
+	// each bucket reads its key's retained spends, from which its replay finds where to start (QD-990, QD-994)
 	orderBucket := settings.OrderBucket()
 	orders := tlsCustomSpendTimesInTx(
 		ctx,
