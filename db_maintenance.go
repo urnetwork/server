@@ -594,10 +594,14 @@ func dbMaintenanceIsContractPartitionTable(tableName string) bool {
 	return false
 }
 
+// A table swap's kept old table takes no writes and is dropped whole, and its
+// twin exists only inside the swap's transaction (db_table_swap.go).
 func dbMaintenanceShouldReindexTable(tableName string) bool {
+	_, swapRelation := TableSwapRelation(tableName)
 	return !dbMaintenanceSkipReindexTables[tableName] &&
 		!dbMaintenanceSkipReindexTablePattern().MatchString(tableName) &&
-		!dbMaintenanceIsContractPartitionTable(tableName)
+		!dbMaintenanceIsContractPartitionTable(tableName) &&
+		!swapRelation
 }
 
 // Whether the rotation may rebuild a table as a whole. REINDEX TABLE on a
