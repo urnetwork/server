@@ -11638,6 +11638,24 @@ var migrations = []any{
 	// monitor pins the new body from this version on.
 	newSqlMigration(clientKeyHistoryRetentionSevenDayFloorSql),
 
+	// The device day rollup (owner, 2026-11-16, PARTITION-CANDIDATES.md §7.3;
+	// audit_device_day_schema.go, model/audit_device_day.go): one new empty
+	// table, created only when absent, under a five-second lock bound. Nothing
+	// existing is locked, scanned or rewritten. Apply before deploying the
+	// taskworker whose device sweep keeps today's row and whose stats export
+	// reads the rows; an older taskworker never touches it.
+	auditDeviceDayMigration,
+
+	// The drop guard of transfer_debit_journal's daily partitions (owner,
+	// 2026-11-16, PARTITION-CANDIDATES.md §6.3;
+	// db_transfer_debit_journal_partition.go): a new function only, under a
+	// five-second lock bound, so no table is locked, scanned or rewritten.
+	// Nothing calls it before the owner-run cutover (bringyourctl model
+	// migrate debit-journal-partition), so it applies before or after any
+	// deploy; the cutover's prepare refuses without it. The monitor pins its
+	// body and the journal's custody in both layouts from this version on.
+	transferDebitJournalDropGuardMigration,
+
 	// The redundant UNIQUE (registration_hash) of st_client_key_history
 	// (owner, 2026-11-16, PARTITION-CANDIDATES.md §8.5;
 	// db_client_key_history_unique_drop.go): 20.6 GiB, never scanned, and

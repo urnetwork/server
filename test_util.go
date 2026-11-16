@@ -1276,6 +1276,9 @@ cluster: %t`,
 		if testFinishedTaskPartitions() {
 			Testing_PartitionFinishedTasks(ctx, TestingFinishedTaskCutoverDay(NowUtc()))
 		}
+		if testTransferDebitJournalPartitions() {
+			Testing_PartitionTransferDebitJournal(ctx, TestingTransferDebitJournalCutoverDay(NowUtc()))
+		}
 	}
 
 	if self.Warmup {

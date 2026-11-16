@@ -87,8 +87,6 @@ const NetworkWindowExpiration = 15 * 24 * time.Hour
 // grow anywhere near 1000.
 const networkWindowLookbackIndex = 1000
 
-const ClientLocationExpiration = 30 * 24 * time.Hour
-
 // How many disconnects a client is forgiven within one block before the block
 // counts against it. A disconnect drops the provider's live clients, so it is
 // real user impact and repeated disconnects (flapping) must still fail -- but
@@ -3080,7 +3078,7 @@ func updateClientLocationReliabilityCohortInTx(ctx context.Context, tx server.Pg
 	// upserted every pass and is mostly unchanged, and update_block_number is
 	// indexed, so writing it each pass was a non-HOT update per connected
 	// client per pass. The block number only ages out disconnected clients
-	// (RemoveOldClientLocationReliabilities), whose cutoff allows for the
+	// (RemoveOldClientLocationReliabilities), whose cutoffs allow for the
 	// refresh lag, and it never moves back.
 	upsertTag := server.RaisePgResult(tx.Exec(
 		ctx,
@@ -3281,12 +3279,6 @@ func updateClientLocationReliabilityCohortInTx(ctx context.Context, tx server.Pg
 	// 		fmt.Printf("valid connected client_id[%d] %s\n", i, clientId)
 	// 	}
 	// })
-}
-
-// Removes the rows of clients not seen for ClientLocationExpiration, in
-// bounded batches (network_client_location_reliability_retention.go).
-func RemoveOldClientLocationReliabilities(ctx context.Context, maxTime time.Time) (removedCount int64) {
-	return defaultClientLocationReliabilityRetentionSettings().removeOld(ctx, maxTime)
 }
 
 func GetAllClientLocationReliabilityMultipliers(ctx context.Context) (countryMultipliers map[server.Id]*CountryMultiplier) {
