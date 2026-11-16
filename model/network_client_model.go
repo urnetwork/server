@@ -4841,6 +4841,7 @@ func removeReapedNetworkClientDependents(ctx context.Context, reapedClientIds []
 	removeProvideKeysForClientIds(ctx, reapedClientIds)
 
 	for chunk := range slices.Chunk(reapedClientIds, removeCascadeChunkCount) {
+		var locationReliabilityCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// (cascade) remove TLS certificates of the reaped clients
 			server.RaisePgResult(tx.Exec(
@@ -4870,7 +4871,22 @@ func removeReapedNetworkClientDependents(ctx context.Context, reapedClientIds []
 				`,
 				idStrings(chunk),
 			))
+			// (cascade) and their location folds, which outlived them by up to
+			// 31 days (network_client_location_reliability_retention.go). No
+			// reader needs one past its client, and the pass cannot write it
+			// again: both its reads join network_client.
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM network_client_location_reliability
+				WHERE client_id = ANY($1::uuid[])
+				`,
+				idStrings(chunk),
+			))
+			locationReliabilityCount = tag.RowsAffected()
 		}, server.TxReadCommitted)
+		// counted once the chunk committed
+		countRetentionDeletedRows(RetentionTableNetworkClientLocationReliability, locationReliabilityCount)
 	}
 
 	for chunk := range slices.Chunk(reapedDeviceIds, removeCascadeChunkCount) {

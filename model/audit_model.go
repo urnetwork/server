@@ -528,7 +528,9 @@ type computeStatsDeviceSpan struct {
 	endDay string
 }
 
-func computeStatsDevice(ctx context.Context, stats *Stats) {
+// The devices series from the raw events (computeStatsDevice uses the device
+// day rollup when it covers the window).
+func computeStatsDeviceFromEvents(ctx context.Context, stats *Stats) {
 	startDay, endDay := dayRange(stats.Lookback)
 	windowStart := server.NowUtc().Add(-24 * time.Hour * time.Duration(stats.Lookback))
 	query := func(run func(server.PgCanQuery)) {
@@ -1287,9 +1289,19 @@ func RemoveOldAuditContractEvents(ctx context.Context, maxTime time.Time, limit 
 }
 
 // audit_device_event's PK is (event_time, device_id, event_id), so event_id is
-// not unique alone -- match the full PK.
+// not unique alone -- match the full PK. Once the table is partitioned its
+// days drop whole by the partition registry's retention, and deleting rows
+// from a leaf that takes no inserts would return no disk, so nothing is
+// deleted.
 func RemoveOldAuditDeviceEvents(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
 	minTime := maxTime.Add(-AuditEventExpiration)
+	partitioned := false
+	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		partitioned = auditDeviceEventPartitionedInConn(ctx, conn)
+	})
+	if partitioned {
+		return 0
+	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		tag, err := tx.Exec(
 			ctx,

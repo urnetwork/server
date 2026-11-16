@@ -288,6 +288,40 @@ took its snapshot before it started waiting.
 - The cost: a second write per queue change while mirroring, and more code (the trigger, the
   backfill, the compare, the rollback). A first rotation does not need it.
 
+**Implemented 11-16** (db_table_swap.go, db_table_swap_catalog.go and
+task/pending_task_swap.go; the runbook is PENDING-TASK-SWAP-RUNBOOK.md). Where
+it differs from the design above:
+- **One script, one message, under the lock.** The swap is a single script
+  sent in one message, BEGIN to COMMIT, so its lock is held for the database's
+  work and no network round trip. The operator's Mac is about 90 ms from
+  edge-2, and a statement-by-statement swap would hold the lock for seconds of
+  round trips alone.
+  - Under the lock, the script compares catalog fingerprints in SQL: the
+    table's against the one the rehearsal read, and the twin's against the
+    table's.
+  - The rich, column-by-column comparison runs in the rehearsal.
+- **A rehearsal before the swap.** The whole copy runs in a rolled-back
+  transaction under ACCESS SHARE. It measures the lock time, warms the live
+  rows, and runs in a dry run even while the taskworker still runs.
+- **No twin in a separate step.** The twin is created inside the swap
+  transaction, so an interrupted swap leaves nothing behind.
+- **Live owners, not live leases.** The taskworker check refuses a leased row
+  only if a session holds its task advisory lock, or its heartbeat is under
+  ReleaseTimeout old. A claim that a stopped worker left (its lease runs at
+  most TaskLeaseTimeout, 5 minutes) is copied as it is and claimed again once
+  the lease ends.
+- **Copy and checksums.** The copy goes through the primary key, with indexes
+  built after it. The checksums are two order-independent 64-bit hashes over
+  every column, generated ones included.
+- **Bounds:**
+  - lock waits of 500 ms, a quarter of a writer's PgLockTimeout, retried 60
+    times;
+  - a refusal while any client transaction older than 2 minutes is open;
+  - at most 1,000,000 rows under the lock;
+  - a rollback window of a day before `--drop-old`.
+- **Rollback** empties the kept old table under its own lock first, so the
+  swap's commit unlinks no file.
+
 ### 4.5 Readers, writers and the monitor
 
 - **No reader or writer changes.** Names, columns, keys and indexes are identical. Cached plans
@@ -748,12 +782,92 @@ The window sets the size. At 5.4 GiB/day:
 | 7 days (needs the rollup) | about 40 GiB |
 
 - **Partitioning alone saves nothing until C + window,** apart from the 7.8 GiB unique index.
-- **With the rollup and 7 days,** the legacy leaf (about 80 GiB at C) drops at C + 7. The table
+- **With the rollup and 7 days,** the legacy leaf (about 100 GiB for C = 11-23) drops at C + 7. The table
   then holds about 40 GiB: −35 GiB against today, and about −900 GiB against the 180-day path by
   May.
 - **The inflow is the other lever.** If hosted window children should not count as devices, the
   sweep can skip them, which cuts the inflow several-fold *(inferred)*. That is a product
   decision (§10).
+
+### 7.8 Built 11-16, and the hosted window children measured
+
+**Built** (AUDIT-DEVICE-EVENT-PARTITION-RUNBOOK.md):
+- **The rollup `audit_device_day`** comes from its own additive migration and
+  the files model/audit_device_day.go and audit_device_day_schema.go.
+  - **Writer:** the device sweep keeps today's row in its own transaction.
+    The first sweep of a day inserts the devices online at the day's start.
+    Each later sweep adds the devices it adds that were neither online at the
+    start nor touched earlier that day; those have an `audit_device_state`
+    row with that day's event time. A day is complete when its count saw the
+    whole day.
+  - **Export:** it publishes from the rows when every closed day of its
+    window is complete. While the table is plain, it otherwise replays the
+    raw events as before and writes each closed day it lacked. Once the table
+    is partitioned, it publishes from the rows alone.
+  - **Today, before its first sweep,** counts the devices online now.
+  - **Tests:** the rollup equals the reference replay day by day.
+- **The family and the cutover** live in db_audit_device_event_partition.go,
+  with `bringyourctl model migrate audit-device-event-partition`:
+  - daily partitions, 3 days ahead, kept 7 days, with no DEFAULT leaf;
+  - the legacy leaf retires at C + 7 days;
+  - prepare refuses until the rollup covers the window, then drops
+    `UNIQUE (event_id)`;
+  - the row delete stops once partitioned;
+  - contract 830 accepts the partitioned parent.
+- **Deviations:**
+  - **No weekly option.** The owner chose 7 days, so the family is daily
+    only.
+  - **The unique index's drop is an operator step,** in prepare. Its record
+    migration (`DROP CONSTRAINT IF EXISTS`) is a follow-up after the drop,
+    like the index-diet records, so that `db migrate` never takes the lock.
+
+**Hosted window children among devices and events** (owner 11-16; measured
+11-16 about 08:00Z from Mimir, Main's statistics views and the public
+`/stats/last-90`; no table data was read):
+- **The published series** counted 8.95M devices on 11-15, 5.66M on 11-14 and
+  2.77M on 11-13, against 1.45–2.17M a day from 11-07 to 11-12.
+- **Top-level clients with a connected connection** numbered 0.84M
+  (`urnetwork_stats_device_versions{population="client"}`; providers 0.80M of
+  them). So on 11-15 at least about 90% of the day's devices were derived
+  clients *(inferred: the top-level count is a snapshot, not the day's
+  distinct total)*.
+- **The last location-reliability pass** folded 918k derived clients against
+  107k top-level (89.6%). Its `hosted_child` label is any
+  `source_client_id IS NOT NULL`, which also covers the apps' per-stream
+  windows.
+- **Identities:** `network_client` holds about 514M rows, 98.4% of them
+  derived (`pg_stats` null_frac of `source_client_id` is 0.0159).
+  `proxy_device_config` holds 1.11M hosted proxies, the windows' parents.
+- **State:** `audit_device_state` holds about 123M rows, 99.7% offline
+  (`pg_stats` on `online`): devices seen once and gone, the shape of
+  short-lived windows. The S4 retention now deletes them a day after they go
+  offline.
+- **Events:** `audit_device_event` has about 15.7M distinct device ids
+  (`pg_stats` n_distinct) over 269M events, half `device_added` and half
+  `device_removed`. One add and one remove per short-lived device fits that.
+  - Top-level clients can be at most about 1M of those ids, so derived
+    clients hold at least about 94% of the device ids and, at two events
+    each, a similar share of the events *(inferred)*.
+  - The rollup will give exact daily counts once deployed. A per-kind split
+    would need a sweep metric labeled by identity kind; none exists today.
+
+**What reads device counts** (code, 11-16):
+- **Only the public devices series** (`computeStatsDevice`, Redis
+  `stats.last-90`, `GET /stats/last-90`, unauthenticated) reads the device
+  audit tables. Its consumer is bringyour.com's stats page; ur.io reads
+  `grafana.bringyour.com/stats.json` instead.
+- **Device and client limits** count top-level clients only
+  (`source_client_id IS NULL`), from `network_client` or the connected-peer
+  Redis sets. Hosted window children never count against a limit.
+  - The top-level create cap: network_client_limit_model.go:100.
+  - The concurrent connected limit: peer_model.go:1567, which returns early
+    for a client that is not top-level.
+  - The hosted proxy cap: network_client_proxy_limit.go, which counts proxy
+    devices, not windows.
+- **Nothing in payouts reads device counts,** nor in the SN epoch release
+  (which attests top-level users with contracts), account points or
+  reliability weights. The public Grafana "connected devices" panel is a
+  different source: the connect residents gauge, which includes windows.
 
 ## 8. `st_client_key_history`: retention, not partitions
 
@@ -883,8 +997,8 @@ The window sets the size. At 5.4 GiB/day:
   - So identical bytes already collide on the primary key, and distinct bytes with one hash would
     be a SHA-256 collision.
   - The index has never been scanned, and no monitor contract pins it.
-  - `ALTER TABLE ... DROP CONSTRAINT` takes ACCESS EXCLUSIVE for the catalog change and the
-    unlink, with a short lock wait and retries.
+  - `ALTER TABLE ... DROP CONSTRAINT` takes ACCESS EXCLUSIVE for the catalog change only, with a
+    short lock wait and retries; the commit unlinks the index after it releases the lock.
   - DBDISK-STABILIZE §3.3 called it an integrity guard; the owner decides.
 
 ## 9. The rest
@@ -980,6 +1094,16 @@ The window sets the size. At 5.4 GiB/day:
 | 5c | **st_client_key_history:** a rewrite (REPACK) after PostgreSQL 19 | **Decide then**, from the live share after the bulk deletes |
 | 6 | **network_client_location_reliability:** delete with the client, and 11 days instead of 31 | **Yes**, after the sample of §9.1 |
 | 7 | Confirm the tables that are not partitioned (§9.2–§9.4) | **Confirm** |
+
+**Answered by the owner, 11-16 about 04:47–04:52Z, one at a time:**
+- **2, pending_task:** yes, the swap, run Wed 11-18.
+- **3, transfer_debit_journal:** daily partitions by contract day, not the swap.
+- **4, audit_device_event:**
+  - daily partitions by `event_time`, keeping 7 days of raw events;
+  - a per-day summary that the stats export reads instead;
+  - drop `UNIQUE (event_id)`.
+- **The share of hosted window children** among devices and events: measure
+  it and report what reads device counts. Device counting is unchanged.
 
 ## 11. Order, effort and risks
 

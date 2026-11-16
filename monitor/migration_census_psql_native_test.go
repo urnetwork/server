@@ -65,7 +65,7 @@ func migrationCensusNativePsql(ctx context.Context, fixture *migrationCensusNati
 func TestMigrationCensusNativePsqlCompletePublishedPrefixes(t *testing.T) {
 	fixture := migrationCensusNativeFixture(t)
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
-		for _, head := range []int{server.CompetitionDistributedEvaluationMigrationVersion() - 1, server.MigrationCount()} {
+		for _, head := range []int{server.CompetitionDistributedEvaluationMigrationVersion() - 1, server.CompetitionSecondRecoveryMigrationVersion() - 1, server.MigrationCount()} {
 			server.ApplyDbMigrationsUpTo(tb.Context(), head)
 			runner := migrationCensusNativeRunner(tb, tb.Context(), fixture)
 			calls := 0

@@ -11,7 +11,7 @@ import (
 // appends are valid; omissions, reordered entries and prefix inserts are not.
 func competitionCapturedRecoveryTailValid(versions []int, migrationCount int) bool {
 	const firstVersion = 974
-	const lastVersion = 982
+	const lastVersion = 983
 	if len(versions) != lastVersion-firstVersion+1 || migrationCount < lastVersion {
 		return false
 	}
@@ -23,8 +23,8 @@ func competitionCapturedRecoveryTailValid(versions []int, migrationCount int) bo
 	return true
 }
 
-// Captured main 4bc9e8c7d's published tail keeps its exact order before recovery
-// 982. Resolve positions from the actual registered objects, not the current
+// Captured main 5d4b8ccc2's published tail keeps its exact order before recovery
+// 983. Resolve positions from the actual registered objects, not the current
 // head, so publishing a subsequent migration never shifts these identities.
 func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *testing.T) {
 	versions := []int{CtfSchemaMigrationVersion(), NetworkPingTargetEvidenceSchemaMigrationVersion(),
@@ -38,7 +38,7 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 		OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(),
 		ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), ProviderWorkSessionProviderAppendMigrationVersion(),
 		ProviderWorkSessionHeadRetentionGuardMigrationVersion(), ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(),
-		CompetitionSecondRecoveryMigrationVersion()}
+		AuditDeviceDayVersion(), CompetitionSecondRecoveryMigrationVersion()}
 	for index, version := range versions {
 		if version < 1 || index > 0 && version != versions[index-1]+1 {
 			t.Fatal("captured published migration tail was moved, omitted or overwritten", versions)
@@ -50,7 +50,7 @@ func TestCompetitionDistributedRecoveryMigrationFollowsCapturedPublishedTail(t *
 	if !competitionCapturedRecoveryTailValid(versions[14:], MigrationCount()) {
 		t.Fatal("captured published migration tail or recovery ordinal changed", versions, MigrationCount())
 	}
-	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d mail_context=%d recovery=%d gift=%d gift_refund=%d operator_retry=%d operator_traffic=%d expired_points=%d gift_gamma=%d legacy_drop_guard=%d provider_append=%d head_retention=%d history_floor=%d second_recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], versions[11], versions[12], versions[13], versions[14], versions[15], versions[16], versions[17], versions[18], versions[19], versions[20], versions[21], versions[22], MigrationCount())
+	t.Logf("registered_tail ctf=%d ping_evidence=%d extender_ports=%d ctf_award=%d ledger_extenders=%d receiver_sweep=%d fp2_evidence=%d notification_flow=%d address_sweep=%d shopify_order=%d mail_context=%d recovery=%d gift=%d gift_refund=%d operator_retry=%d operator_traffic=%d expired_points=%d gift_gamma=%d legacy_drop_guard=%d provider_append=%d head_retention=%d history_floor=%d audit_device_day=%d second_recovery=%d head=%d", versions[0], versions[1], versions[2], versions[3], versions[4], versions[5], versions[6], versions[7], versions[8], versions[9], versions[10], versions[11], versions[12], versions[13], versions[14], versions[15], versions[16], versions[17], versions[18], versions[19], versions[20], versions[21], versions[22], versions[23], MigrationCount())
 }
 
 // The same helper used by both real tail assertions accepts future appends
@@ -59,7 +59,7 @@ func TestCompetitionCapturedRecoveryTailAllowsOnlyAppendOnlySuccessors(t *testin
 	versions := []int{CompetitionOperatorRequestedPatchRetryMigrationVersion(), OperatorBlockTrafficVersion(),
 		OperatorBlockPointsExpiredVersion(), GiftGammaSchemaVersion(), ProviderWorkSessionEventLegacyDropGuardMigrationVersion(),
 		ProviderWorkSessionProviderAppendMigrationVersion(), ProviderWorkSessionHeadRetentionGuardMigrationVersion(),
-		ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(), CompetitionSecondRecoveryMigrationVersion()}
+		ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(), AuditDeviceDayVersion(), CompetitionSecondRecoveryMigrationVersion()}
 	if !competitionCapturedRecoveryTailValid(versions, MigrationCount()) {
 		t.Fatal("actual registered tail does not match its captured ordinals", versions, MigrationCount())
 	}
@@ -74,20 +74,25 @@ func TestCompetitionCapturedRecoveryTailAllowsOnlyAppendOnlySuccessors(t *testin
 		shifted[index]++
 	}
 	omitted := append(append([]int(nil), versions[:4]...), versions[5:]...)
+	withoutAudit := append(append([]int(nil), versions[:8]...), versions[9:]...)
+	recoveryBeforeAudit := append([]int(nil), versions...)
+	recoveryBeforeAudit[8], recoveryBeforeAudit[9] = recoveryBeforeAudit[9], recoveryBeforeAudit[8]
 	for _, test := range []struct {
 		name     string
 		versions []int
 		head     int
 		valid    bool
 	}{
-		{name: "captured head", versions: versions, head: 982, valid: true},
-		{name: "subsequent append", versions: versions, head: 983, valid: true},
-		{name: "incomplete head", versions: versions, head: 981, valid: false},
-		{name: "gap", versions: gap, head: 983, valid: false},
-		{name: "duplicate", versions: duplicate, head: 982, valid: false},
-		{name: "reorder", versions: reordered, head: 982, valid: false},
-		{name: "prefix insertion", versions: shifted, head: 983, valid: false},
-		{name: "omission", versions: omitted, head: 982, valid: false},
+		{name: "captured head", versions: versions, head: 983, valid: true},
+		{name: "subsequent append", versions: versions, head: 984, valid: true},
+		{name: "incomplete head", versions: versions, head: 982, valid: false},
+		{name: "gap", versions: gap, head: 984, valid: false},
+		{name: "duplicate", versions: duplicate, head: 983, valid: false},
+		{name: "reorder", versions: reordered, head: 983, valid: false},
+		{name: "prefix insertion", versions: shifted, head: 984, valid: false},
+		{name: "omission", versions: omitted, head: 983, valid: false},
+		{name: "published audit omission", versions: withoutAudit, head: 983, valid: false},
+		{name: "recovery before published audit", versions: recoveryBeforeAudit, head: 983, valid: false},
 	} {
 		if valid := competitionCapturedRecoveryTailValid(test.versions, test.head); valid != test.valid {
 			t.Errorf("%s validity = %t, want %t", test.name, valid, test.valid)
