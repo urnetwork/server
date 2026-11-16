@@ -118,14 +118,13 @@ type TransferDebitJournalPartitionSettings struct {
 	// every debit.
 	AbandonMargin time.Duration
 
-	// runs inside a create's transaction just before its attach
-	beforeAttachForTest func()
 	// runs inside a drop's transaction once its fence holds the locks
 	afterDropLockForTest func()
 	// runs before each cutover step; an error interrupts the step
 	beforeCutoverStepForTest func(step string) error
-	// runs inside the swap's transaction once it holds its locks
-	afterSwapLockForTest func()
+	// runs once the swap read the prepared state, before its script; an
+	// error interrupts the swap
+	beforeSwapScriptForTest func() error
 }
 
 // Lock waits of 100 ms: with the holds measured on a test database (a day's
@@ -373,9 +372,6 @@ func createTransferDebitJournalLeaf(ctx context.Context, table string, r Partiti
 				panic(fmt.Errorf("moved %d rows of %s out of DEFAULT but copied %d", deleted, report.Leaf, copied))
 			}
 			report.Moved = copied
-		}
-		if settings.beforeAttachForTest != nil {
-			settings.beforeAttachForTest()
 		}
 		var attachStart time.Time
 		Raise(tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&attachStart))

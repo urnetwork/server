@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -307,16 +308,144 @@ func transferDebitJournalRetry(ctx context.Context, settings *TransferDebitJourn
 	return
 }
 
-// Runs statements in one maintenance transaction under the settings' lock and
-// statement bounds.
-func transferDebitJournalExec(ctx context.Context, settings *TransferDebitJournalPartitionSettings, statements []string) error {
-	return contractPartitionTx(ctx, func(tx PgTx) {
-		RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.LockTimeout.Milliseconds())))
-		RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", settings.StatementTimeout.Milliseconds())))
-		for _, statement := range statements {
-			RaisePgResult(tx.Exec(ctx, statement))
-		}
+// The command runs from an operator's machine, about 90 ms from Main, so each
+// step that takes an exclusive journal lock is one script sent in one
+// message, BEGIN to COMMIT (transferDebitJournalScript): its lock is held for
+// the database's own work and no network round trip. What the script's
+// statements were computed from is read before the lock and asserted
+// unchanged under it, in SQL (transferDebitJournalFingerprintSql).
+
+// Where a script marks the moment it holds its lock, and the rows its
+// rollback copied.
+const transferDebitJournalLockedAtSetting = "urnetwork.debit_journal_locked_at"
+const transferDebitJournalCopiedSetting = "urnetwork.debit_journal_copied"
+
+const transferDebitJournalMarkLockedSql = "SELECT set_config('" + transferDebitJournalLockedAtSetting + "', clock_timestamp()::text, true)"
+
+// How long the script has held its lock, in seconds, by the database's clock.
+const transferDebitJournalHeldExpression = "extract(epoch FROM clock_timestamp() - current_setting('" + transferDebitJournalLockedAtSetting + "')::timestamptz)::float8"
+
+func transferDebitJournalLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// The bounds every script starts with.
+func transferDebitJournalScriptBounds(settings *TransferDebitJournalPartitionSettings) []string {
+	return []string{
+		fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.LockTimeout.Milliseconds()),
+		fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", settings.StatementTimeout.Milliseconds()),
+	}
+}
+
+// Raises message unless condition holds, as one statement of a script.
+func transferDebitJournalAssertSql(condition string, message string) string {
+	return fmt.Sprintf(
+		"DO $debit_journal$ BEGIN IF NOT coalesce(%s, false) THEN RAISE EXCEPTION '%%', %s; END IF; END $debit_journal$",
+		condition,
+		transferDebitJournalLiteral(message),
+	)
+}
+
+// A text fingerprint of the relations a script's statements were computed
+// from: each one's kind, constraints, index names and partitions with their
+// bounds. A relation that is gone reads as "-".
+func transferDebitJournalFingerprintSql(relations ...string) string {
+	parts := []string{}
+	for _, relation := range relations {
+		regclass := fmt.Sprintf("to_regclass(%s)", transferDebitJournalLiteral("public."+quoteIdentifier(relation)))
+		parts = append(
+			parts,
+			fmt.Sprintf(`coalesce((SELECT relkind::text FROM pg_class WHERE oid = %s), '-')`, regclass),
+			fmt.Sprintf(`coalesce((SELECT string_agg(conname::text || ' ' || convalidated::text || ' ' || pg_get_constraintdef(oid), ', ' ORDER BY conname::text COLLATE "C") FROM pg_constraint WHERE conrelid = %s), '')`, regclass),
+			fmt.Sprintf(`coalesce((SELECT string_agg(index_class.relname::text, ', ' ORDER BY index_class.relname::text COLLATE "C") FROM pg_index JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid WHERE pg_index.indrelid = %s), '')`, regclass),
+			fmt.Sprintf(`coalesce((SELECT string_agg(child.relname::text || ' ' || pg_get_expr(child.relpartbound, child.oid), ', ' ORDER BY child.relname::text COLLATE "C") FROM pg_inherits JOIN pg_class child ON child.oid = pg_inherits.inhrelid WHERE pg_inherits.inhparent = %s), '')`, regclass),
+		)
+	}
+	return "concat_ws(' | ', " + strings.Join(parts, ", ") + ")"
+}
+
+// The assertion, under a script's lock, that its relations still read as
+// fingerprint did before the lock.
+func transferDebitJournalUnchangedSql(fingerprint string, message string, relations ...string) string {
+	return transferDebitJournalAssertSql(
+		fmt.Sprintf("%s = %s", transferDebitJournalFingerprintSql(relations...), transferDebitJournalLiteral(fingerprint)),
+		message,
+	)
+}
+
+// A snapshot read's expressions (pg_get_expr) take ACCESS SHARE on their
+// relation, which waits behind an exclusive lock; the read gives up after
+// this, and the step retries.
+const transferDebitJournalReadLockTimeout = 5 * time.Second
+
+// Reads the relations' shapes and their fingerprint in one repeatable read
+// snapshot, so the statements computed from the shapes fit the fingerprint.
+func readTransferDebitJournalShapes(ctx context.Context, relations ...string) (shapes map[string]*contractTableShape, fingerprint string, err error) {
+	shapes = map[string]*contractTableShape{}
+	err = partitionRegistryRun(func() {
+		MaintenanceTx(ctx, func(tx PgTx) {
+			for _, relation := range relations {
+				shapes[relation] = readContractTableShape(ctx, tx, relation)
+			}
+			Raise(tx.QueryRow(ctx, "SELECT "+transferDebitJournalFingerprintSql(relations...)).Scan(&fingerprint))
+		}, TxRepeatableRead, TxLockTimeout(transferDebitJournalReadLockTimeout), OptNoRetry())
 	})
+	return
+}
+
+// Runs statements as one script in one message on a maintenance session,
+// between BEGIN and COMMIT, and returns the values of its last one-row
+// result. A failed script is rolled back before the session goes back, or the
+// session is discarded.
+func transferDebitJournalScript(ctx context.Context, statements []string) (values []string, err error) {
+	conn, err := AcquireMaintenanceDbConn(ctx)
+	if err != nil {
+		return
+	}
+	committed := false
+	defer func() {
+		if committed {
+			conn.Release()
+			return
+		}
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if _, rollbackErr := conn.Exec(rollbackCtx, "ROLLBACK"); rollbackErr != nil {
+			discardPgConnection(rollbackCtx, conn)
+			return
+		}
+		conn.Release()
+	}()
+	script := strings.Join(append(append([]string{"BEGIN"}, statements...), "COMMIT"), ";\n")
+	results, err := conn.Conn().PgConn().Exec(ctx, script).ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		if 0 < len(result.FieldDescriptions) && len(result.Rows) == 1 {
+			values = values[:0]
+			for _, value := range result.Rows[0] {
+				values = append(values, string(value))
+			}
+		}
+	}
+	committed = true
+	return
+}
+
+// The script's report value at index, in seconds, as a duration.
+func transferDebitJournalReportSeconds(values []string, index int) (time.Duration, error) {
+	if len(values) <= index {
+		return 0, fmt.Errorf("the script reported %d values", len(values))
+	}
+	seconds, err := strconv.ParseFloat(values[index], 64)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 // Whether the staged parent's DEFAULT partition is attached.
@@ -482,17 +611,30 @@ func prepareTransferDebitJournalCutover(ctx context.Context, cutoverDay time.Tim
 			quoteIdentifier(bound),
 			contractIdLiteral(floor),
 		)
+		// a brief ACCESS EXCLUSIVE lock, without a scan, in one message
+		script := append(
+			transferDebitJournalScriptBounds(settings),
+			fmt.Sprintf("LOCK TABLE public.%s IN ACCESS EXCLUSIVE MODE", quoteIdentifier(transferDebitJournalTable)),
+			transferDebitJournalMarkLockedSql,
+			statement,
+			"SELECT "+transferDebitJournalHeldExpression,
+		)
 		if dryRun {
-			logf("would add %s: %s", bound, statement)
+			logf("would add %s in one message:\n%s", bound, strings.Join(script, ";\n"))
 		} else {
-			// a brief ACCESS EXCLUSIVE lock, without a scan
+			var held time.Duration
 			err := transferDebitJournalRetry(ctx, settings, settings.MaxAttempts, true, func() error {
-				return transferDebitJournalExec(ctx, settings, []string{statement})
+				values, scriptErr := transferDebitJournalScript(ctx, script)
+				if scriptErr != nil {
+					return scriptErr
+				}
+				held, scriptErr = transferDebitJournalReportSeconds(values, 0)
+				return scriptErr
 			}, logf)
 			if err != nil {
 				return fmt.Errorf("add %s: %w", bound, err)
 			}
-			logf("added %s", bound)
+			logf("added %s; its lock was held %s", bound, held.Round(time.Microsecond))
 		}
 	}
 	if shape.legacyBound == nil || !shape.legacyBound.validated {
@@ -667,9 +809,13 @@ func finalizeTransferDebitJournalCutover(ctx context.Context, deadline bool, dry
 	}
 	logf("probed the swap: every parent index adopts an index of %s", transferDebitJournalTable)
 
-	statements := append([]string{transferDebitJournalSwapLockSql()}, transferDebitJournalSwapSql(shape, staged, floor)...)
 	if dryRun {
-		logf("would swap in one transaction, waiting at most %s for the lock:\n%s", settings.LockTimeout, strings.Join(statements, ";\n"))
+		_, fingerprint, err := readTransferDebitJournalShapes(ctx, transferDebitJournalTable, transferDebitJournalStagedParentName())
+		if err != nil {
+			return err
+		}
+		statements := transferDebitJournalSwapScript(shape, staged, fingerprint, cutoverDay, settings)
+		logf("would send the swap in one message, waiting at most %s for the lock:\n%s", settings.LockTimeout, strings.Join(statements, ";\n"))
 		logf("dry run: nothing changed")
 		return nil
 	}
@@ -688,37 +834,49 @@ func finalizeTransferDebitJournalCutover(ctx context.Context, deadline bool, dry
 	return completeTransferDebitJournalCutover(ctx, logf)
 }
 
-// The swap transaction: its lock, then the prepared state read again under it
-// (an abandon or abort that committed while the swap waited leaves the table
-// without its bound, and the attach would then scan the table under the
-// lock), then the renames and the attach. Returns how long the lock was held
-// before the commit, by the database's clock.
+// The swap as one script: its lock, the prepared state asserted unchanged
+// under it (an abort or abandon that committed while the swap waited leaves
+// the table without its bound, and the attach would then scan the table under
+// the lock), the renames and the attach, then how long the lock has been held,
+// by the database's clock, as its last row.
+func transferDebitJournalSwapScript(shape *contractTableShape, staged *contractTableShape, fingerprint string, cutoverDay time.Time, settings *TransferDebitJournalPartitionSettings) []string {
+	statements := transferDebitJournalScriptBounds(settings)
+	statements = append(
+		statements,
+		transferDebitJournalSwapLockSql(),
+		transferDebitJournalMarkLockedSql,
+		transferDebitJournalUnchangedSql(fingerprint, "the prepared cutover changed while the swap waited for its lock", transferDebitJournalTable, transferDebitJournalStagedParentName()),
+	)
+	statements = append(statements, transferDebitJournalSwapSql(shape, staged, ContractIdFloor(cutoverDay))...)
+	return append(statements, "SELECT "+transferDebitJournalHeldExpression)
+}
+
+// The swap: the table and the staged parent read with their fingerprint, the
+// prepared state checked, then the swap script in one message. Returns how
+// long its lock was held before the commit, by the database's clock.
 func swapTransferDebitJournal(ctx context.Context, cutoverDay time.Time, settings *TransferDebitJournalPartitionSettings) (held time.Duration, err error) {
-	err = contractPartitionTx(ctx, func(tx PgTx) {
-		RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.LockTimeout.Milliseconds())))
-		RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", settings.StatementTimeout.Milliseconds())))
-		RaisePgResult(tx.Exec(ctx, transferDebitJournalSwapLockSql()))
-		var lockedAt time.Time
-		Raise(tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&lockedAt))
-		if settings.afterSwapLockForTest != nil {
-			settings.afterSwapLockForTest()
+	shapes, fingerprint, err := readTransferDebitJournalShapes(ctx, transferDebitJournalTable, transferDebitJournalStagedParentName())
+	if err != nil {
+		return
+	}
+	shape := shapes[transferDebitJournalTable]
+	staged := shapes[transferDebitJournalStagedParentName()]
+	if shape == nil || shape.relkind != "r" || staged == nil || shape.legacyBound == nil || !shape.legacyBound.validated {
+		return 0, errors.New("the prepared cutover changed before the swap")
+	}
+	if day, boundErr := transferDebitJournalLegacyBoundDay(shape.legacyBound); boundErr != nil || !day.Equal(cutoverDay) {
+		return 0, errors.New("the prepared cutover changed before the swap")
+	}
+	if settings.beforeSwapScriptForTest != nil {
+		if err = settings.beforeSwapScriptForTest(); err != nil {
+			return
 		}
-		current := readContractTableShape(ctx, tx, transferDebitJournalTable)
-		currentStaged := readContractTableShape(ctx, tx, transferDebitJournalStagedParentName())
-		if current == nil || current.relkind != "r" || currentStaged == nil || current.legacyBound == nil || !current.legacyBound.validated {
-			panic(errors.New("the prepared cutover changed while the swap waited for its lock"))
-		}
-		if day, boundErr := transferDebitJournalLegacyBoundDay(current.legacyBound); boundErr != nil || !day.Equal(cutoverDay) {
-			panic(errors.New("the prepared cutover changed while the swap waited for its lock"))
-		}
-		for _, statement := range transferDebitJournalSwapSql(current, currentStaged, ContractIdFloor(cutoverDay)) {
-			RaisePgResult(tx.Exec(ctx, statement))
-		}
-		var doneAt time.Time
-		Raise(tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&doneAt))
-		held = doneAt.Sub(lockedAt)
-	})
-	return
+	}
+	values, err := transferDebitJournalScript(ctx, transferDebitJournalSwapScript(shape, staged, fingerprint, cutoverDay, settings))
+	if err != nil {
+		return
+	}
+	return transferDebitJournalReportSeconds(values, 0)
 }
 
 // After the swap: the parent starts without statistics, and the days ahead
@@ -745,173 +903,214 @@ func completeTransferDebitJournalCutover(ctx context.Context, logf func(string, 
 	return nil
 }
 
-// The rollback transaction's statements, from the catalog it reads after
-// taking ACCESS EXCLUSIVE on the parent and every partition: detach the
-// legacy partition and drop its bound, copy every other partition's rows into
-// it, drop the parent with those partitions, and give the legacy table and its
-// indexes the published names. expected is the number of rows the copy must
-// carry.
-func transferDebitJournalRollbackSqlInTx(ctx context.Context, tx PgTx, settings *TransferDebitJournalPartitionSettings) (statements []string, expected int64, err error) {
+// What a rollback is computed from, read in one repeatable read snapshot: the
+// legacy partition's shape (its index names), the column list, the
+// fingerprint of the parent and the legacy partition, and the partitions
+// other than the legacy one. Refuses unless the journal is partitioned with
+// its legacy partition attached as such and still carrying its bound.
+func readTransferDebitJournalRollback(ctx context.Context) (legacy *contractTableShape, columns string, fingerprint string, others []PartitionLeaf, err error) {
 	table := transferDebitJournalTable
 	legacyName := transferDebitJournalLegacyLeafName()
-	parent := readContractTableShape(ctx, tx, table)
-	legacy := readContractTableShape(ctx, tx, legacyName)
-	if parent == nil || parent.relkind != "p" {
-		return nil, 0, fmt.Errorf("%s is not partitioned", table)
-	}
-	// the legacy partition keeps the table's bound under the table's name,
-	// which a shape read by the partition's own name lists with its checks
-	bound := contractLegacyBoundName(table)
-	if legacy == nil || !slices.ContainsFunc(legacy.checks, func(check contractConstraint) bool {
-		return check.name == bound
-	}) {
-		return nil, 0, fmt.Errorf("%s has no legacy partition with its bound; the swap can no longer be undone", table)
-	}
-	leaves, err := transferDebitJournalPartitionFamily.ListLeaves(ctx, tx, table)
-	if err != nil {
-		return nil, 0, err
-	}
-	if !slices.ContainsFunc(leaves, func(leaf PartitionLeaf) bool {
-		return leaf.Name == legacyName && leaf.Range.Legacy
-	}) {
-		return nil, 0, fmt.Errorf("%s is not attached as the legacy partition", legacyName)
-	}
-	// each other partition counted directly, up to the bound, so the legacy
-	// partition is never read
-	for _, leaf := range leaves {
-		if leaf.Name == legacyName {
-			continue
-		}
-		var count int64
-		Raise(tx.QueryRow(
-			ctx,
-			fmt.Sprintf(`SELECT count(*) FROM (SELECT 1 FROM ONLY public.%s LIMIT $1) outside`, quoteIdentifier(leaf.Name)),
-			int64(settings.RollbackMaxRows)+1-expected,
-		).Scan(&count))
-		expected += count
-		if int64(settings.RollbackMaxRows) < expected {
-			return nil, 0, fmt.Errorf("more than %d rows are outside %s; the swap can no longer be undone", settings.RollbackMaxRows, legacyName)
-		}
-	}
-	columns := closeEvidenceColumnList(ctx, tx, table)
-	statements = append(statements,
-		fmt.Sprintf("ALTER TABLE public.%s DETACH PARTITION public.%s", quoteIdentifier(table), quoteIdentifier(legacyName)),
-		fmt.Sprintf("ALTER TABLE public.%s DROP CONSTRAINT %s", quoteIdentifier(legacyName), quoteIdentifier(bound)),
-		fmt.Sprintf("INSERT INTO public.%[1]s (%[3]s) SELECT %[3]s FROM public.%[2]s", quoteIdentifier(legacyName), quoteIdentifier(table), columns),
-		fmt.Sprintf("DROP TABLE public.%s", quoteIdentifier(table)),
-		fmt.Sprintf("ALTER TABLE public.%s RENAME TO %s", quoteIdentifier(legacyName), quoteIdentifier(table)),
+	err = partitionRegistryRun(func() {
+		MaintenanceTx(ctx, func(tx PgTx) {
+			parent := readContractTableShape(ctx, tx, table)
+			legacy = readContractTableShape(ctx, tx, legacyName)
+			if parent == nil || parent.relkind != "p" {
+				panic(fmt.Errorf("%s is not partitioned", table))
+			}
+			// the legacy partition keeps the table's bound under the table's
+			// name, which a shape read by the partition's own name lists with
+			// its checks
+			bound := contractLegacyBoundName(table)
+			if legacy == nil || !slices.ContainsFunc(legacy.checks, func(check contractConstraint) bool {
+				return check.name == bound
+			}) {
+				panic(fmt.Errorf("%s has no legacy partition with its bound; the swap can no longer be undone", table))
+			}
+			leaves, listErr := transferDebitJournalPartitionFamily.ListLeaves(ctx, tx, table)
+			Raise(listErr)
+			if !slices.ContainsFunc(leaves, func(leaf PartitionLeaf) bool {
+				return leaf.Name == legacyName && leaf.Range.Legacy
+			}) {
+				panic(fmt.Errorf("%s is not attached as the legacy partition", legacyName))
+			}
+			for _, leaf := range leaves {
+				if leaf.Name != legacyName {
+					others = append(others, leaf)
+				}
+			}
+			columns = closeEvidenceColumnList(ctx, tx, table)
+			Raise(tx.QueryRow(ctx, "SELECT "+transferDebitJournalFingerprintSql(table, legacyName)).Scan(&fingerprint))
+		}, TxRepeatableRead, TxLockTimeout(transferDebitJournalReadLockTimeout), OptNoRetry())
+	})
+	return
+}
+
+// The rollback as one script: the lock on the parent and every partition, the
+// two asserted unchanged since they were read, the legacy partition detached,
+// the rows outside it bounded by RollbackMaxRows and copied back into it, the
+// parent dropped with its other partitions, and the published names restored.
+// Its last row is the rows copied and how long the lock has been held.
+func transferDebitJournalRollbackScript(legacy *contractTableShape, columns string, fingerprint string, settings *TransferDebitJournalPartitionSettings) []string {
+	table := quoteIdentifier(transferDebitJournalTable)
+	legacyName := quoteIdentifier(transferDebitJournalLegacyLeafName())
+	statements := transferDebitJournalScriptBounds(settings)
+	statements = append(
+		statements,
+		// the live rows are a small share of each partition's heap: count and
+		// copy them through the primary key
+		"SET LOCAL enable_seqscan = off",
+		fmt.Sprintf("LOCK TABLE public.%s IN ACCESS EXCLUSIVE MODE", table),
+		transferDebitJournalMarkLockedSql,
+		transferDebitJournalUnchangedSql(fingerprint, "the partitions changed while the rollback waited for its lock; run it again", transferDebitJournalTable, transferDebitJournalLegacyLeafName()),
+		fmt.Sprintf("ALTER TABLE public.%s DETACH PARTITION public.%s", table, legacyName),
+		transferDebitJournalAssertSql(
+			fmt.Sprintf("(SELECT count(*) FROM (SELECT 1 FROM public.%s LIMIT %d) outside) <= %d", table, settings.RollbackMaxRows+1, settings.RollbackMaxRows),
+			fmt.Sprintf("more than %d rows are outside %s; the swap can no longer be undone", settings.RollbackMaxRows, transferDebitJournalLegacyLeafName()),
+		),
+		fmt.Sprintf("ALTER TABLE public.%s DROP CONSTRAINT %s", legacyName, quoteIdentifier(contractLegacyBoundName(transferDebitJournalTable))),
+		fmt.Sprintf(
+			"WITH copied AS (INSERT INTO public.%[1]s (%[3]s) SELECT %[3]s FROM public.%[2]s RETURNING 1) SELECT set_config('%[4]s', count(*)::text, true) FROM copied",
+			legacyName,
+			table,
+			columns,
+			transferDebitJournalCopiedSetting,
+		),
+		fmt.Sprintf("DROP TABLE public.%s", table),
+		fmt.Sprintf("ALTER TABLE public.%s RENAME TO %s", legacyName, table),
 	)
 	for _, index := range legacy.indexes {
 		if name, ok := strings.CutSuffix(index.name, contractLegacyIndexSuffix); ok {
 			statements = append(statements, fmt.Sprintf("ALTER INDEX public.%s RENAME TO %s", quoteIdentifier(index.name), quoteIdentifier(name)))
 		}
 	}
-	return statements, expected, nil
+	return append(statements, fmt.Sprintf("SELECT current_setting('%s')::bigint, %s", transferDebitJournalCopiedSetting, transferDebitJournalHeldExpression))
 }
 
-// Undoes the swap while the legacy partition exists: one transaction locks
-// the parent and every partition, reads the catalog and the count under the
-// lock, copies the rows outside the legacy partition back and makes the legacy
-// table the plain table again. The copy's count must match, or nothing
-// changes.
+// Undoes the swap while the legacy partition exists, in one script: the rows
+// written outside the legacy partition since the swap are copied back into
+// it, and the legacy table becomes the plain table again.
 func rollbackTransferDebitJournalCutover(ctx context.Context, dryRun bool, logf func(string, ...any), settings *TransferDebitJournalPartitionSettings) error {
 	if !IsTransferDebitJournalPartitioned(ctx) {
 		return errors.New("the transfer debit journal is not partitioned")
 	}
-	lock := fmt.Sprintf("LOCK TABLE public.%s IN ACCESS EXCLUSIVE MODE", quoteIdentifier(transferDebitJournalTable))
 	if dryRun {
-		var statements []string
-		var expected int64
-		err := contractPartitionTx(ctx, func(tx PgTx) {
-			var err error
-			statements, expected, err = transferDebitJournalRollbackSqlInTx(ctx, tx, settings)
-			Raise(err)
-		})
+		legacy, columns, fingerprint, others, err := readTransferDebitJournalRollback(ctx)
 		if err != nil {
 			return err
 		}
-		logf("would lock and recheck every partition, copy back %d row(s), then roll back in one transaction:\n%s", expected, strings.Join(append([]string{lock}, statements...), ";\n"))
-		logf("dry run: nothing changed")
-		return nil
-	}
-	var copied int64
-	err := transferDebitJournalRetry(ctx, settings, settings.MaxAttempts, true, func() error {
-		return contractPartitionTx(ctx, func(tx PgTx) {
-			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.LockTimeout.Milliseconds())))
-			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", settings.StatementTimeout.Milliseconds())))
-			RaisePgResult(tx.Exec(ctx, lock))
-			// read committed: the catalog and count are read after the lock,
-			// including every debit and attach that committed while it waited
-			statements, expected, err := transferDebitJournalRollbackSqlInTx(ctx, tx, settings)
-			Raise(err)
-			copied = 0
-			for _, statement := range statements {
-				tag := RaisePgResult(tx.Exec(ctx, statement))
-				if strings.HasPrefix(statement, "INSERT INTO ") {
-					copied = tag.RowsAffected()
-				}
-			}
-			if copied != expected {
-				panic(fmt.Errorf("copied %d rows back into %s, want %d", copied, transferDebitJournalLegacyLeafName(), expected))
-			}
-		})
-	}, logf)
-	if err != nil {
-		return fmt.Errorf("rollback: %w", err)
-	}
-	logf("rolled back: %s is a plain table again, with the %d debit(s) written outside its legacy partition since the swap", transferDebitJournalTable, copied)
-	return nil
-}
-
-// Drops a prepared, unfinalized cutover in one transaction: the bound check
-// goes, and the staged parent is dropped with its partitions, which nothing
-// writes to before the swap.
-func abortTransferDebitJournalCutover(ctx context.Context, dryRun bool, logf func(string, ...any), settings *TransferDebitJournalPartitionSettings) error {
-	if IsTransferDebitJournalPartitioned(ctx) {
-		return errors.New("the transfer debit journal is partitioned; use rollback")
-	}
-	table := quoteIdentifier(transferDebitJournalTable)
-	stagedName := transferDebitJournalStagedParentName()
-	bound := quoteIdentifier(contractLegacyBoundName(transferDebitJournalTable))
-	abortSql := func(conn PgQuerier) []string {
-		var stagedExists bool
-		Raise(conn.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+stagedName).Scan(&stagedExists))
-		if !stagedExists {
-			return []string{fmt.Sprintf("ALTER TABLE public.%s DROP CONSTRAINT IF EXISTS %s", table, bound)}
-		}
-		return []string{
-			fmt.Sprintf("LOCK TABLE public.%s, public.%s IN ACCESS EXCLUSIVE MODE", table, quoteIdentifier(stagedName)),
-			fmt.Sprintf("ALTER TABLE public.%s DROP CONSTRAINT IF EXISTS %s", table, bound),
-			fmt.Sprintf("DROP TABLE public.%s", quoteIdentifier(stagedName)),
-		}
-	}
-	if dryRun {
-		var statements []string
-		err := partitionRegistryRun(func() {
+		// counted without the lock, so the count is a sample
+		var outside int64
+		err = partitionRegistryRun(func() {
 			MaintenanceDb(ctx, func(conn PgConn) {
-				statements = abortSql(conn)
+				for _, leaf := range others {
+					var count int64
+					Raise(conn.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM ONLY public.%s", quoteIdentifier(leaf.Name))).Scan(&count))
+					outside += count
+				}
 			})
 		})
 		if err != nil {
 			return err
 		}
-		logf("would run in one transaction:\n%s", strings.Join(statements, ";\n"))
+		logf("about %d row(s) are outside %s now; would send the rollback in one message, waiting at most %s for the lock:\n%s", outside, transferDebitJournalLegacyLeafName(), settings.LockTimeout, strings.Join(transferDebitJournalRollbackScript(legacy, columns, fingerprint, settings), ";\n"))
 		logf("dry run: nothing changed")
 		return nil
 	}
+	var copied int64
+	var held time.Duration
 	err := transferDebitJournalRetry(ctx, settings, settings.MaxAttempts, true, func() error {
-		return contractPartitionTx(ctx, func(tx PgTx) {
-			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.LockTimeout.Milliseconds())))
-			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", settings.StatementTimeout.Milliseconds())))
-			for _, statement := range abortSql(tx) {
-				RaisePgResult(tx.Exec(ctx, statement))
-			}
+		legacy, columns, fingerprint, _, err := readTransferDebitJournalRollback(ctx)
+		if err != nil {
+			return err
+		}
+		values, err := transferDebitJournalScript(ctx, transferDebitJournalRollbackScript(legacy, columns, fingerprint, settings))
+		if err != nil {
+			return err
+		}
+		if len(values) != 2 {
+			return fmt.Errorf("the rollback reported %d values", len(values))
+		}
+		if copied, err = strconv.ParseInt(values[0], 10, 64); err != nil {
+			return err
+		}
+		held, err = transferDebitJournalReportSeconds(values, 1)
+		return err
+	}, logf)
+	if err != nil {
+		return fmt.Errorf("rollback: %w", err)
+	}
+	logf("rolled back: %s is a plain table again, with the %d debit(s) written outside its legacy partition since the swap; its lock was held %s", transferDebitJournalTable, copied, held.Round(time.Microsecond))
+	return nil
+}
+
+// The abort as one script: the lock on the table and the staged parent, the
+// table asserted still plain, then the bound check and the staged parent with
+// its partitions dropped. Nothing writes to the staged parent before the swap.
+func transferDebitJournalAbortScript(stagedExists bool, settings *TransferDebitJournalPartitionSettings) []string {
+	table := quoteIdentifier(transferDebitJournalTable)
+	staged := quoteIdentifier(transferDebitJournalStagedParentName())
+	statements := transferDebitJournalScriptBounds(settings)
+	if stagedExists {
+		statements = append(statements, fmt.Sprintf("LOCK TABLE public.%s, public.%s IN ACCESS EXCLUSIVE MODE", table, staged))
+	} else {
+		statements = append(statements, fmt.Sprintf("LOCK TABLE public.%s IN ACCESS EXCLUSIVE MODE", table))
+	}
+	statements = append(
+		statements,
+		transferDebitJournalMarkLockedSql,
+		transferDebitJournalAssertSql(
+			fmt.Sprintf("(SELECT relkind FROM pg_class WHERE oid = to_regclass(%s)) = 'r'", transferDebitJournalLiteral("public."+table)),
+			"the transfer debit journal is partitioned; use rollback",
+		),
+		fmt.Sprintf("ALTER TABLE public.%s DROP CONSTRAINT IF EXISTS %s", table, quoteIdentifier(contractLegacyBoundName(transferDebitJournalTable))),
+	)
+	if stagedExists {
+		statements = append(statements, fmt.Sprintf("DROP TABLE public.%s", staged))
+	}
+	return append(statements, "SELECT "+transferDebitJournalHeldExpression)
+}
+
+// Drops a prepared, unfinalized cutover in one script (see
+// transferDebitJournalAbortScript).
+func abortTransferDebitJournalCutover(ctx context.Context, dryRun bool, logf func(string, ...any), settings *TransferDebitJournalPartitionSettings) error {
+	if IsTransferDebitJournalPartitioned(ctx) {
+		return errors.New("the transfer debit journal is partitioned; use rollback")
+	}
+	stagedExists := func() (exists bool, err error) {
+		err = partitionRegistryRun(func() {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				Raise(conn.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+transferDebitJournalStagedParentName()).Scan(&exists))
+			})
 		})
+		return
+	}
+	if dryRun {
+		exists, err := stagedExists()
+		if err != nil {
+			return err
+		}
+		logf("would send in one message, waiting at most %s for the lock:\n%s", settings.LockTimeout, strings.Join(transferDebitJournalAbortScript(exists, settings), ";\n"))
+		logf("dry run: nothing changed")
+		return nil
+	}
+	var held time.Duration
+	err := transferDebitJournalRetry(ctx, settings, settings.MaxAttempts, true, func() error {
+		exists, err := stagedExists()
+		if err != nil {
+			return err
+		}
+		values, err := transferDebitJournalScript(ctx, transferDebitJournalAbortScript(exists, settings))
+		if err != nil {
+			return err
+		}
+		held, err = transferDebitJournalReportSeconds(values, 0)
+		return err
 	}, logf)
 	if err != nil {
 		return fmt.Errorf("abort: %w", err)
 	}
-	logf("aborted the cutover of %s", transferDebitJournalTable)
+	logf("aborted the cutover of %s; its lock was held %s", transferDebitJournalTable, held.Round(time.Microsecond))
 	return nil
 }
 
