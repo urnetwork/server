@@ -110,6 +110,50 @@ func TestRouterMetricsClassifyUnmatchedPanicCancelAndAbort(t *testing.T) {
 	}
 }
 
+// A 500 written after the caller closed its request (a query its canceled
+// context ended, as GET /key/<id> answers) reached nobody: it counts as no
+// status beside the canceled outcome, like the 503 of the same kind. A 500
+// to a caller still waiting keeps its count, and so does a panic's.
+func TestRouterMetricsCountA5xxToAGoneCallerAsNoStatus(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := newHttpMetrics(registry)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	failRoute := NewRoute(http.MethodGet, "/fail", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, UnexpectedErrorMessage, http.StatusInternalServerError)
+	})
+	panicRoute := NewRoute(http.MethodGet, "/panic", func(http.ResponseWriter, *http.Request) {
+		panic("synthetic failure")
+	})
+	router := NewRouter(ctx, []*Route{failRoute, panicRoute})
+	router.metrics = metrics
+
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/fail", nil))
+	goneCtx, cancelRequest := context.WithCancel(ctx)
+	cancelRequest()
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/fail", nil).WithContext(goneCtx))
+	// a panic is a defect whoever was waiting: its 500 keeps its count
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/panic", nil).WithContext(goneCtx))
+	if got := testutil.ToFloat64(metrics.requests.WithLabelValues(panicRoute.id, "500", "panic")); got != 1 {
+		t.Errorf("500/panic requests to a gone caller = %v, want 1", got)
+	}
+
+	checks := []struct {
+		status  string
+		outcome string
+		want    float64
+	}{
+		{status: "500", outcome: "completed", want: 1},
+		{status: "none", outcome: "canceled", want: 1},
+		{status: "500", outcome: "canceled", want: 0},
+	}
+	for _, check := range checks {
+		if got := testutil.ToFloat64(metrics.requests.WithLabelValues(failRoute.id, check.status, check.outcome)); got != check.want {
+			t.Errorf("%s/%s requests = %v, want %v", check.status, check.outcome, got, check.want)
+		}
+	}
+}
+
 func TestHttpIntervalMaximumCarriesItsOwnFreshness(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	metrics := newHttpMetrics(registry)
