@@ -22,6 +22,7 @@ const (
 	IndexDietSweepPaymentIndexDrop
 	IndexDietCreateTimeIndexDrop
 	IndexDietOpenPayerIndexDrop
+	IndexDietOpenSourceIdIndexDrop
 )
 
 // The drop of transfer_contract_reap_pending_create_time.
@@ -54,12 +55,19 @@ var openPayerIndexDropMigration = newOnlineSqlMigration(
 	`DROP INDEX IF EXISTS transfer_contract_open_payer_network_id_transfer_byte_count`,
 )
 
+// The drop of transfer_contract_open_source_id (OPEN-SOURCE-ID-RETIRE.md).
+var openSourceIdIndexDropMigration = newOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_open_source_id`,
+	`DROP INDEX IF EXISTS transfer_contract_open_source_id`,
+)
+
 var indexDietMigrations = map[IndexDietMigration]*OnlineSqlMigration{
 	IndexDietReapPendingIndexDrop:  reapPendingIndexDropMigration,
 	IndexDietStreamIndexDrop:       streamIndexDropMigration,
 	IndexDietSweepPaymentIndexDrop: sweepPaymentIndexDropMigration,
 	IndexDietCreateTimeIndexDrop:   createTimeIndexDropMigration,
 	IndexDietOpenPayerIndexDrop:    openPayerIndexDropMigration,
+	IndexDietOpenSourceIdIndexDrop: openSourceIdIndexDropMigration,
 }
 
 // The index each index diet migration drops.
@@ -69,6 +77,7 @@ var indexDietDroppedIndexes = map[IndexDietMigration]string{
 	IndexDietSweepPaymentIndexDrop: "transfer_escrow_sweep_payment_id",
 	IndexDietCreateTimeIndexDrop:   "transfer_contract_create_time",
 	IndexDietOpenPayerIndexDrop:    "transfer_contract_open_payer_network_id_transfer_byte_count",
+	IndexDietOpenSourceIdIndexDrop: "transfer_contract_open_source_id",
 }
 
 // The version a database reaches once the migration has applied: its position

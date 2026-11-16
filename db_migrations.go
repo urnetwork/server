@@ -11713,4 +11713,16 @@ var migrations = []any{
 	// statements until the state row's complete time, 75 minutes after the
 	// trigger.
 	contractOriginLingerMigration,
+
+	// transfer_contract_open_source_id (323 GiB on 11-16, v56) served only
+	// the closed origin arms of the companion origin reads, which now read
+	// the side table and each contract's primary key
+	// (contract_origin_linger_schema.go), and the prober shard retention's
+	// client window, which now walks each dropped generation's primary key
+	// range (OPEN-SOURCE-ID-RETIRE.md). The operator drops it first with
+	// DROP INDEX CONCURRENTLY, once every running reader is past the side
+	// table's complete time and idx_scan has stayed flat for a day that
+	// includes a prober generation drop; this records the drop, a no-op on
+	// Main. Merge it only after the operator's drop.
+	openSourceIdIndexDropMigration,
 }

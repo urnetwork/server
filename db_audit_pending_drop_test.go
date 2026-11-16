@@ -18,8 +18,8 @@ func TestAuditSchemaAcceptsIndexDroppedAheadOfItsMigration(t *testing.T) {
 		ctx := context.Background()
 		// created at v354, and dropped by a plain migration before v377 rebuilt it
 		const pendingDrop = "transfer_contract_open_payer_network_id_transfer_byte_count"
-		// created at v56 and never dropped
-		const noPendingDrop = "transfer_contract_open_source_id"
+		// created at v64 and never dropped
+		const noPendingDrop = "account_wallet_active_network_id"
 		dropVersion := auditTestIndexDropVersion(t, pendingDrop)
 		ApplyDbMigrationsUpTo(ctx, dropVersion-1)
 
