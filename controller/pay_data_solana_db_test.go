@@ -98,7 +98,7 @@ func TestSolanaWebhookAppliesDataPackToNamedNetwork(t *testing.T) {
 		}, pageSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, intentResult.Error, nil)
-		priceUsd, ok := dataPackPriceUsd(StripeItemData1Tib)
+		priceUsd, ok := dataPackPriceUsd(StripeItemData1Tib, model.DataRailCrypto)
 		connect.AssertEqual(t, ok, true)
 		// the price plus the reserved sub-cent suffix
 		connect.AssertEqual(t, intentResult.AmountUsd, model.SolanaMicroToUsd(model.SolanaUsdToMicro(priceUsd)+202))

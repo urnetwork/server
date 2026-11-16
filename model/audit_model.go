@@ -32,7 +32,6 @@ const (
 	AuditEventTypeDeviceAdded                 AuditEventType = "device_added"
 	AuditEventTypeDeviceRemoved               AuditEventType = "device_removed"
 	AuditEventTypeContractClosedSuccess       AuditEventType = "contract_closed_success"
-	AuditEventTypeCirclePayoutFailed          AuditEventType = "circle_payout_failed"
 )
 
 // Removed series (2026-08, see STATS3.md): packets (all_packets_*), extenders
@@ -1026,10 +1025,6 @@ func AddAuditEvent(ctx context.Context, event interface{}) {
 		AddAuditDeviceEvent(ctx, v)
 	case *AuditContractEvent:
 		AddAuditContractEvent(ctx, v)
-	case *AuditAccountPaymentEvent:
-		// processor submit failures (controller.auditAccountPayment) were
-		// dropped by the default case until this case existed
-		AddAuditAccountPaymentEvent(ctx, v)
 	default:
 		// panic(fmt.Sprintf("Event type not recognized: %T", v))
 		glog.V(2).Infof("[audit]event type not recognized: %T", v)
@@ -1184,49 +1179,6 @@ func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
 			event.EventDetails,
 			event.TransferBytes,
 			event.TransferPackets,
-		)
-		server.Raise(err)
-	})
-}
-
-type AuditAccountPaymentEvent struct {
-	AuditEvent
-
-	AccountPaymentId server.Id
-}
-
-func NewAuditAccountPaymentEvent(eventType AuditEventType) *AuditAccountPaymentEvent {
-	eventId := server.NewId()
-	eventTime := server.NowUtc()
-	return &AuditAccountPaymentEvent{
-		AuditEvent: AuditEvent{
-			EventId:   eventId,
-			EventTime: eventTime,
-			EventType: eventType,
-		},
-	}
-}
-
-func AddAuditAccountPaymentEvent(ctx context.Context, event *AuditAccountPaymentEvent) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		_, err := tx.Exec(
-			ctx,
-			`
-			INSERT INTO audit_account_payment
-			(
-				event_id,
-				event_time,
-				payment_id,
-				event_type,
-				event_details
-			)
-			VALUES ($1, $2, $3, $4, $5)
-			`,
-			event.EventId,
-			event.EventTime,
-			event.AccountPaymentId,
-			event.EventType,
-			event.EventDetails,
 		)
 		server.Raise(err)
 	})

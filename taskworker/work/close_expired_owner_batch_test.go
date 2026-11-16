@@ -11,7 +11,6 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
 )
 
 // A payer with one balance and count reserved contracts on it, created inside
@@ -55,20 +54,16 @@ func newCloseExpiredOwnerBatchRows(t testing.TB, ctx context.Context, count int)
 // Records the contracts each admitted owned turn on the balance carried.
 func observeCloseExpiredOwnerTurns(ctx context.Context, balanceId server.Id, contractIds []server.Id) (context.Context, func() [][]server.Id) {
 	grant := server.NewPgOwnershipKey("transfer_balance", balanceId)
-	keyContractIds := map[server.PgOwnershipKey]server.Id{}
-	for _, contractId := range contractIds {
-		keyContractIds[task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))] = contractId
-	}
 	var stateLock sync.Mutex
 	admitted := [][]server.Id{}
-	observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+	observed := model.Testing_WithContractDeadlineOwnerTurnObservation(ctx, func(members []server.Id, event server.PgOwnershipEvent) {
 		if event.Kind != server.PgOwnershipAdmitted || !slices.Contains(event.Keys, grant) {
 			return
 		}
 		covered := []server.Id{}
-		for _, key := range event.Keys {
-			if contractId, ok := keyContractIds[key]; ok {
-				covered = append(covered, contractId)
+		for _, member := range members {
+			if slices.Contains(contractIds, member) {
+				covered = append(covered, member)
 			}
 		}
 		if len(covered) == 0 {

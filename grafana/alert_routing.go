@@ -526,37 +526,23 @@ func managedCompetitionRoute(value any) bool {
 }
 
 func (self *grafanaProvisioningClient) request(ctx context.Context, method string, requestPath string, requestBody any) (int, []byte, error) {
-	var bodyReader io.Reader
+	var encoded []byte
+	headers := map[string]string{"Accept": "application/json"}
 	if requestBody != nil {
-		encoded, err := json.Marshal(requestBody)
+		var err error
+		encoded, err = json.Marshal(requestBody)
 		if err != nil {
 			return 0, nil, err
 		}
-		bodyReader = bytes.NewReader(encoded)
+		headers["Content-Type"] = "application/json"
+		headers["X-Disable-Provenance"] = "true"
 	}
-	request, err := http.NewRequestWithContext(ctx, method, self.baseUrl+requestPath, bodyReader)
-	if err != nil {
-		return 0, nil, err
-	}
-	request.SetBasicAuth(self.username, self.password)
-	request.Header.Set("Accept", "application/json")
-	if requestBody != nil {
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("X-Disable-Provenance", "true")
-	}
-	response, err := self.http.Do(request)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, alertRoutingResponseLimit+1))
-	if err != nil {
-		return 0, nil, err
-	}
-	if alertRoutingResponseLimit < len(body) {
+	// retries the load balancer's 429 (and 502-504 for GET); see grafanaSend
+	statusCode, body, err := grafanaSend(ctx, self.http, method, self.baseUrl+requestPath, self.username, self.password, encoded, headers, int64(alertRoutingResponseLimit))
+	if errors.Is(err, errGrafanaResponseTooLarge) {
 		return 0, nil, errors.New("Grafana provisioning response exceeded the size limit")
 	}
-	return response.StatusCode, body, nil
+	return statusCode, body, err
 }
 
 func boundedErrorBody(body []byte) string {

@@ -73,6 +73,8 @@ func ProvidersFromDue(due []ingest.DueProvider) []prober.Provider {
 			OutcomeCount:         entry.OutcomeCount,
 			ClaimOrdinal:         entry.ClaimOrdinal,
 			SecurityDestinations: entry.SecurityDestinations,
+			IpFamily:             entry.IpFamily.Normalize(),
+			PostQuantum:          entry.PostQuantum,
 			Place: egresshealth.Place{
 				Country: strings.ToLower(strings.TrimSpace(entry.CountryCode)),
 				Region:  strings.TrimSpace(entry.Region),

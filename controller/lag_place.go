@@ -7,32 +7,6 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The GeoLite2 City place of an extender's address (lag.dev/PLAN.md A4), or
-// nil when it has no record: where the extender sample places an extender
-// without a derived location. An extender's address is public through its
-// measurement name (§2), so its place keeps the block's own coordinates,
-// which serve distance (L3) better than the city's. A visitor's place is
-// lagClientPlace, never this. A deployment without the database places
-// nothing this way, rather than failing the caller. Tests replace it.
-var lagAddressPlace = func(ip netip.Addr) *model.LagPlace {
-	var place *model.LagPlace
-	server.HandleError(func() {
-		ipInfo, err := server.GetIpInfo(ip)
-		if err != nil || ipInfo.CountryCode == "" {
-			return
-		}
-		place = &model.LagPlace{
-			City:        ipInfo.City,
-			Region:      ipInfo.Region,
-			CountryCode: ipInfo.CountryCode,
-			CountryName: ipInfo.Country,
-			Latitude:    ipInfo.Latitude,
-			Longitude:   ipInfo.Longitude,
-		}
-	})
-	return place
-}
-
 // A visitor's city-level place, as a track keeps it (A5, amendment 9).
 type lagClientPlaceFields struct {
 	CountryCode string
@@ -51,7 +25,8 @@ type lagClientPlaceFields struct {
 // coordinates would keep a point finer than the city beside the network and
 // the time (amendment 9); they are never kept. A place that names no city, or
 // a city the place list does not hold, keeps no coordinates. nil when the
-// lookup cannot answer. Unlike lagAddressPlace this is never replaced: tests
+// lookup cannot answer. An extender is placed by model.GetLagExtenderPlaces,
+// never by this. Unlike the extenders' places this is never replaced: tests
 // install a database and a place list instead, so they run what production
 // runs.
 func lagClientPlace(addr netip.Addr) *lagClientPlaceFields {

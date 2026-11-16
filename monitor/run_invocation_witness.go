@@ -52,14 +52,18 @@ type runInvocationRecord struct {
 	StartupNativeCadenceNanoseconds int64                   `json:"startup_native_cadence_nanoseconds"`
 	ConfiguredDelayNanoseconds      int64                   `json:"configured_delay_nanoseconds"`
 	Result                          string                  `json:"result,omitempty"`
+	ObserverRouteReceiptSha256      string                  `json:"observer_route_receipt_sha256,omitempty"`
+	ObserverRouteReceiptStatus      string                  `json:"observer_route_receipt_status,omitempty"`
 }
 
 type runInvocationToken struct {
-	invocation uint64
-	started    time.Time
-	signal     runInvocationSignal
-	kind       string
-	delay      time.Duration
+	invocation                 uint64
+	started                    time.Time
+	signal                     runInvocationSignal
+	kind                       string
+	delay                      time.Duration
+	observerRouteReceiptSha256 string
+	observerRouteReceiptStatus string
 }
 
 // RunInvocationWitness owns one optional private bounded stream. Runtime sink
@@ -190,7 +194,7 @@ func (self *RunInvocationWitness) write(token runInvocationToken, event, result 
 		return false
 	}
 	now := time.Now()
-	record := runInvocationRecord{Schema: 1, RunId: self.runId, Identity: self.identity, SelectedKeysSha256: self.selectedKeysSha256, Sequence: self.sequence + 1, Invocation: token.invocation, Key: token.signal.Key, Number: token.signal.Number, Kind: token.kind, Event: event, ObservedAt: now.UTC(), DispatchElapsedNanoseconds: int64(now.Sub(token.started)), StartupNativeCadenceNanoseconds: token.signal.NativeCadenceNanoseconds, ConfiguredDelayNanoseconds: int64(token.delay), Result: result}
+	record := runInvocationRecord{Schema: 1, RunId: self.runId, Identity: self.identity, SelectedKeysSha256: self.selectedKeysSha256, Sequence: self.sequence + 1, Invocation: token.invocation, Key: token.signal.Key, Number: token.signal.Number, Kind: token.kind, Event: event, ObservedAt: now.UTC(), DispatchElapsedNanoseconds: int64(now.Sub(token.started)), StartupNativeCadenceNanoseconds: token.signal.NativeCadenceNanoseconds, ConfiguredDelayNanoseconds: int64(token.delay), Result: result, ObserverRouteReceiptSha256: token.observerRouteReceiptSha256, ObserverRouteReceiptStatus: token.observerRouteReceiptStatus}
 	encoded, err := json.Marshal(record)
 	if err != nil || len(encoded)+1 > self.limits.recordBytes || int64(len(encoded)+1) > self.limits.totalBytes-self.bytes {
 		self.fail()
@@ -223,7 +227,7 @@ func (self *RunInvocationWitness) begin(signal Signal, kind string, floor time.D
 	if kind == "active" {
 		delay = max(delay, floor)
 	}
-	token := runInvocationToken{self.invocation, time.Now(), entry, kind, delay}
+	token := runInvocationToken{invocation: self.invocation, started: time.Now(), signal: entry, kind: kind, delay: delay}
 	if !self.write(token, "dispatch_begin", "") {
 		return runInvocationToken{}
 	}
@@ -233,6 +237,9 @@ func (self *RunInvocationWitness) begin(signal Signal, kind string, floor time.D
 func (self *RunInvocationWitness) returned(ctx context.Context, token runInvocationToken, err error) {
 	if token.invocation == 0 {
 		return
+	}
+	if association, _ := ctx.Value(observerRouteInvocationKey{}).(*observerRouteInvocation); association != nil && association.invocation == token.invocation && association.runId == self.runId && association.completion != nil {
+		token.observerRouteReceiptSha256, token.observerRouteReceiptStatus = association.completion.result()
 	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -272,6 +279,14 @@ func runSignalWithWitness(ctx context.Context, signal Signal, settings SignalSet
 		return signal.Run(ctx, settings)
 	}
 	token := witness.begin(signal, kind, floor)
+	if adapter, ok := signal.(*signalAdapter); ok && signal.Key() == "observer-route" && token.invocation != 0 {
+		if probe, ok := adapter.probe.(observerRouteProbe); ok {
+			cfg := configFromSignalSettings(settings.withDefaults())
+			policy := observerRouteEffectivePolicy(cfg, settings.ExcludedHosts, probe.settings)
+			association := &observerRouteInvocation{runId: witness.runId, invocation: token.invocation, identity: witness.identity, policySha256: observerRoutePolicyDigest(policy, probe.settings.MaxReceiptBytes), completion: &observerRouteCompletion{status: "unavailable"}}
+			ctx = context.WithValue(ctx, observerRouteInvocationKey{}, association)
+		}
+	}
 	// No defer/recover: unwinding is not a returned Signal.Run invocation.
 	alerts, err := signal.Run(ctx, settings)
 	witness.returned(ctx, token, err)

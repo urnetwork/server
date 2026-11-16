@@ -93,6 +93,9 @@ func newConnectH1BatchTestMessage(index byte) []byte {
 	return message
 }
 
+// Ready batches balance the message cap with a byte target across tunnel MTUs.
+// The target follows the 16-KiB coalescer and the 4-KiB ordinary H1 data
+// message, not the packet size, so the MTU only changes the packet count.
 func TestConnectH1ReadyDrainBalancesAcksAndPayloadBytes(t *testing.T) {
 	readyCount := func(messageByteCount int) (count int, byteCount int) {
 		count = 1
@@ -107,9 +110,21 @@ func TestConnectH1ReadyDrainBalancesAcksAndPayloadBytes(t *testing.T) {
 	if count, bytes := readyCount(128); count != 32 || bytes != 4*1024 {
 		t.Fatalf("ACK-sized ready drain=(%d, %dB), want (32, 4096B)", count, bytes)
 	}
-	if count, bytes := readyCount(clientconnect.DefaultMtu); count != 12 ||
-		bytes >= 16*1024 {
-		t.Fatalf("tunnel-MTU ready drain=(%d, %dB), want 12 below 16KiB", count, bytes)
+	// The historical and current MTUs reach the same byte target with different
+	// packet counts. Stop at the first complete packet that reaches that target.
+	for _, messageByteCount := range []int{1100, clientconnect.DefaultMtu} {
+		count, byteCount := readyCount(messageByteCount)
+		if byteCount < connectH1WriteBatchDrainByteCount ||
+			connectH1WriteBatchDrainByteCount <= byteCount-messageByteCount ||
+			16*1024 <= byteCount {
+			t.Fatalf(
+				"%d-byte tunnel ready drain=(%d, %dB), want the first complete prefix reaching %dB below 16KiB",
+				messageByteCount,
+				count,
+				byteCount,
+				connectH1WriteBatchDrainByteCount,
+			)
+		}
 	}
 	if count, bytes := readyCount(4 * 1024); count != 3 ||
 		bytes != connectH1WriteBatchDrainByteCount {

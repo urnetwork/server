@@ -1213,6 +1213,68 @@ func TestProviderIntentExemptIndexRebuiltPastItsAge(t *testing.T) {
 	})
 }
 
+// Past its age, the index of a network of up to
+// providerIntentExemptRebuildWalkLimit registry members is rebuilt from
+// nothing: the first count drops it and walks while it builds, so an entry a
+// writer without the index left goes at once
+// (TestProviderIntentExemptIndexRebuiltPastItsAge). One member more and the
+// index stays: every count reads it while a re-sweep re-derives it, an
+// unrecorded build time (`#ready` scored -inf) included, and the re-sweep
+// records a build time when it completes.
+func TestProviderIntentExemptIndexRebuildWalkLimit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		cases := []struct {
+			memberCount int
+			built       string
+		}{
+			{providerIntentExemptRebuildWalkLimit, "aged"},
+			{providerIntentExemptRebuildWalkLimit + 1, "aged"},
+			{providerIntentExemptRebuildWalkLimit + 1, "unrecorded"},
+		}
+		for _, c := range cases {
+			now := server.NowUtc()
+			networkId, _, _, exemptCount := testingProviderIntentLargePreIndexNetwork(ctx, now, c.memberCount)
+			normalCount := c.memberCount - exemptCount
+			testingProviderIntentCompleteExemptBuild(t, ctx, networkId, now, normalCount, exemptCount)
+			if c.built == "aged" {
+				testingAgeProviderIntentExemptIndex(t, ctx, networkId, providerIntentExemptRebuildAge+10*time.Minute)
+			} else {
+				server.Redis(ctx, func(r server.RedisClient) {
+					err := r.ZAdd(ctx, providerIntentExemptKey(networkId), redis.Z{Score: math.Inf(-1), Member: "#ready"}).Err()
+					server.Raise(err)
+				})
+			}
+			resweep := providerIntentExemptRebuildWalkLimit < c.memberCount
+			for counts := 1; ; counts += 1 {
+				_, result := testingCountedScript(t, ctx, providerIntentCountClientsLua, providerIntentKeys(networkId), providerIntentCountArgs(now)...)
+				connect.AssertEqual(t, result[0], int64(normalCount))
+				connect.AssertEqual(t, result[1], int64(exemptCount))
+				ready, _, sentinel := testingProviderIntentExemptReady(ctx, networkId)
+				t.Logf("%d members, %s: count %d, path %d, ready %t, state %q", c.memberCount, c.built, counts, result[2], ready, sentinel)
+				if counts == 1 {
+					// dropped and building, so the count walked; or kept and
+					// re-sweeping, so the count read it
+					connect.AssertNotEqual(t, sentinel, "")
+					connect.AssertEqual(t, ready, resweep)
+					if !resweep {
+						connect.AssertEqual(t, result[2], int64(2))
+					}
+				}
+				if resweep {
+					connect.AssertEqual(t, result[2], int64(1))
+				}
+				if testingProviderIntentExemptRebuilt(ctx, networkId) {
+					break
+				}
+				if 8 < counts {
+					t.Fatalf("%d members, %s: the rebuild did not complete in %d counts", c.memberCount, c.built, counts)
+				}
+			}
+		}
+	})
+}
+
 // An index without exempt entries holds only `#ready`, which no sync writes, so
 // the counts that read it keep its ttl armed: it does not expire a day after
 // its build, and its ttl does not run down toward the short ones a volatile-ttl

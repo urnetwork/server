@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "kind": "epoch2-file-stream-tool-synthetic-qualification/v1",
+  "status": "source-and-standalone-tool-only",
+  "operator_approved": false,
+  "source_approved": false,
+  "product_selected": false,
+  "runtime_qualified": false,
+  "installed": false,
+  "source_payload_io_authorized": false,
+  "actual_transfer_performed": false,
+  "image_loaded": false,
+  "actual_layer_contents_verified": false,
+  "authority": "Actual Sille bulk reads/export/transfer are deferred until a natural empty queue or separately approved maintenance. This record is not that authority.",
+  "subject": {
+    "config_id": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "identity_kind": "Docker image config ID, not a pullable registry manifest digest",
+    "expected_ordered_uncompressed_layers": 35,
+    "product_graph_canonical_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf"
+  },
+  "source": {
+    "directory": "/home/by/urnetwork/temp/competition-image-stream-preparation-20261107.waa1wZ7t",
+    "program": "image_layer_stream.go",
+    "program_sha256": "7bc3dac232533b3d6301d1167ad7fbaaf7d7ed5eb460cf4901ea7118a6c1d1b4",
+    "tests": "image_layer_stream_test.go",
+    "tests_sha256": "dd93abc6eaf274344ba92c6894b2f1ec9262d8f30f2dc7ee3f37a390e0752b81",
+    "scope": "Standalone standard-library diagnostic; no repository, source-lock, module, product, control, or live configuration edits."
+  },
+  "qualification": {
+    "receipt_path": "/home/by/urnetwork/temp/competition-image-stream-preparation-20261107.waa1wZ7t/qualified-goofe-20261107/qualification-receipt.json",
+    "receipt_sha256": "7fd9ce10d2d284a4e63ec01ace6a7e3377af088daa7a27f4fc6f051f9c7989dc",
+    "tools_sha256": "70931f134b4cfbcd58ebdbe52be0993728e8a5325f38a8b80ea49c2408553896",
+    "test_json_sha256": "253c4226207a6e93f15e501cc66e580617d3fb31a51b7136abf811a5e824fefc",
+    "phase_log_sha256": "b99261992c083e842f2b74189dbb52bca7b3d018537b9f681daf9cba0f302b1e",
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "ordinary_only": true,
+    "race_claimed": false,
+    "runtime_seconds": 1.055,
+    "pre_and_post_source_tools_custody": true,
+    "go_module": "/dev/null",
+    "unit_and_cgroup_gone": true,
+    "resource_scope": "Goofe CPUs0,2/200%/1GiB/swap0/64tasks/300s/private-network"
+  },
+  "test_roots": [
+    "TestImageDestinationRejectsIncompleteOrSubstitutedContent",
+    "TestImageLayerStreamAndDestinationVerifyExactContent",
+    "TestImageLayerStreamPacingRetainsWholeOwnerAndDeadline",
+    "TestImageLayerStreamRejectsWrongSourceAndInterruptedOutput"
+  ],
+  "native": {
+    "path": "/home/by/urnetwork/temp/competition-image-stream-preparation-20261107.waa1wZ7t/qualified-goofe-20261107/artifacts/image-layer-stream",
+    "sha256": "51ad1cf3b43727bf852326a348253a2cf92c33a1d670ec14d4d3464efd0d56d7",
+    "buildinfo_sha256": "b223b53e662f1c735e4353157d894f13753a4bc8de8de29f580f1a016ab977f4",
+    "toolchain": "Go1.27.3 linux/amd64",
+    "cgo_enabled": 0,
+    "goexperiment": "greenteagc",
+    "flags": "-mod=readonly -p=2 -trimpath -buildvcs=false",
+    "static_no_interp_needed": true,
+    "no_vcs_revision_claim": true,
+    "main_never_executed": true
+  },
+  "contract": {
+    "sender": "stream RATE NEW_PRIVATE_RECEIPT TIMEOUT_SECONDS; fixed config and35 retained files only, binary stdout",
+    "destination": "verify ROOT0400_ARCHIVE NEW_PRIVATE_RECEIPT TIMEOUT_SECONDS; no extraction or Docker",
+    "controls": "Exact tagless USTAR/config/ordered35 diffIDs on both ends, full raw archive SHA+size, strict names/metadata/EOF/trailing refusal,16GiB total/3GiB per-layer bounds, one byte-rate owner, root physical ancestry/O_NOFOLLOW/single-link0400 inputs/O_EXCL0400 fsynced receipts.",
+    "cancellation_limit": "Context cannot interrupt a blocked regular-file read or stdout write. The future real orchestration must impose an absolute unit/pipeline deadline, cancel/kill and join both endpoints, and compare both full archive hashes/sizes plus all35 layer receipts before any separately authorized load."
+  },
+  "retained_metadata_only": {
+    "path": "/home/by/urnetwork/temp/competition-image-stream-preparation-20261107.waa1wZ7t/retained-layer-metadata.UNAPPROVED.json",
+    "sha256": "4fcf4667aa64e836c97a8176641d023c6475fb895b9d04ca7abeadba9b716d40",
+    "count": 35,
+    "total_bytes": 11338367488,
+    "maximum_file_bytes": 1932618752,
+    "all_below_three_gibibytes": true,
+    "expected_diff_ids_from_exact_config": true,
+    "observed_body_digests": null,
+    "payload_read": false,
+    "scope": "Stat/filename/ordered expected-digest metadata only, not layer-content integrity."
+  },
+  "remaining": [
+    "Root-reviewed finite two-end stream/receiver/receipt comparison harness at the approved empty boundary; no Docker SAVE by default.",
+    "Full35 actual destination diffID verification and complete archive custody, then separate load/image-config/alias authority.",
+    "Actual ordinary clean ten-repository Git recovery and privacy/tree/blob/candidate-policy/raw-lock proof.",
+    "Actual nonroot agent, technical image+contained70, exact kernel/core-one12trial qualification and independent review; not supplied by these four synthetic tests."
+  ]
+}

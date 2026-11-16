@@ -10,6 +10,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	clientconnect "github.com/urnetwork/connect"
 )
 
 const (
@@ -189,7 +191,7 @@ func initialNetworkProfiles(seed int64) map[string]networkProfile {
 		"clean-lan": {
 			Name:       "clean-lan",
 			Seed:       seed,
-			InnerMtu:   1440,
+			InnerMtu:   clientconnect.DefaultMtu,
 			Forward:    cleanForward,
 			Reverse:    cleanReverse,
 			SourceNote: "synthetic same-host clean LAN",
@@ -197,7 +199,7 @@ func initialNetworkProfiles(seed int64) map[string]networkProfile {
 		"wifi-good": {
 			Name:       "wifi-good",
 			Seed:       seed,
-			InnerMtu:   1440,
+			InnerMtu:   clientconnect.DefaultMtu,
 			Forward:    wifiForward,
 			Reverse:    wifiReverse,
 			SourceNote: "synthetic good Wi-Fi",
@@ -205,7 +207,7 @@ func initialNetworkProfiles(seed int64) map[string]networkProfile {
 		"lte": {
 			Name:       "lte",
 			Seed:       seed,
-			InnerMtu:   1400,
+			InnerMtu:   clientconnect.DefaultMtu,
 			Forward:    lteForward,
 			Reverse:    lteReverse,
 			SourceNote: "synthetic LTE",
@@ -213,7 +215,7 @@ func initialNetworkProfiles(seed int64) map[string]networkProfile {
 		"mobile-poor": {
 			Name:       "mobile-poor",
 			Seed:       seed,
-			InnerMtu:   1280,
+			InnerMtu:   clientconnect.DefaultMtu,
 			Forward:    poorForward,
 			Reverse:    poorReverse,
 			SourceNote: "synthetic poor mobile path with clustered loss",
@@ -221,7 +223,7 @@ func initialNetworkProfiles(seed int64) map[string]networkProfile {
 		"wan": {
 			Name:       "wan",
 			Seed:       seed,
-			InnerMtu:   1400,
+			InnerMtu:   clientconnect.DefaultMtu,
 			Forward:    wanForward,
 			Reverse:    wanReverse,
 			SourceNote: "synthetic asymmetric WAN",
@@ -229,7 +231,7 @@ func initialNetworkProfiles(seed int64) map[string]networkProfile {
 		"single-region-500ms-rtt": {
 			Name:       "single-region-500ms-rtt",
 			Seed:       seed,
-			InnerMtu:   1400,
+			InnerMtu:   clientconnect.DefaultMtu,
 			Forward:    regional500Forward,
 			Reverse:    regional500Reverse,
 			SourceNote: "constant 250 ms each way; 500 ms application-user-to-connect RTT",
@@ -237,7 +239,7 @@ func initialNetworkProfiles(seed int64) map[string]networkProfile {
 		"single-region-1000ms-rtt": {
 			Name:       "single-region-1000ms-rtt",
 			Seed:       seed,
-			InnerMtu:   1400,
+			InnerMtu:   clientconnect.DefaultMtu,
 			Forward:    regional1000Forward,
 			Reverse:    regional1000Reverse,
 			SourceNote: "constant 500 ms each way; 1 s application-user-to-connect RTT",
@@ -295,7 +297,7 @@ func cellEdgeNetworkProfiles(seed int64) map[string]networkProfile {
 		return networkProfile{
 			Name:       name,
 			Seed:       seed,
-			InnerMtu:   outerMtu - 80,
+			InnerMtu:   clientconnect.DefaultMtu,
 			Forward:    newDirection(upRateBitsPerSecond),
 			Reverse:    newDirection(downRateBitsPerSecond),
 			SourceNote: "synthetic one-device cell-edge stress profile; not a field-network claim",
@@ -439,7 +441,7 @@ func TestCellEdgeProfilesResolveExactDeviceAccessConditions(t *testing.T) {
 			profile.Forward.Jitter != expected.jitter || profile.Reverse.Jitter != expected.jitter {
 			t.Errorf("profile %q delay/jitter=%+v", expected.name, profile)
 		}
-		if profile.InnerMtu != expected.outerMtu-80 ||
+		if profile.InnerMtu != clientconnect.DefaultMtu ||
 			profile.Forward.OuterMtu != expected.outerMtu ||
 			profile.Reverse.OuterMtu != expected.outerMtu ||
 			profile.Forward.BurstByteCount != expected.outerMtu ||
@@ -559,8 +561,8 @@ func allNetworkProfiles(seed int64) map[string]networkProfile {
 			reverse.OuterMtu = outerMtu
 		})
 		profile := profiles[name]
-		profile.InnerMtu = min(profile.InnerMtu, outerMtu-80)
-		profile.SourceNote = "synthetic focused MTU with an 80-byte tunnel allowance"
+		profile.InnerMtu = clientconnect.DefaultMtu
+		profile.SourceNote = "synthetic focused outer MTU; application packet MTU stays at the product default"
 		profiles[name] = profile
 	}
 	profiles["mtu-blackhole-1280"] = focusedNetworkProfile(

@@ -12,13 +12,13 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Exact earnings and their immutable unapplied owner must exist when closure
-// returns. Applied totals plus pending allocation preserve the same payment.
+// Exact earnings must exist in the sweep when closure returns. The closure
+// publishes no provider totals, applied or pending (BILLING-SPLIT.md).
 func requireDeadlineProviderDurability(t testing.TB, ctx context.Context, networkId, contractId server.Id, bytes ByteCount) {
 	t.Helper()
 	state := readDeadlineDeferredProjection(t, ctx, networkId, contractId)
-	if state.sweptBytes != bytes || state.accountBytes+state.pendingBytes != bytes {
-		t.Fatal("deadline earnings or their durable projection were not committed", state.sweptBytes, state.accountBytes, state.pendingBytes, bytes)
+	if state.sweptBytes != bytes || state.accountBytes != 0 || state.pendingBytes != 0 || state.owners != 0 {
+		t.Fatal("deadline earnings were not committed, or provider totals were published", state.sweptBytes, state.accountBytes, state.pendingBytes, state.owners, bytes)
 	}
 }
 
@@ -288,9 +288,10 @@ func TestDeadlineReconciliationThroughExpirySweep(t *testing.T) {
 				t.Fatal("expiry sweep overcharged or left the contract open", terminal, balance, charged, provided)
 			}
 		})
+		// the sweep alone holds the provider's earnings (BILLING-SPLIT.md)
 		state := readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
-		if state.accountBytes != 0 || state.sweptBytes != 7 || state.pendingBytes != 7 {
-			t.Fatal("expiry sweep lost exact pending provider allocation", state.accountBytes, state.sweptBytes, state.pendingBytes)
+		if state.accountBytes != 0 || state.sweptBytes != 7 || state.pendingBytes != 0 || state.owners != 0 {
+			t.Fatal("expiry sweep lost exact earnings or published provider totals", state.accountBytes, state.sweptBytes, state.pendingBytes, state.owners)
 		}
 		if remaining := Testing_NetEscrowByteCount(ctx, f.balanceId); remaining != 0 {
 			t.Fatal("deadline retained a spent reservation", remaining)

@@ -158,6 +158,10 @@ func TestInitTasksReapsRemovedTargets(t *testing.T) {
 			"github.com/urnetwork/server/controller.RefreshTransferBalances",
 			// the user_auth_attempt drain, retired with its table
 			"github.com/urnetwork/server/taskworker/work.RemoveExpiredAuthAttempts",
+			// a USDC payment's send and status check, retired with USDC
+			// provider payouts, under both of its names
+			"github.com/urnetwork/server/controller.AdvancePayment",
+			"bringyour.com/bringyour/controller.AdvancePayment",
 		}
 
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)

@@ -9,7 +9,7 @@ import (
 )
 
 func AccountPreferencesSet(w http.ResponseWriter, r *http.Request) {
-	router.WrapWithInputRequireAuth(controller.AccountPreferencesSet, w, r)
+	router.WrapWithInputRequireAuth(controller.AccountPreferencesSetBySettings, w, r)
 }
 
 func AccountPreferencesGet(w http.ResponseWriter, r *http.Request) {

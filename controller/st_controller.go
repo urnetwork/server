@@ -42,6 +42,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -198,6 +199,17 @@ type StConfig struct {
 	// V1SweepConfigError says why st.yml's sweep keys were refused. A refused
 	// sweep configuration disables only the sweep, never the st subsystem.
 	V1SweepConfigError string
+	// Amendments and ExtenderPool are st.yml's amendments and extender_pool
+	// blocks, raw: st_ledger_v2_amendments.go reads them, so a malformed one
+	// refuses only the epochs whose rows need it.
+	Amendments   yaml.Node
+	ExtenderPool yaml.Node
+	// Ctf is the capture the flag driver's configuration (st_ctf_config.go),
+	// off unless st.yml's ctf block turns it on.
+	Ctf StCtfConfig
+	// CtfConfigError says why st.yml's ctf block was refused. A refused block
+	// turns capture the flag off, never the st subsystem.
+	CtfConfigError string
 }
 
 // DeploymentKey is the exact chain/coordinator identity used to namespace
@@ -285,6 +297,12 @@ type stVaultFile struct {
 	// (stV1SweepSelect) instead of failing the whole st.yml decode.
 	V1SweepEpoch          yaml.Node `yaml:"v1_sweep_epoch"`
 	V1SweepRecoveryEpochs yaml.Node `yaml:"v1_sweep_recovery_epochs"`
+	// The amendment fallback lines and the extender pool's networks stay raw
+	// too (st_ledger_v2_amendments.go).
+	Amendments   yaml.Node `yaml:"amendments"`
+	ExtenderPool yaml.Node `yaml:"extender_pool"`
+	// The capture the flag block stays raw for the same reason (stCtfSelect).
+	Ctf yaml.Node `yaml:"ctf"`
 
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
@@ -322,6 +340,9 @@ type stVaultFile struct {
 	TestnetValidatorHotkeys       []string                       `yaml:"testnet-validator-hotkeys"`
 	TestnetV1SweepEpoch           yaml.Node                      `yaml:"testnet-v1-sweep-epoch"`
 	TestnetV1SweepRecoveryEpochs  yaml.Node                      `yaml:"testnet-v1-sweep-recovery-epochs"`
+	TestnetAmendments             yaml.Node                      `yaml:"testnet-amendments"`
+	TestnetExtenderPool           yaml.Node                      `yaml:"testnet-extender-pool"`
+	TestnetCtf                    yaml.Node                      `yaml:"testnet-ctf"`
 }
 
 // stConfigFromVault lazily loads `st.yml`. Unlike verify.yml the resource is
@@ -397,6 +418,8 @@ type stSelectedConfig struct {
 	DepositZeroRateAction                                                                                          string
 	ValidatorHotkeys                                                                                               []string
 	V1SweepEpoch, V1SweepRecoveryEpochs                                                                            yaml.Node
+	Amendments, ExtenderPool                                                                                       yaml.Node
+	Ctf                                                                                                            yaml.Node
 }
 
 func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
@@ -425,6 +448,9 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			ValidatorHotkeys:      append([]string(nil), f.TestnetValidatorHotkeys...),
 			V1SweepEpoch:          f.TestnetV1SweepEpoch,
 			V1SweepRecoveryEpochs: f.TestnetV1SweepRecoveryEpochs,
+			Amendments:            f.TestnetAmendments,
+			ExtenderPool:          f.TestnetExtenderPool,
+			Ctf:                   f.TestnetCtf,
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
@@ -448,6 +474,9 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			ValidatorHotkeys:      append([]string(nil), f.ValidatorHotkeys...),
 			V1SweepEpoch:          f.V1SweepEpoch,
 			V1SweepRecoveryEpochs: f.V1SweepRecoveryEpochs,
+			Amendments:            f.Amendments,
+			ExtenderPool:          f.ExtenderPool,
+			Ctf:                   f.Ctf,
 		}, nil
 	default:
 		return stSelectedConfig{}, fmt.Errorf("st.yml unknown profile %q", profile)
@@ -468,7 +497,7 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 		DepositTiers:          append([]StDepositTier(nil), s.DepositTiers...),
 		DepositZeroRateAction: s.DepositZeroRateAction,
 		ReliabilityAMin:       s.ReliabilityAMin, BlockSeconds: s.BlockSeconds, DeployBlock: s.DeployBlock,
-		PruneAlertPositions: s.PruneAlertPositions}
+		PruneAlertPositions: s.PruneAlertPositions, Amendments: s.Amendments, ExtenderPool: s.ExtenderPool}
 	if profile == "mainnet" {
 		cfg.LaunchReadinessSha256 = file.LaunchReadinessSha256
 	}
@@ -543,6 +572,8 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	// A refused sweep configuration disables only the sweep; settlement,
 	// v2 included, keeps running.
 	stV1SweepSelect(cfg, profile, &s.V1SweepEpoch, &s.V1SweepRecoveryEpochs)
+	// Likewise a refused capture the flag block turns only capture the flag off.
+	stCtfSelect(cfg, profile, &s.Ctf)
 	if cfg.GenesisHash, err = stParseHex32(s.GenesisHash); err != nil {
 		return nil, fmt.Errorf("st.yml genesis_hash: %w", err)
 	}
@@ -858,6 +889,14 @@ type CoreStClient struct {
 	// Zero selects stClientKeyAuthorityAttemptBudget. Tests shorten the bound
 	// on one endpoint's client-key read; it never changes what is verified.
 	clientKeyAttemptBudget time.Duration
+	// Tests replace what pays for a demand deposit (st_demand.go), so a funding
+	// decision is exercised without its chains, the two steps before it that
+	// reach the database, settling the deposit key's earlier transactions and
+	// reading a retained staging intent, and the sweep's hold on a conversion.
+	demandPayer    stDemandPayer
+	demandSettle   func(context.Context) error
+	demandRetained func(context.Context, uint64, *big.Int) (bool, error)
+	demandHold     func(context.Context) (string, error)
 	// Tests inject only the independent public authority bytes and the actual
 	// signer boundary; neither hook skips policy or durable reservation checks.
 	gasAuthority      func(context.Context) ([]byte, error)
@@ -865,6 +904,8 @@ type CoreStClient struct {
 	transactionSigner func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error)
 	// One bounded registration owner is reused by every authenticated dispatch.
 	clientKeyRegistrations *stClientKeyRegistrationCohorts
+	// Only the claim relay's own client has this (sn_claim_relay_chain.go).
+	claimRelay *stClaimRelayEngine
 }
 
 // client returns a dialed, chain-id-verified client for one rpc url.
@@ -1202,6 +1243,8 @@ func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethcl
 		// intrinsic gas was selected by the cancellation payload
 	} else if previous != nil {
 		gasLimit = previous.GasLimit
+	} else {
+		gasLimit = self.claimRelay.plannedGasLimit(calldata)
 	}
 	estimate := gasLimit == 0 && previous == nil
 	forceLegacy := previous != nil && previous.GasPrice != nil
@@ -1224,16 +1267,19 @@ func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethcl
 	if prepared.legacy {
 		envelope.price = prepared.fee
 		if previous != nil {
-			envelope.price = stReplacementFee(previous.GasPrice, envelope.price)
+			envelope.price = stReplacementFee(previous.GasPrice, self.claimRelay.replacementQuote(envelope.price))
 		}
 		feeCap = envelope.price
 	} else {
 		envelope.tip = prepared.fee
 		envelope.fee = new(big.Int).Mul(prepared.header.BaseFee, big.NewInt(2))
 		envelope.fee.Add(envelope.fee, envelope.tip)
+		if self.claimRelay != nil {
+			envelope.fee = snClaimRelayFeeCap(prepared.header.BaseFee, envelope.tip)
+		}
 		if previous != nil {
-			envelope.tip = stReplacementFee(previous.GasTipCap, envelope.tip)
-			envelope.fee = stReplacementFee(previous.GasFeeCap, envelope.fee)
+			envelope.tip = stReplacementFee(previous.GasTipCap, self.claimRelay.replacementQuote(envelope.tip))
+			envelope.fee = stReplacementFee(previous.GasFeeCap, self.claimRelay.replacementQuote(envelope.fee))
 			if envelope.fee.Cmp(envelope.tip) < 0 {
 				envelope.fee.Set(envelope.tip)
 			}
@@ -1742,7 +1788,23 @@ func (self *CoreStClient) reconcileAccountIntents(
 			return err
 		}
 		spent := self.spentLedgerV2Intent(ctx, client, intent, from, finalized)
-		cancelIntent := stale || expiredClose || expiredDeposit || spent
+		// A staging transfer reserved and never signed before its epoch rolled.
+		// Never an intent with an attempt, whose bytes may be out there.
+		rolledStaging := false
+		if len(attempts) == 0 {
+			// A retirement already made is durable: its cancellation is signed as
+			// reserved, without reading custody again (turnedDepositStaging).
+			if rolledStaging, err = self.turnedDepositStaging(ctx, intent, from); err != nil {
+				return err
+			}
+			if !rolledStaging {
+				if rolledStaging, err = self.retireRolledDepositStaging(ctx, client, intent, from); err != nil {
+					return err
+				}
+			}
+		}
+		retired := self.claimRelay.retiresUnsigned(attempts)
+		cancelIntent := stale || expiredClose || expiredDeposit || spent || retired || rolledStaging
 		desiredKind := model.StTxAttemptExecution
 		if cancelIntent {
 			desiredKind = model.StTxAttemptCancellation
@@ -2176,9 +2238,15 @@ func (self *CoreStClient) stakeMoveGasFloor(to common.Address, calldata []byte, 
 		return stV1DepositGasFloor
 	case bytes.HasPrefix(calldata, stTransferStakeSelector) && to == stStakingPrecompileAddress:
 		return stV1DepositStagingGasFloor
+	case stDemandStakeCall(to, calldata):
+		return stV1DepositStagingGasFloor
 	case (bytes.HasPrefix(calldata, stV1ClaimSelector) || bytes.HasPrefix(calldata, stV1WithdrawClaimCreditSelector)) && to == self.cfg.SettlementVault:
 		return stV1ClaimGasFloor
 	case bytes.HasPrefix(calldata, stLedgerV2AbsorbStakeSelector) && self.cfg.LedgerV2Enabled() && to == self.cfg.VaultV2:
+		return stLedgerV2StakeMoveGasFloor
+	case bytes.HasPrefix(calldata, stCtfRecycleSelector) && self.cfg.Ctf.CarryAddress != (common.Address{}) && to == self.cfg.Ctf.CarryAddress:
+		// the carry's recycle claims and makes two stake moves from its own
+		// coldkey, whose StakingHotkeys list third parties can lengthen
 		return stLedgerV2StakeMoveGasFloor
 	}
 	return 0
@@ -2326,6 +2394,9 @@ func (self *CoreStClient) DepositCredit(ctx context.Context, epoch uint64, noId 
 			}
 			if state.staged.Cmp(new(big.Int).Add(alphaRao, big.NewInt(stDepositReserveAllowanceRao))) < 0 {
 				return "", common.Address{}, nil, errors.New("st: deposit staging lacks principal plus exact reserve rounding allowance")
+			}
+			if err := self.requireDepositDeadlineOpen(ctx, epoch, state.deadline); err != nil {
+				return "", common.Address{}, nil, err
 			}
 			operation := fmt.Sprintf("deposit:%d:%d:%s", epoch, noId, state.nonce)
 			logicalKey, err := stTransactionLogicalKey(self.cfg, operation)
@@ -2928,6 +2999,9 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		if self.cfg.LedgerV2Enabled() {
 			addresses = append(addresses, self.cfg.SettlementV2, self.cfg.VaultV2)
 		}
+		if carry := stCtfCarryMirrored(self.cfg); carry != (common.Address{}) {
+			addresses = append(addresses, carry)
+		}
 		out, err := client.FilterLogs(callCtx, ethereum.FilterQuery{
 			FromBlock: new(big.Int).SetUint64(fromBlock),
 			ToBlock:   new(big.Int).SetUint64(toBlock),
@@ -2955,6 +3029,8 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		logDecoders := decoders
 		if v2Decoders, ok := self.stLedgerV2EventDecoders(log.Address); ok {
 			logDecoders = v2Decoders
+		} else if ctfDecoders, ok := self.stCtfEventDecoders(log.Address); ok {
+			logDecoders = ctfDecoders
 		}
 		for _, decode := range logDecoders {
 			if k, a, ok := decode(log); ok {
@@ -3365,20 +3441,37 @@ func stDepositArtifactTotals(ctx context.Context, cfg *StConfig, client StClient
 	return usageBytes, users, nil
 }
 
-// stEpochDepositSizing sizes the epoch's automated deposit (D-3): the previous
-// epoch's signed usage and user totals at the conviction-snapshot tier, capped
-// by deposit_epoch_cap_rao. Epoch 0 has no prior artifact and sizes to zero.
-// Under the zero-price schedule the requirement is zero without reading the
-// artifact, so a not-yet-published artifact neither blocks nor retries the
-// task; its totals are still reported when available.
+// stEpochDepositSizing sizes the epoch's automated deposit under the price the last
+// verified sheet puts in force, fetching nothing (bringyourctl st status). The deposit
+// task fetches the sheet itself, once per attempt, and sizes under what that returned.
 func stEpochDepositSizing(ctx context.Context, cfg *StConfig, client StClient, state *StEpochState, epoch uint64) (*StDepositSizing, *StPublishOutcome, error) {
-	policy := stDepositPolicy(cfg)
+	policy, failed := stDepositStoredPolicy(ctx, cfg, epoch)
+	if failed != nil {
+		return nil, failed, nil
+	}
+	return stEpochDepositSizingUnder(ctx, cfg, client, state, epoch, policy)
+}
+
+// stEpochDepositSizingUnder sizes the epoch's automated deposit (D-3) under the
+// policy in force for it: the previous epoch's usage and user totals at the
+// conviction-snapshot tier, capped by the policy's epoch cap. Epoch 0 has no prior
+// usage and sizes to zero. Under a zero-price schedule the requirement is zero
+// without reading the source, so a total that is not published yet neither blocks
+// nor retries the task; the artifact's totals are still reported when available. A
+// priced source epoch's totals come from what settled it (stDepositSourceTotals).
+func stEpochDepositSizingUnder(ctx context.Context, cfg *StConfig, client StClient, state *StEpochState, epoch uint64, policy protocol.DepositPolicy) (*StDepositSizing, *StPublishOutcome, error) {
 	sizing := &StDepositSizing{Epoch: epoch, ConvictionRao: big.NewInt(0), RequiredRao: big.NewInt(0), ZeroPrice: policy.IsZeroPrice()}
 	if epoch == 0 {
 		return sizing, nil, nil
 	}
 	sizing.SourceEpoch = epoch - 1
-	usageBytes, users, failed := stDepositArtifactTotals(ctx, cfg, client, sizing.SourceEpoch)
+	var usageBytes, users uint64
+	var failed *StPublishOutcome
+	if sizing.ZeroPrice {
+		usageBytes, users, failed = stDepositArtifactTotals(ctx, cfg, client, sizing.SourceEpoch)
+	} else {
+		usageBytes, users, failed = stDepositSourceTotals(ctx, cfg, client, sizing.SourceEpoch)
+	}
 	if failed != nil {
 		if !sizing.ZeroPrice {
 			return nil, failed, nil
@@ -4049,7 +4142,25 @@ func StComputeEpochPayout(ctx context.Context, epoch uint64) (root [32]byte, lea
 	return root, len(leaves), nil
 }
 
-// stResolvePublish records the outcome of a publish attempt.
+// stPublishReasonMaxChars is st_publish.error's varchar(1024).
+const stPublishReasonMaxChars = 1024
+
+// stPublishResolveTimeout bounds recording an outcome after its attempt has stopped.
+const stPublishResolveTimeout = 30 * time.Second
+
+// stPublishReason is an outcome's reason as the publish column can hold it: no
+// endpoint and its key, valid text, and no longer than the column.
+func stPublishReason(reason string) string {
+	reason = strings.ReplaceAll(strings.ToValidUTF8(stScrubEndpoints(reason), "\uFFFD"), "\x00", "")
+	if utf8.RuneCountInString(reason) <= stPublishReasonMaxChars {
+		return reason
+	}
+	return string([]rune(reason)[:stPublishReasonMaxChars])
+}
+
+// stResolvePublish records the outcome of a publish attempt. It runs on a bounded
+// context of its own, so an attempt whose task was stopped still resolves its row
+// rather than leaving it pending forever.
 func stResolvePublish(ctx context.Context, publishId server.Id, outcome *StPublishOutcome) {
 	var txHash *string
 	if outcome.TxHash != "" {
@@ -4057,9 +4168,12 @@ func stResolvePublish(ctx context.Context, publishId server.Id, outcome *StPubli
 	}
 	var errorMessage *string
 	if outcome.Reason != "" {
-		errorMessage = &outcome.Reason
+		reason := stPublishReason(outcome.Reason)
+		errorMessage = &reason
 	}
-	model.UpdateStPublish(ctx, publishId, outcome.Status, txHash, errorMessage)
+	resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stPublishResolveTimeout)
+	defer cancel()
+	model.UpdateStPublish(resolveCtx, publishId, outcome.Status, txHash, errorMessage)
 }
 
 // StCommitEpochRoot publishes the payout root for a closed epoch
@@ -4200,13 +4314,102 @@ func StCommitEpochRoot(ctx context.Context, epoch uint64) (*StPublishOutcome, er
 	return outcome, nil
 }
 
-// StDepositForEpoch stages into this NO's isolated deposit hotkey and executes
-// the exact reserve transition for the CURRENT open epoch (a deposit
-// for a passed epoch is skipped). Sizing (when overrideRao is nil) is the
-// documented reference-rate policy over the PREVIOUS epoch's usage window,
-// hard-capped by deposit_epoch_cap_rao (D-3). Both the push and the credit
-// are recorded as publish rows (kinds deposit_push / deposit).
+const (
+	// stDepositMaxAttemptRows bounds the publish rows of one kind one epoch's
+	// attempts write. A refusal can last the whole epoch, and every sync turn and
+	// every retry reads the epoch's rows.
+	stDepositMaxAttemptRows = 16
+	// stDepositStaleRowAge is past the deposit task's MaxTime, so a row still pending
+	// after it belongs to an attempt that is gone.
+	stDepositStaleRowAge = 61 * time.Minute
+)
+
+// stDepositPublishRow is the publish row of one attempt. The first rows of a kind are
+// new; past the bound the newest is reused unless it records a transaction, so a
+// long refusal keeps its first rows and its latest state. A row an attempt that is
+// gone left pending is resolved here. A row's update time is when it last became
+// pending, created or reused, so a row another attempt has just reused is not taken
+// for one left behind.
+func stDepositPublishRow(ctx context.Context, cfg *StConfig, epoch uint64, kind string) server.Id {
+	count := 0
+	var last *model.StPublish
+	for _, publish := range model.GetStPublishes(ctx, cfg.DeploymentKey(), epoch) {
+		if publish.Kind != kind {
+			continue
+		}
+		count, last = count+1, publish
+		if publish.Status == model.StPublishStatusPending && stDepositStaleRowAge < server.NowUtc().Sub(publish.UpdateTime) {
+			stResolvePublish(ctx, publish.PublishId, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: "the attempt stopped before it resolved"})
+		}
+	}
+	if count < stDepositMaxAttemptRows || last.Status == model.StPublishStatusConfirmed || last.TxHash != nil {
+		return model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, kind)
+	}
+	model.UpdateStPublish(ctx, last.PublishId, model.StPublishStatusPending, nil, nil)
+	return last.PublishId
+}
+
+// stDepositRecordFailure records a failed attempt that wrote nothing to chain. The
+// same reason as the kind's newest row updates that row, so its create and update
+// times say how long the refusal has lasted.
+func stDepositRecordFailure(ctx context.Context, cfg *StConfig, epoch uint64, kind string, outcome *StPublishOutcome) {
+	var last *model.StPublish
+	for _, publish := range model.GetStPublishes(ctx, cfg.DeploymentKey(), epoch) {
+		if publish.Kind == kind {
+			last = publish
+		}
+	}
+	if last != nil && last.Status == outcome.Status && last.Error != nil && *last.Error == stPublishReason(outcome.Reason) {
+		stResolvePublish(ctx, last.PublishId, outcome)
+		return
+	}
+	stResolvePublish(ctx, stDepositPublishRow(ctx, cfg, epoch, kind), outcome)
+}
+
+// stDepositResolveOnPanic is deferred around one chain write. A send that panics,
+// as a database read does once its task is stopped, still resolves its row.
+func stDepositResolveOnPanic(ctx context.Context, publishId server.Id) {
+	if r := recover(); r != nil {
+		stResolvePublish(ctx, publishId, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: fmt.Sprintf("the attempt stopped: %v", r)})
+		panic(r)
+	}
+}
+
+// StDepositForEpoch is one attempt of the demand deposit for the CURRENT open
+// epoch (a deposit for a passed epoch is skipped). The price is the signed sheet's
+// for this epoch, fetched once per attempt, and prices the PREVIOUS epoch's usage,
+// hard-capped by the policy in force and deposit_epoch_cap_rao (D-3). The attempt
+// converts USDC for what the alpha wallet lacks, stages into this NO's isolated
+// deposit hotkey and executes the exact reserve transition, each recorded as a
+// publish row (kinds deposit_push / deposit). A size the caller names does not
+// convert: see StDepositForEpochConverting.
 func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) (*StPublishOutcome, error) {
+	return stDepositScrubbed(ctx, epoch, overrideRao, overrideRao == nil)
+}
+
+// StDepositForEpochConverting is StDepositForEpoch with the conversion of USDC
+// allowed for a size the caller names, which only its explicit request may spend.
+func StDepositForEpochConverting(ctx context.Context, epoch uint64, overrideRao *big.Int) (*StPublishOutcome, error) {
+	return stDepositScrubbed(ctx, epoch, overrideRao, true)
+}
+
+// Whatever an attempt returns reaches a log or the operator's terminal, and an RPC
+// read's error names the endpoint it tried.
+func stDepositScrubbed(ctx context.Context, epoch uint64, overrideRao *big.Int, convert bool) (*StPublishOutcome, error) {
+	outcome, err := stDepositAttempt(ctx, epoch, overrideRao, convert)
+	if err != nil {
+		if scrubbed := stScrubEndpoints(err.Error()); scrubbed != err.Error() {
+			err = errors.New(scrubbed)
+		}
+		return nil, err
+	}
+	if outcome != nil {
+		outcome.Reason = stScrubEndpoints(outcome.Reason)
+	}
+	return outcome, nil
+}
+
+func stDepositAttempt(ctx context.Context, epoch uint64, overrideRao *big.Int, convert bool) (*StPublishOutcome, error) {
 	cfg, client, err := stRequire()
 	if err != nil {
 		return nil, err
@@ -4217,11 +4420,16 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 
 	state, err := client.Epoch(ctx)
 	if err != nil {
-		return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
+		return stDepositSoon(err.Error()), nil
 	}
 	if state.Epoch != epoch || state.PendingEpoch != epoch {
 		// deposit() lazily rolls, so a send now would credit a different
-		// epoch than intended — never send
+		// epoch than intended — never send. Only a view past the epoch ends its
+		// chain: one behind it, as after a failover to a node that lags, writes
+		// nothing and comes again shortly.
+		if !stDepositEpochPassedAt(state, epoch) {
+			return stDepositSoon(fmt.Sprintf("the chain view is at epoch %d (pending %d), behind epoch %d", state.Epoch, state.PendingEpoch, epoch)), nil
+		}
 		outcome := &StPublishOutcome{
 			Status: model.StPublishStatusSkipped,
 			Reason: fmt.Sprintf("epoch %d is not the current epoch (rolled %d, pending %d)", epoch, state.Epoch, state.PendingEpoch),
@@ -4238,7 +4446,7 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 	if cfg.SettlementVault != (common.Address{}) {
 		deposited, err = client.EpochDeposit(ctx, epoch, cfg.NoId)
 		if err != nil {
-			return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
+			return stDepositSoon(err.Error()), nil
 		}
 	}
 	if 0 < deposited.Sign() {
@@ -4262,11 +4470,20 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 			return nil, fmt.Errorf("st: deposit %s rao exceeds deposit_epoch_cap_rao %d", amount, cfg.DepositEpochCapRao)
 		}
 	} else {
-		sizing, failed, err := stEpochDepositSizing(ctx, cfg, client, state, epoch)
+		policy, unknown := stDepositEffectivePolicy(ctx, cfg, epoch)
+		if unknown != nil {
+			return unknown, nil
+		}
+		sizing, failed, err := stEpochDepositSizingUnder(ctx, cfg, client, state, epoch, policy)
 		if err != nil {
 			return nil, err
 		}
 		if failed != nil {
+			// The source totals are on their way: the deposit is due as soon as
+			// they exist.
+			if failed.RetryAt.IsZero() {
+				failed.RetryAt = server.NowUtc().Add(stDepositSoonDelay)
+			}
 			return failed, nil
 		}
 		if sizing.ZeroPrice {
@@ -4294,37 +4511,70 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 
 	if core, ok := client.(*CoreStClient); ok {
 		if err := core.preflightDepositRuntimeMinimum(ctx, amount); err != nil {
+			if errors.Is(err, errStDepositBelowRuntimeMinimum) {
+				return stDepositTerminal(ctx, cfg, epoch, stDepositBelowMinimum(epoch, err)), nil
+			}
 			outcome := &StPublishOutcome{
 				Status: model.StPublishStatusFailed,
 				Reason: err.Error(),
-				Retry:  !errors.Is(err, errStDepositBelowRuntimeMinimum),
+				Retry:  true,
 			}
-			publishId := model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, model.StPublishKindDeposit)
-			stResolvePublish(ctx, publishId, outcome)
+			stDepositRecordFailure(ctx, cfg, epoch, model.StPublishKindDeposit, outcome)
 			return outcome, nil
 		}
 	}
+	return stDepositFundAndSend(ctx, cfg, client, epoch, amount, convert), nil
+}
 
+// stDepositTerminal records a refusal below the runtime minimum, which is terminal
+// for the epoch: its deposit row is what stops the chain.
+func stDepositTerminal(ctx context.Context, cfg *StConfig, epoch uint64, outcome *StPublishOutcome) *StPublishOutcome {
+	stResolvePublish(ctx, model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, model.StPublishKindDeposit), outcome)
+	return outcome
+}
+
+// stDepositFundAndSend makes the wallet able to pay an admitted amount and sends it.
+func stDepositFundAndSend(ctx context.Context, cfg *StConfig, client StClient, epoch uint64, amount *big.Int, convert bool) *StPublishOutcome {
 	// STAGE: move alpha into this NO's unique coordinator-owned deposit
 	// position. Skip (partially) when an approved campaign preload or a prior
 	// stage whose reserve transition failed already covers the amount.
-	pushPublishId := model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, model.StPublishKindDepositPush)
 	if core, ok := client.(*CoreStClient); ok && core.coordinator != nil {
-		txHash, err := core.stageDepositPrincipal(ctx, epoch, amount)
+		// FUND: the alpha wallet pays from what it holds, and converts USDC for
+		// what it lacks (st_demand.go). A size named by hand converts only when
+		// its caller says so.
+		if convert {
+			if outcome := core.fundDemandDeposit(ctx, epoch, amount); outcome != nil {
+				if outcome.Status == model.StPublishStatusRefused {
+					return stDepositTerminal(ctx, cfg, epoch, outcome)
+				}
+				stDepositRecordFailure(ctx, cfg, epoch, model.StPublishKindDepositPush, outcome)
+				return outcome
+			}
+		}
+		pushPublishId := stDepositPublishRow(ctx, cfg, epoch, model.StPublishKindDepositPush)
+		txHash, err := func() (string, error) {
+			defer stDepositResolveOnPanic(ctx, pushPublishId)
+			return core.stageDepositPrincipal(ctx, epoch, amount)
+		}()
 		if errors.Is(err, errStDepositAlreadyCredited) {
 			outcome := &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: err.Error()}
 			stResolvePublish(ctx, pushPublishId, outcome)
-			return outcome, nil
+			return outcome
+		}
+		if errors.Is(err, errStDepositBelowRuntimeMinimum) {
+			outcome := stDepositBelowMinimum(epoch, err)
+			stResolvePublish(ctx, pushPublishId, outcome)
+			return stDepositTerminal(ctx, cfg, epoch, outcome)
 		}
 		if err != nil {
 			outcome := &StPublishOutcome{
 				Status: model.StPublishStatusFailed,
 				TxHash: txHash,
 				Reason: fmt.Sprintf("push transferStake: %s", err),
-				Retry:  !errors.Is(err, errStDepositBelowRuntimeMinimum),
+				Retry:  true,
 			}
 			stResolvePublish(ctx, pushPublishId, outcome)
-			return outcome, nil
+			return outcome
 		}
 		status := model.StPublishStatusConfirmed
 		if txHash == "" {
@@ -4332,9 +4582,12 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 		}
 		stResolvePublish(ctx, pushPublishId, &StPublishOutcome{Status: status, TxHash: txHash})
 	} else {
+		pushPublishId := stDepositPublishRow(ctx, cfg, epoch, model.StPublishKindDepositPush)
 		unaccounted, err := client.UnaccountedStakeRao(ctx)
 		if err != nil {
-			return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
+			outcome := &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}
+			stResolvePublish(ctx, pushPublishId, outcome)
+			return outcome
 		}
 		pushAmount := new(big.Int).Sub(amount, unaccounted)
 		if pushAmount.Sign() <= 0 {
@@ -4344,15 +4597,23 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 			if err != nil {
 				outcome := &StPublishOutcome{Status: model.StPublishStatusFailed, TxHash: txHash, Reason: fmt.Sprintf("push transferStake: %s", err), Retry: true}
 				stResolvePublish(ctx, pushPublishId, outcome)
-				return outcome, nil
+				return outcome
 			}
 			stResolvePublish(ctx, pushPublishId, &StPublishOutcome{Status: model.StPublishStatusConfirmed, TxHash: txHash})
 		}
 	}
 
 	// RESERVE: deposit() atomically moves and attributes the staged alpha.
-	creditPublishId := model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, model.StPublishKindDeposit)
-	txHash, err := client.DepositCredit(ctx, epoch, cfg.NoId, amount)
+	creditPublishId := stDepositPublishRow(ctx, cfg, epoch, model.StPublishKindDeposit)
+	txHash, err := func() (string, error) {
+		defer stDepositResolveOnPanic(ctx, creditPublishId)
+		return client.DepositCredit(ctx, epoch, cfg.NoId, amount)
+	}()
+	if errors.Is(err, errStDepositBelowRuntimeMinimum) {
+		outcome := stDepositBelowMinimum(epoch, err)
+		stResolvePublish(ctx, creditPublishId, outcome)
+		return outcome
+	}
 	if err != nil {
 		outcome := &StPublishOutcome{
 			Status: model.StPublishStatusFailed,
@@ -4361,8 +4622,8 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 			Retry:  true,
 		}
 		stResolvePublish(ctx, creditPublishId, outcome)
-		glog.Errorf("[st]epoch %d deposit credit failed: %s\n", epoch, err)
-		return outcome, nil
+		glog.Errorf("[st]epoch %d deposit credit failed: %s\n", epoch, stScrubEndpoints(err.Error()))
+		return outcome
 	}
 	outcome := &StPublishOutcome{
 		Status: model.StPublishStatusConfirmed,
@@ -4370,7 +4631,29 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 	}
 	stResolvePublish(ctx, creditPublishId, outcome)
 	glog.Infof("[st]epoch %d deposit confirmed: %s rao tx %s\n", epoch, amount, txHash)
-	return outcome, nil
+	return outcome
+}
+
+// StDepositEpochPassed reports whether an epoch is known to have passed, which ends
+// its deposit chain whatever stopped its last attempt. A chain read that fails knows
+// nothing, and nor does a view behind the epoch: the chain goes on.
+func StDepositEpochPassed(ctx context.Context, epoch uint64) (bool, error) {
+	_, client, err := stRequire()
+	if err != nil {
+		return false, err
+	}
+	state, err := client.Epoch(ctx)
+	if err != nil {
+		return false, err
+	}
+	return stDepositEpochPassedAt(state, epoch), nil
+}
+
+// stDepositEpochPassedAt reports whether a view of the chain is past an epoch: the
+// coordinator's epoch, or under the legacy contract either its rolled or its pending
+// epoch, is later. On the coordinator both are its currentEpoch at the finalized head.
+func stDepositEpochPassedAt(state *StEpochState, epoch uint64) bool {
+	return epoch < state.Epoch || epoch < state.PendingEpoch
 }
 
 // stMaxFinalizePerPoke bounds the in-order finalize catch-up loop per run.
@@ -4659,6 +4942,7 @@ func StSyncChainEvents(ctx context.Context, _ uint64) (int, error) {
 		stApplyEventStatuses(ctx, cfg, events)
 		stApplyHeadBindings(ctx, cfg, events)
 		stApplyLedgerV2Events(ctx, cfg, events)
+		stApplyCtfEvents(ctx, cfg, events)
 		model.SetStChainCheckpoint(ctx, cfg.DeploymentKey(), model.StChainCheckpoint{NextBlock: nextBlock, BlockHash: canonicalHashes[toBlock]})
 		synced += len(events)
 		fromBlock = nextBlock

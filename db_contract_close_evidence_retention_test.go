@@ -9,9 +9,10 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-// Migration 857: the evidence guard admits a delete only from a transaction
-// that opts in, and only of a row older than the 13-week horizon. Updates and
-// truncates stay refused with or without the opt-in.
+// The evidence guard (857, the move guard, and since the horizon guard at the
+// head, a floor of 35 days) admits a delete only from a transaction that opts
+// in, and only of a row older than the shortest contract horizon, 35 days.
+// Updates and truncates stay refused with or without the opt-in.
 func TestContractCloseEvidenceRetentionGuard(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -69,8 +70,10 @@ func TestContractCloseEvidenceRetentionGuard(t *testing.T) {
 			return err != nil && strings.Contains(err.Error(), "original contract close reports are immutable")
 		}
 
-		expiredClientId, expiredReportId := insert(now.Add(-92 * 24 * time.Hour))
-		retainedClientId, retainedReportId := insert(now.Add(-90 * 24 * time.Hour))
+		expiredClientId, expiredReportId := insert(now.Add(-36 * 24 * time.Hour))
+		retainedClientId, retainedReportId := insert(now.Add(-34 * 24 * time.Hour))
+		// what 857 alone admitted is still admitted
+		agedClientId, agedReportId := insert(now.Add(-92 * 24 * time.Hour))
 		deleteSql := `DELETE FROM contract_close_report_evidence WHERE client_id = $1 AND report_id = $2`
 
 		// without the opt-in nothing can be deleted, however old
@@ -89,5 +92,7 @@ func TestContractCloseEvidenceRetentionGuard(t *testing.T) {
 		connect.AssertEqual(t, exec(true, deleteSql, expiredClientId, expiredReportId), nil)
 		connect.AssertEqual(t, exists(expiredClientId, expiredReportId), false)
 		connect.AssertEqual(t, exists(retainedClientId, retainedReportId), true)
+		connect.AssertEqual(t, exec(true, deleteSql, agedClientId, agedReportId), nil)
+		connect.AssertEqual(t, exists(agedClientId, agedReportId), false)
 	})
 }

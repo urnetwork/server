@@ -1907,12 +1907,16 @@ func TestPerfvarCellEdgeScenarioDefaults(t *testing.T) {
 				wantPayloadByteCount,
 			)
 		}
-		if scenario.ApplicationMtu != clientconnect.DefaultMtu {
+		// The application TUN advertises the product packet MTU unless the
+		// profile's own inner MTU is smaller; a smaller path remains bounded.
+		wantApplicationMtu := min(clientconnect.DefaultMtu, scenario.Profile.InnerMtu)
+		if scenario.ApplicationMtu != wantApplicationMtu {
 			t.Errorf(
-				"profile %q application MTU=%d want product default=%d",
+				"profile %q application MTU=%d want min(product default=%d, inner=%d)",
 				scenario.Profile.Name,
 				scenario.ApplicationMtu,
 				clientconnect.DefaultMtu,
+				scenario.Profile.InnerMtu,
 			)
 		}
 		directionalRateBitsPerSecond := scenario.Profile.Forward.RateBitsPerSecond

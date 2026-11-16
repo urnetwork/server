@@ -81,6 +81,7 @@ func CoinbaseWebhook(w http.ResponseWriter, r *http.Request) {
 
 func PlayWebhook(w http.ResponseWriter, r *http.Request) {
 	if !webhookVerifiable(w, "play", controller.PlayWebhookVerifiable) {
+		controller.RecordStoreNotificationOutcome(r.Context(), model.SubscriptionMarketGoogle, controller.StoreNotificationRefusedUnavailable)
 		return
 	}
 	router.WrapWithInputBodyFormatterNoAuth(
@@ -118,6 +119,15 @@ func SubscriptionRedeemBalanceCode(w http.ResponseWriter, r *http.Request) {
 // payment reconciler.
 func SubscriptionVerifyPlayPurchase(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.VerifyPlayPurchase, w, r)
+}
+
+// SubscriptionVerifyStripeCheckout is the client purchase-reporting endpoint
+// for card payments: the app reports the checkout session (or the payment
+// sheet's subscription) as soon as it finishes, and the server reads it back
+// from Stripe and credits it through the webhooks' own code
+// (controller/subscription_verify_stripe_controller.go).
+func SubscriptionVerifyStripeCheckout(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.VerifyStripeCheckout, w, r)
 }
 
 // subscriptionAppleVerifierFunc is the verifier seam, replaceable only by

@@ -243,3 +243,57 @@ rows whose stored shard count is stale perform no network work. Their post-step
 replaces still-valid indices with current arguments and retires indices outside
 the new range. The new `RunOnce` rows cover every index in the new range, so a
 change converges without a permanent duplicate or gap.
+
+The URL probe's `shard_count` is at most 254: prober shard slot 254 is the
+active bandwidth probe's and slot 255 the capability probe's.
+
+## Active bandwidth samples
+
+URL probes are sampled-only (FP2FIX.md): a quality tunnel carries randomized
+destination-pool requests and never a fixed target, so a modified provider
+cannot recognize the prober and serve it better. Provider capacity is sampled
+by a separate task, `ProviderBandwidthProbe`
+(`taskworker/work/provider_bandwidth_probe_work.go`), which measures eight
+parallel 2 MiB streams through a provider's tunnel against Cloudflare's
+public speed test (`qualityprobe/bandwidth`).
+
+- **Apart from the quality probes.** Each pass runs in prober shard slot 254
+  with a private network, credential parent and balance minted for the pass;
+  every tunnel mints its own derived client. Its tunnels are ordinary
+  clients' tunnels: none of the URL probe's traits (data-only admission
+  without provider pings, unpublished client keys), and an allowlist of the
+  CDN host alone. Its providers are a random draw of the connected, valid
+  providers that are due (no CDN figure in seven days) and Online as the
+  score export judges it, never the URL probe's due claims.
+- **No credential in a tunnel.** The operator's own download endpoint
+  (`/network/provider-bandwidth-test`) is not sampled. It authorizes with
+  `X-UR-Operator-Secret`, the operator ingest secret, which authorizes every
+  operator ingest call; even inside TLS it does not belong on a
+  provider-controlled path. Sampling it would need a secret scoped to that
+  one route, which the route does not accept today, and the target wired
+  back (`bandwidth.OperatorTarget`) with that secret alone.
+  `public_api_url` is not read by this probe.
+- **Advisory.** Figures land in `provider_bandwidth` (one row per provider and
+  source). Nothing that ranks or selects providers reads that table;
+  `model/provider_bandwidth_readers_test.go` fails if anything but the probe's
+  own due draw does.
+- **Budget.** Every sample is reserved before it is measured, against the
+  deployment-wide hourly budget (`provider_bandwidth.yml` `probes_per_bucket`,
+  default 40, 16 MiB each). A pass every fifteen minutes takes its share
+  (default ten providers) and stops at the first refusal. Probe traffic is
+  paid from the pass's free shard credit; providers earn for it as for any
+  traffic.
+- **Settings.** The probe reads `provider_egress_probe.yml`: `full.bandwidth`
+  (default true) switches it on or off, `full.bandwidth_timeout_seconds` is
+  the per-target cap and `bandwidth_cdn_url` the target.
+- **Metrics.** `urnetwork_egress_probe_bandwidth_bytes_per_second{source}`
+  (histogram), `urnetwork_egress_probe_bandwidth_country_bytes_per_second{source,country}`
+  (sum and count), `urnetwork_egress_probe_bandwidth_samples_total{source,result}`,
+  `urnetwork_egress_probe_bandwidth_passes_total{result}`.
+
+The URL probe's own timing of its sampled request is exported with no new
+traffic: `urnetwork_url_probe_ttfb_seconds` and
+`urnetwork_url_probe_body_bits_per_second` are fleet histograms without
+labels, and `urnetwork_url_probe_country_ttfb_seconds{country}` and
+`urnetwork_url_probe_country_body_bits_per_second{country}` a sum and a count
+per country, two series per country rather than one per bucket.

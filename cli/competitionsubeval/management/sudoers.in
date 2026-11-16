@@ -1,0 +1,6 @@
+# Inert template; validate the rendered file with the native sudoers parser.
+# No wildcard arguments, alternate config, shell, environment setting or role.
+Cmnd_Alias URNETWORK_SUBEVAL_CONTROL = @AGENT_PATH@ --config @CONFIG_PATH@ --serve-managed
+Defaults!URNETWORK_SUBEVAL_CONTROL env_reset, !setenv, !use_pty
+Defaults!URNETWORK_SUBEVAL_CONTROL env_delete += "SSH_ORIGINAL_COMMAND SSH_AUTH_SOCK LD_* DYLD_* GODEBUG GOMEMLIMIT GOMAXPROCS GOTRACEBACK GORACE GOFLAGS GOTOOLCHAIN DOCKER_* BASH_ENV ENV CDPATH PYTHON* PERL* RUBY*"
+@CONTROL_USER@ ALL=(root:root) NOPASSWD: NOSETENV: URNETWORK_SUBEVAL_CONTROL

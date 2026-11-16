@@ -303,6 +303,9 @@ type stripeReconcileTestEnv struct {
 	fullInvoices   map[string]map[string]any
 	failList       bool
 	statusRequests atomic.Int64
+	// charge id -> the object GET /v1/charges/{id} serves; any other id is 404
+	charges        map[string]map[string]any
+	chargeRequests atomic.Int64
 	// Overrides exercise invalid, partial, and failed destination lookups.
 	checkoutResponse any
 	checkoutStatus   int
@@ -313,6 +316,7 @@ type stripeReconcileTestEnv struct {
 func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 	env := &stripeReconcileTestEnv{
 		fullInvoices: map[string]map[string]any{},
+		charges:      map[string]map[string]any{},
 	}
 
 	mux := http.NewServeMux()
@@ -336,6 +340,16 @@ func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(invoice)
+	})
+	mux.HandleFunc("GET /v1/charges/{chargeId}", func(w http.ResponseWriter, r *http.Request) {
+		env.chargeRequests.Add(1)
+		charge, ok := env.charges[r.PathValue("chargeId")]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(charge)
 	})
 	mux.HandleFunc("GET /v1/checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if env.checkoutStatus != 0 {
@@ -370,7 +384,8 @@ func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 
 // the expanded invoice shape BOTH legs read: stripeHandleInvoicePaid
 // (StripeInvoiceExpanded: lines + subscription metadata) and the status leg
-// (stripeReconcileInvoiceExpanded: subscription status)
+// (stripeReconcileInvoiceExpanded: subscription status). The invoice took
+// payment (amount_paid); a trial's $0 invoice sets amount_paid to 0.
 func stripeTestFullInvoice(
 	invoiceId string,
 	subscriptionId string,
@@ -381,9 +396,10 @@ func stripeTestFullInvoice(
 	cancelAtPeriodEnd bool,
 ) map[string]any {
 	return map[string]any{
-		"id":       invoiceId,
-		"status":   "paid",
-		"customer": map[string]any{"id": "cus_reconcile", "email": ""},
+		"id":          invoiceId,
+		"status":      "paid",
+		"amount_paid": 1000,
+		"customer":    map[string]any{"id": "cus_reconcile", "email": ""},
 		"lines": map[string]any{
 			"data": []map[string]any{
 				{
@@ -554,6 +570,16 @@ func newSolanaReconcileTestEnv(t testing.TB) *solanaReconcileTestEnv {
 			Params []any  `json:"params"`
 		}
 		json.NewDecoder(r.Body).Decode(&request)
+		if request.Method == "getTokenAccountsByOwner" {
+			// the receivers hold no USDC token account here: the receiver
+			// leg (solana_receiver_sweep.go) has no history to read
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"result":  map[string]any{"context": map[string]any{"slot": 1}, "value": []any{}},
+			})
+			return
+		}
 		if request.Method != "getSignatureStatuses" || len(request.Params) == 0 {
 			http.Error(w, "unknown method", http.StatusBadRequest)
 			return
@@ -868,8 +894,80 @@ func TestStripeInvoiceCreditIncludesManualPaymentGrace(t *testing.T) {
 	if !credit.startTime.Equal(periodStart) {
 		t.Fatalf("credit starts at %v; want %v", credit.startTime, periodStart)
 	}
+	if !credit.paidEndTime.Equal(periodEnd) {
+		t.Fatalf("credit's paid period ends at %v; want %v", credit.paidEndTime, periodEnd)
+	}
 	if !credit.endTime.Equal(periodEnd.Add(manualPaymentGracePeriod)) {
 		t.Fatalf("credit ends at %v; want %v", credit.endTime, periodEnd.Add(manualPaymentGracePeriod))
+	}
+}
+
+// The yearly plan's 14-day trial starts with a $0 invoice. Its window got the
+// 30-day manual-payment grace, so a trial whose first charge failed stayed Pro
+// for 44 days without a payment (20 such networks on 2026-11-13). A window no
+// payment paid for gets the day App Store and Play trials get (owner,
+// 2026-11-13).
+func TestStripeInvoiceCreditGivesAFreePeriodADay(t *testing.T) {
+	stripeEnv := newStripeReconcileTestEnv(t)
+	periodStart := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	trialEnd := periodStart.Add(14 * 24 * time.Hour)
+	for _, c := range []struct {
+		invoiceId     string
+		invoiceStatus string
+		amountPaid    int64
+		wantGrace     time.Duration
+	}{
+		// the trial's $0 invoice
+		{invoiceId: "in_synthetic_free_trial", invoiceStatus: "paid", amountPaid: 0, wantGrace: SubscriptionGracePeriod},
+		// a paid period keeps the manual-payment grace
+		{invoiceId: "in_synthetic_paid_after_trial", invoiceStatus: "paid", amountPaid: 4000, wantGrace: manualPaymentGracePeriod},
+	} {
+		invoice := stripeTestFullInvoice(
+			c.invoiceId, "sub_synthetic_free_trial", server.NewId(),
+			periodStart, trialEnd, "past_due", false,
+		)
+		invoice["status"] = c.invoiceStatus
+		invoice["amount_paid"] = c.amountPaid
+		stripeEnv.fullInvoices[c.invoiceId] = invoice
+
+		credit, err := stripeResolveInvoiceCredit(
+			c.invoiceId, &session.ClientSession{Ctx: context.Background()},
+		)
+		connect.AssertEqual(t, err, nil)
+		if credit == nil {
+			t.Fatalf("%s: the subscription invoice was not credited", c.invoiceId)
+		}
+		if !credit.paidEndTime.Equal(trialEnd) {
+			t.Errorf("%s: the paid period ends at %v; want the invoice's period end %v", c.invoiceId, credit.paidEndTime, trialEnd)
+		}
+		if !credit.endTime.Equal(trialEnd.Add(c.wantGrace)) {
+			t.Errorf("%s: the window ends at %v; want %v past the period, at %v", c.invoiceId, credit.endTime, c.wantGrace, trialEnd.Add(c.wantGrace))
+		}
+	}
+}
+
+// The invoice period reaches the timestamp columns, which pgx writes from a
+// time's wall clock, dropping its zone. time.Unix answers in Local on every
+// machine, even one whose zone is UTC, so an unconverted period fails here
+// wherever this runs.
+func TestStripeInvoiceCreditTimesAreUtc(t *testing.T) {
+	stripeEnv := newStripeReconcileTestEnv(t)
+	invoiceId := "in_synthetic_utc_period"
+	periodStart := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	stripeEnv.fullInvoices[invoiceId] = stripeTestFullInvoice(
+		invoiceId, "sub_synthetic_utc_period", server.NewId(),
+		periodStart, periodStart.Add(30*24*time.Hour), "active", false,
+	)
+
+	credit, err := stripeResolveInvoiceCredit(
+		invoiceId, &session.ClientSession{Ctx: context.Background()},
+	)
+	connect.AssertEqual(t, err, nil)
+	if credit == nil {
+		t.Fatal("synthetic paid subscription invoice was not credited")
+	}
+	if credit.startTime.Location() != time.UTC || credit.paidEndTime.Location() != time.UTC || credit.endTime.Location() != time.UTC {
+		t.Fatal("the credit's times were left in the process's zone, want them in time.UTC")
 	}
 }
 

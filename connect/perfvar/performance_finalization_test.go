@@ -89,7 +89,7 @@ func testPerfvarRunFinalization(t testing.TB, c perfvarFinalizationCase) perfvar
 		Direction:             perfvarDirectionDownload,
 		Topology:              c.topology,
 		Resource:              perfvarResourceDefault,
-		ApplicationMtu:        1100,
+		ApplicationMtu:        1280,
 		Seed:                  9137,
 		RunCount:              1,
 		PayloadByteCount:      64 * 1024,

@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "observed_at": "2026-11-11T09:18:03Z",
+  "user_requested_system_and_competition_toolchain": "go1.27.4",
+  "system_upgrade_complete": true,
+  "hosts": ["sille", "goofe"],
+  "both_system_commands_verified_with_GOTOOLCHAIN_local": true,
+  "go_version": "go1.27.4 linux/amd64",
+  "root_owned_toolchain_directory": "/usr/local/libexec/urnetwork/go1.27.4-competition-20261111",
+  "system_go": "/usr/bin/go",
+  "system_gofmt": "/usr/bin/gofmt",
+  "default_goroot_link": "/usr/local/go",
+  "all_installed_toolchain_files_root_owned_not_group_or_world_writable": true,
+  "toolchain_module": "golang.org/toolchain@v0.0.1-go1.27.4.linux-amd64",
+  "toolchain_module_sum": "h1:8Tl0rBb7KdISSdPkZBjlpZxsUBb+004GI/SM2XbmSqI=",
+  "distribution_archive_sha256": "cad1ed7297d5781af1b35e2c7338c347f92ea67f00b2c1e69160b9f06317513c",
+  "go_binary_sha256": "de0ae3e082ce7599eae4fb69fa2ef1e43b8f31ffd3fce62cdf81930aa9005050",
+  "gofmt_binary_sha256": "96d48ae3c8754e4a10e8f5ec2472d1344767d276e0ba6e94948c00cf8558e378",
+  "old_installations_preserved": {
+    "sille_previous_system_go": "/usr/local/libexec/urnetwork/go1.27.3-competition-20261109/bin/go",
+    "sille_legacy_goroot": "/usr/local/go.pre-1.27.4-20261111",
+    "sille_legacy_goroot_version": "go1.26.6",
+    "goofe_previous_goroot": "/usr/local/go.pre-1.27.4-20261111",
+    "goofe_previous_goroot_version": "go1.27.3"
+  },
+  "competition": {
+    "prepared_coordinator_worker_uses_go1.27.4": true,
+    "epoch2_frozen_product_evaluator_still_go1.27.3": true,
+    "frozen_image_version_verified_by_readonly_network_disabled_container": true,
+    "verified_image_digest": "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9",
+    "frozen_image_or_baseline_not_silently_replaced": true,
+    "user_choice_of_epoch2_amendment_or_epoch3_start_pending": false,
+    "approved_epoch": 2,
+    "security_hotfix_exception_approved": true,
+    "existing_baseline_reuse_explicitly_approved": true,
+    "replacement_baseline_or_statistical_recalibration_required": false,
+    "preserved_baseline_sha256": "784aef3401631be5a39a73185c0276bb7ded38410f53de48af7ed942dfdd1340",
+    "remaining_work": "Build and identify the Go1.27.4 evaluator, record the explicit execution-identity amendment without relabeling existing Go1.27.3 measurements, and verify compatibility and containment before starting scoring.",
+    "scoring_not_started": true
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "_source": "The x402 facilitator answers these tests replay: the response examples of the CDP facilitator's API reference (docs.cdp.coinbase.com api-reference v2 rest-api x402-facilitator verify-payment, settle-payment) and of the x402 v2 spec (x402-foundation/x402 specs/x402-specification-v2.md 7.1, 7.2), read 2026-11-10, with the network set to Base mainnet. No facilitator was called to record them.",
+  "verify_valid": {
+    "status": 200,
+    "body": {"isValid": true, "payer": "0x857b06519E91e3A54538791bDbb0E22373e36b66"}
+  },
+  "verify_insufficient_funds": {
+    "status": 400,
+    "body": {"isValid": false, "invalidReason": "insufficient_funds", "invalidMessage": "Insufficient funds", "payer": "0x857b06519E91e3A54538791bDbb0E22373e36b66"}
+  },
+  "settle_success": {
+    "status": 200,
+    "body": {"success": true, "payer": "0x857b06519E91e3A54538791bDbb0E22373e36b66", "transaction": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "network": "eip155:8453"}
+  },
+  "settle_insufficient_funds": {
+    "status": 400,
+    "body": {"success": false, "errorReason": "insufficient_funds", "payer": "0x857b06519E91e3A54538791bDbb0E22373e36b66", "transaction": "", "network": "eip155:8453"}
+  },
+  "settle_pending": {
+    "status": 200,
+    "body": {"success": false, "errorReason": "settlement_pending", "errorMessage": "The transaction was broadcast but its receipt could not be retrieved", "payer": "0x857b06519E91e3A54538791bDbb0E22373e36b66", "transaction": "0x89c91c789e57059b17285e7ba1716a1f5ff4c5dace0ea5a5135f26158d0421b9", "network": "eip155:8453"}
+  },
+  "settle_success_after_pending": {
+    "status": 200,
+    "body": {"success": true, "payer": "0x857b06519E91e3A54538791bDbb0E22373e36b66", "transaction": "0x89c91c789e57059b17285e7ba1716a1f5ff4c5dace0ea5a5135f26158d0421b9", "network": "eip155:8453"}
+  }
+}

@@ -16,6 +16,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -406,22 +407,127 @@ func TestRedisKeyEventSubscriptionDuplicatePatterns(t *testing.T) {
 	})
 }
 
-// Pressure before all masters are ready fails startup instead of blocking drains.
+// Pressure before all masters are ready drops the overflow without blocking
+// drains or failing the startup: nothing drains the merge before the handoff,
+// and the caller's recovery read after it covers the dropped event. On Main
+// on 2026-11-15 busy connect processes failed 96 starts in 30 minutes this way,
+// each followed by a 5 s backoff and another start (CPUOPT6). After the
+// handoff an overflow still ends the epoch.
 func TestRedisKeyEventSubscriptionStartupOverflow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		first, second := newRedisKeyEventTestNode(t), newRedisKeyEventTestNode(t)
 		installRedisKeyEventTestClient(t, redisKeyEventTestCluster(first, second))
 		settings := DefaultRedisKeyEventSubscriptionSettings()
 		settings.MessageBufferSize = 1
+		startupDropsBefore := testutil.ToFloat64(redisKeyEventStartupDrops)
+		mergeDropsBefore := testutil.ToFloat64(redisKeyEventMergeDrops)
 		start := startRedisKeyEventTest(t, settings, "removed:*")
 		firstSubscription, secondSubscription := first.subscription(t), second.subscription(t)
 		firstSubscription.acknowledge(t, "removed:*", 1)
 		firstSubscription.message(t, "removed:*", "removed:first", "set")
 		start.requireWaiting(t)
 		firstSubscription.message(t, "removed:*", "removed:second", "set")
-		start.requireFailure(t, nil)
-		<-firstSubscription.done
-		<-secondSubscription.done
+		start.requireWaiting(t)
+		secondSubscription.acknowledge(t, "removed:*", 1)
+		<-start.returned
+		if start.err != nil {
+			t.Fatal("a startup overflow failed the subscription", start.err)
+		}
+		if got := testutil.ToFloat64(redisKeyEventStartupDrops) - startupDropsBefore; got != 1 {
+			t.Fatalf("counted %v startup drops; want 1", got)
+		}
+		if got := testutil.ToFloat64(redisKeyEventMergeDrops) - mergeDropsBefore; got != 0 {
+			t.Fatalf("a startup overflow counted %v epoch-ending drops", got)
+		}
+
+		// the merge still holds the early message, so the next one overflows
+		secondSubscription.message(t, "removed:*", "removed:third", "set")
+		<-start.done
+		if got := testutil.ToFloat64(redisKeyEventMergeDrops) - mergeDropsBefore; got != 1 {
+			t.Fatalf("an overflow after the handoff counted %v epoch-ending drops; want 1", got)
+		}
+		if message := <-start.messages; message.Channel != "removed:first" {
+			t.Fatal("the early message that fit was not delivered", message)
+		}
+	})
+}
+
+// Main 2026-11-15 (CPUOPT6): every connect hint read refreshed a session key's
+// ttl, and each refresh's expire event reached every connect process, 87% of
+// its stream. The events filled the merge, a drop ended the subscription, and
+// the busy processes resubscribed every 7–9 s. With the production settings,
+// more expire events than the merge holds, during startup and after it with
+// nothing draining, end no generation, and the set behind them is delivered.
+func TestRedisKeyEventSubscriptionIgnoresTtlRefreshFlood(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		first, second := newRedisKeyEventTestNode(t), newRedisKeyEventTestNode(t)
+		installRedisKeyEventTestClient(t, redisKeyEventTestCluster(first, second))
+		settings := DefaultRedisKeyEventSubscriptionSettings()
+		const pattern = "__keyspace@0__:{ns_*}eid"
+		const channel = "__keyspace@0__:{ns_synthetic}eid"
+		floodCount := 2 * settings.MessageBufferSize
+		mergeDropsBefore := testutil.ToFloat64(redisKeyEventMergeDrops)
+		startupDropsBefore := testutil.ToFloat64(redisKeyEventStartupDrops)
+		ignoredBefore := testutil.ToFloat64(redisKeyEventIgnored)
+		start := startRedisKeyEventTest(t, settings, pattern)
+		firstSubscription, secondSubscription := first.subscription(t), second.subscription(t)
+		firstSubscription.acknowledge(t, pattern, 1)
+		for range floodCount {
+			firstSubscription.message(t, pattern, channel, "expire")
+		}
+		start.requireWaiting(t)
+		secondSubscription.acknowledge(t, pattern, 1)
+		<-start.returned
+		if start.err != nil {
+			t.Fatal("ttl refreshes failed the startup", start.err)
+		}
+		for range floodCount {
+			secondSubscription.message(t, pattern, channel, "expire")
+		}
+		secondSubscription.message(t, pattern, channel, "set")
+		synctest.Wait()
+		select {
+		case <-start.done:
+			t.Fatal("ttl refreshes ended the subscription")
+		default:
+		}
+		select {
+		case message := <-start.messages:
+			if message.Channel != channel || message.Payload != "set" {
+				t.Fatalf("delivered %s %s ahead of the set", message.Channel, message.Payload)
+			}
+		default:
+			t.Fatal("the set behind the ttl refreshes was not delivered")
+		}
+		if got := testutil.ToFloat64(redisKeyEventMergeDrops) - mergeDropsBefore; got != 0 {
+			t.Fatalf("ttl refreshes counted %v epoch-ending drops", got)
+		}
+		if got := testutil.ToFloat64(redisKeyEventStartupDrops) - startupDropsBefore; got != 0 {
+			t.Fatalf("ttl refreshes counted %v startup drops", got)
+		}
+		if got := testutil.ToFloat64(redisKeyEventIgnored) - ignoredBefore; got != float64(2*floodCount) {
+			t.Fatalf("counted %v ignored events; want %d", got, 2*floodCount)
+		}
+	})
+}
+
+// Only the event of a keyspace channel is a ttl refresh: a published message
+// whose payload happens to read expire is delivered like any other.
+func TestRedisKeyEventSubscriptionDeliversNonKeyspaceExpirePayload(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		node := newRedisKeyEventTestNode(t)
+		installRedisKeyEventTestClient(t, redisKeyEventTestClient(node))
+		start := startRedisKeyEventTest(t, DefaultRedisKeyEventSubscriptionSettings(), "removed:*")
+		subscription := node.subscription(t)
+		subscription.acknowledge(t, "removed:*", 1)
+		<-start.returned
+		if start.err != nil {
+			t.Fatal(start.err)
+		}
+		subscription.message(t, "removed:*", "removed:synthetic", "expire")
+		if message := <-start.messages; message.Channel != "removed:synthetic" || message.Payload != "expire" {
+			t.Fatal("a non-keyspace message was discarded", message)
+		}
 	})
 }
 

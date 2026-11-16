@@ -178,7 +178,7 @@ func TestDbCanceledSocketCallbackDoesNotReportUnexpectedRecovery(t *testing.T) {
 // Redis shares the stopped-dependency helper. Its callback stop must neither
 // replay an admitted operation nor hide an independent connection reset.
 func TestRedisCanceledSocketCallbackRecoveryKeepsPhysicalCause(t *testing.T) {
-	for _, preflight := range []bool{false, true} {
+	for _, noCommandRetry := range []bool{false, true} {
 		for _, socketCause := range []error{os.ErrDeadlineExceeded, syscall.ECONNRESET} {
 			func() {
 				peer := newDeadlineRedisPeer(t, "")
@@ -189,7 +189,7 @@ func TestRedisCanceledSocketCallbackRecoveryKeepsPhysicalCause(t *testing.T) {
 				original := &net.OpError{Op: "read", Net: "tcp", Err: socketCause}
 				calls := 0
 				recovered := captureDbErrorPanic(func() {
-					redisWithClient(ctx, &safeRedisClient{client: client, disableCommandRetry: preflight}, func(RedisClient) {
+					redisWithClient(ctx, &safeRedisClient{client: client, disableCommandRetry: noCommandRetry}, func(RedisClient) {
 						calls++
 						cancel()
 						panic(original)
@@ -198,7 +198,7 @@ func TestRedisCanceledSocketCallbackRecoveryKeepsPhysicalCause(t *testing.T) {
 				err, ok := recovered.(error)
 				wantDone := socketCause == os.ErrDeadlineExceeded
 				if !ok || !errors.Is(err, original) || !errors.Is(err, context.Canceled) || calls != 1 || IsDoneError(err) != wantDone {
-					t.Fatalf("stopped Redis callback: cause=%v preflight=%t recovered=%v calls=%d", socketCause, preflight, recovered, calls)
+					t.Fatalf("stopped Redis callback: cause=%v no_command_retry=%t recovered=%v calls=%d", socketCause, noCommandRetry, recovered, calls)
 				}
 			}()
 		}

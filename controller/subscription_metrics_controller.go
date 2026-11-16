@@ -24,21 +24,49 @@ const (
 
 var subscriptionMetricsActiveAccountsDesc = prometheus.NewDesc(
 	"urnetwork_subscription_active_accounts",
-	"Distinct networks with a current paid supporter window, per tracked store and deduplicated across stores.",
+	"Distinct networks with a current supporter window (paid, free trial, or a grace period after a failed charge), per tracked store and deduplicated across stores. App Store sandbox purchases are left out.",
 	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsInGraceAccountsDesc = prometheus.NewDesc(
+	"urnetwork_subscription_in_grace_accounts",
+	"Distinct networks past due: a current supporter window but none that still covers now with the period it paid for (a grace after a failed or cancelled renewal, a store's billing grace hold, or the day after a free trial), per tracked store and deduplicated across stores. They count in urnetwork_subscription_active_accounts too.",
+	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsPaymentFailuresOpenDesc = prometheus.NewDesc(
+	"urnetwork_subscription_payment_failures_open",
+	"Failed subscription renewals still failing now (no payment, void, uncollectible mark or subscription end since), per store that records them.",
+	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsPaymentFailuresResolvedDesc = prometheus.NewDesc(
+	"urnetwork_subscription_payment_failures_resolved",
+	"Failed subscription renewals that stopped failing inside the rolling window, per store and reason: paid, voided, uncollectible, or subscription_ended.",
+	[]string{"store", "reason", "window"},
+	nil,
+)
+
+var subscriptionMetricsTrialsActiveDesc = prometheus.NewDesc(
+	"urnetwork_subscription_trials_active",
+	"Distinct networks inside a free trial now (nothing charged yet), per tracked store and plan, plus deduplicated across stores. They count in urnetwork_subscription_active_accounts too.",
+	[]string{"store", "plan"},
 	nil,
 )
 
 var subscriptionMetricsNewPaidAccountsDesc = prometheus.NewDesc(
 	"urnetwork_subscription_new_paid_accounts",
-	"Distinct networks whose first paid supporter window for a store began inside the rolling window, plus a first-ever deduplicated total across tracked stores.",
+	"Distinct networks whose first supporter window for a store (a free trial's start included) began inside the rolling window, plus a first-ever deduplicated total across tracked stores.",
 	[]string{"store", "window"},
 	nil,
 )
 
 var subscriptionMetricsEngagedAccountsDesc = prometheus.NewDesc(
 	"urnetwork_subscription_engaged_accounts",
-	"Current paid networks with an active top-level client authenticated inside the rolling window, per store and deduplicated.",
+	"Current subscribers (trials included) with an active top-level client authenticated inside the rolling window, per store and deduplicated.",
 	[]string{"store", "window"},
 	nil,
 )
@@ -78,6 +106,20 @@ var subscriptionMetricsDataPackBytesDesc = prometheus.NewDesc(
 	nil,
 )
 
+var subscriptionMetricsUncreditedPaymentsDesc = prometheus.NewDesc(
+	"urnetwork_subscription_payments_uncredited",
+	"Payments received at least the snapshot's minimum age ago (30 minutes by default) that no credit consumed, per rail: a USDC payment into a Solana receiver that bought nothing (usdc_solana), a crypto rail receipt not credited (seen, confirmed or held for review), a Pay with Gamma charge spent but not credited (gamma).",
+	[]string{"rail"},
+	nil,
+)
+
+var subscriptionMetricsUncreditedOldestAgeDesc = prometheus.NewDesc(
+	"urnetwork_subscription_payments_uncredited_oldest_age_seconds",
+	"Age of the oldest payment counted in urnetwork_subscription_payments_uncredited, per rail that has one.",
+	[]string{"rail"},
+	nil,
+)
+
 var subscriptionMetricsSnapshotTimestampDesc = prometheus.NewDesc(
 	"urnetwork_subscription_snapshot_timestamp_seconds",
 	"Unix time when this Taskworker completed the complete privacy-safe subscription metrics snapshot.",
@@ -87,6 +129,10 @@ var subscriptionMetricsSnapshotTimestampDesc = prometheus.NewDesc(
 
 var subscriptionMetricsDescs = []*prometheus.Desc{
 	subscriptionMetricsActiveAccountsDesc,
+	subscriptionMetricsInGraceAccountsDesc,
+	subscriptionMetricsPaymentFailuresOpenDesc,
+	subscriptionMetricsPaymentFailuresResolvedDesc,
+	subscriptionMetricsTrialsActiveDesc,
 	subscriptionMetricsNewPaidAccountsDesc,
 	subscriptionMetricsEngagedAccountsDesc,
 	subscriptionMetricsChurnedAccountsDesc,
@@ -94,6 +140,8 @@ var subscriptionMetricsDescs = []*prometheus.Desc{
 	subscriptionMetricsReconciliationSourceTimestampDesc,
 	subscriptionMetricsDataPackFulfillmentsDesc,
 	subscriptionMetricsDataPackBytesDesc,
+	subscriptionMetricsUncreditedPaymentsDesc,
+	subscriptionMetricsUncreditedOldestAgeDesc,
 	subscriptionMetricsSnapshotTimestampDesc,
 }
 
@@ -182,12 +230,29 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 	metrics := []prometheus.Metric{}
 	stores := append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreDeduplicated)
 	for _, store := range stores {
-		metrics = append(metrics, prometheus.MustNewConstMetric(
-			subscriptionMetricsActiveAccountsDesc,
-			prometheus.GaugeValue,
-			float64(snapshot.ActiveAccounts[store]),
-			store,
-		))
+		metrics = append(metrics,
+			prometheus.MustNewConstMetric(
+				subscriptionMetricsActiveAccountsDesc,
+				prometheus.GaugeValue,
+				float64(snapshot.ActiveAccounts[store]),
+				store,
+			),
+			prometheus.MustNewConstMetric(
+				subscriptionMetricsInGraceAccountsDesc,
+				prometheus.GaugeValue,
+				float64(snapshot.InGraceAccounts[store]),
+				store,
+			),
+		)
+		for _, plan := range model.SubscriptionMetricsPlans() {
+			metrics = append(metrics, prometheus.MustNewConstMetric(
+				subscriptionMetricsTrialsActiveDesc,
+				prometheus.GaugeValue,
+				float64(snapshot.TrialsActive[model.SubscriptionMetricsStorePlan{Store: store, Plan: plan}]),
+				store,
+				plan,
+			))
+		}
 		for _, window := range model.SubscriptionMetricsWindows() {
 			key := model.SubscriptionMetricsStoreWindow{Store: store, Window: window}
 			metrics = append(metrics,
@@ -218,6 +283,30 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 				store,
 				window,
 			))
+		}
+	}
+
+	// every store that records failed renewals, reason and window, zero
+	// included
+	for _, store := range model.SubscriptionMetricsPaymentFailureStores() {
+		metrics = append(metrics, prometheus.MustNewConstMetric(
+			subscriptionMetricsPaymentFailuresOpenDesc,
+			prometheus.GaugeValue,
+			float64(snapshot.PaymentFailuresOpen[store]),
+			store,
+		))
+		for _, reason := range model.SubscriptionMetricsPaymentFailureResolveReasons() {
+			for _, window := range model.SubscriptionMetricsWindows() {
+				key := model.SubscriptionMetricsStoreReasonWindow{Store: store, Reason: reason, Window: window}
+				metrics = append(metrics, prometheus.MustNewConstMetric(
+					subscriptionMetricsPaymentFailuresResolvedDesc,
+					prometheus.GaugeValue,
+					float64(snapshot.PaymentFailuresResolved[key]),
+					store,
+					reason,
+					window,
+				))
+			}
 		}
 	}
 
@@ -278,6 +367,24 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 					window,
 				),
 			)
+		}
+	}
+
+	// every rail, zero included; an age only where a payment waits
+	for _, rail := range model.SubscriptionMetricsUncreditedRails() {
+		metrics = append(metrics, prometheus.MustNewConstMetric(
+			subscriptionMetricsUncreditedPaymentsDesc,
+			prometheus.GaugeValue,
+			float64(snapshot.UncreditedPayments[rail]),
+			rail,
+		))
+		if 0 < snapshot.UncreditedPayments[rail] {
+			metrics = append(metrics, prometheus.MustNewConstMetric(
+				subscriptionMetricsUncreditedOldestAgeDesc,
+				prometheus.GaugeValue,
+				float64(snapshot.UncreditedOldestAgeSeconds[rail]),
+				rail,
+			))
 		}
 	}
 

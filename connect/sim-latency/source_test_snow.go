@@ -107,7 +107,7 @@ func executeSourceTestSnow(ctx context.Context, client *http.Client, plan source
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if execution.ImageId != plan.ImageId || execution.SuiteSha256 != plan.SuiteSha256 || execution.TestCount <= 0 || execution.DurationMillis < 0 ||
+	if execution.ImageId != plan.ImageId || execution.SuiteSha256 != plan.SuiteSha256 || !sourceCorrectnessExecutionCountValid(execution) || execution.DurationMillis < 0 ||
 		execution.ExitCode < 0 || !validSha256(execution.TestLogsSha256) {
 		return nil, errors.New("Snow attestation lacks a complete observed fixed-suite execution")
 	}

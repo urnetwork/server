@@ -121,19 +121,48 @@ func TestRedisCommandProbeNoRetryAppliedWrite(t *testing.T) {
 	}
 }
 
-func TestRedisCommandProbeDedicatedPoliciesUnchanged(t *testing.T) {
-	for _, deadline := range []bool{false, true} {
-		t.Run(map[bool]string{false: "no_command_retry", true: "deadline"}[deadline], func(t *testing.T) {
-			peer, _, pool := newRedisCommandProbeClient(t)
-			pool.disableCommandRetry = true
-			pool.contextTimeoutEnabled = deadline
+// The non-retrying pool (RedisDoOnce), the deadline pool and the late-reply
+// pool (RedisWithDeadline) send each call's own commands and nothing else. Each
+// pinged an arbitrary node before every callback until 2026-11-15, about 77k
+// PINGs a second across the fleet (CPUOPT5 E 5.1, CPUOPT6 E #2), a round trip
+// that guarded no command: these pools replay nothing.
+func TestRedisCommandProbeDedicatedPoolsSendOnlyTheirCommands(t *testing.T) {
+	pools := []struct {
+		name            string
+		deadline        bool
+		keepLateReplies bool
+	}{
+		{name: "no_command_retry"},
+		{name: "deadline", deadline: true},
+		{name: "late_reply", deadline: true, keepLateReplies: true},
+	}
+	for _, p := range pools {
+		peer, _, pool := newRedisCommandProbeClient(t)
+		pool.disableCommandRetry = true
+		pool.contextTimeoutEnabled = p.deadline
+		pool.keepLateReplies = p.keepLateReplies
+		for range 3 {
 			redisWithClient(t.Context(), pool, func(r RedisClient) {
-				Raise(r.Set(t.Context(), "dedicated-policy", "unchanged", 0).Err())
+				Raise(r.Set(t.Context(), "dedicated-policy", "only-its-command", 0).Err())
 			}, OptNoRetry())
-			if peer.count("ping") != 1 || peer.count("set") != 1 {
-				t.Fatal("dedicated Redis boundary lost its existing probe policy")
-			}
-		})
+		}
+		if peer.count("ping") != 0 || peer.count("set") != 3 {
+			t.Errorf("%s: pings=%d sets=%d, want only the 3 calls' commands", p.name, peer.count("ping"), peer.count("set"))
+		}
+	}
+}
+
+// OptRedisNoPreflight is accepted and changes nothing: a call that passes it
+// sends the same commands as one that does not.
+func TestRedisCommandProbeNoPreflightOptionIsAccepted(t *testing.T) {
+	peer, _, pool := newRedisCommandProbeClient(t)
+	pool.disableCommandRetry = true
+	pool.contextTimeoutEnabled = true
+	redisWithClient(t.Context(), pool, func(r RedisClient) {
+		Raise(r.Set(t.Context(), "dedicated-policy", "with-option", 0).Err())
+	}, OptNoRetry(), OptRedisNoPreflight())
+	if peer.count("ping") != 0 || peer.count("set") != 1 {
+		t.Fatalf("pings=%d sets=%d, want the call's one command", peer.count("ping"), peer.count("set"))
 	}
 }
 

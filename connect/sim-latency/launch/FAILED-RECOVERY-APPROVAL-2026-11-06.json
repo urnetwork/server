@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "kind": "competition-operator-recovery-preparation-record/v1",
+  "observed_at": "2026-11-06T22:31:26Z",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "epoch": 1,
+  "operator_instruction": "Retry all failed.",
+  "approved_job_ids": [
+    "01a189ac-2c92-4acb-204f-d37a1a24838b",
+    "01a1a3c4-6a91-74a6-e0d6-1caa1f832af2",
+    "01a1a481-0968-ff57-1ca8-1a48fc2a35ea",
+    "01a1a512-cbb1-f62d-6fc5-6f4d23faa3cf",
+    "01a1a672-824d-c2a3-330c-db4244a8972a",
+    "01a1a9e1-ca26-ab2a-d712-45f54ff04a7b",
+    "01a1aad5-5827-a79a-ed06-52df34194821"
+  ],
+  "maximum_new_cycles_per_job": 1,
+  "maximum_seconds_per_cycle": 10800,
+  "additional_submission_fee": false,
+  "preserve_original_submission_order": true,
+  "preserve_original_failure_history": true,
+  "interrupt_active_evaluation": false,
+  "change_epoch_one_scoring_policy": false,
+  "recovery_grants_issued": false,
+  "private_snapshots": "/mnt/data/competition-recovery-snapshots-20261106.WkCJfLKf",
+  "snapshot_scope": "Seven read-only terminal/event snapshots; each cycle zero and no prior recovery receipt. Full snapshots contain private patch bytes and must not be published.",
+  "remaining_requirements": [
+    "Refresh and accept exact serving API and deployed worker compatibility evidence.",
+    "Prepare single-use authorizations against exact terminal snapshots.",
+    "Use a verified idle claim boundary without interrupting the active evaluation.",
+    "Add an audited operator-interruption path for 01a1a481; its complete event history has no heartbeat-failure event. Never manufacture one."
+  ],
+  "authority_scope": "Records operator approval and preparation only; not a recovery authorization, runtime qualification, claim or proof of successful retry. Finalization and reward holds remain unchanged."
+}

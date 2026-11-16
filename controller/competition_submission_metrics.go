@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // Budgets belong to this projection, not grading or the frozen score policy.
@@ -216,7 +217,11 @@ func competitionSubmissionMetricPointFromScore(scope competitionSubmissionMetric
 		return point, errors.New("operator score projection lost its exact epoch baseline or recorded thresholds")
 	}
 	allGates := true
-	for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources"} {
+	names, err := model.CompetitionScoreRequiredGateNames(score)
+	if err != nil {
+		return point, err
+	}
+	for _, name := range names {
 		gate, present := score.Gates[name]
 		if !present {
 			return point, errors.New("operator score projection is missing a recorded gate")
@@ -336,7 +341,9 @@ const competitionSubmissionScoreRowsSql = `SELECT j.job_id,j.submitted_at,j.stat
   'G3_path_integrity',jsonb_build_object('passed',(j.score_json#>>'{gates,G3_path_integrity,passed}')::boolean,'details','{}'::jsonb),
   'G4_matchmaking',jsonb_build_object('passed',(j.score_json#>>'{gates,G4_matchmaking,passed}')::boolean,'details','{}'::jsonb),
   'G5_stability',jsonb_build_object('passed',(j.score_json#>>'{gates,G5_stability,passed}')::boolean,'details','{}'::jsonb),
-  'G6_resources',jsonb_build_object('passed',(j.score_json#>>'{gates,G6_resources,passed}')::boolean,'details','{}'::jsonb)),
+  'G6_resources',jsonb_build_object('passed',(j.score_json#>>'{gates,G6_resources,passed}')::boolean,'details','{}'::jsonb)) ||
+   CASE WHEN jsonb_typeof(r.policy_json#>'{evaluation_policy,work_coverage_policy}')='object' THEN
+    jsonb_build_object('G7_work_coverage',jsonb_build_object('passed',(j.score_json#>>'{gates,G7_work_coverage,passed}')::boolean,'details','{}'::jsonb)) ELSE '{}'::jsonb END,
  'significance',jsonb_build_object(
   'method',CASE WHEN j.score_json#>>'{significance,method}'='one-sided-welch-t' THEN 'one-sided-welch-t' ELSE '' END,
   'alpha',(j.score_json#>>'{significance,alpha}')::double precision,
@@ -362,7 +369,11 @@ const competitionSubmissionScoreRowsSql = `SELECT j.job_id,j.submitted_at,j.stat
   'baseline',jsonb_build_object('raw_score',(j.score_json#>>'{diagnostics,baseline,raw_score}')::double precision),
   'takeover_margin',(j.score_json#>>'{diagnostics,takeover_margin}')::double precision,
   'baseline_takeover_raw_max',(j.score_json#>>'{diagnostics,baseline_takeover_raw_max}')::double precision,
-  'baseline_takeover_eligible',(j.score_json#>>'{diagnostics,baseline_takeover_eligible}')::boolean))::text,
+  'baseline_takeover_eligible',(j.score_json#>>'{diagnostics,baseline_takeover_eligible}')::boolean) ||
+   CASE WHEN jsonb_typeof(r.policy_json#>'{evaluation_policy,work_coverage_policy}')='object' THEN jsonb_build_object(
+    'g2_volume_policy',j.score_json#>'{diagnostics,g2_volume_policy}',
+    'scorer_version',j.score_json#>'{diagnostics,scorer_version}',
+    'work_coverage_policy',j.score_json#>'{diagnostics,work_coverage_policy}') ELSE '{}'::jsonb END)::text,
  COALESCE(jsonb_typeof(j.score_json->'gates')='object'
   AND jsonb_typeof(j.score_json#>'{gates,G1_success,passed}')='boolean'
   AND jsonb_typeof(j.score_json#>'{gates,G2_volume,passed}')='boolean'
@@ -373,8 +384,11 @@ const competitionSubmissionScoreRowsSql = `SELECT j.job_id,j.submitted_at,j.stat
   AND jsonb_typeof(j.score_json#>'{diagnostics,baseline_takeover_eligible}')='boolean'
   AND (j.state='failed' OR NOT COALESCE(jsonb_typeof(j.eval_error_json)<>'null',false))
   AND COALESCE(j.score_json#>>'{diagnostics,g2_volume_policy}','')=COALESCE(r.policy_json#>>'{evaluation_policy,g2_volume_policy}','')
-  AND ((NOT (j.score_json->'diagnostics' ? 'g2_volume_policy') AND NOT (j.score_json->'diagnostics' ? 'scorer_version'))
-   OR (j.score_json#>>'{diagnostics,g2_volume_policy}'='minimum-work/1' AND j.score_json#>>'{diagnostics,scorer_version}'='sim-latency-score/2')),false)
+  AND (j.score_json#>'{diagnostics,work_coverage_policy}') IS NOT DISTINCT FROM (r.policy_json#>'{evaluation_policy,work_coverage_policy}')
+  AND ((NOT (j.score_json->'diagnostics' ? 'g2_volume_policy') AND NOT (j.score_json->'diagnostics' ? 'scorer_version') AND NOT (r.policy_json->'evaluation_policy' ? 'work_coverage_policy'))
+   OR (j.score_json#>>'{diagnostics,g2_volume_policy}'='minimum-work/1' AND
+    ((NOT (r.policy_json->'evaluation_policy' ? 'work_coverage_policy') AND j.score_json#>>'{diagnostics,scorer_version}'='sim-latency-score/2') OR
+     (jsonb_typeof(r.policy_json#>'{evaluation_policy,work_coverage_policy}')='object' AND j.score_json#>>'{diagnostics,scorer_version}'='sim-latency-score/3' AND jsonb_typeof(j.score_json#>'{gates,G7_work_coverage,passed}')='boolean')))),false)
  FROM competition_job j JOIN competition_round r ON r.round_id=j.round_id
  LEFT JOIN competition_round_baseline b ON b.round_id=j.round_id
  WHERE j.round_id=$1 AND j.state IN ('succeeded','failed') AND j.score_json IS NOT NULL

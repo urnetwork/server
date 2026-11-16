@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,8 +18,6 @@ import (
 	"maps"
 
 	"github.com/docopt/docopt-go"
-
-	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -50,7 +47,11 @@ Usage:
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
     bringyourctl db sweep-orphans [--slice=<n>]
     bringyourctl db scrub-client-addresses
+    bringyourctl db scrub-network-create-secrets [--after=<event_id>] [--through=<event_id>] [--batch=<n>] [--batch-pause=<duration>] [(--apply --expect=<digest>)]
     bringyourctl db key-history-floor [--rollback | --restore]
+    bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
+    bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
+    bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -74,6 +75,7 @@ Usage:
     bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
     bringyourctl network sign-out-all --network_id=<network_id> [--remove-clients] [(--commit --expect=<digest>)]
+    bringyourctl network trim-proxies [--network_ids=<network_ids>] [--include_pro] [--keep=<keep>] [--keep_described] [--keep_used_since=<since>] [--rate=<rate>] [--list] [(--commit --expect=<digest>)]
     bringyourctl health status
     bringyourctl health degrade --reason=<reason> [--level=<level>]
     bringyourctl health recover
@@ -89,30 +91,26 @@ Usage:
     bringyourctl onboarding status --network_id=<network_id>
     bringyourctl onboarding preview --network_id=<network_id> --step=<step>
     bringyourctl onboarding send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
-    bringyourctl onboarding webhook-ensure
+    bringyourctl onboarding webhook-ensure [--credential=<credential>]
     bringyourctl onboarding rollup [--from=<from>] [--to=<to>]
     bringyourctl onboarding experiments [--resume | --pause] [--experiment=<experiment>] [--variant=<variant>] [--reason=<reason>]
+    bringyourctl reengagement status --network_id=<network_id>
+    bringyourctl reengagement preview --network_id=<network_id> --step=<step>
+    bringyourctl reengagement scan [--dry-run]
+    bringyourctl reengagement rollup [--from=<from>] [--to=<to>]
+    bringyourctl reengagement send-test --email=<email> --template=<template> [--variant=<variant>] [--locale=<locale>]
+    bringyourctl reengagement mirror-suppressions
+    bringyourctl reengagement suppress (--network_id=<network_id> | --network_ids_file=<path>) --reason=<reason> [(--apply --expect=<digest>)]
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
     bringyourctl crypto show --intent=<intent_id>
-    bringyourctl crypto credit --intent=<intent_id>
+    bringyourctl crypto credit --intent=<intent_id> [--sanctions-cleared]
+    bringyourctl crypto credit-usdc --intent=<intent_id> --tx=<signature> [(--commit --expect=<digest>)]
+    bringyourctl payouts close-attempted [--forfeit=<payment_ids>] [(--commit --expect=<digest>)]
     bringyourctl crypto void --intent=<intent_id>
     bringyourctl crypto refund --intent=<intent_id> --address=<payout_address>
-    bringyourctl payout single --account_payment_id=<account_payment_id>
-    bringyourctl payout pending
-    bringyourctl payouts list-pending [--plan_id=<plan_id>]
-    bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd> --adjustment_id=<adjustment_id> --reason=<reason>
-    bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
-    bringyourctl payouts populate-tx-hashes
-    bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
-    bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
-    bringyourctl payouts close-parked [(--apply --expect=<digest>)] [--ids]
-    bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
-    bringyourctl payouts reimburse --file=<file> --reason=<reason> [--allow_prior_reimbursement] [(--send --expect=<digest>)]
-    bringyourctl payouts usdc-sent-notice --file=<file> [--send]
-    bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
-    bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
+    bringyourctl crypto alchemy-webhook [--signing-key-file=<path>]
 		bringyourctl wallets sync-circle
     bringyourctl contracts repair-expiry-route-check
     bringyourctl contracts repair-expiry --private-stdin [--apply]
@@ -129,7 +127,6 @@ Usage:
     bringyourctl task release <task_id>
     bringyourctl task kick <run_once_key>
     bringyourctl auth login <auth_code>
-    bringyourctl account-points populate --plan_id=<plan_id>
     bringyourctl account-points backfill-blocks [--blocks=<blocks>] [--file=<file>] [(--commit --expect=<digest>)]
     bringyourctl client connection fix
     bringyourctl migrate-user-auth
@@ -148,12 +145,13 @@ Usage:
     bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model migrate provider-egress-health-partition [--copy-days=<n>] [--dry-run] [--swap] [--verify] [--rollback] [--abort] [--drop-old]
     bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
-    bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort] [--drop-legacy]
     bringyourctl model migrate finished-task-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
     bringyourctl refresh-transfer-balances
     bringyourctl st status [--epoch=<epoch>]
-    bringyourctl st deposit [--alpha_rao=<alpha_rao>]
+    bringyourctl st deposit [--alpha_rao=<alpha_rao>] [--convert]
+    bringyourctl st demand-status
     bringyourctl st commit --epoch=<epoch>
     bringyourctl st finalize --epoch=<epoch>
     bringyourctl st payout-dry-run --epoch=<epoch> [--out=<path>]
@@ -163,6 +161,12 @@ Usage:
     bringyourctl st v2-activation
     bringyourctl st v1-sweep-status
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
+    bringyourctl st ctf-outage --start=<start_time> --end=<end_time> --reason=<reason> --by=<operator>
+    bringyourctl st v2-extender-replay --epoch=<epoch> [--out=<path>]
+    bringyourctl st v2-extender-shadow --epoch=<epoch> [--out=<path>]
+    bringyourctl st v2-platform-endpoints
+    bringyourctl st v2-platform-endpoint-register --client_id=<client_id> --kind=<kind> --by=<operator>
+    bringyourctl st v2-platform-endpoint-revoke --client_id=<client_id> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>] [--dashboards_only]
     bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
     bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
@@ -207,6 +211,40 @@ Options:
     --verify       Check the partitioned egress health history against the
                    old table.
     --drop-old     Drop the old egress health history once --verify passes.
+    --drop-legacy  Detach, then drop, provider_work_session_event_legacy once
+                   the journal's drop guard admits it, an hour after the
+                   cutover week starts (owner, 2026-11-15). A connection
+                   admitted before the cutover that retires later is
+                   journaled without its network id.
+    --mode=<mode>  With db close-evidence-retention, set the close evidence
+                   row retention's brake: on, or off to stop the row deletes
+                   from their next batch. The weekly drops of partitioned
+                   evidence never read it. With db usage-archive-export, set
+                   the export control's mode: on drops exported, verified
+                   weeks early, dry_run verifies them and keeps them, off
+                   drops nothing early from the next retention pass.
+    --max-rows-per-second=<n>  With db close-evidence-retention, set the
+                   brake's rate: rows deleted a second, at most 5000; 0 stops
+                   the deletes.
+    --remove       With db close-evidence-retention, delete the brake, so the
+                   code's default rate (1000 a second) applies. With db
+                   usage-archive-export, delete the export control, so no
+                   week of the usage archive drops before its 52 weeks.
+    --close-time-floor=<date>  With db usage-archive-export, the close time
+                   floor (YYYY-MM-DD, UTC): a week leaves early only when it
+                   ends by the floor and every row closed before it. It is
+                   never later than 70 days ago, whatever is set. Move it only
+                   past SN epochs that are recorded with no recovery pending.
+    --max-weeks-per-pass=<n>  With db usage-archive-export, the early drops
+                   (or dry-run verifications) of one retention pass, 1 to 4.
+    --lock-timeout=<duration>  With db reindex-index, how long the rebuild
+                   waits for its table's lock to clear before it starts, and
+                   then for each lock and snapshot wait (Go duration, default
+                   1h).
+    --timeout=<duration>  With db reindex-index, the longest the rebuild may
+                   run (Go duration, default 8h).
+    --parallel=<n> With db reindex-index, the build's parallel maintenance
+                   workers, 0 to 8 (default 0: one cpu).
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -219,34 +257,39 @@ Options:
                    major or full, mildest first.
 
     --private-stdin  Read the bounded private expiry request from stdin.
-    --apply          Apply the scoped expiry request; omission is a read-only preview.
+    --apply          Apply the scoped expiry request; omission is a read-only preview. With reengagement suppress, write the suppression of the dry run whose digest is --expect. With db scrub-network-create-secrets, rewrite the audit rows of the dry run whose digest is --expect.
     --contract_id=<contract_id> The contract to close
     --target_id=<target_id>     The contract_close.party (either "destination" or "source")
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
-    --amount_usd=<amount_usd>   Amount in USD.
-    --destination_address=<destination_address>  Destination address.
-    --blockchain=<blockchain>  Blockchain.
-    --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
-    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero or zcash.
+    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero, zcash, bittensor, bitcoin or ethereum.
     --asset=<asset>  A crypto payment asset: usdc_solana, zec or xmr.
     --state=<state>  A crypto invoice status: pending, seen, confirming, paid, expired or review.
     --intent=<intent_id>  A crypto invoice id.
+    --sanctions-cleared  With crypto credit, credit an invoice whose payment the sanctions screen held as a match (sanctions_hold): only once the owner and counsel cleared it.
+    --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
+    --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
-    --ids  With payouts close-parked, also list each payment: its id, plan week, reason and payout.
-    --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
-    --move_all_sweeps  Move every sweep of a corrected legacy attempt to its replacement instead of one anchor sweep.
-    --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
-    --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
-    --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, balance move-redeemed or contracts close-due dry run printed; --send and --commit refuse any other census.
+    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, payouts close-attempted, contracts close-due, reengagement suppress or db scrub-network-create-secrets dry run printed; --commit and --apply refuse any other census.
+    --network_ids_file=<path>  With reengagement suppress, the networks to suppress: one network id a line; blank lines and lines starting with # are skipped.
+    --after=<event_id>  With db scrub-network-create-secrets, scrub only the audit rows after this event id: a stopped --apply prints the last one it committed.
+    --through=<event_id>  With db scrub-network-create-secrets, the newest audit event id in scope; the dry run defaults to the newest row and prints it, and --apply needs the one the dry run printed.
+    --batch=<n>  With db scrub-network-create-secrets, the audit rows each statement reads and each transaction rewrites, at most 5000 (the default).
+    --batch-pause=<duration>  With db scrub-network-create-secrets, the wait after each batch (Go duration; default 2s).
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
-    --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
-    --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
-    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect. Without it the run is a read-only dry run.
+    --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
+    --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary that has not expired. A block that has its points is skipped; an expired block, past client_reliability retention or recorded expired by the daily award, is refused.
+    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect; with crypto credit-usdc, credit the invoice from the payment as its dry run with that digest printed; with payouts close-attempted, write the decisions of the dry run whose digest is --expect. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
+    --forfeit=<payment_ids>  With payouts close-attempted, close these payments, comma separated, as the owner forfeited them, without reading Circle: each must be a canceled payment an attempt of which reached Circle, not completed and not closed, or the run refuses them all and writes nothing.
+    --network_ids=<network_ids>  With network trim-proxies, the networks to trim, comma separated; omitted, every network that holds a hosted proxy (a paged scan of proxy_client).
+    --include_pro  With network trim-proxies, also trim the Pro networks named in --network_ids, at, over or under the Pro cap; refused without --network_ids. A Pro network not named, and a network with a client allowance (an Embed row), is never trimmed.
+    --keep=<keep>  With network trim-proxies, the active hosted proxies each trimmed network keeps, its newest by client id; omitted, the free cap (5).
+    --keep_described  With network trim-proxies, also keep every hosted proxy with a description (a name its owner gave it).
+    --keep_used_since=<since>  With network trim-proxies, also keep every hosted proxy used at or after this RFC 3339 time: its last contract (a transfer one of its clients created) or its last auth (its creation, or a connect of one of its clients) is that recent. Both are recorded at most once an hour.
+    --list  With network trim-proxies, also print each kept and removed hosted proxy of each trimmed network, with why it is kept.
+    --rate=<rate>  With network trim-proxies --commit, hosted proxies removed a second, in batches of 500; omitted, 200.
     --balance_id=<balance_id>  With balance move-redeemed, the unused balance a redeemed balance code granted, left on a deleted network.
     --to_network_id=<network_id>  With balance move-redeemed, the network the balance and its code move to.
-    --allow_prior_reimbursement  With payouts reimburse, pay networks that already have an open manual reimbursement of another plan; each row lists them, and the digest binds the flag and exactly those.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -288,8 +331,16 @@ func main() {
 			dbSweepOrphans(opts)
 		} else if scrubClientAddresses, _ := opts.Bool("scrub-client-addresses"); scrubClientAddresses {
 			dbScrubClientAddresses(opts)
+		} else if scrubNetworkCreateSecrets, _ := opts.Bool("scrub-network-create-secrets"); scrubNetworkCreateSecrets {
+			os.Exit(dbScrubNetworkCreateSecretsCommand(opts))
 		} else if keyHistoryFloor, _ := opts.Bool("key-history-floor"); keyHistoryFloor {
 			dbKeyHistoryFloor(opts)
+		} else if closeEvidenceRetention, _ := opts.Bool("close-evidence-retention"); closeEvidenceRetention {
+			dbCloseEvidenceRetention(opts)
+		} else if usageArchiveExport, _ := opts.Bool("usage-archive-export"); usageArchiveExport {
+			dbUsageArchiveExport(opts)
+		} else if reindexIndex, _ := opts.Bool("reindex-index"); reindexIndex {
+			dbReindexIndex(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -344,6 +395,8 @@ func main() {
 			networkEmbed(opts)
 		} else if signOutAll, _ := opts.Bool("sign-out-all"); signOutAll {
 			os.Exit(networkSignOutAllCommand(opts))
+		} else if trimProxies, _ := opts.Bool("trim-proxies"); trimProxies {
+			os.Exit(networkTrimProxiesCommand(opts))
 		}
 	} else if health, _ := opts.Bool("health"); health {
 		os.Exit(healthCommand(opts, os.Stdout))
@@ -378,12 +431,25 @@ func main() {
 			os.Exit(paymentsStripeDunning(opts, os.Stdout))
 		}
 	} else if crypto, _ := opts.Bool("crypto"); crypto {
+		if creditUsdc, _ := opts.Bool("credit-usdc"); creditUsdc {
+			os.Exit(cryptoCreditUsdcCommand(opts, os.Stdout, os.Stderr))
+		}
 		os.Exit(cryptoCommand(opts, os.Stdout))
-	} else if payout, _ := opts.Bool("payout"); payout {
-		if single, _ := opts.Bool("single"); single {
-			payoutByPaymentId(opts)
-		} else if pending, _ := opts.Bool("pending"); pending {
-			payoutPending()
+	} else if reengagement_, _ := opts.Bool("reengagement"); reengagement_ {
+		if status, _ := opts.Bool("status"); status {
+			reengagementStatus(opts)
+		} else if preview, _ := opts.Bool("preview"); preview {
+			reengagementPreview(opts)
+		} else if scan, _ := opts.Bool("scan"); scan {
+			reengagementScan(opts)
+		} else if rollup, _ := opts.Bool("rollup"); rollup {
+			reengagementRollup(opts)
+		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
+			reengagementSendTest(opts)
+		} else if mirrorSuppressions, _ := opts.Bool("mirror-suppressions"); mirrorSuppressions {
+			reengagementMirrorSuppressions(opts)
+		} else if suppress, _ := opts.Bool("suppress"); suppress {
+			os.Exit(reengagementSuppressCommand(opts))
 		}
 	} else if onboarding_, _ := opts.Bool("onboarding"); onboarding_ {
 		if status, _ := opts.Bool("status"); status {
@@ -393,47 +459,15 @@ func main() {
 		} else if sendTest, _ := opts.Bool("send-test"); sendTest {
 			onboardingSendTest(opts)
 		} else if webhookEnsure, _ := opts.Bool("webhook-ensure"); webhookEnsure {
-			onboardingWebhookEnsure()
+			onboardingWebhookEnsure(opts)
 		} else if rollup, _ := opts.Bool("rollup"); rollup {
 			onboardingRollup(opts)
 		} else if experiments, _ := opts.Bool("experiments"); experiments {
 			onboardingExperiments(opts)
 		}
 	} else if payouts, _ := opts.Bool("payouts"); payouts {
-		if listPending, _ := opts.Bool("list-pending"); listPending {
-			listPendingPayouts(opts)
-		} else if plan, _ := opts.Bool("plan"); plan {
-			planPayouts(opts)
-		} else if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
-			server.Raise(payoutPlanApplyBonus(opts))
-		} else if ptxh, _ := opts.Bool("populate-tx-hashes"); ptxh {
-			populateTxHashes()
-		} else if reconcileLegacy, _ := opts.Bool("reconcile-legacy-attempts"); reconcileLegacy {
-			os.Exit(reconcileLegacyPayoutAttempts(opts))
-		} else if correctLegacy, _ := opts.Bool("correct-legacy-attempts"); correctLegacy {
-			os.Exit(correctLegacyPayoutAttempts(opts))
-		} else if closeParked, _ := opts.Bool("close-parked"); closeParked {
-			os.Exit(payoutsCloseParkedCommand(opts))
-		} else if usdcSentNotice, _ := opts.Bool("usdc-sent-notice"); usdcSentNotice {
-			os.Exit(payoutsUsdcSentNoticeCommand(opts))
-		} else if snReconcile, _ := opts.Bool("sn-reconcile"); snReconcile {
-			send, _ := opts.Bool("--send")
-			snReconcileRequireReadOnly(send)
-			expect, _ := opts.String("--expect")
-			asJson, _ := opts.Bool("--json")
-			clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
-			os.Exit(runSnReconcile(os.Stdout, os.Stderr, send, expect, asJson, func(send bool, expect string) (*controller.SnReconcileReport, error) {
-				return controller.SnReconcile(clientSession, send, expect)
-			}))
-		} else if reimburse, _ := opts.Bool("reimburse"); reimburse {
-			os.Exit(payoutsReimburseCommand(opts))
-		}
-	} else if wallet, _ := opts.Bool("wallet"); wallet {
-		if send, _ := opts.Bool("transfer"); send {
-			adminWalletTransfer(opts)
-		}
-		if estimate, _ := opts.Bool("estimate-fee"); estimate {
-			adminWalletEstimateFee(opts)
+		if closeAttempted, _ := opts.Bool("close-attempted"); closeAttempted {
+			os.Exit(payoutsCloseAttemptedCommand(opts, os.Stdout, os.Stderr))
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
 		if scheduleOpen, _ := opts.Bool("schedule-open-closures"); scheduleOpen {
@@ -494,9 +528,9 @@ func main() {
 			authLogin(opts)
 		}
 	} else if accountPoints, _ := opts.Bool("account-points"); accountPoints {
-		if populate, _ := opts.Bool("populate"); populate {
-			accountPointsPopulate(opts)
-		} else if backfillBlocks, _ := opts.Bool("backfill-blocks"); backfillBlocks {
+		// populate --plan_id is retired (owner, 2026-11-13: "yes retire it"): its
+		// points followed a USDC payout plan's payout, and a rerun double-awards.
+		if backfillBlocks, _ := opts.Bool("backfill-blocks"); backfillBlocks {
 			os.Exit(accountPointsBackfillBlocksCommand(opts))
 		}
 		// } else if accountPoints, _ := opts.Bool("client"); accountPoints {
@@ -562,6 +596,8 @@ func main() {
 		// manual ops fallback for the st epoch pipeline (D-3/D-11)
 		if status, _ := opts.Bool("status"); status {
 			stStatus(opts)
+		} else if demandStatus, _ := opts.Bool("demand-status"); demandStatus {
+			stDemandStatus()
 		} else if deposit, _ := opts.Bool("deposit"); deposit {
 			stDeposit(opts)
 		} else if commit, _ := opts.Bool("commit"); commit {
@@ -582,6 +618,18 @@ func main() {
 			stV2Activation(opts)
 		} else if activationClear, _ := opts.Bool("v2-activation-clear"); activationClear {
 			stV2ActivationClear(opts)
+		} else if ctfOutage, _ := opts.Bool("ctf-outage"); ctfOutage {
+			stCtfOutage(opts)
+		} else if extenderReplay, _ := opts.Bool("v2-extender-replay"); extenderReplay {
+			stV2ExtenderReplay(opts)
+		} else if extenderShadow, _ := opts.Bool("v2-extender-shadow"); extenderShadow {
+			stV2ExtenderShadow(opts)
+		} else if platformEndpoints, _ := opts.Bool("v2-platform-endpoints"); platformEndpoints {
+			stV2PlatformEndpoints(opts)
+		} else if register, _ := opts.Bool("v2-platform-endpoint-register"); register {
+			stV2PlatformEndpointRegister(opts)
+		} else if revoke, _ := opts.Bool("v2-platform-endpoint-revoke"); revoke {
+			stV2PlatformEndpointRevoke(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
@@ -638,6 +686,183 @@ func dbKeyHistoryFloor(opts docopt.Opts) {
 	server.SetClientKeyHistoryRetentionFloor(ctx, rollback)
 	floor, published = server.GetClientKeyHistoryRetentionFloor(ctx)
 	fmt.Printf("Key history retention floor now: %s (published body: %t)\n", floor, published)
+}
+
+// dbCloseEvidenceRetention prints the close evidence row retention's brake
+// ({close_evidence_retention}control, server.RemoveExpiredCloseEvidence) and
+// the floor the installed evidence guard admits, after setting the brake's
+// fields with --mode and --max-rows-per-second, or deleting it with --remove.
+// The brake stops or paces the row deletes from their next batch, without
+// touching the contract horizon reaper. It is the way to stop them. It does not
+// stop the weekly drops of partitioned evidence, which never read it. Putting
+// the guard's 91-day body back stops both below 91 days, but pages
+// migration-schema-drift.
+func dbCloseEvidenceRetention(opts docopt.Opts) {
+	ctx := context.Background()
+	settings := server.DefaultCloseEvidenceRetentionSettings()
+	fields, remove, err := closeEvidenceRetentionBrakeChange(opts)
+	if err != nil {
+		panic(err)
+	}
+	if remove || 0 < len(fields) {
+		writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if remove {
+			err := server.RemoveCloseEvidenceRetentionControl(writeCtx)
+			server.Raise(err)
+		}
+		err := server.SetCloseEvidenceRetentionControl(writeCtx, fields)
+		server.Raise(err)
+	}
+	stored, err := server.GetCloseEvidenceRetentionControlFields(ctx, settings)
+	server.Raise(err)
+	control := server.NarrowCloseEvidenceRetentionControl(stored, settings)
+	fmt.Printf("Close evidence retention brake: %v, deletes on %t at up to %g rows a second\n", stored, control.On, control.MaxRowsPerSecond)
+	floor, horizonGuard := server.GetCloseEvidenceRetentionGuardFloor(ctx)
+	fmt.Printf("Close evidence guard floor: %s (horizon guard installed: %t)\n", floor, horizonGuard)
+}
+
+// The brake fields and removal the options ask for. A mode other than on or
+// off, or a rate that is not a number of zero or more, is refused.
+func closeEvidenceRetentionBrakeChange(opts docopt.Opts) (fields map[string]string, remove bool, err error) {
+	fields = map[string]string{}
+	remove, _ = opts.Bool("--remove")
+	if mode, _ := opts.String("--mode"); mode != "" {
+		if mode != "on" && mode != "off" {
+			return nil, false, fmt.Errorf("--mode must be on or off, not %q", mode)
+		}
+		fields[server.CloseEvidenceRetentionControlFieldMode] = mode
+	}
+	if rate, _ := opts.String("--max-rows-per-second"); rate != "" {
+		value, parseErr := strconv.ParseFloat(rate, 64)
+		if parseErr != nil || math.IsNaN(value) || value < 0 {
+			return nil, false, fmt.Errorf("--max-rows-per-second must be a rate of zero or more, not %q", rate)
+		}
+		fields[server.CloseEvidenceRetentionControlFieldMaxRowsPerSecond] = rate
+	}
+	if remove && 0 < len(fields) {
+		return nil, false, errors.New("--remove deletes the brake; set fields without it")
+	}
+	return
+}
+
+// dbUsageArchiveExport prints the usage archive export control
+// ({usage_archive_export}control, server/db_provider_usage_archive_export.go)
+// as stored and as the next retention pass narrows it, after setting its
+// fields with --mode, --close-time-floor and --max-weeks-per-pass, or deleting
+// it with --remove. The control only lets the retention pass drop a week
+// early that a verified export in the ledger holds exactly; its kill switch is
+// --mode=off (or --remove): the next pass drops nothing early. The 52-week
+// drops never read it.
+func dbUsageArchiveExport(opts docopt.Opts) {
+	ctx := context.Background()
+	settings := server.DefaultProviderUsageArchiveExportSettings()
+	fields, remove, err := usageArchiveExportControlChange(opts, settings)
+	if err != nil {
+		panic(err)
+	}
+	if remove || 0 < len(fields) {
+		writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if remove {
+			server.Raise(server.RemoveProviderUsageArchiveExportControl(writeCtx))
+		}
+		server.Raise(server.SetProviderUsageArchiveExportControl(writeCtx, fields))
+	}
+	stored, err := server.GetProviderUsageArchiveExportControlFields(ctx, settings)
+	server.Raise(err)
+	control := server.NarrowProviderUsageArchiveExportControl(stored, settings)
+	fmt.Printf("Usage archive export control: %v\n", stored)
+	fmt.Printf("Next retention pass: mode %s, close time floor %s (in force now: %s), up to %d weeks a pass",
+		control.Mode, control.CloseTimeFloor.Format(time.DateOnly), control.EffectiveFloor(server.NowUtc()).Format(time.RFC3339), control.MaxWeeksPerPass)
+	if control.Invalid != "" {
+		fmt.Printf("; off because %s", control.Invalid)
+	}
+	fmt.Println()
+}
+
+// The export control fields and removal the options ask for. Every value is
+// checked as the retention pass narrows it (server.NarrowProviderUsageArchiveExportControl),
+// so the command refuses what the pass would read as off: a mode other than on,
+// dry_run or off, a floor that is not YYYY-MM-DD, and a weekly brake outside 1
+// to the settings' most. --remove with fields is refused.
+func usageArchiveExportControlChange(opts docopt.Opts, settings *server.ProviderUsageArchiveExportSettings) (fields map[string]string, remove bool, err error) {
+	fields = map[string]string{}
+	remove, _ = opts.Bool("--remove")
+	if mode, _ := opts.String("--mode"); mode != "" {
+		if mode != "on" && mode != "dry_run" && mode != "off" {
+			return nil, false, fmt.Errorf("--mode must be on, dry_run or off, not %q", mode)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldMode] = mode
+	}
+	if floor, _ := opts.String("--close-time-floor"); floor != "" {
+		if _, parseErr := time.Parse(time.DateOnly, floor); parseErr != nil {
+			return nil, false, fmt.Errorf("--close-time-floor must be YYYY-MM-DD, not %q", floor)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldCloseTimeFloor] = floor
+	}
+	if weeks, _ := opts.String("--max-weeks-per-pass"); weeks != "" {
+		value, parseErr := strconv.Atoi(weeks)
+		if parseErr != nil || value < 1 || settings.MaxWeeksPerPass < value {
+			return nil, false, fmt.Errorf("--max-weeks-per-pass must be 1 to %d, not %q", settings.MaxWeeksPerPass, weeks)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldMaxWeeksPerPass] = weeks
+	}
+	if remove && 0 < len(fields) {
+		return nil, false, errors.New("--remove deletes the export control; set fields without it")
+	}
+	return
+}
+
+// dbReindexIndex rebuilds one index with REINDEX INDEX CONCURRENTLY
+// (server.RebuildIndexConcurrently): reads and writes continue, the rebuild
+// waits for its table's lock to clear rather than queuing behind it, and a
+// failed rebuild's incomplete copy is dropped. --dry-run reads the index and
+// prints the plan. It exits non-zero on any failure, so a caller stops before
+// the next index.
+func dbReindexIndex(opts docopt.Opts) {
+	indexName, options, err := reindexIndexOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	result, err := server.RebuildIndexConcurrently(context.Background(), indexName, options)
+	if result != nil {
+		fmt.Printf("index %s table %s bytes_before %d bytes_after %d compact_estimate %d heap %d rebuilt %t elapsed %s\n",
+			result.IndexName, result.TableName, result.BytesBefore, result.BytesAfter, result.CompactBytes, result.HeapBytes, result.Rebuilt, result.Elapsed.Round(time.Second))
+	}
+	if err != nil {
+		panic(err)
+	}
+}
+
+// The index and the rebuild's bounds the options ask for. Durations are Go
+// durations; the rebuild refuses bounds it cannot honour.
+func reindexIndexOptions(opts docopt.Opts) (indexName string, options *server.IndexRebuildOptions, err error) {
+	indexName, _ = opts.String("<index>")
+	options = server.DefaultIndexRebuildOptions()
+	options.DryRun, _ = opts.Bool("--dry-run")
+	if value, _ := opts.String("--lock-timeout"); value != "" {
+		if options.LockTimeout, err = time.ParseDuration(value); err != nil {
+			return "", nil, fmt.Errorf("--lock-timeout: %w", err)
+		}
+	}
+	if value, _ := opts.String("--timeout"); value != "" {
+		if options.Timeout, err = time.ParseDuration(value); err != nil {
+			return "", nil, fmt.Errorf("--timeout: %w", err)
+		}
+	}
+	if value, _ := opts.String("--parallel"); value != "" {
+		if options.ParallelWorkers, err = strconv.Atoi(value); err != nil {
+			return "", nil, fmt.Errorf("--parallel: %w", err)
+		}
+	}
+	if err = options.Validate(); err != nil {
+		return "", nil, err
+	}
+	return indexName, options, nil
 }
 
 // dbAudit compares the live DB schema against the schema its recorded migration
@@ -711,10 +936,11 @@ func dbAudit(opts docopt.Opts) {
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
-// on existing rows. A db migration adds the column; this command changes no
-// schema. The provider payout stats that needed it now read provider_payouts,
-// and migration 816 dropped the column's covering index, so each batch scans
-// the sweep table. It is idempotent and safe to re-run.
+// on existing rows without provider_payouts, the only rows whose provider
+// attribution reads it (BILLING-SPLIT.md). A db migration adds the column; this
+// command changes no schema. The provider payout stats that needed it now read
+// provider_payouts, and migration 816 dropped the column's covering index, so
+// each batch scans the sweep table. It is idempotent and safe to re-run.
 func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -1259,31 +1485,6 @@ func networkFind(opts docopt.Opts) {
 	}
 }
 
-func networkRemove(opts docopt.Opts) {
-	ctx := context.Background()
-
-	networkIdStr, _ := opts.String("--network_id")
-	userIdStr, _ := opts.String("--user_id")
-
-	networkId, err := server.ParseId(networkIdStr)
-	if err != nil {
-		panic(err)
-	}
-	userId, err := server.ParseId(userIdStr)
-	if err != nil {
-		panic(err)
-	}
-	// No store steps run here, so this passes no store snapshot: any active
-	// Stripe, App Store or Google Play renewal refuses the removal. Cancel it
-	// at the store (or let it end) first.
-	outcome, _ := model.RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil)
-	if outcome != model.RemoveNetworkRemoved {
-		fmt.Printf("network %s was not removed: %s\n", networkId, outcome)
-		os.Exit(1)
-	}
-	fmt.Printf("network %s removed\n", networkId)
-}
-
 // networkClientLimit shows, sets or clears the Embed plan client allowance of a
 // network (model/network_client_limit_model.go): an Embed plan sets the
 // network's client allowance — the top-level client limit and the concurrent
@@ -1597,421 +1798,6 @@ func sendPayoutEmail(opts docopt.Opts) {
 	fmt.Printf("Sent\n")
 }
 
-func planPayouts(opts docopt.Opts) {
-	send, _ := opts.Bool("--send")
-	dryRun, _ := opts.Bool("--dry-run")
-	maxDurationStr, _ := opts.String("--max_duration")
-
-	if send && dryRun {
-		fmt.Println("--dry-run cannot be combined with --send")
-		return
-	}
-
-	// --max_duration bounds the planning window to keep a single plan small.
-	// --send runs the automated payout path, which is intentionally unbounded,
-	// so the two cannot be combined.
-	var maxDuration time.Duration
-	if maxDurationStr != "" {
-		if send {
-			fmt.Println("--max_duration cannot be combined with --send")
-			return
-		}
-		var err error
-		maxDuration, err = server.ParseDurationExtended(maxDurationStr)
-		if err != nil {
-			fmt.Printf("invalid --max_duration %q: %s\n", maxDurationStr, err)
-			return
-		}
-		// Each slice advances the frontier only by forming a new subsidy epoch,
-		// and an epoch shorter than the minimum subsidy duration is dropped. A
-		// window at or below that minimum could never advance, so reject it up
-		// front instead of silently replanning the same slice forever.
-		minDuration := model.EnvSubsidyConfig().MinDurationPerPayout()
-		if maxDuration <= minDuration {
-			fmt.Printf("--max_duration must be greater than the minimum subsidy duration %s so each slice forms a subsidy epoch and the payout frontier advances\n", minDuration)
-			return
-		}
-	}
-
-	ctx := context.Background()
-
-	if send {
-		glog.Infof("[payouts]send\n")
-		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-		controller.SendPayments(clientSession)
-		return
-	}
-
-	// A real plan (no --dry-run) persists the plan: it creates the payments,
-	// marks the swept contracts paid, and applies points. A dry run computes the
-	// same plan but persists nothing, so it can be previewed first.
-	if dryRun {
-		// A dry run rolls its transaction back, so the frontier never advances —
-		// looping would replan the same slice forever. Preview a single slice.
-		plan, err := model.PlanPaymentsDryRunWithMaxDuration(ctx, maxDuration)
-		if err != nil {
-			fmt.Printf("payout plan err = %s\n", err)
-			return
-		}
-		printPayoutPlan(plan, true)
-		return
-	}
-
-	// When maxDuration is set, drain the backlog slice by slice — each slice is
-	// its own committed plan — until the frontier reaches now, so one command
-	// call catches up instead of needing one invocation per slice. maxDuration of
-	// 0 (flag omitted) plans the whole backlog as a single plan.
-	sliceCount := 0
-	plans, err := model.PlanPaymentsWithMaxDurationLoop(ctx, maxDuration, func(p *model.PaymentPlan) {
-		sliceCount += 1
-		if maxDuration > 0 {
-			fmt.Printf("\n===== slice %d =====\n", sliceCount)
-		}
-		printPayoutPlan(p, false)
-	})
-	if err != nil {
-		fmt.Printf("payout plan err = %s\n", err)
-		// fall through to summarize whatever slices did commit
-	}
-	if len(plans) > 1 {
-		printPayoutLoopSummary(plans)
-	}
-}
-
-func printPayoutPlan(plan *model.PaymentPlan, dryRun bool) {
-	if dryRun {
-		fmt.Println("DRY RUN - nothing was persisted. Preview of the payment plan:")
-		fmt.Println("Payout Plan (preview): ", plan.PaymentPlanId)
-	} else {
-		fmt.Println("Payout Plan Created: ", plan.PaymentPlanId)
-	}
-
-	// largest payout first, so the plan reads consistently across runs
-	payments := slices.Collect(maps.Values(plan.NetworkPayments))
-	slices.SortFunc(payments, func(a, b *model.AccountPayment) int {
-		return cmp.Compare(b.Payout, a.Payout)
-	})
-
-	fmt.Printf("%-40s %-40s %16s\n", "Network ID", "Wallet ID", "Payout (USD)")
-	fmt.Println(strings.Repeat("-", 98))
-
-	total := model.NanoCents(0)
-	missingWallet := 0
-	for _, payment := range payments {
-		walletStr := "(no payout wallet)"
-		if payment.WalletId != nil {
-			walletStr = payment.WalletId.String()
-		} else {
-			missingWallet += 1
-		}
-		fmt.Printf("%-40s %-40s %16.4f\n", payment.NetworkId, walletStr, model.NanoCentsToUsd(payment.Payout))
-		total += payment.Payout
-	}
-
-	fmt.Println(strings.Repeat("-", 98))
-	fmt.Printf("%d payment(s), %.4f USD total\n", len(payments), model.NanoCentsToUsd(total))
-	if missingWallet > 0 {
-		fmt.Printf("%d payment(s) have no payout wallet and will be held until a wallet is set\n", missingWallet)
-	}
-	if len(plan.WithheldNetworkIds) > 0 {
-		fmt.Printf("%d network(s) withheld below the minimum payout threshold\n", len(plan.WithheldNetworkIds))
-	}
-	if s := plan.SubsidyPayment; s != nil {
-		fmt.Printf(
-			"subsidy: %.4f USD net payout over %s .. %s (%d active users)\n",
-			model.NanoCentsToUsd(s.NetPayout),
-			s.StartTime.Format(time.RFC3339),
-			s.EndTime.Format(time.RFC3339),
-			s.ActiveUserCount,
-		)
-	}
-}
-
-// printPayoutLoopSummary prints the grand total across all slices a bounded
-// drain committed (PlanPaymentsWithMaxDurationLoop), after each slice's own
-// plan has been printed.
-func printPayoutLoopSummary(plans []*model.PaymentPlan) {
-	totalPayments := 0
-	total := model.NanoCents(0)
-	for _, plan := range plans {
-		for _, payment := range plan.NetworkPayments {
-			totalPayments += 1
-			total += payment.Payout
-		}
-	}
-	fmt.Println()
-	fmt.Println(strings.Repeat("=", 98))
-	fmt.Printf(
-		"drained %d slice(s): %d payment(s), %.4f USD total\n",
-		len(plans), totalPayments, model.NanoCentsToUsd(total),
-	)
-}
-
-// reconcileLegacyPayoutAttempts decides legacy keyed provider payments from
-// Circle's destination history (controller/account_payment_legacy_reconcile.go).
-// Without --apply it is a dry run that reads Circle and reports counts only.
-// The output carries counts only: no payment, network, wallet or amount.
-func reconcileLegacyPayoutAttempts(opts docopt.Opts) int {
-	apply, _ := opts.Bool("--apply")
-	groupLimit := 0
-	if groupLimitStr, _ := opts.String("--group_limit"); groupLimitStr != "" {
-		var err error
-		groupLimit, err = strconv.Atoi(groupLimitStr)
-		if err != nil || groupLimit < 0 {
-			fmt.Printf("invalid --group_limit %q\n", groupLimitStr)
-			return 2
-		}
-	}
-	settings := controller.DefaultLegacyProviderPaymentReconcileSettings()
-	settings.DryRun = !apply
-	settings.GroupLimit = groupLimit
-
-	ctx := context.Background()
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-	defer clientSession.Cancel()
-	result, err := controller.ReconcileLegacyProviderPaymentAttempts(clientSession, settings)
-	if result != nil {
-		mode := "dry run (nothing written)"
-		if apply {
-			mode = "applied"
-		}
-		fmt.Printf("legacy provider payment attempts: %s\n", mode)
-		fmt.Printf("  attempts:              %d\n", result.AttemptCount)
-		fmt.Printf("  destination groups:    %d (looked up %d, deferred %d)\n", result.GroupCount, result.LookedUpGroupCount, result.DeferredGroupCount)
-		fmt.Printf("  found (record bound):  %d\n", result.FoundCount)
-		fmt.Printf("  absent (key released): %d\n", result.AbsentCount)
-		fmt.Printf("  held, ambiguous:       %d\n", result.AmbiguousCount)
-		fmt.Printf("  held, lookup error:    %d\n", result.LookupErrorCount)
-		fmt.Printf("  held, ineligible:      %d\n", result.IneligibleCount)
-		fmt.Printf("  held, changed:         %d\n", result.RefusedCount)
-	}
-	if err != nil {
-		fmt.Printf("legacy provider payment reconciliation err = %s\n", err)
-		return 1
-	}
-	return 0
-}
-
-// correctLegacyPayoutAttempts replaces each inflated legacy keyed provider
-// payment that Circle shows was never sent with a corrected payment, and
-// records canceled payments that Circle completed
-// (controller/account_payment_legacy_correction.go). Without --apply it is a
-// dry run: the process is read only, so PostgreSQL refuses every write, and it
-// reads Circle. The output carries counts and totals only.
-func correctLegacyPayoutAttempts(opts docopt.Opts) int {
-	apply, _ := opts.Bool("--apply")
-	if !apply {
-		server.RequirePgReadOnly()
-	}
-	settings := controller.DefaultLegacyProviderPaymentCorrectionSettings()
-	settings.DryRun = !apply
-	moveAllSweeps, _ := opts.Bool("--move_all_sweeps")
-	settings.AnchorSweeps = !moveAllSweeps
-	settings.CountSweeps, _ = opts.Bool("--count_sweeps")
-	for _, option := range []struct {
-		name     string
-		value    *int
-		positive bool
-	}{
-		{name: "--group_limit", value: &settings.GroupLimit},
-		{name: "--sweep_batch_size", value: &settings.SweepBatchSize, positive: true},
-		{name: "--sweep_batch_limit", value: &settings.SweepBatchLimit},
-	} {
-		valueStr, _ := opts.String(option.name)
-		if valueStr == "" {
-			continue
-		}
-		value, err := strconv.Atoi(valueStr)
-		if err != nil || value < 0 || (option.positive && value == 0) {
-			fmt.Printf("invalid %s %q\n", option.name, valueStr)
-			return 2
-		}
-		*option.value = value
-	}
-
-	ctx := context.Background()
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-	defer clientSession.Cancel()
-	mode := "dry run (nothing written)"
-	if apply {
-		mode = "applied"
-	}
-	usd := func(nanoCents model.NanoCents) string { return fmt.Sprintf("$%.2f", model.NanoCentsToUsd(nanoCents)) }
-
-	completion, completionErr := controller.CompletePaidCanceledProviderPayments(clientSession, &controller.PaidCanceledProviderPaymentSettings{
-		DryRun:         !apply,
-		LookupInterval: settings.LookupInterval,
-	})
-	if completion != nil {
-		fmt.Printf("canceled payments Circle completed: %s\n", mode)
-		fmt.Printf("  candidates (canceled, record, no hash): %d\n", completion.CandidateCount)
-		fmt.Printf("  complete with exact amount:            %d (%s)\n", completion.CompleteCount, usd(completion.CompletePayout))
-		fmt.Printf("  not complete:                          %d\n", completion.NotCompleteCount)
-		fmt.Printf("  mismatched record or amount:           %d\n", completion.MismatchCount)
-		fmt.Printf("  lookup error:                          %d\n", completion.LookupErrorCount)
-		fmt.Printf("  recorded completed:                    %d (refused %d)\n", completion.RecordedCount, completion.RefusedCount)
-	}
-
-	result, err := controller.CorrectLegacyProviderPaymentAttempts(clientSession, settings)
-	if result != nil {
-		fmt.Printf("legacy provider payment corrections: %s\n", mode)
-		fmt.Printf("  attempts:                 %d\n", result.AttemptCount)
-		fmt.Printf("  destination groups:       %d (looked up %d, deferred %d)\n", result.GroupCount, result.LookedUpGroupCount, result.DeferredGroupCount)
-		fmt.Printf("  found, left to reconcile: %d\n", result.FoundCount)
-		fmt.Printf("  held, ambiguous:          %d\n", result.AmbiguousCount)
-		fmt.Printf("  held, lookup error:       %d\n", result.LookupErrorCount)
-		fmt.Printf("  held, ineligible:         %d\n", result.IneligibleCount)
-		fmt.Printf("  absent:                   %d\n", result.AbsentCount)
-		fmt.Printf("    no subsidy epoch:       %d\n", result.MissingWindowCount)
-		fmt.Printf("    unchanged:              %d (%s, left to reconcile)\n", result.UnchangedCount, usd(result.UnchangedPayout))
-		fmt.Printf("    corrected:              %d (%s -> %s)\n", result.CorrectionCount, usd(result.OriginalPayout), usd(result.CorrectedPayout))
-		fmt.Printf("      subsidy reduction:    %s\n", usd(result.SubsidyReduction))
-		fmt.Printf("      reliability reduction: %s\n", usd(result.ReliabilityReduction))
-		fmt.Printf("      at or below the fee:  %d (%s, held)\n", result.DustCount, usd(result.DustPayout))
-		if settings.CountSweeps {
-			fmt.Printf("      sweeps they own:      %d\n", result.SweepCount)
-		}
-		if settings.AnchorSweeps && !apply {
-			fmt.Printf("      anchor sweeps:        %d (no admissible sweep, held: %d)\n", result.AnchorCount, result.AnchorMissingCount)
-		}
-		if apply {
-			fmt.Printf("  replaced:                 %d (refused %d)\n", result.ReplacedCount, result.RefusedCount)
-			if settings.AnchorSweeps {
-				fmt.Printf("  anchor sweeps moved:      %d (no admissible sweep, held: %d)\n", result.AnchorCount, result.AnchorMissingCount)
-			} else {
-				fmt.Printf("  sweeps moved:             %d (still moving %d)\n", result.MovedSweepCount, result.MovingCount)
-			}
-			fmt.Printf("  released:                 %d (held at or below the fee %d)\n", result.ReleasedCount, result.DustHeldCount)
-			fmt.Printf("  scheduled:                %d\n", result.ScheduledCount)
-		}
-	}
-	exitCode := 0
-	if completionErr != nil {
-		fmt.Printf("canceled payment completion err = %s\n", completionErr)
-		exitCode = 1
-	}
-	if err != nil {
-		fmt.Printf("legacy provider payment correction err = %s\n", err)
-		exitCode = 1
-	}
-	return exitCode
-}
-
-func listPendingPayouts(opts docopt.Opts) {
-	ctx := context.Background()
-
-	planIdStr, _ := opts.String("--plan_id")
-
-	var payouts []*model.AccountPayment
-
-	if planIdStr != "" {
-		planId, err := server.ParseId(planIdStr)
-		if err != nil {
-			panic(err)
-		}
-		payouts = model.GetPendingPaymentsInPlan(ctx, planId)
-	} else {
-		payouts = model.GetPendingPayments(ctx)
-	}
-
-	if len(payouts) == 0 {
-		fmt.Println("No pending payouts")
-		return
-	}
-	fmt.Printf("%-40s %-40s %-16s\n", "Payment ID", "Wallet ID", "Payout Amount")
-	fmt.Println(strings.Repeat("-", 98))
-
-	for _, payout := range payouts {
-		payoutUsd := fmt.Sprintf("%.4f", model.NanoCentsToUsd(payout.Payout))
-		fmt.Printf("%-40s %-40s %-16s\n", payout.PaymentId, payout.WalletId, payoutUsd)
-	}
-
-}
-
-func payoutPending() {
-	ctx := context.Background()
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-	controller.SchedulePendingPayments(clientSession)
-}
-
-func payoutByPaymentId(opts docopt.Opts) {
-	accountPaymentIdStr, err := opts.String("--account_payment_id")
-	if err != nil {
-		panic(err)
-	}
-
-	ctx := context.Background()
-
-	accountPaymentId, err := server.ParseId(accountPaymentIdStr)
-	if err != nil {
-		panic(err)
-	}
-
-	accountPayment, err := model.GetPayment(ctx, accountPaymentId)
-	if err != nil {
-		panic(err)
-	}
-
-	if accountPayment.Completed {
-		fmt.Println("Payment already completed at ", accountPayment.CompleteTime.String())
-		return
-	}
-
-	if accountPayment.Canceled {
-		fmt.Println("Payment canceled at ", accountPayment.CancelTime.String())
-		return
-	}
-
-	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
-
-	res, err := controller.AdvancePayment(&controller.AdvancePaymentArgs{
-		PaymentId: accountPayment.PaymentId,
-	}, clientSession)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Payout to %s processing complete: \n", accountPaymentIdStr)
-	fmt.Println("Complete Status: ", res.Complete)
-}
-
-func payoutPlanApplyBonus(opts docopt.Opts) error {
-	ctx := context.Background()
-
-	planIdStr, err := opts.String("--plan_id")
-	if err != nil {
-		return err
-	}
-
-	amountUsd, err := opts.Float64("--amount_usd")
-	if err != nil {
-		return err
-	}
-	if math.IsNaN(amountUsd) || math.IsInf(amountUsd, 0) || amountUsd <= 0 || amountUsd >= float64(math.MaxInt64)/1e9 {
-		return errors.New("bonus amount must be positive and within NanoCents range")
-	}
-
-	amountNanoCents := model.UsdToNanoCents(amountUsd)
-
-	planId, err := server.ParseId(planIdStr)
-	if err != nil {
-		return err
-	}
-	operationText, err := opts.String("--adjustment_id")
-	if err != nil {
-		return err
-	}
-	operationId, err := server.ParseId(operationText)
-	if err != nil {
-		return err
-	}
-	reason, err := opts.String("--reason")
-	if err != nil {
-		return err
-	}
-	return model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents, operationId, reason)
-}
-
 // paymentsStripeDunning lists every subscription Stripe is retrying (past_due,
 // unpaid) with what the failed-payment follow-up owes its latest invoice now
 // (controller/subscription_stripe_dunning.go): the network, whether the account
@@ -2019,8 +1805,9 @@ func payoutPlanApplyBonus(opts docopt.Opts) error {
 // only reads Stripe and the database. --send owes those notices, through the
 // same processing as the invoice.payment_failed webhook, so an invoice the
 // webhook already noticed gets nothing more; the account message delivery task
-// sends them within a minute. Exits non-zero when a subscription could not be
-// read.
+// sends them within a minute. The taskworker runs the same send every hour
+// (controller.SweepStripeDunning), so --send owes at once what the next sweep
+// would. Exits non-zero when a subscription could not be read.
 func paymentsStripeDunning(opts docopt.Opts, out io.Writer) int {
 	ctx := context.Background()
 	send, _ := opts.Bool("--send")
@@ -2057,8 +1844,13 @@ func paymentsStripeDunning(opts docopt.Opts, out io.Writer) int {
 		if strings.HasPrefix(row.Skip, "error: ") {
 			failed += 1
 		}
+		note := row.Skip
+		if row.PaymentActionRequired {
+			// the notice asks the customer to confirm the payment
+			note = strings.TrimSuffix("awaits 3D Secure confirmation; "+note, "; ")
+		}
 		fmt.Fprintf(out, "%-30s %-9s %-38s %-5s %-29s %10s %8d %-17s %-6s %s\n",
-			row.SubscriptionId, row.SubscriptionStatus, networkId, email, row.InvoiceId, row.Amount(), row.AttemptCount, nextAttempt, notice, row.Skip)
+			row.SubscriptionId, row.SubscriptionStatus, networkId, email, row.InvoiceId, row.Amount(), row.AttemptCount, nextAttempt, notice, note)
 	}
 	fmt.Fprintf(out, "%d subscriptions, %d could not be read\n", len(rows), failed)
 	if 0 < failed {
@@ -2093,11 +1885,14 @@ func paymentsReconcile(opts docopt.Opts) {
 		model.SubscriptionMarketX402,
 		model.SubscriptionMarketMonero,
 		model.SubscriptionMarketZcash,
+		model.SubscriptionMarketBittensor,
+		model.SubscriptionMarketBitcoin,
+		model.SubscriptionMarketEthereum,
 	}
 	stores := allStores
 	if store, _ := opts.String("--store"); store != "" {
 		if !slices.Contains(allStores, store) {
-			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, x402, monero, or zcash)\n", store)
+			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, x402, monero, zcash, bittensor, bitcoin, or ethereum)\n", store)
 			os.Exit(1)
 		}
 		options.Stores = []string{store}
@@ -2187,84 +1982,6 @@ func paymentsReconcile(opts docopt.Opts) {
 	if 0 < result.Errors {
 		os.Exit(1)
 	}
-}
-
-func adminWalletEstimateFee(opts docopt.Opts) {
-	ctx := context.Background()
-
-	amountUsd, err := opts.Float64("--amount_usd")
-	if err != nil {
-		panic(err)
-	}
-
-	blockchain, err := opts.String("--blockchain")
-	if err != nil {
-		panic(err)
-	}
-
-	destinationAddress, err := opts.String("--destination_address")
-	if err != nil {
-		panic(err)
-	}
-
-	client := controller.NewCircleClient()
-
-	fees, err := client.EstimateTransferFee(ctx, amountUsd, destinationAddress, blockchain)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("Medium BaseFee: ", fees.Medium.BaseFee)
-	fmt.Println("Medium GasLimit: ", fees.Medium.GasLimit)
-	fmt.Println("Medium GasPrice: ", fees.Medium.GasPrice)
-	fmt.Println("Medium MaxFee: ", fees.Medium.MaxFee)
-	fmt.Println("Medium PriorityFee: ", fees.Medium.PriorityFee)
-
-	fee, err := controller.CalculateFee(*fees.Medium, blockchain)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Total Fee: %f\n", *fee)
-
-	usdFee, err := controller.ConvertFeeToUSDC(ctx, blockchain, *fee)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Total Fee in USD: %f\n", usdFee)
-}
-
-func adminWalletTransfer(opts docopt.Opts) {
-	ctx := context.Background()
-	server.Raise(controller.RequireUsdcPaymentsOn())
-
-	amountUsd, err := opts.Float64("--amount_usd")
-	if err != nil {
-		panic(err)
-	}
-
-	destinationAddress, err := opts.String("--destination_address")
-	if err != nil {
-		panic(err)
-	}
-
-	blockchain, err := opts.String("--blockchain")
-	if err != nil {
-		panic(err)
-	}
-
-	client := controller.NewCircleClient()
-
-	// a one-off manual transfer gets a fresh idempotency key
-	res, err := client.CreateTransferTransaction(ctx, server.NewId(), amountUsd, destinationAddress, blockchain)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("Transaction Successful")
-	fmt.Println("Transaction ID: ", res.Id)
-	fmt.Println("Transaction State: ", res.State)
 }
 
 func closeExpiredContracts(opts docopt.Opts) {
@@ -2512,29 +2229,6 @@ func authLogin(opts docopt.Opts) {
 
 }
 
-func accountPointsPopulate(opts docopt.Opts) {
-	ctx := context.Background()
-
-	// Payment Plans since 5/1
-	// [x] 0197760f-b8c5-b2f3-b932-47689f9bb6eb
-	// [x] 019747af-e95b-73b8-61bd-217edd39ff34
-	// [x] 019728d3-d5a2-25eb-40f4-e50b326637cf
-	// [x] 0196f54a-2c73-3645-8b91-b25efe9c0792
-	// [x] 0196d13d-a58c-dd9f-611b-ea4384015ddf
-	// [x] 0196a80a-c8cf-74c7-1e20-d7c72958de80
-	// [x] 01968d61-7a3c-b3a9-41c3-810bce4be30f
-	//
-	planIdStr, _ := opts.String("--plan_id")
-	planId := server.RequireParseId(planIdStr)
-	model.PopulatePlanAccountPoints(ctx, planId)
-}
-
-// remove this after we check next payout correctly populates tx hashes
-func populateTxHashes() {
-	ctx := context.Background()
-	controller.PopulateTxHashes(ctx)
-}
-
 // func fixClientConnections(opts docopt.Opts) {
 // 	ctx := context.Background()
 
@@ -2553,12 +2247,21 @@ func migrateUserAuth(opts docopt.Opts) {
 	fmt.Println("User auth migration completed successfully.")
 }
 
+// Refreshes the country reliability multipliers now, as their weekly task does
+// (model.RefreshCountryReliabilityMultipliers), and prints each change.
 func reliabilitySetMultipliers(opts docopt.Opts) {
 	ctx := context.Background()
 
 	countryReliabilityMultipliers1 := model.GetAllClientLocationReliabilityMultipliers(ctx)
 
-	model.UpdateClientLocationReliabilityMultipliersWithDefaults(ctx)
+	refreshed, err := model.RefreshCountryReliabilityMultipliers(ctx, server.NowUtc(), model.DefaultCountryReliabilityMultiplierSettings())
+	if err != nil {
+		panic(err)
+	}
+	if !refreshed {
+		fmt.Println("No usable reliability block in the window; the multipliers are unchanged.")
+		return
+	}
 
 	countryReliabilityMultipliers2 := model.GetAllClientLocationReliabilityMultipliers(ctx)
 
@@ -2625,7 +2328,8 @@ func upgradePlan(opts docopt.Opts) {
 
 	subscriptionYearDuration := 365 * 24 * time.Hour
 
-	endTime := startTime.Add(subscriptionYearDuration + subscriptionGracePeriod)
+	paidEndTime := startTime.Add(subscriptionYearDuration)
+	endTime := paidEndTime.Add(subscriptionGracePeriod)
 
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,
@@ -2635,10 +2339,13 @@ func upgradePlan(opts docopt.Opts) {
 		NetRevenue:         0,
 		SubscriptionMarket: model.SubscriptionMarketManual,
 		// TransactionId:      paymentSearchResult.PaymentReference,
+		// the year is the period its Pro grant cycles are cut from
+		PaidEndTime: &paidEndTime,
 	}
 
 	model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
 
+	// the first cycle's Pro grant; the sweep grants the year's later cycles
 	controller.AddRefreshTransferBalance(ctx, networkId)
 }
 
@@ -2775,7 +2482,7 @@ func providerInspect(opts docopt.Opts) {
 		fmt.Printf("  latest health run none\n")
 	}
 	fmt.Print(providerInspectIndexLines(inspection))
-	fmt.Printf("  url successes %d, errors %d in the evidence window; no success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
+	fmt.Printf("  url successes %d, errors %d in the evidence window (general catalog, which the online rule reads: %d, %d); no general success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, inspection.OnlineUrlSuccessCount, inspection.OnlineUrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
 	// the decision follows the rule as the score export published it; this
 	// host's provider.yml is shown beside it
 	countryGuard := "no trusted published guard, so the rule applies nowhere"
@@ -2835,13 +2542,14 @@ func refreshTransferBalances(opts docopt.Opts) {
 	ctx := context.Background()
 	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 
-	// run all three grants (free daily, pro monthly, referral period)
+	// run all three grants (free daily, pro per subscription cycle, referral
+	// period)
 	controller.RefreshFreeTransferBalances(
 		&controller.RefreshFreeTransferBalancesArgs{},
 		clientSession,
 	)
-	controller.RefreshProTransferBalances(
-		&controller.RefreshProTransferBalancesArgs{},
+	controller.RefreshProCycleTransferBalances(
+		&controller.RefreshProCycleTransferBalancesArgs{},
 		clientSession,
 	)
 	controller.RefreshReferralTransferBalances(
@@ -2916,7 +2624,8 @@ func modelMigrateContractPartition(opts docopt.Opts) {
 // Partitions provider_work_session_event by observed_at week
 // (PARTITION-MAINTENANCE-PLAN.md C4; server.MigrateProviderWorkSessionEventsToPartitions):
 // prepare (with --cutover-week), then --finalize before that week; --rollback
-// and --abort undo. Each step can be rehearsed with --dry-run.
+// and --abort undo; --drop-legacy drops the legacy partition early once the
+// drop guard admits it. Each step can be rehearsed with --dry-run.
 func modelMigrateProviderWorkSessionPartition(opts docopt.Opts) {
 	options, err := providerWorkSessionPartitionMigrateOptions(opts)
 	if err != nil {
@@ -2941,6 +2650,7 @@ func providerWorkSessionPartitionMigrateOptions(opts docopt.Opts) (options serve
 	options.Finalize, _ = opts.Bool("--finalize")
 	options.Rollback, _ = opts.Bool("--rollback")
 	options.Abort, _ = opts.Bool("--abort")
+	options.DropLegacy, _ = opts.Bool("--drop-legacy")
 	return
 }
 
@@ -3229,11 +2939,31 @@ func stDeposit(opts docopt.Opts) {
 	}
 	epoch := state.PendingEpoch
 
-	outcome, err := controller.StDepositForEpoch(ctx, epoch, overrideRao)
+	// A size named by hand spends no USDC unless --convert says it may.
+	deposit := controller.StDepositForEpoch
+	if convert, _ := opts.Bool("--convert"); convert {
+		deposit = controller.StDepositForEpochConverting
+	}
+	outcome, err := deposit(ctx, epoch, overrideRao)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Printf("deposit epoch %d: %s\n", epoch, outcome)
+}
+
+// stDemandStatus prints the demand deposit wallets and what is under way, the price
+// in force for this epoch, its signer, the next scheduled entry and the last usage
+// statement. It signs and fetches nothing.
+func stDemandStatus() {
+	status, err := controller.StDemandStatus(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	encoded, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(encoded))
 }
 
 func stCommit(opts docopt.Opts) {
@@ -3285,6 +3015,106 @@ func stFinalize(opts docopt.Opts) {
 		panic(err)
 	}
 	fmt.Printf("finalize epoch %d: %s\n", epoch, outcome)
+}
+
+// ----- re-engagement (mmm/reengagement/PLAN.md) -----
+
+func printJson(v any) {
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%s\n", out)
+}
+
+// reengagementStatus prints a network's re-engagement row, mail state, sends
+// and the facts a step decision would see now.
+func reengagementStatus(opts docopt.Opts) {
+	networkIdStr, _ := opts.String("--network_id")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	printJson(controller.ReengagementNetworkStatus(context.Background(), networkId))
+}
+
+// reengagementPreview renders the decision a step would make now; nothing is sent.
+func reengagementPreview(opts docopt.Opts) {
+	networkIdStr, _ := opts.String("--network_id")
+	step, _ := opts.String("--step")
+	networkId, err := server.ParseId(networkIdStr)
+	if err != nil {
+		panic(err)
+	}
+	preview, err := controller.ReengagementNetworkPreview(context.Background(), networkId, step)
+	if err != nil {
+		panic(err)
+	}
+	printJson(preview)
+}
+
+// reengagementScan runs the day's scan now. --dry-run counts the candidates
+// per stream and opens nothing (a scan also opens nothing while the program is
+// disabled).
+func reengagementScan(opts docopt.Opts) {
+	dryRun, _ := opts.Bool("--dry-run")
+	ctx := context.Background()
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	result, err := controller.ReengagementScan(&controller.ReengagementScanArgs{DryRun: dryRun}, clientSession)
+	if err != nil {
+		panic(err)
+	}
+	printJson(result)
+}
+
+// reengagementRollup recomputes reengagement_results_daily for the cohort
+// days [--from, --to] (default: the configured window ending yesterday),
+// exactly as the nightly task does. The first backfill after deploy:
+//
+//	bringyourctl reengagement rollup --from=<the first send's day> --to=<yesterday>
+func reengagementRollup(opts docopt.Opts) {
+	parse := func(flag string) time.Time {
+		value, _ := opts.String(flag)
+		if value == "" {
+			return time.Time{}
+		}
+		t, err := time.Parse("2006-01-02", value)
+		if err != nil {
+			panic(fmt.Errorf("%s must be YYYY-MM-DD: %w", flag, err))
+		}
+		return t.UTC()
+	}
+	result, err := controller.RunReengagementResultsRollup(context.Background(), parse("--from"), parse("--to"))
+	if err != nil {
+		panic(err)
+	}
+	printJson(result)
+}
+
+// reengagementSendTest sends ONE template to an explicit address with sample
+// data (behind reengagement.enabled).
+func reengagementSendTest(opts docopt.Opts) {
+	email, _ := opts.String("--email")
+	template, _ := opts.String("--template")
+	variant, _ := opts.String("--variant")
+	locale, _ := opts.String("--locale")
+	messageId, err := controller.ReengagementSendTest(context.Background(), email, template, variant, locale)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reengagement send-test: %s\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("sent %s/%s/%s: message %s\n", template, variant, locale, messageId)
+}
+
+// reengagementMirrorSuppressions queues the Brevo mirror of every marketing
+// suppression and of every network whose sign-up country gets no marketing
+// (the product-updates sync of each one's admin): run after a release that
+// changes the mirror, and after a country joins the mail policy's
+// no_marketing_countries. Safe to repeat.
+func reengagementMirrorSuppressions(opts docopt.Opts) {
+	suppressed, noMarketingCountry := controller.MirrorNetworkMarketingSuppressions(context.Background())
+	fmt.Printf("queued the product-updates sync for %d suppressed networks and %d networks of no-marketing countries\n", suppressed, noMarketingCountry)
 }
 
 // ----- onboarding campaign (mmm/onboarding/PLAN.md) -----
@@ -3399,17 +3229,25 @@ func onboardingSendTest(opts docopt.Opts) {
 	fmt.Printf("Sent %s/%s/%s to %s (message id %s)\n", template, variant, locale, email, messageId)
 }
 
-// onboardingWebhookEnsure registers the Brevo transactional webhook once.
+// onboardingWebhookEnsure registers the Brevo transactional webhook with the
+// credential POST /updates/brevo accepts, or fixes the registered one in place.
+// --credential=url (the default) puts the first brevo.webhook_bearers user,
+// with an empty password, in the webhook url (Brevo's username and password
+// authentication); --credential=header sends the same Basic value as a custom
+// Authorization header instead. An `auth` bearer the webhook already has is
+// left in place: when its token is a brevo.webhook_bearers user the api
+// accepts it too. It prints what it did, the credential masked.
 // A disabled campaign is a refusal, not a fault: the gate exists so nothing
 // touches the live Brevo account until onboarding.enabled is set, so say what
 // to flip and exit non-zero without a stack trace.
-func onboardingWebhookEnsure() {
+func onboardingWebhookEnsure(opts docopt.Opts) {
 	if !model.Onboarding().Enabled {
 		fmt.Fprintln(os.Stderr, "onboarding campaign is disabled: set onboarding.enabled: true in config/main/onboarding.yml (and deploy the config) before registering the Brevo webhook")
 		os.Exit(1)
 	}
+	credential, _ := opts.String("--credential")
 	ctx := context.Background()
-	outcome, err := controller.EnsureOnboardingBrevoWebhook(ctx)
+	outcome, err := controller.EnsureOnboardingBrevoWebhook(ctx, credential)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "onboarding webhook-ensure: %s\n", err)
 		os.Exit(1)

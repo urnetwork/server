@@ -31,8 +31,9 @@ const (
 	pointsLeaderboardMaxLimit     = 200
 
 	// pointsLeaderboardRebuildInterval is the fallback cadence. Rebuilds are
-	// also triggered when a payout plan commits and when a new operator week
-	// closes. ST finalization is not a points-leaderboard prerequisite.
+	// also triggered when an operator block award commits and when a new
+	// operator week closes. ST finalization is not a points-leaderboard
+	// prerequisite.
 	pointsLeaderboardRebuildInterval = 1 * time.Hour
 
 	pointsLeaderboardEmojiTagMessage = "Use 1 to 6 emoji."
@@ -493,6 +494,9 @@ type RebuildPointsLeaderboardResult struct {
 	UnlinkedPoints          int64 `json:"unlinked_points"`
 	ApproximateNetworks     int64 `json:"approximate_networks"`
 	BackfillPendingPayments int64 `json:"backfill_pending_payments"`
+	// the sweep statements the operator block traffic rollup read
+	// (model.AdvanceOperatorBlockTrafficRollup)
+	TrafficChunks int `json:"traffic_chunks"`
 }
 
 const (
@@ -520,7 +524,7 @@ func scheduleRebuildPointsLeaderboardAfter(clientSession *session.ClientSession,
 }
 
 // TriggerRebuildPointsLeaderboardInTx asks for a rebuild now: after an epoch
-// finalizes or a payout plan commits. It uses its own run-once key so a
+// finalizes or an operator block award commits. It uses its own run-once key so a
 // trigger that lands while a rebuild is running still queues one more run
 // instead of merging into the row being executed and getting lost.
 func TriggerRebuildPointsLeaderboardInTx(clientSession *session.ClientSession, tx server.PgTx) {
@@ -546,12 +550,19 @@ func TriggerRebuildPointsLeaderboard(ctx context.Context) {
 }
 
 // RebuildPointsLeaderboard writes a new snapshot from current points and
-// completed seven-day operator payout blocks.
+// completed seven-day operator payout blocks. Each run first advances the
+// bytes served of the operator blocks without an award, which GET
+// /account/epochs reports (model.AdvanceOperatorBlockTrafficRollup), within
+// its own bounds; a failure there is logged and never fails the rebuild.
 func RebuildPointsLeaderboard(
 	args *RebuildPointsLeaderboardArgs,
 	clientSession *session.ClientSession,
 ) (*RebuildPointsLeaderboardResult, error) {
 	ctx := clientSession.Ctx
+	trafficChunks, err := model.AdvanceOperatorBlockTrafficRollup(ctx, model.DefaultOperatorBlockTrafficRollupSettings(), server.NowUtc())
+	if err != nil {
+		glog.Warningf("[points]operator block traffic rollup failed after %d statements: %s\n", trafficChunks, err)
+	}
 	rollupBatches, err := model.AdvancePointsBlockRollup(ctx, model.DefaultPointsBlockRollupSettings())
 	if err != nil {
 		return nil, err
@@ -591,6 +602,7 @@ func RebuildPointsLeaderboard(
 		UnlinkedPoints:          approximation.UnlinkedPoints,
 		ApproximateNetworks:     approximation.ApproximateNetworks,
 		BackfillPendingPayments: approximation.BackfillPendingPayments,
+		TrafficChunks:           trafficChunks,
 	}, nil
 }
 

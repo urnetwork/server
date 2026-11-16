@@ -1,14 +1,21 @@
 package controller
 
 // USD rates and quote math for the crypto payment rail
-// (mmm/ZCASH-CONTRACT.md §3.3, mmm/ZCASH.md §4.5, decision 11).
+// (mmm/ZCASH-CONTRACT.md §3.3, mmm/ZCASH.md §4.5, decision 11, mmm/BTCPAY.md
+// §17.4).
 //
 // A coin is quoted only from at least two fresh answers that agree: each
-// configured source (Kraken, CoinGecko, and Coinbase for ZEC) is asked at most
-// once a minute per process, an answer older than two minutes is stale, and
-// the quote is the median of the fresh answers when their spread is within 3%.
+// configured source (Kraken and Coinbase for every coin they list; Monero,
+// which Coinbase does not list, Kraken and CoinGecko) is asked at most once a
+// minute per process, an answer older than two minutes is stale, and the
+// quote is the median of the fresh answers when their spread is within 3%.
 // Anything less refuses the quote (asset_unavailable): a wrong rate is a
 // mispriced sale, and a refused quote is only "temporarily unavailable".
+//
+// CoinGecko is dropped for every coin but Monero (its keyless terms exclude
+// production use). Monero keeps it until the owner names a second source:
+// CoinPaprika's keyless tier, the planned one, is licensed for personal use
+// only (cryptoRateSourceCoingecko).
 //
 // The requests carry no user data: they are the same public ticker calls
 // whoever is buying, made from the server.
@@ -60,6 +67,9 @@ const (
 	cryptoQuoteRefusedTooManyCodes = "too_many_open_codes"
 	// the coin does not deliver balance codes (code_delivery: false)
 	cryptoQuoteRefusedNoCodes = "code_delivery_off"
+	// the coin is switched on but the vault does not name everything selling
+	// it needs (its chain source, or for a Coinbase coin the Coinbase key)
+	cryptoQuoteRefusedNotConfigured = "not_configured"
 )
 
 // cryptoRateAnswer is one source's rate for one coin, kept with the quote.
@@ -229,6 +239,42 @@ func cryptoQuoteRate(ctx context.Context, config *CryptoPayConfig, asset string)
 	return cryptoDecideRate(answers, cryptoRateNow(), config.Quote.RateStaleAfter, config.Quote.RateMaxSpreadPercent)
 }
 
+// The coin list's rate refusal: the coin's sources were asked recently and
+// left fewer than two fresh answers within the spread.
+const cryptoQuoteRefusedRates = "rates_unavailable"
+
+// cryptoCachedRateAvailable is the rate part of the coin list's availability,
+// from this process's cached answers alone: it never asks a source, so the
+// list and the balance never wait on one. A coin whose sources were asked
+// within rate_stale_after and left fewer than two fresh answers that agree is
+// unavailable (rates_unavailable). A coin no quote asked about lately is not
+// judged here (available): the intent path asks its sources and refuses with
+// the same rule.
+func cryptoCachedRateAvailable(config *CryptoPayConfig, asset string, now time.Time) (bool, string) {
+	assetConfig := config.Asset(asset)
+	if assetConfig == nil || len(assetConfig.RateSources) == 0 {
+		return false, cryptoQuoteRefusedNoSources
+	}
+	answers := []*cryptoRateAnswer{}
+	asked := false
+	for _, source := range assetConfig.RateSources {
+		entry := cryptoRates.entry(source, asset)
+		entry.stateLock.Lock()
+		if !entry.lastAttemptAt.IsZero() && now.Sub(entry.lastAttemptAt) <= config.Quote.RateStaleAfter {
+			asked = true
+		}
+		answers = append(answers, entry.answer)
+		entry.stateLock.Unlock()
+	}
+	if !asked {
+		return true, ""
+	}
+	if quote, _ := cryptoDecideRate(answers, now, config.Quote.RateStaleAfter, config.Quote.RateMaxSpreadPercent); quote == nil {
+		return false, cryptoQuoteRefusedRates
+	}
+	return true, ""
+}
+
 // cryptoDecideRate applies the fail-closed rule to the answers in hand: at
 // least two fresh answers whose spread (max over min) is within the limit,
 // quoted at their median. Pure, so the rule is tested without sources.
@@ -285,7 +331,18 @@ const cryptoQuoteDecimals = 6
 // coin's atomic unit. Exact rational arithmetic: the rounding is a function of
 // the inputs alone, never of float dust. ok = false for an unusable input.
 func cryptoQuoteAmountAtomic(priceUsd float64, rateUsd float64, bufferPercent float64, decimals int) (int64, bool) {
-	if !(0 < priceUsd) || !(0 < rateUsd) || bufferPercent < 0 || decimals < cryptoQuoteDecimals ||
+	return cryptoQuoteAmountAtomicAt(priceUsd, rateUsd, bufferPercent, decimals, cryptoQuoteDecimals)
+}
+
+// cryptoAssetQuoteAmountAtomic is cryptoQuoteAmountAtomic at the coin's own
+// decimals and quote decimals (Bitcoin to the satoshi, mmm/BTCPAY.md §17.7).
+func cryptoAssetQuoteAmountAtomic(asset string, priceUsd float64, rateUsd float64, bufferPercent float64) (int64, bool) {
+	return cryptoQuoteAmountAtomicAt(priceUsd, rateUsd, bufferPercent, cryptoAssetDecimals(asset), cryptoAssetQuoteDecimals(asset))
+}
+
+// cryptoQuoteAmountAtomicAt is the quote math rounded up to quoteDecimals.
+func cryptoQuoteAmountAtomicAt(priceUsd float64, rateUsd float64, bufferPercent float64, decimals int, quoteDecimals int) (int64, bool) {
+	if !(0 < priceUsd) || !(0 < rateUsd) || bufferPercent < 0 || quoteDecimals <= 0 || decimals < quoteDecimals ||
 		math.IsInf(priceUsd, 0) || math.IsInf(rateUsd, 0) || math.IsNaN(bufferPercent) || math.IsInf(bufferPercent, 0) {
 		return 0, false
 	}
@@ -299,10 +356,10 @@ func cryptoQuoteAmountAtomic(priceUsd float64, rateUsd float64, bufferPercent fl
 	coins := new(big.Rat).Quo(price, rate)
 	factor := new(big.Rat).Add(big.NewRat(1, 1), new(big.Rat).Quo(buffer, big.NewRat(100, 1)))
 	coins.Mul(coins, factor)
-	// ceil(coins * 10^6) in units of 10^-6 coin
-	units := new(big.Rat).Mul(coins, new(big.Rat).SetInt(pow10Int(cryptoQuoteDecimals)))
+	// ceil(coins * 10^q) in units of 10^-q coin
+	units := new(big.Rat).Mul(coins, new(big.Rat).SetInt(pow10Int(quoteDecimals)))
 	unitsCeil := ratCeil(units)
-	atomic := new(big.Int).Mul(unitsCeil, pow10Int(decimals-cryptoQuoteDecimals))
+	atomic := new(big.Int).Mul(unitsCeil, pow10Int(decimals-quoteDecimals))
 	if !atomic.IsInt64() || atomic.Sign() <= 0 {
 		return 0, false
 	}
@@ -394,17 +451,31 @@ func ratCeil(r *big.Rat) *big.Int {
 
 // ----- the sources -----
 
+// Kraken's USD pair per coin, by its alt name (mmm/BTCPAY.md §17.4).
+var cryptoKrakenPairs = map[string]string{
+	model.CryptoAssetXmr: "XMRUSD",
+	model.CryptoAssetZec: "ZECUSD",
+	model.CryptoAssetTao: "TAOUSD",
+	model.CryptoAssetBtc: "XBTUSD",
+	model.CryptoAssetEth: "ETHUSD",
+	model.CryptoAssetSol: "SOLUSD",
+}
+
+// Coinbase's currency code per coin. Coinbase lists no Monero.
+var cryptoCoinbaseRateCodes = map[string]string{
+	model.CryptoAssetZec: "ZEC",
+	model.CryptoAssetTao: "TAO",
+	model.CryptoAssetBtc: "BTC",
+	model.CryptoAssetEth: "ETH",
+	model.CryptoAssetSol: "SOL",
+}
+
 // Kraken's public ticker. The coin's pair is asked by its alt name; the one
-// result entry is keyed by Kraken's own name (XXMRZUSD), and c[0] is the last
-// trade's price.
+// result entry is keyed by Kraken's own name (XXMRZUSD, XXBTZUSD), and c[0] is
+// the last trade's price.
 func krakenFetchRate(ctx context.Context, asset string) (float64, *time.Time, error) {
-	var pair string
-	switch asset {
-	case model.CryptoAssetXmr:
-		pair = "XMRUSD"
-	case model.CryptoAssetZec:
-		pair = "ZECUSD"
-	default:
+	pair, ok := cryptoKrakenPairs[asset]
+	if !ok {
 		return 0, nil, fmt.Errorf("kraken has no pair for %s", asset)
 	}
 	type krakenTicker struct {
@@ -441,16 +512,12 @@ func krakenFetchRate(ctx context.Context, asset string) (float64, *time.Time, er
 	return 0, nil, errors.New("unreachable")
 }
 
-// CoinGecko's simple price. One request answers both coins, so it fills the
-// other coin's cache entry too.
+// CoinGecko's simple price, for Monero only (cryptoRateSourceCoingecko): its
+// keyless terms exclude production use, so no other coin asks it, and it
+// stays only until the owner names Monero's second source.
 func coingeckoFetchRate(ctx context.Context, asset string) (float64, *time.Time, error) {
-	ids := map[string]string{
-		model.CryptoAssetXmr: "monero",
-		model.CryptoAssetZec: "zcash",
-	}
-	id, ok := ids[asset]
-	if !ok {
-		return 0, nil, fmt.Errorf("coingecko has no id for %s", asset)
+	if asset != model.CryptoAssetXmr {
+		return 0, nil, fmt.Errorf("coingecko is not a rate source for %s", asset)
 	}
 	type coingeckoPrice struct {
 		Usd           float64 `json:"usd"`
@@ -458,51 +525,33 @@ func coingeckoFetchRate(ctx context.Context, asset string) (float64, *time.Time,
 	}
 	prices, err := server.HttpGetRequireStatusOk(
 		ctx,
-		fmt.Sprintf("%s/api/v3/simple/price?ids=monero,zcash&vs_currencies=usd&include_last_updated_at=true", cryptoCoingeckoBaseUrl),
+		fmt.Sprintf("%s/api/v3/simple/price?ids=monero&vs_currencies=usd&include_last_updated_at=true", cryptoCoingeckoBaseUrl),
 		cryptoRateHeaders,
 		server.ResponseJsonObject[map[string]*coingeckoPrice],
 	)
 	if err != nil {
 		return 0, nil, err
 	}
-	sourceTime := func(price *coingeckoPrice) *time.Time {
-		if price.LastUpdatedAt <= 0 {
-			return nil
-		}
-		t := time.Unix(price.LastUpdatedAt, 0).UTC()
-		return &t
-	}
-	// the other coin's answer is as good as this one's
-	for otherAsset, otherId := range ids {
-		if otherAsset == asset {
-			continue
-		}
-		if price := prices[otherId]; price != nil && 0 < price.Usd {
-			entry := cryptoRates.entry(cryptoRateSourceCoingecko, otherAsset)
-			entry.stateLock.Lock()
-			entry.answer = &cryptoRateAnswer{
-				Source:     cryptoRateSourceCoingecko,
-				RateUsd:    price.Usd,
-				FetchedAt:  cryptoRateNow(),
-				SourceTime: sourceTime(price),
-			}
-			entry.stateLock.Unlock()
-		}
-	}
-	price := prices[id]
+	price := prices["monero"]
 	if price == nil {
-		return 0, nil, fmt.Errorf("coingecko answered no price for %s", id)
+		return 0, nil, fmt.Errorf("coingecko answered no price for monero")
 	}
-	return price.Usd, sourceTime(price), nil
+	var sourceTime *time.Time
+	if 0 < price.LastUpdatedAt {
+		t := time.Unix(price.LastUpdatedAt, 0).UTC()
+		sourceTime = &t
+	}
+	return price.Usd, sourceTime, nil
 }
 
 // Coinbase's exchange rates (the existing client): data.rates.USD is the USD
 // price of one coin. Coinbase has no XMR.
 func coinbaseFetchRate(ctx context.Context, asset string) (float64, *time.Time, error) {
-	if asset != model.CryptoAssetZec {
+	code, ok := cryptoCoinbaseRateCodes[asset]
+	if !ok {
 		return 0, nil, fmt.Errorf("coinbase has no rate for %s", asset)
 	}
-	rates, err := NewCoinbaseClient().FetchExchangeRates(ctx, "ZEC")
+	rates, err := NewCoinbaseClient().FetchExchangeRates(ctx, code)
 	if err != nil {
 		return 0, nil, err
 	}

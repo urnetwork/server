@@ -175,11 +175,10 @@ func TestExtenderActivateSpendsItsBudgetsOnlyAtTheProbe(t *testing.T) {
 		fixture := newTestExtenderFixture(t)
 		installTestExtenderConfig(t, fixture.api)
 
-		settings := &ExtenderActivateSettings{
-			ClientRateLimit:  6,
-			AccountRateLimit: 2,
-			RateLimitWindow:  time.Hour,
-		}
+		settings := DefaultExtenderActivateSettings()
+		settings.ClientRateLimit = 6
+		settings.AccountRateLimit = 2
+		settings.RateLimitWindow = time.Hour
 		clientSession := newTestExtenderSession(t, ctx, fixture.clientAddress("127.0.0.1"))
 		clientId := *clientSession.ByJwt.ClientId
 		userId := clientSession.ByJwt.UserId

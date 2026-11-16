@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -196,6 +197,14 @@ func testMeasurementExtenderPublicKey(index int) []byte {
 	return []byte(fmt.Sprintf("extender-public-key-measure-%04d", index))
 }
 
+// The network of the test extender with this index: one per key, as an
+// extender's is, so an activation of the key again is its own network's.
+// model.ActivateNetworkExtender never moves a key to another network.
+func testMeasurementExtenderNetworkId(index int) server.Id {
+	digest := sha256.Sum256(testMeasurementExtenderPublicKey(index))
+	return server.Id(digest[:16])
+}
+
 // One open tier extender serving tcp on 443 at each address given.
 func createTestMeasurementExtender(t testing.TB, ctx context.Context, index int, ips ...string) server.Id {
 	t.Helper()
@@ -232,7 +241,7 @@ func createTestMeasurementExtenderWith(
 		ctx,
 		&model.NetworkExtender{
 			ExtenderId:  extenderId,
-			NetworkId:   server.NewId(),
+			NetworkId:   testMeasurementExtenderNetworkId(index),
 			ClientId:    server.NewId(),
 			PublicKey:   testMeasurementExtenderPublicKey(index),
 			CreateTime:  createTime,
@@ -261,7 +270,7 @@ func reactivateTestMeasurementExtender(t testing.TB, ctx context.Context, index 
 		return []byte("record"), nil
 	}
 	if model.ActivateNetworkExtender(ctx, &model.NetworkExtenderActivation{
-		NetworkId:   server.NewId(),
+		NetworkId:   testMeasurementExtenderNetworkId(index),
 		ClientId:    server.NewId(),
 		PublicKey:   testMeasurementExtenderPublicKey(index),
 		TcpPort:     controller.ExtenderMeasurementPort,

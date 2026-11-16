@@ -46,11 +46,11 @@ func withCalibrationScoringSlot(lockPath string, do func() (*calibrationAnalysis
 // provenance inferred from synthetic numerical fixtures.
 func executeCalibrationCommand(ctx context.Context, manifestPath string, manifestSha256 string, lockPath string,
 	settings calibrationAnalysisSettings, replaySettings calibrationReplaySettings, docker sourceBuildDocker) (*calibrationAnalysisReport, error) {
-	if runtime.Version() != "go1.27.3" {
+	if runtime.Version() != "go1.27.4" {
 		return &calibrationAnalysisReport{
 			Kind: "sim-latency-calibration-analysis", InputManifestSha256: manifestSha256,
 			Reasons: []string{"wrong_competition_toolchain"},
-		}, errors.New("competition calibration requires actual Go 1.27.3")
+		}, errors.New("competition calibration requires actual Go 1.27.4")
 	}
 	observations := []calibrationReplayObservation{}
 	replaySettings.Observe = func(observation calibrationReplayObservation) {

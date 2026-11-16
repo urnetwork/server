@@ -48,18 +48,30 @@ func contractExpirationDue(expirationTime *time.Time, created, lastReport, cutof
 // deadline after those waits, before publishing a new reverse reservation.
 // Missing deadlines use the same creation-based limit as cleanup. An early
 // close keeps the origin eligible within the caller's close linger.
-func validateCompanionContractExpirationInTx(ctx context.Context, tx server.PgTx, originContractId *server.Id) error {
+func validateCompanionContractExpirationInTx(ctx context.Context, tx server.PgTx, originContractId *server.Id, shardDeadline *time.Time) error {
 	if originContractId == nil {
 		return nil
 	}
 	var valid bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_contract
+	var observedAt time.Time
+	var queryErr error
+	if shardDeadline == nil {
+		queryErr = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_contract
 		WHERE contract_id=$1 AND COALESCE(expiration_time, create_time + interval '60 minutes') > clock_timestamp() AT TIME ZONE 'UTC')`,
-		*originContractId).Scan(&valid); err != nil {
-		return err
+			*originContractId).Scan(&valid)
+	} else {
+		queryErr = tx.QueryRow(ctx, `SELECT count(*)=1,clock_timestamp() AT TIME ZONE 'UTC' FROM transfer_contract
+		WHERE contract_id=$1 AND COALESCE(expiration_time, create_time + interval '60 minutes') > clock_timestamp() AT TIME ZONE 'UTC'`,
+			*originContractId).Scan(&valid, &observedAt)
+	}
+	if queryErr != nil {
+		return queryErr
 	}
 	if !valid {
 		return ErrMissingCompanionOrigin
+	}
+	if shardDeadline != nil && !observedAt.Before(*shardDeadline) {
+		return ErrProberShardRetired
 	}
 	return nil
 }

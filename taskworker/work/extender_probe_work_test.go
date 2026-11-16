@@ -117,9 +117,12 @@ type testExtenderProbeCall struct {
 }
 
 // Replaces the probe dial with a stub that answers as told and records what it
-// was asked to probe.
+// was asked to probe. The prober's own control target answers.
 func stubExtenderProbe(t testing.TB, answer func() error) func() []testExtenderProbeCall {
 	t.Helper()
+	stubTestChurnControl(t, func(ipVersion int) string {
+		return extenderProbeControlOk
+	})
 	// the task probes up to sixteen addresses at once, so the record of what
 	// was probed is shared state
 	stateLock := sync.Mutex{}
@@ -237,13 +240,80 @@ func TestExtenderProbeDeactivatesAndRevokesAfterSixFailures(t *testing.T) {
 		connect.AssertEqual(t, string(body.PublicKey), string(stored.Extender.PublicKey))
 		connect.AssertEqual(t, body.NetworkHost, testExtenderWorkNetworkHost)
 
-		// a deactivated address leaves the probe set: only a new activation
-		// brings it back
+		// a deactivated address leaves the active probe set. It is probed only
+		// for its return, and while it does not answer nothing changes
 		probedBefore := len(calls())
 		result := runTestExtenderProbe(t, ctx)
 		connect.AssertEqual(t, result.Probed, 0)
-		connect.AssertEqual(t, len(calls()), probedBefore)
+		connect.AssertEqual(t, result.RecoveryProbed, 1)
+		connect.AssertEqual(t, result.Restored, 0)
+		connect.AssertEqual(t, len(calls()), probedBefore+1)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 1)
+		stored = model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Addresses[0].Active, false)
+		connect.AssertEqual(t, stored.Extender.Active, false)
+	})
+}
+
+// The way back (extender_probe_recovery.go): an extender the probes revoked is
+// probed for its return, and the first probe it answers restores it, with a
+// record queued that verifies under the root key and is issued after its
+// revocation, so a directory holding the revocation takes it back (B5).
+func TestExtenderProbeRestoresARevokedExtenderThatAnswersAgain(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		rootPublicKey := installTestExtenderWorkConfig(t)
+		extenderId := createTestExtender(ctx, 11, 4)
+
+		answering := false
+		stubExtenderProbe(t, func() error {
+			if answering {
+				return nil
+			}
+			return fmt.Errorf("the extender did not answer")
+		})
+		for range ExtenderMaxConsecutiveProbeFailures {
+			runTestExtenderProbe(t, ctx)
+		}
+		stored := model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Extender.Active, false)
+		revocationTime := *stored.Extender.RevokeTime
+
+		answering = true
+		result := runTestExtenderProbe(t, ctx)
+		connect.AssertEqual(t, result.RecoveryProbed, 1)
+		connect.AssertEqual(t, result.Restored, 1)
+		connect.AssertEqual(t, result.Unrevoked, 1)
+
+		stored = model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Extender.Active, true)
+		connect.AssertEqual(t, stored.Extender.RevokeTime == nil, true)
+		connect.AssertEqual(t, stored.Addresses[0].Active, true)
+		connect.AssertEqual(t, stored.Addresses[0].ConsecutiveProbeFailures, 0)
+		connect.AssertEqual(t, stored.Addresses[0].LastProbeSuccessTime != nil, true)
+
+		publishes := model.Testing_GetNetworkExtenderPublishes(ctx)
+		connect.AssertEqual(t, len(publishes), 2)
+		connect.AssertEqual(t, publishes[0].Kind, model.NetworkExtenderPublishKindRevocation)
+		connect.AssertEqual(t, publishes[1].Kind, model.NetworkExtenderPublishKindRecord)
+		message := &protocol.ExtenderGossipMessage{}
+		if err := proto.Unmarshal(publishes[1].Message, message); err != nil {
+			t.Fatalf("the publish row is not a gossip message: %v", err)
+		}
+		body, err := connect.NewExtenderRootKeySet(rootPublicKey).VerifyRecord(message.GetRecord())
+		if err != nil {
+			t.Fatalf("the restored record does not verify under the root key: %v", err)
+		}
+		if body.IssueTimeMs <= uint64(revocationTime.UnixMilli()) {
+			t.Fatalf("the restored record (%d) is not issued after the revocation (%d)", body.IssueTimeMs, revocationTime.UnixMilli())
+		}
+		connect.AssertEqual(t, len(body.Addresses), 1)
+
+		// it is an active address like any other from then on
+		result = runTestExtenderProbe(t, ctx)
+		connect.AssertEqual(t, result.Probed, 1)
+		connect.AssertEqual(t, result.Succeeded, 1)
+		connect.AssertEqual(t, result.RecoveryProbed, 0)
 	})
 }
 
@@ -331,12 +401,19 @@ func TestExtenderProbeKeepsTheExtenderWhileAFamilyAnswers(t *testing.T) {
 		connect.AssertEqual(t, stored.Extender.Active, true)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 0)
 
-		// the next run probes the surviving family only
+		// the next run probes the surviving family as an active address, and
+		// the lost one only for its return, which it does not answer
 		before := len(calls())
-		runTestExtenderProbe(t, ctx)
+		result := runTestExtenderProbe(t, ctx)
+		connect.AssertEqual(t, result.Probed, 1)
+		connect.AssertEqual(t, result.Succeeded, 1)
+		connect.AssertEqual(t, result.RecoveryProbed, 1)
+		connect.AssertEqual(t, result.Restored, 0)
 		probed := calls()[before:]
-		connect.AssertEqual(t, len(probed), 1)
-		connect.AssertEqual(t, probed[0].ipVersion, 6)
+		connect.AssertEqual(t, len(probed), 2)
+		stored = model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Addresses[0].Active, false)
+		connect.AssertEqual(t, stored.Addresses[1].Active, true)
 	})
 }
 
@@ -390,6 +467,24 @@ func TestExtenderProbePostRearmsTheChain(t *testing.T) {
 		if runAt.Before(want.Add(-time.Second)) || want.Add(5*time.Second).Before(runAt) {
 			t.Fatalf("probe run_at = %s, want about %s", runAt, want)
 		}
+
+		// and a pass may outlast the task default, or an outage across the
+		// directory would be cut off every time
+		var runMaxTimeSeconds int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT run_max_time_seconds FROM pending_task WHERE run_once_key = $1`,
+				fmt.Sprintf("[%q]", "extender_probe"),
+			)
+			server.WithPgResult(result, err, func() {
+				if !result.Next() {
+					t.Fatal("no extender_probe task was scheduled")
+				}
+				server.Raise(result.Scan(&runMaxTimeSeconds))
+			})
+		})
+		connect.AssertEqual(t, runMaxTimeSeconds, int(ExtenderProbeMaxTime/time.Second))
 	})
 }
 
@@ -552,6 +647,55 @@ func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
 				maxInFlight,
 				ExtenderProbeConcurrency,
 			)
+		}
+	})
+}
+
+// A pass's context ends with its task: the task's max time, or a drain. The
+// probes in flight then find the writes of their results raising on the done
+// context, and a raise that reaches the top of a goroutine takes the process
+// and every task it is running with it, so it ends that address instead and the
+// pass returns. A failure that only says the task ended charges nothing.
+func TestExtenderProbeReturnsWhenItsContextEndsDuringAProbe(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderWorkConfig(t)
+		extenderIds := []server.Id{
+			createTestExtender(ctx, 7, 4),
+			createTestExtender(ctx, 8, 4, 6),
+		}
+
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		stubTestChurnControl(t, func(ipVersion int) string {
+			return extenderProbeControlOk
+		})
+		previous := probeExtenderAddress
+		probeExtenderAddress = func(
+			ctx context.Context,
+			target *model.NetworkExtenderProbeTarget,
+			serverName string,
+			destinationHost string,
+		) error {
+			clientSession.Cancel()
+			return fmt.Errorf("the probe ended with its task")
+		}
+		t.Cleanup(func() {
+			probeExtenderAddress = previous
+		})
+
+		result, err := ExtenderProbe(&ExtenderProbeArgs{}, clientSession)
+		if err != nil {
+			t.Fatalf("the probe task must not fail when its context ends: %v", err)
+		}
+		connect.AssertEqual(t, result.Probed, 3)
+		connect.AssertEqual(t, result.Failed, 0)
+
+		for _, extenderId := range extenderIds {
+			for _, address := range model.Testing_GetNetworkExtender(ctx, extenderId).Addresses {
+				connect.AssertEqual(t, address.Active, true)
+				connect.AssertEqual(t, address.ConsecutiveProbeFailures, 0)
+			}
 		}
 	})
 }

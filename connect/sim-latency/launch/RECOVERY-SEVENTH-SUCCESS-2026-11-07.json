@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "kind": "competition-controlled-recovery-terminal-observation/v1",
+  "observed_at": "2026-11-07T16:11:58.822282776Z",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "previous_record": "RECOVERY-SIXTH-SUCCESS-2026-11-07.json",
+  "grant_record": "OPERATOR-RECOVERY-GRANTED-2026-11-07.json",
+  "job_id": "01a1a481-0968-ff57-1ca8-1a48fc2a35ea",
+  "evaluation_cycle": 1,
+  "attempt_count": 3,
+  "state": "succeeded",
+  "cycle_started_at": "2026-11-07T14:48:36.260662Z",
+  "completed_at": "2026-11-07T16:11:39.200738Z",
+  "original_submitted_at": "2026-11-04T03:01:22.278573Z",
+  "candidate_runs_completed": 9,
+  "replicate_count": 9,
+  "worker_image_digest": "sha256:63b43292a6b0a77eb28055b7abe756608cc776c163bfa825c8dd09a6d7eb1bfe",
+  "owner_poll": {
+    "http_status": 200,
+    "state": "completed",
+    "evaluation_status": "completed",
+    "score_present": true,
+    "response_path": "/home/by/urnetwork/temp/competition-recovered-seventh-owner-20261107.mqJfFAeQ/response.private.json",
+    "response_sha256": "14810c50fff00b3ec6668437b3abf562696f498cf2053d160da66281f7183689"
+  },
+  "retention_receipt": {
+    "artifact_manifest_sha256": "cab83257baff98df6adb20cdf538799df9b4610abe8e6ccd822cddf37fe04207",
+    "object_count": 10,
+    "retain_until": "2028-01-01T00:00:00Z",
+    "compliance_object_lock": true,
+    "authenticated_after_upload": true,
+    "scope": "Terminal database archive receipt; no additional independent MinIO readback was performed by this observation."
+  },
+  "terminal_evidence_path": "/var/lib/urnetwork/competition-six-recovery-preparation-20261106.mxsY9Qvf/seventh-terminal-20261107.private.json",
+  "terminal_evidence_sha256": "ad99a49f08269c2970001bdb832148b35b3a9cfb1c3387258637ec3524913b1b",
+  "queue": {"total": 69, "succeeded": 69, "running": 0, "queued": 0, "failed": 0},
+  "worker_slot_unleased": true,
+  "queue_evidence_path": "/var/lib/urnetwork/competition-six-recovery-preparation-20261106.mxsY9Qvf/queue-status-final-completed-20261107.private.json",
+  "queue_evidence_sha256": "42e79e9c27c9a3fa7ad4e03e7addfcb2ef28b3fca12600fad8d0caf94b21dee6",
+  "holds": {"evaluation": false, "evaluation_revision": 25, "finalization": true, "reward_delivery": true},
+  "authority_scope": "Read-only terminal database and authenticated owner-poll observations. All seven approved controlled recoveries succeeded; every epoch-one job is terminal-successful. Original failures and submission ordering remain preserved. No private score values or patches published; no new grant, winner selection, source promotion or hold release authorized."
+}

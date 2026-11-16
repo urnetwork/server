@@ -13,6 +13,7 @@ import (
 // Scope-specific latest revisions contain no private explanation or actor data.
 type competitionAutomationHoldStatus struct {
 	Admission, Evaluation, RewardDelivery bool
+	Finalization                          bool
 	EvaluationHold, RewardDeliveryHold    *model.CompetitionAutomationHold
 }
 
@@ -48,18 +49,26 @@ func (self *Service) competitionRuntimeStatus(ctx context.Context, settings *Set
 	}
 	strictReady := allChecks(checks) && !holds.Admission
 	intakeReady := strictReady
+	gradingPurposeReady := true
+	if settings.intakeFirstActivation != nil {
+		intakeReady = competitionIntakeChecksPass(checks) && !holds.Admission
+		gradingPurposeReady, err = competitionIntakeFirstGradingReady(ctx, settings, self.store)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if !intakeReady {
 		intakeReady, err = self.approvedIntakeReadiness(ctx, settings, round, checks, holds)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return &model.CompetitionRuntimeStatus{IntakeReady: intakeReady, GradingReady: strictReady && !holds.Evaluation,
-		PublicationHeld: holds.Evaluation}, nil
+	return &model.CompetitionRuntimeStatus{IntakeReady: intakeReady, GradingReady: strictReady && !holds.Evaluation && gradingPurposeReady,
+		PublicationHeld: holds.Evaluation || !gradingPurposeReady, FinalizationHeld: holds.Finalization}, nil
 }
 
-// Public scores, winners and round secrets share the grading hold. A payout
-// hold remains independent and does not suppress historical integrity notices.
+// A grading hold blocks new publication, not an already published immutable
+// round. Payout holds and public integrity notices remain independent.
 func (self *Service) competitionPublicationHeld(ctx context.Context, settings *Settings, round *roundRecord) (bool, error) {
 	if !competitionRoundUsesV2(round) {
 		return false, nil
@@ -67,6 +76,9 @@ func (self *Service) competitionPublicationHeld(ctx context.Context, settings *S
 	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
 	if err != nil || policy.CompetitionId != settings.CompetitionId {
 		return true, errors.New("frozen hold scope does not match the requested competition")
+	}
+	if roundPublished(round, server.NowUtc()) {
+		return false, nil
 	}
 	scoped := *settings
 	scoped.AutomationPolicy = *policy.AutomationPolicy
@@ -77,6 +89,16 @@ func (self *Service) competitionPublicationHeld(ctx context.Context, settings *S
 	holds, err := store.AutomationHoldStatus(ctx, &scoped)
 	if err != nil {
 		return true, err
+	}
+	if settings.IntakeFirstPolicy != nil && round.Epoch >= settings.IntakeFirstPolicy.FromEpoch && !round.Staging && round.AutomationSealedAt == nil && round.FinalizedAt == nil {
+		frozen, err := settingsForCompetitionApiRound(ctx, settings, self.store, round)
+		if err != nil {
+			return true, err
+		}
+		ready, err := competitionIntakeFirstGradingReady(ctx, frozen, self.store)
+		if err != nil || !ready {
+			return true, err
+		}
 	}
 	return holds.Evaluation, nil
 }

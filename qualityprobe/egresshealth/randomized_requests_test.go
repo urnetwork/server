@@ -5,12 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Records every application request and returns a valid small website body.
@@ -27,13 +28,13 @@ func TestPlaceCanariesAreBoundedRandomSamples(t *testing.T) {
 		table = append(table, Destination{Name: fmt.Sprintf("canary-%d", i), Class: ClassSite, Url: fmt.Sprintf("https://sample.example/canary-%d", i), Canary: true, Incompatible: []Place{{Country: "de"}}})
 	}
 	var previous []string
-	for _, seed := range []int64{31, 73} {
+	for _, seed := range []uint64{31, 73} {
 		transport := &sampledRequestTransport{}
 		opts := fastOptions()
 		opts.Concurrency = 1
 		opts.Destinations = table
 		opts.ProviderPlace = Place{Country: "de"}
-		opts.Rand = rand.New(rand.NewSource(seed))
+		opts.Rand = rand.New(rand.NewPCG(seed, 0))
 		res, err := Check(context.Background(), &http.Client{Transport: transport}, opts)
 		if err != nil || res.Total != 1 || len(res.Checks) != 3 || len(res.CanaryPassedNames()) != 2 || len(transport.paths) != 3 {
 			t.Fatalf("unbounded or scored canaries: result=%+v requests=%v err=%v", res, transport.paths, err)
@@ -43,6 +44,32 @@ func TestPlaceCanariesAreBoundedRandomSamples(t *testing.T) {
 			t.Fatalf("successive seeds retained a fixed canary set: %v", selected)
 		}
 		previous = selected
+	}
+}
+
+// A run with no injected generator draws its sample and spacing from a fresh
+// connect.NewSecureRand generator (RANDUPDATE.md S1), so a provider cannot
+// predict which destinations a pass asks it for. It was a Go 1 source, whose
+// outputs give its state away, behind a clock seed for a crypto/rand read that
+// cannot fail. Two runs' generators, built the production way under one fixed
+// fake clock, draw different streams; an injected generator is used as given.
+func TestRunGeneratorIsSecureAndPerRun(t *testing.T) {
+	now := time.Date(2026, time.November, 13, 12, 0, 0, 0, time.UTC)
+	opts := Options{Now: func() time.Time { return now }}
+	draws := func(random *rand.Rand) []uint64 {
+		values := []uint64{}
+		for range 4 {
+			values = append(values, random.Uint64())
+		}
+		return values
+	}
+	if first, second := draws(opts.rng()), draws(opts.rng()); slices.Equal(first, second) {
+		t.Fatalf("two runs drew the same stream %v", first)
+	}
+	injected := rand.New(rand.NewPCG(1, 2))
+	opts.Rand = injected
+	if opts.rng() != injected {
+		t.Fatal("an injected generator was not used as given")
 	}
 }
 

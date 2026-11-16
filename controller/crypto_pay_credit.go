@@ -9,14 +9,17 @@ package controller
 //  1. the network lock (LockPaymentNetworkInTx) when the delivery has one
 //  2. the invoice one-shot (credited_at IS NULL AND voided_at IS NULL, rows
 //     affected checked), and for USDC the Solana intent's own one-shot in the
-//     same transaction
+//     same transaction, and an operator's credit of a recorded unfulfilled
+//     USDC payment removes that record there too
 //  3. a plan: the renewal (market monero / zcash / solana), the Pro transfer
 //     balance with the USD value as subsidy revenue, then the price tier on
 //     the renewal and the welcome offer's redemption -- inside the
 //     transaction, on every path (the Solana reconciler used to skip both)
 //  4. a data pack to a network: a pro = false balance and the applied note
 //  5. a data pack as a code: the balance code, emailed through the account
-//     message outbox when the invoice has an email
+//     message outbox when the invoice has an email; a gift order's invoice
+//     (item gift_pro_year): the order's codes and its delivery
+//     (gift_crypto_controller.go)
 //  6. the receipts that made up the payment move to credited
 //  7. after commit, the Pro cache is refreshed
 //
@@ -48,12 +51,36 @@ type cryptoCredit struct {
 	// usdc_solana: the transaction signature the Solana intent is consumed by
 	solanaSignature string
 	late            bool
+	// usdc_solana, an operator's credit of a recorded unfulfilled payment
+	// (CryptoOperatorCommitUsdcCredit): the no_intent record of
+	// solanaSignature is removed in the credit's transaction, so the credit
+	// and the record's resolution commit together or not at all
+	resolvesUnfulfilled bool
 }
 
 // The invoice one-shot won and the linked Solana intent's lost: the two can
 // only disagree if something credited the Solana intent around the invoice.
 // The credit's transaction is rolled back rather than commit half of it.
 var errCryptoSolanaOneShotDiverged = errors.New("the USDC invoice is open but its Solana intent is already consumed")
+
+// An operator's credit of a recorded payment found the record gone or changed
+// in its transaction: the credit is rolled back with it.
+var errCryptoUnfulfilledPaymentChanged = errors.New("the recorded unfulfilled payment is no longer there as a no_intent record; nothing was written")
+
+// cryptoUsdcCreditUsd is what a USDC payment credits its invoice: the price
+// when it was paid by the quote's expiry, else what arrived, capped at the
+// price. The webhook judges a payment at its delivery; an operator's credit
+// at the payment's own time.
+func cryptoUsdcCreditUsd(
+	intent *model.CryptoPaymentIntent,
+	receivedUsd float64,
+	paidAt time.Time,
+) (usdNanoCents model.NanoCents, late bool) {
+	if intent.ExpiresAt.Before(paidAt) {
+		return min(model.UsdToNanoCents(receivedUsd), intent.PriceUsdNanoCents), true
+	}
+	return intent.PriceUsdNanoCents, false
+}
 
 // cryptoCreditIntent credits an invoice on its own connection.
 func cryptoCreditIntent(
@@ -71,6 +98,11 @@ func cryptoCreditIntentInConn(
 	intent *model.CryptoPaymentIntent,
 	credit *cryptoCredit,
 ) (credited bool, returnErr error) {
+	// a gift order's invoice buys the order's codes, not a plan or a data
+	// pack (gift_crypto_controller.go)
+	if cryptoGiftInvoice(intent) {
+		return cryptoCreditGiftIntentInConn(connOwner, clientSession, intent, credit)
+	}
 	ctx := clientSession.Ctx
 	plan := slices.Contains(cryptoPayKnownPlans, intent.Item)
 	market := cryptoAssetMarket(intent.Asset)
@@ -87,7 +119,8 @@ func cryptoCreditIntentInConn(
 	duration := model.Pro().DataCodeDuration
 	if !plan {
 		var ok bool
-		byteCount, ok = stripeDataPackByteCount(intent.Item)
+		// what the invoiced pack grants, whatever its rails say now
+		byteCount, ok = dataPackByteCount(intent.Item)
 		if !ok || byteCount <= 0 {
 			return false, fmt.Errorf("invoice %s names an unknown data pack", intent.IntentId)
 		}
@@ -146,15 +179,8 @@ func cryptoCreditIntentInTx(
 		}
 	}
 	// the invoice one-shot first: when it loses, nothing was written
-	if !model.MarkCryptoPaymentIntentCreditedInTx(tx, ctx, intent.IntentId, now, credit.usdNanoCents) {
+	if !cryptoClaimIntentInTx(tx, clientSession, intent, credit, now) {
 		return false, nil
-	}
-	if intent.Asset == model.CryptoAssetUsdcSolana {
-		completed, err := model.MarkPaymentIntentCompletedInTx(tx, *intent.SolanaReference, credit.solanaSignature, clientSession)
-		server.Raise(err)
-		if !completed {
-			server.Raise(errCryptoSolanaOneShotDiverged)
-		}
 	}
 
 	var balanceId *server.Id
@@ -163,7 +189,8 @@ func cryptoCreditIntentInTx(
 	case plan:
 		networkId := *intent.NetworkId
 		_, transactionId := model.CryptoPaymentRenewalHandle(intent)
-		endTime := now.Add(solanaPlanDuration(intent.Item) + manualPaymentGracePeriod)
+		paidEndTime := now.Add(solanaPlanDuration(intent.Item))
+		endTime := paidEndTime.Add(manualPaymentGracePeriod)
 		// a failure past the one-shot raises: committing a credited
 		// invoice without its grant would lose the payment
 		server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
@@ -174,19 +201,24 @@ func cryptoCreditIntentInTx(
 			NetRevenue:         credit.usdNanoCents,
 			SubscriptionMarket: market,
 			TransactionId:      transactionId,
+			PaidEndTime:        &paidEndTime,
 		}))
-		// a supporter subscription carries the Pro entitlement
+		// a supporter subscription carries the Pro entitlement; the term's
+		// marker holds no data (SupporterPeriodTransferBalance)
 		transferBalance := &model.TransferBalance{
 			NetworkId:             networkId,
 			StartTime:             now,
 			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: SupporterPeriodTransferBalance,
 			SubsidyNetRevenue:     credit.usdNanoCents,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      SupporterPeriodTransferBalance,
 			Pro:                   true,
 		}
 		model.AddTransferBalanceInTx(ctx, tx, transferBalance)
 		balanceId = &transferBalance.BalanceId
+		// the term's data: the full Pro grant for the cycle it starts, and
+		// monthly from there to the term's end (the sweep)
+		model.GrantProCycleInTx(tx, ctx, networkId)
 		// the regional tier and the welcome offer, in the credit's
 		// transaction on every path
 		model.SetSubscriptionRenewalPriceTierByTransactionInTx(tx, ctx, networkId, market, transactionId, intent.Tier)
@@ -245,21 +277,64 @@ func cryptoCreditIntentInTx(
 	}
 
 	model.SetCryptoPaymentIntentGrantInTx(tx, ctx, intent.IntentId, balanceId, balanceCodeId)
-	if 0 < len(credit.receipts) {
-		intentId := intent.IntentId
-		model.SetCryptoPaymentReceiptsStateInTx(tx, ctx, &intentId, credit.receipts, model.CryptoReceiptStateCredited, "")
-		for _, key := range credit.receipts {
-			if value, ok := credit.receiptUsd[key]; ok {
-				model.SetCryptoPaymentReceiptUsdValueInTx(tx, ctx, key, value)
-			}
-		}
-	}
+	cryptoCreditReceiptsInTx(tx, ctx, intent, credit)
 	// this call won the invoice one-shot: a new payment, posted once the
 	// transaction commits
 	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
 		return cryptoSalesNotice(intent, credit, plan, byteCount)
 	})
 	return true, nil
+}
+
+// cryptoClaimIntentInTx wins an invoice's one-shot for this credit, and for
+// USDC the linked Solana intent's own in the same transaction (with an
+// operator's credit of a recorded unfulfilled payment, that record's removal).
+// false when another credit, or a void, got there first: nothing was written.
+// Past the invoice's own one-shot a failure raises, so the transaction rolls
+// back whole.
+func cryptoClaimIntentInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	intent *model.CryptoPaymentIntent,
+	credit *cryptoCredit,
+	now time.Time,
+) bool {
+	ctx := clientSession.Ctx
+	if !model.MarkCryptoPaymentIntentCreditedInTx(tx, ctx, intent.IntentId, now, credit.usdNanoCents) {
+		return false
+	}
+	if intent.Asset == model.CryptoAssetUsdcSolana {
+		completed, err := model.MarkPaymentIntentCompletedInTx(tx, *intent.SolanaReference, credit.solanaSignature, clientSession)
+		server.Raise(err)
+		if !completed {
+			server.Raise(errCryptoSolanaOneShotDiverged)
+		}
+		if credit.resolvesUnfulfilled &&
+			!model.RemoveUnfulfilledSolanaPaymentInTx(tx, ctx, credit.solanaSignature, model.SolanaUnfulfilledReasonNoIntent) {
+			server.Raise(errCryptoUnfulfilledPaymentChanged)
+		}
+	}
+	return true
+}
+
+// cryptoCreditReceiptsInTx moves the receipts that made up a credited payment
+// to credited, each with its share of the credit's value.
+func cryptoCreditReceiptsInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	intent *model.CryptoPaymentIntent,
+	credit *cryptoCredit,
+) {
+	if len(credit.receipts) == 0 {
+		return
+	}
+	intentId := intent.IntentId
+	model.SetCryptoPaymentReceiptsStateInTx(tx, ctx, &intentId, credit.receipts, model.CryptoReceiptStateCredited, "")
+	for _, key := range credit.receipts {
+		if value, ok := credit.receiptUsd[key]; ok {
+			model.SetCryptoPaymentReceiptUsdValueInTx(tx, ctx, key, value)
+		}
+	}
 }
 
 func cryptoCreditTiming(late bool) string {
@@ -324,11 +399,7 @@ func cryptoCreditLinkedSolanaIntentInConn(
 	}
 	// the price on time (the webhook already checked the payment against the
 	// quote); a late one is honored at what arrived, capped at the price
-	usdNanoCents := intent.PriceUsdNanoCents
-	late := intent.ExpiresAt.Before(server.NowUtc())
-	if late {
-		usdNanoCents = min(model.UsdToNanoCents(tokenAmountReceivedUsd), intent.PriceUsdNanoCents)
-	}
+	usdNanoCents, late := cryptoUsdcCreditUsd(intent, tokenAmountReceivedUsd, server.NowUtc())
 	if intent.VoidedAt == nil {
 		credited, err := cryptoCreditIntentInConn(connOwner, clientSession, intent, &cryptoCredit{
 			usdNanoCents:    usdNanoCents,

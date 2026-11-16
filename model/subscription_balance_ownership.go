@@ -59,25 +59,28 @@ func tryContractTransferBalanceOwnershipInTx(ctx context.Context, tx server.PgTx
 	return tryTransferBalanceOwnershipInTx(ctx, tx, balanceIds)
 }
 
-// Financial commits also publish their durable mirror and immutable provider
-// owners. Declare those keys before grant SQL; publication never grows the set.
-func legacyFinancialOwnershipKeys(contractIds, balanceIds []server.Id) []server.PgOwnershipKey {
+// Financial commits also publish their durable mirror owners. Declare those
+// keys before grant SQL; publication never grows the set. Settlement publishes
+// no provider totals, so no contract key joins the set (BILLING-SPLIT.md).
+func legacyFinancialOwnershipKeys(balanceIds []server.Id) []server.PgOwnershipKey {
 	keys := transferBalanceOwnershipKeys(balanceIds)
 	for _, id := range balanceIds {
 		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("legacy_net_escrow_mirror", id)))
 	}
-	for _, id := range contractIds {
-		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", id)))
-	}
 	return keys
 }
 
+// A contract without escrow has no shared balance resource, so it is admitted
+// without ownership, as an empty reservation is (tryTransferBalanceOwnershipInTx).
 func tryLegacyFinancialOwnershipInTx(ctx context.Context, tx server.PgTx, contractIds []server.Id) (bool, error) {
 	balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
 	if err != nil {
 		return false, err
 	}
-	return server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(contractIds, balanceIds))
+	if len(balanceIds) == 0 {
+		return true, nil
+	}
+	return server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(balanceIds))
 }
 
 func contractTransferBalanceIdsInTx(ctx context.Context, tx server.PgTx, contractIds []server.Id) ([]server.Id, error) {

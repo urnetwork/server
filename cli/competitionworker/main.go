@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -33,10 +34,10 @@ passing every gate, or no winner. It never pauses for honesty review or
 promotes source.
 
 Usage:
-  competitionworker [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>]
-  competitionworker --check [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>]
-  competitionworker --supervisor-request [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>]
-  competitionworker --source-readiness=<generation> [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>]
+  competitionworker [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>]
+  competitionworker --check [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>]
+  competitionworker --supervisor-request [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>]
+  competitionworker --source-readiness=<generation> [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>]
   competitionworker -h | --help
   competitionworker --version
 
@@ -50,6 +51,8 @@ Options:
   --baseline-preparation-sha256=<sha>  Exact immutable preparation configuration SHA-256.
   --future-baseline-preparation-config=<path>  Separately pinned future-policy role; inactive for current rounds.
   --future-baseline-preparation-sha256=<sha>  Exact immutable future preparation configuration SHA-256.
+  --distributed-config=<path>  Root-pinned coordinator-only SSH/agent role; inactive for frozen epoch one.
+  --distributed-sha256=<sha>  Exact immutable distributed coordinator configuration SHA-256.
   --worker_id=<id>   Stable evaluator identity; defaults to hostname.`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
@@ -87,6 +90,16 @@ Options:
 			panic("future baseline preparation requires an explicitly approved future epoch policy")
 		}
 		if err := controller.ConfigureCompetitionFutureRoundBaselinePreparation(settings, futureBaselineConfig, futureBaselineDigest); err != nil {
+			panic(err)
+		}
+	}
+	distributedConfig, _ := opts.String("--distributed-config")
+	distributedDigest, _ := opts.String("--distributed-sha256")
+	if (distributedConfig == "") != (distributedDigest == "") {
+		panic("distributed evaluation requires the coordinator role and its exact SHA-256")
+	}
+	if distributedConfig != "" {
+		if err := controller.ConfigureCompetitionDistributedCoordinator(settings, distributedConfig, distributedDigest); err != nil {
 			panic(err)
 		}
 	}
@@ -132,8 +145,11 @@ Options:
 	controller.StartMetrics(quit.Ctx)
 	flushStats := server.StartStatsPusher(quit.Ctx)
 	defer flushStats()
+	var failureObservation *controller.CompetitionWorkerFailureObservation
 	if supervised {
-		err = controller.RunCompetitionSupervisorWorker(quit.Ctx, settings, *supervisorRequest, workerId)
+		var workerCtx context.Context
+		workerCtx, failureObservation = controller.ObserveCompetitionWorkerFailure(quit.Ctx)
+		err = controller.RunCompetitionSupervisorWorker(workerCtx, settings, *supervisorRequest, workerId)
 	} else {
 		var worker *controller.Worker
 		worker, err = controller.NewWorker(settings, controller.PostgresStore{}, controller.CommandEvaluator{}, workerId)
@@ -141,9 +157,28 @@ Options:
 			err = worker.Run(quit.Ctx)
 		}
 	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		panic(fmt.Errorf("competition worker: %w", err))
+	finishCompetitionWorkerObserved(err, supervised, os.Stderr, failureObservation)
+}
+
+// Supervised failure drains the joined worker before emitting only finite
+// diagnostics. Panic retains the existing exit code and deferred owner cleanup.
+func finishCompetitionWorker(err error, supervised bool, diagnostics io.Writer) {
+	finishCompetitionWorkerObserved(err, supervised, diagnostics, nil)
+}
+
+// Optional owner facts come from this joined supervised invocation only.
+// Healthy/canceled behavior and the exact existing panic text stay unchanged.
+func finishCompetitionWorkerObserved(err error, supervised bool, diagnostics io.Writer, observation *controller.CompetitionWorkerFailureObservation) {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return
 	}
+	if supervised {
+		if content, reportErr := controller.MarshalCompetitionWorkerFailureReportObserved(err, observation); reportErr == nil {
+			fmt.Fprintln(diagnostics, string(content))
+		}
+		panic("competition worker failed; bounded diagnostics emitted")
+	}
+	panic(fmt.Errorf("competition worker: %w", err))
 }
 
 // A probe owns its cancellation through synchronous cleanup. Exiting directly

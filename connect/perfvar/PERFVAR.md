@@ -5,6 +5,25 @@
 Implemented single-host harness. Physical-device and multi-host validation
 remain outside this userspace test tier.
 
+The 2026-11-05 checkpoint includes the complete SDK-owned browsing fixture
+dependencies and separates ordinary same-site workload completion from strict
+midpoint mechanism qualification. Ordinary readiness counts distinct owned
+remote providers independently of the local channel rows. The strict
+six-provider and midpoint alternative-provider predicates remain separate.
+All 100 HTML responses, 400 assets, 500 request observations, 99 overlaps,
+four connections per origin, four live pages, payload extents and existing
+timeouts remain required by their original workload oracles.
+
+Before integration, the platform donor passed 17 Darwin normal and 17 race
+roots; Linux was compile-only. The corrected browsing-purpose donor passed
+30 normal and 30 race controls. These exact private-source results are not a
+full-suite pass for this checkpoint. Fresh performance replay with the
+corrected 100-page fixture, device 32/64 MiB MEMSTEADY qualification and the
+complete six-suite correctness run remain pending. Historical latency
+regressions stay recorded; the later page-ten fixture-contract rejection did
+not establish a network stall. No new Go or runtime validation was performed
+during checkpoint integration.
+
 The harness runs in `server/connect/perfvar` on macOS inside `go test`. It
 drives real application traffic through the Connect TUN boundary, provider
 NAT, and each forced production carrier while applying deterministic userspace
@@ -406,12 +425,15 @@ engineering stress points, not claims about a carrier or signal-bar reading.
 The physical profile's `inner_mtu` remains the path limit used by direct
 calibration and the simulated access link. A full VPN workload separately
 advertises `application_mtu = min(connect.DefaultMtu, profile.inner_mtu)` on
-the application TUN. Schema 12 serializes that value into the scenario identity;
-the current cell-edge workloads therefore exercise the production 1,100-byte
-tunnel MTU rather than silently advertising the profile's 1,200-byte limit.
+the application TUN. Schema 12 serializes that value into the scenario identity.
+With the production 1,280-byte tunnel MTU, `cell-edge-5m-down-1m-up` therefore
+advertises the product MTU, while the two cell edges with a 1,280-byte outer
+MTU remain bounded by their 1,200-byte inner MTU.
 The real inner-QUIC workload pins its Initial UDP payload at the QUIC minimum of
-1,200 bytes. It therefore must cross the production IPv4 fragment path rather
-than shrinking QUIC below its protocol floor: the application side fragments,
+1,200 bytes. The production MTU carries that 1,228-byte IPv4 packet whole.
+Where the application MTU is smaller, as on those two cell edges, it must cross
+the production IPv4 fragment path rather than shrinking QUIC below its
+protocol floor: the application side fragments,
 Connect performs bounded complete-datagram inspection at the device and
 provider security boundaries while Transfer carries the original ordered
 fragments, and provider replies are fragmented back to the application.
@@ -698,9 +720,10 @@ go test ./connect/perfvar -run '^TestPerformanceVariations$' \
 ```
 
 The focused H3 lane-selection gate holds the seed, profile, mobile resource
-surrogate, 1,100-byte inner MTU, and exact 64 KiB upload constant. Production
-H3 permits one complete DATAGRAM fragment per message; the fragmented test
-raises the limit explicitly and is never a production-settings assertion:
+surrogate, product 1,280-byte inner MTU (`connect.DefaultMtu`), and exact
+64 KiB upload constant. Production H3 permits one complete DATAGRAM fragment
+per message; the fragmented test raises the limit explicitly and is never a
+production-settings assertion:
 
 ```sh
 go test ./connect/perfvar \

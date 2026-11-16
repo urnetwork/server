@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -107,6 +108,8 @@ type StripeWebhookArgs struct {
 	Id   string           `json:"id"`
 	Type string           `json:"type"`
 	Data *StripeEventData `json:"data"`
+	// when the event happened, unix seconds; 0 when the body does not say
+	Created int64 `json:"created,omitempty"`
 }
 
 type StripeEventData struct {
@@ -121,11 +124,18 @@ type StripeEventCheckoutCompleteObject struct {
 	PaymentStatus     string                                `json:"payment_status"`
 	ClientReferenceId string                                `json:"client_reference_id"`
 	Subscription      string                                `json:"subscription"`
-	// set by /pay/data/checkout (apply_to_network, network_id, network_name, item_id)
+	// the three-letter currency amount_total is in, lowercase; a gift order is
+	// fulfilled only for its total in usd (gift_checkout_controller.go)
+	Currency string `json:"currency,omitempty"`
+	// set by /pay/data/checkout (apply_to_network, network_id, network_name,
+	// item_id), and by /pay/gift/checkout (gift_order_id)
 	Metadata map[string]string `json:"metadata"`
 	// the payment intent of a payment-mode session: an id, or an object when
 	// expanded. Read only for the sales notice's payment method.
 	PaymentIntent json.RawMessage `json:"payment_intent,omitempty"`
+	// payment, subscription or setup; read only for the record of a failed
+	// delayed payment
+	Mode string `json:"mode,omitempty"`
 }
 
 // stripeAppliedNetworkName is the network a buy-data checkout was made FOR, from
@@ -180,10 +190,19 @@ type StripeEventChargeObject struct {
 	Id             string `json:"id"`
 	Invoice        string `json:"invoice"`
 	PaymentIntent  string `json:"payment_intent"`
+	Amount         int    `json:"amount"`
 	AmountRefunded int    `json:"amount_refunded"`
 	// embedded on older API versions' charge.refunded payloads; newer
 	// versions omit it and the refunds are listed by charge instead
 	Refunds *StripeEventChargeRefundList `json:"refunds"`
+}
+
+// Whether the charge still holds part of its money with this refund of
+// refundAmount counted, so what it bought stays paid for. A charge read back
+// before it shows the refund has the refund itself to go on, and one that does
+// not state its amount counts as given back.
+func (self *StripeEventChargeObject) keepsPaidAmount(refundAmount int) bool {
+	return max(self.AmountRefunded, refundAmount) < self.Amount
 }
 
 type StripeEventDisputeObject struct {
@@ -191,7 +210,19 @@ type StripeEventDisputeObject struct {
 	Charge        string `json:"charge"`
 	PaymentIntent string `json:"payment_intent"`
 	Amount        int    `json:"amount"`
+	// on charge.dispute.closed: won | lost | warning_closed
+	Status string `json:"status"`
 }
+
+// The dispute status that gave the money back (charge.dispute.closed).
+const stripeDisputeStatusWon = "won"
+
+// The dispute status that kept the money from us (charge.dispute.closed).
+const stripeDisputeStatusLost = "lost"
+
+// The dispute statuses of an inquiry: warning_needs_response, warning_under_review
+// and warning_closed. No funds have left.
+const stripeDisputeStatusInquiryPrefix = "warning_"
 
 type StripeWebhookResultErr struct {
 	Message string `json:"message"`
@@ -294,6 +325,39 @@ func StripeWebhook(
 			clientSession,
 		)
 
+	} else if stripeWebhook.Type == "checkout.session.async_payment_succeeded" && stripeWebhook.Data != nil {
+
+		/**
+		 * a checkout paid with a delayed method (a bank debit or transfer)
+		 * cleared: it is fulfilled now, through the same exactly-once code as
+		 * a payment that cleared at once (subscription_stripe_checkout_payment.go)
+		 */
+
+		glog.Infof("type: checkout.session.async_payment_succeeded")
+
+		var checkoutObject StripeEventCheckoutCompleteObject
+		if err := json.Unmarshal(stripeWebhook.Data.Object, &checkoutObject); err != nil {
+			return nil, fmt.Errorf("failed to parse checkout session: %v", err)
+		}
+
+		return stripeHandleCheckoutSessionCompleted(&checkoutObject, clientSession)
+
+	} else if stripeWebhook.Type == "checkout.session.async_payment_failed" && stripeWebhook.Data != nil {
+
+		/**
+		 * a checkout's delayed payment failed: nothing was fulfilled, and the
+		 * failure is recorded for support (subscription_stripe_checkout_payment.go)
+		 */
+
+		glog.Infof("type: checkout.session.async_payment_failed")
+
+		var checkoutObject StripeEventCheckoutCompleteObject
+		if err := json.Unmarshal(stripeWebhook.Data.Object, &checkoutObject); err != nil {
+			return nil, fmt.Errorf("failed to parse checkout session: %v", err)
+		}
+
+		return stripeHandleCheckoutSessionAsyncPaymentFailed(&checkoutObject, clientSession)
+
 	} else if stripeWebhook.Type == "invoice.paid" {
 
 		/**
@@ -332,6 +396,31 @@ func StripeWebhook(
 		glog.Infof("type: invoice.payment_failed")
 
 		return stripeHandleInvoicePaymentFailed(stripeWebhook.Data.Object, clientSession)
+
+	} else if stripeWebhook.Type == "invoice.payment_action_required" && stripeWebhook.Data != nil {
+
+		/**
+		 * a renewal (a trial's first charge among them) waits on the customer
+		 * to confirm the payment with their bank (3D Secure): ask the account to
+		 * confirm it, through the same notices (subscription_stripe_dunning.go)
+		 */
+
+		glog.Infof("type: invoice.payment_action_required")
+
+		return stripeHandleInvoicePaymentFailed(stripeWebhook.Data.Object, clientSession)
+
+	} else if (stripeWebhook.Type == "charge.failed" || stripeWebhook.Type == "setup_intent.setup_failed") && stripeWebhook.Data != nil {
+
+		/**
+		 * a card check failed: counted, and a burst of them for one owner is
+		 * the card testing the monitor pages on
+		 * (subscription_stripe_card_failures.go). Always 200.
+		 */
+
+		glog.Infof("type: %s", stripeWebhook.Type)
+
+		stripeCardFailures.record(clientSession.Ctx, stripeWebhook)
+		return &StripeWebhookResult{}, nil
 
 	} else if stripeWebhook.Type == "invoice.voided" && stripeWebhook.Data != nil {
 
@@ -375,7 +464,8 @@ func StripeWebhook(
 
 		/**
 		 * a dispute withdraws the funds immediately -- treat like a refund,
-		 * with its own action label
+		 * with its own action label. An inquiry withdraws nothing
+		 * (stripeHandleDisputeFunds).
 		 */
 
 		glog.Infof("type: charge.dispute.created")
@@ -385,7 +475,39 @@ func StripeWebhook(
 			return nil, fmt.Errorf("failed to parse dispute: %v", err)
 		}
 
-		return stripeHandleDisputeCreated(&disputeObject, clientSession)
+		return stripeHandleDisputeFunds(&disputeObject, "charge.dispute.created", clientSession)
+
+	} else if stripeWebhook.Type == "charge.dispute.funds_withdrawn" && stripeWebhook.Data != nil {
+
+		/**
+		 * the funds left: for an inquiry that became a dispute this is the first
+		 * sign of it, and otherwise the ledger absorbs it as the same dispute
+		 */
+
+		glog.Infof("type: charge.dispute.funds_withdrawn")
+
+		var disputeObject StripeEventDisputeObject
+		if err := json.Unmarshal(stripeWebhook.Data.Object, &disputeObject); err != nil {
+			return nil, fmt.Errorf("failed to parse dispute: %v", err)
+		}
+
+		return stripeHandleDisputeFunds(&disputeObject, "charge.dispute.funds_withdrawn", clientSession)
+
+	} else if stripeWebhook.Type == "charge.dispute.closed" && stripeWebhook.Data != nil {
+
+		/**
+		 * a dispute decided our way gives the money back -- the window it cut
+		 * was paid for after all
+		 */
+
+		glog.Infof("type: charge.dispute.closed")
+
+		var disputeObject StripeEventDisputeObject
+		if err := json.Unmarshal(stripeWebhook.Data.Object, &disputeObject); err != nil {
+			return nil, fmt.Errorf("failed to parse dispute: %v", err)
+		}
+
+		return stripeHandleDisputeClosed(&disputeObject, clientSession)
 
 	} else if stripeWebhook.Type == "setup_intent.succeeded" && stripeWebhook.Data != nil {
 
@@ -415,7 +537,9 @@ func StripeWebhook(
 
 		/**
 		 * the onboarding trial outcome: a subscription deleted within its
-		 * trial is trial.cancelled (onboarding_stripe_controller.go)
+		 * trial is trial.cancelled (onboarding_stripe_controller.go). Pro
+		 * follows within the hour: the reconciler ends a window no payment
+		 * paid for when Stripe cancels for non-payment (reconcileStripe)
 		 */
 
 		glog.Infof("type: customer.subscription.deleted")
@@ -426,6 +550,17 @@ func StripeWebhook(
 
 		return stripeHandleSubscriptionDeleted(stripeWebhook.Data.Object, clientSession)
 
+	} else if stripeWebhook.Type == "customer.subscription.trial_will_end" && stripeWebhook.Data != nil {
+
+		/**
+		 * Stripe posts this three days before a trial's first charge: the
+		 * trial-ending reminder for Stripe trials (service_reminders_controller.go)
+		 */
+
+		glog.Infof("type: customer.subscription.trial_will_end")
+
+		return stripeHandleSubscriptionTrialWillEnd(stripeWebhook.Data.Object, clientSession)
+
 	}
 	// else IGNORE the event and answer 200. This is load-bearing: the endpoint
 	// subscribes to the full event catalog, and a non-2xx on an unhandled type
@@ -435,6 +570,11 @@ func StripeWebhook(
 	return &StripeWebhookResult{}, nil
 }
 
+// Fulfils a checkout session whose payment cleared: checkout.session.completed
+// for a payment that cleared at once, checkout.session.async_payment_succeeded
+// for a delayed one, and the client's report (VerifyStripeCheckout). A session
+// that is not paid fulfils nothing (stripeCheckoutSessionPaid). Each line is
+// fulfilled once, keyed by its purchase event id, however many of these arrive.
 func stripeHandleCheckoutSessionCompleted(
 	checkoutComplete *StripeEventCheckoutCompleteObject,
 	clientSession *session.ClientSession,
@@ -443,6 +583,23 @@ func stripeHandleCheckoutSessionCompleted(
 	glog.Infof("Stripe stripeHandleCheckoutSessionCompleted")
 
 	stripeSessionId := checkoutComplete.Id
+
+	if !stripeCheckoutSessionPaid(checkoutComplete) {
+		// a delayed payment method (a bank debit or transfer) completes the
+		// session before its money arrives: async_payment_succeeded fulfils it
+		// once it clears, and async_payment_failed records it when it does not
+		glog.Infof("[sub]checkout %s is %q, not paid: nothing is fulfilled until its payment clears\n", stripeSessionId, checkoutComplete.PaymentStatus)
+		return &StripeWebhookResult{}, nil
+	}
+
+	// a gift order's checkout (metadata gift_order_id) fulfils its order's
+	// codes, never the data pack skus below (gift_checkout_controller.go)
+	if stripeGiftCheckout(checkoutComplete) {
+		if err := stripeFulfillGiftCheckout(clientSession.Ctx, checkoutComplete); err != nil {
+			return nil, err
+		}
+		return &StripeWebhookResult{}, nil
+	}
 
 	// need to make a second call to get the line items for the order
 	// https://stripe.com/docs/api/checkout/sessions/line_items
@@ -650,6 +807,10 @@ type StripeCustomerExpanded struct {
 }
 
 type StripeInvoiceExpanded struct {
+	Status string `json:"status"`
+	// in the currency's minor unit; 0 for a trial or a fully discounted invoice
+	// (stripeInvoiceTookPayment)
+	AmountPaid   int64                   `json:"amount_paid"`
 	Customer     *StripeCustomerExpanded `json:"customer"`
 	Lines        *StripeLineItems        `json:"lines"`
 	Subscription *struct {
@@ -701,7 +862,11 @@ type stripeInvoiceCredit struct {
 	networkId      server.Id
 	subscriptionId string
 	startTime      time.Time
-	endTime        time.Time
+	// the end of the period the invoice billed
+	paidEndTime time.Time
+	// the window's end: paidEndTime plus the grace of the invoice's payment
+	// (stripeGraceSettings)
+	endTime time.Time
 }
 
 // Resolves the network from the subscription's network_id metadata, then the
@@ -832,11 +997,17 @@ func stripeResolveInvoiceCredit(
 			periodEnd:      periodEnd,
 		}
 	}
+	// in UTC, as the timestamp columns these reach hold it
+	paidEndTime := time.Unix(periodEnd, 0).UTC()
+	// a period that took payment keeps the manual-payment grace; a free trial
+	// gets a day (subscription_stripe_grace.go)
+	grace := stripeGraceSettingsFunc().periodGrace(stripeInvoiceTookPayment(fullInvoice.Status, fullInvoice.AmountPaid))
 	credit := &stripeInvoiceCredit{
 		networkId:      *networkId,
 		subscriptionId: subscriptionId,
-		startTime:      time.Unix(periodStart, 0),
-		endTime:        time.Unix(periodEnd, 0).Add(manualPaymentGracePeriod),
+		startTime:      time.Unix(periodStart, 0).UTC(),
+		paidEndTime:    paidEndTime,
+		endTime:        paidEndTime.Add(grace),
 	}
 	return credit, nil
 }
@@ -914,11 +1085,9 @@ func stripeHandleInvoicePaidInConn(connOwner server.PgConn,
 
 	_, err = stripeCreditInvoicePaidInConn(connOwner,
 		clientSession.Ctx,
-		credit.networkId,
+		credit,
 		invoice,
 		netRevenue,
-		credit.startTime,
-		credit.endTime,
 	)
 	if err != nil {
 		glog.Infof("Error processing invoice paid: %v", err)
@@ -989,6 +1158,9 @@ func stripeAcknowledgeUnresolvedInvoice(
 // credit are in the SAME tx: either both commit or neither does, and a
 // concurrent duplicate delivery blocks on the ledger row and then sees zero
 // rows affected. credited = false means this invoice was already credited.
+//
+// This form credits an invoice that took payment, whose window [startTime,
+// endTime) runs the manual-payment grace past its period.
 func stripeCreditInvoicePaid(
 	ctx context.Context,
 	networkId server.Id,
@@ -997,22 +1169,26 @@ func stripeCreditInvoicePaid(
 	startTime time.Time,
 	endTime time.Time,
 ) (credited bool, returnErr error) {
-	return stripeCreditInvoicePaidInConn(nil, ctx, networkId, &StripeEventInvoiceObject{Id: invoiceId}, netRevenue, startTime, endTime)
+	credit := &stripeInvoiceCredit{
+		networkId:   networkId,
+		startTime:   startTime,
+		paidEndTime: endTime.Add(-stripeGraceSettingsFunc().periodGrace(true)),
+		endTime:     endTime,
+	}
+	return stripeCreditInvoicePaidInConn(nil, ctx, credit, &StripeEventInvoiceObject{Id: invoiceId}, netRevenue)
 }
 
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
 // invoice is the invoice as delivered; only its id is required.
 func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
 	ctx context.Context,
-	networkId server.Id,
+	credit *stripeInvoiceCredit,
 	invoice *StripeEventInvoiceObject,
 	netRevenue model.NanoCents,
-	startTime time.Time,
-	endTime time.Time,
 ) (credited bool, returnErr error) {
 
 	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-		credited, returnErr = stripeCreditInvoicePaidInTx(tx, ctx, networkId, invoice, netRevenue, startTime, endTime)
+		credited, returnErr = stripeCreditInvoicePaidInTx(tx, ctx, credit, invoice, netRevenue)
 	}, server.TxReadCommitted)
 
 	if returnErr != nil {
@@ -1022,7 +1198,7 @@ func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
 	if credited {
 		// the pro balance is committed -- refresh the entitlement cache so the
 		// upgrade is visible immediately rather than after ProCacheTtl
-		model.UpdateProNetworkInConn(connOwner, ctx, networkId)
+		model.UpdateProNetworkInConn(connOwner, ctx, credit.networkId)
 	}
 
 	return credited, nil
@@ -1030,16 +1206,18 @@ func stripeCreditInvoicePaidInConn(connOwner server.PgConn,
 
 // stripeCreditInvoicePaidInTx is one attempt of the credit, in the caller's
 // ReadCommitted transaction: the stripe_invoice ledger gate, then the renewal
-// and the pro balance, then the sales notice of the new payment.
+// and the pro balance, then the sales notice of the new payment. The credit's
+// window and paid period come from stripeResolveInvoiceCredit.
 func stripeCreditInvoicePaidInTx(
 	tx server.PgTx,
 	ctx context.Context,
-	networkId server.Id,
+	credit *stripeInvoiceCredit,
 	invoice *StripeEventInvoiceObject,
 	netRevenue model.NanoCents,
-	startTime time.Time,
-	endTime time.Time,
 ) (credited bool, returnErr error) {
+	networkId := credit.networkId
+	startTime := credit.startTime
+	endTime := credit.endTime
 	if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
 		return false, err
 	}
@@ -1061,6 +1239,9 @@ func stripeCreditInvoicePaidInTx(
 		return false, nil
 	}
 
+	// the invoice's billing period; endTime runs the grace of its payment past
+	// it (stripeResolveInvoiceCredit)
+	paidEndTime := credit.paidEndTime
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -1069,6 +1250,7 @@ func stripeCreditInvoicePaidInTx(
 		NetRevenue:         netRevenue,
 		SubscriptionMarket: model.SubscriptionMarketStripe,
 		TransactionId:      invoiceId,
+		PaidEndTime:        &paidEndTime,
 	}
 
 	err := model.AddSubscriptionRenewalInTx(tx, ctx, &subscriptionRenewal)
@@ -1077,14 +1259,15 @@ func stripeCreditInvoicePaidInTx(
 		return false, err
 	}
 
-	// a supporter subscription -> carries the Pro entitlement
+	// a supporter subscription -> carries the Pro entitlement; the period's
+	// marker holds no data (SupporterPeriodTransferBalance)
 	transferBalance := &model.TransferBalance{
 		NetworkId:             networkId,
 		StartTime:             startTime,
 		EndTime:               endTime,
-		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		StartBalanceByteCount: SupporterPeriodTransferBalance,
 		SubsidyNetRevenue:     netRevenue,
-		BalanceByteCount:      RefreshSupporterTransferBalance,
+		BalanceByteCount:      SupporterPeriodTransferBalance,
 		Pro:                   true,
 	}
 
@@ -1093,11 +1276,13 @@ func stripeCreditInvoicePaidInTx(
 		tx,
 		transferBalance,
 	)
+	// the period's data: the full Pro grant for the cycle it starts
+	model.GrantProCycleInTx(tx, ctx, networkId)
 
 	// the ledger row is new: this invoice is a new payment, posted once the
 	// transaction commits
 	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
-		return stripeInvoiceSalesNotice(networkId, invoice, startTime, endTime)
+		return stripeInvoiceSalesNotice(networkId, invoice, startTime, paidEndTime)
 	})
 
 	return true, nil
@@ -1107,6 +1292,10 @@ func stripeCreditInvoicePaidInTx(
 //
 // decision table (charge -> what was granted -> clawback):
 //
+//	a refund that leaves part of the charge paid (a partial refund)
+//	    -> nothing ends: what the charge bought stays paid for. The refund is
+//	       on the ledger and in the operator stream, and the refund that gives
+//	       back the rest of the charge is the one that claws back
 //	charge carries an invoice, invoice in the stripe_invoice ledger
 //	    -> end the invoice's renewal + the pro balance it granted
 //	       (EndReconciledEntitlementForTransactions, market=stripe scoped to
@@ -1117,6 +1306,9 @@ func stripeCreditInvoicePaidInTx(
 //	    unredeemed code -> void it (cancel_time); redeemed -> end the granted
 //	    transfer_balance
 //	no invoice and no checkout session / no codes      -> refund_unmatched event
+//	a dispute closed as won                            -> the window its clawback
+//	                                                      cut comes back
+//	                                                      (stripeHandleDisputeClosed)
 //
 // A refund is delivered via BOTH charge.refunded and refund.created, so the
 // clawback is gated on the refund id in the stripe_refund ledger, inside the
@@ -1143,6 +1335,28 @@ func stripeFetchCharge(ctx context.Context, chargeId string) (*StripeEventCharge
 		},
 		server.ResponseJsonObject[*StripeEventChargeObject],
 	)
+}
+
+// stripeCheckoutSessionIdForPaymentIntent is the checkout session a
+// single-charge purchase was paid through, "" when none is (a subscription's
+// invoice is not a session's).
+func stripeCheckoutSessionIdForPaymentIntent(ctx context.Context, paymentIntentId string) (string, error) {
+	url := fmt.Sprintf("%s/v1/checkout/sessions?payment_intent=%s", stripeApiBaseUrl, paymentIntentId)
+	sessions, err := server.HttpGetRequireStatusOk[*stripeCheckoutSessionList](
+		ctx,
+		url,
+		func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
+		},
+		server.ResponseJsonObject[*stripeCheckoutSessionList],
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch checkout session for payment intent %s: %v", paymentIntentId, err)
+	}
+	if 0 < len(sessions.Data) {
+		return sessions.Data[0].Id, nil
+	}
+	return "", nil
 }
 
 func stripeHandleChargeRefunded(
@@ -1189,6 +1403,7 @@ func stripeHandleChargeRefunded(
 			model.PaymentReconcileActionRefunded,
 			"charge.refunded",
 			refund.Amount,
+			charge.keepsPaidAmount(refund.Amount),
 		); err != nil {
 			return nil, err
 		}
@@ -1217,18 +1432,28 @@ func stripeHandleRefundCreated(
 		model.PaymentReconcileActionRefunded,
 		"refund.created",
 		refund.Amount,
+		charge.keepsPaidAmount(refund.Amount),
 	); err != nil {
 		return nil, err
 	}
 	return &StripeWebhookResult{}, nil
 }
 
-func stripeHandleDisputeCreated(
+// Claws back what a dispute's charge bought, once the funds have left. An inquiry (status warning_*) takes no money and may close with
+// nothing more, so it ends nothing; if it becomes a dispute,
+// charge.dispute.funds_withdrawn arrives then. The stripe_refund ledger, keyed on
+// the dispute id, makes the two events of an ordinary dispute one clawback.
+func stripeHandleDisputeFunds(
 	dispute *StripeEventDisputeObject,
+	eventType string,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
 	if dispute.Id == "" || dispute.Charge == "" {
-		glog.Infof("[sub]charge.dispute.created with no dispute/charge id; ignoring\n")
+		glog.Infof("[sub]%s with no dispute/charge id; ignoring\n", eventType)
+		return &StripeWebhookResult{}, nil
+	}
+	if strings.HasPrefix(dispute.Status, stripeDisputeStatusInquiryPrefix) {
+		glog.Infof("[sub]%s: inquiry %s (%s) took no funds; nothing ends\n", eventType, dispute.Id, dispute.Status)
 		return &StripeWebhookResult{}, nil
 	}
 	charge, err := stripeFetchCharge(clientSession.Ctx, dispute.Charge)
@@ -1242,10 +1467,205 @@ func stripeHandleDisputeCreated(
 		charge.Invoice,
 		charge.PaymentIntent,
 		model.PaymentReconcileActionDisputed,
-		"charge.dispute.created",
+		eventType,
 		dispute.Amount,
+		false,
 	); err != nil {
 		return nil, err
+	}
+	return &StripeWebhookResult{}, nil
+}
+
+// Gives a network back the paid window a dispute cut, when the dispute is won:
+// Stripe returned the money, so the purchase is paid again. A lost dispute's
+// clawback stands, and an inquiry that closed took no
+// money. One delivery restores, gated by the stripe_refund ledger, and every
+// restoration or reason not to is one operator event.
+//
+// The window comes back only when all of these hold; otherwise the event says
+// which did not, for support:
+//   - the dispute's own clawback ended it (its disputed event says so). A window
+//     cut for another reason stays cut.
+//   - the charge is not refunded in full.
+//   - Stripe still bills the subscription: the hourly reconcile ends a window
+//     whose subscription is over, so a restore there would not last.
+//   - the paid period, with its manual-payment grace, is still running.
+//
+// The renewal and its Pro balance get the end the invoice's credit computes. A
+// balance retention already removed has a zero-byte Pro marker in its place
+// (RepairReconciledProEntitlement), and data comes with the monthly Pro grant,
+// which the open renewal earns. No revenue and no bytes are minted.
+func stripeHandleDisputeClosed(
+	dispute *StripeEventDisputeObject,
+	clientSession *session.ClientSession,
+) (*StripeWebhookResult, error) {
+	if dispute.Id == "" || dispute.Charge == "" {
+		glog.Infof("[sub]charge.dispute.closed with no dispute/charge id; ignoring\n")
+		return &StripeWebhookResult{}, nil
+	}
+	ctx := clientSession.Ctx
+	if dispute.Status == stripeDisputeStatusLost {
+		// a gift order's lost dispute ends its redeemed years and refunds the
+		// order (gift_refund_controller.go); any other lost dispute's clawback
+		// stands as it is
+		paymentIntentId := dispute.PaymentIntent
+		if paymentIntentId == "" {
+			// an older payload: the charge names it
+			charge, err := stripeFetchCharge(ctx, dispute.Charge)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch charge %s: %v", dispute.Charge, err)
+			}
+			if charge.Invoice != "" {
+				return &StripeWebhookResult{}, nil
+			}
+			paymentIntentId = charge.PaymentIntent
+		}
+		if giftOrderId, err := stripeGiftOrderIdForPaymentIntent(ctx, paymentIntentId); err != nil {
+			return nil, err
+		} else if giftOrderId != nil {
+			return stripeHandleGiftDisputeClosed(dispute, dispute.Charge, *giftOrderId, clientSession)
+		}
+		return &StripeWebhookResult{}, nil
+	}
+	if dispute.Status != stripeDisputeStatusWon {
+		return &StripeWebhookResult{}, nil
+	}
+	now := server.NowUtc()
+
+	// the store API reads, before the tx
+	charge, err := stripeFetchCharge(ctx, dispute.Charge)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch charge %s: %v", dispute.Charge, err)
+	}
+	// a gift order's won dispute restores exactly what the dispute voided
+	// (gift_refund_controller.go)
+	if charge.Invoice == "" {
+		if giftOrderId, err := stripeGiftOrderIdForPaymentIntent(ctx, charge.PaymentIntent); err != nil {
+			return nil, err
+		} else if giftOrderId != nil {
+			return stripeHandleGiftDisputeClosed(dispute, charge.Id, *giftOrderId, clientSession)
+		}
+	}
+	details := map[string]any{
+		"charge":     charge.Id,
+		"event_type": "charge.dispute.closed",
+	}
+	reason := ""
+	var credit *stripeInvoiceCredit
+	switch {
+	case charge.Invoice == "":
+		// a data pack: its code or balance is left to the operator
+		reason = "not_a_subscription_invoice"
+	case 0 < charge.Amount && charge.Amount <= charge.AmountRefunded:
+		reason = "charge_refunded"
+	default:
+		details["invoice"] = charge.Invoice
+		credit, err = stripeResolveInvoiceCredit(charge.Invoice, clientSession)
+		if errors.Is(err, errStripeInvoiceDestinationUnresolved) {
+			reason = "destination_unresolved"
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if credit == nil {
+			reason = "not_a_subscription_invoice"
+			break
+		}
+		sub, err := stripeSubscriptionFromInvoice(ctx, charge.Invoice)
+		if err != nil {
+			return nil, err
+		}
+		details["subscription_status"] = sub.Status
+		if !stripeSubscriptionBilling(sub.Status) {
+			reason = "subscription_not_billing"
+		} else if !now.Before(credit.endTime) {
+			reason = "paid_period_over"
+		}
+	}
+
+	handled := false
+	var restored *model.ReconcileSubscriptionRenewal
+	var eventNetworkId *server.Id
+	if credit != nil {
+		eventNetworkId = &credit.networkId
+	}
+	// the dispute id alone is the key of its clawback
+	ledgerId := "won/" + dispute.Id
+	server.Tx(ctx, func(tx server.PgTx) {
+		handled = false
+		restored = nil
+		ledgerTag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO stripe_refund (refund_id, charge_id, network_id, action)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT DO NOTHING
+			`,
+			ledgerId,
+			charge.Id,
+			eventNetworkId,
+			model.PaymentReconcileActionDisputeWon,
+		))
+		if ledgerTag.RowsAffected() == 0 {
+			glog.Infof("[sub]won dispute %s already processed; ignoring redelivery\n", dispute.Id)
+			return
+		}
+		handled = true
+
+		attemptReason := reason
+		if attemptReason == "" && !model.DisputeEndedEntitlementInTx(tx, ctx, dispute.Id) {
+			attemptReason = "dispute_ended_nothing"
+		}
+		if attemptReason == "" {
+			var restoreErr error
+			restored, restoreErr = model.RestoreDisputedStripeEntitlementInTx(
+				tx,
+				ctx,
+				credit.networkId,
+				charge.Invoice,
+				credit.startTime.UTC(),
+				credit.endTime.UTC(),
+				now,
+			)
+			switch {
+			case errors.Is(restoreErr, model.ErrPaymentNetworkNotFound):
+				attemptReason = "network_deleted"
+			case restoreErr != nil:
+				server.Raise(restoreErr)
+			case restored == nil:
+				attemptReason = "window_not_found"
+			}
+		}
+
+		eventDetails := map[string]any{"restored": restored != nil}
+		for key, value := range details {
+			eventDetails[key] = value
+		}
+		if attemptReason != "" {
+			eventDetails["reason"] = attemptReason
+		}
+		if eventErr := model.AddPaymentReconciliationEventInTx(tx, ctx, &model.PaymentReconciliationEvent{
+			RunId:     server.NewId(),
+			Store:     model.SubscriptionMarketStripe,
+			NetworkId: eventNetworkId,
+			Action:    model.PaymentReconcileActionDisputeWon,
+			Evidence:  dispute.Id,
+			Details:   eventDetails,
+		}); eventErr != nil {
+			// the event commits with the restore or neither does; Stripe retries
+			server.Raise(eventErr)
+		}
+	}, server.TxReadCommitted, server.OptNoRetry())
+
+	if handled && restored != nil {
+		// a balance retention removed has no row to reopen; the marker's own
+		// checks make this a no-op when the balance came back with the window
+		if _, err := model.RepairReconciledProEntitlement(ctx, model.SubscriptionMarketStripe, restored, server.NowUtc(), false); err != nil {
+			glog.Errorf("[sub]won dispute %s: could not repair the Pro marker: %v\n", dispute.Id, err)
+		}
+		model.UpdateProNetwork(ctx, restored.NetworkId)
+		glog.Infof("[sub]won dispute %s (charge %s): restored invoice %s\n", dispute.Id, charge.Id, charge.Invoice)
 	}
 	return &StripeWebhookResult{}, nil
 }
@@ -1257,6 +1677,7 @@ func stripeHandleDisputeCreated(
 // retries it. Where the charge cannot be mapped to anything we granted, a
 // refund_unmatched event is recorded for the operator instead of guessing --
 // and the handler still answers 200, since a retry cannot do better.
+// keepsPaidAmount: the charge keeps part of its money, so nothing is clawed back.
 func stripeHandleRefund(
 	clientSession *session.ClientSession,
 	refundId string,
@@ -1266,6 +1687,7 @@ func stripeHandleRefund(
 	action string,
 	eventType string,
 	amount int,
+	keepsPaidAmount bool,
 ) error {
 	ctx := clientSession.Ctx
 	now := server.NowUtc()
@@ -1280,21 +1702,17 @@ func stripeHandleRefund(
 	} else if paymentIntentId != "" {
 		// a single-charge (data pack) purchase: the checkout session id keys
 		// the balance-code ledger
-		url := fmt.Sprintf("%s/v1/checkout/sessions?payment_intent=%s", stripeApiBaseUrl, paymentIntentId)
-		sessions, err := server.HttpGetRequireStatusOk[*stripeCheckoutSessionList](
-			ctx,
-			url,
-			func(header http.Header) {
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", stripeApiTokenFunc()))
-			},
-			server.ResponseJsonObject[*stripeCheckoutSessionList],
-		)
+		sessionId, err := stripeCheckoutSessionIdForPaymentIntent(ctx, paymentIntentId)
 		if err != nil {
-			return fmt.Errorf("failed to fetch checkout session for payment intent %s: %v", paymentIntentId, err)
+			return err
 		}
-		if 0 < len(sessions.Data) {
-			stripeSessionId = sessions.Data[0].Id
-		}
+		stripeSessionId = sessionId
+	}
+	// a gift order's checkout: its refunds and disputes follow the gift's own
+	// rules, never the data pack clawback (gift_refund_controller.go)
+	var giftOrderId *server.Id
+	if stripeSessionId != "" {
+		giftOrderId = model.GetGiftOrderIdForStripeSession(ctx, stripeSessionId)
 	}
 
 	handled := false
@@ -1306,6 +1724,9 @@ func stripeHandleRefund(
 	}
 	if 0 < amount {
 		details["amount"] = amount
+	}
+	if keepsPaidAmount {
+		details["partial"] = true
 	}
 	endedNetworkIds := []server.Id{}
 
@@ -1330,7 +1751,9 @@ func stripeHandleRefund(
 
 		if invoiceId != "" {
 			details["invoice"] = invoiceId
-			if ledgerNetworkId != nil {
+			if ledgerNetworkId != nil && keepsPaidAmount {
+				details["ended"] = false
+			} else if ledgerNetworkId != nil {
 				// a subscription invoice we credited: end its renewal and the
 				// pro balance it granted
 				endedNetworkIds = model.EndReconciledEntitlementForTransactionsInTx(
@@ -1347,21 +1770,29 @@ func stripeHandleRefund(
 				eventAction = model.PaymentReconcileActionRefundUnmatched
 				details["reason"] = "invoice_not_credited"
 			}
+		} else if stripeSessionId != "" && giftOrderId != nil {
+			// a gift order's charge: a refund voids its unredeemed codes by the
+			// amount refunded, partial or not, and a dispute every unredeemed
+			// one; neither ends a redeemed code's year
+			details["checkout_session"] = stripeSessionId
+			eventAction = stripeGiftRefundInTx(tx, ctx, *giftOrderId, refundId, action, amount, details, now)
 		} else if stripeSessionId != "" {
 			details["checkout_session"] = stripeSessionId
-			found, voidedCount, clawedNetworkIds := model.ClawbackBalanceCodesForPurchaseEventInTx(
-				tx,
-				ctx,
-				stripeSessionId,
-				now,
-			)
-			if found {
-				endedNetworkIds = clawedNetworkIds
-				details["voided_codes"] = voidedCount
-				details["ended_balances"] = len(clawedNetworkIds)
-			} else {
-				eventAction = model.PaymentReconcileActionRefundUnmatched
-				details["reason"] = "no_balance_code_for_session"
+			if !keepsPaidAmount {
+				found, voidedCount, clawedNetworkIds := model.ClawbackBalanceCodesForPurchaseEventInTx(
+					tx,
+					ctx,
+					stripeSessionId,
+					now,
+				)
+				if found {
+					endedNetworkIds = clawedNetworkIds
+					details["voided_codes"] = voidedCount
+					details["ended_balances"] = len(clawedNetworkIds)
+				} else {
+					eventAction = model.PaymentReconcileActionRefundUnmatched
+					details["reason"] = "no_balance_code_for_session"
+				}
 			}
 		} else {
 			// no invoice and no checkout session: this charge maps to nothing
@@ -1883,17 +2314,17 @@ func stripeCheckoutError(code string, message string) *StripeCreateCheckoutSessi
 // both sell exactly the same thing. A non-empty errMessage is customer-facing,
 // and errCode is its `PurchaseErrorCode*`.
 func stripeDataPackLineItems(itemId string) (lineItems []*stripe.CheckoutSessionLineItemParams, errCode string, errMessage string) {
-	byteCount, ok := stripeDataPackByteCount(itemId)
-	if !ok {
-		return nil, PurchaseErrorCodeInvalidRequest, "Unknown item."
+	byteCount, errCode, errMessage := stripeDataPackByteCount(itemId)
+	if errMessage != "" {
+		return nil, errCode, errMessage
 	}
 	productId, ok := stripeProductForByteCount(byteCount)
 	if !ok {
 		glog.Errorf("[stripe]no product configured for data pack %s\n", itemId)
 		return nil, PurchaseErrorCodeItemUnavailable, "That data pack is not available."
 	}
-	priceUsd, ok := stripeDataPackPriceUsd(byteCount)
-	if !ok || priceUsd <= 0 {
+	priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCard)
+	if !ok {
 		glog.Errorf("[stripe]no price in pro.yml for data pack %s\n", itemId)
 		return nil, PurchaseErrorCodeItemUnavailable, "That data pack is not available."
 	}
@@ -1909,15 +2340,20 @@ func stripeDataPackLineItems(itemId string) (lineItems []*stripe.CheckoutSession
 	}, "", ""
 }
 
-// stripeDataPackByteCount maps a data item id to the amount it grants, from pro.yml.
-func stripeDataPackByteCount(itemId string) (model.ByteCount, bool) {
-	switch itemId {
-	case StripeItemData1Tib:
-		return 1 * model.Tib, true
-	case StripeItemData10Tib:
-		return 10 * model.Tib, true
+// stripeDataPackByteCount is the amount a data pack sold by card grants, from
+// pro.yml. A pack pro.yml does not sell by card (the 256 GiB pack is x402 and
+// Gamma only) is refused with item_unavailable and where it is sold; an id
+// that names no pack is invalid_request. A non-empty errMessage is the
+// customer-facing refusal and errCode its `PurchaseErrorCode*`.
+func stripeDataPackByteCount(itemId string) (byteCount model.ByteCount, errCode string, errMessage string) {
+	sku, refusal := dataPackOnRail(itemId, model.DataRailCard)
+	if refusal != "" {
+		return 0, PurchaseErrorCodeItemUnavailable, refusal
 	}
-	return 0, false
+	if sku == nil || sku.Data <= 0 {
+		return 0, PurchaseErrorCodeInvalidRequest, "Unknown item."
+	}
+	return sku.Data, "", ""
 }
 
 // stripeProductForByteCount finds the Stripe product configured for a data amount, so
@@ -1933,17 +2369,6 @@ func stripeProductForByteCount(byteCount model.ByteCount) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// stripeDataPackPriceUsd is the price of a data amount, from pro.yml -- the same source
-// the site and the x402 skus quote from, so a customer is never shown two prices.
-func stripeDataPackPriceUsd(byteCount model.ByteCount) (float64, bool) {
-	for _, sku := range model.Pro().DataCodeSkus {
-		if sku.Data == byteCount {
-			return sku.PriceUsd, true
-		}
-	}
-	return 0, false
 }
 
 // stripeCheckoutUiMode normalizes the requested ui mode. Empty means hosted, so callers
@@ -2054,6 +2479,14 @@ func StripeCreateCheckoutSession(
 		), nil
 	}
 
+	// a data pack pro.yml does not sell by card (the 256 GiB pack) is refused
+	// before anything of Stripe's is touched, with where it is sold
+	if isDataPackItem(args.ItemId) {
+		if _, errCode, errMessage := stripeDataPackByteCount(args.ItemId); errMessage != "" {
+			return stripeCheckoutError(errCode, errMessage), nil
+		}
+	}
+
 	networkId := clientSession.ByJwt.NetworkId
 
 	params := &stripe.CheckoutSessionParams{
@@ -2070,6 +2503,22 @@ func StripeCreateCheckoutSession(
 		return stripeCheckoutError(PurchaseErrorCodeCheckoutUnavailable, "Checkout is not configured."), nil
 	}
 
+	if args.ItemId != StripeItemProMonthly && args.ItemId != StripeItemProYearly && !isDataPackItem(args.ItemId) {
+		// refused before it spends a purchase start
+		return stripeCheckoutError(PurchaseErrorCodeInvalidRequest, "Unknown item."), nil
+	}
+
+	// card testers run stolen cards through checkouts: the address's budget
+	// the payment sheet spends, then the network's own purchase starts
+	// (subscription_stripe_purchase_limit.go), before anything of Stripe's
+	if err := model.CheckOnboardingRateLimit(clientSession, model.OnboardingOfferRateLimit); err != nil {
+		return nil, err
+	}
+	if refusal := stripeNetworkPurchaseStartRefusal(clientSession.Ctx, networkId, stripePurchaseStartSettingsFunc()); refusal != "" {
+		glog.Infof("[stripe]checkout: network %s has no purchase start left: %s\n", networkId, refusal)
+		return stripeCheckoutError(PurchaseErrorCodeRateLimited, refusal), nil
+	}
+
 	stripe.Key = stripeApiToken()
 
 	switch args.ItemId {
@@ -2080,19 +2529,24 @@ func StripeCreateCheckoutSession(
 		if existing, _ := model.GetStripeCustomer(clientSession); existing != nil {
 			customerId = *existing
 		}
-		if stripeNetworkHasActiveSubscription(clientSession, customerId) {
+		if refusal := stripeNewSubscriptionRefusal(clientSession, customerId); refusal != "" {
 			glog.Infof("[stripe]checkout: network %s already has an active subscription\n", networkId)
-			return stripeCheckoutError(PurchaseErrorCodeAlreadySubscribed, stripeAlreadySubscribedMessage), nil
+			return stripeCheckoutError(PurchaseErrorCodeAlreadySubscribed, refusal), nil
 		}
 
-		// the caller's regional tier price, and the welcome-offer coupon when
-		// the offer is redeemable (yearly only)
-		priceId, discounts, onboardingMetadata, err := stripeCheckoutTierAndDiscount(args.ItemId, args.StorefrontCountry, clientSession)
+		// the caller's regional tier price, the welcome-offer coupon when the
+		// offer is redeemable (yearly only), and the win-back offer's
+		// promotion code (monthly only), which Stripe applies only for the
+		// customer it was made for
+		priceId, discounts, onboardingMetadata, discountCustomerId, err := stripeCheckoutTierAndDiscount(args.ItemId, args.StorefrontCountry, clientSession)
 		if err != nil || priceId == "" {
 			glog.Errorf("[stripe]no subscription price configured for %s: %v\n", args.ItemId, err)
 			return stripeCheckoutError(PurchaseErrorCodePlanUnavailable, "That plan is not available."), nil
 		}
 		params.Discounts = discounts
+		if discountCustomerId != "" {
+			params.Customer = stripe.String(discountCustomerId)
+		}
 
 		params.Mode = stripe.String(string(stripe.CheckoutSessionModeSubscription))
 		params.LineItems = []*stripe.CheckoutSessionLineItemParams{
@@ -2124,7 +2578,11 @@ func StripeCreateCheckoutSession(
 			params.SubscriptionData.TrialPeriodDays = stripe.Int64(StripeSubscriptionTrialDays)
 		}
 
-	case StripeItemData1Tib, StripeItemData10Tib:
+	default:
+		if !isDataPackItem(args.ItemId) {
+			return stripeCheckoutError(PurchaseErrorCodeInvalidRequest, "Unknown item."), nil
+		}
+		// a data pack pro.yml sells by card (refused above when it does not)
 		lineItems, errCode, errMessage := stripeDataPackLineItems(args.ItemId)
 		if errMessage != "" {
 			return stripeCheckoutError(errCode, errMessage), nil
@@ -2132,9 +2590,6 @@ func StripeCreateCheckoutSession(
 		// a one-time payment
 		params.Mode = stripe.String(string(stripe.CheckoutSessionModePayment))
 		params.LineItems = lineItems
-
-	default:
-		return stripeCheckoutError(PurchaseErrorCodeInvalidRequest, "Unknown item."), nil
 	}
 
 	checkoutSession, err := stripecheckout.New(params)

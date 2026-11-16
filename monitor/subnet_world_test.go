@@ -96,6 +96,8 @@ type subnetWorldContract struct {
 	code  []byte
 	slots map[common.Hash]common.Hash
 	views map[string]subnetWorldView
+	// Code reads at an earlier block see no contract.
+	deployed uint64
 }
 
 // A synthetic included transaction.
@@ -151,6 +153,10 @@ type subnetWorld struct {
 	override func(endpoint, method string, params []json.RawMessage) (any, error, bool)
 	calls    map[string]int
 	requests []string
+
+	// The coordinator's campaignReserved, nil as zero, and how often it was read.
+	campaignReserved      *big.Int
+	campaignReservedReads int
 }
 
 // Endpoint URLs are synthetic and never rendered by the readers.
@@ -541,6 +547,13 @@ func (self *subnetWorld) setDeposit(noId uint64, amount *big.Int) {
 		return []any{new(big.Int).Set(deposits[inputs[1].(*big.Int).Uint64()])}, nil
 	}
 	principal := func(id uint64) *big.Int { return new(big.Int).Add(big.NewInt(500*int64(id)), deposits[id]) }
+	coordinator.views["campaignReserved"] = func([]any) ([]any, error) {
+		self.campaignReservedReads++
+		if self.campaignReserved == nil {
+			return []any{new(big.Int)}, nil
+		}
+		return []any{new(big.Int).Set(self.campaignReserved)}, nil
+	}
 	coordinator.views["cumulativeConviction"] = func(inputs []any) ([]any, error) {
 		return []any{principal(inputs[0].(*big.Int).Uint64())}, nil
 	}
@@ -611,6 +624,8 @@ func (self *subnetWorld) installIdentityState() {
 	}
 	for noId := uint64(1); noId <= 2; noId++ {
 		register(subnetWorldKey(fmt.Sprintf("operator-%d-pool", noId)), uint16(10+noId), [32]byte(vaultColdkey))
+		deposit := subnetWorldKey(fmt.Sprintf("operator-%d-deposit", noId))
+		self.setStorage("SubtensorModule", "Owner", types.AccountID(subnetMirroredColdkey(subnetWorldAddress(fmt.Sprintf("operator-%d-deposit-signer", noId)))), deposit[:])
 	}
 	register(subnetWorldKey("escrow"), 5, [32]byte(vaultColdkey))
 	permits := make([]types.Bool, 32)
@@ -1167,6 +1182,13 @@ func (self *subnetWorld) dispatch(endpoint, method string, params []json.RawMess
 		_ = json.Unmarshal(params[0], &address)
 		contract, ok := self.contracts[address]
 		if !ok {
+			return "0x", nil
+		}
+		// World block hashes carry their height in the first eight bytes.
+		var selector struct {
+			BlockHash common.Hash `json:"blockHash"`
+		}
+		if 1 < len(params) && json.Unmarshal(params[1], &selector) == nil && binary.BigEndian.Uint64(selector.BlockHash[:8]) < contract.deployed {
 			return "0x", nil
 		}
 		return hexutil.Encode(contract.code), nil

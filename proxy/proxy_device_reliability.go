@@ -25,6 +25,13 @@ type hostedReliabilityDevice interface {
 // override and re-applies it to every window it builds. Without a window there
 // is nothing in effect to merge onto, and a nonpositive multiple keeps the
 // connect default.
+//
+// The override replaces the multi client's whole connect.ReliabilitySettings,
+// so "nothing else" holds only while sdk.ReliabilitySettings carries every
+// connect field (sdk TestReliabilitySettingsRoundTripCarriesEveryConnectField).
+// When it did not, this write turned off every hosted window's outcome
+// watchdog, uplink staleness hold and light classifier
+// (TestProxyDeviceHostedWindowKeepsTheOutcomeWatchdog).
 func applyHostedEvaluationPoolMultiple(device hostedReliabilityDevice, multiple int) {
 	if multiple <= 0 {
 		return

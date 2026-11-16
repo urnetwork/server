@@ -167,6 +167,20 @@ func (self *probePath) reopens() int {
 	return self.reopened
 }
 
+// Whether the current tunnel's window client was replaced while the tunnel
+// kept running (providertunnel.Tunnel.ClientReplaced); false for a tunnel
+// that cannot tell.
+func (self *probePath) clientReplaced() bool {
+	var tunnel probeTunnel
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		tunnel = self.tunnel
+	}()
+	replaced, ok := tunnel.(interface{ ClientReplaced() bool })
+	return ok && replaced.ClientReplaced()
+}
+
 // Closes the current tunnel and waits for every retired one. It is safe
 // to call more than once; later calls return nil.
 func (self *probePath) Close() error {

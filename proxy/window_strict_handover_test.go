@@ -106,3 +106,18 @@ func TestWindowStrictHandoverReadsTheYamlBooleanWords(t *testing.T) {
 		}
 	}
 }
+
+// Every hosted device holds its windows' refill while its payer is out of
+// balance; apps leave connect's default off.
+func TestHostedDevicesHoldTheirRefillWhileOutOfBalance(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := budgetTestManager(t, ctx)
+	defer manager.CloseAndWait(context.Background())
+	settings := manager.proxyDeviceSettings()
+	settings.DisableWindowIdentityPersistence = true
+	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, settings)
+	if !deviceLocalSettings.OutOfBalanceRefillProbe {
+		t.Fatal("a hosted device builds window clients its payer's balance refuses")
+	}
+}

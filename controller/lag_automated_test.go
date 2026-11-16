@@ -69,7 +69,7 @@ func TestLagTrackLogsAMissingAsnDatabase(t *testing.T) {
 	lagAsnDatabaseMissingLogged.Store(false)
 
 	// the database is there and does not know the address
-	useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
+	useIpAsnDb(t, writeTestIpAsnDb(t, server.GeoLite2AsnDatabaseType, map[string]IpAsn{
 		"192.0.2.0/24": {Number: 64500, Organization: "Example"},
 	}))
 	connect.AssertEqual(t, lagTrackAutomatedReason(http.Header{}, nil), "")
@@ -82,7 +82,7 @@ func TestLagTrackLogsAMissingAsnDatabase(t *testing.T) {
 		connect.AssertEqual(t, lagTrackAutomatedReason(http.Header{}, nil), "")
 	}
 	connect.AssertEqual(t, len(logged), 1)
-	for _, want := range []string{geoLite2AsnResourcePath, model.LagAutomatedReasonDatacenterAsn} {
+	for _, want := range []string{server.GeoLite2AsnResourcePath, model.LagAutomatedReasonDatacenterAsn} {
 		if !strings.Contains(logged[0], want) {
 			t.Fatalf("the missing database is logged as %q, without %q", logged[0], want)
 		}
@@ -145,7 +145,7 @@ func TestLagTrackAutomated(t *testing.T) {
 		defer Testing_SetLagSettings(settings)()
 		places := map[string]*model.LagPlace{}
 		useLagAddressPlaces(t, places)
-		useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
+		useIpAsnDb(t, writeTestIpAsnDb(t, server.GeoLite2AsnDatabaseType, map[string]IpAsn{
 			"198.51.100.0/24": {Number: 7922, Organization: "Example Access"},
 			"203.0.113.0/24":  {Number: 16509, Organization: "AMAZON-02"},
 		}))
@@ -296,7 +296,7 @@ func TestLagTrackSourceStoredAndCounted(t *testing.T) {
 		defer Testing_SetLagSettings(settings)()
 		places := map[string]*model.LagPlace{}
 		useLagAddressPlaces(t, places)
-		useIpAsnDb(t, writeTestIpAsnDb(t, geoLite2AsnDatabaseType, map[string]IpAsn{
+		useIpAsnDb(t, writeTestIpAsnDb(t, server.GeoLite2AsnDatabaseType, map[string]IpAsn{
 			"198.51.100.0/24": {Number: 7922, Organization: "Example Access"},
 		}))
 		extender := newLagServingTestExtender(t, ctx, places, lagTestPlace("Hamburg", "de", 53.5, 10.0), "192.0.2.1")

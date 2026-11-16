@@ -1,0 +1,34 @@
+# Inert source template; render/pin/prove before any ordinary evaluation launch.
+[Unit]
+Description=Independent subevaluation recovery outside ordinary management ancestry
+Requires=urnetwork-recovery.slice
+After=urnetwork-recovery.slice
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Slice=urnetwork-recovery.slice
+ExecStart="@AGENT_PATH@" --config "@CONFIG_PATH@" --recover-active
+Restart=no
+KillMode=control-group
+OOMPolicy=kill
+LimitCORE=0
+UMask=0077
+MemoryMax=@CLEANUP_MEMORY_BYTES@
+MemorySwapMax=0
+TasksMax=@CLEANUP_TASKS_MAXIMUM@
+CPUQuota=@MANAGEMENT_CPU_QUOTA_PERCENT@%
+CPUQuotaPeriodSec=@CPU_PERIOD_MICROS@us
+AllowedCPUs=@MANAGEMENT_CPUSET@
+CPUAffinity=@MANAGEMENT_CPUSET@
+TimeoutStartSec=@RECOVERY_TIMEOUT_SECONDS@s
+TimeoutStopSec=@CANCEL_GRACE_SECONDS@s
+StandardInput=null
+StandardOutput=null
+StandardError=null
+PrivateNetwork=no
+PrivateUsers=no
+PrivateMounts=no
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "LANG=C" "LC_ALL=C"

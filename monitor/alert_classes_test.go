@@ -298,8 +298,8 @@ func harvestAlertClasses(t *testing.T, sourceTexts ...string) sourceAlertClasses
 					sites = append(sites, classSite{site: site, node: typed, expr: expr, value: resolve(expr, frames, nameValues, 0), marked: marked})
 				}
 				_, logClass := values["re"]
-				_, logBurst := values["eventRe"]
-				if expr, ok := values["name"]; ok && (logClass || logBurst) {
+				_, logCanonical := values["eventRe"]
+				if expr, ok := values["name"]; ok && (logClass || logCanonical) {
 					sites = append(sites, classSite{site: site, node: typed, expr: expr, value: resolve(expr, frames, nameValues, 0)})
 				}
 			case *ast.AssignStmt:
@@ -476,20 +476,21 @@ func TestEveryAlertClassIsClassified(t *testing.T) {
 		"signal_mimir_continuity.go mimirContinuityHealthyFindings": {"mimir-continuity-gap-unclassified", "mimir-ingestion-gap", "mimir-query-store-visibility-gap"},
 		"signal_provider_count.go assess":                           {"provider-count-effective-empty", "provider-count-small-list"},
 		"signal_provider_count.go providerCountFinding":             {"provider-count-effective-empty", "provider-count-small-list", "provider-count-small-list-unclassified"},
+		// the classes of its positional partition table, which no class site names
+		"signal_minio_storage.go evaluateMinioRequestErrors": {"minio-read-errors", "minio-write-errors", "minio-write-rejected"},
 		// literals elsewhere name these: the finding's own class, the
 		// probeSchemaContract classes, the MinIO error patterns, and the log
 		// class and burst names
 		"signal.go alertFromFinding": nil,
 		// Silent availability and notifier lookup copy existing finding
 		// identities; their literal producers above still define every class.
-		"signal.go Run":                                      nil,
-		"alert_slack.go observeWithLock":                     nil,
-		"schema_readiness.go probeSchemaUnavailableFinding":  nil,
-		"signal_derived_locations.go check":                  nil,
-		"signal_egress_site_pool.go check":                   nil,
-		"signal_hmac_cutover.go check":                       nil,
-		"signal_minio_storage.go evaluateMinioRequestErrors": nil,
-		"tailer.go drainWindow":                              nil,
+		"signal.go Run":                                     nil,
+		"alert_slack.go observeWithLock":                    nil,
+		"schema_readiness.go probeSchemaUnavailableFinding": nil,
+		"signal_derived_locations.go check":                 nil,
+		"signal_egress_site_pool.go check":                  nil,
+		"signal_hmac_cutover.go check":                      nil,
+		"tailer.go drainWindow":                             nil,
 	}
 
 	harvest := harvestAlertClasses(t)

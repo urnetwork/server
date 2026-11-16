@@ -14,7 +14,7 @@ import (
 	"reflect"
 	"runtime/debug"
 	"strings"
-	// mathrand "math/rand"
+	// mathrand "math/rand/v2"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"

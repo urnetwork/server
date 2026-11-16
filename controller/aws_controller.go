@@ -84,8 +84,60 @@ type Template interface {
 	Funcs(texttemplate.FuncMap)
 }
 
+// A template whose email is in a language of its own (a gift's buyer chose it
+// on ur.io) names it; every other email is English. The layout's `lang` and
+// `dir` follow it, right to left for Arabic.
+type LanguageTemplate interface {
+	Template
+	// a BCP 47 tag, such as "es" or "ar"
+	Language() string
+}
+
+// A template whose replies go to an address of its own (a gift's buyer, for
+// the friend's email) instead of email.yml's reply-to. An empty or invalid
+// address keeps the default.
+type ReplyToTemplate interface {
+	Template
+	ReplyTo() string
+}
+
+// A file an email carries.
+type EmailAttachment struct {
+	// a plain file name, shown to the recipient
+	Filename    string
+	ContentType string
+	Data        []byte
+}
+
+// A template whose email carries files. Only these emails are sent as raw MIME
+// (multipart/mixed); every other email keeps SES's simple send.
+type AttachmentTemplate interface {
+	Template
+	EmailAttachments() []*EmailAttachment
+}
+
+// The language a template renders in, and its direction.
+func templateLanguage(template Template) (lang string, dir string) {
+	lang = "en"
+	if languageTemplate, ok := template.(LanguageTemplate); ok {
+		if language := languageTemplate.Language(); language != "" {
+			lang = language
+		}
+	}
+	dir = "ltr"
+	if base, _, _ := strings.Cut(lang, "-"); base == "ar" || base == "fa" || base == "he" || base == "ur" {
+		dir = "rtl"
+	}
+	return
+}
+
+// The functions every template has (`Lang`, `Dir`), then the template's own.
 func TemplateFuncs(template Template) texttemplate.FuncMap {
-	funcs := texttemplate.FuncMap{}
+	lang, dir := templateLanguage(template)
+	funcs := texttemplate.FuncMap{
+		"Lang": func() string { return lang },
+		"Dir":  func() string { return dir },
+	}
 	template.Funcs(funcs)
 	return funcs
 }
@@ -253,9 +305,16 @@ func (self *SubscriptionEndedTemplate) Name() string {
 // Subscription, whose "Update payment method" opens Stripe's billing portal. The
 // hosted link is sent only when it is on Stripe's invoice domain
 // (stripeHostedInvoiceUrlAllowed); otherwise the email offers the update alone.
+// A payment that waits on the customer's bank (3D Secure) asks the customer to
+// confirm it instead: the hosted page runs the bank's check, and Manage
+// Subscription links the same page when the email cannot.
 type SubscriptionPaymentFailedTemplate struct {
 	// the final notice rather than the first
 	Final bool
+	// the payment waits on the customer to confirm it with their bank (3D
+	// Secure) rather than having been declined. Added after the other fields:
+	// a notice written before it reads as declined.
+	ActionRequired bool
 	// the invoice's Stripe-hosted payment page, or ""
 	HostedInvoiceUrl string
 	// the amount due in the currency's minor unit, and its ISO code
@@ -289,24 +348,6 @@ func (self *SubscriptionPaymentFailedTemplate) NextAttemptDate() string {
 		return ""
 	}
 	return self.NextAttemptTime.UTC().Format("January 2, 2006")
-}
-
-// The notice that a network's USDC payout is withheld for want of a Solana
-// wallet. Payout is the withheld total, which the account message outbox sums
-// over the slices of one payout run.
-type MissingWalletTemplate struct {
-	PaymentId server.Id
-	Payout    model.NanoCents
-	BaseTemplate
-}
-
-func (self *MissingWalletTemplate) Name() string {
-	return "subscription_missing_wallet"
-}
-
-// The withheld total in USD with two decimals, as the templates print it.
-func (self *MissingWalletTemplate) AmountUsd() string {
-	return fmt.Sprintf("%.2f", model.NanoCentsToUsd(self.Payout))
 }
 
 // fixme - we can clean this up so all public functions are in the interface
@@ -470,11 +511,22 @@ func SendAccountEmailTemplate(emailAddress string, template Template, sendOpts .
 	return (&AWSMessageSender{}).sendEmailTemplate(emailAddress, template, sendOpts...)
 }
 
-// Renders the template and sends it as one email.
+// Renders the template and sends it as one email, with the template's own
+// reply-to and attachments when it has them.
 func (self *AWSMessageSender) sendEmailTemplate(emailAddress string, template Template, sendOpts ...any) error {
 	subject, bodyHtml, bodyText, err := RenderEmailTemplate(template)
 	if err != nil {
 		return err
+	}
+	if replyToTemplate, ok := template.(ReplyToTemplate); ok {
+		if replyTo := replyToTemplate.ReplyTo(); replyTo != "" {
+			sendOpts = append(sendOpts, &sendAccountEmailReplyTo{replyTo: replyTo})
+		}
+	}
+	if attachmentTemplate, ok := template.(AttachmentTemplate); ok {
+		if attachments := attachmentTemplate.EmailAttachments(); 0 < len(attachments) {
+			sendOpts = append(sendOpts, &sendAccountEmailAttachments{attachments: attachments})
+		}
 	}
 	return self.sendEmail(emailAddress, template.Name(), subject, bodyHtml, bodyText, sendOpts...)
 }
@@ -631,22 +683,64 @@ func SenderEmail(senderEmail string) *SendAccountEmailSenderEmail {
 	}
 }
 
-// One SES SendEmail call, bounded by the send timeout.
+// The reply-to of one email, from its template (ReplyToTemplate).
+type sendAccountEmailReplyTo struct {
+	replyTo string
+}
+
+// The files of one email, from its template (AttachmentTemplate).
+type sendAccountEmailAttachments struct {
+	attachments []*EmailAttachment
+}
+
+// One SES call, bounded by the send timeout: SendEmail, or SendRawEmail for an
+// email that carries files.
 // https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
 // https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/ses-example-send-email.html
 // https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html
+// https://docs.aws.amazon.com/ses/latest/APIReference/API_SendRawEmail.html
 func (self *AWSMessageSender) sendEmail(emailAddress string, templateName string, subject string, bodyHtml string, bodyText string, sendOpts ...any) error {
 	awsRegion := "us-west-1"
 	charSet := "UTF-8"
 
 	// note any sender email domain will need to be registed as an identity in SES
 	senderEmail := EnvEmailConfig().CompanySenderEmail
+	templateReplyTo := ""
+	var attachments []*EmailAttachment
 	for _, sendOpt := range sendOpts {
 		switch v := sendOpt.(type) {
 		case SendAccountEmailSenderEmail:
 			senderEmail = v.SenderEmail
 		case *SendAccountEmailSenderEmail:
 			senderEmail = v.SenderEmail
+		case *sendAccountEmailReplyTo:
+			templateReplyTo = v.replyTo
+		case *sendAccountEmailAttachments:
+			attachments = v.attachments
+		}
+	}
+	emailConfig := EnvEmailConfig()
+	replyTo := strings.TrimSpace(emailConfig.ReplyToEmail)
+	if address, ok := emailHeaderAddress(templateReplyTo); ok {
+		replyTo = address
+	}
+
+	var rawMessage []byte
+	if 0 < len(attachments) {
+		var err error
+		rawMessage, err = buildRawEmail(&rawEmail{
+			from:        senderEmail,
+			to:          emailAddress,
+			replyTo:     replyTo,
+			subject:     subject,
+			bodyText:    bodyText,
+			bodyHtml:    bodyHtml,
+			attachments: attachments,
+			date:        server.NowUtc(),
+		})
+		if err != nil {
+			// a message that cannot be written is not an SES call
+			return err
 		}
 	}
 
@@ -660,6 +754,26 @@ func (self *AWSMessageSender) sendEmail(emailAddress string, templateName string
 	}
 
 	sesService := ses.New(awsSession)
+
+	if rawMessage != nil {
+		rawInput := &ses.SendRawEmailInput{
+			Source:       aws.String(senderEmail),
+			Destinations: []*string{aws.String(emailAddress)},
+			RawMessage: &ses.RawMessage{
+				Data: rawMessage,
+			},
+		}
+		if configurationSet := strings.TrimSpace(emailConfig.ConfigurationSet); configurationSet != "" {
+			rawInput.ConfigurationSetName = aws.String(configurationSet)
+			rawInput.Tags = []*ses.MessageTag{{
+				Name:  aws.String("template"),
+				Value: aws.String(templateName),
+			}}
+		}
+		// the call and every SDK retry inside it stop at the send timeout
+		_, err = sesService.SendRawEmailWithContext(sendCtx, rawInput)
+		return accountMessageSendResult(sendCtx, accountMessageChannelEmail, sendTimeout, err)
+	}
 
 	input := &ses.SendEmailInput{
 		Destination: &ses.Destination{
@@ -686,8 +800,7 @@ func (self *AWSMessageSender) sendEmail(emailAddress string, templateName string
 		},
 		Source: aws.String(senderEmail),
 	}
-	emailConfig := EnvEmailConfig()
-	if replyTo := strings.TrimSpace(emailConfig.ReplyToEmail); replyTo != "" {
+	if replyTo != "" {
 		input.ReplyToAddresses = []*string{aws.String(replyTo)}
 	}
 	if configurationSet := strings.TrimSpace(emailConfig.ConfigurationSet); configurationSet != "" {

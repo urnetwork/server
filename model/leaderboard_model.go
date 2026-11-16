@@ -2,10 +2,70 @@ package model
 
 import (
 	"context"
+	"strconv"
+	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
+
+// The data leaderboard ranks each network's provided bytes over the newest
+// payout windows: "refreshed every payout" (/stats/leaderboard). Before the
+// provider earning boundary a window is a payout plan's subsidy epoch
+// (subsidy_payment). Past the boundary no plan forms an epoch
+// (operator_block_points.go), so with subsidy epochs alone the board, the
+// network ranking and the epoch earnings email's rank froze at the plans of
+// 2026-10-11. Since then a window is a completed operator block whose points
+// were awarded: the award stores one payment per provider network with its
+// bytes in the block under the block's plan id (OperatorBlockPointsPlanId),
+// so the block counts as a plan did.
+const leaderboardPayoutWindowCount = 4
+
+// The candidate operator block windows for leaderboardPayoutWindowsSql: the
+// plan ids and numbers of blocks 1 through the block containing now. Only the
+// blocks with an award (a payment_report row) are windows.
+func leaderboardOperatorBlocks(now time.Time) (planIds []server.Id, blocks []int64) {
+	last := int64(SubnetBlockNumber(now))
+	planIds = make([]server.Id, 0, last)
+	blocks = make([]int64, 0, last)
+	for block := int64(1); block <= last; block += 1 {
+		planIds = append(planIds, OperatorBlockPointsPlanId(block))
+		blocks = append(blocks, block)
+	}
+	return
+}
+
+// The plan ids of the newest leaderboardPayoutWindowCount payout windows,
+// subsidy epochs and awarded operator blocks together, ordered by when each
+// window ends (a block ends at genesis + block * duration). Its parameters are
+// leaderboardPayoutWindowsArgs.
+var leaderboardPayoutWindowsSql = `
+	SELECT payout_window.payment_plan_id
+	FROM (
+		SELECT subsidy_payment.payment_plan_id, subsidy_payment.end_time
+		FROM subsidy_payment
+
+		UNION ALL
+
+		SELECT
+			operator_block.payment_plan_id,
+			$3::timestamp + (operator_block.block_number * $4::bigint) * interval '1 second' AS end_time
+		FROM unnest($1::uuid[], $2::bigint[]) AS operator_block(payment_plan_id, block_number)
+		INNER JOIN payment_report ON payment_report.payment_plan_id = operator_block.payment_plan_id
+	) payout_window
+	ORDER BY payout_window.end_time DESC
+	LIMIT ` + strconv.Itoa(leaderboardPayoutWindowCount) + `
+`
+
+func leaderboardPayoutWindowsArgs(now time.Time) []any {
+	planIds, blocks := leaderboardOperatorBlocks(now)
+	return []any{
+		planIds,
+		blocks,
+		SubnetBlockGenesis,
+		int64(SubnetBlockDuration / time.Second),
+	}
+}
 
 type Earner struct {
 	NetworkId         string  `json:"network_id"`
@@ -55,10 +115,7 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 										SUM(account_payment.payout_byte_count) / (1024 * 1024) AS net_mib_count
 							FROM account_payment
 
-							INNER JOIN (SELECT *
-									FROM subsidy_payment
-									ORDER BY end_time DESC
-									LIMIT 4) t ON t.payment_plan_id = account_payment.payment_plan_id
+							INNER JOIN (`+leaderboardPayoutWindowsSql+`) t ON t.payment_plan_id = account_payment.payment_plan_id
 
 							-- a corrected legacy payment counts once, as its replacement
 							WHERE NOT `+legacyProviderPaymentReplacedSql("account_payment.payment_id")+`
@@ -72,6 +129,7 @@ func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
 				ORDER BY t.net_mib_count DESC
 				;
 		`,
+			leaderboardPayoutWindowsArgs(server.NowUtc())...,
 		)
 
 		server.WithPgResult(result, err, func() {
@@ -131,13 +189,14 @@ func GetNetworkLeaderboardRankings(ctx context.Context) (map[server.Id]NetworkRa
 					sum(account_payment.payout_byte_count) / (1024 * 1024) AS net_mib_count,
 					row_number() OVER (ORDER BY sum(account_payment.payout_byte_count) DESC) AS leaderboard_rank
 				FROM account_payment
-				INNER JOIN (SELECT * FROM subsidy_payment ORDER BY end_time DESC LIMIT 4) t ON t.payment_plan_id = account_payment.payment_plan_id
+				INNER JOIN (`+leaderboardPayoutWindowsSql+`) t ON t.payment_plan_id = account_payment.payment_plan_id
 				-- a corrected legacy payment counts once, as its replacement
 				WHERE NOT `+legacyProviderPaymentReplacedSql("account_payment.payment_id")+`
 				GROUP BY account_payment.network_id
 			) t
 			INNER JOIN network ON network.network_id = t.network_id
 			`,
+			leaderboardPayoutWindowsArgs(server.NowUtc())...,
 		)
 		server.WithPgResult(result, err, func() {
 			if err != nil {

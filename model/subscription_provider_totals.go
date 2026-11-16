@@ -1,4 +1,13 @@
 // Legacy provider totals are a replay-safe projection of already-committed earnings.
+//
+// Settlement stopped producing them on 2026-11-11 (BILLING-SPLIT.md): the
+// lifetime totals they credit, account_balance.provided_*, have no production
+// reader. Until then every settled contract with provider payouts queued one
+// ApplyLegacyProviderTotals row. The per-task reader below and the drain
+// (subscription_provider_totals_drain.go) stay to consume the rows already
+// queued, and those that binaries built before the change queue while a
+// rollout replaces them. Remove both readers once every producer is gone and
+// Main has no ApplyLegacyProviderTotals row left.
 package model
 
 import (
@@ -7,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -31,29 +39,6 @@ type legacyProviderTotalsPayload struct {
 	ContractId server.Id             `json:"contract_id"`
 	Totals     []legacyProviderTotal `json:"totals"`
 	Applied    bool                  `json:"applied"`
-}
-
-func queueLegacyProviderTotalsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, payouts map[server.Id]*contractPayout) server.Id {
-	payload := legacyProviderTotalsPayload{Private: true, Version: 1, ContractId: contractId}
-	for networkId, payout := range payouts {
-		payload.Totals = append(payload.Totals, legacyProviderTotal{NetworkId: networkId, Bytes: payout.payoutByteCount, Revenue: payout.payout})
-	}
-	slices.SortFunc(payload.Totals, func(a, b legacyProviderTotal) int { return a.NetworkId.Cmp(b.NetworkId) })
-	data, err := json.Marshal(payload)
-	server.Raise(err)
-	owner := session.NewLocalClientSession(ctx, "", nil)
-	defer owner.Cancel()
-	// The drain removes the row before the per-task reader may claim it
-	// (subscription_provider_totals_drain.go).
-	scheduled, taskId := task.ScheduleTaskInTxIfAbsent(tx, ApplyLegacyProviderTotals, json.RawMessage(data), owner,
-		task.RunOnce("legacy_provider_totals", contractId), task.RunAt(server.NowUtc().Add(legacyProviderTotalsDeferral)),
-		task.MaxTime(10*time.Second), task.RequireQueueOwnership(tx))
-	if !scheduled {
-		// Never merge a second allocation into an existing task's immutable
-		// arguments. The contract outcome must admit exactly one insertion.
-		server.Raise(errors.New("legacy provider total task already exists"))
-	}
-	return taskId
 }
 
 // ApplyLegacyProviderTotals uses its durable pending row, not the invocation's

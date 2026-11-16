@@ -7,7 +7,7 @@
 // extender variants affordable: doubling the matrix is one flag here rather
 // than 93 more functions to write and keep in step.
 //
-//	31 base variants x 3 encryption modes x 2 extender modes
+//	31 base variants x 3 encryption modes x 2 extender modes x 2 delivery paths
 //
 // The output is ordinary top-level tests, one per case, because that is what
 // connect/CODESTYLE.md asks for and what makes a single case selectable with
@@ -104,6 +104,25 @@ var extenderModes = []extenderMode{
 	{suffix: "WithExtender", extender: true},
 }
 
+// The delivery axis.
+//
+// An *InProcess case runs every exchange with in-process delivery on
+// (localDeliveryTestInProcess): a transport or a forward whose resident is in
+// its own exchange attaches to it in memory instead of dialing an exchange
+// socket back into that exchange (resident_local_transport.go,
+// resident_local_forward.go). The unsuffixed case keeps both ceilings off, so
+// every transport and forward crosses the exchange socket and accept path, and
+// each case runs once per delivery path with one body.
+type deliveryMode struct {
+	suffix    string
+	inProcess bool
+}
+
+var deliveryModes = []deliveryMode{
+	{suffix: ""},
+	{suffix: "InProcess", inProcess: true},
+}
+
 // extenderCapable reports whether a base variant can route through an
 // extender.
 //
@@ -131,8 +150,10 @@ func generate() ([]byte, int, error) {
 				if extender.extender && !base.extenderCapable() {
 					continue
 				}
-				fmt.Fprint(&out, testFunc(base, encryption, extender))
-				count += 1
+				for _, delivery := range deliveryModes {
+					fmt.Fprint(&out, testFunc(base, encryption, extender, delivery))
+					count += 1
+				}
 			}
 		}
 	}
@@ -158,8 +179,8 @@ func main() {
 	fmt.Fprintf(os.Stderr, "connectgen: wrote %d cases to %s\n", count, generatedPath)
 }
 
-func testFunc(base baseCase, encryption encryptionMode, extender extenderMode) string {
-	name := "Test" + base.name + encryption.suffix + extender.suffix
+func testFunc(base baseCase, encryption encryptionMode, extender extenderMode, delivery deliveryMode) string {
+	name := "Test" + base.name + encryption.suffix + extender.suffix + delivery.suffix
 
 	fields := []string{}
 	add := func(field string, set bool) {
@@ -178,6 +199,9 @@ func testFunc(base baseCase, encryption encryptionMode, extender extenderMode) s
 	add("enableEncryption", encryption.encryption)
 	add("allowFallback", encryption.allowFallback)
 	add("enableExtender", extender.extender)
+	if delivery.inProcess {
+		fields = append(fields, "localDelivery: localDeliveryTestInProcess")
+	}
 
 	var body bytes.Buffer
 	fmt.Fprintf(&body, "func %s(t *testing.T) {\n", name)

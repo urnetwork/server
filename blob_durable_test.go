@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -71,7 +72,16 @@ func durableBlobDigest(raw []byte) string {
 // under test provisions or repairs those required declarations.
 func newDurableBlobFixture(t *testing.T) *durableBlobFixture {
 	t.Helper()
-	mount := t.TempDir()
+	return newDurableBlobFixtureAt(t, t.TempDir())
+}
+
+// Explicit setup paths let tests reproduce temporary-directory aliases.
+func newDurableBlobFixtureAt(t *testing.T, mount string) *durableBlobFixture {
+	t.Helper()
+	mount, err := filepath.EvalSymlinks(mount)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(mount, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -83,10 +93,20 @@ func newDurableBlobFixture(t *testing.T) *durableBlobFixture {
 	if err := unix.Stat(mount, &state); err != nil {
 		t.Fatal(err)
 	}
+	var filesystemType string
+	var filesystemMagic int64
+	switch runtime.GOOS {
+	case "linux":
+		filesystemType, filesystemMagic = "ext4", 0xef53
+	case "darwin":
+		filesystemType, filesystemMagic = "apfs", 0x61706673
+	default:
+		t.Fatal("durable blob fixture has no filesystem facts for", runtime.GOOS)
+	}
 	device := durablevolume.Device{Major: unix.Major(uint64(state.Dev)), Minor: unix.Minor(uint64(state.Dev))}
-	host := &durableBlobTestHost{device: device, filesystem: durablevolume.Filesystem{Id: [2]int32{37, 41}, Type: 0xef53, AvailableBytes: 1024 * 1024, AvailableInodes: 1024}, mounts: []durablevolume.Mount{
-		{Id: 1, ParentId: 1, Root: "/", Path: "/", Device: durablevolume.Device{Major: device.Major ^ 1, Minor: device.Minor}, FilesystemType: "ext4"},
-		{Id: 7, ParentId: 1, Root: "/", Path: mount, Device: device, FilesystemType: "ext4"},
+	host := &durableBlobTestHost{device: device, filesystem: durablevolume.Filesystem{Id: [2]int32{37, 41}, Type: filesystemMagic, AvailableBytes: 1024 * 1024, AvailableInodes: 1024}, mounts: []durablevolume.Mount{
+		{Id: 1, ParentId: 1, Root: "/", Path: "/", Device: durablevolume.Device{Major: device.Major ^ 1, Minor: device.Minor}, FilesystemType: filesystemType},
+		{Id: 7, ParentId: 1, Root: "/", Path: mount, Device: device, FilesystemType: filesystemType},
 	}}
 	marker, lease := []byte("synthetic-blob-volume\n"), []byte("synthetic-blob-root-lease\n")
 	markerPath, leasePath := filepath.Join(mount, "volume-marker"), filepath.Join(mount, "root-lease")
@@ -106,7 +126,7 @@ func newDurableBlobFixture(t *testing.T) *durableBlobFixture {
 	if err := unix.Stat(root, &rootState); err != nil {
 		t.Fatal(err)
 	}
-	config := durablevolume.Config{Schema: durablevolume.Schema, Volumes: []durablevolume.VolumeSpec{{MountPath: mount, FilesystemUuid: "1234-abcd", FilesystemType: "ext4", MarkerPath: markerPath, MarkerSha256: durableBlobDigest(marker), StateRoots: []durablevolume.StateRootSpec{{Path: root, LeasePath: leasePath, LeaseSha256: durableBlobDigest(lease), RootInode: rootState.Ino, GenerationSha256: durableBlobDigest(nonce)}}, MinAvailableBytes: 1024, MinAvailableInodes: 8}}}
+	config := durablevolume.Config{Schema: durablevolume.Schema, Volumes: []durablevolume.VolumeSpec{{MountPath: mount, FilesystemUuid: "1234-abcd", FilesystemType: filesystemType, MarkerPath: markerPath, MarkerSha256: durableBlobDigest(marker), StateRoots: []durablevolume.StateRootSpec{{Path: root, LeasePath: leasePath, LeaseSha256: durableBlobDigest(lease), RootInode: rootState.Ino, GenerationSha256: durableBlobDigest(nonce)}}, MinAvailableBytes: 1024, MinAvailableInodes: 8}}}
 	raw, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)

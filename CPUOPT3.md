@@ -324,7 +324,7 @@ The owner approved an edge-2 disk reclaim plan:
 - REINDEX CONCURRENTLY of the bloated partial indexes and of network_client's;
 - partitioning provider_egress_health_history;
 - VACUUM FULL of the queue tables in no-dump windows;
-- client_reliability back to 21-day retention, with the subsidy-payment pin removed;
+- client_reliability back to 21-day retention, with the subsidy-payment pin removed (the owner moved it to 14 days on 2026-11-02);
 - a 91-day contract row reaper.
 
 All of these are being built, with a runbook to follow.
@@ -339,13 +339,14 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 - It is read before every batch, with the other fields, and a new value applies from the next batch. Raised, it stops deleting inside the new horizon from that batch on. Nothing already deleted comes back.
 - It never turns the reaper on or off; `mode` does. A dry run at 35 days is `mode dry_run` with `horizonDays 35`.
 
-**Reaper-only, except key history while the mode is on.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
+**Reaper-only, except key history and close evidence while the mode is on.** The floor is `ContractHorizonFloor` in `model/contract_horizon_reaper.go`, and the code setting floors there too. `server.ContractRetention` stays 91 days, so nothing else moves:
 - the partition drop, whose `contractWeekBlocker` keeps only payment holds (it needs the reaper's keep rules before any cutover; that is separate work);
-- close evidence retention;
 - the sn-reconcile holders floor;
 - the monitor's partition retention signal.
 
-**Key history follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `remove_gone_st_client_key_history` then permanently deletes the signed key history of clients gone longer than the horizon, never under the guard's 30-day floor (migration 904). With `mode dry_run`, `mode off`, no control, or an unreadable one, key history keeps 91 days, so a dry run at any horizon deletes no key history. The deletes have their own brake, `{client_key_history_retention}control` (`mode` on/off, `maxClientsPerSecond`, default 150 a second), read before every batch.
+**Close evidence follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `maintain_contract_partitions` then permanently deletes the close report evidence accepted longer ago than the horizon whose contract is resolved or gone, never under the evidence guard's 35-day floor (the horizon guard migration). It does not apply the reaper's keep rules: a contract the reaper keeps for a payment hold, block points or an unsettled escrow loses its evidence at the horizon all the same. At `horizonDays 35` that is about a billion rows, the evidence accepted from 10-06 on, as each day of it passes 35 days, from about 11-10. With `mode dry_run`, `mode off`, no control, or an unreadable one, evidence keeps 91 days. The deletes have their own brake, `{close_evidence_retention}control` (`mode` on/off, `maxRowsPerSecond`, default 1,000 a second), read before every batch; `bringyourctl db close-evidence-retention` shows and sets it. It stops the row deletes, not the weekly drops once the evidence is partitioned, which never read it; `mode off` stops both below 91 days.
+
+**Key history follows `horizonDays` while `mode` is `on` (owner, 2026-11-01).** `remove_gone_st_client_key_history` then permanently deletes the signed key history of clients gone longer than the horizon, never under the guard's 30-day floor (migration 904). With `mode dry_run`, `mode off`, no control, or an unreadable one, key history keeps 91 days, so a dry run at any horizon deletes no key history. The deletes have their own brake, `{client_key_history_retention}control` (`mode` on/off, `maxClientsPerSecond`, default 150 a second), read before every batch. Its `horizonDays`, when set, takes the place of the reaper's horizon for key history, whatever the reaper's mode, down to the guard's floor; it is read once a run.
 
 **Readers of the deleted rows, and how far back each reads:**
 
@@ -355,11 +356,11 @@ The reaper merged on 11-01 (7334b3a17) at the owner's 91 days, and `horizonDays`
 | Transfer audit rollup (`RollupTransferAuditEvents`: the periodic task, `stats rollup-transfer`, `stats backfill`, `stats migrate-202608`) | transfer_contract joined to contract_close by close time, one UTC day at a time, replacing the day's row | task: 3 days; CLI defaults: 7 days (`rollup-transfer`), 21 days (`backfill`, `migrate-202608`); an explicit `--start` reaches any day | days the reaper can reach keep their rows (the new guard) |
 | Payout planner | unpaid sweeps of contracts minted before the cutoff, sweeps of safely canceled payments, staged sweeps | up to 300 days | kept by `unpaid_legacy`, `payment_incomplete`, `plan_staged` |
 | sn-reconcile (A2 holders, census) | sweeps of pending and safely canceled payments; legacy payments | per payment | kept as payment holds or incomplete payments. The reaper deletes a contract with its sweeps, so A2's rule that a sweep above its floor has its contract still holds |
-| Subnet epoch reads (`GetStEpochProviderUsage`, the v2 ledger, close originals) | live contracts and the usage archive, by close time; close evidence | each epoch's window | unchanged in result: every deleted credit-bearing contract is archived in the same statement, and evidence keeps its 91 days. The read's duplicate probe once hashed the whole archive, which the reaper grows; see below |
+| Subnet epoch reads (`GetStEpochProviderUsage`, the v2 ledger, close originals) | live contracts and the usage archive, by close time; close evidence | each epoch's window | unchanged in result: every deleted credit-bearing contract is archived in the same statement. Evidence follows the horizon with the mode on, but the census reads reports only for a window of at most 32,768 closed contracts, which no production epoch is. The read's duplicate probe once hashed the whole archive, which the reaper grows; see below |
 | Provider stats (`/stats/provider-last-n`, `/stats/providers-overview-last-n`, the legacy `-last-90` routes) and provider payout stats | contracts joined to closes; sweeps by sweep time | up to 366 days | undercount the days older than 35 |
 | `/transfer/stats` | unpaid sweeps | all time | `unpaid_bytes_provided` falls as post-cutoff sweeps pass 35 days |
 
-The disk analysis put block points at 37 days: a 7-day block plus reliability retention stretched to 30 days. That stretch was the subsidy-epoch frontier, which the owner retired on 10-31, so an award now fails closed once its window is 21 days old. Its real exposure is late settlement: a dispute resolved, or a legacy settlement committed, weeks after the close puts an unpaid sweep in a recent block, and no horizon covers that. Before this change, a 91-day reaper could delete such a contract too.
+The disk analysis put block points at 37 days: a 7-day block plus reliability retention stretched to 30 days. That stretch was the subsidy-epoch frontier, which the owner retired on 10-31, so an award now fails closed once its window is 14 days old (21 until 2026-11-02). Its real exposure is late settlement: a dispute resolved, or a legacy settlement committed, weeks after the close puts an unpaid sweep in a recent block, and no horizon covers that. Before this change, a 91-day reaper could delete such a contract too.
 
 **The block points keep rule (`block_points`).** A contract stays while any unpaid sweep of it has a sweep time inside the window of a block an award can still read (`OperatorBlockPointsPendingWindows`):
 - The candidate blocks run from the cutoff's block through the one after the open block (a sweep can commit there while a run holds the list). Each has traffic past the cutoff and a reliability window inside retention, by the predicate the award checks (`operatorBlockReliabilityRetained`).
@@ -367,7 +368,7 @@ The disk analysis put block points at 37 days: a 7-day block plus reliability re
 - The windows are the award's own, clamped to the cutoff.
 - The list is read once a run. An award committed since only keeps more.
 - A block's retention is judged at the start of the oldest award that can still be reading, `OperatorBlockPointsMaxTime` (12 hours) and an hour before the run. The award checks retention again on the clock after its reads, so one that outlives the block's retention fails closed.
-- A contract leaves once its block is awarded, or once the block's reliability is past retention for every award that can still be running. That is at most 21 days and 13 hours after the block opened.
+- A contract leaves once its block is awarded, or once the block's reliability is past retention for every award that can still be running. That is at most 14 days and 13 hours after the block opened.
 - It is a new reason on `urnetwork_contract_horizon_protected_contracts_total`, one more series, last in the classification order but for `payment_review`.
 
 **The rollup guard (`TransferAuditRollupFirstDay`).** A rollup never writes a day before the first whole day 33 days back: the 35-day floor less a 2-day margin, since one day's read can take most of a day at Main's churn while the reaper's horizon advances. The row of an earlier day was written while all of its contracts were present, and a re-roll would replace it with a sum of what the reaper left.
@@ -393,7 +394,7 @@ The DB tests check each one at 35 days, with the cutoff inside 91 days as produc
 - **Stats re-rolls:** `stats backfill` and `stats rollup-transfer` no longer rewrite days more than 33 days old; those days keep the rows they have.
 - **Presentation is an owner call:** clamp the stats windows to the horizon, serve older days from the daily audit rollup, or stop counting subnet-pool sweeps as unpaid.
 
-**Close evidence** keeps its 91 days. Below 91, a deleted contract's evidence outlives it until then; `RemoveExpiredCloseEvidence` takes evidence whose contract is gone.
+**Close evidence** follows the horizon while the mode is on, as above: the evidence of a deleted contract goes once it is as old, and so does that of a resolved contract the reaper keeps. An exact retry of a deleted report is answered from the contract's close report while the contract stays, and refused once it is gone.
 
 **Reporting:**
 - `urnetwork_contract_horizon_horizon_seconds` (no labels) is the horizon the last control read set.

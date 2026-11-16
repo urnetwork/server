@@ -195,3 +195,147 @@ func TestFixedMultiHopApiGeneratorFamilyContextCancellation(t *testing.T) {
 		t.Fatalf("canceled family-context discovery=%v err=%v, want no paths and caller cancellation", destinations, err)
 	}
 }
+
+// The production window chooses capability discovery before family discovery.
+// Its real embedded fixed-provider API must not replace the configured stream path.
+func TestFixedMultiHopApiGeneratorCapabilitiesKeepFullPath(t *testing.T) {
+	for _, hopCount := range []int{2, 3, 5, 9} {
+		generator := newFixedMultiHopGeneratorForTest(t, hopCount)
+		var base clientconnect.MultiClientGenerator = generator
+		capabilities, ok := base.(clientconnect.MultiClientGeneratorWithCapabilities)
+		if !ok {
+			t.Fatal("fixed topology generator lost production capability interface dispatch")
+		}
+		destinations, selectorMode, err := capabilities.NextDestinationsWithCapabilities(
+			4, nil, "quality", clientconnect.IpFamilyFilterV4Capable, clientconnect.FindProvidersSelect{},
+		)
+		if err != nil || selectorMode {
+			t.Fatalf("%d-hop fixed capability discovery: selector=%t error=%v", hopCount, selectorMode, err)
+		}
+		if _, fullPath := destinations[generator.destination]; len(destinations) != 1 || !fullPath {
+			t.Fatalf("capability discovery bypassed explicit %d-hop path: destination_count=%d full_path=%t", hopCount, len(destinations), fullPath)
+		}
+	}
+}
+
+// Context-aware capability discovery follows the same actual production interface.
+func TestFixedMultiHopApiGeneratorCapabilityContextKeepsFullPath(t *testing.T) {
+	for _, hopCount := range []int{2, 3, 5, 9} {
+		generator := newFixedMultiHopGeneratorForTest(t, hopCount)
+		var capabilities clientconnect.MultiClientGeneratorWithCapabilities = generator
+		destinations, selectorMode, err := capabilities.NextDestinationsWithCapabilitiesContext(
+			t.Context(), 4, nil, "quality", clientconnect.IpFamilyFilterV4Capable, clientconnect.FindProvidersSelect{},
+		)
+		stats, fullPath := destinations[generator.destination]
+		if err != nil || selectorMode || len(destinations) != 1 || !fullPath {
+			t.Fatalf("%d-hop capability context discovery omitted its explicit path: count=%d full=%t selector=%t err=%v", hopCount, len(destinations), fullPath, selectorMode, err)
+		}
+		if stats.IpFamily != clientconnect.IpFamilyLegacy || stats.Capabilities != (clientconnect.ProviderCapabilities{}) {
+			t.Fatal("fixed capability discovery advertised unproved IP or protocol labels")
+		}
+		if selectorMode, known := capabilities.SelectorMode(); selectorMode || known {
+			t.Fatal("fixed topology advertised a platform selector-mode answer it never requested")
+		}
+	}
+}
+
+// Count, whole-path exclusion and real family evidence are identical on both capability forms.
+func TestFixedMultiHopApiGeneratorCapabilityFilters(t *testing.T) {
+	generator := newFixedMultiHopGeneratorForTest(t, 3)
+	var capabilities clientconnect.MultiClientGeneratorWithCapabilities = generator
+	cases := []struct {
+		name     string
+		count    int
+		excluded []clientconnect.MultiHopId
+		family   clientconnect.IpFamilyFilter
+		want     int
+	}{
+		{name: "v4", count: 4, family: clientconnect.IpFamilyFilterV4Capable, want: 1},
+		{name: "v6", count: 1, family: clientconnect.IpFamilyFilterV6Capable},
+		{name: "dualstack", count: 1, family: clientconnect.IpFamilyFilterDualstack},
+		{name: "unknown", count: 1, family: clientconnect.IpFamilyFilter("unknown-test-family")},
+		{name: "zero", count: 0},
+		{name: "negative", count: -1},
+		{name: "excluded", count: 1, excluded: []clientconnect.MultiHopId{generator.destination}},
+		{name: "unrelated", count: 1, excluded: []clientconnect.MultiHopId{clientconnect.RequireMultiHopId(clientconnect.NewId())}, want: 1},
+	}
+	for _, c := range cases {
+		for _, cooperative := range []bool{false, true} {
+			var destinations map[clientconnect.MultiHopId]clientconnect.DestinationStats
+			var selectorMode bool
+			var err error
+			if cooperative {
+				destinations, selectorMode, err = capabilities.NextDestinationsWithCapabilitiesContext(t.Context(), c.count, c.excluded, "quality", c.family, clientconnect.FindProvidersSelect{})
+			} else {
+				destinations, selectorMode, err = capabilities.NextDestinationsWithCapabilities(c.count, c.excluded, "quality", c.family, clientconnect.FindProvidersSelect{})
+			}
+			if err != nil || selectorMode || len(destinations) != c.want {
+				t.Fatalf("%s cooperative=%t count=%d selector=%t err=%v, want=%d", c.name, cooperative, len(destinations), selectorMode, err, c.want)
+			}
+			if c.want != 0 {
+				if _, fullPath := destinations[generator.destination]; !fullPath {
+					t.Fatal("filtered capability discovery returned a direct provider instead of its path")
+				}
+			}
+		}
+	}
+}
+
+// A canceled discovery request must not fall through to the embedded API generator.
+func TestFixedMultiHopApiGeneratorCapabilityContextCancellation(t *testing.T) {
+	generator := newFixedMultiHopGeneratorForTest(t, 3)
+	var capabilities clientconnect.MultiClientGeneratorWithCapabilities = generator
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	destinations, selectorMode, err := capabilities.NextDestinationsWithCapabilitiesContext(
+		ctx, 1, nil, "quality", clientconnect.IpFamilyFilterV4Capable, clientconnect.FindProvidersSelect{},
+	)
+	if !errors.Is(err, context.Canceled) || selectorMode || len(destinations) != 0 {
+		t.Fatal("canceled capability discovery returned a destination or lost caller cancellation")
+	}
+}
+
+// Sticky redials use the same full path through old and capability-aware interfaces.
+func TestFixedMultiHopApiGeneratorNamedProviderKeepsFullPath(t *testing.T) {
+	for _, hopCount := range []int{2, 3, 5, 9} {
+		generator := newFixedMultiHopGeneratorForTest(t, hopCount)
+		_, providerId := generator.destination.SplitTail()
+		var named clientconnect.MultiClientGeneratorWithClientId = generator
+		var capabilities clientconnect.MultiClientGeneratorWithCapabilities = generator
+		for _, capable := range []bool{false, true} {
+			for _, excluded := range []bool{false, true} {
+				exclusions := []clientconnect.MultiHopId{}
+				if excluded {
+					exclusions = append(exclusions, generator.destination)
+				}
+				var destinations map[clientconnect.MultiHopId]clientconnect.DestinationStats
+				var err error
+				if capable {
+					var selectorMode bool
+					destinations, selectorMode, err = capabilities.NextDestinationsForClientIdWithCapabilities(providerId, exclusions, "quality", clientconnect.FindProvidersSelect{})
+					if selectorMode {
+						t.Fatal("fixed named provider advertised a platform selector answer")
+					}
+				} else {
+					destinations, err = named.NextDestinationsForClientId(providerId, exclusions, "quality")
+				}
+				if err != nil {
+					t.Fatal("fixed named-provider discovery tried the embedded API", err)
+				}
+				if excluded {
+					if len(destinations) != 0 {
+						t.Fatal("excluded full path was rediscovered by provider id")
+					}
+				} else if _, fullPath := destinations[generator.destination]; len(destinations) != 1 || !fullPath {
+					t.Fatal("named provider bypassed its configured full path")
+				}
+			}
+		}
+		foreignId := clientconnect.NewId()
+		oldDestinations, oldErr := named.NextDestinationsForClientId(foreignId, nil, "quality")
+		newDestinations, _, newErr := capabilities.NextDestinationsForClientIdWithCapabilities(foreignId, nil, "quality", clientconnect.FindProvidersSelect{})
+		if oldErr != nil || newErr != nil || len(oldDestinations) != 0 || len(newDestinations) != 0 {
+			t.Fatal("fixed named discovery admitted another provider or called the API")
+		}
+	}
+}

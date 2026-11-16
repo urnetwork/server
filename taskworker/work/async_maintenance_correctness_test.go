@@ -140,10 +140,6 @@ func TestMaintenanceTasksCommitSelectiveCleanupAndRecurrence(t *testing.T) {
 				seed: `INSERT INTO network_extender_latency(latency_id,extender_id,client_id,probe_nonce,rtt_ms,probe_time,create_time)
 					VALUES($1,$1,$1,'old',1,'2000-01-01','2000-01-01'),($2,$2,$2,'live',1,'2099-01-01','2099-01-01')`,
 				verify: `SELECT count(*)=1 AND bool_and(latency_id=$2) FROM network_extender_latency WHERE latency_id IN ($1,$2)`},
-			{asyncMaintenanceCase: newAsyncMaintenanceCase(CancelHungAccountPayments, CancelHungAccountPaymentsPost, &CancelHungAccountPaymentsArgs{}),
-				seed: `INSERT INTO account_payment(payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time,create_time,payment_record)
-					VALUES($1,$1,$1,1,1,'2000-01-01','2000-01-01',NULL),($2,$2,$2,1,1,'2000-01-01','2000-01-01','submitted')`,
-				verify: `SELECT count(*)=2 AND bool_and(canceled=(payment_id=$1)) FROM account_payment WHERE payment_id IN ($1,$2)`},
 			{asyncMaintenanceCase: newAsyncMaintenanceCase(RemoveCompletedContracts, RemoveCompletedContractsPost, &RemoveCompletedContractsArgs{}),
 				seed: `INSERT INTO transfer_contract(contract_id,source_id,source_network_id,destination_id,destination_network_id,transfer_byte_count,outcome,create_time,close_time,reap_time)
 					VALUES($1,$1,$1,$1,$1,1,'canceled','2000-01-01','2000-01-01','2000-01-01'),($2,$2,$2,$2,$2,1,'canceled','2099-01-01','2099-01-01','2099-01-01')`,

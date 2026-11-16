@@ -179,6 +179,31 @@ func clientScoreTargetPages(
 	locationGroupReads map[server.Id]clientScoreTargetRead,
 	observation *findProviders2LoadObservation,
 ) (facetPageSets []clientScoreFacetPageSet, unfacetedPages map[string]clientScorePage, targetStates map[string]int, sourceIncomplete bool, returnErr error) {
+	return clientScoreTargetPagesWithOptions(forceMinimum, rankMode, clientLocationId, facets, locationReads, locationGroupReads, observation, clientScoreReadOptions{})
+}
+
+// How a selector-mode read treats a target's pages (FP2-PROTOCOL.md §6.4).
+// The zero value is today's read.
+type clientScoreReadOptions struct {
+	// the record filter each requested facet's pages apply, none for a
+	// facet without one
+	facetFilters map[ipFamilyFacet]func(*ClientScore) bool
+	// a target without any requested facet is missing: an exporter that
+	// predates the facets wrote un-faceted pages, which hold every class
+	noUnfacetedFallback bool
+}
+
+// clientScoreTargetPages with options.
+func clientScoreTargetPagesWithOptions(
+	forceMinimum bool,
+	rankMode RankMode,
+	clientLocationId server.Id,
+	facets []ipFamilyFacet,
+	locationReads map[server.Id]clientScoreTargetRead,
+	locationGroupReads map[server.Id]clientScoreTargetRead,
+	observation *findProviders2LoadObservation,
+	options clientScoreReadOptions,
+) (facetPageSets []clientScoreFacetPageSet, unfacetedPages map[string]clientScorePage, targetStates map[string]int, sourceIncomplete bool, returnErr error) {
 	facetPageSets = make([]clientScoreFacetPageSet, len(facets))
 	for i := range facetPageSets {
 		facetPageSets[i] = clientScoreFacetPageSet{
@@ -243,7 +268,7 @@ func clientScoreTargetPages(
 			}
 			for i, count := range counts {
 				key := facetSampleKey(effectiveClientLocationId, facet, i)
-				page := clientScorePage{key: key, expectedCount: count}
+				page := clientScorePage{key: key, expectedCount: count, filter: options.facetFilters[facet]}
 				switch {
 				case state == clientScoreModernStale:
 					facetPageSets[facetIndex].modern[key] = page
@@ -266,6 +291,9 @@ func clientScoreTargetPages(
 		}
 		// written before the facets existed: fall back to the un-faceted buckets
 		effectiveClientLocationId, _, counts, ok := decodeCounts(read.alias, read.unfaceted)
+		if options.noUnfacetedFallback {
+			ok = false
+		}
 		if returnErr != nil || !ok {
 			sourceIncomplete = true
 			if returnErr == nil && observation != nil {

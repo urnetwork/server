@@ -1,0 +1,15 @@
+{{define "headline"}}RENEW UR PRO BY {{.EndDateUpper}}{{end}}
+{{define "why"}}Sent to the address on your URnetwork account 14 days and 2 days
+before UR Pro paid in {{.AssetName}} stops. Payments in {{.AssetName}}
+don't renew by themselves.{{end}}
+{{define "content"}}
+Your UR Pro year, paid in {{.AssetName}}, ended on {{.TermEndDate}}.
+Payments in {{.AssetName}} don't renew on their own, so Pro keeps
+working until {{.EndDate}} while you renew.
+
+Renew UR Pro: {{.RenewUrl}}
+
+A renewal starts a new year on the day you pay, so renewing now loses
+you nothing. If you'd rather go back to the free plan, there's nothing
+to do. Questions? Contact support@ur.io.
+{{end}}

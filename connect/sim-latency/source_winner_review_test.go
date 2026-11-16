@@ -52,7 +52,7 @@ func TestWinnerReviewCompletedUncertaintyCannotBeResampled(t *testing.T) {
 		if err := json.Unmarshal(output, &replay); err != nil {
 			t.Fatal(err)
 		}
-		if validateWinnerReviewBrokerResult(&replay, template, policy) == nil {
+		if validateWinnerReviewBrokerResult(&replay, template, policy, request) == nil {
 			t.Fatal("retained uncertainty became an accepted judgment")
 		}
 	}
@@ -129,8 +129,8 @@ func winnerBrokerFixture() (winnerReviewBrokerResult, model.CompetitionIntegrity
 }
 
 func TestWinnerReviewBrokerRequiresExactCompletePinnedJudgment(t *testing.T) {
-	result, template, policy := winnerBrokerFixture()
-	if err := validateWinnerReviewBrokerResult(&result, template, policy); err != nil {
+	result, request := winnerBrokerAuthenticatedFixture(t)
+	if err := validateWinnerReviewBrokerResult(&result, request.Template, request.Request.Policy, request); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func(*winnerReviewBrokerResult){
@@ -142,9 +142,9 @@ func TestWinnerReviewBrokerRequiresExactCompletePinnedJudgment(t *testing.T) {
 		func(r *winnerReviewBrokerResult) { r.PrivateEvidence += "changed" }, func(r *winnerReviewBrokerResult) { r.Review.PrivateEvidenceSha256 = strings.Repeat("0", 64) },
 		func(r *winnerReviewBrokerResult) { r.Review.PublicExplanation = "" }, func(r *winnerReviewBrokerResult) { r.Review.ReviewerReasoning = "low" },
 	} {
-		candidate, identity, frozen := winnerBrokerFixture()
+		candidate, original := winnerBrokerAuthenticatedFixture(t)
 		mutate(&candidate)
-		if validateWinnerReviewBrokerResult(&candidate, identity, frozen) == nil {
+		if validateWinnerReviewBrokerResult(&candidate, original.Template, original.Request.Policy, original) == nil {
 			t.Fatal("incomplete, stale or unqualified broker judgment was accepted")
 		}
 	}
@@ -163,18 +163,33 @@ func TestWinnerReviewResponseRejectsCaseAliasesAndDuplicates(t *testing.T) {
 }
 
 func TestWinnerReviewBrokerRejectsOnlyWithSubstantiatedDisqualification(t *testing.T) {
-	r, template, policy := winnerBrokerFixture()
+	r, original := winnerBrokerAuthenticatedFixture(t)
 	r.Review.RewardDisposition, r.Review.SourceDisposition = "disqualified", "rejected"
 	r.Review.ReasonCodes = []string{"SCORE_TAMPERING"}
-	if validateWinnerReviewBrokerResult(&r, template, policy) == nil {
+	if validateWinnerReviewBrokerResult(&r, original.Template, original.Request.Policy, original) == nil {
 		t.Fatal("all-passing findings manufactured a disqualification")
 	}
-	r.Review.Findings[0].Disposition, r.Review.Findings[0].ReasonCode = "fail", "SCORE_TAMPERING"
-	if err := validateWinnerReviewBrokerResult(&r, template, policy); err != nil {
+	var evidence winnerModelEvidence
+	if err := json.Unmarshal([]byte(r.PrivateEvidence), &evidence); err != nil {
+		t.Fatal(err)
+	}
+	evidence.Judgment.Decision, evidence.Judgment.ReasonCodes = "disqualify", []string{"SCORE_TAMPERING"}
+	evidence.Judgment.Findings[0].Disposition, evidence.Judgment.Findings[0].ReasonCode = "fail", "SCORE_TAMPERING"
+	output, err := json.Marshal(evidence.Judgment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence.ProviderOutput = string(output)
+	content, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = *winnerModelBrokerResult(original, evidence.Judgment, content)
+	if err := validateWinnerReviewBrokerResult(&r, original.Template, original.Request.Policy, original); err != nil {
 		t.Fatal(err)
 	}
 	r.Review.ReasonCodes = []string{"PRODUCT_INTEGRATION_RISK"}
-	if validateWinnerReviewBrokerResult(&r, template, policy) == nil {
+	if validateWinnerReviewBrokerResult(&r, original.Template, original.Request.Policy, original) == nil {
 		t.Fatal("an integration problem was turned into dishonesty")
 	}
 }

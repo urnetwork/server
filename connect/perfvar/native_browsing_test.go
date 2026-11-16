@@ -268,6 +268,11 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		browsingURL = func(page, asset int) string { return nativeBrowsingColdLinkURL(originalURL, page, asset) }
 		browsingHTML = func(page int) []byte { return nativeBrowsingColdLinkHTML(originalURL, originalHTML, page) }
 	}
+	if settings.midSessionForTest != nil {
+		originalURL, originalHTML := browsingURL, browsingHTML
+		browsingURL = func(page, asset int) string { return settings.midSessionForTest.rewriteUrl(originalURL, page, asset) }
+		browsingHTML = func(page int) []byte { return settings.midSessionForTest.rewriteHtml(originalURL, originalHTML, page) }
+	}
 	pages := settings.newPages()
 	var liveHandlers, peakHandlers atomic.Int64
 	var liveAssets, peakAssets atomic.Int64
@@ -304,8 +309,11 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 	if settings.wrapOriginHandlerForTest != nil {
 		handler = settings.wrapOriginHandlerForTest(handler)
 	}
+	if settings.innerHttpTraceForTest != nil {
+		handler = settings.innerHttpTraceForTest.wrapHandler(handler)
+	}
 	originCount := nativeBrowsingOriginCount
-	if settings.coldLinkForTest {
+	if settings.coldLinkForTest || settings.midSessionForTest != nil && settings.midSessionForTest.cold {
 		originCount++
 	}
 	listeners := make([]net.Listener, originCount)
@@ -347,6 +355,10 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 	transport := newNativeBrowsingInnerTransport(dialOrigin, settings)
 
 	defer func() {
+		cleanupFailed := false
+		if settings.midSessionForTest != nil {
+			settings.midSessionForTest.close()
+		}
 		cancelWork()
 		nativeBrowsingReleasePages(pages[:])
 		transport.CloseIdleConnections()
@@ -355,6 +367,7 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		for _, httpServer := range servers {
 			if httpServer != nil {
 				if err := httpServer.Shutdown(joinCtx); err != nil {
+					cleanupFailed = true
 					resultErr = errors.Join(resultErr, fmt.Errorf("synthetic browsing handler shutdown: %w", err), httpServer.Close())
 				}
 			}
@@ -364,7 +377,12 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		select {
 		case <-joined:
 		case <-joinCtx.Done():
+			cleanupFailed = true
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing owners did not join"))
+		}
+		if err := settings.innerHttpTraceForTest.waitJoined(joinCtx); err != nil {
+			cleanupFailed = true
+			resultErr = errors.Join(resultErr, err)
 		}
 		if settings.afterOriginsClosedForTest != nil {
 			settings.afterOriginsClosedForTest()
@@ -372,10 +390,15 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		observation.MaximumConcurrentAssetHandlers = peakHandlers.Load()
 		observation.MaximumConcurrentLogicalAssets = peakAssets.Load()
 		if liveHandlers.Load() != 0 {
+			cleanupFailed = true
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing retained asset handlers"))
 		}
 		if liveAssets.Load() != 0 {
+			cleanupFailed = true
 			resultErr = errors.Join(resultErr, errors.New("synthetic browsing retained logical assets"))
+		}
+		if cleanupFailed {
+			resultErr = &c48ReturnFlightWorkloadOwnerFailure{cause: resultErr}
 		}
 	}()
 	for index := range listeners {
@@ -391,6 +414,11 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		servers[index] = httpServer
 		serverWorkers.Add(1)
 		go func() { defer serverWorkers.Done(); _ = httpServer.Serve(serveListener) }()
+	}
+	if settings.beforeNavigationForTest != nil {
+		if err := settings.beforeNavigationForTest(workCtx); err != nil {
+			return err
+		}
 	}
 	if settings.applicationDeadlineForTest > 0 {
 		applicationCtx, cancelApplication := context.WithTimeout(workCtx, settings.applicationDeadlineForTest)
@@ -432,6 +460,11 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		if progress != nil {
 			request = request.WithContext(httptrace.WithClientTrace(request.Context(), progress.retryTrace()))
 		}
+		requestOwner := settings.innerHttpTraceForTest.newRequest()
+		defer requestOwner.finish()
+		if requestOwner != nil {
+			request = request.WithContext(httptrace.WithClientTrace(request.Context(), requestOwner.clientTrace(trace)))
+		}
 		if settings.requestTraceForTest != nil {
 			if observer := settings.requestTraceForTest(request.Context(), target); observer != nil {
 				request = request.WithContext(httptrace.WithClientTrace(request.Context(), observer))
@@ -452,6 +485,9 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 			}
 		}()
 		if err := nativeBrowsingVerifyTlsResponse(response, settings); err != nil {
+			return nativeBrowsingAssetResult{status: response.StatusCode, firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
+		}
+		if err := settings.innerHttpTraceForTest.observeResponse(response); err != nil {
 			return nativeBrowsingAssetResult{status: response.StatusCode, firstByte: time.Duration(firstByte.Load()), complete: time.Since(start), err: err}
 		}
 		if progress != nil {
@@ -567,6 +603,9 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 		if navigation != browsingURL(page, -1) {
 			return errors.New("HTML next-navigation link changed origin or page")
 		}
+		if settings.midSessionForTest != nil {
+			settings.midSessionForTest.markNavigation(page, "entry")
+		}
 		if settings.beforePageNavigationForTest != nil {
 			if err := settings.beforePageNavigationForTest(workCtx, page, transport.CloseIdleConnections); err != nil {
 				return err
@@ -579,6 +618,9 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 			if err != nil {
 				return err
 			}
+		}
+		if settings.midSessionForTest != nil {
+			settings.midSessionForTest.markNavigation(page, "fetch")
 		}
 		htmlResult := fetch(workCtx, navigation, browsingHTML(page), trace, nil)
 		if settings.pressure != nil {
@@ -621,10 +663,17 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 				state.clientDone[asset] <- fetch(assetCtx, target, nativeBrowsingAsset(page, asset), nil, progress)
 			}()
 		}
+		if settings.midSessionForTest != nil {
+			settings.midSessionForTest.markNavigation(page, "retire_begin")
+		}
 		if retire := nativeBrowsingRetirePage(page, settings.maxLivePages); 0 <= retire {
 			if err := finishPage(retire, true); err != nil {
 				return err
 			}
+		}
+		if settings.midSessionForTest != nil {
+			settings.midSessionForTest.markNavigation(page, "retire_end")
+			settings.midSessionForTest.markNavigation(page, "prefix_begin")
 		}
 		var held [nativeBrowsingAssetCount]bool
 		for range 2 {
@@ -642,6 +691,9 @@ func measureNativeBrowsing100WithSettings(ctx context.Context, path *fullTunPath
 			if err := state.nextNavigation.waitForBodyProgress(workCtx, &settings.pressure.assets[page][2]); err != nil {
 				return fmt.Errorf("page %d never established image body progress: %w", page, err)
 			}
+		}
+		if settings.midSessionForTest != nil {
+			settings.midSessionForTest.markNavigation(page, "prefix_end")
 		}
 		observation.sampleMemory()
 	}

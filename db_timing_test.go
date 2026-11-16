@@ -13,6 +13,28 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Request observations embed DbTiming under a guard that admits only arrays,
+// structs and numeric fields (model's URL due observation embeds it twice).
+// Pinned here as well, a field that could hold an ID, SQL text, an error or a
+// pointer, as the acquisition snapshot once did, fails beside the type.
+func TestDbTimingCarriesOnlyNumericFields(t *testing.T) {
+	var numeric func(string, reflect.Type)
+	numeric = func(path string, kind reflect.Type) {
+		switch kind.Kind() {
+		case reflect.Struct:
+			for field := range kind.NumField() {
+				numeric(path+"."+kind.Field(field).Name, kind.Field(field).Type)
+			}
+		case reflect.Array:
+			numeric(path+"[]", kind.Elem())
+		case reflect.Uint64, reflect.Int64:
+		default:
+			t.Fatalf("%s can carry nonnumeric data: %v", path, kind)
+		}
+	}
+	numeric("DbTiming", reflect.TypeOf(DbTiming{}))
+}
+
 // Real pgx wire replies prove that observing retries neither hides failed
 // attempts nor permits replay of an ambiguous commit or a callback panic.
 func TestDbTimingRetainsAttemptsAndFailureSemantics(t *testing.T) {

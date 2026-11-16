@@ -109,14 +109,29 @@ validate_source_epoch_margin() {
 # services, candidate initialization or simulation; hosts call it before R runs.
 validate_source_epoch_g2_policy() {
     local policy="${APEX_G2_VOLUME_POLICY:-}"
+    local coverage="${APEX_WORK_COVERAGE_POLICY_JSON:-null}"
     case "$policy" in
         ''|minimum-work/1) ;;
         *) die "unsupported g2 volume policy" ;;
     esac
-    jq -e --arg policy "$policy" '
-        if $policy == "" then (has("g2_volume_policy") | not)
-        else .g2_volume_policy == $policy end
+    jq -e --arg policy "$policy" --argjson coverage "$coverage" '
+        (if $policy == "" then (has("g2_volume_policy") | not)
+        else .g2_volume_policy == $policy end) and
+        (.work_coverage_policy // null) == $coverage
     ' <<<"$1" >/dev/null || die "g2 volume policy does not match the configured source generation"
+}
+
+# Authenticate the complete policy through the pristine compiled capability,
+# not a shell default or a candidate's echoed coverage counters.
+coverage_policy_arguments() {
+    coverage_args=()
+    local coverage="${APEX_WORK_COVERAGE_POLICY_JSON:-null}" capability kind
+    [ "$coverage" != null ] || return 0
+    [ "${APEX_G2_VOLUME_POLICY:-}" = minimum-work/1 ] || die "coverage requires minimum-work"
+    kind="$(jq -er '.kind | select(. == "seeded-crawl-coverage/v1")' <<<"$coverage")" || die "unsupported coverage policy"
+    capability="$("$APEX_SCORER_BIN" score-policy --g2-volume-policy minimum-work/1 --work-coverage-policy "$kind")" || die "missing scorer coverage capability"
+    jq -e --argjson coverage "$coverage" '.scorer_version == "sim-latency-score/3" and .work_coverage_policy == $coverage' <<<"$capability" >/dev/null || die "coverage policy differs from compiled capability"
+    coverage_args=(--work-coverage-policy "$kind")
 }
 
 # This read-only action checks both independently frozen contracts.
@@ -272,6 +287,10 @@ run_one() {
         *) die "unsupported g2 volume policy" ;;
     esac
 
+    local coverage_args=()
+    coverage_policy_arguments
+    args+=("${coverage_args[@]}")
+
     log "starting simulator; artifacts=$dir"
     set +e
     timeout --signal=TERM --kill-after="$APEX_KILL_AFTER" "$APEX_WALL_TIMEOUT" \
@@ -283,10 +302,11 @@ run_one() {
     [ -s "$meta" ] || die "simulator emitted no run manifest"
     [ -s "$marker" ] || die "simulator emitted no completion marker"
     [ -s "$accounting_source" ] || die "simulator emitted no provider accounting source"
-    jq -e --argjson source_epoch "$APEX_EPOCH" --arg g2_volume_policy "${APEX_G2_VOLUME_POLICY:-}" \
-        '.schema == 2 and .source_epoch == $source_epoch and .score_schema == 1 and .completion_state == "complete" and
+    jq -e --argjson source_epoch "$APEX_EPOCH" --arg g2_volume_policy "${APEX_G2_VOLUME_POLICY:-}" --argjson coverage "${APEX_WORK_COVERAGE_POLICY_JSON:-null}" \
+        '.schema == (if $coverage == null then 2 else 3 end) and .source_epoch == $source_epoch and .score_schema == 1 and .completion_state == "complete" and
          (.g2_volume_policy // "") == $g2_volume_policy and
-         .scorer_version == (if $g2_volume_policy == "" then "sim-latency-score/1" else "sim-latency-score/2" end)' "$meta" >/dev/null ||
+         (.work_coverage_policy // null) == $coverage and
+         .scorer_version == (if $coverage != null then "sim-latency-score/3" elif $g2_volume_policy == "" then "sim-latency-score/1" else "sim-latency-score/2" end)' "$meta" >/dev/null ||
         die "run manifest is not complete schema 2"
     jq -e --arg evaluation_id "$APEX_EVALUATION_ID" \
         '.schema == 1 and
@@ -335,7 +355,10 @@ build_baseline_bundle() {
         minimum-work/1) g2_policy_args+=(--g2-volume-policy "$APEX_G2_VOLUME_POLICY") ;;
         *) die "unsupported g2 volume policy" ;;
     esac
-    "$APEX_SCORER_BIN" score-baseline "${g2_policy_args[@]}" \
+    local coverage_args=() workload_args=()
+    coverage_policy_arguments
+    if [ "${APEX_WORK_COVERAGE_POLICY_JSON:-null}" != null ]; then workload_args=(--providers "$APEX_PROVIDERS_FILE"); fi
+    "$APEX_SCORER_BIN" score-baseline "${g2_policy_args[@]}" "${coverage_args[@]}" "${workload_args[@]}" \
         --run "$APEX_BASELINE_RUNS" \
         --stderr "$APEX_BASELINE_STDERR" \
         --accounting "$APEX_BASELINE_ACCOUNTING" \
@@ -345,10 +368,11 @@ build_baseline_bundle() {
         --round-id "$APEX_ROUND_ID" \
         --takeover-margin "$APEX_TAKEOVER_MARGIN" \
         --out "$APEX_BASELINE_MANIFEST" >/dev/null
-    jq -e --arg g2_volume_policy "${APEX_G2_VOLUME_POLICY:-}" \
+    jq -e --arg g2_volume_policy "${APEX_G2_VOLUME_POLICY:-}" --argjson coverage "${APEX_WORK_COVERAGE_POLICY_JSON:-null}" \
         '.score_schema == 1 and .kind == "sim-latency-score-baseline" and
         (.g2_volume_policy // "") == $g2_volume_policy and
-        .scorer_version == (if $g2_volume_policy == "" then "sim-latency-score/1" else "sim-latency-score/2" end) and
+        (.work_coverage_policy // null) == $coverage and
+        .scorer_version == (if $coverage != null then "sim-latency-score/3" elif $g2_volume_policy == "" then "sim-latency-score/1" else "sim-latency-score/2" end) and
         (.replicates | length % 2 == 1) and
         ([.replicates[].findproviders_sample_span_fraction |
           type == "number" and isfinite and . >= 0.90 and . <= 1] | all)' \
@@ -375,7 +399,10 @@ score_bundle() {
 
     [ "$(sha256_file "$APEX_SCORER_BIN")" = "$APEX_SCORER_SHA256" ] ||
         die "scorer binary hash mismatch"
-    "$APEX_SCORER_BIN" score \
+    local coverage_args=() workload_args=()
+    coverage_policy_arguments
+    if [ "${APEX_WORK_COVERAGE_POLICY_JSON:-null}" != null ]; then workload_args=(--providers "$APEX_PROVIDERS_FILE"); fi
+    "$APEX_SCORER_BIN" score "${workload_args[@]}" \
         --run "$APEX_CANDIDATE_RUNS" \
         --stderr "$APEX_CANDIDATE_STDERR" \
         --baseline "$APEX_BASELINE_MANIFEST" \

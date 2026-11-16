@@ -33,14 +33,19 @@ const InitialTransferBalance = 32 * model.Gib
 // 30 days
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
 
-// The recurring per-tier data grants come from pro.yml (model.Pro().DataAmount),
-// on three separate schedules -- see model.FreeGrantWindow / model.ProGrantWindow /
-// model.ReferralGrantWindow and the three Refresh*TransferBalances tasks below.
+// The recurring per-tier data grants come from pro.yml (model.Pro().DataAmount).
+// The free grant is daily (model.FreeGrantWindow) and the referral grant runs
+// every referral period (model.ReferralGrantWindow). The Pro grant comes at the
+// start of each of the network's own subscription cycles
+// (model.GrantProCycleInTx, PRO-GRANT-CYCLE.md): at each credit below, and by the
+// hourly RefreshProCycleTransferBalances.
 //
-// RefreshSupporterTransferBalance is the legacy amount still used at subscription
-// ACTIVATION, where the balance spans the whole subscription period alongside the
-// revenue/subsidy accounting. It is not the recurring meter.
-const RefreshSupporterTransferBalance = 600 * model.Gib
+// SupporterPeriodTransferBalance is what a paid supporter period's own balance
+// holds: nothing. That balance is the period's Pro marker, with the period's
+// window, revenue and purchase token, which the end paths, Play's overlap gate
+// and the sales history match. It replaced the 600 GiB activation credit
+// (owner, 2026-11-11); the period's data is its cycle grant.
+const SupporterPeriodTransferBalance = model.ByteCount(0)
 
 const SubscriptionGracePeriod = 24 * time.Hour
 
@@ -117,8 +122,24 @@ var playPackageName = sync.OnceValue(func() string {
 var playSkus = sync.OnceValue(func() map[string]*Sku {
 	var skus Skus
 	server.Config.RequireSimpleResource("play.yml").UnmarshalYaml(&skus)
-	return skus.Skus
+	return playCreditableSkus(skus.Skus)
 })
+
+// playCreditableSkus are the Play products this server credits: play.yml's,
+// except any named like a data pack (data_*). Google Play sells UR Pro only; the
+// packs are sold on the rails pro.yml names (data_pack_rails.go), and the stores
+// are not one, so the 256 GiB pack cannot be sold through Play.
+func playCreditableSkus(skus map[string]*Sku) map[string]*Sku {
+	creditable := map[string]*Sku{}
+	for productId, sku := range skus {
+		if isDataPackItem(productId) {
+			glog.Errorf("[sub]play.yml lists %s, a data pack; Google Play sells UR Pro only, so it is never credited\n", productId)
+			continue
+		}
+		creditable[productId] = sku
+	}
+	return creditable
+}
 
 // var companySenderEmail = sync.OnceValue(func() string {
 // 	c := server.Config.RequireSimpleResource("email.yml").Parse()
@@ -174,10 +195,12 @@ type SubscriptionBalanceResult struct {
 	 * and that is exactly when the cancel path must be reachable, entitlement
 	 * bookkeeping notwithstanding.
 	 */
-	Subscriptions             []*Subscription          `json:"subscriptions,omitempty"`
-	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
-	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
-	UpdateTime                time.Time                `json:"update_time"`
+	Subscriptions          []*Subscription          `json:"subscriptions,omitempty"`
+	ActiveTransferBalances []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
+	// Always zero: USDC provider payouts ended (owner decisions 2026-11-12 and
+	// 2026-11-13), so no payout is pending. Apps built before then parse it.
+	PendingPayoutUsdNanoCents model.NanoCents `json:"pending_payout_usd_nano_cents"`
+	UpdateTime                time.Time       `json:"update_time"`
 	/**
 	 * Guest - the network has no login method (no password/phone, SSO, wallet
 	 * or seedphrase sign-in): a legacy guest network. Read from the live auth
@@ -194,17 +217,30 @@ type SubscriptionBalanceResult struct {
 	PriceTier *PriceTierResult `json:"price_tier,omitempty"`
 	// OnboardingOffer is the caller's welcome offer, null when none was issued.
 	OnboardingOffer *OnboardingOfferResult `json:"onboarding_offer"`
+	// WinbackOffer is the caller's active win-back offer (the re-engagement
+	// program's W1, winback_offer_controller.go). Omitted when there is none,
+	// or it expired or was redeemed, and from an older server.
+	WinbackOffer *WinbackOfferResult `json:"winback_offer,omitempty"`
 	// Experiments is the caller's variant per experiment surface.
 	Experiments map[string]*model.ExperimentAssignment `json:"experiments,omitempty"`
 
 	// ----- crypto payments (crypto_pay_controller.go) -----
-	// CryptoAssets are the coins that are on and what each sells (the list of
-	// GET /pay/crypto/assets). Omitted when none is on, so a client older than
-	// crypto, or a deployment with crypto off, never shows a coin.
+	// CryptoAssets are the coins that can be paid with now and what each sells
+	// (the assets list of GET /pay/crypto/assets: never a coin whose quotes are
+	// refused for now, since every app offers each coin listed here). Omitted
+	// when there is none, so a client older than crypto, or a deployment with
+	// crypto off, never shows a coin.
 	CryptoAssets []*CryptoPaymentAsset `json:"crypto_assets,omitempty"`
+	// CryptoUnavailableAssets are the coins that are on but cannot be paid with
+	// now (the unavailable_assets list of GET /pay/crypto/assets), each with
+	// available false and its unavailable_reason, for an app that shows a coin
+	// greyed out (the "More coins" tab while all four of its coins are
+	// unavailable). Never offered. Omitted when there is none.
+	CryptoUnavailableAssets []*CryptoPaymentAsset `json:"crypto_unavailable_assets,omitempty"`
 	// CryptoTerm is the network's latest one-time crypto credit (Solana,
-	// Monero or Zcash) whose grace has not ended. Apps show the renewal notice
-	// while term_end_time <= now < grace_end_time, and never before.
+	// Monero, Zcash, Bittensor, Bitcoin or Ethereum) whose grace has not
+	// ended. Apps show the renewal notice while term_end_time <= now <
+	// grace_end_time, and never before.
 	CryptoTerm *CryptoTerm `json:"crypto_term,omitempty"`
 
 	// ----- failed renewals (subscription_stripe_dunning.go) -----
@@ -237,50 +273,68 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	// a data-code buyer as Pro.
 	isPro := model.IsProNetwork(session.Ctx, session.ByJwt.NetworkId)
 
-	var currentSubscription *Subscription
+	// every store with a window covering now, in market order
+	markets := model.GetActiveSubscriptionRenewalMarkets(
+		session.Ctx,
+		session.ByJwt.NetworkId,
+		model.SubscriptionTypeSupporter,
+	)
 
-	_, market := model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter)
+	var currentSubscription *Subscription
 
 	if isPro {
 		currentSubscription = &Subscription{
 			Plan: model.SubscriptionTypeSupporter,
 		}
 
-		if market != nil {
-			currentSubscription.Store = *market
+		if store, ok := currentSubscriptionStore(markets); ok {
+			currentSubscription.Store = store
 		}
 	}
 
-	// one entry per store billing this network. MIN(market) above can only name
-	// one of them, so a second store would otherwise be invisible -- and keep
-	// charging, with nowhere in the ui to go and cancel it.
+	// one entry per store billing this network. The current subscription can
+	// only name one of them, so a second store would otherwise be invisible --
+	// and keep charging, with nowhere in the ui to go and cancel it.
 	subscriptions := []*Subscription{}
-	for _, market := range model.GetActiveSubscriptionRenewalMarkets(
-		session.Ctx,
-		session.ByJwt.NetworkId,
-		model.SubscriptionTypeSupporter,
-	) {
+	for _, market := range markets {
 		subscriptions = append(subscriptions, &Subscription{
 			Store: market,
 			Plan:  model.SubscriptionTypeSupporter,
 		})
 	}
 
-	// FIXME
-	pendingPayout := model.ByteCount(0)
-
 	return &SubscriptionBalanceResult{
-		BalanceByteCount:          transferBalanceSummary.BalanceByteCount,
-		StartBalanceByteCount:     transferBalanceSummary.StartBalanceByteCount,
-		OpenTransferByteCount:     transferBalanceSummary.OpenTransferByteCount,
-		CurrentSubscription:       currentSubscription,
-		Subscriptions:             subscriptions,
-		ActiveTransferBalances:    transferBalanceSummary.ActiveTransferBalances,
-		PendingPayoutUsdNanoCents: pendingPayout,
-		UpdateTime:                server.NowUtc(),
-		Guest:                     isGuestNetwork(session, model.HasAnyAuthMethod),
-		PaymentPastDue:            paymentPastDueForNetwork(session.Ctx, session.ByJwt.NetworkId, stripeDunningNow(), stripeDunningSettingsFunc()),
+		BalanceByteCount:       transferBalanceSummary.BalanceByteCount,
+		StartBalanceByteCount:  transferBalanceSummary.StartBalanceByteCount,
+		OpenTransferByteCount:  transferBalanceSummary.OpenTransferByteCount,
+		CurrentSubscription:    currentSubscription,
+		Subscriptions:          subscriptions,
+		ActiveTransferBalances: transferBalanceSummary.ActiveTransferBalances,
+		UpdateTime:             server.NowUtc(),
+		Guest:                  isGuestNetwork(session, model.HasAnyAuthMethod),
+		PaymentPastDue:         paymentPastDueForNetwork(session.Ctx, session.ByJwt.NetworkId, stripeDunningNow(), stripeDunningSettingsFunc()),
 	}, nil
+}
+
+// currentSubscriptionStore is the store current_subscription names, from the
+// network's active markets in market order (GetActiveSubscriptionRenewalMarkets):
+// the first that is not a redeemed gift year, else the gift. Clients show the
+// manage or cancel link of this store only, and released apps do not know
+// "gift", so a subscriber who also redeemed a gift (its year queued after the
+// paid period, or overlapping once the subscription renews) keeps the link to
+// stop paying during the gift year: nothing on our side changes their billing
+// (mmm/GIFTOFPRIVACY.md §9, answer 4). Among the other markets this is the
+// first, as MIN(market) named it before. ok is false with no active market.
+func currentSubscriptionStore(markets []model.SubscriptionMarket) (store model.SubscriptionMarket, ok bool) {
+	for _, market := range markets {
+		if market != model.SubscriptionMarketGift {
+			return market, true
+		}
+	}
+	if 0 < len(markets) {
+		return markets[0], true
+	}
+	return "", false
 }
 
 // isGuestNetwork reports whether the session's network has no login method.
@@ -824,6 +878,23 @@ type PlaySubscription struct {
 	// LatestOrderId is the order id of the latest charge (GPA....), the id on
 	// the customer's Google Play receipt
 	LatestOrderId string `json:"latestOrderId,omitempty"`
+	// OutOfAppPurchaseContext is set on a re-subscription bought in the Play
+	// Store's subscriptions center ("Resubscribe") after the previous
+	// subscription of the product expired, until the purchase is
+	// acknowledged. Such a purchase carries no account identifiers of its own
+	// (playOutOfAppNetworkIdInConn).
+	OutOfAppPurchaseContext *PlayOutOfAppPurchaseContext `json:"outOfAppPurchaseContext,omitempty"`
+	// TestPurchase is present only on a license tester's purchase: no money
+	// moves for it, so it posts no sales notice
+	TestPurchase json.RawMessage `json:"testPurchase,omitempty"`
+}
+
+// PlayOutOfAppPurchaseContext names the expired subscription a
+// re-subscription follows: its account identifiers (the obfuscated account id
+// the app set on the original purchase) and its token.
+type PlayOutOfAppPurchaseContext struct {
+	ExpiredExternalAccountIdentifiers *PlayExternalAccountIdentifiers `json:"expiredExternalAccountIdentifiers,omitempty"`
+	ExpiredPurchaseToken              string                          `json:"expiredPurchaseToken,omitempty"`
 }
 
 // playAcknowledgeSubscription acknowledges the purchase with Google, unless
@@ -900,6 +971,40 @@ type PlaySubscriptionPurchaseLineItem struct {
 	OfferDetails *PlayOfferDetails `json:"offerDetails,omitempty"`
 	// SignupPromotion is set when a Play promotion code was applied at signup
 	SignupPromotion *PlaySignupPromotion `json:"signupPromotion,omitempty"`
+	// OfferPhase is the phase of the offer the item is in now, when Play
+	// reports it; read by the sales notice only
+	OfferPhase *PlayOfferPhase `json:"offerPhase,omitempty"`
+}
+
+// PlayOfferPhase names exactly one phase: the free trial, an introductory
+// price, the base price, or a proration period. Only which one is set is read.
+type PlayOfferPhase struct {
+	FreeTrial         json.RawMessage `json:"freeTrial,omitempty"`
+	IntroductoryPrice json.RawMessage `json:"introductoryPrice,omitempty"`
+	BasePrice         json.RawMessage `json:"basePrice,omitempty"`
+	ProrationPeriod   json.RawMessage `json:"prorationPeriod,omitempty"`
+}
+
+// reported is whether Play named a phase at all.
+func (self *PlayOfferPhase) reported() bool {
+	return self != nil && (playJsonPresent(self.FreeTrial) || playJsonPresent(self.IntroductoryPrice) ||
+		playJsonPresent(self.BasePrice) || playJsonPresent(self.ProrationPeriod))
+}
+
+// freeTrial is whether Play reports the item in its offer's free trial.
+func (self *PlayOfferPhase) freeTrial() bool {
+	return self != nil && playJsonPresent(self.FreeTrial)
+}
+
+// playJsonPresent is whether a field Play may leave out was there, and not
+// null.
+func playJsonPresent(raw json.RawMessage) bool {
+	return 0 < len(raw) && string(raw) != "null"
+}
+
+// testPurchase is whether the purchase is a license tester's.
+func (self *PlaySubscription) testPurchase() bool {
+	return playJsonPresent(self.TestPurchase)
 }
 
 // PlaySignupPromotion is exactly one of oneTimeCode (a single-use code; the
@@ -987,6 +1092,12 @@ var playPackageNameFunc = playPackageName
 var playSkusFunc = func() map[string]*Sku { return playSkus() }
 var playAuthHeaderFunc = playAuthHeader
 
+// The onboarding trial outcome writers the webhook calls. Replaceable only by
+// the hermetic Play webhook tests, which record the outcome instead of reading
+// the network's onboarding events; production never mutates them.
+var playStoreTrialCancelled = storeTrialCancelled
+var playStoreTrialConverted = storeTrialConverted
+
 // Replaceable only by the terminal-renewal error-path test. Production always
 // ends through the network-and-purchase-token-scoped model transaction.
 var endPlaySubscriptionEntitlement = func(
@@ -1008,7 +1119,25 @@ var endPlaySubscriptionEntitlement = func(
 
 // https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
 // https://developer.android.com/google/play/billing/rtdn-reference
+//
+// A verified push is accepted when it is processed, else it is an error the
+// route answers 500 and Pub/Sub redelivers (store_notification_flow.go).
 func PlayWebhook(
+	webhookArgs *PlayWebhookArgs,
+	clientSession *session.ClientSession,
+) (*PlayWebhookResult, error) {
+	result, err := playWebhook(webhookArgs, clientSession)
+	if err != nil {
+		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationError)
+	} else {
+		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationAccepted)
+	}
+	return result, err
+}
+
+// Processes one verified push, as the route always has; PlayWebhook records
+// its outcome.
+func playWebhook(
 	webhookArgs *PlayWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*PlayWebhookResult, error) {
@@ -1122,13 +1251,24 @@ func PlayWebhook(
 			} else {
 				// no account identifiers (a purchase outside the app's billing
 				// flow): only a binding made by the verify endpoint names the
-				// network (play_purchase_binding_controller.go)
+				// network (play_purchase_binding_controller.go), or, for a
+				// Play Store "Resubscribe", the expired subscription's account
+				// identifiers, which bind it
 				boundNetworkId, bound := playPurchaseBindingLookupFunc(nil,
 					clientSession.Ctx,
 					rtdnMessage.SubscriptionNotification.PurchaseToken,
 					sub.LinkedPurchaseToken,
 					true,
 				)
+				if !bound {
+					resubscribedNetworkId, ok := playOutOfAppNetworkIdFunc(nil, clientSession, sub, rtdnMessage.SubscriptionNotification.PurchaseToken)
+					if !ok {
+						return nil, fmt.Errorf("Google Play re-subscription malformed expired account identifiers")
+					}
+					if resubscribedNetworkId != nil {
+						boundNetworkId, bound = *resubscribedNetworkId, true
+					}
+				}
 				if !bound {
 					// paid but nothing names its network: keep it visible to the
 					// owner (a later verify binding credits it and resolves it)
@@ -1159,21 +1299,27 @@ func PlayWebhook(
 				}
 			}
 
+			// the trial outcomes' plan is the purchase's base plan: the product
+			// id ("supporter") sells both plans
+			plan := playPlanForSubscription(sub, rtdnMessage.SubscriptionNotification.SubscriptionId)
+
 			acknowledgeAndCheckRenewal := true
 			switch sub.SubscriptionState {
 			case "SUBSCRIPTION_STATE_CANCELED",
 				"SUBSCRIPTION_STATE_EXPIRED",
 				"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
-				acknowledgeAndCheckRenewal = false
 				// the onboarding trial outcome: a trial that stops renewing or
 				// expires before its first paid period is trial.cancelled
-				storeTrialCancelled(
+				playStoreTrialCancelled(
 					clientSession.Ctx,
 					networkId,
 					model.OnboardingStorePlay,
-					planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+					plan,
 					server.NowUtc(),
 				)
+				// cancelled is not expired: paid time left is acknowledged (or Google
+				// refunds it after three days) and credited like an active purchase
+				acknowledgeAndCheckRenewal = playPurchasePaid(sub, server.NowUtc())
 			}
 
 			if acknowledgeAndCheckRenewal {
@@ -1220,11 +1366,11 @@ func PlayWebhook(
 				if renewalResult != nil && renewalResult.Renewed {
 					// the onboarding trial outcome: a credited renewal past a
 					// recorded trial's length is trial.converted
-					storeTrialConverted(
+					playStoreTrialConverted(
 						clientSession.Ctx,
 						networkId,
 						model.OnboardingStorePlay,
-						planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+						plan,
 						server.NowUtc(),
 					)
 				}
@@ -1384,6 +1530,11 @@ type PlaySubscriptionRenewalResult struct {
 	ExpiryTime       time.Time `json:"expiry_time"`
 	Renewed          bool      `json:"renewed"`
 	Terminal         bool      `json:"terminal"`
+	// Play's grace period: the renewal's charge failed and Play is retrying it,
+	// with the customer entitled through ExpiryTime
+	InGrace bool `json:"in_grace,omitempty"`
+	// this call wrote the grace period's hold (playHoldGraceEntitlementInTx)
+	GraceHeld bool `json:"grace_held,omitempty"`
 }
 
 func SchedulePlaySubscriptionRenewal(
@@ -1473,9 +1624,12 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 	active := false
 	canceled := false
 	terminal := false
+	grace := false
 	switch sub.SubscriptionState {
 	case "SUBSCRIPTION_STATE_ACTIVE":
 		active = true
+	case "SUBSCRIPTION_STATE_IN_GRACE_PERIOD":
+		grace = true
 	case "SUBSCRIPTION_STATE_CANCELED":
 		canceled = true
 		terminal = !maxExpiryTime.After(now)
@@ -1491,6 +1645,27 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 			clientSession,
 			minExpiryTime,
 		)
+	}
+
+	if grace {
+		held := false
+		var holdErr error
+		if sku, ok := playSkusFunc()[playSubscriptionRenewal.SubscriptionId]; ok && sku.Supporter {
+			server.TxInConn(clientSession.Ctx, connOwner, func(tx server.PgTx) {
+				held, holdErr = playHoldGraceEntitlementInTx(tx, clientSession, playSubscriptionRenewal, startTime, maxExpiryTime)
+			}, server.TxReadCommitted)
+		}
+		if holdErr != nil {
+			return nil, holdErr
+		}
+		if held {
+			model.UpdateProNetworkInConn(connOwner, clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+		}
+		return &PlaySubscriptionRenewalResult{
+			ExpiryTime: minExpiryTime,
+			InGrace:    true,
+			GraceHeld:  held,
+		}, nil
 	}
 
 	// cancelled ≠ expired: a CANCELED subscription that is not terminal has
@@ -1616,11 +1791,25 @@ func playCreditSubscriptionInTx(
 		return false, nil
 	}
 
+	// the purchase's earlier credits, read before this one is added, tell the
+	// sales notice whether Play charged this window. A license tester's
+	// purchase moves no money and reads nothing.
+	testPurchase := sub.testPurchase()
+	var earlierExpiries []time.Time
+	historyRead := false
+	if !testPurchase {
+		earlierExpiries, historyRead = playEarlierCreditExpiriesInTx(tx, clientSession.Ctx, playSubscriptionRenewal.NetworkId, playSubscriptionRenewal.PurchaseToken)
+	}
+
 	if sku.Supporter {
 
 		endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
 		netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd)
 
+		// the row starts at the subscription's start; its paid period ends at
+		// the expiry and starts where the purchase's previous paid period
+		// ended (model.proPaidPeriods)
+		paidEndTime := maxExpiryTime
 		renewal := &model.SubscriptionRenewal{
 			NetworkId:          playSubscriptionRenewal.NetworkId,
 			StartTime:          startTime,
@@ -1629,6 +1818,7 @@ func playCreditSubscriptionInTx(
 			PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
 			SubscriptionType:   model.SubscriptionTypeSupporter,
 			SubscriptionMarket: model.SubscriptionMarketGoogle,
+			PaidEndTime:        &paidEndTime,
 		}
 		if err := model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, renewal); err != nil {
 			return false, err
@@ -1636,15 +1826,20 @@ func playCreditSubscriptionInTx(
 		// the regional price tier and the welcome offer, from the
 		// store's region code and offer tag
 		playRecordOnboardingInTx(tx, clientSession, sub, renewal)
+		// the re-engagement program's win-back offer, from its offer tag,
+		// under its own savepoint
+		playRecordWinbackInTx(tx, clientSession.Ctx, sub, renewal)
 
-		// a supporter subscription -> carries the Pro entitlement
+		// a supporter subscription -> carries the Pro entitlement. The
+		// period's marker holds no data (SupporterPeriodTransferBalance); its
+		// revenue makes Play's overlap gate count it as this expiry's credit
 		transferBalance := &model.TransferBalance{
 			NetworkId:             playSubscriptionRenewal.NetworkId,
 			StartTime:             startTime,
 			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: SupporterPeriodTransferBalance,
 			SubsidyNetRevenue:     netRevenue,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      SupporterPeriodTransferBalance,
 			PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 			Pro:                   true,
 		}
@@ -1653,6 +1848,8 @@ func playCreditSubscriptionInTx(
 			tx,
 			transferBalance,
 		)
+		// the period's data: the full Pro grant for the cycle it starts
+		model.GrantProCycleInTx(tx, clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 
 	} else {
 		// a data pack, NOT a subscription -> data only, never Pro
@@ -1673,12 +1870,82 @@ func playCreditSubscriptionInTx(
 		)
 	}
 
-	// no balance covered this expiry: the window is a new payment, posted once
-	// the caller's transaction commits
-	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
-		return playSalesNotice(playSubscriptionRenewal, sub, sku, maxExpiryTime)
-	})
+	// no balance covered this expiry. A window Play charged is a sale, and a
+	// free trial's first window a trial, posted once the caller's transaction
+	// commits; a window Play only moved out posts nothing
+	if historyRead {
+		credit := classifyPlayCredit(sub, playSubscriptionRenewal.SubscriptionId, startTime, maxExpiryTime, earlierExpiries)
+		addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+			return playSalesNotice(playSubscriptionRenewal, sub, sku, maxExpiryTime, credit)
+		})
+	}
 
+	return true, nil
+}
+
+// Keeps Pro through Play's grace period. The renewal's charge failed and Play is retrying it, and Play holds the customer entitled
+// until maxExpiryTime, the grace period's end. Stripe's manual-payment grace
+// keeps a failing renewal's Pro the same way. Nothing here records the unpaid
+// renewal as paid: a renewal row with no revenue, so the network has an open
+// window (the monthly grant, the new-purchase guard, the cancel path), and a
+// zero-byte Pro marker with its exact window, so the end paths retire it. No
+// bytes, no sales notice and no onboarding or win-back record. When the charge
+// lands, the recovered period credits as usual
+// (model.GetOverlappingTransferBalance does not count a hold as a credit), and
+// if it never does, the hold runs out on its own.
+//
+// held is false when a credit or an earlier hold covers the expiry, or the
+// window has already ended. The tx must be ReadCommitted (see
+// PlaySubscriptionRenewal).
+func playHoldGraceEntitlementInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	startTime time.Time,
+	maxExpiryTime time.Time,
+) (held bool, returnErr error) {
+	ctx := clientSession.Ctx
+	if err := model.LockPlaySubscriptionPurchaseInTx(
+		tx,
+		ctx,
+		playSubscriptionRenewal.NetworkId,
+		playSubscriptionRenewal.PurchaseToken,
+	); err != nil {
+		return false, err
+	}
+	endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
+	if !server.NowUtc().Before(endTime) {
+		return false, nil
+	}
+	if _, err := model.GetOverlappingTransferBalanceInTx(tx, ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
+		return false, nil
+	}
+	renewal := &model.SubscriptionRenewal{
+		NetworkId:          playSubscriptionRenewal.NetworkId,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         0,
+		PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		SubscriptionMarket: model.SubscriptionMarketGoogle,
+	}
+	if err := model.AddSubscriptionRenewalInTx(tx, ctx, renewal); err != nil {
+		return false, err
+	}
+	if model.HasPlayGraceHoldInTx(tx, ctx, playSubscriptionRenewal.PurchaseToken, startTime, endTime) {
+		return false, nil
+	}
+	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
+		NetworkId:             playSubscriptionRenewal.NetworkId,
+		StartTime:             startTime,
+		EndTime:               endTime,
+		StartBalanceByteCount: 0,
+		NetRevenue:            0,
+		SubsidyNetRevenue:     0,
+		BalanceByteCount:      0,
+		PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+		Pro:                   true,
+	})
 	return true, nil
 }
 
@@ -1747,6 +2014,22 @@ func PlaySubscriptionRenewalPost(
 				playSubscriptionRenewal,
 			)
 		}
+		return nil
+	}
+
+	if playSubscriptionRenewalResult.InGrace {
+		// Play is still retrying the charge, so nothing has ended: no notice,
+		// and one more poll at the grace period's end, when Play has decided.
+		// The recovery's notification usually gets there first.
+		playSubscriptionRenewal.CheckTime = server.MaxTime(
+			playSubscriptionRenewalResult.ExpiryTime,
+			server.NowUtc().Add(1*time.Hour),
+		)
+		SchedulePlaySubscriptionRenewal(
+			clientSession,
+			tx,
+			playSubscriptionRenewal,
+		)
 		return nil
 	}
 
@@ -1863,8 +2146,21 @@ var playIdTokenClaims = func(ctx context.Context, idToken string) (map[string]an
 }
 
 // Fails closed: without the configured publisher and audience every push is
-// refused as unavailable, before Google is asked about its token.
-func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+// refused as unavailable, before Google is asked about its token. Every
+// refusal is recorded with its outcome (store_notification_flow.go).
+func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (body io.Reader, returnErr error) {
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		outcome := StoreNotificationRefusedMalformed
+		if returnErr == errWebhookVerificationUnavailable {
+			outcome = StoreNotificationRefusedUnavailable
+		} else if refused, ok := returnErr.(*playAuthError); ok {
+			outcome = refused.outcome
+		}
+		RecordStoreNotificationOutcome(req.Context(), model.SubscriptionMarketGoogle, outcome)
+	}()
 	publisherEmail, err := playPublisherEmail()
 	if err != nil {
 		glog.Warningf("[play]webhook refused, verification publisher unavailable: %s\n", err)
@@ -1884,7 +2180,7 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	authHeader := req.Header.Get("Authorization")
 
 	if authHeader == "" {
-		return nil, errors.New("missing authorization header")
+		return nil, &playAuthError{outcome: StoreNotificationRefusedAuth, message: "missing authorization header"}
 	}
 
 	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
@@ -1897,39 +2193,60 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, err
 	return bytes.NewReader(bodyBytes), nil
 }
 
+// Binds a push's Google id token to the configured publisher and audience. A
+// refusal says why (playAuthError): no token Google accepts, or one of
+// another publisher or issuer (refused_auth); the configured publisher's
+// token for another audience (refused_audience: our google.yml and the
+// Pub/Sub subscription disagree); or no answer from Google (error).
 func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string, audience string) error {
 	bearerPrefix := "Bearer "
 
 	if strings.HasPrefix(auth, bearerPrefix) {
 		claims, err := playIdTokenClaims(ctx, auth[len(bearerPrefix):])
 		if err != nil {
-			return err
+			var statusErr *server.HttpStatusError
+			if errors.As(err, &statusErr) {
+				// Google answered: the token is not one it issued, or expired
+				return &playAuthError{outcome: StoreNotificationRefusedAuth, message: err.Error()}
+			}
+			// Google could not be asked: the push is unverified, not refused
+			return &playAuthError{outcome: StoreNotificationError, message: err.Error()}
 		}
 		// Google's tokeninfo endpoint verifies the signature. Bind that token
 		// to this subscription and its verified service account as well.
 		issuer, _ := claims["iss"].(string)
 		verified := claims["email_verified"] == true || claims["email_verified"] == "true"
-		if claims["email"] == publisherEmail && claims["aud"] == audience && verified &&
-			(issuer == "https://accounts.google.com" || issuer == "accounts.google.com") {
+		publisher := claims["email"] == publisherEmail && verified &&
+			(issuer == "https://accounts.google.com" || issuer == "accounts.google.com")
+		if publisher && claims["aud"] == audience {
 			return nil
 		}
+		if publisher {
+			return playAuthRefused(StoreNotificationRefusedAudience)
+		}
 	}
-	return errors.New("Missing authorization.")
+	return playAuthRefused(StoreNotificationRefusedAuth)
 }
 
-// The grant windows (model.FreeGrantWindow, model.ProGrantWindow,
-// model.ReferralGrantWindow) live in the model, next to the balance summary that
-// tells a grant in its grace from the next grant of its kind.
+// The grant windows (model.FreeGrantWindow, model.ReferralGrantWindow) and the Pro
+// grant cycles (model.NextProCycle) live in the model, next to the balance summary
+// that tells a grant in its grace from the next grant of its kind.
 
 // AddRefreshTransferBalance grants one network the data allowance for its CURRENT
-// tier and period: a Pro network gets the monthly Pro amount, everyone else gets the
-// daily free amount. Used when a network is created and when a subscription changes,
-// so the network does not have to wait for the next scheduled grant.
+// tier and period: a Pro network gets the Pro grant of its current subscription cycle
+// unless that cycle has had it, and everyone else gets the daily free amount. Used
+// when a network is created and when a subscription changes (bringyourctl
+// upgrade-plan), so the network does not have to wait for the next scheduled grant.
+// A Pro network also gets the daily free amount, from the daily run
+// (RefreshFreeTransferBalances), like every network; a network that becomes Pro
+// keeps the day's free grant it already holds, so a refresh adds no second one.
+//
+// ReadCommitted, which the cycle grant needs (model.GrantProCycleInTx).
 func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (returnErr error) {
 	proGranted := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		proGranted, returnErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
-	})
+	}, server.TxReadCommitted)
 	if returnErr != nil {
 		return
 	}
@@ -1964,21 +2281,10 @@ func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkI
 	}
 
 	if pro {
-		// the Pro grant carries pro = true, which is what confers the entitlement
-		startTime, endTime := model.ProGrantWindow(server.NowUtc())
-		err := model.AddGrantTransferBalanceInTx(
-			tx,
-			ctx,
-			networkId,
-			model.GrantKindPro,
-			model.Pro().DataAmount(true),
-			startTime,
-			endTime,
-		)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
+		// the Pro grant of the network's current cycle, once per cycle. It
+		// carries pro = true, which is what confers the entitlement. A tx at
+		// another isolation grants nothing here; the sweep grants it.
+		return model.GrantProCycleInTx(tx, ctx, networkId), nil
 	}
 
 	startTime, endTime := model.FreeGrantWindow(server.NowUtc())
@@ -2026,7 +2332,9 @@ func ScheduleRefreshFreeTransferBalances(clientSession *session.ClientSession, t
 }
 
 // RefreshFreeTransferBalances grants the daily free allowance (pro.yml free.data) to
-// every network without an active subscription.
+// every network, Pro and payment grace included, on top of the Pro cycle grant
+// (model.AddFreeTransferBalanceToAllNetworks). A Pro network spends it after its
+// paid Pro data.
 func RefreshFreeTransferBalances(
 	refreshFreeTransferBalances *RefreshFreeTransferBalancesArgs,
 	clientSession *session.ClientSession,
@@ -2060,7 +2368,77 @@ func RefreshFreeTransferBalancesPost(
 	return nil
 }
 
-// ----- Pro grant: runs every month -----
+// ----- Pro grant: each network on its own subscription cycle, swept hourly -----
+
+// How often the sweep runs. A network whose cycle starts with no renewal (the
+// monthly cycles of a yearly plan) gets its grant within this of the cycle's
+// start, inside the previous grant's one-day grace.
+const RefreshProCycleTransferBalancesInterval = 1 * time.Hour
+
+type RefreshProCycleTransferBalancesArgs struct {
+}
+
+type RefreshProCycleTransferBalancesResult struct {
+	GrantedCount int `json:"granted_count"`
+	EndedCount   int `json:"ended_count"`
+}
+
+func ScheduleRefreshProCycleTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshProCycleTransferBalances,
+		&RefreshProCycleTransferBalancesArgs{},
+		clientSession,
+		task.RunOnce("refresh_pro_cycle_transfer_balances"),
+		task.RunAt(server.NowUtc().Add(RefreshProCycleTransferBalancesInterval)),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+// RefreshProCycleTransferBalances grants the FULL Pro allowance (pro.yml pro.data)
+// to every network whose subscription cycle is due and was not granted when its
+// renewal was recorded. It then ends the running cycle grants of networks whose
+// paid period was ended early (model.GrantDueProCycles). The balance is not
+// rationed per day: a Pro network gets the whole 10 TiB at the start of its cycle
+// and can spend it however it likes over the cycle.
+func RefreshProCycleTransferBalances(
+	refreshProCycleTransferBalances *RefreshProCycleTransferBalancesArgs,
+	clientSession *session.ClientSession,
+) (*RefreshProCycleTransferBalancesResult, error) {
+	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
+	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
+	// the process restarts) the sweep grants the cycles that are due by itself.
+	if model.Pro().DataAmount(true) <= 0 {
+		glog.Errorf("[sub]RefreshProCycleTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
+		return &RefreshProCycleTransferBalancesResult{}, nil
+	}
+	grantedNetworkIds, endedNetworkIds := model.GrantDueProCycles(clientSession.Ctx)
+	if 0 < len(grantedNetworkIds) || 0 < len(endedNetworkIds) {
+		glog.Infof("[sub]Pro cycle grants: %d granted, %d ended early\n", len(grantedNetworkIds), len(endedNetworkIds))
+	}
+	return &RefreshProCycleTransferBalancesResult{
+		GrantedCount: len(grantedNetworkIds),
+		EndedCount:   len(endedNetworkIds),
+	}, nil
+}
+
+func RefreshProCycleTransferBalancesPost(
+	refreshProCycleTransferBalances *RefreshProCycleTransferBalancesArgs,
+	refreshProCycleTransferBalancesResult *RefreshProCycleTransferBalancesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRefreshProCycleTransferBalances(clientSession, tx)
+	return nil
+}
+
+// ----- Retired: the calendar-month Pro grant -----
+//
+// RefreshProTransferBalances granted every subscriber the Pro allowance on the 1st
+// of the month (UTC). Grants now follow each network's own cycle (above). The task
+// stays registered so its pending row (due 2026-12-01) is consumed by a binary that
+// grants nothing, and its post-hook schedules no successor. Nothing schedules it
+// any more.
 
 type RefreshProTransferBalancesArgs struct {
 }
@@ -2068,45 +2446,11 @@ type RefreshProTransferBalancesArgs struct {
 type RefreshProTransferBalancesResult struct {
 }
 
-func ScheduleRefreshProTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
-	// the start of the next month (time.Date normalizes month 13 to January)
-	year, month, _ := server.NowUtc().Date()
-	runAt := time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
-	task.ScheduleTaskInTx(
-		tx,
-		RefreshProTransferBalances,
-		&RefreshProTransferBalancesArgs{},
-		clientSession,
-		task.RunOnce("refresh_pro_transfer_balances"),
-		task.RunAt(runAt),
-		task.MaxTime(1*time.Hour),
-	)
-}
-
-// RefreshProTransferBalances grants the FULL monthly Pro allowance (pro.yml pro.data)
-// to every network with an active subscription, at the start of the month. The
-// balance is not rationed per-day: a Pro network gets the whole 10 TiB up front and
-// can spend it however it likes over the month.
 func RefreshProTransferBalances(
 	refreshProTransferBalances *RefreshProTransferBalancesArgs,
 	clientSession *session.ClientSession,
 ) (*RefreshProTransferBalancesResult, error) {
-	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
-	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
-	// the process restarts) the grants resume on their normal cadence by themselves.
-	if model.Pro().DataAmount(true) <= 0 {
-		glog.Errorf("[sub]RefreshProTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
-		return &RefreshProTransferBalancesResult{}, nil
-	}
-
-	startTime, endTime := model.ProGrantWindow(server.NowUtc())
-	model.AddProTransferBalanceToAllNetworks(
-		clientSession.Ctx,
-		startTime,
-		endTime,
-		model.Pro().DataAmount(true),
-		transferGrantRunIds(clientSession.Ctx)...,
-	)
+	glog.Infof("[sub]RefreshProTransferBalances is retired; Pro grants follow each network's cycle (RefreshProCycleTransferBalances)\n")
 	return &RefreshProTransferBalancesResult{}, nil
 }
 
@@ -2116,7 +2460,6 @@ func RefreshProTransferBalancesPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleRefreshProTransferBalances(clientSession, tx)
 	return nil
 }
 
@@ -2371,8 +2714,12 @@ func HeliusWebhook(
 	// the reason the transaction was skipped -- reported as the result message for a
 	// single-transaction delivery, so a caller (and the existing tests) can see WHY
 	skipMessage := ""
+	// native SOL payments to SOL invoice addresses: the chain read credits
+	// them, so a delivery only brings that read forward (heliusHintNativeInvoices)
+	nativeHinted := 0
 	lookups := &solanaDbPaymentLookups{clientSession: clientSession}
 	for _, transaction := range transactions {
+		nativeHinted += heliusHintNativeInvoices(clientSession, transaction)
 		decision := solanaDecidePayment(transaction, lookups)
 
 		switch decision.action {
@@ -2385,6 +2732,15 @@ func HeliusWebhook(
 			skipMessage = decision.skipMessage
 			continue
 		case solanaPaymentActionRecord:
+			// a payment of one of our Shopify store's orders, made with Solana
+			// Pay into the same receiver, bought an order, not an app purchase:
+			// recorded as the order's, or left to the receiver leg while Shopify
+			// cannot verify it yet (solana_shopify_order.go)
+			if decision.unfulfilled.Reason == model.SolanaUnfulfilledReasonNoIntent &&
+				heliusShopifyOrderPayment(clientSession, transaction, decision.unfulfilled.TokenAmountUsd) {
+				skipMessage = "A Shopify order's payment"
+				continue
+			}
 			// Money arrived at our address and bought nothing. Helius is still acked
 			// 200 (it never re-examines a delivered tx) once it is recorded where an
 			// operator can see and repair it.
@@ -2435,6 +2791,9 @@ func HeliusWebhook(
 		return nil, firstErr
 	}
 
+	if matched == 0 && 0 < nativeHinted {
+		return &HeliusWebhookResult{Message: fmt.Sprintf("%d SOL invoice payments to read", nativeHinted)}, nil
+	}
 	if matched == 0 {
 		glog.Infof("HeliusWebhook: no matching payments found for %v", transactions)
 		// a single-transaction delivery keeps its specific reason; a batch with
@@ -2445,6 +2804,104 @@ func HeliusWebhook(
 		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
 	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
+}
+
+// Whether the receiver leg of the Solana reconcile runs (helius.yml names
+// the RPC key it reads the chain with), so the webhook can leave a payment to
+// it. Replaceable only by tests.
+var heliusReceiverLegRuns = func() bool {
+	_, ok := solanaChainRpcUrl()
+	return ok
+}
+
+// The webhook's Shopify branch for a payment it would record as no_intent:
+// true when the payment is a Shopify order's, recorded as the order's payment,
+// or a Solana Pay app payment Shopify cannot verify yet (its order may be made
+// seconds after the block; the lookup may fail) that the receiver leg reads
+// after its minimum age and decides. false keeps today's behaviour: the
+// payment is recorded as no_intent. A redelivery of a payment already recorded
+// as an order's is true at once.
+func heliusShopifyOrderPayment(clientSession *session.ClientSession, transaction *SolanaTransaction, receivedUsd float64) bool {
+	ctx := clientSession.Ctx
+	if !solanaShopifyAppPayment(transaction) {
+		return false
+	}
+	if heliusShopifyOrderRecorded(ctx, transaction.Signature) {
+		return true
+	}
+	leg := model.SolanaShopifyOrderLegWebhook
+	outcome, note, err := solanaRecognizeShopifyOrder(nil, ctx, transaction, receivedUsd, leg, DefaultSolanaShopifyOrderSettings(), false)
+	switch {
+	case err != nil:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "error").Inc()
+		glog.Warningf("HeliusWebhook: the Shopify order of Solana Pay payment %s could not be looked up: %s\n", transaction.Signature, err)
+		note = "the order lookup failed"
+	case outcome == solanaShopifyRecorded:
+		solanaShopifyOrderPayments.WithLabelValues(leg, "recorded").Inc()
+		return true
+	case outcome == solanaShopifyNotApplicable:
+		return false
+	}
+	if !heliusReceiverLegRuns() {
+		if err == nil {
+			solanaShopifyOrderPayments.WithLabelValues(leg, "unverified").Inc()
+		}
+		return false
+	}
+	solanaShopifyOrderPayments.WithLabelValues(leg, "deferred").Inc()
+	glog.Infof("HeliusWebhook: Solana Pay payment %s is not verified as a Shopify order yet (%s); the receiver leg decides\n", transaction.Signature, note)
+	return true
+}
+
+// Whether a signature is recorded as a Shopify order's payment. Replaceable
+// only by tests.
+var heliusShopifyOrderRecorded = func(ctx context.Context, signature string) bool {
+	return model.IsSolanaShopifyOrderPaymentRecordedInConn(nil, ctx, signature)
+}
+
+// heliusHintNativeInvoices is the webhook's native branch: the native SOL
+// transfers of a delivered transaction to SOL invoice addresses (each SOL
+// invoice has a Coinbase deposit address of its own) are read on the SOL
+// scanner's next scan, whatever the invoice's age, and that read of the chain
+// at the finalized commitment credits them (crypto_pay_solana_native.go).
+// The delivery itself credits nothing and changes nothing of the USDC
+// decision. Helius delivers a per-invoice address's transactions only when the
+// address is on its webhook; the scanner's polling is the source of truth
+// either way. Returns how many invoice addresses the transaction paid. A
+// failed lookup is logged, never the delivery's failure: the scan still reads
+// every open invoice.
+func heliusHintNativeInvoices(clientSession *session.ClientSession, transaction *SolanaTransaction) (hinted int) {
+	if cryptoPayConfigFunc().Asset(model.CryptoAssetSol) == nil {
+		// native SOL is not switched on: there is no SOL invoice to hint
+		return 0
+	}
+	destinations := []string{}
+	for _, nativeTransfer := range transaction.NativeTransfers {
+		if nativeTransfer.Amount <= 0 || nativeTransfer.ToUserAccount == "" {
+			continue
+		}
+		address, err := cryptoSolanaAddressCanonical(nativeTransfer.ToUserAccount)
+		if err != nil || slices.Contains(destinations, address) {
+			continue
+		}
+		destinations = append(destinations, address)
+	}
+	if len(destinations) == 0 {
+		return 0
+	}
+	server.HandleError(func() {
+		invoiceAddresses := cryptoInvoiceAddresses(clientSession.Ctx, model.CryptoAssetSol, destinations)
+		if len(invoiceAddresses) == 0 {
+			return
+		}
+		cryptoAddScanHints(clientSession.Ctx, model.CryptoAssetSol, invoiceAddresses)
+		cryptoPayWebhookDeliveries.WithLabelValues("helius", model.CryptoAssetSol, "hinted").Inc()
+		hinted = len(invoiceAddresses)
+		glog.Infof("HeliusWebhook: transaction %s pays %d SOL invoice addresses; their scan reads them next\n", transaction.Signature, hinted)
+	}, func(err error) {
+		glog.Warningf("HeliusWebhook: could not look up the SOL invoice addresses of transaction %s: %s\n", transaction.Signature, err)
+	})
+	return
 }
 
 // What the webhook does with one transaction (solanaDecidePayment).
@@ -2786,6 +3243,9 @@ func solanaCreditPlanIntentInTx(
 		return false, nil
 	}
 
+	// the paid term, without the manual-payment grace the caller added to
+	// endTime (solanaCreditPaymentIntentInConn)
+	paidEndTime := endTime.Add(-manualPaymentGracePeriod)
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          *paymentSearchResult.NetworkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -2794,6 +3254,7 @@ func solanaCreditPlanIntentInTx(
 		NetRevenue:         netRevenue,
 		SubscriptionMarket: model.SubscriptionMarketSolana,
 		TransactionId:      paymentSearchResult.PaymentReference,
+		PaidEndTime:        &paidEndTime,
 	}
 
 	err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
@@ -2803,14 +3264,15 @@ func solanaCreditPlanIntentInTx(
 		return false, err
 	}
 
-	// a supporter subscription -> carries the Pro entitlement
+	// a supporter subscription -> carries the Pro entitlement; the term's
+	// marker holds no data (SupporterPeriodTransferBalance)
 	transferBalance := &model.TransferBalance{
 		NetworkId:             *paymentSearchResult.NetworkId,
 		StartTime:             startTime,
 		EndTime:               endTime,
-		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		StartBalanceByteCount: SupporterPeriodTransferBalance,
 		SubsidyNetRevenue:     netRevenue,
-		BalanceByteCount:      RefreshSupporterTransferBalance,
+		BalanceByteCount:      SupporterPeriodTransferBalance,
 		Pro:                   true,
 	}
 	model.AddTransferBalanceInTx(
@@ -2818,6 +3280,8 @@ func solanaCreditPlanIntentInTx(
 		tx,
 		transferBalance,
 	)
+	// the term's data: the full Pro grant for the cycle it starts
+	model.GrantProCycleInTx(tx, clientSession.Ctx, *paymentSearchResult.NetworkId)
 
 	// this call consumed the intent: a new payment, posted once the
 	// transaction commits

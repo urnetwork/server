@@ -1,0 +1,939 @@
+{
+  "uid": "urnetwork-extender-health",
+  "title": "urnetwork / extender health",
+  "tags": [
+    "urnetwork",
+    "extenders"
+  ],
+  "description": "Whether extender records reach clients through each channel, how many extenders there are and how fast they churn, the gossip mesh's capacity, links and memory, and provider fleets that leave together (monitor/SIGNALS.md §28, from factury/research/extender-health-2026-11-11.md). Alerts are the monitor's.",
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timezone": "",
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_stats_online_extenders, env)",
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "release to clients (SIGNALS.md §28.1, §28.2, §27.2)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "gossip release coverage",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_extender_gossip_extenders_24h{env=\"$env\",kind=\"record\"}) / max(urnetwork_stats_online_extenders{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true
+        }
+      ],
+      "description": "The online extenders whose record the gossip service released in the last 24 hours, as a share of the online extenders. A record lives a day and the drip re-releases each before it expires, so a healthy share is about 100% (100-115% from 2026-10-30 to 11-06, counting extenders revoked during the day). 0% from 2026-11-07 to 11-11 22:15Z, when the drain was dead. The monitor warns under 50% for an hour (extender-release-coverage-low)."
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "oldest unreleased gossip message",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_extender_gossip_oldest_pending_seconds{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true
+        }
+      ],
+      "description": "The age of the oldest record or revocation written to the gossip publish queue and not yet released. The gossip replicas drain the queue every 5 seconds, so a healthy value is seconds; 5.6 days on 2026-11-11. The monitor warns above 10 minutes (extender-gossip-stalled, SIGNALS.md §27.2)."
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "stored activations (last hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_extender_activations_total{env=\"$env\",stage=\"store\",outcome=\"activated\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true
+        }
+      ],
+      "description": "Extender activations the api stored in the last hour. Each answers its extender with its own fresh record and eight random peers. At least 7 an hour from 2026-11-03 to 11-11; the monitor warns at none for 90 minutes (extender-activations-stopped)."
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "extenders in dns",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_taskworker_extender_dns_extenders{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true
+        }
+      ],
+      "description": "Distinct extenders behind the addresses the extender dns tick published. On a taskworker with the publish fix (SIGNALS.md §27.2) it counts only the sets Route 53 accepted; on an older one, the sets the tick wanted, which read 62 while every batch was refused from 2026-10-28. What clients are actually served is the monitor's extender-dns-records (§28.2)."
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "online extenders and what reached clients",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "online"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_extender_gossip_extenders_24h{env=\"$env\",kind=\"record\"})",
+          "refId": "B",
+          "legendFormat": "released through gossip, 24h"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_taskworker_extender_dns_extenders{env=\"$env\"})",
+          "refId": "C",
+          "legendFormat": "in dns"
+        }
+      ],
+      "description": "The online extenders beside the extenders whose record reached clients: through gossip in the last day, and in the dns sets of the last tick. A gap between online and released is extenders whose record has expired in every gossip-fed directory."
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "gated releases (per hour)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (increase(urnetwork_extender_releases_total{env=\"$env\"}[1h]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "Gated release requests by outcome: ok released records; empty (nothing eligible), country_capacity, incompatible and unavailable released nothing; rate_limited, epoch_spent and probation refuse the requester by design. No requests through 2026-11-11 (the gated tier had no members). The monitor warns when clients ask and under half the answers release (extender-gated-release-failing)."
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "supply (SIGNALS.md §28.5)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "online extenders against their 24-hour peak",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_extenders{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "online"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(max_over_time(urnetwork_stats_online_extenders{env=\"$env\"}[24h]))",
+          "refId": "B",
+          "legendFormat": "24h peak"
+        }
+      ],
+      "description": "The online extenders and their peak over the trailing day. On 2026-11-01 the uptime prober's own failures revoked about 136 of 307 extenders in half a day. The monitor warns at more than 25% and 20 extenders under the peak for an hour (extender-supply-falling)."
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "extenders created and revoked (last 24 hours)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_extenders_created_24h{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "created"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_extenders_revoked_24h{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "revoked, not back"
+        }
+      ],
+      "description": "Keys first activated in the trailing day, and extenders that lost their last active address in it and have not activated again (a re-activation clears the revocation). About 11 created and 20 revoked a day from 2026-11-02 to 11-11. The monitor warns when revocations exceed creations by more than 30 for two hours (extender-churn-high)."
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "gossip mesh (SIGNALS.md §28.4)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "panels": []
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "links per replica against the high watermark",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host) (urnetwork_gossip_peers{env=\"$env\",service=\"gossip\"})",
+          "refId": "A",
+          "legendFormat": "{{host}} links"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host) (process_open_fds{env=\"$env\",service=\"gossip\"})",
+          "refId": "B",
+          "legendFormat": "{{host}} open fds"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_gossip_conn_manager_watermark{env=\"$env\",service=\"gossip\",level=\"high\"})",
+          "refId": "C",
+          "legendFormat": "high watermark"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_gossip_conn_manager_watermark{env=\"$env\",service=\"gossip\",level=\"low\"})",
+          "refId": "D",
+          "legendFormat": "low watermark"
+        }
+      ],
+      "description": "The members and extenders each gossip replica holds a link to (its open fds count the same plus the process's own; a build before the link gauge exports only fds). Above the high watermark the replica closes links past their 60 s grace down to the low one and the members redial: the 67-second trim loop of 2026-11-11, when 13-15k members wanted links from four replicas of 1024. The monitor warns above 90% of the watermark for 30 minutes or above it for 10 (gossip-mesh-saturated)."
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "topic mesh peers per replica",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host) (urnetwork_gossip_mesh_peers{env=\"$env\",service=\"gossip\"})",
+          "refId": "A",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "description": "The peers in each replica's topic mesh, the links that carry the records it publishes. Fewer than its links is normal: gossipsub keeps a bounded mesh and floods the rest."
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "heap in use per replica",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host) (go_memstats_heap_inuse_bytes{env=\"$env\",service=\"gossip\"})",
+          "refId": "A",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "description": "Each gossip replica's live heap. It grew with link churn to about 5.5 GB on edge-3 and edge-4 by 2026-11-11 and was freed only by the restart at 22:09-22:15Z. The monitor warns above 4 GiB for 30 minutes (gossip-heap-high); take a heap profile before restarting."
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "links of all replicas against their 3-hour peak",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (host) (urnetwork_gossip_peers{env=\"$env\",service=\"gossip\"}))",
+          "refId": "A",
+          "legendFormat": "links"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (host) (process_open_fds{env=\"$env\",service=\"gossip\"}))",
+          "refId": "B",
+          "legendFormat": "open fds"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max_over_time(sum(max by (host) (process_open_fds{env=\"$env\",service=\"gossip\"}))[3h:1m])",
+          "refId": "C",
+          "legendFormat": "open fds, 3h peak"
+        }
+      ],
+      "description": "The replicas' links together and their recent peak. Under half of the peak for 15 minutes is a mesh that lost its members (gossip-mesh-links-dropped): on 2026-11-02 and 11-11 a departing provider fleet; read the provider fleet row first."
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "provider fleet (SIGNALS.md §28.3)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "panels": []
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "online providers, connect clients and gossip links",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_providers{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "online providers"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (host, block) (urnetwork_connect_connected_clients{env=\"$env\"}))",
+          "refId": "B",
+          "legendFormat": "connect clients"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (host) (process_open_fds{env=\"$env\",service=\"gossip\"}))",
+          "refId": "C",
+          "legendFormat": "gossip open fds"
+        }
+      ],
+      "description": "A fleet that goes offline together drops all three at once: on 2026-11-11 at 10:35Z connect lost 8% and gossip links fell five-fold within a minute, and online providers followed at the next stats refresh (30-40 minutes later)."
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "countries losing providers (against their 3-hour peak)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "topk(5, max by (country_code) (max_over_time(urnetwork_stats_online_providers_by_country{env=\"$env\"}[3h])) - max by (country_code) (urnetwork_stats_online_providers_by_country{env=\"$env\"}))",
+          "refId": "A",
+          "legendFormat": "{{country_code}}"
+        }
+      ],
+      "description": "The countries whose online providers fell the most below their trailing 3-hour peak. The monitor warns when a country loses more than half and at least 1,000 for 45 minutes (provider-fleet-departure); Vietnam lost 11,005 of 11,221 on 2026-11-11."
+    }
+  ]
+}

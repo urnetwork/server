@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "kind": "operator-approved-direct-complete-source-pair-review",
+  "user_approval": ["go ahead", "approved"],
+  "supersedes": "Lengthy 19-control pre-review qualification as a prerequisite for this manual epoch-1 review only",
+  "models": ["qwen3.8-27b", "gemma-4-26b-a4b"],
+  "coverage": "Complete authenticated source bundle; preserve both models' findings",
+  "frozen_scoring_criteria_unchanged": true,
+  "explicit_final_user_approval_required": true,
+  "automatic_reward_release": false,
+  "automatic_source_promotion": false,
+  "historical_failed_qualifications_preserved": true,
+  "formal_native_qualification_claim": false,
+  "purpose": "Finish the actual winner honesty/safety/traffic-preservation/production-benefit review for manual final approval"
+}

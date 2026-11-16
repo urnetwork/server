@@ -1,0 +1,11 @@
+# Inert source template; the parent accounts for this aggregate exactly once.
+[Unit]
+Description=Evaluation coordinator aggregate within the ordinary management budget
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=@COORDINATOR_MEMORY_BYTES@
+MemorySwapMax=@SWAP_BYTES@
+TasksAccounting=yes
+TasksMax=@COORDINATOR_TASKS_MAXIMUM@
+AllowedCPUs=@MANAGEMENT_CPUSET@

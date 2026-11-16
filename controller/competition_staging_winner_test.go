@@ -33,12 +33,15 @@ func (self *competitionRankingFixture) completeScore(t testing.TB, score *ScoreR
 		if err != nil {
 			t.Fatal(err)
 		}
-		server.Db(context.Background(), func(conn server.PgConn) {
+		server.Tx(context.Background(), func(conn server.PgTx) {
 			server.RaisePgResult(conn.Exec(context.Background(), `
 				UPDATE competition_job SET state = 'succeeded', completed_at = $2,
-					lease_owner = NULL, score_json = $3::jsonb WHERE job_id = $1
+					lease_owner = NULL, lease_expires_at = NULL, score_json = $3::jsonb WHERE job_id = $1
 			`, job.JobId, self.now, string(scoreBytes)))
-		}, server.OptReadWrite())
+			server.RaisePgResult(conn.Exec(context.Background(), `UPDATE competition_worker_slot
+			 SET worker_id=NULL,job_id=NULL,lease_expires_at=NULL,heartbeat_at=$1
+			 WHERE slot_id=1 AND worker_id='ranking-worker' AND job_id=$2`, self.now, job.JobId))
+		})
 	}
 	return job
 }

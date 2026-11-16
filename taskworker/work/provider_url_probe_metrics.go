@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 var urlProbeTurns = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -34,6 +35,137 @@ var urlProbeOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_url_probe_outcomes_total",
 	Help: "Acknowledged measured URL outcomes by success or error",
 }, []string{"outcome"})
+
+// The legs of acknowledged URL loads, by transport and IP family, kept apart so
+// the share of providers that carry TCP but not UDP, or IPv4 but not IPv6, is
+// visible. urlProbeOutcomes counts the verdict, which needs every leg.
+var urlProbeTransportOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_url_probe_transport_outcomes_total",
+	Help: "Measured URL loads of acknowledged outcomes by leg: transport tcp is a load's HTTPS leg and udp its HTTP/3 leg (for a URL that declares h3); family ipv4 is every load's legs through the URL's A record, ipv6 a dual-stack provider's legs through its AAAA record (for a URL that declares ipv6). Outcomes: success or error (an IPv4 HTTPS leg); answered (the site answered over QUIC and refused or failed the request, which proves the provider carries UDP); silent (nothing answered the QUIC handshake); not_measured (the leg could not be made or was cut short, never a failure); skipped (an earlier leg of the load failed first and no leg was made); country_disabled (the provider's country disables UDP probes: not measured, never a failure); no_url (the provider advertises IPv6 and the URL does not serve it: not measured, never a failure). A failed or silent IPv6 leg, like a silent IPv4 HTTP/3 leg, is judged by place on the server",
+}, []string{"transport", "family", "outcome"})
+
+// URL turns the HTTP/3 common-mode guard held back: their only failure was a
+// silent HTTP/3 leg while no recent network's HTTP/3 leg reached its site
+// (provider_url_probe_common_mode.go).
+var urlProbeH3CommonModeHeld = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_url_probe_h3_common_mode_held_total",
+	Help: "URL turns held back from provider history because their only failure was a silent HTTP/3 leg while no recently measured network's HTTP/3 leg reached its site: the platform's QUIC path, not each provider's UDP",
+})
+
+// URL turns the IPv6 common-mode guard held back, by the transport of the
+// IPv6 leg that failed (provider_url_probe_common_mode.go).
+var urlProbeIpv6CommonModeHeld = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_url_probe_ipv6_common_mode_held_total",
+	Help: "URL turns held back from provider history because their only failures were IPv6 legs (transport tcp: the HTTPS leg over IPv6 failed; udp: its HTTP/3 leg over IPv6 was silent) while no recently measured network's IPv6 leg of that transport reached its site: the platform's IPv6 path, not each provider's",
+}, []string{"transport"})
+
+// A dual-stack provider's IPv6 HTTPS legs by the URL they loaded (the load's
+// own, or its stand-in), so a URL whose IPv6 fails the fleet shows apart from
+// the providers it is loaded through. no_aaaa is a leg that was not measured
+// because the URL, or a redirect hop of it, had no AAAA record through the
+// provider's resolver: the URL's outcome, never the provider's.
+var urlProbeIpv6DestinationLegs = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_url_probe_ipv6_destination_legs_total",
+	Help: "IPv6 HTTPS legs of acknowledged dual-stack URL loads by the URL they loaded (destination: the load's own URL, or the stand-in its IPv6 legs loaded because its own serves no IPv6) and outcome: passed; failed (judged by IPv6 place on the server); no_aaaa (the URL, or a redirect hop of it, had no AAAA record through the provider's resolver: not measured, and the URL's outcome, never the provider's); not_measured (any other leg that could not be made)",
+}, []string{"destination", "outcome"})
+
+// The label triples urlProbeTransportOutcomes can carry.
+var urlProbeTransportOutcomeLabels = [...][3]string{
+	{"tcp", "ipv4", "success"}, {"tcp", "ipv4", "error"},
+	{"udp", "ipv4", "success"}, {"udp", "ipv4", "answered"}, {"udp", "ipv4", "silent"}, {"udp", "ipv4", "not_measured"}, {"udp", "ipv4", "skipped"}, {"udp", "ipv4", "country_disabled"},
+	{"tcp", "ipv6", "success"}, {"tcp", "ipv6", "error"}, {"tcp", "ipv6", "not_measured"}, {"tcp", "ipv6", "skipped"}, {"tcp", "ipv6", "no_url"},
+	{"udp", "ipv6", "success"}, {"udp", "ipv6", "answered"}, {"udp", "ipv6", "silent"}, {"udp", "ipv6", "not_measured"}, {"udp", "ipv6", "skipped"}, {"udp", "ipv6", "country_disabled"},
+}
+
+// One HTTP/3 leg's outcome label; nil for a leg an earlier failure skipped.
+func urlProbeUdpOutcome(leg *egresshealth.CheckResult) string {
+	switch egresshealth.UrlProbeH3Udp(leg) {
+	case egresshealth.UrlProbeH3UdpPassed:
+		return "success"
+	case egresshealth.UrlProbeH3UdpAnswered:
+		return "answered"
+	case egresshealth.UrlProbeH3UdpSilent:
+		return "silent"
+	case egresshealth.UrlProbeH3UdpNotMeasured:
+		return "not_measured"
+	}
+	return "skipped"
+}
+
+// Counts each load's legs: its IPv4 HTTPS leg when it was measured, its IPv4
+// HTTP/3 leg when its URL declares one, and, for a provider that advertises
+// IPv6, its IPv6 legs (or no_url when the URL serves no IPv6). A leg the
+// provider's country disables is country_disabled. A canary, and a load whose
+// IPv4 HTTPS leg was not measured, says nothing about any leg.
+func observeUrlProbeTransportOutcomes(result *egresshealth.Result) {
+	if result == nil {
+		return
+	}
+	observe := func(transport string, family string, outcome string) {
+		urlProbeTransportOutcomes.WithLabelValues(transport, family, outcome).Inc()
+	}
+	for _, check := range result.Checks {
+		if check.Canary || (check.NotMeasured && check.H3 == nil && check.Ipv6 == nil) {
+			continue
+		}
+		tcp := "error"
+		if check.HttpsOk() {
+			tcp = "success"
+		}
+		observe("tcp", "ipv4", tcp)
+		switch {
+		case check.UdpProbesDisabled:
+			observe("udp", "ipv4", "country_disabled")
+		case check.H3Required:
+			observe("udp", "ipv4", urlProbeUdpOutcome(check.H3))
+		}
+		switch {
+		case check.Ipv6NoUrl:
+			observe("tcp", "ipv6", "no_url")
+		case !check.Ipv6Required:
+		case check.Ipv6 == nil:
+			observe("tcp", "ipv6", "skipped")
+			switch {
+			case check.Ipv6UdpProbesDisabled:
+				observe("udp", "ipv6", "country_disabled")
+			case check.Ipv6H3Required:
+				observe("udp", "ipv6", "skipped")
+			}
+		default:
+			destination := check.Name
+			if result.UrlProbeEvidence != nil {
+				destination = result.UrlProbeEvidence.Ipv6Destination().Name
+			}
+			switch egresshealth.UrlProbeIpv6Tcp(check.Ipv6) {
+			case egresshealth.UrlProbeIpv6TcpPassed:
+				observe("tcp", "ipv6", "success")
+				urlProbeIpv6DestinationLegs.WithLabelValues(destination, "passed").Inc()
+			case egresshealth.UrlProbeIpv6TcpNotMeasured:
+				observe("tcp", "ipv6", "not_measured")
+				if check.Ipv6.AddressRecordMissing {
+					urlProbeIpv6DestinationLegs.WithLabelValues(destination, "no_aaaa").Inc()
+				} else {
+					urlProbeIpv6DestinationLegs.WithLabelValues(destination, "not_measured").Inc()
+				}
+			default:
+				observe("tcp", "ipv6", "error")
+				urlProbeIpv6DestinationLegs.WithLabelValues(destination, "failed").Inc()
+			}
+			// the IPv6 legs' URL, the load's own or its stand-in, decides
+			// whether an IPv6 HTTP/3 leg was planned
+			switch {
+			case check.Ipv6UdpProbesDisabled:
+				observe("udp", "ipv6", "country_disabled")
+			case !check.Ipv6H3Required:
+			case check.Ipv6.H3 == nil && egresshealth.UrlProbeIpv6Tcp(check.Ipv6) == egresshealth.UrlProbeIpv6TcpNotMeasured:
+				// the family was not measured, its UDP leg with it
+				observe("udp", "ipv6", "not_measured")
+			default:
+				observe("udp", "ipv6", urlProbeUdpOutcome(check.Ipv6.H3))
+			}
+		}
+	}
+}
 
 var urlProbeTurnSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
 	Name:    "urnetwork_url_probe_turn_seconds",
@@ -296,9 +428,15 @@ func init() {
 	for _, outcome := range []string{"success", "error"} {
 		urlProbeOutcomes.WithLabelValues(outcome)
 	}
+	for _, labels := range urlProbeTransportOutcomeLabels {
+		urlProbeTransportOutcomes.WithLabelValues(labels[0], labels[1], labels[2])
+	}
+	for _, transport := range []string{"tcp", "udp"} {
+		urlProbeIpv6CommonModeHeld.WithLabelValues(transport)
+	}
 	for _, source := range []string{"general", "country", "general_country_unavailable", "security_recheck"} {
 		urlProbeSources.WithLabelValues(source)
 	}
-	prometheus.MustRegister(urlProbeTurns, urlProbePassSeconds, urlProbeSources, urlProbeOutcomes, urlProbeTurnSeconds,
+	prometheus.MustRegister(urlProbeTurns, urlProbePassSeconds, urlProbeSources, urlProbeOutcomes, urlProbeTransportOutcomes, urlProbeH3CommonModeHeld, urlProbeIpv6CommonModeHeld, urlProbeIpv6DestinationLegs, urlProbeTurnSeconds,
 		urlProbeFleetMetrics, urlProbeConfiguredShards, urlProbeCapability, urlProbeShardObservedAt, urlProbeShardPasses)
 }

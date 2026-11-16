@@ -36,18 +36,19 @@ func sdkBrowsingInitialQualityProvider(ordinal int) bool {
 // Publication follows complete transport, NAT and public-mode registration.
 // All non-atomic fields remain immutable after ready becomes true.
 type sdkBrowsingSetupProvider struct {
-	ready        atomic.Bool
-	id           clientconnect.Id
-	carrier      *clientconnect.Tun
-	strategy     *clientconnect.ClientStrategy
-	client       *clientconnect.Client
-	transport    *clientconnect.PlatformTransport
-	localNat     *clientconnect.LocalUserNat
-	remoteNat    *clientconnect.RemoteUserNatProvider
-	resendBudget *clientconnect.TransferMemoryBudget
-	noAck        *noAckSendTracker
-	packs        *sendPackLifecycleTracker
-	returns      *providerReturnSendTracker
+	ready                            atomic.Bool
+	id                               clientconnect.Id
+	carrier                          *clientconnect.Tun
+	strategy                         *clientconnect.ClientStrategy
+	client                           *clientconnect.Client
+	transport                        *clientconnect.PlatformTransport
+	localNat                         *clientconnect.LocalUserNat
+	remoteNat                        *clientconnect.RemoteUserNatProvider
+	resendBudget                     *clientconnect.TransferMemoryBudget
+	noAck                            *noAckSendTracker
+	packs                            *sendPackLifecycleTracker
+	returns                          *providerReturnSendTracker
+	returnRecoveryPacketLimitForTest int
 }
 
 // Every acquired resource is retained until joined, including partial setup.
@@ -133,6 +134,9 @@ func newSdkBrowsingSetupFixture(t testing.TB, plan *nativeBrowsingPressurePlan, 
 	byJwt := session.NewByJwt(fixture.environment.networkId, fixture.environment.userId, fmt.Sprintf("sdk-browsing-%s", fixture.environment.networkId), false, false).Client(deviceId, clientId).Testing_Sign()
 	fixture.callerToken = byJwt
 	fixture.discovery = newSdkBrowsingSetupDiscovery(fixture.readyProviderIds, &sdkBrowsingSetupApiDiscovery{strategy: fixture.deviceStrategy, apiUrl: apiUrl})
+	if fixture.scenario != nil {
+		fixture.discovery.page1Timeline = fixture.scenario.page1Timeline
+	}
 	settings := sdk.DefaultDeviceLocalSettings()
 	settings.MemoryTargetByteCount, settings.LowMemoryProfile = 32*1024*1024, true
 	settings.AllowProvider, settings.ProvideExtenderEnabled, settings.EnableRpc = false, false, false
@@ -155,7 +159,11 @@ func newSdkBrowsingSetupFixture(t testing.TB, plan *nativeBrowsingPressurePlan, 
 			return &sdkBrowsingOriginPolicy{SecurityPolicy: clientconnect.DefaultSecurityPolicyWithStats(ctx, stats), native: native}
 		})
 	}
-	device.SetTransportSettings(&sdk.TransportSettings{Mode: sdk.TransportModeH1})
+	if plan.autoH1OnlyForTest {
+		device.SetTransportSettings(nativeBrowsingAutoH1OnlySettingsForTest())
+	} else {
+		device.SetTransportSettings(&sdk.TransportSettings{Mode: sdk.TransportModeH1})
+	}
 	device.SetRouteLocal(false)
 	specs := sdk.NewProviderSpecList()
 	specs.Add(&sdk.ProviderSpec{BestAvailable: true})
@@ -181,6 +189,16 @@ func (self *sdkBrowsingSetupFixture) readyProviderIds() [sdkBrowsingProviderCoun
 	return ids
 }
 
+// Ordinary providers keep their constructor policy. Only an explicit research
+// plan changes recovery; each initial or late provider receives fresh settings.
+func sdkBrowsingProviderNatSettings(plan *nativeBrowsingPressurePlan) *clientconnect.LocalUserNatSettings {
+	settings := clientconnect.DefaultLocalUserNatSettings()
+	if plan.providerReturnRecoveryMaxPacketCountForTest > 0 {
+		settings.TcpBufferSettings.ReturnRecoveryMaxPacketCount = plan.providerReturnRecoveryMaxPacketCountForTest
+	}
+	return settings
+}
+
 // Construction repeats the existing real provider hierarchy and publishes last.
 func (self *sdkBrowsingSetupFixture) buildProvider(ordinal int, plan *nativeBrowsingPressurePlan) error {
 	provider := &self.providers[ordinal]
@@ -203,7 +221,8 @@ func (self *sdkBrowsingSetupFixture) buildProvider(ordinal int, plan *nativeBrow
 	if !waitForPlatform(self.setupCtx, provider.transport) {
 		return errors.New("provider H1 transport did not connect")
 	}
-	localSettings := clientconnect.DefaultLocalUserNatSettings()
+	localSettings := sdkBrowsingProviderNatSettings(plan)
+	provider.returnRecoveryPacketLimitForTest = c48ReturnFlightConfiguredPacketLimit(localSettings.TcpBufferSettings)
 	if self.scenario != nil {
 		localSettings.TcpBufferSettings.DialContextSettings = &clientconnect.DialContextSettings{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			if native := self.native.Load(); native != nil {
@@ -247,24 +266,70 @@ func (self *sdkBrowsingSetupFixture) waitInitial() (sdkBrowsingSetupSnapshot, er
 	locationSub := self.device.AddConnectedProviderLocationChangeListener(listener)
 	defer windowSub.Close()
 	defer locationSub.Close()
+	return waitSdkBrowsingSetupInitialSnapshot(
+		self.setupCtx,
+		defaultSdkBrowsingSetupWaitSettings(),
+		listener.changed,
+		self.discovery.changed,
+		func() sdkBrowsingSetupSnapshot {
+			return sdkBrowsingSetupSnapshotFrom(self.device.GetExits(), self.device.GetWindowStatus(), self.device.GetConnectedProviderLocations(), self.readyProviderIds())
+		},
+		func() *sdkBrowsingSetupEmptyReceipt {
+			return self.discovery.snapshot().InitialExcludedEmpty
+		},
+	)
+}
+
+// GetExits is a pull-only public view. These settings belong only to the
+// fixture waiter and never change SDK discovery, transport, or window policy.
+type sdkBrowsingSetupWaitSettings struct {
+	ExitHealthReadInterval time.Duration
+}
+
+func defaultSdkBrowsingSetupWaitSettings() *sdkBrowsingSetupWaitSettings {
+	return &sdkBrowsingSetupWaitSettings{ExitHealthReadInterval: 100 * time.Millisecond}
+}
+
+// Keep the actual readiness loop behind explicit public-view inputs so its
+// wake contract can be qualified without constructing providers or TestEnv.
+func waitSdkBrowsingSetupInitialSnapshot(
+	ctx context.Context,
+	settings *sdkBrowsingSetupWaitSettings,
+	structuralChanged <-chan struct{},
+	discoveryChanged <-chan struct{},
+	readSnapshot func() sdkBrowsingSetupSnapshot,
+	readEmptyReceipt func() *sdkBrowsingSetupEmptyReceipt,
+) (sdkBrowsingSetupSnapshot, error) {
+	if settings == nil || settings.ExitHealthReadInterval <= 0 {
+		return sdkBrowsingSetupSnapshot{}, errors.New("SDK_BROWSING_SETUP_WAIT_SETTINGS: positive exit-health read interval required")
+	}
+	// Window and location callbacks cover structural changes. Exit warning and
+	// quarantine health is pull-only, so bound its otherwise silent recovery.
+	healthReads := time.NewTicker(settings.ExitHealthReadInterval)
+	defer healthReads.Stop()
 	var snapshot sdkBrowsingSetupSnapshot
 	for {
-		snapshot = sdkBrowsingSetupSnapshotFrom(self.device.GetExits(), self.device.GetWindowStatus(), self.device.GetConnectedProviderLocations(), self.readyProviderIds())
-		ready, err := sdkBrowsingSetupReady(snapshot, self.discovery.snapshot().InitialExcludedEmpty)
+		snapshot = readSnapshot()
+		var empty *sdkBrowsingSetupEmptyReceipt
+		if readEmptyReceipt != nil {
+			empty = readEmptyReceipt()
+		}
+		ready, err := sdkBrowsingSetupReady(snapshot, empty)
 		if err != nil {
 			return snapshot, err
 		}
 		if ready {
-			if err := self.setupCtx.Err(); err != nil {
+			if err := ctx.Err(); err != nil {
 				return snapshot, err
 			}
 			return snapshot, nil
 		}
 		select {
-		case <-self.setupCtx.Done():
-			return snapshot, fmt.Errorf("SDK_BROWSING_SETUP_PREMISE: %s: %w", snapshot, self.setupCtx.Err())
-		case <-listener.changed:
-		case <-self.discovery.changed:
+		case <-ctx.Done():
+			return snapshot, fmt.Errorf("SDK_BROWSING_SETUP_PREMISE: %s: %w", snapshot, ctx.Err())
+		case <-structuralChanged:
+		case <-discoveryChanged:
+		case <-healthReads.C:
 		}
 	}
 }

@@ -198,6 +198,102 @@ func RemoveRetiredHostedNetworkClientsPost(
 	return nil
 }
 
+// Removed and expired hosted proxies are hard deleted two days after their
+// deactivation (model.RemoveRetiredHostedProxyClients). A pass walks every
+// hosted proxy once and the chain carries the cursor between runs: a run that
+// left work behind continues ContinueInterval later, and a finished pass starts
+// the next one PassInterval later. MaxRemoveCount bounds each run, so the first
+// deploy, or a lost chain, paces the backlog instead of deleting it at once.
+
+// bounds a stranded claim; the reap's run budget is well under it
+const removeRetiredHostedProxyClientsMaxTime = 15 * time.Minute
+
+type RemoveRetiredHostedProxyClientsArgs struct {
+	// where the previous run stopped; nil starts a pass at the beginning
+	Cursor *model.HostedProxyReapCursor `json:"cursor,omitempty"`
+}
+
+type RemoveRetiredHostedProxyClientsResult struct {
+	RemovedCount int64                       `json:"removed_count"`
+	Cursor       model.HostedProxyReapCursor `json:"cursor"`
+	// the run reached the end of proxy_device_config
+	PassComplete bool `json:"pass_complete"`
+	// the run budget or the removal limit ended the run with work left
+	More bool `json:"more"`
+}
+
+func ScheduleRemoveRetiredHostedProxyClients(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleRemoveRetiredHostedProxyClients(
+		clientSession,
+		tx,
+		&RemoveRetiredHostedProxyClientsArgs{},
+		server.NowUtc().Add(1*time.Minute),
+	)
+}
+
+func scheduleRemoveRetiredHostedProxyClients(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	args *RemoveRetiredHostedProxyClientsArgs,
+	runAt time.Time,
+) {
+	task.ScheduleTaskInTx(
+		tx,
+		RemoveRetiredHostedProxyClients,
+		args,
+		clientSession,
+		task.RunOnce("remove_retired_hosted_proxy_clients"),
+		task.RunAt(runAt),
+		task.MaxTime(removeRetiredHostedProxyClientsMaxTime),
+	)
+}
+
+func RemoveRetiredHostedProxyClients(
+	removeRetiredHostedProxyClients *RemoveRetiredHostedProxyClientsArgs,
+	clientSession *session.ClientSession,
+) (*RemoveRetiredHostedProxyClientsResult, error) {
+	cursor := model.HostedProxyReapCursor{}
+	if removeRetiredHostedProxyClients.Cursor != nil {
+		cursor = *removeRetiredHostedProxyClients.Cursor
+	}
+	removedCount, next, passComplete, more := model.RemoveRetiredHostedProxyClients(
+		clientSession.Ctx,
+		server.NowUtc(),
+		cursor,
+		model.DefaultHostedProxyReapSettings(),
+	)
+	if 0 < removedCount {
+		glog.Infof("[ncm]removed %d retired hosted proxies\n", removedCount)
+	}
+	return &RemoveRetiredHostedProxyClientsResult{
+		RemovedCount: removedCount,
+		Cursor:       next,
+		PassComplete: passComplete,
+		More:         more,
+	}, nil
+}
+
+func RemoveRetiredHostedProxyClientsPost(
+	removeRetiredHostedProxyClients *RemoveRetiredHostedProxyClientsArgs,
+	removeRetiredHostedProxyClientsResult *RemoveRetiredHostedProxyClientsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	runAt := model.HostedProxyReapNextRunAt(
+		server.NowUtc(),
+		removeRetiredHostedProxyClientsResult.PassComplete,
+		model.DefaultHostedProxyReapSettings(),
+	)
+	cursor := removeRetiredHostedProxyClientsResult.Cursor
+	scheduleRemoveRetiredHostedProxyClients(
+		clientSession,
+		tx,
+		&RemoveRetiredHostedProxyClientsArgs{Cursor: &cursor},
+		runAt,
+	)
+	return nil
+}
+
 // SweepOrphanNetworkClientData is the low-cadence safety net for orphaned
 // network-client dependent rows. RemoveDisconnectedNetworkClients cascades
 // dependents together with the parent deletes on every run, so this only

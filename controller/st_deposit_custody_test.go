@@ -279,7 +279,9 @@ func (self *stDepositCustodyRpc) SendRawTransaction(_ context.Context, raw hexut
 		return common.Hash{}, errors.New("wrong fixture signing origin or account nonce")
 	}
 	status := uint64(types.ReceiptStatusSuccessful)
-	if *tx.To() == stStakingPrecompileAddress && len(tx.Data()) == 164 {
+	if stDemandFixtureCall(*tx.To(), tx.Data()) {
+		// The conversion's own calls: gas and the account nonce only here.
+	} else if *tx.To() == stStakingPrecompileAddress && len(tx.Data()) == 164 {
 		amount := new(big.Int).SetBytes(tx.Data()[132:164])
 		self.source.Sub(self.source, amount)
 		self.staged.Add(self.staged, new(big.Int).Sub(amount, big.NewInt(self.loss)))

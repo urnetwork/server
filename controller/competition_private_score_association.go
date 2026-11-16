@@ -23,6 +23,9 @@ func apexAdapterJobIdentityMatches(first ApexAdapterRecord, second ApexAdapterRe
 // Matching identities cannot hold contradictory terminal measurements. Missing
 // legacy fields are weaker evidence, not permission to erase a known outcome.
 func validateApexJobObservation(first ApexAdapterRecord, second ApexAdapterRecord) error {
+	if err := validateApexReevaluationObservation(first, second); err != nil {
+		return err
+	}
 	first, second = apexAdapterRecordView(first), apexAdapterRecordView(second)
 	terminal := func(status string) bool {
 		return status == "completed" || status == "failed" || status == "canceled"
@@ -98,6 +101,9 @@ func reconcileApexJobAssociations(state *apexAdapterState, jobId server.Id, now 
 	}
 	if len(records) < 2 {
 		return nil
+	}
+	if handled, err := reconcileApexReevaluationAssociations(records, now); handled || err != nil {
+		return err
 	}
 	var observation *ApexAdapterRecord
 	var refreshAt *time.Time

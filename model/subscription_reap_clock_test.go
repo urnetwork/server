@@ -54,10 +54,10 @@ func TestStragglerReapTimestampUsesUTC(t *testing.T) {
 				held := insert(cutoff.Add(-time.Hour), true, nil)
 				protected = append(protected, held)
 				paymentId := server.NewId()
+				// a pending payment holds its contracts
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment (
-					payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time,
-					completed,contract_retention_pending
-				) VALUES ($1,$2,$3,1024,1,$4,TRUE,TRUE)`, paymentId, server.NewId(), networkId, cutoff.UTC()))
+					payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time
+				) VALUES ($1,$2,$3,1024,1,$4)`, paymentId, server.NewId(), networkId, cutoff.UTC()))
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep (
 					contract_id,balance_id,network_id,payout_byte_count,payout_net_revenue_nano_cents,payment_id
 				) VALUES ($1,$2,$3,1024,1,$4)`, held, server.NewId(), networkId, paymentId))

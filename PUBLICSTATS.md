@@ -24,9 +24,10 @@ service stats pushers (`grafana.go`; series are per process, keyed by
   (distinct devices), `urnetwork_connect_exchange_io_bytes_total{sent,data}`
   plus `urnetwork_connect_exchange_local_bytes_total{sent,data}` (live relay
   throughput: bytes over exchange sockets plus the same traffic delivered in
-  process, which connect counts as the socket would, so the sum stays
-  continuous as blocks turn in-process delivery on; the local term falls back
-  to zero only where the socket term has a sample, so a Mimir gap stays a gap),
+  process, transports and forwards alike, which connect counts as the socket
+  would, so the sum stays continuous as blocks turn in-process delivery on;
+  both terms sum over the `op` label, and the local term falls back to zero
+  only where the socket term has a sample, so a Mimir gap stays a gap),
   `urnetwork_connect_connection_new` (new
   connections per minute).
 - the operator measurements `urnetwork_stats_*` from the taskworker stats
@@ -220,6 +221,23 @@ exchange mesh topology, `build_info`, per-provider or per-network numbers,
 payouts and balances (auth-gated on the api today), consumer geography
 (only provider geography is published, as `/stats/providers-map` already
 does).
+
+## Unlisted public dashboards
+
+A dashboard tagged both `public` and `unlisted` is published the same way,
+but the warp front leaves it out of `/stats` and `/stats.json`, so only those
+given its link find it. `bringyourctl grafana load-defaults` prints its link
+under "Unlisted public dashboards". `publicDashboardOwnMetrics` in
+`grafana/grafana_test.go` lets one named public dashboard query metrics
+outside `publicSafeMetrics`, each entry a publication decision for that
+dashboard's unlisted share only. The one entry is
+`grafana/dashboards/proxy-test-shared.json`, "urnetwork / proxy test
+(shared)": the proxy test dashboard over all countries with fixed queries,
+including the runner's `urnetwork_proxy_test_build_info` version, for one
+outside viewer (owner decision, 2026-11-09). Its panels show only the
+runner's labels (country, outcome, phase, stat, call, version);
+`grafana/proxy_test_shared_dashboard_test.go` holds it to the internal
+`proxy-test.json`.
 
 ## Grafana public dashboard constraints (verified against 13.x)
 

@@ -358,7 +358,7 @@ func TestGossipRunPublishDrainsEveryRoundAndEndsWithTheContext(t *testing.T) {
 		// with the cancel is absorbed here exactly as it is in production
 		go server.HandleError(func() {
 			defer close(done)
-			runPublish(drainCtx, publisher, 5*time.Millisecond, publishBatchSize)
+			runPublish(drainCtx, modelPublishQueue{}, publisher, 5*time.Millisecond, publishBatchSize, waitPublish)
 		})
 
 		nextPublished := func(what string) string {

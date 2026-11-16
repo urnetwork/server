@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "kind": "approved-reversible-temporary-baseline-cleanup/v1",
+  "approval": "Existing approval for clean versioned baseline copies in completed temporary test checkouts.",
+  "checkouts": [
+    {
+      "temporary_checkout": "/home/by/urnetwork/temp/competition-cache-stable-20261111",
+      "retained_commit": "86892cbff31ceebf4e105186380754289e2102b9",
+      "restore_command": "git -C /home/by/urnetwork/temp/competition-cache-stable-20261111 sparse-checkout disable"
+    },
+    {
+      "temporary_checkout": "/home/by/urnetwork/temp/competition-legacy-prelaunch-recovery-20261111",
+      "retained_commit": "5356a4cfa341e93b94126f25eaa6709640589ad0",
+      "restore_command": "git -C /home/by/urnetwork/temp/competition-legacy-prelaunch-recovery-20261111 sparse-checkout disable"
+    }
+  ],
+  "excluded_subtree": "connect/sim-latency/baseline",
+  "baseline_tracked_files_clean": true,
+  "no_untracked_or_ignored_files_in_excluded_subtree": true,
+  "no_active_process_cwd_reference": true,
+  "process_command_scan_only_matched_its_observer": true,
+  "sparse_checkout_previously_disabled": true,
+  "excluded_subtree_clean_after_operation": true,
+  "canonical_baseline_and_protected_runtime_receipts_preserved": true,
+  "git_objects_logs_patches_preserved": true,
+  "active_checkouts_and_compiler_caches_untouched": true,
+  "root_available_bytes_after": 37109948416
+}

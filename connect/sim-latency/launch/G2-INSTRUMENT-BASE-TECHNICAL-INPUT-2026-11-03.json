@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "kind": "incumbent-instrument-technical-input",
+  "approval_path": "/home/by/urnetwork/server/connect/sim-latency/launch/G2-INSTRUMENT-OPERATOR-APPROVAL-2026-10-31.json",
+  "approval_file_sha256": "d7520563915e7e774f0e2c7e4b275f95e027bd01f95e06816a98ad287b8f9258",
+  "repositories_root": "/home/by/urnetwork/temp/mono-root-c2-release-20261026.PUHdHLML/source",
+  "timeout": 10800000000000,
+  "sandbox": {
+    "state_directory": "/var/lib/urnetwork/competition-g2-instrument-base-6423-20261103-v1"
+  }
+}

@@ -148,6 +148,53 @@ release_gate_service_resources() (
   } > "$release_gate_service_root/environment.sh" || return 1
 )
 
+# A private checkout is not readable after the image drops to its postgres
+# user. Publish only physical init assets under this owner, never checkout or
+# vault permissions. Shell execute bits select entrypoint execution vs sourcing.
+release_gate_service_initdb() (
+  umask 077
+  local workspace="$1" server source target manifest entry relative mode device count=0
+  [[ "$(stat -c '%d:%i:%a:%u' "$release_gate_service_root")" == "$release_gate_service_root_identity" ]] || return 1
+  server="$(cd "$workspace/server" && pwd -P)" || return 1
+  source="$server/local/postgres/initdb"
+  [[ -d "$source" && ! -L "$source" && "$(cd "$source" && pwd -P)" == "$source" ]] || return 1
+  device="$(stat -c '%d' "$source")" || return 1
+  target="$release_gate_service_root/postgres-initdb"
+  manifest="$(mktemp "$release_gate_service_root/postgres-initdb-list.XXXXXXXX")" || return 1
+  trap 'rm -f -- "$manifest"' EXIT
+  find "$source" -print0 > "$manifest" || return 1
+  while IFS= read -r -d '' entry; do
+    [[ ! -L "$entry" && "$(stat -c '%d' "$entry")" == "$device" ]] || return 1
+    if [[ -d "$entry" ]]; then continue; fi
+    [[ -f "$entry" && "$(stat -c '%h' "$entry")" == 1 ]] || return 1
+    case "$entry" in
+      *.sh|*.sql|*.sql.gz|*.sql.xz|*.sql.zst) ;;
+      *) printf 'release gate: refusing non-initdb asset %s\n' "$entry" >&2; return 1 ;;
+    esac
+    count=$((count + 1))
+  done < "$manifest"
+  (( count > 0 )) || return 1
+  mkdir -m 700 "$target" || return 1
+  while IFS= read -r -d '' entry; do
+    [[ "$entry" != "$source" ]] || continue
+    relative="${entry#"$source"/}"
+    if [[ -d "$entry" && ! -L "$entry" ]]; then
+      mkdir -m 755 "$target/$relative" || return 1
+    else
+      [[ -f "$entry" && ! -L "$entry" && "$(stat -c '%h' "$entry")" == 1 ]] || return 1
+      mode=644
+      if [[ "$entry" == *.sh ]]; then
+        mode="$(stat -c '%a' "$entry")" || return 1
+        if (( (8#$mode & 0111) != 0 )); then mode=755; else mode=644; fi
+      fi
+      cp -P -- "$entry" "$target/$relative" || return 1
+      [[ -f "$target/$relative" && ! -L "$target/$relative" ]] || return 1
+      chmod "$mode" "$target/$relative" || return 1
+    fi
+  done < "$manifest"
+  chmod 755 "$target" || return 1
+)
+
 # Settings match server/local and the simulator's dependency specs; the
 # release lock supplies exact images. Data is tmpfs and restart is disabled.
 # PostgreSQL also keeps 16kB of each statement's text, where those keep the
@@ -165,6 +212,7 @@ release_gate_services_start() {
   release_gate_service_owner="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   [[ "$release_gate_service_owner" =~ ^[0-9a-f]{32}$ ]] || return 1
   (umask 077; printf '%s\n' "$release_gate_service_owner" > "$release_gate_service_root/owner") || return 1
+  release_gate_service_initdb "$workspace" || return 1
   if ! release_gate_service_docker info >/dev/null 2>&1; then
     release_gate_docker_command=(sudo -n docker)
     release_gate_service_docker info >/dev/null 2>&1 || return 1
@@ -181,7 +229,7 @@ release_gate_services_start() {
       --label "urnetwork.release-gate.service=$service" --publish "127.0.0.1::$port")
     if [[ "$service" == postgres ]]; then
       arguments+=(--tmpfs /var/lib/postgresql:rw
-        --mount "type=bind,src=$workspace/server/local/postgres/initdb,dst=/docker-entrypoint-initdb.d,readonly"
+        --mount "type=bind,src=$release_gate_service_root/postgres-initdb,dst=/docker-entrypoint-initdb.d,readonly"
         -e LANG=en_US.UTF-8 -e POSTGRES_INITDB_ARGS=--locale=en_US.UTF-8
         -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=urnetwork-local-test -e POSTGRES_DB=postgres
         -e APP_DB_USER=bringyour -e APP_DB_PASSWORD=urnetwork-local-test -e APP_DB_NAME=bringyour

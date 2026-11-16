@@ -120,11 +120,34 @@ func TestResolvedFullTunApplicationMtu(t *testing.T) {
 		t.Fatalf("explicit application MTU=%d want=%d", got, resources.ApplicationMtu)
 	}
 
-	if fullTunQUICInitialPacketSize <= clientconnect.DefaultMtu {
+	// InitialPacketSize is UDP payload; the product MTU includes IP and UDP.
+	// Ordinary QUIC Initials fit even with IPv6 headers at the device MTU.
+	const initialHeaderByteCount = 40 + 8
+	if fullTunQUICInitialPacketSize < 1200 || fullTunQUICInitialPacketSize+initialHeaderByteCount > clientconnect.DefaultMtu {
+		t.Fatalf("QUIC Initial payload=%d plus headers=%d does not fit product MTU=%d",
+			fullTunQUICInitialPacketSize, initialHeaderByteCount, clientconnect.DefaultMtu)
+	}
+	// The product MTU carries the QUIC-minimum Initial in one IPv4 packet, as
+	// Connect's product-MTU UDP test pins. An explicit smaller application MTU
+	// still exercises the IPv4 fragment path independently of the outer MTU.
+	quicInitialPacketByteCount := clientconnect.Ipv4HeaderSizeWithoutExtensions +
+		clientconnect.UdpHeaderSize +
+		fullTunQUICInitialPacketSize
+	if clientconnect.DefaultMtu < quicInitialPacketByteCount {
 		t.Fatalf(
-			"QUIC Initial=%d must exercise IPv4 fragmentation above product MTU=%d",
-			fullTunQUICInitialPacketSize,
+			"QUIC Initial packet=%dB must fit the product MTU=%d unfragmented",
+			quicInitialPacketByteCount,
 			clientconnect.DefaultMtu,
+		)
+	}
+	cellEdge := cellEdgeNetworkProfiles(20260817)[cellEdge1mDown250kUpName]
+	cellEdge.InnerMtu = 1200
+	if got := resolvedFullTunApplicationMtu(cellEdge, defaultTunResourceProfile()); quicInitialPacketByteCount <= got {
+		t.Fatalf(
+			"%s application MTU=%d must still fragment the %dB QUIC Initial packet",
+			cellEdge.Name,
+			got,
+			quicInitialPacketByteCount,
 		)
 	}
 }
@@ -486,4 +509,21 @@ func validatePerfvarResourceLifecycle(t *testing.T, resource perfvarResource) {
 		after.PoolOutstandingSizeCounts,
 		after.PoolTakenCount-before.PoolTakenCount,
 	)
+}
+
+// Ordinary synthetic application defaults follow the product packet MTU,
+// while a deliberately smaller path or explicit compatibility fixture remains bounded.
+func TestFullTunProductMtu1280Defaults(t *testing.T) {
+	if clientconnect.DefaultMtu != 1280 {
+		t.Fatalf("product packet MTU=%d want1280", clientconnect.DefaultMtu)
+	}
+	profile := initialNetworkProfiles(20260819)["clean-lan"]
+	if got := resolvedFullTunApplicationMtu(profile, defaultTunResourceProfile()); got != 1280 {
+		t.Fatalf("ordinary app MTU=%d want1280", got)
+	}
+	resources := defaultTunResourceProfile()
+	resources.ApplicationMtu = 900
+	if got := resolvedFullTunApplicationMtu(profile, resources); got != 900 {
+		t.Fatalf("explicit low-MTU compatibility=%d want900", got)
+	}
 }

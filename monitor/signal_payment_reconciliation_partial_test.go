@@ -19,6 +19,9 @@ func paymentReconciliationPartialHealthRows(heartbeatAge string) []Row {
 		{"x402", heartbeatAge, "600", "0", "0", "600", "1", "0", "0"},
 		{"monero", heartbeatAge, "600", "0", "0", "600", "1", "0", "0"},
 		{"zcash", heartbeatAge, "600", "0", "0", "600", "1", "0", "0"},
+		{"bitcoin", heartbeatAge, "600", "0", "0", "600", "1", "0", "0"},
+		{"bittensor", heartbeatAge, "600", "0", "0", "600", "1", "0", "0"},
+		{"ethereum", heartbeatAge, "600", "0", "0", "600", "1", "0", "0"},
 	}
 }
 

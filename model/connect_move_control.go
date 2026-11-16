@@ -20,6 +20,10 @@
 //     in process when its resident is in the same process (connect
 //     resident_local_transport.go): off, all, or blocks separated by commas
 //     or spaces. Read by the exchanges, not by the mover.
+//   - `localForward`: the connect blocks whose exchanges deliver a resident's
+//     forward in process when its destination's resident is in the same
+//     process (connect resident_local_forward.go): off, all, or blocks, as
+//     `localTransport`. Read by the exchanges, not by the mover.
 //   - `stuckProviderSignal`: the api blocks whose processes report a provider
 //     stuck retrying terminal refusals (controller
 //     connect_control_stuck_provider.go): off, all, or blocks, as
@@ -49,6 +53,9 @@
 //   - `localTransport` chooses the blocks, never past `EnableLocalTransport`.
 //     `LocalTransportDefault` is the choice while the control sets none, not
 //     a ceiling: an operator turns in-process delivery on with the control.
+//   - `localForward` chooses blocks the same way, never past
+//     `EnableLocalForward`, with `LocalForwardDefault` as its choice while the
+//     control sets none. The two switches never read each other's field.
 //   - `stuckProviderSignal` and `stuckProviderRecycle` choose blocks the same
 //     way, never past `EnableStuckProviderSignal` and
 //     `EnableStuckProviderRecycle`, with `StuckProviderSignalDefault` and
@@ -59,7 +66,7 @@
 //
 // A field that does not parse narrows as far as it can: mode off,
 // maxPerMinute 0, an infinite tolerance (no balance sources), drain moves off,
-// placement off, transport delay off. A `localTransport`,
+// placement off, transport delay off. A `localTransport`, `localForward`,
 // `stuckProviderSignal` or `stuckProviderRecycle` list names only the blocks
 // it lists, so a value that is neither off nor all and names no real block
 // turns its switch off everywhere. A `windowStrictHandover` that does not
@@ -68,7 +75,7 @@
 // An absent key or field leaves the code default. A reader that cannot read
 // the control acts as if the mode were off (the mover does); the connect
 // handlers keep the transport delay of their last read, and the exchanges
-// the local transport of theirs.
+// the local transport and local forward of theirs.
 package model
 
 import (
@@ -93,6 +100,7 @@ const (
 	ConnectMoveControlFieldPlacement      = "placement"
 	ConnectMoveControlFieldTransportDelay = "transportDelay"
 	ConnectMoveControlFieldLocalTransport = "localTransport"
+	ConnectMoveControlFieldLocalForward   = "localForward"
 
 	ConnectMoveControlFieldStuckProviderSignal  = "stuckProviderSignal"
 	ConnectMoveControlFieldStuckProviderRecycle = "stuckProviderRecycle"
@@ -100,8 +108,8 @@ const (
 	ConnectMoveControlFieldWindowStrictHandover = "windowStrictHandover"
 )
 
-// The values of a block list field (`localTransport`, `stuckProviderSignal`,
-// `stuckProviderRecycle`) that are not block lists.
+// The values of a block list field (`localTransport`, `localForward`,
+// `stuckProviderSignal`, `stuckProviderRecycle`) that are not block lists.
 const (
 	ConnectLocalTransportOff = "off"
 	ConnectLocalTransportAll = "all"
@@ -174,6 +182,13 @@ type ConnectMoveControlCeiling struct {
 	// `LocalTransportDefault`: the blocks while the control sets none, in the
 	// control's syntax. Not a ceiling.
 	LocalTransportDefault string
+	// The exchange's switch for in-process forward delivery,
+	// `EnableLocalForward`. Every other reader leaves it false and ignores the
+	// control's localForward.
+	EnableLocalForward bool
+	// `LocalForwardDefault`: the blocks while the control sets none, in the
+	// control's syntax. Not a ceiling.
+	LocalForwardDefault string
 	// The api's switch for reporting stuck providers,
 	// `EnableStuckProviderSignal`. Every other reader leaves it false and
 	// ignores the control's stuckProviderSignal.
@@ -214,6 +229,11 @@ type ConnectMoveControl struct {
 	// The connect blocks that deliver transports in process, when not all.
 	// Empty for none.
 	LocalTransportBlocks map[string]bool
+	// Every connect block delivers forwards in process.
+	LocalForwardAll bool
+	// The connect blocks that deliver forwards in process, when not all. Empty
+	// for none.
+	LocalForwardBlocks map[string]bool
 	// Every api block reports stuck providers.
 	StuckProviderSignalAll bool
 	// The api blocks that report stuck providers, when not all. Empty for
@@ -232,6 +252,11 @@ type ConnectMoveControl struct {
 // Whether the exchanges of block deliver transports in process.
 func (self *ConnectMoveControl) LocalTransportAllows(block string) bool {
 	return self.LocalTransportAll || self.LocalTransportBlocks[block]
+}
+
+// Whether the exchanges of block deliver forwards in process.
+func (self *ConnectMoveControl) LocalForwardAllows(block string) bool {
+	return self.LocalForwardAll || self.LocalForwardBlocks[block]
 }
 
 // Whether the api processes of block report stuck providers.
@@ -310,6 +335,14 @@ func NarrowConnectMoveControl(fields map[string]string, ceiling ConnectMoveContr
 			localTransportValue = ceiling.LocalTransportDefault
 		}
 		control.LocalTransportAll, control.LocalTransportBlocks = parseConnectControlBlocks(localTransportValue)
+	}
+
+	if ceiling.EnableLocalForward {
+		localForwardValue, localForwardSet := fields[ConnectMoveControlFieldLocalForward]
+		if !localForwardSet {
+			localForwardValue = ceiling.LocalForwardDefault
+		}
+		control.LocalForwardAll, control.LocalForwardBlocks = parseConnectControlBlocks(localForwardValue)
 	}
 
 	if ceiling.EnableStuckProviderSignal {

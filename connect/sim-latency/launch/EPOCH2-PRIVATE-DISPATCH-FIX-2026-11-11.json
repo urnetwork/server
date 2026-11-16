@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "kind": "epoch-two-private-script-dispatch-correction/v1",
+  "observed_at": "2026-11-11T00:45:04Z",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "fix_commit": "998e50d42",
+  "deployed_source_commit": "63478fa88065512680a2c0b0d5b027c26e968d52",
+  "source_modified": false,
+  "root_cause": "The shared baseline producer and private executors intentionally use distinct qualified scripts. Production dispatch selected the producer digest for private manifests; agents rejected it before committing execution. Private-script selection is now independently pinned and verified against the complete byte-identical agent-role snapshot. Success and failure archive provenance uses the dispatched script digest.",
+  "baseline_producer_script_sha256_unchanged": "5d2d9bef902944eb6db166628dd8bc8adc57ce668f118efd493319af63aa8802",
+  "private_evaluator_script_sha256_unchanged": "8f344afd0438d40dc99450180f9e1b2db823f2e338800ca12e6319c2a46193b6",
+  "baseline_sha256_unchanged": "784aef3401631be5a39a73185c0276bb7ded38410f53de48af7ed942dfdd1340",
+  "coordinator_profile_sha256": "18099b0b23a1794062363333c2885a5ae3170ce97405ecfd704ca47fbacca35b",
+  "agent_snapshots_match_previously_qualified_configs": {
+    "sille": "f84b91742da4a62923a6b09fd1fa4b86fea4786a265f27ec35d5895a956a4808",
+    "goofe": "8463b5075b80af4b0cdb3ccfa8ac7cc1645149a6719590e89fadbc611bbafe2a"
+  },
+  "worker_native_sha256": "fd10012a8f12fab8720f03d99fae94213bfb8d334b69d07f170fcc8d86bc5ce0",
+  "worker_distribution_platform_image_id": "sha256:0bfc9d1b9d3ca0d6b1cca97ca09de202da6efb61cffe31545d0aa5b7394cdcb9",
+  "worker_image_payload_extraction_matches_native": true,
+  "worker_execution_mode": "root-owned host-native controller; image is verified distribution provenance, not a claim of container execution",
+  "worker_launcher_sha256": "d6f50b5d9442c8abb0c1f1f4984be70a1a2a5498eb75f858656271025d15d831",
+  "go_version": "go1.27.3",
+  "cgo_enabled": false,
+  "go_experiment": "greenteagc",
+  "tests": {
+    "targeted_regression_repetitions": 3,
+    "targeted_regression_exit": 0,
+    "targeted_regression_seconds": 0.076,
+    "race_regression_repetitions": 3,
+    "race_regression_exit": 0,
+    "race_regression_seconds": 27.668,
+    "race_includes_real_postgres_redis_integration": true,
+    "fixture_cleanup_verified": true,
+    "earlier_invocation_failures_preserved": "Initial broad race invocation reached two integration tests without WARP_ENV=local. The managed-local preflight then refused a missing launcher-owner record without mutation. Disposable repository fixtures initially found no default Docker bridge; that attempt was cleaned. The same tests passed on owned disposable fixtures using a named bridge, without modifying host Docker configuration or shared local resources.",
+    "root_profile_and_both_snapshots_validation_exit": 0,
+    "bash_and_systemd_validation_exit": 0
+  },
+  "supervisor": {
+    "unit": "urnetwork-competition-production-r2.service",
+    "invocation_id": "6285190f44514587a62183967a3f022e",
+    "started_at": "2026-11-11T00:41:32Z",
+    "automatic_restarts": 0
+  },
+  "admissions": [
+    {
+      "host_id": "sille",
+      "run_id": "a6e33c2be87ab1879f17a2526fd23f0b92539346e504d34f56f6e9c0d775b30e",
+      "original_started_at": "2026-11-11T00:05:58.686403Z",
+      "original_deadline_at": "2026-11-11T03:05:58.686403Z",
+      "execution_service_started_at": "2026-11-11T00:44:27Z",
+      "state": "running",
+      "replicates": 9
+    },
+    {
+      "host_id": "goofe",
+      "run_id": "764ef0fc9d50ff9ef4e5e69dd6ff05ca09179fecd23660d05aa5447d97d082c8",
+      "original_started_at": "2026-11-11T00:05:49.035956Z",
+      "original_deadline_at": "2026-11-11T03:05:49.035956Z",
+      "execution_service_started_at": "2026-11-11T00:44:11Z",
+      "state": "running",
+      "replicates": 9
+    }
+  ],
+  "admission_initial_worker_identity_preserved": "sha256:ea074cff6b8e63b18b60092f9bd4ad3763744d198766566b185951503b52e513",
+  "admission_identity_note": "Original SQL clocks and their initial control-image provenance were preserved. The previously uncommitted dispatches now use the corrected coordinator documented above; no admitted run was replaced, resampled or given a fresh deadline.",
+  "measured_product_source_image_and_scoring_rules_unchanged": true,
+  "api_or_main_database_deployment_required": false,
+  "customer_evaluation_clocks_started": 0,
+  "grading_ready": false,
+  "next_action": "Require both retained full-R9 admission receipts against this exact shared baseline before customer FIFO claims. Neither an active service nor a single successful replicate proves admission."
+}

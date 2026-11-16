@@ -126,8 +126,10 @@ func TestLongOperationsLiftTransactionTimeout(t *testing.T) {
 		identifiers []string
 		literals    []string
 	}{
-		// a rebuild's discarded session (A1-A3 lift it with the helper)
-		{directory: ".", function: "dbMaintenanceRunReindex", identifiers: []string{"AcquireMaintenanceDbConn", "discardPgConnection"}},
+		// a rebuild's discarded session (A1-A3 lift it with the helper): the
+		// scheduled rebuilds (dbMaintenanceRunReindex) and the operator's
+		// (RebuildIndexConcurrently) both run through it
+		{directory: ".", function: "dbMaintenanceRunReindexWithin", identifiers: []string{"AcquireMaintenanceDbConn", "discardPgConnection"}},
 		// an operator VACUUM FULL's own discarded session
 		{directory: ".", function: "VacuumFullAllTables", identifiers: []string{"AcquireMaintenanceDbConn", "discardPgConnection"}, literals: []string{"SET transaction_timeout = 0"}},
 		// A4: a bounded pgstattuple_approx scan on a discarded session
@@ -144,13 +146,13 @@ func TestLongOperationsLiftTransactionTimeout(t *testing.T) {
 		{directory: ".", function: "ApplySchemaFix", identifiers: []string{"SetTransactionTimeoutInTx"}},
 		// the subnet epoch census, one statement in one snapshot
 		{directory: "model", function: "getStEpochProviderUsageWithCensus", identifiers: []string{"MaintenanceDb", "WithoutTransactionTimeout"}},
-		// the weekly payment plan
-		{directory: "model", function: "configurePaymentPlanTransaction", identifiers: []string{"SetTransactionTimeoutInTx"}},
 		// the reliability transactions over every client
-		{directory: "model", function: "UpdateClientLocationReliabilities", identifiers: []string{"boundReliabilityTransactionInTx"}},
 		{directory: "model", function: "UpdateClientReliabilityScores", identifiers: []string{"boundReliabilityTransactionInTx"}},
 		{directory: "model", function: "UpdateNetworkReliabilityWindow", identifiers: []string{"boundReliabilityTransactionInTx"}},
 		{directory: "model", function: "boundReliabilityTransactionInTx", identifiers: []string{"SetTransactionTimeoutInTx", "reliabilityRunningCheckpointStatementTimeout"}},
+		// the location refresh no longer holds one transaction over every
+		// client: each page of a client cohort replaces the bound with its own
+		{directory: "model", function: "clientLocationRefreshTx", identifiers: []string{"SetTransactionTimeoutInTx", "clientLocationRefreshPageTimeout"}},
 		// operator backfills and a partition index build
 		{directory: "model", function: "BackfillProviderAuditEvents", identifiers: []string{"SetTransactionTimeoutInTx"}},
 		{directory: "model", function: "BackfillDeviceAuditEvents", identifiers: []string{"SetTransactionTimeoutInTx"}},

@@ -27,6 +27,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -38,12 +39,29 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// The most stored receipts one scan re-checks with the daemon after they
-// stopped being reported.
-const cryptoScanMaxVanishedChecks = 50
+// The scan's tunables.
+type CryptoPaymentScanSettings struct {
+	// The most stored receipts one scan re-checks with the daemon after they
+	// stopped being reported. Non-positive re-checks none.
+	MaxVanishedChecks int
+	// The most open receipts one scan judges, oldest first.
+	MaxOpenReceipts int
+	// The sweep of a per-address coin's issued addresses
+	// (crypto_pay_sweep.go).
+	Sweep *CryptoAddressSweepSettings
+}
 
-// The most open receipts one scan judges.
-const cryptoScanMaxOpenReceipts = 5000
+// A new instance on every call.
+func DefaultCryptoPaymentScanSettings() *CryptoPaymentScanSettings {
+	return &CryptoPaymentScanSettings{
+		MaxVanishedChecks: 50,
+		MaxOpenReceipts:   5000,
+		Sweep:             DefaultCryptoAddressSweepSettings(),
+	}
+}
+
+// The scan's settings. Replaceable only by tests.
+var cryptoPaymentScanSettingsFunc = DefaultCryptoPaymentScanSettings
 
 // The most addresses one refill run derives.
 const cryptoRefillMaxPerRun = 200
@@ -71,6 +89,18 @@ type CryptoPaymentScanResult struct {
 	CreditErrored int    `json:"credit_errored"`
 	// vanished receipts left alone because the wallet has not caught up
 	OrphanChecksSkipped int `json:"orphan_checks_skipped"`
+	// a per-address coin: the invoice addresses in play this scan read
+	Watched int `json:"watched,omitempty"`
+	// a per-address coin: the issued addresses the sweep read completely, the
+	// receipts it reported and the reads that failed (crypto_pay_sweep.go)
+	Swept         int `json:"swept,omitempty"`
+	SweptReceipts int `json:"swept_receipts,omitempty"`
+	SweepErrors   int `json:"sweep_errors,omitempty"`
+	// payments held for review by the sanctions screen (a match, or senders
+	// that could not be screened)
+	ScreeningHeld int `json:"screening_held,omitempty"`
+	// held payments whose senders screened clean this scan
+	ScreeningReleased int `json:"screening_released,omitempty"`
 }
 
 // One default-level report a minute per coin of a failing scan or refill.
@@ -85,7 +115,7 @@ func RunCryptoPaymentScan(clientSession *session.ClientSession, asset string) (*
 	config := cryptoPayConfigFunc()
 	result := &CryptoPaymentScanResult{
 		Asset:        asset,
-		ScanInterval: int64(config.ScanInterval / time.Second),
+		ScanInterval: int64(config.ScanIntervalFor(asset) / time.Second),
 	}
 	if err := cryptoAssetScannable(config, asset); err != nil {
 		if glog.V(1) {
@@ -96,7 +126,7 @@ func RunCryptoPaymentScan(clientSession *session.ClientSession, asset string) (*
 	result.Configured = true
 	wallet, _, err := cryptoWalletForAsset(config, asset)
 	if err == nil {
-		err = cryptoScan(clientSession, config, asset, wallet, result)
+		err = cryptoScan(clientSession, config, cryptoPaymentScanSettingsFunc(), asset, wallet, result)
 	}
 	ctx := clientSession.Ctx
 	if err != nil {
@@ -159,6 +189,7 @@ func cryptoCheckWallet(ctx context.Context, connOwner server.PgConn, asset strin
 func cryptoScan(
 	clientSession *session.ClientSession,
 	config *CryptoPayConfig,
+	settings *CryptoPaymentScanSettings,
 	asset string,
 	wallet cryptoWallet,
 	result *CryptoPaymentScanResult,
@@ -170,7 +201,8 @@ func cryptoScan(
 	}
 
 	var cursorHeight uint64
-	if cursor := model.GetCryptoScanCursor(ctx, asset); cursor != nil && 0 < cursor.Height {
+	cursor := model.GetCryptoScanCursor(ctx, asset)
+	if cursor != nil && 0 < cursor.Height {
 		cursorHeight = uint64(cursor.Height)
 	}
 	reorgWindow := uint64(max(0, assetConfig.ReorgWindowBlocksAt(int64(cursorHeight))))
@@ -179,6 +211,13 @@ func cryptoScan(
 		minHeight = cursorHeight - reorgWindow
 	}
 	result.MinHeight = minHeight
+	// a per-address coin reads the chain for the invoice addresses in play
+	// often, and its sweep reads every other issued address below
+	if watcher, ok := wallet.(cryptoWalletWatched); ok {
+		watched := cryptoWatchedAddresses(ctx, config, asset, cursor, server.NowUtc())
+		watcher.SetWatched(watched)
+		result.Watched = len(watched)
+	}
 
 	walletReceipts, walletHeight, err := wallet.IncomingSince(ctx, minHeight)
 	if err != nil {
@@ -222,7 +261,9 @@ func cryptoScan(
 	finalKeys := []model.CryptoPaymentReceiptKey{}
 	affected := map[server.Id]bool{}
 	firstSeenHeight := int64(walletHeight)
-	for _, walletReceipt := range walletReceipts {
+	// records one reported receipt, new or seen again, and notes its invoice
+	// for judgment
+	recordReceipt := func(walletReceipt *cryptoWalletReceipt, intents map[int64]*model.CryptoPaymentIntent) {
 		receipt := cryptoReceiptOf(asset, walletReceipt, intents, now)
 		receipt.FirstSeenHeight = &firstSeenHeight
 		reported[receipt.Key()] = true
@@ -249,6 +290,25 @@ func cryptoScan(
 			finalKeys = append(finalKeys, receipt.Key())
 		}
 	}
+	for _, walletReceipt := range walletReceipts {
+		recordReceipt(walletReceipt, intents)
+	}
+
+	// every other address an invoice was ever given, a few a scan from its own
+	// cursor: a payment to an old or expired invoice is recorded, and judged
+	// below by the late-payment rules (crypto_pay_sweep.go)
+	if sweeper, ok := wallet.(cryptoWalletSweeper); ok {
+		readEvery := cryptoSweepReadEvery(wallet, settings.Sweep)
+		cryptoSweepIssuedAddresses(ctx, asset, sweeper, settings.Sweep, readEvery, now, func(sweptReceipts []*cryptoWalletReceipt) {
+			if len(sweptReceipts) == 0 {
+				return
+			}
+			sweptIntents := model.GetCryptoPaymentIntentsByAddressIndexesInConn(nil, ctx, asset, cryptoReceiptIndexes(sweptReceipts))
+			for _, walletReceipt := range sweptReceipts {
+				recordReceipt(walletReceipt, sweptIntents)
+			}
+		}, result)
+	}
 
 	// receipts the daemon stopped reporting: still there (the mined copy of a
 	// pool transfer, or below the window), or gone from the chain before
@@ -262,10 +322,15 @@ func cryptoScan(
 		model.CryptoReceiptStateSeen,
 		model.CryptoReceiptStateConfirmed,
 		model.CryptoReceiptStateReview,
-	}, cryptoScanMaxOpenReceipts)
+	}, settings.MaxOpenReceipts)
+	// a reader of final transactions only never loses one it reported
+	irreversible := false
+	if final, ok := wallet.(cryptoWalletIrreversible); ok {
+		irreversible = final.Irreversible()
+	}
 	checked := 0
 	for _, receipt := range open {
-		if receipt.State == model.CryptoReceiptStateReview || reported[receipt.Key()] {
+		if receipt.State == model.CryptoReceiptStateReview || reported[receipt.Key()] || irreversible {
 			continue
 		}
 		if receipt.BlockHeight != nil && *receipt.BlockHeight < int64(minHeight) {
@@ -279,7 +344,7 @@ func cryptoScan(
 			result.OrphanChecksSkipped += 1
 			continue
 		}
-		if cryptoScanMaxVanishedChecks <= checked {
+		if settings.MaxVanishedChecks <= checked {
 			break
 		}
 		checked += 1
@@ -316,10 +381,17 @@ func cryptoScan(
 	// every invoice with a receipt still in play is judged again: time alone
 	// moves an invoice from short to review at its expiry, and a top-up can
 	// make an underpaid one whole. A receipt in review for any other reason
-	// waits for an operator.
+	// waits for an operator, except one held because its senders could not
+	// be screened: it is screened again, and let through once the screen is
+	// clean (cryptoRescreenHeld).
 	for _, receipt := range open {
 		if receipt.IntentId != nil && cryptoReceiptCounts(receipt) {
 			affected[*receipt.IntentId] = true
+		}
+	}
+	if slices.Contains(cryptoPayScreenedAssets, asset) {
+		for _, intentId := range cryptoRescreenHeld(ctx, asset, wallet, open, result) {
+			affected[intentId] = true
 		}
 	}
 	result.OpenInvoices = len(affected)
@@ -334,7 +406,8 @@ func cryptoScan(
 		if view.NeedsRate {
 			if rate := rateNow(); rate != nil {
 				for _, receipt := range receipts {
-					if receipt.FirstSeenRateUsd == nil && receipt.FirstSeenAt.After(intent.ExpiresAt) {
+					// late: first seen past the quote and the coin's grace
+					if receipt.FirstSeenRateUsd == nil && receipt.FirstSeenAt.After(policy.onTimeUntil(intent)) {
 						model.SetCryptoPaymentReceiptFirstSeenRateInConn(nil, ctx, receipt.Key(), *rate)
 					}
 				}
@@ -344,6 +417,20 @@ func cryptoScan(
 		}
 		switch view.Action {
 		case cryptoIntentActionCredit:
+			// the senders are screened against OFAC's addresses first: a
+			// match, or a sender that cannot be screened, holds the payment
+			// for review instead (mmm/BTCPAY.md §17.3)
+			if slices.Contains(cryptoPayScreenedAssets, asset) {
+				switch cryptoScreenCredit(ctx, asset, intentId, wallet, view.CreditReceipts) {
+				case cryptoScreenRetry:
+					// the senders could not be read now: the next scan tries again
+					continue
+				case cryptoScreenHeld:
+					result.Reviewed += 1
+					result.ScreeningHeld += 1
+					continue
+				}
+			}
 			credited, err := cryptoCreditIntent(clientSession, intent, &cryptoCredit{
 				usdNanoCents: view.CreditUsd,
 				receipts:     view.CreditReceipts,
@@ -367,7 +454,17 @@ func cryptoScan(
 
 	result.MarkedFinal = model.MarkCryptoPaymentReceiptsFinalInConn(nil, ctx, asset, finalKeys, now)
 
-	model.SetCryptoScanCursorSuccessInConn(nil, ctx, asset, int64(walletHeight), int64(walletHeight), int64(nodeHeight), int64(networkHeight), now)
+	// a block reader's kept chain is written with the cursor, only now that
+	// the scan is complete
+	var chain *model.CryptoScanChain
+	if chained, ok := wallet.(cryptoWalletChain); ok {
+		chain = chained.ScanChain()
+	}
+	if chain != nil {
+		model.SetCryptoScanCursorChainSuccessInConn(nil, ctx, asset, int64(walletHeight), int64(nodeHeight), int64(networkHeight), now, chain)
+	} else {
+		model.SetCryptoScanCursorSuccessInConn(nil, ctx, asset, int64(walletHeight), int64(walletHeight), int64(nodeHeight), int64(networkHeight), now)
+	}
 	cryptoPayScanLastSuccess.WithLabelValues(asset).Set(float64(now.Unix()))
 	cryptoPayHeights.WithLabelValues(asset, "wallet").Set(float64(walletHeight))
 	cryptoPayHeights.WithLabelValues(asset, "node").Set(float64(nodeHeight))
@@ -461,6 +558,11 @@ func cryptoReceiptOf(
 	case walletReceipt.UnlockTime != 0:
 		receipt.State = model.CryptoReceiptStateIgnored
 		receipt.ReviewReason = model.CryptoReviewReasonLocked
+	case walletReceipt.ReviewReason != "":
+		// the reader holds it for an operator (a TAO transfer shape the rail
+		// does not credit by itself)
+		receipt.State = model.CryptoReceiptStateReview
+		receipt.ReviewReason = walletReceipt.ReviewReason
 	case asset == model.CryptoAssetZec && slices.Contains(splitCryptoPools(walletReceipt.Pool), cryptoZcashPoolTransparent):
 		receipt.State = model.CryptoReceiptStateIgnored
 		receipt.ReviewReason = model.CryptoReviewReasonTransparent
@@ -580,8 +682,32 @@ func cryptoRefill(
 	if highWaterWallet, ok := wallet.(cryptoWalletHighWater); ok && 0 <= highWater {
 		highWaterWallet.SetAddressHighWater(uint64(highWater))
 	}
-	for i := 0; free+result.Added < config.AddressPoolTarget && i < cryptoRefillMaxPerRun; i += 1 {
-		address, index, err := wallet.NewAddress(ctx, cryptoPoolAddressLabel)
+	namedWallet, named := wallet.(cryptoWalletNamedAddress)
+	registrar, registers := wallet.(cryptoWalletRegistrar)
+	newAddresses := []string{}
+	// the new addresses are registered with the provider's webhook even when
+	// the run stops early: they are in the pool
+	defer func() {
+		if registers && 0 < len(newAddresses) {
+			cryptoRegisterAddresses(ctx, asset, registrar, newAddresses)
+		}
+	}()
+	poolTarget := config.AddressPoolTargetFor(asset)
+	for i := 0; free+result.Added < poolTarget && i < cryptoRefillMaxPerRun; i += 1 {
+		var address string
+		var index uint64
+		var reservedIntentId *server.Id
+		var err error
+		if named {
+			// a Coinbase deposit address is named with the id of the invoice
+			// that will draw it (mmm/BTCPAY.md §17.2): the id is reserved
+			// here, and the invoice takes it (AllocateCryptoPaymentAddressInTx)
+			intentId := server.NewId()
+			reservedIntentId = &intentId
+			address, index, err = namedWallet.NewNamedAddress(ctx, intentId.String())
+		} else {
+			address, index, err = wallet.NewAddress(ctx, cryptoPoolAddressLabel)
+		}
 		if err != nil {
 			return err
 		}
@@ -589,10 +715,22 @@ func cryptoRefill(
 			return fmt.Errorf("the %s wallet issued an index out of range", asset)
 		}
 		added := model.AddCryptoPaymentAddresses(ctx, []*model.CryptoPaymentAddress{{
-			Asset:        asset,
-			AddressIndex: int64(index),
-			Address:      address,
+			Asset:            asset,
+			AddressIndex:     int64(index),
+			Address:          address,
+			ReservedIntentId: reservedIntentId,
 		}})
+		if added == 0 && named {
+			// Coinbase answered an address the pool already holds: it does
+			// not issue a new address per request on this network, and
+			// asking again would only answer the same one
+			cryptoPayCoinbaseAddresses.WithLabelValues(asset, "reused").Inc()
+			return fmt.Errorf("the %s deposit address Coinbase created is one the pool already holds: Coinbase did not issue a new address for this invoice", asset)
+		}
+		if named {
+			cryptoPayCoinbaseAddresses.WithLabelValues(asset, "created").Inc()
+		}
+		newAddresses = append(newAddresses, address)
 		result.Added += int(added)
 	}
 	if 0 < result.Added {
@@ -600,6 +738,25 @@ func cryptoRefill(
 	}
 	cryptoPayAddressPoolFree.WithLabelValues(asset).Set(float64(free + result.Added))
 	return nil
+}
+
+// cryptoRegisterAddresses registers new pool addresses with the provider's
+// webhook (a fast path only). A failure is logged once a minute and counted;
+// the addresses stay in the pool, and polling still reads them.
+func cryptoRegisterAddresses(ctx context.Context, asset string, registrar cryptoWalletRegistrar, addresses []string) {
+	err := registrar.RegisterAddresses(ctx, addresses)
+	if errors.Is(err, errCryptoAlchemyRegistrationOff) {
+		// no webhook to register with: polling reads the addresses
+		return
+	}
+	if err != nil {
+		cryptoPayWebhookRegistrations.WithLabelValues(asset, "error").Add(float64(len(addresses)))
+		cryptoScanFailureReports.report("register/"+asset, func() {
+			glog.Warningf("[cryptopay]%s: could not register %d new addresses with the webhook (polling still reads them): %s\n", asset, len(addresses), err)
+		})
+		return
+	}
+	cryptoPayWebhookRegistrations.WithLabelValues(asset, "registered").Add(float64(len(addresses)))
 }
 
 // ----- the retention unlink (decision 9) -----
@@ -669,9 +826,15 @@ func RunCryptoPaymentUnlink(clientSession *session.ClientSession) (*CryptoPaymen
 	return result, nil
 }
 
-// CryptoPaymentScanInterval is how often a coin is scanned.
+// CryptoPaymentScanInterval is how often a coin is scanned by default.
 func CryptoPaymentScanInterval() time.Duration {
 	return cryptoPayConfigFunc().ScanInterval
+}
+
+// CryptoPaymentScanIntervalFor is how often a coin is scanned: Bitcoin every
+// minute and ETH every 30 s by default, the others every scan_interval.
+func CryptoPaymentScanIntervalFor(asset string) time.Duration {
+	return cryptoPayConfigFunc().ScanIntervalFor(asset)
 }
 
 // CryptoScannedAssets lists the scanned coins: each has a scan chain and a

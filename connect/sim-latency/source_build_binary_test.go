@@ -9,7 +9,7 @@ import (
 )
 
 func sourceBuildInfoFixture() *debug.BuildInfo {
-	return &debug.BuildInfo{GoVersion: "go1.27.3", Path: "github.com/urnetwork/server/connect/sim-latency", Main: debug.Module{Path: "github.com/urnetwork/server"},
+	return &debug.BuildInfo{GoVersion: "go1.27.4", Path: "github.com/urnetwork/server/connect/sim-latency", Main: debug.Module{Path: "github.com/urnetwork/server"},
 		Settings: []debug.BuildSetting{
 			{Key: "vcs", Value: "git"}, {Key: "vcs.revision", Value: strings.Repeat("a", 40)}, {Key: "vcs.modified", Value: "false"},
 			{Key: "GOOS", Value: "linux"}, {Key: "GOARCH", Value: "amd64"}, {Key: "CGO_ENABLED", Value: "0"}, {Key: "-buildmode", Value: "exe"},
@@ -18,7 +18,7 @@ func sourceBuildInfoFixture() *debug.BuildInfo {
 
 // Source identity does not authorize a different compiler or an auto-upgrade.
 func TestSourceBuildInfoRequiresExactCompetitionGoVersion(t *testing.T) {
-	for _, version := range []string{"", "go1.26.6", "go1.27.2", "go1.27.4", "go1.28.0", "devel go1.27.3-synthetic", "go1.27.3-synthetic"} {
+	for _, version := range []string{"", "go1.26.6", "go1.27.3", "go1.27.5", "go1.28.0", "devel go1.27.4-synthetic", "go1.27.4-synthetic"} {
 		info := sourceBuildInfoFixture()
 		info.GoVersion = version
 		if err := verifySourceBuildInfo(info, strings.Repeat("a", 40)); err == nil {

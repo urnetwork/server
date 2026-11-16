@@ -3,7 +3,7 @@ package geo
 import (
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"strings"
 	"testing"
 )
@@ -194,7 +194,8 @@ func TestContainmentRegionHinge(t *testing.T) {
 // without ids spread across the sphere and a dense cluster where regions
 // interleave.
 func TestContainmentMatchesBruteForce(t *testing.T) {
-	random := mathrand.New(mathrand.NewSource(2))
+	// a fixed seed, so a run replays
+	random := mathrand.New(mathrand.NewPCG(2, 0))
 	randomPoint := func() (float64, float64) {
 		latitude := math.Asin(2*random.Float64()-1) * 180 / math.Pi
 		longitude := random.Float64()*360 - 180
@@ -258,11 +259,11 @@ func TestContainmentMatchesBruteForce(t *testing.T) {
 		}
 		allKm := nearestKm(latitude, longitude, func(city) bool { return true })
 
-		regionKey := regionKeys[random.Intn(len(regionKeys))]
+		regionKey := regionKeys[random.IntN(len(regionKeys))]
 		wantRegionKm := nearestKm(latitude, longitude, func(c city) bool { return c.regionKey == regionKey }) - allKm
 		assertHinge(t, fmt.Sprintf("region %s at (%v, %v)", regionKey, latitude, longitude), containment.RegionHinge(LatLon{Latitude: latitude, Longitude: longitude}, regionKey), wantRegionKm)
 
-		countryCode := countryCodes[random.Intn(len(countryCodes))]
+		countryCode := countryCodes[random.IntN(len(countryCodes))]
 		wantCountryKm := nearestKm(latitude, longitude, func(c city) bool { return c.countryCode == countryCode }) - allKm
 		assertHinge(t, fmt.Sprintf("country %s at (%v, %v)", countryCode, latitude, longitude), containment.CountryHinge(LatLon{Latitude: latitude, Longitude: longitude}, countryCode), wantCountryKm)
 	}

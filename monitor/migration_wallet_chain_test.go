@@ -4,11 +4,62 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/urnetwork/server"
 )
+
+// The typed adapter preserves the signal's observation key. A query-only fake
+// closure would lose it and send the entire census through the legacy SQL path.
+type migrationWalletIndexProjectionSource struct {
+	migrationPingDatabaseSource
+	valid bool
+	ready bool
+}
+
+// Every instance refuses unowned census queries before even opening a DB pool.
+func newMigrationWalletIndexProjectionSource(valid, ready bool) *migrationWalletIndexProjectionSource {
+	return &migrationWalletIndexProjectionSource{migrationPingDatabaseSource: migrationPingDatabaseSource{requireCensusOwnership: true}, valid: valid, ready: ready}
+}
+
+// A statement-local materialized relation bounds CASE expansion while changing
+// only the real wallet backing index's two projected status flags.
+func migrationWalletIndexProjectionQuery(query string, valid, ready bool) (string, error) {
+	if strings.Contains(query, "FROM migration_catalog") {
+		return query, nil
+	}
+	trimmed := strings.TrimSpace(query)
+	if !strings.HasPrefix(trimmed, "WITH ") {
+		return "", fmt.Errorf("wallet index projection requires the owning catalog query")
+	}
+	projection := fmt.Sprintf(`pg_index AS MATERIALIZED (
+ SELECT actual.indexrelid, actual.indrelid, actual.indnatts, actual.indnkeyatts,
+ actual.indisunique, actual.indnullsnotdistinct, actual.indisprimary,
+ actual.indisexclusion, actual.indimmediate, actual.indisclustered,
+ CASE WHEN actual.indexrelid=to_regclass('public.network_user_auth_wallet_pkey') THEN %t ELSE actual.indisvalid END AS indisvalid,
+ actual.indcheckxmin,
+ CASE WHEN actual.indexrelid=to_regclass('public.network_user_auth_wallet_pkey') THEN %t ELSE actual.indisready END AS indisready,
+ actual.indislive, actual.indisreplident, actual.indkey, actual.indcollation,
+ actual.indclass, actual.indoption, actual.indexprs, actual.indpred
+ FROM pg_catalog.pg_index actual
+ )`, valid, ready)
+	return "WITH " + projection + ", " + strings.TrimPrefix(trimmed, "WITH "), nil
+}
+
+// No replacement context or nested acquisition is introduced; the real fixture
+// executes every bounded statement and strict catalog frame in its owned RR tx.
+func (self *migrationWalletIndexProjectionSource) PostgreSQL(ctx context.Context, query string) ([]Row, error) {
+	if !self.requireCensusOwnership {
+		return nil, fmt.Errorf("wallet projection fixture requires census ownership enforcement")
+	}
+	projected, err := migrationWalletIndexProjectionQuery(query, self.valid, self.ready)
+	if err != nil {
+		return nil, err
+	}
+	return self.migrationPingDatabaseSource.PostgreSQL(ctx, projected)
+}
 
 // A successful migration head cannot hide restoration of the superseded key.
 // This test is portable to the pre-contract source and reproduces its false green.
@@ -130,32 +181,18 @@ func TestMigrationsWalletChainKeyBackingIndexReadiness(t *testing.T) {
 		{valid: true, ready: false},
 	}
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
+		baseline, drift := migrationPingDatabaseCheck(t, t.Context())
+		if drift != "" {
+			t.Fatalf("published wallet baseline reports drift: %s", drift)
+		}
 		for _, state := range states {
-			native := &migrationPingDatabaseSource{}
-			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-				if strings.Contains(query, "FROM migration_catalog") {
-					return native.PostgreSQL(t.Context(), query)
-				}
-				trimmed := strings.TrimSpace(query)
-				if !strings.HasPrefix(trimmed, "WITH ") {
-					return nil, fmt.Errorf("wallet index projection requires the owning catalog query")
-				}
-				projection := fmt.Sprintf(`pg_index AS (
- SELECT actual.indexrelid, actual.indrelid, actual.indnatts, actual.indnkeyatts,
- actual.indisunique, actual.indnullsnotdistinct, actual.indisprimary,
- actual.indisexclusion, actual.indimmediate, actual.indisclustered,
- CASE WHEN actual.indexrelid=to_regclass('public.network_user_auth_wallet_pkey') THEN %t ELSE actual.indisvalid END AS indisvalid,
- actual.indcheckxmin,
- CASE WHEN actual.indexrelid=to_regclass('public.network_user_auth_wallet_pkey') THEN %t ELSE actual.indisready END AS indisready,
- actual.indislive, actual.indisreplident, actual.indkey, actual.indcollation,
- actual.indclass, actual.indoption, actual.indexprs, actual.indpred
- FROM pg_catalog.pg_index actual
- )`, state.valid, state.ready)
-				return native.PostgreSQL(t.Context(), "WITH "+projection+", "+strings.TrimPrefix(trimmed, "WITH "))
-			}}
+			source := newMigrationWalletIndexProjectionSource(state.valid, state.ready)
 			alerts, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if len(source.artifactRow) != len(baseline) || state.valid && state.ready && !slices.Equal(source.artifactRow, baseline) {
+				t.Fatal("wallet projection changed the complete catalog row shape or healthy semantics")
 			}
 			observations = append(observations, alerts)
 		}

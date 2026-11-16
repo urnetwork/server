@@ -205,7 +205,6 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyConnectTimeout:      httpProxySettings.ProxyConnectTimeout,
 		ProxyConnectBudget:       httpProxySettings.ProxyConnectBudget,
 		NotificationTimeout:      5 * time.Second,
-		WarmupTimeout:            30 * time.Minute,
 		MaxRequestBytes:          32 * model.Kib,
 		EventRateLimitTimeout:    1 * time.Second,
 		ReconcileTimeout:         30 * time.Minute,
@@ -260,7 +259,6 @@ type ProxySettings struct {
 	ProxyConnectTimeout      time.Duration
 	ProxyConnectBudget       time.Duration
 	NotificationTimeout      time.Duration
-	WarmupTimeout            time.Duration
 	MaxRequestBytes          model.ByteCount
 	EventRateLimitTimeout    time.Duration
 	// how often the wg peers are reconciled against the full set of proxy
@@ -508,6 +506,12 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			return false
 		}
 
+		// A sign-in with the proxy's own signed credentials is SOCKS use, for
+		// the Pro features notice (model ProxyFeatureUses), whatever the plan
+		// answers below: a network still signing in once enforcement refuses
+		// it keeps being told why. In process only; no I/O on this path.
+		self.proxyDeviceManager.noteFeatureUse(proxyId, model.FeatureSocksProxy, time.Now())
+
 		// SOCKS is a Pro-only feature (pro.yml). Enforced at the CONNECTION, not just
 		// at credential issuance -- otherwise a client that already holds SOCKS
 		// credentials keeps using them after its plan stops including the feature.
@@ -527,6 +531,12 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 		}
 
 		valid = self.proxyDeviceManager.checkCallerWithContext(ctx, proxyId, addrPort.Addr()) == nil
+		if valid {
+			// the sign-in is the session's first use: start the device now, so
+			// its construction and its window's first exit overlap the client's
+			// request round trip, and the request's dial joins it
+			self.proxyDeviceManager.startOpenProxyDevice(proxyId)
+		}
 		return valid
 	}
 
@@ -551,6 +561,18 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 		if err != nil {
 			recordProxyAdmissionFailure("socks", false)
 			return nil, err
+		}
+
+		// As for a CONNECT: a window still forming, or refilling after it lost
+		// every provider, drops the dial's SYNs and its DoH queries, and the
+		// dial would wait out the stack's backoff, missing a provider that
+		// joins late in the budget. Wait for the first one, within ctx.
+		if !pd.WaitForRoute(ctx, connectBudget) {
+			recordProxyAdmissionFailure("socks", false)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, errProxyDeviceNoRoute
 		}
 
 		conn, err := pd.DialContext(ctx, network, addr)
@@ -853,6 +875,14 @@ type wgServer struct {
 
 	handoffPrepareOnce sync.Once
 	handoffGeneration  string
+
+	// The proxy of each registered client's tunnel address, so the session
+	// sampler, which reads the device's peers by address, can note each
+	// proxy's WireGuard use (noteWgFeatureUses). An entry is replaced when its
+	// address goes to another proxy and is never removed: the addresses come
+	// from the host and block's bounded pool (proxy_client_ipv4).
+	wgProxyIdsLock sync.Mutex
+	wgProxyIds     map[netip.Addr]server.Id
 }
 
 func NewWgServer(
@@ -1137,8 +1167,64 @@ func (self *wgServer) logAppliedClients(op string, applied map[netip.Addr]*proxy
 	logAppliedClientDetails(op, applied, bool(glog.V(1)), glog.Infof)
 }
 
+// indexWgProxyIds records the proxy of each valid client's tunnel address
+// (wgProxyIds), from the proxy clients validWgClients turned into clients.
+func (self *wgServer) indexWgProxyIds(proxyClients []*model.ProxyClient, clients map[netip.Addr]*proxy.WgClient) {
+	if len(clients) == 0 {
+		return
+	}
+	self.wgProxyIdsLock.Lock()
+	defer self.wgProxyIdsLock.Unlock()
+	if self.wgProxyIds == nil {
+		self.wgProxyIds = map[netip.Addr]server.Id{}
+	}
+	for _, proxyClient := range proxyClients {
+		if proxyClient == nil || proxyClient.WgConfig == nil {
+			continue
+		}
+		addr := proxyClient.WgConfig.ClientIpv4
+		if client, ok := clients[addr]; ok && client.PublicKey == proxyClient.WgConfig.ClientPublicKey {
+			self.wgProxyIds[addr] = proxyClient.ProxyId
+		}
+	}
+}
+
+// noteWgFeatureUses notes a WireGuard use, for the Pro features notice (model
+// ProxyFeatureUses), of each proxy whose peer is in session at now: its newest
+// completed handshake is inside the session window, and that handshake is the
+// use. A peer that never completed one, or whose address no registered client
+// holds, notes nothing. Runs on the session sampler's cadence, never on the
+// packet path.
+func (self *wgServer) noteWgFeatureUses(statuses map[netip.Addr]*proxy.WgPeerStatus, now time.Time) {
+	if self.proxyDeviceManager == nil || self.settings == nil || len(statuses) == 0 {
+		return
+	}
+	windowStart := now.Add(-self.settings.WgSessionWindow)
+	type wgUse struct {
+		proxyId       server.Id
+		lastHandshake time.Time
+	}
+	uses := []wgUse{}
+	func() {
+		self.wgProxyIdsLock.Lock()
+		defer self.wgProxyIdsLock.Unlock()
+		for addr, status := range statuses {
+			if status == nil || status.LastHandshake.IsZero() || status.LastHandshake.Before(windowStart) {
+				continue
+			}
+			if proxyId, ok := self.wgProxyIds[addr]; ok {
+				uses = append(uses, wgUse{proxyId: proxyId, lastHandshake: status.LastHandshake})
+			}
+		}
+	}()
+	for _, use := range uses {
+		self.proxyDeviceManager.noteFeatureUse(use.proxyId, model.FeatureWireguardProxy, use.lastHandshake)
+	}
+}
+
 func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error {
 	clients, counts := self.validWgClients(proxyClients)
+	self.indexWgProxyIds(proxyClients, clients)
 
 	if len(clients) == 0 {
 		if 0 < counts.total {
@@ -1171,6 +1257,7 @@ func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error 
 // concurrently with the db snapshot is never removed.
 func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncStartTime time.Time) error {
 	clients, counts := self.validWgClients(proxyClients)
+	self.indexWgProxyIds(proxyClients, clients)
 
 	applied, addErr := self.wgProxy.AddClients(clients)
 	if addErr != nil {
@@ -1205,6 +1292,37 @@ func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncSt
 	self.logClientCounts("sync", len(applied), removed, counts)
 
 	return errors.Join(addErr, removeErr)
+}
+
+// WatchProxyClients registers this instance with the proxy client
+// notification of its (host, block): each delivery of new and changed clients
+// adds their WireGuard clients, and each periodic full set reconciles them. A
+// delivery opens no device. A proxy's device opens on its first use: a SOCKS
+// sign-in or dial, an HTTP request, the first packet of a WireGuard session,
+// or a control api request signed with its id. So a proxy that is created and
+// never used costs no device, window or exits (owner 2026-11-13). A delivery
+// fails only when no client was applied, and the notification then delivers
+// the same clients again on its next poll. Returns the unsubscribe.
+func (self *wgServer) WatchProxyClients(notification *proxyClientNotification) func() {
+	unsubscribe := notification.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) error {
+		// a returned error means the notification re-delivers these clients on
+		// the next poll instead of advancing past them
+		err := self.AddProxyClients(proxyClients...)
+		if err != nil {
+			glog.Infof("[proxy]wg add proxy clients err=%s\n", err)
+		}
+		return err
+	})
+	unsubscribeFullSync := notification.AddProxyClientsFullSyncCallback(func(proxyClients []*model.ProxyClient, syncStartTime time.Time) {
+		err := self.SyncProxyClients(proxyClients, syncStartTime)
+		if err != nil {
+			glog.Infof("[proxy]wg sync proxy clients err=%s\n", err)
+		}
+	})
+	return func() {
+		unsubscribe()
+		unsubscribeFullSync()
+	}
 }
 
 // errProxyDeviceNoRoute: the device's window formed no provider in time.

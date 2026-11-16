@@ -1,0 +1,42 @@
+[Unit]
+Description=Private bounded evaluation Docker engine
+OnFailure=urnetwork-subeval-recovery.service
+OnFailureJobMode=replace
+Requires=urnetwork-private-containerd.service urnetwork-private-engine-network.service urnetwork-private-engine-network-namespace.service
+BindsTo=urnetwork-private-engine-network-namespace.service urnetwork-private-containerd.service
+After=urnetwork-private-containerd.service urnetwork-private-engine-network.service urnetwork-private-engine-network-namespace.service
+JoinsNamespaceOf=urnetwork-private-engine-network-namespace.service
+RequiresMountsFor=@BASE_DIRECTORY@/candidate
+ConditionPathIsMountPoint=@BASE_DIRECTORY@/candidate
+ConditionPathIsDirectory=/run/containerd
+
+[Service]
+Type=notify
+User=root
+Group=root
+Slice=urnetwork-management-private.slice
+UMask=0022
+PrivateNetwork=yes
+Environment="PATH=@ENGINE_HELPER_PATH@"
+Environment="TMPDIR=@BASE_DIRECTORY@/candidate/scratch/engine-tmp"
+Environment="DOCKER_TMPDIR=@BASE_DIRECTORY@/candidate/scratch/docker-tmp"
+Environment="HOME=@BASE_DIRECTORY@/candidate/scratch/engine-home"
+WorkingDirectory=@BASE_DIRECTORY@/candidate
+ExecStart=@PRIVATE_AGENT_PATH@ --config @PRIVATE_AGENT_CONFIG@ --start-private-engine
+ExecStartPost=/usr/bin/chmod 0600 @BASE_DIRECTORY@/control/docker.sock
+Delegate=yes
+KillMode=control-group
+Restart=no
+TimeoutStartSec=@ENGINE_START_SECONDS@
+TimeoutStopSec=@ENGINE_STOP_SECONDS@
+MemoryMax=@ENGINE_MEMORY_MAXIMUM@
+CPUQuota=@ENGINE_CPU_QUOTA@
+AllowedCPUs=@MANAGEMENT_CPUSET@
+TasksMax=@ENGINE_TASKS_MAXIMUM@
+LimitNOFILE=@ENGINE_DESCRIPTOR_MAXIMUM@
+LimitCORE=0
+StandardOutput=append:@BASE_DIRECTORY@/candidate/daemon-logs/dockerd.stdout.log
+StandardError=append:@BASE_DIRECTORY@/candidate/daemon-logs/dockerd.stderr.log
+
+[Install]
+WantedBy=multi-user.target

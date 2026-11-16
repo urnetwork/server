@@ -1,0 +1,313 @@
+// Explicitly authorized manual-review driver, not a qualified native handoff.
+// Candidate text is data only; this driver never executes it or calls the API.
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server"
+)
+
+// One fresh process owns the exact source bundle and immutable 24-hour clock.
+// No successor, renewed clock, or repeated model draw is started on error.
+func TestDirectEpochOnePairReviewCommand(t *testing.T) {
+	if os.Getenv("DIRECT_REVIEW_OPT_IN") != "1" {
+		t.Skip("explicit direct-review operator invocation only")
+	}
+	if err := runDirectEpochOnePairReview(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Persist each original privately and exclusively; existing evidence refuses a
+// second invocation rather than being overwritten by a later successful draw.
+func directPairWrite(path string, value any) error {
+	content, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(content)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
+}
+
+// Archive exact versions and independently hash readback before accepting a
+// completed call. No candidate-controlled bucket, key or endpoint is accepted.
+func directPairRetain(ctx context.Context, store server.RetainedBlobStore, prefix, path string) (map[string]any, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > 32*1024*1024 {
+		return nil, fmt.Errorf("direct review artifact exceeds bound")
+	}
+	digest := sha256.Sum256(content)
+	expected := hex.EncodeToString(digest[:])
+	retention, err := store.PutRetained(ctx, prefix+"/"+expected+".json", path, "application/octet-stream", time.Date(2028, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		return nil, err
+	}
+	reader, err := store.GetVersion(ctx, retention.Key, retention.VersionId)
+	if err != nil {
+		return nil, err
+	}
+	hash := sha256.New()
+	count, readErr := io.Copy(hash, io.LimitReader(reader, int64(len(content))+1))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if count != int64(len(content)) || hex.EncodeToString(hash.Sum(nil)) != expected {
+		return nil, fmt.Errorf("protected exact-version direct review readback differs")
+	}
+	return map[string]any{"file": filepath.Base(path), "bytes": len(content), "sha256": expected, "retention": retention}, nil
+}
+
+// Snapshot the completed call's actual files, not invented containment proof.
+func directPairRetainDirectory(ctx context.Context, store server.RetainedBlobStore, prefix, directory string) ([]byte, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, err
+	}
+	receipts := []map[string]any{}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			return nil, fmt.Errorf("unexpected non-regular call artifact")
+		}
+		receipt, err := directPairRetain(ctx, store, prefix, filepath.Join(directory, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		receipts = append(receipts, receipt)
+	}
+	path := filepath.Join(directory, "protected-originals.json")
+	if err := directPairWrite(path, receipts); err != nil {
+		return nil, err
+	}
+	if _, err := directPairRetain(ctx, store, prefix, path); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
+// Reuse complete-source planning, prompt, tokenizer, privacy and original-output
+// validators; omit only the separately waived 19-control qualification workflow.
+func runDirectEpochOnePairReview() (err error) {
+	approval, err := os.ReadFile(os.Getenv("DIRECT_REVIEW_APPROVAL"))
+	if err != nil {
+		return err
+	}
+	if !validSha256(os.Getenv("DIRECT_REVIEW_APPROVAL_SHA256")) || winnerMultipassSha256(approval) != os.Getenv("DIRECT_REVIEW_APPROVAL_SHA256") {
+		return fmt.Errorf("direct review approval digest differs")
+	}
+	content, err := os.ReadFile(os.Getenv("DIRECT_REVIEW_PREPARED"))
+	if err != nil {
+		return err
+	}
+	if winnerMultipassSha256(content) != os.Getenv("DIRECT_REVIEW_PREPARED_SHA256") {
+		return fmt.Errorf("authenticated prepared source digest differs")
+	}
+	var prepared electedWinnerReviewPrepared
+	if err := decodeStrictJSONBytes(content, &prepared, "authenticated direct review source"); err != nil {
+		return err
+	}
+	if prepared.Status != "PREPARED_NO_MODEL_CALLS" || prepared.PromotionAuthorized {
+		return fmt.Errorf("prepared source state differs")
+	}
+	directory := os.Getenv("DIRECT_REVIEW_OUTPUT")
+	if err := os.Mkdir(directory, 0700); err != nil {
+		return err
+	}
+	started := time.Now().UTC()
+	owner := winnerMultipassOwner{Id: winnerMultipassSha256([]byte(directory + started.Format(time.RFC3339Nano))), StartedAt: started, Deadline: started.Add(24 * time.Hour)}
+	if err := directPairWrite(filepath.Join(directory, "owner.json"), map[string]any{"kind": "operator-authorized-direct-pair-review/v1", "owner": owner, "prepared_sha256": winnerMultipassSha256(content), "approval_sha256": os.Getenv("DIRECT_REVIEW_APPROVAL_SHA256"), "native_qualification": false, "winner_approved": false}); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			directPairWrite(filepath.Join(directory, "failure.json"), map[string]any{"error": err.Error(), "at": time.Now().UTC(), "owner": owner, "winner_approved": false, "retry_authorized": false})
+		}
+	}()
+	plan, err := prepareWinnerMultipass(prepared.Bundle, owner, prepared.Settings, prepared.Provider)
+	if err != nil {
+		return err
+	}
+	if err := directPairWrite(filepath.Join(directory, "plan.json"), plan); err != nil {
+		return err
+	}
+	planBytes, _ := json.Marshal(plan)
+	config, ok := server.LoadBlobStoreConfig()
+	if !ok {
+		return fmt.Errorf("protected storage config unavailable")
+	}
+	config.Bucket = os.Getenv("DIRECT_REVIEW_BUCKET")
+	blob, err := server.NewBlobStore(config)
+	if err != nil {
+		return err
+	}
+	store, ok := blob.(server.RetainedBlobStore)
+	if !ok {
+		return fmt.Errorf("immutable artifact store unavailable")
+	}
+	prefix := "blob/competition/v2/direct-pair-review/" + owner.Id
+	ctx, cancel := context.WithDeadline(context.Background(), owner.Deadline)
+	defer cancel()
+	for _, path := range []string{filepath.Join(directory, "owner.json"), filepath.Join(directory, "plan.json"), os.Getenv("DIRECT_REVIEW_PREPARED"), os.Getenv("DIRECT_REVIEW_APPROVAL")} {
+		archiveCtx, archiveCancel := context.WithTimeout(ctx, 2*time.Minute)
+		_, err = directPairRetain(archiveCtx, store, prefix, path)
+		archiveCancel()
+		if err != nil {
+			return err
+		}
+	}
+	client := &http.Client{}
+	limits := defaultWinnerMultipassProviderLimits()
+	completed := map[string]winnerMultipassCallEvidence{}
+	evidence := winnerMultipassEvidence{Version: winnerMultipassVersion, PlanSha256: winnerMultipassSha256(planBytes), BundleSha256: plan.BundleSha256, Calls: []winnerMultipassCallEvidence{}}
+	fmt.Printf("DIRECT REVIEW START: %d complete-source units; %d calls; owner %s; deadline %s\n", len(plan.Units), len(plan.Calls), owner.Id, owner.Deadline.Format(time.RFC3339))
+	for index, call := range plan.Calls {
+		payload, buildErr := buildWinnerMultipassCall(plan, prepared.Bundle, call.Id, completed)
+		if buildErr != nil {
+			return buildErr
+		}
+		envelope := winnerMultipassBrokerEnvelope{Schema: 1, Kind: "winner-review-multipass-call/v1", Operation: "tokenize", Owner: owner, CallDeadline: time.Now().UTC().Add(limits.TokenizerTimeout), PlanSha256: evidence.PlanSha256, BundleSha256: plan.BundleSha256, Call: call, Payload: payload, Settings: plan.Settings, AllowModelLoad: true}
+		if envelope.CallDeadline.After(owner.Deadline) {
+			envelope.CallDeadline = owner.Deadline
+		}
+		tokenizeDirectory := filepath.Join(directory, call.Id+"-tokenize")
+		if err := os.Mkdir(tokenizeDirectory, 0700); err != nil {
+			return err
+		}
+		tokenResult, tokenErr := executeWinnerMultipassBroker(ctx, client, envelope, plan.Provider, tokenizeDirectory, limits)
+		if tokenErr != nil {
+			return fmt.Errorf("%s token admission: %w", call.Id, tokenErr)
+		}
+		archiveCtx, archiveCancel := context.WithTimeout(ctx, 2*time.Minute)
+		_, err = directPairRetainDirectory(archiveCtx, store, prefix, tokenizeDirectory)
+		archiveCancel()
+		if err != nil {
+			return err
+		}
+		if tokenResult.Admission == nil {
+			return fmt.Errorf("missing actual token admission")
+		}
+		if err := validateWinnerMultipassAdmission(plan, call, payload, *tokenResult.Admission); err != nil {
+			return err
+		}
+		envelope.Operation = "generate"
+		envelope.AllowModelLoad = false
+		envelope.Admission = tokenResult.Admission
+		envelope.CallDeadline = time.Now().UTC().Add(limits.GenerationTimeout)
+		if envelope.CallDeadline.After(owner.Deadline) {
+			envelope.CallDeadline = owner.Deadline
+		}
+		claim := map[string]any{"owner": owner, "call_id": call.Id, "request_sha256": winnerMultipassSha256(payload), "token_admission": tokenResult.Admission}
+		claimPath := filepath.Join(directory, call.Id+"-generation-claim.json")
+		if err := directPairWrite(claimPath, claim); err != nil {
+			return err
+		}
+		claimBytes, readErr := os.ReadFile(claimPath)
+		if readErr != nil {
+			return readErr
+		}
+		envelope.AuthorizedClaimSha256 = winnerMultipassSha256(claimBytes)
+		generationDirectory := filepath.Join(directory, call.Id+"-generate")
+		if err := os.Mkdir(generationDirectory, 0700); err != nil {
+			return err
+		}
+		fmt.Printf("GENERATE %d/%d %s: admitted %d input tokens\n", index+1, len(plan.Calls), call.Id, tokenResult.Admission.InputTokens)
+		result, generationErr := executeWinnerMultipassBroker(ctx, client, envelope, plan.Provider, generationDirectory, limits)
+		archiveCtx, archiveCancel = context.WithTimeout(ctx, 2*time.Minute)
+		receipt, archiveErr := directPairRetainDirectory(archiveCtx, store, prefix, generationDirectory)
+		archiveCancel()
+		if generationErr != nil {
+			return fmt.Errorf("%s generation: %w", call.Id, generationErr)
+		}
+		if archiveErr != nil {
+			return archiveErr
+		}
+		item := winnerMultipassCallEvidence{CallId: call.Id, StartedAt: result.StartedAt, CompletedAt: result.CompletedAt, Request: payload, Admission: *result.Admission, VisibleResponse: result.VisibleResponse, VisibleResponseSha256: result.VisibleResponseSha256, TransportResponseSha256: result.TransportResponseSha256, TransportReceiptSha256: winnerMultipassSha256(receipt), ProviderOutput: result.ProviderOutput, Observation: result.Observation, Error: result.Error}
+		evidence.Calls = append(evidence.Calls, item)
+		if _, err := validateWinnerMultipassCompletedPrefix(plan, prepared.Bundle, evidence); err != nil {
+			return err
+		}
+		if err := directPairWrite(filepath.Join(directory, call.Id+"-evidence.json"), item); err != nil {
+			return err
+		}
+		completed[call.Id] = item
+		fmt.Printf("COMPLETE %d/%d %s\n", index+1, len(plan.Calls), call.Id)
+	}
+	judgment, err := validateWinnerMultipassEvidence(plan, prepared.Bundle, evidence)
+	if err != nil {
+		return err
+	}
+	if err := directPairWrite(filepath.Join(directory, "complete-evidence.json"), evidence); err != nil {
+		return err
+	}
+	if err := directPairWrite(filepath.Join(directory, "review-result.json"), map[string]any{"kind": "operator-authorized-direct-pair-review-result/v1", "owner": owner, "prepared_sha256": winnerMultipassSha256(content), "judgment": judgment, "calls_completed": len(evidence.Calls), "complete_source_coverage": true, "native_qualified_handoff": false, "winner_approved": false, "source_promotion": false, "reward_release": false}); err != nil {
+		return err
+	}
+	for _, path := range []string{filepath.Join(directory, "complete-evidence.json"), filepath.Join(directory, "review-result.json")} {
+		archiveCtx, archiveCancel := context.WithTimeout(ctx, 2*time.Minute)
+		_, err = directPairRetain(archiveCtx, store, prefix, path)
+		archiveCancel()
+		if err != nil {
+			return err
+		}
+	}
+	fmt.Printf("DIRECT PAIR REVIEW COMPLETE: %s; explicit final user approval remains required\n", judgment.Decision)
+	return nil
+}
+
+// A retained original cannot be replaced by a later successful draw.
+func TestDirectPairExclusiveEvidenceWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "synthetic-claim.json")
+	if err := directPairWrite(path, map[string]string{"state": "original"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := directPairWrite(path, map[string]string{"state": "replacement"}); err == nil {
+		t.Fatal("duplicate claim overwritten")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != `{"state":"original"}` {
+		t.Fatal("original changed", err)
+	}
+}
+
+// Pure local storage exercises exact-version archive/readback; it is not a
+// claim about production storage readiness or a model review result.
+func TestDirectPairRetainedOriginalReadback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "synthetic-original.json")
+	if err := directPairWrite(path, map[string]string{"value": "synthetic"}); err != nil {
+		t.Fatal(err)
+	}
+	store := server.NewLocalBlobStore(t.TempDir(), server.DefaultBlobPrefix).(server.RetainedBlobStore)
+	receipt, err := directPairRetain(t.Context(), store, "synthetic/review", path)
+	if err != nil || receipt["bytes"] == 0 {
+		t.Fatal("retained original missing", err)
+	}
+}

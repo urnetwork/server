@@ -289,8 +289,11 @@ func requireCloseBusyRunWalksPastVictim(t testing.TB, ctx context.Context, cohor
 	}
 }
 
-// Another owner holds the victim's immutable provider-totals key, so its
-// try-lock refuses. The busy row stays open and the singleton keeps moving.
+// The victim is past its deadline and another owner holds its payer's grant,
+// so its owner try-lock refuses. The busy row stays open and the singleton
+// keeps moving; its siblings, short of their deadlines, settle without the
+// grant's owner. (Until 2026-11-11 the victim was made busy by holding its
+// provider totals key, which settlement no longer takes, BILLING-SPLIT.md.)
 func TestCloseExpiredBusyRowDefersRowAndContinuesPromptly(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -298,12 +301,18 @@ func TestCloseExpiredBusyRowDefersRowAndContinuesPromptly(t *testing.T) {
 		ctx, cancel := context.WithTimeout(model.WithProviderWorkSessionSource(t.Context(), nil), 120*time.Second)
 		defer cancel()
 		cohort := newCloseDeferredCohort(t, ctx, 3, true)
+		var victimBalanceId server.Id
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=$2 WHERE contract_id=$1`,
+				cohort.victimId, server.NowUtc().Add(-time.Hour)))
+			server.Raise(tx.QueryRow(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1`, cohort.victimId).Scan(&victimBalanceId))
+		}, server.TxReadCommitted, server.OptNoRetry())
 		held, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 		go func() {
 			done <- func() (returnErr error) {
 				server.HandleError(func() {
 					server.OwnedTx(ctx, []server.PgOwnershipKey{
-						task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", cohort.victimId)),
+						server.NewPgOwnershipKey("transfer_balance", victimBalanceId),
 					}, func(tx server.PgTx) {
 						close(held)
 						<-release

@@ -109,21 +109,3 @@ func ValidateWalletAddress(blockchain Blockchain, address string) error {
 		return refuse("the chain has no wallet addresses")
 	}
 }
-
-// Whether a stored wallet can receive a payout by its address: false only
-// when its chain is a payout chain (SOL, MATIC or ETHEREUM) and the address is
-// not an address on it. Stored chain names vary in case and spelling, so the
-// chain is parsed; a chain that does not parse, or TAO, is left to the payout
-// wallet's chain rule.
-func PayoutWalletAddressValid(blockchain string, address string) bool {
-	chain, err := ParseBlockchain(blockchain)
-	if err != nil {
-		return true
-	}
-	switch chain {
-	case SOL, MATIC, ETHEREUM:
-		return ValidateWalletAddress(chain, address) == nil
-	default:
-		return true
-	}
-}

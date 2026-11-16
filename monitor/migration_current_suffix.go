@@ -611,7 +611,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(843, "independent competition holds and immutable integrity incidents", competitionMigration843ArtifactQuery),
 		migrationCurrentSuffix(844, "competition source authority and atomic outbox custody", competitionMigration844ArtifactQuery),
 		migrationCurrentSuffix(845, "competition source abandonment and committed review custody", competitionMigration845ArtifactQuery),
-		migrationCurrentSuffix(846, "competition prospective round identity and readiness binding", competitionMigration846ArtifactQuery),
+		migrationCurrentSuffix(846, "competition prospective round identity and readiness binding", competitionMigration846ArtifactQuery).removedAt(server.CompetitionIntakeFirstMigrationVersion()),
 		migrationCurrentSuffix(847, "isolated automation staging and current lifecycle guards", competitionMigration847ArtifactQuery),
 		migrationCurrentSuffix(848, "network-leading account feedback time index", competitionMigration848ArtifactQuery),
 		migrationCurrentSuffix(849, "wallet authentication key by user and chain",
@@ -746,8 +746,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(858, "production and staging source authorization of the ten live repositories", competitionMigration858ArtifactQuery).removedAt(859),
 		migrationCurrentSuffix(859, "scheduled round opening bound to its intent", competitionMigration859ArtifactQuery).removedAt(891),
 		migrationCurrentSuffix(860, "raw table and index bloat measurements", dbBloatMeasurementArtifactQuery),
+		// the horizon guard replaces the guard body and republishes the rest
 		migrationCurrentSuffix(contractCloseEvidenceMoveGuardMigrationVersion, "close evidence custody with moves into its partitions",
-			contractCloseEvidenceMoveArtifactQuery),
+			contractCloseEvidenceMoveArtifactQuery).removedAt(contractCloseEvidenceHorizonGuardMigrationVersion),
 	},
 	providerUsageArchivePartitionContracts(),
 	[]snMainnetMigrationContract{
@@ -755,8 +756,10 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		clientKeyHistoryRetentionMigrationContract,
 		migrationCurrentSuffix(server.TaskHeartbeatFillfactorMigrationVersion(), "task queue pages keep room for heartbeat versions",
 			pendingTaskFillfactorArtifactQuery),
+		// the horizon drop guard replaces the drop guard body and republishes
+		// the rest
 		migrationCurrentSuffix(server.ProviderWorkSessionPartitionMigrationVersion(), "provider session custody on either layout of the weekly journal",
-			providerWorkSessionPartitionCustodyPredicates()...),
+			providerWorkSessionPartitionCustodyPredicates()...).removedAt(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion()),
 	},
 	finishedTaskPartitionContracts(),
 	[]snMainnetMigrationContract{
@@ -819,8 +822,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(893, "provider union review, identity and retained source custody", competitionMigration893ArtifactQuery).removedAt(897),
 	},
 	[]snMainnetMigrationContract{
-		// the post-quantum declaration that find-providers2 reads for a
-		// request that requires post-quantum encryption
+		// the post-quantum declaration of each provider's latest provide,
+		// stored as its record; find-providers2 no longer reads it
 		migrationCurrentSuffix(894, "provider capability declarations",
 			migrationFp2Table("provide_capability"),
 			snMainnetMigrationColumns("provide_capability",
@@ -869,15 +872,171 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	snTopBoardMigrationContracts,
 	[]snMainnetMigrationContract{
 		migrationCurrentSuffix(900, "trusted instrument overlay with two-member review, identity and retained source custody",
-			competitionMigration900ArtifactQuery),
+			competitionMigration900ArtifactQuery).removedAt(server.CompetitionProductionBenefitMigrationVersion()),
 		snTopReplicaMigrationContract,
 		verifyCohortCensusMigrationContract,
 		competitionSubmissionMetricsMigrationContract,
 		// replaces the key history guard body the retention contract pins
 		clientKeyHistoryRetentionFloorMigrationContract,
 	},
+	// 905-909: the campaigns' consent evidence and the re-engagement tables
+	reengagementMigrationContracts,
 	// the index diet's drops; each version follows its migration's position
 	indexDietMigrationContracts,
+	[]snMainnetMigrationContract{
+		// after the index diet's drops, as in the migration list
+		migrationCurrentSuffix(contractCloseEvidenceHorizonGuardMigrationVersion, "close evidence custody with retention at the contract horizon",
+			contractCloseEvidenceHorizonArtifactQuery),
+		// the legacy drop guard replaces the drop guard body and republishes the
+		// rest
+		migrationCurrentSuffix(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider session custody with drops at the contract horizon",
+			providerWorkSessionHorizonCustodyPredicates()...).removedAt(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion()),
+	},
+	[]snMainnetMigrationContract{
+		// the store country of each subscription row
+		subscriptionRenewalCountryMigrationContract,
+		// the onboarding results' purchase.started count; its version follows
+		// the migration's position
+		onboardingResultsPurchaseStartedMigrationContract,
+	},
+	// the re-engagement results, wherever merges place them
+	[]snMainnetMigrationContract{reengagementResultsMigrationContract},
+	// the re-engagement program's win-back offers; its version follows
+	// the migration's position
+	[]snMainnetMigrationContract{networkWinbackOfferMigrationContract},
+	// which run of the extender process sent each activation
+	[]snMainnetMigrationContract{extenderActivationRunMigrationContract},
+	// lag.dev's measurement api probes; the version follows the migration's position
+	[]snMainnetMigrationContract{extenderMeasurementProbeMigrationContract},
+	// the extender camouflage key (phase 14b), versioned by its position
+	[]snMainnetMigrationContract{extenderCamouflageKeyMigrationContract},
+	// the audited single-use competition job recovery; its version follows the
+	// migration's position
+	[]snMainnetMigrationContract{competitionJobReevaluationMigrationContract},
+	// the usage archive's export ledger, versioned by its position
+	[]snMainnetMigrationContract{usageArchiveExportLedgerMigrationContract},
+	// the demand deposit funder's state; its version follows the migration's position
+	[]snMainnetMigrationContract{stDemandMigrationContract},
+	// the one-tap Top 200 claim's tables, versioned by their position
+	[]snMainnetMigrationContract{snFleetAutoMigrationContract},
+	// planner statistics on the opaque unresolved CASE; no sample is required
+	[]snMainnetMigrationContract{transferContractUnresolvedStatisticsMigrationContract},
+	// Prospective finalization control, after all previously published history.
+	[]snMainnetMigrationContract{competitionFinalizationHoldMigrationContract},
+	// The future executor slots and no-op evidence follow that origin prefix.
+	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
+	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
+	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract.removedAt(server.CompetitionDistributedReevaluationMigrationVersion())},
+	// Version is resolved from the appended coverage migration, never fixed.
+	[]snMainnetMigrationContract{competitionWorkCoverageMigrationContract().removedAt(server.CompetitionIntakeFirstMigrationVersion())},
+	// The successor retains all four retired composites, replacing only
+	// their exact operative guard bodies with scoped legacy-preserving ones.
+	// The pending review handoff (below) re-creates three winner-review bodies
+	// this custody pins, and carries the rest of it on from its own version.
+	[]snMainnetMigrationContract{migrationCurrentSuffix(server.CompetitionIntakeFirstMigrationVersion(), "separate published-source intake and qualified grading custody", competitionIntakeFirstArtifactQuery()).removedAt(server.CompetitionReviewHandoffMigrationVersion())},
+	// unique-exit hosted proxies: eleven additive migrations, each versioned by
+	// its position
+	proxyUniqueExitMigrationContracts,
+	// Independent prospective stop evidence does not retire prior recovery custody.
+	[]snMainnetMigrationContract{competitionOperatorInterruptionMigrationContract},
+	// the exact-URL TLS finding verdicts, versioned by their position
+	[]snMainnetMigrationContract{providerEgressTlsVerdictMigrationContract},
+	// the pending review handoff ledger, with the intake-first custody it
+	// carries on; versioned by its position. The official review (below)
+	// re-creates two winner-review bodies this custody pins and the review
+	// identity body it carries, and carries the rest of it on from its own
+	// version.
+	[]snMainnetMigrationContract{competitionReviewHandoffMigrationContract.removedAt(server.CompetitionOfficialReviewMigrationVersion())},
+	// the URL outcome catalog source and probation, versioned by its position
+	[]snMainnetMigrationContract{providerEgressUrlSourceMigrationContract},
+	// the provider zero-carry verdicts, versioned by their position
+	[]snMainnetMigrationContract{providerZeroCarryMigrationContract},
+	// the epoch-one official review authorization, with the handoff custody it
+	// carries on; versioned by its position. The executor control amendment
+	// (below) re-creates the equivalence guard and intake grading readiness
+	// this custody carries, and carries the rest of it on from its own version.
+	[]snMainnetMigrationContract{competitionOfficialReviewMigrationContract.removedAt(server.CompetitionExecutorControlAmendmentMigrationVersion())},
+	// the operator's executor control amendment, with the official review
+	// custody it carries on; versioned by its position. The qualification
+	// recovery (below) re-creates the equivalence guard this custody pins, and
+	// carries the rest of it on from its own version.
+	[]snMainnetMigrationContract{competitionExecutorControlAmendmentMigrationContract.removedAt(server.CompetitionExecutorQualificationRecoveryMigrationVersion())},
+	// the Pay with Gamma tables, versioned by their position
+	[]snMainnetMigrationContract{gammaPayMigrationContract},
+	// the single-use executor qualification recovery, with the executor
+	// control amendment custody it carries on; versioned by its position. The
+	// admission exception (below) re-creates the whole-host readiness this
+	// custody carries from the amendment, and carries the rest of it on from
+	// its own version.
+	[]snMainnetMigrationContract{competitionExecutorQualificationRecoveryMigrationContract.removedAt(server.CompetitionExecutorAdmissionExceptionMigrationVersion())},
+	// the retained host admission exception, with the qualification recovery
+	// custody it carries on; versioned by its position
+	[]snMainnetMigrationContract{competitionExecutorAdmissionExceptionMigrationContract.removedAt(server.CompetitionExecutorAdmissionClaimMigrationVersion())},
+	// the onboarding platform's distribution, versioned by its position
+	[]snMainnetMigrationContract{networkOnboardingDistributionMigrationContract},
+	// the Bitcoin block scanner's kept chain, versioned by its position
+	[]snMainnetMigrationContract{cryptoScanChainMigrationContract},
+	// the per-cycle Pro grants, versioned by their position
+	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
+	// The corrected claim trigger carries every earlier admission guard.
+	[]snMainnetMigrationContract{competitionExecutorAdmissionClaimMigrationContract.removedAt(server.CompetitionDistributedReevaluationMigrationVersion())},
+	// the HTTP/3 place evidence, versioned by its position
+	[]snMainnetMigrationContract{providerEgressH3PlaceMigrationContract},
+	// the IPv6 place evidence, versioned by its position
+	[]snMainnetMigrationContract{providerEgressIpv6PlaceMigrationContract},
+	// capture the flag's presence, census and lifecycle tables, versioned by
+	// their position
+	[]snMainnetMigrationContract{ctfMigrationContract},
+	// the per-target ping hour's evidence refusals, versioned by their
+	// position
+	[]snMainnetMigrationContract{networkPingTargetEvidenceMigrationContract},
+	// the carrier ports of each extender address, versioned by its position
+	[]snMainnetMigrationContract{extenderAddressPortsMigrationContract},
+	// the network each capture the flag award was won for, versioned by its
+	// position
+	[]snMainnetMigrationContract{ctfAwardNetworkMigrationContract},
+	// the SN25 extender pool's tables and epoch row columns, versioned by
+	// their position
+	[]snMainnetMigrationContract{stLedgerV2ExtenderMigrationContract},
+	// the Solana receiver sweep's cursor, versioned by its position
+	[]snMainnetMigrationContract{solanaReceiverSweepCursorMigrationContract},
+	// capability-aware FindProviders2's URL evidence columns, versioned by
+	// their position
+	[]snMainnetMigrationContract{providerEgressFp2EvidenceMigrationContract},
+	// the store notification flow, versioned by its position
+	[]snMainnetMigrationContract{storeNotificationFlowMigrationContract},
+	// the sweep of every issued address of a per-address coin, versioned by
+	// its position
+	[]snMainnetMigrationContract{cryptoAddressSweepMigrationContract},
+	// the Shopify orders paid with Solana Pay, versioned by its position
+	[]snMainnetMigrationContract{solanaShopifyOrderPaymentMigrationContract},
+	// the per-network mail context, versioned by its position
+	[]snMainnetMigrationContract{networkMailContextMigrationContract},
+	// Exact closure, cycle transition and inherited legacy/source custody.
+	[]snMainnetMigrationContract{competitionDistributedReevaluationMigrationContract.removedAt(server.CompetitionOperatorRequestedPatchRetryMigrationVersion())},
+	// the gift of privacy's orders and Pro gift codes, versioned by their
+	// position
+	[]snMainnetMigrationContract{giftSchemaMigrationContract},
+	// what refunds, disputes and orphaned crypto payments did to a gift
+	// order's codes, versioned by their position
+	[]snMainnetMigrationContract{giftRefundSchemaMigrationContract},
+	// Exact unchanged-patch retry authority inherits every prior guard check.
+	[]snMainnetMigrationContract{competitionOperatorRequestedPatchRetryMigrationContract},
+	// the bytes served per operator block of GET /account/epochs, versioned
+	// by their position
+	[]snMainnetMigrationContract{operatorBlockTrafficMigrationContract},
+	// the operator blocks the daily points award recorded expired, versioned
+	// by its position
+	[]snMainnetMigrationContract{operatorBlockPointsExpiredMigrationContract},
+	// the Pay with Gamma intent that pays a gift order, versioned by its
+	// position
+	[]snMainnetMigrationContract{giftGammaSchemaMigrationContract},
+	// the journal's drop guard with the legacy partition's early drop, which
+	// supersedes the horizon drop guard's contract, versioned by its position
+	[]snMainnetMigrationContract{
+		migrationCurrentSuffix(server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion(), "provider session custody with the legacy partition's early drop",
+			providerWorkSessionLegacyDropCustodyPredicates()...),
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
@@ -947,6 +1106,7 @@ const transactionTimeoutRoleDefaultArtifactQuery = `(` + transactionTimeoutPoolR
 		JOIN pg_roles role_row ON role_row.oid = setting_row.setrole
 		CROSS JOIN LATERAL unnest(setting_row.setconfig) AS setting
 		WHERE setting_row.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+		AND role_row.rolname = current_user
 		AND NOT role_row.rolsuper
 		AND setting = 'transaction_timeout=15min'))`
 

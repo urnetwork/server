@@ -230,9 +230,7 @@ func runWithDependencies(
 		listenErrs <- listenAndServe(
 			runCtx,
 			net.JoinHostPort(statusIpv4, strconv.Itoa(statusPort)),
-			router.NewRouter(runCtx, []*router.Route{
-				router.NewRoute("GET", "/status", altServer.Status),
-			}),
+			newStatusHandler(runCtx, altServer),
 			false,
 			server.HttpServerOptions{
 				ReadTimeout:     15 * time.Second,
@@ -289,6 +287,15 @@ func runWithDependencies(
 	flushStats()
 	glog.Infof("[alt]close\n")
 	return runErr
+}
+
+// The status listener's handler. No lb is in front of this listener either,
+// so the client address its status answer echoes is set by the same ingress
+// as the api front's.
+func newStatusHandler(ctx context.Context, altServer *Alt) http.Handler {
+	return NewIngressHandler(router.NewRouter(ctx, []*router.Route{
+		router.NewRoute("GET", "/status", altServer.Status),
+	}))
 }
 
 // The exchange drains first so residents migrate, then one cancel releases

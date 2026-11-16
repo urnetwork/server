@@ -156,6 +156,17 @@ func refreshAutomationOperationalMetrics(ctx context.Context, settings *Settings
 						snapshot.activeHoldKinds = append(snapshot.activeHoldKinds, kind)
 					}
 				})
+				var finalizationSchemaInstalled bool
+				server.Raise(conn.QueryRow(ctx, `SELECT to_regclass('competition_finalization_hold') IS NOT NULL`).Scan(&finalizationSchemaInstalled))
+				if finalizationSchemaInstalled {
+					var active bool
+					server.Raise(conn.QueryRow(ctx, `SELECT COALESCE((SELECT active FROM competition_finalization_hold
+					 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 ORDER BY revision DESC LIMIT 1),false)`,
+						settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId).Scan(&active))
+					if active {
+						snapshot.activeHoldKinds = append(snapshot.activeHoldKinds, "finalization")
+					}
+				}
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM competition_automation_incident
 					WHERE environment=$1 AND competition_id=$2 AND season_id=$3`,
 					settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId).Scan(&snapshot.incidentCount))
@@ -175,7 +186,7 @@ func (self competitionAutomationMetricSnapshot) publish(now time.Time) {
 	if self.progressionBlocked {
 		competitionAutomationProgressionBlocked.Set(1)
 	}
-	for _, kind := range []string{"admission", "evaluation", "source_activation", "reward_delivery"} {
+	for _, kind := range []string{"admission", "evaluation", "source_activation", "reward_delivery", "finalization"} {
 		competitionAutomationHoldActive.WithLabelValues(kind).Set(0)
 		for _, activeKind := range self.activeHoldKinds {
 			if activeKind == kind {

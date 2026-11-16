@@ -75,14 +75,17 @@ func useIpDbFile(t testing.TB, path string) {
 	}
 
 	previousIpDb := ipDb
+	previousIpDbDeployed := ipDbDeployed
 	var openedDb *mmdb.Reader
 	ipDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
 		db, schemaType := loadIpDb()
 		openedDb = db
 		return db, schemaType
 	})
+	ipDbDeployed = sync.OnceValue(ipDbOpens)
 	t.Cleanup(func() {
 		ipDb = previousIpDb
+		ipDbDeployed = previousIpDbDeployed
 		if openedDb != nil {
 			openedDb.Close()
 		}
@@ -796,6 +799,51 @@ func TestUseIpDbFileForTestStandsInUntilTheTestEnds(t *testing.T) {
 	}
 	readProcess()
 	connect.AssertEqual(t, processReads, 2)
+}
+
+// Whether the process reads GeoLite2 City (IpInfoDatabaseDeployed): ipDbOpens
+// answers true for a file that opens as GeoLite2 City, and false, without
+// raising, for one that is missing or of another type, which ipDb would raise
+// at every lookup. A stand-in answers for what it stands in for.
+func TestIpInfoDatabaseDeployed(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, databaseType string) string {
+		path := filepath.Join(dir, name)
+		data := &mmdbTestData{}
+		if err := os.WriteFile(path, mmdbTestFile(databaseType, data, geoLite2TestRecord(data)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	opening := func(path string) func() (*mmdb.Reader, schemaType) {
+		return sync.OnceValues(func() (*mmdb.Reader, schemaType) {
+			return openIpDb(path)
+		})
+	}
+
+	previousIpDb := ipDb
+	defer func() { ipDb = previousIpDb }()
+	ipDb = opening(write("geolite2.mmdb", string(schemaTypeGeoLite2City)))
+	connect.AssertEqual(t, ipDbOpens(), true)
+	ipDb = opening(write("country.mmdb", "GeoLite2-Country"))
+	connect.AssertEqual(t, ipDbOpens(), false)
+	ipDb = opening(filepath.Join(dir, "missing.mmdb"))
+	connect.AssertEqual(t, ipDbOpens(), false)
+
+	t.Run("stand-in", func(t *testing.T) {
+		UseIpDbFileForTest(t, write("stand-in.mmdb", string(schemaTypeGeoLite2City)))
+		connect.AssertEqual(t, IpInfoDatabaseDeployed(), true)
+	})
+	t.Run("no database", func(t *testing.T) {
+		reads := UseNoIpDbForTest(t)
+		connect.AssertEqual(t, IpInfoDatabaseDeployed(), false)
+		connect.AssertEqual(t, reads(), 0)
+		func() {
+			defer func() { recover() }()
+			GetIpInfo(netip.MustParseAddr(geoLite2TestRecordIp))
+		}()
+		connect.AssertEqual(t, reads(), 1)
+	})
 }
 
 // The repository's synthetic database, which a suite reads in place of the

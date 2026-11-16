@@ -18,6 +18,8 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"os"
+	"path"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -890,6 +892,72 @@ func TestStClientKeyEvidenceWriterThrottledByFullRequestPool(t *testing.T) {
 	}
 }
 
+// The legacy flat key of content written before the sharded layout under
+// store: the last of the content's store-relative keys, in read order.
+func stLegacyEvidenceContentKeyTest(t testing.TB, store server.BlobStore, contentHash string) string {
+	t.Helper()
+	suffixes, err := startifact.EvidenceContentKeySuffixes(contentHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path.Join(store.Prefix(), suffixes[len(suffixes)-1])
+}
+
+// An unchanged key's registration whose evidence was stored at its legacy
+// flat key, before the sharded layout, is verified there: counted as exists,
+// with no create and no sharded copy. Evidence stored at neither key is
+// created at its sharded key alone. Through the actual MinIO client, whose
+// missing keys surface at the first read.
+func TestStClientKeyEvidenceWriterVerifiesLegacyFlatEvidence(t *testing.T) {
+	wrappers := newStClientKeyEvidenceWrappersTest(t, 2)
+	fake := newStClientKeyEvidenceS3Test(t, 0, 0)
+	store := fake.store(t)
+	keys := make([][2]string, len(wrappers))
+	for index, wrapper := range wrappers {
+		sharded, err := startifact.EvidenceContentKey(store, wrapper.contentHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy := stLegacyEvidenceContentKeyTest(t, store, wrapper.contentHash)
+		keys[index] = [2]string{store.Bucket() + "/" + sharded, store.Bucket() + "/" + legacy}
+	}
+	func() {
+		fake.stateLock.Lock()
+		defer fake.stateLock.Unlock()
+		fake.objects[keys[0][1]] = bytes.Clone(wrappers[0].encoded)
+	}()
+	writer := newStClientKeyEvidenceWriterTest(t, stClientKeyEvidenceWriterSettingsTest())
+	if err := writer.enqueue(store, wrappers[0].encoded, wrappers[0].contentHash, true); err != nil {
+		t.Fatal(err)
+	}
+	waitStClientKeyEvidenceIdleTest(t, writer)
+	if puts, gets := fake.methods(); puts != 0 || gets != 2 {
+		t.Fatalf("legacy evidence: %d creates and %d reads, want the sharded and the legacy read only", puts, gets)
+	}
+	if exists := stClientKeyEvidencePublicationsTest(writer, stClientKeyEvidenceOutcomeExists); exists != 1 {
+		t.Fatalf("legacy evidence counted %d exists, want 1", exists)
+	}
+	if _, ok := fake.object(keys[0][0]); ok {
+		t.Fatal("verified legacy evidence was copied to its sharded key")
+	}
+	if err := writer.enqueue(store, wrappers[1].encoded, wrappers[1].contentHash, true); err != nil {
+		t.Fatal(err)
+	}
+	waitStClientKeyEvidenceIdleTest(t, writer)
+	if puts, gets := fake.methods(); puts != 1 || gets != 5 {
+		t.Fatalf("absent evidence: %d creates and %d reads in all, want one create after both reads, then its readback", puts, gets)
+	}
+	if ok := stClientKeyEvidencePublicationsTest(writer, stClientKeyEvidenceOutcomeOk); ok != 1 {
+		t.Fatalf("absent evidence counted %d ok, want 1", ok)
+	}
+	if content, ok := fake.object(keys[1][0]); !ok || !bytes.Equal(content, wrappers[1].encoded) {
+		t.Fatal("absent evidence was not created at its sharded key")
+	}
+	if _, ok := fake.object(keys[1][1]); ok {
+		t.Fatal("absent evidence was written at its legacy flat key")
+	}
+}
+
 // Refused readbacks follow an accepted create in the same attempt.
 func stClientKeyEvidenceReadbackRefusalsTest(requests []stClientKeyEvidenceS3RequestTest) int {
 	refused := 0
@@ -899,4 +967,28 @@ func stClientKeyEvidenceReadbackRefusalsTest(requests []stClientKeyEvidenceS3Req
 		}
 	}
 	return refused
+}
+
+// A writer's backoff jitter draws from its own connect.NewSecureRand generator
+// (RANDUPDATE.md S4); it was a PCG, which gives its state away in its outputs.
+// Two writers built by the production constructor under one fixed fake clock
+// draw different jitters.
+func TestStClientKeyEvidenceWriterJitterIsDrawnPerWriter(t *testing.T) {
+	now := time.Date(2026, time.November, 13, 12, 0, 0, 0, time.UTC)
+	backoffs := func() []time.Duration {
+		writer := newStClientKeyEvidenceWriterTest(t, stClientKeyEvidenceWriterSettingsTest())
+		writer.now = func() time.Time { return now }
+		delays := []time.Duration{}
+		func() {
+			writer.stateLock.Lock()
+			defer writer.stateLock.Unlock()
+			for range 16 {
+				delays = append(delays, writer.backoffWithLock(8))
+			}
+		}()
+		return delays
+	}
+	if first, second := backoffs(), backoffs(); slices.Equal(first, second) {
+		t.Fatalf("two writers drew the same backoff jitters %v", first)
+	}
 }

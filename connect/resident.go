@@ -10,14 +10,15 @@ import (
 	"math"
 	"slices"
 	// "io"
-	"math/rand"
+	"math/rand/v2"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	// "errors"
-	// mathrand "math/rand"
+	// mathrand "math/rand/v2"
 	"bytes"
 	cryptorand "crypto/rand"
 	// "slices"
@@ -26,6 +27,7 @@ import (
 
 	"maps"
 
+	"github.com/pion/webrtc/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
 
@@ -114,6 +116,10 @@ const (
 	// (send) or into the transport's receive queue (receive).
 	receiveQueueBoundaryLocalTransportSend    = "local_transport_send"
 	receiveQueueBoundaryLocalTransportReceive = "local_transport_receive"
+	// A local forward link's pump (resident_local_forward.go): messages it
+	// dequeued from the forward and did not deliver into the destination
+	// resident's forward queue.
+	receiveQueueBoundaryLocalForwardSend = "local_forward_send"
 )
 
 var receiveQueueDroppedMessagesCounter = prometheus.NewCounterVec(
@@ -416,6 +422,7 @@ func init() {
 		receiveQueueBoundaryResidentClientForward,
 		receiveQueueBoundaryLocalTransportSend,
 		receiveQueueBoundaryLocalTransportReceive,
+		receiveQueueBoundaryLocalForwardSend,
 	} {
 		receiveQueueDroppedMessagesCounter.WithLabelValues(boundary).Add(0)
 		receiveQueueDroppedBytesCounter.WithLabelValues(boundary).Add(0)
@@ -547,6 +554,14 @@ type ExchangeSettings struct {
 	// fit the exchange and minimum supported client carrier limits.
 	// Framers below the control sender's 4 KiB envelope leave requests pending.
 	ClientCloseBatchSize int
+	// The most transport addresses one ObservedAddresses frame carries
+	// (resident_observed_addresses.go). 16, the most a client keeps: a client
+	// has a few transports, each seen from one address per family.
+	// Non-positive uses the default.
+	ObservedAddressesMaxCount int
+	// the residents' half of the webrtc extender carrier's signaling relay
+	// (extender_webrtc_relay.go): its bounds per exchange process
+	ExtenderWebRtcRelay ExtenderWebRtcRelaySettings
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -696,7 +711,9 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 			TopologyRefreshInterval: 60 * time.Second,
 			ResyncSpreadTimeout:     30 * time.Second,
 		},
-		ClientCloseBatchSize: 512,
+		ClientCloseBatchSize:      512,
+		ObservedAddressesMaxCount: 16,
+		ExtenderWebRtcRelay:       *DefaultExtenderWebRtcRelaySettings(),
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -804,9 +821,19 @@ type Exchange struct {
 	// Nil in production; constructor tests inject failure after child ownership
 	// exists but before the fallible peer-profile lookup publishes callbacks.
 	beforeResidentProfileForTest func(*Resident)
+	// Nil in production; composed nomination tests replace only the profile
+	// lookup while retaining resident construction and lifecycle ownership.
+	residentProfileForTest func(context.Context, server.Id) (server.Id, bool, model.NetworkPeerCategory, *model.NetworkPeer, bool)
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
+	// Nil in production; registration tests refuse a client's nominations, as
+	// a draining exchange or a failed nomination would, while its connection
+	// stays open, until it returns false.
+	refuseNominationForTest func(clientId server.Id) bool
+	// Nil in production; registration tests wait for a resident's teardown,
+	// its peer registration cleanup included, to finish.
+	afterResidentTeardownForTest func(*Resident)
 	// Nil in production; local transport tests hold an attach after its
 	// generation check, a pump after it takes a batch's first message and
 	// after it gathers the batch, and a pump before it waits on a delivery
@@ -815,10 +842,18 @@ type Exchange struct {
 	beforeLocalTransportGatherForTest func(*localTransportLink, localTransportDirection)
 	afterLocalTransportGatherForTest  func(*localTransportLink, localTransportDirection, int)
 	beforeLocalTransportBlockForTest  func(*localTransportLink, localTransportDirection)
+	// Nil in production; local forward tests hold an attach after its
+	// generation check, and observe each forward that dials its destination
+	// over the exchange (resident_local_forward.go).
+	beforeLocalForwardAttachForTest func(*Resident)
+	beforeForwardDialForTest        func(ExchangeHeader)
 
 	// in-process delivery of transports to local residents; nil while
 	// EnableLocalTransport is off (resident_local_transport.go)
 	localTransport *exchangeLocalTransport
+	// in-process delivery of forwards to local destination residents; nil
+	// while EnableLocalForward is off (resident_local_forward.go)
+	localForward *exchangeLocalTransport
 
 	// recycles of stuck providers the api reports; nil while
 	// EnableStuckProviderRecycle is off (client_recycle.go)
@@ -828,6 +863,12 @@ type Exchange struct {
 	// KeyEventDelivery.Enabled
 	keyEventSubscriber          *keyEventSubscriber
 	contractOriginNotifications *model.ContractOriginNotifications
+	// the webrtc extender carrier offers this exchange's residents relay at
+	// once, over all of them (ExtenderWebRtcRelaySettings.MaxConcurrentRelays)
+	extenderWebRtcRelaySlots chan struct{}
+	// the wakes of the residents' relays: this process's own offer channel,
+	// set exactly when keyEventSubscriber is (extender_webrtc_offer_wakes.go)
+	extenderWebRtcOfferWakes *extenderWebRtcOfferWakes
 
 	// set once `Drain` starts. While draining, new connections are refused
 	// (`ConnectHandler.Connect` 503s and `NominateLocalResident` declines) so
@@ -950,6 +991,10 @@ func newExchange(
 		residentChanges:       map[server.Id]chan struct{}{},
 		connections:           map[server.Id]map[server.Id]context.CancelFunc{},
 		drainedClients:        map[server.Id]struct{}{},
+		extenderWebRtcRelaySlots: make(
+			chan struct{},
+			max(0, settings.ExtenderWebRtcRelay.MaxConcurrentRelays),
+		),
 	}
 
 	if settings.KeyEventDelivery.Enabled {
@@ -957,9 +1002,19 @@ func newExchange(
 		// residents register their listeners with it in `Resident.Run`
 		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery, settings.EnableStuckProviderRecycle)
 		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
+		// the residents' webrtc offers wake this process on its own channel,
+		// the one its resident registrations name (connect/EXTENDER.md S8)
+		exchange.extenderWebRtcOfferWakes = newExtenderWebRtcOfferWakes(
+			cancelCtx,
+			model.ExtenderWebRtcOfferChannel(host, service, block),
+			server.DefaultRedisShardSubscriptionSettings(),
+			nil,
+			settings.KeyEventDelivery.ResyncSpreadTimeout,
+		)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
-	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block)
+	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block, ExchangeOpTransport)
+	exchange.localForward = newExchangeLocalTransport(cancelCtx, settings, block, ExchangeOpForward)
 	// flags arrive only as key events
 	if exchange.keyEventSubscriber != nil {
 		exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(cancelCtx, settings, block, exchange.recycleStuckProvider)
@@ -1161,6 +1216,10 @@ func (self *Exchange) nominateLocalResident(
 		return false, false
 	}
 
+	if refuse := self.refuseNominationForTest; refuse != nil && refuse(clientId) {
+		return false, false
+	}
+
 	// Refuse to nominate a resident for a client that would push the network past
 	// its limit, which keeps the client from becoming active. An intent provider
 	// is judged by its provider intent check and a re-nomination of an
@@ -1258,6 +1317,9 @@ func (self *Exchange) nominateLocalResident(
 				clientId,
 				resident.residentId,
 			)
+			if afterTeardown := self.afterResidentTeardownForTest; afterTeardown != nil {
+				defer afterTeardown(resident)
+			}
 			// RemoveNetworkPeer no-ops (no publish) when this resident never
 			// registered, so churny residents that died before announcing
 			// emit nothing here.
@@ -1265,8 +1327,8 @@ func (self *Exchange) nominateLocalResident(
 			// entirely: the member registration ttl converts a non-returning
 			// client to a disconnect anyway, and a returning client refreshes
 			// the entry with no visible blip (CONNECTDRAIN2.md §3.2, MOVE.md
-			// §5.7)
-			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() {
+			// §5.7). So does a replaced resident's (residentReplaced).
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() && !residentReplaced(cleanupCtx, clientId, resident.residentId) {
 				if resident.peerCategory == model.NetworkPeerCategoryProxy {
 					model.RemoveNetworkProxyPeer(
 						cleanupCtx,
@@ -1325,6 +1387,24 @@ func (self *Exchange) nominateLocalResident(
 	self.notifyResidentArrival(resident)
 
 	return true, false
+}
+
+// residentReplaced reports whether another resident now serves the client: a
+// nomination replaced this one, in this process or on another host. The
+// client's peer registration is the replacement's then, though it may still
+// name this resident: registration happens once per connection, at announce,
+// and the replacement re-registers it under its own id only at its first
+// heartbeat (refreshResidentRegistration). Removing it here would leave the
+// connected client uncounted until that heartbeat, up to ExchangeResidentTtl/4,
+// and let one more client past the network's concurrent client limit. Kept,
+// the registration counts the client; if the client leaves before the
+// replacement's heartbeat, the member ttl converts it to a disconnect, as for
+// a drained or moved resident.
+func residentReplaced(ctx context.Context, clientId server.Id, residentId server.Id) bool {
+	return server.HandleErrorWithReturn(func() bool {
+		current := model.GetResidentForClient(ctx, clientId, 0)
+		return current != nil && current.ResidentId != residentId
+	})
 }
 
 // Refreshes metadata for one resident. Transport cancellation must not change
@@ -2188,7 +2268,7 @@ func (self *Exchange) broadcastResidentMigrates(
 				}
 				migrateTime := startTime
 				if jitterWindow := migrateEndTime.Sub(startTime); 0 < jitterWindow {
-					migrateTime = migrateTime.Add(time.Duration(rand.Int63n(int64(jitterWindow))))
+					migrateTime = migrateTime.Add(time.Duration(rand.Int64N(int64(jitterWindow))))
 				}
 				results <- migrateResult{
 					clientId: resident.clientId,
@@ -2459,6 +2539,9 @@ func (self *Exchange) Close() {
 	if self.localTransport != nil {
 		self.localTransport.closeWorkers()
 	}
+	if self.localForward != nil {
+		self.localForward.closeWorkers()
+	}
 	if self.stuckProviderRecycle != nil {
 		self.stuckProviderRecycle.closeWorkers()
 	}
@@ -2484,10 +2567,10 @@ func (self *Exchange) Close() {
 }
 
 // WaitForIdle waits until every admitted resident, listener, accepted
-// connection, and in-process transport link has completed teardown, with the
-// local transport's control loop and pacer and the stuck provider recycle's
-// control loop and recycles. Close must be called first so no wait group can
-// receive another admission.
+// connection, and in-process transport and forward link has completed
+// teardown, with the local transport's and local forward's control loops and
+// pacers and the stuck provider recycle's control loop and recycles. Close
+// must be called first so no wait group can receive another admission.
 func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 	done := make(chan struct{})
 	go func() {
@@ -2495,6 +2578,9 @@ func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 		self.connectionWorkers.Wait()
 		if self.localTransport != nil {
 			self.localTransport.workers.Wait()
+		}
+		if self.localForward != nil {
+			self.localForward.workers.Wait()
 		}
 		if self.stuckProviderRecycle != nil {
 			self.stuckProviderRecycle.workers.Wait()
@@ -2863,6 +2949,9 @@ type ExchangeHeader struct {
 	Carrier             ResidentCarrier
 	IpFamily            uint8
 	ProvideIntent       bool
+	// the edge's ClientIp, invalid when it has none. Gob encodes it with its
+	// MarshalBinary, and the header stays comparable.
+	ClientIp netip.Addr
 }
 
 func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierProperties {
@@ -2875,12 +2964,16 @@ func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierPr
 }
 
 func (self ExchangeHeader) transportEdge() ResidentTransportEdge {
-	return ResidentTransportEdge{
+	edge := ResidentTransportEdge{
 		ResidentMoveVersion: self.ResidentMoveVersion,
 		Carrier:             self.Carrier,
 		IpFamily:            self.IpFamily,
 		ProvideIntent:       self.ProvideIntent,
 	}
+	if self.ClientIp.IsValid() {
+		edge.ClientIp = self.ClientIp.Unmap()
+	}
+	return edge
 }
 
 type ExchangeConnection struct {
@@ -3629,6 +3722,7 @@ func NewResidentTransportWithEdge(
 		Carrier:                               edge.Carrier,
 		IpFamily:                              edge.IpFamily,
 		ProvideIntent:                         edge.ProvideIntent,
+		ClientIp:                              edge.ClientIp,
 	}
 	transport := newResidentTransport(ctx, exchange, header, clientId, instanceId)
 	transport.admission = admission
@@ -3812,7 +3906,7 @@ func (self *ResidentTransport) runWithResidentLookup(
 					continue
 				}
 			} else {
-				port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+				port := resident.ResidentInternalPorts[rand.IntN(len(resident.ResidentInternalPorts))]
 				exchangeConnection, err := NewExchangeConnection(
 					self.ctx,
 					headerCopy,
@@ -4087,36 +4181,51 @@ func (self *ResidentForward) runWithResidentLookup(
 		})
 		initialLookup = false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
-			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			header := ExchangeHeader{
 				ClientId:   self.clientId,
 				ResidentId: resident.ResidentId,
 				Op:         ExchangeOpForward,
 			}
-			exchangeConnection, err := NewExchangeConnection(
-				self.ctx,
-				header,
-				resident.ResidentHost,
-				port,
-				self.exchange.routes,
-				self.exchange.settings,
-			)
-			if err != nil {
-				if glog.V(1) {
-					glog.Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+			// A destination resident in this process takes the forward in
+			// process, with the accept path's checks, instead of a socket back
+			// into this process (resident_local_forward.go).
+			if link := self.exchange.attachLocalForward(self.ctx, header); link != nil {
+				if self.runLocal(link, &pending, &hasPending) == localTransportDetachDisabled {
+					// The switch detached a link to a resident that still serves:
+					// the next message dials it over the exchange, with no
+					// reconnect wait. The loop's head checks the forward's end.
+					continue
 				}
-			}
-			if err == nil {
-				c := func() {
-					handle(exchangeConnection)
+			} else {
+				if beforeDial := self.exchange.beforeForwardDialForTest; beforeDial != nil {
+					beforeDial(header)
 				}
-				if glog.V(2) {
-					server.Trace(
-						fmt.Sprintf("[rf]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
-						c,
-					)
-				} else {
-					c()
+				port := resident.ResidentInternalPorts[rand.IntN(len(resident.ResidentInternalPorts))]
+				exchangeConnection, err := NewExchangeConnection(
+					self.ctx,
+					header,
+					resident.ResidentHost,
+					port,
+					self.exchange.routes,
+					self.exchange.settings,
+				)
+				if err != nil {
+					if glog.V(1) {
+						glog.Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+					}
+				}
+				if err == nil {
+					c := func() {
+						handle(exchangeConnection)
+					}
+					if glog.V(2) {
+						server.Trace(
+							fmt.Sprintf("[rf]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
+							c,
+						)
+					} else {
+						c()
+					}
 				}
 			}
 		}
@@ -4233,6 +4342,9 @@ type Resident struct {
 	stateLock sync.RWMutex
 
 	transports map[*clientTransport]bool
+	// a coalesced signal that the transports changed, for the observed
+	// addresses listener (resident_observed_addresses.go)
+	observedAddressesKick chan struct{}
 
 	// destination id -> forward
 	forwards map[server.Id]*ResidentForward
@@ -4258,9 +4370,10 @@ type Resident struct {
 	// activity is tracked with an atomic, not stateLock, so UpdateActivity is
 	// lock-free on the per-frame inbound and forward paths
 	lastActivityNanos atomic.Int64
-	// transports attached in process (resident_local_transport.go). While
-	// any is attached the resident is active, as an exchange socket's pings
-	// kept it.
+	// transports, and forwards to this resident, attached in process
+	// (resident_local_transport.go, resident_local_forward.go). While any is
+	// attached the resident is active, as an exchange socket's pings kept it:
+	// a transport's in both directions, and a forward's dialer's pings.
 	localAttachments atomic.Int64
 
 	// set when the teardown is caused by a server drain / migrate rather than
@@ -4293,6 +4406,11 @@ type Resident struct {
 	// Nil in production; tests use this barrier after forward cancellation and
 	// immediately before teardown joins the active consumer.
 	beforeForwardCloseJoinForTest func()
+	// Nil in production; tests receive what AddForward's queues deliver, from
+	// an accepted forward socket or an in-process forward link, in place of
+	// the internal client's forward. It takes a message on true, as
+	// Client.ForwardWithTimeout does.
+	forwardReceiveForTest func(context.Context, []byte) bool
 	// Nil in production; forward tests force cleanup immediately after launch.
 	afterForwardWorkersStartedForTest func(*ResidentForward)
 	// Nil in production; tests observe the exact internal-client join boundary.
@@ -4378,6 +4496,7 @@ func newResidentDuringAdmission(
 		residentContractManager: residentContractManager,
 		residentController:      residentController,
 		transports:              map[*clientTransport]bool{},
+		observedAddressesKick:   make(chan struct{}, 1),
 		forwards:                map[server.Id]*ResidentForward{},
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
 		createTime:              time.Now(),
@@ -4401,7 +4520,11 @@ func newResidentDuringAdmission(
 	if beforeProfile := exchange.beforeResidentProfileForTest; beforeProfile != nil {
 		beforeProfile(resident)
 	}
-	networkId, topLevel, category, peerProfile, peersEnabled := model.GetNetworkPeerProfile(cancelCtx, clientId)
+	loadProfile := model.GetNetworkPeerProfile
+	if exchange.residentProfileForTest != nil {
+		loadProfile = exchange.residentProfileForTest
+	}
+	networkId, topLevel, category, peerProfile, peersEnabled := loadProfile(cancelCtx, clientId)
 	if networkId != (server.Id{}) {
 		resident.sessionNetworkId = &networkId
 	}
@@ -4693,6 +4816,16 @@ func streamHopsToReset(hops []model.StreamHop) *protocol.StreamReset {
 
 func (self *Resident) Run() {
 	defer self.cancel()
+	// the addresses the client's transports connect from
+	// (resident_observed_addresses.go); a transport attached before Run left
+	// its kick in the signal's buffer
+	observedAddressesListener := newResidentObservedAddressesListener(
+		self.ctx,
+		self.observedAddresses,
+		self.sendListenerFrame,
+		self.observedAddressesKick,
+	)
+	defer observedAddressesListener.CloseAndWait()
 	if self.exchange.keyEventSubscriber != nil && self.sessionNetworkId != nil {
 		networkId := *self.sessionNetworkId
 		hints := make(chan *protocol.NetworkSessionsChanged, 1)
@@ -4779,6 +4912,25 @@ func (self *Resident) Run() {
 		removeCloseListener := self.exchange.keyEventSubscriber.AddCloseListener(self.clientId, closeListener)
 		defer removeCloseListener()
 		closeListener.Kick()
+
+		// the webrtc extender carrier's offers the prober relays to the
+		// client (connect/EXTENDER.md S8, extender_webrtc_relay.go), woken on
+		// this process's offer channel. An offer added before this
+		// registration had no listener, so it takes once now; the listener
+		// holds no goroutine while it has nothing to relay
+		relayListener := newExtenderWebRtcRelayListener(
+			self.ctx,
+			self.clientId,
+			&self.exchange.settings.ExtenderWebRtcRelay,
+			self.exchange.extenderWebRtcRelaySlots,
+			extenderWebRtcRelayRedisStore{},
+			self.exchangeExtenderWebRtcOffer,
+			time.Now,
+		)
+		defer relayListener.CloseAndWait()
+		removeRelayListener := self.exchange.extenderWebRtcOfferWakes.AddListener(self.clientId, relayListener)
+		defer removeRelayListener()
+		relayListener.Kick()
 	}
 
 	// only top-level client-category peers get network peer updates.
@@ -4845,6 +4997,19 @@ func (self *Resident) handleNetworkPeerEvent(event *model.NetworkPeerEvent) {
 	for _, frame := range frames {
 		self.sendListenerFrame(frame)
 	}
+}
+
+// Exchanges one relayed webrtc extender carrier offer with the resident
+// client (connect/EXTENDER.md S8): the internal client, whose id is the
+// control id, sends it as a flagged `ExchangeSignals`, the way a peers update
+// reaches the client, and waits under the offer's stream id for the answer of
+// this client alone. The control id is a no-contract peer of every client,
+// so neither direction needs a contract.
+func (self *Resident) exchangeExtenderWebRtcOffer(
+	ctx context.Context,
+	offer webrtc.SessionDescription,
+) (webrtc.SessionDescription, error) {
+	return self.client.WebRtcManager().ExtenderCarrierExchanger(connect.Id(self.clientId)).ExchangeOffer(ctx, offer)
 }
 
 // Sends one listener-produced control frame to the resident client. A failed
@@ -5285,6 +5450,7 @@ func (self *Resident) addTransportWithEdge(
 		defer self.stateLock.Unlock()
 		self.transports[transport] = true
 	}()
+	self.kickObservedAddresses()
 
 	closeTransport = func() {
 		routeManager := self.client.RouteManager()
@@ -5296,6 +5462,7 @@ func (self *Resident) addTransportWithEdge(
 			defer self.stateLock.Unlock()
 			delete(self.transports, transport)
 		}()
+		self.kickObservedAddresses()
 		if move := self.move.Load(); move != nil {
 			move.notifyTransportClosed()
 		}
@@ -5307,12 +5474,17 @@ func (self *Resident) addTransportWithEdge(
 	return
 }
 
-// AddForward attaches one exchange-forward queue to the resident client.
+// AddForward attaches one exchange-forward queue to the resident client. The
+// accept path's forward connections and in-process forward links
+// (resident_local_forward.go) both deliver into it.
 func (self *Resident) AddForward() (
 	forward chan []byte,
 	closeForward func(),
 	returnErr error,
 ) {
+	if receiveForTest := self.forwardReceiveForTest; receiveForTest != nil {
+		return self.addForwardWithReceive(receiveForTest)
+	}
 	return self.addForwardWithReceive(func(ctx context.Context, message []byte) bool {
 		return self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout, connect.Ctx(ctx))
 	})
@@ -5404,7 +5576,7 @@ func (self *Resident) CancelIfIdle() bool {
 	default:
 	}
 
-	// An attached local transport is activity, as the at most
+	// An attached local transport or forward is activity, as the at most
 	// ExchangePingTimeout pings of an exchange socket were. Refreshing here
 	// rearms the watcher a full ttl out instead of every wake; a wedged link
 	// detaches within WriteTimeout, which refreshes once more.

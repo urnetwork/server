@@ -53,6 +53,9 @@ func competitionPreparationTestReceipt(intent *model.CompetitionSourceActivation
 
 // The normal concrete HTTPS, publication and receipt validators remain real;
 // only database authority and trusted host execution use deterministic seams.
+// The token lives under a link-free directory: the production reader opens
+// every path component without following links, so the /var alias of Darwin's
+// temporary directory would fail the read before the API step.
 func newCompetitionPreparationAdapterFixture(t testing.TB) (*competitionPreparationAdapter, CompetitionPreparationRequest, *competitionPreparationTestState, *competitionRuntimeBlobTestStore) {
 	t.Helper()
 	settings, sourceStore, archive, blobs := newCompetitionRuntimeBlobFixture(t)
@@ -62,7 +65,7 @@ func newCompetitionPreparationAdapterFixture(t testing.TB) (*competitionPreparat
 	config := CompetitionPreparationConfig{Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Staging: intent.Staging,
 		ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(), WorkerId: "synthetic-worker", TimeoutSeconds: 3600,
 		QualificationCommand: "/synthetic/qualification", QualificationSha256: strings.Repeat("c", 64), WorkerCommand: "/synthetic/worker", WorkerSha256: strings.Repeat("d", 64),
-		SourcePromoterTokenFile: filepath.Join(t.TempDir(), "source-promoter.token")}
+		SourcePromoterTokenFile: filepath.Join(providerWorkPhysicalTempDir(t), "source-promoter.token")}
 	if err := os.WriteFile(config.SourcePromoterTokenFile, []byte("synthetic-promoter-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -318,10 +321,18 @@ func TestCompetitionPreparationAdapterRechecksFenceBeforeQualification(t *testin
 	}
 }
 
-// Explicit barriers prove cancellation joins the in-flight qualifier before
-// returning, without relying on a short timeout or scheduler luck.
-func TestCompetitionPreparationAdapterCancellationJoinsQualifier(t *testing.T) {
-	adapter, request, _, _ := newCompetitionPreparationAdapterFixture(t)
+// Backstop for the cancellation scenario's waits. They end as soon as the
+// adapter reports, so a passing run never comes near it; it exists so that an
+// adapter that neither reaches the qualifier nor returns fails the test
+// instead of hanging the package, which test.sh runs with -timeout 0.
+const competitionPreparationTestDeadline = 2 * time.Minute
+
+// Blocks the qualifier until its context ends, cancels once it has entered,
+// and requires the adapter to return context.Canceled only after the qualifier
+// finished. Every wait also watches the adapter's result, so an adapter that
+// fails before it reaches the qualifier ends the scenario at once with that
+// failure. deadline bounds an adapter that does neither; nil never fires.
+func runCompetitionPreparationCancellationScenario(adapter *competitionPreparationAdapter, request CompetitionPreparationRequest, deadline <-chan time.Time) error {
 	entered, joined := make(chan struct{}), make(chan struct{})
 	adapter.runProgram = func(ctx context.Context, _ string, _ string, _ any, _ []string) error {
 		close(entered)
@@ -333,16 +344,86 @@ func TestCompetitionPreparationAdapterCancellationJoinsQualifier(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() { _, err := adapter.run(ctx, request); result <- err }()
-	<-entered
+	select {
+	case <-entered:
+	case err := <-result:
+		return fmt.Errorf("adapter returned before starting the qualifier: %w", err)
+	case <-deadline:
+		return errors.New("adapter neither started the qualifier nor returned before the test deadline")
+	}
 	cancel()
-	if err := <-result; !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancellation was lost: %v", err)
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("cancellation was lost: %w", err)
+		}
+	case <-deadline:
+		return errors.New("adapter did not return after cancellation before the test deadline")
 	}
 	select {
 	case <-joined:
+		return nil
 	default:
-		t.Fatal("adapter returned before qualifier cleanup")
+		return errors.New("adapter returned before qualifier cleanup")
 	}
+}
+
+// Explicit barriers prove cancellation joins the in-flight qualifier before
+// returning, without relying on a short timeout or scheduler luck.
+func TestCompetitionPreparationAdapterCancellationJoinsQualifier(t *testing.T) {
+	adapter, request, _, _ := newCompetitionPreparationAdapterFixture(t)
+	deadline := time.NewTimer(competitionPreparationTestDeadline)
+	defer deadline.Stop()
+	if err := runCompetitionPreparationCancellationScenario(adapter, request, deadline.C); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An adapter that fails before it reaches the qualifier ends the cancellation
+// scenario with that failure. The scenario gets no deadline here, so only
+// watching the adapter's result can end it; waiting on the qualifier alone,
+// as the scenario once did, blocks forever.
+func TestCompetitionPreparationCancellationScenarioReportsEarlyAdapterFailure(t *testing.T) {
+	adapter, request, _, _ := newCompetitionPreparationAdapterFixture(t)
+	failure := errors.New("synthetic failure before qualification")
+	adapter.checkFence = func(context.Context, *Settings, CompetitionPreparationRequest) (*model.CompetitionSourceActivation, error) {
+		return nil, failure
+	}
+	if err := runCompetitionPreparationCancellationScenario(adapter, request, nil); !errors.Is(err, failure) {
+		t.Fatalf("early adapter failure was not reported: %v", err)
+	}
+}
+
+// Darwin reaches its temporary directory through the /var link, and the token
+// reader refuses every link on its path, so the fixture's adapter failed there
+// before the API step and the cancellation scenario hung. Test temporary
+// directories behind a link reproduce that on any platform; the fixture must
+// still let the adapter reach the qualifier and finish.
+func TestCompetitionPreparationAdapterFixtureToleratesLinkedTempDir(t *testing.T) {
+	physical := filepath.Join(providerWorkPhysicalTempDir(t), "physical")
+	if err := os.Mkdir(physical, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(filepath.Dir(physical), "linked")
+	if err := os.Symlink(physical, linked); err != nil {
+		t.Fatal(err)
+	}
+	// testing.T.TempDir creates its directories under GOTMPDIR when it is set.
+	t.Setenv("GOTMPDIR", linked)
+	t.Run("fixture", func(t *testing.T) {
+		if !strings.HasPrefix(t.TempDir(), linked+string(filepath.Separator)) {
+			t.Fatal("test temporary directory is not behind the link")
+		}
+		adapter, request, state, _ := newCompetitionPreparationAdapterFixture(t)
+		if _, err := adapter.run(context.Background(), request); err != nil {
+			t.Fatalf("adapter failed behind a linked temporary directory: %v", err)
+		}
+		state.stateLock.Lock()
+		defer state.stateLock.Unlock()
+		if !reflect.DeepEqual(state.events, []string{"api", "qualify", "worker"}) {
+			t.Fatalf("adapter did not reach the qualifier: %v", state.events)
+		}
+	})
 }
 
 // TLS redirects are not followed with the bearer; an old-capability API cannot

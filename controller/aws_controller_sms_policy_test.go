@@ -71,7 +71,6 @@ func TestPhoneAccountsReceiveOnlySecuritySms(t *testing.T) {
 			UnclaimedRao: big.NewInt(3_241_000_000),
 			EpochEnd:     server.NowUtc(),
 		},
-		&MissingWalletTemplate{PaymentId: server.NewId(), Payout: model.UsdToNanoCents(5.00)},
 		&ProviderUpgradeNoticeTemplate{NetworkName: "Synthetic network"},
 		&SubscriptionTransferBalanceCodeTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 10 * model.Tib},
 		&SubscriptionDataAppliedTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: model.Tib, NetworkName: "synthetic"},

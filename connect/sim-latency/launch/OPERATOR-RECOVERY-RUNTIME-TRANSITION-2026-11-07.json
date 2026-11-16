@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "kind": "competition-operator-recovery-runtime-transition-observation/v1",
+  "date": "2026-11-07",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "queue_observation": {"succeeded": 68, "failed": 1, "running": 0, "queued": 0},
+  "evaluation_hold": {"revision": 24, "active": true, "request_file": "/home/by/urnetwork/temp/competition-operator-release-20261106.zFmyrhQk/tools/operator-maintenance-hold-20261107.json"},
+  "idle_boundary": {"old_supervisor_stopped_cleanly": true, "evaluation_cgroup_populated": false, "worker_slot_was_unleased": true, "active_submission_interrupted": false},
+  "new_service": {
+    "name": "urnetwork-competition-production-r2.service",
+    "source": "1f939c82cb399c075306689976699ccaf26f8cf6",
+    "supervisor_pid_observed": 3211366,
+    "worker_pid_observed": 3211718,
+    "supervisor_sha256": "1c0519e4cb5bc57c6a9f9efd80ed89f7c548580c0ec1a1de30be6487f87f59f3",
+    "worker_sha256": "48e10a2150b36ed17fbbbfecae5b9bcb35a28fde74bf1bc09b78a45287d2e171",
+    "worker_image_digest": "sha256:63b43292a6b0a77eb28055b7abe756608cc776c163bfa825c8dd09a6d7eb1bfe",
+    "wrapper_sha256": "bd2bcfd26dea1424ab8db9a0423706058da853d49bd10be580917da2cd1f5adf",
+    "dropin_sha256": "fb112b1352d96e657ae57f3dbff3d5b7c73a82b8c4d3994b324e5de022762d71",
+    "no_claim_preflight_exit": 0,
+    "preflight_log_sha256": "0538d116b954f5d10037da6ac59c54ffcd44ba5400bac84ab7951fc9e32a9e79",
+    "image_extracted_worker_matches_native": true,
+    "byte_proof_container_never_started_and_removed": true,
+    "restarts_observed": 0
+  },
+  "api_observation": {
+    "source": "99a5437f6db45fd746c045356fbd022630154f9a",
+    "modified": false,
+    "image_digest": "sha256:78c62625722be55744b282bad7fdc01d923ccbb856a02ed9b031b4ea71aa984d",
+    "observed_processes": 20,
+    "all_observed_metadata_complete": true,
+    "includes_recovery_source_by_git_ancestry": true,
+    "receipt_sha256": "ec1de8daf7617da81984c1c23a04120988cf97d09399f6ee4fa4a770a46f0857",
+    "not_full_fleet_placement_proof": true
+  },
+  "migration": {"version": 944, "catalog_index": 943, "exact_identity_sha256": "6ac6b231455fdf0e8f374302418eb59461e732c0ff83b1bea99fa51510113ae2"},
+  "remaining_job": {"job_id": "01a1a481-0968-ff57-1ca8-1a48fc2a35ea", "snapshot_sha256": "837a434f099e28a63580ce59dcbe0657bc38030857b347de7fb4a46ce8458c9d", "prior_recovery_receipts": 0, "grant_issued": false},
+  "finalization_and_reward_holds_unchanged": true,
+  "scoring_source_baseline_policy_and_submission_order_unchanged": true,
+  "next_action": "Refresh exact terminal and deployment evidence as needed, bind the independently verified runtime, grant the single approved operator-interruption recovery, verify its receipt and original position, then release evaluation hold revision24. This record alone is not a recovery authorization or winner approval."
+}

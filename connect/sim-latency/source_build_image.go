@@ -46,7 +46,11 @@ func sourceBuildImagePlanForDigest(request reviewedSourceBuildRequest, binaryDig
 		return nil, errors.New("source image requires an authenticated binary digest")
 	}
 	commit := request.Proposal.Commits["server"]
-	lock, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits}, "", "  ")
+	coverage := sourceBuildRequestWorkCoverage(request)
+	if coverage != nil && !sourceBuildRequestMinimumWork(request) {
+		return nil, errors.New("coverage source image requires its immutable minimum-work generation")
+	}
+	lock, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits, WorkCoveragePolicy: coverage.Clone()}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -99,4 +103,18 @@ func sourceBuildRequestMinimumWork(request reviewedSourceBuildRequest) bool {
 	}
 	generation, err := manifest.generation(request.SourceGeneration)
 	return err == nil && generation.G2VolumePolicy == model.CompetitionG2VolumePolicyMinimumWork
+}
+
+// Later reviewed product builds inherit the authenticated generation's
+// instrument policy; they cannot choose a different tolerance or old scorer.
+func sourceBuildRequestWorkCoverage(request reviewedSourceBuildRequest) *model.CompetitionWorkCoveragePolicy {
+	manifest, err := decodeSourceManifest(request.SourceManifest)
+	if err != nil {
+		return nil
+	}
+	generation, err := manifest.generation(request.SourceGeneration)
+	if err != nil {
+		return nil
+	}
+	return generation.WorkCoveragePolicy
 }

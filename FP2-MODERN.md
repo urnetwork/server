@@ -39,6 +39,10 @@ a config release and a restart of every taskworker, api and alt block. See
    reach them, so for a provider holding a Network key and no Public key,
    `require_modern_provider` accepts the `post_quantum_encryption` declaration
    instead of probe evidence.
+   **Superseded on 2026-11-13** (owner: "They must have a positive quality
+   probe handshake to count"). A network-only provider is modern only with the
+   same probe evidence as a Public one. No provider counts on its declaration
+   (FP2-PROTOCOL.md D12.6, §12.8).
 8. **The response is unchanged.** `FindProvidersProvider` gets no `modern`
    field.
 9. **Location lists are out of scope.** Provider-locations stays
@@ -107,8 +111,11 @@ provide that carries a Public or a Network key. A provide with neither key, such
 as a window client's return-traffic provide, leaves the row as it was. So a
 declaration can outlive the keys it was made with.
 
-`FindProviders2Args.post_quantum_encryption` keeps only declaring providers,
-reading declarations from Postgres per candidate.
+`FindProviders2Args.post_quantum_encryption` kept only declaring providers,
+reading declarations from Postgres per candidate. Since 2026-11-13 no selection
+reads the declaration. The row stays the provider's record of what it
+announced, and `post_quantum_encryption` needs a probe's positive evidence
+(FP2-PROTOCOL.md §12.4, §12.8).
 
 ### The index FindProviders2 reads
 
@@ -158,24 +165,30 @@ priority has to decide **which** providers a band draws.
 
 ### Definition
 
-A provider is **modern** at an instant `now` when one of these holds.
+A provider is **modern** at an instant `now` when it holds a Public or a
+Network provide key and `classifyProviderModernEvidence(row, now)` is
+`modern`: evidence measured less than seven days before `now` of a post-quantum
+end-to-end session (X25519MLKEM768), and of acks advertising
+`receive_window_byte_count`. Once the post-quantum marker is set, the quality
+probe's 8-hour positive replaces the post-quantum half (FP2-PROTOCOL.md §12.4).
 
-- **It holds a Public provide key.** Then `classifyProviderModernEvidence(row,
-  now)` must be `modern`: evidence measured less than seven days before `now`
-  of a negotiated post-quantum end-to-end session (X25519MLKEM768), and of acks
-  advertising `receive_window_byte_count`. A Public provider that also holds a
-  Network key still needs this evidence.
-- **It holds a Network key and no Public key** (network-only). The probe can
-  never contract with such a provider. Instead, its latest provide with a
-  Network key must have declared post-quantum encryption (Decision 7).
-- **It holds neither key.** Then it is never modern, whatever declaration a
-  former provide left behind.
+- **A network-only provider** (a Network key and no Public key) needs the same
+  evidence. The probe can never contract with such a provider, so it is modern
+  only while evidence from a former Public provide is fresh. Until 2026-11-13
+  its declaration counted instead (Decision 7, superseded).
+- **A provider with neither key** is never modern, whatever evidence or
+  declaration a former provide left behind.
+- **No provider is modern by its own declaration.**
 
-**Limitation: modern doesn't mean sealable.** The probe records a negotiated
-post-quantum session as positive even when it never sealed
-(`capprobe/reading.go`, "unsealed"). A modern result is therefore evidence that
-the provider negotiates the session. It is not proof that a required-encryption
-client will seal with it.
+**Limitation: modern doesn't mean sealable** (until 2026-11-13). The capability
+probe recorded a negotiated post-quantum session as positive even when it never
+sealed (`capprobe/reading.go`, "unsealed"), and so did the URL ingest that
+replaced it. Such a result was evidence that the provider negotiates the
+session, not proof that a required-encryption client will seal with it. Since
+2026-11-13 the URL ingest records post-quantum only for the quality probe's
+positive outcome, a session sealed before the request (FP2-PROTOCOL.md §12.8).
+Older rows keep their reading until the provider's next conclusive turn, or
+seven days at most.
 
 The client's `EncryptionModeRequired` still decides every send. A modern
 provider that fails session validation costs the client a failed dial, never
@@ -187,11 +200,11 @@ transport.
 
 ```go
 	// Modern is whether the provider qualified as modern at the export's
-	// instant (FP2-MODERN.md): with a Public key, measured modern by the
-	// capability probe; with only a Network key, declared post-quantum
-	// encryption in its latest provide. Set whatever buckets it is in. Zero,
-	// as every entry written before the field decodes, is not modern. Set
-	// only on the top-level score, like the location ids.
+	// instant (FP2-MODERN.md): measured modern by the probe's evidence,
+	// whatever provide keys it holds, never by its declaration. Set whatever
+	// buckets it is in. Zero, as every entry written before the field
+	// decodes, is not modern. Set only on the top-level score, like the
+	// location ids.
 	Modern bool
 ```
 
@@ -200,11 +213,9 @@ transport.
 - `providerEgressDecision` gains `modern`. `decideProviderEgress` sets it for
   every provider it does not hard-exclude, from `facts.modernOutcome`.
   `rankClientScore` copies it onto each score.
-- A `NetworkOnly` score instead takes the provider's declaration. The source
-  query only yields providers holding a Public or Network key, so a
-  `NetworkOnly` score holds a Network key. The export reads the declarations
-  once per run for the cohort's network-only providers, in batches of 256, on
-  a connection of its own (no nested acquisition).
+- A `NetworkOnly` score takes the same decision. Until 2026-11-13 it took the
+  provider's declaration instead, read once per export for the cohort's
+  network-only providers.
 
 **Compatibility.** gob doesn't send a false bool, and an older reader drops a
 field it doesn't know. A page written before the field decodes `Modern ==
@@ -312,23 +323,20 @@ checks:
 and `rejection` returns a new cell 4 for `!score.Modern`.
 
 - `unchecked` feeds every database read the request makes for its candidates.
-  So no declaration, hard-exclusion, liveness or validation read is spent on a
-  refused provider.
+  So no post-quantum, hard-exclusion, liveness or validation read is spent on
+  a refused provider.
 - `apply` removes refused providers before quota counting. The refill counts
   them as discarded rows.
 
 **Named providers.** They are not in the index. One read-only query reads the
-named ids in one snapshot. For each id it returns:
+named ids in one snapshot. For each id it returns its evidence row, classified
+at the request's `filterTime`, and only for an id that holds a Public or a
+Network key.
 
-- whether the id holds a Public key;
-- whether it holds a Network key;
-- its evidence row, classified at the request's `filterTime`;
-- its declaration.
-
-The [definition](#definition) then decides each id: with Public, the evidence;
-with Network only, the declaration; with neither, refused. The helper sits
-beside `readProvidePostQuantumEncryption` and returns errors rather than
-raising, and a failed read fails the request.
+The [definition](#definition) then decides each id: with either key, the
+evidence; with neither, refused. Until 2026-11-13 a network-only id was decided
+by its declaration. The helper (`readProviderModernClientIds`) returns errors
+rather than raising, and a failed read fails the request.
 
 - In the discovery path, the read runs before the other named reads, and
   refused ids join `namedExcludedClientIds`.
@@ -561,7 +569,7 @@ of a second's churn per second, against 250–760 a second on 10-21.
   `capability!~"modern.*|post_quantum"`, which still counts series without the
   label.
 - **Selection.** Selection outcomes gain the reason `filtered_capability`, for
-  modern and declaration refusals; the latter count as `filtered_hard` today.
+  modern and post-quantum refusals; the latter count as `filtered_hard` today.
   A modern-only request whose targets hold no modern page reads nothing. It
   reports `filtered_capability`, or `returned_small_filtered_capability`, from
   the rows it left unread, not `cache_empty`.
@@ -648,7 +656,7 @@ of a second's churn per second, against 250–760 a second on 10-21.
 | --- | --- | --- |
 | new (modern) | new, after step 5's checks | modern providers only |
 | new (modern) | old | field ignored: capability-blind, the client fails closed per provider |
-| sends `post_quantum_encryption` | new | declaring providers only, as today |
+| sends `post_quantum_encryption` | new | providers with a probe's post-quantum evidence only (declaring providers until 2026-11-13; FP2-PROTOCOL.md §12.8) |
 | neither | new | unchanged, plus priority |
 
 #### Deploy record, 2026-10-28
@@ -705,7 +713,8 @@ Each change has a test at the layer where its behavior shows.
 
 - `Modern` is set in every page set, and is false for every non-modern outcome,
   Online-only providers included.
-- A network-only provider is modern exactly when it declares.
+- A network-only provider is modern exactly when its evidence is, never by
+  its declaration (until 2026-11-13: exactly when it declared).
 - Pages are single-class, modern first, with the counts format unchanged.
 - The manifest's `ModernPages` and the union metadata's checksums describe the
   pages written.
@@ -748,8 +757,9 @@ legacy readers:
 - With `post_quantum_encryption` too, the answer is the intersection.
 - Named classification, in both named-only and named-plus-discovery requests:
   - Announce Public with post-quantum, then a return-only provide: the
-    declaration remains, and the id is refused.
-  - Valid network-only controls are answered.
+    declaration and the evidence remain, and the id is refused.
+  - A network-only provider with modern evidence is answered; one that only
+    declares is refused (since 2026-11-13).
   - Public plus Network requires evidence.
 
 **server/model, the gate**
@@ -845,8 +855,10 @@ clarifications. Each is addressed here.
   throughput, not on the estimate.
 - **A stalled probe** ages evidence out over seven days. Priority then draws as
   today, and modern-only requests answer empty. The page covers this.
-- **The declaration is self-reported**, and it only applies to network-only
-  providers. The client verifies every session.
+- **Network-only supply.** Since 2026-11-13 no declaration counts, so a
+  network-only provider without fresh evidence drops out of modern-only and
+  post-quantum answers. Its own network's requests without those fields still
+  get it. The client verifies every session.
 - **Partition reads.** A stale partition consumes more of the finite read
   allowance. The partition-state and incomplete-priority counters show the
   resulting recovery work and any priority limit.
@@ -858,7 +870,7 @@ clarifications. Each is addressed here.
 **server:**
 
 - `model/network_client_location_model.go`: `ClientScore.Modern`, the
-  request field, the export's declaration read and marker, the named read, the
+  request field, the export's marker, the named read, the
   phased quotas, and the band draws in `FindProviders2`.
 - `model/network_client_score_targets.go`: the modern-first split.
 - `model/network_client_score_modern.go` and

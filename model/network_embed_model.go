@@ -153,7 +153,7 @@ func GetNetworkEmbed(ctx context.Context, networkId server.Id) *NetworkEmbed {
 	server.Db(ctx, func(conn server.PgConn) {
 		embed.Enabled, embed.EverEnabled = readNetworkEmbedState(ctx, conn, networkId)
 		embed.ClientLimit, _ = readNetworkTopLevelClientLimit(ctx, conn, networkId)
-		embed.ActiveClientCount = countNetworkActiveTopLevelClients(ctx, conn, networkId, MaxNetworkTopLevelClientLimit+1)
+		embed.ActiveClientCount = countNetworkActiveTopLevelClients(ctx, conn, networkId, MaxNetworkTopLevelClientLimit+1, MaxNetworkTopLevelClientLimit+1)
 	})
 	return embed
 }

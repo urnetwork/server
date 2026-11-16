@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "kind": "competition-archive-diagnostic-code-qualification",
+  "source_commit": "f11df77d9ef05e2bc83fd57e3f758fc9120debb4",
+  "source_tree": "c239021ba4abf568d109639a9d792ed36aaca23c",
+  "independent_tests": {
+    "actual_passes": 12,
+    "failures": 0,
+    "skips": 0,
+    "default_vet_enabled": true,
+    "original_missing_file_control": "Restoring only the pre-fix production file from 1a4a0102d compiled successfully, then failed the real missing-file test with network instead of filesystem_not_found.",
+    "adjacent_pointer_control": "Restoring only the ac1f29de8 production file compiled successfully, then failed the errno-pointer test with network instead of other.",
+    "expected_control_failures_are_not_successful_product_tests": true
+  },
+  "retained_receipt_sha256": "37aee6491e5a06ed6acaeb5e603b490e914dfda6477771416b86b903382627d8",
+  "raw_manifests": {
+    "compile": "3b39a7ac17d55dac9264d2f67e565721f9859b917d026fcc970ab21ff6ae25e4",
+    "positive_tests": "4537a889dbd31f30535f64afc7a7b11ca75187a82fa63ebaa6e892f871c4dad3",
+    "pointer_control": "3fcf41e46a34a6751cff69274ffacf010b83b4029ebae482943d4b7aa93041d1",
+    "missing_file_control": "8a3f96a06d10fb5989313cafaf96171370fd17b24e3a86eecac56f2c8de5e346"
+  },
+  "preserved_failed_attempt": "The earlier f494ad263 pointer fixture failed compilation under the default vet check; zero tests ran. Its evidence is retained, and the fixture was corrected without disabling vet.",
+  "scope": "Diagnostic category selection and redaction only. Concrete network errors, context cancellation/deadline and typed S3 priority remain covered. This does not change retry authorization, scoring, original deadlines, the frozen epoch-one evaluator, or the active worker.",
+  "full_repository_suite_or_runtime_qualification_claim": false
+}

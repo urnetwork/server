@@ -83,20 +83,21 @@ type nativeBrowsingHttp2Observation struct {
 }
 
 type nativeBrowsingHttp2Witness struct {
-	stateLock           sync.Mutex
-	pressure            *nativeBrowsingPressureObservation
-	gates               [nativeBrowsingPageCount - 1]*nativeBrowsingHttp2BodyGate
-	requests            [nativeBrowsingPageCount][nativeBrowsingAssetCount + 1]nativeBrowsingHttp2Request
-	clientSessions      [nativeBrowsingOriginCount]*tls.Conn
-	serverSessions      [nativeBrowsingOriginCount]string
-	validatedHtml       int
-	unreadBodyOverlaps  int
-	sameSessionHtml     int
-	tlsHandshakes       int
-	tapStarted          [nativeBrowsingPageCount]time.Time
-	preNavigationGateNs [nativeBrowsingPageCount]int64
-	combinedFirstByteNs [nativeBrowsingPageCount]int64
-	firstErr            error
+	stateLock                  sync.Mutex
+	afterUnreadSnapshotForTest func()
+	pressure                   *nativeBrowsingPressureObservation
+	gates                      [nativeBrowsingPageCount - 1]*nativeBrowsingHttp2BodyGate
+	requests                   [nativeBrowsingPageCount][nativeBrowsingAssetCount + 1]nativeBrowsingHttp2Request
+	clientSessions             [nativeBrowsingOriginCount]*tls.Conn
+	serverSessions             [nativeBrowsingOriginCount]string
+	validatedHtml              int
+	unreadBodyOverlaps         int
+	sameSessionHtml            int
+	tlsHandshakes              int
+	tapStarted                 [nativeBrowsingPageCount]time.Time
+	preNavigationGateNs        [nativeBrowsingPageCount]int64
+	combinedFirstByteNs        [nativeBrowsingPageCount]int64
+	firstErr                   error
 }
 
 func newNativeBrowsingHttp2Witness(pressure *nativeBrowsingPressureObservation) *nativeBrowsingHttp2Witness {
@@ -152,7 +153,12 @@ func (self *nativeBrowsingHttp2Witness) checkUnreadBody(page int) error {
 	self.stateLock.Lock()
 	request, firstErr := self.requests[page][1], self.firstErr
 	clientSession, serverSession := self.clientSessions[origin], self.serverSessions[origin]
+	progress := &self.pressure.assets[page][1]
+	bodyOpened, receivedBytes := progress.bodyOpened.Load(), progress.receivedBytes.Load()
 	self.stateLock.Unlock()
+	if self.afterUnreadSnapshotForTest != nil {
+		self.afterUnreadSnapshotForTest()
+	}
 	if firstErr != nil {
 		return firstErr
 	}
@@ -165,8 +171,7 @@ func (self *nativeBrowsingHttp2Witness) checkUnreadBody(page int) error {
 		request.clientAcquisitions == 1 && clientSession == nil || request.serverAttempts == 1 && serverSession == "" {
 		return errors.New("HTTP/2 prior JS has invalid observed client/server ownership")
 	}
-	progress := &self.pressure.assets[page][1]
-	if (progress.bodyOpened.Load() || progress.receivedBytes.Load() != 0) &&
+	if (bodyOpened || receivedBytes != 0) &&
 		(request.clientAcquisitions != 1 || request.serverAttempts != 1) {
 		return errors.New("HTTP/2 opened body lacks established original ownership")
 	}

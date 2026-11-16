@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"sync"
 	"testing"
 	"time"
@@ -29,14 +29,14 @@ func Work1(
 	work1 *Work1Args,
 	clientSession *session.ClientSession,
 ) (*Work1Result, error) {
-	if 0 == mathrand.Intn(100) {
+	if 0 == mathrand.IntN(100) {
 		select {
 		case <-time.After(ReleaseTimeout / 2):
 		case <-clientSession.Ctx.Done():
 			return nil, errors.New("Timeout.")
 		}
 	}
-	if 0 == mathrand.Intn(3) {
+	if 0 == mathrand.IntN(3) {
 		return nil, errors.New("Error.")
 	}
 	return &Work1Result{}, nil
@@ -48,7 +48,7 @@ func Work1Post(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	if 0 == mathrand.Intn(3) {
+	if 0 == mathrand.IntN(3) {
 		return errors.New("Post error.")
 	}
 	return nil

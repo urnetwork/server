@@ -16,6 +16,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/server"
@@ -626,6 +627,106 @@ func reserveStTransactionGasAttempt(ctx context.Context, tx server.PgTx, policy 
 	server.RaisePgResult(tx.Exec(ctx, `INSERT INTO st_operator_gas_reservation(intent_id,attempt,scope_key,logical_key,policy_sha256,kind,unsigned_transaction,signing_hash,maximum_liability_wei,historical,create_time) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,false,$10)`, intentId, intent.AttemptCount+1, policy.Scope(), intent.LogicalKey, digest, kind, raw, hash, liability.String(), server.NowUtc()))
 	stGasCheckTotals(ctx, tx, policy)
 	return &StTransactionGasReservation{IntentId: intentId, Attempt: intent.AttemptCount + 1, ScopeKey: policy.Scope(), LogicalKey: intent.LogicalKey, PolicySha256: digest, Kind: kind, UnsignedTransaction: bytes.Clone(raw), SigningHash: hash, MaximumLiabilityWei: liability.String()}
+}
+
+// RetireStTransactionGasExecution turns an intent's execution reservation that was
+// never signed into a cancellation of the same attempt at the same nonce, for an
+// operation that can no longer be carried out: a deposit's staging transfer whose
+// epoch has rolled, which custody refuses to sign and whose signature would move
+// stake. Until then every later send of the account stops at it.
+//
+// It is refused unless the record shows that nothing can have left the engine: the
+// intent is prepared with no attempt, and its one reservation is an unsigned
+// execution. It is refused for any intent but a staging transfer whose reservation is
+// its own execution (stGasStagingTransferShape), whatever the caller has proved. Bytes reach a node only from a recorded attempt, after this same account
+// lock, so a signer that raced this and comes to record afterwards finds the
+// reservation changed and is refused before any broadcast (checkStTransactionGasAttempt).
+// The nonce's charge falls to the cancellation's ceiling, which is all that can be
+// spent on it. The intent keeps its calldata, so the record of what was reserved stays.
+// A reservation already turned is returned as it is, for a retry after a crash.
+func RetireStTransactionGasExecution(ctx context.Context, policy *server.StOperatorGasPolicy, authority *server.StOperatorGasAuthority, intentId server.Id, unsigned *types.Transaction) (result *StTransactionGasReservation, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			result = nil
+		}
+	}()
+	defer recoverStGasError(&resultErr)
+	if err := policy.Verify(authority, server.NowUtc()); err != nil {
+		return nil, err
+	}
+	liability, raw, err := stGasUnsignedEnvelope(policy, unsigned)
+	if err != nil {
+		return nil, err
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		digest := stGasAdmitPolicy(ctx, tx, policy, authority)
+		identity := scanStTransactionIntent(tx.QueryRow(ctx, `SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_id=$1`, intentId))
+		var ignored any
+		server.Raise(tx.QueryRow(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, stTransactionAdvisoryLockKey(identity.ChainId, identity.GenesisHash, identity.FromAddress)).Scan(&ignored))
+		intent := scanStTransactionIntent(tx.QueryRow(ctx, `SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE`, intentId))
+		stGasRequireUnsettled(ctx, tx, intentId)
+		allowed := false
+		for _, account := range policy.Accounts {
+			allowed = allowed || account.Address == intent.FromAddress
+		}
+		var attempts, reservations int64
+		server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*) FROM st_transaction_attempt WHERE intent_id=$1`, intentId).Scan(&attempts))
+		server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*) FROM st_operator_gas_reservation WHERE intent_id=$1`, intentId).Scan(&reservations))
+		if !allowed || intent.ChainId != policy.ChainId || intent.GenesisHash != policy.GenesisHash || intent.Status != StTxPrepared || intent.AttemptCount != 0 || attempts != 0 || reservations != 1 {
+			panic(fmt.Errorf("%w: only an intent with no attempt and one reservation can be retired", ErrStOperatorGasAllowance))
+		}
+		reservation, err := scanStGasReservation(tx.QueryRow(ctx, `SELECT `+stGasReservationColumns+` FROM st_operator_gas_reservation WHERE intent_id=$1 AND attempt=1`, intentId))
+		server.Raise(err)
+		if reservation.SignedTxHash != nil || reservation.Historical {
+			panic(fmt.Errorf("%w: a signed or historical reservation cannot be retired", ErrStOperatorGasAllowance))
+		}
+		if reservation.Kind == StTxAttemptCancellation {
+			reservation.Reused = true
+			result = reservation
+			return
+		}
+		if !stGasStagingTransferShape(intent, reservation) {
+			panic(fmt.Errorf("%w: only an unsigned staging transfer's execution can be retired", ErrStOperatorGasAllowance))
+		}
+		if reservation.Kind != StTxAttemptExecution || unsigned.To() == nil || *unsigned.To() != common.HexToAddress(intent.FromAddress) || len(unsigned.Data()) != 0 || unsigned.Gas() != 21_000 || unsigned.Nonce() != intent.Nonce {
+			panic(errors.New("operator gas cancellation differs from original account"))
+		}
+		signer := types.LatestSignerForChainID(new(big.Int).SetUint64(intent.ChainId))
+		hash := strings.ToLower(signer.Hash(unsigned).Hex())
+		tag := server.RaisePgResult(tx.Exec(ctx, `UPDATE st_operator_gas_reservation SET policy_sha256=$2,kind=$3,unsigned_transaction=$4,signing_hash=$5,maximum_liability_wei=$6 WHERE intent_id=$1 AND attempt=1 AND kind=$7 AND signed_tx_hash IS NULL`, intentId, digest, StTxAttemptCancellation, raw, hash, liability.String(), StTxAttemptExecution))
+		if tag.RowsAffected() != 1 {
+			panic(ErrStOperatorGasAllowance)
+		}
+		stGasCheckTotals(ctx, tx, policy)
+		result = &StTransactionGasReservation{IntentId: intentId, Attempt: 1, ScopeKey: reservation.ScopeKey, LogicalKey: reservation.LogicalKey, PolicySha256: digest, Kind: StTxAttemptCancellation, UnsignedTransaction: bytes.Clone(raw), SigningHash: hash, MaximumLiabilityWei: liability.String()}
+	})
+	return result, nil
+}
+
+// The staking precompile and the selector of the deposit's staging transfer
+// (controller stPackTransferStake), the only intent RetireStTransactionGasExecution
+// may turn into a cancellation.
+var (
+	stGasStakingPrecompile       = common.HexToAddress("0x0000000000000000000000000000000000000805")
+	stGasStagingTransferSelector = crypto.Keccak256([]byte("transferStake(bytes32,bytes32,uint256,uint256,uint256)"))[:4]
+)
+
+// stGasStagingTransferShape reports an intent that is a staging transfer, with its
+// exact calldata hash, whose reservation is its own unsigned execution at its nonce.
+// The controller has proved more, against custody; this guards the model by itself.
+func stGasStagingTransferShape(intent *StTransactionIntent, reservation *StTransactionGasReservation) bool {
+	if !strings.EqualFold(intent.ToAddress, stGasStakingPrecompile.Hex()) || len(intent.Calldata) != 164 || !bytes.HasPrefix(intent.Calldata, stGasStagingTransferSelector) ||
+		!strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(intent.Calldata).Hex()) {
+		return false
+	}
+	if reservation.Kind != StTxAttemptExecution || reservation.SignedTxHash != nil {
+		return false
+	}
+	var execution types.Transaction
+	if err := execution.UnmarshalBinary(reservation.UnsignedTransaction); err != nil {
+		return false
+	}
+	return execution.To() != nil && *execution.To() == stGasStakingPrecompile && bytes.Equal(execution.Data(), intent.Calldata) && execution.Nonce() == intent.Nonce && execution.Value().Sign() == 0
 }
 
 // StOperatorGasRemainingLiability is the liability the policy still accepts

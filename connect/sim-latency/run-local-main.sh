@@ -9,8 +9,8 @@ domain=bringyour.com
 # each node on its own port at 127.0.0.1.
 
 export GOTOOLCHAIN=local
-if [[ "$(go env GOVERSION)" != go1.27.3 ]]; then
-    printf 'sim-latency requires Go 1.27.3 on PATH\n' >&2
+if [[ "$(go env GOVERSION)" != go1.27.4 ]]; then
+    printf 'sim-latency requires Go 1.27.4 on PATH\n' >&2
     exit 1
 fi
 

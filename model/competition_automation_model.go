@@ -230,7 +230,11 @@ func CompetitionRewardEligibilityForMode(score *CompetitionScoreResult, baseline
 	if !score.Placeable {
 		return "not_placeable"
 	}
-	for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources"} {
+	names, err := CompetitionScoreRequiredGateNames(score)
+	if err != nil {
+		return "invalid_score"
+	}
+	for _, name := range names {
 		gate, ok := score.Gates[name]
 		if !ok || !gate.Passed {
 			return "gate_failed_or_missing"
@@ -395,43 +399,50 @@ type CompetitionReviewFinding struct {
 
 // Actor identity comes from authentication, never from this request.
 type CompetitionIntegrityReviewRequest struct {
-	IdempotencyKey              string                     `json:"idempotency_key"`
-	ExpectedRevision            int                        `json:"expected_revision"`
-	JobId                       server.Id                  `json:"job_id"`
-	PatchSha256                 string                     `json:"patch_sha256"`
-	BaseSourceLockSha256        string                     `json:"base_source_lock_sha256"`
-	ScoreSha256                 string                     `json:"score_sha256"`
-	BaselineSha256              string                     `json:"baseline_sha256"`
-	ArtifactManifestSha256      string                     `json:"artifact_manifest_sha256"`
-	CriteriaVersion             string                     `json:"criteria_version"`
-	RewardDisposition           string                     `json:"reward_disposition"`
-	SourceDisposition           string                     `json:"source_disposition"`
-	ReasonCodes                 []string                   `json:"reason_codes"`
-	PublicExplanation           string                     `json:"public_explanation"`
-	WithheldEvidenceExplanation string                     `json:"withheld_evidence_explanation"`
-	PrivateEvidenceSha256       string                     `json:"private_evidence_sha256"`
-	Findings                    []CompetitionReviewFinding `json:"findings"`
-	SupersedesReviewId          *server.Id                 `json:"supersedes_review_id,omitempty"`
-	AppealId                    string                     `json:"appeal_id,omitempty"`
-	ExpectedReplacementJobId    *server.Id                 `json:"expected_replacement_job_id,omitempty"`
-	ExpectedDecisionSha256      string                     `json:"expected_decision_sha256,omitempty"`
-	ReviewerModel               string                     `json:"reviewer_model,omitempty"`
-	ReviewerReasoning           string                     `json:"reviewer_reasoning,omitempty"`
+	OfficialReviewOverride      *CompetitionOfficialReviewOverride `json:"official_review_override,omitempty"`
+	IdempotencyKey              string                             `json:"idempotency_key"`
+	ExpectedRevision            int                                `json:"expected_revision"`
+	JobId                       server.Id                          `json:"job_id"`
+	PatchSha256                 string                             `json:"patch_sha256"`
+	BaseSourceLockSha256        string                             `json:"base_source_lock_sha256"`
+	ScoreSha256                 string                             `json:"score_sha256"`
+	BaselineSha256              string                             `json:"baseline_sha256"`
+	ArtifactManifestSha256      string                             `json:"artifact_manifest_sha256"`
+	CriteriaVersion             string                             `json:"criteria_version"`
+	RewardDisposition           string                             `json:"reward_disposition"`
+	SourceDisposition           string                             `json:"source_disposition"`
+	ReasonCodes                 []string                           `json:"reason_codes"`
+	PublicExplanation           string                             `json:"public_explanation"`
+	WithheldEvidenceExplanation string                             `json:"withheld_evidence_explanation"`
+	PrivateEvidenceSha256       string                             `json:"private_evidence_sha256"`
+	Findings                    []CompetitionReviewFinding         `json:"findings"`
+	SupersedesReviewId          *server.Id                         `json:"supersedes_review_id,omitempty"`
+	AppealId                    string                             `json:"appeal_id,omitempty"`
+	ExpectedReplacementJobId    *server.Id                         `json:"expected_replacement_job_id,omitempty"`
+	ExpectedDecisionSha256      string                             `json:"expected_decision_sha256,omitempty"`
+	ReviewerModel               string                             `json:"reviewer_model,omitempty"`
+	ReviewerReasoning           string                             `json:"reviewer_reasoning,omitempty"`
+	ProductionBenefitAddendum   *CompetitionReviewAddendum         `json:"production_benefit_addendum,omitempty"`
+	HandoffId                   string                             `json:"handoff_id,omitempty"`
 }
 
 // Review records remain separate even when approval does not change the reward recipient.
 type CompetitionIntegrityReviewResult struct {
-	ReviewId       server.Id                         `json:"review_id"`
-	RoundId        server.Id                         `json:"round_id"`
-	ActorId        string                            `json:"actor_id"`
-	CreatedAt      time.Time                         `json:"created_at"`
-	Request        CompetitionIntegrityReviewRequest `json:"request"`
-	RequestSha256  string                            `json:"request_sha256"`
-	RewardDecision CompetitionRewardDecision         `json:"reward_decision"`
+	ReviewId         server.Id                         `json:"review_id"`
+	RoundId          server.Id                         `json:"round_id"`
+	ActorId          string                            `json:"actor_id"`
+	CreatedAt        time.Time                         `json:"created_at"`
+	Request          CompetitionIntegrityReviewRequest `json:"request"`
+	RequestSha256    string                            `json:"request_sha256"`
+	RewardDecision   CompetitionRewardDecision         `json:"reward_decision"`
+	ModelCompletedAt *time.Time                        `json:"model_completed_at,omitempty"`
 }
 
 // Requires complete structured criteria and distinguishes source-only concerns from fraud.
 func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy) error {
+	if request.OfficialReviewOverride != nil {
+		return errors.New("official review overrides require the independently pinned operator import")
+	}
 	return validateCompetitionIntegrityReviewContent(request, policy, false)
 }
 
@@ -448,6 +459,17 @@ func ValidateCompetitionSnowMemberContent(request CompetitionIntegrityReviewRequ
 // The private member context changes only the criterion census, never review
 // authority or the treatment of uncertainty, approval and substantiated failure.
 func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy, snowMember bool) error {
+	if request.OfficialReviewOverride != nil {
+		return errors.New("official review overrides require the independently pinned operator import")
+	}
+	if request.HandoffId != "" {
+		if _, err := server.ParseId(request.HandoffId); err != nil || policy.WinnerReviewPolicy != CompetitionSnowWinnerReviewPolicy || request.RewardDisposition == "restored" {
+			return errors.New("review handoff requires the exact two-member policy and native pending proposal")
+		}
+	}
+	if err := ValidateCompetitionProductionBenefitReview(request, false); err != nil {
+		return err
+	}
 	content, err := json.Marshal(request)
 	if err != nil || len(content) > 64*1024 {
 		return errors.New("review exceeds bounded contract")
@@ -557,7 +579,7 @@ func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityRevie
 // Shared protocol vocabulary for native validation and provider schemas. Each
 // caller receives an owned slice; disposition and policy checks remain separate.
 func CompetitionIntegrityReviewReasonCodes() []string {
-	return []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD"}
+	return []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD", "NO_PRODUCTION_BENEFIT"}
 }
 
 // The cursor orders durable insertion; the payload binds every scope and revision.
@@ -622,6 +644,7 @@ type CompetitionSourceGitRef struct {
 // An immutable intent stages source; only a separately recorded activation changes runtime authority.
 type CompetitionSourceActivation struct {
 	G2VolumePolicy            CompetitionG2VolumePolicy          `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy        *CompetitionWorkCoveragePolicy     `json:"work_coverage_policy,omitempty"`
 	TrustedInstrument         *CompetitionTrustedInstrumentProof `json:"trusted_instrument,omitempty"`
 	SimulatorSha256           string                             `json:"simulator_sha256,omitempty"`
 	ScorerSha256              string                             `json:"scorer_sha256,omitempty"`
@@ -731,6 +754,7 @@ type CompetitionSupervisorTransition struct {
 // The elected identity and its original deadline survive restarts and retries.
 // Re-election creates a different checkpoint; pending review never extends one.
 type CompetitionWinnerReviewCheckpoint struct {
+	HandoffId            string    `json:"handoff_id,omitempty"`
 	RoundId              server.Id `json:"round_id"`
 	JobId                server.Id `json:"job_id"`
 	RewardRevision       int       `json:"reward_revision"`

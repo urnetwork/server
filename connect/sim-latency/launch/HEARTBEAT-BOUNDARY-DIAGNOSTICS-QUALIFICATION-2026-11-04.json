@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "kind": "worker-heartbeat-boundary-diagnostic-qualification",
+  "tested_source_commit": "d73729f0498ccacd0dc6a902f01f8fbe608ce9ff",
+  "integration_checkpoint": "09c5b4b4da6dde14cae4235ab55861e0d59d20ec",
+  "original_independent_receipt_sha256": "1f590e8c768b9d14c410ff92d936d446509a0ed2bb85c12ae035cdfd162fdc11",
+  "integration_review": {
+    "nine_changed_source_and_test_files_byte_identical_to_qualified_snapshot": true,
+    "all_other_origin_main_files_and_migrations_preserved": true,
+    "unqualified_108f_deadline_regression_excluded": true,
+    "merged_main_fully_tested": false,
+    "production_deployment_or_recovery_authority_conferred": false
+  },
+  "independent_receipt": {
+    "schema": 1,
+    "source_commit": "d73729f0498ccacd0dc6a902f01f8fbe608ce9ff",
+    "source_tree": "92ca81670ab86afb4de6e8b048e5e6db6bbb831c",
+    "source_archive_sha256": "c4244492b2a7278ff83d018d776db16aaaccb30b42771f3ddbc118aeed6b48ad",
+    "archive_excluded_path": "connect/sim-latency/baseline",
+    "source_file_manifest_sha256_before_and_after": "a5395721b44b23c3cc520fae7adf1490853a754eb791fb0552c52387b719642c",
+    "go": "go1.27.3",
+    "toolchain_sha256": {
+      "go": "5f5eb6d0b2fb6aa0bb5d5f8c5f1c944e0de955c925f0111af92a9d8f79680b5b",
+      "compile": "c331d8fc6c4ae9dbe20e8198435db0455f2a5ca55d2d02fc6d7337c906be8283",
+      "link": "c9990b939ed48a77ca9a29b33d408d44b56fc4950a28e3d3533025a8dc08b2fe"
+    },
+    "qualification": {
+      "controller_pure_roots": 66,
+      "root_fake_wire_roots": 7,
+      "private_pg_roots": 13,
+      "ordinary_fresh_processes_per_group": 3,
+      "race_fresh_processes_per_group": 3,
+      "pure_passes": 438,
+      "private_pg_passes": 78,
+      "additional_first_new_wiring_pg_passes": 3,
+      "total_passes": 519,
+      "targeted_test_processes_excluding_census": 19,
+      "race_warnings": 0,
+      "all_targeted_group_exit_codes": 0,
+      "source_and_harness_unchanged": true,
+      "remaining_owned_test_or_db_cgroups": 0,
+      "excluded_setup_failure": "controller-pure.EAfvfuGP: zero tests; root TestMain lacked private Go PATH; corrected without bypassing TestMain"
+    },
+    "pure_selection": {
+      "controller_files": [
+        "competition_supervisor_acquire_retry_test.go",
+        "competition_lease_retry_test.go",
+        "competition_lease_retry_supervisor_test.go",
+        "competition_lease_retry_worker_test.go",
+        "competition_heartbeat_failure_test.go",
+        "competition_heartbeat_phase_test.go",
+        "competition_heartbeat_parent_cause_test.go",
+        "competition_heartbeat_database_observation_test.go"
+      ],
+      "root_files": [
+        "db_transaction_observation_test.go"
+      ],
+      "selector": "exact anchored alternation of top-level test names from these files"
+    },
+    "private_pg_roots": [
+      "TestCompetitionAutomationSupervisorLeaseTakeoverFencesOldOwner",
+      "TestCompetitionHeartbeatPgRollsBackSlotWhenJobUpdateIsSuppressed",
+      "TestCompetitionHeartbeatPgRejectsMissingAndExpiredAuthority",
+      "TestCompetitionHeartbeatPgSamplesClockAfterBothAuthorityLocks",
+      "TestCompetitionHeartbeatPgLockTimeoutRetriesAfterRollback",
+      "TestCompetitionSupervisorRenewPgSamplesClockAfterAuthorityLock",
+      "TestCompetitionSupervisorAcquireRetryPgAuthenticatesUnadmittedRenewal",
+      "TestCompetitionSupervisorAcquireRetryPgRejectsEarlierCommittedHistory",
+      "TestCompetitionSupervisorAcquireRetryPgPreservesTakeoverFence",
+      "TestCompetitionSupervisorAcquireRetryPgComposedKeepsOriginalWorker",
+      "TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry",
+      "TestCompetitionHeartbeatDatabasePgMissingSlotBoundary",
+      "TestCompetitionHeartbeatDatabasePgSuppressedUpdateBoundary"
+    ],
+    "artifact_base": "/mnt/data/urnetwork-competition-development-20261104",
+    "completed_groups": [
+      {
+        "path": "controller-pure.evWuqzCn",
+        "manifest_sha256": "330482d640790d6276dee9178e320c1afae209b318d8214151d7b0bc674fc32a"
+      },
+      {
+        "path": "controller-pure.ojqkUa3A",
+        "manifest_sha256": "dd53e40c2178eff72f9076b1150be8cd01dc2691521b02f5027dbf647c90ccfb"
+      },
+      {
+        "path": "controller-pure.kzjerOps",
+        "manifest_sha256": "9caa79a8c8f9dead271313d0ccd1e62f484d31717e392e805436f7d1c31c6f49"
+      },
+      {
+        "path": "controller-pure.msMs5gTv",
+        "manifest_sha256": "8497b18ba4adae145d812ed4a67a6a6a03e2cb6fd5aeaf6fd9b9ef1012a50171"
+      },
+      {
+        "path": "db-validation.BfaGUgj7/artifacts",
+        "manifest_sha256": "6c17d466cf0826ad038042b28a735b9d6c66c6242c8c191a94adcfce2d03a9f9"
+      },
+      {
+        "path": "db-validation.9r6ozK84/artifacts",
+        "manifest_sha256": "116fbbe29c158022a4652940b81b7c6c265d1170ea7ed46ac834425ab8e14d8a"
+      },
+      {
+        "path": "db-validation.WEzMC2Ab/artifacts",
+        "manifest_sha256": "792966ca2fa4af2761b1e1c285a3a850dc2b3b5f8e59d173a723d1f630afbf0c"
+      },
+      {
+        "path": "db-validation.fHlUOEJt/artifacts",
+        "manifest_sha256": "26909901839006b9294bbb1b05aa6ca6bf54593e8c78abb6a24aca2eea794ebc"
+      },
+      {
+        "path": "db-validation.R5ZnkCuh/artifacts",
+        "manifest_sha256": "536321aea98d362d6e6dff0c2744899cd60cdb746be93468e01ef2db19905e43"
+      },
+      {
+        "path": "db-validation.yvUA2cRY/artifacts",
+        "manifest_sha256": "608fd47dd3edaabec18463a09c82ff82ae7f4ea3c0f83027fcd1d6af4909807a"
+      },
+      {
+        "path": "db-validation.YweOi2iO/artifacts",
+        "manifest_sha256": "83b5121c5106c14fe42fcf4bde13bfc6cef1e823f5d02ec122b3a2c883cc083b"
+      }
+    ],
+    "compile_receipt": {
+      "path": "supervisor-d73729f04-validation/artifacts",
+      "manifest_sha256": "037957a8cacf5f3e0e66c47acae54b81a757337b0f836b7cfaa738dbf04ebecc",
+      "controller_ordinary_sha256": "1a11f9eb6187f6456666b271b1b334c541041e7f9e1358002b6fc91521c5d7ad",
+      "controller_race_sha256": "5ccacc0ce4d68f9213f934547e8218063faadcdae9b7a70725718a31c232b832",
+      "root_ordinary_sha256": "4af6b2e16679d5fde6f5186ef6914b6e0433310d9499d00b2b3f2251c5fd2af5",
+      "root_race_sha256": "a8b7d8d6e88f33a454b134b609be1d409b48e70aea1eb48bfa6250b35897e958"
+    },
+    "worker": {
+      "path": "worker-d737.PyGDmunE/artifacts/competitionworker",
+      "sha256": "24ce5145b8b3497d9712b57ffc6f6d2b3fa36252f1ca2d84a5d63c221d2dcb45",
+      "build_flags": "CGO_ENABLED=0 GOEXPERIMENT=greenteagc GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false ./cli/competitionworker",
+      "statically_linked": true,
+      "executed": false,
+      "build_manifest_sha256": "2c96899f57de0f2c675ed5d026148d43a08d8fe030747c9d30d816ae8d607325"
+    },
+    "local_oci_counterpart": {
+      "path": "oci-d737.nGjlcxVu/oci-layout.tar",
+      "archive_sha256": "54a4a09937e5ca12a62e8733761b39195372297c7428fd0081cecd81d4bc3d9b",
+      "manifest_digest": "sha256:def74dcd3ce8fd0181773596cd6f4a21ae94608e345adfe802d08ff6b41798d0",
+      "config_digest_not_yet_actual_docker_id": "sha256:7e09422f3c07c9adff56c5c33b0bc421a9af09935888c0aefb8264994fca23fa",
+      "layer_digest": "sha256:672c338790eb6aef213a7665992b5422aca0c434d54f31957b0672836ea2bbf4",
+      "public_ca_sha256": "0e4c9a8eb123513b1c131c0aec2d3f9ddaad02b77b8af53bff30e1e7fc3c6b71",
+      "user": "65532:65532",
+      "entrypoint": [
+        "/competitionworker"
+      ],
+      "independent_tar_readback": true,
+      "artifact_manifest_sha256": "0b716b0dc7e386742d779fa723de22b9d5e887e2f925259427202fcff772f803",
+      "registry_published": false,
+      "docker_loaded": false,
+      "runtime_qualified": false,
+      "multiarch_attestation_claimed": false
+    },
+    "limitations": "Targeted diagnostic/library qualification only. Artificial callback latency is not evidence of the incident's physical cause. No deployment, claims change, live database access, evaluator instrument substitution or privileged-agent backend qualification performed by this role."
+  }
+}

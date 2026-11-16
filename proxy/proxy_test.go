@@ -119,6 +119,8 @@ type proxyTestOptions struct {
 	// do not depend on real outbound internet or a provider rendezvous the
 	// behavior under test never touches.
 	controlPlaneOnly bool
+	// the manager's ProxyDeviceManagerSettings.FeatureUses; nil notes nothing
+	featureUses *model.ProxyFeatureUses
 }
 
 func defaultProxyTestOptions() *proxyTestOptions {
@@ -659,6 +661,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		if opts.disableSecurityPolicies {
 			pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
 		}
+		pdmSettings.FeatureUses = opts.featureUses
 		proxyDeviceManager := NewProxyDeviceManager(ctx, pdmSettings)
 		harness.lifecycle.manager = proxyDeviceManager
 		if idleTimeout := opts.proxyDeviceIdleTimeout; 0 < idleTimeout {

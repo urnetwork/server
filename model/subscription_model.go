@@ -26,7 +26,6 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
 )
 
 type ByteCount = int64
@@ -46,17 +45,26 @@ const TrustedPriority = 200
 // and ambiguous processor payments are protected independently of age.
 const StragglerContractExpiration = 300 * 24 * time.Hour
 
-// completed contracts are reaped this long after their payment completes
-// (reap_time = complete_time + CompletedContractExpiration, assigned by the
-// bounded retention worker after CompletePayment durably queues the payment)
+// A completed payment discharges its contracts this long after it completed
+// (the contract horizon reaper's payment_recent rule;
+// BackfillCompletedContractReapTime stamps complete_time plus this)
 const CompletedContractExpiration = 7 * 24 * time.Hour
 
-// Per-phase wall-clock budget for the contract reaper's completed assignment,
-// straggler assignment, and delete passes. A large one-time backlog drains over
-// many 30-min runs instead of one unbounded transaction; steady state finishes
-// well under it. A var (not const) so tests can inject a tiny budget to exercise
-// the mid-backlog stop.
+// Per-phase wall-clock budget for the contract reaper's straggler assignment
+// and delete passes. A large one-time backlog drains over many 30-min runs
+// instead of one unbounded transaction; steady state finishes well under it. A
+// var (not const) so tests can inject a tiny budget to exercise the
+// mid-backlog stop.
 var reaperRunBudget = 5 * time.Minute
+
+// Wall clock for one RemoveCompletedContracts run, after which its delete pass
+// starts no batch. The task's MaxTime is 30 minutes, and a run that reaches it
+// is canceled: its batch in flight rolls back, its Post does not run, and it
+// retries within seconds. The earlier passes take about ten minutes at most
+// (one 50,000-contract assign batch past its five-minute budget), so this
+// leaves the delete pass its own budget and the run ten minutes of margin. A
+// var so tests can spend it.
+var removeCompletedContractsRunBudget = 20 * time.Minute
 
 func ByteCountHumanReadable(count ByteCount) string {
 	trimFloatString := func(value float64, precision int, suffix string) string {
@@ -979,18 +987,35 @@ type overlappingBalanceQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
+// A credit for the expiry, from any balance of the purchase token that covers it.
+// A grace period's hold (HasPlayGraceHoldInTx) covers an expiry without having
+// credited it: the charge that recovers the subscription can land an expiry
+// inside the hold's window, and it is owed its credit.
 func getOverlappingTransferBalance(conn overlappingBalanceQuerier, ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId server.Id, returnErr error) {
 	result, err := conn.Query(
 		ctx,
 		`
                 SELECT
                     balance_id
-                FROM transfer_balance
+                FROM transfer_balance balance
                 WHERE
-                    purchase_token = $1 AND
-                    $2 < end_time AND
-                    start_time <= $2
-                ORDER BY end_time DESC
+                    balance.purchase_token = $1 AND
+                    $2 < balance.end_time AND
+                    balance.start_time <= $2 AND
+                    NOT (
+                        balance.start_balance_byte_count = 0 AND
+                        EXISTS (
+                            SELECT 1
+                            FROM subscription_renewal renewal
+                            WHERE
+                                renewal.network_id = balance.network_id AND
+                                renewal.purchase_token = balance.purchase_token AND
+                                renewal.start_time = balance.start_time AND
+                                renewal.end_time = balance.end_time AND
+                                renewal.net_revenue_nano_cents = 0
+                        )
+                    )
+                ORDER BY balance.end_time DESC
                 LIMIT 1
             `,
 		purchaseToken,
@@ -1005,6 +1030,114 @@ func getOverlappingTransferBalance(conn overlappingBalanceQuerier, ctx context.C
 	})
 
 	return
+}
+
+// Whether the network already holds Pro for this exact window with a billing
+// grace period's zero-byte marker (controller appleHoldGraceEntitlementInTx).
+// App Store balances carry no purchase token, so the network and the window
+// name it.
+func HasAppleGraceHoldInTx(tx server.PgTx, ctx context.Context, networkId server.Id, startTime time.Time, endTime time.Time) (held bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT 1
+		FROM transfer_balance
+		WHERE
+			network_id = $1 AND
+			start_time = $2 AND
+			end_time = $3 AND
+			pro AND
+			start_balance_byte_count = 0
+		LIMIT 1
+		`,
+		networkId,
+		startTime,
+		endTime,
+	)
+	server.WithPgResult(result, err, func() {
+		held = result.Next()
+	})
+	return
+}
+
+// Whether the purchase already holds Pro for this exact window with a grace period's zero-byte marker
+// (controller playHoldGraceEntitlementInTx).
+func HasPlayGraceHoldInTx(tx server.PgTx, ctx context.Context, purchaseToken string, startTime time.Time, endTime time.Time) (held bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT 1
+		FROM transfer_balance
+		WHERE
+			purchase_token = $1 AND
+			start_time = $2 AND
+			end_time = $3 AND
+			pro AND
+			start_balance_byte_count = 0
+		LIMIT 1
+		`,
+		purchaseToken,
+		startTime,
+		endTime,
+	)
+	server.WithPgResult(result, err, func() {
+		held = result.Next()
+	})
+	return
+}
+
+// How many of a Play purchase's latest credited windows
+// GetPlayPurchaseCreditEndTimesInTx reads: decades of monthly renewals, each
+// with a day Play added before it.
+const playPurchaseCreditEndTimesLimit = 1000
+
+// GetPlayPurchaseCreditEndTimesInTx is the end of each Pro window the
+// network's Play purchase was credited, oldest first, up to the latest
+// playPurchaseCreditEndTimesLimit. The Play sales notice reads it before the
+// next credit is added, to tell a newly charged window from one Play only
+// moved.
+//
+// It reads the purchase's subscription_renewal rows, which nothing prunes.
+// Its transfer_balance rows are no history: RemoveCompletedContracts deletes
+// a balance 7 days after it ends, so a trial converting after an account hold
+// or a renewal after a week of Play's pending days would be measured from a
+// partial history. A grace period's hold records no revenue and is left out.
+// A data pack's credit writes no renewal row, so it has no history here.
+func GetPlayPurchaseCreditEndTimesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string) []time.Time {
+	endTimes := []time.Time{}
+	if purchaseToken == "" {
+		return endTimes
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+		/* play-purchase-credit-end-times */
+		SELECT end_time
+		FROM subscription_renewal
+		WHERE
+			network_id = $1 AND
+			subscription_type = $2 AND
+			market = $3 AND
+			purchase_token = $4 AND
+			0 < net_revenue_nano_cents
+		ORDER BY end_time DESC
+		LIMIT $5
+		`,
+		networkId,
+		SubscriptionTypeSupporter,
+		SubscriptionMarketGoogle,
+		purchaseToken,
+		playPurchaseCreditEndTimesLimit,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var endTime time.Time
+			server.Raise(result.Scan(&endTime))
+			endTimes = append(endTimes, endTime.UTC())
+		}
+	})
+	slices.Reverse(endTimes)
+	return endTimes
 }
 
 func AddBasicTransferBalanceInTx(
@@ -1056,8 +1189,8 @@ func AddBasicTransferBalanceInTx(
 // tx commits, so the upgrade is visible immediately.
 //
 // It records no grant kind: it is for a Pro balance bought for its own window
-// (x402), which the next monthly grant must not supersede in the summary. The
-// monthly Pro grant uses AddGrantTransferBalanceInTx.
+// (x402's month, which carries its own data and is not a Pro grant cycle). The
+// cycle grants (GrantProCycleInTx) record kind pro.
 func AddProTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -1504,6 +1637,31 @@ func SetContractStream(
 // carried its data over the extender -- every active extender of an endpoint
 // counts, which is fuzzy per contract but averages to the right allocation.
 //
+// Only a tag that can be a relay is a party (owner, 2026-11-11: "Any contract
+// that comes from an extender should treat the extender as a 1/n party on the
+// contract", and only contracts actually relayed through an extender earn that
+// share). A connection is tagged by its caller address alone (J1), so a client
+// on the extender's own address is tagged as if the extender carried it. Two
+// kinds of tag carry nothing, and are no party, so they take no hop share in
+// settlement and count in no extender statistic, every one of which reads
+// these rows:
+//   - the extender's own network's: the extender's own provider client, whose
+//     platform connection leaves from the extender's address, and the clients
+//     of its network packed behind that address. On 2026-11-11 these were 72%
+//     and 22% of the rows (research extender-health-2026-11-11 §1.3). A share
+//     of its own client collapsed into the endpoint's and moved nothing, while
+//     one of another of its clients moved a consumer's provider's half to the
+//     consumer's own network, or split a provider's share inside its network.
+//   - a public provider's: a provider that provides publicly dials the
+//     platform directly on every transport (J4), so a public provider tagged
+//     with an extender is one on the extender's address, which the extender
+//     does not relay. The public mode is its ProvideModePublic key
+//     (setProvideMode in the sdk), which no consumer's client holds.
+//
+// A cross-network tag of any other client stays a party: a client relayed by
+// another network's extender reaches the platform from the extender's
+// address, which is what the tag sees.
+//
 // The two branches carry different party values so they cannot collide, and
 // each is distinct in itself, so several connections of one client through one
 // extender are one row.
@@ -1518,6 +1676,11 @@ func SetContractStream(
 // same transaction inserted just above, so it is a primary key lookup that
 // always hits; a contract that somehow is not there gets no party rows rather
 // than a null create_time.
+//
+// The endpoint's network is the contract's own source or destination network,
+// and its public provide key is read by the provide_key primary key, so the
+// two exclusions add one key lookup per tagged endpoint and nothing for the
+// untagged ones, which are nearly all.
 //
 // $1 contract, $2 source client, $3 destination client, $4 source party,
 // $5 destination party.
@@ -1538,7 +1701,7 @@ const contractExtenderInsertSql = `
 		network_extender.network_id,
 		transfer_contract.create_time
 	FROM (
-		SELECT DISTINCT extender_id, $4::varchar AS party
+		SELECT DISTINCT extender_id, $4::varchar AS party, client_id
 		FROM network_client_connection
 		WHERE
 			client_id = $2 AND
@@ -1547,7 +1710,7 @@ const contractExtenderInsertSql = `
 
 		UNION ALL
 
-		SELECT DISTINCT extender_id, $5::varchar AS party
+		SELECT DISTINCT extender_id, $5::varchar AS party, client_id
 		FROM network_client_connection
 		WHERE
 			client_id = $3 AND
@@ -1559,7 +1722,28 @@ const contractExtenderInsertSql = `
 		network_extender.active
 	INNER JOIN transfer_contract ON
 		transfer_contract.contract_id = $1
+	WHERE
+		-- the extender's own network relays nothing to itself: its own
+		-- provider client, and the clients of its network behind its address
+		network_extender.network_id <> CASE
+			WHEN endpoint.party = $4::varchar THEN transfer_contract.source_network_id
+			ELSE transfer_contract.destination_network_id
+		END AND
+		-- a public provider dials the platform directly (J4)
+		NOT EXISTS (
+			SELECT 1
+			FROM provide_key
+			WHERE
+				provide_key.client_id = endpoint.client_id AND
+				provide_key.provide_mode = ` + contractExtenderPublicProvideModeSql + `
+		)
 `
+
+// The ProvideModePublic key that marks a public provider in
+// contractExtenderInsertSql, as the literal the statement compares
+// provide_key.provide_mode with. A constant statement cannot format the mode
+// in, so TestContractExtenderPublicProvideModeIsTheModel pins this to it.
+const contractExtenderPublicProvideModeSql = "3"
 
 // MinShrinkContractTransferByteCount is the floor for shrink-to-fit escrow.
 // When the payer's available balance is below the requested contract size but
@@ -1592,13 +1776,16 @@ func grantTransferEscrowByteCount(
 	return availableByteCount, true
 }
 
-// Ordinary payers reserve from the earliest available grants. The persisted
+// Ordinary payers reserve from their available grants in the funding order:
+// paid Pro grants first, then the earliest expiry
+// (transfer_balance_funding_order.go). The persisted
 // internal prober first tries a bounded whole-request free grant. Both paths
 // hold balance locks through commit for positive-byte admission and read
 // reservations afterward in read committed, so a lock wait cannot authorize
 // already-reserved credit.
-// Zero-byte contracts read their earliest-grant anchor and priority without
-// taking financial locks; their client lifecycle fences precede this read.
+// Zero-byte contracts read the anchor and priority of the grant that funds
+// first without taking financial locks; their client lifecycle fences precede
+// this read.
 // A positive request larger than the available balance is granted for the
 // available balance when it is at least the shrink floor (see
 // grantTransferEscrowByteCount); the returned escrow's TransferByteCount is the
@@ -1699,21 +1886,9 @@ func createTransferEscrowInTx(
 		})
 	}
 
-	slices.SortFunc(orderedTransferBalances, func(a *escrow, b *escrow) int {
-		if a.endTime.Before(b.endTime) {
-			return -1
-		} else if b.endTime.Before(a.endTime) {
-			return 1
-		}
-
-		if a.startTime.Before(b.startTime) {
-			return -1
-		} else if b.startTime.Before(a.startTime) {
-			return 1
-		}
-
-		return a.balanceId.Cmp(b.balanceId)
-	})
+	// paid Pro grants first, then the earliest expiry
+	// (transfer_balance_funding_order.go)
+	slices.SortFunc(orderedTransferBalances, compareTransferBalanceFunding)
 
 	netEscrowBalanceByteCount := ByteCount(0)
 
@@ -1779,7 +1954,7 @@ func createTransferEscrowInTx(
 	if err := validateProberShardAdmissionDeadlineInTx(ctx, tx, shardDeadline); err != nil {
 		return nil, nil, err
 	}
-	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId); err != nil {
+	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId, shardDeadline); err != nil {
 		return nil, nil, err
 	}
 	pending := make(map[server.Id]netEscrowSnapshot, len(balanceIds))
@@ -1794,6 +1969,7 @@ func createTransferEscrowInTx(
 	}
 	streamId := bindContractStreamAtInsert(ctx, contractId)
 	var expirationTime time.Time
+	var completedAt *time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, balanceId := range balanceIds {
 			escrow := balanceEscrows[balanceId]
@@ -1833,7 +2009,7 @@ func createTransferEscrowInTx(
 	                stream_id
 	            )
 	            SELECT
-	                $1, $2, $3, $4, $5, $6, $7, $8, ($7::uuid IS NULL),
+	                $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($12::boolean, $7::uuid IS NULL),
 	                create_time, $9,
 	                date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond',
 	                $11
@@ -1851,22 +2027,22 @@ func createTransferEscrowInTx(
 			priority,
 			DefaultContractExpiration.Milliseconds(),
 			streamId,
+			// a normalized same-network companion keeps its destination as
+			// its usage origin (subscription_network_escrow.go)
+			contractUsageOriginInsertArg(ctx, sourceNetworkId, destinationNetworkId, companionContractId),
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 
-		batch.Queue(
-			contractExtenderInsertSql,
-			contractId,
-			sourceId,
-			destinationId,
-			ContractPartySource,
-			ContractPartyDestination,
-		)
 		if 0 < contractTransferByteCount {
+			batch.Queue(contractExtenderInsertSql, contractId, sourceId, destinationId, ContractPartySource, ContractPartyDestination)
 			// The same commit publishes only the exact expected revision. A
 			// legacy or concurrent writer leaves a miss rather than stale credit.
-			batch.Queue(netEscrowPublishAdmissionCacheSQL, netEscrowAdmissionCacheArgs(pending, balanceIds)...)
+			completedAt = queueContractPublicationClock(batch, netEscrowPublishAdmissionCacheSQL, netEscrowPublishAdmissionCacheCompletionClockSql,
+				shardDeadline, netEscrowAdmissionCacheArgs(pending, balanceIds)...)
+		} else {
+			completedAt = queueContractExtenderPublication(batch, contractId, sourceId, destinationId, shardDeadline)
 		}
 	})
+	requireContractPublicationDeadline(shardDeadline, completedAt)
 	server.AddTxCommitCount(tx, &contractOpenedCounter, 1)
 	providerWorkRetainReservationInTx(ctx, tx, contractId)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "create", expirationTime)
@@ -2022,6 +2198,7 @@ func createTransferEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	defer recoverContractPublicationDeadline(&transferEscrow, &returnErr)
 	// Direct owners also resolve optional file and key work before acquiring pg.
 	ctx = providerWorkSessionContext(ctx)
 	var posts []func() any
@@ -2213,6 +2390,7 @@ func createCompanionTransferEscrow(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	defer recoverContractPublicationDeadline(&transferEscrow, &returnErr)
 	// Direct callers must not load or verify an optional file while holding pg.
 	ctx = providerWorkSessionContext(ctx)
 	// An absent origin is decided by one read-only statement, before the
@@ -2686,8 +2864,14 @@ func GetTransferEscrow(ctx context.Context, contractId server.Id) (transferEscro
 	return
 }
 
-// some clients - platform, friends and family, etc - do not need an escrow
-// typically `provide_mode < Public` does not use an escrow1
+// Creates a contract without escrow or payer, which settles through the
+// no-escrow path with no debit or payout. Contract creation no longer takes
+// it: network and friends-and-family contracts escrow from their source's
+// balance (subscription_network_escrow.go), and only an exhausted payer while
+// the degradation valve is open gets a free contract
+// (subscription_zero_escrow.go). It remains the creator of the no-escrow
+// contracts that tests and fixtures need, such as the network contracts that
+// were still open when escrow took over.
 func CreateContractNoEscrow(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -2700,8 +2884,9 @@ func CreateContractNoEscrow(
 		destinationNetworkId, destinationId, contractTransferByteCount, true)
 }
 
-// Preserves the service origin before a same-network companion is normalized
-// onto the no-escrow transport path. The funding mode never determines usage.
+// Records an explicit service origin, as a same-network companion normalized
+// to a network contract needs (WithContractUsageOrigin is the escrowed
+// equivalent). The funding mode never determines usage.
 func CreateContractNoEscrowWithUsageOrigin(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -2749,9 +2934,8 @@ func CreateContractNoEscrowWithExpiration(
 	if returnErr != nil {
 		return
 	}
-	// network / friends-and-family egress has no payer but is still
-	// contract-creating usage: count the source's top-level identity in the
-	// block users stat
+	// a contract without a payer is still contract-creating usage: count the
+	// source's top-level identity in the block users stat
 	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	leavePosts()
@@ -2912,9 +3096,10 @@ func closeContractReport(
 
 	terminalReplay := false
 	completion := contractCheckpointNoCompletion
+	settlementUnready := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		var reportCompletion contractCheckpointCompletion
-		applied, terminalReplay, addedByteCount, reportCompletion, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil, clientReport)
+		applied, terminalReplay, addedByteCount, reportCompletion, settlementUnready, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, nil, clientReport)
 		completion = contractCheckpointNoCompletion
 		if returnErr != nil {
 			return
@@ -2946,6 +3131,12 @@ func closeContractReport(
 		return
 	}
 	if returnErr != nil {
+		return
+	}
+	if settlementUnready {
+		// The applied report's locked snapshot proves it cannot settle. The
+		// opposing report will see this commit and own any later settlement.
+		returnErr = ctx.Err()
 		return
 	}
 
@@ -2990,7 +3181,7 @@ func applyContractCloseReportUsageInTx(ctx context.Context, tx server.PgTx,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount,
 	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
 ) (applied, terminalReplay bool, addedByteCount ByteCount, returnErr error) {
-	applied, terminalReplay, addedByteCount, _, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, expiry, false)
+	applied, terminalReplay, addedByteCount, _, _, returnErr = applyContractCloseReportOrderInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId, expiry, false)
 	return
 }
 
@@ -3000,9 +3191,9 @@ func applyContractCloseReportOrderInTx(ctx context.Context, tx server.PgTx,
 	contractId, clientId server.Id, usedTransferByteCount ByteCount,
 	checkpoint bool, reportId *server.Id, expiry *contractExpiryState,
 	clientReport bool,
-) (applied, terminalReplay bool, addedByteCount ByteCount, completion contractCheckpointCompletion, returnErr error) {
+) (applied, terminalReplay bool, addedByteCount ByteCount, completion contractCheckpointCompletion, settlementUnready bool, returnErr error) {
 	if expiry != nil && (!expiry.usageUnverifiedRetained || expiry.contractId != contractId) {
-		return false, false, 0, contractCheckpointNoCompletion, fmt.Errorf("expiry report continuation lacks retained ownership")
+		return false, false, 0, contractCheckpointNoCompletion, false, fmt.Errorf("expiry report continuation lacks retained ownership")
 	}
 	found := false
 	var sourceId server.Id
@@ -3083,7 +3274,7 @@ func applyContractCloseReportOrderInTx(ctx context.Context, tx server.PgTx,
 		return
 	}
 
-	applied, addedByteCount, completion = applyLockedContractCloseReportInTx(ctx, tx, contractId, sourceId, destinationId, party, usedTransferByteCount, checkpoint, reportId, clientReport)
+	applied, addedByteCount, completion, settlementUnready = applyLockedContractCloseReportInTx(ctx, tx, contractId, sourceId, destinationId, party, usedTransferByteCount, checkpoint, reportId, clientReport)
 	return
 }
 
@@ -3096,7 +3287,7 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 	contractId, sourceId, destinationId server.Id, party ContractParty,
 	usedTransferByteCount ByteCount, checkpoint bool, reportId *server.Id,
 	clientReport bool,
-) (applied bool, addedByteCount ByteCount, completion contractCheckpointCompletion) {
+) (applied bool, addedByteCount ByteCount, completion contractCheckpointCompletion, settlementUnready bool) {
 	// The existing contract row lock serializes the receipt with its party
 	// increment. No shared payer/network row is acquired here.
 	var senderFinal bool
@@ -3186,6 +3377,13 @@ func applyLockedContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 		// Only a client-origin final authorizes the zero-ACK settlement policy.
 		completion = contractSenderZeroFinalUnreported
 	}
+	// The statement returned the opposing party's state from under the
+	// contract lock. A newly applied report without two finals or an ordered
+	// completion needs no post-commit reread. Exact retries remain unknown and
+	// keep the existing fresh-read recovery path.
+	hasSenderFinal := senderFinal || party == ContractPartySource && !checkpoint
+	hasReceiverFinal := receiverFinal || party == ContractPartyDestination && !checkpoint
+	settlementUnready = applied && completion == contractCheckpointNoCompletion && (!hasSenderFinal || !hasReceiverFinal)
 	// A receiver that has not reported is asked for its final now that the
 	// sender is done (CLIENTCLOSE.md section 3). One that checkpointed, or a
 	// sender final reporting zero acknowledged bytes, settles with this final. A
@@ -3782,16 +3980,17 @@ func evenContractPayoutShare(total int64, participantIndex int, participantCount
 	return share
 }
 
+// The billing split: each funding balance's payout bytes and revenue, divided
+// evenly over the contract's participants into one sweep per balance and
+// provider network. The sweeps are its only output. Settlement stopped
+// projecting them into lifetime provider totals on 2026-11-11, since nothing
+// read those totals (BILLING-SPLIT.md).
 func allocateContractParticipantPayouts(
 	contractParticipants []ContractParticipant,
 	originNetworkId server.Id,
 	sweepPayouts map[server.Id]sweepPayout,
-) (
-	participantSweepPayouts map[participantSweepKey]*participantSweepPayout,
-	accountPayouts map[server.Id]*contractPayout,
-) {
-	participantSweepPayouts = map[participantSweepKey]*participantSweepPayout{}
-	accountPayouts = map[server.Id]*contractPayout{}
+) map[participantSweepKey]*participantSweepPayout {
+	participantSweepPayouts := map[participantSweepKey]*participantSweepPayout{}
 	balanceIds := make([]server.Id, 0, len(sweepPayouts))
 	for balanceId := range sweepPayouts {
 		balanceIds = append(balanceIds, balanceId)
@@ -3840,8 +4039,10 @@ func allocateContractParticipantPayouts(
 
 			// A service hop on the payer/origin network represents
 			// same-network traffic. Its precomputed even share is omitted, not
-			// transferred to the remaining participants.
-			if participant.NetworkId == originNetworkId ||
+			// transferred to the remaining participants. Every network
+			// contract has its network as payer, so its receiving client and
+			// any same-network hop earn nothing (subscription_network_escrow.go).
+			if contractShareIsIntraNetwork(participant.NetworkId, originNetworkId) ||
 				(participantByteCount <= 0 && participantPayout <= 0) {
 				continue
 			}
@@ -3850,40 +4051,33 @@ func allocateContractParticipantPayouts(
 				balanceId: balanceId,
 				networkId: participant.NetworkId,
 			}
+			// Payout wallets are network-scoped and the sweep primary key is
+			// per network. If two hops belong to one eligible network, their
+			// shares combine in the network's sweep, and providerPayouts keeps
+			// each client's own share. Every sweep written here carries
+			// providerPayouts, so no reader needs the sweep's destination_id,
+			// which only rows from before provider_payouts use.
 			participantSweep := participantSweepPayouts[key]
 			if participantSweep == nil {
-				participantSweep = &participantSweepPayout{
-					destinationId: participant.ClientId,
-				}
+				participantSweep = &participantSweepPayout{}
 				participantSweepPayouts[key] = participantSweep
-			} else if participant.ClientId.Cmp(participantSweep.destinationId) < 0 {
-				// Payout wallets are network-scoped and the sweep primary key is
-				// per network. If two hops belong to one eligible network, combine
-				// their payment shares and keep only a legacy representative here.
-				// providerPayouts retains every client's actual subnet attribution.
-				participantSweep.destinationId = participant.ClientId
 			}
 			participantSweep.payoutByteCount += participantByteCount
 			participantSweep.payout += participantPayout
 			participantSweep.providerPayouts = append(participantSweep.providerPayouts, contractProviderPayout{
 				ClientId: participant.ClientId, PayoutByteCount: participantByteCount, PayoutNanoCents: participantPayout,
 			})
-
-			accountPayout := accountPayouts[participant.NetworkId]
-			if accountPayout == nil {
-				accountPayout = &contractPayout{}
-				accountPayouts[participant.NetworkId] = accountPayout
-			}
-			accountPayout.payoutByteCount += participantByteCount
-			accountPayout.payout += participantPayout
 		}
 	}
-	return
+	return participantSweepPayouts
 }
 
 // Keep both lookups parameterized: historical contract cardinality estimates
 // can otherwise launch parallel workers for a single contract's small escrow.
 // The offset fences prevent flattening without limiting rows or ordering ties.
+// The escrows are charged in the funding order (transfer_balance_funding_order.go):
+// a contract that a paid Pro grant and a later grant funded together charges the
+// paid Pro grant first, as admission reserved it first.
 const settlementEscrowReadSql = `
     SELECT
         selected_escrow.balance_id,
@@ -3898,12 +4092,13 @@ const settlementEscrowReadSql = `
         OFFSET 0
     ) AS selected_escrow
     CROSS JOIN LATERAL (
-        SELECT start_balance_byte_count, net_revenue_nano_cents, end_time
+        SELECT start_balance_byte_count, net_revenue_nano_cents, end_time,
+            ` + transferBalanceFundsFirstSql + ` AS funds_first
         FROM transfer_balance
         WHERE balance_id = selected_escrow.balance_id
         OFFSET 0
     ) AS selected_balance
-    ORDER BY selected_balance.end_time ASC
+    ORDER BY selected_balance.funds_first DESC, selected_balance.end_time ASC
 `
 
 // Computes the floor mean of two non-negative reports without summing them.
@@ -3947,9 +4142,9 @@ func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.Pg
 // (unmarked) reservation, admitted before Redis admission became the only
 // path, settles in the caller's transaction through its original atomic
 // debit/outcome path. With inlineFinancial that transaction also commits its
-// exact earnings, escrow metadata and durable mirror and provider-total
-// owners, as the retired legacy settlement queue's worker did
-// (PARTITION-MAINTENANCE-PLAN.md, Part B).
+// exact earnings, escrow metadata and durable mirror owners, as the retired
+// legacy settlement queue's worker did (PARTITION-MAINTENANCE-PLAN.md, Part B).
+// Settlement writes no lifetime provider totals (BILLING-SPLIT.md).
 //
 // With wakeDebitFlush, a journaled debit's posts kick its partition's
 // backed-off flush chain.
@@ -3965,16 +4160,8 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	var result pgx.Rows
 	var err error
 	if asyncDebit {
-		// Native close writes no shared grant. Its immutable provider owner
-		// still needs queue admission before publishing the outcome and debt.
-		admitted, ownershipErr := server.TryTxOwnership(ctx, tx,
-			[]server.PgOwnershipKey{task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))})
-		if ownershipErr != nil {
-			return nil, false, ownershipErr
-		}
-		if !admitted {
-			return nil, false, errTransferBalanceOwnershipBusy
-		}
+		// Native close writes no shared grant and publishes no queued task, so
+		// it needs no ownership beyond the contract lock it holds.
 		result, err = tx.Query(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1 ORDER BY balance_id`, contractId)
 	} else {
 		admitted, ownershipErr := tryLegacyFinancialOwnershipInTx(ctx, tx, []server.Id{contractId})
@@ -4021,8 +4208,8 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	// transition, including when a legacy writer does not take balance locks.
 	positiveReservations, redisReservations := lockSettlementReservations(ctx, tx, contractId, lockedBalanceIds)
 
-	// order balances by end date, ascending
-	// take from the earlier before the later
+	// order balances in the funding order: paid Pro grants first, then by end
+	// date, ascending; take from the earlier before the later
 	result, err = tx.Query(
 		ctx,
 		settlementEscrowReadSql,
@@ -4042,7 +4229,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 		return
 	}
 
-	participantSweepPayouts, accountPayouts := allocateContractParticipantPayouts(
+	participantSweepPayouts := allocateContractParticipantPayouts(
 		contractParticipants,
 		originNetworkId,
 		sweepPayouts,
@@ -4120,7 +4307,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 					for key, payout := range participantSweepPayouts {
 						batch.Queue(participantSweepInsertSQL, contractId, key.balanceId, key.networkId,
-							payout.payoutByteCount, payout.payout, payout.destinationId, payout.providerPayouts)
+							payout.payoutByteCount, payout.payout, payout.providerPayouts)
 					}
 				})
 			}
@@ -4185,30 +4372,10 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 		})
 	}
 
-	if (inlineFinancial || asyncDebit) && len(accountPayouts) > 0 {
-		// Exact earnings remain in the sweep ledger. Their lifetime display
-		// totals have an independent per-contract durable owner, so a held
-		// provider row cannot retain this transaction. No Redis increment is
-		// added; account totals and the task's replay marker commit together.
-		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
-	} else if 0 < len(accountPayouts) {
-		posts = append(posts, func() any {
-			server.Redis(ctx, func(r server.RedisClient) {
-				// Participant networks occupy independent Redis hash slots. Keep
-				// each network's byte/revenue pair atomic in its own transaction.
-				for networkId, payout := range accountPayouts {
-					_, pipelineErr := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-						pipe.IncrBy(ctx, accountBalanceNetPayoutByteCountKey(networkId), payout.payoutByteCount)
-						pipe.IncrBy(ctx, accountBalanceNetPayout(networkId), payout.payout)
-						return nil
-					})
-					server.Raise(pipelineErr)
-				}
-			})
-			return nil
-		})
-	}
-
+	// Exact earnings remain in the sweep ledger. Settlement no longer adds
+	// them to lifetime provider totals (account_balance.provided_* and the
+	// {account_balance_<id>} Redis counters): nothing read those totals, and
+	// each settled contract queued one task row to write them.
 	return
 }
 
@@ -4225,7 +4392,6 @@ type participantSweepKey struct {
 }
 
 type participantSweepPayout struct {
-	destinationId   server.Id
 	payoutByteCount ByteCount
 	payout          NanoCents
 	providerPayouts []contractProviderPayout
@@ -4237,11 +4403,6 @@ type contractProviderPayout struct {
 	ClientId        server.Id `json:"client_id"`
 	PayoutByteCount ByteCount `json:"payout_byte_count"`
 	PayoutNanoCents NanoCents `json:"payout_nano_cents"`
-}
-
-type contractPayout struct {
-	payoutByteCount ByteCount
-	payout          NanoCents
 }
 
 // `server.ComplexValue`
@@ -4438,7 +4599,8 @@ func GetExpiredOpenContractIds(
                 WHERE
                     transfer_contract.open = true
             `,
-			time.Now().Add(-contractCloseTimeout),
+			// in UTC, as close_time holds it
+			server.NowUtc().Add(-contractCloseTimeout),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -5432,7 +5594,11 @@ func GetContractClose(ctx context.Context, contractId server.Id) (contractClose 
 }
 
 // update 2026-01-30: the net payout byte count and net payout are now tracked in redis
-// FIXME this should be merged back into the database at regular checkpoint intervals
+// update 2026-11-11: settlement no longer writes these counters or
+// account_balance.provided_*. The provided totals are frozen history: only
+// the drain of task rows that older binaries queued still adds to the
+// PostgreSQL columns (subscription_provider_totals_drain.go). GetAccountBalance
+// has no production caller (BILLING-SPLIT.md).
 
 func accountBalanceNetPayoutByteCountKey(networkId server.Id) string {
 	return fmt.Sprintf("{account_balance_%s}npbc", networkId)
@@ -5630,6 +5796,42 @@ const SubscriptionMarketX402 = "x402"
 const SubscriptionMarketMonero = "monero"
 const SubscriptionMarketZcash = "zcash"
 
+// one-time payments in TAO, Bitcoin and ETH, received into our Coinbase
+// account (mmm/BTCPAY.md §17), named for the chain like solana, monero and
+// zcash. Native SOL credits under SubscriptionMarketSolana.
+const SubscriptionMarketBittensor = "bittensor"
+const SubscriptionMarketBitcoin = "bitcoin"
+const SubscriptionMarketEthereum = "ethereum"
+
+// SubscriptionOneTimeCryptoMarkets are the markets whose Pro is a one-time
+// crypto payment: a term that never renews.
+var SubscriptionOneTimeCryptoMarkets = []string{
+	SubscriptionMarketSolana,
+	SubscriptionMarketMonero,
+	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
+}
+
+// SubscriptionMarkets are the markets whose supporter window is a
+// subscription: the App Store, Google Play, Stripe, every one-time crypto
+// market and gamma. It is the one list the subscription dashboard counts
+// (subscription_metrics_model.go, grafana/dashboards/subscriptions.json) and
+// the payment monitor checks for a Pro entitlement
+// (monitor/signal_payment_failures.go), so a market added here or to
+// SubscriptionOneTimeCryptoMarkets is counted and watched. The manual and x402
+// markets stay out of both, as before.
+var SubscriptionMarkets = slices.Clip(slices.Concat(
+	[]string{
+		SubscriptionMarketApple,
+		SubscriptionMarketGoogle,
+		SubscriptionMarketStripe,
+	},
+	SubscriptionOneTimeCryptoMarkets,
+	[]string{SubscriptionMarketGamma},
+))
+
 type SubscriptionRenewal struct {
 	NetworkId          server.Id
 	SubscriptionType   SubscriptionType
@@ -5639,6 +5841,11 @@ type SubscriptionRenewal struct {
 	PurchaseToken      string
 	SubscriptionMarket SubscriptionMarket // google or apple
 	TransactionId      string             // for tracking on Google Play or Apple App Store
+	// The end of the period the row's payment or trial covers, without the
+	// market's grace that EndTime carries. Set by every credit path; nil for a
+	// billing grace hold, which keeps Pro but pays for no period. The Pro
+	// grant cycles are cut from these periods (pro_grant_cycle_model.go).
+	PaidEndTime *time.Time
 }
 
 var ErrPaymentNetworkNotFound = errors.New("payment network does not exist")
@@ -5715,13 +5922,16 @@ func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *Su
 		        net_revenue_nano_cents,
 		        purchase_token,
 						market,
-						transaction_id
+						transaction_id,
+						paid_end_time
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (network_id, subscription_type, end_time, start_time, market) DO UPDATE
 			SET
 				net_revenue_nano_cents = $5,
-				purchase_token = $6
+				purchase_token = $6,
+				-- a hold written over a credit's row keeps the credit's period
+				paid_end_time = COALESCE(EXCLUDED.paid_end_time, subscription_renewal.paid_end_time)
 		`,
 		renewal.NetworkId,
 		renewal.SubscriptionType,
@@ -5731,6 +5941,7 @@ func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *Su
 		renewal.PurchaseToken,
 		renewal.SubscriptionMarket,
 		renewal.TransactionId,
+		renewal.PaidEndTime,
 	)
 	// a failed insert aborts the caller's transaction, so it raises rather
 	// than leave the credit path to commit a rollback
@@ -5892,128 +6103,22 @@ func IsProFresh(
 	return IsProNetworkFresh(ctx, *networkId)
 }
 
-// AddProTransferBalanceToAllNetworks grants the Pro data allowance to every network
-// with an active supporter subscription, for the window [startTime, endTime).
-//
-// The balance carries pro = true, so THIS GRANT is what makes a network Pro for the
-// period (see pro_model.go). It also carries the subscription's revenue pro-rated to
-// the grant window, which drives provider subsidy accounting: a yearly subscription
-// contributes roughly 1/12 of its revenue to each monthly grant.
-//
-// Eligibility comes from subscription_renewal, NOT from the pro column -- otherwise
-// the grant would renew its own entitlement forever and a lapsed subscription would
-// never drop to free.
-//
-// The Pro cache is refreshed for every granted network so the upgrade is visible
-// immediately instead of after ProCacheTtl.
-// A supplied task run id commits a replay receipt with all grants; omit it for
-// an intentional independent refresh. Cached entitlement remains a projection.
-func AddProTransferBalanceToAllNetworks(
-	ctx context.Context,
-	startTime time.Time,
-	endTime time.Time,
-	balanceByteCount ByteCount,
-	runIds ...server.Id,
-) (addedTransferBalances map[server.Id]ByteCount) {
-	addedTransferBalances = map[server.Id]ByteCount{}
-
-	server.Tx(ctx, func(tx server.PgTx) {
-		addedTransferBalances = map[server.Id]ByteCount{}
-		if !claimTransferGrantRunInTx(ctx, tx, GrantKindPro, startTime, endTime, runIds) {
-			return
-		}
-		// network_id -> subscription revenue pro-rated to this grant window
-		supporters := map[server.Id]NanoCents{}
-
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT
-					network.network_id,
-					subscription_renewal.net_revenue_nano_cents,
-					subscription_renewal.start_time,
-					subscription_renewal.end_time
-				FROM network
-
-				INNER JOIN subscription_renewal ON
-					subscription_renewal.network_id = network.network_id AND
-					subscription_renewal.subscription_type = $1 AND
-					subscription_renewal.start_time <= $2 AND
-					$2 < subscription_renewal.end_time
-			`,
-			SubscriptionTypeSupporter,
-			server.NowUtc(),
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var networkId server.Id
-				var netRevenueNanoCents NanoCents
-				var supporterStartTime time.Time
-				var supporterEndTime time.Time
-				server.Raise(result.Scan(
-					&networkId,
-					&netRevenueNanoCents,
-					&supporterStartTime,
-					&supporterEndTime,
-				))
-
-				subsidyNetRevenue := NanoCents(0)
-				if supporterDuration := supporterEndTime.Sub(supporterStartTime); 0 < supporterDuration {
-					fraction := float64(endTime.Sub(startTime)) / float64(supporterDuration)
-					subsidyNetRevenue = NanoCents(fraction * float64(netRevenueNanoCents))
-				}
-				// SUM, do not overwrite: a network can hold several active renewals
-				// at once (one row per market), and each contributes its own
-				// pro-rated revenue to the subsidy accounting
-				supporters[networkId] += subsidyNetRevenue
-			}
-		})
-
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for networkId, subsidyNetRevenue := range supporters {
-				batch.Queue(
-					`
-		                INSERT INTO transfer_balance (
-		                    balance_id,
-		                    network_id,
-		                    start_time,
-		                    end_time,
-		                    start_balance_byte_count,
-		                    net_revenue_nano_cents,
-		                    subsidy_net_revenue_nano_cents,
-		                    balance_byte_count,
-		                    pro,
-		                    grant_kind
-		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, true, $8)
-		            `,
-					server.NewId(),
-					networkId,
-					startTime,
-					endTime,
-					balanceByteCount,
-					NanoCents(0),
-					subsidyNetRevenue,
-					GrantKindPro,
-				)
-				addedTransferBalances[networkId] = balanceByteCount
-			}
-		})
-	})
-
-	networkIds := make([]server.Id, 0, len(addedTransferBalances))
-	for networkId := range addedTransferBalances {
-		networkIds = append(networkIds, networkId)
-	}
-	UpdateProNetworks(ctx, networkIds...)
-
-	return
-}
+// The monthly Pro grant to every subscriber (AddProTransferBalanceToAllNetworks, on
+// the 1st of each month) is retired: each network's Pro grant now comes at the start
+// of each of its own subscription cycles (GrantProCycleInTx, PRO-GRANT-CYCLE.md).
 
 // AddFreeTransferBalanceToAllNetworks grants the free-tier data allowance to every
-// network WITHOUT an active supporter subscription, for the window
-// [startTime, endTime). The balance is unpaid and carries pro = false, so the free
-// grant can never confer Pro.
+// network, Pro included, for the window [startTime, endTime). The owner,
+// 2026-11-11: "pro should get the 1tib per month plus the 30gb per day" (the
+// monthly amount is pro.yml's 10 TiB), and "extend daily data in grace". So a
+// network in a billing-grace hold or in a manual-payment grace, which keeps Pro
+// but starts no cycle (PRO-GRANT-CYCLE.md), still gets the day's free data after
+// its last cycle grant expires. Only a lag.dev guest and a prober shard's private
+// network are left out.
+//
+// The balance is unpaid and carries pro = false, so the free grant can never
+// confer Pro. A Pro network spends it only after its paid Pro grants: paid Pro
+// data funds first (transfer_balance_funding_order.go).
 // A supplied task run id commits a replay receipt with all grants; omit it for
 // an intentional independent refresh.
 func AddFreeTransferBalanceToAllNetworks(
@@ -6043,14 +6148,7 @@ func AddFreeTransferBalanceToAllNetworks(
 					network.network_id
 				FROM network
 
-				LEFT JOIN subscription_renewal ON
-					subscription_renewal.network_id = network.network_id AND
-					subscription_renewal.subscription_type = $1 AND
-					subscription_renewal.start_time <= $2 AND
-					$2 < subscription_renewal.end_time
-
 				WHERE
-					subscription_renewal.network_id IS NULL AND
 					-- a lag.dev guest gets no free data (lag.dev/PLAN.md A1)
 					NOT EXISTS (
 						SELECT 1 FROM lag_guest
@@ -6065,8 +6163,6 @@ func AddFreeTransferBalanceToAllNetworks(
 						WHERE prober_shard_run.network_id = network.network_id
 					)
 			`,
-			SubscriptionTypeSupporter,
-			server.NowUtc(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -6116,16 +6212,20 @@ func AddFreeTransferBalanceToAllNetworks(
 }
 
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
+	// The delete pass, last, starts no batch past this, so the run returns
+	// and its Post schedules the next one well inside the task's MaxTime.
+	runEnd := server.NowUtc().Add(removeCompletedContractsRunBudget)
 	maxRowCount := 50000
 
 	removeCompletedTransferBalanceBatches(ctx, minTime)
 
 	// The reaper is driven by the indexed reap_time column. reap_time is the
-	// instant a contract becomes due for hard deletion:
-	//   - CompletePayment queues bounded retention work; the completed-payment
-	//     pass stamps complete_time + CompletedContractExpiration,
-	//   - the straggler pass stamps now() on aged closed contracts that are not
-	//     owned by an active or otherwise ambiguous payment.
+	// instant a contract becomes due for hard deletion: the straggler pass
+	// stamps now() on aged closed contracts that are not owned by an active or
+	// otherwise ambiguous payment. Completed USDC payouts once stamped it too,
+	// and USDC payouts ended (owner decisions 2026-11-12 and 2026-11-13); the
+	// contract horizon reaper (contract_horizon_reaper.go) deletes contracts
+	// past its horizon without it.
 	// The delete pass then removes every contract whose reap_time has passed,
 	// with its contract_close_report/contract_close/transfer_escrow/
 	// transfer_escrow_sweep/contract_extender rows, by those same contract ids in
@@ -6143,12 +6243,6 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	// net for orphans left by any other path (e.g. crashes mid-statement in older
 	// releases).
 
-	// CompletePayment only records the payment and queues this work. Advance each
-	// queued payment through its sweeps in keyset batches, committing the cursor
-	// after every batch so a timeout or worker restart resumes instead of replaying
-	// one enormous update.
-	assignCompletedContractReapTimeBatches(ctx, maxRowCount)
-
 	// assign pass: give aged closed-but-never-completed contracts a reap_time so
 	// the delete pass removes them. Bounded by the contract ids of the contracts
 	// created before the straggler horizon, so this is a range of the primary
@@ -6157,275 +6251,19 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 
 	// delete pass: hard delete every contract whose reap_time is due, with its
 	// dependent rows. Bounded by the transfer_contract_reap_time partial index.
-	// This reaps both completed contracts (reap_time = complete_time +
-	// CompletedContractExpiration) and the stragglers just assigned above.
+	// This reaps the stragglers just assigned above, and any contract stamped
+	// earlier.
 	// Candidate contract_ids are distinct (from the transfer_contract primary
-	// key). removeDueContractBatches drains until an empty batch; protected
+	// key). The pass drains in batches of dueContractReapBatchSize until no
+	// contract is due, a bound stops it, or the run's budget ends; protected
 	// candidates are repaired back to reap_time = NULL instead of deleted.
 	reapTime := server.NowUtc()
-	removeDueContractBatches(
-		ctx,
+	newDueContractReaper(
 		reapTime,
 		reapTime.Add(-StragglerContractExpiration),
-		maxRowCount,
-	)
-}
-
-// assignCompletedContractReapTimeBatches drains the durable retention queue set
-// by CompletePayment. One payment is advanced by at most maxRowCount distinct
-// contract ids per transaction. The UUID cursor is committed with the contract
-// updates, making the work resumable without ever delaying payment completion.
-func assignCompletedContractReapTimeBatches(ctx context.Context, maxRowCount int) (assignedCount int64) {
-	budgetEnd := server.NowUtc().Add(reaperRunBudget)
-	for {
-		var batchCount int64
-		var stampedCount int64
-		processedPayment := false
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			result, err := tx.Query(
-				ctx,
-				`
-				WITH payment AS MATERIALIZED (
-					SELECT
-						account_payment.payment_id,
-						account_payment.complete_time,
-						account_payment.contract_retention_cursor
-					FROM account_payment
-					WHERE
-						account_payment.contract_retention_pending AND
-						account_payment.completed AND
-						account_payment.complete_time IS NOT NULL
-					ORDER BY account_payment.complete_time, account_payment.payment_id
-					LIMIT 1
-					FOR UPDATE SKIP LOCKED
-				), batch AS MATERIALIZED (
-					SELECT DISTINCT transfer_escrow_sweep.contract_id
-					FROM payment
-					INNER JOIN transfer_escrow_sweep ON
-						transfer_escrow_sweep.payment_id = payment.payment_id
-					WHERE
-						payment.contract_retention_cursor IS NULL OR
-						payment.contract_retention_cursor < transfer_escrow_sweep.contract_id
-					ORDER BY transfer_escrow_sweep.contract_id
-					LIMIT $1
-				), stamped AS (
-					UPDATE transfer_contract
-					SET reap_time = GREATEST(
-						COALESCE(transfer_contract.reap_time, '-infinity'::timestamp),
-						payment.complete_time + interval '7 days'
-					)
-					FROM payment, batch
-					WHERE
-						transfer_contract.contract_id = batch.contract_id AND
-						(
-							transfer_contract.reap_time IS NULL OR
-							transfer_contract.reap_time < payment.complete_time + interval '7 days'
-						)
-					RETURNING transfer_contract.contract_id
-				), advanced AS (
-					UPDATE account_payment
-					SET
-						contract_retention_cursor = COALESCE(
-							(
-								SELECT batch.contract_id
-								FROM batch
-								ORDER BY batch.contract_id DESC
-								LIMIT 1
-							),
-							account_payment.contract_retention_cursor
-						),
-						contract_retention_pending = ((SELECT COUNT(*) FROM batch) = $1)
-					FROM payment
-					WHERE account_payment.payment_id = payment.payment_id
-					RETURNING (SELECT COUNT(*) FROM batch) AS batch_count
-				)
-				SELECT
-					advanced.batch_count,
-					(SELECT COUNT(*) FROM stamped) AS stamped_count
-				FROM advanced
-				`,
-				maxRowCount,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					processedPayment = true
-					server.Raise(result.Scan(&batchCount, &stampedCount))
-				}
-			})
-		}, server.TxReadCommitted)
-		assignedCount += stampedCount
-		if !processedPayment || budgetEnd.Before(server.NowUtc()) {
-			return
-		}
-	}
-}
-
-// removeDueContractBatches consumes the first bounded slice of the reap_time
-// index before doing any payment lookup. Due contracts held by an active or
-// ambiguous payment are repaired to reap_time = NULL. So are unpaid contracts
-// stamped by the former 90-day rule that have not yet reached the new 300-day
-// horizon. All other due contracts and their dependent rows are deleted.
-// Classifying only the already-bounded slice avoids turning the safety checks
-// into an anti-join over contract history. The payment guard also covers
-// completed payments whose queued retention cursor has not finished yet.
-//
-// Every write names its contracts with contract_id = ANY(ids), which lets each
-// statement prune to the partitions holding them. The classification locks the
-// due contracts before their dependent rows are deleted. A close report or close
-// is written only under its contract's lock, so the deletes see every one
-// committed before that lock, and none can follow it. Close reports are deleted
-// here because the partition cutover drops their cascade from transfer_contract;
-// until then the cascade finds them already gone.
-func removeDueContractBatches(ctx context.Context, minTime time.Time, minStragglerCreateTime time.Time, maxRowCount int) {
-	budgetEnd := server.NowUtc().Add(reaperRunBudget)
-	for {
-		var processedCount int64
-		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			// A cached generic plan cannot prune partitions by an array
-			// parameter, so plan every statement with its actual ids.
-			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
-			// Fix the bounded contract slice before shared balance ownership.
-			// The mutation below can only revisit these admitted identities;
-			// newly due contracts remain for the next pass.
-			var contractIds []server.Id
-			rows, err := tx.Query(ctx, `SELECT contract_id FROM transfer_contract
- WHERE reap_time IS NOT NULL AND reap_time<$1 ORDER BY reap_time LIMIT $2`, minTime.UTC(), maxRowCount)
-			server.WithPgResult(rows, err, func() {
-				for rows.Next() {
-					var id server.Id
-					server.Raise(rows.Scan(&id))
-					contractIds = append(contractIds, id)
-				}
-			})
-			// A zero balance id on a due contract's escrow would fail this
-			// head-of-index slice on every pass and stop all reaping behind it.
-			balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, contractIds)
-			server.Raise(err)
-			admitted, err := tryTransferBalanceOwnershipInTx(ctx, tx, ownableTransferBalanceIds(balanceIds))
-			server.Raise(err)
-			if !admitted || len(contractIds) == 0 {
-				return
-			}
-			var candidateIds []server.Id
-			server.Raise(tx.QueryRow(
-				ctx,
-				`
-				WITH due AS MATERIALIZED (
-					SELECT
-						transfer_contract.contract_id,
-						transfer_contract.create_time
-					FROM transfer_contract
-					WHERE
-						transfer_contract.reap_time IS NOT NULL AND
-						transfer_contract.reap_time < $1 AND
-						transfer_contract.contract_id=ANY($4::uuid[])
-					ORDER BY transfer_contract.reap_time
-					LIMIT $3
-					FOR UPDATE
-				), protected AS MATERIALIZED (
-					SELECT due.contract_id
-					FROM due
-					WHERE
-						EXISTS (
-							SELECT 1
-							FROM transfer_escrow_sweep
-							INNER JOIN account_payment ON
-								account_payment.payment_id = transfer_escrow_sweep.payment_id
-							WHERE
-								transfer_escrow_sweep.contract_id = due.contract_id AND
-								`+server.ContractPaymentRetentionHoldSql+`
-						) OR
-						(
-							due.create_time >= $2 AND
-							NOT EXISTS (
-								SELECT 1
-								FROM transfer_escrow_sweep
-								INNER JOIN account_payment ON
-									account_payment.payment_id = transfer_escrow_sweep.payment_id
-								WHERE
-									transfer_escrow_sweep.contract_id = due.contract_id AND
-									account_payment.completed
-							)
-						)
-				), cleared AS (
-					UPDATE transfer_contract
-					SET reap_time = NULL
-					FROM protected
-					WHERE
-						transfer_contract.contract_id=ANY($4::uuid[]) AND
-						transfer_contract.contract_id = protected.contract_id
-					RETURNING transfer_contract.contract_id
-				)
-				SELECT
-					(SELECT COUNT(*) FROM due),
-					ARRAY(
-						SELECT due.contract_id
-						FROM due
-						WHERE NOT EXISTS (
-							SELECT 1
-							FROM protected
-							WHERE protected.contract_id = due.contract_id
-						)
-						ORDER BY due.contract_id
-					)
-				`,
-				minTime.UTC(),
-				minStragglerCreateTime.UTC(),
-				maxRowCount,
-				contractIds,
-			).Scan(&processedCount, &candidateIds))
-			if len(candidateIds) == 0 {
-				return
-			}
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				WITH deleted_report AS (
-					DELETE FROM contract_close_report
-					WHERE contract_close_report.contract_id = ANY($1::uuid[])
-				), deleted_close AS (
-					DELETE FROM contract_close
-					WHERE contract_close.contract_id = ANY($1::uuid[])
-				), deleted_escrow AS (
-					DELETE FROM transfer_escrow
-					WHERE transfer_escrow.contract_id = ANY($1::uuid[])
-				), deleted_sweep AS (
-					DELETE FROM transfer_escrow_sweep
-					WHERE transfer_escrow_sweep.contract_id = ANY($1::uuid[])
-				)
-				DELETE FROM contract_extender
-				WHERE contract_extender.contract_id = ANY($1::uuid[])
-				`,
-				candidateIds,
-			))
-			result, err := tx.Query(
-				ctx,
-				`
-				DELETE FROM transfer_contract
-				WHERE transfer_contract.contract_id = ANY($1::uuid[])
-				RETURNING transfer_contract.contract_id, source_id, destination_id,
-					outcome IS NULL AS unresolved
-				`,
-				candidateIds,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var contractId, sourceId, destinationId server.Id
-					var unresolved bool
-					server.Raise(result.Scan(&contractId, &sourceId, &destinationId, &unresolved))
-					// Deleting unresolved custody is its terminal lifecycle event.
-					// Read the deleted version so a concurrent outcome wins once.
-					if unresolved {
-						server.AddTxCommitCount(tx, &contractClosedCounter, 1)
-					}
-					contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
-				}
-			})
-		}, server.TxReadCommitted, server.OptNoRetry())
-		if processedCount == 0 || budgetEnd.Before(server.NowUtc()) {
-			return
-		}
-	}
+		dueContractReapBatchSize,
+		runEnd,
+	).removeDue(ctx)
 }
 
 // removeContractBatches repeatedly runs a bounded contract-delete cascade (one
@@ -6474,7 +6312,7 @@ var stragglerContractIdMargin = ContractIdCreateTimeMargin
 // the whole contract heap. reap_time is a timestamp without zone on the UTC
 // storage clock. Preserve the transaction-start clock while making its
 // storage zone explicit.
-const assignStragglerReapTimeSQL = `
+var assignStragglerReapTimeSQL = `
 WITH batch AS (
 	SELECT transfer_contract.contract_id
 	FROM transfer_contract
@@ -6882,10 +6720,15 @@ func derefCursor(ptrs []any) []any {
 
 // BackfillSweepDestinationIds denormalizes transfer_contract.destination_id onto
 // transfer_escrow_sweep for rows created before the column existed, in bounded
-// batches (one maintenance tx each) until a batch comes up short. New sweeps are
-// stamped by settleEscrowInTx, so this only touches the pre-existing set. Orphan
-// sweeps whose contract no longer exists are left NULL (no destination to copy)
-// and are reaped by SweepOrphanContractData; the stats filters exclude NULL.
+// batches (one maintenance tx each) until a batch comes up short. Orphan sweeps
+// whose contract no longer exists are left NULL (no destination to copy) and
+// are reaped by SweepOrphanContractData.
+//
+// Only a sweep without provider_payouts is backfilled: the provider
+// attribution reads destination_id for those rows alone
+// (contract_provider_attribution.go). Every sweep settlement writes carries
+// provider_payouts and, since 2026-11-11, no destination_id
+// (BILLING-SPLIT.md), so the backfill leaves new sweeps alone.
 //
 // Migration 816 dropped transfer_escrow_sweep_destination_id_sweep_time once the
 // provider stats stopped reading sweep destinations (b12af6b3), so each batch
@@ -6905,7 +6748,7 @@ func BackfillSweepDestinationIds(ctx context.Context, limit int) (backfilledCoun
 					SELECT s.contract_id, s.balance_id, s.network_id, tc.destination_id
 					FROM transfer_escrow_sweep s
 					INNER JOIN transfer_contract tc ON tc.contract_id = s.contract_id
-					WHERE s.destination_id IS NULL
+					WHERE s.destination_id IS NULL AND s.provider_payouts IS NULL
 					LIMIT $1
 				)
 				UPDATE transfer_escrow_sweep s
@@ -7062,6 +6905,22 @@ func BackfillStragglerContractReapTime(ctx context.Context, limit int, progress 
 	}
 }
 
+// The read of GetOpenTransferByteCount, apart so its plan can be tested: $1 the
+// payer. Its index is transfer_contract_unresolved_payer_transfer_byte_count.
+// Once the open set drains, the planner keeps choosing it only with the
+// statistics object on the unresolved predicate
+// (server.TransferContractUnresolvedPredicateStatisticsSql).
+const openTransferByteCountSql = `
+			SELECT
+			   COALESCE(SUM(transfer_byte_count), 0)
+			FROM transfer_contract
+			WHERE
+			    payer_network_id = $1 AND
+			    -- Isolate this payer aggregate from every false-zero global,
+			    -- pair, or create-time partial index.
+			    (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+			`
+
 func GetOpenTransferByteCount(
 	ctx context.Context,
 	payerNetworkId server.Id,
@@ -7073,16 +6932,7 @@ func GetOpenTransferByteCount(
 
 		result, err := tx.Query(
 			ctx,
-			`
-			SELECT
-			   COALESCE(SUM(transfer_byte_count), 0)
-			FROM transfer_contract
-			WHERE
-			    payer_network_id = $1 AND
-			    -- Isolate this payer aggregate from every false-zero global,
-			    -- pair, or create-time partial index.
-			    (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
-			`,
+			openTransferByteCountSql,
 			payerNetworkId,
 		)
 		server.WithPgResult(result, err, func() {

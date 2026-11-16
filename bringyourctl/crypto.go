@@ -88,7 +88,12 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 		fmt.Fprintf(out, "  price $%.2f (regular $%.2f), rate $%g\n",
 			model.NanoCentsToUsd(intent.PriceUsdNanoCents), model.NanoCentsToUsd(intent.RegularPriceUsdNanoCents), intent.RateUsd)
 		fmt.Fprintf(out, "  address %s (index %v)\n", intent.Address, cryptoOptionalInt(intent.AddressIndex))
-		fmt.Fprintf(out, "  quoted %s, expires %s\n", intent.QuotedAt.Format("2006-01-02 15:04:05"), intent.ExpiresAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(out, "  quoted %s, expires %s", intent.QuotedAt.Format("2006-01-02 15:04:05"), intent.ExpiresAt.Format("2006-01-02 15:04:05"))
+		if grace := controller.CryptoAssetConfirmationGrace(intent.Asset); 0 < grace {
+			// Bitcoin: a payment sent in time and mined by then is on time
+			fmt.Fprintf(out, ", on time if mined by %s (a %s confirmation grace)", intent.ExpiresAt.Add(grace).Format("2006-01-02 15:04:05"), grace)
+		}
+		fmt.Fprintf(out, "\n")
 		if intent.CreditedAt != nil {
 			fmt.Fprintf(out, "  credited %s", intent.CreditedAt.Format("2006-01-02 15:04:05"))
 			if intent.CreditedUsdNanoCents != nil {
@@ -131,7 +136,8 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 		if !ok {
 			return 1
 		}
-		credited, err := controller.CryptoOperatorCredit(clientSession, id)
+		sanctionsCleared, _ := opts.Bool("--sanctions-cleared")
+		credited, err := controller.CryptoOperatorCredit(clientSession, id, sanctionsCleared)
 		if err != nil {
 			fmt.Fprintf(out, "could not credit: %s\n", err)
 			return 1
@@ -177,12 +183,48 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 			fmt.Fprintf(out, "could not refund: %s\n", err)
 			return 1
 		}
+		if gift := result.Gift; gift != nil {
+			// a gift order: only its unredeemed codes are refunded
+			fmt.Fprintf(
+				out,
+				"refunded %d of the %d gift codes of invoice %s; %d redeemed and %d already void are not refundable\n",
+				gift.Refunded, gift.Quantity, id, gift.Redeemed, gift.AlreadyVoid,
+			)
+			ticker := strings.ToUpper(cryptoTicker(result.Intent.Asset))
+			fmt.Fprintf(
+				out,
+				"now send the refund by hand from the cold wallet: %s %s, the refunded codes' share of the %s %s received (%.2f USD at the invoice's credited value), to the address given (recorded with the refund event)\n",
+				gift.Refund, ticker, result.Received, ticker, gift.RefundUsd,
+			)
+			return 0
+		}
 		fmt.Fprintf(out, "ended the grant of invoice %s for %d network(s)\n", id, len(result.EndedNetworkIds))
 		fmt.Fprintf(
 			out,
 			"now send the refund by hand from the cold wallet: up to %s %s received, to the address given (recorded with the refund event)\n",
 			result.Received, strings.ToUpper(cryptoTicker(result.Intent.Asset)),
 		)
+		return 0
+	}
+
+	if alchemyWebhook, _ := opts.Bool("alchemy-webhook"); alchemyWebhook {
+		signingKeyPath, _ := opts.String("--signing-key-file")
+		result, err := controller.CryptoAlchemyEnsureEthWebhook(ctx, strings.TrimSpace(signingKeyPath))
+		if err != nil {
+			fmt.Fprintf(out, "could not set up the Alchemy webhook: %s\n", err)
+			return 1
+		}
+		if result.Created {
+			fmt.Fprintf(out, "created the ETH Address Activity webhook %s for %s\n", result.WebhookId, result.WebhookUrl)
+		} else {
+			fmt.Fprintf(out, "found the ETH Address Activity webhook %s for %s\n", result.WebhookId, result.WebhookUrl)
+		}
+		if result.SigningKeyWritten {
+			fmt.Fprintf(out, "its signing key is in %s (mode 0600); it was not printed\n", signingKeyPath)
+		} else {
+			fmt.Fprintf(out, "Alchemy did not return its signing key: copy it from the webhook's page in the Alchemy dashboard\n")
+		}
+		fmt.Fprintf(out, "store the id as alchemy.eth_webhook_id and the signing key as alchemy.eth_webhook_signing_key in vault/<env>/alchemy.yml\n")
 		return 0
 	}
 
@@ -217,20 +259,13 @@ func cryptoTicker(asset string) string {
 	case model.CryptoAssetUsdcSolana:
 		return "usdc"
 	}
+	// tao, btc, eth and sol are their own tickers
 	return asset
 }
 
 // cryptoFormatAmount prints an atomic amount in coin units with its ticker.
 func cryptoFormatAmount(asset string, amountAtomic int64) string {
-	decimals := 0
-	switch asset {
-	case model.CryptoAssetXmr:
-		decimals = 12
-	case model.CryptoAssetZec:
-		decimals = 8
-	case model.CryptoAssetUsdcSolana:
-		decimals = 6
-	}
+	decimals := controller.CryptoAssetDecimals(asset)
 	text := strconv.FormatInt(amountAtomic, 10)
 	if decimals == 0 {
 		return text + " " + cryptoTicker(asset)

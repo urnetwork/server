@@ -329,14 +329,14 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			durationSeconds,
 			int(closeDurationLimit/time.Second),
 		),
-		mechanism: "CloseExpiredContracts commits contracts individually but acknowledges scheduler progress only when the selected checkpoint returns. Current source independently caps open and disputed scans at 25,000 each; their deduplicated union can contain up to 50,000 selected candidates, not necessarily verified closes. Checkpoints can still overrun while legacy payment-retention writes and transfer_contract vacuum debt drain. A timeout preserves per-contract commits but loses the task-level checkpoint.",
+		mechanism: "CloseExpiredContracts commits contracts individually but acknowledges scheduler progress only when the selected checkpoint returns. Current source independently caps open and disputed scans at 25,000 each; their deduplicated union can contain up to 50,000 selected candidates, not necessarily verified closes. Checkpoints can still overrun while transfer_contract vacuum debt drains. A timeout preserves per-contract commits but loses the task-level checkpoint.",
 		baseline:  "Healthy full checkpoints finish in roughly 20–30s; warn at 120s, and every checkpoint must finish well before the 1,800s deadline. Current source uses a 25,000 per-scan cap; older generations used 100,000 per scan. Verify the actual executor artifact rather than inferring its cap from the merged selection count.",
 		observed:  observed,
 		evidence:  logEvidence + retryEvidence,
 		context:   incidentContext,
-		action:    "Retain the independent 25,000-row scan caps on generations that already have them; roll out that existing correction only where executor provenance proves the older per-scan limit. A merged selection above 25,000 does not prove an older artifact. Keep the bounded retention queue active, then let independently verified scheduled closes and autovacuum drain confirmed debt. Do not raise the deadline, increase closer concurrency, cancel vacuum, or restart a taskworker to hide the elapsed heartbeat.",
+		action:    "Retain the independent 25,000-row scan caps on generations that already have them; roll out that existing correction only where executor provenance proves the older per-scan limit. A merged selection above 25,000 does not prove an older artifact. Let independently verified scheduled closes and autovacuum drain confirmed debt. Do not raise the deadline, increase closer concurrency, cancel vacuum, or restart a taskworker to hide the elapsed heartbeat.",
 		verify:    "Verify the executor's independent scan caps are at most 25,000 and their deduplicated union at most 50,000. Every active generation keeps close checkpoints below 120s, no exact-1,800s timeout recurs, and the older-than-five/30-minute open-contract buckets fall on consecutive samples. Prompt retries or verified sibling progress do not clear unresolved financial failure warnings.",
-		playbook:  "SIGNALS.md §1.2, §2.6 and §2.10",
+		playbook:  "SIGNALS.md §1.2 and §2.6",
 	})
 	return findings, nil
 }

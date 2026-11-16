@@ -42,7 +42,9 @@ func addNetEscrowOrderingTestParties(ctx context.Context) netEscrowOrderingTestF
 	}
 	testingCreatePaymentClient(ctx, f.sourceNetworkId, f.sourceId)
 	testingCreatePaymentClient(ctx, f.destinationNetworkId, f.destinationId)
-	AddBasicTransferBalance(ctx, f.sourceNetworkId, 1000, server.NowUtc(), server.NowUtc().Add(time.Hour))
+	// Discovery uses the host clock; publication rechecks the database clock.
+	// Give this already-current fixture grant the same past margin as expiry fixtures.
+	AddBasicTransferBalance(ctx, f.sourceNetworkId, 1000, server.NowUtc().Add(-time.Hour), server.NowUtc().Add(time.Hour))
 	return f
 }
 

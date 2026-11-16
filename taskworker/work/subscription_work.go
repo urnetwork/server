@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -98,7 +98,7 @@ func scheduleCloseExpiredContractsPageWithExpiration(clientSession *session.Clie
 	now := server.NowUtc()
 	runAt := now
 	if delay {
-		randomDelay := time.Minute + time.Duration(mathrand.Int63n(int64(4*time.Minute)))
+		randomDelay := time.Minute + time.Duration(mathrand.Int64N(int64(4*time.Minute)))
 		runAt = runAt.Add(randomDelay)
 	}
 	if expiration != nil && expiration.Before(runAt) {
@@ -339,6 +339,21 @@ func BackfillInitialTransferBalancePost(
 	tx server.PgTx,
 ) error {
 	return nil
+}
+
+// A failed run, a canceled one at MaxTime included, retries no sooner than the
+// chain's own 30-minute gap. Without a Post nothing else re-arms that gap, and
+// the ordinary backoff restarts the first failures within seconds: a run that
+// keeps reaching MaxTime would hold the database back to back.
+const removeCompletedContractsErrorRetryFloor = 30 * time.Minute
+
+// The registered retention target keeps its function name. Its failures keep
+// their text, count and missing post; only the delay has a floor.
+func NewRemoveCompletedContractsTaskTarget() task.Target {
+	return task.WithErrorRetryFloor(task.NewTaskTargetWithPost(
+		RemoveCompletedContracts,
+		RemoveCompletedContractsPost,
+	), removeCompletedContractsErrorRetryFloor)
 }
 
 type RemoveCompletedContractsArgs struct {

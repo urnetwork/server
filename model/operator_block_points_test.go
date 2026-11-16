@@ -1,8 +1,12 @@
 package model
 
 import (
+	"crypto/md5"
 	"encoding/json"
+	"maps"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,37 +67,102 @@ func TestOperatorBlockPointsDueBlocksWaitForTheSettleTime(t *testing.T) {
 
 // The daily task never awards a block that completed before it was first
 // scheduled: those wait for the backfill and its explicit go. After any award
-// it catches up every later block.
+// it catches up every later block. A block recorded expired is left out, and
+// moves nothing else: without expiry records the blocks are those before
+// expiry was recorded.
 func TestOperatorBlockPointsAutomaticBlocks(t *testing.T) {
 	due := []int64{15, 16, 17, 18, 19}
 	for _, test := range []struct {
 		name      string
 		awarded   []int64
+		expired   []int64
 		fromBlock int64
 		want      []int64
 	}{
-		{"first run after a mid-week deploy", nil, 20, []int64{}},
-		{"the first block that completed after the deploy", nil, 19, []int64{19}},
-		{"several blocks completed after the deploy", nil, 18, []int64{18, 19}},
-		{"a run a payout queued without a schedule", nil, 0, []int64{19}},
-		{"catch up after the backfill", []int64{15, 16, 17}, 20, []int64{18, 19}},
-		{"catch up after a missed week", []int64{18}, 18, []int64{19}},
-		{"a gap before the last award is the backfill's", []int64{15, 18}, 0, []int64{19}},
-		{"nothing left", []int64{15, 16, 17, 18, 19}, 0, []int64{}},
+		{"first run after a mid-week deploy", nil, nil, 20, []int64{}},
+		{"the first block that completed after the deploy", nil, nil, 19, []int64{19}},
+		{"several blocks completed after the deploy", nil, nil, 18, []int64{18, 19}},
+		{"a run a payout queued without a schedule", nil, nil, 0, []int64{19}},
+		{"catch up after the backfill", []int64{15, 16, 17}, nil, 20, []int64{18, 19}},
+		{"catch up after a missed week", []int64{18}, nil, 18, []int64{19}},
+		{"a gap before the last award is the backfill's", []int64{15, 18}, nil, 0, []int64{19}},
+		{"nothing left", []int64{15, 16, 17, 18, 19}, nil, 0, []int64{}},
+		{"an expired block after the last award is left out", []int64{17}, []int64{18}, 0, []int64{19}},
+		{"expired blocks leave the last award where it was", []int64{15}, []int64{16, 17}, 0, []int64{18, 19}},
+		{"an expired block before the first award", nil, []int64{18}, 18, []int64{19}},
+		{"the latest due block expired without a schedule", nil, []int64{19}, 0, []int64{}},
+		{"every block after the last award expired", []int64{16}, []int64{17, 18, 19}, 0, []int64{}},
 	} {
 		awarded := map[int64]bool{}
 		for _, block := range test.awarded {
 			awarded[block] = true
 		}
-		if got := operatorBlockPointsAutomaticBlocks(due, awarded, test.fromBlock); !slices.Equal(got, test.want) {
+		expired := map[int64]bool{}
+		for _, block := range test.expired {
+			expired[block] = true
+		}
+		if got := operatorBlockPointsAutomaticBlocks(due, awarded, expired, test.fromBlock); !slices.Equal(got, test.want) {
 			t.Fatalf("%s: %v, want %v", test.name, got, test.want)
 		}
 	}
-	if got := operatorBlockPointsAutomaticBlocks([]int64{}, map[int64]bool{}, 0); len(got) != 0 {
+	if got := operatorBlockPointsAutomaticBlocks([]int64{}, map[int64]bool{}, map[int64]bool{}, 0); len(got) != 0 {
 		t.Fatal("no due block awarded", got)
 	}
 }
 
+// A block expires when its window's first reliability block leaves
+// client_reliability retention: ClientReliabilityRetention after the window
+// opens, at reliability block granularity. A whole block is due its
+// settle time after it closes and expires about three days later; a block
+// whose window starts at a cutoff inside it expires that much later. A block
+// with no traffic past the cutoff never expires. The expiry carries the
+// window, its first reliability block and the first one retention keeps.
+func TestOperatorBlockPointsExpiryIsTheRetentionDeadline(t *testing.T) {
+	block := int64(20)
+	start := operatorBlockStart(block)
+	due := operatorBlockStart(block + 1).Add(OperatorBlockPointsSettleTime)
+	deadline := start.Add(ClientReliabilityRetention)
+	if !due.Before(deadline.Add(-ReliabilityBlockDuration)) {
+		t.Fatalf("block %d is due at %s, not before its deadline %s", block, due, deadline)
+	}
+	for _, test := range []struct {
+		cutoff  time.Time
+		now     time.Time
+		expired bool
+	}{
+		{operatorBlockPointsMainCutoff, due, false},
+		{operatorBlockPointsMainCutoff, deadline.Add(-ReliabilityBlockDuration), false},
+		// the first reliability block retention keeps passes the window's
+		// first one a block's length after the deadline
+		{operatorBlockPointsMainCutoff, deadline.Add(ReliabilityBlockDuration - time.Nanosecond), false},
+		{operatorBlockPointsMainCutoff, deadline.Add(ReliabilityBlockDuration), true},
+		{operatorBlockPointsMainCutoff, deadline.Add(30 * 24 * time.Hour), true},
+		// a cutoff a day into the block moves its deadline a day on
+		{start.Add(24 * time.Hour), deadline.Add(ReliabilityBlockDuration), false},
+		{start.Add(24 * time.Hour), deadline.Add(24*time.Hour + ReliabilityBlockDuration), true},
+		// a block that ends at the cutoff has no window to expire
+		{start.Add(SubnetBlockDuration), deadline.Add(30 * 24 * time.Hour), false},
+	} {
+		expiry, expired := OperatorBlockPointsExpiryAt(block, test.cutoff, test.now)
+		if expired != test.expired || (expiry != nil) != expired {
+			t.Fatalf("block %d with cutoff %s at %s: expired %t, want %t", block, test.cutoff, test.now, expired, test.expired)
+		}
+		if !expired {
+			continue
+		}
+		windowStart, windowEnd, _ := OperatorBlockPointsWindow(block, test.cutoff)
+		minBlockNumber, _ := operatorBlockReliabilityBlockWindow(windowStart, windowEnd)
+		if expiry.Block != block || !expiry.WindowStart.Equal(windowStart) || !expiry.WindowEnd.Equal(windowEnd) ||
+			expiry.ReliabilityMinBlockNumber != minBlockNumber || expiry.RetentionMinBlockNumber != clientReliabilityRetentionCutoffBlock(test.now) ||
+			expiry.RetentionMinBlockNumber <= expiry.ReliabilityMinBlockNumber || !expiry.ExpireTime.Equal(test.now) {
+			t.Fatalf("block %d with cutoff %s at %s: expiry %+v", block, test.cutoff, test.now, expiry)
+		}
+	}
+}
+
+// A block's plan id never moves with the award's schema: an award, the
+// leaderboard and the epoch history find a block's award by it, so a schema
+// that moved the ids would award every awarded block again.
 func TestOperatorBlockPointsPlanIdIsTheBlocks(t *testing.T) {
 	if OperatorBlockPointsPlanId(16) != OperatorBlockPointsPlanId(16) {
 		t.Fatal("plan id is not stable")
@@ -101,57 +170,97 @@ func TestOperatorBlockPointsPlanIdIsTheBlocks(t *testing.T) {
 	if OperatorBlockPointsPlanId(16) == OperatorBlockPointsPlanId(17) {
 		t.Fatal("blocks share a plan id")
 	}
+	// the ids the v1 awards were written under
+	for _, block := range []int64{15, 16, 19, 20, 21} {
+		sum := md5.Sum([]byte("urnetwork-operator-block-points-v1/" + strconv.FormatInt(block, 10)))
+		if OperatorBlockPointsPlanId(block) != server.RequireIdFromBytes(sum[:]) {
+			t.Fatalf("block %d plan id is not the one its award was written under", block)
+		}
+	}
 }
 
 func operatorBlockPointsTestConfig() *SubsidyConfig {
 	return &SubsidyConfig{
-		Days:                           30,
-		MinDaysFraction:                0.1,
-		UsdPerActiveUser:               0.5,
-		SubscriptionNetRevenueFraction: 0.5,
-		MinPayoutUsd:                   10,
-		ActiveUserByteCountThresholdHumanReadable: "1GiB",
-		ReferralParentPayoutFraction:              0.25,
-		ReferralChildPayoutFraction:               0.125,
-		AccountPointsPerPayout:                    1_000_000,
-		ReliabilityPointsPerPayout:                500_000,
-		ReliabilitySubsidyPerPayoutUsd:            250,
-		MinWalletPayoutUsd:                        5,
-		WalletPayoutTimeoutHumanReadable:          "720h",
-		SeekerHolderMultiplier:                    2,
+		Days:                         30,
+		ReferralParentPayoutFraction: 0.25,
+		ReferralChildPayoutFraction:  0.125,
+		AccountPointsPerPayout:       1_000_000,
+		ReliabilityPointsPerPayout:   500_000,
+		SeekerHolderMultiplier:       2,
 	}
 }
 
-// A block's points are a plan's points for the block's traffic: the subsidy
-// split per paying network over its providers by bytes, plus net revenue and
-// the reliability subsidy, weighs the payout points; reliability points
-// follow reliability weight; the seeker multiplier and the referral bonuses
-// apply to them. Every expected value below is computed independently, by the
-// formulas of planSubsidyPayments, calculateReliabilityPayoutInTx and
-// applyPayoutPoints.
-func TestPlanOperatorBlockPointsFollowsThePlanRules(t *testing.T) {
+// n network ids in ascending order, so a test knows the id order the award
+// visits them in.
+func operatorBlockPointsTestIds(n int) []server.Id {
+	ids := make([]server.Id, n)
+	for i := range ids {
+		ids[i] = server.NewId()
+	}
+	slices.SortFunc(ids, server.Id.Cmp)
+	return ids
+}
+
+// The payout points are shared exactly: the shares sum to the points, each is
+// within one nano point of its exact share, the nano points the floors leave
+// go to the largest remainders (a tie to the lower id), and only the bytes'
+// ratio counts. Every expected share is worked by hand; the third case's
+// products pass 64 bits.
+func TestOperatorBlockPayoutPointSharesAreExact(t *testing.T) {
+	ids := operatorBlockPointsTestIds(3)
+	a, b, c := ids[0], ids[1], ids[2]
+	gib := ByteCount(1024 * 1024 * 1024)
+	for i, test := range []struct {
+		total NanoPoints
+		bytes map[server.Id]ByteCount
+		want  map[server.Id]NanoPoints
+	}{
+		// 3 each, and the leftover to the lowest id of the tie
+		{10, map[server.Id]ByteCount{a: 1, b: 1, c: 1}, map[server.Id]NanoPoints{a: 4, b: 3, c: 3}},
+		// a block's points (1,000,000 x 7/30): b's remainder 2/3 beats a's 1/3
+		{233_333_333_333, map[server.Id]ByteCount{a: 2, b: 1}, map[server.Id]NanoPoints{a: 155_555_555_555, b: 77_777_777_778}},
+		{233_333_333_333, map[server.Id]ByteCount{a: 2 * gib, b: gib}, map[server.Id]NanoPoints{a: 155_555_555_555, b: 77_777_777_778}},
+		// a quarter and three quarters of a petabyte-scale block
+		{233_333_333_333, map[server.Id]ByteCount{a: 1_000_000_000_000_000, b: 3_000_000_000_000_000}, map[server.Id]NanoPoints{a: 58_333_333_333, b: 175_000_000_000}},
+		{7, map[server.Id]ByteCount{c: 5}, map[server.Id]NanoPoints{c: 7}},
+		{0, map[server.Id]ByteCount{a: 5}, map[server.Id]NanoPoints{}},
+		{7, map[server.Id]ByteCount{}, map[server.Id]NanoPoints{}},
+	} {
+		got := operatorBlockPayoutPointShares(test.total, test.bytes)
+		if !maps.Equal(got, test.want) {
+			t.Fatalf("case %d: shares %v, want %v", i, got, test.want)
+		}
+	}
+}
+
+// The award's points rule: account_points_per_payout scaled to the window is
+// shared by bytes alone; reliability points follow reliability weight, for
+// the networks with bytes; the seeker multiplier and the referral bonuses
+// apply to the payout points. The traffic it reads carries no revenue and no
+// payer. The payout shares are worked by hand: the window's points are
+// 233,333,333,333 nano points (1,000,000 x 7/30), of which A's 2 GiB take
+// 155,555,555,555 and B's 1 GiB the rest; the bonuses follow the plan's
+// formulas.
+func TestPlanOperatorBlockPointsSharesPayoutPointsByBytes(t *testing.T) {
 	config := operatorBlockPointsTestConfig()
 	gib := ByteCount(1024 * 1024 * 1024)
 	start := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
 	end := start.Add(SubnetBlockDuration)
 
-	payerU, payerV := server.NewId(), server.NewId()
 	providerA, providerB := server.NewId(), server.NewId()
 	// a network with reliability and no traffic in the block
 	providerC := server.NewId()
+	// a network whose sweeps carry no bytes
+	providerZ := server.NewId()
 	parentD, childE, grandchildG, childH := server.NewId(), server.NewId(), server.NewId(), server.NewId()
-	balanceU, balanceV := server.NewId(), server.NewId()
 
 	traffic := newOperatorBlockTraffic()
-	sweepTime := start.Add(time.Hour)
-	paidSweepTime := start.Add(2 * time.Hour)
-	balanceStart := start.Add(-15 * 24 * time.Hour)
-	balanceEnd := balanceStart.Add(30 * 24 * time.Hour)
-	revenue := UsdToNanoCents(12)
+	firstSweepTime := start.Add(time.Hour)
 	for _, row := range []*operatorBlockSweepRow{
-		{payeeNetworkId: providerA, balanceId: balanceU, payerNetworkId: &payerU, paid: true, balanceStartTime: &balanceStart, balanceEndTime: &balanceEnd, subsidyNetRevenue: revenue, payoutByteCount: 3 * gib, netRevenue: UsdToNanoCents(0.1), minSweepTime: sweepTime, minPaidSweepTime: &paidSweepTime, sweepCount: 3},
-		{payeeNetworkId: providerB, balanceId: balanceU, payerNetworkId: &payerU, paid: true, balanceStartTime: &balanceStart, balanceEndTime: &balanceEnd, subsidyNetRevenue: revenue, payoutByteCount: gib, minSweepTime: sweepTime, minPaidSweepTime: &paidSweepTime, sweepCount: 1},
-		{payeeNetworkId: providerB, balanceId: balanceV, payerNetworkId: &payerV, payoutByteCount: gib / 2, minSweepTime: sweepTime, minPaidSweepTime: &paidSweepTime, sweepCount: 1},
+		{payeeNetworkId: providerA, payoutByteCount: gib, minSweepTime: start.Add(2 * time.Hour), sweepCount: 2},
+		{payeeNetworkId: providerA, payoutByteCount: gib, minSweepTime: firstSweepTime, sweepCount: 1},
+		{payeeNetworkId: providerB, payoutByteCount: gib, minSweepTime: start.Add(3 * time.Hour), sweepCount: 1},
+		{payeeNetworkId: providerZ, payoutByteCount: 0, minSweepTime: start.Add(3 * time.Hour), sweepCount: 1},
 	} {
 		traffic.add(row)
 	}
@@ -161,7 +270,8 @@ func TestPlanOperatorBlockPointsFollowsThePlanRules(t *testing.T) {
 		networkWeights: map[server.Id]float64{
 			providerA: 0.25,
 			providerB: 0.5,
-			providerC: 0.25,
+			providerC: 0.125,
+			providerZ: 0.125,
 		},
 	}
 	award, err := planOperatorBlockPoints(
@@ -187,58 +297,35 @@ func TestPlanOperatorBlockPointsFollowsThePlanRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// planSubsidyPayments over the block's window
 	scale := float64(7) / float64(30)
-	if award.SubsidyScale != scale {
-		t.Fatalf("subsidy scale %v, want %v", award.SubsidyScale, scale)
+	payoutNanoPoints := PointsToNanoPoints(float64(config.AccountPointsPerPayout) * scale)
+	if award.TimeScale != scale || award.PayoutNanoPoints != payoutNanoPoints || payoutNanoPoints != 233_333_333_333 {
+		t.Fatalf("time scale %v and payout points %d, want %v and %d", award.TimeScale, award.PayoutNanoPoints, scale, payoutNanoPoints)
 	}
-	if award.TrafficUserCount != 2 || award.ActiveUserCount != 1 || award.PaidUserCount != 1 {
-		t.Fatalf("users traffic=%d active=%d paid=%d", award.TrafficUserCount, award.ActiveUserCount, award.PaidUserCount)
+	if award.ByteCount != 3*gib || award.SweepCount != 5 || award.Schema != OperatorBlockPointsSchema || award.PaymentPlanId != OperatorBlockPointsPlanId(16) {
+		t.Fatalf("award %+v", award)
 	}
-	// the balance's revenue pro-rated to the window, per subsidy period
-	windowRevenue := float64(revenue) * float64(7*24*time.Hour) / float64(30*24*time.Hour)
-	netRevenue := NanoCents(windowRevenue * float64(30*24*time.Hour) / float64(7*24*time.Hour))
-	if award.NetRevenue != netRevenue {
-		t.Fatalf("net revenue %d, want %d", award.NetRevenue, netRevenue)
+	wantPayments := []*OperatorBlockPayment{
+		{NetworkId: providerA, PayoutByteCount: 2 * gib, MinSweepTime: firstSweepTime},
+		{NetworkId: providerB, PayoutByteCount: gib, MinSweepTime: start.Add(3 * time.Hour)},
 	}
-	subsidyNetPayoutUsd := scale * max(config.MinPayoutUsd, config.UsdPerActiveUser*1, config.SubscriptionNetRevenueFraction*NanoCentsToUsd(netRevenue))
-	if award.SubsidyNetPayoutUsd != subsidyNetPayoutUsd {
-		t.Fatalf("subsidy %v, want %v", award.SubsidyNetPayoutUsd, subsidyNetPayoutUsd)
+	slices.SortFunc(wantPayments, func(x *OperatorBlockPayment, y *OperatorBlockPayment) int { return x.NetworkId.Cmp(y.NetworkId) })
+	if len(award.Payments) != len(wantPayments) {
+		t.Fatalf("payments %+v", award.Payments)
 	}
-	subsidyA := UsdToNanoCents(float64(3*gib) / float64(4*gib) * subsidyNetPayoutUsd / 2)
-	subsidyB := UsdToNanoCents(float64(gib)/float64(4*gib)*subsidyNetPayoutUsd/2) + UsdToNanoCents(1*subsidyNetPayoutUsd/2)
+	for i, payment := range award.Payments {
+		if *payment != *wantPayments[i] {
+			t.Fatalf("payment %+v, want %+v", payment, wantPayments[i])
+		}
+	}
 
-	// calculateReliabilityPayoutInTx: shares of the total weight, including
-	// the weight of a network that earns nothing in the block
+	pointsA := NanoPoints(155_555_555_555)
+	pointsB := NanoPoints(77_777_777_778)
+	// calculateReliabilityPayoutInTx's points: shares of the total weight,
+	// including the weight of networks that earn nothing in the block
 	reliabilityPointsPerPayout := PointsToNanoPoints(float64(config.ReliabilityPointsPerPayout) * scale)
-	reliabilitySubsidyPerPayout := NanoCents(float64(UsdToNanoCents(float64(config.ReliabilitySubsidyPerPayoutUsd))) * scale)
 	reliabilityPointsA := NanoPoints(float64(reliabilityPointsPerPayout) * (0.25 / 1.0))
 	reliabilityPointsB := NanoPoints(float64(reliabilityPointsPerPayout) * (0.5 / 1.0))
-	reliabilityUsdcA := NanoCents(float64(reliabilitySubsidyPerPayout) * (0.25 / 1.0))
-	reliabilityUsdcB := NanoCents(float64(reliabilitySubsidyPerPayout) * (0.5 / 1.0))
-
-	payoutA := UsdToNanoCents(0.1) + subsidyA + reliabilityUsdcA
-	payoutB := subsidyB + reliabilityUsdcB
-	if award.TotalComputedPayout != payoutA+payoutB {
-		t.Fatalf("computed payout %d, want %d", award.TotalComputedPayout, payoutA+payoutB)
-	}
-	payments := map[server.Id]*OperatorBlockPayment{}
-	for _, payment := range award.Payments {
-		payments[payment.NetworkId] = payment
-	}
-	if len(payments) != 2 || payments[providerA].ComputedPayout != payoutA || payments[providerB].ComputedPayout != payoutB ||
-		payments[providerA].PayoutByteCount != 3*gib || payments[providerB].PayoutByteCount != gib+gib/2 ||
-		payments[providerA].SubsidyPayout != subsidyA || payments[providerB].ReliabilitySubsidy != reliabilityUsdcB ||
-		!payments[providerA].MinSweepTime.Equal(sweepTime) || !payments[providerA].MinPaidSweepTime.Equal(paidSweepTime) {
-		t.Fatalf("payments %+v %+v", payments[providerA], payments[providerB])
-	}
-
-	// applyPayoutPoints
-	totalPoints := float64(config.AccountPointsPerPayout) * scale
-	totalPayout := payoutA + payoutB
-	pointsA := PointsToNanoPoints(totalPoints * (float64(payoutA) / float64(totalPayout)))
-	pointsB := PointsToNanoPoints(totalPoints * (float64(payoutB) / float64(totalPayout)))
-	seekerA := NanoPoints(float64(pointsA)*2) - pointsA + reliabilityPointsA
 	multipliedA := NanoPoints(float64(pointsA) * 2)
 	type row struct {
 		network, payment server.Id
@@ -249,7 +336,7 @@ func TestPlanOperatorBlockPointsFollowsThePlanRules(t *testing.T) {
 		{providerA, providerA, AccountPointEventReliability, server.Id{}}:      reliabilityPointsA,
 		{providerB, providerB, AccountPointEventReliability, server.Id{}}:      reliabilityPointsB,
 		{providerA, providerA, AccountPointEventPayout, server.Id{}}:           pointsA,
-		{providerA, providerA, AccountPointEventPayoutMultiplier, server.Id{}}: seekerA,
+		{providerA, providerA, AccountPointEventPayoutMultiplier, server.Id{}}: multipliedA - pointsA + reliabilityPointsA,
 		{parentD, providerA, AccountPointEventPayoutLinkedAccount, providerA}:  NanoPoints(float64(multipliedA) * 0.25),
 		{childE, providerA, AccountPointEventPayoutLinkedAccount, providerA}:   NanoPoints(float64(multipliedA) * 0.125),
 		{grandchildG, providerA, AccountPointEventPayoutLinkedAccount, childE}: NanoPoints(float64(multipliedA) * 0.125 * 0.5),
@@ -275,11 +362,56 @@ func TestPlanOperatorBlockPointsFollowsThePlanRules(t *testing.T) {
 			t.Fatalf("point %+v = %d, want %d", key, got[key], value)
 		}
 	}
-	if award.PayoutNanoPoints != PointsToNanoPoints(totalPoints) || pointsA+pointsB < PointsToNanoPoints(totalPoints)-1 {
-		t.Fatalf("payout points %d, rows %d", award.PayoutNanoPoints, pointsA+pointsB)
+	// the block's payout points, on the configured scale, exactly
+	if events := award.EventNanoPoints(); events[string(AccountPointEventPayout)] != award.PayoutNanoPoints {
+		t.Fatalf("payout points sum to %d, want %d", events[string(AccountPointEventPayout)], award.PayoutNanoPoints)
 	}
-	if award.PaymentPlanId != OperatorBlockPointsPlanId(16) {
-		t.Fatal("award plan id is not the block's")
+}
+
+// An award of another schema never commits, so a dry run made before the
+// bytes rule (v1) cannot award its block by revenue; and an award's payments
+// each carry bytes inside the block.
+func TestValidateOperatorBlockPointsRefusesOtherSchemasAndEmptyPayments(t *testing.T) {
+	start := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
+	transition := &server.ProviderPayoutTransition{Cutoff: operatorBlockPointsMainCutoff, ConfigSha256: "policy"}
+	provider := server.NewId()
+	plan := func() *OperatorBlockPoints {
+		traffic := newOperatorBlockTraffic()
+		traffic.add(&operatorBlockSweepRow{payeeNetworkId: provider, payoutByteCount: 1024, minSweepTime: start.Add(time.Hour), sweepCount: 1})
+		award, err := planOperatorBlockPoints(
+			&operatorBlockPointsInputs{
+				subsidyConfig: operatorBlockPointsTestConfig(),
+				block:         16,
+				cutoff:        operatorBlockPointsMainCutoff,
+				policySha256:  "policy",
+				windowStart:   start,
+				windowEnd:     start.Add(SubnetBlockDuration),
+			},
+			traffic,
+			&operatorBlockReliability{networkWeights: map[server.Id]float64{}},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return award
+	}
+	if err := validateOperatorBlockPoints(plan(), transition); err != nil {
+		t.Fatal(err)
+	}
+	v1 := plan()
+	v1.Schema = "urnetwork-operator-block-points-v1"
+	if err := validateOperatorBlockPoints(v1, transition); err == nil || !strings.Contains(err.Error(), "schema") {
+		t.Fatalf("a v1 award was accepted: %v", err)
+	}
+	noBytes := plan()
+	noBytes.Payments[0].PayoutByteCount = 0
+	if err := validateOperatorBlockPoints(noBytes, transition); err == nil {
+		t.Fatal("a payment without bytes was accepted")
+	}
+	outside := plan()
+	outside.Payments[0].MinSweepTime = start.Add(SubnetBlockDuration)
+	if err := validateOperatorBlockPoints(outside, transition); err == nil {
+		t.Fatal("a payment outside the block was accepted")
 	}
 }
 
@@ -301,7 +433,7 @@ func TestPlanOperatorBlockPointsWithoutTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(award.Payments) != 0 || len(award.Points) != 0 || award.TotalComputedPayout != 0 {
+	if len(award.Payments) != 0 || len(award.Points) != 0 || award.ByteCount != 0 || award.PayoutNanoPoints != 0 {
 		t.Fatalf("award without traffic %+v", award)
 	}
 }
@@ -310,10 +442,9 @@ func TestPlanOperatorBlockPointsWithoutTraffic(t *testing.T) {
 // and changes with any point.
 func TestOperatorBlockPointsDigestBindsTheAwards(t *testing.T) {
 	start := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
-	payer, provider := server.NewId(), server.NewId()
+	provider := server.NewId()
 	traffic := newOperatorBlockTraffic()
-	paidSweepTime := start.Add(time.Hour)
-	traffic.add(&operatorBlockSweepRow{payeeNetworkId: provider, balanceId: server.NewId(), payerNetworkId: &payer, payoutByteCount: 1024, minSweepTime: paidSweepTime, minPaidSweepTime: &paidSweepTime, sweepCount: 1})
+	traffic.add(&operatorBlockSweepRow{payeeNetworkId: provider, payoutByteCount: 1024, minSweepTime: start.Add(time.Hour), sweepCount: 1})
 	award, err := planOperatorBlockPoints(
 		&operatorBlockPointsInputs{
 			subsidyConfig: operatorBlockPointsTestConfig(),

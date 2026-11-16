@@ -3,9 +3,10 @@
 // whose balance is held that way are refused new contracts, and escrow
 // admission under the resulting hot payers holds database connections across
 // Redis reservations. While the valve is open, contract creation still
-// deducts first: public and companion contracts escrow, shrink-to-fit
-// included, while the payer has anything left. Only a payer whose balance
-// escrow admission finds exhausted (ErrContractBalanceExhausted) gets a zero
+// deducts first: public, companion, network and friends-and-family contracts
+// escrow, shrink-to-fit included, while the payer has anything left. Only a
+// payer whose balance escrow admission finds exhausted
+// (ErrContractBalanceExhausted) gets a zero
 // cost contract, created without escrow (subscription_zero_escrow.go): no
 // balance is reserved or debited, and no provider is paid for its traffic.
 //

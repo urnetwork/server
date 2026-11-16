@@ -13,8 +13,9 @@ import (
 )
 
 // Real opens include zero-byte contracts. A disputed, unilateral, and untouched
-// unresolved row each closes on deletion; a prior outcome and a protected young
-// candidate cannot add a close. Small pages force multiple maintenance commits.
+// unresolved row each closes on deletion; a prior outcome and a candidate whose
+// sweep a pending payment holds cannot add a close. Small pages force multiple
+// maintenance commits.
 func TestContractLifecycleCountersRetentionClosesOnlyDeletedUnresolved(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -33,10 +34,14 @@ func TestContractLifecycleCountersRetentionClosesOnlyDeletedUnresolved(t *testin
 		old := now.Add(-400 * 24 * time.Hour)
 		// Seed historical retention before settlement makes its actual outcome
 		// and close time immutable. The terminal owner keeps its own clock.
+		pendingPaymentId := testingAssignSweepPayment(ctx, fixture.destinationNetworkId, nil, nil)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract
  SET create_time=$2,close_time=$2,reap_time=$2 WHERE contract_id=ANY($1)`, ids[:4], old))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET reap_time=$2 WHERE contract_id=$1`, ids[4], old))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep
+ (contract_id,balance_id,network_id,payout_byte_count,payout_net_revenue_nano_cents,payment_id,sweep_time)
+ VALUES($1,$2,$3,0,0,$4,$5)`, ids[4], fixture.balanceId, fixture.destinationNetworkId, pendingPaymentId, now))
 		})
 		SetContractDispute(ctx, ids[1], true)
 		server.Raise(CloseContract(ctx, ids[2], fixture.sourceId, 0, false))
@@ -52,7 +57,7 @@ func TestContractLifecycleCountersRetentionClosesOnlyDeletedUnresolved(t *testin
  (SELECT count(*) FROM transfer_escrow WHERE contract_id=ANY($1)),
  (SELECT count(*) FROM transfer_escrow_sweep WHERE contract_id=ANY($1))
  FROM transfer_contract WHERE contract_id=ANY($1)`, ids, ids[4]).Scan(&remaining, &protected, &reports, &escrows, &sweeps))
-			if remaining != 1 || protected != 1 || reports != 0 || escrows != 0 || sweeps != 0 {
+			if remaining != 1 || protected != 1 || reports != 0 || escrows != 0 || sweeps != 1 {
 				t.Fatal("retention did not preserve exactly its protected candidate")
 			}
 		})

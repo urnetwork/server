@@ -69,9 +69,6 @@ func (self *networkRemoveStepsFake) steps() *networkRemoveSteps {
 			self.removed = true
 			return model.RemoveNetworkRemoved, map[string]bool{"synthetic@example.invalid": true}
 		},
-		scheduleRemoveProductUpdates: func(clientSession *session.ClientSession, userAuths map[string]bool) {
-			self.calls = append(self.calls, "product-updates")
-		},
 	}
 }
 
@@ -91,7 +88,7 @@ func TestNetworkRemoveCancelsPlayBeforeRemoval(t *testing.T) {
 	if err != nil || result == nil || result.Error != nil {
 		t.Fatalf("remove result=%+v err=%v, want success", result, err)
 	}
-	want := []string{"snapshot", "apple", "stripe", "play", "remove", "product-updates"}
+	want := []string{"snapshot", "apple", "stripe", "play", "remove"}
 	if !reflect.DeepEqual(fake.calls, want) {
 		t.Fatalf("steps = %v, want %v", fake.calls, want)
 	}

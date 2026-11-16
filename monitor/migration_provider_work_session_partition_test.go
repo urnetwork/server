@@ -13,11 +13,66 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The contract of the journal's partition preparation, at its computed
-// version.
+// The contract of the journal's current custody, at its computed version:
+// the legacy drop guard's, which republishes the horizon drop guard's and the
+// partition preparation's.
 func migrationProviderWorkSessionPartitionTestContract(t testing.TB) snMainnetMigrationContract {
 	t.Helper()
-	return migrationCurrentSuffixTestContract(t, server.ProviderWorkSessionPartitionMigrationVersion())
+	return migrationCurrentSuffixTestContract(t, server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion())
+}
+
+// The partition preparation's contract ends at the horizon drop guard, whose
+// contract republishes the same custody with only the drop guard's body
+// replaced, by the 35-day body, until the legacy drop guard supersedes it.
+func TestMigrationsProviderWorkSessionHorizonDropGuardContract(t *testing.T) {
+	version := server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion()
+	preparation := server.ProviderWorkSessionPartitionMigrationVersion()
+	if version == 0 || version <= preparation {
+		t.Fatalf("horizon drop guard version %d, partition preparation version %d", version, preparation)
+	}
+	if contract := migrationCurrentSuffixTestContract(t, preparation); contract.artifact.removedVersion != version {
+		t.Fatalf("the partition preparation's contract is removed at %d, want %d", contract.artifact.removedVersion, version)
+	}
+	contract := migrationCurrentSuffixTestContract(t, version)
+	if contract.artifact.removedVersion != server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion() || contract.artifact.rowColumn != version-589 {
+		t.Fatalf("horizon drop guard contract %+v", contract.artifact)
+	}
+	_, _, _, dropGuard := server.ProviderWorkSessionPartitionBodiesSql()
+	horizonGuard := server.ProviderWorkSessionEventHorizonDropGuardBodySql()
+	preparationQuery := migrationCurrentSuffixTestContract(t, preparation).query
+	if !strings.Contains(contract.query, snMainnetMigrationLiteral(horizonGuard)) || strings.Contains(contract.query, snMainnetMigrationLiteral(dropGuard)) {
+		t.Fatal("the horizon contract does not pin the horizon drop guard's body")
+	}
+	if strings.ReplaceAll(contract.query, snMainnetMigrationLiteral(horizonGuard), snMainnetMigrationLiteral(dropGuard)) != preparationQuery {
+		t.Fatal("the horizon contract differs from the partition preparation's beyond the drop guard's body")
+	}
+	if strings.Replace(dropGuard, "interval '91 days'", "interval '35 days'", 1) != strings.Replace(horizonGuard, "kept at least 35 days", "kept 13 weeks", 1) {
+		t.Fatal("the horizon drop guard is not the drop guard with only its age and message changed")
+	}
+}
+
+// The horizon drop guard's contract ends at the legacy drop guard, whose
+// contract republishes the same custody with only the drop guard's body
+// replaced, by the horizon body with the legacy clause, and is not superseded.
+func TestMigrationsProviderWorkSessionLegacyDropGuardContract(t *testing.T) {
+	version := server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion()
+	horizon := server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion()
+	if version == 0 || version <= horizon {
+		t.Fatalf("legacy drop guard version %d, horizon drop guard version %d", version, horizon)
+	}
+	contract := migrationCurrentSuffixTestContract(t, version)
+	if contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 {
+		t.Fatalf("legacy drop guard contract %+v", contract.artifact)
+	}
+	horizonGuard := server.ProviderWorkSessionEventHorizonDropGuardBodySql()
+	legacyGuard := server.ProviderWorkSessionEventLegacyDropGuardBodySql()
+	if !strings.Contains(contract.query, snMainnetMigrationLiteral(legacyGuard)) || strings.Contains(contract.query, snMainnetMigrationLiteral(horizonGuard)) {
+		t.Fatal("the legacy drop guard contract does not pin the legacy drop guard's body")
+	}
+	horizonQuery := migrationCurrentSuffixTestContract(t, horizon).query
+	if strings.ReplaceAll(contract.query, snMainnetMigrationLiteral(legacyGuard), snMainnetMigrationLiteral(horizonGuard)) != horizonQuery {
+		t.Fatal("the legacy drop guard contract differs from the horizon's beyond the drop guard's body")
+	}
 }
 
 // The custody holds and nothing drifts while the journal is plain, prepared

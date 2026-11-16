@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "kind": "epoch2-control-agent-and-git-probe-compile-prerequisite/v1",
+  "status": "build-and-readonly-observation-only",
+  "accepted": false,
+  "source_approved": false,
+  "runtime_qualified": false,
+  "installed": false,
+  "source_payload_io_authorized": false,
+  "source": {
+    "server": "13c2345e79329c85c30bee5823a362f6fbee1d60",
+    "sn": "a62cfef9aa26d3596192aee5718b31a7bf7b3d59",
+    "sdk": "5517f0356d68ca876b8d8087811955a08e3f262d",
+    "connect": "f1e14dda5f0003ae21e2a163661660de30c61bc1",
+    "pristine_files": 7237,
+    "pristine_map_sha256": "aeec8a0a38a257a5089c53fa011a589b0e2f9ebcce98661d545b44f65b0a83c6",
+    "compile_files": 7238,
+    "compile_map_sha256": "3d83ebbe1da68957528e9a1f769ad1461f47c625662d1246041b96f06039b0db",
+    "sole_test_overlay_sha256": "6c75b6cf5362ccf923627118550890df6b86ef491c00f841536cd65d9889426c",
+    "native_plan_sha256": "6e271dd8276eb52a7e654549db9ee69fd15c527c0456acb14eee50a5fd6380aa",
+    "no_frozen_product_graph_or_primary_source_change": true
+  },
+  "evidence": {
+    "receipt_path": "/home/by/urnetwork/temp/competition-image-stream-preparation-20261107.waa1wZ7t/phasezero-qualified-goofe-20261107/qualification-receipt.json",
+    "receipt_sha256": "07ca77d3a95325a65c38e6fefccbdd6491f645ff6785fd17385239ee431e394d",
+    "tools_sha256": "d7dc1d5bd372c05c2c3dd5782084d1b23ed2d0baf078b04c41bd9774fd8d5740",
+    "all_source_dependency_census_pre_post": true,
+    "native_module_verify_before_after": true,
+    "all_three_units_and_cgroups_gone": true
+  },
+  "agent": {
+    "target": "./cli/competitionsubeval",
+    "sha256": "aa3e7a649660c11287926998038c7570a3e1a54cec7dc9a084aa1ae9d7f3fcb4",
+    "bytes": 13838026,
+    "mode": "0500",
+    "exit": 0,
+    "runtime_seconds": 44.302,
+    "buildinfo_sha256": "af5210d0da069d7c619a3644393cc092e72ef0135de18e1b1f3849abe499f3e6",
+    "executed": false,
+    "serve_or_docker_client_invoked": false
+  },
+  "git_probe": {
+    "root": "TestProspectiveFrozenOrdinaryGitRecovery",
+    "sha256": "599166bdef9766542ccae3b8f8e9a45553ec3f4e89fd4b3763ca1c12df162196",
+    "bytes": 151265870,
+    "mode": "0400",
+    "exit": 0,
+    "runtime_seconds": 67.157,
+    "buildinfo_sha256": "0cb24be642043df4f02852ebcbac5ddae148dd6940af01a9250b253a53610756",
+    "compile_flags_include_vet_off": true,
+    "executed": false,
+    "TestMain_or_product_init_executed": false,
+    "ordinary_git_recovery_performed": false
+  },
+  "compiler": {
+    "go": "Go1.27.3 linux/amd64",
+    "cgo_enabled": 0,
+    "goexperiment": "greenteagc",
+    "flags": "-mod=readonly -trimpath -buildvcs=false -p2",
+    "static_no_interp_needed": true,
+    "no_vcs_revision_claim": true,
+    "offline": true,
+    "build_resources": "Goofe2CPU/12GiB/swap0/512tasks/1200s/private-network"
+  },
+  "readonly_kernel_prerequisite": {
+    "projection_path": "/home/by/urnetwork/temp/competition-image-stream-preparation-20261107.waa1wZ7t/phasezero-qualified-goofe-20261107/sanitized-kernel-projection.json",
+    "projection_sha256": "1a9c3786c8d4ec7f1b591db9a3ec9e99aa74bece1013621a80db1ca6b7f927b6",
+    "retained_facts_only": true,
+    "new_query_for_projection": false,
+    "pattern_starts_with_pipe": true,
+    "core_pipe_limit": 10,
+    "limit_canonical_decimal_single_newline": true,
+    "release_safe_name_single_newline": true,
+    "source_maximum_pipe_limit": 128,
+    "raw_facts_remain_root_private_goofe": true,
+    "raw_host_values_in_source_or_tests": false,
+    "exact_native_class_compatibility_proved": false,
+    "kernel_file_sha256": {
+      "osrelease": "b9762398898a6bd87bdc61deef5c3eab745432e6157baa556b310d16f078d089",
+      "version": "c6c489bc31d4ad7412b3107e4f1a674e8c6dfcb87e043c284515bb20f3bb3898",
+      "core_pattern": "2fb6b9f55e20775a9b6766cdf8977dcea5a0c56a7c9b878bfab39974b6a1d7e4",
+      "core_pipe_limit": "917df3320d778ddbaa5c5c7742bc4046bf803c36ed2b050f30844ed206783469"
+    }
+  },
+  "limits": {
+    "actual_tests_run": 0,
+    "image_transfer_load_or_build": false,
+    "Docker_daemon_queried": false,
+    "actual_native_trials": false,
+    "sysctl_account_slice_profile_changes": false,
+    "worker_and_operator_accounts": "pending explicit root selection",
+    "compose_buildx_plugin_pins": "pending exact root selection",
+    "scope": "The observed pipe prerequisites do not qualify its handler, kernel/runtime class, actual12 native trials, or another host."
+  }
+}

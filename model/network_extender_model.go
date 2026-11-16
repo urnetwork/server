@@ -86,6 +86,26 @@ type NetworkExtender struct {
 	// describes the same state the record does, and is never set before the
 	// name resolves.
 	MeasurementCertNotAfter *time.Time
+	// The camouflage key the extender's records carry (connect/EXTENDER.md P6,
+	// EXTENDER-UPDATE2 §3, phase 14b): the X25519 key its latest passing
+	// activation posted, nil when it posted none. A reader returns the key
+	// only while the network that posted it still holds the identity key, so
+	// a key never follows an identity to another network, whatever moved the
+	// row. RecordRealityPublicKey is what a record signs.
+	RealityPublicKey []byte
+}
+
+// The size of the camouflage key a record carries, an X25519 public key.
+const networkExtenderRealityPublicKeySize = 32
+
+// RecordRealityPublicKey is the camouflage key a record of the extender carries
+// (phase 14b): the stored key when it is an X25519 key's size, else nil, so a
+// record never carries a malformed key. The slice is the caller's.
+func (self *NetworkExtender) RecordRealityPublicKey() []byte {
+	if len(self.RealityPublicKey) != networkExtenderRealityPublicKeySize {
+		return nil
+	}
+	return slices.Clone(self.RealityPublicKey)
 }
 
 // Whether the extender may be carried by an open channel at all (R1, R4):
@@ -110,6 +130,13 @@ func (self *NetworkExtender) RecordCountryCode() string {
 // One family an extender was activated and is probed on. DnsPorts are the dns
 // carrier ports this address answered on (L2), ascending; empty when the dns
 // carrier was not offered.
+//
+// TcpPort and UdpPort are the carrier ports this address's own activation was
+// probed on (connect/EXTENDER.md S10): a router's mapping forwards one
+// family's carriers on ports it picks while the other family answers on the
+// bound ones, so they may differ from the extender's, which are its latest
+// activation's. 0 for an address activated before they were kept, which is on
+// the extender's.
 type NetworkExtenderAddress struct {
 	ExtenderId               server.Id
 	IpVersion                int
@@ -122,6 +149,25 @@ type NetworkExtenderAddress struct {
 	ConsecutiveProbeFailures int
 	Active                   bool
 	LastPublishTime          *time.Time
+	TcpPort                  int
+	UdpPort                  int
+}
+
+// The tcp port this address is dialed on (connect/EXTENDER.md S10): its own,
+// or the extender's for an address activated before its own was kept.
+func (self *NetworkExtenderAddress) DialTcpPort(extender *NetworkExtender) int {
+	if 0 < self.TcpPort {
+		return self.TcpPort
+	}
+	return extender.TcpPort
+}
+
+// The udp port this address is dialed on, as DialTcpPort.
+func (self *NetworkExtenderAddress) DialUdpPort(extender *NetworkExtender) int {
+	if 0 < self.UdpPort {
+		return self.UdpPort
+	}
+	return extender.UdpPort
 }
 
 // One queued gossip message.
@@ -142,15 +188,28 @@ type NetworkExtenderWithAddresses struct {
 }
 
 // The extender fields one uptime probe needs, flattened per address so the
-// task can spread addresses over its workers without regrouping (C3).
+// task can spread addresses over its workers without regrouping (C3). TcpPort
+// is the address's own (NetworkExtenderAddress.DialTcpPort).
 type NetworkExtenderProbeTarget struct {
 	ExtenderId server.Id
-	PublicKey  []byte
-	TcpPort    int
-	DnsTld     string
-	IpVersion  int
-	Ip         netip.Addr
-	Carriers   []string
+	// the network that activated the extender, which a pass judges its
+	// failures by: one network's extenders share an operator, and often one
+	// outage
+	NetworkId server.Id
+	// the client the extender's device is reachable under on the exchange,
+	// the one that activated it last, which is where an address accepted on
+	// the webrtc carrier is probed (C2a, C3; connect/EXTENDER.md S8)
+	ClientId  server.Id
+	PublicKey []byte
+	TcpPort   int
+	DnsTld    string
+	IpVersion int
+	Ip        netip.Addr
+	Carriers  []string
+	// the camouflage key the extender's records carry (phase 14b), which the
+	// probe fronts its camouflaged attempt with, so a splicing extender
+	// passes; nil when its records carry none
+	RealityPublicKey []byte
 }
 
 // One address the geo dns sets are sampled from (C5), flattened the same way
@@ -242,6 +301,13 @@ type NetworkExtenderActivation struct {
 	// address, the extender's genesis confidence (connect/GEOMAP.md §5.1),
 	// kept on the history row; nil when the lookup gave none
 	AccuracyKm *float32
+	// the run of the extender process that sent the activation
+	// (connect/EXTENDER.md G3), kept on the history row: its id, when the
+	// process started, and how the run before it ended. Each is nil when the
+	// extender sent none or the caller dropped it as malformed.
+	RunId        *string
+	RunStartTime *time.Time
+	PreviousExit *string
 	// the location the activating address resolved to (M1), already created in
 	// the location table by the caller. Each field is nil when the lookup did
 	// not reach that granularity; all four nil is a lookup that failed, which
@@ -250,6 +316,12 @@ type NetworkExtenderActivation struct {
 	CityLocationId    *server.Id
 	RegionLocationId  *server.Id
 	CountryLocationId *server.Id
+	// the camouflage key the activation posted (connect/EXTENDER.md P6, phase
+	// 14b), parsed and checked by the caller, or nil for none. A passing
+	// activation stores it, with the activating network as the network that
+	// posted it, and nil clears a stored key, so the records carry what the
+	// extender's latest passing activation asked for.
+	RealityPublicKey []byte
 }
 
 // WithLocation stores the location the activating address resolved to (M1),
@@ -294,6 +366,87 @@ func joinExtenderCarriers(carriers []string) string {
 		kept = append(kept, carrier)
 	}
 	return strings.Join(kept, ",")
+}
+
+// Whether an address with these carriers can be a client's first contact
+// (connect/EXTENDER.md S8): it serves a socket carrier, tcp, quic or dns. An
+// address accepted on the webrtc carrier alone cannot be, since the carrier
+// signals through the dialer's own exchange connection, so it is published
+// in the records a connected client reads (the drip, the feed) and never in
+// what a client reaches the operator by: the geo dns sets, the seed cohort,
+// an activation's bootstrap.
+func ExtenderAddressFirstContact(carriers []string) bool {
+	for _, carrier := range carriers {
+		switch carrier {
+		case connect.ExtenderCarrierTcp, connect.ExtenderCarrierQuic, connect.ExtenderCarrierDns:
+			return true
+		}
+	}
+	return false
+}
+
+// The carriers column of an address that can be a first contact, as a
+// postgres regular expression: one of its comma-separated carriers is tcp,
+// quic or dns (ExtenderAddressFirstContact).
+var extenderFirstContactCarriersPattern = fmt.Sprintf(
+	"(^|,)(%s|%s|%s)(,|$)",
+	connect.ExtenderCarrierTcp,
+	connect.ExtenderCarrierQuic,
+	connect.ExtenderCarrierDns,
+)
+
+// Whether an address with these carriers was accepted on the webrtc carrier
+// without tcp (connect/EXTENDER.md S8): it lists webrtc, which the activation
+// tests only where the tcp path failed or was not offered, and not tcp. Such
+// an address is probed for uptime over webrtc, and the operator caps how many
+// extenders hold one (controller ExtenderActivateSettings.
+// MaxWebRtcOnlyExtenders).
+func ExtenderAddressWebRtcOnly(carriers []string) bool {
+	return slices.Contains(carriers, connect.ExtenderCarrierWebRtc) &&
+		!slices.Contains(carriers, connect.ExtenderCarrierTcp)
+}
+
+// The carriers column of an address that lists webrtc, and of one that lists
+// tcp, as postgres regular expressions over its comma-separated carriers
+// (ExtenderAddressWebRtcOnly).
+var (
+	extenderWebRtcCarriersPattern = fmt.Sprintf("(^|,)%s(,|$)", connect.ExtenderCarrierWebRtc)
+	extenderTcpCarriersPattern    = fmt.Sprintf("(^|,)%s(,|$)", connect.ExtenderCarrierTcp)
+)
+
+// How many active extenders hold an active address accepted on the webrtc
+// carrier without tcp (ExtenderAddressWebRtcOnly), which the activation's cap
+// compares with its bound before it runs a webrtc test. The extender of
+// excludePublicKey is left out, so an extender already counted activates
+// again, on either family; nil leaves none out.
+func CountActiveWebRtcOnlyNetworkExtenders(ctx context.Context, excludePublicKey []byte) int {
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT COUNT(DISTINCT network_extender.extender_id)
+			FROM network_extender
+			INNER JOIN network_extender_address ON
+				network_extender_address.extender_id = network_extender.extender_id AND
+				network_extender_address.active
+			WHERE
+				network_extender.active AND
+				network_extender_address.carriers ~ $1 AND
+				network_extender_address.carriers !~ $2 AND
+				($3::bytea IS NULL OR network_extender.public_key != $3::bytea)
+			`,
+			extenderWebRtcCarriersPattern,
+			extenderTcpCarriersPattern,
+			excludePublicKey,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return count
 }
 
 // The inverse, tolerant of the empty column an address with no carrier would
@@ -374,7 +527,9 @@ func getActiveNetworkExtenderAddressesInTx(
 			last_probe_time,
 			last_probe_success_time,
 			consecutive_probe_failures,
-			last_publish_time
+			last_publish_time,
+			COALESCE(tcp_port, 0),
+			COALESCE(udp_port, 0)
 		FROM network_extender_address
 		WHERE extender_id = $1 AND active
 		ORDER BY ip_version
@@ -400,6 +555,8 @@ func getActiveNetworkExtenderAddressesInTx(
 				&address.LastProbeSuccessTime,
 				&address.ConsecutiveProbeFailures,
 				&address.LastPublishTime,
+				&address.TcpPort,
+				&address.UdpPort,
 			))
 			address.Carriers = splitExtenderCarriers(carriers)
 			address.DnsPorts = splitExtenderDnsPorts(dnsPorts)
@@ -433,7 +590,8 @@ func getNetworkExtenderInTx(
 			revoke_time,
 			record_issue_time,
 			directory_tier,
-			COALESCE(canary_channel, '')
+			COALESCE(canary_channel, ''),
+			CASE WHEN reality_public_key_network_id = network_id THEN reality_public_key END
 		FROM network_extender
 		WHERE extender_id = $1
 		FOR UPDATE
@@ -458,6 +616,7 @@ func getNetworkExtenderInTx(
 				&e.RecordIssueTime,
 				&e.DirectoryTier,
 				&e.CanaryChannel,
+				&e.RealityPublicKey,
 			))
 			extender = e
 		}
@@ -506,9 +665,27 @@ func insertNetworkExtenderPublishInTx(
 // what makes the new record win over any revocation the directory already has
 // (B5).
 //
+// A key belongs to the network that first activated it. A re-activation by
+// another client of that network carries the new client; an activation by any
+// other network stores nothing, signs nothing and returns nil
+// (GetNetworkExtenderKeyNetworkId tells the caller why). The activation probes
+// prove that the caller's address answers for the key, not that the caller
+// holds it: an open extender signs any challenge and forwards any request to
+// the api (A4, A5), so a post relayed through a listed extender passes them,
+// and would otherwise move the extender, and the contract parties its row
+// names (J2), to the poster's network.
+//
 // Everything is one transaction: the upserts, the signature over what they
 // wrote, and the publish row. A caller that signed outside it could publish an
 // address set that was never stored.
+//
+// A re-activation of an address that is still active on the same ip keeps its
+// consecutive probe failures (C3). Passing the activation probe is not passing
+// the uptime probe, and an extender that re-activated more often than its
+// failure budget lasts was otherwise never deactivated, however long its
+// uptime probes failed. An address the probes deactivated, or one now on
+// another ip, starts again at zero: it is new to the probes, and a budget
+// spent before a revocation would deactivate it again on its first failure.
 func ActivateNetworkExtender(
 	ctx context.Context,
 	activation *NetworkExtenderActivation,
@@ -520,6 +697,9 @@ func ActivateNetworkExtender(
 		activated = nil
 		issueTime := server.NowUtc()
 
+		// false when the key is another network's: the upsert neither
+		// inserts nor updates, and returns no row
+		stored := false
 		var extenderId server.Id
 		var createTime time.Time
 		// the canary designation is the operator's and outlives a
@@ -530,6 +710,10 @@ func ActivateNetworkExtender(
 		// operator accepted that exposure (lag.dev/PLAN.md A9); the tier the
 		// row keeps is the one the record is signed into
 		var directoryTier int
+		// the camouflage key this activation stored, as a record reads it
+		// (phase 14b): the posting network is the activating one, which the
+		// upsert only ever updates the row of
+		var realityPublicKey []byte
 		result, err := tx.Query(
 			ctx,
 			`
@@ -551,12 +735,13 @@ func ActivateNetworkExtender(
 				city_location_id,
 				region_location_id,
 				country_location_id,
-				directory_tier
+				directory_tier,
+				reality_public_key,
+				reality_public_key_network_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11, $12, $13, $14, $15, $16)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NULL, $11, $12, $13, $14, $15, $16, $17, $2)
 			ON CONFLICT (public_key) DO UPDATE
 			SET
-				network_id = $2,
 				client_id = $3,
 				tcp_port = $6,
 				udp_port = $7,
@@ -577,8 +762,16 @@ func ActivateNetworkExtender(
 						$16 != 0
 					THEN network_extender.directory_tier
 					ELSE $16
-				END
-			RETURNING extender_id, create_time, COALESCE(canary_channel, ''), directory_tier
+				END,
+				reality_public_key = $17,
+				reality_public_key_network_id = $2
+			WHERE network_extender.network_id = $2
+			RETURNING
+				extender_id,
+				create_time,
+				COALESCE(canary_channel, ''),
+				directory_tier,
+				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END
 			`,
 			server.NewId(),
 			activation.NetworkId,
@@ -596,13 +789,22 @@ func ActivateNetworkExtender(
 			activation.RegionLocationId,
 			activation.CountryLocationId,
 			activation.DirectoryTier,
+			activation.RealityPublicKey,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&extenderId, &createTime, &canaryChannel, &directoryTier))
+				server.Raise(result.Scan(&extenderId, &createTime, &canaryChannel, &directoryTier, &realityPublicKey))
+				stored = true
 			}
 		})
+		if !stored {
+			// the key is another network's: no address, no history row, no
+			// record and no publish
+			return
+		}
 
+		// the address keeps the ports it was probed on, which a router's
+		// mapping may make its family's alone (connect/EXTENDER.md S10)
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -614,17 +816,27 @@ func ActivateNetworkExtender(
 				dns_ports,
 				activate_time,
 				consecutive_probe_failures,
-				active
+				active,
+				tcp_port,
+				udp_port
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, 0, true)
+			VALUES ($1, $2, $3, $4, $5, $6, 0, true, NULLIF($7::int, 0), NULLIF($8::int, 0))
 			ON CONFLICT (extender_id, ip_version) DO UPDATE
 			SET
 				ip = $3,
 				carriers = $4,
 				dns_ports = $5,
 				activate_time = $6,
-				consecutive_probe_failures = 0,
-				active = true
+				consecutive_probe_failures = CASE
+					WHEN
+						network_extender_address.active AND
+						network_extender_address.ip = EXCLUDED.ip
+					THEN network_extender_address.consecutive_probe_failures
+					ELSE 0
+				END,
+				active = true,
+				tcp_port = EXCLUDED.tcp_port,
+				udp_port = EXCLUDED.udp_port
 			`,
 			extenderId,
 			activation.IpVersion,
@@ -632,6 +844,8 @@ func ActivateNetworkExtender(
 			joinExtenderCarriers(activation.Carriers),
 			joinExtenderDnsPorts(activation.DnsPorts),
 			issueTime,
+			activation.TcpPort,
+			activation.UdpPort,
 		))
 
 		// the history row: where this activation came from, as of now (M1)
@@ -664,6 +878,7 @@ func ActivateNetworkExtender(
 			DirectoryTier:           directoryTier,
 			CanaryChannel:           canaryChannel,
 			MeasurementCertNotAfter: networkExtenderMeasurementCertNotAfterInTx(ctx, tx, extenderId),
+			RealityPublicKey:        realityPublicKey,
 		}
 		addresses := getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)
 
@@ -691,6 +906,35 @@ func ActivateNetworkExtender(
 	return activated
 }
 
+// GetNetworkExtenderKeyNetworkId returns the network an identity key is
+// registered to, and false for a key that no network has activated. An
+// activation reads it before it probes, so a key another network holds is
+// refused without dialing the caller or spending a budget, and
+// ActivateNetworkExtender refuses it again, atomically, when it stores.
+func GetNetworkExtenderKeyNetworkId(
+	ctx context.Context,
+	publicKey []byte,
+) (networkId server.Id, registered bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT network_id
+			FROM network_extender
+			WHERE public_key = $1
+			`,
+			publicKey,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+				registered = true
+			}
+		})
+	})
+	return
+}
+
 // Testing_NetworkExtenderProbeBarrier, when set, runs inside the probe result
 // transaction after the address has been deactivated and before the remaining
 // addresses are read.
@@ -714,8 +958,10 @@ type NetworkExtenderProbeOutcome struct {
 // consecutive rather than cumulative: an extender that flaps is not eventually
 // removed for the sum of its bad minutes. A failure spends one attempt, and
 // the address is deactivated on the attempt that reaches
-// maxConsecutiveProbeFailures. Only a new activation re-enables it, so a dead
-// address costs the probe task nothing after that.
+// maxConsecutiveProbeFailures, and keeps that count. A new activation
+// re-enables it, and so does a passing probe for its return while it last
+// worked recently (RecordNetworkExtenderRecoveryProbeResult); past that window
+// a dead address costs the probe task nothing.
 //
 // Losing the last active address revokes the extender: the revocation is
 // signed and queued in the same transaction that deactivates the address, so
@@ -921,12 +1167,16 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 			`
 			SELECT
 				network_extender.extender_id,
+				network_extender.network_id,
+				network_extender.client_id,
 				network_extender.public_key,
 				network_extender.tcp_port,
 				network_extender.dns_tld,
 				network_extender_address.ip_version,
 				network_extender_address.ip,
-				network_extender_address.carriers
+				network_extender_address.carriers,
+				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END,
+				COALESCE(network_extender_address.tcp_port, 0)
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -939,16 +1189,27 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 			for result.Next() {
 				target := &NetworkExtenderProbeTarget{}
 				var carriers string
+				var addressTcpPort int
 				server.Raise(result.Scan(
 					&target.ExtenderId,
+					&target.NetworkId,
+					&target.ClientId,
 					&target.PublicKey,
 					&target.TcpPort,
 					&target.DnsTld,
 					&target.IpVersion,
 					&target.Ip,
 					&carriers,
+					&target.RealityPublicKey,
+					&addressTcpPort,
 				))
 				target.Carriers = splitExtenderCarriers(carriers)
+				// the address's own port, which a router's mapping may make its
+				// family's alone (connect/EXTENDER.md S10); an address activated
+				// before it was kept is on the extender's
+				if 0 < addressTcpPort {
+					target.TcpPort = addressTcpPort
+				}
 				targets = append(targets, target)
 			}
 		})
@@ -966,6 +1227,12 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 // The order is stable rather than random. The sampler does its own shuffling
 // from a seeded source, so a random order here would only make one tick's
 // sets impossible to reproduce for the same reason the sampler is seeded.
+//
+// An address accepted on the webrtc carrier alone is left out
+// (ExtenderAddressFirstContact): the dns sets and the seed cohort drawn from
+// this pool are a client's first contact, and the webrtc carrier signals
+// through an exchange connection a client in first contact does not have
+// (connect/EXTENDER.md S8).
 func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtenderDnsAddress {
 	addresses := []*NetworkExtenderDnsAddress{}
 
@@ -980,7 +1247,8 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 				network_extender_address.ip_version,
 				network_extender_address.ip,
 				network_extender.directory_tier,
-				COALESCE(network_extender.canary_channel, '')
+				COALESCE(network_extender.canary_channel, ''),
+				network_extender_address.carriers
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -998,6 +1266,7 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				address := &NetworkExtenderDnsAddress{}
+				var carriers string
 				server.Raise(result.Scan(
 					&address.ExtenderId,
 					&address.PublicKey,
@@ -1006,7 +1275,11 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 					&address.Ip,
 					&address.DirectoryTier,
 					&address.CanaryChannel,
+					&carriers,
 				))
+				if !ExtenderAddressFirstContact(splitExtenderCarriers(carriers)) {
+					continue
+				}
 				addresses = append(addresses, address)
 			}
 		})
@@ -1131,6 +1404,12 @@ func GetNetworkExtenderIdsForPublish(ctx context.Context, limit int, staleBefore
 // excludeExtenderId leaves one extender out, normally the one being activated,
 // which has no use for its own record in the sample. The zero id excludes
 // nothing.
+//
+// Only an extender with an active address that can be a first contact is
+// sampled (ExtenderAddressFirstContact): a bootstrap is what a client starts
+// from, and an extender accepted on the webrtc carrier alone is reached only
+// through an exchange connection (connect/EXTENDER.md S8). Its record keeps
+// every active address of the extender.
 func GetRandomActiveNetworkExtenders(
 	ctx context.Context,
 	limit int,
@@ -1158,12 +1437,15 @@ func GetRandomActiveNetworkExtenders(
 				network_extender.country_code,
 				COALESCE(LOWER(derived_country.country_code::text), ''),
 				network_extender.record_issue_time,
+				CASE WHEN network_extender.reality_public_key_network_id = network_extender.network_id THEN network_extender.reality_public_key END,
 				network_extender_address.ip_version,
 				network_extender_address.ip,
 				network_extender_address.carriers,
 				network_extender_address.dns_ports,
 				network_extender_address.activate_time,
-				network_extender_address.last_publish_time
+				network_extender_address.last_publish_time,
+				COALESCE(network_extender_address.tcp_port, 0),
+				COALESCE(network_extender_address.udp_port, 0)
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -1183,7 +1465,8 @@ func GetRandomActiveNetworkExtenders(
 					sampled.active AND
 					sampled.extender_id != $2 AND
 					sampled.directory_tier = $4 AND
-					sampled.canary_channel IS NULL
+					sampled.canary_channel IS NULL AND
+					sampled_address.carriers ~ $5
 				GROUP BY sampled.extender_id
 				ORDER BY random()
 				LIMIT $1
@@ -1194,6 +1477,7 @@ func GetRandomActiveNetworkExtenders(
 			excludeExtenderId,
 			DerivedLocationNodeKindExtender,
 			connect.ExtenderDirectoryTierOpen,
+			extenderFirstContactCarriersPattern,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1214,12 +1498,15 @@ func GetRandomActiveNetworkExtenders(
 					&extender.CountryCode,
 					&extender.DerivedCountryCode,
 					&extender.RecordIssueTime,
+					&extender.RealityPublicKey,
 					&address.IpVersion,
 					&address.Ip,
 					&carriers,
 					&dnsPorts,
 					&address.ActivateTime,
 					&address.LastPublishTime,
+					&address.TcpPort,
+					&address.UdpPort,
 				))
 				address.ExtenderId = extender.ExtenderId
 				address.Carriers = splitExtenderCarriers(carriers)
@@ -1387,9 +1674,11 @@ func Testing_CreateNetworkExtender(
 					last_probe_success_time,
 					consecutive_probe_failures,
 					active,
-					last_publish_time
+					last_publish_time,
+					tcp_port,
+					udp_port
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12::int, 0), NULLIF($13::int, 0))
 				`,
 				extender.ExtenderId,
 				address.IpVersion,
@@ -1402,6 +1691,8 @@ func Testing_CreateNetworkExtender(
 				address.ConsecutiveProbeFailures,
 				address.Active,
 				address.LastPublishTime,
+				address.TcpPort,
+				address.UdpPort,
 			))
 		}
 	})
@@ -1551,7 +1842,9 @@ func Testing_GetNetworkExtender(
 				last_probe_success_time,
 				consecutive_probe_failures,
 				active,
-				last_publish_time
+				last_publish_time,
+				COALESCE(tcp_port, 0),
+				COALESCE(udp_port, 0)
 			FROM network_extender_address
 			WHERE extender_id = $1
 			ORDER BY ip_version
@@ -1574,6 +1867,8 @@ func Testing_GetNetworkExtender(
 					&address.ConsecutiveProbeFailures,
 					&address.Active,
 					&address.LastPublishTime,
+					&address.TcpPort,
+					&address.UdpPort,
 				))
 				address.Carriers = splitExtenderCarriers(carriers)
 				address.DnsPorts = splitExtenderDnsPorts(dnsPorts)

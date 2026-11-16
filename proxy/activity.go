@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -148,7 +148,7 @@ func Prewarm(
 				select {
 				case <-prewarmCtx.Done():
 					return
-				case <-time.After(time.Duration(rand.Int63n(int64(100 * time.Millisecond)))):
+				case <-time.After(time.Duration(rand.Int64N(int64(100 * time.Millisecond)))):
 				}
 				pd, err := proxyDeviceManager.OpenProxyDevice(proxyId)
 				if err != nil {

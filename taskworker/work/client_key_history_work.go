@@ -12,11 +12,11 @@ import (
 )
 
 // Signed key history of a client that is gone is deleted once the contract
-// horizon has passed since it went, never sooner than the guard's floor
-// (model.RemoveGoneStClientKeyHistory), at the pace and under the off switch
-// of its brake, `{client_key_history_retention}control`. Each run deletes what
-// is due from where the last stopped, and continues the discovery pass of
-// clients gone without a record.
+// horizon has passed since it went, or the horizon its brake sets, never sooner
+// than the guard's floor (model.RemoveGoneStClientKeyHistory), at the pace and
+// under the off switch of its brake, `{client_key_history_retention}control`.
+// Each run deletes what is due from where the last stopped, and continues the
+// discovery pass of clients gone without a record.
 
 // bounds a stranded claim; the retention's run budget is well under it
 const removeGoneStClientKeyHistoryMaxTime = 30 * time.Minute

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/stabi"
@@ -43,9 +44,14 @@ type subnetSettlementCutoverFixture struct {
 	// The vault2 view handler; a test wraps it to fail or contradict a read.
 	vaultV2        subnetReplayTestHandler
 	vaultV2Missing bool
+	// vault2's immutable challenge window and its finalized event logs.
+	challengeBlocks uint64
+	vaultV2Logs     []types.Log
 	// A release owner's enrollment parsed from monitor.yml; nil keeps the
 	// synthetic default.
 	enrollment *SubnetReplaySettings
+	// The signal under test; a test reuses one to observe a later run.
+	signal Signal
 }
 
 func newSubnetSettlementCutoverFixture(t *testing.T) *subnetSettlementCutoverFixture {
@@ -69,7 +75,8 @@ func newSubnetSettlementCutoverFixture(t *testing.T) *subnetSettlementCutoverFix
 		pools: map[uint64]stabi.ISTSettlementVault2Pool{
 			1: {Hotkey: [32]byte{0x52, 1}, FirstEpoch: subnetSettlementCutoverTestFirst, Registered: true},
 		},
-		selfColdkey: subnetSettlementCutoverTestColdkey,
+		selfColdkey:     subnetSettlementCutoverTestColdkey,
+		challengeBlocks: 14_400,
 	}
 	f.vaultV2 = f.vaultV2Handler
 	return f
@@ -77,6 +84,8 @@ func newSubnetSettlementCutoverFixture(t *testing.T) *subnetSettlementCutoverFix
 
 func (self *subnetSettlementCutoverFixture) vaultV2Handler(method string, args []any) ([]any, string) {
 	switch method {
+	case "CHALLENGE_BLOCKS":
+		return []any{self.challengeBlocks}, ""
 	case "coordinator":
 		return []any{subnetRootDeadlineTestSettlementV2}, ""
 	case "netuid":
@@ -142,8 +151,12 @@ func (self *subnetSettlementCutoverFixture) run(t *testing.T, block uint64) Aler
 	}}
 	if !self.vaultV2Missing {
 		node.contracts[subnetRootDeadlineTestVaultV2] = &subnetReplayTestContract{contract: vault, handle: self.vaultV2}
+		node.logs[subnetRootDeadlineTestVaultV2] = append([]types.Log(nil), self.vaultV2Logs...)
 	}
-	alerts := runSubnetSettlement(t, NewSubnetSettlementSignal(), settings)
+	if self.signal == nil {
+		self.signal = NewSubnetSettlementSignal()
+	}
+	alerts := runSubnetSettlement(t, self.signal, settings)
 	if node.exchanges == 0 || settings.SubnetReplay.RpcMaximumExchanges < node.exchanges {
 		t.Fatalf("relayed exchanges=%d outside the run budget", node.exchanges)
 	}

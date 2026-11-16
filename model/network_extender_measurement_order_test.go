@@ -219,7 +219,10 @@ func testMeasurementOrderRequest(ctx context.Context, extenderId server.Id, key 
 // is away among them, but not one whose certificate was withdrawn or expired.
 // The request of an extender that is not active is left out of either part,
 // and that of an extender that is gone is read, for the pass to refuse.
-// `limit` bounds the two parts together.
+// `limit` bounds the two parts together. Each extender counts in the country
+// the lag.dev sample places it in, a dual-stack candidate and a holder that is
+// away included, and one placed nowhere in the country it last activated
+// from.
 func TestNetworkExtenderMeasurementPendingReadsTheCapsOrder(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -317,6 +320,66 @@ func TestNetworkExtenderMeasurementPendingReadsTheCapsOrder(t *testing.T) {
 		want = []server.Id{rotating, away, gone, inactive, inHk, inUs}
 		if got := pendingIds(10); !slices.Equal(got, want) {
 			t.Fatalf("pending once both are back = %v, want %v", got, want)
+		}
+
+		// so far GeoLite2 placed none of them, and each counted in the
+		// country it last activated from. Now a dual-stack extender asks, and
+		// a dual-stack holder goes away, each last activated from a country
+		// the sample does not place it in, as two did on Main: the first by
+		// an IPv4 address GeoLite2 places in Riga, which a network in Hong
+		// Kong leases, and the second by an IPv6 address GeoLite2 places only
+		// in its network's country, Malaysia, while it places the IPv4 address
+		// in a Hong Kong city
+		useTestLagAddressPlaces(t, map[string]*LagAddressPlace{
+			"198.51.100.20":  testLagAddressPlace("lv", "Riga", 5, 402279),
+			"2001:db8:20::1": testLagAddressPlace("hk", "", 1000, 150452),
+			"198.51.100.21":  testLagAddressPlace("hk", "Tseung Kwan O", 20, 154321),
+			"2001:db8:21::1": testLagAddressPlace("my", "", 1000, 154321),
+		})
+		activate := func(index int, networkId server.Id, ipVersion int, ip string, countryCode string) server.Id {
+			t.Helper()
+			sign, _ := testRecordSigner()
+			activation := testExtenderActivation(
+				[]byte(fmt.Sprintf("extender-public-key-measurement-order-%03d", index)),
+				ipVersion,
+				ip,
+			)
+			activation.CountryCode = countryCode
+			activation.NetworkId = networkId
+			activated := ActivateNetworkExtender(ctx, activation, sign)
+			if activated == nil {
+				t.Fatalf("the activation was not stored")
+			}
+			return activated.Extender.ExtenderId
+		}
+		dualStackNetwork := server.NewId()
+		activate(20, dualStackNetwork, 6, "2001:db8:20::1", "hk")
+		dualStack := activate(20, dualStackNetwork, 4, "198.51.100.20", "lv")
+		testMeasurementOrderRequest(ctx, dualStack, "key-dual-stack", now.Add(-time.Hour))
+		awayInHkNetwork := server.NewId()
+		activate(21, awayInHkNetwork, 4, "198.51.100.21", "hk")
+		awayInHk := activate(21, awayInHkNetwork, 6, "2001:db8:21::1", "my")
+		testMeasurementOrderRequest(ctx, awayInHk, "key-away-in-hk", now.Add(-3*day))
+		connect.AssertEqual(t, AddNetworkExtenderMeasurementCert(ctx, testMeasurementCert(awayInHk, []byte("key-away-in-hk"), now.Add(-3*day))), true)
+		RecordNetworkExtenderProbeResult(ctx, awayInHk, 4, false, now.Add(-20*time.Minute), 1, testRevocationSigner())
+		RecordNetworkExtenderProbeResult(ctx, awayInHk, 6, false, now.Add(-20*time.Minute), 1, testRevocationSigner())
+
+		countries := Testing_GetNetworkExtenderMeasurementOrderCountries(ctx, now)
+		connect.AssertEqual(t, countries[dualStack], "hk")
+		connect.AssertEqual(t, countries[awayInHk], "hk")
+		connect.AssertEqual(t, countries[hkServing], "hk")
+		connect.AssertEqual(t, countries[inUs], "us")
+		connect.AssertEqual(t, countries[gone], "")
+
+		// hk holds two certificates, so its request is at 3, after the US's
+		// first, and the dual-stack request is hk's second, at 4, after the
+		// US's other. Counted where they last activated from, the dual-stack
+		// request would go at 1 in lv, right after the gone extender's, and
+		// with the one away counted in my, hk's request and the dual-stack
+		// one would both go before the US's other
+		want = []server.Id{rotating, away, gone, inactive, inHk, inUs, dualStack}
+		if got := pendingIds(10); !slices.Equal(got, want) {
+			t.Fatalf("pending once the sample places them = %v, want %v", got, want)
 		}
 	})
 }

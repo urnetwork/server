@@ -31,7 +31,7 @@ func TestMigrationsTrustedInstrumentPublishedPrefixesHaveNoDrift(t *testing.T) {
 func TestMigrationsTrustedInstrumentSuccessorContractCustody(t *testing.T) {
 	predecessor := migrationCurrentSuffixTestContract(t, 897)
 	contract := migrationCurrentSuffixTestContract(t, 900)
-	if predecessor.artifact.removedVersion != 900 || contract.artifact.rowColumn != 311 || contract.artifact.removedVersion != 0 {
+	if predecessor.artifact.removedVersion != 900 || contract.artifact.rowColumn != 311 || contract.artifact.removedVersion != server.CompetitionProductionBenefitMigrationVersion() {
 		t.Fatal("trusted instrument successor has wrong lifetime or column")
 	}
 	lockDigest, productIntent, sourceAuthorized := server.CompetitionTrustedInstrumentBodiesSql()

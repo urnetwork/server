@@ -411,6 +411,14 @@ func refuseProviderEgressHealthTime(args *SubmitProviderEgressHealthArgs, now ti
 // passes included; the cut here is what the wire allows for any other
 // submitter, since a run names its failures and not its passes.
 //
+// A versioned URL outcome is one load, which its evidence names. Its source,
+// the general catalog or the provider's country list, is read from the served
+// catalog, and an outcome on a destination that has not graduated (a country
+// site the refresh has not graduated, a general site on probation) is stored
+// measured but unscored: in the history and the rolling quota, out of the
+// eight-hour window (provider_egress_url_source.go,
+// model/provider_egress_country_site.go).
+//
 // A "reputation" key inside class_results is still rejected outright. The
 // class dissolved into the sites, so no current prober sends one; a body that
 // carries one is from a prober that would have scored the class twice, and the
@@ -439,6 +447,12 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 		}
 		if tlsFailure != args.TLSAuthenticationFailure {
 			return refuseProviderEgressIngest("URL security evidence disagrees with the aggregate TLS flag.")
+		}
+		if args.UrlProbeEvidence.HasLegVerdict() {
+			// the place judgement of a silent HTTP/3 leg or a failed IPv6 leg
+			// is this server's (model.JudgeProviderEgressLegs), never a
+			// prober's
+			return refuseProviderEgressIngest("An HTTP/3 verdict is judged by the server, as is an IPv6 verdict.")
 		}
 	}
 	if args.OKCount < 0 || args.TotalCount < 0 {
@@ -524,15 +538,37 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 	}
 	if args.UrlProbeEvidence != nil {
 		health.MeasuredAt = args.UrlProbeEvidence.MeasuredAt
+		// where the destination came from, from the served catalog; the store
+		// keeps an outcome on probation out of every score
+		// (provider_egress_url_source.go)
+		sources := getProviderEgressUrlSources()
+		name := args.UrlProbeEvidence.Destination.Name
+		source, countryCodes := sources.of(args.UrlProbeEvidence.Destination)
+		if source == model.ProviderEgressUrlSourceGeneral && !model.ProviderEgressDestinationInPool(ctx, name, sources.configured(name)) {
+			// neither one of this host's country sites nor in the pool as the
+			// pool serves it: a country site this host's catalog does not list
+			// yet, or any country site while it cannot parse the catalog.
+			// Fail closed, so it is never scored as general or reaches the
+			// Online rule.
+			source = model.ProviderEgressUrlSourceUnrecognized
+			health.UrlProbation = true
+		}
+		health.UrlSource = source
+		health.UrlCountryCode = providerEgressUrlCountryOf(ctx, args.ClientId, countryCodes)
 	}
 	// Preserve legacy scoring semantics only for legacy diagnostic reports.
-	// Every versioned URL error remains in its policy-version denominator.
+	// A versioned URL error remains in its policy-version denominator unless
+	// its destination is on probation, which the store decides.
 	if args.UrlProbeEvidence == nil {
 		place := model.GetProviderEgressPlaces(ctx, []server.Id{args.ClientId})[args.ClientId]
 		health = model.ScoreProviderEgressHealth(health, place, model.GetProviderEgressHealthScoring(ctx))
 	}
+	// A silent HTTP/3 leg counts against the provider only where its place
+	// carries QUIC to the URL, and a failed IPv6 leg only where its place
+	// carries IPv6 to it; elsewhere the outcome counts as the legs before.
+	health = model.JudgeProviderEgressLegs(ctx, health)
 
-	model.SetProviderEgressHealth(ctx, health)
+	recordProviderEgressUrlOutcome(health, model.StoreProviderEgressHealth(ctx, health))
 	return nil
 }
 

@@ -29,10 +29,13 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urnetwork/glog"
 	"gopkg.in/yaml.v3"
@@ -248,6 +251,14 @@ type StV1SweepChain struct {
 	RecordedRoot     [32]byte
 	RecordedArtifact [32]byte
 	RecordReadError  string
+	// Owner is STSettlement2's owner() at the head. Since 2026-11-06 it is a
+	// TimelockController, so the Safe schedules each owner call there, and
+	// anyone executes it OwnerMinDelay seconds later. OwnerMinDelay stays 0
+	// while the Safe owns STSettlement2 itself. OwnerReadError notes a failed
+	// read, display-only.
+	Owner          common.Address
+	OwnerMinDelay  uint64
+	OwnerReadError string
 }
 
 // StV1SweepClient is the chain surface of the sweep chain. The close is the
@@ -688,6 +699,9 @@ func stV1SweepNext(in *stV1SweepInput) stV1SweepAction {
 		if !chain.AssignSelector {
 			return stV1SweepAction{kind: stV1SweepActAwaitAssign, epoch: epoch, amount: amount, reason: "the STSettlement2 phase C upgrade is not live; the owner's Safe upgrades, then assigns"}
 		}
+		if 0 < chain.OwnerMinDelay {
+			return stV1SweepAction{kind: stV1SweepActAwaitAssign, epoch: epoch, amount: amount, reason: fmt.Sprintf("the owner's Safe schedules assignSurplus(%d, %d, %s) on STSettlement2 through the timelock %s; anyone executes it %s later, before epoch %d closes", in.noId, chain.V2NextEpoch, amount, stV1SweepAddress(chain.Owner), time.Duration(chain.OwnerMinDelay)*time.Second, chain.V2NextEpoch)}
+		}
 		return stV1SweepAction{kind: stV1SweepActAwaitAssign, epoch: epoch, amount: amount, reason: fmt.Sprintf("the owner's Safe assigns: assignSurplus(%d, %d, %s) on STSettlement2", in.noId, chain.V2NextEpoch, amount)}
 	}
 	return act(stV1SweepActRefuse, epoch, "the sweep entitlement is %s", stV1SweepStatusName(sweep.Status))
@@ -1080,12 +1094,60 @@ func stV1SweepRecorded(epoch uint64, chain *StV1SweepChain) bool {
 }
 
 // StV1SweepSafeCall is one owner call the governance Safe signs, built from
-// the snapshot: the target, the calldata and what it does.
+// the snapshot: the target, the calldata and what it does. When a timelock
+// owns STSettlement2, the Safe's call is the timelock's schedule of the owner
+// call, and ExecuteCalldata is the timelock's execute of it, which anyone
+// sends once the delay has passed.
 type StV1SweepSafeCall struct {
-	Name     string `json:"name"`
-	To       string `json:"to"`
-	Calldata string `json:"calldata"`
-	Note     string `json:"note"`
+	Name            string `json:"name"`
+	To              string `json:"to"`
+	Calldata        string `json:"calldata"`
+	ExecuteCalldata string `json:"execute_calldata,omitempty"`
+	Note            string `json:"note"`
+}
+
+// The OpenZeppelin 5 TimelockController calls an owner call goes through.
+const stV1SweepTimelockAbiJson = `[
+ {"type":"function","name":"schedule","stateMutability":"nonpayable","inputs":[{"name":"target","type":"address"},{"name":"value","type":"uint256"},{"name":"data","type":"bytes"},{"name":"predecessor","type":"bytes32"},{"name":"salt","type":"bytes32"},{"name":"delay","type":"uint256"}],"outputs":[]},
+ {"type":"function","name":"execute","stateMutability":"payable","inputs":[{"name":"target","type":"address"},{"name":"value","type":"uint256"},{"name":"payload","type":"bytes"},{"name":"predecessor","type":"bytes32"},{"name":"salt","type":"bytes32"}],"outputs":[]}
+]`
+
+var stV1SweepTimelockAbi = func() abi.ABI {
+	parsed, err := abi.JSON(strings.NewReader(stV1SweepTimelockAbiJson))
+	if err != nil {
+		panic(err)
+	}
+	return parsed
+}()
+
+// stV1SweepThroughTimelock turns an owner call on STSettlement2 into the
+// Safe's schedule of it on the timelock that owns STSettlement2, for the
+// timelock's least delay, with the execute that anyone may send afterwards.
+// The predecessor and the salt are zero, as sn-mainnet's owner-call review
+// builds them by default.
+func stV1SweepThroughTimelock(cfg *StConfig, chain *StV1SweepChain, call StV1SweepSafeCall) (StV1SweepSafeCall, error) {
+	inner, err := hexutil.Decode(call.Calldata)
+	if err != nil {
+		return call, err
+	}
+	delay := new(big.Int).SetUint64(chain.OwnerMinDelay)
+	schedule, err := stV1SweepTimelockAbi.Pack("schedule", cfg.SettlementV2, new(big.Int), inner, [32]byte{}, [32]byte{}, delay)
+	if err != nil {
+		return call, err
+	}
+	execute, err := stV1SweepTimelockAbi.Pack("execute", cfg.SettlementV2, new(big.Int), inner, [32]byte{}, [32]byte{})
+	if err != nil {
+		return call, err
+	}
+	wait := time.Duration(chain.OwnerMinDelay) * time.Second
+	note := fmt.Sprintf("%s. The timelock %s owns STSettlement2: the Safe schedules this call there, and %s later anyone sends execute_calldata to the timelock", call.Note, stV1SweepAddress(chain.Owner), wait)
+	if call.Name == "assignSurplus" {
+		note += fmt.Sprintf("; schedule it at least %s before epoch %d closes", wait, chain.V2NextEpoch)
+	}
+	return StV1SweepSafeCall{
+		Name: "schedule " + call.Name, To: stV1SweepAddress(chain.Owner), Calldata: stV1SweepHex(schedule),
+		ExecuteCalldata: stV1SweepHex(execute), Note: note,
+	}, nil
 }
 
 // stV1SweepSafeCalls returns the owner calls due at the snapshot: the
@@ -1110,6 +1172,15 @@ func stV1SweepSafeCalls(cfg *StConfig, epoch uint64, chain *StV1SweepChain, surp
 		if calldata, err := StV1SweepPackAssign(cfg.NoId, chain.V2NextEpoch, amount); err == nil {
 			calls = append(calls, StV1SweepSafeCall{Name: "assignSurplus", To: to, Calldata: stV1SweepHex(calldata), Note: fmt.Sprintf("assign %s rao into epoch %d's funding snapshot; it reverts InvalidEpoch once epoch %d closes, then rebuild for epoch %d", amount, chain.V2NextEpoch, chain.V2NextEpoch, chain.V2NextEpoch+1)})
 		}
+	}
+	if 0 < chain.OwnerMinDelay && chain.Owner != (common.Address{}) {
+		scheduled := make([]StV1SweepSafeCall, 0, len(calls))
+		for _, call := range calls {
+			if wrapped, err := stV1SweepThroughTimelock(cfg, chain, call); err == nil {
+				scheduled = append(scheduled, wrapped)
+			}
+		}
+		return scheduled
 	}
 	return calls
 }

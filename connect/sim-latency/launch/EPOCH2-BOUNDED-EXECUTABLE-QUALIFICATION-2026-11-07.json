@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "kind": "epoch2-bounded-executable-and-probe-cli-component-qualification/v1",
+  "source_commit": "028a4a6bc582b716f3a6245390372e8919c13b0e",
+  "source_parent": "13b208b5a67a9fda1b718b8acaca39bdcca27e21",
+  "receipt_path": "/home/by/urnetwork/temp/competition-native-collector-20261107.yhBY8FZ6/slice028a-qualified-goofe-20261107/qualification-receipt.json",
+  "receipt_sha256": "cb715bc464118585868faed6ba053533a30fa160a3d3b57826f0530c6232326c",
+  "source_map_sha256": "79d190c736037778b7e2e611a30fee7a8153c17cdb42bdb9e1fff2ebc2806cf7",
+  "catalog_sha256": "7e36548a754f7729c97d87614c26b7825904f96569f32d8103742a94c8b57443",
+  "ordinary": {"passed": 49, "failed": 0, "skipped": 0},
+  "race": {"passed": 49, "failed": 0, "skipped": 0, "race_findings": 0},
+  "causal_control": {
+    "test": "TestNativeQualificationExecutableRefusesDescriptorAndSameInodePathMutation",
+    "controlled_reversion_exit": 1,
+    "named_assertion_verified": true
+  },
+  "cli": {
+    "target": "./cli/competitionnativequalify",
+    "sha256": "c39eb7c2226f5c7fac8a6573bdd052e2585a651b2b587aacddcf8c9b9e73eed2",
+    "go": "go1.27.3 linux/amd64",
+    "static_cgo_disabled": true,
+    "executed": false
+  },
+  "all_phase_source_dependency_and_module_custody_verified": true,
+  "exact_catalog_run_pass_match": true,
+  "owned_units_and_cgroups_gone": true,
+  "synthetic_injected_private_files_only": true,
+  "complete_native_collector": false,
+  "actual_native_trials": false,
+  "runtime_qualified": false,
+  "source_approved": false,
+  "installed": false,
+  "production_scoring_changed": false
+}

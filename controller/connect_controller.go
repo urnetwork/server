@@ -56,6 +56,18 @@ var MaxContractTransferByteCount = func() model.ByteCount {
 	)
 }()
 
+// Sets the contract ceiling every payer is granted up to, returning the
+// restore. It never goes below MinContractTransferByteCount, so a granted
+// contract still fits a message. It changes the process-wide ceiling: tests
+// that call it must not run in parallel and must defer the restore.
+func Testing_SetMaxContractTransferByteCount(byteCount model.ByteCount) (restore func()) {
+	previous := MaxContractTransferByteCount
+	MaxContractTransferByteCount = max(MinContractTransferByteCount, byteCount)
+	return func() {
+		MaxContractTransferByteCount = previous
+	}
+}
+
 // urnetwork_connect_transfer_bytes counts bytes transferred on the connect
 // path, summed from the acked byte counts of closed and checkpointed transfer
 // contracts (see CloseContract). the acked byte count reported at each
@@ -486,6 +498,22 @@ func ConnectControlFrames(
 	refusals := connectControlRefusalsFromContext(ctx)
 
 	for _, frame := range frames {
+		if frame.MessageType == contractsNoRecordMessageType {
+			// read by its number, before the generic decode, so this holds with
+			// a connect that does or does not know the message
+			// (connect_control_no_record.go)
+			err := observeControlFrame(ctx, contractsNoRecordControlMessage{}, defaultControlFrameMetrics, func() error {
+				if refusals != nil {
+					return errConnectControlRefusalNotPrepared
+				}
+				return ContractsNoRecord(ctx, clientId, frame.MessageBytes)
+			})
+			if err != nil {
+				recordControlFrameFailure(contractsNoRecordControlMessage{}, err)
+				errs = append(errs, err)
+			}
+			continue
+		}
 		message, err := connect.FromFrame(frame)
 		if err != nil {
 			// a frame that will not decode is client-supplied bytes; `nil`
@@ -548,6 +576,13 @@ func ConnectControlFrames(
 				// answered before authentication (connect_control_discard.go).
 				// One in any other pack is a no-op, so its error cannot make
 				// the client drop the replies of the frames beside it.
+
+			case *protocol.ExchangeSignals:
+				// an extender's answer to a webrtc carrier offer the resident
+				// relayed from the control id (connect/EXTENDER.md S8). The
+				// resident's internal client takes it on its own signal
+				// receive path, which waits for it; here it is a no-op, so the
+				// answer is no control failure
 
 			case *protocol.ResidentMoveResult:
 				// validated against the client's move intent in Redis, since
@@ -904,8 +939,9 @@ func CreateContract(
 
 		// network peers never fall back to stream: when the companion reply
 		// is same-network and the destination advertises the network mode,
-		// settle it as a non-companion network contract (the no-escrow path,
-		// same as the forward direction between network peers)
+		// settle it as a non-companion network contract, escrowed from the
+		// network's balance like the forward direction between network peers,
+		// with the destination kept as its usage origin
 		if relationshipDetails.Mode == model.ProvideModeNetwork &&
 			GetProvideModes(ctx, destinationId)[model.ProvideModeNetwork] {
 			glog.V(2).Infof("[contract][network-normalize]%s->%s companion settled as network\n", clientId, destinationId)
@@ -1213,10 +1249,10 @@ func nextContract(
 }
 
 // The lifecycle lookup, Stream fallback origin lookup, provide secret read,
-// degradation valve, escrow and zero escrow creation and payer plan lookup
-// CreateContract and newContract perform. Tests replace them to check, without
-// a database, which byte count the controller requests and signs for a given
-// escrow, which creation path it takes, and which reads a refusal skips.
+// degradation valve, and escrow and zero escrow creation CreateContract and
+// newContract perform. Tests replace them to check, without a database, which
+// byte count the controller requests and signs for a given escrow, which
+// creation path it takes, and which reads a refusal skips.
 var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
 var companionOriginExists = model.CompanionOriginExists
 var getProvideSecretKey = model.GetProvideSecretKey
@@ -1225,61 +1261,20 @@ var createTransferEscrow = model.CreateTransferEscrow
 var createCompanionTransferEscrow = model.CreateCompanionTransferEscrow
 var createZeroEscrowContract = model.CreateZeroEscrowContract
 var createZeroEscrowCompanionContract = model.CreateZeroEscrowCompanionContract
-var isProNetwork = model.IsProNetwork
-
-// Returns the network whose balance escrows a contract, following the order in
-// which newContract chooses the funding path. Network and friends-and-family
-// contracts escrow nothing, so they have no payer. A companion contract is paid
-// by its destination, the source of its origin.
-func contractPayerNetworkId(
-	provideMode model.ProvideMode,
-	companionContract bool,
-	sourceNetworkId server.Id,
-	destinationNetworkId server.Id,
-) (payerNetworkId server.Id, escrowed bool) {
-	switch {
-	case provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily:
-		return server.Id{}, false
-	case companionContract:
-		return destinationNetworkId, true
-	default:
-		return sourceNetworkId, true
-	}
-}
-
-// The largest contract, per hop, granted against the payer's balance. pro.yml
-// may cap the contracts of a tier (<tier>.max_contract_transfer_byte_count,
-// e.g. free) so that a contract abandoned by its client holds less of the
-// payer's balance until it is force-closed. The grant is signed into the
-// contract and clients size from it, so a smaller grant is transparent to them.
-// While no tier sets a cap, the payer's plan is not looked up at all. A cap
-// never goes below MinContractTransferByteCount, so a granted contract still
-// fits a message.
-func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
-	c := model.Pro()
-	if c.MaxContractTransferByteCount(false) == 0 && c.MaxContractTransferByteCount(true) == 0 {
-		return MaxContractTransferByteCount
-	}
-	tierMaxContractTransferByteCount := c.MaxContractTransferByteCount(isProNetwork(ctx, payerNetworkId))
-	if tierMaxContractTransferByteCount == 0 {
-		return MaxContractTransferByteCount
-	}
-	return min(
-		max(MinContractTransferByteCount, tierMaxContractTransferByteCount),
-		MaxContractTransferByteCount,
-	)
-}
 
 // Model creation owns commit and returns its immutable database deadline.
 // Later stream work may reject the response but never changes that deadline.
-// Public and companion contracts always try escrow first, so a payer is
-// charged, shrink-to-fit included, while anything is left. Only when escrow
-// admission finds the balance exhausted (model.ErrContractBalanceExhausted)
-// and the contract degradation valve is open (model/network_degradation_model.go)
-// is the contract created without escrow instead (model/subscription_zero_escrow.go),
-// at the request size and the payer's escrow priority. Every other refusal,
-// including a data cap or test drain, stands. Network and friends-and-family
-// contracts are unchanged.
+// Every contract tries escrow first, so a payer is charged, shrink-to-fit
+// included, while anything is left: public, network and friends-and-family
+// contracts by their source's network, companions by their destination's.
+// Only when escrow admission finds the balance exhausted
+// (model.ErrContractBalanceExhausted) and the contract degradation valve is
+// open (model/network_degradation_model.go) is the contract created without
+// escrow instead (model/subscription_zero_escrow.go), at the request size and
+// the payer's escrow priority. Every other refusal, including a data cap or
+// test drain, stands. Network and friends-and-family contracts escrow like
+// public contracts and differ from them only in how they join streams
+// (model/subscription_network_escrow.go).
 func newContract(
 	ctx context.Context,
 	sourceId server.Id,
@@ -1308,7 +1303,6 @@ func newContract(
 		return
 	}
 	sourceNetworkId, destinationNetworkId := *sourceNetworkIdPointer, *destinationNetworkIdPointer
-	var err error
 	// Participant persistence happens after Redis assigns/reuses the stream id.
 	// Resolve every intermediary before reserving the payer's balance so a
 	// malformed or stale path cannot leave an unreturnable contract behind if
@@ -1320,13 +1314,9 @@ func newContract(
 		}
 	}
 
-	maxContractTransferByteCount := MaxContractTransferByteCount
-	if payerNetworkId, escrowed := contractPayerNetworkId(provideMode, companionContract, sourceNetworkId, destinationNetworkId); escrowed {
-		maxContractTransferByteCount = payerMaxContractTransferByteCount(ctx, payerNetworkId)
-	}
 	contractTransferByteCount = min(
 		max(MinContractTransferByteCount, transferByteCount),
-		maxContractTransferByteCount,
+		MaxContractTransferByteCount,
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
@@ -1339,20 +1329,30 @@ func newContract(
 				ctx = model.WithPairStreamBinding(ctx, sourceId, destinationId, forceStream)
 			}
 		}
-		contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
-			ctx,
+		// Escrowed from the source's network like a public contract: for a
+		// network contract the network both clients belong to, for a
+		// friends-and-family contract the dialing network. A same-network
+		// companion normalized to a network contract keeps its destination as
+		// its usage origin, while its source funds it.
+		escrow, err := createSourcePaidContract(
+			model.WithContractUsageOrigin(ctx, usageOriginIsSource),
 			sourceNetworkId,
 			sourceId,
 			destinationNetworkId,
 			destinationId,
 			contractTransferByteCount,
-			usageOriginIsSource,
 		)
 		if err != nil {
 			returnErr = err
 			return
 		}
-		priority = model.TrustedPriority
+		contractId = escrow.ContractId
+		expirationTime = escrow.ExpirationTime
+		// Sign only the capacity actually held in escrow, which shrinks to fit
+		// the payer's balance. A zero escrow contract holds none and returns
+		// the request.
+		contractTransferByteCount = escrow.TransferByteCount
+		priority = escrow.Priority
 
 		defer server.EnterContractCreationStage(ctx, server.ContractStageStream)()
 		switch streamVersion {
@@ -1510,7 +1510,7 @@ func newContract(
 		if streamVersion != 0 && (forceStream || 0 < len(intermediaryIds)) {
 			ctx = model.WithAddStreamBinding(ctx, sourceId, destinationId, intermediaryIds)
 		}
-		escrow, err := createTransferEscrow(
+		escrow, err := createSourcePaidContract(
 			ctx,
 			sourceNetworkId,
 			sourceId,
@@ -1518,18 +1518,6 @@ func newContract(
 			destinationId,
 			contractTransferByteCount,
 		)
-		// deduct first: free data only once the payer has nothing left and
-		// the valve is open
-		if errors.Is(err, model.ErrContractBalanceExhausted) && zeroContractCost(ctx) {
-			escrow, err = createZeroEscrowContract(
-				ctx,
-				sourceNetworkId,
-				sourceId,
-				destinationNetworkId,
-				destinationId,
-				contractTransferByteCount,
-			)
-		}
 		if err != nil {
 			returnErr = err
 			return
@@ -1561,10 +1549,44 @@ func newContract(
 	return
 }
 
+// Escrow admission for a contract its source pays: public, network and
+// friends-and-family. Deduct first: free data only once the payer has nothing
+// left and the valve is open.
+func createSourcePaidContract(
+	ctx context.Context,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+	contractTransferByteCount model.ByteCount,
+) (*model.TransferEscrow, error) {
+	escrow, err := createTransferEscrow(
+		ctx,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+		contractTransferByteCount,
+	)
+	if errors.Is(err, model.ErrContractBalanceExhausted) && zeroContractCost(ctx) {
+		return createZeroEscrowContract(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferByteCount,
+		)
+	}
+	return escrow, err
+}
+
 // Provide registers the client's provide keys, and the capabilities the provide
-// declares: post-quantum encryption sessions, which discovery requires of the
-// providers it offers a client that requires post-quantum encryption. A provide
-// from a release before the field declares none.
+// declares: post-quantum encryption sessions, kept as the record of what the
+// provider announced. Discovery never matches a provider on its declaration: a
+// client that requires post-quantum encryption is offered only providers with a
+// probe's positive evidence (model/provide_capability_model.go). A provide from
+// a release before the field declares none.
 func Provide(
 	ctx context.Context,
 	clientId server.Id,

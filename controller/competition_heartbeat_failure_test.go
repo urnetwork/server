@@ -188,8 +188,13 @@ func exerciseCompetitionHeartbeatFailure(t *testing.T, cause error, failHost boo
 	if failHost {
 		wantReason = "host_heartbeat_failed"
 	}
-	if store.diagnosticCalls != 1 || store.handbacks != 0 || store.jobId != job.JobId || store.reason != wantReason || store.detail != competitionHeartbeatFailureDetails(cause) {
+	legacy := store.detail
+	legacy.HeartbeatOwner = nil
+	if store.diagnosticCalls != 1 || store.handbacks != 0 || store.jobId != job.JobId || store.reason != wantReason || legacy != competitionHeartbeatFailureDetails(cause) {
 		t.Fatalf("safe heartbeat handback evidence missing or changed: calls=%d legacy=%d reason=%s detail=%+v", store.diagnosticCalls, store.handbacks, store.reason, store.detail)
+	}
+	if failHost && store.detail.HeartbeatOwner != nil || !failHost && (store.detail.HeartbeatOwner == nil || store.detail.HeartbeatOwner.StoreCalls != 1 || store.detail.HeartbeatOwner.LastStoreOutcome != competitionHeartbeatStoreFailed) {
+		t.Fatal("job-only owner diagnostics were missing or leaked into host renewal")
 	}
 	if !store.joined || !store.cleanupContextLive || store.completedCount() != 0 {
 		t.Fatal("handback preceded joined cleanup, reused canceled context or completed the job")

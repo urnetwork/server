@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -332,7 +333,11 @@ func TestCompetitionRoundBaselinePreparationRejectsLocalAndCorruptRetention(t *t
 		archive := &blobArtifactArchive{store: store}
 		manifest, err := archive.ArchiveRoundBaselinePreparation(context.Background(), fixture.settings, fixture.preparation, fixture.directory, document)
 		if mode == "corrupt_version" {
-			if err == nil || !strings.Contains(err.Error(), "failed authentication") {
+			// Public formatting deliberately redacts backend causes. Check the
+			// typed private chain, not text that must stay out of diagnostics.
+			var failure *competitionArtifactArchiveError
+			if !errors.As(err, &failure) || failure.phase != "authenticate_retained_version" ||
+				failure.Unwrap() == nil || len(manifest) != 0 {
 				t.Fatal("corrupted retained version authorized baseline persistence", err)
 			}
 			continue

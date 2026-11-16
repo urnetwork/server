@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +23,15 @@ import (
 func trustedInstrumentTree(ctx context.Context, repositoryRoot, selectedCommit string, approval *model.CompetitionTrustedInstrumentApproval) (string, error) {
 	if err := controller.ValidateCompetitionTrustedInstrumentApproval(approval); err != nil {
 		return "", err
+	}
+	protectedHelpers, err := model.CompetitionWorkCoverageProtectedHelperPaths(approval.WorkCoveragePolicy)
+	if err != nil {
+		return "", err
+	}
+	for _, path := range protectedHelpers {
+		if !slices.Contains(approval.ProtectedPaths, path) {
+			return "", errors.New("coverage instrument approval omits a fixed dedicated helper preimage")
+		}
 	}
 	if !sourceGitShaPattern.MatchString(selectedCommit) {
 		return "", errors.New("trusted instrument requires the exact selected product commit")
@@ -77,6 +87,18 @@ func trustedInstrumentTree(ctx context.Context, repositoryRoot, selectedCommit s
 	tree, err := runIndex("write-tree")
 	if err != nil {
 		return "", err
+	}
+	for _, path := range protectedHelpers {
+		entry, err := sourceGitBytes(ctx, repositoryRoot, maximumSourceConfigBytes, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", strings.TrimSpace(string(tree)), "--", path)
+		if err != nil {
+			return "", errors.New("coverage instrument helper postimage is unavailable")
+		}
+		metadata, actualPath, found := strings.Cut(strings.TrimSuffix(string(entry), "\x00"), "\t")
+		fields := strings.Fields(metadata)
+		if !found || actualPath != path || len(fields) != 3 || fields[1] != "blob" ||
+			fields[0] != "100644" && fields[0] != "100755" || !sourceGitShaPattern.MatchString(fields[2]) {
+			return "", errors.New("coverage instrument helper postimage is not a regular committed file")
+		}
 	}
 	// Full-index, binary-safe diff bytes are the approval format. Comparison
 	// refuses extra paths, missing hunks, fuzz, offsets and unnoticed changes.
@@ -144,6 +166,9 @@ func sourceBuildAuthorizationIdentity(request reviewedSourceBuildRequest) string
 
 // Review and instrument operations share containment, but not authorization.
 func validateSourceBuildReceipt(request reviewedSourceBuildRequest, receipt reviewedSourceBuildReceipt) error {
+	if !reflect.DeepEqual(sourceBuildRequestWorkCoverage(request), receipt.WorkCoveragePolicy) {
+		return errors.New("source build receipt differs from the prospectively frozen coverage policy")
+	}
 	if sourceBuildRequestMinimumWork(request) != (receipt.G2VolumePolicy == model.CompetitionG2VolumePolicyMinimumWork) {
 		return errors.New("source build receipt differs from the prospectively frozen scoring policy")
 	}
@@ -161,7 +186,7 @@ func (self *sourceSupervisorRuntime) instrumentSelectedSource(ctx context.Contex
 	if err != nil {
 		return err
 	}
-	if future.EvaluationPolicy.G2VolumePolicy == current.G2VolumePolicy {
+	if future.EvaluationPolicy.G2VolumePolicy == current.G2VolumePolicy && reflect.DeepEqual(future.EvaluationPolicy.WorkCoveragePolicy, current.WorkCoveragePolicy) {
 		return nil
 	}
 	if self.settings.FutureEpochPolicy == nil || self.settings.FutureEpochPolicy.TrustedInstrument == nil || current.Staging || intent.TargetEpoch != 2 || current.TargetEpoch != 1 ||
@@ -201,6 +226,7 @@ func (self *sourceSupervisorRuntime) instrumentSelectedSource(ctx context.Contex
 	}
 	intent.SourceGeneration = current.SourceGeneration + 1
 	intent.G2VolumePolicy, intent.TrustedInstrument = model.CompetitionG2VolumePolicyMinimumWork, proof
+	intent.WorkCoveragePolicy = approval.WorkCoveragePolicy.Clone()
 	var generation reviewedSourceGeneration
 	if proof.SelectedProductKind == "reviewed_source_carry_forward" {
 		intent.Kind = "trusted_instrument_transition"
@@ -214,6 +240,7 @@ func (self *sourceSupervisorRuntime) instrumentSelectedSource(ctx context.Contex
 	}
 	generation.SourceLockSha256, generation.Repositories = intent.SourceLockSha256, sourceRepositoriesFromCommits(commits)
 	generation.G2VolumePolicy, generation.TrustedInstrument = intent.G2VolumePolicy, proof
+	generation.WorkCoveragePolicy = intent.WorkCoveragePolicy.Clone()
 	manifest.EvaluationSource.Generations[len(manifest.EvaluationSource.Generations)-1] = generation
 	if err := validateSourceManifest(manifest); err != nil {
 		return err
@@ -230,17 +257,11 @@ func (self *sourceSupervisorRuntime) instrumentSelectedSource(ctx context.Contex
 // Builds the protected child through the existing offline pipeline and actual
 // independent qualifier. No passed receipt or runtime pin is synthesized here.
 func (self *sourceSupervisorRuntime) buildTrustedInstrument(ctx context.Context, current, intent *model.CompetitionSourceActivation, manifest *sourceManifest, stagedRoots map[string]string) error {
-	proof := intent.TrustedInstrument
-	manifestBytes, err := yaml.Marshal(manifest)
+	request, err := self.trustedInstrumentBuildRequest(current, intent, manifest, stagedRoots)
 	if err != nil {
 		return err
 	}
-	proposal := &reviewedSourceProposal{Schema: 2, Staging: false, BaseSourceLockSha256: proof.SelectedProductSourceLockSha256,
-		SourceLockSha256: intent.SourceLockSha256, Commits: intent.Commits, StagedRoots: stagedRoots, PatchSha256: proof.Approval.PatchSha256,
-		EvaluatedImageDigest: current.EvaluatorImageDigest, WinnerReviewPolicy: intent.WinnerReviewPolicy, CandidatePathBase: self.settings.PatchPolicy.PathBase}
-	request := reviewedSourceBuildRequest{Operation: "isolated_trusted_instrument_build", Proposal: proposal, SourceManifest: manifestBytes, SourceGeneration: intent.SourceGeneration,
-		ConfigLocalDirectory: filepath.Join(self.repositoriesRoot, "config", "local"), VaultLocalDirectory: filepath.Join(self.repositoriesRoot, "vault", "local"),
-		SandboxContract: "offline_evaluator_containment_v1", TrustedInstrument: proof}
+	proof := intent.TrustedInstrument
 	content, err := runSourceSupervisorProgram(ctx, self.buildCommand, self.buildSha256, request, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
 	if err != nil {
 		return err
@@ -256,4 +277,20 @@ func (self *sourceSupervisorRuntime) buildTrustedInstrument(ctx context.Context,
 	intent.EvaluatorImageDigest, intent.HostQualificationSha256 = receipt.EvaluatorImageDigest, receipt.HostQualificationSha256
 	intent.SimulatorSha256, intent.ScorerSha256 = receipt.SimulatorSha256, receipt.SimulatorSha256
 	return nil
+}
+
+// Local fixtures are configured independently of the operator's checkout root.
+func (self *sourceSupervisorRuntime) trustedInstrumentBuildRequest(current, intent *model.CompetitionSourceActivation, manifest *sourceManifest, stagedRoots map[string]string) (reviewedSourceBuildRequest, error) {
+	proof := intent.TrustedInstrument
+	manifestBytes, err := yaml.Marshal(manifest)
+	if err != nil {
+		return reviewedSourceBuildRequest{}, err
+	}
+	proposal := &reviewedSourceProposal{Schema: 2, Staging: false, BaseSourceLockSha256: proof.SelectedProductSourceLockSha256,
+		SourceLockSha256: intent.SourceLockSha256, Commits: intent.Commits, StagedRoots: stagedRoots, PatchSha256: proof.Approval.PatchSha256,
+		EvaluatedImageDigest: current.EvaluatorImageDigest, WinnerReviewPolicy: intent.WinnerReviewPolicy, CandidatePathBase: self.settings.PatchPolicy.PathBase}
+	request := reviewedSourceBuildRequest{Operation: "isolated_trusted_instrument_build", Proposal: proposal, SourceManifest: manifestBytes, SourceGeneration: intent.SourceGeneration,
+		ConfigLocalDirectory: self.settings.ConfigLocalDirectory, VaultLocalDirectory: self.settings.VaultLocalDirectory,
+		SandboxContract: "offline_evaluator_containment_v1", TrustedInstrument: proof}
+	return request, validateSourceBuildRequest(request)
 }

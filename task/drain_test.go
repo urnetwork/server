@@ -3,7 +3,7 @@ package task
 import (
 	"context"
 	"errors"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"strings"
 	"sync"
 	"testing"
@@ -531,12 +531,12 @@ func TestTaskWorkerRunDrainRace(t *testing.T) {
 							return
 						}
 						// mimic the main loop's re-entry cadence, compressed
-						time.Sleep(time.Duration(mathrand.Intn(2000)) * time.Microsecond)
+						time.Sleep(time.Duration(mathrand.IntN(2000)) * time.Microsecond)
 					}
 				}()
 			}
 
-			time.Sleep(time.Duration(mathrand.Intn(5000)) * time.Microsecond)
+			time.Sleep(time.Duration(mathrand.IntN(5000)) * time.Microsecond)
 			taskWorker.Drain()
 			loopWg.Wait()
 			taskWorker.Close()

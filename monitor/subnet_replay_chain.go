@@ -255,19 +255,33 @@ type subnetReplayLogWindow struct {
 // address and window, must not be removed, and must be strictly ordered; a
 // window that reaches the entry bound is treated as truncated, not complete.
 func readSubnetReplayLogs(ctx context.Context, rpc *subnetReplayRpc, address common.Address, maximumEntries int, windows ...*subnetReplayLogWindow) error {
+	return readSubnetReplayTopicLogs(ctx, rpc, address, nil, maximumEntries, windows...)
+}
+
+// The same windows narrowed to logs whose first topic is one of topics; a
+// node that returns any other log is refused. No topics reads every log.
+func readSubnetReplayTopicLogs(ctx context.Context, rpc *subnetReplayRpc, address common.Address, topics []common.Hash, maximumEntries int, windows ...*subnetReplayLogWindow) error {
+	requested := map[common.Hash]bool{}
+	for _, topic := range topics {
+		requested[topic] = true
+	}
 	calls := make([]*subnetReplayRpcCall, 0, len(windows))
 	for _, window := range windows {
 		if window.to < window.from {
 			return newSubnetReplayUnknown("log-window-invalid", nil)
 		}
 		window.logs = nil
+		filter := map[string]any{
+			"address":   address,
+			"fromBlock": hexutil.EncodeUint64(window.from),
+			"toBlock":   hexutil.EncodeUint64(window.to),
+		}
+		if len(topics) != 0 {
+			filter["topics"] = [][]common.Hash{topics}
+		}
 		window.call = subnetReplayRpcCall{
 			method: "eth_getLogs",
-			params: []any{map[string]any{
-				"address":   address,
-				"fromBlock": hexutil.EncodeUint64(window.from),
-				"toBlock":   hexutil.EncodeUint64(window.to),
-			}},
+			params: []any{filter},
 			result: &window.logs,
 		}
 		calls = append(calls, &window.call)
@@ -284,7 +298,7 @@ func readSubnetReplayLogs(ctx context.Context, rpc *subnetReplayRpc, address com
 		}
 		previousBlock, previousIndex := uint64(0), uint(0)
 		for i, log := range window.logs {
-			if log.Address != address || log.Removed || log.BlockNumber < window.from || window.to < log.BlockNumber || log.BlockHash == (common.Hash{}) || log.TxHash == (common.Hash{}) || len(log.Topics) == 0 {
+			if log.Address != address || log.Removed || log.BlockNumber < window.from || window.to < log.BlockNumber || log.BlockHash == (common.Hash{}) || log.TxHash == (common.Hash{}) || len(log.Topics) == 0 || (len(requested) != 0 && !requested[log.Topics[0]]) {
 				return newSubnetReplayUnknown("log-entry-invalid", nil)
 			}
 			if 0 < i && (log.BlockNumber < previousBlock || (log.BlockNumber == previousBlock && log.Index <= previousIndex)) {

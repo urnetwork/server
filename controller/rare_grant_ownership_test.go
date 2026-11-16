@@ -129,7 +129,7 @@ func TestRareGrantStripeRefundOwnershipRollsBackReceipt(t *testing.T) {
 		firstRefund := "synthetic-refund-" + server.NewId().String()
 		secondRefund := "synthetic-refund-" + server.NewId().String()
 		run := func(callCtx context.Context, refund, invoice string) error {
-			return stripeHandleRefund(reconcileTestSession(t, callCtx), refund, "synthetic-charge", invoice, "", model.PaymentReconcileActionRefunded, "charge.refunded", 500)
+			return stripeHandleRefund(reconcileTestSession(t, callCtx), refund, "synthetic-charge", invoice, "", model.PaymentReconcileActionRefunded, "charge.refunded", 500, false)
 		}
 		finish := pauseRareGrantControllerWriter(t, ctx, func(callCtx context.Context) error { return run(callCtx, firstRefund, invoiceId) })
 		defer finish()

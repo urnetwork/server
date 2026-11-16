@@ -37,7 +37,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -101,6 +101,21 @@ type ResidentTransportEdge struct {
 	// header or the Auth `provide_intent`), so the load table can count
 	// provider residents (MOVE.md §5.4)
 	ProvideIntent bool
+	// the address the client connected from, as the edge resolved it behind
+	// the ingress (session.ResolveClientAddress). The resident sends the
+	// client the set of its transports' addresses
+	// (resident_observed_addresses.go). Invalid from a peer that predates it.
+	ClientIp netip.Addr
+}
+
+// The edge's client ip of a resolved client address; invalid when the
+// address does not parse.
+func residentTransportClientIp(clientAddress string) netip.Addr {
+	addrPort, err := server.ParseClientAddress(clientAddress)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return addrPort.Addr().Unmap()
 }
 
 // The edge's family field of an observed ip version (4 or 6; else unknown).
@@ -684,9 +699,10 @@ func (self *Exchange) takeOverMovedResident(
 	if !nominated {
 		return false
 	}
-	// best effort: an intent left behind only ends with its ttl
-	if _, err := model.TakeResidentMoveIntent(ctx, clientId); err != nil && glog.V(1) {
-		glog.Infof("[move]take intent %s = %s\n", clientId, err)
+	// Nomination can overlap a newer move; remove only the intent we used.
+	// Best effort: an intent left behind only ends with its ttl.
+	if _, err := model.DeleteResidentMoveIntent(ctx, clientId, intent.MoveId); err != nil && glog.V(1) {
+		glog.Infof("[move]delete intent %s = %s\n", clientId, err)
 	}
 	residentMovesArrivedCounter.WithLabelValues(string(intent.Kind), self.localMoveHost()).Inc()
 	if glog.V(1) {
@@ -972,7 +988,7 @@ func (self *Exchange) drainMoveTargets() []netip.Addr {
 	if !ok {
 		return nil
 	}
-	return localHost.PickTargets(rand.Int63n)
+	return localHost.PickTargets(rand.Int64N)
 }
 
 // Sends one drain move: the intent, then the frame (compulsory with this

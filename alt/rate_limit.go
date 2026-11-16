@@ -32,6 +32,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/router"
 )
 
 // The limits one alt process applies, in the units the limiter uses.
@@ -386,8 +387,14 @@ func (self *Limits) takeTokenWithLock(addrLimit *limitsAddr, now time.Time) bool
 // A caller whose address cannot be parsed is served unlimited: alt only ever
 // serves real udp peers, and refusing a caller the limiter cannot identify
 // would drop valid traffic on a parse quirk rather than on a budget.
+//
+// The limits are also the ingress of whatever they wrap: the forwarding
+// headers are set from the connection before anything else reads the request
+// (ingress.go), so no front built on the limits can serve a client's own
+// X-UR-Forwarded-For. The limits themselves key on the connection's peer.
 func NewLimitedHandler(handler http.Handler, limits *Limits) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		router.SetIngressHeaders(r)
 		addrPort, err := server.ParseClientAddress(r.RemoteAddr)
 		if err != nil {
 			if glog.V(1) {

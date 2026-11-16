@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -11,8 +12,6 @@ import (
 	"runtime/debug"
 	"testing"
 	"time"
-
-	mathrand "math/rand"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -38,15 +37,25 @@ import (
 // Requires the test DB env (WARP_ENV=local + postgres/redis/vault), like the rest of
 // this package; skipped under -short.
 func TestExchangeRelayPoolBalance(t *testing.T) {
+	runExchangeRelayPoolBalance(t, localDeliveryTestTcp)
+}
+
+// The same relay with both transports and both forwards delivered in process:
+// every resident shares the one exchange, so each attaches in memory.
+func TestExchangeRelayPoolBalanceInProcess(t *testing.T) {
+	runExchangeRelayPoolBalance(t, localDeliveryTestInProcess)
+}
+
+func runExchangeRelayPoolBalance(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		testExchangeRelayPoolBalance(t)
+		testExchangeRelayPoolBalance(t, delivery)
 	})
 }
 
-func testExchangeRelayPoolBalance(t testing.TB) {
+func testExchangeRelayPoolBalance(t testing.TB, delivery localDeliveryTestMode) {
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
@@ -83,6 +92,7 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 	exchangeSettings.ForwardIdleTimeout = 5 * time.Second
 	exchangeSettings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 	exchangeSettings.ForwardEnforceActiveContracts = false
+	delivery.apply(exchangeSettings)
 
 	exchangeListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -100,6 +110,8 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 		exchangeSettings,
 		map[int]net.Listener{exchangePort: exchangeListener},
 	)
+	delivery.requireExchange(t, exchange)
+	localLinksBefore := snapshotLocalLinkCounts()
 
 	httpListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -209,7 +221,7 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 	transportB := newTransport(clientStrategyB, clientB.RouteManager(), networkIdB, userIdB, deviceIdB, clientIdB, clientBInstanceId)
 
 	messageContentBytes := make([]byte, messageContentSize/2)
-	mathrand.Read(messageContentBytes)
+	cryptorand.Read(messageContentBytes)
 	messageContent := hex.EncodeToString(messageContentBytes)
 
 	// send one message and wait for its receipt (round-trips the relay)
@@ -252,6 +264,9 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 	if delivered == 0 {
 		t.Fatal("no messages were relayed; the exchange relay did not work")
 	}
+	// both transports' residents and both forwards' destinations are in the
+	// one exchange
+	delivery.requireLinksSince(t, localLinksBefore, 2, 2)
 
 	// --- teardown, then assert return-to-baseline ---
 	clientA.Flush()

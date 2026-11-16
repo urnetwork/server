@@ -142,6 +142,13 @@ type StLedgerV2Client interface {
 	LedgerV2Demand(ctx context.Context, noId uint64, seq uint64, rootIndex uint64, index uint64) (uint8, error)
 	// LedgerV2Claimed reads vault2.claimed(noId, index) at the finalized head.
 	LedgerV2Claimed(ctx context.Context, noId uint64, index uint64) (uint256.Int, error)
+	// LedgerV2FinalizedBlock reads the finalized head's number, for a reader
+	// that reads several views at one block.
+	LedgerV2FinalizedBlock(ctx context.Context) (uint64, error)
+	// LedgerV2ClaimedAt reads vault2.claimed(noId, index) of each index at one
+	// block, in batched eth_calls of at most stMaximumEVMRPCBatchCalls to a
+	// request, the values in the indexes' order.
+	LedgerV2ClaimedAt(ctx context.Context, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error)
 	// LedgerV2Close sends closeOperatorEpoch under v2close:e:no.
 	LedgerV2Close(ctx context.Context, epoch uint64, noId uint64) (string, error)
 	// LedgerV2Commit sends commitDistribution under v2commit:e:no.
@@ -339,6 +346,14 @@ func (self *CoreStClient) LedgerV2LatestBlock(ctx context.Context) (uint64, erro
 	return latest, nil
 }
 
+func (self *CoreStClient) LedgerV2FinalizedBlock(ctx context.Context) (uint64, error) {
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("finalized head: %w", err)
+	}
+	return head.Number, nil
+}
+
 // The finalized root at an index, as vault2.roots returns it.
 func stLedgerV2FinalizedRootOf(index uint64, root stabi.ISTSettlementVault2Root) (*StLedgerV2FinalizedRoot, error) {
 	total, err := stUint256(root.Total)
@@ -444,11 +459,12 @@ func (self *CoreStClient) LedgerV2Answer(ctx context.Context, noId uint64, seq u
 	return self.sendLedgerV2(ctx, stLedgerV2AnswerOperation(noId, seq, answer.RootIndex, answer.Index), self.cfg.VaultV2, stLedgerV2PackCheckPath(noId, answer))
 }
 
-// stLedgerV2ErrorNames names every custom error of the v2 contracts and of
-// LedgerTree by selector.
+// stLedgerV2ErrorNames names every custom error of the v2 contracts, the
+// capture the flag carry and LedgerTree by selector. Errors the contracts
+// share have the same signature, so the same selector names them.
 var stLedgerV2ErrorNames = func() map[[4]byte]string {
 	names := map[[4]byte]string{}
-	for _, meta := range []*bind.MetaData{&stabi.STSettlement2MetaData, &stabi.STSettlementVault2MetaData} {
+	for _, meta := range []*bind.MetaData{&stabi.STSettlement2MetaData, &stabi.STSettlementVault2MetaData, &stabi.STCtfCarryMetaData} {
 		parsed, err := meta.ParseABI()
 		if err != nil {
 			panic(err)
@@ -482,13 +498,16 @@ func stLedgerV2RevertName(err error) string {
 // stLedgerV2SpentErrors are the v2 reverts that can never clear for an
 // intent's exact calldata: its window closed, its epoch was closed or its root
 // count moved, or someone else already did it (SPEC A6: a demand answered,
-// NoFault; a root finalized, replaced or deleted, NoPendingRoot).
+// NoFault; a root finalized, replaced or deleted, NoPendingRoot; a claim sent
+// by anyone first, NothingToClaim).
 var stLedgerV2SpentErrors = func() map[[4]byte]string {
 	spent := map[[4]byte]string{}
 	for _, name := range []string{
 		"InvalidWindow", "InvalidTransition", "NoPendingRoot", "NoFault", "UnknownRoot", "StaleRootCount",
 		"EpochOutOfRange", "TotalMismatch", "TotalNotIncreased", "InvalidLeafCount", "InvalidRoot",
-		"IndexOutOfRange", "InvalidProof", "MalformedPath",
+		"IndexOutOfRange", "InvalidProof", "MalformedPath", "NothingToClaim",
+		// capture the flag: a census already committed for the epoch
+		"CensusAlreadyCommitted",
 	} {
 		var selector [4]byte
 		copy(selector[:], crypto.Keccak256([]byte(name + "()"))[:4])

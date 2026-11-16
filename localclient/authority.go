@@ -20,9 +20,12 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// One hosted parent owns its derived clients and notification publisher.
-// Credential state is locked only for a scalar copy; database/controller calls
-// run outside that lock. Close follows the hosted device's completed join.
+// One hosted parent owns its derived clients. Its contract origin
+// notifications are its owner's shared instance when the owner passes one
+// (AuthoritySettings), which the authority borrows and never closes, and
+// otherwise its own, which it closes with itself. Credential state is locked
+// only for a scalar copy; database/controller calls run outside that lock.
+// Close follows the hosted device's completed join.
 type Authority struct {
 	networkId     server.Id
 	userId        server.Id
@@ -32,9 +35,13 @@ type Authority struct {
 	stateLock     sync.Mutex
 	parentJwt     string
 	notifications *model.ContractOriginNotifications
-	cancel        context.CancelFunc
-	closeOnce     sync.Once
-	closed        atomic.Bool
+	// whether notifications were built for this authority alone, so Close
+	// closes them; a borrowed owner's instance outlives every authority
+	ownsNotifications bool
+	// cancels the context of owned notifications; a no-op for borrowed ones
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closed    atomic.Bool
 	// the hosting process's appearance counter, nil when it has none; the
 	// process owns and closes it
 	appearances *model.ProviderAppearances
@@ -48,12 +55,22 @@ type Authority struct {
 	afterContractAdmissionForTest func()
 }
 
-// Owner-supplied bounds. The owner constructs them once and shares them with
-// every authority it creates, and closes the contract creation bound once
-// those authorities have stopped; nil keeps the unbounded legacy behavior.
+// Owner-supplied bounds and shared services. The owner constructs them once
+// and shares them with every authority it creates, and closes the contract
+// creation bound and the notifications once those authorities have stopped;
+// nil keeps the unbounded legacy behavior.
 type AuthoritySettings struct {
 	MintAdmission     *MintAdmission
 	ContractAdmission *ContractAdmission
+	// The owner's contract origin notifications, shared by all of its
+	// authorities instead of one instance (16 bucket and 2 publisher
+	// goroutines and a publish queue) per authority. Watches and route
+	// refusals are keyed by the (source, destination) pair, never by
+	// authority: a watch is registered and closed by its own request, and a
+	// refusal recorded through one authority is the right answer for an
+	// identical request through another. Nil builds one per authority, which
+	// the authority closes with itself.
+	ContractOriginNotifications *model.ContractOriginNotifications
 }
 
 // Signature, audience, current client and credential rotation are checked now
@@ -80,15 +97,49 @@ func NewWithSettings(ctx context.Context, token, apiUrl string, settings *Author
 		if err != nil || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || base.Scheme != "http" && base.Scheme != "https" {
 			return nil, errors.New("local API origin is invalid")
 		}
-		publisherCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		return &Authority{networkId: claims.NetworkId, userId: claims.UserId, clientId: *claims.ClientId, deviceId: *claims.DeviceId, apiUrl: strings.TrimRight(apiUrl, "/"), parentJwt: token,
-			notifications: model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings()), appearances: model.GetProviderAppearances(ctx), mintAdmission: settings.MintAdmission, contractAdmission: settings.ContractAdmission, cancel: cancel}, nil
+		return newAuthority(ctx, claims, token, apiUrl, settings), nil
 	}, func(err error) (*Authority, error) { return nil, err })
 }
 
-// Must be called only after the hosted device has joined every control owner.
+// Builds a validated parent's authority: claims carries its client and device
+// ids, and settings is non-nil. Without the owner's shared notifications in
+// settings, the authority builds its own and owns them.
+func newAuthority(ctx context.Context, claims *session.ByJwt, token string, apiUrl string, settings *AuthoritySettings) *Authority {
+	notifications := settings.ContractOriginNotifications
+	ownsNotifications := notifications == nil
+	cancel := context.CancelFunc(func() {})
+	if ownsNotifications {
+		var publisherCtx context.Context
+		publisherCtx, cancel = context.WithCancel(context.WithoutCancel(ctx))
+		notifications = model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings())
+	}
+	return &Authority{
+		networkId:         claims.NetworkId,
+		userId:            claims.UserId,
+		clientId:          *claims.ClientId,
+		deviceId:          *claims.DeviceId,
+		apiUrl:            strings.TrimRight(apiUrl, "/"),
+		parentJwt:         token,
+		notifications:     notifications,
+		ownsNotifications: ownsNotifications,
+		cancel:            cancel,
+		appearances:       model.GetProviderAppearances(ctx),
+		mintAdmission:     settings.MintAdmission,
+		contractAdmission: settings.ContractAdmission,
+	}
+}
+
+// Must be called only after the hosted device has joined every control owner,
+// so none of its requests still holds a watch. The owner's shared
+// notifications stay open for its other authorities; only owned ones close.
 func (self *Authority) Close() {
-	self.closeOnce.Do(func() { self.closed.Store(true); self.cancel(); self.notifications.Close() })
+	self.closeOnce.Do(func() {
+		self.closed.Store(true)
+		self.cancel()
+		if self.ownsNotifications {
+			self.notifications.Close()
+		}
+	})
 }
 
 func (self *Authority) token() string {
@@ -358,6 +409,11 @@ func (self *Authority) Get(ctx context.Context, requestUrl, token string) ([]byt
 		case "/auth/refresh":
 			var refreshed *controller.RefreshTokenResult
 			refreshed, err = controller.RefreshToken(s)
+			if session.RenewalRefused(err) {
+				// rotated, removed or revoked after authenticate's check: the
+				// 401 authenticate gives the same token
+				return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
+			}
 			result = refreshed
 			if err == nil && refreshed != nil && refreshed.Error == nil && refreshed.ByJwt != "" {
 				self.stateLock.Lock()

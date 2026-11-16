@@ -160,6 +160,24 @@ func WithErrorRetryCap(target Target, maxDelay time.Duration) Target {
 	return &errorRetryCappedTarget{Target: target, maxDelay: maxDelay}
 }
 
+type errorRetryFlooredTarget struct {
+	Target
+	minDelay time.Duration
+}
+
+// WithErrorRetryFloor opts one registered target into a minimum failure delay,
+// including max-time cancellation, so a failed run, which keeps no Post to
+// re-arm its cadence, cannot restart at once. The original failure, pending
+// task, error count, absence of a success post and the ordinary backoff above
+// the floor are unchanged. Drain and version-skew retries keep their own
+// short delays. Invalid floors preserve the target's existing policy.
+func WithErrorRetryFloor(target Target, minDelay time.Duration) Target {
+	if target == nil || !validTaskRetryDelay(minDelay) {
+		return target
+	}
+	return &errorRetryFlooredTarget{Target: target, minDelay: minDelay}
+}
+
 func taskTargetErrorRetryDelay(target Target, err error, errorCount int, randomUnit float64) (time.Duration, int) {
 	causes := inspectTaskRetryCauses(err)
 	delay, delta := taskErrorRetryDelayWithCauses(err, errorCount, randomUnit, causes)
@@ -167,7 +185,18 @@ func taskTargetErrorRetryDelay(target Target, err error, errorCount int, randomU
 		causes.complete && !causes.drained && !causes.targetMissing {
 		delay = min(delay, capped.maxDelay)
 	}
+	if floored, ok := target.(*errorRetryFlooredTarget); ok && validTaskRetryDelay(floored.minDelay) &&
+		causes.complete && !causes.drained && !causes.targetMissing {
+		delay = max(delay, floored.minDelay)
+	}
 	return delay, delta
+}
+
+// The failure delay the worker gives target's task after err at errorCount, at
+// the middle of its jitter. For tests of a target's registered retry policy.
+func Testing_TargetErrorRetryDelay(target Target, err error, errorCount int) time.Duration {
+	delay, _ := taskTargetErrorRetryDelay(target, err, errorCount, 0.5)
+	return delay
 }
 
 // Drain/version-skew precedence and ordinary jitter are unchanged. Only a root

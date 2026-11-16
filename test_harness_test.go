@@ -565,7 +565,7 @@ func TestConnectTestScriptPropagatesDiscoveryFailure(t *testing.T) {
 	}
 }
 
-// Models the mandatory admission command separately from the four output-filter
+// Models the mandatory admission commands separately from the four output-filter
 // tiers; every synthetic go invocation records its exact directory and arguments.
 // No repository test or service preflight runs.
 func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, string, string) {
@@ -580,6 +580,7 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 		filepath.Join(serverDir, "proxy"),
 		filepath.Join(serverDir, "connect", "perfvar"),
 		filepath.Join(serverDir, "fixture"),
+		filepath.Join(serverDir, "grafana"),
 	} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
@@ -594,21 +595,33 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		filepath.Join(serverDir, "test-env.sh"):                                  "#!/usr/bin/env bash\nreturn 0\n",
-		filepath.Join(serverDir, "test-dirs.sh"):                                 "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
+		filepath.Join(serverDir, "test-env.sh"):  "#!/usr/bin/env bash\nreturn 0\n",
+		filepath.Join(serverDir, "test-dirs.sh"): "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
+		// test.sh names the dashboard tests' promtool before its first command;
+		// the synthetic go never runs it
+		filepath.Join(serverDir, "grafana", "promtool.sh"):                       "#!/usr/bin/env bash\nprintf '/synthetic/promtool\\n'\n",
 		filepath.Join(workspaceRoot, "tests", "network-intensive-suite-lock.sh"): "#!/bin/sh\n[ \"$1\" = --verify-held ] && [ \"$2\" = run-all ]\n",
 		filepath.Join(binDir, "go"): `#!/bin/sh
 printf '%s\0' "${PWD#"$URNETWORK_ROOT"/}" "${WARP_TEST_ENV_FAIL_FAST:-}" "$@" >> "$URNETWORK_ROOT/go-invocations"
 printf '\n' >> "$URNETWORK_ROOT/go-invocations"
 if [ "$PWD" = "$URNETWORK_ROOT/server" ]; then
-  if [ "$#" -ne 9 ] || [ "$1" != test ] || [ "$2" != -p=1 ] ||
+  if [ "$#" -ne 8 ] || [ "$1" != test ] || [ "$2" != -p=1 ] ||
      [ "$3" != -race ] || [ "$4" != -count=1 ] || [ "$5" != -timeout=5m ] ||
-     [ "$6" != ./model ] || [ "$7" != ./taskworker/work ] || [ "$8" != -run ] ||
-     [ "$9" != '^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' ] ||
      [ "${WARP_TEST_ENV_FAIL_FAST:-}" != 1 ]; then
     printf 'unexpected admission invocation\n' >&2
     exit 86
   fi
+  case "$6" in
+    ./model) name=TestRedisAdmissionFixture ;;
+    ./taskworker/work) name=TestTransferDebitTaskPartitionsAndBoundedContinuation ;;
+    *) exit 86 ;;
+  esac
+  if [ "$7" = -list ]; then
+    [ "$8" = '^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' ] || exit 86
+    printf '%s\nok synthetic-package 0.001s\n' "$name"
+    exit 0
+  fi
+  [ "$7" = -run ] && [ "$8" = "^${name}$" ] || exit 86
   printf 'test-runner-admission\n'
   exit "${TEST_SERVER_RUNNER_ADMISSION_STATUS:-0}"
 fi
@@ -629,12 +642,23 @@ exit "$test_status"
 	return runnerPath, binDir, workspaceRoot
 }
 
-// Captures the exact first command independently of caller-supplied test flags.
-func testServerRunnerAdmissionInvocation() []string {
-	return []string{
-		"server", "1", "test", "-p=1", "-race", "-count=1", "-timeout=5m",
-		"./model", "./taskworker/work", "-run", testServerRunnerAdmissionPattern,
+// Pins discovery and exact-case execution independently of caller test flags.
+func testServerRunnerAdmissionInvocations() [][]string {
+	var invocations [][]string
+	for _, test := range []struct {
+		packagePath string
+		name        string
+	}{
+		{packagePath: "./model", name: "TestRedisAdmissionFixture"},
+		{packagePath: "./taskworker/work", name: "TestTransferDebitTaskPartitionsAndBoundedContinuation"},
+	} {
+		prefix := []string{"server", "1", "test", "-p=1", "-race", "-count=1", "-timeout=5m", test.packagePath}
+		invocations = append(invocations,
+			append(append([]string{}, prefix...), "-list", testServerRunnerAdmissionPattern),
+			append(append([]string{}, prefix...), "-run", "^"+test.name+"$"),
+		)
 	}
+	return invocations
 }
 
 // Checks every command in order, including argument boundaries and fail-fast scope.
@@ -710,15 +734,14 @@ exec "$TEST_SERVER_RUNNER_CAT"`
 			t.Fatalf("binary runner signature %q count = %d; want 4", signature, count)
 		}
 	}
-	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
-		testServerRunnerAdmissionInvocation(),
+	requireTestServerRunnerInvocations(t, workspaceRoot, append(testServerRunnerAdmissionInvocations(), [][]string{
 		append([]string{"server/proxy", "0", "test", "-timeout", "30m", "-v"}, callerArgs...),
 		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "0", "-p=1", "-parallel=1", "-v"}, callerArgs...),
 		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
 		append([]string{"server/fixture", "0", "test", "-timeout", "0", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
-	})
-	if count := bytes.Count(output, []byte("test-runner-admission\n")); count != 1 {
-		t.Fatalf("admission completion count = %d; want 1", count)
+	}...))
+	if count := bytes.Count(output, []byte("test-runner-admission\n")); count != 2 {
+		t.Fatalf("admission completion count = %d; want 2", count)
 	}
 	if bytes.Contains(output, []byte("--- FAIL")) || bytes.Contains(output, []byte("[flaky]")) {
 		t.Fatal("captured binary fixture leaked a synthetic failure signature")
@@ -762,10 +785,9 @@ func TestServerTestScriptReportsSignaledOutputFilter(t *testing.T) {
 	if !ok || exitErr.ExitCode() != 143 {
 		t.Fatalf("runner filter failure = %v, %q; want exit 143", err, output)
 	}
-	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
-		testServerRunnerAdmissionInvocation(),
+	requireTestServerRunnerInvocations(t, workspaceRoot, append(testServerRunnerAdmissionInvocations(), [][]string{
 		{"server/proxy", "0", "test", "-timeout", "30m", "-v"},
-	})
+	}...))
 	upstreamStatusBytes, readErr := os.ReadFile(upstreamStatusPath)
 	if readErr != nil {
 		t.Fatal(readErr)
@@ -808,7 +830,7 @@ func TestServerTestScriptPropagatesAdmissionFailure(t *testing.T) {
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != status {
 			t.Fatalf("admission status %d: runner = %v, %q", status, err, output)
 		}
-		requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{testServerRunnerAdmissionInvocation()})
+		requireTestServerRunnerInvocations(t, workspaceRoot, testServerRunnerAdmissionInvocations()[:2])
 		for _, path := range []string{upstreamStatusPath, filepath.Join(workspaceRoot, "filter-invocations")} {
 			if record, err := os.ReadFile(path); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("admission status %d ran a later child: record=%q err=%v", status, record, err)
@@ -861,10 +883,9 @@ func TestServerTestScriptPreservesUpstreamFailure(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 70 {
 		t.Fatalf("runner upstream failure = %v, %q; want exit 70", err, output)
 	}
-	requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
-		testServerRunnerAdmissionInvocation(),
+	requireTestServerRunnerInvocations(t, workspaceRoot, append(testServerRunnerAdmissionInvocations(), [][]string{
 		{"server/proxy", "0", "test", "-timeout", "30m", "-v"},
-	})
+	}...))
 	upstreamStatusBytes, err := os.ReadFile(upstreamStatusPath)
 	if err != nil {
 		t.Fatal(err)
@@ -872,10 +893,122 @@ func TestServerTestScriptPreservesUpstreamFailure(t *testing.T) {
 	if string(upstreamStatusBytes) != "70\n" {
 		t.Fatalf("upstream status = %q; want 70", upstreamStatusBytes)
 	}
-	if bytes.Count(output, []byte("test-runner-admission\n")) != 1 ||
+	if bytes.Count(output, []byte("test-runner-admission\n")) != 2 ||
 		bytes.Count(output, []byte("test-runner-upstream-failure\n")) != 1 ||
 		bytes.Contains(output, []byte("test output filter failed")) {
 		t.Fatalf("successful filter masked the upstream boundary: %q", output)
+	}
+}
+
+// The six public native-fee roots build the sn release gate's exports
+// themselves when none of the gate's variables is set, but their verifier runs
+// only on Linux. So the runner always runs them on Linux, and on any other host
+// leaves out exactly those six, from ./model and ./controller alone, only when
+// none of the variables is set, and says so; any one of them set, even empty,
+// runs them exactly as the caller asked.
+func TestServerTestScriptLeavesNativeFeePublicRootsOutOnlyOffLinuxWithoutGateExports(t *testing.T) {
+	if os.Getenv(testServerRunnerChildMode) == "native-fee-skip" {
+		os.Exit(0)
+	}
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateVariables := []string{
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY",
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER",
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER_SHA256",
+	}
+	// The six roots by exact name: the controller's other public-named test is a
+	// pure unit test and always runs.
+	skips := map[string][]string{
+		"server/model":      {"-skip", "^TestStNativeFeeSettlementPublic(OwnedProofRetainsAllOriginals|MissingRefundKeepsFullCeiling|ProofRecoversLostSignerResult|FractionalConflictRevokesCredit)$"},
+		"server/controller": {"-skip", "^TestNativeFeeControllerPublic(ProofSettlesWithoutSignerConfiguration|UnknownRefundKeepsOriginalCeiling)$"},
+	}
+	callerArgs := []string{"-run", "^Test selected fixture$", "-short"}
+	packageInvocation := func(directory string, skip bool) []string {
+		invocation := []string{directory, "0", "test", "-timeout", "0", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}
+		if skip {
+			invocation = append(invocation, skips[directory]...)
+		}
+		return append(invocation, callerArgs...)
+	}
+	allGateVariables := map[string]string{gateVariables[0]: "/synthetic/native-fee", gateVariables[1]: "/synthetic/native-fee-verifier/mainnet.test", gateVariables[2]: "sha256:synthetic"}
+	for _, test := range []struct {
+		name  string
+		host  string
+		set   map[string]string
+		leave bool
+	}{
+		{"linux_no_gate_variable", "Linux", nil, false},
+		{"linux_all_gate_variables", "Linux", allGateVariables, false},
+		{"darwin_no_gate_variable", "Darwin", nil, true},
+		{"darwin_fixture_directory", "Darwin", map[string]string{gateVariables[0]: "/synthetic/native-fee"}, false},
+		{"darwin_verifier", "Darwin", map[string]string{gateVariables[1]: "/synthetic/native-fee-verifier/mainnet.test"}, false},
+		{"darwin_empty_verifier_sha256", "Darwin", map[string]string{gateVariables[2]: ""}, false},
+		{"darwin_all_gate_variables", "Darwin", allGateVariables, false},
+		{"freebsd_no_gate_variable", "FreeBSD", nil, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nexec \"$TEST_SERVER_RUNNER_CAT\"\n")
+			serverDir := filepath.Join(workspaceRoot, "server")
+			for _, directory := range []string{"model", "controller"} {
+				if err := os.MkdirAll(filepath.Join(serverDir, directory), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			selector := "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n./model\\n./controller\\n'\n"
+			if err := os.WriteFile(filepath.Join(serverDir, "test-dirs.sh"), []byte(selector), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			uname := "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = -s ] || exit 88\nprintf '%s\\n' \"$TEST_SERVER_RUNNER_UNAME\"\n"
+			if err := os.WriteFile(filepath.Join(binDir, "uname"), []byte(uname), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			overrides := map[string]string{
+				"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"TEST_SERVER_RUNNER_BINARY":           testBinary,
+				"TEST_SERVER_RUNNER_CAT":              catPath,
+				"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptLeavesNativeFeePublicRootsOutOnlyOffLinuxWithoutGateExports",
+				"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+				"TEST_SERVER_RUNNER_UNAME":            test.host,
+				"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+				"URNETWORK_ROOT":                      workspaceRoot,
+				"WARP_TEST_ENV_FAIL_FAST":             "0",
+				testServerRunnerChildMode:             "native-fee-skip",
+			}
+			unset := []string{"TEST_SERVER_RUNNER_UPSTREAM_STATUS"}
+			for _, name := range gateVariables {
+				if value, ok := test.set[name]; ok {
+					overrides[name] = value
+				} else {
+					unset = append(unset, name)
+				}
+			}
+			cmd := exec.Command("bash", append([]string{runnerPath}, callerArgs...)...)
+			cmd.Env = testCommandEnvironment(overrides, unset...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("runner failed: %v\n%s", err, output)
+			}
+			requireTestServerRunnerInvocations(t, workspaceRoot, append(testServerRunnerAdmissionInvocations(), [][]string{
+				append([]string{"server/proxy", "0", "test", "-timeout", "30m", "-v"}, callerArgs...),
+				append([]string{"server/connect/perfvar", "0", "test", "-timeout", "0", "-p=1", "-parallel=1", "-v"}, callerArgs...),
+				append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
+				packageInvocation("server/fixture", false),
+				packageInvocation("server/model", test.leave),
+				packageInvocation("server/controller", test.leave),
+			}...))
+			notice := "test.sh: the six public native-fee roots are left out of ./model and ./controller: their sn verifier runs only on Linux, and this host is " + test.host + "\n"
+			if count, want := strings.Count(string(output), notice), map[bool]int{false: 0, true: 1}[test.leave]; count != want {
+				t.Fatalf("notice count = %d; want %d\n%s", count, want, output)
+			}
+		})
 	}
 }
 

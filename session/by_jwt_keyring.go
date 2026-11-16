@@ -16,6 +16,11 @@
 // Keys are only added while the process runs. A key the vault no longer lists
 // keeps verifying until restart and no longer signs.
 //
+// The keyring remembers the claims of the tokens it verified
+// (by_jwt_verified_cache.go). Installing a key set that no longer holds a key
+// the previous set held raises the removal generation, which ends every
+// remembered verification at once; gaining keys ends none.
+//
 // Signing uses the newest key version that has settled: its key file was
 // modified at least the signing delay ago. A new version directory keeps the
 // modification time it had in the vault checkout through the vault push, so
@@ -63,6 +68,22 @@ type byJwtKeyringSettings struct {
 	now            func() time.Time
 	rereadInterval time.Duration
 	signingDelay   time.Duration
+	// the most verified tokens the keyring remembers
+	// (by_jwt_verified_cache.go). 64Ki: well above the distinct tokens a busy
+	// api process sees within the maximum age (1.6-1.9k distinct networks per
+	// 5 minutes, CPUOPT3 D4), at about 700 bytes an entry for a client token,
+	// so at most about 45 MiB. Non-positive remembers none, and every token
+	// verifies in full.
+	verifiedCacheMaxEntryCount int
+	// how long a remembered verification answers after it was made, at most;
+	// the token's expiration ends it sooner. 10m (CPUOPT3 D4 Q2): a client
+	// presents its token many times in that window, and no verification is
+	// reused for longer. Non-positive remembers none.
+	verifiedCacheMaxEntryAge time.Duration
+	// the independently locked parts of the remembered verifications, each
+	// bounded by its share of the entry count. 16: twice the api's 8 threads,
+	// so lookups rarely wait on one another.
+	verifiedCacheShardCount int
 }
 
 func defaultByJwtKeyringSettings() *byJwtKeyringSettings {
@@ -78,10 +99,13 @@ func defaultByJwtKeyringSettings() *byJwtKeyringSettings {
 			}
 			return keyPaths, nil
 		},
-		resourcePaths:  server.Vault.ResourcePaths,
-		now:            time.Now,
-		rereadInterval: byJwtKeyRereadInterval,
-		signingDelay:   byJwtKeySigningDelay,
+		resourcePaths:              server.Vault.ResourcePaths,
+		now:                        time.Now,
+		rereadInterval:             byJwtKeyRereadInterval,
+		signingDelay:               byJwtKeySigningDelay,
+		verifiedCacheMaxEntryCount: 64 * 1024,
+		verifiedCacheMaxEntryAge:   10 * time.Minute,
+		verifiedCacheShardCount:    16,
 	}
 }
 
@@ -99,11 +123,15 @@ type byJwtKeyring struct {
 	stateLock sync.Mutex
 	// nil until the first read
 	keys *byJwtKeys
+
+	// the verified tokens' claims; nil when the settings remember none
+	verifiedCache *byJwtVerifiedCache
 }
 
 func newByJwtKeyring(settings *byJwtKeyringSettings) *byJwtKeyring {
 	return &byJwtKeyring{
-		settings: settings,
+		settings:      settings,
+		verifiedCache: newByJwtVerifiedCache(settings),
 	}
 }
 
@@ -132,9 +160,21 @@ func (self *byJwtKeyring) loadedKeys() *byJwtKeys {
 	return self.keys
 }
 
+// Installs keys, a set no reader holds yet, and stamps its removal generation:
+// the held set's, raised by one when keys lacks a key the held set verifies
+// with.
 func (self *byJwtKeyring) setKeys(keys *byJwtKeys) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if self.keys != nil {
+		keys.removalGeneration = self.keys.removalGeneration
+		for _, key := range self.keys.keys {
+			if !keys.verifiesWith(key) {
+				keys.removalGeneration += 1
+				break
+			}
+		}
+	}
 	self.keys = keys
 }
 
@@ -208,6 +248,25 @@ type byJwtKeys struct {
 	// did not parse, so a reread reads only new and rewritten files
 	pathKeys              map[string]*byJwtKey
 	pathFailedModifyTimes map[string]time.Time
+	// raised whenever an installed set drops a key the set before it verified
+	// with (`byJwtKeyring.setKeys`); a verification remembered under an older
+	// generation no longer answers
+	removalGeneration uint64
+}
+
+// Whether the set verifies with key's public key.
+func (self *byJwtKeys) verifiesWith(key *byJwtKey) bool {
+	if key.kid != "" {
+		_, ok := self.kidPublicKeys[key.kid]
+		return ok
+	}
+	// a key whose kid could not be computed is matched by its public key
+	for _, heldKey := range self.keys {
+		if equal, ok := heldKey.publicKey.(interface{ Equal(crypto.PublicKey) bool }); ok && equal.Equal(key.publicKey) {
+			return true
+		}
+	}
+	return false
 }
 
 // The key that signs at now: the newest settled ecdsa key, else the newest

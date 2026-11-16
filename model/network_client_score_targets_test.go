@@ -163,6 +163,12 @@ func exportClientScoreTargetsForTest(t testing.TB, fixture *clientScoreEmptyTarg
 						capture.nativeFacets[clientScoreNativeKey(keys.counts(callerId))] = facets
 						return nil
 					}
+					// the native capability snapshot (FP2-PROTOCOL.md §4.4),
+					// recorded under its own pointer key
+					nativeFanout.publishCapability = func(callerId server.Id, facets map[ipFamilyFacet]clientScoreFacetPayload) error {
+						capture.nativeFacets[clientScoreNativeCapabilityKey(keys.counts(callerId))] = facets
+						return nil
+					}
 				}
 				err := emitClientScoreTargetFanout(
 					fixture.clientLocationIds,

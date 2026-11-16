@@ -127,6 +127,7 @@ func observeRedisHostLatencyTracking(ctx context.Context, env *probeEnv, host *h
 set -eu
 command -v timeout >/dev/null
 command -v redis-cli >/dev/null
+command -v tr >/dev/null
 command -v awk >/dev/null
 expected=0
 enabled=0
@@ -135,12 +136,14 @@ invalid=0
 unreachable=0
 for port in ` + strings.Join(portFields, " ") + `; do
   expected=$((expected + 1))
-  # Validate the stream before shell substitution can discard reply bytes.
+  # Validate the stream before shell substitution can discard reply bytes. A NUL
+  # becomes 0xff first: POSIX leaves NUL in awk's input undefined, and an awk that
+  # loses it would read a malformed reply as a complete one.
   if ! value=$({
     result=0
     timeout 4 redis-cli --raw -h 127.0.0.1 -p "$port" CONFIG GET latency-tracking 2>/dev/null || result=$?
     printf '\nredis-latency-config-exit %s\n' "$result"
-  } | LC_ALL=C awk '
+  } | LC_ALL=C tr '\000' '\377' | LC_ALL=C awk '
     {
       last = $0
       if (NR == 1 && $0 != "latency-tracking") invalid = 1

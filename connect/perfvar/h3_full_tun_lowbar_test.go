@@ -730,6 +730,11 @@ func subtractH3FullTunRecovery(
 		ContractAheadAcknowledgedCount:              end.ContractAheadAcknowledgedCount - start.ContractAheadAcknowledgedCount,
 		ContractAheadSwitchCount:                    end.ContractAheadSwitchCount - start.ContractAheadSwitchCount,
 		ContractAheadUnacknowledgedSwitchCount:      end.ContractAheadUnacknowledgedSwitchCount - start.ContractAheadUnacknowledgedSwitchCount,
+		NoAckContractAdvanceCount:                   end.NoAckContractAdvanceCount - start.NoAckContractAdvanceCount,
+		NoAckContractHoldCount:                      end.NoAckContractHoldCount - start.NoAckContractHoldCount,
+		NoAckContractExpiredCount:                   end.NoAckContractExpiredCount - start.NoAckContractExpiredCount,
+		NoAckContractPromotedCount:                  end.NoAckContractPromotedCount - start.NoAckContractPromotedCount,
+		NoAckContractHeadroomCount:                  end.NoAckContractHeadroomCount - start.NoAckContractHeadroomCount,
 		SelectiveGapWriteCount:                      end.SelectiveGapWriteCount - start.SelectiveGapWriteCount,
 		AckTailProbeWriteCount:                      end.AckTailProbeWriteCount - start.AckTailProbeWriteCount,
 		CumulativeProbeWriteCount:                   end.CumulativeProbeWriteCount - start.CumulativeProbeWriteCount,
@@ -819,6 +824,9 @@ func subtractH3FullTunReceive(
 		}
 	}
 	return clientconnect.ClientReceiveStatsSnapshot{
+		ReceiveDecodeReservedByteCount:         end.ReceiveDecodeReservedByteCount,
+		ReceiveDecodePressureDropCount:         end.ReceiveDecodePressureDropCount - start.ReceiveDecodePressureDropCount,
+		ForgedSourceDropCount:                  end.ForgedSourceDropCount - start.ForgedSourceDropCount,
 		PackHandoffDropCount:                   end.PackHandoffDropCount - start.PackHandoffDropCount,
 		PackHandoffDropByteCount:               end.PackHandoffDropByteCount - start.PackHandoffDropByteCount,
 		PackHandoffWaitCount:                   end.PackHandoffWaitCount - start.PackHandoffWaitCount,
@@ -1068,7 +1076,7 @@ func requireH3FullTunOneDatagramHybrid(
 	}
 }
 
-// TestH3LowBarFullTcpProductionHybridTrack accepts the global 1,100-byte MTU
+// TestH3LowBarFullTcpProductionHybridTrack accepts the global 1,280-byte MTU
 // and production H3 defaults only when the exact hashed TCP body completes,
 // every DATAGRAM message uses one fragment, and both the packet and reliable
 // stream lanes carry classified IP traffic.
@@ -1076,7 +1084,7 @@ func TestH3LowBarFullTcpProductionHybridTrack(t *testing.T) {
 	testH3LowBarFullTcpPacketTrackMtu(
 		t,
 		clientconnect.DefaultMtu,
-		"production-hybrid-1100-mtu",
+		"production-hybrid-1280-mtu",
 		true,
 		0,
 		false,
@@ -1090,7 +1098,7 @@ func TestH3LowBarFullTcpFragmentedPacketTrack(t *testing.T) {
 	testH3LowBarFullTcpPacketTrackMtu(
 		t,
 		clientconnect.DefaultMtu,
-		"fragmented-packet-1100-mtu",
+		"fragmented-packet-1280-mtu",
 		false,
 		8,
 		true,
@@ -1105,18 +1113,33 @@ func TestH3LowBarFullTcpSingleDatagramMtuTrack(t *testing.T) {
 	testH3LowBarFullTcpPacketTrackMtu(t, 900, "single-datagram-900-mtu", true, 1, true)
 }
 
-// TestH3LowBarFullTcpOneDatagramHybridTrack keeps the global 1,100-byte MTU
+// TestH3LowBarFullTcpOneDatagramHybridTrack keeps the global 1,280-byte MTU
 // while restricting the packet lane to one QUIC DATAGRAM. Small IP/control
 // messages remain unordered; larger Transfer frames use the reliable stream.
 func TestH3LowBarFullTcpOneDatagramHybridTrack(t *testing.T) {
 	testH3LowBarFullTcpPacketTrackMtu(
 		t,
 		clientconnect.DefaultMtu,
-		"one-datagram-hybrid-1100-mtu",
+		"one-datagram-hybrid-1280-mtu",
 		true,
 		1,
 		false,
 	)
+}
+
+// One explicit experimental policy is shared by both endpoint transports and
+// server/connect; zero retains the production default.
+func h3FullTunPacketTrackDatagramSettings(maximumDatagramFragmentCount int) *clientconnect.H3DatagramSettings {
+	settings := clientconnect.DefaultH3DatagramSettings()
+	if 0 < maximumDatagramFragmentCount {
+		settings.MaxFragmentCount = maximumDatagramFragmentCount
+	}
+	if 1 < maximumDatagramFragmentCount {
+		// The fragmented control opts out of the independent single-packet
+		// selector while keeping every existing receive and reassembly bound.
+		settings.HybridDatagramMessageByteCount = settings.MaxMessageByteCount
+	}
+	return settings
 }
 
 func testH3LowBarFullTcpPacketTrackMtu(
@@ -1177,8 +1200,7 @@ func testH3LowBarFullTcpPacketTrackMtu(
 			settings.H3SendLaneObserver = laneTrace.observe
 			settings.H3QuicPacketStats = quicStats
 			if 0 < maximumDatagramFragmentCount {
-				settings.H3DatagramSettings = clientconnect.DefaultH3DatagramSettings()
-				settings.H3DatagramSettings.MaxFragmentCount = maximumDatagramFragmentCount
+				settings.H3DatagramSettings = h3FullTunPacketTrackDatagramSettings(maximumDatagramFragmentCount)
 			}
 		}
 		hooks := &fullTunConstructionTestHooks{
@@ -1216,8 +1238,7 @@ func testH3LowBarFullTcpPacketTrackMtu(
 				settings.H3DatagramStats = serverDatagramStats
 				settings.H3QuicPacketStats = serverQuicStats
 				if 0 < maximumDatagramFragmentCount {
-					settings.H3DatagramSettings = clientconnect.DefaultH3DatagramSettings()
-					settings.H3DatagramSettings.MaxFragmentCount = maximumDatagramFragmentCount
+					settings.H3DatagramSettings = h3FullTunPacketTrackDatagramSettings(maximumDatagramFragmentCount)
 				}
 			},
 			configureProviderClientSettings: configureClient,

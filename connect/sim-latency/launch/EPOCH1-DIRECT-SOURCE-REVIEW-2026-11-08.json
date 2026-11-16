@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "kind": "competition-elected-candidate-direct-source-review-summary/v1",
+  "reviewer": "Astra max",
+  "job_id": "01a1a440-fd2e-538a-365c-f4b23eed4739",
+  "recommendation": "HONEST",
+  "scope": "Direct source assessment under established epoch-1 performance and honesty rules; not a Qwen/Gemma provider verdict or operator approval.",
+  "report": {
+    "path": "/usr/local/libexec/urnetwork/competition-review-multipass-f86696bac-20261108-v1/evidence/direct-source-recommendation.private.json",
+    "sha256": "5f92242395cc35bedcd26409419672038ad5e313ef12aa216d4c508e644d8fa5"
+  },
+  "prepared_sha256": "52932c0d7a30ca9a3354a6e1417612ffc8927d24b86311f6e64942a72d49bb2e",
+  "patch_sha256": "b8800b3a52176e5e33ccab86536d5751ea0a42cade6f64be0d2586d765573aff",
+  "score_sha256": "ebe45b20f5fc3fc5b5342ebb869714d06de3d132ba68a707497a6918122ff7d8",
+  "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "findings": {
+    "blocking_source_findings": [],
+    "measurement_integrity": "supported",
+    "workload_generalization": "supported with explicit QoS tradeoffs",
+    "containment": "supported",
+    "patch_scope": "supported",
+    "reproducibility": "supported at source and retained-evidence level; not independently rerun",
+    "source_safety": "supported with a nonblocking correctness advisory",
+    "traffic_preservation": "supported",
+    "production_benefit": "supported by real production paths and concrete mechanisms, not a claim of universal improvement",
+    "preserved_advisory": "Hot-lowering the framed write limit after scratch growth does not immediately enforce the smaller coalescing bound. The current production call sets 20 KiB once before writing; no failure at that callsite was found.",
+    "preserved_tradeoffs": "256 KiB lead in-flight cap and temporary 2 KiB bulk yielding may hurt some workloads. These are genuine generic QoS tradeoffs, not new retrospective disqualification thresholds."
+  },
+  "existing_sealed_measurements_not_rerun": {
+    "all_six_gates_passed": true,
+    "candidate_success": 1,
+    "baseline_success": 0.9996411912450663,
+    "median_candidate_requests": 2862,
+    "median_baseline_requests": 2788,
+    "median_candidate_received_bytes": 3544698658,
+    "median_baseline_received_bytes": 3430238480,
+    "numeric_gates_alone_prove_honesty": false
+  },
+  "formal_qwen_gemma_candidate_review_complete": false,
+  "candidate_code_executed_by_this_review": false,
+  "winner_approved": false,
+  "source_promoted": false,
+  "rewards_released": false,
+  "calibration_accepted": false
+}

@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "observed_at": "2026-11-10T10:43:00Z",
+  "kind": "native-control-worker-distribution-staged/v1",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "source_commit": "f73d6bfcf060bffc48b109b5e3fa497b367ae9ae",
+  "source_modified": false,
+  "go_version": "go1.27.3",
+  "cgo_enabled": false,
+  "go_experiment": "greenteagc",
+  "worker_path": "/usr/local/libexec/urnetwork/competition-worker-f73d6bfcf-20261110-v1/competitionworker",
+  "worker_sha256": "da9c4892cfcde59f9e2d9fb8d13f61625f1846a43dd1b4eaadde5e98cea99bb8",
+  "distribution_image_digest": "sha256:ea074cff6b8e63b18b60092f9bd4ad3763744d198766566b185951503b52e513",
+  "image_payload_extraction_matches_native_worker": true,
+  "worker_mode": "root-owned0500 host-native control binary; OCI image is verified distribution provenance, not a claim of container execution",
+  "amendment_registrar_path": "/usr/local/libexec/urnetwork/competition-worker-f73d6bfcf-20261110-v1/register-executor-amendment",
+  "amendment_registrar_sha256": "ddab3a9314cc5a1321f695e6db35eb8b8cd9802d6a0d790e3be595fdf2eb97f3",
+  "registrar_executed": false,
+  "worker_started": false,
+  "scoring_enabled": false,
+  "official_baseline_started": false,
+  "full_simulator_package_targeted_tests": {
+    "command": "go test -p=1 ./connect/sim-latency -run '^Test(PrivateIdMapProbe|LegacyIdMapProbe|SubevaluationOwnership)' -count=3",
+    "exit_status": 0,
+    "test_functions": 8,
+    "repetitions": 3,
+    "package_test_duration_seconds": 0.725,
+    "scope": "Real simulator package compiled; actual helper argv, legacy routing, closed private scope and bounded namespace probe tested. Not a full simulator-suite or live containment claim."
+  },
+  "post_build_cleanup": "Two root ownership probes found zero active users and zero unreadable processes before go clean -cache removed only this turn's rebuildable2.3 GiB epoch2-control-build-cache-20261110-v1. Retained binaries, source, modules and evidence; root available38089920512 bytes, above34359738368-byte minimum. Separate RAM cache untouched.",
+  "pending": [
+    "Main migration950 and API checkpoint e7a71255a or later",
+    "Additional operational approval for bounded8 MiB namespace-helper correction",
+    "Activate corrected immutable roles and measure fresh actual fingerprints before registering the amendment",
+    "Complete containment, official shared R9 baseline and both hosts' R9 admission"
+  ],
+  "existing_source_readiness_receipts_unchanged": true,
+  "measured_product_source_and_image_unchanged": true
+}

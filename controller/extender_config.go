@@ -34,6 +34,13 @@ import (
 //	  - migration.example
 //	api_url: https://api.ur.example
 //	gossip_identity_key_hex: <ed25519 seed>
+//	directory:
+//	  durable_network_ids:
+//	    - <operator account network id>
+//	  capability_cohorts:
+//	    - capability: tcp-camouflage-v1
+//	      extender_public_keys_hex:
+//	        - <extender identity public key, hex>
 //	dns:
 //	  enabled: false
 //	  hosted_zone_id: <zone>
@@ -56,6 +63,16 @@ import (
 //	  aws_region: <region>
 //	  aws_access_key_id: <key id>
 //	  aws_secret_access_key: <secret>
+//	seed:
+//	  enabled: false
+//	  record_count: 8
+//	  mirrors:
+//	    - name: origin
+//	      url: https://api.ur.example/v1/seed.bin
+//	      dial_addresses:
+//	        - <address>
+//	camouflage_report:
+//	  enabled: false
 //
 // The private key signs; the public list is what clients accept, and is a list
 // so a key can be rotated by publishing both before the old one is dropped.
@@ -69,6 +86,11 @@ import (
 // carried here so operations configure one resource rather than two. The
 // measurement block is the lag.dev measurement certificates and their zone
 // (lag.dev/PLAN.md C), read by the issuance and dns tasks and the activation.
+// The seed block is the public seed bundle and its mirrors
+// (connect/EXTENDER-UPDATE2.md §2, extender_seed_config.go), read by the seed
+// publisher, the mirror check and the api's ExtenderSeedPath. The
+// camouflage_report block turns the camouflage report route on, and off again
+// (extender_camouflage_report.go).
 //
 // The resource is optional. An operator that has not configured it runs with
 // no extender network at all: hello serves no root keys and activation
@@ -94,6 +116,17 @@ type ExtenderConfig struct {
 	Directory ExtenderDirectoryConfig `yaml:"directory"`
 	// the lag.dev measurement certificates and names (lag.dev/PLAN.md C)
 	Measurement ExtenderMeasurementConfig `yaml:"measurement"`
+	// the public seed bundle and its mirrors (connect/EXTENDER-UPDATE2.md §2)
+	Seed ExtenderSeedConfig `yaml:"seed"`
+	// the camouflage report route (extender_camouflage_report.go)
+	CamouflageReport ExtenderCamouflageReportConfig `yaml:"camouflage_report"`
+}
+
+// The camouflage report route. Disabled, the default, it answers disabled to
+// every report and counts nothing, which is also the kill switch. Like the rest
+// of this resource it is read once per process, so a change takes an api restart.
+type ExtenderCamouflageReportConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // The lag.dev measurement certificates (lag.dev/PLAN.md C5-C10). Disabled, the
@@ -131,6 +164,10 @@ type ExtenderMeasurementConfig struct {
 // is the directory as it was.
 type ExtenderDirectoryConfig struct {
 	DurableNetworkIds []string `yaml:"durable_network_ids"`
+	// The gated extenders whose records require a client capability
+	// (connect/EXTENDER-UPDATE2.md §3.2, extender_capability.go). Unset
+	// requires nothing, which is the directory as it was.
+	CapabilityCohorts []ExtenderCapabilityCohortConfig `yaml:"capability_cohorts"`
 }
 
 // The hmac domain the directory secret is derived under.
@@ -182,6 +219,15 @@ func (self *ExtenderConfig) DirectoryTierForNetwork(networkId server.Id) int {
 // record name is configured rather than derived from the host, since which
 // name an operator serves is an operations decision.
 //
+// cn_record_count caps the signed records in China's own set, which answers
+// China in place of the Asia set and rotates each tick (the publisher's
+// extenderDnsCnSet). Unset, the cap is 4 and the set holds as many records as
+// Alidns delivers whole, about 3 (2 when they are near the longest Main
+// signs): the best for users (owner, 2026-11-12). DNSPod, the sdk's other
+// resolver for China, trims that answer at record boundaries to one whole
+// record, as it was measured to on 2026-11-12. Setting it to 1 gives every
+// client in China the one record both deliver whole.
+//
 // The zone is named either way: hosted_zone_id is the zone verbatim, and
 // hosted_zone_name is the zone's domain, which the publisher resolves to an id
 // through the aws api once per process. The name is what operations knows, and
@@ -195,6 +241,7 @@ type ExtenderDnsConfig struct {
 	RecordName         string `yaml:"record_name"`
 	Ttl                int    `yaml:"ttl"`
 	SampleCount        int    `yaml:"sample_count"`
+	CnRecordCount      int    `yaml:"cn_record_count"`
 	AwsRegion          string `yaml:"aws_region"`
 	AwsAccessKeyId     string `yaml:"aws_access_key_id"`
 	AwsSecretAccessKey string `yaml:"aws_secret_access_key"`
@@ -259,6 +306,7 @@ func readExtenderConfig() *extenderConfigResult {
 			err: &extenderConfigError{message: "the extender configuration is not readable", cause: err},
 		}
 	}
+	warnUnknownExtenderCapabilities(config)
 	return &extenderConfigResult{config: config}
 }
 

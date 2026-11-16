@@ -115,23 +115,24 @@ func (self PostgresStore) ReviewedSource(ctx context.Context, settings *Settings
 // The trusted deployment adapter installs this exact envelope on every
 // participating runtime. It contains no token, workload, patch, or seed.
 type CompetitionRuntimeManifest struct {
-	G2VolumePolicy            model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
-	RequiredApiCapability     string                          `json:"required_api_capability,omitempty"`
-	IntentSha256              string                          `json:"intent_sha256,omitempty"`
-	Staging                   bool                            `json:"staging,omitempty"`
-	StagingRoundWindowSeconds int                             `json:"staging_round_window_seconds,omitempty"`
-	StagingPreparationSeconds int                             `json:"staging_preparation_seconds,omitempty"`
-	Environment               string                          `json:"environment"`
-	CompetitionId             string                          `json:"competition_id"`
-	SeasonId                  string                          `json:"season_id"`
-	Generation                int64                           `json:"generation"`
-	TargetRoundId             server.Id                       `json:"target_round_id"`
-	ManifestCommit            string                          `json:"manifest_commit"`
-	ManifestSha256            string                          `json:"manifest_sha256"`
-	Manifest                  []byte                          `json:"manifest"`
-	SourceLockSha256          string                          `json:"source_lock_sha256"`
-	EvaluatorImageDigest      string                          `json:"evaluator_image_digest"`
-	HostQualificationSha256   string                          `json:"host_qualification_sha256"`
+	G2VolumePolicy            model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy        *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	RequiredApiCapability     string                               `json:"required_api_capability,omitempty"`
+	IntentSha256              string                               `json:"intent_sha256,omitempty"`
+	Staging                   bool                                 `json:"staging,omitempty"`
+	StagingRoundWindowSeconds int                                  `json:"staging_round_window_seconds,omitempty"`
+	StagingPreparationSeconds int                                  `json:"staging_preparation_seconds,omitempty"`
+	Environment               string                               `json:"environment"`
+	CompetitionId             string                               `json:"competition_id"`
+	SeasonId                  string                               `json:"season_id"`
+	Generation                int64                                `json:"generation"`
+	TargetRoundId             server.Id                            `json:"target_round_id"`
+	ManifestCommit            string                               `json:"manifest_commit"`
+	ManifestSha256            string                               `json:"manifest_sha256"`
+	Manifest                  []byte                               `json:"manifest"`
+	SourceLockSha256          string                               `json:"source_lock_sha256"`
+	EvaluatorImageDigest      string                               `json:"evaluator_image_digest"`
+	HostQualificationSha256   string                               `json:"host_qualification_sha256"`
 }
 
 // Authenticates installed runtime content instead of accepting a caller's
@@ -176,6 +177,11 @@ type CompetitionSupervisor struct {
 	Now           func() time.Time
 	PollInterval  time.Duration
 	LeaseDuration time.Duration
+	// Nil retains per-owner defaults; tests inject retry time and exact renewal edges.
+	leaseRetrySettings *competitionSupervisorRenewalSettings
+	renewTickForTest   <-chan time.Time
+	// Nil does nothing; tests acknowledge an accepted renewed authority window.
+	renewedForTest func()
 
 	// Preparation-only reconciliation may publish an existing intent and obtain
 	// real role evidence, but never activates source or runs ordinary evaluation.
@@ -189,6 +195,7 @@ type CompetitionSupervisorHooks struct {
 	ChooseSource   func(context.Context, model.CompetitionSupervisorLease, *CompetitionSupervisorSnapshot, model.CompetitionSupervisorTransition) (*model.CompetitionSourceActivation, error)
 	PublishSource  func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation) error
 	PrepareSource  func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation) error
+	PrepareIntake  func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation) error
 	FallbackSource func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation, string) (bool, error)
 	ReviewWinner   func(context.Context, model.CompetitionSupervisorLease, CompetitionWinnerReviewRequest) error
 }
@@ -323,6 +330,11 @@ func (self *PostgresCompetitionSupervisorDriver) PublishSource(ctx context.Conte
 	if self.Hooks.PublishSource == nil {
 		return errors.New("source publication integration is not configured")
 	}
+	if self.IntakeFirst(intent) {
+		if err := self.Store.CheckSourceOperatorHandoff(ctx, self.Settings, lease, intent.Generation); err != nil {
+			return err
+		}
+	}
 	return self.Hooks.PublishSource(ctx, lease, intent)
 }
 
@@ -373,30 +385,69 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 	if err != nil {
 		return "lease_unavailable", err
 	}
-	operationCtx, cancel := context.WithCancel(ctx)
+	retrySettings := defaultCompetitionSupervisorRenewalSettings()
+	if self.leaseRetrySettings != nil {
+		retrySettings = *self.leaseRetrySettings
+	}
+	authorityNow := self.Now
+	if self.leaseRetrySettings != nil && self.leaseRetrySettings.LockRetry.Now != nil {
+		authorityNow = self.leaseRetrySettings.LockRetry.Now
+	}
+	authority, err := newCompetitionConfirmedAuthority(ctx, lease.LeaseExpiresAt, authorityNow)
+	if err != nil {
+		return "lease_lost", err
+	}
+	operationCtx := authority.ctx
 	renewed := make(chan error, 1)
 	go func() {
 		current := *lease
 		for {
+			renewTick := self.renewTickForTest
+			if renewTick == nil {
+				renewTick = time.After(leaseDuration / 3)
+			}
 			select {
 			case <-operationCtx.Done():
 				renewed <- nil
 				return
-			case <-time.After(leaseDuration / 3):
-				next, renewErr := self.Driver.Renew(operationCtx, current, leaseDuration)
+			case <-renewTick:
+				var next *model.CompetitionSupervisorLease
+				renewErr := retryCompetitionSupervisorRenewal(operationCtx, current.LeaseExpiresAt, retrySettings, func(ctx context.Context) error {
+					var err error
+					next, err = self.Driver.Renew(ctx, current, leaseDuration)
+					return err
+				})
 				if renewErr != nil {
-					cancel()
+					authority.cancel(renewErr)
+					renewed <- renewErr
+					return
+				}
+				if next == nil || next.OwnerId != current.OwnerId || next.FencingToken != current.FencingToken || next.Environment != current.Environment ||
+					next.CompetitionId != current.CompetitionId || next.SeasonId != current.SeasonId {
+					renewErr = ErrLeaseLost
+				} else {
+					renewErr = authority.confirm(next.LeaseExpiresAt)
+				}
+				if renewErr != nil {
+					authority.cancel(renewErr)
 					renewed <- renewErr
 					return
 				}
 				current = *next
+				if self.renewedForTest != nil {
+					self.renewedForTest()
+				}
 			}
 		}
 	}()
 	defer func() {
-		cancel()
-		if renewErr := <-renewed; renewErr != nil {
+		finishedWhileLive := operationCtx.Err() == nil
+		authority.close()
+		if renewErr := <-renewed; renewErr != nil && !(finishedWhileLive && errors.Is(renewErr, context.Canceled)) {
 			state, err = "lease_lost", renewErr
+		}
+		if context.Cause(operationCtx) == ErrLeaseLost {
+			state, err = "lease_lost", ErrLeaseLost
 		}
 	}()
 	snapshot, err := self.Driver.Snapshot(operationCtx, *lease)
@@ -416,6 +467,11 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		}
 		if self.PreparationOnly {
 			return "preparation_only", nil
+		}
+		if driver, ok := self.Driver.(competitionSupervisorRoundGradingDriver); ok {
+			if err := driver.PrepareRoundGrading(operationCtx, *lease, *snapshot.Round); err != nil {
+				return "grading_preparation_pending", err
+			}
 		}
 		if err := self.Driver.RunWorker(operationCtx, *lease, *snapshot.Round); err != nil {
 			return "evaluation_blocked", err
@@ -483,6 +539,10 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		if intent != nil {
 			next.SourceActivationGeneration = intent.Generation
 			next.PreparationStartedAt = intent.PreparedAt
+			if nextState == "round_created" {
+				copyRoundId := intent.TargetRoundId
+				next.RoundId = &copyRoundId
+			}
 		}
 		if !opensAt.IsZero() {
 			next.OpensAt = opensAt
@@ -564,6 +624,26 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		if snapshot.Intent == nil {
 			return "preparation_blocked", errors.New("durable source intent is missing")
 		}
+		if driver, ok := self.Driver.(competitionSupervisorIntakeFirstDriver); ok && driver.IntakeFirst(snapshot.Intent) {
+			if err := driver.PrepareIntake(operationCtx, *lease, snapshot.Intent); err != nil {
+				state, saveErr := checkpoint("preparation_blocked", "genuine API intake publication is pending; grading authority is separate", snapshot.Intent, time.Time{})
+				if saveErr != nil {
+					return state, saveErr
+				}
+				return state, err
+			}
+			if self.PreparationOnly {
+				return checkpoint("preparation_ready", "API intake receipt recorded; no activation or opening in preparation-only mode", snapshot.Intent, time.Time{})
+			}
+			round, err := driver.OpenIntake(operationCtx, *lease, snapshot.Intent)
+			if err != nil {
+				return "round_creation_blocked", err
+			}
+			if !competitionIntakeFirstRoundIdentity(round, snapshot.Intent) {
+				return "round_creation_blocked", ErrConflict
+			}
+			return checkpoint("round_created", "intake open; independent grading preparation pending", snapshot.Intent, round.OpensAt)
+		}
 		if prepareErr := self.Driver.PrepareSource(operationCtx, *lease, snapshot.Intent); prepareErr != nil {
 			if abandoned, state, fallbackErr := fallback("readiness_failed"); abandoned {
 				return state, fallbackErr
@@ -587,6 +667,16 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		}
 		if self.PreparationOnly || now.Before(snapshot.Intent.PreparedAt.Add(sourcePreparationInterval(snapshot.Intent))) {
 			return "preparation_ready", nil
+		}
+		if driver, ok := self.Driver.(competitionSupervisorIntakeFirstDriver); ok && driver.IntakeFirst(snapshot.Intent) {
+			round, err := driver.OpenIntake(operationCtx, *lease, snapshot.Intent)
+			if err != nil {
+				return "round_creation_blocked", err
+			}
+			if !competitionIntakeFirstRoundIdentity(round, snapshot.Intent) {
+				return "round_creation_blocked", ErrConflict
+			}
+			return checkpoint("round_created", "intake open; independent grading preparation pending", snapshot.Intent, round.OpensAt)
 		}
 		if activationErr := self.Driver.ActivateSource(operationCtx, *lease, snapshot.Intent); activationErr != nil {
 			return "activation_blocked", activationErr

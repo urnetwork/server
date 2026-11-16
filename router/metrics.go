@@ -171,7 +171,7 @@ func beginHttpRequest(metrics *httpMetrics, route string, writer http.ResponseWr
 	if request.Body != nil {
 		request.Body = body
 	}
-	base := &requestMetricsWriter{ResponseWriter: writer}
+	base := &requestMetricsWriter{ResponseWriter: writer, ctx: request.Context()}
 	metrics.inflight.WithLabelValues(route).Inc()
 	return &requestMetricsObservation{
 		metrics: metrics,
@@ -188,9 +188,16 @@ func (self *requestMetricsObservation) finish(outcome string) {
 	if outcome == "canceled" && self.writer.controlDiscard != nil {
 		self.writer.controlDiscard.discardedCanceled.Inc()
 	}
+	// A 503 that went out after the caller had gone reached nobody, and is
+	// the answer to the caller's own stop rather than an outage anyone saw
+	// (requestMetricsWriter.statusAfterCallerGone). It counts as no status,
+	// as when nothing is written. Every other status keeps its exact count
+	// beside the canceled outcome.
 	status := "none"
 	if self.writer.status != 0 {
-		status = strconv.Itoa(self.writer.status)
+		if self.writer.status != http.StatusServiceUnavailable || !self.writer.statusAfterCallerGone {
+			status = strconv.Itoa(self.writer.status)
+		}
 	} else if !self.writer.hijacked && outcome == "completed" {
 		status = strconv.Itoa(http.StatusOK)
 	}
@@ -238,6 +245,25 @@ type requestMetricsWriter struct {
 	// Set only when the observed control handler discards this request;
 	// cancellation is counted with the route's terminal outcome.
 	controlDiscard *controlHttpMetrics
+	// The request's context. It ends when the caller's connection or stream
+	// closes (the lb closes its upstream connection when its own client
+	// aborts), and whatever is written after that reaches nobody.
+	ctx context.Context
+	// The status went out after the caller had gone. An error path still
+	// answers then: authentication stopped by the caller's own context
+	// answers "503 Authentication temporarily unavailable", and a cache miss
+	// whose wait ended with its caller answers "503 Cached response is
+	// temporarily unavailable". Counted as outages, those answers to nobody
+	// were every 503 of GET /account/referral-code and GET
+	// /subscription/balance on 2026-11-11, for which the lb logged 499 and
+	// served no 503.
+	statusAfterCallerGone bool
+}
+
+// Marks the status going out now as reaching nobody when the caller has
+// already gone.
+func (self *requestMetricsWriter) observeStatusCaller() {
+	self.statusAfterCallerGone = self.ctx != nil && self.ctx.Err() != nil
 }
 
 // Unwrap exposes the native writer to http.ResponseController.
@@ -257,6 +283,7 @@ func (self *requestMetricsWriter) Header() http.Header {
 func (self *requestMetricsWriter) WriteHeader(status int) {
 	if self.status == 0 {
 		self.status = status
+		self.observeStatusCaller()
 	}
 	self.dropCookieHeaders(status)
 	self.ResponseWriter.WriteHeader(status)
@@ -275,6 +302,7 @@ func (self *requestMetricsWriter) Write(buffer []byte) (int, error) {
 func (self *requestMetricsWriter) beginBody() {
 	if self.status == 0 {
 		self.status = http.StatusOK
+		self.observeStatusCaller()
 	}
 	self.dropCookieHeaders(http.StatusOK)
 }

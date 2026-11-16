@@ -210,9 +210,14 @@ func TestContractRateRecoveryHoldPreservesPositiveAndTargetScope(t *testing.T) {
 		settings.runtime = &signalRuntime{}
 		observation := &signalClearHoldObservation{}
 		ctx := context.WithValue(context.Background(), signalClearHoldContextKey{}, observation)
-		alerts, err := NewWithSignals(settings, NewContractRateSignal(), NewRetentionFanoutSignal()).Run(ctx)
-		if err != nil || len(alerts) != 1 || alerts[0].Class != "retention-fanout" {
-			t.Fatal("silent contract hold erased independent measured retention positive")
+		sibling := &signalAdapter{number: "0.1", key: "sibling-positive", name: "Independent measured positive", probe: hostScopeSyntheticProbe{
+			checkFn: func(context.Context, *probeEnv) ([]finding, error) {
+				return []finding{{probeId: "synthetic/sibling-positive", tier: tierWarn, class: "sibling-positive", target: "pg-target-control", sustain: 1, symptom: "synthetic measured positive"}}, nil
+			},
+		}}
+		alerts, err := NewWithSignals(settings, NewContractRateSignal(), sibling).Run(ctx)
+		if err != nil || len(alerts) != 1 || alerts[0].Class != "sibling-positive" {
+			t.Fatal("silent contract hold erased an independent measured positive")
 		}
 		holds := observation.snapshot(false)
 		if len(holds) != 1 || holds[0].Class != "contracts-collapse" {

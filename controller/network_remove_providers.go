@@ -4,7 +4,11 @@ package controller
 // removes the network, and refuses deletion for a renewal it cannot stop.
 // Stripe and Google Play subscriptions are cancelled through their APIs. An
 // App Store subscription can only be cancelled by the customer, so deletion
-// waits until the App Store reports that it will not renew.
+// waits until the App Store reports that it will not renew. Pay with Gamma is
+// our own biller: the removal itself turns its automatic renewal, top-up and
+// seat upgrade off and voids the account's open intents, and waits for a
+// gamma charge already in flight to be credited (model
+// RemoveNetworkWithStoreSnapshot).
 
 import (
 	"context"
@@ -23,11 +27,12 @@ const networkRemoveStripeFailedMessage = "Failed to unsubscribe Stripe"
 const networkRemovePlayFailedMessage = "Could not cancel your Google Play subscription. Please try again."
 const networkRemoveAppleRenewingMessage = "Your subscription is billed through the App Store and cannot be cancelled by URnetwork. Cancel it in your App Store subscriptions (Settings > your name > Subscriptions), then delete your account."
 const networkRemoveStoreRenewalChangedMessage = "Your subscription changed while your account was being deleted. Please try again."
+const networkRemoveGammaChargeInFlightMessage = "A Gamma payment for your account is still being processed, so your account was not deleted. Please try again in a few minutes."
 
 // networkRemoveSteps are the store and storage steps of an account deletion.
 // NetworkRemove runs them in this order: the store snapshot, the App Store
 // check, Stripe cancellation, Google Play cancellation, then the network
-// removal.
+// removal, which queues the Brevo contact removals in its own transaction.
 type networkRemoveSteps struct {
 	// reads the App Store and Google Play renewals once, for every step below
 	storeSnapshot func(clientSession *session.ClientSession) *model.RemoveNetworkStoreSnapshot
@@ -39,10 +44,10 @@ type networkRemoveSteps struct {
 	// cancels the renewal of the Google Play subscriptions
 	cancelPlay func(clientSession *session.ClientSession, purchaseTokens []string) error
 	// removes the network unless an App Store or Google Play renewal outside
-	// the snapshot is active; returns the removed user auths
+	// the snapshot is active, and in the same transaction queues the removal
+	// of its addresses from Brevo (RemoveNetworkAndContacts); returns the
+	// removed user auths
 	removeNetwork func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) (model.RemoveNetworkOutcome, map[string]bool)
-	// schedules the product-update removals for the removed user auths
-	scheduleRemoveProductUpdates func(clientSession *session.ClientSession, userAuths map[string]bool)
 }
 
 var defaultNetworkRemoveSteps = networkRemoveSteps{
@@ -53,20 +58,41 @@ var defaultNetworkRemoveSteps = networkRemoveSteps{
 	unsubscribeStripe: UnsubscribeStripe,
 	cancelPlay:        networkRemoveCancelPlay,
 	removeNetwork: func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) (model.RemoveNetworkOutcome, map[string]bool) {
-		return model.RemoveNetworkWithStoreSnapshot(
-			clientSession.Ctx,
+		return RemoveNetworkAndContacts(
+			clientSession,
 			clientSession.ByJwt.NetworkId,
 			&clientSession.ByJwt.UserId,
 			storeSnapshot,
 		)
 	},
-	scheduleRemoveProductUpdates: func(clientSession *session.ClientSession, userAuths map[string]bool) {
-		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+}
+
+// RemoveNetworkAndContacts removes the network and its users
+// (model.RemoveNetworkWithRemovals) and, in the removal's own transaction,
+// before the sign-in addresses are deleted, queues RemoveProductUpdates for
+// each of them, which deletes its Brevo contact. Both the account deletion
+// (NetworkRemove) and the operator's `bringyourctl network remove` go
+// through it. Until the 2026-11-13 review the operator path dropped the
+// addresses and queued nothing, so the contact stayed in Brevo, and the
+// account deletion queued the removals in a second transaction after the
+// commit, which a crash in between could lose.
+func RemoveNetworkAndContacts(
+	clientSession *session.ClientSession,
+	networkId server.Id,
+	adminUserId *server.Id,
+	storeSnapshot *model.RemoveNetworkStoreSnapshot,
+) (model.RemoveNetworkOutcome, map[string]bool) {
+	return model.RemoveNetworkWithRemovals(
+		clientSession.Ctx,
+		networkId,
+		adminUserId,
+		storeSnapshot,
+		func(tx server.PgTx, userAuths map[string]bool) {
 			for userAuth, _ := range userAuths {
 				ScheduleRemoveProductUpdates(clientSession, userAuth, tx)
 			}
-		})
-	},
+		},
+	)
 }
 
 func networkRemoveError(message string) *NetworkRemoveResult {
@@ -112,16 +138,20 @@ func networkRemoveWithSteps(
 		return networkRemoveError(networkRemovePlayFailedMessage), nil
 	}
 
-	outcome, userAuths := steps.removeNetwork(clientSession, storeSnapshot)
+	outcome, _ := steps.removeNetwork(clientSession, storeSnapshot)
 	switch outcome {
 	case model.RemoveNetworkRemoved:
-		steps.scheduleRemoveProductUpdates(clientSession, userAuths)
 		return &NetworkRemoveResult{}, nil
 	case model.RemoveNetworkStoreRenewalUnchecked:
 		// a retry runs the App Store check and the Play cancellation on the
 		// new renewal
 		glog.Infof("[network]remove %s refused: a store renewal was credited during the deletion\n", clientSession.ByJwt.NetworkId)
 		return networkRemoveError(networkRemoveStoreRenewalChangedMessage), nil
+	case model.RemoveNetworkGammaChargeInFlight:
+		// the biller credits the charge within minutes; a retry then deletes
+		// the account and ends its automatic gamma charges
+		glog.Infof("[network]remove %s refused: a gamma charge is in flight\n", clientSession.ByJwt.NetworkId)
+		return networkRemoveError(networkRemoveGammaChargeInFlightMessage), nil
 	case model.RemoveNetworkNotFound:
 		// the caller is not the network's admin, or the network is gone
 		return nil, fmt.Errorf("403 Could not remove network")

@@ -49,8 +49,9 @@ func competitionRuntimeManifestContent(settings *Settings, intent *model.Competi
 		return nil, errors.New("source_not_ready: immutable source manifest is invalid")
 	}
 	manifest := CompetitionRuntimeManifest{
-		G2VolumePolicy: intent.G2VolumePolicy,
-		Staging:        intent.Staging, StagingRoundWindowSeconds: intent.StagingRoundWindowSeconds, StagingPreparationSeconds: intent.StagingPreparationSeconds,
+		G2VolumePolicy:     intent.G2VolumePolicy,
+		WorkCoveragePolicy: intent.WorkCoveragePolicy,
+		Staging:            intent.Staging, StagingRoundWindowSeconds: intent.StagingRoundWindowSeconds, StagingPreparationSeconds: intent.StagingPreparationSeconds,
 		Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: intent.Generation,
 		TargetRoundId: intent.TargetRoundId, ManifestCommit: intent.ManifestCommit, ManifestSha256: intent.ManifestSha256, Manifest: intent.Manifest,
 		SourceLockSha256: intent.SourceLockSha256, EvaluatorImageDigest: intent.EvaluatorImageDigest, HostQualificationSha256: intent.HostQualificationSha256,

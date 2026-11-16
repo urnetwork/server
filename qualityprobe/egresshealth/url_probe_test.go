@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -29,7 +29,7 @@ func TestUrlProbeRecordsOneOutcomeWithoutHiddenRetries(t *testing.T) {
 			destinations = append(destinations, Destination{Name: fmt.Sprintf("synthetic-%d", i), Url: fmt.Sprintf("https://site-%d.example/", i), Class: ClassSite})
 		}
 		result, err := Check(context.Background(), client, Options{
-			UrlProbe: true, Destinations: destinations, Rand: rand.New(rand.NewSource(7)),
+			UrlProbe: true, Destinations: destinations, Rand: rand.New(rand.NewPCG(7, 0)),
 			Sleep: func(context.Context, time.Duration) error {
 				t.Error("URL turn retained a tunnel while waiting for a retry")
 				return nil
@@ -75,7 +75,7 @@ func TestUrlProbeDrawsGeneralAndCountrySourcesEqually(t *testing.T) {
 			country := []Destination(nil)
 			if countryAvailable {
 				country = []Destination{{Name: "synthetic-country", Url: "https://country.example/", Class: ClassSite}}
-				if rand.New(rand.NewSource(seed)).Intn(2) == 1 {
+				if rand.New(rand.NewPCG(uint64(seed), 0)).IntN(2) == 1 {
 					wantHost, wantSource = "country.example", "country"
 				}
 			} else {
@@ -88,7 +88,7 @@ func TestUrlProbeDrawsGeneralAndCountrySourcesEqually(t *testing.T) {
 				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("synthetic error")), Header: http.Header{}}, nil
 			})}
 			result, err := Check(context.Background(), client, Options{
-				Rand:     rand.New(rand.NewSource(seed)),
+				Rand:     rand.New(rand.NewPCG(uint64(seed), 0)),
 				UrlProbe: true, OutcomeCount: ordinal, CountryDestinations: country,
 				Destinations: []Destination{{Name: "synthetic-general", Url: "https://general.example/", Class: ClassSite}},
 			})

@@ -247,9 +247,9 @@ func TestGetNetworkPingRefusalsStreamsOnlyRefusedPings(t *testing.T) {
 	})
 }
 
-// The dashboard window counts every kind, verdict and relay, zero included,
-// with distinct pingers per kind and distinct targets; the hourly feed counts
-// pings and refusals per target and pinger kind.
+// The dashboard window counts every kind, verdict, reason and relay, zero
+// included, with distinct pingers per kind and distinct targets; the hourly
+// feed counts pings and refusals per target and pinger kind.
 func TestCountExtenderPings(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -273,17 +273,21 @@ func TestCountExtenderPings(t *testing.T) {
 		count := CountExtenderPings(ctx, now)
 		connect.AssertEqual(t, count.Pings24h, int64(4))
 		connect.AssertEqual(t, count.Targets24h, int64(2))
-		connect.AssertEqual(t, len(count.Outcomes24h), 12)
+		// two kinds, relayed or not, by co-signed, unknown and seven refusal
+		// reasons
+		connect.AssertEqual(t, len(count.Outcomes24h), 36)
 		pingedOutcomes := map[ExtenderPingOutcomeCount]bool{}
 		for _, outcome := range count.Outcomes24h {
 			if 0 < outcome.Pings {
 				pingedOutcomes[outcome] = true
 			}
 		}
+		// testNetworkPing refuses for a round trip below the one observed
+		refusalReason := int(connect.ExtenderProbeVerdictReasonRttBelowObserved)
 		for _, wantOutcome := range []ExtenderPingOutcomeCount{
 			{PingerKind: NetworkPingPingerKindProvider, Cosign: NetworkPingCosignCosigned, Relayed: false, Pings: 1},
-			{PingerKind: NetworkPingPingerKindProvider, Cosign: NetworkPingCosignRejected, Relayed: false, Pings: 1},
-			{PingerKind: NetworkPingPingerKindProvider, Cosign: NetworkPingCosignRejected, Relayed: true, Pings: 1},
+			{PingerKind: NetworkPingPingerKindProvider, Cosign: NetworkPingCosignRejected, Relayed: false, Reason: refusalReason, Pings: 1},
+			{PingerKind: NetworkPingPingerKindProvider, Cosign: NetworkPingCosignRejected, Relayed: true, Reason: refusalReason, Pings: 1},
 			{PingerKind: NetworkPingPingerKindExtender, Cosign: NetworkPingCosignUnknown, Relayed: false, Pings: 1},
 		} {
 			if !pingedOutcomes[wantOutcome] {

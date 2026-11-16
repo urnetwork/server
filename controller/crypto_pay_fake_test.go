@@ -337,8 +337,12 @@ func cryptoTestStandardRates(t testing.TB) {
 }
 
 // cryptoTestEnable turns the rail on for one test: the config, a vault that
-// names every daemon, the given fake wallets, and nothing cached.
+// names every daemon, the given fake wallets, and nothing cached. The data
+// packs are the ones pro.yml sells (dataPackTestSkus), whatever this
+// environment's pro.yml is, since the coins sell the packs pro.yml sells with
+// crypto.
 func cryptoTestEnable(t testing.TB, config *CryptoPayConfig, wallets map[string]*fakeCryptoWallet) {
+	restoreSkus := model.Testing_SetDataCodeSkus(dataPackTestSkus()...)
 	restoreConfig := setCryptoPayConfigForTest(config)
 	previousSettings := cryptoWalletSettingsFunc
 	previousWalletFor := cryptoWalletFor
@@ -365,12 +369,83 @@ func cryptoTestEnable(t testing.TB, config *CryptoPayConfig, wallets map[string]
 		return wallet, nil
 	}
 	resetCryptoAvailability()
+	restoreSeams := cryptoTestHermeticSeams()
 	t.Cleanup(func() {
 		restoreConfig()
 		cryptoWalletSettingsFunc = previousSettings
 		cryptoWalletFor = previousWalletFor
+		restoreSeams()
 		resetCryptoAvailability()
+		restoreSkus()
 	})
+}
+
+// Answers the rail's database and Redis reads that a hermetic test does not
+// set up: a pool with free addresses, no watched addresses, no scan hints, no
+// pool addresses for a transaction, no issued address to sweep or to match in
+// a TAO block. Returns the restore.
+func cryptoTestHermeticSeams() func() {
+	previousCount := cryptoCountFreeAddresses
+	previousWatched := cryptoListWatchedAddresses
+	previousResolve := cryptoResolveAddresses
+	previousReceiptAddresses := cryptoReceiptAddressesForTx
+	previousInvoiceAddresses := cryptoInvoiceAddresses
+	previousAddHints := cryptoAddScanHints
+	previousTakeHints := cryptoTakeScanHints
+	previousSweepPosition := cryptoSweepPosition
+	previousSweepSetPosition := cryptoSweepSetPosition
+	previousSweepAddresses := cryptoSweepAddresses
+	previousSweepSetCursor := cryptoSweepSetCursor
+	previousTaoIssued := cryptoTaoAddressesIssued
+	previousTaoIssuedAddresses := cryptoTaoIssuedAddresses
+	cryptoSweepPosition = func(ctx context.Context, asset string) int64 {
+		return -1
+	}
+	cryptoSweepSetPosition = func(ctx context.Context, asset string, afterAddressIndex int64, now time.Time) {}
+	cryptoSweepAddresses = func(ctx context.Context, asset string, afterAddressIndex int64, limit int) []*model.CryptoAddressSweepAddress {
+		return []*model.CryptoAddressSweepAddress{}
+	}
+	cryptoSweepSetCursor = func(ctx context.Context, cursor *model.CryptoAddressSweepCursor, now time.Time) {}
+	cryptoTaoAddressesIssued = func(ctx context.Context) bool {
+		return false
+	}
+	cryptoTaoIssuedAddresses = func(ctx context.Context, addresses []string) map[string]*model.CryptoPaymentIssuedAddress {
+		return map[string]*model.CryptoPaymentIssuedAddress{}
+	}
+	cryptoCountFreeAddresses = func(ctx context.Context, asset string) int {
+		return 1
+	}
+	cryptoListWatchedAddresses = func(ctx context.Context, asset string, now time.Time, watchSince time.Time, limit int) []*model.CryptoPaymentWatchedAddress {
+		return []*model.CryptoPaymentWatchedAddress{}
+	}
+	cryptoResolveAddresses = func(ctx context.Context, asset string, addresses []string) map[string]int64 {
+		return map[string]int64{}
+	}
+	cryptoReceiptAddressesForTx = func(ctx context.Context, asset string, txId string) []string {
+		return []string{}
+	}
+	cryptoInvoiceAddresses = func(ctx context.Context, asset string, addresses []string) []string {
+		return []string{}
+	}
+	cryptoAddScanHints = func(ctx context.Context, asset string, addresses []string) {}
+	cryptoTakeScanHints = func(ctx context.Context, asset string, limit int) []string {
+		return []string{}
+	}
+	return func() {
+		cryptoCountFreeAddresses = previousCount
+		cryptoListWatchedAddresses = previousWatched
+		cryptoResolveAddresses = previousResolve
+		cryptoReceiptAddressesForTx = previousReceiptAddresses
+		cryptoInvoiceAddresses = previousInvoiceAddresses
+		cryptoAddScanHints = previousAddHints
+		cryptoTakeScanHints = previousTakeHints
+		cryptoSweepPosition = previousSweepPosition
+		cryptoSweepSetPosition = previousSweepSetPosition
+		cryptoSweepAddresses = previousSweepAddresses
+		cryptoSweepSetCursor = previousSweepSetCursor
+		cryptoTaoAddressesIssued = previousTaoIssued
+		cryptoTaoIssuedAddresses = previousTaoIssuedAddresses
+	}
 }
 
 // cryptoTestIntent is an open xmr invoice for $40 at $555.36 with the address

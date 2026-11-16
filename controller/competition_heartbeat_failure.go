@@ -1,5 +1,5 @@
-// Heartbeat failures keep bounded, non-secret diagnostic evidence without
-// changing cancellation, fencing, ownership or retry decisions.
+// Per-worker liveness and finished-outcome persistence have independent bounded
+// retry policies; failures retain only non-secret diagnostic evidence.
 package controller
 
 import (
@@ -14,23 +14,67 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The existing cleanup budget belongs to each worker; non-positive selects
-// the historical default rather than shortening an already-owned cleanup.
+// One worker owns cleanup, liveness retry and separate metadata-persistence
+// policies. A non-positive handback timeout retains historical cleanup bounds.
 type competitionHeartbeatSettings struct {
 	HandBackTimeout time.Duration
+	LeaseRetry      competitionLeaseRetrySettings
+	// The existing outer allowance admits acquisition-only host failures and
+	// the job's separately proved no-COMMIT slot-update failure. It never
+	// enlarges ordinary lock retries, lease duration or the evaluation clock.
+	AcquireRetry competitionHeartbeatAcquireRetrySettings
+	// Only a fully rolled-back first advisory-lock timeout may use the
+	// existing twenty-second owner reserve. This is a total call cap, not
+	// extra attempts or a fresh timeout after historical retries are spent.
+	ScopeLockMaximumAttempts int
+	// All exact failed-last distributed SQL prefixes with returned-idle,
+	// acknowledged rollback share one total call ceiling inside the same
+	// twenty-second owner and both leases. Nonpositive preserves historical
+	// final-slot retries and disables the new prefix continuation.
+	DistributedReturnedRollbackMaximumAttempts int
+	// Independent metadata budget; never extends the evaluation or its lease.
+	CompletionRetry competitionLeaseRetrySettings
+	// Optional post-commit local housekeeping; never completion authority.
+	ReceiveCleanup competitionReceiveCleanupSettings
 }
 
-// Retains the existing fifteen-second cleanup bound in one defaults location.
+// Retains fifteen-second cleanup and independently owned default retry policies.
 func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
-	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second}
+	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second,
+		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), ScopeLockMaximumAttempts: 8, DistributedReturnedRollbackMaximumAttempts: 8, CompletionRetry: defaultCompetitionLeaseRetrySettings(), ReceiveCleanup: defaultCompetitionReceiveCleanupSettings()}
 }
 
-// Only fixed categories, a validated PostgreSQL code and an opaque digest are
-// serializable. The original error is deliberately absent from this type.
+// Only fixed categories, a validated PostgreSQL code, an opaque digest and
+// finite heartbeat boundaries are serializable. The original error is absent.
 type competitionHeartbeatFailure struct {
-	Category     string `json:"error_category,omitempty"`
-	SqlState     string `json:"error_sqlstate,omitempty"`
-	DetailSha256 string `json:"error_sha256,omitempty"`
+	Category          string                                `json:"error_category,omitempty"`
+	SqlState          string                                `json:"error_sqlstate,omitempty"`
+	DetailSha256      string                                `json:"error_sha256,omitempty"`
+	DatabasePhase     server.DbOperationPhase               `json:"database_phase,omitempty"`
+	HeartbeatDatabase *competitionHeartbeatDatabaseSnapshot `json:"heartbeat_database,omitempty"`
+	HeartbeatOwner    *competitionHeartbeatOwnerSnapshot    `json:"heartbeat_owner,omitempty"`
+}
+
+// Adds finite source-boundary evidence without changing formatting or identity.
+type competitionDatabasePhaseError struct {
+	cause error
+	phase server.DbOperationPhase
+}
+
+// Preserve the exact original digest and never format the observation as SQL.
+func (self competitionDatabasePhaseError) Error() string { return self.cause.Error() }
+
+// Existing cancellation, PostgreSQL and fencing decisions retain their causes.
+func (self competitionDatabasePhaseError) Unwrap() error { return self.cause }
+
+// Read the sequential observer only after the complete database call unwinds.
+func captureCompetitionDatabasePhase(run func(*server.DbPhaseObservation)) error {
+	observation := &server.DbPhaseObservation{}
+	err := captureDatabaseError(func() { run(observation) })
+	if err == nil {
+		return nil
+	}
+	return competitionDatabasePhaseError{cause: err, phase: observation.Phase()}
 }
 
 // A narrow optional capability preserves compatibility with non-PG stores.
@@ -46,6 +90,21 @@ func competitionHeartbeatFailureDetails(err error) competitionHeartbeatFailure {
 	}
 	digest := sha256.Sum256([]byte(err.Error()))
 	detail := competitionHeartbeatFailure{Category: "other", DetailSha256: hex.EncodeToString(digest[:])}
+	var phaseError competitionDatabasePhaseError
+	if errors.As(err, &phaseError) && phaseError.phase > server.DbOperationUnknown && phaseError.phase <= server.DbOperationPostCommit {
+		detail.DatabasePhase = phaseError.phase
+	}
+	var heartbeatError competitionHeartbeatDatabaseError
+	if errors.As(err, &heartbeatError) {
+		snapshot := heartbeatError.snapshot
+		detail.HeartbeatDatabase = &snapshot
+	}
+	var ownerError competitionHeartbeatOwnerError
+	if errors.As(err, &ownerError) {
+		observation := competitionHeartbeatOwnerObservation{snapshot: ownerError.snapshot}
+		snapshot := observation.snapshotCopy()
+		detail.HeartbeatOwner = &snapshot
+	}
 	var sqlError interface{ SQLState() string }
 	var networkError net.Error
 	switch {
@@ -86,7 +145,16 @@ type competitionSafeHeartbeatError struct {
 
 // Diagnostic formatting contains only the same safe fields as the ledger.
 func (self competitionSafeHeartbeatError) Error() string {
-	return fmt.Sprintf("category=%s sqlstate=%s detail_sha256=%s", self.detail.Category, self.detail.SqlState, self.detail.DetailSha256)
+	formatted := fmt.Sprintf("category=%s sqlstate=%s detail_sha256=%s", self.detail.Category, self.detail.SqlState, self.detail.DetailSha256)
+	if self.detail.DatabasePhase != server.DbOperationUnknown {
+		formatted += fmt.Sprintf(" database_phase=%d", self.detail.DatabasePhase)
+	}
+	if observation := self.detail.HeartbeatDatabase; observation != nil {
+		formatted += fmt.Sprintf(" heartbeat_step=%d callback_entries=%d acquire_attempts=%d acquire_succeeded=%d commit_acknowledged=%d rollback_acknowledged=%d",
+			observation.Step, observation.CallbackEntries, observation.Transaction.AcquireAttempts, observation.Transaction.AcquireSucceeded,
+			observation.Transaction.CommitAcknowledged, observation.Transaction.RollbackAcknowledged)
+	}
+	return formatted
 }
 
 // The original cause is retained for programmatic decisions, never serialization.

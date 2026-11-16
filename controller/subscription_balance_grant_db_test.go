@@ -122,7 +122,9 @@ func TestSubscriptionBalanceCountsOnlyTheCurrentGrant(t *testing.T) {
 
 // The grant a network gets when it is created or changes plan is the current period's
 // free or Pro grant, and is recorded as such, so the next scheduled grant supersedes
-// it at the boundary.
+// it at the boundary. A Pro network's is the grant of its current subscription cycle
+// (model.GrantProCycleInTx, PRO-GRANT-CYCLE.md), and only that: its daily free grant
+// comes from the daily run.
 func TestAddRefreshTransferBalanceRecordsGrantKind(t *testing.T) {
 	if model.Pro().DataAmount(false) <= 0 || model.Pro().DataAmount(true) <= 0 {
 		t.Skip("pro.yml is not present in this environment; there is nothing to grant")
@@ -161,8 +163,11 @@ func TestAddRefreshTransferBalanceRecordsGrantKind(t *testing.T) {
 		connect.AssertEqual(t, len(proTransferBalances), 1)
 		connect.AssertEqual(t, proTransferBalances[0].GrantKind, model.GrantKindPro)
 		connect.AssertEqual(t, proTransferBalances[0].Pro, true)
-		proStartTime, proEndTime := model.ProGrantWindow(now)
-		connect.AssertEqual(t, proTransferBalances[0].StartTime, proStartTime)
-		connect.AssertEqual(t, proTransferBalances[0].EndTime, proEndTime)
+		// The renewal row predates paid_end_time and names no market, so its
+		// period is its window less a day of grace. Its one cycle runs to the
+		// period's end, and the grant to the cycle's end plus a day
+		// (model.ProGrantGrace): the row's own window, not the calendar month.
+		connect.AssertEqual(t, proTransferBalances[0].StartTime, now.Add(-24*time.Hour))
+		connect.AssertEqual(t, proTransferBalances[0].EndTime, now.Add(29*24*time.Hour))
 	})
 }

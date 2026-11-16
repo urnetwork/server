@@ -25,19 +25,39 @@ func TestCreateAccountWalletRefusesInvalidWalletsAsBadRequest(t *testing.T) {
 	})
 }
 
-func TestSetPayoutWalletRefusesUnpayableWalletsAsBadRequest(t *testing.T) {
+// USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13).
+// Every selection is refused with a 400, a Solana or Polygon wallet of the
+// network on its chain too; before, those were selected. The wallet selected
+// while payouts ran is still the one apps read.
+func TestSetPayoutWalletRefusesEverySelectionAsBadRequest(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := tb.Context()
 		networkId := server.NewId()
-		clientSession := session.Testing_CreateClientSession(tb.Context(), &session.ByJwt{NetworkId: networkId})
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId})
 		defer clientSession.Cancel()
+		legacyWalletId := model.CreateAccountWalletExternal(clientSession, &model.CreateAccountWalletExternalArgs{NetworkId: networkId, Blockchain: "SOL", WalletAddress: walletAddressTestSolana("legacy payout"), DefaultTokenType: "USDC"})
 		taoWalletId := model.CreateAccountWalletExternal(clientSession, &model.CreateAccountWalletExternalArgs{NetworkId: networkId, Blockchain: model.TAO.String(), WalletAddress: "synthetic-tao-address"})
-		if taoWalletId == nil {
+		if legacyWalletId == nil || taoWalletId == nil {
 			tb.Fatal("no synthetic wallet")
 		}
-		_, err := SetPayoutWallet(model.SetPayoutWalletArgs{WalletId: *taoWalletId}, clientSession)
-		requireRefusalAnswer(tb, err, http.StatusBadRequest, "Bittensor wallets cannot be the payout wallet.")
-		_, err = SetPayoutWallet(model.SetPayoutWalletArgs{WalletId: server.NewId()}, clientSession)
-		requireRefusalAnswer(tb, err, http.StatusBadRequest, "Wallet must be an active wallet owned by the network.")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO payout_wallet (network_id, wallet_id) VALUES ($1, $2)`, networkId, *legacyWalletId))
+		})
+		solanaWallet, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{Blockchain: "SOL", WalletAddress: walletAddressTestSolana("payout"), DefaultTokenType: "USDC"}, clientSession)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		polygonWallet, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{Blockchain: "MATIC", WalletAddress: walletAddressTestPolygon("payout"), DefaultTokenType: "USDC"}, clientSession)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		for _, walletId := range []server.Id{solanaWallet.WalletId, polygonWallet.WalletId, *taoWalletId, server.NewId()} {
+			_, err := SetPayoutWallet(model.SetPayoutWalletArgs{WalletId: walletId}, clientSession)
+			requireRefusalAnswer(tb, err, http.StatusBadRequest, "USDC payouts have ended, so a payout wallet is no longer used.")
+		}
+		if result, err := GetPayoutWallet(clientSession); err != nil || result.WalletId == nil || *result.WalletId != *legacyWalletId {
+			tb.Fatal("the wallet selected while payouts ran is not the one apps read", result, err)
+		}
 	})
 }
 

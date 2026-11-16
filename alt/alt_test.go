@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -58,7 +59,10 @@ type altEnv struct {
 	dnsPort int
 
 	apiRequestPaths chan string
-	dispatched      chan altDispatch
+	// the local address of each udp socket an api client dialed from, which
+	// is the peer address alt sees
+	apiClientLocalAddrs chan string
+	dispatched          chan altDispatch
 	// closed when each registered listener's serve returns, which is the
 	// barrier a drain is observed on
 	listenerDone []chan struct{}
@@ -172,6 +176,23 @@ func testing_newAltEnv(ctx context.Context, t testing.TB, mutate func(*Settings)
 				fmt.Fprint(w, "early")
 			}
 		}),
+		// the client address a route's session resolves, and the ingress
+		// headers as they reached the router
+		router.NewRoute("GET", "/client-address", func(w http.ResponseWriter, r *http.Request) {
+			clientSession, err := session.NewClientSessionFromRequest(r)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(&testClientAddressResult{
+				ClientAddress:       clientSession.ClientAddress,
+				UrForwardedFor:      r.Header.Values("X-UR-Forwarded-For"),
+				ForwardedFor:        r.Header.Values("X-Forwarded-For"),
+				ForwardedSourcePort: r.Header.Values("X-Forwarded-Source-Port"),
+				RequestBuffering:    r.Header.Values(router.RequestBufferingHeader),
+			})
+		}),
 	})
 
 	altServer, err := NewAlt(ctx, connectHandler, apiHandler, settings)
@@ -217,19 +238,29 @@ func testing_newAltEnv(ctx context.Context, t testing.TB, mutate func(*Settings)
 	))
 
 	return &altEnv{
-		t:               t,
-		ctx:             ctx,
-		alt:             altServer,
-		connectHandler:  connectHandler,
-		exchange:        exchange,
-		transportTls:    connectHandler.TransportTls(),
-		h3Port:          h3PacketConns[0].LocalAddr().(*net.UDPAddr).Port,
-		dnsPort:         dnsPacketConns[0].LocalAddr().(*net.UDPAddr).Port,
-		apiRequestPaths: apiRequestPaths,
-		dispatched:      dispatched,
-		listenerDone:    listenerDone,
-		userSession:     userSession,
+		t:                   t,
+		ctx:                 ctx,
+		alt:                 altServer,
+		connectHandler:      connectHandler,
+		exchange:            exchange,
+		transportTls:        connectHandler.TransportTls(),
+		h3Port:              h3PacketConns[0].LocalAddr().(*net.UDPAddr).Port,
+		dnsPort:             dnsPacketConns[0].LocalAddr().(*net.UDPAddr).Port,
+		apiRequestPaths:     apiRequestPaths,
+		apiClientLocalAddrs: make(chan string, 64),
+		dispatched:          dispatched,
+		listenerDone:        listenerDone,
+		userSession:         userSession,
 	}
+}
+
+// What the fixture's /client-address route answers.
+type testClientAddressResult struct {
+	ClientAddress       string   `json:"client_address"`
+	UrForwardedFor      []string `json:"x_ur_forwarded_for"`
+	ForwardedFor        []string `json:"x_forwarded_for"`
+	ForwardedSourcePort []string `json:"x_forwarded_source_port"`
+	RequestBuffering    []string `json:"x_ur_request_buffering"`
 }
 
 func (self *altEnv) Close() {
@@ -284,6 +315,10 @@ func (self *altEnv) apiClient(serverName string, whodis bool) *http.Client {
 			packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 			if err != nil {
 				return nil, err
+			}
+			select {
+			case self.apiClientLocalAddrs <- packetConn.LocalAddr().String():
+			default:
 			}
 			if whodis {
 				ptSettings := connectcore.DefaultPacketTranslationSettings()

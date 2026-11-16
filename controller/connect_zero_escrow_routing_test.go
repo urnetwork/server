@@ -81,13 +81,11 @@ func withZeroEscrowRoutingCreators(
 // valve is never read; an exhausted payer is free only while the valve is open
 // and refused while it is closed; a data cap or drain refusal, which shares the
 // exhausted message but not its identity, and any other error are refused
-// without reading the valve. Escrow and free creation are both asked for the
-// free payer's 64 MiB cap of a 128 MiB request, and the controller signs what
-// the creator returns: its size and priority, never the trusted priority.
+// without reading the valve. Escrow and free creation are both asked for a
+// 64 MiB ceiling of a 128 MiB request, and the controller signs what the
+// creator returns: its size and priority, never the trusted priority.
 func TestNewContractFallsBackOnlyForExhaustedBalance(t *testing.T) {
-	defer model.Testing_SetMaxContractTransferByteCount(64*model.Mib, 0)()
-	lookup := &proLookup{}
-	defer withProLookup(lookup)()
+	defer Testing_SetMaxContractTransferByteCount(64 * model.Mib)()
 
 	exhausted := fmt.Errorf("%w (%d).", model.ErrContractBalanceExhausted, 0)
 	// the message data cap and test drain refusals share with exhaustion

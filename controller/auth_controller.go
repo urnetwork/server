@@ -70,7 +70,11 @@ func AuthLogin(
 	   }
 	*/
 
-	return authLogin(login, clientSession, model.AuthLogin)
+	result, err := authLogin(login, clientSession, model.AuthLogin)
+	if err == nil && result != nil && result.Network != nil {
+		recordSignInMailContext(clientSession, result.Network.ByJwt, login.TimeZone, login.Locales)
+	}
+	return result, err
 }
 
 // The model's login, injected so the result handling runs without a database.
@@ -95,7 +99,11 @@ func AuthLoginWithPassword(
 	loginWithPassword model.AuthLoginWithPasswordArgs,
 	clientSession *session.ClientSession,
 ) (*model.AuthLoginWithPasswordResult, error) {
-	return authLoginWithPassword(loginWithPassword, clientSession, model.AuthLoginWithPassword, authVerifySendResult)
+	result, err := authLoginWithPassword(loginWithPassword, clientSession, model.AuthLoginWithPassword, authVerifySendResult)
+	if err == nil && result != nil && result.Network != nil && result.Network.ByJwt != nil {
+		recordSignInMailContext(clientSession, *result.Network.ByJwt, loginWithPassword.TimeZone, loginWithPassword.Locales)
+	}
+	return result, err
 }
 
 type authLoginWithPasswordFunction func(model.AuthLoginWithPasswordArgs, *session.ClientSession) (*model.AuthLoginWithPasswordResult, error)
@@ -436,6 +444,11 @@ func AuthVerify(
 ) (*model.AuthVerifyResult, error) {
 	result, err := model.AuthVerify(verify, clientSession)
 	if err == nil {
+		// what the sign-in reported, before the enrollment that places E1
+		// from it
+		if result != nil && result.Network != nil {
+			recordSignInMailContext(clientSession, result.Network.ByJwt, verify.TimeZone, verify.Locales)
+		}
 		completeAuthVerify(result, verify.UserAuth, clientSession, defaultAuthVerifyEffects())
 	}
 	return result, err
@@ -560,7 +573,52 @@ func runRefreshMintHook(clientSession *session.ClientSession) {
 	}
 }
 
-func RefreshToken(clientSession *session.ClientSession) (*RefreshTokenResult, error) {
+// A refresh reads the database and renews in it, and either can fail for a
+// dependency: the database or the session store was unreachable, out of
+// capacity or past the request's deadline. That says nothing about the
+// presented token. It must never become a refusal in the result, which the
+// apps sign out on, and it was a 500: the reads raise past authentication's
+// recovery to the router, and the renewal returned its error undeclared. It is
+// answered as authentication answers an unavailable store, with
+// session.ErrAuthUnavailable: a 503 the client retries, its cause in the
+// server log. A refusal keeps its answer, and any other failure stays a 500.
+func refreshDependencyUnavailable(err error) bool {
+	return errors.Is(err, session.ErrAuthUnavailable) ||
+		errors.Is(err, session.ErrSessionStoreUnavailable) ||
+		server.IsDependencyUnavailable(err)
+}
+
+// Deferred by a refresh: a raise that is a dependency failure returns
+// session.ErrAuthUnavailable; any other raise continues to the router.
+func recoverRefreshDependencyUnavailable[R any](route string, result *R, returnErr *error) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	err, ok := recovered.(error)
+	if !ok || !refreshDependencyUnavailable(err) {
+		panic(recovered)
+	}
+	glog.Infof("[auth]%s dependency unavailable: %s\n", route, err)
+	var empty R
+	*result, *returnErr = empty, session.ErrAuthUnavailable
+}
+
+// The answer to a renewal's error: a refusal (session.RenewalRefused) keeps
+// its 401, a dependency failure is session.ErrAuthUnavailable, and any other
+// error is returned as it is.
+func refreshRenewalError(route string, err error) error {
+	if session.RenewalRefused(err) || !refreshDependencyUnavailable(err) {
+		return err
+	}
+	if !errors.Is(err, session.ErrAuthUnavailable) {
+		glog.Infof("[auth]%s renewal dependency unavailable: %s\n", route, err)
+	}
+	return session.ErrAuthUnavailable
+}
+
+func RefreshToken(clientSession *session.ClientSession) (result *RefreshTokenResult, returnErr error) {
+	defer recoverRefreshDependencyUnavailable("refresh", &result, &returnErr)
 	networkId := clientSession.ByJwt.NetworkId
 
 	if clientSession.ByJwt.ClientId == nil {
@@ -631,15 +689,20 @@ func RefreshToken(clientSession *session.ClientSession) (*RefreshTokenResult, er
 
 	// The refreshed token keeps the presented token's create time, as every
 	// derived credential keeps its root's (AuthCodeCreate, AuthNetworkClient).
-	// A password reset expires the tokens created before it
-	// (credential_change_time), and stamps its transaction's start, so a reset
-	// that commits after the router's state check can still be stamped before
-	// this mint. A fresh create time would outlive that reset; the presented
-	// token's expires with it.
+	// A password reset expires the tokens created before its cutoff
+	// (credential_change_time). The renewal checks the presented token again
+	// under the session lifecycle lock the reset holds exclusively, so a reset
+	// that commits after the router's state check refuses it with 401. A reset
+	// that commits after the renewal expires the refreshed token too: its cutoff
+	// is read from the resetting host's clock, and a fresh create time stamped
+	// here, by a clock ahead of that one, would outlive it.
 	runRefreshMintHook(clientSession)
-	signed, err := session.RenewSessionCredential(clientSession, networkName, isPro)
+	// the apps refresh a client token when a client limit hold starts, so its
+	// claim of whether UR Pro raises the limit is current for the hold's prompt
+	clientLimitUpgrade := model.ClientLimitUpgradeClaim(clientSession.Ctx, networkId, isPro)
+	signed, err := session.RenewSessionCredential(clientSession, networkName, isPro, clientLimitUpgrade)
 	if err != nil {
-		return nil, err
+		return nil, refreshRenewalError("refresh", err)
 	}
 	return &RefreshTokenResult{ByJwt: signed}, nil
 
@@ -688,7 +751,10 @@ func init() {
 	prometheus.MustRegister(networkRefreshCounter)
 }
 
-func NetworkRefreshToken(clientSession *session.ClientSession) (*NetworkRefreshTokenResult, error) {
+func NetworkRefreshToken(clientSession *session.ClientSession) (result *NetworkRefreshTokenResult, returnErr error) {
+	// the network read and the renewal fail for a dependency as RefreshToken's
+	// do, and are answered the same way
+	defer recoverRefreshDependencyUnavailable("network refresh", &result, &returnErr)
 	if clientSession.ByJwt.ClientId != nil || clientSession.ByJwt.DeviceId != nil {
 		// the router refuses a client token first. This keeps the handler from
 		// minting a network token for one whatever routes to it.
@@ -727,9 +793,15 @@ func NetworkRefreshToken(clientSession *session.ClientSession) (*NetworkRefreshT
 	// does: the password reset that expires the presented token expires the
 	// refreshed one too, whenever the reset commits
 	runRefreshMintHook(clientSession)
-	signed, err := session.RenewSessionCredential(clientSession, network.NetworkName, isPro)
+	// a network token carries no client limit claim; its client tokens do
+	signed, err := session.RenewSessionCredential(clientSession, network.NetworkName, isPro, nil)
 	if err != nil {
-		return nil, err
+		if session.RenewalRefused(err) {
+			// rotated or revoked after the router's state check: the 401
+			// authentication gives the same token
+			networkRefreshCounter.WithLabelValues(networkRefreshStateInvalid).Inc()
+		}
+		return nil, refreshRenewalError("network refresh", err)
 	}
 	networkRefreshCounter.WithLabelValues(networkRefreshRenewed).Inc()
 	return &NetworkRefreshTokenResult{ByJwt: signed}, nil

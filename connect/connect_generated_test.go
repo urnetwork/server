@@ -21,6 +21,18 @@ func TestConnectAuto(t *testing.T) {
 	})
 }
 
+func TestConnectAutoInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectAutoInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeAuto,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectAutoWithExtender(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectAutoWithExtender\n")
@@ -33,6 +45,19 @@ func TestConnectAutoWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectAutoWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectAutoWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeAuto,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectAutoEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectAutoEncrypted\n")
@@ -41,6 +66,19 @@ func TestConnectAutoEncrypted(t *testing.T) {
 			enableNack:            true,
 			transportMode:         connect.TransportModeAuto,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectAutoEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectAutoEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeAuto,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -58,6 +96,20 @@ func TestConnectAutoEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectAutoEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectAutoEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeAuto,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectAutoEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectAutoEncryptedAllowFallback\n")
@@ -67,6 +119,20 @@ func TestConnectAutoEncryptedAllowFallback(t *testing.T) {
 			transportMode:         connect.TransportModeAuto,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectAutoEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectAutoEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeAuto,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -85,6 +151,21 @@ func TestConnectAutoEncryptedAllowFallbackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectAutoEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectAutoEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeAuto,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectDns(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDns\n")
@@ -92,6 +173,18 @@ func TestConnectDns(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			transportMode:         connect.TransportModeH3Dns,
+		})
+	})
+}
+
+func TestConnectDnsInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3Dns,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -108,6 +201,19 @@ func TestConnectDnsWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectDnsWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3Dns,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectDnsEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsEncrypted\n")
@@ -116,6 +222,19 @@ func TestConnectDnsEncrypted(t *testing.T) {
 			enableNack:            true,
 			transportMode:         connect.TransportModeH3Dns,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectDnsEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3Dns,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -133,6 +252,20 @@ func TestConnectDnsEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectDnsEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3Dns,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectDnsEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsEncryptedAllowFallback\n")
@@ -142,6 +275,20 @@ func TestConnectDnsEncryptedAllowFallback(t *testing.T) {
 			transportMode:         connect.TransportModeH3Dns,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectDnsEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3Dns,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -160,6 +307,21 @@ func TestConnectDnsEncryptedAllowFallbackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectDnsEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3Dns,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectDnsPump(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsPump\n")
@@ -167,6 +329,18 @@ func TestConnectDnsPump(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			transportMode:         connect.TransportModeH3DnsPump,
+		})
+	})
+}
+
+func TestConnectDnsPumpInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsPumpInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3DnsPump,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -183,6 +357,19 @@ func TestConnectDnsPumpWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectDnsPumpWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsPumpWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3DnsPump,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectDnsPumpEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsPumpEncrypted\n")
@@ -191,6 +378,19 @@ func TestConnectDnsPumpEncrypted(t *testing.T) {
 			enableNack:            true,
 			transportMode:         connect.TransportModeH3DnsPump,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectDnsPumpEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsPumpEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3DnsPump,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -208,6 +408,20 @@ func TestConnectDnsPumpEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectDnsPumpEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsPumpEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3DnsPump,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectDnsPumpEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectDnsPumpEncryptedAllowFallback\n")
@@ -217,6 +431,20 @@ func TestConnectDnsPumpEncryptedAllowFallback(t *testing.T) {
 			transportMode:         connect.TransportModeH3DnsPump,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectDnsPumpEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsPumpEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3DnsPump,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -235,6 +463,21 @@ func TestConnectDnsPumpEncryptedAllowFallbackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectDnsPumpEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectDnsPumpEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3DnsPump,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectH1(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH1\n")
@@ -242,6 +485,18 @@ func TestConnectH1(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			transportMode:         connect.TransportModeH1,
+		})
+	})
+}
+
+func TestConnectH1InProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH1InProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -258,6 +513,19 @@ func TestConnectH1WithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectH1WithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH1WithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectH1Encrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH1Encrypted\n")
@@ -266,6 +534,19 @@ func TestConnectH1Encrypted(t *testing.T) {
 			enableNack:            true,
 			transportMode:         connect.TransportModeH1,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectH1EncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH1EncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -283,6 +564,20 @@ func TestConnectH1EncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectH1EncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH1EncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectH1EncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH1EncryptedAllowFallback\n")
@@ -292,6 +587,20 @@ func TestConnectH1EncryptedAllowFallback(t *testing.T) {
 			transportMode:         connect.TransportModeH1,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectH1EncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH1EncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -310,6 +619,21 @@ func TestConnectH1EncryptedAllowFallbackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectH1EncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH1EncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectH3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH3\n")
@@ -317,6 +641,18 @@ func TestConnectH3(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			transportMode:         connect.TransportModeH3,
+		})
+	})
+}
+
+func TestConnectH3InProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH3InProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -333,6 +669,19 @@ func TestConnectH3WithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectH3WithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH3WithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectH3Encrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH3Encrypted\n")
@@ -341,6 +690,19 @@ func TestConnectH3Encrypted(t *testing.T) {
 			enableNack:            true,
 			transportMode:         connect.TransportModeH3,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectH3EncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH3EncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -358,6 +720,20 @@ func TestConnectH3EncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectH3EncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH3EncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectH3EncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectH3EncryptedAllowFallback\n")
@@ -367,6 +743,20 @@ func TestConnectH3EncryptedAllowFallback(t *testing.T) {
 			transportMode:         connect.TransportModeH3,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectH3EncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH3EncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -385,11 +775,36 @@ func TestConnectH3EncryptedAllowFallbackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectH3EncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectH3EncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoNack(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoNack\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableTransportReform: true,
+		})
+	})
+}
+
+func TestConnectNoNackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoNackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -404,12 +819,34 @@ func TestConnectNoNackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectNoNackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoNackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoNackEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoNackEncrypted\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableTransportReform: true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectNoNackEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoNackEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -425,6 +862,18 @@ func TestConnectNoNackEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectNoNackEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoNackEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoNackEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoNackEncryptedAllowFallback\n")
@@ -432,6 +881,18 @@ func TestConnectNoNackEncryptedAllowFallback(t *testing.T) {
 			enableTransportReform: true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectNoNackEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoNackEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -448,11 +909,34 @@ func TestConnectNoNackEncryptedAllowFallbackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectNoNackEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoNackEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReform(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReform\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableNack: true,
+		})
+	})
+}
+
+func TestConnectNoTransportReformInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:    true,
+			localDelivery: localDeliveryTestInProcess,
 		})
 	})
 }
@@ -467,12 +951,34 @@ func TestConnectNoTransportReformWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectNoTransportReformWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:     true,
+			enableExtender: true,
+			localDelivery:  localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReformEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformEncrypted\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableNack:       true,
 			enableEncryption: true,
+		})
+	})
+}
+
+func TestConnectNoTransportReformEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:       true,
+			enableEncryption: true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -488,6 +994,18 @@ func TestConnectNoTransportReformEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectNoTransportReformEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:       true,
+			enableEncryption: true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReformEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformEncryptedAllowFallback\n")
@@ -495,6 +1013,18 @@ func TestConnectNoTransportReformEncryptedAllowFallback(t *testing.T) {
 			enableNack:       true,
 			enableEncryption: true,
 			allowFallback:    true,
+		})
+	})
+}
+
+func TestConnectNoTransportReformEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:       true,
+			enableEncryption: true,
+			allowFallback:    true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -511,10 +1041,32 @@ func TestConnectNoTransportReformEncryptedAllowFallbackWithExtender(t *testing.T
 	})
 }
 
+func TestConnectNoTransportReformEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:       true,
+			enableEncryption: true,
+			allowFallback:    true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReformNoNack(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformNoNack\n")
 		testConnect(t, contractTestNone, &testConnectConfig{})
+	})
+}
+
+func TestConnectNoTransportReformNoNackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			localDelivery: localDeliveryTestInProcess,
+		})
 	})
 }
 
@@ -527,11 +1079,31 @@ func TestConnectNoTransportReformNoNackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectNoTransportReformNoNackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableExtender: true,
+			localDelivery:  localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReformNoNackEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncrypted\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableEncryption: true,
+		})
+	})
+}
+
+func TestConnectNoTransportReformNoNackEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableEncryption: true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -546,12 +1118,34 @@ func TestConnectNoTransportReformNoNackEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectNoTransportReformNoNackEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableEncryption: true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReformNoNackEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableEncryption: true,
 			allowFallback:    true,
+		})
+	})
+}
+
+func TestConnectNoTransportReformNoNackEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableEncryption: true,
+			allowFallback:    true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -567,12 +1161,35 @@ func TestConnectNoTransportReformNoNackEncryptedAllowFallbackWithExtender(t *tes
 	})
 }
 
+func TestConnectNoTransportReformNoNackEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformNoNackEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableEncryption: true,
+			allowFallback:    true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReformWithNewInstance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstance\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableNack:        true,
 			enableNewInstance: true,
+		})
+	})
+}
+
+func TestConnectNoTransportReformWithNewInstanceInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:        true,
+			enableNewInstance: true,
+			localDelivery:     localDeliveryTestInProcess,
 		})
 	})
 }
@@ -588,6 +1205,18 @@ func TestConnectNoTransportReformWithNewInstanceWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectNoTransportReformWithNewInstanceWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:        true,
+			enableNewInstance: true,
+			enableExtender:    true,
+			localDelivery:     localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReformWithNewInstanceEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncrypted\n")
@@ -595,6 +1224,18 @@ func TestConnectNoTransportReformWithNewInstanceEncrypted(t *testing.T) {
 			enableNack:        true,
 			enableNewInstance: true,
 			enableEncryption:  true,
+		})
+	})
+}
+
+func TestConnectNoTransportReformWithNewInstanceEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:        true,
+			enableNewInstance: true,
+			enableEncryption:  true,
+			localDelivery:     localDeliveryTestInProcess,
 		})
 	})
 }
@@ -611,6 +1252,19 @@ func TestConnectNoTransportReformWithNewInstanceEncryptedWithExtender(t *testing
 	})
 }
 
+func TestConnectNoTransportReformWithNewInstanceEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:        true,
+			enableNewInstance: true,
+			enableEncryption:  true,
+			enableExtender:    true,
+			localDelivery:     localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback\n")
@@ -619,6 +1273,19 @@ func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testin
 			enableNewInstance: true,
 			enableEncryption:  true,
 			allowFallback:     true,
+		})
+	})
+}
+
+func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:        true,
+			enableNewInstance: true,
+			enableEncryption:  true,
+			allowFallback:     true,
+			localDelivery:     localDeliveryTestInProcess,
 		})
 	})
 }
@@ -636,12 +1303,37 @@ func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallbackWithExtend
 	})
 }
 
+func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableNack:        true,
+			enableNewInstance: true,
+			enableEncryption:  true,
+			allowFallback:     true,
+			enableExtender:    true,
+			localDelivery:     localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContracts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContracts\n")
 		testConnect(t, contractTestAsymmetric, &testConnectConfig{
 			enableTransportReform: true,
 			enableNack:            true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -657,6 +1349,18 @@ func TestConnectWithAsymmetricContractsWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncrypted\n")
@@ -664,6 +1368,18 @@ func TestConnectWithAsymmetricContractsEncrypted(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncryptedInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -680,6 +1396,19 @@ func TestConnectWithAsymmetricContractsEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithAsymmetricContractsEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncryptedAllowFallback\n")
@@ -688,6 +1417,19 @@ func TestConnectWithAsymmetricContractsEncryptedAllowFallback(t *testing.T) {
 			enableNack:            true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -705,10 +1447,33 @@ func TestConnectWithAsymmetricContractsEncryptedAllowFallbackWithExtender(t *tes
 	})
 }
 
+func TestConnectWithAsymmetricContractsEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsNoNack(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNack\n")
 		testConnect(t, contractTestAsymmetric, &testConnectConfig{})
+	})
+}
+
+func TestConnectWithAsymmetricContractsNoNackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			localDelivery: localDeliveryTestInProcess,
+		})
 	})
 }
 
@@ -721,11 +1486,31 @@ func TestConnectWithAsymmetricContractsNoNackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithAsymmetricContractsNoNackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableExtender: true,
+			localDelivery:  localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsNoNackEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncrypted\n")
 		testConnect(t, contractTestAsymmetric, &testConnectConfig{
 			enableEncryption: true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsNoNackEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncryptedInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableEncryption: true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -740,12 +1525,34 @@ func TestConnectWithAsymmetricContractsNoNackEncryptedWithExtender(t *testing.T)
 	})
 }
 
+func TestConnectWithAsymmetricContractsNoNackEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableEncryption: true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallback\n")
 		testConnect(t, contractTestAsymmetric, &testConnectConfig{
 			enableEncryption: true,
 			allowFallback:    true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableEncryption: true,
+			allowFallback:    true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -761,6 +1568,18 @@ func TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallbackWithExtender(
 	})
 }
 
+func TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableEncryption: true,
+			allowFallback:    true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaos\n")
@@ -768,6 +1587,18 @@ func TestConnectWithAsymmetricContractsWithChaos(t *testing.T) {
 			enableChaos:           true,
 			enableTransportReform: true,
 			enableNack:            true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -784,6 +1615,19 @@ func TestConnectWithAsymmetricContractsWithChaosWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaosEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncrypted\n")
@@ -792,6 +1636,19 @@ func TestConnectWithAsymmetricContractsWithChaosEncrypted(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncryptedInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -809,6 +1666,20 @@ func TestConnectWithAsymmetricContractsWithChaosEncryptedWithExtender(t *testing
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback\n")
@@ -818,6 +1689,20 @@ func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback(t *testin
 			enableNack:            true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -836,12 +1721,38 @@ func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallbackWithExtend
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaosNoNack(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNack\n")
 		testConnect(t, contractTestAsymmetric, &testConnectConfig{
 			enableChaos:           true,
 			enableTransportReform: true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosNoNackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -857,6 +1768,18 @@ func TestConnectWithAsymmetricContractsWithChaosNoNackWithExtender(t *testing.T)
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosNoNackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncrypted\n")
@@ -864,6 +1787,18 @@ func TestConnectWithAsymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
 			enableChaos:           true,
 			enableTransportReform: true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -880,6 +1815,19 @@ func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedWithExtender(t *t
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback\n")
@@ -888,6 +1836,19 @@ func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *
 			enableTransportReform: true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -905,6 +1866,20 @@ func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallbackWith
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaosWithNewInstance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstance\n")
@@ -913,6 +1888,19 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstance(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableNewInstance:     true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -930,6 +1918,20 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceWithExtender(t *t
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncrypted\n")
@@ -939,6 +1941,20 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncrypted(t *test
 			enableNack:            true,
 			enableNewInstance:     true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -957,6 +1973,21 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedWithExte
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback\n")
@@ -967,6 +1998,21 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFal
 			enableNewInstance:     true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -986,6 +2032,22 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFal
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithForceStream(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStream\n")
@@ -993,6 +2055,18 @@ func TestConnectWithAsymmetricContractsWithForceStream(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			forceStream:           true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithForceStreamInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1009,6 +2083,19 @@ func TestConnectWithAsymmetricContractsWithForceStreamWithExtender(t *testing.T)
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithForceStreamWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithForceStreamEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncrypted\n")
@@ -1017,6 +2104,19 @@ func TestConnectWithAsymmetricContractsWithForceStreamEncrypted(t *testing.T) {
 			enableNack:            true,
 			forceStream:           true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithForceStreamEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncryptedInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1034,6 +2134,20 @@ func TestConnectWithAsymmetricContractsWithForceStreamEncryptedWithExtender(t *t
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithForceStreamEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback\n")
@@ -1043,6 +2157,20 @@ func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback(t *
 			forceStream:           true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1061,6 +2189,21 @@ func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallbackWith
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithNewInstance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstance\n")
@@ -1068,6 +2211,18 @@ func TestConnectWithAsymmetricContractsWithNewInstance(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableNewInstance:     true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithNewInstanceInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1084,6 +2239,19 @@ func TestConnectWithAsymmetricContractsWithNewInstanceWithExtender(t *testing.T)
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithNewInstanceWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncrypted\n")
@@ -1092,6 +2260,19 @@ func TestConnectWithAsymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
 			enableNack:            true,
 			enableNewInstance:     true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncryptedInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1109,6 +2290,20 @@ func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedWithExtender(t *t
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback\n")
@@ -1118,6 +2313,20 @@ func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback(t *
 			enableNewInstance:     true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1136,6 +2345,21 @@ func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallbackWith
 	})
 }
 
+func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestAsymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosH1(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH1\n")
@@ -1144,6 +2368,19 @@ func TestConnectWithChaosH1(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			transportMode:         connect.TransportModeH1,
+		})
+	})
+}
+
+func TestConnectWithChaosH1InProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH1InProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1161,6 +2398,20 @@ func TestConnectWithChaosH1WithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosH1WithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH1WithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosH1Encrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH1Encrypted\n")
@@ -1170,6 +2421,20 @@ func TestConnectWithChaosH1Encrypted(t *testing.T) {
 			enableNack:            true,
 			transportMode:         connect.TransportModeH1,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithChaosH1EncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH1EncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1188,6 +2453,21 @@ func TestConnectWithChaosH1EncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosH1EncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH1EncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosH1EncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH1EncryptedAllowFallback\n")
@@ -1198,6 +2478,21 @@ func TestConnectWithChaosH1EncryptedAllowFallback(t *testing.T) {
 			transportMode:         connect.TransportModeH1,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithChaosH1EncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH1EncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1217,6 +2512,22 @@ func TestConnectWithChaosH1EncryptedAllowFallbackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosH1EncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH1EncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH1,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosH3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH3\n")
@@ -1225,6 +2536,19 @@ func TestConnectWithChaosH3(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			transportMode:         connect.TransportModeH3,
+		})
+	})
+}
+
+func TestConnectWithChaosH3InProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH3InProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1242,6 +2566,20 @@ func TestConnectWithChaosH3WithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosH3WithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH3WithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosH3Encrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH3Encrypted\n")
@@ -1251,6 +2589,20 @@ func TestConnectWithChaosH3Encrypted(t *testing.T) {
 			enableNack:            true,
 			transportMode:         connect.TransportModeH3,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithChaosH3EncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH3EncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1269,6 +2621,21 @@ func TestConnectWithChaosH3EncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosH3EncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH3EncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosH3EncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosH3EncryptedAllowFallback\n")
@@ -1279,6 +2646,21 @@ func TestConnectWithChaosH3EncryptedAllowFallback(t *testing.T) {
 			transportMode:         connect.TransportModeH3,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithChaosH3EncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH3EncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1298,12 +2680,39 @@ func TestConnectWithChaosH3EncryptedAllowFallbackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosH3EncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosH3EncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			transportMode:         connect.TransportModeH3,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoNack(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoNack\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableChaos:           true,
 			enableTransportReform: true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoNackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoNackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1319,6 +2728,18 @@ func TestConnectWithChaosNoNackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosNoNackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoNackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoNackEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncrypted\n")
@@ -1326,6 +2747,18 @@ func TestConnectWithChaosNoNackEncrypted(t *testing.T) {
 			enableChaos:           true,
 			enableTransportReform: true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoNackEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1342,6 +2775,19 @@ func TestConnectWithChaosNoNackEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosNoNackEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncryptedAllowFallback\n")
@@ -1350,6 +2796,19 @@ func TestConnectWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
 			enableTransportReform: true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoNackEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1367,12 +2826,37 @@ func TestConnectWithChaosNoNackEncryptedAllowFallbackWithExtender(t *testing.T) 
 	})
 }
 
+func TestConnectWithChaosNoNackEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoNackEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReform(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReform\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableChaos: true,
 			enableNack:  true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:   true,
+			enableNack:    true,
+			localDelivery: localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1388,6 +2872,18 @@ func TestConnectWithChaosNoTransportReformWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosNoTransportReformWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:    true,
+			enableNack:     true,
+			enableExtender: true,
+			localDelivery:  localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReformEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncrypted\n")
@@ -1395,6 +2891,18 @@ func TestConnectWithChaosNoTransportReformEncrypted(t *testing.T) {
 			enableChaos:      true,
 			enableNack:       true,
 			enableEncryption: true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:      true,
+			enableNack:       true,
+			enableEncryption: true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1411,6 +2919,19 @@ func TestConnectWithChaosNoTransportReformEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosNoTransportReformEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:      true,
+			enableNack:       true,
+			enableEncryption: true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReformEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncryptedAllowFallback\n")
@@ -1419,6 +2940,19 @@ func TestConnectWithChaosNoTransportReformEncryptedAllowFallback(t *testing.T) {
 			enableNack:       true,
 			enableEncryption: true,
 			allowFallback:    true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:      true,
+			enableNack:       true,
+			enableEncryption: true,
+			allowFallback:    true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1436,11 +2970,35 @@ func TestConnectWithChaosNoTransportReformEncryptedAllowFallbackWithExtender(t *
 	})
 }
 
+func TestConnectWithChaosNoTransportReformEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:      true,
+			enableNack:       true,
+			enableEncryption: true,
+			allowFallback:    true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReformNoNack(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNack\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableChaos: true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformNoNackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:   true,
+			localDelivery: localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1455,12 +3013,34 @@ func TestConnectWithChaosNoTransportReformNoNackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosNoTransportReformNoNackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:    true,
+			enableExtender: true,
+			localDelivery:  localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReformNoNackEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncrypted\n")
 		testConnect(t, contractTestNone, &testConnectConfig{
 			enableChaos:      true,
 			enableEncryption: true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformNoNackEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:      true,
+			enableEncryption: true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1476,6 +3056,18 @@ func TestConnectWithChaosNoTransportReformNoNackEncryptedWithExtender(t *testing
 	})
 }
 
+func TestConnectWithChaosNoTransportReformNoNackEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:      true,
+			enableEncryption: true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback\n")
@@ -1483,6 +3075,18 @@ func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback(t *testin
 			enableChaos:      true,
 			enableEncryption: true,
 			allowFallback:    true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:      true,
+			enableEncryption: true,
+			allowFallback:    true,
+			localDelivery:    localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1499,6 +3103,19 @@ func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallbackWithExtend
 	})
 }
 
+func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:      true,
+			enableEncryption: true,
+			allowFallback:    true,
+			enableExtender:   true,
+			localDelivery:    localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReformWithNewInstance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstance\n")
@@ -1506,6 +3123,18 @@ func TestConnectWithChaosNoTransportReformWithNewInstance(t *testing.T) {
 			enableChaos:       true,
 			enableNack:        true,
 			enableNewInstance: true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformWithNewInstanceInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:       true,
+			enableNack:        true,
+			enableNewInstance: true,
+			localDelivery:     localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1522,6 +3151,19 @@ func TestConnectWithChaosNoTransportReformWithNewInstanceWithExtender(t *testing
 	})
 }
 
+func TestConnectWithChaosNoTransportReformWithNewInstanceWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:       true,
+			enableNack:        true,
+			enableNewInstance: true,
+			enableExtender:    true,
+			localDelivery:     localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted\n")
@@ -1530,6 +3172,19 @@ func TestConnectWithChaosNoTransportReformWithNewInstanceEncrypted(t *testing.T)
 			enableNack:        true,
 			enableNewInstance: true,
 			enableEncryption:  true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:       true,
+			enableNack:        true,
+			enableNewInstance: true,
+			enableEncryption:  true,
+			localDelivery:     localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1547,6 +3202,20 @@ func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedWithExtender(t
 	})
 }
 
+func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:       true,
+			enableNack:        true,
+			enableNewInstance: true,
+			enableEncryption:  true,
+			enableExtender:    true,
+			localDelivery:     localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallback\n")
@@ -1556,6 +3225,20 @@ func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallback(
 			enableNewInstance: true,
 			enableEncryption:  true,
 			allowFallback:     true,
+		})
+	})
+}
+
+func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:       true,
+			enableNack:        true,
+			enableNewInstance: true,
+			enableEncryption:  true,
+			allowFallback:     true,
+			localDelivery:     localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1574,6 +3257,21 @@ func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallbackW
 	})
 }
 
+func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:       true,
+			enableNack:        true,
+			enableNewInstance: true,
+			enableEncryption:  true,
+			allowFallback:     true,
+			enableExtender:    true,
+			localDelivery:     localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosWithNewInstance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstance\n")
@@ -1582,6 +3280,19 @@ func TestConnectWithChaosWithNewInstance(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableNewInstance:     true,
+		})
+	})
+}
+
+func TestConnectWithChaosWithNewInstanceInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1599,6 +3310,20 @@ func TestConnectWithChaosWithNewInstanceWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosWithNewInstanceWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosWithNewInstanceEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncrypted\n")
@@ -1608,6 +3333,20 @@ func TestConnectWithChaosWithNewInstanceEncrypted(t *testing.T) {
 			enableNack:            true,
 			enableNewInstance:     true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithChaosWithNewInstanceEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1626,6 +3365,21 @@ func TestConnectWithChaosWithNewInstanceEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithChaosWithNewInstanceEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncryptedAllowFallback\n")
@@ -1636,6 +3390,21 @@ func TestConnectWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 			enableNewInstance:     true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithChaosWithNewInstanceEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1655,6 +3424,22 @@ func TestConnectWithChaosWithNewInstanceEncryptedAllowFallbackWithExtender(t *te
 	})
 }
 
+func TestConnectWithChaosWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithChaosWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithNewInstance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithNewInstance\n")
@@ -1662,6 +3447,18 @@ func TestConnectWithNewInstance(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableNewInstance:     true,
+		})
+	})
+}
+
+func TestConnectWithNewInstanceInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithNewInstanceInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1678,6 +3475,19 @@ func TestConnectWithNewInstanceWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithNewInstanceWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithNewInstanceWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithNewInstanceEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithNewInstanceEncrypted\n")
@@ -1686,6 +3496,19 @@ func TestConnectWithNewInstanceEncrypted(t *testing.T) {
 			enableNack:            true,
 			enableNewInstance:     true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithNewInstanceEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithNewInstanceEncryptedInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1703,6 +3526,20 @@ func TestConnectWithNewInstanceEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithNewInstanceEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithNewInstanceEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithNewInstanceEncryptedAllowFallback\n")
@@ -1712,6 +3549,20 @@ func TestConnectWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 			enableNewInstance:     true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithNewInstanceEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithNewInstanceEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1730,12 +3581,38 @@ func TestConnectWithNewInstanceEncryptedAllowFallbackWithExtender(t *testing.T) 
 	})
 }
 
+func TestConnectWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestNone, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContracts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContracts\n")
 		testConnect(t, contractTestSymmetric, &testConnectConfig{
 			enableTransportReform: true,
 			enableNack:            true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1751,6 +3628,18 @@ func TestConnectWithSymmetricContractsWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithSymmetricContractsWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncrypted\n")
@@ -1758,6 +3647,18 @@ func TestConnectWithSymmetricContractsEncrypted(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncryptedInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1774,6 +3675,19 @@ func TestConnectWithSymmetricContractsEncryptedWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithSymmetricContractsEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncryptedAllowFallback\n")
@@ -1782,6 +3696,19 @@ func TestConnectWithSymmetricContractsEncryptedAllowFallback(t *testing.T) {
 			enableNack:            true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1799,11 +3726,35 @@ func TestConnectWithSymmetricContractsEncryptedAllowFallbackWithExtender(t *test
 	})
 }
 
+func TestConnectWithSymmetricContractsEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsNoNack(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNack\n")
 		testConnect(t, contractTestSymmetric, &testConnectConfig{
 			enableTransportReform: true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsNoNackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1818,12 +3769,34 @@ func TestConnectWithSymmetricContractsNoNackWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithSymmetricContractsNoNackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsNoNackEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncrypted\n")
 		testConnect(t, contractTestSymmetric, &testConnectConfig{
 			enableTransportReform: true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsNoNackEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncryptedInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1839,6 +3812,18 @@ func TestConnectWithSymmetricContractsNoNackEncryptedWithExtender(t *testing.T) 
 	})
 }
 
+func TestConnectWithSymmetricContractsNoNackEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback\n")
@@ -1846,6 +3831,18 @@ func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback(t *testing.T)
 			enableTransportReform: true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1862,6 +3859,19 @@ func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallbackWithExtender(t
 	})
 }
 
+func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsNoNackEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaos(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaos\n")
@@ -1869,6 +3879,18 @@ func TestConnectWithSymmetricContractsWithChaos(t *testing.T) {
 			enableChaos:           true,
 			enableTransportReform: true,
 			enableNack:            true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1885,6 +3907,19 @@ func TestConnectWithSymmetricContractsWithChaosWithExtender(t *testing.T) {
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaosEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncrypted\n")
@@ -1893,6 +3928,19 @@ func TestConnectWithSymmetricContractsWithChaosEncrypted(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncryptedInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1910,6 +3958,20 @@ func TestConnectWithSymmetricContractsWithChaosEncryptedWithExtender(t *testing.
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback\n")
@@ -1919,6 +3981,20 @@ func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback(t *testing
 			enableNack:            true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1937,12 +4013,38 @@ func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallbackWithExtende
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaosNoNack(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNack\n")
 		testConnect(t, contractTestSymmetric, &testConnectConfig{
 			enableChaos:           true,
 			enableTransportReform: true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosNoNackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1958,6 +4060,18 @@ func TestConnectWithSymmetricContractsWithChaosNoNackWithExtender(t *testing.T) 
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosNoNackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncrypted\n")
@@ -1965,6 +4079,18 @@ func TestConnectWithSymmetricContractsWithChaosNoNackEncrypted(t *testing.T) {
 			enableChaos:           true,
 			enableTransportReform: true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncryptedInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -1981,6 +4107,19 @@ func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedWithExtender(t *te
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback\n")
@@ -1989,6 +4128,19 @@ func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *t
 			enableTransportReform: true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2006,6 +4158,20 @@ func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallbackWithE
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaosWithNewInstance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstance\n")
@@ -2014,6 +4180,19 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstance(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableNewInstance:     true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosWithNewInstanceInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2031,6 +4210,20 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstanceWithExtender(t *te
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosWithNewInstanceWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncrypted\n")
@@ -2040,6 +4233,20 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncrypted(t *testi
 			enableNack:            true,
 			enableNewInstance:     true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2058,6 +4265,21 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedWithExten
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallback\n")
@@ -2068,6 +4290,21 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFall
 			enableNewInstance:     true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2087,6 +4324,22 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFall
 	})
 }
 
+func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableChaos:           true,
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithForceStream(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStream\n")
@@ -2094,6 +4347,18 @@ func TestConnectWithSymmetricContractsWithForceStream(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			forceStream:           true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithForceStreamInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2110,6 +4375,19 @@ func TestConnectWithSymmetricContractsWithForceStreamWithExtender(t *testing.T) 
 	})
 }
 
+func TestConnectWithSymmetricContractsWithForceStreamWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithForceStreamEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncrypted\n")
@@ -2118,6 +4396,19 @@ func TestConnectWithSymmetricContractsWithForceStreamEncrypted(t *testing.T) {
 			enableNack:            true,
 			forceStream:           true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithForceStreamEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncryptedInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2135,6 +4426,20 @@ func TestConnectWithSymmetricContractsWithForceStreamEncryptedWithExtender(t *te
 	})
 }
 
+func TestConnectWithSymmetricContractsWithForceStreamEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback\n")
@@ -2144,6 +4449,20 @@ func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback(t *t
 			forceStream:           true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2162,6 +4481,21 @@ func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallbackWithE
 	})
 }
 
+func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			forceStream:           true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithNewInstance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstance\n")
@@ -2169,6 +4503,18 @@ func TestConnectWithSymmetricContractsWithNewInstance(t *testing.T) {
 			enableTransportReform: true,
 			enableNack:            true,
 			enableNewInstance:     true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithNewInstanceInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2185,6 +4531,19 @@ func TestConnectWithSymmetricContractsWithNewInstanceWithExtender(t *testing.T) 
 	})
 }
 
+func TestConnectWithSymmetricContractsWithNewInstanceWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncrypted\n")
@@ -2193,6 +4552,19 @@ func TestConnectWithSymmetricContractsWithNewInstanceEncrypted(t *testing.T) {
 			enableNack:            true,
 			enableNewInstance:     true,
 			enableEncryption:      true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithNewInstanceEncryptedInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncryptedInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2210,6 +4582,20 @@ func TestConnectWithSymmetricContractsWithNewInstanceEncryptedWithExtender(t *te
 	})
 }
 
+func TestConnectWithSymmetricContractsWithNewInstanceEncryptedWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncryptedWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
 func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback\n")
@@ -2219,6 +4605,20 @@ func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback(t *t
 			enableNewInstance:     true,
 			enableEncryption:      true,
 			allowFallback:         true,
+		})
+	})
+}
+
+func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallbackInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallbackInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			localDelivery:         localDeliveryTestInProcess,
 		})
 	})
 }
@@ -2237,4 +4637,19 @@ func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallbackWithE
 	})
 }
 
-// 186 cases.
+func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fmt.Printf("[progress]start TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallbackWithExtenderInProcess\n")
+		testConnect(t, contractTestSymmetric, &testConnectConfig{
+			enableTransportReform: true,
+			enableNack:            true,
+			enableNewInstance:     true,
+			enableEncryption:      true,
+			allowFallback:         true,
+			enableExtender:        true,
+			localDelivery:         localDeliveryTestInProcess,
+		})
+	})
+}
+
+// 372 cases.

@@ -175,7 +175,7 @@ func (self *Service) automationStore(ctx context.Context) (*Settings, competitio
 	if !ok {
 		return nil, nil, http.StatusServiceUnavailable, infrastructureError("capability_unavailable", "this replica does not support the v2 decision contract")
 	}
-	if err := requireConfiguredCompetitionRuntime(ctx, settings, self.store); err != nil {
+	if err := requireConfiguredCompetitionApiRuntime(ctx, settings, self.store); err != nil {
 		return nil, nil, http.StatusServiceUnavailable, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
 	}
 	return settings, store, http.StatusOK, nil

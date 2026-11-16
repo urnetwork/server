@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "kind": "competition-operational-incident-followup/v1",
+  "observed_at": "2026-11-11T21:11:50Z",
+  "supersedes_current_state_of": "EPOCH2-RUNTIME-RECOVERY-2026-11-11.json",
+  "api_readiness_failure_resolved": true,
+  "first_goofe_score_committed": true,
+  "first_sille_timeout_recorded_without_clock_extension": true,
+  "new_goofe_attempt": {
+    "job_id": "01a1c4af-c928-3e6a-d183-6c9f319cc119",
+    "run_id": "ce04036ce8d21253cdb1345b305baa8e3550469c3e0890f12355744740dcfd04",
+    "deadline_at_unchanged": "2026-11-11T23:52:17.050115Z",
+    "state_observed": "accepted",
+    "execution_started": false,
+    "launch_attempted": true,
+    "recovery_active": true,
+    "docker_owner_exit_code": 1,
+    "docker_owner_exit_journal_at": "2026-11-11T20:53:05.362078Z",
+    "evaluator_unit_created": false,
+    "recovery_service_failed": true,
+    "cleanup_proven": false,
+    "historical_error_predicate_known": false,
+    "diagnostic_limitation": "The CLI deliberately discards private causes and both service output streams were null. A fresh passing boundary check does not establish why the historical owner failed.",
+    "fresh_pure_runtime_and_owner_admission_predicates_passed": true,
+    "private_readonly_evidence_root": "/home/by/sim-latency/competition-goofe-runtime-diagnose-20261111.xoslUhSn",
+    "cleanup_guard": "RecoverActive requires a positively stopped existing evaluator unit. It refuses the missing unit here; execution_started=false alone is not proof that no late launch is possible. Preserve custody until a rigorous cleanup path is qualified."
+  },
+  "cache_integration_hazard": {
+    "goofe_cache_service_started_at": "2026-11-11T20:53:05.321457Z",
+    "goofe_cache_service_finished_at": "2026-11-11T20:53:05.349189Z",
+    "cache_pass_issued_reclaim": false,
+    "owner_failed_about_13_ms_after_cache_service_finished": true,
+    "historical_causality_proven": false,
+    "deterministic_descriptor_fixture_demonstrates_hazard": true,
+    "fixture_repetitions_passed": 3,
+    "hazard": "The ordinary management closure correctly rejects a descendant cgroup appearing or disappearing between its two observations. A transient maintenance service can cause that change even when its pass issues no reclaim.",
+    "timers_disabled_on_both_hosts_verified_at": "2026-11-11T21:11:50Z",
+    "installed_binary_units_and_journals_preserved": true,
+    "replacement": "A stable service cgroup with a persistent bounded parent and joined, bounded same-cgroup child passes; retain all closure guards, caps and durable episode limits. Implementation and independent qualification are pending."
+  },
+  "sille_active_attempt": {
+    "job_id": "01a1c4f7-aedc-bdbc-1562-5c0ad5d3bb89",
+    "run_id": "c591f88e1b560026b69c5dfb9abdef93c349721521c7aab3ac4610fcd14ae70a",
+    "deadline_at_unchanged": "2026-11-11T23:57:19.556777Z",
+    "execution_started": true,
+    "docker_owner_active_after_manual_cache_passes": true,
+    "candidate_phase": "building",
+    "fresh_candidate_replicates_completed": 0,
+    "baseline_replicates_loaded_not_rerun": 9,
+    "manual_cache_passes": {
+      "reason": "Management headroom fell below the unchanged 256 MiB control reserve while clean inactive engine file cache was available.",
+      "confined_existing_service_used_with_timer_disabled": true,
+      "pass_times_utc": ["2026-11-11T21:08:32Z", "2026-11-11T21:08:40Z"],
+      "episode_requests": 2,
+      "episode_requested_bytes": 831909888,
+      "actual_observed_headroom_after_second_pass_bytes": 1077731328,
+      "limits_and_episode_budget_unchanged": true,
+      "automatic_repetition_enabled": false
+    }
+  },
+  "recovery_authorization": {
+    "first_sille_timeout_narrow_amendment_requested": true,
+    "approved": false,
+    "active_work_interrupted": false,
+    "existing_inapplicable_recovery_class_reused": false
+  }
+}

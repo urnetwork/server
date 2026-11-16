@@ -1,6 +1,6 @@
 package main
 
-// Fixture commits retain the user's existing global author and committer.
+// Fixture commits retain the explicitly configured global author and committer.
 
 import (
 	"errors"
@@ -15,6 +15,7 @@ import (
 // Refuse overrides before invoking Git: the negative control must never make
 // a fixture commit under an identity different from the configured global one.
 func TestSourceFixtureGitUsesGlobalIdentity(t *testing.T) {
+	sourceTestPrivateGlobalIdentity(t, "Synthetic Global Fixture", "global@fixture.example")
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -22,7 +23,7 @@ func TestSourceFixtureGitUsesGlobalIdentity(t *testing.T) {
 	global := func(key string) string {
 		output, err := exec.Command(realGit, "config", "--global", "--get", key).Output()
 		if err != nil || strings.TrimSpace(string(output)) == "" {
-			t.Fatalf("fixture commits require an existing global %s: %v", key, err)
+			t.Fatalf("fixture commits require the configured global %s: %v", key, err)
 		}
 		return strings.TrimSpace(string(output))
 	}
@@ -54,7 +55,7 @@ exec %s "$@"
 	repository := filepath.Join(repositories, "identity")
 	actual := sourceTestGit(t, repository, "show", "-s", "--format=%an%n%ae%n%cn%n%ce", "HEAD")
 	if actual != strings.Join([]string{name, email, name, email}, "\n") {
-		t.Fatal("fixture author or committer differs from the existing global identity")
+		t.Fatal("fixture author or committer differs from the configured global identity")
 	}
 	command := exec.Command(realGit, "-C", repository, "config", "--local", "--get-regexp", `^user\.(name|email)$`)
 	_, err = command.Output()

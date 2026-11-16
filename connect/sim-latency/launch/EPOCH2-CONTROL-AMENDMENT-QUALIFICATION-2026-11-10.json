@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "kind": "executor-control-amendment-predeployment-qualification/v1",
+  "observed_at": "2026-11-10T09:23:26Z",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "migration_version_at_checkpoint": 950,
+  "approved_scope": "Append-only executor-control identity correction; original round/intake policy, product commits, image, scorer, workload, rules, submissions and clocks preserved",
+  "postgresql": {
+    "command": "go test -p=1 ./controller -run '^Test(ExecutorControlAmendmentPg.*|CompetitionReadiness.*|CompetitionDistributed(BaselinePublicationDoesNotStartCandidate|ClaimsUseOriginalFifoAcrossHosts|RecoveryRetainsAttemptDeadlineAndFencesOldCallbacks|SealWaitsForEveryHostCompletion|QualificationClockAndEvidenceAreImmutable))$' -count=3 -timeout=20m -v",
+    "exit_status": 0,
+    "repetitions": 3,
+    "passed_test_invocations": 45,
+    "duration_seconds": 133.713,
+    "log_path": "/mnt/data/competition-control-tests-by/epoch2-control-amendment-pg.LXgntLbN/tests.log",
+    "log_sha256": "5b742c895bab549842922dab3d8f0e17645ddfd179cb31d1415e945821bf59dd",
+    "services": "Fresh disposable PostgreSQL/Redis, dedicated test bridge, synthetic fixture config/vault; own containers and bridge removed after tests; main services untouched"
+  },
+  "race": {
+    "command": "go test -race . ./controller -run '^Test(ExecutorControlAmendment(Migration|Resolves|DoesNotLeak|Rejects)|CompetitionDistributed(NoopAdmission|NoopReceipt|AdmissionReadiness|AdmissionPreserves|BaselineAndPrivateExecutor))' -count=3",
+    "exit_status": 0,
+    "repetitions": 3,
+    "server_package_duration_seconds": 2.607,
+    "controller_package_duration_seconds": 3.741
+  },
+  "verified_invariants": [
+    "No frozen round or intake grant rewrite",
+    "No source, image, scoring, workload, host membership, response-key, slot or equivalence-policy change",
+    "Both old and corrected fingerprints, agent and builder digests explicitly recorded",
+    "Registration refuses prior customer or official host-admission clocks",
+    "Stale coordinator fenced before admission clock creation",
+    "Fresh no-op receipts bind the exact operational amendment",
+    "Both corrected hosts required before first FIFO customer claim",
+    "Existing FIFO, original deadline, recovery and sealing rules preserved",
+    "Baseline-producer and private-executor readiness identities remain distinct",
+    "Old and foreign eligible heartbeat rows cannot satisfy amended readiness",
+    "Intake readiness and candidate claims share the same exact whole-host predicate"
+  ],
+  "remaining": [
+    "Apply the pushed migration through the normal main deployment pipeline, then deploy the updated API",
+    "Activate corrected protected roles and record genuine new fingerprints in the approved amendment",
+    "Complete Sille private-engine pressure qualification with sufficient memory headroom",
+    "Produce the official shared R9 baseline and then perform parallel R9 no-op admission on both hosts",
+    "Enable and verify the distributed evaluator only after all genuine admission gates pass"
+  ],
+  "live_amendment_registered": false,
+  "grading_ready": false,
+  "qualification_limit": "Synthetic tests prove control/DB behavior, not live containment, MinIO retention, host measurement equivalence or grading readiness"
+}

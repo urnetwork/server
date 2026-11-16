@@ -5,8 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	// "errors"
-	// "errors"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -129,7 +128,7 @@ func HttpPostWithStatus[R any](
 		bytes.NewReader(requestBodyBytes),
 	)
 	if err != nil {
-		return nil, empty, err
+		return nil, empty, httpRequestError(err)
 	}
 
 	header := request.Header
@@ -140,7 +139,7 @@ func HttpPostWithStatus[R any](
 
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, empty, err
+		return nil, empty, httpRequestError(err)
 	}
 	defer response.Body.Close()
 
@@ -169,7 +168,7 @@ func HttpPostForm[R any](
 		strings.NewReader(form.Encode()),
 	)
 	if err != nil {
-		return empty, err
+		return empty, httpRequestError(err)
 	}
 
 	header := request.Header
@@ -180,7 +179,7 @@ func HttpPostForm[R any](
 
 	response, err := client.Do(request)
 	if err != nil {
-		return empty, err
+		return empty, httpRequestError(err)
 	}
 	defer response.Body.Close()
 
@@ -255,7 +254,7 @@ func HttpGetWithStatus[R any](
 
 	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, empty, err
+		return nil, empty, httpRequestError(err)
 	}
 
 	header := request.Header
@@ -265,7 +264,7 @@ func HttpGetWithStatus[R any](
 
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, empty, err
+		return nil, empty, httpRequestError(err)
 	}
 	defer response.Body.Close()
 
@@ -312,7 +311,7 @@ func HttpDeleteWithStatus[R any](
 
 	request, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
 	if err != nil {
-		return nil, empty, err
+		return nil, empty, httpRequestError(err)
 	}
 
 	header := request.Header
@@ -322,7 +321,7 @@ func HttpDeleteWithStatus[R any](
 
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, empty, err
+		return nil, empty, httpRequestError(err)
 	}
 	defer response.Body.Close()
 
@@ -333,6 +332,28 @@ func HttpDeleteWithStatus[R any](
 
 	r, err := responseCallback(response, responseBodyBytes)
 	return NewStatusFromResponse(response), r, err
+}
+
+// The error of building or sending a request, with the request's url cut to
+// its scheme and host. A *url.Error's text holds the whole url, its path and
+// query included, and callers log these errors and store them: a url can
+// carry a credential there, such as an api key, an id token or a purchase
+// token. The error stays a *url.Error with its operation and cause, so
+// errors.Is and errors.As still find a timeout or a cancellation.
+func httpRequestError(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err
+	}
+	redacted := &url.Error{
+		Op:  urlErr.Op,
+		Err: urlErr.Err,
+	}
+	// a url that does not parse is left out whole
+	if parsedUrl, parseErr := url.Parse(urlErr.URL); parseErr == nil && parsedUrl.Host != "" {
+		redacted.URL = parsedUrl.Scheme + "://" + parsedUrl.Host
+	}
+	return redacted
 }
 
 func NoCustomHeaders(header http.Header) {

@@ -244,6 +244,8 @@ func TestX402ConfigProblemSaysWhatToFix(t *testing.T) {
 // a payment that is malformed or signed for another network than the one
 // named is refused before the facilitator hears of it.
 func TestX402PurchaseReportsTheRejection(t *testing.T) {
+	// no path below may reach a database
+	installX402SettledNotGrantedFakes(t)
 	x402CdpTestPrices(t)
 	t.Setenv("WARP_DOMAIN", "x402.example")
 	key := newX402CdpTestEd25519Key(t)
@@ -258,7 +260,7 @@ func TestX402PurchaseReportsTheRejection(t *testing.T) {
 	}
 	payment, _ := x402CdpTestEvmPayment(t, "base", x402CdpTestPayToBase, quote.Accepts[0].MaxAmountRequired)
 	purchase := func(payment string, network string) string {
-		_, err := X402Purchase(context.Background(), server.NewId(), payment, &X402PurchaseArgs{SkuId: X402SkuData1Tib, Network: network})
+		_, err := X402Purchase(context.Background(), server.NewId(), payment, &X402PurchaseArgs{SkuId: X402SkuData1Tib, Network: network}, x402PurchaseResource)
 		if err == nil {
 			t.Fatal("the purchase succeeded")
 		}
@@ -275,7 +277,9 @@ func TestX402PurchaseReportsTheRejection(t *testing.T) {
 		{"verify", http.StatusOK, `{"isValid":false,"invalidReason":"invalid_exact_evm_payload_signature"}`, "x402 payment invalid: invalid_exact_evm_payload_signature"},
 		{"verify", http.StatusBadRequest, `{"isValid":false,"invalidReason":"synthetic facilitator detail <b>"}`, "x402 payment invalid: rejected"},
 		{"settle", http.StatusBadRequest, `{"success":false,"errorReason":"invalid_exact_evm_payload_authorization_valid_before"}`, "x402 settlement failed: invalid_exact_evm_payload_authorization_valid_before"},
-		{"settle", http.StatusInternalServerError, `{"success":false,"errorReason":"settlement_pending","transaction":"0x01"}`, "x402 settle failed"},
+		// a settlement_pending answer is not a failure to reach the
+		// facilitator; TestX402SettlementPendingIsAskedOnceMoreAndRecorded
+		{"settle", http.StatusInternalServerError, `{"errorType":"internal_server_error","errorMessage":"synthetic"}`, "x402 settle failed"},
 	} {
 		facilitator.set(func(f *x402CdpTestFacilitator) {
 			f.verifyStatus, f.verifyBody = http.StatusOK, `{"isValid":true}`

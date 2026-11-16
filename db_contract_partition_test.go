@@ -224,8 +224,42 @@ func TestContractPartitionCutover(t *testing.T) {
 
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Finalize: true, DryRun: true, Logf: logf}), nil)
 		connect.AssertEqual(t, IsContractPartitioned(ctx), false)
+		// Statistics added after prepare must follow the newly published parent.
+		// A colliding legacy name fails atomically, preserving table/object OIDs.
+		statisticsName := "contract_partition_test_predicate"
+		defaultStatisticsName := "contract_partition_test_default_predicate"
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, `CREATE STATISTICS public.contract_partition_test_predicate ON (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) FROM public.transfer_contract`))
+			RaisePgResult(tx.Exec(ctx, `ALTER STATISTICS public.contract_partition_test_predicate SET STATISTICS 250`))
+			RaisePgResult(tx.Exec(ctx, `COMMENT ON STATISTICS public.contract_partition_test_predicate IS 'cutover predicate'`))
+			RaisePgResult(tx.Exec(ctx, `CREATE STATISTICS public.contract_partition_test_default_predicate ON (outcome IS NULL) FROM public.transfer_contract`))
+			RaisePgResult(tx.Exec(ctx, `CREATE STATISTICS public.contract_partition_test_predicate_l ON (contract_id IS NULL) FROM public.contract_close`))
+		})
+		statisticsOid := testContractPartitionScalar[uint32](t, ctx, `SELECT oid FROM pg_statistic_ext WHERE stxnamespace = 'public'::regnamespace AND stxname = $1`, statisticsName)
+		defaultStatisticsOid := testContractPartitionScalar[uint32](t, ctx, `SELECT oid FROM pg_statistic_ext WHERE stxnamespace = 'public'::regnamespace AND stxname = $1`, defaultStatisticsName)
+		// The catalog's NULL means the default, rather than a missing target.
+		// Verify raw values so reader normalization cannot mask a copy defect.
+		assertStatisticsTargets := func(table string, suffix string) {
+			connect.AssertEqual(t, testContractPartitionScalar[bool](t, ctx, `SELECT stxstattarget IS NULL FROM pg_statistic_ext WHERE stxnamespace = 'public'::regnamespace AND stxname = $1 AND stxrelid = to_regclass($2)`, defaultStatisticsName+suffix, "public."+table), true)
+			connect.AssertEqual(t, testContractPartitionScalar[int](t, ctx, `SELECT stxstattarget::int FROM pg_statistic_ext WHERE stxnamespace = 'public'::regnamespace AND stxname = $1 AND stxrelid = to_regclass($2)`, statisticsName+suffix, "public."+table), 250)
+		}
+		assertStatisticsTargets("transfer_contract", "")
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Finalize: true, Logf: logf}) != nil, true)
+		connect.AssertEqual(t, IsContractPartitioned(ctx), false)
+		connect.AssertEqual(t, testContractPartitionScalar[uint32](t, ctx, `SELECT oid FROM pg_statistic_ext WHERE stxnamespace = 'public'::regnamespace AND stxname = $1`, statisticsName), statisticsOid)
+		connect.AssertEqual(t, contractPartitionExec(ctx, []string{`DROP STATISTICS public.contract_partition_test_predicate_l`}), nil)
+		var plainStatistics []contractStatistics
+		MaintenanceDb(ctx, func(conn PgConn) {
+			plainStatistics = readContractStatistics(ctx, conn, "transfer_contract")
+		})
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Finalize: true, Logf: logf}), nil)
 		connect.AssertEqual(t, IsContractPartitioned(ctx), true)
+		assertStatisticsTargets("transfer_contract", "")
+		assertStatisticsTargets("transfer_contract_legacy", contractLegacyStatisticsSuffix)
+		MaintenanceDb(ctx, func(conn PgConn) {
+			connect.AssertEqual(t, readContractStatistics(ctx, conn, "transfer_contract"), plainStatistics)
+		})
+		connect.AssertEqual(t, testContractPartitionScalar[uint32](t, ctx, `SELECT oid FROM pg_statistic_ext WHERE stxnamespace = 'public'::regnamespace AND stxname = $1 AND stxrelid = 'public.transfer_contract_legacy'::regclass`, statisticsName+contractLegacyStatisticsSuffix), statisticsOid)
 
 		for _, table := range ContractPartitionTables {
 			connect.AssertEqual(t, relkind(table), "p")
@@ -314,6 +348,12 @@ func TestContractPartitionCutover(t *testing.T) {
 			}
 		})
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Rollback: true, Logf: logf}), nil)
+		assertStatisticsTargets("transfer_contract", "")
+		connect.AssertEqual(t, testContractPartitionScalar[uint32](t, ctx, `SELECT oid FROM pg_statistic_ext WHERE stxnamespace = 'public'::regnamespace AND stxname = $1 AND stxrelid = 'public.transfer_contract'::regclass`, defaultStatisticsName), defaultStatisticsOid)
+		connect.AssertEqual(t, testContractPartitionScalar[uint32](t, ctx, `SELECT oid FROM pg_statistic_ext WHERE stxnamespace = 'public'::regnamespace AND stxname = $1 AND stxrelid = 'public.transfer_contract'::regclass`, statisticsName), statisticsOid)
+		MaintenanceDb(ctx, func(conn PgConn) {
+			connect.AssertEqual(t, readContractStatistics(ctx, conn, "transfer_contract"), plainStatistics)
+		})
 		connect.AssertEqual(t, IsContractPartitioned(ctx), false)
 		for _, table := range ContractPartitionTables {
 			connect.AssertEqual(t, relkind(table), "r")

@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "kind": "competition-epoch-one-queue-resume-observation",
+  "observed_at": "2026-11-05T21:40:56.486070105Z",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "database_schema": 932,
+  "finalization_hold": {
+    "active": true,
+    "revision": 1,
+    "hold_id": "01a1ada6-3090-c4b5-1f42-0adccfe4423e",
+    "request_sha256": "63baac1b205a0f08b607a94aab80f5b4da91ef36ec8fad7b5e601762c73fb6fe",
+    "created_at": "2026-11-05T21:38:32.204815Z",
+    "verified_by_independent_database_readback": true
+  },
+  "worker": {
+    "source_commit": "d49abe810d7dc3c46c0463733d7d2244fe37f09a",
+    "binary_sha256": "edc8428439793cbbfbfe0808e96734bbd2722857e993966759002f4417d77d2c",
+    "image_id": "sha256:fec1870df5477749e41497403b1d242fc330d5e42f6d76e7cb06af2476c301f6",
+    "wrapper_sha256": "ed21fac59073de908bd09b939916079d443e23c5d87a4c542d0b0bcc942a41bb",
+    "live_preflight_exit": 0,
+    "service_active": true,
+    "service_restarts_since_resume": 0,
+    "installed_dropin_sha256": "6ec92bd8e5db9da85014692abba56660421d80a41874ed1b08553ebe561768e3",
+    "changed_supervisor_arguments": ["worker-command", "worker-sha256"]
+  },
+  "queue": {
+    "succeeded": 51,
+    "queued": 14,
+    "running": 1,
+    "failed": 3,
+    "running_job_id": "01a1a481-d30e-06b0-b963-12b26bc3b174",
+    "running_started_at": "2026-11-05T21:40:24.036784Z",
+    "running_lease_live": true,
+    "prior_stale_job_id": "01a1a481-0968-ff57-1ca8-1a48fc2a35ea",
+    "prior_stale_job_reconciled_against_original_expired_deadline": true
+  },
+  "preserved": {
+    "epoch_one_product_source_and_numeric_policy": true,
+    "shared_baseline": true,
+    "original_submission_order": true,
+    "original_submission_clocks": true,
+    "no_new_recovery_grants_issued": true,
+    "no_calibration_or_provider_qualification_acceptance_inferred": true
+  },
+  "readback_sha256": "1cebe919962ca75f67c2a29bb384be74da4e34f5f04e87aeee55d19c3e9c2a9a",
+  "remaining": [
+    "Verify the target API rollout and its actual platform image config identity before controlled recovery authorization",
+    "Authorize the two previously requested recovery jobs only at a genuinely idle, evaluation-held and finalization-held boundary",
+    "Retain the separate disposition of the newly reconciled expired job; no new budget was granted",
+    "Complete calibration and winner honesty, safety, production-benefit review and manual source approval before releasing finalization"
+  ]
+}

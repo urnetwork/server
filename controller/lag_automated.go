@@ -7,6 +7,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -121,13 +122,13 @@ var lagAsnDatabaseMissingLogf = glog.Errorf
 // (amendment 12). Nothing else would show the gap. An address the database
 // does not know is no gap, and is not logged.
 func lagReportAsnDatabaseMissing() {
-	if ipAsnDb() != nil {
+	if server.IpAsnDatabaseDeployed() {
 		return
 	}
 	if lagAsnDatabaseMissingLogged.CompareAndSwap(false, true) {
 		lagAsnDatabaseMissingLogf(
 			"[lag]no GeoLite2 ASN database (%s): tracks from hosting and cloud networks are not flagged %s and count in every lag.dev aggregate, and tracks keep no network (lag.dev/PLAN.md A3, amendment 12)\n",
-			geoLite2AsnResourcePath,
+			server.GeoLite2AsnResourcePath,
 			model.LagAutomatedReasonDatacenterAsn,
 		)
 	}

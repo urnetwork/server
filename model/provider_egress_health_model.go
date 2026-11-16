@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -92,8 +93,24 @@ type ProviderEgressHealth struct {
 	ShortClasses string
 	// UnscoredFailedNames is the comma-joined failed loads the server left out
 	// of the counts at ingest: a site on probation, or one marked incompatible
-	// with the provider's place (see ScoreProviderEgressHealth).
+	// with the provider's place (see ScoreProviderEgressHealth), or a security
+	// recheck of a URL with an open TLS finding, or a URL outcome on probation
+	// (storeProviderEgressHealth).
 	UnscoredFailedNames string
+	// UrlSource is the catalog a URL outcome's destination came from, which
+	// the operator ingest decides from the served catalog
+	// (provider_egress_url_source.go). Zero, the general catalog, for a report
+	// without URL evidence.
+	UrlSource ProviderEgressUrlSource
+	// UrlCountryCode is the country whose list a country outcome's
+	// destination came from: its graduation state and pair tally are that
+	// country's (provider_egress_country_site.go).
+	UrlCountryCode string
+	// UrlProbation keeps a URL outcome out of every score whatever its
+	// destination's state. The store decides probation itself besides: a
+	// general destination the pool holds on probation, or a country site that
+	// has not graduated. Recorded and in the rolling quota, never counted.
+	UrlProbation bool
 }
 
 // Takes out of a submitted run's counts every failed load the pool says must
@@ -206,9 +223,15 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 	setProviderEgressHealthAt(ctx, health, server.NowUtc())
 }
 
+// SetProviderEgressHealth, reporting how the store counted the outcome, which
+// the operator ingest's per-source outcome counter reads.
+func StoreProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) ProviderEgressHealthStored {
+	return setProviderEgressHealthAt(ctx, health, server.NowUtc())
+}
+
 // The store as the clock reads now, which only judges whether a missing day
 // may be created; a test moves it across the retention.
-func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth, now time.Time) {
+func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth, now time.Time) (stored ProviderEgressHealthStored) {
 	if health.UrlProbeEvidence != nil {
 		// Arrival time must not rejuvenate a delayed measurement. Do not mutate
 		// the caller's receipt; publication retries may share the same value.
@@ -244,7 +267,7 @@ func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth
 	}
 
 	store := func() {
-		storeProviderEgressHealth(ctx, health, runId, string(classResultsJson), evidenceJson, policyVersion)
+		stored = storeProviderEgressHealth(ctx, health, runId, string(classResultsJson), evidenceJson, policyVersion)
 	}
 	var partitionMissingErr *providerEgressHealthPartitionMissingError
 	func() {
@@ -260,6 +283,7 @@ func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth
 		store()
 	}()
 	if partitionMissingErr == nil {
+		recordProviderEgressHealthE2e(ctx, health, stored)
 		return
 	}
 	// a day older than the ingest takes is a day retention may have dropped
@@ -270,6 +294,8 @@ func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth
 	_, err = providerEgressHealthHistoryPartitionFamily.EnsureRangeFor(ctx, health.MeasuredAt)
 	server.Raise(err)
 	store()
+	recordProviderEgressHealthE2e(ctx, health, stored)
+	return
 }
 
 // The store's transaction (see SetProviderEgressHealth).
@@ -280,8 +306,10 @@ func storeProviderEgressHealth(
 	classResultsJson string,
 	evidenceJson any,
 	policyVersion int,
-) {
+) (result ProviderEgressHealthStored) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a retried transaction discards what the rolled-back one decided
+		result = ProviderEgressHealthStored{}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
@@ -315,39 +343,133 @@ func storeProviderEgressHealth(
 				}
 			})
 		}
-		urlProbe := cycleAdmitted && health.Total == 1
+		// A measured outcome on a URL the provider has an open finding for, one
+		// pending or judged its own, is a security recheck: the claim offered
+		// that stored destination (or a normal draw landed on it). It is
+		// evidence about that URL alone, not a random sample of the provider,
+		// so it is stored as a security-only receipt: out of the eight-hour
+		// ratio, the rolling quota and the per-class totals, with its failed
+		// name among the unscored ones. Its security events still resolve or
+		// refresh the finding below, and its cycle is still paced.
+		recheck := false
+		if health.UrlProbeEvidence != nil && health.Total == 1 {
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM provider_egress_url_security AS security
+				WHERE security.client_id = $1 AND security.url_key = $2 AND `+providerUrlSecurityRechecksSql("security")+`
+			)`, health.ClientId, egresshealth.UrlProbeDestinationKey(health.UrlProbeEvidence.Destination)).Scan(&recheck))
+		}
+		// A measured outcome on a destination that has not graduated into
+		// scoring is on probation: a country site the refresh has not
+		// graduated (provider_egress_country_site.go), or a general
+		// destination the pool holds on probation, each read here as it
+		// stands. It is a measured run like any other, so the history keeps it
+		// with its outcome, its source and its probation state, and the
+		// rolling quota, which paces turns by measured runs, counts it:
+		// recording a site unscored costs no extra turns. What it may not do
+		// is count (GEOMAP §11.4): the eight-hour window leaves it out
+		// (providerEgressHealthWindowSql), and the latest-run row takes it out
+		// of the counts and the per-class totals, its failed name among the
+		// unscored ones, as a recheck's.
+		probation := health.UrlProbation
+		if health.UrlProbeEvidence != nil && health.Total == 1 && !probation {
+			if health.UrlSource == ProviderEgressUrlSourceCountry {
+				probation = !providerEgressCountrySiteScoredInTx(ctx, tx, health.UrlProbeEvidence.Destination.Name, health.UrlCountryCode)
+			} else {
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (
+					SELECT 1 FROM provider_egress_destination WHERE name = $1 AND probation
+				)`, health.UrlProbeEvidence.Destination.Name).Scan(&probation))
+			}
+		}
+		// the history row's counts are the rolling quota's: every measured
+		// outcome but a recheck; the latest-run row's are the scored ones
+		measuredOk, measuredTotal, measuredClassResultsJson := health.OKCount, health.Total, classResultsJson
+		countedOk, countedTotal, countedClassResultsJson := health.OKCount, health.Total, classResultsJson
+		countedFailedNames, countedUnscoredFailedNames := health.FailedNames, health.UnscoredFailedNames
+		unscoredOutcome := recheck || (probation && health.UrlProbeEvidence != nil && health.Total == 1)
+		if unscoredOutcome {
+			countedOk, countedTotal, countedClassResultsJson = 0, 0, "{}"
+			unscored := splitProviderEgressNames(health.UnscoredFailedNames)
+			unscored = append(unscored, splitProviderEgressNames(health.FailedNames)...)
+			countedFailedNames, countedUnscoredFailedNames = "", strings.Join(unscored, ",")
+		}
+		if recheck {
+			measuredOk, measuredTotal, measuredClassResultsJson = 0, 0, "{}"
+		}
+		urlProbe := cycleAdmitted && measuredTotal == 1
 		var securityMeasuredAt *time.Time
 		if health.UrlProbeEvidence == nil && (health.TLSAuthenticationFailure || health.OKCount > 0) {
 			t := health.MeasuredAt.UTC()
 			securityMeasuredAt = &t
 		}
+		// the later legs judged the provider's and the post-quantum outcome
+		// (FP2-PROTOCOL.md §4.1, §12.3), from the judged evidence, for a
+		// scored measured outcome only: a recheck or an outcome on probation
+		// never enters the window, so it stores 0 for both
+		failedLaterLegs, pqOutcome := int16(0), egresshealth.UrlProbePqOutcomeUnmeasured
+		if !unscoredOutcome {
+			failedLaterLegs = health.UrlProbeEvidence.FailedLaterLegs(measuredOk, measuredTotal)
+			pqOutcome = health.UrlProbeEvidence.PqOutcome(measuredTotal)
+		}
 		inserted, err := tx.Exec(ctx, `
 			INSERT INTO provider_egress_health_history
-				(run_id, client_id, measured_at, ok_count, total_count, class_results, tls_authentication_failure, cycle_started_at, url_probe, url_probe_evidence, url_probe_policy_version)
-			VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11)
+				(run_id, client_id, measured_at, ok_count, total_count, class_results, tls_authentication_failure, cycle_started_at, url_probe, url_probe_evidence, url_probe_policy_version, url_source, url_probation, failed_later_legs, pq_outcome)
+			VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15)
 			ON CONFLICT DO NOTHING`,
-			runId, health.ClientId, health.MeasuredAt.UTC(), health.OKCount, health.Total,
-			classResultsJson, health.TLSAuthenticationFailure, cycleStartedAt, urlProbe, evidenceJson, policyVersion)
+			runId, health.ClientId, health.MeasuredAt.UTC(), measuredOk, measuredTotal,
+			measuredClassResultsJson, health.TLSAuthenticationFailure, cycleStartedAt, urlProbe, evidenceJson, policyVersion,
+			int16(health.UrlSource), probation, failedLaterLegs, pqOutcome)
 		if err != nil {
 			raiseProviderEgressHealthInsertErr(err, health.MeasuredAt)
 		}
 		if inserted.RowsAffected() == 0 {
 			return
 		}
+		result = ProviderEgressHealthStored{
+			Stored:          true,
+			Recheck:         recheck,
+			Probation:       probation && !recheck,
+			FailedLaterLegs: failedLaterLegs,
+			PqOutcome:       pqOutcome,
+		}
+		// a measured country outcome, scored or not, is paired with the same
+		// provider's general outcomes for the refresh's graduation and
+		// demotion judgements; a recheck is no sample of the site. The pair
+		// judges the site, so both sides count HTTPS legs: an outcome that
+		// failed only its HTTP/3 leg is the provider not carrying UDP.
+		if health.UrlSource == ProviderEgressUrlSourceCountry && health.UrlProbeEvidence != nil && health.UrlCountryCode != "" &&
+			measuredTotal == 1 && policyVersion == SelectedProviderUrlProbePolicyVersion() {
+			httpsOk := 0
+			if health.UrlProbeEvidence.HttpsOk(measuredOk) {
+				httpsOk = 1
+			}
+			addProviderEgressCountrySiteTallyInTx(ctx, tx, health, httpsOk, policyVersion)
+		}
 		if health.UrlProbeEvidence != nil {
 			for _, event := range health.UrlProbeEvidence.Security {
 				destinationJson, err := json.Marshal(event.Destination)
 				server.Raise(err)
+				// A new or resolved finding is pending and decided nothing. A
+				// finding that fails again keeps its verdict, and the failure
+				// that verdict decided, until the judge reads the newer
+				// failure: a judged one does not lapse into pending, and so
+				// out of quarantine, on its own next failure.
 				server.RaisePgResult(tx.Exec(ctx, `
-					INSERT INTO provider_egress_url_security(client_id,url_key,destination,measured_at,tls_failure)
-					VALUES($1,$2,$3::jsonb,$4,$5)
+					INSERT INTO provider_egress_url_security(client_id,url_key,destination,measured_at,tls_failure,tls_verdict,tls_verdict_measured_at)
+					VALUES($1,$2,$3::jsonb,$4,$5,$6,NULL)
 					ON CONFLICT(client_id,url_key) DO UPDATE SET
 						destination=EXCLUDED.destination,
 						measured_at=EXCLUDED.measured_at,
 						tls_failure=CASE WHEN provider_egress_url_security.measured_at=EXCLUDED.measured_at
-							THEN provider_egress_url_security.tls_failure OR EXCLUDED.tls_failure ELSE EXCLUDED.tls_failure END
+							THEN provider_egress_url_security.tls_failure OR EXCLUDED.tls_failure ELSE EXCLUDED.tls_failure END,
+						tls_verdict=CASE WHEN provider_egress_url_security.tls_failure
+							AND (provider_egress_url_security.measured_at=EXCLUDED.measured_at OR EXCLUDED.tls_failure)
+							THEN provider_egress_url_security.tls_verdict ELSE EXCLUDED.tls_verdict END,
+						tls_verdict_measured_at=CASE WHEN provider_egress_url_security.tls_failure
+							AND (provider_egress_url_security.measured_at=EXCLUDED.measured_at OR EXCLUDED.tls_failure)
+							THEN provider_egress_url_security.tls_verdict_measured_at ELSE NULL END
 					WHERE provider_egress_url_security.measured_at <= EXCLUDED.measured_at`,
-					health.ClientId, egresshealth.UrlProbeDestinationKey(event.Destination), string(destinationJson), event.MeasuredAt.UTC(), event.TlsFailure))
+					health.ClientId, egresshealth.UrlProbeDestinationKey(event.Destination), string(destinationJson), event.MeasuredAt.UTC(), event.TlsFailure,
+					int16(ProviderEgressTlsVerdictPending)))
 			}
 		}
 		server.RaisePgResult(tx.Exec(
@@ -391,6 +513,9 @@ func storeProviderEgressHealth(
 					ELSE provider_egress_health.tls_authentication_failure END,
 				security_measured_at = GREATEST(provider_egress_health.security_measured_at, EXCLUDED.security_measured_at),
 				legacy_tls_authentication_failure = provider_egress_health.legacy_tls_authentication_failure OR EXCLUDED.legacy_tls_authentication_failure,
+				-- a new unidentified failure starts the provider's clean rechecks over
+				legacy_tls_recheck_from = CASE WHEN EXCLUDED.legacy_tls_authentication_failure THEN NULL ELSE provider_egress_health.legacy_tls_recheck_from END,
+				legacy_tls_cleared_at = CASE WHEN EXCLUDED.legacy_tls_authentication_failure THEN NULL ELSE provider_egress_health.legacy_tls_cleared_at END,
 				not_measured_count = CASE WHEN provider_egress_health.measured_at < EXCLUDED.measured_at THEN EXCLUDED.not_measured_count ELSE provider_egress_health.not_measured_count END,
 				not_measured_names = CASE WHEN provider_egress_health.measured_at < EXCLUDED.measured_at THEN EXCLUDED.not_measured_names ELSE provider_egress_health.not_measured_names END,
 				canary_passed_names = CASE WHEN provider_egress_health.measured_at < EXCLUDED.measured_at THEN EXCLUDED.canary_passed_names ELSE provider_egress_health.canary_passed_names END,
@@ -405,12 +530,12 @@ func storeProviderEgressHealth(
 			// measured_at is a naive timestamp column holding utc, as
 			// everywhere else in this schema
 			health.MeasuredAt.UTC(),
-			health.OKCount,
-			health.Total,
-			string(classResultsJson),
+			countedOk,
+			countedTotal,
+			countedClassResultsJson,
 			health.ReputationOK,
 			health.ReputationTotal,
-			health.FailedNames,
+			countedFailedNames,
 			health.ReputationFailedNames,
 			health.TLSAuthenticationFailure,
 			health.NotMeasuredCount,
@@ -418,19 +543,30 @@ func storeProviderEgressHealth(
 			health.CanaryPassedNames,
 			health.CanaryFailedNames,
 			health.ShortClasses,
-			health.UnscoredFailedNames,
+			countedUnscoredFailedNames,
 			securityMeasuredAt,
 			health.UrlProbeEvidence == nil && health.TLSAuthenticationFailure,
 		))
+		if health.UrlProbeEvidence != nil {
+			clearProviderEgressLegacyTlsInTx(ctx, tx, health)
+		}
 		// The projection is not a last-run boolean. One unrelated clean URL
 		// cannot clear another URL, nor can it clear an unidentified legacy TLS
-		// finding. Exact-URL rows remain authoritative under concurrent reports.
+		// finding; only its provider's clean rechecks do. Exact-URL rows remain
+		// authoritative under concurrent reports, and only one judged the
+		// provider's own sets it (provider_egress_tls_verdict.go).
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_health AS health SET
-			tls_authentication_failure = health.legacy_tls_authentication_failure OR EXISTS (
+			tls_authentication_failure = `+providerLegacyTlsUnclearedSql("health")+` OR EXISTS (
 				SELECT 1 FROM provider_egress_url_security AS security
-				WHERE security.client_id=health.client_id AND security.tls_failure
+				WHERE security.client_id=health.client_id AND `+providerUrlSecurityExcludesSql("security")+`
 			) WHERE health.client_id=$1`, health.ClientId))
 		if cycleAdmitted {
+			// A provider with an open finding is turned at the capped pace,
+			// whatever its quota. Pacing reads the receipt's own outcome, so a
+			// recheck that authenticated paces like a success; the counters
+			// follow the rolling quota, so a recheck adds no error or outcome,
+			// and an outcome on probation adds its own as the measured run it
+			// is.
 			server.RaisePgResult(tx.Exec(ctx, `
 				WITH current AS MATERIALIZED (
 					SELECT client_id, GREATEST(latest_result_at,$5) AS rolling_at
@@ -446,17 +582,76 @@ func storeProviderEgressHealth(
 					outcome_count = outcome_count + $7,
 					latest_result_at = GREATEST(latest_result_at, $5),
 					next_attempt_at = CASE WHEN latest_result_at > $5 THEN next_attempt_at
-						WHEN recent.run_count >= $6 AND NOT (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`) THEN `+providerUrlProbeRenewalAtSql("recent.oldest_run_at", "$5::timestamp")+`
+						WHEN (`+providerHasUrlSecurityRecheckSql("cycle.client_id")+`) THEN `+
+				providerUrlProbeSecurityPacedAttemptSql("cycle", "$5",
+					providerUrlProbePacedAttemptSql("cycle", "$5", "$3", "recent.run_count < $6"))+`
+						WHEN recent.run_count >= $6 THEN `+providerUrlProbeRenewalAtSql("recent.oldest_run_at", "$5::timestamp")+`
 						ELSE `+providerUrlProbePacedAttemptSql("cycle", "$5", "$3", "recent.run_count < $6")+` END
 				FROM recent WHERE cycle.client_id = recent.client_id`,
-				health.ClientId, cycleStartedAt, health.OKCount, health.Total-health.OKCount,
-				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, health.Total))
+				health.ClientId, cycleStartedAt, health.OKCount, measuredTotal-measuredOk,
+				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, measuredTotal))
 		}
 	}, server.TxReadCommitted)
+	return
+}
+
+// The distinct catalog destinations a legacy-flagged provider must verify TLS
+// through, once back online, before its flag clears: the measured-run quota
+// that makes any provider fully measured (ProviderUrlProbeRunTarget, ten URL
+// turns per four-hour refresh age). At the capped recheck pace that is at
+// least three and a half hours online.
+const providerEgressLegacyTlsCleanSites = ProviderUrlProbeRunTarget
+
+// The legacy snapshot's unidentified finding (legacy_tls_authentication_failure,
+// the URL-less aggregate TLS failures of 2026-09-07 to 09-26) names no URL to
+// recheck, so its provider is rechecked like one with a pending finding: still
+// excluded, claimable past its quota at the capped pace, its turns ordinary
+// catalog draws (providerHasUrlSecurityRecheckSql). This runs for each URL
+// receipt, and one comes only from a provider online: the first after the
+// provider is back starts the count (legacy_tls_recheck_from), so evidence
+// from before, however clean, never counts, and nothing clears while the
+// provider is offline. The flag clears once (legacy_tls_cleared_at; the flag
+// itself is kept), on what a provider verdict rests on, mirrored:
+//
+//   - the provider's TLS verified through at least
+//     providerEgressLegacyTlsCleanSites distinct catalog destinations, each
+//     its latest outcome there, since the count started. A verified chain
+//     through the provider is what an interceptor cannot present, and
+//     distinct sites keep one site's repeated draws from standing for the
+//     catalog; and
+//   - no finding of the provider is still pending or judged its own. A TLS
+//     failure during the rechecks is stored as an exact-URL finding and judged
+//     like any other (provider_egress_tls_verdict.go): while it is pending or
+//     the provider's own it also holds the flag, and once it is judged a site,
+//     place or retired-URL fault, or a later turn authenticates that URL, it
+//     no longer does.
+func clearProviderEgressLegacyTlsInTx(ctx context.Context, tx server.PgTx, health *ProviderEgressHealth) {
+	startedAt := health.MeasuredAt.UTC()
+	for _, event := range health.UrlProbeEvidence.Security {
+		if eventAt := event.MeasuredAt.UTC(); eventAt.Before(startedAt) {
+			startedAt = eventAt
+		}
+	}
+	server.RaisePgResult(tx.Exec(ctx, `
+		UPDATE provider_egress_health AS health SET
+			legacy_tls_recheck_from = COALESCE(health.legacy_tls_recheck_from, $2),
+			legacy_tls_cleared_at = CASE WHEN $4 <= (
+					SELECT COUNT(DISTINCT clean.destination->>'name') FROM provider_egress_url_security AS clean
+					WHERE clean.client_id = health.client_id AND NOT clean.tls_failure
+					AND COALESCE(clean.destination->>'name', '') <> ''
+					AND COALESCE(health.legacy_tls_recheck_from, $2) <= clean.measured_at
+				) AND NOT EXISTS (
+					SELECT 1 FROM provider_egress_url_security AS unresolved
+					WHERE unresolved.client_id = health.client_id AND `+providerUrlSecurityRechecksSql("unresolved")+`
+				) THEN $3::timestamp END
+		WHERE health.client_id = $1 AND `+providerLegacyTlsUnclearedSql("health"),
+		health.ClientId, startedAt, health.MeasuredAt.UTC(), providerEgressLegacyTlsCleanSites))
 }
 
 // Accepted measured URL outcomes contribute for strictly less than eight hours.
-// Security exceptions persist until later authenticated TLS from the same URL.
+// A TLS finding is no measured outcome: it is judged apart, and one judged the
+// provider's own persists until later authenticated TLS from the same URL
+// (provider_egress_tls_verdict.go).
 const ProviderEgressHealthMaxAge = 8 * time.Hour
 
 // ProviderEgressHealthCounts is the ok/total tally alone, for consumers that
@@ -468,17 +663,151 @@ type ProviderEgressHealthCounts struct {
 	FirstMeasuredAt time.Time
 	OKCount         int
 	Total           int
+	// General is the same tally over the general catalog's outcomes alone,
+	// when the window also holds scored outcomes from another source (a
+	// country site that has graduated into scoring); nil when every scored
+	// outcome is general, as every one is while no country site graduates.
+	// Quality, Speed, the index and ranking read the whole tally. The Online
+	// rule, its URL ratio and its country guard read this one (onlineCounts):
+	// in a country where the general catalog fails structurally, a working
+	// country list would otherwise end the exemption while the general half
+	// kept every provider under the ratio, and a failing country site would
+	// take providers whose general outcomes pass out of Online (D4).
+	General *ProviderEgressHealthCounts
+	// The failed runs (ok_count 0) whose later legs judged the provider's
+	// (failed_later_legs non-zero) are all IPv6 legs (mask & 1 = 0), all
+	// HTTP/3 legs (mask & 2 = 0), or any: the runs dropping IPv6, UDP or
+	// both forgives (FP2-PROTOCOL.md §3.2, §4.2). The general half holds its
+	// own.
+	ForgivenIpv4 int
+	ForgivenTcp  int
+	ForgivenBoth int
+	// Runs with negative evidence (§3.3): an IPv6 HTTPS leg judged the
+	// provider's (mask & 2), an HTTP/3 leg (mask & 5), any IPv6 leg
+	// (mask & 6). NegativeIpv6 is the count the provider status tells for
+	// a dropped IPv6 (§5.5); the whole window only.
+	NegativeIp   int
+	NegativeUdp  int
+	NegativeIpv6 int
+	// The newest positive and negative post-quantum outcomes in the window
+	// (§12.3), nil for none; the whole window only.
+	PostQuantumPositiveAt *time.Time
+	PostQuantumNegativeAt *time.Time
+}
+
+// Whether the newest post-quantum outcome in the window is positive
+// (FP2-PROTOCOL.md §12.4): a positive outcome later than any negative one. No
+// outcome is not positive (D12.2).
+func (self ProviderEgressHealthCounts) postQuantumPositive() bool {
+	return self.PostQuantumPositiveAt != nil &&
+		(self.PostQuantumNegativeAt == nil || self.PostQuantumNegativeAt.Before(*self.PostQuantumPositiveAt))
+}
+
+// The tally the Online rule, its URL ratio and its country guard decide by:
+// the general catalog's outcomes alone (General).
+func (self ProviderEgressHealthCounts) onlineCounts() ProviderEgressHealthCounts {
+	if self.General != nil {
+		return *self.General
+	}
+	return self
 }
 
 // Only the explicitly selected URL policy contributes. Legacy/unknown versions
 // remain stored; their weaker or unknown success contracts never become quality.
+// A security recheck is stored with no measured outcome (total_count 0), so it
+// never enters this window: the finding it rechecks is judged on its own, and
+// its failures would otherwise count against the provider twice. An outcome on
+// probation (a country site, or a general site the refresh has not graduated)
+// is a measured run of the rolling quota but never enters this window either:
+// it has to earn the right to cost a provider a tier (provider_egress_url_source.go).
+// Each outcome carries its catalog source, so a reader can tell the general
+// catalog's outcomes from the rest (ProviderEgressHealthCounts.General).
 func providerEgressHealthWindowSql() string {
-	return fmt.Sprintf(`
-	SELECT client_id, measured_at, ok_count, total_count, class_results
+	return `
+	SELECT client_id, measured_at, ok_count, total_count, class_results, url_source, failed_later_legs, pq_outcome
 	FROM provider_egress_health_history
-	WHERE measured_at > $1 AND measured_at <= $2 AND total_count = 1
-	AND url_probe_policy_version = %d
-`, SelectedProviderUrlProbePolicyVersion())
+	WHERE measured_at > $1 AND measured_at <= $2 AND ` + providerEgressHealthWindowRowsSql("") + `
+`
+}
+
+// Which history rows the window holds, over the rows aliased alias ("" for
+// the bare table): the window's one row predicate apart from its time bounds.
+// Every condition on what enters the window belongs here, the selected policy
+// and probation among them, so the readers that share it (the Online rule's
+// evidence, providerOnlineUrlEvidenceSql) cannot drift from it. A catalog
+// source condition does not: Quality, Speed and the index score graduated
+// country outcomes too.
+func providerEgressHealthWindowRowsSql(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return fmt.Sprintf(`%[1]stotal_count = 1
+	AND %[1]surl_probe_policy_version = %[2]d
+	AND NOT %[1]surl_probation`, prefix, SelectedProviderUrlProbePolicyVersion())
+}
+
+// The general catalog's outcomes, over the rows aliased alias: the half the
+// Online rule, its URL ratio and its country guard decide by (D4,
+// ProviderEgressHealthCounts.General). The window's aggregate filters its
+// general half by it, and the Online rule's evidence adds it to the window's
+// rows, so the two cannot drift.
+func providerOnlineUrlSourceSql(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return fmt.Sprintf("%surl_source = %d", prefix, ProviderEgressUrlSourceGeneral)
+}
+
+// The history rows the URL-success rule decides by, its URL ratio and its
+// country guard: the window's rows from the general catalog. The zero-carry
+// judge reads its URL condition through this (provider_zero_carry.go), so
+// whatever narrows the rule's evidence narrows the judge's too;
+// TestProviderZeroCarryUrlConditionIsTheOnlineRules pins it.
+func providerOnlineUrlEvidenceSql(alias string) string {
+	return providerEgressHealthWindowRowsSql(alias) + " AND " + providerOnlineUrlSourceSql(alias)
+}
+
+// The pq_outcome values of a run the aggregate reads (FP2-PROTOCOL.md
+// §12.3), the ingest's own; 0 is unmeasured.
+const (
+	providerEgressPqOutcomeSqlPositive = egresshealth.UrlProbePqOutcomePositive
+	providerEgressPqOutcomeSqlNegative = egresshealth.UrlProbePqOutcomeNegative
+)
+
+// The window's aggregate per provider: the newest and oldest outcome, the
+// successes and outcomes, and the same over the general catalog's outcomes
+// alone, which getProviderEgressHealthCountsSnapshot reads; then the runs
+// each capability drop forgives and the negative evidence, overall and for
+// the general half, and the newest post-quantum outcomes (FP2-PROTOCOL.md
+// §4.2, §12.3). Every filter is an integer test, so the query stays
+// jsonb-free. A general filter puts the source last, so the general half's
+// four tallies stay the only filters on the source alone.
+func providerEgressHealthCountsSql() string {
+	general := providerOnlineUrlSourceSql("")
+	failed := "ok_count = 0 AND failed_later_legs <> 0"
+	forgivenIpv4 := fmt.Sprintf("%s AND failed_later_legs & %d = 0", failed, ProviderEgressFailedLaterLegIpv4Udp)
+	forgivenTcp := fmt.Sprintf("%s AND failed_later_legs & %d = 0", failed, ProviderEgressFailedLaterLegIpv6Tcp)
+	forgivenBoth := failed
+	negativeIp := fmt.Sprintf("failed_later_legs & %d <> 0", ProviderEgressFailedLaterLegIpv6Tcp)
+	negativeUdp := fmt.Sprintf("failed_later_legs & %d <> 0", ProviderEgressFailedLaterLegIpv4Udp|ProviderEgressFailedLaterLegIpv6Udp)
+	negativeIpv6 := fmt.Sprintf("failed_later_legs & %d <> 0", ProviderEgressFailedLaterLegIpv6Tcp|ProviderEgressFailedLaterLegIpv6Udp)
+	capabilityCounts := []string{forgivenIpv4, forgivenTcp, forgivenBoth, negativeIp, negativeUdp}
+	countSql := ""
+	for _, condition := range append(slices.Clone(capabilityCounts), negativeIpv6) {
+		countSql += `
+			COUNT(*) FILTER (WHERE ` + condition + `),`
+	}
+	for _, condition := range capabilityCounts {
+		countSql += `
+			COUNT(*) FILTER (WHERE ` + condition + ` AND ` + general + `),`
+	}
+	return `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count),
+			MAX(measured_at) FILTER (WHERE ` + general + `), MIN(measured_at) FILTER (WHERE ` + general + `),
+			COALESCE(SUM(ok_count) FILTER (WHERE ` + general + `), 0), COALESCE(SUM(total_count) FILTER (WHERE ` + general + `), 0),` + countSql + fmt.Sprintf(`
+			MAX(measured_at) FILTER (WHERE pq_outcome = %d), MAX(measured_at) FILTER (WHERE pq_outcome = %d)`, providerEgressPqOutcomeSqlPositive, providerEgressPqOutcomeSqlNegative) + `
+			FROM (` + providerEgressHealthWindowSql() + `) AS evidence`
 }
 
 // Aggregates accepted URL successes and measured errors in the eight-hour
@@ -502,12 +831,10 @@ func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []serv
 	now := server.NowUtc()
 	minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge)
 
-	query := `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count)
-			FROM (` + providerEgressHealthWindowSql() + `) AS evidence GROUP BY client_id`
+	query := providerEgressHealthCountsSql() + ` GROUP BY client_id`
 	args := []any{minMeasuredAt.UTC(), now.UTC()}
 	if clientIds != nil {
-		query = `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count)
-			FROM (` + providerEgressHealthWindowSql() + `) AS evidence WHERE client_id = ANY($3) GROUP BY client_id`
+		query = providerEgressHealthCountsSql() + ` WHERE client_id = ANY($3) GROUP BY client_id`
 		args = append(args, clientIds)
 	}
 
@@ -521,13 +848,40 @@ func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []serv
 			for result.Next() {
 				var clientId server.Id
 				var counts ProviderEgressHealthCounts
+				var generalMeasuredAt, generalFirstMeasuredAt *time.Time
+				var generalOkCount, generalTotal int
+				general := &ProviderEgressHealthCounts{}
 				server.Raise(result.Scan(
 					&clientId,
 					&counts.MeasuredAt,
 					&counts.FirstMeasuredAt,
 					&counts.OKCount,
 					&counts.Total,
+					&generalMeasuredAt,
+					&generalFirstMeasuredAt,
+					&generalOkCount,
+					&generalTotal,
+					&counts.ForgivenIpv4,
+					&counts.ForgivenTcp,
+					&counts.ForgivenBoth,
+					&counts.NegativeIp,
+					&counts.NegativeUdp,
+					&counts.NegativeIpv6,
+					&general.ForgivenIpv4,
+					&general.ForgivenTcp,
+					&general.ForgivenBoth,
+					&general.NegativeIp,
+					&general.NegativeUdp,
+					&counts.PostQuantumPositiveAt,
+					&counts.PostQuantumNegativeAt,
 				))
+				if generalTotal != counts.Total {
+					general.OKCount, general.Total = generalOkCount, generalTotal
+					if generalMeasuredAt != nil && generalFirstMeasuredAt != nil {
+						general.MeasuredAt, general.FirstMeasuredAt = *generalMeasuredAt, *generalFirstMeasuredAt
+					}
+					counts.General = general
+				}
 				healthCounts[clientId] = counts
 			}
 		})
@@ -537,33 +891,38 @@ func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []serv
 }
 
 // GetAllProviderEgressTLSAuthenticationFailedClientIds returns every provider
-// with any outstanding exact-URL TLS finding or retained legacy quarantine.
+// with an outstanding exact-URL TLS finding judged its own, or a retained
+// legacy quarantine.
 //
-// There is intentionally no age cutoff. A certificate-authentication failure
-// is positive evidence that the path is unsafe, not a quality sample that
-// gradually becomes unknown. Only a newer authenticated response from each
-// affected URL clears its finding. An unidentified legacy finding is retained.
+// There is intentionally no age cutoff on a judged finding. Its judgement
+// already rests on evidence close in time to the failure (a direct,
+// verified handshake to the same URL from the server, with no common-mode or
+// place-level explanation), and it is positive evidence that the path is
+// unsafe, not a quality sample that gradually becomes unknown. Only a newer
+// authenticated response from each affected URL clears it. A finding still
+// pending, or judged a site, place or retired-URL fault, excludes nothing
+// (provider_egress_tls_verdict.go). An unidentified legacy finding is retained.
 func GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx context.Context) map[server.Id]bool {
 	return getProviderEgressTlsAuthenticationFailedClientIds(ctx, nil)
 }
 
 // The same findings for only clientIds, or for every provider when clientIds
-// is nil.
+// is nil. The rows are authoritative; the health row's projection is not read.
 func getProviderEgressTlsAuthenticationFailedClientIds(ctx context.Context, clientIds []server.Id) map[server.Id]bool {
 	failed := map[server.Id]bool{}
 	query := `
 			SELECT client_id
 			FROM provider_egress_health
-			WHERE tls_authentication_failure OR legacy_tls_authentication_failure
-			UNION SELECT client_id FROM provider_egress_url_security WHERE tls_failure
+			WHERE ` + providerLegacyTlsUnclearedSql("provider_egress_health") + `
+			UNION SELECT client_id FROM provider_egress_url_security AS security WHERE ` + providerUrlSecurityExcludesSql("security") + `
 			`
 	args := []any{}
 	if clientIds != nil {
 		query = `
 			SELECT client_id
 			FROM provider_egress_health
-			WHERE client_id = ANY($1) AND (tls_authentication_failure OR legacy_tls_authentication_failure)
-			UNION SELECT client_id FROM provider_egress_url_security WHERE client_id = ANY($1) AND tls_failure
+			WHERE client_id = ANY($1) AND ` + providerLegacyTlsUnclearedSql("provider_egress_health") + `
+			UNION SELECT client_id FROM provider_egress_url_security AS security WHERE client_id = ANY($1) AND ` + providerUrlSecurityExcludesSql("security") + `
 			`
 		args = append(args, clientIds)
 	}

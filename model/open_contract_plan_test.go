@@ -97,8 +97,9 @@ func modelFunctionStatement(t testing.TB, functionName string) string {
 	return statements[0]
 }
 
-// Resolve the real query owner only through the public wrapper's returned
-// call. A dead helper or an unused callback cannot satisfy the SQL guard.
+// Resolve the real query owner only through the call whose result the public
+// wrapper returns. A dead helper or an unused callback cannot satisfy the SQL
+// guard.
 func openContractCompanionQueryOwner(file *ast.File) (*ast.FuncDecl, error) {
 	functions := map[string]*ast.FuncDecl{}
 	for _, declaration := range file.Decls {
@@ -126,8 +127,51 @@ func openContractCompanionQueryOwner(file *ast.File) (*ast.FuncDecl, error) {
 	if wrapper == nil || owner == nil || owner.Body == nil {
 		return nil, fmt.Errorf("missing public companion wrapper or actual query owner")
 	}
+	// The wrapper's result is the call's when the wrapper returns the call, or
+	// when it assigns the call to its two named results and returns them bare
+	// after the one step it takes on the admission's final verdict: requesting
+	// the payer's drain on a balance refusal (fbfacd208). That request gets
+	// plain values, so it cannot change the results. Admit only that exact
+	// post-admission step.
+	resultCall := func(body *ast.BlockStmt) *ast.CallExpr {
+		if call := returnedCall(body); call != nil {
+			return call
+		}
+		if body == nil || len(body.List) != 3 || wrapper.Type.Results == nil {
+			return nil
+		}
+		results := []string{}
+		for _, field := range wrapper.Type.Results.List {
+			for _, name := range field.Names {
+				results = append(results, name.Name)
+			}
+		}
+		if len(results) != 2 {
+			return nil
+		}
+		assignment, ok := body.List[0].(*ast.AssignStmt)
+		if !ok || assignment.Tok != token.ASSIGN || len(assignment.Lhs) != 2 || len(assignment.Rhs) != 1 || !ident(assignment.Lhs[0], results[0]) || !ident(assignment.Lhs[1], results[1]) {
+			return nil
+		}
+		refusal, ok := body.List[1].(*ast.ExprStmt)
+		if !ok {
+			return nil
+		}
+		request, ok := refusal.X.(*ast.CallExpr)
+		if !ok || !ident(request.Fun, "requestPayerDueContractCloseAfterRefusal") || len(request.Args) != 3 || !ident(request.Args[0], "ctx") || !ident(request.Args[2], results[1]) {
+			return nil
+		}
+		if payer, ok := request.Args[1].(*ast.Ident); !ok || payer.Name == results[0] || payer.Name == results[1] {
+			return nil
+		}
+		if final, ok := body.List[2].(*ast.ReturnStmt); !ok || len(final.Results) != 0 {
+			return nil
+		}
+		call, _ := assignment.Rhs[0].(*ast.CallExpr)
+		return call
+	}
 	wrapperBody := wrapper.Body
-	if wrapperBody != nil && len(wrapperBody.List) == 2 {
+	if wrapperBody != nil && (len(wrapperBody.List) == 2 || len(wrapperBody.List) == 4) {
 		// The public owner pins its optional work source before Redis may
 		// replay the callback. Admit only that exact context-preserving step.
 		assignment, ok := wrapperBody.List[0].(*ast.AssignStmt)
@@ -140,7 +184,7 @@ func openContractCompanionQueryOwner(file *ast.File) (*ast.FuncDecl, error) {
 		}
 		wrapperBody = &ast.BlockStmt{List: wrapperBody.List[1:]}
 	}
-	call := returnedCall(wrapperBody)
+	call := resultCall(wrapperBody)
 	if call == nil {
 		return nil, fmt.Errorf("public companion wrapper does not return its query owner")
 	}
@@ -232,6 +276,30 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 		"GetOpenContractIdsForSourceOrDestination":          1,
 		"GetOpenTransferByteCount":                          1,
 	}
+	// The statement constants of the file, so a function that sends its
+	// statement through one is checked as if it held the literal
+	// (GetOpenTransferByteCount's read moved to openTransferByteCountSql in
+	// 8a76e30a2).
+	statementConstants := map[string]string{}
+	for _, declaration := range file.Decls {
+		general, ok := declaration.(*ast.GenDecl)
+		if !ok || general.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range general.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range value.Names {
+				if i < len(value.Values) {
+					if sql, ok := modelSqlExpressionValue(value.Values[i]); ok {
+						statementConstants[name.Name] = sql
+					}
+				}
+			}
+		}
+	}
 	found := map[string]bool{}
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
@@ -244,8 +312,22 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 		}
 		found[function.Name.Name] = true
 
+		// a selected field or method is not a constant of the file
+		selected := map[*ast.Ident]bool{}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok {
+				selected[selector.Sel] = true
+			}
+			return true
+		})
 		literals := []string{}
 		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if name, ok := node.(*ast.Ident); ok {
+				if sql, ok := statementConstants[name.Name]; ok && !selected[name] {
+					literals = append(literals, sql)
+				}
+				return true
+			}
 			literal, ok := node.(*ast.BasicLit)
 			if !ok || literal.Kind != token.STRING {
 				return true

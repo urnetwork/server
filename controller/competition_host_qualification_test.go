@@ -31,7 +31,7 @@ func TestCompetitionHostQualificationProfileIsSeparateFromOfficialPolicy(t *test
 	if !reflect.DeepEqual(settings.EvaluationPolicy, before) || probe == settings {
 		t.Fatal("host-readiness profile mutated its official owner")
 	}
-	if probe.EvaluationPolicy.Replicates != 1 || probe.EvaluationPolicy.ProviderCount != 32 || probe.EvaluationPolicy.DurationMs != 30000 || probe.EvaluationPolicy.PrewarmMs != 5000 || probe.EvaluationPolicy.ImpairmentEnabled {
+	if probe.EvaluationPolicy.Replicates != 1 || probe.EvaluationPolicy.ProviderCount != 32 || probe.EvaluationPolicy.DurationMs != 120000 || probe.EvaluationPolicy.PrewarmMs != 5000 || probe.EvaluationPolicy.ImpairmentEnabled {
 		t.Fatalf("unexpected bounded probe profile: %#v", probe.EvaluationPolicy)
 	}
 	if probe.EvaluationPolicy.TakeoverMargin != before.TakeoverMargin || probe.EvaluationPolicy.ScoreTimeoutSeconds != before.ScoreTimeoutSeconds ||
@@ -43,6 +43,26 @@ func TestCompetitionHostQualificationProfileIsSeparateFromOfficialPolicy(t *test
 	settings.EvaluationPolicy.TakeoverMargin = .12
 	if competitionHostQualificationSettings(settings).EvaluationPolicy.TakeoverMargin != .12 {
 		t.Fatal("production margin was weakened by the probe")
+	}
+}
+
+// The frozen scheduler uses ten intervals, capped at ten seconds. A one-ms
+// delay in the first observed sample must not turn normal readiness into a G4
+// failure. This is a fixed synthetic clock calculation, not a timing test.
+func TestCompetitionHostReadinessHasPositiveMatchmakingObservationHeadroom(t *testing.T) {
+	profile := competitionHostQualificationSettings(validSettings())
+	duration := time.Duration(profile.EvaluationPolicy.DurationMs) * time.Millisecond
+	interval := min(duration/10, 10*time.Second)
+	last := ((duration - time.Nanosecond) / interval) * interval
+	span := float64(last-time.Millisecond) / float64(duration)
+	if span < 0.90 {
+		t.Fatal("readiness requires impossibly exact first-observation timing", span)
+	}
+	legacyDuration := 30 * time.Second
+	legacyInterval := legacyDuration / 10
+	legacyLast := ((legacyDuration - time.Nanosecond) / legacyInterval) * legacyInterval
+	if float64(legacyLast-time.Millisecond)/float64(legacyDuration) >= 0.90 {
+		t.Fatal("synthetic control did not reproduce the old readiness boundary failure")
 	}
 }
 
@@ -377,6 +397,22 @@ func TestCompetitionHostQualificationAuthenticatesExactProbeEvidence(t *testing.
 	}
 }
 
+// A diagnostic string cannot masquerade as false after authenticated bytes and
+// the worker result are compared; the evaluator would fail boolean decoding.
+func TestCompetitionHostQualificationRejectsNonBooleanScorerEligibility(t *testing.T) {
+	fixture := newCompetitionQualificationProofFixture(t)
+	fixture.result.Score.Diagnostics["baseline_takeover_eligible"] = "synthetic-invalid"
+	scoreBytes, err := json.Marshal(fixture.result.Score)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.write(t, "score.json", scoreBytes)
+	fixture.publish(t)
+	if err := authenticateCompetitionQualification(fixture.directory, fixture.request, fixture.settings); err == nil || !strings.Contains(err.Error(), "scorer document") {
+		t.Fatalf("non-boolean scorer eligibility was accepted or failed outside scorer projection: %v", err)
+	}
+}
+
 // The real scorer uses six mixed-case gate identifiers and can include
 // mixed-case diagnostic labels. Only those data maps receive the exception.
 func TestCompetitionHostQualificationAuthenticatesMixedCaseScorerData(t *testing.T) {
@@ -613,8 +649,23 @@ func TestCompetitionHostQualificationRefusesRunningJobWithoutSlot(t *testing.T) 
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fixture := newCompetitionRankingFixture(t, false)
-		fixture.addJob(t)
-		if err := reserveCompetitionQualificationSlot(context.Background(), "synthetic-host-qualifier", server.NowUtc().Add(time.Minute)); !errors.Is(err, ErrEvaluationRunning) {
+		job := fixture.addJob(t)
+		ctx := context.Background()
+		var slotWorker *string
+		var slotJob *server.Id
+		var slotLease, jobLease *time.Time
+		var state string
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE competition_worker_slot
+			 SET worker_id=NULL,job_id=NULL,lease_expires_at=NULL WHERE slot_id=1`))
+			server.Raise(tx.QueryRow(ctx, `SELECT s.worker_id,s.job_id,s.lease_expires_at,j.state,j.lease_expires_at
+			 FROM competition_worker_slot s CROSS JOIN competition_job j WHERE s.slot_id=1 AND j.job_id=$1`, job.JobId).
+				Scan(&slotWorker, &slotJob, &slotLease, &state, &jobLease))
+		})
+		if slotWorker != nil || slotJob != nil || slotLease != nil || state != "running" || jobLease == nil || !fixture.now.Before(*jobLease) {
+			t.Fatal("fixture did not preserve a live running job behind an empty singleton slot")
+		}
+		if err := reserveCompetitionQualificationSlot(ctx, "synthetic-host-qualifier", server.NowUtc().Add(time.Minute)); !errors.Is(err, ErrEvaluationRunning) {
 			t.Fatalf("live job was ignored: %v", err)
 		}
 	})

@@ -224,7 +224,10 @@ func TestProxyDeviceSdkCarrierIpv4Only(t *testing.T) {
 }
 
 func TestProxyDeviceInnerTunIpv4Only(t *testing.T) {
-	for _, mtu := range []int{900, connect.DefaultMtu, connect.DefaultTunnelMtu} {
+	if got := DefaultProxyDeviceSettings().Mtu; got != 1280 {
+		t.Fatalf("default proxy inner mtu = %d, want 1280", got)
+	}
+	for _, mtu := range []int{1280, 900, 1500} {
 		settings := DefaultProxyDeviceSettings()
 		settings.Mtu = mtu
 		tunSettings := proxyDeviceTunSettings(settings)
@@ -235,8 +238,9 @@ func TestProxyDeviceInnerTunIpv4Only(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = tun.Close() })
 		if tun.Ipv6Enabled() {
-			t.Fatalf("requested MTU %d enabled the inner IPv6 route", mtu)
+			t.Fatalf("SERVER_PROXY_TUN_IPV6_ENABLED_AT_MTU1280: requested mtu=%d", mtu)
 		}
 		for _, address := range tun.LocalAddresses() {
 			if !address.Is4() {

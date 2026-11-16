@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "kind": "competition-provisional-election-operator-approval/v1",
+  "observed_at": "2026-11-07T23:01:04Z",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "operator_reply": "ok please present me with the winner option for approval",
+  "approved_scope": "Seal completed epoch-one evidence and elect the provisional candidate for review and presentation to the operator. Keep rewards and source promotion held. Preserve failed calibration as unaccepted.",
+  "terminal_evidence_record": "RECOVERY-SEVENTH-SUCCESS-2026-11-07.json",
+  "expected_succeeded_jobs": 69,
+  "winner_approved": false,
+  "calibration_accepted": false,
+  "reward_release_authorized": false,
+  "source_promotion_authorized": false,
+  "new_calibration_measurement_authorized": false,
+  "safeguards": [
+    "Verify the empty queue and idle execution boundary before stopping the supervisor.",
+    "Persist a scoped source-activation hold before releasing finalization; preserve reward-delivery hold.",
+    "Release finalization only by its scoped revision-checked API, then use the ordinary seal/election API; do not select a job locally.",
+    "Materialize the elected candidate's authenticated review packet. Neither this record nor a favorable score is honesty/source approval."
+  ]
+}

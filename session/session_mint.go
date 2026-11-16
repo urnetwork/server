@@ -4,6 +4,8 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -74,7 +76,8 @@ func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt,
 		if err != nil {
 			return "", err
 		}
-		if err = QueueSessionIndexInTx(ctx, tx, credential.NetworkId, time.UnixMilli(registered.AcceptUntil)); err != nil {
+		// in UTC, as next_review_time holds it
+		if err = QueueSessionIndexInTx(ctx, tx, credential.NetworkId, time.UnixMilli(registered.AcceptUntil).UTC()); err != nil {
 			return "", err
 		}
 	}
@@ -105,13 +108,25 @@ func MintNetworkSession(ctx context.Context, credential *ByJwt, kind string) (si
 
 // Renewal preserves the presented authority, actual topology, and credential
 // lineage time. Rebinding is exclusively an explicit network auth-client action.
-func RenewSessionCredential(clientSession *ClientSession, networkName string, pro bool) (signed string, err error) {
+//
+// The presented credential is checked again in the renewal's transaction,
+// under the shared lifecycle lock that every credential rotation (password
+// set, sign-out-all) takes exclusively. A rotation or revocation that commits
+// after the router's check refuses the renewal here, and the refusal gets
+// authentication's answer (answerRenewalRefusal).
+//
+// A non-nil clientLimitUpgrade replaces the presented token's
+// client_limit_upgrade claim (ByJwt.ClientLimitUpgrade); nil keeps it.
+func RenewSessionCredential(clientSession *ClientSession, networkName string, pro bool, clientLimitUpgrade *bool) (signed string, err error) {
 	if clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity {
 		return "", sessionError("current_session_required")
 	}
 	credential := clientSession.ByJwt.Renew()
 	credential.NetworkName = networkName
 	credential.Pro = pro
+	if clientLimitUpgrade != nil {
+		credential.ClientLimitUpgrade = cloneClientLimitUpgrade(clientLimitUpgrade)
+	}
 	PrepareSessionMint(credential, false)
 	err = sessionTx(clientSession.Ctx, func(tx server.PgTx) error {
 		if err := LockSessionLifecycle(clientSession.Ctx, tx, credential.NetworkId, false); err != nil {
@@ -127,7 +142,45 @@ func RenewSessionCredential(clientSession *ClientSession, networkName string, pr
 		signed, err = RegisterAndSignInTx(clientSession.Ctx, tx, credential, "legacy", nil, false)
 		return err
 	})
+	if err != nil {
+		return "", answerRenewalRefusal(err)
+	}
 	return
+}
+
+// RenewalRefused reports whether a renewal's own check refused the presented
+// credential: it was rotated, removed or revoked after the router's check.
+func RenewalRefused(err error) bool {
+	var refusal *renewalRefusalError
+	return errors.As(err, &refusal)
+}
+
+// Authentication's answer to a credential the renewal refused.
+type renewalRefusalError struct {
+	answer error
+}
+
+func (self *renewalRefusalError) Error() string { return self.answer.Error() }
+func (self *renewalRefusalError) Unwrap() error { return self.answer }
+
+// A definitive refusal of the presented credential gets the answer
+// authentication gives the same refusal (router.authenticationHttpError): a
+// revoked session the structured 401 session_revoked, any other refusal 401.
+// It was an undeclared error, a 500 the client retries, while the router's
+// check answers the same credential 401 and the client signs out. A store that
+// could not answer is no refusal and stays ErrAuthUnavailable, a 503 that never
+// signs the client out; every other failure is returned as it is.
+func answerRenewalRefusal(err error) error {
+	switch {
+	case errors.Is(err, ErrSessionRevoked):
+		return &renewalRefusalError{answer: sessionError("session_revoked")}
+	case errors.Is(err, ErrAuthUnavailable):
+		return err
+	case authorizationRejectionDefinitive(err):
+		return &renewalRefusalError{answer: fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)}
+	default:
+		return err
+	}
 }
 
 // Internal probes are explicitly exempt; no request-selected flag reaches here.

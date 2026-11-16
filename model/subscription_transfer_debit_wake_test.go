@@ -131,7 +131,7 @@ func TestDeadlineCloseWakesABackedOffFlushChain(t *testing.T) {
 		shard := transferDebitShard(f.balanceId)
 		backOffTransferDebitWakeStandIn(t, ctx, shard, true)
 		escrow := createRedisAdmissionTest(ctx, f, 100)
-		keys := deadlineFinancialOwnershipKeys(escrow.ContractId, readDeadlineBalanceIds(ctx, escrow.ContractId))
+		keys := deadlineFinancialOwnershipKeys(readDeadlineBalanceIds(ctx, escrow.ContractId))
 		var result *ContractDeadlineReconciliation
 		var posts []server.PostFunction
 		server.OwnedTx(ctx, keys, func(tx server.PgTx) {

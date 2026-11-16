@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "kind": "competition-management-capacity-guard-qualification/v1",
+  "recorded_at": "2026-11-12T13:55:09Z",
+  "source_commit": "cc31c9c6e6bf0bb823f17d5c98f31534c219c107",
+  "versioned_path": "tools/competition-qa-capacity-guard",
+  "versioned_six_source_blobs_equal_tested_blobs": true,
+  "versioned_source_manifest_sha256": "99f8cb0961afcf97d871487187b670d178897af343b2bde1c4d07e3577bcbef8",
+  "normal_guard_sha256": "0941dda0d7f5fd2eac210955279717889b24cda94ef47cdf82de323a01cbfc06",
+  "race_guard_sha256": "8edaeadaa678078278b8c2fbe36de796e13555dd6c4cbffeb8036bd4c0002fc6",
+  "historical_normal_sha256": "7bf4ab8d4a1c5f1e148cdf2a05cbcd9b65638a2ee9d8bc8525c476539a59d335",
+  "historical_race_sha256": "dc1d56288016cf26e09309a779547cdf3c833eabce8202a986dc3729ca6f8967",
+  "source_before_after_identical": true,
+  "source_before_after_manifest_sha256": "916f60ff7500016366a5d6bf39bc350c260fd89c67be5aa95792cea1173cc45c",
+  "qualification": {
+    "selected_top_level_tests": 11,
+    "ordinary_repetitions": 3,
+    "ordinary_passed": 33,
+    "race_repetitions": 3,
+    "race_passed": 33,
+    "failed": 0,
+    "skipped": 0,
+    "actual_qa_exit": 0,
+    "bootstrap_exit": 0,
+    "cleanup_exit": 0,
+    "no_real_services_contacted": true,
+    "normal_log_sha256": "3e239238ccd2b99ff62a7de08ae6d2eb8aee4f3060382527a7f53fa5410ccf09",
+    "race_log_sha256": "ed9b023b336a7b0abb22700ed069e6b1c795c66f5b45be618a5a36f061b33dfe",
+    "historical_unfenced_du_failure_causally_reproduced": true
+  },
+  "unchanged_resource_limits": {
+    "minimum_root_free_bytes": 35433480192,
+    "maximum_cache_growth_bytes": 2147483648,
+    "maximum_temporary_bytes": 1342177280
+  },
+  "new_measurement_controls": {
+    "maximum_attempts": 3,
+    "command_timeout_seconds": 5,
+    "command_kill_grace_seconds": 1,
+    "full_exit_zero_and_canonical_numeric_output_required": true,
+    "partial_measurement_never_accepted": true,
+    "original_invocation_and_main_pid_revalidated_before_signal": true,
+    "sole_chain_owner_joins_guard_before_unit_reuse_required": true
+  },
+  "durable_private_evidence": {
+    "root": "/var/lib/urnetwork/competition-capacity-guard-proof-20261112.SxwXLvNk",
+    "retained_manifest_sha256": "43dc118624dd77712072762e8e76eea67c1d0bd8b8b12040a7dc9ff80353ace2",
+    "directory_mode": "0700",
+    "file_mode": "0400"
+  },
+  "scoring_policy_changed": false,
+  "production_worker_changed": false,
+  "recovery_scope_reduced": false,
+  "broader_monitor_allowlist_count": 260,
+  "note": "Historical guard failure invalidated that actor qualification despite passing assertions; no automatic credit or evaluation rerun follows from this guard fix."
+}

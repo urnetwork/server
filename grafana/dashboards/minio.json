@@ -192,6 +192,19 @@
         {"refId": "A", "expr": "100 * (1 - avg by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\",mode=\"idle\"}[$__rate_interval])))", "legendFormat": "{{host}} cpu", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
         {"refId": "B", "expr": "100 * (1 - node_memory_MemAvailable_bytes{env=\"$env\",host=~\"$host\",job=\"node\"} / node_memory_MemTotal_bytes{env=\"$env\",host=~\"$host\",job=\"node\"})", "legendFormat": "{{host}} memory", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
       ]
+    },
+    {
+      "id": 13,
+      "title": "host drive inodes free",
+      "description": "Free inodes on each MinIO drive's filesystem (/mnt/blobN), from host metrics. XFS caps a drive's inodes at its imaxpct ceiling. Once a drive has none free, every new file on it fails with ENOSPC however many bytes are free, and every MinIO write fails. Every object puts a shard on every drive, so the drives fall together. The threshold lines at 30M and 15M are the monitor's warn and page floors (SIGNALS.md §11.6b, minio-inode-runway); the monitor also warns at 7 days and pages at 3 days to zero.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 15000000}, {"color": "green", "value": 30000000}]}, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}, "thresholdsStyle": {"mode": "line"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "min"]}, "tooltip": {"mode": "multi", "sort": "asc"}},
+      "targets": [
+        {"refId": "A", "expr": "max by (host, mountpoint) (node_filesystem_files_free{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=~\"/mnt/blob[0-9]+\"})", "legendFormat": "{{host}} {{mountpoint}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
     }
   ]
 }

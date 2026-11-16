@@ -318,6 +318,60 @@ func RemoveOldNetworkReliabilityWindowPost(
 	return nil
 }
 
+type RefreshCountryReliabilityMultipliersArgs struct {
+}
+
+type RefreshCountryReliabilityMultipliersResult struct {
+}
+
+// Seeds the weekly chain only when it has no task, so a deploy never moves a
+// queued refresh: a new chain's first run starts after FirstRunDelay, and
+// every later run is queued by its predecessor.
+func ScheduleRefreshCountryReliabilityMultipliers(clientSession *session.ClientSession, tx server.PgTx) {
+	settings := model.DefaultCountryReliabilityMultiplierSettings()
+	task.ScheduleTaskInTxIfAbsent(
+		tx,
+		RefreshCountryReliabilityMultipliers,
+		&RefreshCountryReliabilityMultipliersArgs{},
+		clientSession,
+		task.RunOnce("refresh_country_reliability_multipliers"),
+		task.RunAt(server.NowUtc().Add(settings.FirstRunDelay)),
+		task.MaxTime(settings.MaxTime),
+	)
+}
+
+// The country reliability multipliers' owner since USDC payouts ended
+// (model.RefreshCountryReliabilityMultipliers).
+func RefreshCountryReliabilityMultipliers(
+	refreshCountryReliabilityMultipliers *RefreshCountryReliabilityMultipliersArgs,
+	clientSession *session.ClientSession,
+) (*RefreshCountryReliabilityMultipliersResult, error) {
+	if _, err := model.RefreshCountryReliabilityMultipliers(clientSession.Ctx, server.NowUtc(), model.DefaultCountryReliabilityMultiplierSettings()); err != nil {
+		return nil, err
+	}
+	return &RefreshCountryReliabilityMultipliersResult{}, nil
+}
+
+// Queues the next refresh a period later.
+func RefreshCountryReliabilityMultipliersPost(
+	refreshCountryReliabilityMultipliers *RefreshCountryReliabilityMultipliersArgs,
+	refreshCountryReliabilityMultipliersResult *RefreshCountryReliabilityMultipliersResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	settings := model.DefaultCountryReliabilityMultiplierSettings()
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshCountryReliabilityMultipliers,
+		&RefreshCountryReliabilityMultipliersArgs{},
+		clientSession,
+		task.RunOnce("refresh_country_reliability_multipliers"),
+		task.RunAt(server.NowUtc().Add(settings.Period)),
+		task.MaxTime(settings.MaxTime),
+	)
+	return nil
+}
+
 type RemoveOldClientLocationReliabilitiesArgs struct {
 }
 

@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -88,6 +89,38 @@ func AccountProductUpdatesSetForEmail(ctx context.Context, userEmail string, pro
 		))
 	})
 
+}
+
+// AccountProductUpdatesUnsubscribeForEmail turns product updates off for
+// every network the address signs in to, recording the unsubscribe as the
+// preference's source (the campaigns' consent evidence).
+func AccountProductUpdatesUnsubscribeForEmail(ctx context.Context, userEmail string, now time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO account_preferences (network_id, product_updates, product_updates_source, product_updates_source_time)
+			SELECT
+				network.network_id,
+				false,
+				'unsubscribe',
+				$2::timestamp
+			FROM (
+				SELECT user_id FROM network_user_auth_sso WHERE user_auth = $1
+				UNION ALL
+				SELECT user_id FROM network_user_auth_password WHERE user_auth = $1
+			) t
+			INNER JOIN network ON network.admin_user_id = t.user_id
+			ON CONFLICT (network_id) DO UPDATE
+			SET
+				product_updates = false,
+				product_updates_source = 'unsubscribe',
+				product_updates_source_time = $2::timestamp
+			`,
+			userEmail,
+			now,
+		))
+	})
 }
 
 type AccountPreferencesGetResult struct {

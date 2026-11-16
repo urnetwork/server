@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/competitionagent"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"io"
@@ -29,6 +30,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -240,6 +242,14 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 		!imageDigestPattern.MatchString(manifest.WorkerImageDigest) {
 		return nil, errors.New("attempt archive identity is invalid")
 	}
+	if job.SlotFencingToken > 0 && (manifest.Executor == nil || !workerIdPattern.MatchString(job.ExecutorHostId) || job.SlotId <= 0 ||
+		manifest.Executor.HostId != job.ExecutorHostId || manifest.Executor.SlotId != job.SlotId || manifest.Executor.SlotFencingToken != job.SlotFencingToken ||
+		manifest.Executor.RunId != competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount)) {
+		return nil, errors.New("distributed archive lost its exact executor custody")
+	}
+	if err := validateCompetitionSecurityToolchainArchive(settings, job, manifest); err != nil {
+		return nil, err
+	}
 	artifacts := append([]evaluationArtifact(nil), manifest.Artifacts...)
 	workerArtifacts := []struct {
 		path   string
@@ -329,6 +339,18 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 	competitionArtifactObjects.Add(float64(retention.ObjectCount))
 	competitionArtifactBytes.Add(float64(retention.Bytes))
 	manifest.Retention = retention
+	if job.SlotFencingToken > 0 {
+		// A lost PUT acknowledgement can finish after a later archive of the
+		// same fence. Different object-version metadata must never alias the
+		// latest manifest key; identical canonical bodies may safely share it.
+		retention.ManifestKey = ""
+		identityBytes, err := json.Marshal(manifest)
+		if err != nil {
+			return nil, err
+		}
+		identityDigest := sha256.Sum256(identityBytes)
+		retention.ManifestKey = filepath.ToSlash(filepath.Join(basePrefix, "manifests", hex.EncodeToString(identityDigest[:]), "artifact-manifest.json"))
+	}
 	manifestBytes, err := json.Marshal(manifest)
 	if err != nil {
 		return nil, err
@@ -469,7 +491,7 @@ func (self *blobArtifactArchive) submissionPatchKey(settings *Settings, roundId 
 }
 
 func (self *blobArtifactArchive) attemptPrefix(settings *Settings, job *queuedJob) string {
-	return filepath.ToSlash(filepath.Join(
+	prefix := filepath.ToSlash(filepath.Join(
 		self.store.Prefix(),
 		"competition",
 		"v1",
@@ -480,6 +502,10 @@ func (self *blobArtifactArchive) attemptPrefix(settings *Settings, job *queuedJo
 		job.JobId.String(),
 		fmt.Sprintf("attempt-%02d", job.AttemptCount),
 	))
+	if job.SlotFencingToken > 0 {
+		prefix = filepath.ToSlash(filepath.Join(prefix, "executors", job.ExecutorHostId, fmt.Sprintf("fence-%d", job.SlotFencingToken)))
+	}
+	return prefix
 }
 
 func artifactContentType(path string) string {
@@ -501,9 +527,19 @@ type Principal struct {
 	Environment   string
 	CompetitionId string
 	SeasonId      string
+	RoundId       server.Id
+	JobId         server.Id
+	ExpiresAt     time.Time
+	tokenSha256   string
 }
 
 func Authenticate(request *http.Request, settings *Settings) (*Principal, bool) {
+	return authenticateCompetitionAt(request, settings, server.NowUtc())
+}
+
+// A single authentication cut enforces scoped credential expiration without
+// changing legacy credentials, which have no expiry or job-level claims.
+func authenticateCompetitionAt(request *http.Request, settings *Settings, now time.Time) (*Principal, bool) {
 	if settings == nil {
 		return nil, false
 	}
@@ -531,13 +567,19 @@ func Authenticate(request *http.Request, settings *Settings) (*Principal, bool) 
 	}
 	// A revoked alias or a duplicate scope must not select a different capability
 	// merely because token configuration was reordered.
-	if matched == nil || matchCount != 1 || matched.Revoked || validateCompetitionTokenRole(*matched) != nil {
+	if matched == nil || matchCount != 1 || matched.Revoked || validateCompetitionTokenRole(*matched) != nil ||
+		!matched.ExpiresAt.IsZero() && !now.Before(matched.ExpiresAt) {
 		return nil, false
 	}
-	return &Principal{
+	principal := &Principal{
 		Id: matched.Name, Role: matched.Role, Environment: matched.Environment,
 		CompetitionId: matched.CompetitionId, SeasonId: matched.SeasonId,
-	}, true
+		RoundId: matched.RoundId, JobId: matched.JobId, ExpiresAt: matched.ExpiresAt,
+	}
+	if matched.Role == competitionOperatorPatchRetryRole {
+		principal.tokenSha256 = matched.Sha256
+	}
+	return principal, true
 }
 
 const (
@@ -557,69 +599,94 @@ var (
 )
 
 type Settings struct {
-	AutomationPolicy           model.CompetitionAutomationPolicy `yaml:"automation_policy"`
-	Enabled                    bool                              `yaml:"enabled"`
-	CompetitionId              string                            `yaml:"competition_id"`
-	BaseSha                    string                            `yaml:"base_sha"`
-	EvaluatorImageDigest       string                            `yaml:"evaluator_image_digest"`
-	PatchPolicy                PatchPolicy                       `yaml:"patch_policy"`
-	EvaluationPolicy           EvaluationPolicy                  `yaml:"evaluation_policy"`
-	FutureEpochPolicy          *CompetitionFutureEpochPolicy     `yaml:"future_epoch_policy,omitempty"`
-	SeasonPolicy               SeasonPolicy                      `yaml:"season_policy"`
-	ArtifactRoot               string                            `yaml:"artifact_root"`
-	ArtifactBucket             string                            `yaml:"artifact_bucket"`
-	ConfigLocalDirectory       string                            `yaml:"config_local_directory"`
-	VaultLocalDirectory        string                            `yaml:"vault_local_directory"`
-	SeasonEndsAt               time.Time                         `yaml:"season_ends_at"`
-	RetainUntil                time.Time                         `yaml:"retain_until"`
-	WorkerLeaseSeconds         int                               `yaml:"worker_lease_seconds"`
-	WorkerHeartbeatSeconds     int                               `yaml:"worker_heartbeat_seconds"`
-	HostHeartbeatMaxAgeSeconds int                               `yaml:"host_heartbeat_max_age_seconds"`
-	MaxInfrastructureAttempts  int                               `yaml:"max_infrastructure_attempts"`
-	SimulatorCommand           string                            `yaml:"simulator_command"`
-	EvaluatorCommand           string                            `yaml:"evaluator_command"`
-	EvaluatorCommandSha256     string                            `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand           string                            `yaml:"self_check_command"`
-	SelfCheckCommandSha256     string                            `yaml:"self_check_command_sha256"`
-	Tokens                     []Token                           `yaml:"-"`
-	SeedKey                    []byte                            `yaml:"-"`
-	workloadGenerator          WorkloadGenerator
-	artifactArchive            artifactArchive
-	automationLease            *model.CompetitionSupervisorLease
-	automationRoundId          server.Id
-	automationTargetRoundId    server.Id
-	roundBaselinePreparation   *roundBaselinePreparationProfile
-	futureBaselinePreparation  *roundBaselinePreparationProfile
-	intakeAdmission            *competitionIntakeAdmission
+	securityToolchainException          *competitionSecurityToolchainException
+	readinessSecurityToolchainException *competitionSecurityToolchainException
+	OfficialReviewImportSha256          string `yaml:"official_review_import_sha256,omitempty"`
+	reevaluationRuntime                 *model.CompetitionJobReevaluationRuntime
+	reevaluationRuntimeSha256           string
+	distributedReevaluationSettings     *competitionDistributedReevaluationSettings
+	AutomationPolicy                    model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
+	Enabled                             bool                                    `yaml:"enabled"`
+	CompetitionId                       string                                  `yaml:"competition_id"`
+	BaseSha                             string                                  `yaml:"base_sha"`
+	EvaluatorImageDigest                string                                  `yaml:"evaluator_image_digest"`
+	PatchPolicy                         PatchPolicy                             `yaml:"patch_policy"`
+	EvaluationPolicy                    EvaluationPolicy                        `yaml:"evaluation_policy"`
+	FutureEpochPolicy                   *CompetitionFutureEpochPolicy           `yaml:"future_epoch_policy,omitempty"`
+	IntakeFirstPolicy                   *model.CompetitionIntakeFirstPolicy     `yaml:"intake_first_policy,omitempty"`
+	DistributedEvaluationPolicy         *CompetitionDistributedEvaluationPolicy `yaml:"-"`
+	SeasonPolicy                        SeasonPolicy                            `yaml:"season_policy"`
+	ArtifactRoot                        string                                  `yaml:"artifact_root"`
+	ArtifactBucket                      string                                  `yaml:"artifact_bucket"`
+	ConfigLocalDirectory                string                                  `yaml:"config_local_directory"`
+	VaultLocalDirectory                 string                                  `yaml:"vault_local_directory"`
+	SeasonEndsAt                        time.Time                               `yaml:"season_ends_at"`
+	RetainUntil                         time.Time                               `yaml:"retain_until"`
+	WorkerLeaseSeconds                  int                                     `yaml:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds              int                                     `yaml:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds          int                                     `yaml:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts           int                                     `yaml:"max_infrastructure_attempts"`
+	SimulatorCommand                    string                                  `yaml:"simulator_command"`
+	EvaluatorCommand                    string                                  `yaml:"evaluator_command"`
+	EvaluatorCommandSha256              string                                  `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand                    string                                  `yaml:"self_check_command"`
+	SelfCheckCommandSha256              string                                  `yaml:"self_check_command_sha256"`
+	Tokens                              []Token                                 `yaml:"-"`
+	SeedKey                             []byte                                  `yaml:"-"`
+	workloadGenerator                   WorkloadGenerator
+	artifactArchive                     artifactArchive
+	automationLease                     *model.CompetitionSupervisorLease
+	automationRoundId                   server.Id
+	automationTargetRoundId             server.Id
+	roundBaselinePreparation            *roundBaselinePreparationProfile
+	futureBaselinePreparation           *roundBaselinePreparationProfile
+	intakeAdmission                     *competitionIntakeAdmission
+	intakeFirstActivation               *model.CompetitionSourceIntakeActivation
+	distributedCoordinator              *competitionDistributedCoordinatorProfile
+	distributedRoundEpoch               int
+	distributedPreparationOnly          bool
+	executorHostId                      string
+	executorSlotId                      int
+	executorReconcileExpiredOnly        bool
+	executorReconcileOnly               bool
+	// Existing custody is separate from admission; only a minted, short-lived
+	// native observation can authorize an attach without a fresh host check.
+	executorExistingWitness       *competitionExistingRunWitness
+	executorFreshOnly             bool
+	distributedSourceCommits      map[string]string
+	executorControlAmendment      *competitionExecutorControlAmendmentRecord
+	executorQualificationRecovery *competitionExecutorQualificationRecoveryRecord
 	// Non-serialized proof set only after exact retained runtime authentication.
 	runtimeIntentSha256 string
 }
 
 type settingsFile struct {
-	AutomationPolicy           model.CompetitionAutomationPolicy `yaml:"automation_policy"`
-	Enabled                    bool                              `yaml:"enabled"`
-	CompetitionId              string                            `yaml:"competition_id"`
-	BaseSha                    string                            `yaml:"base_sha"`
-	EvaluatorImageDigest       string                            `yaml:"evaluator_image_digest"`
-	PatchPolicy                PatchPolicy                       `yaml:"patch_policy"`
-	EvaluationPolicy           EvaluationPolicy                  `yaml:"evaluation_policy"`
-	FutureEpochPolicy          *CompetitionFutureEpochPolicy     `yaml:"future_epoch_policy,omitempty"`
-	SeasonPolicy               SeasonPolicy                      `yaml:"season_policy"`
-	ArtifactRoot               string                            `yaml:"artifact_root"`
-	ArtifactBucket             string                            `yaml:"artifact_bucket"`
-	ConfigLocalDirectory       string                            `yaml:"config_local_directory"`
-	VaultLocalDirectory        string                            `yaml:"vault_local_directory"`
-	SeasonEndsAt               time.Time                         `yaml:"season_ends_at"`
-	RetainUntil                time.Time                         `yaml:"retain_until"`
-	WorkerLeaseSeconds         int                               `yaml:"worker_lease_seconds"`
-	WorkerHeartbeatSeconds     int                               `yaml:"worker_heartbeat_seconds"`
-	HostHeartbeatMaxAgeSeconds int                               `yaml:"host_heartbeat_max_age_seconds"`
-	MaxInfrastructureAttempts  int                               `yaml:"max_infrastructure_attempts"`
-	SimulatorCommand           string                            `yaml:"simulator_command"`
-	EvaluatorCommand           string                            `yaml:"evaluator_command"`
-	EvaluatorCommandSha256     string                            `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand           string                            `yaml:"self_check_command"`
-	SelfCheckCommandSha256     string                            `yaml:"self_check_command_sha256"`
+	OfficialReviewImportSha256 string                              `yaml:"official_review_import_sha256,omitempty"`
+	AutomationPolicy           model.CompetitionAutomationPolicy   `yaml:"automation_policy"`
+	IntakeFirstPolicy          *model.CompetitionIntakeFirstPolicy `yaml:"intake_first_policy,omitempty"`
+	Enabled                    bool                                `yaml:"enabled"`
+	CompetitionId              string                              `yaml:"competition_id"`
+	BaseSha                    string                              `yaml:"base_sha"`
+	EvaluatorImageDigest       string                              `yaml:"evaluator_image_digest"`
+	PatchPolicy                PatchPolicy                         `yaml:"patch_policy"`
+	EvaluationPolicy           EvaluationPolicy                    `yaml:"evaluation_policy"`
+	FutureEpochPolicy          *CompetitionFutureEpochPolicy       `yaml:"future_epoch_policy,omitempty"`
+	SeasonPolicy               SeasonPolicy                        `yaml:"season_policy"`
+	ArtifactRoot               string                              `yaml:"artifact_root"`
+	ArtifactBucket             string                              `yaml:"artifact_bucket"`
+	ConfigLocalDirectory       string                              `yaml:"config_local_directory"`
+	VaultLocalDirectory        string                              `yaml:"vault_local_directory"`
+	SeasonEndsAt               time.Time                           `yaml:"season_ends_at"`
+	RetainUntil                time.Time                           `yaml:"retain_until"`
+	WorkerLeaseSeconds         int                                 `yaml:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds     int                                 `yaml:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds int                                 `yaml:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts  int                                 `yaml:"max_infrastructure_attempts"`
+	SimulatorCommand           string                              `yaml:"simulator_command"`
+	EvaluatorCommand           string                              `yaml:"evaluator_command"`
+	EvaluatorCommandSha256     string                              `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand           string                              `yaml:"self_check_command"`
+	SelfCheckCommandSha256     string                              `yaml:"self_check_command_sha256"`
 }
 
 type secretsFile struct {
@@ -628,13 +695,16 @@ type secretsFile struct {
 }
 
 type Token struct {
-	Name          string `yaml:"name"`
-	Role          string `yaml:"role"`
-	Sha256        string `yaml:"sha256"`
-	Environment   string `yaml:"environment,omitempty"`
-	CompetitionId string `yaml:"competition_id,omitempty"`
-	SeasonId      string `yaml:"season_id,omitempty"`
-	Revoked       bool   `yaml:"revoked,omitempty"`
+	Name          string    `yaml:"name"`
+	Role          string    `yaml:"role"`
+	Sha256        string    `yaml:"sha256"`
+	Environment   string    `yaml:"environment,omitempty"`
+	CompetitionId string    `yaml:"competition_id,omitempty"`
+	SeasonId      string    `yaml:"season_id,omitempty"`
+	Revoked       bool      `yaml:"revoked,omitempty"`
+	RoundId       server.Id `yaml:"round_id,omitempty"`
+	JobId         server.Id `yaml:"job_id,omitempty"`
+	ExpiresAt     time.Time `yaml:"expires_at,omitempty"`
 }
 
 func LoadSettings() (*Settings, error) {
@@ -659,13 +729,15 @@ func LoadSettings() (*Settings, error) {
 		return nil, fmt.Errorf("seed_key_base64: %w", err)
 	}
 	s := &Settings{
+		OfficialReviewImportSha256: strings.TrimSpace(public.OfficialReviewImportSha256),
 		AutomationPolicy:           public.AutomationPolicy,
+		IntakeFirstPolicy:          public.IntakeFirstPolicy,
 		Enabled:                    public.Enabled,
 		CompetitionId:              strings.TrimSpace(public.CompetitionId),
 		BaseSha:                    strings.TrimSpace(public.BaseSha),
 		EvaluatorImageDigest:       strings.TrimSpace(public.EvaluatorImageDigest),
 		PatchPolicy:                public.PatchPolicy,
-		EvaluationPolicy:           public.EvaluationPolicy,
+		EvaluationPolicy:           public.EvaluationPolicy.Clone(),
 		FutureEpochPolicy:          public.FutureEpochPolicy,
 		SeasonPolicy:               public.SeasonPolicy,
 		ArtifactRoot:               filepath.Clean(public.ArtifactRoot),
@@ -716,6 +788,12 @@ func (self *Settings) Validate() error {
 	if err := model.ValidateCompetitionAutomationPolicy(self.AutomationPolicy); err != nil {
 		return err
 	}
+	if err := model.ValidateCompetitionIntakeFirstPolicy(self.IntakeFirstPolicy); err != nil {
+		return err
+	}
+	if self.IntakeFirstPolicy != nil && (!self.AutomationPolicy.Enabled || self.AutomationPolicy.Staging || self.AutomationPolicy.RequiredApiCapability != model.CompetitionRuntimeBlobCapability) {
+		return errors.New("intake-first requires explicit production automation and authenticated runtime-blob source authority")
+	}
 	if self.CompetitionId == "" || len(self.CompetitionId) > 128 {
 		return errors.New("competition_id must contain 1..128 characters")
 	}
@@ -748,10 +826,16 @@ func (self *Settings) Validate() error {
 		return fmt.Errorf("patch_policy.forbidden_paths must explicitly contain %q", protectedTree)
 	}
 	p := self.EvaluationPolicy
-	if _, err := model.CompetitionScorerVersionForG2Policy(p.G2VolumePolicy); err != nil {
+	if _, err := model.CompetitionScorerVersionForWorkCoverage(p.G2VolumePolicy, p.WorkCoveragePolicy); err != nil {
+		return err
+	}
+	if err := model.ValidateCompetitionWorkCoveragePatchPolicy(self.PatchPolicy, p.WorkCoveragePolicy); err != nil {
 		return err
 	}
 	if err := self.validateFutureEpochPolicy(); err != nil {
+		return err
+	}
+	if err := validateCompetitionDistributedPolicy(self.DistributedEvaluationPolicy); err != nil {
 		return err
 	}
 	season := self.SeasonPolicy
@@ -935,7 +1019,7 @@ func (self *Settings) PublicInfo() InfoResult {
 		BaseSha:              self.BaseSha,
 		EvaluatorImageDigest: self.EvaluatorImageDigest,
 		PatchPolicy:          self.PatchPolicy,
-		EvaluationPolicy:     self.EvaluationPolicy,
+		EvaluationPolicy:     self.EvaluationPolicy.Clone(),
 		SeasonPolicy:         self.SeasonPolicy,
 	}
 	if self.AutomationPolicy.Enabled {
@@ -1098,21 +1182,23 @@ type evaluatorRequest struct {
 // This is the strict subset of baseline.json independently authenticated by
 // the worker before it freezes or redistributes the scorer-owned document.
 type roundBaselineManifest struct {
-	G2VolumePolicy   model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
-	ScoreSchema      int                             `json:"score_schema"`
-	Kind             string                          `json:"kind"`
-	ScorerVersion    string                          `json:"scorer_version"`
-	RoundId          string                          `json:"round_id"`
-	ConfigSha256     string                          `json:"config_sha256"`
-	RequestTimeoutMs int64                           `json:"request_timeout_ms"`
-	RunFlags         map[string]string               `json:"run_flags"`
-	TakeoverMargin   float64                         `json:"takeover_margin"`
-	Replicates       []roundBaselineReplicate        `json:"replicates"`
+	G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	ScoreSchema        int                                  `json:"score_schema"`
+	Kind               string                               `json:"kind"`
+	ScorerVersion      string                               `json:"scorer_version"`
+	RoundId            string                               `json:"round_id"`
+	ConfigSha256       string                               `json:"config_sha256"`
+	RequestTimeoutMs   int64                                `json:"request_timeout_ms"`
+	RunFlags           map[string]string                    `json:"run_flags"`
+	TakeoverMargin     float64                              `json:"takeover_margin"`
+	Replicates         []roundBaselineReplicate             `json:"replicates"`
 }
 
 // Carries the recomputed score inputs and public live telemetry for one
 // trusted control run.
 type roundBaselineReplicate struct {
+	WorkCoverage                    *model.CompetitionWorkCoverageSummary `json:"work_coverage,omitempty"`
 	RawScore                        float64                               `json:"raw_score"`
 	SuccessRate                     float64                               `json:"success_rate"`
 	RequestCount                    int64                                 `json:"request_count"`
@@ -1182,23 +1268,26 @@ type evaluationArtifact struct {
 }
 
 type artifactManifest struct {
-	Schema                 int                  `json:"schema"`
-	JobId                  string               `json:"job_id"`
-	RoundId                string               `json:"round_id"`
-	SourceEpoch            int                  `json:"source_epoch"`
-	Attempt                int                  `json:"attempt"`
-	EvaluatorImageDigest   string               `json:"evaluator_image_digest"`
-	ApiImageDigest         string               `json:"api_image_digest"`
-	WorkerImageDigest      string               `json:"worker_image_digest"`
-	EvaluatorCommandSha256 string               `json:"evaluator_command_sha256"`
-	RequestSha256          string               `json:"request_sha256"`
-	PatchSha256            string               `json:"patch_sha256"`
-	StderrSha256           string               `json:"stderr_sha256"`
-	ResultSha256           string               `json:"result_sha256"`
-	Security               evaluationSecurity   `json:"security"`
-	Artifacts              []evaluationArtifact `json:"artifacts"`
-	Failure                *CompetitionError    `json:"failure,omitempty"`
-	Retention              *artifactRetention   `json:"retention,omitempty"`
+	SecurityToolchainException    *competitionSecurityToolchainException `json:"security_toolchain_exception,omitempty"`
+	ExecutionEvaluatorImageDigest string                                 `json:"execution_evaluator_image_digest,omitempty"`
+	Executor                      *competitionExecutorArtifactIdentity   `json:"executor,omitempty"`
+	Schema                        int                                    `json:"schema"`
+	JobId                         string                                 `json:"job_id"`
+	RoundId                       string                                 `json:"round_id"`
+	SourceEpoch                   int                                    `json:"source_epoch"`
+	Attempt                       int                                    `json:"attempt"`
+	EvaluatorImageDigest          string                                 `json:"evaluator_image_digest"`
+	ApiImageDigest                string                                 `json:"api_image_digest"`
+	WorkerImageDigest             string                                 `json:"worker_image_digest"`
+	EvaluatorCommandSha256        string                                 `json:"evaluator_command_sha256"`
+	RequestSha256                 string                                 `json:"request_sha256"`
+	PatchSha256                   string                                 `json:"patch_sha256"`
+	StderrSha256                  string                                 `json:"stderr_sha256"`
+	ResultSha256                  string                                 `json:"result_sha256"`
+	Security                      evaluationSecurity                     `json:"security"`
+	Artifacts                     []evaluationArtifact                   `json:"artifacts"`
+	Failure                       *CompetitionError                      `json:"failure,omitempty"`
+	Retention                     *artifactRetention                     `json:"retention,omitempty"`
 }
 
 func (self CommandEvaluator) SelfCheck(ctx context.Context, settings *Settings) (HostSelfCheck, error) {
@@ -1361,7 +1450,7 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 			}
 		}
 		if !scoreMatchesFrozenMargin(result.Score, settings.EvaluationPolicy.TakeoverMargin) ||
-			!scoreMatchesFrozenG2Policy(result.Score, settings.EvaluationPolicy.G2VolumePolicy) {
+			!scoreMatchesFrozenG2Policy(result.Score, settings.EvaluationPolicy.G2VolumePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) {
 			return EvaluationOutcome{Error: terminalInfrastructureError(
 				"score_result_invalid", "pinned scorer used a policy different from the frozen round",
 			)}
@@ -1471,7 +1560,7 @@ func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir
 		ConfigLocalDirectory: settings.ConfigLocalDirectory,
 		VaultLocalDirectory:  settings.VaultLocalDirectory,
 		PatchPolicy:          settings.PatchPolicy,
-		EvaluationPolicy:     settings.EvaluationPolicy,
+		EvaluationPolicy:     settings.EvaluationPolicy.Clone(),
 	}
 }
 
@@ -1506,6 +1595,7 @@ func validateRoundBaselineJson(settings *Settings, round *roundRecord, content [
 	if manifest.ScoreSchema != ScoreSchema || manifest.Kind != "sim-latency-score-baseline" ||
 		manifest.ScorerVersion != settings.scorerVersion() || manifest.ScorerVersion != policy.ScorerVersion ||
 		manifest.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || manifest.G2VolumePolicy != policy.EvaluationPolicy.G2VolumePolicy ||
+		!reflect.DeepEqual(manifest.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) || !reflect.DeepEqual(manifest.WorkCoveragePolicy, policy.EvaluationPolicy.WorkCoveragePolicy) ||
 		manifest.RoundId != round.RoundId.String() ||
 		manifest.ConfigSha256 != round.ProvidersSha256 ||
 		manifest.RequestTimeoutMs != settings.EvaluationPolicy.RequestTimeoutMs ||
@@ -1519,6 +1609,15 @@ func validateRoundBaselineJson(settings *Settings, round *roundRecord, content [
 	finitePositive := func(value float64) bool { return finite(value) && 0 < value }
 	finiteNonnegative := func(value float64) bool { return finite(value) && 0 <= value }
 	for _, replicate := range manifest.Replicates {
+		if manifest.WorkCoveragePolicy != nil {
+			coverage := replicate.WorkCoverage
+			if model.ValidateCompetitionWorkCoverageSummary(coverage) != nil || coverage.CompletedPages <= 0 || coverage.CompletedBytes <= 0 ||
+				manifest.Replicates[0].WorkCoverage == nil || coverage.PlanSha256 != manifest.Replicates[0].WorkCoverage.PlanSha256 {
+				return "", errors.New("round baseline lacks a nondegenerate independent work coverage qualification")
+			}
+		} else if replicate.WorkCoverage != nil {
+			return "", errors.New("historical round baseline contains prospective coverage")
+		}
 		if !finitePositive(replicate.RawScore) ||
 			float64(manifest.RequestTimeoutMs) < replicate.RawScore ||
 			!finite(replicate.SuccessRate) || replicate.SuccessRate < 0.97 || 1 < replicate.SuccessRate ||
@@ -1669,6 +1768,7 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 		return nil, errors.New("round policy is missing")
 	}
 	copy := *settings
+	copy.EvaluationPolicy = settings.EvaluationPolicy.Clone()
 	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
 	if err != nil {
 		return nil, err
@@ -1676,6 +1776,15 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 	// A staged future policy is never inherited by an already frozen round.
 	// Its image and command pins must still match the immutable snapshot below.
 	copy.EvaluationPolicy.G2VolumePolicy = policy.EvaluationPolicy.G2VolumePolicy
+	copy.EvaluationPolicy.WorkCoveragePolicy = policy.EvaluationPolicy.WorkCoveragePolicy
+	copy.DistributedEvaluationPolicy = policy.DistributedEvaluationPolicy
+	copy.distributedRoundEpoch = round.Epoch
+	if policy.DistributedEvaluationPolicy != nil {
+		if round.Staging || round.Epoch < policy.DistributedEvaluationPolicy.FromEpoch || settings.FutureEpochPolicy == nil ||
+			!sameCompetitionDistributedPolicy(policy.DistributedEvaluationPolicy, settings.FutureEpochPolicy.DistributedEvaluationPolicy) {
+			return nil, errors.New("distributed execution is not approved for this exact frozen round")
+		}
+	}
 	if round.Staging {
 		if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled {
 			copy.AutomationPolicy = model.CompetitionAutomationPolicy{}
@@ -2755,7 +2864,8 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, queryErr := conn.Query(ctx, `
 				SELECT job.state, count(*),
-				       COALESCE(extract(epoch FROM ($2::timestamp - min(job.submitted_at))), 0)
+				       COALESCE(extract(epoch FROM ($2::timestamp - min(CASE WHEN job.evaluation_cycle>0 AND job.state='queued'
+				         THEN job.available_at ELSE job.submitted_at END))), 0)
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE round.competition_id = $1
@@ -2806,13 +2916,13 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 			var startedAt time.Time
 			scanErr := conn.QueryRow(ctx, `
 				SELECT job.job_id::text, job.round_id::text, job.patch_sha256,
-				       job.attempt_count, job.started_at
+				       job.attempt_count, COALESCE(job.cycle_started_at,job.started_at)
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE round.competition_id = $1
 				  AND job.state = 'running'
 				  AND job.started_at IS NOT NULL
-				ORDER BY job.started_at, job.job_id
+				ORDER BY COALESCE(job.cycle_started_at,job.started_at), job.job_id
 				LIMIT 1
 			`, settings.CompetitionId).Scan(
 				&jobId, &roundId, &patchSha256, &attempt, &startedAt,
@@ -2854,13 +2964,13 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 					$2::double precision
 				)
 				FROM (
-					SELECT extract(epoch FROM (job.completed_at - job.started_at))::double precision AS duration_seconds
+					SELECT extract(epoch FROM (job.completed_at - COALESCE(job.cycle_started_at,job.started_at)))::double precision AS duration_seconds
 					FROM competition_job AS job
 					JOIN competition_round AS round ON round.round_id = job.round_id
 					WHERE round.competition_id = $1
 					  AND job.state = 'succeeded'
 					  AND job.started_at IS NOT NULL
-					  AND job.completed_at >= job.started_at
+					  AND job.completed_at >= COALESCE(job.cycle_started_at,job.started_at)
 					ORDER BY job.completed_at DESC
 					LIMIT 20
 				) AS recent
@@ -2913,6 +3023,9 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 		competitionArtifactArchiveReady.Set(1)
 	} else {
 		competitionArtifactArchiveReady.Set(0)
+	}
+	if err := refreshCompetitionDistributedMetrics(ctx, settings, now); err != nil {
+		return err
 	}
 	return refreshAutomationOperationalMetrics(ctx, settings, now)
 }
@@ -3239,6 +3352,9 @@ func validateRepositoryPath(value string) error {
 }
 
 func pathAllowed(value string, policy PatchPolicy) bool {
+	if competitionWorkCoveragePathProtected(value, policy) {
+		return false
+	}
 	if policy.PathBase == competitionMonoRootPathBase {
 		if _, _, err := competitionRepositoryPath(value); err != nil || matchAny(policy.ForbiddenPaths, value) {
 			return false
@@ -3470,7 +3586,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 		return result, evalError
 	}
 	if competitionRoundUsesV2(round) {
-		settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
+		settings, err = settingsForCompetitionApiRound(ctx, settings, self.store, round)
 		if err != nil {
 			result.Checks["frozen_source_activation"] = false
 			evalError := infrastructureError("source_not_ready", "the current round's approved source and frozen policy do not match runtime readiness")
@@ -3481,6 +3597,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 	checks, err := self.readinessChecks(ctx, settings)
 	result.Checks = checks
 	if err != nil {
+		glog.Infof("[competition]readiness checks failed: %s\n", competitionLogError(err))
 		result.Checks["database"] = false
 		evalError := infrastructureError("readiness_failed", "competition dependencies did not pass readiness")
 		evalError.Readiness = &result
@@ -3489,6 +3606,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 	result.Ready = allChecks(checks)
 	result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, settings, round, checks)
 	if err != nil {
+		glog.Infof("[competition]readiness hold status unavailable: %s\n", competitionLogError(err))
 		result.Ready = false
 		result.Checks["automation_hold_status"] = false
 		evalError := infrastructureError("readiness_failed", "competition hold status is unavailable")
@@ -3602,7 +3720,7 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 	if err != nil {
 		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
-	if err := requireConfiguredCompetitionRuntime(ctx, settings, self.store); err != nil {
+	if err := requireConfiguredCompetitionApiRuntime(ctx, settings, self.store); err != nil {
 		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
 	}
 	result := settings.PublicInfo()
@@ -3613,17 +3731,19 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		effective := settings
 		if competitionRoundUsesV2(round) {
 			var sourceErr error
-			effective, sourceErr = settingsForAutomationRound(ctx, settings, self.store, round)
+			effective, sourceErr = settingsForCompetitionApiRound(ctx, settings, self.store, round)
 			if sourceErr != nil {
 				return infrastructureError("source_not_ready", "the exact frozen round source is unavailable")
 			}
 		}
 		checks, checkErr := self.readinessChecks(ctx, effective)
 		if checkErr != nil {
+			glog.Infof("[competition]intake readiness checks failed: %s\n", competitionLogError(checkErr))
 			return infrastructureError("readiness_failed", "competition intake status is unavailable")
 		}
 		result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, effective, round, checks)
 		if err != nil {
+			glog.Infof("[competition]intake hold status unavailable: %s\n", competitionLogError(err))
 			return infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		return nil
@@ -3697,7 +3817,7 @@ func applyFrozenRoundPublicPolicy(result *InfoResult, round *roundRecord) error 
 	result.ScoreSchema, result.ScorerVersion = policy.ScoreSchema, policy.ScorerVersion
 	result.EvaluatorImageDigest = policy.EvaluatorImageDigest
 	result.PatchPolicy = policy.PatchPolicy
-	result.EvaluationPolicy = policy.EvaluationPolicy
+	result.EvaluationPolicy = policy.EvaluationPolicy.Clone()
 	result.SeasonPolicy = policy.SeasonPolicy
 	result.AutomationPolicy = nil
 	if policy.AutomationPolicy != nil && policy.AutomationPolicy.Enabled {
@@ -3866,7 +3986,7 @@ func (self *Service) Leaderboards(ctx context.Context, includeStaging bool) (*Se
 	if err != nil {
 		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
-	if err := requireConfiguredCompetitionRuntime(ctx, settings, self.store); err != nil {
+	if err := requireConfiguredCompetitionApiRuntime(ctx, settings, self.store); err != nil {
 		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
 	}
 	result, err := self.store.Leaderboards(ctx, settings, includeStaging)
@@ -3927,7 +4047,7 @@ func (self *Service) submitWithDecisionContract(ctx context.Context, args ScoreA
 			}
 			return nil, status, patchErr
 		}
-		settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
+		settings, err = settingsForCompetitionApiRound(ctx, settings, self.store, round)
 		if err != nil {
 			return nil, http.StatusServiceUnavailable, infrastructureError("round_source_not_ready", "the exact activated source for this frozen round is not ready")
 		}
@@ -4011,6 +4131,7 @@ func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId ser
 	if v2 {
 		held, holdErr := self.competitionPublicationHeld(ctx, settings, &job.Round)
 		if holdErr != nil {
+			glog.Infof("[competition]score job publication hold status unavailable: %s\n", competitionLogError(holdErr))
 			return nil, http.StatusServiceUnavailable, infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		if held {
@@ -4060,6 +4181,7 @@ func (self *Service) roundViewContext(ctx context.Context, round *roundRecord) (
 	if competitionRoundUsesV2(round) {
 		held, holdErr := self.competitionPublicationHeld(ctx, self.settings, round)
 		if holdErr != nil {
+			glog.Infof("[competition]round publication hold status unavailable: %s\n", competitionLogError(holdErr))
 			return nil, infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		published = published && !held
@@ -4152,6 +4274,7 @@ func scoreJobEvaluationFailure(status string, evalError *CompetitionError) *Eval
 		"infrastructure\x00evaluator_process_failed",
 		"infrastructure\x00evaluator_result_invalid",
 		"infrastructure\x00evaluator_result_missing",
+		"infrastructure\x00executor_process_failed",
 		"infrastructure\x00g2_volume_policy_mismatch",
 		"infrastructure\x00incomplete_run_manifest",
 		"infrastructure\x00invalid_accounting",
@@ -4289,6 +4412,12 @@ type Store interface {
 type PostgresStore struct {
 	now                      func() time.Time
 	dequeueCompetitionSignal func(context.Context, *Settings) (*server.Id, error)
+	// Nil preserves real row locking; tests admit an exact held-lock boundary.
+	beforeLeaseRowLockForTest func(string)
+	// Nil preserves real authority reads; tests force a completed owned deadline.
+	beforeAutomationLeaseAuthorityForTest func()
+	// Nil preserves normal baseline work; tests advance time at its completion.
+	afterCompletionBaselineForTest func()
 	// bounds the admission upload in Enqueue; zero selects defaultSubmissionArchiveTimeout
 	submissionArchiveTimeout time.Duration
 }
@@ -4308,18 +4437,19 @@ func (self PostgresStore) dequeueSignal(ctx context.Context, settings *Settings)
 }
 
 type roundPolicySnapshot struct {
-	AutomationPolicy       *model.CompetitionAutomationPolicy `json:"automation_policy,omitempty"`
-	Schema                 int                                `json:"schema"`
-	CompetitionId          string                             `json:"competition_id"`
-	BaseSha                string                             `json:"base_sha"`
-	EvaluatorImageDigest   string                             `json:"evaluator_image_digest"`
-	EvaluatorCommand       string                             `json:"evaluator_command,omitempty"`
-	EvaluatorCommandSha256 string                             `json:"evaluator_command_sha256,omitempty"`
-	ScoreSchema            int                                `json:"score_schema"`
-	ScorerVersion          string                             `json:"scorer_version"`
-	PatchPolicy            PatchPolicy                        `json:"patch_policy"`
-	EvaluationPolicy       EvaluationPolicy                   `json:"evaluation_policy"`
-	SeasonPolicy           SeasonPolicy                       `json:"season_policy"`
+	AutomationPolicy            *model.CompetitionAutomationPolicy      `json:"automation_policy,omitempty"`
+	DistributedEvaluationPolicy *CompetitionDistributedEvaluationPolicy `json:"distributed_evaluation_policy,omitempty"`
+	Schema                      int                                     `json:"schema"`
+	CompetitionId               string                                  `json:"competition_id"`
+	BaseSha                     string                                  `json:"base_sha"`
+	EvaluatorImageDigest        string                                  `json:"evaluator_image_digest"`
+	EvaluatorCommand            string                                  `json:"evaluator_command,omitempty"`
+	EvaluatorCommandSha256      string                                  `json:"evaluator_command_sha256,omitempty"`
+	ScoreSchema                 int                                     `json:"score_schema"`
+	ScorerVersion               string                                  `json:"scorer_version"`
+	PatchPolicy                 PatchPolicy                             `json:"patch_policy"`
+	EvaluationPolicy            EvaluationPolicy                        `json:"evaluation_policy"`
+	SeasonPolicy                SeasonPolicy                            `json:"season_policy"`
 }
 
 // Both policy versions remain readable for seed reveal and historical evidence.
@@ -4343,9 +4473,12 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 		policy.ScoreSchema != ScoreSchema {
 		return nil, errors.New("round policy identity is invalid")
 	}
-	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(policy.EvaluationPolicy.G2VolumePolicy)
+	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(policy.EvaluationPolicy.G2VolumePolicy, policy.EvaluationPolicy.WorkCoveragePolicy)
 	if err != nil || policy.ScorerVersion != scorerVersion || (policy.Schema == 1 && policy.EvaluationPolicy.G2VolumePolicy != "") {
 		return nil, errors.New("round scorer version does not match its frozen g2 volume policy")
+	}
+	if err := model.ValidateCompetitionWorkCoveragePatchPolicy(policy.PatchPolicy, policy.EvaluationPolicy.WorkCoveragePolicy); err != nil {
+		return nil, err
 	}
 	if policy.Schema == 1 {
 		if policy.EvaluatorCommand != "" || policy.EvaluatorCommandSha256 != "" {
@@ -4362,30 +4495,40 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 			return nil, err
 		}
 	}
+	if err := validateCompetitionDistributedPolicy(policy.DistributedEvaluationPolicy); err != nil {
+		return nil, err
+	}
+	if policy.DistributedEvaluationPolicy != nil && (policy.Schema != 2 || policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled || policy.AutomationPolicy.Staging || policy.EvaluationPolicy.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork) {
+		return nil, errors.New("distributed execution requires a production minimum-work v2 round")
+	}
 	return policy, nil
 }
 
 // Freeze the command path as well as its bytes because it resolves sibling
 // helpers from its immutable release directory.
 func policySnapshot(settings *Settings) ([]byte, error) {
+	if err := model.ValidateCompetitionWorkCoveragePatchPolicy(settings.PatchPolicy, settings.EvaluationPolicy.WorkCoveragePolicy); err != nil {
+		return nil, err
+	}
 	var automationPolicy *model.CompetitionAutomationPolicy
 	if settings.AutomationPolicy.Enabled {
 		copyPolicy := settings.AutomationPolicy
 		automationPolicy = &copyPolicy
 	}
 	return json.Marshal(roundPolicySnapshot{
-		AutomationPolicy:       automationPolicy,
-		Schema:                 2,
-		CompetitionId:          settings.CompetitionId,
-		BaseSha:                settings.BaseSha,
-		EvaluatorImageDigest:   settings.EvaluatorImageDigest,
-		EvaluatorCommand:       settings.EvaluatorCommand,
-		EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
-		ScoreSchema:            ScoreSchema,
-		ScorerVersion:          settings.scorerVersion(),
-		PatchPolicy:            settings.PatchPolicy,
-		EvaluationPolicy:       settings.EvaluationPolicy,
-		SeasonPolicy:           settings.SeasonPolicy,
+		AutomationPolicy:            automationPolicy,
+		DistributedEvaluationPolicy: settings.DistributedEvaluationPolicy,
+		Schema:                      2,
+		CompetitionId:               settings.CompetitionId,
+		BaseSha:                     settings.BaseSha,
+		EvaluatorImageDigest:        settings.EvaluatorImageDigest,
+		EvaluatorCommand:            settings.EvaluatorCommand,
+		EvaluatorCommandSha256:      settings.EvaluatorCommandSha256,
+		ScoreSchema:                 ScoreSchema,
+		ScorerVersion:               settings.scorerVersion(),
+		PatchPolicy:                 settings.PatchPolicy,
+		EvaluationPolicy:            settings.EvaluationPolicy.Clone(),
+		SeasonPolicy:                settings.SeasonPolicy,
 	})
 }
 
@@ -4505,6 +4648,18 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "source_activation"))
 			}
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
+			if settings.intakeFirstActivation != nil {
+				existing, replayErr := competitionIntakeFirstRound(ctx, tx, settings, round.RoundId)
+				server.Raise(replayErr)
+				if existing != nil {
+					if existing.Epoch != settings.intakeFirstActivation.TargetEpoch || !storedPolicyMatches(settings, existing.PolicyJson) {
+						stateErr = ErrConflict
+						return
+					}
+					round = existing
+					return
+				}
+			}
 			var activeAutomationStaging bool
 			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_round
 			 WHERE competition_id=$1 AND staging AND NOT canceled AND automation_sealed_at IS NULL
@@ -4538,7 +4693,12 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				}
 			}
 			round.Epoch = previousEpoch + 1
-			if settings.AutomationPolicy.Enabled {
+			if settings.intakeFirstActivation != nil {
+				if err := self.checkIntakeFirstRoundInTx(ctx, tx, settings, round); err != nil {
+					stateErr = err
+					return
+				}
+			} else if settings.AutomationPolicy.Enabled {
 				intent, loadErr := currentSourceActivationInTx(ctx, tx, settings)
 				server.Raise(loadErr)
 				if intent.Generation != settings.AutomationPolicy.SourceActivationGeneration || intent.TargetEpoch != round.Epoch || intent.TargetRoundId != round.RoundId || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.SourceGeneration != settings.AutomationPolicy.SourceGeneration || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || intent.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(round.OpensAt)) || round.OpensAt.Before(intent.PreparedAt.Add(sourcePreparationInterval(intent))) || round.ClosesAt.Sub(round.OpensAt) != 7*24*time.Hour || round.RevealAt.Before(round.ClosesAt) || intent.ActivatedAt == nil {
@@ -5849,6 +6009,9 @@ const jobSelect = `
 	       j.started_at, j.completed_at, j.cache_key, j.score_json,
 	       j.eval_error_json, j.patch_bytes, j.attempt_count, COALESCE(j.lease_owner, ''),
 	       j.lease_expires_at, j.api_image_digest, COALESCE(j.worker_image_digest, ''),
+	       j.evaluation_cycle,j.cycle_attempt_offset,j.cycle_started_at,
+	       (SELECT receipt_json FROM competition_job_reevaluation recovery WHERE recovery.job_id=j.job_id),
+	       COALESCE(j.executor_host_id,''),COALESCE(j.executor_slot_id,0),COALESCE(j.executor_fencing_token,0),j.execution_deadline_at,
 	       r.competition_id, r.workload_commitment, r.seed_nonce,
 	       r.seed_ciphertext, r.providers_sha256, r.providers_path,
 	       r.policy_json, r.opens_at, r.closes_at,
@@ -5859,12 +6022,14 @@ const jobSelect = `
 
 func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) {
 	job := &queuedJob{}
-	var scoreJson, errorJson, policyJson []byte
+	var scoreJson, errorJson, policyJson, reevaluationJson []byte
 	err := row.Scan(
 		&job.JobId, &job.RoundId, &job.PatchSha256, &job.State,
 		&job.SubmittedAt, &job.StartedAt, &job.CompletedAt, &job.CacheKey,
 		&scoreJson, &errorJson, &job.Patch, &job.AttemptCount, &job.LeaseOwner,
 		&job.LeaseExpiresAt, &job.ApiImageDigest, &job.WorkerImageDigest,
+		&job.EvaluationCycle, &job.CycleAttemptOffset, &job.CycleStartedAt, &reevaluationJson,
+		&job.ExecutorHostId, &job.SlotId, &job.SlotFencingToken, &job.ExecutionDeadline,
 		&job.Round.CompetitionId,
 		&job.Round.WorkloadCommitment, &job.Round.SeedNonce,
 		&job.Round.SeedCiphertext, &job.Round.ProvidersSha256,
@@ -5881,6 +6046,23 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 	job.Staging = job.Round.Staging
 	job.Round.ScoreSchema = ScoreSchema
 	job.Round.PolicyJson = policyJson
+	if job.EvaluationCycle > 0 {
+		var receipt model.CompetitionJobReevaluationReceipt
+		if err := decodeFailureEvidenceJson(reevaluationJson, &receipt); err != nil {
+			return nil, err
+		}
+		if receipt.Cycle != job.EvaluationCycle || receipt.AttemptOffset != job.CycleAttemptOffset || receipt.JobId != job.JobId ||
+			receipt.RoundId != job.RoundId || receipt.PatchSha256 != job.PatchSha256 {
+			return nil, ErrConflict
+		}
+		receipt.StartedAt = job.CycleStartedAt
+		if err := model.ValidateCompetitionJobReevaluationCycle(&receipt.CompetitionJobReevaluationCycle); err != nil {
+			return nil, err
+		}
+		job.Reevaluation = &receipt.CompetitionJobReevaluationCycle
+	} else if len(reevaluationJson) != 0 {
+		return nil, ErrConflict
+	}
 	job.EvaluatorImageDigest, err = evaluatorImageDigestFromPolicy(policyJson)
 	if err != nil {
 		return nil, err
@@ -5953,6 +6135,10 @@ func (self PostgresStore) GetJob(ctx context.Context, settings *Settings, jobId 
 }
 
 func (self PostgresStore) Readiness(ctx context.Context, settings *Settings) (checks map[string]bool, err error) {
+	settings, err = self.competitionReadinessExecutionSettings(ctx, settings)
+	if err != nil {
+		return nil, err
+	}
 	checks = map[string]bool{
 		"configuration":                true,
 		"frozen_policy":                true,
@@ -5972,33 +6158,8 @@ func (self PostgresStore) Readiness(ctx context.Context, settings *Settings) (ch
 			var slots int
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM competition_worker_slot WHERE slot_id = 1`).Scan(&slots))
 			checks["fifo_slot"] = slots == 1
-			var hosts, artifactHosts, rebaselineHosts int
-			server.Raise(conn.QueryRow(ctx, `
-				WITH current_round AS (
-					SELECT round_id::text AS round_id
-					FROM competition_round
-					WHERE competition_id = $6 AND canceled = false
-					  AND finalized_at IS NULL AND $5 < closes_at
-					ORDER BY staging, epoch_number DESC
-					LIMIT 1
-				)
-				SELECT count(*),
-				       count(*) FILTER (WHERE (self_check_json->>'artifact_storage')::boolean),
-				       count(*) FILTER (
-				           WHERE (self_check_json->>'rebaseline_passed')::boolean
-				             AND self_check_json->>'rebaseline_round_id' =
-				                 COALESCE((SELECT round_id FROM current_round), '')
-				       )
-				FROM competition_evaluator_host
-				WHERE eligible = true AND hardware_id = $1 AND image_digest = $2
-				  AND self_check_json->>'qualification_sha256' = $3
-				  AND heartbeat_at >= $4
-			`, settings.EvaluationPolicy.HardwareId, settings.EvaluatorImageDigest,
-				settings.EvaluationPolicy.HostQualificationSha256,
-				self.nowUtc().Add(-time.Duration(settings.HostHeartbeatMaxAgeSeconds)*time.Second),
-				self.nowUtc(), settings.CompetitionId).Scan(
-				&hosts, &artifactHosts, &rebaselineHosts,
-			))
+			hosts, artifactHosts, rebaselineHosts, hostErr := readCompetitionReadinessHosts(ctx, conn, settings, self.nowUtc())
+			server.Raise(hostErr)
 			checks["authoritative_evaluator_host"] = 1 <= hosts
 			checks["artifact_storage"] = 1 <= artifactHosts
 			checks["host_rebaseline"] = 1 <= rebaselineHosts
@@ -6017,8 +6178,10 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 	}
 	digest := sha256.Sum256(bytes)
 	eligible := selfCheck.Eligible(settings)
-	return captureDatabaseError(func() {
+	observation := newCompetitionHostHeartbeatObservation()
+	return observation.capture(func() {
 		server.Db(ctx, func(conn server.PgConn) {
+			observation.callbackEntered = true
 			server.RaisePgResult(conn.Exec(ctx, `
 				INSERT INTO competition_evaluator_host (
 					host_id, hardware_id, image_digest, self_check_json,
@@ -6033,16 +6196,21 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 					heartbeat_at = EXCLUDED.heartbeat_at
 			`, selfCheck.HostId, selfCheck.HardwareId, selfCheck.ImageDigest,
 				string(bytes), hex.EncodeToString(digest[:]), eligible, self.nowUtc()))
-		}, server.OptReadWrite())
+		}, server.OptReadWrite(), &observation.phase, &observation.timing, &observation.acquire, observation.read)
 	})
 }
 
+// A scanned candidate becomes a claim only after both authority updates commit.
+// Any failed or rolled-back transaction returns no job to its caller.
 func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerId string, workerImageDigest string) (job *queuedJob, err error) {
 	if _, identityErr := validateRuntimeImageDigest(workerImageDigest); identityErr != nil {
 		return nil, identityErr
 	}
 	if settings.AutomationPolicy.Enabled && !model.SupportsCompetitionAutomationCapability(settings.AutomationPolicy.RequiredApiCapability) {
 		return nil, ErrUnsupportedDecisionMode
+	}
+	if competitionDistributedEnabled(settings) {
+		return self.claimDistributedCompetitionJob(ctx, settings, workerId, workerImageDigest)
 	}
 	now := self.nowUtc()
 	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
@@ -6054,6 +6222,7 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 		)
 	}
 	discarded := []server.Id{}
+	var stateErr error
 	discardError, marshalErr := json.Marshal(submissionError(
 		"outside_epoch_window",
 		"submission timestamp is outside the epoch admission window",
@@ -6064,13 +6233,19 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
-			job, discarded = nil, []server.Id{}
+			job, discarded, stateErr = nil, []server.Id{}, nil
 			if settings.AutomationPolicy.Enabled {
 				automationScopeLockInTx(ctx, tx, settings)
 				if settings.automationLease != nil {
 					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
 				}
-				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+				if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"); holdErr != nil {
+					if holdErr == ErrAutomationHeld {
+						stateErr = ErrAutomationHeld
+						return
+					}
+					server.Raise(holdErr)
+				}
 				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			}
 			var slotWorker *string
@@ -6083,6 +6258,11 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 
 			if slotWorker != nil && slotLease != nil && now.Before(*slotLease) {
 				return
+			}
+			cleared, clearError := self.clearExpiredCompetitionRecoverySlotInTx(ctx, tx, settings, slotJob)
+			server.Raise(clearError)
+			if cleared {
+				slotWorker, slotJob, slotLease = nil, nil, nil
 			}
 			rows, queryErr := tx.Query(ctx, `
 				UPDATE competition_job AS job
@@ -6178,21 +6358,45 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 					return
 				}
 			}
-			server.RaisePgResult(tx.Exec(ctx, `
+			allowed, gateErr := competitionIntakeFirstCandidateClaimInTx(ctx, tx, settings, job.RoundId)
+			server.Raise(gateErr)
+			if !allowed {
+				job = nil
+				return
+			}
+			if job.EvaluationCycle > 0 && (job.Reevaluation == nil || workerImageDigest != job.Reevaluation.FixedWorkerImageDigest) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(setCompetitionJobAuthorityInTx(ctx, tx, job.JobId, job.EvaluationCycle, job.AttemptCount))
+			jobUpdate, updateErr := tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'running', started_at = COALESCE(started_at, $2),
+					cycle_started_at=CASE WHEN evaluation_cycle>0 THEN COALESCE(cycle_started_at,$2) ELSE cycle_started_at END,
 					lease_owner = $3, lease_expires_at = $4, attempt_count = attempt_count + 1,
 					worker_image_digest = $5
 				WHERE job_id = $1
-			`, job.JobId, now, workerId, leaseUntil, workerImageDigest))
-			server.RaisePgResult(tx.Exec(ctx, `
+			`, job.JobId, now, workerId, leaseUntil, workerImageDigest)
+			server.Raise(updateErr)
+			if jobUpdate.RowsAffected() != 1 {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(setCompetitionJobAuthorityInTx(ctx, tx, job.JobId, job.EvaluationCycle, job.AttemptCount+1))
+			slotUpdate, updateErr := tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET worker_id = $1, job_id = $2,
 					lease_expires_at = $3, heartbeat_at = $4 WHERE slot_id = 1
-			`, workerId, job.JobId, leaseUntil, now))
+			`, workerId, job.JobId, leaseUntil, now)
+			server.Raise(updateErr)
+			if slotUpdate.RowsAffected() != 1 {
+				panic(ErrLeaseLost)
+			}
 			appendEvent(ctx, tx, job.JobId, now, "claimed", workerId, map[string]any{
 				"attempt": job.AttemptCount + 1, "worker_image_digest": workerImageDigest,
 			})
 			job.State = "running"
 			job.AttemptCount++
+			if job.EvaluationCycle > 0 && job.CycleStartedAt == nil {
+				job.CycleStartedAt = &now
+				job.Reevaluation.StartedAt = &now
+			}
 			job.LeaseOwner = workerId
 			job.LeaseExpiresAt = &leaseUntil
 			job.WorkerImageDigest = workerImageDigest
@@ -6201,60 +6405,127 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 			}
 		})
 	})
-	if err == nil {
-		for _, jobId := range discarded {
-			if removeErr := removeCompetitionJobSignal(ctx, settings, jobId); removeErr != nil {
-				glog.Infof("[competition]discarded FIFO signal cleanup failed job=%s: %s\n", jobId, removeErr)
-			}
+	if err != nil {
+		return nil, err
+	}
+	if stateErr != nil {
+		return nil, stateErr
+	}
+	for _, jobId := range discarded {
+		if removeErr := removeCompetitionJobSignal(ctx, settings, jobId); removeErr != nil {
+			glog.Infof("[competition]discarded FIFO signal cleanup failed job=%s: %s\n", jobId, removeErr)
 		}
 	}
-	return job, err
+	return job, nil
 }
 
+// Lock both existing authorities before reading the renewal clock. Expired or
+// mismatched ownership rolls back the whole transaction, including either update.
 func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, workerId string, jobId server.Id) error {
-	now := self.nowUtc()
-	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
-	leaseLost := false
-	err := captureDatabaseError(func() {
+	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
+	return captureCompetitionHeartbeatDatabase(ctx, func(observation *competitionHeartbeatDatabaseObservation) {
+		if settings.AutomationPolicy.Enabled && settings.automationLease != nil && self.beforeLeaseRowLockForTest == nil {
+			observation.sqlShape, observation.sqlValid = competitionHeartbeatLegacySlotShape, true
+			if competitionDistributedEnabled(settings) {
+				observation.sqlShape = competitionHeartbeatDistributedSlotShape
+			}
+		}
 		server.Tx(ctx, func(tx server.PgTx) {
-			// server.Tx can rerun the callback; every run starts from empty results.
-			leaseLost = false
+			tx = observation.beginCallback(tx)
 			if settings.AutomationPolicy.Enabled {
+				observation.enterStep(competitionHeartbeatDatabaseScopeLock)
 				automationScopeLockInTx(ctx, tx, settings)
+			}
+			var slotLease, jobLease time.Time
+			var actualRoundId server.Id
+			var evaluationCycle, attempts int
+			observation.enterStep(competitionHeartbeatDatabaseSlotLock)
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("worker_slot")
+			}
+			var loadError error
+			if competitionDistributedEnabled(settings) {
+				loadError = tx.QueryRow(ctx, `SELECT lease_expires_at FROM `+slotTable+`
+				 WHERE slot_id=$3 AND worker_id=$1 AND job_id=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, workerId, jobId, slotId).Scan(&slotLease)
+			} else {
+				loadError = tx.QueryRow(ctx, `SELECT lease_expires_at FROM competition_worker_slot
+				 WHERE slot_id=1 AND worker_id=$1 AND job_id=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, workerId, jobId).Scan(&slotLease)
+			}
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(loadError)
+			observation.enterStep(competitionHeartbeatDatabaseJobLock)
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("job")
+			}
+			loadError = tx.QueryRow(ctx, `SELECT lease_expires_at,round_id,evaluation_cycle,attempt_count FROM competition_job
+			 WHERE job_id=$1 AND state='running' AND lease_owner=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, jobId, workerId).Scan(&jobLease, &actualRoundId, &evaluationCycle, &attempts)
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(loadError)
+			observation.enterStep(competitionHeartbeatDatabaseJobAuthority)
+			server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
+			server.Raise(requireCompetitionExecutorAuthorityInTx(ctx, tx, settings, jobId))
+			if settings.AutomationPolicy.Enabled {
 				if settings.automationLease != nil {
+					observation.enterStep(competitionHeartbeatDatabaseSupervisorAuthority)
 					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
-					var actualRoundId server.Id
-					server.Raise(tx.QueryRow(ctx, `SELECT round_id FROM competition_job WHERE job_id=$1`, jobId).Scan(&actualRoundId))
 					if actualRoundId != settings.automationRoundId {
 						panic(ErrLeaseLost)
 					}
 				}
+				observation.enterStep(competitionHeartbeatDatabaseWorkerMode)
 				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			}
-			result, err := tx.Exec(ctx, `
-				UPDATE competition_worker_slot SET lease_expires_at = $3, heartbeat_at = $4
-				WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2
-			`, workerId, jobId, leaseUntil, now)
-			server.Raise(err)
-			if result.RowsAffected() != 1 {
-				leaseLost = true
-				return
+			observation.enterStep(competitionHeartbeatDatabaseClockCheck)
+			now := self.nowUtc()
+			if !now.Before(slotLease) || !now.Before(jobLease) {
+				panic(ErrLeaseLost)
 			}
-			result, err = tx.Exec(ctx, `
-				UPDATE competition_job SET lease_expires_at = $3
-				WHERE job_id = $1 AND state = 'running' AND lease_owner = $2
-			`, jobId, workerId, leaseUntil)
-			server.Raise(err)
-			if result.RowsAffected() != 1 {
-				leaseLost = true
-				return
+			leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
+			updateJob := func() {
+				observation.enterStep(competitionHeartbeatDatabaseJobUpdate)
+				result, err := tx.Exec(ctx, `
+					UPDATE competition_job SET lease_expires_at = $3
+					WHERE job_id = $1 AND state = 'running' AND lease_owner = $2 AND $4 < lease_expires_at
+				`, jobId, workerId, leaseUntil, now)
+				server.Raise(err)
+				if result.RowsAffected() != 1 {
+					panic(ErrLeaseLost)
+				}
 			}
-		})
+			updateSlot := func() {
+				observation.enterStep(competitionHeartbeatDatabaseSlotUpdate)
+				query := `
+					UPDATE competition_worker_slot SET lease_expires_at = $3, heartbeat_at = $4
+					WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at
+				`
+				args := []any{workerId, jobId, leaseUntil, now}
+				if competitionDistributedEnabled(settings) {
+					query = `
+						UPDATE ` + slotTable + ` SET lease_expires_at = $3, heartbeat_at = $4
+						WHERE slot_id = $5 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at
+					`
+					args = append(args, slotId)
+				}
+				result, err := tx.Exec(ctx, query, args...)
+				server.Raise(err)
+				if result.RowsAffected() != 1 {
+					panic(ErrLeaseLost)
+				}
+			}
+			if competitionDistributedEnabled(settings) {
+				updateJob()
+				updateSlot()
+			} else {
+				updateSlot()
+				updateJob()
+			}
+			observation.enterStep(competitionHeartbeatDatabaseCallbackReturn)
+		}, &observation.phase, &observation.timing, &observation.acquire, &observation.transaction)
 	})
-	if err == nil && leaseLost {
-		return ErrLeaseLost
-	}
-	return err
 }
 
 type EvaluationOutcome struct {
@@ -6264,6 +6535,11 @@ type EvaluationOutcome struct {
 	RoundBaselineJson   []byte
 	RoundBaselineSha256 string
 	archiveFailure      *competitionArtifactArchiveFailure
+	// Set only by the coordinator after authenticated artifacts are retained.
+	distributedArchiveVerified   bool
+	distributedIntegrityRejected bool
+	// Creation custody is local-only and never serialized as score authority.
+	receiveCustody *competitionReceiveCustody
 }
 
 // Schedules an infrastructure retry only when it can begin before the one
@@ -6280,65 +6556,103 @@ func infrastructureRetrySchedule(
 	return retryAt, attempts < settings.MaxInfrastructureAttempts && retryAt.Before(deadline)
 }
 
+// Completion locks both current authorities before recording a result. Any
+// lost authority or suppressed update rolls back the result, event and release.
 func (self PostgresStore) Complete(ctx context.Context, settings *Settings, workerId string, jobId server.Id, outcome EvaluationOutcome) (retry bool, err error) {
-	now := self.nowUtc()
-	leaseLost := false
+	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
-			retry, leaseLost = false, false
+			retry = false
 			if settings.AutomationPolicy.Enabled {
 				automationScopeLockInTx(ctx, tx, settings)
-				if settings.automationLease != nil {
-					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
-				}
-				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			}
+			var slotWorker *string
+			var slotJob *server.Id
+			var slotLease, jobLease *time.Time
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("completion_slot")
+			}
+			loadError := tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at
+			 FROM `+slotTable+` WHERE slot_id=$1 FOR UPDATE`, slotId).Scan(&slotWorker, &slotJob, &slotLease)
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(loadError)
 			var state, owner string
-			var attempts int
+			var attempts, evaluationCycle, attemptOffset int
+			var cycleStartedAt *time.Time
 			var apiImageDigest, workerImageDigest string
 			var roundId server.Id
+			var roundEpoch int
 			var staging bool
 			var providersSha256 string
 			var policyJson []byte
 			var startedAt time.Time
-			server.Raise(tx.QueryRow(ctx, `
+			var executionDeadline *time.Time
+			if self.beforeLeaseRowLockForTest != nil {
+				self.beforeLeaseRowLockForTest("completion_job")
+			}
+			loadError = tx.QueryRow(ctx, `
 				SELECT state, COALESCE(lease_owner, ''), attempt_count,
-				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,
-			       job.round_id, round.staging, round.providers_sha256, round.policy_json
+				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,evaluation_cycle,cycle_attempt_offset,cycle_started_at,
+				       job.round_id, round.epoch_number, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at,job.execution_deadline_at
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE job.job_id = $1 FOR UPDATE OF job
 			`, jobId).Scan(
-				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt,
-				&roundId, &staging, &providersSha256, &policyJson,
-			))
-			if state != "running" || owner != workerId {
-				leaseLost = true
-				return
-			}
-			if settings.automationLease != nil && roundId != settings.automationRoundId {
+				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt, &evaluationCycle, &attemptOffset, &cycleStartedAt,
+				&roundId, &roundEpoch, &staging, &providersSha256, &policyJson, &jobLease, &executionDeadline,
+			)
+			if errors.Is(loadError, pgx.ErrNoRows) {
 				panic(ErrLeaseLost)
+			}
+			server.Raise(loadError)
+			requireAuthority := func() time.Time {
+				server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
+				server.Raise(requireCompetitionExecutorAuthorityInTx(ctx, tx, settings, jobId))
+				if settings.AutomationPolicy.Enabled {
+					if settings.automationLease != nil {
+						server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
+					}
+					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
+				}
+				now := self.nowUtc()
+				if state != "running" || owner != workerId || slotWorker == nil || *slotWorker != workerId ||
+					slotJob == nil || *slotJob != jobId || slotLease == nil || jobLease == nil ||
+					!now.Before(*slotLease) || !now.Before(*jobLease) || settings.automationLease != nil && roundId != settings.automationRoundId {
+					panic(ErrLeaseLost)
+				}
+				if evaluationCycle > 0 && (cycleStartedAt == nil || attempts <= attemptOffset) {
+					panic(ErrLeaseLost)
+				}
+				return now
+			}
+			now := requireAuthority()
+			if competitionDistributedEnabled(settings) {
+				if executionDeadline == nil {
+					panic(ErrLeaseLost)
+				}
+				if !now.Before(*executionDeadline) {
+					outcome.Score = nil
+					outcome.Error = terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
+				}
+				if !outcome.distributedArchiveVerified && (outcome.Score != nil || outcome.Error == nil || outcome.Error.Code != "evaluation_time_budget_exhausted" || now.Before(*executionDeadline)) {
+					panic(errors.New("distributed outcome requires authenticated coordinator-retained artifacts"))
+				}
+				if outcome.distributedArchiveVerified {
+					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_executor_artifacts_verified = 'on'`))
+				}
 			}
 			if outcome.Score != nil && outcome.Error == nil {
 				policy, policyErr := decodeRoundPolicySnapshot(policyJson)
 				server.Raise(policyErr)
-				if !scoreMatchesFrozenG2Policy(outcome.Score, policy.EvaluationPolicy.G2VolumePolicy) {
+				if !scoreMatchesFrozenG2Policy(outcome.Score, policy.EvaluationPolicy.G2VolumePolicy, policy.EvaluationPolicy.WorkCoveragePolicy) {
 					panic(errors.New("score g2 volume policy does not match the immutable round"))
 				}
 			}
 			if !imageDigestPattern.MatchString(apiImageDigest) || !imageDigestPattern.MatchString(workerImageDigest) {
 				panic(errors.New("competition job runtime image identity is invalid"))
-			}
-			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, startedAt, now, attempts)
-			retryableInfrastructure := outcome.Error != nil &&
-				outcome.Error.Kind == "infrastructure" && outcome.Error.Retriable
-			if retryableInfrastructure && attempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
-				outcome.Score = nil
-				outcome.Error = terminalInfrastructureError(
-					"evaluation_time_budget_exhausted",
-					"submission exhausted its total evaluation time budget",
-				)
 			}
 			manifestJson := []byte(outcome.ArtifactManifest)
 			manifestHash := any(nil)
@@ -6364,7 +6678,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				}
 				round := &roundRecord{
 					RoundResult: RoundResult{
-						RoundId: roundId, Staging: staging, ProvidersSha256: providersSha256,
+						RoundId: roundId, Epoch: roundEpoch, Staging: staging, ProvidersSha256: providersSha256,
 					},
 					PolicyJson: policyJson,
 				}
@@ -6375,7 +6689,20 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				if baselineSha256 != outcome.RoundBaselineSha256 {
 					panic(errors.New("round baseline outcome digest does not match its bytes"))
 				}
-				insertResult, insertErr := tx.Exec(ctx, `
+				readBaseline := func() (*roundBaselineRecord, error) {
+					return scanRoundBaseline(tx.QueryRow(ctx, `
+						SELECT round_id, baseline_json, baseline_sha256, source_job_id,
+						       source_attempt, source_artifact_manifest_sha256, base_sha,
+						       providers_sha256, evaluator_image_digest, scorer_version,
+						       hardware_id, host_qualification_sha256, created_at
+						FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
+					`, roundId))
+				}
+				storedBaseline, storedErr := readBaseline()
+				if errors.Is(storedErr, pgx.ErrNoRows) {
+					// A prepared control is authenticated below, not republished by
+					// each candidate. Before-insert guards also run on conflict no-ops.
+					insertResult, insertErr := tx.Exec(ctx, `
 					INSERT INTO competition_round_baseline (
 						round_id, baseline_json, baseline_sha256, source_job_id,
 						source_attempt, source_artifact_manifest_sha256, base_sha,
@@ -6384,23 +6711,18 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 					ON CONFLICT (round_id) DO NOTHING
 				`, roundId, outcome.RoundBaselineJson, baselineSha256, jobId, attempts,
-					manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
-					roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
-					settings.EvaluationPolicy.HostQualificationSha256, now)
-				server.Raise(insertErr)
-				if insertResult.RowsAffected() == 1 {
-					appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
-						"round_id": roundId.String(), "baseline_sha256": baselineSha256,
-						"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
-					})
+						manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
+						roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
+						settings.EvaluationPolicy.HostQualificationSha256, now)
+					server.Raise(insertErr)
+					if insertResult.RowsAffected() == 1 {
+						appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
+							"round_id": roundId.String(), "baseline_sha256": baselineSha256,
+							"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
+						})
+					}
+					storedBaseline, storedErr = readBaseline()
 				}
-				storedBaseline, storedErr := scanRoundBaseline(tx.QueryRow(ctx, `
-					SELECT round_id, baseline_json, baseline_sha256, source_job_id,
-					       source_attempt, source_artifact_manifest_sha256, base_sha,
-					       providers_sha256, evaluator_image_digest, scorer_version,
-					       hardware_id, host_qualification_sha256, created_at
-					FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
-				`, roundId))
 				server.Raise(storedErr)
 				server.Raise(validateRoundBaselineRecord(roundSettings, round, storedBaseline))
 				if storedBaseline.Sha256 != baselineSha256 ||
@@ -6408,13 +6730,42 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					panic(errors.New("evaluator outcome conflicts with the immutable round baseline"))
 				}
 			}
+			if self.afterCompletionBaselineForTest != nil {
+				self.afterCompletionBaselineForTest()
+			}
+			// Baseline insertion/conflict and shared reads can wait after the first
+			// check. Revalidate before publishing any terminal or retry transition.
+			now = requireAuthority()
+			if competitionDistributedEnabled(settings) && !now.Before(*executionDeadline) {
+				outcome.Score = nil
+				outcome.Error = terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
+			}
+			executionStartedAt := startedAt
+			if evaluationCycle > 0 {
+				executionStartedAt = *cycleStartedAt
+			}
+			cycleAttempts := attempts - attemptOffset
+			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, executionStartedAt, now, cycleAttempts)
+			retryableInfrastructure := outcome.Error != nil &&
+				outcome.Error.Kind == "infrastructure" && outcome.Error.Retriable
+			if retryableInfrastructure && cycleAttempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
+				outcome.Score = nil
+				outcome.Error = terminalInfrastructureError(
+					"evaluation_time_budget_exhausted",
+					"submission exhausted its total evaluation time budget",
+				)
+			}
 			if retryableInfrastructure && retryBudgetAvailable {
 				retry = true
-				server.RaisePgResult(tx.Exec(ctx, `
+				updated, updateError := tx.Exec(ctx, `
 					UPDATE competition_job SET state = 'queued', available_at = $2,
 						lease_owner = NULL, lease_expires_at = NULL
 					WHERE job_id = $1
-				`, jobId, retryAt))
+				`, jobId, retryAt)
+				server.Raise(updateError)
+				if updated.RowsAffected() != 1 {
+					panic(ErrLeaseLost)
+				}
 				errorCode := "unknown_infrastructure_error"
 				if outcome.Error != nil {
 					errorCode = outcome.Error.Code
@@ -6435,30 +6786,38 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				if outcome.Score != nil && outcome.Error == nil {
 					terminal = "succeeded"
 				}
-				server.RaisePgResult(tx.Exec(ctx, `
+				updated, updateError := tx.Exec(ctx, `
 					UPDATE competition_job SET state = $2, completed_at = $3,
 						lease_owner = NULL, lease_expires_at = NULL,
 						score_json = $4::jsonb, eval_error_json = $5::jsonb,
 						artifact_manifest_json = $6::jsonb,
 						artifact_manifest_sha256 = $7
 					WHERE job_id = $1
-				`, jobId, terminal, now, scoreJson, errorJson, nullableBytes(manifestJson), manifestHash))
+				`, jobId, terminal, now, scoreJson, errorJson, nullableBytes(manifestJson), manifestHash)
+				server.Raise(updateError)
+				if updated.RowsAffected() != 1 {
+					panic(ErrLeaseLost)
+				}
 				appendEvent(ctx, tx, jobId, now, terminal, workerId, competitionArtifactArchiveEventData(outcome, map[string]any{
 					"attempt": attempts, "api_image_digest": apiImageDigest,
 					"worker_image_digest": workerImageDigest,
 				}))
 			}
-			server.RaisePgResult(tx.Exec(ctx, `
-				UPDATE competition_worker_slot SET worker_id = NULL, job_id = NULL,
+			updated, updateError := tx.Exec(ctx, `
+				UPDATE `+slotTable+` SET worker_id = NULL, job_id = NULL,
 					lease_expires_at = NULL, heartbeat_at = $1
-				WHERE slot_id = 1 AND worker_id = $2 AND job_id = $3
-			`, now, workerId, jobId))
+				WHERE slot_id = $4 AND worker_id = $2 AND job_id = $3
+			`, now, workerId, jobId, slotId)
+			server.Raise(updateError)
+			if updated.RowsAffected() != 1 {
+				panic(ErrLeaseLost)
+			}
 		})
 	})
-	if err == nil && leaseLost {
-		err = ErrLeaseLost
+	if err != nil {
+		return false, err
 	}
-	if err == nil && retry {
+	if retry {
 		if signalErr := enqueueCompetitionJob(ctx, settings, jobId); signalErr != nil {
 			glog.Warningf(
 				"[competition]Redis FIFO retry signal failed; PostgreSQL retry remains queued job=%s: %s\n",
@@ -6477,9 +6836,23 @@ func (self PostgresStore) HandBack(ctx context.Context, workerId string, jobId s
 // Persists safe heartbeat cause metadata in the existing owner-fenced event;
 // every state/slot update and the transaction boundary are unchanged.
 func (self PostgresStore) handBackWithFailure(ctx context.Context, workerId string, jobId server.Id, reason string, failure competitionHeartbeatFailure) error {
+	if authority, present := ctx.Value(competitionJobAuthorityKey{}).(competitionJobAuthority); present && authority.SlotFencingToken > 0 {
+		return self.handBackDistributedCompetitionJob(ctx, workerId, jobId, reason, failure, authority)
+	}
 	now := self.nowUtc()
 	return captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SELECT 1 FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`))
+			var cycle, attempt int
+			loadError := tx.QueryRow(ctx, `SELECT evaluation_cycle,attempt_count FROM competition_job WHERE job_id=$1 FOR UPDATE`, jobId).Scan(&cycle, &attempt)
+			if errors.Is(loadError, pgx.ErrNoRows) {
+				if authority, present := ctx.Value(competitionJobAuthorityKey{}).(competitionJobAuthority); present && authority.Cycle > 0 {
+					panic(ErrLeaseLost)
+				}
+			} else {
+				server.Raise(loadError)
+				server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, cycle, attempt))
+			}
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			result, err := tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'queued', available_at = $3,
@@ -6642,48 +7015,59 @@ type roundBaselineRecord struct {
 
 type queuedJob struct {
 	ScoreJobResult
-	Patch          []byte
-	PrincipalId    string
-	AttemptCount   int
-	LeaseOwner     string
-	LeaseExpiresAt *time.Time
-	Round          roundRecord
-	RoundBaseline  *roundBaselineRecord
+	EvaluationCycle    int
+	CycleAttemptOffset int
+	CycleStartedAt     *time.Time
+	Patch              []byte
+	PrincipalId        string
+	AttemptCount       int
+	LeaseOwner         string
+	LeaseExpiresAt     *time.Time
+	Round              roundRecord
+	RoundBaseline      *roundBaselineRecord
+	ExecutorHostId     string
+	SlotId             int
+	SlotFencingToken   int64
+	ExecutionDeadline  *time.Time
+	executorSettings   *Settings
 }
 
 type HostSelfCheck struct {
-	Schema                      int             `json:"schema"`
-	HostId                      string          `json:"host_id"`
-	HardwareId                  string          `json:"hardware_id"`
-	QualificationSha256         string          `json:"qualification_sha256"`
-	ImageDigest                 string          `json:"image_digest"`
-	KernelRelease               string          `json:"kernel_release"`
-	MicrocodeRevision           string          `json:"microcode_revision"`
-	IrqAffinitySha256           string          `json:"irq_affinity_sha256"`
-	IrqPolicySha256             string          `json:"irq_policy_sha256"`
-	LogicalCpuCount             int             `json:"logical_cpu_count"`
-	SMTDisabled                 bool            `json:"smt_disabled"`
-	GovernorPinned              bool            `json:"governor_pinned"`
-	TurboPinned                 bool            `json:"turbo_pinned"`
-	NumaPinned                  bool            `json:"numa_pinned"`
-	IrqPinned                   bool            `json:"irq_pinned"`
-	CgroupV2                    bool            `json:"cgroup_v2"`
-	ServicesInJobCgroup         bool            `json:"services_in_job_cgroup"`
-	DefaultDenyNetwork          bool            `json:"default_deny_network"`
-	OfflineBuildCache           bool            `json:"offline_build_cache"`
-	TemplateDatabase            bool            `json:"template_database"`
-	RedisReset                  bool            `json:"redis_reset"`
-	ArtifactStorage             bool            `json:"artifact_storage"`
-	ImmutableReports            bool            `json:"immutable_reports"`
-	NoProductionSecrets         bool            `json:"no_production_secrets"`
-	CleanupVerified             bool            `json:"cleanup_verified"`
-	ResourceLimitsVerified      bool            `json:"resource_limits_verified"`
-	ManagementCpuReserved       bool            `json:"management_cpu_reserved"`
-	ManagementMemoryReserved    bool            `json:"management_memory_reserved"`
-	ResourceBombCleanupVerified bool            `json:"resource_bomb_cleanup_verified"`
-	RebaselinePassed            bool            `json:"rebaseline_passed"`
-	RebaselineRoundId           *server.Id      `json:"rebaseline_round_id,omitempty"`
-	Checks                      map[string]bool `json:"checks"`
+	Schema                       int             `json:"schema"`
+	HostId                       string          `json:"host_id"`
+	HardwareId                   string          `json:"hardware_id"`
+	QualificationSha256          string          `json:"qualification_sha256"`
+	ImageDigest                  string          `json:"image_digest"`
+	KernelRelease                string          `json:"kernel_release"`
+	MicrocodeRevision            string          `json:"microcode_revision"`
+	IrqAffinitySha256            string          `json:"irq_affinity_sha256"`
+	IrqPolicySha256              string          `json:"irq_policy_sha256"`
+	LogicalCpuCount              int             `json:"logical_cpu_count"`
+	SMTDisabled                  bool            `json:"smt_disabled"`
+	GovernorPinned               bool            `json:"governor_pinned"`
+	TurboPinned                  bool            `json:"turbo_pinned"`
+	NumaPinned                   bool            `json:"numa_pinned"`
+	IrqPinned                    bool            `json:"irq_pinned"`
+	CgroupV2                     bool            `json:"cgroup_v2"`
+	ServicesInJobCgroup          bool            `json:"services_in_job_cgroup"`
+	DefaultDenyNetwork           bool            `json:"default_deny_network"`
+	OfflineBuildCache            bool            `json:"offline_build_cache"`
+	TemplateDatabase             bool            `json:"template_database"`
+	RedisReset                   bool            `json:"redis_reset"`
+	ArtifactStorage              bool            `json:"artifact_storage"`
+	ImmutableReports             bool            `json:"immutable_reports"`
+	NoProductionSecrets          bool            `json:"no_production_secrets"`
+	CleanupVerified              bool            `json:"cleanup_verified"`
+	ResourceLimitsVerified       bool            `json:"resource_limits_verified"`
+	ManagementCpuReserved        bool            `json:"management_cpu_reserved"`
+	ManagementMemoryReserved     bool            `json:"management_memory_reserved"`
+	ResourceBombCleanupVerified  bool            `json:"resource_bomb_cleanup_verified"`
+	RebaselinePassed             bool            `json:"rebaseline_passed"`
+	RebaselineRoundId            *server.Id      `json:"rebaseline_round_id,omitempty"`
+	NamespaceProbeSource         string          `json:"namespace_probe_source,omitempty"`
+	NamespaceProbeFresh          bool            `json:"namespace_probe_fresh,omitempty"`
+	PrivateRuntimeBoundarySha256 string          `json:"private_runtime_boundary_sha256,omitempty"`
+	Checks                       map[string]bool `json:"checks"`
 }
 
 // Decodes exactly one checker-owned report while rejecting schema drift in
@@ -6703,8 +7087,9 @@ func decodeHostSelfCheck(content []byte) (HostSelfCheck, error) {
 
 func (self HostSelfCheck) Eligible(settings *Settings) bool {
 	return self.commonContainmentEligible(settings) &&
-		self.QualificationSha256 == settings.EvaluationPolicy.HostQualificationSha256 &&
-		self.ImageDigest == settings.EvaluatorImageDigest &&
+		self.QualificationSha256 == competitionExecutorQualificationSha256(settings) &&
+		(settings.executorHostId == "" || self.HostId == settings.executorHostId) &&
+		self.ImageDigest == competitionExecutionImageDigest(settings) &&
 		(!self.RebaselinePassed || self.RebaselineRoundId != nil) &&
 		allChecks(self.Checks)
 }
@@ -6763,7 +7148,23 @@ type Worker struct {
 	pollTickForTest, hostTickForTest <-chan time.Time
 	// Nil retains the production ticker; tests force the exact failure edge.
 	evaluationTickForTest <-chan time.Time
-	heartbeatSettings     competitionHeartbeatSettings
+	// Nil uses the original submission deadline; tests force that exact stop edge.
+	evaluationContextForTest func(context.Context, time.Time) (context.Context, context.CancelFunc)
+	// Nil does nothing; tests acknowledge a fully completed heartbeat cycle.
+	evaluationHeartbeatForTest func()
+	// Nil preserves the production result boundary; tests force shutdown after
+	// the done case won but before it can obtain completion authority.
+	evaluationResultForTest func()
+	// Nil preserves the ready-result probe; tests hold job/host cleanup dispatch.
+	evaluationCleanupForTest func(host bool)
+	// Nil preserves final persistence; tests withdraw parent authority here.
+	evaluationCompletionForTest func()
+	heartbeatSettings           competitionHeartbeatSettings
+	// Nil retains the idle owner's defaults; tests own cleanup cancellation.
+	idleHeartbeatSettings *competitionIdleHostHeartbeatSettings
+	// Only a successful actual host registration can move this conservative
+	// freshness bound. Job lease acknowledgements never refresh it.
+	confirmedHostLeaseExpiresAt time.Time
 }
 
 func NewWorker(settings *Settings, store Store, evaluator Evaluator, workerId string) (*Worker, error) {
@@ -6800,7 +7201,10 @@ func newWorkerWithImageDigest(
 	}, nil
 }
 
-func (self *Worker) Run(ctx context.Context) error {
+// Idle round/runtime/admission reads never own host-refresh progress. Each idle
+// child is joined before baseline preparation or the existing job heartbeat
+// takes over; no request manufactures containment or changes execution clocks.
+func (self *Worker) Run(ctx context.Context) (resultErr error) {
 	if err := requireConfiguredCompetitionRuntime(ctx, self.settings, self.store); err != nil {
 		return err
 	}
@@ -6808,23 +7212,42 @@ func (self *Worker) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	hostTicker := time.NewTicker(time.Duration(self.settings.WorkerHeartbeatSeconds) * time.Second)
-	defer hostTicker.Stop()
 	pollTicker := time.NewTicker(self.pollEvery)
 	defer pollTicker.Stop()
-	pollTick, hostTick := pollTicker.C, hostTicker.C
+	pollTick := pollTicker.C
 	if self.pollTickForTest != nil {
 		pollTick = self.pollTickForTest
 	}
-	if self.hostTickForTest != nil {
-		hostTick = self.hostTickForTest
+	workCtx, cancelWork := context.WithCancelCause(ctx)
+	defer cancelWork(nil)
+	var idle *competitionIdleHostHeartbeat
+	startIdle := func() error {
+		if idle != nil {
+			return nil
+		}
+		var err error
+		idle, err = newCompetitionIdleHostHeartbeat(workCtx, cancelWork, self, hostCheck, self.confirmedHostLeaseExpiresAt)
+		return err
 	}
+	stopIdle := func() error {
+		if idle == nil {
+			return nil
+		}
+		latest, confirmed, err := idle.stop()
+		idle = nil
+		hostCheck, self.confirmedHostLeaseExpiresAt = latest, confirmed
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, stopIdle()) }()
 
 	for {
-		if err := requireConfiguredCompetitionRuntime(ctx, self.settings, self.store); err != nil {
+		if err := startIdle(); err != nil {
 			return err
 		}
-		finished, err := self.finishEpoch(ctx)
+		if err := requireConfiguredCompetitionRuntime(workCtx, self.settings, self.store); err != nil {
+			return err
+		}
+		finished, err := self.finishEpoch(workCtx)
 		if err != nil && !errors.Is(err, ErrAutomationHeld) {
 			return fmt.Errorf("finish competition epoch: %w", err)
 		}
@@ -6833,7 +7256,13 @@ func (self *Worker) Run(ctx context.Context) error {
 		}
 		var job *queuedJob
 		if err == nil {
-			job, err = self.claimWithPreparedRoundBaseline(ctx, hostCheck)
+			hostCheck = idle.latest()
+			job, err = self.claimWithPreparedRoundBaselineOwned(workCtx, hostCheck, func() (HostSelfCheck, error) {
+				// Only a genuinely reserved producer transfers ownership. Ordinary
+				// polls retain one ticker even with a configured baseline profile.
+				err := stopIdle()
+				return hostCheck, err
+			})
 		}
 		// An authorized grading pause is idle, not worker death. Keep genuine
 		// self-check/host heartbeats alive without claiming or evaluating work.
@@ -6841,38 +7270,36 @@ func (self *Worker) Run(ctx context.Context) error {
 			return fmt.Errorf("claim competition job: %w", err)
 		}
 		if job != nil {
-			if err := self.evaluateOne(ctx, job, hostCheck); err != nil {
+			if err := stopIdle(); err != nil {
 				return err
 			}
-			fresh, checkErr := self.selfCheck(ctx)
+			if err := workCtx.Err(); err != nil {
+				return context.Cause(workCtx)
+			}
+			if err := self.evaluateOne(workCtx, job, hostCheck); err != nil {
+				return err
+			}
+			fresh, checkErr := self.selfCheck(workCtx)
 			if checkErr != nil {
-				if fresh.HostId != "" {
+				if competitionFailedHostCheckCanInvalidate(self.settings, fresh) {
 					_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, fresh)
 				}
 				return fmt.Errorf("competition evaluator lost self-check after job: %w", checkErr)
 			}
-			if err := self.store.RegisterHost(ctx, self.settings, fresh); err != nil {
+			if err := self.registerHost(workCtx, fresh); err != nil {
 				return fmt.Errorf("refresh evaluator host after job: %w", err)
 			}
 			hostCheck = fresh
 			continue
 		}
+		if err := startIdle(); err != nil {
+			return err
+		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-workCtx.Done():
+			return context.Cause(workCtx)
 		case <-pollTick:
-		case <-hostTick:
-			fresh, checkErr := self.selfCheck(ctx)
-			if checkErr != nil {
-				if fresh.HostId != "" {
-					_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, fresh)
-				}
-				return fmt.Errorf("competition evaluator lost self-check: %w", checkErr)
-			}
-			if err := self.store.RegisterHost(ctx, self.settings, fresh); err != nil {
-				return fmt.Errorf("refresh evaluator host: %w", err)
-			}
-			hostCheck = fresh
+		case <-idle.updated:
 		}
 	}
 }
@@ -6888,12 +7315,12 @@ func (self *Worker) Preflight(ctx context.Context) error {
 func (self *Worker) preflight(ctx context.Context) (HostSelfCheck, error) {
 	hostCheck, err := self.selfCheck(ctx)
 	if err != nil {
-		if hostCheck.HostId != "" {
+		if competitionFailedHostCheckCanInvalidate(self.settings, hostCheck) {
 			_ = self.store.RegisterHost(context.WithoutCancel(ctx), self.settings, hostCheck)
 		}
 		return hostCheck, fmt.Errorf("competition evaluator self-check: %w", err)
 	}
-	if err := self.store.RegisterHost(ctx, self.settings, hostCheck); err != nil {
+	if err := self.registerHost(ctx, hostCheck); err != nil {
 		return hostCheck, fmt.Errorf("register evaluator host: %w", err)
 	}
 	return hostCheck, nil
@@ -6979,8 +7406,14 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 		if !ok {
 			return false, ErrUnsupportedDecisionMode
 		}
+		if poll, ok := self.store.(competitionAutomationEpochPollStore); ok {
+			ready, err := poll.automationEpochSealReady(ctx, self.settings, latest.RoundId)
+			if err != nil || !ready {
+				return false, err
+			}
+		}
 		_, err := store.SealAndElect(ctx, self.settings, latest.RoundId)
-		if errors.Is(err, ErrReviewNotReady) {
+		if errors.Is(err, ErrReviewNotReady) || errors.Is(err, ErrFinalizationHeld) {
 			return false, nil
 		}
 		return err == nil, err
@@ -7015,39 +7448,56 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
+// Fresh work retains its full host gate and ordinary evaluator entrypoint.
 func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostCheck HostSelfCheck) error {
+	return self.evaluateOneOwned(parent, job, hostCheck, nil)
+}
+
+// Both paths retain the original heartbeat/completion and cancellation owners.
+// Existing observations never invoke Evaluate or publish host eligibility.
+func (self *Worker) evaluateOneOwned(parent context.Context, job *queuedJob, hostCheck HostSelfCheck, existing *competitionExistingRunWitness) error {
+	parent = withCompetitionJobAuthority(parent, job)
 	startedAt := time.Now()
 	metricOutcome := "infrastructure_failed"
 	defer func() {
 		competitionEvaluationSeconds.Observe(time.Since(startedAt).Seconds())
 		competitionEvaluations.WithLabelValues(metricOutcome).Inc()
 	}()
-	if (!job.Staging || roundUsesAutomation(&job.Round)) && (!hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != job.RoundId) {
+	if existing == nil && (!job.Staging || roundUsesAutomation(&job.Round)) && (!hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != job.RoundId) {
 		metricOutcome = "rebaseline_mismatch"
-		_ = self.handBack(job.JobId, "round_rebaseline_mismatch")
+		_ = self.handBackJob(job, "round_rebaseline_mismatch")
 		return fmt.Errorf("competition evaluator host is not re-baselined for round %s", job.RoundId)
 	}
 	if job.StartedAt == nil {
-		_ = self.handBack(job.JobId, "missing_execution_start")
+		_ = self.handBackJob(job, "missing_execution_start")
 		return fmt.Errorf("competition job %s has no execution start", job.JobId)
 	}
-	executionDeadline := job.StartedAt.Add(
+	confirmedLeaseExpiresAt := time.Time{}
+	if job.LeaseExpiresAt != nil {
+		confirmedLeaseExpiresAt = *job.LeaseExpiresAt
+	}
+	executionStartedAt := job.StartedAt
+	if job.EvaluationCycle > 0 {
+		if job.CycleStartedAt == nil || job.CycleAttemptOffset < 1 || job.AttemptCount <= job.CycleAttemptOffset {
+			_ = self.handBackJob(job, "missing_cycle_authority")
+			return ErrLeaseLost
+		}
+		executionStartedAt = job.CycleStartedAt
+	}
+	executionDeadline := executionStartedAt.Add(
 		time.Duration(self.settings.EvaluationPolicy.ScoreTimeoutSeconds) * time.Second,
 	)
 	if !server.NowUtc().Before(executionDeadline) {
+		if existing != nil {
+			existing.evaluator.cancelExistingRun(self.settings, job, existing.identity.RunId)
+		}
 		outcome := EvaluationOutcome{
 			Error: terminalInfrastructureError(
 				"evaluation_time_budget_exhausted",
 				"submission exhausted its total evaluation time budget",
 			),
 		}
-		retry, err := self.store.Complete(
-			context.WithoutCancel(parent),
-			self.settings,
-			self.workerId,
-			job.JobId,
-			outcome,
-		)
+		retry, err := self.completeWithRetry(parent, job, confirmedLeaseExpiresAt, outcome)
 		if err != nil {
 			return fmt.Errorf("complete expired competition job %s: %w", job.JobId, err)
 		}
@@ -7056,77 +7506,277 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		}
 		return nil
 	}
-	evalCtx, cancel := context.WithDeadline(parent, executionDeadline)
+	newEvaluationContext := context.WithDeadline
+	if self.evaluationContextForTest != nil {
+		newEvaluationContext = self.evaluationContextForTest
+	}
+	evalCtx, cancel := newEvaluationContext(parent, executionDeadline)
 	defer cancel()
 	type evalReturn struct{ outcome EvaluationOutcome }
 	done := make(chan evalReturn, 1)
 	go func() {
-		done <- evalReturn{outcome: self.evaluator.Evaluate(evalCtx, self.settings, job)}
+		if existing != nil {
+			done <- evalReturn{outcome: existing.evaluator.finishExisting(evalCtx, self.settings, job, existing)}
+		} else {
+			done <- evalReturn{outcome: self.evaluator.Evaluate(evalCtx, self.settings, job)}
+		}
 	}()
+	joinPreservingReceive := func() { result := <-done; result.outcome.closeReceiveCustody() }
 	heartbeatTicker := time.NewTicker(time.Duration(self.settings.WorkerHeartbeatSeconds) * time.Second)
 	defer heartbeatTicker.Stop()
 	heartbeatTick := heartbeatTicker.C
 	if self.evaluationTickForTest != nil {
 		heartbeatTick = self.evaluationTickForTest
 	}
+	budgetExpired := false
+	evaluationDone := evalCtx.Done()
+	// Scoring never restarts. The same evaluator may still be retaining its
+	// bounded failure archive, whose ownership uses the live parent only.
+	observeBudget := func() bool {
+		if parent.Err() != nil {
+			return false
+		}
+		if !budgetExpired && (evalCtx.Err() == context.DeadlineExceeded || !server.NowUtc().Before(executionDeadline)) {
+			budgetExpired, evaluationDone = true, nil
+			cancel()
+		}
+		return budgetExpired
+	}
+	// Retain immutable original-cause bytes and real archive-failure metadata.
+	// Budget expiry grants neither a late score nor an empty synthetic success.
+	applyBudget := func(outcome *EvaluationOutcome) {
+		if observeBudget() {
+			outcome.Score = nil
+			outcome.Error = terminalInfrastructureError(
+				"evaluation_time_budget_exhausted",
+				"submission exhausted its total evaluation time budget",
+			)
+		}
+	}
+	// Every caller has already joined the evaluator, including its archive.
+	handBackShutdown := func() error {
+		shutdownCause := context.Cause(parent)
+		if shutdownCause == context.Canceled {
+			shutdownCause = nil
+		}
+		if err := self.handBackJob(job, "worker_shutdown", shutdownCause); err != nil {
+			return fmt.Errorf("hand back competition job %s: %w", job.JobId, err)
+		}
+		return parent.Err()
+	}
+	// All result selections, including pre-dispatch probes, share the same
+	// parent/integrity/budget ordering and retain the one joined outcome.
+	finishEvaluation := func(outcome EvaluationOutcome) error {
+		defer outcome.closeReceiveCustody()
+		if self.evaluationResultForTest != nil {
+			self.evaluationResultForTest()
+		}
+		if parent.Err() != nil {
+			cancel()
+			return handBackShutdown()
+		}
+		if competitionDistributedEnabled(self.settings) && outcome.distributedIntegrityRejected {
+			if err := self.handBackJob(job, "executor_integrity_rejected"); err != nil {
+				return fmt.Errorf("hold rejected executor job %s: %w", job.JobId, err)
+			}
+			return errCompetitionExecutorIntegrityRejected
+		}
+		applyBudget(&outcome)
+		cancel()
+		if parent.Err() != nil {
+			return handBackShutdown()
+		}
+		if outcome.Score != nil {
+			if err := validateScore(outcome.Score); err != nil {
+				outcome.Score = nil
+				outcome.Error = terminalInfrastructureError(
+					"score_result_invalid",
+					"pinned scorer returned an invalid result",
+				)
+			}
+		}
+		if self.evaluationCompletionForTest != nil {
+			self.evaluationCompletionForTest()
+		}
+		if parent.Err() != nil {
+			return handBackShutdown()
+		}
+		// Result validation or scheduling may have crossed the same immutable
+		// deadline after the first observation. Never refresh that allowance.
+		applyBudget(&outcome)
+		if parent.Err() != nil {
+			return handBackShutdown()
+		}
+		retry, err := self.completeWithRetry(parent, job, confirmedLeaseExpiresAt, outcome)
+		if err != nil {
+			return fmt.Errorf("complete competition job %s: %w", job.JobId, err)
+		}
+		if retry {
+			metricOutcome = "infrastructure_retry"
+			glog.Infof("[competition]job %s retained for infrastructure retry\n", job.JobId)
+		} else if outcome.Score != nil && outcome.Error == nil {
+			metricOutcome = "succeeded"
+		} else if outcome.Error != nil && outcome.Error.Kind == "submission" {
+			metricOutcome = "submission_failed"
+		}
+		return nil
+	}
+	var readyOutcome *EvaluationOutcome
+	evaluationReady := errors.New("competition evaluator result ready before cleanup dispatch")
+	// Capture only: a retry callback must never re-enter completion SQL. The
+	// private nonretryable sentinel withdraws dispatch after the engine unwinds.
+	probeReadyEvaluation := func(host bool) bool {
+		if self.evaluationCleanupForTest != nil {
+			self.evaluationCleanupForTest(host)
+		}
+		select {
+		case result := <-done:
+			readyOutcome = &result.outcome
+			return true
+		default:
+			return false
+		}
+	}
 	for {
 		select {
 		case result := <-done:
-			cancel()
-			if result.outcome.Score != nil {
-				if err := validateScore(result.outcome.Score); err != nil {
-					result.outcome = EvaluationOutcome{
-						Error: terminalInfrastructureError(
-							"score_result_invalid",
-							"pinned scorer returned an invalid result",
-						),
-					}
+			return finishEvaluation(result.outcome)
+		case <-evaluationDone:
+			// A closed child channel is one edge, not a spin or a fresh cleanup
+			// allowance. Only the original scoring deadline enters budget cleanup.
+			evaluationDone = nil
+			observeBudget()
+		case <-heartbeatTick:
+			if parent.Err() != nil {
+				cancel()
+				joinPreservingReceive()
+				return handBackShutdown()
+			}
+			if observeBudget() {
+				if probeReadyEvaluation(false) {
+					return finishEvaluation(*readyOutcome)
 				}
 			}
-			retry, err := self.store.Complete(context.WithoutCancel(parent), self.settings, self.workerId, job.JobId, result.outcome)
+			// Metadata owns the live worker parent, not the scoring deadline.
+			// Its original per-call/total budgets and confirmed fences still win.
+			hostExpiry := self.confirmedHostLeaseExpiresAt
+			if existing != nil {
+				// Existing custody is not positive fresh-work host eligibility.
+				// Keep only the original acquisition-safe retry predicate.
+				hostExpiry = time.Time{}
+			}
+			observation := newCompetitionHeartbeatOwnerObservation(parent, confirmedLeaseExpiresAt, hostExpiry)
+			attemptStartedAt, err := retryCompetitionJobHeartbeatOperationObserved(parent, confirmedLeaseExpiresAt, hostExpiry, self.heartbeatSettings, func(ctx context.Context) error {
+				if observeBudget() && probeReadyEvaluation(false) {
+					return evaluationReady
+				}
+				if err := parent.Err(); err != nil {
+					return err
+				}
+				return self.store.Heartbeat(ctx, self.settings, self.workerId, job.JobId)
+			}, observation)
+			if readyOutcome != nil {
+				return finishEvaluation(*readyOutcome)
+			}
 			if err != nil {
-				return fmt.Errorf("complete competition job %s: %w", job.JobId, err)
-			}
-			if retry {
-				metricOutcome = "infrastructure_retry"
-				glog.Infof("[competition]job %s retained for infrastructure retry\n", job.JobId)
-			} else if result.outcome.Score != nil && result.outcome.Error == nil {
-				metricOutcome = "succeeded"
-			} else if result.outcome.Error != nil && result.outcome.Error.Kind == "submission" {
-				metricOutcome = "submission_failed"
-			}
-			return nil
-		case <-heartbeatTick:
-			if err := self.store.Heartbeat(parent, self.settings, self.workerId, job.JobId); err != nil {
+				if parent.Err() != nil {
+					cancel()
+					joinPreservingReceive()
+					return handBackShutdown()
+				}
 				cancel()
-				<-done
-				_ = self.handBack(job.JobId, "heartbeat_failed", err)
+				joinPreservingReceive()
+				err = withCompetitionHeartbeatOwner(err, observation)
+				_ = self.handBackJob(job, "heartbeat_failed", err)
 				return fmt.Errorf("heartbeat competition job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}
+			// PostgreSQL computes renewal time after its lock/fence waits. The
+			// successful public operation's start is a conservative committed bound.
+			confirmedLeaseExpiresAt = attemptStartedAt.Add(time.Duration(self.settings.WorkerLeaseSeconds) * time.Second)
+			if existing != nil {
+				if self.evaluationHeartbeatForTest != nil {
+					self.evaluationHeartbeatForTest()
+				}
+				continue
+			}
 
-			if err := self.store.RegisterHost(parent, self.settings, hostCheck); err != nil {
+			if observeBudget() {
+				if probeReadyEvaluation(true) {
+					return finishEvaluation(*readyOutcome)
+				}
+			}
+			err = self.refreshHostHeartbeatWithOperation(parent, confirmedLeaseExpiresAt, func(ctx context.Context) error {
+				if observeBudget() && probeReadyEvaluation(true) {
+					return evaluationReady
+				}
+				if err := parent.Err(); err != nil {
+					return err
+				}
+				return self.store.RegisterHost(ctx, self.settings, hostCheck)
+			})
+			if readyOutcome != nil {
+				return finishEvaluation(*readyOutcome)
+			}
+			if err != nil {
+				if parent.Err() != nil {
+					cancel()
+					joinPreservingReceive()
+					return handBackShutdown()
+				}
 				cancel()
-				<-done
-				_ = self.handBack(job.JobId, "host_heartbeat_failed", err)
+				joinPreservingReceive()
+				_ = self.handBackJob(job, "host_heartbeat_failed", err)
 				return fmt.Errorf("refresh evaluator host during job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
+			}
+			if self.evaluationHeartbeatForTest != nil {
+				self.evaluationHeartbeatForTest()
 			}
 		case <-parent.Done():
 			cancel()
-			<-done
-			if err := self.handBack(job.JobId, "worker_shutdown"); err != nil {
-				return fmt.Errorf("hand back competition job %s: %w", job.JobId, err)
-			}
-			return parent.Err()
+			joinPreservingReceive()
+			return handBackShutdown()
 		}
 	}
 }
 
+// Persists the same finished outcome without another claim or evaluation. Its
+// detached, bounded metadata lifetime never renews expired authority or scoring.
+func (self *Worker) completeWithRetry(parent context.Context, job *queuedJob, leaseExpiresAt time.Time, outcome EvaluationOutcome) (bool, error) {
+	defer outcome.closeReceiveCustody()
+	var retry bool
+	_, err := retryCompetitionLeaseOperation(withCompetitionJobAuthority(context.WithoutCancel(parent), job), leaseExpiresAt, self.heartbeatSettings.CompletionRetry, func(ctx context.Context) error {
+		completedRetry, err := self.store.Complete(ctx, self.settings, self.workerId, job.JobId, outcome)
+		if err == nil {
+			retry = completedRetry
+		}
+		return err
+	})
+	// Housekeeping cannot alter an acknowledged database result. Shutdown,
+	// late/ambiguous completion or changed custody only preserves local bytes.
+	if err == nil && parent.Err() == nil && outcome.receiveCustody != nil {
+		if cleanupErr := outcome.receiveCustody.cleanup(parent, self.heartbeatSettings.ReceiveCleanup, job, outcome); cleanupErr != nil {
+			competitionReceiveCleanupFailures.WithLabelValues("cleanup").Inc()
+		}
+	}
+	return err == nil && retry, err
+}
+
 func (self *Worker) handBack(jobId server.Id, reason string, failures ...error) error {
+	return self.handBackContext(context.Background(), jobId, reason, failures...)
+}
+
+// Recovery cleanup carries the exact claim even after evaluator cancellation.
+func (self *Worker) handBackJob(job *queuedJob, reason string, failures ...error) error {
+	return self.handBackContext(withCompetitionJobAuthority(context.Background(), job), job.JobId, reason, failures...)
+}
+
+// The bounded detached cleanup owns metadata persistence, never evaluation.
+func (self *Worker) handBackContext(parent context.Context, jobId server.Id, reason string, failures ...error) error {
 	timeout := self.heartbeatSettings.HandBackTimeout
 	if timeout <= 0 {
 		timeout = defaultCompetitionHeartbeatSettings().HandBackTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	if len(failures) != 0 && failures[0] != nil {
 		if store, ok := self.store.(competitionHeartbeatFailureStore); ok {
@@ -7283,46 +7933,52 @@ var apexSubmissionIdPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,
 // staging records are explicitly fee-free. PrivateScore is owner-only feedback,
 // never publication or approval. Public outcomes require finalized publication.
 type ApexAdapterRecord struct {
-	Sequence              uint64             `json:"sequence"`
-	SubmissionId          string             `json:"submission_id"`
-	InputPatchSha256      string             `json:"input_patch_sha256"`
-	RoundId               server.Id          `json:"round_id,omitempty"`
-	JobId                 server.Id          `json:"job_id,omitempty"`
-	CanonicalPatchSha256  string             `json:"canonical_patch_sha256,omitempty"`
-	StatusUrl             string             `json:"status_url,omitempty"`
-	Staging               bool               `json:"staging"`
-	FeeUsd                int                `json:"fee_usd"`
-	FeeReceipt            string             `json:"fee_receipt,omitempty"`
-	State                 string             `json:"state"`
-	EvaluationStatus      string             `json:"evaluation_status,omitempty"`
-	EvaluationFailure     *EvaluationFailure `json:"evaluation_failure,omitempty"`
-	Published             bool               `json:"published"`
-	Winner                bool               `json:"winner,omitempty"`
-	HonestyReview         string             `json:"honesty_review,omitempty"`
-	PrivateScore          *ScoreResult       `json:"private_score,omitempty"`
-	PrivateScoreRefreshAt *time.Time         `json:"private_score_refresh_at,omitempty"`
-	Score                 *ScoreResult       `json:"score,omitempty"`
-	EvalError             *CompetitionError  `json:"eval_error,omitempty"`
-	SubmittedAt           time.Time          `json:"submitted_at"`
-	UpdatedAt             time.Time          `json:"updated_at"`
-	DecisionMode          string             `json:"decision_mode,omitempty"`
-	RequiredApiCapability string             `json:"required_api_capability,omitempty"`
-	CompetitionId         string             `json:"competition_id,omitempty"`
+	Reevaluation          *model.CompetitionJobReevaluationCycle `json:"reevaluation,omitempty"`
+	ReevaluationHistory   []ApexReevaluationObservation          `json:"reevaluation_history,omitempty"`
+	Sequence              uint64                                 `json:"sequence"`
+	SubmissionId          string                                 `json:"submission_id"`
+	InputPatchSha256      string                                 `json:"input_patch_sha256"`
+	RoundId               server.Id                              `json:"round_id,omitempty"`
+	JobId                 server.Id                              `json:"job_id,omitempty"`
+	CanonicalPatchSha256  string                                 `json:"canonical_patch_sha256,omitempty"`
+	StatusUrl             string                                 `json:"status_url,omitempty"`
+	Staging               bool                                   `json:"staging"`
+	FeeUsd                int                                    `json:"fee_usd"`
+	FeeReceipt            string                                 `json:"fee_receipt,omitempty"`
+	State                 string                                 `json:"state"`
+	EvaluationStatus      string                                 `json:"evaluation_status,omitempty"`
+	EvaluationFailure     *EvaluationFailure                     `json:"evaluation_failure,omitempty"`
+	Published             bool                                   `json:"published"`
+	Winner                bool                                   `json:"winner,omitempty"`
+	HonestyReview         string                                 `json:"honesty_review,omitempty"`
+	PrivateScore          *ScoreResult                           `json:"private_score,omitempty"`
+	PrivateScoreRefreshAt *time.Time                             `json:"private_score_refresh_at,omitempty"`
+	Score                 *ScoreResult                           `json:"score,omitempty"`
+	EvalError             *CompetitionError                      `json:"eval_error,omitempty"`
+	SubmittedAt           time.Time                              `json:"submitted_at"`
+	UpdatedAt             time.Time                              `json:"updated_at"`
+	DecisionMode          string                                 `json:"decision_mode,omitempty"`
+	RequiredApiCapability string                                 `json:"required_api_capability,omitempty"`
+	CompetitionId         string                                 `json:"competition_id,omitempty"`
 }
 
 type apexAdapterState struct {
-	Schema                  int                 `json:"schema"`
-	NextSequence            uint64              `json:"next_sequence"`
-	PrivateScoreRefreshNext bool                `json:"private_score_refresh_next,omitempty"`
-	Records                 []ApexAdapterRecord `json:"records"`
+	ReevaluationRefreshCursor int                  `json:"reevaluation_refresh_cursor,omitempty"`
+	ReevaluationRefreshNext   bool                 `json:"reevaluation_refresh_next,omitempty"`
+	ReevaluationRefreshAt     map[string]time.Time `json:"reevaluation_refresh_at,omitempty"`
+	Schema                    int                  `json:"schema"`
+	NextSequence              uint64               `json:"next_sequence"`
+	PrivateScoreRefreshNext   bool                 `json:"private_score_refresh_next,omitempty"`
+	Records                   []ApexAdapterRecord  `json:"records"`
 }
 
 // ApexAdapterFileStore persists the emulator's admission identity in one
 // fsync-and-rename state file. Methods are safe for concurrent goroutines and
 // cooperating processes on the evaluator host.
 type ApexAdapterFileStore struct {
-	directory string
-	stateLock sync.Mutex
+	reevaluationSettings apexReevaluationRefreshSettings
+	directory            string
+	stateLock            sync.Mutex
 }
 
 // NewApexAdapterFileStore opens or creates a private state directory. Symlinks
@@ -7343,7 +7999,7 @@ func NewApexAdapterFileStore(directory string) (*ApexAdapterFileStore, error) {
 	if err != nil || !info.IsDir() || info.Mode()&0077 != 0 {
 		return nil, errors.New("Apex adapter state directory must be private and must not be a symlink")
 	}
-	store := &ApexAdapterFileStore{directory: absDirectory}
+	store := &ApexAdapterFileStore{directory: absDirectory, reevaluationSettings: defaultApexReevaluationRefreshSettings()}
 	if err := store.read(func(*apexAdapterState) error { return nil }); err != nil {
 		return nil, err
 	}
@@ -7530,6 +8186,14 @@ func scoreJobEvaluationStatusMatchesState(state string, status string) bool {
 // evidence. A sanitized failure summary is terminal metadata, not publication
 // of the embargoed evaluator result.
 func validateScoreJobPoll(job ScoreJobResult) error {
+	if job.Reevaluation != nil {
+		if err := model.ValidateCompetitionJobReevaluationCycle(job.Reevaluation); err != nil {
+			return err
+		}
+		if job.Reevaluation.JobId != job.JobId || job.Reevaluation.RoundId != job.RoundId || job.Reevaluation.PatchSha256 != job.PatchSha256 {
+			return ErrConflict
+		}
+	}
 	if !scoreJobEvaluationStatusMatchesState(job.State, job.EvaluationStatus) {
 		return errors.New("competition poll returned contradictory evaluation state")
 	}
@@ -7610,10 +8274,7 @@ func (self *ApexAdapterFileStore) RecordPoll(submissionId string, job ScoreJobRe
 			return errors.New("competition poll changed an immutable job identity")
 		}
 		updateRecord := func(record *ApexAdapterRecord) error {
-			if record.DecisionMode != "" {
-				return recordApexV2Poll(record, job, now)
-			}
-			return recordApexLegacyPoll(record, job, now)
+			return recordApexReevaluationAwarePoll(record, job, now)
 		}
 		for i := range state.Records {
 			record := &state.Records[i]
@@ -7961,10 +8622,16 @@ func (self *ApexAdapterFileStore) withState(write bool, operation func(*apexAdap
 }
 
 func validateApexAdapterState(state *apexAdapterState) error {
+	if err := validateApexReevaluationRefreshState(state); err != nil {
+		return err
+	}
 	seenSubmissionIds := map[string]bool{}
 	jobIdRecords := map[server.Id]ApexAdapterRecord{}
 	lastSequence := uint64(0)
 	for _, record := range state.Records {
+		if err := validateApexReevaluationRecord(record); err != nil {
+			return err
+		}
 		if record.DecisionMode != "" || record.RequiredApiCapability != "" || record.CompetitionId != "" {
 			if record.DecisionMode != model.CompetitionDecisionModeV2 || !model.SupportsCompetitionAutomationCapability(record.RequiredApiCapability) ||
 				!tokenNamePattern.MatchString(record.CompetitionId) || record.Winner || record.HonestyReview != "" {
@@ -8233,7 +8900,7 @@ func (self *ApexAdapter) Submit(ctx context.Context, submissionId string, patch 
 // completed production jobs. Durable reservations bound rolling-replica retries
 // and preserve fairness even across cooperating adapter instances.
 func (self *ApexAdapter) PollNext(ctx context.Context) (*ApexAdapterRecord, error) {
-	record, err := self.store.nextPrivateScoreAwarePoll(self.now(), self.privateScoreRefreshEvery)
+	record, err := self.store.nextApexReevaluationAwarePoll(self.now(), self.privateScoreRefreshEvery)
 	if err != nil || record == nil {
 		return nil, err
 	}

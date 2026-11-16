@@ -160,7 +160,7 @@ func TestMigrationEgressIndexColumnsExecuteExactGuards(t *testing.T) {
 			{name: "egress_quality", kind: "boolean"},
 			{name: "egress_evidence_time", kind: "timestamp without time zone"},
 		} {
-			marker := "EXISTS ( SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability' AND column_name = '" + column.name + "'"
+			marker := "EXISTS ( SELECT 1 FROM public_columns WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability' AND column_name = '" + column.name + "'"
 			if strings.Count(normalized, marker) != 1 {
 				t.Fatalf("%s has no unique relation-scoped column guard", column.name)
 			}
@@ -173,7 +173,7 @@ func TestMigrationEgressIndexColumnsExecuteExactGuards(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s column guard has no following artifact boundary", column.name)
 			}
-			guard = strings.ReplaceAll(guard+" )", "information_schema.columns", "observed_column")
+			guard = strings.ReplaceAll(guard+" )", "public_columns", "observed_column")
 
 			for _, fault := range []string{"healthy", "missing", "wrong table", "wrong type", "not nullable", "default"} {
 				table, kind, nullable, present := "network_client_location_reliability", column.kind, "YES", true

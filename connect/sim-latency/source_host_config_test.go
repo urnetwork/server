@@ -198,11 +198,14 @@ func TestSourceHostAlternateConfigRequiresRootAndExactArguments(t *testing.T) {
 	if !ok {
 		t.Fatal("host checker argument parser boundary is absent")
 	}
-	_, parser, ok = strings.Cut(parser, "secure_host_path() {")
+	_, parser, ok = strings.Cut(parser, "docker_daemon_config=")
 	if !ok {
-		t.Fatal("host checker protected-path helper is absent")
+		t.Fatal("host checker initial defaults are absent")
 	}
-	parser = "set -uo pipefail\nsecure_host_path() {" + parser
+	// Keep every actual parser default and helper, replacing only the script's
+	// filesystem location. The fixture stops before any hardware probe.
+	parser = "set -uo pipefail\nreadonly SCRIPT_DIR=\"$SOURCE_TEST_SCRIPT_DIR\"\ndocker_daemon_config=" + parser
+	parser += "\n[[ $DOCKER_DAEMON_CONFIG = /etc/docker/daemon.json && $private_runtime = false ]]\n"
 	path := filepath.Join(t.TempDir(), "prospective.json")
 	if err := os.WriteFile(path, []byte(`{"schema":1}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -227,7 +230,7 @@ func TestSourceHostAlternateConfigRequiresRootAndExactArguments(t *testing.T) {
 	} {
 		args := append([]string{"-c", parser, "fixture"}, c.Args...)
 		command := exec.Command("bash", args...)
-		command.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "SYNTHETIC_CALLER_UID=" + c.Uid}
+		command.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "SYNTHETIC_CALLER_UID=" + c.Uid, "SOURCE_TEST_SCRIPT_DIR=" + bin}
 		if output, err := command.CombinedOutput(); (err == nil) != c.Pass {
 			t.Fatal("host checker argument authorization mismatch", c.Args, c.Uid, err, string(output))
 		}

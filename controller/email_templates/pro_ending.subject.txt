@@ -1,0 +1,1 @@
+Renew UR Pro by {{.EndDate}} to keep it

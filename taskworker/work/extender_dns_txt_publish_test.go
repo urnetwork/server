@@ -201,7 +201,7 @@ func TestRoute53ExtenderDnsPublishesTxtSets(t *testing.T) {
 		{continentCode: "EU", records: []string{"short", long}},
 		{records: []string{"short"}},
 	}
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
@@ -210,8 +210,7 @@ func TestRoute53ExtenderDnsPublishesTxtSets(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 
-	connect.AssertEqual(t, len(api.changeInputs), 1)
-	changes := api.changeInputs[0].ChangeBatch.Changes
+	changes := api.oneChangePerRequest(t, testExtenderDnsHostedZoneId)
 	connect.AssertEqual(t, len(changes), 4)
 
 	connect.AssertEqual(t, aws.StringValue(changes[0].ResourceRecordSet.SetIdentifier), "extender-EU-A")
@@ -265,8 +264,8 @@ func TestExtenderDnsPublishSignsATxtRecordPerExtender(t *testing.T) {
 		createTestDnsExtender(ctx, 2, "de", true, testExtenderDnsAddressSpec{ipVersion: 4, active: true})
 
 		runTestExtenderPublish(t, ctx)
-		batch := publisher.onlyBatch(t)
-		connect.AssertEqual(t, batch.setIdentifiers(), []string{
+		batch := publisher.onlyApply(t)
+		connect.AssertEqual(t, testExtenderDnsNonChinaSetIdentifiers(batch.upsertSets), []string{
 			"extender-EU-A",
 			"extender-NA-A",
 			"extender-default-A",
@@ -276,6 +275,9 @@ func TestExtenderDnsPublishSignsATxtRecordPerExtender(t *testing.T) {
 			"extender-NA-TXT",
 			"extender-default-TXT",
 		})
+		// China's set holds both records, the same bytes as each extender's
+		// record in every other set, under the same root key
+		assertTestExtenderDnsChinaSets(t, batch.upsertSets, 2, 2, rootPublicKey)
 
 		keySet := connect.NewExtenderRootKeySet(rootPublicKey)
 		// every location answers with both extenders, so every txt set holds

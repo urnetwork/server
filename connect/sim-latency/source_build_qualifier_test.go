@@ -21,6 +21,7 @@ import (
 // the provider for a new judgment on retry. Only complete real-shaped retained
 // observations can produce a receipt for the same reviewed source and owner.
 func TestSourceBuildQualifierReplaysTestsAfterHostUnavailability(t *testing.T) {
+	sourceTestPrivateGlobalIdentity(t, "Synthetic Source Fixture", "source@fixture.example")
 	request, artifacts, hostConfig, parent, prospective := sourceHostProfileFixture(t)
 	settings := defaultSourceBuildQualifierSettings()
 	settings.Sandbox.StateDirectory = t.TempDir()

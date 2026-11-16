@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -491,7 +492,10 @@ func TestCompetitionDashboardOperationalSignals(t *testing.T) {
 	}
 }
 
-func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
+// Each archive's freshness reads ERROR past its objective, as Grafana's
+// alert rules and the monitor's §11.22 do: 7 days for pg (owner, 2026-11-15,
+// for edge-6's Sun/Thu runs of 40 to 75 hours), 5 days for the others.
+func TestBackupArchiveDashboardFailsClosedPastTheObjective(t *testing.T) {
 	dashboard := readTestDashboard(t, "backup-archives.json")
 	joined := strings.Join(dashboardExpressions(dashboard), "\n")
 	for _, required := range []string{
@@ -519,21 +523,28 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 		t.Errorf("backup activity does not identify the running archive: %s", activity.Targets[0].Expr)
 	}
 
-	archives := map[int]string{
-		5:  `archive="pg"`,
-		6:  `archive="redis"`,
-		7:  `archive="github-urnetwork"`,
-		8:  `archive="github-urfoundation"`,
-		17: `archive="router-config"`,
+	archives := map[int]struct{ selector, objective string }{
+		5:  {`archive="pg"`, "> bool 604800"},
+		6:  {`archive="redis"`, "> bool 432000"},
+		7:  {`archive="github-urnetwork"`, "> bool 432000"},
+		8:  {`archive="github-urfoundation"`, "> bool 432000"},
+		17: {`archive="router-config"`, "> bool 432000"},
 	}
-	for panelID, archiveSelector := range archives {
+	overall := dashboardPanelById(dashboard, 2)
+	if overall == nil || len(overall.Targets) != 1 ||
+		!strings.Contains(overall.Targets[0].Expr, `archive="pg"})) > bool 604800`) ||
+		!strings.Contains(overall.Targets[0].Expr, `archive=~"redis|github-urnetwork|github-urfoundation|router-config"})) > bool 432000`) ||
+		!strings.Contains(overall.Targets[0].Expr, "< bool 5") {
+		t.Errorf("overall archive status does not judge pg at 7 days and the others at 5, failing closed on a missing archive")
+	}
+	for panelID, archive := range archives {
 		panel := dashboardPanelById(dashboard, panelID)
 		if panel == nil || len(panel.Targets) != 1 {
 			t.Errorf("backup freshness panel %d is missing", panelID)
 			continue
 		}
 		expression := panel.Targets[0].Expr
-		for _, required := range []string{archiveSelector, "time()", "432000", "vector(1)"} {
+		for _, required := range []string{archive.selector, "time()", archive.objective, "vector(1)"} {
 			if !strings.Contains(expression, required) {
 				t.Errorf("backup freshness panel %d is missing %q: %s", panelID, required, expression)
 			}
@@ -758,6 +769,61 @@ func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 		if slices.Contains(dashboard.Tags, PublicTag) && len(dashboard.Templating.List) != 0 {
 			t.Errorf("public dashboard %s uses template variables, which Grafana public dashboards do not support", entry.Name())
 		}
+		// unlisted only keeps a published dashboard out of the public
+		// directory, so without public it publishes nothing
+		if slices.Contains(dashboard.Tags, UnlistedTag) && !slices.Contains(dashboard.Tags, PublicTag) {
+			t.Errorf("%s is tagged %s without %s, which publishes nothing", entry.Name(), UnlistedTag, PublicTag)
+		}
+	}
+}
+
+// A grafana public dashboard resolves no template variable, defined or not:
+// a reference reaches the datasource as literal text and the panel shows no
+// data. Only the built-ins that the prometheus backend interpolates resolve;
+// frontend-only globals such as $__from do not (PUBLICSTATS.md, verified on
+// grafana 13). TestDefaultDashboardDocumentsAreValid checks that no public
+// dashboard defines a variable; this checks that none refers to one, in a
+// query, a title or anywhere else in its document.
+func TestPublicDashboardsReferenceNoTemplateVariables(t *testing.T) {
+	variablePattern := regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)|\[\[([A-Za-z_][A-Za-z0-9_]*)`)
+	backendBuiltins := []string{"__interval", "__interval_ms", "__rate_interval", "__rate_interval_ms", "__range", "__range_s", "__range_ms"}
+	public := 0
+	for _, name := range mustReadDashboardDir(t) {
+		if !slices.Contains(readTestDashboard(t, name).Tags, PublicTag) {
+			continue
+		}
+		public += 1
+		body, err := dashboardsFs.ReadFile("dashboards/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document any
+		if err := json.Unmarshal(body, &document); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		var walk func(node any)
+		walk = func(node any) {
+			switch value := node.(type) {
+			case string:
+				for _, match := range variablePattern.FindAllStringSubmatch(value, -1) {
+					if variable := match[1] + match[2]; !slices.Contains(backendBuiltins, variable) {
+						t.Errorf("public dashboard %s refers to %s, which a public dashboard does not resolve: %s", name, match[0], value)
+					}
+				}
+			case map[string]any:
+				for _, child := range value {
+					walk(child)
+				}
+			case []any:
+				for _, child := range value {
+					walk(child)
+				}
+			}
+		}
+		walk(document)
+	}
+	if public == 0 {
+		t.Fatal("no public dashboard found")
 	}
 }
 
@@ -816,9 +882,12 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	document := string(documentBytes)
 	for _, required := range []string{
 		`"query": "24h,7d,30d"`,
-		"upgrades / new paid accounts",
-		"current paid accounts by store",
-		"paid subscriber engagement by store",
+		"new subscriptions (trial starts included)",
+		"current subscriptions by store",
+		"subscriber engagement by store",
+		"current trials by store and plan",
+		"A free trial is a subscription",
+		"App Store sandbox purchases (TestFlight, App Review) record no revenue and are left out",
 		"observed churn: expiry or cancellation",
 		"provider-confirmed terminal events",
 		"reconciliation repairs",
@@ -826,6 +895,10 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		"data-pack bytes fulfilled",
 		"Raw cancellation intent is not durably available",
 		"never renders an invented cancellation-intent zero",
+		"past due (in grace)",
+		"past due by store",
+		"open payment failures",
+		"payment failures resolved",
 	} {
 		if !strings.Contains(document, required) {
 			t.Errorf("subscriptions dashboard lacks %q", required)
@@ -833,6 +906,10 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	}
 	for _, metric := range []string{
 		"urnetwork_subscription_active_accounts",
+		"urnetwork_subscription_in_grace_accounts",
+		"urnetwork_subscription_payment_failures_open",
+		"urnetwork_subscription_payment_failures_resolved",
+		"urnetwork_subscription_trials_active",
 		"urnetwork_subscription_new_paid_accounts",
 		"urnetwork_subscription_engaged_accounts",
 		"urnetwork_subscription_churned_accounts",
@@ -886,16 +963,18 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		}
 	}
 
+	// the exporter's tracked store labels (subscriptions_dashboard_stores_test.go)
+	trackedStores := `store=~"` + subscriptionsDashboardStores() + `"`
 	active := dashboardPanelById(dashboard, 8)
 	engagement := dashboardPanelById(dashboard, 9)
 	upgrades := dashboardPanelById(dashboard, 21)
 	churn := dashboardPanelById(dashboard, 11)
 	if active == nil || len(active.Targets) != 1 ||
-		!strings.Contains(active.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash"`) {
+		!strings.Contains(active.Targets[0].Expr, trackedStores) {
 		t.Fatal("subscriptions dashboard lacks the bounded tracked-store active view")
 	}
 	if upgrades == nil || len(upgrades.Targets) != 1 ||
-		!strings.Contains(upgrades.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash"`) ||
+		!strings.Contains(upgrades.Targets[0].Expr, trackedStores) ||
 		!strings.Contains(upgrades.Targets[0].Expr, `window="$window"`) {
 		t.Fatal("subscriptions dashboard lacks the bounded tracked-store upgrade view")
 	}
@@ -904,9 +983,24 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		!strings.Contains(upgradeTotal.Targets[0].Expr, `store="deduplicated"`) {
 		t.Fatal("subscriptions dashboard lacks the first-ever deduplicated upgrade total")
 	}
+	// the active trials: a deduplicated total over the closed plan set, and
+	// the stores that sell a trial by plan
+	trialTotal := dashboardPanelById(dashboard, 22)
+	if trialTotal == nil || len(trialTotal.Targets) != 1 ||
+		!strings.Contains(trialTotal.Targets[0].Expr, `sum(urnetwork_subscription_trials_active{`) ||
+		!strings.Contains(trialTotal.Targets[0].Expr, `store="deduplicated"`) {
+		t.Fatal("subscriptions dashboard lacks the deduplicated active trial total")
+	}
+	trials := dashboardPanelById(dashboard, 23)
+	if trials == nil || len(trials.Targets) != 1 ||
+		!strings.Contains(trials.Targets[0].Expr, `max by (store, plan) (urnetwork_subscription_trials_active{`) ||
+		!strings.Contains(trials.Targets[0].Expr, `store=~"apple|google|stripe"`) ||
+		!strings.Contains(trials.Targets[0].Expr, `plan=~"yearly|monthly|unknown"`) {
+		t.Fatal("subscriptions dashboard lacks the bounded active trials by store and plan")
+	}
 	for _, panel := range []*testPanel{engagement, churn} {
 		if panel == nil || len(panel.Targets) != 1 ||
-			!strings.Contains(panel.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash|deduplicated"`) ||
+			!strings.Contains(panel.Targets[0].Expr, `store=~"`+subscriptionsDashboardStores()+`|deduplicated"`) ||
 			!strings.Contains(panel.Targets[0].Expr, `window="$window"`) {
 			t.Fatal("subscriptions dashboard lacks a bounded store/window account view")
 		}
@@ -921,7 +1015,7 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		expression := panel.Targets[0].Expr
 		for _, required := range []string{
 			`store="all"`,
-			`store=~"apple|google|stripe|solana|monero|zcash"`,
+			trackedStores,
 			"time() - 9000",
 			"time() - 10800",
 			"and on(env,service,block,host,instance,store)",
@@ -945,6 +1039,34 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 			!strings.Contains(panel.Targets[0].Expr, `window="$window"`) {
 			t.Errorf("data-pack panel %d lacks the bounded deduplicated source/window contract", panelID)
 		}
+	}
+
+	// past due: a deduplicated total and the tracked stores; Stripe's failed
+	// renewals: open now, and resolved by the closed reason set per window
+	pastDue := dashboardPanelById(dashboard, 28)
+	if pastDue == nil || len(pastDue.Targets) != 1 ||
+		!strings.Contains(pastDue.Targets[0].Expr, `max(urnetwork_subscription_in_grace_accounts{`) ||
+		!strings.Contains(pastDue.Targets[0].Expr, `store="deduplicated"`) {
+		t.Fatal("subscriptions dashboard lacks the deduplicated past-due total")
+	}
+	pastDueByStore := dashboardPanelById(dashboard, 29)
+	if pastDueByStore == nil || len(pastDueByStore.Targets) != 1 ||
+		!strings.Contains(pastDueByStore.Targets[0].Expr, `max by (store) (urnetwork_subscription_in_grace_accounts{`) ||
+		!strings.Contains(pastDueByStore.Targets[0].Expr, trackedStores) {
+		t.Fatal("subscriptions dashboard lacks the bounded past-due view by tracked store")
+	}
+	failuresOpen := dashboardPanelById(dashboard, 30)
+	if failuresOpen == nil || len(failuresOpen.Targets) != 1 ||
+		!strings.Contains(failuresOpen.Targets[0].Expr, `max(urnetwork_subscription_payment_failures_open{`) ||
+		!strings.Contains(failuresOpen.Targets[0].Expr, `store="stripe"`) {
+		t.Fatal("subscriptions dashboard lacks the open payment failures")
+	}
+	failuresResolved := dashboardPanelById(dashboard, 31)
+	if failuresResolved == nil || len(failuresResolved.Targets) != 1 ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `max by (reason) (urnetwork_subscription_payment_failures_resolved{`) ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `reason=~"paid|voided|uncollectible|subscription_ended"`) ||
+		!strings.Contains(failuresResolved.Targets[0].Expr, `window="$window"`) {
+		t.Fatal("subscriptions dashboard lacks the bounded resolved payment failures by reason")
 	}
 
 	cancellation := dashboardPanelById(dashboard, 12)
@@ -1608,6 +1730,16 @@ var publicSafeMetrics = append(append([]string{
 	"urnetwork_connect_connection_new",
 }, networkMeasurementMetrics...), networkLabeledMeasurementMetrics...)
 
+// metrics one public dashboard may query besides publicSafeMetrics, by its
+// file. each entry is a publication decision for that dashboard alone, made
+// for an unlisted share, so the dashboard must stay tagged unlisted
+var publicDashboardOwnMetrics = map[string][]string{
+	// the proxy test runner's measurements, shared unlisted with an outside
+	// viewer (owner decision, 2026-11-09). its panels show only the runner's
+	// own labels (proxy_test_shared_dashboard_test.go)
+	proxyTestSharedDashboardName: slices.Sorted(maps.Keys(proxyTestMetrics)),
+}
+
 var metricNamePattern = regexp.MustCompile(`urnetwork_[a-z0-9_]+`)
 
 // metricOccurrences returns the byte offsets at which the whole metric
@@ -1701,9 +1833,13 @@ func TestPublicDashboardsQueryOnlyPublicSafeMetrics(t *testing.T) {
 			continue
 		}
 		public += 1
+		ownMetrics := publicDashboardOwnMetrics[entry.Name()]
+		if 0 < len(ownMetrics) && !slices.Contains(dashboard.Tags, UnlistedTag) {
+			t.Errorf("%s may query its own metrics only while tagged %s", entry.Name(), UnlistedTag)
+		}
 		for _, expression := range dashboardExpressions(dashboard) {
 			for _, metric := range metricNamePattern.FindAllString(expression, -1) {
-				if !slices.Contains(publicSafeMetrics, metric) {
+				if !slices.Contains(publicSafeMetrics, metric) && !slices.Contains(ownMetrics, metric) {
 					t.Errorf("%s queries %s, which is not a public-safe metric: %s", entry.Name(), metric, expression)
 				}
 			}
@@ -1917,10 +2053,12 @@ func TestProvidersDashboardPinsInternalMeasurements(t *testing.T) {
 	// observes its own answers, so they are summed as rates across them, and
 	// TestProvidersDashboardShowsTheEgressBuckets pins those reads instead. So
 	// are the ARIN canary's decision reads, each process's own counter, which
-	// TestProvidersDashboardShowsTheArindbCanaryRow pins
+	// TestProvidersDashboardShowsTheArindbCanaryRow pins, and the selector-mode
+	// and strict post-quantum request counters, which
+	// TestProvidersDashboardShowsTheCapabilityAwareSelection pins
 	for _, expression := range expressions {
 		for _, metric := range metricNamePattern.FindAllString(expression, -1) {
-			if providersPerProcessMetric(metric) || metric == providersArindbDecisionReadsMetric {
+			if providersPerProcessMetric(metric) || metric == providersArindbDecisionReadsMetric || slices.Contains(providersCapabilityRequestMetrics, metric) {
 				continue
 			}
 			assertReplicaSafeReads(t, "providers dashboard", expression, metric, `{env="$env"`)
@@ -2010,6 +2148,47 @@ func TestExchangeTrafficDashboardsUseLiveIoWithoutDoubleCounting(t *testing.T) {
 	}
 }
 
+// 2026-11-04: with in-process delivery on for transports and forwards, more
+// than half of the exchange's data frames went through local links, and the
+// connect dashboard's totals, which read the socket counters alone, showed
+// exchange traffic falling by about two thirds while socket plus in-process
+// traffic matched the nights before. Each total must add the local counter of
+// the same kind, under the same selectors, and fall back to zero so it keeps
+// the socket count where no process exports local series.
+func TestConnectDashboardExchangeTotalsIncludeInProcessLinks(t *testing.T) {
+	dashboard := readTestDashboard(t, "connect.json")
+	selectors := `{env="$env",block=~"$block",host=~"$host",`
+	for _, expected := range []struct {
+		panelId int
+		kind    string
+	}{
+		{panelId: 5, kind: "bytes"},
+		{panelId: 6, kind: "bytes"},
+		{panelId: 7, kind: "frames"},
+		{panelId: 8, kind: "bytes"},
+		{panelId: 9, kind: "frames"},
+		{panelId: 10, kind: "bytes"},
+		{panelId: 10, kind: "frames"},
+	} {
+		panel := dashboardPanelById(dashboard, expected.panelId)
+		if panel == nil || len(panel.Targets) != 1 {
+			t.Fatalf("exchange total panel %d is missing its query", expected.panelId)
+		}
+		expression := panel.Targets[0].Expr
+		socket := "urnetwork_connect_exchange_io_" + expected.kind + "_total" + selectors
+		local := "urnetwork_connect_exchange_local_" + expected.kind + "_total" + selectors
+		if !strings.Contains(expression, socket) {
+			t.Errorf("exchange total panel %d no longer reads the socket %s: %s", expected.panelId, expected.kind, expression)
+		}
+		if !strings.Contains(expression, local) {
+			t.Errorf("exchange total panel %d omits the in-process %s: %s", expected.panelId, expected.kind, expression)
+		}
+		if !strings.Contains(expression, " or ") {
+			t.Errorf("exchange total panel %d has no fallback for processes without local series: %s", expected.panelId, expression)
+		}
+	}
+}
+
 // Keeps carrier rates, instantaneous queue occupancy, and wait duration distinct.
 func TestConnectH3DashboardPreservesMetricUnitsAndScope(t *testing.T) {
 	dashboard := readTestDashboard(t, "connect.json")
@@ -2049,15 +2228,9 @@ func TestConnectH3DashboardPreservesMetricUnitsAndScope(t *testing.T) {
 	}
 }
 
-func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
+func TestCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	signalExpressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
 	for _, expression := range []string{
-		`sum(rate(urnetwork_circle_transfer_admissions_total{env="$env"}[$__rate_interval]))`,
-		`sum(rate(urnetwork_circle_transfer_deferrals_total{env="$env"}[$__rate_interval]))`,
-		`sum(rate(urnetwork_circle_transfer_admission_errors_total{env="$env"}[$__rate_interval]))`,
-		`histogram_quantile(0.50, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env="$env"}[$__rate_interval])))`,
-		`histogram_quantile(0.95, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env="$env"}[$__rate_interval])))`,
-		`sum(rate(urnetwork_circle_transfer_admission_wait_seconds_sum{env="$env"}[$__rate_interval])) / sum(rate(urnetwork_circle_transfer_admission_wait_seconds_count{env="$env"}[$__rate_interval]))`,
 		`max by (host, block, instance) (urnetwork_proxy_lock_cache_entries{env="$env"})`,
 		`max by (host, block, instance) (urnetwork_proxy_lock_cache_capacity{env="$env"})`,
 		`sum(rate(urnetwork_proxy_lock_cache_hits_total{env="$env"}[$__rate_interval]))`,
@@ -2079,41 +2252,6 @@ func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	sourceTarget := sourcePanel.Targets[0]
 	if sourceTarget.Expr != wantSourceQuery || sourceTarget.Format != "table" || !sourceTarget.Instant {
 		t.Errorf("running source revisions query = %+v, want instant table %q", sourceTarget, wantSourceQuery)
-	}
-}
-
-// The capability gauge identifies each freshly observed worker that emits a
-// bounded pre-POST admission event; missing workers must remain no-data.
-func TestCircleAdmissionDashboardPreservesPerWorkerCapability(t *testing.T) {
-	dashboard := readTestDashboard(t, "signals.json")
-	if slices.Contains(dashboard.Tags, PublicTag) {
-		t.Fatal("worker admission capability must remain authenticated")
-	}
-	var capabilityPanel *testPanel
-	for panelIndex := range dashboard.Panels {
-		panel := &dashboard.Panels[panelIndex]
-		if panel.Title == "Circle transfer admission event capability by worker" {
-			capabilityPanel = panel
-			break
-		}
-	}
-	if capabilityPanel == nil || len(capabilityPanel.Targets) != 1 {
-		t.Fatal("signals dashboard is missing a dedicated Circle admission capability panel")
-	}
-	const metric = `urnetwork_circle_transfer_admission_observable_info{env="$env",service="taskworker",instance!=""}`
-	wantQuery := metric + ` and on (env, service, block, host, instance) (timestamp(` + metric + `) >= time() - 90)`
-	target := capabilityPanel.Targets[0]
-	if target.Expr != wantQuery || target.LegendFormat != "{{host}} / {{block}} / {{instance}}" {
-		t.Errorf("Circle admission capability loses fresh per-worker gauge semantics: %+v", target)
-	}
-	if capabilityPanel.Type != "timeseries" || capabilityPanel.FieldConfig.Defaults.Unit != "short" ||
-		target.Instant || target.Range != nil && !*target.Range {
-		t.Error("Circle admission capability must be a unitless gauge time series")
-	}
-	for _, part := range []string{"1", "pre-POST", "90 seconds", "no-data", "§2.14"} {
-		if !strings.Contains(capabilityPanel.Description, part) {
-			t.Errorf("Circle admission capability does not explain %q", part)
-		}
 	}
 }
 
@@ -2564,10 +2702,11 @@ func TestEpochClockMeasurementsAndBlockAliases(t *testing.T) {
 	}
 }
 
-// Flipping reject_expired waits on network tokens: a client token refreshes on
-// its half-life, a network token only at POST /auth/network-refresh. The
-// authentication panel keeps the legacy accepts split by credential kind and
-// charts the network refresh outcomes beside them.
+// Flipping reject_expired waits on network tokens: a client token refreshes
+// between 40% and 50% of its lifetime, a network token only at
+// POST /auth/network-refresh. The authentication panel keeps the legacy
+// accepts split by credential kind and charts the network refresh outcomes
+// beside them.
 func TestAuthenticationPanelSplitsLegacyAcceptsByCredentialKind(t *testing.T) {
 	dashboard := readTestDashboard(t, "signals.json")
 	var panel *testPanel

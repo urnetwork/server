@@ -48,6 +48,10 @@ const (
 	VariantActivated    = "activated"
 	VariantNotActivated = "not_activated"
 	VariantEngaged      = "engaged"
+	// E2's habit email on a platform without a widget (windows, linux, web):
+	// the browser extension pinned to the toolbar, or the app started with
+	// the computer (mmm/ONBOARDING-RETENTION.md P18)
+	VariantDesktop = "desktop"
 )
 
 // Openings of the shared last-chance template (params.opening).
@@ -67,6 +71,9 @@ const (
 	ExitBounced        = "bounced"
 	ExitComplained     = "complained"
 	ExitDone           = "done"
+	// marketing mail is suppressed for the network (a bounce or complaint on
+	// any program, a re-engagement sunset): account_preferences.marketing_suppressed_at
+	ExitSuppressed = "suppressed"
 )
 
 // Actions of a decision.
@@ -74,6 +81,8 @@ const (
 	ActionSend = "send"
 	ActionSkip = "skip"
 	ActionExit = "exit"
+	// nothing goes now: the same step runs again at Decision.At
+	ActionDefer = "defer"
 )
 
 // Schedule is the day offset of every step from the account email, per path,
@@ -164,13 +173,52 @@ type Facts struct {
 	Bounced        bool
 	Complained     bool
 	ComplainedStep string
+	// marketing mail is suppressed for the network (every program)
+	Suppressed bool
+	// the mail policy's exit (policy.go: country and consent evidence), or ""
+	PolicyExit string
+	// the offer steps (E3a, E4b, E5b) may not go: the country gets no offers by
+	// email, or the network's store cannot redeem the emailed offer yet
+	NoOfferEmail bool
 
 	// ----- step conditions -----
-	HasConnected      bool
-	WidgetAdded       bool
-	OfferState        string // "" (none) | active | redeemed | expired
+	// the row's platform: ios, macos, android, windows, linux, web; for a row
+	// without one, the platform of the network's newest active client; ""
+	// when neither is known
+	Platform string
+	// the distribution of Platform's app (session.ClientDistribution*): the
+	// row's when Platform is the row's, "" when it came from the client's
+	// device spec, which names no distribution. With Platform it decides who
+	// bills the reader (StoreBilledPlatform) and whether the offer may be
+	// emailed (OfferEmailWithheld)
+	Distribution string
+	// the network's newest active client is an app build with the home
+	// screen widget (WidgetSettings.HasWidget): E2's widget email goes only
+	// then
+	WidgetBuild  bool
+	HasConnected bool
+	WidgetAdded  bool
+	OfferState   string // "" (none) | active | redeemed | expired
+	// the offer expires within LastChanceWindow of the send (OfferEndsSoon):
+	// the last-chance email's "end tomorrow" holds
+	OfferEndsSoon bool
+	// when the active offer's last-chance email goes (LastChanceAt), set only
+	// while that moment lies ahead: an in-app offer issued after sign-up
+	// still has days left on E3a's day 4, and E3a waits for it
+	LastChanceAt *time.Time
+	// the desktop habit email (e2_widget/desktop) has a Brevo template: until
+	// the release uploads it, a desktop network's E2 is skipped as before
+	DesktopTemplate bool
+	// an answer to the feedback step: the app's feedback form
+	// (account_feedback, feedback.submitted) or a one-tap answer from the
+	// feedback email (feedback.tapped)
 	FeedbackSubmitted bool
-	EmailOpens        int
+	// a feedback email (e4_feedback) already went to the network: after a
+	// B -> A path flip E3b sent it and E4a would send it again
+	FeedbackEmailSent bool
+	// recorded for the status tooling only: opens decide nothing (Apple Mail
+	// Privacy Protection and proxies open every message; REVIEW.md finding 1)
+	EmailOpens int
 }
 
 // Offer states, as model.OnboardingOfferState reports them.
@@ -181,6 +229,32 @@ const (
 	OfferStateExpired  = "expired"
 )
 
+// LastChanceWindow is how near its end an offer must be for the last-chance
+// email, whose subject says the free months "end tomorrow".
+const LastChanceWindow = 36 * time.Hour
+
+// OfferEndsSoon reports whether an offer expiring at expiresAt ends within
+// LastChanceWindow of now, and has not ended yet.
+func OfferEndsSoon(expiresAt time.Time, now time.Time) bool {
+	left := expiresAt.Sub(now)
+	return 0 < left && left <= LastChanceWindow
+}
+
+// LastChanceAt is when the last-chance email goes for an offer expiring at
+// expiresAt: on the reader's local day before the expiry's, at the expiry's
+// local time, clamped into the send window. "End tomorrow" then names the
+// reader's next day, and with the default window the send falls 16 to 27
+// hours before the expiry, inside LastChanceWindow, so OfferEndsSoon holds
+// when it runs. Day arithmetic goes through time.Date in loc, as SendAt's
+// does.
+func LastChanceAt(expiresAt time.Time, loc *time.Location, w SendWindow) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	local := expiresAt.In(loc)
+	return w.clampDay(time.Date(local.Year(), local.Month(), local.Day()-1, local.Hour(), local.Minute(), 0, 0, loc)).UTC()
+}
+
 // Decision is what a step does.
 type Decision struct {
 	Action   string
@@ -188,18 +262,71 @@ type Decision struct {
 	Variant  string
 	// Opening is the last-chance template's opening (params.opening)
 	Opening string
+	// Browser is E2's desktop email's browser branch (params.browser): the
+	// platform it was decided for is the web
+	Browser bool
 	// IssueOffer: issue the welcome offer by email before sending (E4b)
 	IssueOffer bool
+	// NoOfferEmail is Facts.NoOfferEmail at the send: the offer may not be
+	// emailed to the network, so E1 leaves out its offer line (the offer
+	// steps do not send at all then)
+	NoOfferEmail bool
+	// the App Store or Google Play bills the reader's app
+	// (StoreBilledPlatform of Facts.Platform and Facts.Distribution), so the
+	// offer emails name no price (params.store_billed). Decided on the
+	// reader's app as the facts resolve it, not on the row alone: a row
+	// recorded without a platform is often an Android app reader, who buys
+	// through Google Play, and used to be quoted the Stripe price in USD
+	StoreBilled bool
 	// ExitReason when Action == ActionExit
 	ExitReason string
-	// NextStep after this one on the effective path ("" = done)
+	// NextStep after this one on the effective path ("" = done); for
+	// ActionDefer the step itself
 	NextStep string
+	// At is when a deferred step runs again (ActionDefer)
+	At time.Time
 }
 
-// engaged is the plan's feedback-variant rule: two or more email opens or one
-// connection.
+// The web platform: a browser sign-up, whose app is the extension.
+const PlatformWeb = "web"
+
+// WidgetPlatform reports whether E2's activated email, which points at the
+// widget on the home screen, fits the platform: a phone, iOS or Android, and
+// then only when the reader's app build has the widget (Facts.WidgetBuild). A
+// Mac has no home screen, in either distribution (the App Store build's
+// widgets would sit on the desktop and in the Notification Center; the
+// direct-download build has none), so a Mac reader gets the desktop email, as
+// Windows, Linux and the web do (DesktopPlatform). An unknown platform ("")
+// gets neither: the widget copy would be wrong on a computer and the desktop
+// copy on a phone. Until the 2026-11-13 review the widget email went to every
+// phone, to the App Store Mac and to an unknown platform, whatever the build.
+func WidgetPlatform(platform string) bool {
+	switch platform {
+	case "ios", "android":
+		return true
+	}
+	return false
+}
+
+// DesktopPlatform reports whether E2's desktop email fits the platform: the
+// Windows, Linux and macOS apps, whose Settings have "Launch URnetwork on
+// system startup" (the email's app branch), and the web, whose extension pins
+// to the browser's toolbar (its browser branch).
+func DesktopPlatform(platform string) bool {
+	switch platform {
+	case "windows", "linux", "macos", PlatformWeb:
+		return true
+	}
+	return false
+}
+
+// engaged is the feedback-variant rule: the network connected. Opens used to
+// count too (two or more), but machine opens (Apple Mail Privacy Protection,
+// proxies) made a network that never connected "engaged", and its feedback
+// email then said "You've connected on 0 of your first 6 days"
+// (mmm/onboarding/REVIEW.md finding 1).
 func engaged(f Facts) bool {
-	return 2 <= f.EmailOpens || f.HasConnected
+	return f.HasConnected
 }
 
 // GlobalExit is the exit that applies before any step, or "" when none does.
@@ -216,6 +343,10 @@ func GlobalExit(f Facts) string {
 		return ExitPaused
 	case !f.ProductUpdates:
 		return ExitOptOut
+	case f.Suppressed:
+		return ExitSuppressed
+	case f.PolicyExit != "":
+		return f.PolicyExit
 	case f.Pro:
 		return ExitPro
 	case f.Complained:
@@ -238,10 +369,13 @@ func Decide(step string, f Facts) Decision {
 	next := NextStep(step, path)
 	skip := Decision{Action: ActionSkip, NextStep: next}
 	send := func(template string, variant string) Decision {
-		return Decision{Action: ActionSend, Template: template, Variant: variant, NextStep: next}
+		return Decision{Action: ActionSend, Template: template, Variant: variant, NoOfferEmail: f.NoOfferEmail,
+			StoreBilled: StoreBilledPlatform(f.Platform, f.Distribution), NextStep: next}
 	}
 	feedback := func() Decision {
-		if f.FeedbackSubmitted {
+		// once per network: a network that flips from B to A between day 5
+		// and 7 reaches E4a's feedback after E3b's
+		if f.FeedbackSubmitted || f.FeedbackEmailSent {
 			return skip
 		}
 		if engaged(f) {
@@ -259,22 +393,46 @@ func Decide(step string, f Facts) Decision {
 		}
 		return send(TemplateE1Connect, VariantDefault)
 	case StepE2:
-		// day 3: activated -> the widget habit unless a widget exists;
-		// not activated -> another connect nudge
+		// day 3: activated -> the widget habit on a phone whose app has the
+		// widget, unless one is added; the desktop habit on a computer or the
+		// web; nothing on a phone without the widget or an unknown platform.
+		// Not activated -> another connect nudge
 		if f.HasConnected {
-			if f.WidgetAdded {
-				return skip
+			switch {
+			case WidgetPlatform(f.Platform):
+				if f.WidgetBuild && !f.WidgetAdded {
+					return send(TemplateE2Widget, VariantActivated)
+				}
+			case DesktopPlatform(f.Platform):
+				// windows, linux and macos: the desktop email, the app
+				// started with the computer; the web: the extension pinned to
+				// the toolbar, once the extension is linked (widget.added on
+				// the web). Each once its template is uploaded
+				// (mmm/ONBOARDING-RETENTION.md P18)
+				if f.DesktopTemplate && (f.Platform != PlatformWeb || f.WidgetAdded) {
+					d := send(TemplateE2Widget, VariantDesktop)
+					d.Browser = f.Platform == PlatformWeb
+					return d
+				}
 			}
-			return send(TemplateE2Widget, VariantActivated)
+			return skip
 		}
 		return send(TemplateE2Widget, VariantNotActivated)
 	case StepE3:
 		if path == PathA {
-			// E3a day 4: the in-app offer's last day, still free
-			if f.OfferState == OfferStateActive {
-				d := send(TemplateE3LastChance, VariantDefault)
-				d.Opening = OpeningJoined
-				return d
+			// E3a day 4: the in-app offer's last day, still free. Only when the
+			// offer does end within LastChanceWindow: the subject says
+			// "tomorrow". An offer issued after sign-up has days left on day 4,
+			// so E3a waits for its last day (mmm/ONBOARDING-RETENTION.md P7)
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail {
+				if f.OfferEndsSoon {
+					d := send(TemplateE3LastChance, VariantDefault)
+					d.Opening = OpeningJoined
+					return d
+				}
+				if f.LastChanceAt != nil {
+					return Decision{Action: ActionDefer, Template: TemplateE3LastChance, Variant: VariantDefault, Opening: OpeningJoined, NextStep: StepE3, At: *f.LastChanceAt}
+				}
 			}
 			return skip
 		}
@@ -285,8 +443,9 @@ func Decide(step string, f Facts) Decision {
 			// E4a day 6: feedback
 			return feedback()
 		}
-		// E4b day 7: issue the offer by email when none exists yet
-		if f.OfferState == OfferStateNone {
+		// E4b day 7: issue the offer by email when none exists yet, and only
+		// where the offer may be emailed and redeemed
+		if f.OfferState == OfferStateNone && !f.NoOfferEmail {
 			d := send(TemplateE4bOffer, VariantDefault)
 			d.IssueOffer = true
 			return d
@@ -294,8 +453,10 @@ func Decide(step string, f Facts) Decision {
 		return skip
 	case StepE5:
 		if path == PathB {
-			// E5b day 11: the emailed offer's last day, no complaint on E4b
-			if f.OfferState == OfferStateActive && !(f.Complained && f.ComplainedStep == StepE4) {
+			// E5b day 11: the emailed offer's last day, no complaint on E4b. As
+			// E3a (the same "end tomorrow" subject), only when the offer ends
+			// within LastChanceWindow: a late E4b issued it later
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail && f.OfferEndsSoon && !(f.Complained && f.ComplainedStep == StepE4) {
 				d := send(TemplateE3LastChance, VariantDefault)
 				d.Opening = OpeningLastNote
 				return d
@@ -360,6 +521,25 @@ func ParseSendWindow(value string) (SendWindow, error) {
 func (w SendWindow) startMinutes() int { return w.StartHour*60 + w.StartMinute }
 func (w SendWindow) endMinutes() int   { return w.EndHour*60 + w.EndMinute }
 
+// NextOpen is the first moment from `at` on when the window is open in `loc`:
+// `at` itself inside the window (both edges count, as in SendAt's clamp), else
+// the next window start: that day's before the window, the next day's after
+// it.
+func (w SendWindow) NextOpen(at time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	local := at.In(loc)
+	minutes := local.Hour()*60 + local.Minute()
+	if minutes < w.startMinutes() {
+		return time.Date(local.Year(), local.Month(), local.Day(), w.StartHour, w.StartMinute, 0, 0, loc).UTC()
+	}
+	if w.endMinutes() < minutes {
+		return time.Date(local.Year(), local.Month(), local.Day()+1, w.StartHour, w.StartMinute, 0, 0, loc).UTC()
+	}
+	return at.UTC()
+}
+
 // SendAt places a step: the sign-up's local hour and minute, `day` days later,
 // clamped into the window. Local means `loc` (the network's time zone, or UTC
 // when unknown, which is why the clamp exists). Day arithmetic goes through
@@ -370,14 +550,55 @@ func SendAt(createdAt time.Time, day int, loc *time.Location, w SendWindow) time
 		loc = time.UTC
 	}
 	local := createdAt.In(loc)
-	at := time.Date(local.Year(), local.Month(), local.Day()+day, local.Hour(), local.Minute(), 0, 0, loc)
+	return w.clampDay(time.Date(local.Year(), local.Month(), local.Day()+day, local.Hour(), local.Minute(), 0, 0, loc)).UTC()
+}
+
+// clampDay moves a local time into the window on its own day: before the
+// window to its start, after it to its end.
+func (w SendWindow) clampDay(at time.Time) time.Time {
 	minutes := at.Hour()*60 + at.Minute()
 	if minutes < w.startMinutes() {
-		at = time.Date(at.Year(), at.Month(), at.Day(), w.StartHour, w.StartMinute, 0, 0, loc)
-	} else if w.endMinutes() < minutes {
-		at = time.Date(at.Year(), at.Month(), at.Day(), w.EndHour, w.EndMinute, 0, 0, loc)
+		return time.Date(at.Year(), at.Month(), at.Day(), w.StartHour, w.StartMinute, 0, 0, at.Location())
 	}
-	return at.UTC()
+	if w.endMinutes() < minutes {
+		return time.Date(at.Year(), at.Month(), at.Day(), w.EndHour, w.EndMinute, 0, 0, at.Location())
+	}
+	return at
+}
+
+// DueSendAt is where a step that is already due goes (a long retry, a late
+// enable, a late scan): right away while the window is open (a minute on once
+// `now` is past the minute's start), else the next window start. Past the
+// window's end that is the next morning: SendAt's same-day clamp lands in the
+// past there, and sending a minute on would mail at night.
+func DueSendAt(now time.Time, loc *time.Location, w SendWindow) time.Time {
+	at := SendAt(now, 0, loc, w)
+	if at.Before(now) {
+		at = now.Add(time.Minute)
+	}
+	return w.NextOpen(at, loc)
+}
+
+// MinSendGap is the least time between two onboarding emails to one network.
+// The schedule's steps are a day or more apart; a step that runs late (an E3a
+// that waited for the offer's last day, a long retry, a late enable) must not
+// send the next one minutes after it.
+const MinSendGap = 20 * time.Hour
+
+// NextSendAt places the next step: its day on the schedule (SendAt), the next
+// window opening when that has passed (DueSendAt), and, when this step sent
+// an email at sentAt, no sooner than MinSendGap after it.
+func NextSendAt(createdAt time.Time, day int, sentAt *time.Time, now time.Time, loc *time.Location, w SendWindow) time.Time {
+	at := SendAt(createdAt, day, loc, w)
+	if at.Before(now) {
+		at = DueSendAt(now, loc, w)
+	}
+	if sentAt != nil {
+		if earliest := sentAt.Add(MinSendGap); at.Before(earliest) {
+			at = DueSendAt(earliest, loc, w)
+		}
+	}
+	return at
 }
 
 // LoadLocation resolves an IANA zone name, falling back to UTC for "" or an
@@ -396,9 +617,9 @@ func LoadLocation(name string) *time.Location {
 
 // EventForWebhook maps a Brevo transactional webhook event name to the
 // campaign event name (model.EventEmail*), or "" when the event is not one the
-// campaign records. `opened` and `unique_opened` both count as an open (the
-// engaged rule counts opens); `request` is the accepted-for-delivery ack and
-// is not recorded.
+// campaign records. `opened`, `unique_opened` and `proxy_open` each count as
+// an open, which only the reports read (no step decides on opens: engaged);
+// `request` is the accepted-for-delivery ack and is not recorded.
 func EventForWebhook(event string) string {
 	switch strings.ToLower(strings.TrimSpace(event)) {
 	case "delivered":

@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "kind": "competition-worker-transport-passive-packaging-verification/v1",
+  "recorded_at": "2026-11-12T13:26:17Z",
+  "status": "verified_not_installed_or_activated",
+  "worker": {
+    "source_revision": "0aa7513825f7f1cfa1cc62bb88ca1d87244d1c48",
+    "source_parent": "698d94c44a0c148af0dfff119020c76dcd0a7444",
+    "workspace_sha256": "cf60a7c87fced3da461f23853efec081954e879b9ff95f42b995b13770039452",
+    "native_sha256": "009dce62e7ddd90b377252122bb0b262e7e697e0c0488bb829af214a3ac26719",
+    "payload_bytes": 120015512,
+    "toolchain": "go1.27.4",
+    "target": "linux/amd64",
+    "cgo_enabled": false,
+    "experiment": "greenteagc",
+    "trimpath": true,
+    "vcs_modified": false,
+    "original_dependency_manifest_sha256": "f42988756e4b572f8128db09ddd675b90d3227796b08112ef587fdffe0dd2e4e",
+    "independent_qualification": {
+      "selected_top_level_tests": 22,
+      "ordinary_repetitions": 3,
+      "ordinary_passed": 66,
+      "race_repetitions": 3,
+      "race_passed": 66,
+      "failed": 0,
+      "skipped": 0,
+      "historical_blocked_join_negative_controls": 3
+    }
+  },
+  "packaging": {
+    "native_rebuilt": false,
+    "payload_executed": false,
+    "packaging_only_invocation": "cb23cdecb1dc4551a2d8fdb5f056e2a5",
+    "dockerfile_sha256": "2f40451da90768458c6b5c706542b7bfc4f6bd31f4869ced499527b4e7c0d8e8",
+    "recipe_sha256": "6482fdad856135067f975590ab37a642c883170d008bf81884a80c1d9def4fc9",
+    "preserved_v1": {
+      "image_id": "sha256:2e5dc95b631b4760931f0959195b06c5c7007ba75e173f1dc76fccae309a3f62",
+      "archive_sha256": "11ddc99d9c0299e40cf42e53c14dcc5d982df8fac98ecbf945039aad4c0a7fc5",
+      "actual_verifier_exit": 1,
+      "passed": false,
+      "code": "payload_permission",
+      "payload_mode": "0700",
+      "report_sha256": "9ac7f701da144c0bc203b0b4fa14f0631ff186ee5563b8e6a6b197d295956aa6"
+    },
+    "accepted_v2": {
+      "image_id": "sha256:2e6d6c076589a0f3602726cbe4f348ed94dee7e90e5362fac6d1ce45196e5b36",
+      "archive_sha256": "0fc2f870b219f6b54917dd47d37f49efb749c20ff98da152217f76cf26731c4f",
+      "actual_verifier_exit": 0,
+      "passed": true,
+      "code": "verified",
+      "payload_mode": "0555",
+      "configured_user": "65532:65532",
+      "report_sha256": "35f3b9e8689e7aeb56f528e1f92ec006668fdb6526e13185a5f194a89bd8eb37"
+    },
+    "both_payloads_equal_native": true
+  },
+  "verifier": {
+    "source_commit": "6456ec41dcda28be0e3d2d9856902c6b9486e5fe",
+    "versioned_path": "tools/competition-worker-image-archive",
+    "source_manifest_sha256": "4a4e4b78b0ca48a1b16fd11157ce3484b735e1450b85eba3a9a383865cbabd2c",
+    "versioned_blobs_equal_tested_blobs": true,
+    "qa_built_binary_sha256": "d7be4ce17acee9d59b2ef94e05d71e1ec3f592aa7b9f2ee133bc06c63c608cdc",
+    "binary_rebuilt_after_source_versioning": false,
+    "selected_top_level_tests": 8,
+    "ordinary_repetitions": 3,
+    "ordinary_passed": 24,
+    "race_repetitions": 3,
+    "race_passed": 24,
+    "failed": 0,
+    "skipped": 0,
+    "normal_log_sha256": "7a8b79a537b969fb9bf74816117624babf328972c22beb003f2439d03e4d5364",
+    "race_log_sha256": "876def1f99ad123d25ed65295be23ea7e03db82d20f194579166ec28eec9a3ab",
+    "source_before_after_identical": true,
+    "source_check_output_sha256": "0489bc974faadcecdd4007f09e2c032f16e3abb2acb261c9279ecb26b253c4e7",
+    "cleanup_status": 0,
+    "external_services": false
+  },
+  "durable_private_evidence": {
+    "root": "/var/lib/urnetwork/competition-worker-transport-packaging-proof-20261112.DQgMSFQc",
+    "retained_manifest_sha256": "b5d2eb3c5a7288af4e23fb90770edd2cc115289aa4ab75c5ac0f75e0b92affea",
+    "ownership": "root:root",
+    "directory_mode": "0700",
+    "file_mode": "0400"
+  },
+  "scope": {
+    "runtime_override_installed": false,
+    "service_reloaded": false,
+    "service_restarted": false,
+    "new_ddl_required_for_this_698_based_worker_cut": false,
+    "new_api_or_sn_contract_required_for_this_worker_cut": false,
+    "new_config_or_vault_required": false,
+    "native_agent_unchanged": true,
+    "activation_authority": false,
+    "global_idle_not_inferred_from_queue_empty": true,
+    "broader_schema2_recovery_separate_and_unqualified": true,
+    "broader_published_monitor_scope_tests": 260,
+    "latest_main_dependency_context_not_qualified_by_698_component_tests": true
+  }
+}

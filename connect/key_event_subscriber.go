@@ -338,7 +338,9 @@ func (self *keyEventSubscriber) resyncAll() {
 // `event` is the command class name (the message payload).
 func (self *keyEventSubscriber) dispatch(channel string, event string) {
 	if event == "expire" {
-		// a ttl refresh (heartbeat), not a visible change
+		// a ttl refresh (heartbeat), not a visible change. The subscription's
+		// node drains already discard these before its bounded merge
+		// (server.RedisKeyEventSubscriptionSettings.IgnoredKeyspaceEvents).
 		return
 	}
 	if networkId, ok := parseSessionEvent(channel); ok {

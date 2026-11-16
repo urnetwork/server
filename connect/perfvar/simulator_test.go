@@ -629,6 +629,9 @@ func TestSimulatorLossPrecedesDuplicationAndReordering(t *testing.T) {
 }
 
 // Burst loss has a fixed seeded regression vector, including state changes.
+// The vector is the one seed 77 draws on the link's v2 PCG, a burst of three
+// losses among them; it changes whenever the generator or the order of the
+// link's draws does.
 func TestSimulatorBurstLossMatchesExpectedVector(t *testing.T) {
 	profile := simulatorTestLinkProfile()
 	profile.LossModel = lossModelBurst
@@ -639,7 +642,7 @@ func TestSimulatorBurstLossMatchesExpectedVector(t *testing.T) {
 		BadLossProbability:   0.8,
 	}
 	delivered := collectDeliveredSequences(t, profile, 77, 24, 64)
-	expected := []uint64{1, 4, 5, 7, 14, 16, 18, 19, 20, 21, 22, 23, 24}
+	expected := []uint64{1, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24}
 	if !reflect.DeepEqual(delivered, expected) {
 		t.Fatalf("burst vector=%v want=%v", delivered, expected)
 	}

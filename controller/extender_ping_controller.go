@@ -192,7 +192,9 @@ type ExtenderPingReportArgs struct {
 // decode, does not name the caller as its pinger, names an unknown target or
 // the pinger's own, does not verify, is out of the time window, is past the
 // uncosigned cap, or was already stored is counted in `Rejected` and not
-// named: the count is what tells a broken reporter from a quiet one.
+// named: the count is what tells a broken reporter from a quiet one. The
+// operator counts every refused claim by why, a refused report's claims
+// included (urnetwork_extender_ping_report_refused_total).
 type ExtenderPingReportResult struct {
 	Accepted int    `json:"accepted"`
 	Rejected int    `json:"rejected"`
@@ -212,16 +214,18 @@ func ExtenderPingReport(
 	args *ExtenderPingReportArgs,
 	clientSession *session.ClientSession,
 ) (*ExtenderPingReportResult, error) {
-	return extenderPingReport(args, clientSession, server.NowUtc(), DefaultExtenderPingReportSettings())
+	return extenderPingReport(args, clientSession, server.NowUtc(), DefaultExtenderPingReportSettings(), defaultExtenderPingReportMetrics)
 }
 
-// The report as the operator's clock reads `now`, under `settings`; a test
-// moves the clock to post a claim again later.
+// The report as the operator's clock reads `now`, under `settings`, counting
+// what it refuses in `metrics`; a test moves the clock to post a claim again
+// later.
 func extenderPingReport(
 	args *ExtenderPingReportArgs,
 	clientSession *session.ClientSession,
 	now time.Time,
 	settings *ExtenderPingReportSettings,
+	metrics *extenderPingReportMetrics,
 ) (*ExtenderPingReportResult, error) {
 	refuse := func(message string) (*ExtenderPingReportResult, error) {
 		return &ExtenderPingReportResult{
@@ -231,13 +235,15 @@ func extenderPingReport(
 
 	if clientSession.ByJwt == nil || clientSession.ByJwt.ClientId == nil {
 		// the route requires a client jwt; this is the structural guard for a
-		// caller that reaches the controller another way
+		// caller that reaches the controller another way, and the route never
+		// counts it
 		return refuse("a ping report requires a client")
 	}
 	if args == nil || len(args.Pings) == 0 {
 		return &ExtenderPingReportResult{}, nil
 	}
 	if settings.MaxCount < len(args.Pings) {
+		metrics.observe(pingReportRefusalCounts{pingReportRefusalOversized: len(args.Pings)})
 		return refuse(fmt.Sprintf(
 			"a ping report carries at most %d pings",
 			settings.MaxCount,
@@ -253,10 +259,11 @@ func extenderPingReport(
 		settings.RateLimit,
 		settings.RateLimitWindow,
 	); err != nil {
+		metrics.observe(pingReportRefusalCounts{pingReportRefusalRateLimited: len(args.Pings)})
 		return refuse(err.Error())
 	}
 
-	pings, rejected, err := verifyPingReport(args, reporterClientId, now, &storedPingReportKeys{
+	pings, refusals, err := verifyPingReport(args, reporterClientId, now, &storedPingReportKeys{
 		ctx:              clientSession.Ctx,
 		reporterClientId: reporterClientId,
 		keyHexExtenders:  map[string]*model.NetworkExtender{},
@@ -276,10 +283,13 @@ func extenderPingReport(
 	)
 	// what verified but was already stored, or repeated in the report, is a
 	// replay, not a sample
-	rejected += len(pings) - accepted
+	if replays := len(pings) - accepted; 0 < replays {
+		refusals[pingReportRefusalReplay] += replays
+	}
+	metrics.observe(refusals)
 	return &ExtenderPingReportResult{
 		Accepted: accepted,
-		Rejected: rejected,
+		Rejected: refusals.total(),
 	}, nil
 }
 
@@ -337,32 +347,33 @@ func (self *storedPingReportKeys) extenderByKey(publicKey []byte) *model.Network
 
 // Checks every claim of a report under `keys` as the operator's clock reads
 // `now` and `settings` bound it (GEOMAP §2.4), and returns the pings to store
-// and how many claims were rejected. No database is behind it but what `keys` reads, so the endpoint
-// and the verification benchmark (§5.8) run exactly this. A claim that passes
-// the structural checks costs two ed25519 verifications, the pinger's
-// signature and the target's co-signature.
+// and the claims refused, by why. No database is behind it but what `keys`
+// reads, so the endpoint and the verification benchmark (§5.8) run exactly
+// this. A claim that passes the structural checks costs two ed25519
+// verifications, the pinger's signature and the target's co-signature.
 func verifyPingReport(
 	args *ExtenderPingReportArgs,
 	reporterClientId server.Id,
 	now time.Time,
 	keys pingReportKeys,
 	settings *ExtenderPingReportSettings,
-) (pings []*model.NetworkPing, rejected int, err error) {
+) (pings []*model.NetworkPing, refusals pingReportRefusalCounts, err error) {
 	uncosigned := 0
 	pings = []*model.NetworkPing{}
+	refusals = pingReportRefusalCounts{}
 	for _, pingArgs := range args.Pings {
 		if pingArgs == nil {
-			rejected += 1
+			refusals.add(pingReportRefusalMalformed)
 			continue
 		}
 		attestation, err := pingArgs.proto()
 		if err != nil {
-			rejected += 1
+			refusals.add(pingReportRefusalMalformed)
 			continue
 		}
 		outcome, reason, cosignature, ok := pingArgs.verdict()
 		if !ok {
-			rejected += 1
+			refusals.add(pingReportRefusalMalformed)
 			continue
 		}
 		if !pingTimestampInWindow(
@@ -371,17 +382,17 @@ func verifyPingReport(
 			settings.MaxBackwardClockSkew,
 			settings.MaxForwardClockSkew,
 		) {
-			rejected += 1
+			refusals.add(pingReportRefusalTimeWindow)
 			continue
 		}
 		if math.MaxInt32 < attestation.RttMs {
 			// no round trip is this long, and the column is an int
-			rejected += 1
+			refusals.add(pingReportRefusalMalformed)
 			continue
 		}
 		if math.MaxInt16 < pingArgs.HopCount {
 			// no chain is this deep, and the column is a smallint
-			rejected += 1
+			refusals.add(pingReportRefusalMalformed)
 			continue
 		}
 
@@ -394,16 +405,20 @@ func verifyPingReport(
 		switch connect.ExtenderProbeAttestationPingerKind(attestation) {
 		case connect.ExtenderPingerKindProvider:
 			pingerClientId, err := server.IdFromBytes(attestation.ProbeClientId)
-			if err != nil || pingerClientId != reporterClientId {
-				rejected += 1
+			if err != nil {
+				refusals.add(pingReportRefusalMalformed)
+				continue
+			}
+			if pingerClientId != reporterClientId {
+				refusals.add(pingReportRefusalPingerNotReporter)
 				continue
 			}
 			publicKey, err := keys.providerKey()
 			if err != nil {
-				return nil, 0, err
+				return nil, nil, err
 			}
 			if publicKey == nil {
-				rejected += 1
+				refusals.add(pingReportRefusalPingerUnknown)
 				continue
 			}
 			pingerKind = model.NetworkPingPingerKindProvider
@@ -411,39 +426,43 @@ func verifyPingReport(
 			pingerPublicKey = publicKey
 		case connect.ExtenderPingerKindExtender:
 			pingerExtender = keys.extenderByKey(attestation.PingerExtenderPublicKey)
-			if pingerExtender == nil || pingerExtender.ClientId != reporterClientId {
+			if pingerExtender == nil {
+				refusals.add(pingReportRefusalPingerUnknown)
+				continue
+			}
+			if pingerExtender.ClientId != reporterClientId {
 				// an extender reports only its own pings
-				rejected += 1
+				refusals.add(pingReportRefusalPingerNotReporter)
 				continue
 			}
 			pingerKind = model.NetworkPingPingerKindExtender
 			pingerId = pingerExtender.ExtenderId
 			pingerPublicKey = ed25519.PublicKey(pingerExtender.PublicKey)
 		default:
-			rejected += 1
+			refusals.add(pingReportRefusalMalformed)
 			continue
 		}
 
 		target := keys.extenderByKey(attestation.ExtenderPublicKey)
 		if target == nil {
-			rejected += 1
+			refusals.add(pingReportRefusalTargetUnknown)
 			continue
 		}
 		if pingerExtender != nil && target.ExtenderId == pingerExtender.ExtenderId {
 			// an extender measuring itself says nothing
-			rejected += 1
+			refusals.add(pingReportRefusalTargetOwn)
 			continue
 		}
 		if target.ClientId == reporterClientId {
 			// nor does a client measuring an extender it activated itself:
 			// for a provider that is its own extender, and for an extender a
 			// sibling identity of the same client
-			rejected += 1
+			refusals.add(pingReportRefusalTargetOwn)
 			continue
 		}
 
 		if !connect.VerifyExtenderProbeAttestation(pingerPublicKey, attestation) {
-			rejected += 1
+			refusals.add(pingReportRefusalBadSignature)
 			continue
 		}
 
@@ -467,14 +486,14 @@ func verifyPingReport(
 		)
 		if ping.Cosign != model.NetworkPingCosignCosigned {
 			if settings.MaxUncosignedPerPost <= uncosigned {
-				rejected += 1
+				refusals.add(pingReportRefusalUncosignedCap)
 				continue
 			}
 			uncosigned += 1
 		}
 		pings = append(pings, ping)
 	}
-	return pings, rejected, nil
+	return pings, refusals, nil
 }
 
 // The pinger's account of the verdict, decoded: the outcome it recorded, the

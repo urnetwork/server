@@ -29,6 +29,8 @@ package main
 //             verify one frozen source epoch against the measured repositories
 //   source-record
 //             verify and print one epoch from the remote competition branches
+//   source-index
+//             preview exact public source and authenticated intake/grading purpose
 //   staging-source-check
 //             verify immutable staging branches alias frozen baseline source
 //   epoch-review
@@ -64,19 +66,20 @@ func simulationUsage() string {
 
 Usage:
   sim-latency init [--out=<path>] [--count=<n>] [--clients=<n>] [--rate=<m>] [--seed=<s>] [--quality-window=<n>]
-  sim-latency run --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>] [--g2-volume-policy=<policy>]
+  sim-latency run --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>] [--g2-volume-policy=<policy>] [--work-coverage-policy=<kind>]
   sim-latency fleet --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>] [--no-impair] [--evaluation-id=<id>] [--accounting-command-fd=<n>] [--accounting-response-fd=<n>]
   sim-latency analyze --run=<path> [--window=<w>] [--out=<path>] [--json]
   sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --runs=<paths> [--alpha=<a>] [--out=<path>]
   sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
   sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
-  sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--g2-volume-policy=<policy>] [--out=<path>]
+  sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--g2-volume-policy=<policy>] [--work-coverage-policy=<kind>] [--providers=<path>] [--out=<path>]
   sim-latency score-progress --run=<paths> --baseline=<path>
-  sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
-  sim-latency score-policy [--g2-volume-policy=<policy>]
+  sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--providers=<path>] [--out=<path>]
+  sim-latency score-policy [--g2-volume-policy=<policy>] [--work-coverage-policy=<kind>]
   sim-latency calibrate --calibration-inputs=<path> --calibration-inputs-sha256=<digest> --calibration-lock=<path> --calibration-cpuset=<cpus> [--calibration-protocol=<name> --calibration-approval=<path> --calibration-approval-sha256=<digest> --calibration-original-plan=<path> --calibration-original-plan-sha256=<digest>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency source-record --epoch=<n> [--staging] [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency source-index --activation-generation=<n> [--json]
   sim-latency staging-source-check --epoch=0 [--source-config=<path>] [--repos-root=<dir>]
   sim-latency epoch-review --epoch=<n> next [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> export-winner --job-id=<id> [--out-dir=<dir>]
@@ -91,12 +94,14 @@ Usage:
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency review-broker --model-key-file=<path>
   sim-latency review-broker --review-provider-settings=<path> --review-provider-settings-sha256=<sha256> --review-state-directory=<path>
+  sim-latency review-multipass-broker --review-provider-settings=<path> --review-provider-settings-sha256=<sha256> --review-state-directory=<path>
   sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest>
   sim-latency source-qualify-build --qualification-settings=<path> --qualification-settings-sha256=<digest>
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--preflight-timeout=<d>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
   sim-latency credentials rotate-token --vault=<path> --delivery=<path> --role=<role> --name=<name> [--environment=<env> --competition-id=<id> --season-id=<id>]
+  sim-latency credentials issue-patch-retry --registration=<path> --token-file=<path> --name=<name> --environment=<env> --competition-id=<id> --season-id=<id> --round-id=<id> --job-id=<id> --expires-at=<time>
   sim-latency credentials rotate-seed --vault=<path> --confirm-no-unrevealed-rounds
   sim-latency credentials revoke --vault=<path> --name=<name>
   sim-latency reset
@@ -154,6 +159,7 @@ Options:
   --build-command=<path> Pinned isolated source build/test broker; never a candidate host command.
   --build-sha256=<digest> SHA-256 of the qualified isolated build/test broker.
   --manifest-commit=<sha> Exact already-published, prospectively approved baseline config commit.
+  --activation-generation=<n> Exact persisted source activation to preview; never a moving branch head.
   --evaluator-image=<digest>  Immutable sha256 evaluator image identity.
   --operator-token-file=<path>  Private file containing the competition operator bearer token.
   --grafana-url=<url>     Main Grafana origin used by launch preflight.
@@ -175,6 +181,9 @@ Options:
   --environment=<env>    Exact v2 credential environment scope.
   --competition-id=<id>  Exact v2 credential competition scope.
   --season-id=<id>       Exact v2 credential season scope.
+  --registration=<path> New root-owned local patch-retry registration; never the API vault.
+  --token-file=<path>   New root-owned raw patch-retry bearer file.
+  --expires-at=<time>   Exact patch-retry credential expiry in RFC3339 format.
   --confirm-no-unrevealed-rounds  Confirm seed rotation cannot invalidate an unrevealed round.
   --out=<path>           Output path for the selected file-producing command.
   --count=<n>            Number of providers [default: 100000].
@@ -223,6 +232,7 @@ Options:
   --round-id=<id>        Competition round id bound into a score baseline manifest.
   --takeover-margin=<m>  Frozen fractional improvement required for takeover.
   --g2-volume-policy=<policy>  Frozen G2 policy; omission retains historical 95–105%, minimum-work/1 retains only inclusive 95% floors.
+  --work-coverage-policy=<kind>  Explicit prospective seeded-crawl-coverage/v1; omission preserves historical workload and six gates.
   --stderr=<paths>       Comma-separated candidate stderr artifacts (score).
   --accounting=<paths>   Comma-separated immutable accounting snapshots (score).
   --samples=<paths>      Comma-separated FindProviders2 corpora (score).
@@ -248,15 +258,17 @@ func main() {
 	switch {
 	case optBool(opts, "score-policy"):
 		policy := model.CompetitionG2VolumePolicy(optString(opts, "--g2-volume-policy", ""))
-		version, err := model.CompetitionScorerVersionForG2Policy(policy)
+		coverage := coveragePolicyOption(opts)
+		version, err := model.CompetitionScorerVersionForWorkCoverage(policy, coverage)
 		if err != nil {
 			fatalf("score policy: %s", err)
 		}
 		printJson(struct {
-			ScoreSchema    int                             `json:"score_schema"`
-			ScorerVersion  string                          `json:"scorer_version"`
-			G2VolumePolicy model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
-		}{ScoreSchema: apexScoreSchema, ScorerVersion: version, G2VolumePolicy: policy})
+			ScoreSchema        int                                  `json:"score_schema"`
+			ScorerVersion      string                               `json:"scorer_version"`
+			G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+			WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+		}{ScoreSchema: apexScoreSchema, ScorerVersion: version, G2VolumePolicy: policy, WorkCoveragePolicy: coverage})
 	case optBool(opts, "init"):
 		runInit(opts)
 	case optBool(opts, "run"):
@@ -288,6 +300,9 @@ func main() {
 		runSourceCheck(opts)
 	case optBool(opts, "source-record"):
 		runSourceRecord(opts)
+	case optBool(opts, "source-index"):
+		requireMainEnvironment("source-index")
+		runSourceIndex(opts)
 	case optBool(opts, "staging-source-check"):
 		runStagingSourceCheck(opts)
 	case optBool(opts, "epoch-review"):
@@ -313,6 +328,8 @@ func main() {
 		runSourceReviewPacket(opts)
 	case optBool(opts, "review-broker"):
 		runWinnerReviewBroker(opts)
+	case optBool(opts, "review-multipass-broker"):
+		runWinnerMultipassBroker(opts)
 	case optBool(opts, "source-build-broker"):
 		runSourceBuildBroker(opts)
 	case optBool(opts, "source-qualify-build"):
@@ -395,6 +412,7 @@ func runRun(opts docopt.Opts) {
 
 	options := &RunOptions{
 		G2VolumePolicy:      model.CompetitionG2VolumePolicy(optString(opts, "--g2-volume-policy", "")),
+		WorkCoveragePolicy:  coveragePolicyOption(opts),
 		Epoch:               epochNumber,
 		SourceConfig:        sourceConfig,
 		RepositoriesRoot:    repositoriesRoot,
@@ -521,7 +539,7 @@ func validateEnvironment(command string, env string) error {
 				env,
 			)
 		}
-	case "epoch-review", "staging-review", "promote", "launch-preflight", "credentials", "supervise", "stage-reviewed-source", "bootstrap-source", "source-review-packet":
+	case "epoch-review", "staging-review", "promote", "launch-preflight", "credentials", "supervise", "stage-reviewed-source", "bootstrap-source", "source-review-packet", "source-index":
 		if env != "main" {
 			return fmt.Errorf(
 				"sim-latency %s is main-only: refusing WARP_ENV=%q",

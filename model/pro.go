@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,13 +39,12 @@ type proPriceTierYaml struct {
 }
 
 type proTierYaml struct {
-	ConcurrentClients            int                `yaml:"concurrent_clients"`
-	Data                         string             `yaml:"data"`
-	DataPeriod                   string             `yaml:"data_period"`
-	MaxContractTransferByteCount string             `yaml:"max_contract_transfer_byte_count"`
-	PriceUsd                     proPriceYaml       `yaml:"price_usd"`
-	PriceTiers                   []proPriceTierYaml `yaml:"price_tiers"`
-	Features                     proFeaturesYaml    `yaml:"features"`
+	ConcurrentClients int                `yaml:"concurrent_clients"`
+	Data              string             `yaml:"data"`
+	DataPeriod        string             `yaml:"data_period"`
+	PriceUsd          proPriceYaml       `yaml:"price_usd"`
+	PriceTiers        []proPriceTierYaml `yaml:"price_tiers"`
+	Features          proFeaturesYaml    `yaml:"features"`
 }
 
 type proReferralYaml struct {
@@ -59,8 +59,12 @@ type proSeekerYaml struct {
 }
 
 type proDataCodeSkuYaml struct {
+	Sku      string  `yaml:"sku"`
 	Data     string  `yaml:"data"`
 	PriceUsd float64 `yaml:"price_usd"`
+	// nil when the key is absent (a pro.yml written before rails); an empty
+	// list sells the sku nowhere
+	Rails []string `yaml:"rails"`
 }
 
 type proDataCodeYaml struct {
@@ -84,11 +88,6 @@ type ProTier struct {
 	ConcurrentClients int
 	Data              ByteCount
 	DataPeriod        time.Duration
-	// The largest contract granted against a payer's balance on this tier. An
-	// abandoned contract keeps its escrow reserved until it is force-closed, so
-	// a smaller cap bounds how much of a balance such contracts can hold. Zero
-	// (unset) is no cap; read it through MaxContractTransferByteCount.
-	MaxContractTransferByteCount ByteCount
 	// The subscription price in USD. The server quotes from this so a client can never
 	// name its own price.
 	PriceMonthlyUsd float64
@@ -99,9 +98,126 @@ type ProTier struct {
 	WireguardProxy  bool
 }
 
+// ProDataCodeSku is one data pack (pro.yml data_code.skus).
 type ProDataCodeSku struct {
+	// Sku is the item id every purchase path and client names the pack by
+	// ("data_1tib"). It always starts with DataCodeSkuPrefix.
+	Sku      string
 	Data     ByteCount
 	PriceUsd float64
+	// Rails are the purchase paths that sell the pack (DataRail*). Every
+	// other path refuses it.
+	Rails []string
+}
+
+// SoldOn reports whether the rail sells the pack.
+func (self *ProDataCodeSku) SoldOn(rail string) bool {
+	return self != nil && slices.Contains(self.Rails, rail)
+}
+
+// The purchase paths ("rails") a data pack is sold on: pro.yml
+// data_code.skus[].rails. Every path that sells data packs asks the pack's
+// rails before it quotes, so a pack is sold only where pro.yml says, never
+// because a path happens not to check. The App Store and Google Play sell UR
+// Pro only, never a data pack, so they are not a rail.
+const (
+	// Stripe card checkout: POST /stripe/create-checkout-session (signed in)
+	// and POST /pay/data/checkout
+	DataRailCard = "card"
+	// the crypto invoice rail, every coin (POST /pay/crypto/*, POST
+	// /pay/data/crypto-intent), and USDC by Solana Pay (POST
+	// /pay/data/solana-intent)
+	DataRailCrypto = "crypto"
+	// GET /x402/skus and POST /x402/purchase
+	DataRailX402 = "x402"
+	// Pay with Gamma: its terms, its intents and the automatic top-up item
+	DataRailGamma = "gamma"
+)
+
+// DataRails are every rail, in the order a refusal names them.
+var DataRails = []string{DataRailCard, DataRailCrypto, DataRailX402, DataRailGamma}
+
+// DataCodeSkuPrefix starts every data pack's item id. A plan's id ("monthly",
+// "yearly", "yearly_onboarding") never does, so a path that credits what was
+// sold tells a pack from a plan by its id alone, even once pro.yml drops the
+// pack: an unknown pack is refused, never credited as a plan.
+const DataCodeSkuPrefix = "data_"
+
+// legacyDataCodeSkuIds name the packs of a pro.yml written before skus had
+// ids and rails, by their amount: the item ids every purchase path knew them
+// by. They were sold on every rail (legacyDataCodeRails). So a server that
+// reads such a pro.yml, during a deploy that brings the server before the
+// config, sells exactly what it sold before.
+var legacyDataCodeSkuIds = map[ByteCount]string{
+	1 * Tib:  "data_1tib",
+	10 * Tib: "data_10tib",
+}
+
+var legacyDataCodeRails = []string{DataRailCard, DataRailCrypto, DataRailX402, DataRailGamma}
+
+// normalizeDataCodeSku applies the pack rules to one sku as pro.yml (or a
+// test) wrote it. ok = false leaves it out: it is sold nowhere.
+//
+//   - With a sku id: the id must start with DataCodeSkuPrefix (panics
+//     otherwise), and the pack is sold on exactly the rails it lists. A rail
+//     this server does not know is dropped, loudly: a newer pro.yml may name a
+//     rail an older server cannot sell on. No rails: sold nowhere.
+//   - Without a sku id (a pro.yml from before ids and rails): a 1 TiB or 10 TiB
+//     pack is data_1tib or data_10tib on every rail, as it was. Any other amount
+//     has no id, and is sold nowhere. A pack that lists rails must name its id
+//     (panics otherwise).
+func normalizeDataCodeSku(sku ProDataCodeSku) (ProDataCodeSku, bool) {
+	sku.Sku = strings.TrimSpace(sku.Sku)
+	if sku.Sku == "" {
+		if sku.Rails != nil {
+			panic(fmt.Errorf("pro.yml: a data_code sku of %s lists rails but has no sku id", ByteCountHumanReadable(sku.Data)))
+		}
+		skuId, ok := legacyDataCodeSkuIds[sku.Data]
+		if !ok {
+			glog.Errorf("[pro]pro.yml data_code sku of %s has no sku id; it is not sold\n", ByteCountHumanReadable(sku.Data))
+			return sku, false
+		}
+		sku.Sku = skuId
+		sku.Rails = slices.Clone(legacyDataCodeRails)
+		return sku, true
+	}
+	if !strings.HasPrefix(sku.Sku, DataCodeSkuPrefix) || len(sku.Sku) == len(DataCodeSkuPrefix) {
+		panic(fmt.Errorf("pro.yml: data_code sku id %q must start with %q", sku.Sku, DataCodeSkuPrefix))
+	}
+	rails := []string{}
+	for _, rail := range sku.Rails {
+		rail = strings.TrimSpace(rail)
+		switch {
+		case !slices.Contains(DataRails, rail):
+			glog.Errorf("[pro]pro.yml data_code sku %s names the unknown rail %q; it is not sold there\n", sku.Sku, rail)
+		case !slices.Contains(rails, rail):
+			rails = append(rails, rail)
+		}
+	}
+	if len(rails) == 0 {
+		glog.Errorf("[pro]pro.yml data_code sku %s names no rail it is sold on; it is not sold\n", sku.Sku)
+	}
+	sku.Rails = rails
+	return sku, true
+}
+
+// normalizeDataCodeSkus applies normalizeDataCodeSku to every sku, in order.
+// Two skus with one id panic: a price and an amount must never be ambiguous.
+func normalizeDataCodeSkus(skus []ProDataCodeSku) []ProDataCodeSku {
+	normalized := make([]ProDataCodeSku, 0, len(skus))
+	seen := map[string]bool{}
+	for _, sku := range skus {
+		sku, ok := normalizeDataCodeSku(sku)
+		if !ok {
+			continue
+		}
+		if seen[sku.Sku] {
+			panic(fmt.Errorf("pro.yml: duplicate data_code sku %q", sku.Sku))
+		}
+		seen[sku.Sku] = true
+		normalized = append(normalized, sku)
+	}
+	return normalized
 }
 
 // ProPriceTier is one regional price tier of the Pro subscription (pro.yml
@@ -158,8 +274,6 @@ func (t *ProPriceTier) hasCountry(countryCode string) bool {
 //	no data amounts      -> the grants NO-OP (they never write a zero-byte balance)
 //	no referral cap      -> referrals UNCAPPED (never capped at zero, which would
 //	                        make `count >= cap` true for everyone and block them all)
-//	no contract cap      -> contracts uncapped (a zero cap is never applied, since a
-//	                        contract granted zero bytes carries nothing)
 //	no price / duration  -> purchases REFUSED, loudly, rather than sold for nothing
 //
 // The checks key off the VALUE, never off a "was it loaded" flag. A flag has to be
@@ -197,7 +311,10 @@ type ProConfig struct {
 	seekerDataMultiplier float64
 
 	DataCodeDuration time.Duration
-	DataCodeSkus     []ProDataCodeSku
+	// DataCodeSkus are the data packs in pro.yml order, each with its id and
+	// rails (normalizeDataCodeSku). Read them through DataCodeSku and
+	// DataCodeSkusOn.
+	DataCodeSkus []ProDataCodeSku
 }
 
 func mustParseByteCount(s string) ByteCount {
@@ -228,16 +345,15 @@ func mustParseDuration(s string) time.Duration {
 
 func parseProTier(y proTierYaml) ProTier {
 	return ProTier{
-		ConcurrentClients:            y.ConcurrentClients,
-		Data:                         mustParseByteCount(y.Data),
-		DataPeriod:                   mustParseDuration(y.DataPeriod),
-		MaxContractTransferByteCount: parseByteCountOrZero(y.MaxContractTransferByteCount),
-		PriceMonthlyUsd:              y.PriceUsd.Monthly,
-		PriceYearlyUsd:               y.PriceUsd.Yearly,
-		HttpProxy:                    y.Features.HttpProxy,
-		HttpsProxy:                   y.Features.HttpsProxy,
-		SocksProxy:                   y.Features.SocksProxy,
-		WireguardProxy:               y.Features.WireguardProxy,
+		ConcurrentClients: y.ConcurrentClients,
+		Data:              mustParseByteCount(y.Data),
+		DataPeriod:        mustParseDuration(y.DataPeriod),
+		PriceMonthlyUsd:   y.PriceUsd.Monthly,
+		PriceYearlyUsd:    y.PriceUsd.Yearly,
+		HttpProxy:         y.Features.HttpProxy,
+		HttpsProxy:        y.Features.HttpsProxy,
+		SocksProxy:        y.Features.SocksProxy,
+		WireguardProxy:    y.Features.WireguardProxy,
 	}
 }
 
@@ -325,8 +441,9 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 
 	skus := make([]ProDataCodeSku, 0, len(y.DataCode.Skus))
 	for _, s := range y.DataCode.Skus {
-		skus = append(skus, ProDataCodeSku{Data: mustParseByteCount(s.Data), PriceUsd: s.PriceUsd})
+		skus = append(skus, ProDataCodeSku{Sku: s.Sku, Data: mustParseByteCount(s.Data), PriceUsd: s.PriceUsd, Rails: s.Rails})
 	}
+	skus = normalizeDataCodeSkus(skus)
 
 	return &ProConfig{
 		EnforceConcurrentClients: y.EnforceConcurrentClients,
@@ -362,6 +479,17 @@ func Testing_SetEnforceConcurrentClients(enforce bool) func() {
 	return func() { c.EnforceConcurrentClients = prev }
 }
 
+// Testing_SetEnforceFeatures overrides the feature enforcement flag
+// (enforce_features) on the process's parsed config, returning a function that
+// restores the previous value. Same caveats as
+// Testing_SetEnforceConcurrentClients.
+func Testing_SetEnforceFeatures(enforce bool) func() {
+	c := Pro()
+	prev := c.EnforceFeatures
+	c.EnforceFeatures = enforce
+	return func() { c.EnforceFeatures = prev }
+}
+
 // Testing_SetProviderIntentShadowSampling makes every shadow slot decision
 // sampled (true) or none (false), returning a function that restores the
 // random sampler. Same caveats as Testing_SetEnforceConcurrentClients.
@@ -388,26 +516,12 @@ func Testing_SetConcurrentClientsLimit(free int, pro int) func() {
 	}
 }
 
-// Overrides the per-tier contract size caps on the process's parsed config,
-// returning a restore function. Same caveats as
-// Testing_SetEnforceConcurrentClients (mutates the shared config; defer the
-// return). For tests exercising the contract cap, which no pro.yml sets yet.
-func Testing_SetMaxContractTransferByteCount(free ByteCount, pro ByteCount) func() {
-	c := Pro()
-	prevFree := c.Free.MaxContractTransferByteCount
-	prevPro := c.Pro.MaxContractTransferByteCount
-	c.Free.MaxContractTransferByteCount = free
-	c.Pro.MaxContractTransferByteCount = pro
-	return func() {
-		c.Free.MaxContractTransferByteCount = prevFree
-		c.Pro.MaxContractTransferByteCount = prevPro
-	}
-}
-
 // Overrides the Pro month's price and data and the data code skus on the
 // process's parsed config, returning a restore function. Same caveats as
 // Testing_SetEnforceConcurrentClients (mutates the shared config; defer the
 // return). For tests that buy a sku whatever the environment's pro.yml prices.
+// The skus follow pro.yml's rules (normalizeDataCodeSku): one with no id and
+// no rails is the 1 TiB or 10 TiB pack of a pro.yml from before rails.
 func Testing_SetSkuPrices(proMonthlyUsd float64, proData ByteCount, dataCodeSkus []ProDataCodeSku) func() {
 	c := Pro()
 	prevMonthlyUsd := c.Pro.PriceMonthlyUsd
@@ -415,12 +529,51 @@ func Testing_SetSkuPrices(proMonthlyUsd float64, proData ByteCount, dataCodeSkus
 	prevSkus := c.DataCodeSkus
 	c.Pro.PriceMonthlyUsd = proMonthlyUsd
 	c.Pro.Data = proData
-	c.DataCodeSkus = dataCodeSkus
+	c.DataCodeSkus = normalizeDataCodeSkus(dataCodeSkus)
 	return func() {
 		c.Pro.PriceMonthlyUsd = prevMonthlyUsd
 		c.Pro.Data = prevData
 		c.DataCodeSkus = prevSkus
 	}
+}
+
+// Testing_SetDataCodeSkus replaces only the data code skus, as pro.yml would
+// list them, returning a restore function. Same caveats as
+// Testing_SetSkuPrices.
+func Testing_SetDataCodeSkus(dataCodeSkus ...ProDataCodeSku) func() {
+	c := Pro()
+	prevSkus := c.DataCodeSkus
+	c.DataCodeSkus = normalizeDataCodeSkus(dataCodeSkus)
+	return func() {
+		c.DataCodeSkus = prevSkus
+	}
+}
+
+// Testing_SetProPriceTiers replaces the price tiers (the first is the default
+// tier and sets pro.price_usd, as pro.yml requires) on the process's parsed
+// config, returning a restore function. Same caveats as
+// Testing_SetEnforceConcurrentClients. For tests that price a purchase by
+// country, whatever the environment's pro.yml says.
+func Testing_SetProPriceTiers(tiers ...proPriceTierYaml) func() {
+	c := Pro()
+	prevTiers := c.priceTiers
+	prevMonthlyUsd := c.Pro.PriceMonthlyUsd
+	prevYearlyUsd := c.Pro.PriceYearlyUsd
+	c.priceTiers = parseProPriceTiers(tiers)
+	if 0 < len(c.priceTiers) {
+		c.Pro.PriceMonthlyUsd = c.priceTiers[0].MonthlyUsd
+		c.Pro.PriceYearlyUsd = c.priceTiers[0].YearlyUsd
+	}
+	return func() {
+		c.priceTiers = prevTiers
+		c.Pro.PriceMonthlyUsd = prevMonthlyUsd
+		c.Pro.PriceYearlyUsd = prevYearlyUsd
+	}
+}
+
+// Testing_ProPriceTier is one tier for Testing_SetProPriceTiers.
+func Testing_ProPriceTier(name string, monthlyUsd float64, yearlyUsd float64, countries ...string) proPriceTierYaml {
+	return proPriceTierYaml{Name: name, MonthlyUsd: monthlyUsd, YearlyUsd: yearlyUsd, Countries: countries}
 }
 
 // Tier returns the free or pro tier limits/features.
@@ -456,15 +609,6 @@ func (c *ProConfig) ConcurrentClientsExceeded(pro bool, connectedCount int) bool
 	return max <= connectedCount
 }
 
-// The largest contract granted against the balance of a payer on the tier
-// (pro.yml <tier>.max_contract_transfer_byte_count). Zero means no cap, and so
-// does an unset or negative value: a cap of zero would grant contracts that
-// carry nothing. The cap ships off, because smaller contracts mean more
-// contract creations and closes; setting it is an ops step.
-func (self *ProConfig) MaxContractTransferByteCount(pro bool) ByteCount {
-	return max(0, self.Tier(pro).MaxContractTransferByteCount)
-}
-
 // DataAmount / DataPeriod are the recurring data grant for the tier.
 func (c *ProConfig) DataAmount(pro bool) ByteCount {
 	return c.Tier(pro).Data
@@ -482,6 +626,30 @@ func (c *ProConfig) PriceMonthlyUsd() float64 {
 
 func (c *ProConfig) PriceYearlyUsd() float64 {
 	return c.Pro.PriceYearlyUsd
+}
+
+// DataCodeSku is the data pack with the item id, whatever rails sell it, or
+// nil. A path that quotes a pack asks DataCodeSkusOn or SoldOn; a path that
+// credits a pack it already sold looks it up here.
+func (c *ProConfig) DataCodeSku(skuId string) *ProDataCodeSku {
+	for i := range c.DataCodeSkus {
+		if c.DataCodeSkus[i].Sku == skuId {
+			return &c.DataCodeSkus[i]
+		}
+	}
+	return nil
+}
+
+// DataCodeSkusOn are the data packs the rail sells, in pro.yml order. Each
+// still needs a usable price to be quoted.
+func (c *ProConfig) DataCodeSkusOn(rail string) []*ProDataCodeSku {
+	skus := []*ProDataCodeSku{}
+	for i := range c.DataCodeSkus {
+		if c.DataCodeSkus[i].SoldOn(rail) {
+			skus = append(skus, &c.DataCodeSkus[i])
+		}
+	}
+	return skus
 }
 
 // PriceTiers returns the regional Pro price tiers in pro.yml order; the first is
@@ -623,6 +791,14 @@ func (c *ProConfig) FeatureEnabled(pro bool, feature string) bool {
 	default:
 		return false
 	}
+}
+
+// ProOnlyFeature reports whether a feature is in the Pro plan and not in the
+// free plan: what an upgrade adds, and what enforcement takes from a network
+// without Pro. False for every feature when pro.yml is absent, since then no
+// plan lists any.
+func (c *ProConfig) ProOnlyFeature(feature string) bool {
+	return c.FeatureEnabled(true, feature) && !c.FeatureEnabled(false, feature)
 }
 
 // FeatureAllowed reports whether a tier may actually USE a proxy feature right

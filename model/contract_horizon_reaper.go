@@ -11,41 +11,50 @@
 //     open: the usage guard makes a set outcome and close time immutable;
 //   - every escrow of it is settled;
 //   - every sweep of it is discharged: paid by a payment that completed more
-//     than CompletedContractExpiration ago and whose retention stamping is
-//     done, or unpaid on a contract minted after the earning cutoff, whose
-//     provider earns through the subnet pool from the archived usage. A sweep
-//     with no payment on an older contract, or one whose payment is canceled,
-//     pending or held (server.ContractPaymentRetentionHoldSql), is a legacy
-//     obligation the payout planner can still select, or the evidence a
-//     recovery reads, and keeps its contract. So does a sweep staged in a
-//     payment plan whose assignment is pending, and one whose payment
-//     completed under attribution review: completePaymentInTx queues no
-//     retention stamping for it, so the payment completion path keeps its
-//     contracts until the straggler horizon, and so does this reaper;
+//     than CompletedContractExpiration ago; of a payment that is otherwise
+//     settled (server.AccountPaymentRetentionSettledSql), closed by the USDC
+//     close-out or safely canceled; or unpaid. USDC payouts ended (owner
+//     decisions 2026-11-12 and 2026-11-13), so an unpaid legacy sweep and a
+//     safely canceled payment are forfeited (owner decision 2026-11-13), and a
+//     provider earns from post-cutoff traffic through the subnet pool, from
+//     the archived usage. A sweep whose payment holds retention
+//     (server.ContractPaymentRetentionHoldSql), pending or canceled with an
+//     external attempt the close-out never closed, or whose payment row is
+//     missing, keeps its contract. So does a sweep whose payment completed
+//     under attribution review, the evidence of that review;
 //   - no unpaid sweep of it is traffic of an operator block whose points can
 //     still be awarded (OperatorBlockPointsPendingWindows). An award reads a
 //     block's unpaid sweeps by sweep time, the settlement, which can come long
 //     after the contract closed: a dispute resolved late, say.
 //
 // The sweep rule is stricter than the partition drop's, which keeps only
-// contracts held by a pending payment. It means the reaper never deletes a
-// sweep the planner can select, so it never races a plan; contracts kept by it
-// age out through the payment completion path or the straggler horizon. The
-// block points rule keeps a contract only until its block is awarded or its
-// reliability passes retention for every award that can still be running, at
-// most ClientReliabilityRetention and OperatorBlockPointsMaxTime and an hour
-// after the block opened.
+// contracts held by a payment (server.ContractPaymentRetentionHoldSql).
+// Contracts kept by it age out through the straggler horizon, unless their
+// payment holds them. The block points rule keeps a contract only until its
+// block is awarded or its reliability passes retention for every award that
+// can still be running, at most ClientReliabilityRetention and
+// OperatorBlockPointsMaxTime and an hour after the block opened.
 //
 // Each contract goes in one transaction with its close reports, closes,
 // escrows, sweeps and extender parties. The usage archive trigger copies a
 // credit-bearing contract's proof into st_provider_usage_archive in the same
 // statement, so the subnet usage readers see it either live or archived, never
-// both and never neither. Close evidence keeps its own 91-day retention
-// (server.RemoveExpiredCloseEvidence), which takes evidence whose contract is
-// gone, so below 91 days a deleted contract's evidence outlives it until then.
+// both and never neither. Close evidence is not deleted here: while the mode
+// is on, its own retention (server.RemoveExpiredCloseEvidence) follows this
+// horizon, down to its guard's 35 days, and takes the evidence of a resolved
+// or deleted contract once it is as old, whether or not these keep rules keep
+// the contract, at the pace of its own brake.
 //
 // A pass walks transfer_contract's primary key from a cursor toward the
-// horizon. Each batch takes the next ids from an index-only range of that key,
+// horizon, and reads a contract only once its mint time is CloseSettleTime
+// past the horizon. The cursor moves past every contract a batch reads, kept
+// or deleted, so a contract read too early is lost to the pass: until
+// 2026-11-15 a pass read up to the horizon itself, and once it caught up it
+// read only contracts minted minutes before the horizon, which close after
+// it, kept every one as recent_close and moved past it to the next rescan. A
+// contract that lives no longer than the settle time has closed before the
+// horizon when the pass reaches it. Each batch takes the next ids from an
+// index-only range of that key,
 // then reads and deletes the rows of those ids in every table with bitmap
 // scans: each dependent table's key leads with the contract id, and each heap
 // page is read once, in block order, with prefetch, rather than one random
@@ -54,16 +63,18 @@
 // contracts-per-second rate. The contract rows are locked before their
 // dependents are deleted (closes and close reports are written only under
 // that lock), with SKIP LOCKED, so the reaper never queues behind a writer.
-// The sweeps are then locked, and the payment and plan checks read after both
-// locks, so no payout writer can move a sweep between the check and the
-// delete.
+// The sweeps are then locked, and the payment checks read after both locks,
+// so no writer can change a sweep between the check and the delete.
 //
 // The run returns its cursor for the next run, and a failed batch hands the
 // last committed position to the retry, so a stopped or failed run resumes at
 // its last committed batch. A batch is idempotent: rereading a reaped range
 // finds nothing to delete. A pass that reaches the horizon starts over from
 // the oldest contract once it is RescanInterval old, to pick up contracts that
-// were protected when it passed them.
+// were protected when it passed them, and a pass that began before reads
+// stopped short of the horizon starts over at once
+// (contractHorizonSettledPassTime). The cursor also counts the contracts its
+// pass kept, by reason: what waits for the next pass.
 //
 // The runtime control, the Redis hash `{contract_horizon}control`, turns the
 // reaper on, off or to a dry run, slows it and shortens its horizon, without a
@@ -77,6 +88,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -131,14 +143,17 @@ func (self ContractHorizonMode) String() string {
 
 // The shortest horizon the reaper applies, whatever its settings or control
 // say (owner, 2026-11-01: 35 days). It is the reaper's: server.ContractRetention,
-// which the partition drop, close evidence retention and the sn-reconcile
-// floor share, stays 91 days. Key history retention follows the reaper's
-// horizon while its mode is on (RemoveGoneStClientKeyHistory), over the key
-// history guard's own 30-day floor (server.ClientKeyHistoryRetentionFloor),
-// and keeps 91 days in a dry run. What keeps a contract the payout planner,
-// operator block points or a recovery can still read is the reaper's row
-// checks, never its horizon. The transfer audit rollup never replaces a day
-// the floor can reach (TransferAuditRollupFirstDay).
+// which the partition drop and the sn-reconcile floor share, stays 91 days.
+// Key history and close evidence retention follow the reaper's horizon while
+// its mode is on: key history (RemoveGoneStClientKeyHistory) over its guard's
+// 30-day floor (server.ClientKeyHistoryRetentionFloor), close evidence
+// (server.RemoveExpiredCloseEvidence) over its guard's 35-day floor
+// (server.CloseEvidenceRetentionFloor), each with its own brake; both keep 91
+// days in a dry run, with the mode off, or without the control. What keeps a
+// contract that operator block points or a USDC obligation can still read is
+// the reaper's row checks, never its horizon. The transfer audit
+// rollup never replaces a day the floor can reach
+// (TransferAuditRollupFirstDay).
 //
 // Below 91 days users see less history: the 90-day provider stats views
 // undercount the days past the horizon by the contracts deleted there, and
@@ -157,6 +172,21 @@ type ContractHorizonSettings struct {
 	// control sets no horizon, and the longest horizon the control can set.
 	// Values below ContractHorizonFloor count as ContractHorizonFloor.
 	Horizon time.Duration
+	// How far past the horizon a contract's mint time must be before a pass
+	// reads it. The cursor moves past every contract a batch reads, so a pass
+	// that read up to the horizon itself would, once caught up, read only
+	// contracts minted minutes before it, whose closes fall after it, and leave
+	// each to the next rescan: on Main from 2026-11-13 a caught-up pass kept 99%
+	// of what it read as recent_close. A contract that lives no longer than this
+	// has closed before the horizon when the pass reads it; one that lives
+	// longer, closed late after an outage or held in a dispute, still waits for
+	// the next rescan, counted in the pass's skipped contracts. Twice the
+	// longest contract life (DefaultContractExpiration): every sampled contract
+	// created since 2026-10-12 closed within 75 minutes (CONTRACT-PARTITION.md),
+	// and the rest covers an expiry close that runs late. A caught-up pass
+	// deletes a contract at most this much later than the horizon alone would
+	// allow; the horizon is unchanged. Non-positive reads up to the horizon.
+	CloseSettleTime time.Duration
 	// Contracts read per batch transaction, at most. The control can lower it.
 	BatchSize int
 	// The adaptive batch size never goes below this.
@@ -181,9 +211,12 @@ type ContractHorizonSettings struct {
 	ControlTimeout time.Duration
 	// A pass that reached the horizon starts over from the oldest contract
 	// once it began this long ago. A rescan rereads every contract still kept
-	// below the horizon at the same rate, and most kept contracts leave by the
-	// payment completion path (reap_time) or the straggler horizon instead, so
-	// it is long.
+	// below the horizon at the same rate, so it is long. It deletes those whose
+	// checks pass since the pass kept them, such as the contracts of a payment
+	// the USDC close-out closed after the pass went by. With CloseSettleTime it
+	// rereads only what passes kept: payment holds and reviews (about 122M
+	// contracts in the pass of 2026-11-01, each locked again on every reread),
+	// disputes, and contracts that closed late.
 	RescanInterval time.Duration
 	// Gap between runs while a pass has work left.
 	ResumeInterval time.Duration
@@ -196,10 +229,11 @@ type ContractHorizonSettings struct {
 
 func DefaultContractHorizonSettings() *ContractHorizonSettings {
 	return &ContractHorizonSettings{
-		Enable:      true,
-		DefaultMode: ContractHorizonModeOff,
-		Horizon:     server.ContractRetention,
-		BatchSize:   2000,
+		Enable:          true,
+		DefaultMode:     ContractHorizonModeOff,
+		Horizon:         server.ContractRetention,
+		CloseSettleTime: 2 * DefaultContractExpiration,
+		BatchSize:       2000,
 		// a 2000-row batch halved four times
 		MinBatchSize:        125,
 		TargetBatchDuration: 10 * time.Second,
@@ -234,7 +268,13 @@ const contractHorizonControlKey = "{contract_horizon}control"
 //   - `horizonDays`: the horizon in whole days, between ContractHorizonFloor
 //     (35) and the code's horizon (91); a value past either end counts as that
 //     end. Below 91 days users see less history in the provider stats and
-//     /transfer/stats (ContractHorizonFloor).
+//     /transfer/stats (ContractHorizonFloor). It moves more than the reaper:
+//     while the mode is on, close evidence and key history retention follow
+//     it (ContractHorizonFloor). At 35 the close evidence deletes permanently
+//     remove about a billion rows, the evidence accepted from 2026-10-06 on,
+//     whatever the reaper's keep rules; their own brake
+//     (server.RemoveExpiredCloseEvidence) stops the row deletes, and this mode
+//     alone the weekly drops once the evidence is partitioned.
 //
 // A field that does not parse narrows as far as it can: mode off, rate zero
 // (which is off), the minimum batch size, the code's horizon.
@@ -351,6 +391,16 @@ func RemoveContractHorizonControl(ctx context.Context) error {
 	}, server.OptRedisNoPreflight())
 }
 
+// When passes started reading only up to CloseSettleTime before the horizon.
+// A pass that began earlier read up to the horizon itself and may have moved
+// past contracts that were about to qualify, which only a new pass reads
+// again, so a batch with the mode on, run at or after this, starts a new pass
+// at the oldest contract when its cursor has moved past any and its pass began
+// before this. A pass that began since never starts over for it: a build from
+// before keeps the pass's start in the cursor it hands on, also while both
+// builds run.
+var contractHorizonSettledPassTime = time.Date(2026, time.November, 15, 0, 0, 0, 0, time.UTC)
+
 // Where a pass resumes. It round trips through the task args.
 type ContractHorizonCursor struct {
 	// The last contract id the pass committed past. The zero id starts the
@@ -361,6 +411,32 @@ type ContractHorizonCursor struct {
 	// The adaptive batch size, carried between runs. Zero starts at the
 	// control's batch size.
 	BatchSize int `json:"batch_size,omitempty"`
+	// Contracts the pass committed past and kept, by reason: each waits for
+	// the next pass. Empty when it kept none, and in a cursor a build from
+	// before 2026-11-15 handed on.
+	SkippedReasonCounts map[string]int64 `json:"skipped_reason_counts,omitempty"`
+}
+
+// The cursor of a new pass at the oldest contract, carrying the adaptive
+// batch size.
+func newContractHorizonPass(now time.Time, batchSize int) ContractHorizonCursor {
+	return ContractHorizonCursor{
+		PassStartTime: now.UTC(),
+		BatchSize:     batchSize,
+	}
+}
+
+// Adds the contracts one committed batch kept, by reason.
+func (self *ContractHorizonCursor) addSkipped(protected map[string]int64) {
+	for reason, count := range protected {
+		if count <= 0 {
+			continue
+		}
+		if self.SkippedReasonCounts == nil {
+			self.SkippedReasonCounts = map[string]int64{}
+		}
+		self.SkippedReasonCounts[reason] += count
+	}
 }
 
 // Why a run ended.
@@ -393,21 +469,14 @@ const (
 	contractHorizonProtectedUnsettled = "unsettled"
 	// a sweep belongs to a payment that holds retention
 	contractHorizonProtectedPaymentHold = "payment_hold"
-	// a sweep belongs to a payment that is not completed and holds nothing,
-	// such as a safely canceled one the planner re-plans, or to none that
-	// exists
+	// a sweep belongs to a payment row that does not exist
 	contractHorizonProtectedPaymentIncomplete = "payment_incomplete"
 	// a sweep's payment completed within CompletedContractExpiration
 	contractHorizonProtectedPaymentRecent = "payment_recent"
-	// a sweep has no payment, on a contract minted before the earning cutoff
-	contractHorizonProtectedUnpaidLegacy = "unpaid_legacy"
-	// a sweep is staged in a payment plan whose assignment is pending
-	contractHorizonProtectedPlanStaged = "plan_staged"
 	// an unpaid sweep is traffic of an operator block whose points can still
 	// be awarded
 	contractHorizonProtectedBlockPoints = "block_points"
-	// a sweep's payment completed under attribution review, which stamps no
-	// retention on its contracts
+	// a sweep's payment completed under attribution review
 	contractHorizonProtectedPaymentReview = "payment_review"
 )
 
@@ -420,8 +489,6 @@ var contractHorizonProtectedReasons = []string{
 	contractHorizonProtectedPaymentHold,
 	contractHorizonProtectedPaymentIncomplete,
 	contractHorizonProtectedPaymentRecent,
-	contractHorizonProtectedUnpaidLegacy,
-	contractHorizonProtectedPlanStaged,
 	contractHorizonProtectedBlockPoints,
 	contractHorizonProtectedPaymentReview,
 }
@@ -497,7 +564,11 @@ var (
 	}, []string{"mode"})
 	contractHorizonProtectedCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "urnetwork_contract_horizon_protected_contracts_total",
-		Help: "Contracts the contract horizon reaper read and kept, by reason",
+		Help: "Contracts the contract horizon reaper read and kept, by reason; the pass moves past each, which waits for the next pass",
+	}, []string{"reason"})
+	contractHorizonPassSkippedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "urnetwork_contract_horizon_pass_skipped_contracts",
+		Help: "Contracts the contract horizon reaper's current pass committed past and kept, by reason: each waits for the next pass. It restarts with each pass",
 	}, []string{"reason"})
 	contractHorizonBatchDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "urnetwork_contract_horizon_batch_duration_seconds",
@@ -522,7 +593,7 @@ var (
 	})
 	contractHorizonLagGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "urnetwork_contract_horizon_lag_seconds",
-		Help: "How far the contract horizon reaper's pass is behind its horizon; it restarts with each rescan",
+		Help: "How far the contract horizon reaper's pass is behind its horizon; a caught-up pass holds it near the close settle time, since it reads a contract only once its mint time is that far past the horizon, and it restarts with each pass",
 	})
 	contractHorizonPassStartGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "urnetwork_contract_horizon_pass_start_timestamp_seconds",
@@ -548,6 +619,7 @@ func init() {
 	}
 	for _, reason := range contractHorizonProtectedReasons {
 		contractHorizonProtectedCounter.WithLabelValues(reason)
+		contractHorizonPassSkippedGauge.WithLabelValues(reason)
 	}
 	for _, stop := range []string{
 		contractHorizonStopHorizon,
@@ -565,6 +637,7 @@ func init() {
 		contractHorizonScannedCounter,
 		contractHorizonEligibleCounter,
 		contractHorizonProtectedCounter,
+		contractHorizonPassSkippedGauge,
 		contractHorizonBatchDuration,
 		contractHorizonBatchSizeGauge,
 		contractHorizonCursorGauge,
@@ -580,6 +653,11 @@ func init() {
 // Observes each committed batch, after its commit. Nil in production; tests
 // use it to stop a run at an exact batch boundary.
 var contractHorizonBatchCommitted func(batch int, last server.Id)
+
+// Observes each batch that read contracts, inside its transaction, once its
+// settings are in place and before its checks. Nil in production; tests read
+// the batch's settings through it.
+var contractHorizonBatchObserved func(ctx context.Context, tx server.PgTx)
 
 // One run: batches from cursor toward the horizon of now, until the horizon,
 // the budget, the mode or ctx stops it. next is where the following run
@@ -607,15 +685,17 @@ func RemoveContractsPastHorizon(
 		Stop: contractHorizonStopError,
 	}
 	next = cursor
+	// the pass's counts are its own, never the caller's map
+	next.SkippedReasonCounts = maps.Clone(cursor.SkippedReasonCounts)
 	if next.PassStartTime.IsZero() {
 		next.PassStartTime = now.UTC()
 	}
-	contractHorizonPassStartGauge.Set(float64(next.PassStartTime.Unix()))
+	reaper.observePass(next)
 	defer func() {
 		contractHorizonRunCounter.WithLabelValues(report.Stop).Inc()
 		if glog.V(1) {
 			glog.Infof(
-				"[contract_horizon]run mode=%s stop=%s batches=%d scanned=%d eligible=%d deleted=%v archived=%d protected=%v caught_up=%t horizon_days=%g horizon=%s\n",
+				"[contract_horizon]run mode=%s stop=%s batches=%d scanned=%d eligible=%d deleted=%v archived=%d protected=%v caught_up=%t horizon_days=%g horizon=%s pass_start=%s pass_skipped=%v\n",
 				report.Mode,
 				report.Stop,
 				report.Batches,
@@ -627,21 +707,20 @@ func RemoveContractsPastHorizon(
 				report.CaughtUp,
 				reaper.horizon.Hours()/24,
 				report.HorizonTime.Format(time.RFC3339),
+				next.PassStartTime.Format(time.RFC3339),
+				next.SkippedReasonCounts,
 			)
 		}
 	}()
 
-	// The planner's legacy selection reaches unpaid sweeps below this bound.
-	// Without the boundary nothing is deleted.
+	// Past the earning cutoff, operator block awards read the unpaid sweeps of
+	// their blocks. Read once a run: an award committed since only keeps more.
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		report.Stop = contractHorizonStopError
 		returnErr = err
 		return
 	}
-	reaper.unpaidLegacyBound = paymentPlanUnpaidContractIdBound(transition)
-	// Past the boundary, operator block awards read the unpaid sweeps of their
-	// blocks. Read once a run: an award committed since only keeps more.
 	reaper.blockPointsWindowStarts = []time.Time{}
 	reaper.blockPointsWindowEnds = []time.Time{}
 	if transition != nil {
@@ -683,6 +762,21 @@ func RemoveContractsPastHorizon(
 			report.Stop = contractHorizonStopOff
 			return
 		}
+		// A run whose clock is before that time, as a fixture's can be, never
+		// starts over: the new pass would begin before it too, and start over
+		// again at every batch.
+		if control.Mode == ContractHorizonModeOn && next.ContractId != (server.Id{}) &&
+			next.PassStartTime.Before(contractHorizonSettledPassTime) && !reaper.now.Before(contractHorizonSettledPassTime) {
+			// it read up to the horizon itself: revisit what it moved past
+			glog.Infof(
+				"[contract_horizon]the pass of %s read up to the horizon, through %s; a new pass starts at the oldest contract\n",
+				next.PassStartTime.Format(time.RFC3339),
+				server.ContractIdTime(next.ContractId).Format(time.RFC3339),
+			)
+			next = newContractHorizonPass(now, next.BatchSize)
+			dryRunPosition = next.ContractId
+			reaper.observePass(next)
+		}
 
 		batchSize := next.BatchSize
 		if batchSize <= 0 || control.BatchSize < batchSize {
@@ -714,17 +808,17 @@ func RemoveContractsPastHorizon(
 			report.Stop = contractHorizonStopHorizon
 			if control.Mode == ContractHorizonModeOn && settings.RescanInterval <= now.Sub(next.PassStartTime) {
 				// revisit what this pass kept
-				next = ContractHorizonCursor{
-					PassStartTime: now.UTC(),
-					BatchSize:     next.BatchSize,
-				}
+				next = newContractHorizonPass(now, next.BatchSize)
+				reaper.observePass(next)
 			}
 			return
 		}
 		if control.Mode == ContractHorizonModeOn {
 			next.ContractId = batch.lastId
+			next.addSkipped(batch.protected)
 			dryRunPosition = batch.lastId
 			reaper.observeCursor(next.ContractId)
+			reaper.observePass(next)
 			if contractHorizonBatchCommitted != nil {
 				contractHorizonBatchCommitted(report.Batches, batch.lastId)
 			}
@@ -772,14 +866,12 @@ type contractHorizonReaper struct {
 	// How long past its creation and its close a contract is kept.
 	horizon     time.Duration
 	horizonTime time.Time
-	horizonId   server.Id
-	// The first contract id whose unpaid sweeps the planner never selects;
-	// nil without an earning cutoff, when every unpaid sweep is a legacy
-	// obligation.
-	unpaidLegacyBound *server.Id
+	// A batch reads only ids below this: the floor of the horizon less
+	// CloseSettleTime.
+	windowId server.Id
 	// The windows, [start, end), of the operator blocks whose points can still
 	// be awarded (OperatorBlockPointsPendingWindows); none without an earning
-	// cutoff, when payout plans award points.
+	// cutoff, when no block is awarded.
 	blockPointsWindowStarts []time.Time
 	blockPointsWindowEnds   []time.Time
 	// A sweep's completed payment discharges it once it completed before this.
@@ -815,12 +907,20 @@ func (self *contractHorizonReaper) observe(batch *contractHorizonBatch, mode Con
 	contractHorizonArchivedCounter.Add(float64(batch.archived))
 }
 
-// The next batch reads the contracts minted and closed more than horizon
-// before the run's now.
+// The next batch deletes the contracts minted and closed more than horizon
+// before the run's now, and reads those minted CloseSettleTime before that.
 func (self *contractHorizonReaper) setHorizon(horizon time.Duration) {
 	self.horizon = horizon
 	self.horizonTime = self.now.Add(-horizon)
-	self.horizonId = server.ContractIdFloor(self.horizonTime)
+	self.windowId = server.ContractIdFloor(self.horizonTime.Add(-max(0, self.settings.CloseSettleTime)))
+}
+
+// Publishes the pass's start and the contracts it kept, by reason.
+func (self *contractHorizonReaper) observePass(cursor ContractHorizonCursor) {
+	contractHorizonPassStartGauge.Set(float64(cursor.PassStartTime.Unix()))
+	for _, reason := range contractHorizonProtectedReasons {
+		contractHorizonPassSkippedGauge.WithLabelValues(reason).Set(float64(cursor.SkippedReasonCounts[reason]))
+	}
 }
 
 // Publishes the horizon a control read set, and the stored cursor's lag
@@ -852,10 +952,10 @@ type contractHorizonBatch struct {
 	archived    int64
 }
 
-// The next batchSize contract ids after start and below the horizon, in id
+// The next batchSize contract ids after start and below the window, in id
 // order: an index-only range of the primary key, which reads the heap only for
-// pages vacuum has not marked all-visible. $1 start, $2 the horizon id, $3 the
-// batch size.
+// pages vacuum has not marked all-visible. $1 start, $2 the window id (the
+// horizon less CloseSettleTime), $3 the batch size.
 const contractHorizonWindowSql = `
 	SELECT ARRAY(
 		SELECT contract_id
@@ -915,9 +1015,8 @@ var contractHorizonScanSql = fmt.Sprintf(contractHorizonScanSqlFormat, "", "cand
 var contractHorizonScanLockSql = fmt.Sprintf(contractHorizonScanSqlFormat, contractHorizonLockSql, "locked")
 
 // Locks the sweeps of the locked contracts, skipping any another transaction
-// holds, and returns the contracts with a sweep it could not lock. A planner
-// that assigns one of the locked sweeps waits for this transaction, and then
-// finds it gone.
+// holds, and returns the contracts with a sweep it could not lock. A writer of
+// one of the locked sweeps waits for this transaction, and then finds it gone.
 const contractHorizonSweepLockSql = `
 	WITH locked_sweep AS MATERIALIZED (
 		SELECT contract_id
@@ -938,16 +1037,14 @@ const contractHorizonSweepLockSql = `
 `
 
 // The checks that read other tables, in a snapshot taken after the locks:
-// every escrow settled, every sweep discharged, none staged in a pending plan,
-// none unpaid in the window of an operator block still to be awarded, none
-// paid by a payment completed under attribution review. Each
-// reads the candidates' rows together, by their ids. A NULL flag counts
-// against deletion. $1 the candidate contract ids, $2 the first contract id
-// past the earning cutoff (paymentPlanUnpaidContractIdBound), NULL without a
-// cutoff, $3 the newest completion time that discharges a sweep, $4 and $5
-// the starts and ends of the pending block windows
-// (OperatorBlockPointsPendingWindows), which an award reads as
-// operatorBlockPointsSweepSql does: an unpaid sweep, by its sweep time.
+// every escrow settled, every sweep discharged, none unpaid in the window of
+// an operator block still to be awarded, none paid by a payment completed
+// under attribution review. Each reads the candidates' rows together, by their
+// ids. A NULL flag counts against deletion. $1 the candidate contract ids, $2
+// the newest completion time that discharges a sweep, $3 and $4 the starts and
+// ends of the pending block windows (OperatorBlockPointsPendingWindows), which
+// an award reads as operatorBlockPointsSweepSql does: an unpaid sweep, by its
+// sweep time.
 var contractHorizonHoldSql = `
 	WITH unsettled AS MATERIALIZED (
 		SELECT DISTINCT contract_id
@@ -957,27 +1054,18 @@ var contractHorizonHoldSql = `
 		SELECT
 			transfer_escrow_sweep.contract_id,
 			bool_or(account_payment.payment_id IS NOT NULL AND (` + server.ContractPaymentRetentionHoldSql + `) IS TRUE) AS payment_hold,
-			bool_or(transfer_escrow_sweep.payment_id IS NOT NULL AND account_payment.completed IS NOT TRUE) AS payment_incomplete,
-			bool_or(account_payment.completed IS TRUE AND (account_payment.complete_time IS NULL OR $3 <= account_payment.complete_time)) AS payment_recent,
-			bool_or(transfer_escrow_sweep.payment_id IS NULL AND ($2::uuid IS NULL OR transfer_escrow_sweep.contract_id < $2::uuid)) AS unpaid_legacy,
+			bool_or(transfer_escrow_sweep.payment_id IS NOT NULL AND (` + server.AccountPaymentRetentionSettledSql + `) IS NOT TRUE) AS payment_incomplete,
+			bool_or(account_payment.completed IS TRUE AND (account_payment.complete_time IS NULL OR $2 <= account_payment.complete_time)) AS payment_recent,
 			bool_or(account_payment.completed IS TRUE AND account_payment.attribution_review_required IS TRUE) AS payment_review
 		FROM transfer_escrow_sweep
 		LEFT JOIN account_payment ON
 			account_payment.payment_id = transfer_escrow_sweep.payment_id
 		WHERE transfer_escrow_sweep.contract_id = ANY($1::uuid[])
 		GROUP BY transfer_escrow_sweep.contract_id
-	), staged AS MATERIALIZED (
-		SELECT DISTINCT payment_plan_sweep.contract_id
-		FROM payment_plan_sweep
-		INNER JOIN payment_plan_assignment ON
-			payment_plan_assignment.payment_plan_id = payment_plan_sweep.payment_plan_id
-		WHERE
-			payment_plan_sweep.contract_id = ANY($1::uuid[]) AND
-			payment_plan_assignment.complete_time IS NULL
 	), block_points AS MATERIALIZED (
 		SELECT DISTINCT transfer_escrow_sweep.contract_id
 		FROM transfer_escrow_sweep
-		INNER JOIN unnest($4::timestamp[], $5::timestamp[]) AS pending(window_start, window_end) ON
+		INNER JOIN unnest($3::timestamp[], $4::timestamp[]) AS pending(window_start, window_end) ON
 			pending.window_start <= transfer_escrow_sweep.sweep_time AND
 			transfer_escrow_sweep.sweep_time < pending.window_end
 		WHERE
@@ -990,14 +1078,11 @@ var contractHorizonHoldSql = `
 			coalesce(sweep.payment_hold, false) AS payment_hold,
 			coalesce(sweep.payment_incomplete, false) AS payment_incomplete,
 			coalesce(sweep.payment_recent, false) AS payment_recent,
-			coalesce(sweep.unpaid_legacy, false) AS unpaid_legacy,
-			staged.contract_id IS NOT NULL AS plan_staged,
 			block_points.contract_id IS NOT NULL AS block_points,
 			coalesce(sweep.payment_review, false) AS payment_review
 		FROM unnest($1::uuid[]) AS candidate(contract_id)
 		LEFT JOIN unsettled ON unsettled.contract_id = candidate.contract_id
 		LEFT JOIN sweep ON sweep.contract_id = candidate.contract_id
-		LEFT JOIN staged ON staged.contract_id = candidate.contract_id
 		LEFT JOIN block_points ON block_points.contract_id = candidate.contract_id
 	)
 	SELECT
@@ -1005,13 +1090,11 @@ var contractHorizonHoldSql = `
 		(SELECT count(*) FROM classified WHERE NOT unsettled AND payment_hold),
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold) AND payment_incomplete),
 		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete) AND payment_recent),
-		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent) AND unpaid_legacy),
-		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy) AND plan_staged),
-		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged) AND block_points),
-		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points) AND payment_review),
+		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent) AND block_points),
+		(SELECT count(*) FROM classified WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR block_points) AND payment_review),
 		ARRAY(
 			SELECT contract_id FROM classified
-			WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR unpaid_legacy OR plan_staged OR block_points OR payment_review)
+			WHERE NOT (unsettled OR payment_hold OR payment_incomplete OR payment_recent OR block_points OR payment_review)
 			ORDER BY contract_id
 		)
 `
@@ -1072,11 +1155,18 @@ func (self *contractHorizonReaper) removeBatch(
 				deleted:   map[string]int64{},
 			}
 			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d`, self.settings.StatementTimeout.Milliseconds())))
+			// The batch's statements are short, but the misestimated escrow
+			// and close counts (on Main, 2026-11-02, n_distinct 185,552 for
+			// transfer_escrow.contract_id over 4.96 billion rows, about 1.6
+			// escrows per contract in truth) cost them past jit_above_cost, so
+			// each compiled: 89% of the hold check's time, about a second a
+			// batch, and 70% of the dependents delete's (pg_stat_statements).
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL jit = off`))
 			// plan each statement for its actual ids
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
 
 			var windowIds []server.Id
-			server.Raise(tx.QueryRow(ctx, contractHorizonWindowSql, start, self.horizonId, batchSize).Scan(&windowIds))
+			server.Raise(tx.QueryRow(ctx, contractHorizonWindowSql, start, self.windowId, batchSize).Scan(&windowIds))
 			batch.scanned = int64(len(windowIds))
 			if batch.scanned == 0 {
 				return
@@ -1084,6 +1174,9 @@ func (self *contractHorizonReaper) removeBatch(
 			batch.lastId = windowIds[len(windowIds)-1]
 			for _, setting := range contractHorizonBitmapSettings {
 				server.RaisePgResult(tx.Exec(ctx, setting))
+			}
+			if contractHorizonBatchObserved != nil {
+				contractHorizonBatchObserved(ctx, tx)
 			}
 
 			scanSql := contractHorizonScanLockSql
@@ -1118,12 +1211,11 @@ func (self *contractHorizonReaper) removeBatch(
 				return
 			}
 
-			var unsettledCount, paymentHoldCount, paymentIncompleteCount, paymentRecentCount, unpaidLegacyCount, planStagedCount, blockPointsCount, paymentReviewCount int64
+			var unsettledCount, paymentHoldCount, paymentIncompleteCount, paymentRecentCount, blockPointsCount, paymentReviewCount int64
 			server.Raise(tx.QueryRow(
 				ctx,
 				contractHorizonHoldSql,
 				heldIds,
-				self.unpaidLegacyBound,
 				self.paymentDischargeTime,
 				self.blockPointsWindowStarts,
 				self.blockPointsWindowEnds,
@@ -1132,8 +1224,6 @@ func (self *contractHorizonReaper) removeBatch(
 				&paymentHoldCount,
 				&paymentIncompleteCount,
 				&paymentRecentCount,
-				&unpaidLegacyCount,
-				&planStagedCount,
 				&blockPointsCount,
 				&paymentReviewCount,
 				&batch.eligibleIds,
@@ -1142,8 +1232,6 @@ func (self *contractHorizonReaper) removeBatch(
 			batch.protected[contractHorizonProtectedPaymentHold] = paymentHoldCount
 			batch.protected[contractHorizonProtectedPaymentIncomplete] = paymentIncompleteCount
 			batch.protected[contractHorizonProtectedPaymentRecent] = paymentRecentCount
-			batch.protected[contractHorizonProtectedUnpaidLegacy] = unpaidLegacyCount
-			batch.protected[contractHorizonProtectedPlanStaged] = planStagedCount
 			batch.protected[contractHorizonProtectedBlockPoints] = blockPointsCount
 			batch.protected[contractHorizonProtectedPaymentReview] = paymentReviewCount
 			if dryRun || len(batch.eligibleIds) == 0 {

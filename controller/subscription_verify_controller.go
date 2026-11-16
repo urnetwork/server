@@ -117,7 +117,9 @@ type VerifyPlayPurchaseArgs struct {
 //	SUBSCRIPTION_STATE_PENDING / PAUSED / ON_HOLD / GRACE        -> pending (retry)
 //	SUBSCRIPTION_STATE_ACTIVE, credit landed                     -> credited
 //	SUBSCRIPTION_STATE_ACTIVE, balance already overlaps expiry   -> already_credited
-//	CANCELED / EXPIRED / PENDING_PURCHASE_CANCELED / other       -> invalid
+//	CANCELED with paid time left (auto-renew off)                -> as ACTIVE
+//	CANCELED past its expiry / EXPIRED /
+//	PENDING_PURCHASE_CANCELED / other                            -> invalid
 //	Google API failure                                           -> error (non-2xx, retry)
 func VerifyPlayPurchase(
 	verifyPlayPurchase *VerifyPlayPurchaseArgs,
@@ -193,9 +195,15 @@ func VerifyPlayPurchase(
 		return verifyStatusResult(VerifyPurchaseStatusPending), nil
 	case "SUBSCRIPTION_STATE_ACTIVE":
 		// fall through to credit
+	case "SUBSCRIPTION_STATE_CANCELED":
+		// cancelled is not expired: the paid period credits like an active one's;
+		// with no paid time left it never credits -- terminal
+		if !playPurchasePaid(sub, server.NowUtc()) {
+			return NewVerifyStorePurchaseInvalid(), nil
+		}
 	default:
-		// CANCELED / EXPIRED / PENDING_PURCHASE_CANCELED / unknown: this report
-		// will never credit through this endpoint -- terminal
+		// EXPIRED / PENDING_PURCHASE_CANCELED / unknown: this report will
+		// never credit through this endpoint -- terminal
 		return NewVerifyStorePurchaseInvalid(), nil
 	}
 
@@ -241,9 +249,10 @@ func VerifyPlayPurchase(
 	if err != nil {
 		return nil, err
 	}
-	if renewalResult.Canceled && !renewalResult.Renewed {
-		// the state flipped between the two fetches; a flip to a paid-through
-		// cancellation still credits its period (Renewed) and reports it
+	if renewalResult.Terminal || renewalResult.Canceled && !renewalResult.Renewed && !renewalResult.ExpiryTime.After(server.NowUtc()) {
+		// the paid time is over (or the state flipped to expired between the
+		// two fetches). A paid-through cancellation the credit gate found
+		// already covered falls through to already_credited.
 		return NewVerifyStorePurchaseInvalid(), nil
 	}
 	expiryTime := renewalResult.ExpiryTime
@@ -270,7 +279,14 @@ func playLinkedNetworkId(
 
 // Resolve the account link without acquiring another PostgreSQL session.
 func playLinkedNetworkIdInConn(connOwner server.PgConn, clientSession *session.ClientSession, sub *PlaySubscription) (*server.Id, bool) {
-	identifiers := sub.ExternalAccountIdentifiers
+	return playNetworkIdForIdentifiersInConn(connOwner, clientSession, sub.ExternalAccountIdentifiers)
+}
+
+// playNetworkIdForIdentifiersInConn is the network account identifiers name:
+// the external account id, or the obfuscated external account id as a
+// subscription payment id falling back to a plain network id. nil (with ok)
+// when they name none; ok=false when present but unparseable.
+func playNetworkIdForIdentifiersInConn(connOwner server.PgConn, clientSession *session.ClientSession, identifiers *PlayExternalAccountIdentifiers) (*server.Id, bool) {
 	if identifiers == nil {
 		return nil, true
 	}
@@ -378,7 +394,10 @@ func VerifyAppleTransactionClaims(
 		// pointer; a client report has no notification, so it gets a fresh id
 		// (the reconciler does the same)
 		credited = appleCreditSubscriptionTransactionInTx(tx, clientSession.Ctx, server.NewId(), transaction)
-	})
+		// ReadCommitted, like the webhook's and the reconciler's credit: the
+		// ledger gate is insert-then-check, and the period's Pro cycle grant
+		// reads the chain after its lock (model.GrantProCycleInTx)
+	}, server.TxReadCommitted)
 	if creditErr != nil {
 		return nil, creditErr
 	}

@@ -36,8 +36,8 @@ func TestCloseEvidencePartitionFamilyDeclaration(t *testing.T) {
 		family.DropGuardSetting != "urnetwork.close_evidence_retention" {
 		t.Fatalf("family rules %+v", family)
 	}
-	if family.CreateLeaf == nil || family.DropFence == nil || family.DropPrecondition == nil {
-		t.Fatal("the family lacks its create, fence or precondition")
+	if family.CreateLeaf == nil || family.RangeExpired == nil || family.DropFence == nil || family.DropPrecondition == nil {
+		t.Fatal("the family lacks its create, expiry, fence or precondition")
 	}
 	// leaves are the family's, and stay out of the rotation
 	week := family.RangeAt(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC))
@@ -114,22 +114,34 @@ func TestCloseEvidenceWeekLeafSql(t *testing.T) {
 
 // The drop precondition is one statement over the week's own leaf: the day
 // after retention, the late index's presence and newest entry, then the few
-// old unresolved contracts looked up in the week.
+// old unresolved contracts looked up in the week. Every age it reads is the
+// retention it is given: 91 days without a horizon, 35 at the shortest.
 func TestCloseEvidenceWeekBlockerSql(t *testing.T) {
 	week := PartitionGranularityWeekly.RangeOf(time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC))
-	sql := strings.Join(strings.Fields(closeEvidenceWeekBlockerSql("contract_close_report_evidence_w20261102", week)), " ")
-	for _, want := range []string{
-		`'2026-11-10 00:00:00'::timestamp THEN 'within a day of its retention'`,
-		`to_regclass('public.contract_close_report_evidence_w20261102_late')`,
-		`THEN 'no index of its late reports'`,
-		`SELECT max(late.accepted_at) FROM public."contract_close_report_evidence_w20261102" late WHERE late.accepted_at >= '2026-11-10 00:00:00'::timestamp`,
-		`THEN 'a report accepted within 91 days'`,
-		`CROSS JOIN LATERAL ( SELECT 1 FROM public."contract_close_report_evidence_w20261102" evidence WHERE evidence.contract_id = transfer_contract.contract_id LIMIT 1 ) reported`,
-		`transfer_contract.outcome IS NULL AND transfer_contract.contract_id < contract_id_floor(now() - interval '91 days' + interval '86400 seconds')`,
-		`THEN 'a report of an unresolved contract'`,
+	for _, retention := range []struct {
+		retention time.Duration
+		interval  string
+	}{
+		{ContractRetention, "interval '7862400 seconds'"},
+		{CloseEvidenceRetentionFloor, "interval '3024000 seconds'"},
 	} {
-		if !strings.Contains(sql, want) {
-			t.Errorf("precondition lacks %q:\n%s", want, sql)
+		sql := strings.Join(strings.Fields(closeEvidenceWeekBlockerSql("contract_close_report_evidence_w20261102", week, retention.retention)), " ")
+		for _, want := range []string{
+			`(now() AT TIME ZONE 'UTC') - ` + retention.interval + ` < '2026-11-10 00:00:00'::timestamp THEN 'within a day of its retention'`,
+			`to_regclass('public.contract_close_report_evidence_w20261102_late')`,
+			`THEN 'no index of its late reports'`,
+			`(now() AT TIME ZONE 'UTC') - ` + retention.interval + ` <= ( SELECT max(late.accepted_at) FROM public."contract_close_report_evidence_w20261102" late WHERE late.accepted_at >= '2026-11-10 00:00:00'::timestamp`,
+			`THEN 'a report accepted within the retention'`,
+			`CROSS JOIN LATERAL ( SELECT 1 FROM public."contract_close_report_evidence_w20261102" evidence WHERE evidence.contract_id = transfer_contract.contract_id LIMIT 1 ) reported`,
+			`transfer_contract.outcome IS NULL AND transfer_contract.contract_id < contract_id_floor(now() - ` + retention.interval + ` + interval '86400 seconds')`,
+			`THEN 'a report of an unresolved contract'`,
+		} {
+			if !strings.Contains(sql, want) {
+				t.Errorf("precondition at %s lacks %q:\n%s", retention.retention, want, sql)
+			}
+		}
+		if strings.Contains(sql, "days") {
+			t.Errorf("precondition at %s keeps a fixed age:\n%s", retention.retention, sql)
 		}
 	}
 	// the late index and the precondition share one bound
@@ -180,31 +192,70 @@ func TestCloseEvidenceRemovalOrder(t *testing.T) {
 	}
 }
 
-// A pass resumes at its cursor's leaf and contract id; a cursor from before
-// leaves were recorded is the plain table's; a leaf no longer a target starts
-// the pass over.
-func TestCloseEvidenceRemovalCursorResume(t *testing.T) {
+// A pass in progress resumes at its leaf and key; a cursor from before
+// 2026-11-02 holds only a contract id, and one from before leaves were recorded
+// is the plain table's; a leaf no longer a target starts the pass over at its
+// floor. A new pass starts at the low water, or from the first key when there
+// is none or the day's first pass is due.
+func TestCloseEvidenceRemovalCursorStart(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	today := now.Format(time.DateOnly)
 	contractId := ContractIdFloor(time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
+	clientId := NewId()
+	reportId := NewId()
+	lowWater := ContractIdFloor(time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC))
 	targets := []string{closeEvidenceDefaultLeafName(), "contract_close_report_evidence_w20260601", closeEvidenceLegacyLeafName()}
 	for _, test := range []struct {
-		cursor  CloseEvidenceRemovalCursor
-		targets []string
-		start   int
-		from    Id
+		name        string
+		cursor      CloseEvidenceRemovalCursor
+		targets     []string
+		start       int
+		after       closeEvidenceKey
+		floor       *Id
+		fullPassDay string
 	}{
-		{cursor: CloseEvidenceRemovalCursor{}, targets: targets, start: 0},
-		{cursor: CloseEvidenceRemovalCursor{Leaf: closeEvidenceLegacyLeafName(), ContractId: &contractId}, targets: targets, start: 2, from: contractId},
-		{cursor: CloseEvidenceRemovalCursor{Leaf: "contract_close_report_evidence_w20260601"}, targets: targets, start: 1},
-		{cursor: CloseEvidenceRemovalCursor{Leaf: "contract_close_report_evidence_w20260608", ContractId: &contractId}, targets: targets, start: 0},
+		{name: "no cursor", targets: targets, fullPassDay: today},
+		{
+			name:        "in progress",
+			cursor:      CloseEvidenceRemovalCursor{Leaf: closeEvidenceLegacyLeafName(), ContractId: &contractId, ClientId: &clientId, ReportId: &reportId, PassFloor: &lowWater, FullPassDay: "2026-11-19"},
+			targets:     targets,
+			start:       2,
+			after:       closeEvidenceKey{contractId: contractId, clientId: clientId, reportId: reportId},
+			floor:       &lowWater,
+			fullPassDay: "2026-11-19",
+		},
+		{name: "a leaf without a key", cursor: CloseEvidenceRemovalCursor{Leaf: "contract_close_report_evidence_w20260601"}, targets: targets, start: 1},
+		{
+			name:    "a leaf no longer a target",
+			cursor:  CloseEvidenceRemovalCursor{Leaf: "contract_close_report_evidence_w20260608", ContractId: &contractId, PassFloor: &lowWater},
+			targets: targets,
+			after:   closeEvidenceKey{contractId: lowWater},
+			floor:   &lowWater,
+		},
 		// the plain table's cursor, before and after the leaf was recorded
-		{cursor: CloseEvidenceRemovalCursor{ContractId: &contractId}, targets: []string{closeEvidenceTable}, start: 0, from: contractId},
-		{cursor: CloseEvidenceRemovalCursor{Leaf: closeEvidenceTable, ContractId: &contractId}, targets: []string{closeEvidenceTable}, start: 0, from: contractId},
+		{name: "plain, before leaves", cursor: CloseEvidenceRemovalCursor{ContractId: &contractId}, targets: []string{closeEvidenceTable}, after: closeEvidenceKey{contractId: contractId}},
+		{name: "plain", cursor: CloseEvidenceRemovalCursor{Leaf: closeEvidenceTable, ContractId: &contractId}, targets: []string{closeEvidenceTable}, after: closeEvidenceKey{contractId: contractId}},
 		// a plain table's cursor once the table is partitioned
-		{cursor: CloseEvidenceRemovalCursor{ContractId: &contractId}, targets: targets, start: 0},
+		{name: "plain, once partitioned", cursor: CloseEvidenceRemovalCursor{ContractId: &contractId}, targets: targets},
+		{
+			name:        "a new pass at the low water",
+			cursor:      CloseEvidenceRemovalCursor{LowWater: &lowWater, FullPassDay: today},
+			targets:     targets,
+			after:       closeEvidenceKey{contractId: lowWater},
+			floor:       &lowWater,
+			fullPassDay: today,
+		},
+		{name: "the day's first pass", cursor: CloseEvidenceRemovalCursor{LowWater: &lowWater, FullPassDay: "2026-11-19"}, targets: targets, fullPassDay: today},
 	} {
-		start, from := test.cursor.resumeIn(test.targets)
-		if start != test.start || from != test.from {
-			t.Errorf("cursor %+v in %v resumes at %d from %s, want %d from %s", test.cursor, test.targets, start, from, test.start, test.from)
+		start, after, pass := test.cursor.startIn(test.targets, now)
+		if start != test.start || after != test.after {
+			t.Errorf("%s: starts at %d after %+v, want %d after %+v", test.name, start, after, test.start, test.after)
+		}
+		if (pass.PassFloor == nil) != (test.floor == nil) || (pass.PassFloor != nil && *pass.PassFloor != *test.floor) {
+			t.Errorf("%s: the pass floor is %v, want %v", test.name, pass.PassFloor, test.floor)
+		}
+		if pass.FullPassDay != test.fullPassDay {
+			t.Errorf("%s: the full pass day is %q, want %q", test.name, pass.FullPassDay, test.fullPassDay)
 		}
 	}
 }

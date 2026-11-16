@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
@@ -47,7 +46,6 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 		task.NewTaskTarget(model.ApplyLegacyProviderTotals).TargetFunctionName(): legacyProviderTotalsClaimSharePeriod,
 		model.NewLegacyProviderTotalsDrainTaskTarget().TargetFunctionName():      legacyProviderTotalsDrainClaimSharePeriod,
 		task.NewTaskTarget(work.FlushTransferDebits).TargetFunctionName():        financialOwnerClaimSharePeriod,
-		task.NewTaskTarget(controller.AdvancePayment).TargetFunctionName():       financialOwnerClaimSharePeriod,
 	}
 	if !reflect.DeepEqual(production.TargetClaimShares, shares) || settings.TargetClaimShares != nil {
 		t.Fatal("production claim shares differ or mutated their caller", production.TargetClaimShares)

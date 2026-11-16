@@ -191,7 +191,8 @@ func TestRedisCurrentJoinRecoveryUnderstandsReducedAppliedDebit(t *testing.T) {
 		posts := asyncDebitTestSettle(ctx, contract.ContractId, 11)
 		server.RunPosts(ctx, posts...)
 		want.pending, want.debt = 1, 11
-		providerWant = forceCloseProviderProjection{sweptBytes: 11, unappliedBytes: 11, owners: 1}
+		// the sweep alone: settlement queues no provider total (BILLING-SPLIT.md)
+		providerWant = forceCloseProviderProjection{sweptBytes: 11}
 		requireState(want)
 		// Current settlement posts retain the original token until the worker.
 		// Explicit repair is the supported producer of a reduced pending token.

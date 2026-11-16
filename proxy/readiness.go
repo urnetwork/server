@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sync/atomic"
@@ -92,4 +93,14 @@ func (self *Readiness) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	router.WarpStatus(w, r)
+}
+
+// The status port's handler. Warp exposes the proxy's ports by DNAT, with no
+// nginx in front (PROXYDRAIN1.md 1.1), so this router is its own ingress
+// (router/ingress.go): the client address the status answer echoes is the
+// peer, whatever the client sent.
+func NewStatusHandler(ctx context.Context, readiness *Readiness) http.Handler {
+	return router.NewIngressHandler(router.NewRouter(ctx, []*router.Route{
+		router.NewRoute("GET", "/status", readiness.StatusHandler),
+	}))
 }

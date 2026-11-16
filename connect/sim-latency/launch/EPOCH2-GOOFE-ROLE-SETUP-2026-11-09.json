@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "status": "ISOLATED_FIXTURES_AND_RESTRICTED_SSH_INSTALLED_AGENT_CONFIGURATION_PENDING",
+  "fixture_root": "/home/by/sim-latency/fixtures/epoch2-runtime-20261109-v1",
+  "fixture_transfer": "Only the explicitly named config/local and vault/local leaves of the frozen isolated runtime were transferred. The native hash command rejected non-regular entries and matched both expected hashes before transfer and after remote extraction.",
+  "config_local_sha256": "b8a0996c29195cad1839fa6f7e32933f01f812d573df6e3bb5f9e7b6276430b7",
+  "vault_local_sha256": "a68c0e07eaa6d831c9a562128950237e76b0cd0f942afd1fec3d7a32b3aed7c7",
+  "main_or_all_config_or_vault_copied": false,
+  "restricted_ssh": {
+    "account": "urnetwork-eval-control",
+    "coordinator_key_fingerprint": "SHA256:Fn8UJ8y0LgKL4oaBt5Y56PYmFqbzH9+4swuIEPOIyzw",
+    "private_key_location": "root-only on Sille; not transferred to Goofe or committed",
+    "authorized_keys": "/etc/urnetwork/competition-goofe-epoch2-20261109/authorized_keys",
+    "sshd_dropin_sha256": "9fde782684a98c57147213c1b30dd9fd919b8a4cff95f2f72b9afde218f8202a",
+    "forced_wrapper": "/usr/local/libexec/urnetwork/competition-goofe-epoch2-20261109/serve-agent",
+    "forced_wrapper_sha256": "05f4f5879fd3c95afc93336284cd945fcfbbe7d560ae82ab73c2feefa13f3e79",
+    "sudoers_sha256": "4dad8e3201f4fa42301b2c7714b607fd3e3f28f25d756c2b1de8a73ca918a85f",
+    "configuration_checks": ["visudo validation passed", "sshd -t passed", "effective role has exact ForceCommand and AuthorizedKeysFile, DisableForwarding=yes, PermitTTY=no and PermitUserRC=no", "ordinary operator account retains ForceCommand=none and its existing authorized-key paths"],
+    "native_smoke": {"requested_remote_command": "echo unauthorized-shell-marker", "exit_code": 1, "handler_error": "subevaluation operation failed", "shell_marker_executed": false, "meaning": "Dedicated-key authentication reaches the forced handler; incomplete agent inventory fails closed. This is not an admission or execution-readiness receipt."},
+    "account_home_warning": "The existing system account has /nonexistent as its home; SSH emits a stderr warning. No shell marker or protocol success was returned."
+  },
+  "worker_fixture_access": {
+    "verified_as": "urnetwork-eval-worker",
+    "read_and_hash_config_local": "passed; original hash unchanged",
+    "read_and_hash_vault_local": "passed; original hash unchanged",
+    "permission_scope": "Direct synthetic local mount leaves only: directories0555/files0444 for remapped read-only mounts. Exact protected parent paths have worker traversal ACLs; no recursive home or main/all permission changes.",
+    "private_authority_roots": "state, identities and control remain root-owned0700"
+  },
+  "remaining_before_host_policy_freeze": ["Complete native agent, public client and recovery arming inventory", "Collect actual immutable host fingerprint"],
+  "remaining_before_grading": ["Native containment/cleanup qualification", "Fresh shared epoch baseline", "Five-percent cross-host operational admission and required runtime receipts"],
+  "agent_execution_ready": false,
+  "baseline_ready": false,
+  "grading_activated": false
+}

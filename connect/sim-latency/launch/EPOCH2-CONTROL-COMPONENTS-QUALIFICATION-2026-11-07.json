@@ -1,0 +1,193 @@
+{
+  "schema": 1,
+  "kind": "competition-future-g7-control-components-qualification/v1",
+  "status": "selected component and merged-source checks passed; future epoch remains PREPARED and not live",
+  "instrument_or_runtime_approval": false,
+  "components": {
+    "protected_helpers": {
+      "source": "a09e520f36277e8773418b77693153bf2041948b",
+      "production_identical_to": "7d44dc3c2833d2bbf035e64e15b332c136b166fa",
+      "base": "02ea84d7b4bad2f69c0bb9e676ccd96c30e02f56",
+      "changed_paths": 30,
+      "production_paths": 14,
+      "test_paths": 16,
+      "control_schema_fixture_sn": "64994620e7125d154980c1303f0d4b5a24001f48",
+      "schema_scope": "Private 8543 plus only the reviewed G7 schema deltas 215c91d9/cf57dd5b, preserving typed operator receipts. This is not a canonical runtime/source-graph pin.",
+      "connect": "f1e14dda5f0003ae21e2a163661660de30c61bc1",
+      "sdk": "5517f0356d68ca876b8d8087811955a08e3f262d",
+      "receipt_file_sha256": "b88a5684aa2ccaf8becdbfb0f08c59a9698e6da6e1efa544b8e9d1249f9be373",
+      "sealed_at": "2026-11-07T03:05:34Z",
+      "catalog_sha256": "8667c5531df840f40cdfedc79b18b05e185d786c66c01b3b8225582df68ed218",
+      "ordinary": {
+        "pass": 145,
+        "fail": 0,
+        "skip": 0
+      },
+      "race": {
+        "pass": 145,
+        "fail": 0,
+        "skip": 0,
+        "race_findings": 0
+      },
+      "genuine_parent_reds": 3,
+      "retained_failed_attempts": "Initial compile/list export omitted a tracked SQL embed, so no selected tests ran. Next view ran 139 passes/6 failures: three missing G7 schema dependency, two omitted Dockerfile text asset, one source-generation fixture error. Both failed views remain preserved.",
+      "corrected_view": "Declared the precise schema composition and exact tracked assets; one test-only line selects request.SourceGeneration instead of confusing epoch two with source generation two. No production code was changed to fit these six failures.",
+      "protected_scope": "Existing protected simulator tree plus a fixed versioned six-file dedicated-helper census, derived from the full immutable G7 policy. Raw-lock authentication prevents marker/list stripping from downgrading to a legacy context.",
+      "receipt_path": "/home/by/urnetwork/temp/protected-helpers-a09-qualified-20261107.RcBfjj/qualification-receipt.json"
+    },
+    "run_clock": {
+      "source": "fc5e3501ca3d23183d68354458bfa91f449e37d0",
+      "production_equivalent_pre_fix_seam": "29494678ef96648f737b6fdbdb5a7141a007746e",
+      "binding_parent": "7d44dc3c2833d2bbf035e64e15b332c136b166fa",
+      "changed_paths": 4,
+      "production_paths": 1,
+      "test_paths": 3,
+      "sn": "8543b3b8efd6cdd0f0ffd51a827ccccc32d62960",
+      "connect": "f1e14dda5f0003ae21e2a163661660de30c61bc1",
+      "sdk": "5517f0356d68ca876b8d8087811955a08e3f262d",
+      "receipt_file_sha256": "3427b44509ba89fa9a195f8f3077e9f2e96b6d4a85800af6ad303a1e6892e724",
+      "sealed_at": "2026-11-07T03:11:00Z",
+      "catalog_sha256": "f182ac3e8957c6b9a7161eb956fff2cdb1e9f3cca462e1238d84f7f486f747f0",
+      "ordinary": {
+        "pass": 43,
+        "fail": 0,
+        "skip": 0
+      },
+      "race": {
+        "pass": 43,
+        "fail": 0,
+        "skip": 0,
+        "race_findings": 0
+      },
+      "genuine_parent_reds": 4,
+      "short_owner": {
+        "declared_window": "2s",
+        "observed_virtual_owner": "1.92s",
+        "full_synthetic_score_placeable": true,
+        "passed_gates": 7,
+        "page_coverage": 1,
+        "byte_coverage": 1
+      },
+      "pruned_cohort": {
+        "declared_window": "30s",
+        "observed_virtual_owner": "28.5s",
+        "full_synthetic_score_placeable": true,
+        "passed_gates": 7,
+        "completed_pages": 2838,
+        "expected_pages": 2948,
+        "page_coverage_logged": 0.962687,
+        "byte_coverage_logged": 0.962687
+      },
+      "additional_controls": "The existing mandatory G7 deadline root reaches the same accepted short-owner assertion; an unchanged-parent AST control detects the four remaining product-clock sites.",
+      "fix_scope": "Future authenticated G7 orchestration uses standard-library monotonic time at its four barrier/wait/owner/completion sites without evaluating the product callback. Nil legacy policy retains the original callback value and behavior.",
+      "reproduction_scope": "Complete synthetic artifacts plus virtual-owner scheduling only, not a live candidate exploit, arbitrary request-latency spoofing, native workload or performance measurement.",
+      "mandatory_execution": "Shared owner/scorer checks are unconditionally executed by the already-required G7 deadline root; no historical 33/48 or future 70 root-name protocol expansion was needed.",
+      "receipt_path": "/home/by/urnetwork/temp/g7-clock-fc5-qualified-20261107.7QCUrt/qualification-receipt.json"
+    }
+  },
+  "shared_component_execution": {
+    "go_version": "go1.27.3",
+    "platform": "linux/amd64",
+    "environment": "Bounded isolated Goofe execution, offline read-only modules and source binds, private network and synthetic fixtures. No Sille compilation.",
+    "continuity": "Exact named native catalogs and every selected source/dependency blob, mode and export census checked before/after all phases; owned units and cgroups absent after terminal results.",
+    "limits": {
+      "cpus": 2,
+      "memory_bytes": 12884901888,
+      "tasks": 512
+    },
+    "source_graph_yaml_file_sha256": "5ef2eb29b18e80a336d58d1818720105f57197deb1916203503088c0a76d256f",
+    "source_graph_yaml_unchanged": true,
+    "scope": "These are two separate control-component receipts with different SN inputs. Neither is a full repository/source-graph, whole-main, API, native-host, evaluator runtime or deployment qualification."
+  },
+  "combined_source_integration": {
+    "code_commit": "13c2345e79329c85c30bee5823a362f6fbee1d60",
+    "tree": "25cdec29f461461b9d8d5ddd12e5dad3afd88a14",
+    "parents": [
+      "e855f168ac74e0c1a32098c0fb6bfc2140dd4f65",
+      "fc5e3501ca3d23183d68354458bfa91f449e37d0"
+    ],
+    "main_parent": "82277dec0df06e397024ad93e46e93fcc70020d3",
+    "protection_only_merge": "e855f168ac74e0c1a32098c0fb6bfc2140dd4f65",
+    "changed_owned_paths": 34,
+    "source_continuity": "Normal private merges with no conflicts. All 30 protection blobs equal a09 and all four clock blobs equal fc5. Only these 34 paths differ from the main parent; unrelated main changes and source-graph YAML are preserved.",
+    "aggregate_main_diff_sha256": "6f0aaaa610f88e1d008bf6890f22947cd3083250b39d24c81df44e1401756e8f",
+    "actual_sn_main": "a62cfef9aa26d3596192aee5718b31a7bf7b3d59",
+    "actual_sn_schema_sha256": "a6a85f8e83beb6a60da79ae8b94c6de1da5c6c85ef4cfe9e9e6ba7185a202682",
+    "schema_ancestry": "Actual SN main already contains 215c91d9 and cf57dd5b. No private SN merge, whole-file overwrite or source-graph pin change is required.",
+    "selected_catalog": 188,
+    "overlapping_component_catalog_tuples": 0,
+    "catalog_sha256": "ad3e086f0d8dce206cde72032856de57d67092b8ab90669295a93d97c2744ced",
+    "package_counts": {
+      "competitionpatch": 37,
+      "controller": 39,
+      "model": 15,
+      "sim_latency": 97
+    },
+    "execution_status": "PASS: exact separately declared targeted 188 ordinary and 188 race checks; not full-main or release qualification.",
+    "sealed_at": "2026-11-07T03:26:11Z",
+    "ordinary": {
+      "pass": 188,
+      "fail": 0,
+      "skip": 0,
+      "additional_typed_serialization_subtest_pass": 1
+    },
+    "race": {
+      "pass": 188,
+      "fail": 0,
+      "skip": 0,
+      "race_findings": 0,
+      "additional_typed_serialization_subtest_pass": 1
+    },
+    "receipt_path": "/home/by/urnetwork/temp/protection-clock-13c-qualified-20261107.zynnbN/qualification-receipt.json",
+    "receipt_file_sha256": "ce7ef6c8e790cd9b2bda254763e500b2bc758838414b2864c5ac130354aff9cf",
+    "handoff_file_sha256": "f1109c342adcd71caf8949df690333ed774761c736f0f3b0c645a69baec03e9c",
+    "server_blob_map_sha256": "aeec8a0a38a257a5089c53fa011a589b0e2f9ebcce98661d545b44f65b0a83c6",
+    "sn_blob_map_sha256": "a47fff59813ac956da8d5ad9b10efc8c82f409b76f013670e02d819c84135ad6",
+    "tools_manifest_sha256": "17be49b7ef31f8798dd70aaf41b43c02e594ce3ffb98337f330d625070c3a745",
+    "source_metadata_manifest_sha256": "edbce355ea5338f6c90f3c20998b02bcc52406b55afb4d36949a38ca50051293",
+    "native_test_json_sha256": {
+      "ordinary": "98d3b6feb8403519fe16534d51887253340c5ec485868db4222d469bfee1ba9e",
+      "race": "32e3eae2998614d8e3b235d8099be093dc2808ed84baf22f9ebbeb205cda1f55"
+    },
+    "native_log_sha256": {
+      "ordinary": "e751b9628345dcebbe330240590b646a6ad031c55ccc69a9a886f5dbc7c1053c",
+      "race": "2320ff214cbfaefaac8b30d2d5bd0bacb64125eba6915e5abdd49628e461fd03"
+    },
+    "continuity_and_cleanup": "Exact selected source/dependency modes, blobs and file censuses verified before/after both phases; both owned units and cgroup directories absent after completion.",
+    "module_scope": "Server go.mod/go.sum unchanged from the protected-helper component; exact actual SN main modules selected offline, with no downloads, tidy, upgrades, edits or shims."
+  },
+  "exact_unapproved_patch_serialization": {
+    "sha256": "ff9aae5710c8ce3daadf0d714b74c8eab3d6e17a149abbddc863536c3e5b89ce",
+    "raw_bytes": 585265,
+    "scope": "Synthetic typed-envelope serialization only; no product code from this patch executed. Instrument, runtime and production-eligibility approval remain false.",
+    "measured_bytes": {
+      "approval_json": 783216,
+      "prospective_yaml": 789246,
+      "build_request_json": 1839854,
+      "qualifier_request_json": 1840211,
+      "preparation_request_json": 1842126,
+      "runtime_manifest_json": 1055678,
+      "prospective_host_config_json": 485,
+      "prospective_host_profile_json": 3464
+    },
+    "existing_limits_unchanged": true,
+    "successor_requirement": "Remeasure every changed overlay against its actual typed-envelope limits. These sizes apply only to the exact sealed patch.",
+    "separate_compile_evidence": "The frozen ec322 plus ff9 compile-only record is separate; none of these control-component results is actual frozen-product 70 correctness/runtime evidence."
+  },
+  "policy_and_authority": {
+    "epoch_one": "These changes preserve frozen epoch-one product sources, evaluator inputs, numeric gates, clocks and qualified 1f runtime artifacts. This component does not authorize or rejudge any epoch-one result.",
+    "g2": "Minimum-work/1 keeps inclusive 95% request-count and received-byte lower floors, with no upper ceilings.",
+    "g7": "The complete seeded-crawl-coverage/v1 contract requires candidate page and byte coverage each to retain at least 95% of its own baseline coverage; an 80% baseline requires 76%.",
+    "honesty": "Deliberate instrument or transitive-timing manipulation remains dishonest under existing no-faked-numbers and production-benefit review. This does not create a blanket ban on legitimate product util.go edits or change epoch-one numeric tolerances.",
+    "legacy": "Omitted future-policy leaves retain the historical wire/policy/identity bytes and accepted product patch surface. Actual source replay authenticates its retained raw source lock before selecting a legacy or future context.",
+    "not_complete_tcb": "The dedicated-helper census and clock correction do not claim closure of every transitive runtime authority.",
+    "required_manual_gates": "Genuine frozen provider review and explicit manual product-source approval remain mandatory; these test receipts do not elect, approve or promote a winner/carry."
+  },
+  "remaining_deployment_proof": [
+    "Newly pinned trusted host competitionpatch validator/builder identity and raw-lock-aware image writer, loader and preparer; actual Docker fixed-path replay is a separate boundary.",
+    "Separately sealed minimal combined instrument against the accepted product graph, actual frozen-product mandatory 70 correctness, exact evaluator image/compiler identity and genuine runtime/host qualification.",
+    "Authorized source publication and epoch-two intake lifecycle; immutable fresh same-round R9 baseline and actual runtime quorum before grading.",
+    "No source promotion, configuration deployment, native host, database, provider, workload/performance, readiness acknowledgment, intake/grading activation or baseline is authorized by this record."
+  ],
+  "publication_metadata_scope": "This file records selected source-test evidence only. Source-control publication is not configuration deployment, evaluator activation or product/instrument approval."
+}

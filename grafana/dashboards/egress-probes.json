@@ -666,7 +666,7 @@
     {
       "type": "stat",
       "title": "tls authentication failed",
-      "description": "Providers whose egress presented a certificate that could not authenticate the requested host: an interception signal, kept apart from the score.",
+      "description": "Providers hard-excluded by TLS: an exact-URL finding the TLS judge found specific to the provider (the URL verified directly from the server, and no site, prober or country fault explains it), or a retained legacy flag. A finding still pending, or judged a site, prober, country or retired-URL fault, excludes nobody; see the TLS findings panels below.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -4043,7 +4043,7 @@
       "id": 68,
       "type": "timeseries",
       "title": "destination pool fetches",
-      "description": "Destination pool fetches at the start of each pass, by result: server when the prober loaded the pool the server serves, builtin when that fetch failed and the prober fell back to its built-in table. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes; any builtin value is passes that probed the built-in sites instead of the refreshed pool.",
+      "description": "Destination pool fetches at the start of each pass, URL passes included, by result: server when the pass loaded the pool the server serves, unavailable when no usable pool was served (the route answered 500, the pool was refused or empty) and the pass measured no destination; there is no built-in table to fall back to. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes; any unavailable value is passes that measured nothing. When half or more of a 15-minute window's fetches are unavailable, monitor signal §2.19h raises egress-destination-pool-unavailable; a smaller share, transient errors or one failing instance of several, is read here and does not alert. A series named builtin is the same result from a taskworker built before the rename.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4100,7 +4100,7 @@
       "description": "Pool refresh runs by result: refreshed, skipped (the fleet-wide failure share of the loads that reached their provider was over the 20 % prober-fault line, or fewer than the 20 % prober-fault floor of the recent loads reached their provider at all), or failed. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a run; a skip is the refresh keeping a prober fault from emptying the pool, and failures with no refresh after them are the refresh-not-running finding of monitor signal §2.19b.",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 198
       },
@@ -4154,8 +4154,8 @@
       "description": "The changes each refresh made to the pool: sites retired, candidates promoted onto probation, sites graduated from probation, and places marked incompatible for a site or unmarked after their canaries passed. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a change; the refresh is daily, so changes arrive once a day, at most one retirement per class.",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 198
       },
       "datasource": {
@@ -4198,6 +4198,60 @@
           "expr": "sum by (change) (increase(urnetwork_egress_site_changes_total{env=\"$env\"}[5m]))",
           "refId": "A",
           "legendFormat": "{{change}}"
+        }
+      ]
+    },
+    {
+      "id": 149,
+      "type": "timeseries",
+      "title": "catalog entries kept out of the pool",
+      "description": "qualityprobe.yml entries kept out of the served destination pool, by stage and reason. parse: refused while reading the catalog, counted once per read, so its rate follows the readers (every api pool request, the refresh and the in-process operator) and any non-zero value means the released catalog has entries that are not served. serve: a country site dropped from one served pool because it collides with a served general entry, which the parse should already have kept out. refresh: a candidate held back from promotion because the entry it would serve collides with a country site. Reasons: candidate_name (a candidate repeating a destination's name; the destination is served), country_conflict (a country site sharing a name or registrable domain with a destination or candidate), country_invalid (a country entry or list the prober could not run). Nothing here stops the pool: the rest of the catalog is served. The [egresssites] log line names each entry; monitor signal §2.19h raises egress-destination-catalog-refused.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 198
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (stage, reason) (increase(urnetwork_egress_site_catalog_refusals_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{stage}} {{reason}}"
         }
       ]
     },
@@ -6630,458 +6684,6 @@
     },
     {
       "type": "row",
-      "title": "capability probe (server/capprobe): the modern provider gate's end-to-end post-quantum and window evidence",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 409
-      },
-      "id": 127
-    },
-    {
-      "id": 128,
-      "type": "timeseries",
-      "title": "capability probe passes / min by result, and chain restarts",
-      "description": "Capability probe passes, one task row fleet-wide, by result: measured (a pass read its sweep pages and measured what was due), waiting (between sweeps, every ten minutes, reading nothing; the next sweep starts min_sweep_interval_minutes after the last one started), disabled (the last pass of a chain once capability_probe.yml switches the probe off; nothing runs after it) and failed (its settings, prober shard, a page read or an evidence write; the task retries the same sweep page after a minute). The probe ships switched off, and every series stays at zero until capability_probe.yml enables it and the taskworkers restart. No measured or waiting pass for longer than a pass's max time, with the probe switched on, is a stopped probe (SIGNALS.md §2.19g). Chain restarts: a taskworker with the probe switched on found the chain's task row missing at its ten-minute check and scheduled a pass (urnetwork_capability_probe_chain_restarts_total), so a stale taskworker, a lost row or maintenance had ended the chain.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 410
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (result) (rate(urnetwork_capability_probe_passes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "{{result}}"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(urnetwork_capability_probe_chain_restarts_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "chain restarts"
-        }
-      ]
-    },
-    {
-      "id": 129,
-      "type": "timeseries",
-      "title": "capability measurements / min by outcome",
-      "description": "Finished capability measurements, each one provider in a short tunnel of its own. recorded_modern, recorded_not_post_quantum and recorded_no_resizable_windows wrote evidence with that gate outcome. The rest recorded nothing: tunnel_failed (the tunnel could not be opened), no_ack (the provider never acknowledged the probe's pings), e2e_not_attempted (acknowledged, but the send path accepted no ClientHello: the probe client's encryption is off), e2e_pending (the ClientHello was still in its establishment window at the measurement's timeout), canceled (the pass ended), tunnel_lost (the tunnel's path went away, or its window client was replaced, before the reading concluded), record_failed (the write failed), downgrade_held (a negative reading of a provider whose modern evidence is still fresh, held for a later sweep to confirm) and negative_withheld (a negative reading of a pass that negotiated no session with any provider). A provider that recorded nothing is measured again by the next sweep.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 410
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (outcome) (rate(urnetwork_capability_probe_providers_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "{{outcome}}"
-        }
-      ]
-    },
-    {
-      "id": 130,
-      "type": "timeseries",
-      "title": "capability readings / min by capability and reading",
-      "description": "The final reading of every opened capability measurement. e2e: post_quantum_sealed (authenticated post-quantum key exchange), post_quantum_unsealed (negotiated with a post-quantum group, identity proof not verified within the seal grace; the model records it as post-quantum), classical_sealed and classical_unsealed, no_responder (a ClientHello unanswered for a whole establishment window while the provider acknowledged the probe), pending and not_tested, which are not evidence. window: resizable, fixed (acknowledgements without a window) and not_tested. A large post_quantum_unsealed share is a key resolution problem to understand before the gate is switched on.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 418
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (capability, reading) (rate(urnetwork_capability_probe_readings_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "{{capability}} {{reading}}"
-        }
-      ]
-    },
-    {
-      "id": 131,
-      "type": "timeseries",
-      "title": "capability probe selection / min by stage",
-      "description": "The capability probe's sweep: providers its pages scanned (connected and valid), those due for evidence (none, modern evidence older than modern_refresh_hours, other evidence older than other_refresh_hours), those of them the egress rules admit to quality or speed before the gate, and those it started measuring. Scanned with nothing due is a fleet whose evidence is fresh.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 418
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (stage) (rate(urnetwork_capability_probe_selection_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "{{stage}}"
-        }
-      ]
-    },
-    {
-      "id": 132,
-      "type": "timeseries",
-      "title": "capability measurement mean and p95 duration",
-      "description": "One capability measurement, from opening its tunnel to reading its evidence, teardown excluded. A modern provider reads in seconds; a provider without the end-to-end responder takes the whole 60 s establishment window after its first acknowledgement; measure_timeout_seconds bounds every one.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 426
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(urnetwork_capability_probe_measure_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / clamp_min(sum(rate(urnetwork_capability_probe_measure_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])), 1e-9)",
-          "legendFormat": "mean"
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_capability_probe_measure_seconds_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
-          "legendFormat": "p95"
-        }
-      ]
-    },
-    {
-      "id": 133,
-      "type": "timeseries",
-      "title": "capability measurements in flight and teardown errors / min",
-      "description": "Capability measurements each taskworker has running, teardown included, which concurrency bounds per pass, and capability tunnel teardowns that returned an error; the derived client's retirement is then for the prober reaper (SIGNALS.md §2.25).",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 426
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (host, block, instance) (urnetwork_capability_probe_in_flight{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
-          "legendFormat": "{{host}} {{block}} {{instance}}"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(urnetwork_capability_probe_close_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "teardown errors / min"
-        }
-      ]
-    },
-    {
-      "id": 134,
-      "type": "timeseries",
-      "title": "capability probe sweep duration and time since the last pass",
-      "description": "How long the last completed capability probe sweep took, from its first pass's start, and the time since any taskworker last finished a measured or waiting pass. A sweep must finish well inside the gate's seven-day staleness window, less the refresh age, or evidence goes stale before it is refreshed.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 434
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_capability_probe_last_sweep_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
-          "legendFormat": "last sweep"
-        },
-        {
-          "refId": "B",
-          "expr": "time() - max(urnetwork_capability_probe_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
-          "legendFormat": "since the last pass"
-        }
-      ]
-    },
-    {
-      "id": 135,
-      "type": "timeseries",
-      "title": "capability probe sweeps completed / day",
-      "description": "Capability probe sweeps the taskworkers completed in the trailing day. Between sweeps the probe waits min_sweep_interval_minutes from the last sweep's start, so a fleet whose evidence is fresh completes about one sweep an interval.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 434
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(increase(urnetwork_capability_probe_sweeps_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1d]))",
-          "legendFormat": "sweeps"
-        }
-      ]
-    },
-    {
-      "id": 136,
-      "type": "timeseries",
-      "title": "capability probe guards / min: downgrades held and confirmed, breaker trips",
-      "description": "The two guards that keep a passing fault from recording a negative reading, which takes a provider out of Quality and Speed once the gate is on. Downgrades: held is a negative reading of a provider whose modern evidence is still fresh, held back and carried by the sweep; confirmed is a held one that a negative reading in a later sweep confirmed and recorded. Breaker trips: capability probe passes that negotiated no end-to-end session with any provider and so recorded none of their negative readings (outcome negative_withheld), which is how a fault on the probe's own side shows. Trips on every pass are a probe-side regression (SIGNALS.md §2.19g).",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 442
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (result) (rate(urnetwork_capability_probe_downgrades_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "downgrades {{result}}"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(urnetwork_capability_probe_breaker_trips_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "breaker trips"
-        }
-      ]
-    },
-    {
-      "id": 137,
-      "type": "timeseries",
-      "title": "capability probe shard readiness failures and cleanup errors / min",
-      "description": "Capability probe passes whose prober shard could not show it was funded, by step: funding_unknown (the balance read failed) and funding_unavailable (no active balance); the pass fails and retries after a minute. These are the capability probe's own, never counted in the URL probe's pass errors. Cleanup errors: passes whose prober shard drain or reap failed after the pass; a finished pass still stands, and the prober reaper retries the cleanup.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 442
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (step) (rate(urnetwork_capability_probe_readiness_failures_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "readiness {{step}}"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(urnetwork_capability_probe_shard_cleanup_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
-          "legendFormat": "shard cleanup errors"
-        }
-      ]
-    },
-    {
-      "type": "row",
       "title": "probe tunnel retirement: late provider returns acknowledged before the derived client is revoked",
       "collapsed": false,
       "gridPos": {
@@ -7227,6 +6829,1192 @@
           "refId": "C",
           "expr": "sum(rate(urnetwork_provider_tunnel_retirement_errors_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
           "legendFormat": "teardown errors / min"
+        }
+      ]
+    },
+    {
+      "id": 142,
+      "type": "row",
+      "title": "speed: URL turn timing by country, and active bandwidth samples (CDN, prober shard slot 254)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 467
+      }
+    },
+    {
+      "id": 143,
+      "type": "timeseries",
+      "title": "URL turn time to first byte p50 / p90 (fleet)",
+      "description": "Final-request time to first byte of measured URL turns, from the request written to the first response byte; DNS, TCP, TLS and redirects are excluded. One fleet histogram without labels; the policy fails a turn above 2s.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 468
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(urnetwork_url_probe_ttfb_seconds_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.9, sum by (le) (rate(urnetwork_url_probe_ttfb_seconds_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p90"
+        }
+      ]
+    },
+    {
+      "id": 144,
+      "type": "timeseries",
+      "title": "URL turn wire throughput p10 / p50 (fleet)",
+      "description": "Wire throughput after the first body byte of measured URL turns whose sample met the policy's minimum size (passed or throughput_slow). The sample is at most 1 MiB of a real page, so this is page-load speed, not provider capacity; see the active bandwidth panel for capacity.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 468
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.1, sum by (le) (rate(urnetwork_url_probe_body_bits_per_second_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p10"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(urnetwork_url_probe_body_bits_per_second_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        }
+      ]
+    },
+    {
+      "id": 145,
+      "type": "timeseries",
+      "title": "URL turn mean time to first byte by country (top 15 by turns)",
+      "description": "Mean final-request time to first byte by the provider's claim country, from the per-country sum and count (no buckets, so no per-country percentiles). Countries with the most measured turns are shown.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 476
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (country) (rate(urnetwork_url_probe_country_ttfb_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])) / clamp_min(sum by (country) (rate(urnetwork_url_probe_country_ttfb_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])), 1e-9) and on (country) topk(15, sum by (country) (rate(urnetwork_url_probe_country_ttfb_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])))",
+          "legendFormat": "{{country}}"
+        }
+      ]
+    },
+    {
+      "id": 146,
+      "type": "timeseries",
+      "title": "URL turn mean wire throughput by country (top 15 by turns)",
+      "description": "Mean wire throughput after the first body byte by the provider's claim country, from the per-country sum and count, for turns whose sample met the policy's minimum size.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 476
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (country) (rate(urnetwork_url_probe_country_body_bits_per_second_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])) / clamp_min(sum by (country) (rate(urnetwork_url_probe_country_body_bits_per_second_count{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])), 1e-9) and on (country) topk(15, sum by (country) (rate(urnetwork_url_probe_country_body_bits_per_second_count{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])))",
+          "legendFormat": "{{country}}"
+        }
+      ]
+    },
+    {
+      "id": 147,
+      "type": "timeseries",
+      "title": "active bandwidth mean by country (CDN, 6h)",
+      "description": "Mean active bandwidth sampled through provider tunnels against the public CDN by the provider's egress country, from the per-country sum and count over six hours. Samples are few (the deployment's hourly budget), so read this over hours, not minutes. The figures are advisory: nothing ranks or selects providers by them.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 484
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (country) (rate(urnetwork_egress_probe_bandwidth_country_bytes_per_second_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",source=\"active-cdn\",country=~\"$country\"}[6h])) / clamp_min(sum by (country) (rate(urnetwork_egress_probe_bandwidth_country_bytes_per_second_count{env=\"$env\",service=\"taskworker\",instance!=\"\",source=\"active-cdn\",country=~\"$country\"}[6h])), 1e-12)",
+          "legendFormat": "{{country}}"
+        }
+      ]
+    },
+    {
+      "id": 148,
+      "type": "timeseries",
+      "title": "bandwidth probe passes, samples and readiness / hour",
+      "description": "Bandwidth probe passes by result (measured, empty, disabled, failed), target samples by source and result (measured, no_budget, no_time, unsupported, failed; source tunnel counts tunnels that did not open), and passes refused by their shard's funding readiness. no_budget is the deployment's hourly budget working as designed.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 484
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_egress_probe_bandwidth_passes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "pass {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (source, result) (rate(urnetwork_egress_probe_bandwidth_samples_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "sample {{source}} {{result}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (step) (rate(urnetwork_egress_probe_bandwidth_readiness_failures_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "readiness {{step}}"
+        }
+      ]
+    },
+    {
+      "id": 150,
+      "type": "row",
+      "title": "tls findings: judged verdicts, direct checks, judge runs",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 492
+      }
+    },
+    {
+      "id": 151,
+      "type": "timeseries",
+      "title": "unresolved TLS findings by verdict",
+      "description": "Unresolved exact-URL TLS findings by the TLS judge's verdict after its newest judged run: the judge runs every five minutes on one taskworker at a time, so each point is the taskworker process whose last-judged timestamp is newest, and the chart goes blank once no run has judged for 15 minutes. pending: not judged yet, excludes nobody. provider: specific to its provider, which is hard-excluded. site: a site or prober fault (the URL failed a direct check from the server, or providers on 16 or more networks failed it within the hour). place: a national block, the URL's certificate failing across at least three other networks in the provider's country while its exits work. retired: the pool has not served the URL for a whole refresh interval (a day); pending again once it is served. Only provider excludes, and only pending and provider are rechecked. undecided: the pending findings that run left undecided although their failure is inside the one-hour direct window, because the server's direct check of their host was inconclusive. place withheld pairs: the URL and country pairs whose place evidence that run could not read, by reason (error: a read failed; budget: the run's minute of place reads ran out; limit: past its 64 pairs); their findings are decided nothing for the run: a failure the server's direct check verified still excludes, undecided, until its pair is read, and any other stays as stored, a new one pending. Monitor signal §2.31 raises egress-tls-judge-stale when no run has judged for 20 minutes and egress-tls-findings-undecided when undecided stays above zero for half an hour.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 493
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (verdict) (urnetwork_egress_tls_findings{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "legendFormat": "{{verdict}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max(urnetwork_egress_tls_undecided_findings{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "legendFormat": "undecided"
+        },
+        {
+          "refId": "C",
+          "expr": "max by (reason) (urnetwork_egress_tls_place_withheld_pairs{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "legendFormat": "place withheld pairs {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 152,
+      "type": "timeseries",
+      "title": "TLS judge: verdicts moved, direct checks and runs / hour",
+      "description": "Findings the TLS judge moved to each verdict (pending includes retired findings whose URL is served again), its direct server-side TLS checks of recent findings' hosts by outcome (failed is a certificate the server itself cannot verify: a site or prober fault; inconclusive leaves a finding pending), and its runs (pool_unavailable: the served pool could not be built, so nothing was judged). A burst of site verdicts is one site's certificate, or the prober's CA bundle or clock, failing through many networks at once; the taskworker log names the destination. A judge that has stopped shows no judged runs at all, and every new finding stays pending meanwhile.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 493
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (verdict) (rate(urnetwork_egress_tls_verdicts_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "verdict {{verdict}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome) (rate(urnetwork_egress_tls_direct_checks_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "direct {{outcome}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (result) (rate(urnetwork_egress_tls_judge_runs_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "run {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 153,
+      "type": "row",
+      "title": "URL outcomes by catalog source, and country sites graduating on paired evidence",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 501
+      }
+    },
+    {
+      "id": 154,
+      "type": "timeseries",
+      "title": "URL outcomes by catalog source / min",
+      "description": "Measured URL outcomes the operator ingest stored (api and alt, or a taskworker with operator_transport: local), by the catalog their destination came from (source: general, the served general pool; country, the provider's country list; unrecognized, a destination the storing host could place in neither, as during a catalog rollout or while it cannot parse the catalog, stored on probation so it fails closed), how they counted (scoring: scored, in the eight-hour window every bucket, the index and the Online rule read; probation, recorded and in the rolling quota but never scored: a country site until it graduates on paired evidence, and again after a demotion, and a general site the pool refresh promoted and has not graduated; security_recheck, a recheck of a URL with an open TLS finding, out of both) and outcome. The ingest reads the source from the served catalog and the probation from the pool as it stands (model/provider_egress_url_source.go); each outcome's history row keeps both (provider_egress_health_history url_source, url_probation).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 502
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source, scoring, outcome) (rate(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{source}} {{scoring}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 155,
+      "type": "timeseries",
+      "title": "URL success share by catalog source (1h)",
+      "description": "The share of the last hour's stored URL outcomes that succeeded, per catalog source and scoring: how a country list, or a site on probation, does beside the scored general pool before anything decides to score it. A country list whose share stays well under the general pool's in the same country would cost its providers buckets if it were scored. Read beside the per-destination series above (urnetwork_egress_probe_health_checks_total) for a single site.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 502
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source, scoring) (increase(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\",outcome=\"success\"}[1h])) / sum by (source, scoring) (increase(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{source}} {{scoring}}"
+        }
+      ]
+    },
+    {
+      "id": 156,
+      "type": "timeseries",
+      "title": "country sites by state (latest refresh)",
+      "description": "The listed country sites by state, as the latest daily pool refresh left them (read from the taskworker that ran it): probation, never graduated, recorded and in the rolling quota but never scored; scored, graduated because, over a week, it did no worse than the general catalog for the same providers (per network, at most 3 points worse at one-sided 95%, and load-weighted), with at least 10 networks of 50 paired loads, 20 providers and no TLS failure the judge has not called the provider's own. Only networks at least two weeks old (by network creation) count, for a site or against it: their paired outcomes and their TLS findings, so a farm of new networks can neither graduate a site nor demote one; demoted, on probation again after being clearly worse (6 points at 95%), collapsing (under half the successes its providers' general outcomes predict, for most loads or most networks) or a TLS failure judged a site or place fault. A scored country site counts in Quality, Speed, the index and ranking, never in the Online rule or its country guard. Each site's last judgement is in provider_egress_country_site.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 510
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (state) (urnetwork_egress_country_sites{env=\"$env\"} and on(env,service,block,host,instance) topk(1, max by (env,service,block,host,instance) (urnetwork_egress_site_refresh_last_run_timestamp_seconds{env=\"$env\"})))",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "id": 157,
+      "type": "timeseries",
+      "title": "country site graduations and demotions / day",
+      "description": "Country sites the daily pool refresh graduated (paired: no worse than the general catalog for the same providers) or demoted (worse: clearly worse per network; collapsed: failing for most loads or networks in the last two days; tls: a TLS failure judged a site or place fault), summed across the taskworkers over a day. A refresh skipped for a prober fault judges no country site. The [egresssites] log line names each site with its evidence.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 510
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (change, reason) (increase(urnetwork_egress_country_site_changes_total{env=\"$env\"}[1d]))",
+          "legendFormat": "{{change}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 158,
+      "type": "row",
+      "title": "zero-carry judge: verdicts by country, changes, reads",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 518
+      },
+      "panels": []
+    },
+    {
+      "id": 159,
+      "type": "timeseries",
+      "title": "zero-carry providers by country",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 519
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (country_code) (urnetwork_provider_zero_carry_providers{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{country_code}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_provider_zero_carry_verdicts{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "B",
+          "legendFormat": "verdicts in force"
+        }
+      ],
+      "description": "Connected providers with a zero-carry verdict in force by published country, and every verdict in force connected or not, after the zero-carry judge's newest run: the judge runs every two minutes on one taskworker at a time, so each point is the taskworker process whose last-run timestamp is newest, and the chart goes blank once no run has finished for 15 minutes. A country whose count here equals its provider-locations count before the verdicts has lost all its listed supply: every provider it listed carried nothing for its clients."
+    },
+    {
+      "id": 160,
+      "type": "timeseries",
+      "title": "zero-carry judge: changes and reads / hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 519
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (change) (rate(urnetwork_provider_zero_carry_changes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "refId": "A",
+          "legendFormat": "{{change}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (kind) (rate(urnetwork_provider_zero_carry_reads_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "refId": "B",
+          "legendFormat": "read {{kind}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (rate(urnetwork_provider_zero_carry_confirmations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "refId": "C",
+          "legendFormat": "confirm {{outcome}}"
+        }
+      ],
+      "description": "Verdicts the zero-carry judge made (created) and cleared, by why (expired: past 72 hours; url_success: a URL probe succeeded that the verdict did not see; upgrade: the device reported another app version; gone: the client is gone or inactive), what it read (connected providers paged, the candidates the URL condition left: at least two URL runs in eight hours, none a success; those whose contracts it read; those it read again to confirm a verdict; and the contracts both reads read, its load on transfer_contract through the (destination_id, close_time) index), and how the confirming reads ended (verdict; older_carried: the read stopped at its limit and a contract earlier in the day carried bytes; capped: the search of the rest of the day examined its bound of 2,000 contracts without finding one that carried, so the provider is too busy to confirm and gets no verdict; idle: with the sessions their clients reported idle left out, they fell below the rule). A wave of upgrade clears follows an operator notice; a wave of created after a release is a build that stopped carrying, and monitor signal §2.32 raises zero-carry-verdict-spike when one hour's verdicts pass its bound."
+    },
+    {
+      "id": 161,
+      "type": "timeseries",
+      "title": "zero-carry judge: since the last run and pass",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 527
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > 0)",
+          "refId": "A",
+          "legendFormat": "since the last run"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_provider_zero_carry_judge_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > 0)",
+          "refId": "B",
+          "legendFormat": "since the last pass over every connected provider"
+        }
+      ],
+      "description": "Seconds since the newest zero-carry judge run on any taskworker, and since one finished a pass over every connected provider (about an hour on Main). A judge that stops makes no new verdicts, and those in force lapse at their expiry, 72 hours after each was made, so zero-carry providers return to the pool; the pending_task row under run_once_key judge_provider_zero_carry carries its reschedule error."
+    },
+    {
+      "id": 162,
+      "type": "row",
+      "title": "URL legs by transport: HTTPS over TCP, HTTP/3 over UDP",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 533
+      },
+      "panels": []
+    },
+    {
+      "id": 163,
+      "type": "timeseries",
+      "title": "URL legs by transport and outcome / min",
+      "description": "Each acknowledged URL load's legs, counted apart. tcp is every load's HTTPS leg, success or error. udp is the HTTP/3 leg of a URL whose catalog entry declares h3: success; answered (the site answered over QUIC and refused or failed the request, e.g. a TLS alert 0x128 or 0x150 from an edge without h3 for the hostname, which proves the provider carries UDP); silent (nothing answered the QUIC handshake: the one leg that fails the load, and only where the place carries QUIC to the URL); not_measured; or skipped (its HTTPS leg failed first, so no HTTP/3 leg was made). verdict counts the ingest's place judgement of stored silent legs: provider where at least three other established networks in the provider's country reached the URL over QUIC that day or the day before, so the outcome fails; place where they did not, so the outcome counts as its HTTPS leg and both legs are not required there. held counts turns the HTTP/3 common-mode guard kept out of provider history: their only failure was a silent leg while no recently measured network's HTTP/3 leg reached its site, which is the platform's QUIC path rather than each provider's. Both IP families are counted here, each by its transport; the IP family row below splits them.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 534
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (transport, outcome) (rate(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{transport}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_url_probe_h3_common_mode_held_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "held: HTTP/3 common mode"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (verdict) (rate(urnetwork_egress_url_h3_verdicts_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "silent verdict {{verdict}}"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (country) (rate(urnetwork_url_probe_udp_country_disabled_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "udp country_disabled {{country}}"
+        }
+      ]
+    },
+    {
+      "id": 164,
+      "type": "timeseries",
+      "title": "silent HTTP/3 legs after a passed HTTPS leg (1h)",
+      "description": "The share of measured HTTP/3 legs that nothing answered over the last hour, out of the legs that passed, were answered by their site, or were silent. Every HTTP/3 leg follows an HTTPS leg that passed through the same provider, so this is the share of turns whose provider path carries TCP but not UDP to the site, before the place judgement excuses the places that block QUIC. An unmeasured or skipped leg is in neither count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 534
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",outcome=\"silent\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",outcome=~\"success|answered|silent\"}[1h]))",
+          "legendFormat": "silent HTTP/3 legs"
+        }
+      ]
+    },
+    {
+      "id": 165,
+      "type": "row",
+      "title": "URL legs by IP family: IPv4 through A records, IPv6 through AAAA",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 542
+      },
+      "panels": []
+    },
+    {
+      "id": 166,
+      "type": "timeseries",
+      "title": "URL legs by IP family, transport and outcome / min",
+      "description": "Each acknowledged URL load's legs by family and transport. family ipv4 is every load's legs through the URL's A record; ipv6 is a dual-stack provider's legs through the URL's AAAA record, made only for a URL whose catalog entry says ipv6: true and only after the IPv4 HTTPS leg passed. tcp success or error is an HTTPS leg's; udp is the HTTP/3 leg of a URL that declares h3, worded as in the transport row. not_measured is a leg that could not be made or was cut short (an empty AAAA record from the provider's place, a resolver failure, the tunnel's loss); no_url is a dual-stack provider's load on a URL without ipv6: true; country_disabled is a UDP leg not made because the provider's country sets udp_probes: false; skipped is a leg an earlier failed leg kept from being made. None of these is a failure. verdict counts the ingest's place judgement of stored failed IPv6 legs: provider where at least three other established networks in the provider's country reached the URL over IPv6 that day or the day before, so the outcome fails; place where they did not, so the outcome counts as its IPv4 legs. held counts turns the IPv6 common-mode guard kept out of provider history: their only failures were IPv6 legs while no recently measured network's IPv6 leg reached its site, which is the platform's IPv6 path rather than each provider's.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 543
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (family, transport, outcome) (rate(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{family}} {{transport}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (transport) (rate(urnetwork_url_probe_ipv6_common_mode_held_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "held: IPv6 {{transport}} common mode"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (transport, verdict) (rate(urnetwork_egress_url_ipv6_verdicts_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "IPv6 {{transport}} verdict {{verdict}}"
+        }
+      ]
+    },
+    {
+      "id": 167,
+      "type": "timeseries",
+      "title": "failed IPv6 legs after a passed IPv4 leg (1h)",
+      "description": "The share of measured IPv6 HTTPS legs that failed over the last hour, out of those that passed or failed, and the share of measured IPv6 HTTP/3 legs that nothing answered, out of those that passed, were answered or were silent. Every IPv6 leg follows an IPv4 HTTPS leg that passed through the same provider, so the first is the share of dual-stack turns whose provider carries the URL over IPv4 but not over IPv6, before the place judgement excuses the places where IPv6 does not reach the URL. not_measured, no_url, skipped and country_disabled legs are in neither count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 543
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"tcp\",family=\"ipv6\",outcome=\"error\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"tcp\",family=\"ipv6\",outcome=~\"success|error\"}[1h]))",
+          "legendFormat": "failed IPv6 HTTPS legs"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",family=\"ipv6\",outcome=\"silent\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",family=\"ipv6\",outcome=~\"success|answered|silent\"}[1h]))",
+          "legendFormat": "silent IPv6 HTTP/3 legs"
+        }
+      ]
+    },
+    {
+      "id": 168,
+      "type": "timeseries",
+      "title": "IPv6 legs by URL: no AAAA and failed / min",
+      "description": "The URLs whose IPv6 HTTPS legs most often came back without an AAAA record through the provider's resolver (no_aaaa: the URL, or a redirect hop of it, publishes AAAA to some resolvers or places only, or not at all; not measured, and the URL's outcome, never the provider's), and the URLs whose IPv6 HTTPS legs most often failed (judged by IPv6 place on the server). destination is the URL the legs loaded: the load's own, or the stand-in its IPv6 legs loaded because its own serves no IPv6. A URL high on the first list is one to drop the ipv6 mark from.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 551
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (destination) (rate(urnetwork_url_probe_ipv6_destination_legs_total{env=\"$env\",service=\"taskworker\",instance!=\"\",outcome=\"no_aaaa\"}[$__rate_interval]))) * 60",
+          "legendFormat": "no AAAA {{destination}}"
+        },
+        {
+          "refId": "B",
+          "expr": "topk(10, sum by (destination) (rate(urnetwork_url_probe_ipv6_destination_legs_total{env=\"$env\",service=\"taskworker\",instance!=\"\",outcome=\"failed\"}[$__rate_interval]))) * 60",
+          "legendFormat": "failed {{destination}}"
+        }
+      ]
+    },
+    {
+      "id": 169,
+      "type": "timeseries",
+      "title": "QUIC handshakes retried after silence / min",
+      "description": "HTTP/3 legs whose first QUIC handshake heard nothing back within its bound and were made once more on a fresh socket, so from a new source port, by IP family and how the second ended: answered (the site answered it, so the first was a lost handshake, not the provider's UDP; Cloudflare's IPv6 edge lost about one in 50 in the 2026-11-11 survey), silent (no answer again: the leg reports silence, which the server judges by place), canceled (the request ended under it). Counted by the prober's tunnel, per leg.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 551
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (family, outcome) (rate(urnetwork_provider_tunnel_quic_handshake_retries_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{family}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 170,
+      "type": "row",
+      "title": "capability evidence: failed later legs and post-quantum outcomes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 559
+      },
+      "panels": []
+    },
+    {
+      "id": 171,
+      "type": "timeseries",
+      "title": "URL outcomes failed only on later legs, by leg / min",
+      "description": "Stored URL outcomes that failed only on legs made after their IPv4 HTTPS leg passed, where the ingest's place verdict held each failed leg against the provider (FP2-PROTOCOL.md §3.2): v4udp, the IPv4 HTTP/3 leg was silent; v6tcp, the IPv6 HTTPS leg failed; v6udp, the IPv6 HTTP/3 leg was silent; v4udp_v6tcp and v4udp_v6udp, both. This is the failed_later_legs mask each outcome stores. Capability-aware FindProviders2 reads it as negative evidence on one axis, UDP (protocol, label tcp) or IPv6 (IP, label ipv4), and classifies the provider on the legs it keeps instead of excluding it. A leg judged the place's makes its outcome a pass and is not counted here.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 560
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (legs) (rate(urnetwork_egress_url_failed_later_legs_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{legs}}"
+        }
+      ]
+    },
+    {
+      "id": 172,
+      "type": "timeseries",
+      "title": "post-quantum outcomes of URL turns / min",
+      "description": "Stored URL outcomes of post-quantum turns, the turns whose claim asked for an end-to-end session (about one turn per provider every four hours), by the pq_outcome the store kept (FP2-PROTOCOL.md §12.3): positive, the session negotiated a post-quantum group (X25519MLKEM768), sealed before the IPv4 HTTPS leg's request and carried that passed leg; negative, a classical group, a post-quantum session that had not sealed by the run's end, or no responder for a whole establishment window while the provider acknowledged the turn's traffic; unmeasured, anything else, a security recheck or an outcome on probation included. Strict post-quantum selection matches only providers whose newest outcome in the eight-hour window is positive. prober is the same turns as the taskworker read them before submitting, so a gap between the two is outcomes the store kept as unmeasured.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 560
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pq) (rate(urnetwork_egress_url_pq_outcomes_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "stored {{pq}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (pq) (rate(urnetwork_url_probe_e2e_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "prober {{pq}}"
         }
       ]
     }

@@ -1,0 +1,53 @@
+{
+  "schema": "epoch2-correctness-component-qualification/v1",
+  "status": "source component qualified; runtime overlay remains unapproved",
+  "qualified_source": "156927e68bd86aa71cf9eddb110a441012c7e50d",
+  "qualified_parents": [
+    "1f939c82cb399c075306689976699ccaf26f8cf6",
+    "53a4abbda00db2369d8c0cc5965922d88743eb6b"
+  ],
+  "publication_merge": "d2b02d37f0fa70414abbbe1ca2327ea8d18abba3",
+  "publication_scope": "The 21 E2 paths in the publication merge are byte-identical to the qualified component. Other current-main changes, including the upstream DbTiming observation-option correction, were not qualified by these component tests.",
+  "source_lock_sha256": "5ef2eb29b18e80a336d58d1818720105f57197deb1916203503088c0a76d256f",
+  "dependencies": {
+    "go": "1.27.3",
+    "sn": "8543b3b8efd6cdd0f0ffd51a827ccccc32d62960",
+    "sdk": "5517f0356d68ca876b8d8087811955a08e3f262d",
+    "other_canonical_refs": "Unchanged; verified Go and embed blob maps, not a complete-worktree sourcegraph test."
+  },
+  "source_proof": {
+    "server_blob_count": 7213,
+    "server_blob_map_sha256": "997c7eb3b5e9f7351c86a55bb7487c4431438ef01f5e7828221409c1d2fa5c6f",
+    "source_archive_sha256": "3395dd8c93ace8ddcdeed21a9127d4a5bd5928c034356d6a108be0e8238f0a9a",
+    "post_test_source_and_dependency_continuity": "passed"
+  },
+  "tests": {
+    "catalog_count": 82,
+    "catalog_sha256": "79c868995b7fcb6ffad840a9ffe46de04ea17290daaf0a3a8b479fda11f23aaf",
+    "normal": {"passed": 82, "failed": 0, "skipped": 0},
+    "race": {"passed": 82, "failed": 0, "skipped": 0, "race_findings": 0},
+    "cold_global_regression": "All three actual affected test roots supply their own private global identity, even with empty HOME/XDG, cleared author/committer/EMAIL, and native Git config-only actor refusal enabled.",
+    "removal_control": {
+      "variant": "Qualified component with only three explicit private-global fixture setup calls removed; not an earlier revision.",
+      "diff_sha256": "cd9c339fd770a6b4d2329aa01d9b65ca74c326b785759e28004bf8ac9c7b3f2f",
+      "result": "All three named cold child assertions and their parent failed with native Git identity refusal; no compile error, panic, timeout or skip."
+    }
+  },
+  "causal_history_preserved": {
+    "coverage_parent": "f7bc71b8a03abe2ff737abe2b03827f47465a7c1",
+    "coverage_parent_result": "Named failure: coverage image qualified without any G7 execution.",
+    "initial_d4_normal": "72 passed, three Git identity fixture failures; original log retained.",
+    "initial_d4_log_sha256": "45feece9c01f20d58f1295eb29738268669423759052f21d745426a72b70f284",
+    "configured_runner_75_receipt_sha256": "5822e4a95db7e0bdd54443aecaf01906f180bea13ca0884a61cf90ca35604cf4",
+    "durable_fixture_correction": "Explicit private-global setup in test roots, with the shared Git helpers and all d4 production bytes preserved; no actual global/local actor or date override."
+  },
+  "qualification_receipt_sha256": "f0d1509bbc9f3018d12d5db6d5e5fd7efe2136069de8905e59ee74dc478c1e53",
+  "environment": "Goofe only; CPUs 0,2, CPU 200%, memory 12 GiB, swap 0, tasks 512, offline private network, stable verified cache/source binds, synthetic fixtures only.",
+  "explicit_non_claims": [
+    "No qualification of newer main, the complete model suite, API deployment or complete-worktree sourcegraph.",
+    "No genuine combined G2+G7 overlay, product/compiler graph, technical image or E2 runtime qualification.",
+    "No native, image, provider or database integration execution in this component run.",
+    "No E1 source, evaluator, gates or baseline changes, and no runtime deployment, grant or clock change.",
+    "The separately qualified 1f939c82 operator-release binaries and image remain frozen and are not replaced by this publication."
+  ]
+}

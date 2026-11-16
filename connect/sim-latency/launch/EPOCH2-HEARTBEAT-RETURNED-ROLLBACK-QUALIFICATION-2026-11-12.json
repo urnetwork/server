@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "kind": "competition-returned-rollback-qualification/v1",
+  "source_commit": "d485ae64a883aa29ad678eb453b858b714783f75",
+  "source_manifest_sha256": "04b362c184a16bd53bcef3342a534e61cae19b9b6e58663f96d17299c385c54c",
+  "scope": "Exact source-owned pre-business and final-slot deadline proofs share the optional job-only cumulative eight-call ceiling, retaining acknowledged rollback, returned idle release, zero COMMIT, the original 20-second budget and both confirmed leases.",
+  "focused_smoke": {
+    "passed": 8,
+    "failed": 0,
+    "exit_status": 0,
+    "log_sha256": "3ff001625a6cd783a2ae3d680fb01aedffe95f31b98169fc4d680cd683273a94"
+  },
+  "ordinary_passed": 303,
+  "race_passed": 303,
+  "failures": 0,
+  "repetitions_each": 3,
+  "terminal_exit_status": 0,
+  "source_unchanged": true,
+  "external_dependencies_clean_unchanged": true,
+  "external_dependency_manifest_sha256": "b8d6daacae1b26cd10ca18ca698d53440105c25f21769eb4fde57cf3f5f4f8ae",
+  "ordinary_log_sha256": "e6c2a0bc29ed5904658f9e116b89de51c3c234493b63f736446c1026d38486ca",
+  "race_log_sha256": "ed209468582ff32fb0a540497839e4df7bef500c91837cfe6a2b1e6a3f4edc60",
+  "logs": "/dev/shm/competition-heartbeat-independent-qa-20261112.Pg7OR8uP",
+  "deployed": false,
+  "build_deferred_for_superset_commit": "95fe2b792253549f41ab5e275ea1a78bfef2ba3a",
+  "remaining": "Qualify the separately committed superset covering all twelve known failed-last statement positions, then build/stage that exact source. Activation remains subject to the authorized idle boundary. These are targeted tests, not repository-wide or native-host admission claims."
+}

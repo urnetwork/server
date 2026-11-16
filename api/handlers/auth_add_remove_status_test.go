@@ -409,40 +409,90 @@ func TestRemoveAuthNotBoundRefusalCarriesNoStatusPrefix(t *testing.T) {
 //
 // This package imports both, so it is where the agreement can be asserted.
 //
+// The agreement is about the grammar, not about every body. Since 078d282fa
+// (2026-10-16) an error that declares no status is an internal failure: the
+// router answers it with the fixed UnexpectedErrorMessage 500 and keeps the
+// text in the log, while PeelStatusPrefix still returns such a message
+// unchanged, because structured results (RemoveAuthResult and the wallet
+// auth results) carry undeclared refusals such as "cannot remove your last
+// auth method" to the user. So both sides must agree on WHETHER a message
+// declares a status; when it does, the router's body is exactly the peeled
+// text; when it does not, the peel changes nothing and the router sends none
+// of the text.
+//
 // PURE UNIT within an integration package: no database is touched.
 func TestPeelStatusPrefixAgreesWithRaiseHttpError(t *testing.T) {
-	cases := []string{
-		"400 Invalid email or phone number.",
-		"401 invalid signature",
-		"409 This wallet is already linked to another account.",
-		"429 Too many attempts.",
-		"500 something broke",
+	cases := []struct {
+		message string
+		// the status the message declares by the "<code> message" convention,
+		// or 0 when it declares none
+		status int
+	}{
+		{"400 Invalid email or phone number.", http.StatusBadRequest},
+		{"401 invalid signature", http.StatusUnauthorized},
+		{"409 This wallet is already linked to another account.", http.StatusConflict},
+		{"429 Too many attempts.", http.StatusTooManyRequests},
+		{"500 something broke", http.StatusInternalServerError},
 		// tagged by an auth wrapper
-		"[impl]404 Feedback not found.",
-		"[outer][inner]403 Nope.",
-		// NOT prefixes, and must survive untouched
-		"no auth method supplied",
-		"cannot remove your last auth method",
-		"[impl]something broke",
-		"4000 not a status",
-		"400no space",
-		"This wallet is already linked to another account.",
+		{"[impl]404 Feedback not found.", http.StatusNotFound},
+		{"[outer][inner]403 Nope.", http.StatusForbidden},
+		// NOT prefixes: the peel must leave them untouched, and the router
+		// must answer them as internal failures without their text
+		{"no auth method supplied", 0},
+		{"cannot remove your last auth method", 0},
+		{"[impl]something broke", 0},
+		{"4000 not a status", 0},
+		{"400no space", 0},
+		{"This wallet is already linked to another account.", 0},
 		// a multi-line message: only the first line can select a status, and
 		// the remainder belongs to the body
-		"400 first line\nsecond line",
+		{"400 first line\nsecond line", http.StatusBadRequest},
 	}
-	for _, message := range cases {
+	for _, c := range cases {
 		w := httptest.NewRecorder()
-		router.RaiseHttpError(fmt.Errorf("%s", message), w)
+		statusError := router.RaiseHttpError(fmt.Errorf("%s", c.message), w)
 		routerBody := strings.TrimRight(w.Body.String(), "\n")
+		peeled := model.PeelStatusPrefix(c.message)
 
-		peeled := model.PeelStatusPrefix(message)
-		if peeled != routerBody {
+		declares := c.status != 0
+		if statusError != declares {
 			t.Fatalf(
-				"disagreement on %q: router leaves %q in the body, PeelStatusPrefix "+
-					"yields %q. The two grammars have drifted",
-				message, routerBody, peeled,
+				"router reads %q as declaring a status = %v, want %v. The two grammars have drifted",
+				c.message, statusError, declares,
 			)
+		}
+		if declares {
+			if w.Code != c.status {
+				t.Fatalf("router answers %q with HTTP %d, want %d", c.message, w.Code, c.status)
+			}
+			if peeled == c.message {
+				t.Fatalf("PeelStatusPrefix left the declared prefix on %q", c.message)
+			}
+			if peeled != routerBody {
+				t.Fatalf(
+					"disagreement on %q: router leaves %q in the body, PeelStatusPrefix "+
+						"yields %q. The two grammars have drifted",
+					c.message, routerBody, peeled,
+				)
+			}
+			continue
+		}
+		if peeled != c.message {
+			t.Fatalf(
+				"PeelStatusPrefix changed %q to %q, but it declares no status: text that was "+
+					"never a prefix was stripped",
+				c.message, peeled,
+			)
+		}
+		if w.Code != http.StatusInternalServerError || routerBody != router.UnexpectedErrorMessage {
+			t.Fatalf(
+				"router answers undeclared %q with HTTP %d %q, want the fixed %d %q: an "+
+					"internal failure's text must stay in the log",
+				c.message, w.Code, routerBody, http.StatusInternalServerError, router.UnexpectedErrorMessage,
+			)
+		}
+		if strings.Contains(routerBody, c.message) {
+			t.Fatalf("router body %q quotes the undeclared failure %q", routerBody, c.message)
 		}
 	}
 }

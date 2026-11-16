@@ -98,7 +98,7 @@ func currentPayoutRedisSettlements(t testing.TB, ctx context.Context, legacy boo
 }
 
 // Neither zero revenue nor an asynchronous Redis release changes completed
-// provider work. Post-boundary usage stays out of a legacy payment plan.
+// provider work.
 func TestProviderCurrentMigrationRedisPaidFreeUsageRemainsSubnetOnly(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -118,46 +118,20 @@ func TestProviderCurrentMigrationRedisPaidFreeUsageRemainsSubnetOnly(t *testing.
 				t.Fatal("free and paid work have different subnet weight", got)
 			}
 		}
-		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil || plan == nil || len(plan.NetworkPayments) != 0 {
-			t.Fatal("post-boundary Redis work entered legacy payment plan", plan, err)
-		}
-		server.Db(ctx, func(conn server.PgConn) {
-			var unpaid int
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow_sweep WHERE payment_id IS NULL`).Scan(&unpaid))
-			if unpaid != 2 {
-				t.Fatal("subnet usage was consumed by legacy planning", unpaid)
-			}
-		})
 	})
 }
 
-// Pre-boundary work still reaches the actual USDC planner after Redis close
-// and replay, without becoming a second subnet earning.
-func TestProviderCurrentMigrationRedisLegacySettlementKeepsAsset(t *testing.T) {
+// Pre-boundary work never becomes a subnet earning after Redis close and
+// replay.
+func TestProviderCurrentMigrationRedisLegacySettlementEarnsNoSubnetUsage(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		cohorts, start, end := currentPayoutRedisSettlements(t, ctx, true)
+		_, start, end := currentPayoutRedisSettlements(t, ctx, true)
 		usages, err := GetStEpochProviderUsageAtEpoch(ctx, 9, start, end)
 		if err != nil || len(usages) != 0 {
 			t.Fatal("legacy Redis work became subnet earning", usages, err)
-		}
-		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil || plan == nil {
-			t.Fatal("legacy Redis work was not planned", err)
-		}
-		payment := plan.NetworkPayments[cohorts[0].network]
-		if payment == nil || payment.PayoutByteCount != 1024 || payment.Payout <= 0 {
-			t.Fatal("legacy paid work lost its retained amount", payment)
-		}
-		if err := RequireProviderUsdcPayment(ctx, payment.PaymentId); err != nil {
-			t.Fatal("legacy Redis payment admission refused", err)
-		}
-		second, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil || second == nil || len(second.NetworkPayments) != 0 {
-			t.Fatal("settlement replay paid the same work twice", second, err)
 		}
 	})
 }

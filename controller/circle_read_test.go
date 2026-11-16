@@ -7,12 +7,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -72,53 +70,6 @@ func circleReadTestList(t *testing.T, client *CoreCircleApiClient, ctx context.C
 		}
 		return &CircleUserToken{circleUserId: server.NewId(), UserToken: "synthetic-user-token"}, nil
 	}, "Synthetic native", "SYNTHETIC")
-}
-
-func TestCircleReadEntityKeyRetriesAndRejectsMalformedKey(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	public := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
-	for _, malformed := range []bool{false, true} {
-		calls, closed, waits := 0, 0, 0
-		now := time.Now()
-		client := paymentReadTestCircle(paymentReadHooks{
-			now: func() time.Time { return now },
-			wait: func(ctx context.Context, delay time.Duration) error {
-				waits++
-				now = now.Add(delay)
-				return ctx.Err()
-			},
-			do: func(request *http.Request) (*http.Response, error) {
-				requirePaymentReadRequest(t, request)
-				if !strings.HasSuffix(request.URL.Path, "/config/entity/publicKey") || calls != closed {
-					t.Fatal("wrong entity read or unjoined prior body")
-				}
-				calls++
-				if calls == 1 && !malformed {
-					return paymentReadTestResponse(503, "temporary", &closed), nil
-				}
-				value := public
-				if malformed {
-					value = "synthetic-invalid-key"
-				}
-				return paymentReadTestResponse(200, circleReadTestPage(t, "publicKey", value), &closed), nil
-			},
-		})
-		result, err := client.getPublicKey(context.Background())
-		if malformed {
-			if result != nil || err == nil || calls != 1 || closed != 1 || waits != 0 {
-				t.Fatal("malformed entity key was accepted or retried", err, calls, closed, waits)
-			}
-		} else if result == nil || *result != public || err != nil || calls != 2 || closed != 2 || waits != 1 {
-			t.Fatal("entity key did not survive transient read", err, calls, closed, waits)
-		}
-	}
 }
 
 func TestCircleReadNotificationBindsKeyAndSignature(t *testing.T) {
@@ -505,9 +456,6 @@ func TestCircleReadCanceledAdmissionDoesNotLoadConfigOrCreateToken(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	client := &CoreCircleApiClient{}
-	if key, err := client.getPublicKey(ctx); key != nil || !errors.Is(err, context.Canceled) {
-		t.Fatal("canceled entity admission read configuration", err)
-	}
 	if err := client.verifyCircleAuth(ctx, "synthetic-key", "synthetic-signature", nil); !errors.Is(err, context.Canceled) {
 		t.Fatal("canceled notification admission read configuration", err)
 	}
@@ -589,7 +537,7 @@ func TestPaymentReadRetryAfterBoundsAndTransientInternalError(t *testing.T) {
 				return response, nil
 			},
 		})
-		result, err := client.GetTransaction(context.Background(), paymentReadTestId)
+		result, err := client.getCircleWallet(context.Background(), paymentReadTestId)
 		if strings.HasPrefix(header, "999") {
 			if result != nil || !errors.Is(err, context.DeadlineExceeded) || calls != 1 || waited != 300*time.Second {
 				t.Fatal("oversized retry-after overflowed or extended the owner", err, calls, waited)

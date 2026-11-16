@@ -484,8 +484,8 @@ func appendFixedAlertClass(classes map[string][]string, class, source string) {
 	classes[class] = append(classes[class], source)
 }
 
-// Recognize the actual typed parent/event and emitted burst only. Canonical
-// metrics and correlation-only bursts are distinct observability names.
+// Recognize the actual typed log class only. A canonical metric is a distinct
+// observability name.
 func (self *fixedAlertClassScanner) collectLogClasses(file *ast.File, source string, classes map[string][]string, limits *[]string) {
 	ast.Inspect(file, func(node ast.Node) bool {
 		composite, ok := node.(*ast.CompositeLit)
@@ -515,42 +515,6 @@ func (self *fixedAlertClassScanner) collectLogClasses(file *ast.File, source str
 		}
 		if !known {
 			*limits = append(*limits, source+": unresolved typed log class name")
-		}
-		burstExpression := fields["burst"]
-		if pointer, ok := burstExpression.(*ast.UnaryExpr); ok && pointer.Op == token.AND {
-			burstExpression = pointer.X
-		}
-		burst, ok := burstExpression.(*ast.CompositeLit)
-		if !ok || self.compositeTypes[burst] != "logBurst" {
-			if burstExpression != nil {
-				if value, nilValue := burstExpression.(*ast.Ident); !nilValue || value.Name != "nil" {
-					*limits = append(*limits, source+": unresolved burst expression")
-				}
-			}
-			return false
-		}
-		burstFields := map[string]ast.Expr{}
-		for _, raw := range burst.Elts {
-			if field, ok := raw.(*ast.KeyValueExpr); ok {
-				if name, ok := field.Key.(*ast.Ident); ok {
-					burstFields[name.Name] = field.Value
-				}
-			}
-		}
-		if flag := burstFields["correlationOnly"]; flag != nil {
-			if value, ok := flag.(*ast.Ident); !ok || value.Name != "false" {
-				if !ok || value.Name != "true" {
-					*limits = append(*limits, source+": unresolved burst correlation mode")
-				}
-				return false
-			}
-		}
-		values, known = self.strings(burstFields["name"], map[*ast.Object]bool{}, 0)
-		for value := range values {
-			appendFixedAlertClass(classes, value, source)
-		}
-		if !known {
-			*limits = append(*limits, source+": unresolved emitted burst name")
 		}
 		return false
 	})
@@ -707,8 +671,8 @@ var second = computed("synthetic-computed-input-not-exact-class")
 func TestFixedLogAlertClassScannerDistinguishesTypedEventsAndObservabilityNames(t *testing.T) {
 	parsed, err := parser.ParseFile(token.NewFileSet(), "tailer.go", `package synthetic
 var logClasses = []logClass{
- {name: "synthetic-log-class", canonical: &logCanonical{name: "synthetic-canonical-not-alert"}, burst: &logBurst{name: "synthetic-burst-class"}},
- {name: "synthetic-correlation-parent", burst: &logBurst{name: "synthetic-correlation-not-alert", correlationOnly: true}},
+ {name: "synthetic-log-class", canonical: &logCanonical{name: "synthetic-canonical-not-alert"}},
+ {name: "synthetic-second-log-class"},
  {name: "synthetic-metric-not-alert", metricOnly: true},
 }
 var arbitrary = []label{{name: "synthetic-label-not-alert"}}
@@ -718,10 +682,10 @@ var arbitrary = []label{{name: "synthetic-label-not-alert"}}
 	}
 	classes := map[string][]string{}
 	collectFixedLogAlertClassLiterals(parsed, "tailer.go", classes)
-	if len(classes) != 3 {
-		t.Fatalf("typed log class inventory has %d classes, want parent/parent/burst", len(classes))
+	if len(classes) != 2 {
+		t.Fatalf("typed log class inventory has %d classes, want the two typed classes", len(classes))
 	}
-	for _, class := range []string{"synthetic-log-class", "synthetic-correlation-parent", "synthetic-burst-class"} {
+	for _, class := range []string{"synthetic-log-class", "synthetic-second-log-class"} {
 		if sources := classes[class]; len(sources) != 1 || sources[0] != "tailer.go" {
 			t.Fatalf("typed log class %q lost exact source attribution", class)
 		}

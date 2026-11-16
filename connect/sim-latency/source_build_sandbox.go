@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
 // Deployment owns these ceilings; candidate input cannot change them. Every
@@ -46,13 +48,15 @@ func defaultSourceBuildSandboxSettings() sourceBuildSandboxSettings {
 
 // These are authenticated staging paths, never candidate-provided commands.
 type sourceBuildSandboxInput struct {
-	Owner             string
-	Phase             string
-	ImageId           string
-	Commit            string
-	SourceDirectory   string
-	MetadataDirectory string
-	OutputDirectory   string
+	Owner              string
+	Phase              string
+	MinimumWork        bool
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy
+	ImageId            string
+	Commit             string
+	SourceDirectory    string
+	MetadataDirectory  string
+	OutputDirectory    string
 }
 
 // Builds fixed argv rather than interpolating paths, commits or code in shell
@@ -103,7 +107,7 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 	if input.Phase != "metadata" {
 		args = append(args, "--tmpfs=/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size="+strconv.FormatInt(settings.MetadataBytes, 10))
 	}
-	script := "test \"$(go env GOVERSION)\" = go1.27.3; mkdir -p /work/cache /work/tmp; cp -R /opt/urnetwork/go/build-cache/. /work/cache/; cp -R /input/server-metadata/. /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/; source_head=$(git -C /workspace/server rev-parse HEAD); test \"$source_head\" = \"$SOURCE_BUILD_COMMIT\"; source_status=$(git -C /workspace/server status --porcelain --untracked-files=all); test -z \"$source_status\"; cd /workspace/server; "
+	script := "test \"$(go env GOVERSION)\" = go1.27.4; mkdir -p /work/cache /work/tmp; cp -R /opt/urnetwork/go/build-cache/. /work/cache/; cp -R /input/server-metadata/. /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/; source_head=$(git -C /workspace/server rev-parse HEAD); test \"$source_head\" = \"$SOURCE_BUILD_COMMIT\"; source_status=$(git -C /workspace/server status --porcelain --untracked-files=all); test -z \"$source_status\"; cd /workspace/server; "
 	if input.Phase == "metadata" {
 		// Export only the immutable incumbent's module metadata. In particular,
 		// do not shadow this path with the later phases' empty writable tmpfs.
@@ -111,7 +115,11 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 	} else if input.Phase == "check" {
 		script += "go vet ./connect/...; go test -run '^$' ./connect/..."
 	} else if input.Phase == "correctness" {
-		script += sourceCorrectnessSuiteScript()
+		suite, err := newSourceCorrectnessSuite(input.MinimumWork, input.WorkCoveragePolicy)
+		if err != nil {
+			return nil, err
+		}
+		script += suite.script
 	} else {
 		args = append(args, "--tmpfs=/output:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size="+strconv.Itoa(settings.BinaryBytes))
 		script += "go build -trimpath -o /output/sim-latency ./connect/sim-latency; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.revision=//p')\" = \"$SOURCE_BUILD_COMMIT\"; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.modified=//p')\" = false; cat /output/sim-latency"
@@ -120,16 +128,21 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 }
 
 // Command-scope config reaches Go's own VCS subprocesses as well as preflight.
-// Reset inherited trust, then name only the authenticated mounted server root.
+// Reset inherited trust, then name only the authenticated mounted repo roots.
+// Test setup may build a helper in a sibling repo; Go's VCS child needs that
+// exact root too, without admitting arbitrary siblings or disabling stamping.
 func sourceBuildSandboxGitEnvironment() []string {
-	configuration := [][2]string{
-		{"safe.directory", ""}, {"safe.directory", "/workspace/server"},
+	configuration := [][2]string{{"safe.directory", ""}}
+	for _, repository := range sourceRepositoryNames() {
+		configuration = append(configuration, [2]string{"safe.directory", "/workspace/" + repository})
+	}
+	configuration = append(configuration, [][2]string{
 		{"core.hooksPath", "/dev/null"}, {"core.fsmonitor", "false"},
 		{"core.attributesFile", "/dev/null"}, {"log.showSignature", "false"},
 		{"gc.auto", "0"}, {"maintenance.auto", "false"},
 		{"submodule.recurse", "false"}, {"fetch.recurseSubmodules", "false"},
 		{"protocol.allow", "never"}, {"credential.helper", ""}, {"credential.interactive", "false"},
-	}
+	}...)
 	environment := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_PARAMETERS=",
 		"GIT_CONFIG_COUNT=" + strconv.Itoa(len(configuration)), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1",
 		"GIT_ATTR_NOSYSTEM=1", "GIT_ASKPASS=/bin/false", "SSH_ASKPASS=/bin/false", "GIT_PAGER=/bin/cat"}

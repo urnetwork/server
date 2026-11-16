@@ -17,6 +17,7 @@ func TestProviderWorkSessionPartitionCommandParses(t *testing.T) {
 		finalize    bool
 		rollback    bool
 		abort       bool
+		dropLegacy  bool
 	}{
 		{args: []string{"--cutover-week=2026-11-02"}, cutoverWeek: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)},
 		{args: []string{"--cutover-week=2026-11-02", "--dry-run"}, cutoverWeek: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC), dryRun: true},
@@ -25,6 +26,8 @@ func TestProviderWorkSessionPartitionCommandParses(t *testing.T) {
 		{args: []string{"--rollback"}, rollback: true},
 		{args: []string{"--rollback", "--dry-run"}, rollback: true, dryRun: true},
 		{args: []string{"--abort"}, abort: true},
+		{args: []string{"--drop-legacy"}, dropLegacy: true},
+		{args: []string{"--drop-legacy", "--dry-run"}, dropLegacy: true, dryRun: true},
 	} {
 		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"model", "migrate", "provider-work-session-partition"}, test.args...), "synthetic")
 		if err != nil {
@@ -41,7 +44,7 @@ func TestProviderWorkSessionPartitionCommandParses(t *testing.T) {
 			t.Fatal(test.args, err)
 		}
 		if !options.CutoverWeek.Equal(test.cutoverWeek) || options.DryRun != test.dryRun || options.Finalize != test.finalize ||
-			options.Rollback != test.rollback || options.Abort != test.abort {
+			options.Rollback != test.rollback || options.Abort != test.abort || options.DropLegacy != test.dropLegacy {
 			t.Fatal(test.args, options)
 		}
 	}

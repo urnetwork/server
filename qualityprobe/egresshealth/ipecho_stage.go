@@ -47,7 +47,9 @@ func echoRequestStage(err error) string {
 	var staged interface{ ProviderHttpStage() string }
 	if errors.As(err, &staged) {
 		switch stage := staged.ProviderHttpStage(); stage {
-		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy":
+		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy",
+			// an HTTP/3 leg's QUIC handshake: no answer in time, or refused
+			FailureStageDialQuic, FailureStageQuic:
 			return stage
 		}
 	}

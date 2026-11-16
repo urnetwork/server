@@ -94,7 +94,7 @@ func CryptoPaymentScanPost(
 	tx server.PgTx,
 ) error {
 	next := &CryptoPaymentScanArgs{Asset: args.Asset}
-	delay := controller.CryptoPaymentScanInterval()
+	delay := controller.CryptoPaymentScanIntervalFor(args.Asset)
 	if result == nil || !result.Configured {
 		next.Idle = args.Idle + 1
 		delay = cryptoPayIdleDelay(delay, next.Idle)

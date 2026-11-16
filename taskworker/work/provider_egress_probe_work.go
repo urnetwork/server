@@ -36,9 +36,10 @@ const (
 	defaultProviderEgressProbeShardCount = 4
 	// The prober shard registry's slots (model.BeginProberShard).
 	maxProviderEgressProbeShardCount = 256
-	// The most URL probe shards. They take slots [0, shard_count), and the
-	// registry's last slot is the capability probe's.
-	maxProviderUrlProbeShardCount        = maxProviderEgressProbeShardCount - 1
+	// The most URL probe shards. They take slots [0, shard_count); the
+	// registry's second to last slot is the bandwidth probe's and its last the
+	// capability probe's.
+	maxProviderUrlProbeShardCount        = maxProviderEgressProbeShardCount - 2
 	providerEgressBlackholeSubmitTimeout = 30 * time.Second
 	// In-process operator calls one pass runs at once (operator_concurrency).
 	// Two 64-worker passes per taskworker, Main's geometry, then run at most 16
@@ -812,9 +813,10 @@ type providerEgressProbePass struct {
 	blackholeDue func(context.Context, int) ([]ingest.DueProvider, error)
 	fullDue      func(context.Context, int) ([]ingest.DueProvider, error)
 	loadPins     func(context.Context) (map[string][]string, error)
-	// loadPool fetches the pass's destination pool. It always returns a pool
-	// that can be run -- the built-in table when the server's cannot be had --
-	// and the error only says why it fell back. Nil runs the built-in table.
+	// loadPool fetches the pass's destination pool: one the prober can run, or
+	// an error saying why there is none. There is no built-in table to fall
+	// back to: a pass without a pool measures no destination, and every fetch
+	// is counted by result in urnetwork_egress_probe_pool_fetches_total.
 	loadPool func(context.Context) (*egresshealth.Pool, error)
 	// loadScoring reads which pooled sites may count in a provider's run (see
 	// model.ProviderEgressHealthScoring) and the refresh's settings, for the
@@ -1299,6 +1301,11 @@ func scoreEgressHealthResult(
 // are tallied against the run's scored sites without being among them; a
 // canary is tallied as a canary; a load that was not measured is not tallied
 // at all.
+//
+// The tally judges sites, so a load counts its HTTPS leg (CheckResult.HttpsOk):
+// a URL that declares HTTP/3 and failed only its HTTP/3 leg says the provider
+// does not carry UDP, not that the site does not work at the provider's place,
+// and must not move the site toward retirement or a place mark.
 func egressHealthSiteLoads(
 	res *egresshealth.Result,
 	place model.ProviderEgressPlace,
@@ -1313,7 +1320,7 @@ func egressHealthSiteLoads(
 	for _, check := range res.Checks {
 		if scores(check) {
 			scoredTotal++
-			if check.Ok {
+			if check.HttpsOk() {
 				scoredOk++
 			}
 		}
@@ -1333,19 +1340,19 @@ func egressHealthSiteLoads(
 			continue
 		}
 		if check.Canary {
-			loads = append(loads, model.ProviderEgressSiteLoad{Name: check.Name, Ok: check.Ok, Canary: true})
+			loads = append(loads, model.ProviderEgressSiteLoad{Name: check.Name, Ok: check.HttpsOk(), Canary: true})
 			continue
 		}
 		othersOk, othersTotal := scoredOk, scoredTotal
 		if scores(check) {
 			othersTotal--
-			if check.Ok {
+			if check.HttpsOk() {
 				othersOk--
 			}
 		}
 		loads = append(loads, model.ProviderEgressSiteLoad{
 			Name:    check.Name,
-			Ok:      check.Ok,
+			Ok:      check.HttpsOk(),
 			Healthy: healthy(othersOk, othersTotal),
 		})
 	}
@@ -1414,7 +1421,13 @@ func (self *providerEgressFullBatch) release(
 				failure = prober.FailureNotMeasured
 				publicationFailed = true
 			}
-			if (submitted || scored.Total < 1) && recordTally != nil {
+			// A security recheck is aimed at a URL the provider already failed,
+			// not drawn at random, so it is no evidence of how the site does at
+			// the provider's place. The TLS judge reads the place's tally to
+			// tell a site that does not work there from a provider that
+			// intercepts it; an intercepting provider's own rechecks would
+			// otherwise fill its place's tally with its failures.
+			if (submitted || scored.Total < 1) && recordTally != nil && entry.health.UrlSource != egresshealth.UrlSourceSecurityRecheck {
 				loads, runHealthy := egressHealthSiteLoads(entry.health, place, scoring, healthyShare)
 				recordTally(ctx, server.NowUtc(), model.ProviderEgressRunTally{
 					Place:      place,
@@ -1499,6 +1512,11 @@ func (self *providerEgressProbePass) runFullBatchObserved(
 	}
 	var scoring *model.ProviderEgressHealthScoring
 	siteSettings := model.DefaultProviderEgressSiteSettings()
+	// A URL turn submits its one load as measured: cut here it would be no
+	// outcome at all, and the rolling quota would turn the provider again for
+	// it. The operator ingest records the load's catalog source and keeps one
+	// on probation, a country site or a general site the refresh has not
+	// graduated, out of every score (model/provider_egress_url_source.go).
 	if self.loadScoring != nil && !self.urlProbes {
 		scoring, siteSettings = self.loadScoring(ctx)
 	}
@@ -1769,18 +1787,19 @@ func (self *providerEgressProbePass) run(
 	pinSource := func() map[string][]string {
 		return pins
 	}
-	// One pool snapshot for every batch of the pass, like the pins. A fetch
-	// failure is never a reason to stop: the built-in table is always a
-	// well-defined measurement, and the metric and log say it was used.
+	// One pool snapshot for every batch of the pass, like the pins. There is
+	// no built-in table: without a pool every provider of the pass opens with
+	// egresshealth.ErrNoDestinations and nothing is measured, which the metric
+	// and the log say.
 	var pool *egresshealth.Pool
 	if self.loadPool != nil {
 		var poolErr error
 		pool, poolErr = self.loadPool(ctx)
 		if poolErr != nil {
-			egressProbePoolFetchesTotal.WithLabelValues("builtin").Inc()
-			log.Printf("provider-egress task: shard=%d/%d destination pool unavailable, probing the built-in table: %s", args.ShardIndex, args.ShardCount, poolErr)
+			egressProbePoolFetchesTotal.WithLabelValues(egressProbePoolUnavailable).Inc()
+			log.Printf("provider-egress task: shard=%d/%d destination pool unavailable, this pass measures no destination: %s", args.ShardIndex, args.ShardCount, poolErr)
 		} else {
-			egressProbePoolFetchesTotal.WithLabelValues("server").Inc()
+			egressProbePoolFetchesTotal.WithLabelValues(egressProbePoolServed).Inc()
 		}
 	}
 	poolSource := func() *egresshealth.Pool {
@@ -2116,7 +2135,9 @@ func runProviderEgressProbe(
 //
 // Its tunnels opt in to KeepClientKeysLocal: each URL probe mints a derived
 // client whose identity key nothing reads, and only this pass may skip
-// publishing it.
+// publishing it. A turn the claim marks for post-quantum reads its key, so
+// its clients publish (fleetprobe url_e2e.go): its session resolves the
+// provider's key from the platform's own store when no contract carried one.
 func newProviderUrlProbePass(
 	args *ProviderEgressProbeArgs,
 	operator ingest.Operator,
@@ -2137,8 +2158,9 @@ func newProviderUrlProbePass(
 		},
 		loadPool: operator.DestinationPool,
 		fullOptions: fleetprobe.FullOptions{
-			UrlProbe:     true,
-			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
+			UrlProbe:                      true,
+			TunnelConfig:                  providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
+			NewPeerClientPublicKeyFetcher: newProviderUrlProbePeerClientPublicKeyFetcher,
 		},
 		fullSink:     newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry),
 		recordTally:  newProviderEgressTallyRecorder(),

@@ -11,9 +11,11 @@ import (
 )
 
 // The store purchase paths' onboarding bookkeeping: record the regional price
-// tier on the subscription row and stamp the welcome offer redeemed. Each helper
-// runs after the store's own crediting, inside its transaction where there is
-// one, and never fails the credit.
+// tier and the store's country on the subscription row and stamp the welcome
+// offer redeemed. Each helper runs after the store's own crediting, inside its
+// transaction where there is one, and never fails the credit. The country is a
+// network's country for the campaigns' mail policy when it has no onboarding
+// row (reengagement_context.go).
 
 // Apple offerType claim values (App Store Server API JWSTransactionDecodedPayload).
 const (
@@ -23,9 +25,9 @@ const (
 	appleOfferTypeWinBack      = 4
 )
 
-// appleRecordOnboardingInTx: the tier from the transaction's storefront, and the
-// offer when the purchase used an offer code (the one-time or custom code the
-// offer carries) or a promotional offer.
+// appleRecordOnboardingInTx: the tier and the country from the transaction's
+// storefront, and the offer when the purchase used an offer code (the one-time
+// or custom code the offer carries) or a promotional offer.
 func appleRecordOnboardingInTx(tx server.PgTx, ctx context.Context, transaction *validatedAppleTransaction) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -36,6 +38,9 @@ func appleRecordOnboardingInTx(tx server.PgTx, ctx context.Context, transaction 
 		tier := model.Pro().PriceTierForCountry(code)
 		model.SetSubscriptionRenewalPriceTierByTransactionInTx(
 			tx, ctx, transaction.networkId, model.SubscriptionMarketApple, transaction.transactionId, tier.Name,
+		)
+		model.SetSubscriptionRenewalCountryByTransactionInTx(
+			tx, ctx, transaction.networkId, model.SubscriptionMarketApple, transaction.transactionId, code,
 		)
 	}
 	switch transaction.offerType {
@@ -49,8 +54,8 @@ func appleRecordOnboardingInTx(tx server.PgTx, ctx context.Context, transaction 
 	}
 }
 
-// playRecordOnboardingInTx: the tier from the purchase's region code, and the
-// offer when a line item was bought under the welcome offer's tag.
+// playRecordOnboardingInTx: the tier and the country from the purchase's region
+// code, and the offer when a line item was bought under the welcome offer's tag.
 func playRecordOnboardingInTx(tx server.PgTx, clientSession *session.ClientSession, sub *PlaySubscription, renewal *model.SubscriptionRenewal) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -62,6 +67,9 @@ func playRecordOnboardingInTx(tx server.PgTx, clientSession *session.ClientSessi
 		tier := model.Pro().PriceTierForCountry(code)
 		model.SetSubscriptionRenewalPriceTierByPurchaseTokenInTx(
 			tx, ctx, renewal.NetworkId, model.SubscriptionMarketGoogle, renewal.PurchaseToken, renewal.EndTime, tier.Name,
+		)
+		model.SetSubscriptionRenewalCountryByPurchaseTokenInTx(
+			tx, ctx, renewal.NetworkId, model.SubscriptionMarketGoogle, renewal.PurchaseToken, renewal.EndTime, code,
 		)
 	}
 	if tag := model.Onboarding().Offer.PlayOfferTag; tag != "" && sub.HasOfferTag(tag) {

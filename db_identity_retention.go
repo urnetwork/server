@@ -120,6 +120,7 @@ const clientKeyHistoryRetentionSchemaSql = `
 // The shortest time a gone client's signed key history is kept, whatever the
 // retention's horizon (owner, 2026-11-01). The retention follows the contract
 // horizon reaper's effective horizon, which never goes below the reaper's own
+// floor, unless its brake's `horizonDays` sets its own, which may reach this
 // floor; this floor is the guard's, below every horizon the reaper applies,
 // so a task, a setting or an operator statement can never delete history
 // younger than it. Every reader of a gone client's history ends well inside

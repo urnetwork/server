@@ -269,6 +269,15 @@ func testProvidePublicationAfterSuccessor(t *testing.T, deactivate bool) {
 			}
 		}
 		peer := GetNetworkPeerMember(ctx, networkId, clientId)
+		if deactivate {
+			// the deactivation drops the removed client's peer registration at
+			// once (releaseRemovedClientSlot), and the late publication must
+			// not write it back
+			if peer != nil {
+				t.Fatalf("late publication restored the removed peer: peer=%+v", peer)
+			}
+			return
+		}
 		wantModes := []ProvideMode{}
 		for mode := range wantKeys {
 			wantModes = append(wantModes, mode)
@@ -314,6 +323,9 @@ func TestProvidePublicationConfirmsKeysAfterMissedInvalidation(t *testing.T) {
 
 // A peer update can be delayed after its canonical read too. The deactivation
 // publishes while that old read is in flight; its version forces a fresh read.
+// The deactivation also drops the removed client's peer registration at once
+// (releaseRemovedClientSlot), so the fresh read finds no peer, and the stale
+// read must not write the old registration back with its modes.
 func TestNetworkPeerProvidePublicationReloadsAfterDeactivation(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -339,8 +351,8 @@ func TestNetworkPeerProvidePublicationReloadsAfterDeactivation(t *testing.T) {
 			return modes
 		})
 		peer := GetNetworkPeerMember(ctx, networkId, clientId)
-		if !updated || reads != 2 || peer == nil || len(peer.ProvideModes) != 0 {
-			t.Fatalf("stale canonical read restored peer modes: updated=%t reads=%d peer=%+v", updated, reads, peer)
+		if !updated || reads != 2 || peer != nil {
+			t.Fatalf("stale canonical read restored the removed peer: updated=%t reads=%d peer=%+v", updated, reads, peer)
 		}
 	})
 }

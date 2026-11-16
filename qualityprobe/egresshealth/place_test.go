@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -110,7 +110,7 @@ func runForPlace(t *testing.T, pool []Destination, place Place) (*Result, *place
 	opts := fastOptions()
 	opts.Destinations = pool
 	opts.ProviderPlace = place
-	opts.Rand = rand.New(rand.NewSource(1))
+	opts.Rand = rand.New(rand.NewPCG(1, 0))
 	res, err := Check(context.Background(), http.DefaultClient, opts)
 	if err != nil {
 		t.Fatalf("Check err = %v", err)
@@ -183,7 +183,7 @@ func TestShortClassIsReportedAndNotPadded(t *testing.T) {
 	opts := fastOptions()
 	opts.Destinations = pool
 	opts.ProviderPlace = Place{Country: "cn"}
-	opts.Rand = rand.New(rand.NewSource(2))
+	opts.Rand = rand.New(rand.NewPCG(2, 0))
 	res, err := Check(context.Background(), http.DefaultClient, opts)
 	if err != nil {
 		t.Fatalf("Check err = %v", err)
@@ -268,7 +268,7 @@ func TestBlackholeDrawsOnlyCompatibleConnectivity(t *testing.T) {
 		{Name: "conn-ru", Class: ClassConnectivity, Url: srv.URL + "/conn-ru", Expect: ExpectStatus, Status: http.StatusNoContent, Incompatible: []Place{{Country: "ru"}}},
 		{Name: "conn-ru-canary", Class: ClassConnectivity, Url: srv.URL + "/conn-ru-canary", Expect: ExpectStatus, Status: http.StatusNoContent, Incompatible: []Place{{Country: "ru"}}, Canary: true},
 	}
-	res := blackhole(context.Background(), http.DefaultClient, dests, Options{Rand: rand.New(rand.NewSource(1)), Sleep: noSleep, ProviderPlace: Place{Country: "ru"}})
+	res := blackhole(context.Background(), http.DefaultClient, dests, Options{Rand: rand.New(rand.NewPCG(1, 0)), Sleep: noSleep, ProviderPlace: Place{Country: "ru"}})
 	if !res.Ok {
 		t.Fatalf("result = %+v", res)
 	}

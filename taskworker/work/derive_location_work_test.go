@@ -135,23 +135,71 @@ func TestDeriveNodeIds(t *testing.T) {
 	}
 }
 
-// Only a refusal that speaks to honesty counts (§5.5).
-func TestDerivePingRefusalIsEvidence(t *testing.T) {
-	for reason, want := range map[int]bool{
-		0: false,
+// Each refusal counts against the parties its reason is evidence against
+// (§5.5). A refusal of the claim -- a round trip below the one observed, a bad
+// nonce, the wrong extender, a bad signature -- counts against both. A refusal
+// with no reason, which a pinger records for an acceptance whose co-signature
+// did not verify, counts against the target alone, as connect means it to
+// (connect ExtenderPingRejected): until 2026-11-12 the derive ignored it, so a
+// target escaped its refusal rate by accepting with a signature nobody could
+// check. An unknown pinger, a rate limit and a reason no target sends count
+// against neither. Pure.
+func TestDeriveRefusalReasonsCountAgainstTheirParties(t *testing.T) {
+	type parties struct {
+		pinger bool
+		target bool
+	}
+	for reason, want := range map[int]parties{
+		// an acceptance whose co-signature did not verify
+		0: {target: true},
 		// rtt below observed, nonce, wrong extender, bad signature
-		1: true,
-		2: true,
-		3: true,
-		5: true,
-		// an unknown pinger and a rate limit say nothing about either party
-		4:  false,
-		6:  false,
-		7:  false,
-		-1: false,
+		1: {pinger: true, target: true},
+		2: {pinger: true, target: true},
+		3: {pinger: true, target: true},
+		5: {pinger: true, target: true},
+		// an unknown pinger and a rate limit say nothing about either party,
+		// and nor does a reason no target sends
+		4:  {},
+		6:  {},
+		7:  {},
+		-1: {},
 	} {
-		if got := derivePingRefusalIsEvidence(reason); got != want {
-			t.Errorf("reason %d is evidence: %v, want %v", reason, got, want)
+		pingerExtender := server.NewId()
+		target := server.NewId()
+		inputs := deriveTestInputs(solve.DefaultSettings(), nil)
+		inputs.addRefusal(&model.NetworkPingRefusal{
+			PingerKind:       model.NetworkPingPingerKindExtender,
+			PingerId:         pingerExtender,
+			TargetExtenderId: target,
+			Reason:           reason,
+		})
+		counts := func(id server.Id) solve.Refusals {
+			if counts, ok := inputs.refusals[deriveNodeId(model.DerivedLocationNodeKindExtender, id)]; ok {
+				return *counts
+			}
+			return solve.Refusals{}
+		}
+		wantPinger := solve.Refusals{}
+		if want.pinger {
+			wantPinger = solve.Refusals{AsPinger: 1, PingsAsPinger: 1}
+		}
+		wantTarget := solve.Refusals{}
+		if want.target {
+			wantTarget = solve.Refusals{AsTarget: 1, PingsAsTarget: 1}
+		}
+		if got := counts(pingerExtender); got != wantPinger {
+			t.Errorf("reason %d: the pinger's counts are %+v, want %+v", reason, got, wantPinger)
+		}
+		if got := counts(target); got != wantTarget {
+			t.Errorf("reason %d: the target's counts are %+v, want %+v", reason, got, wantTarget)
+		}
+		wantRefusals, wantIgnored := 0, 1
+		if want.target {
+			wantRefusals, wantIgnored = 1, 0
+		}
+		if inputs.refusalCount != wantRefusals || inputs.ignoredRefusals != wantIgnored {
+			t.Errorf("reason %d: %d refusals and %d ignored, want %d and %d",
+				reason, inputs.refusalCount, inputs.ignoredRefusals, wantRefusals, wantIgnored)
 		}
 	}
 }
@@ -210,10 +258,12 @@ func TestDeriveInputsAggregatePerOrderedPair(t *testing.T) {
 }
 
 // A refusal counts against both parties' refusal rates only when it is
-// evidence, and every attestation with a verdict -- co-signed direct,
-// co-signed relayed, or refused as evidence -- is in both denominators
-// (§5.5). A refusal that is not evidence, and a ping with no verdict, is in
-// neither.
+// evidence against both, and every attestation with a verdict -- co-signed
+// direct, co-signed relayed, or refused as evidence -- is in both denominators
+// (§5.5). A refusal with no reason, an acceptance whose co-signature did not
+// verify, is evidence against the target alone, and is in the target's counts
+// only. A refusal that is evidence against no one, and a ping with no verdict,
+// is in neither.
 func TestDeriveInputsCountRefusals(t *testing.T) {
 	provider := server.NewId()
 	pingerExtender := server.NewId()
@@ -249,20 +299,24 @@ func TestDeriveInputsCountRefusals(t *testing.T) {
 	refuse(model.NetworkPingPingerKindExtender, pingerExtender, int(connect.ExtenderProbeVerdictReasonRateLimited))
 	refuse(model.NetworkPingPingerKindExtender, pingerExtender, int(connect.ExtenderProbeVerdictReasonBadSignature))
 	refuse(3, server.NewId(), int(connect.ExtenderProbeVerdictReasonNonce))
+	// the target accepted the provider's claim with a co-signature that did
+	// not verify
+	refuse(model.NetworkPingPingerKindProvider, provider, int(connect.ExtenderProbeVerdictReasonOk))
 
-	connect.AssertEqual(t, inputs.refusalCount, 2)
+	connect.AssertEqual(t, inputs.refusalCount, 3)
 	connect.AssertEqual(t, inputs.ignoredRefusals, 3)
 
 	p := deriveNodeId(model.DerivedLocationNodeKindProvider, provider)
 	x := deriveNodeId(model.DerivedLocationNodeKindExtender, pingerExtender)
 	e := deriveNodeId(model.DerivedLocationNodeKindExtender, target)
 	r := deriveNodeId(model.DerivedLocationNodeKindExtender, relayedTarget)
-	// three co-signed direct, two co-signed relayed, one refused as evidence
+	// three co-signed direct, two co-signed relayed, one refused as evidence;
+	// the unverified acceptance is neither its refusal nor its attestation
 	connect.AssertEqual(t, *inputs.refusals[p], solve.Refusals{AsPinger: 1, PingsAsPinger: 6})
 	// only its evidence refusal: its rate-limited probe is no attestation
 	connect.AssertEqual(t, *inputs.refusals[x], solve.Refusals{AsPinger: 1, PingsAsPinger: 1})
-	// three co-signed and two refused as evidence
-	connect.AssertEqual(t, *inputs.refusals[e], solve.Refusals{AsTarget: 2, PingsAsTarget: 5})
+	// three co-signed, two refused as evidence, and the unverified acceptance
+	connect.AssertEqual(t, *inputs.refusals[e], solve.Refusals{AsTarget: 3, PingsAsTarget: 6})
 	connect.AssertEqual(t, *inputs.refusals[r], solve.Refusals{PingsAsTarget: 2})
 
 	// the solver is given the counts of its nodes: the parties of a co-signed
@@ -941,10 +995,11 @@ func TestDeriveLocationsOnASeededGraph(t *testing.T) {
 			Cosignature:      []byte("cosignature"),
 			CreateTime:       now,
 		}}), 1)
-		// evidence and non-evidence refusals, and a relayed co-signed ping,
-		// none of which is a term
+		// evidence and non-evidence refusals -- a refusal with no reason, an
+		// acceptance whose co-signature did not verify, is evidence against
+		// the target -- and a relayed co-signed ping, none of which is a term
 		refusals := []*model.NetworkPing{}
-		for _, reason := range []uint32{connect.ExtenderProbeVerdictReasonRttBelowObserved, connect.ExtenderProbeVerdictReasonRateLimited} {
+		for _, reason := range []uint32{connect.ExtenderProbeVerdictReasonRttBelowObserved, connect.ExtenderProbeVerdictReasonRateLimited, connect.ExtenderProbeVerdictReasonOk} {
 			refusals = append(refusals, &model.NetworkPing{
 				PingerKind:       model.NetworkPingPingerKindProvider,
 				PingerId:         graph.providers["region"],
@@ -971,7 +1026,7 @@ func TestDeriveLocationsOnASeededGraph(t *testing.T) {
 			HopCount:         1,
 			CreateTime:       now,
 		})
-		connect.AssertEqual(t, model.AddNetworkPings(ctx, refusals), 3)
+		connect.AssertEqual(t, model.AddNetworkPings(ctx, refusals), 4)
 
 		// a row of a node this derivation will not publish
 		staleNodeId := server.NewId()
@@ -996,7 +1051,9 @@ func TestDeriveLocationsOnASeededGraph(t *testing.T) {
 		connect.AssertEqual(t, result.NodesWithoutGenesis, 1)
 		connect.AssertEqual(t, result.ProviderNodes, 2)
 		connect.AssertEqual(t, result.ExtenderNodes, 4)
-		connect.AssertEqual(t, result.Refusals, 1)
+		// the round trip below the observed one and the unverified acceptance;
+		// the rate limit is evidence against no one
+		connect.AssertEqual(t, result.Refusals, 2)
 		connect.AssertEqual(t, result.IgnoredRefusals, 1)
 		connect.AssertEqual(t, result.ExcludedSources, 0)
 		connect.AssertEqual(t, result.Removed, 1)

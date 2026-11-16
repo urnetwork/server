@@ -1,0 +1,46 @@
+{
+ "transfers": [
+  {
+   "blockNum": "0x191ed13",
+   "uniqueId": "0x7c17b0b357ea17dfd6a06b3e1d831226f4d222c0589fea38aad33bee416a07f1:internal:2_0_0_0_0_0",
+   "hash": "0x7c17b0b357ea17dfd6a06b3e1d831226f4d222c0589fea38aad33bee416a07f1",
+   "from": "0xa6cd233fa1fafde96591d073eac32ecbeee0007c",
+   "to": "0xd8da6bf26964af9d7eed9e03e53415d37aa96045",
+   "value": 0.000431283586209276,
+   "erc721TokenId": null,
+   "erc1155Metadata": null,
+   "tokenId": null,
+   "asset": "ETH",
+   "category": "internal",
+   "rawContract": {
+    "value": "0x01884008f415fc",
+    "address": null,
+    "decimal": "0x12"
+   },
+   "metadata": {
+    "blockTimestamp": "2026-11-04T09:43:23.000Z"
+   }
+  },
+  {
+   "blockNum": "0x1922f1e",
+   "uniqueId": "0xd75f67f4cf551015772d8c6e7c53328ef4f12153819367ab9f2865c7d99f53f1:external",
+   "hash": "0xd75f67f4cf551015772d8c6e7c53328ef4f12153819367ab9f2865c7d99f53f1",
+   "from": "0x65604502cae188bd6cce556dd4e8a20213667328",
+   "to": "0xd8da6bf26964af9d7eed9e03e53415d37aa96045",
+   "value": 0.0133774915708334,
+   "erc721TokenId": null,
+   "erc1155Metadata": null,
+   "tokenId": null,
+   "asset": "ETH",
+   "category": "external",
+   "rawContract": {
+    "value": "0x2f86c1f910b7f7",
+    "address": null,
+    "decimal": "0x12"
+   },
+   "metadata": {
+    "blockTimestamp": "2026-11-06T18:14:47.000Z"
+   }
+  }
+ ]
+}

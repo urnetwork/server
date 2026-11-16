@@ -406,11 +406,8 @@ type RemoveWalletError struct {
 }
 
 type RemoveWalletResult struct {
-	Success bool `json:"success"`
-	// set when the removed wallet was the payout wallet and another of the
-	// network's wallets took over. Added later; older clients ignore it.
-	PayoutWalletId *server.Id         `json:"payout_wallet_id,omitempty"`
-	Error          *RemoveWalletError `json:"error,omitempty"`
+	Success bool               `json:"success"`
+	Error   *RemoveWalletError `json:"error,omitempty"`
 }
 
 type RemoveWalletArgs struct {
@@ -423,71 +420,11 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 		Success: false,
 	}
 
-	// runs after id, the payout wallet, was removed in tx. Payments planned
-	// while a network has no payout wallet are held until the user picks one,
-	// so another active wallet the network owns takes over instead. Returns the
-	// promoted wallet, or nil when no active Solana or Polygon wallet is left.
-	promotePayoutWalletInTx := func(tx server.PgTx) *server.Id {
-		var removedBlockchain string
-		removedResult, err := tx.Query(
-			session.Ctx,
-			`
-				SELECT blockchain
-				FROM account_wallet
-				WHERE
-						wallet_id = $2 AND
-						network_id = $1
-			`,
-			session.ByJwt.NetworkId,
-			id,
-		)
-		server.WithPgResult(removedResult, err, func() {
-			if removedResult.Next() {
-				server.Raise(removedResult.Scan(&removedBlockchain))
-			}
-		})
-
-		candidates := []*payoutWalletCandidate{}
-		candidateResult, err := tx.Query(
-			session.Ctx,
-			`
-				SELECT
-						wallet_id,
-						blockchain,
-						wallet_address
-				FROM account_wallet
-				WHERE
-						network_id = $1 AND
-						active = true AND
-						wallet_id <> $2
-				ORDER BY create_time DESC, wallet_id
-			`,
-			session.ByJwt.NetworkId,
-			id,
-		)
-		server.WithPgResult(candidateResult, err, func() {
-			for candidateResult.Next() {
-				candidate := &payoutWalletCandidate{}
-				server.Raise(candidateResult.Scan(&candidate.walletId, &candidate.blockchain, &candidate.walletAddress))
-				candidates = append(candidates, candidate)
-			}
-		})
-
-		promotedWalletId := choosePromotedPayoutWallet(removedBlockchain, candidates)
-		if promotedWalletId == nil {
-			return nil
-		}
-		if err := setPayoutWalletInTx(session.Ctx, tx, session.ByJwt.NetworkId, *promotedWalletId); err != nil {
-			return nil
-		}
-		return promotedWalletId
-	}
-
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		result.Success = false
-		result.PayoutWalletId = nil
-		// removing the payout wallet removes it, or replaces it with the
-		// promoted wallet: one change, owed once, after both
+		// removing the payout wallet removes the selection. No other wallet
+		// takes over: USDC provider payouts ended (owner decisions 2026-11-12
+		// and 2026-11-13)
 		watch := watchPayoutWalletInTx(session.Ctx, tx, session.ByJwt.NetworkId)
 		tag := server.RaisePgResult(tx.Exec(
 			session.Ctx,
@@ -505,9 +442,7 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 		))
 
 		if tag.RowsAffected() == 1 {
-			if deletePayoutWalletInTx(session.Ctx, tx, id, session.ByJwt.NetworkId) {
-				result.PayoutWalletId = promotePayoutWalletInTx(tx)
-			}
+			deletePayoutWalletInTx(session.Ctx, tx, id, session.ByJwt.NetworkId)
 			result.Success = true
 		}
 

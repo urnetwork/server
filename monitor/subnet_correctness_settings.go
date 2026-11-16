@@ -31,6 +31,14 @@ const maximumSubnetScheduledPolicies = 8
 const maximumSubnetPolicyDocumentBytes = 32 * 1024
 const maximumSubnetTreasuryHotkeys = 8
 
+// STSettlement2's own auditor bound (MAX_AUDITORS).
+const maximumSubnetReviewedAuditors = 16
+const maximumSubnetReviewedTimelockRoleHolders = 8
+const maximumSubnetReviewedOperations = 64
+
+// The executor role held by the zero address opens execution to anyone.
+const subnetOpenRoleHolder = "0x0000000000000000000000000000000000000000"
+
 // Review timestamps govern the local expectation, never the age of chain
 // evidence. Endpoints are read separately; two names for one node are not
 // independent observations, and that cannot be detected from here.
@@ -83,6 +91,91 @@ type SubnetReviewedGovernance struct {
 	OwnerSigners                      uint64 `yaml:"owner_signers"`
 	Guardian                          string `yaml:"guardian"`
 	CommitmentOracle                  string `yaml:"commitment_oracle"`
+	// Decides settlement v2's governance whenever sn.yml declares settlement
+	// v2; while it is absent that check is unknown, never healthy.
+	SettlementV2 SubnetReviewedSettlementV2 `yaml:"settlement_v2"`
+}
+
+// The reviewed settlement v2 governance (REMEDIATION-PLAN R1): the STSettlement2
+// proxy's implementation, initializer version and auditor set, the vault2 code,
+// and the TimelockController that owns the proxy with its delay and roles.
+// Proposers also cancel and are the governance Safes whose events page.
+// Executors may name the zero address, which opens execution to anyone.
+// EventsFromBlock is a block at or before the timelock's deployment: the
+// timelock's operations are replayed from it, so a call scheduled while the
+// monitor was down is still found. ReviewedOperations lists the timelock
+// operation ids governance reviewed; any other scheduled call pages.
+type SubnetReviewedSettlementV2 struct {
+	Implementation         string   `yaml:"implementation"`
+	ProxyCodeHash          string   `yaml:"proxy_code_hash"`
+	ImplementationCodeHash string   `yaml:"implementation_code_hash"`
+	VaultCodeHash          string   `yaml:"vault_code_hash"`
+	InitializedVersion     uint64   `yaml:"initialized_version"`
+	Auditors               []string `yaml:"auditors"`
+	Quorum                 uint64   `yaml:"quorum"`
+	AuditorSetVersion      uint64   `yaml:"auditor_set_version"`
+	Timelock               string   `yaml:"timelock"`
+	TimelockCodeHash       string   `yaml:"timelock_code_hash"`
+	TimelockMinDelay       uint64   `yaml:"timelock_min_delay"`
+	Proposers              []string `yaml:"proposers"`
+	Cancellers             []string `yaml:"cancellers"`
+	Executors              []string `yaml:"executors"`
+	EventsFromBlock        uint64   `yaml:"events_from_block"`
+	ReviewedOperations     []string `yaml:"reviewed_operations"`
+}
+
+// Any field present makes the block enrolled, and then every field is required.
+func (self SubnetReviewedSettlementV2) enrolled() bool {
+	return self.Implementation != "" || self.ProxyCodeHash != "" || self.ImplementationCodeHash != "" || self.VaultCodeHash != "" || self.InitializedVersion != 0 ||
+		self.Auditors != nil || self.Quorum != 0 || self.AuditorSetVersion != 0 || self.Timelock != "" || self.TimelockCodeHash != "" || self.TimelockMinDelay != 0 ||
+		self.Proposers != nil || self.Cancellers != nil || self.Executors != nil || self.EventsFromBlock != 0 || self.ReviewedOperations != nil
+}
+
+// The contract's own auditor rule (1 <= quorum <= auditors <= 16, distinct,
+// nonzero), complete code identities and distinct nonzero role holders, with
+// the zero address admitted only as an executor.
+func (self SubnetReviewedSettlementV2) valid() bool {
+	if !subnetArtifactAddress(self.Implementation) || !subnetArtifactAddress(self.Timelock) {
+		return false
+	}
+	for _, digest := range []string{self.ProxyCodeHash, self.ImplementationCodeHash, self.VaultCodeHash, self.TimelockCodeHash} {
+		if !subnetCorrectnessHex(digest, 32) {
+			return false
+		}
+	}
+	if self.InitializedVersion == 0 || self.Quorum == 0 || self.Quorum > uint64(len(self.Auditors)) || self.AuditorSetVersion == 0 || self.TimelockMinDelay == 0 || self.EventsFromBlock == 0 {
+		return false
+	}
+	if !subnetReviewedAddressList(self.Auditors, maximumSubnetReviewedAuditors, false) || !subnetReviewedAddressList(self.Proposers, maximumSubnetReviewedTimelockRoleHolders, false) ||
+		!subnetReviewedAddressList(self.Cancellers, maximumSubnetReviewedTimelockRoleHolders, false) || !subnetReviewedAddressList(self.Executors, maximumSubnetReviewedTimelockRoleHolders, true) {
+		return false
+	}
+	if len(self.ReviewedOperations) > maximumSubnetReviewedOperations {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, operation := range self.ReviewedOperations {
+		if !subnetCorrectnessHex(operation, 32) || seen[operation] {
+			return false
+		}
+		seen[operation] = true
+	}
+	return true
+}
+
+// A nonempty bounded list of distinct lowercase addresses.
+func subnetReviewedAddressList(values []string, maximum int, openRole bool) bool {
+	if len(values) == 0 || len(values) > maximum {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, value := range values {
+		if seen[value] || !(subnetArtifactAddress(value) || (openRole && value == subnetOpenRoleHolder)) {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
 }
 
 // Every reviewed native hyperparameter is required so a partial profile cannot
@@ -250,6 +343,13 @@ func cloneSubnetCorrectnessSettings(value *SubnetCorrectnessSettings) *SubnetCor
 	copy.Operators = append([]SubnetReviewedOperator(nil), value.Operators...)
 	copy.Validators = append([]SubnetReviewedValidator(nil), value.Validators...)
 	copy.TreasuryHotkeys = append([]string(nil), value.TreasuryHotkeys...)
+	v2 := &copy.Governance.SettlementV2
+	for _, list := range []*[]string{&v2.Auditors, &v2.Proposers, &v2.Cancellers, &v2.Executors, &v2.ReviewedOperations} {
+		// An explicitly empty list stays present, so enrollment is unchanged.
+		if *list != nil {
+			*list = append([]string{}, (*list)...)
+		}
+	}
 	return &copy
 }
 
@@ -393,6 +493,9 @@ func (self *SubnetCorrectnessSettings) validate(now time.Time) string {
 	if governance.OwnerThreshold > governance.OwnerSigners || (governance.OwnerThreshold == 0) != (governance.OwnerSigners == 0) || governance.OwnerSigners > 16 {
 		return "expectations-invalid"
 	}
+	if governance.SettlementV2.enrolled() && !governance.SettlementV2.valid() {
+		return "expectations-invalid"
+	}
 	profile := self.NativeProfile
 	if profile.MaxAllowedUids == 0 || profile.MaxAllowedValidators == 0 || profile.MaxAllowedValidators > profile.MaxAllowedUids || profile.MechanismCount == 0 || profile.Tempo == 0 {
 		return "expectations-invalid"
@@ -446,6 +549,11 @@ func (self *SubnetCorrectnessSettings) validate(now time.Time) string {
 	}
 	if reason := self.Deployment.validate(); reason != "" {
 		return reason
+	}
+	// Reviewed settlement v2 values with no declared pair to compare them with
+	// would read as reviewed while observing nothing.
+	if governance.SettlementV2.enrolled() && !self.Deployment.settlementV2Declared() {
+		return "expectations-invalid"
 	}
 	return ""
 }

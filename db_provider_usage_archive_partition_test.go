@@ -23,8 +23,10 @@ const testArchiveTable = "st_provider_usage_archive"
 
 // The archive is a weekly id family on the contract weeks: keyed by
 // contract_id through contract_id_floor, four weeks ahead, each week kept 52
-// weeks, with a DEFAULT partition, the retention opt-in and its fence, and out
-// of the REINDEX rotation.
+// weeks or until its verified export drops it (the expiry and the
+// precondition of db_provider_usage_archive_export.go), with a DEFAULT
+// partition, the retention opt-in and its fence, and out of the REINDEX
+// rotation.
 func TestProviderUsageArchivePartitionFamilyDeclaration(t *testing.T) {
 	family := providerUsageArchivePartitionFamily
 	if GetPartitionFamily(testArchiveTable) != family {
@@ -42,7 +44,8 @@ func TestProviderUsageArchivePartitionFamilyDeclaration(t *testing.T) {
 	connect.AssertEqual(t, family.DropGuardSetting, "urnetwork.usage_archive_retention")
 	connect.AssertEqual(t, family.ReindexExempt, true)
 	connect.AssertEqual(t, family.DropFence != nil, true)
-	connect.AssertEqual(t, family.DropPrecondition == nil, true)
+	connect.AssertEqual(t, family.RangeExpired != nil, true)
+	connect.AssertEqual(t, family.DropPrecondition != nil, true)
 	for _, name := range []string{testArchiveTable, "st_provider_usage_archive_w20260601", "st_provider_usage_archive_default"} {
 		if PartitionFamilyOfTable(name) != family {
 			t.Fatalf("%s is not the archive family's", name)
