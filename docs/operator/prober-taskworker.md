@@ -166,24 +166,39 @@ before its generation drops. A settled shard waits with `next_cleanup_time`
 `'infinity'`.
 
 **The drop** (`model.RemoveProberShardGenerations`, task
-`remove_prober_shard_generations`) takes the passes of dropped generations
-oldest first and, for each:
+`remove_prober_shard_generations`) takes the dropped generations oldest first:
 
-1. deletes its zero-byte contracts: resolved and closed before the cutoff,
-   every escrow settled, no sweep and no destination close with bytes. Such a
-   contract adds nothing to any byte sum (the daily transfer rollup, the clock
-   backfill, the subnet usage weight, payouts, payment plans, operator block
-   awards). The capture trigger archives a credit-bearing contract's usage in
-   the same statement. The rows deleted are the contract horizon reaper's own.
-2. deletes its identity in `ReapProberShard`'s transaction, which refuses a pass
-   with an unresolved contract, an unsettled escrow, a pending debit, a
-   connected client or a balance that is not a plain grant. A refused pass is
-   retried after an hour, and a pass whose drop failed after a minute.
-3. deletes its registry row.
+1. It walks the generation's contracts once and deletes its passes' zero-byte
+   contracts: resolved and closed before the cutoff, every escrow settled, no
+   sweep and no destination close with bytes. Such a contract adds nothing to
+   any byte sum (the daily transfer rollup, the clock backfill, the subnet
+   usage weight, payouts, payment plans, operator block awards). The capture
+   trigger archives a credit-bearing contract's usage in the same statement.
+   The rows deleted are the contract horizon reaper's own. The walk reads the
+   primary key over the generation's contract id range, from 15 minutes before
+   its first pass's creation to 15 minutes past its last pass's deadline, in
+   batches of 5,000, and keeps the contracts whose payer is one of the
+   generation's pass networks, which every prober contract's payer is. It
+   reads each contract of the day once (about 116M on Main, at 3,000 a second
+   by default: about 11 hours) and needs no other index; it replaced the read
+   of each pass client's closed contracts from `transfer_contract_open_source_id`
+   (`OPEN-SOURCE-ID-RETIRE.md`, option A).
+2. Then, for each of its passes, it deletes the pass's identity in
+   `ReapProberShard`'s transaction, which refuses a pass with an unresolved
+   contract, an unsettled escrow, a pending debit, a connected client or a
+   balance that is not a plain grant. A refused pass is retried after an hour,
+   and a pass whose drop failed after a minute.
+3. And it deletes the pass's registry row.
 
-A run ends when its four-minute budget does; a pass whose contracts the budget
-interrupted keeps its identity until the next run finishes them, since a pass's
-contracts are found through its clients.
+A run ends when its four-minute budget does. The walk's cursor goes into the
+task's args, so the next run resumes where it stopped, and the retry of a
+failed run resumes after its last committed batch. A pass waits, untaken, until
+its generation's walk completes: the walk keeps contracts by the network its
+registry row names. The walk serves the oldest dropped generation that still
+has a pass to drop, so a refused pass never holds a newer generation's walk,
+and a refused pass retried after its generation's walk completed drops without
+a second walk; a contract the walk kept (for its bytes or an unsettled escrow)
+is the contract horizon reaper's.
 
 It keeps, for the retention that owns each: contracts that carry bytes (the
 contract horizon reaper, because the transfer rollup can re-sum their day until
@@ -196,24 +211,32 @@ drops only once its deadline is six hours past, and the identity transaction
 refuses anything still unresolved or connected.
 
 **The control.** The drop is off until an operator sets the Redis hash
-`{prober_retention}control` (read before every pass; a run that cannot read it
-stops):
+`{prober_retention}control` (read before every pass and every walk batch; a
+run that cannot read it stops):
 
 ```
 HSET {prober_retention}control mode dry_run          # count what a drop would delete
 HSET {prober_retention}control mode on               # drop
-HSET {prober_retention}control mode off              # stop within one pass
+HSET {prober_retention}control mode off              # stop within one pass or walk batch
 HSET {prober_retention}control retainedGenerations 8 # 2..30 UTC days kept
-HSET {prober_retention}control maxContractsPerSecond 200   # up to 2000; 0 is off
+HSET {prober_retention}control maxContractsPerSecond 200   # pass contracts the walk keeps a second, up to 2000; 0 is off
+HSET {prober_retention}control maxWalkRowsPerSecond 3000   # contracts of any payer the walk reads a second, up to 20000; 0 is off
 HSET {prober_retention}control maxShardsPerMinute 30        # passes dropped a minute, up to 600; 0 is off
-HSET {prober_retention}control contracts off         # drop identities only
+HSET {prober_retention}control contracts off         # drop identities only, without a walk
 DEL  {prober_retention}control                       # code defaults (off)
 ```
 
+A dry run reads one page of due passes and walks the next generation read
+only, from the walk's cursor when it is in progress, for one budget; it changes
+nothing, the walk included. With contracts off, a generation's passes drop
+without a walk, and that generation is never walked once contracts are on
+again.
+
 **Metrics.** `urnetwork_prober_retention_*`: the mode, the kept generations,
-the cutoff, the oldest registered pass, the due backlog and the run's clock
-(gauges); passes dropped, refused (by reason) and failed; contracts deleted,
-kept for bytes, kept unsettled or busy; archived contracts; deleted rows by
+the cutoff, the oldest registered pass, the due backlog, the run's clock and
+the creation time the walk has read up to (gauges); passes dropped, refused (by
+reason) and failed; contracts deleted, kept for bytes, kept unsettled or busy;
+contracts of any payer the walk read; archived contracts; deleted rows by
 table; step durations; runs by why they stopped. While the drop keeps up, the
 oldest registered pass is within a generation of the cutoff. Each taskworker
 keeps the gauges of the last run it made, and a run publishes its clock with

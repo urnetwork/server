@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,10 @@ import (
 
 // A synthetic webhook. Its path stands in for the secret part of a real one.
 const syntheticSlackWebhookUrl = "https://hooks.slack.example/services/T0SYNTHETIC/B0SYNTHETIC/syntheticWebhookSecret01"
+
+// A synthetic heartbeat check's ping url. Its path stands in for the check's
+// secret uuid.
+const syntheticWatchdogHeartbeatUrl = "https://heartbeat.example/ping/syntheticHeartbeatSecret01"
 
 // One recorded mutation of the fake Grafana.
 type fakeGrafanaWrite struct {
@@ -34,9 +39,10 @@ type fakeAlertingGrafana struct {
 	policy       map[string]any
 	writes       []fakeGrafanaWrite
 	requestCount int
-	// status and body forced on writes to the default Slack contact point
-	slackContactStatus int
-	slackContactBody   string
+	// status and body forced on writes to the contact point with this uid
+	failedContactUid    string
+	failedContactStatus int
+	failedContactBody   string
 	// status and body forced on policy writes
 	policyStatus int
 	policyBody   string
@@ -104,9 +110,9 @@ func (self *fakeAlertingGrafana) serve(response http.ResponseWriter, request *ht
 		encode(listed)
 	case request.Method == http.MethodPost && request.URL.Path == "/api/v1/provisioning/contact-points":
 		contact := decodeContact()
-		if contact.Uid == DefaultAlertContactUid && self.slackContactStatus != 0 {
-			response.WriteHeader(self.slackContactStatus)
-			_, _ = io.WriteString(response, self.slackContactBody)
+		if contact.Uid == self.failedContactUid && self.failedContactStatus != 0 {
+			response.WriteHeader(self.failedContactStatus)
+			_, _ = io.WriteString(response, self.failedContactBody)
 			return
 		}
 		self.contacts = append(self.contacts, contact)
@@ -114,9 +120,9 @@ func (self *fakeAlertingGrafana) serve(response http.ResponseWriter, request *ht
 	case request.Method == http.MethodPut && strings.HasPrefix(request.URL.Path, "/api/v1/provisioning/contact-points/"):
 		contact := decodeContact()
 		uid := strings.TrimPrefix(request.URL.Path, "/api/v1/provisioning/contact-points/")
-		if uid == DefaultAlertContactUid && self.slackContactStatus != 0 {
-			response.WriteHeader(self.slackContactStatus)
-			_, _ = io.WriteString(response, self.slackContactBody)
+		if uid == self.failedContactUid && self.failedContactStatus != 0 {
+			response.WriteHeader(self.failedContactStatus)
+			_, _ = io.WriteString(response, self.failedContactBody)
 			return
 		}
 		for i := range self.contacts {
@@ -137,11 +143,21 @@ func (self *fakeAlertingGrafana) serve(response http.ResponseWriter, request *ht
 		if err := json.Unmarshal(body, &policy); err != nil {
 			self.t.Error(err)
 		}
-		// Grafana refuses a tree that names a receiver it does not have
+		// Grafana refuses a tree that names a receiver it does not have. The
+		// fixtures' manual routes name receivers they do not model, so child
+		// routes are checked only for the heartbeat's.
 		receiver, _ := policy["receiver"].(string)
 		if receiver != "empty" && !self.hasReceiverWithLock(receiver) {
 			response.WriteHeader(http.StatusBadRequest)
 			return
+		}
+		routes, _ := policy["routes"].([]any)
+		for _, value := range routes {
+			route, _ := value.(map[string]any)
+			if route["receiver"] == WatchdogAlertContactName && !self.hasReceiverWithLock(WatchdogAlertContactName) {
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
 		}
 		self.policy = policy
 		response.WriteHeader(http.StatusAccepted)
@@ -190,10 +206,64 @@ func (self *fakeAlertingGrafana) snapshot() ([]grafanaContactPoint, map[string]a
 }
 
 func (self *fakeAlertingGrafana) failSlackContactWrites(status int, body string) {
+	self.failContactWrites(DefaultAlertContactUid, status, body)
+}
+
+func (self *fakeAlertingGrafana) failContactWrites(uid string, status int, body string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	self.slackContactStatus = status
-	self.slackContactBody = body
+	self.failedContactUid = uid
+	self.failedContactStatus = status
+	self.failedContactBody = body
+}
+
+// The integrations Grafana would notify for an alert with labels: those of
+// the receiver of the first top-level route whose matchers all match, else
+// the root's. Nested routes and continue are not modeled; the managed tree
+// has neither.
+func (self *fakeAlertingGrafana) integrationsFor(labels map[string]string) []grafanaContactPoint {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	receiver, _ := self.policy["receiver"].(string)
+	routes, _ := self.policy["routes"].([]any)
+	for _, value := range routes {
+		route, _ := value.(map[string]any)
+		matchers, _ := route["object_matchers"].([]any)
+		matched := true
+		for _, matcherValue := range matchers {
+			matcher, _ := matcherValue.([]any)
+			if len(matcher) != 3 {
+				self.t.Fatalf("matcher = %#v", matcherValue)
+			}
+			name, _ := matcher[0].(string)
+			operator, _ := matcher[1].(string)
+			pattern, _ := matcher[2].(string)
+			actual := labels[name]
+			switch operator {
+			case "=":
+				matched = matched && actual == pattern
+			case "!=":
+				matched = matched && actual != pattern
+			case "=~":
+				matched = matched && regexp.MustCompile("^(?:"+pattern+")$").MatchString(actual)
+			case "!~":
+				matched = matched && !regexp.MustCompile("^(?:"+pattern+")$").MatchString(actual)
+			default:
+				self.t.Fatalf("matcher operator = %q", operator)
+			}
+		}
+		if matched {
+			receiver, _ = route["receiver"].(string)
+			break
+		}
+	}
+	integrations := []grafanaContactPoint{}
+	for _, contact := range self.contacts {
+		if contact.Name == receiver {
+			integrations = append(integrations, contact)
+		}
+	}
+	return integrations
 }
 
 func (self *fakeAlertingGrafana) failPolicyWrites(status int, body string) {
@@ -610,13 +680,14 @@ func TestDefaultAlertTestUsesTheStoredSlackIntegration(t *testing.T) {
 }
 
 func TestAlertRoutingSettingsFromMonitorVault(t *testing.T) {
-	settings, err := AlertRoutingSettingsFromMonitorVault([]byte("ssh:\n  user: monitor\nalerts:\n  slack_webhook_url: \" " + syntheticSlackWebhookUrl + " \"\n"))
-	if err != nil || settings.SlackWebhookUrl != syntheticSlackWebhookUrl {
+	settings, err := AlertRoutingSettingsFromMonitorVault([]byte("ssh:\n  user: monitor\nalerts:\n  slack_webhook_url: \" " + syntheticSlackWebhookUrl + " \"\n" +
+		"  watchdog_heartbeat_url: \" " + syntheticWatchdogHeartbeatUrl + "\"\n"))
+	if err != nil || settings.SlackWebhookUrl != syntheticSlackWebhookUrl || settings.WatchdogHeartbeatUrl != syntheticWatchdogHeartbeatUrl {
 		t.Fatalf("settings = %+v, err = %v", settings, err)
 	}
-	for _, document := range []string{"", "ssh:\n  user: monitor\n", "alerts:\n  slack_webhook_url: \"\"\n"} {
+	for _, document := range []string{"", "ssh:\n  user: monitor\n", "alerts:\n  slack_webhook_url: \"\"\n  watchdog_heartbeat_url: \"\"\n"} {
 		settings, err := AlertRoutingSettingsFromMonitorVault([]byte(document))
-		if err != nil || settings.SlackWebhookUrl != "" {
+		if err != nil || settings.SlackWebhookUrl != "" || settings.WatchdogHeartbeatUrl != "" {
 			t.Errorf("document %q: settings = %+v, err = %v", document, settings, err)
 		}
 	}
@@ -624,5 +695,203 @@ func TestAlertRoutingSettingsFromMonitorVault(t *testing.T) {
 	_, err = AlertRoutingSettingsFromMonitorVault([]byte("alerts: " + syntheticSlackWebhookUrl + "\n"))
 	if err == nil || strings.Contains(err.Error(), "syntheticWebhookSecret01") || !strings.Contains(err.Error(), "line 1") {
 		t.Fatalf("malformed document error = %v", err)
+	}
+}
+
+// The labels Grafana gives the always-firing Watchdog rule (warp
+// grafana/alerting/watchdog.yml): its title as alertname, its own labels and
+// its folder.
+func watchdogAlertLabels() map[string]string {
+	return map[string]string{
+		"alertname":      WatchdogAlertName,
+		"service":        WatchdogAlertService,
+		"severity":       "warn",
+		"grafana_folder": "urnetwork alerts",
+	}
+}
+
+func slackRootContacts() []grafanaContactPoint {
+	return append(teamCoreContacts(), grafanaContactPoint{
+		Uid: DefaultAlertContactUid, Name: DefaultAlertContactName, Type: "slack", Settings: map[string]any{"url": syntheticSlackWebhookUrl},
+	})
+}
+
+func slackRootPolicy() map[string]any {
+	policy := unroutedToNobodyPolicy()
+	policy["receiver"] = DefaultAlertContactName
+	return policy
+}
+
+// The dead man's switch (owner, 2026-11-16). With no route of its own, the
+// always-firing Watchdog would reach Slack every 4 hours and no external
+// check would hear it stop. With the vault heartbeat set it reaches only the
+// heartbeat's webhook, every 5 minutes, and nothing else does: not its own
+// DatasourceError, which must reach Slack when Mimir stops answering, not
+// another rule's alerts, not competition alerts. Reconciling again keeps one
+// Watchdog route and rewrites the webhook in place.
+func TestAlertRoutingSendsTheWatchdogOnlyToItsHeartbeat(t *testing.T) {
+	fake, server := newFakeAlertingGrafana(t, slackRootContacts(), slackRootPolicy())
+	if reached := fake.integrationsFor(watchdogAlertLabels()); len(reached) != 1 || reached[0].Uid != DefaultAlertContactUid {
+		t.Fatalf("fixture routes the Watchdog to %+v", reached)
+	}
+
+	for i := 0; i < 2; i++ {
+		result, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{
+			WatchdogHeartbeatUrl: " " + syntheticWatchdogHeartbeatUrl + "\n",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := AlertRoutingResult{
+			PreviousDefaultReceiver:        DefaultAlertContactName,
+			DefaultReceiver:                DefaultAlertContactName,
+			DefaultReceiverHasIntegrations: true,
+			WatchdogConfigured:             true,
+		}
+		if result != want {
+			t.Fatalf("result = %+v, want %+v", result, want)
+		}
+	}
+
+	reached := fake.integrationsFor(watchdogAlertLabels())
+	if len(reached) != 1 {
+		t.Fatalf("the Watchdog reaches %+v", reached)
+	}
+	heartbeat := reached[0]
+	if heartbeat.Uid != WatchdogAlertContactUid || heartbeat.Name != WatchdogAlertContactName || heartbeat.Type != "webhook" ||
+		heartbeat.Settings["url"] != syntheticWatchdogHeartbeatUrl || heartbeat.Settings["httpMethod"] != http.MethodPost ||
+		len(heartbeat.Settings) != 2 || !heartbeat.DisableResolveMessage {
+		t.Fatalf("heartbeat integration = %+v", heartbeat)
+	}
+	for _, labels := range []map[string]string{
+		{"alertname": "DatasourceError", "rulename": WatchdogAlertName, "service": WatchdogAlertService, "severity": "warn"},
+		{"alertname": "DbArchiveRunOver168h", "service": "db-archive", "severity": "page"},
+		{"alertname": "SimLatencyStale", "service": "sim-latency", "severity": "page"},
+		{"alertname": WatchdogAlertName, "service": "db-archive", "severity": "warn"},
+	} {
+		reached := fake.integrationsFor(labels)
+		if len(reached) != 1 || reached[0].Uid != DefaultAlertContactUid {
+			t.Errorf("%v reaches %+v, want only the Slack default", labels, reached)
+		}
+	}
+
+	_, storedPolicy, _ := fake.snapshot()
+	routes, _ := json.Marshal(storedPolicy["routes"])
+	if string(routes) != `[{"group_by":["alertname"],"group_interval":"1m","group_wait":"30s","object_matchers":[["alertname","=","Watchdog"],["service","=","watchdog"]],"receiver":"urnetwork-watchdog","repeat_interval":"5m"},`+
+		`{"object_matchers":[["team","=","core"],["service","!=","sim-latency"]],"receiver":"team-core"},`+
+		`{"object_matchers":[["service","=","sim-latency"],["severity","=~","warn|page"]],"receiver":"urnetwork-default"}]` {
+		t.Fatalf("routes = %s", routes)
+	}
+
+	// created once, then rewritten in place, each time before the policy
+	creates, rewrites := 0, 0
+	lastContact, lastPolicy := -1, -1
+	for i, write := range fake.recordedWrites() {
+		switch {
+		case write.method == http.MethodPost && strings.Contains(write.body, `"uid":"`+WatchdogAlertContactUid+`"`):
+			creates++
+			lastContact = i
+		case write.method == http.MethodPut && write.path == "/api/v1/provisioning/contact-points/"+WatchdogAlertContactUid:
+			rewrites++
+			lastContact = i
+		case write.path == "/api/v1/provisioning/policies":
+			lastPolicy = i
+		}
+	}
+	if creates != 1 || rewrites != 1 || lastPolicy < lastContact {
+		t.Fatalf("heartbeat creates = %d, rewrites = %d, writes = %+v", creates, rewrites, fake.recordedWrites())
+	}
+}
+
+// Without the vault heartbeat, a heartbeat an earlier reconcile set up stays:
+// its contact point is not written and its route keeps its place, so an
+// environment's routing does not change with a vault that lacks the url.
+func TestAlertRoutingWithoutHeartbeatLeavesTheWatchdogAsItIs(t *testing.T) {
+	fake, server := newFakeAlertingGrafana(t, slackRootContacts(), slackRootPolicy())
+	if _, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{WatchdogHeartbeatUrl: syntheticWatchdogHeartbeatUrl}); err != nil {
+		t.Fatal(err)
+	}
+	_, before, _ := fake.snapshot()
+	beforeRoutes, _ := json.Marshal(before["routes"])
+	writes := len(fake.recordedWrites())
+
+	result, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{WatchdogHeartbeatUrl: "  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WatchdogConfigured {
+		t.Fatalf("result = %+v", result)
+	}
+	for _, write := range fake.recordedWrites()[writes:] {
+		if write.path != "/api/v1/provisioning/policies" {
+			t.Fatalf("write without the heartbeat: %+v", write)
+		}
+	}
+	_, after, _ := fake.snapshot()
+	afterRoutes, _ := json.Marshal(after["routes"])
+	if string(afterRoutes) != string(beforeRoutes) {
+		t.Fatalf("routes = %s, want %s", afterRoutes, beforeRoutes)
+	}
+	if reached := fake.integrationsFor(watchdogAlertLabels()); len(reached) != 1 || reached[0].Uid != WatchdogAlertContactUid {
+		t.Fatalf("the Watchdog reaches %+v", reached)
+	}
+}
+
+// The heartbeat url is a credential: a Grafana error that quotes it, or its
+// path, is redacted at the boundary, and the policy that would name its
+// contact point is not written.
+func TestAlertRoutingRedactsTheHeartbeatFromErrors(t *testing.T) {
+	fake, server := newFakeAlertingGrafana(t, slackRootContacts(), slackRootPolicy())
+	parsed, err := url.Parse(syntheticWatchdogHeartbeatUrl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.failContactWrites(WatchdogAlertContactUid, http.StatusBadRequest, `{"message":"invalid url \"`+syntheticWatchdogHeartbeatUrl+`\": rejected path `+parsed.Path+`"}`)
+
+	_, err = ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{WatchdogHeartbeatUrl: syntheticWatchdogHeartbeatUrl})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 400") || !strings.Contains(err.Error(), "Watchdog heartbeat") {
+		t.Fatalf("error = %v", err)
+	}
+	for _, secret := range []string{syntheticWatchdogHeartbeatUrl, parsed.Path, "syntheticHeartbeatSecret01"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error quotes %q: %v", secret, err)
+		}
+	}
+	for _, write := range fake.recordedWrites() {
+		if write.path == "/api/v1/provisioning/policies" {
+			t.Fatalf("policy written after the heartbeat write failed: %+v", write)
+		}
+	}
+}
+
+// A non-https heartbeat is refused before any request, without quoting it,
+// and so is a heartbeat receiver that carries an integration this reconcile
+// does not manage, which would reach someone every 5 minutes.
+func TestAlertRoutingRefusesAnUnsafeHeartbeat(t *testing.T) {
+	fake, server := newFakeAlertingGrafana(t, slackRootContacts(), slackRootPolicy())
+	for i, heartbeatUrl := range []string{
+		"http://heartbeat.example/ping/plainSecret",
+		"https://user:pass@heartbeat.example/ping/userinfoSecret",
+		"heartbeat.example/ping/relativeSecret",
+	} {
+		_, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{WatchdogHeartbeatUrl: heartbeatUrl})
+		if err == nil || strings.Contains(err.Error(), "Secret") {
+			t.Errorf("heartbeat %d: error = %v", i, err)
+		}
+	}
+	if _, _, requestCount := fake.snapshot(); requestCount != 0 {
+		t.Fatalf("invalid heartbeats reached Grafana %d times", requestCount)
+	}
+
+	contacts := append(slackRootContacts(), grafanaContactPoint{
+		Uid: "operator-email", Name: WatchdogAlertContactName, Type: "email", Settings: map[string]any{"addresses": "oncall@example.com"},
+	})
+	fake, server = newFakeAlertingGrafana(t, contacts, slackRootPolicy())
+	_, err := ReconcileAlertRouting(context.Background(), server.URL, "admin", "secret", AlertRoutingSettings{WatchdogHeartbeatUrl: syntheticWatchdogHeartbeatUrl})
+	if err == nil || !strings.Contains(err.Error(), "does not manage") {
+		t.Fatalf("error = %v", err)
+	}
+	if writes := fake.recordedWrites(); len(writes) != 0 {
+		t.Fatalf("writes = %+v", writes)
 	}
 }

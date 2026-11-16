@@ -3,8 +3,8 @@ package main
 // Grafana commands act on <env>-grafana.<domain> (or --grafana_url) as the
 // grafana admin from vault grafana.yml. Alert routing also reads the optional
 // Slack webhook from vault monitor.yml alerts.slack_webhook_url, the webhook
-// the monitor's notifier posts to. The webhook is a credential: no command
-// prints it.
+// the monitor's notifier posts to, and the optional Watchdog heartbeat,
+// alerts.watchdog_heartbeat_url. Both are credentials: no command prints them.
 
 import (
 	"context"
@@ -141,6 +141,11 @@ func grafanaReconcileAlerting(ctx context.Context, out io.Writer, grafanaUrl str
 		return err
 	}
 	fmt.Fprintf(out, "Competition warn/page alerts use existing main receiver %s; incident owner %s.\n", grafana.DefaultAlertContactName, grafana.CompetitionIncidentContact)
+	if result.WatchdogConfigured {
+		fmt.Fprintf(out, "The %s alert goes only to %s, the external heartbeat, about every 5 minutes; no other alert does.\n", grafana.WatchdogAlertName, grafana.WatchdogAlertContactName)
+	} else {
+		fmt.Fprintf(out, "Watchdog heartbeat left as it is: vault monitor.yml alerts.watchdog_heartbeat_url is empty.\n")
+	}
 	if result.SlackConfigured {
 		fmt.Fprintf(out, "Unrouted alerts go to Slack: default receiver %s (was %s)\n", result.DefaultReceiver, result.PreviousDefaultReceiver)
 		fmt.Fprintf(out, "Send a test notification with: bringyourctl grafana test-alert\n")
