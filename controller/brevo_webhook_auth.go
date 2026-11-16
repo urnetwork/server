@@ -189,6 +189,8 @@ type brevoWebhookCredential struct {
 	// "Basic base64(<user>:)", one of expectedAuths
 	authorization string
 	expectedAuths map[string]bool
+	// every brevo.webhook_bearers entry in order, to name a user by position
+	users []string
 }
 
 // The first usable brevo.webhook_bearers user, as a Basic value that
@@ -203,7 +205,8 @@ func loadBrevoWebhookCredential() (*brevoWebhookCredential, error) {
 		return nil, err
 	}
 	// brevoWebhookExpectedAuths parsed the resource
-	for _, user := range brevo.String("brevo", "webhook_bearers") {
+	users := brevo.String("brevo", "webhook_bearers")
+	for _, user := range users {
 		if strings.TrimSpace(user) == "" {
 			continue
 		}
@@ -213,15 +216,20 @@ func loadBrevoWebhookCredential() (*brevoWebhookCredential, error) {
 				user:          user,
 				authorization: authorization,
 				expectedAuths: expectedAuths,
+				users:         users,
 			}, nil
 		}
 	}
 	return nil, errors.New("brevo.yml: brevo.webhook_bearers names no user")
 }
 
-// The user, masked for output.
-func (self *brevoWebhookCredential) maskedUser() string {
-	return server.MaskValue(self.user)
+// A user named for output by its position in brevo.webhook_bearers. No
+// character of the user is shown: the user is the whole secret.
+func (self *brevoWebhookCredential) userName(user string) string {
+	if index := slices.Index(self.users, user); 0 <= index {
+		return fmt.Sprintf("brevo.webhook_bearers entry %d", index+1)
+	}
+	return "(not in brevo.webhook_bearers)"
 }
 
 // Removes the credential, and the userinfo of any url, from text Brevo
@@ -435,7 +443,8 @@ func brevoWebhookSameEndpoint(listed *url.URL, target *url.URL) bool {
 		strings.EqualFold(strings.TrimRight(listed.Path, "/"), strings.TrimRight(target.Path, "/"))
 }
 
-// A webhook url for output: its userinfo masked, so no credential is printed.
+// A webhook url for output: no character of its userinfo is printed, since the
+// user is the credential.
 func brevoWebhookRedactedUrl(u *url.URL) string {
 	withoutUser := *u
 	withoutUser.User = nil
@@ -443,7 +452,7 @@ func brevoWebhookRedactedUrl(u *url.URL) string {
 	if u.User == nil {
 		return text
 	}
-	userinfo := server.MaskValue(u.User.Username())
+	userinfo := "***"
 	if password, set := u.User.Password(); set {
 		if password == "" {
 			userinfo += ":"
@@ -631,9 +640,10 @@ func (self *brevoWebhookPlan) gaps() []string {
 	return gaps
 }
 
-// The masked user of the credential the plan leaves on the webhook, which may
-// be another accepted user than the first.
-func (self *brevoWebhookPlan) maskedUser(carrier brevoWebhookCredentialCarrier) string {
+// The user of the credential the plan leaves on the webhook, which may be
+// another accepted user than the first, named for output as
+// brevoWebhookCredential.userName does.
+func (self *brevoWebhookPlan) userName(carrier brevoWebhookCredentialCarrier, credential *brevoWebhookCredential) string {
 	if carrier == brevoWebhookCredentialHeader {
 		for _, header := range self.headers {
 			if !brevoWebhookIsAuthorizationHeader(header) {
@@ -642,7 +652,7 @@ func (self *brevoWebhookPlan) maskedUser(carrier brevoWebhookCredentialCarrier) 
 			scheme, encoded, _ := strings.Cut(strings.TrimSpace(header.Value), " ")
 			if decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded)); err == nil && strings.EqualFold(scheme, "Basic") {
 				user, _, _ := strings.Cut(string(decoded), ":")
-				return server.MaskValue(user)
+				return credential.userName(user)
 			}
 		}
 		return "***"
@@ -650,14 +660,14 @@ func (self *brevoWebhookPlan) maskedUser(carrier brevoWebhookCredentialCarrier) 
 	if self.url.User == nil {
 		return "***"
 	}
-	return server.MaskValue(self.url.User.Username())
+	return credential.userName(self.url.User.Username())
 }
 
-func describeBrevoWebhookCarrier(carrier brevoWebhookCredentialCarrier, maskedUser string) string {
+func describeBrevoWebhookCarrier(carrier brevoWebhookCredentialCarrier, userName string) string {
 	if carrier == brevoWebhookCredentialHeader {
-		return fmt.Sprintf("Basic, user %s with an empty password, in a custom Authorization header", maskedUser)
+		return fmt.Sprintf("Basic, user %s with an empty password, in a custom Authorization header", userName)
 	}
-	return fmt.Sprintf("Basic, user %s with an empty password, in the url", maskedUser)
+	return fmt.Sprintf("Basic, user %s with an empty password, in the url", userName)
 }
 
 // ensureBrevoTransactionalWebhook makes one transactional webhook post `events`
@@ -769,7 +779,7 @@ func ensureBrevoTransactionalWebhook(
 	if primary.done() {
 		lines := []string{
 			fmt.Sprintf("exists: transactional webhook %d %s", primary.webhook.Id, brevoWebhookRedactedUrl(primary.listedUrl)),
-			fmt.Sprintf("  credential: %s", describeBrevoWebhookCarrier(carrier, primary.maskedUser(carrier))),
+			fmt.Sprintf("  credential: %s", describeBrevoWebhookCarrier(carrier, primary.userName(carrier, credential))),
 			fmt.Sprintf("  events: all %d present", len(events)),
 		}
 		return strings.Join(append(lines, notes...), "\n"), nil
@@ -814,7 +824,7 @@ func createBrevoTransactionalWebhook(
 	}
 	lines := []string{
 		fmt.Sprintf("created: transactional webhook %d %s", r.Id, brevoWebhookRedactedUrl(&webhookUrl)),
-		fmt.Sprintf("  credential: %s", describeBrevoWebhookCarrier(carrier, credential.maskedUser())),
+		fmt.Sprintf("  credential: %s", describeBrevoWebhookCarrier(carrier, credential.userName(credential.user))),
 		fmt.Sprintf("  events: %s", strings.Join(events, ", ")),
 		checkBrevoTransactionalWebhook(ctx, r.Id, target, events, carrier, credential),
 	}
@@ -856,11 +866,11 @@ func updateBrevoTransactionalWebhook(
 	if plan.urlChanged() || plan.headersChanged() {
 		lines = append(lines, fmt.Sprintf(
 			"  credential: now %s (it had %s)",
-			describeBrevoWebhookCarrier(carrier, plan.maskedUser(carrier)),
+			describeBrevoWebhookCarrier(carrier, plan.userName(carrier, credential)),
 			describeBrevoWebhookCredentials(plan),
 		))
 	} else {
-		lines = append(lines, fmt.Sprintf("  credential: %s, unchanged", describeBrevoWebhookCarrier(carrier, plan.maskedUser(carrier))))
+		lines = append(lines, fmt.Sprintf("  credential: %s, unchanged", describeBrevoWebhookCarrier(carrier, plan.userName(carrier, credential))))
 	}
 	if 0 < len(plan.missingEvents) {
 		lines = append(lines, fmt.Sprintf("  events: added %s", strings.Join(plan.missingEvents, ", ")))

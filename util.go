@@ -167,6 +167,9 @@ func AttemptCompactJson(jsonBytes []byte) []byte {
 	}
 }
 
+// Shows the first and last two characters of v, for output where a hint helps
+// and v is not a secret, such as an email address in a log. Never use it for a
+// credential: the characters it shows are part of the secret.
 func MaskValue(v string) string {
 	if len(v) < 6 {
 		return "***"
