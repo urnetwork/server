@@ -131,9 +131,9 @@ type hostDeps struct {
 	// tls/'s listen facts (TLS-M5-22): api's GET /internal/gate/listen-facts/<network_id> on the block's bearer
 	// (plan-SOCK-gate-data), which no route serves yet. nil leaves tls/ unregistered, refusing every entry.
 	TlsListenFacts socketsservice.TlsListenFactsSource
-	// The gate the engine judges by, made from the block's production gate, which stays the one readiness and the
-	// key events read: a test's stand-in for a check the production gate refuses until its wiring lands, such as an
-	// urnetwork-edge caller's tls/ Find (ACL-M5-01, QD-852). nil: the production gate itself.
+	// The gate the engine judges by, made from the block's production gate, whose readiness the block still reads: a
+	// test's stand-in for a check the production gate refuses until its wiring lands, such as an urnetwork-edge
+	// caller's tls/ Find (ACL-M5-01, QD-852). nil: the production gate itself.
 	Gate func(production *socketsservice.SocketProjectionGate) socketsservice.SocketGate
 }
 
