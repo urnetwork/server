@@ -12,9 +12,9 @@ import (
 
 // The side table's row and panel ids on the taskworker dashboard.
 const (
-	contractOriginLingerRowPanel   = 131
-	contractOriginLingerSweepPanel = 133
-	contractOriginLingerLagPanel   = 134
+	contractOriginLingerRowPanel   = 142
+	contractOriginLingerSweepPanel = 144
+	contractOriginLingerLagPanel   = 145
 )
 
 // The sweep panels read the taskworker's deletes of its table, its runs by
@@ -60,7 +60,7 @@ func TestContractOriginLingerDashboardPanels(t *testing.T) {
 // The companion origin reads' counter and panel are gone with the switch.
 func TestContractOriginLingerDashboardDropsTheReadsPanel(t *testing.T) {
 	dashboard := readTestDashboard(t, "taskworker.json")
-	if dashboardPanelById(dashboard, 132) != nil {
+	if dashboardPanelById(dashboard, 143) != nil {
 		t.Fatal("the companion origin reads panel is still on the dashboard")
 	}
 	for _, expression := range dashboardExpressions(dashboard) {

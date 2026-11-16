@@ -1526,8 +1526,15 @@ func deactivateOwnedNetworkClientInTx(
 // hundreds of thousands in a network that churned proxies (2026-11-05), which
 // also kept them from the retired hosted reap, which reaps retired ones only.
 func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, lockedClientIds []server.Id, networkId server.Id) (int64, error) {
+	lockedCount, _, err := deactivateLockedNetworkClientsCountedInTx(ctx, tx, lockedClientIds, networkId)
+	return lockedCount, err
+}
+
+// deactivateLockedNetworkClientsInTx that also counts every client it
+// deactivated, the caller's and their active descendants.
+func deactivateLockedNetworkClientsCountedInTx(ctx context.Context, tx server.PgTx, lockedClientIds []server.Id, networkId server.Id) (lockedCount int64, deactivatedCount int64, returnErr error) {
 	if len(lockedClientIds) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// Locks the clients' active descendants, one generation at a time, each in
@@ -1571,14 +1578,14 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 	}
 	descendantClientIds, err := lockActiveDescendants()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	deactivatedClientIds := append(slices.Clone(lockedClientIds), descendantClientIds...)
 
 	// The revocation records refuse these clients before the deactivation can
 	// commit; a failed write fails the deactivation (revocation_record.go).
 	if err := session.RevokeClientRecordsInTx(ctx, tx, networkId, deactivatedClientIds); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	// Read the primary database clock in the UPDATE only after every target row
@@ -1605,34 +1612,34 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 		networkId,
 	)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	lockedClientIdSet := map[server.Id]bool{}
 	for _, clientId := range lockedClientIds {
 		lockedClientIdSet[clientId] = true
 	}
-	var lockedCount int64
 	for result.Next() {
 		var clientId server.Id
 		if err := result.Scan(&clientId); err != nil {
 			result.Close()
-			return 0, err
+			return 0, 0, err
 		}
+		deactivatedCount += 1
 		if lockedClientIdSet[clientId] {
 			lockedCount += 1
 		}
 	}
 	result.Close()
 	if err := result.Err(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := removeDeactivatedProvideKeysInTx(ctx, tx, deactivatedClientIds); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	// the connect and proxy processes close what they hold of the clients, and
 	// the clients' counterparties close their contracts (CLIENTCLOSE.md)
 	addClientsRemovedPostCommit(ctx, tx, deactivatedClientIds)
-	return lockedCount, nil
+	return lockedCount, deactivatedCount, nil
 }
 
 // A child is minted (AuthNetworkClient) by a request that names its parent's

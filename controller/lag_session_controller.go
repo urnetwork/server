@@ -96,7 +96,7 @@ func LagSession(clientSession *session.ClientSession) (result *LagSessionResult,
 
 	unavailable := func(cause string) (*LagSessionResult, error) {
 		glog.Infof("[lag]guest session %s not created: %s\n", guest.NetworkId, cause)
-		model.RemoveLagGuest(ctx, guest.NetworkId)
+		model.RemoveLagGuestWithRemovals(ctx, guest.NetworkId, ScheduleDeletedNetworkCleanup(ctx))
 		return &LagSessionResult{
 			Error: &LagError{
 				Code:    LagErrorCodeUnavailable,
