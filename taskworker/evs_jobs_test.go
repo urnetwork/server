@@ -79,7 +79,7 @@ func TestEvsJobsRunOnTheHostTheRuntimeHolds(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var lifetime sync.WaitGroup
 	closed := 0
-	startEvsJobsOnHost(ctx, &lifetime, host, jobs, func() { closed += 1 })
+	startEvsJobsOnHost(ctx, &lifetime, host, nil, jobs, func() { closed += 1 })
 	if evsJobHost.Load() != host {
 		t.Fatal("the runtime's host is not the jobs'")
 	}

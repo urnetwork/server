@@ -81,6 +81,8 @@ type Settings struct {
 	// The AclExchangeTier each Net names (acl_exchange_tier.go): FS-21's sidecars on an exchange of its own under
 	// server's contract gate. nil: its defaults.
 	AclExchangeTier *AclExchangeTierSettings
+	// The evs tier each Net names (evs_tier.go). nil: its defaults.
+	EvsTier *EvsTierSettings
 }
 
 func DefaultSettings() *Settings {
@@ -223,7 +225,7 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 	net.Faults().SetRealStore(admitClusterFault(layoutFaults))
 	stopPgCommits := armPgCommitFaults(t, net)
 	// an evs world's instances run evshost's block, its devices on oauth's tokens (evs_tier.go)
-	evsTier, removeEvsTier := newEvsTier()
+	evsTier, removeEvsTier := newEvsTier(settings.EvsTier)
 	fault.SetEvsTier(net, evsTier)
 	// FS-21's sidecars on server's exchange under its contract gate (acl_exchange_tier.go)
 	aclExchangeTier, closeAclExchangeTier := newAclExchangeTier(ctx, t, settings.AclExchangeTier)

@@ -34,12 +34,14 @@ func firstEvsEvacuate(host *sidecar.ServiceHost) *sidecar.TaskRequest {
 	return evsservice.EvsEvacuateStartTaskRequest(host.ClockOrReal().Now())
 }
 
-// One run: the hourly start, or one cluster's evacuation. Format 2's sweep reads §19.11's purge mode from the host's
-// gates (EVSB-M10-02), observe while sidecar.yml sets none.
+// One run: the hourly start, or one cluster's evacuation, at the instance format the block's config names
+// (evs_block_config.go): a format-1 run leaves format-2 batches where they are, alarming. Format 2's sweep reads
+// §19.11's purge mode from the host's gates (EVSB-M10-02), observe while sidecar.yml sets none.
 func runEvsEvacuate(ctx context.Context, host *sidecar.ServiceHost, args []byte) error {
 	deps := &evsservice.EvacuatorDeps{
-		Log:     evsBudgetLogger{},
-		Format2: evsservice.NewFormat2Gate(host),
+		EvsSettings: evsJobSettings(ctx),
+		Log:         evsBudgetLogger{},
+		Format2:     evsservice.NewFormat2Gate(host),
 	}
 	if len(args) != 0 {
 		usage, finish, err := evsEvacuateUsage(ctx, host)

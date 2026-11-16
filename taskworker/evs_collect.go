@@ -19,9 +19,9 @@ func init() {
 	evsJobs = append(evsJobs, &evsJob{name: evsservice.EvsCollectTaskName, run: runEvsCollect})
 }
 
-// One ref's collection.
+// One ref's collection, at the instance format the block's config names (evs_block_config.go).
 func runEvsCollect(ctx context.Context, host *sidecar.ServiceHost, args []byte) error {
-	result, err := evsservice.RunMarkerCollection(ctx, host, &evsservice.MarkerCollectorDeps{Log: evsBudgetLogger{}}, args)
+	result, err := evsservice.RunMarkerCollection(ctx, host, &evsservice.MarkerCollectorDeps{EvsSettings: evsJobSettings(ctx), Log: evsBudgetLogger{}}, args)
 	if result != nil && glog.V(1) {
 		glog.Infof("[evsjobs]marker collection: %d versions read, %d removals, %d markers deleted, %d left, done %d, opened %t, closed %t, skipped %q\n",
 			result.ScannedVersionCount, result.RemovalCount, result.MarkerDeletedCount, result.MarkerLeftCount, result.Done,
