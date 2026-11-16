@@ -283,11 +283,12 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "transfer balance pages filled", version: server.WritePathMigrationVersion(server.WritePathTransferBalanceFillfactor), sql: `ALTER TABLE transfer_balance RESET (fillfactor)`},
 		{name: "device pages filled", version: server.WritePathMigrationVersion(server.WritePathDeviceFillfactor), sql: `ALTER TABLE device SET (fillfactor = 100)`},
 		{name: "search provider stats pages filled", version: server.WritePathMigrationVersion(server.WritePathSearchProviderStatsFillfactor), sql: `ALTER TABLE search_provider_stats RESET (fillfactor)`},
-		{name: "missing debit journal age index", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time`},
-		{name: "debit journal age index keys applied", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time; CREATE INDEX transfer_debit_journal_shard_create_time ON transfer_debit_journal (shard, applied, create_time)`},
-		{name: "dropped debit journal applied age index rebuilt", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
-		{name: "debit journal shard index missing", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `DROP INDEX transfer_debit_journal_shard`},
-		{name: "debit journal pages filled", version: server.WritePathMigrationVersion(server.WritePathDebitJournalFillfactor), sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
+		{name: "missing debit journal age index", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `DROP INDEX transfer_debit_journal_shard_create_time`},
+		{name: "debit journal age index keys applied", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `DROP INDEX transfer_debit_journal_shard_create_time; CREATE INDEX transfer_debit_journal_shard_create_time ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "dropped debit journal applied age index rebuilt", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "debit journal shard index missing", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `DROP INDEX transfer_debit_journal_shard`},
+		{name: "debit journal pages filled", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
+		{name: "debit journal drop guard admits every drop", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `CREATE OR REPLACE FUNCTION transfer_debit_journal_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$`},
 		{name: "dropped full probe deadline index rebuilt", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `CREATE INDEX provider_egress_probe_cycle_next_attempt ON provider_egress_probe_cycle (next_attempt_at, client_id)`},
 		{name: "probe queue identity missing", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `ALTER TABLE provider_egress_probe_cycle DROP CONSTRAINT provider_egress_probe_cycle_pkey`},
 		{name: "dropped client score window index rebuilt", version: server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), sql: `CREATE INDEX client_connection_reliability_score_lookback_max_block ON client_connection_reliability_score (lookback_index, max_block_number)`},
@@ -308,6 +309,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "dropped reap-pending contract index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), sql: `CREATE INDEX transfer_contract_reap_pending_create_time ON transfer_contract (create_time) WHERE reap_time IS NULL AND close_time IS NOT NULL`},
 		{name: "dropped stream index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), sql: `CREATE INDEX transfer_contract_stream_id ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`},
 		{name: "dropped sweep payment index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), sql: `CREATE INDEX transfer_escrow_sweep_payment_id ON transfer_escrow_sweep (payment_id)`},
+		{name: "dropped contract create-time index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietCreateTimeIndexDrop), sql: `CREATE INDEX transfer_contract_create_time ON transfer_contract (create_time, open, contract_id)`},
+		{name: "dropped open payer contract index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietOpenPayerIndexDrop), sql: `CREATE INDEX transfer_contract_open_payer_network_id_transfer_byte_count ON transfer_contract (open, payer_network_id, transfer_byte_count)`},
 		// The retired queue's guard, function and key stay gone; its empty
 		// table keeps the published shape.
 		{name: "retired legacy settlement guard function restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
@@ -658,6 +661,8 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), "transfer_contract", "transfer_contract_reap_pending_create_time"},
 				{server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), "transfer_contract", "transfer_contract_stream_id"},
 				{server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), "transfer_escrow_sweep", "transfer_escrow_sweep_payment_id"},
+				{server.IndexDietMigrationVersion(server.IndexDietCreateTimeIndexDrop), "transfer_contract", "transfer_contract_create_time"},
+				{server.IndexDietMigrationVersion(server.IndexDietOpenPayerIndexDrop), "transfer_contract", "transfer_contract_open_payer_network_id_transfer_byte_count"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

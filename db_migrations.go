@@ -11637,4 +11637,65 @@ var migrations = []any{
 	// floor on the database clock. Apply before or after any deploy. The
 	// monitor pins the new body from this version on.
 	newSqlMigration(clientKeyHistoryRetentionSevenDayFloorSql),
+
+	// The device day rollup (owner, 2026-11-16, PARTITION-CANDIDATES.md §7.3;
+	// audit_device_day_schema.go, model/audit_device_day.go): one new empty
+	// table, created only when absent, under a five-second lock bound. Nothing
+	// existing is locked, scanned or rewritten. Apply before deploying the
+	// taskworker whose device sweep keeps today's row and whose stats export
+	// reads the rows; an older taskworker never touches it.
+	auditDeviceDayMigration,
+
+	// The drop guard of transfer_debit_journal's daily partitions (owner,
+	// 2026-11-16, PARTITION-CANDIDATES.md §6.3;
+	// db_transfer_debit_journal_partition.go): a new function only, under a
+	// five-second lock bound, so no table is locked, scanned or rewritten.
+	// Nothing calls it before the owner-run cutover (bringyourctl model
+	// migrate debit-journal-partition), so it applies before or after any
+	// deploy; the cutover's prepare refuses without it. The monitor pins its
+	// body and the journal's custody in both layouts from this version on.
+	transferDebitJournalDropGuardMigration,
+
+	// The redundant UNIQUE (registration_hash) of st_client_key_history
+	// (owner, 2026-11-16, PARTITION-CANDIDATES.md §8.5;
+	// db_client_key_history_unique_drop.go): 20.6 GiB, never scanned, and
+	// redundant with the primary key, since the hashed registration bytes
+	// encode the key's client, domain and generation. No reader, writer, ON
+	// CONFLICT target or monitor contract uses it. The operator drops it first
+	// on Main with ALTER TABLE ... DROP CONSTRAINT in a vacuum gap under a
+	// short lock timeout; this records the drop, and is a catalog read once
+	// the constraint is gone, so db migrate takes no lock on the table. Merge
+	// it only after the operator's drop: merged first, the next db migrate
+	// would take the table's ACCESS EXCLUSIVE lock itself.
+	newSqlMigration(clientKeyHistoryRegistrationHashUniqueDropSql),
+
+	// One separately approved job may receive a second recovery without replacing
+	// its original immutable audit or changing any other job's one-cycle limit.
+	newSqlMigration(CompetitionSecondRecoveryMigrationSql()),
+
+	// transfer_contract_create_time (301.6 GB, v373) served the reads of
+	// a create_time window of contracts: the public contract stats' live
+	// bucket count and hour fill, the degradation check's count of new
+	// contracts, the monitor's per-minute count and stale contract probe, and
+	// the straggler stamp's fallback. Each now bounds contract_id by its
+	// window's id range (model.ContractIdCreateTimeRange) and reads a range
+	// of the primary key. Drop it only once every running build has those
+	// reads, and pg_stat_statements has shown no call of the old statements
+	// for 7 days that include a Sunday payout and an epoch close. Ad hoc reads
+	// of transfer_contract by create_time need the same contract_id bound;
+	// without it they read the whole heap. Without this index the planner
+	// estimates a create_time range from the column's histogram, which
+	// autoanalyze refreshes about every 17 minutes on Main, instead of
+	// probing the index for the newest value.
+	createTimeIndexDropMigration,
+
+	// transfer_contract_open_payer_network_id_transfer_byte_count (36.7
+	// GB, v377) served only the prober shard cleanup's payer scan
+	// (model/prober_shard_model.go), which walked both values of open for the
+	// shard payer: 177k scans since the reset, about 5.5M tuples a call. That
+	// scan now reads the unresolved-payer and dispute partial indexes
+	// (04d883882), which plan the same contracts without this index. Drop it
+	// only once every running build has that rewrite and the index's idx_scan
+	// has stopped growing.
+	openPayerIndexDropMigration,
 }

@@ -25,6 +25,9 @@ const (
 	// the session state retention (session_state_retention.go)
 	RetentionTableProviderWorkSessionHead = "provider_work_session_head"
 	RetentionTableAuditDeviceState        = "audit_device_state"
+	// the location fold, by its retention and with its client
+	// (network_client_location_reliability_retention.go)
+	RetentionTableNetworkClientLocationReliability = "network_client_location_reliability"
 )
 
 var retentionTables = []string{
@@ -43,6 +46,7 @@ var retentionTables = []string{
 	RetentionTableStClientKeyGone,
 	RetentionTableProviderWorkSessionHead,
 	RetentionTableAuditDeviceState,
+	RetentionTableNetworkClientLocationReliability,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,

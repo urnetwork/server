@@ -137,30 +137,42 @@ func TestUpdateClientLocationReliabilitiesCountsHostedChildren(t *testing.T) {
 	})
 }
 
-// The cutoff keeps a row ClientLocationExpiration past its client's last
-// pass even when its block lags that pass by the whole refresh interval.
+// Each window's cutoff keeps a row its retention past its client's last pass
+// even when its block lags that pass by the whole refresh interval, and
+// deletes a row past both: 31 days after the last refresh for a top-level
+// client, 11 days for a child or a gone client.
 func TestClientLocationReliabilityRetentionAllowsForTheRefreshLag(t *testing.T) {
+	settings := DefaultClientLocationReliabilityRetentionSettings()
 	maxTime := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
-	maxBlockNumber := clientLocationReliabilityRetentionMaxBlockNumber(maxTime)
-	lastSeen := maxTime.Add(-ClientLocationExpiration).Add(ReliabilityBlockDuration)
-	laggedBlock := reliabilityBlockNumber(lastSeen.Add(-ClientLocationReliabilityRefreshInterval))
-	if laggedBlock <= maxBlockNumber {
-		t.Fatalf("a client last seen %s ago with a lagged block %d is past the cutoff %d", maxTime.Sub(lastSeen), laggedBlock, maxBlockNumber)
+	for _, retention := range []time.Duration{settings.TopLevelRetention, settings.ShortRetention} {
+		maxBlockNumber := clientLocationReliabilityCutoffBlockNumber(maxTime, retention)
+		lastSeen := maxTime.Add(-retention).Add(ReliabilityBlockDuration)
+		laggedBlock := reliabilityBlockNumber(lastSeen.Add(-ClientLocationReliabilityRefreshInterval))
+		if laggedBlock <= maxBlockNumber {
+			t.Fatalf("retention %s: a client last seen %s ago with a lagged block %d is past the cutoff %d", retention, maxTime.Sub(lastSeen), laggedBlock, maxBlockNumber)
+		}
+		expiredBlock := reliabilityBlockNumber(maxTime.Add(-retention - ClientLocationReliabilityRefreshInterval - ReliabilityBlockDuration))
+		if maxBlockNumber < expiredBlock {
+			t.Fatalf("retention %s: a block older than the retention and the lag, %d, is kept by the cutoff %d", retention, expiredBlock, maxBlockNumber)
+		}
 	}
-	expiredBlock := reliabilityBlockNumber(maxTime.Add(-ClientLocationExpiration - ClientLocationReliabilityRefreshInterval - ReliabilityBlockDuration))
-	if maxBlockNumber < expiredBlock {
-		t.Fatalf("a block older than the expiration and the lag, %d, is kept by the cutoff %d", expiredBlock, maxBlockNumber)
+	if days := (settings.TopLevelRetention + ClientLocationReliabilityRefreshInterval) / (24 * time.Hour); days != 31 {
+		t.Fatalf("a top-level row is kept %d days after its last refresh, want 31", days)
+	}
+	if days := (settings.ShortRetention + ClientLocationReliabilityRefreshInterval) / (24 * time.Hour); days != 11 {
+		t.Fatalf("a child's or gone client's row is kept %d days after its last refresh, want 11", days)
 	}
 }
 
-// Retention deletes every expired row across batches and keeps the rest; a
-// run stops starting batches once its budget has passed, and the next run
-// continues.
+// The trim deletes every row past the top-level window across batches and
+// keeps the rest; it stops starting batches once its budget has passed, and
+// the next run continues.
 func TestRemoveOldClientLocationReliabilitiesBatches(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		maxTime := server.NowUtc()
-		maxBlockNumber := clientLocationReliabilityRetentionMaxBlockNumber(maxTime)
+		settings := DefaultClientLocationReliabilityRetentionSettings()
+		maxBlockNumber := clientLocationReliabilityCutoffBlockNumber(maxTime, settings.TopLevelRetention)
 
 		insert := func(updateBlockNumber int64) server.Id {
 			clientId := server.NewId()
@@ -178,8 +190,8 @@ func TestRemoveOldClientLocationReliabilitiesBatches(t *testing.T) {
 		for i := range 5 {
 			expiredClientIds = append(expiredClientIds, insert(maxBlockNumber-int64(i)))
 		}
-		// past the old 30-day cutoff, within the refresh lag
-		lagClientId := insert(reliabilityBlockNumber(maxTime.Add(-ClientLocationExpiration - time.Hour)))
+		// past 30 days, within the refresh lag
+		lagClientId := insert(reliabilityBlockNumber(maxTime.Add(-settings.TopLevelRetention - time.Hour)))
 		currentClientId := insert(reliabilityBlockNumber(maxTime))
 		exists := func(clientId server.Id) (found bool) {
 			server.Db(ctx, func(conn server.PgConn) {
@@ -195,28 +207,26 @@ func TestRemoveOldClientLocationReliabilitiesBatches(t *testing.T) {
 		// a budget that has passed once the first batch is done
 		startTime := maxTime
 		clockReads := 0
-		budgeted := &clientLocationReliabilityRetentionSettings{
-			batchSize: 2,
-			budget:    time.Minute,
-			now: func() time.Time {
-				clockReads += 1
-				if clockReads == 1 {
-					return startTime
-				}
-				return startTime.Add(time.Minute)
-			},
+		budgeted := DefaultClientLocationReliabilityRetentionSettings()
+		budgeted.TrimBatchCount = 2
+		budgeted.TrimBudget = time.Minute
+		budgeted.now = func() time.Time {
+			clockReads += 1
+			if clockReads == 1 {
+				return startTime
+			}
+			return startTime.Add(time.Minute)
 		}
-		if removedCount := budgeted.removeOld(ctx, maxTime); removedCount != 2 {
-			t.Fatalf("the budgeted run removed %d rows, want one batch of 2", removedCount)
+		if removedCount, more := budgeted.trim(ctx, maxTime); removedCount != 2 || !more {
+			t.Fatalf("the budgeted trim removed %d rows (more %t), want one batch of 2 and more", removedCount, more)
 		}
 
-		drained := &clientLocationReliabilityRetentionSettings{
-			batchSize: 2,
-			budget:    time.Hour,
-			now:       func() time.Time { return startTime },
-		}
-		if removedCount := drained.removeOld(ctx, maxTime); removedCount != 3 {
-			t.Fatalf("the next run removed %d rows, want the other 3", removedCount)
+		drained := DefaultClientLocationReliabilityRetentionSettings()
+		drained.TrimBatchCount = 2
+		drained.TrimBudget = time.Hour
+		drained.now = func() time.Time { return startTime }
+		if removedCount, more := drained.trim(ctx, maxTime); removedCount != 3 || more {
+			t.Fatalf("the next trim removed %d rows (more %t), want the other 3", removedCount, more)
 		}
 		for _, clientId := range expiredClientIds {
 			if exists(clientId) {
@@ -224,7 +234,7 @@ func TestRemoveOldClientLocationReliabilitiesBatches(t *testing.T) {
 			}
 		}
 		if !exists(lagClientId) || !exists(currentClientId) {
-			t.Fatal("retention removed a row within the expiration and its refresh lag")
+			t.Fatal("the trim removed a row within the top-level window and its refresh lag")
 		}
 	})
 }
@@ -243,5 +253,57 @@ func TestRecordClientLocationReliabilityPassCountsIdentityKinds(t *testing.T) {
 	writtenRowCount := testutil.ToFloat64(clientLocationReliabilityPassWrittenRows)
 	if hostedChildCount != 2 || topLevelCount != 1 || writtenRowCount != 1 {
 		t.Fatalf("hosted_child=%g top_level=%g written=%g, want 2, 1 and 1", hostedChildCount, topLevelCount, writtenRowCount)
+	}
+}
+
+// The brake narrows to the code's bounds: absent, the walk runs at the
+// default rate; off, or any mode but on, stops it; a rate is capped at the
+// maximum, and one that does not parse stops the walk.
+func TestNarrowClientLocationReliabilityRetentionControl(t *testing.T) {
+	settings := DefaultClientLocationReliabilityRetentionSettings()
+	rate := settings.DefaultRowsPerSecond
+	for _, test := range []struct {
+		fields map[string]string
+		rate   float64
+	}{
+		{fields: nil, rate: rate},
+		{fields: map[string]string{"mode": "on"}, rate: rate},
+		{fields: map[string]string{"mode": " on "}, rate: rate},
+		{fields: map[string]string{"mode": "off"}, rate: 0},
+		{fields: map[string]string{"mode": "paused", "maxRowsPerSecond": "500"}, rate: 0},
+		{fields: map[string]string{"maxRowsPerSecond": "500"}, rate: 500},
+		{fields: map[string]string{"mode": "on", "maxRowsPerSecond": "1e9"}, rate: settings.MaxRowsPerSecond},
+		{fields: map[string]string{"maxRowsPerSecond": "0"}, rate: 0},
+		{fields: map[string]string{"maxRowsPerSecond": "NaN"}, rate: 0},
+		{fields: map[string]string{"maxRowsPerSecond": "fast"}, rate: 0},
+	} {
+		control := NarrowClientLocationReliabilityRetentionControl(test.fields, settings)
+		if control.RowsPerSecond != test.rate || control.Present != (0 < len(test.fields)) {
+			t.Fatalf("fields %v narrowed to %+v, want rate %v", test.fields, control, test.rate)
+		}
+	}
+}
+
+// The owner's windows (2026-11-16, "11 days except top-level"), on by default
+// with no setting: a child's or gone client's row 11 days and a top-level
+// client's 31 days after its last refresh, the top-level window as long as a
+// top-level client stays active idle. A run that spends both budgets finishes
+// inside its task's max time, so its post hands on the cursor.
+func TestClientLocationReliabilityRetentionDefaults(t *testing.T) {
+	settings := DefaultClientLocationReliabilityRetentionSettings()
+	if settings.ShortRetention+ClientLocationReliabilityRefreshInterval != 11*24*time.Hour {
+		t.Fatalf("short window %s after the last refresh, want 11 days", settings.ShortRetention+ClientLocationReliabilityRefreshInterval)
+	}
+	if settings.TopLevelRetention+ClientLocationReliabilityRefreshInterval != 31*24*time.Hour || settings.TopLevelRetention < TopLevelClientIdleExpiration {
+		t.Fatalf("top-level window %s, shorter than a top-level client stays active idle (%s) or not 31 days after the last refresh", settings.TopLevelRetention, TopLevelClientIdleExpiration)
+	}
+	if !(0 < settings.DefaultRowsPerSecond) || settings.MaxRowsPerSecond < settings.DefaultRowsPerSecond || 2000 < settings.MaxRowsPerSecond {
+		t.Fatalf("rates default %v max %v", settings.DefaultRowsPerSecond, settings.MaxRowsPerSecond)
+	}
+	if control := NarrowClientLocationReliabilityRetentionControl(nil, settings); !(0 < control.RowsPerSecond) {
+		t.Fatal("the walk is not on without a brake")
+	}
+	if settings.TaskMaxTime < 2*(settings.TrimBudget+settings.WalkBudget) || settings.MoreInterval <= 0 || settings.RunInterval <= settings.MoreInterval {
+		t.Fatalf("schedule %+v", settings)
 	}
 }

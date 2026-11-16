@@ -276,7 +276,7 @@ func validateCompetitionReevaluationRequest(settings *Settings, principal *Princ
 		return ErrAutomationDisabled
 	}
 	if !tokenNamePattern.MatchString(request.IdempotencyKey) || !sha256Pattern.MatchString(request.AuthorizationSha256) ||
-		a.Schema != 1 || a.Kind != model.CompetitionJobReevaluationAuthorizationKind || a.Distributed != nil ||
+		a.Schema != 1 || a.Kind != model.CompetitionJobReevaluationAuthorizationKind || a.Distributed != nil || a.SecondRecovery != nil ||
 		a.Environment != settings.AutomationPolicy.Environment || a.CompetitionId != settings.CompetitionId || a.SeasonId != settings.AutomationPolicy.SeasonId ||
 		a.JobId == (server.Id{}) || a.RoundId == (server.Id{}) || a.ExpectedCycle != 0 || a.ExpectedAttemptCount < 1 || !a.SingleUse ||
 		a.AuthorizedAt.IsZero() || !a.AuthorizedAt.Before(a.ExpiresAt) || !sha256Pattern.MatchString(a.EvidenceSha256) ||
@@ -353,7 +353,7 @@ func readCompetitionReevaluationReceipt(ctx context.Context, settings *Settings,
 		server.Db(ctx, func(conn server.PgConn) {
 			var key, digest string
 			var content []byte
-			loadErr := conn.QueryRow(ctx, `SELECT idempotency_key,request_sha256,receipt_json FROM competition_job_reevaluation WHERE job_id=$1`, request.Authorization.JobId).Scan(&key, &digest, &content)
+			loadErr := conn.QueryRow(ctx, competitionRecoveryReceiptQuery(request.Authorization), request.Authorization.JobId).Scan(&key, &digest, &content)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
 				return
 			}

@@ -73,6 +73,9 @@ type CompetitionDistributedJobReevaluationCycle struct {
 // requires its explicit distributed provenance and cannot relabel a scored or
 // submitter-caused outcome as an infrastructure recovery.
 func validCompetitionReevaluationCycleClass(cycle *CompetitionJobReevaluationCycle) bool {
+	if cycle.Schema == 3 {
+		return validCompetitionOperatorSecondRecoveryCycle(cycle)
+	}
 	if cycle.IncidentClass == CompetitionJobReevaluationOperatorRequestedPatchRetry {
 		return validCompetitionOperatorRequestedPatchRetryCycle(cycle)
 	}

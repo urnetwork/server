@@ -22,7 +22,9 @@ warp_build:
 
 warp_build_image:
 	@case "${SOURCE_DATE_EPOCH}" in ''|*[!0-9]*) echo "SOURCE_DATE_EPOCH must be a nonnegative Unix timestamp" >&2; exit 1;; esac
+	python3 -B ../prepare-runtime-packages.py alt build/runtime-packages
 	docker buildx build --progress=plain \
+		--build-context verified-runtime-packages=build/runtime-packages \
 		--build-arg warp_env=${WARP_ENV} \
 		--build-arg SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
 	--platform linux/arm64/v8,linux/amd64 \

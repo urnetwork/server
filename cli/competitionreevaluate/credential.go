@@ -16,7 +16,7 @@ import (
 func bindRecoveryCredential(settings *controller.Settings, content []byte, auth model.CompetitionJobReevaluationAuthorization, limits recoverySettings, now time.Time) (*controller.Settings, error) {
 	var registration controller.CompetitionOperatorPatchRetryCredential
 	if decodeRecoveryDocument(content, &registration, limits.DocumentBytes) != nil ||
-		auth.Schema != 2 || auth.Kind != model.CompetitionOperatorRequestedPatchRetryAuthorizationKind ||
+		(auth.Schema != 2 && auth.Schema != 3) || auth.Kind != model.CompetitionOperatorRequestedPatchRetryAuthorizationKind ||
 		auth.IncidentClass != model.CompetitionJobReevaluationOperatorRequestedPatchRetry ||
 		registration.RoundId != auth.RoundId || registration.JobId != auth.JobId || registration.Environment != auth.Environment ||
 		registration.CompetitionId != auth.CompetitionId || registration.SeasonId != auth.SeasonId {

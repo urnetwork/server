@@ -38,9 +38,10 @@ func isMigrationContractTable(table string) bool {
 }
 
 // The tables published as plain tables that an operator cutover may make
-// partitioned parents: the contract tables, and provider_egress_health_history
-// (PARTITION-MAINTENANCE-PLAN.md C2).
-var migrationPartitionableTablesSql = migrationQuotedTablesSql(append(append([]string{}, server.ContractPartitionTables...), migrationEgressHealthHistoryTable))
+// partitioned parents: the contract tables, provider_egress_health_history
+// (PARTITION-MAINTENANCE-PLAN.md C2) and audit_device_event
+// (PARTITION-CANDIDATES.md §7).
+var migrationPartitionableTablesSql = migrationQuotedTablesSql(append(append([]string{}, server.ContractPartitionTables...), migrationEgressHealthHistoryTable, "audit_device_event"))
 
 // pg_get_indexdef with its whitespace collapsed, for the index whose pg_class
 // row is indexRelation on the table named by the SQL expression tableName. A

@@ -66,9 +66,10 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 	claimVersion := server.CompetitionExecutorAdmissionClaimMigrationVersion()
 	distributedVersion := server.CompetitionDistributedReevaluationMigrationVersion()
 	patchRetryVersion := server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
+	secondRecoveryVersion := server.CompetitionSecondRecoveryMigrationVersion()
 	if benefitVersion <= 900 || intakeVersion <= benefitVersion || handoffVersion <= intakeVersion ||
 		officialVersion <= handoffVersion || controlVersion <= officialVersion || recoveryVersion <= controlVersion ||
-		exceptionVersion <= recoveryVersion || claimVersion <= exceptionVersion || distributedVersion <= claimVersion || patchRetryVersion <= distributedVersion || server.MigrationCount() < patchRetryVersion {
+		exceptionVersion <= recoveryVersion || claimVersion <= exceptionVersion || distributedVersion <= claimVersion || patchRetryVersion <= distributedVersion || secondRecoveryVersion <= patchRetryVersion || server.MigrationCount() < secondRecoveryVersion {
 		t.Fatal("source guard successors are not published in order")
 	}
 	for _, expected := range []struct {
@@ -86,14 +87,15 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 		{exceptionVersion, claimVersion, "retained host admission exception with retained qualification recovery custody"},
 		{version: claimVersion, removedAt: distributedVersion, name: "executor claims honor admitted evidence with retained admission custody"},
 		{version: distributedVersion, removedAt: patchRetryVersion, name: "separately authorized distributed infrastructure recovery"},
-		{version: patchRetryVersion, removedAt: 0, name: "separately authorized unchanged-patch retry"},
+		{version: patchRetryVersion, removedAt: secondRecoveryVersion, name: "separately authorized unchanged-patch retry"},
+		{version: secondRecoveryVersion, removedAt: 0, name: "exact-job second recovery with immutable prior receipt"},
 	} {
 		contract := migrationCurrentSuffixTestContract(t, expected.version)
 		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
 			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
 		}
 	}
-	return fmt.Sprintf("separately authorized unchanged-patch retry@v%d", patchRetryVersion)
+	return fmt.Sprintf("exact-job second recovery with immutable prior receipt@v%d", secondRecoveryVersion)
 }
 
 // The intake-first owner, current from its version until the review handoff.
@@ -140,6 +142,11 @@ func competitionSourceGuardsDistributedOwner() string {
 	return fmt.Sprintf("separately authorized distributed infrastructure recovery@v%d", server.CompetitionDistributedReevaluationMigrationVersion())
 }
 
+// The default one-cycle authority stays exact until its explicit successor.
+func competitionSourceGuardsPatchRetryOwner() string {
+	return fmt.Sprintf("separately authorized unchanged-patch retry@v%d", server.CompetitionOperatorRequestedPatchRetryMigrationVersion())
+}
+
 // Before a registered transfer the old artifact remains required; at the
 // transfer the successor owns drift. Missing old or future artifact booleans
 // cannot move that boundary, and every result uses the public signal reducer.
@@ -164,7 +171,8 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 		{server.CompetitionExecutorQualificationRecoveryMigrationVersion(), server.CompetitionExecutorAdmissionExceptionMigrationVersion(), competitionSourceGuardsQualificationRecoveryOwner(), competitionSourceGuardsAdmissionExceptionOwner()},
 		{oldVersion: server.CompetitionExecutorAdmissionExceptionMigrationVersion(), nextVersion: server.CompetitionExecutorAdmissionClaimMigrationVersion(), oldOwner: competitionSourceGuardsAdmissionExceptionOwner(), nextOwner: competitionSourceGuardsClaimOwner()},
 		{oldVersion: server.CompetitionExecutorAdmissionClaimMigrationVersion(), nextVersion: server.CompetitionDistributedReevaluationMigrationVersion(), oldOwner: competitionSourceGuardsClaimOwner(), nextOwner: competitionSourceGuardsDistributedOwner()},
-		{oldVersion: server.CompetitionDistributedReevaluationMigrationVersion(), nextVersion: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), oldOwner: competitionSourceGuardsDistributedOwner(), nextOwner: currentOwner},
+		{oldVersion: server.CompetitionDistributedReevaluationMigrationVersion(), nextVersion: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), oldOwner: competitionSourceGuardsDistributedOwner(), nextOwner: competitionSourceGuardsPatchRetryOwner()},
+		{oldVersion: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), nextVersion: server.CompetitionSecondRecoveryMigrationVersion(), oldOwner: competitionSourceGuardsPatchRetryOwner(), nextOwner: currentOwner},
 	} {
 		for _, control := range []struct {
 			head           int
@@ -286,7 +294,8 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{server.CompetitionExecutorAdmissionExceptionMigrationVersion(), server.CompetitionExecutorAdmissionClaimMigrationVersion(), competitionSourceGuardsAdmissionExceptionOwner()},
 		{head: server.CompetitionExecutorAdmissionClaimMigrationVersion(), removedAt: server.CompetitionDistributedReevaluationMigrationVersion(), owner: competitionSourceGuardsClaimOwner()},
 		{head: server.CompetitionDistributedReevaluationMigrationVersion(), removedAt: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), owner: competitionSourceGuardsDistributedOwner()},
-		{head: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), removedAt: 0, owner: currentOwner},
+		{head: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), removedAt: server.CompetitionSecondRecoveryMigrationVersion(), owner: competitionSourceGuardsPatchRetryOwner()},
+		{head: server.CompetitionSecondRecoveryMigrationVersion(), removedAt: 0, owner: currentOwner},
 	}
 	faults := []struct {
 		name string
