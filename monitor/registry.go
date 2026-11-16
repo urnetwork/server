@@ -72,6 +72,7 @@ func NewSignals() []Signal {
 		NewRetentionLivenessSignal(),
 		NewContractHorizonReaperSignal(),
 		NewSessionStateRetentionSignal(),
+		NewClientLocationReliabilityRetentionSignal(),
 		NewUsageArchiveHashBudgetSignal(),
 		NewContractPartitionRunwaySignal(),
 		NewContractPartitionRetentionBlockedSignal(),
