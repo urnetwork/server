@@ -486,6 +486,12 @@ func (self *PostgresLossFixture) TakeSidecarDump() {
 // starts the incident's list; then points the env's pools at the restored database. Answers the incident, whose
 // kind is postgres.
 func (self *PostgresLossFixture) LosePrimary(incidentId server.Id) *Incident {
+	self.t.Helper()
+	return self.restoreDumps(incidentId, IncidentKindPostgres)
+}
+
+// LosePrimary's restore, the incident's kind kind: a site loss restores both dumps the same way (SiteLossFixture).
+func (self *PostgresLossFixture) restoreDumps(incidentId server.Id, kind IncidentKind) *Incident {
 	t := self.t
 	t.Helper()
 	if self.mainDumpDir == "" || self.sidecarDumpDir == "" {
@@ -522,7 +528,7 @@ func (self *PostgresLossFixture) LosePrimary(incidentId server.Id) *Incident {
 	if err != nil {
 		t.Fatalf("the incident's list: %v", err)
 	}
-	if err := incident.SetKind(IncidentKindPostgres); err != nil {
+	if err := incident.SetKind(kind); err != nil {
 		t.Fatalf("%v", err)
 	}
 	self.incident = incident
