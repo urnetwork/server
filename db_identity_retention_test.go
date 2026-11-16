@@ -215,8 +215,8 @@ func TestClientKeyHistoryRetentionMigrationKeepsPopulatedHistory(t *testing.T) {
 
 // Pure: the floor migration is appended after the key history retention, bounds
 // its lock wait, and changes nothing in the guard but the 91 days, which become
-// the floor function. The floor function returns ClientKeyHistoryRetentionFloor,
-// and the rollback differs from the published floor only in its days.
+// the floor function. The floor function returned 30 days until the 7-day floor
+// migration, and the rollback differs from it only in its days.
 func TestClientKeyHistoryRetentionFloorMigration(t *testing.T) {
 	historyVersion := ClientKeyHistoryRetentionMigrationVersion()
 	floorVersion := ClientKeyHistoryRetentionFloorMigrationVersion()
@@ -244,12 +244,8 @@ func TestClientKeyHistoryRetentionFloorMigration(t *testing.T) {
 	if want := strings.Replace(guard, "interval '91 days'", "st_client_key_history_retention_floor()", 1); ClientKeyHistoryFloorGuardBodySql() != want {
 		t.Fatalf("the floor guard changes more than the 91 days:\n%s\nwant\n%s", ClientKeyHistoryFloorGuardBodySql(), want)
 	}
-	floorDays := int(ClientKeyHistoryRetentionFloor / (24 * time.Hour))
-	if ClientKeyHistoryRetentionFloor != time.Duration(floorDays)*24*time.Hour || floorDays != 30 {
-		t.Fatalf("the floor %v is not 30 whole days", ClientKeyHistoryRetentionFloor)
-	}
-	if body := strings.TrimSpace(ClientKeyHistoryRetentionFloorBodySql()); body != fmt.Sprintf("SELECT interval '%d days'", floorDays) {
-		t.Fatalf("the floor function returns %q, not the floor's %d days", body, floorDays)
+	if body := strings.TrimSpace(ClientKeyHistoryRetentionFloorBodySql()); body != "SELECT interval '30 days'" {
+		t.Fatalf("the 904 floor function returns %q, not 30 days", body)
 	}
 	rollbackBody := strings.Split(ClientKeyHistoryRetentionFloorRollbackSql, "$st_client_key_history_retention_floor$")
 	if len(rollbackBody) != 3 || strings.TrimSpace(rollbackBody[1]) != "SELECT interval '91 days'" ||
@@ -264,12 +260,52 @@ func TestClientKeyHistoryRetentionFloorMigration(t *testing.T) {
 	if strings.Count(clientKeyHistoryRetentionFloorSql, "CREATE OR REPLACE FUNCTION") != 2 || strings.Contains(strings.ReplaceAll(clientKeyHistoryRetentionFloorSql, "CREATE OR REPLACE FUNCTION", ""), "CREATE FUNCTION") {
 		t.Fatal("the floor migration does not replace both functions")
 	}
-	// the restore is the migration's own floor statement, byte for byte
+}
+
+// Pure: the 7-day floor migration (owner, 2026-11-16) is appended after the
+// 30-day floor, bounds its lock wait, and replaces only the floor function:
+// 904's statement with 7 days for 30, and nothing that touches a table or the
+// guard. ClientKeyHistoryRetentionFloor is the same 7 days, and the restore is
+// this migration's floor statement, byte for byte.
+func TestClientKeyHistoryRetentionSevenDayFloorMigration(t *testing.T) {
+	floorVersion := ClientKeyHistoryRetentionFloorMigrationVersion()
+	version := ClientKeyHistoryRetentionSevenDayFloorMigrationVersion()
+	if !(floorVersion < version && version <= MigrationCount()) {
+		t.Fatalf("versions: 30-day floor %d, 7-day floor %d, count %d", floorVersion, version, MigrationCount())
+	}
+	migration, ok := migrations[version-1].(*SqlMigration)
+	if !ok || !strings.HasPrefix(strings.TrimSpace(migration.sql), "SET LOCAL lock_timeout = '5s';") {
+		t.Fatal("the 7-day floor migration does not bound its lock wait")
+	}
+	if strings.Count(clientKeyHistoryRetentionSevenDayFloorSql, "$st_client_key_history_retention_floor$") != 2 ||
+		strings.Count(clientKeyHistoryRetentionSevenDayFloorSql, "CREATE OR REPLACE FUNCTION") != 1 ||
+		strings.Contains(clientKeyHistoryRetentionSevenDayFloorSql, "immutable_guard") {
+		t.Fatalf("the 7-day floor migration replaces more than the floor function: %q", clientKeyHistoryRetentionSevenDayFloorSql)
+	}
+	for _, statement := range []string{"CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "DROP", "UPDATE ", "DELETE FROM", "INSERT INTO", "TRIGGER"} {
+		if strings.Contains(clientKeyHistoryRetentionSevenDayFloorSql, statement) {
+			t.Fatalf("the 7-day floor migration touches a table: %q", statement)
+		}
+	}
+	floorDays := int(ClientKeyHistoryRetentionFloor / (24 * time.Hour))
+	if ClientKeyHistoryRetentionFloor != time.Duration(floorDays)*24*time.Hour || floorDays != 7 {
+		t.Fatalf("the floor %v is not 7 whole days", ClientKeyHistoryRetentionFloor)
+	}
+	if body := strings.TrimSpace(ClientKeyHistoryRetentionSevenDayFloorBodySql()); body != fmt.Sprintf("SELECT interval '%d days'", floorDays) {
+		t.Fatalf("the floor function returns %q, not the floor's %d days", body, floorDays)
+	}
+	// 904's floor statement with only its days changed
 	restore := ClientKeyHistoryRetentionFloorRestoreSql()
+	thirtyDayStatement := strings.SplitN(clientKeyHistoryRetentionFloorSql, "$st_client_key_history_retention_floor$;", 2)[0] + "$st_client_key_history_retention_floor$"
+	thirtyDayStatement = thirtyDayStatement[strings.Index(thirtyDayStatement, "CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()"):]
+	if strings.Replace(thirtyDayStatement, "interval '30 days'", "interval '7 days'", 1) != restore {
+		t.Fatalf("the 7-day floor statement differs from 904's in more than its days:\n%s\nwant\n%s", restore, thirtyDayStatement)
+	}
+	// the restore is this migration's own floor statement, byte for byte
 	if !strings.HasPrefix(restore, "CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()") ||
 		!strings.HasSuffix(restore, "$st_client_key_history_retention_floor$") ||
-		!strings.Contains(clientKeyHistoryRetentionFloorSql, restore+";") ||
-		strings.Split(restore, "$st_client_key_history_retention_floor$")[1] != ClientKeyHistoryRetentionFloorBodySql() {
+		!strings.Contains(clientKeyHistoryRetentionSevenDayFloorSql, restore+";") ||
+		strings.Split(restore, "$st_client_key_history_retention_floor$")[1] != ClientKeyHistoryRetentionSevenDayFloorBodySql() {
 		t.Fatalf("the restore is not the published floor statement: %q", restore)
 	}
 	if strings.Contains(restore, "immutable_guard") || strings.Contains(restore, "lock_timeout") {
@@ -358,15 +394,19 @@ func TestClientKeyHistoryRetentionFloorMigrationMovesTheGuard(t *testing.T) {
 			t.Fatalf("after the rollback the floor reads %q published=%t", floor, published)
 		}
 
-		// the restore puts the published body back, and a rerun of the
-		// migration, as after an interrupted apply, completes without error
+		// the restore puts the published body back, 7 days since 2026-11-16,
+		// and a rerun of the migration, as after an interrupted apply,
+		// completes without error and returns its 30 days
 		SetClientKeyHistoryRetentionFloor(ctx, false)
-		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "30 days" || !published {
+		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "7 days" || !published {
 			t.Fatalf("after the restore the floor reads %q published=%t", floor, published)
 		}
 		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(ctx, clientKeyHistoryRetentionFloorSql))
 		})
+		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "30 days" || published {
+			t.Fatalf("after a rerun of 904 the floor reads %q published=%t", floor, published)
+		}
 		if err := statement(deleteSql, rolledBackId); err != nil {
 			t.Fatalf("the restored floor refused a client gone 40 days: %v", err)
 		}
@@ -374,6 +414,105 @@ func TestClientKeyHistoryRetentionFloorMigrationMovesTheGuard(t *testing.T) {
 		ApplyDbMigrations(ctx)
 		if DbVersion(ctx) != MigrationCount() {
 			t.Fatal("the migrations after the floor did not apply")
+		}
+	})
+}
+
+// DB-backed. Before the 7-day floor migration the guard refuses a client gone
+// 8 days; the migration admits it and still refuses one gone 6 days, an update
+// and a truncate, without changing a row; the rollback refuses the 8-day
+// client again, the restore admits it, and a rerun of the migration completes.
+func TestClientKeyHistoryRetentionSevenDayFloorMigrationMovesTheGuard(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		version := ClientKeyHistoryRetentionSevenDayFloorMigrationVersion()
+		ApplyDbMigrationsUpTo(ctx, version-1)
+		domain := []byte(strings.Repeat("d", 32))
+		// a client whose row and heads are gone, recorded gone this many days
+		// before the database clock
+		insertGone := func(clientId Id, fill string, goneDays int) {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				RaisePgResult(conn.Exec(ctx, `
+					INSERT INTO st_client_key_history (client_id, generation, domain_hash, registration_hash, evidence_hash, evidence)
+					VALUES ($1, 1, $2, $3, $4, '{}')
+				`, clientId, domain, []byte(strings.Repeat(fill, 32)), "sha256:"+strings.Repeat(fill, 64)))
+				RaisePgResult(conn.Exec(ctx, `
+					INSERT INTO st_client_key_gone (client_id, gone_time)
+					VALUES ($1, (now() AT TIME ZONE 'UTC') - make_interval(days => $2))
+				`, clientId, goneDays))
+			}, OptReadWrite(), OptNoRetry())
+		}
+		weekId, recentId, rolledBackId := NewId(), NewId(), NewId()
+		insertGone(weekId, "a", 8)
+		insertGone(recentId, "b", 6)
+		insertGone(rolledBackId, "c", 8)
+		statement := func(sql string, clientId Id) (err error) {
+			HandleError(func() {
+				MaintenanceTx(ctx, func(tx PgTx) {
+					RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.client_key_history_retention = 'on'`))
+					if clientId == (Id{}) {
+						RaisePgResult(tx.Exec(ctx, sql))
+					} else {
+						RaisePgResult(tx.Exec(ctx, sql, clientId))
+					}
+				}, TxReadCommitted, OptNoRetry())
+			}, func(e error) { err = e })
+			return
+		}
+		const deleteSql = `DELETE FROM st_client_key_history WHERE client_id = $1`
+		requireRefused := func(err error, what string) {
+			t.Helper()
+			if err == nil || !strings.Contains(err.Error(), "signed client-key history is immutable") {
+				t.Fatalf("%s was not refused by the history guard: %v", what, err)
+			}
+		}
+		historyCount := func() (count int) {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				Raise(conn.QueryRow(ctx, `SELECT count(*) FROM st_client_key_history`).Scan(&count))
+			})
+			return
+		}
+
+		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "30 days" || published {
+			t.Fatalf("before the migration the floor reads %q published=%t", floor, published)
+		}
+		requireRefused(statement(deleteSql, weekId), "a delete of a client gone 8 days under the 30-day floor")
+		ApplyDbMigrationsUpTo(ctx, version)
+		if count := historyCount(); count != 3 {
+			t.Fatalf("the 7-day floor migration changed signed history: %d rows", count)
+		}
+		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "7 days" || !published {
+			t.Fatalf("after the migration the floor reads %q published=%t", floor, published)
+		}
+		requireRefused(statement(deleteSql, recentId), "a delete of a client gone 6 days")
+		requireRefused(statement(`UPDATE st_client_key_history SET evidence = '{"changed":true}' WHERE client_id = $1`, weekId), "an update")
+		requireRefused(statement(`TRUNCATE st_client_key_history CASCADE`, Id{}), "a truncate")
+		if err := statement(deleteSql, weekId); err != nil {
+			t.Fatalf("the 7-day floor refused a client gone 8 days: %v", err)
+		}
+		if count := historyCount(); count != 2 {
+			t.Fatalf("the admitted delete left %d rows, want 2", count)
+		}
+
+		SetClientKeyHistoryRetentionFloor(ctx, true)
+		requireRefused(statement(deleteSql, rolledBackId), "a delete of a client gone 8 days after the rollback")
+		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "91 days" || published {
+			t.Fatalf("after the rollback the floor reads %q published=%t", floor, published)
+		}
+		SetClientKeyHistoryRetentionFloor(ctx, false)
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, clientKeyHistoryRetentionSevenDayFloorSql))
+		})
+		if floor, published := GetClientKeyHistoryRetentionFloor(ctx); floor != "7 days" || !published {
+			t.Fatalf("after the restore and a rerun the floor reads %q published=%t", floor, published)
+		}
+		if err := statement(deleteSql, rolledBackId); err != nil {
+			t.Fatalf("the restored floor refused a client gone 8 days: %v", err)
+		}
+
+		ApplyDbMigrations(ctx)
+		if DbVersion(ctx) != MigrationCount() {
+			t.Fatal("the migrations after the 7-day floor did not apply")
 		}
 	})
 }

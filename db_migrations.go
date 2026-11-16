@@ -11627,4 +11627,14 @@ var migrations = []any{
 	// deploying the taskworker that deletes heads; an older guard refuses
 	// them, and the retention's head pass then stops on its error.
 	newSqlMigration(providerWorkSessionHeadRetentionGuardSql),
+
+	// The key history guard's floor from 30 days to 7 (owner, 2026-11-16,
+	// PARTITION-CANDIDATES.md §8.4; db_identity_retention.go): it replaces the
+	// floor function's body only, under a five-second lock bound, so no table
+	// is locked, scanned or rewritten. It only widens what the guard admits:
+	// a running taskworker keeps deleting at its own, longer horizon, and the
+	// taskworker that deletes at 7 days needs it, since its batch repeats the
+	// floor on the database clock. Apply before or after any deploy. The
+	// monitor pins the new body from this version on.
+	newSqlMigration(clientKeyHistoryRetentionSevenDayFloorSql),
 }

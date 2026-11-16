@@ -8251,7 +8251,9 @@ only says how long is left, not why. Facts on 10-22:
   stays on this append-only list until the first deletes. Those come when the
   30-day reap has recorded the children deactivated from 2026-10-09, at their
   deactivation times, and those times reach the horizon: about 2026-11-13 at a
-  35-day horizon, 2026-11-08 at a 30-day one.
+  35-day horizon, 2026-11-08 at a 30-day one. Since the 7-day floor migration
+  (owner, 2026-11-16) the retention deletes 7 days after the client went,
+  whatever the reaper says, and the brake's `horizonDays` can only narrow it.
 
 Checks, all cheap and read-only:
 1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
@@ -30550,6 +30552,16 @@ strictness or configuration. The retention task deletes a gone client's
 history once the contract horizon reaper's horizon has passed since the
 client went while the reaper's mode is on, never below the floor; the catalog
 checks do not show where the retention task is.
+
+The 7-day floor migration (owner, 2026-11-16, PARTITION-CANDIDATES.md §8.4;
+its version follows its position) replaces only the floor function's body,
+now `interval '7 days'`, so its contract supersedes the 904 contract and
+republishes the same custody with the new body. From its version the 30-day
+body is drift like any other floor body, and the rollback stays drift until
+the floor is restored. From that build on, the retention deletes a gone
+client's history 7 days after the client went, whatever the contract horizon
+reaper's control says; the brake's `horizonDays` can only narrow that, so
+the 30 set on Main on 2026-11-02 counts as 7.
 
 The onboarding results' purchase.started count
 (`onboarding_results_purchase_started_schema.go`) adds one column to
