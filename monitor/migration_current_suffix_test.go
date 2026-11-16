@@ -158,32 +158,35 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN currency`},
 		{"invented App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
 		// the journal's partition preparation republishes the 824 custody, and
-		// the horizon drop guard, the legacy drop guard and the append for
-		// provider clients only republish it after
-		{"dropped provider session transaction index rebuilt", server.ProviderWorkSessionProviderAppendMigrationVersion(), `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
-		{"provider session head accepts a zero sequence", server.ProviderWorkSessionProviderAppendMigrationVersion(), snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
-		{"provider session retire lookup unbounded again", server.ProviderWorkSessionProviderAppendMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
+		// the horizon drop guard, the legacy drop guard, the append for
+		// provider clients only and the head retention guard republish it
+		// after
+		{"dropped provider session transaction index rebuilt", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
+		{"provider session head accepts a zero sequence", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
+		{"provider session retire lookup unbounded again", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
 			RETURNS bigint LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(snMainnetProviderSessionAppendBody)},
-		{"provider session append journals every client again", server.ProviderWorkSessionProviderAppendMigrationVersion(), func() string {
+		{"provider session append journals every client again", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), func() string {
 			_, sessionAppend, _, _ := server.ProviderWorkSessionPartitionBodiesSql()
 			return `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
 			RETURNS bigint LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(sessionAppend)
 		}()},
-		{"provider session append journals network clients", server.ProviderWorkSessionProviderAppendMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
+		{"provider session head guard admits every delete", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_head_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN IF TG_OP=''DELETE'' THEN RETURN OLD; END IF; RETURN NEW; END'`},
+		{"provider session head guard without the head retention", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_head_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(snMainnetProviderHeadBody)},
+		{"provider session append journals network clients", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
 			RETURNS bigint LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(strings.ReplaceAll(server.ProviderWorkSessionProviderAppendBodySql(), "provide_mode IN (2,3)", "provide_mode IN (1,2,3)"))},
-		{"provider session admit floor not immutable", server.ProviderWorkSessionProviderAppendMigrationVersion(), `ALTER FUNCTION provider_work_session_admit_floor(uuid) STABLE`},
-		{"provider session receipt reference dropped", server.ProviderWorkSessionProviderAppendMigrationVersion(), `DROP TRIGGER provider_work_session_receipt_reference ON provider_work_session_receipt`},
-		{"provider session receipt reference disabled", server.ProviderWorkSessionProviderAppendMigrationVersion(), `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER provider_work_session_receipt_reference`},
-		{"provider session receipt depends on a mutable parent", server.ProviderWorkSessionProviderAppendMigrationVersion(), `ALTER TABLE provider_work_session_receipt ADD CONSTRAINT synthetic_receipt_client FOREIGN KEY (client_id) REFERENCES network_client(client_id) NOT VALID`},
-		{"provider session drop guard admits every drop", server.ProviderWorkSessionProviderAppendMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS 'BEGIN END'`},
-		{"provider session drop guard back at 13 weeks", server.ProviderWorkSessionProviderAppendMigrationVersion(), func() string {
+		{"provider session admit floor not immutable", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER FUNCTION provider_work_session_admit_floor(uuid) STABLE`},
+		{"provider session receipt reference dropped", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `DROP TRIGGER provider_work_session_receipt_reference ON provider_work_session_receipt`},
+		{"provider session receipt reference disabled", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER provider_work_session_receipt_reference`},
+		{"provider session receipt depends on a mutable parent", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER TABLE provider_work_session_receipt ADD CONSTRAINT synthetic_receipt_client FOREIGN KEY (client_id) REFERENCES network_client(client_id) NOT VALID`},
+		{"provider session drop guard admits every drop", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS 'BEGIN END'`},
+		{"provider session drop guard back at 13 weeks", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), func() string {
 			_, _, _, dropGuard := server.ProviderWorkSessionPartitionBodiesSql()
 			return `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(dropGuard)
 		}()},
-		{"provider session drop guard without the legacy partition's early drop", server.ProviderWorkSessionProviderAppendMigrationVersion(),
+		{"provider session drop guard without the legacy partition's early drop", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(),
 			`CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(server.ProviderWorkSessionEventHorizonDropGuardBodySql())},
-		{"provider session journal row guard disabled", server.ProviderWorkSessionProviderAppendMigrationVersion(), `ALTER TABLE provider_work_session_event DISABLE TRIGGER original_guard`},
-		{"provider session journal partitioned by sequence", server.ProviderWorkSessionProviderAppendMigrationVersion(), `ALTER TABLE provider_work_session_event RENAME TO synthetic_plain_journal;
+		{"provider session journal row guard disabled", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER TABLE provider_work_session_event DISABLE TRIGGER original_guard`},
+		{"provider session journal partitioned by sequence", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER TABLE provider_work_session_event RENAME TO synthetic_plain_journal;
 			CREATE TABLE provider_work_session_event (LIKE synthetic_plain_journal INCLUDING ALL) PARTITION BY RANGE (sequence)`},
 		// the horizon guard republishes the 825 custody, including the dropped
 		// index, after 857 and the move guard
@@ -634,10 +637,10 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
 				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
 				{819, "pending_task", "pending_task_has_reschedule_error"},
-				// the horizon drop guard, the legacy drop guard and the append
-				// for provider clients only republish the 824 custody after the
-				// journal's partition preparation
-				{server.ProviderWorkSessionProviderAppendMigrationVersion(), "provider_work_session_event", "provider_work_session_event_transaction"},
+				// the horizon drop guard, the legacy drop guard, the append for
+				// provider clients only and the head retention guard republish
+				// the 824 custody after the journal's partition preparation
+				{server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), "provider_work_session_event", "provider_work_session_event_transaction"},
 				// the horizon guard republishes the 825 custody after 857 and the
 				// move guard
 				{contractCloseEvidenceHorizonGuardMigrationVersion, "contract_close_report_evidence", "contract_close_report_evidence_contract"},

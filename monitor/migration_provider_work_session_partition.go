@@ -73,19 +73,26 @@ func providerWorkSessionLegacyDropCustodyPredicates() []string {
 // append's body, keeping the legacy drop guard's, and republishes the rest of
 // the custody.
 func providerWorkSessionProviderAppendCustodyPredicates() []string {
-	return providerWorkSessionPartitionCustodyPredicatesWith(server.ProviderWorkSessionProviderAppendBodySql(), server.ProviderWorkSessionEventLegacyDropGuardBodySql())
+	return providerWorkSessionPartitionCustodyPredicatesWith(server.ProviderWorkSessionProviderAppendBodySql(), server.ProviderWorkSessionEventLegacyDropGuardBodySql(), snMainnetProviderHeadBody)
 }
 
-// The custody with dropGuard as the drop guard's body and the partition
-// preparation's append.
+// The head retention guard (owner, 2026-11-16) replaces only the head guard's
+// body, admitting the retention's deletes of heads with no event and no
+// receipt left, and republishes the rest of the custody.
+func providerWorkSessionHeadRetentionCustodyPredicates() []string {
+	return providerWorkSessionPartitionCustodyPredicatesWith(server.ProviderWorkSessionProviderAppendBodySql(), server.ProviderWorkSessionEventLegacyDropGuardBodySql(), server.ProviderWorkSessionHeadRetentionGuardBodySql())
+}
+
+// The custody with dropGuard as the drop guard's body, the partition
+// preparation's append and the v776 head guard.
 func providerWorkSessionPartitionCustodyPredicatesWithDropGuard(dropGuard string) []string {
 	_, sessionAppend, _, _ := server.ProviderWorkSessionPartitionBodiesSql()
-	return providerWorkSessionPartitionCustodyPredicatesWith(sessionAppend, dropGuard)
+	return providerWorkSessionPartitionCustodyPredicatesWith(sessionAppend, dropGuard, snMainnetProviderHeadBody)
 }
 
-// The custody with sessionAppend as the append's body and dropGuard as the
-// drop guard's.
-func providerWorkSessionPartitionCustodyPredicatesWith(sessionAppend string, dropGuard string) []string {
+// The custody with sessionAppend as the append's body, dropGuard as the drop
+// guard's and headGuard as the head guard's.
+func providerWorkSessionPartitionCustodyPredicatesWith(sessionAppend string, dropGuard string, headGuard string) []string {
 	admitFloor, _, receiptReference, _ := server.ProviderWorkSessionPartitionBodiesSql()
 	return []string{
 		migrationFp2Table("provider_work_session_head"),
@@ -199,7 +206,7 @@ func providerWorkSessionPartitionCustodyPredicatesWith(sessionAppend string, dro
 		snMainnetMigrationFunction("provider_work_session_append(uuid,uuid,text,uuid)", "bigint", "plpgsql", "v", false, sessionAppend, "client", "connection", "event_kind", "extender"),
 		snMainnetMigrationFunction("provider_work_session_mutation()", "trigger", "plpgsql", "v", false, snMainnetProviderSessionMutationBody),
 		snMainnetMigrationFunction("provider_work_session_statement_fence()", "trigger", "plpgsql", "v", false, snMainnetProviderStatementFenceBody),
-		snMainnetMigrationFunction("provider_work_session_head_guard()", "trigger", "plpgsql", "v", false, snMainnetProviderHeadBody),
+		snMainnetMigrationFunction("provider_work_session_head_guard()", "trigger", "plpgsql", "v", false, headGuard),
 		snMainnetMigrationFunction("provider_work_session_admit_floor(uuid)", "timestamp without time zone", "sql", "i", true, admitFloor, "connection"),
 		snMainnetMigrationFunction("provider_work_session_receipt_reference()", "trigger", "plpgsql", "v", false, receiptReference),
 		snMainnetMigrationFunction("provider_work_session_event_drop_guard(text)", "void", "plpgsql", "v", false, dropGuard, "leaf"),

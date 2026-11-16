@@ -14,11 +14,12 @@ import (
 )
 
 // The contract of the journal's current custody, at its computed version:
-// the append for provider clients only's, which republishes the legacy drop
-// guard's, the horizon drop guard's and the partition preparation's.
+// the head retention guard's, which republishes the provider append's, the
+// legacy drop guard's, the horizon drop guard's and the partition
+// preparation's.
 func migrationProviderWorkSessionPartitionTestContract(t testing.TB) snMainnetMigrationContract {
 	t.Helper()
-	return migrationCurrentSuffixTestContract(t, server.ProviderWorkSessionProviderAppendMigrationVersion())
+	return migrationCurrentSuffixTestContract(t, server.ProviderWorkSessionHeadRetentionGuardMigrationVersion())
 }
 
 // The partition preparation's contract ends at the horizon drop guard, whose
@@ -78,8 +79,8 @@ func TestMigrationsProviderWorkSessionLegacyDropGuardContract(t *testing.T) {
 
 // The legacy drop guard's contract ends at the append for provider clients
 // only, whose contract republishes the same custody with only the append's
-// body replaced, and is not superseded. The new body reads the provide keys of
-// the friends and family and public modes only.
+// body replaced, until the head retention guard supersedes it. The new body
+// reads the provide keys of the friends and family and public modes only.
 func TestMigrationsProviderWorkSessionProviderAppendContract(t *testing.T) {
 	version := server.ProviderWorkSessionProviderAppendMigrationVersion()
 	legacyDrop := server.ProviderWorkSessionEventLegacyDropGuardMigrationVersion()
@@ -87,7 +88,7 @@ func TestMigrationsProviderWorkSessionProviderAppendContract(t *testing.T) {
 		t.Fatalf("provider append version %d, legacy drop guard version %d", version, legacyDrop)
 	}
 	contract := migrationCurrentSuffixTestContract(t, version)
-	if contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 {
+	if contract.artifact.removedVersion != server.ProviderWorkSessionHeadRetentionGuardMigrationVersion() || contract.artifact.rowColumn != version-589 {
 		t.Fatalf("provider append contract %+v", contract.artifact)
 	}
 	_, sessionAppend, _, _ := server.ProviderWorkSessionPartitionBodiesSql()
@@ -101,6 +102,32 @@ func TestMigrationsProviderWorkSessionProviderAppendContract(t *testing.T) {
 	}
 	if strings.Count(providerAppend, "provide_mode IN (2,3)") != 2 || strings.Count(providerAppend, "provide_key") != 2 {
 		t.Fatal("the provider append does not read the friends and family and public provide keys at both gates")
+	}
+}
+
+// The provider append's contract ends at the head retention guard, whose
+// contract republishes the same custody with only the head guard's body
+// replaced, by the v776 body with the retention clause, and is not superseded.
+func TestMigrationsProviderWorkSessionHeadRetentionGuardContract(t *testing.T) {
+	version := server.ProviderWorkSessionHeadRetentionGuardMigrationVersion()
+	providerAppend := server.ProviderWorkSessionProviderAppendMigrationVersion()
+	if version == 0 || version <= providerAppend {
+		t.Fatalf("head retention guard version %d, provider append version %d", version, providerAppend)
+	}
+	contract := migrationCurrentSuffixTestContract(t, version)
+	if contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 {
+		t.Fatalf("head retention guard contract %+v", contract.artifact)
+	}
+	retentionGuard := server.ProviderWorkSessionHeadRetentionGuardBodySql()
+	if server.ProviderWorkSessionHeadGuardBodySql() != snMainnetProviderHeadBody {
+		t.Fatal("the monitor's v776 head guard body differs from the server's")
+	}
+	if !strings.Contains(contract.query, snMainnetMigrationLiteral(retentionGuard)) || strings.Contains(contract.query, snMainnetMigrationLiteral(snMainnetProviderHeadBody)) {
+		t.Fatal("the head retention contract does not pin the retention guard's body")
+	}
+	providerAppendQuery := migrationCurrentSuffixTestContract(t, providerAppend).query
+	if strings.ReplaceAll(contract.query, snMainnetMigrationLiteral(retentionGuard), snMainnetMigrationLiteral(snMainnetProviderHeadBody)) != providerAppendQuery {
+		t.Fatal("the head retention contract differs from the provider append's beyond the head guard's body")
 	}
 }
 

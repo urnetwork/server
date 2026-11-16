@@ -136,6 +136,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveRetiredHostedProxyClients(clientSession, tx)
 		work.ScheduleSweepProxyExits(clientSession, tx)
 		work.ScheduleRemoveGoneStClientKeyHistory(clientSession, tx)
+		work.ScheduleRemoveExpiredSessionState(clientSession, tx)
 		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
 		work.ScheduleSweepOrphanContractData(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
@@ -454,6 +455,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveGoneStClientKeyHistory,
 			work.RemoveGoneStClientKeyHistoryPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredSessionState,
+			work.RemoveExpiredSessionStatePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.SweepOrphanNetworkClientData,

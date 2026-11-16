@@ -17,13 +17,16 @@
 //   - the append starts a client's head at 1, and only when the client has
 //     none (the head's primary key);
 //   - provider_work_session_head_guard refuses every update but +1 and every
-//     delete, and its truncate guard refuses truncate, so a head never
-//     repeats a value;
+//     delete but the head retention's, and its truncate guard refuses
+//     truncate, so a head never repeats a value while its client has an event
+//     in the journal: the retention deletes a head only once its client has
+//     no event and no receipt left (db_provider_work_session_head_retention.go),
+//     and a journal started again at 1 then meets none of its old sequences;
 //   - the cutover copies nothing: the old table attaches as the legacy
 //     partition with its rows as they are.
 //
-// So a client's sequences are 1, 2, 3, ... exactly once each, across every
-// partition, and no separate identity relation is kept.
+// So a client's retained sequences are 1, 2, 3, ... exactly once each, across
+// every partition, and no separate identity relation is kept.
 //
 // # The receipt's reference
 //
