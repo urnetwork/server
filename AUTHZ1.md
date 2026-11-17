@@ -133,7 +133,9 @@ own-client routes are unaffected: the connect multi-client generator
 (`ip_remote_multi_client_api.go:812/969`) and the sn validator
 (`validator/transport_client.go:204-245`) create and remove only their own
 children. The apps, sn `clientauth` and the embed example backends mint
-top-level clients with the root token or an API key.
+top-level clients with the root token or an API key. One exception was found
+later: app builds v2025.7.4 and older mint their window clients without a
+source, which this rule refused; section 11 says how they are served now.
 
 ## 4. Shipped clients that depend on a client token for admin routes
 
@@ -904,3 +906,73 @@ change ignores the header.
   meant for A is refused for B's root token, API key and client token, and A
   and B both remain. A balance code redeemed by a stale tab is refused and
   stays unredeemed. It then redeems meant for B, and with no header.
+
+## 11. The old app window's mint (`fix/legacy-window-mint-8183`)
+
+**What broke.** App builds v2025.7.4 and older mint every VPN window client
+with the device's client token and only the device's description and
+`device_spec`, with no `source_client_id`: the server of their day took the
+source from the token (connect 3d0509f0 `v2025/ip_remote_multi_client.go`
+`NewClientArgs`; connect sends `source_client_id` since 6ac021c7, 2025-07-22,
+so v2025.7.23 and newer builds are unaffected). The model rule of 587bacf44
+(section 3, "no top-level mint") refused exactly that request, so those builds
+could no longer create a window client or connect at all (support inbox 8183).
+Measured 2026-11-17 from the lb access log, where the refusal is the only
+102-byte answer of the route: about 120k to 330k refusals a day, nearly all
+from old-style HTTP/1.1 Go clients, from a few devices retrying.
+
+**Owner decision (2026-11-17):** "Accept the exact old request."
+
+**The rule.** `POST /network/auth-client` with a client token, no `client_id`,
+no `source_client_id`, no other field set, and a `device_spec` equal to the
+caller's own device's is a child of the caller's own client: exactly as if it
+had sent `source_client_id` as the caller's client id
+(`model/network_client_legacy_window_mint.go`). Every other client-token mint
+without a source is refused with the same message as before, "A client token
+cannot create a top-level client."
+
+**Why AUTHZ1's guarantees hold.**
+- **No top-level client.** The request is given the caller as its source
+  before anything else runs, so it takes the child branch: it never inserts a
+  device or a top-level client.
+- **Only its own children.** The source filled in is the token's own client
+  id, the one source this rule already lets a client token name. A request
+  that names another client's id still answers "Client does not exist."
+- **The same checks as any child mint.** The caller's row must be active and
+  in the token's network, and it is held `FOR KEY SHARE` until the child
+  commits, so the child retires with its parent
+  (`deactivateLockedNetworkClientsInTx`). The token's state is validated in the
+  same transaction, and remove-client takes it as the caller's own child.
+- **Narrow.** Any other field set (roles, principal, `proxy_config`,
+  `provide_intent`, time zone, locales, `client_id`, or a field added to the
+  request later; the check reflects over the request) keeps the refusal. So
+  does a `device_spec` other than the caller's device's, read inside the mint's
+  transaction before any write. Only the plain mint of a signed client token
+  qualifies: not a registration, the hosted parent mint, the internal probe or
+  an unsigned OAuth/MCP identity.
+- **No new capability.** A client token could already mint this exact child by
+  sending its own client id as `source_client_id`; the change only fills in
+  the field the old builds don't send.
+
+**Observability.** `urnetwork_network_client_top_level_mint_refusals_total`
+counts the refusals (the old window's request with another device's spec
+included), and `urnetwork_network_client_legacy_window_mints_total` the
+children minted for the old window; both are on the api dashboard ("client
+token mints without a source"). api and alt log each outcome with the client
+and its network at most once per client an hour. The refusal of a request
+that is not the old window's does no database work. When the mint counter
+stays at zero, the old installs are gone and this path can be removed.
+
+**Tests** (`model/network_client_legacy_window_mint_test.go`):
+- pure: the old window's shape, with every other request field (by
+  reflection) making it another request; the old request becomes a child of
+  the caller and nothing else does; another client's source is refused; the
+  counters move; the log line is limited per client and interval and its
+  memory stays bounded.
+- DB: the old request is minted as a child of the caller on the caller's
+  device, with no new device, removable by the token, and retired with its
+  parent; each other shape (another device's spec, no spec, roles, principal,
+  provide intent, time zone, locales, proxy, another client's source) is
+  refused, writes nothing and counts; an inactive caller gets no child either
+  way. The existing `TestAuthNetworkClientClientTokenCreatesOnlyItsOwnChildren`
+  still pins the refusal of a request whose spec is not the caller's device's.
