@@ -37,10 +37,13 @@ const (
 // takes a few minutes at lag.dev's volume.
 const lagDriftCalibrationMaxTime = 30 * time.Minute
 
-// The most tracks one calibration reads, the newest first. 2,000 already fix
-// κ to 1%, and each track is about 2,000 pings read from lag_result, so this
-// bounds the job's read at a few hundred MB.
-const lagDriftCalibrationMaxTracks = 10000
+// The most tracks one calibration reads, the newest first. κ and σ₀ need far
+// fewer (2,000 fix κ to 1%), but every track adds to its continent's
+// region-size histogram, and a continent's k counts only once 26 weeks of them
+// hold 10,000 tracks (V11), about 385 a week. Each track is about 2,000 pings
+// read from lag_result, so this bounds the job's read at about 800 MB, in
+// batches of 500 tracks, once a week.
+const lagDriftCalibrationMaxTracks = 50000
 
 type LagDriftCalibrationArgs struct {
 }
@@ -77,6 +80,11 @@ type LagDriftCalibrationResult struct {
 	Passes           int  `json:"passes"`
 	Converged        bool `json:"converged"`
 	AtBound          bool `json:"at_bound"`
+	// the week's tracks in each continent's region-size histogram (V11), and
+	// those left out because light rules out their city point; a continent's
+	// k counts once 26 weeks of the first sum to 10,000
+	KTracks           map[string]int `json:"k_tracks"`
+	KImpossibleTracks map[string]int `json:"k_impossible_tracks"`
 }
 
 // The first weekly time after `now`.
@@ -153,6 +161,11 @@ func calibrateLagDrift(
 		Passes:            run.Result.Passes,
 		Converged:         run.Result.Converged,
 		AtBound:           run.Result.AtBound,
+		KTracks:           map[string]int{},
+		KImpossibleTracks: run.Result.KImpossibleTracks,
+	}
+	for continentCode, histogram := range run.Result.KHistograms {
+		result.KTracks[continentCode] = histogram.Tracks
 	}
 	if run.Result.Applied && run.CalibrationId == nil {
 		// the fit applied, but the task's context ended before it was stored
