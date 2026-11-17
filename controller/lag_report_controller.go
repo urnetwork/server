@@ -272,6 +272,12 @@ func storeLagReport(
 	if err != nil {
 		return LagReportRejectMalformed
 	}
+	// a drift demo's session is never reported, and an extender that
+	// predates NoReport reports it anyway: dropped unstored and counted
+	// (lag.dev/DRIFTTEST.md W8, E4)
+	if lagDriftDemoReport(ticketId, trackId) {
+		return LagReportRejectTicket
+	}
 	ticket := model.GetLagTicket(ctx, ticketId)
 	if ticket == nil ||
 		ticket.ExtenderId != extender.ExtenderId ||
@@ -299,6 +305,9 @@ func storeLagReport(
 	if !model.AddLagResult(ctx, result) {
 		return LagReportRejectDuplicate
 	}
+	// a drift test's run completes as its reports arrive
+	// (lag.dev/DRIFTTEST.md E5, lag_drift_process.go)
+	lagDriftReportStored(ctx, ticket.TrackId, now)
 	return ""
 }
 

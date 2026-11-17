@@ -1,7 +1,10 @@
 package controller
 
 import (
+	"strings"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // The drift test's settings (lag.dev/DRIFTTEST.md P7), the `drift:` block of
@@ -9,6 +12,9 @@ import (
 // design's value:
 //
 //	drift:
+//	  enabled: true               # false stops every allocation and start, the demo's too
+//	  calibration_enabled: true   # false judges with the design's defaults, not the calibration in force
+//	  excluded_extenders: []      # extender ids never ticketed for a run or the demo
 //	  measure_ms: 12000           # a run's cap from its sessions' opening (V10)
 //	  extenders: 12               # a run's extenders: 4 near, 4 mid, 4 far (E2)
 //	  spares: 4                   # in positions 12-15, opened only for a session that fails (E2)
@@ -33,9 +39,20 @@ import (
 //
 // The model's constants, κ and σ₀ (V3), and the relay threshold behind
 // relay_suspected (K2, Q12) are the weekly calibration's (V4), with its
-// defaults until it has run (lagDriftCalibration). A value that is not
-// positive keeps its default, as for every lag setting.
+// defaults until it has run (model.GetLagDriftCalibration). A value that is
+// not positive keeps its default, as for every lag setting; `enabled` is the
+// one switch, on unless set false. The settings are read once per process, so
+// a change reaches the api and the taskworker as each restarts.
 type LagDriftSettings struct {
+	// the operator's kill switch: nil or true is on
+	Enabled *bool `yaml:"enabled"`
+	// whether verdicts use the weekly calibration in force (V4): nil or true
+	// does; false judges with the design's defaults, and its verdicts record
+	// no calibration, until it is set true again
+	CalibrationEnabled *bool `yaml:"calibration_enabled"`
+	// extenders an operator keeps out of every run (E2), by id
+	ExcludedExtenders []string `yaml:"excluded_extenders"`
+
 	MeasureMs           int           `yaml:"measure_ms"`
 	Extenders           int           `yaml:"extenders"`
 	Spares              int           `yaml:"spares"`
@@ -134,6 +151,29 @@ func (self *LagDriftSettings) withDefaults() {
 // The time a run's report may take after its finish (E5).
 func (self *LagDriftSettings) ReportWait() time.Duration {
 	return time.Duration(self.ReportWaitMs) * time.Millisecond
+}
+
+// Whether drift tests run at all: on unless an operator set `enabled: false`.
+func (self *LagDriftSettings) On() bool {
+	return self.Enabled == nil || *self.Enabled
+}
+
+// Whether verdicts use the calibration in force: unless an operator set
+// `calibration_enabled: false`.
+func (self *LagDriftSettings) CalibrationOn() bool {
+	return self.CalibrationEnabled == nil || *self.CalibrationEnabled
+}
+
+// The extenders kept out of every run, by id; an id that does not parse keeps
+// nothing out.
+func (self *LagDriftSettings) Excluded() map[server.Id]bool {
+	excluded := map[server.Id]bool{}
+	for _, text := range self.ExcludedExtenders {
+		if extenderId, err := server.ParseId(strings.TrimSpace(text)); err == nil {
+			excluded[extenderId] = true
+		}
+	}
+	return excluded
 }
 
 // The confidences an allocation may name (P2, V6).
