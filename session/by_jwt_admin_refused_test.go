@@ -37,8 +37,8 @@ func adminRefusedTestClaims(t testing.TB, signed string) map[string]any {
 	return claims
 }
 
-// Whether the signed token carries admin_refused: true, and parses back with
-// the mark.
+// Requires the signed token to carry admin_refused as a JSON true and parse
+// back with the mark, or to carry no such claim at all.
 func requireAdminRefusedClaim(t testing.TB, signed string, adminRefused bool) {
 	t.Helper()
 	claim, present := adminRefusedTestClaims(t, signed)["admin_refused"]
