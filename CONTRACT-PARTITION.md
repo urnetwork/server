@@ -642,11 +642,15 @@ cutover week is chosen for disk headroom, not as the nearest Monday.
 
 ## S1: weeks retire at the reaper's horizon (2026-11-17)
 
-Status: **BUILT** (owner go 2026-11-17 ~08:30Z): code 2d55bc9f3, tests
-de9552b8e, branch `feat/contract-week-reaper-horizon-1117`. No migration;
-it ships with the taskworker. It supersedes the 91-day drop and the archive step of "Retention
-as built" above. It is a prerequisite for the cutover week C (RUNBOOK gates
-C1 and C2); it does not make C feasible on edge-2's current volume (below).
+Status: **BUILT** (owner go 2026-11-17 ~08:30Z), on branch
+`feat/contract-week-reaper-horizon-1117`:
+- code: 2d55bc9f3, 6bbba8761 (the live-row gate) and 2b5b72df2 (the bound);
+- tests: de9552b8e and e61aa3eea.
+
+No migration; it ships with the taskworker. It supersedes the 91-day drop and
+the archive step of "Retention as built" above. It is a prerequisite for the
+cutover week C (RUNBOOK gates C1 and C2), but it does not make C feasible on
+edge-2's current volume (below).
 
 ### The problem
 
@@ -678,8 +682,8 @@ way close evidence reads it (`model.WithContractHorizonControl`):
 - with the mode off, in a dry run, or with the control unread, 91 days. The
   reaper then deletes nothing, so the week stays.
 
-The day covers the reaper's 2-hour close settle time and the vacuum after its
-last deletes. The legacy partition expires the same way from the cutover week.
+The day covers the reaper's 2-hour close settle time. The legacy partition
+expires the same way from the cutover week.
 
 **Per expired week**, oldest first, each run
 (`db_contract_week_retirement.go`):
