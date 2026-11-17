@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -67,6 +68,84 @@ func TestLagDriftCalibrationRelayThresholdLookup(t *testing.T) {
 	connect.AssertEqual(t, calibration.RelayThresholdMsFor("", ""), 60.0)
 	connect.AssertEqual(t, calibration.RelaySuspected(36, "EU", LagDriftNetworkTypeFixed), true)
 	connect.AssertEqual(t, calibration.RelaySuspected(36, "EU", LagDriftNetworkTypeMobile), false)
+}
+
+// A calibration as the fit would leave it, for the storage tests.
+func testLagDriftCalibrationResult(kappa float64, sigma0Ms float64, relayThresholdMs float64) *LagDriftCalibrationResult {
+	return &LagDriftCalibrationResult{
+		Kappa:            kappa,
+		Sigma0Ms:         sigma0Ms,
+		RelayThresholdMs: relayThresholdMs,
+		RelayThresholdsMs: map[string]map[string]float64{
+			"":   {"": relayThresholdMs, LagDriftNetworkTypeMobile: relayThresholdMs + 40},
+			"EU": {LagDriftNetworkTypeFixed: relayThresholdMs - 10},
+		},
+		Applied:         true,
+		Converged:       true,
+		Tracks:          1200,
+		Observations:    11000,
+		FitTracks:       1150,
+		FitObservations: 10400,
+		Continents:      map[string]*LagDriftCalibrationContinent{},
+	}
+}
+
+// With nothing stored the getter answers the defaults. A stored calibration
+// is in force, the latest first; withdrawing it goes back to the one before,
+// and withdrawing every one to the defaults. A withdrawn calibration can still
+// be read by its id, for the verdicts that name it.
+func TestGetLagDriftCalibrationFallsBack(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Millisecond)
+
+		calibration := GetLagDriftCalibration(ctx)
+		connect.AssertEqual(t, calibration.Calibrated(), false)
+		connect.AssertEqual(t, calibration.Kappa, LagDriftDefaultKappa)
+		connect.AssertEqual(t, calibration.Sigma0Ms, LagDriftDefaultSigma0Ms)
+		connect.AssertEqual(t, calibration.RelayThresholdMs, LagDriftDefaultRelayThresholdMs)
+		connect.AssertEqual(t, calibration.RelayThresholdMsFor("EU", LagDriftNetworkTypeFixed), LagDriftDefaultRelayThresholdMs)
+
+		older := AddLagDriftCalibration(ctx, now.Add(-7*24*time.Hour), now.Add(-14*24*time.Hour), now.Add(-7*24*time.Hour), testLagDriftCalibrationResult(0.21, 0.8, 55))
+		newer := AddLagDriftCalibration(ctx, now, now.Add(-7*24*time.Hour), now, testLagDriftCalibrationResult(0.27, 1.4, 62))
+
+		calibration = GetLagDriftCalibration(ctx)
+		connect.AssertEqual(t, calibration.Calibrated(), true)
+		connect.AssertEqual(t, *calibration.CalibrationId, newer)
+		connect.AssertEqual(t, calibration.CalibratedAt.Equal(now), true)
+		connect.AssertEqual(t, calibration.Kappa, 0.27)
+		connect.AssertEqual(t, calibration.Sigma0Ms, 1.4)
+		connect.AssertEqual(t, calibration.Model().Kappa, 0.27)
+		connect.AssertEqual(t, calibration.RelayThresholdMs, 62.0)
+		connect.AssertEqual(t, calibration.RelayThresholdMsFor("EU", LagDriftNetworkTypeFixed), 52.0)
+		connect.AssertEqual(t, calibration.RelayThresholdMsFor("EU", LagDriftNetworkTypeMobile), 102.0)
+		connect.AssertEqual(t, calibration.RelayThresholdMsFor("AS", LagDriftNetworkTypeFixed), 62.0)
+
+		// undo the newer: the older is in force again
+		connect.AssertEqual(t, WithdrawLagDriftCalibration(ctx, newer, now), true)
+		connect.AssertEqual(t, WithdrawLagDriftCalibration(ctx, newer, now), false)
+		calibration = GetLagDriftCalibration(ctx)
+		connect.AssertEqual(t, *calibration.CalibrationId, older)
+		connect.AssertEqual(t, calibration.Kappa, 0.21)
+
+		// back to the defaults
+		connect.AssertEqual(t, WithdrawLagDriftCalibrations(ctx, now), 1)
+		calibration = GetLagDriftCalibration(ctx)
+		connect.AssertEqual(t, calibration.Calibrated(), false)
+		connect.AssertEqual(t, calibration.Kappa, LagDriftDefaultKappa)
+		connect.AssertEqual(t, calibration.RelayThresholdMs, LagDriftDefaultRelayThresholdMs)
+
+		// a withdrawn calibration still reads by its id
+		withdrawn := GetLagDriftCalibrationById(ctx, newer)
+		connect.AssertNotEqual(t, withdrawn, (*LagDriftCalibration)(nil))
+		connect.AssertEqual(t, withdrawn.Kappa, 0.27)
+		connect.AssertEqual(t, withdrawn.RelayThresholdMsFor("EU", LagDriftNetworkTypeFixed), 52.0)
+		connect.AssertEqual(t, GetLagDriftCalibrationById(ctx, server.NewId()), (*LagDriftCalibration)(nil))
+
+		// the next calibration is in force again
+		latest := AddLagDriftCalibration(ctx, now.Add(time.Hour), now.Add(-7*24*time.Hour), now.Add(time.Hour), testLagDriftCalibrationResult(0.24, 1.1, 70))
+		connect.AssertEqual(t, *GetLagDriftCalibration(ctx).CalibrationId, latest)
+	})
 }
 
 // A network is typed by its number where a curated list knows it, else by

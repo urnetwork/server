@@ -2,8 +2,11 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/connect/lagdrift"
 
 	"github.com/urnetwork/server"
 )
@@ -204,9 +207,180 @@ func (self *LagDriftCalibration) RelaySuspected(lastMileMs float64, continentCod
 	return self.RelayThresholdMsFor(continentCode, networkType) < lastMileMs
 }
 
-// GetLagDriftCalibration reads the latest calibration of the drift model
-// (lag.dev/DRIFTTEST.md V4), or the defaults when there is none: κ 0.25,
-// σ₀ 1 ms and a relay threshold of 80 ms.
+// κ and σ₀ as lagdrift's fits take them (V3).
+func (self *LagDriftCalibration) Model() lagdrift.Model {
+	return lagdrift.Model{
+		Kappa:    self.Kappa,
+		Sigma0Ms: self.Sigma0Ms,
+	}
+}
+
+// A calibration row's columns, in the order scanLagDriftCalibration reads
+// them. Of the summary only the relay thresholds are read.
+const lagDriftCalibrationColumns = `
+	calibration_id,
+	calibrated_at,
+	kappa,
+	sigma0_ms,
+	relay_threshold_ms,
+	summary_json->'relay_thresholds_ms'
+`
+
+func scanLagDriftCalibration(result server.PgResult) *LagDriftCalibration {
+	calibration := DefaultLagDriftCalibration()
+	var calibrationId server.Id
+	var calibratedAt time.Time
+	var thresholdsJson []byte
+	server.Raise(result.Scan(
+		&calibrationId,
+		&calibratedAt,
+		&calibration.Kappa,
+		&calibration.Sigma0Ms,
+		&calibration.RelayThresholdMs,
+		&thresholdsJson,
+	))
+	calibration.CalibrationId = &calibrationId
+	calibration.CalibratedAt = &calibratedAt
+	if 0 < len(thresholdsJson) {
+		server.Raise(json.Unmarshal(thresholdsJson, &calibration.RelayThresholdsMs))
+	}
+	if calibration.RelayThresholdsMs == nil {
+		calibration.RelayThresholdsMs = map[string]map[string]float64{}
+	}
+	return calibration
+}
+
+// GetLagDriftCalibration reads the drift model's calibration in force
+// (lag.dev/DRIFTTEST.md V4): the latest one not withdrawn, or the defaults
+// when there is none: κ 0.25, σ₀ 1 ms and a relay threshold of 80 ms.
 func GetLagDriftCalibration(ctx context.Context) *LagDriftCalibration {
-	return DefaultLagDriftCalibration()
+	calibration := DefaultLagDriftCalibration()
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT `+lagDriftCalibrationColumns+`
+			FROM lag_drift_calibration
+			WHERE withdrawn_at IS NULL
+			ORDER BY calibrated_at DESC, calibration_id DESC
+			LIMIT 1
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				calibration = scanLagDriftCalibration(result)
+			}
+		})
+	})
+	return calibration
+}
+
+// GetLagDriftCalibrationById reads one calibration, withdrawn or not, so a
+// verdict that recorded it can be judged again as it was; nil when there is
+// no such calibration.
+func GetLagDriftCalibrationById(ctx context.Context, calibrationId server.Id) *LagDriftCalibration {
+	var calibration *LagDriftCalibration
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT `+lagDriftCalibrationColumns+`
+			FROM lag_drift_calibration
+			WHERE calibration_id = $1
+			`,
+			calibrationId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				calibration = scanLagDriftCalibration(result)
+			}
+		})
+	})
+	return calibration
+}
+
+// AddLagDriftCalibration stores an applied calibration, which is in force
+// from then on, and answers its id (V4). The row holds only aggregates: the
+// result's κ, σ₀, thresholds, histograms and counts (R1).
+func AddLagDriftCalibration(
+	ctx context.Context,
+	calibratedAt time.Time,
+	windowStart time.Time,
+	windowEnd time.Time,
+	result *LagDriftCalibrationResult,
+) server.Id {
+	summaryJson, err := json.Marshal(result)
+	server.Raise(err)
+	calibrationId := server.NewId()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO lag_drift_calibration (
+				calibration_id,
+				calibrated_at,
+				window_start,
+				window_end,
+				fit_tracks,
+				fit_observations,
+				kappa,
+				sigma0_ms,
+				relay_threshold_ms,
+				summary_json
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			`,
+			calibrationId,
+			calibratedAt.UTC(),
+			windowStart.UTC(),
+			windowEnd.UTC(),
+			result.FitTracks,
+			result.FitObservations,
+			result.Kappa,
+			result.Sigma0Ms,
+			result.RelayThresholdMs,
+			summaryJson,
+		))
+	})
+	return calibrationId
+}
+
+// WithdrawLagDriftCalibration takes a calibration out of force: the drift
+// test goes back to the latest one before it that is still in force, or to
+// the defaults, until the next calibration. The row stays, for the verdicts
+// that name it. False when there is no such calibration in force.
+func WithdrawLagDriftCalibration(ctx context.Context, calibrationId server.Id, now time.Time) (withdrawn bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE lag_drift_calibration
+			SET withdrawn_at = $2
+			WHERE calibration_id = $1 AND withdrawn_at IS NULL
+			`,
+			calibrationId,
+			now.UTC(),
+		))
+		withdrawn = tag.RowsAffected() == 1
+	})
+	return
+}
+
+// WithdrawLagDriftCalibrations takes every calibration out of force, so the
+// drift test goes back to the defaults until the next calibration, and
+// answers how many it withdrew.
+func WithdrawLagDriftCalibrations(ctx context.Context, now time.Time) (withdrawn int) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE lag_drift_calibration
+			SET withdrawn_at = $1
+			WHERE withdrawn_at IS NULL
+			`,
+			now.UTC(),
+		))
+		withdrawn = int(tag.RowsAffected())
+	})
+	return
 }
