@@ -196,11 +196,21 @@ func countNetworkRecentProxyClientsInTx(ctx context.Context, tx server.PgTx, net
 	return
 }
 
+// The ur.io page that lists a network's hosted proxies and removes them. The
+// cap refusal names it because no client can list or remove the network's
+// other proxies itself: the browser extensions show the refusal word for word,
+// and proxies an older extension left behind stay active until the 30-day idle
+// reap (support inbox 8244; the owner, 2026-11-17: the cap message points to
+// ur.io).
+const proxyClientLimitProxiesPageUrl = "https://ur.io/app/proxies"
+
+// proxyClientLimitMessage is the cap refusal's message: the limit, where to
+// remove a proxy, and the upgrade when one lifts the limit.
 func proxyClientLimitMessage(limit int, isPro bool) string {
 	if isPro {
-		return fmt.Sprintf("Your plan's limit of %d active proxies is reached. Remove a proxy to create another.", limit)
+		return fmt.Sprintf("Your plan's limit of %d active proxies is reached. Remove a proxy you no longer use at %s to create another.", limit, proxyClientLimitProxiesPageUrl)
 	}
-	return fmt.Sprintf("Your plan's limit of %d active proxies is reached. Remove a proxy to create another, or upgrade to UR Pro for more.", limit)
+	return fmt.Sprintf("Your plan's limit of %d active proxies is reached. Remove a proxy you no longer use at %s to create another, or upgrade to UR Pro for more.", limit, proxyClientLimitProxiesPageUrl)
 }
 
 // The create rate counts every hosted proxy create attempt in a redis counter
