@@ -190,6 +190,11 @@ func ProcessAppleNotification(
 	// validated the same way minus the entitlement fields a revocation payload
 	// need not carry.
 	revocation := notification.NotificationType == "REFUND" || notification.NotificationType == "REVOKE"
+	// REFUND_REVERSED: Apple reversed a refund, and the paid window the REFUND
+	// ended comes back for what is left of it (appleReverseRefund). It needs
+	// the transaction's paid window, so its claims are validated like a
+	// credit's.
+	reversal := notification.NotificationType == "REFUND_REVERSED"
 	var transaction *validatedAppleTransaction
 	// DID_FAIL_TO_RENEW in the billing grace period holds Pro to its end
 	// (appleHoldGraceEntitlementInTx). The hold needs the transaction's paid
@@ -197,7 +202,7 @@ func ProcessAppleNotification(
 	// nothing.
 	var graceTransaction *validatedAppleTransaction
 	if notification.TransactionInfo != nil {
-		transaction, err = validateAppleTransactionBound(ctx, notification, allowedProductIds, actionable)
+		transaction, err = validateAppleTransactionBound(ctx, notification, allowedProductIds, actionable || reversal)
 		if err != nil {
 			if actionable && errors.Is(err, errAppleAccountTokenInvalid) {
 				appleRecordUnownedTransaction(ctx, notification, "destination_unresolved", nil)
@@ -210,17 +215,19 @@ func ProcessAppleNotification(
 				graceTransaction = nil
 			}
 		}
-	} else if actionable || revocation || notification.NotificationType == "EXPIRED" {
+	} else if actionable || revocation || reversal || notification.NotificationType == "EXPIRED" {
 		return false, errors.New("missing verified transaction claims")
 	}
 
 	var revokedNetworkIds []server.Id
 	graceHeld := false
+	var restored *model.ReconcileSubscriptionRenewal
 	server.Tx(ctx, func(tx server.PgTx) {
 		processed = false
 		returnErr = nil
 		revokedNetworkIds = nil
 		graceHeld = false
+		restored = nil
 
 		if transaction != nil {
 			if !appleNetworkExistsInTx(tx, ctx, transaction.networkId) {
@@ -246,7 +253,12 @@ func ProcessAppleNotification(
 			notification.Subtype,
 			time.UnixMilli(notification.SignedDate).UTC(),
 		))
-		if notificationTag.RowsAffected() == 0 || !(actionable || revocation || graceTransaction != nil) {
+		if notificationTag.RowsAffected() == 0 || !(actionable || revocation || reversal || graceTransaction != nil) {
+			return
+		}
+
+		if reversal {
+			restored = appleReverseRefund(&appleRefundReversalDbTx{tx: tx, ctx: ctx}, transaction, notification, server.NowUtc())
 			return
 		}
 
@@ -308,6 +320,15 @@ func ProcessAppleNotification(
 		// the entitlement ended under the network -- make the downgrade visible
 		// immediately rather than after ProCacheTtl
 		model.UpdateProNetwork(ctx, networkId)
+	}
+	if restored != nil {
+		// a marker retention removed has no row to reopen; the repair's own
+		// checks make this a no-op when the marker came back with the window
+		if _, err := model.RepairReconciledProEntitlement(ctx, model.SubscriptionMarketApple, restored, server.NowUtc(), false); err != nil {
+			glog.Errorf("[sub]apple refund reversal of transaction %s: could not repair the Pro marker: %v\n", transaction.transactionId, err)
+		}
+		model.UpdateProNetwork(ctx, restored.NetworkId)
+		glog.Infof("[sub]apple refund reversal: restored transaction %s on network %s\n", transaction.transactionId, restored.NetworkId)
 	}
 	if actionable && errors.Is(returnErr, errAppleAccountNetworkMissing) {
 		appleRecordUnownedTransaction(ctx, notification, "destination_deleted", &transaction.networkId)
