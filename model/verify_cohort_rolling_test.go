@@ -370,3 +370,139 @@ func TestSnHeadSummaryKeepsTheReportedCensus(t *testing.T) {
 		}
 	})
 }
+
+// The admission script as it was before the rolling census, kept to prove the
+// new script's legacy mode is the same rule: during the api roll both run on
+// one Redis, before the rolling census can start.
+const testVerifyCohortAdmitScriptBeforeRolling = `
+local member = redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1
+local size = redis.call('SCARD', KEYS[1])
+local carried = redis.call('SISMEMBER', KEYS[3], ARGV[1]) == 1
+local lifetime = redis.call('SCARD', KEYS[3])
+local ready = redis.call('EXISTS', KEYS[5]) == 1
+local counted = redis.call('SISMEMBER', KEYS[4], ARGV[1]) == 1
+local census = redis.call('SCARD', KEYS[4])
+local raw = redis.call('GET', KEYS[2])
+if raw and not string.match(raw, '^%d+$') then
+  return redis.error_reply('verify cohort draw counter is not an integer')
+end
+local draws = tonumber(raw or '0')
+local new = 0
+if not member then
+  if size >= tonumber(ARGV[2]) then return {0, size, 0} end
+  if not carried then
+    if lifetime >= tonumber(ARGV[3]) then return {0, size, 0} end
+    if not (ready and counted) then
+      if ARGV[9] == '1' and not ready then return {0, size, 0} end
+      local ever = lifetime
+      local bound = tonumber(ARGV[3])
+      if ready then
+        ever = census
+        if ARGV[8] == '1' then bound = tonumber(ARGV[7]) end
+      end
+      if ever >= bound then return {0, size, 0} end
+      if ARGV[5] ~= '1' and draws < tonumber(ARGV[4]) * size then return {0, size, 0} end
+      if ready then new = 1 end
+    end
+    redis.call('SADD', KEYS[3], ARGV[1])
+    redis.call('SADD', KEYS[4], ARGV[1])
+  end
+  redis.call('SADD', KEYS[1], ARGV[1])
+end
+redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+redis.call('EXPIRE', KEYS[2], ARGV[6])
+local n = redis.call('SCARD', KEYS[1])
+for i = 10, #ARGV do
+  if redis.call('SISMEMBER', KEYS[1], ARGV[i]) == 1 then n = n - 1 end
+end
+return {1, n, new}
+`
+
+// One admission by the script as it was before the rolling census.
+func testVerifyCohortAdmitBeforeRolling(ctx context.Context, r server.RedisClient, keys verifyCohortKeys, candidate string, settings *VerifySettings, admission verifyCohortAdmission) []int64 {
+	flag := func(value bool) string {
+		if value {
+			return "1"
+		}
+		return "0"
+	}
+	values, err := r.Eval(ctx, testVerifyCohortAdmitScriptBeforeRolling, []string{keys.epoch, keys.draws, keys.lifetime, keys.census, keys.censusReady},
+		candidate, settings.CohortSize, settings.CohortLifetimeLimit, settings.ReliabilityAMin, flag(admission.skipGrowthGate),
+		int64(verifyCohortEpochTtl/time.Second), max(settings.CohortCensusLimit, settings.CohortLifetimeLimit), flag(admission.priority), flag(admission.censusRequired),
+	).Int64Slice()
+	server.Raise(err)
+	return values
+}
+
+// Before the rolling census starts, an api on the new script and one still on
+// the old interleave on one Redis exactly as the old script alone: the same
+// admissions, refusals, cohort sizes and census entries, across the growth
+// gate, both limits, the claimed path and a ready census.
+func TestVerifyCohortLegacyModeMatchesTheScriptBeforeRolling(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := testVerifyCohortRotationSettings()
+		settings.ReliabilityAMin = 1
+		candidates := make([]string, 12)
+		for i := range candidates {
+			candidates[i] = server.NewId().String()
+		}
+		type step struct {
+			candidate int
+			admission verifyCohortAdmission
+		}
+		steps := []step{}
+		for i := range candidates {
+			steps = append(steps, step{candidate: i, admission: verifyCohortAdmission{skipGrowthGate: i%3 == 0, priority: 6 <= i && i%2 == 0}})
+			steps = append(steps, step{candidate: i / 2, admission: verifyCohortAdmission{}})
+		}
+		run := func(deploymentKey StDeploymentKey, mixed bool) [][]int64 {
+			keys := newVerifyCohortKeys(deploymentKey, 1)
+			results := [][]int64{}
+			server.Redis(ctx, func(r server.RedisClient) {
+				// a ready census, as after rotation's first run
+				server.Raise(r.Set(ctx, keys.censusReady, "1", 0).Err())
+				for index, step := range steps {
+					if mixed && index%2 == 1 {
+						admitted, n, entered, _ := admitVerifyCohortWithReason(ctx, r, keys, candidates[step.candidate], settings, step.admission, nil)
+						result := []int64{0, int64(n), 0}
+						if admitted {
+							result[0] = 1
+						}
+						if entered {
+							result[2] = 1
+						}
+						results = append(results, result)
+					} else {
+						results = append(results, testVerifyCohortAdmitBeforeRolling(ctx, r, keys, candidates[step.candidate], settings, step.admission))
+					}
+				}
+			})
+			return results
+		}
+		before := run("964:0x00000000000000000000000000000000000000b1", false)
+		mixed := run("964:0x00000000000000000000000000000000000000b2", true)
+		if len(before) != len(mixed) {
+			t.Fatal("runs differ in length")
+		}
+		for index := range before {
+			if len(before[index]) != 3 || before[index][0] != mixed[index][0] || before[index][1] != mixed[index][1] || before[index][2] != mixed[index][2] {
+				t.Fatalf("step %d: the old script alone %v, interleaved with the new %v", index, before[index], mixed[index])
+			}
+		}
+		beforeKeys := newVerifyCohortKeys("964:0x00000000000000000000000000000000000000b1", 1)
+		mixedKeys := newVerifyCohortKeys("964:0x00000000000000000000000000000000000000b2", 1)
+		for _, pair := range [][2]string{{beforeKeys.lifetime, mixedKeys.lifetime}, {beforeKeys.census, mixedKeys.census}, {beforeKeys.epoch, mixedKeys.epoch}} {
+			left, right := testVerifyCohortMembers(ctx, pair[0]), testVerifyCohortMembers(ctx, pair[1])
+			if len(left) != len(right) || len(left) == 0 {
+				t.Fatalf("%s holds %d, %s holds %d", pair[0], len(left), pair[1], len(right))
+			}
+			for member := range left {
+				if !right[member] {
+					t.Fatalf("%s holds %s and %s does not", pair[0], member, pair[1])
+				}
+			}
+		}
+	})
+}

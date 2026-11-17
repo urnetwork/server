@@ -54,6 +54,77 @@ func TestMigrationsVerifyCohortRollingPendingWarnsWithoutPaging(t *testing.T) {
 	}
 }
 
+// The real schema before and at the rolling census's version, then rolled-back
+// shape faults of everything it publishes, each drift owned by the migration.
+func TestMigrationsVerifyCohortRollingPublishedSchemaAndFaults(t *testing.T) {
+	version := server.VerifyCohortRollingSchemaMigrationVersion()
+	owner := fmt.Sprintf("%s@v%d", migrationCurrentSuffixTestContract(t, version).artifact.name, version)
+	column := migrationCurrentSuffixTestContract(t, version).artifact.rowColumn
+	faults := []struct{ name, sql string }{
+		{"summary census absent", `ALTER TABLE sn_head_summary DROP COLUMN census_providers`},
+		{"summary census narrowed", `ALTER TABLE sn_head_summary ALTER COLUMN census_providers TYPE integer`},
+		{"summary bindings absent", `ALTER TABLE sn_head_summary DROP COLUMN bound_clients`},
+		{"summary coverage required", `ALTER TABLE sn_head_summary ALTER COLUMN bound_clients_observed SET NOT NULL`},
+		{"invented coverage default", `ALTER TABLE sn_head_summary ALTER COLUMN bound_clients_observed SET DEFAULT 0`},
+		{"last epoch absent", `ALTER TABLE verify_cohort_census DROP COLUMN last_epoch`},
+		{"last epoch narrowed", `ALTER TABLE verify_cohort_census ALTER COLUMN last_epoch TYPE integer`},
+		{"state table absent", `DROP TABLE verify_cohort_state`},
+		{"state not durable", `ALTER TABLE verify_cohort_state SET UNLOGGED`},
+		{"state start nullable", `ALTER TABLE verify_cohort_state ALTER COLUMN rolling_from_epoch DROP NOT NULL`},
+		{"state start zoned", `ALTER TABLE verify_cohort_state ALTER COLUMN rolling_since TYPE timestamp with time zone`},
+		{"state without its key", `ALTER TABLE verify_cohort_state DROP CONSTRAINT verify_cohort_state_pkey`},
+	}
+	type prefix struct {
+		row    Row
+		alerts []Alert
+	}
+	prefixes := map[int]prefix{}
+	var observations [][]Alert
+	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
+		for _, head := range []int{version - 1, version} {
+			server.ApplyDbMigrationsUpTo(t.Context(), head)
+			source := &migrationPingDatabaseSource{}
+			alerts, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefixes[head] = prefix{row: source.artifactRow, alerts: alerts}
+		}
+		for _, fault := range faults {
+			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
+				if _, err := tx.Exec(ctx, fault.sql); err != nil {
+					t.Fatalf("apply %s: %v", fault.name, err)
+				}
+				alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(&snMainnetMigrationTxSource{tx: tx}))
+				if err != nil {
+					t.Fatalf("inspect %s: %v", fault.name, err)
+				}
+				observations = append(observations, alerts)
+			})
+		}
+		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
+			t.Fatalf("rolled-back rolling census faults left drift: %s", drift)
+		}
+	})
+	pending, published := prefixes[version-1], prefixes[version]
+	if pending.row == nil || published.row == nil {
+		t.Fatal("a published prefix was not observed")
+	}
+	if pending.row[column] != "f" || published.row[column] != "t" {
+		t.Fatalf("the rolling census reads %q one version behind and %q at its version", pending.row[column], published.row[column])
+	}
+	verifyCohortCensusRequireAlerts(t, "pending rolling census", version-1, pending.alerts, false, owner)
+	verifyCohortCensusRequireAlerts(t, "published rolling census", version, published.alerts, false, owner)
+	if len(observations) != len(faults) {
+		t.Fatalf("observed %d rolling census faults, want %d", len(observations), len(faults))
+	}
+	for index, alerts := range observations {
+		if alert := requireAlertClass(t, alerts, "migration-schema-drift"); alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), owner) {
+			t.Fatalf("%s lost its owning migration: %s", faults[index].name, alert.Markdown())
+		}
+	}
+}
+
 // The contract pins every column and the state table's key it publishes, so
 // a rolled-back shape of any of them is drift the rolling census owns.
 func TestMigrationsVerifyCohortRollingContractNamesItsArtifacts(t *testing.T) {
