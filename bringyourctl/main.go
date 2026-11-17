@@ -52,6 +52,9 @@ Usage:
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
     bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
+    bringyourctl evidence move-flat [--checkpoint=<path>] [--journal=<path>] [--objects-per-second=<n>] [--workers=<n>] [--batch-rows=<n>] [--max-moves=<n>] [--dry-run]
+    bringyourctl evidence move-flat-verify --journal=<path> [--checkpoint=<path>] [--fallback-sample=<n>]
+    bringyourctl evidence flat-census [--sample-rows=<n>]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -265,6 +268,29 @@ Options:
                    run (Go duration, default 8h).
     --parallel=<n> With db reindex-index, the build's parallel maintenance
                    workers, 0 to 8 (default 0: one cpu).
+    --checkpoint=<path>  With evidence move-flat, the durable cursor of the
+                   move of the legacy flat evidence content objects to their
+                   sharded keys: a run resumes from it and advances it after
+                   each batch; refusals append to <path>.refused.jsonl. With
+                   evidence move-flat-verify, also read rows past its cursor
+                   and check that their flat objects still read through the
+                   readers' fallback.
+    --journal=<path>  With evidence move-flat, append each object moved,
+                   deduplicated or refused (one JSON line each); with evidence
+                   move-flat-verify, the journal whose moved objects to check.
+    --objects-per-second=<n>  With evidence move-flat, objects begun a second
+                   (default 200).
+    --workers=<n>  With evidence move-flat, objects in flight at once
+                   (default 96).
+    --batch-rows=<n>  With evidence move-flat, st_client_key_history rows a
+                   batch; the checkpoint advances per batch (default 1000).
+    --max-moves=<n>  With evidence move-flat, stop once this many flat objects
+                   are removed (in a dry run, would be); objects in flight
+                   then finish (a canary). Omitted, run to the end.
+    --fallback-sample=<n>  With evidence move-flat-verify, the rows past the
+                   checkpoint to check (default 200).
+    --sample-rows=<n>  With evidence flat-census, about how many
+                   st_client_key_history rows to sample, by page (default 3000).
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -361,6 +387,14 @@ func main() {
 			dbUsageArchiveExport(opts)
 		} else if reindexIndex, _ := opts.Bool("reindex-index"); reindexIndex {
 			dbReindexIndex(opts)
+		}
+	} else if evidence, _ := opts.Bool("evidence"); evidence {
+		if moveFlatVerify, _ := opts.Bool("move-flat-verify"); moveFlatVerify {
+			evidenceMoveFlatVerifyCommand(opts)
+		} else if moveFlat, _ := opts.Bool("move-flat"); moveFlat {
+			evidenceMoveFlatCommand(opts)
+		} else if flatCensus, _ := opts.Bool("flat-census"); flatCensus {
+			evidenceFlatCensusCommand(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
