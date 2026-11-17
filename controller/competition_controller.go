@@ -657,6 +657,7 @@ type Settings struct {
 	executorFreshOnly             bool
 	distributedSourceCommits      map[string]string
 	executorControlAmendment      *competitionExecutorControlAmendmentRecord
+	executorExpiredControlWitness *competitionExpiredControlWitness
 	executorQualificationRecovery *competitionExecutorQualificationRecoveryRecord
 	// Non-serialized proof set only after exact retained runtime authentication.
 	runtimeIntentSha256 string
@@ -6562,259 +6563,9 @@ func infrastructureRetrySchedule(
 // Completion locks both current authorities before recording a result. Any
 // lost authority or suppressed update rolls back the result, event and release.
 func (self PostgresStore) Complete(ctx context.Context, settings *Settings, workerId string, jobId server.Id, outcome EvaluationOutcome) (retry bool, err error) {
-	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			// server.Tx can rerun the callback; every run starts from empty results.
-			retry = false
-			if settings.AutomationPolicy.Enabled {
-				automationScopeLockInTx(ctx, tx, settings)
-			}
-			var slotWorker *string
-			var slotJob *server.Id
-			var slotLease, jobLease *time.Time
-			if self.beforeLeaseRowLockForTest != nil {
-				self.beforeLeaseRowLockForTest("completion_slot")
-			}
-			loadError := tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at
-			 FROM `+slotTable+` WHERE slot_id=$1 FOR UPDATE`, slotId).Scan(&slotWorker, &slotJob, &slotLease)
-			if errors.Is(loadError, pgx.ErrNoRows) {
-				panic(ErrLeaseLost)
-			}
-			server.Raise(loadError)
-			var state, owner string
-			var attempts, evaluationCycle, attemptOffset int
-			var cycleStartedAt *time.Time
-			var apiImageDigest, workerImageDigest string
-			var roundId server.Id
-			var roundEpoch int
-			var staging bool
-			var providersSha256 string
-			var policyJson []byte
-			var startedAt time.Time
-			var executionDeadline *time.Time
-			if self.beforeLeaseRowLockForTest != nil {
-				self.beforeLeaseRowLockForTest("completion_job")
-			}
-			loadError = tx.QueryRow(ctx, `
-				SELECT state, COALESCE(lease_owner, ''), attempt_count,
-				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,evaluation_cycle,cycle_attempt_offset,cycle_started_at,
-				       job.round_id, round.epoch_number, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at,job.execution_deadline_at
-				FROM competition_job AS job
-				JOIN competition_round AS round ON round.round_id = job.round_id
-				WHERE job.job_id = $1 FOR UPDATE OF job
-			`, jobId).Scan(
-				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt, &evaluationCycle, &attemptOffset, &cycleStartedAt,
-				&roundId, &roundEpoch, &staging, &providersSha256, &policyJson, &jobLease, &executionDeadline,
-			)
-			if errors.Is(loadError, pgx.ErrNoRows) {
-				panic(ErrLeaseLost)
-			}
-			server.Raise(loadError)
-			requireAuthority := func() time.Time {
-				server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
-				server.Raise(requireCompetitionExecutorAuthorityInTx(ctx, tx, settings, jobId))
-				if settings.AutomationPolicy.Enabled {
-					if settings.automationLease != nil {
-						server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
-					}
-					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
-				}
-				now := self.nowUtc()
-				if state != "running" || owner != workerId || slotWorker == nil || *slotWorker != workerId ||
-					slotJob == nil || *slotJob != jobId || slotLease == nil || jobLease == nil ||
-					!now.Before(*slotLease) || !now.Before(*jobLease) || settings.automationLease != nil && roundId != settings.automationRoundId {
-					panic(ErrLeaseLost)
-				}
-				if evaluationCycle > 0 && (cycleStartedAt == nil || attempts <= attemptOffset) {
-					panic(ErrLeaseLost)
-				}
-				return now
-			}
-			now := requireAuthority()
-			if competitionDistributedEnabled(settings) {
-				if executionDeadline == nil {
-					panic(ErrLeaseLost)
-				}
-				if !now.Before(*executionDeadline) {
-					outcome.Score = nil
-					outcome.Error = terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
-				}
-				if !outcome.distributedArchiveVerified && (outcome.Score != nil || outcome.Error == nil || outcome.Error.Code != "evaluation_time_budget_exhausted" || now.Before(*executionDeadline)) {
-					panic(errors.New("distributed outcome requires authenticated coordinator-retained artifacts"))
-				}
-				if outcome.distributedArchiveVerified {
-					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_executor_artifacts_verified = 'on'`))
-				}
-			}
-			if outcome.Score != nil && outcome.Error == nil {
-				policy, policyErr := decodeRoundPolicySnapshot(policyJson)
-				server.Raise(policyErr)
-				if !scoreMatchesFrozenG2Policy(outcome.Score, policy.EvaluationPolicy.G2VolumePolicy, policy.EvaluationPolicy.WorkCoveragePolicy) {
-					panic(errors.New("score g2 volume policy does not match the immutable round"))
-				}
-			}
-			if !imageDigestPattern.MatchString(apiImageDigest) || !imageDigestPattern.MatchString(workerImageDigest) {
-				panic(errors.New("competition job runtime image identity is invalid"))
-			}
-			manifestJson := []byte(outcome.ArtifactManifest)
-			manifestHash := any(nil)
-			manifestSha256 := ""
-			if len(manifestJson) != 0 {
-				if !json.Valid(manifestJson) {
-					panic(errors.New("artifact manifest is invalid JSON"))
-				}
-				h := sha256.Sum256(manifestJson)
-				manifestSha256 = hex.EncodeToString(h[:])
-				manifestHash = manifestSha256
-			}
-			// Every new scored result freezes its shared control atomically.
-			// Absence of that append-only row identifies legacy ranking policy.
-			if outcome.Score != nil && outcome.Error == nil &&
-				(len(outcome.RoundBaselineJson) == 0 || outcome.RoundBaselineSha256 == "") {
-				panic(errors.New("scored competition outcome requires its round baseline"))
-			}
-			if len(outcome.RoundBaselineJson) != 0 || outcome.RoundBaselineSha256 != "" {
-				if len(outcome.RoundBaselineJson) == 0 || !sha256Pattern.MatchString(outcome.RoundBaselineSha256) ||
-					manifestSha256 == "" {
-					panic(errors.New("round baseline outcome identity is incomplete"))
-				}
-				round := &roundRecord{
-					RoundResult: RoundResult{
-						RoundId: roundId, Epoch: roundEpoch, Staging: staging, ProvidersSha256: providersSha256,
-					},
-					PolicyJson: policyJson,
-				}
-				roundSettings, roundSettingsErr := settingsForFrozenRound(settings, round)
-				server.Raise(roundSettingsErr)
-				baselineSha256, baselineErr := validateRoundBaselineJson(roundSettings, round, outcome.RoundBaselineJson)
-				server.Raise(baselineErr)
-				if baselineSha256 != outcome.RoundBaselineSha256 {
-					panic(errors.New("round baseline outcome digest does not match its bytes"))
-				}
-				readBaseline := func() (*roundBaselineRecord, error) {
-					return scanRoundBaseline(tx.QueryRow(ctx, `
-						SELECT round_id, baseline_json, baseline_sha256, source_job_id,
-						       source_attempt, source_artifact_manifest_sha256, base_sha,
-						       providers_sha256, evaluator_image_digest, scorer_version,
-						       hardware_id, host_qualification_sha256, created_at
-						FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
-					`, roundId))
-				}
-				storedBaseline, storedErr := readBaseline()
-				if errors.Is(storedErr, pgx.ErrNoRows) {
-					// A prepared control is authenticated below, not republished by
-					// each candidate. Before-insert guards also run on conflict no-ops.
-					insertResult, insertErr := tx.Exec(ctx, `
-					INSERT INTO competition_round_baseline (
-						round_id, baseline_json, baseline_sha256, source_job_id,
-						source_attempt, source_artifact_manifest_sha256, base_sha,
-						providers_sha256, evaluator_image_digest, scorer_version,
-						hardware_id, host_qualification_sha256, created_at
-					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-					ON CONFLICT (round_id) DO NOTHING
-				`, roundId, outcome.RoundBaselineJson, baselineSha256, jobId, attempts,
-						manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
-						roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
-						settings.EvaluationPolicy.HostQualificationSha256, now)
-					server.Raise(insertErr)
-					if insertResult.RowsAffected() == 1 {
-						appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
-							"round_id": roundId.String(), "baseline_sha256": baselineSha256,
-							"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
-						})
-					}
-					storedBaseline, storedErr = readBaseline()
-				}
-				server.Raise(storedErr)
-				server.Raise(validateRoundBaselineRecord(roundSettings, round, storedBaseline))
-				if storedBaseline.Sha256 != baselineSha256 ||
-					!bytes.Equal(storedBaseline.Json, outcome.RoundBaselineJson) {
-					panic(errors.New("evaluator outcome conflicts with the immutable round baseline"))
-				}
-			}
-			if self.afterCompletionBaselineForTest != nil {
-				self.afterCompletionBaselineForTest()
-			}
-			// Baseline insertion/conflict and shared reads can wait after the first
-			// check. Revalidate before publishing any terminal or retry transition.
-			now = requireAuthority()
-			if competitionDistributedEnabled(settings) && !now.Before(*executionDeadline) {
-				outcome.Score = nil
-				outcome.Error = terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
-			}
-			executionStartedAt := startedAt
-			if evaluationCycle > 0 {
-				executionStartedAt = *cycleStartedAt
-			}
-			cycleAttempts := attempts - attemptOffset
-			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, executionStartedAt, now, cycleAttempts)
-			retryableInfrastructure := outcome.Error != nil &&
-				outcome.Error.Kind == "infrastructure" && outcome.Error.Retriable
-			if retryableInfrastructure && cycleAttempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
-				outcome.Score = nil
-				outcome.Error = terminalInfrastructureError(
-					"evaluation_time_budget_exhausted",
-					"submission exhausted its total evaluation time budget",
-				)
-			}
-			if retryableInfrastructure && retryBudgetAvailable {
-				retry = true
-				updated, updateError := tx.Exec(ctx, `
-					UPDATE competition_job SET state = 'queued', available_at = $2,
-						lease_owner = NULL, lease_expires_at = NULL
-					WHERE job_id = $1
-				`, jobId, retryAt)
-				server.Raise(updateError)
-				if updated.RowsAffected() != 1 {
-					panic(ErrLeaseLost)
-				}
-				errorCode := "unknown_infrastructure_error"
-				if outcome.Error != nil {
-					errorCode = outcome.Error.Code
-				}
-				appendEvent(ctx, tx, jobId, now, "infrastructure_retry", workerId, competitionArtifactArchiveEventData(outcome, map[string]any{
-					"attempt": attempts, "error_code": errorCode,
-					"artifact_manifest_sha256": manifestHash,
-					"api_image_digest":         apiImageDigest, "worker_image_digest": workerImageDigest,
-				}))
-			} else {
-				if outcome.Error != nil && outcome.Error.Retriable {
-					terminalError := *outcome.Error
-					terminalError.Retriable = false
-					outcome.Error = &terminalError
-				}
-				scoreJson, errorJson := nullableJson(outcome.Score), nullableJson(outcome.Error)
-				terminal := "failed"
-				if outcome.Score != nil && outcome.Error == nil {
-					terminal = "succeeded"
-				}
-				updated, updateError := tx.Exec(ctx, `
-					UPDATE competition_job SET state = $2, completed_at = $3,
-						lease_owner = NULL, lease_expires_at = NULL,
-						score_json = $4::jsonb, eval_error_json = $5::jsonb,
-						artifact_manifest_json = $6::jsonb,
-						artifact_manifest_sha256 = $7
-					WHERE job_id = $1
-				`, jobId, terminal, now, scoreJson, errorJson, nullableBytes(manifestJson), manifestHash)
-				server.Raise(updateError)
-				if updated.RowsAffected() != 1 {
-					panic(ErrLeaseLost)
-				}
-				appendEvent(ctx, tx, jobId, now, terminal, workerId, competitionArtifactArchiveEventData(outcome, map[string]any{
-					"attempt": attempts, "api_image_digest": apiImageDigest,
-					"worker_image_digest": workerImageDigest,
-				}))
-			}
-			updated, updateError := tx.Exec(ctx, `
-				UPDATE `+slotTable+` SET worker_id = NULL, job_id = NULL,
-					lease_expires_at = NULL, heartbeat_at = $1
-				WHERE slot_id = $4 AND worker_id = $2 AND job_id = $3
-			`, now, workerId, jobId, slotId)
-			server.Raise(updateError)
-			if updated.RowsAffected() != 1 {
-				panic(ErrLeaseLost)
-			}
+			retry = self.completeCompetitionJobInTx(ctx, tx, settings, workerId, jobId, &outcome)
 		})
 	})
 	if err != nil {
@@ -6830,6 +6581,262 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 		}
 	}
 	return retry, err
+}
+
+// The caller owns the transaction. Expired control reconciliation uses the same
+// authority and outcome rules without committing an intermediate custody lease.
+// Outcome reductions remain caller-owned across transaction callback retries.
+func (self PostgresStore) completeCompetitionJobInTx(ctx context.Context, tx server.PgTx, settings *Settings, workerId string, jobId server.Id, outcome *EvaluationOutcome) (retry bool) {
+	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
+	if settings.AutomationPolicy.Enabled {
+		automationScopeLockInTx(ctx, tx, settings)
+	}
+	var slotWorker *string
+	var slotJob *server.Id
+	var slotLease, jobLease *time.Time
+	if self.beforeLeaseRowLockForTest != nil {
+		self.beforeLeaseRowLockForTest("completion_slot")
+	}
+	loadError := tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at
+			 FROM `+slotTable+` WHERE slot_id=$1 FOR UPDATE`, slotId).Scan(&slotWorker, &slotJob, &slotLease)
+	if errors.Is(loadError, pgx.ErrNoRows) {
+		panic(ErrLeaseLost)
+	}
+	server.Raise(loadError)
+	var state, owner string
+	var attempts, evaluationCycle, attemptOffset int
+	var cycleStartedAt *time.Time
+	var apiImageDigest, workerImageDigest string
+	var roundId server.Id
+	var roundEpoch int
+	var staging bool
+	var providersSha256 string
+	var policyJson []byte
+	var startedAt time.Time
+	var executionDeadline *time.Time
+	if self.beforeLeaseRowLockForTest != nil {
+		self.beforeLeaseRowLockForTest("completion_job")
+	}
+	loadError = tx.QueryRow(ctx, `
+				SELECT state, COALESCE(lease_owner, ''), attempt_count,
+				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,evaluation_cycle,cycle_attempt_offset,cycle_started_at,
+				       job.round_id, round.epoch_number, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at,job.execution_deadline_at
+				FROM competition_job AS job
+				JOIN competition_round AS round ON round.round_id = job.round_id
+				WHERE job.job_id = $1 FOR UPDATE OF job
+			`, jobId).Scan(
+		&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt, &evaluationCycle, &attemptOffset, &cycleStartedAt,
+		&roundId, &roundEpoch, &staging, &providersSha256, &policyJson, &jobLease, &executionDeadline,
+	)
+	if errors.Is(loadError, pgx.ErrNoRows) {
+		panic(ErrLeaseLost)
+	}
+	server.Raise(loadError)
+	requireAuthority := func() time.Time {
+		server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
+		server.Raise(requireCompetitionExecutorAuthorityInTx(ctx, tx, settings, jobId))
+		if settings.AutomationPolicy.Enabled {
+			if settings.automationLease != nil {
+				server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
+			}
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
+		}
+		now := self.nowUtc()
+		if state != "running" || owner != workerId || slotWorker == nil || *slotWorker != workerId ||
+			slotJob == nil || *slotJob != jobId || slotLease == nil || jobLease == nil ||
+			!now.Before(*slotLease) || !now.Before(*jobLease) || settings.automationLease != nil && roundId != settings.automationRoundId {
+			panic(ErrLeaseLost)
+		}
+		if evaluationCycle > 0 && (cycleStartedAt == nil || attempts <= attemptOffset) {
+			panic(ErrLeaseLost)
+		}
+		return now
+	}
+	now := requireAuthority()
+	if competitionDistributedEnabled(settings) {
+		if executionDeadline == nil {
+			panic(ErrLeaseLost)
+		}
+		if !now.Before(*executionDeadline) {
+			outcome.Score = nil
+			outcome.Error = terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
+		}
+		if !outcome.distributedArchiveVerified && (outcome.Score != nil || outcome.Error == nil || outcome.Error.Code != "evaluation_time_budget_exhausted" || now.Before(*executionDeadline)) {
+			panic(errors.New("distributed outcome requires authenticated coordinator-retained artifacts"))
+		}
+		if outcome.distributedArchiveVerified {
+			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_executor_artifacts_verified = 'on'`))
+		}
+	}
+	if outcome.Score != nil && outcome.Error == nil {
+		policy, policyErr := decodeRoundPolicySnapshot(policyJson)
+		server.Raise(policyErr)
+		if !scoreMatchesFrozenG2Policy(outcome.Score, policy.EvaluationPolicy.G2VolumePolicy, policy.EvaluationPolicy.WorkCoveragePolicy) {
+			panic(errors.New("score g2 volume policy does not match the immutable round"))
+		}
+	}
+	if !imageDigestPattern.MatchString(apiImageDigest) || !imageDigestPattern.MatchString(workerImageDigest) {
+		panic(errors.New("competition job runtime image identity is invalid"))
+	}
+	manifestJson := []byte(outcome.ArtifactManifest)
+	manifestHash := any(nil)
+	manifestSha256 := ""
+	if len(manifestJson) != 0 {
+		if !json.Valid(manifestJson) {
+			panic(errors.New("artifact manifest is invalid JSON"))
+		}
+		h := sha256.Sum256(manifestJson)
+		manifestSha256 = hex.EncodeToString(h[:])
+		manifestHash = manifestSha256
+	}
+	// Every new scored result freezes its shared control atomically.
+	// Absence of that append-only row identifies legacy ranking policy.
+	if outcome.Score != nil && outcome.Error == nil &&
+		(len(outcome.RoundBaselineJson) == 0 || outcome.RoundBaselineSha256 == "") {
+		panic(errors.New("scored competition outcome requires its round baseline"))
+	}
+	if len(outcome.RoundBaselineJson) != 0 || outcome.RoundBaselineSha256 != "" {
+		if len(outcome.RoundBaselineJson) == 0 || !sha256Pattern.MatchString(outcome.RoundBaselineSha256) ||
+			manifestSha256 == "" {
+			panic(errors.New("round baseline outcome identity is incomplete"))
+		}
+		round := &roundRecord{
+			RoundResult: RoundResult{
+				RoundId: roundId, Epoch: roundEpoch, Staging: staging, ProvidersSha256: providersSha256,
+			},
+			PolicyJson: policyJson,
+		}
+		roundSettings, roundSettingsErr := settingsForFrozenRound(settings, round)
+		server.Raise(roundSettingsErr)
+		baselineSha256, baselineErr := validateRoundBaselineJson(roundSettings, round, outcome.RoundBaselineJson)
+		server.Raise(baselineErr)
+		if baselineSha256 != outcome.RoundBaselineSha256 {
+			panic(errors.New("round baseline outcome digest does not match its bytes"))
+		}
+		readBaseline := func() (*roundBaselineRecord, error) {
+			return scanRoundBaseline(tx.QueryRow(ctx, `
+						SELECT round_id, baseline_json, baseline_sha256, source_job_id,
+						       source_attempt, source_artifact_manifest_sha256, base_sha,
+						       providers_sha256, evaluator_image_digest, scorer_version,
+						       hardware_id, host_qualification_sha256, created_at
+						FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
+					`, roundId))
+		}
+		storedBaseline, storedErr := readBaseline()
+		if errors.Is(storedErr, pgx.ErrNoRows) {
+			// A prepared control is authenticated below, not republished by
+			// each candidate. Before-insert guards also run on conflict no-ops.
+			insertResult, insertErr := tx.Exec(ctx, `
+					INSERT INTO competition_round_baseline (
+						round_id, baseline_json, baseline_sha256, source_job_id,
+						source_attempt, source_artifact_manifest_sha256, base_sha,
+						providers_sha256, evaluator_image_digest, scorer_version,
+						hardware_id, host_qualification_sha256, created_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+					ON CONFLICT (round_id) DO NOTHING
+				`, roundId, outcome.RoundBaselineJson, baselineSha256, jobId, attempts,
+				manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
+				roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
+				settings.EvaluationPolicy.HostQualificationSha256, now)
+			server.Raise(insertErr)
+			if insertResult.RowsAffected() == 1 {
+				appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
+					"round_id": roundId.String(), "baseline_sha256": baselineSha256,
+					"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
+				})
+			}
+			storedBaseline, storedErr = readBaseline()
+		}
+		server.Raise(storedErr)
+		server.Raise(validateRoundBaselineRecord(roundSettings, round, storedBaseline))
+		if storedBaseline.Sha256 != baselineSha256 ||
+			!bytes.Equal(storedBaseline.Json, outcome.RoundBaselineJson) {
+			panic(errors.New("evaluator outcome conflicts with the immutable round baseline"))
+		}
+	}
+	if self.afterCompletionBaselineForTest != nil {
+		self.afterCompletionBaselineForTest()
+	}
+	// Baseline insertion/conflict and shared reads can wait after the first
+	// check. Revalidate before publishing any terminal or retry transition.
+	now = requireAuthority()
+	if competitionDistributedEnabled(settings) && !now.Before(*executionDeadline) {
+		outcome.Score = nil
+		outcome.Error = terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
+	}
+	executionStartedAt := startedAt
+	if evaluationCycle > 0 {
+		executionStartedAt = *cycleStartedAt
+	}
+	cycleAttempts := attempts - attemptOffset
+	retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, executionStartedAt, now, cycleAttempts)
+	retryableInfrastructure := outcome.Error != nil &&
+		outcome.Error.Kind == "infrastructure" && outcome.Error.Retriable
+	if retryableInfrastructure && cycleAttempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
+		outcome.Score = nil
+		outcome.Error = terminalInfrastructureError(
+			"evaluation_time_budget_exhausted",
+			"submission exhausted its total evaluation time budget",
+		)
+	}
+	if retryableInfrastructure && retryBudgetAvailable {
+		retry = true
+		updated, updateError := tx.Exec(ctx, `
+					UPDATE competition_job SET state = 'queued', available_at = $2,
+						lease_owner = NULL, lease_expires_at = NULL
+					WHERE job_id = $1
+				`, jobId, retryAt)
+		server.Raise(updateError)
+		if updated.RowsAffected() != 1 {
+			panic(ErrLeaseLost)
+		}
+		errorCode := "unknown_infrastructure_error"
+		if outcome.Error != nil {
+			errorCode = outcome.Error.Code
+		}
+		appendEvent(ctx, tx, jobId, now, "infrastructure_retry", workerId, competitionArtifactArchiveEventData(*outcome, map[string]any{
+			"attempt": attempts, "error_code": errorCode,
+			"artifact_manifest_sha256": manifestHash,
+			"api_image_digest":         apiImageDigest, "worker_image_digest": workerImageDigest,
+		}))
+	} else {
+		if outcome.Error != nil && outcome.Error.Retriable {
+			terminalError := *outcome.Error
+			terminalError.Retriable = false
+			outcome.Error = &terminalError
+		}
+		scoreJson, errorJson := nullableJson(outcome.Score), nullableJson(outcome.Error)
+		terminal := "failed"
+		if outcome.Score != nil && outcome.Error == nil {
+			terminal = "succeeded"
+		}
+		updated, updateError := tx.Exec(ctx, `
+					UPDATE competition_job SET state = $2, completed_at = $3,
+						lease_owner = NULL, lease_expires_at = NULL,
+						score_json = $4::jsonb, eval_error_json = $5::jsonb,
+						artifact_manifest_json = $6::jsonb,
+						artifact_manifest_sha256 = $7
+					WHERE job_id = $1
+				`, jobId, terminal, now, scoreJson, errorJson, nullableBytes(manifestJson), manifestHash)
+		server.Raise(updateError)
+		if updated.RowsAffected() != 1 {
+			panic(ErrLeaseLost)
+		}
+		appendEvent(ctx, tx, jobId, now, terminal, workerId, competitionArtifactArchiveEventData(*outcome, map[string]any{
+			"attempt": attempts, "api_image_digest": apiImageDigest,
+			"worker_image_digest": workerImageDigest,
+		}))
+	}
+	updated, updateError := tx.Exec(ctx, `
+				UPDATE `+slotTable+` SET worker_id = NULL, job_id = NULL,
+					lease_expires_at = NULL, heartbeat_at = $1
+				WHERE slot_id = $4 AND worker_id = $2 AND job_id = $3
+			`, now, workerId, jobId, slotId)
+	server.Raise(updateError)
+	if updated.RowsAffected() != 1 {
+		panic(ErrLeaseLost)
+	}
+	return retry
 }
 
 func (self PostgresStore) HandBack(ctx context.Context, workerId string, jobId server.Id, reason string) error {

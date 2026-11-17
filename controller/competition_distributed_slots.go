@@ -77,6 +77,13 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 		return nil, ErrLeaseLost
 	}
 	witness := settings.executorExistingWitness
+	expiredWitness := settings.executorExpiredControlWitness
+	if witness != nil && expiredWitness != nil {
+		return nil, ErrLeaseLost
+	}
+	if expiredWitness != nil && !expiredWitness.consume(settings) {
+		return nil, ErrLeaseLost
+	}
 	if witness != nil && (witness.evaluator == nil || witness.slotFence <= 0 || witness.slotId != settings.executorSlotId || witness.identity.HostId != settings.executorHostId ||
 		!sameCompetitionAgentIdentity(&witness.manifest.Identity, &witness.identity) || !witness.consumed.CompareAndSwap(false, true)) {
 		return nil, ErrLeaseLost
@@ -87,7 +94,10 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			job, stateErr = nil, nil
 			automationScopeLockInTx(ctx, tx, settings)
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
-			if witness == nil {
+			if expiredWitness != nil {
+				server.Raise(expiredWitness.requireHeldInTx(ctx, tx, settings))
+			}
+			if witness == nil && expiredWitness == nil {
 				if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"); holdErr != nil {
 					if holdErr == ErrAutomationHeld {
 						stateErr = ErrAutomationHeld
@@ -135,11 +145,14 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			if hostId != settings.executorHostId {
 				panic(ErrConflict)
 			}
+			if expiredWitness != nil && !expiredWitness.slotMatches(hostId, slotJob, slotWorker, slotLease, slotFence) {
+				panic(ErrLeaseLost)
+			}
 			if witness != nil && (slotJob == nil || slotJob.String() != witness.identity.JobId || slotWorker == nil || *slotWorker != witness.leaseOwner ||
 				slotLease == nil || !slotLease.Equal(witness.leaseExpiresAt) || slotFence != witness.slotFence) {
 				panic(ErrLeaseLost)
 			}
-			if (settings.executorReconcileExpiredOnly || settings.executorReconcileOnly) && slotJob == nil {
+			if (settings.executorReconcileExpiredOnly || settings.executorReconcileOnly || expiredWitness != nil) && slotJob == nil {
 				return
 			}
 			if settings.executorFreshOnly && slotJob != nil {
@@ -155,7 +168,14 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 				self.beforeLeaseRowLockForTest("distributed_job")
 			}
 			if reconcile {
-				job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id=$1 FOR UPDATE OF j`, *slotJob), true, now)
+				if expiredWitness != nil {
+					query, err := competitionExpiredControlJobSelect(expiredWitness.record.Identity.Cycle)
+					server.Raise(err)
+					job, scanErr = scanCompetitionExpiredControlJob(tx.QueryRow(ctx, query+` WHERE j.job_id=$1 AND j.evaluation_cycle=$2 FOR UPDATE OF j`,
+						*slotJob, expiredWitness.record.Identity.Cycle), expiredWitness.record.Identity.Cycle, now)
+				} else {
+					job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id=$1 FOR UPDATE OF j`, *slotJob), true, now)
+				}
 			} else {
 				// The scope lock serializes these short claims across hosts. Do not
 				// skip a locked oldest row and invert the admission's true FIFO.
@@ -202,7 +222,7 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 				job = nil
 				return
 			}
-			if witness == nil {
+			if witness == nil && expiredWitness == nil {
 				// This gate authorizes a fresh candidate clock, and includes the
 				// claim-only hold. Existing native custody already has that clock.
 				allowed, gateErr := competitionIntakeFirstCandidateClaimInTx(ctx, tx, settings, job.RoundId)
@@ -223,6 +243,12 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			// claim's clock starts only after those waits and a fresh parent fence.
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
 			now = self.nowUtc().Truncate(time.Microsecond)
+			if expiredWitness != nil {
+				server.Raise(expiredWitness.requireHeldInTx(ctx, tx, settings))
+				if !expiredWitness.matches(settings, job, now) {
+					panic(ErrLeaseLost)
+				}
+			}
 			if job.EvaluationCycle > 0 && job.Reevaluation != nil && (job.Reevaluation.Schema == 2 || job.Reevaluation.Schema == 3) {
 				var clockErr error
 				now, clockErr = competitionDistributedRecoveryDatabaseTime(ctx, tx)
@@ -250,6 +276,9 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 				panic(ErrLeaseLost)
 			}
 			if witness != nil && (!reconcile || !witness.matches(settings, job, now)) {
+				panic(ErrLeaseLost)
+			}
+			if expiredWitness != nil && (!reconcile || !expiredWitness.matches(settings, job, now)) {
 				panic(ErrLeaseLost)
 			}
 			fence := slotFence + 1
@@ -305,6 +334,13 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 				eventPayload["existing_observation_started_at"] = witness.observedAt
 				eventPayload["existing_observation_expires_at"] = witness.expiresAt
 			}
+			if expiredWitness != nil {
+				proof := expiredWitness.eventPayload(fence, workerId, leaseUntil)
+				if proof == nil {
+					panic(ErrLeaseLost)
+				}
+				eventPayload["expired_control_bridge"] = proof
+			}
 			appendEvent(ctx, tx, job.JobId, now, eventType, workerId, eventPayload)
 			job.State, job.LeaseOwner, job.LeaseExpiresAt = "running", workerId, &leaseUntil
 			job.AttemptCount += increment
@@ -315,6 +351,17 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			}
 			if job.EvaluationCycle > 0 && job.CycleStartedAt == nil {
 				job.CycleStartedAt, job.Reevaluation.StartedAt = &now, &now
+			}
+			if expiredWitness != nil {
+				// Reconcile and expire atomically. A missing commit acknowledgement
+				// cannot leave a new database lease behind the old native fence.
+				server.Raise(expiredWitness.requireHeldInTx(ctx, tx, settings))
+				outcome := EvaluationOutcome{Error: terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")}
+				if self.completeCompetitionJobInTx(withCompetitionJobAuthority(ctx, job), tx, settings, workerId, job.JobId, &outcome) {
+					panic(ErrLeaseLost)
+				}
+				server.Raise(expiredWitness.requireHeldInTx(ctx, tx, settings))
+				job.State, job.LeaseOwner, job.LeaseExpiresAt = "failed", "", nil
 			}
 		})
 	})

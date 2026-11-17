@@ -137,7 +137,8 @@ type competitionExecutorConnection struct {
 	SshIdentityFile         string `json:"ssh_identity_file,omitempty"`
 	SshKnownHostsFile       string `json:"ssh_known_hosts_file,omitempty"`
 
-	ExistingControl *competitionExistingControlConnection `json:"existing_control,omitempty"`
+	ExistingControl      *competitionExistingControlConnection      `json:"existing_control,omitempty"`
+	ExpiredControlBridge *competitionExpiredControlBridgeConnection `json:"expired_control_bridge,omitempty"`
 }
 
 // A separately provisioned forced role cannot be selected by fresh work. Its
@@ -269,6 +270,9 @@ func ConfigureCompetitionDistributedCoordinator(settings *Settings, path, expect
 			return err
 		}
 		if err := validateCompetitionExistingControlConnection(connection, *host, config.Settings); err != nil {
+			return err
+		}
+		if err := validateCompetitionExpiredControlBridgeConnection(connection, *host, config.Settings); err != nil {
 			return err
 		}
 		if host.Transport == "ssh" {

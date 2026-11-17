@@ -158,6 +158,26 @@ func runCompetitionExecutorWorker(ctx context.Context, worker *Worker, evaluator
 		// A grading pause is an idle worker state, not a reason to skip the
 		// preflight and heartbeat owner on a held coordinator restart.
 		if (err == nil || errors.Is(err, ErrAutomationHeld)) && !integrityRejected {
+			bridged, bridgeErr := worker.reconcileExpiredControl(ctx, evaluator)
+			if bridged {
+				if bridgeErr == nil {
+					continue
+				}
+				err = bridgeErr
+			} else if bridgeErr != nil {
+				err = bridgeErr
+			}
+			if bridged || bridgeErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(worker.settings.distributedCoordinator.Config.Settings.PollInterval):
+				}
+				continue
+			}
 			occupied, attachErr := worker.attachExisting(ctx, evaluator)
 			if occupied {
 				if attachErr == nil {
