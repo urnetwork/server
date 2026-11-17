@@ -8401,14 +8401,20 @@ and at least 2 weeks after it.
 ### 2.4i Contract partition retention — expired weeks that were not dropped
 Probe: `contract-partition-retention-blocked`
 
-Why: once the contract tables are partitioned, size is bounded only by the
-retention horizon R = 13 weeks (`ContractRetention`, owner decision
-2026-10-23). `maintain_contract_partitions` drops a week's six partitions
-together once the week ended more than R ago and every contract in it is
-resolved, every escrow settled and no sweep belongs to a pending payment; it
-archives the week's usage proof first. A blocked week stays, and the task
-reports its reason. (A legacy settlement intent no longer blocks a week: the
-queue retired on 2026-10-24, §2.5b.)
+Why: once the contract tables are partitioned, size is bounded only by
+retention. Since S1 (server/CONTRACT-PARTITION.md, 2026-11-17)
+`maintain_contract_partitions` retires a week a day after its upper bound
+passes the contract horizon reaper's horizon: 35 days while the reaper's mode
+is on, otherwise R = 13 weeks (`ContractRetention`). It deletes no row: the
+reaper alone deletes contracts, by its keep rules, archiving their usage. Once
+the reaper has emptied a week, the task rewrites each leaf down to
+the rows the reaper keeps (CLUSTER, MVCC-safe) and drops the six partitions
+together once they hold no row at all. A week that waits stays, and the task
+reports why: rows the reaper keeps, a week the reaper has not emptied, a
+vacuum or long transaction holding a leaf, or more live rows than a compaction
+moves. The check below still judges at R plus 2 weeks, so it names weeks held
+far past S1's 36 days: kept rows nothing releases (the legacy partition's
+contracts under attribution review), the reaper off, or the task stopped.
 
 Check, on the §2.4h catalog read: a partition, legacy or weekly, whose upper
 bound plus R plus 2 weeks is in the past and that still exists. The legacy
@@ -8433,12 +8439,13 @@ current-week layout with the horizon shortened.
 The contract tables' registry declaration names this probe, so §2.4q leaves
 the contract family alone.
 
-ACTION: read the task's reason for the oldest blocked week (`[cp]` log lines,
-its run report) and resolve the blocker at its owner: close or settle the
-contracts, or complete or cancel the pending payment. Check that the task
-runs. Never drop or detach a contract
-partition by hand: a drop bypasses the usage archive capture and the
-preconditions. VERIFY: the next runs drop the week and a complete observation
+ACTION: read the task's reason for the oldest week (`[cp]` log lines, its run
+report). If the reaper keeps its rows, resolve the reason at its owner (the
+reaper's protected reasons, `urnetwork_contract_horizon_pass_skipped_contracts`).
+If the reaper has not emptied it, check its mode, horizon and lag (§2.4r).
+Check that the task runs. Never drop, detach or rewrite a contract partition
+by hand: a drop bypasses the usage archive capture and would delete rows the
+reaper keeps. VERIFY: the next runs drop the week and a complete observation
 shows no partition past the horizon plus grace.
 
 ### 2.4j Contract partition cutover pending — the legacy bound refuses its week
