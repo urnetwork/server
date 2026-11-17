@@ -11732,4 +11732,94 @@ var migrations = []any{
 	// owner-run prepare of the partition cutover dropped it, and the drop
 	// under a five-second lock bound elsewhere. Merge only after that prepare.
 	auditDeviceEventUniqueRecordMigration,
+
+	// The lag.dev drift test (lag.dev/DRIFTTEST.md E1, P2-P6, K3, R1, V4;
+	// model/lag_drift_model.go). Each run is a lag_track of kind drift, with
+	// its drift test and run number (E1); every other track is kind lag. The
+	// three columns are added under a five-second lock bound with a constant
+	// default or none, so lag_track is not rewritten, and the running release,
+	// which names its columns, inserts lag tracks as before.
+	//
+	// lag_drift_test is one token: its SHA-256, never the token (K5); the
+	// peppered hash of the visitor's /29 (/56) and its family, the hash only
+	// while a run can still start (K3: deleted when the token closes or
+	// expires); the origins it narrows the network's list to (P3); and the
+	// verdict over its window, replaced after each completed run (P4, V7).
+	// lag_drift_run is one run: its track, its state (P6), the browser's stop
+	// and the one the reports support (V10), whether it started from the
+	// token's address, and the extenders it was ticketed with and where they
+	// were placed (E2), so a verdict can be reproduced. lag_drift_network is
+	// a network's allowed parent origins (P3, `bringyourctl network
+	// drift-test`). No table holds an address, a prefix or a hash of one
+	// beyond the token's own client_ip_hash. Tests and runs are kept 7 days,
+	// like lag results (decision 11, R1). New tables only, created when
+	// absent: nothing existing is read or locked but lag_track's catalog
+	// entry.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE lag_track
+			ADD COLUMN IF NOT EXISTS kind varchar(8) NOT NULL DEFAULT 'lag',
+			ADD COLUMN IF NOT EXISTS drift_test_id uuid NULL,
+			ADD COLUMN IF NOT EXISTS drift_run smallint NULL;
+
+		CREATE TABLE IF NOT EXISTS lag_drift_test (
+			drift_test_id uuid NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			token_hash bytea NOT NULL,
+			client_ip_hash bytea NULL,
+			client_ip_family smallint NOT NULL,
+			parent_origins varchar(256)[] NULL,
+			confidence double precision NOT NULL,
+			reference varchar(128) NULL,
+			created_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL,
+			first_started_at timestamp NULL,
+			retest_until timestamp NULL,
+			run_count smallint NOT NULL DEFAULT 0,
+			updated_at timestamp NOT NULL,
+			failed_at timestamp NULL,
+			result_json jsonb NULL,
+			result_at timestamp NULL,
+			CONSTRAINT lag_drift_test_token_hash UNIQUE (token_hash)
+		);
+		CREATE INDEX IF NOT EXISTS lag_drift_test_network_id_created_at
+		ON lag_drift_test (network_id, created_at);
+		CREATE INDEX IF NOT EXISTS lag_drift_test_created_at
+		ON lag_drift_test (created_at, drift_test_id);
+		CREATE INDEX IF NOT EXISTS lag_drift_test_client_ip_hash_created_at
+		ON lag_drift_test (created_at)
+		WHERE client_ip_hash IS NOT NULL;
+
+		CREATE TABLE IF NOT EXISTS lag_drift_run (
+			drift_test_id uuid NOT NULL,
+			run smallint NOT NULL,
+			track_id uuid NOT NULL,
+			state varchar(16) NOT NULL,
+			started_at timestamp NOT NULL,
+			finished_at timestamp NULL,
+			completed_at timestamp NULL,
+			stop varchar(16) NULL,
+			ip_family smallint NOT NULL,
+			client_ip_matches bool NULL,
+			ip_country_code varchar(2) NULL,
+			ip_country_name varchar(256) NULL,
+			extenders_json jsonb NOT NULL,
+			outcome varchar(32) NULL,
+			supported_stop varchar(16) NULL,
+			answered smallint NULL,
+			usable smallint NULL,
+			measured_ms int NULL,
+			PRIMARY KEY (drift_test_id, run),
+			CONSTRAINT lag_drift_run_track_id UNIQUE (track_id)
+		);
+		CREATE INDEX IF NOT EXISTS lag_drift_run_open_started_at
+		ON lag_drift_run (started_at)
+		WHERE state <> 'complete';
+
+		CREATE TABLE IF NOT EXISTS lag_drift_network (
+			network_id uuid NOT NULL PRIMARY KEY,
+			parent_origins varchar(256)[] NOT NULL,
+			update_time timestamp NOT NULL
+		);
+	`),
 }

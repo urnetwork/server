@@ -44,6 +44,9 @@ import (
 //	report_max_age: 24h          # from a ticket's issue to its report's arrival
 //	ticket_retention: 48h        # past report_max_age, so a late report still finds its ticket
 //	result_retention: 168h       # 7 days: results, and the tracks with their client fields
+//	# the drift test (lag.dev/DRIFTTEST.md P7): LagDriftSettings
+//	drift:
+//	  report_wait_ms: 20000
 //
 // A value that is not positive keeps its default, so a typo can turn a limit
 // down but never off.
@@ -80,6 +83,9 @@ type LagSettings struct {
 	ReportMaxAge    time.Duration `yaml:"report_max_age"`
 	TicketRetention time.Duration `yaml:"ticket_retention"`
 	ResultRetention time.Duration `yaml:"result_retention"`
+
+	// the drift test (lag.dev/DRIFTTEST.md P7, lag_drift_config.go)
+	Drift LagDriftSettings `yaml:"drift"`
 }
 
 // The plan's values (lag.dev/PLAN.md A1, A4-A7).
@@ -118,6 +124,8 @@ func DefaultLagSettings() *LagSettings {
 		ReportMaxAge:      24 * time.Hour,
 		TicketRetention:   48 * time.Hour,
 		ResultRetention:   7 * 24 * time.Hour,
+
+		Drift: *DefaultLagDriftSettings(),
 	}
 }
 
@@ -165,6 +173,7 @@ func (self *LagSettings) withDefaults() *LagSettings {
 	positiveDuration(&self.ReportMaxAge, d.ReportMaxAge)
 	positiveDuration(&self.TicketRetention, d.TicketRetention)
 	positiveDuration(&self.ResultRetention, d.ResultRetention)
+	self.Drift.withDefaults()
 	return self
 }
 
