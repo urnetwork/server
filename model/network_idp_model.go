@@ -23,7 +23,9 @@ package model
 //	           IdP-verified email
 //	reauth     each IdP sign-in moves the member's reauth_deadline 7 days on,
 //	           which bounds access after the IdP disables the user where no
-//	           SCIM runs
+//	           SCIM runs; the membership's projection in the network's
+//	           revocation record, which holds the deadline, is dropped first
+//	           (session.DropMemberRecordProjections)
 //
 // A new IdP owes Owners and Admins the network authority notice (§7.8).
 //
@@ -600,6 +602,13 @@ func ResolveNetworkSsoLoginInTx(
 		AddAdminEventInTx(ctx, tx, event)
 	}
 	login.MemberId, login.Pending = member.MemberId, member.Pending
+	// the record's projected membership holds the deadline this moves, so it
+	// is dropped first, before tx commits, and the next check reads SQL: an
+	// earlier deadline left there would refuse the member once it passed
+	// (owner decision 561). A pending member has none projected.
+	if !member.Pending {
+		server.Raise(session.DropMemberRecordProjections(ctx, idp.NetworkId, []server.Id{member.MemberId}))
+	}
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`UPDATE network_member SET reauth_deadline = $3 WHERE network_id = $1 AND member_id = $2`,

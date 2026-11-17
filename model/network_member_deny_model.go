@@ -10,7 +10,11 @@ package model
 //	         transaction, so every credential naming its member_id stops at
 //	         once: its network and admin tokens, and the reach of the API keys
 //	         and OAuth clients it created, which is their scopes ∩ a role it no
-//	         longer holds (TEAM-M6-02, TEAM-M6-03)
+//	         longer holds (TEAM-M6-02, TEAM-M6-03). The network's revocation
+//	         record tombstones the membership first, before the transaction
+//	         commits, so sockets, which reads only the record, refuses those
+//	         tokens at once too (session.RevokeMemberRecords; owner decision
+//	         561)
 //	clients  its untagged clients are deactivated through the deactivation
 //	         path, which runs §7.10's chain for each, tokens, keys, listeners,
 //	         publishes and certificates, and owes their rev/ objects; its tagged
@@ -40,6 +44,7 @@ import (
 	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // The admin event words of a member's removal.
@@ -142,6 +147,11 @@ func DenyNetworkMemberInTx(ctx context.Context, tx server.PgTx, denial *NetworkM
 		Reason:   sidecar.RevocationReasonRemoved,
 		Time:     denial.Time,
 	}); err != nil {
+		return nil, err
+	}
+	// every record of the network refuses the membership before the deletion
+	// commits; a failed write fails the denial
+	if err := session.RevokeMemberRecords(ctx, map[server.Id][]server.Id{denial.NetworkId: {denial.MemberId}}); err != nil {
 		return nil, err
 	}
 	server.RaisePgResult(tx.Exec(
