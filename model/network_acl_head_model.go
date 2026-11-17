@@ -179,6 +179,53 @@ func GetNetworkAclHeads(ctx context.Context) (heads map[server.Id]*NetworkAclHea
 	return
 }
 
+// A page of the networks with a head, every network with a config repo, in id
+// order after afterNetworkId (nil from the first), at most limit: what a reader
+// that walks every network's log pages through, as taskworker's gkm reconciler
+// does at its start (§10.6's networks row, owner decision 371). A range of the
+// primary key, so a page reads limit rows however many networks there are. A
+// read that fails answers an error, never a short page, so a caller's cursor
+// does not pass networks it did not read.
+func ListNetworkAclHeadNetworkIds(ctx context.Context, afterNetworkId *server.Id, limit int) (networkIds []server.Id, returnErr error) {
+	if !server.SidecarMg2Linked() {
+		return nil, ErrNetworkAclHeadUnavailable
+	}
+	networkIds = []server.Id{}
+	if limit <= 0 {
+		return networkIds, nil
+	}
+	after := server.Id{}
+	if afterNetworkId != nil {
+		after = *afterNetworkId
+	}
+	if r := server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT network_id
+					FROM network_acl_head
+					WHERE $1 < network_id
+					ORDER BY network_id
+					LIMIT $2
+				`,
+				after,
+				limit,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var networkId server.Id
+					server.Raise(result.Scan(&networkId))
+					networkIds = append(networkIds, networkId)
+				}
+			})
+		})
+	}); r != nil {
+		return nil, errors.New("network_acl_head's page of networks did not read")
+	}
+	return networkIds, nil
+}
+
 // Removes networkId's head in the network's deletion transaction, the one way
 // the row goes.
 func removeNetworkAclHeadInTx(ctx context.Context, tx server.PgTx, networkId server.Id) {
