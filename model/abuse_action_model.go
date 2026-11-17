@@ -102,7 +102,7 @@ func abuseActionKindRecorded(kind AbuseActionKind) bool {
 	case AbuseActionKindNoticeForward, AbuseActionKindHostKill, AbuseActionKindLabelKill,
 		AbuseActionKindCertRevoke, AbuseActionKindZoneSuspend, AbuseActionKindHostSuspend,
 		AbuseActionKindNetworkSuspend, AbuseActionKindMailHalt, AbuseActionKindMailLabelHalt,
-		AbuseActionKindLimitTighten:
+		AbuseActionKindLimitTighten, AbuseActionKindScreenAllow:
 		return true
 	}
 	return false
@@ -297,6 +297,18 @@ func RecordAbuseActionInTx(
 		}
 		if err := validateAbuseLimitTightenTarget(args.Target, args.CaseId); err != nil {
 			return nil, nil, false, err
+		}
+	}
+	if args.Kind == AbuseActionKindScreenAllow {
+		// §21.6: a reviewer's allow of one name, for the network its brand case names (ABUSE-M5-08)
+		if abuseCase.NetworkId == nil || abuseCase.Category != AbuseCategoryBrand {
+			return nil, nil, false, fmt.Errorf("%w: a screen allow on a case that is no network's brand case", ErrAbuseActionInvalid)
+		}
+		if args.ReviewerId == nil {
+			return nil, nil, false, fmt.Errorf("%w: a screen allow is a reviewer's", ErrAbuseActionInvalid)
+		}
+		if _, err := AbuseScreenAllowTarget(args.Target); err != nil || args.Target != abuseName(args.Target) {
+			return nil, nil, false, fmt.Errorf("%w: a screen allow names one lowercase label", ErrAbuseActionInvalid)
 		}
 	}
 

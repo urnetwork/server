@@ -88,8 +88,14 @@ const (
 
 func NetworkCheck(check *NetworkCheckArgs, clientSession *session.ClientSession) (*NetworkCheckResult, error) {
 
-	_, err := ValidateNetworkName(check.NetworkName)
+	validatedNetworkName, err := ValidateNetworkName(check.NetworkName)
 	if err != nil {
+		return &NetworkCheckResult{
+			Available: false,
+		}, nil
+	}
+	// a name §21.6's screen refuses is no more available than a taken one (ABUSE-M5-08), behind the dns gate
+	if ScreenNewNetworkName(validatedNetworkName) != nil {
 		return &NetworkCheckResult{
 			Available: false,
 		}, nil
@@ -275,7 +281,8 @@ func NetworkCreate(
 			return nil, err
 		}
 
-		validatedNetworkName, err := generateRandomNetworkName()
+		// a generated name the new-network screen refuses is drawn again (ABUSE-M5-08), as a label draw is
+		validatedNetworkName, err := drawScreenedNetworkName(generateRandomNetworkName, DefaultAbuseScreenSettings())
 		if err != nil {
 			result := &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
@@ -375,6 +382,18 @@ func NetworkCreate(
 			Error: &NetworkCreateResultError{
 				Message:       error.Error(),
 				refusalStatus: http.StatusBadRequest,
+			},
+		}
+		return result, nil
+	}
+
+	// §21.6's screen of a new name, behind sidecar.yml's dns gate (ABUSE-M5-08). A new network is on probation, so a
+	// review is a plain refusal and opens no case, and the refusal reads as a taken name's, naming no brand.
+	if ScreenNewNetworkName(validatedNetworkName) != nil {
+		result := &NetworkCreateResult{
+			Error: &NetworkCreateResultError{
+				Message:       networkNameNotAvailableMessage,
+				refusalStatus: http.StatusConflict,
 			},
 		}
 		return result, nil

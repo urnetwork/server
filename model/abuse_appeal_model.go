@@ -579,7 +579,7 @@ func GetNetworkAbuseStatus(
 				INNER JOIN abuse_case ON abuse_case.case_id = abuse_action.case_id
 				WHERE
 					abuse_action.network_id = $1 AND
-					abuse_action.kind <> $2 AND
+					abuse_action.kind NOT IN ($2, $7) AND
 					abuse_action.review_state NOT IN ($3, $4) AND
 					(abuse_action.until_time IS NULL OR $5 < abuse_action.until_time) AND
 					NOT abuse_case.barred
@@ -592,6 +592,8 @@ func GetNetworkAbuseStatus(
 			string(AbuseReviewStateLiftedWrong),
 			now.UTC(),
 			settings.StatusActionLimit,
+			// a reviewer's allow of a name withholds nothing, so the status lists no such action
+			string(AbuseActionKindScreenAllow),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

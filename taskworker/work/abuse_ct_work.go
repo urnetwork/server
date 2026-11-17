@@ -112,7 +112,7 @@ type abuseCtWatchDeps struct {
 	config       func() *server.AbuseConfig
 	sources      func() ([]sidecar.TlsCtSource, error)
 	labelNetwork func(ctx context.Context, root string, label string) (server.Id, bool, error)
-	screenFacts  func(ctx context.Context, networkId server.Id, now time.Time) *sidecar.ScreenFacts
+	screenFacts  func(ctx context.Context, networkId server.Id, now time.Time) *model.NetworkScreenFacts
 	accept       func(ctx context.Context, report *model.AbuseReport) (*controller.AbuseIntakeResult, error)
 }
 
@@ -194,7 +194,7 @@ func (self *abuseCtWatch) run(ctx context.Context, args *AbuseCtWatchArgs) (resu
 	}
 
 	now := self.deps.now()
-	networkIdFacts := map[server.Id]*sidecar.ScreenFacts{}
+	networkIdFacts := map[server.Id]*model.NetworkScreenFacts{}
 	reportedNames := map[string]bool{}
 	watchedKeys := map[string]bool{}
 	for _, rootName := range rootNames {
@@ -245,7 +245,7 @@ func (self *abuseCtWatch) screen(
 	root string,
 	certificates []*sidecar.TlsCtCertificate,
 	now time.Time,
-	networkIdFacts map[server.Id]*sidecar.ScreenFacts,
+	networkIdFacts map[server.Id]*model.NetworkScreenFacts,
 	reportedNames map[string]bool,
 	result *AbuseCtWatchResult,
 ) error {
@@ -290,7 +290,7 @@ func (self *abuseCtWatch) refusedName(
 	root string,
 	dnsName string,
 	now time.Time,
-	networkIdFacts map[server.Id]*sidecar.ScreenFacts,
+	networkIdFacts map[server.Id]*model.NetworkScreenFacts,
 	result *AbuseCtWatchResult,
 ) (string, error) {
 	name := strings.TrimPrefix(model.AbuseName(dnsName), "*.")
@@ -318,14 +318,14 @@ func (self *abuseCtWatch) refusedName(
 		facts = self.deps.screenFacts(ctx, networkId, now)
 		networkIdFacts[networkId] = facts
 	}
-	if sidecar.ScreenName(label, facts) != sidecar.ScreenVerdictAllow {
+	if sidecar.ScreenName(label, facts.For(label)) != sidecar.ScreenVerdictAllow {
 		return label + "." + root, nil
 	}
 	for _, hostLabel := range labels[:len(labels)-1] {
 		if hostLabel == "*" || strings.HasPrefix(hostLabel, "_") {
 			continue
 		}
-		if sidecar.ScreenHost(hostLabel, facts) != sidecar.ScreenVerdictAllow {
+		if sidecar.ScreenHost(hostLabel, facts.For(hostLabel)) != sidecar.ScreenVerdictAllow {
 			return name, nil
 		}
 	}

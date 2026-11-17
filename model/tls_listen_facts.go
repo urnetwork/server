@@ -15,7 +15,7 @@ package model
 //   - the sidecars bound to a client with a proxy_device_config row, or to that client's child: §18's hosted
 //     devices, which D-TLS-1 bars from tls/;
 //   - ScreenHost's facts: the verified domains, the Team scope labels (none known reads as none, as dns's writes
-//     read them) and the hosts a reviewer allowed, which stay empty until ABUSE-M5-08's screen_allow exists.
+//     read them) and the hosts a reviewer allowed, its screen_allow actions not lifted (ABUSE-M5-08).
 //
 // A network that does not exist is an error, never empty facts, so the hooks keep it undecided. A table the binary
 // does not link holds no row here: no certificate, no mail_network row, no binding. Nothing here is on a
@@ -122,6 +122,7 @@ func GetTlsListenFactsWithSettings(ctx context.Context, networkId server.Id, now
 	}
 	facts.Certs = certs
 	facts.VerifiedDomains = GetNetworkVerifiedDomains(ctx, networkId)
+	facts.ScreenAllowedHosts = GetNetworkScreenAllowedNames(ctx, networkId)
 	if scopeLabels, ok := dnsNetworkScopeLabels(ctx, networkId); ok {
 		facts.ScopeLabels = scopeLabels
 	}

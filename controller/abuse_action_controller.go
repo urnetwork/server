@@ -563,6 +563,8 @@ func abuseActionKindText(kind string) string {
 		return "Sending halted for one address"
 	case model.AbuseActionKindLimitTighten:
 		return "Limit tightened"
+	case model.AbuseActionKindScreenAllow:
+		return "Name allowed after review"
 	}
 	return "Action taken"
 }

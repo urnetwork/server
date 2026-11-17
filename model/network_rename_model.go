@@ -4,7 +4,10 @@ package model
 // /account/claim-name and POST /network/user/update all rename through
 // RenameNetwork, so every path applies the same rules:
 //
-//   - ValidateNetworkName, then §12.5's label rules (sidecar.ValidateDnsName);
+//   - ValidateNetworkName, then §12.5's label rules (sidecar.ValidateDnsName) until sidecar.yml's dns gate opens
+//     M5, and from then §21.6's ScreenName under the network's facts once the owner is known (ABUSE-M5-08): a verified
+//     brand passes, a deny is not available, and a name sent to review opens a case and is refused as held for
+//     review until a reviewer's screen_allow lets the retry pass (QD-235);
 //   - only the network's owner renames it (its admin_user_id; roles replace
 //     this at TEAM-M6-03);
 //   - no other network holds the name or one a single edit from it (the
@@ -73,16 +76,31 @@ func defaultNetworkLabelHolder() NetworkLabelHolder {
 	return dnsLabelHolder{}
 }
 
-// §12.5's label rules a renamed network's name meets beyond ValidateNetworkName,
-// sidecar's ValidateDnsName (DNS-M0-01): no edge hyphen, which Boulder refuses;
-// no "--" at the third and fourth characters, which keeps out xn-- and IDNA
-// homographs; not reserved; and no token confusable with a brand. Each refusal
-// reads as a sentence about the network name.
+// §12.5's label rules a renamed network's name meets beyond ValidateNetworkName
+// before M5, sidecar's ValidateDnsName (DNS-M0-01): no edge hyphen, which Boulder
+// refuses; no "--" at the third and fourth characters, which keeps out xn-- and
+// IDNA homographs; not reserved; and no token confusable with a brand. Each
+// refusal reads as a sentence about the network name. Once sidecar.yml's dns gate
+// opens M5, ScreenName holds these rules and more under the network's facts
+// (screenRenamedNetworkNameForNetwork), so this passes everything: the brand rule
+// here would refuse a brand the network verified, which §21.6 allows.
 func screenRenamedNetworkName(name string) error {
+	if networkCreateScreened() {
+		return nil
+	}
 	if err := sidecar.ValidateDnsName(name); err != nil {
 		return errors.New("Network " + err.Error())
 	}
 	return nil
+}
+
+// §21.6's ScreenName under the network's facts, once sidecar.yml's dns gate
+// opens M5 (ABUSE-M5-08): nil before it.
+func screenRenamedNetworkNameForNetwork(ctx context.Context, networkId server.Id, name string) error {
+	if !networkCreateScreened() {
+		return nil
+	}
+	return ScreenNetworkName(ctx, networkId, name)
 }
 
 // Why a rename was refused.
@@ -96,11 +114,21 @@ const (
 	RenameNetworkRefusalNotAvailable = "not_available"
 	// the day's budget is spent
 	RenameNetworkRefusalRateLimited = "rate_limited"
+	// §21.6 sent the name to review: a reviewer's allow lets a retry pass (QD-235)
+	RenameNetworkRefusalScreenReview = "screen_review"
 )
 
 const renameNetworkNotAvailableMessage = "Network name not available."
 
 const renameNetworkNotOwnerMessage = "Only the network's owner may rename it."
+
+// A name held for review, with its case, which names no brand.
+func renameNetworkScreenReviewMessage(review *AbuseScreenReviewError) string {
+	if review.CaseId == nil {
+		return "Network name held for review."
+	}
+	return "Network name held for review as case " + review.CaseId.String() + "."
+}
 
 type RenameNetworkArgs struct {
 	NewName string
@@ -138,14 +166,17 @@ type networkRenamer struct {
 	now         func() time.Time
 	labelHolder NetworkLabelHolder
 	screen      func(name string) error
+	// §21.6's screen under the network's facts, which may open a review case, so it runs once the owner is known
+	networkScreen func(ctx context.Context, networkId server.Id, name string) error
 }
 
 func newNetworkRenamer() *networkRenamer {
 	return &networkRenamer{
-		settings:    DefaultNetworkRenameSettings(),
-		now:         server.NowUtc,
-		labelHolder: defaultNetworkLabelHolder(),
-		screen:      screenRenamedNetworkName,
+		settings:      DefaultNetworkRenameSettings(),
+		now:           server.NowUtc,
+		labelHolder:   defaultNetworkLabelHolder(),
+		screen:        screenRenamedNetworkName,
+		networkScreen: screenRenamedNetworkNameForNetwork,
 	}
 }
 
@@ -193,6 +224,12 @@ func (self *networkRenamer) rename(clientSession *session.ClientSession, args *R
 			NetworkName: name,
 			Unchanged:   true,
 		}
+	}
+	if err := self.networkScreen(ctx, networkId, name); err != nil {
+		if review := AbuseScreenReviewOf(err); review != nil {
+			return refuse(RenameNetworkRefusalScreenReview, renameNetworkScreenReviewMessage(review))
+		}
+		return refuse(RenameNetworkRefusalNotAvailable, renameNetworkNotAvailableMessage)
 	}
 
 	// availability before the budget, so a taken name costs no attempt

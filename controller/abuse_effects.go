@@ -454,8 +454,9 @@ func (self *abuseEffects) lift(ctx context.Context, effect *AbuseEffect) error {
 func (self *abuseEffects) unitsOf(ctx context.Context, action *model.AbuseAction) (*abuseEffectUnits, error) {
 	units := &abuseEffectUnits{}
 	switch action.Kind {
-	case model.AbuseActionKindNoticeForward, model.AbuseActionKindLimitTighten:
-		// a tightening's row is no unit a lift of another action frees
+	case model.AbuseActionKindNoticeForward, model.AbuseActionKindLimitTighten, model.AbuseActionKindScreenAllow:
+		// a tightening's row is no unit a lift of another action frees, and a screen allow is read where names
+		// are screened (abuse_screen_model.go)
 		return units, nil
 	case model.AbuseActionKindMailHalt, model.AbuseActionKindMailLabelHalt:
 		return nil, fmt.Errorf("%w: %s", ErrAbuseEffectKindUnbuilt, action.Kind)
