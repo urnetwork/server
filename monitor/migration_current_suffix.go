@@ -1080,6 +1080,10 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the redundant unique event id of the device events, dropped by the
 	// owner-run prepare and recorded, versioned by its position
 	[]snMainnetMigrationContract{auditDeviceEventUniqueRecordMigrationContract},
+	// the verify cohort's rolling census: the validator's reported census on
+	// each head summary, each member's last epoch and when the rolling census
+	// started, versioned by its position
+	[]snMainnetMigrationContract{verifyCohortRollingMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

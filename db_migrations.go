@@ -11778,4 +11778,12 @@ var migrations = []any{
 		  )
 		ON CONFLICT (network_id) DO NOTHING
 	`),
+
+	// The verify cohort v2's rolling census (verify_cohort_rolling_schema.go,
+	// sn VERIFY-COHORT-V2.md): the validator's reported census on each head
+	// summary, each cohort member's last epoch, and the epoch the rolling
+	// census started from. Additive: nullable columns and a new table. Apply
+	// before deploying the api, alt and taskworker that write them; the
+	// running release names its own columns and writes on.
+	newSqlMigration(verifyCohortRollingSchemaSql),
 }
