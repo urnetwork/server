@@ -67,6 +67,9 @@ type LagDriftResult struct {
 	Reason  string `json:"reason"`
 	// the runs pooled for the verdict (V7)
 	RunsInVerdict []int `json:"runs_in_verdict"`
+	// every run in the verdict matched client_ip in its family; false when a
+	// run from the other family counted (K3, K6), or no run is in it
+	Bound bool `json:"bound"`
 	// a run whose verdict is not in yet, else null; set as the test is read
 	PendingRun *int    `json:"pending_run"`
 	Confidence float64 `json:"confidence"`
@@ -90,8 +93,8 @@ type LagDriftCalibrationView struct {
 	RelayThresholdMs float64    `json:"relay_threshold_ms"`
 }
 
-// The address's side (P4): the IP country of the window's newest run, and
-// the family it started from.
+// The address's side (P4): client_ip's country, which every run is judged
+// against (K3), and the family of the runs judged.
 type LagDriftIp struct {
 	CountryCode string `json:"country_code,omitempty"`
 	CountryName string `json:"country_name,omitempty"`

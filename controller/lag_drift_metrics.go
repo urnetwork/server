@@ -32,7 +32,7 @@ var lagDriftStartsCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "lag",
 		Name:      "drift_starts_total",
-		Help:      "Drift test starts (P5, W8), by outcome: started, demo, refused_<code>, rejected or error",
+		Help:      "Drift test starts (P5, W8), by outcome: started, demo, pinned, refused_<code>, rejected or error",
 	},
 	[]string{"outcome"},
 )
@@ -156,8 +156,12 @@ func countLagDriftStart(result *LagDriftStartResult, err error) {
 	success := "started"
 	if result != nil {
 		lagError = result.Error
-		if result.Demo {
+		switch {
+		case result.Demo:
 			success = "demo"
+		case result.Pin != "":
+			// pointed at client_ip's family, no run used (K6, P5)
+			success = "pinned"
 		}
 	}
 	lagDriftStartsCounter.WithLabelValues(lagDriftAnswerOutcome(result != nil, lagError, err, success)).Inc()

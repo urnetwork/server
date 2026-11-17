@@ -445,6 +445,9 @@ func lagDriftTestAllocate(
 		}
 	}
 
+	// the country every run is judged against: client_ip's own, never a
+	// start address's (K3, review F-10)
+	clientIpPlace := lagDriftStartPlace(clientIp)
 	token := newLagDriftToken()
 	tokenHash, _ := lagDriftTokenHash(token)
 	// the binding is to the visitor's network, not the exact address: the
@@ -456,16 +459,18 @@ func lagDriftTestAllocate(
 	expiresAt := now.Add(ttl).Truncate(time.Second)
 	driftTestId := server.NewId()
 	model.CreateLagDriftTest(ctx, &model.LagDriftTest{
-		DriftTestId:    driftTestId,
-		NetworkId:      networkId,
-		TokenHash:      tokenHash,
-		ClientIpHash:   clientIpHash[:],
-		ClientIpFamily: server.IpVersionForAddr(clientIp),
-		ParentOrigins:  parentOrigins,
-		Confidence:     confidence,
-		Reference:      args.Reference,
-		CreatedAt:      now,
-		ExpiresAt:      expiresAt,
+		DriftTestId:         driftTestId,
+		NetworkId:           networkId,
+		TokenHash:           tokenHash,
+		ClientIpHash:        clientIpHash[:],
+		ClientIpFamily:      server.IpVersionForAddr(clientIp),
+		ClientIpCountryCode: clientIpPlace.CountryCode,
+		ClientIpCountryName: clientIpPlace.CountryName,
+		ParentOrigins:       parentOrigins,
+		Confidence:          confidence,
+		Reference:           args.Reference,
+		CreatedAt:           now,
+		ExpiresAt:           expiresAt,
 	})
 	return &LagDriftTestResult{
 		DriftTestId: driftTestId,
@@ -619,6 +624,14 @@ func lagDriftStoredResult(test *model.LagDriftTest) *LagDriftResult {
 		glog.Errorf("[lag]drift test %s has an unreadable result: %s\n", test.DriftTestId, err)
 		return nil
 	}
+	// a slice stored as null, as Go writes a nil one, reads as empty: P4's
+	// arrays are never null
+	if result.RunsInVerdict == nil {
+		result.RunsInVerdict = []int{}
+	}
+	if result.Drift != nil && result.Drift.LastMileMs == nil {
+		result.Drift.LastMileMs = []float64{}
+	}
 	return result
 }
 
@@ -674,6 +687,9 @@ type LagDriftStartArgs struct {
 	// the frame's parent, from its ancestor origins or referrer, "" when
 	// unknown (W5)
 	ParentOrigin string `json:"parent_origin,omitempty"`
+	// the frame couldn't reach the pinned origin, so the run goes ahead from
+	// client_ip's other family (K3, K6)
+	Unpinned bool `json:"unpinned,omitempty"`
 }
 
 // The place the radar centers on (P5): /my-ip-info's fields for the start's
@@ -715,6 +731,20 @@ type LagDriftStartResult struct {
 	// RFC 3339: every session must open before this
 	ExpiresAt string    `json:"expires_at,omitempty"`
 	Error     *LagError `json:"error,omitempty"`
+	// the API's origin in client_ip's family, for a start that arrived over
+	// the other (K6): the frame sends the same request there
+	Pin string `json:"pin,omitempty"`
+}
+
+// A pin answer is the pin and nothing else (P5).
+func (self *LagDriftStartResult) MarshalJSON() ([]byte, error) {
+	if self.Pin != "" {
+		return json.Marshal(struct {
+			Pin string `json:"pin"`
+		}{self.Pin})
+	}
+	type plain LagDriftStartResult
+	return json.Marshal((*plain)(self))
 }
 
 // Answers `POST /lag/drift-test/start` (P5, W8).
@@ -758,6 +788,19 @@ func lagDriftTestStart(
 		return lagDriftDemoStart(ctx, addr, now, settings)
 	}
 
+	var test *model.LagDriftTest
+	tokenHash, ok := lagDriftTokenHash(args.Token)
+	if ok {
+		test = model.GetLagDriftTestByTokenHash(ctx, tokenHash)
+	}
+	// pinned to client_ip's family (K6, P5): a start over the other family
+	// is pointed at the API's name in client_ip's family, and uses no run and
+	// no count of the start limit. One the frame sends unpinned, having
+	// failed to reach that name, goes ahead from the other family (K3).
+	if test != nil && !args.Unpinned && server.IpVersionForAddr(addr) != test.ClientIpFamily {
+		return &LagDriftStartResult{Pin: drift.PinOrigin(test.ClientIpFamily)}, nil
+	}
+
 	limit, err := model.CheckLagPrefixRateLimit(ctx, lagDriftStartRateLimitName, addr, drift.StartLimit, drift.StartLimitWindow)
 	if err != nil {
 		return nil, err
@@ -774,11 +817,6 @@ func lagDriftTestStart(
 	expired := &LagDriftStartResult{
 		Error: lagDriftRefusal(LagDriftErrorCodeExpired, "This check has expired."),
 	}
-	tokenHash, ok := lagDriftTokenHash(args.Token)
-	if !ok {
-		return expired, nil
-	}
-	test := model.GetLagDriftTestByTokenHash(ctx, tokenHash)
 	if test == nil {
 		return expired, nil
 	}
@@ -1165,19 +1203,17 @@ func newLagDriftWidgetResult(test *model.LagDriftTest, runs []*model.LagDriftRun
 		RetestAllowed: 0 < runsLeft && 0 < test.RunCount,
 		RunsLeft:      runsLeft,
 	}
+	// the country judged: client_ip's (K3)
+	widget.IpCountryName = test.ClientIpCountryName
 	if 0 < len(runs) {
 		newest := runs[len(runs)-1]
 		widget.Run = newest.Run
 		widget.RunState = newest.State
-		widget.IpCountryName = newest.IpCountryName
 	}
 	if result := lagDriftStoredResult(test); result != nil {
 		verdict := result.Verdict
 		widget.Verdict = &verdict
 		widget.RunsInVerdict = result.RunsInVerdict
-		if result.Ip != nil && result.Ip.CountryName != "" {
-			widget.IpCountryName = result.Ip.CountryName
-		}
 	}
 	return widget
 }
@@ -1199,12 +1235,22 @@ func lagDriftCounts(run *model.LagDriftRun) bool {
 	return run.Complete() && run.Outcome == LagDriftRunOutcomeCounted && (run.ClientIpMatches == nil || *run.ClientIpMatches)
 }
 
-// The last window_runs runs that count, by run number (V7).
+// The last window_runs runs that count, by run number (V7), of one family:
+// the family of the newest run that counts. Runs from the two families can
+// end at different places, so they are never pooled (K3).
 func lagDriftWindowRuns(runs []*model.LagDriftRun, drift *LagDriftSettings) []*model.LagDriftRun {
 	window := []*model.LagDriftRun{}
+	family := 0
 	for i := len(runs) - 1; 0 <= i && len(window) < drift.WindowRuns; i -= 1 {
-		if lagDriftCounts(runs[i]) {
-			window = append(window, runs[i])
+		run := runs[i]
+		if !lagDriftCounts(run) {
+			continue
+		}
+		if family == 0 {
+			family = run.IpFamily
+		}
+		if run.IpFamily == family {
+			window = append(window, run)
 		}
 	}
 	slices.Reverse(window)

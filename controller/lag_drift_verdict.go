@@ -5,6 +5,7 @@ import (
 	"context"
 	"math"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -34,16 +35,26 @@ import (
 // verdicts judged against nothing.
 const LagDriftBordersResource = "lag/ne-admin0-10m.bin"
 
-// The looks of the server's stop check: the frame looks after every ping
-// round from 3 s after the sessions open (V10).
+// The looks of the server's stop check: the frame fits after every ping
+// round, 250 ms, from its first, and evaluates the rules from 3 s after the
+// sessions open (V10).
 const lagDriftLookMs = 250
 
-// How far before the cap a run may close, as its reports see the close, and
-// still have stopped at the cap: the reports see the close by the run's last
-// activity, up to a ping interval and a round trip before the browser closed,
-// and the browser counts the cap from its own first session's opening, a
-// little before the run's opening here (the median of its sessions').
-const lagDriftCapSlackMs = 1000.0
+// How many extenders with an estimate the frame's fit needs before it fits
+// at all (lag.dev's check.ts): the server's history has a fit only where the
+// frame's could.
+const lagDriftLookExtenders = 6
+
+// How much shorter than measure_ms a main session may have lasted, on its own
+// extender's clock, and still have run to the cap (V10, review F-22): sessions
+// to far extenders open up to a second or so late.
+const lagDriftCapSessionSlackMs = 2000.0
+
+// How much shorter than measure_ms the operator's clock may see a run, from
+// its start to its finish, and still have run to the cap: an additional check
+// on the reports' durations, never a substitute, since the client times its
+// finish (V10, review F-22).
+const lagDriftCapFinishSlackMs = 1000.0
 
 // How long after its start a run's sessions may open, as the operator's clock
 // counts it, for the check of an interrupted run (lagDriftOperatorCloseMs).
@@ -132,10 +143,10 @@ func lagDriftCalibrationFor(ctx context.Context, drift *LagDriftSettings) *model
 	return model.GetLagDriftCalibration(ctx)
 }
 
-// The relay threshold for a run (K2, Q12): the calibration's for the IP
+// The relay threshold for a run (K2, Q12): the calibration's for the judged
 // country's continent and the run's network type.
-func lagDriftRelayThresholdMs(calibration *model.LagDriftCalibration, run *model.LagDriftRun, client *model.LagDriftTrackClient) float64 {
-	return calibration.RelayThresholdMsFor(model.ContinentCodeForCountry(run.IpCountryCode), lagDriftNetworkType(client))
+func lagDriftRelayThresholdMs(calibration *model.LagDriftCalibration, test *model.LagDriftTest, client *model.LagDriftTrackClient) float64 {
+	return calibration.RelayThresholdMsFor(model.ContinentCodeForCountry(test.ClientIpCountryCode), lagDriftNetworkType(client))
 }
 
 func lagDriftNetworkType(client *model.LagDriftTrackClient) string {
@@ -223,23 +234,31 @@ func lagDriftOperatorCloseMs(run *model.LagDriftRun, timeline *lagDriftTimeline)
 	return float64(run.FinishedAt.Sub(run.StartedAt).Milliseconds()) - openDelayMs, true
 }
 
-// The stop the run's reports support, or "" for none (V10): the frame's own
-// rules, each look a fit of the round trips back by then, with the server's
-// wider tolerance on the ellipse's area, at the close the reports show. That
-// is the run's last activity, which a frame cannot delay to make its fit look
-// steadier. A run that closed at the cap stopped there whatever the rules
-// say. An interrupted run's silence shows in no report, since an extender
-// sends no ping while one is unanswered (M4), so its close is the frame's
-// finish on the operator's clock (lagDriftOperatorCloseMs).
+// The stop the run's reports support, or "" for none (V10, E5): the frame's
+// own rules on fits of the round trips back by each look, with the server's
+// wider tolerance on the ellipse's area, against the judged country,
+// client_ip's (K3). The history is rebuilt from the sessions' first round
+// trips, as the frame keeps its fits from its first tick, and the last look
+// is at the close the reports show, the run's last activity, so the round
+// trips the frame counted are all in it. The frame's own stop is answered
+// when the reports support it, else the first rule that holds.
+//
+// An interrupted run counts only if converged or clear held when its silence
+// began, at its last pong (review F-02): otherwise a client could withhold its
+// pongs right after a favourable look and end the run there. Through any
+// silence the fit doesn't move, so the trailing 2 s look steadier than they
+// were: the rules on the fit look no later than the frame's first look after
+// the last pong. cap holds on the signed reports' own durations (review
+// F-22), never on the finish's timing, which the client controls.
 func lagDriftSupportedStop(
+	test *model.LagDriftTest,
 	run *model.LagDriftRun,
 	timeline *lagDriftTimeline,
 	cityPoint *lagDriftPoint,
 	drift *LagDriftSettings,
 	calibration *model.LagDriftCalibration,
 ) string {
-	country := lagDriftBorders().country(run.IpCountryCode)
-	driftModel := calibration.Model()
+	country := lagDriftBorders().country(test.ClientIpCountryCode)
 	all := []lagdrift.Observation{}
 	for _, session := range timeline.sessions {
 		if observation, ok := lagDriftObservation(session, session.rttMs, run.Run); ok {
@@ -248,39 +267,167 @@ func lagDriftSupportedStop(
 	}
 	expected := lagDriftExpectedPoint(cityPoint, country, all)
 	tolerance := lagdrift.StopTolerance{AreaRatio: drift.StopAreaTolerance}
+
+	// whole ms, rounded up, so the pong at the close is in the look there
+	closeMs := int64(math.Ceil(timeline.closeMs))
+	lastPongMs := int64(-1)
+	if 0 <= timeline.lastPongMs {
+		lastPongMs = int64(math.Ceil(timeline.lastPongMs))
+	}
+	lookMs := closeMs
+	if 0 <= lastPongMs {
+		lookMs = min(closeMs, lastPongMs+lagDriftLookMs)
+	}
+	history := lagDriftHistory(run, timeline, calibration.Model(), expected, lookMs, closeMs)
+
+	if lagDriftInterrupted(run, timeline, history, closeMs, lastPongMs, country, tolerance) {
+		// it counts only if converged or clear held when the silence began
+		if lagdrift.StopHolds(lagdrift.StopConverged, history, 0, lookMs, lastPongMs, country, tolerance) ||
+			lagdrift.StopHolds(lagdrift.StopClear, history, 0, lookMs, lastPongMs, country, tolerance) {
+			return string(lagdrift.StopInterrupted)
+		}
+		return ""
+	}
+	holds := func(stop lagdrift.StopReason) bool {
+		switch stop {
+		case lagdrift.StopClear, lagdrift.StopConverged:
+			return lagdrift.StopHolds(stop, history, 0, lookMs, lastPongMs, country, tolerance)
+		case lagdrift.StopCap:
+			return lagDriftCapHolds(run, timeline, drift)
+		default:
+			return false
+		}
+	}
+	if holds(lagdrift.StopReason(run.Stop)) {
+		return run.Stop
+	}
+	for _, stop := range []lagdrift.StopReason{lagdrift.StopClear, lagdrift.StopConverged, lagdrift.StopCap} {
+		if holds(stop) {
+			return string(stop)
+		}
+	}
+	return ""
+}
+
+// The frame's looks rebuilt from the reports (V10): one every 250 ms from the
+// run's opening, from the first that has a round trip back, and one at each
+// of the given moments, in order. Each fits the round trips back by then,
+// from the look before, once the frame would fit: with lagDriftLookExtenders
+// estimates. Every look measures from the same expected point, so the stop
+// check can compare their positions.
+func lagDriftHistory(
+	run *model.LagDriftRun,
+	timeline *lagDriftTimeline,
+	driftModel lagdrift.Model,
+	expected lagdrift.Point,
+	atMs ...int64,
+) []lagdrift.Snapshot {
+	firstPongMs := math.Inf(1)
+	for _, session := range timeline.sessions {
+		for _, pongMs := range session.pongMs {
+			firstPongMs = min(firstPongMs, pongMs)
+		}
+	}
+	if math.IsInf(firstPongMs, 1) {
+		return []lagdrift.Snapshot{}
+	}
+	lastMs := slices.Max(atMs)
+	looks := slices.Clone(atMs)
+	for lookMs := int64(math.Ceil(max(firstPongMs, 0)/lagDriftLookMs)) * lagDriftLookMs; lookMs <= lastMs; lookMs += lagDriftLookMs {
+		looks = append(looks, lookMs)
+	}
+	slices.Sort(looks)
+	looks = slices.Compact(looks)
+
 	history := []lagdrift.Snapshot{}
 	var warm *lagdrift.Fit
-	for atMs := float64(lagdrift.StopEarliestMs); atMs <= timeline.closeMs; atMs += lagDriftLookMs {
+	for _, lookMs := range looks {
 		observations := []lagdrift.Observation{}
 		roundTrips := []int{}
 		for _, session := range timeline.sessions {
-			rttMs := session.roundTripsBy(atMs)
+			rttMs := session.roundTripsBy(float64(lookMs))
 			roundTrips = append(roundTrips, len(rttMs))
 			if observation, ok := lagDriftObservation(session, rttMs, run.Run); ok {
 				observations = append(observations, observation)
 			}
 		}
-		snapshot := lagdrift.Snapshot{AtMs: int64(math.Floor(atMs)), RoundTrips: roundTrips}
-		if fit, err := lagdrift.FitPosition(driftModel, expected, observations, warm); err == nil {
-			snapshot.Fit = fit
-			warm = fit
+		snapshot := lagdrift.Snapshot{AtMs: lookMs, RoundTrips: roundTrips}
+		if lagDriftLookExtenders <= len(observations) {
+			if fit, err := lagdrift.FitPosition(driftModel, expected, observations, warm); err == nil {
+				snapshot.Fit = fit
+				warm = fit
+			}
 		}
 		history = append(history, snapshot)
 	}
-	closeMs := int64(math.Floor(timeline.closeMs))
-	lastPongMs := int64(math.Floor(timeline.lastPongMs))
-	if stop, ok := lagdrift.EvaluateStop(history, 0, closeMs, lastPongMs, country, tolerance); ok {
-		return string(stop)
+	return history
+}
+
+// Whether a run stopped as interrupted (V10): 4 s without a pong, before the
+// cap could stop it. The reports show the silence when the sessions went on
+// pinging into it, each unanswered ping lost after 5 s and the next sent then
+// (M4). They show none when the frame closed them sooner, since an extender
+// sends no ping while one is unanswered, so then the silence is the frame's
+// finish on the operator's clock, for a frame that says it was interrupted.
+// The reports' close is the silence's start only in that second case: a
+// client that withholds its pongs and holds its sessions open moves the close
+// 5 s past the last pong with each lost ping. So interrupted is decided
+// before the other rules, which look no later than one look past the last
+// pong: through a silence the fit doesn't move, its trailing 2 s look steady,
+// and converged would hold at such a close on a look the client chose
+// (TestLagDriftProcessInterrupted's third run).
+func lagDriftInterrupted(
+	run *model.LagDriftRun,
+	timeline *lagDriftTimeline,
+	history []lagdrift.Snapshot,
+	closeMs int64,
+	lastPongMs int64,
+	country *lagdrift.Country,
+	tolerance lagdrift.StopTolerance,
+) bool {
+	if lagdrift.StopCapMs < max(lastPongMs, 0)+lagdrift.StopInterruptedMs {
+		// the cap comes first
+		return false
 	}
-	if float64(lagdrift.StopCapMs)-lagDriftCapSlackMs <= timeline.closeMs {
-		return string(lagdrift.StopCap)
+	if lagdrift.StopHolds(lagdrift.StopInterrupted, history, 0, closeMs, lastPongMs, country, tolerance) {
+		return true
 	}
 	if operatorCloseMs, ok := lagDriftOperatorCloseMs(run, timeline); ok && run.Stop == string(lagdrift.StopInterrupted) {
-		if lagdrift.StopHolds(lagdrift.StopInterrupted, history, 0, int64(operatorCloseMs), lastPongMs, country, tolerance) {
-			return string(lagdrift.StopInterrupted)
+		return lagdrift.StopHolds(lagdrift.StopInterrupted, history, 0, int64(operatorCloseMs), lastPongMs, country, tolerance)
+	}
+	return false
+}
+
+// Whether the signed reports show the run went to the cap (V10, review
+// F-22): at least min_extenders main sessions each lasted at least
+// measure_ms less 2 s, each from its own session start to its last round
+// trip on its own extender's clock, so no clocks need aligning. A session
+// lasts to its last round trip rather than its last ping: a client that
+// withholds its pongs leaves the extender pinging, each ping lost after 5 s
+// (M4), and so could keep a session going on with its fit frozen at a look
+// it chose. The operator's clock is an additional check: a run whose finish
+// came sooner than measure_ms less 1 s after its start didn't run to the cap.
+// One with no finish was open on that clock until processing.
+func lagDriftCapHolds(run *model.LagDriftRun, timeline *lagDriftTimeline, drift *LagDriftSettings) bool {
+	lasted := 0
+	for _, session := range timeline.sessions {
+		if drift.Extenders <= session.report.Position {
+			// a spare is no main session
+			continue
+		}
+		// the session's times are from its own start (newLagDriftTimeline)
+		if float64(drift.MeasureMs)-lagDriftCapSessionSlackMs <= session.lastPongMs() {
+			lasted += 1
 		}
 	}
-	return ""
+	if lasted < drift.MinExtenders {
+		return false
+	}
+	if run.FinishedAt != nil &&
+		float64(run.FinishedAt.Sub(run.StartedAt).Milliseconds()) < float64(drift.MeasureMs)-lagDriftCapFinishSlackMs {
+		return false
+	}
+	return true
 }
 
 // The drift country (V6, G3): the IP country when its own polygons hold the
@@ -330,12 +477,9 @@ func lagDriftWindowResult(
 		RunsInVerdict:   []int{},
 		Confidence:      test.Confidence,
 		GeometryVersion: loaded.version(),
-		Ip: &LagDriftIp{
-			CountryCode: newest.IpCountryCode,
-			CountryName: newest.IpCountryName,
-			Family:      newest.IpFamily,
-		},
-		Calibration: newLagDriftCalibrationView(calibration, lagDriftRelayThresholdMs(calibration, newest, clients[newest.Run])),
+		// judged against client_ip's country, never a start address's (K3)
+		Ip:          lagDriftIpOf(test, newest.IpFamily),
+		Calibration: newLagDriftCalibrationView(calibration, lagDriftRelayThresholdMs(calibration, test, clients[newest.Run])),
 	}
 	var cityPoint *lagDriftPoint
 	if client := clients[newest.Run]; client != nil && client.Latitude != nil && client.Longitude != nil {
@@ -343,8 +487,14 @@ func lagDriftWindowResult(
 	}
 
 	observations := []lagdrift.Observation{}
+	// bound while every run in the window matched client_ip in its family
+	// (K3): a run from the other family counts unbound
+	result.Bound = true
 	for _, run := range window {
 		result.RunsInVerdict = append(result.RunsInVerdict, run.Run)
+		if run.ClientIpMatches == nil || !*run.ClientIpMatches {
+			result.Bound = false
+		}
 		timeline := newLagDriftTimeline(run, reports[run.Run], drift)
 		for _, session := range timeline.sessions {
 			if len(session.rttMs) < drift.UsableRoundTrips {
@@ -356,7 +506,7 @@ func lagDriftWindowResult(
 		}
 	}
 
-	country := loaded.country(newest.IpCountryCode)
+	country := loaded.country(test.ClientIpCountryCode)
 	fit, err := lagdrift.FitPosition(calibration.Model(), lagDriftExpectedPoint(cityPoint, country, observations), observations, nil)
 	if err != nil {
 		// a window run has the extenders to fit, so this is geometry that
@@ -365,7 +515,10 @@ func lagDriftWindowResult(
 		return result
 	}
 
-	verdict, reason, judgement := lagdrift.Decide(fit, country, observations, test.Confidence, drift.MaxSigmaKm)
+	// the textbook k at the token's confidence (V6), as before V11's
+	// per-run k
+	k := lagdrift.KForConfidence(test.Confidence)
+	verdict, reason, judgement := lagdrift.Decide(fit, country, observations, k, drift.MaxSigmaKm)
 	result.Verdict = string(verdict)
 	result.Reason = string(reason)
 
@@ -391,7 +544,7 @@ func lagDriftWindowResult(
 		if i < len(fit.Runs) {
 			if run := windowRuns[fit.Runs[i]]; run != nil {
 				client := clients[run.Run]
-				if calibration.RelaySuspected(lastMileMs, model.ContinentCodeForCountry(run.IpCountryCode), lagDriftNetworkType(client)) {
+				if calibration.RelaySuspected(lastMileMs, model.ContinentCodeForCountry(test.ClientIpCountryCode), lagDriftNetworkType(client)) {
 					view.RelaySuspected = true
 				}
 			}
@@ -403,16 +556,41 @@ func lagDriftWindowResult(
 	if country != nil && reason == lagdrift.ReasonLowPrecision {
 		// Decide judges no fit it can't trust; its figures still show how
 		// far off and how wide it is
-		judgement = lagdrift.Judge(fit, country, test.Confidence)
+		judgement = lagdrift.Judge(fit, country, k)
 	}
 	if country != nil {
-		distanceKm := lagDriftRound(judgement.DistanceKm)
-		significanceKm := lagDriftRound(judgement.SignificanceKm)
-		marginKm := lagDriftRound(judgement.MarginKm)
-		view.DistanceKm = &distanceKm
-		view.SignificanceKm = &significanceKm
-		view.MarginKm = &marginKm
+		view.DistanceKm = lagDriftFigureKm(judgement.DistanceKm)
+		view.SignificanceKm = lagDriftFigureKm(judgement.SignificanceKm)
+		view.MarginKm = lagDriftMarginKm(judgement)
 	}
 	result.Drift = view
 	return result
+}
+
+// A drift figure for P4, rounded to 0.1 km, and never -0. nil when not
+// finite: lagdrift.Judge answers +Inf for a country without an outline.
+func lagDriftFigureKm(valueKm float64) *float64 {
+	if math.IsInf(valueKm, 0) || math.IsNaN(valueKm) {
+		return nil
+	}
+	// adding 0 turns -0 into 0
+	rounded := lagDriftRound(valueKm) + 0
+	return &rounded
+}
+
+// The margin for P4 (review F-11), rounded as lagDriftFigureKm, and positive
+// exactly when the whole region is outside the country (outside, D > k): such
+// a margin reads at least 0.1 km rather than rounding to 0, and any other is
+// at most 0.
+func lagDriftMarginKm(judgement lagdrift.Judgement) *float64 {
+	marginKm := lagDriftFigureKm(judgement.MarginKm)
+	if marginKm == nil {
+		return nil
+	}
+	if !judgement.Inside && judgement.K < judgement.D {
+		*marginKm = max(*marginKm, 0.1)
+	} else {
+		*marginKm = min(*marginKm, 0) + 0
+	}
+	return marginKm
 }

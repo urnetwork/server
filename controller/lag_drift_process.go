@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -71,6 +72,76 @@ func lagDriftReportStored(ctx context.Context, trackId server.Id, now time.Time)
 			completeLagDriftRuns(ctx, run.DriftTestId, now, settings)
 		}
 	})
+}
+
+// The drift test's side of a report post (lag.dev/DRIFTTEST.md E4, review
+// F-08). One operator client runs every extender, and report_limit counts its
+// posts: a prompt post per drift session would spend it at about 60 runs an
+// hour and then starve lag.dev's own reports. So a post isn't counted when
+// every report in it verifies under one of the client's extenders and names a
+// drift run's ticket issued to that extender for that track and position,
+// and at least one of them is its ticket's first report, before the ticket
+// expires: the tickets the server issued bound such posts. A repeat, for a
+// ticket whose report is stored, is answered and dropped, and a post of
+// repeats alone counts as every post did, so a looping extender can't
+// re-post one old report outside the limit. So does a post with any other
+// report, or a first report after its ticket expired.
+type lagDriftReportPost struct {
+	// whether report_limit doesn't count the post
+	prompt bool
+	// the reports read and verified, by index, so they are stored without
+	// being read again
+	read map[int]*lagReadReport
+	// the repeats by index: their tickets have their reports
+	repeats map[int]bool
+}
+
+// Reads a report post's drift reports (lagDriftReportPost), each verified
+// once, up to the first report that isn't one.
+func lagDriftReadReportPost(
+	ctx context.Context,
+	reporterClientId server.Id,
+	reportTexts []string,
+	now time.Time,
+	extenderByKey func(publicKey []byte) *model.NetworkExtender,
+) *lagDriftReportPost {
+	post := &lagDriftReportPost{
+		read:    map[int]*lagReadReport{},
+		repeats: map[int]bool{},
+	}
+	fresh := false
+	for index, reportText := range reportTexts {
+		body, extender, reason := readLagReport(reporterClientId, reportText, extenderByKey)
+		if reason != "" {
+			return post
+		}
+		post.read[index] = &lagReadReport{body: body, extender: extender}
+		ticketId, err := server.IdFromBytes(body.TicketId)
+		if err != nil {
+			return post
+		}
+		trackId, err := server.IdFromBytes(body.TrackId)
+		if err != nil {
+			return post
+		}
+		driftTicket := model.GetLagDriftReportTicket(ctx, ticketId)
+		if driftTicket == nil ||
+			driftTicket.Ticket.ExtenderId != extender.ExtenderId ||
+			driftTicket.Ticket.TrackId != trackId ||
+			uint32(driftTicket.Ticket.Position) != body.TrackPosition {
+			return post
+		}
+		switch {
+		case driftTicket.Reported:
+			post.repeats[index] = true
+		case !now.Before(driftTicket.Ticket.ExpiresAt):
+			return post
+		default:
+			fresh = true
+		}
+	}
+	post.prompt = fresh
+	return post
 }
 
 // Whether any run is due at `now`: started past processing_after, or
@@ -187,7 +258,7 @@ func completeLagDriftRuns(ctx context.Context, driftTestId server.Id, now time.T
 					cityPoint := lagDriftCityPoint(runClient(run))
 					var completion *model.LagDriftRunCompletion
 					failure = lagDriftSafely(func() {
-						completion = lagDriftCompleteRun(run, runReports(run), cityPoint, drift, calibration)
+						completion = lagDriftCompleteRun(test, run, runReports(run), cityPoint, drift, calibration)
 					})
 					if failure != nil {
 						failure = fmt.Errorf("run %d: %w", run.Run, failure)
@@ -290,9 +361,10 @@ func lagDriftSafely(compute func()) (err error) {
 type lagDriftSession struct {
 	report   *model.LagDriftReport
 	extender *model.LagDriftRunExtender
-	sendMs   []float64
-	pongMs   []float64
-	rttMs    []float64
+	// ms from the session's own start (newLagDriftTimeline)
+	sendMs []float64
+	pongMs []float64
+	rttMs  []float64
 	// the last ping sent, lost or not; -1 for none
 	lastSendMs float64
 }
@@ -323,26 +395,27 @@ func (self *lagDriftSession) lastActivityMs() float64 {
 	return max(self.lastPongMs(), self.lastSendMs)
 }
 
-// A run's reports on one timeline (V10).
+// A run's reports on one timeline (V10): ms from the sessions' opening.
 type lagDriftTimeline struct {
 	sessions []*lagDriftSession
 	// the run's opening on the extenders' clocks, unix ms: the median of its
-	// own sessions' openings
+	// own sessions' openings, only to estimate on the operator's clock how
+	// long the sessions took to open (lagDriftOperatorCloseMs)
 	openedUnixMs float64
-	// when the sessions closed, ms from the run's opening, as the reports
-	// show it: the median of the run's own sessions' last activity
+	// when the sessions closed, as the reports show it: the median of the
+	// run's own sessions' last activity
 	closeMs float64
-	// the latest pong of any session, ms from the opening, -1 for none
+	// the latest pong of any session, -1 for none
 	lastPongMs float64
 }
 
 // Lays a run's reports on one timeline (V10). Each report's times are its
-// extender's clock (A7), which may be off another's, so each session is
-// placed by its own: its pings at their send offsets from its own opening,
-// and its opening at its offset from the run's opening, the median of its own
-// sessions' openings, held within the run's cap. Each round trip's pong
-// arrives its round trip after its ping was sent. A report whose position the
-// run never ticketed is left out.
+// extender's clock (A7), which may be well off another's, so each session is
+// laid at its own start, its pings at their send offsets from it, and no
+// clocks are compared (review F-14). The frame opens the sessions together,
+// and a late opener's offset is within V10's tolerance. Each round trip's
+// pong arrives its round trip after its ping was sent. A report whose
+// position the run never ticketed is left out.
 func newLagDriftTimeline(run *model.LagDriftRun, reports []*model.LagDriftReport, drift *LagDriftSettings) *lagDriftTimeline {
 	extenders := map[int]*model.LagDriftRunExtender{}
 	for _, extender := range run.Extenders {
@@ -368,19 +441,13 @@ func newLagDriftTimeline(run *model.LagDriftRun, reports []*model.LagDriftReport
 		if extender == nil {
 			continue
 		}
-		openMs := float64(report.SessionStartTime.UnixMilli()) - runOpenMs
-		// a clock far off the others places a session nowhere in the run;
-		// it is taken to have opened with the run
-		if openMs < -float64(drift.MeasureMs) || float64(drift.MeasureMs) < openMs {
-			openMs = 0
-		}
 		windowMs := float64(report.WindowStartTime.Sub(report.SessionStartTime).Milliseconds())
 		session := &lagDriftSession{report: report, extender: extender, lastSendMs: -1}
 		for i, offsetMs := range report.PingOffsetMs {
 			if len(report.PingMicros) <= i {
 				break
 			}
-			sendMs := openMs + windowMs + float64(offsetMs)
+			sendMs := windowMs + float64(offsetMs)
 			session.lastSendMs = max(session.lastSendMs, sendMs)
 			micros := report.PingMicros[i]
 			if micros <= 0 {
@@ -423,13 +490,15 @@ func lagDriftMedian(values []float64) float64 {
 }
 
 // What processing makes of a run (E5, V10, K3, K4), in order: a run from
-// another address than client_ip stays out (K3), as does one where fewer than
-// min_extenders sessions reported at all (reports_missing), one whose
-// sessions mostly took the start's other family (K4), one where at least
-// min_extenders reported but fewer are usable (too_few_extenders, E5), and
-// one the browser stopped before its reports support a stop (V10). Every
-// other run counts.
+// another address than client_ip stays out (K3), as does one from client_ip's
+// other family whose address's country isn't client_ip's (ip_family_mismatch,
+// K3), one where fewer than min_extenders sessions reported at all
+// (reports_missing), one whose sessions mostly took the start's other family
+// (K4), one where at least min_extenders reported but fewer are usable
+// (too_few_extenders, E5), and one the browser stopped before its reports
+// support a stop (V10). Every other run counts.
 func lagDriftCompleteRun(
+	test *model.LagDriftTest,
 	run *model.LagDriftRun,
 	reports []*model.LagDriftReport,
 	cityPoint *lagDriftPoint,
@@ -458,6 +527,9 @@ func lagDriftCompleteRun(
 	switch {
 	case run.ClientIpMatches != nil && !*run.ClientIpMatches:
 		completion.Outcome = LagDriftRunOutcomeIpMismatch
+	case run.ClientIpMatches == nil &&
+		(run.IpCountryCode == "" || !strings.EqualFold(run.IpCountryCode, test.ClientIpCountryCode)):
+		completion.Outcome = LagDriftRunOutcomeIpFamilyMismatch
 	case len(timeline.sessions) < drift.MinExtenders:
 		completion.Outcome = LagDriftRunOutcomeReportsMissing
 	case len(timeline.sessions) < 2*otherFamily:
@@ -465,7 +537,7 @@ func lagDriftCompleteRun(
 	case completion.Usable < drift.MinExtenders:
 		completion.Outcome = LagDriftRunOutcomeTooFewExtenders
 	default:
-		completion.SupportedStop = lagDriftSupportedStop(run, timeline, cityPoint, drift, calibration)
+		completion.SupportedStop = lagDriftSupportedStop(test, run, timeline, cityPoint, drift, calibration)
 		if completion.SupportedStop == "" {
 			completion.Outcome = LagDriftRunOutcomeStoppedEarly
 		} else {
@@ -473,6 +545,20 @@ func lagDriftCompleteRun(
 		}
 	}
 	return completion
+}
+
+// The address's side of a verdict (P4, K3): client_ip's country, which every
+// run is judged against, and the family of the runs judged, client_ip's
+// before any.
+func lagDriftIpOf(test *model.LagDriftTest, family int) *LagDriftIp {
+	if family == 0 {
+		family = test.ClientIpFamily
+	}
+	return &LagDriftIp{
+		CountryCode: test.ClientIpCountryCode,
+		CountryName: test.ClientIpCountryName,
+		Family:      family,
+	}
 }
 
 // The verdict when no run of the window can be fitted (V6, step 1): no run in
@@ -484,7 +570,7 @@ func lagDriftNoWindowResult(test *model.LagDriftTest, runs []*model.LagDriftRun)
 		Reason:        LagDriftReasonTooFewExtenders,
 		RunsInVerdict: []int{},
 		Confidence:    test.Confidence,
-		Ip:            &LagDriftIp{},
+		Ip:            lagDriftIpOf(test, 0),
 	}
 	mismatched := true
 	var newest *model.LagDriftRun
@@ -500,11 +586,7 @@ func lagDriftNoWindowResult(test *model.LagDriftTest, runs []*model.LagDriftRun)
 	if newest == nil {
 		return result
 	}
-	result.Ip = &LagDriftIp{
-		CountryCode: newest.IpCountryCode,
-		CountryName: newest.IpCountryName,
-		Family:      newest.IpFamily,
-	}
+	result.Ip = lagDriftIpOf(test, newest.IpFamily)
 	switch {
 	case mismatched:
 		result.Reason = LagDriftReasonIpMismatch

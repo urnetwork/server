@@ -36,6 +36,8 @@ import (
 //	  ticket_ttl: 1m              # to open a run's sessions
 //	  sweep_interval: 15s         # the drift sweep (E5, K3, R1)
 //	  retention: 168h             # drift tests and runs, 7 days (R1)
+//	  pin_origin_ipv4: https://api4.bringyour.com   # the API's IPv4-only name, for a start pinned to client_ip's family (K6, P5)
+//	  pin_origin_ipv6: https://api6.bringyour.com   # the API's IPv6-only name
 //
 // The model's constants, κ and σ₀ (V3), and the relay threshold behind
 // relay_suspected (K2, Q12) are the weekly calibration's (V4), with its
@@ -74,6 +76,10 @@ type LagDriftSettings struct {
 	TicketTtl           time.Duration `yaml:"ticket_ttl"`
 	SweepInterval       time.Duration `yaml:"sweep_interval"`
 	Retention           time.Duration `yaml:"retention"`
+	// the API's origins that resolve in one family only (K6): a start that
+	// arrives over client_ip's other family is pointed at its family's (P5)
+	PinOriginIpv4 string `yaml:"pin_origin_ipv4"`
+	PinOriginIpv6 string `yaml:"pin_origin_ipv6"`
 }
 
 // The design's values (lag.dev/DRIFTTEST.md P7, E2, E5, V6, V7, V10, W8).
@@ -100,6 +106,8 @@ func DefaultLagDriftSettings() *LagDriftSettings {
 		TicketTtl:           time.Minute,
 		SweepInterval:       15 * time.Second,
 		Retention:           7 * 24 * time.Hour,
+		PinOriginIpv4:       "https://api4.bringyour.com",
+		PinOriginIpv6:       "https://api6.bringyour.com",
 	}
 }
 
@@ -146,6 +154,26 @@ func (self *LagDriftSettings) withDefaults() {
 	positiveDuration(&self.TicketTtl, d.TicketTtl)
 	positiveDuration(&self.SweepInterval, d.SweepInterval)
 	positiveDuration(&self.Retention, d.Retention)
+	for _, origin := range []struct {
+		value    *string
+		fallback string
+	}{
+		{&self.PinOriginIpv4, d.PinOriginIpv4},
+		{&self.PinOriginIpv6, d.PinOriginIpv6},
+	} {
+		*origin.value = strings.TrimRight(strings.TrimSpace(*origin.value), "/")
+		if *origin.value == "" {
+			*origin.value = origin.fallback
+		}
+	}
+}
+
+// The API's origin that resolves in IP family 4 or 6 alone (K6, P5).
+func (self *LagDriftSettings) PinOrigin(ipFamily int) string {
+	if ipFamily == 6 {
+		return self.PinOriginIpv6
+	}
+	return self.PinOriginIpv4
 }
 
 // The time a run's report may take after its finish (E5).
