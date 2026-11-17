@@ -31,11 +31,15 @@ import (
 //	  preview_networks: []          # §7.4, D-PHASE-3: networks that hold strict_exp clients before stage 2
 //	  sockets_control_qps: {rate: 50, burst: 500}
 //	  urnetwork_edge: <network_id>
-//	  p0_enforce: {enabled: false}  # M0's log-only switch for §7.4 stage 1 and D-TEAM-14; inert since M1
 //	  file_clusters: {<cluster id>: {settle_passed_build: <commit>, hdd_capacity_ops: <n>}}
 //
-// p0_enforce is not in §19.11's list, which picks it up at the next records pass
-// (plan-OPS-small-readings #3), and file_clusters is plan-EVSB-settle-gate's.
+// No key enforces §7.4's stage 1 or D-TEAM-14: since M1 (TEAM-M1-01) they refuse
+// in code, in api's route gates, session's strict_exp expiry and the transport
+// lease's end, whatever this file holds or whether it is there. p0_enforce, M0's
+// log-only switch for them, is retired (owner decision 510, QD-922): the reader
+// has no field for it, so a file an old deployment still carries with the line
+// reads as one without it, whatever the line's value.
+// file_clusters is plan-EVSB-settle-gate's.
 // restore_hold is plan-OPS-restore-hold's (QD-076): while it reads true, api
 // answers every public route but its status route 503 with Retry-After, the
 // token exchange among them, and CreateContract answers Setup, until §19.10's
@@ -43,17 +47,17 @@ import (
 // does not parse holds nothing, as it opens nothing: a broken push must not stop
 // every route of a running product, and a restore's runbook reads the hold back
 // before its api step runs (sidecarrestore).
-// acl_contract_gate is not in it either: it is the switch ACL-M4-01's plan keeps
-// CreateContract's §8.10 gate dark behind, which a process consults only where it
-// installed a gate (controller.SetAclContractGate).
+// acl_contract_gate is not in §19.11's list: it is the switch ACL-M4-01's plan
+// keeps CreateContract's §8.10 gate dark behind, which a process consults only
+// where it installed a gate (controller.SetAclContractGate).
 // certs is QD-846's (question tls-m5-17-certs-host-install), which §19.11's list
-// picks up at the next records pass: certs' engine is installed in api (its /tls
+// carries (owner decision 429): certs' engine is installed in api (its /tls
 // routes) and in taskworker (its order, renewal and revocation chains) only
 // while it reads on, so nothing reaches a CA or a zone because a vault file
 // arrived, and the first real order is the owner's act (SidecarSwitchInstall).
 // It is the server's own, like wake, and never listed to a client.
 // evs's blocks is QD-639's (question quota-m2-10-evs-block-count), which §19.4's
-// evs row picks up at the next records pass: how many evs blocks serve the env,
+// evs row carries (owner decision 500): how many evs blocks serve the env,
 // set by the operator with services.yml's evs block count, as tlsedge.yml's
 // blocks is (§13.9, TLS reading 12). Each evs process paces a spent network's
 // reads at evs_unpaid_read_rate ÷ blocks (§20.6), with no shared counter. It has
@@ -62,12 +66,14 @@ import (
 // what one host sees of its peers.
 // sidecar_gates.go holds what each gate answers.
 //
-// A gate that loosens when the file breaks would drop P0's enforcement, or open
-// a service, on a bad push. So once a read succeeded, a failed or absent read
+// A gate that loosens when the file breaks would open a service, or preview a
+// network, on a bad push. So once a read succeeded, a failed or absent read
 // keeps it, and on a process's first read a file that is there but cannot be
-// read or parsed enforces P0, previews nothing and opens no gate. Only a file
-// the resolver finds absent from every home is inert (ErrResourceNotFound): a
-// dangling link, a directory or an inaccessible home is unavailable, not absent.
+// read or parsed answers the zero value, as an absent file does: it previews
+// nothing and opens no gate, and nothing the file partly parsed is kept. A failed
+// read is logged at every reread; only a file the resolver finds absent from
+// every home (ErrResourceNotFound) reads as absent, quietly: a dangling link, a
+// directory or an inaccessible home is unavailable, not absent.
 // Taking a gate back off is an edit to the file, not its removal: a removal
 // holds until the process restarts. Within a file that parses, one bad entry
 // costs only itself: an id that does not parse is skipped, a percent out of
@@ -114,7 +120,6 @@ type sidecarSwitchYaml struct {
 // The keys this reader reads.
 type sidecarConfigYaml struct {
 	Sidecar struct {
-		P0Enforce         sidecarSwitchYaml  `yaml:"p0_enforce"`
 		PreviewNetworks   []string           `yaml:"preview_networks"`
 		Evs               *sidecarGateYaml   `yaml:"evs"`
 		Format2           *sidecarGateYaml   `yaml:"format2"`
@@ -147,12 +152,8 @@ type sidecarConfigYaml struct {
 }
 
 // One read of sidecar.yml. Immutable once read. The zero value, what a first
-// read of a broken file answers but for P0Enforce, opens nothing.
+// read of an absent or broken file answers, previews nothing and opens nothing.
 type SidecarConfig struct {
-	// M0's switch for §7.4's stage 1 and D-TEAM-14, which refused only while it
-	// was on. Since M1 (TEAM-M1-01) they refuse in code, and no refusal reads
-	// this (question team-m1-01-retire-p0-enforce).
-	P0Enforce bool
 	// the networks that may hold strict_exp clients before stage 2 (D-TRUST-3)
 	previewNetworkIds map[Id]bool
 
@@ -220,7 +221,6 @@ func parseSidecarConfigEvsBlocks(node *yaml.Node) int {
 // One bad entry costs only that entry.
 func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 	config := &SidecarConfig{
-		P0Enforce:         y.Sidecar.P0Enforce.Enabled,
 		previewNetworkIds: map[Id]bool{},
 		serviceGates:      map[string]*SidecarServiceGate{},
 		switches:          map[string]bool{},
@@ -312,7 +312,8 @@ func loadSidecarConfig(previous *SidecarConfig) (config *SidecarConfig) {
 		if previous != nil {
 			return previous
 		}
-		return &SidecarConfig{P0Enforce: true}
+		// the zero value, never what the file partly parsed
+		return &SidecarConfig{}
 	}
 	if r := HandleError(func() {
 		resource, err := Config.SimpleResource(sidecarConfigResourceName)

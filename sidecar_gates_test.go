@@ -218,9 +218,7 @@ func TestSidecarGatesAnswerTheGateTable(t *testing.T) {
 			func() {
 				defer Testing_PushSidecarConfig(c.File)()
 				config := loadSidecarConfig(nil)
-				if !config.P0Enforce {
-					t.Errorf("%s: a first read of a broken file does not enforce", c.Name)
-				}
+				requireSidecarConfigOpensNothing(t, c.Name, config)
 				requireSidecarGateTableCase(t, table, sidecarGateTableCase{Name: c.Name}, config)
 			}()
 			continue
@@ -302,13 +300,14 @@ func TestWriteGateClosedAnswers503WithRetryAfter(t *testing.T) {
 	}
 }
 
-// The reader's failure rules hold for the gates as for P0: absent is inert; a
-// broken first read opens nothing; a broken or absent later read keeps the last
+// The reader's failure rules hold for the gates as for preview_networks: absent
+// is inert; a broken first read opens nothing, though the broken file turns push
+// on before the percent it fails on; a broken or absent later read keeps the last
 // good one.
 func TestSidecarGatesFailClosed(t *testing.T) {
 	networkId := NewId()
 	good := fmt.Sprintf("sidecar:\n  evs: {enabled: true, networks: [%q]}\n  push: {enabled: true}\n", networkId)
-	const broken = "sidecar:\n  evs: {enabled: true, percent: fifty}\n"
+	const broken = "sidecar:\n  push: {enabled: true}\n  evs: {enabled: true, percent: fifty}\n"
 
 	newTestSidecarConfigHome(t)
 	if config := loadSidecarConfig(nil); config.Service(SidecarGateEvs).Admits(networkId) || config.Push() {
@@ -317,8 +316,8 @@ func TestSidecarGatesFailClosed(t *testing.T) {
 	func() {
 		defer Testing_PushSidecarConfig(broken)()
 		config := loadSidecarConfig(nil)
-		if config.Service(SidecarGateEvs).Enabled() || config.Push() || !config.P0Enforce {
-			t.Fatal("a first read of a broken file opens a gate or leaves P0 off")
+		if config.Service(SidecarGateEvs).Enabled() || config.Push() {
+			t.Fatal("a first read of a broken file opens a gate")
 		}
 	}()
 	var previous *SidecarConfig
@@ -563,6 +562,7 @@ func FuzzSidecarConfig(f *testing.F) {
 		}
 	}
 	f.Add("sidecar:\n  evs: {enabled: true, writes: false, networks: [5ca1ab1e-0000-4000-8000-000000000004], percent: 100}\n")
+	// a file an old deployment may carry, with the retired p0_enforce
 	f.Add("sidecar:\n  p0_enforce: {enabled: true}\n  preview_networks: [5ca1ab1e-0000-4000-8000-000000000004]\n")
 	f.Add("sidecar: {format2: {enabled: true, percent: 7, purge: on, drop: \"on\"}, reseed: true}\n")
 	f.Add("sidecar:\n  evs: {enabled: true, percent: 100, blocks: 4}\n  tlsedge: {enabled: true, blocks: 3}\n")
@@ -629,9 +629,6 @@ func FuzzSidecarConfig(f *testing.F) {
 		if config.Reseed() && !sidecarYamlTrue(generic, "sidecar", "reseed") {
 			t.Fatalf("reseed is on in %q", text)
 		}
-		if config.P0Enforce && !sidecarYamlTrue(generic, "sidecar", "p0_enforce", "enabled") {
-			t.Fatalf("p0 enforces with no enabled: true in %q", text)
-		}
 		for networkId := range config.previewNetworkIds {
 			if !sidecarYamlListsId(generic, networkId, "sidecar", "preview_networks") {
 				t.Fatalf("%s previews, which %q does not list", networkId, text)
@@ -660,7 +657,9 @@ func FuzzSidecarConfig(f *testing.F) {
 }
 
 // config/main, config/local and config/canary sidecar.yml parse and are dark: no
-// gate open, no switch on, P0 log-only, no network named.
+// gate open, no switch on, no network named. None carries the retired p0_enforce
+// (owner decision 510), which reads like a switch for P0's refusals and is not
+// one: they refuse in code since M1.
 func TestSidecarConfigFilesAreDark(t *testing.T) {
 	for _, env := range []string{"main", "local", "canary"} {
 		path := "../config/" + env + "/sidecar.yml"
@@ -675,8 +674,15 @@ func TestSidecarConfigFilesAreDark(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %s", path, err)
 		}
-		if config.P0Enforce || 0 < len(config.previewNetworkIds) || config.Reseed() || config.PlaceNew() != "" || 0 < len(config.Drained()) {
+		if 0 < len(config.previewNetworkIds) || config.Reseed() || config.PlaceNew() != "" || 0 < len(config.Drained()) {
 			t.Errorf("%s is not dark", path)
+		}
+		generic := &yaml.Node{}
+		if err := yaml.Unmarshal(data, generic); err != nil {
+			t.Fatalf("%s: %s", path, err)
+		}
+		if _, ok := sidecarYamlLookup(generic, "sidecar", "p0_enforce"); ok {
+			t.Errorf("%s carries the retired p0_enforce", path)
 		}
 		for _, name := range []string{SidecarGateEvs, SidecarGateGkm, SidecarGateSockets, SidecarGateTlsedge, SidecarGateMxedge, SidecarGateSmtpedge, SidecarGateDns} {
 			gate := config.Service(name)

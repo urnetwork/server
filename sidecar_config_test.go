@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -32,37 +33,75 @@ func newTestSidecarConfigHome(t *testing.T) string {
 	return home
 }
 
-// Absent, the file is inert: nothing enforces and nothing is previewed. Stage 1
-// is log-only, and a strict_exp mint is refused. A home that is not there is
-// absent too.
+// Holds a read to what the zero value answers, the reader's closed direction: no
+// network previewed, so a strict_exp mint is refused, no service gate, format 2
+// or switch open, and no reseed or restore hold. Each network given is probed
+// beside one no file names.
+func requireSidecarConfigOpensNothing(t *testing.T, name string, config *SidecarConfig, networkIds ...Id) {
+	t.Helper()
+	probeIds := append([]Id{NewId()}, networkIds...)
+	if 0 < len(config.previewNetworkIds) {
+		t.Errorf("%s: previews %d networks", name, len(config.previewNetworkIds))
+	}
+	for _, networkId := range probeIds {
+		if config.PreviewNetwork(networkId) {
+			t.Errorf("%s: previews %s", name, networkId)
+		}
+	}
+	for _, service := range []string{SidecarGateEvs, SidecarGateGkm, SidecarGateSockets, SidecarGateTlsedge, SidecarGateMxedge, SidecarGateSmtpedge, SidecarGateDns} {
+		gate := config.Service(service)
+		if gate.Enabled() {
+			t.Errorf("%s: %s is enabled", name, service)
+		}
+		for _, networkId := range probeIds {
+			if gate.Admits(networkId) {
+				t.Errorf("%s: %s admits %s", name, service, networkId)
+			}
+		}
+	}
+	format2 := config.Format2()
+	if format2.Gate().Enabled() || format2.Purge() != SidecarFormat2Observe || format2.Drop() != SidecarFormat2Observe {
+		t.Errorf("%s: format2 is enabled or deletes", name)
+	}
+	for _, networkId := range probeIds {
+		if format2.Admits(networkId) {
+			t.Errorf("%s: format2 admits %s", name, networkId)
+		}
+	}
+	for _, switchName := range []string{SidecarSwitchPush, SidecarSwitchWake, SidecarSwitchBridge, SidecarSwitchEscrowDrawOrder, SidecarSwitchAclContractGate, SidecarSwitchCerts} {
+		if config.Switch(switchName) {
+			t.Errorf("%s: %s is on", name, switchName)
+		}
+	}
+	if config.Reseed() || config.RestoreHold() {
+		t.Errorf("%s: reseed %t, restore_hold %t", name, config.Reseed(), config.RestoreHold())
+	}
+}
+
+// Absent, the file is inert: no network is previewed, so a strict_exp mint is
+// refused, and no gate opens. A home that is not there is absent too.
 func TestSidecarConfigIsInertWhenAbsent(t *testing.T) {
+	networkId := NewId()
 	home := newTestSidecarConfigHome(t)
-	config := loadSidecarConfig(nil)
-	if config.P0Enforce {
-		t.Fatal("an absent file enforces")
-	}
-	if config.PreviewNetwork(NewId()) {
-		t.Fatal("an absent file previews a network")
-	}
+	requireSidecarConfigOpensNothing(t, "an absent file", loadSidecarConfig(nil), networkId)
 
 	// the answer came from this home: a file put there is read
-	if err := os.WriteFile(filepath.Join(home, sidecarConfigResourceName), []byte("sidecar:\n  p0_enforce: {enabled: true}\n"), 0o600); err != nil {
+	text := fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", networkId)
+	if err := os.WriteFile(filepath.Join(home, sidecarConfigResourceName), []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !loadSidecarConfig(nil).P0Enforce {
+	if !loadSidecarConfig(nil).PreviewNetwork(networkId) {
 		t.Fatal("the test's config home is not the one read")
 	}
 
 	t.Setenv("WARP_CONFIG_HOME", filepath.Join(t.TempDir(), "absent"))
-	if loadSidecarConfig(nil).P0Enforce {
-		t.Fatal("a file in a home that is not there enforces")
-	}
+	requireSidecarConfigOpensNothing(t, "a file in a home that is not there", loadSidecarConfig(nil), networkId)
 }
 
-// A file that is there but cannot be read is not an absent one, so it does not
-// loosen a gate: on a process's first read it enforces and previews nothing, and
-// after a good read it keeps that read. The same holds when what cannot be read
-// is the home the file would be in.
+// A file that is there but cannot be read is not an absent one, though a first
+// read answers alike: it previews nothing and opens no gate, and after a good
+// read it keeps that read. The same holds when what cannot be read is the home
+// the file would be in.
 func TestSidecarConfigFailsClosedWhenUnavailable(t *testing.T) {
 	networkId := NewId()
 	for _, c := range []struct {
@@ -97,15 +136,8 @@ func TestSidecarConfigFailsClosedWhenUnavailable(t *testing.T) {
 			t.Fatalf("%s: the resolver answers %v, want an unavailable resource", c.name, err)
 		}
 
-		config := loadSidecarConfig(nil)
-		if !config.P0Enforce {
-			t.Errorf("%s: a first read does not enforce", c.name)
-		}
-		if config.PreviewNetwork(networkId) {
-			t.Errorf("%s: a first read previews a network", c.name)
-		}
+		requireSidecarConfigOpensNothing(t, "a first read of "+c.name, loadSidecarConfig(nil), networkId)
 		previous := &SidecarConfig{
-			P0Enforce:         false,
 			previewNetworkIds: map[Id]bool{networkId: true},
 		}
 		if loadSidecarConfig(previous) != previous {
@@ -114,7 +146,8 @@ func TestSidecarConfigFailsClosedWhenUnavailable(t *testing.T) {
 	}
 }
 
-// §19.11's shape, with keys this reader does not read beside the ones it does.
+// §19.11's shape, with keys this reader does not read beside the ones it does,
+// the retired p0_enforce among them.
 func TestSidecarConfigReadsItsGates(t *testing.T) {
 	networkId := NewId()
 	defer Testing_PushSidecarConfig(fmt.Sprintf(`
@@ -123,29 +156,76 @@ sidecar:
   reseed: false
   place_new: meta-1
   p0_enforce: {enabled: true}
+  revocation_record_enabled: false
   preview_networks: [%q, "not-an-id"]
 `, networkId))()
 
 	config := CurrentSidecarConfig()
-	if !config.P0Enforce {
-		t.Fatal("p0_enforce was not read")
-	}
 	if !config.PreviewNetwork(networkId) {
 		t.Fatal("the listed network was not read")
 	}
 	if config.PreviewNetwork(NewId()) {
 		t.Fatal("an unlisted network previews")
 	}
+	if config.PlaceNew() != "meta-1" {
+		t.Fatalf("place_new = %q, want meta-1", config.PlaceNew())
+	}
 }
 
-// A file without the key leaves the gate off, and without the block too.
+// p0_enforce is retired (owner decision 510, QD-922): §7.4's stage 1 and
+// D-TEAM-14 refuse in code since M1. A file an old deployment still carries with
+// the line reads exactly as the same file without it, whatever the line's value,
+// one the old reader could not decode included, so the line neither opens,
+// closes nor breaks anything.
+func TestSidecarConfigReadsTheRetiredP0EnforceAsAbsent(t *testing.T) {
+	networkId := NewId()
+	without := fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n  evs: {enabled: true, networks: [%q]}\n  push: {enabled: true}\n", networkId, networkId)
+	want, err := parseSidecarConfig([]byte(without))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !want.PreviewNetwork(networkId) || !want.Service(SidecarGateEvs).Admits(networkId) || !want.Push() {
+		t.Fatal("the file without the line did not open what it names")
+	}
+	for _, line := range []string{
+		"  p0_enforce: {enabled: false}\n",
+		"  p0_enforce: {enabled: true}\n",
+		"  p0_enforce: {enabled: fifty}\n",
+		"  p0_enforce: true\n",
+	} {
+		with := without + line
+		got, err := parseSidecarConfig([]byte(with))
+		if err != nil {
+			t.Errorf("%q: %s", line, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%q: the file reads otherwise than without the line", line)
+		}
+		// and as a process reads it, through Config
+		func() {
+			defer Testing_PushSidecarConfig(with)()
+			if !reflect.DeepEqual(CurrentSidecarConfig(), want) {
+				t.Errorf("%q: the read file differs from the file without the line", line)
+			}
+		}()
+	}
+}
+
+// A file without a gate's key leaves the gate off, and without the block too. The
+// retired p0_enforce, on or off, is no gate.
 func TestSidecarConfigDefaultsItsGatesOff(t *testing.T) {
-	for _, yaml := range []string{"", "other: true\n", "sidecar: {}\n", "sidecar:\n  p0_enforce: {enabled: false}\n"} {
+	networkId := NewId()
+	for _, yaml := range []string{
+		"",
+		"other: true\n",
+		"sidecar: {}\n",
+		"sidecar:\n  p0_enforce: {enabled: false}\n",
+		"sidecar:\n  p0_enforce: {enabled: true}\n",
+	} {
 		func() {
 			defer Testing_PushSidecarConfig(yaml)()
-			if CurrentSidecarConfig().P0Enforce {
-				t.Fatalf("%q enforces", yaml)
-			}
+			requireSidecarConfigOpensNothing(t, fmt.Sprintf("%q", yaml), CurrentSidecarConfig(), networkId)
 		}()
 	}
 }
@@ -153,23 +233,24 @@ func TestSidecarConfigDefaultsItsGatesOff(t *testing.T) {
 // The file is read again once a read is older than the interval, and not before:
 // a gate moves within §19.11's 60 s of a config push without a read per request.
 func TestSidecarConfigRereadsAfterItsInterval(t *testing.T) {
+	networkId := NewId()
 	reads := 0
-	enforce := false
+	preview := false
 	reader, now := newTestSidecarConfigReader(func(previous *SidecarConfig) *SidecarConfig {
 		reads += 1
-		return &SidecarConfig{P0Enforce: enforce}
+		return &SidecarConfig{previewNetworkIds: map[Id]bool{networkId: preview}}
 	})
 
-	if reader.get().P0Enforce {
-		t.Fatal("first read enforces")
+	if reader.get().PreviewNetwork(networkId) {
+		t.Fatal("first read previews")
 	}
-	enforce = true
+	preview = true
 	*now = now.Add(59 * time.Second)
-	if reader.get().P0Enforce || reads != 1 {
-		t.Fatalf("inside the interval: enforce = %t, reads = %d", reader.get().P0Enforce, reads)
+	if reader.get().PreviewNetwork(networkId) || reads != 1 {
+		t.Fatalf("inside the interval: preview = %t, reads = %d", reader.get().PreviewNetwork(networkId), reads)
 	}
 	*now = now.Add(time.Second)
-	if !reader.get().P0Enforce || reads != 2 {
+	if !reader.get().PreviewNetwork(networkId) || reads != 2 {
 		t.Fatalf("at the interval: reads = %d", reads)
 	}
 }
@@ -177,17 +258,18 @@ func TestSidecarConfigRereadsAfterItsInterval(t *testing.T) {
 // One caller rereads while the others keep the latest read, so a slow read holds
 // up no request.
 func TestSidecarConfigRereadBlocksNoOtherCaller(t *testing.T) {
+	networkId := NewId()
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	first := true
 	reader, now := newTestSidecarConfigReader(func(previous *SidecarConfig) *SidecarConfig {
 		if first {
 			first = false
-			return &SidecarConfig{P0Enforce: false}
+			return &SidecarConfig{}
 		}
 		close(entered)
 		<-release
-		return &SidecarConfig{P0Enforce: true}
+		return &SidecarConfig{previewNetworkIds: map[Id]bool{networkId: true}}
 	})
 	reader.get()
 	*now = now.Add(time.Minute)
@@ -197,49 +279,57 @@ func TestSidecarConfigRereadBlocksNoOtherCaller(t *testing.T) {
 		done <- reader.get()
 	}()
 	<-entered
-	if reader.get().P0Enforce {
+	if reader.get().PreviewNetwork(networkId) {
 		t.Fatal("a second caller did not keep the latest read")
 	}
 	close(release)
-	if !(<-done).P0Enforce {
+	if !(<-done).PreviewNetwork(networkId) {
 		t.Fatal("the rereading caller did not get its read")
 	}
-	if !reader.get().P0Enforce {
+	if !reader.get().PreviewNetwork(networkId) {
 		t.Fatal("the reread was not kept")
 	}
 }
 
-// A bad push must not drop enforcement: once a read succeeded a failed one keeps
-// it, and a first read of a broken file enforces and previews nothing.
+// A bad push must not preview a network or open a gate: once a read succeeded a
+// failed one keeps it, and a first read of a broken file answers the zero value,
+// never what it partly parsed. The second broken file fails on its last gate's
+// percent, after it names the network and turns push on, which a reader that kept
+// its partial decoding would open.
 func TestSidecarConfigFailsClosed(t *testing.T) {
 	networkId := NewId()
-	good := fmt.Sprintf("sidecar:\n  p0_enforce: {enabled: true}\n  preview_networks: [%q]\n", networkId)
-	const broken = "sidecar: [unterminated\n"
+	good := fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", networkId)
+	newTestSidecarConfigHome(t)
 
-	func() {
-		defer Testing_PushSidecarConfig(broken)()
-		config := loadSidecarConfig(nil)
-		if !config.P0Enforce {
-			t.Fatal("a first read of a broken file does not enforce")
+	for _, broken := range []string{
+		"sidecar: [unterminated\n",
+		fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n  push: {enabled: true}\n  evs: {enabled: true, networks: [%q], percent: fifty}\n", networkId, networkId),
+	} {
+		if _, err := parseSidecarConfig([]byte(broken)); err == nil {
+			t.Fatalf("%q parsed", broken)
 		}
-		if config.PreviewNetwork(networkId) {
-			t.Fatal("a broken file previews a network")
-		}
-	}()
+		func() {
+			defer Testing_PushSidecarConfig(broken)()
+			requireSidecarConfigOpensNothing(t, fmt.Sprintf("a first read of %q", broken), loadSidecarConfig(nil), networkId)
+		}()
 
-	var previous *SidecarConfig
-	func() {
-		defer Testing_PushSidecarConfig(good)()
-		previous = loadSidecarConfig(nil)
-	}()
-	func() {
-		defer Testing_PushSidecarConfig(broken)()
+		var previous *SidecarConfig
+		func() {
+			defer Testing_PushSidecarConfig(good)()
+			previous = loadSidecarConfig(nil)
+		}()
+		if !previous.PreviewNetwork(networkId) {
+			t.Fatal("the good file was not read")
+		}
+		func() {
+			defer Testing_PushSidecarConfig(broken)()
+			if config := loadSidecarConfig(previous); config != previous {
+				t.Fatalf("%q replaced the latest good read", broken)
+			}
+		}()
+		// with no file at all the latest read holds too: only an edit moves a gate
 		if config := loadSidecarConfig(previous); config != previous {
-			t.Fatal("a broken file replaced the latest good read")
+			t.Fatal("an absent file replaced the latest good read")
 		}
-	}()
-	// with no file at all the latest read holds too: only an edit moves a gate
-	if config := loadSidecarConfig(previous); config != previous {
-		t.Fatal("an absent file replaced the latest good read")
 	}
 }
