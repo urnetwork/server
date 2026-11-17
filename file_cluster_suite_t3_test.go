@@ -19,14 +19,19 @@ import (
 	"github.com/urnetwork/sidecar/sidecartest/blobsuite"
 )
 
-// blobsuite's cases as the suite's, as filecluster-suite's main adds them.
+// blobsuite's cases as the suite's, as filecluster-suite's main adds them. Its settle cases take blobsuite's
+// defaults, LateBy among them: a request this machine's clock sends that late is late by the hosts' clock too, which
+// is docker's VM's (QD-892).
 func fileClusterSuiteT3StoreCases(ctx context.Context, target *FileClusterSuiteStoreTarget) []*FileClusterSuiteCase {
+	settle := blobsuite.DefaultSettle()
+	settle.Now = target.Now
+	settle.Delayed = target.Delayed
 	cases := []*FileClusterSuiteCase{}
 	for _, result := range blobsuite.RunCases(ctx, &blobsuite.Target{
 		Cluster:        target.Cluster,
 		Now:            target.Now,
 		ClockTolerance: 2 * time.Second,
-		Settle:         &blobsuite.Settle{Now: target.Now, Delayed: target.Delayed},
+		Settle:         settle,
 	}) {
 		c := &FileClusterSuiteCase{Name: "store/" + result.Name, Outcome: FileClusterSuitePass, Elapsed: result.Elapsed}
 		switch {
