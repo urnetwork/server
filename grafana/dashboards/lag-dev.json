@@ -2001,7 +2001,7 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "max(urnetwork_lag_drift_stuck_runs{env=\"$env\",service=\"taskworker\"})",
+     "expr": "max(urnetwork_lag_drift_stuck_runs{env=\"$env\",service=\"taskworker\"} and on (env, service, block, host, instance) topk(1, urnetwork_lag_drift_sweep_timestamp_seconds{env=\"$env\",service=\"taskworker\"}))",
      "refId": "A",
      "legendFormat": "runs stuck"
     },
@@ -2015,7 +2015,7 @@
      "legendFormat": "tests failed in the hour"
     }
    ],
-   "description": "Runs stuck: runs still started or processing a minute past their report wait (E5), as the taskworker's drift sweep last found them, read with max across taskworkers, each of which keeps the count of its own last sweep. Any is ops/drift-test.md 9.1: a process without the border file, lock waits on lag_drift_test rows, or Main's health; LagDriftRunsStuck warns after 5 minutes. Tests failed: drift tests marked failed by an internal error in the trailing hour (P4), each logged as [lag]drift test <id> failed; one is a bug to chase and a burst is ops 9.1, and LagDriftTestFailed warns on any. Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+   "description": "Runs stuck: runs still started or processing a minute past their report wait (E5), as the drift sweep's newest pass found them. Each taskworker keeps the count of the last pass it ran, so this reads the count of the taskworker whose pass ended last. Any is ops/drift-test.md 9.1: a process without the border file, lock waits on lag_drift_test rows, or Main's health; LagDriftRunsStuck warns after 5 minutes. Tests failed: drift tests marked failed by an internal error in the trailing hour (P4), each logged as [lag]drift test <id> failed; a failed test closes its open runs as failed, so they never count as stuck. One is a bug to chase and a burst is ops 9.1, and LagDriftTestFailed warns on any. Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
   },
   {
    "id": 38,
@@ -2160,7 +2160,7 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 16,
+    "w": 8,
     "x": 0,
     "y": 128
    },
@@ -2210,7 +2210,80 @@
      "legendFormat": "start {{outcome}}"
     }
    ],
-   "description": "Every answer to POST /lag/drift-test (allocate) and POST /lag/drift-test/start, by outcome (P1, P5): created, started, and demo for the demo token; refused_<code>, where embed is a network without Embed, disabled a network whose drift tests are switched off, expired, closed and busy are the token's state, origin a parent origin not allowed, limit a rate limit, and unavailable no extenders or no border file; rejected, a 4xx; error. Mostly refused_unavailable after a deploy is a process without the border file (ops/drift-test.md 5). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+   "description": "Every answer to POST /lag/drift-test (allocate) and POST /lag/drift-test/start, by outcome (P1, P5): created, started, and demo for the demo token; refused_<code>, where embed is a network without Embed, disabled a network whose drift tests are switched off, client_token a client's token in place of the network's credential, expired, closed and busy are the token's state, origin a parent origin not allowed, limit a rate limit, and unavailable no extenders or no border file; rejected, a 4xx; error. Mostly refused_unavailable after a deploy is a process without the border file (ops/drift-test.md 5). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 42,
+   "type": "timeseries",
+   "title": "drift sweep, time since its last pass",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 128
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "decimals": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 60
+       },
+       {
+        "color": "red",
+        "value": 300
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "time() - max(urnetwork_lag_drift_sweep_timestamp_seconds{env=\"$env\",service=\"taskworker\"})",
+     "refId": "A",
+     "legendFormat": "since the last pass"
+    }
+   ],
+   "description": "How long ago the drift sweep last finished a pass, in any taskworker. It runs every sweep_interval, 15 s, so this stays under a minute. The sweep completes the runs nobody reads, and deletes client_ip hashes and old tests (K3, R1), so while it is stopped those runs wait and the privacy deletes do not happen: ops/drift-test.md 9.1 and 10. LagDriftSweepStopped warns past 5 minutes, 20 passes missed, or one pass that ran to its 5-minute task limit, a backlog the sweep cannot clear. The lines mark 1 and 5 minutes. Each taskworker publishes the end of its own last pass, so this reads the newest with max."
   },
   {
    "id": 41,

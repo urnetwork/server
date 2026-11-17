@@ -41,14 +41,21 @@ const lagDevDriftStatsMetricPrefix = "urnetwork_stats_lag_drift_"
 
 const lagDevDriftRowTitle = "drift test"
 
-// The drift metrics the row reads that no code registers yet, and what each
-// waits on. The run outcomes' stop label is also pending (drift-server: the
-// browser's stop, or none for a run with no finish).
-var lagDevDriftPendingMetrics = map[string]string{
-	"urnetwork_lag_drift_verdict_reasons_total":         "drift-server: each verdict counted by verdict and reason, without the network",
-	"urnetwork_lag_drift_processing_seconds":            "drift-server: a histogram of finish to complete, for runs the frame finished",
-	"urnetwork_stats_lag_drift_calibration_age_seconds": "drift-calibration: a stats gauge of the calibration in force's age, no value for the defaults",
-}
+// The drift sweep's gauges, which each taskworker sets for the last pass it
+// ran: the runs it left stuck, and when the pass ended.
+const (
+	lagDevDriftStuckRunsGauge      = "urnetwork_lag_drift_stuck_runs"
+	lagDevDriftSweepTimestampGauge = "urnetwork_lag_drift_sweep_timestamp_seconds"
+)
+
+// The stuck runs of the taskworker whose pass ended last: another
+// taskworker's count is as old as its own last pass.
+const lagDevDriftStuckAtNewestPass = `max(urnetwork_lag_drift_stuck_runs{env="$env",service="taskworker"}` +
+	` and on (env, service, block, host, instance)` +
+	` topk(1, urnetwork_lag_drift_sweep_timestamp_seconds{env="$env",service="taskworker"}))`
+
+// How long ago any taskworker's pass ended.
+const lagDevDriftSweepAge = `time() - max(urnetwork_lag_drift_sweep_timestamp_seconds{env="$env",service="taskworker"})`
 
 // The drift row's panels: every panel below its row, which is the dashboard's
 // last.
@@ -112,7 +119,8 @@ func TestLagDevDriftRowAnswersEachQuestion(t *testing.T) {
 		{"stop reasons", []string{"sum by (stop) (", "urnetwork_lag_drift_run_outcomes_total{"}},
 		{"runs ending reports_missing or stopped_early", []string{"urnetwork_lag_drift_run_outcomes_total{", `outcome=~"reports_missing|stopped_early"`}},
 		{"processing latency, finish to complete", []string{"histogram_quantile(0.9, sum by (le) (", "urnetwork_lag_drift_processing_seconds_bucket{"}},
-		{"runs stuck processing", []string{`max(urnetwork_lag_drift_stuck_runs{env="$env",service="taskworker"})`}},
+		{"runs stuck processing", []string{lagDevDriftStuckAtNewestPass}},
+		{"whether the sweep runs", []string{lagDevDriftSweepAge}},
 		{"tests failed", []string{"urnetwork_lag_drift_failures_total{"}},
 		{"demo starts", []string{"urnetwork_lag_drift_starts_total{", `outcome="demo"`}},
 		{"demo reports dropped", []string{"urnetwork_lag_drift_demo_reports_total{"}},
@@ -135,8 +143,8 @@ func TestLagDevDriftRowAnswersEachQuestion(t *testing.T) {
 }
 
 // Every drift metric the code registers is on the drift row, every one the row
-// reads is registered or pending, and no other panel reads one, so lag.dev's
-// rules and the drift row's each hold where they apply.
+// reads is registered, and no other panel reads one, so lag.dev's rules and
+// the drift row's each hold where they apply.
 func TestLagDevDriftRowCoversTheDriftMetrics(t *testing.T) {
 	dashboard := readTestDashboard(t, "lag-dev.json")
 	driftPanels := lagDevDriftPanels(t, dashboard)
@@ -158,8 +166,8 @@ func TestLagDevDriftRowCoversTheDriftMetrics(t *testing.T) {
 		}
 	}
 	for _, metric := range slices.Sorted(maps.Keys(read)) {
-		if !registered[metric] && lagDevDriftPendingMetrics[metric] == "" {
-			t.Errorf("the drift row reads %s, which no code registers and nothing is pending as", metric)
+		if !registered[metric] {
+			t.Errorf("the drift row reads %s, which no code registers", metric)
 		}
 	}
 
@@ -184,13 +192,13 @@ var lagDevDriftSumPrefixPattern = regexp.MustCompile(`(?:sum\(|sum by \([a-z_, ]
 
 // Every drift counter, and the latency histogram's buckets, is read as each
 // process's count over the window, summed across processes and scoped to the
-// env. The stuck runs gauge is each taskworker's last sweep, read with max.
+// env. The sweep's gauges are read only as the newest pass's stuck runs, and
+// as the time since the newest pass.
 func TestLagDevDriftRowCountsEveryCountOfEachProcess(t *testing.T) {
-	gauge := "urnetwork_lag_drift_stuck_runs"
 	for _, expression := range lagDevDriftExpressions(t) {
 		occurrences := 0
 		for _, series := range lagDevDriftMetricPattern.FindAllString(expression, -1) {
-			if strings.HasPrefix(series, lagDevDriftMetricPrefix) && series != gauge {
+			if strings.HasPrefix(series, lagDevDriftMetricPrefix) && series != lagDevDriftStuckRunsGauge && series != lagDevDriftSweepTimestampGauge {
 				occurrences += 1
 			}
 		}
@@ -215,18 +223,22 @@ func TestLagDevDriftRowCountsEveryCountOfEachProcess(t *testing.T) {
 				t.Errorf("a count is not summed across processes: %s", expression)
 			}
 		}
-		for _, offset := range metricOccurrences(expression, gauge) {
-			if !strings.HasSuffix(expression[:offset], "max(") || !strings.HasPrefix(expression[offset+len(gauge):], `{env="$env",service="taskworker"}`) {
-				t.Errorf("the stuck runs gauge is not read as the taskworkers' max: %s", expression)
-			}
+		stuckReads := strings.Count(expression, lagDevDriftStuckAtNewestPass)
+		ageReads := strings.Count(expression, lagDevDriftSweepAge)
+		if len(metricOccurrences(expression, lagDevDriftStuckRunsGauge)) != stuckReads {
+			t.Errorf("the stuck runs gauge is read other than as the newest pass's: %s", expression)
+		}
+		if len(metricOccurrences(expression, lagDevDriftSweepTimestampGauge)) != stuckReads+ageReads {
+			t.Errorf("the sweep timestamp is read other than to pick the newest pass or to age it: %s", expression)
 		}
 	}
 }
 
 // The drift row groups by the bounded labels of the drift metrics: outcome,
 // verdict, reason, stop and le, and by network only for the 10 networks with
-// the most runs. Nothing names a visitor, an address, an extender, a test or
-// a token (DRIFTTEST.md R1, ops/drift-test.md §10).
+// the most runs. A process's labels only match the sweep's two gauges under a
+// max, which keeps no process. Nothing names a visitor, an address, an
+// extender, a test or a token (DRIFTTEST.md R1, ops/drift-test.md §10).
 func TestLagDevDriftRowGroupsOnlyByBoundedLabels(t *testing.T) {
 	bounded := map[string]bool{
 		"outcome": true,
@@ -259,10 +271,13 @@ func TestLagDevDriftRowGroupsOnlyByBoundedLabels(t *testing.T) {
 				}
 			}
 		}
-		for _, unbounded := range []string{"extender_id", "client_id", "track_id", "drift_test_id", "token", "client_ip", "instance)"} {
+		for _, unbounded := range []string{"extender_id", "client_id", "track_id", "drift_test_id", "token", "client_ip", "without ("} {
 			if strings.Contains(expression, unbounded) {
 				t.Errorf("drift query names %q: %s", unbounded, expression)
 			}
+		}
+		if strings.Count(expression, "instance") != strings.Count(expression, lagDevDriftStuckAtNewestPass) {
+			t.Errorf("drift query names the instance other than to match the newest pass's process: %s", expression)
 		}
 	}
 }
@@ -275,6 +290,8 @@ func TestLagDevDriftRowGroupsOnlyByBoundedLabels(t *testing.T) {
 // processes add; another environment is ignored; and an hour later every
 // remaining series reads 0. The network table: the 10 networks with the most
 // runs in the day, across processes, and the verdicts of those networks only.
+// The stuck runs: the count of the taskworker whose pass ended last, however
+// many another taskworker found at its own last pass.
 func TestLagDevDriftRowPromqlCountsEachProcess(t *testing.T) {
 	promtool := os.Getenv("URNETWORK_PROMTOOL")
 	if promtool == "" {
@@ -361,6 +378,25 @@ func TestLagDevDriftRowPromqlCountsEachProcess(t *testing.T) {
 	}
 	topRuns["n12"] += 1
 
+	// one sample a minute from 0: t1 ran a pass each minute, half a minute
+	// in, until minute 20, and found 2 runs stuck at each; t2 runs one each
+	// minute throughout and finds none; the api pushes the gauges at 0
+	stuck := panelExpression("drift runs stuck and tests failed", "A")
+	taskworker := func(instance string) string {
+		return fmt.Sprintf(`env="synthetic",service="taskworker",block="b1",host="synthetic-host",instance=%q`, instance)
+	}
+	sweepSeries := []map[string]string{
+		{"series": "urnetwork_lag_drift_stuck_runs{" + taskworker("t1") + "}", "values": "2x60"},
+		{"series": "urnetwork_lag_drift_sweep_timestamp_seconds{" + taskworker("t1") + "}", "values": "30+60x20 1230x40"},
+		{"series": "urnetwork_lag_drift_stuck_runs{" + taskworker("t2") + "}", "values": "0x60"},
+		{"series": "urnetwork_lag_drift_sweep_timestamp_seconds{" + taskworker("t2") + "}", "values": "0+60x60"},
+		{"series": "urnetwork_lag_drift_stuck_runs{" + process("synthetic", "a1") + "}", "values": "0x60"},
+		{"series": "urnetwork_lag_drift_sweep_timestamp_seconds{" + process("synthetic", "a1") + "}", "values": "0x60"},
+	}
+	newestPass := func(value float64) []map[string]any {
+		return []map[string]any{{"labels": "{}", "value": value}}
+	}
+
 	fixture, err := json.Marshal(map[string]any{
 		"evaluation_interval": "1m",
 		"tests": []map[string]any{
@@ -380,6 +416,15 @@ func TestLagDevDriftRowPromqlCountsEachProcess(t *testing.T) {
 				"promql_expr_test": []map[string]any{
 					{"expr": runs, "eval_time": "48h", "exp_samples": samples("network_id", topRuns)},
 					{"expr": agree, "eval_time": "48h", "exp_samples": samples("network_id", map[string]float64{"n12": 4})},
+				},
+			},
+			{
+				"name":         "drift runs stuck at the newest pass",
+				"interval":     "1m",
+				"input_series": sweepSeries,
+				"promql_expr_test": []map[string]any{
+					{"expr": stuck, "eval_time": "10m", "exp_samples": newestPass(2)},
+					{"expr": stuck, "eval_time": "50m", "exp_samples": newestPass(0)},
 				},
 			},
 		},
