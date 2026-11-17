@@ -1,5 +1,6 @@
 // The companion origin reads as they were before the lingering origins' side
-// table (contract_origin_linger.go), kept verbatim. A closed origin arm here
+// table (contract_origin_linger.go), with the hot reads' contract id bound
+// (contract_id_bound.go) as their successors carry it. A closed origin arm here
 // reads the closed pair range of transfer_contract_open_source_id. Each read
 // uses these only until the side table's state row is complete, and they go
 // with the index's drop record (OPEN-SOURCE-ID-RETIRE.md §4, step 6): without
