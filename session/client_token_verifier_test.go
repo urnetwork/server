@@ -77,7 +77,7 @@ func testingLapseRevocationField(ctx context.Context, t testing.TB, client *ByJw
 	t.Helper()
 	lineage, _ := revocationRecordLineage(client)
 	err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-		return r.HDel(ctx, revocationRecordKey(client.NetworkId, lineage), field).Err()
+		return r.HDel(ctx, revocationRecordKey(DefaultRevocationRecordSettings(), client.NetworkId, lineage), field).Err()
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -288,8 +288,9 @@ func TestClientTokenVerifierGraceCoversNoRotation(t *testing.T) {
 
 // What the check cannot vouch for: a token with no root claim, one past its exp
 // or with none, a forgery under a held kid, each refused; a key the block was
-// not given, a member's credential and a record not yet enabled, each
-// unavailable. None reaches SQL.
+// not given, a credential descending from an API key, which the record keeps no
+// state for, a member's credential whose membership the record has not
+// projected, and a record not yet enabled, each unavailable. None reaches SQL.
 func TestClientTokenVerifierAnswersWhatItCannotVouchFor(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		defer Testing_SetRevocationRecordEnabled(true)()
@@ -324,12 +325,20 @@ func TestClientTokenVerifierAnswersWhatItCannotVouchFor(t *testing.T) {
 			}
 		}
 
+		apiKey := *client
+		apiKeyId := server.NewId()
+		apiKey.ApiKeyId = &apiKeyId
+		_, err = test.verifyWithoutSql(t, ctx, apiKey.Testing_Sign())
+		if retryAfter := clientTokenRetryAfter(t, err); retryAfter != DefaultClientTokenVerifierSettings().MissRetryAfter {
+			t.Fatalf("a credential descending from an API key asked for %s", retryAfter)
+		}
+		// the record misses the membership, and nothing it holds refuses
 		member := *client
 		memberId := server.NewId()
 		member.MemberId = &memberId
 		_, err = test.verifyWithoutSql(t, ctx, member.Testing_Sign())
 		if retryAfter := clientTokenRetryAfter(t, err); retryAfter != DefaultClientTokenVerifierSettings().MissRetryAfter {
-			t.Fatalf("a member's credential asked for %s", retryAfter)
+			t.Fatalf("a member's credential the record has not projected asked for %s", retryAfter)
 		}
 
 		otherDocument, err := json.Marshal(&jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{

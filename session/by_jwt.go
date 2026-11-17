@@ -207,11 +207,13 @@ type ByJwt struct {
 	// a team member's credential (§7.5, TEAM-M6-02): the member_id of
 	// UserId's membership in NetworkId, new per join, so a removal and a
 	// re-invite never revive a credential of the earlier membership. The state
-	// check reads network_member's row for it, never network.admin_user_id,
-	// which in a team is a synthetic owner of record (D-TEAM-2). Nil in a
-	// personal network, whose one member is its owner's user. Set when the
-	// credential is minted for the membership; renewal and every credential
-	// derived from it keep it.
+	// check reads the membership, never network.admin_user_id, which in a team
+	// is a synthetic owner of record (D-TEAM-2): a tagged credential from its
+	// revocation record's m:<member_id> and u:<user_id> fields (owner decision
+	// 561), which sockets reads with no SQL, and network_member's row where the
+	// record cannot answer. Nil in a personal network, whose one member is its
+	// owner's user. Set when the credential is minted for the membership;
+	// renewal and every credential derived from it keep it.
 	MemberId *server.Id `json:"member_id,omitempty"`
 	// the sidecar whose identity binding names this client (§5.5): sockets
 	// reads the caller's §8 subject here, with no Postgres (plan-SOCK-client-auth,
@@ -832,39 +834,46 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 // inside its reauth_deadline; a client credential's client must be active in
 // the network, with the same lineage checks as the owner's. A binary that does
 // not link MG6 has no members, so it refuses every member credential.
+//
+// noActiveRow reports only a refusal that is permanent for the credential, so
+// that state_refusal_cache.go may remember it: no membership of its member_id,
+// network and user (a member_id names one membership and is never reused), or
+// a client refused. A pending membership or one past its reauth_deadline is
+// refused without it, since an admission or the member's next IdP sign-in
+// changes that answer for the same credential.
 func validateMemberByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, parentClientId *server.Id) (noActiveRow bool, err error) {
 	if !server.SidecarMg6Linked() {
 		return true, rejectNoActiveRow(byJwt)
 	}
-	valid := false
+	found := false
+	admitted := false
 	var credentialChangeTime time.Time
 	now := server.NowUtc()
 	func() {
 		query := beginStateQuery(ctx, byJwt.ClientId != nil)
 		defer query.finish(ctx)
-		queryFound := false
 		if byJwt.ClientId == nil {
 			result, err := conn.Query(ctx, `
-				SELECT network_user.credential_change_time
+				SELECT
+					network_user.credential_change_time,
+					NOT network_member.pending AND
+					(network_member.reauth_deadline IS NULL OR $5 < network_member.reauth_deadline)
 				FROM network_user
 				INNER JOIN network_member ON
 					network_member.member_id = $3 AND
 					network_member.network_id = $2 AND
-					network_member.user_id = network_user.user_id AND
-					NOT network_member.pending AND
-					(network_member.reauth_deadline IS NULL OR $5 < network_member.reauth_deadline)
+					network_member.user_id = network_user.user_id
 				WHERE
 					network_user.user_id = $1 AND
 					($4::uuid IS NULL OR EXISTS (SELECT 1 FROM account_api_key WHERE api_key_id=$4 AND network_id=$2))
 			`, byJwt.UserId, byJwt.NetworkId, *byJwt.MemberId, byJwt.ApiKeyId, now)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
-					server.Raise(result.Scan(&credentialChangeTime))
-					valid = true
-					queryFound = true
+					server.Raise(result.Scan(&credentialChangeTime, &admitted))
+					found = true
 				}
 			})
-			query.complete(queryFound, byJwt.CreateTime, credentialChangeTime)
+			query.complete(found && admitted, byJwt.CreateTime, credentialChangeTime)
 			return
 		}
 
@@ -873,14 +882,15 @@ func validateMemberByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, 
 			 SELECT client_id, source_client_id, network_id, active, 1 AS depth FROM network_client WHERE client_id=$3 AND $6::uuid IS NULL AND $7::uuid IS NULL
 			 UNION ALL SELECT c.client_id,c.source_client_id,c.network_id,c.active,a.depth+1 FROM network_client c JOIN ancestors a ON c.client_id=a.source_client_id WHERE a.depth < 1024
 			)
-			SELECT network_user.credential_change_time
+			SELECT
+				network_user.credential_change_time,
+				NOT network_member.pending AND
+				(network_member.reauth_deadline IS NULL OR $10 < network_member.reauth_deadline)
 			FROM network_user
 			INNER JOIN network_member ON
 				network_member.member_id = $9 AND
 				network_member.network_id = $2 AND
-				network_member.user_id = network_user.user_id AND
-				NOT network_member.pending AND
-				(network_member.reauth_deadline IS NULL OR $10 < network_member.reauth_deadline)
+				network_member.user_id = network_user.user_id
 			INNER JOIN network_client ON
 				network_client.client_id = $3 AND
 				network_client.network_id = $2 AND
@@ -897,15 +907,18 @@ func validateMemberByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, 
 		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId, parentClientId, byJwt.SessionId, byJwt.RootClientId, byJwt.ApiKeyId, *byJwt.MemberId, now)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&credentialChangeTime))
-				valid = true
-				queryFound = true
+				server.Raise(result.Scan(&credentialChangeTime, &admitted))
+				found = true
 			}
 		})
-		query.complete(queryFound, byJwt.CreateTime, credentialChangeTime)
+		query.complete(found && admitted, byJwt.CreateTime, credentialChangeTime)
 	}()
-	if !valid {
+	if !found {
 		return true, rejectNoActiveRow(byJwt)
+	}
+	if !admitted {
+		// refused, but not for good: see the doc comment
+		return false, rejectNoActiveRow(byJwt)
 	}
 	if byJwt.CreateTime.Before(credentialChangeTime) {
 		return false, rejectRotated(byJwt, credentialChangeTime)
