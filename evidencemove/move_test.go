@@ -854,3 +854,40 @@ func TestCheckpointIsExclusiveAndBoundToItsStore(t *testing.T) {
 		t.Fatalf("reopened %+v", reopened.State)
 	}
 }
+
+// A stall fails every request in flight at once: one episode, one backoff.
+// A failure after the backoff ended doubles it, up to the largest; a quiet
+// period resets it.
+func TestGateKeeperBackoffGrowsPerEpisode(t *testing.T) {
+	now := time.Date(2026, 11, 17, 17, 0, 0, 0, time.UTC)
+	keeper := NewGateKeeper(t.Logf, newTestGate(true))
+	keeper.now = func() time.Time { return now }
+	keeper.CheckNow(t.Context())
+	stall := errors.New("context deadline exceeded")
+	for range 96 {
+		keeper.Failed(stall, false)
+	}
+	if keeper.backoff != minFailureBackoff || !keeper.backoffUntil.Equal(now.Add(minFailureBackoff)) {
+		t.Fatalf("96 failures of one stall backed off %s until %s", keeper.backoff, keeper.backoffUntil)
+	}
+	if open, reason := keeper.Open(); open || !strings.Contains(reason, "backing off") {
+		t.Fatalf("open during the backoff: %s", reason)
+	}
+	for episode, want := range []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 80 * time.Second, 160 * time.Second, maxFailureBackoff, maxFailureBackoff} {
+		now = keeper.backoffUntil
+		if open, reason := keeper.Open(); !open {
+			t.Fatalf("closed after the backoff ended: %s", reason)
+		}
+		keeper.Failed(stall, false)
+		keeper.Failed(stall, false)
+		if keeper.backoff != want {
+			t.Fatalf("episode %d backed off %s, want %s", episode+2, keeper.backoff, want)
+		}
+	}
+	now = keeper.backoffUntil.Add(failureBackoffReset + time.Second)
+	keeper.Succeeded()
+	keeper.Failed(stall, true)
+	if keeper.backoff != 4*minFailureBackoff {
+		t.Fatalf("a throttled failure after a quiet period backed off %s", keeper.backoff)
+	}
+}
