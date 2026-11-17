@@ -199,6 +199,10 @@ type Settings struct {
 	RequestTimeout time.Duration
 	// the largest object moved; a larger flat object is refused
 	MaxObjectBytes int64
+	// when set, the run ends before the first row of a client created at or
+	// after this time (its id's leading 48 bits): every writer has written
+	// sharded keys since the cutover, so those rows need no move
+	UntilCreated time.Time
 	// how often progress is logged
 	ProgressInterval time.Duration
 }
@@ -365,7 +369,24 @@ func (self *Mover) Run(ctx context.Context) (*Report, error) {
 			}
 			return finish(err)
 		}
+		reachedUntil := false
+		if !self.Settings.UntilCreated.IsZero() {
+			for index, item := range items {
+				if !item.Cursor.Time().Before(self.Settings.UntilCreated) {
+					items, reachedUntil = items[:index], true
+					break
+				}
+			}
+		}
+		until := func() (*Report, error) {
+			report.Finished = true
+			report.Stopped = "reached the clients created at or after " + self.Settings.UntilCreated.UTC().Format(time.RFC3339)
+			return finish(nil)
+		}
 		if len(items) == 0 {
+			if reachedUntil {
+				return until()
+			}
 			report.Finished = true
 			return finish(nil)
 		}
@@ -400,6 +421,9 @@ func (self *Mover) Run(ctx context.Context) (*Report, error) {
 		if completed < len(items) {
 			// the bound stopped dispatch inside the batch
 			continue
+		}
+		if reachedUntil {
+			return until()
 		}
 	}
 }
