@@ -101,7 +101,7 @@ func GetTlsListenFactsWithSettings(ctx context.Context, networkId server.Id, now
 			return
 		}
 		found = true
-		standing := deriveNetworkAbuseStanding(networkId, abuseFacts.createTime, abuseFacts.row, now, DefaultAbuseSettings())
+		standing := deriveNetworkAbuseStanding(networkId, abuseFacts.createTime, abuseFacts.row, abuseFacts.trusted, now, DefaultAbuseSettings())
 		facts.Verified = abuseFacts.verified
 		facts.Standing = sidecar.AbuseStanding(standing.Standing)
 		facts.MailNetwork = tlsListenMailNetworkWithConn(ctx, conn, networkId)

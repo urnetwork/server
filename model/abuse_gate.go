@@ -336,7 +336,9 @@ type abuseGateEntry struct {
 	restricted   bool
 	// when the restriction ends, zero for no end
 	restrictedUntil time.Time
-	verified        bool
+	// every entry condition of trusted held at the load (ABUSE-M6-01)
+	trusted  bool
+	verified bool
 	loadTime        time.Time
 	// unix nanoseconds of the last read, which eviction reads
 	readTime atomic.Int64
@@ -349,6 +351,8 @@ func (self *abuseGateEntry) standing(now time.Time) AbuseStanding {
 		return AbuseStandingProbation
 	case self.restricted && (self.restrictedUntil.IsZero() || now.Before(self.restrictedUntil)):
 		return AbuseStandingRestricted
+	case self.trusted:
+		return AbuseStandingTrusted
 	}
 	return AbuseStandingStandard
 }
@@ -592,6 +596,7 @@ func (self *NetworkAbuseGate) loadBatch(networkIds []server.Id) error {
 		if facts, found := networkIdFacts[networkId]; found {
 			entry.found = true
 			entry.verified = facts.verified
+			entry.trusted = facts.trusted
 			if 0 < self.abuse.ProbationAge {
 				entry.probationEnd = facts.createTime.Add(self.abuse.ProbationAge)
 			}

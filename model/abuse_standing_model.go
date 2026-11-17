@@ -11,7 +11,11 @@ package model
 //	restricted  a network_abuse_state row in state restricted whose until_time is ahead: a host, label or network
 //	            kill, or a network halt, within RestrictedWindow, 30 days, unless review lifted it as wrong
 //	            (plan-ABUSE-small-readings #4)
-//	trusted     ABUSE-M6-01's; never answered here yet
+//	trusted     §21.7's trusted (ABUSE-M6-01, plan-ABUSE-small-readings #18): tier team (NetworkTierOf, read through
+//	            the cache's own ttls), a verified network_domain row, the Team grant itself, not its credit line, in
+//	            window across the whole of TrustedPaidWindow, 30 days, with no unresolved invoice.payment_failed, and
+//	            no action in TrustedCleanWindow, 90 days, unless review lifted it as wrong (a lift and a reviewer's
+//	            screen_allow are no action). It needs MG6's tables, so a binary that does not link MG6 answers none
 //	standard    anything else
 //
 // Rows exist only for restricted and suspended (plan-ABUSE-small-readings #3), and only while current (§21.10).
@@ -69,6 +73,8 @@ type networkAbuseFacts struct {
 	// nil when the network has no row
 	row      *networkAbuseRow
 	verified bool
+	// every entry condition of trusted holds (loadNetworkAbuseTrustedWithConn)
+	trusted bool
 	// microseconds since the unix epoch, Postgres clock: when the read began (pro_model.go's ordering note)
 	version int64
 }
@@ -78,6 +84,7 @@ func deriveNetworkAbuseStanding(
 	networkId server.Id,
 	createTime time.Time,
 	row *networkAbuseRow,
+	trusted bool,
 	now time.Time,
 	settings *AbuseSettings,
 ) *NetworkAbuseStanding {
@@ -109,6 +116,11 @@ func deriveNetworkAbuseStanding(
 			untilTime := *row.untilTime
 			standing.ChangeTime = &untilTime
 		}
+		return standing
+	}
+	if trusted {
+		// a grant's lapse, a failed payment or an action ends it, none by time alone
+		standing.Standing = AbuseStandingTrusted
 		return standing
 	}
 	standing.Standing = AbuseStandingStandard
@@ -194,7 +206,129 @@ func loadNetworkAbuseFactsWithConn(
 			networkIdFacts[networkId] = facts
 		}
 	})
+	if 0 < len(networkIdFacts) {
+		for networkId := range loadNetworkAbuseTrustedWithConn(ctx, query, networkIds, now, DefaultAbuseSettings()) {
+			if facts, ok := networkIdFacts[networkId]; ok {
+				facts.trusted = true
+			}
+		}
+	}
 	return networkIdFacts
+}
+
+// The networks of networkIds every entry condition of trusted holds for at now (the file header's row), through
+// query: a verified domain, no unresolved payment failure and no counted action in TrustedCleanWindow in one
+// statement, then the Team grant's cover of TrustedPaidWindow, then tier team through the tier's cache. None in a
+// binary that does not link MG6, whose network_domain and grant tier it reads, or MG5, whose actions it counts.
+func loadNetworkAbuseTrustedWithConn(
+	ctx context.Context,
+	query server.PgCanQuery,
+	networkIds []server.Id,
+	now time.Time,
+	settings *AbuseSettings,
+) map[server.Id]bool {
+	trustedNetworkIds := map[server.Id]bool{}
+	if !server.SidecarMg5Linked() || !server.SidecarMg6Linked() || len(networkIds) == 0 ||
+		settings.TrustedPaidWindow <= 0 || settings.TrustedCleanWindow <= 0 {
+		return trustedNetworkIds
+	}
+	now = now.UTC()
+	candidateNetworkIds := []server.Id{}
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT network.network_id
+			FROM network
+			WHERE
+				network.network_id = ANY($1::uuid[]) AND
+				EXISTS (
+					SELECT 1
+					FROM network_domain
+					WHERE network_domain.network_id = network.network_id AND network_domain.verify_time IS NOT NULL
+				) AND
+				NOT EXISTS (
+					SELECT 1
+					FROM stripe_invoice_payment_failure
+					WHERE stripe_invoice_payment_failure.network_id = network.network_id AND stripe_invoice_payment_failure.resolve_time IS NULL
+				) AND
+				NOT EXISTS (
+					SELECT 1
+					FROM abuse_action
+					WHERE
+						abuse_action.network_id = network.network_id AND
+						$2 <= abuse_action.create_time AND
+						abuse_action.kind NOT IN ($3, $4) AND
+						abuse_action.review_state <> $5
+				)
+		`,
+		networkIds,
+		now.Add(-settings.TrustedCleanWindow),
+		string(AbuseActionKindLift),
+		string(AbuseActionKindScreenAllow),
+		string(AbuseReviewStateLiftedWrong),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var networkId server.Id
+			server.Raise(result.Scan(&networkId))
+			candidateNetworkIds = append(candidateNetworkIds, networkId)
+		}
+	})
+	if len(candidateNetworkIds) == 0 {
+		return trustedNetworkIds
+	}
+	// the Team grant's windows over the paid window, oldest first, to find a gap
+	paidFrom := now.Add(-settings.TrustedPaidWindow)
+	networkIdCoverEnds := map[server.Id]time.Time{}
+	networkIdGaps := map[server.Id]bool{}
+	result, err = query.Query(
+		ctx,
+		`
+			SELECT network_id, start_time, end_time
+			FROM transfer_balance
+			WHERE
+				network_id = ANY($1::uuid[]) AND
+				tier = $2 AND
+				grant_kind IS DISTINCT FROM $3 AND
+				start_time <= $4 AND
+				$5 < end_time
+			ORDER BY network_id, start_time, end_time
+		`,
+		candidateNetworkIds,
+		string(NetworkTierTeam),
+		string(GrantKindTeamCredit),
+		now,
+		paidFrom,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var networkId server.Id
+			var startTime, endTime time.Time
+			server.Raise(result.Scan(&networkId, &startTime, &endTime))
+			coverEnd, ok := networkIdCoverEnds[networkId]
+			if !ok {
+				coverEnd = paidFrom
+			}
+			if coverEnd.Before(startTime) {
+				networkIdGaps[networkId] = true
+			}
+			if coverEnd.Before(endTime) {
+				coverEnd = endTime
+			}
+			networkIdCoverEnds[networkId] = coverEnd
+		}
+	})
+	for _, networkId := range candidateNetworkIds {
+		coverEnd, ok := networkIdCoverEnds[networkId]
+		if !ok || networkIdGaps[networkId] || !now.Before(coverEnd) {
+			continue
+		}
+		if networkTierOfWithQuery(ctx, query, networkId) != NetworkTierTeam {
+			continue
+		}
+		trustedNetworkIds[networkId] = true
+	}
+	return trustedNetworkIds
 }
 
 // The network's §21.7 standing at now, read from Postgres, found false for a network that does not exist. Not for an
@@ -206,7 +340,7 @@ func GetNetworkAbuseStanding(ctx context.Context, networkId server.Id, now time.
 		if !ok {
 			return
 		}
-		standing = deriveNetworkAbuseStanding(networkId, facts.createTime, facts.row, now, settings)
+		standing = deriveNetworkAbuseStanding(networkId, facts.createTime, facts.row, facts.trusted, now, settings)
 		found = true
 	})
 	return

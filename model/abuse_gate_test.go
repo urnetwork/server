@@ -262,7 +262,7 @@ func TestDeriveNetworkAbuseStanding(t *testing.T) {
 		{name: "suspended", age: 400 * testAbuseDay, row: &networkAbuseRow{state: networkAbuseStateSuspended, caseId: caseId}, standing: AbuseStandingSuspended, withCase: true},
 		{name: "a state this build does not know", age: 400 * testAbuseDay, row: &networkAbuseRow{state: "banished", caseId: caseId}, standing: AbuseStanding("banished"), withCase: true},
 	} {
-		standing := deriveNetworkAbuseStanding(networkId, now.Add(-c.age), c.row, now, settings)
+		standing := deriveNetworkAbuseStanding(networkId, now.Add(-c.age), c.row, false, now, settings)
 		if standing.Standing != c.standing || standing.NetworkId != networkId {
 			t.Errorf("%s: %+v", c.name, standing)
 			continue
@@ -274,13 +274,13 @@ func TestDeriveNetworkAbuseStanding(t *testing.T) {
 			t.Errorf("%s: change time %v, want %v", c.name, standing.ChangeTime, c.changeTime)
 		}
 	}
-	if standing := deriveNetworkAbuseStanding(networkId, now.Add(-banishedAge()), &networkAbuseRow{state: "banished", caseId: caseId}, now, settings); standing.Standing.Known() {
+	if standing := deriveNetworkAbuseStanding(networkId, now.Add(-banishedAge()), &networkAbuseRow{state: "banished", caseId: caseId}, false, now, settings); standing.Standing.Known() {
 		t.Error("a state this build does not know reads as one a gate passes")
 	}
 
 	// a non-positive ProbationAge puts no network on probation
 	settings.ProbationAge = 0
-	if standing := deriveNetworkAbuseStanding(networkId, now, nil, now, settings); standing.Standing != AbuseStandingStandard {
+	if standing := deriveNetworkAbuseStanding(networkId, now, nil, false, now, settings); standing.Standing != AbuseStandingStandard {
 		t.Errorf("no probation: %+v", standing)
 	}
 }

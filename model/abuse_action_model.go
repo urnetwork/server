@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -560,36 +561,80 @@ func ListOwedAbuseActions(
 }
 
 // The email addresses that get an action's notice: one for each Owner and
-// Admin of the network. Until TEAM-M6-02 names Owners, that is the network's
-// admin (plan-ABUSE-small-readings #19), at its login when that is an email,
-// else its first verified email sign-in, else an Apple or Google sign-in's
-// email. A phone number receives no notice, since only account security goes
-// by SMS, and an admin with no email has none.
+// Admin of the network. That is the network's admin of record
+// (plan-ABUSE-small-readings #19) and, from M6, every Owner and Admin of
+// network_member who is not pending (TEAM-M6-02, ABUSE-M6-01), each at their
+// login when that is an email, else their first verified email sign-in, else an
+// Apple or Google sign-in's email. A phone number receives no notice, since only
+// account security goes by SMS, and a person with no email has none. Each
+// address once, sorted.
 func AbuseNoticeRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) []string {
+	userIds := []server.Id{}
+	result, err := tx.Query(ctx, `SELECT admin_user_id FROM network WHERE network_id = $1`, networkId)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var userId server.Id
+			server.Raise(result.Scan(&userId))
+			userIds = append(userIds, userId)
+		}
+	})
+	if server.SidecarMg6Linked() {
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT user_id
+				FROM network_member
+				WHERE network_id = $1 AND role IN ($2, $3) AND NOT pending
+				ORDER BY member_id
+			`,
+			networkId,
+			string(NetworkMemberRoleOwner),
+			string(NetworkMemberRoleAdmin),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var userId server.Id
+				server.Raise(result.Scan(&userId))
+				if !slices.Contains(userIds, userId) {
+					userIds = append(userIds, userId)
+				}
+			}
+		})
+	}
+	recipients := []string{}
+	for _, userId := range userIds {
+		if recipient := abuseNoticeRecipientOfUserInTx(ctx, tx, userId); recipient != "" && !slices.Contains(recipients, recipient) {
+			recipients = append(recipients, recipient)
+		}
+	}
+	slices.Sort(recipients)
+	return recipients
+}
+
+// One person's notice address: their login when it is an email, else their first verified email sign-in, else an
+// Apple or Google sign-in's email; "" for none.
+func abuseNoticeRecipientOfUserInTx(ctx context.Context, tx server.PgTx, userId server.Id) string {
 	userAuths := []string{}
 	result, err := tx.Query(
 		ctx,
 		`
 			SELECT network_user.user_auth, 1 AS rank
-			FROM network
-			INNER JOIN network_user ON network_user.user_id = network.admin_user_id
-			WHERE network.network_id = $1 AND network_user.user_auth IS NOT NULL
+			FROM network_user
+			WHERE network_user.user_id = $1 AND network_user.user_auth IS NOT NULL
 			UNION ALL
 			SELECT network_user_auth_password.user_auth, 2 AS rank
-			FROM network
-			INNER JOIN network_user_auth_password ON network_user_auth_password.user_id = network.admin_user_id
+			FROM network_user_auth_password
 			WHERE
-				network.network_id = $1 AND
+				network_user_auth_password.user_id = $1 AND
 				network_user_auth_password.auth_type = 'email' AND
 				network_user_auth_password.verified
 			UNION ALL
 			SELECT network_user_auth_sso.user_auth, 3 AS rank
-			FROM network
-			INNER JOIN network_user_auth_sso ON network_user_auth_sso.user_id = network.admin_user_id
-			WHERE network.network_id = $1
+			FROM network_user_auth_sso
+			WHERE network_user_auth_sso.user_id = $1
 			ORDER BY rank, user_auth
 		`,
-		networkId,
+		userId,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -601,9 +646,8 @@ func AbuseNoticeRecipientsInTx(ctx context.Context, tx server.PgTx, networkId se
 	})
 	for _, userAuth := range userAuths {
 		if normalUserAuth, userAuthType := NormalUserAuth(userAuth); userAuthType == UserAuthTypeEmail && normalUserAuth != "" {
-			// one Owner or Admin today, so one address
-			return []string{normalUserAuth}
+			return normalUserAuth
 		}
 	}
-	return []string{}
+	return ""
 }

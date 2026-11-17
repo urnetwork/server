@@ -163,7 +163,7 @@ func GetNetworkScreenFactsInTx(ctx context.Context, query server.PgCanQuery, net
 	if !ok {
 		return nil, false
 	}
-	standing := deriveNetworkAbuseStanding(networkId, abuseFacts.createTime, abuseFacts.row, now, DefaultAbuseSettings())
+	standing := deriveNetworkAbuseStanding(networkId, abuseFacts.createTime, abuseFacts.row, abuseFacts.trusted, now, DefaultAbuseSettings())
 	facts := &NetworkScreenFacts{
 		VerifiedDomains: getNetworkVerifiedDomainsInTx(ctx, query, networkId),
 		Probation:       abuseStandingScreensAsProbation(standing.Standing),

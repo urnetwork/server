@@ -155,6 +155,9 @@ var routePermissionByRoute = map[string]model.RolePermission{
 
 	// §21.16's appeal of an abuse action: an Owner or an Admin
 	"POST /abuse/appeal": model.RolePermissionAdmin,
+	// §15.15's direct MX of a Team, which its model gives an Owner or an Admin
+	"POST /mail/direct-mx":   model.RolePermissionAdmin,
+	"DELETE /mail/direct-mx": model.RolePermissionAdmin,
 
 	// reading settings, clients and the network's earnings
 	"GET /network/clients":                  model.RolePermissionRead,

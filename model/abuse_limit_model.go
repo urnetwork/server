@@ -39,10 +39,24 @@ const AbuseReporterClassClosureGrowth AbuseReporterClass = "closure_growth"
 
 // The keys §21 may tighten (§21.7): each eraser's closure allowance, to the floor at most, and the day's statements,
 // which bound the admissions, each a new eraser, that a day adds. Forwarding and sockets have no key (owner decision
-// 66). M6 adds the directory's request limits.
+// 66). From M6 the team directory's request limits (ABUSE-M6-01, §20.4, §16.11), which §16.11's daemons and readers
+// apply as GET /sidecar/limits gives them, since the server sees no request's content: they take a row only in a
+// binary that links MG6 (abuseDirectoryLimitKeys).
 var AbuseTightenableLimitKeys = []string{
 	"evs_closure_bytes_per_day",
 	"config_statements_per_day",
+	"directory_requests_pending",
+	"directory_requests_per_day",
+	"directory_requests_per_run",
+	"directory_target_pending",
+}
+
+// The directory's keys of AbuseTightenableLimitKeys, which wait for MG6.
+var abuseDirectoryLimitKeys = []string{
+	"directory_requests_pending",
+	"directory_requests_per_day",
+	"directory_requests_per_run",
+	"directory_target_pending",
 }
 
 // A tightening no row may take: a key off AbuseTightenableLimitKeys, a value ValidateNetworkSidecarLimit refuses, or
@@ -77,6 +91,9 @@ func ParseAbuseLimitTightenTarget(target string) (limitKey string, limitValue in
 func ValidateAbuseLimitTighten(limitKey string, limitValue int64, caseId server.Id) error {
 	if !slices.Contains(AbuseTightenableLimitKeys, limitKey) {
 		return fmt.Errorf("%w: §21 does not tighten %q", ErrAbuseLimitRefused, limitKey)
+	}
+	if slices.Contains(abuseDirectoryLimitKeys, limitKey) && !server.SidecarMg6Linked() {
+		return fmt.Errorf("%w: %q waits for the team directory (MG6)", ErrAbuseLimitRefused, limitKey)
 	}
 	if err := ValidateNetworkSidecarLimit(limitKey, limitValue, AbuseLimitReason(caseId)); err != nil {
 		return fmt.Errorf("%w: %w", ErrAbuseLimitRefused, err)
