@@ -177,6 +177,10 @@ type CompetitionSupervisor struct {
 	Now           func() time.Time
 	PollInterval  time.Duration
 	LeaseDuration time.Duration
+	// Positive bounded renewal drain only while the original worker joins after
+	// requested caller cancellation. Non-positive preserves immediate cancellation.
+	// The process owner supplies its complete cleanup allowance, including handoff.
+	CleanupGrace time.Duration
 	// Nil retains per-owner defaults; tests inject retry time and exact renewal edges.
 	leaseRetrySettings *competitionSupervisorRenewalSettings
 	renewTickForTest   <-chan time.Time
@@ -393,11 +397,14 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 	if self.leaseRetrySettings != nil && self.leaseRetrySettings.LockRetry.Now != nil {
 		authorityNow = self.leaseRetrySettings.LockRetry.Now
 	}
-	authority, err := newCompetitionConfirmedAuthority(ctx, lease.LeaseExpiresAt, authorityNow)
+	renewal := newCompetitionSupervisorRenewalDrain(ctx, self.CleanupGrace)
+	defer renewal.close()
+	authority, err := newCompetitionConfirmedAuthority(renewal.ctx, lease.LeaseExpiresAt, authorityNow)
 	if err != nil {
 		return "lease_lost", err
 	}
-	operationCtx := authority.ctx
+	operationCtx, closeOperation := competitionSupervisorWorkContext(ctx, authority.ctx)
+	defer closeOperation()
 	renewed := make(chan error, 1)
 	go func() {
 		current := *lease
@@ -407,12 +414,12 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 				renewTick = time.After(leaseDuration / 3)
 			}
 			select {
-			case <-operationCtx.Done():
+			case <-authority.ctx.Done():
 				renewed <- nil
 				return
 			case <-renewTick:
 				var next *model.CompetitionSupervisorLease
-				renewErr := retryCompetitionSupervisorRenewal(operationCtx, current.LeaseExpiresAt, retrySettings, func(ctx context.Context) error {
+				renewErr := retryCompetitionSupervisorRenewal(authority.ctx, current.LeaseExpiresAt, retrySettings, func(ctx context.Context) error {
 					var err error
 					next, err = self.Driver.Renew(ctx, current, leaseDuration)
 					return err
@@ -441,17 +448,22 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		}
 	}()
 	defer func() {
-		finishedWhileLive := operationCtx.Err() == nil
+		finishedWhileLive := authority.ctx.Err() == nil
 		authority.close()
-		if renewErr := <-renewed; renewErr != nil && !(finishedWhileLive && errors.Is(renewErr, context.Canceled)) {
+		renewErr := <-renewed
+		if renewErr != nil && !(renewErr == context.Canceled &&
+			(finishedWhileLive || (ctx.Err() != nil && renewal.ctx.Err() != nil && context.Cause(authority.ctx) != ErrLeaseLost))) {
 			state, err = "lease_lost", renewErr
 		}
-		if context.Cause(operationCtx) == ErrLeaseLost {
+		if context.Cause(authority.ctx) == ErrLeaseLost && CompetitionSupervisorRenewalFailureDetails(renewErr) == nil && !errors.Is(renewErr, ErrLeaseLost) {
 			state, err = "lease_lost", ErrLeaseLost
 		}
 	}()
 	snapshot, err := self.Driver.Snapshot(operationCtx, *lease)
 	if err != nil {
+		return "state_unavailable", err
+	}
+	if err := operationCtx.Err(); err != nil {
 		return "state_unavailable", err
 	}
 	now := time.Now().UTC()
@@ -473,7 +485,18 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 				return "grading_preparation_pending", err
 			}
 		}
-		if err := self.Driver.RunWorker(operationCtx, *lease, *snapshot.Round); err != nil {
+		if err := operationCtx.Err(); err != nil {
+			return "evaluation_blocked", err
+		}
+		if err := renewal.beginWorker(); err != nil {
+			return "evaluation_blocked", err
+		}
+		workerErr := self.Driver.RunWorker(operationCtx, *lease, *snapshot.Round)
+		renewal.endWorker()
+		if workerErr != nil {
+			return "evaluation_blocked", workerErr
+		}
+		if err := operationCtx.Err(); err != nil {
 			return "evaluation_blocked", err
 		}
 		if now.Before(snapshot.Round.ClosesAt) {

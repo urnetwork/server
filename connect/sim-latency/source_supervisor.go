@@ -13,10 +13,8 @@ import (
 	"hash"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"time"
 
 	"github.com/docopt/docopt-go"
@@ -36,6 +34,7 @@ type sourceSupervisorRuntime struct {
 	sourceConfig      string
 	workerCommand     string
 	workerSha256      string
+	processSettings   sourceSupervisorProcessSettings
 	prepareCommand    string
 	prepareSha256     string
 	reviewCommand     string
@@ -70,7 +69,12 @@ func runSourceSupervisorProgramArguments(ctx context.Context, path, expectedDige
 // The worker returns status, not a machine document. Both of its log streams
 // must remain drained for the full epoch, independently of retained log bounds.
 func runSourceSupervisorWorkerCommand(ctx context.Context, path, expectedDigest string, request controller.CompetitionSupervisorWorkerRequest) error {
-	_, err := runSourceSupervisorProcess(ctx, path, expectedDigest, request, nil, []string{"--supervisor-request"}, false)
+	return runSourceSupervisorWorkerCommandWithSettings(ctx, path, expectedDigest, request, defaultSourceSupervisorProcessSettings())
+}
+
+// The owning supervisor supplies the same join budget as its pinned worker role.
+func runSourceSupervisorWorkerCommandWithSettings(ctx context.Context, path, expectedDigest string, request controller.CompetitionSupervisorWorkerRequest, settings sourceSupervisorProcessSettings) error {
+	_, err := runSourceSupervisorProcessWithSettings(ctx, path, expectedDigest, request, nil, []string{"--supervisor-request"}, false, settings)
 	return err
 }
 
@@ -100,6 +104,11 @@ func verifySourceSupervisorProgram(path, expectedDigest string) error {
 // Recheck the executable immediately before every launch, including after an
 // earlier preflight accepted the independently configured qualification hook.
 func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string, request any, environment, arguments []string, machineOutput bool) ([]byte, error) {
+	return runSourceSupervisorProcessWithSettings(ctx, path, expectedDigest, request, environment, arguments, machineOutput, defaultSourceSupervisorProcessSettings())
+}
+
+// Settings belong to this invocation, including the worker's post-cancel join.
+func runSourceSupervisorProcessWithSettings(ctx context.Context, path, expectedDigest string, request any, environment, arguments []string, machineOutput bool, settings sourceSupervisorProcessSettings) ([]byte, error) {
 	if err := verifySourceSupervisorProgram(path, expectedDigest); err != nil {
 		return nil, err
 	}
@@ -107,9 +116,10 @@ func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string
 	if err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, path, arguments...)
-	command.Cancel = func() error { return command.Process.Signal(syscall.SIGTERM) }
-	command.WaitDelay = 30 * time.Second
+	command, err := sourceSupervisorProcessCommand(ctx, path, arguments, settings)
+	if err != nil {
+		return nil, err
+	}
 	command.Env = environment
 	command.Stdin = bytes.NewReader(requestBytes)
 	output := &sourceSupervisorOutput{limit: 1024 * 1024}
@@ -658,6 +668,10 @@ func runSourceSupervisor(opts docopt.Opts) {
 	if !optBool(opts, "--enable-automation") {
 		fatalf("supervisor is disabled; explicit --enable-automation and approved v2 configuration are required")
 	}
+	processSettings, err := sourceSupervisorProcessSettingsFromOptions(opts)
+	if err != nil {
+		fatalf("supervisor process settings: %s", err)
+	}
 	settings, store, err := loadCompetitionControl()
 	if err != nil {
 		fatalf("supervisor settings: %s", err)
@@ -683,7 +697,8 @@ func runSourceSupervisor(opts docopt.Opts) {
 	runtime := &sourceSupervisorRuntime{
 		settings: settings, store: store, stateDirectory: stateDirectory, repositoriesRoot: repositoriesRoot, sourceConfig: sourceConfig,
 		workerCommand: optString(opts, "--worker-command", ""), workerSha256: optString(opts, "--worker-sha256", ""),
-		prepareCommand: optString(opts, "--prepare-command", ""), prepareSha256: optString(opts, "--prepare-sha256", ""),
+		processSettings: processSettings,
+		prepareCommand:  optString(opts, "--prepare-command", ""), prepareSha256: optString(opts, "--prepare-sha256", ""),
 		reviewCommand: optString(opts, "--review-command", ""), reviewSha256: optString(opts, "--review-sha256", ""),
 		reviewerTokenFile: optString(opts, "--reviewer-token-file", ""), reviewApiUrl: optString(opts, "--review-api-url", "https://api.bringyour.com"),
 		buildCommand: optString(opts, "--build-command", ""), buildSha256: optString(opts, "--build-sha256", ""),
@@ -700,10 +715,11 @@ func runSourceSupervisor(opts docopt.Opts) {
 		ReviewWinner: runtime.reviewWinner,
 		ChooseSource: runtime.chooseSource, PublishSource: runtime.publishSource, PrepareSource: runtime.prepareSource, PrepareIntake: runtime.prepareIntake, FallbackSource: runtime.fallbackSource,
 		RunWorker: func(ctx context.Context, lease model.CompetitionSupervisorLease, round model.CompetitionRoundResult) error {
-			return runSourceSupervisorWorkerCommand(ctx, runtime.workerCommand, runtime.workerSha256, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch", Round: round, Lease: lease})
+			return runSourceSupervisorWorkerCommandWithSettings(ctx, runtime.workerCommand, runtime.workerSha256, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch", Round: round, Lease: lease}, runtime.processSettings)
 		},
 	}}
-	supervisor := &controller.CompetitionSupervisor{Enabled: true, PreparationOnly: preparationOnly, OwnerId: optString(opts, "--owner-id", ""), Driver: driver}
+	supervisor := &controller.CompetitionSupervisor{Enabled: true, PreparationOnly: preparationOnly, OwnerId: optString(opts, "--owner-id", ""), Driver: driver,
+		CleanupGrace: processSettings.WorkerControlJoinTimeout + processSettings.WorkerHandoffTimeout}
 	ctx, cancel := signalContext()
 	defer cancel()
 	report := func(state string, err error) {

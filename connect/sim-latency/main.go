@@ -88,7 +88,7 @@ Usage:
   sim-latency staging-review --epoch=<n> next [--out-dir=<dir>]
   sim-latency staging-review --epoch=<n> approve --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path>
   sim-latency promote --epoch=<n> (--winner=<dir> --winner-job-id=<id> | --no-winner) [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
-  sim-latency supervise --enable-automation --owner-id=<id> --state-dir=<dir> --worker-command=<path> --worker-sha256=<digest> --prepare-command=<path> --prepare-sha256=<digest> [--review-command=<path>] [--review-sha256=<digest>] [--reviewer-token-file=<path>] [--review-api-url=<url>] [--build-command=<path>] [--build-sha256=<digest>] [--source-config=<path>] [--repos-root=<dir>] [--once] [--prepare-only]
+  sim-latency supervise --enable-automation --owner-id=<id> --state-dir=<dir> --worker-command=<path> --worker-sha256=<digest> [--worker-control-join-timeout=<duration>] --prepare-command=<path> --prepare-sha256=<digest> [--review-command=<path>] [--review-sha256=<digest>] [--reviewer-token-file=<path>] [--review-api-url=<url>] [--build-command=<path>] [--build-sha256=<digest>] [--source-config=<path>] [--repos-root=<dir>] [--once] [--prepare-only]
   sim-latency stage-reviewed-source --review-id=<id> --state-dir=<dir> --build-command=<path> --build-sha256=<digest> [--source-config=<path>] [--repos-root=<dir>]
   sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--opens-at=<time>] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
@@ -147,6 +147,7 @@ Options:
   --state-dir=<dir>       Private durable source staging and recovery directory.
   --worker-command=<path> Absolute prequalified one-shot worker or trusted launcher executable.
   --worker-sha256=<digest> Exact SHA-256 of the trusted worker launcher executable.
+  --worker-control-join-timeout=<duration> Pinned worker role control_join_timeout; omission uses its default. Unit stop grace must exceed this plus supervisor handoff.
   --prepare-command=<path> Absolute trusted runtime propagation and qualification executable.
   --prepare-sha256=<digest> Exact SHA-256 of the trusted preparation executable.
   --review-command=<path> Qualified isolated elected-winner review broker executable.
