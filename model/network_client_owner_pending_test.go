@@ -3,8 +3,12 @@
 package model
 
 import (
+	"context"
+	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -196,7 +200,9 @@ func countNetworkClients(self *clientOwnerFixture) (count int) {
 
 // D-TRUST-3: until stage 2 a strict_exp mint is refused outside preview_networks,
 // with nothing written, and an inherited mark asks the same question: a network
-// taken off the list mints no more.
+// taken off the list mints no more. Every such refusal, a new client's and a
+// reissue's, answers its 200 with the code not_preview beside the message it
+// always had (owner decision 326).
 func TestNonPreviewNetworkRefusesAStrictExpMint(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		// the gate stands until stage 2 is live
@@ -208,9 +214,13 @@ func TestNonPreviewNetworkRefusesAStrictExpMint(t *testing.T) {
 			before := countNetworkClients(self)
 			result, err := AuthNetworkClient(args, caller)
 			connect.AssertEqual(t, err, nil)
-			if result.Error == nil || result.Error.Message != clientStrictExpNotPreviewMessage || result.ByClientJwt != nil {
+			if result.Error == nil || result.Error.Message != clientStrictExpNotPreviewMessage || result.Error.Code != "not_preview" || result.ByClientJwt != nil {
 				t.Fatalf("auth-client = %+v, error = %+v", result, result.Error)
 			}
+			// the body as the route writes it
+			body, err := json.Marshal(result)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, string(body), `{"error":{"client_limit_exceeded":false,"message":"This network cannot hold sidecar clients yet.","code":"not_preview"}}`)
 			connect.AssertEqual(t, countNetworkClients(self), before)
 		}
 
@@ -232,6 +242,8 @@ func TestNonPreviewNetworkRefusesAStrictExpMint(t *testing.T) {
 		requireRefused(&AuthNetworkClientArgs{SourceClientId: sidecar.ClientId, Description: "window", DeviceSpec: "test"}, sidecarSession)
 		requireRefused(&AuthNetworkClientArgs{SourceClientId: sidecar.ClientId, Description: "window", DeviceSpec: "test"}, self.root)
 		requireRefused(&AuthNetworkClientArgs{ClientId: sidecar.ClientId, Description: "sidecar", DeviceSpec: "test"}, self.root)
+		// the sidecar's own reissue
+		requireRefused(&AuthNetworkClientArgs{ClientId: sidecar.ClientId, Description: "sidecar", DeviceSpec: "test"}, sidecarSession)
 	})
 }
 
@@ -280,7 +292,8 @@ func TestReauthFollowsTheClientsMarks(t *testing.T) {
 }
 
 // A hosted proxy's token comes from its host with no mark, so a strict_exp client
-// has none, and a refused create leaves nothing, not even its exit.
+// has none, and a refused create leaves nothing, not even its exit. The refusal
+// carries no code: only the preview refusal has one (owner decision 326).
 func TestStrictExpClientHostsNoProxy(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newClientOwnerFixture(t)
@@ -302,10 +315,95 @@ func TestStrictExpClientHostsNoProxy(t *testing.T) {
 			if result.Error == nil || result.Error.Message != clientStrictExpProxyMessage {
 				t.Fatalf("auth-client = %+v, error = %+v", result, result.Error)
 			}
+			requireRefusalBodyBeforeCode(t, result)
 		}
 		if writes := authClientTestWritesNow(self.ctx); writes != writesBefore {
 			t.Fatalf("the refusal left %+v, want %+v", writes, writesBefore)
 		}
+	})
+}
+
+// A strict_exp mint in a preview network that a client limit refuses carries no
+// code: the limits answer a sidecar's mint as they answer any other, and only
+// the preview refusal is coded (owner decision 326).
+func TestStrictExpMintAtAClientLimitCarriesNoCode(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_ClearNetworkClientLimitCache()
+		self := newClientOwnerFixture(t)
+		self.pushPreview(t)
+		device := self.mint(t, self.root, &AuthNetworkClientArgs{Description: "device", DeviceSpec: "test"})
+		defer Testing_SetEnforceConcurrentClients(true)()
+		defer Testing_SetConcurrentClientsLimit(1, 1)()
+		sidecarArgs := &AuthNetworkClientArgs{Description: "sidecar", DeviceSpec: "test", AdminRefused: true, StrictExp: true}
+
+		// the top-level cap: an allowance of one, which the device fills
+		// unconnected
+		connect.AssertEqual(t, SetNetworkTopLevelClientLimit(self.ctx, self.networkId, 1), nil)
+		result, err := AuthNetworkClient(sidecarArgs, self.root)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, requireRefusalBodyBeforeCode(t, result), `{"error":{"client_limit_exceeded":true,"message":"Client limit exceeded."}}`)
+
+		// the plan's concurrent limit: the tier's one, which the device fills
+		// connected
+		ClearNetworkTopLevelClientLimit(self.ctx, self.networkId)
+		registerTestPeer(t, self.ctx, self.networkId, *device.ClientId)
+		result, err = AuthNetworkClient(sidecarArgs, self.root)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error != nil && result.Error.ClientLimitExceeded && result.Error.UpgradeRequired, true)
+		requireRefusalBodyBeforeCode(t, result)
+	})
+}
+
+// An enrollment whose network leaves preview_networks between enrollment's own
+// check and the mint's is refused by the mint's code, not_preview, never by its
+// text: 403 not_preview, with no use of the key spent and no client minted.
+func TestEnrollReadsTheMintsPreviewRefusalByItsCode(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// the gate stands until stage 2 is live
+		defer Testing_SetSidecarStage2Live(false)()
+		self := newClientOwnerFixture(t)
+		created, err := CreateAuthKey(&CreateAuthKeyArgs{DurationSeconds: 3600, MaxUses: 10, Ephemeral: true}, self.root)
+		if err != nil || created.Error != nil || created.AuthKeyId == nil {
+			t.Fatalf("create auth key: %v %+v", err, created)
+		}
+		clientPublicKey, _, err := ed25519.GenerateKey(nil)
+		connect.AssertEqual(t, err, nil)
+
+		popPreview := server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", self.networkId))
+		left := false
+		leave := func() {
+			if !left {
+				left = true
+				popPreview()
+			}
+		}
+		defer leave()
+		// an ephemeral key's enrollment reads the network's base 1 after its own
+		// preview check and before the mint: the network leaves the list there
+		defer Testing_SetNetworkEnrollHasGenesis(func(ctx context.Context, networkId server.Id) (bool, error) {
+			leave()
+			return true, nil
+		})()
+
+		before := countNetworkClients(self)
+		_, err = EnrollNetworkClient(self.ctx, &NetworkEnrollArgs{
+			AuthKey:         created.AuthKey,
+			ClientPublicKey: clientPublicKey,
+			DeviceSpec:      "test",
+			AdminRefused:    true,
+			StrictExp:       true,
+		}, "192.0.2.9:1")
+		connect.AssertEqual(t, left, true)
+		refusal := &NetworkEnrollRefusal{}
+		if !errors.As(err, &refusal) || refusal.Status != http.StatusForbidden || refusal.Code != "not_preview" || refusal.Message != SidecarPreviewRefusedMessage {
+			t.Fatalf("enroll = %v", err)
+		}
+		connect.AssertEqual(t, countNetworkClients(self), before)
+		var useCount int
+		server.Db(self.ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(self.ctx, `SELECT use_count FROM network_auth_key WHERE auth_key_id = $1`, *created.AuthKeyId).Scan(&useCount))
+		})
+		connect.AssertEqual(t, useCount, 0)
 	})
 }
 

@@ -2,7 +2,10 @@ package model
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 
@@ -186,4 +189,149 @@ func TestClientAdminCacheIsBounded(t *testing.T) {
 		t.Fatal("a map past its bound kept its oldest entry")
 	}
 	connect.AssertEqual(t, answers.Len() <= 2, true)
+}
+
+// The preview refusal alone carries a code (owner decision 326): outside
+// preview_networks a strict_exp mint is refused with not_preview, a hosted
+// proxy's included; in the list a strict_exp proxy is refused with no code; and
+// an unmarked mint, or a strict_exp one in the list, is not refused.
+func TestRefuseClientMarksCodesThePreviewRefusalAlone(t *testing.T) {
+	// the gate stands until stage 2 is live
+	defer Testing_SetSidecarStage2Live(false)()
+	networkId := server.NewId()
+	strictExp := clientMarks{adminRefused: true, strictExp: true}
+
+	func() {
+		defer server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", server.NewId()))()
+		for _, proxy := range []bool{false, true} {
+			message, code := refuseClientMarks(networkId, strictExp, proxy)
+			if message != "This network cannot hold sidecar clients yet." || code != "not_preview" {
+				t.Fatalf("proxy %t: refusal = %q, code %q", proxy, message, code)
+			}
+			// admin_refused alone needs no preview: it is the apps' mark too
+			message, code = refuseClientMarks(networkId, clientMarks{adminRefused: true}, proxy)
+			if message != "" || code != "" {
+				t.Fatalf("proxy %t: an admin_refused mint was refused: %q, code %q", proxy, message, code)
+			}
+		}
+	}()
+	func() {
+		defer server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", networkId))()
+		message, code := refuseClientMarks(networkId, strictExp, true)
+		if message != clientStrictExpProxyMessage || code != "" {
+			t.Fatalf("a strict_exp proxy = %q, code %q", message, code)
+		}
+		message, code = refuseClientMarks(networkId, strictExp, false)
+		if message != "" || code != "" {
+			t.Fatalf("a listed network refused a strict_exp mint: %q, code %q", message, code)
+		}
+	}()
+}
+
+// AuthNetworkClientError as it was before its code (owner decision 326). A
+// refusal with no code encodes byte for byte as this does.
+type authNetworkClientErrorBeforeCode struct {
+	ClientLimitExceeded bool   `json:"client_limit_exceeded"`
+	UpgradeRequired     bool   `json:"upgrade_required,omitempty"`
+	NoUniqueSupply      bool   `json:"no_unique_supply,omitempty"`
+	Message             string `json:"message"`
+}
+
+// Requires a refusal with no code whose 200 body, as the route writes it, is byte
+// for byte what the same refusal answered before the code; returns the body.
+func requireRefusalBodyBeforeCode(t testing.TB, result *AuthNetworkClientResult) string {
+	t.Helper()
+	if result == nil || result.Error == nil || result.Error.Code != "" || result.ClientId != nil || result.ByClientJwt != nil {
+		t.Fatalf("auth-client = %+v", result)
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := json.Marshal(&struct {
+		Error *authNetworkClientErrorBeforeCode `json:"error,omitempty"`
+	}{
+		Error: &authNetworkClientErrorBeforeCode{
+			ClientLimitExceeded: result.Error.ClientLimitExceeded,
+			UpgradeRequired:     result.Error.UpgradeRequired,
+			NoUniqueSupply:      result.Error.NoUniqueSupply,
+			Message:             result.Error.Message,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != string(before) {
+		t.Fatalf("body = %s, before the code %s", body, before)
+	}
+	return string(body)
+}
+
+// Owner decision 326 codes the preview refusal alone, so a legacy mint answers
+// byte for byte what it did: its client, and each client limit's refusal (the
+// top-level cap, the plan's concurrent limit, the proxy cap and the proxy create
+// rate), none with a code.
+func TestLegacyMintBodiesAreWhatTheyWere(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_ClearNetworkClientLimitCache()
+		self := newClientOwnerFixture(t)
+		deviceArgs := &AuthNetworkClientArgs{Description: "device", DeviceSpec: "test"}
+
+		device := self.mint(t, self.root, deviceArgs)
+		body, err := json.Marshal(device)
+		connect.AssertEqual(t, err, nil)
+		jwtJson, err := json.Marshal(*device.ByClientJwt)
+		connect.AssertEqual(t, err, nil)
+		clientIdJson, err := json.Marshal(*device.ClientId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, string(body), `{"by_client_jwt":`+string(jwtJson)+`,"client_id":`+string(clientIdJson)+`}`)
+
+		func() {
+			defer Testing_SetEnforceConcurrentClients(true)()
+			defer Testing_SetConcurrentClientsLimit(1, 1)()
+
+			// the top-level cap: an allowance of one, which the device fills
+			// unconnected
+			connect.AssertEqual(t, SetNetworkTopLevelClientLimit(self.ctx, self.networkId, 1), nil)
+			result, err := AuthNetworkClient(deviceArgs, self.root)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, requireRefusalBodyBeforeCode(t, result), `{"error":{"client_limit_exceeded":true,"message":"Client limit exceeded."}}`)
+
+			// the plan's concurrent limit: the tier's one, which the device fills
+			// connected
+			ClearNetworkTopLevelClientLimit(self.ctx, self.networkId)
+			registerTestPeer(t, self.ctx, self.networkId, *device.ClientId)
+			result, err = AuthNetworkClient(deviceArgs, self.root)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.Error != nil && result.Error.ClientLimitExceeded && result.Error.UpgradeRequired, true)
+			requireRefusalBodyBeforeCode(t, result)
+		}()
+
+		// the proxy limits, on a network of their own: its creates are not the
+		// device network's top-level clients
+		_, proxySession := testProxyLimitNetwork(self.ctx)
+
+		// the proxy cap, one active proxy, with the rate lifted
+		func() {
+			defer Testing_SetProxyClientLimits(1, 1)()
+			defer Testing_SetProxyClientCreatesPerMinute(0, 0)()
+			connect.AssertEqual(t, testAuthProxyClient(t, proxySession).Error, (*AuthNetworkClientError)(nil))
+			result := testAuthProxyClient(t, proxySession)
+			connect.AssertEqual(t, result.Error != nil && result.Error.ClientLimitExceeded, true)
+			requireRefusalBodyBeforeCode(t, result)
+		}()
+
+		// the proxy create rate, one a minute, with the cap lifted: a minute of
+		// its own, so the cap's creates above are not counted in it
+		func() {
+			defer Testing_SetProxyClientLimits(0, 0)()
+			defer Testing_SetProxyClientCreatesPerMinute(1, 1)()
+			now := time.Unix(1_762_320_010, 0)
+			defer Testing_SetProxyClientCreateNow(func() time.Time { return now })()
+			connect.AssertEqual(t, testAuthProxyClient(t, proxySession).Error, (*AuthNetworkClientError)(nil))
+			result := testAuthProxyClient(t, proxySession)
+			connect.AssertEqual(t, result.Error != nil && result.Error.ClientLimitExceeded, true)
+			requireRefusalBodyBeforeCode(t, result)
+		}()
+	})
 }

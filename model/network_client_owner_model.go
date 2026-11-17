@@ -288,24 +288,29 @@ const (
 	// D-TRUST-3: until stage 2 is live, a strict_exp client exists only in a
 	// network sidecar.yml's preview_networks lists (SidecarPreviewAllowed)
 	clientStrictExpNotPreviewMessage = SidecarPreviewRefusedMessage
+	// the preview refusal's code, the one both routes answer it with: in
+	// auth-client's error object and enroll's 403 (owner decision 326)
+	clientStrictExpNotPreviewCode = NetworkEnrollCodeNotPreview
 	// a hosted proxy's host mints its token with no mark, so a strict_exp client
 	// never has one
 	clientStrictExpProxyMessage = "A sidecar client cannot host a proxy."
 )
 
-// Why a mint of a client with these marks is refused, or "". Every mint that ends
-// in a strict_exp token asks, an inherited mark included.
-func refuseClientMarks(networkId server.Id, marks clientMarks, proxy bool) string {
+// Why a mint of a client with these marks is refused, with the refusal's code,
+// or "" for both. Every mint that ends in a strict_exp token asks, an inherited
+// mark included. Only the preview refusal has a code (not_preview), which a
+// client reads in place of the message; the proxy refusal has none.
+func refuseClientMarks(networkId server.Id, marks clientMarks, proxy bool) (message string, code string) {
 	if !marks.strictExp {
-		return ""
+		return "", ""
 	}
 	if !SidecarPreviewAllowed(networkId) {
-		return clientStrictExpNotPreviewMessage
+		return clientStrictExpNotPreviewMessage, clientStrictExpNotPreviewCode
 	}
 	if proxy {
-		return clientStrictExpProxyMessage
+		return clientStrictExpProxyMessage, ""
 	}
-	return ""
+	return "", ""
 }
 
 // The client has no key a proof could be checked against.
@@ -679,7 +684,9 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 		switch {
 		case result != nil && result.Error.ClientLimitExceeded:
 			return nil, &NetworkEnrollRefusal{Status: http.StatusTooManyRequests, Code: NetworkEnrollCodeRefused, Message: "The network is at its client limit."}
-		case result != nil && result.Error.Message == SidecarPreviewRefusedMessage:
+		case result != nil && result.Error.Code == clientStrictExpNotPreviewCode:
+			// the mint's own preview check refused, the list having changed
+			// since the check above: told by its code, never its text
 			return nil, newNetworkEnrollRefusal(http.StatusForbidden, NetworkEnrollCodeNotPreview, SidecarPreviewRefusedMessage)
 		}
 		return nil, newNetworkEnrollRefusal(http.StatusForbidden, NetworkEnrollCodeRefused, "The enrollment is refused.")
