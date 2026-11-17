@@ -1,6 +1,8 @@
 // The source graph selector routes a round to the evaluator release cut for its
 // repositories. The three historical producers, their preparation programs and
-// their pins stay byte for byte, and no release authenticates another's control.
+// their pins stay byte for byte, save the controller's work-coverage pin, which
+// the owner corrected to its file (QD-875), and no release authenticates
+// another's control.
 package controller
 
 import (
@@ -28,6 +30,10 @@ func sourceGraphContainerFileSha256(t *testing.T, name string) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// The line by which a preparation program checks its producer's bytes before
+// it runs it.
+var sourceGraphProducerPinPattern = regexp.MustCompile(`(?m)^    \[ "\$\(sha256sum -- "\$source" \| awk '\{print \$1\}'\)" = ([0-9a-f]{64}) \] \|\| return 1$`)
+
 func sourceGraphPolicyCases() []struct {
 	name     string
 	policy   model.CompetitionG2VolumePolicy
@@ -47,6 +53,9 @@ func sourceGraphPolicyCases() []struct {
 
 // Version-one controls must still authenticate: the programs of the ten
 // repositories and the pins that name them are the bytes they were sealed at.
+// Each producer's pin is its file in this tree, the bytes its preparation
+// program checks. The work-coverage entry had been left at 484a9e2e when its
+// file and program moved; the owner corrected it to the tree's file (QD-875).
 func TestSourceGraphHistoricalProducersAndPinsAreUnchanged(t *testing.T) {
 	for name, digest := range map[string]string{
 		"evaluator.sh":                            "0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b",
@@ -63,7 +72,26 @@ func TestSourceGraphHistoricalProducersAndPinsAreUnchanged(t *testing.T) {
 	wantPrograms := map[string][3]string{
 		"legacy":        {"prepare-round-baseline.sh", "evaluator.sh", "0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b"},
 		"minimum-work":  {"prepare-round-baseline-minimum-work.sh", "evaluator-minimum-work.sh", "7780930d44ebc1df5d8f775a75c37aadb2048fc1b9386027615f3ce6b5fe56d4"},
-		"work-coverage": {"prepare-round-baseline-work-coverage.sh", "evaluator-work-coverage.sh", "484a9e2eb107b0d5a812db4f0c2a9cd30a30e3615604def4eeea1d000a0b8b4e"},
+		"work-coverage": {"prepare-round-baseline-work-coverage.sh", "evaluator-work-coverage.sh", "d2ad9dc8d6fcbb41f74ea5b1fb3746bb45447ffb25d4030c925516f7b46a8c72"},
+	}
+	// The sealed v3 files every release of the ten runs beside its producer,
+	// at that release's bytes; some of this tree's helpers have moved since.
+	sealed := map[string]string{
+		"network-boundary.sh":            "9ab82a9a8bb2272934461472509c15df4242f14859351dadd6dfcb2a1cd27cb7",
+		"compose.yml":                    "f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464",
+		"hash-local-mount.sh":            "94ee94b9cc42dfe2f7236d49cc24e26b7bd79e9b63c5d582315b7fd1878dcb86",
+		"docker-id-map.sh":               "0babbcce2d286bf861827c9c11fa02d841d487b33c23765c96916ee1063d854c",
+		"resource-boundary.sh":           "14909d09069d0ee329a2779796bf003b12765fa4fad435c0aeb784c316ccbd03",
+		"retain-failure-evidence.sh":     "f3f119c06b12662c1f2d1dae433be40de7a7b222fc42f55aba8b75a3cd14c4d1",
+		"postgres-init.sh":               "653b81b0fcf2fdaf4a3f4421a252a582484581e3a03463c0fad03186ee14d77c",
+		"timeout-budget.sh":              "7f3298edaca3bd31f4e5a02d17fd88ccb66f961e9d8493d9b047426d8fab476d",
+		"entrypoint.sh":                  "efbfe1a8dd8fb58b4fef8e57bea205e819dfdf21a85ec31d71d85365cf467758",
+		"build-submission.sh":            "4a998275ffe94d322462ec9d7876af1ff288c3e8ba85f0c3278b4b512baa0172",
+		"submission-builder-identity.sh": "1764b7a97f1f99d33aa201c7e721dcce37ed3f58c5aeed8c99b50644706b8c19",
+		"prepare-evaluation-source.sh":   "a2445db1aa6e8655da12ca8ec810eda86c5e93df84801887c76ed490f232d4b6",
+		"Dockerfile.submission":          "255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034",
+		"competitionpatch":               "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
+		"competitionpatch.sha256":        "560358c0192972f71e715144289b8871fc4c3566d382cd30a9b7d3deb74c6df7",
 	}
 	for _, c := range sourceGraphPolicyCases() {
 		historical, historicalProgram, err := roundBaselinePreparationPolicyDependencies(c.policy, c.coverage)
@@ -75,8 +103,24 @@ func TestSourceGraphHistoricalProducersAndPinsAreUnchanged(t *testing.T) {
 			t.Fatalf("%s: omission did not select the historical release: %v", c.name, err)
 		}
 		want := wantPrograms[c.name]
-		if program != want[0] || selected[want[1]] != want[2] || len(selected) != 16 {
+		if program != want[0] || selected[want[1]] != want[2] || len(selected) != len(sealed)+1 {
 			t.Errorf("%s: historical release is %s with %s=%s over %d files", c.name, program, want[1], selected[want[1]], len(selected))
+		}
+		if actual := sourceGraphContainerFileSha256(t, want[1]); selected[want[1]] != actual {
+			t.Errorf("%s: %s is %s in this tree, pinned %s", c.name, want[1], actual, selected[want[1]])
+		}
+		content, err := os.ReadFile(filepath.Join("..", "connect", "sim-latency", "evaluator", "container", program))
+		if err != nil {
+			t.Fatal(err)
+		}
+		matches := sourceGraphProducerPinPattern.FindAllSubmatch(content, -1)
+		if len(matches) != 1 || string(matches[0][1]) != selected[want[1]] {
+			t.Errorf("%s: %s does not check the producer bytes the controller pins", c.name, program)
+		}
+		for name, digest := range sealed {
+			if selected[name] != digest {
+				t.Errorf("%s: sealed v3 dependency %s was re-pinned to %s", c.name, name, selected[name])
+			}
 		}
 		for name := range selected {
 			if strings.Contains(name, "sidecar") {
@@ -84,23 +128,11 @@ func TestSourceGraphHistoricalProducersAndPinsAreUnchanged(t *testing.T) {
 			}
 		}
 	}
-	base := roundBaselinePreparationDependencyDigests()
-	for name, digest := range map[string]string{
-		"build-submission.sh":          "4a998275ffe94d322462ec9d7876af1ff288c3e8ba85f0c3278b4b512baa0172",
-		"prepare-evaluation-source.sh": "a2445db1aa6e8655da12ca8ec810eda86c5e93df84801887c76ed490f232d4b6",
-		"competitionpatch":             "3d161d76bace48bff6536164a84f330b1618c82f319775b8551c19872b937e54",
-		"competitionpatch.sha256":      "560358c0192972f71e715144289b8871fc4c3566d382cd30a9b7d3deb74c6df7",
-	} {
-		if base[name] != digest {
-			t.Errorf("sealed v3 dependency %s was re-pinned to %s", name, base[name])
-		}
-	}
 }
 
 // Each policy has its own producer of the eleven repositories, and the
 // preparation program in this tree pins exactly that producer's bytes.
 func TestSourceGraphSidecarReleasePinsItsOwnProducers(t *testing.T) {
-	pinPattern := regexp.MustCompile(`(?m)^    \[ "\$\(sha256sum -- "\$source" \| awk '\{print \$1\}'\)" = ([0-9a-f]{64}) \] \|\| return 1$`)
 	seenProducers, seenPrograms := map[string]bool{}, map[string]bool{}
 	for _, c := range sourceGraphPolicyCases() {
 		historical, historicalProgram, err := roundBaselinePreparationPolicyDependencies(c.policy, c.coverage)
@@ -130,7 +162,7 @@ func TestSourceGraphSidecarReleasePinsItsOwnProducers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		matches := pinPattern.FindAllSubmatch(content, -1)
+		matches := sourceGraphProducerPinPattern.FindAllSubmatch(content, -1)
 		if len(matches) != 1 || string(matches[0][1]) != digest {
 			t.Errorf("%s: %s does not pin exactly its producer", c.name, program)
 		}
