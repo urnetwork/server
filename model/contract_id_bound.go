@@ -169,6 +169,7 @@ func (self contractWeeks) render(sql string) string {
 	).Replace(sql)
 }
 
+// A contract id as a uuid literal.
 func contractIdLiteralSql(contractId server.Id) string {
 	return "'" + contractId.String() + "'::uuid"
 }

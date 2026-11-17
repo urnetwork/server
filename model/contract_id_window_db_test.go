@@ -60,6 +60,7 @@ type unexpiredContractReadIds struct {
 	destinationNetworkId server.Id
 }
 
+// Fresh ids for a read's arguments.
 func newUnexpiredContractReadIds() unexpiredContractReadIds {
 	return unexpiredContractReadIds{
 		sourceId:             server.NewId(),
