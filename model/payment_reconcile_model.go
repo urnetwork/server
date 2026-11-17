@@ -94,6 +94,13 @@ const (
 	// checkout fulfils only once its payment clears. Evidence is the checkout
 	// session; written once per session, for support.
 	PaymentReconcileActionPaymentFailed = "payment_failed"
+	// A verified App Store restore moved a subscription whose account is
+	// deleted to the restoring account (apple_subscription_move_model.go).
+	// Evidence is the subscription's original transaction id; network_id is
+	// the account it moved to, and details name the deleted one, the restored
+	// transaction and whether a paid window credited to the deleted account
+	// moved with it.
+	PaymentReconcileActionSubscriptionMoved = "subscription_moved"
 )
 
 // PaymentReconcileStoreAll is the store label for run-level rows (heartbeat).

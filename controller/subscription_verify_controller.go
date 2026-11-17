@@ -348,7 +348,14 @@ type VerifyAppleTransactionArgs struct {
 //	                                                           (credited /
 //	                                                           already_credited
 //	                                                           / invalid)
-//	appAccountToken != session network                      -> wrong_network
+//	appAccountToken != session network                      -> wrong_network,
+//	                                                           unless the move
+//	                                                           rules move the
+//	                                                           subscription of a
+//	                                                           deleted account
+//	                                                           here (credited /
+//	                                                           already_credited;
+//	                                                           apple_subscription_move_controller.go)
 //	ledger insert landed                                    -> credited
 //	transaction already in the ledger                       -> already_credited
 //
@@ -379,12 +386,9 @@ func VerifyAppleTransactionClaims(
 	}
 
 	if transaction.networkId != clientSession.ByJwt.NetworkId {
-		glog.Infof(
-			"[sub]verify apple transaction: appAccountToken names network %s, session is %s\n",
-			transaction.networkId,
-			clientSession.ByJwt.NetworkId,
-		)
-		return verifyStatusResult(VerifyPurchaseStatusWrongNetwork), nil
+		// another account's purchase stays its own (wrong_network), unless
+		// that account is deleted and the subscription moves here
+		return verifyAppleTransactionForAnotherNetwork(clientSession.Ctx, transaction, clientSession.ByJwt.NetworkId)
 	}
 
 	credited := false
