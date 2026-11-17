@@ -156,7 +156,7 @@ func MaintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 			cutoverWeek.Format(time.DateOnly),
 			cutoverWeek.Add(-contractCutoverAbandonMargin).Format(time.RFC3339),
 		)
-		if err := abortContractPartitionCutover(ctx, false, contractPartitionGlogf); err != nil {
+		if err := abortContractPartitionCutover(ctx, false, contractPartitionGlogf, DefaultContractPartitionCutoverSettings()); err != nil {
 			glog.Errorf("[cp]could not abandon the prepared cutover: %s\n", err)
 		} else {
 			report.AbandonedCutover = true

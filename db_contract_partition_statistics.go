@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -72,15 +73,27 @@ func contractStatisticsSwapSql(statistics []contractStatistics) (rename []string
 	return
 }
 
+// How long the last swap attempt waited for its locks, and how long it held
+// them: from the LOCK TABLE's return through the commit. Application
+// statements on the contract tables queue for both.
+type contractSwapTiming struct {
+	lockWait time.Duration
+	held     time.Duration
+}
+
 // Reads definitions only after the swap acquired every table lock. Name collisions
 // fail the same transaction, leaving every table and original object unchanged.
-func contractPartitionSwap(ctx context.Context, statements []string) error {
-	return contractPartitionTx(ctx, func(tx PgTx) {
+func contractPartitionSwap(ctx context.Context, statements []string, timing *contractSwapTiming) error {
+	var lockedAt time.Time
+	err := contractPartitionTx(ctx, func(tx PgTx) {
 		var create []string
 		locked := false
 		for _, statement := range statements {
+			start := time.Now()
 			RaisePgResult(tx.Exec(ctx, statement))
 			if !locked && strings.HasPrefix(statement, "LOCK TABLE ") {
+				lockedAt = time.Now()
+				timing.lockWait = lockedAt.Sub(start)
 				locked = true
 				// Force deparsed relations and application functions to carry
 				// their schemas, then restore the caller's exact search path.
@@ -117,6 +130,10 @@ func contractPartitionSwap(ctx context.Context, statements []string) error {
 			RaisePgResult(tx.Exec(ctx, statement))
 		}
 	})
+	if !lockedAt.IsZero() {
+		timing.held = time.Since(lockedAt)
+	}
+	return err
 }
 
 // The parent's copies have been dropped before the original names are restored.

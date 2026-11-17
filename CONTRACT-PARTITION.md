@@ -485,6 +485,31 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
    on main today, the swap would wait until the transaction fixes (escrow
    out of the transaction, the shorter close-report transaction) are
    deployed.
+   - **Revised 2026-11-17** (`db_contract_partition_admission.go`), for Main
+     as it now runs: the large contract tables are under autovacuum most of
+     the day, often anti-wraparound passes of hours, and every main-pool
+     statement gives up after `PgLockTimeout` (2 s) behind a lock.
+   - The cutover's steps (the legacy bound, its validation, the swap, abort
+     and rollback) never queue behind an autovacuum worker, whatever its age:
+     a request that waits deadlock_timeout (1 s) behind one cancels a routine
+     pass, and waits out its whole lock timeout behind an anti-wraparound
+     one. They still wait out any transaction older than 5 s that holds a
+     lock the request conflicts with, and a prepared transaction.
+   - The scope of each step is the relations it locks and every partition
+     below them, so rollback sees the vacuums of the leaves. Each prepare
+     step and abort reads only its own table's scope.
+   - Each ACCESS EXCLUSIVE wait is at most 1 s (`ContractPartitionCutoverSettings.LockTimeout`,
+     rollback's `LockTimeout`), so a statement queued behind it stays under
+     `PgLockTimeout` with the step's own work. The validation waits at most
+     5 s for its SHARE UPDATE EXCLUSIVE lock, which queues no reads or
+     writes.
+   - Prepare no longer waits on a busy table: it defers that table's bound
+     or validation to the next run, prepares the others, and ends with
+     `ContractPartitionDeferredError`. Run it again until it reports
+     "prepared".
+   - The swap logs how long it waited for its locks and how long it held
+     them; the dry run reports whether the swap would be admitted now.
+   - A week's drop keeps its admission (parents, transactions older than 5 s).
 4. **TRUNCATE guards stay on every leaf.** They are kept on the legacy
    partition and repeated on each weekly partition, because a parent's
    statement trigger does not fire for a statement that names a partition.
@@ -570,6 +595,13 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
   prepare off-peak.
 
 ### Production runbook
+
+The runbook for Main as of 2026-11-17 (PostgreSQL 18.7, near-continuous
+autovacuum on the large tables, the disk headroom the cutover week needs) is
+`temp/contract-cutover-1117/RUNBOOK.md` in the workspace. It supersedes the
+steps below where they differ: prepare is rerun until it reports "prepared",
+finalize runs with the taskworker stopped through the settlement gate, and the
+cutover week is chosen for disk headroom, not as the nearest Monday.
 
 1. Deploy a build with this code and apply migrations 856-857. Also deploy
    the transaction fixes.
