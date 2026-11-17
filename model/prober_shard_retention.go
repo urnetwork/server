@@ -18,7 +18,22 @@
 // begins, the oldest kept generation falls out and is dropped as a unit. The
 // retention is a fixed number of shards: a pass is never cut short of its
 // generation. A pass ends by draining and settling its shard
-// (SettleProberShard), and nothing deletes it before its generation drops.
+// (SettleProberShard), and nothing but its window clients goes before its
+// generation drops.
+//
+// The window clients. Each tunnel of a pass mints a derived client of the
+// pass's own client and retires it when the tunnel closes: on Main about 5,500
+// a pass, 6.8M a day, each retired about 16 seconds after it was minted. Once
+// its pass settled, nothing reads a retired window again: its contracts carry
+// their own network ids, so close, expiry, settlement and payout never read
+// its row (as for a hosted proxy's windows, network_client_retired_hosted.go),
+// and the location fold cannot write its row again once its client is gone.
+// The window step (RemoveProberShardWindows, prober_shard_window_clients.go)
+// deletes a pass's window clients and the rows keyed by them an hour after its
+// deadline, once every contract it funded is resolved and every escrow of its
+// balances settled; the pass's own client, identity, contracts and registry
+// row stay for its generation. A window held by a connection or a hosted
+// resource stays for the drop.
 //
 // The drop. Oldest generation first:
 //  1. the generation's zero-byte contracts, by one walk of the primary key
@@ -80,12 +95,12 @@
 //
 // The runtime control, the Redis hash `{prober_retention}control`, turns the
 // drop on, off or to a dry run, shortens or lengthens the window within the
-// code's bounds, paces the walk and the contract deletes and turns the
-// contract step off, without a deploy. It is read before every pass and every
-// walk batch, so setting the mode off stops a running drop within one pass or
-// batch. A run that cannot read it stops, as if the mode were off. The code's
-// default mode is off: a deploy drops nothing until an operator sets the
-// control.
+// code's bounds, paces the walk and the contract deletes, turns the contract
+// step off, and paces or turns off the window step, without a deploy. It is
+// read before every pass and every walk batch, so setting the mode off stops a
+// running drop, and the window step, within one pass or batch. A run that
+// cannot read it stops, as if the mode were off. The code's default mode is
+// off: a deploy drops nothing until an operator sets the control.
 package model
 
 import (
@@ -183,6 +198,22 @@ type ProberShardRetentionSettings struct {
 	// rows at once, so this paces those deletes.
 	DefaultMaxShardsPerMinute float64
 	MaxShardsPerMinute        float64
+	// The window step runs while the control does not turn it off.
+	DropWindows bool
+	// The window step takes a pass once its deadline is this far in the past
+	// and every contract it funded is resolved.
+	WindowMinDeadlineAge time.Duration
+	// A pass still unresolved, or still live, this far past its deadline is
+	// passed over: its window clients wait for its generation's drop. Until
+	// then the window step waits at it.
+	WindowSkipAge time.Duration
+	// Window clients one transaction deletes, at most. Non-positive turns the
+	// window step off.
+	WindowBatchSize int
+	// Passes whose window clients the window step deletes per minute while the
+	// control sets no rate, and the most the control can set.
+	DefaultMaxWindowShardsPerMinute float64
+	MaxWindowShardsPerMinute        float64
 	// Passes selected and locked together.
 	ShardPageSize int
 	// Closed registry rows of dropped generations deleted per transaction.
@@ -237,17 +268,31 @@ func DefaultProberShardRetentionSettings() *ProberShardRetentionSettings {
 		// about 49,000 passes (Main, 2026-11-01) in about 27 hours
 		DefaultMaxShardsPerMinute: 30,
 		MaxShardsPerMinute:        600,
-		ShardPageSize:             16,
-		RegistryBatchSize:         1000,
-		RunBudget:                 4 * time.Minute,
-		StatementTimeout:          30 * time.Second,
-		LockTimeout:               2 * time.Second,
-		ControlTimeout:            2 * time.Second,
-		BlockedRetryInterval:      time.Hour,
-		FailedRetryInterval:       time.Minute,
-		ResumeInterval:            15 * time.Second,
-		IdleInterval:              5 * time.Minute,
-		TaskMaxTime:               15 * time.Minute,
+		DropWindows:               true,
+		// a pass settles within about half an hour of its creation on Main,
+		// and a contract's lifespan and close linger are about 75 minutes
+		// (RetiredHostedNetworkClientReapSettings)
+		WindowMinDeadlineAge: time.Hour,
+		WindowSkipAge:        6 * time.Hour,
+		// a pass on Main has about 5,500 window clients: one transaction
+		WindowBatchSize: 10000,
+		// Main creates about 1,400 passes a day, one a minute: four keep up
+		// with room, at about 380 window deletes a second while behind, and
+		// clear the backlog of about 39,000 passes (2026-11-17) in about nine
+		// days
+		DefaultMaxWindowShardsPerMinute: 4,
+		MaxWindowShardsPerMinute:        120,
+		ShardPageSize:                   16,
+		RegistryBatchSize:               1000,
+		RunBudget:                       4 * time.Minute,
+		StatementTimeout:                30 * time.Second,
+		LockTimeout:                     2 * time.Second,
+		ControlTimeout:                  2 * time.Second,
+		BlockedRetryInterval:            time.Hour,
+		FailedRetryInterval:             time.Minute,
+		ResumeInterval:                  15 * time.Second,
+		IdleInterval:                    5 * time.Minute,
+		TaskMaxTime:                     15 * time.Minute,
 	}
 }
 
@@ -284,17 +329,24 @@ const proberShardRetentionControlKey = "{prober_retention}control"
 //     second, of any payer, at most the code's; zero is off;
 //   - `maxShardsPerMinute`: passes dropped per minute, at most the code's;
 //     zero is off;
-//   - `contracts`: on or off, the zero-byte contract step.
+//   - `contracts`: on or off, the zero-byte contract step;
+//   - `windows`: on or off, the window step (RemoveProberShardWindows), which
+//     runs in the mode the other fields set;
+//   - `maxWindowShardsPerMinute`: passes whose window clients the window step
+//     deletes per minute, at most the code's; zero turns the window step off.
 //
 // A field that does not parse narrows as far as it can: mode off, the most
-// generations, rate zero (which is off), the contract step off.
+// generations, rate zero (which is off), the contract step off, the window
+// step off.
 const (
-	ProberShardRetentionControlFieldMode                  = "mode"
-	ProberShardRetentionControlFieldRetainedGenerations   = "retainedGenerations"
-	ProberShardRetentionControlFieldMaxContractsPerSecond = "maxContractsPerSecond"
-	ProberShardRetentionControlFieldMaxWalkRowsPerSecond  = "maxWalkRowsPerSecond"
-	ProberShardRetentionControlFieldMaxShardsPerMinute    = "maxShardsPerMinute"
-	ProberShardRetentionControlFieldContracts             = "contracts"
+	ProberShardRetentionControlFieldMode                     = "mode"
+	ProberShardRetentionControlFieldRetainedGenerations      = "retainedGenerations"
+	ProberShardRetentionControlFieldMaxContractsPerSecond    = "maxContractsPerSecond"
+	ProberShardRetentionControlFieldMaxWalkRowsPerSecond     = "maxWalkRowsPerSecond"
+	ProberShardRetentionControlFieldMaxShardsPerMinute       = "maxShardsPerMinute"
+	ProberShardRetentionControlFieldContracts                = "contracts"
+	ProberShardRetentionControlFieldWindows                  = "windows"
+	ProberShardRetentionControlFieldMaxWindowShardsPerMinute = "maxWindowShardsPerMinute"
 )
 
 // The effective control: the code settings as the Redis control narrowed them.
@@ -307,6 +359,10 @@ type ProberShardRetentionControl struct {
 	MaxWalkRowsPerSecond  float64
 	MaxShardsPerMinute    float64
 	DropContracts         bool
+	// The window step runs, in the control's mode, at most
+	// MaxWindowShardsPerMinute passes a minute.
+	DropWindows              bool
+	MaxWindowShardsPerMinute float64
 }
 
 // The control the fields narrow the settings to. Pure: fields is the control
@@ -320,7 +376,9 @@ func NarrowProberShardRetentionControl(fields map[string]string, settings *Probe
 		MaxWalkRowsPerSecond:  min(settings.DefaultMaxWalkRowsPerSecond, settings.MaxWalkRowsPerSecond),
 		MaxShardsPerMinute:    min(settings.DefaultMaxShardsPerMinute, settings.MaxShardsPerMinute),
 		// a batch with no room reads or keeps nothing
-		DropContracts: settings.DropContracts && 0 < settings.ContractBatchSize && 0 < settings.WalkBatchSize,
+		DropContracts:            settings.DropContracts && 0 < settings.ContractBatchSize && 0 < settings.WalkBatchSize,
+		DropWindows:              settings.DropWindows && 0 < settings.WindowBatchSize,
+		MaxWindowShardsPerMinute: min(settings.DefaultMaxWindowShardsPerMinute, settings.MaxWindowShardsPerMinute),
 	}
 	if value, ok := fields[ProberShardRetentionControlFieldMode]; ok {
 		// a value that does not parse is off
@@ -360,6 +418,21 @@ func NarrowProberShardRetentionControl(fields map[string]string, settings *Probe
 	}
 	if value, ok := fields[ProberShardRetentionControlFieldContracts]; ok {
 		control.DropContracts = control.DropContracts && strings.TrimSpace(value) == "on"
+	}
+	if value, ok := fields[ProberShardRetentionControlFieldWindows]; ok {
+		control.DropWindows = control.DropWindows && strings.TrimSpace(value) == "on"
+	}
+	if value, ok := fields[ProberShardRetentionControlFieldMaxWindowShardsPerMinute]; ok {
+		rate, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err == nil && !math.IsNaN(rate) {
+			control.MaxWindowShardsPerMinute = min(settings.MaxWindowShardsPerMinute, rate)
+		} else {
+			control.MaxWindowShardsPerMinute = 0
+		}
+	}
+	// a rate of zero turns only the window step off: the drop does not read it
+	if !(0 < control.MaxWindowShardsPerMinute) {
+		control.DropWindows = false
 	}
 	if !settings.Enable || !(0 < control.MaxContractsPerSecond) || !(0 < control.MaxWalkRowsPerSecond) || !(0 < control.MaxShardsPerMinute) {
 		control.Mode = ProberShardRetentionModeOff
@@ -616,7 +689,7 @@ func init() {
 	for _, table := range proberShardRetentionTables {
 		proberShardRetentionDeletedRowsCounter.WithLabelValues(table)
 	}
-	for _, step := range []string{"select", "contracts", "identity", "registry"} {
+	for _, step := range []string{"select", "contracts", "identity", "registry", proberShardRetentionStepWindows} {
 		for _, outcome := range []string{"ok", "error"} {
 			proberShardRetentionBatchDuration.WithLabelValues(step, outcome)
 		}

@@ -360,6 +360,21 @@ const proberShardHasUnresolvedContractsSql = `
 	)
 `
 
+// Whether an escrow of a balance of the network $1 is not settled: the
+// network's balances by network, then each one's unsettled escrows, through
+// the partial index that holds exactly those.
+const proberShardHasUnsettledEscrowSql = `
+	SELECT EXISTS (
+		SELECT 1 FROM transfer_balance AS balance
+		CROSS JOIN LATERAL (
+			SELECT 1 FROM transfer_escrow
+			WHERE transfer_escrow.balance_id = balance.balance_id AND NOT transfer_escrow.settled
+			LIMIT 1
+		) AS escrow
+		WHERE balance.network_id = $1
+	)
+`
+
 // Retry only contracts whose two actual final reports already authorize normal
 // settlement. This runs without an ownership/balance lock: settlement keeps its
 // existing contract-before-balance lock order. Missing/checkpoint reports and
@@ -629,24 +644,9 @@ func reapProberShard(ctx context.Context, key ProberShardKey) (*proberShardReap,
 			cacheOwner = owner
 		}, server.TxReadCommitted, server.OptNoRetry())
 		if cacheOwner != nil {
-			// Ordinary model cleanup uses bounded cross-slot pipelines. Keep all
-			// Redis I/O outside the transaction and repeat safely after a crash.
-			removeReapedClientRedisState(ctx, cacheOwner.RetiredClientIds)
-			forEachReapedClientRedisChunk(cacheOwner.RetiredClientIds, func(ids []server.Id) {
-				server.Redis(ctx, func(r server.RedisClient) {
-					_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-						for _, id := range ids {
-							pipe.Del(ctx, residentKey(id))
-							pipe.Del(ctx, provideModesKey(id))
-							for mode := ProvideModeDefault; mode <= ProvideModeStream; mode++ {
-								pipe.Del(ctx, provideModeSecretKeyKey(id, mode))
-							}
-						}
-						return nil
-					})
-					server.Raise(err)
-				})
-			})
+			// Keep all Redis I/O outside the transaction and repeat safely
+			// after a crash.
+			removeProberShardClientRedisState(ctx, cacheOwner.RetiredClientIds)
 			if !slices.Contains(retiredBalanceIds, cacheOwner.BalanceId) {
 				retiredBalanceIds = append(retiredBalanceIds, cacheOwner.BalanceId)
 			}
@@ -660,13 +660,37 @@ func reapProberShard(ctx context.Context, key ProberShardKey) (*proberShardReap,
 	}, func(err error) (*proberShardReap, error) { return nil, err })
 }
 
+// The Redis state of a pass's deleted clients: the ordinary reap's
+// (removeReapedClientRedisState), then each client's resident and provide
+// mode keys, in bounded cross-slot pipelines. Every delete is idempotent, so a
+// retry after a crash repeats it safely. Raises on a Redis error.
+func removeProberShardClientRedisState(ctx context.Context, clientIds []server.Id) {
+	removeReapedClientRedisState(ctx, clientIds)
+	forEachReapedClientRedisChunk(clientIds, func(ids []server.Id) {
+		server.Redis(ctx, func(r server.RedisClient) {
+			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for _, id := range ids {
+					pipe.Del(ctx, residentKey(id))
+					pipe.Del(ctx, provideModesKey(id))
+					for mode := ProvideModeDefault; mode <= ProvideModeStream; mode++ {
+						pipe.Del(ctx, provideModeSecretKeyKey(id, mode))
+					}
+				}
+				return nil
+			})
+			server.Raise(err)
+		})
+	})
+}
+
 // SettleProberShard ends a pass's cleanup without deleting anything. It
 // retries the normal settlement of the shard's contracts whose two final
 // reports exist. Once none of its contracts lacks an outcome and no escrow of
 // its network's balances is unsettled, the shard is settled: it waits, with
 // next_cleanup_time 'infinity', for its generation to drop
-// (RemoveProberShardGenerations). Otherwise it is due again a minute later. A
-// changed funding record is an error, as it is for ReapProberShard.
+// (RemoveProberShardGenerations); its window clients go before, an hour past
+// its deadline (RemoveProberShardWindows). Otherwise it is due again a minute
+// later. A changed funding record is an error, as it is for ReapProberShard.
 func SettleProberShard(ctx context.Context, key ProberShardKey) error {
 	_, err := server.HandleError2(func() (struct{}, error) {
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -700,15 +724,7 @@ func SettleProberShard(ctx context.Context, key ProberShardKey) error {
 			var unsettled bool
 			server.Raise(tx.QueryRow(ctx, proberShardHasUnresolvedContractsSql, owner.NetworkId).Scan(&unsettled))
 			if !unsettled {
-				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (
-					SELECT 1 FROM transfer_balance AS balance
-					CROSS JOIN LATERAL (
-						SELECT 1 FROM transfer_escrow
-						WHERE transfer_escrow.balance_id = balance.balance_id AND NOT transfer_escrow.settled
-						LIMIT 1
-					) AS escrow
-					WHERE balance.network_id = $1
-				)`, owner.NetworkId).Scan(&unsettled))
+				server.Raise(tx.QueryRow(ctx, proberShardHasUnsettledEscrowSql, owner.NetworkId).Scan(&unsettled))
 			}
 			if unsettled {
 				return
