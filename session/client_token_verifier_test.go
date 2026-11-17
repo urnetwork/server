@@ -358,3 +358,39 @@ func TestClientTokenVerifierAnswersWhatItCannotVouchFor(t *testing.T) {
 		}
 	})
 }
+
+// Times read with the verifier's own ClockLeeway: a token 10 s past its exp,
+// and one whose issuer's clock runs 10 s ahead, pass the default 30 s, as at
+// the issuer, and are refused by a verifier that reads times exactly.
+func TestClientTokenVerifierReadsTimesWithItsClockLeeway(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetRevocationRecordEnabled(true)()
+		ctx := t.Context()
+		network := newTestingStateRefusalNetwork(ctx)
+		client := network.taggedClient(ctx, nil)
+		if err := ValidateByJwtState(ctx, client, true); err != nil {
+			t.Fatal(err)
+		}
+		lenient := newClientTokenTestVerifier(t, nil)
+		exact := newClientTokenTestVerifier(t, nil)
+		exact.verifier.settings.ClockLeeway = 0
+		exact.now = lenient.now
+
+		expired := *client
+		expired.ExpiresAt = gojwt.NewNumericDate(lenient.now.Add(-10 * time.Second))
+		ahead := *client
+		ahead.IssuedAt = gojwt.NewNumericDate(lenient.now.Add(10 * time.Second))
+		ahead.NotBefore = ahead.IssuedAt
+		for name, signed := range map[string]string{
+			"10 s past its exp": expired.Testing_Sign(),
+			"issued 10 s ahead": ahead.Testing_Sign(),
+		} {
+			if _, err := lenient.verifyWithoutSql(t, ctx, signed); err != nil {
+				t.Errorf("%s, read with %s: %v", name, DefaultClientTokenVerifierSettings().ClockLeeway, err)
+			}
+			if _, err := exact.verifyWithoutSql(t, ctx, signed); !errors.Is(err, ErrClientTokenRefused) {
+				t.Errorf("%s, read exactly: %v", name, err)
+			}
+		}
+	})
+}

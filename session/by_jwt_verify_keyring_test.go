@@ -245,11 +245,11 @@ func TestByJwtVerifyKeyringRefusesADocumentItCannotTrust(t *testing.T) {
 		t.Fatalf("a good document: %v %v", keys, err)
 	}
 	for name, data := range map[string][]byte{
-		"a private key":           document(good, jose.JSONWebKey{Key: otherEcdsaKey, KeyID: kid(&otherEcdsaKey.PublicKey), Algorithm: "ES256"}),
-		"another key's kid":       document(jose.JSONWebKey{Key: &otherEcdsaKey.PublicKey, KeyID: kid(&ecdsaKey.PublicKey), Algorithm: "ES256"}),
-		"another alg":             document(jose.JSONWebKey{Key: &ecdsaKey.PublicKey, KeyID: kid(&ecdsaKey.PublicKey), Algorithm: "ES384"}),
-		"no alg":                  document(jose.JSONWebKey{Key: &ecdsaKey.PublicKey, KeyID: kid(&ecdsaKey.PublicKey)}),
-		"a small rsa key": document(jose.JSONWebKey{Key: &smallRsaKey.PublicKey, KeyID: kid(&smallRsaKey.PublicKey), Algorithm: "RS512"}),
+		"a private key":     document(good, jose.JSONWebKey{Key: otherEcdsaKey, KeyID: kid(&otherEcdsaKey.PublicKey), Algorithm: "ES256"}),
+		"another key's kid": document(jose.JSONWebKey{Key: &otherEcdsaKey.PublicKey, KeyID: kid(&ecdsaKey.PublicKey), Algorithm: "ES256"}),
+		"another alg":       document(jose.JSONWebKey{Key: &ecdsaKey.PublicKey, KeyID: kid(&ecdsaKey.PublicKey), Algorithm: "ES384"}),
+		"no alg":            document(jose.JSONWebKey{Key: &ecdsaKey.PublicKey, KeyID: kid(&ecdsaKey.PublicKey)}),
+		"a small rsa key":   document(jose.JSONWebKey{Key: &smallRsaKey.PublicKey, KeyID: kid(&smallRsaKey.PublicKey), Algorithm: "RS512"}),
 		"a curve no by jwt signs": []byte(`{"keys":[{"kty":"EC","crv":"P-224","alg":"ES256","kid":"synthetic",` +
 			`"x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","y":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`),
 		"a symmetric key": []byte(`{"keys":[{"kty":"oct","k":"c3ludGhldGlj","alg":"HS256","kid":"synthetic"}]}`),
