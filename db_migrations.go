@@ -11748,13 +11748,14 @@ var migrations = []any{
 	// lag_drift_run is one run: its track, its state (P6), the browser's stop
 	// and the one the reports support (V10), whether it started from the
 	// token's address, and the extenders it was ticketed with and where they
-	// were placed (E2), so a verdict can be reproduced. lag_drift_network is
-	// a network's allowed parent origins (P3, `bringyourctl network
-	// drift-test`). No table holds an address, a prefix or a hash of one
-	// beyond the token's own client_ip_hash. Tests and runs are kept 7 days,
-	// like lag results (decision 11, R1). New tables only, created when
-	// absent: nothing existing is read or locked but lag_track's catalog
-	// entry.
+	// were placed (E2), so a verdict can be reproduced. An operator can
+	// revoke one token (revoke_time). lag_drift_network is a network's
+	// allowed parent origins (P3) and its drift switch, both set with
+	// `bringyourctl network drift-test`. No table holds an address, a prefix
+	// or a hash of one beyond the token's own client_ip_hash. Tests and runs
+	// are kept 7 days, like lag results (decision 11, R1). New tables only,
+	// created when absent: nothing existing is read or locked but lag_track's
+	// catalog entry.
 	newSqlMigration(`
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE lag_track
@@ -11778,6 +11779,7 @@ var migrations = []any{
 			run_count smallint NOT NULL DEFAULT 0,
 			updated_at timestamp NOT NULL,
 			failed_at timestamp NULL,
+			revoke_time timestamp NULL,
 			result_json jsonb NULL,
 			result_at timestamp NULL,
 			CONSTRAINT lag_drift_test_token_hash UNIQUE (token_hash)
@@ -11818,8 +11820,41 @@ var migrations = []any{
 
 		CREATE TABLE IF NOT EXISTS lag_drift_network (
 			network_id uuid NOT NULL PRIMARY KEY,
-			parent_origins varchar(256)[] NOT NULL,
+			parent_origins varchar(256)[] NULL,
+			disable_time timestamp NULL,
 			update_time timestamp NOT NULL
 		);
+	`),
+
+	// The drift model's calibration (lag.dev/DRIFTTEST.md V3, V4, K2, Q12;
+	// model/lag_drift_calibration_model.go). One row a week: κ and σ₀ fitted
+	// over the last 7 days of lag tracks, the relay threshold behind
+	// relay_suspected, the tracks and observations the fit kept, and in
+	// summary_json the aggregates they come from: by continent, histograms of
+	// the standardized residuals and of the last-mile offset by network type,
+	// and the relay thresholds by continent and network type. Only
+	// aggregates: no track, visitor, address or place is kept, and a group too
+	// small to be anyone's is left out, so nothing per visitor outlives the
+	// lag retention (R1). The drift test reads the latest row not withdrawn,
+	// and records its id with each verdict, so a withdrawn calibration stays
+	// for the verdicts that name it. A new table only, created when absent:
+	// nothing existing is read or locked.
+	newSqlMigration(`
+		CREATE TABLE IF NOT EXISTS lag_drift_calibration (
+			calibration_id uuid NOT NULL PRIMARY KEY,
+			calibrated_at timestamp NOT NULL,
+			window_start timestamp NOT NULL,
+			window_end timestamp NOT NULL,
+			fit_tracks int NOT NULL,
+			fit_observations int NOT NULL,
+			kappa double precision NOT NULL,
+			sigma0_ms double precision NOT NULL,
+			relay_threshold_ms double precision NOT NULL,
+			summary_json jsonb NOT NULL,
+			withdrawn_at timestamp NULL
+		);
+		CREATE INDEX IF NOT EXISTS lag_drift_calibration_calibrated_at
+		ON lag_drift_calibration (calibrated_at, calibration_id)
+		WHERE withdrawn_at IS NULL;
 	`),
 }
