@@ -6,7 +6,8 @@ package model
 // account row made by an admin's desktop alone; a device's CSR queued, taken again and superseded; the lock taken,
 // renewed, refused while held and taken over once lapsed, every write under a stale claim refused and changing
 // nothing; the one row in flight an account; order_recorded once; a chain registered only on the row's key and one
-// name; the exact-set bucket certifying a host's first four devices at once and the fifth 34 hours on; a 429's hold;
+// name; the exact-set bucket certifying a host's first four devices at once, the fifth to the tenth 34 hours apart
+// and the eleventh a window after the tenth; the grant reading 16 days of spends, all the purge keeps; a 429's hold;
 // a row failed under an order going to custom_revoking and settled before the account orders again; the removal
 // moves; the work list in plan order; the key change's row operations; and the listen facts' two maps. Names are
 // under .example, keys generated.
@@ -444,9 +445,11 @@ func TestTlsCustomRegisterTakesOnlyTheRowsKeyAndName(t *testing.T) {
 }
 
 // The exact-set bucket keeps one certificate back: a host's first four devices are certified at once, and the fifth
-// is refused with a wait. The replay starts empty two windows back, so the burst's window reads full at its start:
-// the fifth is granted when its retry_after_ms has passed, and the sixth 34 h after the fifth, each refusal's wait
-// answered by a grant (17.2.8, QD-990; 17.6's six devices, one host).
+// is refused with a wait. The replay starts full at the quiet window before the burst (QD-994), so the fifth is
+// granted when its retry_after_ms has passed and each further device 34 h after the one before, each refusal's wait
+// answered by a grant, through the tenth, 204 h (8.5 d) after the burst: the grant's 16 d of spends still hold that
+// window (QD-996). At the eleventh's turn they no longer do, and it is granted a window after the tenth (17.2.8;
+// 17.4's N = 10; 17.6's six devices, one host).
 func TestTlsCustomBudgetsCertifyFourDevicesAtOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -462,6 +465,7 @@ func TestTlsCustomBudgetsCertifyFourDevicesAtOnce(t *testing.T) {
 				Chain: world.chain(t, &phone.tlsKey.PublicKey, []string{world.host}, world.now.Add(45*24*time.Hour)),
 			})
 		}
+		burst := world.now
 		for index := range 4 {
 			phone := newTestTlsCustomDevice(t)
 			certId := world.queue(t, phone)
@@ -474,8 +478,8 @@ func TestTlsCustomBudgetsCertifyFourDevicesAtOnce(t *testing.T) {
 			}
 			world.now = world.now.Add(time.Second)
 		}
-		// the fifth and the sixth: each refused with about a refill's wait, and granted at its retry
-		for _, device := range []int{5, 6} {
+		// the fifth to the tenth: each refused with about a refill's wait, and granted at its retry
+		for device := 5; device <= 10; device += 1 {
 			phone := newTestTlsCustomDevice(t)
 			certId := world.queue(t, phone)
 			_, err := claim(certId)
@@ -490,11 +494,78 @@ func TestTlsCustomBudgetsCertifyFourDevicesAtOnce(t *testing.T) {
 			world.now = world.now.Add(time.Duration(refusal.Refusal.RetryAfterMs) * time.Millisecond)
 			claimed, err := claim(certId)
 			if err != nil {
-				t.Fatalf("device %d at its retry: %v", device, err)
+				t.Fatalf("device %d at its retry, %v after the burst: %v", device, world.now.Sub(burst), err)
 			}
 			if err := register(certId, phone, claimed.ClaimSeq); err != nil {
 				t.Fatalf("device %d's register: %v", device, err)
 			}
+		}
+		if paced := world.now.Sub(burst); paced != 204*time.Hour {
+			t.Fatalf("the tenth device certified %v after the burst", paced)
+		}
+		// the eleventh: refused at its turn and at each retry until a window after the tenth
+		phone := newTestTlsCustomDevice(t)
+		certId := world.queue(t, phone)
+		pause := burst.Add(374 * time.Hour)
+		for world.now.Before(pause) {
+			_, err := claim(certId)
+			if err == nil {
+				t.Fatalf("the eleventh device granted %v after the burst", world.now.Sub(burst))
+			}
+			refusal := testTlsCustomRefused(t, err)
+			if refusal.Refusal.Reason != sidecar.TlsCustomRefusalBudget || refusal.Refusal.RetryAfterMs == 0 {
+				t.Fatalf("the eleventh device %v after the burst: %+v", world.now.Sub(burst), refusal)
+			}
+			world.now = world.now.Add(time.Duration(refusal.Refusal.RetryAfterMs) * time.Millisecond)
+			if pause.Before(world.now) {
+				world.now = pause
+			}
+		}
+		claimed, err := claim(certId)
+		if err != nil {
+			t.Fatalf("the eleventh device a window after the tenth: %v", err)
+		}
+		if err := register(certId, phone, claimed.ClaimSeq); err != nil {
+			t.Fatalf("the eleventh device's register: %v", err)
+		}
+	})
+}
+
+// The grant reads a host's spends of the last 16 d, all the purge keeps, and none older (QD-996). With a certificate
+// each 34 h for 17 d no quiet window lies within them, so the set bucket's replay starts empty 16 d back, 10 h before
+// the oldest spend it reads, 374 h old, and a new device's claim is refused for 68 h − (10 h − 34 h) = 92 h, where a
+// read of 15 d would answer 82 h and one of 17 d 68 h. The purge at now less SpendRetention takes only the spend
+// 408 h old, which the grant left unread, so the answer stands.
+func TestTlsCustomGrantReads16DaysOfSpends(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestTlsCustomWorld(t, ctx)
+		account := world.createAccount(t, newTestTlsCustomDevice(t))
+		server.Tx(ctx, func(tx server.PgTx) {
+			accountRow := getTlsCustomAccountInTx(ctx, tx, world.networkId, world.domain, false)
+			for at := world.now; !at.Before(world.now.Add(-408 * time.Hour)); at = at.Add(-34 * time.Hour) {
+				spent := &tlsCustomCertRow{certId: server.NewId(), customHost: world.host}
+				world.store.spendInTx(ctx, tx, accountRow, spent, certsservice.CertsCustomSpendCertificate, at)
+			}
+		})
+		certId := world.queue(t, newTestTlsCustomDevice(t))
+		claim := func() *sidecar.TlsCustomError {
+			_, err := world.store.Claim(ctx, world.caller(newTestTlsCustomDevice(t), false), &sidecar.TlsCustomClaimArgs{Domain: world.domain, Purpose: sidecar.TlsCustomPurposeOrder, CertId: certId, KeySeq: account.KeySeq})
+			if err == nil {
+				t.Fatalf("a claim granted under 17 d of spends")
+			}
+			return testTlsCustomRefused(t, err)
+		}
+		retryAfterMs := uint32((92 * time.Hour).Milliseconds())
+		if refusal := claim(); refusal.Refusal.Reason != sidecar.TlsCustomRefusalBudget || refusal.Refusal.RetryAfterMs != retryAfterMs {
+			t.Fatalf("under 17 d of spends: %+v", refusal.Refusal)
+		}
+		purgedCount, err := world.store.PurgeCustomSpends(ctx, world.now.Add(-certsservice.DefaultCertsCustomSettings().SpendRetention))
+		if err != nil || purgedCount != 1 {
+			t.Fatalf("the purge: %d, %v", purgedCount, err)
+		}
+		if refusal := claim(); refusal.Refusal.Reason != sidecar.TlsCustomRefusalBudget || refusal.Refusal.RetryAfterMs != retryAfterMs {
+			t.Fatalf("after the purge: %+v", refusal.Refusal)
 		}
 	})
 }

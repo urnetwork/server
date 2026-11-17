@@ -124,7 +124,7 @@ var tlsSchemaColumnRows = map[string][2]string{
 	"network_tls_account.orderer_seen":        {"cert-1", "each ordering desktop's last poll time"},
 	"network_tls_account.create_time":         {"cert-1", "the account row with its domain"},
 
-	"network_tls_custom_spend.spend_id":          {"cert-1", "the times of orders, certificates and failed authorizations of the last 8 days"},
+	"network_tls_custom_spend.spend_id":          {"cert-1", "the times of orders, certificates and failed authorizations of the last 16 days"},
 	"network_tls_custom_spend.network_id":        {"cert-1", "network_id"},
 	"network_tls_custom_spend.domain":            {"cert-1", "per custom host and registered domain"},
 	"network_tls_custom_spend.custom_host":       {"cert-1", "per custom host and registered domain"},
