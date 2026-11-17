@@ -337,9 +337,6 @@ const (
 	deletedNetworkKeepRetention = "own retention or aggregate"
 	// the prober's own system accounts, removed by the prober shard reap
 	deletedNetworkKeepSystem = "system account"
-	// the record that the account was deleted (deleted_network_model.go),
-	// which a store purchase's move to its owner's new account reads
-	deletedNetworkKeepDeletionRecord = "deletion record"
 )
 
 // Every table that names a network, user, client or device and keeps its rows
@@ -353,7 +350,6 @@ var deletedNetworkKeptTables = map[string]string{
 	"account_point":                    deletedNetworkKeepFinancial,
 	"account_wallet":                   deletedNetworkKeepFinancial,
 	"apple_offer_code_binding":         deletedNetworkKeepFinancial,
-	"apple_subscription_move":          deletedNetworkKeepFinancial,
 	"apple_subscription_transaction":   deletedNetworkKeepFinancial,
 	"circle_transfer_observation":      deletedNetworkKeepFinancial,
 	"circle_transfer_request":          deletedNetworkKeepFinancial,
@@ -455,8 +451,6 @@ var deletedNetworkKeptTables = map[string]string{
 
 	"prober_identity":  deletedNetworkKeepSystem,
 	"prober_shard_run": deletedNetworkKeepSystem,
-
-	"deleted_network": deletedNetworkKeepDeletionRecord,
 }
 
 // Every table that names a network, user, client or device whose rows go with

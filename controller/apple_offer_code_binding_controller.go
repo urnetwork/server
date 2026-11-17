@@ -280,9 +280,7 @@ var appleOfferCodeBindingLookupFunc = func(connOwner server.PgConn, ctx context.
 // validateAppleTransactionBound is validateAppleTransaction for the paths that
 // cannot bind (the notification webhook, the reconciler): a transaction
 // without an appAccountToken resolves to the network its subscription was
-// bound to, and is invalid when it was never bound. A transaction whose
-// appAccountToken names a deleted network resolves to the network its
-// subscription moved to, if it moved (apple_subscription_move_controller.go).
+// bound to, and is invalid when it was never bound.
 func validateAppleTransactionBound(
 	ctx context.Context,
 	notification AppleNotificationDecodedPayload,
@@ -309,8 +307,6 @@ func validateAppleTransactionBoundInConn(connOwner server.PgConn,
 			return nil, errAppleAccountTokenInvalid
 		}
 		transaction.networkId = networkId
-		return transaction, nil
 	}
-	resolveAppleSubscriptionMove(connOwner, ctx, transaction)
 	return transaction, nil
 }
