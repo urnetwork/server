@@ -579,12 +579,13 @@ func TestLagDriftStart(t *testing.T) {
 			connect.AssertEqual(t, ticket.Location.CountryCode, fixture.places[ticket.ExtenderId].CountryCode)
 		}
 		connect.AssertEqual(t, positions, []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
-		// near: two in Germany first, then the nearest; mid and far spread
-		// by bearing; spares nearest first (E2)
+		// near: two in Germany first, then the nearest; mid by the ring
+		// around the IP place; far spread by bearing; spares nearest first
+		// (E2)
 		connect.AssertEqual(t, []string{cities[0], cities[1], cities[2], cities[3]}, []string{"Berlin", "Leipzig", "Szczecin", "Dresden"})
 		mid := []string{cities[4], cities[5], cities[6], cities[7]}
 		slices.Sort(mid)
-		connect.AssertEqual(t, mid, []string{"London", "Rome", "Stockholm", "Warsaw"})
+		connect.AssertEqual(t, mid, []string{"Kyiv", "Lisbon", "London", "Stockholm"})
 		for _, position := range []int{8, 9, 10, 11} {
 			if !slices.Contains([]string{"Cairo", "Dubai", "Lagos", "New York", "Mumbai", "Toronto"}, cities[position]) {
 				t.Fatalf("far position %d is %s", position, cities[position])
@@ -1024,9 +1025,14 @@ func TestLagDriftParseOrigin(t *testing.T) {
 	connect.AssertNotEqual(t, err, nil)
 }
 
-// A retest prefers extenders the window has not used, within each band, and
-// falls back to repeats where a band has no others (E2). An address placed
-// nowhere gets the sample's spread. Pure.
+// E2's choice (lag.dev/DRIFTTEST.md E2): the near band nearest, the mid band
+// by expected information over a ring of plausible places around the IP
+// place, and the far band spread by bearing, with a short mid band's slots
+// passing to it. A retest prefers extenders the window has not used, within
+// each band, and falls back to repeats where a band has no others. The choice
+// is the same for the same pool and place. An address placed nowhere gets the
+// sample's spread. Names pinned to the run's family come first in each band
+// (K6). Pure.
 func TestLagDriftChoose(t *testing.T) {
 	set := &lagServingSet{byId: map[server.Id]*lagServingExtender{}}
 	byCity := map[string]*lagServingExtender{}
@@ -1040,6 +1046,7 @@ func TestLagDriftChoose(t *testing.T) {
 		byCity[city.city] = extender
 	}
 	drift := DefaultLagDriftSettings()
+	driftModel := model.DefaultLagDriftCalibration().Model()
 	berlin := &lagDriftAddrPlace{CountryCode: "de", Point: &lagDriftPoint{latitude: 52.5196, longitude: 13.4069}}
 	cities := func(chosen []*lagDriftExtender) []string {
 		names := []string{}
@@ -1049,13 +1056,26 @@ func TestLagDriftChoose(t *testing.T) {
 		return names
 	}
 
-	first := lagDriftChoose(set, berlin, nil, drift)
+	first := lagDriftChoose(set, berlin, nil, drift, 4, driftModel, nil)
 	connect.AssertEqual(t, len(first), 16)
 	connect.AssertEqual(t, cities(first)[:4], []string{"Berlin", "Leipzig", "Szczecin", "Dresden"})
+	// the ring takes extenders toward Iberia, Scandinavia and the east,
+	// where spreading by bearing took the nearest in each gap (London, Rome,
+	// Stockholm, Warsaw)
 	firstMid := cities(first)[4:8]
 	slices.Sort(firstMid)
-	connect.AssertEqual(t, firstMid, []string{"London", "Rome", "Stockholm", "Warsaw"})
-	connect.AssertEqual(t, cities(first)[12:], []string{"Hamburg", "Prague", "Paris", "Kyiv"})
+	connect.AssertEqual(t, firstMid, []string{"Kyiv", "Lisbon", "London", "Stockholm"})
+	for _, toward := range [][]string{{"Lisbon", "Madrid"}, {"Stockholm"}, {"Kyiv", "Warsaw"}} {
+		if !slices.ContainsFunc(firstMid, func(city string) bool { return slices.Contains(toward, city) }) {
+			t.Fatalf("the mid band %v has none of %v", firstMid, toward)
+		}
+	}
+	firstFar := cities(first)[8:12]
+	slices.Sort(firstFar)
+	connect.AssertEqual(t, firstFar, []string{"Cairo", "Lagos", "Mumbai", "Toronto"})
+	connect.AssertEqual(t, cities(first)[12:], []string{"Hamburg", "Prague", "Warsaw", "Paris"})
+	// the same pool and place choose the same
+	connect.AssertEqual(t, cities(lagDriftChoose(set, berlin, nil, drift, 4, driftModel, nil)), cities(first))
 	for i, choice := range first {
 		// the run's 12 from 0, the spares from 12
 		connect.AssertEqual(t, choice.position, i)
@@ -1067,23 +1087,42 @@ func TestLagDriftChoose(t *testing.T) {
 	for _, choice := range first[:12] {
 		used[choice.extender.ExtenderId] = true
 	}
-	retest := lagDriftChoose(set, berlin, used, drift)
+	retest := lagDriftChoose(set, berlin, used, drift, 4, driftModel, nil)
 	connect.AssertEqual(t, cities(retest)[:4], []string{"Hamburg", "Berlin", "Prague", "Szczecin"})
-	mid := cities(retest)[4:8]
-	for _, city := range []string{"Paris", "Kyiv", "Madrid", "Lisbon"} {
-		if !slices.Contains(mid, city) {
-			t.Fatalf("the retest's mid band %v lacks the unused %s", mid, city)
+	for _, choice := range retest[4:8] {
+		if used[choice.extender.ExtenderId] {
+			t.Fatalf("the retest's mid band %v repeats %s", cities(retest)[4:8], choice.extender.Place.City)
+		}
+	}
+	// the far band's two unused, then repeats
+	retestFar := cities(retest)[8:12]
+	for _, city := range []string{"Dubai", "New York"} {
+		if !slices.Contains(retestFar, city) {
+			t.Fatalf("the retest's far band %v lacks the unused %s", retestFar, city)
 		}
 	}
 
 	// an extender an operator excluded is never chosen
 	drift.ExcludedExtenders = []string{byCity["Berlin"].ExtenderId.String(), "not-an-id"}
-	excluded := lagDriftChoose(lagDriftWithout(set, drift.Excluded()), berlin, nil, drift)
+	excluded := lagDriftChoose(lagDriftWithout(set, drift.Excluded()), berlin, nil, drift, 4, driftModel, nil)
 	connect.AssertEqual(t, cities(excluded)[:4], []string{"Leipzig", "Dresden", "Szczecin", "Hamburg"})
+
+	// a mid band of two hands its other two slots to the far band
+	drift.ExcludedExtenders = []string{}
+	for _, city := range []string{"Warsaw", "Paris", "London", "Rome", "Kyiv", "Lisbon"} {
+		drift.ExcludedExtenders = append(drift.ExcludedExtenders, byCity[city].ExtenderId.String())
+	}
+	short := lagDriftChoose(lagDriftWithout(set, drift.Excluded()), berlin, nil, drift, 4, driftModel, nil)
+	shortMid := cities(short)[4:6]
+	slices.Sort(shortMid)
+	connect.AssertEqual(t, shortMid, []string{"Madrid", "Stockholm"})
+	shortFar := cities(short)[6:12]
+	slices.Sort(shortFar)
+	connect.AssertEqual(t, shortFar, []string{"Cairo", "Dubai", "Lagos", "Mumbai", "New York", "Toronto"})
 	drift.ExcludedExtenders = nil
 
 	// an address placed nowhere: a spread across countries
-	unplaced := lagDriftChoose(set, &lagDriftAddrPlace{}, nil, drift)
+	unplaced := lagDriftChoose(set, &lagDriftAddrPlace{}, nil, drift, 4, driftModel, nil)
 	connect.AssertEqual(t, len(unplaced), 16)
 	countries := map[string]bool{}
 	for _, choice := range unplaced {
@@ -1092,6 +1131,114 @@ func TestLagDriftChoose(t *testing.T) {
 	if len(countries) < 12 {
 		t.Fatalf("an unplaced choice spans %d countries", len(countries))
 	}
+
+	// names pinned to the run's family first within each band (K6): every
+	// extender but Berlin's and Leipzig's has its IPv4 name, and none in the
+	// far band, which fills with plain names
+	publishTime := server.NowUtc()
+	far := []string{"Cairo", "Dubai", "Lagos", "New York", "Mumbai", "Toronto"}
+	for i, extender := range set.extenders {
+		extender.Name = fmt.Sprintf("%s.m.example", extender.ExtenderId)
+		extender.Ips = []netip.Addr{netip.MustParseAddr(fmt.Sprintf("192.0.2.%d", 10+i))}
+		if city := extender.Place.City; city == "Berlin" || city == "Leipzig" || slices.Contains(far, city) {
+			continue
+		}
+		extender.Ipv4Name = fmt.Sprintf("%s.ipv4.m.example", extender.ExtenderId)
+		extender.FamilyPublishTime = &publishTime
+		extender.FamilyServing = true
+	}
+	pinned := lagDriftChoose(set, berlin, nil, drift, 4, driftModel, nil)
+	connect.AssertEqual(t, cities(pinned)[:4], []string{"Dresden", "Hamburg", "Szczecin", "Prague"})
+	for _, choice := range pinned[:8] {
+		connect.AssertEqual(t, choice.pinned, true)
+	}
+	for _, city := range cities(pinned)[8:12] {
+		if !slices.Contains(far, city) {
+			t.Fatalf("the far band %v has %s", cities(pinned)[8:12], city)
+		}
+	}
+	connect.AssertEqual(t, lagDriftHost(byCity["Dresden"], 4), byCity["Dresden"].Ipv4Name)
+	connect.AssertEqual(t, lagDriftHost(byCity["Dresden"], 6), byCity["Dresden"].Name)
+	connect.AssertEqual(t, lagDriftHost(byCity["Berlin"], 4), byCity["Berlin"].Name)
+	// a run over IPv6, whose names none has, chooses as without them
+	connect.AssertEqual(t, cities(lagDriftChoose(set, berlin, nil, drift, 6, driftModel, nil)), cities(first))
+}
+
+// A run's tickets name each extender's host pinned to the run's family where
+// it has one, and its measurement name where it hasn't (K6). Pure.
+func TestLagDriftTicketHosts(t *testing.T) {
+	installLagTestExtenderConfig(t, true)
+	signer, refusal := newLagTicketSigner()
+	if refusal != nil {
+		t.Fatalf("no signer: %+v", refusal)
+	}
+	publishTime := server.NowUtc()
+	extender := func(name string, ipv4Name string, ipv6Name string) *lagServingExtender {
+		host := &ExtenderMeasurementHost{
+			ExtenderId: server.NewId(),
+			PublicKey:  make([]byte, 32),
+			Name:       name,
+			Ips:        []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("2001:db8:10::1")},
+			Ipv4Name:   ipv4Name,
+			Ipv6Name:   ipv6Name,
+		}
+		if ipv4Name != "" || ipv6Name != "" {
+			host.FamilyPublishTime = &publishTime
+			host.FamilyServing = true
+		}
+		return &lagServingExtender{
+			ExtenderMeasurementHost: host,
+			Place:                   lagTestPlace("Berlin", "de", 52.52, 13.40),
+		}
+	}
+	chosen := []*lagDriftExtender{
+		{extender: extender("a.m.example", "a.ipv4.m.example", "a.ipv6.m.example"), position: 0},
+		{extender: extender("b.m.example", "", ""), position: 1},
+	}
+	for family, want := range map[int][]string{
+		4: {"a.ipv4.m.example", "b.m.example"},
+		6: {"a.ipv6.m.example", "b.m.example"},
+	} {
+		_, tickets, _, err := signer.signDrift(server.NewId(), server.NewId(), server.NewId(), chosen, family, false, server.NowUtc(), DefaultLagSettings())
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, []string{tickets[0].Host, tickets[1].Host}, want)
+	}
+}
+
+// A start over IPv4 names the IPv4 host of each extender whose certificate
+// carries its family-pinned names, and E2 takes those first in each band; the
+// rest keep their measurement names (K6).
+func TestLagDriftStartPinnedHosts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLagDriftTestFixture(t, ctx)
+		now := server.NowUtc().Truncate(time.Millisecond)
+		pinnedHosts := map[server.Id]string{}
+		for extenderId, extender := range fixture.extenders {
+			if city := fixture.places[extenderId].City; city == "Berlin" || city == "Leipzig" {
+				continue
+			}
+			addLagTestCert(t, ctx, extender, ExtenderMeasurementNames(extenderId, lagTestMeasurementZone)...)
+			pinnedHosts[extenderId] = ExtenderMeasurementFamilyName(extenderId, lagTestMeasurementZone, 4)
+		}
+		allocated := fixture.allocate(t, now, nil)
+		start := fixture.start(t, allocated.Token, lagDriftTestVisitorAddress, "", now)
+		connect.AssertEqual(t, start.Error, (*LagError)(nil))
+		for _, ticket := range start.Tickets {
+			if host, ok := pinnedHosts[ticket.ExtenderId]; ok {
+				connect.AssertEqual(t, ticket.Host, host)
+			} else {
+				connect.AssertEqual(t, strings.Contains(ticket.Host, ".ipv4."), false)
+			}
+			if ticket.Position < 4 {
+				if _, ok := pinnedHosts[ticket.ExtenderId]; !ok {
+					t.Fatalf("the near band names the plain-named %s", ticket.Host)
+				}
+			}
+		}
+	})
 }
 
 // lag.yml's drift block is read over the design's defaults (P7): the keys it

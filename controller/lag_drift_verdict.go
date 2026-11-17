@@ -266,7 +266,12 @@ func lagDriftSupportedStop(
 		}
 	}
 	expected := lagDriftExpectedPoint(cityPoint, country, all)
-	tolerance := lagdrift.StopTolerance{AreaRatio: drift.StopAreaTolerance}
+	// a clear stop holds only at a k_early, which lagdrift requires (V11):
+	// the textbook k's, until the run records its own
+	tolerance := lagdrift.StopTolerance{
+		AreaRatio: drift.StopAreaTolerance,
+		KEarly:    lagdrift.KEarly(lagdrift.KForConfidence(test.Confidence)),
+	}
 
 	// whole ms, rounded up, so the pong at the close is in the look there
 	closeMs := int64(math.Ceil(timeline.closeMs))

@@ -245,7 +245,9 @@ func TestLagDriftProcessAgree(t *testing.T) {
 		}
 		connect.AssertEqual(t, result.Drift.RelaySuspected, false)
 		connect.AssertEqual(t, result.Drift.Extenders, 12)
-		if 100 < result.Drift.EllipseKm.Major {
+		// E2's ring trades a little precision at the IP place for reach
+		// toward where a VPN's visitor may be (T3)
+		if 150 < result.Drift.EllipseKm.Major {
 			t.Fatalf("an ellipse of %+v", result.Drift.EllipseKm)
 		}
 		// the model it was judged with: the defaults, until a calibration

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/urnetwork/connect/lagdrift"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -136,6 +138,23 @@ type lagDriftExtender struct {
 	used         bool
 	inCountry    bool
 	placeErrorKm float64
+	// it answers to its name pinned to the run's family (K6)
+	pinned bool
+}
+
+// Whether an extender answers to its name pinned to IP family 4 or 6 (K6);
+// never for a run that names no family.
+func lagDriftPinned(extender *lagServingExtender, family int) bool {
+	return family != 0 && extender.FamilyName(family) != ""
+}
+
+// The name a run's session connects to (K6): the extender's name pinned to
+// the run's family when it answers to one, else its measurement name.
+func lagDriftHost(extender *lagServingExtender, family int) string {
+	if lagDriftPinned(extender, family) {
+		return extender.FamilyName(family)
+	}
+	return extender.Name
 }
 
 // How many of the chosen are the run's own extenders, its spares apart.
@@ -165,18 +184,21 @@ func lagDriftRunExtenders(chosen []*lagDriftExtender) []*model.LagDriftRunExtend
 	return extenders
 }
 
-// Chooses a run's extenders from what the sample offers now (E2), drops any
-// that no longer serve at `now`, as a track's dots are (lagStillServing),
-// and places each with its error (V3).
+// Chooses a run's extenders from what the sample offers now (E2), for a run
+// started over IP family 4 or 6 (K6), with the model of the calibration in
+// force (V3, V4), drops any that no longer serve at `now`, as a track's dots
+// are (lagStillServing), and places each with its error (V3).
 func lagDriftChooseExtenders(
 	ctx context.Context,
 	now time.Time,
 	settings *LagSettings,
 	place *lagDriftAddrPlace,
 	used map[server.Id]bool,
+	family int,
 ) []*lagDriftExtender {
 	set := lagDriftWithout(getLagServing(ctx, now, settings.ExtenderSampleCache), settings.Drift.Excluded())
-	chosen := lagDriftChoose(set, place, used, &settings.Drift)
+	driftModel := lagDriftCalibrationFor(ctx, &settings.Drift).Model()
+	chosen := lagDriftChoose(set, place, used, &settings.Drift, family, driftModel, lagDriftPlaceErrorsKm)
 
 	extenders := make([]*lagServingExtender, 0, len(chosen))
 	for _, choice := range chosen {
@@ -203,6 +225,18 @@ func lagDriftChooseExtenders(
 	return kept
 }
 
+// The place error of each extender, in order (V3, model.GetLagDriftExtenderPlaceErrorsKm).
+func lagDriftPlaceErrorsKm(extenders []*lagServingExtender) []float64 {
+	placed := make([]*model.LagDriftPlacedExtender, 0, len(extenders))
+	for _, extender := range extenders {
+		placed = append(placed, &model.LagDriftPlacedExtender{
+			Place: extender.Place,
+			Ips:   extender.Ips,
+		})
+	}
+	return model.GetLagDriftExtenderPlaceErrorsKm(placed)
+}
+
 // The serving set without the extenders an operator excluded
 // (lag.yml drift.excluded_extenders).
 func lagDriftWithout(set *lagServingSet, excluded map[server.Id]bool) *lagServingSet {
@@ -220,15 +254,24 @@ func lagDriftWithout(set *lagServingSet, excluded map[server.Id]bool) *lagServin
 }
 
 // The choice of E2 from a serving set, with positions: the run's extenders
-// from 0, near then mid then far, and the spares from drift.Extenders. Pure.
+// from 0, near then mid then far, and the spares from drift.Extenders. The
+// mid band is chosen by the information it is expected to give a visitor on
+// a ring around the IP place, from the model's variances and each
+// candidate's place error (placeErrorsKm, nil for the derived 50 km). Within
+// each band the extenders with names pinned to the run's family come first,
+// and plain-named ones fill only what they leave (K6). Pure, and the same for
+// the same pool, place, family and model.
 func lagDriftChoose(
 	set *lagServingSet,
 	place *lagDriftAddrPlace,
 	used map[server.Id]bool,
 	drift *LagDriftSettings,
+	family int,
+	driftModel lagdrift.Model,
+	placeErrorsKm func(extenders []*lagServingExtender) []float64,
 ) []*lagDriftExtender {
 	if place == nil || place.Point == nil {
-		return lagDriftChooseUnplaced(set, used, drift)
+		return lagDriftChooseUnplaced(set, used, drift, family)
 	}
 
 	candidates := []*lagDriftExtender{}
@@ -248,6 +291,7 @@ func lagDriftChoose(
 			bearingDeg: bearingDeg,
 			used:       used[extender.ExtenderId],
 			inCountry:  place.CountryCode != "" && extender.Place.CountryCode == place.CountryCode,
+			pinned:     lagDriftPinned(extender, family),
 		})
 	}
 	// nearest first; equal distances by id, so the choice is stable
@@ -281,8 +325,8 @@ func lagDriftChoose(
 	}
 
 	// near: the band reaches the nearest nearCount, and at least the mid
-	// band's start; unused extenders within it come first, then repeats,
-	// then anything nearer than the rest
+	// band's start; within it pinned names first, unused extenders first,
+	// then repeats, then anything nearer than the rest
 	nearLimitKm := lagDriftMidMinKm
 	if 0 < nearCount && nearCount <= len(candidates) {
 		nearLimitKm = max(nearLimitKm, candidates[nearCount-1].distanceKm)
@@ -297,6 +341,12 @@ func lagDriftChoose(
 					return 1
 				}
 				return -1
+			}
+			if a.pinned != b.pinned {
+				if a.pinned {
+					return -1
+				}
+				return 1
 			}
 			if a.used != b.used {
 				if a.used {
@@ -315,53 +365,64 @@ func lagDriftChoose(
 	near := nearOrder(remaining(func(*lagDriftExtender) bool { return true }))
 	take(near[:min(nearCount-len(chosen), len(near))]...)
 
-	// mid and far: spread by bearing, unused extenders first
-	spreadBand := func(minKm float64, maxKm float64, count int) {
-		band := remaining(func(candidate *lagDriftExtender) bool {
-			return minKm <= candidate.distanceKm && candidate.distanceKm < maxKm
-		})
-		unused := []*lagDriftExtender{}
-		repeats := []*lagDriftExtender{}
-		for _, candidate := range band {
-			if candidate.used {
-				repeats = append(repeats, candidate)
-			} else {
-				unused = append(unused, candidate)
+	// mid: one at a time, the candidate that most shrinks the region for a
+	// visitor who is really on a ring around the IP place (E2, T3's
+	// hybrid), pinned names first, unused extenders first within them; the
+	// nearer on a tie
+	midBand := remaining(func(candidate *lagDriftExtender) bool {
+		return lagDriftMidMinKm <= candidate.distanceKm && candidate.distanceKm < lagDriftMidMaxKm
+	})
+	lagDriftSetPlaceErrors(append(slices.Clone(chosen), midBand...), placeErrorsKm)
+	ringScore := lagDriftRingScore(*place.Point, driftModel)
+	midPicked := 0
+	for _, group := range lagDriftPreferenceGroups(midBand) {
+		for midPicked < midCount {
+			var best *lagDriftExtender
+			bestScore := math.Inf(1)
+			for _, candidate := range group {
+				if taken[candidate.extender.ExtenderId] {
+					continue
+				}
+				if score := ringScore(append(slices.Clone(chosen), candidate)); score < bestScore {
+					best = candidate
+					bestScore = score
+				}
 			}
+			if best == nil {
+				break
+			}
+			take(best)
+			midPicked += 1
 		}
-		picks := lagDriftSpread(unused, count, nil)
-		bearings := []float64{}
-		for _, pick := range picks {
+	}
+
+	// far: spread by bearing, pinned names first, unused extenders first
+	// within them, each group spread from the bearings picked before; the
+	// slots a short mid band leaves pass to it
+	band := remaining(func(candidate *lagDriftExtender) bool {
+		return lagDriftMidMaxKm <= candidate.distanceKm && candidate.distanceKm <= lagDriftFarMaxKm
+	})
+	farWant := farCount + midCount - midPicked
+	farPicks := []*lagDriftExtender{}
+	bearings := []float64{}
+	for _, group := range lagDriftPreferenceGroups(band) {
+		for _, pick := range lagDriftSpread(group, farWant-len(farPicks), bearings) {
+			farPicks = append(farPicks, pick)
 			bearings = append(bearings, pick.bearingDeg)
 		}
-		picks = append(picks, lagDriftSpread(repeats, count-len(picks), bearings)...)
-		take(picks...)
 	}
-	spreadBand(lagDriftMidMinKm, lagDriftMidMaxKm, midCount)
-	spreadBand(lagDriftMidMaxKm, math.Nextafter(lagDriftFarMaxKm, math.Inf(1)), farCount)
+	take(farPicks...)
 
-	// a short band is made up from the nearest left, unused first
-	byUse := func(candidates []*lagDriftExtender) []*lagDriftExtender {
-		ordered := slices.Clone(candidates)
-		slices.SortStableFunc(ordered, func(a *lagDriftExtender, b *lagDriftExtender) int {
-			if a.used != b.used {
-				if a.used {
-					return 1
-				}
-				return -1
-			}
-			return 0
-		})
-		return ordered
-	}
-	fill := byUse(remaining(func(*lagDriftExtender) bool { return true }))
+	// a short band is made up from the nearest left, pinned names first,
+	// unused first
+	fill := lagDriftByPreference(remaining(func(*lagDriftExtender) bool { return true }))
 	take(fill[:min(drift.Extenders-len(chosen), len(fill))]...)
 	for position, choice := range chosen {
 		choice.position = position
 	}
 
-	// spares, nearest first, unused first
-	spares := byUse(remaining(func(*lagDriftExtender) bool { return true }))
+	// spares, nearest first, pinned names first, unused first
+	spares := lagDriftByPreference(remaining(func(*lagDriftExtender) bool { return true }))
 	spares = spares[:min(drift.Spares, len(spares))]
 	for i, spare := range spares {
 		spare.position = drift.Extenders + i
@@ -369,23 +430,168 @@ func lagDriftChoose(
 	return append(chosen, spares...)
 }
 
+// The candidates in four groups, each in the order given: pinned names
+// unused, pinned names used, plain names unused, plain names used (K6, E2).
+func lagDriftPreferenceGroups(candidates []*lagDriftExtender) [4][]*lagDriftExtender {
+	groups := [4][]*lagDriftExtender{}
+	for _, candidate := range candidates {
+		group := 0
+		if !candidate.pinned {
+			group += 2
+		}
+		if candidate.used {
+			group += 1
+		}
+		groups[group] = append(groups[group], candidate)
+	}
+	return groups
+}
+
+// The candidates in order of preference, otherwise as they were: names
+// pinned to the run's family first (K6), then extenders the window has not
+// used (E2).
+func lagDriftByPreference(candidates []*lagDriftExtender) []*lagDriftExtender {
+	ordered := []*lagDriftExtender{}
+	for _, group := range lagDriftPreferenceGroups(candidates) {
+		ordered = append(ordered, group...)
+	}
+	return ordered
+}
+
+// Sets each candidate's place error (V3), the derived 50 km without a
+// lookup.
+func lagDriftSetPlaceErrors(candidates []*lagDriftExtender, placeErrorsKm func(extenders []*lagServingExtender) []float64) {
+	if placeErrorsKm == nil {
+		for _, candidate := range candidates {
+			candidate.placeErrorKm = lagdrift.DerivedPlaceErrorKm
+		}
+		return
+	}
+	extenders := make([]*lagServingExtender, 0, len(candidates))
+	for _, candidate := range candidates {
+		extenders = append(extenders, candidate.extender)
+	}
+	for i, placeErrorKm := range placeErrorsKm(extenders) {
+		candidates[i].placeErrorKm = placeErrorKm
+	}
+}
+
+// The rings of plausible true places around the IP place that E2's mid band
+// is chosen for, km, with lagDriftRingPlaces places on each (T3's hybrid).
+var lagDriftRingKm = []float64{800, 2000}
+
+const lagDriftRingPlaces = 12
+
+// The measurement's own noise in the ring's variances, ms (lagdriftsim's).
+const lagDriftRingMeasurementMs = 0.3
+
+// A set of extenders' score for E2's mid band, lower better: the weighted
+// log of the region's area the set is expected to give a visitor at each
+// plausible place, the IP place at weight 1 and each ring place at 1/24. At a
+// place, each extender adds to the information on the visitor's east, north
+// and last mile b by its round trip's sensitivity to each, over the model's
+// variance for the path: measurement, σ₀, κ times the distance, and the place
+// error held (V3). The area is the determinant of the position's block of the
+// information's inverse. Ported from lagdriftsim's informationRingScore
+// (connect 232faf11, 734a65b2).
+func lagDriftRingScore(ipPoint lagDriftPoint, driftModel lagdrift.Model) func(picked []*lagDriftExtender) float64 {
+	type weightedPlace struct {
+		at     lagdrift.Point
+		weight float64
+	}
+	center := lagdrift.Point{Lat: ipPoint.latitude, Lon: ipPoint.longitude}
+	places := []weightedPlace{{at: center, weight: 1}}
+	ringWeight := 1 / float64(len(lagDriftRingKm)*lagDriftRingPlaces)
+	for _, ringKm := range lagDriftRingKm {
+		for i := range lagDriftRingPlaces {
+			places = append(places, weightedPlace{
+				at:     lagDriftDestination(center, float64(i)*360/lagDriftRingPlaces, ringKm),
+				weight: ringWeight,
+			})
+		}
+	}
+	return func(picked []*lagDriftExtender) float64 {
+		total := 0.0
+		for _, place := range places {
+			var information [3][3]float64
+			for _, choice := range picked {
+				at := lagdrift.Point{Lat: choice.extender.Place.Latitude, Lon: choice.extender.Place.Longitude}
+				distanceKm := lagdrift.DistanceKm(place.at, at)
+				bearing := lagdrift.BearingDeg(place.at, at) * math.Pi / 180
+				// an extender at the place says little of the direction
+				fade := min(1, distanceKm/10)
+				row := [3]float64{
+					-math.Sin(bearing) * lagdrift.MsPerKm * fade,
+					-math.Cos(bearing) * lagdrift.MsPerKm * fade,
+					1,
+				}
+				routeMs := driftModel.Kappa * lagdrift.MsPerKm * distanceKm
+				placeMs := lagdrift.MsPerKm * lagdrift.HeldPlaceErrorKm(choice.placeErrorKm)
+				variance := lagDriftRingMeasurementMs*lagDriftRingMeasurementMs +
+					driftModel.Sigma0Ms*driftModel.Sigma0Ms +
+					routeMs*routeMs +
+					placeMs*placeMs
+				for u := range 3 {
+					for v := range 3 {
+						information[u][v] += row[u] * row[v] / variance
+					}
+				}
+			}
+			total += place.weight * lagDriftPositionLogDet(information)
+		}
+		return total
+	}
+}
+
+// The log determinant of the position block of a 3 × 3 information's
+// inverse, or a large number when it is singular (lagdriftsim's).
+func lagDriftPositionLogDet(a [3][3]float64) float64 {
+	det := a[0][0]*(a[1][1]*a[2][2]-a[1][2]*a[2][1]) -
+		a[0][1]*(a[1][0]*a[2][2]-a[1][2]*a[2][0]) +
+		a[0][2]*(a[1][0]*a[2][1]-a[1][1]*a[2][0])
+	if !(1e-30 < math.Abs(det)) {
+		return 1e6
+	}
+	// the inverse's position block is the adjugate's over det
+	c00 := (a[1][1]*a[2][2] - a[1][2]*a[2][1]) / det
+	c01 := -(a[0][1]*a[2][2] - a[0][2]*a[2][1]) / det
+	c10 := -(a[1][0]*a[2][2] - a[1][2]*a[2][0]) / det
+	c11 := (a[0][0]*a[2][2] - a[0][2]*a[2][0]) / det
+	block := c00*c11 - c01*c10
+	if !(0 < block) {
+		return 1e6
+	}
+	return math.Log(block)
+}
+
+// The point distanceKm from p along bearingDeg, on the sphere.
+func lagDriftDestination(p lagdrift.Point, bearingDeg float64, distanceKm float64) lagdrift.Point {
+	radians := math.Pi / 180
+	lat1 := p.Lat * radians
+	lon1 := p.Lon * radians
+	theta := bearingDeg * radians
+	delta := distanceKm / lagdrift.EarthRadiusKm
+	sinLat2 := math.Sin(lat1)*math.Cos(delta) + math.Cos(lat1)*math.Sin(delta)*math.Cos(theta)
+	lat2 := math.Asin(max(-1, min(1, sinLat2)))
+	y := math.Sin(theta) * math.Sin(delta) * math.Cos(lat1)
+	x := math.Cos(delta) - math.Sin(lat1)*sinLat2
+	lon2 := (lon1 + math.Atan2(y, x)) / radians
+	return lagdrift.Point{Lat: lat2 / radians, Lon: math.Mod(lon2+540, 360) - 180}
+}
+
 // The choice for an address placed nowhere: the sample's spread across
-// countries (sampleLagServing), unused extenders first.
-func lagDriftChooseUnplaced(set *lagServingSet, used map[server.Id]bool, drift *LagDriftSettings) []*lagDriftExtender {
+// countries (sampleLagServing), pinned names first, unused extenders first.
+func lagDriftChooseUnplaced(set *lagServingSet, used map[server.Id]bool, drift *LagDriftSettings, family int) []*lagDriftExtender {
 	sample := sampleLagServing(set, len(set.extenders))
 	ordered := []*lagDriftExtender{}
 	for _, extender := range sample {
-		ordered = append(ordered, &lagDriftExtender{extender: extender, used: used[extender.ExtenderId]})
+		ordered = append(ordered, &lagDriftExtender{
+			extender: extender,
+			used:     used[extender.ExtenderId],
+			pinned:   lagDriftPinned(extender, family),
+		})
 	}
-	slices.SortStableFunc(ordered, func(a *lagDriftExtender, b *lagDriftExtender) int {
-		if a.used != b.used {
-			if a.used {
-				return 1
-			}
-			return -1
-		}
-		return 0
-	})
+	ordered = lagDriftByPreference(ordered)
 	// the run's extenders from 0 and the spares after them, as for a placed
 	// address
 	chosen := ordered[:min(drift.Extenders+drift.Spares, len(ordered))]

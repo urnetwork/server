@@ -849,7 +849,10 @@ func lagDriftTestStart(
 	place := lagDriftStartPlace(addr)
 	// a retest prefers paths the window has not measured (E2, V7)
 	used := lagDriftWindowExtenderIds(model.GetLagDriftRuns(ctx, test.DriftTestId), drift)
-	chosen := lagDriftChooseExtenders(ctx, now, settings, place, used)
+	// the run's sessions take the start's family, by names pinned to it
+	// where the extenders have them (K4, K6)
+	family := server.IpVersionForAddr(addr)
+	chosen := lagDriftChooseExtenders(ctx, now, settings, place, used, family)
 	if lagDriftMainCount(chosen, drift) < drift.MinExtenders {
 		return &LagDriftStartResult{
 			Error: lagDriftRefusal(LagErrorCodeUnavailable, "Too few extenders can be measured now. Try again shortly."),
@@ -857,7 +860,7 @@ func lagDriftTestStart(
 	}
 
 	trackId := server.NewId()
-	tickets, ticketsResult, expiresAt, err := signer.signDrift(test.DriftTestId, test.NetworkId, trackId, chosen, false, now, settings)
+	tickets, ticketsResult, expiresAt, err := signer.signDrift(test.DriftTestId, test.NetworkId, trackId, chosen, family, false, now, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -929,7 +932,8 @@ func lagDriftDemoStart(ctx context.Context, addr netip.Addr, now time.Time, sett
 		return &LagDriftStartResult{Error: signerRefusal.Error}, nil
 	}
 	place := lagDriftStartPlace(addr)
-	chosen := lagDriftChooseExtenders(ctx, now, settings, place, nil)
+	family := server.IpVersionForAddr(addr)
+	chosen := lagDriftChooseExtenders(ctx, now, settings, place, nil, family)
 	if lagDriftMainCount(chosen, drift) < drift.MinExtenders {
 		return &LagDriftStartResult{
 			Error: lagDriftRefusal(LagErrorCodeUnavailable, "Too few extenders can be measured now. Try again shortly."),
@@ -938,7 +942,7 @@ func lagDriftDemoStart(ctx context.Context, addr netip.Addr, now time.Time, sett
 	// a client and a track that name nothing stored: the extenders never
 	// report these sessions (E4), and an older one's report finds no ticket
 	// (A7)
-	_, ticketsResult, expiresAt, err := signer.signDrift(server.NewId(), server.Id{}, server.NewId(), chosen, true, now, settings)
+	_, ticketsResult, expiresAt, err := signer.signDrift(server.NewId(), server.Id{}, server.NewId(), chosen, family, true, now, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -1001,13 +1005,15 @@ func lagDriftDemoReport(ticketId server.Id, trackId server.Id) bool {
 // Signs one ticket per chosen extender (E1-E3, M0): pings only, with load
 // caps that bound any load to nothing (E3), and a prompt report (E4), or no
 // report at all for the demo token, whose tickets each have their own derived
-// track (W8). The ticket's client is the drift test (E1). Answers the tickets
-// to store, the tickets to answer, and when they expire.
+// track (W8). The ticket's client is the drift test (E1). Each names the
+// extender's host pinned to the run's family where it has one (K6). Answers
+// the tickets to store, the tickets to answer, and when they expire.
 func (self *lagTicketSigner) signDrift(
 	clientId server.Id,
 	networkId server.Id,
 	trackId server.Id,
 	chosen []*lagDriftExtender,
+	family int,
 	demo bool,
 	now time.Time,
 	settings *LagSettings,
@@ -1061,7 +1067,7 @@ func (self *lagTicketSigner) signDrift(
 		place := choice.extender.Place
 		ticketsResult = append(ticketsResult, &LagDriftTicket{
 			ExtenderId: choice.extender.ExtenderId,
-			Host:       choice.extender.Name,
+			Host:       lagDriftHost(choice.extender, family),
 			Position:   choice.position,
 			Ticket:     ticketText,
 			Location: &LagExtenderLocation{
