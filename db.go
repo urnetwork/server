@@ -183,6 +183,26 @@ func configurePgPoolReadOnly(config *pgxpool.Config) {
 	}
 }
 
+// Set only by an operator process that names its sessions, so that an operator
+// can find exactly that process's backends in pg_stat_activity (for example to
+// cancel them after stopping the process).
+var pgApplicationName atomic.Value
+
+// Every session this process opens carries the name as its application_name.
+// PostgreSQL keeps 63 bytes of it. Pools opened earlier are reset.
+func SetPgApplicationName(name string) {
+	pgApplicationName.Store(name)
+	PgReset()
+}
+
+// An ordinary process's sessions keep the driver's default.
+func configurePgPoolApplicationName(config *pgxpool.Config) {
+	if name, ok := pgApplicationName.Load().(string); ok && name != "" {
+		config.ConnConfig.RuntimeParams["application_name"] = name
+		glog.Infof("[db]application_name = %s\n", name)
+	}
+}
+
 const DefaultPgVaultResourceName = "pg.yml"
 const DefaultPgConfigResourceName = "db.yml"
 
@@ -321,6 +341,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
 		}
 		configurePgPoolReadOnly(config)
+		configurePgPoolApplicationName(config)
 		glog.Infof("[db]statement_tag = %s\n", processPgStatementTag())
 		self.startupMetrics = configurePgPoolLiveness(config)
 		configurePgPoolWriteTracking(config)
