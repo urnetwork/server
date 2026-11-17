@@ -53,9 +53,10 @@ func TestRevocationMembershipVerdict(t *testing.T) {
 
 // A member's client credential reads m: and u: in place of n:user and n:cred.
 // The record answers it valid only with all its fields; a tombstone, another
-// user, a passed deadline, a deleted network, a removed client or a later
-// cutoff refuses; a missing field is a miss, which sockets still refuses when
-// another field it holds does.
+// user or a passed deadline refuses whatever else it lacks, and a deleted
+// network, a removed client or a later cutoff refuses; a missing field is
+// otherwise a miss, which sockets still refuses when another field it holds
+// does.
 func TestRevocationRecordQueryReadsAMembersFields(t *testing.T) {
 	networkId, userId, memberId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	member := NewByJwt(networkId, userId, "verdict", false, false)
@@ -97,14 +98,16 @@ func TestRevocationRecordQueryReadsAMembersFields(t *testing.T) {
 		{name: "every field", values: reply(admitted, cutoffBefore, nil, clientActive), verdict: revocationValid},
 		{name: "a removed membership, its cutoff lapsed", values: reply(revocationTombstone, nil, nil, clientActive), verdict: revocationNoActiveRow},
 		{name: "another user's membership", values: reply(revocationMembershipValue(server.NewId(), nil), cutoffBefore, nil, clientActive), verdict: revocationNoActiveRow},
+		// the token's user has no cutoff field where the membership is another's
+		{name: "another user's membership, no cutoff of the token's user", values: reply(revocationMembershipValue(server.NewId(), nil), nil, nil, clientActive), verdict: revocationNoActiveRow},
 		{name: "a passed reauth deadline", values: reply(revocationMembershipValue(userId, &passed), cutoffBefore, nil, clientActive), verdict: revocationNoActiveRow},
+		{name: "a passed reauth deadline, its cutoff lapsed", values: reply(revocationMembershipValue(userId, &passed), nil, nil, clientActive), verdict: revocationNoActiveRow},
 		{name: "a deleted network", values: reply(nil, nil, "1", nil), verdict: revocationNoActiveRow},
 		{name: "a removed client", values: reply(admitted, cutoffBefore, nil, revocationTombstone), verdict: revocationNoActiveRow},
 		{name: "a cutoff after its creation", values: reply(admitted, cutoffAfter, nil, clientActive), verdict: revocationRotated},
 		{name: "a lapsed membership", values: reply(nil, cutoffBefore, nil, clientActive), verdict: revocationMiss, present: revocationMiss},
 		{name: "a lapsed cutoff", values: reply(admitted, nil, nil, clientActive), verdict: revocationMiss, present: revocationMiss},
 		{name: "a lapsed membership and a later cutoff", values: reply(nil, cutoffAfter, nil, clientActive), verdict: revocationMiss, present: revocationRotated},
-		{name: "a lapsed cutoff and a passed deadline", values: reply(revocationMembershipValue(userId, &passed), nil, nil, clientActive), verdict: revocationMiss, present: revocationNoActiveRow},
 		{name: "a lapsed membership and a removed client", values: reply(nil, cutoffBefore, nil, revocationTombstone), verdict: revocationMiss, present: revocationNoActiveRow},
 		{name: "a malformed membership", values: reply("a "+userId.String(), cutoffBefore, nil, clientActive), verdict: revocationMiss, present: revocationMiss},
 	} {

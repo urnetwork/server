@@ -306,20 +306,23 @@ func (self *revocationRecordQuery) verdict(byJwt *ByJwt, values []any, now time.
 		return revocationNoActiveRow, time.Time{}
 	}
 	identity, identityOk := value(revocationQueryIdentityIndex)
-	if self.member && identityOk && identity == revocationTombstone {
-		// a removed membership refuses whatever else the record lacks
-		return revocationNoActiveRow, time.Time{}
+	membershipAdmitted := false
+	if self.member && identityOk {
+		// a removed membership, another user's or one past its deadline
+		// refuses whatever else the record lacks: a token naming another user
+		// reads that user's own cutoff field, which the record need not hold
+		refuses, admitted := revocationMembershipVerdict(identity, byJwt.UserId, now)
+		if refuses {
+			return revocationNoActiveRow, time.Time{}
+		}
+		membershipAdmitted = admitted
 	}
 	credential, credentialOk := value(revocationQueryCredentialIndex)
 	if !identityOk || !credentialOk {
 		return revocationMiss, time.Time{}
 	}
 	if self.member {
-		refuses, admitted := revocationMembershipVerdict(identity, byJwt.UserId, now)
-		if refuses {
-			return revocationNoActiveRow, time.Time{}
-		}
-		if !admitted {
+		if !membershipAdmitted {
 			return revocationMiss, time.Time{}
 		}
 	} else if identity != byJwt.UserId.String() {
