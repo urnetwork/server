@@ -837,6 +837,7 @@ func TestProviderUsageArchiveContractRetentionWritesHistoricalWeek(t *testing.T)
 		// the reaper's deletes archive, and retirement drops the emptied weeks
 		testReapContract(t, ctx, historicalId)
 		testReapContract(t, ctx, laterId)
+		testWaitForContractHorizon(t, ctx)
 		report, _ = MaintainContractPartitions(ctx, later, ContractRetentionCursor{}, time.Minute)
 		connect.AssertEqual(t, len(report.Blocked), 0)
 		connect.AssertEqual(t, slices.Contains(report.Dropped, ContractLegacyPartitionName("transfer_contract")), true)

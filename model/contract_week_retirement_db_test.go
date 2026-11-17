@@ -52,10 +52,42 @@ func weekRetirementTestFilenodes(t testing.TB, ctx context.Context, weekStart ti
 	return
 }
 
+// Waits until no other backend of this database holds a snapshot or a
+// transaction id from before now, so a row deleted before the call is dead to
+// every snapshot. A shared test server's autovacuum workers can hold one for
+// seconds.
+func waitWeekRetirementTestHorizon(t testing.TB, ctx context.Context) {
+	t.Helper()
+	var since time.Time
+	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&since))
+	})
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		var holders string
+		server.MaintenanceDb(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `
+				SELECT coalesce(string_agg(pid::text || ' ' || coalesce(backend_type, ''), ', '), '')
+				FROM pg_stat_activity
+				WHERE datname = current_database() AND pid <> pg_backend_pid()
+					AND (backend_xmin IS NOT NULL OR backend_xid IS NOT NULL) AND xact_start <= $1`, since).Scan(&holders))
+		})
+		if holders == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backends of this database still hold snapshots from before %s: %s", since, holders)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // VACUUM of each leaf of the week, as autovacuum runs after the reaper's
-// deletes. TRUNCATE false, as on Main (vacuum_truncate off).
+// deletes, once every snapshot sees them. TRUNCATE false, as on Main
+// (vacuum_truncate off).
 func vacuumWeekRetirementTestWeek(t testing.TB, ctx context.Context, weekStart time.Time) {
 	t.Helper()
+	waitWeekRetirementTestHorizon(t, ctx)
 	server.MaintenanceDb(ctx, func(conn server.PgConn) {
 		for _, leaf := range weekRetirementTestLeaves(weekStart) {
 			server.RaisePgResult(conn.Exec(ctx, fmt.Sprintf(`VACUUM (ANALYZE, TRUNCATE false) public.%s`, leaf)))
@@ -232,6 +264,7 @@ func TestContractWeekRetirementKeepsWhatTheReaperKeeps(t *testing.T) {
 		for _, contract := range kept {
 			deleteWeekRetirementTestContract(t, ctx, contract.contractId)
 		}
+		waitWeekRetirementTestHorizon(t, ctx)
 		server.MaintainContractPartitions(taskCtx, now, server.ContractRetentionCursor{}, time.Minute)
 		for _, weekStart := range []time.Time{weekA, weekB} {
 			for i, filenode := range weekRetirementTestFilenodes(t, ctx, weekStart) {

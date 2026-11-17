@@ -334,6 +334,7 @@ func TestContractWeekCompactionKeepsEveryRowVersion(t *testing.T) {
 		for _, contractId := range keptIds {
 			testReapContract(t, ctx, contractId)
 		}
+		testWaitForContractHorizon(t, ctx)
 		report, _ = maintainContractPartitions(horizonCtx, now, ContractRetentionCursor{}, time.Minute, testContractWeekSettings())
 		connect.AssertEqual(t, len(report.Blocked), 0)
 		connect.AssertEqual(t, slices.Contains(report.Dropped, ContractPartitionName("transfer_contract", r.Lower)), true)

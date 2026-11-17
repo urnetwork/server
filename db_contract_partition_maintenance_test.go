@@ -42,11 +42,37 @@ func testReapContract(t testing.TB, ctx context.Context, contractId Id) {
 	})
 }
 
+// Waits until no other backend of this database holds a snapshot or a
+// transaction id from before now, so a row deleted before the call is dead to
+// every snapshot: vacuum removes it, and CLUSTER copies it no more. A shared
+// test server's autovacuum workers can hold one for seconds.
+func testWaitForContractHorizon(t testing.TB, ctx context.Context) {
+	t.Helper()
+	since := testContractPartitionScalar[time.Time](t, ctx, `SELECT clock_timestamp()`)
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		holders := testContractPartitionScalar[string](t, ctx, `
+			SELECT coalesce(string_agg(pid::text || ' ' || coalesce(backend_type, ''), ', '), '')
+			FROM pg_stat_activity
+			WHERE datname = current_database() AND pid <> pg_backend_pid()
+				AND (backend_xmin IS NOT NULL OR backend_xid IS NOT NULL) AND xact_start <= $1`, since)
+		if holders == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backends of this database still hold snapshots from before %s: %s", since, holders)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // VACUUM (ANALYZE) of each leaf of the week r, as autovacuum runs after the
 // reaper's deletes: it removes the deleted rows from the heaps and keys, and
 // sets the row estimates. TRUNCATE false, as on Main (vacuum_truncate off).
+// It first waits until every snapshot sees those deletes.
 func testVacuumContractWeek(t testing.TB, ctx context.Context, r PartitionRange) {
 	t.Helper()
+	testWaitForContractHorizon(t, ctx)
 	MaintenanceDb(ctx, func(conn PgConn) {
 		for _, leaf := range contractPartitionFamily.LeafNames(r) {
 			RaisePgResult(conn.Exec(ctx, fmt.Sprintf(`VACUUM (ANALYZE, TRUNCATE false) public.%s`, quoteIdentifier(leaf))))
@@ -186,6 +212,7 @@ func TestContractPartitionMaintenance(t *testing.T) {
 		// once the reaper deletes week 0's contract, week 0 is emptied and
 		// drops
 		testReapContract(t, ctx, keptContractId)
+		testWaitForContractHorizon(t, ctx)
 		report, _ = MaintainContractPartitions(ctx, later, cursor, time.Minute)
 		connect.AssertEqual(t, slices.Contains(report.Compacted, ContractPartitionName("transfer_contract", week(0))), true)
 		connect.AssertEqual(t, slices.Contains(report.Dropped, ContractPartitionName("transfer_contract", week(0))), true)
