@@ -63,7 +63,7 @@ func TestGkmReconcilerSweepRunsOnTheReconcilerTheRuntimeHolds(t *testing.T) {
 	host := fakeHost.ServiceHost()
 	ctx, cancel := context.WithCancel(t.Context())
 	var lifetime sync.WaitGroup
-	reconciler, err := startGkmReconcilerOnHost(ctx, &lifetime, host, gkmReconcilerTestState{}, fakeHost.Push)
+	reconciler, err := startGkmReconcilerOnHost(ctx, &lifetime, host, gkmReconcilerTestState{}, fakeHost.Push, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +188,13 @@ func TestGkmReconcilerStartsOnTheHostsGateCache(t *testing.T) {
 	var lifetime sync.WaitGroup
 	evsJobHost.Store(host)
 	defer evsJobHost.CompareAndSwap(host, nil)
+	// no Postgres here: the start's listing of network_acl_head runs on the private test stack
+	// (gkm_reconciler_networks_test.go)
+	pages := gkmReconcilerNetworkPages
+	gkmReconcilerNetworkPages = nil
+	defer func() {
+		gkmReconcilerNetworkPages = pages
+	}()
 	startGkmReconcilerFromHost(ctx, &lifetime)
 	reconciler := gkmReconcilerCurrent.Load()
 	if reconciler == nil {

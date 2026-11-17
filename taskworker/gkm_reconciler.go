@@ -22,14 +22,20 @@ package taskworker
 // runtime starts no reconciler; the sweep's name stays bound, so a run queued anyway fails and waits on server/task's
 // backoff rather than find no function.
 //
-// Not yet here:
+// The cache holds a network from its first {acl_}v event on, so at a runtime's start the reconciler reads every
+// network a page at a time (§10.6's networks row; owner decision 371, QD-893): listGkmReconcilerNetworks pages
+// network_acl_head, every network with a config repo, by a cursor, and keeps those sidecar.yml's gkm gate admits,
+// listed or by percent; the reconciler asks the cache for each it holds nothing of, the cache loads them under its
+// LoadConcurrency, and the pages come GkmReconcilerSettings' NetworkPageCount a NetworkPageInterval. So a quiet
+// network's pending hints, expiry wakes, key deletions and sweeps run after a restart, and §2.8's ttls hold. A network
+// the bounded cache evicts is asked for again at the reconciler's next wake for it (gkmservice's reconciler.go). The
+// listing runs once a runtime: a network the gate admits only later is read from its next {acl_}v event, or the next
+// start's listing. It reads no row but network_acl_head's and writes nothing, so it adds no server-visible state. A
+// binary that does not link MG2 has no heads to page, and lists nothing.
 //
-//   - the networks whose log has not moved since this process started: the cache holds a network from its first
-//     {acl_}v event on, so until then the reconciler sends it no hint, sets it no expiry wake and keeps every object
-//     of its sidecars (question gkm-auth-state-reconciler-networks);
-//   - the hint writer's sidecar_id resolver, which plan-KEYS-hint-addressing gives taskworker over
-//     sidecar_identity_binding: without it every pending hint is counted unresolved and lost, which the clients'
-//     hourly resync covers (§6.8).
+// Not yet here: the hint writer's sidecar_id resolver, which plan-KEYS-hint-addressing gives taskworker over
+// sidecar_identity_binding: without it every pending hint is counted unresolved and lost, which the clients' hourly
+// resync covers (§6.8).
 
 import (
 	"context"
@@ -38,6 +44,9 @@ import (
 	"sync/atomic"
 
 	"github.com/urnetwork/glog"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/gkmservice"
@@ -119,16 +128,55 @@ func startGkmReconcilerFromHost(ctx context.Context, lifetime *sync.WaitGroup) {
 		glog.Errorf("[gkmreconciler]no authorization state, so gkm's reconciler waits: %v\n", err)
 		return
 	}
-	if _, err := startGkmReconcilerOnHost(ctx, lifetime, host, state, nil); err != nil {
+	if _, err := startGkmReconcilerOnHost(ctx, lifetime, host, state, nil, gkmReconcilerNetworkPages, nil); err != nil {
 		glog.Errorf("[gkmreconciler]gkm's reconciler did not start: %v\n", err)
 	}
+}
+
+// The networks a runtime's reconciler reads at its start: listGkmReconcilerNetworks, or a test's. nil lists none.
+var gkmReconcilerNetworkPages gkmservice.GkmNetworkPages = listGkmReconcilerNetworks
+
+// One page of §10.6's networks row (owner decision 371): of limit networks network_acl_head holds after
+// afterNetworkId, every network with a config repo, those sidecar.yml's gkm gate admits now, listed or by percent;
+// and the cursor past the last row read, nil once a page reads fewer than limit. A gate that is off admits nothing,
+// so the listing ends with no page read, and a binary that does not link MG2 has no heads to list. A failed read
+// answers its error with the cursor where it was.
+func listGkmReconcilerNetworks(ctx context.Context, afterNetworkId *sidecar.Id, limit int) ([]sidecar.Id, *sidecar.Id, error) {
+	gate := server.CurrentSidecarConfig().Service(server.SidecarGateGkm)
+	if !gate.Enabled() {
+		return nil, nil, nil
+	}
+	var after *server.Id
+	if afterNetworkId != nil {
+		afterId := server.Id(*afterNetworkId)
+		after = &afterId
+	}
+	headIds, err := model.ListNetworkAclHeadNetworkIds(ctx, after, limit)
+	if errors.Is(err, model.ErrNetworkAclHeadUnavailable) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, afterNetworkId, err
+	}
+	networkIds := []sidecar.Id{}
+	for _, headId := range headIds {
+		if gate.Admits(headId) {
+			networkIds = append(networkIds, sidecar.Id(headId))
+		}
+	}
+	if len(headIds) < limit {
+		return networkIds, nil, nil
+	}
+	next := sidecar.Id(headIds[len(headIds)-1])
+	return networkIds, &next, nil
 }
 
 // Starts a reconciler on a copy of host carrying gkm's hint writer, with push when given and else pushservice's with
 // no resolver, makes it current until ctx ends, then closes it, and starts its sweep's chain through host.Tasks. The
 // copy shares host's clusters, budget, Redis and registry. A chain that does not start is said, and the next runtime's
-// start tries again.
-func startGkmReconcilerOnHost(ctx context.Context, lifetime *sync.WaitGroup, host *sidecar.ServiceHost, state gkmservice.GkmReconcilerState, push sidecar.Push) (*gkmservice.GkmReconciler, error) {
+// start tries again. The reconciler reads the networks pages lists at its start (§10.6's networks row), none when it
+// is nil, on settings, the defaults when nil.
+func startGkmReconcilerOnHost(ctx context.Context, lifetime *sync.WaitGroup, host *sidecar.ServiceHost, state gkmservice.GkmReconcilerState, push sidecar.Push, pages gkmservice.GkmNetworkPages, settings *gkmservice.GkmReconcilerSettings) (*gkmservice.GkmReconciler, error) {
 	gkmHost := *host
 	if push == nil {
 		// no resolver: a hint by sidecar id is lost and counted until plan-KEYS-hint-addressing's resolver lands
@@ -139,10 +187,11 @@ func startGkmReconcilerOnHost(ctx context.Context, lifetime *sync.WaitGroup, hos
 		push = writer
 	}
 	gkmHost.Push = push
-	reconciler, err := gkmservice.NewGkmReconciler(ctx, &gkmHost, nil, &gkmservice.GkmReconcilerDeps{
+	reconciler, err := gkmservice.NewGkmReconciler(ctx, &gkmHost, settings, &gkmservice.GkmReconcilerDeps{
 		State: state,
 		// glog, as the budget loops' own adapter writes it
-		Log: evsBudgetLogger{},
+		Log:      evsBudgetLogger{},
+		Networks: pages,
 	})
 	if err != nil {
 		return nil, err
