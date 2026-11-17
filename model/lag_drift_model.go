@@ -45,6 +45,10 @@ const (
 	LagDriftRunStateComplete   = "complete"
 )
 
+// What processing made of a run of a test that failed by an internal error
+// (P4): it is closed with the test, so no sweep waits on it.
+const LagDriftRunOutcomeFailed = "failed"
+
 // Why a start was refused by the token's own state (P5).
 const (
 	// unknown, or never started before its expiry
@@ -706,7 +710,9 @@ func SetLagDriftResultInTx(ctx context.Context, tx server.PgTx, driftTestId serv
 }
 
 // Marks a drift test failed after an internal error (P4): it starts no more
-// runs, and its client_ip hash goes, since no run can start.
+// runs, its client_ip hash goes, since no run can start, and its open runs
+// are closed as failed, so neither the sweep nor the stuck runs' count waits
+// on them.
 func MarkLagDriftTestFailed(ctx context.Context, driftTestId server.Id, now time.Time) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -721,6 +727,21 @@ func MarkLagDriftTestFailed(ctx context.Context, driftTestId server.Id, now time
 			`,
 			driftTestId,
 			now.UTC(),
+		))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE lag_drift_run
+			SET
+				state = $3,
+				completed_at = $2,
+				outcome = $4
+			WHERE drift_test_id = $1 AND state <> $3
+			`,
+			driftTestId,
+			now.UTC(),
+			LagDriftRunStateComplete,
+			LagDriftRunOutcomeFailed,
 		))
 	})
 }
@@ -831,13 +852,22 @@ func GetLagDriftTrackClientInTx(ctx context.Context, tx server.PgTx, trackId ser
 }
 
 // The drift runs still open, started or processing, that started before
-// startedBefore: runs a working sweep would have completed by now (E5).
+// startedBefore: runs a working sweep would have completed by now (E5). A
+// failed test's runs are closed with it, and never counted.
 func CountStuckLagDriftRuns(ctx context.Context, startedBefore time.Time) int {
 	var count int
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(
 			ctx,
-			`SELECT COUNT(*) FROM lag_drift_run WHERE state <> $1 AND started_at < $2`,
+			`
+			SELECT COUNT(*)
+			FROM lag_drift_run
+			INNER JOIN lag_drift_test ON lag_drift_test.drift_test_id = lag_drift_run.drift_test_id
+			WHERE
+				lag_drift_run.state <> $1 AND
+				lag_drift_run.started_at < $2 AND
+				lag_drift_test.failed_at IS NULL
+			`,
 			LagDriftRunStateComplete,
 			startedBefore.UTC(),
 		).Scan(&count))
@@ -847,23 +877,26 @@ func CountStuckLagDriftRuns(ctx context.Context, startedBefore time.Time) int {
 
 // The drift tests with a run that may be due (P6, E5): one started at or
 // before startedBefore and still started, or one processing since at or
-// before finishedBefore. At most limit, oldest first.
+// before finishedBefore. A failed test waits on nothing. At most limit,
+// oldest first.
 func GetDueLagDriftTests(ctx context.Context, startedBefore time.Time, finishedBefore time.Time, limit int) []server.Id {
 	driftTestIds := []server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT drift_test_id
+			SELECT lag_drift_run.drift_test_id
 			FROM lag_drift_run
+			INNER JOIN lag_drift_test ON lag_drift_test.drift_test_id = lag_drift_run.drift_test_id
 			WHERE
-				state <> $1 AND
+				lag_drift_run.state <> $1 AND
 				(
-					(state = $2 AND started_at <= $3) OR
-					(state = $4 AND finished_at <= $5)
-				)
-			GROUP BY drift_test_id
-			ORDER BY MIN(started_at)
+					(lag_drift_run.state = $2 AND lag_drift_run.started_at <= $3) OR
+					(lag_drift_run.state = $4 AND lag_drift_run.finished_at <= $5)
+				) AND
+				lag_drift_test.failed_at IS NULL
+			GROUP BY lag_drift_run.drift_test_id
+			ORDER BY MIN(lag_drift_run.started_at)
 			LIMIT $6
 			`,
 			LagDriftRunStateComplete,

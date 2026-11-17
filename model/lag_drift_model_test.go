@@ -166,6 +166,24 @@ func TestLagDriftSweepReads(t *testing.T) {
 		connect.AssertEqual(t, len(GetDueLagDriftTests(ctx, now, now.Add(5*time.Second), 10)), 2)
 		connect.AssertEqual(t, CountStuckLagDriftRuns(ctx, now.Add(time.Second)), 2)
 
+		// a failed test's runs close with it, and it waits on no sweep
+		failed := testLagDriftTest(ctx, now)
+		testLagDriftRun(ctx, failed, "198.51.100.31", now)
+		connect.AssertEqual(t, CountStuckLagDriftRuns(ctx, now.Add(time.Second)), 3)
+		connect.AssertEqual(t, len(GetDueLagDriftTests(ctx, now, now.Add(5*time.Second), 10)), 3)
+		MarkLagDriftTestFailed(ctx, failed.DriftTestId, now)
+		failedRun := GetLagDriftRuns(ctx, failed.DriftTestId)[0]
+		connect.AssertEqual(t, failedRun.State, LagDriftRunStateComplete)
+		connect.AssertEqual(t, failedRun.Outcome, LagDriftRunOutcomeFailed)
+		connect.AssertEqual(t, CountStuckLagDriftRuns(ctx, now.Add(time.Second)), 2)
+		connect.AssertEqual(t, len(GetDueLagDriftTests(ctx, now, now.Add(5*time.Second), 10)), 2)
+		// even a run left open under a failed test
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE lag_drift_run SET state = 'started' WHERE drift_test_id = $1`, failed.DriftTestId))
+		})
+		connect.AssertEqual(t, CountStuckLagDriftRuns(ctx, now.Add(time.Second)), 2)
+		connect.AssertEqual(t, len(GetDueLagDriftTests(ctx, now, now.Add(5*time.Second), 10)), 2)
+
 		// hashes: a token never started past its expiry, one past its retest
 		// window, one revoked
 		neverStarted := testLagDriftTest(ctx, now)
@@ -179,7 +197,7 @@ func TestLagDriftSweepReads(t *testing.T) {
 
 		// retention: tests and their runs created before the cut
 		removed := RemoveExpiredLagDriftTests(ctx, now.Add(time.Second))
-		connect.AssertEqual(t, removed, RemoveExpiredLagDriftTestsResult{Tests: 4, Runs: 2})
+		connect.AssertEqual(t, removed, RemoveExpiredLagDriftTestsResult{Tests: 5, Runs: 3})
 		connect.AssertEqual(t, GetLagDriftTest(ctx, started.DriftTestId), (*LagDriftTest)(nil))
 		connect.AssertEqual(t, len(GetLagDriftRuns(ctx, started.DriftTestId)), 0)
 	})
