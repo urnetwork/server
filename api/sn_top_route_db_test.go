@@ -53,7 +53,7 @@ func TestSnTopRouteDb(t *testing.T) {
 			t.Fatalf("GET /sn/top = %d", code)
 		}
 		snapshot, ok := body["snapshot"].(map[string]any)
-		if !ok || snapshot["head_seats"] != float64(200) || snapshot["binding_open"] != false {
+		if !ok || snapshot["head_seats"] != float64(200) || snapshot["binding_open"] != true || snapshot["binding_note"] != "" {
 			t.Fatalf("snapshot = %v", body["snapshot"])
 		}
 		if rows, ok := body["rows"].([]any); !ok || len(rows) != 0 {
