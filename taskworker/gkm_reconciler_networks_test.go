@@ -189,6 +189,68 @@ func (self *gkmListingPush) HintSidecars(ctx context.Context, sidecarIds []conne
 	return nil
 }
 
+// Moves the clock by step once the reconciler's loop waits, then waits for the pass the move starts: step is the gate's
+// hint interval, which bounds how far the loop's timer is, so the clock never moves while a pass runs
+// (GkmReconciler.Idle). A pass a change started meanwhile may set the loop's timer one step late, which the next step
+// reaches.
+func stepGkmReconciler(t testing.TB, clock *sidecartest.FakeClock, reconciler *gkmservice.GkmReconciler, step time.Duration) {
+	t.Helper()
+	guard := time.After(gkmListingGuardTimeout)
+	for {
+		idle, changed := reconciler.Idle()
+		if idle {
+			break
+		}
+		select {
+		case <-changed:
+		case <-guard:
+			t.Fatal("the reconciler never waited")
+		}
+	}
+	count, changed := reconciler.Passes()
+	clock.Advance(step)
+	for {
+		select {
+		case <-changed:
+		case <-guard:
+			t.Fatal("no pass after the clock moved")
+		}
+		var passed int
+		passed, changed = reconciler.Passes()
+		if count < passed {
+			return
+		}
+	}
+}
+
+// Steps the clock until done holds, calling each after every step, and fails once the clock reaches deadline first.
+func stepGkmReconcilerUntil(t testing.TB, clock *sidecartest.FakeClock, reconciler *gkmservice.GkmReconciler, step time.Duration, deadline time.Time, what string, done func() bool, each func()) {
+	t.Helper()
+	for !done() {
+		if !clock.Now().Before(deadline) {
+			t.Fatalf("no %s by %v", what, deadline)
+		}
+		stepGkmReconciler(t, clock, reconciler, step)
+		if each != nil {
+			each()
+		}
+	}
+}
+
+// Whether the reconciler has read the network, loaded or not as given, at *cursor or past it; moves *cursor past what
+// it looked at.
+func (self *gkmListingRecorder) sawRead(cursor *int, networkId sidecar.Id, loaded bool) bool {
+	reads := self.reads.all()
+	for *cursor < len(reads) {
+		read := reads[*cursor]
+		*cursor += 1
+		if read.networkId == networkId && read.loaded == loaded {
+			return true
+		}
+	}
+	return false
+}
+
 // Waits until the listing has read count pages.
 func awaitGkmStartListing(t testing.TB, reconciler *gkmservice.GkmReconciler, count int) gkmservice.GkmNetworkListing {
 	t.Helper()
@@ -439,9 +501,11 @@ func TestGkmReconcilerRuntimeStartListsTheGkmNetworks(t *testing.T) {
 }
 
 // After a restart, a network whose log is quiet is read because the start's listing asked for it: its reader's grant
-// expiry closes the repo's gate at its time and the writers get their pending hint, and its ended forwarding
-// Delegation's key object goes DelegationKeyRetention after the end, with no {acl_}v event and no entry since the
-// runtime started. The state is gkmReconcilerStateFromHost's, the one a runtime builds, on its default settings.
+// expiry closes the repo's gate at its time and the writers get their pending hint, never before, and its ended
+// forwarding Delegation's key object stands until DelegationKeyRetention after the end and goes then, with no {acl_}v
+// event and no entry since the runtime started. The state is gkmReconcilerStateFromHost's, the one a runtime builds,
+// and the reconciler runs on its default settings. The expiry and the deletion fall on the loop's minute grid from the
+// runtime's start, which the clock steps through.
 func TestGkmReconcilerAfterARestartReadsAQuietNetwork(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -452,20 +516,8 @@ func TestGkmReconcilerAfterARestartReadsAQuietNetwork(t *testing.T) {
 		owner := admission.Owner()
 		clock := world.net.Clock()
 		host := world.net.Host()
-
-		// a repo the owner writes and an ephemeral device reads until an hour on, by a grant
-		repoId, groupId := admission.Id("restart repo"), admission.Id("restart group")
-		admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_REPO_CREATE, &protocol.RepoCreate{
-			Header: admission.Header(), RepoId: repoId.Bytes(), Kind: protocol.RepoKind_REPO_KIND_GENERAL,
-		}))
-		burner := admission.Device("restart burner", owner.MemberId)
-		admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_SIDECAR_ADMIT,
-			admission.Admission(burner, nil, true, clock.Now().Add(48*time.Hour).UnixMilli(), 0)))
-		expires := clock.Now().Add(time.Hour)
-		admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_REPO_GRANT, &protocol.RepoGrant{
-			Header: admission.Header(), RepoId: repoId.Bytes(), Subject: burner.SidecarId.Bytes(),
-			Role: protocol.RepoGrantRole_REPO_GRANT_ROLE_READER, Expires: expires.UnixMilli(),
-		}))
+		settings := gkmservice.DefaultGkmReconcilerSettings()
+		step := min(settings.PendingHintInterval, settings.DroppedLeafHintInterval)
 
 		// a forwarding Delegation of a member device, ended by its revocation
 		_, phone := admission.ConsentedMember("restart phone")
@@ -484,7 +536,21 @@ func TestGkmReconcilerAfterARestartReadsAQuietNetwork(t *testing.T) {
 			t.Fatal(err)
 		}
 		endedAt := time.UnixMilli(revokedEntry.GetTimeMs())
-		if expiry, found, err := sidecar.GkmHolderExpiry(admission.State(), repoId, clock.Now(), clock.Now().Add(2*time.Hour)); err != nil || !found || !expiry.Equal(expires) {
+
+		// a repo the owner writes and an ephemeral device reads until an hour after that end, by a grant
+		repoId, groupId := admission.Id("restart repo"), admission.Id("restart group")
+		admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_REPO_CREATE, &protocol.RepoCreate{
+			Header: admission.Header(), RepoId: repoId.Bytes(), Kind: protocol.RepoKind_REPO_KIND_GENERAL,
+		}))
+		burner := admission.Device("restart burner", owner.MemberId)
+		admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_SIDECAR_ADMIT,
+			admission.Admission(burner, nil, true, clock.Now().Add(48*time.Hour).UnixMilli(), 0)))
+		expires := endedAt.Add(time.Hour)
+		admission.MustLand(admission.Sign(owner, bridge.SignedType_SIGNED_REPO_GRANT, &protocol.RepoGrant{
+			Header: admission.Header(), RepoId: repoId.Bytes(), Subject: burner.SidecarId.Bytes(),
+			Role: protocol.RepoGrantRole_REPO_GRANT_ROLE_READER, Expires: expires.UnixMilli(),
+		}))
+		if expiry, found, err := sidecar.GkmHolderExpiry(admission.State(), repoId, clock.Now(), expires.Add(time.Hour)); err != nil || !found || !expiry.Equal(expires) {
 			t.Fatalf("the fixture's holder expiry: %v, %t, %v", expiry, found, err)
 		}
 
@@ -536,7 +602,9 @@ func TestGkmReconcilerAfterARestartReadsAQuietNetwork(t *testing.T) {
 		world.raiseHead(admission)
 		defer server.Testing_PushSidecarConfig(gkmListingConfig(networkId))()
 
-		// the restart: a runtime whose cache has heard nothing, as every process's does at its start
+		// the restart, ten minutes after the end: a runtime whose cache has heard nothing, as every process's does at
+		// its start, the expiry and the deletion whole minutes on
+		clock.AdvanceTo(endedAt.Add(10 * time.Minute))
 		state, err := gkmReconcilerStateFromHost(ctx, host)
 		if err != nil {
 			t.Fatal(err)
@@ -566,28 +634,44 @@ func TestGkmReconcilerAfterARestartReadsAQuietNetwork(t *testing.T) {
 		}
 
 		// the grant's expiry: the gate closes at its time and the writers are hinted, never before
-		clock.AdvanceTo(expires)
 		hintCursor := 0
-		push.hints.await(t, &hintCursor, "pending hint at the expiry", func(hint *gkmListingHint) bool {
-			return hint.groupId == groupId && slices.Contains(hint.sidecarIds, owner.SidecarId)
-		})
+		hinted := func() bool {
+			hints := push.hints.all()
+			for hintCursor < len(hints) {
+				hint := hints[hintCursor]
+				hintCursor += 1
+				if hint.groupId == groupId && slices.Contains(hint.sidecarIds, owner.SidecarId) {
+					return true
+				}
+			}
+			return false
+		}
+		stepGkmReconcilerUntil(t, clock, reconciler, step, expires.Add(3*step), "pending hint at the expiry", hinted, nil)
 		for _, hint := range push.hints.all() {
 			if hint.groupId == groupId && hint.at.Before(expires) {
 				t.Errorf("a pending hint before the expiry, at %v to %v", hint.at, hint.sidecarIds)
 			}
 		}
 
-		// the key object stands until DelegationKeyRetention after the end, and goes then
-		retention := gkmservice.DefaultGkmReconcilerSettings().DelegationKeyRetention
-		clock.AdvanceTo(endedAt.Add(retention - time.Second))
-		if _, err := first.Head(ctx, delegationKey); err != nil {
-			t.Fatalf("the key object before its retention ended: %v", err)
+		// the key object stands until DelegationKeyRetention after the end, and goes then: the pass at that time queues
+		// it for the deleter, whose own goroutine deletes it
+		deleteAt := endedAt.Add(settings.DelegationKeyRetention)
+		due := func() bool {
+			return !clock.Now().Before(deleteAt)
 		}
-		clock.AdvanceTo(endedAt.Add(retention + time.Second))
+		standsBefore := func() {
+			if count, _ := reconciler.DelegationKeyDeletes(); count != 0 && clock.Now().Before(deleteAt) {
+				t.Fatalf("a key object deletion at %v, before %v", clock.Now(), deleteAt)
+			}
+			if _, err := first.Head(ctx, delegationKey); err != nil && clock.Now().Before(deleteAt) {
+				t.Fatalf("the key object at %v, before its retention ended: %v", clock.Now(), err)
+			}
+		}
+		stepGkmReconcilerUntil(t, clock, reconciler, step, deleteAt.Add(step), "the deletion's time", due, standsBefore)
 		guard := time.After(gkmListingGuardTimeout)
 		for {
-			deleted, changed := reconciler.DelegationKeyDeletes()
-			if 1 <= deleted {
+			count, changed := reconciler.DelegationKeyDeletes()
+			if 1 <= count {
 				break
 			}
 			select {
@@ -607,7 +691,7 @@ func TestGkmReconcilerAfterARestartReadsAQuietNetwork(t *testing.T) {
 
 // With a cache that holds one network at a time, loading the second evicts the first; the reconciler's next wake for
 // the first finds no state, asks for it again, and reads it once it installs, evicting the second, which is asked
-// for nothing meanwhile.
+// for nothing meanwhile. The pages and the wakes fall on the loop's minute grid, which the clock steps through.
 func TestGkmReconcilerAsksForAnEvictedNetworkAtItsNextWake(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -623,13 +707,16 @@ func TestGkmReconcilerAsksForAnEvictedNetworkAtItsNextWake(t *testing.T) {
 		})
 		recorder := newGkmListingRecorder(gkmservice.NewAclGkmReconcilerState(cache))
 		settings := gkmservice.DefaultGkmReconcilerSettings()
+		step := min(settings.PendingHintInterval, settings.DroppedLeafHintInterval)
 		settings.NetworkPageCount = 1
-		settings.NetworkPageInterval = 10 * time.Second
+		settings.NetworkPageInterval = 2 * step
+		// a network with no expiry is woken this long after its read
+		settings.ExpiryHorizon = 5 * step
 		var lifetime sync.WaitGroup
 		defer lifetime.Wait()
 		defer cancel()
 		clock := world.net.Clock()
-		firstReadAt := clock.Now()
+		startedAt := clock.Now()
 		reconciler, err := startGkmReconcilerOnHost(ctx, &lifetime, world.net.Host(), recorder, newGkmListingPush(clock), listGkmReconcilerNetworks, settings)
 		if err != nil {
 			t.Fatal(err)
@@ -641,7 +728,10 @@ func TestGkmReconcilerAsksForAnEvictedNetworkAtItsNextWake(t *testing.T) {
 		awaitGkmStartListing(t, reconciler, 1)
 		world.loads.await(t, &loadCursor, "load of the first network", isNetwork(firstId))
 		recorder.awaitRead(t, firstId, true)
-		clock.Advance(settings.NetworkPageInterval)
+
+		// the second page at its interval: the second network loads, which evicts the first
+		stepGkmReconciler(t, clock, reconciler, step)
+		stepGkmReconciler(t, clock, reconciler, step)
 		awaitGkmStartListing(t, reconciler, 2)
 		// OnLoad runs after the load's eviction step
 		world.loads.await(t, &loadCursor, "load of the second network", isNetwork(secondId))
@@ -654,9 +744,16 @@ func TestGkmReconcilerAsksForAnEvictedNetworkAtItsNextWake(t *testing.T) {
 		}
 
 		// the first network's wake, ExpiryHorizon after its read: no state, an ask, and its install read
-		clock.AdvanceTo(firstReadAt.Add(settings.ExpiryHorizon))
-		recorder.awaitRead(t, firstId, false)
+		readCursor := recorder.readCursor
+		wokenAt := startedAt.Add(settings.ExpiryHorizon)
+		stepGkmReconcilerUntil(t, clock, reconciler, step, wokenAt.Add(3*step), "read of the evicted network at its wake", func() bool {
+			return recorder.sawRead(&readCursor, firstId, false)
+		}, nil)
+		if clock.Now().Before(wokenAt) {
+			t.Fatalf("the evicted network was read at %v, before its wake at %v", clock.Now(), wokenAt)
+		}
 		world.loads.await(t, &loadCursor, "the first network's reload", isNetwork(firstId))
+		recorder.readCursor = readCursor
 		recorder.awaitRead(t, firstId, true)
 		if asks := recorder.asks.all(); !slices.Equal(asks, []sidecar.Id{firstId, secondId, firstId}) {
 			t.Errorf("asked for %v", asks)
