@@ -378,26 +378,35 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		registration.mintCredential = mintCredential
 	}
 
+	// the old app window's request, made a child of the caller's own client
+	// (network_client_legacy_window_mint.go)
+	legacyWindowMint := false
 	if authClient.ClientId == nil {
 		// a client token creates only children of its own client (AUTHZ1.md).
 		// A top-level client needs the network credential, and another
-		// client's id answers as a client that does not exist
+		// client's id answers as a client that does not exist. Only the plain
+		// mint of a signed client token takes the old window's request
 		if callerClientId := clientSession.ByJwt.ClientId; callerClientId != nil {
-			if authClient.SourceClientId == nil {
+			legacyWindowMintAllowed := registration == nil && !validateParent && !probe && !clientSession.UnsignedIdentity
+			var refusal *AuthNetworkClientError
+			refusal, legacyWindowMint = applyClientTokenMintSource(
+				authClient,
+				*callerClientId,
+				clientSession.ByJwt.NetworkId,
+				legacyWindowMintAllowed,
+				server.NowUtc(),
+			)
+			if refusal != nil {
 				authClientResult = &AuthNetworkClientResult{
-					Error: &AuthNetworkClientError{
-						Message: "A client token cannot create a top-level client.",
-					},
+					Error: refusal,
 				}
 				return
 			}
-			if *authClient.SourceClientId != *callerClientId {
-				authClientResult = &AuthNetworkClientResult{
-					Error: &AuthNetworkClientError{
-						Message: "Client does not exist.",
-					},
-				}
-				return
+			if legacyWindowMint {
+				legacyCallerClientId := *callerClientId
+				defer func() {
+					observeLegacyWindowMintResult(legacyCallerClientId, clientSession.ByJwt.NetworkId, authClientResult, authClientError, server.NowUtc())
+				}()
 			}
 		}
 
@@ -887,6 +896,16 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					authClientResult = &AuthNetworkClientResult{
 						Error: &AuthNetworkClientError{
 							Message: "Client does not exist.",
+						},
+					}
+					return
+				}
+				// the old window sends its own device's spec; any other spec is
+				// not its request, and is refused before anything is written
+				if legacyWindowMint && !legacyWindowMintDeviceSpecMatchesInTx(clientSession.Ctx, tx, deviceId, authClient.DeviceSpec) {
+					authClientResult = &AuthNetworkClientResult{
+						Error: &AuthNetworkClientError{
+							Message: clientTokenTopLevelMintRefusalMessage,
 						},
 					}
 					return
