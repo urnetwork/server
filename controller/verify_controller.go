@@ -333,6 +333,13 @@ const verifyValidatorMaxProviders = 4096
 // 1.3 MB at 3,072 against max_transition_bytes 2 MiB (sn VERSION2.md:33). The
 // per-epoch window and the per-tempo egress hashes follow the cohort size,
 // which rotation does not change.
+//
+// In the rolling census (sn VERIFY-COHORT-V2.md, model/verify_cohort_rolling.go)
+// this limit no longer applies: the validator retires idle members' quality, the
+// census counts a member only until the validator has folded two windows after
+// its last assignment, and the lifetime limit (2,000) bounds every tier, claimed
+// members ahead of the rest through headroom. The validator then holds at most
+// two windows' members, each counted under 2,000 when admitted, so under 4,096.
 const verifyDefaultCohortCensusLimit = 3072
 
 // The census limit for a lifetime limit: never below it, so rotation can only

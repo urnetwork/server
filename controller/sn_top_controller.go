@@ -869,6 +869,8 @@ func computeSnTopSnapshotAt(args *ComputeSnTopSnapshotArgs, clientSession *sessi
 	}
 	model.WriteSnTopSnapshot(ctx, snapshot, projection)
 	snTopResetLatestSnapshotCache()
+	// tier B of the verify cohort's rolling census, from this fold's ranking
+	snTopRefreshVerifyCohortRanked(ctx, settings, projection, inputs.projection)
 	result.RemovedTrailHops = model.RemoveOldSnTopData(ctx, now)
 
 	result.SnapshotId = &snapshot.SnapshotId
