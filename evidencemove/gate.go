@@ -157,7 +157,7 @@ func (self *GateKeeper) update() {
 
 func (self *GateKeeper) openLocked(now time.Time) (bool, string) {
 	if now.Before(self.backoffUntil) {
-		return false, fmt.Sprintf("backing off %s after a failed storage request: %s", self.backoffUntil.Sub(now).Round(time.Second), self.failureCause)
+		return false, fmt.Sprintf("backing off %s after a failure: %s", self.backoffUntil.Sub(now).Round(time.Second), self.failureCause)
 	}
 	reasons := []string{}
 	for index, state := range self.states {
