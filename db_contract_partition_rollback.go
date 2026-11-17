@@ -15,7 +15,9 @@ import (
 type ContractPartitionRollbackSettings struct {
 	// Admission policy before requesting exclusive locks.
 	LockSettings ContractPartitionLockSettings
-	// Maximum wait for each relation lock, to bound queued application traffic.
+	// Maximum wait for each relation lock, to bound queued application traffic:
+	// a main-pool statement gives up after PgLockTimeout (2 s), and a queued one
+	// also waits out the rollback's own work, so this stays well below that.
 	LockTimeout time.Duration
 	// Maximum execution time of each catalog or emptiness statement.
 	StatementTimeout time.Duration
@@ -32,7 +34,7 @@ type ContractPartitionRollbackSettings struct {
 func DefaultContractPartitionRollbackSettings() *ContractPartitionRollbackSettings {
 	return &ContractPartitionRollbackSettings{
 		LockSettings: *DefaultContractPartitionLockSettings(),
-		LockTimeout:  3 * time.Second, StatementTimeout: 30 * time.Second,
+		LockTimeout:  time.Second, StatementTimeout: 30 * time.Second,
 		MaxAttempts: 60, RetryInterval: 10 * time.Second,
 		ValidationLockTimeout: 15 * time.Second, ValidationMaxAttempts: 10,
 		ValidationRetryInterval: 10 * time.Second,
@@ -75,8 +77,11 @@ func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf fun
 		logf("dry run: nothing changed")
 		return nil
 	}
+	// The parents' leaves are in the scope: their vacuums run there, and the
+	// LOCK TABLE of a parent waits for them.
+	scope := &contractLockScope{relations: tableNames, request: contractLockAccessExclusive, settings: settings.LockSettings}
 	var external []contractForeignKey
-	err := contractPartitionRetryWhen(ctx, &settings.LockSettings, func() error {
+	err := contractPartitionRetryWhen(ctx, scope, func() error {
 		return contractPartitionTx(ctx, func(tx PgTx) {
 			for _, statement := range lockStatements {
 				RaisePgResult(tx.Exec(ctx, statement))
