@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -241,17 +242,33 @@ func TestNetworkCleanupDeletedRunTagAndCountTimeoutParse(t *testing.T) {
 	}
 }
 
-// Every session of a run carries the run's application_name, on the main pool
-// and on the maintenance pool the cleanup's transactions use, so that an
-// operator who stops the run finds exactly its backends.
-func TestNetworkCleanupDeletedSessionsCarryTheRunName(t *testing.T) {
+// The run's direct sessions, on the maintenance pool where the cleanup's
+// counting and deleting run, carry the run's application_name, so an operator
+// who stops the run finds exactly its backends. A session on the pooled
+// default resource does not: through PgBouncer its server connection serves
+// other clients too, and a cancel by the name could reach them.
+func TestNetworkCleanupDeletedDirectSessionsCarryTheRunName(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		// as in production, the maintenance resource reaches the database
+		// directly; the local test vault has none, so point one at the same
+		// database
+		pg := server.Vault.RequireSimpleResource(server.DefaultPgVaultResourceName)
+		quoted := func(key string) string {
+			b, err := json.Marshal(pg.RequireString(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(b)
+		}
+		maintenance := fmt.Sprintf("authority: %s\nuser: %s\npassword: %s\ndb: %s\n", quoted("authority"), quoted("user"), quoted("password"), quoted("db"))
+		t.Cleanup(server.PgReset)
+		t.Cleanup(server.Vault.PushSimpleResource(server.MaintenancePgVaultResourceName, []byte(maintenance)))
 		name := networkCleanupDeletedApplicationName("test-" + server.NewId().String()[24:])
-		server.SetPgApplicationName(name)
-		defer server.SetPgApplicationName("")
+		server.SetPgDirectApplicationName(name)
+		t.Cleanup(func() { server.SetPgDirectApplicationName("") })
 		var mainName, maintenanceName string
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&mainName))
@@ -259,7 +276,9 @@ func TestNetworkCleanupDeletedSessionsCarryTheRunName(t *testing.T) {
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			server.Raise(tx.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&maintenanceName))
 		})
-		connect.AssertEqual(t, mainName, name)
 		connect.AssertEqual(t, maintenanceName, name)
+		if mainName == name {
+			t.Fatalf("a session on the pooled default resource carries the run's name %q", name)
+		}
 	})
 }
