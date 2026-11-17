@@ -154,21 +154,34 @@ func DenyNetworkMemberInTx(ctx context.Context, tx server.PgTx, denial *NetworkM
 }
 
 // How many live Owners the team holds, read in tx: what a removal of an Owner
-// must leave at least one of.
+// must leave at least one of. Their rows stay locked FOR UPDATE until tx ends,
+// taken in member_id order, the order an account deletion locks a team's Owners
+// in (account_last_owner_model.go), so a deletion, removal or role change of
+// another Owner waits for tx, or tx for it, and no two of them each leave the
+// other's Owner as the last. Under RepeatableRead a row the winner changed
+// fails tx with a serialization failure, which server.Tx reruns.
 func CountNetworkOwnersInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (count int) {
 	if !server.SidecarMg6Linked() {
 		return 0
 	}
-	server.Raise(tx.QueryRow(
+	result, err := tx.Query(
 		ctx,
 		`
-			SELECT COUNT(*)
+			/* team-owner-count-lock */
+			SELECT member_id
 			FROM network_member
 			WHERE network_id = $1 AND role = $2 AND NOT pending
+			ORDER BY member_id
+			FOR UPDATE
 		`,
 		networkId,
 		string(NetworkMemberRoleOwner),
-	).Scan(&count))
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			count += 1
+		}
+	})
 	return
 }
 
