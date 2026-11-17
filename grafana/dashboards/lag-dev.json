@@ -2360,7 +2360,7 @@
   {
    "id": 43,
    "type": "bargauge",
-   "title": "drift calibration k overflows, last 30 days",
+   "title": "drift calibration k alarms, last 30 days",
    "datasource": {
     "type": "prometheus",
     "uid": "warp-mimir"
@@ -2417,14 +2417,14 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "sort_desc(sum by (continent, confidence) ((last_over_time(urnetwork_lag_drift_calibration_k_overflow_total{env=\"$env\"}[30d]) - last_over_time(urnetwork_lag_drift_calibration_k_overflow_total{env=\"$env\"}[30d] offset 30d)) or last_over_time(urnetwork_lag_drift_calibration_k_overflow_total{env=\"$env\"}[30d])))",
+     "expr": "sort_desc(sum by (continent, kind) ((last_over_time(urnetwork_lag_drift_calibration_k_alarm_total{env=\"$env\"}[30d]) - last_over_time(urnetwork_lag_drift_calibration_k_alarm_total{env=\"$env\"}[30d] offset 30d)) or last_over_time(urnetwork_lag_drift_calibration_k_alarm_total{env=\"$env\"}[30d])))",
      "refId": "A",
-     "legendFormat": "{{continent}} at {{confidence}}",
+     "legendFormat": "{{continent}} {{kind}}",
      "instant": true,
      "range": false
     }
    ],
-   "description": "Weekly drift calibrations in the trailing 30 days whose region size k, for a continent with 10,000 tracks or more, came out beyond its histogram's last edge at a confidence (DRIFTTEST.md V11), by continent and confidence. That continent keeps the default k at that confidence until a calibration gives one. The weekly job logs each as [lag]drift calibration <id>: <continent>'s region size at <confidence> is beyond its histograms' last edge, and lists them in its task result as k_overflows. Such a tail is most likely visitors whose city points are wrong far beyond what light rules out, such as many on VPNs (ops/drift-test.md 6). None is normal, and LagDriftCalibrationKOverflow warns for 8 days after each. Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+   "description": "Region-size alarms the weekly drift calibration raised in the trailing 30 days, by continent and kind (DRIFTTEST.md V11). The drift test's k is a fixed table; lag.dev's tracks only watch it. tail: a week of 2,000 tracks or more put over 2% of them beyond the trailing 26 weeks' 99% bound, twice the share expected; drift: that bound moved more than 15% from 26 weeks earlier; overflow: that bound lies beyond the histograms' last edge, a tail no honest fit has, most likely visitors whose city points are wrong far beyond what light rules out. Any one means the network changed and the k table should be derived again with T3 before the next release; the verdicts keep the table meanwhile. The job logs each as an error and lists it in its task result as k_alarms (ops/drift-test.md 6). None is normal, and LagDriftKAlarm warns for 8 days after each. Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
   }
  ]
 }

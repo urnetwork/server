@@ -127,7 +127,7 @@ func TestLagDevDriftRowAnswersEachQuestion(t *testing.T) {
 		{"start refusals by a rate limit", []string{"urnetwork_lag_drift_starts_total{", `outcome="refused_limit"`}},
 		{"allocation refusals by a rate limit", []string{"urnetwork_lag_drift_allocations_total{", `outcome="refused_limit"`}},
 		{"calibration freshness", []string{`max(urnetwork_stats_lag_drift_calibration_age_seconds{env="$env"})`}},
-		{"calibration k overflows by continent and confidence, 30 days", []string{"sum by (continent, confidence) (", "urnetwork_lag_drift_calibration_k_overflow_total{", "[30d]"}},
+		{"calibration k alarms by continent and kind, 30 days", []string{"sum by (continent, kind) (", "urnetwork_lag_drift_calibration_k_alarm_total{", "[30d]"}},
 	} {
 		answered := slices.ContainsFunc(expressions, func(expression string) bool {
 			for _, part := range question.parts {
@@ -236,20 +236,20 @@ func TestLagDevDriftRowCountsEveryCountOfEachProcess(t *testing.T) {
 }
 
 // The drift row groups by the bounded labels of the drift metrics: outcome,
-// verdict, reason, stop, le, and the calibration's continent code and
-// confidence, and by network only for the 10 networks with the most runs. A
+// verdict, reason, stop, le, and the calibration alarms' continent code and
+// kind, and by network only for the 10 networks with the most runs. A
 // process's labels only match the sweep's two gauges under a max, which keeps
 // no process. Nothing names a visitor, an address, an extender, a test or a
 // token (DRIFTTEST.md R1, ops/drift-test.md §10).
 func TestLagDevDriftRowGroupsOnlyByBoundedLabels(t *testing.T) {
 	bounded := map[string]bool{
-		"outcome":    true,
-		"verdict":    true,
-		"reason":     true,
-		"stop":       true,
-		"le":         true,
-		"continent":  true,
-		"confidence": true,
+		"outcome":   true,
+		"verdict":   true,
+		"reason":    true,
+		"stop":      true,
+		"le":        true,
+		"continent": true,
+		"kind":      true,
 	}
 	byClause := regexp.MustCompile(`by \(([^)]*)\)`)
 	topNetworks := "topk(10, sum by (network_id) ((last_over_time(urnetwork_lag_drift_runs_total{"
@@ -295,7 +295,10 @@ func TestLagDevDriftRowGroupsOnlyByBoundedLabels(t *testing.T) {
 // remaining series reads 0. The network table: the 10 networks with the most
 // runs in the day, across processes, and the verdicts of those networks only.
 // The stuck runs: the count of the taskworker whose pass ended last, however
-// many another taskworker found at its own last pass.
+// many another taskworker found at its own last pass. The calibration's k
+// alarms over 30 days: a long-running taskworker's alarm from before the
+// window doesn't count, and one from a taskworker that came and went within
+// it does.
 func TestLagDevDriftRowPromqlCountsEachProcess(t *testing.T) {
 	promtool := os.Getenv("URNETWORK_PROMTOOL")
 	if promtool == "" {
@@ -401,6 +404,27 @@ func TestLagDevDriftRowPromqlCountsEachProcess(t *testing.T) {
 		return []map[string]any{{"labels": "{}", "value": value}}
 	}
 
+	// one sample each 6 hours from 0, read at 60 days over the 30 before: a
+	// taskworker running throughout raised EU tail at day 20, before the
+	// window, and again at day 45; one that ran from day 52 to 55 raised AS
+	// drift; EU overflow came at day 5 only; another environment's is ignored
+	alarms := panelExpression("drift calibration k alarms, last 30 days", "A")
+	alarm := func(env string, instance string, continent string, kind string) string {
+		return fmt.Sprintf(`urnetwork_lag_drift_calibration_k_alarm_total{%s,continent=%q,kind=%q}`,
+			strings.Replace(taskworker(instance), `env="synthetic"`, fmt.Sprintf("env=%q", env), 1), continent, kind)
+	}
+	alarmSeries := []map[string]string{
+		{"series": alarm("synthetic", "t1", "EU", "tail"), "values": "0x79 1x100 2x100"},
+		{"series": alarm("synthetic", "t2", "AS", "drift"), "values": "_x207 1x12 _x60"},
+		{"series": alarm("synthetic", "t1", "EU", "overflow"), "values": "0x19 1x260"},
+		{"series": alarm("other", "t1", "EU", "tail"), "values": "_x200 5x80"},
+	}
+	alarmCounts := []map[string]any{
+		{"labels": `{continent="EU",kind="tail"}`, "value": 1},
+		{"labels": `{continent="AS",kind="drift"}`, "value": 1},
+		{"labels": `{continent="EU",kind="overflow"}`, "value": 0},
+	}
+
 	fixture, err := json.Marshal(map[string]any{
 		"evaluation_interval": "1m",
 		"tests": []map[string]any{
@@ -429,6 +453,14 @@ func TestLagDevDriftRowPromqlCountsEachProcess(t *testing.T) {
 				"promql_expr_test": []map[string]any{
 					{"expr": stuck, "eval_time": "10m", "exp_samples": newestPass(2)},
 					{"expr": stuck, "eval_time": "50m", "exp_samples": newestPass(0)},
+				},
+			},
+			{
+				"name":         "drift calibration k alarms, last 30 days",
+				"interval":     "6h",
+				"input_series": alarmSeries,
+				"promql_expr_test": []map[string]any{
+					{"expr": alarms, "eval_time": "60d", "exp_samples": alarmCounts},
 				},
 			},
 		},
