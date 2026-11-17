@@ -347,6 +347,96 @@ func TestAbuseReportLimitHoldsAcrossApiInstances(t *testing.T) {
 	})
 }
 
+// The members of addr's report count history in the test's Redis.
+func testAbuseReportLimitCount(t testing.TB, ctx context.Context, addr netip.Addr) int64 {
+	t.Helper()
+	addressHash := server.ClientIpHashForAddr(addr)
+	var count int64
+	var err error
+	server.Redis(ctx, func(r server.RedisClient) {
+		count, err = r.ZCard(ctx, abuseReportRateLimitKeyPrefix+"{address_"+hex.EncodeToString(addressHash[:])+"}.address").Result()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// Each URL and each header block counts as one report (QD-1024): a request of 16 URLs spends 16 of the hour's 30;
+// a body refused for its content counts once; a request that would pass the limit is refused whole with nothing
+// taken, and the counts it made stand, so the caller stays refused; and the window's end frees the caller again.
+func TestAbuseReportLimitCountsEachReport(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clock := &testAbuseRouteClock{now: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}
+		sink := &testAbuseReportSink{}
+		settings := DefaultAbuseRouteSettings()
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			Now:               clock.Now,
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      sink.accept,
+			Settings:          settings,
+		})
+		caller := netip.MustParseAddr("192.0.2.10")
+		urls := func(count int) []string {
+			urls := []string{}
+			for i := range count {
+				urls = append(urls, fmt.Sprintf("https://h%d.elsewhere.example/", i))
+			}
+			return urls
+		}
+		headerBlocks := func(count int) []string {
+			headerBlocks := []string{}
+			for i := range count {
+				headerBlocks = append(headerBlocks, fmt.Sprintf("From: s%d@elsewhere.example\nSubject: hello\n\n", i))
+			}
+			return headerBlocks
+		}
+		report := func(body string) *testAbuseRouteAnswer {
+			return testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", body)
+		}
+
+		if answer := report(testAbuseReportBody(t, "nonsense", urls(settings.ReportUrlMaxCount), nil)); answer.status != http.StatusBadRequest {
+			t.Fatalf("a body refused for its content: %d", answer.status)
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 1 {
+			t.Fatalf("a body refused for its content counted %d", count)
+		}
+		if answer := report(testAbuseReportBody(t, "phishing", urls(16), nil)); answer.status != http.StatusOK || sink.count() != 16 {
+			t.Fatalf("16 URLs: %d, %d reports taken", answer.status, sink.count())
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 17 {
+			t.Fatalf("16 URLs after a refused body counted %d, want 17", count)
+		}
+		if answer := report(testAbuseReportBody(t, "spam", urls(4), headerBlocks(4))); answer.status != http.StatusOK || sink.count() != 24 {
+			t.Fatalf("4 URLs and 4 header blocks: %d, %d reports taken", answer.status, sink.count())
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 25 {
+			t.Fatalf("after 24 reports and a refused body, %d counted, want 25", count)
+		}
+
+		// 16 more would pass 30: refused whole, nothing taken, and its counts up to the refusal stand
+		refused := report(testAbuseReportBody(t, "phishing", urls(16), nil))
+		if refused.status != http.StatusTooManyRequests || refused.header.Get("Retry-After") != "3600" || sink.count() != 24 {
+			t.Fatalf("a request past the limit: %d, Retry-After %q, %d reports taken", refused.status, refused.header.Get("Retry-After"), sink.count())
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != int64(settings.ReportAddressLimit+1) {
+			t.Fatalf("after the refusal, %d counted, want the history held at %d", count, settings.ReportAddressLimit+1)
+		}
+		if answer := report(testAbuseReportBody(t, "phishing", urls(1), nil)); answer.status != http.StatusTooManyRequests || sink.count() != 24 {
+			t.Fatalf("one URL after the refusal: %d, %d reports taken", answer.status, sink.count())
+		}
+
+		clock.Advance(settings.ReportAddressLookback)
+		if answer := report(testAbuseReportBody(t, "spam", urls(16), headerBlocks(4))); answer.status != http.StatusOK || sink.count() != 44 {
+			t.Fatalf("a full request past the window: %d, %d reports taken", answer.status, sink.count())
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 20 {
+			t.Fatalf("past the window, %d counted, want 20", count)
+		}
+	})
+}
+
 // An infrastructure address (WARP_LIMIT_EXCLUDE_SUBNETS, through the dep that stands for it) is never counted: past
 // twice the limit, as an IPv4-mapped IPv6 address too, every report is taken and Redis holds no history, while the
 // first caller outside it is counted.
