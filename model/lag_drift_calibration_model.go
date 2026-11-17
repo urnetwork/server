@@ -185,9 +185,25 @@ const LagDriftKWindow = 26 * 7 * 24 * time.Hour
 type LagDriftCalibratedK struct {
 	// the tracks in its summed histograms
 	Tracks int64
-	// the empirical quantile of the Mahalanobis distance of a city point from
-	// its track's fit at each of LagDriftKConfidences, in their order
+	// at each of LagDriftKConfidences, in their order, an upper bound on the
+	// quantile of the Mahalanobis distance of a city point from its track's
+	// fit (lagDriftHistogramUpperBound); NaN where it is unusable, beyond the
+	// histogram's last edge
 	Quantiles []float64
+}
+
+// Whether the quantile at the i-th of LagDriftKConfidences counts for k: the
+// continent's histograms hold LagDriftKMinTracks tracks, and its bound is
+// within them. One that is not keeps lagdrift.DefaultK.
+func (self *LagDriftCalibratedK) Counts(i int) bool {
+	return LagDriftKMinTracks <= self.Tracks && i < len(self.Quantiles) && !math.IsNaN(self.Quantiles[i])
+}
+
+// Whether the quantile at the i-th of LagDriftKConfidences would count but for
+// its bound lying beyond the histogram's last edge, which the weekly job
+// alerts on (V11).
+func (self *LagDriftCalibratedK) Overflows(i int) bool {
+	return LagDriftKMinTracks <= self.Tracks && i < len(self.Quantiles) && math.IsNaN(self.Quantiles[i])
 }
 
 // The design's values, for when nothing has been calibrated.
@@ -208,15 +224,14 @@ func (self *LagDriftCalibration) Calibrated() bool {
 
 // K is the region's size at a confidence for a visitor on a continent, the
 // continent code of client_ip's country (V11): the larger of the textbook k and
-// the calibrated quantile, where the continent's summed histograms hold
-// LagDriftKMinTracks tracks, and else lagdrift.DefaultK, T3's per-region k.
-// The defaults, as the drift test judges with while drift.calibration_enabled
-// is off, always answer DefaultK.
+// the calibrated bound, where the continent's summed histograms hold
+// LagDriftKMinTracks tracks and the bound is within them, and else
+// lagdrift.DefaultK, T3's per-region k. The defaults, as the drift test judges
+// with while drift.calibration_enabled is off, always answer DefaultK.
 func (self *LagDriftCalibration) K(confidence float64, continentCode string) float64 {
-	calibrated := self.CalibratedK[strings.ToUpper(continentCode)]
-	if calibrated != nil && LagDriftKMinTracks <= calibrated.Tracks {
+	if calibrated := self.CalibratedK[strings.ToUpper(continentCode)]; calibrated != nil {
 		for i, kConfidence := range LagDriftKConfidences {
-			if math.Abs(kConfidence-confidence) < 1e-9 && i < len(calibrated.Quantiles) {
+			if math.Abs(kConfidence-confidence) < 1e-9 && calibrated.Counts(i) {
 				return math.Max(lagdrift.KForConfidence(confidence), calibrated.Quantiles[i])
 			}
 		}
@@ -224,37 +239,40 @@ func (self *LagDriftCalibration) K(confidence float64, continentCode string) flo
 	return lagdrift.DefaultK(confidence, continentCode)
 }
 
-// The q quantile of a histogram over edges, interpolated within its bin. The
-// bin below the first edge starts at 0, and a quantile in the bin from the
-// last edge up is the last edge: the most the histogram can tell.
-func lagDriftHistogramQuantile(edges []float64, counts []int64, q float64) float64 {
+// The one-sided normal quantile of a 95% upper bound.
+const lagDriftKBoundZ = 1.645
+
+// An upper bound on the q quantile of a histogram over edges (V11, drift-review
+// V-3): the upper edge of the bin holding the value at rank
+// n·q + 1.645·√(n·q·(1 − q)), a one-sided 95% bound on the quantile by the
+// binomial's normal approximation, so the k it gives is above the true quantile
+// at least 95% of the time rather than half. The bin below the first edge has
+// the first edge as its upper edge. False when the rank lands in the bin from
+// the last edge up, beyond what the histogram can tell, or past the sample.
+func lagDriftHistogramUpperBound(edges []float64, counts []int64, q float64) (float64, bool) {
 	total := int64(0)
 	for _, count := range counts {
 		total += count
 	}
 	if total == 0 || len(counts) != len(edges)+1 {
-		return math.NaN()
+		return math.NaN(), false
 	}
-	target := q * float64(total)
-	cumulative := 0.0
+	n := float64(total)
+	rank := max(int64(math.Ceil(n*q+lagDriftKBoundZ*math.Sqrt(n*q*(1-q)))), 1)
+	if total < rank {
+		return math.NaN(), false
+	}
+	cumulative := int64(0)
 	for bin, count := range counts {
-		if count == 0 {
-			continue
-		}
-		if target <= cumulative+float64(count) {
+		cumulative += count
+		if rank <= cumulative {
 			if bin == len(edges) {
-				return edges[len(edges)-1]
+				return math.NaN(), false
 			}
-			lower := 0.0
-			if 0 < bin {
-				lower = edges[bin-1]
-			}
-			upper := edges[bin]
-			return lower + (upper-lower)*(target-cumulative)/float64(count)
+			return edges[bin], true
 		}
-		cumulative += float64(count)
 	}
-	return edges[len(edges)-1]
+	return math.NaN(), false
 }
 
 // The calibrated region size by continent from the region-size histograms of
@@ -311,7 +329,9 @@ func getLagDriftCalibratedKInConn(ctx context.Context, conn server.PgConn, calib
 	for continentCode, continentCounts := range counts {
 		k := &LagDriftCalibratedK{Tracks: tracks[continentCode]}
 		for _, confidence := range LagDriftKConfidences {
-			k.Quantiles = append(k.Quantiles, lagDriftHistogramQuantile(LagDriftKEdges, continentCounts, confidence))
+			// NaN when unusable
+			bound, _ := lagDriftHistogramUpperBound(LagDriftKEdges, continentCounts, confidence)
+			k.Quantiles = append(k.Quantiles, bound)
 		}
 		calibratedK[continentCode] = k
 	}
@@ -533,6 +553,26 @@ func WithdrawLagDriftCalibrations(ctx context.Context, now time.Time) (withdrawn
 			now.UTC(),
 		))
 		withdrawn = int(tag.RowsAffected())
+	})
+	return
+}
+
+// GetLagDriftCalibrationWindowEnd is where the latest window of a calibration
+// in force ended, nil when none is in force. The next calibration's window
+// starts there, if that is later than the lag retention allows, so a run
+// beside the weekly one never bins a track twice into the 26 weeks the region
+// size sums (V11, drift-review V-5). A withdrawn calibration's tracks count
+// again.
+func GetLagDriftCalibrationWindowEnd(ctx context.Context) (windowEnd *time.Time) {
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+			SELECT MAX(window_end)
+			FROM lag_drift_calibration
+			WHERE withdrawn_at IS NULL
+			`,
+		).Scan(&windowEnd))
 	})
 	return
 }

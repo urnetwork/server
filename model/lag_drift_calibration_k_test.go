@@ -18,36 +18,81 @@ import (
 // continent from 26 weeks of them, and lagdrift.DefaultK where it has too
 // few.
 
-// A histogram's quantile, interpolated within its bin, is the sample's to
-// the bin width: for a Rayleigh population, which a city point's Mahalanobis
-// distance is under a calibrated fit, the textbook k times its scale. Pure.
-func TestLagDriftHistogramQuantile(t *testing.T) {
+// A Rayleigh sample: a city point's Mahalanobis distance from its fit when
+// the fit's covariance is right, scaled.
+func testLagDriftRayleighHistogram(rng *mathrand.Rand, count int, scale float64) *LagDriftHistogram {
+	histogram := newLagDriftHistogram(LagDriftKEdges)
+	for range count {
+		histogram.add(LagDriftKEdges, scale*math.Sqrt(-2*math.Log(1-rng.Float64())))
+	}
+	histogram.Tracks = count
+	return histogram
+}
+
+// A histogram's bound on a quantile is at or above the true quantile, by
+// little more than a bin on a large sample: for a Rayleigh population the
+// textbook k times its scale (drift-review V-3). Pure.
+func TestLagDriftHistogramUpperBound(t *testing.T) {
 	rng := mathrand.New(mathrand.NewPCG(7, 7))
 	for _, scale := range []float64{1.0, 1.3, 2.4} {
-		histogram := newLagDriftHistogram(LagDriftKEdges)
-		for range 200000 {
-			histogram.add(LagDriftKEdges, scale*math.Sqrt(-2*math.Log(1-rng.Float64())))
-		}
+		histogram := testLagDriftRayleighHistogram(rng, 200000, scale)
 		for _, confidence := range LagDriftKConfidences {
 			want := scale * lagdrift.KForConfidence(confidence)
-			got := lagDriftHistogramQuantile(LagDriftKEdges, histogram.Counts, confidence)
-			if !(math.Abs(got-want) < 0.03*want) {
-				t.Fatalf("scale %g at %g: quantile %.4f, want %.4f", scale, confidence, got, want)
+			got, ok := lagDriftHistogramUpperBound(LagDriftKEdges, histogram.Counts, confidence)
+			connect.AssertEqual(t, ok, true)
+			if !(want <= got && got < want+0.1) {
+				t.Fatalf("scale %g at %g: bound %.4f, want from %.4f to a bin or two above", scale, confidence, got, want)
 			}
 		}
 	}
 
 	counts := make([]int64, len(LagDriftKEdges)+1)
-	// everything below the first edge: inside it, from 0
-	counts[0] = 100
-	if got := lagDriftHistogramQuantile(LagDriftKEdges, counts, 0.99); !(math.Abs(got-0.99*LagDriftKEdges[0]) < 1e-12) {
-		t.Fatalf("quantile below the first edge %v, want %v", got, 0.99*LagDriftKEdges[0])
-	}
-	// from the last edge up: the last edge, the most the histogram can tell
+	// everything below the first edge: that bin's upper edge
+	counts[0] = 10000
+	bound, ok := lagDriftHistogramUpperBound(LagDriftKEdges, counts, 0.99)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, bound, LagDriftKEdges[0])
+	// a rank from the last edge up: unusable, beyond what the histogram tells
 	counts[len(counts)-1] = 900
-	connect.AssertEqual(t, lagDriftHistogramQuantile(LagDriftKEdges, counts, 0.99), LagDriftKEdges[len(LagDriftKEdges)-1])
-	// nothing: no quantile
-	connect.AssertEqual(t, math.IsNaN(lagDriftHistogramQuantile(LagDriftKEdges, make([]int64, len(LagDriftKEdges)+1), 0.99)), true)
+	_, ok = lagDriftHistogramUpperBound(LagDriftKEdges, counts, 0.99)
+	connect.AssertEqual(t, ok, false)
+	// 100 tracks can't bound a 99% quantile: its rank, 101, is past them
+	small := make([]int64, len(LagDriftKEdges)+1)
+	small[0] = 100
+	_, ok = lagDriftHistogramUpperBound(LagDriftKEdges, small, 0.99)
+	connect.AssertEqual(t, ok, false)
+	// nothing: no bound
+	_, ok = lagDriftHistogramUpperBound(LagDriftKEdges, make([]int64, len(LagDriftKEdges)+1), 0.99)
+	connect.AssertEqual(t, ok, false)
+}
+
+// Over repeated samples of 10,000 tracks, the size at which a continent's k
+// first counts, the bound is at or above the true quantile about 95% of the
+// time even with the quantile on a bin's edge, where rounding up to the edge
+// helps least; an estimate at the quantile's own rank would be below it about
+// half the time (drift-review V-3). 400 samples hold 95% to about ±1%, so the
+// test asks for 92%. Pure.
+func TestLagDriftHistogramUpperBoundCoverage(t *testing.T) {
+	rng := mathrand.New(mathrand.NewPCG(11, 11))
+	const samples = 400
+	for _, confidence := range LagDriftKConfidences {
+		// the true quantile on a bin's edge, as the worst case for rounding up
+		scale := 6 / lagdrift.KForConfidence(confidence)
+		want := scale * lagdrift.KForConfidence(confidence)
+		covered := 0
+		for range samples {
+			histogram := testLagDriftRayleighHistogram(rng, LagDriftKMinTracks, scale)
+			bound, ok := lagDriftHistogramUpperBound(LagDriftKEdges, histogram.Counts, confidence)
+			connect.AssertEqual(t, ok, true)
+			if want <= bound {
+				covered += 1
+			}
+		}
+		t.Logf("at %g: the bound covers the true quantile in %d of %d samples", confidence, covered, samples)
+		if covered < samples*92/100 {
+			t.Fatalf("at %g the bound covers the true quantile in %d of %d samples, want about 95%%", confidence, covered, samples)
+		}
+	}
 }
 
 // A continent's k is the larger of the textbook k and its calibrated
@@ -76,7 +121,17 @@ func TestLagDriftCalibrationK(t *testing.T) {
 		"OC": {Tracks: LagDriftKMinTracks - 1, Quantiles: []float64{3.0, 9.5}},
 		// enough, and narrower than T3 found: the calibration wins
 		"AF": {Tracks: LagDriftKMinTracks, Quantiles: []float64{2.6, 3.3}},
+		// enough, but the 99% bound beyond the histograms' last edge:
+		// unusable, the default there
+		"SA": {Tracks: 20000, Quantiles: []float64{2.7, math.NaN()}},
 	}
+	connect.AssertEqual(t, calibration.K(0.95, "SA"), 2.7)
+	connect.AssertEqual(t, calibration.K(0.99, "SA"), lagdrift.DefaultK(0.99, "SA"))
+	connect.AssertEqual(t, calibration.CalibratedK["SA"].Counts(1), false)
+	connect.AssertEqual(t, calibration.CalibratedK["SA"].Overflows(1), true)
+	connect.AssertEqual(t, calibration.CalibratedK["SA"].Overflows(0), false)
+	// too few tracks is no overflow: the default is expected there
+	connect.AssertEqual(t, calibration.CalibratedK["OC"].Overflows(1), false)
 	connect.AssertEqual(t, calibration.K(0.95, "EU"), textbook95)
 	connect.AssertEqual(t, calibration.K(0.99, "EU"), 3.4)
 	connect.AssertEqual(t, calibration.K(0.99, "eu"), 3.4)
@@ -100,8 +155,10 @@ func TestLagDriftCalibrationK(t *testing.T) {
 func TestCalibrateLagDriftTracksRegionSize(t *testing.T) {
 	quantiles := func(result *LagDriftCalibrationResult, continentCode string) (float64, float64) {
 		histogram := result.KHistograms[continentCode]
-		return lagDriftHistogramQuantile(LagDriftKEdges, histogram.Counts, 0.95),
-			lagDriftHistogramQuantile(LagDriftKEdges, histogram.Counts, 0.99)
+		k95, ok95 := lagDriftHistogramUpperBound(LagDriftKEdges, histogram.Counts, 0.95)
+		k99, ok99 := lagDriftHistogramUpperBound(LagDriftKEdges, histogram.Counts, 0.99)
+		connect.AssertEqual(t, ok95 && ok99, true)
+		return k95, k99
 	}
 	population := func(cityErrorKm float64) *testLagDriftPopulation {
 		return &testLagDriftPopulation{
@@ -229,21 +286,27 @@ func TestGetLagDriftCalibrationRegionSize(t *testing.T) {
 			return AddLagDriftCalibration(ctx, calibratedAt, calibratedAt.Add(-7*24*time.Hour), calibratedAt, result)
 		}
 
-		// OC: 4,000 tracks a week, 2% of them at a distance of 9
+		// OC: 4,000 tracks a week, 2% of them at a distance of 9. SA: as
+		// many, 3% of them beyond the last edge
 		add(now.Add(-27*7*24*time.Hour), map[string]*LagDriftHistogram{"OC": week(4000, 11, 0.5)})
-		add(now.Add(-14*24*time.Hour), map[string]*LagDriftHistogram{"OC": week(4000, 9, 0.02)})
-		middle := add(now.Add(-7*24*time.Hour), map[string]*LagDriftHistogram{"OC": week(4000, 9, 0.02), "EU": week(500, 4, 0.02)})
-		add(now, map[string]*LagDriftHistogram{"OC": week(4000, 9, 0.02)})
+		add(now.Add(-14*24*time.Hour), map[string]*LagDriftHistogram{"OC": week(4000, 9, 0.02), "SA": week(4000, 13, 0.03)})
+		middle := add(now.Add(-7*24*time.Hour), map[string]*LagDriftHistogram{"OC": week(4000, 9, 0.02), "EU": week(500, 4, 0.02), "SA": week(4000, 13, 0.03)})
+		add(now, map[string]*LagDriftHistogram{"OC": week(4000, 9, 0.02), "SA": week(4000, 13, 0.03)})
 
 		calibration := GetLagDriftCalibration(ctx)
 		// the three weeks in the window, not the one 27 weeks old
 		connect.AssertEqual(t, calibration.CalibratedK["OC"].Tracks, int64(12000))
-		// 2% at 9: the 99% quantile is in that bin
-		if k := calibration.K(0.99, "OC"); !(9 <= k && k < 9.05) {
-			t.Fatalf("OC's k at 99%% is %.3f, want in [9, 9.05)", k)
-		}
-		// the 95% quantile is below the first edge: the textbook k
+		// 2% at 9: the bound's rank, 11,898 of 12,000, is in the bin
+		// [9, 9.05), and the bound is its upper edge
+		connect.AssertEqual(t, calibration.K(0.99, "OC"), 9.05)
+		// the 95% bound is below the first edge: the textbook k
 		connect.AssertEqual(t, calibration.K(0.95, "OC"), lagdrift.KForConfidence(0.95))
+		// SA's 99% bound is beyond the last edge: unusable, its default there,
+		// while its 95% bound counts
+		connect.AssertEqual(t, calibration.CalibratedK["SA"].Overflows(1), true)
+		connect.AssertEqual(t, calibration.K(0.99, "SA"), lagdrift.DefaultK(0.99, "SA"))
+		connect.AssertEqual(t, calibration.CalibratedK["SA"].Counts(0), true)
+		connect.AssertEqual(t, calibration.K(0.95, "SA"), lagdrift.KForConfidence(0.95))
 		// EU's 500 tracks are too few: its default
 		connect.AssertEqual(t, calibration.CalibratedK["EU"].Tracks, int64(500))
 		connect.AssertEqual(t, calibration.K(0.99, "EU"), lagdrift.DefaultK(0.99, "EU"))
