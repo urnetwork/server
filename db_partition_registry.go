@@ -113,9 +113,11 @@ import (
 type PartitionGranularity string
 
 const (
-	// one range per UTC day, from 00:00
+	// one range per UTC day, from 00:00, as the contract tables since
+	// 2026-11-17
 	PartitionGranularityDaily PartitionGranularity = "daily"
-	// one range per week, from Monday 00:00 UTC, as the contract weeks
+	// one range per week, from Monday 00:00 UTC, as the close evidence and the
+	// usage archive
 	PartitionGranularityWeekly PartitionGranularity = "weekly"
 )
 

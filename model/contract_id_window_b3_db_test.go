@@ -44,7 +44,7 @@ func TestRemovedClientOpenContractsLeaveContractsBeforeTheFloorToTheSweep(t *tes
 		server.Db(ctx, func(conn server.PgConn) {
 			// the fixture's source and destination, so each arm returns rows
 			for _, clientId := range []server.Id{ids.sourceId, ids.destinationId} {
-				rows := unexpiredContractReadRows(t, ctx, conn, unexpiredContractWeeksAt(server.NowUtc()).render(removedClientOpenContractsSql), clientId, clientRemovedOpenContractLimit)
+				rows := unexpiredContractReadRows(t, ctx, conn, unexpiredContractDaysAt(server.NowUtc()).render(removedClientOpenContractsSql), clientId, clientRemovedOpenContractLimit)
 				unboundedRows := unexpiredContractReadRows(t, ctx, conn, unboundedRemovedClientOpenContractsSql(t), clientId, clientRemovedOpenContractLimit)
 				admitted, before := []string{}, []string{}
 				for _, row := range unboundedRows {
@@ -103,7 +103,7 @@ func insertStrandedGrantBoundFixture(t testing.TB, ctx context.Context, start ti
 func unboundedStrandedGrantPayersSql(t testing.TB) string {
 	t.Helper()
 	bound := `
-				AND e.contract_id >= ` + ContractIdCreatedFromSql("b.start_time") + ` AND e.contract_id < ` + contractWeeksUpperSql
+				AND e.contract_id >= ` + ContractIdCreatedFromSql("b.start_time") + ` AND e.contract_id < ` + contractDaysUpperSql
 	if strings.Count(strandedGrantPayersSql, bound) != 1 {
 		t.Fatalf("the stranded grant read has no escrow bound: %s", strandedGrantPayersSql)
 	}
@@ -143,7 +143,7 @@ func TestStrandedGrantPayersReadMatchesTheUnboundedRead(t *testing.T) {
 		}
 		args := []any{endedAfter, endedBefore, server.Id{}, 1000}
 		server.Db(ctx, func(conn server.PgConn) {
-			rows := unexpiredContractReadRows(t, ctx, conn, strandedGrantEscrowWeeks(endedBefore).render(strandedGrantPayersSql), args...)
+			rows := unexpiredContractReadRows(t, ctx, conn, strandedGrantEscrowDays(endedBefore).render(strandedGrantPayersSql), args...)
 			unboundedRows := unexpiredContractReadRows(t, ctx, conn, unboundedStrandedGrantPayersSql(t), args...)
 			if !slices.Equal(rows, unboundedRows) || len(rows) != len(want) {
 				t.Fatalf("the bounded read returns %v, and the unbounded read %v", rows, unboundedRows)
@@ -225,7 +225,7 @@ func TestStrandedGrantPayersReadKeepsTheUnboundedReadsIndexes(t *testing.T) {
 		}, server.OptReadWrite(), server.OptNoRetry())
 
 		endedAfter, endedBefore := end.Add(-time.Minute), end
-		bounded := strandedGrantEscrowWeeks(endedBefore).render(strandedGrantPayersSql)
+		bounded := strandedGrantEscrowDays(endedBefore).render(strandedGrantPayersSql)
 		args := []any{endedAfter, endedBefore, server.Id{}, 100000}
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()
@@ -292,14 +292,14 @@ func strandedGrantEscrowPartitions(t testing.TB, ctx context.Context, ranges map
 }
 
 // On partitioned contract tables the stranded grant read's escrow probe reads
-// only the partitions of the grant's lifetime: the weeks after the window's
+// only the partitions of the grant's lifetime: the days after the window's
 // end are not planned, and a probe executes no partition before the grant's
-// start. The grant is in the second week after the cutover week, so the
-// legacy partition, the weeks before the grant's and the weeks after it are
-// outside it. The read without its bound, as it ran before, plans every
-// partition and probes those before the grant's: the root cause, which the
-// test proves against the read's own statement.
-func TestStrandedGrantPayersProbeOnlyTheGrantsWeeksWhenPartitioned(t *testing.T) {
+// start. The grant is in the second day after the cutover day, so the legacy
+// partition, the days before the grant's and the day after it are outside it.
+// The read without its bound, as it ran before, plans every partition and
+// probes those before the grant's: the root cause, which the test proves
+// against the read's own statement.
+func TestStrandedGrantPayersProbeOnlyTheGrantsDaysWhenPartitioned(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -308,8 +308,8 @@ func TestStrandedGrantPayersProbeOnlyTheGrantsWeeksWhenPartitioned(t *testing.T)
 			server.Testing_PartitionContracts(ctx)
 		}
 		ranges := contractPartitionRanges(t, ctx)
-		grantWeek := server.ContractPartitionWeekStart(server.NowUtc()).AddDate(0, 0, 14)
-		start, end := grantWeek.Add(24*time.Hour), grantWeek.Add(48*time.Hour)
+		grantDay := server.ContractPartitionDayStart(server.NowUtc()).AddDate(0, 0, 2)
+		start, end := grantDay.Add(time.Hour), grantDay.Add(20*time.Hour)
 		payerNetworkId := insertStrandedGrantBoundFixture(t, ctx, start, end, []time.Time{start.Add(time.Hour), end.Add(-time.Hour)}, false)
 
 		endedAfter, endedBefore := end.Add(-time.Minute), end
@@ -319,16 +319,16 @@ func TestStrandedGrantPayersProbeOnlyTheGrantsWeeksWhenPartitioned(t *testing.T)
 		}
 
 		// the grant's lifetime: from its start less the margin to the end of
-		// the window's weeks
-		lifetime := contractWeeks{
+		// the window's days
+		lifetime := contractDays{
 			lower: server.ContractIdFloor(start.Add(-ContractIdCreateTimeMargin)),
-			upper: strandedGrantEscrowWeeks(endedBefore).upper,
+			upper: strandedGrantEscrowDays(endedBefore).upper,
 		}
 		args := []any{endedAfter, endedBefore, server.Id{}, 16}
-		planned, executed := strandedGrantEscrowPartitions(t, ctx, ranges, strandedGrantEscrowWeeks(endedBefore).render(strandedGrantPayersSql), args...)
+		planned, executed := strandedGrantEscrowPartitions(t, ctx, ranges, strandedGrantEscrowDays(endedBefore).render(strandedGrantPayersSql), args...)
 		for _, relation := range planned {
 			if ranges[relation].lower.Cmp(lifetime.upper) >= 0 {
-				t.Fatalf("the read plans %s, after the window's weeks: %v", relation, planned)
+				t.Fatalf("the read plans %s, after the window's days: %v", relation, planned)
 			}
 		}
 		for _, relation := range executed {
@@ -337,7 +337,7 @@ func TestStrandedGrantPayersProbeOnlyTheGrantsWeeksWhenPartitioned(t *testing.T)
 			}
 		}
 		if len(executed) == 0 {
-			t.Fatal("no probe read the grant's week")
+			t.Fatal("no probe read the grant's day")
 		}
 
 		unboundedPlanned, unboundedExecuted := strandedGrantEscrowPartitions(t, ctx, ranges, unboundedStrandedGrantPayersSql(t), args...)

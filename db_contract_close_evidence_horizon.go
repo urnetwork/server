@@ -77,7 +77,7 @@ type contractHorizonContextKey struct{}
 // ctx carrying the contract horizon: how long past its creation and its close
 // a contract is kept, as the contract horizon reaper's runtime control sets it.
 // Close evidence retention (CloseEvidenceRetention) and the retirement of the
-// contract weeks (ContractWeekRetention) follow it.
+// contract days (ContractDayRetention) follow it.
 func WithContractHorizon(ctx context.Context, horizon time.Duration) context.Context {
 	return context.WithValue(ctx, contractHorizonContextKey{}, horizon)
 }

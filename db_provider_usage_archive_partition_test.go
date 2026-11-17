@@ -21,7 +21,15 @@ import (
 
 const testArchiveTable = "st_provider_usage_archive"
 
-// The archive is a weekly id family on the contract weeks: keyed by
+// An archive week: seven days from Monday 00:00 UTC. The archive keeps its
+// weeks; the contract tables are daily since 2026-11-17.
+const testArchiveWeek = 7 * 24 * time.Hour
+
+func testArchiveWeekStart(t time.Time) time.Time {
+	return PartitionGranularityWeekly.RangeStart(t)
+}
+
+// The archive is a weekly id family, by its contracts' creation weeks: keyed by
 // contract_id through contract_id_floor, four weeks ahead, each week kept 52
 // weeks or until its verified export drops it (the expiry and the
 // precondition of db_provider_usage_archive_export.go), with a DEFAULT
@@ -37,7 +45,7 @@ func TestProviderUsageArchivePartitionFamilyDeclaration(t *testing.T) {
 	connect.AssertEqual(t, family.KeyColumn, "contract_id")
 	connect.AssertEqual(t, family.KeyKind, PartitionKeyId)
 	connect.AssertEqual(t, family.Granularity, PartitionGranularityWeekly)
-	connect.AssertEqual(t, family.AheadRanges, ContractPartitionAheadWeeks)
+	connect.AssertEqual(t, family.AheadRanges, providerUsageArchiveAheadWeeks)
 	connect.AssertEqual(t, family.Retention, 52*7*24*time.Hour)
 	connect.AssertEqual(t, family.DefaultPartition, true)
 	connect.AssertEqual(t, family.KeepLegacyPartition, false)
@@ -57,18 +65,18 @@ func TestProviderUsageArchivePartitionFamilyDeclaration(t *testing.T) {
 		t.Fatal("a name off the Monday bounds belongs to the archive family")
 	}
 
-	// an archive week is the week of its contracts, under the contract
-	// partitions' naming
+	// an archive week is the week of its contracts, from Monday 00:00 UTC,
+	// named for its Monday
 	for at := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC); at.Before(time.Date(2027, 7, 1, 0, 0, 0, 0, time.UTC)); at = at.Add(11 * time.Hour) {
 		r := family.RangeAt(at)
-		weekStart := ContractPartitionWeekStart(at)
-		if !r.Lower.Equal(weekStart) || family.LeafName(testArchiveTable, r) != ContractPartitionName(testArchiveTable, weekStart) {
-			t.Fatalf("the archive week of %s is %+v, not the contract week %s", at, r, weekStart)
+		weekStart := testArchiveWeekStart(at)
+		if !r.Lower.Equal(weekStart) || family.LeafName(testArchiveTable, r) != testArchiveTable+"_w"+weekStart.Format("20060102") {
+			t.Fatalf("the archive week of %s is %+v, not the week %s", at, r, weekStart)
 		}
 	}
 	// the cutover's first possible week is a Monday, bounded by contract_id_floor
 	first := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	connect.AssertEqual(t, ContractPartitionWeekStart(first).Equal(first), true)
+	connect.AssertEqual(t, testArchiveWeekStart(first).Equal(first), true)
 	connect.AssertEqual(t, family.LeafName(testArchiveTable, family.RangeAt(first)), "st_provider_usage_archive_w20260601")
 	connect.AssertEqual(t, family.KeyKind.BoundSql(first), contractIdLiteral(ContractIdFloor(first)))
 }
@@ -132,7 +140,7 @@ func TestProviderUsageArchivePartitionSqlOrder(t *testing.T) {
 			t.Fatalf("%q runs before the write fence", statement)
 		}
 	}
-	if !strings.Contains(sql, fmt.Sprintf("current_week + interval '%d weeks'", ContractPartitionAheadWeeks)) {
+	if !strings.Contains(sql, fmt.Sprintf("current_week + interval '%d weeks'", providerUsageArchiveAheadWeeks)) {
 		t.Fatal("the cutover does not create the weeks the family keeps ahead")
 	}
 	if !strings.Contains(sql, "generate_series(timestamp '2026-06-01', current_week") {
@@ -177,7 +185,7 @@ func TestProviderUsageArchiveDropFenceRefusesPartialWeeks(t *testing.T) {
 		{Default: true},
 		{Lower: week.Lower},
 		{Upper: week.Upper, Legacy: true},
-		{Lower: week.Lower, Upper: week.Upper.Add(contractPartitionWeek)},
+		{Lower: week.Lower, Upper: week.Upper.Add(testArchiveWeek)},
 		{Lower: week.Lower.Add(24 * time.Hour), Upper: week.Upper.Add(24 * time.Hour)},
 	} {
 		failure := testContractPartitionRecover(func() {
@@ -305,7 +313,7 @@ type testArchiveWeekTotal struct {
 func testArchiveWeekTotals(t testing.TB, rows map[Id]testArchiveRow) map[time.Time]testArchiveWeekTotal {
 	totals := map[time.Time]testArchiveWeekTotal{}
 	for contractId, row := range rows {
-		weekStart := ContractPartitionWeekStart(ContractIdTime(contractId))
+		weekStart := testArchiveWeekStart(ContractIdTime(contractId))
 		total := totals[weekStart]
 		total.rows += 1
 		if row.providerUsage == nil {
@@ -353,7 +361,7 @@ func testArchiveLeaves(t testing.TB, ctx context.Context) (weekStarts []time.Tim
 
 // The consecutive weeks from first through last.
 func testArchiveWeeks(first time.Time, last time.Time) (weekStarts []time.Time) {
-	for weekStart := first; !last.Before(weekStart); weekStart = weekStart.Add(contractPartitionWeek) {
+	for weekStart := first; !last.Before(weekStart); weekStart = weekStart.Add(testArchiveWeek) {
 		weekStarts = append(weekStarts, weekStart)
 	}
 	return
@@ -409,11 +417,11 @@ func TestProviderUsageArchivePartitionMigrationCopiesEveryRow(t *testing.T) {
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
 		now := NowUtc()
-		currentWeek := ContractPartitionWeekStart(now)
+		currentWeek := testArchiveWeekStart(now)
 
 		// before the usage guard a terminal contract could lack its proof
 		ApplyDbMigrationsUpTo(ctx, testMigrationIndexOfSql(t, contractUsageGuardSchemaSql))
-		missingProofId := testContractIdAt(now.Add(-2 * contractPartitionWeek))
+		missingProofId := testContractIdAt(now.Add(-2 * testArchiveWeek))
 		testArchiveInsertContract(t, ctx, missingProofId, "settled", nil, nil)
 
 		version := ProviderUsageArchivePartitionMigrationVersion()
@@ -425,14 +433,14 @@ func TestProviderUsageArchivePartitionMigrationCopiesEveryRow(t *testing.T) {
 		// ahead
 		closeTime := now
 		goneIds := map[Id]string{
-			testContractIdAt(now.Add(-3 * contractPartitionWeek)):                      "settled",
-			testContractIdAt(now.Add(-contractPartitionWeek)):                          "dispute_resolved_to_source",
-			testContractIdAt(now):                                                      "dispute_resolved_to_destination",
-			testContractIdAt(now.Add(time.Minute)):                                     "settled",
-			testContractIdAt(now.Add(contractPartitionWeek)):                           "settled",
-			testContractIdAt(time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)):             "settled",
-			testContractIdAt(currentWeek.Add(10*contractPartitionWeek + time.Hour)):    "dispute_resolved_to_source",
-			testContractIdAt(currentWeek.Add(-12*contractPartitionWeek + time.Second)): "settled",
+			testContractIdAt(now.Add(-3 * testArchiveWeek)):                      "settled",
+			testContractIdAt(now.Add(-testArchiveWeek)):                          "dispute_resolved_to_source",
+			testContractIdAt(now):                                                "dispute_resolved_to_destination",
+			testContractIdAt(now.Add(time.Minute)):                               "settled",
+			testContractIdAt(now.Add(testArchiveWeek)):                           "settled",
+			testContractIdAt(time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)):       "settled",
+			testContractIdAt(currentWeek.Add(10*testArchiveWeek + time.Hour)):    "dispute_resolved_to_source",
+			testContractIdAt(currentWeek.Add(-12*testArchiveWeek + time.Second)): "settled",
 		}
 		byteCount := int64(100)
 		for contractId, outcome := range goneIds {
@@ -446,7 +454,7 @@ func TestProviderUsageArchivePartitionMigrationCopiesEveryRow(t *testing.T) {
 		testArchiveInsertContract(t, ctx, canceledId, "canceled", &closeTime, nil)
 		testArchiveDeleteContract(t, ctx, canceledId)
 		// a terminal contract still live at the cutover
-		liveId := testContractIdAt(now.Add(-contractPartitionWeek + time.Minute))
+		liveId := testContractIdAt(now.Add(-testArchiveWeek + time.Minute))
 		testArchiveInsertContract(t, ctx, liveId, "settled", &closeTime, testArchiveUsage(7))
 		liveUsage := testArchiveSourceUsage(t, ctx, liveId)
 
@@ -472,7 +480,7 @@ func TestProviderUsageArchivePartitionMigrationCopiesEveryRow(t *testing.T) {
 
 		// the oldest id is before 2026-06-01, so the weeks start there
 		firstWeek := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-		lastWeek := currentWeek.Add(ContractPartitionAheadWeeks * contractPartitionWeek)
+		lastWeek := currentWeek.Add(providerUsageArchiveAheadWeeks * testArchiveWeek)
 		weekStarts, defaultPartition := testArchiveLeaves(t, ctx)
 		connect.AssertEqual(t, defaultPartition, true)
 		if !testArchiveWeeksEqual(weekStarts, testArchiveWeeks(firstWeek, lastWeek)) {
@@ -529,7 +537,7 @@ func TestProviderUsageArchivePartitionMigrationKeepsConcurrentArchives(t *testin
 		version := ProviderUsageArchivePartitionMigrationVersion()
 		ApplyDbMigrationsUpTo(ctx, version-1)
 		now := NowUtc()
-		beforeFenceId := testContractIdAt(now.Add(-contractPartitionWeek))
+		beforeFenceId := testContractIdAt(now.Add(-testArchiveWeek))
 		duringFenceId := testContractIdAt(now)
 		sourceUsages := map[Id]string{}
 		for _, contractId := range []Id{beforeFenceId, duringFenceId} {
@@ -597,7 +605,7 @@ func TestProviderUsageArchivePartitionMigrationRestarts(t *testing.T) {
 		version := ProviderUsageArchivePartitionMigrationVersion()
 		ApplyDbMigrationsUpTo(ctx, version-1)
 		now := NowUtc()
-		oldestId := testContractIdAt(now.Add(-2 * contractPartitionWeek))
+		oldestId := testContractIdAt(now.Add(-2 * testArchiveWeek))
 		for i, contractId := range []Id{oldestId, testContractIdAt(now)} {
 			testArchiveInsertContract(t, ctx, contractId, "settled", &now, testArchiveUsage(int64(10+i)))
 			testArchiveDeleteContract(t, ctx, contractId)
@@ -650,8 +658,8 @@ func TestProviderUsageArchivePartitionMigrationRestarts(t *testing.T) {
 		connect.AssertEqual(t, testArchiveProofs(after), testArchiveProofs(before))
 		weekStarts, defaultPartition := testArchiveLeaves(t, ctx)
 		connect.AssertEqual(t, defaultPartition, true)
-		firstWeek := ContractPartitionWeekStart(ContractIdTime(oldestId))
-		lastWeek := ContractPartitionWeekStart(now).Add(ContractPartitionAheadWeeks * contractPartitionWeek)
+		firstWeek := testArchiveWeekStart(ContractIdTime(oldestId))
+		lastWeek := testArchiveWeekStart(now).Add(providerUsageArchiveAheadWeeks * testArchiveWeek)
 		if !testArchiveWeeksEqual(weekStarts, testArchiveWeeks(firstWeek, lastWeek)) {
 			t.Fatalf("the rerun made weeks %v, want %s through %s", weekStarts, firstWeek, lastWeek)
 		}
@@ -676,8 +684,8 @@ func TestProviderUsageArchiveWeekDropsAtRetention(t *testing.T) {
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
 		now := NowUtc()
-		old := family.RangeAt(now.Add(-60 * contractPartitionWeek))
-		young := family.RangeAt(now.Add(-50 * contractPartitionWeek))
+		old := family.RangeAt(now.Add(-60 * testArchiveWeek))
+		young := family.RangeAt(now.Add(-50 * testArchiveWeek))
 		for _, r := range []PartitionRange{old, young} {
 			created, err := family.EnsureRangeFor(ctx, r.Lower)
 			connect.AssertEqual(t, err, nil)
@@ -731,7 +739,7 @@ func TestProviderUsageArchiveDropRefusedWithoutOptIn(t *testing.T) {
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
 		now := NowUtc()
-		old := family.RangeAt(now.Add(-60 * contractPartitionWeek))
+		old := family.RangeAt(now.Add(-60 * testArchiveWeek))
 		_, err := family.EnsureRangeFor(ctx, old.Lower)
 		connect.AssertEqual(t, err, nil)
 		oldId := testArchiveContractIn(t, ctx, old.Lower.Add(time.Hour), 3)
@@ -764,7 +772,7 @@ func TestProviderUsageArchiveDropRefusedWithoutOptIn(t *testing.T) {
 			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("ALTER TABLE public.st_provider_usage_archive DETACH PARTITION public.%s", quoteIdentifier(oldLeaf))))
 		}), "only under the retention opt-in")
 		// two weeks at once
-		_, err = family.DropRange(ctx, PartitionRange{Lower: old.Lower, Upper: old.Upper.Add(contractPartitionWeek)})
+		_, err = family.DropRange(ctx, PartitionRange{Lower: old.Lower, Upper: old.Upper.Add(testArchiveWeek)})
 		refused(err, "whole weeks only")
 		// a week within the horizon, by the database's clock
 		current := family.RangeAt(now)
@@ -783,22 +791,22 @@ func TestProviderUsageArchiveDropRefusedWithoutOptIn(t *testing.T) {
 	})
 }
 
-// The contract horizon reaper deletes a retired week's contracts through the
+// The contract horizon reaper deletes a retired day's contracts through the
 // capture trigger (here as testReapContract does), and each one's proof passes
 // the guard and lands in its own contract week of the partitioned archive: a
-// week from before the contract cutover, deleted 23 weeks later from the legacy
-// partition, and a week after the cutover. Retirement then compacts and drops
-// the emptied weeks, and archives nothing itself (S1). Those archive weeks
-// exist before the contracts are written, and the runway keeps the archive
-// four weeks ahead at any later time.
+// contract from three weeks before the contract cutover, deleted 20 weeks
+// later from the legacy partition, and one of the day after the cutover.
+// Retirement then compacts and drops the emptied ranges, and archives nothing
+// itself (S1). Those archive weeks exist before the contracts are written,
+// and the runway keeps the archive four weeks ahead at any later time.
 func TestProviderUsageArchiveContractRetentionWritesHistoricalWeek(t *testing.T) {
 	testArchivePlainEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
 		now := NowUtc()
-		cutoverWeek := ContractPartitionWeekStart(now)
+		currentWeek := testArchiveWeekStart(now)
 		week := func(i int) time.Time {
-			return cutoverWeek.Add(time.Duration(i) * contractPartitionWeek)
+			return currentWeek.Add(time.Duration(i) * testArchiveWeek)
 		}
 
 		// a contract three weeks before the cutover is the oldest, so the
@@ -808,44 +816,46 @@ func TestProviderUsageArchiveContractRetentionWritesHistoricalWeek(t *testing.T)
 		testInsertContractRows(t, ctx, historicalId, true)
 		ApplyDbMigrations(ctx)
 		Testing_PartitionContracts(ctx)
-		laterId := testContractIdAt(week(1).Add(time.Hour))
+		// the contract tables' first day after the cutover day
+		laterDay := ContractPartitionDayStart(now).AddDate(0, 0, 1)
+		laterId := testContractIdAt(laterDay.Add(time.Hour))
 		testInsertContractRows(t, ctx, laterId, true)
 		sourceUsages := map[Id]string{
 			historicalId: testArchiveSourceUsage(t, ctx, historicalId),
 			laterId:      testArchiveSourceUsage(t, ctx, laterId),
 		}
 		connect.AssertEqual(t, testContractPartitionOf(t, ctx, "transfer_contract", historicalId), ContractLegacyPartitionName("transfer_contract"))
-		connect.AssertEqual(t, testContractPartitionOf(t, ctx, "transfer_contract", laterId), ContractPartitionName("transfer_contract", week(1)))
+		connect.AssertEqual(t, testContractPartitionOf(t, ctx, "transfer_contract", laterId), ContractPartitionName("transfer_contract", laterDay))
 
 		weekStarts, defaultPartition := testArchiveLeaves(t, ctx)
 		connect.AssertEqual(t, defaultPartition, true)
-		if !testArchiveWeeksEqual(weekStarts, testArchiveWeeks(week(-3), week(ContractPartitionAheadWeeks))) {
+		if !testArchiveWeeksEqual(weekStarts, testArchiveWeeks(week(-3), week(providerUsageArchiveAheadWeeks))) {
 			t.Fatalf("the archive has weeks %v before retention writes them", weekStarts)
 		}
 		// at the cutover the archive's runway already covers the contract weeks
 		runway := family.EnsureRunway(ctx, now)
 		connect.AssertEqual(t, runway.Created, []string(nil))
 		connect.AssertEqual(t, runway.CurrentCovered, true)
-		connect.AssertEqual(t, runway.FutureRanges, ContractPartitionAheadWeeks)
+		connect.AssertEqual(t, runway.FutureRanges, providerUsageArchiveAheadWeeks)
 
 		later := week(20).Add(time.Hour)
 		// retirement alone archives nothing
 		report, _ := MaintainContractPartitions(ctx, later, ContractRetentionCursor{}, time.Minute)
 		connect.AssertEqual(t, len(testArchiveRows(t, ctx)), 0)
 		connect.AssertEqual(t, report.Kept[ContractLegacyPartitionName("transfer_contract")], int64(len(ContractPartitionTables)))
-		connect.AssertEqual(t, report.Kept[ContractPartitionName("transfer_contract", week(1))], int64(len(ContractPartitionTables)))
-		// the reaper's deletes archive, and retirement drops the emptied weeks
+		connect.AssertEqual(t, report.Kept[ContractPartitionName("transfer_contract", laterDay)], int64(len(ContractPartitionTables)))
+		// the reaper's deletes archive, and retirement drops the emptied ranges
 		testReapContract(t, ctx, historicalId)
 		testReapContract(t, ctx, laterId)
 		testWaitForContractHorizon(t, ctx)
 		report, _ = MaintainContractPartitions(ctx, later, ContractRetentionCursor{}, time.Minute)
 		connect.AssertEqual(t, len(report.Blocked), 0)
 		connect.AssertEqual(t, slices.Contains(report.Dropped, ContractLegacyPartitionName("transfer_contract")), true)
-		connect.AssertEqual(t, slices.Contains(report.Dropped, ContractPartitionName("transfer_contract", week(1))), true)
+		connect.AssertEqual(t, slices.Contains(report.Dropped, ContractPartitionName("transfer_contract", laterDay)), true)
 
 		rows := testArchiveRows(t, ctx)
 		connect.AssertEqual(t, len(rows), 2)
-		for contractId, weekStart := range map[Id]time.Time{historicalId: week(-3), laterId: week(1)} {
+		for contractId, weekStart := range map[Id]time.Time{historicalId: week(-3), laterId: testArchiveWeekStart(laterDay)} {
 			connect.AssertEqual(t, rows[contractId].partition, family.LeafName(testArchiveTable, family.RangeAt(weekStart)))
 			connect.AssertEqual(t, *rows[contractId].providerUsage, sourceUsages[contractId])
 			connect.AssertEqual(t, testContractPartitionScalar[bool](t, ctx, `SELECT EXISTS (SELECT 1 FROM transfer_contract WHERE contract_id = $1)`, contractId), false)
@@ -855,7 +865,7 @@ func TestProviderUsageArchiveContractRetentionWritesHistoricalWeek(t *testing.T)
 		runway = family.EnsureRunway(ctx, later)
 		connect.AssertEqual(t, len(runway.Errors), 0)
 		connect.AssertEqual(t, runway.CurrentCovered, true)
-		connect.AssertEqual(t, runway.FutureRanges, ContractPartitionAheadWeeks)
-		connect.AssertEqual(t, len(runway.Created), ContractPartitionAheadWeeks+1)
+		connect.AssertEqual(t, runway.FutureRanges, providerUsageArchiveAheadWeeks)
+		connect.AssertEqual(t, len(runway.Created), providerUsageArchiveAheadWeeks+1)
 	})
 }

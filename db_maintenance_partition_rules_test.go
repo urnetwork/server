@@ -12,12 +12,12 @@ import (
 // whole-table rebuild; the contract tables keep their place before the
 // cutover, and other partitioned tables keep theirs.
 func TestDbMaintenanceSkipsContractPartitionsAndPartitionedContractTables(t *testing.T) {
-	week := testDbMaintenanceCutoverWeek
+	day := testDbMaintenanceCutoverDay
 	for _, table := range ContractPartitionTables {
 		for _, name := range []string{
 			ContractLegacyPartitionName(table),
-			ContractPartitionName(table, week),
-			ContractPartitionName(table, week.Add(13*contractPartitionWeek)),
+			ContractPartitionName(table, day),
+			ContractPartitionName(table, day.AddDate(0, 0, 91)),
 			contractStagedParentName(table),
 		} {
 			if dbMaintenanceShouldReindexTable(name) || dbMaintenanceShouldReindexRelation(name, false) || dbMaintenanceShouldReindexRelation(name, true) {
@@ -40,12 +40,14 @@ func TestDbMaintenanceSkipsContractPartitionsAndPartitionedContractTables(t *tes
 			t.Errorf("the plain %s joined the rotation", table)
 		}
 	}
-	// names that only look like contract partitions (a Tuesday, a short
-	// date, a constraint name) and partitioned tables outside the contract
-	// tables are unaffected
+	// names that only look like contract partitions (the weekly names of
+	// before 2026-11-17, a date that does not exist, a short date, a
+	// constraint name) and partitioned tables outside the contract tables
+	// are unaffected
 	for _, name := range []string{
-		"transfer_contract_w20261020",
-		"transfer_contract_w2026101",
+		"transfer_contract_w20261019",
+		"transfer_contract_p20261032",
+		"transfer_contract_p2026101",
 		"transfer_contract_legacy_bound",
 		"network_ping",
 		"account_feedback",

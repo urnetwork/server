@@ -408,7 +408,7 @@ func coveredCompanionRuntimeQueries(t testing.TB) map[string]struct {
 		if !ok || receiver.Name != "conn" || !sqlOk {
 			return true
 		}
-		sql := unexpiredContractWeeksAt(server.NowUtc()).render(template)
+		sql := unexpiredContractDaysAt(server.NowUtc()).render(template)
 		for _, branch := range []string{"earliest_origin", "earliest_companion_origin"} {
 			if !strings.Contains(sql, "AS "+branch) {
 				continue

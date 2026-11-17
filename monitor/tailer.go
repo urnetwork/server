@@ -1471,7 +1471,7 @@ var warpLogIdentityRe = regexp.MustCompile(`^\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\
 // partition as a whole, so only an older worker selects one.
 // network_client_connection is back in the rotation since 2026-10-24
 // (PARTITION-MAINTENANCE-PLAN.md A3), so its start line is ordinary.
-var dbMaintenanceLegacyReindexRe = regexp.MustCompile(`\[db\]maintenance (?:reindex\[[0-9]+/[0-9]+\] |table\[[0-9]+/[0-9]+\] reindex )(client_reliability(?:_p[0-9]{8})?|contract_close|network_client|network_client_location_reliability|transfer_contract|transfer_escrow|transfer_escrow_sweep|(?:transfer_contract|transfer_escrow|contract_close|transfer_escrow_sweep|contract_close_report|contract_extender)_(?:legacy|w[0-9]{8}))[[:space:]]*$`)
+var dbMaintenanceLegacyReindexRe = regexp.MustCompile(`\[db\]maintenance (?:reindex\[[0-9]+/[0-9]+\] |table\[[0-9]+/[0-9]+\] reindex )(client_reliability(?:_p[0-9]{8})?|contract_close|network_client|network_client_location_reliability|transfer_contract|transfer_escrow|transfer_escrow_sweep|(?:transfer_contract|transfer_escrow|contract_close|transfer_escrow_sweep|contract_close_report|contract_extender)_(?:legacy|p[0-9]{8}))[[:space:]]*$`)
 
 type warpLogIdentity struct {
 	host       string

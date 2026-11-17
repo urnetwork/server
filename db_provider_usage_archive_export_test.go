@@ -181,7 +181,7 @@ func TestProviderUsageArchiveExportMatchesTheRows(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
-		week := family.RangeAt(NowUtc().Add(-20 * contractPartitionWeek))
+		week := family.RangeAt(NowUtc().Add(-20 * testArchiveWeek))
 		_, err := family.EnsureRangeFor(ctx, week.Lower)
 		connect.AssertEqual(t, err, nil)
 		leaf := family.LeafName(testArchiveTable, week)
@@ -257,7 +257,7 @@ func TestProviderUsageArchiveExportedWeekDropsOnlyWhenVerified(t *testing.T) {
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
 		now := NowUtc()
-		week := family.RangeAt(now.Add(-20 * contractPartitionWeek))
+		week := family.RangeAt(now.Add(-20 * testArchiveWeek))
 		_, err := family.EnsureRangeFor(ctx, week.Lower)
 		connect.AssertEqual(t, err, nil)
 		leaf := family.LeafName(testArchiveTable, week)
@@ -271,7 +271,7 @@ func TestProviderUsageArchiveExportedWeekDropsOnlyWhenVerified(t *testing.T) {
 			return testContractPartitionScalar[bool](t, ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, leaf)
 		}
 		settings := DefaultProviderUsageArchiveExportSettings()
-		floor := now.Add(-10 * contractPartitionWeek).Format(time.RFC3339)
+		floor := now.Add(-10 * testArchiveWeek).Format(time.RFC3339)
 		pass := func(mode string) *PartitionRetireReport {
 			control := NarrowProviderUsageArchiveExportControl(map[string]string{"mode": mode, "closeTimeFloor": floor}, settings)
 			report, _ := family.Retire(WithProviderUsageArchiveExportControlValue(ctx, control), NowUtc(), PartitionFamilyState{}, time.Now().Add(time.Minute))
@@ -380,7 +380,7 @@ func TestProviderUsageArchiveExportKeepsWhatReadersNeed(t *testing.T) {
 		now := NowUtc()
 		weeks := []PartitionRange{}
 		for _, ago := range []int{24, 23, 22, 21} {
-			r := family.RangeAt(now.Add(-time.Duration(ago) * contractPartitionWeek))
+			r := family.RangeAt(now.Add(-time.Duration(ago) * testArchiveWeek))
 			_, err := family.EnsureRangeFor(ctx, r.Lower)
 			connect.AssertEqual(t, err, nil)
 			weeks = append(weeks, r)
@@ -392,7 +392,7 @@ func TestProviderUsageArchiveExportKeepsWhatReadersNeed(t *testing.T) {
 		}
 		testExportArchiveUndatedContract(t, ctx, undated.Lower.Add(2*time.Hour))
 		// closed after the floor (10 weeks ago): an epoch window may read it
-		lateClose := now.Add(-5 * contractPartitionWeek)
+		lateClose := now.Add(-5 * testArchiveWeek)
 		testExportArchiveContract(t, ctx, lateClosed.Lower.Add(2*time.Hour), &lateClose, testArchiveUsage(2))
 
 		dir := t.TempDir()
@@ -403,7 +403,7 @@ func TestProviderUsageArchiveExportKeepsWhatReadersNeed(t *testing.T) {
 		}
 		settings := DefaultProviderUsageArchiveExportSettings()
 		control := func(mode string) *ProviderUsageArchiveExportControl {
-			return NarrowProviderUsageArchiveExportControl(map[string]string{"mode": mode, "closeTimeFloor": now.Add(-10 * contractPartitionWeek).Format(time.RFC3339)}, settings)
+			return NarrowProviderUsageArchiveExportControl(map[string]string{"mode": mode, "closeTimeFloor": now.Add(-10 * testArchiveWeek).Format(time.RFC3339)}, settings)
 		}
 		leafExists := func(r PartitionRange) bool {
 			return testContractPartitionScalar[bool](t, ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, family.LeafName(testArchiveTable, r))
@@ -473,7 +473,7 @@ func TestProviderUsageArchiveExportRegistersStoredCopies(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
-		week := family.RangeAt(NowUtc().Add(-20 * contractPartitionWeek))
+		week := family.RangeAt(NowUtc().Add(-20 * testArchiveWeek))
 		_, err := family.EnsureRangeFor(ctx, week.Lower)
 		connect.AssertEqual(t, err, nil)
 		leaf := family.LeafName(testArchiveTable, week)

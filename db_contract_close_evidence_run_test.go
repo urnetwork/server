@@ -519,7 +519,7 @@ func TestContractRetentionCursorCarriesTheEvidenceRemoval(t *testing.T) {
 	}
 
 	var legacy ContractRetentionCursor
-	if err := json.Unmarshal([]byte(fmt.Sprintf(`{"evidence_cursor":%s,"evidence_leaf":"contract_close_report_evidence_legacy","analyzed_week":"2026-10-26"}`, contractIdJson)), &legacy); err != nil {
+	if err := json.Unmarshal([]byte(fmt.Sprintf(`{"evidence_cursor":%s,"evidence_leaf":"contract_close_report_evidence_legacy","analyzed_day":"2026-10-26"}`, contractIdJson)), &legacy); err != nil {
 		t.Fatal(err)
 	}
 	removal := legacy.evidenceRemovalCursor()
@@ -566,7 +566,7 @@ func TestContractRetentionCursorCarriesTheEvidenceRemoval(t *testing.T) {
 		t.Errorf("the cursor came back as %+v, want %+v", decoded.evidenceRemovalCursor(), full)
 	}
 	// the rest of the task's cursor stays
-	connect.AssertEqual(t, decoded.AnalyzedWeek, "2026-10-26")
+	connect.AssertEqual(t, decoded.AnalyzedDay, "2026-10-26")
 
 	// evidence_removal wins over old fields beside it
 	both := ContractRetentionCursor{EvidenceCursor: &other, EvidenceLeaf: "another", EvidenceRemoval: &full}

@@ -109,13 +109,13 @@ func (self contractPartitionRange) upperTime() time.Time {
 	return server.ContractIdTime(*self.upper)
 }
 
-// Whether every id of the week starting at weekStart routes to this range.
-func (self contractPartitionRange) coversWeek(weekStart time.Time) bool {
+// Whether every id of the day starting at dayStart routes to this range.
+func (self contractPartitionRange) coversDay(dayStart time.Time) bool {
 	if self.defaultPart {
 		return true
 	}
-	floor := server.ContractIdFloor(weekStart)
-	end := server.ContractIdFloor(weekStart.Add(contractPartitionWeek))
+	floor := server.ContractIdFloor(dayStart)
+	end := server.ContractIdFloor(dayStart.Add(contractPartitionDay))
 	return (self.lower == nil || bytes.Compare(self.lower[:], floor[:]) <= 0) &&
 		(self.upper == nil || bytes.Compare(end[:], self.upper[:]) <= 0)
 }
@@ -146,7 +146,8 @@ type contractPartitionCatalog struct {
 	tables   []*contractPartitionTable
 }
 
-const contractPartitionWeek = 7 * 24 * time.Hour
+// The contract partitions are daily (server.ContractPartitionGranularity).
+const contractPartitionDay = 24 * time.Hour
 
 // Whether the cutover has swapped the tables: transfer_contract leads, as in
 // server.IsContractPartitioned.
@@ -188,22 +189,22 @@ func parseContractPartitionRange(table, name, bound string) (contractPartitionRa
 	if partition.lower != nil && partition.upper != nil && bytes.Compare(partition.lower[:], partition.upper[:]) >= 0 {
 		return partition, false
 	}
-	// The scheme's names: the legacy partition below the cutover week, and a
-	// weekly partition whose bounds are its own Monday-to-Monday week.
-	if parsedTable, weekStart, legacy, ok := server.ParseContractPartitionName(name); ok && parsedTable == table {
+	// The scheme's names: the legacy partition below the cutover day, and a
+	// daily partition whose bounds are its own day, 00:00 to 00:00 UTC.
+	if parsedTable, dayStart, legacy, ok := server.ParseContractPartitionName(name); ok && parsedTable == table {
 		if legacy {
 			partition.scheme = partition.lower == nil && partition.upper != nil
 		} else {
-			floor := server.ContractIdFloor(weekStart)
-			end := server.ContractIdFloor(weekStart.Add(contractPartitionWeek))
+			floor := server.ContractIdFloor(dayStart)
+			end := server.ContractIdFloor(dayStart.Add(contractPartitionDay))
 			partition.scheme = partition.lower != nil && partition.upper != nil && *partition.lower == floor && *partition.upper == end
 		}
 	}
 	return partition, true
 }
 
-// The cutover week a prepared legacy bound refuses ids from.
-func parseContractLegacyBoundWeek(definition string) (time.Time, bool) {
+// The cutover day a prepared legacy bound refuses ids from.
+func parseContractLegacyBoundDay(definition string) (time.Time, bool) {
 	match := contractPartitionLegacyBoundPattern.FindStringSubmatch(definition)
 	if match == nil {
 		return time.Time{}, false

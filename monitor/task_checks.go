@@ -233,8 +233,8 @@ func (self dbMaintenanceRebuild) priority() bool {
 }
 
 // Whether the row is a whole-table rebuild of table: of the plain table, or of
-// its legacy partition, which holds the table's history. A weekly partition is
-// one week of rows, not the relation the whole-table guidance is about.
+// its legacy partition, which holds the table's history. A daily partition is
+// one day of rows, not the relation the whole-table guidance is about.
 func (self dbMaintenanceRebuild) wholeTable(table string) bool {
 	return strings.EqualFold(self.table, table) && (self.partition == "" || self.legacy) && !self.priority()
 }

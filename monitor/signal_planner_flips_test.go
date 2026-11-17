@@ -119,7 +119,7 @@ func TestPlannerFlipsSignalSyntheticPartitionTargets(t *testing.T) {
 	}
 
 	source = &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{"2", "0", "3", "300", "7", "1", "transfer_contract_w20261102=missing"}}, nil
+		return []Row{{"2", "0", "3", "300", "7", "1", "transfer_contract_p20261102=missing"}}, nil
 	}}
 	alerts, err = NewPlannerFlipsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -128,7 +128,7 @@ func TestPlannerFlipsSignalSyntheticPartitionTargets(t *testing.T) {
 	alert := requireAlertClass(t, alerts, "stats-landmine")
 	for _, want := range []string{
 		"partitions with another target=1/7",
-		"partitions=7 partition_target_mismatches=1 first_partition_target_mismatch=transfer_contract_w20261102=missing",
+		"partitions=7 partition_target_mismatches=1 first_partition_target_mismatch=transfer_contract_p20261102=missing",
 		"ALTER COLUMN open SET STATISTICS 300",
 		"transfer_contract is partitioned",
 	} {

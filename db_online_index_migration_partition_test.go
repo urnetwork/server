@@ -90,8 +90,8 @@ func TestOnlineIndexCompletionRecognizesPartitionedIndex(t *testing.T) {
 		connect.AssertEqual(t, complete, false)
 		connect.AssertEqual(t, busy, false)
 
-		// maintenance on a weekly partition is a busy owner
-		weekly := ContractPartitionName("transfer_contract", ContractPartitionWeekStart(NowUtc()))
+		// maintenance on a daily partition is a busy owner
+		weekly := ContractPartitionName("transfer_contract", ContractPartitionDayStart(NowUtc()))
 		lockStart := time.Now()
 		holder, release := testDbMaintenanceHoldVacuumLock(t, ctx, weekly)
 		connect.AssertEqual(t, holder(weekly), true)

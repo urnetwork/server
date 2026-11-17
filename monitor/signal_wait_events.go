@@ -113,7 +113,7 @@ func (pgWaitEventProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 // Whether the sampled statement rebuilds transfer_escrow as a whole: a REINDEX
 // TABLE of the plain table or, after the contract partition cutover, of its
 // legacy partition. A REINDEX INDEX is the bounded rebuild of one priority
-// index, or of one partition's leaf of it, and a weekly partition is one week
+// index, or of one partition's leaf of it, and a daily partition is one day
 // of rows.
 func transferEscrowWholeTableReindexQuery(sample string) bool {
 	// the sample may carry a trailing comment after the relation

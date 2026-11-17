@@ -95,7 +95,7 @@ func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return unexpiredContractWeeksAt(server.NowUtc()).render(template), true
+	return unexpiredContractDaysAt(server.NowUtc()).render(template), true
 }
 
 // The template of the one statement a model function in subscription_model.go
@@ -136,7 +136,7 @@ func modelFunctionStatementTemplate(t testing.TB, functionName string) string {
 // runs: its template rendered with the unexpired contract weeks at now.
 func modelFunctionStatement(t testing.TB, functionName string) string {
 	t.Helper()
-	return unexpiredContractWeeksAt(server.NowUtc()).render(modelFunctionStatementTemplate(t, functionName))
+	return unexpiredContractDaysAt(server.NowUtc()).render(modelFunctionStatementTemplate(t, functionName))
 }
 
 // Resolve the real query owner only through the call whose result the public
@@ -445,7 +445,7 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 				args []any
 			}{
 				{sql: runtimeQueries["earliest_origin"].sql, args: plainOriginArgs},
-				{sql: unexpiredContractWeeksAt(server.NowUtc()).render(zeroEscrowPlainOriginSql), args: plainOriginArgs[:3]},
+				{sql: unexpiredContractDaysAt(server.NowUtc()).render(zeroEscrowPlainOriginSql), args: plainOriginArgs[:3]},
 			} {
 				originPlan := explainOpenContractPlan(t, ctx, conn, origin.sql, origin.args...)
 				assertPlanUsesAnyIndex(t, originPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
@@ -453,7 +453,7 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 			}
 
 			// the actual companion origin existence read, before any transaction
-			existencePlan := explainOpenContractPlan(t, ctx, conn, unexpiredContractWeeksAt(server.NowUtc()).render(companionOriginExistsSql), sourceId, destinationId, server.NowUtc().Add(-time.Hour))
+			existencePlan := explainOpenContractPlan(t, ctx, conn, unexpiredContractDaysAt(server.NowUtc()).render(companionOriginExistsSql), sourceId, destinationId, server.NowUtc().Add(-time.Hour))
 			assertPlanUsesAnyIndex(t, existencePlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, existencePlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 

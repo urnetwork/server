@@ -245,7 +245,7 @@ func queueClientRemovedClose(clientId server.Id) {
 // with its counterparty. Each arm is a range of its endpoint's unresolved pair
 // index bounded as every hot read of unexpired contracts is
 // (unexpiredContractIdBoundSql), so on partitioned contract tables each reads
-// only the partitions of its weeks. An open contract older than the bound is
+// only the partitions of its days. An open contract older than the bound is
 // past its deadline, and closing it belongs to the force-close sweep, as when a
 // full queue drops this read. A counterparty with a live sequence with the
 // client holds an open contract inside the bound, so it is still asked to
@@ -282,7 +282,7 @@ func RequestRemovedClientContractCloses(ctx context.Context, clientId server.Id)
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			unexpiredContractWeeksAt(server.NowUtc()).render(removedClientOpenContractsSql),
+			unexpiredContractDaysAt(server.NowUtc()).render(removedClientOpenContractsSql),
 			clientId,
 			clientRemovedOpenContractLimit,
 		)

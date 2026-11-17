@@ -1,9 +1,9 @@
 package model
 
-// The hot reads of unexpired contracts and their contract weeks
+// The hot reads of unexpired contracts and their contract days
 // (contract_id_bound.go):
 //   - on partitioned contract tables each read plans, and locks, only the
-//     partitions of its weeks, in a custom and in a generic plan (C1
+//     partitions of its days, in a custom and in a generic plan (C1
 //     readiness, 2026-11-17: with the floor alone every read planned and
 //     locked every partition and its indexes);
 //   - on the plain tables each read returns the rows, and reads the indexes,
@@ -30,14 +30,14 @@ var unexpiredContractIdBoundColumns = []string{
 	"transfer_escrow.contract_id",
 }
 
-// The statement as it was before its weeks: each bound is the floor alone.
+// The statement as it was before its days: each bound is the floor alone.
 func floorOnlyUnexpiredContractStatement(t testing.TB, template string) string {
 	t.Helper()
 	statement := template
 	for _, column := range unexpiredContractIdBoundColumns {
 		statement = strings.ReplaceAll(statement, unexpiredContractIdBoundSql(column), column+" >= "+unexpiredContractIdFloorSql)
 	}
-	if statement == template || strings.Contains(statement, contractWeeksLowerSql) || strings.Contains(statement, contractWeeksUpperSql) {
+	if statement == template || strings.Contains(statement, contractDaysLowerSql) || strings.Contains(statement, contractDaysUpperSql) {
 		t.Fatalf("the statement has no bound, or keeps a placeholder: %s", statement)
 	}
 	return statement
@@ -173,9 +173,9 @@ func contractPartitionRanges(t testing.TB, ctx context.Context) map[string]contr
 	return ranges
 }
 
-// Whether the partition holds any id of the weeks.
-func (self contractPartitionRange) overlaps(weeks contractWeeks) bool {
-	return self.lower.Cmp(weeks.upper) < 0 && weeks.lower.Cmp(self.upper) < 0
+// Whether the partition holds any id of the days.
+func (self contractPartitionRange) overlaps(days contractDays) bool {
+	return self.lower.Cmp(days.upper) < 0 && days.lower.Cmp(self.upper) < 0
 }
 
 // The relation names of every node of an EXPLAIN (FORMAT JSON) plan, and the
@@ -202,15 +202,15 @@ func contractPlanRelations(t testing.TB, raw []byte) (relations []string, subpla
 	return
 }
 
-// The partitions a statement plans outside the weeks, in a custom and in a
+// The partitions a statement plans outside the days, in a custom and in a
 // generic plan, and the relations it locks outside them when it runs in a
 // custom plan: a partition, or an index of one.
-func unexpiredContractReadOutsideWeeks(
+func unexpiredContractReadOutsideDays(
 	t testing.TB,
 	ctx context.Context,
 	conn server.PgConn,
 	ranges map[string]contractPartitionRange,
-	weeks contractWeeks,
+	days contractDays,
 	sql string,
 	args []any,
 ) (planned map[string][]string, locked []string, locks int) {
@@ -225,7 +225,7 @@ func unexpiredContractReadOutsideWeeks(
 		server.Raise(tx.Rollback(ctx))
 		relations, _ := contractPlanRelations(t, raw)
 		for _, relation := range relations {
-			if partition, ok := ranges[relation]; ok && !partition.overlaps(weeks) {
+			if partition, ok := ranges[relation]; ok && !partition.overlaps(days) {
 				planned[mode] = append(planned[mode], relation)
 			}
 		}
@@ -252,7 +252,7 @@ func unexpiredContractReadOutsideWeeks(
 			var relation, owner string
 			server.Raise(held.Scan(&relation, &owner))
 			locks += 1
-			if partition, ok := ranges[owner]; ok && !partition.overlaps(weeks) {
+			if partition, ok := ranges[owner]; ok && !partition.overlaps(days) {
 				locked = append(locked, relation)
 			}
 		}
@@ -261,14 +261,14 @@ func unexpiredContractReadOutsideWeeks(
 }
 
 // On partitioned contract tables each hot read plans only the partitions of
-// its weeks, in a custom plan and in the generic plan PostgreSQL caches, and
+// its days, in a custom plan and in the generic plan PostgreSQL caches, and
 // running it locks no other partition or index of one. The test database is
-// cut over at the current week, so its weeks ahead and, but early on Monday,
-// the legacy partition are outside every read's weeks. The same statement
+// cut over at the current day, so its days ahead and, but from 00:00 to 01:30
+// UTC, the legacy partition are outside every read's days. The same statement
 // with the floor alone, as the reads ran before, plans and locks partitions
-// outside its weeks in both plans: the root cause, which the test proves
+// outside its days in both plans: the root cause, which the test proves
 // against each read's own statement.
-func TestUnexpiredContractReadsPlanAndLockOnlyTheirWeeksWhenPartitioned(t *testing.T) {
+func TestUnexpiredContractReadsPlanAndLockOnlyTheirDaysWhenPartitioned(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -280,23 +280,127 @@ func TestUnexpiredContractReadsPlanAndLockOnlyTheirWeeksWhenPartitioned(t *testi
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()
 		for _, read := range unexpiredContractReads(t, newUnexpiredContractReadIds()) {
-			weeks := unexpiredContractWeeksAt(server.NowUtc())
-			planned, locked, locks := unexpiredContractReadOutsideWeeks(t, ctx, conn, ranges, weeks, weeks.render(read.template), read.args)
+			days := unexpiredContractDaysAt(server.NowUtc())
+			planned, locked, locks := unexpiredContractReadOutsideDays(t, ctx, conn, ranges, days, days.render(read.template), read.args)
 			if len(planned) != 0 || len(locked) != 0 {
-				t.Fatalf("%s plans %v and locks %v outside its weeks", read.name, planned, locked)
+				t.Fatalf("%s plans %v and locks %v outside its days", read.name, planned, locked)
 			}
-			floorPlanned, floorLocked, floorLocks := unexpiredContractReadOutsideWeeks(t, ctx, conn, ranges, weeks, floorOnlyUnexpiredContractStatement(t, read.template), read.args)
+			floorPlanned, floorLocked, floorLocks := unexpiredContractReadOutsideDays(t, ctx, conn, ranges, days, floorOnlyUnexpiredContractStatement(t, read.template), read.args)
 			if len(floorPlanned["force_custom_plan"]) == 0 || len(floorPlanned["force_generic_plan"]) == 0 || len(floorLocked) == 0 {
-				t.Fatalf("%s with the floor alone plans %v and locks %v outside its weeks; the test no longer sees the root cause", read.name, floorPlanned, floorLocked)
+				t.Fatalf("%s with the floor alone plans %v and locks %v outside its days; the test no longer sees the root cause", read.name, floorPlanned, floorLocked)
 			}
 			t.Logf("%s: %d relation locks, and %d with the floor alone", read.name, locks, floorLocks)
 		}
 	})
 }
 
-// A statement that reaches the database without its weeks rendered fails to
+// The partitions of each contract table a statement plans, in a custom and in
+// a generic plan.
+func unexpiredContractReadPlannedPartitions(t testing.TB, ctx context.Context, conn server.PgConn, ranges map[string]contractPartitionRange, sql string, args []any) map[string]map[string][]string {
+	t.Helper()
+	planned := map[string]map[string][]string{}
+	for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
+		tx, err := conn.Begin(ctx)
+		server.Raise(err)
+		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = `+mode))
+		var raw []byte
+		server.Raise(tx.QueryRow(ctx, `EXPLAIN (FORMAT JSON) `+sql, args...).Scan(&raw))
+		server.Raise(tx.Rollback(ctx))
+		relations, _ := contractPlanRelations(t, raw)
+		planned[mode] = map[string][]string{}
+		for _, relation := range relations {
+			if partition, ok := ranges[relation]; ok && !slices.Contains(planned[mode][partition.table], relation) {
+				planned[mode][partition.table] = append(planned[mode][partition.table], relation)
+			}
+		}
+		for table := range planned[mode] {
+			slices.Sort(planned[mode][table])
+		}
+	}
+	return planned
+}
+
+// Days after the cutover, with daily partitions before and after the current
+// day and none of the legacy partition's ids in reach, each hot read plans, of
+// every contract table it reads, the current day's partition and no partition
+// outside its days, in a custom and in a generic plan: the previous or the
+// next day's too while its window crosses midnight, unless the floor prunes
+// the previous day's when the executor starts (01:15 to 01:30 UTC, the margin
+// the days keep for this process's clock). Weekly bounds would plan up to
+// seven partitions, and the floor alone every one.
+func TestUnexpiredContractReadsPlanExactlyTheirDaysAfterTheCutover(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		if server.IsContractPartitioned(ctx) {
+			t.Skip("cuts the test database over itself")
+		}
+		now := server.NowUtc()
+		server.Testing_PartitionContractsFrom(ctx, server.ContractPartitionDayStart(now).AddDate(0, 0, -3))
+		ranges := contractPartitionRanges(t, ctx)
+		conn := acquireContractLifecycleTestConnection(t, ctx)
+		defer conn.Release()
+		for _, read := range unexpiredContractReads(t, newUnexpiredContractReadIds()) {
+			now := server.NowUtc()
+			days := unexpiredContractDaysAt(now)
+			daysOf := map[string][]string{}
+			for name, partition := range ranges {
+				if partition.overlaps(days) {
+					daysOf[partition.table] = append(daysOf[partition.table], name)
+				}
+			}
+			for table := range daysOf {
+				if len(daysOf[table]) < 1 || 2 < len(daysOf[table]) {
+					t.Fatalf("%s: the days [%s, %s) hold %v of %s", read.name, server.ContractIdTime(days.lower), server.ContractIdTime(days.upper), daysOf[table], table)
+				}
+				for _, name := range daysOf[table] {
+					if _, _, legacy, ok := server.ParseContractPartitionName(name); !ok || legacy {
+						t.Fatalf("%s: the days hold %s", read.name, name)
+					}
+				}
+			}
+			for mode, tables := range unexpiredContractReadPlannedPartitions(t, ctx, conn, ranges, days.render(read.template), read.args) {
+				if len(tables["transfer_contract"]) == 0 {
+					t.Fatalf("%s (%s) plans no transfer_contract partition: %v", read.name, mode, tables)
+				}
+				for table, partitions := range tables {
+					current := server.ContractPartitionName(table, server.ContractPartitionDayStart(now))
+					if !slices.Contains(partitions, current) {
+						t.Fatalf("%s (%s) plans %v of %s, without the current day's %s", read.name, mode, partitions, table, current)
+					}
+					for _, partition := range partitions {
+						if !slices.Contains(daysOf[table], partition) {
+							t.Fatalf("%s (%s) plans %v of %s, outside its days' %v", read.name, mode, partitions, table, daysOf[table])
+						}
+					}
+				}
+				t.Logf("%s (%s): %v", read.name, mode, tables)
+			}
+			// against the read's own statement: with its days it locks no
+			// partition outside them, and with the weekly build's bounds, the
+			// whole weeks of the window, it locks the partitions of the rest of
+			// its week (at least three of this layout's seven days, whatever the
+			// weekday), as it ran before 2026-11-17's daily partitions
+			weekLower := server.PartitionGranularityWeekly.RangeStart(now.Add(-unexpiredContractIdAge - ContractIdCreateTimeMargin))
+			weekUpper := server.PartitionGranularityWeekly.NextRangeStart(server.PartitionGranularityWeekly.RangeStart(now.Add(2 * ContractIdCreateTimeMargin)))
+			weeks := contractDays{lower: server.ContractIdFloor(weekLower), upper: server.ContractIdFloor(weekUpper)}
+			_, dayLocked, dayLocks := unexpiredContractReadOutsideDays(t, ctx, conn, ranges, days, days.render(read.template), read.args)
+			_, weekLocked, weekLocks := unexpiredContractReadOutsideDays(t, ctx, conn, ranges, days, weeks.render(read.template), read.args)
+			if len(dayLocked) != 0 {
+				t.Fatalf("%s locks %v outside its days", read.name, dayLocked)
+			}
+			if len(weekLocked) == 0 {
+				t.Fatalf("%s with the weekly bounds locks nothing outside its days; the test no longer sees the root cause", read.name)
+			}
+			t.Logf("%s: %d relation locks with its days, %d with its week's bounds", read.name, dayLocks, weekLocks)
+		}
+	})
+}
+
+// A statement that reaches the database without its days rendered fails to
 // parse; it never reads without its bound.
-func TestUnrenderedContractWeeksFailToParse(t *testing.T) {
+func TestUnrenderedContractDaysFailToParse(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -407,7 +511,7 @@ func TestUnexpiredContractReadsReturnTheFloorsRows(t *testing.T) {
 		earliest := minted[-unexpiredContractIdAge+2*time.Minute].String()
 		server.Db(ctx, func(conn server.PgConn) {
 			for _, read := range unexpiredContractReads(t, ids) {
-				rows := unexpiredContractReadRows(t, ctx, conn, unexpiredContractWeeksAt(server.NowUtc()).render(read.template), read.args...)
+				rows := unexpiredContractReadRows(t, ctx, conn, unexpiredContractDaysAt(server.NowUtc()).render(read.template), read.args...)
 				floorRows := unexpiredContractReadRows(t, ctx, conn, floorOnlyUnexpiredContractStatement(t, read.template), read.args...)
 				if len(rows) == 0 {
 					t.Fatalf("%s returns no row", read.name)
@@ -528,12 +632,12 @@ func TestUnexpiredContractReadsKeepTheFloorsPlans(t *testing.T) {
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()
 		for _, read := range unexpiredContractReads(t, ids) {
-			weeksSql := unexpiredContractWeeksAt(server.NowUtc()).render(read.template)
+			daysSql := unexpiredContractDaysAt(server.NowUtc()).render(read.template)
 			floorSql := floorOnlyUnexpiredContractStatement(t, read.template)
 			for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
 				scans := map[string][]string{}
 				rows := map[string][]string{}
-				for name, sql := range map[string]string{"weeks": weeksSql, "floor": floorSql} {
+				for name, sql := range map[string]string{"days": daysSql, "floor": floorSql} {
 					tx, err := conn.Begin(ctx)
 					server.Raise(err)
 					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = `+mode))
@@ -544,13 +648,13 @@ func TestUnexpiredContractReadsKeepTheFloorsPlans(t *testing.T) {
 					rows[name] = unexpiredContractReadRows(t, ctx, conn, sql, read.args...)
 					slices.Sort(rows[name])
 				}
-				if !slices.Equal(scans["weeks"], scans["floor"]) {
-					t.Fatalf("%s (%s) scans %v, and with the floor alone %v", read.name, mode, scans["weeks"], scans["floor"])
+				if !slices.Equal(scans["days"], scans["floor"]) {
+					t.Fatalf("%s (%s) scans %v, and with the floor alone %v", read.name, mode, scans["days"], scans["floor"])
 				}
-				if !slices.Equal(rows["weeks"], rows["floor"]) {
-					t.Fatalf("%s (%s) returns %d rows, and with the floor alone %d", read.name, mode, len(rows["weeks"]), len(rows["floor"]))
+				if !slices.Equal(rows["days"], rows["floor"]) {
+					t.Fatalf("%s (%s) returns %d rows, and with the floor alone %d", read.name, mode, len(rows["days"]), len(rows["floor"]))
 				}
-				t.Logf("%s (%s): %d rows; %v", read.name, mode, len(rows["weeks"]), scans["weeks"])
+				t.Logf("%s (%s): %d rows; %v", read.name, mode, len(rows["days"]), scans["days"])
 			}
 		}
 
@@ -559,7 +663,7 @@ func TestUnexpiredContractReadsKeepTheFloorsPlans(t *testing.T) {
 		for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
 			reads := map[string][]string{}
 			for name, sql := range map[string]string{
-				"bounded":   unexpiredContractWeeksAt(server.NowUtc()).render(removedClientOpenContractsSql),
+				"bounded":   unexpiredContractDaysAt(server.NowUtc()).render(removedClientOpenContractsSql),
 				"unbounded": unboundedRemovedClientOpenContractsSql(t),
 			} {
 				tx, err := conn.Begin(ctx)

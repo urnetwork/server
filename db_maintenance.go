@@ -577,7 +577,7 @@ var dbMaintenanceSkipReindexTablePattern = sync.OnceValue(func() *regexp.Regexp 
 })
 
 // The contract partitions (CONTRACT-PARTITION.md) are never rebuilt as a
-// whole either: a weekly partition is dropped whole at retention, and the
+// whole either: a daily partition is dropped whole at retention, and the
 // legacy partition holds every contract from before the cutover, terabytes
 // that one rebuild would read for days. Their bloated priority indexes are
 // rebuilt one leaf at a time instead. The staged parents of a prepared cutover

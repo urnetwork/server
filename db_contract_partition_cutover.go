@@ -15,31 +15,31 @@ import (
 
 // The zero-copy cutover (CONTRACT-PARTITION.md "Cutover"). Each contract table
 // becomes the first partition, "<table>_legacy", of a new parent partitioned by
-// contract_id; new contracts go to weekly partitions from the cutover week C.
+// contract_id; new contracts go to daily partitions from the cutover day C.
 //
 //   - prepare (default): stage the empty parents "<table>_p" with every index of
-//     the table and the weekly partitions C..C+4, then add and validate the check
-//     contract_id < contract_id_floor(C). Validation scans under SHARE UPDATE
-//     EXCLUSIVE, so reads and writes continue. Resumable; completed steps are
-//     skipped.
+//     the table and the daily partitions C..C+ContractPartitionAheadDays, then
+//     add and validate the check contract_id < contract_id_floor(C). Validation
+//     scans under SHARE UPDATE EXCLUSIVE, so reads and writes continue.
+//     Resumable; completed steps are skipped.
 //   - finalize: one transaction swaps all six tables (seconds of catalog work).
 //     The validated check proves the legacy bound, so ATTACH skips its scan, and
 //     every legacy index attaches to its matching parent index without a build.
-//   - rollback: before any weekly partition holds a row, undo the swap.
+//   - rollback: before any daily partition holds a row, undo the swap.
 //   - abort: before finalize, drop the staged parents and the legacy checks.
 //
 // The prepared check refuses ids from C on, so finalize must run before C. A
 // cutover still unfinalized 6 hours before C is abandoned by the maintenance
 // task (MaintainContractPartitions) before it can refuse a contract.
 type ContractPartitionMigrateOptions struct {
-	// the Monday 00:00 UTC from which new contracts go to weekly partitions
-	// (prepare only)
-	CutoverWeek time.Time
-	DryRun      bool
-	Finalize    bool
-	Rollback    bool
-	Abort       bool
-	Logf        func(string, ...any)
+	// the 00:00 UTC from which new contracts go to daily partitions (prepare
+	// only)
+	CutoverDay time.Time
+	DryRun     bool
+	Finalize   bool
+	Rollback   bool
+	Abort      bool
+	Logf       func(string, ...any)
 	// nil uses the default rollback lock and retry budgets.
 	RollbackSettings *ContractPartitionRollbackSettings
 	// nil uses DefaultContractPartitionCutoverSettings for prepare, finalize
@@ -48,7 +48,7 @@ type ContractPartitionMigrateOptions struct {
 }
 
 // The foreign key that the cutover drops for good (owner decision
-// 2026-10-23): a week's reports are dropped with its contracts. Rollback
+// 2026-10-23): a day's reports are dropped with its contracts. Rollback
 // restores it.
 const contractCloseReportForeignKeyName = "contract_close_report_contract_id_fkey"
 const contractCloseReportForeignKeyDefinition = "FOREIGN KEY (contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE"
@@ -94,7 +94,7 @@ func MigrateContractsToPartitions(ctx context.Context, options ContractPartition
 	case options.Abort:
 		return abortContractPartitionCutover(ctx, options.DryRun, logf, settings)
 	default:
-		return prepareContractPartitionCutover(ctx, options.CutoverWeek, options.DryRun, logf, settings)
+		return prepareContractPartitionCutover(ctx, options.CutoverDay, options.DryRun, logf, settings)
 	}
 }
 
@@ -141,9 +141,9 @@ func DefaultContractPartitionLockSettings() *ContractPartitionLockSettings {
 }
 
 // The transactions older than maxTransactionAge that hold a lock on one of the
-// contract tables' parents. The weekly drop's admission; the cutover's steps
-// use contractLockAdmission, which also counts autovacuum workers and the
-// locks of partitions.
+// contract tables' parents or staged parents. The cutover's steps and the
+// daily retirement use contractLockAdmission, which also counts autovacuum
+// workers and the locks of partitions.
 func contractTablesBusy(ctx context.Context, maxTransactionAge time.Duration) (busy int, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -244,10 +244,11 @@ func contractTableName(table string) string {
 
 // A partition of a contract table with its bounds.
 type contractPartition struct {
-	name      string
-	legacy    bool
-	weekStart time.Time
-	// the legacy partition's upper bound, the cutover week
+	name     string
+	legacy   bool
+	dayStart time.Time
+	// the upper bound: the next day's start, or the legacy partition's, the
+	// cutover day
 	upper time.Time
 }
 
@@ -278,12 +279,12 @@ func listContractPartitionsInConn(ctx context.Context, conn contractCatalogQueri
 			var name string
 			var bound string
 			Raise(result.Scan(&name, &bound))
-			_, weekStart, legacy, ok := ParseContractPartitionName(name)
+			_, dayStart, legacy, ok := ParseContractPartitionName(name)
 			if !ok {
 				err = fmt.Errorf("unexpected partition %s of %s", name, parent)
 				return
 			}
-			partition := contractPartition{name: name, legacy: legacy, weekStart: weekStart}
+			partition := contractPartition{name: name, legacy: legacy, dayStart: dayStart}
 			if legacy {
 				groups := contractPartitionUpperPattern.FindStringSubmatch(bound)
 				if groups == nil {
@@ -297,7 +298,7 @@ func listContractPartitionsInConn(ctx context.Context, conn contractCatalogQueri
 				}
 				partition.upper = ContractIdTime(upper)
 			} else {
-				partition.upper = weekStart.Add(contractPartitionWeek)
+				partition.upper = ContractPartitionGranularity.NextRangeStart(dayStart)
 			}
 			partitions = append(partitions, partition)
 		}
@@ -460,7 +461,7 @@ func stageContractParent(ctx context.Context, shape *contractTableShape) error {
 // The swap's ATTACH must adopt a valid legacy index for every parent index; a
 // parent index without a match is built on the whole table under the swap's
 // lock. An empty clone of the table has the same index trees (LIKE), so attach
-// one to the staged parent just below the cutover week, in a transaction that
+// one to the staged parent just below the cutover day, in a transaction that
 // is rolled back, and check that every parent index adopted one of the clone's
 // indexes instead of building its own.
 func probeContractLegacyAttach(ctx context.Context, table string, floor Id) (problems []string) {
@@ -519,13 +520,13 @@ func probeContractLegacyAttach(ctx context.Context, table string, floor Id) (pro
 	return
 }
 
-// The statements that create table's partition for weekStart under parent: an
-// empty table with parentShape's columns and checks, the given storage
-// settings and TRUNCATE guards, then ATTACH. ATTACH takes only SHARE UPDATE
-// EXCLUSIVE on the parent, builds the parent's indexes on the empty table and
-// clones the parent's row triggers.
-func contractWeekPartitionSql(parent string, parentShape *contractTableShape, table string, weekStart time.Time, reloptions []string, guards *contractTableShape, guardsFrom string) (statements []string, err error) {
-	name := ContractPartitionName(table, weekStart)
+// The statements that create table's partition for the day starting at
+// dayStart under parent: an empty table with parentShape's columns and checks,
+// the given storage settings and TRUNCATE guards, then ATTACH. ATTACH takes
+// only SHARE UPDATE EXCLUSIVE on the parent, builds the parent's indexes on the
+// empty table and clones the parent's row triggers.
+func contractDayPartitionSql(parent string, parentShape *contractTableShape, table string, dayStart time.Time, reloptions []string, guards *contractTableShape, guardsFrom string) (statements []string, err error) {
+	name := ContractPartitionName(table, dayStart)
 	leaf := &contractTableShape{
 		table:      name,
 		columns:    parentShape.columns,
@@ -541,18 +542,19 @@ func contractWeekPartitionSql(parent string, parentShape *contractTableShape, ta
 		}
 		statements = append(statements, guardStatements...)
 	}
+	day := ContractPartitionGranularity.RangeOf(dayStart)
 	statements = append(statements, fmt.Sprintf(
 		"ALTER TABLE public.%s ATTACH PARTITION public.%s FOR VALUES FROM (%s) TO (%s)",
 		quoteIdentifier(parent),
 		quoteIdentifier(name),
-		contractIdLiteral(ContractIdFloor(weekStart)),
-		contractIdLiteral(ContractIdFloor(weekStart.Add(contractPartitionWeek))),
+		contractIdLiteral(ContractIdFloor(day.Lower)),
+		contractIdLiteral(ContractIdFloor(day.Upper)),
 	))
 	return
 }
 
-// The cutover week of a prepared legacy bound check.
-func (self *contractTableShape) legacyBoundWeek() (cutoverWeek time.Time, err error) {
+// The cutover day of a prepared legacy bound check.
+func (self *contractTableShape) legacyBoundDay() (cutoverDay time.Time, err error) {
 	groups := contractLegacyBoundPattern.FindStringSubmatch(self.legacyBound.definition)
 	if groups == nil {
 		return time.Time{}, fmt.Errorf("%s has an unexpected %s: %s", self.table, self.legacyBound.name, self.legacyBound.definition)
@@ -564,14 +566,14 @@ func (self *contractTableShape) legacyBoundWeek() (cutoverWeek time.Time, err er
 	return ContractIdTime(floor), nil
 }
 
-func prepareContractPartitionCutover(ctx context.Context, cutoverWeek time.Time, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
-	if cutoverWeek.IsZero() {
-		return errors.New("the cutover week is required to prepare")
+func prepareContractPartitionCutover(ctx context.Context, cutoverDay time.Time, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
+	if cutoverDay.IsZero() {
+		return errors.New("the cutover day is required to prepare")
 	}
-	if cutoverWeek.Before(NowUtc().Add(24 * time.Hour)) {
-		return fmt.Errorf("the cutover week %s must start at least 24h from now, to leave time for validation and the swap", cutoverWeek.UTC().Format(time.DateOnly))
+	if cutoverDay.Before(NowUtc().Add(24 * time.Hour)) {
+		return fmt.Errorf("the cutover day %s must start at least 24h from now, to leave time for validation and the swap", cutoverDay.UTC().Format(time.DateOnly))
 	}
-	return prepareContractPartitionCutoverForWeek(ctx, cutoverWeek, dryRun, logf, settings)
+	return prepareContractPartitionCutoverForDay(ctx, cutoverDay, dryRun, logf, settings)
 }
 
 // The statement that adds table's legacy bound, NOT VALID: a brief ACCESS
@@ -606,21 +608,21 @@ func contractPreparedStep(ctx context.Context, scope *contractLockScope, stateme
 	}
 }
 
-func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek time.Time, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
+func prepareContractPartitionCutoverForDay(ctx context.Context, cutoverDay time.Time, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
 	if IsContractPartitioned(ctx) {
 		return errors.New("the contract tables are already partitioned")
 	}
-	cutoverWeek = cutoverWeek.UTC()
-	if !ContractPartitionWeekStart(cutoverWeek).Equal(cutoverWeek) {
-		return fmt.Errorf("the cutover week must start Monday 00:00 UTC: %s", cutoverWeek)
+	cutoverDay = cutoverDay.UTC()
+	if !ContractPartitionDayStart(cutoverDay).Equal(cutoverDay) {
+		return fmt.Errorf("the cutover day must start at 00:00 UTC: %s", cutoverDay)
 	}
-	floor := ContractIdFloor(cutoverWeek)
-	if err := checkContractIdFloorFunction(ctx, cutoverWeek, floor); err != nil {
+	floor := ContractIdFloor(cutoverDay)
+	if err := checkContractIdFloorFunction(ctx, cutoverDay, floor); err != nil {
 		return err
 	}
-	logf("cutover week %s: contract ids below %s stay in the legacy partitions", cutoverWeek.Format(time.DateOnly), floor)
+	logf("cutover day %s: contract ids below %s stay in the legacy partitions", cutoverDay.Format(time.DateOnly), floor)
 	logf("finalize must complete before %s; unfinished preparation is then abandoned",
-		cutoverWeek.Add(-contractCutoverAbandonMargin).Format(time.RFC3339),
+		cutoverDay.Add(-contractCutoverAbandonMargin).Format(time.RFC3339),
 	)
 
 	shapes := readContractShapes(ctx, contractTableName)
@@ -634,10 +636,10 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 		}
 		problems = append(problems, shape.cutoverProblems()...)
 		if shape.legacyBound != nil {
-			if week, err := shape.legacyBoundWeek(); err != nil {
+			if day, err := shape.legacyBoundDay(); err != nil {
 				problems = append(problems, err.Error())
-			} else if !week.Equal(cutoverWeek) {
-				problems = append(problems, fmt.Sprintf("%s is prepared for the cutover week %s; abort it first", table, week.Format(time.DateOnly)))
+			} else if !day.Equal(cutoverDay) {
+				problems = append(problems, fmt.Sprintf("%s is prepared for the cutover day %s; abort it first", table, day.Format(time.DateOnly)))
 			}
 		}
 		if stagedShape := staged[table]; stagedShape != nil {
@@ -687,13 +689,13 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 				existing[partition.name] = true
 			}
 		}
-		for week := 0; week <= ContractPartitionAheadWeeks; week += 1 {
-			weekStart := cutoverWeek.Add(time.Duration(week) * contractPartitionWeek)
-			name := ContractPartitionName(table, weekStart)
+		for day := 0; day <= ContractPartitionAheadDays; day += 1 {
+			dayStart := ContractPartitionGranularity.AddRanges(cutoverDay, day)
+			name := ContractPartitionName(table, dayStart)
 			if existing[name] {
 				continue
 			}
-			statements, err := contractWeekPartitionSql(stagedName, stagedShape, table, weekStart, shape.reloptions, shape, table)
+			statements, err := contractDayPartitionSql(stagedName, stagedShape, table, dayStart, shape.reloptions, shape, table)
 			if err != nil {
 				return err
 			}
@@ -757,7 +759,7 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 	if 0 < len(deferred) {
 		return &ContractPartitionDeferredError{Deferred: deferred}
 	}
-	logf("prepared; run --finalize before %s", cutoverWeek.Add(-contractCutoverAbandonMargin).Format(time.RFC3339))
+	logf("prepared; run --finalize before %s", cutoverDay.Add(-contractCutoverAbandonMargin).Format(time.RFC3339))
 	return nil
 }
 
@@ -853,7 +855,7 @@ func contractSwapSql(shapes map[string]*contractTableShape, staged map[string]*c
 }
 
 // The relations the swap locks: every table and its staged parent (with the
-// staged weekly partitions below it), and the tables of outside foreign keys.
+// staged daily partitions below it), and the tables of outside foreign keys.
 func contractSwapLockRelations(shapes map[string]*contractTableShape) (relations []string) {
 	for _, table := range ContractPartitionTables {
 		relations = append(relations, "public."+table, "public."+contractStagedParentName(table))
@@ -962,7 +964,7 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 	shapes := readContractShapes(ctx, contractTableName)
 	staged := readContractShapes(ctx, contractStagedParentName)
 	var problems []string
-	var cutoverWeek time.Time
+	var cutoverDay time.Time
 	var syncStatements []string
 	for _, table := range ContractPartitionTables {
 		shape := shapes[table]
@@ -975,15 +977,15 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 			problems = append(problems, fmt.Sprintf("%s is not prepared: its legacy bound is missing or not validated", table))
 			continue
 		}
-		week, err := shape.legacyBoundWeek()
+		day, err := shape.legacyBoundDay()
 		if err != nil {
 			problems = append(problems, err.Error())
 			continue
 		}
-		if cutoverWeek.IsZero() {
-			cutoverWeek = week
-		} else if !week.Equal(cutoverWeek) {
-			problems = append(problems, fmt.Sprintf("%s is prepared for %s, not %s", table, week.Format(time.DateOnly), cutoverWeek.Format(time.DateOnly)))
+		if cutoverDay.IsZero() {
+			cutoverDay = day
+		} else if !day.Equal(cutoverDay) {
+			problems = append(problems, fmt.Sprintf("%s is prepared for %s, not %s", table, day.Format(time.DateOnly), cutoverDay.Format(time.DateOnly)))
 		}
 		stagedShape := staged[table]
 		if stagedShape == nil {
@@ -1000,9 +1002,9 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 			continue
 		}
 		if !slices.ContainsFunc(partitions, func(partition contractPartition) bool {
-			return partition.weekStart.Equal(week)
+			return !partition.legacy && partition.dayStart.Equal(day)
 		}) {
-			problems = append(problems, fmt.Sprintf("%s has no partition for the cutover week", contractStagedParentName(table)))
+			problems = append(problems, fmt.Sprintf("%s has no partition for the cutover day", contractStagedParentName(table)))
 		}
 	}
 	if 0 < len(problems) {
@@ -1011,8 +1013,8 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 		}
 		return fmt.Errorf("%d problem(s) block the swap", len(problems))
 	}
-	if deadline && !NowUtc().Before(cutoverWeek.Add(-contractCutoverFinalizeMargin)) {
-		return fmt.Errorf("too close to the cutover week %s; abort and prepare a later week", cutoverWeek.Format(time.DateOnly))
+	if deadline && !NowUtc().Before(cutoverDay.Add(-contractCutoverFinalizeMargin)) {
+		return fmt.Errorf("too close to the cutover day %s; abort and prepare a later day", cutoverDay.Format(time.DateOnly))
 	}
 
 	if 0 < len(syncStatements) {
@@ -1027,7 +1029,7 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 		}
 	}
 
-	floor := ContractIdFloor(cutoverWeek)
+	floor := ContractIdFloor(cutoverDay)
 	for _, table := range ContractPartitionTables {
 		problems = append(problems, probeContractLegacyAttach(ctx, table, floor)...)
 	}
@@ -1062,11 +1064,11 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 		return fmt.Errorf("swap: %w", err)
 	}
 	logf(
-		"swapped the contract tables in %s: the swap waited %s for its locks and held them %s (catalog work and commit); contracts from %s go to weekly partitions",
+		"swapped the contract tables in %s: the swap waited %s for its locks and held them %s (catalog work and commit); contracts from %s go to daily partitions",
 		time.Since(swapStart).Round(time.Millisecond),
 		timing.lockWait.Round(time.Millisecond),
 		timing.held.Round(time.Millisecond),
-		cutoverWeek.Format(time.DateOnly),
+		cutoverDay.Format(time.DateOnly),
 	)
 
 	external, _ := contractExternalForeignKeys(shapes)
@@ -1100,7 +1102,7 @@ func contractPartitionRollbackSqlInConn(ctx context.Context, conn contractCatalo
 	parents := readContractShapesInConn(ctx, conn, contractTableName)
 	legacies := readContractShapesInConn(ctx, conn, ContractLegacyPartitionName)
 	var problems []string
-	weekly := map[string][]string{}
+	daily := map[string][]string{}
 	for _, table := range ContractPartitionTables {
 		if parents[table] == nil || parents[table].relkind != "p" {
 			problems = append(problems, fmt.Sprintf("%s is not partitioned", table))
@@ -1129,7 +1131,7 @@ func contractPartitionRollbackSqlInConn(ctx context.Context, conn contractCatalo
 			if !empty {
 				problems = append(problems, fmt.Sprintf("%s holds rows; the swap can no longer be undone", partition.name))
 			}
-			weekly[table] = append(weekly[table], partition.name)
+			daily[table] = append(daily[table], partition.name)
 		}
 	}
 	if 0 < len(problems) {
@@ -1154,7 +1156,7 @@ func contractPartitionRollbackSqlInConn(ctx context.Context, conn contractCatalo
 		for _, trigger := range parent.triggers {
 			statements = append(statements, fmt.Sprintf("DROP TRIGGER %s ON public.%s", quoteIdentifier(trigger.name), quoteIdentifier(table)))
 		}
-		for _, name := range weekly[table] {
+		for _, name := range daily[table] {
 			statements = append(statements,
 				fmt.Sprintf("ALTER TABLE public.%s DETACH PARTITION public.%s", quoteIdentifier(table), quoteIdentifier(name)),
 				fmt.Sprintf("DROP TABLE public.%s", quoteIdentifier(name)),
@@ -1203,8 +1205,8 @@ func contractPartitionRollbackSqlInConn(ctx context.Context, conn contractCatalo
 	return statements, external, nil
 }
 
-// The prepared cutover week, if a cutover is prepared and not finalized.
-func preparedContractCutoverWeek(ctx context.Context) (cutoverWeek time.Time, prepared bool) {
+// The prepared cutover day, if a cutover is prepared and not finalized.
+func preparedContractCutoverDay(ctx context.Context) (cutoverDay time.Time, prepared bool) {
 	shapes := readContractShapes(ctx, contractTableName)
 	staged := readContractShapes(ctx, contractStagedParentName)
 	for _, table := range ContractPartitionTables {
@@ -1213,8 +1215,8 @@ func preparedContractCutoverWeek(ctx context.Context) (cutoverWeek time.Time, pr
 		}
 		if shape := shapes[table]; shape != nil && shape.relkind == "r" && shape.legacyBound != nil {
 			prepared = true
-			if week, err := shape.legacyBoundWeek(); err == nil && (cutoverWeek.IsZero() || week.Before(cutoverWeek)) {
-				cutoverWeek = week
+			if day, err := shape.legacyBoundDay(); err == nil && (cutoverDay.IsZero() || day.Before(cutoverDay)) {
+				cutoverDay = day
 			}
 		}
 	}
@@ -1261,13 +1263,32 @@ func testContractPartitions() bool {
 }
 
 // Cuts a freshly migrated, empty test database over to partitioned contract
-// tables from the current week: earlier ids go to the legacy partitions and
-// current ones to the weekly partitions, as in production after the cutover.
+// tables from the current day: earlier ids go to the legacy partitions and
+// current ones to the daily partitions, as in production after the cutover.
 func Testing_PartitionContracts(ctx context.Context) {
 	if IsContractPartitioned(ctx) {
 		return
 	}
-	cutoverWeek := ContractPartitionWeekStart(NowUtc())
-	Raise(prepareContractPartitionCutoverForWeek(ctx, cutoverWeek, false, func(string, ...any) {}, DefaultContractPartitionCutoverSettings()))
+	cutoverDay := ContractPartitionDayStart(NowUtc())
+	Raise(prepareContractPartitionCutoverForDay(ctx, cutoverDay, false, func(string, ...any) {}, DefaultContractPartitionCutoverSettings()))
 	Raise(finalizeContractPartitionCutoverWithDeadline(ctx, false, false, func(string, ...any) {}, DefaultContractPartitionCutoverSettings()))
+}
+
+// Cuts a test database over at cutoverDay, which may have passed, as the
+// layout stands that many days after a cutover: each day from cutoverDay
+// through ContractPartitionAheadDays after the current one has its partitions,
+// made as the maintenance task makes them. Rows of the days before cutoverDay
+// go to the legacy partitions; the database must hold none from cutoverDay on.
+func Testing_PartitionContractsFrom(ctx context.Context, cutoverDay time.Time) {
+	if IsContractPartitioned(ctx) {
+		return
+	}
+	cutoverDay = ContractPartitionDayStart(cutoverDay)
+	Raise(prepareContractPartitionCutoverForDay(ctx, cutoverDay, false, func(string, ...any) {}, DefaultContractPartitionCutoverSettings()))
+	Raise(finalizeContractPartitionCutoverWithDeadline(ctx, false, false, func(string, ...any) {}, DefaultContractPartitionCutoverSettings()))
+	last := ContractPartitionGranularity.AddRanges(ContractPartitionDayStart(NowUtc()), ContractPartitionAheadDays)
+	for day := cutoverDay; !last.Before(day); day = ContractPartitionGranularity.NextRangeStart(day) {
+		_, err := contractPartitionFamily.EnsureRangeFor(ctx, day)
+		Raise(err)
+	}
 }

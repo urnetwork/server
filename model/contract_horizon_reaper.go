@@ -3,8 +3,10 @@
 // "Retention": 13 weeks, server.ContractRetention) unless the runtime control
 // shortens it, to no less than ContractHorizonFloor (35 days). The floor is
 // the reaper's own: nothing else that server.ContractRetention sets moves.
-// Once the partition cutover lands, weekly drops retire whole weeks past R;
-// until then this reaper deletes the same contracts row by row. A contract is
+// It keeps deleting row by row once the partition cutover lands: the daily
+// partitions it has emptied are then compacted to the rows it keeps and
+// dropped (server.ContractDayRetention, CONTRACT-PARTITION.md "S1"), and it
+// remains the only code that decides which contract goes. A contract is
 // deleted only when every one of these holds, at any horizon:
 //   - its id time and its close time are both older than the horizon;
 //   - it is resolved (outcome IS NOT NULL), so it is closed and no dispute is
