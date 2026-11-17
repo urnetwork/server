@@ -683,13 +683,24 @@ last deletes. The legacy partition expires the same way from the cutover week.
 
 **Per expired week**, oldest first, each run
 (`db_contract_week_retirement.go`):
-1. **Wait for the reaper.** A leaf is examined only once the catalog shows it
-   emptied: at most 1M rows (`reltuples`) and 1M dead rows (`n_dead_tup`), or
-   at most 256 MiB on disk. Until vacuum has removed the reaper's deletes, a
-   walk of its key would visit every deleted row.
+1. **Wait for the reaper.** A leaf is examined only once the statistics count
+   at most 1M live rows in it (`n_live_tup`, which follows the reaper's
+   deletes as they commit), or it is at most 256 MiB on disk. Vacuum is not
+   required:
+   - Main's leaves inherit vacuum thresholds of 5M to 25M dead rows, and two
+     tables keep the default 10% analyze threshold.
+   - So a week's last deleted rows can stay unvacuumed, and its row estimate
+     stale, for good.
+   - A first build gated on `n_dead_tup` and `reltuples`, which would have kept
+     such a week forever (`TestContractWeekRetiresWithoutVacuum`).
 2. **Count its live rows** along its key, up to 20,000 (`MaxCompactRows`), in
    a read-only statement of at most 5 s. Above the bound the leaf waits,
-   reported. The walk also brings the kept rows into the cache.
+   reported.
+   - Like any index scan, the walk marks the key entries of rows every snapshot
+     sees deleted as dead. Unvacuumed deletes are therefore passed over a little
+     further each run, until the count finishes within its 5 s; CLUSTER then
+     skips them.
+   - It also brings the kept rows into the cache.
 3. **Compact** each leaf that holds more than 256 MiB, or no live row:
    `CLUSTER` along its primary key, in its own transaction.
    - It takes that leaf's ACCESS EXCLUSIVE lock first, waiting at most 1 s, and
@@ -798,16 +809,16 @@ archived, deleted and dropped with their week.
   weekly partitions are empty and in the future. Nothing expires before
   C + 36 days.
 - **From C:** the reaper deletes each contract 35 days and 2 hours after
-  creation, through the parent, pruned per leaf, exactly as before. Vacuum
-  removes those rows from the leaves; a day after the week's upper bound
-  passes the horizon, S1 compacts and drops it.
+  creation, through the parent, pruned per leaf, exactly as before. A day
+  after the week's upper bound passes the horizon, S1 compacts and drops it,
+  whether or not vacuum has visited it since.
 - **No double work.** S1 never classifies or deletes, and its reads are
   bounded by the kept rows. The reaper's rescans reread a compacted week's
   few kept rows, as they reread kept rows today.
 - **No gap.** At no point is a row the reaper keeps outside a live,
   attached partition or invisible to a snapshot.
-- **Reaper off or behind:** the week waits ("the reaper and vacuum have not
-  emptied it"), reported each run. With the mode off it waits from 91 days.
+- **Reaper off or behind:** the week waits ("the reaper has not emptied
+  it"), reported each run. With the mode off it waits from 91 days.
 
 ### The legacy partition
 
@@ -904,6 +915,7 @@ launcher 10.213.0.1):
 - `TestContractWeekRetirementDoesNotQueueBehindALeafLock`
 - `TestContractWeekRetirementWaitsOutAnAutovacuum`
 - `TestContractWeekRetirementBoundsItsWork`
+- `TestContractWeekRetiresWithoutVacuum`
 - `TestContractWeekRetirementIsANoOpOnPlainTables`
 - `model.TestContractWeekRetirementKeepsWhatTheReaperKeeps`
 - `TestContractPartitionMaintenance` and the payment-hold, archive and registry

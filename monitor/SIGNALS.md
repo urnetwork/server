@@ -8407,7 +8407,7 @@ retention. Since S1 (server/CONTRACT-PARTITION.md, 2026-11-17)
 passes the contract horizon reaper's horizon: 35 days while the reaper's mode
 is on, otherwise R = 13 weeks (`ContractRetention`). It deletes no row: the
 reaper alone deletes contracts, by its keep rules, archiving their usage. Once
-the reaper and vacuum have emptied a week, the task rewrites each leaf down to
+the reaper has emptied a week, the task rewrites each leaf down to
 the rows the reaper keeps (CLUSTER, MVCC-safe) and drops the six partitions
 together once they hold no row at all. A week that waits stays, and the task
 reports why: rows the reaper keeps, a week the reaper has not emptied, a
